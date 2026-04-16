@@ -637,9 +637,12 @@ def case_transfer_guard_disallow_rejects_implicit_host_to_device_jit_inputs() ->
 
     try:
         fn(np.ones((2,), dtype=np.float64))
-    except Exception as exc:
+    except RuntimeError as exc:
         message = str(exc)
-        assert "host-to-device" in message
+        normalized_message = message.lower()
+        assert "transfer" in normalized_message and (
+            "guard" in normalized_message or "disallow" in normalized_message
+        )
     else:
         raise AssertionError("expected transfer guard to reject implicit host input")
 

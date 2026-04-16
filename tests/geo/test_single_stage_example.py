@@ -29,6 +29,7 @@ from simsopt.jax_core.specs import (
     OptimizableDofMapSpec,
 )
 from simsopt.objectives.utilities import forward_backward
+from .surface_test_helpers import get_surface
 
 
 EXAMPLE_MODULE_PATH = (
@@ -242,7 +243,6 @@ class SingleStageExampleTests(unittest.TestCase):
 
         return _runtime_builder
 
-    def resolve_benchmark_target_lane_sync(
     @staticmethod
     def _make_fake_target_lane_accepted_step_summary():
         return {
@@ -289,6 +289,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
         return fake_sync
 
+    def resolve_benchmark_target_lane_sync(
         self,
         module,
         *,
@@ -361,16 +362,14 @@ class SingleStageExampleTests(unittest.TestCase):
     def patch_initialize_boozer_surface_jax(self, module, fake_boozer_surface_jax):
         fake_jax_module = types.ModuleType("simsopt.geo.boozersurface_jax")
         fake_jax_module.BoozerSurfaceJAX = fake_boozer_surface_jax
-        fake_jax_module.build_boozer_surface_runtime_state = (
-            lambda surface: {
-                "mpol": surface.mpol,
-                "ntor": surface.ntor,
-                "nfp": surface.nfp,
-                "stellsym": surface.stellsym,
-                "quadpoints_phi": np.asarray(surface.quadpoints_phi).copy(),
-                "quadpoints_theta": np.asarray(surface.quadpoints_theta).copy(),
-            }
-        )
+        fake_jax_module.build_boozer_surface_runtime_state = lambda surface: {
+            "mpol": surface.mpol,
+            "ntor": surface.ntor,
+            "nfp": surface.nfp,
+            "stellsym": surface.stellsym,
+            "quadpoints_phi": np.asarray(surface.quadpoints_phi).copy(),
+            "quadpoints_theta": np.asarray(surface.quadpoints_theta).copy(),
+        }
         with patch.object(
             module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier
         ), patch.object(module, "Volume", FakeVolume), patch.object(
@@ -798,7 +797,9 @@ class SingleStageExampleTests(unittest.TestCase):
             },
         )
 
-    def test_resolve_warm_start_boozer_init_overrides_keeps_explicit_surface_algorithm(self):
+    def test_resolve_warm_start_boozer_init_overrides_keeps_explicit_surface_algorithm(
+        self,
+    ):
         module = self.load_module()
 
         overrides = module.resolve_warm_start_boozer_init_overrides(
@@ -824,7 +825,9 @@ class SingleStageExampleTests(unittest.TestCase):
             },
         )
 
-    def test_resolve_warm_start_boozer_init_overrides_uses_quasi_newton_for_legacy_path(self):
+    def test_resolve_warm_start_boozer_init_overrides_uses_quasi_newton_for_legacy_path(
+        self,
+    ):
         module = self.load_module()
 
         overrides = module.resolve_warm_start_boozer_init_overrides(
@@ -843,7 +846,9 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(overrides["bfgs_tol_override"], 1.0e-8)
         self.assertEqual(overrides["bfgs_maxiter_override"], 128)
 
-    def test_resolve_warm_start_boozer_init_overrides_preserves_explicit_algorithm(self):
+    def test_resolve_warm_start_boozer_init_overrides_preserves_explicit_algorithm(
+        self,
+    ):
         module = self.load_module()
 
         overrides = module.resolve_warm_start_boozer_init_overrides(
@@ -975,7 +980,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 self.options.get("stage_callback")
                 return self.res
 
-        with patch.object(module, "jax_solver_stage_callback_supported", return_value=False):
+        with patch.object(
+            module, "jax_solver_stage_callback_supported", return_value=False
+        ):
             with self.patch_initialize_boozer_surface_jax(module, FakeBoozerSurfaceJAX):
                 module.initialize_boozer_surface(
                     surf_prev,
@@ -1048,8 +1055,14 @@ class SingleStageExampleTests(unittest.TestCase):
             {"SIMSOPT_FORCE_JAX_SOLVER_STAGE_CALLBACK": "1"},
             clear=False,
         ):
-            with patch.object(module, "jax_solver_stage_callback_supported", wraps=module.jax_solver_stage_callback_supported):
-                with self.patch_initialize_boozer_surface_jax(module, FakeBoozerSurfaceJAX):
+            with patch.object(
+                module,
+                "jax_solver_stage_callback_supported",
+                wraps=module.jax_solver_stage_callback_supported,
+            ):
+                with self.patch_initialize_boozer_surface_jax(
+                    module, FakeBoozerSurfaceJAX
+                ):
                     module.initialize_boozer_surface(
                         surf_prev,
                         mpol=TEST_MPOL,
@@ -1060,7 +1073,9 @@ class SingleStageExampleTests(unittest.TestCase):
                         iota=TEST_IOTA,
                         G0=TEST_G0,
                         backend="jax",
-                        on_stage=lambda label, **extra: stage_events.append((label, extra)),
+                        on_stage=lambda label, **extra: stage_events.append(
+                            (label, extra)
+                        ),
                     )
 
         self.assertIn(
@@ -1722,7 +1737,9 @@ class SingleStageExampleTests(unittest.TestCase):
             with patch.object(
                 module,
                 "load",
-                side_effect=AssertionError("serialized warm start should not call load()"),
+                side_effect=AssertionError(
+                    "serialized warm start should not call load()"
+                ),
             ):
                 warm_start = module.load_single_stage_warm_start_state(str(run_dir))
 
@@ -1732,7 +1749,9 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(warm_start["iota"], 0.123)
         self.assertEqual(warm_start["G"], 4.5)
 
-    def test_resolve_single_stage_search_policy_preserves_serialized_surface_state(self):
+    def test_resolve_single_stage_search_policy_preserves_serialized_surface_state(
+        self,
+    ):
         module = self.load_module()
         policy = module.resolve_single_stage_search_policy(
             {
@@ -1932,7 +1951,9 @@ class SingleStageExampleTests(unittest.TestCase):
             quadpoints_theta=quadpoints_theta,
         )
 
-    def test_project_surface_dofs_to_resolution_rejects_unsupported_hybrid_surface(self):
+    def test_project_surface_dofs_to_resolution_rejects_unsupported_hybrid_surface(
+        self,
+    ):
         module = self.load_module()
 
         class FakeSurface:
@@ -1943,7 +1964,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 raise AssertionError("unsupported surfaces must not use gamma()")
 
             def cross_section(self, phi, thetas=None):
-                raise AssertionError("unsupported surfaces must not use cross_section()")
+                raise AssertionError(
+                    "unsupported surfaces must not use cross_section()"
+                )
 
         quadpoints_phi = np.linspace(0.0, 0.2, 5, endpoint=False)
         quadpoints_theta = np.linspace(0.0, 1.0, 7, endpoint=False)
@@ -2117,6 +2140,43 @@ class SingleStageExampleTests(unittest.TestCase):
             atol=1e-12,
         )
 
+    def test_project_surface_dofs_to_resolution_serialized_xyz_avoids_eager_host_surface_construction(
+        self,
+    ):
+        module = self.load_module()
+        serialized_surface = module.SerializedSurfaceState(
+            surface_class="SurfaceXYZTensorFourier",
+            dofs=np.linspace(
+                0.02,
+                0.02 * len(module.stellsym_scatter_indices(TEST_MPOL, TEST_NTOR)),
+                len(module.stellsym_scatter_indices(TEST_MPOL, TEST_NTOR)),
+            ),
+            mpol=TEST_MPOL,
+            ntor=TEST_NTOR,
+            nfp=5,
+            stellsym=True,
+            quadpoints_phi=np.linspace(
+                0.0, 1.0 / 5.0, 2 * TEST_NTOR + 1, endpoint=False
+            ),
+            quadpoints_theta=np.linspace(0.0, 1.0, 2 * TEST_MPOL + 1, endpoint=False),
+        )
+
+        with patch.object(
+            module,
+            "SurfaceXYZTensorFourier",
+            FakeSurfaceXYZTensorFourier,
+        ):
+            projected_dofs = module.project_surface_dofs_to_resolution(
+                serialized_surface,
+                mpol=TEST_MPOL,
+                ntor=TEST_NTOR,
+                quadpoints_phi=serialized_surface.quadpoints_phi,
+                quadpoints_theta=serialized_surface.quadpoints_theta,
+            )
+
+        self.assertEqual(len(FakeSurfaceXYZTensorFourier.instances), 0)
+        self.assertEqual(projected_dofs.shape, serialized_surface.dofs.shape)
+
     def test_project_surface_dofs_to_resolution_matches_host_for_rank_deficient_serialized_xyz_surface(
         self,
     ):
@@ -2263,7 +2323,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 self.scatter_indices = jax.device_put(np.asarray([0], dtype=np.int32))
                 self._surface_geometry_kind = "rzfourier"
 
-            def _unpack_decision_vector_jax(self, solved_x, optimize_G, coil_set_spec=None):
+            def _unpack_decision_vector_jax(
+                self, solved_x, optimize_G, coil_set_spec=None
+            ):
                 del solved_x, optimize_G, coil_set_spec
                 return (
                     jax.device_put(np.zeros(2, dtype=np.float64)),
@@ -2276,21 +2338,22 @@ class SingleStageExampleTests(unittest.TestCase):
             "simsopt.jax_core.surface_rzfourier.surface_rz_fourier_gamma_from_spec",
             return_value=jax.device_put(np.zeros((2, 3, 3), dtype=np.float64)),
         ):
-            success_filter = module.build_single_stage_target_lane_hardware_success_filter(
-                FakeBoozerSurface(),
-                FakeBS(),
-                banana_curve,
-                vessel_surface,
-                cc_dist=0.05,
-                cs_dist=0.05,
-                ss_dist=0.05,
-                curvature_threshold=40.0,
+            success_filter = (
+                module.build_single_stage_target_lane_hardware_success_filter(
+                    FakeBoozerSurface(),
+                    FakeBS(),
+                    banana_curve,
+                    vessel_surface,
+                    cc_dist=0.05,
+                    cs_dist=0.05,
+                    ss_dist=0.05,
+                    curvature_threshold=40.0,
+                )
             )
 
         def contains_jax_array(value):
             return any(
-                isinstance(leaf, jax.Array)
-                for leaf in jax.tree_util.tree_leaves(value)
+                isinstance(leaf, jax.Array) for leaf in jax.tree_util.tree_leaves(value)
             )
 
         captured_values = [
@@ -2335,7 +2398,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 self.scatter_indices = np.asarray([0], dtype=np.int32)
                 self._surface_geometry_kind = "rzfourier"
 
-            def _unpack_decision_vector_jax(self, solved_x, optimize_G, coil_set_spec=None):
+            def _unpack_decision_vector_jax(
+                self, solved_x, optimize_G, coil_set_spec=None
+            ):
                 del solved_x, optimize_G, coil_set_spec
                 return (
                     jax.device_put(np.zeros(2, dtype=np.float64)),
@@ -2348,25 +2413,29 @@ class SingleStageExampleTests(unittest.TestCase):
             "simsopt.jax_core.surface_rzfourier.surface_rz_fourier_gamma_from_spec",
             return_value=np.zeros((2, 3, 3), dtype=np.float64),
         ):
-            success_filter_a = module.build_single_stage_target_lane_hardware_success_filter(
-                FakeBoozerSurface(),
-                FakeBS(),
-                banana_curve,
-                vessel_surface,
-                cc_dist=0.05,
-                cs_dist=0.05,
-                ss_dist=0.05,
-                curvature_threshold=40.0,
+            success_filter_a = (
+                module.build_single_stage_target_lane_hardware_success_filter(
+                    FakeBoozerSurface(),
+                    FakeBS(),
+                    banana_curve,
+                    vessel_surface,
+                    cc_dist=0.05,
+                    cs_dist=0.05,
+                    ss_dist=0.05,
+                    curvature_threshold=40.0,
+                )
             )
-            success_filter_b = module.build_single_stage_target_lane_hardware_success_filter(
-                FakeBoozerSurface(),
-                FakeBS(),
-                banana_curve,
-                vessel_surface,
-                cc_dist=0.05,
-                cs_dist=0.05,
-                ss_dist=0.05,
-                curvature_threshold=40.0,
+            success_filter_b = (
+                module.build_single_stage_target_lane_hardware_success_filter(
+                    FakeBoozerSurface(),
+                    FakeBS(),
+                    banana_curve,
+                    vessel_surface,
+                    cc_dist=0.05,
+                    cs_dist=0.05,
+                    ss_dist=0.05,
+                    curvature_threshold=40.0,
+                )
             )
 
         self.assertEqual(
@@ -2584,7 +2653,9 @@ class SingleStageExampleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outer_maxls must be at least 1"):
             module.resolve_single_stage_outer_maxls("jax", "ondevice", 0)
 
-    def test_resolve_single_stage_outer_maxls_uses_benchmark_budget_for_target_lane(self):
+    def test_resolve_single_stage_outer_maxls_uses_benchmark_budget_for_target_lane(
+        self,
+    ):
         module = self.load_module()
 
         self.assertEqual(
@@ -2675,18 +2746,10 @@ class SingleStageExampleTests(unittest.TestCase):
     def test_should_write_single_stage_full_artifacts_respects_minimal_mode(self):
         module = self.load_module()
 
-        self.assertTrue(
-            module.should_write_single_stage_full_artifacts(False, False)
-        )
-        self.assertFalse(
-            module.should_write_single_stage_full_artifacts(False, True)
-        )
-        self.assertFalse(
-            module.should_write_single_stage_full_artifacts(True, False)
-        )
-        self.assertFalse(
-            module.should_write_single_stage_full_artifacts(True, True)
-        )
+        self.assertTrue(module.should_write_single_stage_full_artifacts(False, False))
+        self.assertFalse(module.should_write_single_stage_full_artifacts(False, True))
+        self.assertFalse(module.should_write_single_stage_full_artifacts(True, False))
+        self.assertFalse(module.should_write_single_stage_full_artifacts(True, True))
 
     def test_should_write_single_stage_restart_artifacts_only_skips_benchmark(self):
         module = self.load_module()
@@ -2696,7 +2759,9 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_temporary_boozer_surface_option_overrides_restores_original_values(self):
         module = self.load_module()
-        boozer_surface = types.SimpleNamespace(options={"bfgs_tol": 1e-10, "verbose": True})
+        boozer_surface = types.SimpleNamespace(
+            options={"bfgs_tol": 1e-10, "verbose": True}
+        )
 
         with module.temporary_boozer_surface_option_overrides(
             boozer_surface,
@@ -2896,7 +2961,9 @@ class SingleStageExampleTests(unittest.TestCase):
         with patch.object(
             module,
             "get_traceable_single_stage_runtime_bundle_builder",
-            return_value=self._make_reporting_runtime_builder(captured, runtime_summary),
+            return_value=self._make_reporting_runtime_builder(
+                captured, runtime_summary
+            ),
         ):
             metrics = module.resolve_single_stage_final_penalty_metrics(
                 use_target_lane=True,
@@ -2999,7 +3066,9 @@ class SingleStageExampleTests(unittest.TestCase):
         with patch.object(
             module,
             "get_traceable_single_stage_runtime_bundle_builder",
-            return_value=self._make_reporting_runtime_builder(captured, runtime_summary),
+            return_value=self._make_reporting_runtime_builder(
+                captured, runtime_summary
+            ),
         ):
             metrics = module.resolve_single_stage_final_penalty_metrics(
                 use_target_lane=True,
@@ -3055,12 +3124,16 @@ class SingleStageExampleTests(unittest.TestCase):
                 "G": jnp.asarray(1.75, dtype=jnp.float64),
             }
         )
-        fake_bs = types.SimpleNamespace(coil_set_spec_from_dofs=lambda coil_dofs: coil_dofs)
+        fake_bs = types.SimpleNamespace(
+            coil_set_spec_from_dofs=lambda coil_dofs: coil_dofs
+        )
 
         with patch.object(
             module,
             "get_traceable_single_stage_runtime_bundle_builder",
-            return_value=self._make_reporting_runtime_builder(captured, runtime_summary),
+            return_value=self._make_reporting_runtime_builder(
+                captured, runtime_summary
+            ),
         ), patch.object(module, "CC_DIST", 0.05, create=True), patch.object(
             module, "CS_DIST", 0.02, create=True
         ), patch.object(module, "SS_DIST", 0.04, create=True), patch.object(
@@ -3110,79 +3183,6 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         self.assertTrue(run_dict["target_lane_reporting_include_distance_metrics"])
 
-    def test_build_target_lane_outer_objectives_profiles_with_jax_coil_dofs(self):
-        module = self.load_module()
-        bs = types.SimpleNamespace(x=np.array([1.0, -2.0], dtype=np.float64))
-        profiled_calls = []
-
-        def _runtime_builder(
-            *args,
-            include_profile_suite=False,
-            include_host_wrappers=False,
-            outer_objective_config=None,
-            success_filter=None,
-        ):
-            self.assertFalse(include_host_wrappers)
-            return {
-                "objective": object(),
-                "value_and_grad": object(),
-                "profile_suite": "profile-suite-marker",
-            }
-
-        def _profile(profile_suite, coil_dofs):
-            profiled_calls.append((profile_suite, coil_dofs))
-            return {"ok": True}
-
-        with patch.object(
-            module,
-            "get_traceable_single_stage_runtime_bundle_builder",
-            return_value=_runtime_builder,
-        ), patch.object(
-            module,
-            "profile_traceable_target_lane_objective",
-            side_effect=_profile,
-        ):
-            _, _, target_lane_profile = module.build_target_lane_outer_objectives(
-                object(),
-                bs,
-                object(),
-                use_value_and_grad=True,
-                profile_target_lane=True,
-                profile_batch_size=1,
-                outer_objective_config=None,
-            )
-
-        self.assertEqual(target_lane_profile["ok"], True)
-        self.assertEqual(len(profiled_calls), 1)
-        self.assertEqual(profiled_calls[0][0], "profile-suite-marker")
-        self.assertIsInstance(profiled_calls[0][1], jax.Array)
-        self.assertNotEqual(
-            tuple(np.asarray(profiled_calls[0][1], dtype=np.float64)),
-            tuple(bs.x),
-        )
-        self.assertEqual(target_lane_profile["profile_point_kind"], "baseline_perturbed")
-
-    def test_build_target_lane_profile_coil_dofs_avoids_exact_baseline_fast_path(self):
-        module = self.load_module()
-
-        profiled = module.build_target_lane_profile_coil_dofs(
-            np.array([0.0, -2.0], dtype=np.float64)
-        )
-
-        self.assertIsInstance(profiled, jax.Array)
-        np.testing.assert_allclose(
-            np.asarray(profiled, dtype=np.float64)[1:],
-            np.array([-2.0], dtype=np.float64),
-        )
-        self.assertNotEqual(float(np.asarray(profiled, dtype=np.float64)[0]), 0.0)
-
-    def test_build_target_lane_profile_batch_coil_dofs_returns_perturbed_batch(self):
-        module = self.load_module()
-
-        profiled_batch = module.build_target_lane_profile_batch_coil_dofs(
-            np.array([0.0, -2.0], dtype=np.float64),
-            batch_size=3,
-        )
     def test_build_single_stage_target_lane_accepted_step_sync_can_skip_state_commit(
         self,
     ):
@@ -3251,6 +3251,81 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(run_dict["x_prev"], run_dict_before["x_prev"])
         self.assertEqual(run_dict["it"], run_dict_before["it"])
 
+    def test_build_target_lane_outer_objectives_profiles_with_jax_coil_dofs(self):
+        module = self.load_module()
+        bs = types.SimpleNamespace(x=np.array([1.0, -2.0], dtype=np.float64))
+        profiled_calls = []
+
+        def _runtime_builder(
+            *args,
+            include_profile_suite=False,
+            include_host_wrappers=False,
+            outer_objective_config=None,
+            success_filter=None,
+        ):
+            self.assertFalse(include_host_wrappers)
+            return {
+                "objective": object(),
+                "value_and_grad": object(),
+                "profile_suite": "profile-suite-marker",
+            }
+
+        def _profile(profile_suite, coil_dofs):
+            profiled_calls.append((profile_suite, coil_dofs))
+            return {"ok": True}
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=_runtime_builder,
+        ), patch.object(
+            module,
+            "profile_traceable_target_lane_objective",
+            side_effect=_profile,
+        ):
+            _, _, target_lane_profile = module.build_target_lane_outer_objectives(
+                object(),
+                bs,
+                object(),
+                use_value_and_grad=True,
+                profile_target_lane=True,
+                profile_batch_size=1,
+                outer_objective_config=None,
+            )
+
+        self.assertEqual(target_lane_profile["ok"], True)
+        self.assertEqual(len(profiled_calls), 1)
+        self.assertEqual(profiled_calls[0][0], "profile-suite-marker")
+        self.assertIsInstance(profiled_calls[0][1], jax.Array)
+        self.assertNotEqual(
+            tuple(np.asarray(profiled_calls[0][1], dtype=np.float64)),
+            tuple(bs.x),
+        )
+        self.assertEqual(
+            target_lane_profile["profile_point_kind"], "baseline_perturbed"
+        )
+
+    def test_build_target_lane_profile_coil_dofs_avoids_exact_baseline_fast_path(self):
+        module = self.load_module()
+
+        profiled = module.build_target_lane_profile_coil_dofs(
+            np.array([0.0, -2.0], dtype=np.float64)
+        )
+
+        self.assertIsInstance(profiled, jax.Array)
+        np.testing.assert_allclose(
+            np.asarray(profiled, dtype=np.float64)[1:],
+            np.array([-2.0], dtype=np.float64),
+        )
+        self.assertNotEqual(float(np.asarray(profiled, dtype=np.float64)[0]), 0.0)
+
+    def test_build_target_lane_profile_batch_coil_dofs_returns_perturbed_batch(self):
+        module = self.load_module()
+
+        profiled_batch = module.build_target_lane_profile_batch_coil_dofs(
+            np.array([0.0, -2.0], dtype=np.float64),
+            batch_size=3,
+        )
 
         self.assertIsInstance(profiled_batch, jax.Array)
         host_batch = np.asarray(profiled_batch, dtype=np.float64)
@@ -3258,10 +3333,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(host_batch)))
         self.assertTrue(np.all(host_batch[:, 1] != 0.0))
         self.assertTrue(
-            any(
-                not np.array_equal(row, np.array([0.0, -2.0]))
-                for row in host_batch
-            )
+            any(not np.array_equal(row, np.array([0.0, -2.0])) for row in host_batch)
         )
 
     def test_build_target_lane_outer_objectives_profiles_seed_batch_when_requested(
@@ -3472,9 +3544,7 @@ class SingleStageExampleTests(unittest.TestCase):
             outer_objective_config=None,
             success_filter=None,
         ):
-            diagnostic_builder_calls.append(
-                (outer_objective_config, success_filter)
-            )
+            diagnostic_builder_calls.append((outer_objective_config, success_filter))
             return {
                 "all_finite": False,
                 "first_nonfinite_term": "curve_surface",
@@ -4011,76 +4081,6 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertIsNone(callback)
 
-    def test_should_force_strict_target_lane_final_sync(self):
-        module = self.load_module()
-
-        self.assertFalse(
-            module.should_force_strict_target_lane_final_sync(
-                use_target_lane=False,
-                res_nit=3,
-                accepted_step_callback=None,
-                trial_boozer_override_active=True,
-            )
-        )
-        self.assertFalse(
-            module.should_force_strict_target_lane_final_sync(
-                use_target_lane=True,
-                res_nit=0,
-                accepted_step_callback=None,
-                trial_boozer_override_active=True,
-            )
-        )
-        self.assertFalse(
-            module.should_force_strict_target_lane_final_sync(
-                use_target_lane=True,
-                res_nit=2,
-                accepted_step_callback=object(),
-                trial_boozer_override_active=False,
-            )
-        )
-        self.assertTrue(
-            module.should_force_strict_target_lane_final_sync(
-                use_target_lane=True,
-                res_nit=2,
-                accepted_step_callback=None,
-                trial_boozer_override_active=False,
-            )
-        )
-        self.assertTrue(
-            module.should_force_strict_target_lane_final_sync(
-                use_target_lane=True,
-                res_nit=2,
-                accepted_step_callback=object(),
-                trial_boozer_override_active=True,
-            )
-        )
-
-    def test_run_single_stage_optimizer_prefers_fused_target_lane_contract(self):
-        module = self.load_module()
-        captured = {}
-        explicit_fun = lambda x: (
-            jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
-            jnp.asarray(2.0 * x, dtype=jnp.float64),
-        )
-        scalar_fun = lambda x: float(np.dot(x, x))
-
-        def fake_require_target_backend_x64(optimizer_backend):
-            captured["x64_backend"] = optimizer_backend
-
-        def fake_jax_minimize(
-            fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
-        ):
-            captured["fun"] = fun
-            captured["method"] = method
-            captured["x0"] = x0
-            captured["tol"] = tol
-            captured["maxiter"] = maxiter
-            captured["options"] = dict(options)
-            captured["value_and_grad"] = value_and_grad
-            captured["callback"] = callback
-            return types.SimpleNamespace(x=x0, nit=0, message="ok")
-
-        with self.patch_optimizer_jax_module(
     def test_resolve_target_lane_accepted_step_callback_uses_observe_only_callback_for_per_accept(
         self,
     ):
@@ -4142,6 +4142,76 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(len(synced_states), 1)
         np.testing.assert_allclose(synced_states[0], np.array([11.0, 22.0]))
 
+    def test_should_force_strict_target_lane_final_sync(self):
+        module = self.load_module()
+
+        self.assertFalse(
+            module.should_force_strict_target_lane_final_sync(
+                use_target_lane=False,
+                res_nit=3,
+                accepted_step_callback=None,
+                trial_boozer_override_active=True,
+            )
+        )
+        self.assertFalse(
+            module.should_force_strict_target_lane_final_sync(
+                use_target_lane=True,
+                res_nit=0,
+                accepted_step_callback=None,
+                trial_boozer_override_active=True,
+            )
+        )
+        self.assertTrue(
+            module.should_force_strict_target_lane_final_sync(
+                use_target_lane=True,
+                res_nit=2,
+                accepted_step_callback=object(),
+                trial_boozer_override_active=False,
+            )
+        )
+        self.assertTrue(
+            module.should_force_strict_target_lane_final_sync(
+                use_target_lane=True,
+                res_nit=2,
+                accepted_step_callback=None,
+                trial_boozer_override_active=False,
+            )
+        )
+        self.assertTrue(
+            module.should_force_strict_target_lane_final_sync(
+                use_target_lane=True,
+                res_nit=2,
+                accepted_step_callback=object(),
+                trial_boozer_override_active=True,
+            )
+        )
+
+    def test_run_single_stage_optimizer_prefers_fused_target_lane_contract(self):
+        module = self.load_module()
+        captured = {}
+        explicit_fun = lambda x: (
+            jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
+            jnp.asarray(2.0 * x, dtype=jnp.float64),
+        )
+        scalar_fun = lambda x: float(np.dot(x, x))
+
+        def fake_require_target_backend_x64(optimizer_backend):
+            captured["x64_backend"] = optimizer_backend
+
+        def fake_jax_minimize(
+            fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
+        ):
+            captured["fun"] = fun
+            captured["method"] = method
+            captured["x0"] = x0
+            captured["tol"] = tol
+            captured["maxiter"] = maxiter
+            captured["options"] = dict(options)
+            captured["value_and_grad"] = value_and_grad
+            captured["callback"] = callback
+            return types.SimpleNamespace(x=x0, nit=0, message="ok")
+
+        with self.patch_optimizer_jax_module(
             require_target_backend_x64=fake_require_target_backend_x64,
             jax_minimize=fake_jax_minimize,
         ):
@@ -4231,6 +4301,40 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIs(captured["failure_callback"], failure_callback)
         self.assertEqual(result.message, "ok")
 
+    def test_run_single_stage_optimizer_rejects_failure_callback_on_reference_lane(
+        self,
+    ):
+        module = self.load_module()
+
+        def fake_reference_minimize(*args, **kwargs):
+            raise AssertionError("reference_minimize should not run")
+
+        with self.patch_optimizer_jax_module(
+            require_target_backend_x64=lambda _optimizer_backend: None,
+            jax_minimize=fake_reference_minimize,
+        ):
+            contract = module.resolve_single_stage_optimizer_contract("cpu", "scipy")
+            with self.assertRaisesRegex(
+                ValueError,
+                "reference-lane optimization does not support failure_callback",
+            ):
+                module.run_single_stage_optimizer(
+                    lambda x: (
+                        jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
+                        jnp.asarray(2.0 * x, dtype=jnp.float64),
+                    ),
+                    np.array([0.0, 0.0]),
+                    contract=contract,
+                    maxiter=1,
+                    ftol=0.0,
+                    gtol=1e-6,
+                    maxcor=5,
+                    outer_maxls=6,
+                    callback=None,
+                    scalar_fun=None,
+                    failure_callback=lambda *args: None,
+                )
+
     def test_run_single_stage_optimizer_threads_target_lane_initial_step_size(self):
         module = self.load_module()
         captured = {}
@@ -4254,7 +4358,16 @@ class SingleStageExampleTests(unittest.TestCase):
             callback,
             failure_callback=None,
         ):
-            del fun, x0, method, tol, maxiter, value_and_grad, callback, failure_callback
+            del (
+                fun,
+                x0,
+                method,
+                tol,
+                maxiter,
+                value_and_grad,
+                callback,
+                failure_callback,
+            )
             captured["options"] = dict(options)
             return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
 
@@ -4262,9 +4375,7 @@ class SingleStageExampleTests(unittest.TestCase):
             require_target_backend_x64=fake_require_target_backend_x64,
             jax_minimize=fake_jax_minimize,
         ):
-            contract = module.resolve_single_stage_optimizer_contract(
-                "jax", "ondevice"
-            )
+            contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
             result = module.run_single_stage_optimizer(
                 explicit_fun,
                 np.array([0.0, 0.0]),
@@ -4282,7 +4393,9 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(captured["options"]["initial_step_size"], 1.0e-4)
         self.assertEqual(result.message, "ok")
 
-    def test_run_single_stage_target_lane_optimizer_with_retries_retries_from_anchor(self):
+    def test_run_single_stage_target_lane_optimizer_with_retries_retries_from_anchor(
+        self,
+    ):
         module = self.load_module()
         contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
         run_dict = self._make_candidate_run_dict([1.0, 2.0])
@@ -4373,6 +4486,7 @@ class SingleStageExampleTests(unittest.TestCase):
                     np.array([0.0, 0.0]),
                     callback=None,
                     retry_callback=retry_callback,
+                    result_state_sync=None,
                     contract=contract,
                     maxiter=5,
                     ftol=0.0,
@@ -4400,9 +4514,10 @@ class SingleStageExampleTests(unittest.TestCase):
     ):
         module = self.load_module()
         contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
         anchor_state = {
-            "coil_dofs": np.array([4.0, 5.0]),
-            "sdofs": np.array([6.0, 7.0]),
+            "coil_dofs": np.array([1.0, 2.0]),
+            "sdofs": np.array([3.0, 4.0]),
             "iota": TEST_IOTA,
             "G": TEST_G0,
             "J": 1.0,
@@ -4411,30 +4526,13 @@ class SingleStageExampleTests(unittest.TestCase):
             "self_intersection_check_available": True,
             "hardware_constraint_status": {"success": True, "violations": []},
         }
-        run_dict = self._make_candidate_run_dict([1.0, 2.0])
         run_dict["latest_local_incumbent"] = copy.deepcopy(anchor_state)
-        run_dict["latest_local_stage"] = "latest"
+        run_dict["latest_local_stage"] = "initial"
         run_dict["best_local_incumbent"] = copy.deepcopy(anchor_state)
-        run_dict["best_local_stage"] = "best"
-        invalid_state_events = [
-            {
-                "line_search_failed": True,
-                "nonfinite_step": False,
-                "stalled_step": False,
-                "valid_curvature": True,
-                "step_scale": {"value": 0.2},
-            }
-        ]
-
-        def always_fail(*args, **kwargs):
-            del args, kwargs
-            return types.SimpleNamespace(
-                x=np.array([9.0, 9.0]),
-                nit=0,
-                success=False,
-                message="failed",
-                status=5,
-            )
+        run_dict["best_local_stage"] = "initial"
+        invalid_state_events = []
+        optimizer_calls = []
+        synced_states = []
 
         def fake_run_single_stage_optimizer(
             fun,
@@ -4606,6 +4704,7 @@ class SingleStageExampleTests(unittest.TestCase):
                     np.array([0.0, 0.0]),
                     callback=None,
                     retry_callback=None,
+                    result_state_sync=None,
                     contract=contract,
                     maxiter=5,
                     ftol=0.0,
@@ -4637,7 +4736,6 @@ class SingleStageExampleTests(unittest.TestCase):
             "sdofs": np.array([3.0, 4.0]),
             "iota": TEST_IOTA,
             "G": TEST_G0,
-                    result_state_sync=None,
             "J": 1.0,
             "dJ": np.zeros(5),
             "intersecting": False,
@@ -4704,7 +4802,6 @@ class SingleStageExampleTests(unittest.TestCase):
                 x=np.array([1.0, 2.0]),
                 nit=3,
                 nfev=6,
-                    result_state_sync=None,
                 njev=6,
                 success=True,
                 message="ok",
@@ -4730,6 +4827,7 @@ class SingleStageExampleTests(unittest.TestCase):
                     np.array([0.0, 0.0]),
                     callback=None,
                     retry_callback=None,
+                    result_state_sync=None,
                     contract=contract,
                     maxiter=5,
                     ftol=0.0,
@@ -4827,7 +4925,6 @@ class SingleStageExampleTests(unittest.TestCase):
 
         retry_callback = object()
         policy = module.SingleStageSearchPolicy(
-                    result_state_sync=None,
             donor_class="stage2_seed_only",
             search_policy="repair_first",
             adaptive_failure_penalty_weight=1.5,
@@ -4849,6 +4946,7 @@ class SingleStageExampleTests(unittest.TestCase):
                     initial_state,
                     callback=None,
                     retry_callback=retry_callback,
+                    result_state_sync=None,
                     contract=contract,
                     maxiter=5,
                     ftol=0.0,
@@ -4946,7 +5044,6 @@ class SingleStageExampleTests(unittest.TestCase):
             "run_single_stage_optimizer",
             side_effect=always_fail,
         ):
-                    result_state_sync=None,
             result, retry_summary = (
                 module.run_single_stage_target_lane_optimizer_with_retries(
                     lambda x: x,
@@ -4955,6 +5052,7 @@ class SingleStageExampleTests(unittest.TestCase):
                     ),
                     callback=None,
                     retry_callback=None,
+                    result_state_sync=None,
                     contract=contract,
                     maxiter=5,
                     ftol=0.0,
@@ -5052,7 +5150,6 @@ class SingleStageExampleTests(unittest.TestCase):
                 explicit_fun,
                 np.array([0.0, 0.0]),
                 contract=contract,
-                    result_state_sync=None,
                 maxiter=1,
                 ftol=0.0,
                 gtol=1e-6,
@@ -5399,32 +5496,6 @@ class SingleStageExampleTests(unittest.TestCase):
         def fake_setter(value):
             captured["setter"].append(np.asarray(value))
 
-        def fake_sync(state, x, *, benchmark_mode):
-            captured["sync"] = {
-                "state": state,
-                "x": np.asarray(x),
-                "benchmark_mode": benchmark_mode,
-            }
-            state["sdofs"] = np.array([9.0, -2.0])
-            state["iota"] = 0.21
-            state["G"] = 1.8
-            return {
-                "objective_value": 1.25,
-                "reporting_metrics": {
-                    "final_iota": 0.21,
-                    "final_volume": 0.75,
-                    "coil_length": 2.0,
-                    "max_curvature": 3.0,
-                    "curve_curve_min_dist": 0.11,
-                    "curve_surface_min_dist": 0.12,
-                    "surface_vessel_min_dist": 0.13,
-                    "hardware_status": {
-                        "success": True,
-                        "violations": [],
-                    },
-                },
-            }
-
         adapter = module.SingleStageAdapter(
             run_dict=run_dict,
             boozer_surface="booz",
@@ -5465,83 +5536,12 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIs(captured["sync"]["state"], run_dict)
         np.testing.assert_allclose(captured["sync"]["x"], np.array([3.0, -4.0]))
         self.assertFalse(captured["sync"]["benchmark_mode"])
+        self.assertTrue(captured["sync"]["update_run_state"])
         log_summary.assert_called_once()
         np.testing.assert_allclose(run_dict["x_prev"], np.array([3.0, -4.0]))
         self.assertEqual(captured["setter"], [])
         np.testing.assert_allclose(jf.x, np.array([1.0, 2.0]))
 
-    def test_single_stage_adapter_sync_accepted_step_uses_benchmark_snapshot_path(
-        self,
-    ):
-        module = self.load_module()
-
-        class _JF:
-            def __init__(self):
-                self._x = None
-
-            @property
-            def x(self):
-                return self._x
-
-            @x.setter
-            def x(self, value):
-                self._x = np.asarray(value)
-
-        jf = _JF()
-        run_dict = {"x_prev": np.zeros(2), "lscount": 4}
-        captured = {}
-
-        def fake_snapshot(
-            state,
-            booz,
-            objective,
-            *,
-            objective_value=None,
-            objective_grad=None,
-            store_objective_grad=True,
-        ):
-            captured["snapshot"] = {
-                "state": state,
-                "booz": booz,
-                "objective": objective,
-                "objective_value": objective_value,
-                "objective_grad": objective_grad,
-                "store_objective_grad": store_objective_grad,
-            }
-            return 1.0, np.zeros(2)
-
-        adapter = module.SingleStageAdapter(
-            run_dict=run_dict,
-            boozer_surface="booz",
-            JF=jf,
-            bs="bs",
-            objectives={"qs": "obj"},
-            diagnostics={"iota": "diag"},
-            log_path="/tmp/log.txt",
-            benchmark_mode=True,
-        )
-
-        with patch.object(
-            module,
-            "snapshot_accepted_step_state",
-            side_effect=fake_snapshot,
-        ), patch.object(
-            module,
-            "accept_step",
-            side_effect=AssertionError(
-                "benchmark sync path should not call accept_step"
-            ),
-        ):
-            adapter.sync_accepted_step(np.array([9.0, -10.0]))
-
-        self.assertIsNone(jf.x)
-        np.testing.assert_allclose(run_dict["x_prev"], np.zeros(2))
-        self.assertTrue(captured["sync"]["update_run_state"])
-        self.assertIs(captured["snapshot"]["state"], run_dict)
-        self.assertIsNone(captured["snapshot"]["objective_value"])
-        self.assertIsNone(captured["snapshot"]["objective_grad"])
-        self.assertFalse(captured["snapshot"]["store_objective_grad"])
-        self.assertEqual(run_dict["lscount"], 4)
     def test_single_stage_adapter_observe_accepted_step_skips_state_commit(self):
         module = self.load_module()
 
@@ -5644,6 +5644,77 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(run_dict["sdofs"], np.array([9.0, -2.0]))
         np.testing.assert_allclose(jf.x, np.array([1.0, 2.0]))
 
+    def test_single_stage_adapter_sync_accepted_step_uses_benchmark_snapshot_path(
+        self,
+    ):
+        module = self.load_module()
+
+        class _JF:
+            def __init__(self):
+                self._x = None
+
+            @property
+            def x(self):
+                return self._x
+
+            @x.setter
+            def x(self, value):
+                self._x = np.asarray(value)
+
+        jf = _JF()
+        run_dict = {"x_prev": np.zeros(2), "lscount": 4}
+        captured = {}
+
+        def fake_snapshot(
+            state,
+            booz,
+            objective,
+            *,
+            objective_value=None,
+            objective_grad=None,
+            store_objective_grad=True,
+        ):
+            captured["snapshot"] = {
+                "state": state,
+                "booz": booz,
+                "objective": objective,
+                "objective_value": objective_value,
+                "objective_grad": objective_grad,
+                "store_objective_grad": store_objective_grad,
+            }
+            return 1.0, np.zeros(2)
+
+        adapter = module.SingleStageAdapter(
+            run_dict=run_dict,
+            boozer_surface="booz",
+            JF=jf,
+            bs="bs",
+            objectives={"qs": "obj"},
+            diagnostics={"iota": "diag"},
+            log_path="/tmp/log.txt",
+            benchmark_mode=True,
+        )
+
+        with patch.object(
+            module,
+            "snapshot_accepted_step_state",
+            side_effect=fake_snapshot,
+        ), patch.object(
+            module,
+            "accept_step",
+            side_effect=AssertionError(
+                "benchmark sync path should not call accept_step"
+            ),
+        ):
+            adapter.sync_accepted_step(np.array([9.0, -10.0]))
+
+        self.assertIsNone(jf.x)
+        np.testing.assert_allclose(run_dict["x_prev"], np.zeros(2))
+        self.assertIs(captured["snapshot"]["state"], run_dict)
+        self.assertIsNone(captured["snapshot"]["objective_value"])
+        self.assertIsNone(captured["snapshot"]["objective_grad"])
+        self.assertFalse(captured["snapshot"]["store_objective_grad"])
+        self.assertEqual(run_dict["lscount"], 4)
 
     def test_single_stage_adapter_benchmark_sync_reuses_reevaluated_objective(self):
         module = self.load_module()
@@ -5891,6 +5962,154 @@ class SingleStageExampleTests(unittest.TestCase):
             self.assertEqual(
                 module.evaluate_surface_self_intersection(SentinelSurface()),
                 (False, False),
+            )
+
+    def test_surface_self_intersection_check_available_accepts_supported_surface_without_backend(
+        self,
+    ):
+        module = self.load_module()
+        surface = get_surface(
+            "SurfaceRZFourier",
+            True,
+            full=True,
+            nphi=200,
+            ntheta=200,
+            mpol=2,
+            ntor=2,
+        )
+
+        with self.patch_surface_self_intersection_backend_unavailable(module):
+            self.assertFalse(module.surface_self_intersection_check_available())
+            self.assertTrue(module.surface_self_intersection_check_available(surface))
+
+    def test_evaluate_surface_self_intersection_uses_supported_rzfourier_path_when_backend_unavailable(
+        self,
+    ):
+        module = self.load_module()
+        surface = get_surface(
+            "SurfaceRZFourier",
+            True,
+            full=True,
+            nphi=200,
+            ntheta=200,
+            mpol=2,
+            ntor=2,
+        )
+        surface.x = np.array(
+            [
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.1,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.1,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.1,
+            ],
+            dtype=np.float64,
+        )
+
+        with self.patch_surface_self_intersection_backend_unavailable(module):
+            self.assertEqual(
+                module.evaluate_surface_self_intersection(surface),
+                (True, True),
+            )
+
+    def test_evaluate_surface_self_intersection_reports_non_crossing_supported_rzfourier_without_backend(
+        self,
+    ):
+        module = self.load_module()
+        surface = get_surface(
+            "SurfaceRZFourier",
+            True,
+            full=True,
+            nphi=200,
+            ntheta=200,
+            mpol=2,
+            ntor=2,
+        )
+
+        with self.patch_surface_self_intersection_backend_unavailable(module):
+            self.assertEqual(
+                module.evaluate_surface_self_intersection(surface),
+                (False, True),
+            )
+
+    def test_evaluate_surface_self_intersection_uses_supported_xyztensor_path_when_backend_unavailable(
+        self,
+    ):
+        module = self.load_module()
+        crossing_surface = get_surface(
+            "SurfaceRZFourier",
+            True,
+            full=True,
+            nphi=200,
+            ntheta=200,
+            mpol=2,
+            ntor=2,
+            nfp=1,
+        )
+        crossing_surface.x = np.array(
+            [
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.1,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.1,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.1,
+            ],
+            dtype=np.float64,
+        )
+        surface = module.SurfaceXYZTensorFourier(
+            mpol=2,
+            ntor=2,
+            nfp=1,
+            stellsym=True,
+            quadpoints_phi=crossing_surface.quadpoints_phi,
+            quadpoints_theta=crossing_surface.quadpoints_theta,
+        )
+        surface.least_squares_fit(crossing_surface.gamma())
+
+        with self.patch_surface_self_intersection_backend_unavailable(module):
+            self.assertEqual(
+                module.evaluate_surface_self_intersection(surface),
+                (True, True),
             )
 
     def test_initialize_boozer_surface_skips_optional_self_intersection_gate(self):
@@ -6435,15 +6654,11 @@ class SingleStageExampleTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "test.log")
-            with patch.object(
-                module, "host_float", counted_host_float
-            ), patch.object(
+            with patch.object(module, "host_float", counted_host_float), patch.object(
                 module, "host_array", counted_host_array
             ), patch.object(
                 module, "update_self_intersection_status", return_value=False
-            ), patch.object(
-                module, "BiotSavart", _BS
-            ):
+            ), patch.object(module, "BiotSavart", _BS):
                 module.accept_step(
                     run_dict,
                     _BoozerSurface(),
@@ -6550,7 +6765,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 self.run_code_calls = []
 
             def run_code(self, iota, G=None, *, sdofs=None):
-                self.run_code_calls.append((iota, G, None if sdofs is None else sdofs.copy()))
+                self.run_code_calls.append(
+                    (iota, G, None if sdofs is None else sdofs.copy())
+                )
                 return self.res
 
         class _JF:
@@ -6922,7 +7139,9 @@ class SingleStageExampleTests(unittest.TestCase):
         host_calls = []
         original_host_array = module.host_array
         banana_curve = object()
-        vessel_gamma = jax.device_put(np.arange(12.0, dtype=np.float64).reshape(2, 2, 3))
+        vessel_gamma = jax.device_put(
+            np.arange(12.0, dtype=np.float64).reshape(2, 2, 3)
+        )
 
         def counted_host_array(value, *, dtype=np.float64):
             host_calls.append((value, dtype))
@@ -7186,9 +7405,7 @@ class SingleStageExampleTests(unittest.TestCase):
         with patch.object(
             module, "surface_self_intersection_check_available", return_value=True
         ):
-            _, run_dict, _ = module.snapshot_to_pytree(
-                jf, booz, bs_obj, num_tf_coils=1
-            )
+            _, run_dict, _ = module.snapshot_to_pytree(jf, booz, bs_obj, num_tf_coils=1)
 
         np.testing.assert_allclose(run_dict["sdofs"], np.array([10.0, 20.0, 30.0]))
         self.assertEqual(run_dict["iota"], 0.15)
@@ -7391,14 +7608,15 @@ class SegmentDistanceTests(unittest.TestCase):
 
 
 class HardwareConstraintTests(unittest.TestCase):
-    def test_jax_curvature_threshold_respects_floor_and_ceiling(self):
+    def test_jax_curvature_threshold_matches_stage_specific_contracts(self):
         stage2_module = load_stage2_module()
         single_stage_module = load_single_stage_example_module()
 
-        self.assertEqual(stage2_module.resolve_curvature_threshold(10.0), 20.0)
+        self.assertEqual(stage2_module.resolve_curvature_threshold(10.0), 10.0)
         self.assertEqual(stage2_module.resolve_curvature_threshold(20.0), 20.0)
         self.assertEqual(stage2_module.resolve_curvature_threshold(39.0), 39.0)
-        self.assertEqual(stage2_module.resolve_curvature_threshold(41.0), 40.0)
+        self.assertEqual(stage2_module.resolve_curvature_threshold(80.0), 80.0)
+        self.assertEqual(stage2_module.resolve_curvature_threshold(120.0), 100.0)
         self.assertEqual(single_stage_module.resolve_curvature_threshold(10.0), 20.0)
         self.assertEqual(single_stage_module.resolve_curvature_threshold(20.0), 20.0)
         self.assertEqual(single_stage_module.resolve_curvature_threshold(39.0), 39.0)
@@ -7433,9 +7651,14 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertFalse(status["success"])
         self.assertEqual(len(status["violations"]), 3)
-        self.assertIn("coil_length", status["violations"][0])
-        self.assertIn("coil_coil_min_dist", status["violations"][1])
-        self.assertIn("max_curvature", status["violations"][2])
+        self.assertEqual(
+            set(status["violations"]),
+            {
+                "coil_length 1.800000 exceeds threshold 1.750000",
+                "coil_coil_spacing 0.040000 below threshold 0.050000",
+                "max_curvature 41.000000 exceeds threshold 40.000000",
+            },
+        )
 
     def test_stage2_hardware_constraints_report_self_intersection_violation(self):
         module = load_stage2_module()
@@ -7469,7 +7692,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 ),
             ),
             (
-                "coil_coil_min_dist",
+                "coil_coil_spacing",
                 dict(
                     coil_length=1.75,
                     length_target=1.75,
@@ -7514,7 +7737,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 ),
             ),
             (
-                "coil_coil_min_dist",
+                "coil_coil_spacing",
                 np.nan,
                 dict(
                     coil_length=1.75,
@@ -7538,7 +7761,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 ),
             ),
             (
-                "coil_coil_min_dist",
+                "coil_coil_spacing",
                 np.inf,
                 dict(
                     coil_length=1.75,
@@ -7839,7 +8062,9 @@ class HardwareConstraintTests(unittest.TestCase):
         module.SS_DIST = 0.04
         module.CURVATURE_THRESHOLD = 40.0
 
-        with patch.object(module, "update_self_intersection_status", return_value=False):
+        with patch.object(
+            module, "update_self_intersection_status", return_value=False
+        ):
             J_out, dJ_out = module._evaluate_candidate_impl(
                 np.ones(3),
                 run_dict,
@@ -8055,6 +8280,62 @@ class FtolGtolDefaultTests(unittest.TestCase):
 
 
 class ResultsEnvelopeTests(unittest.TestCase):
+    def test_stage2_select_better_exact_hardware_pass_prefers_lower_field_objective(
+        self,
+    ):
+        module = load_stage2_module()
+        current = module.Stage2ExactHardwarePass(
+            dofs=np.asarray([1.0, 2.0], dtype=float),
+            field_objective=2.0,
+            source="initial_state",
+        )
+        candidate = module.Stage2ExactHardwarePass(
+            dofs=np.asarray([3.0, 4.0], dtype=float),
+            field_objective=1.0,
+            source="accepted_iterate_3",
+        )
+
+        chosen = module.select_better_stage2_exact_hardware_pass(current, candidate)
+
+        self.assertIs(chosen, candidate)
+
+    def test_stage2_restore_exact_hardware_pass_only_for_final_strict_miss(self):
+        module = load_stage2_module()
+        best = module.Stage2ExactHardwarePass(
+            dofs=np.asarray([0.9, 0.8], dtype=float),
+            field_objective=0.4,
+            source="accepted_iterate_2",
+        )
+
+        restored_dofs, optimizer_success, termination_message = (
+            module.restore_stage2_exact_hardware_pass_for_artifact_output(
+                best,
+                {"hardware_status": {"success": False, "violations": ["coil_length"]}},
+                optimizer_success=True,
+                termination_message="alm_ok",
+            )
+        )
+
+        np.testing.assert_allclose(restored_dofs, np.asarray([0.9, 0.8], dtype=float))
+        self.assertFalse(optimizer_success)
+        self.assertEqual(
+            termination_message,
+            "alm_ok; restored_best_exact_hardware_pass",
+        )
+
+        restored_dofs, optimizer_success, termination_message = (
+            module.restore_stage2_exact_hardware_pass_for_artifact_output(
+                best,
+                {"hardware_status": {"success": True, "violations": []}},
+                optimizer_success=True,
+                termination_message="alm_ok",
+            )
+        )
+
+        self.assertIsNone(restored_dofs)
+        self.assertTrue(optimizer_success)
+        self.assertEqual(termination_message, "alm_ok")
+
     def test_stage2_select_better_feasible_partial_prefers_lower_objective(self):
         module = load_stage2_module()
         current = module.Stage2FeasiblePartial(
@@ -8172,9 +8453,7 @@ class ResultsEnvelopeTests(unittest.TestCase):
             envelope["problem_contract"]["runtime_contract"]["optimizer_backend"],
             "ondevice",
         )
-        self.assertTrue(
-            envelope["artifacts"]["required"]["results.json"]["exists"]
-        )
+        self.assertTrue(envelope["artifacts"]["required"]["results.json"]["exists"])
         self.assertFalse(
             envelope["artifacts"]["required"]["biot_savart_opt.json"]["exists"]
         )
@@ -8341,9 +8620,7 @@ class ResultsEnvelopeTests(unittest.TestCase):
             envelope["problem_contract"]["runtime_contract"]["outer_optimizer_method"],
             "lbfgs-ondevice",
         )
-        self.assertFalse(
-            envelope["artifacts"]["policy"]["write_restart_artifacts"]
-        )
+        self.assertFalse(envelope["artifacts"]["policy"]["write_restart_artifacts"])
         self.assertFalse(envelope["artifacts"]["policy"]["write_full_artifacts"])
 
     def test_single_stage_results_envelope_records_invalid_state_event_policy(self):

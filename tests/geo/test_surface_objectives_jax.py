@@ -905,25 +905,37 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
 def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
     monkeypatch,
 ):
-    compiled_value_and_grad_for = object()
-    batched_value_and_grad_for = object()
     runtime_entry = {
-        "compiled_bundle": {
-            "compiled_value_and_grad_for": compiled_value_and_grad_for,
-        },
+        "compiled_bundle": {"compiled_value_and_grad_for": object()},
         "objective": object(),
-        "batched_value_and_grad": batched_value_and_grad_for,
-        "reporting_metrics": None,
+        "batched_value_and_grad": object(),
+        "public_objective": None,
+        "public_value_and_grad": None,
+        "public_batched_value_and_grad": None,
+        "public_reporting_metrics": None,
         "host_objective": None,
         "host_value_and_grad": None,
+        "host_reporting_metrics": None,
         "profile_suite": None,
     }
-    ensure_calls = []
-    ensure_reporting_calls = []
+    ensure_public_calls = []
+    ensure_host_calls = []
 
-    def ensure_reporting(entry):
-        ensure_reporting_calls.append(entry)
-        entry["reporting_metrics"] = ("reporting_metrics", entry["compiled_bundle"])
+    def ensure_public(entry):
+        ensure_public_calls.append(entry)
+        entry["public_objective"] = ("public_objective", entry["objective"])
+        entry["public_value_and_grad"] = (
+            "public_value_and_grad",
+            entry["compiled_bundle"]["compiled_value_and_grad_for"],
+        )
+        entry["public_batched_value_and_grad"] = (
+            "public_batched_value_and_grad",
+            entry["batched_value_and_grad"],
+        )
+        entry["public_reporting_metrics"] = (
+            "public_reporting_metrics",
+            entry["compiled_bundle"],
+        )
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
@@ -932,13 +944,13 @@ def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_ensure_traceable_runtime_reporting_metrics",
-        ensure_reporting,
+        "_ensure_traceable_runtime_public_boundaries",
+        ensure_public,
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
         "_ensure_traceable_runtime_host_wrappers",
-        lambda entry: ensure_calls.append(entry),
+        lambda entry: ensure_host_calls.append(entry),
     )
 
     bundle = surfaceobjectives_jax_module.make_traceable_objective_runtime_bundle(
@@ -949,41 +961,61 @@ def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
     )
 
     assert bundle == {
-        "objective": runtime_entry["objective"],
-        "value_and_grad": compiled_value_and_grad_for,
-        "batched_value_and_grad": batched_value_and_grad_for,
-        "reporting_metrics": ("reporting_metrics", runtime_entry["compiled_bundle"]),
+        "objective": ("public_objective", runtime_entry["objective"]),
+        "value_and_grad": (
+            "public_value_and_grad",
+            runtime_entry["compiled_bundle"]["compiled_value_and_grad_for"],
+        ),
+        "batched_value_and_grad": (
+            "public_batched_value_and_grad",
+            runtime_entry["batched_value_and_grad"],
+        ),
+        "reporting_metrics": (
+            "public_reporting_metrics",
+            runtime_entry["compiled_bundle"],
+        ),
     }
-    assert ensure_reporting_calls == [runtime_entry]
-    assert ensure_calls == []
+    assert ensure_public_calls == [runtime_entry]
+    assert ensure_host_calls == []
 
 
 def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_demand(
     monkeypatch,
 ):
-    compiled_value_and_grad_for = object()
-    batched_value_and_grad_for = object()
     runtime_entry = {
-        "compiled_bundle": {
-            "compiled_value_and_grad_for": compiled_value_and_grad_for,
-        },
+        "compiled_bundle": {"compiled_value_and_grad_for": object()},
         "objective": object(),
-        "batched_value_and_grad": batched_value_and_grad_for,
-        "reporting_metrics": None,
+        "batched_value_and_grad": object(),
+        "public_objective": None,
+        "public_value_and_grad": None,
+        "public_batched_value_and_grad": None,
+        "public_reporting_metrics": None,
         "host_objective": None,
         "host_value_and_grad": None,
         "host_reporting_metrics": None,
         "profile_suite": None,
     }
-    ensure_calls = []
-    ensure_reporting_calls = []
+    ensure_public_calls = []
+    ensure_host_calls = []
 
-    def ensure_reporting(entry):
-        ensure_reporting_calls.append(entry)
-        entry["reporting_metrics"] = ("reporting_metrics", entry["compiled_bundle"])
+    def ensure_public(entry):
+        ensure_public_calls.append(entry)
+        entry["public_objective"] = ("public_objective", entry["objective"])
+        entry["public_value_and_grad"] = (
+            "public_value_and_grad",
+            entry["compiled_bundle"]["compiled_value_and_grad_for"],
+        )
+        entry["public_batched_value_and_grad"] = (
+            "public_batched_value_and_grad",
+            entry["batched_value_and_grad"],
+        )
+        entry["public_reporting_metrics"] = (
+            "public_reporting_metrics",
+            entry["compiled_bundle"],
+        )
 
     def ensure_wrappers(entry):
-        ensure_calls.append(entry)
+        ensure_host_calls.append(entry)
         entry["host_objective"] = ("host_objective", entry["objective"])
         entry["host_value_and_grad"] = (
             "host_value_and_grad",
@@ -991,7 +1023,7 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
         )
         entry["host_reporting_metrics"] = (
             "host_reporting_metrics",
-            entry["reporting_metrics"],
+            entry["public_reporting_metrics"],
         )
 
     monkeypatch.setattr(
@@ -1001,8 +1033,8 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_ensure_traceable_runtime_reporting_metrics",
-        ensure_reporting,
+        "_ensure_traceable_runtime_public_boundaries",
+        ensure_public,
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
@@ -1019,22 +1051,198 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
     )
 
     assert bundle == {
-        "objective": runtime_entry["objective"],
-        "value_and_grad": compiled_value_and_grad_for,
-        "batched_value_and_grad": batched_value_and_grad_for,
-        "reporting_metrics": ("reporting_metrics", runtime_entry["compiled_bundle"]),
+        "objective": ("public_objective", runtime_entry["objective"]),
+        "value_and_grad": (
+            "public_value_and_grad",
+            runtime_entry["compiled_bundle"]["compiled_value_and_grad_for"],
+        ),
+        "batched_value_and_grad": (
+            "public_batched_value_and_grad",
+            runtime_entry["batched_value_and_grad"],
+        ),
+        "reporting_metrics": (
+            "public_reporting_metrics",
+            runtime_entry["compiled_bundle"],
+        ),
         "host_objective": ("host_objective", runtime_entry["objective"]),
         "host_value_and_grad": (
             "host_value_and_grad",
-            compiled_value_and_grad_for,
+            runtime_entry["compiled_bundle"]["compiled_value_and_grad_for"],
         ),
         "host_reporting_metrics": (
             "host_reporting_metrics",
-            ("reporting_metrics", runtime_entry["compiled_bundle"]),
+            ("public_reporting_metrics", runtime_entry["compiled_bundle"]),
         ),
     }
-    assert ensure_reporting_calls == [runtime_entry]
-    assert ensure_calls == [runtime_entry]
+    assert ensure_public_calls == [runtime_entry]
+    assert ensure_host_calls == [runtime_entry]
+
+
+def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_until_used(
+    monkeypatch,
+):
+    runtime_entry = {
+        "compiled_bundle": {"compiled_value_and_grad_for": object()},
+        "objective": object(),
+        "batched_value_and_grad": object(),
+        "reporting_metrics": None,
+        "public_objective": None,
+        "public_value_and_grad": None,
+        "public_batched_value_and_grad": None,
+        "public_reporting_metrics": None,
+    }
+    reporting_calls = []
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_objective_boundary",
+        lambda objective: ("public_objective", objective),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_value_and_grad_boundary",
+        lambda compiled_value_and_grad_for: (
+            "public_value_and_grad",
+            compiled_value_and_grad_for,
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_batched_value_and_grad_boundary",
+        lambda batched_value_and_grad: (
+            "public_batched_value_and_grad",
+            batched_value_and_grad,
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_as_jax_float64",
+        lambda value: ("as_jax_float64", value),
+    )
+
+    def ensure_reporting(entry):
+        reporting_calls.append(entry)
+        entry["reporting_metrics"] = (
+            lambda coil_dofs, *, include_distance_metrics=True: (
+                "reporting_metrics",
+                coil_dofs,
+                include_distance_metrics,
+            )
+        )
+        return entry
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_ensure_traceable_runtime_reporting_metrics",
+        ensure_reporting,
+    )
+
+    surfaceobjectives_jax_module._ensure_traceable_runtime_public_boundaries(
+        runtime_entry
+    )
+
+    assert reporting_calls == []
+    assert runtime_entry["public_objective"] == (
+        "public_objective",
+        runtime_entry["objective"],
+    )
+    assert runtime_entry["public_value_and_grad"] == (
+        "public_value_and_grad",
+        runtime_entry["compiled_bundle"]["compiled_value_and_grad_for"],
+    )
+    assert runtime_entry["public_batched_value_and_grad"] == (
+        "public_batched_value_and_grad",
+        runtime_entry["batched_value_and_grad"],
+    )
+
+    assert runtime_entry["public_reporting_metrics"](
+        "coil_dofs",
+        include_distance_metrics=False,
+    ) == (
+        "reporting_metrics",
+        ("as_jax_float64", "coil_dofs"),
+        False,
+    )
+    assert reporting_calls == [runtime_entry]
+
+
+def test_ensure_traceable_runtime_host_wrappers_defers_reporting_metrics_until_used(
+    monkeypatch,
+):
+    runtime_entry = {
+        "compiled_bundle": {"compiled_value_and_grad_for": object()},
+        "objective": object(),
+        "reporting_metrics": None,
+        "host_objective": None,
+        "host_value_and_grad": None,
+        "host_reporting_metrics": None,
+    }
+    reporting_calls = []
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_host_objective",
+        lambda objective: ("host_objective", objective),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_host_value_and_grad",
+        lambda compiled_value_and_grad_for: (
+            "host_value_and_grad",
+            compiled_value_and_grad_for,
+        ),
+    )
+
+    def ensure_reporting(entry):
+        reporting_calls.append(entry)
+        entry["reporting_metrics"] = (
+            lambda coil_dofs, *, include_distance_metrics=True: (
+                "reporting_metrics",
+                coil_dofs,
+                include_distance_metrics,
+            )
+        )
+        return entry
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_ensure_traceable_runtime_reporting_metrics",
+        ensure_reporting,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_host_reporting_metrics",
+        lambda reporting_metrics: (
+            lambda coil_dofs, *, include_distance_metrics=True: (
+                "host_reporting_metrics",
+                reporting_metrics(
+                    coil_dofs,
+                    include_distance_metrics=include_distance_metrics,
+                ),
+            )
+        ),
+    )
+
+    surfaceobjectives_jax_module._ensure_traceable_runtime_host_wrappers(runtime_entry)
+
+    assert reporting_calls == []
+    assert runtime_entry["host_objective"] == (
+        "host_objective",
+        runtime_entry["objective"],
+    )
+    assert runtime_entry["host_value_and_grad"] == (
+        "host_value_and_grad",
+        runtime_entry["compiled_bundle"]["compiled_value_and_grad_for"],
+    )
+
+    assert runtime_entry["host_reporting_metrics"](
+        "coil_dofs",
+        include_distance_metrics=False,
+    ) == (
+        "host_reporting_metrics",
+        ("reporting_metrics", "coil_dofs", False),
+    )
+    assert reporting_calls == [runtime_entry]
 
 
 def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(

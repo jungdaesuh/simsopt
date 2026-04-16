@@ -800,6 +800,87 @@ def _run_closed_curve_self_intersection_summary_case() -> None:
     assert bool(violation)
 
 
+def _run_single_stage_surface_self_intersection_case() -> None:
+    gpu = _configure_strict_gpu_fast_backend()
+    if gpu is None:
+        return
+
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    crossing_surface = SurfaceRZFourier(
+        mpol=2,
+        ntor=2,
+        stellsym=True,
+        nfp=1,
+        quadpoints_phi=np.linspace(0.0, 1.0, 200, endpoint=False),
+        quadpoints_theta=np.linspace(0.0, 1.0, 200, endpoint=False),
+    )
+    crossing_surface.x = np.array(
+        [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.1,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.1,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.1,
+        ],
+        dtype=np.float64,
+    )
+    surface = SurfaceXYZTensorFourier(
+        mpol=2,
+        ntor=2,
+        stellsym=True,
+        nfp=1,
+        quadpoints_phi=np.asarray(crossing_surface.quadpoints_phi, dtype=np.float64),
+        quadpoints_theta=np.asarray(
+            crossing_surface.quadpoints_theta,
+            dtype=np.float64,
+        ),
+    )
+    surface.least_squares_fit(crossing_surface.gamma())
+
+    cross_section = single_stage_example._surface_phi0_cross_section_from_supported_dofs(
+        jax.device_put(np.asarray(surface.get_dofs(), dtype=np.float64), device=gpu),
+        jax.device_put(
+            np.asarray(surface.quadpoints_theta, dtype=np.float64),
+            device=gpu,
+        ),
+        mpol=surface.mpol,
+        ntor=surface.ntor,
+        nfp=surface.nfp,
+        stellsym=surface.stellsym,
+        surface_kind="xyztensorfourier",
+    )
+    assert cross_section.shape == (surface.quadpoints_theta.size, 3)
+
+    intersecting, available = single_stage_example.evaluate_surface_self_intersection(
+        surface
+    )
+    assert available is True
+    assert intersecting is True
+
+
 def _run_surface_xyztensorfourier_gamma_from_dofs_case() -> None:
     gpu = _configure_strict_gpu_fast_backend()
     if gpu is None:
@@ -1447,6 +1528,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers.add_parser("shifted-grid-axis-sample")
     subparsers.add_parser("gamma-2d-eager-host-constants")
     subparsers.add_parser("closed-curve-self-intersection-summary")
+    subparsers.add_parser("single-stage-surface-self-intersection")
     subparsers.add_parser("surface-xyztensorfourier-gamma-from-dofs")
     subparsers.add_parser("coil-symmetry-spec-identity-default")
     subparsers.add_parser("pairwise-curve-penalty-pure-functions")
@@ -1530,6 +1612,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.case == "closed-curve-self-intersection-summary":
         _run_closed_curve_self_intersection_summary_case()
+        return 0
+    if args.case == "single-stage-surface-self-intersection":
+        _run_single_stage_surface_self_intersection_case()
         return 0
     if args.case == "surface-xyztensorfourier-gamma-from-dofs":
         _run_surface_xyztensorfourier_gamma_from_dofs_case()

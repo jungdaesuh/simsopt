@@ -761,6 +761,15 @@ def test_transfer_guard_disallow_allows_closed_curve_self_intersection_summary()
     )
 
 
+def test_transfer_guard_disallow_allows_single_stage_surface_self_intersection():
+    """Single-stage supported-surface self-intersection should stay transfer-clean."""
+    _assert_python_script_passes(
+        _JAX_SUBPROCESS_CASES_PATH,
+        args=("single-stage-surface-self-intersection",),
+        failure_message="single-stage surface self-intersection transfer-guard smoke failed",
+    )
+
+
 def test_segment_segment_distance_pure_rejects_host_numpy_inputs_without_spec():
     from simsopt.jax_core.curve_geometry import segment_segment_distance_pure
 
