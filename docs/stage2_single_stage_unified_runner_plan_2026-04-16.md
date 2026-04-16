@@ -10,6 +10,18 @@ Use a **unified workflow**, not a fully unified hot-loop objective.
 
 This gives one user-facing command and one artifact contract, while avoiding the main failure mode of a true merge: putting Boozer solves inside the Stage 2 L-BFGS-B inner loop.
 
+## Relationship To The Broader Stage 2 Iota Plan
+
+This document is the **first implementation slice** of the broader root-fix roadmap in
+`docs/stage2_iota_root_fix_and_ishw_deliverables_plan_2026-04-16.md`.
+
+- The broader document remains the umbrella strategy and decision log.
+- This document is the concrete execution plan for the first low-risk Track B path.
+- The bridge/probe/repair helpers defined here must be reused by any later Stage 2-native
+  soft or hard `iota` implementation.
+- This document does **not** compete with the broader plan; it operationalizes the
+  "fix the handoff contract first" path before modifying the Stage 2 hot loop.
+
 ## Why Not a True Merge
 
 Current code is split for a real performance reason:
@@ -77,7 +89,9 @@ Single entrypoint with three internal phases:
 
 ### Contract Definition
 
-Add a seed-level bootability contract with explicit statuses:
+Add a seed-level bootability contract with explicit statuses. These keys should be treated
+as the same SSOT status vocabulary referenced by the broader Stage 2 `iota` plan, not a
+parallel bridge-only schema.
 
 - [ ] `BOOZER_BOOTABLE`
 - [ ] `IOTA_FEASIBLE`
@@ -191,7 +205,8 @@ Avoid starting with:
 - [ ] `examples/single_stage_optimization/banana_opt/artifact_contracts.py`
   - [ ] extend Stage 2 artifact upgrade / validation for bridge metadata
 - [ ] `examples/single_stage_optimization/banana_opt/hardware_constraint_schema.py`
-  - [ ] optional shared helper for adding bridge status payload fields
+  - [ ] add one shared helper for bootability / repair status payload fields
+  - [ ] keep the helper reusable by later Stage 2-native `iota` reporting
 
 ### Avoid editing unless needed
 
@@ -200,7 +215,8 @@ Avoid starting with:
 
 ## Schema / Metadata Todos
 
-- [ ] Define bridge-status payload keys in one SSOT helper.
+- [ ] Define bootability and repair payload keys in one SSOT helper shared with any later
+  Stage 2-native `iota` reporting path.
 - [ ] Keep top-level hardware artifact status untouched.
 - [ ] Avoid overloading single-stage-only files like `alm_state.partial.json`.
 - [ ] Add provenance fields:
@@ -257,11 +273,13 @@ Avoid starting with:
 ### Step 4
 
 - [ ] Benchmark repair cost and success rate.
+- [ ] Feed those measurements back into the broader Stage 2 `iota` decision gate.
 - [ ] Decide whether Stage 2 itself needs an `iota`-aware soft term.
 
 ### Step 5
 
-- [ ] Only after the bridge works, reconsider a deeper objective-level merge.
+- [ ] Only after the bridge works, reconsider Stage 2-native soft or hard `iota`.
+- [ ] Only after that, reconsider a deeper objective-level merge.
 
 ## Decision Gate for a True Merge Later
 
