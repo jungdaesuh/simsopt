@@ -219,16 +219,14 @@ def partition_loaded_stage2_coils(
 
 def validate_loaded_stage2_coils_partition(
     coils,
-    num_tf_coils,
     *,
-    stage2_results: Mapping[str, object] | None = None,
+    stage2_results: Mapping[str, object],
+    requested_num_tf_coils: int,
 ):
-    if stage2_results is None:
-        stage2_results = {"NUM_TF_COILS": int(num_tf_coils)}
     partition_loaded_stage2_coils(
         coils,
         stage2_results=stage2_results,
-        requested_num_tf_coils=int(num_tf_coils),
+        requested_num_tf_coils=int(requested_num_tf_coils),
     )
 
 
@@ -274,6 +272,9 @@ def validate_stage2_seed_contract(stage2_results):
 
 
 def compute_tf_G0(tf_coils) -> float:
+    # Keep G0 tied to the TF bundle only. Proxy/VF coils already enter the
+    # loaded Biot-Savart field, so folding them into the toroidal-current seed
+    # here would double count their effect during the Boozer initialization.
     current_sum = float(sum(abs(coil.current.get_value()) for coil in tf_coils))
     return 2.0 * np.pi * current_sum * (4.0 * np.pi * 10.0 ** (-7) / (2.0 * np.pi))
 

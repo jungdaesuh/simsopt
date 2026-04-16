@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_WATARU_VF_TEMPLATE_PATH = (
+    SCRIPT_DIR / "banana_opt" / "wataru_vf_template.json"
+)
+
 
 def format_compact_float(value: float) -> str:
     return f"{value:g}"
@@ -20,6 +25,28 @@ def validate_normalized_toroidal_flux(
             f"{field_name} must be between 0 and 1 inclusive, got {value!r}."
         )
     return flux
+
+
+def default_wataru_vf_template_path() -> str | None:
+    if not DEFAULT_WATARU_VF_TEMPLATE_PATH.is_file():
+        return None
+    return str(DEFAULT_WATARU_VF_TEMPLATE_PATH)
+
+
+def resolve_wataru_vf_template_path(
+    *,
+    finite_current_mode: str,
+    vf_current_A: float,
+    vf_template_path: str | None,
+) -> str | None:
+    if vf_template_path not in {None, ""}:
+        return vf_template_path
+    if (
+        finite_current_mode == "wataru_proxy_field"
+        and abs(float(vf_current_A)) > 1.0e-12
+    ):
+        return default_wataru_vf_template_path()
+    return vf_template_path
 
 
 @dataclass(frozen=True)
@@ -49,6 +76,15 @@ class Stage2SeedSpec:
             validate_normalized_toroidal_flux(
                 self.toroidal_flux,
                 field_name="Stage2SeedSpec.toroidal_flux",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "vf_template_path",
+            resolve_wataru_vf_template_path(
+                finite_current_mode=self.finite_current_mode,
+                vf_current_A=self.vf_current_A,
+                vf_template_path=self.vf_template_path,
             ),
         )
 

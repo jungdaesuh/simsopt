@@ -17,6 +17,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from workflow_helpers import (
     Stage2SeedSpec,
     local_stage2_bs_path,
+    resolve_wataru_vf_template_path,
     validate_normalized_toroidal_flux,
 )
 from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
@@ -87,6 +88,15 @@ class Stage2ArtifactConfig:
         validate_normalized_toroidal_flux(
             self.toroidal_flux,
             field_name="Stage2ArtifactConfig.toroidal_flux",
+        )
+        object.__setattr__(
+            self,
+            "vf_template_path",
+            resolve_wataru_vf_template_path(
+                finite_current_mode=self.finite_current_mode,
+                vf_current_A=self.vf_current_A,
+                vf_template_path=self.vf_template_path,
+            ),
         )
         if self.stage2_iota_mode != "off" and self.stage2_iota_target is None:
             raise ValueError(

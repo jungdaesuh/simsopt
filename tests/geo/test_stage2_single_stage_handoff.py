@@ -3,10 +3,15 @@ import importlib.util
 import json
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
 from unittest.mock import patch
+
+import numpy as np
+from simsopt.field import BiotSavart, Coil, Current
+from simsopt.geo import CurveXYZFourier
 
 
 EXAMPLE_ROOT = (
@@ -47,6 +52,114 @@ def load_handoff_module():
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _make_circle_curve(*, center, radius, normal):
+    curve = CurveXYZFourier(96, 1)
+    center_x, center_y, center_z = center
+    if normal == "z":
+        curve.set_dofs(
+            [
+                center_x,
+                radius,
+                0.0,
+                center_y,
+                radius,
+                0.0,
+                center_z,
+                0.0,
+                0.0,
+            ]
+        )
+    elif normal == "x":
+        curve.set_dofs(
+            [
+                center_x,
+                0.0,
+                0.0,
+                center_y,
+                radius,
+                0.0,
+                center_z,
+                0.0,
+                radius,
+            ]
+        )
+    else:
+        raise ValueError(f"Unsupported normal {normal!r}.")
+    curve.fix_all()
+    return curve
+
+
+def _build_round_trip_seed(
+    seed_dir: Path,
+    *,
+    include_proxy_vf: bool,
+) -> tuple[Path, dict, np.ndarray, np.ndarray]:
+    tf_coils = [
+        Coil(
+            _make_circle_curve(
+                center=(0.9 + 0.01 * index, 0.0, 0.02 * ((index % 4) - 1.5)),
+                radius=0.18,
+                normal="z",
+            ),
+            Current(8.0e4),
+        )
+        for index in range(20)
+    ]
+    banana_coils = [
+        Coil(_make_circle_curve(center=(1.02, 0.0, -0.08), radius=0.07, normal="z"), Current(1.1e4)),
+        Coil(_make_circle_curve(center=(1.02, 0.0, 0.08), radius=0.07, normal="z"), Current(-1.1e4)),
+    ]
+    proxy_coils = (
+        [
+            Coil(
+                _make_circle_curve(center=(0.82, 0.0, 0.0), radius=0.05, normal="z"),
+                Current(9.0e3),
+            )
+        ]
+        if include_proxy_vf
+        else []
+    )
+    vf_coils = (
+        [
+            Coil(
+                _make_circle_curve(center=(1.15, 0.0, 0.0), radius=0.22, normal="x"),
+                Current(-5.0e2),
+            )
+        ]
+        if include_proxy_vf
+        else []
+    )
+    coils = [*tf_coils, *banana_coils, *proxy_coils, *vf_coils]
+    for coil in coils:
+        coil.current.fix_all()
+    bs = BiotSavart(coils)
+    points = np.array(
+        [
+            [0.25, 0.10, -0.15],
+            [0.35, -0.05, 0.20],
+            [0.55, 0.15, 0.05],
+            [0.70, -0.10, -0.25],
+        ],
+        dtype=float,
+    )
+    bs.set_points(points)
+    expected_field = bs.B().copy()
+    stage2_bs_path = seed_dir / "biot_savart_opt.json"
+    bs.save(str(stage2_bs_path))
+    stage2_results = {
+        "PLASMA_SURF_FILENAME": "demo.nc",
+        "NUM_TF_COILS": len(tf_coils),
+        "NUM_BANANA_COILS": len(banana_coils),
+        "NUM_PROXY_COILS": len(proxy_coils),
+        "NUM_VF_COILS": len(vf_coils),
+        "FINITE_CURRENT_MODE": (
+            "wataru_proxy_field" if include_proxy_vf else "boozer_surrogate"
+        ),
+    }
+    _write_json(stage2_bs_path.with_name("results.json"), stage2_results)
+    return stage2_bs_path, stage2_results, points, expected_field
 
 
 def _bootability_status(
@@ -246,6 +359,66 @@ class HandoffModuleTests(unittest.TestCase):
                 },
                 requested_num_tf_coils=20,
             )
+
+    def test_wataru_round_trip_field_parity_survives_stage2_write_and_reload(self):
+        module = load_handoff_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stage2_bs_path, stage2_results, points, expected_field = _build_round_trip_seed(
+                Path(tmpdir),
+                include_proxy_vf=True,
+            )
+
+            loaded_bs = module.load(str(stage2_bs_path))
+            loaded_bs.set_points(points)
+            actual_field = loaded_bs.B()
+            partitions = module.partition_loaded_stage2_coils(
+                loaded_bs.coils,
+                stage2_results=stage2_results,
+                requested_num_tf_coils=20,
+            )
+
+        np.testing.assert_allclose(actual_field, expected_field, rtol=1.0e-12, atol=1.0e-12)
+        self.assertEqual(len(partitions.tf_coils), 20)
+        self.assertEqual(len(partitions.banana_coils), 2)
+        self.assertEqual(len(partitions.proxy_coils), 1)
+        self.assertEqual(len(partitions.vf_coils), 1)
+        self.assertEqual(partitions.finite_current_mode, "wataru_proxy_field")
+
+    def test_round_trip_field_timing_smoke_covers_legacy_and_wataru_partition_shapes(self):
+        module = load_handoff_module()
+
+        timings: dict[str, float] = {}
+        for label, include_proxy_vf in (
+            ("legacy", False),
+            ("wataru_proxy_field", True),
+        ):
+            with self.subTest(mode=label), tempfile.TemporaryDirectory() as tmpdir:
+                stage2_bs_path, stage2_results, points, _ = _build_round_trip_seed(
+                    Path(tmpdir),
+                    include_proxy_vf=include_proxy_vf,
+                )
+                loaded_bs = module.load(str(stage2_bs_path))
+                loaded_bs.set_points(points)
+                start = time.perf_counter()
+                field = loaded_bs.B()
+                elapsed_s = time.perf_counter() - start
+                partitions = module.partition_loaded_stage2_coils(
+                    loaded_bs.coils,
+                    stage2_results=stage2_results,
+                    requested_num_tf_coils=20,
+                )
+                self.assertEqual(field.shape, (4, 3))
+                self.assertGreaterEqual(elapsed_s, 0.0)
+                timings[label] = elapsed_s
+                if include_proxy_vf:
+                    self.assertEqual(len(partitions.proxy_coils), 1)
+                    self.assertEqual(len(partitions.vf_coils), 1)
+                else:
+                    self.assertEqual(len(partitions.proxy_coils), 0)
+                    self.assertEqual(len(partitions.vf_coils), 0)
+
+        self.assertEqual(set(timings), {"legacy", "wataru_proxy_field"})
 
 
 class UnifiedRunnerTests(unittest.TestCase):

@@ -590,6 +590,89 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             "/tmp/vf_template.json",
         )
 
+    def test_build_stage2_command_uses_repo_default_vf_template_for_wataru_mode(self):
+        module = load_workflow_common_module()
+        helpers = load_workflow_helpers_module()
+        config = module.Stage2ArtifactConfig(
+            plasma_surf_filename="demo.nc",
+            output_root=Path("/tmp/stage2"),
+            equilibria_dir="/tmp/equilibria",
+            tf_current_A=8.0e4,
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            order=2,
+            constraint_method="penalty",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            basin_hops=0,
+            basin_stepsize=0.01,
+            basin_seed=None,
+            init_only=False,
+            finite_current_mode="wataru_proxy_field",
+            proxy_plasma_current_A=9000.0,
+            vf_current_A=500.0,
+            vf_template_path=None,
+        )
+
+        command = module.build_stage2_command(config, python_executable="python")
+
+        self.assertIn("--vf-template-path", command)
+        self.assertEqual(
+            command[command.index("--vf-template-path") + 1],
+            helpers.default_wataru_vf_template_path(),
+        )
+
+    def test_stage2_artifact_config_normalizes_repo_default_vf_template_for_identity(self):
+        common = load_workflow_common_module()
+        baseline = load_baseline_sweep_module()
+        helpers = load_workflow_helpers_module()
+        config = common.Stage2ArtifactConfig(
+            plasma_surf_filename="demo.nc",
+            output_root=Path("/tmp/stage2"),
+            equilibria_dir="/tmp/equilibria",
+            tf_current_A=8.0e4,
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            order=2,
+            constraint_method="penalty",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            basin_hops=0,
+            basin_stepsize=0.01,
+            basin_seed=None,
+            init_only=False,
+            finite_current_mode="wataru_proxy_field",
+            proxy_plasma_current_A=9000.0,
+            vf_current_A=500.0,
+            vf_template_path=None,
+        )
+
+        self.assertEqual(
+            config.vf_template_path,
+            helpers.default_wataru_vf_template_path(),
+        )
+        artifact_path = common.resolve_stage2_artifact_path(config)
+        self.assertIn("-VFT=wataru_vf_template", str(artifact_path))
+        metadata = baseline.expected_locked_baseline_stage2_artifact_metadata(config)
+        self.assertEqual(
+            metadata["VF_TEMPLATE_PATH"],
+            helpers.default_wataru_vf_template_path(),
+        )
+
     def test_locked_baseline_stage2_metadata_includes_basin_identity(self):
         common = load_workflow_common_module()
         module = load_baseline_sweep_module()

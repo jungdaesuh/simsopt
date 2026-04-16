@@ -52,6 +52,12 @@ ALM_UTILS_MODULE_PATH = (
     / "single_stage_optimization"
     / "alm_utils.py"
 )
+WORKFLOW_HELPERS_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "workflow_helpers.py"
+)
 TEST_MPOL = 8
 TEST_NTOR = 6
 TEST_VOL_TARGET = 0.1
@@ -99,6 +105,14 @@ def load_alm_utils_module():
     return _load_module_from_path(
         ALM_UTILS_MODULE_PATH,
         "alm_utils",
+    )
+
+
+def load_workflow_helpers_module():
+    return _load_module_from_path(
+        WORKFLOW_HELPERS_MODULE_PATH,
+        "workflow_helpers",
+        register_in_sys_modules=True,
     )
 
 
@@ -6808,13 +6822,21 @@ class CurrentBaselineContractTests(unittest.TestCase):
         module = load_single_stage_example_module()
 
         with self.assertRaisesRegex(ValueError, "has only 19 coils.*NUM_TF_COILS=20"):
-            module.validate_loaded_stage2_coils_partition([object()] * 19, num_tf_coils=20)
+            module.validate_loaded_stage2_coils_partition(
+                [object()] * 19,
+                stage2_results={"NUM_TF_COILS": 20},
+                requested_num_tf_coils=20,
+            )
 
     def test_validate_loaded_stage2_coils_partition_rejects_missing_banana_coils(self):
         module = load_single_stage_example_module()
 
         with self.assertRaisesRegex(ValueError, "leaving no banana coils"):
-            module.validate_loaded_stage2_coils_partition([object()] * 20, num_tf_coils=20)
+            module.validate_loaded_stage2_coils_partition(
+                [object()] * 20,
+                stage2_results={"NUM_TF_COILS": 20},
+                requested_num_tf_coils=20,
+            )
 
     def test_build_stage2_bs_path_prefers_current_penalty_dir(self):
         module = load_single_stage_example_module()
@@ -6942,6 +6964,40 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 stage2_seed_curvature_weight=0.0001,
                 stage2_seed_curvature_threshold=100.0,
                 stage2_seed_banana_surf_radius=module.BANANA_WINDING_MINOR_RADIUS_M,
+                stage2_seed_tf_current_A=8.0e4,
+                stage2_seed_order=2,
+                stage2_seed_banana_init_current_A=1.0e4,
+            )
+
+            self.assertEqual(module.build_stage2_bs_path(args), str(expected_path))
+
+    def test_build_stage2_bs_path_discovers_unique_wataru_local_output(self):
+        module = load_single_stage_example_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs_dir = Path(tmpdir) / "outputs-demo.nc"
+            wataru_dir = (
+                outputs_dir
+                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-FCM=wataru_proxy_field-PPC=9000-VFC=500-VFT=wataru_vf_template-CM=penalty"
+            )
+            wataru_dir.mkdir(parents=True)
+            expected_path = wataru_dir / "biot_savart_opt.json"
+            expected_path.write_text("{}", encoding="utf-8")
+
+            args = SimpleNamespace(
+                stage2_bs_path=None,
+                stage2_source="local",
+                local_stage2_root=tmpdir,
+                database_stage2_root="/unused",
+                plasma_surf_filename="demo.nc",
+                stage2_seed_major_radius=0.915,
+                stage2_seed_toroidal_flux=0.24,
+                stage2_seed_length_weight=0.0005,
+                stage2_seed_cc_weight=100.0,
+                stage2_seed_cc_threshold=0.05,
+                stage2_seed_curvature_weight=0.0001,
+                stage2_seed_curvature_threshold=40.0,
+                stage2_seed_banana_surf_radius=0.22,
                 stage2_seed_tf_current_A=8.0e4,
                 stage2_seed_order=2,
                 stage2_seed_banana_init_current_A=1.0e4,
@@ -7664,6 +7720,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         banana_current_A=9500.0,
         alm_accepted_candidate_x=None,
         artifact_state_by_x=None,
+        seed_stage2_results=None,
         arg_overrides=None,
     ):
         module = load_stage2_module()
@@ -7675,6 +7732,9 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "run_basin_hopping_calls": 0,
             "minimize_bounds": None,
             "basin_bounds": None,
+            "initialize_extra_kwargs": None,
+            "curve_curve_curves": None,
+            "curve_surface_curves": None,
             "results": None,
         }
 
@@ -7801,18 +7861,44 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             SimpleNamespace(curve=FakeCurve(), current=FakeCurrent(8.0e4)),
         ]
 
-        def fake_seed_loader(seed_bs_path, surf, num_tf_coils, out_dir):
+        def build_coil_bundle(*, wataru_proxy_field):
+            proxy_coils = []
+            vf_coils = []
+            curves = list(fake_curve_names)
+            if wataru_proxy_field:
+                proxy_coils = [
+                    SimpleNamespace(curve="proxy_curve", current=FakeCurrent(9000.0))
+                ]
+                vf_coils = [
+                    SimpleNamespace(curve="vf_curve", current=FakeCurrent(-500.0))
+                ]
+                curves = [
+                    *(f"tf_curve_{index}" for index in range(20)),
+                    fake_banana_curve,
+                    "proxy_curve",
+                    "vf_curve",
+                ]
+            return curves, proxy_coils, vf_coils
+
+        def fake_seed_loader(seed_bs_path, surf, num_tf_coils, out_dir, **_kwargs):
             runtime["seed_loads"] += 1
             self.assertEqual(num_tf_coils, 20)
             self.assertIs(surf, fake_surface)
+            curves, proxy_coils, vf_coils = build_coil_bundle(
+                wataru_proxy_field=(
+                    seed_stage2_results is not None
+                    and seed_stage2_results.get("FINITE_CURRENT_MODE")
+                    == "wataru_proxy_field"
+                ),
+            )
             return (
                 fake_bs,
-                fake_curve_names,
+                curves,
                 fake_banana_curve,
                 fake_banana_coils,
                 fake_tf_coils,
-                [],
-                [],
+                proxy_coils,
+                vf_coils,
             )
 
         def fake_initialize_coils(
@@ -7827,8 +7913,10 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             phi_width,
             theta_width,
             out_dir,
+            **extra_kwargs,
         ):
             runtime["initialize_calls"] += 1
+            runtime["initialize_extra_kwargs"] = dict(extra_kwargs)
             self.assertIs(surf, fake_surface)
             self.assertEqual(surf_coils, "surf_coils")
             self.assertEqual(len(tf_coils), 20)
@@ -7840,14 +7928,27 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             self.assertEqual(phi_width, np.pi / 8.0)
             self.assertEqual(theta_width, np.pi / 6.0)
             self.assertTrue(str(out_dir).endswith("outputs-demo.nc/"))
+            curves, proxy_coils, vf_coils = build_coil_bundle(
+                wataru_proxy_field=(
+                    extra_kwargs.get("finite_current_mode") == "wataru_proxy_field"
+                ),
+            )
             return (
                 fake_bs,
-                fake_curve_names,
+                curves,
                 fake_banana_curve,
                 fake_banana_coils,
-                [],
-                [],
+                proxy_coils,
+                vf_coils,
             )
+
+        def fake_curve_curve_distance(curves, *_args, **_kwargs):
+            runtime["curve_curve_curves"] = tuple(curves)
+            return FakeCurveDistance()
+
+        def fake_curve_surface_distance(curves, *_args, **_kwargs):
+            runtime["curve_surface_curves"] = tuple(curves)
+            return FakeCurveSurfaceDistance()
 
         def fake_minimize(*_args, **_kwargs):
             runtime["minimize_calls"] += 1
@@ -7993,12 +8094,12 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     patch.object(
                         module,
                         "CurveCurveDistance",
-                        lambda *_args, **_kwargs: FakeCurveDistance(),
+                        side_effect=fake_curve_curve_distance,
                     ),
                     patch.object(
                         module,
                         "CurveSurfaceDistance",
-                        lambda *_args, **_kwargs: FakeCurveSurfaceDistance(),
+                        side_effect=fake_curve_surface_distance,
                     ),
                     patch.object(
                         module,
@@ -8026,6 +8127,17 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 ]
                 for patcher in common_patches:
                     stack.enter_context(patcher)
+                if use_seed and seed_stage2_results is not None:
+                    stack.enter_context(
+                        patch.object(
+                            module,
+                            "load_stage2_seed_results",
+                            return_value=(
+                                Path(stage2_bs_path).with_name("results.json"),
+                                dict(seed_stage2_results),
+                            ),
+                        )
+                    )
                 if artifact_state_by_x is not None:
                     stack.enter_context(
                         patch.object(
@@ -8094,6 +8206,86 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 use_seed=True,
                 arg_overrides={"finite_current_mode": "wataru_proxy_field"},
             )
+
+    def test_stage2_main_init_only_wataru_proxy_field_uses_repo_default_vf_and_banana_only_penalties(self):
+        workflow_helpers = load_workflow_helpers_module()
+        runtime = self._run_stage2_main(
+            init_only=True,
+            constraint_method="penalty",
+            use_seed=False,
+            arg_overrides={
+                "finite_current_mode": "wataru_proxy_field",
+                "proxy_plasma_current_A": 9000.0,
+                "vf_current_A": 500.0,
+            },
+        )
+
+        self._assert_runtime_counts(
+            runtime,
+            seed_loads=0,
+            initialize_calls=1,
+            minimize_calls=0,
+            minimize_alm_calls=0,
+        )
+        self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "init_only")
+        self.assertEqual(runtime["results"]["FINITE_CURRENT_MODE"], "wataru_proxy_field")
+        self.assertEqual(runtime["results"]["NUM_PROXY_COILS"], 1)
+        self.assertEqual(runtime["results"]["NUM_VF_COILS"], 1)
+        self.assertEqual(runtime["results"]["PROXY_PLASMA_CURRENT_A"], 9000.0)
+        self.assertEqual(runtime["results"]["VF_CURRENT_A"], 500.0)
+        self.assertEqual(
+            runtime["results"]["VF_TEMPLATE_PATH"],
+            workflow_helpers.default_wataru_vf_template_path(),
+        )
+        self.assertEqual(len(runtime["curve_curve_curves"]), 1)
+        self.assertEqual(len(runtime["curve_surface_curves"]), 1)
+        self.assertEqual(
+            runtime["curve_surface_curves"][0],
+            runtime["curve_curve_curves"][0],
+        )
+        self.assertEqual(
+            runtime["initialize_extra_kwargs"]["vf_template_path"],
+            workflow_helpers.default_wataru_vf_template_path(),
+        )
+
+    def test_stage2_main_init_only_wataru_seed_restart_uses_banana_only_penalties(self):
+        runtime = self._run_stage2_main(
+            init_only=True,
+            constraint_method="penalty",
+            use_seed=True,
+            arg_overrides={"finite_current_mode": "wataru_proxy_field"},
+            seed_stage2_results={
+                "PLASMA_SURF_FILENAME": "demo.nc",
+                "TF_CURRENT_A": 8.0e4,
+                "NUM_TF_COILS": 20,
+                "NUM_BANANA_COILS": 1,
+                "NUM_PROXY_COILS": 1,
+                "NUM_VF_COILS": 1,
+                "FINITE_CURRENT_MODE": "wataru_proxy_field",
+                "BOOZER_CURRENT_CONVENTION": "mu0",
+                "PROXY_PLASMA_CURRENT_A": 9000.0,
+                "VF_CURRENT_A": 500.0,
+                "VF_TEMPLATE_PATH": "/tmp/vf_template.json",
+            },
+        )
+
+        self._assert_runtime_counts(
+            runtime,
+            seed_loads=1,
+            initialize_calls=0,
+            minimize_calls=0,
+            minimize_alm_calls=0,
+        )
+        self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "init_only")
+        self.assertEqual(runtime["results"]["FINITE_CURRENT_MODE"], "wataru_proxy_field")
+        self.assertEqual(runtime["results"]["NUM_PROXY_COILS"], 1)
+        self.assertEqual(runtime["results"]["NUM_VF_COILS"], 1)
+        self.assertEqual(len(runtime["curve_curve_curves"]), 1)
+        self.assertEqual(len(runtime["curve_surface_curves"]), 1)
+        self.assertEqual(
+            runtime["curve_surface_curves"][0],
+            runtime["curve_curve_curves"][0],
+        )
 
     def test_stage2_main_alm_path_uses_minimize_alm(self):
         runtime = self._run_stage2_main(init_only=False, constraint_method="alm", use_seed=True)

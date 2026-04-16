@@ -155,6 +155,7 @@ from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for t
 )
 from banana_opt.stage2_single_stage_handoff import (
     build_equilibrium_path as _build_equilibrium_path_impl,
+    compute_tf_G0 as _compute_tf_G0_impl,
     initialize_boozer_surface as _initialize_boozer_surface_impl,
     partition_loaded_stage2_coils as _partition_loaded_stage2_coils_impl,
     resolve_single_stage_banana_surf_radius as _resolve_single_stage_banana_surf_radius_impl,
@@ -314,6 +315,25 @@ def _resolve_unique_stage2_match(patterns, note):
     return None
 
 
+def _stage2_outputs_parent(root, plasma_surf_filename):
+    return os.path.join(root, f"outputs-{plasma_surf_filename}")
+
+
+def _wataru_stage2_patterns(parent, seed_dir, *, include_constraint_variants):
+    suffixes = ["-FCM=wataru_proxy_field-*"]
+    if include_constraint_variants:
+        suffixes = [
+            "-FCM=wataru_proxy_field-*-CM=penalty",
+            "-FCM=wataru_proxy_field-*-CM=penalty-BH=*",
+            "-FCM=wataru_proxy_field-*-CM=alm-*",
+            "-FCM=wataru_proxy_field-*-CM=alm-*-BH=*",
+        ]
+    return [
+        os.path.join(parent, seed_dir + suffix, "biot_savart_opt.json")
+        for suffix in suffixes
+    ]
+
+
 def _stage2_seed_spec_from_args(args, *, banana_surf_radius: float | None = None):
     return Stage2SeedSpec(
         plasma_surf_filename=args.plasma_surf_filename,
@@ -369,12 +389,15 @@ def build_stage2_bs_path(args):
     lookup_specs = tuple(_iter_stage2_seed_specs_for_lookup(seed_spec))
 
     if args.stage2_source == "database":
+        parent = _stage2_outputs_parent(
+            args.database_stage2_root,
+            args.plasma_surf_filename,
+        )
         for lookup_spec, compatibility_note in lookup_specs:
             note_suffix = "" if compatibility_note is None else f"; {compatibility_note}"
             seed_dir = format_database_stage2_seed_dir(lookup_spec)
             candidate = os.path.join(
-                args.database_stage2_root,
-                f"outputs-{args.plasma_surf_filename}",
+                parent,
                 seed_dir,
                 "biot_savart_opt.json",
             )
@@ -388,8 +411,7 @@ def build_stage2_bs_path(args):
 
             legacy_init_dir = format_database_stage2_seed_dir_without_init_current(lookup_spec)
             legacy_init = os.path.join(
-                args.database_stage2_root,
-                f"outputs-{args.plasma_surf_filename}",
+                parent,
                 legacy_init_dir,
                 "biot_savart_opt.json",
             )
@@ -402,8 +424,7 @@ def build_stage2_bs_path(args):
 
             legacy_dir = format_legacy_database_stage2_seed_dir(lookup_spec)
             legacy = os.path.join(
-                args.database_stage2_root,
-                f"outputs-{args.plasma_surf_filename}",
+                parent,
                 legacy_dir,
                 "biot_savart_opt.json",
             )
@@ -413,15 +434,30 @@ def build_stage2_bs_path(args):
                     f"(missing TFC segment{note_suffix})"
                 )
                 return legacy
+            wataru_match = _resolve_unique_stage2_match(
+                _wataru_stage2_patterns(
+                    parent,
+                    seed_dir,
+                    include_constraint_variants=False,
+                ),
+                "current Wataru Stage 2 database output"
+                if compatibility_note is None
+                else f"legacy-compatible Wataru Stage 2 database output ({compatibility_note})",
+            )
+            if wataru_match is not None:
+                return wataru_match
         return candidate
 
+    parent = _stage2_outputs_parent(
+        args.local_stage2_root,
+        args.plasma_surf_filename,
+    )
     for lookup_spec, compatibility_note in lookup_specs:
         note_suffix = "" if compatibility_note is None else f"; {compatibility_note}"
         seed_dir = format_local_stage2_seed_dir(lookup_spec)
         legacy_init_dir = format_local_stage2_seed_dir_without_init_current(lookup_spec)
         current_penalty_candidate = os.path.join(
-            args.local_stage2_root,
-            f"outputs-{args.plasma_surf_filename}",
+            parent,
             seed_dir + "-CM=penalty",
             "biot_savart_opt.json",
         )
@@ -434,8 +470,7 @@ def build_stage2_bs_path(args):
             return current_penalty_candidate
 
         legacy_init_penalty_candidate = os.path.join(
-            args.local_stage2_root,
-            f"outputs-{args.plasma_surf_filename}",
+            parent,
             legacy_init_dir + "-CM=penalty",
             "biot_savart_opt.json",
         )
@@ -447,8 +482,7 @@ def build_stage2_bs_path(args):
             return legacy_init_penalty_candidate
 
         candidate = os.path.join(
-            args.local_stage2_root,
-            f"outputs-{args.plasma_surf_filename}",
+            parent,
             seed_dir,
             "biot_savart_opt.json",
         )
@@ -460,8 +494,7 @@ def build_stage2_bs_path(args):
             return candidate
 
         legacy_init_candidate = os.path.join(
-            args.local_stage2_root,
-            f"outputs-{args.plasma_surf_filename}",
+            parent,
             legacy_init_dir,
             "biot_savart_opt.json",
         )
@@ -474,8 +507,7 @@ def build_stage2_bs_path(args):
 
         no_tfc_dir = format_local_stage2_seed_dir_without_tf(lookup_spec)
         no_tfc_candidate = os.path.join(
-            args.local_stage2_root,
-            f"outputs-{args.plasma_surf_filename}",
+            parent,
             no_tfc_dir,
             "biot_savart_opt.json",
         )
@@ -488,8 +520,7 @@ def build_stage2_bs_path(args):
 
         legacy_dir = format_legacy_local_stage2_seed_dir(lookup_spec)
         legacy = os.path.join(
-            args.local_stage2_root,
-            f"outputs-{args.plasma_surf_filename}",
+            parent,
             legacy_dir,
             "biot_savart_opt.json",
         )
@@ -500,10 +531,6 @@ def build_stage2_bs_path(args):
             )
             return legacy
 
-        parent = os.path.join(
-            args.local_stage2_root,
-            f"outputs-{args.plasma_surf_filename}",
-        )
         current_matches = _resolve_unique_stage2_match(
             [
                 os.path.join(parent, seed_dir + "-CM=penalty-BH=*", "biot_savart_opt.json"),
@@ -519,6 +546,19 @@ def build_stage2_bs_path(args):
         )
         if current_matches is not None:
             return current_matches
+
+        wataru_matches = _resolve_unique_stage2_match(
+            _wataru_stage2_patterns(
+                parent,
+                seed_dir,
+                include_constraint_variants=True,
+            ),
+            "current Wataru Stage 2 output"
+            if compatibility_note is None
+            else f"legacy-compatible Wataru Stage 2 output ({compatibility_note})",
+        )
+        if wataru_matches is not None:
+            return wataru_matches
 
         no_tfc_matches = _resolve_unique_stage2_match(
             [
@@ -568,8 +608,21 @@ def resolve_single_stage_banana_surf_radius(stage2_results, requested_banana_sur
     )
 
 
-def validate_loaded_stage2_coils_partition(coils, num_tf_coils):
-    _validate_loaded_stage2_coils_partition_impl(coils, num_tf_coils)
+def validate_loaded_stage2_coils_partition(
+    coils,
+    *,
+    stage2_results,
+    requested_num_tf_coils,
+):
+    _validate_loaded_stage2_coils_partition_impl(
+        coils,
+        stage2_results=stage2_results,
+        requested_num_tf_coils=requested_num_tf_coils,
+    )
+
+
+def compute_tf_G0(tf_coils):
+    return _compute_tf_G0_impl(tf_coils)
 
 
 def resolve_stage2_finite_current_mode(stage2_results, requested_finite_current_mode):
@@ -1410,19 +1463,18 @@ class BoozerResidualExact(Optimizable):
         adj_times_dg_dcoil = booz_surf.res['vjp'](adj, booz_surf, iota, G)
         self._dJ = dJ_by_dcoils - adj_times_dg_dcoil
 
-def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_weight, iota, G0, boozer_I=0.0, nfp=5):
-    """
-    This initializes the boozer surface, using either the boozer "exact" algorithm, or the boozer "least squares" algorithm
-
-    surf_prev: Any instance of simsopt.geo.Surface. This is the initial guess for the boozer surface solver
-    mpol: SurfaceXYZTensorFourier resolution (both toroidal and poloidal)
-    bs: simsopt.field.BiotSavart instance
-    vol_target: target volume to be enclosed by the boozer surface
-    constraint_weight: Set to 1.0 to use Boozer least square, None to use Boozer exact
-    iota: initial guess for iota value on the surface
-    G0: Value of net current going through the torus hole
-    nfp: number of field periods (default 5 for banana coils)
-    """
+def initialize_boozer_surface(
+    surf_prev,
+    mpol,
+    ntor,
+    bs,
+    vol_target,
+    constraint_weight,
+    iota,
+    G0,
+    boozer_I=0.0,
+    nfp=5,
+):
     return _initialize_boozer_surface_impl(
         surf_prev,
         mpol,
@@ -5464,10 +5516,7 @@ if __name__ == "__main__":
         num_tf_coils,
     )
     tf_coils = list(coil_partitions.tf_coils)
-    tf_curves = [c.curve for c in tf_coils]
     banana_coils = list(coil_partitions.banana_coils)
-    proxy_coils = list(coil_partitions.proxy_coils)
-    vf_coils = list(coil_partitions.vf_coils)
     banana_curves = [c.curve for c in banana_coils]
     banana_curve = banana_curves[0]
     objective_curves = (
@@ -5487,10 +5536,10 @@ if __name__ == "__main__":
     # ALM now checks banana current as a final feasibility constraint as well,
     # but only penalty/L-BFGS-B mode keeps the hard inner box bound that forbids
     # infeasible traversal during the search itself.
-    current_sum = tf_current_sum_abs_A
-
-    # Calculate G0 parameter from TF coil currents
-    G0 = 2. * np.pi * current_sum * (4 * np.pi * 10**(-7) / (2 * np.pi))
+    # Keep the toroidal-current seed tied to the TF bundle only. Extra Wataru
+    # proxy/VF coils shape the field through the loaded Biot-Savart object and
+    # should not perturb G0 a second time here.
+    G0 = compute_tf_G0(tf_coils)
 
     # ==============================================================================
     # OPTIMIZATION SETUP

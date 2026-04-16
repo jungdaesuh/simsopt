@@ -41,6 +41,7 @@ from workflow_helpers import (
     Stage2SeedSpec,
     canonical_stage2_iota_constraint_weight,
     format_local_stage2_run_dir,
+    resolve_wataru_vf_template_path,
     validate_stage2_iota_args,
     validate_normalized_toroidal_flux,
 )
@@ -1171,6 +1172,11 @@ def _resolve_stage2_finite_current_config(
             ),
         )
 
+    vf_template_path = resolve_wataru_vf_template_path(
+        finite_current_mode=finite_current_mode,
+        vf_current_A=vf_current_A,
+        vf_template_path=vf_template_path,
+    )
     if vf_current_A != 0.0 and vf_template_path in {None, ""}:
         raise ValueError(
             "--vf-template-path is required when --vf-current-A is non-zero in "
