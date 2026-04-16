@@ -5304,27 +5304,18 @@ def build_traceable_single_stage_alm_runtime_config(
     banana_current_threshold,
 ):
     """Build the immutable pure-JAX ALM runtime config for the inner solve."""
+    def optional_threshold(value):
+        return None if value is None else float(value)
+
     return {
         "constraint_names": tuple(str(name) for name in constraint_names),
         "alm_formulation": str(alm_formulation),
         "distance_smoothing": float(distance_smoothing),
         "curvature_smoothing": float(curvature_smoothing),
-        "qs_threshold": (
-            None if qs_threshold is None else float(qs_threshold)
-        ),
-        "boozer_threshold": (
-            None if boozer_threshold is None else float(boozer_threshold)
-        ),
-        "iota_penalty_threshold": (
-            None
-            if iota_penalty_threshold is None
-            else float(iota_penalty_threshold)
-        ),
-        "length_penalty_threshold": (
-            None
-            if length_penalty_threshold is None
-            else float(length_penalty_threshold)
-        ),
+        "qs_threshold": optional_threshold(qs_threshold),
+        "boozer_threshold": optional_threshold(boozer_threshold),
+        "iota_penalty_threshold": optional_threshold(iota_penalty_threshold),
+        "length_penalty_threshold": optional_threshold(length_penalty_threshold),
         "banana_current_threshold": float(banana_current_threshold),
     }
 

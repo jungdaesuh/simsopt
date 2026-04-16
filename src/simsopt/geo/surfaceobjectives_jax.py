@@ -3540,10 +3540,19 @@ def make_traceable_single_stage_alm_runtime_bundle(
             "success": forward_result["success"],
         }
 
+    def _normalize_runtime_inputs(coil_dofs, multipliers, penalty):
+        return (
+            _as_jax_float64(coil_dofs),
+            _as_jax_float64(multipliers),
+            _as_jax_float64(penalty),
+        )
+
     def _alm_evaluation_for(coil_dofs, multipliers, penalty):
-        coil_dofs = _as_jax_float64(coil_dofs)
-        multipliers = _as_jax_float64(multipliers)
-        penalty = _as_jax_float64(penalty)
+        coil_dofs, multipliers, penalty = _normalize_runtime_inputs(
+            coil_dofs,
+            multipliers,
+            penalty,
+        )
         forward_result = compiled_forward_result_for(coil_dofs)
 
         def _success(_):
@@ -3645,17 +3654,27 @@ def make_traceable_single_stage_alm_runtime_bundle(
     compiled_objective = jax.jit(_objective)
 
     def objective(coil_dofs, multipliers, penalty):
+        coil_dofs, multipliers, penalty = _normalize_runtime_inputs(
+            coil_dofs,
+            multipliers,
+            penalty,
+        )
         return compiled_objective(
-            _as_jax_float64(coil_dofs),
-            _as_jax_float64(multipliers),
-            _as_jax_float64(penalty),
+            coil_dofs,
+            multipliers,
+            penalty,
         )
 
     def evaluate(coil_dofs, multipliers, penalty):
+        coil_dofs, multipliers, penalty = _normalize_runtime_inputs(
+            coil_dofs,
+            multipliers,
+            penalty,
+        )
         return compiled_evaluation_for(
-            _as_jax_float64(coil_dofs),
-            _as_jax_float64(multipliers),
-            _as_jax_float64(penalty),
+            coil_dofs,
+            multipliers,
+            penalty,
         )
 
     @_mark_cacheable_jit_value_and_grad
@@ -3668,10 +3687,15 @@ def make_traceable_single_stage_alm_runtime_bundle(
         )
 
     def public_value_and_grad(coil_dofs, multipliers, penalty):
+        coil_dofs, multipliers, penalty = _normalize_runtime_inputs(
+            coil_dofs,
+            multipliers,
+            penalty,
+        )
         return value_and_grad(
-            _as_jax_float64(coil_dofs),
-            _as_jax_float64(multipliers),
-            _as_jax_float64(penalty),
+            coil_dofs,
+            multipliers,
+            penalty,
         )
 
     alm_runtime_bundle = {
