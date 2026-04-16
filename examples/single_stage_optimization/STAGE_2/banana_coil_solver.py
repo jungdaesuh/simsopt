@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+import time
 import numpy as np
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -58,10 +59,14 @@ from banana_opt.hardware_contracts import (
     validate_tf_current_limit,
 )
 from banana_opt.hardware_constraint_schema import (
+    build_bootability_recovery_payload_fields,
     hardware_constraint_alm_names,
 )
 from banana_opt.current_contracts import (
     apply_penalty_traversal_forbidden_box_bounds,
+)
+from banana_opt.stage2_single_stage_handoff import (
+    probe_stage2_seed_bootability,
 )
 from banana_opt.stage2_objectives import (
     build_stage2_alm_settings,
@@ -78,6 +83,15 @@ from banana_opt.stage2_objectives import (
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
 DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUILIBRIA_DIR) else os.path.join(EXAMPLE_ROOT, "equilibria")
+DEFAULT_STAGE2_IOTA_MODE = "off"
+DEFAULT_STAGE2_IOTA_TOLERANCE = 5.0e-3
+DEFAULT_STAGE2_IOTA_VOL_TARGET = 0.10
+DEFAULT_STAGE2_IOTA_CONSTRAINT_WEIGHT = 1.0
+DEFAULT_STAGE2_IOTA_NUM_TF_COILS = 20
+DEFAULT_STAGE2_IOTA_NPHI = 91
+DEFAULT_STAGE2_IOTA_NTHETA = 32
+DEFAULT_STAGE2_IOTA_MPOL = 8
+DEFAULT_STAGE2_IOTA_NTOR = 6
 
 
 def stage2_alm_constraint_names(*, include_coil_surface: bool) -> tuple[str, ...]:
@@ -120,6 +134,34 @@ def validate_banana_current_cli_args(args) -> None:
             "--banana-init-current-A cannot exceed --banana-current-max-A."
         )
     validate_tf_current_limit(args.tf_current_A)
+
+
+def validate_stage2_iota_cli_args(args) -> None:
+    if args.stage2_iota_mode == DEFAULT_STAGE2_IOTA_MODE:
+        return
+    if args.stage2_iota_target is None:
+        raise ValueError(
+            "--stage2-iota-target is required when --stage2-iota-mode is enabled."
+        )
+    if args.stage2_iota_tolerance <= 0.0:
+        raise ValueError("--stage2-iota-tolerance must be positive.")
+    if args.stage2_iota_vol_target <= 0.0:
+        raise ValueError("--stage2-iota-vol-target must be positive.")
+    if args.stage2_iota_num_tf_coils <= 0:
+        raise ValueError("--stage2-iota-num-tf-coils must be positive.")
+    if args.stage2_iota_nphi <= 0 or args.stage2_iota_ntheta <= 0:
+        raise ValueError(
+            "--stage2-iota-nphi and --stage2-iota-ntheta must both be positive."
+        )
+    if args.stage2_iota_mpol <= 0 or args.stage2_iota_ntor <= 0:
+        raise ValueError(
+            "--stage2-iota-mpol and --stage2-iota-ntor must both be positive."
+        )
+
+
+def resolve_stage2_iota_constraint_weight(constraint_weight: float) -> float | None:
+    normalized_constraint_weight = float(constraint_weight)
+    return None if normalized_constraint_weight < 0.0 else normalized_constraint_weight
 
 
 def build_lbfgsb_bounds(optimizable):
@@ -333,6 +375,105 @@ def parse_args():
         help="Random seed used to build the Stage 2 ALM Taylor-test direction.",
     )
     parser.add_argument(
+        "--stage2-iota-mode",
+        choices=["off", "report"],
+        default=os.environ.get("STAGE2_IOTA_MODE", DEFAULT_STAGE2_IOTA_MODE),
+        help=(
+            "Optional reporting-only Stage 2 iota probe. 'off' preserves current "
+            "Stage 2 semantics; 'report' records Boozer bootability and iota feasibility "
+            "in results.json without changing the optimization objective."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-iota-target",
+        type=float,
+        default=(
+            None
+            if os.environ.get("STAGE2_IOTA_TARGET") is None
+            else float(os.environ["STAGE2_IOTA_TARGET"])
+        ),
+        help="Target iota used by the optional Stage 2 reporting-only probe.",
+    )
+    parser.add_argument(
+        "--stage2-iota-tolerance",
+        type=float,
+        default=float(
+            os.environ.get(
+                "STAGE2_IOTA_TOLERANCE",
+                str(DEFAULT_STAGE2_IOTA_TOLERANCE),
+            )
+        ),
+        help="Absolute |iota_solved - iota_target| tolerance for the Stage 2 report probe.",
+    )
+    parser.add_argument(
+        "--stage2-iota-vol-target",
+        type=float,
+        default=float(
+            os.environ.get(
+                "STAGE2_IOTA_VOL_TARGET",
+                str(DEFAULT_STAGE2_IOTA_VOL_TARGET),
+            )
+        ),
+        help="Outer-surface target volume used by the Stage 2 reporting-only Boozer probe.",
+    )
+    parser.add_argument(
+        "--stage2-iota-constraint-weight",
+        type=float,
+        default=float(
+            os.environ.get(
+                "STAGE2_IOTA_CONSTRAINT_WEIGHT",
+                str(DEFAULT_STAGE2_IOTA_CONSTRAINT_WEIGHT),
+            )
+        ),
+        help=(
+            "Boozer constraint weight used by the Stage 2 reporting-only probe. "
+            "Use a negative value to select the exact Boozer Newton solver."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-iota-num-tf-coils",
+        type=int,
+        default=int(
+            os.environ.get(
+                "STAGE2_IOTA_NUM_TF_COILS",
+                str(DEFAULT_STAGE2_IOTA_NUM_TF_COILS),
+            )
+        ),
+        help="Expected TF-coil count used by the Stage 2 reporting-only probe.",
+    )
+    parser.add_argument(
+        "--stage2-iota-nphi",
+        type=int,
+        default=int(
+            os.environ.get("STAGE2_IOTA_NPHI", str(DEFAULT_STAGE2_IOTA_NPHI))
+        ),
+        help="Surface quadrature nphi used by the Stage 2 reporting-only probe.",
+    )
+    parser.add_argument(
+        "--stage2-iota-ntheta",
+        type=int,
+        default=int(
+            os.environ.get("STAGE2_IOTA_NTHETA", str(DEFAULT_STAGE2_IOTA_NTHETA))
+        ),
+        help="Surface quadrature ntheta used by the Stage 2 reporting-only probe.",
+    )
+    parser.add_argument(
+        "--stage2-iota-mpol",
+        type=int,
+        default=int(
+            os.environ.get("STAGE2_IOTA_MPOL", str(DEFAULT_STAGE2_IOTA_MPOL))
+        ),
+        help="Boozer-surface mpol used by the Stage 2 reporting-only probe.",
+    )
+    parser.add_argument(
+        "--stage2-iota-ntor",
+        type=int,
+        default=int(
+            os.environ.get("STAGE2_IOTA_NTOR", str(DEFAULT_STAGE2_IOTA_NTOR))
+        ),
+        help="Boozer-surface ntor used by the Stage 2 reporting-only probe.",
+    )
+    parser.add_argument(
         "--length-weight",
         type=float,
         default=float(os.environ.get("LENGTH_WEIGHT", "0.0005")),
@@ -445,6 +586,7 @@ def parse_args():
     args = parser.parse_args()
     try:
         validate_banana_current_cli_args(args)
+        validate_stage2_iota_cli_args(args)
     except ValueError as exc:
         parser.error(str(exc))
     return args
@@ -466,6 +608,76 @@ def build_equilibrium_path(args):
 def build_hbt_reference_surfaces(nfp, banana_surf_radius):
     surfaces = build_banana_reference_surfaces(nfp, banana_surf_radius)
     return surfaces.hbt, surfaces.coil_winding_surface, surfaces.vessel
+
+
+def build_stage2_results_sidecar_path(stage2_bs_artifact_path):
+    return os.path.join(os.path.dirname(stage2_bs_artifact_path), "results.json")
+
+
+def build_stage2_iota_report_payload(
+    *,
+    args,
+    stage2_bs_artifact_path,
+    stage2_results_payload,
+):
+    probe_enabled = args.stage2_iota_mode != DEFAULT_STAGE2_IOTA_MODE
+    stage2_results_path = build_stage2_results_sidecar_path(stage2_bs_artifact_path)
+    payload = {
+        "STAGE2_ROOT_FIX_ENABLED": probe_enabled,
+        "STAGE2_IOTA_MODE": args.stage2_iota_mode,
+        "STAGE2_IOTA_TARGET": (
+            None
+            if args.stage2_iota_target is None
+            else float(args.stage2_iota_target)
+        ),
+        "STAGE2_IOTA_TOLERANCE": (
+            None
+            if not probe_enabled
+            else float(args.stage2_iota_tolerance)
+        ),
+        "STAGE2_IOTA_PROBE_SECONDS": None,
+    }
+    payload.update(
+        build_bootability_recovery_payload_fields(
+            None,
+            stage2_bs_path=stage2_bs_artifact_path,
+            stage2_results_path=stage2_results_path,
+            include_recovery=False,
+        )
+    )
+    if not probe_enabled:
+        return payload
+
+    probe_start = time.perf_counter()
+    constraint_weight = resolve_stage2_iota_constraint_weight(
+        args.stage2_iota_constraint_weight
+    )
+    bootability_status = probe_stage2_seed_bootability(
+        stage2_bs_path=stage2_bs_artifact_path,
+        stage2_artifact_results=stage2_results_payload,
+        plasma_surf_filename=os.path.basename(args.plasma_surf_filename),
+        equilibria_dir=args.equilibria_dir,
+        equilibrium_path=args.equilibrium_path,
+        num_tf_coils=args.stage2_iota_num_tf_coils,
+        nphi=args.stage2_iota_nphi,
+        ntheta=args.stage2_iota_ntheta,
+        mpol=args.stage2_iota_mpol,
+        ntor=args.stage2_iota_ntor,
+        vol_target=args.stage2_iota_vol_target,
+        iota_target=float(args.stage2_iota_target),
+        iota_tolerance=args.stage2_iota_tolerance,
+        constraint_weight=constraint_weight,
+    )
+    payload.update(
+        build_bootability_recovery_payload_fields(
+            bootability_status,
+            stage2_bs_path=stage2_bs_artifact_path,
+            stage2_results_path=stage2_results_path,
+            include_recovery=False,
+        )
+    )
+    payload["STAGE2_IOTA_PROBE_SECONDS"] = time.perf_counter() - probe_start
+    return payload
 
 
 def evaluate_stage2_hardware_constraints(
@@ -566,6 +778,7 @@ def main(parsed_args=None):
     # ---------------------------------------------------------------------------------------
     args = parse_args() if parsed_args is None else parsed_args
     validate_alm_cli_args(args)
+    validate_stage2_iota_cli_args(args)
     if parsed_args is not None:
         validate_banana_current_cli_args(args)
 
@@ -1084,7 +1297,8 @@ def main(parsed_args=None):
     fieldError = _magnetic_field_plots(new_surf, new_bs, OUT_DIR_ITER)
 
     # Save the optimized coil shapes and currents so they can be loaded into other scripts for analysis:
-    new_bs.save(OUT_DIR_ITER + "biot_savart_opt.json")
+    stage2_bs_artifact_path = OUT_DIR_ITER + "biot_savart_opt.json"
+    new_bs.save(stage2_bs_artifact_path)
     print(f'Banana Coil Current / TF Current = {new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value():.3f}\n')
 
     # Save the results of optimization to a separate file
@@ -1148,6 +1362,13 @@ def main(parsed_args=None):
         final_curve_surface_min_dist=final_curve_surface_min_dist,
         plasma_vessel_min_dist=plasma_vessel_min_dist,
         hardware_status=hardware_status,
+    )
+    results.update(
+        build_stage2_iota_report_payload(
+            args=args,
+            stage2_bs_artifact_path=stage2_bs_artifact_path,
+            stage2_results_payload=results,
+        )
     )
     with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
         json.dump(results, outfile, indent=2)

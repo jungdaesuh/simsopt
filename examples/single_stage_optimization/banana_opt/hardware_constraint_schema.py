@@ -252,6 +252,7 @@ def build_bootability_recovery_payload_fields(
     prefix: str = "",
     stage2_bs_path: str | None = None,
     stage2_results_path: str | None = None,
+    include_recovery: bool = True,
     recovery_attempted: bool | None = None,
     recovery_succeeded: bool | None = None,
     recovery_iters: int | None = None,
@@ -259,27 +260,31 @@ def build_bootability_recovery_payload_fields(
 ) -> dict[str, object]:
     payload_fields = {
         field_name: None
-        for field_name in bootability_recovery_payload_field_names(prefix=prefix)
+        for field_name in bootability_recovery_payload_field_names(
+            prefix=prefix,
+            include_recovery=include_recovery,
+        )
     }
     if bootability_status is not None:
         for field_name in _BOOTABILITY_STATUS_FIELD_NAMES:
             payload_fields[f"{prefix}{field_name}"] = bootability_status.get(field_name)
     payload_fields[f"{prefix}STAGE2_BS_PATH"] = stage2_bs_path
     payload_fields[f"{prefix}STAGE2_RESULTS_PATH"] = stage2_results_path
-    payload_fields[f"{prefix}RECOVERY_ATTEMPTED"] = (
-        None if recovery_attempted is None else bool(recovery_attempted)
-    )
-    payload_fields[f"{prefix}RECOVERY_SUCCEEDED"] = (
-        None if recovery_succeeded is None else bool(recovery_succeeded)
-    )
-    payload_fields[f"{prefix}RECOVERY_ITERS"] = (
-        None if recovery_iters is None else int(recovery_iters)
-    )
-    payload_fields[f"{prefix}RECOVERY_TERMINATION_REASON"] = (
-        None
-        if recovery_termination_reason is None
-        else str(recovery_termination_reason)
-    )
+    if include_recovery:
+        payload_fields[f"{prefix}RECOVERY_ATTEMPTED"] = (
+            None if recovery_attempted is None else bool(recovery_attempted)
+        )
+        payload_fields[f"{prefix}RECOVERY_SUCCEEDED"] = (
+            None if recovery_succeeded is None else bool(recovery_succeeded)
+        )
+        payload_fields[f"{prefix}RECOVERY_ITERS"] = (
+            None if recovery_iters is None else int(recovery_iters)
+        )
+        payload_fields[f"{prefix}RECOVERY_TERMINATION_REASON"] = (
+            None
+            if recovery_termination_reason is None
+            else str(recovery_termination_reason)
+        )
     return payload_fields
 
 

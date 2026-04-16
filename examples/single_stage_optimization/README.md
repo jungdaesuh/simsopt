@@ -8,6 +8,9 @@ This directory contains the current banana-coil workflow stack for this reposito
 - generic Stage 2 ALM wrapper in [run_stage2_alm.py](run_stage2_alm.py)
 - generic single-stage ALM rerun wrapper in [run_single_stage_thresholded_physics_alm.py](run_single_stage_thresholded_physics_alm.py)
 - explicit target-vs-frontier comparison wrapper in [run_single_stage_goal_mode_comparison.py](run_single_stage_goal_mode_comparison.py)
+- explicit iota-target sweep wrapper in [run_single_stage_iota_target_sweep.py](run_single_stage_iota_target_sweep.py)
+- banana-current scan wrapper in [run_banana_current_scan.py](run_banana_current_scan.py)
+- ISHW slide plot packager in [plot_ishw_tradeoffs.py](plot_ishw_tradeoffs.py)
 - optional field-line / Poincare diagnostics in [POINCARE_PLOTTING/poincare_surfaces.py](POINCARE_PLOTTING/poincare_surfaces.py)
 
 The codebase has evolved beyond the older "edit script constants and rerun" model. Use CLI flags or environment variables, not source edits, for normal operation.
@@ -44,6 +47,18 @@ There are two wrapper entrypoints for the general ALM workflow:
    This is the matched target-vs-frontier comparison lane.
    It requires one explicit Stage 2 artifact plus one explicit plasma surface, runs single-stage twice with identical settings except for `--single-stage-goal-mode {target, frontier}`, validates Stage 2 surface identity, and writes one summary JSON with per-mode metrics plus frontier-minus-target deltas.
 
+There are three wrapper entrypoints for the ISHW analysis / slide-deliverable lane:
+
+6. `run_single_stage_iota_target_sweep.py`
+   This reuses one explicit Stage 2 donor and sweeps single-stage `--iota-target` over a user-provided list.
+   It writes a compact summary JSON plus a slide-friendly CSV without aborting the entire sweep when one target fails.
+
+7. `run_banana_current_scan.py`
+   This reuses one optimized Stage 2 donor, scales the banana-coil current from zero to the donor current, attempts single-stage init-only Boozer startup at each point, and falls back to standalone Poincare artifacts when Boozer startup fails.
+
+8. `plot_ishw_tradeoffs.py`
+   This reads the sweep/scan summaries, generates slide-ready figures, and can optionally rerun and copy a reference Poincare directory into one output bundle.
+
 ## Branch Scope
 
 This README describes the current behavior of this repository, not necessarily older upstream SIMSOPT examples.
@@ -79,6 +94,9 @@ examples/single_stage_optimization/
 ├── run_80ka_baseline_tradeoff_sweep.py
 ├── run_finite_current_smoke.py
 ├── run_stage2_alm.py
+├── run_single_stage_iota_target_sweep.py
+├── run_banana_current_scan.py
+├── plot_ishw_tradeoffs.py
 ├── run_single_stage_goal_mode_comparison.py
 └── run_single_stage_thresholded_physics_alm.py
 ```
@@ -164,6 +182,7 @@ Useful notes:
 - `--stage2-spec-json` is the fully explicit path for non-profile Stage 2 contracts
 - `--dry-run` prints and records the resolved config and exact Stage 2 command without launching it
 - dry runs write `DRY_RUN_ONLY.txt` next to the summary so a summary-only directory is not mistaken for a real solver artifact root
+- `--stage2-iota-mode report --stage2-iota-target ...` enables a reporting-only Boozer/iota probe for the generated Stage 2 artifact; this records `BOOZER_BOOTABLE`, `IOTA_FEASIBLE`, `STAGE2_ROOT_FIX_ENABLED`, and `STAGE2_IOTA_*` metadata in `results.json` without changing the Stage 2 optimization objective
 
 ### Single-Stage Thresholded-Physics ALM Rerun
 
@@ -220,6 +239,75 @@ Useful notes:
 - frontier result payloads record the fixed seed references, effective normalized weights, Boozer trust threshold, and the separate `BOOZER_SURFACE_TARGET_VOLUMES` used by the internal Boozer solve
 - when the shared Stage 2 `results.json` includes banana-current metadata, the comparison summary also records the shared seed `BANANA_CURRENT_A` and `BANANA_CURRENT_MAX_A`
 
+### Single-Stage Iota-Target Sweep
+
+Use this for the talk-style tradeoff sweep over increasing `iota` target from one fixed Stage 2 donor:
+
+- requires `--plasma-surf-filename`
+- requires `--stage2-bs-path`
+- accepts `--iota-targets` as a CSV list
+- reuses the same single-stage geometry, Boozer discretization, and hardware settings across every case
+- writes one summary JSON plus one slide-friendly CSV
+
+```bash
+cd /path/to/simsopt-surrogate
+python examples/single_stage_optimization/run_single_stage_iota_target_sweep.py \
+  --plasma-surf-filename wout_nfp10ginsburg_desc_s024match_iota20.nc \
+  --stage2-bs-path /full/path/to/biot_savart_opt.json \
+  --iota-targets 0.15,0.18,0.20
+```
+
+Useful notes:
+
+- output root defaults to `examples/single_stage_optimization/outputs_single_stage_iota_target_sweep`
+- failures are recorded per target instead of aborting the full sweep
+- `--dry-run` writes only the planned commands plus a summary/CSV bundle
+
+### Banana-Current Scan
+
+Use this for the talk-style scan from zero banana current to the optimized donor current with TF current fixed:
+
+- requires `--plasma-surf-filename`
+- requires `--stage2-bs-path`
+- accepts `--banana-current-scales` as a CSV list
+- mutates the loaded donor banana current after deserialization, so reused donors are scanned correctly even though `--banana-init-current-A` only affects fresh Stage 2 generation
+- classifies each point as `success`, `poincare_only_fallback`, or `boozer_failed`
+
+```bash
+cd /path/to/simsopt-surrogate
+python examples/single_stage_optimization/run_banana_current_scan.py \
+  --plasma-surf-filename wout_nfp10ginsburg_desc_s024match_iota20.nc \
+  --stage2-bs-path /full/path/to/biot_savart_opt.json \
+  --banana-current-scales 0,0.25,0.5,0.75,1.0
+```
+
+Useful notes:
+
+- output root defaults to `examples/single_stage_optimization/outputs_banana_current_scan`
+- successful init-only single-stage cases reuse their own output directory for Poincare artifacts
+- Boozer-init failures still trigger a fallback Poincare artifact path when enough donor metadata exists to rebuild the reference surface
+
+### ISHW Plot Packaging
+
+Use this to turn the sweep and scan summaries into slide-ready plots:
+
+- reads one or both of the summary JSON files from the new wrappers
+- can ingest an external field-error versus coil-length CSV or JSON
+- can rerun and copy a reference Poincare directory into the final output bundle
+
+```bash
+cd /path/to/simsopt-surrogate
+python examples/single_stage_optimization/plot_ishw_tradeoffs.py \
+  --iota-sweep-summary /full/path/to/single_stage_iota_target_sweep_summary.json \
+  --banana-current-scan-summary /full/path/to/banana_current_scan_summary.json
+```
+
+Useful notes:
+
+- output root defaults to `examples/single_stage_optimization/outputs_ishw_tradeoffs`
+- generated plots include `iota_target` tradeoffs, banana-current tradeoffs, a startup-outcome chart, and a cleaned field-error versus coil-length figure
+- the manifest JSON records the exact source summaries plus all generated output paths
+
 ## Manual Stage 2
 
 Use [banana_coil_solver.py](STAGE_2/banana_coil_solver.py) when you want to generate or inspect a Stage 2 artifact directly.
@@ -246,6 +334,8 @@ Key Stage 2 controls:
   `--maxiter`, `--ftol`, `--gtol`
 - ALM path:
   `--constraint-method alm`, `--alm-max-outer-iters`, `--alm-penalty-init`, `--alm-penalty-scale`, `--alm-feas-tol`, `--alm-stationarity-tol`, `--alm-trust-radius-*`, `--alm-max-inner-attempts`, `--alm-max-subproblem-continuations`, `--alm-distance-smoothing`, `--alm-curvature-smoothing`, `--alm-taylor-test`
+- reporting-only root-fix probe:
+  `--stage2-iota-mode report`, `--stage2-iota-target`, `--stage2-iota-tolerance`, `--stage2-iota-vol-target`, `--stage2-iota-constraint-weight` (negative selects exact Boozer Newton mode), `--stage2-iota-num-tf-coils`, `--stage2-iota-nphi`, `--stage2-iota-ntheta`, `--stage2-iota-mpol`, `--stage2-iota-ntor`
 - basin-hopping path:
   `--basin-hops`, `--basin-stepsize`, `--basin-temperature`, `--basin-niter-success`, `--basin-seed`
 
@@ -258,6 +348,7 @@ Stage 2 output root layout:
 
 - `STAGE_2/outputs-[plasma_filename]/...`
 - the artifact consumed by single-stage is the generated `biot_savart_opt.json`
+- when the reporting-only probe is enabled, the sibling `results.json` also records bootability/iota status using the shared Stage 2-to-single-stage contract fields instead of a separate ad hoc schema
 - the sibling `results.json` is part of the contract and is now used for stricter validation and provenance
 
 ## Stage 2 Seed Resolution For Single-Stage

@@ -201,6 +201,27 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional override for the VMEC flux-surface label s in [0, 1].",
     )
+    parser.add_argument(
+        "--stage2-iota-mode",
+        choices=["off", "report"],
+        default="off",
+        help=(
+            "Optional Stage 2 reporting-only iota probe mode. 'report' forwards "
+            "the shared Boozer/iota probe flags into banana_coil_solver.py."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-iota-target",
+        type=float,
+        default=None,
+        help="Target iota used when --stage2-iota-mode=report.",
+    )
+    parser.add_argument(
+        "--stage2-iota-tolerance",
+        type=float,
+        default=5.0e-3,
+        help="Absolute iota tolerance used when --stage2-iota-mode=report.",
+    )
     return parser.parse_args()
 
 
@@ -291,6 +312,9 @@ def build_stage2_alm_config(
             f"{STAGE2_CURVATURE_THRESHOLD_CEILING}"
         )
     tf_current_A = validate_tf_current_limit(resolved_spec["tf_current_A"])
+    stage2_iota_mode = getattr(args, "stage2_iota_mode", "off")
+    stage2_iota_target = getattr(args, "stage2_iota_target", None)
+    stage2_iota_tolerance = getattr(args, "stage2_iota_tolerance", 5.0e-3)
     return Stage2ArtifactConfig(
         plasma_surf_filename=Path(args.plasma_surf_filename).name,
         output_root=output_root,
@@ -330,6 +354,9 @@ def build_stage2_alm_config(
         init_only=bool(resolved_spec["init_only"]),
         banana_init_current_A=float(resolved_spec["banana_init_current_A"]),
         banana_current_max_A=float(resolved_spec["banana_current_max_A"]),
+        stage2_iota_mode=stage2_iota_mode,
+        stage2_iota_target=stage2_iota_target,
+        stage2_iota_tolerance=stage2_iota_tolerance,
     )
 
 

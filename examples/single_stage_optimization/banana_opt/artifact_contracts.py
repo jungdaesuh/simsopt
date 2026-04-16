@@ -46,6 +46,19 @@ def _upgrade_legacy_bootability_recovery_metadata(upgraded_results: dict) -> Non
             upgraded_results[key] = value
 
 
+def _upgrade_legacy_stage2_iota_report_metadata(upgraded_results: dict) -> None:
+    defaults = {
+        "STAGE2_ROOT_FIX_ENABLED": False,
+        "STAGE2_IOTA_MODE": "off",
+        "STAGE2_IOTA_TARGET": None,
+        "STAGE2_IOTA_TOLERANCE": None,
+        "STAGE2_IOTA_PROBE_SECONDS": None,
+    }
+    for key, value in defaults.items():
+        if upgraded_results.get(key) is None:
+            upgraded_results[key] = value
+
+
 def upgrade_legacy_stage2_artifact_results(
     stage2_artifact_results: dict,
     *,
@@ -67,6 +80,7 @@ def upgrade_legacy_stage2_artifact_results(
     _upgrade_legacy_banana_current_metadata(upgraded_results)
     _upgrade_legacy_stage2_hardware_contract_metadata(upgraded_results)
     _upgrade_legacy_bootability_recovery_metadata(upgraded_results)
+    _upgrade_legacy_stage2_iota_report_metadata(upgraded_results)
     return upgraded_results
 
 
