@@ -86,7 +86,6 @@ fi
 export HF_HUB_DISABLE_TELEMETRY=1
 export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-/tmp/jax-compilation-cache}"
 mkdir -p "${RESULTS_DIR}" "${JAX_COMPILATION_CACHE_DIR}"
-unset LD_LIBRARY_PATH
 
 OVERALL_RC=0
 declare -a EXPECTED_PROBES=("${STAGE2_RUNG_NAMES[@]}" "single_stage_cold" "single_stage_warm")

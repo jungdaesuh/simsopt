@@ -29,8 +29,11 @@ DEFAULT_STAGE2_SEED_REL = (
 )
 DEFAULT_EQUILIBRIA_REL = "examples/single_stage_optimization/equilibria"
 DEFAULT_PLASMA = "wout_nfp22ginsburg_000_014417_iota15.nc"
-DEFAULT_IMAGE = os.environ.get("SIMSOPT_HF_GPU_IMAGE", "python:3.11-bookworm")
+DEFAULT_FALLBACK_IMAGE = "python:3.11-bookworm"
+DEFAULT_IMAGE = os.environ.get("SIMSOPT_HF_GPU_IMAGE") or None
 DEFAULT_TARGET_OPTIMIZER_BACKEND = "ondevice"
+DEFAULT_JAX_GPU_WHEEL_SPEC = "jax[cuda12]==0.9.2"
+DEFAULT_EXPECTED_JAX_VERSION = "0.9.2"
 
 
 def _resolve_hf_cli() -> str:
@@ -141,6 +144,21 @@ def _resolve_repo_defaults(args: argparse.Namespace) -> argparse.Namespace:
         args.repo_sha = _git_output("rev-parse", "HEAD")
     if args.repo_ref is None:
         args.repo_ref = _git_output("rev-parse", "--abbrev-ref", "HEAD")
+    return args
+
+
+def _validate_runtime_contract(args: argparse.Namespace) -> argparse.Namespace:
+    if not args.image:
+        raise SystemExit(
+            "Production GPU proof requires a prebuilt image via SIMSOPT_HF_GPU_IMAGE "
+            "or --image. For the fallback ad hoc path, pass "
+            f"--image {DEFAULT_FALLBACK_IMAGE} --bootstrap-mode always."
+        )
+    if args.image == DEFAULT_FALLBACK_IMAGE and args.bootstrap_mode != "always":
+        raise SystemExit(
+            f"Fallback image {DEFAULT_FALLBACK_IMAGE} requires --bootstrap-mode always. "
+            "Use a prebuilt pinned image for the exact proof path."
+        )
     return args
 
 
@@ -286,6 +304,9 @@ def _build_preflight_report(args: argparse.Namespace) -> dict[str, object]:
         "repo_ref": args.repo_ref,
         "repo_ref_commit": resolved_ref,
         "repo_url": args.repo_url,
+        "image": args.image,
+        "bootstrap_mode": args.bootstrap_mode,
+        "expected_jax_version": DEFAULT_EXPECTED_JAX_VERSION,
         "platform": args.platform,
         "hardware": list(args.hardware),
         "stage2_lane": resolve_probe_lane(
@@ -317,7 +338,8 @@ def _build_job_command(args: argparse.Namespace, *, resolved_repo_sha: str) -> s
         "export HF_HUB_DISABLE_TELEMETRY=1",
         'export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-/tmp/jax-compilation-cache}"',
         f'export SIMSOPT_HF_JOB_BOOTSTRAP_MODE="{args.bootstrap_mode}"',
-        "unset LD_LIBRARY_PATH",
+        f'export SIMSOPT_HF_JOB_EXPECTED_JAX_VERSION="{DEFAULT_EXPECTED_JAX_VERSION}"',
+        f'export SIMSOPT_HF_JOB_JAX_GPU_WHEEL_SPEC="{DEFAULT_JAX_GPU_WHEEL_SPEC}"',
         "rm -rf /tmp/hf-production-proof",
         'mkdir -p /tmp/hf-production-proof "$JAX_COMPILATION_CACHE_DIR"',
         (
@@ -364,8 +386,9 @@ def parse_args() -> argparse.Namespace:
         "--image",
         default=DEFAULT_IMAGE,
         help=(
-            "Docker image to use for the job. Defaults to SIMSOPT_HF_GPU_IMAGE or "
-            "python:3.11-bookworm."
+            "Docker image to use for the job. Defaults to SIMSOPT_HF_GPU_IMAGE when "
+            "set. For the fallback ad hoc bootstrap path, pass "
+            f"{DEFAULT_FALLBACK_IMAGE} explicitly with --bootstrap-mode always."
         ),
     )
     parser.add_argument(
@@ -442,7 +465,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    args = _resolve_repo_defaults(parse_args())
+    args = _validate_runtime_contract(_resolve_repo_defaults(parse_args()))
     hf_cli = _resolve_hf_cli()
     preflight = _build_preflight_report(args)
     print(json.dumps({"preflight": preflight}, indent=2))

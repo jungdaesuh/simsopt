@@ -64,7 +64,16 @@ def _build_fake_proof_repo(
         call_log = Path({str(call_log)!r})
         call_log.parent.mkdir(parents=True, exist_ok=True)
         with call_log.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({{"argv": argv, "output_json": str(output_json)}}) + "\\n")
+            handle.write(
+                json.dumps(
+                    {{
+                        "argv": argv,
+                        "output_json": str(output_json),
+                        "ld_library_path": __import__("os").environ.get("LD_LIBRARY_PATH"),
+                    }}
+                )
+                + "\\n"
+            )
         if output_json.name == "stage2_warm.json":
             if {stage2_warm_mode!r} == "missing":
                 raise SystemExit(3)
@@ -96,7 +105,16 @@ def _build_fake_proof_repo(
             raise SystemExit("missing --output-json")
         call_log = Path({str(call_log)!r})
         with call_log.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({{"argv": argv, "output_json": str(output_json)}}) + "\\n")
+            handle.write(
+                json.dumps(
+                    {{
+                        "argv": argv,
+                        "output_json": str(output_json),
+                        "ld_library_path": __import__("os").environ.get("LD_LIBRARY_PATH"),
+                    }}
+                )
+                + "\\n"
+            )
         output_json.parent.mkdir(parents=True, exist_ok=True)
         output_json.write_text(
             json.dumps({{"passed": True, "elapsed_s": 2.0, "failures": []}}),
@@ -258,6 +276,44 @@ def test_run_production_gpu_proof_omits_boozer_override_by_default(tmp_path):
     assert "--boozer-optimizer-backend" not in single_stage_calls[0]["argv"]
 
 
+def test_run_production_gpu_proof_preserves_ld_library_path(tmp_path):
+    repo_root, call_log = _build_fake_proof_repo(tmp_path)
+    results_dir = tmp_path / "results"
+    stage2_seed = tmp_path / "stage2_seed.json"
+    stage2_seed.write_text("{}", encoding="utf-8")
+    ld_library_path = "/cuda/lib:/driver/lib"
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(repo_root / "benchmarks" / "hf_jobs" / "run_production_gpu_proof.sh"),
+            "--results-dir",
+            str(results_dir),
+            "--equilibria-dir",
+            str(repo_root / "examples" / "single_stage_optimization" / "equilibria"),
+            "--stage2-bs-path",
+            str(stage2_seed),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "HEARTBEAT_INTERVAL_S": "0.01",
+            "LD_LIBRARY_PATH": ld_library_path,
+        },
+    )
+
+    assert completed.returncode == 0
+    call_records = [
+        json.loads(line) for line in call_log.read_text(encoding="utf-8").splitlines()
+    ]
+    assert call_records
+    assert {
+        record["ld_library_path"] for record in call_records
+    } == {ld_library_path}
+
+
 def test_build_stage2_hf_plan_keeps_smoke_jobs_geometry_report_only():
     plan = build_stage2_hf_plan(20, None)
 
@@ -300,7 +356,11 @@ def test_build_stage2_hf_plan_reports_default_long_run_geometry_gate():
     assert plan["supports_geometry_repro"] is True
 
 
-def _launcher_env(tmp_path: Path) -> dict[str, str]:
+def _launcher_env(
+    tmp_path: Path,
+    *,
+    image: str | None = "registry.example/simsopt-jax:cuda12-jax092",
+) -> dict[str, str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     _write_executable(
@@ -309,6 +369,10 @@ def _launcher_env(tmp_path: Path) -> dict[str, str]:
     )
     env = dict(os.environ)
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    if image is None:
+        env.pop("SIMSOPT_HF_GPU_IMAGE", None)
+    else:
+        env["SIMSOPT_HF_GPU_IMAGE"] = image
     return env
 
 
@@ -454,7 +518,88 @@ def test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override(tmp_p
     assert '"stage2_geometry_policy": "report-only"' in completed.stdout
     assert "--geometry-rel-tol" not in completed.stdout
     assert "--single-stage-boozer-optimizer-backend" not in completed.stdout
+    assert "unset LD_LIBRARY_PATH" not in completed.stdout
+    assert 'SIMSOPT_HF_JOB_JAX_GPU_WHEEL_SPEC="jax[cuda12]==0.9.2"' in completed.stdout
     assert "stage2_warm_repro" not in completed.stdout
+
+
+def test_launch_production_gpu_proof_requires_explicit_image_or_env(tmp_path):
+    env = _launcher_env(tmp_path, image=None)
+    remote_args = _default_remote_launcher_args(tmp_path)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER_SCRIPT),
+            "--dry-run",
+            "--hardware",
+            "a100-large",
+            *remote_args,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    assert completed.returncode != 0
+    assert "requires a prebuilt image via SIMSOPT_HF_GPU_IMAGE or --image" in completed.stderr
+
+
+def test_launch_production_gpu_proof_rejects_fallback_image_without_always_bootstrap(
+    tmp_path,
+):
+    env = _launcher_env(tmp_path, image=None)
+    remote_args = _default_remote_launcher_args(tmp_path)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER_SCRIPT),
+            "--dry-run",
+            "--hardware",
+            "a100-large",
+            "--image",
+            launcher.DEFAULT_FALLBACK_IMAGE,
+            *remote_args,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    assert completed.returncode != 0
+    assert "requires --bootstrap-mode always" in completed.stderr
+
+
+def test_launch_production_gpu_proof_allows_explicit_fallback_image_with_always_bootstrap(
+    tmp_path,
+):
+    env = _launcher_env(tmp_path, image=None)
+    remote_args = _default_remote_launcher_args(tmp_path)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER_SCRIPT),
+            "--dry-run",
+            "--hardware",
+            "a100-large",
+            "--image",
+            launcher.DEFAULT_FALLBACK_IMAGE,
+            "--bootstrap-mode",
+            "always",
+            *remote_args,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    assert completed.returncode == 0
+    assert launcher.DEFAULT_FALLBACK_IMAGE in completed.stdout
 
 
 def test_launch_production_gpu_proof_reports_default_long_run_geometry_gate(tmp_path):

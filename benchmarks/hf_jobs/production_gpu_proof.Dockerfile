@@ -1,5 +1,7 @@
 FROM python:3.11-bookworm
 
+ARG SIMSOPT_HF_JOB_JAX_GPU_WHEEL_SPEC="jax[cuda12]==0.9.2"
+
 ENV DEBIAN_FRONTEND=noninteractive \
     HF_HUB_DISABLE_TELEMETRY=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -47,7 +49,7 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
       monty \
       Deprecated \
       "pybind11<3" && \
-    python -m pip install "jax[cuda12]==0.9.2"
+    python -m pip install "${SIMSOPT_HF_JOB_JAX_GPU_WHEEL_SPEC}"
 
 WORKDIR /work
 
