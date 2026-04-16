@@ -290,6 +290,13 @@ def _optimizer_dtype(value):
     return np.asarray(value).dtype
 
 
+def _optimizer_shape(value):
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        return shape
+    return np.shape(value)
+
+
 def _hostify_optimizer_leaf(leaf):
     if isinstance(leaf, jax.Array):
         array = np.asarray(jax.device_get(leaf))
@@ -326,8 +333,8 @@ def _prepare_optimizer_pytree_adapter(x0):
     flat_dtype = np.dtype(_optimizer_dtype(flat_x0))
     leaf_signature = tuple(
         (
-            tuple(int(dim) for dim in np.shape(leaf)),
-            np.dtype(np.asarray(leaf).dtype).str,
+            tuple(int(dim) for dim in _optimizer_shape(leaf)),
+            np.dtype(_optimizer_dtype(leaf)).str,
         )
         for leaf in leaves
     )

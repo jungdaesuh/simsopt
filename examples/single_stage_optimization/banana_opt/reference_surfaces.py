@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from simsopt.geo import SurfaceRZFourier
 
-from banana_opt.hardware_contracts import (
+from .hardware_contracts import (
     VACUUM_VESSEL_MAJOR_RADIUS_M,
     VACUUM_VESSEL_MINOR_RADIUS_M,
 )

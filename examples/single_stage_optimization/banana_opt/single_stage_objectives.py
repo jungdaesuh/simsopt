@@ -1,8 +1,8 @@
 import numpy as np
 
 from alm_utils import augmented_inequality_objective
-from banana_opt.hardware_constraint_schema import get_hardware_constraint_spec
-from banana_opt.single_stage_constraints import single_stage_constraint_activity_tolerances
+from .hardware_constraint_schema import get_hardware_constraint_spec
+from .single_stage_constraints import single_stage_constraint_activity_tolerances
 
 
 def _annotate_search_evaluation_finiteness(evaluation):

@@ -658,6 +658,45 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         self.assertFalse(hasattr(boozer_surface.surface, "fitted_gamma"))
 
+    def test_initialize_boozer_surface_cpu_sets_projected_dofs_via_set_dofs(self):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        projected_dofs = np.array([4.0, 5.0, 6.0])
+
+        class RecordingSurface(FakeSurfaceXYZTensorFourier):
+            def __init__(self, **kwargs):
+                dofs = kwargs.get("dofs")
+                self.received_dofs = (
+                    None if dofs is None else np.asarray(dofs, dtype=np.float64)
+                )
+                super().__init__(**kwargs)
+
+        with patch.object(
+            module, "SurfaceXYZTensorFourier", RecordingSurface
+        ), patch.object(module, "Volume", FakeVolume), patch.object(
+            module, "BoozerSurface", RecordingCPUBoozerSurface
+        ), patch.object(
+            module,
+            "project_surface_dofs_to_resolution",
+            return_value=projected_dofs,
+        ):
+            boozer_surface = module.initialize_boozer_surface(
+                surf_prev,
+                mpol=TEST_MPOL,
+                ntor=TEST_NTOR,
+                bs=object(),
+                vol_target=TEST_VOL_TARGET,
+                constraint_weight=1.0,
+                iota=TEST_IOTA,
+                G0=TEST_G0,
+                backend="cpu",
+            )
+
+        self.assertIsInstance(boozer_surface, RecordingCPUBoozerSurface)
+        surface = boozer_surface.surface
+        self.assertIsNone(surface.received_dofs)
+        np.testing.assert_array_equal(surface.get_dofs(), projected_dofs)
+
     def test_initialize_boozer_surface_skips_fit_when_surface_override_present(self):
         module = self.load_module()
         surf_prev = FakeSurfPrev()
@@ -1106,6 +1145,53 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         self.assertEqual(payload["stages"]["starting"]["backend"], "jax")
         self.assertEqual(payload["stages"]["after_boozer_setup"]["boozer_type"], "ls")
+
+    def test_build_event_progress_recorder_preserves_event_history(self):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            progress_path = os.path.join(tmpdir, "outer_optimizer_progress.json")
+            record_event = module.build_event_progress_recorder(progress_path)
+            record_event("phase1_started", phase="phase1", maxiter=1)
+            record_event("phase1_progress_iter_1", phase="phase1", iteration=1)
+
+            with open(progress_path, encoding="utf-8") as infile:
+                payload = json.load(infile)
+
+        self.assertEqual(payload["current_event"], "phase1_progress_iter_1")
+        self.assertEqual(payload["event_count"], 2)
+        self.assertEqual(
+            [event["label"] for event in payload["events"]],
+            ["phase1_started", "phase1_progress_iter_1"],
+        )
+        self.assertEqual(payload["events"][0]["phase"], "phase1")
+        self.assertEqual(payload["events"][1]["iteration"], 1)
+
+    def test_build_event_progress_recorder_serializes_scaled_phase_optimizer_state(self):
+        module = self.load_module()
+        phase1_state = module.build_target_lane_scaled_outer_phase_state(
+            np.array([10.0, 20.0], dtype=np.float64),
+            jax.device_put(np.array([1.5, -2.5], dtype=np.float64)),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            progress_path = os.path.join(tmpdir, "outer_optimizer_progress.json")
+            record_event = module.build_event_progress_recorder(progress_path)
+            record_event(
+                "phase1_started",
+                phase="phase1",
+                optimizer_dofs=module._summarize_host_vector(phase1_state),
+            )
+
+            with open(progress_path, encoding="utf-8") as infile:
+                payload = json.load(infile)
+
+        self.assertEqual(payload["current_event"], "phase1_started")
+        np.testing.assert_allclose(
+            payload["events"][0]["optimizer_dofs"]["values"],
+            np.array([1.5, -2.5], dtype=np.float64),
+        )
+        self.assertTrue(payload["events"][0]["optimizer_dofs"]["all_finite"])
 
     def test_resolve_boozer_optimizer_backend_defaults_and_overrides(self):
         module = self.load_module()
@@ -2630,6 +2716,41 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(diagnostics["jac_inf_norm"])
         self.assertIsNone(diagnostics["x_finite"])
         self.assertTrue(diagnostics["invalid_state"])
+
+    def test_summarize_optimizer_result_for_progress_handles_scaled_phase_state(self):
+        module = self.load_module()
+        x_state = module.build_target_lane_scaled_outer_phase_state(
+            np.array([4.0, 5.0], dtype=np.float64),
+            np.array([1.0, -2.0], dtype=np.float64),
+        )
+        jac_state = module.build_target_lane_scaled_outer_phase_state(
+            np.array([4.0, 5.0], dtype=np.float64),
+            np.array([3.0, -6.0], dtype=np.float64),
+        )
+        result = types.SimpleNamespace(
+            success=False,
+            nit=3,
+            status=7,
+            nfev=11,
+            njev=5,
+            ls_status=2,
+            message="phase1 completed",
+            fun=1.25,
+            jac=jac_state,
+            x=x_state,
+        )
+
+        summary = module.summarize_optimizer_result_for_progress(result)
+
+        self.assertEqual(summary["iterations"], 3)
+        self.assertEqual(summary["status"], 7)
+        self.assertEqual(summary["ls_status"], 2)
+        self.assertEqual(summary["message"], "phase1 completed")
+        self.assertEqual(summary["diagnostics"]["fun"], 1.25)
+        self.assertTrue(summary["diagnostics"]["jac_finite"])
+        self.assertEqual(summary["diagnostics"]["jac_inf_norm"], 6.0)
+        self.assertTrue(summary["diagnostics"]["x_finite"])
+        self.assertFalse(summary["diagnostics"]["invalid_state"])
 
     def test_build_target_lane_invalid_state_failure_callback_records_payload(self):
         module = self.load_module()
@@ -4271,8 +4392,19 @@ class SingleStageExampleTests(unittest.TestCase):
             captured["x64_backend"] = optimizer_backend
 
         def fake_jax_minimize(
-            fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+            callback,
+            progress_callback=None,
+            failure_callback=None,
         ):
+            del progress_callback, failure_callback
             captured["fun"] = fun
             captured["method"] = method
             captured["x0"] = x0
@@ -4344,9 +4476,20 @@ class SingleStageExampleTests(unittest.TestCase):
             options,
             value_and_grad,
             callback,
+            progress_callback=None,
             failure_callback=None,
         ):
-            del fun, x0, method, tol, maxiter, options, value_and_grad, callback
+            del (
+                fun,
+                x0,
+                method,
+                tol,
+                maxiter,
+                options,
+                value_and_grad,
+                callback,
+                progress_callback,
+            )
             captured["failure_callback"] = failure_callback
             return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
 
@@ -4371,6 +4514,67 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         self.assertIs(captured["failure_callback"], failure_callback)
+        self.assertEqual(result.message, "ok")
+
+    def test_run_single_stage_optimizer_threads_target_lane_progress_callback(self):
+        module = self.load_module()
+        captured = {}
+        explicit_fun = lambda x: (
+            jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
+            jnp.asarray(2.0 * x, dtype=jnp.float64),
+        )
+
+        def fake_require_target_backend_x64(_optimizer_backend):
+            return None
+
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+            callback,
+            progress_callback=None,
+            failure_callback=None,
+        ):
+            del (
+                fun,
+                x0,
+                method,
+                tol,
+                maxiter,
+                options,
+                value_and_grad,
+                callback,
+                failure_callback,
+            )
+            captured["progress_callback"] = progress_callback
+            return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
+
+        with self.patch_optimizer_jax_module(
+            require_target_backend_x64=fake_require_target_backend_x64,
+            jax_minimize=fake_jax_minimize,
+        ):
+            progress_callback = object()
+            contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+            result = module.run_single_stage_optimizer(
+                explicit_fun,
+                np.array([0.0, 0.0]),
+                contract=contract,
+                maxiter=1,
+                ftol=0.0,
+                gtol=1e-6,
+                maxcor=5,
+                outer_maxls=6,
+                callback=None,
+                progress_callback=progress_callback,
+                scalar_fun=None,
+            )
+
+        self.assertIs(captured["progress_callback"], progress_callback)
         self.assertEqual(result.message, "ok")
 
     def test_run_single_stage_optimizer_rejects_failure_callback_on_reference_lane(
@@ -4428,6 +4632,7 @@ class SingleStageExampleTests(unittest.TestCase):
             options,
             value_and_grad,
             callback,
+            progress_callback=None,
             failure_callback=None,
         ):
             del (
@@ -4438,6 +4643,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 maxiter,
                 value_and_grad,
                 callback,
+                progress_callback,
                 failure_callback,
             )
             captured["options"] = dict(options)
@@ -4502,10 +4708,21 @@ class SingleStageExampleTests(unittest.TestCase):
             maxcor,
             outer_maxls,
             scalar_fun,
+            progress_callback=None,
             target_lane_initial_step_size,
             failure_callback,
         ):
-            del fun, contract, maxiter, ftol, gtol, maxcor, outer_maxls, scalar_fun
+            del (
+                fun,
+                contract,
+                maxiter,
+                ftol,
+                gtol,
+                maxcor,
+                outer_maxls,
+                scalar_fun,
+                progress_callback,
+            )
             optimizer_calls.append(
                 {
                     "dofs": np.asarray(dofs, dtype=float).copy(),
@@ -4618,6 +4835,7 @@ class SingleStageExampleTests(unittest.TestCase):
             maxcor,
             outer_maxls,
             scalar_fun,
+            progress_callback=None,
             target_lane_initial_step_size,
             failure_callback,
         ):
@@ -4630,6 +4848,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 maxcor,
                 outer_maxls,
                 scalar_fun,
+                progress_callback,
                 target_lane_initial_step_size,
                 failure_callback,
             )
@@ -4834,6 +5053,7 @@ class SingleStageExampleTests(unittest.TestCase):
             maxcor,
             outer_maxls,
             scalar_fun,
+            progress_callback=None,
             target_lane_initial_step_size,
             failure_callback,
         ):
@@ -4847,6 +5067,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 maxcor,
                 outer_maxls,
                 scalar_fun,
+                progress_callback,
                 target_lane_initial_step_size,
                 failure_callback,
             )
@@ -4959,10 +5180,21 @@ class SingleStageExampleTests(unittest.TestCase):
             maxcor,
             outer_maxls,
             scalar_fun,
+            progress_callback=None,
             target_lane_initial_step_size,
             failure_callback,
         ):
-            del fun, contract, maxiter, ftol, gtol, maxcor, outer_maxls, scalar_fun
+            del (
+                fun,
+                contract,
+                maxiter,
+                ftol,
+                gtol,
+                maxcor,
+                outer_maxls,
+                scalar_fun,
+                progress_callback,
+            )
             optimizer_calls.append(
                 {
                     "dofs": dofs,
@@ -5197,8 +5429,19 @@ class SingleStageExampleTests(unittest.TestCase):
             return None
 
         def fake_jax_minimize(
-            fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+            callback,
+            progress_callback=None,
+            failure_callback=None,
         ):
+            del progress_callback, failure_callback
             value, grad = fun(x0)
             self.assertEqual(value, 0.0)
             self.assertIsInstance(grad, jax.Array)
@@ -5245,8 +5488,19 @@ class SingleStageExampleTests(unittest.TestCase):
             return None
 
         def fake_jax_minimize(
-            fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+            callback,
+            progress_callback=None,
+            failure_callback=None,
         ):
+            del method, tol, maxiter, options, callback, progress_callback, failure_callback
             captured["fun"] = fun
             captured["x0"] = x0
             captured["value_and_grad"] = value_and_grad
@@ -5286,8 +5540,30 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         def fake_jax_minimize(
-            fun, x0, *, method, tol, maxiter, options, value_and_grad, callback
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+            callback,
+            progress_callback=None,
+            failure_callback=None,
         ):
+            del (
+                fun,
+                x0,
+                method,
+                tol,
+                maxiter,
+                options,
+                value_and_grad,
+                callback,
+                progress_callback,
+                failure_callback,
+            )
             raise AssertionError(
                 "Unsupported single-stage lane must fail before jax_minimize."
             )
@@ -7203,6 +7479,20 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsInstance(host_calls[0][0], jax.Array)
         self.assertEqual(np.dtype(host_calls[0][1]), np.dtype(np.float64))
         np.testing.assert_allclose(resolved, np.array([1.0, -2.0]))
+
+    def test_summarize_host_gradient_supports_scaled_outer_phase_state(self):
+        module = self.load_module()
+        phase1_grad = module.build_target_lane_scaled_outer_phase_state(
+            np.array([10.0, 20.0], dtype=np.float64),
+            jax.device_put(np.array([3.0, -4.0], dtype=np.float64)),
+        )
+
+        summary = module._summarize_host_gradient(phase1_grad)
+
+        self.assertTrue(summary["all_finite"])
+        self.assertEqual(summary["inf_norm"], 4.0)
+        self.assertEqual(summary["size"], 2)
+        self.assertEqual(summary["nonfinite_count"], 0)
 
     def test_build_traceable_single_stage_outer_objective_config_hostifies_vessel_gamma(
         self,

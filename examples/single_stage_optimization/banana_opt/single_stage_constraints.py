@@ -1,7 +1,7 @@
 import numpy as np
 
 from alm_utils import zero_gradient_like
-from banana_opt.smoothing import smoothmax_selected, smoothmin_selected
+from .smoothing import smoothmax_selected, smoothmin_selected
 
 
 _SMOOTHING_EPS = float(np.finfo(float).eps)

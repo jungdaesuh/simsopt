@@ -5,11 +5,11 @@ from typing import Callable, Literal, Mapping
 
 import numpy as np
 
-from banana_opt.hardware_contracts import (
+from .hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
     validate_tf_current_limit,
 )
-from banana_opt.hardware_constraint_schema import (
+from .hardware_constraint_schema import (
     hardware_constraint_penalty_box_bound_names,
     resolve_penalty_box_bound_threshold,
 )

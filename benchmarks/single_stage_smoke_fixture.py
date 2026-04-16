@@ -6,17 +6,17 @@ from pathlib import Path
 
 import numpy as np
 
+from benchmarks.single_stage_smoke_defaults import (
+    DEFAULT_PLASMA_SURF_FILENAME,
+    DEFAULT_STAGE2_BS_PATH,
+    DEFAULT_STAGE2_BS_REL_PATH,
+    DEFAULT_STAGE2_SEED_DIR,
+)
 from examples.single_stage_optimization.equilibria_paths import (
     DEFAULT_EQUILIBRIA_DIR,
     resolve_equilibrium_path as _resolve_equilibrium_path,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_PLASMA_SURF_FILENAME = "wout_nfp22ginsburg_000_014417_iota15.nc"
-DEFAULT_STAGE2_SEED_DIR = (
-    REPO_ROOT / "benchmarks" / "fixtures" / "single_stage_seed_iota15"
-)
-DEFAULT_STAGE2_BS_PATH = DEFAULT_STAGE2_SEED_DIR / "biot_savart_opt.json"
 DEFAULT_SMOKE_NPHI = 31
 DEFAULT_SMOKE_NTHETA = 16
 DEFAULT_SMOKE_MPOL = 2

@@ -38,6 +38,44 @@ __all__ = [
 if _HAS_JAX:
     __all__.append("SurfaceSurfaceDistance")
 
+_BOOZER_DRESIDUAL_DC_CALL_MODE = None
+
+
+def _call_boozer_compat_signature(call_mode_name, func, with_I_args, alpha_only_args):
+    call_mode = globals()[call_mode_name]
+    if call_mode == "with_I":
+        return func(*with_I_args)
+    if call_mode == "alpha_only":
+        return func(*alpha_only_args)
+    try:
+        value = func(*with_I_args)
+    except TypeError as exc:
+        if "incompatible function arguments" not in str(exc):
+            raise
+        globals()[call_mode_name] = "alpha_only"
+        return func(*alpha_only_args)
+    globals()[call_mode_name] = "with_I"
+    return value
+
+
+def _call_boozer_dresidual_dc(
+    G,
+    dB_dc,
+    B,
+    tang,
+    B2,
+    dxphi_dc,
+    iota,
+    dxtheta_dc,
+):
+    """Dispatch across the supported simsoptpp Boozer dresidual signatures."""
+    return _call_boozer_compat_signature(
+        "_BOOZER_DRESIDUAL_DC_CALL_MODE",
+        sopp.boozer_dresidual_dc,
+        (G, 0.0, dB_dc, B, tang, B2, dxphi_dc, iota, dxtheta_dc),
+        (G, dB_dc, B, tang, B2, dxphi_dc, iota, dxtheta_dc),
+    )
+
 
 class AspectRatio(Optimizable):
     """
@@ -501,7 +539,7 @@ def boozer_surface_residual(
     dB_dc = np.einsum("ijkl,ijkm->ijlm", dB_by_dX, dx_dc)
 
     # dresidual_dc = G*dB_dc - 2*np.sum(B[..., None]*dB_dc, axis=2)[:, :, None, :] * tang[..., None] - B2[..., None, None] * (dxphi_dc + iota * dxtheta_dc)
-    dresidual_dc = sopp.boozer_dresidual_dc(
+    dresidual_dc = _call_boozer_dresidual_dc(
         G, dB_dc, B, tang, B2, dxphi_dc, iota, dxtheta_dc
     )
     dresidual_diota = -B2[..., None] * xtheta

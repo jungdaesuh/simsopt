@@ -19,6 +19,10 @@ from functools import partial
 
 __all__ = ["BoozerSurface"]
 
+_BOOZER_RESIDUAL_CALL_MODE = None
+_BOOZER_RESIDUAL_DS_CALL_MODE = None
+_BOOZER_RESIDUAL_DS2_CALL_MODE = None
+
 _BOOZER_SURFACE_REQUIRED_ATTRIBUTES = (
     "quadpoints_phi",
     "quadpoints_theta",
@@ -75,6 +79,124 @@ def _is_supported_boozer_surface(surface):
 
 def _is_supported_boozer_exact_surface(surface):
     return _matches_supported_surface_spec(surface, _BOOZER_EXACT_SURFACE_SPEC)
+
+
+def _call_boozer_compat_signature(call_mode_name, func, with_I_args, alpha_only_args):
+    call_mode = globals()[call_mode_name]
+    if call_mode == "with_I":
+        return func(*with_I_args)
+    if call_mode == "alpha_only":
+        return func(*alpha_only_args)
+    try:
+        value = func(*with_I_args)
+    except TypeError as exc:
+        if "incompatible function arguments" not in str(exc):
+            raise
+        globals()[call_mode_name] = "alpha_only"
+        return func(*alpha_only_args)
+    globals()[call_mode_name] = "with_I"
+    return value
+
+
+def _call_boozer_residual(G, iota, xphi, xtheta, B, weight_inv_modB):
+    """Dispatch across the supported simsoptpp residual signatures."""
+    return _call_boozer_compat_signature(
+        "_BOOZER_RESIDUAL_CALL_MODE",
+        sopp.boozer_residual,
+        (G, 0.0, iota, xphi, xtheta, B, weight_inv_modB),
+        (G, iota, xphi, xtheta, B, weight_inv_modB),
+    )
+
+
+def _call_boozer_residual_ds(
+    G,
+    iota,
+    B,
+    dB_dx,
+    xphi,
+    xtheta,
+    dx_ds,
+    dxphi_ds,
+    dxtheta_ds,
+    weight_inv_modB,
+):
+    """Dispatch across the supported simsoptpp first-derivative signatures."""
+    return _call_boozer_compat_signature(
+        "_BOOZER_RESIDUAL_DS_CALL_MODE",
+        sopp.boozer_residual_ds,
+        (
+            G,
+            0.0,
+            iota,
+            B,
+            dB_dx,
+            xphi,
+            xtheta,
+            dx_ds,
+            dxphi_ds,
+            dxtheta_ds,
+            weight_inv_modB,
+        ),
+        (
+            G,
+            iota,
+            B,
+            dB_dx,
+            xphi,
+            xtheta,
+            dx_ds,
+            dxphi_ds,
+            dxtheta_ds,
+            weight_inv_modB,
+        ),
+    )
+
+
+def _call_boozer_residual_ds2(
+    G,
+    iota,
+    B,
+    dB_dx,
+    d2B_dx2,
+    xphi,
+    xtheta,
+    dx_ds,
+    dxphi_ds,
+    dxtheta_ds,
+    weight_inv_modB,
+):
+    """Dispatch across the supported simsoptpp second-derivative signatures."""
+    return _call_boozer_compat_signature(
+        "_BOOZER_RESIDUAL_DS2_CALL_MODE",
+        sopp.boozer_residual_ds2,
+        (
+            G,
+            0.0,
+            iota,
+            B,
+            dB_dx,
+            d2B_dx2,
+            xphi,
+            xtheta,
+            dx_ds,
+            dxphi_ds,
+            dxtheta_ds,
+            weight_inv_modB,
+        ),
+        (
+            G,
+            iota,
+            B,
+            dB_dx,
+            d2B_dx2,
+            xphi,
+            xtheta,
+            dx_ds,
+            dxphi_ds,
+            dxtheta_ds,
+            weight_inv_modB,
+        ),
+    )
 
 
 class BoozerSurface(Optimizable):
@@ -518,10 +640,10 @@ class BoozerSurface(Optimizable):
 
         num_res = 3 * s.quadpoints_phi.size * s.quadpoints_theta.size
         if derivatives == 0:
-            val = sopp.boozer_residual(G, iota, xphi, xtheta, B, weight_inv_modB)
+            val = _call_boozer_residual(G, iota, xphi, xtheta, B, weight_inv_modB)
             boozer = (val,)
         elif derivatives == 1:
-            val, dval = sopp.boozer_residual_ds(
+            val, dval = _call_boozer_residual_ds(
                 G,
                 iota,
                 B,
@@ -535,7 +657,7 @@ class BoozerSurface(Optimizable):
             )
             boozer = val, dval
         elif derivatives == 2:
-            val, dval, d2val = sopp.boozer_residual_ds2(
+            val, dval, d2val = _call_boozer_residual_ds2(
                 G,
                 iota,
                 B,

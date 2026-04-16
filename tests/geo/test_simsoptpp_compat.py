@@ -3,6 +3,7 @@ import pytest
 
 sopp = pytest.importorskip("simsoptpp")
 from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
+import simsopt.geo.surfaceobjectives as surfaceobjectives_module
 
 
 def _make_clamped_tensor_surface(theta):
@@ -55,3 +56,48 @@ def test_surface_xyztensorfourier_theta_third_derivative_matches_finite_differen
     ) / (2 * eps)
 
     np.testing.assert_allclose(analytical[0], finite_difference, rtol=1.0e-6, atol=1.0e-6)
+
+
+def test_call_boozer_dresidual_dc_falls_back_to_alpha_only_signature(monkeypatch):
+    surfaceobjectives_module._BOOZER_DRESIDUAL_DC_CALL_MODE = None
+    calls = []
+    expected = np.arange(6, dtype=float).reshape(1, 2, 3)
+
+    def _fake_boozer_dresidual_dc(*args):
+        calls.append(args)
+        if len(args) == 9:
+            raise TypeError("incompatible function arguments")
+        assert len(args) == 8
+        return expected
+
+    monkeypatch.setattr(
+        surfaceobjectives_module.sopp,
+        "boozer_dresidual_dc",
+        _fake_boozer_dresidual_dc,
+    )
+
+    value = surfaceobjectives_module._call_boozer_dresidual_dc(
+        2.5,
+        np.zeros((1, 1, 3, 2)),
+        np.zeros((1, 1, 3)),
+        np.zeros((1, 1, 3)),
+        np.zeros((1, 1)),
+        np.zeros((1, 1, 3, 2)),
+        0.2,
+        np.zeros((1, 1, 3, 2)),
+    )
+    cached_value = surfaceobjectives_module._call_boozer_dresidual_dc(
+        2.5,
+        np.zeros((1, 1, 3, 2)),
+        np.zeros((1, 1, 3)),
+        np.zeros((1, 1, 3)),
+        np.zeros((1, 1)),
+        np.zeros((1, 1, 3, 2)),
+        0.2,
+        np.zeros((1, 1, 3, 2)),
+    )
+
+    np.testing.assert_allclose(value, expected)
+    np.testing.assert_allclose(cached_value, expected)
+    assert surfaceobjectives_module._BOOZER_DRESIDUAL_DC_CALL_MODE == "alpha_only"
+    assert [len(args) for args in calls] == [9, 8, 8]

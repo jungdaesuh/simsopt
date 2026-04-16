@@ -10,17 +10,17 @@ from alm_utils import (
     upper_bound_residual,
     zero_gradient_like,
 )
-from banana_opt.hardware_contracts import (
+from .hardware_contracts import (
     TF_CURRENT_HARD_LIMIT_A,
     fixed_stage2_clearance_contract,
 )
-from banana_opt.hardware_constraint_schema import (
+from .hardware_constraint_schema import (
     build_hardware_constraint_artifact_payload_fields,
     build_hardware_constraint_status,
     build_threshold_overrides,
     hardware_constraint_alm_names,
 )
-from banana_opt.smoothing import smoothmax_selected, smoothmin_selected
+from .smoothing import smoothmax_selected, smoothmin_selected
 
 
 _SMOOTHING_EPS = float(np.finfo(float).eps)

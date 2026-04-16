@@ -2,6 +2,7 @@ import argparse
 import copy
 from contextlib import contextmanager
 from dataclasses import dataclass, fields as dataclass_fields, is_dataclass
+import faulthandler
 from functools import lru_cache
 import hashlib
 import inspect
@@ -319,7 +320,7 @@ def extract_optimizer_diagnostics(result, *, ran_optimizer, termination_message=
         if value is None:
             return None, None
         try:
-            array = np.asarray(host_array(value), dtype=np.float64)
+            array = _single_stage_host_vector_array(value)
         except Exception:
             return None, None
         finite = bool(np.all(np.isfinite(array)))
@@ -350,6 +351,27 @@ def extract_optimizer_diagnostics(result, *, ran_optimizer, termination_message=
     }
 
 
+def summarize_optimizer_result_for_progress(result):
+    """Return a compact, JSON-safe optimizer summary for progress checkpoints."""
+    if result is None:
+        return None
+    termination_message = str(getattr(result, "message", ""))
+    return {
+        "success": bool(getattr(result, "success", False)),
+        "iterations": int(getattr(result, "nit", 0)),
+        "status": _optional_int(getattr(result, "status", None)),
+        "nfev": _optional_int(getattr(result, "nfev", None)),
+        "njev": _optional_int(getattr(result, "njev", None)),
+        "ls_status": _optional_int(getattr(result, "ls_status", None)),
+        "message": termination_message,
+        "diagnostics": extract_optimizer_diagnostics(
+            result,
+            ran_optimizer=True,
+            termination_message=termination_message,
+        ),
+    }
+
+
 def _classify_nonfinite_scalar(value):
     if np.isnan(value):
         return "nan"
@@ -370,8 +392,18 @@ def _summarize_host_scalar(value):
     }
 
 
+def _single_stage_host_vector_array(value):
+    return np.asarray(_single_stage_optimizer_dofs_array(value), dtype=np.float64).reshape(
+        -1
+    )
+
+
+def _optional_int(value):
+    return None if value is None else int(value)
+
+
 def _summarize_host_gradient(gradient):
-    array = np.asarray(host_array(gradient), dtype=np.float64).reshape(-1)
+    array = _single_stage_host_vector_array(gradient)
     finite_mask = np.isfinite(array)
     all_finite = bool(np.all(finite_mask))
     first_nonfinite_index = None
@@ -394,7 +426,7 @@ def _summarize_host_gradient(gradient):
 
 
 def _summarize_host_vector(vector):
-    array = np.asarray(host_array(vector), dtype=np.float64).reshape(-1)
+    array = _single_stage_host_vector_array(vector)
     finite_mask = np.isfinite(array)
     all_finite = bool(np.all(finite_mask))
     first_nonfinite_index = None
@@ -3654,15 +3686,16 @@ def initialize_boozer_surface(
                 quadpoints_phi=quadpoints_phi,
                 dofs=initial_surface_dofs,
             )
-        return SurfaceXYZTensorFourier(
+        surface = SurfaceXYZTensorFourier(
             mpol=mpol,
             ntor=ntor,
             nfp=5,
             stellsym=True,
             quadpoints_theta=quadpoints_theta,
             quadpoints_phi=quadpoints_phi,
-            dofs=initial_surface_dofs_host,
         )
+        surface.set_dofs(initial_surface_dofs_host)
+        return surface
 
     def build_volume_label(surface):
         if backend == "jax":
@@ -6476,6 +6509,7 @@ def run_single_stage_optimizer(
     maxcor,
     outer_maxls,
     callback,
+    progress_callback=None,
     scalar_fun=None,
     target_lane_initial_step_size=None,
     failure_callback=None,
@@ -6519,6 +6553,7 @@ def run_single_stage_optimizer(
             },
             "value_and_grad": value_and_grad,
             "callback": callback,
+            "progress_callback": progress_callback,
         }
         if target_lane_initial_step_size is not None:
             target_minimize_kwargs["options"]["initial_step_size"] = float(
@@ -6554,6 +6589,7 @@ def run_single_stage_optimizer(
         },
         value_and_grad=True,
         callback=callback,
+        progress_callback=progress_callback,
     )
 
 
@@ -6571,6 +6607,7 @@ def run_single_stage_target_lane_optimizer_with_retries(
     maxcor,
     outer_maxls,
     scalar_fun,
+    progress_callback=None,
     target_lane_initial_step_size,
     failure_callback,
     invalid_state_events,
@@ -6613,6 +6650,7 @@ def run_single_stage_target_lane_optimizer_with_retries(
         maxcor=maxcor,
         outer_maxls=outer_maxls,
         scalar_fun=scalar_fun,
+        progress_callback=progress_callback,
         target_lane_initial_step_size=initial_step_size,
         failure_callback=failure_callback,
     )
@@ -6668,6 +6706,7 @@ def run_single_stage_target_lane_optimizer_with_retries(
             maxcor=maxcor,
             outer_maxls=outer_maxls,
             scalar_fun=scalar_fun,
+            progress_callback=progress_callback,
             target_lane_initial_step_size=initial_step_size,
             failure_callback=failure_callback,
         )
@@ -6743,6 +6782,24 @@ def build_stage_progress_recorder(path):
         )
 
     return record_stage
+
+
+def build_event_progress_recorder(path):
+    """Build a JSON event recorder that preserves chronological history."""
+    events = []
+
+    def record_event(label, **extra):
+        events.append({"label": label, **dict(extra)})
+        write_json_file(
+            path,
+            {
+                "current_event": label,
+                "event_count": int(len(events)),
+                "events": list(events),
+            },
+        )
+
+    return record_event
 
 
 def resolve_warm_start_boozer_init_overrides(
@@ -7584,6 +7641,13 @@ if __name__ == "__main__":
     args = apply_default_stage2_seed_args(parse_args())
     OUT_DIR = args.output_root
     os.makedirs(OUT_DIR, exist_ok=True)
+    fatal_error_log_stream = open(
+        os.path.join(OUT_DIR, "fatal_error.log"),
+        "w",
+        encoding="utf-8",
+        buffering=1,
+    )
+    faulthandler.enable(file=fatal_error_log_stream, all_threads=True)
     startup_progress_path = os.path.join(OUT_DIR, "startup_progress.json")
     startup_progress = {"completed_stages": [], "timings": {}}
 
@@ -8235,6 +8299,88 @@ if __name__ == "__main__":
     record_target_lane_invalid_state_events = (
         record_target_lane_invalid_state_events_enabled(args)
     )
+    outer_optimizer_progress = (
+        build_event_progress_recorder(
+            os.path.join(OUT_DIR_ITER, "outer_optimizer_progress.json")
+        )
+        if use_target_lane and args.benchmark_mode
+        else None
+    )
+
+    def record_outer_optimizer_event(label, **extra):
+        if outer_optimizer_progress is None:
+            return
+        outer_optimizer_progress(label, **extra)
+
+    def build_outer_optimizer_progress_callback(phase):
+        if outer_optimizer_progress is None:
+            return None
+
+        def _record(iteration, fun_value, grad_inf):
+            record_outer_optimizer_event(
+                f"{phase}_progress_iter_{int(iteration)}",
+                phase=phase,
+                iteration=int(iteration),
+                fun_value=_summarize_host_scalar(fun_value),
+                grad_inf=_summarize_host_scalar(grad_inf),
+            )
+
+        return _record
+
+    def wrap_outer_optimizer_failure_callback(callback, *, phase):
+        if callback is None or outer_optimizer_progress is None:
+            return callback
+
+        def _record(
+            iteration,
+            trial_x,
+            trial_f,
+            trial_g,
+            search_direction,
+            step_vector,
+            step_scale,
+            line_search_failed,
+            nonfinite_step,
+            stalled_step,
+            valid_curvature,
+            trial_converged,
+            ls_status,
+        ):
+            callback(
+                iteration,
+                trial_x,
+                trial_f,
+                trial_g,
+                search_direction,
+                step_vector,
+                step_scale,
+                line_search_failed,
+                nonfinite_step,
+                stalled_step,
+                valid_curvature,
+                trial_converged,
+                ls_status,
+            )
+            record_outer_optimizer_event(
+                f"{phase}_failure_iter_{int(iteration)}",
+                phase=phase,
+                iteration=int(iteration),
+                line_search_failed=bool(line_search_failed),
+                nonfinite_step=bool(nonfinite_step),
+                stalled_step=bool(stalled_step),
+                valid_curvature=bool(valid_curvature),
+                trial_converged=bool(trial_converged),
+                ls_status=int(ls_status),
+                step_scale=_summarize_host_scalar(step_scale),
+                trial_value=_summarize_host_scalar(trial_f),
+                trial_grad=_summarize_host_vector(trial_g),
+                trial_x=_summarize_host_vector(trial_x),
+                search_direction=_summarize_host_vector(search_direction),
+                step_vector=_summarize_host_vector(step_vector),
+            )
+
+        return _record
+
     skip_outer_optimizer = bool(
         args.init_only
         or (
@@ -8252,6 +8398,17 @@ if __name__ == "__main__":
     accepted_step_callback = None
     target_lane_success_filter = None
     optimized_artifacts_already_materialized = False
+    record_outer_optimizer_event(
+        "starting",
+        use_target_lane=bool(use_target_lane),
+        maxiter=int(MAXITER),
+        initial_step_scale=float(effective_initial_step_scale),
+        initial_step_maxiter=int(effective_initial_step_maxiter),
+        target_lane_outer_initial_step_size=args.target_lane_outer_initial_step_size,
+        record_target_lane_invalid_state_events=bool(
+            record_target_lane_invalid_state_events
+        ),
+    )
 
     if args.init_only:
         res_nit = 0
@@ -9043,6 +9200,13 @@ if __name__ == "__main__":
                                 f"(step_scale={effective_initial_step_scale}, "
                                 f"maxiter={phase1_maxiter})..."
                             )
+                            record_outer_optimizer_event(
+                                "phase1_started",
+                                phase="phase1",
+                                maxiter=int(phase1_maxiter),
+                                step_scale=float(effective_initial_step_scale),
+                                optimizer_dofs=_summarize_host_vector(phase1_dofs),
+                            )
                             phase1_failure_callback = (
                                 resolve_target_lane_invalid_state_failure_callback(
                                     target_lane_invalid_state_events,
@@ -9050,6 +9214,15 @@ if __name__ == "__main__":
                                     use_target_lane=use_target_lane,
                                     args=args,
                                 )
+                            )
+                            phase1_failure_callback = (
+                                wrap_outer_optimizer_failure_callback(
+                                    phase1_failure_callback,
+                                    phase="phase1",
+                                )
+                            )
+                            phase1_progress_callback = (
+                                build_outer_optimizer_progress_callback("phase1")
                             )
                             phase1_start_s = _perf_counter_s()
                             with maybe_trace_single_stage_phase(
@@ -9071,6 +9244,7 @@ if __name__ == "__main__":
                                             maxcor=args.maxcor,
                                             outer_maxls=args.outer_maxls,
                                             scalar_fun=phase1_scalar_fun,
+                                            progress_callback=phase1_progress_callback,
                                             target_lane_initial_step_size=None,
                                             failure_callback=phase1_failure_callback,
                                             invalid_state_events=(
@@ -9114,6 +9288,7 @@ if __name__ == "__main__":
                                         maxcor=args.maxcor,
                                         outer_maxls=args.outer_maxls,
                                         scalar_fun=phase1_scalar_fun,
+                                        progress_callback=phase1_progress_callback,
                                         failure_callback=phase1_failure_callback,
                                     )
                             _record_timing(
@@ -9121,6 +9296,15 @@ if __name__ == "__main__":
                                 "outer_optimizer_initial_phase_s",
                                 phase1_start_s,
                                 _perf_counter_s(),
+                            )
+                            record_outer_optimizer_event(
+                                "phase1_returned",
+                                phase="phase1",
+                                elapsed_s=timings.get("outer_optimizer_initial_phase_s"),
+                                result=summarize_optimizer_result_for_progress(
+                                    phase1_res
+                                ),
+                                retry_summary=phase1_retry_summary,
                             )
                             phase1_iterations = int(phase1_res.nit)
                             phase1_termination_message = str(phase1_res.message)
@@ -9174,6 +9358,13 @@ if __name__ == "__main__":
                             f"boozer_newton_maxiter={target_lane_boozer_newton_maxiter_record}, "
                             f"remaining_maxiter={remaining_maxiter})..."
                         )
+                        record_outer_optimizer_event(
+                            "phase2_started",
+                            phase="phase2",
+                            maxiter=int(remaining_maxiter),
+                            initial_step_size=args.target_lane_outer_initial_step_size,
+                            optimizer_dofs=_summarize_host_vector(dofs),
+                        )
                     if run_main_optimizer:
                         main_failure_callback = (
                             resolve_target_lane_invalid_state_failure_callback(
@@ -9182,6 +9373,13 @@ if __name__ == "__main__":
                                 use_target_lane=use_target_lane,
                                 args=args,
                             )
+                        )
+                        main_failure_callback = wrap_outer_optimizer_failure_callback(
+                            main_failure_callback,
+                            phase="phase2",
+                        )
+                        main_progress_callback = build_outer_optimizer_progress_callback(
+                            "phase2"
                         )
                         main_optimizer_start_s = _perf_counter_s()
                         with maybe_trace_single_stage_phase(
@@ -9203,6 +9401,7 @@ if __name__ == "__main__":
                                         maxcor=args.maxcor,
                                         outer_maxls=args.outer_maxls,
                                         scalar_fun=target_scalar_objective,
+                                        progress_callback=main_progress_callback,
                                         target_lane_initial_step_size=(
                                             args.target_lane_outer_initial_step_size
                                         ),
@@ -9224,6 +9423,7 @@ if __name__ == "__main__":
                                     maxcor=args.maxcor,
                                     outer_maxls=args.outer_maxls,
                                     scalar_fun=target_scalar_objective,
+                                    progress_callback=main_progress_callback,
                                     target_lane_initial_step_size=None,
                                     failure_callback=main_failure_callback,
                                 )
@@ -9232,6 +9432,13 @@ if __name__ == "__main__":
                             "outer_optimizer_main_s",
                             main_optimizer_start_s,
                             _perf_counter_s(),
+                        )
+                        record_outer_optimizer_event(
+                            "phase2_returned",
+                            phase="phase2",
+                            elapsed_s=timings.get("outer_optimizer_main_s"),
+                            result=summarize_optimizer_result_for_progress(res),
+                            retry_summary=target_lane_retry_summary,
                         )
                         termination_message = str(res.message)
                         if target_lane_retry_summary["attempt_count"] > 0:
@@ -9267,6 +9474,12 @@ if __name__ == "__main__":
                                 f"phase2={termination_message}"
                             )
                     else:
+                        record_outer_optimizer_event(
+                            "phase2_skipped",
+                            phase="phase2",
+                            phase1_termination_message=phase1_termination_message,
+                            remaining_maxiter=int(remaining_maxiter),
+                        )
                         res = phase1_res
                         if phase1_final_dofs is not None:
                             res.x = phase1_final_dofs
@@ -9888,3 +10101,5 @@ if __name__ == "__main__":
             results["TARGET_LANE_INVALID_STATE_DIAGNOSIS"],
         )
     write_json_file(os.path.join(OUT_DIR_ITER, "results.json"), results)
+    faulthandler.disable()
+    fatal_error_log_stream.close()

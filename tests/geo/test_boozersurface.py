@@ -1,5 +1,6 @@
 import unittest
 import inspect
+from unittest.mock import patch
 
 import numpy as np
 from simsopt._core.optimizable import Optimizable
@@ -62,6 +63,153 @@ def _make_free_current_biotsavart(attr_name="coils"):
 
 
 class BoozerSurfaceTests(unittest.TestCase):
+    def setUp(self):
+        boozersurface_module._BOOZER_RESIDUAL_CALL_MODE = None
+        boozersurface_module._BOOZER_RESIDUAL_DS_CALL_MODE = None
+        boozersurface_module._BOOZER_RESIDUAL_DS2_CALL_MODE = None
+
+    def test_call_boozer_residual_falls_back_to_alpha_only_signature(self):
+        calls = []
+
+        def _fake_residual(*args):
+            calls.append(args)
+            if len(args) == 7:
+                raise TypeError("incompatible function arguments")
+            self.assertEqual(len(args), 6)
+            return 1.25
+
+        with patch.object(
+            boozersurface_module.sopp, "boozer_residual", new=_fake_residual
+        ):
+            value = boozersurface_module._call_boozer_residual(
+                3.5,
+                0.2,
+                np.zeros((1, 1, 3)),
+                np.zeros((1, 1, 3)),
+                np.zeros((1, 1, 3)),
+                True,
+            )
+            cached_value = boozersurface_module._call_boozer_residual(
+                3.5,
+                0.2,
+                np.zeros((1, 1, 3)),
+                np.zeros((1, 1, 3)),
+                np.zeros((1, 1, 3)),
+                True,
+            )
+
+        self.assertEqual(value, 1.25)
+        self.assertEqual(cached_value, 1.25)
+        self.assertEqual(boozersurface_module._BOOZER_RESIDUAL_CALL_MODE, "alpha_only")
+        self.assertEqual([len(args) for args in calls], [7, 6, 6])
+
+    def test_call_boozer_residual_ds_falls_back_to_alpha_only_signature(self):
+        calls = []
+        expected_gradient = np.arange(5, dtype=float)
+
+        def _fake_residual_ds(*args):
+            calls.append(args)
+            if len(args) == 11:
+                raise TypeError("incompatible function arguments")
+            self.assertEqual(len(args), 10)
+            return 2.5, expected_gradient
+
+        with patch.object(
+            boozersurface_module.sopp, "boozer_residual_ds", new=_fake_residual_ds
+        ):
+            value, gradient = boozersurface_module._call_boozer_residual_ds(
+                3.5,
+                0.2,
+                np.zeros((1, 1, 3)),
+                np.zeros((1, 1, 3, 3)),
+                np.zeros((1, 1, 3)),
+                np.zeros((1, 1, 3)),
+                np.zeros((1, 1, 3, 2)),
+                np.zeros((1, 1, 3, 2)),
+                np.zeros((1, 1, 3, 2)),
+                True,
+            )
+            cached_value, cached_gradient = (
+                boozersurface_module._call_boozer_residual_ds(
+                    3.5,
+                    0.2,
+                    np.zeros((1, 1, 3)),
+                    np.zeros((1, 1, 3, 3)),
+                    np.zeros((1, 1, 3)),
+                    np.zeros((1, 1, 3)),
+                    np.zeros((1, 1, 3, 2)),
+                    np.zeros((1, 1, 3, 2)),
+                    np.zeros((1, 1, 3, 2)),
+                    True,
+                )
+            )
+
+        self.assertEqual(value, 2.5)
+        np.testing.assert_allclose(gradient, expected_gradient)
+        self.assertEqual(cached_value, 2.5)
+        np.testing.assert_allclose(cached_gradient, expected_gradient)
+        self.assertEqual(
+            boozersurface_module._BOOZER_RESIDUAL_DS_CALL_MODE, "alpha_only"
+        )
+        self.assertEqual([len(args) for args in calls], [11, 10, 10])
+
+    def test_call_boozer_residual_ds2_falls_back_to_alpha_only_signature(self):
+        calls = []
+        expected_gradient = np.arange(5, dtype=float)
+        expected_hessian = np.eye(5)
+
+        def _fake_residual_ds2(*args):
+            calls.append(args)
+            if len(args) == 12:
+                raise TypeError("incompatible function arguments")
+            self.assertEqual(len(args), 11)
+            return 3.5, expected_gradient, expected_hessian
+
+        with patch.object(
+            boozersurface_module.sopp, "boozer_residual_ds2", new=_fake_residual_ds2
+        ):
+            value, gradient, hessian = boozersurface_module._call_boozer_residual_ds2(
+                3.5,
+                0.2,
+                np.zeros((1, 1, 3)),
+                np.zeros((1, 1, 3, 3)),
+                np.zeros((1, 1, 3, 3, 3)),
+                np.zeros((1, 1, 3)),
+                np.zeros((1, 1, 3)),
+                np.zeros((1, 1, 3, 2)),
+                np.zeros((1, 1, 3, 2)),
+                np.zeros((1, 1, 3, 2)),
+                True,
+            )
+            (
+                cached_value,
+                cached_gradient,
+                cached_hessian,
+            ) = boozersurface_module._call_boozer_residual_ds2(
+                3.5,
+                0.2,
+                np.zeros((1, 1, 3)),
+                np.zeros((1, 1, 3, 3)),
+                np.zeros((1, 1, 3, 3, 3)),
+                np.zeros((1, 1, 3)),
+                np.zeros((1, 1, 3)),
+                np.zeros((1, 1, 3, 2)),
+                np.zeros((1, 1, 3, 2)),
+                np.zeros((1, 1, 3, 2)),
+                True,
+            )
+
+        self.assertEqual(value, 3.5)
+        np.testing.assert_allclose(gradient, expected_gradient)
+        np.testing.assert_allclose(hessian, expected_hessian)
+        self.assertEqual(cached_value, 3.5)
+        np.testing.assert_allclose(cached_gradient, expected_gradient)
+        np.testing.assert_allclose(cached_hessian, expected_hessian)
+        self.assertEqual(
+            boozersurface_module._BOOZER_RESIDUAL_DS2_CALL_MODE, "alpha_only"
+        )
+        self.assertEqual([len(args) for args in calls], [12, 11, 11])
+
     def test_solver_signatures_do_not_expose_vectorize(self):
         lbfgs_params = inspect.signature(
             BoozerSurface.minimize_boozer_penalty_constraints_LBFGS

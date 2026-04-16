@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass
 from typing import Collection, Iterable, Literal, Mapping
 
-from banana_opt.hardware_contracts import (
+from .hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
     COIL_COIL_MIN_DIST_M,
     COIL_LENGTH_TARGET_M,

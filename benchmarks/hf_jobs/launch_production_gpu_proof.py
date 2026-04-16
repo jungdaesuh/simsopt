@@ -23,12 +23,14 @@ from benchmarks.validation_ladder_contract import (  # noqa: E402
     optimizer_drift_tolerances,
     resolve_probe_lane,
 )
-
-DEFAULT_STAGE2_SEED_REL = (
-    "benchmarks/fixtures/single_stage_seed_iota15/biot_savart_opt.json"
+from benchmarks.single_stage_smoke_defaults import (  # noqa: E402
+    DEFAULT_PLASMA_SURF_FILENAME,
+    DEFAULT_STAGE2_BS_REL_PATH,
 )
+
+DEFAULT_STAGE2_SEED_REL = str(DEFAULT_STAGE2_BS_REL_PATH)
 DEFAULT_EQUILIBRIA_REL = "examples/single_stage_optimization/equilibria"
-DEFAULT_PLASMA = "wout_nfp22ginsburg_000_014417_iota15.nc"
+DEFAULT_PLASMA = DEFAULT_PLASMA_SURF_FILENAME
 DEFAULT_FALLBACK_IMAGE = "python:3.11-bookworm"
 DEFAULT_IMAGE = os.environ.get("SIMSOPT_HF_GPU_IMAGE") or None
 DEFAULT_TARGET_OPTIMIZER_BACKEND = "ondevice"

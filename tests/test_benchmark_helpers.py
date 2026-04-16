@@ -63,6 +63,7 @@ from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_PLASMA_SURF_FILENAME,
     default_optimizer_backend_for_backend,
 )
+from benchmarks.single_stage_smoke_defaults import DEFAULT_STAGE2_RESULTS_PATH
 from benchmarks.single_stage_init_parity import (
     DEFAULT_OUTER_MAXITER,
     DEFAULT_STAGE2_BS_PATH,
@@ -451,12 +452,32 @@ def test_single_stage_init_fixture_files_are_vendored():
 
 
 def test_single_stage_init_fixture_results_include_required_seed_metadata():
-    results = json.loads(DEFAULT_STAGE2_BS_PATH.with_name("results.json").read_text())
+    results = json.loads(DEFAULT_STAGE2_RESULTS_PATH.read_text())
 
     assert results["MAJOR_RADIUS"] > 0.0
     assert results["TOROIDAL_FLUX"] > 0.0
     assert results["banana_surf_radius"] > 0.0
     assert results["order"] >= 1
+    assert results["TF_CURRENT_A"] > 0.0
+    assert results["NUM_TF_COILS"] > 0
+
+
+def test_single_stage_init_fixture_tf_current_contract_is_valid():
+    from simsopt._core.optimizable import load
+
+    from examples.single_stage_optimization.banana_opt.current_contracts import (
+        resolve_loaded_tf_current_A,
+    )
+
+    results = json.loads(DEFAULT_STAGE2_RESULTS_PATH.read_text())
+    bs = load(str(DEFAULT_STAGE2_BS_PATH))
+
+    tf_current_A = resolve_loaded_tf_current_A(
+        results["TF_CURRENT_A"],
+        bs.coils[: int(results["NUM_TF_COILS"])],
+    )
+
+    assert tf_current_A == pytest.approx(80000.0)
 
 
 def test_single_stage_init_defaults_to_reduced_grid_smoke_fixture(monkeypatch):

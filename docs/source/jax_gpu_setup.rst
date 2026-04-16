@@ -365,6 +365,59 @@ Troubleshooting
   Consumer GPUs (RTX series) have 1/32 or 1/64 FP64 throughput.
   Performance will be poor; use only for correctness validation.
 
+Runpod Operational Notes
+------------------------
+
+The following points were validated on **April 17, 2026** during real
+Runpod RTX 4090 proof runs with exact ``jax==0.9.2`` / ``jaxlib==0.9.2``.
+These are setup lessons, not theoretical guidance.
+
+**Use a Linux-built environment on the pod**
+  Do not copy a local macOS ``.conda`` or virtualenv into Runpod and try to
+  execute it there.  The copied interpreter can fail immediately with
+  ``Exec format error`` because the binaries are built for the wrong OS/ABI.
+  Build the Python environment on the pod itself.
+
+**Exact JAX 0.9.2 on the stock CUDA 12.4 Runpod image needed CUDA toolkit 12.9**
+  On ``runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04``, the exact
+  ``jax[cuda12]==0.9.2`` wheel stack only became reliable after installing
+  ``cuda-toolkit-12-9`` and repointing ``/usr/local/cuda`` to
+  ``/usr/local/cuda-12.9``.  Without that upgrade, prior proof attempts hit
+  CUDA userspace/toolchain mismatches.
+
+**Keep the bundled-wheel CUDA mode**
+  For the pip-installed JAX CUDA wheel path, keep
+  ``SIMSOPT_JAX_CUDA_LIBRARY_MODE=bundled``.  That preserves the intended
+  wheel-provided NVIDIA library resolution path.  Do not reintroduce older
+  behavior that unsets ``LD_LIBRARY_PATH`` in the proof harness.
+
+**Editable installs still need version metadata**
+  This repo uses ``setuptools_scm`` for versioning.  If you sync a source tree
+  onto the pod without ``.git``, editable install can fail because the build
+  backend cannot resolve version metadata.  Either:
+
+  1. clone the repo on the pod with real git metadata, or
+  2. create a local git snapshot on the pod before installing.
+
+**Single-stage seed paths are a package contract, not just one JSON file**
+  ``single_stage_banana_example.py`` does not only read
+  ``biot_savart_opt.json``.  It also expects the sibling ``results.json`` next
+  to that Stage 2 seed path.  If you copy only ``biot_savart_opt.json`` onto
+  the pod, single-stage startup can fail with ``FileNotFoundError`` for the
+  missing adjacent ``results.json``.
+
+**Current single-stage smoke donors must satisfy the TF-current contract**
+  The older single-stage benchmark seed family includes ``TF_CURRENT_A=100000``.
+  Current single-stage heads enforce ``TF_CURRENT_A <= 80000``, so real Runpod
+  single-stage validation should use a strict-80k donor package instead of the
+  legacy 100 kA fixture.
+
+**macOS-to-Linux archive syncs can still leak Apple metadata**
+  When syncing from macOS to Runpod, tar streams can emit repeated
+  ``LIBARCHIVE.xattr.com.apple.*`` warnings on the Linux extractor if the
+  source archive carries Apple xattrs.  Use a metadata-free archive path when
+  pushing repo snapshots to the pod.
+
 Version Upgrade Policy
 ----------------------
 

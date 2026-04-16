@@ -1,15 +1,912 @@
 {
+  "schema_version": 1,
+  "provenance": {
+    "title": "Stage 2 banana coil optimization",
+    "generated_at_utc": "2026-04-15T17:59:38.712196Z",
+    "repo_root": "/Users/suhjungdae/code/columbia",
+    "repo_sha": "4ebaad41148b041fa3c64cb88a9c666a4ee36f0e",
+    "script_path": "/Users/suhjungdae/code/columbia/simsopt-jax/examples/single_stage_optimization/STAGE_2/banana_coil_solver.py",
+    "output_root": "/Users/suhjungdae/code/columbia/simsopt-jax/examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.210-INITC=10000-MAXC=16000-TFC=80000-Order=2-NQ=128-CP=4-SFW=1-backend=jax-cm=penalty",
+    "argv": [
+      "/Users/suhjungdae/code/columbia/simsopt-jax/examples/single_stage_optimization/STAGE_2/banana_coil_solver.py",
+      "--backend",
+      "jax",
+      "--optimizer-backend",
+      "ondevice",
+      "--skip-postprocess",
+      "--nphi",
+      "31",
+      "--ntheta",
+      "16",
+      "--maxiter",
+      "0",
+      "--trajectory-json",
+      "/var/folders/cx/6v0629d93nzc_tjzpzsrwj4h0000gn/T/stage2-ondevice-trajectory-icx3rch4/trajectory.json"
+    ],
+    "cwd": "/Users/suhjungdae/code/columbia/simsopt-jax",
+    "python": "3.13.12",
+    "python_executable": "/opt/homebrew/Caskroom/miniforge/base/bin/python3.13",
+    "jax": "0.9.2",
+    "jaxlib": "0.9.2",
+    "backend": "cpu",
+    "devices": [
+      "TFRT_CPU_0"
+    ],
+    "x64_enabled": true,
+    "backend_mode": "native_cpu",
+    "backend_label": "native_cpu",
+    "backend_strict": false,
+    "transfer_guard": null,
+    "jax_platform_request": "cpu",
+    "compilation_cache_policy": "not_applicable",
+    "compilation_cache_dir": null,
+    "environment": {
+      "SIMSOPT_BACKEND_MODE": null,
+      "SIMSOPT_BACKEND_STRICT": null,
+      "SIMSOPT_JAX_TRANSFER_GUARD": null,
+      "JAX_PLATFORMS": null,
+      "CUDA_VISIBLE_DEVICES": null
+    }
+  },
+  "artifacts": {
+    "output_root": "/Users/suhjungdae/code/columbia/simsopt-jax/examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.210-INITC=10000-MAXC=16000-TFC=80000-Order=2-NQ=128-CP=4-SFW=1-backend=jax-cm=penalty",
+    "required": {
+      "results.json": {
+        "path": "/Users/suhjungdae/code/columbia/simsopt-jax/examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.210-INITC=10000-MAXC=16000-TFC=80000-Order=2-NQ=128-CP=4-SFW=1-backend=jax-cm=penalty/results.json",
+        "exists": true
+      },
+      "biot_savart_opt.json": {
+        "path": "/Users/suhjungdae/code/columbia/simsopt-jax/examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.210-INITC=10000-MAXC=16000-TFC=80000-Order=2-NQ=128-CP=4-SFW=1-backend=jax-cm=penalty/biot_savart_opt.json",
+        "exists": true
+      },
+      "surf_opt.json": {
+        "path": "/Users/suhjungdae/code/columbia/simsopt-jax/examples/single_stage_optimization/STAGE_2/outputs-wout_nfp22ginsburg_000_014417_iota15.nc/R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.210-INITC=10000-MAXC=16000-TFC=80000-Order=2-NQ=128-CP=4-SFW=1-backend=jax-cm=penalty/surf_opt.json",
+        "exists": true
+      }
+    },
+    "optional": {},
+    "policy": {
+      "skip_postprocess": true
+    }
+  },
+  "problem_contract": {
+    "workflow": "stage2-banana-coil-optimization",
+    "equilibrium": {
+      "filename": "wout_nfp22ginsburg_000_014417_iota15.nc",
+      "path": "/Users/suhjungdae/code/columbia/simsopt-jax/examples/single_stage_optimization/equilibria/wout_nfp22ginsburg_000_014417_iota15.nc"
+    },
+    "resolution": {
+      "nphi": 31,
+      "ntheta": 16,
+      "num_quadpoints": 128,
+      "order": 2,
+      "field_diagnostic_stride": 1
+    },
+    "seed_parameters": {
+      "major_radius": 0.915,
+      "toroidal_flux": 0.24,
+      "banana_surface_radius": 0.21,
+      "theta_center": 0.5,
+      "phi_center": 0.06,
+      "theta_width": 0.1,
+      "phi_width": 0.03
+    },
+    "objective_weights": {
+      "squared_flux": 1.0,
+      "length": 0.0005,
+      "coil_coil_distance": 100.0,
+      "curvature": 0.0001
+    },
+    "hardware_thresholds": {
+      "length_target": 1.7,
+      "coil_coil_distance": 0.05,
+      "curvature": 100.0
+    },
+    "runtime_contract": {
+      "field_backend": "jax",
+      "optimizer_backend": "ondevice",
+      "least_squares_algorithm": "lm",
+      "constraint_method": "penalty",
+      "max_iterations": 0,
+      "init_only": false,
+      "skip_postprocess": true
+    }
+  },
+  "PLASMA_SURF_FILENAME": "wout_nfp22ginsburg_000_014417_iota15.nc",
+  "PLASMA_SURF_PATH": "/Users/suhjungdae/code/columbia/simsopt-jax/examples/single_stage_optimization/equilibria/wout_nfp22ginsburg_000_014417_iota15.nc",
+  "STAGE2_BS_PATH": null,
+  "TF_CURRENT_A": 80000.0,
+  "TF_CURRENT_SUM_ABS_A": 1600000.0,
+  "NUM_TF_COILS": 20,
+  "BANANA_INIT_CURRENT_A": 10000.0,
+  "BANANA_CURRENT_MAX_A": 16000.0,
+  "BANANA_CURRENT_A": 10000.0,
+  "BANANA_TO_TF_CURRENT_RATIO": 0.125,
   "CC_THRESHOLD": 0.05,
-  "CC_WEIGHT": 100,
+  "CC_WEIGHT": 100.0,
   "CURVATURE_WEIGHT": 0.0001,
+  "CURVATURE_THRESHOLD": 100.0,
   "LENGTH_WEIGHT": 0.0005,
+  "COIL_PLASMA_MIN_DIST_M": 0.015,
+  "PLASMA_VESSEL_MIN_DIST_M": 0.04,
+  "CONSTRAINT_METHOD": "penalty",
+  "theta_center": 0.5,
+  "phi_center": 0.06,
+  "theta_width": 0.1,
+  "phi_width": 0.03,
+  "LENGTH_TARGET": 1.7,
   "MAJOR_RADIUS": 0.915,
   "TOROIDAL_FLUX": 0.24,
-  "banana_surf_radius": 0.22,
+  "NFP": 5,
+  "banana_surf_radius": 0.21,
   "order": 2,
-  "max_iterations": 300,
-  "iterations": 300,
-  "FINAL_VOLUME": 0.09374293647252192,
-  "FIELD_ERROR": 0.009485710555577545,
-  "SELF_INTERSECTING": false
+  "init_only": false,
+  "max_iterations": 0,
+  "iterations": 0,
+  "TERMINATION_MESSAGE": "maximum iterations reached",
+  "OPTIMIZER_SUCCESS": false,
+  "basin_hops": 0,
+  "basin_stepsize": null,
+  "basin_temperature": null,
+  "basin_niter_success": null,
+  "basin_seed": null,
+  "basin_iterations": null,
+  "basin_minimization_failures": null,
+  "basin_accepted_hops": null,
+  "basin_rejected_hops": null,
+  "basin_best_objective": null,
+  "basin_accept_test_rejections": null,
+  "basin_accept_test_triggered": null,
+  "basin_nonfinite_rejections": null,
+  "basin_normalized_step_rejections": null,
+  "basin_completed_hops": null,
+  "basin_initial_objective": null,
+  "basin_best_hop_objective": null,
+  "basin_best_hop_index": null,
+  "basin_best_result_source": null,
+  "basin_objective_improvement": null,
+  "ALM_MAX_OUTER_ITERS": null,
+  "ALM_MAX_SUBPROBLEM_CONTINUATIONS": null,
+  "ALM_OUTER_ITERATIONS": null,
+  "ALM_PENALTY_INIT": null,
+  "ALM_PENALTY_SCALE": null,
+  "ALM_PENALTY_MAX": null,
+  "ALM_FEAS_TOL": null,
+  "ALM_STATIONARITY_TOL": null,
+  "ALM_TRUST_RADIUS_INIT": null,
+  "ALM_TRUST_RADIUS_MIN": null,
+  "ALM_TRUST_RADIUS_SHRINK": null,
+  "ALM_TRUST_RADIUS_GROW": null,
+  "ALM_MAX_INNER_ATTEMPTS": null,
+  "ALM_DISTANCE_SMOOTHING": null,
+  "ALM_CURVATURE_SMOOTHING": null,
+  "ALM_TAYLOR_TEST_ENABLED": null,
+  "ALM_TAYLOR_TEST_SEED": null,
+  "ALM_TAYLOR_RESULT": null,
+  "ALM_TERMINATION_REASON": null,
+  "ALM_CONVERGED": null,
+  "ALM_RESTORED_BEST_FEASIBLE": null,
+  "ALM_RESTORED_BEST_FEASIBLE_REASON": null,
+  "ALM_INNER_OPTIMIZER_SUCCESS": null,
+  "ALM_INNER_OPTIMIZER_MESSAGE": null,
+  "ALM_FINAL_MAX_FEASIBILITY_VIOLATION": null,
+  "ALM_FINAL_STATIONARITY_NORM": null,
+  "ALM_FINAL_RAW_STATIONARITY_NORM": null,
+  "ALM_FINAL_KKT_STATIONARITY_NORM": null,
+  "ALM_FINAL_FEASIBILITY_TOL": null,
+  "ALM_FINAL_STATIONARITY_TOL": null,
+  "ALM_FINAL_PENALTY": null,
+  "ALM_FINAL_MULTIPLIERS": null,
+  "ALM_FINAL_CONSTRAINT_VALUES": null,
+  "ALM_FINAL_SOLVER_CONSTRAINT_VALUES": null,
+  "ALM_FINAL_HARD_SIGNED_CONSTRAINT_VALUES": null,
+  "ALM_FINAL_HARD_VIOLATION_VALUES": null,
+  "ALM_FINAL_SURROGATE_SIGNED_CONSTRAINT_VALUES": null,
+  "ALM_FINAL_HARD_MAX_VIOLATION": null,
+  "ALM_FINAL_SURROGATE_MAX_VALUE": null,
+  "ALM_FINAL_HARD_POSITIVE_SHIFT_ZERO": null,
+  "ALM_FINAL_SIGNAL_MISMATCH_ACTIVE": null,
+  "ALM_FINAL_PENALTY_GRADIENT_NORM": null,
+  "ALM_FINAL_TRUST_RADIUS": null,
+  "ALM_MULTIPLIER_CAP_BINDING": null,
+  "ALM_MULTIPLIER_CAP_BINDING_INDICES": null,
+  "ALM_FINAL_BASE_OBJECTIVE": null,
+  "ALM_FINAL_PENALTY_OBJECTIVE": null,
+  "ALM_FINAL_PENALTY_OBJECTIVE_RATIO": null,
+  "ALM_FINAL_TOTAL_GRAD_NORM": null,
+  "ALM_FINAL_BASE_GRAD_NORM": null,
+  "ALM_FINAL_PENALTY_GRAD_NORM": null,
+  "ALM_FINAL_PENALTY_GRAD_RATIO": null,
+  "ALM_PENALTY_CAP_REACHED": null,
+  "ALM_PENALTY_CAP_REQUESTED": null,
+  "ALM_HISTORY": null,
+  "FINAL_VOLUME": 0.09374293647251883,
+  "FIELD_ERROR": 0.05825530170279561,
+  "SELF_INTERSECTING": false,
+  "CURVE_CURVE_MIN_DIST": 0.09619507591890812,
+  "CURVE_SURFACE_MIN_DIST": 0.06055175701495014,
+  "SURFACE_VESSEL_MIN_DIST": 0.06870994132207642,
+  "MAX_CURVATURE": 9.563257250887936,
+  "COIL_LENGTH": 0.8867855177197002,
+  "TF_CURRENT_LIMIT_A": 80000.0,
+  "HARDWARE_CONSTRAINTS_OK": true,
+  "HARDWARE_CONSTRAINT_VIOLATIONS": [],
+  "backend": "jax",
+  "optimizer_backend": "ondevice",
+  "least_squares_algorithm": "lm",
+  "field_diagnostic_stride": 1,
+  "banana_curve_class": "CurveCWSFourierCPP",
+  "OPTIMIZER_ACCEPTED_ITERATIONS": 0,
+  "BEST_FEASIBLE_PARTIAL_AVAILABLE": false,
+  "BEST_FEASIBLE_PARTIAL_RESTORED": false,
+  "BEST_FEASIBLE_PARTIAL_ACCEPTED_INDEX": null,
+  "BEST_FEASIBLE_PARTIAL_OBJECTIVE": null,
+  "FINAL_DOFS": [
+    1.0,
+    0.06,
+    0.03,
+    0.0,
+    0.0,
+    0.0,
+    0.5,
+    0.0,
+    0.0,
+    0.1,
+    0.0
+  ],
+  "FINAL_OBJECTIVE": 0.0010977516199695207,
+  "OBJECTIVE_J": 0.0010977516199695207,
+  "FINAL_SQUARED_FLUX": 0.0010977516199695207,
+  "FINAL_CURVE_LENGTH": 0.8867855177197002,
+  "FINAL_CC_DISTANCE": 0.09619507591890812,
+  "FINAL_COIL_SURFACE_DISTANCE": 0.06055175701495014,
+  "FINAL_MEAN_ABS_RELBN": 0.058255301702795595,
+  "FINAL_BANANA_GAMMA": [
+    [
+      0.6467551909345436,
+      0.41044332495391145,
+      2.5717582782094416e-17
+    ],
+    [
+      0.6469326371179919,
+      0.4103499211703556,
+      -0.006473301509037855
+    ],
+    [
+      0.6474638052229864,
+      0.41006914274186906,
+      -0.012924883036764452
+    ],
+    [
+      0.6483451928162834,
+      0.4095993039210302,
+      -0.019333215250885483
+    ],
+    [
+      0.6495709921247638,
+      0.4089376463855918,
+      -0.025677146314795608
+    ],
+    [
+      0.65113313424715,
+      0.4080804148629983,
+      -0.031936081232612205
+    ],
+    [
+      0.6530213506260395,
+      0.4070229605224913,
+      -0.03809015019573686
+    ],
+    [
+      0.6552232513539424,
+      0.40575986974221523,
+      -0.044120362728862404
+    ],
+    [
+      0.6577244197631077,
+      0.4042851152991122,
+      -0.05000874481013257
+    ],
+    [
+      0.6605085226245369,
+      0.40259222655580457,
+      -0.05573845658608279
+    ],
+    [
+      0.663557435157679,
+      0.4006744748430232,
+      -0.06129388880205375
+    ],
+    [
+      0.6668513799303123,
+      0.3985250699665356,
+      -0.06666073660661226
+    ],
+    [
+      0.6703690786098763,
+      0.3961373636081763,
+      -0.07182604994706147
+    ],
+    [
+      0.6740879154151503,
+      0.3935050553416738,
+      -0.07677826033534263
+    ],
+    [
+      0.6779841110129947,
+      0.39062239704199203,
+      -0.08150718431319363
+    ],
+    [
+      0.6820329055111604,
+      0.387484391624852,
+      -0.0860040044673024
+    ],
+    [
+      0.6862087491170779,
+      0.3840869823010689,
+      -0.09026122932617749
+    ],
+    [
+      0.6904854989658366,
+      0.3804272288560402,
+      -0.09427263389952872
+    ],
+    [
+      0.694836620569582,
+      0.3765034678541874,
+      -0.09803318298958164
+    ],
+    [
+      0.6992353923060037,
+      0.37231545410639666,
+      -0.1015389397059364
+    ],
+    [
+      0.7036551113455204,
+      0.36786448121025084,
+      -0.10478696184793442
+    ],
+    [
+      0.7080692994145593,
+      0.3631534794631248,
+      -0.10777518898002043
+    ],
+    [
+      0.7124519068047311,
+      0.35818708994297627,
+      -0.11050232311749837
+    ],
+    [
+      0.7167775130628414,
+      0.3529717140382312,
+      -0.11296770596546218
+    ],
+    [
+      0.7210215228323572,
+      0.3475155381756063,
+      -0.11517119561715106
+    ],
+    [
+      0.7251603553605795,
+      0.3418285339340657,
+      -0.1171130455252334
+    ],
+    [
+      0.7291716262347973,
+      0.33592243413753303,
+      -0.11879378841700278
+    ],
+    [
+      0.7330343199626209,
+      0.32981068588368423,
+      -0.12021412763892865
+    ],
+    [
+      0.7367289520643749,
+      0.323508381788328,
+      -0.12137483819420065
+    ],
+    [
+      0.7402377193972152,
+      0.31703217100349806,
+      -0.12227667948530371
+    ],
+    [
+      0.7435446374805649,
+      0.31040015180284614,
+      -0.12292032149823066
+    ],
+    [
+      0.7466356636403122,
+      0.30363174772182683,
+      -0.12330628587101021
+    ],
+    [
+      0.7494988048356325,
+      0.2967475693948438,
+      -0.12343490298141933
+    ],
+    [
+      0.7521242090787993,
+      0.28976926434977707,
+      -0.12330628587101021
+    ],
+    [
+      0.7545042394072224,
+      0.2827193571049982,
+      -0.12292032149823066
+    ],
+    [
+      0.7566335294212777,
+      0.2756210819677662,
+      -0.12227667948530371
+    ],
+    [
+      0.7585090194648555,
+      0.268498210957984,
+      -0.12137483819420065
+    ],
+    [
+      0.7601299726019715,
+      0.26137487927927294,
+      -0.12021412763892865
+    ],
+    [
+      0.7614979696363874,
+      0.2542754107310489,
+      -0.11879378841700278
+    ],
+    [
+      0.7626168825360359,
+      0.2472241454009149,
+      -0.1171130455252334
+    ],
+    [
+      0.7634928257637614,
+      0.24024527189570116,
+      -0.11517119561715106
+    ],
+    [
+      0.7641340851835121,
+      0.2333626662608986,
+      -0.11296770596546218
+    ],
+    [
+      0.7645510244086955,
+      0.22659973960075344,
+      -0.11050232311749837
+    ],
+    [
+      0.7647559686878873,
+      0.2199792962436468,
+      -0.10777518898002043
+    ],
+    [
+      0.7647630666820401,
+      0.21352340409857898,
+      -0.10478696184793442
+    ],
+    [
+      0.7645881307748391,
+      0.2072532786182667,
+      -0.1015389397059364
+    ],
+    [
+      0.7642484568704394,
+      0.2011891815231091,
+      -0.09803318298958164
+    ],
+    [
+      0.7637626249653876,
+      0.19535033514987116,
+      -0.09427263389952872
+    ],
+    [
+      0.7631502821275201,
+      0.18975485297259911,
+      -0.09026122932617749
+    ],
+    [
+      0.7624319098660389,
+      0.1844196865058106,
+      -0.0860040044673024
+    ],
+    [
+      0.7616285782246915,
+      0.17936058844781774,
+      -0.08150718431319363
+    ],
+    [
+      0.760761689263994,
+      0.17459209156313732,
+      -0.07677826033534263
+    ],
+    [
+      0.7598527129081957,
+      0.17012750244668345,
+      -0.07182604994706147
+    ],
+    [
+      0.7589229184074943,
+      0.16597890896932022,
+      -0.06666073660661234
+    ],
+    [
+      0.7579931048954541,
+      0.16215719988553914,
+      -0.06129388880205375
+    ],
+    [
+      0.7570833346959159,
+      0.15867209480094563,
+      -0.05573845658608279
+    ],
+    [
+      0.7562126731443104,
+      0.15553218246096037,
+      -0.05000874481013257
+    ],
+    [
+      0.755398938728113,
+      0.15274496514285354,
+      -0.044120362728862404
+    ],
+    [
+      0.7546584673149386,
+      0.15031690681961896,
+      -0.03809015019573686
+    ],
+    [
+      0.7540058941213907,
+      0.14825348272292274,
+      -0.031936081232612205
+    ],
+    [
+      0.7534539568804999,
+      0.1465592279675867,
+      -0.025677146314795608
+    ],
+    [
+      0.7530133233921033,
+      0.14523778301308543,
+      -0.019333215250885483
+    ],
+    [
+      0.7526924462930493,
+      0.14429193392655632,
+      -0.012924883036764452
+    ],
+    [
+      0.7524974474692492,
+      0.14372364567189735,
+      -0.006473301509037855
+    ],
+    [
+      0.7524320340581756,
+      0.14353408697266504,
+      2.5717582782094416e-17
+    ],
+    [
+      0.7524974474692492,
+      0.14372364567189735,
+      0.006473301509037907
+    ],
+    [
+      0.7526924462930493,
+      0.14429193392655632,
+      0.012924883036764504
+    ],
+    [
+      0.7530133233921033,
+      0.14523778301308543,
+      0.019333215250885535
+    ],
+    [
+      0.7534539568804999,
+      0.1465592279675867,
+      0.025677146314795656
+    ],
+    [
+      0.7540058941213907,
+      0.14825348272292274,
+      0.03193608123261225
+    ],
+    [
+      0.7546584673149386,
+      0.15031690681961896,
+      0.038090150195736916
+    ],
+    [
+      0.755398938728113,
+      0.15274496514285354,
+      0.04412036272886246
+    ],
+    [
+      0.7562126731443104,
+      0.15553218246096037,
+      0.05000874481013263
+    ],
+    [
+      0.7570833346959159,
+      0.15867209480094557,
+      0.055738456586082834
+    ],
+    [
+      0.7579931048954542,
+      0.16215719988553914,
+      0.06129388880205381
+    ],
+    [
+      0.7589229184074943,
+      0.1659789089693202,
+      0.0666607366066124
+    ],
+    [
+      0.7598527129081957,
+      0.17012750244668343,
+      0.07182604994706152
+    ],
+    [
+      0.760761689263994,
+      0.17459209156313732,
+      0.07677826033534269
+    ],
+    [
+      0.7616285782246915,
+      0.17936058844781774,
+      0.08150718431319359
+    ],
+    [
+      0.762431909866039,
+      0.18441968650581056,
+      0.08600400446730253
+    ],
+    [
+      0.7631502821275201,
+      0.18975485297259903,
+      0.09026122932617753
+    ],
+    [
+      0.7637626249653876,
+      0.19535033514987113,
+      0.09427263389952867
+    ],
+    [
+      0.7642484568704394,
+      0.2011891815231091,
+      0.09803318298958168
+    ],
+    [
+      0.7645881307748391,
+      0.20725327861826673,
+      0.10153893970593644
+    ],
+    [
+      0.7647630666820402,
+      0.21352340409857895,
+      0.10478696184793446
+    ],
+    [
+      0.7647559686878874,
+      0.21997929624364682,
+      0.10777518898002048
+    ],
+    [
+      0.7645510244086955,
+      0.22659973960075339,
+      0.11050232311749834
+    ],
+    [
+      0.7641340851835122,
+      0.23336266626089852,
+      0.11296770596546213
+    ],
+    [
+      0.7634928257637614,
+      0.24024527189570105,
+      0.11517119561715101
+    ],
+    [
+      0.7626168825360359,
+      0.2472241454009149,
+      0.11711304552523344
+    ],
+    [
+      0.7614979696363874,
+      0.25427541073104887,
+      0.11879378841700272
+    ],
+    [
+      0.7601299726019716,
+      0.2613748792792729,
+      0.12021412763892869
+    ],
+    [
+      0.7585090194648555,
+      0.26849821095798393,
+      0.12137483819420071
+    ],
+    [
+      0.7566335294212778,
+      0.2756210819677661,
+      0.12227667948530375
+    ],
+    [
+      0.7545042394072226,
+      0.28271935710499824,
+      0.1229203214982307
+    ],
+    [
+      0.7521242090787993,
+      0.28976926434977707,
+      0.12330628587101027
+    ],
+    [
+      0.7494988048356325,
+      0.29674756939484376,
+      0.12343490298141938
+    ],
+    [
+      0.7466356636403122,
+      0.3036317477218268,
+      0.12330628587101027
+    ],
+    [
+      0.7435446374805651,
+      0.3104001518028461,
+      0.1229203214982307
+    ],
+    [
+      0.7402377193972153,
+      0.3170321710034982,
+      0.12227667948530375
+    ],
+    [
+      0.7367289520643749,
+      0.323508381788328,
+      0.12137483819420071
+    ],
+    [
+      0.733034319962621,
+      0.32981068588368423,
+      0.12021412763892869
+    ],
+    [
+      0.7291716262347973,
+      0.33592243413753303,
+      0.11879378841700279
+    ],
+    [
+      0.7251603553605795,
+      0.3418285339340657,
+      0.11711304552523344
+    ],
+    [
+      0.7210215228323573,
+      0.3475155381756064,
+      0.11517119561715111
+    ],
+    [
+      0.7167775130628414,
+      0.3529717140382312,
+      0.11296770596546213
+    ],
+    [
+      0.7124519068047311,
+      0.35818708994297627,
+      0.11050232311749841
+    ],
+    [
+      0.7080692994145594,
+      0.3631534794631249,
+      0.10777518898002048
+    ],
+    [
+      0.7036551113455204,
+      0.3678644812102508,
+      0.10478696184793446
+    ],
+    [
+      0.6992353923060038,
+      0.3723154541063965,
+      0.10153893970593644
+    ],
+    [
+      0.694836620569582,
+      0.3765034678541874,
+      0.09803318298958168
+    ],
+    [
+      0.6904854989658366,
+      0.3804272288560402,
+      0.09427263389952877
+    ],
+    [
+      0.686208749117078,
+      0.38408698230106886,
+      0.09026122932617761
+    ],
+    [
+      0.6820329055111605,
+      0.387484391624852,
+      0.08600400446730253
+    ],
+    [
+      0.6779841110129948,
+      0.390622397041992,
+      0.08150718431319368
+    ],
+    [
+      0.6740879154151503,
+      0.3935050553416738,
+      0.07677826033534269
+    ],
+    [
+      0.6703690786098763,
+      0.3961373636081763,
+      0.07182604994706152
+    ],
+    [
+      0.6668513799303124,
+      0.3985250699665357,
+      0.0666607366066124
+    ],
+    [
+      0.663557435157679,
+      0.4006744748430231,
+      0.061293888802053886
+    ],
+    [
+      0.660508522624537,
+      0.4025922265558046,
+      0.05573845658608293
+    ],
+    [
+      0.6577244197631077,
+      0.4042851152991122,
+      0.05000874481013272
+    ],
+    [
+      0.6552232513539424,
+      0.40575986974221523,
+      0.04412036272886246
+    ],
+    [
+      0.6530213506260395,
+      0.4070229605224913,
+      0.038090150195737
+    ],
+    [
+      0.65113313424715,
+      0.4080804148629983,
+      0.031936081232612344
+    ],
+    [
+      0.6495709921247639,
+      0.4089376463855917,
+      0.02567714631479575
+    ],
+    [
+      0.6483451928162834,
+      0.4095993039210302,
+      0.019333215250885535
+    ],
+    [
+      0.6474638052229864,
+      0.41006914274186906,
+      0.012924883036764504
+    ],
+    [
+      0.6469326371179919,
+      0.4103499211703556,
+      0.006473301509038
+    ]
+  ],
+  "SELF_INTERSECTION_MIN_DISTANCE": 0.001243564037914765,
+  "SELF_INTERSECTION_TOLERANCE": 4.433925340517763e-05,
+  "SELF_INTERSECTION_PENALTY": 0.0,
+  "OPTIMIZER_TIMINGS": {
+    "cold_run_s": 4.213774916999682
+  }
 }

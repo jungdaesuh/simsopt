@@ -94,6 +94,35 @@ def test_optimizer_dtype_uses_dtype_attr_without_eager_hostification(monkeypatch
     assert _opt._optimizer_dtype(HasDtypeOnly()) == np.dtype(np.float64)
 
 
+def test_prepare_optimizer_pytree_adapter_uses_leaf_metadata_without_hostification(
+    monkeypatch,
+):
+    original_asarray = _opt.np.asarray
+
+    def guarded_asarray(value, *args, **kwargs):
+        if isinstance(value, jax.Array):
+            raise AssertionError(
+                "np.asarray should not run on JAX pytree leaves during adapter prep"
+            )
+        return original_asarray(value, *args, **kwargs)
+
+    monkeypatch.setattr(_opt.np, "asarray", guarded_asarray)
+
+    adapter = _opt._prepare_optimizer_pytree_adapter(
+        {
+            "surface": jax.device_put(np.asarray([1.0, -2.0], dtype=np.float64)),
+            "current": jax.device_put(np.asarray([0.5], dtype=np.float64)),
+        }
+    )
+
+    assert adapter is not None
+    assert len(adapter.leaf_signature) == 2
+    assert {
+        ((2,), np.dtype(np.float64).str),
+        ((1,), np.dtype(np.float64).str),
+    } == set(adapter.leaf_signature)
+
+
 def test_resolve_lbfgs_limits_normalizes_to_int32_counter_domain():
     maxiter, maxfun, maxgrad = _opt_common._resolve_lbfgs_limits(
         4,
