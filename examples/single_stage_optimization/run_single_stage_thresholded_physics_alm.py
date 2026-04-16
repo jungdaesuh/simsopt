@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -11,20 +12,20 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from workflow_runner_common import (  # noqa: E402
     SINGLE_STAGE_SCRIPT_PATH,
+    append_single_stage_handoff_flags,
     clear_dry_run_marker,
     discover_single_results_path,
     dry_run_marker_path,
     load_json,
-    load_stage2_artifact_results,
+    load_validated_stage2_seed_results,
+    maybe_load_validated_stage2_seed_results,
     resolved_path,
     resolved_optional_path,
     timeout_or_none,
     run_command,
     snapshot_single_results_paths,
-    validate_stage2_seed_not_init_only,
     write_dry_run_marker,
 )
-from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results  # noqa: E402
 
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_single_stage_thresholded_physics_alm"
 DEFAULT_SUMMARY_JSON = "single_stage_thresholded_physics_alm_summary.json"
@@ -65,6 +66,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--equilibria-dir", default=None)
     parser.add_argument(
+        "--equilibrium-path",
+        default=None,
+        help="Optional explicit equilibrium path forwarded into the single-stage run.",
+    )
+    parser.add_argument(
         "--output-root",
         default=str(DEFAULT_OUTPUT_ROOT),
     )
@@ -83,6 +89,47 @@ def parse_args() -> argparse.Namespace:
     # The 0.20 value is only a convenience default for historical reruns.
     parser.add_argument("--iota-target", type=float, default=0.20)
     parser.add_argument("--vol-target", type=float, default=0.10)
+    parser.add_argument(
+        "--constraint-weight",
+        type=float,
+        default=float(os.environ.get("CONSTRAINT_WEIGHT", "1.0")),
+        help=(
+            "Boozer constraint weight forwarded into the single-stage run. "
+            "Use a negative value to select the exact Boozer Newton solver."
+        ),
+    )
+    parser.add_argument(
+        "--boozer-I",
+        type=float,
+        default=float(os.environ["BOOZER_I"]) if "BOOZER_I" in os.environ else None,
+        help="Expert/internal Boozer-current input. Prefer --plasma-current-A.",
+    )
+    parser.add_argument(
+        "--plasma-current-A",
+        type=float,
+        default=float(os.environ["PLASMA_CURRENT_A"]) if "PLASMA_CURRENT_A" in os.environ else None,
+        help="User-facing enclosed toroidal plasma current in physical SI amperes.",
+    )
+    parser.add_argument(
+        "--num-tf-coils",
+        type=int,
+        default=int(os.environ.get("NUM_TF_COILS", "20")),
+        help="Expected number of TF coils in the loaded Stage 2 artifact.",
+    )
+    parser.add_argument(
+        "--banana-surf-radius",
+        type=float,
+        default=float(os.environ["BANANA_SURF_RADIUS"]) if "BANANA_SURF_RADIUS" in os.environ else None,
+    )
+    parser.add_argument(
+        "--stage2-seed-tf-current-A",
+        type=float,
+        default=float(os.environ["STAGE2_SEED_TF_CURRENT_A"]) if "STAGE2_SEED_TF_CURRENT_A" in os.environ else None,
+        help=(
+            "Optional legacy backfill for TF_CURRENT_A when the loaded Stage 2 "
+            "artifact predates that metadata field."
+        ),
+    )
     parser.add_argument("--cc-dist", type=float, default=0.05)
     parser.add_argument("--cs-dist", type=float, default=0.015)
     parser.add_argument("--curvature-threshold", type=float, default=100.0)
@@ -134,43 +181,20 @@ def load_validated_stage2_seed_metadata(
     *,
     stage2_bs_path: Path | None = None,
 ) -> tuple[Path, Path, dict]:
-    if stage2_bs_path is None:
-        stage2_bs_path = resolved_path(args.stage2_bs_path)
-    stage2_results_path, stage2_results = load_stage2_artifact_results(stage2_bs_path)
-    stage2_results = upgrade_legacy_stage2_artifact_results(stage2_results)
-    actual_surface = stage2_results.get("PLASMA_SURF_FILENAME")
-    expected_surface = Path(args.plasma_surf_filename).name
-    if actual_surface is None:
-        raise ValueError(
-            f"Stage 2 artifact results.json is missing PLASMA_SURF_FILENAME: {stage2_results_path}"
-        )
-    if Path(str(actual_surface)).name != expected_surface:
-        raise ValueError(
-            "Stage 2 artifact surface mismatch: "
-            f"--plasma-surf-filename requests {expected_surface!r}, but "
-            f"{stage2_results_path} reports {actual_surface!r}."
-        )
-    validate_stage2_seed_not_init_only(
-        stage2_results_path,
-        stage2_results,
+    return load_validated_stage2_seed_results(
+        args,
         owner_label="run_single_stage_thresholded_physics_alm.py",
-        allow_init_only=getattr(args, "allow_init_only_stage2_seed", False),
+        stage2_bs_path=stage2_bs_path,
     )
-    return stage2_bs_path, stage2_results_path, stage2_results
 
 
 def maybe_load_validated_stage2_seed_metadata(
     args: argparse.Namespace,
 ) -> tuple[Path, Path | None, dict | None]:
-    stage2_bs_path = resolved_path(args.stage2_bs_path)
-    stage2_results_path = stage2_bs_path.with_name("results.json")
-    if not stage2_bs_path.exists() or not stage2_results_path.exists():
-        return stage2_bs_path, None, None
-    _, loaded_results_path, stage2_results = load_validated_stage2_seed_metadata(
+    return maybe_load_validated_stage2_seed_results(
         args,
-        stage2_bs_path=stage2_bs_path,
+        owner_label="run_single_stage_thresholded_physics_alm.py",
     )
-    return stage2_bs_path, loaded_results_path, stage2_results
 
 
 def build_single_stage_thresholded_physics_command(
@@ -256,6 +280,7 @@ def build_single_stage_thresholded_physics_command(
     ]
     if equilibria_dir is not None:
         command.extend(["--equilibria-dir", str(equilibria_dir)])
+    append_single_stage_handoff_flags(command, args)
     return command
 
 

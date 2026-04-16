@@ -908,6 +908,20 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
 
         self.assertEqual(upgraded_results["TF_CURRENT_SUM_ABS_A"], 1.6e6)
 
+    def test_legacy_smoke_artifact_backfills_tf_current_from_known_seed_contract(self):
+        module = load_finite_current_smoke_module()
+        legacy_results = {
+            "NUM_TF_COILS": 20,
+        }
+
+        upgraded_results = module.upgrade_legacy_stage2_artifact_results(
+            legacy_results,
+            known_tf_current_A=8.0e4,
+        )
+
+        self.assertEqual(upgraded_results["TF_CURRENT_A"], 8.0e4)
+        self.assertEqual(upgraded_results["TF_CURRENT_SUM_ABS_A"], 1.6e6)
+
     def test_legacy_smoke_artifact_upgrades_total_tf_current_from_negative_tf_current(self):
         module = load_finite_current_smoke_module()
         legacy_results = {

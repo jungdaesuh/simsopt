@@ -16,6 +16,7 @@ from workflow_helpers import (
     local_stage2_bs_path,
     validate_normalized_toroidal_flux,
 )
+from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
 
 STAGE2_SCRIPT_PATH = SCRIPT_DIR / "STAGE_2" / "banana_coil_solver.py"
 SINGLE_STAGE_SCRIPT_PATH = SCRIPT_DIR / "SINGLE_STAGE" / "single_stage_banana_example.py"
@@ -328,6 +329,107 @@ def resolved_optional_path(raw_path: str | Path | None) -> Path | None:
     if raw_path is None:
         return None
     return resolved_path(raw_path)
+
+
+def load_validated_stage2_seed_results(
+    args: object,
+    *,
+    owner_label: str,
+    stage2_bs_path: str | Path | None = None,
+) -> tuple[Path, Path, dict]:
+    resolved_stage2_bs_path = (
+        resolved_path(getattr(args, "stage2_bs_path"))
+        if stage2_bs_path is None
+        else resolved_path(stage2_bs_path)
+    )
+    stage2_results_path, stage2_results = load_stage2_artifact_results(
+        resolved_stage2_bs_path
+    )
+    stage2_results = upgrade_legacy_stage2_artifact_results(
+        stage2_results,
+        known_num_tf_coils=getattr(args, "num_tf_coils", None),
+        known_tf_current_A=getattr(args, "stage2_seed_tf_current_A", None),
+    )
+    actual_surface = stage2_results.get("PLASMA_SURF_FILENAME")
+    expected_surface = Path(getattr(args, "plasma_surf_filename")).name
+    if actual_surface is None:
+        raise ValueError(
+            f"Stage 2 artifact results.json is missing PLASMA_SURF_FILENAME: {stage2_results_path}"
+        )
+    if Path(str(actual_surface)).name != expected_surface:
+        raise ValueError(
+            "Stage 2 artifact surface mismatch: "
+            f"--plasma-surf-filename requests {expected_surface!r}, but "
+            f"{stage2_results_path} reports {actual_surface!r}."
+        )
+    validate_stage2_seed_not_init_only(
+        stage2_results_path,
+        stage2_results,
+        owner_label=owner_label,
+        allow_init_only=bool(
+            getattr(args, "allow_init_only_stage2_seed", False)
+        ),
+    )
+    return resolved_stage2_bs_path, stage2_results_path, stage2_results
+
+
+def maybe_load_validated_stage2_seed_results(
+    args: object,
+    *,
+    owner_label: str,
+) -> tuple[Path, Path | None, dict | None]:
+    stage2_bs_path = resolved_path(getattr(args, "stage2_bs_path"))
+    stage2_results_path = stage2_bs_path.with_name("results.json")
+    if not stage2_bs_path.exists() or not stage2_results_path.exists():
+        return stage2_bs_path, None, None
+    return load_validated_stage2_seed_results(
+        args,
+        owner_label=owner_label,
+        stage2_bs_path=stage2_bs_path,
+    )
+
+
+def append_optional_flag(command: list[str], flag: str, value) -> None:
+    if value is not None:
+        command.extend([flag, str(value)])
+
+
+def append_bool_flag(command: list[str], flag: str, enabled: bool) -> None:
+    if enabled:
+        command.append(flag)
+
+
+def append_single_stage_handoff_flags(command: list[str], args: object) -> None:
+    equilibrium_path = resolved_optional_path(getattr(args, "equilibrium_path", None))
+    if equilibrium_path is not None:
+        command.extend(["--equilibrium-path", str(equilibrium_path)])
+    append_optional_flag(
+        command,
+        "--constraint-weight",
+        getattr(args, "constraint_weight", None),
+    )
+    append_optional_flag(command, "--num-tf-coils", getattr(args, "num_tf_coils", None))
+    append_optional_flag(
+        command,
+        "--stage2-seed-tf-current-A",
+        getattr(args, "stage2_seed_tf_current_A", None),
+    )
+    append_optional_flag(command, "--boozer-I", getattr(args, "boozer_I", None))
+    append_optional_flag(
+        command,
+        "--plasma-current-A",
+        getattr(args, "plasma_current_A", None),
+    )
+    append_optional_flag(
+        command,
+        "--banana-surf-radius",
+        getattr(args, "banana_surf_radius", None),
+    )
+    append_bool_flag(
+        command,
+        "--allow-init-only-stage2-seed",
+        bool(getattr(args, "allow_init_only_stage2_seed", False)),
+    )
 
 
 def timeout_or_none(timeout_seconds: float) -> float | None:

@@ -4,6 +4,8 @@ import math
 from pathlib import Path
 
 from .current_contracts import BANANA_CURRENT_HARD_LIMIT_A, resolve_effective_current_mode
+from .hardware_contracts import fixed_stage2_artifact_hardware_contract
+from .hardware_constraint_schema import build_bootability_recovery_payload_fields
 
 DEFAULT_LEGACY_BANANA_INIT_CURRENT_A = 1.0e4
 
@@ -28,12 +30,31 @@ def _upgrade_legacy_banana_current_metadata(upgraded_results: dict) -> None:
         )
 
 
+def _upgrade_legacy_stage2_hardware_contract_metadata(upgraded_results: dict) -> None:
+    for key, value in fixed_stage2_artifact_hardware_contract().items():
+        if upgraded_results.get(key) is None:
+            upgraded_results[key] = float(value)
+
+
+def _upgrade_legacy_bootability_recovery_metadata(upgraded_results: dict) -> None:
+    for key, value in build_bootability_recovery_payload_fields(
+        None,
+        recovery_attempted=False,
+        recovery_succeeded=False,
+    ).items():
+        if upgraded_results.get(key) is None:
+            upgraded_results[key] = value
+
+
 def upgrade_legacy_stage2_artifact_results(
     stage2_artifact_results: dict,
     *,
     known_num_tf_coils: int | None = None,
+    known_tf_current_A: float | None = None,
 ) -> dict:
     upgraded_results = dict(stage2_artifact_results)
+    if upgraded_results.get("TF_CURRENT_A") is None and known_tf_current_A is not None:
+        upgraded_results["TF_CURRENT_A"] = float(known_tf_current_A)
     if upgraded_results.get("NUM_TF_COILS") is None and known_num_tf_coils is not None:
         upgraded_results["NUM_TF_COILS"] = int(known_num_tf_coils)
     if upgraded_results.get("TF_CURRENT_SUM_ABS_A") is None:
@@ -44,6 +65,8 @@ def upgrade_legacy_stage2_artifact_results(
                 num_tf_coils
             )
     _upgrade_legacy_banana_current_metadata(upgraded_results)
+    _upgrade_legacy_stage2_hardware_contract_metadata(upgraded_results)
+    _upgrade_legacy_bootability_recovery_metadata(upgraded_results)
     return upgraded_results
 
 
@@ -168,6 +191,7 @@ def expected_locked_baseline_stage2_artifact_metadata(
         "CC_THRESHOLD": config.cc_threshold,
         "CURVATURE_WEIGHT": config.curvature_weight,
         "CURVATURE_THRESHOLD": config.curvature_threshold,
+        **fixed_stage2_artifact_hardware_contract(),
         "banana_surf_radius": config.banana_surf_radius,
         "order": config.order,
         "CONSTRAINT_METHOD": config.constraint_method,

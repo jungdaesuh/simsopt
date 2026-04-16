@@ -13,17 +13,17 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from workflow_runner_common import (  # noqa: E402
     SINGLE_STAGE_SCRIPT_PATH,
+    append_single_stage_handoff_flags,
     discover_single_results_path,
     load_json,
-    load_stage2_artifact_results,
+    load_validated_stage2_seed_results,
+    maybe_load_validated_stage2_seed_results,
     resolved_optional_path,
     resolved_path,
     run_command,
     snapshot_single_results_paths,
     timeout_or_none,
-    validate_stage2_seed_not_init_only,
 )
-from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results  # noqa: E402
 
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_single_stage_goal_mode_comparison"
 DEFAULT_SUMMARY_JSON = "single_stage_goal_mode_comparison_summary.json"
@@ -158,6 +158,11 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--equilibria-dir", default=None)
+    parser.add_argument(
+        "--equilibrium-path",
+        default=None,
+        help="Optional explicit equilibrium path forwarded into the single-stage run.",
+    )
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument(
         "--summary-json",
@@ -203,13 +208,37 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     )
     parser.add_argument("--iota-target", type=float, default=0.15)
     parser.add_argument("--vol-target", type=float, default=0.10)
+    parser.add_argument(
+        "--constraint-weight",
+        type=float,
+        default=float(os.environ.get("CONSTRAINT_WEIGHT", "1.0")),
+        help=(
+            "Boozer constraint weight forwarded into the single-stage run. "
+            "Use a negative value to select the exact Boozer Newton solver."
+        ),
+    )
     parser.add_argument("--boozer-I", type=float, default=float(os.environ["BOOZER_I"]) if "BOOZER_I" in os.environ else None)
     parser.add_argument(
         "--plasma-current-A",
         type=float,
         default=float(os.environ["PLASMA_CURRENT_A"]) if "PLASMA_CURRENT_A" in os.environ else None,
     )
+    parser.add_argument(
+        "--num-tf-coils",
+        type=int,
+        default=int(os.environ.get("NUM_TF_COILS", "20")),
+        help="Expected number of TF coils in the loaded Stage 2 artifact.",
+    )
     parser.add_argument("--banana-surf-radius", type=float, default=float(os.environ["BANANA_SURF_RADIUS"]) if "BANANA_SURF_RADIUS" in os.environ else None)
+    parser.add_argument(
+        "--stage2-seed-tf-current-A",
+        type=float,
+        default=float(os.environ["STAGE2_SEED_TF_CURRENT_A"]) if "STAGE2_SEED_TF_CURRENT_A" in os.environ else None,
+        help=(
+            "Optional legacy backfill for TF_CURRENT_A when the loaded Stage 2 "
+            "artifact predates that metadata field."
+        ),
+    )
     parser.add_argument("--num-surfaces", type=int, choices=[1, 2], default=int(os.environ.get("NUM_SURFACES", "1")))
     parser.add_argument("--inner-surface-ratio", type=float, default=float(os.environ.get("INNER_SURFACE_RATIO", "0.8")))
     parser.add_argument("--surface-gap-threshold", type=float, default=float(os.environ.get("SURFACE_GAP_THRESHOLD", "0.0")))
@@ -283,43 +312,20 @@ def load_validated_stage2_seed_metadata(
     *,
     stage2_bs_path: Path | None = None,
 ) -> tuple[Path, Path, dict]:
-    if stage2_bs_path is None:
-        stage2_bs_path = resolved_path(args.stage2_bs_path)
-    stage2_results_path, stage2_results = load_stage2_artifact_results(stage2_bs_path)
-    stage2_results = upgrade_legacy_stage2_artifact_results(stage2_results)
-    actual_surface = stage2_results.get("PLASMA_SURF_FILENAME")
-    expected_surface = Path(args.plasma_surf_filename).name
-    if actual_surface is None:
-        raise ValueError(
-            f"Stage 2 artifact results.json is missing PLASMA_SURF_FILENAME: {stage2_results_path}"
-        )
-    if Path(str(actual_surface)).name != expected_surface:
-        raise ValueError(
-            "Stage 2 artifact surface mismatch: "
-            f"--plasma-surf-filename requests {expected_surface!r}, but "
-            f"{stage2_results_path} reports {actual_surface!r}."
-        )
-    validate_stage2_seed_not_init_only(
-        stage2_results_path,
-        stage2_results,
+    return load_validated_stage2_seed_results(
+        args,
         owner_label="run_single_stage_goal_mode_comparison.py",
-        allow_init_only=getattr(args, "allow_init_only_stage2_seed", False),
+        stage2_bs_path=stage2_bs_path,
     )
-    return stage2_bs_path, stage2_results_path, stage2_results
 
 
 def maybe_load_validated_stage2_seed_metadata(
     args: argparse.Namespace,
 ) -> tuple[Path, Path | None, dict | None]:
-    stage2_bs_path = resolved_path(args.stage2_bs_path)
-    stage2_results_path = stage2_bs_path.with_name("results.json")
-    if not stage2_bs_path.exists() or not stage2_results_path.exists():
-        return stage2_bs_path, None, None
-    _, loaded_results_path, stage2_results = load_validated_stage2_seed_metadata(
+    return maybe_load_validated_stage2_seed_results(
         args,
-        stage2_bs_path=stage2_bs_path,
+        owner_label="run_single_stage_goal_mode_comparison.py",
     )
-    return stage2_bs_path, loaded_results_path, stage2_results
 
 
 def build_single_stage_goal_mode_command(
@@ -448,9 +454,7 @@ def build_single_stage_goal_mode_command(
     ]
     if equilibria_dir is not None:
         command.extend(["--equilibria-dir", str(equilibria_dir)])
-    _append_optional_flag(command, "--boozer-I", args.boozer_I)
-    _append_optional_flag(command, "--plasma-current-A", args.plasma_current_A)
-    _append_optional_flag(command, "--banana-surf-radius", args.banana_surf_radius)
+    append_single_stage_handoff_flags(command, args)
     _append_optional_flag(command, "--length-target", args.length_target)
     _append_optional_flag(command, "--frontier-volume-weight", args.frontier_volume_weight)
     _append_optional_flag(command, "--alm-qs-threshold", args.alm_qs_threshold)

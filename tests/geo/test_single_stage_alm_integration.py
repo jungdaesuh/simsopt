@@ -226,6 +226,7 @@ def make_single_stage_thresholded_physics_rerun_args(**overrides):
         "stage2_bs_path": "relative/seed.json",
         "output_root": "outputs",
         "equilibria_dir": None,
+        "equilibrium_path": None,
         "summary_json": None,
         "allow_init_only_stage2_seed": False,
         "single_stage_timeout_seconds": 0.0,
@@ -233,6 +234,12 @@ def make_single_stage_thresholded_physics_rerun_args(**overrides):
         "ntheta": 32,
         "mpol": 8,
         "ntor": 6,
+        "constraint_weight": 1.0,
+        "boozer_I": None,
+        "plasma_current_A": None,
+        "num_tf_coils": 20,
+        "banana_surf_radius": None,
+        "stage2_seed_tf_current_A": None,
         "maxiter": 300,
         "iota_target": 0.2,
         "vol_target": 0.1,
@@ -1245,6 +1252,42 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--equilibria-dir") + 1],
             str(Path("eqdir").resolve()),
+        )
+
+    def test_single_stage_thresholded_physics_rerun_wrapper_forwards_stage2_handoff_flags(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+        args = make_single_stage_thresholded_physics_rerun_args(
+            allow_init_only_stage2_seed=True,
+            equilibrium_path="eq/demo.nc",
+            constraint_weight=-1.0,
+            boozer_I=0.031,
+            plasma_current_A=9000.0,
+            num_tf_coils=18,
+            banana_surf_radius=0.23,
+            stage2_seed_tf_current_A=12345.0,
+        )
+
+        command = module.build_single_stage_thresholded_physics_command(args)
+
+        self.assertIn("--allow-init-only-stage2-seed", command)
+        self.assertEqual(
+            command[command.index("--equilibrium-path") + 1],
+            str(Path("eq/demo.nc").resolve()),
+        )
+        self.assertEqual(command[command.index("--constraint-weight") + 1], "-1.0")
+        self.assertEqual(command[command.index("--boozer-I") + 1], "0.031")
+        self.assertEqual(
+            command[command.index("--plasma-current-A") + 1],
+            "9000.0",
+        )
+        self.assertEqual(command[command.index("--num-tf-coils") + 1], "18")
+        self.assertEqual(
+            command[command.index("--banana-surf-radius") + 1],
+            "0.23",
+        )
+        self.assertEqual(
+            command[command.index("--stage2-seed-tf-current-A") + 1],
+            "12345.0",
         )
 
     def test_single_stage_thresholded_physics_rerun_wrapper_parse_args_rejects_adaptive_mode(self):

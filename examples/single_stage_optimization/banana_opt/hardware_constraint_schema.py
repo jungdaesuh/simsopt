@@ -97,6 +97,25 @@ _ARTIFACT_THRESHOLD_FIELD_BY_NAME = {
     "banana_current": ("banana_current_max_A", "BANANA_CURRENT_MAX_A"),
     "tf_current": ("tf_current_limit_A", "TF_CURRENT_LIMIT_A"),
 }
+_BOOTABILITY_STATUS_FIELD_NAMES = (
+    "BOOZER_BOOTABLE",
+    "IOTA_FEASIBLE",
+    "BOOTABILITY_REASON",
+    "BOOTABILITY_STAGE",
+    "BOOTABILITY_TARGET_IOTA",
+    "BOOTABILITY_SOLVED_IOTA",
+    "BOOTABILITY_SELF_INTERSECTING",
+)
+_BOOTABILITY_PROVENANCE_FIELD_NAMES = (
+    "STAGE2_BS_PATH",
+    "STAGE2_RESULTS_PATH",
+)
+_RECOVERY_STATUS_FIELD_NAMES = (
+    "RECOVERY_ATTEMPTED",
+    "RECOVERY_SUCCEEDED",
+    "RECOVERY_ITERS",
+    "RECOVERY_TERMINATION_REASON",
+)
 
 
 def hardware_constraint_schema() -> tuple[HardwareConstraintSpec, ...]:
@@ -203,6 +222,63 @@ def build_hardware_constraint_artifact_payload_fields(
         None
         if artifact_hardware_status is None
         else list(artifact_hardware_status["violations"])
+    )
+    return payload_fields
+
+
+def bootability_recovery_payload_field_names(
+    *,
+    prefix: str = "",
+    include_provenance: bool = True,
+    include_recovery: bool = True,
+) -> tuple[str, ...]:
+    field_names = [
+        f"{prefix}{field}" for field in _BOOTABILITY_STATUS_FIELD_NAMES
+    ]
+    if include_provenance:
+        field_names.extend(
+            f"{prefix}{field}" for field in _BOOTABILITY_PROVENANCE_FIELD_NAMES
+        )
+    if include_recovery:
+        field_names.extend(
+            f"{prefix}{field}" for field in _RECOVERY_STATUS_FIELD_NAMES
+        )
+    return tuple(field_names)
+
+
+def build_bootability_recovery_payload_fields(
+    bootability_status: Mapping[str, object] | None,
+    *,
+    prefix: str = "",
+    stage2_bs_path: str | None = None,
+    stage2_results_path: str | None = None,
+    recovery_attempted: bool | None = None,
+    recovery_succeeded: bool | None = None,
+    recovery_iters: int | None = None,
+    recovery_termination_reason: str | None = None,
+) -> dict[str, object]:
+    payload_fields = {
+        field_name: None
+        for field_name in bootability_recovery_payload_field_names(prefix=prefix)
+    }
+    if bootability_status is not None:
+        for field_name in _BOOTABILITY_STATUS_FIELD_NAMES:
+            payload_fields[f"{prefix}{field_name}"] = bootability_status.get(field_name)
+    payload_fields[f"{prefix}STAGE2_BS_PATH"] = stage2_bs_path
+    payload_fields[f"{prefix}STAGE2_RESULTS_PATH"] = stage2_results_path
+    payload_fields[f"{prefix}RECOVERY_ATTEMPTED"] = (
+        None if recovery_attempted is None else bool(recovery_attempted)
+    )
+    payload_fields[f"{prefix}RECOVERY_SUCCEEDED"] = (
+        None if recovery_succeeded is None else bool(recovery_succeeded)
+    )
+    payload_fields[f"{prefix}RECOVERY_ITERS"] = (
+        None if recovery_iters is None else int(recovery_iters)
+    )
+    payload_fields[f"{prefix}RECOVERY_TERMINATION_REASON"] = (
+        None
+        if recovery_termination_reason is None
+        else str(recovery_termination_reason)
     )
     return payload_fields
 

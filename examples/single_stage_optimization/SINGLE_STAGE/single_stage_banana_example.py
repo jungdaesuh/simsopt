@@ -152,6 +152,15 @@ from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for t
     resolve_penalty_phase1_settings,
     run_penalty_phase1,
 )
+from banana_opt.stage2_single_stage_handoff import (
+    build_equilibrium_path as _build_equilibrium_path_impl,
+    initialize_boozer_surface as _initialize_boozer_surface_impl,
+    resolve_single_stage_banana_surf_radius as _resolve_single_stage_banana_surf_radius_impl,
+    resolve_stage2_num_tf_coils as _resolve_stage2_num_tf_coils_impl,
+    resolve_stage2_tf_current_A as _resolve_stage2_tf_current_A_impl,
+    validate_loaded_stage2_coils_partition as _validate_loaded_stage2_coils_partition_impl,
+    validate_stage2_seed_contract as _validate_stage2_seed_contract_impl,
+)
 from banana_opt.single_stage_geometry import (
     build_scipy_bounds,
     build_surface_configs as _build_surface_configs_impl,
@@ -542,59 +551,22 @@ def infer_uniform_tf_current_A(tf_coils):
 
 
 def resolve_stage2_tf_current_A(stage2_results, tf_coils):
-    return _resolve_loaded_tf_current_A(stage2_results.get("TF_CURRENT_A"), tf_coils)
+    return _resolve_stage2_tf_current_A_impl(stage2_results, tf_coils)
 
 
 def resolve_stage2_num_tf_coils(stage2_results, requested_num_tf_coils):
-    requested_num_tf_coils = int(requested_num_tf_coils)
-    recorded_num_tf_coils = stage2_results.get("NUM_TF_COILS")
-    if recorded_num_tf_coils is None:
-        return requested_num_tf_coils
-    resolved_num_tf_coils = int(recorded_num_tf_coils)
-    if resolved_num_tf_coils <= 0:
-        raise ValueError(
-            f"Stage 2 artifact reports invalid NUM_TF_COILS={recorded_num_tf_coils!r}; "
-            "cannot partition loaded coils."
-        )
-    if resolved_num_tf_coils != requested_num_tf_coils:
-        raise ValueError(
-            "Loaded Stage 2 artifact reports "
-            f"NUM_TF_COILS={resolved_num_tf_coils}, but --num-tf-coils={requested_num_tf_coils}. "
-            "Single-stage reload now refuses to re-slice coils with inconsistent TF-count provenance."
-        )
-    return resolved_num_tf_coils
+    return _resolve_stage2_num_tf_coils_impl(stage2_results, requested_num_tf_coils)
 
 
 def resolve_single_stage_banana_surf_radius(stage2_results, requested_banana_surf_radius):
-    artifact_banana_surf_radius = validate_banana_winding_surface_radius(
-        stage2_results["banana_surf_radius"]
+    return _resolve_single_stage_banana_surf_radius_impl(
+        stage2_results,
+        requested_banana_surf_radius,
     )
-    if requested_banana_surf_radius is None:
-        return artifact_banana_surf_radius
-    resolved_banana_surf_radius = validate_banana_winding_surface_radius(
-        requested_banana_surf_radius
-    )
-    if abs(resolved_banana_surf_radius - artifact_banana_surf_radius) > 1.0e-12:
-        raise ValueError(
-            "Single-stage banana winding surface must match the loaded Stage 2 artifact "
-            f"radius {artifact_banana_surf_radius:.6f} m; got "
-            f"{resolved_banana_surf_radius:.6f} m."
-        )
-    return resolved_banana_surf_radius
 
 
 def validate_loaded_stage2_coils_partition(coils, num_tf_coils):
-    total_coils = len(coils)
-    if num_tf_coils > total_coils:
-        raise ValueError(
-            f"Loaded Stage 2 BiotSavart artifact has only {total_coils} coils, but "
-            f"NUM_TF_COILS={num_tf_coils}. Cannot partition TF and banana coils."
-        )
-    if num_tf_coils == total_coils:
-        raise ValueError(
-            f"Loaded Stage 2 BiotSavart artifact has {total_coils} coils and "
-            f"NUM_TF_COILS={num_tf_coils}, leaving no banana coils to optimize."
-        )
+    _validate_loaded_stage2_coils_partition_impl(coils, num_tf_coils)
 
 
 def resolve_plasma_current_settings(args):
@@ -612,17 +584,12 @@ def resolve_plasma_current_settings(args):
 
 
 def build_equilibrium_path(args):
-    if args.equilibrium_path is not None:
-        return args.equilibrium_path
-
-    candidate_paths = [
-        os.path.join(args.equilibria_dir, args.plasma_surf_filename),
-        os.path.join(DATABASE_EQUILIBRIA_DIR, args.plasma_surf_filename),
-    ]
-    for candidate_path in candidate_paths:
-        if os.path.exists(candidate_path):
-            return candidate_path
-    return candidate_paths[0]
+    return _build_equilibrium_path_impl(
+        args.plasma_surf_filename,
+        args.equilibria_dir,
+        equilibrium_path=args.equilibrium_path,
+        database_equilibria_dir=DATABASE_EQUILIBRIA_DIR,
+    )
 
 
 def apply_default_stage2_seed_args(args):
@@ -1421,55 +1388,21 @@ def initialize_boozer_surface(surf_prev, mpol, ntor, bs, vol_target, constraint_
     G0: Value of net current going through the torus hole
     nfp: number of field periods (default 5 for banana coils)
     """
-    surf = SurfaceXYZTensorFourier(
-          mpol=mpol,ntor=ntor,nfp=nfp,stellsym=True,
-          quadpoints_theta=surf_prev.quadpoints_theta,
-          quadpoints_phi=surf_prev.quadpoints_phi
-          )
-    surf.least_squares_fit(surf_prev.gamma())
-
-    if constraint_weight is not None:
-        # Boozer least square approach
-        print("Generating Boozer least squares surface...")
-        vol = Volume(surf)
-        boozer_surface = BoozerSurface(bs, surf, vol, vol_target, constraint_weight, options={'verbose':True}, I=boozer_I)
-    else:
-        # Boozer exact approach
-        print("Generating Boozer exact surface...")
-        surf_exact = SurfaceXYZTensorFourier(
-              mpol=mpol,ntor=ntor,nfp=nfp,stellsym=True,
-              quadpoints_theta=np.linspace(0,1,2*mpol+1,endpoint=False),
-              quadpoints_phi=np.linspace(0,1./nfp,2*ntor+1,endpoint=False),
-              dofs=surf.dofs
-              )
-    
-        vol = Volume(surf_exact)
-        boozer_surface = BoozerSurface(bs, surf_exact, vol, vol_target, None, options={'verbose':True}, I=boozer_I)
-
-    # Run boozer surface algorithm
-    res = boozer_surface.run_code(iota, G0)
-    print(f"G0 from solve: {res['G']}")
-    print(f"iota from solve: {res['iota']}")
-
-    # Check if boozer algo is successful
-    success1 = res['success'] # True if the boozer surface algo converged
-    try:
-        success2 = not boozer_surface.surface.is_self_intersecting() # True if surface is not self intersecting
-    except Exception:
-        success2 = False  # surface that folds is self-intersecting
-    success = success1 and success2
-    if not success:
-        print(
-            "Boozer initialization failed: "
-            f"solve_success={success1}, "
-            f"self_intersecting={not success2}, "
-            f"volume={boozer_surface.surface.volume()}, "
-            f"iota_guess={iota}, "
-            f"iota_solved={res['iota']}"
-        )
-        raise RuntimeError("Something went wrong with the Boozer solve...")
-
-    return boozer_surface
+    return _initialize_boozer_surface_impl(
+        surf_prev,
+        mpol,
+        ntor,
+        bs,
+        vol_target,
+        constraint_weight,
+        iota,
+        G0,
+        boozer_I,
+        nfp=nfp,
+        surface_cls=SurfaceXYZTensorFourier,
+        volume_cls=Volume,
+        boozer_surface_cls=BoozerSurface,
+    )
 
 
 def build_surface_configs(
@@ -5326,20 +5259,7 @@ CONFINEMENT_SURROGATE_EARLY_WEIGHT = 0.2
 
 
 def validate_stage2_seed_contract(stage2_results):
-    tf_current_A = stage2_results.get("TF_CURRENT_A")
-    if tf_current_A is None:
-        raise ValueError(
-            "Stage 2 seed artifact is missing TF_CURRENT_A even after legacy-contract "
-            "upgrade. Pass --stage2-seed-tf-current-A explicitly or use a newer "
-            "artifact with TF-current metadata."
-        )
-    validate_tf_current_limit(tf_current_A)
-    validate_banana_winding_surface_radius(stage2_results["banana_surf_radius"])
-    if float(stage2_results.get("CURVATURE_THRESHOLD", MAX_CURVATURE_INV_M)) > MAX_CURVATURE_INV_M:
-        raise ValueError(
-            "Stage 2 seed curvature threshold exceeds the hardware ceiling of "
-            f"{MAX_CURVATURE_INV_M:.1f} m^-1."
-        )
+    _validate_stage2_seed_contract_impl(stage2_results)
 
 
 if __name__ == "__main__":
