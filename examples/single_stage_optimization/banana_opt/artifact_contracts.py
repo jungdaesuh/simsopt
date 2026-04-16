@@ -6,6 +6,7 @@ from pathlib import Path
 from .current_contracts import BANANA_CURRENT_HARD_LIMIT_A, resolve_effective_current_mode
 from .hardware_contracts import fixed_stage2_artifact_hardware_contract
 from .hardware_constraint_schema import build_bootability_recovery_payload_fields
+from workflow_helpers import canonical_stage2_iota_constraint_weight
 
 DEFAULT_LEGACY_BANANA_INIT_CURRENT_A = 1.0e4
 
@@ -52,11 +53,35 @@ def _upgrade_legacy_stage2_iota_report_metadata(upgraded_results: dict) -> None:
         "STAGE2_IOTA_MODE": "off",
         "STAGE2_IOTA_TARGET": None,
         "STAGE2_IOTA_TOLERANCE": None,
+        "STAGE2_IOTA_WEIGHT": 1.0,
+        "STAGE2_IOTA_VOL_TARGET": 0.10,
+        "STAGE2_IOTA_CONSTRAINT_WEIGHT": 1.0,
+        "STAGE2_IOTA_NUM_TF_COILS": 20,
+        "STAGE2_IOTA_NPHI": 91,
+        "STAGE2_IOTA_NTHETA": 32,
+        "STAGE2_IOTA_MPOL": 8,
+        "STAGE2_IOTA_NTOR": 6,
         "STAGE2_IOTA_PROBE_SECONDS": None,
+        "BOOTABILITY_STAGE2_BS_PATH": None,
+        "BOOTABILITY_STAGE2_RESULTS_PATH": None,
+        "STAGE2_IOTA_HOT_LOOP_ENABLED": False,
+        "STAGE2_IOTA_BOOTSTRAP_SECONDS": None,
+        "STAGE2_IOTA_RUNTIME_SECONDS": None,
+        "STAGE2_IOTA_RUNTIME_CALLS": None,
+        "STAGE2_IOTA_INITIAL": None,
+        "STAGE2_IOTA_INITIAL_PENALTY": None,
+        "STAGE2_IOTA_FINAL": None,
+        "STAGE2_IOTA_FINAL_PENALTY": None,
+        "STAGE2_IOTA_PENALTY_THRESHOLD": None,
     }
     for key, value in defaults.items():
         if upgraded_results.get(key) is None:
             upgraded_results[key] = value
+    upgraded_results["STAGE2_IOTA_CONSTRAINT_WEIGHT"] = (
+        canonical_stage2_iota_constraint_weight(
+            upgraded_results.get("STAGE2_IOTA_CONSTRAINT_WEIGHT")
+        )
+    )
 
 
 def upgrade_legacy_stage2_artifact_results(

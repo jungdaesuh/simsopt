@@ -1,4 +1,6 @@
 import inspect
+import time
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -20,7 +22,14 @@ from banana_opt.hardware_constraint_schema import (
     build_threshold_overrides,
     hardware_constraint_alm_names,
 )
+from banana_opt.single_stage_geometry import build_surface_configs
 from banana_opt.smoothing import smoothmax_selected, smoothmin_selected
+from banana_opt.stage2_single_stage_handoff import (
+    attempt_initialize_boozer_surface,
+    compute_tf_G0,
+)
+from simsopt.geo.surfaceobjectives import Iotas
+from simsopt.objectives import QuadraticPenalty
 
 
 _SMOOTHING_EPS = float(np.finfo(float).eps)
@@ -30,6 +39,187 @@ def _new_derivative():
     from simsopt._core.derivative import Derivative
 
     return Derivative({})
+
+
+@dataclass
+class Stage2IotaRuntimeStats:
+    bootstrap_seconds: float
+    runtime_seconds: float = 0.0
+    runtime_calls: int = 0
+
+
+@dataclass(frozen=True)
+class Stage2IotaState:
+    iota: float
+    penalty: float
+    abs_error: float
+    feasible: bool
+
+
+@dataclass
+class Stage2IotaRuntime:
+    mode: str
+    boozer_surface: object
+    iota_term: object
+    penalty_objective: object
+    target: float
+    tolerance: float
+    weight: float
+    penalty_threshold: float
+    vol_target: float
+    constraint_weight: float | None
+    num_tf_coils: int
+    nphi: int
+    ntheta: int
+    mpol: int
+    ntor: int
+    stats: Stage2IotaRuntimeStats
+    initial_state: Stage2IotaState
+
+
+def stage2_iota_penalty_threshold(iota_tolerance: float) -> float:
+    tolerance = float(iota_tolerance)
+    if tolerance <= 0.0:
+        raise ValueError("Stage 2 iota tolerance must be positive.")
+    return 0.5 * tolerance * tolerance
+
+
+def _build_stage2_iota_state(
+    iota_term,
+    penalty_objective,
+    *,
+    target: float,
+    tolerance: float,
+) -> Stage2IotaState:
+    iota = float(iota_term.J())
+    penalty = float(penalty_objective.J())
+    abs_error = abs(iota - float(target))
+    return Stage2IotaState(
+        iota=iota,
+        penalty=penalty,
+        abs_error=abs_error,
+        feasible=abs_error <= float(tolerance),
+    )
+
+
+def evaluate_stage2_iota_state(stage2_iota_runtime: Stage2IotaRuntime) -> Stage2IotaState:
+    return _build_stage2_iota_state(
+        stage2_iota_runtime.iota_term,
+        stage2_iota_runtime.penalty_objective,
+        target=stage2_iota_runtime.target,
+        tolerance=stage2_iota_runtime.tolerance,
+    )
+
+
+def build_stage2_iota_runtime(
+    *,
+    equilibrium_file: str,
+    bs,
+    tf_coils,
+    major_radius: float,
+    toroidal_flux: float,
+    nphi: int,
+    ntheta: int,
+    mpol: int,
+    ntor: int,
+    vol_target: float,
+    iota_target: float,
+    iota_tolerance: float,
+    constraint_weight: float | None,
+    num_tf_coils: int,
+    mode: str,
+    weight: float = 1.0,
+    build_surface_configs_fn=build_surface_configs,
+    attempt_initialize_boozer_surface_fn=attempt_initialize_boozer_surface,
+    compute_tf_G0_fn=compute_tf_G0,
+    iotas_cls=Iotas,
+    quadratic_penalty_cls=QuadraticPenalty,
+) -> Stage2IotaRuntime:
+    if len(tf_coils) != int(num_tf_coils):
+        raise ValueError(
+            "Stage 2 hot-loop iota setup requires --stage2-iota-num-tf-coils to "
+            f"match the actual TF-coil count ({len(tf_coils)}), got {num_tf_coils}."
+        )
+
+    outer_surface_config = build_surface_configs_fn(
+        equilibrium_file,
+        int(nphi),
+        int(ntheta),
+        float(toroidal_flux),
+        float(major_radius),
+        float(vol_target),
+        1,
+        0.8,
+    )[-1]
+    bootstrap_start = time.perf_counter()
+    initialization = attempt_initialize_boozer_surface_fn(
+        outer_surface_config["initial_surface"],
+        int(mpol),
+        int(ntor),
+        bs,
+        outer_surface_config["target_volume"],
+        constraint_weight,
+        float(iota_target),
+        compute_tf_G0_fn(tf_coils),
+        nfp=outer_surface_config["initial_surface"].nfp,
+    )
+    bootstrap_seconds = time.perf_counter() - bootstrap_start
+    if not initialization.success or initialization.boozer_surface is None:
+        details = [
+            f"solve_success={initialization.solve_success}",
+            f"self_intersecting={initialization.self_intersecting}",
+            f"solved_iota={initialization.solved_iota}",
+        ]
+        if initialization.error_type is not None:
+            details.append(
+                f"{initialization.error_type}: {initialization.error_message}"
+            )
+        raise RuntimeError(
+            "Stage 2 Boozer/iota hot-loop initialization failed: "
+            + ", ".join(details)
+        )
+
+    boozer_surface = initialization.boozer_surface
+    stats = Stage2IotaRuntimeStats(bootstrap_seconds=bootstrap_seconds)
+    original_run_code = boozer_surface.run_code
+
+    def timed_run_code(iota, G=None):
+        run_start = time.perf_counter()
+        result = original_run_code(iota, G)
+        stats.runtime_calls += 1
+        stats.runtime_seconds += time.perf_counter() - run_start
+        return result
+
+    boozer_surface.run_code = timed_run_code
+    iota_term = iotas_cls(boozer_surface)
+    penalty_objective = quadratic_penalty_cls(iota_term, float(iota_target))
+    initial_state = _build_stage2_iota_state(
+        iota_term,
+        penalty_objective,
+        target=float(iota_target),
+        tolerance=float(iota_tolerance),
+    )
+    return Stage2IotaRuntime(
+        mode=str(mode),
+        boozer_surface=boozer_surface,
+        iota_term=iota_term,
+        penalty_objective=penalty_objective,
+        target=float(iota_target),
+        tolerance=float(iota_tolerance),
+        weight=float(weight),
+        penalty_threshold=stage2_iota_penalty_threshold(iota_tolerance),
+        vol_target=float(vol_target),
+        constraint_weight=(
+            None if constraint_weight is None else float(constraint_weight)
+        ),
+        num_tf_coils=int(num_tf_coils),
+        nphi=int(nphi),
+        ntheta=int(ntheta),
+        mpol=int(mpol),
+        ntor=int(ntor),
+        stats=stats,
+        initial_state=initial_state,
+    )
 
 
 def build_stage2_alm_settings(args):
@@ -79,7 +269,11 @@ def _build_stage2_artifact_hardware_snapshot(
     }
 
 
-def _stage2_constraint_names(*, include_coil_surface: bool) -> tuple[str, ...]:
+def _stage2_constraint_names(
+    *,
+    include_coil_surface: bool,
+    include_iota_penalty: bool = False,
+) -> tuple[str, ...]:
     requested_names = [
         "coil_length",
         "coil_coil_spacing",
@@ -88,24 +282,35 @@ def _stage2_constraint_names(*, include_coil_surface: bool) -> tuple[str, ...]:
     ]
     if include_coil_surface:
         requested_names.insert(2, "coil_surface_spacing")
-    return hardware_constraint_alm_names(names=tuple(requested_names))
+    constraint_names = list(hardware_constraint_alm_names(names=tuple(requested_names)))
+    if include_iota_penalty:
+        constraint_names.append("iota_penalty")
+    return tuple(constraint_names)
 
 
-def _legacy_stage2_constraint_names(*, include_coil_surface: bool) -> tuple[str, ...]:
+def _legacy_stage2_constraint_names(
+    *,
+    include_coil_surface: bool,
+    include_iota_penalty: bool = False,
+) -> tuple[str, ...]:
     if include_coil_surface:
-        return (
+        constraint_names = [
             "coil_length_upper_bound",
             "coil_coil_spacing",
             "coil_surface_spacing",
             "max_curvature",
             "banana_current_upper_bound",
-        )
-    return (
-        "coil_length_upper_bound",
-        "coil_coil_spacing",
-        "max_curvature",
-        "banana_current_upper_bound",
-    )
+        ]
+    else:
+        constraint_names = [
+            "coil_length_upper_bound",
+            "coil_coil_spacing",
+            "max_curvature",
+            "banana_current_upper_bound",
+        ]
+    if include_iota_penalty:
+        constraint_names.append("iota_penalty")
+    return tuple(constraint_names)
 
 
 def _ordered_constraint_values(
@@ -359,7 +564,16 @@ def build_stage2_results(
     }
 
 
-def make_stage2_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc):
+def make_stage2_fun(
+    JF,
+    new_bs,
+    new_surf,
+    Jf,
+    Jls,
+    Jccdist,
+    Jc,
+    stage2_iota_runtime: Stage2IotaRuntime | None = None,
+):
     def fun(dofs):
         JF.x = dofs
         J = JF.J()
@@ -370,6 +584,11 @@ def make_stage2_fun(JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc):
         outstr += f", Len={Jls.J():.1f}m"
         outstr += f", C-C-Sep={Jccdist.shortest_distance():.2f}m"
         outstr += f", Curvature={Jc.J():.2f}"
+        if stage2_iota_runtime is not None:
+            iota_state = evaluate_stage2_iota_state(stage2_iota_runtime)
+            outstr += (
+                f", Iota={iota_state.iota:.4f}, Jiota={iota_state.penalty:.2e}"
+            )
         outstr += f", ║∇J║={np.linalg.norm(grad):.1e}"
         print(outstr)
         return J, grad
@@ -450,6 +669,8 @@ def stage2_constraint_activity_tolerances(
     length_tolerance: float = 1e-3,
     banana_current_tolerance: float = 1e-3,
     include_coil_surface: bool = False,
+    include_iota_penalty: bool = False,
+    iota_tolerance: float = 0.0,
 ):
     tolerances = [
         length_tolerance,
@@ -458,13 +679,17 @@ def stage2_constraint_activity_tolerances(
         banana_current_tolerance,
     ]
     if include_coil_surface:
-        return [
+        tolerances = [
             tolerances[0],
             tolerances[1],
             tolerances[1],
             tolerances[2],
             tolerances[3],
         ]
+    if include_iota_penalty:
+        tolerances.append(
+            max(stage2_iota_penalty_threshold(iota_tolerance), _SMOOTHING_EPS)
+        )
     return tolerances
 
 
@@ -474,22 +699,26 @@ def resolve_stage2_constraint_activity_tolerances(
     curvature_smoothing: float,
     *,
     include_coil_surface: bool,
+    include_iota_penalty: bool = False,
+    iota_tolerance: float | None = None,
 ):
     parameters = inspect.signature(stage2_constraint_activity_tolerances_fn).parameters
+    call_kwargs = {}
     if "include_coil_surface" in parameters:
-        raw_tolerances = stage2_constraint_activity_tolerances_fn(
-            distance_smoothing,
-            curvature_smoothing,
-            include_coil_surface=include_coil_surface,
-        )
-    else:
-        raw_tolerances = stage2_constraint_activity_tolerances_fn(
-            distance_smoothing,
-            curvature_smoothing,
-        )
+        call_kwargs["include_coil_surface"] = include_coil_surface
+    if "include_iota_penalty" in parameters:
+        call_kwargs["include_iota_penalty"] = include_iota_penalty
+    if "iota_tolerance" in parameters and iota_tolerance is not None:
+        call_kwargs["iota_tolerance"] = iota_tolerance
+    raw_tolerances = stage2_constraint_activity_tolerances_fn(
+        distance_smoothing,
+        curvature_smoothing,
+        **call_kwargs,
+    )
     tolerance_values = [float(value) for value in raw_tolerances]
     constraint_names = _legacy_stage2_constraint_names(
         include_coil_surface=include_coil_surface,
+        include_iota_penalty=include_iota_penalty,
     )
     if len(tolerance_values) != len(constraint_names):
         raise ValueError(
@@ -746,6 +975,7 @@ def evaluate_stage2_alm_problem(
     smooth_max_curvature_signed_constraint,
     Jcsdist=None,
     smooth_min_curve_surface_signed_constraint=None,
+    stage2_iota_runtime: Stage2IotaRuntime | None = None,
 ):
     base_objective.x = dofs
     base_value = float(base_objective.J())
@@ -805,8 +1035,30 @@ def evaluate_stage2_alm_problem(
         banana_current_max_A,
         base_objective_optimizable,
     )
+    iota_state = None
+    iota_violation = None
+    iota_signed_value = None
+    include_iota_penalty = (
+        stage2_iota_runtime is not None and stage2_iota_runtime.mode == "alm"
+    )
+    if stage2_iota_runtime is not None:
+        iota_state = evaluate_stage2_iota_state(stage2_iota_runtime)
+        iota_violation = upper_bound_residual(
+            iota_state.penalty,
+            stage2_iota_runtime.penalty_threshold,
+        )
+        iota_signed_value = (
+            iota_state.penalty - stage2_iota_runtime.penalty_threshold
+        )
+        iota_grad = np.asarray(
+            stage2_iota_runtime.penalty_objective.dJ(),
+            dtype=float,
+        )
 
-    active_names = _stage2_constraint_names(include_coil_surface=include_coil_surface)
+    active_names = _stage2_constraint_names(
+        include_coil_surface=include_coil_surface,
+        include_iota_penalty=include_iota_penalty,
+    )
     hard_by_name = {
         "coil_length_upper_bound": coil_length - length_target,
         "coil_coil_spacing": Jccdist.minimum_distance - curve_curve_min_dist,
@@ -838,6 +1090,11 @@ def evaluate_stage2_alm_problem(
         surrogate_by_name["coil_surface_spacing"] = curve_surface_signed_value
         grad_by_name["coil_surface_spacing"] = curve_surface_grad
         feasibility_by_name["coil_surface_spacing"] = curve_surface_violation
+    if include_iota_penalty:
+        hard_by_name["iota_penalty"] = iota_signed_value
+        surrogate_by_name["iota_penalty"] = iota_signed_value
+        grad_by_name["iota_penalty"] = iota_grad
+        feasibility_by_name["iota_penalty"] = iota_violation
     hard_signed_constraint_values = _ordered_constraint_values(active_names, hard_by_name)
     surrogate_signed_constraint_values = _ordered_constraint_values(
         active_names,
@@ -885,6 +1142,10 @@ def evaluate_stage2_alm_problem(
         distance_smoothing,
         curvature_smoothing,
         include_coil_surface=include_coil_surface,
+        include_iota_penalty=include_iota_penalty,
+        iota_tolerance=(
+            None if stage2_iota_runtime is None else stage2_iota_runtime.tolerance
+        ),
     )
     invalid_fields = (
         sanitized_invalid_fields
@@ -946,6 +1207,10 @@ def evaluate_stage2_alm_problem(
         f", |BananaI|={banana_current_abs_A:.2f}A, BananaI+={banana_current_violation:.2e}, "
         f"BananaIg={banana_current_signed_value:.2e}"
     )
+    if iota_state is not None:
+        outstr += f", Iota={iota_state.iota:.4f}, Jiota={iota_state.penalty:.2e}"
+    if include_iota_penalty:
+        outstr += f", Iota+={iota_violation:.2e}, Iotag={iota_signed_value:.2e}"
     outstr += f", ║∇L_A║={evaluation['stationarity_norm']:.1e}, μ={penalty:.1e}"
     print(outstr)
     return evaluation

@@ -385,8 +385,102 @@ class IshwPlotTests(unittest.TestCase):
 
 
 class Stage2IotaReportingTests(unittest.TestCase):
-    def test_build_stage2_command_forwards_stage2_iota_report_flags(self):
+    def test_build_stage2_command_forwards_stage2_iota_hot_loop_flags(self):
         module = load_workflow_common_module()
+
+        config = module.Stage2ArtifactConfig(
+            plasma_surf_filename="demo.nc",
+            output_root=Path("/tmp/stage2"),
+            equilibria_dir=None,
+            tf_current_A=8.0e4,
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=100.0,
+            banana_surf_radius=0.21,
+            order=2,
+            constraint_method="alm",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            basin_hops=0,
+            basin_stepsize=0.01,
+            stage2_iota_mode="soft",
+            stage2_iota_target=0.2,
+            stage2_iota_tolerance=1.0e-2,
+            stage2_iota_weight=3.0,
+            stage2_iota_vol_target=0.12,
+            stage2_iota_constraint_weight=-1.0,
+            stage2_iota_num_tf_coils=20,
+            stage2_iota_nphi=91,
+            stage2_iota_ntheta=32,
+            stage2_iota_mpol=8,
+            stage2_iota_ntor=6,
+        )
+
+        command = module.build_stage2_command(config, python_executable="python")
+
+        self.assertEqual(
+            command[command.index("--stage2-iota-mode") + 1],
+            "soft",
+        )
+        self.assertEqual(
+            command[command.index("--stage2-iota-target") + 1],
+            "0.2",
+        )
+        self.assertEqual(
+            command[command.index("--stage2-iota-tolerance") + 1],
+            "0.01",
+        )
+        self.assertEqual(
+            command[command.index("--stage2-iota-weight") + 1],
+            "3.0",
+        )
+        self.assertEqual(
+            command[command.index("--stage2-iota-vol-target") + 1],
+            "0.12",
+        )
+        self.assertEqual(
+            command[command.index("--stage2-iota-constraint-weight") + 1],
+            "-1.0",
+        )
+
+    def test_stage2_artifact_config_rejects_iota_alm_without_alm_constraint_method(self):
+        module = load_workflow_common_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "stage2_iota_mode='alm' requires constraint_method='alm'",
+        ):
+            module.Stage2ArtifactConfig(
+                plasma_surf_filename="demo.nc",
+                output_root=Path("/tmp/stage2"),
+                equilibria_dir=None,
+                tf_current_A=8.0e4,
+                major_radius=0.915,
+                toroidal_flux=0.24,
+                length_weight=0.0005,
+                cc_weight=100.0,
+                cc_threshold=0.05,
+                curvature_weight=0.0001,
+                curvature_threshold=100.0,
+                banana_surf_radius=0.21,
+                order=2,
+                constraint_method="penalty",
+                alm_max_outer_iters=10,
+                alm_penalty_init=1.0,
+                alm_penalty_scale=10.0,
+                basin_hops=0,
+                basin_stepsize=0.01,
+                stage2_iota_mode="alm",
+                stage2_iota_target=0.2,
+            )
+
+    def test_run_stage2_alm_expected_metadata_canonicalizes_exact_constraint_weight(self):
+        module = load_module(EXAMPLE_ROOT / "run_stage2_alm.py", "run_stage2_alm")
 
         config = module.Stage2ArtifactConfig(
             plasma_surf_filename="demo.nc",
@@ -410,23 +504,12 @@ class Stage2IotaReportingTests(unittest.TestCase):
             basin_stepsize=0.01,
             stage2_iota_mode="report",
             stage2_iota_target=0.2,
-            stage2_iota_tolerance=1.0e-2,
+            stage2_iota_constraint_weight=0.0,
         )
 
-        command = module.build_stage2_command(config, python_executable="python")
+        expected_metadata = module._expected_stage2_artifact_metadata(config)
 
-        self.assertEqual(
-            command[command.index("--stage2-iota-mode") + 1],
-            "report",
-        )
-        self.assertEqual(
-            command[command.index("--stage2-iota-target") + 1],
-            "0.2",
-        )
-        self.assertEqual(
-            command[command.index("--stage2-iota-tolerance") + 1],
-            "0.01",
-        )
+        self.assertIsNone(expected_metadata["STAGE2_IOTA_CONSTRAINT_WEIGHT"])
 
     def test_stage2_iota_report_payload_reuses_bootability_schema_without_recovery_fields(self):
         module = load_stage2_module()
@@ -471,9 +554,17 @@ class Stage2IotaReportingTests(unittest.TestCase):
         self.assertTrue(payload["BOOZER_BOOTABLE"])
         self.assertTrue(payload["IOTA_FEASIBLE"])
         self.assertNotIn("RECOVERY_ATTEMPTED", payload)
+        self.assertEqual(
+            payload["BOOTABILITY_STAGE2_BS_PATH"],
+            "/tmp/stage2/biot_savart_opt.json",
+        )
+        self.assertEqual(
+            payload["BOOTABILITY_STAGE2_RESULTS_PATH"],
+            "/tmp/stage2/results.json",
+        )
         self.assertIsNotNone(payload["STAGE2_IOTA_PROBE_SECONDS"])
 
-    def test_stage2_iota_report_payload_maps_negative_constraint_weight_to_exact_mode(self):
+    def test_stage2_iota_report_payload_maps_nonpositive_constraint_weight_to_exact_mode(self):
         module = load_stage2_module()
 
         args = SimpleNamespace(
@@ -488,7 +579,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
             stage2_iota_mpol=8,
             stage2_iota_ntor=6,
             stage2_iota_vol_target=0.1,
-            stage2_iota_constraint_weight=-1.0,
+            stage2_iota_constraint_weight=0.0,
             plasma_surf_filename="demo.nc",
         )
 
@@ -505,13 +596,14 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 "BOOTABILITY_SELF_INTERSECTING": False,
             },
         ) as probe_mock:
-            module.build_stage2_iota_report_payload(
+            payload = module.build_stage2_iota_report_payload(
                 args=args,
                 stage2_bs_artifact_path="/tmp/stage2/biot_savart_opt.json",
                 stage2_results_payload={},
             )
 
         self.assertIsNone(probe_mock.call_args.kwargs["constraint_weight"])
+        self.assertIsNone(payload["STAGE2_IOTA_CONSTRAINT_WEIGHT"])
 
 
 if __name__ == "__main__":

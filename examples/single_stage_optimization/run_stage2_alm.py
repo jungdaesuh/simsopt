@@ -24,6 +24,7 @@ from workflow_runner_common import (  # noqa: E402
     timeout_or_none,
     write_dry_run_marker,
 )
+from workflow_helpers import canonical_stage2_iota_constraint_weight  # noqa: E402
 from banana_opt.artifact_contracts import (  # noqa: E402
     basin_metadata_from_config,
     upgrade_legacy_stage2_artifact_results,
@@ -203,24 +204,76 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--stage2-iota-mode",
-        choices=["off", "report"],
+        choices=["off", "report", "soft", "alm"],
         default="off",
         help=(
-            "Optional Stage 2 reporting-only iota probe mode. 'report' forwards "
-            "the shared Boozer/iota probe flags into banana_coil_solver.py."
+            "Optional Stage 2 iota mode. 'report' runs only the final verification "
+            "probe, 'soft' adds a weighted Jiota hot-loop term, and 'alm' adds a "
+            "hard Stage 2 ALM iota_penalty constraint."
         ),
     )
     parser.add_argument(
         "--stage2-iota-target",
         type=float,
         default=None,
-        help="Target iota used when --stage2-iota-mode=report.",
+        help="Target iota used when --stage2-iota-mode is enabled.",
     )
     parser.add_argument(
         "--stage2-iota-tolerance",
         type=float,
         default=5.0e-3,
-        help="Absolute iota tolerance used when --stage2-iota-mode=report.",
+        help="Absolute iota tolerance used when --stage2-iota-mode is enabled.",
+    )
+    parser.add_argument(
+        "--stage2-iota-weight",
+        type=float,
+        default=1.0,
+        help="Soft-mode Jiota weight used when --stage2-iota-mode=soft.",
+    )
+    parser.add_argument(
+        "--stage2-iota-vol-target",
+        type=float,
+        default=0.10,
+        help="Outer-surface target volume passed to the Stage 2 Boozer/iota solve.",
+    )
+    parser.add_argument(
+        "--stage2-iota-constraint-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Boozer constraint weight used by the Stage 2 iota solve. Use a "
+            "non-positive value to select the exact Boozer Newton solve."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-iota-num-tf-coils",
+        type=int,
+        default=20,
+        help="Expected TF-coil count used by the Stage 2 Boozer/iota solve.",
+    )
+    parser.add_argument(
+        "--stage2-iota-nphi",
+        type=int,
+        default=91,
+        help="Surface quadrature nphi used by the Stage 2 Boozer/iota solve.",
+    )
+    parser.add_argument(
+        "--stage2-iota-ntheta",
+        type=int,
+        default=32,
+        help="Surface quadrature ntheta used by the Stage 2 Boozer/iota solve.",
+    )
+    parser.add_argument(
+        "--stage2-iota-mpol",
+        type=int,
+        default=8,
+        help="Boozer-surface mpol used by the Stage 2 Boozer/iota solve.",
+    )
+    parser.add_argument(
+        "--stage2-iota-ntor",
+        type=int,
+        default=6,
+        help="Boozer-surface ntor used by the Stage 2 Boozer/iota solve.",
     )
     return parser.parse_args()
 
@@ -315,6 +368,18 @@ def build_stage2_alm_config(
     stage2_iota_mode = getattr(args, "stage2_iota_mode", "off")
     stage2_iota_target = getattr(args, "stage2_iota_target", None)
     stage2_iota_tolerance = getattr(args, "stage2_iota_tolerance", 5.0e-3)
+    stage2_iota_weight = getattr(args, "stage2_iota_weight", 1.0)
+    stage2_iota_vol_target = getattr(args, "stage2_iota_vol_target", 0.10)
+    stage2_iota_constraint_weight = getattr(
+        args,
+        "stage2_iota_constraint_weight",
+        1.0,
+    )
+    stage2_iota_num_tf_coils = getattr(args, "stage2_iota_num_tf_coils", 20)
+    stage2_iota_nphi = getattr(args, "stage2_iota_nphi", 91)
+    stage2_iota_ntheta = getattr(args, "stage2_iota_ntheta", 32)
+    stage2_iota_mpol = getattr(args, "stage2_iota_mpol", 8)
+    stage2_iota_ntor = getattr(args, "stage2_iota_ntor", 6)
     return Stage2ArtifactConfig(
         plasma_surf_filename=Path(args.plasma_surf_filename).name,
         output_root=output_root,
@@ -357,6 +422,14 @@ def build_stage2_alm_config(
         stage2_iota_mode=stage2_iota_mode,
         stage2_iota_target=stage2_iota_target,
         stage2_iota_tolerance=stage2_iota_tolerance,
+        stage2_iota_weight=stage2_iota_weight,
+        stage2_iota_vol_target=stage2_iota_vol_target,
+        stage2_iota_constraint_weight=stage2_iota_constraint_weight,
+        stage2_iota_num_tf_coils=stage2_iota_num_tf_coils,
+        stage2_iota_nphi=stage2_iota_nphi,
+        stage2_iota_ntheta=stage2_iota_ntheta,
+        stage2_iota_mpol=stage2_iota_mpol,
+        stage2_iota_ntor=stage2_iota_ntor,
     )
 
 
@@ -380,6 +453,28 @@ def _expected_stage2_alm_solver_metadata(config: Stage2ArtifactConfig) -> dict:
 
 
 def _expected_stage2_artifact_metadata(config: Stage2ArtifactConfig) -> dict:
+    expected_iota_metadata = {
+        "STAGE2_ROOT_FIX_ENABLED": config.stage2_iota_mode != "off",
+        "STAGE2_IOTA_MODE": config.stage2_iota_mode,
+    }
+    if config.stage2_iota_mode != "off":
+        expected_iota_metadata.update(
+            {
+                "STAGE2_IOTA_TARGET": config.stage2_iota_target,
+                "STAGE2_IOTA_TOLERANCE": config.stage2_iota_tolerance,
+                "STAGE2_IOTA_VOL_TARGET": config.stage2_iota_vol_target,
+                "STAGE2_IOTA_CONSTRAINT_WEIGHT": canonical_stage2_iota_constraint_weight(
+                    config.stage2_iota_constraint_weight
+                ),
+                "STAGE2_IOTA_NUM_TF_COILS": config.stage2_iota_num_tf_coils,
+                "STAGE2_IOTA_NPHI": config.stage2_iota_nphi,
+                "STAGE2_IOTA_NTHETA": config.stage2_iota_ntheta,
+                "STAGE2_IOTA_MPOL": config.stage2_iota_mpol,
+                "STAGE2_IOTA_NTOR": config.stage2_iota_ntor,
+            }
+        )
+    if config.stage2_iota_mode == "soft":
+        expected_iota_metadata["STAGE2_IOTA_WEIGHT"] = config.stage2_iota_weight
     return {
         "PLASMA_SURF_FILENAME": Path(config.plasma_surf_filename).name,
         "TF_CURRENT_A": config.tf_current_A,
@@ -398,6 +493,7 @@ def _expected_stage2_artifact_metadata(config: Stage2ArtifactConfig) -> dict:
         "CONSTRAINT_METHOD": config.constraint_method,
         **_expected_stage2_alm_solver_metadata(config),
         **basin_metadata_from_config(config),
+        **expected_iota_metadata,
         "init_only": config.init_only,
     }
 

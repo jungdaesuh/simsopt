@@ -61,6 +61,37 @@ class SingleStageWeightCase:
     surf_dist_weight: float
 
 
+_DEFAULT_STAGE2_ALM_MAX_SUBPROBLEM_CONTINUATIONS = 20
+_DEFAULT_STAGE2_ALM_FEAS_TOL = 1.0e-6
+_DEFAULT_STAGE2_ALM_STATIONARITY_TOL = 1.0e-6
+_DEFAULT_STAGE2_ALM_TRUST_RADIUS_INIT = 0.05
+_DEFAULT_STAGE2_ALM_TRUST_RADIUS_MIN = 1.0e-4
+_DEFAULT_STAGE2_ALM_TRUST_RADIUS_SHRINK = 0.5
+_DEFAULT_STAGE2_ALM_TRUST_RADIUS_GROW = 1.5
+_DEFAULT_STAGE2_ALM_MAX_INNER_ATTEMPTS = 4
+_DEFAULT_STAGE2_ALM_DISTANCE_SMOOTHING = 0.005
+_DEFAULT_STAGE2_ALM_CURVATURE_SMOOTHING = 0.25
+_DEFAULT_STAGE2_IOTA_MODE = "off"
+_DEFAULT_STAGE2_IOTA_TOLERANCE = 5.0e-3
+_DEFAULT_STAGE2_IOTA_WEIGHT = 1.0
+_DEFAULT_STAGE2_IOTA_VOL_TARGET = 0.10
+_DEFAULT_STAGE2_IOTA_CONSTRAINT_WEIGHT = 1.0
+_DEFAULT_STAGE2_IOTA_NUM_TF_COILS = 20
+_DEFAULT_STAGE2_IOTA_NPHI = 91
+_DEFAULT_STAGE2_IOTA_NTHETA = 32
+_DEFAULT_STAGE2_IOTA_MPOL = 8
+_DEFAULT_STAGE2_IOTA_NTOR = 6
+
+
+def canonical_stage2_iota_constraint_weight(
+    constraint_weight: float | None,
+) -> float | None:
+    if constraint_weight is None:
+        return None
+    normalized_constraint_weight = float(constraint_weight)
+    return None if normalized_constraint_weight <= 0.0 else normalized_constraint_weight
+
+
 def format_local_stage2_seed_dir(spec: Stage2SeedSpec) -> str:
     return (
         f"R0={format_compact_float(spec.major_radius)}"
@@ -164,6 +195,16 @@ def format_stage2_constraint_suffix(
     alm_penalty_init: float,
     alm_penalty_scale: float,
     alm_penalty_max: float | None = None,
+    alm_max_subproblem_continuations: int = _DEFAULT_STAGE2_ALM_MAX_SUBPROBLEM_CONTINUATIONS,
+    alm_feas_tol: float = _DEFAULT_STAGE2_ALM_FEAS_TOL,
+    alm_stationarity_tol: float = _DEFAULT_STAGE2_ALM_STATIONARITY_TOL,
+    alm_trust_radius_init: float = _DEFAULT_STAGE2_ALM_TRUST_RADIUS_INIT,
+    alm_trust_radius_min: float = _DEFAULT_STAGE2_ALM_TRUST_RADIUS_MIN,
+    alm_trust_radius_shrink: float = _DEFAULT_STAGE2_ALM_TRUST_RADIUS_SHRINK,
+    alm_trust_radius_grow: float = _DEFAULT_STAGE2_ALM_TRUST_RADIUS_GROW,
+    alm_max_inner_attempts: int = _DEFAULT_STAGE2_ALM_MAX_INNER_ATTEMPTS,
+    alm_distance_smoothing: float = _DEFAULT_STAGE2_ALM_DISTANCE_SMOOTHING,
+    alm_curvature_smoothing: float = _DEFAULT_STAGE2_ALM_CURVATURE_SMOOTHING,
 ) -> str:
     if constraint_method == "alm":
         suffix = (
@@ -173,6 +214,57 @@ def format_stage2_constraint_suffix(
         )
         if alm_penalty_max is not None:
             suffix += f"-ALMMax={format_compact_float(alm_penalty_max)}"
+        optional_alm_segments = (
+            (
+                "ALMSub",
+                int(alm_max_subproblem_continuations),
+                _DEFAULT_STAGE2_ALM_MAX_SUBPROBLEM_CONTINUATIONS,
+            ),
+            ("ALMFeas", float(alm_feas_tol), _DEFAULT_STAGE2_ALM_FEAS_TOL),
+            (
+                "ALMStat",
+                float(alm_stationarity_tol),
+                _DEFAULT_STAGE2_ALM_STATIONARITY_TOL,
+            ),
+            (
+                "ALMTR",
+                float(alm_trust_radius_init),
+                _DEFAULT_STAGE2_ALM_TRUST_RADIUS_INIT,
+            ),
+            (
+                "ALMTRMin",
+                float(alm_trust_radius_min),
+                _DEFAULT_STAGE2_ALM_TRUST_RADIUS_MIN,
+            ),
+            (
+                "ALMTRShrink",
+                float(alm_trust_radius_shrink),
+                _DEFAULT_STAGE2_ALM_TRUST_RADIUS_SHRINK,
+            ),
+            (
+                "ALMTRGrow",
+                float(alm_trust_radius_grow),
+                _DEFAULT_STAGE2_ALM_TRUST_RADIUS_GROW,
+            ),
+            (
+                "ALMInner",
+                int(alm_max_inner_attempts),
+                _DEFAULT_STAGE2_ALM_MAX_INNER_ATTEMPTS,
+            ),
+            (
+                "ALMDist",
+                float(alm_distance_smoothing),
+                _DEFAULT_STAGE2_ALM_DISTANCE_SMOOTHING,
+            ),
+            (
+                "ALMCurv",
+                float(alm_curvature_smoothing),
+                _DEFAULT_STAGE2_ALM_CURVATURE_SMOOTHING,
+            ),
+        )
+        for label, value, default in optional_alm_segments:
+            if value != default:
+                suffix += f"-{label}={format_compact_float(float(value))}"
         return suffix
     return "-CM=penalty"
 
@@ -199,6 +291,45 @@ def format_stage2_basin_suffix(
     return suffix
 
 
+def format_stage2_iota_suffix(
+    stage2_iota_mode: str = _DEFAULT_STAGE2_IOTA_MODE,
+    stage2_iota_target: float | None = None,
+    stage2_iota_tolerance: float = _DEFAULT_STAGE2_IOTA_TOLERANCE,
+    stage2_iota_weight: float = _DEFAULT_STAGE2_IOTA_WEIGHT,
+    stage2_iota_vol_target: float = _DEFAULT_STAGE2_IOTA_VOL_TARGET,
+    stage2_iota_constraint_weight: float = _DEFAULT_STAGE2_IOTA_CONSTRAINT_WEIGHT,
+    stage2_iota_num_tf_coils: int = _DEFAULT_STAGE2_IOTA_NUM_TF_COILS,
+    stage2_iota_nphi: int = _DEFAULT_STAGE2_IOTA_NPHI,
+    stage2_iota_ntheta: int = _DEFAULT_STAGE2_IOTA_NTHETA,
+    stage2_iota_mpol: int = _DEFAULT_STAGE2_IOTA_MPOL,
+    stage2_iota_ntor: int = _DEFAULT_STAGE2_IOTA_NTOR,
+) -> str:
+    if stage2_iota_mode == _DEFAULT_STAGE2_IOTA_MODE:
+        return ""
+    if stage2_iota_target is None:
+        raise ValueError(
+            "stage2_iota_target is required when stage2_iota_mode is enabled."
+        )
+    canonical_constraint_weight = canonical_stage2_iota_constraint_weight(
+        stage2_iota_constraint_weight
+    )
+    suffix = (
+        f"-IM={stage2_iota_mode}"
+        f"-ITarget={format_compact_float(stage2_iota_target)}"
+        f"-ITol={format_compact_float(stage2_iota_tolerance)}"
+        f"-IVol={format_compact_float(stage2_iota_vol_target)}"
+        f"-ICW={'exact' if canonical_constraint_weight is None else format_compact_float(canonical_constraint_weight)}"
+        f"-INTF={int(stage2_iota_num_tf_coils)}"
+        f"-INPhi={int(stage2_iota_nphi)}"
+        f"-INTheta={int(stage2_iota_ntheta)}"
+        f"-IMPol={int(stage2_iota_mpol)}"
+        f"-INTor={int(stage2_iota_ntor)}"
+    )
+    if stage2_iota_mode == "soft":
+        suffix += f"-IW={format_compact_float(stage2_iota_weight)}"
+    return suffix
+
+
 def format_local_stage2_run_dir(
     spec: Stage2SeedSpec,
     *,
@@ -207,11 +338,32 @@ def format_local_stage2_run_dir(
     alm_penalty_init: float,
     alm_penalty_scale: float,
     alm_penalty_max: float | None = None,
+    alm_max_subproblem_continuations: int = _DEFAULT_STAGE2_ALM_MAX_SUBPROBLEM_CONTINUATIONS,
+    alm_feas_tol: float = _DEFAULT_STAGE2_ALM_FEAS_TOL,
+    alm_stationarity_tol: float = _DEFAULT_STAGE2_ALM_STATIONARITY_TOL,
+    alm_trust_radius_init: float = _DEFAULT_STAGE2_ALM_TRUST_RADIUS_INIT,
+    alm_trust_radius_min: float = _DEFAULT_STAGE2_ALM_TRUST_RADIUS_MIN,
+    alm_trust_radius_shrink: float = _DEFAULT_STAGE2_ALM_TRUST_RADIUS_SHRINK,
+    alm_trust_radius_grow: float = _DEFAULT_STAGE2_ALM_TRUST_RADIUS_GROW,
+    alm_max_inner_attempts: int = _DEFAULT_STAGE2_ALM_MAX_INNER_ATTEMPTS,
+    alm_distance_smoothing: float = _DEFAULT_STAGE2_ALM_DISTANCE_SMOOTHING,
+    alm_curvature_smoothing: float = _DEFAULT_STAGE2_ALM_CURVATURE_SMOOTHING,
     basin_hops: int,
     basin_stepsize: float,
     basin_temperature: float = 1.0,
     basin_niter_success: int = 0,
     basin_seed: int | None = None,
+    stage2_iota_mode: str = _DEFAULT_STAGE2_IOTA_MODE,
+    stage2_iota_target: float | None = None,
+    stage2_iota_tolerance: float = _DEFAULT_STAGE2_IOTA_TOLERANCE,
+    stage2_iota_weight: float = _DEFAULT_STAGE2_IOTA_WEIGHT,
+    stage2_iota_vol_target: float = _DEFAULT_STAGE2_IOTA_VOL_TARGET,
+    stage2_iota_constraint_weight: float = _DEFAULT_STAGE2_IOTA_CONSTRAINT_WEIGHT,
+    stage2_iota_num_tf_coils: int = _DEFAULT_STAGE2_IOTA_NUM_TF_COILS,
+    stage2_iota_nphi: int = _DEFAULT_STAGE2_IOTA_NPHI,
+    stage2_iota_ntheta: int = _DEFAULT_STAGE2_IOTA_NTHETA,
+    stage2_iota_mpol: int = _DEFAULT_STAGE2_IOTA_MPOL,
+    stage2_iota_ntor: int = _DEFAULT_STAGE2_IOTA_NTOR,
 ) -> str:
     return (
         format_local_stage2_seed_dir(spec)
@@ -221,6 +373,16 @@ def format_local_stage2_run_dir(
             alm_penalty_init,
             alm_penalty_scale,
             alm_penalty_max,
+            alm_max_subproblem_continuations,
+            alm_feas_tol,
+            alm_stationarity_tol,
+            alm_trust_radius_init,
+            alm_trust_radius_min,
+            alm_trust_radius_shrink,
+            alm_trust_radius_grow,
+            alm_max_inner_attempts,
+            alm_distance_smoothing,
+            alm_curvature_smoothing,
         )
         + format_stage2_basin_suffix(
             basin_hops,
@@ -228,6 +390,19 @@ def format_local_stage2_run_dir(
             basin_temperature,
             basin_niter_success,
             basin_seed,
+        )
+        + format_stage2_iota_suffix(
+            stage2_iota_mode,
+            stage2_iota_target,
+            stage2_iota_tolerance,
+            stage2_iota_weight,
+            stage2_iota_vol_target,
+            stage2_iota_constraint_weight,
+            stage2_iota_num_tf_coils,
+            stage2_iota_nphi,
+            stage2_iota_ntheta,
+            stage2_iota_mpol,
+            stage2_iota_ntor,
         )
     )
 
@@ -241,11 +416,32 @@ def local_stage2_bs_path(
     alm_penalty_init: float,
     alm_penalty_scale: float,
     alm_penalty_max: float | None = None,
+    alm_max_subproblem_continuations: int = _DEFAULT_STAGE2_ALM_MAX_SUBPROBLEM_CONTINUATIONS,
+    alm_feas_tol: float = _DEFAULT_STAGE2_ALM_FEAS_TOL,
+    alm_stationarity_tol: float = _DEFAULT_STAGE2_ALM_STATIONARITY_TOL,
+    alm_trust_radius_init: float = _DEFAULT_STAGE2_ALM_TRUST_RADIUS_INIT,
+    alm_trust_radius_min: float = _DEFAULT_STAGE2_ALM_TRUST_RADIUS_MIN,
+    alm_trust_radius_shrink: float = _DEFAULT_STAGE2_ALM_TRUST_RADIUS_SHRINK,
+    alm_trust_radius_grow: float = _DEFAULT_STAGE2_ALM_TRUST_RADIUS_GROW,
+    alm_max_inner_attempts: int = _DEFAULT_STAGE2_ALM_MAX_INNER_ATTEMPTS,
+    alm_distance_smoothing: float = _DEFAULT_STAGE2_ALM_DISTANCE_SMOOTHING,
+    alm_curvature_smoothing: float = _DEFAULT_STAGE2_ALM_CURVATURE_SMOOTHING,
     basin_hops: int,
     basin_stepsize: float,
     basin_temperature: float = 1.0,
     basin_niter_success: int = 0,
     basin_seed: int | None = None,
+    stage2_iota_mode: str = _DEFAULT_STAGE2_IOTA_MODE,
+    stage2_iota_target: float | None = None,
+    stage2_iota_tolerance: float = _DEFAULT_STAGE2_IOTA_TOLERANCE,
+    stage2_iota_weight: float = _DEFAULT_STAGE2_IOTA_WEIGHT,
+    stage2_iota_vol_target: float = _DEFAULT_STAGE2_IOTA_VOL_TARGET,
+    stage2_iota_constraint_weight: float = _DEFAULT_STAGE2_IOTA_CONSTRAINT_WEIGHT,
+    stage2_iota_num_tf_coils: int = _DEFAULT_STAGE2_IOTA_NUM_TF_COILS,
+    stage2_iota_nphi: int = _DEFAULT_STAGE2_IOTA_NPHI,
+    stage2_iota_ntheta: int = _DEFAULT_STAGE2_IOTA_NTHETA,
+    stage2_iota_mpol: int = _DEFAULT_STAGE2_IOTA_MPOL,
+    stage2_iota_ntor: int = _DEFAULT_STAGE2_IOTA_NTOR,
 ) -> Path:
     return (
         Path(output_root)
@@ -257,11 +453,32 @@ def local_stage2_bs_path(
             alm_penalty_init=alm_penalty_init,
             alm_penalty_scale=alm_penalty_scale,
             alm_penalty_max=alm_penalty_max,
+            alm_max_subproblem_continuations=alm_max_subproblem_continuations,
+            alm_feas_tol=alm_feas_tol,
+            alm_stationarity_tol=alm_stationarity_tol,
+            alm_trust_radius_init=alm_trust_radius_init,
+            alm_trust_radius_min=alm_trust_radius_min,
+            alm_trust_radius_shrink=alm_trust_radius_shrink,
+            alm_trust_radius_grow=alm_trust_radius_grow,
+            alm_max_inner_attempts=alm_max_inner_attempts,
+            alm_distance_smoothing=alm_distance_smoothing,
+            alm_curvature_smoothing=alm_curvature_smoothing,
             basin_hops=basin_hops,
             basin_stepsize=basin_stepsize,
             basin_temperature=basin_temperature,
             basin_niter_success=basin_niter_success,
             basin_seed=basin_seed,
+            stage2_iota_mode=stage2_iota_mode,
+            stage2_iota_target=stage2_iota_target,
+            stage2_iota_tolerance=stage2_iota_tolerance,
+            stage2_iota_weight=stage2_iota_weight,
+            stage2_iota_vol_target=stage2_iota_vol_target,
+            stage2_iota_constraint_weight=stage2_iota_constraint_weight,
+            stage2_iota_num_tf_coils=stage2_iota_num_tf_coils,
+            stage2_iota_nphi=stage2_iota_nphi,
+            stage2_iota_ntheta=stage2_iota_ntheta,
+            stage2_iota_mpol=stage2_iota_mpol,
+            stage2_iota_ntor=stage2_iota_ntor,
         )
         / "biot_savart_opt.json"
     )

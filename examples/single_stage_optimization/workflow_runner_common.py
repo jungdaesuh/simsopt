@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -20,6 +22,7 @@ from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
 
 STAGE2_SCRIPT_PATH = SCRIPT_DIR / "STAGE_2" / "banana_coil_solver.py"
 SINGLE_STAGE_SCRIPT_PATH = SCRIPT_DIR / "SINGLE_STAGE" / "single_stage_banana_example.py"
+POINCARE_SCRIPT_PATH = SCRIPT_DIR / "POINCARE_PLOTTING" / "poincare_surfaces.py"
 DRY_RUN_MARKER_FILENAME = "DRY_RUN_ONLY.txt"
 
 T = TypeVar("T")
@@ -47,18 +50,53 @@ class Stage2ArtifactConfig:
     basin_hops: int
     basin_stepsize: float
     alm_penalty_max: float = 1.0e8
+    alm_feas_tol: float = 1e-6
+    alm_stationarity_tol: float = 1e-6
+    alm_trust_radius_init: float = 0.05
+    alm_trust_radius_min: float = 1e-4
+    alm_trust_radius_shrink: float = 0.5
+    alm_trust_radius_grow: float = 1.5
+    alm_max_inner_attempts: int = 4
+    alm_max_subproblem_continuations: int = 20
+    alm_distance_smoothing: float = 0.005
+    alm_curvature_smoothing: float = 0.25
     basin_temperature: float = 1.0
     basin_niter_success: int = 0
     basin_seed: int | None = None
     init_only: bool = False
     banana_init_current_A: float = 1.0e4
     banana_current_max_A: float = 1.6e4
+    stage2_iota_mode: str = "off"
+    stage2_iota_target: float | None = None
+    stage2_iota_tolerance: float = 5.0e-3
+    stage2_iota_weight: float = 1.0
+    stage2_iota_vol_target: float = 0.10
+    stage2_iota_constraint_weight: float = 1.0
+    stage2_iota_num_tf_coils: int = 20
+    stage2_iota_nphi: int = 91
+    stage2_iota_ntheta: int = 32
+    stage2_iota_mpol: int = 8
+    stage2_iota_ntor: int = 6
 
     def __post_init__(self) -> None:
         validate_normalized_toroidal_flux(
             self.toroidal_flux,
             field_name="Stage2ArtifactConfig.toroidal_flux",
         )
+        if self.stage2_iota_mode != "off" and self.stage2_iota_target is None:
+            raise ValueError(
+                "Stage2ArtifactConfig.stage2_iota_target is required when "
+                "stage2_iota_mode is enabled."
+            )
+        if self.stage2_iota_mode == "soft" and self.stage2_iota_weight <= 0.0:
+            raise ValueError(
+                "Stage2ArtifactConfig.stage2_iota_weight must be positive in soft mode."
+            )
+        if self.stage2_iota_mode == "alm" and self.constraint_method != "alm":
+            raise ValueError(
+                "Stage2ArtifactConfig.stage2_iota_mode='alm' requires "
+                "constraint_method='alm'."
+            )
 
 
 def parse_csv(raw: str, cast: Callable[[str], T]) -> list[T]:
@@ -95,11 +133,32 @@ def resolve_stage2_artifact_path(config: Stage2ArtifactConfig) -> Path:
         alm_penalty_init=config.alm_penalty_init,
         alm_penalty_scale=config.alm_penalty_scale,
         alm_penalty_max=config.alm_penalty_max,
+        alm_max_subproblem_continuations=config.alm_max_subproblem_continuations,
+        alm_feas_tol=config.alm_feas_tol,
+        alm_stationarity_tol=config.alm_stationarity_tol,
+        alm_trust_radius_init=config.alm_trust_radius_init,
+        alm_trust_radius_min=config.alm_trust_radius_min,
+        alm_trust_radius_shrink=config.alm_trust_radius_shrink,
+        alm_trust_radius_grow=config.alm_trust_radius_grow,
+        alm_max_inner_attempts=config.alm_max_inner_attempts,
+        alm_distance_smoothing=config.alm_distance_smoothing,
+        alm_curvature_smoothing=config.alm_curvature_smoothing,
         basin_hops=config.basin_hops,
         basin_stepsize=config.basin_stepsize,
         basin_temperature=config.basin_temperature,
         basin_niter_success=config.basin_niter_success,
         basin_seed=config.basin_seed,
+        stage2_iota_mode=config.stage2_iota_mode,
+        stage2_iota_target=config.stage2_iota_target,
+        stage2_iota_tolerance=config.stage2_iota_tolerance,
+        stage2_iota_weight=config.stage2_iota_weight,
+        stage2_iota_vol_target=config.stage2_iota_vol_target,
+        stage2_iota_constraint_weight=config.stage2_iota_constraint_weight,
+        stage2_iota_num_tf_coils=config.stage2_iota_num_tf_coils,
+        stage2_iota_nphi=config.stage2_iota_nphi,
+        stage2_iota_ntheta=config.stage2_iota_ntheta,
+        stage2_iota_mpol=config.stage2_iota_mpol,
+        stage2_iota_ntor=config.stage2_iota_ntor,
     )
 
 
@@ -155,6 +214,26 @@ def build_stage2_command(
                 str(config.alm_penalty_scale),
                 "--alm-penalty-max",
                 str(config.alm_penalty_max),
+                "--alm-feas-tol",
+                str(config.alm_feas_tol),
+                "--alm-stationarity-tol",
+                str(config.alm_stationarity_tol),
+                "--alm-trust-radius-init",
+                str(config.alm_trust_radius_init),
+                "--alm-trust-radius-min",
+                str(config.alm_trust_radius_min),
+                "--alm-trust-radius-shrink",
+                str(config.alm_trust_radius_shrink),
+                "--alm-trust-radius-grow",
+                str(config.alm_trust_radius_grow),
+                "--alm-max-inner-attempts",
+                str(config.alm_max_inner_attempts),
+                "--alm-max-subproblem-continuations",
+                str(config.alm_max_subproblem_continuations),
+                "--alm-distance-smoothing",
+                str(config.alm_distance_smoothing),
+                "--alm-curvature-smoothing",
+                str(config.alm_curvature_smoothing),
             ]
         )
     if config.basin_hops > 0:
@@ -174,6 +253,38 @@ def build_stage2_command(
             command.extend(["--basin-seed", str(config.basin_seed)])
     if config.init_only:
         command.append("--init-only")
+    if config.stage2_iota_mode != "off":
+        command.extend(
+            [
+                "--stage2-iota-mode",
+                config.stage2_iota_mode,
+                "--stage2-iota-target",
+                str(config.stage2_iota_target),
+                "--stage2-iota-tolerance",
+                str(config.stage2_iota_tolerance),
+                "--stage2-iota-vol-target",
+                str(config.stage2_iota_vol_target),
+                "--stage2-iota-constraint-weight",
+                str(config.stage2_iota_constraint_weight),
+                "--stage2-iota-num-tf-coils",
+                str(config.stage2_iota_num_tf_coils),
+                "--stage2-iota-nphi",
+                str(config.stage2_iota_nphi),
+                "--stage2-iota-ntheta",
+                str(config.stage2_iota_ntheta),
+                "--stage2-iota-mpol",
+                str(config.stage2_iota_mpol),
+                "--stage2-iota-ntor",
+                str(config.stage2_iota_ntor),
+            ]
+        )
+        if config.stage2_iota_mode == "soft":
+            command.extend(
+                [
+                    "--stage2-iota-weight",
+                    str(config.stage2_iota_weight),
+                ]
+            )
     return command
 
 
@@ -242,6 +353,12 @@ def _single_results_matches(output_root: str | Path) -> list[Path]:
     return sorted(Path(output_root).glob("mpol=*-ntor=*/results.json"))
 
 
+def _single_solver_checkpoint_matches(output_root: str | Path) -> list[Path]:
+    return sorted(
+        Path(output_root).glob("mpol=*-ntor=*/solver_state_checkpoint.json")
+    )
+
+
 def snapshot_single_results_paths(output_root: str | Path) -> dict[Path, int]:
     return {
         path: path.stat().st_mtime_ns
@@ -287,6 +404,20 @@ def discover_single_results_path(
     return matches[0]
 
 
+def discover_single_solver_checkpoint_path(output_root: str | Path) -> Path:
+    matches = _single_solver_checkpoint_matches(output_root)
+    if not matches:
+        raise FileNotFoundError(
+            f"Expected at least one single-stage solver_state_checkpoint.json under {output_root}, found 0"
+        )
+    if len(matches) != 1:
+        raise FileNotFoundError(
+            "Expected exactly one single-stage solver_state_checkpoint.json under "
+            f"{output_root}, found {len(matches)}"
+        )
+    return matches[0]
+
+
 def dry_run_marker_path(output_root: str | Path) -> Path:
     return Path(output_root) / DRY_RUN_MARKER_FILENAME
 
@@ -314,6 +445,33 @@ def clear_dry_run_marker(output_root: str | Path) -> None:
     marker_path = dry_run_marker_path(output_root)
     if marker_path.exists():
         marker_path.unlink()
+
+
+def write_json(path: str | Path, payload: object) -> None:
+    target_path = Path(path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    with target_path.open("w", encoding="utf-8") as outfile:
+        json.dump(payload, outfile, indent=2)
+
+
+def write_csv_rows(
+    path: str | Path,
+    rows: Sequence[Mapping[str, object]],
+    *,
+    fieldnames: Sequence[str],
+) -> None:
+    target_path = Path(path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    with target_path.open("w", encoding="utf-8", newline="") as outfile:
+        writer = csv.DictWriter(outfile, fieldnames=list(fieldnames))
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    fieldname: row.get(fieldname)
+                    for fieldname in fieldnames
+                }
+            )
 
 
 def load_json(path: str | Path) -> dict:
@@ -430,6 +588,28 @@ def append_single_stage_handoff_flags(command: list[str], args: object) -> None:
         "--allow-init-only-stage2-seed",
         bool(getattr(args, "allow_init_only_stage2_seed", False)),
     )
+
+
+def run_poincare_artifact(
+    *,
+    output_dir: str | Path,
+    python_executable: str = sys.executable,
+    timeout_seconds: float | None = None,
+    dry_run: bool = False,
+) -> list[str]:
+    command = [python_executable, str(POINCARE_SCRIPT_PATH)]
+    if dry_run:
+        return command
+    env = os.environ.copy()
+    env["POINCARE_OUT_DIR"] = str(resolved_path(output_dir))
+    subprocess.run(
+        command,
+        cwd=str(SCRIPT_DIR),
+        check=True,
+        timeout=timeout_seconds,
+        env=env,
+    )
+    return command
 
 
 def timeout_or_none(timeout_seconds: float) -> float | None:

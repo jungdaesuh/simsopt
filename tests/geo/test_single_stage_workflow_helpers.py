@@ -186,6 +186,50 @@ class WorkflowHelpersTests(unittest.TestCase):
             "biot_savart_opt.json",
         )
 
+    def test_format_local_stage2_run_dir_canonicalizes_exact_iota_constraint_weight(self):
+        module = load_workflow_helpers_module()
+        spec = module.Stage2SeedSpec(
+            plasma_surf_filename="demo.nc",
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            tf_current_A=8.0e4,
+            order=2,
+        )
+
+        run_dir = module.format_local_stage2_run_dir(
+            spec,
+            constraint_method="alm",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            basin_hops=0,
+            basin_stepsize=0.01,
+            stage2_iota_mode="soft",
+            stage2_iota_target=0.2,
+            stage2_iota_tolerance=5.0e-3,
+            stage2_iota_weight=3.0,
+            stage2_iota_vol_target=0.12,
+            stage2_iota_constraint_weight=0.0,
+            stage2_iota_num_tf_coils=20,
+            stage2_iota_nphi=91,
+            stage2_iota_ntheta=32,
+            stage2_iota_mpol=8,
+            stage2_iota_ntor=6,
+        )
+
+        self.assertIn("-IM=soft", run_dir)
+        self.assertIn("-ITarget=0.2", run_dir)
+        self.assertIn("-ITol=0.005", run_dir)
+        self.assertIn("-IW=3", run_dir)
+        self.assertIn("-IVol=0.12", run_dir)
+        self.assertIn("-ICW=exact", run_dir)
+
     def test_format_local_stage2_run_dir_includes_alm_penalty_cap_when_enabled(self):
         module = load_workflow_helpers_module()
         spec = module.Stage2SeedSpec(
@@ -214,6 +258,51 @@ class WorkflowHelpersTests(unittest.TestCase):
         )
 
         self.assertIn("-CM=alm-ALMOuter=10-ALMMu=1-ALMScale=10-ALMMax=1e+08", run_dir)
+
+    def test_local_stage2_run_dir_encodes_nondefault_extended_alm_controls(self):
+        module = load_workflow_helpers_module()
+        spec = module.Stage2SeedSpec(
+            plasma_surf_filename="demo.nc",
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            tf_current_A=8.0e4,
+            order=2,
+        )
+
+        run_dir = module.format_local_stage2_run_dir(
+            spec,
+            constraint_method="alm",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            alm_penalty_max=50.0,
+            alm_feas_tol=1.0e-4,
+            alm_stationarity_tol=2.0e-4,
+            alm_trust_radius_init=0.15,
+            alm_trust_radius_min=1.0e-3,
+            alm_trust_radius_shrink=0.4,
+            alm_trust_radius_grow=1.8,
+            alm_max_inner_attempts=5,
+            alm_max_subproblem_continuations=9,
+            alm_distance_smoothing=0.01,
+            alm_curvature_smoothing=0.05,
+            basin_hops=0,
+            basin_stepsize=0.01,
+        )
+
+        self.assertIn("-ALMSub=9", run_dir)
+        self.assertIn("-ALMFeas=0.0001", run_dir)
+        self.assertIn("-ALMStat=0.0002", run_dir)
+        self.assertIn("-ALMTR=0.15", run_dir)
+        self.assertIn("-ALMInner=5", run_dir)
+        self.assertIn("-ALMDist=0.01", run_dir)
+        self.assertIn("-ALMCurv=0.05", run_dir)
 
     def test_select_non_dominated_records_uses_augmented_iota_error(self):
         module = load_workflow_helpers_module()
@@ -363,6 +452,60 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
         self.assertIn("--basin-temperature", command)
         self.assertIn("--basin-niter-success", command)
         self.assertIn("--basin-seed", command)
+
+    def test_build_stage2_command_threads_extended_alm_controls(self):
+        module = load_workflow_common_module()
+        config = module.Stage2ArtifactConfig(
+            plasma_surf_filename="demo.nc",
+            output_root=Path("/tmp/stage2"),
+            equilibria_dir=None,
+            tf_current_A=8.0e4,
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            order=2,
+            constraint_method="alm",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            alm_penalty_max=50.0,
+            alm_feas_tol=1.0e-4,
+            alm_stationarity_tol=2.0e-4,
+            alm_trust_radius_init=0.15,
+            alm_trust_radius_min=1.0e-3,
+            alm_trust_radius_shrink=0.4,
+            alm_trust_radius_grow=1.8,
+            alm_max_inner_attempts=5,
+            alm_max_subproblem_continuations=9,
+            alm_distance_smoothing=0.01,
+            alm_curvature_smoothing=0.05,
+            basin_hops=0,
+            basin_stepsize=0.01,
+            basin_seed=None,
+            init_only=False,
+        )
+
+        command = module.build_stage2_command(config, python_executable="python")
+
+        for flag, expected in (
+            ("--alm-max-subproblem-continuations", "9"),
+            ("--alm-feas-tol", "0.0001"),
+            ("--alm-stationarity-tol", "0.0002"),
+            ("--alm-trust-radius-init", "0.15"),
+            ("--alm-trust-radius-min", "0.001"),
+            ("--alm-trust-radius-shrink", "0.4"),
+            ("--alm-trust-radius-grow", "1.8"),
+            ("--alm-max-inner-attempts", "5"),
+            ("--alm-distance-smoothing", "0.01"),
+            ("--alm-curvature-smoothing", "0.05"),
+        ):
+            self.assertIn(flag, command)
+            self.assertEqual(command[command.index(flag) + 1], expected)
 
     def test_locked_baseline_stage2_metadata_includes_basin_identity(self):
         common = load_workflow_common_module()
@@ -516,8 +659,8 @@ class BaselineSweepScriptTests(unittest.TestCase):
             "CC_WEIGHT": 100.0,
             "CC_THRESHOLD": 0.05,
             "CURVATURE_WEIGHT": 0.0001,
-            "CURVATURE_THRESHOLD": 40.0,
-            "banana_surf_radius": 0.22,
+            "CURVATURE_THRESHOLD": 100.0,
+            "banana_surf_radius": 0.21,
             "order": 2,
             "CONSTRAINT_METHOD": "penalty",
             "basin_hops": 0,
@@ -540,8 +683,8 @@ class BaselineSweepScriptTests(unittest.TestCase):
             "cc_weight": 100.0,
             "cc_threshold": 0.05,
             "curvature_weight": 0.0001,
-            "curvature_threshold": 40.0,
-            "banana_surf_radius": 0.22,
+            "curvature_threshold": 100.0,
+            "banana_surf_radius": 0.21,
             "order": 2,
             "constraint_method": "penalty",
             "alm_max_outer_iters": 10,
@@ -570,7 +713,7 @@ class BaselineSweepScriptTests(unittest.TestCase):
             stage2_cc_threshold=0.05,
             stage2_curvature_weight=0.0001,
             stage2_curvature_threshold=40.0,
-            banana_surf_radius=0.22,
+            banana_surf_radius=0.21,
             stage2_order=2,
             stage2_constraint_method="penalty",
             stage2_basin_hops=0,
@@ -1030,6 +1173,22 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             res_weight=1000.0,
             iotas_weight=100.0,
             frontier_volume_weight=None,
+            frontier_scalarization_type=None,
+            frontier_reference_iota=None,
+            frontier_reference_iota_scale=None,
+            frontier_reference_volume=None,
+            frontier_reference_volume_scale=None,
+            frontier_reference_qa=None,
+            frontier_reference_boozer=None,
+            frontier_boozer_trust_threshold=None,
+            frontier_boozer_trust_penalty_scale=None,
+            frontier_chebyshev_rho=None,
+            frontier_chebyshev_weight_iota=None,
+            frontier_chebyshev_weight_volume=None,
+            frontier_chebyshev_weight_qa=None,
+            frontier_chebyshev_weight_boozer=None,
+            epsilon_constraint_qa_max=None,
+            epsilon_constraint_boozer_max=None,
             cc_weight=100.0,
             curvature_weight=0.1,
             length_weight=1.0,
@@ -1226,6 +1385,116 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         )
 
         self.assertNotIn("--frontier-volume-weight", command)
+
+    def test_build_single_stage_goal_mode_command_forwards_resume_solver_checkpoint(self):
+        module = load_goal_mode_comparison_module()
+        args = self._make_args()
+        args.resume_solver_checkpoint = "/tmp/checkpoints/solver_state_checkpoint.json"
+
+        command = module.build_single_stage_goal_mode_command(
+            args,
+            goal_mode="frontier",
+            stage2_bs_path=Path("relative/seed.json").resolve(),
+            case_output_root=Path("outputs/frontier").resolve(),
+        )
+
+        self.assertIn("--resume-solver-checkpoint", command)
+        self.assertEqual(
+            command[command.index("--resume-solver-checkpoint") + 1],
+            "/tmp/checkpoints/solver_state_checkpoint.json",
+        )
+
+    def test_build_single_stage_goal_mode_command_forwards_stage2_handoff_flags(self):
+        module = load_goal_mode_comparison_module()
+        args = self._make_args()
+        args.allow_init_only_stage2_seed = True
+        args.equilibrium_path = "eq/demo.nc"
+        args.constraint_weight = -1.0
+        args.num_tf_coils = 18
+        args.stage2_seed_tf_current_A = 12345.0
+
+        command = module.build_single_stage_goal_mode_command(
+            args,
+            goal_mode="target",
+            stage2_bs_path=Path("relative/seed.json").resolve(),
+            case_output_root=Path("outputs/target").resolve(),
+        )
+
+        self.assertIn("--allow-init-only-stage2-seed", command)
+        self.assertEqual(
+            command[command.index("--equilibrium-path") + 1],
+            str(Path("eq/demo.nc").resolve()),
+        )
+        self.assertEqual(
+            command[command.index("--constraint-weight") + 1],
+            "-1.0",
+        )
+        self.assertEqual(
+            command[command.index("--num-tf-coils") + 1],
+            "18",
+        )
+        self.assertEqual(
+            command[command.index("--stage2-seed-tf-current-A") + 1],
+            "12345.0",
+        )
+
+    def test_build_single_stage_goal_mode_command_forwards_chebyshev_flags(self):
+        module = load_goal_mode_comparison_module()
+        args = self._make_args()
+        args.frontier_scalarization_type = "achievement_chebyshev_sweep_v1"
+        args.frontier_chebyshev_rho = 0.02
+        args.frontier_chebyshev_weight_iota = 2.0
+        args.frontier_chebyshev_weight_volume = 1.5
+        args.frontier_chebyshev_weight_qa = 1.0
+        args.frontier_chebyshev_weight_boozer = 0.5
+
+        command = module.build_single_stage_goal_mode_command(
+            args,
+            goal_mode="frontier",
+            stage2_bs_path=Path("relative/seed.json").resolve(),
+            case_output_root=Path("outputs/frontier").resolve(),
+        )
+
+        self.assertEqual(
+            command[command.index("--frontier-scalarization-type") + 1],
+            "achievement_chebyshev_sweep_v1",
+        )
+        self.assertEqual(command[command.index("--frontier-chebyshev-rho") + 1], "0.02")
+        self.assertEqual(
+            command[command.index("--frontier-chebyshev-weight-iota") + 1],
+            "2.0",
+        )
+        self.assertEqual(
+            command[command.index("--frontier-chebyshev-weight-volume") + 1],
+            "1.5",
+        )
+
+    def test_build_single_stage_goal_mode_command_forwards_epsilon_flags(self):
+        module = load_goal_mode_comparison_module()
+        args = self._make_args()
+        args.frontier_scalarization_type = "epsilon_constraint_sweep_v1"
+        args.epsilon_constraint_qa_max = 0.011
+        args.epsilon_constraint_boozer_max = 0.007
+
+        command = module.build_single_stage_goal_mode_command(
+            args,
+            goal_mode="frontier",
+            stage2_bs_path=Path("relative/seed.json").resolve(),
+            case_output_root=Path("outputs/frontier").resolve(),
+        )
+
+        self.assertEqual(
+            command[command.index("--frontier-scalarization-type") + 1],
+            "epsilon_constraint_sweep_v1",
+        )
+        self.assertEqual(
+            command[command.index("--epsilon-constraint-qa-max") + 1],
+            "0.011",
+        )
+        self.assertEqual(
+            command[command.index("--epsilon-constraint-boozer-max") + 1],
+            "0.007",
+        )
 
     def test_goal_mode_comparison_wrapper_rejects_stage2_surface_mismatch(self):
         module = load_goal_mode_comparison_module()
@@ -1868,6 +2137,28 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             },
         }
 
+    def _write_stage2_seed_artifact(
+        self,
+        tmpdir_path: Path,
+        *,
+        overrides: dict | None = None,
+    ) -> tuple[Path, Path, dict]:
+        stage2_results = {
+            "PLASMA_SURF_FILENAME": "demo.nc",
+            "init_only": False,
+        }
+        if overrides is not None:
+            stage2_results.update(overrides)
+        stage2_bs_path = tmpdir_path / "stage2" / "biot_savart_opt.json"
+        stage2_results_path = tmpdir_path / "stage2" / "results.json"
+        stage2_bs_path.parent.mkdir(parents=True, exist_ok=True)
+        stage2_bs_path.write_text("{}", encoding="utf-8")
+        stage2_results_path.write_text(
+            json.dumps(stage2_results),
+            encoding="utf-8",
+        )
+        return stage2_bs_path, stage2_results_path, stage2_results
+
     def test_frontier_campaign_dry_run_writes_manifest_and_summary(self):
         module = load_frontier_campaign_module()
 
@@ -1943,11 +2234,9 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             tmpdir_path = Path(tmpdir)
             output_root = tmpdir_path / "outputs"
             summary_path = tmpdir_path / "summary.json"
-            stage2_bs_path = tmpdir_path / "stage2" / "biot_savart_opt.json"
-            stage2_results_path = tmpdir_path / "stage2" / "results.json"
-            stage2_bs_path.parent.mkdir(parents=True, exist_ok=True)
-            stage2_bs_path.write_text("{}", encoding="utf-8")
-            stage2_results_path.write_text("{}", encoding="utf-8")
+            stage2_bs_path, stage2_results_path, stage2_results = (
+                self._write_stage2_seed_artifact(tmpdir_path)
+            )
 
             target_payload = self._minimal_target_payload(output_root)
             lane_01 = self._minimal_frontier_payload(
@@ -1990,10 +2279,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 return_value=(
                     stage2_bs_path.resolve(),
                     stage2_results_path.resolve(),
-                    {
-                        "PLASMA_SURF_FILENAME": "demo.nc",
-                        "init_only": False,
-                    },
+                    stage2_results,
                 ),
             ), patch.object(
                 module.goal_mode_comparison,
@@ -2014,19 +2300,62 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             recommended = json.loads(
                 (output_root / "frontier_recommended.json").read_text(encoding="utf-8")
             )
+            progress_payload = json.loads(
+                (output_root / "campaign_progress.json").read_text(encoding="utf-8")
+            )
 
             self.assertEqual(summary["frontier_archive_size"], 2)
             self.assertEqual(
                 [lane["lane_budget"] for lane in summary["frontier_lanes"]],
                 [300, 300, 300],
             )
+            self.assertIsNotNone(summary["frontier_hypervolume"])
+            self.assertEqual(len(summary["frontier_hypervolume_history"]), 3)
             self.assertEqual(summary["frontier_lanes"][1]["status"], "failed")
             self.assertEqual(summary["frontier_lanes"][1]["error_type"], "RuntimeError")
+            self.assertEqual(
+                [lane["provisional_member_ids"] for lane in summary["frontier_lanes"]],
+                [[], [], []],
+            )
+            self.assertIsNotNone(archive["hypervolume_total"])
+            self.assertTrue(
+                all(
+                    member["hypervolume_contribution"] is not None
+                    for member in archive["members"]
+                )
+            )
             self.assertEqual(archive["best_by_metric"]["iota"]["member_id"].split(":")[-1], "lane_03")
             self.assertEqual(recommended["recommended_member_id"].split(":")[-1], "lane_01")
             self.assertEqual(
                 summary["recommended_member"]["recommended_member_id"].split(":")[-1],
                 "lane_01",
+            )
+            self.assertEqual(
+                len(progress_payload["provisional_archive_members"]),
+                2,
+            )
+            self.assertTrue(
+                all(
+                    member["archive_state"] == "provisional"
+                    and member["member_id"].endswith(":provisional")
+                    for member in progress_payload["provisional_archive_members"]
+                )
+            )
+            self.assertEqual(
+                progress_payload["lane_records"][0]["provisional_member_ids"],
+                [
+                    f"{summary['frontier_campaign_id']}:lane_01:provisional",
+                ],
+            )
+            self.assertEqual(
+                progress_payload["lane_records"][2]["provisional_member_ids"],
+                [
+                    f"{summary['frontier_campaign_id']}:lane_03:provisional",
+                ],
+            )
+            self.assertEqual(
+                progress_payload["lane_records"][0]["certified_member_ids"],
+                [f"{summary['frontier_campaign_id']}:lane_01"],
             )
             self.assertAlmostEqual(
                 summary["target_comparison"]["recommended_minus_target_final_iota"],
@@ -2067,7 +2396,125 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             args.frontier_epsilon_spec_file,
             "/tmp/epsilon.json",
         )
+        self.assertEqual(args.frontier_lane_warm_start_mode, "seed")
         self.assertTrue(args.resume)
+
+    def test_frontier_campaign_parse_args_accepts_runtime_calibration_and_early_stop_flags(self):
+        module = load_frontier_campaign_module()
+
+        args = module.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/demo/biot_savart_opt.json",
+                "--frontier-runtime-calibration-profile",
+                "canonical_seed_v1",
+                "--frontier-early-stop-patience-lanes",
+                "4",
+                "--frontier-early-stop-min-certified",
+                "2",
+                "--frontier-early-stop-min-hypervolume-gain",
+                "0.0015",
+            ]
+        )
+
+        self.assertEqual(
+            args.frontier_runtime_calibration_profile,
+            "canonical_seed_v1",
+        )
+        self.assertEqual(args.frontier_early_stop_patience_lanes, 4)
+        self.assertEqual(args.frontier_early_stop_min_certified, 2)
+        self.assertEqual(
+            args.frontier_early_stop_min_hypervolume_gain,
+            0.0015,
+        )
+
+    def test_frontier_campaign_parse_args_accepts_recommendation_and_warm_start_modes(self):
+        module = load_frontier_campaign_module()
+
+        args = module.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/demo/biot_savart_opt.json",
+                "--frontier-recommendation-policy",
+                "closest_to_seed",
+                "--frontier-lane-warm-start-mode",
+                "reuse_latest_certified",
+            ]
+        )
+
+        self.assertEqual(args.frontier_recommendation_policy, "closest_to_seed")
+        self.assertEqual(
+            args.frontier_lane_warm_start_mode,
+            "reuse_latest_certified",
+        )
+
+    def test_frontier_campaign_manifest_records_resolved_hypervolume_reference_metrics(self):
+        module = load_frontier_campaign_module()
+
+        args = module.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/demo/biot_savart_opt.json",
+                "--frontier-num-lanes",
+                "1",
+                "--frontier-hypervolume-reference",
+                "0.15,0.10,0.012,0.008",
+            ]
+        )
+        lane_specs = [
+            module.FrontierLaneSpec(
+                lane_id="lane_01",
+                scalarization_type="weight_schedule_v1",
+                scalarization_params={"iota_share": 0.5, "volume_share": 0.5},
+                iotas_weight=150.0,
+                frontier_volume_weight=150.0,
+                res_weight=1000.0,
+                lane_budget=30,
+            )
+        ]
+
+        manifest = module.build_frontier_campaign_manifest(
+            args,
+            campaign_id="campaign",
+            stage2_bs_path=Path("/tmp/demo/biot_savart_opt.json"),
+            stage2_results_path=None,
+            stage2_results=None,
+            lane_specs=lane_specs,
+        )
+
+        self.assertEqual(
+            manifest["FRONTIER_HYPERVOLUME_REFERENCE_METRICS"],
+            {
+                "iota": 0.15,
+                "volume": 0.10,
+                "qa_error": 0.012,
+                "boozer_residual": 0.008,
+            },
+        )
+        self.assertEqual(
+            manifest["PARETO_OBJECTIVE_NORMALIZATION"]["reference_metrics"],
+            {
+                "iota": 0.15,
+                "volume": 0.10,
+                "qa_error": 0.012,
+                "boozer_residual": 0.008,
+            },
+        )
+        self.assertEqual(
+            manifest["PARETO_OBJECTIVE_NORMALIZATION"]["metric_rules"]["iota"],
+            {
+                "direction": "max",
+                "scale_kind": "reference_fraction_with_floor",
+                "reference_fraction": 0.25,
+                "floor": 0.05,
+            },
+        )
 
     def test_frontier_campaign_manifest_uses_effective_lane_budget_from_lane_specs(self):
         module = load_frontier_campaign_module()
@@ -2106,6 +2553,45 @@ class FrontierCampaignScriptTests(unittest.TestCase):
         self.assertEqual(manifest["LANE_BUDGET"], 25)
         self.assertEqual(manifest["TOTAL_BUDGET"], 25)
         self.assertEqual(manifest["LANE_SPECS"][0]["lane_budget"], 25)
+
+    def test_frontier_campaign_manifest_reports_lane_constraint_mode_family(self):
+        module = load_frontier_campaign_module()
+
+        args = module.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/demo/biot_savart_opt.json",
+                "--frontier-num-lanes",
+                "1",
+            ]
+        )
+        lane_specs = [
+            module.FrontierLaneSpec(
+                lane_id="lane_tradeoff",
+                scalarization_type="achievement_chebyshev_sweep_v1",
+                scalarization_params={"frontier_chebyshev_rho": 0.02},
+                iotas_weight=100.0,
+                frontier_volume_weight=200.0,
+                res_weight=1000.0,
+                lane_budget=25,
+            )
+        ]
+
+        manifest = module.build_frontier_campaign_manifest(
+            args,
+            campaign_id="campaign",
+            stage2_bs_path=Path("/tmp/demo/biot_savart_opt.json"),
+            stage2_results_path=None,
+            stage2_results=None,
+            lane_specs=lane_specs,
+        )
+
+        self.assertEqual(
+            manifest["FRONTIER_CONSTRAINT_MODE"],
+            "frontier_achievement_chebyshev_v1",
+        )
 
     def test_frontier_campaign_manifest_uses_null_lane_budget_for_mixed_lane_budgets(self):
         module = load_frontier_campaign_module()
@@ -2160,11 +2646,9 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             tmpdir_path = Path(tmpdir)
             output_root = tmpdir_path / "outputs"
             summary_path = tmpdir_path / "summary.json"
-            stage2_bs_path = tmpdir_path / "stage2" / "biot_savart_opt.json"
-            stage2_results_path = tmpdir_path / "stage2" / "results.json"
-            stage2_bs_path.parent.mkdir(parents=True, exist_ok=True)
-            stage2_bs_path.write_text("{}", encoding="utf-8")
-            stage2_results_path.write_text("{}", encoding="utf-8")
+            stage2_bs_path, stage2_results_path, stage2_results = (
+                self._write_stage2_seed_artifact(tmpdir_path)
+            )
 
             base_args = module.parse_args(
                 [
@@ -2195,10 +2679,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     campaign_id=campaign_id,
                     stage2_bs_path=stage2_bs_path.resolve(),
                     stage2_results_path=stage2_results_path.resolve(),
-                    stage2_results={
-                        "PLASMA_SURF_FILENAME": "demo.nc",
-                        "init_only": False,
-                    },
+                    stage2_results=stage2_results,
                     lane_specs=lane_specs,
                 ),
             )
@@ -2230,6 +2711,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 lane_specs[0],
                 campaign_id=campaign_id,
                 stage2_bs_path=stage2_bs_path.resolve(),
+                warm_start_source=str(stage2_bs_path.resolve()),
                 lane_budget=int(lane_01_args.maxiter),
                 lane_index=0,
             )
@@ -2239,11 +2721,19 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 payload=lane_01_payload,
                 rerun_contract=lane_01_contract.rerun_contract,
             )
+            lane_01_provisional_member = module.build_archive_member_from_results(
+                campaign_id=campaign_id,
+                lane_id="lane_01",
+                payload=lane_01_payload,
+                rerun_contract=lane_01_contract.rerun_contract,
+                archive_state=module.FRONTIER_ARCHIVE_STATE_PROVISIONAL,
+            )
             lane_01_record = module.build_lane_record_from_payload(
                 lane_01_contract,
                 lane_specs[0],
                 int(lane_01_args.maxiter),
                 lane_01_payload,
+                provisional_archive_member=lane_01_provisional_member,
                 archive_member=lane_01_member,
                 archive_update={
                     "action": "inserted",
@@ -2258,12 +2748,14 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 frontier_engine=base_args.frontier_engine,
                 target_payload=target_payload,
                 lane_records=[lane_01_record],
+                provisional_archive_members=[lane_01_provisional_member],
                 archive_members=[lane_01_member],
             )
             progress_payload = json.loads(
                 (output_root / "campaign_progress.json").read_text(encoding="utf-8")
             )
             progress_payload["archive_members"] = []
+            progress_payload["provisional_archive_members"] = []
             (output_root / "campaign_progress.json").write_text(
                 json.dumps(progress_payload, indent=2),
                 encoding="utf-8",
@@ -2309,10 +2801,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 return_value=(
                     stage2_bs_path.resolve(),
                     stage2_results_path.resolve(),
-                    {
-                        "PLASMA_SURF_FILENAME": "demo.nc",
-                        "init_only": False,
-                    },
+                    stage2_results,
                 ),
             ), patch.object(
                 module.goal_mode_comparison,
@@ -2325,6 +2814,11 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             progress = module.load_frontier_campaign_progress(
                 output_root / "campaign_progress.json"
             )
+            expected_provisional_ids = [
+                f"{campaign_id}:lane_01:provisional",
+                f"{campaign_id}:lane_02:provisional",
+                f"{campaign_id}:lane_03:provisional",
+            ]
 
             self.assertEqual(run_case.call_count, 2)
             self.assertEqual(summary["frontier_campaign_id"], campaign_id)
@@ -2336,7 +2830,12 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             )
             self.assertEqual(summary["frontier_archive_size"], 3)
             self.assertEqual(len(progress.lane_records), 3)
+            self.assertEqual(len(progress.provisional_archive_members), 3)
             self.assertEqual(len(progress.archive_members), 3)
+            self.assertEqual(
+                [member.member_id for member in progress.provisional_archive_members],
+                expected_provisional_ids,
+            )
 
     def test_frontier_campaign_resume_preserves_existing_contract_metadata(self):
         module = load_frontier_campaign_module()
@@ -2407,6 +2906,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 frontier_engine="original_frontier_engine",
                 target_payload=None,
                 lane_records=[],
+                provisional_archive_members=[],
                 archive_members=[],
             )
 
@@ -2468,3 +2968,723 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 summary["frontier_lanes"][0]["warm_start_source"],
                 str(original_stage2_bs_path.resolve()),
             )
+
+    def test_frontier_campaign_resume_salvages_missing_lane_from_partial_artifact_before_rerun(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            stage2_bs_path, stage2_results_path, stage2_results = (
+                self._write_stage2_seed_artifact(tmpdir_path)
+            )
+
+            base_args = module.parse_args(
+                [
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                ]
+            )
+            lane_specs = module.generate_multilane_local_specs(
+                num_lanes=3,
+                iotas_weight=base_args.iotas_weight,
+                frontier_volume_weight=base_args.frontier_volume_weight,
+                res_weight=base_args.res_weight,
+                lane_budget=base_args.frontier_lane_budget,
+            )
+            campaign_id = "resume-salvage"
+            module.write_json(
+                output_root / "campaign_manifest.json",
+                module.build_frontier_campaign_manifest(
+                    base_args,
+                    campaign_id=campaign_id,
+                    stage2_bs_path=stage2_bs_path.resolve(),
+                    stage2_results_path=stage2_results_path.resolve(),
+                    stage2_results=stage2_results,
+                    lane_specs=lane_specs,
+                ),
+            )
+
+            target_payload = {
+                "status": "completed",
+                **self._minimal_target_payload(output_root),
+            }
+            target_payload["results_summary"] = (
+                module.goal_mode_comparison.result_metric_subset(
+                    target_payload["results"]
+                )
+            )
+            lane_01_payload = {
+                "status": "completed",
+                **self._minimal_frontier_payload(
+                    output_root,
+                    lane_id="lane_01",
+                    final_iota=0.165,
+                    final_volume=0.108,
+                    nonqs_ratio=0.011,
+                    boozer_residual=0.0075,
+                ),
+            }
+            lane_01_payload["results_summary"] = (
+                module.goal_mode_comparison.result_metric_subset(
+                    lane_01_payload["results"]
+                )
+            )
+            lane_01_args = module.build_frontier_lane_args(base_args, lane_specs[0])
+            lane_01_contract = module.build_frontier_lane_contract_for_spec(
+                lane_01_args,
+                lane_specs[0],
+                campaign_id=campaign_id,
+                stage2_bs_path=stage2_bs_path.resolve(),
+                warm_start_source=str(stage2_bs_path.resolve()),
+                lane_budget=int(lane_01_args.maxiter),
+                lane_index=0,
+            )
+            lane_01_member = module.build_archive_member_from_results(
+                campaign_id=campaign_id,
+                lane_id="lane_01",
+                payload=lane_01_payload,
+                rerun_contract=lane_01_contract.rerun_contract,
+            )
+            lane_01_provisional_member = module.build_archive_member_from_results(
+                campaign_id=campaign_id,
+                lane_id="lane_01",
+                payload=lane_01_payload,
+                rerun_contract=lane_01_contract.rerun_contract,
+                archive_state=module.FRONTIER_ARCHIVE_STATE_PROVISIONAL,
+            )
+            lane_01_record = module.build_lane_record_from_payload(
+                lane_01_contract,
+                lane_specs[0],
+                int(lane_01_args.maxiter),
+                lane_01_payload,
+                provisional_archive_member=lane_01_provisional_member,
+                archive_member=lane_01_member,
+                archive_update={
+                    "action": "inserted",
+                    "member_id": lane_01_member.member_id,
+                    "dominated_members": [],
+                },
+            )
+            module.persist_campaign_progress(
+                output_root / "campaign_progress.json",
+                campaign_id=campaign_id,
+                frontier_version=base_args.frontier_version,
+                frontier_engine=base_args.frontier_engine,
+                target_payload=target_payload,
+                lane_records=[lane_01_record],
+                provisional_archive_members=[lane_01_provisional_member],
+                archive_members=[lane_01_member],
+            )
+
+            lane_02_partial = self._minimal_frontier_payload(
+                output_root,
+                lane_id="lane_02",
+                final_iota=0.172,
+                final_volume=0.106,
+                nonqs_ratio=0.0108,
+                boozer_residual=0.0072,
+                result_source="best_feasible_partial",
+            )
+            lane_02_partial_path = (
+                output_root
+                / "lanes"
+                / "lane_02"
+                / "frontier"
+                / "mpol=8-ntor=6"
+                / "results_best_feasible.partial.json"
+            )
+            lane_02_partial_path.parent.mkdir(parents=True, exist_ok=True)
+            lane_02_partial_path.write_text(
+                json.dumps(lane_02_partial["results"]),
+                encoding="utf-8",
+            )
+
+            lane_03_payload = self._minimal_frontier_payload(
+                output_root,
+                lane_id="lane_03",
+                final_iota=0.181,
+                final_volume=0.101,
+                nonqs_ratio=0.0115,
+                boozer_residual=0.0085,
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                    "--resume",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    stage2_results_path.resolve(),
+                    stage2_results,
+                ),
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+                side_effect=[lane_03_payload],
+            ) as run_case:
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            lane_02_summary = summary["frontier_lanes"][1]
+
+            self.assertEqual(run_case.call_count, 1)
+            self.assertEqual(lane_02_summary["lane_id"], "lane_02")
+            self.assertEqual(lane_02_summary["status"], "completed")
+            self.assertEqual(
+                lane_02_summary["result_source"],
+                "best_feasible_partial",
+            )
+
+    def test_frontier_campaign_resume_uses_solver_checkpoint_when_results_are_missing(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            stage2_bs_path, stage2_results_path, stage2_results = (
+                self._write_stage2_seed_artifact(tmpdir_path)
+            )
+
+            resume_checkpoint = (
+                output_root
+                / "lanes"
+                / "lane_01"
+                / "frontier"
+                / "mpol=8-ntor=6"
+                / "solver_state_checkpoint.json"
+            )
+            resume_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            resume_checkpoint.write_text("{}", encoding="utf-8")
+
+            seen_resume_checkpoint: dict[str, str | None] = {}
+
+            def run_goal_mode_case(args, *, goal_mode, stage2_bs_path, output_root):
+                seen_resume_checkpoint["path"] = args.resume_solver_checkpoint
+                self.assertEqual(goal_mode, "frontier")
+                return self._minimal_frontier_payload(
+                    output_root.parent.parent,
+                    lane_id="lane_01",
+                    final_iota=0.171,
+                    final_volume=0.107,
+                    nonqs_ratio=0.0109,
+                    boozer_residual=0.0071,
+                )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "1",
+                    "--skip-target",
+                    "--resume",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    stage2_results_path.resolve(),
+                    stage2_results,
+                ),
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+                side_effect=run_goal_mode_case,
+            ) as run_case:
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(run_case.call_count, 1)
+            self.assertEqual(
+                Path(seen_resume_checkpoint["path"]).resolve(),
+                resume_checkpoint.resolve(),
+            )
+            self.assertEqual(summary["frontier_lanes"][0]["lane_id"], "lane_01")
+            self.assertEqual(summary["frontier_lanes"][0]["status"], "completed")
+
+    def test_frontier_campaign_resume_matches_clean_archive_on_deterministic_smoke_fixture(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            stage2_bs_path, stage2_results_path, stage2_results = (
+                self._write_stage2_seed_artifact(tmpdir_path)
+            )
+
+            clean_output_root = tmpdir_path / "clean_outputs"
+            clean_summary_path = tmpdir_path / "clean_summary.json"
+            clean_target_payload = self._minimal_target_payload(clean_output_root)
+            clean_lane_01_payload = self._minimal_frontier_payload(
+                clean_output_root,
+                lane_id="lane_01",
+                final_iota=0.165,
+                final_volume=0.108,
+                nonqs_ratio=0.011,
+                boozer_residual=0.0075,
+            )
+            clean_lane_02_payload = self._minimal_frontier_payload(
+                clean_output_root,
+                lane_id="lane_02",
+                final_iota=0.172,
+                final_volume=0.107,
+                nonqs_ratio=0.0105,
+                boozer_residual=0.0070,
+            )
+            clean_lane_03_payload = self._minimal_frontier_payload(
+                clean_output_root,
+                lane_id="lane_03",
+                final_iota=0.181,
+                final_volume=0.101,
+                nonqs_ratio=0.0115,
+                boozer_residual=0.0085,
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(clean_output_root),
+                    "--summary-json",
+                    str(clean_summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    stage2_results_path.resolve(),
+                    stage2_results,
+                ),
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+                side_effect=[
+                    clean_target_payload,
+                    clean_lane_01_payload,
+                    clean_lane_02_payload,
+                    clean_lane_03_payload,
+                ],
+            ):
+                self.assertEqual(module.main(), 0)
+
+            clean_summary = json.loads(clean_summary_path.read_text(encoding="utf-8"))
+
+            resume_output_root = tmpdir_path / "resume_outputs"
+            resume_summary_path = tmpdir_path / "resume_summary.json"
+            base_args = module.parse_args(
+                [
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(resume_output_root),
+                    "--summary-json",
+                    str(resume_summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                ]
+            )
+            lane_specs = module.generate_multilane_local_specs(
+                num_lanes=3,
+                iotas_weight=base_args.iotas_weight,
+                frontier_volume_weight=base_args.frontier_volume_weight,
+                res_weight=base_args.res_weight,
+                lane_budget=base_args.frontier_lane_budget,
+            )
+            campaign_id = "resume-equivalence"
+            module.write_json(
+                resume_output_root / "campaign_manifest.json",
+                module.build_frontier_campaign_manifest(
+                    base_args,
+                    campaign_id=campaign_id,
+                    stage2_bs_path=stage2_bs_path.resolve(),
+                    stage2_results_path=stage2_results_path.resolve(),
+                    stage2_results=stage2_results,
+                    lane_specs=lane_specs,
+                ),
+            )
+            resume_target_payload = {
+                "status": "completed",
+                **self._minimal_target_payload(resume_output_root),
+            }
+            resume_target_payload["results_summary"] = (
+                module.goal_mode_comparison.result_metric_subset(
+                    resume_target_payload["results"]
+                )
+            )
+            resume_lane_01_payload = {
+                "status": "completed",
+                **self._minimal_frontier_payload(
+                    resume_output_root,
+                    lane_id="lane_01",
+                    final_iota=0.165,
+                    final_volume=0.108,
+                    nonqs_ratio=0.011,
+                    boozer_residual=0.0075,
+                ),
+            }
+            resume_lane_01_payload["results_summary"] = (
+                module.goal_mode_comparison.result_metric_subset(
+                    resume_lane_01_payload["results"]
+                )
+            )
+            lane_01_args = module.build_frontier_lane_args(base_args, lane_specs[0])
+            lane_01_contract = module.build_frontier_lane_contract_for_spec(
+                lane_01_args,
+                lane_specs[0],
+                campaign_id=campaign_id,
+                stage2_bs_path=stage2_bs_path.resolve(),
+                warm_start_source=str(stage2_bs_path.resolve()),
+                lane_budget=int(lane_01_args.maxiter),
+                lane_index=0,
+            )
+            lane_01_member = module.build_archive_member_from_results(
+                campaign_id=campaign_id,
+                lane_id="lane_01",
+                payload=resume_lane_01_payload,
+                rerun_contract=lane_01_contract.rerun_contract,
+            )
+            lane_01_provisional_member = module.build_archive_member_from_results(
+                campaign_id=campaign_id,
+                lane_id="lane_01",
+                payload=resume_lane_01_payload,
+                rerun_contract=lane_01_contract.rerun_contract,
+                archive_state=module.FRONTIER_ARCHIVE_STATE_PROVISIONAL,
+            )
+            lane_01_record = module.build_lane_record_from_payload(
+                lane_01_contract,
+                lane_specs[0],
+                int(lane_01_args.maxiter),
+                resume_lane_01_payload,
+                provisional_archive_member=lane_01_provisional_member,
+                archive_member=lane_01_member,
+                archive_update={
+                    "action": "inserted",
+                    "member_id": lane_01_member.member_id,
+                    "dominated_members": [],
+                },
+            )
+            module.persist_campaign_progress(
+                resume_output_root / "campaign_progress.json",
+                campaign_id=campaign_id,
+                frontier_version=base_args.frontier_version,
+                frontier_engine=base_args.frontier_engine,
+                target_payload=resume_target_payload,
+                lane_records=[lane_01_record],
+                provisional_archive_members=[lane_01_provisional_member],
+                archive_members=[lane_01_member],
+            )
+
+            resume_lane_02_payload = self._minimal_frontier_payload(
+                resume_output_root,
+                lane_id="lane_02",
+                final_iota=0.172,
+                final_volume=0.107,
+                nonqs_ratio=0.0105,
+                boozer_residual=0.0070,
+            )
+            resume_lane_03_payload = self._minimal_frontier_payload(
+                resume_output_root,
+                lane_id="lane_03",
+                final_iota=0.181,
+                final_volume=0.101,
+                nonqs_ratio=0.0115,
+                boozer_residual=0.0085,
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(resume_output_root),
+                    "--summary-json",
+                    str(resume_summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                    "--resume",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    stage2_results_path.resolve(),
+                    stage2_results,
+                ),
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+                side_effect=[resume_lane_02_payload, resume_lane_03_payload],
+            ):
+                self.assertEqual(module.main(), 0)
+
+            resume_summary = json.loads(
+                resume_summary_path.read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(
+                [
+                    member["objective_metrics"]
+                    for member in clean_summary["frontier_archive"]["members"]
+                ],
+                [
+                    member["objective_metrics"]
+                    for member in resume_summary["frontier_archive"]["members"]
+                ],
+            )
+            self.assertEqual(
+                clean_summary["recommended_member"]["recommended_metrics"],
+                resume_summary["recommended_member"]["recommended_metrics"],
+            )
+            self.assertEqual(
+                clean_summary["target_comparison"],
+                resume_summary["target_comparison"],
+            )
+
+    def test_frontier_campaign_early_stop_stops_after_archive_stagnation(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            stage2_bs_path, stage2_results_path, stage2_results = (
+                self._write_stage2_seed_artifact(
+                    tmpdir_path,
+                    overrides={
+                        "FINAL_IOTA": 0.15,
+                        "FINAL_VOLUME": 0.10,
+                        "NONQS_RATIO": 0.012,
+                        "BOOZER_RESIDUAL": 0.008,
+                    },
+                )
+            )
+
+            lane_01_payload = self._minimal_frontier_payload(
+                output_root,
+                lane_id="lane_01",
+                final_iota=0.181,
+                final_volume=0.111,
+                nonqs_ratio=0.0105,
+                boozer_residual=0.0070,
+            )
+            lane_02_payload = self._minimal_frontier_payload(
+                output_root,
+                lane_id="lane_02",
+                final_iota=0.170,
+                final_volume=0.106,
+                nonqs_ratio=0.0115,
+                boozer_residual=0.0078,
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                    "--skip-target",
+                    "--frontier-early-stop-patience-lanes",
+                    "1",
+                    "--frontier-early-stop-min-certified",
+                    "1",
+                    "--frontier-early-stop-min-hypervolume-gain",
+                    "1.0",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    stage2_results_path.resolve(),
+                    stage2_results,
+                ),
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+                side_effect=[lane_01_payload, lane_02_payload],
+            ) as run_case:
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(run_case.call_count, 2)
+            self.assertEqual(
+                [lane["lane_id"] for lane in summary["frontier_lanes"]],
+                ["lane_01", "lane_02"],
+            )
+            self.assertTrue(summary["frontier_early_stop"]["triggered"])
+            self.assertEqual(
+                summary["frontier_early_stop"]["reason"],
+                "archive_stagnation",
+            )
+            self.assertEqual(
+                summary["frontier_early_stop"]["stopped_after_lane_id"],
+                "lane_02",
+            )
+            self.assertEqual(summary["frontier_archive_size"], 1)
+
+    def test_resolve_frontier_lane_warm_start_reuses_latest_certified_final_artifact(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            base_stage2_bs_path = tmpdir_path / "stage2" / "biot_savart_opt.json"
+            base_stage2_bs_path.parent.mkdir(parents=True, exist_ok=True)
+            base_stage2_bs_path.write_text("{}", encoding="utf-8")
+
+            lane_results_path = (
+                tmpdir_path / "outputs" / "lanes" / "lane_01" / "frontier" / "results.json"
+            )
+            lane_results_path.parent.mkdir(parents=True, exist_ok=True)
+            lane_results_path.write_text("{}", encoding="utf-8")
+            warmed_bs_path = lane_results_path.with_name("biot_savart_opt.json")
+            warmed_bs_path.write_text("{}", encoding="utf-8")
+
+            lane_contract = module.build_frontier_lane_contract(
+                campaign_id="campaign",
+                lane_id="lane_01",
+                engine="multilane_local",
+                scalarization_type="weight_schedule_v1",
+                scalarization_params={"iota_share": 0.5, "volume_share": 0.5},
+                constraint_mode="frontier_v2_single_lane_contract",
+                warm_start_source=str(base_stage2_bs_path),
+                optimizer_budget=25,
+                rng_seed=0,
+                rerun_contract={},
+            )
+            lane_record = module.build_frontier_lane_record(
+                lane_contract,
+                command=["python"],
+                weights={
+                    "iotas_weight": 150.0,
+                    "frontier_volume_weight": 150.0,
+                    "res_weight": 1000.0,
+                },
+                lane_budget=25,
+                status="completed",
+                result_source="final",
+                success=True,
+                archive_state="certified",
+                archive_member=module.build_archive_member_from_results(
+                    campaign_id="campaign",
+                    lane_id="lane_01",
+                    payload={
+                        "result_source": "final",
+                        "results_path": str(lane_results_path),
+                        "results": {
+                            "FINAL_IOTA": 0.17,
+                            "FINAL_VOLUME": 0.11,
+                            "NONQS_RATIO": 0.011,
+                            "BOOZER_RESIDUAL": 0.007,
+                            "FINAL_FEASIBILITY_OK": True,
+                            "HARDWARE_CONSTRAINTS_OK": True,
+                            "FINAL_TOPOLOGY_GATE_SUCCESS": True,
+                            "FRONTIER_TRUST_OK": True,
+                            "FRONTIER_REFERENCE_IOTA": 0.15,
+                            "FRONTIER_REFERENCE_VOLUME": 0.10,
+                            "FRONTIER_REFERENCE_QA": 0.012,
+                            "FRONTIER_REFERENCE_BOOZER": 0.008,
+                            "FRONTIER_RANK_OBJECTIVE_J": -1.0,
+                            "OPTIMIZER_SUCCESS": True,
+                            "TERMINATION_MESSAGE": "ok",
+                        },
+                    },
+                    rerun_contract={},
+                ),
+                results_path=str(lane_results_path),
+                results={"OPTIMIZER_SUCCESS": True},
+            )
+            lane_specs = [
+                module.FrontierLaneSpec(
+                    lane_id="lane_01",
+                    scalarization_type="weight_schedule_v1",
+                    scalarization_params={"iota_share": 0.5, "volume_share": 0.5},
+                    iotas_weight=150.0,
+                    frontier_volume_weight=150.0,
+                    res_weight=1000.0,
+                    lane_budget=25,
+                ),
+                module.FrontierLaneSpec(
+                    lane_id="lane_02",
+                    scalarization_type="weight_schedule_v1",
+                    scalarization_params={"iota_share": 0.7, "volume_share": 0.3},
+                    iotas_weight=210.0,
+                    frontier_volume_weight=90.0,
+                    res_weight=1000.0,
+                    lane_budget=25,
+                ),
+            ]
+
+            warm_start_path, warm_start_source = (
+                module.resolve_frontier_lane_warm_start(
+                    base_stage2_bs_path=base_stage2_bs_path,
+                    lane_records_by_id={"lane_01": lane_record},
+                    lane_specs=lane_specs,
+                    lane_index=1,
+                    warm_start_mode="reuse_latest_certified",
+                )
+            )
+
+            self.assertEqual(warm_start_path, warmed_bs_path.resolve())
+            self.assertEqual(warm_start_source, str(warmed_bs_path.resolve()))
