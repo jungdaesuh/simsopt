@@ -869,7 +869,7 @@ class TestBoozerResidualCoilVJP:
         [(0, 42), (1, 43)],
         ids=["gammas", "gammadashs"],
     )
-    def test_coil_vjp_geometry_fd(self, grad_idx, seed):
+    def test_coil_vjp_geometry_scalarization(self, grad_idx, seed):
         """VJP w.r.t. coil gammas/gammadashs matches JAX-native scalarization."""
         self._assert_coil_vjp_scalar_contract(
             grad_idx,
@@ -920,6 +920,10 @@ class TestComposedWeightInvModB:
             self.x,
             self.kwargs,
             seed=2026,
+            # Near-pole 1/|B| weighting is the remaining FD-sensitive path here.
+            check_grads_atol=5e-6,
+            check_grads_rtol=5e-5,
+            check_grads_eps=3e-6,
         )
 
     def test_jacobian_weighted_fd(self):

@@ -2280,6 +2280,11 @@ def target_minimize(
     failure_callback=None,
 ):
     """Explicit JAX target scalar optimizer entrypoint."""
+    if failure_callback is not None and method != "lbfgs-ondevice":
+        raise ValueError(
+            "target_minimize() only supports failure_callback for "
+            "method='lbfgs-ondevice'."
+        )
     if method in _TARGET_PUBLIC_METHODS:
         require_target_backend_x64("ondevice")
         result = adam_optimize_traceable(

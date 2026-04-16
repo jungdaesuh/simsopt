@@ -35,6 +35,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
+from scipy.optimize import root
 
 from ..backend import (
     get_backend_config,
@@ -185,12 +186,24 @@ class _BoozerAdjointRuntimeState:
 
 
 def _surface_geometry_kind(surface) -> str:
+    deferred_surface_class = getattr(surface, "deferred_surface_class", None)
+    if deferred_surface_class == "SurfaceRZFourier":
+        return "rzfourier"
+    if deferred_surface_class == "SurfaceXYZFourier":
+        return "xyzfourier"
     surface_type_name = type(surface).__name__
     if surface_type_name == "SurfaceRZFourier":
         return "rzfourier"
     if surface_type_name == "SurfaceXYZFourier":
         return "xyzfourier"
     return "generic"
+
+
+def _is_surface_xyztensorfourier_like(surface) -> bool:
+    return bool(
+        getattr(surface, "deferred_surface_class", None) == "SurfaceXYZTensorFourier"
+        or type(surface).__name__ == "SurfaceXYZTensorFourier"
+    )
 
 
 def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
@@ -1945,6 +1958,217 @@ class BoozerSurfaceJAX(Optimizable):
             weight_inv_modB=weight_inv_modB,
         )
 
+    def _make_exact_objective_with(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        coil_set_spec=None,
+        coil_arrays=None,
+        *,
+        hostify_inputs=True,
+    ):
+        """Build the constrained-objective scalar used by exact-constraints Newton."""
+        resolved_coil_set_spec = _resolved_coil_set_spec(
+            self.coil_set_spec,
+            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
+        )
+        quadpoints_phi = self.quadpoints_phi
+        quadpoints_theta = self.quadpoints_theta
+        scatter_indices = self.scatter_indices
+        if hostify_inputs:
+            resolved_coil_set_spec = _hostify_tree(resolved_coil_set_spec)
+            quadpoints_phi = _hostify_tree(quadpoints_phi)
+            quadpoints_theta = _hostify_tree(quadpoints_theta)
+            scatter_indices = _hostify_tree(scatter_indices)
+
+        def objective_fn(x):
+            sdofs, iota, G = _split_decision_vector_jax(x, optimize_G=optimize_G)
+            if not optimize_G:
+                G = compute_G_from_currents(
+                    _grouped_coil_currents(
+                        coil_arrays=coil_arrays,
+                        coil_set_spec=resolved_coil_set_spec,
+                    )
+                )
+            gamma, xphi, xtheta = _surface_geometry_from_dofs(
+                sdofs,
+                quadpoints_phi,
+                quadpoints_theta,
+                self.mpol,
+                self.ntor,
+                self.nfp,
+                self.stellsym,
+                scatter_indices,
+                surface_kind=self._surface_geometry_kind,
+            )
+            nphi, ntheta = gamma.shape[:2]
+            B = _grouped_biot_savart_B_points(
+                gamma.reshape(-1, 3),
+                coil_arrays=coil_arrays,
+                coil_set_spec=resolved_coil_set_spec,
+            ).reshape(nphi, ntheta, 3)
+            residual = boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB)
+            return _as_jax_float64(0.5) * jnp.sum(jnp.square(residual))
+
+        return objective_fn
+
+    def _make_exact_constraint_vector_with(
+        self,
+        optimize_G,
+        coil_set_spec=None,
+        coil_arrays=None,
+        *,
+        hostify_inputs=True,
+    ):
+        """Build the exact-constraints vector ``[label-target, z_axis]``."""
+        resolved_coil_set_spec = _resolved_coil_set_spec(
+            self.coil_set_spec,
+            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
+        )
+        quadpoints_phi = self.quadpoints_phi
+        quadpoints_theta = self.quadpoints_theta
+        scatter_indices = self.scatter_indices
+        if hostify_inputs:
+            resolved_coil_set_spec = _hostify_tree(resolved_coil_set_spec)
+            quadpoints_phi = _hostify_tree(quadpoints_phi)
+            quadpoints_theta = _hostify_tree(quadpoints_theta)
+            scatter_indices = _hostify_tree(scatter_indices)
+
+        def constraint_fn(x):
+            sdofs, _iota, _G = _split_decision_vector_jax(x, optimize_G=optimize_G)
+            gamma, xphi, xtheta = _surface_geometry_from_dofs(
+                sdofs,
+                quadpoints_phi,
+                quadpoints_theta,
+                self.mpol,
+                self.ntor,
+                self.nfp,
+                self.stellsym,
+                scatter_indices,
+                surface_kind=self._surface_geometry_kind,
+            )
+            label_value, gamma_axis_z = _compute_label_and_axis_z(
+                gamma=gamma,
+                xphi=xphi,
+                xtheta=xtheta,
+                points=gamma.reshape(-1, 3),
+                label_type=self.label_type,
+                phi_idx=self.phi_idx,
+                coil_arrays=coil_arrays,
+                coil_set_spec=resolved_coil_set_spec,
+            )
+            return _concat_jax_float64(
+                [label_value - _as_jax_float64(self.targetlabel), gamma_axis_z]
+            )
+
+        return constraint_fn
+
+    def _make_exact_constraints_residual_with(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        coil_set_spec=None,
+        coil_arrays=None,
+        *,
+        hostify_inputs=True,
+    ):
+        """Build the KKT residual for the exact-constraints Newton solve."""
+        objective_fn = self._make_exact_objective_with(
+            optimize_G,
+            weight_inv_modB,
+            coil_set_spec=coil_set_spec,
+            coil_arrays=coil_arrays,
+            hostify_inputs=hostify_inputs,
+        )
+        constraint_fn = self._make_exact_constraint_vector_with(
+            optimize_G,
+            coil_set_spec=coil_set_spec,
+            coil_arrays=coil_arrays,
+            hostify_inputs=hostify_inputs,
+        )
+
+        def constraint_value_with_aux(current_x):
+            value = constraint_fn(current_x)
+            return value, value
+
+        def residual_fn(xl):
+            x = xl[:-2]
+            lm = _as_jax_float64(xl[-2:])
+            constraint_jacobian, constraint_value = jax.jacfwd(
+                constraint_value_with_aux,
+                has_aux=True,
+            )(x)
+            stationarity = jax.grad(objective_fn)(x) - (constraint_jacobian.T @ lm)
+            return _concat_jax_float64(stationarity, constraint_value)
+
+        return residual_fn
+
+    def _run_manual_penalty_least_squares(
+        self,
+        residual_fn,
+        x0,
+        *,
+        tol,
+        maxiter,
+    ):
+        """Compatibility damped Gauss-Newton loop for ``method='manual'``."""
+        residual_and_jacobian = jax.jit(
+            lambda x: (residual_fn(x), jax.jacobian(residual_fn)(x))
+        )
+
+        x = _as_jax_float64(x0)
+        lam = _as_runtime_float64(1.0, reference=x)
+        residual, jacobian = residual_and_jacobian(x)
+        gradient = jacobian.T @ residual
+        normal_matrix = jacobian.T @ jacobian
+        norm = jnp.linalg.norm(gradient)
+        cost = _as_jax_float64(0.5) * jnp.sum(jnp.square(residual))
+        nit = 0
+
+        while nit < maxiter and float(_host_scalar(norm)) > tol:
+            damping = lam * jnp.diag(jnp.diag(normal_matrix))
+            dx = jnp.linalg.solve(normal_matrix + damping, gradient)
+            candidate_x = x - dx
+            candidate_residual, candidate_jacobian = residual_and_jacobian(candidate_x)
+            candidate_gradient = candidate_jacobian.T @ candidate_residual
+            candidate_normal_matrix = candidate_jacobian.T @ candidate_jacobian
+            candidate_norm = jnp.linalg.norm(candidate_gradient)
+            candidate_cost = _as_jax_float64(0.5) * jnp.sum(
+                jnp.square(candidate_residual)
+            )
+            current_cost = float(_host_scalar(cost))
+            candidate_cost_value = float(_host_scalar(candidate_cost))
+            candidate_is_finite = bool(
+                _host_all_finite(candidate_x)
+                and _host_all_finite(candidate_residual)
+                and _host_all_finite(candidate_gradient)
+                and _host_all_finite(candidate_normal_matrix)
+            )
+            accepted = candidate_is_finite and candidate_cost_value < current_cost
+            if accepted:
+                x = candidate_x
+                residual = candidate_residual
+                jacobian = candidate_jacobian
+                gradient = candidate_gradient
+                normal_matrix = candidate_normal_matrix
+                norm = candidate_norm
+                cost = candidate_cost
+                lam = lam / _as_runtime_float64(3.0, reference=lam)
+            else:
+                lam = lam * _as_runtime_float64(3.0, reference=lam)
+            nit += 1
+
+        return {
+            "x": x,
+            "residual": residual,
+            "gradient": gradient,
+            "jacobian": normal_matrix,
+            "nit": nit,
+            "success": bool(float(_host_scalar(norm)) <= tol),
+        }
+
     def _traceable_surface_signature(self):
         """Signature for metadata that becomes a traced constant in JAX closures."""
         return (
@@ -2449,10 +2673,19 @@ class BoozerSurfaceJAX(Optimizable):
         tol=None,
         maxiter=None,
         verbose=None,
-        limited_memory=False,
+        vectorize=True,
+        limited_memory=None,
         weight_inv_modB=None,
     ):
-        """Least-squares first stage of the LS solve. Matches CPU public API."""
+        """Least-squares first stage of the LS solve.
+
+        Accepts the CPU public argument shape, but when ``limited_memory`` is
+        omitted it preserves the configured BoozerSurfaceJAX options default.
+        The legacy ``vectorize`` kwarg is accepted for call-site compatibility
+        and ignored because the JAX path always assembles the residuals in its
+        vectorized form.
+        """
+        _ = vectorize  # Public CPU API compatibility; JAX assembly is always vectorized.
         if not self.need_to_run_code:
             return self.res
         tol = tol if tol is not None else self.options["bfgs_tol"]
@@ -2555,9 +2788,16 @@ class BoozerSurfaceJAX(Optimizable):
         maxiter=None,
         stab=0.0,
         verbose=None,
+        vectorize=True,
         weight_inv_modB=None,
     ):
-        """Newton polish stage of the LS solve. Matches CPU public API."""
+        """Newton polish stage of the LS solve.
+
+        The legacy ``vectorize`` kwarg is accepted for call-site compatibility
+        and ignored because the JAX path always assembles the residuals in its
+        vectorized form.
+        """
+        _ = vectorize  # Public CPU API compatibility; JAX assembly is always vectorized.
         if not self.need_to_run_code:
             return self.res
         tol = tol if tol is not None else self.options["newton_tol"]
@@ -2688,6 +2928,115 @@ class BoozerSurfaceJAX(Optimizable):
             )
         return res
 
+    def minimize_boozer_penalty_constraints_ls(
+        self,
+        tol=1e-12,
+        maxiter=10,
+        constraint_weight=1.0,
+        iota=0.0,
+        G=None,
+        method="lm",
+        weight_inv_modB=True,
+    ):
+        """Public LS solver matching the baseline BoozerSurface API."""
+        if not self.need_to_run_code:
+            return self.res
+
+        optimize_G = G is not None
+        s = self.surface
+        x0 = self._pack_decision_vector(iota, G)
+        # Reuse the centralized backend/algorithm validation seam even though
+        # this public method forces an LM/manual route rather than the
+        # constructor-wide least_squares_algorithm policy.
+        self._resolve_optimizer_method(
+            limited_memory=False,
+            optimize_G=optimize_G,
+        )
+
+        if method == "manual":
+            residual_fn = self._make_penalty_residual_with(
+                optimize_G,
+                weight_inv_modB,
+                constraint_weight,
+                hostify_inputs=self.options["optimizer_backend"] != "ondevice",
+            )
+            result = self._run_manual_penalty_least_squares(
+                residual_fn,
+                x0,
+                tol=tol,
+                maxiter=maxiter,
+            )
+            sdofs_final, iota_out, G_out = self._unpack_decision_vector(
+                result["x"],
+                optimize_G,
+            )
+            self._set_surface_dofs(sdofs_final)
+            resdict = {
+                "residual": result["residual"],
+                "gradient": result["gradient"],
+                "jacobian": result["jacobian"],
+                "success": result["success"],
+                "G": G_out,
+                "s": s,
+                "iota": iota_out,
+                "type": "ls",
+                "weight_inv_modB": weight_inv_modB,
+                "optimizer_method": "manual",
+            }
+            self.res = resdict
+            self.need_to_run_code = False
+            return resdict
+
+        if method != "lm":
+            raise ValueError(
+                "BoozerSurfaceJAX minimize_boozer_penalty_constraints_ls() "
+                "supports method='lm' or method='manual'."
+            )
+
+        residual_fn = self._make_penalty_residual_with(
+            optimize_G,
+            weight_inv_modB,
+            constraint_weight,
+            hostify_inputs=self.options["optimizer_backend"] != "ondevice",
+        )
+        if self.options["optimizer_backend"] == "ondevice":
+            result = target_least_squares(
+                residual_fn,
+                x0,
+                method="lm-ondevice",
+                tol=tol,
+                maxiter=maxiter,
+            )
+            optimizer_method = "lm-ondevice"
+        else:
+            result = reference_least_squares(
+                residual_fn,
+                x0,
+                method="lm",
+                tol=tol,
+                maxiter=maxiter,
+            )
+            optimizer_method = "lm"
+
+        sdofs_final, iota_out, G_out = self._unpack_decision_vector(result.x, optimize_G)
+        self._set_surface_dofs(sdofs_final)
+        resdict = {
+            "info": result,
+            "residual": result.residual,
+            "gradient": result.jac,
+            "jacobian": result.residual_jacobian,
+            "success": bool(_host_scalar(result.success)),
+            "G": G_out,
+            "s": s,
+            "iota": iota_out,
+            "type": "ls",
+            "weight_inv_modB": weight_inv_modB,
+            "optimizer_method": optimizer_method,
+        }
+        self.res = resdict
+        self.need_to_run_code = False
+        return resdict
+
     def _make_exact_residual_with(
         self,
         mask_indices,
@@ -2790,7 +3139,10 @@ class BoozerSurfaceJAX(Optimizable):
         try:
             from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
 
-            if not isinstance(s, SurfaceXYZTensorFourier):
+            if not (
+                isinstance(s, SurfaceXYZTensorFourier)
+                or _is_surface_xyztensorfourier_like(s)
+            ):
                 raise RuntimeError(
                     "Exact solution of Boozer Surfaces only supported for "
                     "SurfaceXYZTensorFourier"
@@ -2950,6 +3302,154 @@ class BoozerSurfaceJAX(Optimizable):
                 f"||residual||_inf={res_norm:.3e}",
                 flush=True,
             )
+        return res
+
+    def minimize_boozer_exact_constraints_newton(
+        self,
+        tol=1e-12,
+        maxiter=10,
+        iota=0.0,
+        G=None,
+        lm=(0.0, 0.0),
+    ):
+        """Public exact-constraints Newton solver matching the CPU API."""
+        if not self.need_to_run_code:
+            return self.res
+
+        optimize_G = G is not None
+        s = self.surface
+        lm_init = _as_jax_float64(lm)
+        if lm_init.shape != (2,):
+            raise ValueError("lm must contain exactly two Lagrange multipliers.")
+
+        x0 = self._pack_decision_vector(iota, G)
+        xl = _concat_jax_float64(x0, lm_init)
+        residual_fn = self._make_exact_constraints_residual_with(
+            optimize_G,
+            self.options["weight_inv_modB"],
+            hostify_inputs=False,
+        )
+        residual_and_jacobian = jax.jit(
+            lambda x: (residual_fn(x), jax.jacobian(residual_fn)(x))
+        )
+        residual, jacobian = residual_and_jacobian(xl)
+        norm = jnp.linalg.norm(residual)
+        if self.stellsym:
+            nit = 0
+            while nit < maxiter and float(_host_scalar(norm)) > tol:
+                linear_matrix = jacobian[:-1, :-1]
+                rhs = residual[:-1]
+                dx = jnp.linalg.solve(linear_matrix, rhs)
+                if float(_host_scalar(norm)) < 1e-9:
+                    dx = dx + jnp.linalg.solve(linear_matrix, rhs - linear_matrix @ dx)
+                xl = _concat_jax_float64(xl[:-1] - dx, [xl[-1]])
+                residual, jacobian = residual_and_jacobian(xl)
+                norm = jnp.linalg.norm(residual)
+                nit += 1
+        else:
+            best_xl = xl
+            best_residual = residual
+            best_jacobian = jacobian
+            best_norm = norm
+
+            def exact_residual_and_jacobian(x_host):
+                residual_host, jacobian_host = residual_and_jacobian(
+                    _as_jax_float64(x_host)
+                )
+                return _host_numpy(residual_host), _host_numpy(jacobian_host)
+
+            def solve_exact_fallback(x0_host, *, xtol, maxfev):
+                return root(
+                    exact_residual_and_jacobian,
+                    x0_host,
+                    jac=True,
+                    method="hybr",
+                    options={
+                        "xtol": xtol,
+                        "maxfev": maxfev,
+                    },
+                )
+
+            fallback_xtol = max(1e-12, tol * 1e-2)
+            fallback = solve_exact_fallback(
+                _host_numpy(xl),
+                xtol=fallback_xtol,
+                maxfev=max(400, 4 * maxiter),
+            )
+            fallback_xl = _as_jax_float64(np.asarray(fallback.x))
+            fallback_residual, fallback_jacobian = residual_and_jacobian(fallback_xl)
+            fallback_norm = jnp.linalg.norm(fallback_residual)
+            fallback_norm_value = float(_host_scalar(fallback_norm))
+            nit = int(getattr(fallback, "nfev", 0))
+            # Make the optional second hybr pass meaningfully tighter than the
+            # coarse fallback solve, even at the default tolerance.
+            polish_xtol = max(1e-14, min(1e-10, fallback_xtol * 1e-2))
+            if (
+                np.isfinite(fallback_norm_value)
+                and fallback_norm_value > tol
+                and polish_xtol < fallback_xtol
+            ):
+                polished = solve_exact_fallback(
+                    _host_numpy(fallback_xl),
+                    xtol=polish_xtol,
+                    maxfev=max(200, 2 * maxiter),
+                )
+                polished_xl = _as_jax_float64(np.asarray(polished.x))
+                polished_residual, polished_jacobian = residual_and_jacobian(polished_xl)
+                polished_norm = jnp.linalg.norm(polished_residual)
+                polished_norm_value = float(_host_scalar(polished_norm))
+                if (
+                    np.isfinite(polished_norm_value)
+                    and polished_norm_value <= fallback_norm_value
+                ):
+                    fallback_xl = polished_xl
+                    fallback_residual = polished_residual
+                    fallback_jacobian = polished_jacobian
+                    fallback_norm = polished_norm
+                    fallback_norm_value = polished_norm_value
+                nit += int(getattr(polished, "nfev", 0))
+            if (
+                np.isfinite(fallback_norm_value)
+                and fallback_norm_value <= float(_host_scalar(best_norm))
+            ):
+                best_xl = fallback_xl
+                best_residual = fallback_residual
+                best_jacobian = fallback_jacobian
+                best_norm = fallback_norm
+            xl = best_xl
+            residual = best_residual
+            jacobian = best_jacobian
+            norm = best_norm
+
+        if optimize_G:
+            sdofs_final = xl[:-4]
+            iota_out = float(_host_scalar(xl[-4]))
+            G_out = float(_host_scalar(xl[-3]))
+        else:
+            sdofs_final = xl[:-3]
+            iota_out = float(_host_scalar(xl[-3]))
+            G_out = None
+
+        self._set_surface_dofs(sdofs_final)
+        lm_out = (
+            float(_host_scalar(xl[-2]))
+            if self.stellsym
+            else _host_numpy(xl[-2:])
+        )
+        res = {
+            "residual": residual,
+            "jacobian": jacobian,
+            "iter": nit,
+            "success": bool(float(_host_scalar(norm)) <= tol),
+            "lm": lm_out,
+            "G": G_out,
+            "s": s,
+            "iota": iota_out,
+            "weight_inv_modB": self.options["weight_inv_modB"],
+            "type": "exact_constraints",
+        }
+        self.res = res
+        self.need_to_run_code = False
         return res
 
     def run_code(self, iota, G=None, *, sdofs=None):

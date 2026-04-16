@@ -1420,6 +1420,476 @@ class TestBoozerSurfaceJAXClass:
 
         assert state["jit_call_count"] == first_call_jit_count
 
+    def test_lbfgs_public_api_uses_options_default_when_limited_memory_omitted(
+        self,
+        monkeypatch,
+    ):
+        """Omitted limited_memory should preserve the configured JAX default."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "scipy"
+        booz.options["limited_memory"] = False
+        captured_methods = []
+
+        def fake_reference_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, tol, maxiter, options, progress_callback
+            captured_methods.append(method)
+            return _successful_minimize_result(x0)
+
+        monkeypatch.setattr(_bsj, "reference_minimize", fake_reference_minimize)
+
+        res = booz.minimize_boozer_penalty_constraints_LBFGS(
+            iota=0.3,
+            G=0.05,
+            verbose=False,
+        )
+
+        assert captured_methods == ["bfgs"]
+        assert res["optimizer_method"] == "bfgs"
+
+        booz.recompute_bell()
+        res = booz.minimize_boozer_penalty_constraints_LBFGS(
+            iota=0.3,
+            G=0.05,
+            verbose=False,
+            limited_memory=True,
+        )
+
+        assert captured_methods == ["bfgs", "lbfgs"]
+        assert res["optimizer_method"] == "lbfgs"
+
+    def test_lbfgs_public_api_accepts_legacy_vectorize_kwarg(
+        self,
+        monkeypatch,
+    ):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "scipy"
+        captured_methods = []
+
+        def fake_reference_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, tol, maxiter, options, progress_callback
+            captured_methods.append(method)
+            return _successful_minimize_result(x0)
+
+        monkeypatch.setattr(_bsj, "reference_minimize", fake_reference_minimize)
+
+        res = booz.minimize_boozer_penalty_constraints_LBFGS(
+            iota=0.3,
+            G=0.05,
+            verbose=False,
+            vectorize=False,
+        )
+
+        assert captured_methods == ["bfgs"]
+        assert res["optimizer_method"] == "bfgs"
+
+    def test_public_ls_api_routes_ondevice_lm(self, monkeypatch):
+        """The restored public LS method should route to the ondevice LM lane."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        captured = {}
+
+        def fake_target_least_squares(
+            residual_fn,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options=None,
+            callback=None,
+            progress_callback=None,
+        ):
+            del residual_fn, tol, maxiter, options, callback, progress_callback
+            captured["method"] = method
+            flat_x0, _ = ravel_pytree(x0)
+            return types.SimpleNamespace(
+                x=x0,
+                residual=jnp.zeros_like(flat_x0),
+                jac=jnp.zeros_like(flat_x0),
+                residual_jacobian=jnp.eye(flat_x0.size, dtype=flat_x0.dtype),
+                success=True,
+            )
+
+        monkeypatch.setattr(_bsj, "target_least_squares", fake_target_least_squares)
+
+        res = booz.minimize_boozer_penalty_constraints_ls(
+            iota=0.3,
+            G=0.05,
+            method="lm",
+        )
+
+        assert captured["method"] == "lm-ondevice"
+        assert res["optimizer_method"] == "lm-ondevice"
+        assert res["success"] is True
+        assert booz.need_to_run_code is False
+
+    def test_public_ls_api_accepts_weight_inv_modB_override(self, monkeypatch):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "scipy"
+        captured = {}
+
+        def fake_make_penalty_residual_with(
+            optimize_G,
+            weight_inv_modB,
+            constraint_weight=None,
+            coil_set_spec=None,
+            coil_arrays=None,
+            *,
+            hostify_inputs=True,
+        ):
+            del optimize_G, constraint_weight, coil_set_spec, coil_arrays, hostify_inputs
+            captured["weight_inv_modB"] = weight_inv_modB
+            return lambda x: jnp.zeros_like(x)
+
+        def fake_reference_least_squares(
+            residual_fn,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options=None,
+            callback=None,
+            progress_callback=None,
+        ):
+            del residual_fn, method, tol, maxiter, options, callback, progress_callback
+            flat_x0, _ = ravel_pytree(x0)
+            return types.SimpleNamespace(
+                x=x0,
+                residual=jnp.zeros_like(flat_x0),
+                jac=jnp.zeros_like(flat_x0),
+                residual_jacobian=jnp.eye(flat_x0.size, dtype=flat_x0.dtype),
+                success=True,
+            )
+
+        monkeypatch.setattr(booz, "_make_penalty_residual_with", fake_make_penalty_residual_with)
+        monkeypatch.setattr(_bsj, "reference_least_squares", fake_reference_least_squares)
+
+        res = booz.minimize_boozer_penalty_constraints_ls(
+            iota=0.3,
+            G=0.05,
+            method="lm",
+            weight_inv_modB=False,
+        )
+
+        assert captured["weight_inv_modB"] is False
+        assert res["weight_inv_modB"] is False
+
+    def test_public_ls_api_rejects_invalid_backend_after_options_mutation(self):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "bogus"
+
+        with pytest.raises(ValueError, match="optimizer_backend must be one of"):
+            booz.minimize_boozer_penalty_constraints_ls(
+                iota=0.3,
+                G=0.05,
+                method="lm",
+            )
+
+    def test_public_manual_ls_api_supports_baseline_demo_sequence(self, monkeypatch):
+        """The restored public LS API should support the old demo call pattern."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "scipy"
+        lbfgs_target = booz._pack_decision_vector(0.25, 0.04) - 0.05
+
+        def fake_reference_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, tol, maxiter, options, progress_callback
+            flat_target, _ = ravel_pytree(lbfgs_target)
+            return types.SimpleNamespace(
+                x=lbfgs_target,
+                fun=0.0,
+                jac=jnp.zeros_like(flat_target),
+                nit=0,
+                nfev=1,
+                njev=1,
+                success=True,
+                status=0,
+            )
+
+        monkeypatch.setattr(_bsj, "reference_minimize", fake_reference_minimize)
+
+        res_lbfgs = booz.minimize_boozer_penalty_constraints_LBFGS(
+            iota=0.3,
+            G=0.05,
+            verbose=False,
+            limited_memory=True,
+        )
+        assert res_lbfgs["optimizer_method"] == "lbfgs"
+
+        booz.recompute_bell()
+        manual_target = booz._pack_decision_vector(res_lbfgs["iota"], res_lbfgs["G"]) - 0.1
+        monkeypatch.setattr(
+            booz,
+            "_make_penalty_residual_with",
+            lambda *args, **kwargs: (lambda x: x - manual_target),
+        )
+
+        res_manual = booz.minimize_boozer_penalty_constraints_ls(
+            iota=res_lbfgs["iota"],
+            G=res_lbfgs["G"],
+            method="manual",
+            maxiter=40,
+            tol=1e-8,
+        )
+
+        assert res_manual["optimizer_method"] == "manual"
+        assert res_manual["success"] is True
+        np.testing.assert_allclose(
+            np.asarray(res_manual["residual"]),
+            np.zeros_like(np.asarray(manual_target)),
+            atol=1e-6,
+        )
+
+    def test_public_manual_ls_api_increases_damping_after_worsening_trial(self):
+        """The manual LS compatibility loop must not shrink damping on rejected steps."""
+        booz = _make_mock_boozer_surface()
+        result = booz._run_manual_penalty_least_squares(
+            lambda x: jnp.asarray([x[0] ** 2 - 1.0], dtype=x.dtype),
+            jnp.asarray([0.1], dtype=jnp.float64),
+            tol=1e-10,
+            maxiter=80,
+        )
+
+        assert result["success"] is True
+        assert result["nit"] > 1
+        assert abs(abs(float(np.asarray(result["x"])[0])) - 1.0) < 1e-6
+
+    @pytest.mark.parametrize("stellsym", [True, False])
+    @pytest.mark.parametrize("optimize_G", [True, False])
+    def test_public_exact_constraints_newton_restores_cpu_api(
+        self,
+        monkeypatch,
+        stellsym,
+        optimize_G,
+    ):
+        """The restored exact-constraints method should expose the CPU-shaped API."""
+        booz = _make_mock_boozer_surface_exact(stellsym=stellsym)
+        initial_G = 0.05 if optimize_G else None
+        x0 = booz._pack_decision_vector(0.3, initial_G)
+        xl0 = jnp.concatenate([x0, jnp.array([0.0, 0.0], dtype=x0.dtype)])
+        shift = jnp.linspace(0.01, 0.01 * xl0.size, xl0.size, dtype=xl0.dtype)
+        if stellsym:
+            shift = shift.at[-1].set(0.0)
+        target = xl0 - shift
+
+        monkeypatch.setattr(
+            booz,
+            "_make_exact_constraints_residual_with",
+            lambda *args, **kwargs: (lambda xl: xl - target),
+        )
+
+        res = booz.minimize_boozer_exact_constraints_newton(
+            iota=0.3,
+            G=initial_G,
+            maxiter=5,
+            tol=1e-10,
+        )
+
+        assert res["success"] is True
+        assert "jacobian" in res
+        assert "residual" in res
+        if optimize_G:
+            assert isinstance(res["G"], float)
+        else:
+            assert res["G"] is None
+        if stellsym:
+            assert res["lm"] == pytest.approx(float(np.asarray(target[-2])))
+        else:
+            np.testing.assert_allclose(
+                np.asarray(res["lm"]),
+                np.asarray(target[-2:]),
+                atol=1e-12,
+            )
+
+    def test_public_exact_constraints_newton_nonstellsym_uses_hybr_fallback(
+        self,
+        monkeypatch,
+    ):
+        booz = _make_mock_boozer_surface_exact(stellsym=False)
+        initial_G = 0.05
+        x0 = booz._pack_decision_vector(0.3, initial_G)
+        xl0 = jnp.concatenate([x0, jnp.array([0.0, 0.0], dtype=x0.dtype)])
+        target = xl0.at[0].set(xl0[0]).at[1:].add(-0.02)
+        captured = {}
+
+        monkeypatch.setattr(
+            booz,
+            "_make_exact_constraints_residual_with",
+            lambda *args, **kwargs: (lambda xl: (xl - target) ** 2),
+        )
+
+        def fake_root(fun, x_init, *, jac, method, options):
+            del jac
+            captured["method"] = method
+            captured["xtol"] = options["xtol"]
+            captured["maxfev"] = options["maxfev"]
+            residual, jacobian = fun(np.asarray(target))
+            np.testing.assert_allclose(residual, 0.0, atol=1e-12)
+            np.testing.assert_allclose(jacobian, 0.0, atol=1e-12)
+            return types.SimpleNamespace(x=np.asarray(target), nfev=7)
+
+        monkeypatch.setattr(_bsj, "root", fake_root)
+
+        res = booz.minimize_boozer_exact_constraints_newton(
+            iota=0.3,
+            G=initial_G,
+            maxiter=5,
+            tol=1e-10,
+        )
+
+        assert captured["method"] == "hybr"
+        assert res["success"] is True
+        np.testing.assert_allclose(np.asarray(res["residual"]), 0.0, atol=1e-12)
+
+    def test_public_exact_constraints_newton_nonstellsym_keeps_better_prefallback_iterate(
+        self,
+        monkeypatch,
+    ):
+        booz = _make_mock_boozer_surface_exact(stellsym=False)
+        initial_G = 0.05
+        x0 = booz._pack_decision_vector(0.3, initial_G)
+        xl0 = jnp.concatenate([x0, jnp.array([0.0, 0.0], dtype=x0.dtype)])
+        worse = xl0 + 1.0
+
+        monkeypatch.setattr(
+            booz,
+            "_make_exact_constraints_residual_with",
+            lambda *args, **kwargs: (lambda xl: xl - xl0),
+        )
+
+        def fake_root(fun, x_init, *, jac, method, options):
+            del fun, x_init, jac, options
+            assert method == "hybr"
+            return types.SimpleNamespace(x=np.asarray(worse), nfev=5)
+
+        monkeypatch.setattr(_bsj, "root", fake_root)
+
+        res = booz.minimize_boozer_exact_constraints_newton(
+            iota=0.3,
+            G=initial_G,
+            maxiter=5,
+            tol=1e-10,
+        )
+
+        assert res["success"] is True
+        np.testing.assert_allclose(np.asarray(res["residual"]), 0.0, atol=1e-12)
+        assert res["G"] == pytest.approx(initial_G)
+
+    def test_public_exact_constraints_newton_nonstellsym_uses_tighter_polish_xtol(
+        self,
+        monkeypatch,
+    ):
+        booz = _make_mock_boozer_surface_exact(stellsym=False)
+        initial_G = 0.05
+        x0 = booz._pack_decision_vector(0.3, initial_G)
+        xl0 = jnp.concatenate([x0, jnp.array([0.0, 0.0], dtype=x0.dtype)])
+        offset = jnp.full_like(xl0, 1e-11)
+        xtols = []
+
+        monkeypatch.setattr(
+            booz,
+            "_make_exact_constraints_residual_with",
+            lambda *args, **kwargs: (lambda xl: xl - xl0 + offset),
+        )
+
+        def fake_root(fun, x_init, *, jac, method, options):
+            del x_init, jac, method
+            xtols.append(options["xtol"])
+            residual, jacobian = fun(np.asarray(xl0))
+            np.testing.assert_allclose(np.asarray(residual), np.asarray(offset))
+            np.testing.assert_allclose(
+                np.asarray(jacobian),
+                np.eye(xl0.size),
+                atol=1e-12,
+            )
+            return types.SimpleNamespace(x=np.asarray(xl0), nfev=4)
+
+        monkeypatch.setattr(_bsj, "root", fake_root)
+
+        res = booz.minimize_boozer_exact_constraints_newton(
+            iota=0.3,
+            G=initial_G,
+            maxiter=5,
+            tol=1e-12,
+        )
+
+        assert res["success"] is False
+        assert xtols == [pytest.approx(1e-12), pytest.approx(1e-14)]
+
+    def test_public_newton_api_accepts_legacy_vectorize_kwarg(self, monkeypatch):
+        booz = _make_mock_boozer_surface()
+        target = booz._pack_decision_vector(0.3, 0.05) - 0.01
+        captured = {}
+
+        def fake_run_newton_polish_for_method(
+            method,
+            obj_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            progress_callback=None,
+            objective_args=(),
+        ):
+            del obj_fn, maxiter, tol, stab, progress_callback, objective_args
+            captured["method"] = method
+            np.testing.assert_allclose(
+                np.asarray(x0),
+                np.asarray(booz._pack_decision_vector(0.3, 0.05)),
+            )
+            return {
+                "x": target,
+                "fun": 0.0,
+                "grad": jnp.zeros_like(target),
+                "hessian": jnp.eye(target.size, dtype=target.dtype),
+                "nit": 2,
+                "success": True,
+            }
+
+        monkeypatch.setattr(
+            booz,
+            "_run_newton_polish_for_method",
+            fake_run_newton_polish_for_method,
+        )
+
+        res = booz.minimize_boozer_penalty_constraints_newton(
+            iota=0.3,
+            G=0.05,
+            verbose=False,
+            vectorize=False,
+        )
+
+        assert captured["method"] == "bfgs"
+        assert res["success"] is True
+
     def test_stale_bfgs_method_rejected(self):
         """The removed bfgs_method option must fail fast."""
         bs = _MockBiotSavart(_make_mock_coils())
@@ -4221,6 +4691,7 @@ class TestEnsureSolvedGuard:
             "success": True,
             "PLU": (np.eye(1), np.eye(1), np.eye(1)),
             "vjp": lambda *_args, **_kwargs: None,
+            "vjp_groups": lambda *_args, **_kwargs: None,
         }
         booz.need_to_run_code = True
 
@@ -4235,6 +4706,7 @@ class TestEnsureSolvedGuard:
                 "success": True,
                 "PLU": (np.eye(1), np.eye(1), np.eye(1)),
                 "vjp": lambda *_args, **_kwargs: None,
+            "vjp_groups": lambda *_args, **_kwargs: None,
             }
             booz.need_to_run_code = False
             return booz.res
@@ -4256,6 +4728,7 @@ class TestEnsureSolvedGuard:
             "success": False,
             "PLU": (np.eye(1), np.eye(1), np.eye(1)),
             "vjp": lambda *_args, **_kwargs: None,
+            "vjp_groups": lambda *_args, **_kwargs: None,
         }
 
         with pytest.raises(RuntimeError, match="failed"):
@@ -4274,6 +4747,7 @@ class TestEnsureSolvedGuard:
             "residual": np.asarray([1.5, -2.5]),
             "PLU": (np.eye(1), np.eye(1), np.eye(1)),
             "vjp": lambda *_args, **_kwargs: None,
+            "vjp_groups": lambda *_args, **_kwargs: None,
         }
 
         with caplog.at_level(
@@ -4299,6 +4773,7 @@ class TestEnsureSolvedGuard:
             "residual": np.asarray([0.1, -0.2]),
             "PLU": (np.eye(1), np.eye(1), np.eye(1)),
             "vjp": lambda *_args, **_kwargs: None,
+            "vjp_groups": lambda *_args, **_kwargs: None,
         }
 
         with caplog.at_level(
