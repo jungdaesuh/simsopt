@@ -171,6 +171,16 @@ Implement a Stage 2-local helper that:
 - restores the prior state if the solve raises or returns `success=False`
 - exposes `solve_failed` as an explicit signal to the caller
 
+That snapshot should be advanced only on successful solves.
+
+The important repeated-failure case is a line search that tries several bad
+steps in the same neighborhood before backing off enough to recover. In that
+case, the next retry should warm-start from the last successful Boozer state,
+not from an accumulating chain of failed terminal iterates. `boozerQA.py`
+already has that property implicitly because it snapshots the current state
+before evaluation and restores it on failure. A generalized Stage 2 helper
+should preserve the same discipline explicitly.
+
 This should live in the Stage 2 seam, not in global `BoozerSurface`.
 
 ### 2. Soft mode should stop embedding raw `penalty_objective` inside `JF`
@@ -235,6 +245,12 @@ That claim is too strong for the current code:
 
 So restore-time recomputation is already wired.
 
+Also, `_flag_recompute_opt()` does more than toggle recompute flags: it calls
+`opt.local_dof_setter(...)` for dependent optimizables before
+`set_recompute_flag()`. So `surface.x = ...` is the right restore mechanism. A
+bare manual `recompute_bell(None)` would not be an equivalent substitute for
+state restoration by assignment.
+
 An explicit `recompute_bell(None)` is still acceptable as belt-and-suspenders,
 but it is not required by the current implementation.
 
@@ -287,6 +303,10 @@ So the design guidance is correct:
 - do not silently mask probe failures that should be reported as bootability
   failures
 
+If the guard is centralized in a shared helper, it should preserve those two
+policies explicitly: restore-and-reject for optimization paths, report failure
+for bootability probes.
+
 ## Regression Test Guidance
 
 The two original regression directions remain good:
@@ -301,6 +321,9 @@ A third test is also worthwhile:
 3. an alternating success/failure fake solve in soft mode, asserting the live
    Stage 2 state after multiple evaluations matches the last successful solve,
    not the last attempted failed solve
+
+That third test pins the cascading-failure behavior above: repeated failed
+retries must keep warm-starting from the last successful snapshot.
 
 ## Validation Limits
 
