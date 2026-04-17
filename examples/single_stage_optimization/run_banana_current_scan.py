@@ -17,8 +17,7 @@ import run_single_stage_goal_mode_comparison as goal_mode_runner  # noqa: E402
 from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results  # noqa: E402
 from banana_opt.stage2_single_stage_handoff import (  # noqa: E402
     build_equilibrium_path,
-    resolve_stage2_num_tf_coils,
-    validate_loaded_stage2_coils_partition,
+    partition_loaded_stage2_coils,
 )
 from banana_opt.single_stage_geometry import build_surface_configs  # noqa: E402
 from workflow_runner_common import (  # noqa: E402
@@ -168,6 +167,43 @@ def _append_case_error_context(
         payload["error_message"] = f"{error_message}; {context}: {error}"
 
 
+def _scale_banana_current_chain(
+    banana_coils,
+    *,
+    target_banana_current_a: float,
+) -> None:
+    """Scale the shared banana-coil current DOF so that the outermost coil reports
+    ``target_banana_current_a``, while preserving stellsym sign flips on mirrored
+    coils. Stage 2 builds banana coils with
+    ``ScaledCurrent(Current(1), banana_init_current_A)`` plus ``ScaledCurrent(..., -1)``
+    wrappers for the stellsym pair, so every coil ultimately points at the same
+    underlying scalar ``Current`` DOF. ``ScaledCurrent`` does not expose
+    ``set_value``; we have to mutate the innermost ``Current`` DOF instead.
+
+    Uses ``local_full_x`` rather than ``.x`` so the override succeeds even when
+    the loaded artifact's banana ``Current`` DOF is fixed (init-only Stage 2
+    seeds, post-optimization saves with locked DOFs, etc.). The banana scan
+    intentionally overrides the optimization-time current; the scan owner
+    always wants the requested value regardless of the donor's free/fixed state.
+    """
+    if not banana_coils:
+        raise ValueError(
+            "Banana-current scan requires at least one banana coil in the partition."
+        )
+    innermost_current = banana_coils[0].current
+    chain_scale = 1.0
+    while hasattr(innermost_current, "current_to_scale"):
+        chain_scale *= float(innermost_current.scale)
+        innermost_current = innermost_current.current_to_scale
+    if chain_scale == 0.0:
+        raise ValueError(
+            "Banana-current scan cannot rescale a donor whose outermost banana-coil "
+            "ScaledCurrent wrapper has zero scale."
+        )
+    new_dof_value = float(target_banana_current_a) / chain_scale
+    innermost_current.local_full_x = [new_dof_value]
+
+
 def _materialize_stage2_seed_variant(
     *,
     stage2_bs_path: Path,
@@ -177,14 +213,15 @@ def _materialize_stage2_seed_variant(
     requested_num_tf_coils: int,
 ) -> tuple[Path, Path]:
     bs = load(str(stage2_bs_path))
-    resolved_num_tf_coils = resolve_stage2_num_tf_coils(
-        stage2_results,
+    coil_partitions = partition_loaded_stage2_coils(
+        bs.coils,
+        stage2_results=stage2_results,
         requested_num_tf_coils=requested_num_tf_coils,
     )
-    validate_loaded_stage2_coils_partition(bs.coils, resolved_num_tf_coils)
-    banana_coils = bs.coils[resolved_num_tf_coils:]
-    for coil in banana_coils:
-        coil.current.set_value(float(banana_current_a))
+    _scale_banana_current_chain(
+        coil_partitions.banana_coils,
+        target_banana_current_a=banana_current_a,
+    )
 
     variant_root.mkdir(parents=True, exist_ok=True)
     variant_bs_path = variant_root / "biot_savart_opt.json"

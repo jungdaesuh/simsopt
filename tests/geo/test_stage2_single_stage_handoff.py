@@ -1245,3 +1245,133 @@ class UnifiedRunnerTests(unittest.TestCase):
                     "/tmp/stage2/biot_savart_opt.json",
                 ]
             )
+
+    def test_run_recovery_stage_probes_recovered_bs_with_original_stage2_metadata(self):
+        """Guard against a regression where the recovery probe was fed the
+        recovery single-stage results.json (which uses the STAGE2_* /
+        STAGE2_SEED_* prefix scheme and omits TF_CURRENT_A / NUM_TF_COILS /
+        FINITE_CURRENT_MODE under their unprefixed Stage 2 names) instead of
+        the original Stage 2 artifact metadata. That regression silently
+        returned BOOTABILITY_REASON_MISSING_ARTIFACT_METADATA even on
+        successful recoveries.
+        """
+        wrapper = load_wrapper_module()
+        handoff = load_handoff_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stage2_bs_path, stage2_results_path = self._stage2_seed_paths(root)
+            recovery_output_root = root / "recovery"
+            recovery_case_dir = recovery_output_root / "mpol=8-ntor=6-test"
+
+            # Original Stage 2 artifact metadata (lives at stage2_results_path,
+            # loaded by run_recovery_stage via load_json on
+            # original_stage2_results_path).
+            original_stage2_results = {
+                "PLASMA_SURF_FILENAME": "demo.nc",
+                "init_only": False,
+                "TF_CURRENT_A": 8.0e4,
+                "NUM_TF_COILS": 20,
+                "MAJOR_RADIUS": 0.915,
+                "TOROIDAL_FLUX": 0.24,
+                "banana_surf_radius": 0.21,
+                "FINITE_CURRENT_MODE": "boozer_surrogate",
+                "CURVATURE_THRESHOLD": 100.0,
+            }
+            _write_json(stage2_results_path, original_stage2_results)
+
+            def fake_recovery_run(command, *, output_root, timeout_seconds):
+                recovery_case_dir.mkdir(parents=True, exist_ok=True)
+                # Single-stage recovery results: STAGE2_* prefix scheme,
+                # missing the unprefixed Stage 2 keys the probe requires.
+                recovery_single_stage_results = {
+                    "PLASMA_SURF_FILENAME": "demo.nc",
+                    "init_only": False,
+                    "iterations": 7,
+                    "STAGE2_TF_CURRENT_A": 8.0e4,
+                    "STAGE2_FINITE_CURRENT_MODE": "boozer_surrogate",
+                    "MAJOR_RADIUS": 0.915,
+                    "TOROIDAL_FLUX": 0.24,
+                    "banana_surf_radius": 0.21,
+                }
+                _write_json(
+                    recovery_case_dir / "results.json",
+                    recovery_single_stage_results,
+                )
+                (recovery_case_dir / "biot_savart_opt.json").write_text(
+                    "{}",
+                    encoding="utf-8",
+                )
+                return (
+                    "final",
+                    recovery_case_dir / "results.json",
+                    recovery_single_stage_results,
+                )
+
+            captured_probe_calls: list[dict[str, object]] = []
+
+            def fake_build_probe_status(args, *, stage2_bs_path, stage2_results, stage):
+                captured_probe_calls.append(
+                    {
+                        "stage2_bs_path": stage2_bs_path,
+                        "stage2_results": stage2_results,
+                        "stage": stage,
+                    }
+                )
+                return _bootability_status(
+                    handoff,
+                    stage=stage,
+                    reason=handoff.BOOTABILITY_REASON_OK,
+                    bootable=True,
+                    iota_feasible=True,
+                    solved_iota=0.2004,
+                    self_intersecting=False,
+                )
+
+            args = wrapper.parse_args(
+                [
+                    "--recovery-only",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(root / "outputs"),
+                ]
+            )
+
+            with patch.object(
+                wrapper,
+                "build_probe_status",
+                side_effect=fake_build_probe_status,
+            ), patch.object(
+                wrapper,
+                "run_single_stage_command_with_salvage",
+                side_effect=fake_recovery_run,
+            ):
+                wrapper.run_recovery_stage(
+                    args,
+                    stage2_bs_path=stage2_bs_path,
+                    original_stage2_bs_path=stage2_bs_path,
+                    original_stage2_results_path=stage2_results_path,
+                    recovery_output_root=recovery_output_root,
+                )
+
+            self.assertEqual(len(captured_probe_calls), 1)
+            probe_call = captured_probe_calls[0]
+            self.assertEqual(probe_call["stage"], handoff.BOOTABILITY_STAGE_RECOVERY)
+            # The probe should target the recovered coils file, not the original.
+            self.assertEqual(
+                probe_call["stage2_bs_path"],
+                recovery_case_dir / "biot_savart_opt.json",
+            )
+            # And it must receive the *original* Stage 2 metadata (loaded from
+            # original_stage2_results_path) so that TF_CURRENT_A /
+            # NUM_TF_COILS / FINITE_CURRENT_MODE / banana_surf_radius can be
+            # validated. The recovery single-stage results.json does not
+            # surface these keys directly, so passing it would silently fail.
+            recovery_results = probe_call["stage2_results"]
+            self.assertEqual(recovery_results["TF_CURRENT_A"], 8.0e4)
+            self.assertEqual(recovery_results["NUM_TF_COILS"], 20)
+            self.assertEqual(recovery_results["FINITE_CURRENT_MODE"], "boozer_surrogate")
+            self.assertEqual(recovery_results["banana_surf_radius"], 0.21)

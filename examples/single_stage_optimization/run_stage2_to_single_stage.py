@@ -572,10 +572,21 @@ def run_recovery_stage(
             ),
             "recovery_termination_reason": "missing_recovery_artifact",
         }
+    # The recovered BiotSavart artifact is a single-stage output (results.json
+    # uses the STAGE2_* / STAGE2_SEED_* prefix scheme, omits TF_CURRENT_A /
+    # NUM_TF_COILS / FINITE_CURRENT_MODE under their unprefixed Stage 2 names).
+    # The probe expects Stage 2 artifact metadata. The plasma surface and
+    # TF/banana_surf_radius/finite-current invariants did not change during
+    # recovery — only the banana-coil DOFs did — so re-load and pass the
+    # original Stage 2 results while pointing the probe at the recovered
+    # coils file. Without this the probe silently falls into the
+    # ``missing_artifact_metadata`` branch and falsely reports recoveries
+    # as not bootable.
+    original_stage2_results = load_json(original_stage2_results_path)
     recovery_probe = build_probe_status(
         args,
         stage2_bs_path=recovered_bs_path,
-        stage2_results=results,
+        stage2_results=original_stage2_results,
         stage=BOOTABILITY_STAGE_RECOVERY,
     )
     recovery_iters = results.get("iterations")

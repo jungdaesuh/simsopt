@@ -1314,9 +1314,14 @@ def main(parsed_args=None):
     num_quadpoints = args.num_quadpoints # number of quadature points for coils
     order = args.order # number of Fourier modes for coils
 
+    accept_offspec_r0_seed = getattr(
+        args,
+        "accept_offspec_r0_seed",
+        os.environ.get("ACCEPT_OFFSPEC_R0_SEED", "").lower() in {"1", "true", "yes"},
+    )
     R0 = validate_major_radius(
         args.major_radius,
-        accept_offspec=args.accept_offspec_r0_seed,
+        accept_offspec=accept_offspec_r0_seed,
     ) # major radius (vacuum-vessel contract)
     s = validate_normalized_toroidal_flux(
         args.toroidal_flux,
