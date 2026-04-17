@@ -34,9 +34,9 @@ def test_solve_boozer_adjoint_enables_iterative_refinement(monkeypatch):
         return "adjoint"
 
     monkeypatch.setattr(_soj, "forward_backward_jax", fake_forward_backward_jax)
-    booz_surf = types.SimpleNamespace(res={"PLU": ("P", "L", "U")})
+    adjoint_state = types.SimpleNamespace(plu=("P", "L", "U"))
 
-    result = _soj._solve_boozer_adjoint(booz_surf, "rhs")
+    result = _soj._solve_boozer_adjoint(adjoint_state, "rhs")
 
     assert result == "adjoint"
     assert recorded["args"] == ("P", "L", "U", "rhs")

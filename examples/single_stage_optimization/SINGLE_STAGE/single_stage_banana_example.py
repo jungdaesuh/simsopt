@@ -6116,12 +6116,38 @@ def _scaled_outer_problem_coordinates(z, anchor_x):
     return z, anchor_x
 
 
+def _scaled_outer_problem_step_and_anchor(z, anchor_x, *, anchor_in_state):
+    """Resolve scaled-phase step and anchor coordinates for one optimizer input."""
+    if anchor_in_state:
+        if not isinstance(z, ScaledOuterPhaseOptimizerState):
+            raise TypeError(
+                "anchor_in_state=True requires ScaledOuterPhaseOptimizerState inputs."
+            )
+        return z.step_dofs, jax.lax.stop_gradient(z.anchor_dofs)
+    return _scaled_outer_problem_coordinates(z, anchor_x)
+
+
 def _scaled_outer_problem_gradient(z, grad, scale):
     if isinstance(z, ScaledOuterPhaseOptimizerState):
-        anchor_scale = _as_runtime_float64(0.0, reference=z.anchor_dofs)
+        runtime_reference = _scaled_outer_problem_runtime_reference(
+            grad,
+            scale,
+            z.step_dofs,
+            z.anchor_dofs,
+        )
+        anchor_scale = (
+            0.0
+            if runtime_reference is None
+            else _as_runtime_float64(0.0, reference=runtime_reference)
+        )
+        anchor_dofs = (
+            z.anchor_dofs
+            if runtime_reference is None
+            else _as_runtime_float64(z.anchor_dofs, reference=runtime_reference)
+        )
         return ScaledOuterPhaseOptimizerState(
             step_dofs=scale * grad,
-            anchor_dofs=anchor_scale * z.anchor_dofs,
+            anchor_dofs=anchor_scale * anchor_dofs,
         )
     return scale * grad
 
@@ -6160,6 +6186,35 @@ def _wrap_single_stage_outer_value_and_grad_objective(fun):
     return wrapped
 
 
+def _scaled_outer_problem_runtime_reference(*values):
+    """Return one runtime leaf when scaled-phase coordinates already touch JAX."""
+    array_reference = None
+    for value in values:
+        for leaf in jax.tree_util.tree_leaves(value):
+            if isinstance(leaf, jax.core.Tracer):
+                return leaf
+            if array_reference is None and isinstance(leaf, jax.Array):
+                array_reference = leaf
+    return array_reference
+
+
+def _resolve_scaled_outer_problem_point(anchor_dofs, step_dofs, step_scale):
+    """Resolve one scaled-phase point with the explicit target-lane staging contract."""
+    runtime_reference = _scaled_outer_problem_runtime_reference(anchor_dofs, step_dofs)
+    scale = (
+        float(step_scale)
+        if runtime_reference is None
+        else _as_runtime_float64(step_scale, reference=runtime_reference)
+    )
+    x = resolve_scaled_outer_phase_final_dofs(
+        anchor_dofs,
+        step_dofs,
+        step_scale,
+        use_target_lane=runtime_reference is not None,
+    )
+    return x, scale
+
+
 def build_scaled_outer_problem(
     base_fun,
     base_callback,
@@ -6172,25 +6227,17 @@ def build_scaled_outer_problem(
     if not (0.0 < step_scale <= 1.0):
         raise ValueError("step_scale must be in (0, 1]")
 
-    def resolve_scale(reference):
-        if isinstance(reference, jax.core.Tracer):
-            return np.float64(step_scale)
-        if isinstance(reference, jax.Array):
-            return _as_runtime_float64(step_scale, reference=reference)
-        return float(step_scale)
-
     def scaled_fun(z):
-        if anchor_in_state:
-            if not isinstance(z, ScaledOuterPhaseOptimizerState):
-                raise TypeError(
-                    "anchor_in_state=True requires ScaledOuterPhaseOptimizerState inputs."
-                )
-            step_dofs = z.step_dofs
-            resolved_anchor = jax.lax.stop_gradient(z.anchor_dofs)
-        else:
-            step_dofs, resolved_anchor = _scaled_outer_problem_coordinates(z, anchor_x)
-        scale = resolve_scale(step_dofs)
-        x = resolved_anchor + scale * step_dofs
+        step_dofs, resolved_anchor = _scaled_outer_problem_step_and_anchor(
+            z,
+            anchor_x,
+            anchor_in_state=anchor_in_state,
+        )
+        x, scale = _resolve_scaled_outer_problem_point(
+            resolved_anchor,
+            step_dofs,
+            step_scale,
+        )
         value, grad = base_fun(x)
         return value, _scaled_outer_problem_gradient(z, grad, scale)
 
@@ -6198,17 +6245,17 @@ def build_scaled_outer_problem(
         return scaled_fun, None
 
     def scaled_callback(z):
-        if anchor_in_state:
-            if not isinstance(z, ScaledOuterPhaseOptimizerState):
-                raise TypeError(
-                    "anchor_in_state=True requires ScaledOuterPhaseOptimizerState inputs."
-                )
-            step_dofs = z.step_dofs
-            resolved_anchor = jax.lax.stop_gradient(z.anchor_dofs)
-        else:
-            step_dofs, resolved_anchor = _scaled_outer_problem_coordinates(z, anchor_x)
-        scale = resolve_scale(step_dofs)
-        base_callback(resolved_anchor + scale * step_dofs)
+        step_dofs, resolved_anchor = _scaled_outer_problem_step_and_anchor(
+            z,
+            anchor_x,
+            anchor_in_state=anchor_in_state,
+        )
+        x, _ = _resolve_scaled_outer_problem_point(
+            resolved_anchor,
+            step_dofs,
+            step_scale,
+        )
+        base_callback(x)
 
     return scaled_fun, scaled_callback
 
@@ -6225,41 +6272,34 @@ def build_scaled_outer_scalar_problem(
     if not (0.0 < step_scale <= 1.0):
         raise ValueError("step_scale must be in (0, 1]")
 
-    def resolve_scale(reference):
-        if isinstance(reference, jax.core.Tracer):
-            return np.float64(step_scale)
-        if isinstance(reference, jax.Array):
-            return _as_runtime_float64(step_scale, reference=reference)
-        return float(step_scale)
-
     def scaled_fun(z):
-        if anchor_in_state:
-            if not isinstance(z, ScaledOuterPhaseOptimizerState):
-                raise TypeError(
-                    "anchor_in_state=True requires ScaledOuterPhaseOptimizerState inputs."
-                )
-            step_dofs = z.step_dofs
-            resolved_anchor = jax.lax.stop_gradient(z.anchor_dofs)
-        else:
-            step_dofs, resolved_anchor = _scaled_outer_problem_coordinates(z, anchor_x)
-        scale = resolve_scale(step_dofs)
-        return base_fun(resolved_anchor + scale * step_dofs)
+        step_dofs, resolved_anchor = _scaled_outer_problem_step_and_anchor(
+            z,
+            anchor_x,
+            anchor_in_state=anchor_in_state,
+        )
+        x, _ = _resolve_scaled_outer_problem_point(
+            resolved_anchor,
+            step_dofs,
+            step_scale,
+        )
+        return base_fun(x)
 
     if base_callback is None:
         return scaled_fun, None
 
     def scaled_callback(z):
-        if anchor_in_state:
-            if not isinstance(z, ScaledOuterPhaseOptimizerState):
-                raise TypeError(
-                    "anchor_in_state=True requires ScaledOuterPhaseOptimizerState inputs."
-                )
-            step_dofs = z.step_dofs
-            resolved_anchor = jax.lax.stop_gradient(z.anchor_dofs)
-        else:
-            step_dofs, resolved_anchor = _scaled_outer_problem_coordinates(z, anchor_x)
-        scale = resolve_scale(step_dofs)
-        base_callback(resolved_anchor + scale * step_dofs)
+        step_dofs, resolved_anchor = _scaled_outer_problem_step_and_anchor(
+            z,
+            anchor_x,
+            anchor_in_state=anchor_in_state,
+        )
+        x, _ = _resolve_scaled_outer_problem_point(
+            resolved_anchor,
+            step_dofs,
+            step_scale,
+        )
+        base_callback(x)
 
     return scaled_fun, scaled_callback
 
@@ -6534,6 +6574,13 @@ def resolve_scaled_outer_phase_final_dofs(
             if isinstance(candidate, jax.Array):
                 runtime_reference = candidate
                 break
+        if isinstance(runtime_reference, jax.core.Tracer):
+            anchor_runtime = _as_runtime_float64(
+                anchor_dofs, reference=runtime_reference
+            )
+            step_runtime = _as_runtime_float64(step_dofs, reference=runtime_reference)
+            scale = _as_runtime_float64(step_scale, reference=runtime_reference)
+            return anchor_runtime + scale * step_runtime
         if isinstance(runtime_reference, jax.Array):
             runtime_sharding = runtime_reference.sharding
 
@@ -6545,13 +6592,6 @@ def resolve_scaled_outer_phase_final_dofs(
 
             anchor_runtime = _explicit_runtime_array(anchor_dofs)
             step_runtime = _explicit_runtime_array(step_dofs)
-            scale = _as_runtime_float64(step_scale, reference=runtime_reference)
-            return anchor_runtime + scale * step_runtime
-        if runtime_reference is not None:
-            anchor_runtime = _as_runtime_float64(
-                anchor_dofs, reference=runtime_reference
-            )
-            step_runtime = _as_runtime_float64(step_dofs, reference=runtime_reference)
             scale = _as_runtime_float64(step_scale, reference=runtime_reference)
             return anchor_runtime + scale * step_runtime
         return _as_jax_float64(anchor_dofs) + _as_jax_float64(step_scale) * (
@@ -7284,7 +7324,16 @@ def snapshot_accepted_step_state(
 
 
 def accept_step(
-    run_dict, boozer_surface, JF, bs, objectives, diagnostics_refs, log_path
+    run_dict,
+    boozer_surface,
+    JF,
+    bs,
+    objectives,
+    diagnostics_refs,
+    log_path,
+    *,
+    objective_value=None,
+    objective_grad=None,
 ):
     """Update state and log diagnostics on an accepted optimizer step.
 
@@ -7304,7 +7353,19 @@ def accept_step(
         diagnostics_refs: Dict of extra diagnostic objects (banana_curve, etc.).
         log_path: Path to the iteration log file.
     """
-    J, grad = snapshot_accepted_step_state(run_dict, boozer_surface, JF)
+    snapshot_kwargs = {}
+    if objective_value is not None or objective_grad is not None:
+        snapshot_kwargs = {
+            "objective_value": objective_value,
+            "objective_grad": objective_grad,
+            "store_objective_grad": True,
+        }
+    J, grad = snapshot_accepted_step_state(
+        run_dict,
+        boozer_surface,
+        JF,
+        **snapshot_kwargs,
+    )
 
     # Per-component diagnostics
     diag = {}
@@ -7555,6 +7616,8 @@ class SingleStageAdapter:
             self.objectives,
             self.diagnostics,
             self.log_path,
+            objective_value=objective_value,
+            objective_grad=objective_grad,
         )
 
     def __call__(self, x):

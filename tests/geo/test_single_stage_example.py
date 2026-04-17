@@ -289,6 +289,34 @@ class SingleStageExampleTests(unittest.TestCase):
 
         return fake_sync
 
+    @staticmethod
+    def _make_fake_accept_step_capture(captured):
+        def fake_accept_step(
+            state,
+            booz,
+            objective,
+            bs,
+            objectives,
+            diagnostics,
+            log_path,
+            *,
+            objective_value=None,
+            objective_grad=None,
+        ):
+            captured["accept"] = {
+                "state": state,
+                "booz": booz,
+                "objective": objective,
+                "bs": bs,
+                "objectives": objectives,
+                "diagnostics": diagnostics,
+                "log_path": log_path,
+                "objective_value": objective_value,
+                "objective_grad": objective_grad,
+            }
+
+        return fake_accept_step
+
     def resolve_benchmark_target_lane_sync(
         self,
         module,
@@ -1703,6 +1731,42 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         np.testing.assert_allclose(seen["callback"][0], [10.5, 19.0])
 
+    def test_build_scaled_outer_problem_scaled_state_target_lane_mixed_inputs_and_numpy_scale_are_transfer_safe(
+        self,
+    ):
+        module = self.load_module()
+        seen = {"callback": []}
+
+        def base_fun(x):
+            return jnp.sum(x * x), x + x
+
+        def base_callback(x):
+            seen["callback"].append(np.asarray(jax.device_get(x), dtype=np.float64))
+
+        scaled_state = module.ScaledOuterPhaseOptimizerState(
+            step_dofs=jax.device_put(np.array([2.0, -4.0], dtype=np.float64)),
+            anchor_dofs=np.array([10.0, 20.0], dtype=np.float64),
+        )
+        scaled_fun, scaled_callback = module.build_scaled_outer_problem(
+            base_fun,
+            base_callback,
+            np.zeros(2, dtype=np.float64),
+            np.float64(0.25),
+            anchor_in_state=True,
+        )
+
+        with jax.transfer_guard("disallow"):
+            value, grad = scaled_fun(scaled_state)
+            scaled_callback(scaled_state)
+
+        self.assertAlmostEqual(float(jax.device_get(value)), 10.5**2 + 19.0**2)
+        self.assertIsInstance(grad, module.ScaledOuterPhaseOptimizerState)
+        np.testing.assert_allclose(
+            np.asarray(jax.device_get(grad.step_dofs), dtype=np.float64),
+            [5.25, 9.5],
+        )
+        np.testing.assert_allclose(seen["callback"][0], [10.5, 19.0])
+
     def test_build_scaled_outer_problem_scaled_state_target_lane_jit_is_transfer_safe(
         self,
     ):
@@ -1766,6 +1830,37 @@ class SingleStageExampleTests(unittest.TestCase):
             scaled_callback(scaled_state)
 
         self.assertAlmostEqual(float(jax.device_get(value)), 10.5**2 + 19.0**2)
+
+    def test_build_scaled_outer_scalar_problem_scaled_state_target_lane_mixed_inputs_and_numpy_scale_are_transfer_safe(
+        self,
+    ):
+        module = self.load_module()
+        seen = {"callback": []}
+
+        def base_fun(x):
+            return jnp.sum(x * x)
+
+        def base_callback(x):
+            seen["callback"].append(np.asarray(jax.device_get(x), dtype=np.float64))
+
+        scaled_state = module.ScaledOuterPhaseOptimizerState(
+            step_dofs=np.array([2.0, -4.0], dtype=np.float64),
+            anchor_dofs=jax.device_put(np.array([10.0, 20.0], dtype=np.float64)),
+        )
+        scaled_fun, scaled_callback = module.build_scaled_outer_scalar_problem(
+            base_fun,
+            base_callback,
+            np.zeros(2, dtype=np.float64),
+            np.float64(0.25),
+            anchor_in_state=True,
+        )
+
+        with jax.transfer_guard("disallow"):
+            value = scaled_fun(scaled_state)
+            scaled_callback(scaled_state)
+
+        self.assertAlmostEqual(float(jax.device_get(value)), 10.5**2 + 19.0**2)
+        np.testing.assert_allclose(seen["callback"][0], [10.5, 19.0])
 
     def test_resolve_single_stage_warm_start_paths_requires_artifacts(self):
         module = self.load_module()
@@ -5863,19 +5958,6 @@ class SingleStageExampleTests(unittest.TestCase):
             }
             return 1.0, np.zeros(2)
 
-        def fake_accept_step(
-            state, booz, objective, bs, objectives, diagnostics, log_path
-        ):
-            captured["accept"] = {
-                "state": state,
-                "booz": booz,
-                "objective": objective,
-                "bs": bs,
-                "objectives": objectives,
-                "diagnostics": diagnostics,
-                "log_path": log_path,
-            }
-
         adapter = module.SingleStageAdapter(
             run_dict=run_dict,
             boozer_surface="booz",
@@ -5891,7 +5973,11 @@ class SingleStageExampleTests(unittest.TestCase):
             module,
             "_evaluate_candidate_impl",
             side_effect=fake_eval,
-        ), patch.object(module, "accept_step", side_effect=fake_accept_step):
+        ), patch.object(
+            module,
+            "accept_step",
+            side_effect=self._make_fake_accept_step_capture(captured),
+        ):
             adapter.callback(
                 module.SingleStageOuterOptimizerState(
                     coil_dofs=np.array([2.0, -1.0]),
@@ -5904,6 +5990,8 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(run_dict["lscount"], 3)
         self.assertIs(captured["accept"]["state"], run_dict)
         self.assertEqual(captured["accept"]["log_path"], "/tmp/log.txt")
+        self.assertEqual(captured["accept"]["objective_value"], 1.0)
+        np.testing.assert_allclose(captured["accept"]["objective_grad"], np.zeros(2))
         self.assertEqual(captured["eval"]["objectives"], {"qs": "obj"})
         self.assertEqual(captured["eval"]["diagnostics"], {"iota": "diag"})
 
@@ -5946,19 +6034,6 @@ class SingleStageExampleTests(unittest.TestCase):
             }
             return 1.0, np.zeros(2)
 
-        def fake_accept_step(
-            state, booz, objective, bs, objectives, diagnostics, log_path
-        ):
-            captured["accept"] = {
-                "state": state,
-                "booz": booz,
-                "objective": objective,
-                "bs": bs,
-                "objectives": objectives,
-                "diagnostics": diagnostics,
-                "log_path": log_path,
-            }
-
         adapter = module.SingleStageAdapter(
             run_dict=run_dict,
             boozer_surface="booz",
@@ -5974,7 +6049,11 @@ class SingleStageExampleTests(unittest.TestCase):
             module,
             "_evaluate_candidate_impl",
             side_effect=fake_eval,
-        ), patch.object(module, "accept_step", side_effect=fake_accept_step):
+        ), patch.object(
+            module,
+            "accept_step",
+            side_effect=self._make_fake_accept_step_capture(captured),
+        ):
             adapter.sync_accepted_step(
                 module.SingleStageOuterOptimizerState(
                     coil_dofs=np.array([3.0, -4.0]),
@@ -5986,6 +6065,8 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(run_dict["lscount"], 5)
         self.assertIs(captured["accept"]["state"], run_dict)
         self.assertEqual(captured["accept"]["log_path"], "/tmp/log.txt")
+        self.assertEqual(captured["accept"]["objective_value"], 1.0)
+        np.testing.assert_allclose(captured["accept"]["objective_grad"], np.zeros(2))
         self.assertEqual(captured["eval"]["objectives"], {"qs": "obj"})
         self.assertEqual(captured["eval"]["diagnostics"], {"iota": "diag"})
 
