@@ -15,6 +15,7 @@ from ..._core.jax_host_boundary import (
     host_float as _host_float,
     host_int as _host_int,
 )
+from ._types import LBFGS_STATUS_NONFINITE
 
 
 def _is_invalid_state(f, g):
@@ -40,7 +41,9 @@ _LBFGS_STATUS_MESSAGES = {
     3: "Maximum number of gradient evaluations reached.",
     4: "Optimization terminated successfully (ftol).",
     5: "Line search failed.",
-    6: "Non-finite objective or gradient encountered during iteration.",
+    LBFGS_STATUS_NONFINITE: (
+        "Non-finite objective or gradient encountered during iteration."
+    ),
 }
 
 _LBFGS_SUCCESS_STATUSES = frozenset({0, 4})

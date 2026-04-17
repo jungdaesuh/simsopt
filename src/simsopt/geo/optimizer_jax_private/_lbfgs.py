@@ -27,7 +27,7 @@ from ._common import (
     _zeros,
 )
 from ._line_search import _line_search_value_and_grad
-from ._types import _LBFGSInvalidStepLog, _LBFGSResults
+from ._types import LBFGS_STATUS_NONFINITE, _LBFGSInvalidStepLog, _LBFGSResults
 
 
 _LBFGS_DEBUG_ENABLED = os.environ.get("SIMSOPT_LBFGS_DEBUG", "").lower() not in {
@@ -390,7 +390,9 @@ def _minimize_lbfgs_private_impl(
         _int_scalar(1),
         initial_status,
     )
-    initial_status = jnp.where(initial_nonfinite, _int_scalar(6), initial_status)
+    initial_status = jnp.where(
+        initial_nonfinite, _int_scalar(LBFGS_STATUS_NONFINITE), initial_status
+    )
     state_initial = state_initial._replace(
         failed=((initial_status > _int_scalar(0)) & (~state_initial.converged))
         | initial_nonfinite,
@@ -685,7 +687,7 @@ def _minimize_lbfgs_private_impl(
             _int_scalar(0),
             jnp.where(
                 state_nonfinite,
-                _int_scalar(6),
+                _int_scalar(LBFGS_STATUS_NONFINITE),
                 jnp.where(
                     state.k >= maxiter_limit,
                     _int_scalar(1),

@@ -7,6 +7,14 @@ from typing import NamedTuple
 import jax
 
 
+# Private L-BFGS terminal status code emitted when f(x) or ∇f(x) is non-finite
+# at solver entry or at the final re-evaluation. The solver encodes this as a
+# JAX literal; the host converter maps it to the "Non-finite objective or
+# gradient encountered during iteration." message. Kept here as the single
+# contract between solver-site emission and host-side decoding.
+LBFGS_STATUS_NONFINITE = 6
+
+
 class _BFGSResults(NamedTuple):
     converged: bool | jax.Array
     failed: bool | jax.Array
