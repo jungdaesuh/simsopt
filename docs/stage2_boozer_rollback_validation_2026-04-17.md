@@ -344,8 +344,16 @@ Completed in the current Stage 2 rollback slice:
 
 Remaining follow-up:
 
-- [ ] Keep bootability probes report-oriented if the guard is centralized, so
-  probe failures are surfaced rather than silently masked.
+- [x] Keep bootability probes report-oriented if the guard is centralized, so
+  probe failures are surfaced rather than silently masked. Verified at
+  `examples/single_stage_optimization/banana_opt/stage2_single_stage_handoff.py:485-489`
+  (`attempt_initialize_boozer_surface` runs the probe with
+  `BOOZER_FAILURE_POLICY_REPORT_FAILURE`) and `:749-760`
+  (`probe_stage2_seed_bootability` routes through the same seam). The Stage 2
+  hot-loop guard at `examples/single_stage_optimization/banana_opt/stage2_objectives.py:93-107`
+  uses `BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS`, so the centralized helper
+  preserves the policy split rather than collapsing both call sites onto a
+  single behavior.
 
 ## Validation Limits
 
