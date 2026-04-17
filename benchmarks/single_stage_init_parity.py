@@ -283,7 +283,7 @@ def _append_optional_single_stage_flags(
     if diagnose_target_lane_scaled_phase1:
         command.append("--diagnose-target-lane-scaled-phase1")
     if record_target_lane_invalid_state_events:
-        command.append("--record-target-lane-invalid-state-events")
+        command.append("--diagnostic-callbacks")
     if (
         profile_target_lane_batch_size is not None
         and int(profile_target_lane_batch_size) > 1

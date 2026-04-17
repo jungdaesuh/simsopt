@@ -1664,7 +1664,8 @@ def test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env(
     assert len(observed_invocations) == 1
     command, env = observed_invocations[0]
     assert "--diagnose-target-lane-scaled-phase1" in command
-    assert "--record-target-lane-invalid-state-events" in command
+    assert "--diagnostic-callbacks" in command
+    assert "--record-target-lane-invalid-state-events" not in command
     assert "--record-jax-compile-diagnostics" not in command
     assert "--xla_gpu_deterministic_ops=true" in env["XLA_FLAGS"].split()
 

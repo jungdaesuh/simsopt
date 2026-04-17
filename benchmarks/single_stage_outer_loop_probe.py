@@ -231,12 +231,20 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--record-target-lane-invalid-state-events",
+        "--diagnostic-callbacks",
+        dest="record_target_lane_invalid_state_events",
         action="store_true",
         help=(
-            "Record rejected target-lane L-BFGS trial states so proof failures "
-            "carry a structured first-event postmortem."
+            "Opt in to target-lane host callbacks so proof failures carry a "
+            "structured first-event postmortem. On explicit CUDA-only runs "
+            "this also keeps a CPU lane available for JAX host callbacks."
         ),
+    )
+    parser.add_argument(
+        "--record-target-lane-invalid-state-events",
+        dest="record_target_lane_invalid_state_events",
+        action="store_true",
+        help="Deprecated alias for --diagnostic-callbacks.",
     )
     parser.add_argument(
         "--enable-compile-diagnostics",
