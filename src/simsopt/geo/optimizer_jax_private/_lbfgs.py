@@ -264,6 +264,15 @@ def _minimize_lbfgs_private_impl(
         status=_int_scalar(0),
         ls_status=_int_scalar(0),
     )
+    initial_nonfinite = (~jnp.isfinite(state_initial.f_k)) | (
+        ~jnp.all(jnp.isfinite(state_initial.g_k))
+    )
+    # A non-finite entry point cannot be "converged" even when the gradient
+    # norm happens to be below gtol (e.g., constant-NaN objective with zero
+    # autodiff gradient at x0). Mask converged before it drives status=0.
+    state_initial = state_initial._replace(
+        converged=state_initial.converged & (~initial_nonfinite),
+    )
     initial_status = _int_scalar(0)
     initial_status = jnp.where(
         state_initial.ngev >= _int_scalar(maxgrad_limit_value),
@@ -280,8 +289,10 @@ def _minimize_lbfgs_private_impl(
         _int_scalar(1),
         initial_status,
     )
+    initial_status = jnp.where(initial_nonfinite, _int_scalar(6), initial_status)
     state_initial = state_initial._replace(
-        failed=(initial_status > _int_scalar(0)) & (~state_initial.converged),
+        failed=((initial_status > _int_scalar(0)) & (~state_initial.converged))
+        | initial_nonfinite,
         status=jnp.where(state_initial.converged, _int_scalar(0), initial_status),
     )
 
@@ -525,9 +536,14 @@ def _minimize_lbfgs_private_impl(
             ls_status=state.ls_status,
             converged=state.converged,
         )
-        converged_final = _norm(g_final, ord=norm) < gtol_jax
+        state_nonfinite = (~jnp.isfinite(f_final)) | (~jnp.all(jnp.isfinite(g_final)))
+        # Gradient-norm convergence does not apply when the final iterate is
+        # non-finite — e.g., a NaN objective that trivially has zero autodiff
+        # gradient would otherwise flip converged=True and report status=0.
+        converged_final = (_norm(g_final, ord=norm) < gtol_jax) & (~state_nonfinite)
         state = state._replace(
             converged=converged_final,
+            failed=state.failed | state_nonfinite,
             nfev=state.nfev + _int_scalar(1),
             ngev=state.ngev + _int_scalar(1),
             f_k=_as_jax_dtype(f_final, state.f_k.dtype),
@@ -537,15 +553,19 @@ def _minimize_lbfgs_private_impl(
             state.converged,
             _int_scalar(0),
             jnp.where(
-                state.k >= maxiter_limit,
-                _int_scalar(1),
+                state_nonfinite,
+                _int_scalar(6),
                 jnp.where(
-                    state.nfev >= maxfun_limit,
-                    _int_scalar(2),
+                    state.k >= maxiter_limit,
+                    _int_scalar(1),
                     jnp.where(
-                        state.ngev >= maxgrad_limit,
-                        _int_scalar(3),
-                        jnp.where(state.failed, _int_scalar(5), state.status),
+                        state.nfev >= maxfun_limit,
+                        _int_scalar(2),
+                        jnp.where(
+                            state.ngev >= maxgrad_limit,
+                            _int_scalar(3),
+                            jnp.where(state.failed, _int_scalar(5), state.status),
+                        ),
                     ),
                 ),
             ),

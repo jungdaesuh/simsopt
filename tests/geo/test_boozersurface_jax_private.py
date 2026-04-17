@@ -859,6 +859,44 @@ class TestOptimizerAdapterPrivate:
         assert progress_points[-1][0] >= 1
 
     @PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_lbfgs_private_skips_debug_callback_without_observability(
+        self,
+        monkeypatch,
+    ):
+        """Default solve must not invoke jax.debug.callback when no callbacks wired.
+
+        This is the CUDA-only correctness contract: the solver's hot loop must be
+        safe on ``JAX_PLATFORMS=cuda`` (no CPU backend), which requires zero host
+        callback traffic when the caller omits observability hooks.
+        """
+        observed = {"called": False}
+
+        def forbidden_debug_callback(*_args, **_kwargs):
+            observed["called"] = True
+            raise AssertionError(
+                "jax.debug.callback must not run when no observability callbacks "
+                "are wired to the private L-BFGS solver."
+            )
+
+        monkeypatch.setattr(jax.debug, "callback", forbidden_debug_callback)
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        state = _opt._minimize_lbfgs_private(
+            quad,
+            x0,
+            maxiter=5,
+            gtol=1e-8,
+            maxcor=5,
+        )
+
+        assert observed["called"] is False
+        assert bool(state.converged) is True
+        assert int(state.status) == 0
+
+    @PRIVATE_OPTIMIZER_RUNTIME
     def test_minimize_lbfgs_private_preserves_last_finite_iterate_on_nonfinite_step(
         self,
         monkeypatch,
@@ -1403,6 +1441,62 @@ class TestLBFGSMethodPrivate:
         assert result.success is True
         assert result.nit > 0
         assert float(result.fun) < float(tiny_wave(x0))
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_lbfgs_ondevice_reports_status_six_for_nonfinite_initial_objective(
+        self,
+    ):
+        """Entry with a NaN initial objective must be classified as non-finite."""
+
+        def nan_at_origin(x):
+            return jnp.where(
+                jnp.all(jnp.equal(x, jnp.zeros_like(x))),
+                jnp.asarray(jnp.nan, dtype=x.dtype),
+                0.5 * jnp.dot(x, x),
+            )
+
+        x0 = jnp.zeros((2,), dtype=jnp.float64)
+        result = jax_minimize(
+            nan_at_origin,
+            x0,
+            method="lbfgs-ondevice",
+            tol=1e-8,
+            maxiter=5,
+        )
+
+        assert result.success is False
+        assert result.status == 6
+        assert "non-finite" in result.message.lower()
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_lbfgs_ondevice_reports_status_six_for_nonfinite_initial_gradient(
+        self,
+    ):
+        """Entry with a non-finite initial gradient must be classified as non-finite."""
+
+        def inf_grad_at_origin(x):
+            value = jnp.asarray(0.0, dtype=x.dtype)
+            grad = jnp.asarray(
+                [jnp.inf, jnp.inf],
+                dtype=x.dtype,
+            )
+            return value, grad
+
+        x0 = jnp.zeros((2,), dtype=jnp.float64)
+        result = jax_minimize(
+            inf_grad_at_origin,
+            x0,
+            method="lbfgs-ondevice",
+            tol=1e-8,
+            maxiter=5,
+            value_and_grad=True,
+        )
+
+        assert result.success is False
+        assert result.status == 6
+        assert "non-finite" in result.message.lower()
 
 
 class TestBoozerSurfaceJAXClassPrivate:

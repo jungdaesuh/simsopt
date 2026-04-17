@@ -40,6 +40,7 @@ _LBFGS_STATUS_MESSAGES = {
     3: "Maximum number of gradient evaluations reached.",
     4: "Optimization terminated successfully (ftol).",
     5: "Line search failed.",
+    6: "Non-finite objective or gradient encountered during iteration.",
 }
 
 _LBFGS_SUCCESS_STATUSES = frozenset({0, 4})

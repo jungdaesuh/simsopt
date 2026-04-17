@@ -116,3 +116,65 @@ def test_private_lbfgs_result_treats_ftol_status_as_success():
     assert result.status == 4
     assert result.success is True
     assert result.message == "Optimization terminated successfully (ftol)."
+
+
+def test_private_lbfgs_result_reports_status_six_for_nonfinite_objective():
+    result = converters._private_lbfgs_result_to_optimize_result(
+        _make_lbfgs_state(
+            status=6,
+            k=3,
+            f_k=float("nan"),
+            g_k=(0.1, -0.2),
+            nfev=7,
+            ngev=8,
+            converged=False,
+        )
+    )
+
+    assert result.status == 6
+    assert result.success is False
+    assert "non-finite" in result.message.lower()
+
+
+def test_private_lbfgs_result_reports_status_six_for_nonfinite_gradient():
+    result = converters._private_lbfgs_result_to_optimize_result(
+        _make_lbfgs_state(
+            status=6,
+            k=4,
+            f_k=0.5,
+            g_k=(float("inf"), 0.3),
+            nfev=9,
+            ngev=10,
+            converged=False,
+        )
+    )
+
+    assert result.status == 6
+    assert result.success is False
+    assert "non-finite" in result.message.lower()
+
+
+def test_private_lbfgs_result_status_six_dict_entry_surfaces_when_state_is_finite():
+    """status=6 with numerically finite f_k/g_k surfaces the dict entry.
+
+    The runtime invalid_state post-check in the converter overrides the
+    status-to-message mapping when f_k/g_k contain NaN/inf, but the
+    status=6 dict entry still serves when the solver flagged non-finite
+    mid-run but the final accepted iterate happens to be finite.
+    """
+    result = converters._private_lbfgs_result_to_optimize_result(
+        _make_lbfgs_state(
+            status=6,
+            k=1,
+            f_k=0.5,
+            g_k=(0.1, -0.2),
+            converged=False,
+        )
+    )
+
+    assert result.status == 6
+    assert result.success is False
+    assert (
+        result.message
+        == "Non-finite objective or gradient encountered during iteration."
+    )
