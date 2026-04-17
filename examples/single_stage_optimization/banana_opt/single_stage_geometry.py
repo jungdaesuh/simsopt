@@ -628,7 +628,7 @@ def evaluate_topology_gate(
         tmax=tmax,
         tol=tol,
         nphis=1,
-        seed_tier="cheap",
+        inset_fraction=0.05,
         field_policy="never",
     )
     earliest_exit = topology_result["first_exit"]

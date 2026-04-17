@@ -5,11 +5,10 @@ Single source of truth for field-line tracing metrics used by:
 - the callback medium-fidelity scorer
 - the strict Poincare validator in poincare_surfaces.py
 
-All three paths use the same stopping criteria, seed logic, and metric
-computation so that metrics cannot drift between callback and validation.
+All three paths use the same stopping criteria, seed logic (midplane radial
+sweep matching upstream SIMSOPT), and metric computation so that metrics
+cannot drift between callback and validation.
 """
-
-from dataclasses import dataclass
 
 import numpy as np
 import simsoptpp as sopp
@@ -65,31 +64,6 @@ def phi_hit_counts(fieldlines_phi_hits, phis):
     ]
 
 
-@dataclass(frozen=True)
-class TopologySeedTier:
-    name: str
-    default_seed_plane_count: int
-    default_field_policy: str
-
-
-TOPOLOGY_SEED_TIERS = {
-    "cheap": TopologySeedTier(
-        name="cheap",
-        default_seed_plane_count=2,
-        default_field_policy="never",
-    ),
-    "medium": TopologySeedTier(
-        name="medium",
-        default_seed_plane_count=4,
-        default_field_policy="auto",
-    ),
-    "strict": TopologySeedTier(
-        name="strict",
-        default_seed_plane_count=8,
-        default_field_policy="auto",
-    ),
-}
-
 TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD = 50.0
 TOPOLOGY_INTERPOLATION_GRID = {
     "degree": 3,
@@ -97,7 +71,6 @@ TOPOLOGY_INTERPOLATION_GRID = {
     "nphi": 40,
     "nz": 20,
 }
-_TOPOLOGY_SEED_THETA_SAMPLES = 512
 TOPOLOGY_TRANSPORT_DIAGNOSTICS_SCHEMA_VERSION = (
     "single_stage_topology_transport_diagnostics_v1"
 )
@@ -111,161 +84,6 @@ _EFFECTIVE_RIPPLE_UNAVAILABLE_REASON = (
     "transport backend and flux-coordinate geometry that the single-stage "
     "vacuum topology scorer does not expose."
 )
-
-
-def _resolve_topology_seed_tier(seed_tier):
-    try:
-        return TOPOLOGY_SEED_TIERS[str(seed_tier)]
-    except KeyError as error:
-        raise ValueError(
-            f"Unsupported topology seed tier {seed_tier!r}; "
-            f"expected one of {sorted(TOPOLOGY_SEED_TIERS)}"
-        ) from error
-
-
-def _resolve_seed_plane_count(seed_tier, nfieldlines, seed_plane_count):
-    if nfieldlines <= 0:
-        return 0
-    default_plane_count = _resolve_topology_seed_tier(seed_tier).default_seed_plane_count
-    resolved_plane_count = (
-        default_plane_count
-        if seed_plane_count is None
-        else int(seed_plane_count)
-    )
-    if resolved_plane_count <= 0:
-        raise ValueError("seed_plane_count must be positive")
-    return min(int(nfieldlines), resolved_plane_count)
-
-
-def _seed_plane_angles(nfp, plane_count):
-    if plane_count <= 0:
-        return np.empty((0,), dtype=float)
-    field_period = (2.0 * np.pi) / float(max(int(nfp), 1))
-    return np.linspace(0.0, field_period, plane_count, endpoint=False, dtype=float)
-
-
-def _lines_per_plane(nfieldlines, plane_count):
-    if plane_count <= 0:
-        return []
-    base, remainder = divmod(int(nfieldlines), int(plane_count))
-    return [
-        int(base + (1 if plane_index < remainder else 0))
-        for plane_index in range(int(plane_count))
-    ]
-
-
-def _cross_section_rz(surface, phi_abs, theta_samples=_TOPOLOGY_SEED_THETA_SAMPLES):
-    cross_section = np.asarray(
-        surface.cross_section(phi=float(phi_abs) / (2.0 * np.pi), thetas=theta_samples),
-        dtype=float,
-    )
-    rz = np.empty((cross_section.shape[0], 2), dtype=float)
-    rz[:, 0] = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
-    rz[:, 1] = cross_section[:, 2]
-    return cross_section, rz
-
-
-def _angle_distance(values, target):
-    wrapped = np.mod(values - target + np.pi, 2.0 * np.pi) - np.pi
-    return np.abs(wrapped)
-
-
-def _inset_rz_point(boundary_rz, centroid_rz, inset_fraction, min_inset):
-    direction = np.asarray(boundary_rz, dtype=float) - np.asarray(centroid_rz, dtype=float)
-    radius = float(np.linalg.norm(direction))
-    if radius <= 0.0:
-        return np.asarray(boundary_rz, dtype=float)
-    inset = min(max(float(inset_fraction) * radius, float(min_inset)), 0.45 * radius)
-    scale = max((radius - inset) / radius, 0.0)
-    return np.asarray(centroid_rz, dtype=float) + scale * direction
-
-
-def build_topology_seed_points(
-    surface,
-    nfieldlines,
-    *,
-    seed_tier="medium",
-    seed_plane_count=None,
-    inset_fraction=0.08,
-    min_inset=0.01,
-    theta_samples=_TOPOLOGY_SEED_THETA_SAMPLES,
-):
-    resolved_nfieldlines = int(nfieldlines)
-    if resolved_nfieldlines < 0:
-        raise ValueError("nfieldlines must be non-negative")
-
-    resolved_plane_count = _resolve_seed_plane_count(
-        seed_tier,
-        resolved_nfieldlines,
-        seed_plane_count,
-    )
-    plane_angles = _seed_plane_angles(surface.nfp, resolved_plane_count)
-    points_per_plane = _lines_per_plane(resolved_nfieldlines, resolved_plane_count)
-
-    xyz_inits = []
-    seed_points = []
-    for plane_index, (phi_abs, plane_line_count) in enumerate(
-        zip(plane_angles, points_per_plane)
-    ):
-        if plane_line_count <= 0:
-            continue
-        _, rz = _cross_section_rz(surface, float(phi_abs), theta_samples=theta_samples)
-        centroid_rz = np.mean(rz, axis=0)
-        boundary_angles = np.mod(
-            np.arctan2(rz[:, 1] - centroid_rz[1], rz[:, 0] - centroid_rz[0]),
-            2.0 * np.pi,
-        )
-        poloidal_step = (2.0 * np.pi) / float(plane_line_count)
-        poloidal_offset = (
-            float(plane_index) / float(max(resolved_plane_count, 1))
-        ) * poloidal_step
-        target_angles = np.mod(
-            poloidal_offset
-            + np.arange(plane_line_count, dtype=float) * poloidal_step,
-            2.0 * np.pi,
-        )
-        for target_angle in target_angles:
-            boundary_index = int(np.argmin(_angle_distance(boundary_angles, target_angle)))
-            seeded_rz = _inset_rz_point(
-                rz[boundary_index],
-                centroid_rz,
-                inset_fraction,
-                min_inset,
-            )
-            seeded_r = float(seeded_rz[0])
-            seeded_z = float(seeded_rz[1])
-            seeded_xyz = np.array(
-                [
-                    seeded_r * np.cos(phi_abs),
-                    seeded_r * np.sin(phi_abs),
-                    seeded_z,
-                ],
-                dtype=float,
-            )
-            xyz_inits.append(seeded_xyz)
-            seed_points.append(
-                {
-                    "phi": float(phi_abs),
-                    "R": seeded_r,
-                    "Z": seeded_z,
-                    "target_poloidal_angle": float(target_angle),
-                }
-            )
-
-    return {
-        "xyz_inits": np.asarray(xyz_inits, dtype=float).reshape((-1, 3)),
-        "contract": {
-            "tier": str(seed_tier),
-            "seed_plane_count": int(resolved_plane_count),
-            "seed_plane_angles": [float(angle) for angle in plane_angles],
-            "lines_per_plane": [int(count) for count in points_per_plane],
-            "poloidal_sampling": "evenly_spaced_cross_section",
-            "theta_samples": int(theta_samples),
-            "inset_fraction": float(inset_fraction),
-            "min_inset": float(min_inset),
-        },
-        "seed_points": seed_points,
-    }
 
 
 def trace_fieldlines_xyz(
@@ -834,6 +652,56 @@ def trace_metrics(fieldlines_tys, fieldlines_phi_hits, phis, stop_labels, mode="
     }
 
 
+def kam_fraction(fieldlines_phi_hits, cross_section_span, width_ratio=0.25):
+    """Seed-independent confinement proxy.
+
+    For each traced seed line, measures the radial+axial span of its Poincare
+    hits. A line whose hits stay within a narrow band (< width_ratio times the
+    cross-section span) and never triggers a stopping criterion is classified
+    as lying on a preserved flux surface. The returned fraction is the count
+    of such bounded, surviving lines divided by the total number of seeds.
+
+    Because the classification is based on the spread of hits rather than
+    whether a fixed set of seeds survive, the metric is insensitive to the
+    seed placement strategy — it measures how many flux surfaces in the
+    equilibrium are actually preserved, not how many of your particular
+    seeds happened to land on them.
+    """
+    if cross_section_span <= 0.0 or not len(fieldlines_phi_hits):
+        return 0.0, 0.0
+    threshold = float(width_ratio) * float(cross_section_span)
+    bounded = 0
+    widths = []
+    total = 0
+    for line_hits in fieldlines_phi_hits:
+        arr = np.asarray(line_hits)
+        if arr.size == 0:
+            continue
+        total += 1
+        valid = arr[arr[:, 1] >= 0]
+        if valid.shape[0] < 3:
+            widths.append(float(cross_section_span))
+            continue
+        r = np.sqrt(valid[:, 2] ** 2 + valid[:, 3] ** 2)
+        z = valid[:, 4]
+        span_this = float(np.hypot(float(r.max() - r.min()), float(z.max() - z.min())))
+        widths.append(span_this)
+        lost = bool(arr[-1, 1] < 0)
+        if span_this <= threshold and not lost:
+            bounded += 1
+    if total == 0:
+        return 0.0, 0.0
+    return float(bounded) / float(total), float(np.median(widths)) if widths else 0.0
+
+
+def cross_section_span(surface):
+    """Representative cross-section extent used by kam_fraction as a scale."""
+    gamma = surface.gamma()
+    r = np.sqrt(gamma[:, :, 0] ** 2 + gamma[:, :, 1] ** 2)
+    z = gamma[:, :, 2]
+    return float(np.hypot(float(np.max(r) - np.min(r)), float(np.max(z) - np.min(z))))
+
+
 def _normalized_line_lifetimes(line_metrics, tmax):
     """Return normalized line lifetimes in [0, 1], where 1 means full survival."""
     lifetimes = []
@@ -933,6 +801,9 @@ def empty_topology_score_result(
         "line_metrics": [],
         "line_lifetimes": [],
         "line_losses": [],
+        "kam_fraction": 0.0,
+        "kam_median_width": 0.0,
+        "cross_section_span": 0.0,
         "seed_contract": seed_contract,
         "field_model": field_model,
         "transport_diagnostics": (
@@ -971,8 +842,7 @@ def score_topology(
     surrogate_mean_weight=0.2,
     surrogate_worst_weight=0.6,
     surrogate_early_weight=0.2,
-    seed_tier="medium",
-    seed_plane_count=None,
+    inset_fraction=0.05,
     field_policy=None,
     interpolation_grid=None,
 ):
@@ -981,29 +851,24 @@ def score_topology(
     This is the reusable entry point for all topology scoring:
     - search-time gate: nfieldlines=4, tmax=2
     - callback medium scorer: nfieldlines=12, tmax=50
-    - strict validation: nfieldlines=50, tmax=7000
+    - strict validation: nfieldlines=30-50, tmax=7000
+
+    Seeding: midplane radial sweep (phi=0, Z=0), matching upstream SIMSOPT
+    conventions (tracing_fieldlines_NCSX.py, tracing_fieldlines_QA.py).
 
     Returns a dict with survival_fraction, mean_exit_time, stop_reason_counts,
-    and per-line metrics.
+    per-line metrics, and kam_fraction (a seed-independent confinement proxy).
     """
+    from simsopt.field import compute_fieldlines
+
     nfp = surface.nfp
     phis = [(i / nphis) * (2 * np.pi / nfp) for i in range(nphis)]
-    resolved_field_policy = (
-        _resolve_topology_seed_tier(seed_tier).default_field_policy
-        if field_policy is None
-        else str(field_policy)
-    )
+    resolved_field_policy = "auto" if field_policy is None else str(field_policy)
 
     stopping_criteria, stop_labels = build_stopping_criteria(
         surface,
         include_surface_exit=True,
         max_iterations=topology_iteration_limit(tmax),
-    )
-    seed_bundle = build_topology_seed_points(
-        surface,
-        nfieldlines,
-        seed_tier=seed_tier,
-        seed_plane_count=seed_plane_count,
     )
     traced_field, field_model = prepare_topology_field(
         surface,
@@ -1013,9 +878,22 @@ def score_topology(
         interpolation_grid=interpolation_grid,
     )
     transport_diagnostics = compute_topology_transport_diagnostics(surface, traced_field)
-    fieldlines_tys, fieldlines_phi_hits = trace_fieldlines_xyz(
+
+    radii = midplane_seed_radii(surface, nfieldlines, inset_fraction=inset_fraction)
+    seed_contract = {
+        "mode": "midplane_radial_sweep",
+        "nplanes": 1,
+        "nfieldlines": int(nfieldlines),
+        "inset_fraction": float(inset_fraction),
+        "phi": 0.0,
+        "Z": 0.0,
+        "r_min": float(np.min(radii)) if nfieldlines > 0 else 0.0,
+        "r_max": float(np.max(radii)) if nfieldlines > 0 else 0.0,
+    }
+    fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
         traced_field,
-        seed_bundle["xyz_inits"],
+        radii,
+        np.zeros(int(nfieldlines)),
         tmax=tmax,
         tol=tol,
         phis=phis,
@@ -1040,6 +918,9 @@ def score_topology(
         early_weight=surrogate_early_weight,
     )
 
+    span = cross_section_span(surface)
+    kam_frac, kam_median = kam_fraction(fieldlines_phi_hits, span)
+
     return {
         "survival_fraction": metrics["survival_fraction"],
         "survived_lines": metrics["survived_lines"],
@@ -1059,7 +940,10 @@ def score_topology(
         "line_metrics": metrics["line_metrics"],
         "line_lifetimes": surrogate["line_lifetimes"],
         "line_losses": surrogate["line_losses"],
-        "seed_contract": seed_bundle["contract"],
+        "kam_fraction": float(kam_frac),
+        "kam_median_width": float(kam_median),
+        "cross_section_span": float(span),
+        "seed_contract": seed_contract,
         "field_model": field_model,
         "transport_diagnostics": transport_diagnostics,
     }
@@ -1076,18 +960,14 @@ def safe_score_topology(
 ):
     resolved_field_policy = kwargs.get("field_policy")
     if resolved_field_policy is None:
-        resolved_field_policy = _resolve_topology_seed_tier(
-            kwargs.get("seed_tier", "medium")
-        ).default_field_policy
+        resolved_field_policy = "auto"
     seed_contract = {
-        "tier": str(kwargs.get("seed_tier", "medium")),
-        "seed_plane_count": None,
-        "seed_plane_angles": [],
-        "lines_per_plane": [],
-        "poloidal_sampling": "evenly_spaced_cross_section",
-        "theta_samples": int(_TOPOLOGY_SEED_THETA_SAMPLES),
-        "inset_fraction": 0.08,
-        "min_inset": 0.01,
+        "mode": "midplane_radial_sweep",
+        "nplanes": 1,
+        "nfieldlines": int(nfieldlines),
+        "inset_fraction": float(kwargs.get("inset_fraction", 0.05)),
+        "phi": 0.0,
+        "Z": 0.0,
     }
     field_model = {
         "policy": str(resolved_field_policy),

@@ -5,29 +5,18 @@ import sys
 
 # SIMSOPT imports
 from simsopt._core.optimizable import load
-from simsopt.field import InterpolatedField
 from simsopt.field import compute_fieldlines
 import numpy as np
-from simsopt.field import (
-    LevelsetStoppingCriterion,
-    MaxZStoppingCriterion,
-    MinZStoppingCriterion,
-    MaxRStoppingCriterion,
-    MinRStoppingCriterion,
-)
-from simsopt.geo import SurfaceClassifier, curves_to_vtk
+from simsopt.geo import curves_to_vtk
 
 # Shared topology scorer — single source of truth for helpers and metrics
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from topology_scorer import (
-    midplane_seed_radii as _midplane_seed_radii,
-    padded_bounds as _padded_bounds,
     trace_metrics as _trace_metrics,
-    phi_hit_counts as _phi_hit_counts,
+    midplane_seed_radii,
     build_stopping_criteria,
+    prepare_topology_field,
     topology_iteration_limit,
-    STOP_LABELS_VALIDATION,
-    STOP_LABELS_DIAGNOSTIC,
 )
 
 
@@ -175,16 +164,34 @@ if __name__ == "__main__":
 
 
     def trace_fieldlines(bfield):
-        # Seed from the midplane slightly inside the surface so any outward
-        # excursion is meaningful rather than an artifact of boundary seeding.
-        R0 = _midplane_seed_radii(surf, nfieldlines)
-        Z0 = np.zeros((nfieldlines,))
+        # Midplane radial sweep matches upstream SIMSOPT conventions
+        # (tracing_fieldlines_NCSX.py, tracing_fieldlines_QA.py). The R sweep
+        # covers the cross-section from near inner edge to near outer edge,
+        # so the rendered Poincare faithfully reflects the topology rather
+        # than being biased toward the boundary.
+        seed_inset_fraction = 0.05
+        radii = midplane_seed_radii(
+            surf,
+            nfieldlines,
+            inset_fraction=seed_inset_fraction,
+        )
+        Z0 = np.zeros(nfieldlines)
         phis = [(i/4)*(2*np.pi/nfp) for i in range(4)]
+        seed_contract = {
+            "mode": "midplane_radial_sweep",
+            "nplanes": 1,
+            "nfieldlines": int(nfieldlines),
+            "inset_fraction": float(seed_inset_fraction),
+            "phi": 0.0,
+            "Z": 0.0,
+            "r_min": float(np.min(radii)),
+            "r_max": float(np.max(radii)),
+        }
 
         def trace_and_plot(stopping_criteria, stop_labels, suffix, label, mode):
             fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
                 bfield,
-                R0,
+                radii,
                 Z0,
                 tmax=tmax_fl,
                 tol=tol,
@@ -237,6 +244,8 @@ if __name__ == "__main__":
             "tmax": tmax_fl,
             "tol": tol,
             "phis": [float(phi) for phi in phis],
+            "seed_contract": seed_contract,
+            "field_model": field_model,
             "validation": validation_metrics,
             "diagnostic": diagnostic_metrics,
             "validation_status": validation_metrics["validation_status"],
@@ -246,36 +255,20 @@ if __name__ == "__main__":
         print(f"Saved: {os.path.basename(metrics_path)}")
         return artifact
 
-    # Determine interpolation bounds independently from the validation surface
-    # so the field interpolant is not clipped at the exact Boozer outline.
-    gamma = surf.gamma()
-    Rmin = np.min(np.sqrt(gamma[:, :, 0]**2 + gamma[:, :, 1]**2))
-    Rmax = np.max(np.sqrt(gamma[:, :, 0]**2 + gamma[:, :, 1]**2))
-    Zmax = np.max(np.abs(gamma[:, :, 2]))
-    interp_rmin, interp_rmax, interp_zmax = _padded_bounds(Rmin, Rmax, Zmax)
-    rrange = (interp_rmin, interp_rmax, nr)
-    phirange = (0, 2*np.pi/nfp, nphi)
-    # exploit stellarator symmetry and only consider positive z values:
-    zrange = (0, interp_zmax, nz)
-
-    if interpolate:
-        bsh = InterpolatedField(
-            bs,
-            degree,
-            rrange,
-            phirange,
-            zrange,
-            True,
-            nfp=nfp,
-            stellsym=True,
-        )
-
-        bsh.set_points(surf.gamma().reshape((-1, 3)))
-        bs.set_points(surf.gamma().reshape((-1, 3)))
-        Bh = bsh.B()
-        B = bs.B()
-        print("Maximum field interpolation error: ", np.max(np.abs(B-Bh)))
-    else:
-        bsh = bs
+    field_model_policy = "auto" if interpolate else "never"
+    bsh, field_model = prepare_topology_field(
+        surf,
+        bs,
+        tmax_fl,
+        field_policy=field_model_policy,
+        interpolation_grid={
+            "degree": degree,
+            "nr": nr,
+            "nphi": nphi,
+            "nz": nz,
+        },
+    )
+    if field_model["selected_mode"] == "interpolated":
+        print("Maximum field interpolation error: ", field_model["max_abs_error"])
 
     trace_fieldlines(bsh)

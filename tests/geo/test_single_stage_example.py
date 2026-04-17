@@ -997,25 +997,18 @@ class SingleStageExampleTests(unittest.TestCase):
             return_value=([object()], stop_labels),
         ), patch.object(
             topology_module,
-            "build_topology_seed_points",
-            return_value={
-                "xyz_inits": np.array(
-                    [
-                        [1.0, 0.0, 0.0],
-                        [1.1, 0.0, 0.0],
-                        [1.2, 0.0, 0.0],
-                    ]
-                ),
-                "contract": {"tier": "cheap"},
-                "seed_points": [],
-            },
+            "midplane_seed_radii",
+            return_value=np.array([1.0, 1.1, 1.2]),
         ), patch.object(
             topology_module,
             "prepare_topology_field",
             return_value=(object(), {"selected_mode": "native"}),
         ), patch.object(
             topology_module,
-            "trace_fieldlines_xyz",
+            "cross_section_span",
+            return_value=1.0,
+        ), patch(
+            "simsopt.field.compute_fieldlines",
             return_value=(fieldlines_tys, fieldlines_phi_hits),
         ):
             scorer_result = topology_module.score_topology(
@@ -1025,7 +1018,6 @@ class SingleStageExampleTests(unittest.TestCase):
                 tmax=2.0,
                 tol=1e-7,
                 nphis=1,
-                seed_tier="cheap",
                 field_policy="never",
             )
         gate_status = module._evaluate_topology_gate_impl(
@@ -1114,7 +1106,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(metrics["validation_status"], "broken")
         self.assertEqual(metrics["stop_reason_counts"]["iteration_limit"], 1)
 
-    def test_build_topology_seed_points_uses_multi_plane_multi_poloidal_contract(self):
+    def test_midplane_seed_radii_produces_inset_radial_sweep(self):
         topology_module = load_topology_scorer_module()
 
         class _Surface:
@@ -1133,31 +1125,15 @@ class SingleStageExampleTests(unittest.TestCase):
                     ]
                 )
 
-        seed_bundle = topology_module.build_topology_seed_points(
-            _Surface(),
-            12,
-            seed_tier="medium",
-        )
-
-        self.assertEqual(seed_bundle["xyz_inits"].shape, (12, 3))
-        self.assertEqual(seed_bundle["contract"]["tier"], "medium")
-        self.assertEqual(seed_bundle["contract"]["seed_plane_count"], 4)
-        self.assertEqual(seed_bundle["contract"]["lines_per_plane"], [3, 3, 3, 3])
-        self.assertEqual(len(seed_bundle["contract"]["seed_plane_angles"]), 4)
-        self.assertEqual(len(seed_bundle["seed_points"]), 12)
-        self.assertEqual(
-            len({round(seed["phi"], 12) for seed in seed_bundle["seed_points"]}),
-            4,
-        )
-        self.assertGreater(
-            len(
-                {
-                    round(seed["target_poloidal_angle"], 12)
-                    for seed in seed_bundle["seed_points"]
-                }
-            ),
-            3,
-        )
+        radii = topology_module.midplane_seed_radii(_Surface(), 12, inset_fraction=0.05)
+        self.assertEqual(radii.shape, (12,))
+        # With R = 1 + 0.2 cos(theta) near the midplane, R ranges over ~[0.8, 1.2].
+        # The 0.05 inset takes ~5% of that span off each end.
+        span = 1.2 - 0.8
+        expected_inset = max(0.05 * span, 0.01)
+        self.assertGreaterEqual(radii[0], 0.8 + 0.9 * expected_inset)
+        self.assertLessEqual(radii[-1], 1.2 - 0.9 * expected_inset)
+        self.assertTrue(np.all(np.diff(radii) > 0))
 
     def test_prepare_topology_field_auto_policy_switches_at_threshold(self):
         topology_module = load_topology_scorer_module()
