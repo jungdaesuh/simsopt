@@ -325,6 +325,23 @@ A third test is also worthwhile:
 That third test pins the cascading-failure behavior above: repeated failed
 retries must keep warm-starting from the last successful snapshot.
 
+## TODOs
+
+- [ ] Add a Stage 2-local guarded Boozer evaluation helper that snapshots only
+  the last successful surface/iota/G state and restores it on solve failure.
+- [ ] Remove the raw soft-mode iota penalty from `JF` and evaluate it through
+  the guarded helper inside `make_stage2_fun(...)`.
+- [ ] Route the ALM iota path through the same guard and avoid consuming
+  `penalty_objective.dJ()` from failed Boozer states.
+- [ ] Keep bootability probes report-oriented if the guard is centralized, so
+  probe failures are surfaced rather than silently masked.
+- [ ] Add a regression test for restore-on-failure with a fake Boozer surface
+  that mutates state and returns `success=False`.
+- [ ] Add Stage 2 soft-mode and ALM-mode regression tests proving failed solves
+  are rejected without consuming failed-state gradients.
+- [ ] Add an alternating success/failure regression test proving repeated
+  failures keep warm-starting from the last successful snapshot.
+
 ## Validation Limits
 
 I validated the code paths statically in the current repo and checked the SciPy
