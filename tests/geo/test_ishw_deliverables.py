@@ -450,7 +450,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
             curvature_threshold=100.0,
             banana_surf_radius=0.21,
             order=2,
-            constraint_method="alm",
+            constraint_method="penalty",
             alm_max_outer_iters=10,
             alm_penalty_init=1.0,
             alm_penalty_scale=10.0,
@@ -524,6 +524,37 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 basin_hops=0,
                 basin_stepsize=0.01,
                 stage2_iota_mode="alm",
+                stage2_iota_target=0.2,
+            )
+
+    def test_stage2_artifact_config_rejects_iota_soft_with_alm_constraint_method(self):
+        module = load_workflow_common_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "stage2_iota_mode='soft' is incompatible with constraint_method='alm'",
+        ):
+            module.Stage2ArtifactConfig(
+                plasma_surf_filename="demo.nc",
+                output_root=Path("/tmp/stage2"),
+                equilibria_dir=None,
+                tf_current_A=8.0e4,
+                major_radius=0.915,
+                toroidal_flux=0.24,
+                length_weight=0.0005,
+                cc_weight=100.0,
+                cc_threshold=0.05,
+                curvature_weight=0.0001,
+                curvature_threshold=100.0,
+                banana_surf_radius=0.21,
+                order=2,
+                constraint_method="alm",
+                alm_max_outer_iters=10,
+                alm_penalty_init=1.0,
+                alm_penalty_scale=10.0,
+                basin_hops=0,
+                basin_stepsize=0.01,
+                stage2_iota_mode="soft",
                 stage2_iota_target=0.2,
             )
 
@@ -733,6 +764,44 @@ class Stage2IotaReportingTests(unittest.TestCase):
         self.assertEqual(payload["STAGE2_IOTA_RUNTIME_SECONDS"], 1.5)
         self.assertEqual(payload["STAGE2_IOTA_RUNTIME_CALLS"], 7)
         self.assertIsNotNone(payload["STAGE2_IOTA_PROBE_SECONDS"])
+
+    def test_stage2_iota_hot_loop_payload_nulls_final_values_after_solve_failure(self):
+        module = load_stage2_module()
+
+        args = SimpleNamespace(
+            stage2_iota_weight=1.0,
+            stage2_iota_vol_target=0.1,
+            stage2_iota_constraint_weight=1.0,
+            stage2_iota_num_tf_coils=20,
+            stage2_iota_nphi=91,
+            stage2_iota_ntheta=32,
+            stage2_iota_mpol=8,
+            stage2_iota_ntor=6,
+        )
+        runtime = SimpleNamespace(
+            stats=SimpleNamespace(
+                bootstrap_seconds=0.25,
+                runtime_seconds=1.5,
+                runtime_calls=7,
+            ),
+            initial_state=SimpleNamespace(iota=0.18, penalty=0.03),
+            penalty_threshold=5.0e-3,
+        )
+
+        with patch.object(
+            module,
+            "evaluate_stage2_iota_state",
+            return_value=SimpleNamespace(iota=0.201, penalty=0.0, solve_failed=True),
+        ):
+            payload = module.build_stage2_iota_hot_loop_payload(
+                args=args,
+                stage2_iota_runtime=runtime,
+            )
+
+        self.assertEqual(payload["STAGE2_IOTA_INITIAL"], 0.18)
+        self.assertEqual(payload["STAGE2_IOTA_INITIAL_PENALTY"], 0.03)
+        self.assertIsNone(payload["STAGE2_IOTA_FINAL"])
+        self.assertIsNone(payload["STAGE2_IOTA_FINAL_PENALTY"])
 
     def test_stage2_secondary_artifact_helpers_return_standard_bundle_paths(self):
         module = load_stage2_module()

@@ -772,6 +772,40 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertEqual(excinfo.exception.code, 2)
 
+    def test_stage2_alm_wrapper_rejects_soft_iota_mode_at_parse_time(self):
+        module = load_stage2_alm_wrapper_module()
+
+        with self.assertRaises(SystemExit) as excinfo:
+            module.parse_args(
+                [
+                    "--plasma-surf-filename",
+                    DEFAULT_ALM_WRAPPER_SURFACE,
+                    "--profile",
+                    "standard_80ka",
+                    "--stage2-iota-mode",
+                    "soft",
+                ]
+            )
+
+        self.assertEqual(excinfo.exception.code, 2)
+
+    def test_stage2_alm_wrapper_does_not_expose_soft_iota_weight_flag(self):
+        module = load_stage2_alm_wrapper_module()
+
+        with self.assertRaises(SystemExit) as excinfo:
+            module.parse_args(
+                [
+                    "--plasma-surf-filename",
+                    DEFAULT_ALM_WRAPPER_SURFACE,
+                    "--profile",
+                    "standard_80ka",
+                    "--stage2-iota-weight",
+                    "3.0",
+                ]
+            )
+
+        self.assertEqual(excinfo.exception.code, 2)
+
     def test_stage2_alm_wrapper_pins_alm_and_resolves_cli_paths(self):
         module = load_stage2_alm_wrapper_module()
         args = make_stage2_alm_wrapper_args(

@@ -215,20 +215,62 @@ class _FakeSurfaceNormals:
 
 
 class _FakeSurfaceState:
-    def __init__(self, x):
-        self.x = np.asarray(x, dtype=float)
+    def __init__(self, owner, x):
+        self._owner = owner
+        self._x = np.asarray(x, dtype=float)
+
+    @property
+    def x(self):
+        return self._x.copy()
+
+    @x.setter
+    def x(self, value):
+        self._x = np.asarray(value, dtype=float)
+        self._owner.need_to_run_code = True
 
 
 class _FakeBoozerSurface:
     def __init__(self, x, iota, G):
-        self.surface = _FakeSurfaceState(x)
-        self.res = {"iota": iota, "G": G}
+        self.need_to_run_code = False
+        self.surface = _FakeSurfaceState(self, x)
+        self.res = {"iota": iota, "G": G, "success": True}
         self.calls = []
+        self._queued_results = []
+
+    def queue_result(self, *, surface_x=None, iota=None, G=None, success=True, raises=None):
+        self._queued_results.append(
+            {
+                "surface_x": None if surface_x is None else np.asarray(surface_x, dtype=float),
+                "iota": iota,
+                "G": G,
+                "success": bool(success),
+                "raises": raises,
+            }
+        )
 
     def run_code(self, iota, G):
-        self.calls.append((float(iota), float(G)))
-        self.res["iota"] = iota
+        self.calls.append((float(iota), None if G is None else float(G)))
+        if self._queued_results:
+            queued_result = self._queued_results.pop(0)
+            if queued_result["surface_x"] is not None:
+                self.surface.x = queued_result["surface_x"].copy()
+            self.res["iota"] = (
+                float(iota)
+                if queued_result["iota"] is None
+                else float(queued_result["iota"])
+            )
+            self.res["G"] = G if queued_result["G"] is None else float(queued_result["G"])
+            self.res["success"] = queued_result["success"]
+            self.need_to_run_code = False
+            if queued_result["raises"] is not None:
+                raise queued_result["raises"]
+            return {"success": queued_result["success"]}
+
+        self.res["iota"] = float(iota)
         self.res["G"] = G
+        self.res["success"] = True
+        self.need_to_run_code = False
+        return {"success": True}
 
 
 def _surface_entry(x, iota, G):
@@ -246,6 +288,67 @@ class _ModuleTestCase(unittest.TestCase):
 class Stage2ObjectiveModuleTests(_ModuleTestCase):
     MODULE_PATH = STAGE2_OBJECTIVES_PATH
     MODULE_PREFIX = "banana_stage2_objectives"
+
+    def _build_fake_stage2_iota_runtime(self, fake_boozer_surface):
+        class _FakeIotaTerm:
+            def __init__(self, boozer_surface):
+                self.boozer_surface = boozer_surface
+
+            def J(self):
+                if getattr(self.boozer_surface, "need_to_run_code", False):
+                    res = self.boozer_surface.res
+                    self.boozer_surface.run_code(res["iota"], G=res["G"])
+                    self.boozer_surface.need_to_run_code = False
+                return float(self.boozer_surface.res["iota"])
+
+        class _FakeQuadraticPenalty:
+            def __init__(self, term, target):
+                self.term = term
+                self.target = float(target)
+
+            def J(self):
+                delta = self.term.J() - self.target
+                return 0.5 * delta * delta
+
+            def dJ(self):
+                return np.array([0.2, -0.1], dtype=float)
+
+        return self.module.build_stage2_iota_runtime(
+            equilibrium_file="demo.nc",
+            bs=SimpleNamespace(),
+            tf_coils=[object(), object()],
+            major_radius=0.915,
+            toroidal_flux=0.24,
+            nphi=91,
+            ntheta=32,
+            mpol=8,
+            ntor=6,
+            vol_target=0.12,
+            iota_target=0.2,
+            iota_tolerance=5.0e-3,
+            constraint_weight=None,
+            num_tf_coils=2,
+            mode="soft",
+            weight=3.0,
+            build_surface_configs_fn=lambda *_args, **_kwargs: [
+                {
+                    "initial_surface": SimpleNamespace(nfp=5),
+                    "target_volume": 0.12,
+                }
+            ],
+            attempt_initialize_boozer_surface_fn=lambda *_args, **_kwargs: SimpleNamespace(
+                success=True,
+                boozer_surface=fake_boozer_surface,
+                solve_success=True,
+                self_intersecting=False,
+                solved_iota=0.21,
+                error_type=None,
+                error_message=None,
+            ),
+            compute_tf_G0_fn=lambda _tf_coils: 0.35,
+            iotas_cls=_FakeIotaTerm,
+            quadratic_penalty_cls=_FakeQuadraticPenalty,
+        )
 
     def test_make_stage2_fun_returns_value_grad_and_logs_metrics(self):
         class _JF:
@@ -279,6 +382,170 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertIn("Len=1.8m", log_line)
         self.assertIn("C-C-Sep=0.06m", log_line)
         self.assertIn("Curvature=39.50", log_line)
+
+    def test_make_stage2_fun_soft_mode_adds_guarded_iota_penalty_and_gradient(self):
+        class _JF:
+            def __init__(self):
+                self.x = None
+
+            def J(self):
+                return 1.23
+
+            def dJ(self):
+                return np.array([1.0, -2.0])
+
+        stage2_iota_runtime = SimpleNamespace(
+            mode="soft",
+            weight=3.0,
+            penalty_objective=_FakeAlgebraicObjective(0.0, [0.2, -0.1]),
+        )
+        soft_state = self.module.Stage2IotaState(
+            iota=0.24,
+            penalty=0.4,
+            abs_error=0.04,
+            feasible=True,
+            solve_failed=False,
+        )
+        fun = self.module.make_stage2_fun(
+            _JF(),
+            _FakeBiotSavart((2, 3)),
+            _FakeSurfaceNormals((1, 2, 3)),
+            _FakeScalarObjective(0.12),
+            _FakeScalarObjective(1.75),
+            SimpleNamespace(shortest_distance=lambda: 0.055),
+            _FakeScalarObjective(39.5),
+            stage2_iota_runtime=stage2_iota_runtime,
+        )
+
+        with mock.patch.object(
+            self.module,
+            "evaluate_stage2_iota_state",
+            return_value=soft_state,
+        ), mock.patch("builtins.print"):
+            value, grad = fun(np.array([0.2, -0.1]))
+
+        self.assertAlmostEqual(value, 2.43)
+        np.testing.assert_allclose(grad, [1.6, -2.3])
+
+    def test_make_stage2_fun_soft_mode_rejects_failed_iota_solve(self):
+        class _JF:
+            def __init__(self):
+                self.x = None
+
+            def J(self):
+                return 1.23
+
+            def dJ(self):
+                return np.array([1.0, -2.0])
+
+        stage2_iota_runtime = SimpleNamespace(
+            mode="soft",
+            weight=3.0,
+            penalty_objective=SimpleNamespace(
+                dJ=mock.Mock(side_effect=AssertionError("soft penalty gradient should not run"))
+            ),
+        )
+        soft_state = self.module.Stage2IotaState(
+            iota=0.24,
+            penalty=0.4,
+            abs_error=0.04,
+            feasible=True,
+            solve_failed=False,
+        )
+        failed_state = self.module.Stage2IotaState(
+            iota=0.24,
+            penalty=0.4,
+            abs_error=0.04,
+            feasible=False,
+            solve_failed=True,
+        )
+        jf = _JF()
+        fun = self.module.make_stage2_fun(
+            jf,
+            _FakeBiotSavart((2, 3)),
+            _FakeSurfaceNormals((1, 2, 3)),
+            _FakeScalarObjective(0.12),
+            _FakeScalarObjective(1.75),
+            SimpleNamespace(shortest_distance=lambda: 0.055),
+            _FakeScalarObjective(39.5),
+            stage2_iota_runtime=stage2_iota_runtime,
+        )
+
+        with mock.patch.object(
+            self.module,
+            "evaluate_stage2_iota_state",
+            side_effect=[soft_state, failed_state],
+        ), mock.patch("builtins.print") as print_mock:
+            accepted_value, accepted_grad = fun(np.array([0.2, -0.1]))
+            fun.mark_accepted(np.array([0.2, -0.1]))
+            value, grad = fun(np.array([0.3, -0.2]))
+
+        self.assertAlmostEqual(accepted_value, 2.43)
+        np.testing.assert_allclose(accepted_grad, [1.6, -2.3])
+        self.assertAlmostEqual(value, 4.86)
+        np.testing.assert_allclose(grad, [1.6, -2.3])
+        np.testing.assert_allclose(jf.x, [0.2, -0.1])
+        self.assertIn("IotaSolveFailed=1", print_mock.call_args[0][0])
+
+    def test_make_stage2_fun_soft_mode_reset_clears_previous_reject_cache(self):
+        class _JF:
+            def __init__(self):
+                self.x = None
+
+            def J(self):
+                return 1.23
+
+            def dJ(self):
+                return np.array([1.0, -2.0])
+
+        stage2_iota_runtime = SimpleNamespace(
+            mode="soft",
+            weight=3.0,
+            penalty_objective=SimpleNamespace(
+                dJ=mock.Mock(side_effect=AssertionError("soft penalty gradient should not run"))
+            ),
+        )
+        soft_state = self.module.Stage2IotaState(
+            iota=0.24,
+            penalty=0.4,
+            abs_error=0.04,
+            feasible=True,
+            solve_failed=False,
+        )
+        failed_state = self.module.Stage2IotaState(
+            iota=0.24,
+            penalty=0.4,
+            abs_error=0.04,
+            feasible=False,
+            solve_failed=True,
+        )
+        jf = _JF()
+        fun = self.module.make_stage2_fun(
+            jf,
+            _FakeBiotSavart((2, 3)),
+            _FakeSurfaceNormals((1, 2, 3)),
+            _FakeScalarObjective(0.12),
+            _FakeScalarObjective(1.75),
+            SimpleNamespace(shortest_distance=lambda: 0.055),
+            _FakeScalarObjective(39.5),
+            stage2_iota_runtime=stage2_iota_runtime,
+        )
+
+        with mock.patch.object(
+            self.module,
+            "evaluate_stage2_iota_state",
+            side_effect=[soft_state, failed_state],
+        ), mock.patch("builtins.print"):
+            accepted_value, accepted_grad = fun(np.array([0.2, -0.1]))
+            fun.mark_accepted(np.array([0.2, -0.1]))
+            fun.reset_soft_history()
+            value, grad = fun(np.array([0.3, -0.2]))
+
+        self.assertAlmostEqual(accepted_value, 2.43)
+        np.testing.assert_allclose(accepted_grad, [1.6, -2.3])
+        self.assertAlmostEqual(value, 2.46)
+        np.testing.assert_allclose(grad, [1.0, -2.0])
+        np.testing.assert_allclose(jf.x, [0.3, -0.2])
 
     def test_evaluate_stage2_alm_problem_exposes_constraint_payload(self):
         base_objective = _FakeBaseObjective(3.5, [1.2, -0.5])
@@ -638,80 +905,224 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             [0.02, 0.08, 1e-3, 1e-3, 0.5],
         )
 
+    def test_evaluate_stage2_alm_problem_rejects_failed_iota_solves_without_penalty_gradient(self):
+        base_objective = _FakeBaseObjective(3.5, [1.2, -0.5])
+        new_surf = _FakeSurfaceNormals((2, 2, 3))
+        new_bs = _FakeBiotSavart((4, 3))
+        Jf = _FakeScalarObjective(0.25)
+        Jls = _FakeLengthObjective(2.2, [0.3, 0.4])
+        Jccdist = _FakeCurveDistance(0.05, 0.04)
+        Jc = _FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5)
+        banana_current = _FakeCurrentObjective(9500.0, [0.7, -0.4])
+        stage2_iota_runtime = SimpleNamespace(
+            mode="alm",
+            target=0.2,
+            tolerance=0.05,
+            penalty_threshold=0.5,
+            iota_term=SimpleNamespace(J=lambda: 0.18),
+            penalty_objective=SimpleNamespace(
+                dJ=mock.Mock(side_effect=AssertionError("penalty gradient should not run"))
+            ),
+        )
+
+        def fake_augmented(base_value, base_grad, signed_values, grads, multipliers, penalty):
+            self.assertAlmostEqual(base_value, 3.5)
+            np.testing.assert_allclose(base_grad, [1.2, -0.5])
+            np.testing.assert_allclose(
+                signed_values,
+                [-0.008, 0.75, 0.2, -6500.0, 1.0],
+            )
+            np.testing.assert_allclose(grads[4], [0.0, 0.0])
+            np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3, 0.4, 0.5])
+            self.assertAlmostEqual(penalty, 12.0)
+            return {
+                "total": 9.5,
+                "grad": np.array([7.0, -3.0]),
+                "stationarity_norm": 0.5,
+            }
+
+        failed_state = self.module.Stage2IotaState(
+            iota=0.18,
+            penalty=0.01,
+            abs_error=0.02,
+            feasible=False,
+            solve_failed=True,
+        )
+        with mock.patch.object(
+            self.module,
+            "evaluate_stage2_iota_state",
+            return_value=failed_state,
+        ), mock.patch.object(
+            self.module,
+            "augmented_inequality_objective",
+            side_effect=fake_augmented,
+        ), mock.patch("builtins.print"):
+            result = self.module.evaluate_stage2_alm_problem(
+                dofs=np.array([0.25, -0.4]),
+                base_objective=base_objective,
+                new_bs=new_bs,
+                new_surf=new_surf,
+                Jf=Jf,
+                Jls=Jls,
+                length_target=2.0,
+                Jccdist=Jccdist,
+                Jc=Jc,
+                banana_current=banana_current,
+                banana_current_max_A=16000.0,
+                distance_smoothing=0.005,
+                curvature_smoothing=0.02,
+                multipliers=np.array([0.1, 0.2, 0.3, 0.4, 0.5]),
+                penalty=12.0,
+                stage2_constraint_activity_tolerances=lambda ds, cs: [
+                    1e-3,
+                    ds * 4.0,
+                    cs * 4.0,
+                    1e-3,
+                    0.5,
+                ],
+                smooth_min_distance_signed_constraint=lambda *_args: (-0.008, np.array([0.6, 0.2])),
+                smooth_max_curvature_signed_constraint=lambda *_args: (0.75, np.array([0.9, -0.1])),
+                stage2_iota_runtime=stage2_iota_runtime,
+            )
+
+        np.testing.assert_allclose(
+            result["constraint_grads"][4],
+            [0.0, 0.0],
+        )
+        np.testing.assert_allclose(
+            result["dual_update_values"],
+            [-0.008, 0.75, 0.2, -6500.0, 1.0],
+        )
+        np.testing.assert_allclose(
+            result["hard_violation_values"],
+            [0.01, 1.0, 0.2, 0.0, 1.0],
+        )
+
     def test_build_stage2_iota_runtime_instruments_boozer_hot_loop(self):
         fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
-        fake_boozer_surface.need_to_run_code = False
-
-        class _FakeIotaTerm:
-            def __init__(self, boozer_surface):
-                self.boozer_surface = boozer_surface
-
-            def J(self):
-                if getattr(self.boozer_surface, "need_to_run_code", False):
-                    res = self.boozer_surface.res
-                    self.boozer_surface.run_code(res["iota"], G=res["G"])
-                    self.boozer_surface.need_to_run_code = False
-                return float(self.boozer_surface.res["iota"])
-
-        class _FakeQuadraticPenalty:
-            def __init__(self, term, target):
-                self.term = term
-                self.target = float(target)
-
-            def J(self):
-                delta = self.term.J() - self.target
-                return 0.5 * delta * delta
-
-            def dJ(self):
-                return np.array([0.2, -0.1], dtype=float)
-
-        runtime = self.module.build_stage2_iota_runtime(
-            equilibrium_file="demo.nc",
-            bs=SimpleNamespace(),
-            tf_coils=[object(), object()],
-            major_radius=0.915,
-            toroidal_flux=0.24,
-            nphi=91,
-            ntheta=32,
-            mpol=8,
-            ntor=6,
-            vol_target=0.12,
-            iota_target=0.2,
-            iota_tolerance=5.0e-3,
-            constraint_weight=None,
-            num_tf_coils=2,
-            mode="soft",
-            weight=3.0,
-            build_surface_configs_fn=lambda *_args, **_kwargs: [
-                {
-                    "initial_surface": SimpleNamespace(nfp=5),
-                    "target_volume": 0.12,
-                }
-            ],
-            attempt_initialize_boozer_surface_fn=lambda *_args, **_kwargs: SimpleNamespace(
-                success=True,
-                boozer_surface=fake_boozer_surface,
-                solve_success=True,
-                self_intersecting=False,
-                solved_iota=0.21,
-                error_type=None,
-                error_message=None,
-            ),
-            compute_tf_G0_fn=lambda _tf_coils: 0.35,
-            iotas_cls=_FakeIotaTerm,
-            quadratic_penalty_cls=_FakeQuadraticPenalty,
-        )
+        runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
 
         self.assertAlmostEqual(runtime.initial_state.iota, 0.21)
         self.assertAlmostEqual(runtime.initial_state.penalty, 5.0e-5)
+        self.assertFalse(runtime.initial_state.solve_failed)
         self.assertEqual(runtime.stats.runtime_calls, 0)
+        self.assertIsNotNone(runtime.guarded_boozer_evaluator)
 
         fake_boozer_surface.need_to_run_code = True
         state = self.module.evaluate_stage2_iota_state(runtime)
 
         self.assertAlmostEqual(state.iota, 0.21)
+        self.assertFalse(state.solve_failed)
         self.assertEqual(runtime.stats.runtime_calls, 1)
         self.assertGreaterEqual(runtime.stats.runtime_seconds, 0.0)
+
+    def test_build_stage2_iota_runtime_restores_last_successful_state_on_failed_solve(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
+        runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
+        fake_boozer_surface.queue_result(
+            surface_x=[9.0, -4.0],
+            iota=0.41,
+            G=0.72,
+            success=False,
+        )
+        fake_boozer_surface.need_to_run_code = True
+
+        state = self.module.evaluate_stage2_iota_state(runtime)
+
+        self.assertAlmostEqual(state.iota, 0.21)
+        self.assertAlmostEqual(state.penalty, 5.0e-5)
+        self.assertFalse(state.feasible)
+        self.assertTrue(state.solve_failed)
+        self.assertEqual(runtime.stats.runtime_calls, 1)
+        self.assertTrue(runtime.guarded_boozer_evaluator.last_solve_failed)
+        np.testing.assert_allclose(fake_boozer_surface.surface.x, [0.0, 0.0])
+        self.assertAlmostEqual(fake_boozer_surface.res["iota"], 0.21)
+        self.assertAlmostEqual(fake_boozer_surface.res["G"], 0.35)
+        self.assertEqual(fake_boozer_surface.calls, [(0.21, 0.35)])
+
+        second_state = self.module.evaluate_stage2_iota_state(runtime)
+
+        self.assertFalse(second_state.feasible)
+        self.assertTrue(second_state.solve_failed)
+        self.assertEqual(runtime.stats.runtime_calls, 1)
+
+    def test_build_stage2_iota_runtime_restores_last_successful_state_on_boozer_exception(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
+        runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
+        fake_boozer_surface.queue_result(
+            surface_x=[9.0, -4.0],
+            iota=0.41,
+            G=0.72,
+            success=False,
+            raises=RuntimeError("boom"),
+        )
+        fake_boozer_surface.need_to_run_code = True
+
+        state = self.module.evaluate_stage2_iota_state(runtime)
+
+        self.assertAlmostEqual(state.iota, 0.21)
+        self.assertAlmostEqual(state.penalty, 5.0e-5)
+        self.assertFalse(state.feasible)
+        self.assertTrue(state.solve_failed)
+        self.assertEqual(runtime.stats.runtime_calls, 1)
+        np.testing.assert_allclose(fake_boozer_surface.surface.x, [0.0, 0.0])
+        self.assertAlmostEqual(fake_boozer_surface.res["iota"], 0.21)
+        self.assertAlmostEqual(fake_boozer_surface.res["G"], 0.35)
+
+        second_state = self.module.evaluate_stage2_iota_state(runtime)
+
+        self.assertFalse(second_state.feasible)
+        self.assertTrue(second_state.solve_failed)
+        self.assertEqual(runtime.stats.runtime_calls, 1)
+
+    def test_build_stage2_iota_runtime_keeps_last_successful_snapshot_across_failures(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
+        runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
+        fake_boozer_surface.queue_result(
+            surface_x=[1.5, -2.5],
+            iota=0.24,
+            G=0.38,
+            success=True,
+        )
+        fake_boozer_surface.need_to_run_code = True
+
+        success_state = self.module.evaluate_stage2_iota_state(runtime)
+
+        self.assertAlmostEqual(success_state.iota, 0.24)
+        self.assertFalse(success_state.solve_failed)
+        np.testing.assert_allclose(fake_boozer_surface.surface.x, [1.5, -2.5])
+        self.assertAlmostEqual(fake_boozer_surface.res["iota"], 0.24)
+        self.assertAlmostEqual(fake_boozer_surface.res["G"], 0.38)
+
+        fake_boozer_surface.queue_result(
+            surface_x=[7.0, 8.0],
+            iota=0.44,
+            G=0.91,
+            success=False,
+        )
+        fake_boozer_surface.need_to_run_code = True
+
+        failure_state = self.module.evaluate_stage2_iota_state(runtime)
+
+        self.assertAlmostEqual(failure_state.iota, 0.24)
+        self.assertFalse(failure_state.feasible)
+        self.assertTrue(failure_state.solve_failed)
+        self.assertEqual(runtime.stats.runtime_calls, 2)
+        np.testing.assert_allclose(fake_boozer_surface.surface.x, [1.5, -2.5])
+        self.assertAlmostEqual(fake_boozer_surface.res["iota"], 0.24)
+        self.assertAlmostEqual(fake_boozer_surface.res["G"], 0.38)
+        np.testing.assert_allclose(
+            runtime.guarded_boozer_evaluator.last_successful_state.surface_dofs,
+            [1.5, -2.5],
+        )
+        self.assertAlmostEqual(
+            runtime.guarded_boozer_evaluator.last_successful_state.iota,
+            0.24,
+        )
+        self.assertAlmostEqual(
+            runtime.guarded_boozer_evaluator.last_successful_state.G,
+            0.38,
+        )
 
     def test_evaluate_banana_current_upper_bound_accepts_scaled_current_vjp(self):
         leaf_current = Current(17000.0)
@@ -813,9 +1224,18 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             tf_current_A=8.0e4,
             tf_current_sum_abs_A=1.6e5,
             num_tf_coils=2,
+            num_banana_coils=4,
+            num_proxy_coils=0,
+            num_vf_coils=0,
             initial_banana_current_A=1.2e4,
             banana_current_A=9.5e3,
             banana_to_tf_current_ratio=0.11875,
+            finite_current_mode="boozer_surrogate",
+            boozer_current_convention="mu0",
+            proxy_plasma_current_A=0.0,
+            vf_current_A=0.0,
+            vf_template_path=None,
+            total_coils=6,
             cc_threshold=0.05,
             cc_weight=100.0,
             curvature_weight=1.0e-4,

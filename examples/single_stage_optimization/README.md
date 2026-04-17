@@ -201,6 +201,7 @@ Useful notes:
 - `--dry-run` prints and records the resolved config and exact Stage 2 command without launching it
 - dry runs write `DRY_RUN_ONLY.txt` next to the summary so a summary-only directory is not mistaken for a real solver artifact root
 - `--stage2-iota-mode report --stage2-iota-target ...` enables a reporting-only Boozer/iota probe for the generated Stage 2 artifact; this records `BOOZER_BOOTABLE`, `IOTA_FEASIBLE`, `STAGE2_ROOT_FIX_ENABLED`, and `STAGE2_IOTA_*` metadata in `results.json` without changing the Stage 2 optimization objective
+- because `run_stage2_alm.py` always launches the Stage 2 solver with `--constraint-method=alm`, its supported iota modes are `off`, `report`, and `alm`; the penalty-path `soft` mode remains available only on the direct `STAGE_2/banana_coil_solver.py` entrypoint
 
 ### Unified Stage-2-To-Single-Stage Handoff
 

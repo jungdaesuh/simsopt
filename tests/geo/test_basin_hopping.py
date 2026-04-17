@@ -115,6 +115,7 @@ class BasinHoppingHelperTests(unittest.TestCase):
     def test_run_basin_hopping_passes_rng_accept_test_and_callback(self):
         module = load_basin_hopping_module()
         captured = {}
+        minima = []
 
         def fake_basinhopping(fun, dofs, **kwargs):
             del fun
@@ -145,6 +146,9 @@ class BasinHoppingHelperTests(unittest.TestCase):
                 rng_seed=17,
                 minimizer_kwargs={"method": "L-BFGS-B", "jac": True},
                 disp=False,
+                local_minimum_callback=lambda x, f, accept: minima.append(
+                    (x.tolist(), f, accept)
+                ),
             )
 
         self.assertEqual(result.nit, 2)
@@ -158,6 +162,14 @@ class BasinHoppingHelperTests(unittest.TestCase):
             {"method": "L-BFGS-B", "jac": True},
         )
         self.assertFalse(captured["disp"])
+        self.assertEqual(
+            minima,
+            [
+                ([0.0, 0.0], 3.0, True),
+                ([1.0, 1.0], 2.0, True),
+                ([2.0, 2.0], 5.0, False),
+            ],
+        )
         for key, expected in EXPECTED_BASIN_TELEMETRY.items():
             self.assertEqual(telemetry[key], expected)
 

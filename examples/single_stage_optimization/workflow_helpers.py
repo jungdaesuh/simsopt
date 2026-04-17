@@ -168,6 +168,10 @@ def validate_stage2_iota_args(
         )
     if stage2_iota_mode == "soft" and stage2_iota_weight <= 0.0:
         raise ValueError("--stage2-iota-weight must be positive in soft mode.")
+    if stage2_iota_mode == "soft" and constraint_method == "alm":
+        raise ValueError(
+            "--stage2-iota-mode=soft is incompatible with --constraint-method=alm."
+        )
     if stage2_iota_mode == "alm" and constraint_method != "alm":
         raise ValueError(
             "--stage2-iota-mode=alm requires --constraint-method=alm."

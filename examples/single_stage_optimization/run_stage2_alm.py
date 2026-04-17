@@ -219,12 +219,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--stage2-iota-mode",
-        choices=["off", "report", "soft", "alm"],
+        choices=["off", "report", "alm"],
         default="off",
         help=(
             "Optional Stage 2 iota mode. 'report' runs only the final verification "
-            "probe, 'soft' adds a weighted Jiota hot-loop term, and 'alm' adds a "
-            "hard Stage 2 ALM iota_penalty constraint."
+            "probe, and 'alm' adds a hard Stage 2 ALM iota_penalty constraint. "
+            "This wrapper pins --constraint-method=alm, so soft mode is not exposed here."
         ),
     )
     parser.add_argument(
@@ -238,12 +238,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=5.0e-3,
         help="Absolute iota tolerance used when --stage2-iota-mode is enabled.",
-    )
-    parser.add_argument(
-        "--stage2-iota-weight",
-        type=float,
-        default=1.0,
-        help="Soft-mode Jiota weight used when --stage2-iota-mode=soft.",
     )
     parser.add_argument(
         "--stage2-iota-vol-target",
@@ -383,7 +377,6 @@ def build_stage2_alm_config(
     stage2_iota_mode = getattr(args, "stage2_iota_mode", "off")
     stage2_iota_target = getattr(args, "stage2_iota_target", None)
     stage2_iota_tolerance = getattr(args, "stage2_iota_tolerance", 5.0e-3)
-    stage2_iota_weight = getattr(args, "stage2_iota_weight", 1.0)
     stage2_iota_vol_target = getattr(args, "stage2_iota_vol_target", 0.10)
     stage2_iota_constraint_weight = getattr(
         args,
@@ -445,7 +438,7 @@ def build_stage2_alm_config(
         stage2_iota_mode=stage2_iota_mode,
         stage2_iota_target=stage2_iota_target,
         stage2_iota_tolerance=stage2_iota_tolerance,
-        stage2_iota_weight=stage2_iota_weight,
+        stage2_iota_weight=1.0,
         stage2_iota_vol_target=stage2_iota_vol_target,
         stage2_iota_constraint_weight=stage2_iota_constraint_weight,
         stage2_iota_num_tf_coils=stage2_iota_num_tf_coils,
@@ -626,7 +619,7 @@ def main(argv: list[str] | None = None) -> int:
         stage2_iota_ntheta=args.stage2_iota_ntheta,
         stage2_iota_mpol=args.stage2_iota_mpol,
         stage2_iota_ntor=args.stage2_iota_ntor,
-        stage2_iota_weight=args.stage2_iota_weight,
+        stage2_iota_weight=1.0,
         constraint_method="alm",
     )
     resolved_spec, resolved_spec_source = resolve_stage2_spec_payload(args)

@@ -107,6 +107,11 @@ class Stage2ArtifactConfig:
             raise ValueError(
                 "Stage2ArtifactConfig.stage2_iota_weight must be positive in soft mode."
             )
+        if self.stage2_iota_mode == "soft" and self.constraint_method == "alm":
+            raise ValueError(
+                "Stage2ArtifactConfig.stage2_iota_mode='soft' is incompatible with "
+                "constraint_method='alm'."
+            )
         if self.stage2_iota_mode == "alm" and self.constraint_method != "alm":
             raise ValueError(
                 "Stage2ArtifactConfig.stage2_iota_mode='alm' requires "

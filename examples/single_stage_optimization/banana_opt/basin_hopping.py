@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import math
 from dataclasses import dataclass
 
@@ -124,10 +125,22 @@ def run_basin_hopping(
     minimizer_kwargs: dict,
     normalized_step_rms_limit: float = DEFAULT_NORMALIZED_STEP_RMS_LIMIT,
     disp: bool = True,
+    local_minimum_callback: Callable[[np.ndarray, float, bool], bool | None] | None = None,
 ):
     monitor = BasinHoppingMonitor(
         normalized_step_rms_limit=normalized_step_rms_limit,
     )
+    basin_callback = monitor.callback
+    if local_minimum_callback is not None:
+        def basin_callback(x, f, accept) -> bool:
+            should_stop = bool(monitor.callback(x, f, accept))
+            callback_result = local_minimum_callback(
+                np.asarray(x, dtype=float).copy(),
+                float(f),
+                bool(accept),
+            )
+            return should_stop or bool(callback_result)
+
     result = basinhopping(
         fun,
         dofs,
@@ -138,7 +151,7 @@ def run_basin_hopping(
         niter_success=basin_niter_success,
         rng=np.random.default_rng(rng_seed),
         accept_test=monitor.accept_test,
-        callback=monitor.callback,
+        callback=basin_callback,
         disp=disp,
     )
     return result, monitor.as_dict()

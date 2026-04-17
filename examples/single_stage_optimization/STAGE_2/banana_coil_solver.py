@@ -802,6 +802,8 @@ def build_stage2_iota_hot_loop_payload(
         return payload
 
     final_state = evaluate_stage2_iota_state(stage2_iota_runtime)
+    final_iota = None if final_state.solve_failed else final_state.iota
+    final_penalty = None if final_state.solve_failed else final_state.penalty
     payload.update(
         {
             "STAGE2_IOTA_BOOTSTRAP_SECONDS": stage2_iota_runtime.stats.bootstrap_seconds,
@@ -809,8 +811,8 @@ def build_stage2_iota_hot_loop_payload(
             "STAGE2_IOTA_RUNTIME_CALLS": stage2_iota_runtime.stats.runtime_calls,
             "STAGE2_IOTA_INITIAL": stage2_iota_runtime.initial_state.iota,
             "STAGE2_IOTA_INITIAL_PENALTY": stage2_iota_runtime.initial_state.penalty,
-            "STAGE2_IOTA_FINAL": final_state.iota,
-            "STAGE2_IOTA_FINAL_PENALTY": final_state.penalty,
+            "STAGE2_IOTA_FINAL": final_iota,
+            "STAGE2_IOTA_FINAL_PENALTY": final_penalty,
             "STAGE2_IOTA_PENALTY_THRESHOLD": stage2_iota_runtime.penalty_threshold,
         }
     )
@@ -1458,18 +1460,12 @@ def main(parsed_args=None):
     # we'll penalize the coil length, coil-coil distance, and curvature while minimizing the normal field
     SQUARED_FLUX_WEIGHT = args.squared_flux_weight
     CONSTRAINT_METHOD = args.constraint_method
-    soft_iota_objective = (
-        args.stage2_iota_weight * stage2_iota_runtime.penalty_objective
-        if stage2_iota_runtime is not None and args.stage2_iota_mode == "soft"
-        else 0
-    )
     JF = SQUARED_FLUX_WEIGHT * Jf \
         + LENGTH_WEIGHT * QuadraticPenalty(Jls, LENGTH_TARGET, "max") \
         + CC_WEIGHT * Jccdist \
         + CC_WEIGHT * Jcsdist \
-        + CURVATURE_WEIGHT * Jc \
-        + soft_iota_objective
-    BASE_OBJECTIVE = SQUARED_FLUX_WEIGHT * Jf + soft_iota_objective
+        + CURVATURE_WEIGHT * Jc
+    BASE_OBJECTIVE = SQUARED_FLUX_WEIGHT * Jf
     if args.alm_taylor_test and CONSTRAINT_METHOD != "alm":
         raise ValueError("--alm-taylor-test requires --constraint-method=alm")
 
@@ -1600,6 +1596,8 @@ def main(parsed_args=None):
         Jc,
         stage2_iota_runtime=stage2_iota_runtime,
     )
+    stage2_soft_accept_callback = getattr(fun, "mark_accepted", None)
+    stage2_soft_reset_callback = getattr(fun, "reset_soft_history", None)
     alm_result = None
     if CONSTRAINT_METHOD == "alm":
         alm_settings = build_stage2_alm_settings(args)
@@ -1775,6 +1773,8 @@ def main(parsed_args=None):
             'bounds': lbfgsb_bounds,
             'options': {'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol},
         }
+        if stage2_soft_accept_callback is not None:
+            minimizer_kwargs['callback'] = stage2_soft_accept_callback
         basin_niter_success = args.basin_niter_success if args.basin_niter_success > 0 else None
         print(
             f"Basin-hopping with {args.basin_hops} hops, "
@@ -1792,6 +1792,7 @@ def main(parsed_args=None):
             basin_niter_success=basin_niter_success,
             rng_seed=rng_seed,
             minimizer_kwargs=minimizer_kwargs,
+            local_minimum_callback=stage2_soft_reset_callback,
         )
         basin_hop_count = res.nit if hasattr(res, 'nit') else None
         basin_minimization_failures = res.minimization_failures if hasattr(res, 'minimization_failures') else None
@@ -1829,6 +1830,7 @@ def main(parsed_args=None):
             dofs,
             jac=True,
             method='L-BFGS-B',
+            callback=stage2_soft_accept_callback,
             bounds=lbfgsb_bounds,
             options={'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol},
         )
