@@ -30,10 +30,33 @@ def _clear_simsopt_modules() -> None:
             del sys.modules[module_name]
 
 
-def configure_local_simsopt_imports(script_file: str) -> tuple[str, str, str]:
-    script_dir = os.path.dirname(os.path.abspath(script_file))
-    example_root = os.path.abspath(os.path.join(script_dir, ".."))
-    simsopt_root = os.path.abspath(os.path.join(example_root, "..", ".."))
+def configure_local_simsopt_imports(
+    script_file: str | None = None,
+    *,
+    simsopt_root: str | None = None,
+) -> tuple[str, str, str]:
+    """Prepend the local simsopt fork's src/ and examples dir to sys.path.
+
+    Pass either:
+    - ``script_file`` (a file inside examples/single_stage_optimization/...)
+      to derive simsopt_root from the script's location, or
+    - ``simsopt_root`` (absolute path to the simsopt-surrogate checkout) for
+      callers that live outside the examples tree (e.g. the sibling
+      autoresearch repo).
+    """
+    if simsopt_root is None:
+        if script_file is None:
+            raise TypeError(
+                "configure_local_simsopt_imports requires script_file or simsopt_root"
+            )
+        script_dir = os.path.dirname(os.path.abspath(script_file))
+        example_root = os.path.abspath(os.path.join(script_dir, ".."))
+        simsopt_root = os.path.abspath(os.path.join(example_root, "..", ".."))
+    else:
+        simsopt_root = os.path.abspath(simsopt_root)
+        example_root = os.path.join(
+            simsopt_root, "examples", "single_stage_optimization"
+        )
     src_root = os.path.join(simsopt_root, "src")
     local_simsopt_init = os.path.join(src_root, "simsopt", "__init__.py")
 
