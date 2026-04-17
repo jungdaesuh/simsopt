@@ -289,6 +289,12 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
     MODULE_PATH = STAGE2_OBJECTIVES_PATH
     MODULE_PREFIX = "banana_stage2_objectives"
 
+    def _assert_restored_fake_boozer_state(self, fake_boozer_surface):
+        np.testing.assert_allclose(fake_boozer_surface.surface.x, [0.0, 0.0])
+        self.assertAlmostEqual(fake_boozer_surface.res["iota"], 0.21)
+        self.assertAlmostEqual(fake_boozer_surface.res["G"], 0.35)
+        self.assertTrue(fake_boozer_surface.res["success"])
+
     def _build_fake_stage2_iota_runtime(self, fake_boozer_surface):
         class _FakeIotaTerm:
             def __init__(self, boozer_surface):
@@ -1095,9 +1101,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertTrue(state.solve_failed)
         self.assertEqual(runtime.stats.runtime_calls, 1)
         self.assertTrue(runtime.guarded_boozer_evaluator.last_solve_failed)
-        np.testing.assert_allclose(fake_boozer_surface.surface.x, [0.0, 0.0])
-        self.assertAlmostEqual(fake_boozer_surface.res["iota"], 0.21)
-        self.assertAlmostEqual(fake_boozer_surface.res["G"], 0.35)
+        self._assert_restored_fake_boozer_state(fake_boozer_surface)
         self.assertEqual(fake_boozer_surface.calls, [(0.21, 0.35)])
 
         second_state = self.module.evaluate_stage2_iota_state(runtime)
@@ -1125,9 +1129,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertFalse(state.feasible)
         self.assertTrue(state.solve_failed)
         self.assertEqual(runtime.stats.runtime_calls, 1)
-        np.testing.assert_allclose(fake_boozer_surface.surface.x, [0.0, 0.0])
-        self.assertAlmostEqual(fake_boozer_surface.res["iota"], 0.21)
-        self.assertAlmostEqual(fake_boozer_surface.res["G"], 0.35)
+        self._assert_restored_fake_boozer_state(fake_boozer_surface)
 
         second_state = self.module.evaluate_stage2_iota_state(runtime)
 

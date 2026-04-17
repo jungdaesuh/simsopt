@@ -25,8 +25,11 @@ from banana_opt.hardware_constraint_schema import (
 from banana_opt.single_stage_geometry import build_surface_configs
 from banana_opt.smoothing import smoothmax_selected, smoothmin_selected
 from banana_opt.stage2_single_stage_handoff import (
+    BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS,
     attempt_initialize_boozer_surface,
     compute_tf_G0,
+    run_boozer_with_failure_policy,
+    snapshot_boozer_solve_state,
 )
 from simsopt.geo.surfaceobjectives import Iotas
 from simsopt.objectives import QuadraticPenalty
@@ -64,66 +67,44 @@ class Stage2IotaEvaluation:
     penalty_grad: np.ndarray | None = None
 
 
-@dataclass(frozen=True)
-class Stage2BoozerSolveSnapshot:
-    surface_dofs: np.ndarray
-    iota: float
-    G: float | None
-
-
-def _snapshot_stage2_boozer_state(boozer_surface) -> Stage2BoozerSolveSnapshot:
-    return Stage2BoozerSolveSnapshot(
-        surface_dofs=np.asarray(boozer_surface.surface.x, dtype=float).copy(),
-        iota=float(boozer_surface.res["iota"]),
-        G=(
-            None
-            if boozer_surface.res.get("G") is None
-            else float(boozer_surface.res["G"])
-        ),
-    )
-
-
-def _restore_stage2_boozer_state(
-    boozer_surface,
-    snapshot: Stage2BoozerSolveSnapshot,
-) -> None:
-    boozer_surface.surface.x = snapshot.surface_dofs.copy()
-    boozer_surface.res["iota"] = snapshot.iota
-    boozer_surface.res["G"] = snapshot.G
-    if hasattr(boozer_surface, "need_to_run_code"):
-        boozer_surface.need_to_run_code = False
-
-
 class Stage2GuardedBoozerEvaluator:
     def __init__(self, boozer_surface):
         self.boozer_surface = boozer_surface
-        self.last_successful_state = _snapshot_stage2_boozer_state(boozer_surface)
+        self.last_successful_state = snapshot_boozer_solve_state(boozer_surface)
         self.last_solve_failed = False
+
+    def _refresh_if_needed(self) -> None:
+        if self.boozer_surface.need_to_run_code:
+            self.run_guarded()
+
+    def _build_failed_state(
+        self,
+        *,
+        target: float,
+        tolerance: float,
+    ) -> Stage2IotaState:
+        return _build_stage2_iota_state_from_iota(
+            self.last_successful_state.iota,
+            target=target,
+            tolerance=tolerance,
+            solve_failed=True,
+        )
 
     def run_guarded(self):
         res = self.boozer_surface.res
-        try:
-            result = self.boozer_surface.run_code(res["iota"], G=res["G"])
-        except Exception:
-            self.last_solve_failed = True
-            _restore_stage2_boozer_state(
-                self.boozer_surface,
-                self.last_successful_state,
-            )
-            return {"success": False}
-
-        if bool(result.get("success", False)):
-            self.last_successful_state = _snapshot_stage2_boozer_state(
+        solve_attempt = run_boozer_with_failure_policy(
+            self.boozer_surface,
+            res["iota"],
+            res["G"],
+            failure_policy=BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS,
+            last_successful_state=self.last_successful_state,
+        )
+        self.last_solve_failed = not solve_attempt.solve_success
+        if not self.last_solve_failed:
+            self.last_successful_state = snapshot_boozer_solve_state(
                 self.boozer_surface
             )
-            self.last_solve_failed = False
-        else:
-            self.last_solve_failed = True
-            _restore_stage2_boozer_state(
-                self.boozer_surface,
-                self.last_successful_state,
-            )
-        return result
+        return {"success": solve_attempt.solve_success}
 
     def evaluate(
         self,
@@ -133,21 +114,16 @@ class Stage2GuardedBoozerEvaluator:
         target: float,
         tolerance: float,
     ) -> Stage2IotaEvaluation:
-        if self.boozer_surface.need_to_run_code:
-            self.run_guarded()
+        self._refresh_if_needed()
         if self.last_solve_failed:
-            return _build_stage2_iota_evaluation_from_iota(
-                self.last_successful_state.iota,
-                target=target,
-                tolerance=tolerance,
-                solve_failed=True,
+            return Stage2IotaEvaluation(
+                state=self._build_failed_state(target=target, tolerance=tolerance)
             )
         return _evaluate_stage2_iota_terms(
             iota_term,
             penalty_objective,
             target=target,
             tolerance=tolerance,
-            solve_failed=self.last_solve_failed,
         )
 
     def evaluate_state(
@@ -158,21 +134,14 @@ class Stage2GuardedBoozerEvaluator:
         target: float,
         tolerance: float,
     ) -> Stage2IotaState:
-        if self.boozer_surface.need_to_run_code:
-            self.run_guarded()
+        self._refresh_if_needed()
         if self.last_solve_failed:
-            return _build_stage2_iota_state_from_iota(
-                self.last_successful_state.iota,
-                target=target,
-                tolerance=tolerance,
-                solve_failed=True,
-            )
+            return self._build_failed_state(target=target, tolerance=tolerance)
         return _build_stage2_iota_state(
             iota_term,
             penalty_objective,
             target=target,
             tolerance=tolerance,
-            solve_failed=self.last_solve_failed,
         )
 
 
@@ -225,24 +194,6 @@ def _build_stage2_iota_state_from_iota(
         abs_error=abs_error,
         feasible=not solve_failed and abs_error <= float(tolerance),
         solve_failed=bool(solve_failed),
-    )
-
-
-def _build_stage2_iota_evaluation_from_iota(
-    iota: float,
-    *,
-    target: float,
-    tolerance: float,
-    solve_failed: bool = False,
-) -> Stage2IotaEvaluation:
-    return Stage2IotaEvaluation(
-        state=_build_stage2_iota_state_from_iota(
-            iota,
-            target=target,
-            tolerance=tolerance,
-            solve_failed=solve_failed,
-        ),
-        penalty_grad=None,
     )
 
 

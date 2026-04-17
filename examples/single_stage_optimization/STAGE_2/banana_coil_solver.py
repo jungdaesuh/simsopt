@@ -802,8 +802,9 @@ def build_stage2_iota_hot_loop_payload(
         return payload
 
     final_state = evaluate_stage2_iota_state(stage2_iota_runtime)
-    final_iota = None if final_state.solve_failed else final_state.iota
-    final_penalty = None if final_state.solve_failed else final_state.penalty
+    final_solve_failed = bool(getattr(final_state, "solve_failed", False))
+    final_iota = None if final_solve_failed else final_state.iota
+    final_penalty = None if final_solve_failed else final_state.penalty
     payload.update(
         {
             "STAGE2_IOTA_BOOTSTRAP_SECONDS": stage2_iota_runtime.stats.bootstrap_seconds,

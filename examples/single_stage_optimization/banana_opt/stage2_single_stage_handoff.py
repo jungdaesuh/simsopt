@@ -29,6 +29,9 @@ BOOTABILITY_REASON_IOTA_MISMATCH = "iota_mismatch"
 BOOTABILITY_STAGE_PROBE = "probe"
 BOOTABILITY_STAGE_RECOVERY = "recovery"
 
+BOOZER_FAILURE_POLICY_REPORT_FAILURE = "report_failure"
+BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS = "restore_last_success"
+
 __all__ = [
     "BOOTABILITY_REASON_BOOZER_SOLVE_FAILED",
     "BOOTABILITY_REASON_IOTA_MISMATCH",
@@ -37,7 +40,11 @@ __all__ = [
     "BOOTABILITY_REASON_SELF_INTERSECTION",
     "BOOTABILITY_STAGE_PROBE",
     "BOOTABILITY_STAGE_RECOVERY",
+    "BOOZER_FAILURE_POLICY_REPORT_FAILURE",
+    "BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS",
     "BoozerInitializationResult",
+    "BoozerSolveAttempt",
+    "BoozerSolveSnapshot",
     "Stage2CoilPartitions",
     "bootability_passes",
     "build_equilibrium_path",
@@ -46,10 +53,13 @@ __all__ = [
     "initialize_boozer_surface",
     "partition_loaded_stage2_coils",
     "probe_stage2_seed_bootability",
+    "restore_boozer_solve_state",
     "resolve_stage2_finite_current_mode",
     "resolve_single_stage_banana_surf_radius",
     "resolve_stage2_num_tf_coils",
     "resolve_stage2_tf_current_A",
+    "run_boozer_with_failure_policy",
+    "snapshot_boozer_solve_state",
     "validate_loaded_stage2_coils_partition",
     "validate_stage2_seed_contract",
 ]
@@ -64,6 +74,23 @@ class BoozerInitializationResult:
     solved_iota: float | None
     solved_G: float | None
     volume: float | None
+    error_type: str | None = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class BoozerSolveSnapshot:
+    surface_dofs: np.ndarray
+    iota: float
+    G: float | None
+    success: bool
+
+
+@dataclass(frozen=True)
+class BoozerSolveAttempt:
+    solve_success: bool
+    solved_iota: float | None
+    solved_G: float | None
     error_type: str | None = None
     error_message: str | None = None
 
@@ -279,6 +306,117 @@ def compute_tf_G0(tf_coils) -> float:
     return 2.0 * np.pi * current_sum * (4.0 * np.pi * 10.0 ** (-7) / (2.0 * np.pi))
 
 
+def _coerce_boozer_scalar(value) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _read_boozer_solve_scalars(boozer_surface) -> tuple[float | None, float | None]:
+    res = boozer_surface.res
+    return (
+        _coerce_boozer_scalar(res.get("iota")),
+        _coerce_boozer_scalar(res.get("G")),
+    )
+
+
+def _attempt_from_current_boozer_state(
+    boozer_surface,
+    *,
+    solve_success: bool,
+    error: Exception | None = None,
+) -> BoozerSolveAttempt:
+    solved_iota, solved_G = _read_boozer_solve_scalars(boozer_surface)
+    return BoozerSolveAttempt(
+        solve_success=bool(solve_success),
+        solved_iota=solved_iota,
+        solved_G=solved_G,
+        error_type=None if error is None else type(error).__name__,
+        error_message=None if error is None else str(error),
+    )
+
+
+def snapshot_boozer_solve_state(boozer_surface) -> BoozerSolveSnapshot:
+    res = boozer_surface.res
+    _, solved_G = _read_boozer_solve_scalars(boozer_surface)
+    return BoozerSolveSnapshot(
+        surface_dofs=np.asarray(boozer_surface.surface.x, dtype=float).copy(),
+        iota=float(res["iota"]),
+        G=solved_G,
+        success=bool(res.get("success", False)),
+    )
+
+
+def restore_boozer_solve_state(
+    boozer_surface,
+    snapshot: BoozerSolveSnapshot,
+) -> None:
+    boozer_surface.surface.x = snapshot.surface_dofs.copy()
+    boozer_surface.res["iota"] = snapshot.iota
+    boozer_surface.res["G"] = snapshot.G
+    boozer_surface.res["success"] = snapshot.success
+    if hasattr(boozer_surface, "need_to_run_code"):
+        boozer_surface.need_to_run_code = False
+
+
+def run_boozer_with_failure_policy(
+    boozer_surface,
+    iota,
+    G,
+    *,
+    failure_policy: str,
+    last_successful_state: BoozerSolveSnapshot | None = None,
+) -> BoozerSolveAttempt:
+    res = boozer_surface.res
+    if failure_policy not in (
+        BOOZER_FAILURE_POLICY_REPORT_FAILURE,
+        BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS,
+    ):
+        raise ValueError(f"Unsupported Boozer failure policy {failure_policy!r}.")
+    if (
+        failure_policy == BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS
+        and last_successful_state is None
+    ):
+        raise ValueError(
+            "restore_last_success Boozer failure policy requires a successful snapshot."
+        )
+
+    def _restore_if_needed() -> None:
+        if failure_policy == BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS:
+            restore_boozer_solve_state(boozer_surface, last_successful_state)
+
+    try:
+        result = boozer_surface.run_code(iota, G)
+    except Exception as error:
+        attempt = _attempt_from_current_boozer_state(
+            boozer_surface,
+            solve_success=False,
+            error=error,
+        )
+        _restore_if_needed()
+        return attempt
+
+    if result is None:
+        attempt = _attempt_from_current_boozer_state(
+            boozer_surface,
+            solve_success=bool(res.get("success", False)),
+        )
+        if not attempt.solve_success:
+            _restore_if_needed()
+        return attempt
+
+    solve_success = bool(result.get("success", False))
+    solved_iota = _coerce_boozer_scalar(result.get("iota", res.get("iota")))
+    solved_G = _coerce_boozer_scalar(result.get("G", res.get("G")))
+    if not solve_success:
+        _restore_if_needed()
+    return BoozerSolveAttempt(
+        solve_success=solve_success,
+        solved_iota=solved_iota,
+        solved_G=solved_G,
+    )
+
+
 def _surface_volume_or_none(surface) -> float | None:
     try:
         return float(surface.volume())
@@ -344,35 +482,37 @@ def attempt_initialize_boozer_surface(
             I=boozer_I,
         )
 
-    try:
-        result = boozer_surface.run_code(iota, G0)
-    except Exception as error:
+    solve_attempt = run_boozer_with_failure_policy(
+        boozer_surface,
+        iota,
+        G0,
+        failure_policy=BOOZER_FAILURE_POLICY_REPORT_FAILURE,
+    )
+    if solve_attempt.error_type is not None:
         return BoozerInitializationResult(
             boozer_surface=boozer_surface,
             solve_success=False,
             self_intersecting=None,
             success=False,
-            solved_iota=None,
-            solved_G=None,
+            solved_iota=solve_attempt.solved_iota,
+            solved_G=solve_attempt.solved_G,
             volume=_surface_volume_or_none(boozer_surface.surface),
-            error_type=type(error).__name__,
-            error_message=str(error),
+            error_type=solve_attempt.error_type,
+            error_message=solve_attempt.error_message,
         )
 
-    solve_success = bool(result.get("success", False))
+    solve_success = solve_attempt.solve_success
     try:
         self_intersecting = bool(boozer_surface.surface.is_self_intersecting())
     except Exception:
         self_intersecting = True
-    solved_iota = result.get("iota")
-    solved_G = result.get("G")
     return BoozerInitializationResult(
         boozer_surface=boozer_surface,
         solve_success=solve_success,
         self_intersecting=self_intersecting,
         success=solve_success and not self_intersecting,
-        solved_iota=None if solved_iota is None else float(solved_iota),
-        solved_G=None if solved_G is None else float(solved_G),
+        solved_iota=solve_attempt.solved_iota,
+        solved_G=solve_attempt.solved_G,
         volume=_surface_volume_or_none(boozer_surface.surface),
     )
 

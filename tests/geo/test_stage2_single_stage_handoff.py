@@ -314,6 +314,19 @@ class HandoffModuleTests(unittest.TestCase):
             )
         return tf_coils, fake_bs, stage2_artifact_results
 
+    def _assert_restored_fake_boozer_surface(self, boozer_surface):
+        np.testing.assert_allclose(boozer_surface.surface.x, [1.0, -2.0])
+        self.assertAlmostEqual(boozer_surface.res["iota"], 0.21)
+        self.assertAlmostEqual(boozer_surface.res["G"], 0.35)
+        self.assertTrue(boozer_surface.res["success"])
+        self.assertFalse(boozer_surface.need_to_run_code)
+
+    def _assert_failed_boozer_attempt(self, attempt):
+        self.assertFalse(attempt.solve_success)
+        self.assertAlmostEqual(attempt.solved_iota, 0.41)
+        self.assertAlmostEqual(attempt.solved_G, 0.72)
+        self.assertIsNone(attempt.error_type)
+
     def test_classify_bootability_result_rejects_iota_mismatch(self):
         module = load_handoff_module()
 
@@ -335,6 +348,195 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertFalse(module.bootability_passes(status))
         self.assertEqual(status["BOOTABILITY_REASON"], module.BOOTABILITY_REASON_IOTA_MISMATCH)
         self.assertAlmostEqual(status["BOOTABILITY_ABS_IOTA_ERROR"], 0.08)
+
+    def test_attempt_initialize_boozer_surface_keeps_probe_failures_visible(self):
+        module = load_handoff_module()
+        surf_prev = SimpleNamespace(
+            quadpoints_theta=np.array([0.0, 0.5]),
+            quadpoints_phi=np.array([0.0, 0.2]),
+            gamma=lambda: np.zeros((2, 2, 3), dtype=float),
+        )
+
+        class _FakeSurface:
+            def __init__(
+                self,
+                *,
+                mpol,
+                ntor,
+                nfp,
+                stellsym,
+                quadpoints_theta,
+                quadpoints_phi,
+                dofs=None,
+            ):
+                del mpol, ntor, nfp, stellsym
+                self.quadpoints_theta = quadpoints_theta
+                self.quadpoints_phi = quadpoints_phi
+                self.dofs = (
+                    np.zeros(2, dtype=float)
+                    if dofs is None
+                    else np.asarray(dofs, dtype=float)
+                )
+                self.x = np.zeros(2, dtype=float)
+                self._gamma = np.zeros((2, 2, 3), dtype=float)
+
+            def least_squares_fit(self, gamma):
+                self._gamma = np.asarray(gamma, dtype=float)
+
+            def gamma(self):
+                return self._gamma.copy()
+
+            def is_self_intersecting(self):
+                return False
+
+            def volume(self):
+                return 0.1
+
+        class _FakeVolume:
+            def __init__(self, surface):
+                self.surface = surface
+
+        class _FakeBoozerSurface:
+            def __init__(
+                self,
+                bs,
+                surf,
+                vol,
+                vol_target,
+                constraint_weight,
+                options,
+                I=0.0,
+            ):
+                del bs, vol, vol_target, constraint_weight, options, I
+                self.surface = surf
+                self.res = {"iota": 0.21, "G": 0.35, "success": True}
+
+            def run_code(self, iota, G):
+                del iota, G
+                self.surface.x = np.array([9.0, -4.0], dtype=float)
+                self.res["iota"] = 0.41
+                self.res["G"] = 0.72
+                self.res["success"] = False
+                return {"success": False}
+
+        result = module.attempt_initialize_boozer_surface(
+            surf_prev,
+            mpol=8,
+            ntor=6,
+            bs=object(),
+            vol_target=0.1,
+            constraint_weight=1.0,
+            iota=0.2,
+            G0=0.35,
+            boozer_I=0.0,
+            nfp=5,
+            surface_cls=_FakeSurface,
+            volume_cls=_FakeVolume,
+            boozer_surface_cls=_FakeBoozerSurface,
+        )
+
+        self.assertFalse(result.solve_success)
+        self.assertFalse(result.success)
+        self.assertAlmostEqual(result.solved_iota, 0.41)
+        self.assertAlmostEqual(result.solved_G, 0.72)
+        self.assertIsNone(result.error_type)
+        np.testing.assert_allclose(result.boozer_surface.surface.x, [9.0, -4.0])
+
+    def test_run_boozer_with_failure_policy_accepts_cached_result_state(self):
+        module = load_handoff_module()
+
+        class _FakeBoozerSurface:
+            def __init__(self):
+                self.surface = SimpleNamespace(x=np.array([1.0, -2.0], dtype=float))
+                self.res = {"iota": 0.21, "G": 0.35, "success": True}
+                self.calls = []
+
+            def run_code(self, iota, G):
+                self.calls.append((float(iota), float(G)))
+                return None
+
+        boozer_surface = _FakeBoozerSurface()
+
+        attempt = module.run_boozer_with_failure_policy(
+            boozer_surface,
+            0.21,
+            0.35,
+            failure_policy=module.BOOZER_FAILURE_POLICY_REPORT_FAILURE,
+        )
+
+        self.assertTrue(attempt.solve_success)
+        self.assertAlmostEqual(attempt.solved_iota, 0.21)
+        self.assertAlmostEqual(attempt.solved_G, 0.35)
+        self.assertIsNone(attempt.error_type)
+        self.assertEqual(boozer_surface.calls, [(0.21, 0.35)])
+
+    def test_run_boozer_with_failure_policy_restores_last_successful_state_on_failed_result(self):
+        module = load_handoff_module()
+
+        class _FakeBoozerSurface:
+            def __init__(self):
+                self.surface = SimpleNamespace(x=np.array([1.0, -2.0], dtype=float))
+                self.res = {"iota": 0.21, "G": 0.35, "success": True}
+                self.need_to_run_code = True
+                self.calls = []
+
+            def run_code(self, iota, G):
+                self.calls.append((float(iota), float(G)))
+                self.surface.x = np.array([9.0, -4.0], dtype=float)
+                self.res["iota"] = 0.41
+                self.res["G"] = 0.72
+                self.res["success"] = False
+                self.need_to_run_code = False
+                return {"success": False}
+
+        boozer_surface = _FakeBoozerSurface()
+        last_successful_state = module.snapshot_boozer_solve_state(boozer_surface)
+
+        attempt = module.run_boozer_with_failure_policy(
+            boozer_surface,
+            0.21,
+            0.35,
+            failure_policy=module.BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS,
+            last_successful_state=last_successful_state,
+        )
+
+        self._assert_failed_boozer_attempt(attempt)
+        self._assert_restored_fake_boozer_surface(boozer_surface)
+        self.assertEqual(boozer_surface.calls, [(0.21, 0.35)])
+
+    def test_run_boozer_with_failure_policy_restores_cached_failed_state_on_reported_failure(self):
+        module = load_handoff_module()
+
+        class _FakeBoozerSurface:
+            def __init__(self):
+                self.surface = SimpleNamespace(x=np.array([1.0, -2.0], dtype=float))
+                self.res = {"iota": 0.21, "G": 0.35, "success": True}
+                self.need_to_run_code = False
+                self.calls = []
+
+            def run_code(self, iota, G):
+                self.calls.append((float(iota), float(G)))
+                return None
+
+        boozer_surface = _FakeBoozerSurface()
+        last_successful_state = module.snapshot_boozer_solve_state(boozer_surface)
+        boozer_surface.surface.x = np.array([9.0, -4.0], dtype=float)
+        boozer_surface.res["iota"] = 0.41
+        boozer_surface.res["G"] = 0.72
+        boozer_surface.res["success"] = False
+        boozer_surface.need_to_run_code = False
+
+        attempt = module.run_boozer_with_failure_policy(
+            boozer_surface,
+            0.21,
+            0.35,
+            failure_policy=module.BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS,
+            last_successful_state=last_successful_state,
+        )
+
+        self._assert_failed_boozer_attempt(attempt)
+        self._assert_restored_fake_boozer_surface(boozer_surface)
+        self.assertEqual(boozer_surface.calls, [(0.21, 0.35)])
 
     def test_probe_stage2_seed_bootability_reports_missing_metadata_without_loading_bs(self):
         module = load_handoff_module()
