@@ -56,6 +56,8 @@ from banana_opt.stage2_geometry import (
     magnetic_field_plots as _magnetic_field_plots,
 )
 from banana_opt.hardware_contracts import (
+    ACCEPT_OFFSPEC_R0_SEED_ENV,
+    ACCEPT_OFFSPEC_R0_SEED_HELP,
     BANANA_CURRENT_HARD_LIMIT_A,
     BANANA_WINDING_MINOR_RADIUS_M,
     COIL_COIL_MIN_DIST_M,
@@ -65,6 +67,7 @@ from banana_opt.hardware_contracts import (
     PLASMA_VESSEL_MIN_DIST_M,
     TF_CURRENT_HARD_LIMIT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
+    env_flag,
     validate_major_radius,
     validate_tf_current_limit,
 )
@@ -313,12 +316,8 @@ def parse_args():
     parser.add_argument(
         "--accept-offspec-r0-seed",
         action="store_true",
-        default=os.environ.get("ACCEPT_OFFSPEC_R0_SEED", "").lower() in {"1", "true", "yes"},
-        help=(
-            "Allow --major-radius to deviate from the vacuum-vessel contract. "
-            "Use only to reproduce historical artifacts; produces coils that do "
-            "not fit HBT-EP."
-        ),
+        default=env_flag(ACCEPT_OFFSPEC_R0_SEED_ENV),
+        help=ACCEPT_OFFSPEC_R0_SEED_HELP,
     )
     parser.add_argument(
         "--toroidal-flux",
@@ -1317,7 +1316,7 @@ def main(parsed_args=None):
     accept_offspec_r0_seed = getattr(
         args,
         "accept_offspec_r0_seed",
-        os.environ.get("ACCEPT_OFFSPEC_R0_SEED", "").lower() in {"1", "true", "yes"},
+        env_flag(ACCEPT_OFFSPEC_R0_SEED_ENV),
     )
     R0 = validate_major_radius(
         args.major_radius,

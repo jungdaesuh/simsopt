@@ -112,6 +112,8 @@ from banana_opt.current_contracts import (
 )
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
+    ACCEPT_OFFSPEC_R0_SEED_ENV,
+    ACCEPT_OFFSPEC_R0_SEED_HELP,
     BANANA_WINDING_MINOR_RADIUS_M,
     COIL_COIL_MIN_DIST_M,
     COIL_LENGTH_TARGET_M,
@@ -120,6 +122,8 @@ from banana_opt.hardware_contracts import (
     PLASMA_VESSEL_MIN_DIST_M,
     TF_CURRENT_HARD_LIMIT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
+    env_flag,
+    is_major_radius_offspec,
     validate_banana_winding_surface_radius,
     validate_major_radius,
     validate_tf_current_limit,
@@ -1262,12 +1266,8 @@ def parse_args():
     parser.add_argument(
         "--accept-offspec-r0-seed",
         action="store_true",
-        default=os.environ.get("ACCEPT_OFFSPEC_R0_SEED", "").lower() in {"1", "true", "yes"},
-        help=(
-            "Allow Stage 2 seed MAJOR_RADIUS to deviate from the vacuum-vessel "
-            "contract. Use only to reproduce historical artifacts; produces coils "
-            "that do not fit HBT-EP."
-        ),
+        default=env_flag(ACCEPT_OFFSPEC_R0_SEED_ENV),
+        help=ACCEPT_OFFSPEC_R0_SEED_HELP,
     )
     parser.add_argument(
         "--stage2-seed-toroidal-flux",
@@ -1841,6 +1841,7 @@ class PreservedTimeoutReplayConfig:
     frontier_chebyshev_weight_boozer: float | None = None
     epsilon_constraint_qa_max: float | None = None
     epsilon_constraint_boozer_max: float | None = None
+    major_radius: float = VACUUM_VESSEL_MAJOR_RADIUS_M
 
 
 @dataclass(frozen=True)
@@ -4226,6 +4227,8 @@ def build_preserved_timeout_results_payload(
         "PRESERVED_TIMEOUT_SALVAGE_AVAILABLE": True,
         "PRESERVED_TIMEOUT_SALVAGE_KIND": preservation_kind,
         "PRESERVED_TIMEOUT_SALVAGE_STAGE": source_stage,
+        "MAJOR_RADIUS": float(replay_config.major_radius),
+        "R0_OFF_SPEC": is_major_radius_offspec(replay_config.major_radius),
     }
     if replay_config.constraint_method == "alm":
         if alm_runtime_state is None:
@@ -5506,6 +5509,7 @@ if __name__ == "__main__":
         target_iota=iota_target,
         single_stage_goal_mode=args.single_stage_goal_mode,
         single_stage_goal_mode_impl=current_frontier_goal_mode_impl(),
+        major_radius=R0,
     )
 
     # Initialize the boundary magnetic surface and scale it to the target major radius
@@ -6844,7 +6848,7 @@ if __name__ == "__main__":
         "RES_WEIGHT": RES_WEIGHT,
         "IOTAS_WEIGHT": IOTAS_WEIGHT,
         "MAJOR_RADIUS": R0,
-        "R0_OFF_SPEC": abs(float(R0) - VACUUM_VESSEL_MAJOR_RADIUS_M) > 1.0e-12,
+        "R0_OFF_SPEC": is_major_radius_offspec(R0),
         "TOROIDAL_FLUX": s,
         "banana_surf_radius": banana_surf_radius,
         "order": order,

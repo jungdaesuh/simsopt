@@ -43,6 +43,7 @@ from banana_opt.hardware_contracts import (  # noqa: E402
     fixed_stage2_artifact_hardware_contract,
     fixed_stage2_clearance_contract,
     TF_CURRENT_HARD_LIMIT_A,
+    validate_major_radius,
     validate_tf_current_limit,
 )
 
@@ -375,6 +376,7 @@ def build_stage2_alm_config(
             f"{STAGE2_CURVATURE_THRESHOLD_CEILING}"
         )
     tf_current_A = validate_tf_current_limit(resolved_spec["tf_current_A"])
+    validate_major_radius(resolved_spec["major_radius"])
     stage2_iota_mode = getattr(args, "stage2_iota_mode", "off")
     stage2_iota_target = getattr(args, "stage2_iota_target", None)
     stage2_iota_tolerance = getattr(args, "stage2_iota_tolerance", 5.0e-3)

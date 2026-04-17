@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 TF_CURRENT_HARD_LIMIT_A = 8.0e4
 BANANA_CURRENT_HARD_LIMIT_A = 1.6e4
 
@@ -47,9 +49,16 @@ def validate_banana_winding_surface_radius(banana_surf_radius: float) -> float:
     return radius
 
 
+_MAJOR_RADIUS_TOL_M = 1.0e-12
+
+
+def is_major_radius_offspec(major_radius: float) -> bool:
+    return abs(float(major_radius) - VACUUM_VESSEL_MAJOR_RADIUS_M) > _MAJOR_RADIUS_TOL_M
+
+
 def validate_major_radius(major_radius: float, *, accept_offspec: bool = False) -> float:
     radius = float(major_radius)
-    if abs(radius - VACUUM_VESSEL_MAJOR_RADIUS_M) <= 1.0e-12:
+    if not is_major_radius_offspec(radius):
         return radius
     if accept_offspec:
         return radius
@@ -60,3 +69,15 @@ def validate_major_radius(major_radius: float, *, accept_offspec: bool = False) 
         "the HBT-EP vacuum vessel. Pass --accept-offspec-r0-seed to reproduce "
         "historical artifacts on off-spec geometry."
     )
+
+
+ACCEPT_OFFSPEC_R0_SEED_ENV = "ACCEPT_OFFSPEC_R0_SEED"
+ACCEPT_OFFSPEC_R0_SEED_HELP = (
+    "Allow --major-radius to deviate from the vacuum-vessel contract. "
+    "Use only to reproduce historical artifacts; produces coils that do "
+    "not fit HBT-EP."
+)
+
+
+def env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
