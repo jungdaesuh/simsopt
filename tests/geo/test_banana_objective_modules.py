@@ -397,7 +397,13 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         stage2_iota_runtime = SimpleNamespace(
             mode="soft",
             weight=3.0,
-            penalty_objective=_FakeAlgebraicObjective(0.0, [0.2, -0.1]),
+            penalty_objective=SimpleNamespace(
+                dJ=mock.Mock(
+                    side_effect=AssertionError(
+                        "soft penalty gradient should come from guarded evaluation"
+                    )
+                )
+            ),
         )
         soft_state = self.module.Stage2IotaState(
             iota=0.24,
@@ -405,6 +411,10 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             abs_error=0.04,
             feasible=True,
             solve_failed=False,
+        )
+        soft_evaluation = self.module.Stage2IotaEvaluation(
+            state=soft_state,
+            penalty_grad=np.array([0.2, -0.1]),
         )
         fun = self.module.make_stage2_fun(
             _JF(),
@@ -419,8 +429,8 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
 
         with mock.patch.object(
             self.module,
-            "evaluate_stage2_iota_state",
-            return_value=soft_state,
+            "evaluate_stage2_iota",
+            return_value=soft_evaluation,
         ), mock.patch("builtins.print"):
             value, grad = fun(np.array([0.2, -0.1]))
 
@@ -459,6 +469,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             feasible=False,
             solve_failed=True,
         )
+        soft_evaluation = self.module.Stage2IotaEvaluation(
+            state=soft_state,
+            penalty_grad=np.array([0.2, -0.1]),
+        )
+        failed_evaluation = self.module.Stage2IotaEvaluation(
+            state=failed_state,
+            penalty_grad=None,
+        )
         jf = _JF()
         fun = self.module.make_stage2_fun(
             jf,
@@ -473,30 +491,29 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
 
         with mock.patch.object(
             self.module,
-            "evaluate_stage2_iota_state",
-            side_effect=[soft_state, failed_state],
+            "evaluate_stage2_iota",
+            side_effect=[soft_evaluation, failed_evaluation],
         ), mock.patch("builtins.print") as print_mock:
-            accepted_value, accepted_grad = fun(np.array([0.2, -0.1]))
-            fun.mark_accepted(np.array([0.2, -0.1]))
             value, grad = fun(np.array([0.3, -0.2]))
+            failed_value, failed_grad = fun(np.array([0.4, -0.3]))
 
-        self.assertAlmostEqual(accepted_value, 2.43)
-        np.testing.assert_allclose(accepted_grad, [1.6, -2.3])
-        self.assertAlmostEqual(value, 4.86)
+        self.assertAlmostEqual(value, 2.43)
         np.testing.assert_allclose(grad, [1.6, -2.3])
-        np.testing.assert_allclose(jf.x, [0.2, -0.1])
+        self.assertAlmostEqual(failed_value, 2.46)
+        np.testing.assert_allclose(failed_grad, [2.0, -4.0])
+        np.testing.assert_allclose(jf.x, [0.4, -0.3])
         self.assertIn("IotaSolveFailed=1", print_mock.call_args[0][0])
 
-    def test_make_stage2_fun_soft_mode_reset_clears_previous_reject_cache(self):
+    def test_make_stage2_fun_soft_mode_first_failure_adds_constant_reject_offset(self):
         class _JF:
             def __init__(self):
                 self.x = None
 
             def J(self):
-                return 1.23
+                return 0.4
 
             def dJ(self):
-                return np.array([1.0, -2.0])
+                return np.array([0.5, -0.25])
 
         stage2_iota_runtime = SimpleNamespace(
             mode="soft",
@@ -519,6 +536,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             feasible=False,
             solve_failed=True,
         )
+        soft_evaluation = self.module.Stage2IotaEvaluation(
+            state=soft_state,
+            penalty_grad=np.array([0.2, -0.1]),
+        )
+        failed_evaluation = self.module.Stage2IotaEvaluation(
+            state=failed_state,
+            penalty_grad=None,
+        )
         jf = _JF()
         fun = self.module.make_stage2_fun(
             jf,
@@ -533,18 +558,13 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
 
         with mock.patch.object(
             self.module,
-            "evaluate_stage2_iota_state",
-            side_effect=[soft_state, failed_state],
+            "evaluate_stage2_iota",
+            return_value=failed_evaluation,
         ), mock.patch("builtins.print"):
-            accepted_value, accepted_grad = fun(np.array([0.2, -0.1]))
-            fun.mark_accepted(np.array([0.2, -0.1]))
-            fun.reset_soft_history()
             value, grad = fun(np.array([0.3, -0.2]))
 
-        self.assertAlmostEqual(accepted_value, 2.43)
-        np.testing.assert_allclose(accepted_grad, [1.6, -2.3])
-        self.assertAlmostEqual(value, 2.46)
-        np.testing.assert_allclose(grad, [1.0, -2.0])
+        self.assertAlmostEqual(value, 1.4)
+        np.testing.assert_allclose(grad, [0.5, -0.25])
         np.testing.assert_allclose(jf.x, [0.3, -0.2])
 
     def test_evaluate_stage2_alm_problem_exposes_constraint_payload(self):
@@ -830,7 +850,24 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             tolerance=0.05,
             penalty_threshold=0.5,
             iota_term=SimpleNamespace(J=lambda: 0.18),
-            penalty_objective=_FakeAlgebraicObjective(0.6, [0.2, 0.1]),
+            penalty_objective=SimpleNamespace(
+                dJ=mock.Mock(
+                    side_effect=AssertionError(
+                        "ALM iota gradient should come from guarded evaluation"
+                    )
+                )
+            ),
+        )
+        iota_state = self.module.Stage2IotaState(
+            iota=0.18,
+            penalty=0.6,
+            abs_error=0.02,
+            feasible=False,
+            solve_failed=False,
+        )
+        iota_evaluation = self.module.Stage2IotaEvaluation(
+            state=iota_state,
+            penalty_grad=np.array([0.2, 0.1]),
         )
 
         def fake_augmented(base_value, base_grad, signed_values, grads, multipliers, penalty):
@@ -850,6 +887,10 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             }
 
         with mock.patch.object(
+            self.module,
+            "evaluate_stage2_iota",
+            return_value=iota_evaluation,
+        ), mock.patch.object(
             self.module,
             "augmented_inequality_objective",
             side_effect=fake_augmented,
@@ -948,10 +989,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             feasible=False,
             solve_failed=True,
         )
+        failed_evaluation = self.module.Stage2IotaEvaluation(
+            state=failed_state,
+            penalty_grad=None,
+        )
         with mock.patch.object(
             self.module,
-            "evaluate_stage2_iota_state",
-            return_value=failed_state,
+            "evaluate_stage2_iota",
+            return_value=failed_evaluation,
         ), mock.patch.object(
             self.module,
             "augmented_inequality_objective",
@@ -1015,6 +1060,21 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertFalse(state.solve_failed)
         self.assertEqual(runtime.stats.runtime_calls, 1)
         self.assertGreaterEqual(runtime.stats.runtime_seconds, 0.0)
+
+    def test_evaluate_stage2_iota_state_guarded_path_does_not_require_penalty_gradient(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
+        runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
+        runtime.penalty_objective = SimpleNamespace(
+            J=lambda: 5.0e-5,
+            dJ=mock.Mock(side_effect=AssertionError("state-only path should not evaluate dJ")),
+        )
+        fake_boozer_surface.need_to_run_code = True
+
+        state = self.module.evaluate_stage2_iota_state(runtime)
+
+        self.assertAlmostEqual(state.iota, 0.21)
+        self.assertFalse(state.solve_failed)
+        self.assertEqual(runtime.stats.runtime_calls, 1)
 
     def test_build_stage2_iota_runtime_restores_last_successful_state_on_failed_solve(self):
         fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)

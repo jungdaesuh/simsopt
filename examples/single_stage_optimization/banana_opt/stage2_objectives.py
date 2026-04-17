@@ -59,6 +59,12 @@ class Stage2IotaState:
 
 
 @dataclass(frozen=True)
+class Stage2IotaEvaluation:
+    state: Stage2IotaState
+    penalty_grad: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
 class Stage2BoozerSolveSnapshot:
     surface_dofs: np.ndarray
     iota: float
@@ -118,6 +124,31 @@ class Stage2GuardedBoozerEvaluator:
                 self.last_successful_state,
             )
         return result
+
+    def evaluate(
+        self,
+        iota_term,
+        penalty_objective,
+        *,
+        target: float,
+        tolerance: float,
+    ) -> Stage2IotaEvaluation:
+        if self.boozer_surface.need_to_run_code:
+            self.run_guarded()
+        if self.last_solve_failed:
+            return _build_stage2_iota_evaluation_from_iota(
+                self.last_successful_state.iota,
+                target=target,
+                tolerance=tolerance,
+                solve_failed=True,
+            )
+        return _evaluate_stage2_iota_terms(
+            iota_term,
+            penalty_objective,
+            target=target,
+            tolerance=tolerance,
+            solve_failed=self.last_solve_failed,
+        )
 
     def evaluate_state(
         self,
@@ -197,27 +228,33 @@ def _build_stage2_iota_state_from_iota(
     )
 
 
-def _snapshot_stage2_soft_objective_state(
-    dofs,
-    objective_value: float,
-    objective_grad: np.ndarray,
-) -> dict[str, np.ndarray | float]:
-    return {
-        "dofs": np.asarray(dofs, dtype=float).copy(),
-        "objective": float(objective_value),
-        "gradient": np.asarray(objective_grad, dtype=float).copy(),
-    }
+def _build_stage2_iota_evaluation_from_iota(
+    iota: float,
+    *,
+    target: float,
+    tolerance: float,
+    solve_failed: bool = False,
+) -> Stage2IotaEvaluation:
+    return Stage2IotaEvaluation(
+        state=_build_stage2_iota_state_from_iota(
+            iota,
+            target=target,
+            tolerance=tolerance,
+            solve_failed=solve_failed,
+        ),
+        penalty_grad=None,
+    )
 
 
 def _build_stage2_soft_failure_reject_value_and_grad(
-    accepted_state: dict[str, np.ndarray | float],
+    objective_value: float,
+    objective_grad: np.ndarray,
 ) -> tuple[float, np.ndarray]:
-    accepted_objective = float(accepted_state["objective"])
-    reject_increment = max(abs(accepted_objective), 1.0)
-    return (
-        accepted_objective + reject_increment,
-        np.asarray(accepted_state["gradient"], dtype=float).copy(),
-    )
+    base_objective = float(objective_value)
+    base_grad = np.asarray(objective_grad, dtype=float).copy()
+    if base_objective >= 1.0:
+        return 2.0 * base_objective, 2.0 * base_grad
+    return base_objective + 1.0, base_grad
 
 
 def _build_stage2_iota_state(
@@ -237,6 +274,45 @@ def _build_stage2_iota_state(
         abs_error=abs_error,
         feasible=not solve_failed and abs_error <= float(tolerance),
         solve_failed=bool(solve_failed),
+    )
+
+
+def _evaluate_stage2_iota_terms(
+    iota_term,
+    penalty_objective,
+    *,
+    target: float,
+    tolerance: float,
+    solve_failed: bool = False,
+) -> Stage2IotaEvaluation:
+    state = _build_stage2_iota_state(
+        iota_term,
+        penalty_objective,
+        target=target,
+        tolerance=tolerance,
+        solve_failed=solve_failed,
+    )
+    return Stage2IotaEvaluation(
+        state=state,
+        penalty_grad=np.asarray(penalty_objective.dJ(), dtype=float),
+    )
+
+
+def evaluate_stage2_iota(
+    stage2_iota_runtime: Stage2IotaRuntime,
+) -> Stage2IotaEvaluation:
+    if stage2_iota_runtime.guarded_boozer_evaluator is not None:
+        return stage2_iota_runtime.guarded_boozer_evaluator.evaluate(
+            stage2_iota_runtime.iota_term,
+            stage2_iota_runtime.penalty_objective,
+            target=stage2_iota_runtime.target,
+            tolerance=stage2_iota_runtime.tolerance,
+        )
+    return _evaluate_stage2_iota_terms(
+        stage2_iota_runtime.iota_term,
+        stage2_iota_runtime.penalty_objective,
+        target=stage2_iota_runtime.target,
+        tolerance=stage2_iota_runtime.tolerance,
     )
 
 
@@ -803,53 +879,30 @@ def make_stage2_fun(
     Jc,
     stage2_iota_runtime: Stage2IotaRuntime | None = None,
 ):
-    last_soft_successful_eval: dict[str, np.ndarray | float] | None = None
-    last_soft_accepted_eval: dict[str, np.ndarray | float] | None = None
     soft_mode_enabled = (
         stage2_iota_runtime is not None and stage2_iota_runtime.mode == "soft"
     )
 
-    def current_soft_reject_source():
-        return last_soft_accepted_eval or last_soft_successful_eval
-
-    def cache_soft_successful_eval(
-        dofs,
-        objective_value: float,
-        objective_grad: np.ndarray,
-    ) -> None:
-        nonlocal last_soft_successful_eval, last_soft_accepted_eval
-        last_soft_successful_eval = _snapshot_stage2_soft_objective_state(
-            dofs,
-            objective_value,
-            objective_grad,
-        )
-        if last_soft_accepted_eval is None:
-            last_soft_accepted_eval = last_soft_successful_eval
-
     def fun(dofs):
-        nonlocal last_soft_successful_eval, last_soft_accepted_eval
         JF.x = dofs
         J = float(JF.J())
         grad = np.asarray(JF.dJ(), dtype=float)
         iota_state = None
+        iota_evaluation = None
         if soft_mode_enabled:
-            iota_state = evaluate_stage2_iota_state(stage2_iota_runtime)
+            iota_evaluation = evaluate_stage2_iota(stage2_iota_runtime)
+            iota_state = iota_evaluation.state
             if iota_state.solve_failed:
-                reject_source = current_soft_reject_source()
-                if reject_source is None:
-                    J += max(abs(J), 1.0)
-                else:
-                    J, grad = _build_stage2_soft_failure_reject_value_and_grad(
-                        reject_source,
-                    )
-                    JF.x = np.asarray(reject_source["dofs"], dtype=float).copy()
+                J, grad = _build_stage2_soft_failure_reject_value_and_grad(
+                    J,
+                    grad,
+                )
             else:
                 J += stage2_iota_runtime.weight * iota_state.penalty
                 grad = grad + (
                     stage2_iota_runtime.weight
-                    * np.asarray(stage2_iota_runtime.penalty_objective.dJ(), dtype=float)
+                    * np.asarray(iota_evaluation.penalty_grad, dtype=float)
                 )
-                cache_soft_successful_eval(dofs, J, grad)
         unitn = new_surf.unitnormal()
         BdotN = np.mean(np.abs(np.sum(new_bs.B().reshape(unitn.shape) * unitn, axis=2)))
         outstr = f"J={J:.1e}, Jf={Jf.J():.1e}, ⟨B·n⟩={BdotN:.1e}"
@@ -867,27 +920,6 @@ def make_stage2_fun(
         outstr += f", ║∇J║={np.linalg.norm(grad):.1e}"
         print(outstr)
         return J, grad
-
-    def mark_accepted(dofs) -> None:
-        nonlocal last_soft_accepted_eval
-        if last_soft_successful_eval is None:
-            return
-        if np.allclose(
-            np.asarray(last_soft_successful_eval["dofs"], dtype=float),
-            np.asarray(dofs, dtype=float),
-            rtol=0.0,
-            atol=1.0e-12,
-        ):
-            last_soft_accepted_eval = last_soft_successful_eval
-
-    def reset_soft_history(*_args) -> None:
-        nonlocal last_soft_successful_eval, last_soft_accepted_eval
-        last_soft_successful_eval = None
-        last_soft_accepted_eval = None
-
-    if soft_mode_enabled:
-        fun.mark_accepted = mark_accepted
-        fun.reset_soft_history = reset_soft_history
 
     return fun
 
@@ -1338,7 +1370,8 @@ def evaluate_stage2_alm_problem(
         stage2_iota_runtime is not None and stage2_iota_runtime.mode == "alm"
     )
     if stage2_iota_runtime is not None:
-        iota_state = evaluate_stage2_iota_state(stage2_iota_runtime)
+        iota_evaluation = evaluate_stage2_iota(stage2_iota_runtime)
+        iota_state = iota_evaluation.state
         if iota_state.solve_failed:
             iota_violation = max(
                 stage2_iota_runtime.penalty_threshold,
@@ -1354,10 +1387,7 @@ def evaluate_stage2_alm_problem(
             iota_signed_value = (
                 iota_state.penalty - stage2_iota_runtime.penalty_threshold
             )
-            iota_grad = np.asarray(
-                stage2_iota_runtime.penalty_objective.dJ(),
-                dtype=float,
-            )
+            iota_grad = np.asarray(iota_evaluation.penalty_grad, dtype=float)
 
     active_names = _stage2_constraint_names(
         include_coil_surface=include_coil_surface,

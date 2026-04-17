@@ -1596,8 +1596,6 @@ def main(parsed_args=None):
         Jc,
         stage2_iota_runtime=stage2_iota_runtime,
     )
-    stage2_soft_accept_callback = getattr(fun, "mark_accepted", None)
-    stage2_soft_reset_callback = getattr(fun, "reset_soft_history", None)
     alm_result = None
     if CONSTRAINT_METHOD == "alm":
         alm_settings = build_stage2_alm_settings(args)
@@ -1773,8 +1771,6 @@ def main(parsed_args=None):
             'bounds': lbfgsb_bounds,
             'options': {'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol},
         }
-        if stage2_soft_accept_callback is not None:
-            minimizer_kwargs['callback'] = stage2_soft_accept_callback
         basin_niter_success = args.basin_niter_success if args.basin_niter_success > 0 else None
         print(
             f"Basin-hopping with {args.basin_hops} hops, "
@@ -1792,7 +1788,6 @@ def main(parsed_args=None):
             basin_niter_success=basin_niter_success,
             rng_seed=rng_seed,
             minimizer_kwargs=minimizer_kwargs,
-            local_minimum_callback=stage2_soft_reset_callback,
         )
         basin_hop_count = res.nit if hasattr(res, 'nit') else None
         basin_minimization_failures = res.minimization_failures if hasattr(res, 'minimization_failures') else None
@@ -1830,7 +1825,6 @@ def main(parsed_args=None):
             dofs,
             jac=True,
             method='L-BFGS-B',
-            callback=stage2_soft_accept_callback,
             bounds=lbfgsb_bounds,
             options={'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol},
         )
