@@ -4803,6 +4803,8 @@ def build_single_stage_target_lane_accepted_step_sync(
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
     )
+    reporting_metrics_fn = runtime_bundle["reporting_metrics"]
+    value_and_grad = runtime_bundle["value_and_grad"]
 
     def sync(run_dict, coil_dofs, *, benchmark_mode, update_run_state=True):
         coil_dofs = _as_jax_float64(_single_stage_optimizer_dofs_array(coil_dofs))
@@ -4818,7 +4820,7 @@ def build_single_stage_target_lane_accepted_step_sync(
                 "single-stage array-native state."
             )
 
-        traceable_reporting_metrics = runtime_bundle["reporting_metrics"](
+        traceable_reporting_metrics = reporting_metrics_fn(
             coil_dofs,
             include_distance_metrics=not benchmark_mode,
         )
@@ -4845,11 +4847,17 @@ def build_single_stage_target_lane_accepted_step_sync(
                 )
             )
         reporting_metrics["hardware_status"] = hardware_status
-        objective_value = host_float(
-            total_single_stage_objective_from_traceable_reporting_metrics(
-                traceable_reporting_metrics
+        if update_run_state:
+            objective_value, objective_grad = value_and_grad(coil_dofs)
+            objective_value = host_float(objective_value)
+            objective_grad = host_array(objective_grad, dtype=np.float64)
+        else:
+            objective_value = host_float(
+                total_single_stage_objective_from_traceable_reporting_metrics(
+                    traceable_reporting_metrics
+                )
             )
-        )
+            objective_grad = None
         accepted_step_summary = {
             "objective_value": objective_value,
             "reporting_metrics": reporting_metrics,
@@ -4861,7 +4869,8 @@ def build_single_stage_target_lane_accepted_step_sync(
                 iota=solve_result["iota"],
                 G=solve_result["G"],
                 objective_value=objective_value,
-                store_objective_grad=False,
+                objective_grad=objective_grad,
+                store_objective_grad=True,
             )
             run_dict["hardware_constraint_status"] = hardware_status
             record_single_stage_local_incumbent(
@@ -4877,6 +4886,29 @@ def build_single_stage_target_lane_accepted_step_sync(
         return accepted_step_summary
 
     return sync
+
+
+def configure_single_stage_target_lane_accepted_step_sync(
+    adapter,
+    boozer_surface,
+    bs,
+    iota_target,
+    *,
+    use_target_lane,
+    outer_objective_config,
+    success_filter,
+):
+    """Install the array-native accepted-step sync and disable CPU reevaluation."""
+    if not use_target_lane:
+        return
+    adapter.accepted_step_state_sync = build_single_stage_target_lane_accepted_step_sync(
+        boozer_surface,
+        bs,
+        iota_target,
+        outer_objective_config=outer_objective_config,
+        success_filter=success_filter,
+    )
+    adapter.reevaluate_before_accept = False
 
 
 def log_single_stage_target_lane_accepted_step(
@@ -8430,7 +8462,7 @@ if __name__ == "__main__":
         objectives=objectives,
         diagnostics=diagnostics_refs,
         log_path=OUT_DIR_ITER + "/log.txt",
-        reevaluate_before_accept=use_target_lane,
+        reevaluate_before_accept=False,
         apply_coil_dofs=dof_setter,
         benchmark_mode=args.benchmark_mode,
         accepted_step_state_sync=None,
@@ -9002,36 +9034,36 @@ if __name__ == "__main__":
                         curvature_threshold=CURVATURE_THRESHOLD,
                         curvature_weight=CURVATURE_WEIGHT,
                     )
-                if use_target_lane:
-                    adapter.accepted_step_state_sync = (
-                        build_single_stage_target_lane_accepted_step_sync(
-                            boozer_surface,
-                            bs,
-                            iota_target,
-                            outer_objective_config=(
-                                build_target_lane_outer_objective_config(
-                                    boozer_surface,
-                                    bs,
-                                    banana_curve,
-                                    VV,
-                                    non_qs_weight=1.0,
-                                    residual_weight=RES_WEIGHT,
-                                    iota_weight=IOTAS_WEIGHT,
-                                    length_weight=LENGTH_WEIGHT,
-                                    length_target=length_target,
-                                    curve_curve_threshold=CC_DIST,
-                                    curve_curve_weight=CC_WEIGHT,
-                                    curve_surface_threshold=CS_DIST,
-                                    curve_surface_weight=CS_WEIGHT,
-                                    surface_vessel_threshold=SS_DIST,
-                                    surface_vessel_weight=SURF_DIST_WEIGHT,
-                                    curvature_threshold=CURVATURE_THRESHOLD,
-                                    curvature_weight=CURVATURE_WEIGHT,
-                                )
-                            ),
-                            success_filter=target_lane_success_filter,
-                        )
+                target_lane_outer_objective_config = (
+                    build_target_lane_outer_objective_config(
+                        boozer_surface,
+                        bs,
+                        banana_curve,
+                        VV,
+                        non_qs_weight=1.0,
+                        residual_weight=RES_WEIGHT,
+                        iota_weight=IOTAS_WEIGHT,
+                        length_weight=LENGTH_WEIGHT,
+                        length_target=length_target,
+                        curve_curve_threshold=CC_DIST,
+                        curve_curve_weight=CC_WEIGHT,
+                        curve_surface_threshold=CS_DIST,
+                        curve_surface_weight=CS_WEIGHT,
+                        surface_vessel_threshold=SS_DIST,
+                        surface_vessel_weight=SURF_DIST_WEIGHT,
+                        curvature_threshold=CURVATURE_THRESHOLD,
+                        curvature_weight=CURVATURE_WEIGHT,
                     )
+                )
+                configure_single_stage_target_lane_accepted_step_sync(
+                    adapter,
+                    boozer_surface,
+                    bs,
+                    iota_target,
+                    use_target_lane=use_target_lane,
+                    outer_objective_config=target_lane_outer_objective_config,
+                    success_filter=target_lane_success_filter,
+                )
                 if use_target_lane:
                     _record_timing(
                         timings,

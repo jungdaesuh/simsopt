@@ -217,7 +217,19 @@ class SingleStageExampleTests(unittest.TestCase):
         }
 
     @staticmethod
-    def _make_reporting_runtime_builder(captured, runtime_summary):
+    def _make_reporting_runtime_builder(
+        captured,
+        runtime_summary,
+        *,
+        objective_value=1.25,
+        objective_grad=None,
+    ):
+        resolved_grad = (
+            np.asarray(objective_grad, dtype=np.float64)
+            if objective_grad is not None
+            else np.array([0.3, -0.4], dtype=np.float64)
+        )
+
         def _runtime_builder(
             boozer_surface,
             bs,
@@ -239,7 +251,18 @@ class SingleStageExampleTests(unittest.TestCase):
                 captured["reporting_metrics_kwargs"] = kwargs
                 return runtime_summary
 
-            return {"reporting_metrics": _reporting_metrics}
+            def _value_and_grad(coil_dofs):
+                del coil_dofs
+                captured["value_and_grad_called"] = True
+                return (
+                    jnp.asarray(objective_value, dtype=jnp.float64),
+                    jnp.asarray(resolved_grad, dtype=jnp.float64),
+                )
+
+            return {
+                "reporting_metrics": _reporting_metrics,
+                "value_and_grad": _value_and_grad,
+            }
 
         return _runtime_builder
 
@@ -3529,10 +3552,16 @@ class SingleStageExampleTests(unittest.TestCase):
             captured["reporting_metrics_kwargs"],
             {"include_distance_metrics": True},
         )
+        self.assertTrue(captured["value_and_grad_called"])
         self.assertIn("objective_value", summary)
         self.assertEqual(
             summary["reporting_metrics"]["final_non_qs"],
             runtime_summary["final_non_qs"],
+        )
+        self.assertEqual(run_dict["J"], summary["objective_value"])
+        np.testing.assert_allclose(
+            run_dict["dJ"],
+            np.array([0.3, -0.4], dtype=np.float64),
         )
         self.assertTrue(run_dict["hardware_constraint_status"]["success"])
         np.testing.assert_allclose(
@@ -3601,6 +3630,7 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         self.assertIn("objective_value", summary)
+        self.assertNotIn("value_and_grad_called", captured)
         self.assertNotIn("hardware_constraint_status", run_dict)
         self.assertNotIn("target_lane_reporting_metrics", run_dict)
         self.assertNotIn("target_lane_reporting_coil_dofs", run_dict)
@@ -4461,6 +4491,66 @@ class SingleStageExampleTests(unittest.TestCase):
         )
 
         self.assertIs(resolved_callback, observe_accepted_step)
+
+    def test_configure_target_lane_accepted_step_sync_installs_array_native_sync(
+        self,
+    ):
+        module = self.load_module()
+        adapter = types.SimpleNamespace(
+            accepted_step_state_sync=None,
+            reevaluate_before_accept=True,
+        )
+        configured_sync = object()
+
+        with patch.object(
+            module,
+            "build_single_stage_target_lane_accepted_step_sync",
+            return_value=configured_sync,
+        ) as build_sync:
+            module.configure_single_stage_target_lane_accepted_step_sync(
+                adapter,
+                "booz",
+                "bs",
+                0.2,
+                use_target_lane=True,
+                outer_objective_config={"kind": "outer"},
+                success_filter="filter",
+            )
+
+        self.assertIs(adapter.accepted_step_state_sync, configured_sync)
+        self.assertFalse(adapter.reevaluate_before_accept)
+        build_sync.assert_called_once_with(
+            "booz",
+            "bs",
+            0.2,
+            outer_objective_config={"kind": "outer"},
+            success_filter="filter",
+        )
+
+    def test_configure_target_lane_accepted_step_sync_skips_non_target_lane(self):
+        module = self.load_module()
+        adapter = types.SimpleNamespace(
+            accepted_step_state_sync=None,
+            reevaluate_before_accept=True,
+        )
+
+        with patch.object(
+            module,
+            "build_single_stage_target_lane_accepted_step_sync",
+            side_effect=AssertionError("non-target lane should not build sync"),
+        ):
+            module.configure_single_stage_target_lane_accepted_step_sync(
+                adapter,
+                "booz",
+                "bs",
+                0.2,
+                use_target_lane=False,
+                outer_objective_config={"kind": "outer"},
+                success_filter="filter",
+            )
+
+        self.assertIsNone(adapter.accepted_step_state_sync)
+        self.assertTrue(adapter.reevaluate_before_accept)
 
     def test_resolve_target_lane_post_run_state_sync_uses_explicit_state_sync_when_callback_active(
         self,
