@@ -630,6 +630,7 @@ def evaluate_topology_gate(
         nphis=1,
         inset_fraction=0.05,
         field_policy="never",
+        compute_transport_diagnostics=False,
     )
     earliest_exit = topology_result["first_exit"]
     return _finalize_topology_gate_status(

@@ -863,12 +863,16 @@ def score_topology(
     inset_fraction=0.05,
     field_policy=None,
     interpolation_grid=None,
+    compute_transport_diagnostics=True,
 ):
     """Score field-line confinement on a Boozer surface.
 
     Seeding is a midplane radial sweep (phi=0, Z=0). Returns a dict with
     survival_fraction, mean_exit_time, stop_reason_counts, per-line metrics,
-    and kam_fraction (a seed-independent confinement proxy).
+    and kam_fraction (a seed-independent confinement proxy). When
+    compute_transport_diagnostics is False, skips the surface-field structure
+    computation and returns a not-evaluated stub (used by the search-time
+    gate, which does not consume transport diagnostics for its decision).
     """
     from simsopt.field import compute_fieldlines
 
@@ -888,7 +892,12 @@ def score_topology(
         field_policy=resolved_field_policy,
         interpolation_grid=interpolation_grid,
     )
-    transport_diagnostics = compute_topology_transport_diagnostics(surface, traced_field)
+    if compute_transport_diagnostics:
+        transport_diagnostics = compute_topology_transport_diagnostics(surface, traced_field)
+    else:
+        transport_diagnostics = topology_transport_diagnostics_not_evaluated(
+            "skipped_by_caller"
+        )
 
     radii = midplane_seed_radii(surface, nfieldlines, inset_fraction=inset_fraction)
     seed_contract = build_midplane_seed_contract(nfieldlines, inset_fraction, radii)
