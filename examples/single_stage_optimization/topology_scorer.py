@@ -14,6 +14,9 @@ import numpy as np
 import simsoptpp as sopp
 
 
+SEED_MODE_MIDPLANE = "midplane_radial_sweep"
+
+
 # ---------------------------------------------------------------------------
 # Helpers (previously duplicated across poincare_surfaces.py and the solver)
 # ---------------------------------------------------------------------------
@@ -30,6 +33,21 @@ def midplane_seed_radii(surf, nfieldlines, inset_fraction=0.05, min_inset=0.01):
     span = rout - rin
     inset = min(max(inset_fraction * span, min_inset), 0.45 * span)
     return np.linspace(rin + inset, rout - inset, nfieldlines)
+
+
+def build_midplane_seed_contract(nfieldlines, inset_fraction, radii=None):
+    contract = {
+        "mode": SEED_MODE_MIDPLANE,
+        "nplanes": 1,
+        "nfieldlines": int(nfieldlines),
+        "inset_fraction": float(inset_fraction),
+        "phi": 0.0,
+        "Z": 0.0,
+    }
+    if radii is not None and len(radii) > 0:
+        contract["r_min"] = float(np.min(radii))
+        contract["r_max"] = float(np.max(radii))
+    return contract
 
 
 def padded_bounds(rmin, rmax, zmax, radial_padding_fraction=0.05, axial_padding_fraction=0.05):
@@ -691,7 +709,7 @@ def kam_fraction(fieldlines_phi_hits, cross_section_span, width_ratio=0.25):
             bounded += 1
     if total == 0:
         return 0.0, 0.0
-    return float(bounded) / float(total), float(np.median(widths)) if widths else 0.0
+    return float(bounded) / float(total), float(np.median(widths))
 
 
 def cross_section_span(surface):
@@ -848,16 +866,9 @@ def score_topology(
 ):
     """Score field-line confinement on a Boozer surface.
 
-    This is the reusable entry point for all topology scoring:
-    - search-time gate: nfieldlines=4, tmax=2
-    - callback medium scorer: nfieldlines=12, tmax=50
-    - strict validation: nfieldlines=30-50, tmax=7000
-
-    Seeding: midplane radial sweep (phi=0, Z=0), matching upstream SIMSOPT
-    conventions (tracing_fieldlines_NCSX.py, tracing_fieldlines_QA.py).
-
-    Returns a dict with survival_fraction, mean_exit_time, stop_reason_counts,
-    per-line metrics, and kam_fraction (a seed-independent confinement proxy).
+    Seeding is a midplane radial sweep (phi=0, Z=0). Returns a dict with
+    survival_fraction, mean_exit_time, stop_reason_counts, per-line metrics,
+    and kam_fraction (a seed-independent confinement proxy).
     """
     from simsopt.field import compute_fieldlines
 
@@ -880,16 +891,7 @@ def score_topology(
     transport_diagnostics = compute_topology_transport_diagnostics(surface, traced_field)
 
     radii = midplane_seed_radii(surface, nfieldlines, inset_fraction=inset_fraction)
-    seed_contract = {
-        "mode": "midplane_radial_sweep",
-        "nplanes": 1,
-        "nfieldlines": int(nfieldlines),
-        "inset_fraction": float(inset_fraction),
-        "phi": 0.0,
-        "Z": 0.0,
-        "r_min": float(np.min(radii)) if nfieldlines > 0 else 0.0,
-        "r_max": float(np.max(radii)) if nfieldlines > 0 else 0.0,
-    }
+    seed_contract = build_midplane_seed_contract(nfieldlines, inset_fraction, radii)
     fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
         traced_field,
         radii,
@@ -958,30 +960,6 @@ def safe_score_topology(
     tol=1e-7,
     **kwargs,
 ):
-    resolved_field_policy = kwargs.get("field_policy")
-    if resolved_field_policy is None:
-        resolved_field_policy = "auto"
-    seed_contract = {
-        "mode": "midplane_radial_sweep",
-        "nplanes": 1,
-        "nfieldlines": int(nfieldlines),
-        "inset_fraction": float(kwargs.get("inset_fraction", 0.05)),
-        "phi": 0.0,
-        "Z": 0.0,
-    }
-    field_model = {
-        "policy": str(resolved_field_policy),
-        "selected_mode": "native",
-        "reason": "uninitialized",
-        "tmax_threshold": float(TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD),
-        "grid": None,
-        "max_abs_error": None,
-        "mean_abs_error": None,
-        "max_rel_error": None,
-    }
-    transport_diagnostics = topology_transport_diagnostics_not_evaluated(
-        "topology_score_failed_before_transport_metrics"
-    )
     try:
         return finalize_topology_score_result(
             score_topology(
@@ -994,6 +972,17 @@ def safe_score_topology(
             )
         )
     except Exception as error:
+        resolved_field_policy = kwargs.get("field_policy") or "auto"
+        field_model = {
+            "policy": str(resolved_field_policy),
+            "selected_mode": "native",
+            "reason": "uninitialized",
+            "tmax_threshold": float(TOPOLOGY_INTERPOLATION_TMAX_THRESHOLD),
+            "grid": None,
+            "max_abs_error": None,
+            "mean_abs_error": None,
+            "max_rel_error": None,
+        }
         return finalize_topology_score_result(
             empty_topology_score_result(
                 nfieldlines,
@@ -1003,9 +992,14 @@ def safe_score_topology(
                     "surrogate_early_exit_threshold",
                     0.0,
                 ),
-                seed_contract=seed_contract,
+                seed_contract=build_midplane_seed_contract(
+                    nfieldlines,
+                    kwargs.get("inset_fraction", 0.05),
+                ),
                 field_model=field_model,
-                transport_diagnostics=transport_diagnostics,
+                transport_diagnostics=topology_transport_diagnostics_not_evaluated(
+                    "topology_score_failed_before_transport_metrics"
+                ),
             ),
             error_message=str(error) or repr(error),
             error_type=type(error).__name__,

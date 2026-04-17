@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from topology_scorer import (
     trace_metrics as _trace_metrics,
     midplane_seed_radii,
+    build_midplane_seed_contract,
     build_stopping_criteria,
     prepare_topology_field,
     topology_iteration_limit,
@@ -164,11 +165,6 @@ if __name__ == "__main__":
 
 
     def trace_fieldlines(bfield):
-        # Midplane radial sweep matches upstream SIMSOPT conventions
-        # (tracing_fieldlines_NCSX.py, tracing_fieldlines_QA.py). The R sweep
-        # covers the cross-section from near inner edge to near outer edge,
-        # so the rendered Poincare faithfully reflects the topology rather
-        # than being biased toward the boundary.
         seed_inset_fraction = 0.05
         radii = midplane_seed_radii(
             surf,
@@ -177,16 +173,7 @@ if __name__ == "__main__":
         )
         Z0 = np.zeros(nfieldlines)
         phis = [(i/4)*(2*np.pi/nfp) for i in range(4)]
-        seed_contract = {
-            "mode": "midplane_radial_sweep",
-            "nplanes": 1,
-            "nfieldlines": int(nfieldlines),
-            "inset_fraction": float(seed_inset_fraction),
-            "phi": 0.0,
-            "Z": 0.0,
-            "r_min": float(np.min(radii)),
-            "r_max": float(np.max(radii)),
-        }
+        seed_contract = build_midplane_seed_contract(nfieldlines, seed_inset_fraction, radii)
 
         def trace_and_plot(stopping_criteria, stop_labels, suffix, label, mode):
             fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
