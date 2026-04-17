@@ -119,7 +119,9 @@ from banana_opt.hardware_contracts import (
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
     TF_CURRENT_HARD_LIMIT_A,
+    VACUUM_VESSEL_MAJOR_RADIUS_M,
     validate_banana_winding_surface_radius,
+    validate_major_radius,
     validate_tf_current_limit,
 )
 from banana_opt.hardware_constraint_schema import (
@@ -230,7 +232,7 @@ SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES = (
 )
 DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
     "wout_nfp22ginsburg_000_014417_iota15.nc": {
-        "major_radius": 0.915,
+        "major_radius": VACUUM_VESSEL_MAJOR_RADIUS_M,
         "toroidal_flux": 0.24,
         "length_weight": 0.0005,
         "cc_weight": 100.0,
@@ -243,7 +245,7 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "banana_init_current_A": 1.0e4,
     },
     "wout_nfp22ginsburg_000_002084_iota20.nc": {
-        "major_radius": 0.975,
+        "major_radius": VACUUM_VESSEL_MAJOR_RADIUS_M,
         "toroidal_flux": 0.24,
         "length_weight": 0.0005,
         "cc_weight": 100.0,
@@ -674,7 +676,9 @@ def build_equilibrium_path(args):
 def apply_default_stage2_seed_args(args):
     default_seed = DEFAULT_STAGE2_SEEDS_BY_PLASMA.get(args.plasma_surf_filename, {})
     if args.stage2_seed_major_radius is None:
-        args.stage2_seed_major_radius = default_seed.get("major_radius", 0.915)
+        args.stage2_seed_major_radius = default_seed.get(
+            "major_radius", VACUUM_VESSEL_MAJOR_RADIUS_M
+        )
     if args.stage2_seed_toroidal_flux is None:
         args.stage2_seed_toroidal_flux = default_seed.get("toroidal_flux", 0.24)
     if args.stage2_seed_length_weight is None:
@@ -1254,6 +1258,16 @@ def parse_args():
         "--stage2-seed-major-radius",
         type=float,
         default=float(os.environ["STAGE2_SEED_MAJOR_RADIUS"]) if "STAGE2_SEED_MAJOR_RADIUS" in os.environ else None,
+    )
+    parser.add_argument(
+        "--accept-offspec-r0-seed",
+        action="store_true",
+        default=os.environ.get("ACCEPT_OFFSPEC_R0_SEED", "").lower() in {"1", "true", "yes"},
+        help=(
+            "Allow Stage 2 seed MAJOR_RADIUS to deviate from the vacuum-vessel "
+            "contract. Use only to reproduce historical artifacts; produces coils "
+            "that do not fit HBT-EP."
+        ),
     )
     parser.add_argument(
         "--stage2-seed-toroidal-flux",
@@ -5362,7 +5376,10 @@ if __name__ == "__main__":
         known_tf_current_A=args.stage2_seed_tf_current_A,
     )
     validate_stage2_seed_contract(stage2_results)
-    R0 = float(stage2_results["MAJOR_RADIUS"])
+    R0 = validate_major_radius(
+        float(stage2_results["MAJOR_RADIUS"]),
+        accept_offspec=args.accept_offspec_r0_seed,
+    )
     s = float(stage2_results["TOROIDAL_FLUX"])
     order = int(stage2_results.get("order", args.stage2_seed_order))
 
@@ -6827,6 +6844,7 @@ if __name__ == "__main__":
         "RES_WEIGHT": RES_WEIGHT,
         "IOTAS_WEIGHT": IOTAS_WEIGHT,
         "MAJOR_RADIUS": R0,
+        "R0_OFF_SPEC": abs(float(R0) - VACUUM_VESSEL_MAJOR_RADIUS_M) > 1.0e-12,
         "TOROIDAL_FLUX": s,
         "banana_surf_radius": banana_surf_radius,
         "order": order,

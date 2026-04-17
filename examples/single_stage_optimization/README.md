@@ -406,7 +406,7 @@ Basic penalty-mode example:
 cd /path/to/simsopt-surrogate/examples/single_stage_optimization/STAGE_2
 python banana_coil_solver.py \
   --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
-  --major-radius 0.915 \
+  --major-radius 0.976 \
   --toroidal-flux 0.24 \
   --banana-surf-radius 0.21 \
   --constraint-method penalty
@@ -489,7 +489,7 @@ cd /path/to/simsopt-surrogate/examples/single_stage_optimization/SINGLE_STAGE
 python single_stage_banana_example.py \
   --stage2-source database \
   --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
-  --stage2-seed-major-radius 0.915 \
+  --stage2-seed-major-radius 0.976 \
   --stage2-seed-toroidal-flux 0.24 \
   --stage2-seed-banana-surf-radius 0.21 \
   --single-stage-goal-mode target \

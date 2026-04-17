@@ -106,7 +106,7 @@ class WorkflowHelpersTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "between 0 and 1 inclusive"):
             module.Stage2SeedSpec(
                 plasma_surf_filename="demo.nc",
-                major_radius=0.915,
+                major_radius=0.976,
                 toroidal_flux=1.2,
                 length_weight=0.0005,
                 cc_weight=100.0,
@@ -143,7 +143,7 @@ class WorkflowHelpersTests(unittest.TestCase):
         module = load_workflow_helpers_module()
         spec = module.Stage2SeedSpec(
             plasma_surf_filename="demo.nc",
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -177,7 +177,7 @@ class WorkflowHelpersTests(unittest.TestCase):
         module = load_workflow_helpers_module()
         spec = module.Stage2SeedSpec(
             plasma_surf_filename="demo.nc",
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -204,7 +204,7 @@ class WorkflowHelpersTests(unittest.TestCase):
         self.assertEqual(
             str(artifact_path),
             "/tmp/stage2-root/outputs-demo.nc/"
-            "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty/"
+            "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty/"
             "biot_savart_opt.json",
         )
 
@@ -212,7 +212,7 @@ class WorkflowHelpersTests(unittest.TestCase):
         module = load_workflow_helpers_module()
         spec = module.Stage2SeedSpec(
             plasma_surf_filename="demo.nc",
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -256,7 +256,7 @@ class WorkflowHelpersTests(unittest.TestCase):
         module = load_workflow_helpers_module()
         spec = module.Stage2SeedSpec(
             plasma_surf_filename="demo.nc",
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -285,7 +285,7 @@ class WorkflowHelpersTests(unittest.TestCase):
         module = load_workflow_helpers_module()
         spec = module.Stage2SeedSpec(
             plasma_surf_filename="demo.nc",
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -330,7 +330,7 @@ class WorkflowHelpersTests(unittest.TestCase):
         module = load_workflow_helpers_module()
         spec = module.Stage2SeedSpec(
             plasma_surf_filename="demo.nc",
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -383,7 +383,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
                 output_root=Path("/tmp/stage2"),
                 equilibria_dir=None,
                 tf_current_A=8.0e4,
-                major_radius=0.915,
+                major_radius=0.976,
                 toroidal_flux=-0.01,
                 length_weight=0.0005,
                 cc_weight=100.0,
@@ -446,7 +446,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             output_root=Path("/tmp/stage2"),
             equilibria_dir="/tmp/equilibria",
             tf_current_A=8.0e4,
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -481,7 +481,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             output_root=Path("/tmp/stage2"),
             equilibria_dir=None,
             tf_current_A=8.0e4,
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -517,7 +517,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             output_root=Path("/tmp/stage2"),
             equilibria_dir=None,
             tf_current_A=8.0e4,
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -571,7 +571,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             output_root=Path("/tmp/stage2"),
             equilibria_dir="/tmp/equilibria",
             tf_current_A=8.0e4,
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -619,7 +619,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             output_root=Path("/tmp/stage2"),
             equilibria_dir="/tmp/equilibria",
             tf_current_A=8.0e4,
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -659,7 +659,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             output_root=Path("/tmp/stage2"),
             equilibria_dir="/tmp/equilibria",
             tf_current_A=8.0e4,
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -702,7 +702,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             output_root=Path("/tmp/stage2"),
             equilibria_dir=None,
             tf_current_A=8.0e4,
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -739,7 +739,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             output_root=Path("/tmp/stage2"),
             equilibria_dir=None,
             tf_current_A=8.0e4,
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -840,7 +840,7 @@ class BaselineSweepScriptTests(unittest.TestCase):
             "TF_CURRENT_A": 8.0e4,
             "TF_CURRENT_SUM_ABS_A": 1.6e6,
             "NUM_TF_COILS": 20,
-            "MAJOR_RADIUS": 0.915,
+            "MAJOR_RADIUS": 0.976,
             "TOROIDAL_FLUX": 0.24,
             "LENGTH_WEIGHT": 0.0005,
             "CC_WEIGHT": 100.0,
@@ -864,7 +864,7 @@ class BaselineSweepScriptTests(unittest.TestCase):
             "output_root": output_root,
             "equilibria_dir": None,
             "tf_current_A": 8.0e4,
-            "major_radius": 0.915,
+            "major_radius": 0.976,
             "toroidal_flux": 0.24,
             "length_weight": 0.0005,
             "cc_weight": 100.0,
@@ -893,7 +893,7 @@ class BaselineSweepScriptTests(unittest.TestCase):
             plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
             equilibria_dir=None,
             tf_current_A=8.0e4,
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             stage2_length_weight=0.0005,
             stage2_cc_weight=100.0,

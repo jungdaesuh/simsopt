@@ -873,7 +873,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             spec_path = Path(tmpdir) / "stage2_spec.json"
-            spec_path.write_text(json.dumps({"major_radius": 0.915}), encoding="utf-8")
+            spec_path.write_text(json.dumps({"major_radius": 0.976}), encoding="utf-8")
             args = make_stage2_alm_wrapper_args(
                 profile=None,
                 stage2_spec_json=str(spec_path),
@@ -1007,7 +1007,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             spec_path.write_text(
                 json.dumps(
                     {
-                        "major_radius": 0.915,
+                        "major_radius": 0.976,
                         "toroidal_flux": 0.24,
                         "length_weight": 5.0e-4,
                         "cc_weight": 100.0,
@@ -1088,7 +1088,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             spec_path.write_text(
                 json.dumps(
                     {
-                        "major_radius": 0.915,
+                        "major_radius": 0.976,
                         "toroidal_flux": 0.24,
                         "length_weight": 5.0e-4,
                         "cc_weight": 100.0,
@@ -1172,7 +1172,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             disabled_spec_path.write_text(
                 json.dumps(
                     {
-                        "major_radius": 0.915,
+                        "major_radius": 0.976,
                         "toroidal_flux": 0.24,
                         "length_weight": 5.0e-4,
                         "cc_weight": 100.0,
@@ -1212,7 +1212,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             enabled_spec_path.write_text(
                 json.dumps(
                     {
-                        "major_radius": 0.915,
+                        "major_radius": 0.976,
                         "toroidal_flux": 0.24,
                         "length_weight": 5.0e-4,
                         "cc_weight": 100.0,

@@ -39,6 +39,7 @@ from banana_opt.hardware_contracts import (  # noqa: E402
     COIL_PLASMA_MIN_DIST_M,
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
+    VACUUM_VESSEL_MAJOR_RADIUS_M,
     fixed_stage2_artifact_hardware_contract,
     fixed_stage2_clearance_contract,
     TF_CURRENT_HARD_LIMIT_A,
@@ -50,7 +51,7 @@ STAGE2_CC_THRESHOLD_FLOOR = COIL_COIL_MIN_DIST_M
 STAGE2_CURVATURE_THRESHOLD_CEILING = MAX_CURVATURE_INV_M
 DEFAULT_SUMMARY_JSON = "stage2_alm_summary.json"
 _BASE_STAGE2_PROFILE = {
-    "major_radius": 0.915,
+    "major_radius": VACUUM_VESSEL_MAJOR_RADIUS_M,
     "toroidal_flux": 0.24,
     "length_weight": 0.0005,
     "cc_weight": 100.0,

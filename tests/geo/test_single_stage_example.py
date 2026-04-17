@@ -735,7 +735,7 @@ class SingleStageExampleTests(unittest.TestCase):
             parent.mkdir(parents=True)
             matched = (
                 parent
-                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty-BH=3"
+                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty-BH=3"
                 / "biot_savart_opt.json"
             )
             matched.parent.mkdir(parents=True)
@@ -744,7 +744,7 @@ class SingleStageExampleTests(unittest.TestCase):
             args = SimpleNamespace(
                 stage2_bs_path=None,
                 plasma_surf_filename="demo.nc",
-                stage2_seed_major_radius=0.915,
+                stage2_seed_major_radius=0.976,
                 stage2_seed_toroidal_flux=0.24,
                 stage2_seed_length_weight=0.0005,
                 stage2_seed_cc_weight=100.0,
@@ -773,7 +773,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 candidate = (
                     parent
                     / (
-                        "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-"
+                        "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-"
                         f"SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2{suffix}"
                     )
                     / "biot_savart_opt.json"
@@ -784,7 +784,7 @@ class SingleStageExampleTests(unittest.TestCase):
             args = SimpleNamespace(
                 stage2_bs_path=None,
                 plasma_surf_filename="demo.nc",
-                stage2_seed_major_radius=0.915,
+                stage2_seed_major_radius=0.976,
                 stage2_seed_toroidal_flux=0.24,
                 stage2_seed_length_weight=0.0005,
                 stage2_seed_cc_weight=100.0,
@@ -6687,7 +6687,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
         module = load_single_stage_example_module()
         seed_spec = module.Stage2SeedSpec(
             plasma_surf_filename="dummy.nc",
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -6821,7 +6821,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             outputs_dir = Path(tmpdir) / "outputs-demo.nc"
             current_dir = (
                 outputs_dir
-                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty"
+                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty"
             )
             current_dir.mkdir(parents=True)
             expected_path = current_dir / "biot_savart_opt.json"
@@ -6833,7 +6833,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 local_stage2_root=tmpdir,
                 database_stage2_root="/unused",
                 plasma_surf_filename="demo.nc",
-                stage2_seed_major_radius=0.915,
+                stage2_seed_major_radius=0.976,
                 stage2_seed_toroidal_flux=0.24,
                 stage2_seed_length_weight=0.0005,
                 stage2_seed_cc_weight=100.0,
@@ -6855,7 +6855,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             outputs_dir = Path(tmpdir) / "outputs-demo.nc"
             legacy_dir = (
                 outputs_dir
-                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.220-Order=2-BH=3-BS=0.01-BSeed=7"
+                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.220-Order=2-BH=3-BS=0.01-BSeed=7"
             )
             legacy_dir.mkdir(parents=True)
             expected_path = legacy_dir / "biot_savart_opt.json"
@@ -6867,7 +6867,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 local_stage2_root=tmpdir,
                 database_stage2_root="/unused",
                 plasma_surf_filename="demo.nc",
-                stage2_seed_major_radius=0.915,
+                stage2_seed_major_radius=0.976,
                 stage2_seed_toroidal_flux=0.24,
                 stage2_seed_length_weight=0.0005,
                 stage2_seed_cc_weight=100.0,
@@ -6889,7 +6889,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             outputs_dir = Path(tmpdir) / "outputs-demo.nc"
             legacy_dir = (
                 outputs_dir
-                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty"
+                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty"
             )
             legacy_dir.mkdir(parents=True)
             expected_path = legacy_dir / "biot_savart_opt.json"
@@ -6901,7 +6901,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 local_stage2_root=tmpdir,
                 database_stage2_root="/unused",
                 plasma_surf_filename="demo.nc",
-                stage2_seed_major_radius=0.915,
+                stage2_seed_major_radius=0.976,
                 stage2_seed_toroidal_flux=0.24,
                 stage2_seed_length_weight=0.0005,
                 stage2_seed_cc_weight=100.0,
@@ -6921,7 +6921,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             outputs_dir = Path(tmpdir) / "outputs-demo.nc"
-            legacy_dir = outputs_dir / "MR=0.915-TF=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.22-INITC=10000-TFC=80000-Order=2"
+            legacy_dir = outputs_dir / "MR=0.976-TF=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.22-INITC=10000-TFC=80000-Order=2"
             legacy_dir.mkdir(parents=True)
             expected_path = legacy_dir / "biot_savart_opt.json"
             expected_path.write_text("{}", encoding="utf-8")
@@ -6932,7 +6932,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 local_stage2_root="/unused",
                 database_stage2_root=tmpdir,
                 plasma_surf_filename="demo.nc",
-                stage2_seed_major_radius=0.915,
+                stage2_seed_major_radius=0.976,
                 stage2_seed_toroidal_flux=0.24,
                 stage2_seed_length_weight=0.0005,
                 stage2_seed_cc_weight=100.0,
@@ -6954,7 +6954,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             outputs_dir = Path(tmpdir) / "outputs-demo.nc"
             wataru_dir = (
                 outputs_dir
-                / "R0=0.915-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-FCM=wataru_proxy_field-PPC=9000-VFC=500-VFT=wataru_vf_template-CM=penalty"
+                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-FCM=wataru_proxy_field-PPC=9000-VFC=500-VFT=wataru_vf_template-CM=penalty"
             )
             wataru_dir.mkdir(parents=True)
             expected_path = wataru_dir / "biot_savart_opt.json"
@@ -6966,7 +6966,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 local_stage2_root=tmpdir,
                 database_stage2_root="/unused",
                 plasma_surf_filename="demo.nc",
-                stage2_seed_major_radius=0.915,
+                stage2_seed_major_radius=0.976,
                 stage2_seed_toroidal_flux=0.24,
                 stage2_seed_length_weight=0.0005,
                 stage2_seed_cc_weight=100.0,
@@ -7665,7 +7665,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "tf_current_A": 8.0e4,
             "banana_init_current_A": 1.0e4,
             "banana_current_max_A": 1.6e4,
-            "major_radius": 0.915,
+            "major_radius": 0.976,
             "toroidal_flux": 0.24,
             "order": 2,
             "maxiter": 30,

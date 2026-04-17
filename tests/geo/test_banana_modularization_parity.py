@@ -596,7 +596,7 @@ class SnapshotParityTests(unittest.TestCase):
         base_args = dict(
             stage2_bs_path=None,
             plasma_surf_filename="demo.nc",
-            stage2_seed_major_radius=0.915,
+            stage2_seed_major_radius=0.976,
             stage2_seed_toroidal_flux=0.24,
             stage2_seed_length_weight=0.0005,
             stage2_seed_cc_weight=100.0,
@@ -613,7 +613,7 @@ class SnapshotParityTests(unittest.TestCase):
             tmp_path = Path(tmpdir)
             seed_spec = self.current_single_stage.Stage2SeedSpec(
                 plasma_surf_filename="demo.nc",
-                major_radius=0.915,
+                major_radius=0.976,
                 toroidal_flux=0.24,
                 length_weight=0.0005,
                 cc_weight=100.0,

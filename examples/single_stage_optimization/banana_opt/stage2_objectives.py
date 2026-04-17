@@ -14,6 +14,7 @@ from alm_utils import (
 )
 from banana_opt.hardware_contracts import (
     TF_CURRENT_HARD_LIMIT_A,
+    VACUUM_VESSEL_MAJOR_RADIUS_M,
     fixed_stage2_clearance_contract,
 )
 from banana_opt.hardware_constraint_schema import (
@@ -673,6 +674,7 @@ def build_stage2_results(
         "phi_width": phi_width,
         "LENGTH_TARGET": length_target,
         "MAJOR_RADIUS": major_radius,
+        "R0_OFF_SPEC": abs(float(major_radius) - VACUUM_VESSEL_MAJOR_RADIUS_M) > 1.0e-12,
         "TOROIDAL_FLUX": toroidal_flux,
         "NFP": int(nfp),
         "banana_surf_radius": banana_surf_radius,

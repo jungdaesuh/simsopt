@@ -64,6 +64,8 @@ from banana_opt.hardware_contracts import (
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
     TF_CURRENT_HARD_LIMIT_A,
+    VACUUM_VESSEL_MAJOR_RADIUS_M,
+    validate_major_radius,
     validate_tf_current_limit,
 )
 from banana_opt.hardware_constraint_schema import (
@@ -299,8 +301,24 @@ def parse_args():
     parser.add_argument(
         "--major-radius",
         type=float,
-        default=float(os.environ.get("MAJOR_RADIUS", "0.915")),
-        help="Target major radius used to rescale the plasma surface.",
+        default=float(
+            os.environ.get("MAJOR_RADIUS", str(VACUUM_VESSEL_MAJOR_RADIUS_M))
+        ),
+        help=(
+            "Vacuum-vessel major radius (fixed contract, "
+            f"= {VACUUM_VESSEL_MAJOR_RADIUS_M:.3f} m). "
+            "Off-spec values require --accept-offspec-r0-seed."
+        ),
+    )
+    parser.add_argument(
+        "--accept-offspec-r0-seed",
+        action="store_true",
+        default=os.environ.get("ACCEPT_OFFSPEC_R0_SEED", "").lower() in {"1", "true", "yes"},
+        help=(
+            "Allow --major-radius to deviate from the vacuum-vessel contract. "
+            "Use only to reproduce historical artifacts; produces coils that do "
+            "not fit HBT-EP."
+        ),
     )
     parser.add_argument(
         "--toroidal-flux",
@@ -1296,7 +1314,10 @@ def main(parsed_args=None):
     num_quadpoints = args.num_quadpoints # number of quadature points for coils
     order = args.order # number of Fourier modes for coils
 
-    R0 = args.major_radius # major radius
+    R0 = validate_major_radius(
+        args.major_radius,
+        accept_offspec=args.accept_offspec_r0_seed,
+    ) # major radius (vacuum-vessel contract)
     s = validate_normalized_toroidal_flux(
         args.toroidal_flux,
         field_name="--toroidal-flux",

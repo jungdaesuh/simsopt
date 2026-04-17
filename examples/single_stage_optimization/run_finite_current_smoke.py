@@ -29,6 +29,14 @@ from banana_opt.artifact_contracts import (  # noqa: E402
     validate_smoke_results as _validate_smoke_results_impl,
 )
 from banana_opt.current_contracts import physical_current_to_boozer_I  # noqa: E402
+from banana_opt.current_contracts import resolve_boozer_current_convention  # noqa: E402
+from banana_opt.hardware_contracts import (  # noqa: E402
+    BANANA_WINDING_MINOR_RADIUS_M,
+    COIL_COIL_MIN_DIST_M,
+    MAX_CURVATURE_INV_M,
+    TF_CURRENT_HARD_LIMIT_A,
+    VACUUM_VESSEL_MAJOR_RADIUS_M,
+)
 
 DEFAULT_PLASMA_SURF_FILENAME = "wout_nfp22ginsburg_000_014417_iota15.nc"
 DEFAULT_SMOKE_OUTPUT_ROOT = SCRIPT_DIR / "outputs_finite_current_smoke"
@@ -67,15 +75,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stage2-timeout-seconds", type=float, default=0.0)
     parser.add_argument("--single-stage-timeout-seconds", type=float, default=0.0)
     parser.add_argument("--currents-A", default="0,8000,-35200")
-    parser.add_argument("--tf-current-A", type=float, default=8.0e4)
-    parser.add_argument("--major-radius", type=float, default=0.915)
+    parser.add_argument("--tf-current-A", type=float, default=TF_CURRENT_HARD_LIMIT_A)
+    parser.add_argument("--major-radius", type=float, default=VACUUM_VESSEL_MAJOR_RADIUS_M)
     parser.add_argument("--toroidal-flux", type=float, default=0.24)
     parser.add_argument("--stage2-length-weight", type=float, default=0.0005)
     parser.add_argument("--stage2-cc-weight", type=float, default=100.0)
-    parser.add_argument("--stage2-cc-threshold", type=float, default=0.05)
+    parser.add_argument("--stage2-cc-threshold", type=float, default=COIL_COIL_MIN_DIST_M)
     parser.add_argument("--stage2-curvature-weight", type=float, default=0.0001)
-    parser.add_argument("--stage2-curvature-threshold", type=float, default=40.0)
-    parser.add_argument("--banana-surf-radius", type=float, default=0.22)
+    parser.add_argument("--stage2-curvature-threshold", type=float, default=MAX_CURVATURE_INV_M)
+    parser.add_argument("--banana-surf-radius", type=float, default=BANANA_WINDING_MINOR_RADIUS_M)
     parser.add_argument("--stage2-order", type=int, default=2)
     parser.add_argument("--nphi", type=int, default=41)
     parser.add_argument("--ntheta", type=int, default=16)
@@ -205,7 +213,10 @@ def validate_smoke_results(
     return _validate_smoke_results_impl(
         results,
         requested_current_A=requested_current_A,
-        expected_boozer_I=physical_current_to_boozer_I(requested_current_A),
+        expected_boozer_I=physical_current_to_boozer_I(
+            requested_current_A,
+            convention=resolve_boozer_current_convention("boozer_surrogate"),
+        ),
         expected_stage2_tf_current_A=expected_stage2_tf_current_A,
         expected_stage2_tf_current_sum_abs_A=expected_stage2_tf_current_sum_abs_A,
     )
