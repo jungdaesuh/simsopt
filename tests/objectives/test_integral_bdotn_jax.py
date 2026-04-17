@@ -291,7 +291,7 @@ class TestIntegralBdotNCppParity:
 
         np.testing.assert_allclose(J_jax, J_cpp, rtol=1e-13)
 
-    def test_cpp_zero_normal_quadratic_flux_nan_boundary_is_documented(self):
+    def test_cpp_zero_normal_quadratic_flux_returns_zero(self):
         import simsoptpp as sopp
 
         B = np.zeros((2, 3, 3))
@@ -305,10 +305,10 @@ class TestIntegralBdotNCppParity:
             )
         )
 
-        assert np.isnan(J_cpp)
+        np.testing.assert_allclose(J_cpp, 0.0, atol=0.0)
         np.testing.assert_allclose(J_jax, 0.0, atol=0.0)
 
-    def test_cpp_zero_field_normalized_nan_boundary_is_documented(self):
+    def test_cpp_zero_field_normalized_returns_inf(self):
         import simsoptpp as sopp
 
         B = np.zeros((2, 3, 3))
@@ -322,10 +322,10 @@ class TestIntegralBdotNCppParity:
             )
         )
 
-        assert np.isnan(J_cpp)
+        assert np.isinf(J_cpp)
         assert np.isinf(J_jax)
 
-    def test_cpp_zero_field_local_nan_boundary_is_documented(self):
+    def test_cpp_zero_field_local_returns_inf(self):
         import simsoptpp as sopp
 
         B = np.zeros((2, 3, 3))
@@ -337,7 +337,7 @@ class TestIntegralBdotNCppParity:
             integral_BdotN(jnp.array(B), jnp.array(target), jnp.array(normal), "local")
         )
 
-        assert np.isnan(J_cpp)
+        assert np.isinf(J_cpp)
         assert np.isinf(J_jax)
 
     def test_cpp_zero_field_local_with_target_returns_inf(self):
@@ -355,7 +355,7 @@ class TestIntegralBdotNCppParity:
         assert np.isinf(J_cpp)
         assert np.isinf(J_jax)
 
-    def test_cpp_zero_normal_local_nan_boundary_is_documented(self):
+    def test_cpp_zero_normal_local_returns_zero(self):
         import simsoptpp as sopp
 
         B = np.zeros((2, 3, 3))
@@ -367,7 +367,7 @@ class TestIntegralBdotNCppParity:
             integral_BdotN(jnp.array(B), jnp.array(target), jnp.array(normal), "local")
         )
 
-        assert np.isnan(J_cpp)
+        np.testing.assert_allclose(J_cpp, 0.0, atol=0.0)
         np.testing.assert_allclose(J_jax, 0.0, atol=0.0)
 
 
