@@ -122,7 +122,7 @@ def _mock_topology_score_result(
     first_exit_time,
     survival_fraction=0.5,
     survived_lines=1,
-    seed_tier="cheap",
+    seed_mode="midplane_radial_sweep",
     field_mode="native",
 ):
     return {
@@ -134,7 +134,7 @@ def _mock_topology_score_result(
             "first_exit_angle": 0.0,
             "stop_reason": str(stop_reason),
         },
-        "seed_contract": {"tier": str(seed_tier)},
+        "seed_contract": {"mode": str(seed_mode)},
         "field_model": {"selected_mode": str(field_mode)},
     }
 
@@ -1325,7 +1325,13 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(medium_vs_strict["false_pass_count"], 1)
         self.assertEqual(medium_vs_strict["false_reject_count"], 1)
         self.assertIsNotNone(cheap_vs_strict["spearman_rank_correlation"])
-        self.assertEqual(report["tier_specs"]["cheap"]["seed_tier"], "cheap")
+        self.assertEqual(report["schema_version"], "topology_fidelity_ladder_v2")
+        cheap_spec = report["tier_specs"]["cheap"]
+        self.assertEqual(
+            cheap_spec["seed_mode"],
+            "midplane_radial_sweep",
+        )
+        self.assertEqual(cheap_spec["inset_fraction"], 0.05)
         self.assertEqual(report["tier_specs"]["medium"]["field_policy"], "auto")
 
     def test_topology_gate_rejection_increment_scales_with_deficit(self):
@@ -7666,6 +7672,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "banana_init_current_A": 1.0e4,
             "banana_current_max_A": 1.6e4,
             "major_radius": 0.976,
+            "accept_offspec_r0_seed": False,
             "toroidal_flux": 0.24,
             "order": 2,
             "maxiter": 30,
@@ -7733,6 +7740,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         artifact_state_by_x=None,
         seed_stage2_results=None,
         arg_overrides=None,
+        missing_attr_names=(),
     ):
         module = load_stage2_module()
         runtime = {
@@ -8063,6 +8071,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 basin_hops=basin_hops,
                 **({} if arg_overrides is None else dict(arg_overrides)),
             )
+            for attr_name in missing_attr_names:
+                delattr(args, attr_name)
 
             with ExitStack() as stack:
                 common_patches = [
@@ -8193,21 +8203,42 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             )
         )
 
-    def test_stage2_main_init_only_loads_seed_and_writes_results(self):
-        runtime = self._run_stage2_main(init_only=True, constraint_method="penalty", use_seed=True)
-
+    def _assert_init_only_runtime_counts(self, runtime, *, seed_loads, initialize_calls):
         self._assert_runtime_counts(
             runtime,
-            seed_loads=1,
-            initialize_calls=0,
+            seed_loads=seed_loads,
+            initialize_calls=initialize_calls,
             minimize_calls=0,
             minimize_alm_calls=0,
         )
         self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "init_only")
+
+    def test_stage2_main_init_only_loads_seed_and_writes_results(self):
+        runtime = self._run_stage2_main(init_only=True, constraint_method="penalty", use_seed=True)
+
+        self._assert_init_only_runtime_counts(
+            runtime,
+            seed_loads=1,
+            initialize_calls=0,
+        )
         self.assertTrue(runtime["results"]["OPTIMIZER_SUCCESS"])
         self.assertEqual(runtime["results"]["iterations"], 0)
         self.assertTrue(runtime["results"]["HARDWARE_CONSTRAINTS_OK"])
         self.assertTrue(runtime["results"]["STAGE2_BS_PATH"].endswith("seed.json"))
+
+    def test_stage2_main_injected_args_without_accept_offspec_flag_use_parser_default(self):
+        runtime = self._run_stage2_main(
+            init_only=True,
+            constraint_method="penalty",
+            use_seed=True,
+            missing_attr_names=("accept_offspec_r0_seed",),
+        )
+
+        self._assert_init_only_runtime_counts(
+            runtime,
+            seed_loads=1,
+            initialize_calls=0,
+        )
 
     def test_stage2_main_rejects_wataru_seed_without_results_sidecar(self):
         with self.assertRaisesRegex(ValueError, "results.json sidecar"):
@@ -8231,14 +8262,11 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             },
         )
 
-        self._assert_runtime_counts(
+        self._assert_init_only_runtime_counts(
             runtime,
             seed_loads=0,
             initialize_calls=1,
-            minimize_calls=0,
-            minimize_alm_calls=0,
         )
-        self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "init_only")
         self.assertEqual(runtime["results"]["FINITE_CURRENT_MODE"], "wataru_proxy_field")
         self.assertEqual(runtime["results"]["NUM_PROXY_COILS"], 1)
         self.assertEqual(runtime["results"]["NUM_VF_COILS"], 1)
@@ -8280,14 +8308,11 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             },
         )
 
-        self._assert_runtime_counts(
+        self._assert_init_only_runtime_counts(
             runtime,
             seed_loads=1,
             initialize_calls=0,
-            minimize_calls=0,
-            minimize_alm_calls=0,
         )
-        self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "init_only")
         self.assertEqual(runtime["results"]["FINITE_CURRENT_MODE"], "wataru_proxy_field")
         self.assertEqual(runtime["results"]["NUM_PROXY_COILS"], 1)
         self.assertEqual(runtime["results"]["NUM_VF_COILS"], 1)
@@ -8493,14 +8518,11 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
     def test_stage2_main_fresh_init_path_uses_initialize_coils(self):
         runtime = self._run_stage2_main(init_only=True, constraint_method="penalty", use_seed=False)
 
-        self._assert_runtime_counts(
+        self._assert_init_only_runtime_counts(
             runtime,
             seed_loads=0,
             initialize_calls=1,
-            minimize_calls=0,
-            minimize_alm_calls=0,
         )
-        self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "init_only")
         self.assertIsNone(runtime["results"]["STAGE2_BS_PATH"])
 
 

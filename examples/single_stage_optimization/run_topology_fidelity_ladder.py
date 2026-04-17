@@ -27,8 +27,9 @@ from topology_scorer import safe_score_topology
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Evaluate cheap / medium / strict topology tiers on one or more "
-            "single-stage output directories and write a JSON fidelity-ladder report."
+            "Evaluate cheap / medium / strict topology fidelity settings on one "
+            "or more single-stage output directories and write a JSON report. "
+            "All three settings use the shared midplane radial sweep seed contract."
         )
     )
     parser.add_argument(
@@ -64,6 +65,27 @@ def resolve_field_and_surface(output_dir: str | Path) -> tuple[object, object, s
     )
 
 
+def build_tier_case_record(
+    result: dict[str, object],
+    *,
+    survival_threshold: float,
+) -> dict[str, object]:
+    return {
+        "passed": topology_tier_passed(
+            result,
+            survival_threshold=survival_threshold,
+        ),
+        "survival_fraction": float(result["survival_fraction"]),
+        "confinement_score": float(result["confinement_score"]),
+        "broken": bool(result["broken"]),
+        "evaluation_state": result["evaluation_state"],
+        "evaluation_error": result.get("evaluation_error"),
+        "evaluation_error_type": result.get("evaluation_error_type"),
+        "seed_contract": result.get("seed_contract"),
+        "field_model": result.get("field_model"),
+    }
+
+
 def evaluate_case(output_dir: str | Path) -> dict[str, object]:
     bfield, surface, field_label = resolve_field_and_surface(output_dir)
     case_record: dict[str, object] = {
@@ -78,22 +100,13 @@ def evaluate_case(output_dir: str | Path) -> dict[str, object]:
             nfieldlines=tier_spec.nfieldlines,
             tmax=tier_spec.tmax,
             nphis=tier_spec.nphis,
+            inset_fraction=tier_spec.inset_fraction,
             field_policy=tier_spec.field_policy,
         )
-        case_record[tier_name] = {
-            "passed": topology_tier_passed(
-                result,
-                survival_threshold=tier_spec.survival_threshold,
-            ),
-            "survival_fraction": float(result["survival_fraction"]),
-            "confinement_score": float(result["confinement_score"]),
-            "broken": bool(result["broken"]),
-            "evaluation_state": result["evaluation_state"],
-            "evaluation_error": result.get("evaluation_error"),
-            "evaluation_error_type": result.get("evaluation_error_type"),
-            "seed_contract": result.get("seed_contract"),
-            "field_model": result.get("field_model"),
-        }
+        case_record[tier_name] = build_tier_case_record(
+            result,
+            survival_threshold=tier_spec.survival_threshold,
+        )
     return case_record
 
 
