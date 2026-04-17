@@ -2672,6 +2672,24 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertTrue(args.record_target_lane_invalid_state_events)
 
+    def test_parse_args_accepts_diagnostic_callbacks(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--diagnostic-callbacks",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.diagnostic_callbacks)
+        self.assertTrue(args.record_target_lane_invalid_state_events)
+
     def test_parse_args_accepts_minimal_artifacts(self):
         module = self.load_module()
 
@@ -2796,6 +2814,15 @@ class SingleStageExampleTests(unittest.TestCase):
             )
         )
 
+    def test_target_lane_diagnostic_callbacks_enabled_accepts_new_flag(self):
+        module = self.load_module()
+
+        self.assertTrue(
+            module.target_lane_diagnostic_callbacks_enabled(
+                types.SimpleNamespace(diagnostic_callbacks=True)
+            )
+        )
+
     def test_resolve_target_lane_invalid_state_failure_callback_requires_opt_in(self):
         module = self.load_module()
         events = []
@@ -2839,6 +2866,53 @@ class SingleStageExampleTests(unittest.TestCase):
             0,
         )
         self.assertEqual(len(events), 1)
+
+    def test_extend_target_lane_invalid_state_events_from_result_uses_structured_log(
+        self,
+    ):
+        module = self.load_module()
+        events = []
+        result = types.SimpleNamespace(
+            invalid_step_log=[
+                {
+                    "iteration": 4,
+                    "step_scale": 0.125,
+                    "line_search_failed": False,
+                    "nonfinite_step": True,
+                    "stalled_step": False,
+                    "valid_curvature": False,
+                    "trial_converged": False,
+                    "ls_status": 2,
+                }
+            ]
+        )
+
+        module.extend_target_lane_invalid_state_events_from_result(
+            events,
+            result,
+            phase="phase1",
+        )
+
+        self.assertEqual(
+            events,
+            [
+                {
+                    "phase": "phase1",
+                    "iteration": 4,
+                    "step_scale": {
+                        "value": 0.125,
+                        "finite": True,
+                        "classification": None,
+                    },
+                    "line_search_failed": False,
+                    "nonfinite_step": True,
+                    "stalled_step": False,
+                    "valid_curvature": False,
+                    "trial_converged": False,
+                    "ls_status": 2,
+                }
+            ],
+        )
 
     def test_resolve_single_stage_outer_maxls_rejects_nonpositive_budget(self):
         module = self.load_module()
@@ -4671,6 +4745,56 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(captured["options"]["initial_step_size"], 1.0e-4)
         self.assertEqual(result.message, "ok")
 
+    def _build_target_lane_retry_result(
+        self,
+        *,
+        x,
+        nit,
+        success,
+        message,
+        status,
+        step_scale=None,
+        line_search_failed=True,
+        nonfinite_step=False,
+        stalled_step=False,
+        valid_curvature=True,
+        trial_converged=False,
+        ls_status=0,
+        nfev=None,
+        njev=None,
+    ):
+        result_x = (
+            x
+            if hasattr(x, "step_dofs") and hasattr(x, "anchor_dofs")
+            else np.asarray(x, dtype=float)
+        )
+        result = types.SimpleNamespace(
+            x=result_x,
+            nit=nit,
+            success=success,
+            message=message,
+            status=status,
+            invalid_step_log=[],
+        )
+        if step_scale is not None:
+            result.invalid_step_log = [
+                {
+                    "iteration": 1,
+                    "step_scale": float(step_scale),
+                    "line_search_failed": bool(line_search_failed),
+                    "nonfinite_step": bool(nonfinite_step),
+                    "stalled_step": bool(stalled_step),
+                    "valid_curvature": bool(valid_curvature),
+                    "trial_converged": bool(trial_converged),
+                    "ls_status": int(ls_status),
+                }
+            ]
+        if nfev is not None:
+            result.nfev = int(nfev)
+        if njev is not None:
+            result.njev = int(njev)
+        return result
+
     def test_run_single_stage_target_lane_optimizer_with_retries_retries_from_anchor(
         self,
     ):
@@ -4731,23 +4855,15 @@ class SingleStageExampleTests(unittest.TestCase):
                 }
             )
             if len(optimizer_calls) == 1:
-                invalid_state_events.append(
-                    {
-                        "line_search_failed": True,
-                        "nonfinite_step": False,
-                        "stalled_step": False,
-                        "valid_curvature": True,
-                        "step_scale": {"value": 0.2},
-                    }
-                )
-                return types.SimpleNamespace(
+                return self._build_target_lane_retry_result(
                     x=np.array([9.0, 9.0]),
                     nit=0,
                     success=False,
                     message="failed",
                     status=5,
+                    step_scale=0.2,
                 )
-            return types.SimpleNamespace(
+            return self._build_target_lane_retry_result(
                 x=np.array([1.0, 2.0]),
                 nit=1,
                 success=True,
@@ -4773,6 +4889,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 module.run_single_stage_target_lane_optimizer_with_retries(
                     lambda x: x,
                     np.array([0.0, 0.0]),
+                    phase="phase2",
                     callback=None,
                     retry_callback=retry_callback,
                     result_state_sync=None,
@@ -4859,23 +4976,15 @@ class SingleStageExampleTests(unittest.TestCase):
                 }
             )
             if len(optimizer_calls) == 1:
-                invalid_state_events.append(
-                    {
-                        "line_search_failed": True,
-                        "nonfinite_step": False,
-                        "stalled_step": False,
-                        "valid_curvature": True,
-                        "step_scale": {"value": 0.2},
-                    }
-                )
-                return types.SimpleNamespace(
+                return self._build_target_lane_retry_result(
                     x=np.array([9.0, 9.0]),
                     nit=1,
                     success=False,
                     message="failed",
                     status=5,
+                    step_scale=0.2,
                 )
-            return types.SimpleNamespace(
+            return self._build_target_lane_retry_result(
                 x=np.array([9.0, 9.0]),
                 nit=1,
                 success=True,
@@ -4911,6 +5020,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 module.run_single_stage_target_lane_optimizer_with_retries(
                     lambda x: x,
                     np.array([0.0, 0.0]),
+                    phase="phase2",
                     callback=None,
                     retry_callback=None,
                     result_state_sync=result_state_sync,
@@ -4993,6 +5103,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 module.run_single_stage_target_lane_optimizer_with_retries(
                     lambda x: x,
                     np.array([0.0, 0.0]),
+                    phase="phase2",
                     callback=None,
                     retry_callback=None,
                     result_state_sync=None,
@@ -5073,16 +5184,7 @@ class SingleStageExampleTests(unittest.TestCase):
             )
             observed_maxiters.append(maxiter)
             if len(observed_maxiters) == 1:
-                invalid_state_events.append(
-                    {
-                        "line_search_failed": True,
-                        "nonfinite_step": False,
-                        "stalled_step": False,
-                        "valid_curvature": True,
-                        "step_scale": {"value": 0.2},
-                    }
-                )
-                return types.SimpleNamespace(
+                return self._build_target_lane_retry_result(
                     x=np.array([9.0, 9.0]),
                     nit=2,
                     nfev=4,
@@ -5090,8 +5192,9 @@ class SingleStageExampleTests(unittest.TestCase):
                     success=False,
                     message="failed",
                     status=5,
+                    step_scale=0.2,
                 )
-            return types.SimpleNamespace(
+            return self._build_target_lane_retry_result(
                 x=np.array([1.0, 2.0]),
                 nit=3,
                 nfev=6,
@@ -5118,6 +5221,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 module.run_single_stage_target_lane_optimizer_with_retries(
                     lambda x: x,
                     np.array([0.0, 0.0]),
+                    phase="phase2",
                     callback=None,
                     retry_callback=None,
                     result_state_sync=None,
@@ -5142,6 +5246,136 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(result.nit, 5)
         self.assertEqual(result.nfev, 10)
         self.assertEqual(result.njev, 10)
+
+    def test_run_single_stage_target_lane_optimizer_with_retries_rebuilds_events_from_result_without_callback(
+        self,
+    ):
+        """Retry must rebuild invalid_state_events from result.invalid_step_log
+        alone when failure_callback is None, so strict-transfer-guard runs that
+        cannot emit host callbacks still trigger anchor-restored retries.
+        """
+
+        module = self.load_module()
+        contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        anchor_state = {
+            "coil_dofs": np.array([1.0, 2.0]),
+            "sdofs": np.array([3.0, 4.0]),
+            "iota": TEST_IOTA,
+            "G": TEST_G0,
+            "J": 1.0,
+            "dJ": np.zeros(5),
+            "intersecting": False,
+            "self_intersection_check_available": True,
+            "hardware_constraint_status": {"success": True, "violations": []},
+        }
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        run_dict["latest_local_incumbent"] = copy.deepcopy(anchor_state)
+        run_dict["latest_local_stage"] = "initial"
+        run_dict["best_local_incumbent"] = copy.deepcopy(anchor_state)
+        run_dict["best_local_stage"] = "initial"
+        invalid_state_events = []
+        observed_failure_callbacks = []
+
+        def fake_run_single_stage_optimizer(
+            fun,
+            dofs,
+            *,
+            callback,
+            contract,
+            maxiter,
+            ftol,
+            gtol,
+            maxcor,
+            outer_maxls,
+            scalar_fun,
+            progress_callback=None,
+            target_lane_initial_step_size,
+            failure_callback,
+        ):
+            del (
+                fun,
+                dofs,
+                callback,
+                contract,
+                maxiter,
+                ftol,
+                gtol,
+                maxcor,
+                outer_maxls,
+                scalar_fun,
+                progress_callback,
+                target_lane_initial_step_size,
+            )
+            observed_failure_callbacks.append(failure_callback)
+            if len(observed_failure_callbacks) == 1:
+                return self._build_target_lane_retry_result(
+                    x=np.array([9.0, 9.0]),
+                    nit=1,
+                    success=False,
+                    message="failed",
+                    status=5,
+                    step_scale=0.2,
+                    nonfinite_step=True,
+                )
+            return self._build_target_lane_retry_result(
+                x=np.array([1.0, 2.0]),
+                nit=1,
+                success=True,
+                message="ok",
+                status=0,
+            )
+
+        policy = module.SingleStageSearchPolicy(
+            donor_class="stage2_seed_only",
+            search_policy="repair_first",
+            adaptive_failure_penalty_weight=1.5,
+            invalid_step_retry_budget=2,
+            retry_step_shrink_factor=0.5,
+        )
+
+        with patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=fake_run_single_stage_optimizer,
+        ):
+            result, retry_summary = (
+                module.run_single_stage_target_lane_optimizer_with_retries(
+                    lambda x: x,
+                    np.array([0.0, 0.0]),
+                    phase="phase1",
+                    callback=None,
+                    retry_callback=None,
+                    result_state_sync=None,
+                    contract=contract,
+                    maxiter=5,
+                    ftol=0.0,
+                    gtol=1.0e-6,
+                    maxcor=5,
+                    outer_maxls=6,
+                    scalar_fun=None,
+                    target_lane_initial_step_size=None,
+                    failure_callback=None,
+                    invalid_state_events=invalid_state_events,
+                    run_dict=run_dict,
+                    single_stage_search_policy=policy,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(retry_summary["attempt_count"], 1)
+        self.assertEqual(
+            observed_failure_callbacks, [None] * len(observed_failure_callbacks)
+        )
+        self.assertEqual(len(invalid_state_events), 1)
+        rebuilt_event = invalid_state_events[0]
+        self.assertEqual(rebuilt_event["phase"], "phase1")
+        self.assertEqual(rebuilt_event["iteration"], 1)
+        self.assertTrue(rebuilt_event["nonfinite_step"])
+        self.assertTrue(rebuilt_event["line_search_failed"])
+        self.assertEqual(rebuilt_event["step_scale"]["value"], 0.2)
+        self.assertTrue(
+            module.single_stage_retry_triggered_by_invalid_state(invalid_state_events)
+        )
 
     def test_run_single_stage_target_lane_optimizer_with_retries_supports_scaled_phase_retry_state(
         self,
@@ -5203,23 +5437,15 @@ class SingleStageExampleTests(unittest.TestCase):
                 }
             )
             if len(optimizer_calls) == 1:
-                invalid_state_events.append(
-                    {
-                        "line_search_failed": True,
-                        "nonfinite_step": False,
-                        "stalled_step": False,
-                        "valid_curvature": True,
-                        "step_scale": {"value": 0.2},
-                    }
-                )
-                return types.SimpleNamespace(
+                return self._build_target_lane_retry_result(
                     x=dofs,
                     nit=0,
                     success=False,
                     message="failed",
                     status=5,
+                    step_scale=0.2,
                 )
-            return types.SimpleNamespace(
+            return self._build_target_lane_retry_result(
                 x=dofs,
                 nit=1,
                 success=True,
@@ -5248,6 +5474,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 module.run_single_stage_target_lane_optimizer_with_retries(
                     lambda x: x,
                     initial_state,
+                    phase="phase1",
                     callback=None,
                     retry_callback=retry_callback,
                     result_state_sync=None,
@@ -5354,6 +5581,7 @@ class SingleStageExampleTests(unittest.TestCase):
                     module.build_single_stage_scaled_phase_retry_state(
                         np.array([8.0, 9.0]),
                     ),
+                    phase="phase1",
                     callback=None,
                     retry_callback=None,
                     result_state_sync=None,

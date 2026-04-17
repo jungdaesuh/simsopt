@@ -64,6 +64,17 @@ def _bool_scalar(value):
     return _as_jax_dtype(value, jnp.bool_)
 
 
+def _emit_host_callback(callback, *args):
+    """Dispatch private-optimizer callbacks without ordered-effect tokens.
+
+    JAX 0.9.2 lowers ``ordered=True`` debug callbacks through a host token that
+    strict ``transfer_guard='disallow'`` rejects as a ``bool[0]`` host-to-device
+    transfer. Keep the private optimizer callback path unordered so strict
+    on-device optimizer lanes remain executable.
+    """
+    jax.debug.callback(callback, *args, ordered=False)
+
+
 def _reduce_sum_all(x):
     flat = jnp.reshape(jnp.asarray(x), (-1,))
     return lax.reduce(flat, _as_numpy_dtype(0.0, flat.dtype), lax.add, (0,))
@@ -202,14 +213,13 @@ def _emit_iteration_callbacks(callback, progress_callback, x_kp1, next_k, f_kp1,
     only exposes an observability/compatibility seam here.
     """
     if callback is not None:
-        jax.debug.callback(
+        _emit_host_callback(
             lambda x: callback(_host_callback_array(x, dtype=float)),
             x_kp1,
-            ordered=True,
         )
     if progress_callback is not None:
         grad_inf = _norm(g_kp1, ord=jnp.inf)
-        jax.debug.callback(
+        _emit_host_callback(
             lambda iteration, fun_value, grad_inf_value: progress_callback(
                 int(iteration),
                 float(fun_value),
@@ -218,5 +228,4 @@ def _emit_iteration_callbacks(callback, progress_callback, x_kp1, next_k, f_kp1,
             next_k,
             f_kp1,
             grad_inf,
-            ordered=True,
         )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import numpy as np
 
@@ -15,6 +16,7 @@ from ._common import (
     _bool_scalar,
     _cached_private_solver,
     _dot,
+    _emit_host_callback,
     _emit_iteration_callbacks,
     _int_scalar,
     _norm,
@@ -25,7 +27,7 @@ from ._common import (
     _zeros,
 )
 from ._line_search import _line_search_value_and_grad
-from ._types import _LBFGSResults
+from ._types import _LBFGSInvalidStepLog, _LBFGSResults
 
 
 _LBFGS_DEBUG_ENABLED = os.environ.get("SIMSOPT_LBFGS_DEBUG", "").lower() not in {
@@ -35,6 +37,20 @@ _LBFGS_DEBUG_ENABLED = os.environ.get("SIMSOPT_LBFGS_DEBUG", "").lower() not in 
     "no",
     "off",
 }
+_LBFGS_STATE_DUMP_ENABLED = os.environ.get(
+    "SIMSOPT_LBFGS_STATE_DUMP", ""
+).lower() not in {
+    "",
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+# Cap the on-device rejected-step ring buffer so capacity does not scale with
+# maxiter. The retry policy only reads the most recent event, so a small bound
+# is sufficient and keeps the buffer size independent of problem dimension.
+_INVALID_STEP_LOG_MAX_CAPACITY = 256
 
 
 def _emit_lbfgs_runtime_debug(
@@ -71,7 +87,7 @@ def _emit_lbfgs_runtime_debug(
     if converged is None:
         converged = _bool_scalar(False)
 
-    jax.debug.callback(
+    _emit_host_callback(
         lambda k, f, ginf, alpha, failed, status, nonfinite, stalled, curvature, done: (
             print(
                 "[lbfgs-debug] "
@@ -99,7 +115,88 @@ def _emit_lbfgs_runtime_debug(
         stalled_step,
         valid_curvature,
         converged,
-        ordered=True,
+    )
+
+
+def _emit_lbfgs_state_dump(state_initial):
+    """Dump the structured solver input leaves before entering the jitted solve."""
+    if not _LBFGS_STATE_DUMP_ENABLED:
+        return
+
+    for field_name, leaf in state_initial._asdict().items():
+        shape = getattr(leaf, "shape", ())
+        sharding = getattr(leaf, "sharding", None)
+        print(
+            "[lbfgs-state-dump] "
+            + json.dumps(
+                {
+                    "field": field_name,
+                    "python_type": type(leaf).__name__,
+                    "dtype": None
+                    if getattr(leaf, "dtype", None) is None
+                    else str(leaf.dtype),
+                    "shape": [int(dim) for dim in shape],
+                    "sharding": None if sharding is None else str(sharding),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
+
+def _build_invalid_step_log(*, max_entries, dtype):
+    capacity = max(int(max_entries), 1)
+    return _LBFGSInvalidStepLog(
+        count=_int_scalar(0),
+        write_index=_int_scalar(0),
+        iteration=_zeros((capacity,), jnp.int32),
+        step_scale=_zeros((capacity,), dtype),
+        line_search_failed=_zeros((capacity,), jnp.bool_),
+        nonfinite_step=_zeros((capacity,), jnp.bool_),
+        stalled_step=_zeros((capacity,), jnp.bool_),
+        valid_curvature=_zeros((capacity,), jnp.bool_),
+        trial_converged=_zeros((capacity,), jnp.bool_),
+        ls_status=_zeros((capacity,), jnp.int32),
+    )
+
+
+def _record_invalid_step_log(
+    invalid_step_log,
+    *,
+    iteration,
+    step_scale,
+    line_search_failed,
+    nonfinite_step,
+    stalled_step,
+    valid_curvature,
+    trial_converged,
+    ls_status,
+):
+    capacity = _int_scalar(invalid_step_log.iteration.shape[0])
+    write_index = _as_jax_dtype(
+        invalid_step_log.write_index, invalid_step_log.iteration.dtype
+    )
+    next_write_index = jnp.mod(write_index + _int_scalar(1), capacity)
+    next_count = jnp.minimum(invalid_step_log.count + _int_scalar(1), capacity)
+    return invalid_step_log._replace(
+        count=next_count,
+        write_index=next_write_index,
+        iteration=invalid_step_log.iteration.at[write_index].set(iteration),
+        step_scale=invalid_step_log.step_scale.at[write_index].set(step_scale),
+        line_search_failed=invalid_step_log.line_search_failed.at[write_index].set(
+            line_search_failed
+        ),
+        nonfinite_step=invalid_step_log.nonfinite_step.at[write_index].set(
+            nonfinite_step
+        ),
+        stalled_step=invalid_step_log.stalled_step.at[write_index].set(stalled_step),
+        valid_curvature=invalid_step_log.valid_curvature.at[write_index].set(
+            valid_curvature
+        ),
+        trial_converged=invalid_step_log.trial_converged.at[write_index].set(
+            trial_converged
+        ),
+        ls_status=invalid_step_log.ls_status.at[write_index].set(ls_status),
     )
 
 
@@ -263,6 +360,10 @@ def _minimize_lbfgs_private_impl(
         gamma=_as_jax_dtype(1.0, dtype),
         status=_int_scalar(0),
         ls_status=_int_scalar(0),
+        invalid_step_log=_build_invalid_step_log(
+            max_entries=min(int(maxiter_limit_value), _INVALID_STEP_LOG_MAX_CAPACITY),
+            dtype=dtype,
+        ),
     )
     initial_nonfinite = (~jnp.isfinite(state_initial.f_k)) | (
         ~jnp.all(jnp.isfinite(state_initial.g_k))
@@ -321,6 +422,15 @@ def _minimize_lbfgs_private_impl(
                 _as_jax_dtype(initial_step_size_value, state.x_k.dtype),
                 _as_jax_dtype(0.0, state.x_k.dtype),
             )
+        )
+        _emit_lbfgs_runtime_debug(
+            "body_entry",
+            iteration=state.k,
+            fun_value=state.f_k,
+            grad=state.g_k,
+            step_scale=line_search_initial_step_size,
+            ls_status=state.ls_status,
+            converged=state.converged,
         )
         p_k = _two_loop_recursion(state)
         ls_results = _line_search_value_and_grad(
@@ -411,22 +521,35 @@ def _minimize_lbfgs_private_impl(
         )
 
         def failed_step(_):
+            invalid_step_log = _record_invalid_step_log(
+                state.invalid_step_log,
+                iteration=next_k,
+                step_scale=ls_results.a_k,
+                line_search_failed=ls_results.failed,
+                nonfinite_step=nonfinite_step,
+                stalled_step=stalled_step,
+                valid_curvature=valid_curvature,
+                trial_converged=converged,
+                ls_status=ls_status,
+            )
             if failure_callback is not None:
-                jax.debug.callback(
-                    lambda iteration, trial_x, trial_f, trial_g, search_direction, step_vector, step_scale, line_search_failed, nonfinite_step_detected, stalled_step_detected, valid_curvature_detected, trial_converged, line_search_status: failure_callback(
-                        int(iteration),
-                        np.asarray(trial_x, dtype=np.float64),
-                        float(trial_f),
-                        np.asarray(trial_g, dtype=np.float64),
-                        np.asarray(search_direction, dtype=np.float64),
-                        np.asarray(step_vector, dtype=np.float64),
-                        float(step_scale),
-                        bool(line_search_failed),
-                        bool(nonfinite_step_detected),
-                        bool(stalled_step_detected),
-                        bool(valid_curvature_detected),
-                        bool(trial_converged),
-                        int(line_search_status),
+                _emit_host_callback(
+                    lambda iteration, trial_x, trial_f, trial_g, search_direction, step_vector, step_scale, line_search_failed, nonfinite_step_detected, stalled_step_detected, valid_curvature_detected, trial_converged, line_search_status: (
+                        failure_callback(
+                            int(iteration),
+                            np.asarray(trial_x, dtype=np.float64),
+                            float(trial_f),
+                            np.asarray(trial_g, dtype=np.float64),
+                            np.asarray(search_direction, dtype=np.float64),
+                            np.asarray(step_vector, dtype=np.float64),
+                            float(step_scale),
+                            bool(line_search_failed),
+                            bool(nonfinite_step_detected),
+                            bool(stalled_step_detected),
+                            bool(valid_curvature_detected),
+                            bool(trial_converged),
+                            int(line_search_status),
+                        )
                     ),
                     next_k,
                     x_kp1,
@@ -441,7 +564,6 @@ def _minimize_lbfgs_private_impl(
                     valid_curvature,
                     converged,
                     ls_status,
-                    ordered=True,
                 )
             return state._replace(
                 converged=_bool_scalar(False),
@@ -454,6 +576,7 @@ def _minimize_lbfgs_private_impl(
                     ls_status,
                     _int_scalar(0),
                 ),
+                invalid_step_log=invalid_step_log,
             )
 
         def accepted_step(_):
@@ -518,6 +641,14 @@ def _minimize_lbfgs_private_impl(
         maxiter_limit = _as_jax_dtype(maxiter_limit_value, initial_state.k.dtype)
         maxfun_limit = _as_jax_dtype(maxfun_limit_value, initial_state.nfev.dtype)
         maxgrad_limit = _as_jax_dtype(maxgrad_limit_value, initial_state.ngev.dtype)
+        _emit_lbfgs_runtime_debug(
+            "solver_entry",
+            iteration=initial_state.k,
+            fun_value=initial_state.f_k,
+            grad=initial_state.g_k,
+            ls_status=initial_state.ls_status,
+            converged=initial_state.converged,
+        )
         state = lax.while_loop(cond_fun, body_fun, initial_state)
         _emit_lbfgs_runtime_debug(
             "pre_final_eval",
@@ -606,6 +737,7 @@ def _minimize_lbfgs_private_impl(
         ),
         builder=lambda: jax.jit(run_solver),
     )
+    _emit_lbfgs_state_dump(state_initial)
     return solver(state_initial)
 
 

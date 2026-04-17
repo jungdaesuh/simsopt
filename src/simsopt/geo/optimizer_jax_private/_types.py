@@ -103,3 +103,17 @@ class _LBFGSResults(NamedTuple):
     gamma: float | jax.Array
     status: int | jax.Array
     ls_status: int | jax.Array
+    invalid_step_log: "_LBFGSInvalidStepLog"
+
+
+class _LBFGSInvalidStepLog(NamedTuple):
+    count: int | jax.Array
+    write_index: int | jax.Array
+    iteration: jax.Array
+    step_scale: jax.Array
+    line_search_failed: jax.Array
+    nonfinite_step: jax.Array
+    stalled_step: jax.Array
+    valid_curvature: jax.Array
+    trial_converged: jax.Array
+    ls_status: jax.Array

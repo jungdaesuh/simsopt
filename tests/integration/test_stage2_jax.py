@@ -919,7 +919,7 @@ class _DummyDerivative:
 
 
 def _build_fake_lbfgs_result(x0, value, grad):
-    from simsopt.geo.optimizer_jax_private import _LBFGSResults
+    from simsopt.geo.optimizer_jax_private import _LBFGSInvalidStepLog, _LBFGSResults
 
     x0_array = np.asarray(x0, dtype=np.float64)
     grad_array = np.asarray(grad, dtype=np.float64)
@@ -940,6 +940,18 @@ def _build_fake_lbfgs_result(x0, value, grad):
         gamma=np.float64(1.0),
         status=0,
         ls_status=0,
+        invalid_step_log=_LBFGSInvalidStepLog(
+            count=0,
+            write_index=0,
+            iteration=np.zeros((1,), dtype=np.int32),
+            step_scale=np.zeros((1,), dtype=np.float64),
+            line_search_failed=np.zeros((1,), dtype=bool),
+            nonfinite_step=np.zeros((1,), dtype=bool),
+            stalled_step=np.zeros((1,), dtype=bool),
+            valid_curvature=np.zeros((1,), dtype=bool),
+            trial_converged=np.zeros((1,), dtype=bool),
+            ls_status=np.zeros((1,), dtype=np.int32),
+        ),
     )
 
 

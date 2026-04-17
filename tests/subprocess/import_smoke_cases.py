@@ -545,6 +545,51 @@ def case_entrypoint_runtime_helper_adds_detected_cuda_toolchain_root() -> None:
         )
 
 
+def case_entrypoint_runtime_helper_accepts_multi_platform_env_list() -> None:
+    import os
+
+    from repo_bootstrap import configure_entrypoint_jax_runtime
+
+    os.environ["JAX_PLATFORMS"] = "cuda,cpu"
+    os.environ.pop("SIMSOPT_JAX_PLATFORM", None)
+    os.environ.pop("SIMSOPT_JAX_BACKEND", None)
+    os.environ.pop("XLA_PYTHON_CLIENT_PREALLOCATE", None)
+
+    requested = configure_entrypoint_jax_runtime(
+        [],
+        respect_existing_env=True,
+    )
+
+    assert requested == "cuda"
+    assert os.environ["JAX_PLATFORMS"] == "cuda,cpu"
+    assert os.environ["SIMSOPT_JAX_PLATFORM"] == "cuda"
+    assert os.environ["SIMSOPT_JAX_BACKEND"] == "cuda"
+    assert os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
+
+
+def case_entrypoint_runtime_helper_promotes_cuda_to_cuda_cpu_for_callback_flags() -> None:
+    import os
+
+    from repo_bootstrap import configure_entrypoint_jax_runtime
+
+    os.environ["JAX_PLATFORMS"] = "cuda"
+    os.environ.pop("SIMSOPT_JAX_PLATFORM", None)
+    os.environ.pop("SIMSOPT_JAX_BACKEND", None)
+    os.environ.pop("XLA_PYTHON_CLIENT_PREALLOCATE", None)
+
+    requested = configure_entrypoint_jax_runtime(
+        ["--diagnostic-callbacks"],
+        respect_existing_env=True,
+        require_cpu_platform_when_flags=("--diagnostic-callbacks",),
+    )
+
+    assert requested == "cuda"
+    assert os.environ["JAX_PLATFORMS"] == "cuda,cpu"
+    assert os.environ["SIMSOPT_JAX_PLATFORM"] == "cuda"
+    assert os.environ["SIMSOPT_JAX_BACKEND"] == "cuda"
+    assert os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
+
+
 def case_run_code_benchmark_common_import_is_jax_cold() -> None:
     block_jax_imports(message="blocked jax import for benchmark helper smoke")
 

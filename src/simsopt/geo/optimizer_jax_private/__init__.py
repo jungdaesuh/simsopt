@@ -8,6 +8,7 @@ The public API is in ``simsopt.geo.optimizer_jax``.
 
 from ._types import (
     _BFGSResults,
+    _LBFGSInvalidStepLog,
     _LBFGSResults,
     _LineSearchResults,
     _LineSearchState,

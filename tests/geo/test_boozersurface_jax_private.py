@@ -989,6 +989,20 @@ class TestOptimizerAdapterPrivate:
         assert valid_curvature is False
         assert trial_converged is False
         assert ls_status == 0
+        assert int(state.invalid_step_log.count) == 1
+        used = int(state.invalid_step_log.count)
+        np.testing.assert_array_equal(
+            np.asarray(state.invalid_step_log.iteration)[:used],
+            np.asarray([1], dtype=np.int32),
+        )
+        np.testing.assert_allclose(
+            np.asarray(state.invalid_step_log.step_scale)[:used],
+            np.asarray([1.0], dtype=np.float64),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(state.invalid_step_log.nonfinite_step)[:used],
+            np.asarray([True], dtype=bool),
+        )
 
     @PRIVATE_OPTIMIZER_RUNTIME
     def test_minimize_lbfgs_private_rejects_degenerate_curvature_update(

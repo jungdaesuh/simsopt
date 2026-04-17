@@ -359,6 +359,24 @@ def test_entrypoint_runtime_helper_adds_detected_cuda_toolchain_root():
     )
 
 
+def test_entrypoint_runtime_helper_accepts_multi_platform_env_list():
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=("case_entrypoint_runtime_helper_accepts_multi_platform_env_list",),
+        failure_message="entrypoint runtime helper should preserve multi-platform JAX_PLATFORMS lists",
+    )
+
+
+def test_entrypoint_runtime_helper_promotes_cuda_to_cuda_cpu_for_callback_flags():
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=(
+            "case_entrypoint_runtime_helper_promotes_cuda_to_cuda_cpu_for_callback_flags",
+        ),
+        failure_message="entrypoint runtime helper should keep a CPU lane for explicit diagnostic callback runs",
+    )
+
+
 def test_run_code_benchmark_common_import_is_jax_cold():
     _assert_python_script_passes(
         _IMPORT_SMOKE_CASES_PATH,

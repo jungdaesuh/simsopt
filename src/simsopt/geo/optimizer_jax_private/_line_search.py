@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 
-import jax
 import jax.numpy as jnp
 from jax import lax
 
@@ -16,6 +15,7 @@ from ._common import (
     _as_jax_dtype,
     _bool_scalar,
     _dot,
+    _emit_host_callback,
     _int_scalar,
     _promote_dtypes_inexact,
     _scalar_value_and_grad,
@@ -40,10 +40,18 @@ def _emit_line_search_runtime_debug(
     phi,
     dphi,
 ):
-    """Emit ordered runtime diagnostics when SIMSOPT_LBFGS_DEBUG is enabled."""
+    """Emit runtime diagnostics when SIMSOPT_LBFGS_DEBUG is enabled.
+
+    The callback routes through ``_emit_host_callback`` (``ordered=False``) so
+    strict ``transfer_guard='disallow'`` lanes do not trip on the JAX 0.9.2
+    ``bool[0]`` host token associated with ``ordered=True``. One consequence is
+    that debug prints from the line search may interleave with other unordered
+    callbacks (e.g. the L-BFGS body debug). Use SIMSOPT_LBFGS_DEBUG only for
+    ad-hoc tracing; do not rely on print ordering across stages.
+    """
     if not _LINE_SEARCH_DEBUG_ENABLED:
         return
-    jax.debug.callback(
+    _emit_host_callback(
         lambda i, a, f, df: print(
             "[line-search-debug] "
             f"stage={stage} "
@@ -57,7 +65,6 @@ def _emit_line_search_runtime_debug(
         alpha,
         phi,
         dphi,
-        ordered=True,
     )
 
 
@@ -474,6 +481,13 @@ def _line_search_from_restricted_func_and_grad(
         dphi_star=dphi_0,
         g_star=gfk,
     )
+    _emit_line_search_runtime_debug(
+        "search_entry",
+        iteration=state.i,
+        alpha=start_value,
+        phi=phi_0,
+        dphi=dphi_0,
+    )
 
     def body(state):
         a_i = jnp.where(state.i == _int_scalar(1), start_value, state.a_i1 * two)
@@ -629,6 +643,13 @@ def _line_search_from_restricted_func_and_grad(
             state.best_g,
             state.g_star,
         ),
+    )
+    _emit_line_search_runtime_debug(
+        "search_exit",
+        iteration=state.i - _int_scalar(1),
+        alpha=state.a_star,
+        phi=state.phi_star,
+        dphi=state.dphi_star,
     )
 
     status = jnp.where(

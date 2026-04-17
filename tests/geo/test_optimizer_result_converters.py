@@ -24,6 +24,32 @@ def _make_bfgs_state():
     )
 
 
+_INVALID_STEP_LOG_FIELDS = (
+    ("iteration", jnp.int32, 0),
+    ("step_scale", jnp.float64, 0.0),
+    ("line_search_failed", jnp.bool_, False),
+    ("nonfinite_step", jnp.bool_, False),
+    ("stalled_step", jnp.bool_, False),
+    ("valid_curvature", jnp.bool_, True),
+    ("trial_converged", jnp.bool_, False),
+    ("ls_status", jnp.int32, 0),
+)
+
+
+def _build_invalid_step_log_snapshot(physical_entries, *, count, write_index):
+    """Construct a ring-buffer SimpleNamespace from explicit physical entries."""
+
+    fields = {
+        "count": jnp.asarray(count, dtype=jnp.int32),
+        "write_index": jnp.asarray(write_index, dtype=jnp.int32),
+    }
+    for name, dtype, _default in _INVALID_STEP_LOG_FIELDS:
+        fields[name] = jnp.asarray(
+            [entry[name] for entry in physical_entries], dtype=dtype
+        )
+    return SimpleNamespace(**fields)
+
+
 def _make_lbfgs_state(
     *,
     status=0,
@@ -33,7 +59,20 @@ def _make_lbfgs_state(
     nfev=13,
     ngev=14,
     converged=True,
+    invalid_step_entries=(),
 ):
+    entry_count = max(len(invalid_step_entries), 1)
+    if invalid_step_entries:
+        physical_entries = list(invalid_step_entries)
+    else:
+        physical_entries = [
+            {name: default for name, _dtype, default in _INVALID_STEP_LOG_FIELDS}
+        ]
+    invalid_step_log = _build_invalid_step_log_snapshot(
+        physical_entries,
+        count=len(invalid_step_entries),
+        write_index=len(invalid_step_entries) % entry_count,
+    )
     return SimpleNamespace(
         status=jnp.asarray(status, dtype=jnp.int32),
         k=jnp.asarray(k, dtype=jnp.int32),
@@ -44,6 +83,7 @@ def _make_lbfgs_state(
         ngev=jnp.asarray(ngev, dtype=jnp.int32),
         converged=jnp.asarray(converged),
         ls_status=jnp.asarray(0, dtype=jnp.int32),
+        invalid_step_log=invalid_step_log,
     )
 
 
@@ -97,6 +137,8 @@ def test_private_lbfgs_result_uses_explicit_host_metadata_helpers(monkeypatch):
     assert result.success is True
     assert result.fun == 1.25
     assert result.ls_status == 0
+    assert result.invalid_step_log == []
+    assert result.rejected_step_count == 0
     _assert_host_numeric_metadata_helper_calls(calls)
 
 
@@ -178,3 +220,85 @@ def test_private_lbfgs_result_status_six_dict_entry_surfaces_when_state_is_finit
         result.message
         == "Non-finite objective or gradient encountered during iteration."
     )
+
+
+def test_private_lbfgs_result_materializes_invalid_step_log():
+    result = converters._private_lbfgs_result_to_optimize_result(
+        _make_lbfgs_state(
+            status=5,
+            converged=False,
+            invalid_step_entries=(
+                {
+                    "iteration": 3,
+                    "step_scale": 0.25,
+                    "line_search_failed": True,
+                    "nonfinite_step": False,
+                    "stalled_step": True,
+                    "valid_curvature": True,
+                    "trial_converged": False,
+                    "ls_status": 7,
+                },
+            ),
+        )
+    )
+
+    assert result.rejected_step_count == 1
+    assert result.maxiter_hit is False
+    assert result.line_search_final_status == 0
+    assert result.invalid_step_log == [
+        {
+            "iteration": 3,
+            "step_scale": 0.25,
+            "line_search_failed": True,
+            "nonfinite_step": False,
+            "stalled_step": True,
+            "valid_curvature": True,
+            "trial_converged": False,
+            "ls_status": 7,
+        }
+    ]
+
+
+def _make_invalid_step_entry(**overrides):
+    """Build a fully-populated invalid-step entry with per-field defaults."""
+    base = {name: default for name, _dtype, default in _INVALID_STEP_LOG_FIELDS}
+    base.update(overrides)
+    return base
+
+
+def test_private_lbfgs_invalid_step_log_replays_wrap_around():
+    # 5 logical writes into a capacity-3 buffer: write_index wraps to 5 % 3 = 2
+    # and count saturates at capacity, so the oldest retained write is at
+    # offset write_index (physical slot 2) and replay must restore chronology.
+    physical_entries = [
+        _make_invalid_step_entry(iteration=40, step_scale=0.4, ls_status=4),
+        _make_invalid_step_entry(iteration=50, step_scale=0.5, ls_status=5),
+        _make_invalid_step_entry(iteration=30, step_scale=0.3, ls_status=3),
+    ]
+    invalid_step_log = _build_invalid_step_log_snapshot(
+        physical_entries, count=3, write_index=2
+    )
+
+    events = converters._private_lbfgs_invalid_step_log_to_host(invalid_step_log)
+
+    assert [event["iteration"] for event in events] == [30, 40, 50]
+    assert [event["ls_status"] for event in events] == [3, 4, 5]
+    assert [event["step_scale"] for event in events] == [0.3, 0.4, 0.5]
+
+
+def test_private_lbfgs_invalid_step_log_replays_partial_fill():
+    # count < capacity: replay must stop at ``count`` entries and ignore the
+    # still-zero tail slots.
+    physical_entries = [
+        _make_invalid_step_entry(iteration=1),
+        _make_invalid_step_entry(iteration=2),
+        _make_invalid_step_entry(iteration=0),
+        _make_invalid_step_entry(iteration=0),
+    ]
+    invalid_step_log = _build_invalid_step_log_snapshot(
+        physical_entries, count=2, write_index=2
+    )
+
+    events = converters._private_lbfgs_invalid_step_log_to_host(invalid_step_log)
+
+    assert [event["iteration"] for event in events] == [1, 2]

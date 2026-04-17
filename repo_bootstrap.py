@@ -16,6 +16,7 @@ _ENTRYPOINT_PLATFORM_ENV_VARS = (
     "SIMSOPT_JAX_PLATFORM",
     "SIMSOPT_JAX_BACKEND",
 )
+_JAX_PLATFORMS_ENV = "JAX_PLATFORMS"
 _JAX_ENABLE_X64_ENV = "JAX_ENABLE_X64"
 _XLA_PREALLOCATE_ENV = "XLA_PYTHON_CLIENT_PREALLOCATE"
 _XLA_FLAGS_ENV = "XLA_FLAGS"
@@ -168,8 +169,8 @@ def apply_cuda_toolchain_env(env: dict[str, str]) -> None:
     env[_XLA_FLAGS_ENV] = data_dir_flag
 
 
-def _normalize_entrypoint_platform(platform: str | None) -> str | None:
-    """Normalize benchmark/example platform tokens to the JAX selector env contract."""
+def _normalize_entrypoint_platform_token(platform: str | None) -> str | None:
+    """Normalize one benchmark/example platform token."""
     if platform is None:
         return None
     normalized = str(platform).strip().lower()
@@ -187,6 +188,49 @@ def _normalize_entrypoint_platform(platform: str | None) -> str | None:
     return normalized
 
 
+def _normalize_entrypoint_platform_spec(
+    platform: str | None,
+    *,
+    allow_multiple: bool,
+) -> str | None:
+    """Normalize an entrypoint platform selector or JAX platform list."""
+    if platform is None:
+        return None
+    normalized = str(platform).strip().lower()
+    if normalized == "":
+        return None
+    if not allow_multiple or "," not in normalized:
+        return _normalize_entrypoint_platform_token(normalized)
+    parts = [
+        normalized_part
+        for normalized_part in (
+            _normalize_entrypoint_platform_token(part)
+            for part in normalized.split(",")
+        )
+        if normalized_part is not None
+    ]
+    if not parts:
+        return None
+    return ",".join(parts)
+
+
+def _argv_requests_flag(argv: list[str], flags: tuple[str, ...]) -> bool:
+    if not flags:
+        return False
+    flag_set = set(flags)
+    return any(arg in flag_set for arg in argv)
+
+
+def _ensure_cpu_callback_lane(platform: str | None) -> str | None:
+    normalized = _normalize_entrypoint_platform_spec(platform, allow_multiple=True)
+    if normalized is None:
+        return None
+    parts = normalized.split(",")
+    if ("cuda" not in parts) or ("cpu" in parts):
+        return normalized
+    return ",".join(["cuda", "cpu", *[part for part in parts if part != "cuda"]])
+
+
 def preparse_entrypoint_jax_platform(
     argv: list[str],
     *,
@@ -200,30 +244,40 @@ def preparse_entrypoint_jax_platform(
     )
     args, _ = parser.parse_known_args(argv)
     if args.platform is not None:
-        return _normalize_entrypoint_platform(args.platform)
+        return _normalize_entrypoint_platform_spec(
+            args.platform, allow_multiple=False
+        )
     if respect_existing_env:
         for name in _ENTRYPOINT_PLATFORM_ENV_VARS:
-            env_value = _normalize_entrypoint_platform(os.environ.get(name))
+            env_value = _normalize_entrypoint_platform_spec(
+                os.environ.get(name),
+                allow_multiple=name == _JAX_PLATFORMS_ENV,
+            )
             if env_value is not None:
                 return env_value
-    return _normalize_entrypoint_platform(default)
+    return _normalize_entrypoint_platform_spec(default, allow_multiple=False)
 
 
 def apply_entrypoint_jax_runtime_env(platform: str | None) -> str | None:
     """Synchronize platform/x64 env vars before any entrypoint imports ``jax``."""
-    normalized = _normalize_entrypoint_platform(platform)
+    normalized = _normalize_entrypoint_platform_spec(platform, allow_multiple=True)
     os.environ.setdefault(_JAX_ENABLE_X64_ENV, "True")
     for name in _ENTRYPOINT_PLATFORM_ENV_VARS:
         os.environ.pop(name, None)
     os.environ.pop(_XLA_PREALLOCATE_ENV, None)
     if normalized is None:
         return None
+    normalized_parts = normalized.split(",")
+    default_platform = normalized_parts[0]
+    os.environ[_JAX_PLATFORMS_ENV] = normalized
     for name in _ENTRYPOINT_PLATFORM_ENV_VARS:
-        os.environ[name] = normalized
-    if normalized == "cuda":
+        if name == _JAX_PLATFORMS_ENV:
+            continue
+        os.environ[name] = default_platform
+    if "cuda" in normalized_parts:
         os.environ.setdefault(_XLA_PREALLOCATE_ENV, "false")
         apply_cuda_toolchain_env(os.environ)
-    return normalized
+    return default_platform
 
 
 def configure_entrypoint_jax_runtime(
@@ -231,13 +285,17 @@ def configure_entrypoint_jax_runtime(
     *,
     default_platform: str | None = None,
     respect_existing_env: bool = True,
+    require_cpu_platform_when_flags: tuple[str, ...] = (),
 ) -> str | None:
     """Apply entrypoint JAX env policy before any direct ``import jax``."""
+    resolved_argv = [] if argv is None else argv
     requested_platform = preparse_entrypoint_jax_platform(
-        [] if argv is None else argv,
+        resolved_argv,
         default=default_platform,
         respect_existing_env=respect_existing_env,
     )
+    if _argv_requests_flag(resolved_argv, require_cpu_platform_when_flags):
+        requested_platform = _ensure_cpu_callback_lane(requested_platform)
     return apply_entrypoint_jax_runtime_env(requested_platform)
 
 

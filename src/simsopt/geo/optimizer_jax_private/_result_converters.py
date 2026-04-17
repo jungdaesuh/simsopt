@@ -62,6 +62,41 @@ def _status_message_lbfgs(status, invalid_state):
     return _status_message(status, invalid_state, _LBFGS_STATUS_MESSAGES)
 
 
+def _private_lbfgs_invalid_step_log_to_host(invalid_step_log):
+    count = _host_int(invalid_step_log.count)
+    if count <= 0:
+        return []
+    iterations = _as_host_numpy(invalid_step_log.iteration)
+    capacity = int(iterations.shape[0])
+    if capacity <= 0:
+        return []
+    write_index = _host_int(invalid_step_log.write_index)
+    start_index = (write_index - count) % capacity
+    step_scales = _as_host_numpy(invalid_step_log.step_scale)
+    line_search_failed = _as_host_numpy(invalid_step_log.line_search_failed)
+    nonfinite_step = _as_host_numpy(invalid_step_log.nonfinite_step)
+    stalled_step = _as_host_numpy(invalid_step_log.stalled_step)
+    valid_curvature = _as_host_numpy(invalid_step_log.valid_curvature)
+    trial_converged = _as_host_numpy(invalid_step_log.trial_converged)
+    line_search_statuses = _as_host_numpy(invalid_step_log.ls_status)
+    events = []
+    for offset in range(count):
+        index = (start_index + offset) % capacity
+        events.append(
+            {
+                "iteration": int(iterations[index]),
+                "step_scale": float(step_scales[index]),
+                "line_search_failed": bool(line_search_failed[index]),
+                "nonfinite_step": bool(nonfinite_step[index]),
+                "stalled_step": bool(stalled_step[index]),
+                "valid_curvature": bool(valid_curvature[index]),
+                "trial_converged": bool(trial_converged[index]),
+                "ls_status": int(line_search_statuses[index]),
+            }
+        )
+    return events
+
+
 def _private_bfgs_result_to_optimize_result(state, *, total_nit=None):
     line_search_status = _host_int(state.line_search_status)
     invalid_state = _is_invalid_state(state.f_k, state.g_k) or line_search_status < 0
@@ -86,6 +121,8 @@ def _private_bfgs_result_to_optimize_result(state, *, total_nit=None):
 def _private_lbfgs_result_to_optimize_result(state):
     invalid_state = _is_invalid_state(state.f_k, state.g_k)
     status = _host_int(state.status)
+    ls_status = _host_int(state.ls_status)
+    invalid_step_log = _private_lbfgs_invalid_step_log_to_host(state.invalid_step_log)
     return OptimizeResult(
         x=_as_host_numpy(state.x_k),
         fun=_host_float(state.f_k),
@@ -96,7 +133,11 @@ def _private_lbfgs_result_to_optimize_result(state):
         success=(status in _LBFGS_SUCCESS_STATUSES) and not invalid_state,
         status=status,
         message=_status_message_lbfgs(status, invalid_state),
-        ls_status=_host_int(state.ls_status),
+        ls_status=ls_status,
+        line_search_final_status=ls_status,
+        maxiter_hit=status == 1,
+        rejected_step_count=len(invalid_step_log),
+        invalid_step_log=invalid_step_log,
     )
 
 

@@ -5,6 +5,7 @@ BOOTSTRAP_MODE="${SIMSOPT_HF_JOB_BOOTSTRAP_MODE:-auto}"
 EXPECTED_JAX_VERSION="${SIMSOPT_HF_JOB_EXPECTED_JAX_VERSION:-0.9.2}"
 JAX_GPU_WHEEL_SPEC="${SIMSOPT_HF_JOB_JAX_GPU_WHEEL_SPEC:-jax[cuda12]==0.9.2}"
 CUDA_LIBRARY_MODE="${SIMSOPT_JAX_CUDA_LIBRARY_MODE:-bundled}"
+APT_RETRY_ATTEMPTS="${SIMSOPT_HF_JOB_APT_RETRY_ATTEMPTS:-3}"
 VENV_DIR="/opt/venv"
 BOOTSTRAP_SOURCED=0
 
@@ -52,6 +53,39 @@ if jax.__version__ != expected or jaxlib.__version__ != expected:
 PY
 }
 
+
+run_apt_with_retry() {
+  local -a cmd=("$@")
+  local attempt=1
+  local max_attempts
+  max_attempts="${APT_RETRY_ATTEMPTS}"
+  while true; do
+    if "${cmd[@]}"; then
+      return 0
+    fi
+    if [[ "${attempt}" -ge "${max_attempts}" ]]; then
+      return 1
+    fi
+    sleep "$((attempt * 5))"
+    attempt="$((attempt + 1))"
+  done
+}
+
+
+normalize_ubuntu_apt_sources_to_https() {
+  local source_file
+  for source_file in \
+    /etc/apt/sources.list \
+    /etc/apt/sources.list.d/*.list \
+    /etc/apt/sources.list.d/*.sources; do
+    [[ -f "${source_file}" ]] || continue
+    sed -i \
+      -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+      -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
+      "${source_file}"
+  done
+}
+
 if [[ -x "${VENV_DIR}/bin/python" && "${BOOTSTRAP_MODE}" != "always" ]]; then
   activate_runtime_env
   verify_runtime_versions
@@ -64,8 +98,9 @@ if [[ "${BOOTSTRAP_MODE}" == "never" ]]; then
 fi
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends \
+normalize_ubuntu_apt_sources_to_https
+run_apt_with_retry apt-get -o Acquire::Retries=3 update
+run_apt_with_retry apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
   build-essential \
   gfortran \
   git \

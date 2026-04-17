@@ -29,7 +29,13 @@ sys.path.insert(0, REPO_ROOT)
 from repo_bootstrap import bootstrap_local_simsopt, configure_entrypoint_jax_runtime
 
 
-configure_entrypoint_jax_runtime(sys.argv[1:])
+configure_entrypoint_jax_runtime(
+    sys.argv[1:],
+    require_cpu_platform_when_flags=(
+        "--diagnostic-callbacks",
+        "--record-target-lane-invalid-state-events",
+    ),
+)
 
 import jax
 import jax.numpy as jnp
@@ -364,6 +370,9 @@ def summarize_optimizer_result_for_progress(result):
         "nfev": _optional_int(getattr(result, "nfev", None)),
         "njev": _optional_int(getattr(result, "njev", None)),
         "ls_status": _optional_int(getattr(result, "ls_status", None)),
+        "rejected_step_count": _optional_int(
+            getattr(result, "rejected_step_count", None)
+        ),
         "message": termination_message,
         "diagnostics": extract_optimizer_diagnostics(
             result,
@@ -496,6 +505,31 @@ def _resolve_first_nonfinite_target_lane_stage(stage_records):
     return None
 
 
+def _build_target_lane_invalid_state_event(
+    *,
+    phase,
+    iteration,
+    step_scale,
+    line_search_failed,
+    nonfinite_step,
+    stalled_step,
+    valid_curvature,
+    trial_converged,
+    ls_status,
+):
+    return {
+        "phase": phase,
+        "iteration": int(iteration),
+        "step_scale": _summarize_host_scalar(step_scale),
+        "line_search_failed": bool(line_search_failed),
+        "nonfinite_step": bool(nonfinite_step),
+        "stalled_step": bool(stalled_step),
+        "valid_curvature": bool(valid_curvature),
+        "trial_converged": bool(trial_converged),
+        "ls_status": int(ls_status),
+    }
+
+
 def build_target_lane_invalid_state_failure_callback(events, *, phase):
     """Record rejected target-lane L-BFGS trial states for postmortem analysis."""
 
@@ -515,16 +549,18 @@ def build_target_lane_invalid_state_failure_callback(events, *, phase):
         ls_status,
     ):
         events.append(
-            {
-                "phase": phase,
-                "iteration": int(iteration),
-                "step_scale": _summarize_host_scalar(step_scale),
-                "line_search_failed": bool(line_search_failed),
-                "nonfinite_step": bool(nonfinite_step),
-                "stalled_step": bool(stalled_step),
-                "valid_curvature": bool(valid_curvature),
-                "trial_converged": bool(trial_converged),
-                "ls_status": int(ls_status),
+            _build_target_lane_invalid_state_event(
+                phase=phase,
+                iteration=iteration,
+                step_scale=step_scale,
+                line_search_failed=line_search_failed,
+                nonfinite_step=nonfinite_step,
+                stalled_step=stalled_step,
+                valid_curvature=valid_curvature,
+                trial_converged=trial_converged,
+                ls_status=ls_status,
+            )
+            | {
                 "trial_value": _summarize_host_scalar(trial_f),
                 "trial_x": _summarize_host_vector(trial_x),
                 "trial_grad": _summarize_host_vector(trial_g),
@@ -536,10 +572,19 @@ def build_target_lane_invalid_state_failure_callback(events, *, phase):
     return _record
 
 
-def record_target_lane_invalid_state_events_enabled(args) -> bool:
-    """Return whether rejected target-lane trial events should be recorded."""
+def target_lane_diagnostic_callbacks_enabled(args) -> bool:
+    """Return whether detailed target-lane host callbacks are explicitly enabled."""
 
-    return bool(getattr(args, "record_target_lane_invalid_state_events", False))
+    return bool(
+        getattr(args, "diagnostic_callbacks", False)
+        or getattr(args, "record_target_lane_invalid_state_events", False)
+    )
+
+
+def record_target_lane_invalid_state_events_enabled(args) -> bool:
+    """Return whether detailed target-lane callback payloads are enabled."""
+
+    return target_lane_diagnostic_callbacks_enabled(args)
 
 
 def resolve_target_lane_invalid_state_failure_callback(
@@ -556,6 +601,28 @@ def resolve_target_lane_invalid_state_failure_callback(
     ):
         return None
     return build_target_lane_invalid_state_failure_callback(events, phase=phase)
+
+
+def extend_target_lane_invalid_state_events_from_result(events, result, *, phase):
+    """Append the structured invalid-step result log to the host retry event list."""
+
+    invalid_step_log = getattr(result, "invalid_step_log", None)
+    if not invalid_step_log:
+        return
+    events.extend(
+        _build_target_lane_invalid_state_event(
+            phase=phase,
+            iteration=entry["iteration"],
+            step_scale=entry["step_scale"],
+            line_search_failed=entry["line_search_failed"],
+            nonfinite_step=entry["nonfinite_step"],
+            stalled_step=entry["stalled_step"],
+            valid_curvature=entry["valid_curvature"],
+            trial_converged=entry["trial_converged"],
+            ls_status=entry["ls_status"],
+        )
+        for entry in invalid_step_log
+    )
 
 
 def _target_lane_signature_tree(value):
@@ -813,9 +880,13 @@ def build_single_stage_problem_contract(
             "diagnose_target_lane_scaled_phase1": bool(
                 getattr(args, "diagnose_target_lane_scaled_phase1", False)
             ),
+            "diagnostic_callbacks": bool(
+                getattr(args, "diagnostic_callbacks", False)
+            ),
             "record_target_lane_invalid_state_events": bool(
                 getattr(args, "record_target_lane_invalid_state_events", False)
             ),
+            "structured_invalid_step_log": True,
             "disable_target_lane_success_filter": bool(
                 args.disable_target_lane_success_filter
             ),
@@ -3318,12 +3389,20 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--diagnostic-callbacks",
+        action="store_true",
+        help=(
+            "Opt in to target-lane host callbacks for detailed progress and "
+            "rejected-step payloads. On explicit CUDA-only runs this also "
+            "keeps a CPU lane available for JAX host callbacks."
+        ),
+    )
+    parser.add_argument(
         "--record-target-lane-invalid-state-events",
         action="store_true",
         help=(
-            "Opt in to rejected-step target-lane failure diagnostics. This "
-            "installs host-callback postmortem recording on the ondevice outer "
-            "optimizer and is disabled by default for production throughput."
+            "Deprecated alias for --diagnostic-callbacks. Keeps detailed "
+            "target-lane rejected-step payload recording enabled."
         ),
     )
     parser.add_argument(
@@ -3343,6 +3422,8 @@ def parse_args():
         ),
     )
     args = parser.parse_args()
+    args.diagnostic_callbacks = target_lane_diagnostic_callbacks_enabled(args)
+    args.record_target_lane_invalid_state_events = bool(args.diagnostic_callbacks)
     args.boozer_least_squares_algorithm_explicit = (
         args.boozer_least_squares_algorithm is not None
     )
@@ -6603,6 +6684,7 @@ def run_single_stage_target_lane_optimizer_with_retries(
     fun,
     dofs,
     *,
+    phase,
     callback,
     retry_callback,
     result_state_sync,
@@ -6660,6 +6742,11 @@ def run_single_stage_target_lane_optimizer_with_retries(
         target_lane_initial_step_size=initial_step_size,
         failure_callback=failure_callback,
     )
+    extend_target_lane_invalid_state_events_from_result(
+        invalid_state_events,
+        result,
+        phase=phase,
+    )
     total_nit = int(getattr(result, "nit", 0))
     total_nfev = int(getattr(result, "nfev", 0)) if hasattr(result, "nfev") else None
     total_njev = int(getattr(result, "njev", 0)) if hasattr(result, "njev") else None
@@ -6715,6 +6802,11 @@ def run_single_stage_target_lane_optimizer_with_retries(
             progress_callback=progress_callback,
             target_lane_initial_step_size=initial_step_size,
             failure_callback=failure_callback,
+        )
+        extend_target_lane_invalid_state_events_from_result(
+            invalid_state_events,
+            result,
+            phase=phase,
         )
         sync_failed_attempt_state(result, event_start_index=event_start)
         total_nit += int(getattr(result, "nit", 0))
@@ -8294,6 +8386,7 @@ if __name__ == "__main__":
     target_lane_gradient_diagnosis = None
     target_lane_scaled_phase1_diagnosis = None
     target_lane_invalid_state_events = []
+    target_lane_invalid_state_diagnostic_events = []
     phase1_retry_summary = {
         "attempt_count": 0,
         "attempts": [],
@@ -8309,6 +8402,9 @@ if __name__ == "__main__":
     jax_compile_diagnostics = None
     record_target_lane_invalid_state_events = (
         record_target_lane_invalid_state_events_enabled(args)
+    )
+    diagnostic_target_lane_callbacks = bool(
+        use_target_lane and target_lane_diagnostic_callbacks_enabled(args)
     )
     outer_optimizer_progress = (
         build_event_progress_recorder(
@@ -8419,7 +8515,13 @@ if __name__ == "__main__":
         record_target_lane_invalid_state_events=bool(
             record_target_lane_invalid_state_events
         ),
+        diagnostic_callbacks=diagnostic_target_lane_callbacks,
     )
+    if diagnostic_target_lane_callbacks:
+        print(
+            "Enabling target-lane accepted-step, progress, and failure host "
+            "callbacks for diagnostic run."
+        )
 
     if args.init_only:
         res_nit = 0
@@ -9096,6 +9198,8 @@ if __name__ == "__main__":
                         use_target_lane=use_target_lane,
                         sync_policy=effective_target_lane_sync_policy,
                     )
+                    if use_target_lane and not diagnostic_target_lane_callbacks:
+                        accepted_step_callback = None
                     retry_step_callback = accepted_step_callback
                     target_lane_phase1_state_sync = (
                         resolve_target_lane_post_run_state_sync(
@@ -9222,7 +9326,7 @@ if __name__ == "__main__":
                             )
                             phase1_failure_callback = (
                                 resolve_target_lane_invalid_state_failure_callback(
-                                    target_lane_invalid_state_events,
+                                    target_lane_invalid_state_diagnostic_events,
                                     phase="phase1",
                                     use_target_lane=use_target_lane,
                                     args=args,
@@ -9236,6 +9340,8 @@ if __name__ == "__main__":
                             )
                             phase1_progress_callback = (
                                 build_outer_optimizer_progress_callback("phase1")
+                                if diagnostic_target_lane_callbacks
+                                else None
                             )
                             phase1_start_s = _perf_counter_s()
                             with maybe_trace_single_stage_phase(
@@ -9247,6 +9353,7 @@ if __name__ == "__main__":
                                         run_single_stage_target_lane_optimizer_with_retries(
                                             phase1_fun,
                                             phase1_dofs,
+                                            phase="phase1",
                                             callback=phase1_callback,
                                             retry_callback=phase1_retry_callback,
                                             result_state_sync=phase1_post_run_state_sync,
@@ -9383,7 +9490,7 @@ if __name__ == "__main__":
                     if run_main_optimizer:
                         main_failure_callback = (
                             resolve_target_lane_invalid_state_failure_callback(
-                                target_lane_invalid_state_events,
+                                target_lane_invalid_state_diagnostic_events,
                                 phase="phase2",
                                 use_target_lane=use_target_lane,
                                 args=args,
@@ -9395,6 +9502,8 @@ if __name__ == "__main__":
                         )
                         main_progress_callback = (
                             build_outer_optimizer_progress_callback("phase2")
+                            if diagnostic_target_lane_callbacks
+                            else None
                         )
                         main_optimizer_start_s = _perf_counter_s()
                         with maybe_trace_single_stage_phase(
@@ -9406,6 +9515,7 @@ if __name__ == "__main__":
                                     run_single_stage_target_lane_optimizer_with_retries(
                                         target_value_and_grad_objective,
                                         dofs,
+                                        phase="phase2",
                                         callback=accepted_step_callback,
                                         retry_callback=retry_step_callback,
                                         result_state_sync=target_lane_post_run_state_sync,
@@ -9865,9 +9975,11 @@ if __name__ == "__main__":
         "diagnose_target_lane_scaled_phase1": bool(
             args.diagnose_target_lane_scaled_phase1
         ),
+        "diagnostic_callbacks": bool(diagnostic_target_lane_callbacks),
         "record_target_lane_invalid_state_events": bool(
             record_target_lane_invalid_state_events
         ),
+        "structured_invalid_step_log": bool(use_target_lane),
         "minimal_artifacts": bool(args.minimal_artifacts),
         "init_only": args.init_only,
         "max_iterations": MAXITER,
@@ -10054,7 +10166,10 @@ if __name__ == "__main__":
     ):
         results["TARGET_LANE_INVALID_STATE_DIAGNOSIS"] = {
             "event_count": int(len(target_lane_invalid_state_events)),
-            "event_recording_enabled": bool(record_target_lane_invalid_state_events),
+            "event_recording_enabled": True,
+            "diagnostic_callback_recording_enabled": bool(
+                diagnostic_target_lane_callbacks
+            ),
             "initial_phase": {
                 "iterations": phase1_iterations,
                 "termination_message": phase1_termination_message,
@@ -10066,16 +10181,13 @@ if __name__ == "__main__":
                 "success": optimizer_success,
             },
             "events": target_lane_invalid_state_events,
+            "diagnostic_events": target_lane_invalid_state_diagnostic_events,
             "note": (
                 None
                 if target_lane_invalid_state_events
                 else (
                     "optimizer reported an invalid target-lane state without a "
-                    "recorded rejected trial payload because rejected-step event "
-                    "recording was disabled"
-                    if not record_target_lane_invalid_state_events
-                    else "optimizer reported an invalid target-lane state without "
-                    "a recorded rejected trial payload"
+                    "structured invalid-step solver-result entry"
                 )
             ),
         }
