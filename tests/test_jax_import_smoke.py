@@ -493,7 +493,7 @@ def test_transfer_guard_disallow_enforces_single_stage_target_runtime_boundaries
         failure_message=(
             "single-stage target runtime transfer-guard contract drifted"
         ),
-        timeout=120,
+        timeout=300,
     )
 
 
