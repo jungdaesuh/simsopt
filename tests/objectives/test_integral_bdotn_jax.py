@@ -24,7 +24,6 @@ from conftest import (
     host_scalar,
     parity_acceptance_tolerance,
     parity_default_device,
-    parity_lane,
     parity_rng,
 )
 
