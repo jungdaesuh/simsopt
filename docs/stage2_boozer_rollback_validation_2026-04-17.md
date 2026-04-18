@@ -354,6 +354,38 @@ Remaining follow-up:
   uses `BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS`, so the centralized helper
   preserves the policy split rather than collapsing both call sites onto a
   single behavior.
+- [x] Extend the Stage 2 hot-loop guard to treat Newton-converged but
+  self-intersecting Boozer surfaces as failures. Landed as
+  `_boozer_surface_is_self_intersecting(...)` plus the self-intersection branch
+  in `Stage2GuardedBoozerEvaluator.run_guarded(...)` at
+  `examples/single_stage_optimization/banana_opt/stage2_objectives.py`. The
+  check uses `angle=0.0` for consistency with `attempt_initialize_boozer_surface`
+  (`banana_opt/stage2_single_stage_handoff.py:506`), and the evaluator records
+  `last_failure_reason = "self_intersecting"` so soft-mode status prints emit
+  `IotaFailureReason=self_intersecting` and ALM consumers can inspect it.
+  Regression coverage lives in `tests/geo/test_banana_objective_modules.py` as
+  `test_build_stage2_iota_runtime_{restores_state_on_self_intersecting_solve,
+  treats_self_intersection_check_exception_as_failure,
+  does_not_check_self_intersection_on_solve_failure,
+  recovers_after_self_intersection_failure,
+  sets_no_failure_reason_on_successful_solve}`.
+
+Deferred out of scope:
+
+- Single-stage (`banana_opt/single_stage_objectives.py`) hosts the same class
+  of hazard — `Iotas`, `raw_J_Boozer_obj`, `raw_J_QS_obj` on a shared
+  `BoozerSurface` threaded into single-stage's L-BFGS-B / ALM driver — and is
+  not touched by this fix. A separate audit is required before single-stage
+  guarantees the same rollback semantics.
+- Multi-angle self-intersection probing. Currently single-angle at
+  `angle=0.0`. Escalate to multi-angle if false negatives are observed in
+  practice (adds O(N_angles) `cross_section` + Bentley-Ottmann cost per
+  hot-loop evaluation).
+- ALM `solve_failed` channel. Today the ALM path emits a large violation and
+  zero gradient on failure, which causes the subproblem to reject but still
+  inflates the outer Lagrange multiplier. A dedicated `solve_failed` flag in
+  the ALM driver would let the outer loop skip the multiplier update on
+  failed iterates; not done here.
 
 ## Validation Limits
 

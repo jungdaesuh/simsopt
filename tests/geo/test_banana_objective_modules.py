@@ -218,6 +218,9 @@ class _FakeSurfaceState:
     def __init__(self, owner, x):
         self._owner = owner
         self._x = np.asarray(x, dtype=float)
+        self._self_intersecting = False
+        self._self_intersecting_raises: Exception | None = None
+        self.self_intersection_calls = 0
 
     @property
     def x(self):
@@ -227,6 +230,19 @@ class _FakeSurfaceState:
     def x(self, value):
         self._x = np.asarray(value, dtype=float)
         self._owner.need_to_run_code = True
+
+    def set_self_intersecting(self, flag: bool):
+        self._self_intersecting = bool(flag)
+        self._self_intersecting_raises = None
+
+    def set_self_intersecting_raises(self, error: Exception):
+        self._self_intersecting_raises = error
+
+    def is_self_intersecting(self, angle=0.0, thetas=None):
+        self.self_intersection_calls += 1
+        if self._self_intersecting_raises is not None:
+            raise self._self_intersecting_raises
+        return self._self_intersecting
 
 
 class _FakeBoozerSurface:
@@ -1184,6 +1200,123 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(
             runtime.guarded_boozer_evaluator.last_successful_state.G,
             0.38,
+        )
+
+    def test_build_stage2_iota_runtime_sets_no_failure_reason_on_successful_solve(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
+        runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
+        fake_boozer_surface.need_to_run_code = True
+
+        state = self.module.evaluate_stage2_iota_state(runtime)
+
+        self.assertFalse(state.solve_failed)
+        self.assertIsNone(runtime.guarded_boozer_evaluator.last_failure_reason)
+
+    def test_build_stage2_iota_runtime_restores_state_on_self_intersecting_solve(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
+        runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
+        fake_boozer_surface.queue_result(
+            surface_x=[3.5, -1.5],
+            iota=0.27,
+            G=0.42,
+            success=True,
+        )
+        fake_boozer_surface.surface.set_self_intersecting(True)
+        fake_boozer_surface.need_to_run_code = True
+
+        state = self.module.evaluate_stage2_iota_state(runtime)
+
+        self.assertAlmostEqual(state.iota, 0.21)
+        self.assertAlmostEqual(state.penalty, 5.0e-5)
+        self.assertFalse(state.feasible)
+        self.assertTrue(state.solve_failed)
+        self.assertEqual(
+            runtime.guarded_boozer_evaluator.last_failure_reason,
+            "self_intersecting",
+        )
+        self._assert_restored_fake_boozer_state(fake_boozer_surface)
+        self.assertEqual(fake_boozer_surface.surface.self_intersection_calls, 1)
+
+    def test_build_stage2_iota_runtime_treats_self_intersection_check_exception_as_failure(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
+        runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
+        fake_boozer_surface.queue_result(
+            surface_x=[6.0, 2.0],
+            iota=0.33,
+            G=0.55,
+            success=True,
+        )
+        fake_boozer_surface.surface.set_self_intersecting_raises(
+            RuntimeError("ground missing")
+        )
+        fake_boozer_surface.need_to_run_code = True
+
+        state = self.module.evaluate_stage2_iota_state(runtime)
+
+        self.assertAlmostEqual(state.iota, 0.21)
+        self.assertTrue(state.solve_failed)
+        self.assertEqual(
+            runtime.guarded_boozer_evaluator.last_failure_reason,
+            "self_intersecting",
+        )
+        self._assert_restored_fake_boozer_state(fake_boozer_surface)
+
+    def test_build_stage2_iota_runtime_does_not_check_self_intersection_on_solve_failure(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
+        runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
+        fake_boozer_surface.queue_result(
+            surface_x=[9.0, -4.0],
+            iota=0.41,
+            G=0.72,
+            success=False,
+        )
+        fake_boozer_surface.need_to_run_code = True
+
+        state = self.module.evaluate_stage2_iota_state(runtime)
+
+        self.assertTrue(state.solve_failed)
+        self.assertEqual(
+            runtime.guarded_boozer_evaluator.last_failure_reason,
+            "solve_failed",
+        )
+        self.assertEqual(fake_boozer_surface.surface.self_intersection_calls, 0)
+
+    def test_build_stage2_iota_runtime_recovers_after_self_intersection_failure(self):
+        fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
+        runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
+
+        fake_boozer_surface.queue_result(
+            surface_x=[4.5, -2.5],
+            iota=0.27,
+            G=0.42,
+            success=True,
+        )
+        fake_boozer_surface.surface.set_self_intersecting(True)
+        fake_boozer_surface.need_to_run_code = True
+        failure_state = self.module.evaluate_stage2_iota_state(runtime)
+        self.assertTrue(failure_state.solve_failed)
+        self.assertEqual(
+            runtime.guarded_boozer_evaluator.last_failure_reason,
+            "self_intersecting",
+        )
+
+        fake_boozer_surface.surface.set_self_intersecting(False)
+        fake_boozer_surface.queue_result(
+            surface_x=[1.1, -0.9],
+            iota=0.23,
+            G=0.36,
+            success=True,
+        )
+        fake_boozer_surface.need_to_run_code = True
+        success_state = self.module.evaluate_stage2_iota_state(runtime)
+
+        self.assertFalse(success_state.solve_failed)
+        self.assertIsNone(runtime.guarded_boozer_evaluator.last_failure_reason)
+        self.assertAlmostEqual(success_state.iota, 0.23)
+        np.testing.assert_allclose(fake_boozer_surface.surface.x, [1.1, -0.9])
+        np.testing.assert_allclose(
+            runtime.guarded_boozer_evaluator.last_successful_state.surface_dofs,
+            [1.1, -0.9],
         )
 
     def test_evaluate_banana_current_upper_bound_accepts_scaled_current_vjp(self):

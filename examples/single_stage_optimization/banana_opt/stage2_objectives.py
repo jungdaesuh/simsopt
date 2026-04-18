@@ -29,6 +29,7 @@ from banana_opt.stage2_single_stage_handoff import (
     BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS,
     attempt_initialize_boozer_surface,
     compute_tf_G0,
+    restore_boozer_solve_state,
     run_boozer_with_failure_policy,
     snapshot_boozer_solve_state,
 )
@@ -38,6 +39,35 @@ from simsopt.objectives import QuadraticPenalty
 
 _SMOOTHING_EPS = float(np.finfo(float).eps)
 _STAGE2_SOLVE_FAILURE_REJECT_VIOLATION = 1.0
+_STAGE2_HOT_LOOP_SELF_INTERSECTION_ANGLE = 0.0
+
+_STAGE2_FAILURE_REASON_NONE = None
+_STAGE2_FAILURE_REASON_SOLVE = "solve_failed"
+_STAGE2_FAILURE_REASON_SELF_INTERSECTION = "self_intersecting"
+
+
+def _boozer_surface_is_self_intersecting(boozer_surface) -> bool:
+    """Return True when the Boozer surface is self-intersecting at the probe angle.
+
+    Fails closed: if the underlying check raises, the surface is treated as
+    self-intersecting so the caller rejects the iterate rather than trust a
+    geometry that cannot be validated. If the surface object does not expose
+    ``is_self_intersecting`` (e.g. minimal test doubles), returns ``False`` so
+    existing tests remain valid without having to stub the method.
+    """
+    surface = getattr(boozer_surface, "surface", None)
+    check = getattr(surface, "is_self_intersecting", None)
+    if not callable(check):
+        return False
+    try:
+        return bool(check(angle=_STAGE2_HOT_LOOP_SELF_INTERSECTION_ANGLE))
+    except TypeError:
+        try:
+            return bool(check())
+        except Exception:
+            return True
+    except Exception:
+        return True
 
 
 def _new_derivative():
@@ -73,6 +103,7 @@ class Stage2GuardedBoozerEvaluator:
         self.boozer_surface = boozer_surface
         self.last_successful_state = snapshot_boozer_solve_state(boozer_surface)
         self.last_solve_failed = False
+        self.last_failure_reason: str | None = _STAGE2_FAILURE_REASON_NONE
 
     def _refresh_if_needed(self) -> None:
         if self.boozer_surface.need_to_run_code:
@@ -100,12 +131,24 @@ class Stage2GuardedBoozerEvaluator:
             failure_policy=BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS,
             last_successful_state=self.last_successful_state,
         )
-        self.last_solve_failed = not solve_attempt.solve_success
-        if not self.last_solve_failed:
-            self.last_successful_state = snapshot_boozer_solve_state(
-                self.boozer_surface
+        if not solve_attempt.solve_success:
+            self.last_solve_failed = True
+            self.last_failure_reason = _STAGE2_FAILURE_REASON_SOLVE
+            return {"success": False, "reason": self.last_failure_reason}
+        if _boozer_surface_is_self_intersecting(self.boozer_surface):
+            restore_boozer_solve_state(
+                self.boozer_surface,
+                self.last_successful_state,
             )
-        return {"success": solve_attempt.solve_success}
+            self.last_solve_failed = True
+            self.last_failure_reason = _STAGE2_FAILURE_REASON_SELF_INTERSECTION
+            return {"success": False, "reason": self.last_failure_reason}
+        self.last_solve_failed = False
+        self.last_failure_reason = _STAGE2_FAILURE_REASON_NONE
+        self.last_successful_state = snapshot_boozer_solve_state(
+            self.boozer_surface
+        )
+        return {"success": True, "reason": None}
 
     def evaluate(
         self,
@@ -869,7 +912,18 @@ def make_stage2_fun(
                 f", Iota={iota_state.iota:.4f}, Jiota={iota_state.penalty:.2e}"
             )
             if iota_state.solve_failed:
-                outstr += ", IotaSolveFailed=1"
+                evaluator = getattr(
+                    stage2_iota_runtime,
+                    "guarded_boozer_evaluator",
+                    None,
+                )
+                reason = (
+                    evaluator.last_failure_reason
+                    if evaluator is not None
+                    and getattr(evaluator, "last_failure_reason", None) is not None
+                    else _STAGE2_FAILURE_REASON_SOLVE
+                )
+                outstr += f", IotaSolveFailed=1, IotaFailureReason={reason}"
         outstr += f", ║∇J║={np.linalg.norm(grad):.1e}"
         print(outstr)
         return J, grad
