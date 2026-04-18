@@ -1333,9 +1333,8 @@ def _lm_iteration(flat_residual_fn, state, *, tol):
             jnp.asarray(2, dtype=jnp.int32),
         ),
         "accepted": accepted,
-        "success": finite_candidate & (
-            lax.select(accepted, grad_norm_candidate, state["grad_norm_inf"]) <= tol
-        ),
+        "success": finite_candidate
+        & (lax.select(accepted, grad_norm_candidate, state["grad_norm_inf"]) <= tol),
     }
 
 
@@ -1458,7 +1457,7 @@ def levenberg_marquardt_traceable(
 
 def _materialize_dense_linear_operator(linear_operator_fn, x):
     eye = jnp.eye(x.shape[0], dtype=x.dtype)
-    cols = lax.map(lambda basis: linear_operator_fn(x, basis), eye)
+    cols = jax.vmap(lambda basis: linear_operator_fn(x, basis))(eye)
     return jnp.swapaxes(cols, 0, 1)
 
 

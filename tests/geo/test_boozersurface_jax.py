@@ -254,7 +254,28 @@ def _explicit_scalar(value, *, dtype, device=None):
 
 
 def _matrix_constant(matrix, reference):
-    return jnp.asarray(np.asarray(matrix, dtype=np.dtype(reference.dtype)), dtype=reference.dtype)
+    return jnp.asarray(
+        np.asarray(matrix, dtype=np.dtype(reference.dtype)), dtype=reference.dtype
+    )
+
+
+def test_materialize_dense_linear_operator_matches_linear_map():
+    A = jnp.asarray(
+        [
+            [2.0, -1.0, 0.5],
+            [0.0, 3.0, 1.0],
+            [1.5, -2.0, 4.0],
+        ],
+        dtype=jnp.float64,
+    )
+    x = jnp.asarray([0.25, -0.5, 1.0], dtype=jnp.float64)
+
+    dense = _opt._materialize_dense_linear_operator(
+        lambda _x, v: A @ v,
+        x,
+    )
+
+    np.testing.assert_allclose(np.asarray(dense), np.asarray(A), atol=1.0e-12)
 
 
 def _build_gpu_traceable_linear_problem(booz, gpu, *, step_scale):
@@ -1555,7 +1576,13 @@ class TestBoozerSurfaceJAXClass:
             *,
             hostify_inputs=True,
         ):
-            del optimize_G, constraint_weight, coil_set_spec, coil_arrays, hostify_inputs
+            del (
+                optimize_G,
+                constraint_weight,
+                coil_set_spec,
+                coil_arrays,
+                hostify_inputs,
+            )
             captured["weight_inv_modB"] = weight_inv_modB
             return lambda x: jnp.zeros_like(x)
 
@@ -1580,8 +1607,12 @@ class TestBoozerSurfaceJAXClass:
                 success=True,
             )
 
-        monkeypatch.setattr(booz, "_make_penalty_residual_with", fake_make_penalty_residual_with)
-        monkeypatch.setattr(_bsj, "reference_least_squares", fake_reference_least_squares)
+        monkeypatch.setattr(
+            booz, "_make_penalty_residual_with", fake_make_penalty_residual_with
+        )
+        monkeypatch.setattr(
+            _bsj, "reference_least_squares", fake_reference_least_squares
+        )
 
         res = booz.minimize_boozer_penalty_constraints_ls(
             iota=0.3,
@@ -1644,11 +1675,13 @@ class TestBoozerSurfaceJAXClass:
         assert res_lbfgs["optimizer_method"] == "lbfgs"
 
         booz.recompute_bell()
-        manual_target = booz._pack_decision_vector(res_lbfgs["iota"], res_lbfgs["G"]) - 0.1
+        manual_target = (
+            booz._pack_decision_vector(res_lbfgs["iota"], res_lbfgs["G"]) - 0.1
+        )
         monkeypatch.setattr(
             booz,
             "_make_penalty_residual_with",
-            lambda *args, **kwargs: (lambda x: x - manual_target),
+            lambda *args, **kwargs: lambda x: x - manual_target,
         )
 
         res_manual = booz.minimize_boozer_penalty_constraints_ls(
@@ -1702,7 +1735,7 @@ class TestBoozerSurfaceJAXClass:
         monkeypatch.setattr(
             booz,
             "_make_exact_constraints_residual_with",
-            lambda *args, **kwargs: (lambda xl: xl - target),
+            lambda *args, **kwargs: lambda xl: xl - target,
         )
 
         res = booz.minimize_boozer_exact_constraints_newton(
@@ -1742,7 +1775,7 @@ class TestBoozerSurfaceJAXClass:
         monkeypatch.setattr(
             booz,
             "_make_exact_constraints_residual_with",
-            lambda *args, **kwargs: (lambda xl: (xl - target) ** 2),
+            lambda *args, **kwargs: lambda xl: (xl - target) ** 2,
         )
 
         def fake_root(fun, x_init, *, jac, method, options):
@@ -1781,7 +1814,7 @@ class TestBoozerSurfaceJAXClass:
         monkeypatch.setattr(
             booz,
             "_make_exact_constraints_residual_with",
-            lambda *args, **kwargs: (lambda xl: xl - xl0),
+            lambda *args, **kwargs: lambda xl: xl - xl0,
         )
 
         def fake_root(fun, x_init, *, jac, method, options):
@@ -1816,7 +1849,7 @@ class TestBoozerSurfaceJAXClass:
         monkeypatch.setattr(
             booz,
             "_make_exact_constraints_residual_with",
-            lambda *args, **kwargs: (lambda xl: xl - xl0 + offset),
+            lambda *args, **kwargs: lambda xl: xl - xl0 + offset,
         )
 
         def fake_root(fun, x_init, *, jac, method, options):
@@ -4706,7 +4739,7 @@ class TestEnsureSolvedGuard:
                 "success": True,
                 "PLU": (np.eye(1), np.eye(1), np.eye(1)),
                 "vjp": lambda *_args, **_kwargs: None,
-            "vjp_groups": lambda *_args, **_kwargs: None,
+                "vjp_groups": lambda *_args, **_kwargs: None,
             }
             booz.need_to_run_code = False
             return booz.res
@@ -5259,7 +5292,9 @@ class TestStellsymMaskCPUJAXParity:
         ),
         (
             "half_phi_x_full_theta",
-            lambda ntor, nfp: np.linspace(0, 1.0 / (2.0 * nfp), ntor + 1, endpoint=False),
+            lambda ntor, nfp: np.linspace(
+                0, 1.0 / (2.0 * nfp), ntor + 1, endpoint=False
+            ),
             lambda mpol: np.linspace(0, 1.0, 2 * mpol + 1, endpoint=False),
         ),
     ]
@@ -5383,12 +5418,8 @@ class TestBuildBoozerSurfaceRuntimeState:
         assert rs.ntor == s.ntor
         assert rs.nfp == s.nfp
         assert rs.stellsym == s.stellsym
-        np.testing.assert_allclose(
-            np.asarray(rs.quadpoints_phi), s.quadpoints_phi
-        )
-        np.testing.assert_allclose(
-            np.asarray(rs.quadpoints_theta), s.quadpoints_theta
-        )
+        np.testing.assert_allclose(np.asarray(rs.quadpoints_phi), s.quadpoints_phi)
+        np.testing.assert_allclose(np.asarray(rs.quadpoints_theta), s.quadpoints_theta)
         assert rs.scatter_indices is not None  # stellsym=True
 
     def test_runtime_state_non_stellsym_has_no_scatter(self):
