@@ -68,7 +68,7 @@ class Stage2ArtifactConfig:
     init_only: bool = False
     banana_init_current_A: float = 1.0e4
     banana_current_max_A: float = 1.6e4
-    finite_current_mode: str = "boozer_surrogate"
+    finite_current_mode: str = "wataru_proxy_field"
     proxy_plasma_current_A: float = 0.0
     vf_current_A: float = 0.0
     vf_template_path: str | None = None
@@ -225,7 +225,10 @@ def build_stage2_command(
         "--constraint-method",
         config.constraint_method,
     ]
-    if config.finite_current_mode != "boozer_surrogate":
+    # finite_current_mode is a passive provenance label after the root-fix
+    # refactor, so it no longer needs to be explicitly forwarded. Stage 2
+    # always uses the Wataru proxy-field model.
+    if config.finite_current_mode not in {"wataru_proxy_field", None, ""}:
         command.extend(["--finite-current-mode", config.finite_current_mode])
     if abs(float(config.proxy_plasma_current_A)) > 1.0e-12:
         command.extend(

@@ -49,7 +49,6 @@ from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
 from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basin_telemetry_values
 from banana_opt.stage2_geometry import (
-    WATARU_PROXY_FIELD_MODE,
     init_surface as _init_surface,
     initialize_coils as _initialize_coils,
     is_self_intersecting,
@@ -271,11 +270,12 @@ def parse_args():
     )
     parser.add_argument(
         "--finite-current-mode",
-        choices=["boozer_surrogate", "wataru_proxy_field"],
+        choices=["wataru_proxy_field"],
         default=os.environ.get("FINITE_CURRENT_MODE"),
         help=(
-            "Optional Stage 2 finite-current field model. When omitted for a fresh run, "
-            "Stage 2 preserves the existing surrogate default."
+            "Passive artifact-provenance label. Retained for backward "
+            "compatibility; Stage 2 always uses the Wataru proxy-field model "
+            "after the root-fix refactor."
         ),
     )
     parser.add_argument(
@@ -1141,14 +1141,10 @@ def _resolve_stage2_finite_current_config(
             else stage2_results.get("FINITE_CURRENT_MODE_SOURCE")
         ),
     )
-    if (
-        args.stage2_bs_path
-        and stage2_results is None
-        and finite_current_mode == WATARU_PROXY_FIELD_MODE
-    ):
+    if args.stage2_bs_path and stage2_results is None:
         raise ValueError(
-            "Stage 2 restarts in wataru_proxy_field mode require the sibling "
-            "results.json sidecar so the loaded coils can be partitioned correctly."
+            "Stage 2 restarts require the sibling results.json sidecar so the "
+            "loaded coils can be partitioned via the coil_groups manifest."
         )
 
     if stage2_results is None:
@@ -1178,29 +1174,6 @@ def _resolve_stage2_finite_current_config(
             field_name="--vf-template-path",
         )
 
-    if finite_current_mode != WATARU_PROXY_FIELD_MODE:
-        if (
-            requested_proxy_plasma_current_A is not None
-            or requested_vf_current_A is not None
-        ):
-            raise ValueError(
-                "--proxy-plasma-current-A and --vf-current-A require "
-                "--finite-current-mode=wataru_proxy_field."
-            )
-        if requested_vf_template_path not in {None, ""}:
-            raise ValueError(
-                "--vf-template-path requires --finite-current-mode=wataru_proxy_field."
-            )
-        return Stage2FiniteCurrentConfig(
-            finite_current_mode=finite_current_mode,
-            proxy_plasma_current_A=0.0,
-            vf_current_A=0.0,
-            vf_template_path=None,
-            boozer_current_convention=resolve_boozer_current_convention(
-                finite_current_mode,
-            ),
-        )
-
     vf_template_path = resolve_wataru_vf_template_path(
         finite_current_mode=finite_current_mode,
         vf_current_A=vf_current_A,
@@ -1208,8 +1181,7 @@ def _resolve_stage2_finite_current_config(
     )
     if vf_current_A != 0.0 and vf_template_path in {None, ""}:
         raise ValueError(
-            "--vf-template-path is required when --vf-current-A is non-zero in "
-            "wataru_proxy_field mode."
+            "--vf-template-path is required when --vf-current-A is non-zero."
         )
     return Stage2FiniteCurrentConfig(
         finite_current_mode=finite_current_mode,
@@ -1237,15 +1209,12 @@ def _build_initialize_coils_kwargs(
     nphi,
     ntheta,
 ):
-    if finite_current_config.finite_current_mode != WATARU_PROXY_FIELD_MODE:
-        return {}
     return {
         "equilibrium_file": equilibrium_file,
         "target_major_radius": target_major_radius,
         "toroidal_flux": toroidal_flux,
         "nphi": nphi,
         "ntheta": ntheta,
-        "finite_current_mode": finite_current_config.finite_current_mode,
         "proxy_plasma_current_A": finite_current_config.proxy_plasma_current_A,
         "vf_current_A": finite_current_config.vf_current_A,
         "vf_template_path": finite_current_config.vf_template_path,
@@ -1401,11 +1370,10 @@ def main(parsed_args=None):
         )
         new_tf_coils = tf_coils
     new_surf_coils = surf_coils
-    objective_curves = (
-        new_curves
-        if finite_current_mode != WATARU_PROXY_FIELD_MODE
-        else [coil.curve for coil in new_banana_coils]
-    )
+    # SquaredFlux geometry penalties act on the optimizable banana curves only;
+    # TF / proxy / VF curves are fixed field sources and must not enter the
+    # clearance or length objectives.
+    objective_curves = [coil.curve for coil in new_banana_coils]
     initial_banana_current_A = float(new_banana_coils[0].current.get_value())
 
     # MAIN OPTIMIZATION

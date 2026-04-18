@@ -26,9 +26,6 @@ from simsopt.geo import (
 from plotting_utils import magnitude_field_plot, norm_field_plot
 from workflow_helpers import validate_normalized_toroidal_flux
 
-WATARU_PROXY_FIELD_MODE = "wataru_proxy_field"
-
-
 def init_surface(R0, s, file_loc, nphi, ntheta):
     s = validate_normalized_toroidal_flux(s, field_name="Stage 2 VMEC surface label s")
     surf = SurfaceRZFourier.from_wout(
@@ -112,12 +109,11 @@ def initialize_coils(
     theta_width,
     out_dir,
     *,
-    equilibrium_file=None,
-    target_major_radius=None,
-    toroidal_flux=None,
-    nphi=None,
-    ntheta=None,
-    finite_current_mode="boozer_surrogate",
+    equilibrium_file,
+    target_major_radius,
+    toroidal_flux,
+    nphi,
+    ntheta,
     proxy_plasma_current_A=0.0,
     vf_current_A=0.0,
     vf_template_path=None,
@@ -139,35 +135,24 @@ def initialize_coils(
         surf_coils.stellsym,
     )
 
-    proxy_coils: list[Coil] = []
+    # Proxy plasma-current coil: always built (Wataru convention). With
+    # plasma_current_A=0.0 it contributes no field, keeping the I=0 baseline
+    # bit-equivalent to the historical vacuum case while preserving a single
+    # bs.coils layout regardless of current magnitude.
+    proxy_coils = build_proxy_plasma_current_coils(
+        equilibrium_file=equilibrium_file,
+        target_major_radius=float(target_major_radius),
+        nphi=int(nphi),
+        ntheta=int(ntheta),
+        toroidal_flux=float(toroidal_flux),
+        plasma_current_A=float(proxy_plasma_current_A),
+    )
     vf_coils: list[Coil] = []
-    if finite_current_mode == WATARU_PROXY_FIELD_MODE:
-        if equilibrium_file is None:
-            raise ValueError(
-                "equilibrium_file is required to build the Wataru proxy plasma-current coil."
-            )
-        if target_major_radius is None or toroidal_flux is None:
-            raise ValueError(
-                "target_major_radius and toroidal_flux are required for "
-                "wataru_proxy_field initialization."
-            )
-        if nphi is None or ntheta is None:
-            raise ValueError(
-                "nphi and ntheta are required for wataru_proxy_field initialization."
-            )
-        proxy_coils = build_proxy_plasma_current_coils(
-            equilibrium_file=equilibrium_file,
-            target_major_radius=float(target_major_radius),
-            nphi=int(nphi),
-            ntheta=int(ntheta),
-            toroidal_flux=float(toroidal_flux),
-            plasma_current_A=float(proxy_plasma_current_A),
+    if vf_template_path not in {None, ""}:
+        vf_coils = build_vf_coils(
+            vf_current_A=float(vf_current_A),
+            vf_template_path=str(vf_template_path),
         )
-        if vf_template_path not in {None, ""}:
-            vf_coils = build_vf_coils(
-                vf_current_A=float(vf_current_A),
-                vf_template_path=str(vf_template_path),
-            )
 
     coils = tf_coils + banana_coils + proxy_coils + vf_coils
     bs = BiotSavart(coils)

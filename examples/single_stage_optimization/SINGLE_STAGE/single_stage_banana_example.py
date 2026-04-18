@@ -649,7 +649,7 @@ def partition_loaded_stage2_coils(coils, stage2_results, requested_num_tf_coils)
 def resolve_plasma_current_settings(
     args,
     *,
-    finite_current_mode="boozer_surrogate",
+    finite_current_mode="wataru_proxy_field",
     default_plasma_current_A=0.0,
 ):
     settings = _resolve_plasma_current_settings_impl(
@@ -5540,9 +5540,9 @@ if __name__ == "__main__":
     banana_coils = list(coil_partitions.banana_coils)
     banana_curves = [c.curve for c in banana_coils]
     banana_curve = banana_curves[0]
-    objective_curves = (
-        curves if finite_current_mode == "boozer_surrogate" else banana_curves
-    )
+    # Clearance/length objectives operate on the optimizable banana curves only;
+    # TF/proxy/VF curves are fixed field sources and must not enter the penalty.
+    objective_curves = banana_curves
     stage2_tf_current_A = resolve_stage2_tf_current_A(stage2_results, tf_coils)
     tf_current_sum_abs_A = float(sum(abs(c.current.get_value()) for c in tf_coils))
     initial_banana_current_A = float(banana_coils[0].current.get_value())

@@ -39,12 +39,14 @@ def resolve_wataru_vf_template_path(
     vf_current_A: float,
     vf_template_path: str | None,
 ) -> str | None:
+    # finite_current_mode is kept as a passive provenance label; it no longer
+    # gates template selection after the root-fix refactor, so the bundled
+    # default is used whenever the caller requests a non-zero VF current and
+    # has not supplied a template path.
+    del finite_current_mode
     if vf_template_path not in {None, ""}:
         return vf_template_path
-    if (
-        finite_current_mode == "wataru_proxy_field"
-        and abs(float(vf_current_A)) > 1.0e-12
-    ):
+    if abs(float(vf_current_A)) > 1.0e-12:
         return default_wataru_vf_template_path()
     return vf_template_path
 
@@ -64,7 +66,7 @@ class Stage2SeedSpec:
     order: int
     banana_init_current_A: float = 1.0e4
     banana_current_max_A: float = 1.6e4
-    finite_current_mode: str = "boozer_surrogate"
+    finite_current_mode: str = "wataru_proxy_field"
     proxy_plasma_current_A: float = 0.0
     vf_current_A: float = 0.0
     vf_template_path: str | None = None
@@ -283,9 +285,10 @@ def format_legacy_local_stage2_seed_dir(spec: Stage2SeedSpec) -> str:
 
 
 def format_stage2_finite_current_suffix(spec: Stage2SeedSpec) -> str:
+    # The I=0, VF=0 baseline keeps its historical un-suffixed output directory
+    # name so existing sweep manifests and archive paths stay stable.
     if (
-        spec.finite_current_mode == "boozer_surrogate"
-        and abs(float(spec.proxy_plasma_current_A)) <= 1.0e-12
+        abs(float(spec.proxy_plasma_current_A)) <= 1.0e-12
         and abs(float(spec.vf_current_A)) <= 1.0e-12
         and spec.vf_template_path in {None, ""}
     ):

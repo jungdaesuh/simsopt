@@ -29,7 +29,7 @@ BoozerCurrentConvention = Literal["mu0_over_2pi", "mu0"]
 FiniteCurrentMode = Literal["boozer_surrogate", "wataru_proxy_field"]
 EffectiveCurrentMode = Literal["vacuum", "boozer_surrogate", "wataru_proxy_field"]
 CURRENT_MODE_ZERO_TOL = 1e-12
-DEFAULT_FINITE_CURRENT_MODE: FiniteCurrentMode = "boozer_surrogate"
+DEFAULT_FINITE_CURRENT_MODE: FiniteCurrentMode = "wataru_proxy_field"
 FINITE_CURRENT_MODE_SOURCE_ARTIFACT_METADATA: FiniteCurrentModeSource = (
     "artifact_metadata"
 )

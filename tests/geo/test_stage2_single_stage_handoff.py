@@ -265,7 +265,7 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertIsNone(upgraded["STAGE2_SECONDARY_ARTIFACT_SOURCE"])
         self.assertIsNone(upgraded["STAGE2_SECONDARY_BS_PATH"])
         self.assertIsNone(upgraded["STAGE2_SECONDARY_RESULTS_PATH"])
-        self.assertEqual(upgraded["FINITE_CURRENT_MODE"], "boozer_surrogate")
+        self.assertEqual(upgraded["FINITE_CURRENT_MODE"], "wataru_proxy_field")
         self.assertEqual(upgraded["FINITE_CURRENT_MODE_SOURCE"], "legacy_assumed_default")
         self.assertEqual(upgraded["BOOZER_CURRENT_CONVENTION"], "mu0")
         self.assertEqual(upgraded["NUM_PROXY_COILS"], 0)
