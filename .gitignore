@@ -9,8 +9,14 @@ objective*.dat
 residuals_20*.dat
 _skbuild/
 build/
+build-*/
 build-cmake/
 cmake_build/
+
+# Isolated dev environment (see scripts/dev/)
+/env/
+/env-*/
+/.asv/
 dist/
 .eggs/
 pip-wheel-metadata/
