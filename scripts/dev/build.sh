@@ -76,9 +76,18 @@ echo "    Build dir:  $build_dir"
 echo "    CXX_FLAGS:  $flags"
 [[ -n "$env_extra" ]] && echo "    Env:        $env_extra"
 
+if [[ -z "${CONDA_PREFIX:-}" ]] || [[ "$CONDA_PREFIX" != *"/env"* && "$CONDA_PREFIX" != *"/env-"* ]]; then
+    echo "error: CONDA_PREFIX is not set to an in-tree env." >&2
+    echo "       activate first:  conda activate ./env" >&2
+    exit 1
+fi
+
 if [[ -n "$env_extra" ]]; then
     eval "export $env_extra"
 fi
+
+# CMAKE_PREFIX_PATH ensures the env's Boost / pybind11 win over brew's.
+export CMAKE_PREFIX_PATH="${CONDA_PREFIX}${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 
 # scikit-build-core reads build-dir from config settings; CMAKE_CXX_FLAGS_RELEASE
 # is appended to default release flags rather than replacing them.

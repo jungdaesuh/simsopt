@@ -43,7 +43,21 @@ echo ""
 echo "==> Installing Python deps into $ENV_PREFIX"
 "$ENV_PREFIX/bin/pip" install --upgrade pip
 "$ENV_PREFIX/bin/pip" install -r requirements.txt
-"$ENV_PREFIX/bin/pip" install -e . --no-build-isolation
+
+# Critical: the editable install compiles simsoptpp via cmake, which
+# consults CONDA_PREFIX, CMAKE_PREFIX_PATH, and PATH to resolve boost,
+# pybind11, openmp, etc. Running ./env/bin/pip alone is not enough —
+# the child cmake process sees the shell's ambient CONDA_PREFIX (often
+# miniforge base) and finds brew's headers instead of the env's.
+# Explicitly activate the env for the install.
+ABS_PREFIX="$(cd "$ENV_PREFIX" && pwd)"
+echo ""
+echo "==> Compiling simsoptpp with CONDA_PREFIX=$ABS_PREFIX"
+env -i HOME="$HOME" USER="$USER" SHELL="$SHELL" \
+    CONDA_PREFIX="$ABS_PREFIX" \
+    PATH="$ABS_PREFIX/bin:/usr/bin:/bin" \
+    CMAKE_PREFIX_PATH="$ABS_PREFIX" \
+    "$ABS_PREFIX/bin/pip" install -e . --no-build-isolation
 
 echo ""
 echo "==> Env ready."
