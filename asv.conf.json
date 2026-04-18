@@ -1,0 +1,20 @@
+{
+    "version": 1,
+    "project": "simsopt",
+    "project_url": "https://github.com/hiddenSymmetries/simsopt",
+    "repo": ".",
+    "branches": ["master"],
+    "dvcs": "git",
+    "environment_type": "existing",
+    "install_command": [],
+    "uninstall_command": [],
+    "build_command": [],
+    "show_commit_url": "https://github.com/hiddenSymmetries/simsopt/commit/",
+    "pythons": ["3.11"],
+    "matrix": {},
+    "benchmark_dir": "benchmarks/simsopt_benchmarks",
+    "env_dir": ".asv/env",
+    "results_dir": ".asv/results",
+    "html_dir": ".asv/html",
+    "plugins": []
+}
