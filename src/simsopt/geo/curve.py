@@ -75,25 +75,14 @@ def _as_runtime_jax_float64(value):
     return _as_jax_float64(value)
 
 
-def _contains_jax_leaves(value):
-    if not _HAS_JAX:
-        return False
-    return any(
-        isinstance(leaf, jax.Array) or hasattr(leaf, "aval")
-        for leaf in jax.tree_util.tree_leaves(value)
-    )
-
-
-def _is_tracer(value):
-    return _HAS_JAX and hasattr(value, "aval") and not isinstance(value, jax.Array)
-
-
 def _as_runtime_float64_ref(value, *, reference):
     if not _HAS_JAX:
         return np.asarray(value, dtype=np.float64)
-    if _is_tracer(reference) and not _contains_jax_leaves(value):
-        return np.asarray(value, dtype=np.float64)
-    return _as_jax_float64(value)
+    from ..jax_core._math_utils import (
+        as_runtime_float64 as _distributed_as_runtime_float64,
+    )
+
+    return _distributed_as_runtime_float64(value, reference=reference)
 
 
 _TWO_PI = 2.0 * np.pi

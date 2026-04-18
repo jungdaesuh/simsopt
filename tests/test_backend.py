@@ -1192,6 +1192,16 @@ def test_as_jax_array_initializes_distributed_runtime_before_device_put(monkeypa
     )
 
 
+def test_as_runtime_array_initializes_distributed_runtime_before_device_put(monkeypatch):
+    _assert_distributed_runtime_initializes_before_device_put(
+        monkeypatch,
+        lambda math_utils: math_utils.as_runtime_float64(
+            [1.0, 2.0],
+            reference=np.asarray([0.0], dtype=np.float64),
+        ),
+    )
+
+
 def test_curveobjectives_as_jax_float64_initializes_distributed_runtime_before_device_put(
     monkeypatch,
 ):
@@ -1216,6 +1226,44 @@ def test_framedcurve_as_jax_float64_array_initializes_distributed_runtime_before
             np.array([1.0, 2.0], dtype=np.float64)
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("module_name", "helper_name"),
+    (
+        ("simsopt.jax_core._math_utils", "as_runtime_float64"),
+        ("simsopt.geo.curve", "_as_runtime_float64_ref"),
+        ("simsopt.geo.curvexyzfourier", "_as_runtime_float64"),
+    ),
+)
+def test_runtime_float64_helpers_keep_traced_references_on_device(
+    module_name,
+    helper_name,
+):
+    jax_module = _require_jax()
+    jnp_module = importlib.import_module("jax.numpy")
+    module = importlib.import_module(module_name)
+    helper = getattr(module, helper_name)
+    captured: dict[str, bool] = {}
+
+    def traced(reference):
+        value = helper(
+            np.array([1.0, 2.0], dtype=np.float64),
+            reference=reference,
+        )
+        captured["is_ndarray"] = isinstance(value, np.ndarray)
+        captured["has_aval"] = hasattr(value, "aval")
+        return jnp_module.sum(value) + reference
+
+    jax_module.eval_shape(
+        traced,
+        jnp_module.asarray(3.0, dtype=jnp_module.float64),
+    )
+
+    assert captured == {
+        "is_ndarray": False,
+        "has_aval": True,
+    }
 
 
 def test_explicit_current_mode_policy_preserves_strict_state(monkeypatch):

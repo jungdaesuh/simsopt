@@ -27,10 +27,6 @@ def _contains_jax_leaves(value) -> bool:
     )
 
 
-def is_tracer(value) -> bool:
-    return hasattr(value, "aval") and not isinstance(value, jax.Array)
-
-
 def as_jax_array(value, *, dtype) -> jax.Array:
     if isinstance(value, jax.Array):
         return jnp.asarray(value, dtype=dtype)
@@ -50,8 +46,10 @@ def as_jax_int32(value) -> jax.Array:
 
 
 def as_runtime_array(value, *, dtype, reference):
-    if is_tracer(reference) and not _contains_jax_leaves(value):
-        return np.asarray(value, dtype=np.dtype(dtype))
+    # Keep the API stable for callers that already thread a runtime reference,
+    # but route all JAX-enabled paths through the same array conversion helper.
+    # JAX treats tracers as ``jax.Array`` values, so a tracer-only NumPy escape
+    # hatch is both stale and unreachable on supported runtimes.
     return as_jax_array(value, dtype=dtype)
 
 

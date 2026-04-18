@@ -30,22 +30,21 @@ artifact, not to every public runtime-bundle entrypoint.
    `JAX_PLATFORMS` value such as `cuda,cpu`, which preserves CUDA as primary
    while keeping a callback lane available.
 
-## False alarm: `_math_utils.as_runtime_array(...)`
+## Runtime-array root fix
 
 A previously reported hot-path concern was that traced coil DOFs would fall into
-`np.asarray(...)` at `src/simsopt/jax_core/_math_utils.py:52-55` and force a
-host round-trip each iteration. The current implementation does not support that
-claim.
+`np.asarray(...)` inside `src/simsopt/jax_core/_math_utils.py` and force a host
+round-trip each iteration. That concern was a false alarm in the old code and
+has now been removed at the source.
 
-Two source facts matter:
+Before the fix, the NumPy fallback depended on a stale predicate:
 
-- `is_tracer(...)` is defined as `hasattr(value, "aval") and not isinstance(value, jax.Array)`
-  at `src/simsopt/jax_core/_math_utils.py:30-31`.
-- `as_runtime_array(...)` only takes the NumPy branch when
-  `is_tracer(reference)` is true and the value tree contains no JAX leaves at
-  `src/simsopt/jax_core/_math_utils.py:52-55`.
+- `is_tracer(...)` was defined as
+  `hasattr(value, "aval") and not isinstance(value, jax.Array)`.
+- `as_runtime_array(...)` only took the NumPy branch when
+  `is_tracer(reference)` was true and the value tree contained no JAX leaves.
 
-An isolated local reproduction against the checked-in module under JAX 0.9.2
+An isolated local reproduction against that old implementation under JAX 0.9.2
 produced:
 
 ```text
@@ -55,9 +54,19 @@ _contains_jax_leaves True
 result_type DynamicJaxprTracer
 ```
 
-So for real traced inputs, the NumPy branch is effectively unreachable and the
-result stays on the traced/device path. That makes `is_tracer(...)` look
-vestigial for modern JAX, but inert rather than harmful on this hot path.
+So for real traced inputs, the NumPy branch was effectively unreachable and the
+result stayed on the traced/device path.
+
+The root fix now removes that dead split entirely:
+
+- `src/simsopt/jax_core/_math_utils.py` routes `as_runtime_array(...)` straight
+  through `as_jax_array(...)` while preserving the public `reference=` API.
+- `src/simsopt/geo/curve.py` and `src/simsopt/geo/curvexyzfourier.py` no longer
+  carry their own copy-pasted tracer predicates; both delegate to the shared
+  `_math_utils.as_runtime_float64(...)` helper instead.
+
+That leaves one SSOT for runtime float conversion on JAX-enabled paths and
+eliminates the stale tracer heuristic from the active tree.
 
 ## Compile-cost driver structure
 
@@ -179,6 +188,6 @@ Python process.
 4. Do not expect a debug run to warm the production cache.
    Callback-bearing and callback-free paths lower to different HLO.
 
-5. Keep `_math_utils.is_tracer(...)` on the cleanup list, but not on the
-   critical path. It looks stale under JAX 0.9.2+, yet the current hot path does
-   not rely on it for correctness or performance.
+5. The stale `_math_utils.is_tracer(...)` cleanup item is closed.
+   The shared runtime-float helpers now go through one callback-free JAX array
+   conversion path, and backend tests lock in the traced-reference behavior.

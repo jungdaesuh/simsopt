@@ -4,7 +4,13 @@ import numpy as np
 from scipy.fft import rfft
 
 from ._simsoptpp import sopp_namespace
-from .curve import Curve, JaxCurve, _HAS_JAX, _as_jax_float64, jax, jnp
+from .curve import (
+    Curve,
+    JaxCurve,
+    _as_jax_float64,
+    _as_runtime_float64_ref as _as_runtime_float64,
+    jnp,
+)
 
 sopp = sopp_namespace("CurveXYZFourier")
 
@@ -17,27 +23,6 @@ __all__ = [
 ]
 
 _TWO_PI = 2.0 * np.pi
-
-
-def _contains_jax_leaves(value):
-    if not _HAS_JAX:
-        return False
-    return any(
-        isinstance(leaf, jax.Array) or hasattr(leaf, "aval")
-        for leaf in jax.tree_util.tree_leaves(value)
-    )
-
-
-def _is_tracer(value):
-    return _HAS_JAX and hasattr(value, "aval") and not isinstance(value, jax.Array)
-
-
-def _as_runtime_float64(value, *, reference):
-    if not _HAS_JAX:
-        return np.asarray(value, dtype=np.float64)
-    if _is_tracer(reference) and not _contains_jax_leaves(value):
-        return np.asarray(value, dtype=np.float64)
-    return _as_jax_float64(value)
 
 
 def _mode_numbers(order, *, reference):
