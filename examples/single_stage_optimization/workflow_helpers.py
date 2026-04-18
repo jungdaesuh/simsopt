@@ -39,16 +39,16 @@ def resolve_wataru_vf_template_path(
     vf_current_A: float,
     vf_template_path: str | None,
 ) -> str | None:
-    # finite_current_mode is kept as a passive provenance label; it no longer
-    # gates template selection after the root-fix refactor, so the bundled
-    # default is used whenever the caller requests a non-zero VF current and
-    # has not supplied a template path.
-    del finite_current_mode
+    # finite_current_mode and vf_current_A are kept in the signature for
+    # caller symmetry but no longer gate template selection. Wataru-faithful
+    # Stage 2 always loads the VF template so the serialized coil bundle
+    # matches the reference artifact shape — VF coils are materialized even at
+    # vf_current_A=0.0, which yields a zero-current VF bundle that contributes
+    # no field but preserves a single uniform bs.coils layout.
+    del finite_current_mode, vf_current_A
     if vf_template_path not in {None, ""}:
         return vf_template_path
-    if abs(float(vf_current_A)) > 1.0e-12:
-        return default_wataru_vf_template_path()
-    return vf_template_path
+    return default_wataru_vf_template_path()
 
 
 @dataclass(frozen=True)
@@ -286,11 +286,12 @@ def format_legacy_local_stage2_seed_dir(spec: Stage2SeedSpec) -> str:
 
 def format_stage2_finite_current_suffix(spec: Stage2SeedSpec) -> str:
     # The I=0, VF=0 baseline keeps its historical un-suffixed output directory
-    # name so existing sweep manifests and archive paths stay stable.
+    # name so existing sweep manifests and archive paths stay stable — even
+    # now that Wataru-faithful Stage 2 always resolves a VF template path,
+    # the current magnitudes are the load-bearing signal for naming.
     if (
         abs(float(spec.proxy_plasma_current_A)) <= 1.0e-12
         and abs(float(spec.vf_current_A)) <= 1.0e-12
-        and spec.vf_template_path in {None, ""}
     ):
         return ""
     suffix = f"-FCM={spec.finite_current_mode}"
