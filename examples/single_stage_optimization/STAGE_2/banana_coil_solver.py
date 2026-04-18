@@ -1148,6 +1148,8 @@ def _resolve_stage2_finite_current_config(
         )
 
     if stage2_results is None:
+        # Fresh Stage 2: auto-resolve the bundled VF template so the zero-current
+        # VF bundle is always serialized. This is the Wataru-faithful shape.
         proxy_plasma_current_A = (
             0.0
             if requested_proxy_plasma_current_A is None
@@ -1156,8 +1158,14 @@ def _resolve_stage2_finite_current_config(
         vf_current_A = (
             0.0 if requested_vf_current_A is None else float(requested_vf_current_A)
         )
-        vf_template_path = requested_vf_template_path
+        vf_template_path = resolve_wataru_vf_template_path(requested_vf_template_path)
     else:
+        # Seeded restart: trust the donor artifact verbatim. Legacy zero-VF
+        # donors must stay zero-VF — silently upgrading their VF_TEMPLATE_PATH
+        # to the bundled default would desync artifact metadata from the
+        # actual bs.coils layout (which partition_loaded_stage2_coils slices
+        # from the saved BiotSavart). A dedicated migration tool can opt-in to
+        # promoting legacy donors to the full-VF shape.
         proxy_plasma_current_A = _resolve_seeded_numeric_field(
             requested_proxy_plasma_current_A,
             stage2_results.get("PROXY_PLASMA_CURRENT_A"),
@@ -1174,11 +1182,6 @@ def _resolve_stage2_finite_current_config(
             field_name="--vf-template-path",
         )
 
-    vf_template_path = resolve_wataru_vf_template_path(
-        finite_current_mode=finite_current_mode,
-        vf_current_A=vf_current_A,
-        vf_template_path=vf_template_path,
-    )
     if vf_current_A != 0.0 and vf_template_path in {None, ""}:
         raise ValueError(
             "--vf-template-path is required when --vf-current-A is non-zero."

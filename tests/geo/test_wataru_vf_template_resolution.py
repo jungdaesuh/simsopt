@@ -25,19 +25,13 @@ workflow_helpers = _load_workflow_helpers_module()
 
 class ResolveWataruVfTemplatePathTests(unittest.TestCase):
     def test_returns_explicit_path_when_provided(self):
-        resolved = workflow_helpers.resolve_wataru_vf_template_path(
-            finite_current_mode="wataru_proxy_field",
-            vf_current_A=0.0,
-            vf_template_path="/custom/path.json",
+        self.assertEqual(
+            workflow_helpers.resolve_wataru_vf_template_path("/custom/path.json"),
+            "/custom/path.json",
         )
-        self.assertEqual(resolved, "/custom/path.json")
 
-    def test_returns_bundled_default_when_path_missing_and_zero_current(self):
-        resolved = workflow_helpers.resolve_wataru_vf_template_path(
-            finite_current_mode="wataru_proxy_field",
-            vf_current_A=0.0,
-            vf_template_path=None,
-        )
+    def test_returns_bundled_default_when_none(self):
+        resolved = workflow_helpers.resolve_wataru_vf_template_path(None)
         self.assertIsNotNone(resolved)
         self.assertTrue(Path(resolved).is_file())
         self.assertEqual(
@@ -45,44 +39,11 @@ class ResolveWataruVfTemplatePathTests(unittest.TestCase):
             workflow_helpers.DEFAULT_WATARU_VF_TEMPLATE_PATH,
         )
 
-    def test_returns_bundled_default_when_path_empty_and_zero_current(self):
-        resolved = workflow_helpers.resolve_wataru_vf_template_path(
-            finite_current_mode="wataru_proxy_field",
-            vf_current_A=0.0,
-            vf_template_path="",
-        )
-        self.assertIsNotNone(resolved)
+    def test_returns_bundled_default_when_empty_string(self):
         self.assertEqual(
-            Path(resolved),
+            Path(workflow_helpers.resolve_wataru_vf_template_path("")),
             workflow_helpers.DEFAULT_WATARU_VF_TEMPLATE_PATH,
         )
-
-    def test_returns_bundled_default_when_path_missing_and_nonzero_current(self):
-        resolved = workflow_helpers.resolve_wataru_vf_template_path(
-            finite_current_mode="wataru_proxy_field",
-            vf_current_A=3.0e3,
-            vf_template_path=None,
-        )
-        self.assertIsNotNone(resolved)
-        self.assertEqual(
-            Path(resolved),
-            workflow_helpers.DEFAULT_WATARU_VF_TEMPLATE_PATH,
-        )
-
-    def test_mode_label_does_not_influence_resolution(self):
-        # Legacy artifact-provenance label stays accepted; it no longer gates
-        # template selection after the Wataru-faithful refactor.
-        resolved_wataru = workflow_helpers.resolve_wataru_vf_template_path(
-            finite_current_mode="wataru_proxy_field",
-            vf_current_A=0.0,
-            vf_template_path=None,
-        )
-        resolved_legacy = workflow_helpers.resolve_wataru_vf_template_path(
-            finite_current_mode="boozer_surrogate",
-            vf_current_A=0.0,
-            vf_template_path=None,
-        )
-        self.assertEqual(resolved_wataru, resolved_legacy)
 
 
 class Stage2SeedSpecVfTemplateResolutionTests(unittest.TestCase):
@@ -116,9 +77,7 @@ class Stage2SeedSpecVfTemplateResolutionTests(unittest.TestCase):
         )
 
     def test_preserves_explicit_template_path(self):
-        spec = self._minimal_spec(
-            vf_template_path="/explicit/vf_template.json",
-        )
+        spec = self._minimal_spec(vf_template_path="/explicit/vf_template.json")
         self.assertEqual(spec.vf_template_path, "/explicit/vf_template.json")
 
 
@@ -151,14 +110,10 @@ class FormatStage2FiniteCurrentSuffixTests(unittest.TestCase):
         spec = self._spec(
             proxy_plasma_current_A=0.0,
             vf_current_A=0.0,
-            vf_template_path=None,  # will auto-resolve to bundled path
+            vf_template_path=None,  # auto-resolves to bundled path
         )
-        # Sanity-check that the template actually auto-resolved, so the test
-        # exercises the "populated template + zero currents" branch.
         self.assertIsNotNone(spec.vf_template_path)
-
-        suffix = workflow_helpers.format_stage2_finite_current_suffix(spec)
-        self.assertEqual(suffix, "")
+        self.assertEqual(workflow_helpers.format_stage2_finite_current_suffix(spec), "")
 
     def test_nonzero_plasma_current_emits_suffix(self):
         spec = self._spec(proxy_plasma_current_A=-1.0e3, vf_current_A=0.0)

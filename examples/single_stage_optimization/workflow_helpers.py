@@ -33,19 +33,14 @@ def default_wataru_vf_template_path() -> str | None:
     return str(DEFAULT_WATARU_VF_TEMPLATE_PATH)
 
 
-def resolve_wataru_vf_template_path(
-    *,
-    finite_current_mode: str,
-    vf_current_A: float,
-    vf_template_path: str | None,
-) -> str | None:
-    # finite_current_mode and vf_current_A are kept in the signature for
-    # caller symmetry but no longer gate template selection. Wataru-faithful
-    # Stage 2 always loads the VF template so the serialized coil bundle
-    # matches the reference artifact shape — VF coils are materialized even at
-    # vf_current_A=0.0, which yields a zero-current VF bundle that contributes
-    # no field but preserves a single uniform bs.coils layout.
-    del finite_current_mode, vf_current_A
+def resolve_wataru_vf_template_path(vf_template_path: str | None) -> str | None:
+    """Return ``vf_template_path`` if non-empty, else the bundled default.
+
+    Intended for **fresh** Stage 2 initialization paths only. Seeded restarts
+    must not pass through this helper — they inherit the donor artifact's
+    recorded ``VF_TEMPLATE_PATH`` verbatim (even when ``None``) so legacy
+    zero-VF donors stay internally consistent on reload.
+    """
     if vf_template_path not in {None, ""}:
         return vf_template_path
     return default_wataru_vf_template_path()
@@ -83,11 +78,7 @@ class Stage2SeedSpec:
         object.__setattr__(
             self,
             "vf_template_path",
-            resolve_wataru_vf_template_path(
-                finite_current_mode=self.finite_current_mode,
-                vf_current_A=self.vf_current_A,
-                vf_template_path=self.vf_template_path,
-            ),
+            resolve_wataru_vf_template_path(self.vf_template_path),
         )
 
 

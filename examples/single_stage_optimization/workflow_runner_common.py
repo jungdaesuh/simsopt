@@ -92,11 +92,7 @@ class Stage2ArtifactConfig:
         object.__setattr__(
             self,
             "vf_template_path",
-            resolve_wataru_vf_template_path(
-                finite_current_mode=self.finite_current_mode,
-                vf_current_A=self.vf_current_A,
-                vf_template_path=self.vf_template_path,
-            ),
+            resolve_wataru_vf_template_path(self.vf_template_path),
         )
         if self.stage2_iota_mode != "off" and self.stage2_iota_target is None:
             raise ValueError(

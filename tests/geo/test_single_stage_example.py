@@ -7946,10 +7946,11 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             self.assertEqual(phi_width, np.pi / 8.0)
             self.assertEqual(theta_width, np.pi / 6.0)
             self.assertTrue(str(out_dir).endswith("outputs-demo.nc/"))
+            # Fix #4: _initialize_coils no longer takes finite_current_mode.
+            # Proxy is always built; VF is built iff vf_template_path is set —
+            # that kwarg is the SSOT the mock must mirror.
             curves, proxy_coils, vf_coils = build_coil_bundle(
-                wataru_proxy_field=(
-                    extra_kwargs.get("finite_current_mode") == "wataru_proxy_field"
-                ),
+                wataru_proxy_field=bool(extra_kwargs.get("vf_template_path")),
             )
             fake_bs.coils = [*fake_tf_coils, *fake_banana_coils, *proxy_coils, *vf_coils]
             return (
