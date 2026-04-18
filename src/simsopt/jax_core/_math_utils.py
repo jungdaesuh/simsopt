@@ -46,10 +46,9 @@ def as_jax_int32(value) -> jax.Array:
 
 
 def as_runtime_array(value, *, dtype, reference):
-    # Keep the API stable for callers that already thread a runtime reference,
-    # but route all JAX-enabled paths through the same array conversion helper.
-    # JAX treats tracers as ``jax.Array`` values, so a tracer-only NumPy escape
-    # hatch is both stale and unreachable on supported runtimes.
+    # ``reference`` is accepted for call-site symmetry with tracer-aware APIs;
+    # conversion is device-uniform and does not branch on it.
+    del reference
     return as_jax_array(value, dtype=dtype)
 
 
