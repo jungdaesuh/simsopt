@@ -250,7 +250,97 @@ The final `BASELINE.md` delta table becomes the validated replacement for the wi
 
 ---
 
-## 8. Appendix — tooling commands
+## 8. Regression prevention
+
+Seven classes of regression risk are introduced by these fixes. Each needs a specific guard in CI or the review process.
+
+### 8.1 Numerical regressions (B1, B2, B4, B10)
+
+Reordering reductions changes FP output by ~ULPs. Biot–Savart summation, VJP reductions, and `np.sum → np.einsum` all reorder ops.
+
+- **Golden-output fixtures**: capture B, dB, ddB, all four VJPs at representative inputs from master into `tests/regression/golden/`. Compare with `np.testing.assert_allclose(rtol=1e-12, atol=1e-14)` — not bit-exact.
+- **FD cross-check per PR**: every function returning a derivative must pass a finite-difference check against its primal. Catches sign flips and unit errors the golden alone cannot.
+- **`assert_array_equal` → `assert_allclose` migration** before any Phase 2 PR lands — bit-exact tests on kernel output flake after reduction reorder.
+- **Thread-count invariance**: same benchmark at `OMP_NUM_THREADS=1` and `=N` must agree to `rtol=1e-10`. Catches accidentally non-associative parallel reductions.
+
+### 8.2 Memory safety (A1, any new `new`/`delete`)
+
+- **ASan + UBSan nightly build** running the full pytest suite. Fail on any new leak.
+- **`bench_rss_long_run`** (§6) asserts peak RSS doesn't grow across 500 optimizer iters.
+- **Policy**: no raw `new[]` in new code; require `std::vector` / `std::unique_ptr` / `xt::xarray`. `grep` check in CI.
+
+### 8.3 Thread safety (A3, B3, B9)
+
+- **TSan nightly build** with dedicated `tests/test_concurrent_*.py` exercising `evaluate_batch`, tracing, and Biot–Savart at `OMP_NUM_THREADS=32`.
+- **Parity-vs-serial**: same call at `OMP_NUM_THREADS=1` and `=N`, compare to `rtol=1e-10`.
+- **GIL-deadlock test for B3**: a tracing RHS that hits a Python-defined field subclass must still work. Release-GIL path must re-acquire before any Python object touch.
+
+### 8.4 API / behavior regressions (B5 is the watch item)
+
+`fieldcache_get_or_create("B_{i}", …)` is **Python-visible** at `src/simsopt/field/biotsavart.py:37`. Users may call it. Changing the cache from string-keyed to vector-indexed silently breaks them.
+
+- **Grep the full repo + known downstream (VMEC2000, SPEC, booz_xform)** for `fieldcache_get_or_create` and any other `sopp.*` surface B5 touches.
+- **Keep the string-key API as a shim** resolving `"B_{i}"` → vector index for at least one release. Deprecation warning now, removal later.
+- **CHANGELOG entry** required for any pybind11 signature change.
+- **`tests/test_public_api.py`** importing and accessing every documented public method — breaks CI on accidental removal.
+
+### 8.5 Platform / build regressions (C1, any XSIMD-path touch)
+
+- **CI matrix**: Linux x86_64 at both `westmere` and `x86-64-v3` baselines, macOS arm64, macOS x86_64. Four permutations of `USE_XSIMD × OpenMP`.
+- **If the wheel baseline is bumped (C1)**: runtime CPU-feature check at import that errors clearly on older hardware.
+- **conda-forge recipe build** must be green before release — `conda.recipe/` uses different flags than pip.
+- **A2 specifically** needs a `NO_XSIMD=1` CI job since the bug only lives there.
+
+### 8.6 Performance regressions (structural wins trading off elsewhere)
+
+B1's `collapse(2)` may slow small-ncoils cases due to scheduling overhead.
+
+- **`asv continuous master HEAD`** in CI; fail PR if any benchmark regresses > 5 % without an explicit allowlist entry.
+- **Small-N variant per kernel benchmark** (ncoils=1, npoints=100) alongside the production-sized one. Catches threading-overhead regressions only visible at small N.
+- **Single-thread variant per benchmark** (`OMP_NUM_THREADS=1`). Isolates kernel gains from parallel speedup.
+- **Output-fingerprint hashing**: each benchmark hashes its output array. Catches "benchmark got 10× faster because it returns zeros now".
+
+### 8.7 Integration / downstream regressions
+
+- **Run all `examples/*.py` end-to-end** in CI. Enumerate currently-excluded examples and close gaps.
+- **MPI test suite** (`run_tests_mpi`) must stay green, especially after B3 introduces hybrid MPI + OpenMP.
+- **Optimizer-convergence regression test**: one canonical stage-II problem, fixed seed, assert final objective within tolerance of a pinned reference. Protects against "gradients shifted by ULPs → optimizer takes a different path → final dofs differ".
+
+### 8.8 Phase-0 prerequisites (extend the §6 harness before any fix lands)
+
+1. Golden-output fixtures for B/dB/ddB/VJPs.
+2. ASan + TSan nightly CI jobs.
+3. Thread-count-invariance tests.
+4. `assert_array_equal` → `assert_allclose` migration sweep.
+5. Grep audit of Python-visible `sopp.*` surface touched by B5.
+6. Small-N + single-thread benchmark variants + output fingerprinting.
+
+Phase 1 then lands under a stricter gate: every PR green on golden, ASan, TSan, asv-continuous, and API-surface tests — not just happy-path unit tests.
+
+### 8.9 Per-fix risk cheat-sheet
+
+| Fix | Dominant risk | Specific guard |
+|-----|--------------|----------------|
+| A1 | New code leaks | ASan + `bench_rss_long_run` |
+| A2 | Non-XSIMD path untested | `NO_XSIMD=1` CI job |
+| A3 | Concurrent numerical drift | TSan + parity-vs-serial |
+| B1 | Reduction reorder; small-N overhead | Golden `rtol=1e-12` + small-N benchmark |
+| B2 | Same as B1 for VJP | FD cross-check + golden VJP fixture |
+| B3 | Python callback deadlock; MPI + threads | GIL-callback test + MPI suite |
+| B4 | Reduction reorder | Golden-output |
+| B5 | **Python API break** | Deprecation shim + downstream grep + API-surface test |
+| B6 | Stale point buffer across calls | Test: two consecutive `.B()` with different points |
+| B7 | None (reserve is safe) | — |
+| B8 | Compiler-dependent vectorization | `NO_XSIMD=1` golden-output |
+| B9 | Same as A3 | TSan |
+| B10 | Drift from `np.einsum` | Golden + FD cross-check |
+| B11 | Shared-state BiotSavart cache interaction | Test that mutates coils between `force()` calls |
+| B12 | None (read elimination) | — |
+| C1 | Runs on user's old CPU | Runtime feature check + wheel tagging |
+
+---
+
+## 9. Appendix — tooling commands
 
 ```bash
 # Phase 0: asv setup (one-time)
