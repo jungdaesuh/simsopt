@@ -30,7 +30,7 @@ fi
 echo "==> Creating conda env at $ENV_PREFIX using $CONDA"
 "$CONDA" create --prefix "$ENV_PREFIX" -c conda-forge -y \
     python=3.11 \
-    cmake ninja pybind11 \
+    cmake ninja 'pybind11<3' \
     scikit-build-core setuptools_scm \
     compilers llvm-openmp \
     boost \
