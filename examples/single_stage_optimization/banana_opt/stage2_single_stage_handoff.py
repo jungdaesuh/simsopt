@@ -11,6 +11,15 @@ from simsopt.field import BiotSavart
 from simsopt.geo import BoozerSurface, SurfaceXYZTensorFourier
 from simsopt.geo.surfaceobjectives import Volume
 
+from .coil_groups import (
+    COIL_GROUP_ROLE_BANANA,
+    COIL_GROUP_ROLE_PROXY,
+    COIL_GROUP_ROLE_TF,
+    COIL_GROUP_ROLE_VF,
+    ManifestResolution,
+    partition_coils_by_manifest,
+    resolve_manifest,
+)
 from .current_contracts import resolve_finite_current_mode, resolve_loaded_tf_current_A
 from .hardware_contracts import (
     BANANA_WINDING_MINOR_RADIUS_M,
@@ -106,6 +115,7 @@ class Stage2CoilPartitions:
     num_proxy_coils: int
     num_vf_coils: int
     finite_current_mode: str
+    coil_groups_manifest_is_legacy_inferred: bool = False
 
 
 def resolve_stage2_tf_current_A(stage2_results, tf_coils):
@@ -164,12 +174,14 @@ def resolve_stage2_finite_current_mode(
     )
 
 
-def _resolve_stage2_loaded_partition_counts(
+def _resolve_stage2_coil_manifest(
     stage2_results: Mapping[str, object],
     *,
     requested_num_tf_coils: int,
     total_loaded_coils: int,
-) -> tuple[int, int, int, int]:
+) -> ManifestResolution:
+    # TF count consistency is enforced up-front to preserve the pre-manifest
+    # provenance contract, then the manifest resolver takes over.
     resolved_num_tf_coils = resolve_stage2_num_tf_coils(
         stage2_results,
         requested_num_tf_coils=requested_num_tf_coils,
@@ -179,37 +191,18 @@ def _resolve_stage2_loaded_partition_counts(
             f"Loaded Stage 2 BiotSavart artifact has only {total_loaded_coils} coils, but "
             f"NUM_TF_COILS={resolved_num_tf_coils}. Cannot partition TF and banana coils."
         )
-    num_proxy_coils = int(stage2_results.get("NUM_PROXY_COILS", 0) or 0)
-    num_vf_coils = int(stage2_results.get("NUM_VF_COILS", 0) or 0)
-    recorded_num_banana_coils = stage2_results.get("NUM_BANANA_COILS")
-    if recorded_num_banana_coils is None:
-        num_banana_coils = (
-            total_loaded_coils - resolved_num_tf_coils - num_proxy_coils - num_vf_coils
-        )
-    else:
-        num_banana_coils = int(recorded_num_banana_coils)
+    resolution = resolve_manifest(
+        stage2_results,
+        total_loaded_coils=total_loaded_coils,
+        requested_num_tf_coils=resolved_num_tf_coils,
+    )
+    num_banana_coils = resolution.manifest.count_for_role(COIL_GROUP_ROLE_BANANA)
     if num_banana_coils <= 0:
         raise ValueError(
             f"Loaded Stage 2 BiotSavart artifact has {total_loaded_coils} coils and "
             f"NUM_TF_COILS={resolved_num_tf_coils}, leaving no banana coils to optimize."
         )
-    expected_total_coils = (
-        resolved_num_tf_coils + num_banana_coils + num_proxy_coils + num_vf_coils
-    )
-    if expected_total_coils != total_loaded_coils:
-        raise ValueError(
-            "Loaded Stage 2 BiotSavart artifact has "
-            f"{total_loaded_coils} coils, but the artifact partition metadata "
-            f"expects {expected_total_coils} "
-            f"(TF={resolved_num_tf_coils}, banana={num_banana_coils}, "
-            f"proxy={num_proxy_coils}, vf={num_vf_coils})."
-        )
-    return (
-        resolved_num_tf_coils,
-        num_banana_coils,
-        num_proxy_coils,
-        num_vf_coils,
-    )
+    return resolution
 
 
 def partition_loaded_stage2_coils(
@@ -218,29 +211,27 @@ def partition_loaded_stage2_coils(
     stage2_results: Mapping[str, object],
     requested_num_tf_coils: int,
 ) -> Stage2CoilPartitions:
-    (
-        resolved_num_tf_coils,
-        num_banana_coils,
-        num_proxy_coils,
-        num_vf_coils,
-    ) = _resolve_stage2_loaded_partition_counts(
+    resolution = _resolve_stage2_coil_manifest(
         stage2_results,
         requested_num_tf_coils=requested_num_tf_coils,
         total_loaded_coils=len(coils),
     )
-    tf_stop = resolved_num_tf_coils
-    banana_stop = tf_stop + num_banana_coils
-    proxy_stop = banana_stop + num_proxy_coils
+    role_partitions = partition_coils_by_manifest(coils, resolution.manifest)
+    tf_coils = role_partitions.get(COIL_GROUP_ROLE_TF, ())
+    banana_coils = role_partitions.get(COIL_GROUP_ROLE_BANANA, ())
+    proxy_coils = role_partitions.get(COIL_GROUP_ROLE_PROXY, ())
+    vf_coils = role_partitions.get(COIL_GROUP_ROLE_VF, ())
     return Stage2CoilPartitions(
-        tf_coils=tuple(coils[:tf_stop]),
-        banana_coils=tuple(coils[tf_stop:banana_stop]),
-        proxy_coils=tuple(coils[banana_stop:proxy_stop]),
-        vf_coils=tuple(coils[proxy_stop:]),
-        num_tf_coils=resolved_num_tf_coils,
-        num_banana_coils=num_banana_coils,
-        num_proxy_coils=num_proxy_coils,
-        num_vf_coils=num_vf_coils,
+        tf_coils=tf_coils,
+        banana_coils=banana_coils,
+        proxy_coils=proxy_coils,
+        vf_coils=vf_coils,
+        num_tf_coils=len(tf_coils),
+        num_banana_coils=len(banana_coils),
+        num_proxy_coils=len(proxy_coils),
+        num_vf_coils=len(vf_coils),
         finite_current_mode=resolve_stage2_finite_current_mode(stage2_results, None),
+        coil_groups_manifest_is_legacy_inferred=resolution.is_legacy_inferred,
     )
 
 

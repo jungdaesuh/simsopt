@@ -12,6 +12,10 @@ from alm_utils import (
     upper_bound_residual,
     zero_gradient_like,
 )
+from banana_opt.coil_groups import (
+    COIL_GROUPS_RESULTS_KEY,
+    build_contiguous_manifest,
+)
 from banana_opt.hardware_contracts import (
     TF_CURRENT_HARD_LIMIT_A,
     fixed_stage2_clearance_contract,
@@ -683,6 +687,12 @@ def build_stage2_results(
         num_vf_coils=num_vf_coils,
         context="Stage 2 coil partition metadata",
     )
+    coil_groups_manifest = build_contiguous_manifest(
+        num_tf_coils=int(num_tf_coils),
+        num_banana_coils=int(num_banana_coils),
+        num_proxy_coils=int(num_proxy_coils),
+        num_vf_coils=int(num_vf_coils),
+    )
     return {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
@@ -693,6 +703,7 @@ def build_stage2_results(
         "NUM_BANANA_COILS": int(num_banana_coils),
         "NUM_PROXY_COILS": int(num_proxy_coils),
         "NUM_VF_COILS": int(num_vf_coils),
+        COIL_GROUPS_RESULTS_KEY: coil_groups_manifest.to_json_payload(),
         "BANANA_INIT_CURRENT_A": float(initial_banana_current_A),
         "BANANA_CURRENT_MAX_A": float(args.banana_current_max_A),
         "BANANA_CURRENT_A": float(banana_current_A),

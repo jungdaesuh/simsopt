@@ -585,11 +585,60 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertEqual(len(partitions.vf_coils), 1)
         self.assertEqual(partitions.finite_current_mode, "wataru_proxy_field")
 
+    def test_partition_loaded_stage2_coils_prefers_explicit_manifest(self):
+        module = load_handoff_module()
+        coils = [object() for _ in range(24)]
+        manifest_payload = [
+            {"role": "tf", "start": 0, "count": 20},
+            {"role": "banana", "start": 20, "count": 2},
+            {"role": "proxy", "start": 22, "count": 1},
+            {"role": "vf", "start": 23, "count": 1},
+        ]
+
+        partitions = module.partition_loaded_stage2_coils(
+            coils,
+            stage2_results={
+                "COIL_GROUPS": manifest_payload,
+                # Legacy counts are deliberately wrong; manifest should win.
+                "NUM_TF_COILS": 20,
+                "NUM_BANANA_COILS": 99,
+                "NUM_PROXY_COILS": 99,
+                "NUM_VF_COILS": 99,
+            },
+            requested_num_tf_coils=20,
+        )
+
+        self.assertEqual(partitions.num_tf_coils, 20)
+        self.assertEqual(partitions.num_banana_coils, 2)
+        self.assertEqual(partitions.num_proxy_coils, 1)
+        self.assertEqual(partitions.num_vf_coils, 1)
+        self.assertFalse(partitions.coil_groups_manifest_is_legacy_inferred)
+
+    def test_partition_loaded_stage2_coils_flags_legacy_inference(self):
+        module = load_handoff_module()
+        coils = [object() for _ in range(22)]
+
+        partitions = module.partition_loaded_stage2_coils(
+            coils,
+            stage2_results={
+                "NUM_TF_COILS": 20,
+                "NUM_BANANA_COILS": 2,
+                "NUM_PROXY_COILS": 0,
+                "NUM_VF_COILS": 0,
+            },
+            requested_num_tf_coils=20,
+        )
+
+        self.assertTrue(partitions.coil_groups_manifest_is_legacy_inferred)
+
     def test_partition_loaded_stage2_coils_rejects_inconsistent_partition_total(self):
         module = load_handoff_module()
         coils = [object() for _ in range(22)]
 
-        with self.assertRaisesRegex(ValueError, "partition metadata expects 24"):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"manifest expects 24 coils but the loaded BiotSavart artifact contains 22",
+        ):
             module.partition_loaded_stage2_coils(
                 coils,
                 stage2_results={
