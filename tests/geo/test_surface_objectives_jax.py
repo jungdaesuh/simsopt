@@ -1483,6 +1483,98 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
     )
 
 
+def _quadratic_inner_objective_closure(*, coil_set_spec, **_kwargs):
+    def inner_objective(x_inner):
+        return 0.5 * jnp.dot(x_inner, x_inner) + jnp.dot(coil_set_spec, x_inner)
+
+    return inner_objective
+
+
+def test_traceable_inner_stationarity_grad_matches_directional_inner_objective(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_boozer_penalty_objective_closure",
+        _quadratic_inner_objective_closure,
+    )
+
+    x_inner = jnp.asarray([1.5, -0.25], dtype=jnp.float64)
+    tangent = jnp.asarray([0.75, 2.0], dtype=jnp.float64)
+    coil_set_spec = jnp.asarray([0.5, -1.25], dtype=jnp.float64)
+
+    stationarity_grad = surfaceobjectives_jax_module._traceable_inner_stationarity_grad(
+        x_inner,
+        coil_set_spec,
+    )
+    directional = surfaceobjectives_jax_module._traceable_directional_inner_objective(
+        x_inner,
+        tangent,
+        coil_set_spec,
+    )
+
+    np.testing.assert_allclose(
+        stationarity_grad,
+        np.asarray(x_inner + coil_set_spec, dtype=np.float64),
+    )
+    assert directional == pytest.approx(
+        float(jnp.dot(tangent, stationarity_grad)),
+    )
+
+
+def test_traceable_objective_gradient_parts_use_combined_vjp(monkeypatch):
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_inner_objective_kwargs",
+        lambda _objective_kwargs: {"kind": "inner"},
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_evaluate_traceable_total_objective",
+        lambda x_inner, coil_dofs, coil_set_spec, _objective_kwargs: (
+            jnp.dot(x_inner, coil_set_spec) + 0.5 * jnp.dot(coil_dofs, coil_dofs)
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_boozer_penalty_objective_closure",
+        _quadratic_inner_objective_closure,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_solve_plu_transpose_with_refinement",
+        lambda *_args: _args[-1],
+    )
+
+    original_vjp = surfaceobjectives_jax_module.jax.vjp
+    vjp_calls = {"count": 0}
+
+    def counting_vjp(fun, *primals, **kwargs):
+        vjp_calls["count"] += 1
+        return original_vjp(fun, *primals, **kwargs)
+
+    monkeypatch.setattr(surfaceobjectives_jax_module.jax, "vjp", counting_vjp)
+
+    direct_grad, implicit_grad, total_grad = (
+        surfaceobjectives_jax_module._traceable_objective_gradient_parts(
+            object(),
+            lambda coil_dofs: coil_dofs,
+            coil_dofs=jnp.asarray([3.0, 4.0], dtype=jnp.float64),
+            solved_x=jnp.asarray([1.0, 2.0], dtype=jnp.float64),
+            solved_plu=(object(), object(), object()),
+            objective_kwargs={},
+        )
+    )
+
+    np.testing.assert_allclose(direct_grad, np.asarray([4.0, 6.0], dtype=np.float64))
+    np.testing.assert_allclose(
+        implicit_grad,
+        np.asarray([3.0, 4.0], dtype=np.float64),
+    )
+    np.testing.assert_allclose(total_grad, np.asarray([1.0, 2.0], dtype=np.float64))
+    assert vjp_calls["count"] == 1
+
+
 def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
     monkeypatch,
 ):

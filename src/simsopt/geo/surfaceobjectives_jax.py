@@ -2111,6 +2111,19 @@ def _evaluate_traceable_total_objective(
     )
 
 
+def _traceable_inner_stationarity_grad(
+    x_inner,
+    coil_set_spec,
+    **objective_kwargs,
+):
+    """Gradient of the LS inner objective w.r.t. the explicit inner state."""
+    inner_objective = _make_boozer_penalty_objective_closure(
+        coil_set_spec=coil_set_spec,
+        **objective_kwargs,
+    )
+    return jax.grad(inner_objective)(x_inner)
+
+
 def _traceable_directional_inner_objective(
     x_inner,
     tangent,
@@ -2118,11 +2131,15 @@ def _traceable_directional_inner_objective(
     **objective_kwargs,
 ):
     """Directional derivative of the LS inner objective at an explicit state."""
-    inner_objective = _make_boozer_penalty_objective_closure(
-        coil_set_spec=coil_set_spec,
-        **objective_kwargs,
+    return jnp.dot(
+        tangent,
+        _traceable_inner_stationarity_grad(
+            x_inner,
+            coil_set_spec,
+            **objective_kwargs,
+        ),
+        precision=lax.Precision.HIGHEST,
     )
-    return jax.jvp(inner_objective, (x_inner,), (tangent,))[1]
 
 
 def _traceable_forward_result(
@@ -2280,29 +2297,35 @@ def _traceable_objective_gradient_parts(
             objective_kwargs,
         )
 
-    def objective_of_coils(current_coil_dofs):
-        return _evaluate_objective(
-            solved_x,
-            current_coil_dofs,
-            coil_set_spec_from_dofs(current_coil_dofs),
-        )
-
     coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
     dJ_dx = jax.grad(lambda x: _evaluate_objective(x, coil_dofs, coil_set_spec))(
         solved_x
     )
     adjoint = _solve_plu_transpose_with_refinement(*solved_plu, dJ_dx)
 
-    def directional_of_coils(cd):
-        return _traceable_directional_inner_objective(
+    def objective_and_stationarity_of_coils(current_coil_dofs):
+        current_coil_set_spec = coil_set_spec_from_dofs(current_coil_dofs)
+        objective_value = _evaluate_objective(
             solved_x,
-            adjoint,
-            coil_set_spec_from_dofs(cd),
+            current_coil_dofs,
+            current_coil_set_spec,
+        )
+        stationarity_grad = _traceable_inner_stationarity_grad(
+            solved_x,
+            current_coil_set_spec,
             **inner_objective_kwargs,
         )
+        return objective_value, stationarity_grad
 
-    direct_grad = jax.grad(objective_of_coils)(coil_dofs)
-    implicit_grad = jax.grad(directional_of_coils)(coil_dofs)
+    (objective_value, stationarity_grad), combined_vjp = jax.vjp(
+        objective_and_stationarity_of_coils,
+        coil_dofs,
+    )
+    objective_pullback_seed = _explicit_scalar_pullback_seed(objective_value)
+    zero_objective = jnp.zeros_like(objective_value)
+    zero_stationarity_grad = jnp.zeros_like(stationarity_grad)
+    (direct_grad,) = combined_vjp((objective_pullback_seed, zero_stationarity_grad))
+    (implicit_grad,) = combined_vjp((zero_objective, adjoint))
     return direct_grad, implicit_grad, direct_grad - implicit_grad
 
 
@@ -2339,11 +2362,11 @@ def _traceable_predict_warmstart_x(
         inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
 
         def baseline_stationarity_of_coils(cd):
-            inner_objective = _make_boozer_penalty_objective_closure(
-                coil_set_spec=coil_set_spec_from_dofs(cd),
+            return _traceable_inner_stationarity_grad(
+                baseline_x,
+                coil_set_spec_from_dofs(cd),
                 **inner_objective_kwargs,
             )
-            return jax.grad(inner_objective)(baseline_x)
 
         forcing = jax.jvp(
             baseline_stationarity_of_coils,
