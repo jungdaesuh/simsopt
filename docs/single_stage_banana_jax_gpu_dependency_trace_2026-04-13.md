@@ -4,6 +4,9 @@
 
 This note traces the execution path of `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py` and identifies what still needs to be ported, or intentionally isolated, for truly end-to-end JAX/GPU execution.
 
+For the callback-density and persistent-compilation-cache follow-up on the same
+path, see `docs/single_stage_banana_ondevice_hot_path_diagnosis_2026-04-19.md`.
+
 The key conclusion is:
 
 - [x] The core single-stage target lane is already on the JAX/ondevice path.

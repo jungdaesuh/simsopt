@@ -1078,6 +1078,73 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
     assert ensure_host_calls == [runtime_entry]
 
 
+def test_make_traceable_objective_runtime_bundle_reuses_stable_public_boundaries(
+    monkeypatch,
+):
+    runtime_entry = {
+        "compiled_bundle": {"compiled_value_and_grad_for": object()},
+        "objective": object(),
+        "batched_value_and_grad": object(),
+        "reporting_metrics": None,
+        "public_objective": None,
+        "public_value_and_grad": None,
+        "public_batched_value_and_grad": None,
+        "public_reporting_metrics": None,
+    }
+    expected_public_boundaries = {
+        "objective": object(),
+        "value_and_grad": object(),
+        "batched_value_and_grad": object(),
+        "reporting_metrics": object(),
+    }
+    build_counts = {name: 0 for name in expected_public_boundaries}
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_get_cached_traceable_runtime_entry",
+        lambda *_args, **_kwargs: runtime_entry,
+    )
+
+    def build_boundary(name, boundary):
+        def _build(_):
+            build_counts[name] += 1
+            return boundary
+
+        return _build
+
+    for attr_name, boundary_name in (
+        ("_make_traceable_objective_boundary", "objective"),
+        ("_make_traceable_value_and_grad_boundary", "value_and_grad"),
+        (
+            "_make_traceable_batched_value_and_grad_boundary",
+            "batched_value_and_grad",
+        ),
+        (
+            "_make_traceable_lazy_reporting_metrics_boundary",
+            "reporting_metrics",
+        ),
+    ):
+        monkeypatch.setattr(
+            surfaceobjectives_jax_module,
+            attr_name,
+            build_boundary(boundary_name, expected_public_boundaries[boundary_name]),
+        )
+
+    def build_runtime_bundle():
+        return surfaceobjectives_jax_module.make_traceable_objective_runtime_bundle(
+            object(),
+            object(),
+            0.23,
+            include_profile_suite=False,
+        )
+
+    for bundle in (build_runtime_bundle(), build_runtime_bundle()):
+        for boundary_name, expected_boundary in expected_public_boundaries.items():
+            assert bundle[boundary_name] is expected_boundary
+
+    assert build_counts == {name: 1 for name in expected_public_boundaries}
+
+
 def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_until_used(
     monkeypatch,
 ):

@@ -67,7 +67,12 @@ def _emit_lbfgs_runtime_debug(
     valid_curvature=None,
     converged=None,
 ):
-    """Emit ordered runtime diagnostics when SIMSOPT_LBFGS_DEBUG is enabled."""
+    """Emit unordered runtime diagnostics when SIMSOPT_LBFGS_DEBUG is enabled.
+
+    This path routes through ``_emit_host_callback(...)``, which deliberately
+    uses ``jax.debug.callback(..., ordered=False)`` so strict transfer-guard
+    on-device lanes remain executable on JAX 0.9.2.
+    """
     if not _LBFGS_DEBUG_ENABLED:
         return
 
