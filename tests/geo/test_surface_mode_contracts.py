@@ -50,6 +50,25 @@ def load_goal_mode_comparison_module():
     )
 
 
+def make_surface_mode_args(**overrides):
+    values = {
+        "surface_mode": None,
+        "num_surfaces": 1,
+        "inner_surface_ratio": 0.72,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def resolve_explicit_multisurface_contract(module, **arg_overrides):
+    args = make_surface_mode_args(
+        surface_mode=module.EXPERIMENTAL_MULTISURFACE,
+        **arg_overrides,
+    )
+    contract = module.resolve_surface_mode_contract(args, warn_on_legacy_mapping=False)
+    return args, contract
+
+
 class SurfaceModeContractTests(unittest.TestCase):
     def test_legacy_two_surface_mapping_warns_and_preserves_legacy_fields(self):
         module = load_surface_mode_contracts_module()
@@ -108,19 +127,31 @@ class SurfaceModeContractTests(unittest.TestCase):
 
 
 class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
-    def test_resolve_surface_mode_contract_prefers_explicit_surface_mode(self):
+    def test_resolve_surface_mode_contract_suppresses_legacy_warning_for_default_single_surface(self):
         module = load_single_stage_example_module()
-        args = SimpleNamespace(
-            surface_mode="experimental_multisurface",
-            num_surfaces=1,
-            inner_surface_ratio=0.72,
-        )
+        contracts_module = load_surface_mode_contracts_module()
+        args = make_surface_mode_args()
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             contract = module.resolve_surface_mode_contract(args)
 
-        self.assertEqual(contract.mode, "experimental_multisurface")
+        self.assertEqual(contract.mode, module.SINGLE_SURFACE)
+        self.assertEqual(
+            contract.source,
+            contracts_module.SURFACE_MODE_SOURCE_LEGACY_NUM_SURFACES_MAPPING,
+        )
+        self.assertEqual(len(caught), 0)
+
+    def test_resolve_surface_mode_contract_prefers_explicit_surface_mode(self):
+        module = load_single_stage_example_module()
+        args = make_surface_mode_args(surface_mode=module.EXPERIMENTAL_MULTISURFACE)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            contract = module.resolve_surface_mode_contract(args)
+
+        self.assertEqual(contract.mode, module.EXPERIMENTAL_MULTISURFACE)
         self.assertEqual(contract.num_surfaces, 2)
         self.assertEqual(contract.label_fractions, (0.72, 1.0))
         self.assertEqual(len(caught), 0)
@@ -218,10 +249,61 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
         self.assertEqual(config.num_surfaces, 2)
         self.assertEqual(config.inner_surface_ratio, 0.73)
 
+    def test_validate_boozer_stage_refinement_args_rejects_explicit_multisurface_contract(self):
+        module = load_single_stage_example_module()
+        args, contract = resolve_explicit_multisurface_contract(
+            module,
+            boozer_stage_refinement=True,
+            constraint_method="penalty",
+            basin_hops=0,
+            boozer_stage="initial",
+            refinement_boozer_stage="final",
+            refinement_maxiter=20,
+            refinement_chunk_maxiter=10,
+            refinement_max_stalled_chunks=2,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            f"--surface-mode={module.SINGLE_SURFACE}",
+        ):
+            module.validate_boozer_stage_refinement_args(
+                args,
+                constraint_weight=1.0,
+                surface_mode_contract=contract,
+            )
+
+    def test_validate_surface_mode_constraint_args_rejects_explicit_multisurface_alm(self):
+        module = load_single_stage_example_module()
+        args, contract = resolve_explicit_multisurface_contract(
+            module,
+            constraint_method="alm",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            f"--surface-mode={module.SINGLE_SURFACE}",
+        ):
+            module.validate_surface_mode_constraint_args(
+                args,
+                surface_mode_contract=contract,
+            )
+
 
 class GoalModeWrapperSurfaceModeTests(unittest.TestCase):
+    def test_goal_mode_parser_reuses_surface_mode_ssot_choices(self):
+        module = load_goal_mode_comparison_module()
+        contracts_module = load_surface_mode_contracts_module()
+        parser = module.build_parser()
+
+        self.assertEqual(
+            tuple(parser._option_string_actions["--surface-mode"].choices),
+            contracts_module.SURFACE_MODE_CHOICES,
+        )
+
     def test_goal_mode_command_forwards_surface_mode_flag(self):
         module = load_goal_mode_comparison_module()
+        contracts_module = load_surface_mode_contracts_module()
         args = module.build_parser().parse_args(
             [
                 "--plasma-surf-filename",
@@ -229,7 +311,7 @@ class GoalModeWrapperSurfaceModeTests(unittest.TestCase):
                 "--stage2-bs-path",
                 "/tmp/stage2/biot_savart_opt.json",
                 "--surface-mode",
-                "experimental_multisurface",
+                contracts_module.EXPERIMENTAL_MULTISURFACE,
                 "--num-surfaces",
                 "1",
                 "--inner-surface-ratio",
@@ -245,7 +327,7 @@ class GoalModeWrapperSurfaceModeTests(unittest.TestCase):
         )
 
         self.assertIn("--surface-mode", command)
-        self.assertIn("experimental_multisurface", command)
+        self.assertIn(contracts_module.EXPERIMENTAL_MULTISURFACE, command)
 
 
 if __name__ == "__main__":
