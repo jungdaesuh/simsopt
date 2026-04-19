@@ -1588,7 +1588,12 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         functions = extract_functions(
             STAGE2_MODULE_PATH,
             ["load_stage2_seed_configuration"],
-            {"np": np, "load": None, "curves_to_vtk": None},
+            {
+                "np": np,
+                "load": None,
+                "curves_to_vtk": None,
+                "partition_loaded_stage2_coils": None,
+            },
         )
         load_stage2_seed_configuration = functions["load_stage2_seed_configuration"]
 
@@ -1648,9 +1653,23 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 {"curves": curves, "path": path, "close": close}
             )
         )
+        load_stage2_seed_configuration.__globals__["partition_loaded_stage2_coils"] = (
+            lambda loaded_coils, *, stage2_results, requested_num_tf_coils: SimpleNamespace(
+                tf_coils=loaded_coils[:requested_num_tf_coils],
+                banana_coils=loaded_coils[requested_num_tf_coils:],
+                proxy_coils=[],
+                vf_coils=[],
+            )
+        )
 
         surf = FakeSurface()
-        result = load_stage2_seed_configuration("/tmp/seed.json", surf, 2, "/tmp/out/")
+        result = load_stage2_seed_configuration(
+            "/tmp/seed.json",
+            surf,
+            2,
+            "/tmp/out/",
+            stage2_results={"COIL_GROUPS": "unused-by-test"},
+        )
 
         self.assertIs(result[0], fake_bs)
         self.assertEqual(result[1], [coil.curve for coil in coils])

@@ -3,6 +3,7 @@ import importlib.util
 from contextlib import ExitStack
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -58,6 +59,12 @@ WORKFLOW_HELPERS_MODULE_PATH = (
     / "single_stage_optimization"
     / "workflow_helpers.py"
 )
+WORKFLOW_RUNNER_COMMON_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "workflow_runner_common.py"
+)
 TEST_MPOL = 8
 TEST_NTOR = 6
 TEST_VOL_TARGET = 0.1
@@ -112,6 +119,14 @@ def load_workflow_helpers_module():
     return _load_module_from_path(
         WORKFLOW_HELPERS_MODULE_PATH,
         "workflow_helpers",
+        register_in_sys_modules=True,
+    )
+
+
+def load_workflow_runner_common_module():
+    return _load_module_from_path(
+        WORKFLOW_RUNNER_COMMON_MODULE_PATH,
+        "workflow_runner_common",
         register_in_sys_modules=True,
     )
 
@@ -604,8 +619,8 @@ class SingleStageExampleTests(unittest.TestCase):
         )
 
         self.assertEqual(settings["input_source"], "physical_A")
-        self.assertEqual(settings["mode"], "boozer_surrogate")
-        self.assertEqual(settings["effective_mode"], "boozer_surrogate")
+        self.assertEqual(settings["mode"], "wataru_proxy_field")
+        self.assertEqual(settings["effective_mode"], "wataru_proxy_field")
         self.assertEqual(settings["plasma_current_A"], 8000.0)
         self.assertAlmostEqual(settings["boozer_I"], 4.0e-7 * np.pi * 8000.0)
         self.assertEqual(settings["boozer_current_convention"], "mu0")
@@ -621,7 +636,7 @@ class SingleStageExampleTests(unittest.TestCase):
         )
 
         self.assertEqual(settings["input_source"], "physical_A")
-        self.assertEqual(settings["mode"], "boozer_surrogate")
+        self.assertEqual(settings["mode"], "wataru_proxy_field")
         self.assertEqual(settings["effective_mode"], "vacuum")
         self.assertEqual(settings["plasma_current_A"], 0.0)
         self.assertEqual(settings["boozer_I"], 0.0)
@@ -638,7 +653,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(settings["plasma_current_A"], -35200.0)
         self.assertAlmostEqual(settings["boozer_I"], 4.0e-7 * np.pi * -35200.0)
-        self.assertEqual(settings["effective_mode"], "boozer_surrogate")
+        self.assertEqual(settings["effective_mode"], "wataru_proxy_field")
 
     def test_resolve_plasma_current_settings_rejects_mixed_raw_and_physical_inputs(self):
         module = self.load_module()
@@ -662,11 +677,78 @@ class SingleStageExampleTests(unittest.TestCase):
         )
 
         self.assertEqual(settings["input_source"], "default_zero")
-        self.assertEqual(settings["mode"], "boozer_surrogate")
+        self.assertEqual(settings["mode"], "wataru_proxy_field")
         self.assertEqual(settings["effective_mode"], "vacuum")
         self.assertEqual(settings["plasma_current_A"], 0.0)
         self.assertEqual(settings["boozer_I"], 0.0)
         self.assertEqual(settings["boozer_current_convention"], "mu0")
+
+    def test_resolve_plasma_current_settings_single_surface_normalizes_legacy_mode(self):
+        module = self.load_module()
+
+        settings = module.resolve_plasma_current_settings(
+            SimpleNamespace(
+                boozer_I=None,
+                plasma_current_A=9100.0,
+                finite_current_mode=None,
+            ),
+            finite_current_mode="boozer_surrogate",
+            num_surfaces=1,
+        )
+
+        self.assertEqual(settings["mode"], "wataru_proxy_field")
+        self.assertEqual(settings["effective_mode"], "wataru_proxy_field")
+        self.assertEqual(settings["input_source"], "physical_A")
+        self.assertAlmostEqual(settings["boozer_I"], 4.0e-7 * np.pi * 9100.0)
+
+    def test_resolve_plasma_current_settings_single_surface_allows_raw_boozer_override(self):
+        module = self.load_module()
+
+        settings = module.resolve_plasma_current_settings(
+            SimpleNamespace(
+                boozer_I=0.125,
+                plasma_current_A=None,
+                finite_current_mode=None,
+            ),
+            finite_current_mode="boozer_surrogate",
+            num_surfaces=1,
+        )
+
+        self.assertEqual(settings["mode"], "wataru_proxy_field")
+        self.assertEqual(settings["input_source"], "raw_boozer_I")
+        self.assertAlmostEqual(settings["boozer_I"], 0.125)
+        self.assertAlmostEqual(settings["plasma_current_A"], 0.125 / (4.0e-7 * np.pi))
+
+    def test_resolve_plasma_current_settings_single_surface_rejects_conflicting_requested_mode(self):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(ValueError, "Single-surface mode is locked to"):
+            module.resolve_plasma_current_settings(
+                SimpleNamespace(
+                    boozer_I=None,
+                    plasma_current_A=9100.0,
+                    finite_current_mode="boozer_surrogate",
+                ),
+                finite_current_mode="boozer_surrogate",
+                num_surfaces=1,
+            )
+
+    def test_resolve_plasma_current_settings_multisurface_preserves_requested_mode(self):
+        module = self.load_module()
+
+        settings = module.resolve_plasma_current_settings(
+            SimpleNamespace(
+                boozer_I=None,
+                plasma_current_A=6400.0,
+                finite_current_mode="boozer_surrogate",
+            ),
+            finite_current_mode="boozer_surrogate",
+            num_surfaces=2,
+        )
+
+        self.assertEqual(settings["mode"], "boozer_surrogate")
+        self.assertEqual(settings["effective_mode"], "boozer_surrogate")
+        self.assertAlmostEqual(settings["boozer_I"], 4.0e-7 * np.pi * 6400.0)
 
     def test_resolve_plasma_current_settings_uses_artifact_default_in_wataru_mode(self):
         module = self.load_module()
@@ -7716,24 +7798,6 @@ class Stage2ArtifactWriterTests(unittest.TestCase):
                 new_surf=SimpleNamespace(),
             )
 
-    def test_load_stage2_seed_results_rejects_checksum_mismatch(self):
-        module = load_stage2_module()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            stage2_dir = Path(tmpdir)
-            stage2_bs_path = stage2_dir / "biot_savart_opt.json"
-            stage2_bs_path.write_text('{"coils": []}', encoding="utf-8")
-            (stage2_dir / "results.json").write_text(
-                json.dumps({"STAGE2_BS_SHA256": "not-the-real-digest"}),
-                encoding="utf-8",
-            )
-
-            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
-                module.load_stage2_seed_results(
-                    str(stage2_bs_path),
-                    known_tf_current_A=8.0e4,
-                )
-
 
 class Stage2RuntimeSmokeTests(unittest.TestCase):
     _EXPECTED_BASIN_TELEMETRY = {
@@ -7836,6 +7900,9 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         init_only,
         constraint_method,
         use_seed,
+        # Seeded smoke tests emulate a valid donor sidecar by default. Opt out
+        # only when exercising the explicit sidecar-required rejection path.
+        seed_has_results_sidecar=True,
         basin_hops=0,
         banana_current_A=9500.0,
         alm_accepted_candidate_x=None,
@@ -8003,10 +8070,14 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             runtime["seed_loads"] += 1
             self.assertEqual(num_tf_coils, 20)
             self.assertIs(surf, fake_surface)
+            effective_seed_stage2_results = (
+                seed_stage2_results
+                if seed_stage2_results is not None
+                else {"FINITE_CURRENT_MODE": "wataru_proxy_field"}
+            )
             curves, proxy_coils, vf_coils = build_coil_bundle(
                 wataru_proxy_field=(
-                    seed_stage2_results is not None
-                    and seed_stage2_results.get("FINITE_CURRENT_MODE")
+                    effective_seed_stage2_results.get("FINITE_CURRENT_MODE")
                     == "wataru_proxy_field"
                 ),
             )
@@ -8251,14 +8322,19 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 ]
                 for patcher in common_patches:
                     stack.enter_context(patcher)
-                if use_seed and seed_stage2_results is not None:
+                if use_seed and seed_has_results_sidecar:
+                    effective_seed_stage2_results = (
+                        seed_stage2_results
+                        if seed_stage2_results is not None
+                        else {"FINITE_CURRENT_MODE": "wataru_proxy_field"}
+                    )
                     stack.enter_context(
                         patch.object(
                             module,
                             "load_stage2_seed_results",
                             return_value=(
                                 Path(stage2_bs_path).with_name("results.json"),
-                                dict(seed_stage2_results),
+                                dict(effective_seed_stage2_results),
                             ),
                         )
                     )
@@ -8344,11 +8420,17 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         )
 
     def test_stage2_main_rejects_wataru_seed_without_results_sidecar(self):
-        with self.assertRaisesRegex(ValueError, "results.json sidecar"):
+        workflow_runner_common = load_workflow_runner_common_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            re.escape(workflow_runner_common.STAGE2_SIDECAR_REQUIRED_ERROR),
+        ):
             self._run_stage2_main(
                 init_only=True,
                 constraint_method="penalty",
                 use_seed=True,
+                seed_has_results_sidecar=False,
                 arg_overrides={"finite_current_mode": "wataru_proxy_field"},
             )
 

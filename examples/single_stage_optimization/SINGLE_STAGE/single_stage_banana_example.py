@@ -108,7 +108,7 @@ from banana_opt.current_contracts import (
     infer_uniform_coil_current_A as _infer_uniform_coil_current_A,
     resolve_penalty_traversal_forbidden_box_bounds,
     resolve_loaded_tf_current_A as _resolve_loaded_tf_current_A,
-    resolve_plasma_current_settings as _resolve_plasma_current_settings_impl,
+    resolve_plasma_current_settings_for_num_surfaces as _resolve_plasma_current_settings_for_num_surfaces_impl,
 )
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
@@ -651,12 +651,15 @@ def resolve_plasma_current_settings(
     *,
     finite_current_mode="wataru_proxy_field",
     default_plasma_current_A=0.0,
+    num_surfaces=1,
 ):
-    settings = _resolve_plasma_current_settings_impl(
+    settings = _resolve_plasma_current_settings_for_num_surfaces_impl(
         raw_boozer_I=args.boozer_I,
         plasma_current_A=args.plasma_current_A,
         finite_current_mode=finite_current_mode,
         default_plasma_current_A=default_plasma_current_A,
+        num_surfaces=num_surfaces,
+        requested_finite_current_mode=getattr(args, "finite_current_mode", None),
     )
     return {
         "boozer_I": settings.boozer_I,
@@ -833,13 +836,20 @@ def parse_args():
         "--boozer-I",
         type=float,
         default=float(os.environ["BOOZER_I"]) if "BOOZER_I" in os.environ else None,
-        help="Expert/internal Boozer-current input. Prefer --plasma-current-A.",
+        help=(
+            "Expert/internal override for the solver-facing BoozerSurface I input. "
+            "Prefer --plasma-current-A for the standard Wataru-style mu0*I_A path."
+        ),
     )
     parser.add_argument(
         "--plasma-current-A",
         type=float,
         default=float(os.environ["PLASMA_CURRENT_A"]) if "PLASMA_CURRENT_A" in os.environ else None,
-        help="User-facing enclosed toroidal plasma current in physical SI amperes.",
+        help=(
+            "User-facing enclosed toroidal plasma current in physical SI amperes. "
+            "In single-surface mode this is converted to BoozerSurface I using "
+            "Wataru's mu0*I_A convention."
+        ),
     )
     parser.add_argument(
         "--finite-current-mode",
@@ -847,7 +857,9 @@ def parse_args():
         default=os.environ.get("FINITE_CURRENT_MODE"),
         help=(
             "Finite-current interpretation for the loaded Stage 2 donor. When omitted, "
-            "single-stage reload uses the donor artifact metadata."
+            "single-stage reload uses the donor artifact metadata. Ignored when "
+            "--num-surfaces=1 unless set to wataru_proxy_field, because the "
+            "single-surface path is locked to the Wataru proxy-field contract."
         ),
     )
     parser.add_argument("--maxiter", type=int, default=int(os.environ.get("MAXITER", "300")))
@@ -5416,6 +5428,7 @@ if __name__ == "__main__":
         args,
         finite_current_mode=finite_current_mode,
         default_plasma_current_A=float(stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0)),
+        num_surfaces=args.num_surfaces,
     )
     boozer_I = plasma_current_settings["boozer_I"]
     plasma_current_A = plasma_current_settings["plasma_current_A"]

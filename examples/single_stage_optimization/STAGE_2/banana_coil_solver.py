@@ -18,7 +18,7 @@ EXAMPLE_ROOT, SIMSOPT_ROOT, SRC_ROOT = configure_local_simsopt_imports(__file__)
 
 # SIMSOPT imports
 from scipy.optimize import minimize
-from simsopt.field import Current, Coil
+from simsopt.field import BiotSavart, Current, Coil
 from simsopt.geo import (
     curves_to_vtk,
     create_equally_spaced_curves,
@@ -46,12 +46,9 @@ from workflow_helpers import (
     validate_normalized_toroidal_flux,
 )
 from workflow_runner_common import (
-    STAGE2_SIDECAR_REQUIRED_ERROR,
     load_stage2_artifact_results,
 )
 from banana_opt.artifact_contracts import (
-    STAGE2_BS_SHA256_KEY,
-    compute_stage2_bs_sha256,
     upgrade_legacy_stage2_artifact_results,
 )
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
@@ -952,7 +949,6 @@ def materialize_stage2_artifact_results(
         **results_kwargs,
         field_error=field_error,
     )
-    results[STAGE2_BS_SHA256_KEY] = compute_stage2_bs_sha256(stage2_bs_artifact_path)
     results.update(
         build_stage2_iota_report_payload(
             args=args,
@@ -1188,6 +1184,8 @@ def _resolve_stage2_finite_current_config(
             finite_current_mode,
         ),
     )
+
+
 def _build_initialize_coils_kwargs(
     *,
     finite_current_config: Stage2FiniteCurrentConfig,

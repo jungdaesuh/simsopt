@@ -295,7 +295,7 @@ class HandoffModuleTests(unittest.TestCase):
         stage2_artifact_results = {
             "PLASMA_SURF_FILENAME": "demo.nc",
             "TF_CURRENT_A": 8.0e4,
-            "MAJOR_RADIUS": 0.915,
+            "MAJOR_RADIUS": 0.976,
             "TOROIDAL_FLUX": 0.24,
             "banana_surf_radius": 0.21,
             "CURVATURE_THRESHOLD": 100.0,
@@ -453,6 +453,34 @@ class HandoffModuleTests(unittest.TestCase):
 
             def run_code(self, iota, G):
                 self.calls.append((float(iota), float(G)))
+                return None
+
+        boozer_surface = _FakeBoozerSurface()
+
+        attempt = module.run_boozer_with_failure_policy(
+            boozer_surface,
+            0.21,
+            0.35,
+            failure_policy=module.BOOZER_FAILURE_POLICY_REPORT_FAILURE,
+        )
+
+        self.assertTrue(attempt.solve_success)
+        self.assertAlmostEqual(attempt.solved_iota, 0.21)
+        self.assertAlmostEqual(attempt.solved_G, 0.35)
+        self.assertIsNone(attempt.error_type)
+        self.assertEqual(boozer_surface.calls, [(0.21, 0.35)])
+
+    def test_run_boozer_with_failure_policy_handles_fresh_surface_without_cached_res(self):
+        module = load_handoff_module()
+
+        class _FakeBoozerSurface:
+            def __init__(self):
+                self.surface = SimpleNamespace(x=np.array([1.0, -2.0], dtype=float))
+                self.calls = []
+
+            def run_code(self, iota, G):
+                self.calls.append((float(iota), float(G)))
+                self.res = {"iota": 0.21, "G": 0.35, "success": True}
                 return None
 
         boozer_surface = _FakeBoozerSurface()
@@ -1046,6 +1074,33 @@ class UnifiedRunnerTests(unittest.TestCase):
             4.0e-7 * 3.141592653589793 * 9000.0,
         )
 
+    def test_build_probe_status_single_surface_rejects_conflicting_requested_mode(self):
+        wrapper = load_wrapper_module()
+
+        args = wrapper.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/stage2/biot_savart_opt.json",
+                "--plasma-current-A",
+                "9000.0",
+            ]
+        )
+        args.finite_current_mode = "boozer_surrogate"
+
+        with self.assertRaisesRegex(ValueError, "Single-surface mode is locked to"):
+            wrapper.build_probe_status(
+                args,
+                stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+                stage2_results={
+                    "PLASMA_SURF_FILENAME": "demo.nc",
+                    "FINITE_CURRENT_MODE": "boozer_surrogate",
+                    "PROXY_PLASMA_CURRENT_A": 0.0,
+                },
+                stage="probe",
+            )
+
     def test_recovery_only_updates_recovery_results_with_handoff_metadata(self):
         wrapper = load_wrapper_module()
         handoff = load_handoff_module()
@@ -1296,13 +1351,11 @@ class UnifiedRunnerTests(unittest.TestCase):
             )
 
     def test_run_recovery_stage_probes_recovered_bs_with_original_stage2_metadata(self):
-        """Guard against a regression where the recovery probe was fed the
-        recovery single-stage results.json (which uses the STAGE2_* /
-        STAGE2_SEED_* prefix scheme and omits TF_CURRENT_A / NUM_TF_COILS /
-        FINITE_CURRENT_MODE under their unprefixed Stage 2 names) instead of
-        the original Stage 2 artifact metadata. That regression silently
-        returned BOOTABILITY_REASON_MISSING_ARTIFACT_METADATA even on
-        successful recoveries.
+        """Guard against a regression where the recovery probe was fed the recovery
+        single-stage results.json (which uses the STAGE2_* prefix convention and omits
+        TF_CURRENT_A / NUM_TF_COILS / FINITE_CURRENT_MODE) instead of the original
+        Stage 2 artifact metadata. That regression silently returned
+        BOOTABILITY_REASON_MISSING_ARTIFACT_METADATA even on successful recoveries.
         """
         wrapper = load_wrapper_module()
         handoff = load_handoff_module()
@@ -1313,33 +1366,28 @@ class UnifiedRunnerTests(unittest.TestCase):
             recovery_output_root = root / "recovery"
             recovery_case_dir = recovery_output_root / "mpol=8-ntor=6-test"
 
-            # Original Stage 2 artifact metadata (lives at stage2_results_path,
-            # loaded by run_recovery_stage via load_json on
-            # original_stage2_results_path).
             original_stage2_results = {
                 "PLASMA_SURF_FILENAME": "demo.nc",
-                "init_only": False,
                 "TF_CURRENT_A": 8.0e4,
                 "NUM_TF_COILS": 20,
-                "MAJOR_RADIUS": 0.915,
+                "MAJOR_RADIUS": 0.976,
                 "TOROIDAL_FLUX": 0.24,
                 "banana_surf_radius": 0.21,
                 "FINITE_CURRENT_MODE": "boozer_surrogate",
                 "CURVATURE_THRESHOLD": 100.0,
             }
-            _write_json(stage2_results_path, original_stage2_results)
 
             def fake_recovery_run(command, *, output_root, timeout_seconds):
                 recovery_case_dir.mkdir(parents=True, exist_ok=True)
-                # Single-stage recovery results: STAGE2_* prefix scheme,
-                # missing the unprefixed Stage 2 keys the probe requires.
                 recovery_single_stage_results = {
                     "PLASMA_SURF_FILENAME": "demo.nc",
                     "init_only": False,
                     "iterations": 7,
+                    # Single-stage schema: uses STAGE2_* prefix, does not surface
+                    # TF_CURRENT_A / NUM_TF_COILS / FINITE_CURRENT_MODE directly.
                     "STAGE2_TF_CURRENT_A": 8.0e4,
                     "STAGE2_FINITE_CURRENT_MODE": "boozer_surrogate",
-                    "MAJOR_RADIUS": 0.915,
+                    "MAJOR_RADIUS": 0.976,
                     "TOROIDAL_FLUX": 0.24,
                     "banana_surf_radius": 0.21,
                 }
@@ -1400,27 +1448,28 @@ class UnifiedRunnerTests(unittest.TestCase):
             ):
                 wrapper.run_recovery_stage(
                     args,
-                    stage2_bs_path=stage2_bs_path,
                     original_stage2_bs_path=stage2_bs_path,
                     original_stage2_results_path=stage2_results_path,
+                    original_stage2_results=original_stage2_results,
                     recovery_output_root=recovery_output_root,
                 )
 
             self.assertEqual(len(captured_probe_calls), 1)
             probe_call = captured_probe_calls[0]
             self.assertEqual(probe_call["stage"], handoff.BOOTABILITY_STAGE_RECOVERY)
-            # The probe should target the recovered coils file, not the original.
+            # The recovered coils live at the recovery output, not the original seed.
             self.assertEqual(
                 probe_call["stage2_bs_path"],
                 recovery_case_dir / "biot_savart_opt.json",
             )
-            # And it must receive the *original* Stage 2 metadata (loaded from
-            # original_stage2_results_path) so that TF_CURRENT_A /
-            # NUM_TF_COILS / FINITE_CURRENT_MODE / banana_surf_radius can be
-            # validated. The recovery single-stage results.json does not
+            # But the probe must receive the *original* Stage 2 metadata so that
+            # TF_CURRENT_A / NUM_TF_COILS / FINITE_CURRENT_MODE / banana_surf_radius
+            # can be validated. The recovery single-stage results.json does not
             # surface these keys directly, so passing it would silently fail.
-            recovery_results = probe_call["stage2_results"]
-            self.assertEqual(recovery_results["TF_CURRENT_A"], 8.0e4)
-            self.assertEqual(recovery_results["NUM_TF_COILS"], 20)
-            self.assertEqual(recovery_results["FINITE_CURRENT_MODE"], "boozer_surrogate")
-            self.assertEqual(recovery_results["banana_surf_radius"], 0.21)
+            self.assertIs(probe_call["stage2_results"], original_stage2_results)
+            self.assertEqual(probe_call["stage2_results"]["TF_CURRENT_A"], 8.0e4)
+            self.assertEqual(probe_call["stage2_results"]["NUM_TF_COILS"], 20)
+            self.assertEqual(
+                probe_call["stage2_results"]["FINITE_CURRENT_MODE"],
+                "boozer_surrogate",
+            )

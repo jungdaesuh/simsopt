@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import sys
@@ -15,7 +14,9 @@ if str(SCRIPT_DIR) not in sys.path:
 import run_single_stage_goal_mode_comparison as goal_mode_runner  # noqa: E402
 import run_single_stage_thresholded_physics_alm as recovery_runner  # noqa: E402
 import run_stage2_alm as stage2_alm_runner  # noqa: E402
-from banana_opt.current_contracts import resolve_plasma_current_settings  # noqa: E402
+from banana_opt.current_contracts import (  # noqa: E402
+    resolve_plasma_current_settings_for_num_surfaces,
+)
 from banana_opt.hardware_constraint_schema import (  # noqa: E402
     build_bootability_recovery_payload_fields,
 )
@@ -34,6 +35,7 @@ from workflow_runner_common import (  # noqa: E402
     resolved_path,
     run_command,
     timeout_or_none,
+    write_json,
 )
 
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_stage2_to_single_stage"
@@ -212,19 +214,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return build_parser().parse_args(argv)
 
 
-def write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as outfile:
-        json.dump(payload, outfile, indent=2)
-
-
 def update_results_json(
     results_path: Path,
     payload: dict[str, object],
-) -> None:
+) -> dict:
     results = load_json(results_path)
     results.update(payload)
     write_json(results_path, results)
+    return results
 
 
 def validate_handoff_cli_args(args: argparse.Namespace) -> None:
@@ -411,14 +408,18 @@ def build_probe_status(
         if float(args.constraint_weight) < 0.0
         else float(args.constraint_weight)
     )
-    finite_current_mode = resolve_stage2_finite_current_mode(stage2_results, None)
-    current_settings = resolve_plasma_current_settings(
+    requested_finite_current_mode = getattr(args, "finite_current_mode", None)
+    finite_current_mode = resolve_stage2_finite_current_mode(
+        stage2_results,
+        requested_finite_current_mode,
+    )
+    current_settings = resolve_plasma_current_settings_for_num_surfaces(
         raw_boozer_I=args.boozer_I,
         plasma_current_A=args.plasma_current_A,
         finite_current_mode=finite_current_mode,
-        default_plasma_current_A=float(
-            stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0)
-        ),
+        default_plasma_current_A=float(stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0)),
+        num_surfaces=args.num_surfaces,
+        requested_finite_current_mode=requested_finite_current_mode,
     )
     return probe_stage2_seed_bootability(
         stage2_bs_path=stage2_bs_path,
@@ -519,16 +520,14 @@ def build_recovery_command(
 def run_recovery_stage(
     args: argparse.Namespace,
     *,
-    stage2_bs_path: Path,
     original_stage2_bs_path: Path,
     original_stage2_results_path: Path,
+    original_stage2_results: dict,
     recovery_output_root: Path,
 ) -> dict[str, object]:
-    if args.recovery_stage != RECOVERY_STAGE_THRESHOLDED_PHYSICS_ALM:
-        raise ValueError(f"Unsupported recovery stage {args.recovery_stage!r}")
     command = build_recovery_command(
         args,
-        stage2_bs_path=stage2_bs_path,
+        stage2_bs_path=original_stage2_bs_path,
         recovery_output_root=recovery_output_root,
     )
     if args.dry_run:
@@ -572,17 +571,11 @@ def run_recovery_stage(
             ),
             "recovery_termination_reason": "missing_recovery_artifact",
         }
-    # The recovered BiotSavart artifact is a single-stage output (results.json
-    # uses the STAGE2_* / STAGE2_SEED_* prefix scheme, omits TF_CURRENT_A /
-    # NUM_TF_COILS / FINITE_CURRENT_MODE under their unprefixed Stage 2 names).
-    # The probe expects Stage 2 artifact metadata. The plasma surface and
-    # TF/banana_surf_radius/finite-current invariants did not change during
-    # recovery — only the banana-coil DOFs did — so re-load and pass the
-    # original Stage 2 results while pointing the probe at the recovered
-    # coils file. Without this the probe silently falls into the
-    # ``missing_artifact_metadata`` branch and falsely reports recoveries
-    # as not bootable.
-    original_stage2_results = load_json(original_stage2_results_path)
+    # The recovered BiotSavart artifact is a single-stage output, but the probe
+    # expects Stage 2 artifact metadata (TF_CURRENT_A, NUM_TF_COILS, FINITE_CURRENT_MODE,
+    # banana_surf_radius, MAJOR_RADIUS, TOROIDAL_FLUX). Those invariants did not change
+    # during recovery — only the banana-coil DOFs did — so we pass the original Stage 2
+    # results through while pointing the probe at the recovered coils file.
     recovery_probe = build_probe_status(
         args,
         stage2_bs_path=recovered_bs_path,
@@ -780,12 +773,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not bootability_passes(initial_probe):
         if args.skip_recovery:
-            if (
-                not args.recovery_only
-                and args.force_full_single_stage_after_recovery_fail
-            ):
-                pass
-            else:
+            if not args.force_full_single_stage_after_recovery_fail:
                 summary = build_summary(
                     args,
                     stage2_input=stage2_input,
@@ -805,9 +793,9 @@ def main(argv: list[str] | None = None) -> int:
             recovery_output_root.mkdir(parents=True, exist_ok=True)
             recovery_payload = run_recovery_stage(
                 args,
-                stage2_bs_path=original_stage2_bs_path,
                 original_stage2_bs_path=original_stage2_bs_path,
                 original_stage2_results_path=original_stage2_results_path,
+                original_stage2_results=stage2_results,
                 recovery_output_root=recovery_output_root,
             )
             recovery_termination_reason = recovery_payload.get(
@@ -869,7 +857,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if full_payload["status"] == "completed":
         full_results_path = Path(full_payload["results_path"])
-        update_results_json(
+        full_payload["results"] = update_results_json(
             full_results_path,
             handoff_results_payload(
                 handoff_bootability,
@@ -882,7 +870,6 @@ def main(argv: list[str] | None = None) -> int:
                 seed_source=seed_source,
             ),
         )
-        full_payload["results"] = load_json(full_results_path)
 
     summary = build_summary(
         args,

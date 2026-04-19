@@ -64,6 +64,8 @@ __all__ = [
     "resolve_penalty_traversal_forbidden_box_bounds",
     "resolve_loaded_tf_current_A",
     "resolve_plasma_current_settings",
+    "resolve_plasma_current_settings_for_num_surfaces",
+    "resolve_single_surface_plasma_current_settings",
     "unwrap_current_optimizable",
 ]
 
@@ -377,4 +379,61 @@ def resolve_plasma_current_settings(
         ),
         boozer_current_convention=boozer_current_convention,
         finite_current_mode=finite_current_mode,
+    )
+
+
+def resolve_single_surface_plasma_current_settings(
+    *,
+    raw_boozer_I: float | None,
+    plasma_current_A: float | None,
+    default_plasma_current_A: float = 0.0,
+) -> PlasmaCurrentSettings:
+    """Resolve the single-surface Boozer current using Wataru's contract.
+
+    User-facing current input remains physical plasma current in amperes. The
+    solver-facing BoozerSurface ``I`` parameter is then derived as ``mu0 * I_A``.
+    A raw Boozer-current value is still allowed as an explicit expert override.
+    Single-surface mode also locks the recorded provenance mode to the Wataru
+    proxy-field contract even though the numerical current convention is
+    identical to the generic multisurface path today.
+    """
+    return resolve_plasma_current_settings(
+        raw_boozer_I=raw_boozer_I,
+        plasma_current_A=plasma_current_A,
+        finite_current_mode=DEFAULT_FINITE_CURRENT_MODE,
+        default_plasma_current_A=default_plasma_current_A,
+    )
+
+
+def resolve_plasma_current_settings_for_num_surfaces(
+    *,
+    raw_boozer_I: float | None,
+    plasma_current_A: float | None,
+    finite_current_mode: FiniteCurrentMode = DEFAULT_FINITE_CURRENT_MODE,
+    default_plasma_current_A: float = 0.0,
+    num_surfaces: int | None = 1,
+    requested_finite_current_mode: FiniteCurrentMode | None = None,
+) -> PlasmaCurrentSettings:
+    resolved_num_surfaces = 1 if num_surfaces is None else int(num_surfaces)
+    if resolved_num_surfaces == 1:
+        if requested_finite_current_mode not in {
+            None,
+            "",
+            DEFAULT_FINITE_CURRENT_MODE,
+        }:
+            raise ValueError(
+                "Single-surface mode is locked to "
+                f"{DEFAULT_FINITE_CURRENT_MODE!r}; remove --finite-current-mode or "
+                f"set it to {DEFAULT_FINITE_CURRENT_MODE!r}."
+            )
+        return resolve_single_surface_plasma_current_settings(
+            raw_boozer_I=raw_boozer_I,
+            plasma_current_A=plasma_current_A,
+            default_plasma_current_A=default_plasma_current_A,
+        )
+    return resolve_plasma_current_settings(
+        raw_boozer_I=raw_boozer_I,
+        plasma_current_A=plasma_current_A,
+        finite_current_mode=finite_current_mode,
+        default_plasma_current_A=default_plasma_current_A,
     )
