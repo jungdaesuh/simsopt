@@ -13,19 +13,14 @@ from simsopt.geo import curves_to_vtk
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from topology_scorer import (
     trace_metrics as _trace_metrics,
+    extended_surface_seed_radii,
+    build_extended_surface_seed_contract,
     midplane_seed_radii,
     build_midplane_seed_contract,
     build_stopping_criteria,
     prepare_topology_field,
     topology_iteration_limit,
 )
-
-
-def _closed_rz(cross_section):
-    """Convert a Cartesian cross-section to closed (R, Z) arrays."""
-    r = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
-    z = cross_section[:, 2]
-    return np.append(r, r[0]), np.append(z, z[0])
 
 
 def plot_poincare_data(fieldlines_phi_hits, phis, filename, mark_lost=False, aspect='equal', dpi=600, xlims=None,
@@ -61,7 +56,7 @@ def plot_poincare_data(fieldlines_phi_hits, phis, filename, mark_lost=False, asp
             axs[row, col].set_xlabel("$r$")
         if col == 0:
             axs[row, col].set_ylabel("$z$")
-        if col > 0:
+        if col == 1:
             axs[row, col].set_yticklabels([])
         if xlims is not None:
             axs[row, col].set_xlim(xlims)
@@ -82,19 +77,17 @@ def plot_poincare_data(fieldlines_phi_hits, phis, filename, mark_lost=False, asp
 
         # if passed a surface, plot the plasma surface outline
         if surf is not None:
-            phi_new = phis[i] / (2 * np.pi)
-            cross_section = surf.cross_section(phi=phi_new, thetas=256)
-            r_interp, z_interp = _closed_rz(cross_section)
+            phi_new = phis[i] * 1 / (2 * np.pi)
+            cross_section = surf.cross_section(phi=phi_new)
+            r_interp = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
+            z_interp = cross_section[:, 2]
             axs[row, col].plot(r_interp, z_interp, linewidth=1, c='k')
         if surf1 is not None:
-            phi_new = phis[i] / (2 * np.pi)
-            cross_section = surf1.cross_section(phi=phi_new, thetas=256)
-            r_interp, z_interp = _closed_rz(cross_section)
+            phi_new = phis[i] * 1 / (2 * np.pi)
+            cross_section = surf1.cross_section(phi=phi_new)
+            r_interp = np.sqrt(cross_section[:, 0] ** 2 + cross_section[:, 1] ** 2)
+            z_interp = cross_section[:, 2]
             axs[row, col].plot(r_interp, z_interp, linewidth=1, c='r')
-
-    # Hide unused subplots for non-square phi counts
-    for idx in range(len(phis), nrowcol * nrowcol):
-        axs[idx // nrowcol, idx % nrowcol].set_visible(False)
 
     plt.tight_layout()
     plt.savefig(filename, dpi=dpi)
@@ -135,7 +128,7 @@ if __name__ == "__main__":
         bs = load(opt_bs_path)
         surf = load(opt_surf_path)
         field_label = "opt"
-        print(f"Loaded OPTIMIZED field + surface")
+        print("Loaded OPTIMIZED field + surface")
     else:
         bs = load(init_bs_path)
         surf = load(init_surf_path)
@@ -143,7 +136,7 @@ if __name__ == "__main__":
         if os.path.exists(opt_bs_path) != os.path.exists(opt_surf_path):
             print(f"WARNING: mismatched opt files (bs={os.path.exists(opt_bs_path)}, surf={os.path.exists(opt_surf_path)}). Using init for both.")
         else:
-            print(f"Loaded INITIAL field + surface (no opt found)")
+            print("Loaded INITIAL field + surface (no opt found)")
 
     # Export the exact geometry used by this Poincare run for ParaView inspection.
     curves_to_vtk([coil.curve for coil in bs.coils], os.path.join(OUT_DIR, f"curves_{field_label}_poincare"), close=True)
@@ -166,16 +159,42 @@ if __name__ == "__main__":
 
     def trace_fieldlines(bfield):
         seed_inset_fraction = 0.05
-        radii = midplane_seed_radii(
+        midplane_radii = midplane_seed_radii(
             surf,
             nfieldlines,
             inset_fraction=seed_inset_fraction,
         )
-        Z0 = np.zeros(nfieldlines)
+        midplane_Z0 = np.zeros(nfieldlines)
+        physics_extend_distance = 0.05
+        physics_radii = extended_surface_seed_radii(
+            surf,
+            nfieldlines,
+            extend_distance=physics_extend_distance,
+        )
+        physics_Z0 = np.zeros(nfieldlines)
         phis = [(i/4)*(2*np.pi/nfp) for i in range(4)]
-        seed_contract = build_midplane_seed_contract(nfieldlines, seed_inset_fraction, radii)
+        validation_seed_contract = build_midplane_seed_contract(
+            nfieldlines,
+            seed_inset_fraction,
+            midplane_radii,
+        )
+        physics_seed_contract = build_extended_surface_seed_contract(
+            nfieldlines,
+            physics_extend_distance,
+            physics_radii,
+        )
 
-        def trace_and_plot(stopping_criteria, stop_labels, suffix, label, mode):
+        def trace_and_plot(
+            radii,
+            Z0,
+            stopping_criteria,
+            stop_labels,
+            plot_suffix,
+            metrics_suffix,
+            label,
+            mode,
+            seed_contract,
+        ):
             fieldlines_tys, fieldlines_phi_hits = compute_fieldlines(
                 bfield,
                 radii,
@@ -192,37 +211,77 @@ if __name__ == "__main__":
                 stop_labels,
                 mode,
             )
-            filename = OUT_DIR + f'/PoincarePlot_{field_label}{suffix}.png'
+            plot_filename = OUT_DIR + f'/PoincarePlot_{field_label}{plot_suffix}.png'
             plot_poincare_data(
                 fieldlines_phi_hits,
                 phis,
-                filename,
+                plot_filename,
                 dpi=600,
                 surf=surf,
                 mark_lost=False,
             )
+            metrics["plot_filename"] = os.path.basename(plot_filename)
+            metrics["seed_contract"] = seed_contract
+            metrics_sidecar_path = os.path.join(
+                OUT_DIR,
+                f"PoincareMetrics_{field_label}{metrics_suffix}.json",
+            )
+            mode_artifact = {
+                "field_label": field_label,
+                "render_mode": mode,
+                "nfieldlines": nfieldlines,
+                "tmax": tmax_fl,
+                "tol": tol,
+                "phis": [float(phi) for phi in phis],
+                "seed_contract": seed_contract,
+                "field_model": field_model,
+                "plot_filename": metrics["plot_filename"],
+                "metrics": metrics,
+                "validation_status": metrics["validation_status"],
+            }
+            with open(metrics_sidecar_path, "w", encoding="utf-8") as f:
+                json.dump(mode_artifact, f, indent=2)
+            metrics["metrics_filename"] = os.path.basename(metrics_sidecar_path)
             print(
-                f"Saved: {os.path.basename(filename)} "
+                f"Saved: {os.path.basename(plot_filename)} "
                 f"({label}; phi hit counts={metrics['per_phi_hit_counts']}; "
                 f"status={metrics['validation_status']}; "
                 f"survival={metrics['survived_lines']}/{metrics['nfieldlines']})"
             )
-            metrics["plot_filename"] = os.path.basename(filename)
             return metrics
 
         validation_metrics = trace_and_plot(
+            midplane_radii,
+            midplane_Z0,
             stop_crit_validation,
             stop_labels_validation,
             "",
+            "_validation",
             "validation: stop on Boozer-surface exit",
             "validation",
+            validation_seed_contract,
         )
         diagnostic_metrics = trace_and_plot(
+            midplane_radii,
+            midplane_Z0,
             stop_crit_box,
             stop_labels_diagnostic,
             "_diagnostic",
+            "_diagnostic",
             "diagnostic: box-bounded only",
             "diagnostic",
+            validation_seed_contract,
+        )
+        physics_metrics = trace_and_plot(
+            physics_radii,
+            physics_Z0,
+            stop_crit_box,
+            stop_labels_diagnostic,
+            "_physics",
+            "_physics",
+            "physics: extended-surface seeds, box-bounded only",
+            "physics",
+            physics_seed_contract,
         )
         metrics_path = os.path.join(OUT_DIR, f"PoincareMetrics_{field_label}.json")
         artifact = {
@@ -231,10 +290,12 @@ if __name__ == "__main__":
             "tmax": tmax_fl,
             "tol": tol,
             "phis": [float(phi) for phi in phis],
-            "seed_contract": seed_contract,
+            "seed_contract": validation_seed_contract,
+            "physics_seed_contract": physics_seed_contract,
             "field_model": field_model,
             "validation": validation_metrics,
             "diagnostic": diagnostic_metrics,
+            "physics": physics_metrics,
             "validation_status": validation_metrics["validation_status"],
         }
         with open(metrics_path, "w", encoding="utf-8") as f:

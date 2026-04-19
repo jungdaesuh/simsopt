@@ -1135,6 +1135,90 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertLessEqual(radii[-1], 1.2 - 0.9 * expected_inset)
         self.assertTrue(np.all(np.diff(radii) > 0))
 
+    def test_extended_surface_seed_radii_spans_extended_surface_without_mutating_input(self):
+        topology_module = load_topology_scorer_module()
+
+        class _Surface:
+            def __init__(self, delta=0.0):
+                self.delta = float(delta)
+                self.extend_calls = []
+
+            def copy(self):
+                return _Surface(self.delta)
+
+            def extend_via_normal(self, distance):
+                self.extend_calls.append(float(distance))
+                self.delta += float(distance)
+
+            def gamma(self):
+                radii = np.array([1.0 - self.delta, 1.0 + self.delta], dtype=float)
+                return np.array(
+                    [
+                        [[radii[0], 0.0, 0.0], [radii[1], 0.0, 0.0]],
+                    ],
+                    dtype=float,
+                )
+
+        surface = _Surface(delta=0.2)
+        radii = topology_module.extended_surface_seed_radii(
+            surface,
+            5,
+            extend_distance=0.05,
+        )
+
+        self.assertEqual(radii.shape, (5,))
+        self.assertAlmostEqual(radii[0], 0.75)
+        self.assertAlmostEqual(radii[-1], 1.25)
+        self.assertTrue(np.all(np.diff(radii) > 0))
+        self.assertEqual(surface.extend_calls, [])
+
+        contract = topology_module.build_extended_surface_seed_contract(
+            5,
+            0.05,
+            radii,
+        )
+        self.assertEqual(contract["mode"], "extended_surface_radial_sweep")
+        self.assertEqual(contract["nfieldlines"], 5)
+        self.assertAlmostEqual(contract["extend_distance"], 0.05)
+        self.assertEqual(contract["radial_sampling_source"], "global_extended_surface_bounds")
+        self.assertAlmostEqual(contract["r_min_seed"], 0.75)
+        self.assertAlmostEqual(contract["r_max_seed"], 1.25)
+
+    def test_extended_surface_seed_radii_clones_real_surface_xyztensorfourier(self):
+        topology_module = load_topology_scorer_module()
+        from simsopt.geo import SurfaceXYZTensorFourier
+
+        surface = SurfaceXYZTensorFourier(
+            nfp=5,
+            stellsym=True,
+            mpol=2,
+            ntor=1,
+            quadpoints_phi=np.linspace(0.0, 1.0 / 5.0, 9, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 11, endpoint=False),
+        )
+        dofs = surface.get_dofs().copy()
+        dofs[0] = 1.23
+        surface.set_dofs(dofs)
+        surface.fix(0)
+        original_x = np.asarray(surface.x, dtype=float).copy()
+        original_full_x = np.asarray(surface.get_dofs(), dtype=float).copy()
+        original_gamma = surface.gamma().copy()
+
+        radii = topology_module.extended_surface_seed_radii(
+            surface,
+            8,
+            extend_distance=0.02,
+        )
+
+        self.assertEqual(radii.shape, (8,))
+        self.assertTrue(np.all(np.diff(radii) > 0))
+        self.assertLess(original_x.size, original_full_x.size)
+        clone = topology_module._clone_surface_for_extension(surface)
+        np.testing.assert_allclose(clone.get_dofs(), original_full_x)
+        np.testing.assert_allclose(np.asarray(surface.x, dtype=float), original_x)
+        np.testing.assert_allclose(np.asarray(surface.get_dofs(), dtype=float), original_full_x)
+        np.testing.assert_allclose(surface.gamma(), original_gamma)
+
     def test_prepare_topology_field_auto_policy_switches_at_threshold(self):
         topology_module = load_topology_scorer_module()
 

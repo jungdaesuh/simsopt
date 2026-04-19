@@ -629,9 +629,17 @@ Current outputs include:
 
 - `PoincarePlot_init.png` or `PoincarePlot_opt.png`
 - `PoincarePlot_init_diagnostic.png` or `PoincarePlot_opt_diagnostic.png`
+- `PoincarePlot_init_physics.png` or `PoincarePlot_opt_physics.png`
 - `PoincareMetrics_init.json` or `PoincareMetrics_opt.json`
+- `PoincareMetrics_init_validation.json` / `_diagnostic.json` / `_physics.json`
+  or `PoincareMetrics_opt_validation.json` / `_diagnostic.json` / `_physics.json`
 - `curves_init_poincare*` or `curves_opt_poincare*`
 - `surf_init_poincare*` or `surf_opt_poincare*`
+
+The aggregate `PoincareMetrics_*.json` file nests all three render modes.
+Mode-sensitive downstream tooling should read the explicit sidecars
+(`*_validation.json`, `*_diagnostic.json`, `*_physics.json`) instead of
+inferring a seed contract from the combined artifact.
 
 By default, the script auto-selects the newest single-stage output under `SINGLE_STAGE/outputs`. Override that with:
 
@@ -651,6 +659,7 @@ Interpretation:
 
 - validation plots stop field lines on Boozer-surface exit
 - diagnostic plots use only the box-bounded stopping set
+- physics plots use box-bounded stopping plus the extended-surface radial sweep
 - well-nested closed contours indicate better magnetic surfaces
 - scattered or chaotic hits indicate poor confinement / field-line loss
 

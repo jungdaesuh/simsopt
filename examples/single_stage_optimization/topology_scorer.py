@@ -10,11 +10,14 @@ sweep matching upstream SIMSOPT), and metric computation so that metrics
 cannot drift between callback and validation.
 """
 
+import copy
+
 import numpy as np
 import simsoptpp as sopp
 
 
 SEED_MODE_MIDPLANE = "midplane_radial_sweep"
+SEED_MODE_EXTENDED_SURFACE = "extended_surface_radial_sweep"
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +38,14 @@ def midplane_seed_radii(surf, nfieldlines, inset_fraction=0.05, min_inset=0.01):
     return np.linspace(rin + inset, rout - inset, nfieldlines)
 
 
+def _update_seed_radius_bounds(contract, radii, *, min_key="r_min", max_key="r_max"):
+    if radii is None or len(radii) == 0:
+        return contract
+    contract[min_key] = float(np.min(radii))
+    contract[max_key] = float(np.max(radii))
+    return contract
+
+
 def build_midplane_seed_contract(nfieldlines, inset_fraction, radii=None):
     contract = {
         "mode": SEED_MODE_MIDPLANE,
@@ -44,10 +55,65 @@ def build_midplane_seed_contract(nfieldlines, inset_fraction, radii=None):
         "phi": 0.0,
         "Z": 0.0,
     }
-    if radii is not None and len(radii) > 0:
-        contract["r_min"] = float(np.min(radii))
-        contract["r_max"] = float(np.max(radii))
-    return contract
+    return _update_seed_radius_bounds(contract, radii)
+
+
+def _clone_surface_for_extension(surface):
+    """Return a detached surface copy suitable for extend_via_normal()."""
+    from simsopt.geo import SurfaceXYZTensorFourier
+
+    if hasattr(surface, "copy"):
+        return surface.copy()
+    if isinstance(surface, SurfaceXYZTensorFourier):
+        cloned = SurfaceXYZTensorFourier(
+            nfp=surface.nfp,
+            stellsym=surface.stellsym,
+            mpol=surface.mpol,
+            ntor=surface.ntor,
+            clamped_dims=list(getattr(surface, "clamped_dims", [False, False, False])),
+            quadpoints_phi=np.asarray(surface.quadpoints_phi, dtype=float),
+            quadpoints_theta=np.asarray(surface.quadpoints_theta, dtype=float),
+        )
+        # SurfaceXYZTensorFourier inherits Optimizable, so `.x` is only the
+        # free-DOF view. Use the full coefficient vector to preserve geometry
+        # even when some surface coefficients are fixed.
+        cloned.local_full_x = np.asarray(surface.get_dofs(), dtype=float).copy()
+        return cloned
+    return copy.deepcopy(surface)
+
+
+def extended_surface_seed_radii(surface, nfieldlines, extend_distance=0.05):
+    """Seed field lines across an outward-extended surface radial span."""
+    extended_surface = _clone_surface_for_extension(surface)
+    extended_surface.extend_via_normal(float(extend_distance))
+    gamma = extended_surface.gamma()
+    radii = np.sqrt(gamma[:, :, 0] ** 2 + gamma[:, :, 1] ** 2)
+    return np.linspace(float(np.min(radii)), float(np.max(radii)), int(nfieldlines))
+
+
+def build_extended_surface_seed_contract(
+    nfieldlines,
+    extend_distance,
+    radii=None,
+):
+    contract = {
+        "mode": SEED_MODE_EXTENDED_SURFACE,
+        "nplanes": 1,
+        "nfieldlines": int(nfieldlines),
+        "extend_distance": float(extend_distance),
+        "phi": 0.0,
+        "Z": 0.0,
+        # Baseline-style physics renders launch at phi=0, Z=0 using the
+        # global radial envelope of the outward-extended surface rather than
+        # the phi=0 cross-section span itself.
+        "radial_sampling_source": "global_extended_surface_bounds",
+    }
+    return _update_seed_radius_bounds(
+        contract,
+        radii,
+        min_key="r_min_seed",
+        max_key="r_max_seed",
+    )
 
 
 def padded_bounds(rmin, rmax, zmax, radial_padding_fraction=0.05, axial_padding_fraction=0.05):
