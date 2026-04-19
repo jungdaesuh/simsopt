@@ -477,6 +477,51 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
                 target_banana_current_a=1.0,
             )
 
+    def test_materialize_stage2_seed_variant_emits_matching_checksum(self):
+        module = load_banana_scan_module()
+
+        class _FakeBS:
+            coils = [object()]
+
+            @staticmethod
+            def save(path):
+                Path(path).write_text('{"variant": true}', encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            module,
+            "load",
+            return_value=_FakeBS(),
+        ), patch.object(
+            module,
+            "partition_loaded_stage2_coils",
+            return_value=SimpleNamespace(banana_coils=[object()]),
+        ), patch.object(
+            module,
+            "_scale_banana_current_chain",
+        ):
+            tmpdir_path = Path(tmpdir)
+            seed_bs_path = tmpdir_path / "seed" / "biot_savart_opt.json"
+            seed_bs_path.parent.mkdir(parents=True, exist_ok=True)
+            seed_bs_path.write_text('{"seed": true}', encoding="utf-8")
+
+            variant_bs_path, variant_results_path = module._materialize_stage2_seed_variant(
+                stage2_bs_path=seed_bs_path,
+                stage2_results={},
+                variant_root=tmpdir_path / "variant",
+                banana_current_a=5500.0,
+                requested_num_tf_coils=20,
+            )
+
+            variant_results = json.loads(variant_results_path.read_text(encoding="utf-8"))
+            expected_digest = module.compute_stage2_bs_sha256(variant_bs_path)
+
+        self.assertEqual(
+            variant_results["STAGE2_BS_SHA256"],
+            expected_digest,
+        )
+        self.assertEqual(variant_results["BANANA_CURRENT_A"], 5500.0)
+        self.assertEqual(variant_results["STAGE2_BS_PATH"], str(seed_bs_path))
+
 
 class IshwPlotTests(unittest.TestCase):
     def test_resolved_error_metric_key_ignores_missing_and_nan_nonqs_ratio(self):
@@ -874,6 +919,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
             ),
             initial_state=SimpleNamespace(iota=0.18, penalty=0.03),
             penalty_threshold=5.0e-3,
+            effective_weight=2.5,
         )
 
         with patch.object(
@@ -931,6 +977,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
             ),
             initial_state=SimpleNamespace(iota=0.18, penalty=0.03),
             penalty_threshold=5.0e-3,
+            effective_weight=2.5,
         )
 
         with patch.object(
@@ -945,6 +992,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
 
         self.assertEqual(payload["STAGE2_IOTA_INITIAL"], 0.18)
         self.assertEqual(payload["STAGE2_IOTA_INITIAL_PENALTY"], 0.03)
+        self.assertEqual(payload["STAGE2_IOTA_EFFECTIVE_WEIGHT"], 2.5)
         self.assertIsNone(payload["STAGE2_IOTA_FINAL"])
         self.assertIsNone(payload["STAGE2_IOTA_FINAL_PENALTY"])
 

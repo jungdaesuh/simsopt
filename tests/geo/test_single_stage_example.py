@@ -7798,6 +7798,51 @@ class Stage2ArtifactWriterTests(unittest.TestCase):
                 new_surf=SimpleNamespace(),
             )
 
+    def test_materialize_stage2_artifact_results_emits_matching_checksum(self):
+        module = load_stage2_module()
+
+        def _save(path):
+            Path(path).write_text('{"coils": [1, 2]}', encoding="utf-8")
+
+        fake_bs = SimpleNamespace(
+            coils=[object(), object()],
+            save=_save,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            module,
+            "_magnetic_field_plots",
+            return_value=0.125,
+        ), patch.object(
+            module,
+            "_build_stage2_results_impl",
+            return_value={"FIELD_ERROR": 0.125},
+        ), patch.object(
+            module,
+            "build_stage2_iota_report_payload",
+            return_value={},
+        ):
+            artifact_path = Path(tmpdir) / "biot_savart_opt.json"
+            results = module.materialize_stage2_artifact_results(
+                args=SimpleNamespace(),
+                stage2_bs_artifact_path=str(artifact_path),
+                results_kwargs={
+                    "num_tf_coils": 1,
+                    "num_banana_coils": 1,
+                    "num_proxy_coils": 0,
+                    "num_vf_coils": 0,
+                },
+                stage2_iota_runtime=None,
+                new_bs=fake_bs,
+                new_surf=SimpleNamespace(),
+            )
+            expected_digest = module.compute_stage2_bs_sha256(artifact_path)
+
+        self.assertEqual(
+            results["STAGE2_BS_SHA256"],
+            expected_digest,
+        )
+
 
 class Stage2RuntimeSmokeTests(unittest.TestCase):
     _EXPECTED_BASIN_TELEMETRY = {

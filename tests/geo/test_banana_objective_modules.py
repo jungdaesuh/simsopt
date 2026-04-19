@@ -405,7 +405,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertIn("C-C-Sep=0.06m", log_line)
         self.assertIn("Curvature=39.50", log_line)
 
-    def test_make_stage2_fun_soft_mode_adds_guarded_iota_penalty_and_gradient(self):
+    def test_make_stage2_fun_soft_mode_computes_and_freezes_effective_weight(self):
         class _JF:
             def __init__(self):
                 self.x = None
@@ -419,6 +419,8 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         stage2_iota_runtime = SimpleNamespace(
             mode="soft",
             weight=3.0,
+            effective_weight=None,
+            penalty_threshold=2.0e-2,
             penalty_objective=SimpleNamespace(
                 dJ=mock.Mock(
                     side_effect=AssertionError(
@@ -427,16 +429,27 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 )
             ),
         )
-        soft_state = self.module.Stage2IotaState(
+        first_state = self.module.Stage2IotaState(
+            iota=0.2,
+            penalty=1.0e-12,
+            abs_error=1.0e-6,
+            feasible=True,
+            solve_failed=False,
+        )
+        second_state = self.module.Stage2IotaState(
             iota=0.24,
-            penalty=0.4,
+            penalty=0.6,
             abs_error=0.04,
             feasible=True,
             solve_failed=False,
         )
-        soft_evaluation = self.module.Stage2IotaEvaluation(
-            state=soft_state,
+        first_evaluation = self.module.Stage2IotaEvaluation(
+            state=first_state,
             penalty_grad=np.array([0.2, -0.1]),
+        )
+        second_evaluation = self.module.Stage2IotaEvaluation(
+            state=second_state,
+            penalty_grad=np.array([0.1, -0.2]),
         )
         fun = self.module.make_stage2_fun(
             _JF(),
@@ -452,12 +465,32 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         with mock.patch.object(
             self.module,
             "evaluate_stage2_iota",
-            return_value=soft_evaluation,
+            side_effect=[first_evaluation, second_evaluation],
         ), mock.patch("builtins.print"):
-            value, grad = fun(np.array([0.2, -0.1]))
+            first_value, first_grad = fun(np.array([0.2, -0.1]))
+            second_value, second_grad = fun(np.array([0.2, -0.1]))
 
-        self.assertAlmostEqual(value, 2.43)
-        np.testing.assert_allclose(grad, [1.6, -2.3])
+        expected_effective_weight = 3.0 * 1.23 / 2.0e-2
+        self.assertAlmostEqual(
+            stage2_iota_runtime.effective_weight,
+            expected_effective_weight,
+        )
+        self.assertAlmostEqual(
+            first_value,
+            1.23 + expected_effective_weight * first_state.penalty,
+        )
+        np.testing.assert_allclose(
+            first_grad,
+            [1.0, -2.0] + expected_effective_weight * np.array([0.2, -0.1]),
+        )
+        self.assertAlmostEqual(
+            second_value,
+            1.23 + expected_effective_weight * second_state.penalty,
+        )
+        np.testing.assert_allclose(
+            second_grad,
+            [1.0, -2.0] + expected_effective_weight * np.array([0.1, -0.2]),
+        )
 
     def test_make_stage2_fun_soft_mode_rejects_failed_iota_solve(self):
         class _JF:
@@ -473,6 +506,8 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         stage2_iota_runtime = SimpleNamespace(
             mode="soft",
             weight=3.0,
+            effective_weight=None,
+            penalty_threshold=2.0e-2,
             penalty_objective=SimpleNamespace(
                 dJ=mock.Mock(side_effect=AssertionError("soft penalty gradient should not run"))
             ),
@@ -519,8 +554,12 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             value, grad = fun(np.array([0.3, -0.2]))
             failed_value, failed_grad = fun(np.array([0.4, -0.3]))
 
-        self.assertAlmostEqual(value, 2.43)
-        np.testing.assert_allclose(grad, [1.6, -2.3])
+        expected_effective_weight = 3.0 * 1.23 / 0.4
+        self.assertAlmostEqual(value, 1.23 + expected_effective_weight * 0.4)
+        np.testing.assert_allclose(
+            grad,
+            [1.0, -2.0] + expected_effective_weight * np.array([0.2, -0.1]),
+        )
         self.assertAlmostEqual(failed_value, 2.46)
         np.testing.assert_allclose(failed_grad, [2.0, -4.0])
         np.testing.assert_allclose(jf.x, [0.4, -0.3])
@@ -540,16 +579,11 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         stage2_iota_runtime = SimpleNamespace(
             mode="soft",
             weight=3.0,
+            effective_weight=None,
+            penalty_threshold=2.0e-2,
             penalty_objective=SimpleNamespace(
                 dJ=mock.Mock(side_effect=AssertionError("soft penalty gradient should not run"))
             ),
-        )
-        soft_state = self.module.Stage2IotaState(
-            iota=0.24,
-            penalty=0.4,
-            abs_error=0.04,
-            feasible=True,
-            solve_failed=False,
         )
         failed_state = self.module.Stage2IotaState(
             iota=0.24,
@@ -557,10 +591,6 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             abs_error=0.04,
             feasible=False,
             solve_failed=True,
-        )
-        soft_evaluation = self.module.Stage2IotaEvaluation(
-            state=soft_state,
-            penalty_grad=np.array([0.2, -0.1]),
         )
         failed_evaluation = self.module.Stage2IotaEvaluation(
             state=failed_state,

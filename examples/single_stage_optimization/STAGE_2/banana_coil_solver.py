@@ -18,7 +18,7 @@ EXAMPLE_ROOT, SIMSOPT_ROOT, SRC_ROOT = configure_local_simsopt_imports(__file__)
 
 # SIMSOPT imports
 from scipy.optimize import minimize
-from simsopt.field import BiotSavart, Current, Coil
+from simsopt.field import Current, Coil
 from simsopt.geo import (
     curves_to_vtk,
     create_equally_spaced_curves,
@@ -49,6 +49,8 @@ from workflow_runner_common import (
     load_stage2_artifact_results,
 )
 from banana_opt.artifact_contracts import (
+    STAGE2_BS_SHA256_KEY,
+    compute_stage2_bs_sha256,
     upgrade_legacy_stage2_artifact_results,
 )
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
@@ -60,6 +62,7 @@ from banana_opt.stage2_geometry import (
     magnetic_field_plots as _magnetic_field_plots,
 )
 from banana_opt.hardware_contracts import (
+    ACCEPT_OFFSPEC_LCFS_ENV,
     ACCEPT_OFFSPEC_R0_SEED_ENV,
     ACCEPT_OFFSPEC_R0_SEED_HELP,
     BANANA_CURRENT_HARD_LIMIT_A,
@@ -72,6 +75,7 @@ from banana_opt.hardware_contracts import (
     TF_CURRENT_HARD_LIMIT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
     env_flag,
+    validate_lcfs_envelope,
     validate_major_radius,
     validate_tf_current_limit,
 )
@@ -791,6 +795,7 @@ def build_stage2_iota_hot_loop_payload(
         "STAGE2_IOTA_WEIGHT": float(
             getattr(args, "stage2_iota_weight", DEFAULT_STAGE2_IOTA_WEIGHT)
         ),
+        "STAGE2_IOTA_EFFECTIVE_WEIGHT": None,
         "STAGE2_IOTA_VOL_TARGET": float(
             getattr(args, "stage2_iota_vol_target", DEFAULT_STAGE2_IOTA_VOL_TARGET)
         ),
@@ -832,6 +837,7 @@ def build_stage2_iota_hot_loop_payload(
             "STAGE2_IOTA_BOOTSTRAP_SECONDS": stage2_iota_runtime.stats.bootstrap_seconds,
             "STAGE2_IOTA_RUNTIME_SECONDS": stage2_iota_runtime.stats.runtime_seconds,
             "STAGE2_IOTA_RUNTIME_CALLS": stage2_iota_runtime.stats.runtime_calls,
+            "STAGE2_IOTA_EFFECTIVE_WEIGHT": stage2_iota_runtime.effective_weight,
             "STAGE2_IOTA_INITIAL": stage2_iota_runtime.initial_state.iota,
             "STAGE2_IOTA_INITIAL_PENALTY": stage2_iota_runtime.initial_state.penalty,
             "STAGE2_IOTA_FINAL": final_iota,
@@ -948,6 +954,9 @@ def materialize_stage2_artifact_results(
     results = _build_stage2_results_impl(
         **results_kwargs,
         field_error=field_error,
+    )
+    results[STAGE2_BS_SHA256_KEY] = compute_stage2_bs_sha256(
+        stage2_bs_artifact_path
     )
     results.update(
         build_stage2_iota_report_payload(
@@ -1958,6 +1967,8 @@ def main(parsed_args=None):
         alm_result=alm_result,
         alm_taylor_result=alm_taylor_result,
         final_volume=new_surf.volume(),
+        final_plasma_major_radius_m=new_surf.major_radius(),
+        final_plasma_minor_radius_m=new_surf.minor_radius(),
         intersecting=intersecting,
         final_max_curvature=final_max_curvature,
         final_coil_length=final_coil_length,
@@ -1965,6 +1976,11 @@ def main(parsed_args=None):
         final_curve_surface_min_dist=final_curve_surface_min_dist,
         plasma_vessel_min_dist=plasma_vessel_min_dist,
         hardware_status=hardware_status,
+    )
+    validate_lcfs_envelope(
+        new_surf.major_radius(),
+        new_surf.minor_radius(),
+        accept_offspec=env_flag(ACCEPT_OFFSPEC_LCFS_ENV),
     )
     secondary_artifact_metadata = build_stage2_secondary_artifact_metadata()
     if (

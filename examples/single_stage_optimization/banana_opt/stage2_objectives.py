@@ -213,6 +213,7 @@ class Stage2IotaRuntime:
     stats: Stage2IotaRuntimeStats
     initial_state: Stage2IotaState
     guarded_boozer_evaluator: Stage2GuardedBoozerEvaluator | None = None
+    effective_weight: float | None = None
 
 
 def stage2_iota_penalty_threshold(iota_tolerance: float) -> float:
@@ -254,6 +255,28 @@ def _build_stage2_soft_failure_reject_value_and_grad(
     if base_objective >= 1.0:
         return 2.0 * base_objective, 2.0 * base_grad
     return base_objective + 1.0, base_grad
+
+
+def _resolve_stage2_soft_effective_weight(
+    stage2_iota_runtime: Stage2IotaRuntime,
+    *,
+    objective_value: float,
+    penalty_value: float,
+) -> float:
+    cached_weight = stage2_iota_runtime.effective_weight
+    if cached_weight is not None:
+        return float(cached_weight)
+    penalty_floor = max(
+        float(stage2_iota_runtime.penalty_threshold),
+        _SMOOTHING_EPS,
+    )
+    effective_weight = (
+        float(stage2_iota_runtime.weight)
+        * float(objective_value)
+        / max(float(penalty_value), penalty_floor)
+    )
+    stage2_iota_runtime.effective_weight = effective_weight
+    return effective_weight
 
 
 def _build_stage2_iota_state(
@@ -657,6 +680,8 @@ def build_stage2_results(
     alm_result,
     alm_taylor_result,
     final_volume,
+    final_plasma_major_radius_m,
+    final_plasma_minor_radius_m,
     field_error,
     intersecting,
     final_max_curvature,
@@ -870,6 +895,8 @@ def build_stage2_results(
         **alm_result_diagnostics_fields(alm_result),
         "ALM_HISTORY": getattr(alm_result, "history", None),
         "FINAL_VOLUME": float(final_volume),
+        "FINAL_LCFS_MAJOR_RADIUS_M": float(final_plasma_major_radius_m),
+        "FINAL_LCFS_MINOR_RADIUS_M": float(final_plasma_minor_radius_m),
         "FIELD_ERROR": float(field_error),
         "SELF_INTERSECTING": intersecting,
         **build_hardware_constraint_artifact_payload_fields(hardware_snapshot),
@@ -905,9 +932,14 @@ def make_stage2_fun(
                     grad,
                 )
             else:
-                J += stage2_iota_runtime.weight * iota_state.penalty
+                effective_weight = _resolve_stage2_soft_effective_weight(
+                    stage2_iota_runtime,
+                    objective_value=J,
+                    penalty_value=iota_state.penalty,
+                )
+                J += effective_weight * iota_state.penalty
                 grad = grad + (
-                    stage2_iota_runtime.weight
+                    effective_weight
                     * np.asarray(iota_evaluation.penalty_grad, dtype=float)
                 )
         unitn = new_surf.unitnormal()

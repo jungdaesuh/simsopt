@@ -14,10 +14,13 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import run_single_stage_goal_mode_comparison as goal_mode_runner  # noqa: E402
-from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results  # noqa: E402
 from banana_opt.stage2_single_stage_handoff import (  # noqa: E402
     build_equilibrium_path,
     partition_loaded_stage2_coils,
+)
+from banana_opt.artifact_contracts import (  # noqa: E402
+    STAGE2_BS_SHA256_KEY,
+    compute_stage2_bs_sha256,
 )
 from banana_opt.single_stage_geometry import build_surface_configs  # noqa: E402
 from workflow_runner_common import (  # noqa: E402
@@ -231,6 +234,7 @@ def _materialize_stage2_seed_variant(
     variant_results = dict(upgrade_legacy_stage2_artifact_results(stage2_results))
     variant_results["BANANA_CURRENT_A"] = float(banana_current_a)
     variant_results["STAGE2_BS_PATH"] = str(stage2_bs_path)
+    variant_results[STAGE2_BS_SHA256_KEY] = compute_stage2_bs_sha256(variant_bs_path)
     write_json(variant_results_path, variant_results)
     return variant_bs_path, variant_results_path
 
