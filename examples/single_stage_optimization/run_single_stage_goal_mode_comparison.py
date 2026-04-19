@@ -241,6 +241,15 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     )
     parser.add_argument("--num-surfaces", type=int, choices=[1, 2], default=int(os.environ.get("NUM_SURFACES", "1")))
     parser.add_argument("--inner-surface-ratio", type=float, default=float(os.environ.get("INNER_SURFACE_RATIO", "0.8")))
+    parser.add_argument(
+        "--surface-mode",
+        choices=[
+            "single_surface",
+            "published_multisurface",
+            "experimental_multisurface",
+        ],
+        default=os.environ.get("SURFACE_MODE"),
+    )
     parser.add_argument("--surface-gap-threshold", type=float, default=float(os.environ.get("SURFACE_GAP_THRESHOLD", "0.0")))
     parser.add_argument("--multisurface-ramp-iterations", type=int, default=int(os.environ.get("MULTISURFACE_RAMP_ITERATIONS", "5")))
     parser.add_argument("--inner-surface-initial-weight", type=float, default=float(os.environ.get("INNER_SURFACE_INITIAL_WEIGHT", "0.0")))
@@ -397,6 +406,10 @@ def build_single_stage_goal_mode_command(
         str(args.num_surfaces),
         "--inner-surface-ratio",
         str(args.inner_surface_ratio),
+    ] + ([
+        "--surface-mode",
+        str(args.surface_mode),
+    ] if getattr(args, "surface_mode", None) else []) + [
         "--surface-gap-threshold",
         str(args.surface_gap_threshold),
         "--multisurface-ramp-iterations",

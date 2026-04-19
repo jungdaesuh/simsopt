@@ -212,6 +212,20 @@ from banana_opt.single_stage_objectives import (
     evaluate_total_objective as _evaluate_total_objective_impl,
     evaluate_alm_objective as _evaluate_alm_objective_impl,
 )
+from banana_opt.surface_mode_contracts import (
+    EXPERIMENTAL_MULTISURFACE,
+    PUBLISHED_MULTISURFACE,
+    SINGLE_SURFACE,
+    SURFACE_MODE_CHOICES,
+    SurfaceModeContract,
+    build_surface_mode_contract as _build_surface_mode_contract_impl,
+    build_surface_mode_metadata as _build_surface_mode_metadata_impl,
+    resolve_surface_mode_inner_surface_ratio,
+    surface_mode_supports_alm,
+    surface_mode_supports_boozer_stage_refinement,
+    surface_mode_supports_topology_gate,
+    validate_surface_mode_runtime_support,
+)
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
 DEFAULT_EQUILIBRIA_DIR = DATABASE_EQUILIBRIA_DIR if os.path.isdir(DATABASE_EQUILIBRIA_DIR) else os.path.join(EXAMPLE_ROOT, "equilibria")
@@ -671,6 +685,20 @@ def resolve_plasma_current_settings(
     }
 
 
+def resolve_surface_mode_contract(args, *, warn_on_legacy_mapping=True):
+    should_warn = (
+        bool(warn_on_legacy_mapping)
+        and getattr(args, "surface_mode", None) is None
+        and int(getattr(args, "num_surfaces", 1)) != 1
+    )
+    return _build_surface_mode_contract_impl(
+        requested_surface_mode=getattr(args, "surface_mode", None),
+        legacy_num_surfaces=getattr(args, "num_surfaces", 1),
+        legacy_inner_surface_ratio=getattr(args, "inner_surface_ratio", 0.8),
+        warn_on_legacy_mapping=should_warn,
+    )
+
+
 def build_equilibrium_path(args):
     return _build_equilibrium_path_impl(
         args.plasma_surf_filename,
@@ -864,19 +892,36 @@ def parse_args():
     )
     parser.add_argument("--maxiter", type=int, default=int(os.environ.get("MAXITER", "300")))
     parser.add_argument(
+        "--surface-mode",
+        choices=SURFACE_MODE_CHOICES,
+        default=os.environ.get("SURFACE_MODE"),
+        help=(
+            "Surface physics contract selector. "
+            f"{SINGLE_SURFACE!r} preserves the current one-surface baseline, "
+            f"{EXPERIMENTAL_MULTISURFACE!r} preserves the current custom two-surface "
+            "continuation lane, and "
+            f"{PUBLISHED_MULTISURFACE!r} reserves the future published-aligned "
+            "multisurface contract. When omitted, legacy --num-surfaces mapping is used."
+        ),
+    )
+    parser.add_argument(
         "--num-surfaces",
         type=int,
         choices=[1, 2],
         default=int(os.environ.get("NUM_SURFACES", "1")),
-        help="Number of nested Boozer surfaces to optimize together (v1 supports 1 or 2).",
+        help=(
+            "Legacy surface selector retained for backward compatibility. "
+            "Use --surface-mode for new runs. Legacy mapping keeps 1 -> single_surface "
+            "and 2 -> experimental_multisurface."
+        ),
     )
     parser.add_argument(
         "--inner-surface-ratio",
         type=float,
         default=float(os.environ.get("INNER_SURFACE_RATIO", "0.8")),
         help=(
-            "When --num-surfaces=2, use this factor times the Stage 2 toroidal-flux label "
-            "to build the inner equilibrium reference surface and derive its target volume."
+            "Legacy inner-surface ratio used by the experimental two-surface contract. "
+            "Ignored by single_surface. Reserved for the future published contract."
         ),
     )
     parser.add_argument(
@@ -2138,7 +2183,29 @@ def make_run_identity_config(
     nphi,
     ntheta,
     rng_seed,
+    *,
+    surface_mode_contract: SurfaceModeContract | None = None,
+    effective_num_surfaces: int | None = None,
+    effective_inner_surface_ratio: float | None = None,
 ):
+    resolved_contract = (
+        resolve_surface_mode_contract(args, warn_on_legacy_mapping=False)
+        if surface_mode_contract is None
+        else surface_mode_contract
+    )
+    resolved_num_surfaces = (
+        resolved_contract.num_surfaces
+        if effective_num_surfaces is None
+        else int(effective_num_surfaces)
+    )
+    resolved_inner_surface_ratio = resolve_surface_mode_inner_surface_ratio(
+        resolved_contract,
+        fallback_inner_surface_ratio=(
+            args.inner_surface_ratio
+            if effective_inner_surface_ratio is None
+            else effective_inner_surface_ratio
+        ),
+    )
     return RunIdentityConfig(
         stage2_bs_path=stage2_bs_path,
         stage=stage,
@@ -2188,8 +2255,8 @@ def make_run_identity_config(
         alm_penalty_max=args.alm_penalty_max,
         alm_feas_tol=args.alm_feas_tol,
         alm_stationarity_tol=args.alm_stationarity_tol,
-        num_surfaces=args.num_surfaces,
-        inner_surface_ratio=args.inner_surface_ratio,
+        num_surfaces=resolved_num_surfaces,
+        inner_surface_ratio=resolved_inner_surface_ratio,
         surface_gap_threshold=args.surface_gap_threshold,
         multisurface_ramp_iterations=args.multisurface_ramp_iterations,
         inner_surface_initial_weight=args.inner_surface_initial_weight,
@@ -2232,13 +2299,26 @@ def build_run_identity_config(config):
     return "|".join(str(value) for value in astuple(config))
 
 
-def validate_boozer_stage_refinement_args(args, constraint_weight):
+def validate_boozer_stage_refinement_args(
+    args,
+    constraint_weight,
+    *,
+    surface_mode_contract: SurfaceModeContract | None = None,
+):
     if not args.boozer_stage_refinement:
         return
+    resolved_contract = (
+        resolve_surface_mode_contract(args, warn_on_legacy_mapping=False)
+        if surface_mode_contract is None
+        else surface_mode_contract
+    )
     if args.constraint_method != "penalty":
         raise ValueError("--boozer-stage-refinement currently requires --constraint-method=penalty")
-    if args.num_surfaces != 1:
-        raise ValueError("--boozer-stage-refinement currently requires --num-surfaces=1")
+    if not surface_mode_supports_boozer_stage_refinement(resolved_contract):
+        raise ValueError(
+            "--boozer-stage-refinement currently requires "
+            f"--surface-mode={SINGLE_SURFACE} (legacy --num-surfaces=1)"
+        )
     if args.basin_hops > 0:
         raise ValueError("--boozer-stage-refinement is not supported with --basin-hops > 0")
     if args.boozer_stage != "initial":
@@ -2315,8 +2395,27 @@ def single_stage_alm_constraint_names(*, alm_formulation, include_surface_surfac
     return names
 
 
-def evaluate_search_topology_gate(num_surfaces, outer_surface, bfield):
-    if num_surfaces <= 1 or TOPOLOGY_GATE_FIELDLINES <= 0:
+def evaluate_search_topology_gate(
+    num_surfaces,
+    outer_surface,
+    bfield,
+    *,
+    surface_mode_contract: SurfaceModeContract | None = None,
+):
+    if TOPOLOGY_GATE_FIELDLINES <= 0:
+        return disabled_topology_gate_status(
+            TOPOLOGY_GATE_TMAX,
+            TOPOLOGY_GATE_TOL,
+            TOPOLOGY_GATE_SURVIVAL_THRESHOLD,
+        )
+    if surface_mode_contract is not None:
+        if not surface_mode_supports_topology_gate(surface_mode_contract):
+            return disabled_topology_gate_status(
+                TOPOLOGY_GATE_TMAX,
+                TOPOLOGY_GATE_TOL,
+                TOPOLOGY_GATE_SURVIVAL_THRESHOLD,
+            )
+    elif num_surfaces <= 1:
         return disabled_topology_gate_status(
             TOPOLOGY_GATE_TMAX,
             TOPOLOGY_GATE_TOL,
@@ -2349,10 +2448,22 @@ def skipped_topology_gate_status():
     }
 
 
-def final_topology_gate_for_results(init_only, num_surfaces, outer_surface, bfield):
+def final_topology_gate_for_results(
+    init_only,
+    num_surfaces,
+    outer_surface,
+    bfield,
+    *,
+    surface_mode_contract: SurfaceModeContract | None = None,
+):
     if init_only:
         return skipped_topology_gate_status()
-    status = evaluate_search_topology_gate(num_surfaces, outer_surface, bfield)
+    status = evaluate_search_topology_gate(
+        num_surfaces,
+        outer_surface,
+        bfield,
+        surface_mode_contract=surface_mode_contract,
+    )
     status["evaluated"] = True
     return status
 
@@ -4694,10 +4805,12 @@ def evaluate_search_step(x):
                 )
 
         if success:
+            active_surface_mode_contract = globals().get("surface_mode_contract")
             topology_status = evaluate_search_topology_gate(
                 len(surface_data),
                 outer_entry['boozer_surface'].surface,
                 bs,
+                surface_mode_contract=active_surface_mode_contract,
             )
             run_dict['topology_gate_status'] = topology_status
             topology_state = _topology_gate_state(topology_status)
@@ -5420,6 +5533,13 @@ if __name__ == "__main__":
         "finite_current_mode",
         DEFAULT_FINITE_CURRENT_MODE,
     )
+    surface_mode_contract = resolve_surface_mode_contract(args)
+    validate_surface_mode_runtime_support(surface_mode_contract)
+    effective_num_surfaces = surface_mode_contract.num_surfaces
+    effective_inner_surface_ratio = resolve_surface_mode_inner_surface_ratio(
+        surface_mode_contract,
+        fallback_inner_surface_ratio=args.inner_surface_ratio,
+    )
     finite_current_mode = resolve_stage2_finite_current_mode(
         stage2_results,
         requested_finite_current_mode,
@@ -5428,7 +5548,7 @@ if __name__ == "__main__":
         args,
         finite_current_mode=finite_current_mode,
         default_plasma_current_A=float(stage2_results.get("PROXY_PLASMA_CURRENT_A", 0.0)),
-        num_surfaces=args.num_surfaces,
+        num_surfaces=effective_num_surfaces,
     )
     boozer_I = plasma_current_settings["boozer_I"]
     plasma_current_A = plasma_current_settings["plasma_current_A"]
@@ -5483,7 +5603,11 @@ if __name__ == "__main__":
     validate_single_stage_alm_formulation_args(args)
     validate_confinement_surrogate_args(args)
     validate_single_stage_current_args(args)
-    validate_boozer_stage_refinement_args(args, CONSTRAINT_WEIGHT)
+    validate_boozer_stage_refinement_args(
+        args,
+        CONSTRAINT_WEIGHT,
+        surface_mode_contract=surface_mode_contract,
+    )
     MULTISURFACE_RAMP_ITERATIONS = args.multisurface_ramp_iterations
     INNER_SURFACE_INITIAL_WEIGHT = args.inner_surface_initial_weight
     TOPOLOGY_GATE_FIELDLINES = args.topology_gate_fieldlines
@@ -5533,8 +5657,8 @@ if __name__ == "__main__":
         s,
         R0,
         vol_target,
-        args.num_surfaces,
-        args.inner_surface_ratio,
+        effective_num_surfaces,
+        effective_inner_surface_ratio,
     )
     surf = surface_configs[-1]["initial_surface"]
     banana_surf_nfp = surf.nfp
@@ -5600,6 +5724,9 @@ if __name__ == "__main__":
         nphi,
         ntheta,
         rng_seed,
+        surface_mode_contract=surface_mode_contract,
+        effective_num_surfaces=effective_num_surfaces,
+        effective_inner_surface_ratio=effective_inner_surface_ratio,
     )
     config_str = build_run_identity_config(run_identity_config)
     config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:8]
@@ -5826,6 +5953,7 @@ if __name__ == "__main__":
         len(surface_data),
         outer_surface_data["boozer_surface"].surface,
         bs,
+        surface_mode_contract=surface_mode_contract,
     )
     initial_hardware_snapshot = evaluate_single_stage_hardware_snapshot(
         JCurveCurve,
@@ -5972,7 +6100,7 @@ if __name__ == "__main__":
         REQUESTED_SEED_REGIME,
         run_dict,
         constraint_method=CONSTRAINT_METHOD,
-        num_surfaces=args.num_surfaces,
+        num_surfaces=effective_num_surfaces,
         basin_hops=args.basin_hops,
         init_only=args.init_only,
     )
@@ -6143,8 +6271,13 @@ if __name__ == "__main__":
     bridge_local_donor_ready = False
     final_source_stage = stage
     alm_result = None
-    if CONSTRAINT_METHOD == "alm" and args.num_surfaces != 1:
-        raise ValueError("--constraint-method=alm currently requires --num-surfaces=1")
+    if CONSTRAINT_METHOD == "alm" and not surface_mode_supports_alm(
+        surface_mode_contract
+    ):
+        raise ValueError(
+            "--constraint-method=alm currently requires "
+            f"--surface-mode={SINGLE_SURFACE} (legacy --num-surfaces=1)"
+        )
     if args.init_only:
         res_nit = 0
         final_volume = initial_volume
@@ -6401,7 +6534,7 @@ if __name__ == "__main__":
         enable_local_preservation = penalty_feasible_start_local_preservation_enabled(
             run_dict,
             constraint_method=CONSTRAINT_METHOD,
-            num_surfaces=args.num_surfaces,
+            num_surfaces=effective_num_surfaces,
             basin_hops=args.basin_hops,
             init_only=args.init_only,
         )
@@ -6722,7 +6855,9 @@ if __name__ == "__main__":
         len(surface_data),
         outer_surface_data['boozer_surface'].surface,
         bs,
+        surface_mode_contract=surface_mode_contract,
     )
+    surface_mode_metadata = _build_surface_mode_metadata_impl(surface_mode_contract)
     objective_j = float(run_dict['J']) if run_dict['J'] is not None else None
     base_objective_j = None if run_dict['base_eval'] is None else float(run_dict['base_eval']['total'])
     search_objective_j = float(run_dict['search_eval']['total'])
@@ -6816,8 +6951,9 @@ if __name__ == "__main__":
         "ntor": ntor,
         "nphi": nphi,
         "ntheta": ntheta,
-        "NUM_SURFACES": args.num_surfaces,
-        "INNER_SURFACE_RATIO": args.inner_surface_ratio,
+        "NUM_SURFACES": effective_num_surfaces,
+        "INNER_SURFACE_RATIO": effective_inner_surface_ratio,
+        **surface_mode_metadata,
         "SURFACE_GAP_THRESHOLD": SURFACE_GAP_THRESHOLD,
         "MULTISURFACE_RAMP_ITERATIONS": MULTISURFACE_RAMP_ITERATIONS,
         "INNER_SURFACE_INITIAL_WEIGHT": INNER_SURFACE_INITIAL_WEIGHT,
@@ -7086,7 +7222,11 @@ if __name__ == "__main__":
         "FRONTIER_BOOZER_TRUST_THRESHOLD": final_frontier_trust_status["threshold"],
         "PLASMA_CURRENT_A": float(plasma_current_A),
         "PLASMA_CURRENT_INPUT_SOURCE": plasma_current_input_source,
-        "PLASMA_CURRENT_SURROGATE_SCOPE": "shared_all_surfaces" if args.num_surfaces > 1 else "single_surface",
+        "PLASMA_CURRENT_SURROGATE_SCOPE": (
+            "shared_all_surfaces"
+            if effective_num_surfaces > 1
+            else "single_surface"
+        ),
         "FINITE_CURRENT_MODE": finite_current_mode,
         "BOOZER_CURRENT_CONVENTION": boozer_current_convention,
         "EFFECTIVE_CURRENT_MODE": effective_current_mode,

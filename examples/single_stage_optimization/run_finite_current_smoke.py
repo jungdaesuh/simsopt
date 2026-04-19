@@ -29,7 +29,10 @@ from banana_opt.artifact_contracts import (  # noqa: E402
     validate_smoke_results as _validate_smoke_results_impl,
 )
 from banana_opt.current_contracts import physical_current_to_boozer_I  # noqa: E402
-from banana_opt.current_contracts import resolve_boozer_current_convention  # noqa: E402
+from banana_opt.current_contracts import (  # noqa: E402
+    DEFAULT_FINITE_CURRENT_MODE,
+    resolve_boozer_current_convention,
+)
 from banana_opt.hardware_contracts import (  # noqa: E402
     BANANA_WINDING_MINOR_RADIUS_M,
     COIL_COIL_MIN_DIST_M,
@@ -215,10 +218,11 @@ def validate_smoke_results(
         requested_current_A=requested_current_A,
         expected_boozer_I=physical_current_to_boozer_I(
             requested_current_A,
-            convention=resolve_boozer_current_convention("boozer_surrogate"),
+            convention=resolve_boozer_current_convention(DEFAULT_FINITE_CURRENT_MODE),
         ),
         expected_stage2_tf_current_A=expected_stage2_tf_current_A,
         expected_stage2_tf_current_sum_abs_A=expected_stage2_tf_current_sum_abs_A,
+        expected_finite_current_mode=DEFAULT_FINITE_CURRENT_MODE,
     )
 
 

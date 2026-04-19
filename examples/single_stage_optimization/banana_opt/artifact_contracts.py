@@ -359,6 +359,22 @@ def expected_locked_baseline_stage2_artifact_metadata(
     }
 
 
+def _allows_missing_legacy_zero_vf_template_path(
+    *,
+    metadata_key: str,
+    expected_value,
+    actual_value,
+    stage2_artifact_results: dict,
+) -> bool:
+    return (
+        metadata_key == "VF_TEMPLATE_PATH"
+        and actual_value is None
+        and expected_value is not None
+        and float(stage2_artifact_results.get("VF_CURRENT_A", 0.0)) == 0.0
+        and int(stage2_artifact_results.get("NUM_VF_COILS", 0)) == 0
+    )
+
+
 def validate_stage2_artifact_metadata(
     stage2_results_path: Path,
     stage2_artifact_results: dict,
@@ -369,6 +385,13 @@ def validate_stage2_artifact_metadata(
 ) -> None:
     for key, expected in expected_metadata.items():
         actual = stage2_artifact_results.get(key)
+        if _allows_missing_legacy_zero_vf_template_path(
+            metadata_key=key,
+            expected_value=expected,
+            actual_value=actual,
+            stage2_artifact_results=stage2_artifact_results,
+        ):
+            continue
         if actual is None and expected is not None:
             raise ValueError(
                 f"Stage 2 artifact results.json is missing {key}; cannot verify the "

@@ -28,6 +28,7 @@ IMPORT_PROVENANCE_PATH = EXAMPLE_ROOT / "import_provenance.py"
 EXPECTED_LOCAL_SIMSOPT_INIT = (
     Path(__file__).resolve().parents[2] / "src" / "simsopt" / "__init__.py"
 )
+EXPECTED_FINITE_CURRENT_MODE = "wataru_proxy_field"
 
 
 def load_module(path: Path, stem: str):
@@ -1209,7 +1210,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
 
         upgraded_results = module.upgrade_legacy_stage2_artifact_results(legacy_results)
 
-        self.assertEqual(upgraded_results["FINITE_CURRENT_MODE"], "boozer_surrogate")
+        self.assertEqual(upgraded_results["FINITE_CURRENT_MODE"], EXPECTED_FINITE_CURRENT_MODE)
         self.assertEqual(
             upgraded_results["FINITE_CURRENT_MODE_SOURCE"],
             "legacy_assumed_default",
@@ -1227,7 +1228,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
             "EFFECTIVE_CURRENT_MODE": "vacuum",
             "STAGE2_TF_CURRENT_A": 8.0e4,
             "STAGE2_TF_CURRENT_SUM_ABS_A": 1.6e6,
-            "FINITE_CURRENT_MODE": "boozer_surrogate",
+            "FINITE_CURRENT_MODE": EXPECTED_FINITE_CURRENT_MODE,
             "BOOZER_CURRENT_CONVENTION": "mu0",
         }
         results.update(overrides)
@@ -1264,7 +1265,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
         results = self._make_smoke_results(
             PLASMA_CURRENT_A=-35200.0,
             BOOZER_I=4.0e-7 * math.pi * -35200.0,
-            EFFECTIVE_CURRENT_MODE="boozer_surrogate",
+            EFFECTIVE_CURRENT_MODE=EXPECTED_FINITE_CURRENT_MODE,
         )
 
         validation = module.validate_smoke_results(
@@ -1342,7 +1343,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
 
         self.assertEqual(upgraded_results["TF_CURRENT_A"], 8.0e4)
         self.assertEqual(upgraded_results["TF_CURRENT_SUM_ABS_A"], 1.6e6)
-        self.assertEqual(upgraded_results["FINITE_CURRENT_MODE"], "boozer_surrogate")
+        self.assertEqual(upgraded_results["FINITE_CURRENT_MODE"], EXPECTED_FINITE_CURRENT_MODE)
         self.assertEqual(upgraded_results["BOOZER_CURRENT_CONVENTION"], "mu0")
 
     def test_legacy_smoke_artifact_preserves_old_boozer_I_convention_when_inferable(self):
