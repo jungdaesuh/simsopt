@@ -432,6 +432,98 @@ class Testing(unittest.TestCase):
         assert np.linalg.norm(dJ[0]-dJ_approx) < 1e-15
         assert np.linalg.norm(dH[0]-dH_approx) < 1e-15
 
+    def test_biotsavart_vector_potential_current_getters_fill_cold_cache(self):
+        curve0 = get_curve()
+        c0 = 1e4
+        current0 = Current(c0)
+        curve1 = get_curve(perturb=True)
+        current1 = Current(1e3)
+        bs = BiotSavart([Coil(curve0, current0), Coil(curve1, current1)])
+        points = np.asarray(17 * [[-1.41513202e-03, 8.99999382e-01, -3.14473221e-04]])
+        bs.set_points(points)
+
+        dA = bs.dA_by_dcoilcurrents()
+        dJ = bs.d2A_by_dXdcoilcurrents()
+        dH = bs.d3A_by_dXdXdcoilcurrents()
+
+        np.testing.assert_allclose(
+            bs.fieldcache_get_or_create('A_0', [len(points), 3]),
+            dA[0],
+        )
+        assert bs.fieldcache_get_status('A_0')
+        assert bs.fieldcache_get_status('dA_0')
+        assert bs.fieldcache_get_status('ddA_0')
+
+        A = bs.A()
+        J = bs.dA_by_dX()
+        H = bs.d2A_by_dXdX()
+
+        current0.x = [0]
+        A0 = bs.A()
+        J0 = bs.dA_by_dX()
+        H0 = bs.d2A_by_dXdX()
+        dA_approx = (A-A0)/(c0)
+        dJ_approx = (J-J0)/(c0)
+        dH_approx = (H-H0)/(c0)
+        assert np.linalg.norm(dA[0]-dA_approx) < 1e-15
+        assert np.linalg.norm(dJ[0]-dJ_approx) < 1e-15
+        assert np.linalg.norm(dH[0]-dH_approx) < 1e-15
+
+    def test_biotsavart_fieldcache_compatibility_layer_tracks_indexed_slots(self):
+        curve = get_curve()
+        bs = BiotSavart([Coil(curve, Current(1e4))])
+        points = np.asarray(7 * [[-1.41513202e-03, 8.99999382e-01, -3.14473221e-04]])
+        bs.set_points(points)
+
+        dB = bs.dB_by_dcoilcurrents()[0]
+        dA = bs.dA_by_dcoilcurrents()[0]
+
+        np.testing.assert_allclose(
+            bs.fieldcache_get_or_create('B_0', [len(points), 3]),
+            dB,
+        )
+        np.testing.assert_allclose(
+            bs.fieldcache_get_or_create('A_0', [len(points), 3]),
+            dA,
+        )
+
+        bs.recompute_bell()
+        assert not bs.fieldcache_get_status('B_0')
+        assert not bs.fieldcache_get_status('A_0')
+
+    def test_biotsavart_fieldcache_legacy_keys_still_work(self):
+        curve = get_curve()
+        bs = BiotSavart([Coil(curve, Current(1e4))])
+        points = np.asarray(3 * [[-1.41513202e-03, 8.99999382e-01, -3.14473221e-04]])
+        bs.set_points(points)
+
+        custom = bs.fieldcache_get_or_create('custom_cache_key', [len(points), 2])
+        assert custom.shape == (len(points), 2)
+        assert bs.fieldcache_get_status('custom_cache_key')
+
+        bs.recompute_bell()
+        assert not bs.fieldcache_get_status('custom_cache_key')
+
+    def test_biotsavart_fieldcache_recognized_keys_keep_legacy_noncanonical_shapes(self):
+        curve = get_curve()
+        bs = BiotSavart([Coil(curve, Current(1e4))])
+        points = np.asarray(5 * [[-1.41513202e-03, 8.99999382e-01, -3.14473221e-04]])
+        bs.set_points(points)
+
+        noncanonical = bs.fieldcache_get_or_create('B_0', [len(points), 2])
+        assert noncanonical.shape == (len(points), 2)
+        assert bs.fieldcache_get_status('B_0')
+
+        bs.recompute_bell()
+        assert not bs.fieldcache_get_status('B_0')
+
+        dB = bs.dB_by_dcoilcurrents()[0]
+        assert dB.shape == (len(points), 3)
+        np.testing.assert_allclose(
+            bs.fieldcache_get_or_create('B_0', [len(points), 3]),
+            dB,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

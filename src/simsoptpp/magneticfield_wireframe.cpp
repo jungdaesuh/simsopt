@@ -1,8 +1,6 @@
 #include "magneticfield_wireframe.h"
 #include "wireframe_field_impl.h"
 #include "xtensor_compat.h"
-#include <fmt/core.h>
-#include <fmt/format.h>
 #include <xtensor/xarray.hpp>
 
 template<class Array>
@@ -35,16 +33,7 @@ void WireframeField<T, Array, IntArray>::compute(int derivatives) {
     set_array_to_zero(B);
     set_array_to_zero(dB);
     set_array_to_zero(ddB);
-
-    // Creating new xtensor arrays from an openmp thread doesn't appear
-    // to be safe. so we do that here in serial.
-    for (int i = 0; i < nSegments; ++i) {
-        field_cache.get_or_create(fmt::format("B_{}", i), {npoints, 3});
-        if(derivatives > 0)
-            field_cache.get_or_create(fmt::format("dB_{}", i), {npoints, 3, 3});
-        if(derivatives > 1)
-            field_cache.get_or_create(fmt::format("ddB_{}", i), {npoints, 3, 3, 3});
-    }
+    field_cache.prepare_magnetic_field_family(nSegments, npoints, derivatives);
 
     // Store pointers to the nodes array for each half period (in nodes vector)
     double* halfPrd_ptr[nHalfPrds];
@@ -62,13 +51,11 @@ void WireframeField<T, Array, IntArray>::compute(int derivatives) {
     //#pragma omp parallel for
     for (int i = 0; i < nSegments; ++i) {
 
-        Array& Bi = field_cache.get_or_create(fmt::format("B_{}", i), 
-                                              {npoints, 3});
+        Array& Bi = field_cache.get(IndexedFieldCacheKind::B, i);
         set_array_to_zero(Bi);
 
         if (derivatives > 0) {
-            Array& dBi = field_cache.get_or_create(fmt::format("dB_{}", i),
-                                                   {npoints, 3, 3});
+            Array& dBi = field_cache.get(IndexedFieldCacheKind::dB, i);
             set_array_to_zero(dBi);
         }
 
@@ -95,8 +82,7 @@ void WireframeField<T, Array, IntArray>::compute(int derivatives) {
             } else {
     
                 if(derivatives == 1) {
-                    Array& dBi = field_cache.get_or_create(
-                                     fmt::format("dB_{}", i), {npoints, 3, 3});
+                    Array& dBi = field_cache.get(IndexedFieldCacheKind::dB, i);
                     wireframe_field_kernel<Array, 1>(pointsx, pointsy, pointsz, 
                         node0, node1, Bij, dBij, dummyhess);
                     simsoptpp::axpy_array(Bi, Bij, seg_signs[j]);
@@ -113,20 +99,20 @@ void WireframeField<T, Array, IntArray>::compute(int derivatives) {
         }
     }
     for (int i = 0; i < nSegments; ++i) {
-        Array& Bi = field_cache.get_or_create(fmt::format("B_{}", i), {npoints, 3});
+        Array& Bi = field_cache.get(IndexedFieldCacheKind::B, i);
         double current = currents[i];
         xt::noalias(B) = B + current * Bi;
     }
     if(derivatives>=1) {
         for (int i = 0; i < nSegments; ++i) {
-            Array& dBi = field_cache.get_or_create(fmt::format("dB_{}", i), {npoints, 3, 3});
+            Array& dBi = field_cache.get(IndexedFieldCacheKind::dB, i);
             double current = currents[i];
             xt::noalias(dB) = dB + current * dBi;
         }
     }
     if(derivatives>=2) {
         for (int i = 0; i < nSegments; ++i) {
-            Array& ddBi = field_cache.get_or_create(fmt::format("ddB_{}", i), {npoints, 3, 3, 3});
+            Array& ddBi = field_cache.get(IndexedFieldCacheKind::ddB, i);
             double current = currents[i]; 
             xt::noalias(ddB) = ddB + current * ddBi;
         }

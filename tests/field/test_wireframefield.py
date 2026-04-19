@@ -289,6 +289,24 @@ class WireframeFieldTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             field_wf_tor.dBnormal_by_dsegmentcurrents_matrix(None)
 
+    def test_wireframefield_fieldcache_recognized_keys_keep_legacy_noncanonical_shapes(self):
+        surf = surf_torus(2, 2, 1)
+        test_wf = ToroidalWireframe(surf, 2, 4)
+        field_wf = WireframeField(test_wf)
+        points = np.asarray([[2.1, 0.0, 0.0], [2.0, 0.1, 0.0]])
+        field_wf.set_points(points)
+
+        noncanonical = field_wf.fieldcache_get_or_create('B_0', [len(points), 2])
+        assert noncanonical.shape == (len(points), 2)
+        assert field_wf.fieldcache_get_status('B_0')
+
+        field_wf.clear_cached_properties()
+        assert not field_wf.fieldcache_get_status('B_0')
+
+        dB = field_wf.dB_by_dsegmentcurrents(0)[0]
+        assert dB.shape == (len(points), 3)
+        assert field_wf.fieldcache_get_status('B_0')
+
 
 if __name__ == "__main__":
     unittest.main()

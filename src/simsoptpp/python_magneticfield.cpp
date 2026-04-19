@@ -104,6 +104,7 @@ void init_magneticfields(py::module_ &m){
     auto bs = py::class_<PyBiotSavart, PyMagneticFieldTrampoline<PyBiotSavart>, shared_ptr<PyBiotSavart>, PyMagneticField>(m, "BiotSavart")
         .def(py::init<vector<shared_ptr<Coil<PyArray>>>>())
         .def("compute", &PyBiotSavart::compute)
+        .def("compute_A", &PyBiotSavart::compute_A)
         .def("fieldcache_get_or_create", &PyBiotSavart::fieldcache_get_or_create)
         .def("fieldcache_get_status", &PyBiotSavart::fieldcache_get_status)
         .def_readonly("coils", &PyBiotSavart::coils);

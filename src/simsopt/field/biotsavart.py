@@ -124,7 +124,7 @@ class BiotSavart(sopp.BiotSavart, MagneticField):
         ncoils = len(self._coils)
         if any([not self.fieldcache_get_status(f'A_{i}') for i in range(ncoils)]):
             assert compute_derivatives >= 0
-            self.compute(compute_derivatives)
+            self.compute_A(compute_derivatives)
         self._dA_by_dcoilcurrents = [self.fieldcache_get_or_create(f'A_{i}', [npoints, 3]) for i in range(ncoils)]
         return self._dA_by_dcoilcurrents
 
@@ -134,7 +134,7 @@ class BiotSavart(sopp.BiotSavart, MagneticField):
         ncoils = len(self._coils)
         if any([not self.fieldcache_get_status(f'dA_{i}') for i in range(ncoils)]):
             assert compute_derivatives >= 1
-            self.compute(compute_derivatives)
+            self.compute_A(compute_derivatives)
         self._d2A_by_dXdcoilcurrents = [self.fieldcache_get_or_create(f'dA_{i}', [npoints, 3, 3]) for i in range(ncoils)]
         return self._d2A_by_dXdcoilcurrents
 
@@ -144,7 +144,7 @@ class BiotSavart(sopp.BiotSavart, MagneticField):
         ncoils = len(self._coils)
         if any([not self.fieldcache_get_status(f'ddA_{i}') for i in range(ncoils)]):
             assert compute_derivatives >= 2
-            self.compute(compute_derivatives)
+            self.compute_A(compute_derivatives)
         self._d3A_by_dXdXdcoilcurrents = [self.fieldcache_get_or_create(f'ddA_{i}', [npoints, 3, 3, 3]) for i in range(ncoils)]
         return self._d3A_by_dXdXdcoilcurrents
 

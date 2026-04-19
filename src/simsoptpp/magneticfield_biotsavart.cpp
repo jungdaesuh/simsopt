@@ -1,7 +1,5 @@
 #include "magneticfield_biotsavart.h"
 #include "biot_savart_impl.h"
-#include <fmt/core.h>
-#include <fmt/format.h>
 
 template<class Array>
 void set_array_to_zero(Array& data){
@@ -28,35 +26,30 @@ void BiotSavart<T, Array>::compute(int derivatives) {
     set_array_to_zero(ddB);
 
     std::vector<double> currents(ncoils, 0.);
+    field_cache.prepare_magnetic_field_family(ncoils, npoints, derivatives);
     // Creating new xtensor arrays from an openmp thread doesn't appear
     // to be safe. so we do that here in serial.
     for (int i = 0; i < ncoils; ++i) {
         this->coils[i]->curve->gamma();
         this->coils[i]->curve->gammadash();
-        field_cache.get_or_create(fmt::format("B_{}", i), {npoints, 3});
-        if(derivatives > 0)
-            field_cache.get_or_create(fmt::format("dB_{}", i), {npoints, 3, 3});
-        if(derivatives > 1)
-            field_cache.get_or_create(fmt::format("ddB_{}", i), {npoints, 3, 3, 3});
         currents[i] = this->coils[i]->current->get_value();
     }
 
 #pragma omp parallel for
     for (int i = 0; i < ncoils; ++i) {
-        Array& Bi = field_cache.get_or_create(fmt::format("B_{}", i), {npoints, 3});
+        Array& Bi = field_cache.get(IndexedFieldCacheKind::B, i);
         set_array_to_zero(Bi);
         Array& gamma = this->coils[i]->curve->gamma();
         Array& gammadash = this->coils[i]->curve->gammadash();
-        double current = currents[i];
         if(derivatives == 0){
             biot_savart_kernel<Array, 0>(pointsx, pointsy, pointsz, gamma, gammadash, Bi, dummyjac, dummyhess);
         } else {
-            Array& dBi = field_cache.get_or_create(fmt::format("dB_{}", i), {npoints, 3, 3});
+            Array& dBi = field_cache.get(IndexedFieldCacheKind::dB, i);
             set_array_to_zero(dBi);
             if(derivatives == 1) {
                 biot_savart_kernel<Array, 1>(pointsx, pointsy, pointsz, gamma, gammadash, Bi, dBi, dummyhess);
             } else {
-                Array& ddBi = field_cache.get_or_create(fmt::format("ddB_{}", i), {npoints, 3, 3, 3});
+                Array& ddBi = field_cache.get(IndexedFieldCacheKind::ddB, i);
                 set_array_to_zero(ddBi);
                 if (derivatives == 2) {
                     biot_savart_kernel<Array, 2>(pointsx, pointsy, pointsz, gamma, gammadash, Bi, dBi, ddBi);
@@ -67,22 +60,19 @@ void BiotSavart<T, Array>::compute(int derivatives) {
         }
     }
     for (int i = 0; i < ncoils; ++i) {
-        Array& Bi = field_cache.get_or_create(fmt::format("B_{}", i), {npoints, 3});
-        double current = this->coils[i]->current->get_value();
-        xt::noalias(B) = B + current * Bi;
+        Array& Bi = field_cache.get(IndexedFieldCacheKind::B, i);
+        xt::noalias(B) = B + currents[i] * Bi;
     }
     if(derivatives>=1) {
         for (int i = 0; i < ncoils; ++i) {
-            Array& dBi = field_cache.get_or_create(fmt::format("dB_{}", i), {npoints, 3, 3});
-            double current = this->coils[i]->current->get_value();
-            xt::noalias(dB) = dB + current * dBi;
+            Array& dBi = field_cache.get(IndexedFieldCacheKind::dB, i);
+            xt::noalias(dB) = dB + currents[i] * dBi;
         }
     }
     if(derivatives>=2) {
         for (int i = 0; i < ncoils; ++i) {
-            Array& ddBi = field_cache.get_or_create(fmt::format("ddB_{}", i), {npoints, 3, 3, 3});
-            double current = this->coils[i]->current->get_value();
-            xt::noalias(ddB) = ddB + current * ddBi;
+            Array& ddBi = field_cache.get(IndexedFieldCacheKind::ddB, i);
+            xt::noalias(ddB) = ddB + currents[i] * ddBi;
         }
     }
 }
@@ -113,33 +103,28 @@ void BiotSavart<T, Array>::compute_A(int derivatives) {
     // `get_value` function for that is implemented in python, then this will
     // freeze in parallel.
     std::vector<double> currents(ncoils, 0.);
+    field_cache.prepare_vector_potential_family(ncoils, npoints, derivatives);
     for (int i = 0; i < ncoils; ++i) {
         this->coils[i]->curve->gamma();
         this->coils[i]->curve->gammadash();
-        field_cache.get_or_create(fmt::format("A_{}", i), {npoints, 3});
-        if(derivatives > 0)
-            field_cache.get_or_create(fmt::format("dA_{}", i), {npoints, 3, 3});
-        if(derivatives > 1)
-            field_cache.get_or_create(fmt::format("ddA_{}", i), {npoints, 3, 3, 3});
         currents[i] = this->coils[i]->current->get_value();
     }
 
 #pragma omp parallel for
     for (int i = 0; i < ncoils; ++i) {
-        Array& Ai = field_cache.get_or_create(fmt::format("A_{}", i), {npoints, 3});
+        Array& Ai = field_cache.get(IndexedFieldCacheKind::A, i);
         set_array_to_zero(Ai);
         Array& gamma = this->coils[i]->curve->gamma();
         Array& gammadash = this->coils[i]->curve->gammadash();
-        double current = currents[i];
         if(derivatives == 0){
             biot_savart_kernel_A<Array, 0>(pointsx, pointsy, pointsz, gamma, gammadash, Ai, dummyjac, dummyhess);
         } else {
-            Array& dAi = field_cache.get_or_create(fmt::format("dA_{}", i), {npoints, 3, 3});
+            Array& dAi = field_cache.get(IndexedFieldCacheKind::dA, i);
             set_array_to_zero(dAi);
             if(derivatives == 1) {
                 biot_savart_kernel_A<Array, 1>(pointsx, pointsy, pointsz, gamma, gammadash, Ai, dAi, dummyhess);
             } else {
-                Array& ddAi = field_cache.get_or_create(fmt::format("ddA_{}", i), {npoints, 3, 3, 3});
+                Array& ddAi = field_cache.get(IndexedFieldCacheKind::ddA, i);
                 set_array_to_zero(ddAi);
                 if (derivatives == 2) {
                     biot_savart_kernel_A<Array, 2>(pointsx, pointsy, pointsz, gamma, gammadash, Ai, dAi, ddAi);
@@ -150,22 +135,19 @@ void BiotSavart<T, Array>::compute_A(int derivatives) {
         }
     }
     for (int i = 0; i < ncoils; ++i) {
-        Array& Ai = field_cache.get_or_create(fmt::format("A_{}", i), {npoints, 3});
-        double current = this->coils[i]->current->get_value();
-        xt::noalias(A) = A + current * Ai;
+        Array& Ai = field_cache.get(IndexedFieldCacheKind::A, i);
+        xt::noalias(A) = A + currents[i] * Ai;
     }
     if(derivatives>=1) {
         for (int i = 0; i < ncoils; ++i) {
-            Array& dAi = field_cache.get_or_create(fmt::format("dA_{}", i), {npoints, 3, 3});
-            double current = this->coils[i]->current->get_value();
-            xt::noalias(dA) = dA + current * dAi;
+            Array& dAi = field_cache.get(IndexedFieldCacheKind::dA, i);
+            xt::noalias(dA) = dA + currents[i] * dAi;
         }
     }
     if(derivatives>=2) {
         for (int i = 0; i < ncoils; ++i) {
-            Array& ddAi = field_cache.get_or_create(fmt::format("ddA_{}", i), {npoints, 3, 3, 3});
-            double current = this->coils[i]->current->get_value();
-            xt::noalias(ddA) = ddA + current * ddAi;
+            Array& ddAi = field_cache.get(IndexedFieldCacheKind::ddA, i);
+            xt::noalias(ddA) = ddA + currents[i] * ddAi;
         }
     }
 }

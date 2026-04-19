@@ -18,7 +18,8 @@ class BiotSavart : public MagneticField<T> {
         const vector<shared_ptr<Coil<Array>>> coils;
 
     private:
-        Cache<Array> field_cache;
+        IndexedFieldCache<Array> field_cache;
+        Cache<Array> legacy_field_cache;
 
         #if defined(USE_XSIMD)
         // this vectors are aligned in memory for fast simd usage.
@@ -116,15 +117,19 @@ class BiotSavart : public MagneticField<T> {
         virtual void invalidate_cache() override {
             MagneticField<T>::invalidate_cache();
             this->field_cache.invalidate_cache();
+            this->legacy_field_cache.invalidate_cache();
         }
 
         Array& fieldcache_get_or_create(string key, vector<int> dims){
-            return this->field_cache.get_or_create(key, dims);
+            return fieldcache_get_or_create_compat(
+                this->field_cache, this->legacy_field_cache, key, dims
+            );
         }
 
         bool fieldcache_get_status(string key){
-            return this->field_cache.get_status(key);
+            return fieldcache_get_status_compat(
+                this->field_cache, this->legacy_field_cache, key
+            );
         }
 
 };
-
