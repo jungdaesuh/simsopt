@@ -6,6 +6,7 @@ import math
 import os
 import subprocess
 import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence, TypeVar
@@ -20,12 +21,20 @@ from workflow_helpers import (
     resolve_wataru_vf_template_path,
     validate_normalized_toroidal_flux,
 )
-from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
+from banana_opt.artifact_contracts import (
+    STAGE2_BS_SHA256_KEY,
+    compute_stage2_bs_sha256,
+    upgrade_legacy_stage2_artifact_results,
+)
 
 STAGE2_SCRIPT_PATH = SCRIPT_DIR / "STAGE_2" / "banana_coil_solver.py"
 SINGLE_STAGE_SCRIPT_PATH = SCRIPT_DIR / "SINGLE_STAGE" / "single_stage_banana_example.py"
 POINCARE_SCRIPT_PATH = SCRIPT_DIR / "POINCARE_PLOTTING" / "poincare_surfaces.py"
 DRY_RUN_MARKER_FILENAME = "DRY_RUN_ONLY.txt"
+STAGE2_SIDECAR_REQUIRED_ERROR = (
+    "Stage 2 restarts require the sibling results.json sidecar so the "
+    "loaded coils can be partitioned via the coil_groups manifest."
+)
 
 T = TypeVar("T")
 
@@ -366,7 +375,26 @@ def ensure_stage2_artifact(
 def load_stage2_artifact_results(stage2_bs_path: str | Path) -> tuple[Path, dict]:
     stage2_bs_path = Path(stage2_bs_path)
     stage2_results_path = stage2_bs_path.with_name("results.json")
-    return stage2_results_path, load_json(stage2_results_path)
+    if not stage2_results_path.is_file():
+        raise ValueError(STAGE2_SIDECAR_REQUIRED_ERROR)
+    stage2_results = load_json(stage2_results_path)
+    recorded_digest = stage2_results.get(STAGE2_BS_SHA256_KEY)
+    if recorded_digest in {None, ""}:
+        warnings.warn(
+            "Stage 2 artifact results.json is missing STAGE2_BS_SHA256; "
+            "allowing legacy artifact without checksum binding.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return stage2_results_path, stage2_results
+    actual_digest = compute_stage2_bs_sha256(stage2_bs_path)
+    if str(recorded_digest) != actual_digest:
+        raise ValueError(
+            "Stage 2 artifact checksum mismatch: "
+            f"{stage2_results_path} reports {STAGE2_BS_SHA256_KEY}={recorded_digest!r}, "
+            f"but {stage2_bs_path} hashes to {actual_digest!r}."
+        )
+    return stage2_results_path, stage2_results
 
 
 def validate_stage2_seed_not_init_only(

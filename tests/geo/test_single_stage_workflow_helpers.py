@@ -1128,6 +1128,76 @@ class BaselineSweepScriptTests(unittest.TestCase):
         self.assertEqual(summary["stage2_bs_path"], str(stage2_bs_path))
 
 
+class WorkflowRunnerCommonArtifactTests(unittest.TestCase):
+    def _write_stage2_artifact_pair(
+        self,
+        root: Path,
+        *,
+        stage2_results: dict,
+    ) -> tuple[Path, Path]:
+        stage2_bs_path = root / "biot_savart_opt.json"
+        stage2_bs_path.write_text('{"coils": []}', encoding="utf-8")
+        stage2_results_path = root / "results.json"
+        stage2_results_path.write_text(
+            json.dumps(stage2_results),
+            encoding="utf-8",
+        )
+        return stage2_bs_path, stage2_results_path
+
+    def test_load_stage2_artifact_results_accepts_matching_checksum(self):
+        module = load_workflow_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stage2_dir = Path(tmpdir)
+            stage2_bs_path, stage2_results_path = self._write_stage2_artifact_pair(
+                stage2_dir,
+                stage2_results={},
+            )
+            expected_digest = module.compute_stage2_bs_sha256(stage2_bs_path)
+            stage2_results_path.write_text(
+                json.dumps({"STAGE2_BS_SHA256": expected_digest}),
+                encoding="utf-8",
+            )
+
+            loaded_results_path, loaded_results = module.load_stage2_artifact_results(
+                stage2_bs_path
+            )
+
+        self.assertEqual(loaded_results_path, stage2_results_path)
+        self.assertEqual(loaded_results["STAGE2_BS_SHA256"], expected_digest)
+
+    def test_load_stage2_artifact_results_warns_for_legacy_missing_checksum(self):
+        module = load_workflow_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stage2_dir = Path(tmpdir)
+            stage2_bs_path, stage2_results_path = self._write_stage2_artifact_pair(
+                stage2_dir,
+                stage2_results={},
+            )
+
+            with self.assertWarnsRegex(RuntimeWarning, "missing STAGE2_BS_SHA256"):
+                loaded_results_path, loaded_results = module.load_stage2_artifact_results(
+                    stage2_bs_path
+                )
+
+        self.assertEqual(loaded_results_path, stage2_results_path)
+        self.assertEqual(loaded_results, {})
+
+    def test_load_stage2_artifact_results_rejects_checksum_mismatch(self):
+        module = load_workflow_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stage2_dir = Path(tmpdir)
+            stage2_bs_path, _ = self._write_stage2_artifact_pair(
+                stage2_dir,
+                stage2_results={"STAGE2_BS_SHA256": "not-the-real-digest"},
+            )
+
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                module.load_stage2_artifact_results(stage2_bs_path)
+
+
 class FiniteCurrentSmokeScriptTests(unittest.TestCase):
     def _assert_upgraded_boozer_current_convention(
         self,

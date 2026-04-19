@@ -7716,6 +7716,24 @@ class Stage2ArtifactWriterTests(unittest.TestCase):
                 new_surf=SimpleNamespace(),
             )
 
+    def test_load_stage2_seed_results_rejects_checksum_mismatch(self):
+        module = load_stage2_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stage2_dir = Path(tmpdir)
+            stage2_bs_path = stage2_dir / "biot_savart_opt.json"
+            stage2_bs_path.write_text('{"coils": []}', encoding="utf-8")
+            (stage2_dir / "results.json").write_text(
+                json.dumps({"STAGE2_BS_SHA256": "not-the-real-digest"}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                module.load_stage2_seed_results(
+                    str(stage2_bs_path),
+                    known_tf_current_A=8.0e4,
+                )
+
 
 class Stage2RuntimeSmokeTests(unittest.TestCase):
     _EXPECTED_BASIN_TELEMETRY = {

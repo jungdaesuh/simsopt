@@ -18,7 +18,7 @@ EXAMPLE_ROOT, SIMSOPT_ROOT, SRC_ROOT = configure_local_simsopt_imports(__file__)
 
 # SIMSOPT imports
 from scipy.optimize import minimize
-from simsopt.field import BiotSavart, Current, Coil
+from simsopt.field import Current, Coil
 from simsopt.geo import (
     curves_to_vtk,
     create_equally_spaced_curves,
@@ -45,7 +45,15 @@ from workflow_helpers import (
     validate_stage2_iota_args,
     validate_normalized_toroidal_flux,
 )
-from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
+from workflow_runner_common import (
+    STAGE2_SIDECAR_REQUIRED_ERROR,
+    load_stage2_artifact_results,
+)
+from banana_opt.artifact_contracts import (
+    STAGE2_BS_SHA256_KEY,
+    compute_stage2_bs_sha256,
+    upgrade_legacy_stage2_artifact_results,
+)
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
 from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basin_telemetry_values
 from banana_opt.stage2_geometry import (
@@ -944,6 +952,7 @@ def materialize_stage2_artifact_results(
         **results_kwargs,
         field_error=field_error,
     )
+    results[STAGE2_BS_SHA256_KEY] = compute_stage2_bs_sha256(stage2_bs_artifact_path)
     results.update(
         build_stage2_iota_report_payload(
             args=args,
@@ -1047,7 +1056,7 @@ def load_stage2_seed_configuration(
     num_tf_coils,
     out_dir,
     *,
-    stage2_results=None,
+    stage2_results,
 ):
     bs = load(seed_bs_path)
     bs.set_points(surf.gamma().reshape((-1, 3)))
@@ -1059,31 +1068,21 @@ def load_stage2_seed_configuration(
     pointData = {"B_N": np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]}
     surf.to_vtk(out_dir + "surf_init", extra_data=pointData)
 
-    if stage2_results is None:
-        tf_coils = coils[:num_tf_coils]
-        banana_coils = coils[num_tf_coils:]
-        proxy_coils = []
-        vf_coils = []
-    else:
-        coil_partitions = partition_loaded_stage2_coils(
-            coils,
-            stage2_results=stage2_results,
-            requested_num_tf_coils=num_tf_coils,
-        )
-        tf_coils = list(coil_partitions.tf_coils)
-        banana_coils = list(coil_partitions.banana_coils)
-        proxy_coils = list(coil_partitions.proxy_coils)
-        vf_coils = list(coil_partitions.vf_coils)
+    coil_partitions = partition_loaded_stage2_coils(
+        coils,
+        stage2_results=stage2_results,
+        requested_num_tf_coils=num_tf_coils,
+    )
+    tf_coils = list(coil_partitions.tf_coils)
+    banana_coils = list(coil_partitions.banana_coils)
+    proxy_coils = list(coil_partitions.proxy_coils)
+    vf_coils = list(coil_partitions.vf_coils)
     banana_curve = banana_coils[0].curve
     return bs, curves, banana_curve, banana_coils, tf_coils, proxy_coils, vf_coils
 
 
 def load_stage2_seed_results(seed_bs_path, *, known_tf_current_A):
-    stage2_results_path = Path(seed_bs_path).with_name("results.json")
-    if not stage2_results_path.is_file():
-        return None, None
-    with stage2_results_path.open(encoding="utf-8") as infile:
-        loaded_results = json.load(infile)
+    stage2_results_path, loaded_results = load_stage2_artifact_results(seed_bs_path)
     return stage2_results_path, upgrade_legacy_stage2_artifact_results(
         loaded_results,
         known_num_tf_coils=20,
@@ -1141,12 +1140,6 @@ def _resolve_stage2_finite_current_config(
             else stage2_results.get("FINITE_CURRENT_MODE_SOURCE")
         ),
     )
-    if args.stage2_bs_path and stage2_results is None:
-        raise ValueError(
-            "Stage 2 restarts require the sibling results.json sidecar so the "
-            "loaded coils can be partitioned via the coil_groups manifest."
-        )
-
     if stage2_results is None:
         # Fresh Stage 2: auto-resolve the bundled VF template so the zero-current
         # VF bundle is always serialized. This is the Wataru-faithful shape.
@@ -1195,14 +1188,6 @@ def _resolve_stage2_finite_current_config(
             finite_current_mode,
         ),
     )
-
-
-def _build_stage2_seed_load_kwargs(*, stage2_results):
-    if stage2_results is None:
-        return {}
-    return {"stage2_results": stage2_results}
-
-
 def _build_initialize_coils_kwargs(
     *,
     finite_current_config: Stage2FiniteCurrentConfig,
@@ -1242,9 +1227,8 @@ def main(parsed_args=None):
     os.makedirs(OUT_DIR, exist_ok=True)
 
     seed_stage2_results = None
-    seed_stage2_results_path = None
     if args.stage2_bs_path:
-        seed_stage2_results_path, seed_stage2_results = load_stage2_seed_results(
+        _, seed_stage2_results = load_stage2_seed_results(
             args.stage2_bs_path,
             known_tf_current_A=args.tf_current_A,
         )
@@ -1338,7 +1322,7 @@ def main(parsed_args=None):
             new_surf,
             len(tf_coils),
             OUT_DIR,
-            **_build_stage2_seed_load_kwargs(stage2_results=seed_stage2_results),
+            stage2_results=seed_stage2_results,
         )
         tf_current_A = float(new_tf_coils[0].current.get_value())
         validate_tf_current_limit(tf_current_A)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 from pathlib import Path
 
@@ -18,6 +19,15 @@ from workflow_helpers import canonical_stage2_iota_constraint_weight
 
 DEFAULT_LEGACY_BANANA_INIT_CURRENT_A = 1.0e4
 _BOOZER_CURRENT_CONVENTION_INFERENCE_ABS_TOL = 1.0e-12
+STAGE2_BS_SHA256_KEY = "STAGE2_BS_SHA256"
+
+
+def compute_stage2_bs_sha256(stage2_bs_path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(stage2_bs_path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _upgrade_legacy_banana_current_metadata(upgraded_results: dict) -> None:
