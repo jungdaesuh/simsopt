@@ -213,9 +213,43 @@ def make_stage2_alm_wrapper_args(**overrides):
         "curvature_threshold": None,
         "order": None,
         "tf_current_A": None,
+        "banana_current_max_A": None,
+        "length_target": None,
+        "target_lcfs_max_major_radius_m": None,
+        "target_lcfs_max_minor_radius_m": None,
+        "banana_surf_radius": None,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
+
+
+def make_complete_stage2_spec_payload(**overrides):
+    payload = {
+        "major_radius": 0.976,
+        "toroidal_flux": 0.30,
+        "length_weight": 0.001,
+        "cc_weight": 50.0,
+        "cc_threshold": 0.06,
+        "curvature_weight": 0.0002,
+        "curvature_threshold": 45.0,
+        "banana_surf_radius": 0.21,
+        "tf_current_A": 8.0e4,
+        "order": 3,
+        "banana_init_current_A": 1.2e4,
+        "banana_current_max_A": 1.5e4,
+        "alm_max_outer_iters": 15,
+        "alm_penalty_init": 2.0,
+        "alm_penalty_scale": 5.0,
+        "alm_penalty_max": 5.0e5,
+        "basin_hops": 0,
+        "basin_stepsize": 0.01,
+        "basin_temperature": 1.0,
+        "basin_niter_success": 0,
+        "basin_seed": None,
+        "init_only": False,
+    }
+    payload.update(overrides)
+    return payload
 
 
 def make_single_stage_thresholded_physics_rerun_args(**overrides):
@@ -314,11 +348,20 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "DEFAULT_LOCAL_STAGE2_ROOT": "/tmp/fake_local",
             "DEFAULT_HARDWARE_SEARCH_MODE": "hard",
             "DEFAULT_HARDWARE_SEARCH_SOFT_ITERATIONS": 0,
+            "DEFAULT_INNER_SURFACE_RATIO": 0.8,
             "DEFAULT_STAGE2_SEEDS_BY_PLASMA": {},
             "FRONTIER_SCALARIZATION_TYPE_WEIGHT_SCHEDULE": "weight_schedule_v1",
             "FRONTIER_SCALARIZATION_TYPE_REFERENCE_POINT": "reference_point_v1",
             "FRONTIER_SCALARIZATION_TYPE_ACHIEVEMENT": "achievement_v1",
             "FRONTIER_SCALARIZATION_TYPE_EPSILON": "epsilon_constraint_v1",
+            "SINGLE_SURFACE": "single_surface",
+            "EXPERIMENTAL_MULTISURFACE": "experimental_multisurface",
+            "PUBLISHED_MULTISURFACE": "published_multisurface",
+            "SURFACE_MODE_CHOICES": (
+                "single_surface",
+                "experimental_multisurface",
+                "published_multisurface",
+            ),
             "BANANA_CURRENT_HARD_LIMIT_A": 1.6e4,
             "MAX_CURVATURE_INV_M": 100.0,
             "PLASMA_VESSEL_MIN_DIST_M": 0.04,
@@ -828,8 +871,14 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(config.cc_threshold, 0.07)
         self.assertEqual(config.output_root, Path("outputs").resolve())
         self.assertEqual(config.equilibria_dir, str(Path("eqdir").resolve()))
+        self.assertEqual(config.finite_current_mode, "wataru_proxy_field")
         self.assertIn("--constraint-method", command)
         self.assertEqual(command[command.index("--constraint-method") + 1], "alm")
+        self.assertIn("--finite-current-mode", command)
+        self.assertEqual(
+            command[command.index("--finite-current-mode") + 1],
+            "wataru_proxy_field",
+        )
         self.assertEqual(
             command[command.index("--output-root") + 1],
             str(Path("outputs").resolve()),
@@ -850,6 +899,30 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(command[command.index("--banana-current-max-A") + 1], "16000.0")
         self.assertEqual(command[command.index("--toroidal-flux") + 1], "0.37")
 
+    def test_stage2_alm_wrapper_command_threads_constraint_metadata_flags(self):
+        module = load_stage2_alm_wrapper_module()
+        args = make_stage2_alm_wrapper_args(cc_threshold=0.06)
+        resolved_spec, _ = module.resolve_stage2_spec_payload(args)
+        config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+
+        command = module.build_stage2_command(
+            config,
+            constraint_profile_label="profile:standard_80ka",
+            constraint_override_reason="cli:cc_threshold",
+            python_executable=args.python_executable,
+        )
+
+        self.assertIn("--constraint-profile-label", command)
+        self.assertEqual(
+            command[command.index("--constraint-profile-label") + 1],
+            "profile:standard_80ka",
+        )
+        self.assertIn("--constraint-override-reason", command)
+        self.assertEqual(
+            command[command.index("--constraint-override-reason") + 1],
+            "cli:cc_threshold",
+        )
+
     def test_stage2_alm_wrapper_standard_profile_matches_hardware_baseline(self):
         module = load_stage2_alm_wrapper_module()
 
@@ -862,6 +935,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(resolved_spec["cc_threshold"], 0.05)
         self.assertEqual(resolved_spec["curvature_threshold"], 100.0)
         self.assertEqual(resolved_spec["banana_surf_radius"], 0.21)
+        self.assertEqual(resolved_spec["finite_current_mode"], "wataru_proxy_field")
 
     def test_stage2_alm_wrapper_rejects_tf_current_above_hard_limit(self):
         module = load_stage2_alm_wrapper_module()
@@ -870,6 +944,45 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "TF coil current must be in the interval"):
             module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+
+    def test_stage2_alm_wrapper_cli_overrides_banana_current_and_surface_radius(self):
+        module = load_stage2_alm_wrapper_module()
+        args = make_stage2_alm_wrapper_args(
+            banana_current_max_A=1.5e4,
+            banana_surf_radius=0.22,
+        )
+        resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
+        config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+        metadata = module.build_stage2_constraint_artifacts(
+            args=args,
+            config=config,
+            source_label=resolved_spec_source,
+        )
+        command = module.build_stage2_command(
+            config,
+            python_executable=args.python_executable,
+        )
+
+        self.assertEqual(resolved_spec["banana_current_max_A"], 1.5e4)
+        self.assertEqual(resolved_spec["banana_surf_radius"], 0.22)
+        self.assertEqual(config.banana_current_max_A, 1.5e4)
+        self.assertEqual(config.banana_surf_radius, 0.22)
+        self.assertEqual(metadata["EFFECTIVE_VALUES"]["BANANA_CURRENT_MAX_A"], 1.5e4)
+        self.assertEqual(metadata["EFFECTIVE_VALUES"]["banana_surf_radius"], 0.22)
+        self.assertEqual(
+            metadata["OVERRIDE_REASON"],
+            "cli:banana_current_max_A,banana_surf_radius",
+        )
+        self.assertIn("--banana-current-max-A", command)
+        self.assertEqual(
+            command[command.index("--banana-current-max-A") + 1],
+            "15000.0",
+        )
+        self.assertIn("--banana-surf-radius", command)
+        self.assertEqual(
+            command[command.index("--banana-surf-radius") + 1],
+            "0.22",
+        )
 
     def test_stage2_alm_wrapper_spec_json_must_be_complete(self):
         module = load_stage2_alm_wrapper_module()
@@ -887,30 +1000,11 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
     def test_stage2_alm_wrapper_spec_json_valid_complete_spec_resolves(self):
         module = load_stage2_alm_wrapper_module()
-        complete_spec = {
-            "major_radius": 1.0,
-            "toroidal_flux": 0.30,
-            "length_weight": 0.001,
-            "cc_weight": 50.0,
-            "cc_threshold": 0.06,
-            "curvature_weight": 0.0002,
-            "curvature_threshold": 45.0,
-            "banana_surf_radius": 0.25,
-            "tf_current_A": 9.0e4,
-            "order": 3,
-            "banana_init_current_A": 1.2e4,
-            "banana_current_max_A": 1.5e4,
-            "alm_max_outer_iters": 15,
-            "alm_penalty_init": 2.0,
-            "alm_penalty_scale": 5.0,
-            "alm_penalty_max": 5.0e5,
-            "basin_hops": 0,
-            "basin_stepsize": 0.01,
-            "basin_temperature": 1.0,
-            "basin_niter_success": 0,
-            "basin_seed": None,
-            "init_only": False,
-        }
+        complete_spec = make_complete_stage2_spec_payload(
+            major_radius=1.0,
+            banana_surf_radius=0.25,
+            tf_current_A=9.0e4,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             spec_path = Path(tmpdir) / "stage2_spec.json"
@@ -927,6 +1021,57 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(resolved_spec["tf_current_A"], 9.0e4)
         self.assertEqual(resolved_spec["order"], 3)
         self.assertEqual(resolved_spec["banana_current_max_A"], 1.5e4)
+
+    def test_stage2_alm_wrapper_spec_json_accepts_length_target_and_lcfs_ceiling_fields(self):
+        module = load_stage2_alm_wrapper_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spec_path = Path(tmpdir) / "stage2_spec.json"
+            spec_path.write_text(
+                json.dumps(
+                    make_complete_stage2_spec_payload(
+                        length_target=1.6,
+                        target_lcfs_max_major_radius_m=0.91,
+                        target_lcfs_max_minor_radius_m=0.14,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            args = make_stage2_alm_wrapper_args(
+                profile=None,
+                stage2_spec_json=str(spec_path),
+            )
+
+            resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
+            config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+            metadata = module.build_stage2_constraint_artifacts(
+                args=args,
+                config=config,
+                source_label=resolved_spec_source,
+            )
+            command = module.build_stage2_command(
+                config,
+                python_executable=args.python_executable,
+            )
+
+        self.assertEqual(config.length_target, 1.6)
+        self.assertEqual(config.target_lcfs_max_major_radius_m, 0.91)
+        self.assertEqual(config.target_lcfs_max_minor_radius_m, 0.14)
+        self.assertEqual(metadata["EFFECTIVE_VALUES"]["COIL_LENGTH_TARGET_M"], 1.6)
+        self.assertEqual(metadata["EFFECTIVE_VALUES"]["TARGET_LCFS_MAX_MAJOR_RADIUS_M"], 0.91)
+        self.assertEqual(metadata["EFFECTIVE_VALUES"]["TARGET_LCFS_MAX_MINOR_RADIUS_M"], 0.14)
+        self.assertIn("--length-target", command)
+        self.assertEqual(command[command.index("--length-target") + 1], "1.6")
+        self.assertIn("--target-lcfs-max-major-radius-m", command)
+        self.assertEqual(
+            command[command.index("--target-lcfs-max-major-radius-m") + 1],
+            "0.91",
+        )
+        self.assertIn("--target-lcfs-max-minor-radius-m", command)
+        self.assertEqual(
+            command[command.index("--target-lcfs-max-minor-radius-m") + 1],
+            "0.14",
+        )
 
     def test_stage2_alm_wrapper_summary_includes_resolved_config(self):
         module = load_stage2_alm_wrapper_module()
@@ -956,6 +1101,10 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(summary["resolved_stage2_config"]["alm_curvature_smoothing"], 0.25)
         self.assertEqual(summary["resolved_stage2_config"]["curvature_threshold"], 100.0)
         self.assertEqual(summary["resolved_stage2_config"]["banana_surf_radius"], 0.21)
+        self.assertEqual(
+            summary["resolved_stage2_config"]["finite_current_mode"],
+            "wataru_proxy_field",
+        )
         self.assertEqual(summary["resolved_stage2_config"]["output_root"], str(Path("outputs").resolve()))
         self.assertEqual(
             summary["fixed_stage2_hardware_contract"],
@@ -966,6 +1115,28 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(summary["output_contract"], "materialized_stage2_artifact")
         self.assertFalse(summary["contains_solver_outputs"])
+
+    def test_stage2_alm_wrapper_constraint_metadata_uses_effective_clamped_values(self):
+        module = load_stage2_alm_wrapper_module()
+        args = make_stage2_alm_wrapper_args(
+            cc_threshold=0.01,
+            curvature_threshold=200.0,
+        )
+        resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
+        config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+
+        metadata = module.build_stage2_constraint_artifacts(
+            args=args,
+            config=config,
+            source_label=resolved_spec_source,
+        )
+
+        self.assertEqual(metadata["EFFECTIVE_VALUES"]["CC_THRESHOLD"], 0.05)
+        self.assertEqual(metadata["EFFECTIVE_VALUES"]["CURVATURE_THRESHOLD"], 100.0)
+        self.assertEqual(
+            metadata["EFFECTIVE_VALUES"]["VACUUM_VESSEL_MAJOR_RADIUS_M"],
+            0.976,
+        )
 
     def test_stage2_alm_wrapper_dry_run_writes_explicit_marker(self):
         module = load_stage2_alm_wrapper_module()
@@ -1057,8 +1228,13 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
     def test_stage2_alm_wrapper_load_validated_artifact_backfills_clearance_metadata(self):
         module = load_stage2_alm_wrapper_module()
         args = make_stage2_alm_wrapper_args()
-        resolved_spec, _ = module.resolve_stage2_spec_payload(args)
+        resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
         config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+        constraint_metadata = module.build_stage2_constraint_artifacts(
+            args=args,
+            config=config,
+            source_label=resolved_spec_source,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             artifact_path = Path(tmpdir) / "biot_savart_opt.json"
@@ -1074,7 +1250,10 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             results_path.write_text(json.dumps(legacy_results), encoding="utf-8")
 
             with patch.object(module, "resolve_stage2_artifact_path", return_value=artifact_path):
-                loaded_results_path, loaded_results = module.load_validated_stage2_artifact(config)
+                loaded_results_path, loaded_results = module.load_validated_stage2_artifact(
+                    config,
+                    constraint_metadata=constraint_metadata,
+                )
 
         self.assertEqual(loaded_results_path, results_path)
         self.assertEqual(loaded_results["COIL_PLASMA_MIN_DIST_M"], 0.015)
@@ -1082,6 +1261,124 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(loaded_results["LENGTH_TARGET"], 1.7)
         self.assertEqual(loaded_results["ALM_DISTANCE_SMOOTHING"], 0.005)
         self.assertEqual(loaded_results["ALM_CURVATURE_SMOOTHING"], 0.25)
+
+    def test_stage2_alm_wrapper_load_validated_artifact_rejects_mismatched_constraint_metadata(self):
+        module = load_stage2_alm_wrapper_module()
+        args = make_stage2_alm_wrapper_args(cc_threshold=0.06)
+        resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
+        config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+        constraint_metadata = module.build_stage2_constraint_artifacts(
+            args=args,
+            config=config,
+            source_label=resolved_spec_source,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_path = Path(tmpdir) / "biot_savart_opt.json"
+            results_path = artifact_path.with_name("results.json")
+            artifact_path.write_text("{}", encoding="utf-8")
+            stage2_results = module._expected_stage2_artifact_metadata(config)
+            stage2_results.update(constraint_metadata)
+            stage2_results["CONTRACT_HASH"] = "mismatched"
+            results_path.write_text(json.dumps(stage2_results), encoding="utf-8")
+
+            with patch.object(module, "resolve_stage2_artifact_path", return_value=artifact_path):
+                with self.assertRaisesRegex(ValueError, "CONTRACT_HASH"):
+                    module.load_validated_stage2_artifact(
+                        config,
+                        constraint_metadata=constraint_metadata,
+                    )
+
+    def test_stage2_alm_wrapper_load_validated_artifact_allows_equivalent_spec_json_source_labels(self):
+        module = load_stage2_alm_wrapper_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spec_payload = make_complete_stage2_spec_payload(
+                length_target=1.6,
+                target_lcfs_max_major_radius_m=0.91,
+                target_lcfs_max_minor_radius_m=0.14,
+            )
+            spec_path_a = Path(tmpdir) / "a.json"
+            spec_path_b = Path(tmpdir) / "b.json"
+            spec_path_a.write_text(json.dumps(spec_payload), encoding="utf-8")
+            spec_path_b.write_text(json.dumps(spec_payload), encoding="utf-8")
+
+            args_a = make_stage2_alm_wrapper_args(
+                profile=None,
+                stage2_spec_json=str(spec_path_a),
+            )
+            args_b = make_stage2_alm_wrapper_args(
+                profile=None,
+                stage2_spec_json=str(spec_path_b),
+            )
+            resolved_spec_a, resolved_spec_source_a = module.resolve_stage2_spec_payload(args_a)
+            resolved_spec_b, resolved_spec_source_b = module.resolve_stage2_spec_payload(args_b)
+            config = module.build_stage2_alm_config(args_a, resolved_spec=resolved_spec_a)
+            constraint_metadata_a = module.build_stage2_constraint_artifacts(
+                args=args_a,
+                config=config,
+                source_label=resolved_spec_source_a,
+            )
+            constraint_metadata_b = module.build_stage2_constraint_artifacts(
+                args=args_b,
+                config=config,
+                source_label=resolved_spec_source_b,
+            )
+
+            artifact_path = Path(tmpdir) / "biot_savart_opt.json"
+            results_path = artifact_path.with_name("results.json")
+            artifact_path.write_text("{}", encoding="utf-8")
+            stage2_results = module._expected_stage2_artifact_metadata(config)
+            stage2_results.update(constraint_metadata_a)
+            results_path.write_text(json.dumps(stage2_results), encoding="utf-8")
+
+            with patch.object(module, "resolve_stage2_artifact_path", return_value=artifact_path):
+                loaded_results_path, loaded_results = module.load_validated_stage2_artifact(
+                    config,
+                    constraint_metadata=constraint_metadata_b,
+                )
+
+        self.assertEqual(loaded_results_path, results_path)
+        self.assertEqual(loaded_results["CONTRACT_HASH"], constraint_metadata_a["CONTRACT_HASH"])
+
+    def test_stage2_alm_wrapper_load_validated_artifact_allows_no_op_cli_override_reason_drift(self):
+        module = load_stage2_alm_wrapper_module()
+        args_default = make_stage2_alm_wrapper_args()
+        args_no_op = make_stage2_alm_wrapper_args(cc_threshold=0.05)
+        resolved_spec_default, resolved_spec_source_default = module.resolve_stage2_spec_payload(
+            args_default
+        )
+        config = module.build_stage2_alm_config(
+            args_default,
+            resolved_spec=resolved_spec_default,
+        )
+        constraint_metadata_default = module.build_stage2_constraint_artifacts(
+            args=args_default,
+            config=config,
+            source_label=resolved_spec_source_default,
+        )
+        constraint_metadata_no_op = module.build_stage2_constraint_artifacts(
+            args=args_no_op,
+            config=config,
+            source_label=resolved_spec_source_default,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_path = Path(tmpdir) / "biot_savart_opt.json"
+            results_path = artifact_path.with_name("results.json")
+            artifact_path.write_text("{}", encoding="utf-8")
+            stage2_results = module._expected_stage2_artifact_metadata(config)
+            stage2_results.update(constraint_metadata_default)
+            results_path.write_text(json.dumps(stage2_results), encoding="utf-8")
+
+            with patch.object(module, "resolve_stage2_artifact_path", return_value=artifact_path):
+                loaded_results_path, loaded_results = module.load_validated_stage2_artifact(
+                    config,
+                    constraint_metadata=constraint_metadata_no_op,
+                )
+
+        self.assertEqual(loaded_results_path, results_path)
+        self.assertIsNone(loaded_results["OVERRIDE_REASON"])
 
     def test_stage2_alm_wrapper_spec_json_backfills_optional_alm_solver_keys(self):
         module = load_stage2_alm_wrapper_module()
@@ -1166,6 +1463,84 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(summary["coil_plasma_threshold"], 0.015)
         self.assertEqual(summary["plasma_vessel_min_dist"], 0.041)
         self.assertEqual(summary["plasma_vessel_threshold"], 0.04)
+
+    def test_stage2_alm_wrapper_summary_prefers_loaded_constraint_metadata(self):
+        module = load_stage2_alm_wrapper_module()
+        args = make_stage2_alm_wrapper_args(cc_threshold=0.06)
+        resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
+        config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+        command = module.build_stage2_command(config, python_executable=args.python_executable)
+        constraint_metadata = module.build_stage2_constraint_artifacts(
+            args=args,
+            config=config,
+            source_label=resolved_spec_source,
+        )
+        loaded_constraint_metadata = {
+            "CONSTRAINT_PROFILE": "artifact:reused",
+            "EFFECTIVE_VALUES": {"TF_CURRENT_A": 81000.0},
+            "OVERRIDE_REASON": "artifact:reused",
+            "CONTRACT_HASH": "artifact-hash",
+            "CONTRACT_SCHEMA_VERSION": 1,
+        }
+
+        summary = module.build_summary(
+            args,
+            config=config,
+            resolved_spec_source=resolved_spec_source,
+            command=command,
+            artifact_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            artifact_reused=True,
+            stage2_results_path=Path("/tmp/stage2/results.json"),
+            stage2_results={
+                "TERMINATION_MESSAGE": "done",
+                "OPTIMIZER_SUCCESS": True,
+                **loaded_constraint_metadata,
+            },
+            constraint_metadata=constraint_metadata,
+        )
+
+        self.assertEqual(summary["CONSTRAINT_PROFILE"], "artifact:reused")
+        self.assertEqual(summary["OVERRIDE_REASON"], "artifact:reused")
+        self.assertEqual(summary["CONTRACT_HASH"], "artifact-hash")
+        self.assertEqual(summary["CONTRACT_SCHEMA_VERSION"], 1)
+        self.assertEqual(summary["EFFECTIVE_VALUES"], {"TF_CURRENT_A": 81000.0})
+
+    def test_stage2_alm_wrapper_summary_clears_wrapper_hash_for_legacy_constraint_metadata(self):
+        module = load_stage2_alm_wrapper_module()
+        args = make_stage2_alm_wrapper_args(cc_threshold=0.06)
+        resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
+        config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+        command = module.build_stage2_command(config, python_executable=args.python_executable)
+        constraint_metadata = module.build_stage2_constraint_artifacts(
+            args=args,
+            config=config,
+            source_label=resolved_spec_source,
+        )
+
+        summary = module.build_summary(
+            args,
+            config=config,
+            resolved_spec_source=resolved_spec_source,
+            command=command,
+            artifact_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            artifact_reused=True,
+            stage2_results_path=Path("/tmp/stage2/results.json"),
+            stage2_results={
+                "TERMINATION_MESSAGE": "done",
+                "OPTIMIZER_SUCCESS": True,
+                "CONTRACT_SCHEMA_VERSION": 0,
+                "CONSTRAINT_PROFILE": None,
+                "EFFECTIVE_VALUES": None,
+                "OVERRIDE_REASON": None,
+            },
+            constraint_metadata=constraint_metadata,
+        )
+
+        self.assertIsNone(summary["CONTRACT_HASH"])
+        self.assertEqual(summary["CONTRACT_SCHEMA_VERSION"], 0)
+        self.assertIsNone(summary["CONSTRAINT_PROFILE"])
+        self.assertIsNone(summary["EFFECTIVE_VALUES"])
+        self.assertIsNone(summary["OVERRIDE_REASON"])
 
     def test_stage2_alm_wrapper_normalizes_basin_seed_against_basin_hops(self):
         module = load_stage2_alm_wrapper_module()

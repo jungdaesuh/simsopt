@@ -13,7 +13,15 @@ MAX_CURVATURE_INV_M = 100.0
 
 VACUUM_VESSEL_MAJOR_RADIUS_M = 0.976
 VACUUM_VESSEL_MINOR_RADIUS_M = 0.222
+BANANA_WINDING_SURFACE_MAJOR_RADIUS_M = VACUUM_VESSEL_MAJOR_RADIUS_M
 BANANA_WINDING_MINOR_RADIUS_M = 0.21
+LCFS_CLEARANCE_REFERENCE_MAJOR_RADIUS_M = VACUUM_VESSEL_MAJOR_RADIUS_M
+LCFS_CLEARANCE_REFERENCE_MINOR_RADIUS_M = (
+    VACUUM_VESSEL_MINOR_RADIUS_M - PLASMA_VESSEL_MIN_DIST_M
+)
+
+TARGET_LCFS_MAX_MAJOR_RADIUS_M = 0.92
+TARGET_LCFS_MAX_MINOR_RADIUS_M = 0.15
 
 
 def fixed_stage2_clearance_contract() -> dict[str, float]:
@@ -49,7 +57,28 @@ def validate_banana_winding_surface_radius(banana_surf_radius: float) -> float:
     return radius
 
 
+def validate_target_lcfs_major_radius(target_major_radius_m: float) -> float:
+    radius = float(target_major_radius_m)
+    if not (0.0 < radius <= TARGET_LCFS_MAX_MAJOR_RADIUS_M):
+        raise ValueError(
+            "Requested target LCFS major radius must lie in "
+            f"(0, {TARGET_LCFS_MAX_MAJOR_RADIUS_M:.3f}] m."
+        )
+    return radius
+
+
+def validate_target_lcfs_minor_radius(target_minor_radius_m: float) -> float:
+    radius = float(target_minor_radius_m)
+    if not (0.0 < radius <= TARGET_LCFS_MAX_MINOR_RADIUS_M):
+        raise ValueError(
+            "Requested target LCFS minor radius must lie in "
+            f"(0, {TARGET_LCFS_MAX_MINOR_RADIUS_M:.3f}] m."
+        )
+    return radius
+
+
 _MAJOR_RADIUS_TOL_M = 1.0e-12
+_PLASMA_VESSEL_CLEARANCE_TOL_M = 1.0e-9
 
 
 def is_major_radius_offspec(major_radius: float) -> bool:
@@ -71,11 +100,55 @@ def validate_major_radius(major_radius: float, *, accept_offspec: bool = False) 
     )
 
 
+def is_plasma_vessel_clearance_offspec(
+    plasma_vessel_min_dist_m: float,
+    *,
+    threshold: float = PLASMA_VESSEL_MIN_DIST_M,
+) -> bool:
+    clearance = float(plasma_vessel_min_dist_m)
+    clearance_threshold = float(threshold)
+    return clearance < clearance_threshold - _PLASMA_VESSEL_CLEARANCE_TOL_M
+
+
+def validate_plasma_vessel_clearance(
+    plasma_vessel_min_dist_m: float,
+    *,
+    accept_offspec: bool = False,
+    threshold: float = PLASMA_VESSEL_MIN_DIST_M,
+) -> float:
+    clearance = float(plasma_vessel_min_dist_m)
+    clearance_threshold = float(threshold)
+    if not is_plasma_vessel_clearance_offspec(
+        clearance,
+        threshold=clearance_threshold,
+    ):
+        return clearance
+    if accept_offspec:
+        return clearance
+    raise ValueError(
+        "LCFS-to-vessel clearance violates the HBT-EP hardware contract "
+        f"({clearance:.6f} m < {clearance_threshold:.6f} m). "
+        "Use the direct LCFS-to-vessel spacing metric for fit validation, not "
+        "a proxy envelope. Set "
+        f"{ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV} to reproduce historical "
+        "artifacts on off-spec plasma geometry."
+    )
+
+
 ACCEPT_OFFSPEC_R0_SEED_ENV = "ACCEPT_OFFSPEC_R0_SEED"
 ACCEPT_OFFSPEC_R0_SEED_HELP = (
     "Allow --major-radius to deviate from the vacuum-vessel contract. "
     "Use only to reproduce historical artifacts; produces coils that do "
     "not fit HBT-EP."
+)
+
+ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV = (
+    "ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE"
+)
+ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV_HELP = (
+    "Allow the LCFS-to-vessel clearance to fall below the fixed HBT-EP "
+    f"threshold of {PLASMA_VESSEL_MIN_DIST_M:.3f} m. Use only to reproduce "
+    "historical artifacts on off-spec plasma geometry."
 )
 
 

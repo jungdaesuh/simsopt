@@ -33,18 +33,25 @@ from banana_opt.artifact_contracts import (  # noqa: E402
     upgrade_legacy_stage2_artifact_results,
     validate_stage2_artifact_metadata,
 )
+from banana_opt.current_contracts import DEFAULT_FINITE_CURRENT_MODE  # noqa: E402
 from banana_opt.hardware_contracts import (  # noqa: E402
     BANANA_CURRENT_HARD_LIMIT_A,
     COIL_COIL_MIN_DIST_M,
+    COIL_LENGTH_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
+    TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+    TARGET_LCFS_MAX_MINOR_RADIUS_M,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
     fixed_stage2_artifact_hardware_contract,
     fixed_stage2_clearance_contract,
     TF_CURRENT_HARD_LIMIT_A,
     validate_major_radius,
-    validate_tf_current_limit,
+)
+from banana_opt.constraint_contract import (  # noqa: E402
+    build_constraint_metadata,
+    resolve_constraint_contract_from_wire_names,
 )
 
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_stage2_alm"
@@ -63,7 +70,10 @@ _BASE_STAGE2_PROFILE = {
     "order": 2,
     "banana_init_current_A": 1.0e4,
     "banana_current_max_A": BANANA_CURRENT_HARD_LIMIT_A,
-    "finite_current_mode": "boozer_surrogate",
+    "length_target": COIL_LENGTH_TARGET_M,
+    "target_lcfs_max_major_radius_m": TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+    "target_lcfs_max_minor_radius_m": TARGET_LCFS_MAX_MINOR_RADIUS_M,
+    "finite_current_mode": DEFAULT_FINITE_CURRENT_MODE,
     "proxy_plasma_current_A": 0.0,
     "vf_current_A": 0.0,
     "vf_template_path": None,
@@ -104,6 +114,9 @@ STAGE2_SPEC_KEYS = (
     "order",
     "banana_init_current_A",
     "banana_current_max_A",
+    "length_target",
+    "target_lcfs_max_major_radius_m",
+    "target_lcfs_max_minor_radius_m",
     "finite_current_mode",
     "proxy_plasma_current_A",
     "vf_current_A",
@@ -129,11 +142,29 @@ STAGE2_SPEC_KEYS = (
     "basin_seed",
     "init_only",
 )
+_STAGE2_CONTRACT_OVERRIDE_KEYS = (
+    "tf_current_A",
+    "banana_current_max_A",
+    "length_target",
+    "cc_threshold",
+    "curvature_threshold",
+    "banana_surf_radius",
+    "target_lcfs_max_major_radius_m",
+    "target_lcfs_max_minor_radius_m",
+)
+_STAGE2_SPEC_OVERRIDE_KEYS = (
+    "toroidal_flux",
+    "order",
+    *_STAGE2_CONTRACT_OVERRIDE_KEYS,
+)
 OPTIONAL_STAGE2_SPEC_KEYS = (
     "finite_current_mode",
     "proxy_plasma_current_A",
     "vf_current_A",
     "vf_template_path",
+    "length_target",
+    "target_lcfs_max_major_radius_m",
+    "target_lcfs_max_minor_radius_m",
     "alm_feas_tol",
     "alm_stationarity_tol",
     "alm_trust_radius_init",
@@ -212,6 +243,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=None,
         help="Optional override for the per-TF-coil current in SI amperes.",
+    )
+    parser.add_argument(
+        "--banana-current-max-A",
+        type=float,
+        default=None,
+        help="Optional override for the banana-current hardware ceiling in SI amperes.",
+    )
+    parser.add_argument(
+        "--length-target",
+        type=float,
+        default=None,
+        help="Optional override for the Stage 2 coil-length ceiling in meters.",
+    )
+    parser.add_argument(
+        "--target-lcfs-max-major-radius-m",
+        type=float,
+        default=None,
+        help="Optional override for the requested-plasma LCFS major-radius ceiling.",
+    )
+    parser.add_argument(
+        "--target-lcfs-max-minor-radius-m",
+        type=float,
+        default=None,
+        help="Optional override for the requested-plasma LCFS minor-radius ceiling.",
+    )
+    parser.add_argument(
+        "--banana-surf-radius",
+        type=float,
+        default=None,
+        help="Optional override for the Stage 2 banana winding-surface minor radius.",
     )
     parser.add_argument(
         "--toroidal-flux",
@@ -325,6 +386,28 @@ def _load_stage2_spec_json(spec_json_path: str | Path) -> tuple[Path, dict]:
     }
 
 
+def _stage2_arg_overrides(
+    args: argparse.Namespace,
+    keys: tuple[str, ...],
+) -> dict[str, object]:
+    overrides: dict[str, object] = {}
+    for key in keys:
+        value = getattr(args, key, None)
+        if value is not None:
+            overrides[key] = value
+    return overrides
+
+
+def _stage2_override_reason(
+    args: argparse.Namespace,
+    keys: tuple[str, ...],
+) -> str | None:
+    override_names = sorted(_stage2_arg_overrides(args, keys))
+    if not override_names:
+        return None
+    return f"cli:{','.join(override_names)}"
+
+
 def resolve_stage2_spec_payload(args: argparse.Namespace) -> tuple[dict, str]:
     if args.profile is not None:
         resolved_spec = dict(DEFAULT_STAGE2_PROFILES[args.profile])
@@ -332,18 +415,93 @@ def resolve_stage2_spec_payload(args: argparse.Namespace) -> tuple[dict, str]:
     else:
         spec_json_path, resolved_spec = _load_stage2_spec_json(args.stage2_spec_json)
         source_label = f"json:{spec_json_path}"
-
-    overrides = {
-        "toroidal_flux": args.toroidal_flux,
-        "cc_threshold": args.cc_threshold,
-        "curvature_threshold": args.curvature_threshold,
-        "order": args.order,
-        "tf_current_A": args.tf_current_A,
-    }
-    for key, value in overrides.items():
-        if value is not None:
-            resolved_spec[key] = value
+    resolved_spec.update(_stage2_arg_overrides(args, _STAGE2_SPEC_OVERRIDE_KEYS))
     return resolved_spec, source_label
+
+
+def _stage2_spec_constraint_layer(resolved_spec: dict) -> dict[str, object]:
+    return {
+        key: resolved_spec[key]
+        for key in _STAGE2_CONTRACT_OVERRIDE_KEYS
+        if key in resolved_spec
+    }
+
+
+def _resolve_stage2_constraint_contract(
+    args: argparse.Namespace,
+    *,
+    resolved_spec: dict,
+) -> dict[str, float]:
+    validate_major_radius(resolved_spec["major_radius"])
+    contract, _ = resolve_constraint_contract_from_wire_names(
+        profile=_stage2_spec_constraint_layer(resolved_spec),
+        cli_overrides=_stage2_arg_overrides(args, _STAGE2_CONTRACT_OVERRIDE_KEYS),
+    )
+    return dict(contract)
+
+
+def _stage2_config_constraint_layer(config: Stage2ArtifactConfig) -> dict[str, float]:
+    return {
+        "tf_current_A": float(config.tf_current_A),
+        "banana_current_max_A": float(config.banana_current_max_A),
+        "length_target": float(config.length_target),
+        "cc_threshold": float(config.cc_threshold),
+        "curvature_threshold": float(config.curvature_threshold),
+        "banana_surf_radius": float(config.banana_surf_radius),
+        "target_lcfs_max_major_radius_m": float(config.target_lcfs_max_major_radius_m),
+        "target_lcfs_max_minor_radius_m": float(config.target_lcfs_max_minor_radius_m),
+    }
+
+
+def build_stage2_constraint_artifacts(
+    *,
+    args: argparse.Namespace,
+    config: Stage2ArtifactConfig,
+    source_label: str,
+) -> dict:
+    """Route the resolved Stage 2 spec through the shared constraint contract.
+
+    Returns the artifact-ready metadata block (CONSTRAINT_PROFILE,
+    EFFECTIVE_VALUES, OVERRIDE_REASON, CONTRACT_HASH, CONTRACT_SCHEMA_VERSION)
+    built against the effective values that actually drive
+    :class:`Stage2ArtifactConfig`.
+    """
+    contract, _ = resolve_constraint_contract_from_wire_names(
+        cli_overrides=_stage2_config_constraint_layer(config),
+    )
+    return build_constraint_metadata(
+        contract,
+        profile_name=source_label,
+        override_reason=_stage2_override_reason(
+            args,
+            _STAGE2_CONTRACT_OVERRIDE_KEYS,
+        ),
+    )
+
+
+_CONSTRAINT_METADATA_KEYS = (
+    "CONSTRAINT_PROFILE",
+    "EFFECTIVE_VALUES",
+    "OVERRIDE_REASON",
+    "CONTRACT_HASH",
+    "CONTRACT_SCHEMA_VERSION",
+)
+_CONSTRAINT_IDENTITY_KEYS = (
+    "EFFECTIVE_VALUES",
+    "CONTRACT_HASH",
+    "CONTRACT_SCHEMA_VERSION",
+)
+
+
+def _artifact_uses_legacy_constraint_metadata(stage2_results: dict) -> bool:
+    return (
+        int(stage2_results.get("CONTRACT_SCHEMA_VERSION", 0)) == 0
+        and stage2_results.get("CONTRACT_HASH") in {None, ""}
+    )
+
+
+def _constraint_metadata_expectation(constraint_metadata: dict) -> dict:
+    return {key: constraint_metadata[key] for key in _CONSTRAINT_IDENTITY_KEYS}
 
 
 def build_stage2_alm_config(
@@ -351,6 +509,10 @@ def build_stage2_alm_config(
     *,
     resolved_spec: dict,
 ) -> Stage2ArtifactConfig:
+    constraint_contract = _resolve_stage2_constraint_contract(
+        args,
+        resolved_spec=resolved_spec,
+    )
     output_root = resolved_path(args.output_root)
     equilibria_dir = resolved_optional_path(args.equilibria_dir)
     basin_hops = int(resolved_spec["basin_hops"])
@@ -360,14 +522,14 @@ def build_stage2_alm_config(
             None if resolved_spec["basin_seed"] is None else int(resolved_spec["basin_seed"])
         ),
     )
-    raw_cc = float(resolved_spec["cc_threshold"])
+    raw_cc = float(constraint_contract["CC_THRESHOLD"])
     cc_threshold = max(raw_cc, STAGE2_CC_THRESHOLD_FLOOR)
     if raw_cc < STAGE2_CC_THRESHOLD_FLOOR:
         print(
             f"WARNING: cc_threshold {raw_cc} below Stage 2 "
             f"solver floor, clamped to {STAGE2_CC_THRESHOLD_FLOOR}"
         )
-    raw_curvature = float(resolved_spec["curvature_threshold"])
+    raw_curvature = float(constraint_contract["CURVATURE_THRESHOLD"])
     curvature_threshold = min(raw_curvature, STAGE2_CURVATURE_THRESHOLD_CEILING)
     if raw_curvature > STAGE2_CURVATURE_THRESHOLD_CEILING:
         print(
@@ -375,8 +537,7 @@ def build_stage2_alm_config(
             f"above Stage 2 hardware ceiling, clamped to "
             f"{STAGE2_CURVATURE_THRESHOLD_CEILING}"
         )
-    tf_current_A = validate_tf_current_limit(resolved_spec["tf_current_A"])
-    validate_major_radius(resolved_spec["major_radius"])
+    tf_current_A = float(constraint_contract["TF_CURRENT_A"])
     stage2_iota_mode = getattr(args, "stage2_iota_mode", "off")
     stage2_iota_target = getattr(args, "stage2_iota_target", None)
     stage2_iota_tolerance = getattr(args, "stage2_iota_tolerance", 5.0e-3)
@@ -396,14 +557,14 @@ def build_stage2_alm_config(
         output_root=output_root,
         equilibria_dir=None if equilibria_dir is None else str(equilibria_dir),
         tf_current_A=tf_current_A,
-        major_radius=float(resolved_spec["major_radius"]),
+        major_radius=float(constraint_contract["VACUUM_VESSEL_MAJOR_RADIUS_M"]),
         toroidal_flux=float(resolved_spec["toroidal_flux"]),
         length_weight=float(resolved_spec["length_weight"]),
         cc_weight=float(resolved_spec["cc_weight"]),
         cc_threshold=cc_threshold,
         curvature_weight=float(resolved_spec["curvature_weight"]),
         curvature_threshold=curvature_threshold,
-        banana_surf_radius=float(resolved_spec["banana_surf_radius"]),
+        banana_surf_radius=float(constraint_contract["banana_surf_radius"]),
         order=int(resolved_spec["order"]),
         constraint_method="alm",
         alm_max_outer_iters=int(resolved_spec["alm_max_outer_iters"]),
@@ -429,15 +590,22 @@ def build_stage2_alm_config(
         basin_seed=basin_seed,
         init_only=bool(resolved_spec["init_only"]),
         banana_init_current_A=float(resolved_spec["banana_init_current_A"]),
-        banana_current_max_A=float(resolved_spec["banana_current_max_A"]),
+        banana_current_max_A=float(constraint_contract["BANANA_CURRENT_MAX_A"]),
+        length_target=float(constraint_contract["COIL_LENGTH_TARGET_M"]),
         finite_current_mode=str(
-            resolved_spec.get("finite_current_mode", "boozer_surrogate")
+            resolved_spec.get("finite_current_mode", DEFAULT_FINITE_CURRENT_MODE)
         ),
         proxy_plasma_current_A=float(
             resolved_spec.get("proxy_plasma_current_A", 0.0)
         ),
         vf_current_A=float(resolved_spec.get("vf_current_A", 0.0)),
         vf_template_path=resolved_spec.get("vf_template_path"),
+        target_lcfs_max_major_radius_m=float(
+            constraint_contract["TARGET_LCFS_MAX_MAJOR_RADIUS_M"]
+        ),
+        target_lcfs_max_minor_radius_m=float(
+            constraint_contract["TARGET_LCFS_MAX_MINOR_RADIUS_M"]
+        ),
         stage2_iota_mode=stage2_iota_mode,
         stage2_iota_target=stage2_iota_target,
         stage2_iota_tolerance=stage2_iota_tolerance,
@@ -507,6 +675,7 @@ def _expected_stage2_artifact_metadata(config: Stage2ArtifactConfig) -> dict:
         "CURVATURE_WEIGHT": config.curvature_weight,
         "CURVATURE_THRESHOLD": config.curvature_threshold,
         **fixed_stage2_artifact_hardware_contract(),
+        "LENGTH_TARGET": config.length_target,
         "banana_surf_radius": config.banana_surf_radius,
         "order": config.order,
         "CONSTRAINT_METHOD": config.constraint_method,
@@ -530,6 +699,8 @@ def _backfill_missing_stage2_alm_solver_metadata(
 
 def load_validated_stage2_artifact(
     config: Stage2ArtifactConfig,
+    *,
+    constraint_metadata: dict,
 ) -> tuple[Path, dict]:
     artifact_path = resolve_stage2_artifact_path(config)
     stage2_results_path, stage2_results = load_stage2_artifact_results(artifact_path)
@@ -542,6 +713,14 @@ def load_validated_stage2_artifact(
         owner_label="run_stage2_alm.py",
         experiment_family="generic Stage 2 ALM",
     )
+    if not _artifact_uses_legacy_constraint_metadata(stage2_results):
+        validate_stage2_artifact_metadata(
+            stage2_results_path,
+            stage2_results,
+            expected_metadata=_constraint_metadata_expectation(constraint_metadata),
+            owner_label="run_stage2_alm.py",
+            experiment_family="generic Stage 2 ALM constraint contract",
+        )
     return stage2_results_path, stage2_results
 
 
@@ -555,6 +734,7 @@ def build_summary(
     artifact_reused: bool,
     stage2_results_path: Path | None = None,
     stage2_results: dict | None = None,
+    constraint_metadata: dict | None = None,
 ) -> dict:
     summary = {
         "plasma_surf_filename": Path(args.plasma_surf_filename).name,
@@ -571,6 +751,8 @@ def build_summary(
         "resolved_stage2_config": _jsonable_stage2_config(config),
         "fixed_stage2_hardware_contract": fixed_stage2_clearance_contract(),
     }
+    if constraint_metadata is not None:
+        summary.update(constraint_metadata)
     if stage2_results_path is None or stage2_results is None:
         return summary
     summary.update(
@@ -607,6 +789,12 @@ def build_summary(
             ),
         }
     )
+    summary.update(
+        {
+            key: stage2_results.get(key)
+            for key in _CONSTRAINT_METADATA_KEYS
+        }
+    )
     return summary
 
 
@@ -627,12 +815,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     resolved_spec, resolved_spec_source = resolve_stage2_spec_payload(args)
     config = build_stage2_alm_config(args, resolved_spec=resolved_spec)
+    constraint_metadata = build_stage2_constraint_artifacts(
+        args=args,
+        config=config,
+        source_label=resolved_spec_source,
+    )
     artifact_path = resolve_stage2_artifact_path(config)
     artifact_reused = artifact_path.exists()
     output_root = config.output_root
     output_root.mkdir(parents=True, exist_ok=True)
 
-    command = build_stage2_command(config, python_executable=args.python_executable)
+    command = build_stage2_command(
+        config,
+        constraint_override_reason=constraint_metadata["OVERRIDE_REASON"],
+        constraint_profile_label=constraint_metadata["CONSTRAINT_PROFILE"],
+        python_executable=args.python_executable,
+    )
     summary_path = resolved_optional_path(args.summary_json)
     if summary_path is None:
         summary_path = output_root / DEFAULT_SUMMARY_JSON
@@ -646,6 +844,7 @@ def main(argv: list[str] | None = None) -> int:
             command=command,
             artifact_path=artifact_path,
             artifact_reused=artifact_reused,
+            constraint_metadata=constraint_metadata,
         )
         write_dry_run_marker(
             output_root,
@@ -662,11 +861,16 @@ def main(argv: list[str] | None = None) -> int:
         # flag; for now the pre-check is authoritative for the common case.
         artifact_path = ensure_stage2_artifact(
             config,
+            constraint_override_reason=constraint_metadata["OVERRIDE_REASON"],
+            constraint_profile_label=constraint_metadata["CONSTRAINT_PROFILE"],
             python_executable=args.python_executable,
             timeout_seconds=timeout_or_none(args.stage2_timeout_seconds),
             dry_run=False,
         )
-        stage2_results_path, stage2_results = load_validated_stage2_artifact(config)
+        stage2_results_path, stage2_results = load_validated_stage2_artifact(
+            config,
+            constraint_metadata=constraint_metadata,
+        )
         summary = build_summary(
             args,
             config=config,
@@ -676,6 +880,7 @@ def main(argv: list[str] | None = None) -> int:
             artifact_reused=artifact_reused,
             stage2_results_path=stage2_results_path,
             stage2_results=stage2_results,
+            constraint_metadata=constraint_metadata,
         )
 
     with summary_path.open("w", encoding="utf-8") as outfile:

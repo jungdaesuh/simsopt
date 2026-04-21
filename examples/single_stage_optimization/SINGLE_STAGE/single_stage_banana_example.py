@@ -27,6 +27,7 @@ from simsopt.geo import (
     SurfaceRZFourier,
     SurfaceXYZTensorFourier,
     BoozerSurface,
+    CurveCWSFourierCPP,
     curves_to_vtk,
     CurveLength,
     LpCurveCurvature,
@@ -72,7 +73,14 @@ from workflow_helpers import (
     format_local_stage2_seed_dir_without_tf,
 )
 from workflow_runner_common import load_stage2_artifact_results
-from banana_opt.artifact_contracts import upgrade_legacy_stage2_artifact_results
+from banana_opt.artifact_contracts import (
+    STAGE2_SEED_CONTRACT_HASH_KEY,
+    upgrade_legacy_stage2_artifact_results,
+)
+from banana_opt.constraint_contract import (
+    resolve_constraint_contract_from_wire_names as _resolve_constraint_contract_from_wire_names_impl,
+)
+from banana_opt.coil_order_upgrade import upgrade_loaded_seed_biot_savart_order
 from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basin_telemetry_values
 from banana_opt.basin_hopping import (  # noqa: F401 - re-exported for importlib-loaded tests
     _normalized_step_rms as basin_normalized_step_rms,
@@ -213,6 +221,7 @@ from banana_opt.single_stage_objectives import (
     evaluate_alm_objective as _evaluate_alm_objective_impl,
 )
 from banana_opt.surface_mode_contracts import (
+    DEFAULT_INNER_SURFACE_RATIO,
     EXPERIMENTAL_MULTISURFACE,
     PUBLISHED_MULTISURFACE,
     SINGLE_SURFACE,
@@ -660,6 +669,44 @@ def partition_loaded_stage2_coils(coils, stage2_results, requested_num_tf_coils)
     )
 
 
+def load_stage2_seed_biot_savart(
+    stage2_bs_path,
+    *,
+    stage2_results,
+    num_tf_coils,
+    seed_order_upgrade=None,
+):
+    bs = load(stage2_bs_path)
+    coil_partitions = partition_loaded_stage2_coils(
+        bs.coils,
+        stage2_results,
+        num_tf_coils,
+    )
+    if seed_order_upgrade is None:
+        return bs, coil_partitions
+    loaded_master_banana_curve = next(
+        coil.curve
+        for coil in coil_partitions.banana_coils
+        if isinstance(coil.curve, CurveCWSFourierCPP)
+    )
+    if int(seed_order_upgrade) == int(loaded_master_banana_curve.order):
+        return bs, coil_partitions
+    upgraded_bs, _, _ = upgrade_loaded_seed_biot_savart_order(
+        bs,
+        banana_coils=coil_partitions.banana_coils,
+        tf_coils=coil_partitions.tf_coils,
+        proxy_coils=coil_partitions.proxy_coils,
+        vf_coils=coil_partitions.vf_coils,
+        new_order=int(seed_order_upgrade),
+    )
+    upgraded_partitions = partition_loaded_stage2_coils(
+        upgraded_bs.coils,
+        stage2_results,
+        num_tf_coils,
+    )
+    return upgraded_bs, upgraded_partitions
+
+
 def resolve_plasma_current_settings(
     args,
     *,
@@ -694,7 +741,11 @@ def resolve_surface_mode_contract(args, *, warn_on_legacy_mapping=True):
     return _build_surface_mode_contract_impl(
         requested_surface_mode=getattr(args, "surface_mode", None),
         legacy_num_surfaces=getattr(args, "num_surfaces", 1),
-        legacy_inner_surface_ratio=getattr(args, "inner_surface_ratio", 0.8),
+        legacy_inner_surface_ratio=getattr(
+            args,
+            "inner_surface_ratio",
+            DEFAULT_INNER_SURFACE_RATIO,
+        ),
         warn_on_legacy_mapping=should_warn,
     )
 
@@ -708,44 +759,77 @@ def build_equilibrium_path(args):
     )
 
 
+_STAGE2_SEED_NON_CONSTRAINT_DEFAULTS = {
+    "toroidal_flux": 0.24,
+    "length_weight": 0.0005,
+    "cc_weight": 100.0,
+    "curvature_weight": 0.0001,
+    "order": 2,
+    "banana_init_current_A": 1.0e4,
+}
+
+_STAGE2_SEED_CONTRACT_KEYS = (
+    "tf_current_A",
+    "banana_current_max_A",
+    "length_target",
+    "cc_threshold",
+    "curvature_threshold",
+    "banana_surf_radius",
+    "target_lcfs_max_major_radius_m",
+    "target_lcfs_max_minor_radius_m",
+)
+
+
 def apply_default_stage2_seed_args(args):
-    default_seed = DEFAULT_STAGE2_SEEDS_BY_PLASMA.get(args.plasma_surf_filename, {})
+    """Populate stage2 seed args using the shared constraint contract resolver.
+
+    The resolver owns all engineering and geometry constraint fields; the
+    plasma-specific profile in :data:`DEFAULT_STAGE2_SEEDS_BY_PLASMA` supplies
+    weights, toroidal flux, Fourier order, and the banana initialization
+    current. Fixed vessel/winding geometry is routed automatically and is not
+    subject to CLI override.
+    """
+    plasma_profile = DEFAULT_STAGE2_SEEDS_BY_PLASMA.get(
+        args.plasma_surf_filename,
+        {},
+    )
+    constraint_profile = {
+        key: plasma_profile[key]
+        for key in _STAGE2_SEED_CONTRACT_KEYS
+        if key in plasma_profile
+    }
+    cli_seed_layer = {
+        "tf_current_A": args.stage2_seed_tf_current_A,
+        "cc_threshold": args.stage2_seed_cc_threshold,
+        "curvature_threshold": args.stage2_seed_curvature_threshold,
+        "banana_surf_radius": args.stage2_seed_banana_surf_radius,
+    }
+    contract, _trace = _resolve_constraint_contract_from_wire_names_impl(
+        profile=constraint_profile,
+        cli_overrides=cli_seed_layer,
+        accept_offspec_major_radius=bool(
+            getattr(args, "accept_offspec_r0_seed", False)
+        ),
+        offspec_major_radius_m=args.stage2_seed_major_radius,
+    )
     if args.stage2_seed_major_radius is None:
-        args.stage2_seed_major_radius = default_seed.get(
-            "major_radius", VACUUM_VESSEL_MAJOR_RADIUS_M
-        )
-    if args.stage2_seed_toroidal_flux is None:
-        args.stage2_seed_toroidal_flux = default_seed.get("toroidal_flux", 0.24)
-    if args.stage2_seed_length_weight is None:
-        args.stage2_seed_length_weight = default_seed.get("length_weight", 0.0005)
-    if args.stage2_seed_cc_weight is None:
-        args.stage2_seed_cc_weight = default_seed.get("cc_weight", 100.0)
-    if args.stage2_seed_curvature_weight is None:
-        args.stage2_seed_curvature_weight = default_seed.get("curvature_weight", 0.0001)
+        args.stage2_seed_major_radius = contract["VACUUM_VESSEL_MAJOR_RADIUS_M"]
     if args.stage2_seed_cc_threshold is None:
-        args.stage2_seed_cc_threshold = default_seed.get("cc_threshold", COIL_COIL_MIN_DIST_M)
+        args.stage2_seed_cc_threshold = contract["CC_THRESHOLD"]
     if args.stage2_seed_curvature_threshold is None:
-        args.stage2_seed_curvature_threshold = default_seed.get(
-            "curvature_threshold",
-            MAX_CURVATURE_INV_M,
-        )
+        args.stage2_seed_curvature_threshold = contract["CURVATURE_THRESHOLD"]
     if args.stage2_seed_banana_surf_radius is None:
-        args.stage2_seed_banana_surf_radius = default_seed.get(
-            "banana_surf_radius",
-            BANANA_WINDING_MINOR_RADIUS_M,
-        )
+        args.stage2_seed_banana_surf_radius = contract["banana_surf_radius"]
     if args.stage2_seed_tf_current_A is None:
-        args.stage2_seed_tf_current_A = default_seed.get(
-            "tf_current_A",
-            TF_CURRENT_HARD_LIMIT_A,
-        )
-    if args.stage2_seed_order is None:
-        args.stage2_seed_order = default_seed.get("order", 2)
-    if args.stage2_seed_banana_init_current_A is None:
-        args.stage2_seed_banana_init_current_A = default_seed.get(
-            "banana_init_current_A",
-            1.0e4,
-        )
+        args.stage2_seed_tf_current_A = contract["TF_CURRENT_A"]
+    for attr_name, default_value in _STAGE2_SEED_NON_CONSTRAINT_DEFAULTS.items():
+        arg_attr = f"stage2_seed_{attr_name}"
+        if getattr(args, arg_attr) is None:
+            setattr(
+                args,
+                arg_attr,
+                plasma_profile.get(attr_name, default_value),
+            )
     return args
 
 
@@ -918,7 +1002,12 @@ def parse_args():
     parser.add_argument(
         "--inner-surface-ratio",
         type=float,
-        default=float(os.environ.get("INNER_SURFACE_RATIO", "0.8")),
+        default=float(
+            os.environ.get(
+                "INNER_SURFACE_RATIO",
+                str(DEFAULT_INNER_SURFACE_RATIO),
+            )
+        ),
         help=(
             "Legacy inner-surface ratio used by the experimental two-surface contract. "
             "Ignored by single_surface. Reserved for the future published contract."
@@ -1289,6 +1378,19 @@ def parse_args():
         help="Explicit path to the Stage 2 biot_savart_opt.json seed. Overrides all derived seed settings.",
     )
     parser.add_argument(
+        "--seed-order-upgrade",
+        type=int,
+        default=(
+            int(os.environ["SEED_ORDER_UPGRADE"])
+            if "SEED_ORDER_UPGRADE" in os.environ
+            else None
+        ),
+        help=(
+            "Optional Fourier order upgrade applied to the loaded Stage 2 "
+            "seed before rebuilding the banana symmetry family."
+        ),
+    )
+    parser.add_argument(
         "--seed-regime",
         choices=[
             _SINGLE_STAGE_SEED_REGIME_AUTO,
@@ -1588,7 +1690,11 @@ def build_surface_configs(
 
 def build_hbt_reference_surfaces(nfp, banana_surf_radius):
     surfaces = build_banana_reference_surfaces(nfp, banana_surf_radius)
-    return surfaces.vessel, surfaces.hbt, surfaces.coil_winding_surface
+    return (
+        surfaces.vessel,
+        surfaces.lcfs_clearance_reference,
+        surfaces.coil_winding_surface,
+    )
 
 
 def evaluate_single_stage_hardware_constraints(
@@ -2337,6 +2443,20 @@ def validate_boozer_stage_refinement_args(
     if args.refinement_max_stalled_chunks <= 0:
         raise ValueError(
             "--refinement-max-stalled-chunks must be positive when --boozer-stage-refinement is enabled"
+        )
+
+
+def validate_surface_mode_constraint_args(
+    args,
+    *,
+    surface_mode_contract: SurfaceModeContract,
+):
+    if args.constraint_method == "alm" and not surface_mode_supports_alm(
+        surface_mode_contract
+    ):
+        raise ValueError(
+            "--constraint-method=alm currently requires "
+            f"--surface-mode={SINGLE_SURFACE} (legacy --num-surfaces=1)"
         )
 
 
@@ -5628,7 +5748,12 @@ if __name__ == "__main__":
     # ==============================================================================
     plasma_surf_filename = args.plasma_surf_filename
     file_loc = build_equilibrium_path(args)
-    bs = load(stage2_bs_path)
+    bs, coil_partitions = load_stage2_seed_biot_savart(
+        stage2_bs_path,
+        stage2_results=stage2_results,
+        num_tf_coils=num_tf_coils,
+        seed_order_upgrade=getattr(args, "seed_order_upgrade", None),
+    )
     PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
         plasma_surf_filename=plasma_surf_filename,
         plasma_surf_path=file_loc,
@@ -5663,20 +5788,20 @@ if __name__ == "__main__":
     surf = surface_configs[-1]["initial_surface"]
     banana_surf_nfp = surf.nfp
 
-    VV, hbt, surf_coils = build_hbt_reference_surfaces(banana_surf_nfp, banana_surf_radius)
+    (
+        VV,
+        lcfs_clearance_reference,
+        surf_coils,
+    ) = build_hbt_reference_surfaces(banana_surf_nfp, banana_surf_radius)
 
     # Extract coil information
     coils = bs.coils
     curves = [c.curve for c in coils]
-    coil_partitions = partition_loaded_stage2_coils(
-        coils,
-        stage2_results,
-        num_tf_coils,
-    )
     tf_coils = list(coil_partitions.tf_coils)
     banana_coils = list(coil_partitions.banana_coils)
     banana_curves = [c.curve for c in banana_coils]
     banana_curve = banana_curves[0]
+    order = int(banana_curve.order)
     # Clearance/length objectives operate on the optimizable banana curves only;
     # TF/proxy/VF curves are fixed field sources and must not enter the penalty.
     objective_curves = banana_curves
@@ -5769,7 +5894,14 @@ if __name__ == "__main__":
     # Generate initial diagnostic plots
     initial_field_error = normPlot(outer_surface_data['boozer_surface'].surface, bs, OUT_DIR_ITER + "/NormPlotInitial")
     try:
-        cross_section_plot(surf_coils, outer_surface_data['boozer_surface'].surface, banana_curve, OUT_DIR_ITER + "/CrossSectionInitial", hbt, VV)
+        cross_section_plot(
+            surf_coils,
+            outer_surface_data['boozer_surface'].surface,
+            banana_curve,
+            OUT_DIR_ITER + "/CrossSectionInitial",
+            lcfs_clearance_reference,
+            VV,
+        )
     except Exception as e:
         print(f"WARNING: CrossSectionInitial plot failed (surface may fold at high mpol): {e}")
     initial_volume = outer_surface_data['boozer_surface'].surface.volume()
@@ -6271,13 +6403,10 @@ if __name__ == "__main__":
     bridge_local_donor_ready = False
     final_source_stage = stage
     alm_result = None
-    if CONSTRAINT_METHOD == "alm" and not surface_mode_supports_alm(
-        surface_mode_contract
-    ):
-        raise ValueError(
-            "--constraint-method=alm currently requires "
-            f"--surface-mode={SINGLE_SURFACE} (legacy --num-surfaces=1)"
-        )
+    validate_surface_mode_constraint_args(
+        args,
+        surface_mode_contract=surface_mode_contract,
+    )
     if args.init_only:
         res_nit = 0
         final_volume = initial_volume
@@ -6839,7 +6968,14 @@ if __name__ == "__main__":
         # Generate final diagnostic plots
         fieldError = normPlot(outer_surface_data['boozer_surface'].surface, bs, OUT_DIR_ITER + "/NormPlotOptimized")
         try:
-            cross_section_plot(surf_coils, outer_surface_data['boozer_surface'].surface, banana_curve, OUT_DIR_ITER + "/CrossSectionOptimized", hbt, VV)
+            cross_section_plot(
+                surf_coils,
+                outer_surface_data['boozer_surface'].surface,
+                banana_curve,
+                OUT_DIR_ITER + "/CrossSectionOptimized",
+                lcfs_clearance_reference,
+                VV,
+            )
         except Exception as e:
             print(f"WARNING: CrossSectionOptimized plot failed (surface may fold at high mpol): {e}")
     else:
@@ -6929,6 +7065,7 @@ if __name__ == "__main__":
         "STAGE2_SOURCE": args.stage2_source,
         "STAGE2_BS_PATH": stage2_bs_path,
         "STAGE2_RESULTS_PATH": str(stage2_results_path),
+        STAGE2_SEED_CONTRACT_HASH_KEY: stage2_results.get("CONTRACT_HASH"),
         "STAGE2_SEED_MAJOR_RADIUS": R0,
         "STAGE2_SEED_TOROIDAL_FLUX": s,
         "STAGE2_SEED_BANANA_SURF_RADIUS": float(stage2_results["banana_surf_radius"]),

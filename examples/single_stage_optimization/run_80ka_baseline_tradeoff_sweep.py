@@ -38,6 +38,10 @@ from banana_opt.hardware_contracts import (  # noqa: E402
     COIL_COIL_MIN_DIST_M,
     TF_CURRENT_HARD_LIMIT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
+    validate_major_radius,
+)
+from banana_opt.constraint_contract import (  # noqa: E402
+    resolve_constraint_contract_from_wire_names,
 )
 
 DEFAULT_PLASMA_SURF_FILENAME = "wout_nfp22ginsburg_000_014417_iota15.nc"
@@ -247,21 +251,37 @@ def load_locked_baseline_stage2_artifact(
     return stage2_results_path, stage2_artifact_results
 
 
+def _resolve_locked_baseline_constraint_contract(
+    args: argparse.Namespace,
+) -> dict[str, float]:
+    validate_major_radius(args.major_radius)
+    contract, _trace = resolve_constraint_contract_from_wire_names(
+        cli_overrides={
+            "tf_current_A": args.tf_current_A,
+            "cc_threshold": args.stage2_cc_threshold,
+            "curvature_threshold": args.stage2_curvature_threshold,
+            "banana_surf_radius": args.banana_surf_radius,
+        },
+    )
+    return dict(contract)
+
+
 def make_stage2_config(args: argparse.Namespace) -> Stage2ArtifactConfig:
+    constraint_contract = _resolve_locked_baseline_constraint_contract(args)
     basin_seed = None if args.stage2_basin_seed < 0 else args.stage2_basin_seed
     return Stage2ArtifactConfig(
         plasma_surf_filename=args.plasma_surf_filename,
         output_root=Path(args.stage2_output_root),
         equilibria_dir=args.equilibria_dir,
-        tf_current_A=args.tf_current_A,
-        major_radius=args.major_radius,
+        tf_current_A=float(constraint_contract["TF_CURRENT_A"]),
+        major_radius=float(constraint_contract["VACUUM_VESSEL_MAJOR_RADIUS_M"]),
         toroidal_flux=args.toroidal_flux,
         length_weight=args.stage2_length_weight,
         cc_weight=args.stage2_cc_weight,
-        cc_threshold=args.stage2_cc_threshold,
+        cc_threshold=float(constraint_contract["CC_THRESHOLD"]),
         curvature_weight=args.stage2_curvature_weight,
-        curvature_threshold=args.stage2_curvature_threshold,
-        banana_surf_radius=args.banana_surf_radius,
+        curvature_threshold=float(constraint_contract["CURVATURE_THRESHOLD"]),
+        banana_surf_radius=float(constraint_contract["banana_surf_radius"]),
         order=args.stage2_order,
         constraint_method=args.stage2_constraint_method,
         alm_max_outer_iters=10,
@@ -272,6 +292,8 @@ def make_stage2_config(args: argparse.Namespace) -> Stage2ArtifactConfig:
         basin_stepsize=args.stage2_basin_stepsize,
         basin_seed=basin_seed,
         init_only=args.stage2_init_only,
+        banana_current_max_A=float(constraint_contract["BANANA_CURRENT_MAX_A"]),
+        length_target=float(constraint_contract["COIL_LENGTH_TARGET_M"]),
     )
 
 

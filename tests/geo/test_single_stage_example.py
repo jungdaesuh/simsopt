@@ -6855,6 +6855,18 @@ class RunIdentityTests(unittest.TestCase):
 
 
 class CurrentBaselineContractTests(unittest.TestCase):
+    @staticmethod
+    def _upgrade_stage2_seed_results(module, **overrides):
+        stage2_results = {
+            "banana_surf_radius": 0.22,
+            "CURVATURE_THRESHOLD": module.MAX_CURVATURE_INV_M,
+        }
+        stage2_results.update(overrides)
+        return module.upgrade_legacy_stage2_artifact_results(
+            stage2_results,
+            known_tf_current_A=8.0e4,
+        )
+
     def test_stage2_seed_dir_formats_include_tf_current_segment(self):
         module = load_single_stage_example_module()
         seed_spec = module.Stage2SeedSpec(
@@ -6920,15 +6932,64 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
     def test_validate_stage2_seed_contract_accepts_upgraded_legacy_tf_current(self):
         module = load_single_stage_example_module()
-        stage2_results = module.upgrade_legacy_stage2_artifact_results(
-            {
-                "banana_surf_radius": 0.22,
-                "CURVATURE_THRESHOLD": module.MAX_CURVATURE_INV_M,
-            },
-            known_tf_current_A=8.0e4,
-        )
+        stage2_results = self._upgrade_stage2_seed_results(module)
 
         module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_accepts_surface_vessel_clearance_at_threshold(self):
+        import warnings
+
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(
+            module,
+            SURFACE_VESSEL_MIN_DIST=module.PLASMA_VESSEL_MIN_DIST_M,
+        )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_surface_vessel_clearance_below_threshold(self):
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(
+            module,
+            SURFACE_VESSEL_MIN_DIST=module.PLASMA_VESSEL_MIN_DIST_M - 1.0e-3,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "LCFS-to-vessel clearance violates the HBT-EP hardware contract",
+        ):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_warns_on_missing_surface_vessel_clearance(self):
+        import warnings
+
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(module)
+        stage2_results.pop("SURFACE_VESSEL_MIN_DIST", None)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            module.validate_stage2_seed_contract(stage2_results)
+
+        clearance_warnings = [
+            w for w in caught if "plasma-vessel clearance gate" in str(w.message)
+        ]
+        self.assertEqual(len(clearance_warnings), 1)
+
+    def test_validate_stage2_seed_contract_accepts_clearance_override_via_env(self):
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(
+            module,
+            SURFACE_VESSEL_MIN_DIST=module.PLASMA_VESSEL_MIN_DIST_M - 1.0e-3,
+        )
+        with patch.dict(
+            os.environ,
+            {"ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE": "1"},
+            clear=False,
+        ):
+            module.validate_stage2_seed_contract(stage2_results)
 
     def test_resolve_single_stage_banana_surf_radius_defaults_to_loaded_artifact(self):
         module = load_single_stage_example_module()
@@ -7705,6 +7766,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             stage2_seed_tf_current_A=None,
             stage2_seed_order=None,
             stage2_seed_banana_init_current_A=None,
+            accept_offspec_r0_seed=False,
         )
 
         module.apply_default_stage2_seed_args(args)
@@ -7712,6 +7774,55 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.stage2_seed_curvature_threshold, 100.0)
         self.assertEqual(args.stage2_seed_banana_surf_radius, 0.21)
         self.assertEqual(args.stage2_seed_tf_current_A, 8.0e4)
+        self.assertEqual(args.stage2_seed_cc_threshold, 0.05)
+        self.assertEqual(args.stage2_seed_major_radius, 0.976)
+        self.assertEqual(args.stage2_seed_toroidal_flux, 0.24)
+        self.assertEqual(args.stage2_seed_banana_init_current_A, 1.0e4)
+
+    def test_apply_default_stage2_seed_args_preserves_cli_overrides(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+            stage2_seed_major_radius=None,
+            stage2_seed_toroidal_flux=None,
+            stage2_seed_length_weight=None,
+            stage2_seed_cc_weight=None,
+            stage2_seed_curvature_weight=None,
+            stage2_seed_cc_threshold=0.06,
+            stage2_seed_curvature_threshold=80.0,
+            stage2_seed_banana_surf_radius=None,
+            stage2_seed_tf_current_A=75000.0,
+            stage2_seed_order=None,
+            stage2_seed_banana_init_current_A=None,
+            accept_offspec_r0_seed=False,
+        )
+
+        module.apply_default_stage2_seed_args(args)
+
+        self.assertEqual(args.stage2_seed_cc_threshold, 0.06)
+        self.assertEqual(args.stage2_seed_curvature_threshold, 80.0)
+        self.assertEqual(args.stage2_seed_tf_current_A, 75000.0)
+
+    def test_apply_default_stage2_seed_args_rejects_offspec_major_radius(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
+            stage2_seed_major_radius=0.80,
+            stage2_seed_toroidal_flux=None,
+            stage2_seed_length_weight=None,
+            stage2_seed_cc_weight=None,
+            stage2_seed_curvature_weight=None,
+            stage2_seed_cc_threshold=None,
+            stage2_seed_curvature_threshold=None,
+            stage2_seed_banana_surf_radius=None,
+            stage2_seed_tf_current_A=None,
+            stage2_seed_order=None,
+            stage2_seed_banana_init_current_A=None,
+            accept_offspec_r0_seed=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "vacuum-vessel major radius"):
+            module.apply_default_stage2_seed_args(args)
 
     def test_stage2_parse_args_accepts_banana_current_controls(self):
         module = load_stage2_module()
@@ -7968,6 +8079,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "initialize_extra_kwargs": None,
             "curve_curve_curves": None,
             "curve_surface_curves": None,
+            "surface_surface_min_distance_labels": None,
             "results": None,
         }
 
@@ -8029,11 +8141,15 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 return None
 
         class FakeSurface:
-            def __init__(self):
+            def __init__(self, *, label, gamma_value, major_radius, minor_radius):
+                self.label = label
                 self.nfp = 22
+                self._gamma_value = float(gamma_value)
+                self._major_radius = float(major_radius)
+                self._minor_radius = float(minor_radius)
 
             def gamma(self):
-                return np.zeros((2, 2, 3), dtype=float)
+                return np.ones((2, 2, 3), dtype=float) * self._gamma_value
 
             def unitnormal(self):
                 return np.ones((2, 2, 3), dtype=float)
@@ -8043,6 +8159,12 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
 
             def volume(self):
                 return 0.12
+
+            def major_radius(self):
+                return self._major_radius
+
+            def minor_radius(self):
+                return self._minor_radius
 
         class FakeBiotSavart:
             def __init__(self):
@@ -8078,13 +8200,35 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 super().__init__(0.15, [0.05, 0.06])
                 self.minimum_distance = 0.015
                 self.curves = ["curve_a", "curve_b"]
-                self.surface = fake_surface
+                self.surface = fake_working_surface
 
             def shortest_distance(self):
                 return 0.02
 
         fake_bs = FakeBiotSavart()
-        fake_surface = FakeSurface()
+        fake_working_surface = FakeSurface(
+            label="working",
+            gamma_value=0.0,
+            major_radius=0.88,
+            minor_radius=0.12,
+        )
+        fake_lcfs_surface = FakeSurface(
+            label="lcfs",
+            gamma_value=0.2,
+            major_radius=0.91,
+            minor_radius=0.14,
+        )
+        fake_plasma_geometry = SimpleNamespace(
+            working_surface=fake_working_surface,
+            lcfs_surface=fake_lcfs_surface,
+            lcfs_major_radius_m=fake_lcfs_surface.major_radius(),
+            lcfs_minor_radius_m=fake_lcfs_surface.minor_radius(),
+        )
+        fake_vv = SimpleNamespace(
+            label="vv",
+            gamma=lambda: np.ones((2, 2, 3), dtype=float) * 0.1,
+            to_vtk=lambda *_a, **_k: None,
+        )
         fake_curve_names = ["curve_a", "curve_b", "curve_c"]
         fake_banana_curve = SimpleNamespace(kappa=lambda: np.array([39.0, 41.0], dtype=float))
         fake_banana_coils = [
@@ -8114,7 +8258,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         def fake_seed_loader(seed_bs_path, surf, num_tf_coils, out_dir, **_kwargs):
             runtime["seed_loads"] += 1
             self.assertEqual(num_tf_coils, 20)
-            self.assertIs(surf, fake_surface)
+            self.assertIs(surf, fake_working_surface)
             effective_seed_stage2_results = (
                 seed_stage2_results
                 if seed_stage2_results is not None
@@ -8153,7 +8297,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         ):
             runtime["initialize_calls"] += 1
             runtime["initialize_extra_kwargs"] = dict(extra_kwargs)
-            self.assertIs(surf, fake_surface)
+            self.assertIs(surf, fake_working_surface)
             self.assertEqual(surf_coils, "surf_coils")
             self.assertEqual(len(tf_coils), 20)
             self.assertEqual(num_quadpoints, 16)
@@ -8187,6 +8331,15 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         def fake_curve_surface_distance(curves, *_args, **_kwargs):
             runtime["curve_surface_curves"] = tuple(curves)
             return FakeCurveSurfaceDistance()
+
+        def fake_surface_surface_min_distance(surface_a, surface_b):
+            runtime["surface_surface_min_distance_labels"] = (
+                surface_a.label,
+                surface_b.label,
+            )
+            self.assertIs(surface_a, fake_lcfs_surface)
+            self.assertIs(surface_b, fake_vv)
+            return 0.045
 
         def fake_minimize(*_args, **_kwargs):
             runtime["minimize_calls"] += 1
@@ -8308,18 +8461,20 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                         "Coil",
                         lambda curve, current: SimpleNamespace(curve=curve, current=current),
                     ),
-                    patch.object(module, "_init_surface", lambda *_args, **_kwargs: fake_surface),
+                    patch.object(
+                        module,
+                        "_load_plasma_geometry",
+                        lambda *_args, **_kwargs: fake_plasma_geometry,
+                    ),
                     patch.object(
                         module,
                         "build_hbt_reference_surfaces",
-                        lambda *_args, **_kwargs: (
-                            "hbt",
-                            "surf_coils",
-                            SimpleNamespace(
-                                gamma=lambda: np.ones((2, 2, 3), dtype=float) * 0.1,
-                                to_vtk=lambda *_a, **_k: None,
-                            ),
-                        ),
+                        lambda *_args, **_kwargs: ("hbt", "surf_coils", fake_vv),
+                    ),
+                    patch.object(
+                        module,
+                        "_surface_surface_min_distance",
+                        side_effect=fake_surface_surface_min_distance,
                     ),
                     patch.object(
                         module,
@@ -8356,6 +8511,11 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     patch.object(module, "cross_section_plot", lambda *_args, **_kwargs: None),
                     patch.object(module, "_magnetic_field_plots", lambda *_args, **_kwargs: 0.03),
                     patch.object(module, "is_self_intersecting", lambda *_args, **_kwargs: False),
+                    patch.object(
+                        module,
+                        "compute_stage2_bs_sha256",
+                        return_value="0" * 64,
+                    ),
                     patch.object(module, "minimize", side_effect=fake_minimize),
                     patch.object(module, "minimize_alm", side_effect=fake_minimize_alm),
                     patch.object(module, "run_basin_hopping", side_effect=fake_run_basin_hopping),
@@ -8449,6 +8609,28 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertEqual(runtime["results"]["iterations"], 0)
         self.assertTrue(runtime["results"]["HARDWARE_CONSTRAINTS_OK"])
         self.assertTrue(runtime["results"]["STAGE2_BS_PATH"].endswith("seed.json"))
+
+    def test_stage2_main_reports_lcfs_metrics_and_boundary_clearance(self):
+        runtime = self._run_stage2_main(
+            init_only=True,
+            constraint_method="penalty",
+            use_seed=False,
+        )
+
+        self._assert_init_only_runtime_counts(
+            runtime,
+            seed_loads=0,
+            initialize_calls=1,
+        )
+        self.assertEqual(
+            runtime["surface_surface_min_distance_labels"],
+            ("lcfs", "vv"),
+        )
+        self.assertEqual(runtime["results"]["FINAL_LCFS_MAJOR_RADIUS_M"], 0.91)
+        self.assertEqual(runtime["results"]["FINAL_LCFS_MINOR_RADIUS_M"], 0.14)
+        self.assertNotEqual(runtime["results"]["FINAL_LCFS_MAJOR_RADIUS_M"], 0.88)
+        self.assertNotEqual(runtime["results"]["FINAL_LCFS_MINOR_RADIUS_M"], 0.12)
+        self.assertEqual(runtime["results"]["SURFACE_VESSEL_MIN_DIST"], 0.045)
 
     def test_stage2_main_injected_args_without_accept_offspec_flag_use_parser_default(self):
         runtime = self._run_stage2_main(

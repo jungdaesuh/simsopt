@@ -77,10 +77,13 @@ class Stage2ArtifactConfig:
     init_only: bool = False
     banana_init_current_A: float = 1.0e4
     banana_current_max_A: float = 1.6e4
+    length_target: float = 1.7
     finite_current_mode: str = "wataru_proxy_field"
     proxy_plasma_current_A: float = 0.0
     vf_current_A: float = 0.0
     vf_template_path: str | None = None
+    target_lcfs_max_major_radius_m: float = 0.92
+    target_lcfs_max_minor_radius_m: float = 0.15
     stage2_iota_mode: str = "off"
     stage2_iota_target: float | None = None
     stage2_iota_tolerance: float = 5.0e-3
@@ -146,10 +149,13 @@ def build_stage2_seed_spec(config: Stage2ArtifactConfig) -> Stage2SeedSpec:
         order=config.order,
         banana_init_current_A=config.banana_init_current_A,
         banana_current_max_A=config.banana_current_max_A,
+        length_target=config.length_target,
         finite_current_mode=config.finite_current_mode,
         proxy_plasma_current_A=config.proxy_plasma_current_A,
         vf_current_A=config.vf_current_A,
         vf_template_path=config.vf_template_path,
+        target_lcfs_max_major_radius_m=config.target_lcfs_max_major_radius_m,
+        target_lcfs_max_minor_radius_m=config.target_lcfs_max_minor_radius_m,
     )
 
 
@@ -194,6 +200,8 @@ def resolve_stage2_artifact_path(config: Stage2ArtifactConfig) -> Path:
 def build_stage2_command(
     config: Stage2ArtifactConfig,
     *,
+    constraint_override_reason: str | None = None,
+    constraint_profile_label: str | None = None,
     python_executable: str = sys.executable,
 ) -> list[str]:
     command = [
@@ -211,6 +219,12 @@ def build_stage2_command(
         str(config.toroidal_flux),
         "--length-weight",
         str(config.length_weight),
+        "--length-target",
+        str(config.length_target),
+        "--target-lcfs-max-major-radius-m",
+        str(config.target_lcfs_max_major_radius_m),
+        "--target-lcfs-max-minor-radius-m",
+        str(config.target_lcfs_max_minor_radius_m),
         "--cc-weight",
         str(config.cc_weight),
         "--cc-threshold",
@@ -245,6 +259,10 @@ def build_stage2_command(
         command.extend(["--vf-template-path", str(config.vf_template_path)])
     if config.equilibria_dir is not None:
         command.extend(["--equilibria-dir", config.equilibria_dir])
+    if constraint_profile_label not in {None, ""}:
+        command.extend(["--constraint-profile-label", constraint_profile_label])
+    if constraint_override_reason not in {None, ""}:
+        command.extend(["--constraint-override-reason", constraint_override_reason])
     if config.constraint_method == "alm":
         command.extend(
             [
@@ -350,6 +368,8 @@ def run_command(
 def ensure_stage2_artifact(
     config: Stage2ArtifactConfig,
     *,
+    constraint_override_reason: str | None = None,
+    constraint_profile_label: str | None = None,
     python_executable: str = sys.executable,
     timeout_seconds: float | None = None,
     dry_run: bool = False,
@@ -358,7 +378,12 @@ def ensure_stage2_artifact(
     if artifact_path.exists() or dry_run:
         return artifact_path
     run_command(
-        build_stage2_command(config, python_executable=python_executable),
+        build_stage2_command(
+            config,
+            constraint_override_reason=constraint_override_reason,
+            constraint_profile_label=constraint_profile_label,
+            python_executable=python_executable,
+        ),
         timeout_seconds=timeout_seconds,
         dry_run=dry_run,
     )

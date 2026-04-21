@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import numpy as np
 from scipy.io import netcdf_file
 
@@ -26,16 +28,72 @@ from simsopt.geo import (
 from plotting_utils import magnitude_field_plot, norm_field_plot
 from workflow_helpers import validate_normalized_toroidal_flux
 
-def init_surface(R0, s, file_loc, nphi, ntheta):
-    s = validate_normalized_toroidal_flux(s, field_name="Stage 2 VMEC surface label s")
-    surf = SurfaceRZFourier.from_wout(
-        file_loc, range="full torus", nphi=nphi, ntheta=ntheta, s=s
+
+@dataclass(frozen=True)
+class PlasmaGeometry:
+    working_surface: SurfaceRZFourier
+    lcfs_surface: SurfaceRZFourier
+    lcfs_major_radius_m: float
+    lcfs_minor_radius_m: float
+    scale_factor: float
+
+
+def _load_vmec_surface(file_loc, s, nphi, ntheta):
+    surface_label = validate_normalized_toroidal_flux(
+        s,
+        field_name="Stage 2 VMEC surface label s",
     )
-    surf.set_dofs(surf.get_dofs() * R0 / surf.major_radius())
-    print("Major radius target: ", R0)
-    print("Major radius actual: ", surf.major_radius())
-    print("Minor radius: ", surf.minor_radius())
+    return SurfaceRZFourier.from_wout(
+        file_loc,
+        range="full torus",
+        nphi=nphi,
+        ntheta=ntheta,
+        s=surface_label,
+    )
+
+
+def _scale_surface(surface, scale_factor):
+    surf = surface
+    surf.set_dofs(surf.get_dofs() * float(scale_factor))
     return surf
+
+
+def load_plasma_geometry(R0, s_working, file_loc, nphi, ntheta):
+    working_surface = _load_vmec_surface(file_loc, s_working, nphi, ntheta)
+    scale_factor = float(R0) / float(working_surface.major_radius())
+    working_surface = _scale_surface(working_surface, scale_factor)
+    lcfs_surface = _scale_surface(
+        _load_vmec_surface(file_loc, 1.0, nphi, ntheta),
+        scale_factor,
+    )
+    print("Working surface major radius target: ", R0)
+    print("Working surface major radius actual: ", working_surface.major_radius())
+    print("Working surface minor radius: ", working_surface.minor_radius())
+    print("LCFS major radius: ", lcfs_surface.major_radius())
+    print("LCFS minor radius: ", lcfs_surface.minor_radius())
+    return PlasmaGeometry(
+        working_surface=working_surface,
+        lcfs_surface=lcfs_surface,
+        lcfs_major_radius_m=float(lcfs_surface.major_radius()),
+        lcfs_minor_radius_m=float(lcfs_surface.minor_radius()),
+        scale_factor=float(scale_factor),
+    )
+
+
+def init_surface(R0, s, file_loc, nphi, ntheta):
+    return load_plasma_geometry(R0, s, file_loc, nphi, ntheta).working_surface
+
+
+def surface_surface_min_distance(surface_a, surface_b):
+    return float(
+        np.min(
+            np.linalg.norm(
+                surface_a.gamma().reshape((-1, 1, 3))
+                - surface_b.gamma().reshape((1, -1, 3)),
+                axis=2,
+            )
+        )
+    )
 
 
 def build_proxy_plasma_current_coils(

@@ -24,6 +24,7 @@ from simsopt.geo import (
     create_equally_spaced_curves,
     CurveLength,
     CurveCurveDistance,
+    CurveCWSFourierCPP,
     LpCurveCurvature,
 )
 from simsopt.geo.curveobjectives import CurveSurfaceDistance
@@ -53,16 +54,24 @@ from banana_opt.artifact_contracts import (
     compute_stage2_bs_sha256,
     upgrade_legacy_stage2_artifact_results,
 )
+from banana_opt.constraint_contract import (
+    build_constraint_metadata,
+    resolve_constraint_contract_from_wire_names,
+)
+from banana_opt.coil_order_upgrade import (
+    upgrade_loaded_seed_biot_savart_order,
+)
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
 from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basin_telemetry_values
 from banana_opt.stage2_geometry import (
-    init_surface as _init_surface,
     initialize_coils as _initialize_coils,
     is_self_intersecting,
+    load_plasma_geometry as _load_plasma_geometry,
     magnetic_field_plots as _magnetic_field_plots,
+    surface_surface_min_distance as _surface_surface_min_distance,
 )
 from banana_opt.hardware_contracts import (
-    ACCEPT_OFFSPEC_LCFS_ENV,
+    ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV,
     ACCEPT_OFFSPEC_R0_SEED_ENV,
     ACCEPT_OFFSPEC_R0_SEED_HELP,
     BANANA_CURRENT_HARD_LIMIT_A,
@@ -72,11 +81,13 @@ from banana_opt.hardware_contracts import (
     COIL_PLASMA_MIN_DIST_M,
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
+    TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+    TARGET_LCFS_MAX_MINOR_RADIUS_M,
     TF_CURRENT_HARD_LIMIT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
     env_flag,
-    validate_lcfs_envelope,
     validate_major_radius,
+    validate_plasma_vessel_clearance,
     validate_tf_current_limit,
 )
 from banana_opt.hardware_constraint_schema import (
@@ -245,6 +256,41 @@ def parse_args():
         "--stage2-bs-path",
         default=os.environ.get("STAGE2_BS_PATH"),
         help="Optional path to a saved Stage 2 biot_savart_opt.json seed to restart from.",
+    )
+    parser.add_argument(
+        "--seed-order-upgrade",
+        type=int,
+        default=(
+            int(os.environ["SEED_ORDER_UPGRADE"])
+            if "SEED_ORDER_UPGRADE" in os.environ
+            else None
+        ),
+        help=(
+            "Optional Fourier order upgrade applied to a loaded Stage 2 seed "
+            "before rebuilding the banana symmetry family."
+        ),
+    )
+    parser.add_argument(
+        "--constraint-profile-label",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--constraint-override-reason",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--target-lcfs-max-major-radius-m",
+        type=float,
+        default=TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--target-lcfs-max-minor-radius-m",
+        type=float,
+        default=TARGET_LCFS_MAX_MINOR_RADIUS_M,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--nphi", type=int, default=int(os.environ.get("NPHI", "255")))
     parser.add_argument("--ntheta", type=int, default=int(os.environ.get("NTHETA", "64")))
@@ -707,7 +753,11 @@ def build_equilibrium_path(args):
 
 def build_hbt_reference_surfaces(nfp, banana_surf_radius):
     surfaces = build_banana_reference_surfaces(nfp, banana_surf_radius)
-    return surfaces.hbt, surfaces.coil_winding_surface, surfaces.vessel
+    return (
+        surfaces.lcfs_clearance_reference,
+        surfaces.coil_winding_surface,
+        surfaces.vessel,
+    )
 
 
 def build_stage2_results_sidecar_path(stage2_bs_artifact_path):
@@ -938,6 +988,7 @@ def materialize_stage2_artifact_results(
     stage2_iota_runtime,
     new_bs,
     new_surf,
+    constraint_metadata=None,
 ):
     artifact_output_root = os.path.dirname(stage2_bs_artifact_path)
     os.makedirs(artifact_output_root, exist_ok=True)
@@ -958,6 +1009,8 @@ def materialize_stage2_artifact_results(
     results[STAGE2_BS_SHA256_KEY] = compute_stage2_bs_sha256(
         stage2_bs_artifact_path
     )
+    if constraint_metadata is not None:
+        results.update(constraint_metadata)
     results.update(
         build_stage2_iota_report_payload(
             args=args,
@@ -967,6 +1020,53 @@ def materialize_stage2_artifact_results(
         )
     )
     return results
+
+
+def build_stage2_constraint_artifact_metadata(
+    *,
+    args,
+    tf_current_A,
+    banana_current_max_A,
+    length_target,
+    target_lcfs_max_major_radius_m,
+    target_lcfs_max_minor_radius_m,
+    cc_threshold,
+    curvature_threshold,
+    banana_surf_radius,
+    major_radius,
+    accept_offspec_r0_seed,
+    profile_name=None,
+    override_reason=None,
+):
+    """Route clamped/validated Stage 2 solver values through the shared contract."""
+    cli_overrides = {
+        "tf_current_A": float(tf_current_A),
+        "banana_current_max_A": float(banana_current_max_A),
+        "length_target": float(length_target),
+        "target_lcfs_max_major_radius_m": float(target_lcfs_max_major_radius_m),
+        "target_lcfs_max_minor_radius_m": float(target_lcfs_max_minor_radius_m),
+        "cc_threshold": float(cc_threshold),
+        "curvature_threshold": float(curvature_threshold),
+        "banana_surf_radius": float(banana_surf_radius),
+    }
+    offspec_major_radius_m = None
+    if accept_offspec_r0_seed:
+        offspec_major_radius_m = float(major_radius)
+    contract, _trace = resolve_constraint_contract_from_wire_names(
+        cli_overrides=cli_overrides,
+        accept_offspec_major_radius=accept_offspec_r0_seed,
+        offspec_major_radius_m=offspec_major_radius_m,
+    )
+    resolved_override_reason = override_reason
+    if resolved_override_reason is None and accept_offspec_r0_seed:
+        resolved_override_reason = "accept_offspec_r0_seed"
+    return build_constraint_metadata(
+        contract,
+        profile_name=(
+            "stage2_solver" if profile_name in {None, ""} else str(profile_name)
+        ),
+        override_reason=resolved_override_reason,
+    )
 
 
 def evaluate_stage2_hardware_constraints(
@@ -1062,8 +1162,29 @@ def load_stage2_seed_configuration(
     out_dir,
     *,
     stage2_results,
+    seed_order_upgrade=None,
 ):
     bs = load(seed_bs_path)
+    if seed_order_upgrade is not None:
+        loaded_coil_partitions = partition_loaded_stage2_coils(
+            bs.coils,
+            stage2_results=stage2_results,
+            requested_num_tf_coils=num_tf_coils,
+        )
+        loaded_master_banana_curve = next(
+            coil.curve
+            for coil in loaded_coil_partitions.banana_coils
+            if isinstance(coil.curve, CurveCWSFourierCPP)
+        )
+        if int(seed_order_upgrade) != int(loaded_master_banana_curve.order):
+            bs, _, _ = upgrade_loaded_seed_biot_savart_order(
+                bs,
+                banana_coils=loaded_coil_partitions.banana_coils,
+                tf_coils=loaded_coil_partitions.tf_coils,
+                proxy_coils=loaded_coil_partitions.proxy_coils,
+                vf_coils=loaded_coil_partitions.vf_coils,
+                new_order=int(seed_order_upgrade),
+            )
     bs.set_points(surf.gamma().reshape((-1, 3)))
 
     coils = bs.coils
@@ -1290,7 +1411,11 @@ def main(parsed_args=None):
         field_name="--toroidal-flux",
     ) # VMEC flux-surface label
 
-    new_surf = _init_surface(R0, s, file_loc, nphi, ntheta)
+    # Keep the optimization target on the requested working surface while
+    # routing hardware reporting and clearance checks through the true LCFS.
+    plasma_geometry = _load_plasma_geometry(R0, s, file_loc, nphi, ntheta)
+    new_surf = plasma_geometry.working_surface
+    lcfs_surf = plasma_geometry.lcfs_surface
     banana_surf_nfp = new_surf.nfp
 
     banana_surf_radius = args.banana_surf_radius
@@ -1299,20 +1424,16 @@ def main(parsed_args=None):
             "Stage 2 banana winding surface must remain concentric with the vessel at "
             f"minor radius {BANANA_WINDING_MINOR_RADIUS_M:.6f} m."
         )
-    hbt, surf_coils, VV = build_hbt_reference_surfaces(banana_surf_nfp, banana_surf_radius)
-    plasma_vessel_min_dist = float(
-        np.min(
-            np.linalg.norm(
-                new_surf.gamma().reshape((-1, 1, 3)) - VV.gamma().reshape((1, -1, 3)),
-                axis=2,
-            )
-        )
+    (
+        lcfs_clearance_reference,
+        surf_coils,
+        VV,
+    ) = build_hbt_reference_surfaces(banana_surf_nfp, banana_surf_radius)
+    plasma_vessel_min_dist = _surface_surface_min_distance(lcfs_surf, VV)
+    validate_plasma_vessel_clearance(
+        plasma_vessel_min_dist,
+        accept_offspec=env_flag(ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV),
     )
-    if plasma_vessel_min_dist < PLASMA_VESSEL_MIN_DIST_M:
-        raise ValueError(
-            "Fixed Stage 2 plasma surface violates the plasma-vessel clearance contract: "
-            f"{plasma_vessel_min_dist:.6f} m < {PLASMA_VESSEL_MIN_DIST_M:.6f} m."
-        )
 
     if args.stage2_bs_path:
         print(f"Loading Stage 2 seed from {args.stage2_bs_path}")
@@ -1330,6 +1451,7 @@ def main(parsed_args=None):
             len(tf_coils),
             OUT_DIR,
             stage2_results=seed_stage2_results,
+            seed_order_upgrade=getattr(args, "seed_order_upgrade", None),
         )
         tf_current_A = float(new_tf_coils[0].current.get_value())
         validate_tf_current_limit(tf_current_A)
@@ -1363,6 +1485,7 @@ def main(parsed_args=None):
             ),
         )
         new_tf_coils = tf_coils
+    order = int(new_banana_curve.order)
     new_surf_coils = surf_coils
     # SquaredFlux geometry penalties act on the optimizable banana curves only;
     # TF / proxy / VF curves are fixed field sources and must not enter the
@@ -1491,10 +1614,13 @@ def main(parsed_args=None):
         order=order,
         banana_init_current_A=initial_banana_current_A,
         banana_current_max_A=float(args.banana_current_max_A),
+        length_target=LENGTH_TARGET,
         finite_current_mode=finite_current_mode,
         proxy_plasma_current_A=proxy_plasma_current_A,
         vf_current_A=vf_current_A,
         vf_template_path=vf_template_path,
+        target_lcfs_max_major_radius_m=float(args.target_lcfs_max_major_radius_m),
+        target_lcfs_max_minor_radius_m=float(args.target_lcfs_max_minor_radius_m),
     )
     OUT_DIR_ITER = (
         OUT_DIR
@@ -1897,7 +2023,14 @@ def main(parsed_args=None):
     VV.to_vtk(OUT_DIR_ITER + "VV")
 
     # Create toroidal cross section plot
-    cross_section_plot(new_surf_coils, new_surf, new_banana_curve, OUT_DIR_ITER + "CrossSectionPlot", hbt, VV)
+    cross_section_plot(
+        new_surf_coils,
+        new_surf,
+        new_banana_curve,
+        OUT_DIR_ITER + "CrossSectionPlot",
+        lcfs_clearance_reference,
+        VV,
+    )
     stage2_bs_artifact_path = OUT_DIR_ITER + "biot_savart_opt.json"
     print(f'Banana Coil Current / TF Current = {new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value():.3f}\n')
 
@@ -1967,8 +2100,8 @@ def main(parsed_args=None):
         alm_result=alm_result,
         alm_taylor_result=alm_taylor_result,
         final_volume=new_surf.volume(),
-        final_plasma_major_radius_m=new_surf.major_radius(),
-        final_plasma_minor_radius_m=new_surf.minor_radius(),
+        final_plasma_major_radius_m=plasma_geometry.lcfs_major_radius_m,
+        final_plasma_minor_radius_m=plasma_geometry.lcfs_minor_radius_m,
         intersecting=intersecting,
         final_max_curvature=final_max_curvature,
         final_coil_length=final_coil_length,
@@ -1977,10 +2110,20 @@ def main(parsed_args=None):
         plasma_vessel_min_dist=plasma_vessel_min_dist,
         hardware_status=hardware_status,
     )
-    validate_lcfs_envelope(
-        new_surf.major_radius(),
-        new_surf.minor_radius(),
-        accept_offspec=env_flag(ACCEPT_OFFSPEC_LCFS_ENV),
+    constraint_metadata = build_stage2_constraint_artifact_metadata(
+        args=args,
+        tf_current_A=tf_current_A,
+        banana_current_max_A=float(args.banana_current_max_A),
+        length_target=LENGTH_TARGET,
+        target_lcfs_max_major_radius_m=float(args.target_lcfs_max_major_radius_m),
+        target_lcfs_max_minor_radius_m=float(args.target_lcfs_max_minor_radius_m),
+        cc_threshold=CC_THRESHOLD,
+        curvature_threshold=CURVATURE_THRESHOLD,
+        banana_surf_radius=banana_surf_radius,
+        major_radius=R0,
+        accept_offspec_r0_seed=accept_offspec_r0_seed,
+        profile_name=getattr(args, "constraint_profile_label", None),
+        override_reason=getattr(args, "constraint_override_reason", None),
     )
     secondary_artifact_metadata = build_stage2_secondary_artifact_metadata()
     if (
@@ -2006,6 +2149,7 @@ def main(parsed_args=None):
             stage2_iota_runtime=stage2_iota_runtime,
             new_bs=new_bs,
             new_surf=new_surf,
+            constraint_metadata=constraint_metadata,
         )
         with open(secondary_stage2_results_path, "w") as outfile:
             json.dump(secondary_results, outfile, indent=2)
@@ -2026,6 +2170,7 @@ def main(parsed_args=None):
         stage2_iota_runtime=stage2_iota_runtime,
         new_bs=new_bs,
         new_surf=new_surf,
+        constraint_metadata=constraint_metadata,
     )
     results.update(secondary_artifact_metadata)
     with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:

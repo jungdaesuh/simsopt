@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import sys
 import unittest
 import uuid
@@ -13,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES_ROOT = REPO_ROOT / "examples" / "single_stage_optimization"
 REFERENCE_SURFACES_PATH = EXAMPLES_ROOT / "banana_opt" / "reference_surfaces.py"
 STAGE2_GEOMETRY_PATH = EXAMPLES_ROOT / "banana_opt" / "stage2_geometry.py"
+HARDWARE_CONTRACTS_PATH = EXAMPLES_ROOT / "banana_opt" / "hardware_contracts.py"
 
 
 def _load_module(module_path: Path, prefix: str):
@@ -57,8 +59,17 @@ class BananaReferenceSurfaceTests(unittest.TestCase):
         self.assertEqual(surfaces.vessel.rc, {(0, 0): 0.976, (1, 0): 0.222})
         self.assertEqual(surfaces.vessel.zs, {(1, 0): 0.222})
 
-        self.assertEqual(surfaces.hbt.rc, {(0, 0): 0.9115, (1, 0): 0.1605})
-        self.assertEqual(surfaces.hbt.zs, {(1, 0): 0.152})
+        self.assertEqual(
+            surfaces.lcfs_clearance_reference.rc,
+            {
+                (0, 0): module.LCFS_CLEARANCE_REFERENCE_MAJOR_RADIUS_M,
+                (1, 0): module.LCFS_CLEARANCE_REFERENCE_MINOR_RADIUS_M,
+            },
+        )
+        self.assertEqual(
+            surfaces.lcfs_clearance_reference.zs,
+            {(1, 0): module.LCFS_CLEARANCE_REFERENCE_MINOR_RADIUS_M},
+        )
 
         self.assertEqual(
             surfaces.coil_winding_surface.rc,
@@ -73,6 +84,120 @@ class BananaReferenceSurfaceTests(unittest.TestCase):
 class Stage2GeometryHelperTests(unittest.TestCase):
     def setUp(self):
         self.module = _load_module(STAGE2_GEOMETRY_PATH, "banana_stage2_geometry")
+
+    def test_load_plasma_geometry_scales_working_and_lcfs_surfaces_from_same_factor(self):
+        class FakeSurface:
+            def __init__(self, major_radius, minor_radius):
+                self._major_radius = float(major_radius)
+                self._minor_radius = float(minor_radius)
+                self._dofs = np.array([1.0])
+                self.nfp = 22
+
+            def major_radius(self):
+                return self._major_radius
+
+            def minor_radius(self):
+                return self._minor_radius
+
+            def get_dofs(self):
+                return self._dofs.copy()
+
+            def set_dofs(self, dofs):
+                dofs = np.asarray(dofs, dtype=float)
+                scale = dofs[0] / self._dofs[0]
+                self._dofs = dofs
+                self._major_radius *= scale
+                self._minor_radius *= scale
+
+        def fake_from_wout(*_args, **kwargs):
+            if kwargs["s"] == 0.24:
+                return FakeSurface(1.20, 0.10)
+            if kwargs["s"] == 1.0:
+                return FakeSurface(1.45, 0.19)
+            raise AssertionError(f"unexpected VMEC surface label {kwargs['s']}")
+
+        with mock.patch.object(
+            self.module.SurfaceRZFourier,
+            "from_wout",
+            side_effect=fake_from_wout,
+        ):
+            geometry = self.module.load_plasma_geometry(
+                R0=0.96,
+                s_working=0.24,
+                file_loc="/tmp/demo.nc",
+                nphi=8,
+                ntheta=8,
+            )
+
+        self.assertAlmostEqual(geometry.scale_factor, 0.8)
+        self.assertAlmostEqual(geometry.working_surface.major_radius(), 0.96)
+        self.assertAlmostEqual(geometry.working_surface.minor_radius(), 0.08)
+        self.assertAlmostEqual(geometry.lcfs_major_radius_m, 1.16)
+        self.assertAlmostEqual(geometry.lcfs_minor_radius_m, 0.152)
+
+    def test_load_plasma_geometry_real_wout_uses_scaled_lcfs_boundary(self):
+        equilibrium_path = (
+            EXAMPLES_ROOT
+            / "equilibria"
+            / "wout_nfp22ginsburg_000_014417_iota15.nc"
+        )
+        nphi = 91
+        ntheta = 32
+        working_label = 0.24
+        target_major_radius = 0.976
+        working_surface = self.module.SurfaceRZFourier.from_wout(
+            str(equilibrium_path),
+            range="full torus",
+            nphi=nphi,
+            ntheta=ntheta,
+            s=working_label,
+        )
+        expected_scale = (
+            target_major_radius / float(working_surface.major_radius())
+        )
+        expected_lcfs_surface = self.module.SurfaceRZFourier.from_wout(
+            str(equilibrium_path),
+            range="full torus",
+            nphi=nphi,
+            ntheta=ntheta,
+            s=1.0,
+        )
+        expected_lcfs_surface.set_dofs(
+            expected_lcfs_surface.get_dofs() * expected_scale
+        )
+
+        geometry = self.module.load_plasma_geometry(
+            R0=target_major_radius,
+            s_working=working_label,
+            file_loc=str(equilibrium_path),
+            nphi=nphi,
+            ntheta=ntheta,
+        )
+
+        self.assertAlmostEqual(
+            geometry.working_surface.major_radius(),
+            target_major_radius,
+            places=12,
+        )
+        self.assertAlmostEqual(geometry.scale_factor, expected_scale, places=12)
+        self.assertGreater(
+            geometry.lcfs_major_radius_m,
+            geometry.working_surface.major_radius(),
+        )
+        self.assertGreater(
+            geometry.lcfs_minor_radius_m,
+            geometry.working_surface.minor_radius(),
+        )
+        self.assertAlmostEqual(
+            geometry.lcfs_major_radius_m,
+            expected_lcfs_surface.major_radius(),
+            places=12,
+        )
+        self.assertAlmostEqual(
+            geometry.lcfs_minor_radius_m,
+            expected_lcfs_surface.minor_radius(),
+            places=12,
+        )
 
     def test_build_proxy_plasma_current_coils_rescales_vmec_axis(self):
         class FakeNetcdfFile:
@@ -297,3 +422,54 @@ class Stage2GeometryHelperTests(unittest.TestCase):
                     neighbor_skip=1,
                 )
             )
+
+
+class HardwareContractsPlasmaVesselClearanceTests(unittest.TestCase):
+    def setUp(self):
+        self.module = _load_module(HARDWARE_CONTRACTS_PATH, "banana_hardware_contracts")
+        self.threshold = self.module.PLASMA_VESSEL_MIN_DIST_M
+
+    def test_accepts_clearance_exactly_at_threshold(self):
+        clearance = self.module.validate_plasma_vessel_clearance(self.threshold)
+        self.assertEqual(clearance, self.threshold)
+
+    def test_accepts_clearance_above_threshold(self):
+        self.module.validate_plasma_vessel_clearance(self.threshold + 0.01)
+
+    def test_raises_when_clearance_falls_below_threshold(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "LCFS-to-vessel clearance violates the HBT-EP hardware contract",
+        ):
+            self.module.validate_plasma_vessel_clearance(self.threshold - 1e-6)
+
+    def test_accept_offspec_bypasses_raise(self):
+        clearance = self.module.validate_plasma_vessel_clearance(
+            self.threshold - 0.02,
+            accept_offspec=True,
+        )
+        self.assertAlmostEqual(clearance, self.threshold - 0.02)
+
+    def test_is_plasma_vessel_clearance_offspec_detects_violation(self):
+        self.assertFalse(
+            self.module.is_plasma_vessel_clearance_offspec(self.threshold)
+        )
+        self.assertTrue(
+            self.module.is_plasma_vessel_clearance_offspec(self.threshold - 1e-6)
+        )
+
+    def test_env_flag_recognizes_truthy_values(self):
+        flag_name = self.module.ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV
+        original = os.environ.get(flag_name)
+        try:
+            for truthy in ("1", "true", "TRUE", "yes"):
+                os.environ[flag_name] = truthy
+                self.assertTrue(self.module.env_flag(flag_name))
+            for falsy in ("0", "false", "", "no"):
+                os.environ[flag_name] = falsy
+                self.assertFalse(self.module.env_flag(flag_name))
+        finally:
+            if original is None:
+                os.environ.pop(flag_name, None)
+            else:
+                os.environ[flag_name] = original

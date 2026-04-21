@@ -209,6 +209,69 @@ class WorkflowHelpersTests(unittest.TestCase):
             "biot_savart_opt.json",
         )
 
+    def test_local_stage2_bs_path_includes_nondefault_length_target(self):
+        module = load_workflow_helpers_module()
+        spec = module.Stage2SeedSpec(
+            plasma_surf_filename="demo.nc",
+            major_radius=0.976,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            tf_current_A=8.0e4,
+            order=2,
+            length_target=1.6,
+        )
+
+        artifact_path = module.local_stage2_bs_path(
+            "/tmp/stage2-root",
+            spec,
+            constraint_method="penalty",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            basin_hops=0,
+            basin_stepsize=0.01,
+            basin_seed=None,
+        )
+
+        self.assertIn("-LT=1.6-", str(artifact_path))
+
+    def test_local_stage2_bs_path_includes_nondefault_lcfs_ceiling(self):
+        module = load_workflow_helpers_module()
+        spec = module.Stage2SeedSpec(
+            plasma_surf_filename="demo.nc",
+            major_radius=0.976,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=40.0,
+            banana_surf_radius=0.22,
+            tf_current_A=8.0e4,
+            order=2,
+            target_lcfs_max_major_radius_m=0.91,
+            target_lcfs_max_minor_radius_m=0.14,
+        )
+
+        artifact_path = module.local_stage2_bs_path(
+            "/tmp/stage2-root",
+            spec,
+            constraint_method="penalty",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            basin_hops=0,
+            basin_stepsize=0.01,
+            basin_seed=None,
+        )
+
+        self.assertIn("-LCFSMR=0.91-LCFSMN=0.14-", str(artifact_path))
+
     def test_format_local_stage2_run_dir_canonicalizes_exact_iota_constraint_weight(self):
         module = load_workflow_helpers_module()
         spec = module.Stage2SeedSpec(
@@ -472,6 +535,9 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
         self.assertIn("--tf-current-A", command)
         self.assertIn("--banana-init-current-A", command)
         self.assertIn("--banana-current-max-A", command)
+        self.assertIn("--length-target", command)
+        self.assertIn("--target-lcfs-max-major-radius-m", command)
+        self.assertIn("--target-lcfs-max-minor-radius-m", command)
         self.assertIn("--output-root", command)
         self.assertIn("--init-only", command)
 
@@ -974,6 +1040,14 @@ class BaselineSweepScriptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "--major-radius"):
             module.validate_locked_baseline_args(args)
 
+    def test_make_stage2_config_rejects_offspec_major_radius(self):
+        module = load_baseline_sweep_module()
+        args = self._make_args()
+        args.major_radius = 0.915
+
+        with self.assertRaisesRegex(ValueError, "vacuum-vessel major radius"):
+            module.make_stage2_config(args)
+
     def test_validate_locked_baseline_args_rejects_nonbaseline_constraint_method(self):
         module = load_baseline_sweep_module()
         args = self._make_args()
@@ -1239,6 +1313,17 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
             python_executable="python",
             plasma_surf_filename="demo.nc",
             equilibria_dir=None,
+            stage2_output_root="/tmp/stage2",
+            tf_current_A=8.0e4,
+            major_radius=0.976,
+            toroidal_flux=0.24,
+            stage2_length_weight=0.0005,
+            stage2_cc_weight=100.0,
+            stage2_cc_threshold=0.05,
+            stage2_curvature_weight=0.0001,
+            stage2_curvature_threshold=100.0,
+            banana_surf_radius=0.21,
+            stage2_order=2,
             nphi=41,
             ntheta=16,
             mpol=4,
@@ -1259,6 +1344,14 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
         self.assertIn("--init-only", command)
         self.assertIn("--nphi", command)
         self.assertIn("--plasma-current-A", command)
+
+    def test_make_stage2_config_rejects_offspec_major_radius(self):
+        module = load_finite_current_smoke_module()
+        args = self._make_args()
+        args.major_radius = 0.915
+
+        with self.assertRaisesRegex(ValueError, "vacuum-vessel major radius"):
+            module.make_stage2_config(args)
 
     def test_validate_smoke_results_checks_current_contract(self):
         module = load_finite_current_smoke_module()

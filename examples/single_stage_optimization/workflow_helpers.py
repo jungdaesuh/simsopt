@@ -8,6 +8,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_WATARU_VF_TEMPLATE_PATH = (
     SCRIPT_DIR / "banana_opt" / "wataru_vf_template.json"
 )
+DEFAULT_STAGE2_LENGTH_TARGET = 1.7
+DEFAULT_TARGET_LCFS_MAX_MAJOR_RADIUS_M = 0.92
+DEFAULT_TARGET_LCFS_MAX_MINOR_RADIUS_M = 0.15
+_FLOAT_DEFAULT_ABS_TOL = 1.0e-12
 
 
 def format_compact_float(value: float) -> str:
@@ -65,6 +69,9 @@ class Stage2SeedSpec:
     proxy_plasma_current_A: float = 0.0
     vf_current_A: float = 0.0
     vf_template_path: str | None = None
+    length_target: float = DEFAULT_STAGE2_LENGTH_TARGET
+    target_lcfs_max_major_radius_m: float = DEFAULT_TARGET_LCFS_MAX_MAJOR_RADIUS_M
+    target_lcfs_max_minor_radius_m: float = DEFAULT_TARGET_LCFS_MAX_MINOR_RADIUS_M
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -176,6 +183,8 @@ def format_local_stage2_seed_dir(spec: Stage2SeedSpec) -> str:
         f"R0={format_compact_float(spec.major_radius)}"
         f"-s={format_compact_float(spec.toroidal_flux)}"
         f"-LW={format_compact_float(spec.length_weight)}"
+        f"{format_stage2_length_target_suffix(spec)}"
+        f"{format_stage2_target_lcfs_suffix(spec)}"
         f"-CCW={format_compact_float(spec.cc_weight)}"
         f"-CCT={format_compact_float(spec.cc_threshold)}"
         f"-CW={format_compact_float(spec.curvature_weight)}"
@@ -194,6 +203,8 @@ def format_database_stage2_seed_dir(spec: Stage2SeedSpec) -> str:
         f"MR={format_compact_float(spec.major_radius)}"
         f"-TF={format_compact_float(spec.toroidal_flux)}"
         f"-LW={format_compact_float(spec.length_weight)}"
+        f"{format_stage2_length_target_suffix(spec)}"
+        f"{format_stage2_target_lcfs_suffix(spec)}"
         f"-CCW={format_compact_float(spec.cc_weight)}"
         f"-CW={format_compact_float(spec.curvature_weight)}"
         f"-SR={format_compact_float(spec.banana_surf_radius)}"
@@ -209,12 +220,46 @@ def format_database_stage2_seed_dir_without_init_current(spec: Stage2SeedSpec) -
         f"MR={format_compact_float(spec.major_radius)}"
         f"-TF={format_compact_float(spec.toroidal_flux)}"
         f"-LW={format_compact_float(spec.length_weight)}"
+        f"{format_stage2_length_target_suffix(spec)}"
+        f"{format_stage2_target_lcfs_suffix(spec)}"
         f"-CCW={format_compact_float(spec.cc_weight)}"
         f"-CW={format_compact_float(spec.curvature_weight)}"
         f"-SR={format_compact_float(spec.banana_surf_radius)}"
         f"-TFC={format_compact_float(spec.tf_current_A)}"
         f"-Order={spec.order}"
         f"{format_stage2_finite_current_suffix(spec)}"
+    )
+
+
+def format_stage2_length_target_suffix(spec: Stage2SeedSpec) -> str:
+    return (
+        ""
+        if abs(float(spec.length_target) - DEFAULT_STAGE2_LENGTH_TARGET)
+        <= _FLOAT_DEFAULT_ABS_TOL
+        else f"-LT={format_compact_float(spec.length_target)}"
+    )
+
+
+def format_stage2_target_lcfs_suffix(spec: Stage2SeedSpec) -> str:
+    has_default_major = (
+        abs(
+            float(spec.target_lcfs_max_major_radius_m)
+            - DEFAULT_TARGET_LCFS_MAX_MAJOR_RADIUS_M
+        )
+        <= _FLOAT_DEFAULT_ABS_TOL
+    )
+    has_default_minor = (
+        abs(
+            float(spec.target_lcfs_max_minor_radius_m)
+            - DEFAULT_TARGET_LCFS_MAX_MINOR_RADIUS_M
+        )
+        <= _FLOAT_DEFAULT_ABS_TOL
+    )
+    if has_default_major and has_default_minor:
+        return ""
+    return (
+        f"-LCFSMR={format_compact_float(spec.target_lcfs_max_major_radius_m)}"
+        f"-LCFSMN={format_compact_float(spec.target_lcfs_max_minor_radius_m)}"
     )
 
 

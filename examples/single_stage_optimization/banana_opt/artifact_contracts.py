@@ -20,6 +20,8 @@ from workflow_helpers import canonical_stage2_iota_constraint_weight
 DEFAULT_LEGACY_BANANA_INIT_CURRENT_A = 1.0e4
 _BOOZER_CURRENT_CONVENTION_INFERENCE_ABS_TOL = 1.0e-12
 STAGE2_BS_SHA256_KEY = "STAGE2_BS_SHA256"
+LEGACY_CONSTRAINT_CONTRACT_SCHEMA_VERSION = 0
+STAGE2_SEED_CONTRACT_HASH_KEY = "STAGE2_SEED_CONTRACT_HASH"
 
 
 def compute_stage2_bs_sha256(stage2_bs_path: str | Path) -> str:
@@ -206,7 +208,21 @@ def upgrade_legacy_stage2_artifact_results(
     _upgrade_legacy_bootability_recovery_metadata(upgraded_results)
     _upgrade_legacy_stage2_iota_report_metadata(upgraded_results)
     _upgrade_legacy_finite_current_metadata(upgraded_results)
+    _upgrade_legacy_constraint_contract_metadata(upgraded_results)
     return upgraded_results
+
+
+def _upgrade_legacy_constraint_contract_metadata(upgraded_results: dict) -> None:
+    if "CONTRACT_SCHEMA_VERSION" not in upgraded_results:
+        upgraded_results["CONTRACT_SCHEMA_VERSION"] = (
+            LEGACY_CONSTRAINT_CONTRACT_SCHEMA_VERSION
+        )
+    if "CONSTRAINT_PROFILE" not in upgraded_results:
+        upgraded_results["CONSTRAINT_PROFILE"] = None
+    if "EFFECTIVE_VALUES" not in upgraded_results:
+        upgraded_results["EFFECTIVE_VALUES"] = None
+    if "OVERRIDE_REASON" not in upgraded_results:
+        upgraded_results["OVERRIDE_REASON"] = None
 
 
 def require_stage2_artifact_float(
@@ -351,6 +367,7 @@ def expected_locked_baseline_stage2_artifact_metadata(
         "CURVATURE_WEIGHT": config.curvature_weight,
         "CURVATURE_THRESHOLD": config.curvature_threshold,
         **fixed_stage2_artifact_hardware_contract(),
+        "LENGTH_TARGET": config.length_target,
         "banana_surf_radius": config.banana_surf_radius,
         "order": config.order,
         "CONSTRAINT_METHOD": config.constraint_method,
