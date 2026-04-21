@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 from dataclasses import astuple, dataclass
+from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
 from scipy.optimize import minimize
@@ -171,7 +172,9 @@ from banana_opt.stage2_single_stage_handoff import (
     build_equilibrium_path as _build_equilibrium_path_impl,
     compute_tf_G0 as _compute_tf_G0_impl,
     initialize_boozer_surface as _initialize_boozer_surface_impl,
+    load_warm_start_boozer_seed,
     partition_loaded_stage2_coils as _partition_loaded_stage2_coils_impl,
+    resolve_warm_start_boozer_surface_path,
     resolve_single_stage_banana_surf_radius as _resolve_single_stage_banana_surf_radius_impl,
     resolve_stage2_finite_current_mode as _resolve_stage2_finite_current_mode_impl,
     resolve_stage2_num_tf_coils as _resolve_stage2_num_tf_coils_impl,
@@ -863,6 +866,16 @@ def parse_args():
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--warm-start-surface-stem",
+        default=None,
+        help=(
+            "Optional stem for saved single-stage surface artifacts "
+            "(for example /path/to/surf_best_feasible). When set, the single-stage "
+            "initializer reuses the saved Boozer surface geometry/iota/G as its "
+            "starting seed."
+        ),
+    )
+    parser.add_argument(
         "--banana-surf-radius",
         type=float,
         default=float(os.environ["BANANA_SURF_RADIUS"]) if "BANANA_SURF_RADIUS" in os.environ else None,
@@ -1378,6 +1391,15 @@ def parse_args():
         help="Explicit path to the Stage 2 biot_savart_opt.json seed. Overrides all derived seed settings.",
     )
     parser.add_argument(
+        "--stage2-seed-surf-path",
+        default=os.environ.get("STAGE2_SEED_SURF_PATH"),
+        help=(
+            "Optional saved surface or Boozer-surface artifact from the Stage 2 seed lane. "
+            "When set, the Boozer initializer reuses the saved surface geometry/iota/G "
+            "as its starting seed."
+        ),
+    )
+    parser.add_argument(
         "--seed-order-upgrade",
         type=int,
         default=(
@@ -1646,6 +1668,8 @@ def initialize_boozer_surface(
     iota,
     G0,
     boozer_I=0.0,
+    *,
+    initial_surface_guess=None,
     nfp=5,
 ):
     return _initialize_boozer_surface_impl(
@@ -1658,6 +1682,7 @@ def initialize_boozer_surface(
         iota,
         G0,
         boozer_I,
+        initial_surface_guess=initial_surface_guess,
         nfp=nfp,
         surface_cls=SurfaceXYZTensorFourier,
         volume_cls=Volume,
@@ -1685,6 +1710,50 @@ def build_surface_configs(
         num_surfaces,
         inner_surface_ratio,
         surface_factory=SurfaceRZFourier,
+    )
+
+
+def _resolved_optional_path_string(raw_path):
+    if raw_path is None:
+        return None
+    return str(Path(raw_path).expanduser().resolve())
+
+
+def resolve_initial_boozer_surface_seed(
+    *,
+    config_name,
+    default_surface,
+    default_iota,
+    default_G,
+    stage2_seed_surface,
+    warm_start_surface_stem,
+):
+    if stage2_seed_surface is not None and config_name == "outer":
+        return (
+            stage2_seed_surface.surface,
+            stage2_seed_surface.surface,
+            (
+                default_iota
+                if stage2_seed_surface.iota is None
+                else stage2_seed_surface.iota
+            ),
+            default_G if stage2_seed_surface.G is None else stage2_seed_surface.G,
+            None,
+        )
+    if warm_start_surface_stem is None:
+        return default_surface, None, default_iota, default_G, None
+
+    warm_start_surface_path = resolve_warm_start_boozer_surface_path(
+        warm_start_surface_stem,
+        surface_name=config_name,
+    )
+    warm_start_seed = load_warm_start_boozer_seed(warm_start_surface_path)
+    return (
+        warm_start_seed.surface,
+        warm_start_seed.surface,
+        default_iota if warm_start_seed.iota is None else warm_start_seed.iota,
+        default_G if warm_start_seed.G is None else warm_start_seed.G,
+        str(warm_start_seed.source_path),
     )
 
 
@@ -1960,6 +2029,8 @@ class RunIdentityConfig:
     alm_max_subproblem_continuations: int
     alm_distance_smoothing: float
     alm_curvature_smoothing: float
+    warm_start_surface_stem: str | None = None
+    stage2_seed_surf_path: str | None = None
     seed_regime: str | None = None
 
 
@@ -2004,6 +2075,7 @@ class PreservedTimeoutReplayConfig:
     frontier_chebyshev_weight_boozer: float | None = None
     epsilon_constraint_qa_max: float | None = None
     epsilon_constraint_boozer_max: float | None = None
+    stage2_seed_surf_path: str | None = None
     major_radius: float = VACUUM_VESSEL_MAJOR_RADIUS_M
 
 
@@ -2236,6 +2308,7 @@ PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
     plasma_surf_filename="",
     plasma_surf_path="",
     stage2_bs_path="",
+    stage2_seed_surf_path=None,
     stage2_results_path="",
     mpol=0,
     ntor=0,
@@ -2314,6 +2387,9 @@ def make_run_identity_config(
     )
     return RunIdentityConfig(
         stage2_bs_path=stage2_bs_path,
+        stage2_seed_surf_path=_resolved_optional_path_string(
+            getattr(args, "stage2_seed_surf_path", None)
+        ),
         stage=stage,
         boozer_stage_refinement=bool(args.boozer_stage_refinement),
         refinement_boozer_stage=args.refinement_boozer_stage,
@@ -2392,6 +2468,9 @@ def make_run_identity_config(
         alm_max_subproblem_continuations=args.alm_max_subproblem_continuations,
         alm_distance_smoothing=args.alm_distance_smoothing,
         alm_curvature_smoothing=args.alm_curvature_smoothing,
+        warm_start_surface_stem=_resolved_optional_path_string(
+            getattr(args, "warm_start_surface_stem", None)
+        ),
         seed_regime=(
             None
             if getattr(args, "seed_regime", _DEFAULT_SINGLE_STAGE_SEED_REGIME)
@@ -4191,6 +4270,10 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
         stage2_bs_path=(
             replay_config.stage2_bs_path if stage2_bs_path is None else str(stage2_bs_path)
         ),
+        stage2_seed_surf_path=globals().get(
+            "stage2_seed_surf_path",
+            replay_config.stage2_seed_surf_path,
+        ),
         stage2_results_path=(
             replay_config.stage2_results_path if stage2_results_path is None else str(stage2_results_path)
         ),
@@ -4367,6 +4450,7 @@ def build_preserved_timeout_results_payload(
         "PLASMA_SURF_FILENAME": replay_config.plasma_surf_filename,
         "PLASMA_SURF_PATH": replay_config.plasma_surf_path,
         "STAGE2_BS_PATH": replay_config.stage2_bs_path,
+        "STAGE2_SEED_SURF_PATH": replay_config.stage2_seed_surf_path,
         "STAGE2_RESULTS_PATH": replay_config.stage2_results_path,
         "mpol": replay_config.mpol,
         "ntor": replay_config.ntor,
@@ -5748,6 +5832,7 @@ if __name__ == "__main__":
     # ==============================================================================
     plasma_surf_filename = args.plasma_surf_filename
     file_loc = build_equilibrium_path(args)
+    stage2_seed_surf_path = _resolved_optional_path_string(args.stage2_seed_surf_path)
     bs, coil_partitions = load_stage2_seed_biot_savart(
         stage2_bs_path,
         stage2_results=stage2_results,
@@ -5758,6 +5843,7 @@ if __name__ == "__main__":
         plasma_surf_filename=plasma_surf_filename,
         plasma_surf_path=file_loc,
         stage2_bs_path=str(stage2_bs_path),
+        stage2_seed_surf_path=stage2_seed_surf_path,
         stage2_results_path=str(stage2_results_path),
         mpol=mpol,
         ntor=ntor,
@@ -5784,6 +5870,9 @@ if __name__ == "__main__":
         vol_target,
         effective_num_surfaces,
         effective_inner_surface_ratio,
+    )
+    warm_start_surface_stem = _resolved_optional_path_string(
+        args.warm_start_surface_stem
     )
     surf = surface_configs[-1]["initial_surface"]
     banana_surf_nfp = surf.nfp
@@ -5860,17 +5949,40 @@ if __name__ == "__main__":
 
     # Initialize Boozer surfaces with target parameters
     surface_data = []
+    warm_start_surface_paths = []
+    stage2_seed_surface = (
+        None
+        if stage2_seed_surf_path is None
+        else load_warm_start_boozer_seed(stage2_seed_surf_path)
+    )
     for config in surface_configs:
+        (
+            initial_surface,
+            initial_surface_guess,
+            initial_iota,
+            initial_G,
+            warm_start_surface_path,
+        ) = resolve_initial_boozer_surface_seed(
+            config_name=config["name"],
+            default_surface=config["initial_surface"],
+            default_iota=iota_target,
+            default_G=G0,
+            stage2_seed_surface=stage2_seed_surface,
+            warm_start_surface_stem=warm_start_surface_stem,
+        )
+        if warm_start_surface_path is not None:
+            warm_start_surface_paths.append(warm_start_surface_path)
         boozer_surface = initialize_boozer_surface(
-            config["initial_surface"],
+            initial_surface,
             mpol,
             ntor,
             bs,
             config["target_volume"],
             CONSTRAINT_WEIGHT,
-            iota_target,
-            G0,
+            initial_iota,
+            initial_G,
             boozer_I,
+            initial_surface_guess=initial_surface_guess,
             nfp=banana_surf_nfp,
         )
         surface_data.append({
@@ -7064,7 +7176,12 @@ if __name__ == "__main__":
         "PLASMA_SURF_PATH": file_loc,
         "STAGE2_SOURCE": args.stage2_source,
         "STAGE2_BS_PATH": stage2_bs_path,
+        "STAGE2_SEED_SURF_PATH": stage2_seed_surf_path,
         "STAGE2_RESULTS_PATH": str(stage2_results_path),
+        "WARM_START_SURFACE_STEM": warm_start_surface_stem,
+        "WARM_START_SURFACE_PATHS": (
+            None if not warm_start_surface_paths else warm_start_surface_paths
+        ),
         STAGE2_SEED_CONTRACT_HASH_KEY: stage2_results.get("CONTRACT_HASH"),
         "STAGE2_SEED_MAJOR_RADIUS": R0,
         "STAGE2_SEED_TOROIDAL_FLUX": s,
