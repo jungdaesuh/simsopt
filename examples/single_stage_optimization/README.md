@@ -358,7 +358,7 @@ Use this for the talk-style scan from zero banana current to the optimized donor
 
 - requires `--plasma-surf-filename`
 - requires `--stage2-bs-path`
-- accepts `--banana-current-scales` as a CSV list
+- accepts `--banana-currents-A` as a CSV list in physical amperes
 - mutates the loaded donor banana current after deserialization, so reused donors are scanned correctly even though `--banana-init-current-A` only affects fresh Stage 2 generation
 - classifies each point as `success`, `poincare_only_fallback`, or `boozer_failed`
 
@@ -367,7 +367,7 @@ cd /path/to/simsopt-surrogate
 python examples/single_stage_optimization/run_banana_current_scan.py \
   --plasma-surf-filename wout_nfp10ginsburg_desc_s024match_iota20.nc \
   --stage2-bs-path /full/path/to/biot_savart_opt.json \
-  --banana-current-scales 0,0.25,0.5,0.75,1.0
+  --banana-currents-A 0,4000,8000,12000,16000
 ```
 
 Useful notes:

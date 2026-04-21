@@ -39,10 +39,9 @@ from workflow_runner_common import (  # noqa: E402
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_banana_current_scan"
 DEFAULT_SUMMARY_JSON = "banana_current_scan_summary.json"
 DEFAULT_SUMMARY_CSV = "banana_current_scan_summary.csv"
-DEFAULT_BANANA_CURRENT_SCALES = "0,0.25,0.5,0.75,1.0"
+DEFAULT_DONOR_RELATIVE_BANANA_CURRENT_SCALES = "0,0.25,0.5,0.75,1.0"
 CSV_FIELDNAMES = (
     "case_id",
-    "banana_current_scale",
     "banana_current_a",
     "classification",
     "single_stage_status",
@@ -82,12 +81,19 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         help=f"Optional summary path. Defaults to <output-root>/{DEFAULT_SUMMARY_JSON}.",
     )
     parser.add_argument(
-        "--banana-current-scales",
-        default=DEFAULT_BANANA_CURRENT_SCALES,
+        "--banana-currents-A",
+        dest="banana_currents_a",
+        default=None,
         help=(
-            "Comma-separated scale factors applied to the donor BANANA_CURRENT_A. "
-            "Default scans zero through the optimized current."
+            "Comma-separated banana-current setpoints in physical amperes. "
+            "When omitted, the scan falls back to donor-relative quartile points."
         ),
+    )
+    parser.add_argument(
+        "--banana-current-scales",
+        dest="banana_current_scales",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--summary-csv",
@@ -107,8 +113,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return build_parser().parse_args(argv)
 
 
-def _case_label(scale: float) -> str:
-    return f"banana_scale_{str(scale).replace('-', 'm').replace('.', 'p')}"
+def _case_label(banana_current_a: float) -> str:
+    token = f"{float(banana_current_a):g}".replace("-", "m").replace(".", "p")
+    return f"banana_current_{token}A"
 
 
 def _result_summary(results: dict) -> dict:
@@ -126,7 +133,6 @@ def _result_summary(results: dict) -> dict:
 def _csv_row(case_payload: dict) -> dict[str, object]:
     row = {
         "case_id": case_payload["case_id"],
-        "banana_current_scale": case_payload["banana_current_scale"],
         "banana_current_a": case_payload["banana_current_a"],
         "classification": case_payload["classification"],
         "single_stage_status": case_payload.get("single_stage_status"),
@@ -290,24 +296,51 @@ def _single_stage_case_args(
     return SimpleNamespace(**payload)
 
 
+def _scaled_banana_currents_a(
+    scale_csv: str,
+    *,
+    donor_banana_current_a: float,
+) -> list[float]:
+    return [
+        float(scale) * donor_banana_current_a
+        for scale in parse_csv(scale_csv, float)
+    ]
+
+
+def _resolved_banana_currents_a(
+    args: argparse.Namespace,
+    *,
+    donor_banana_current_a: float,
+) -> list[float]:
+    if args.banana_currents_a not in {None, ""}:
+        return parse_csv(str(args.banana_currents_a), float)
+    if args.banana_current_scales not in {None, ""}:
+        return _scaled_banana_currents_a(
+            str(args.banana_current_scales),
+            donor_banana_current_a=donor_banana_current_a,
+        )
+    return _scaled_banana_currents_a(
+        DEFAULT_DONOR_RELATIVE_BANANA_CURRENT_SCALES,
+        donor_banana_current_a=donor_banana_current_a,
+    )
+
+
 def run_current_case(
     args: argparse.Namespace,
     *,
     stage2_bs_path: Path,
     stage2_results: dict,
-    scale: float,
+    banana_current_a: float,
     output_root: Path,
     poincare_timeout_seconds: float | None,
 ) -> dict[str, object]:
-    banana_current_a = float(scale) * float(stage2_results["BANANA_CURRENT_A"])
-    case_id = _case_label(scale)
+    case_id = _case_label(banana_current_a)
     case_root = output_root / case_id
     stage2_variant_root = case_root / "stage2_variant"
     single_stage_root = case_root / "single_stage"
     fallback_root = case_root / "poincare_fallback"
     payload: dict[str, object] = {
         "case_id": case_id,
-        "banana_current_scale": float(scale),
         "banana_current_a": float(banana_current_a),
         "case_output_root": str(case_root),
         "classification": "dry_run" if args.dry_run else "boozer_failed",
@@ -428,7 +461,7 @@ def build_summary(
     stage2_bs_path: Path,
     stage2_results_path: Path,
     stage2_results: dict,
-    scales: list[float],
+    banana_currents_a: list[float],
     case_payloads: list[dict[str, object]],
     summary_csv_path: Path,
 ) -> dict[str, object]:
@@ -443,7 +476,7 @@ def build_summary(
         "stage2_results_path": str(stage2_results_path),
         "stage2_artifact_init_only": stage2_results.get("init_only"),
         "optimized_banana_current_a": stage2_results.get("BANANA_CURRENT_A"),
-        "banana_current_scales": [float(value) for value in scales],
+        "requested_banana_currents_a": [float(value) for value in banana_currents_a],
         "summary_csv": str(summary_csv_path),
         "cases": case_payloads,
     }
@@ -465,25 +498,28 @@ def main(argv: list[str] | None = None) -> int:
     stage2_bs_path, stage2_results_path, stage2_results = (
         goal_mode_runner.load_validated_stage2_seed_metadata(args)
     )
-    scales = parse_csv(args.banana_current_scales, float)
+    banana_currents_a = _resolved_banana_currents_a(
+        args,
+        donor_banana_current_a=float(stage2_results["BANANA_CURRENT_A"]),
+    )
     poincare_timeout_seconds = timeout_or_none(args.poincare_timeout_seconds)
     case_payloads = [
         run_current_case(
             args,
             stage2_bs_path=stage2_bs_path,
             stage2_results=stage2_results,
-            scale=scale,
+            banana_current_a=banana_current_a,
             output_root=output_root,
             poincare_timeout_seconds=poincare_timeout_seconds,
         )
-        for scale in scales
+        for banana_current_a in banana_currents_a
     ]
     summary = build_summary(
         args,
         stage2_bs_path=stage2_bs_path,
         stage2_results_path=stage2_results_path,
         stage2_results=stage2_results,
-        scales=scales,
+        banana_currents_a=banana_currents_a,
         case_payloads=case_payloads,
         summary_csv_path=summary_csv_path,
     )

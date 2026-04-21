@@ -149,7 +149,6 @@ def _banana_scan_rows(summary: dict | None) -> list[dict]:
     for case in summary.get("cases", []):
         row = {
             "label": case["case_id"],
-            "banana_current_scale": case["banana_current_scale"],
             "banana_current_a": case["banana_current_a"],
             "classification": case["classification"],
             "poincare_status": case.get("poincare_status"),
@@ -212,11 +211,11 @@ def _plot_banana_success_status(
 ) -> list[str]:
     points = [
         (
-            float(row["banana_current_scale"]),
+            float(row["banana_current_a"]),
             STATUS_ORDER[row["classification"]],
         )
         for row in rows
-        if row.get("banana_current_scale") is not None
+        if row.get("banana_current_a") is not None
         and row.get("classification") in STATUS_ORDER
     ]
     if not points:
@@ -227,17 +226,58 @@ def _plot_banana_success_status(
         [point[1] for point in points],
         s=48,
     )
-    axis.set_xlabel("Banana Current Scale [-]")
+    axis.set_xlabel("Banana Current [A]")
     axis.set_ylabel("Startup Outcome")
-    axis.set_title("Banana Current Scale vs Boozer Startup Outcome")
+    axis.set_title("Banana Current vs Boozer Startup Outcome")
     axis.set_yticks([STATUS_ORDER[key] for key in ("boozer_failed", "poincare_only_fallback", "success")])
     axis.set_yticklabels(["boozer_failed", "poincare_only_fallback", "success"])
     axis.grid(True, linewidth=0.4)
     return _save_figure(
         figure,
         output_root=output_root,
-        stem="banana_current_scale_vs_startup_outcome",
+        stem="banana_current_a_vs_startup_outcome",
         formats=formats,
+    )
+
+
+def _record_plot_with_legacy_alias(
+    generated_plots: dict[str, list[str]],
+    *,
+    key: str,
+    legacy_key: str,
+    paths: list[str],
+) -> None:
+    generated_plots[key] = paths
+    generated_plots[legacy_key] = paths
+
+
+def _record_banana_xy_plot(
+    generated_plots: dict[str, list[str]],
+    *,
+    suffix: str,
+    rows: list[dict],
+    y_key: str,
+    ylabel: str,
+    title: str,
+    output_root: Path,
+    formats: list[str],
+) -> None:
+    stem = f"banana_current_a_vs_{suffix}"
+    _record_plot_with_legacy_alias(
+        generated_plots,
+        key=stem,
+        legacy_key=f"banana_current_scale_vs_{suffix}",
+        paths=_plot_xy(
+            rows,
+            x_key="banana_current_a",
+            y_key=y_key,
+            xlabel="Banana Current [A]",
+            ylabel=ylabel,
+            title=title,
+            output_root=output_root,
+            stem=stem,
+            formats=formats,
+        ),
     )
 
 
@@ -368,34 +408,35 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     banana_error_key, banana_error_label = _resolved_error_metric_spec(banana_rows)
-    generated_plots["banana_current_scale_vs_qs_proxy"] = _plot_xy(
-        banana_rows,
-        x_key="banana_current_scale",
+    _record_banana_xy_plot(
+        generated_plots,
+        suffix="qs_proxy",
+        rows=banana_rows,
         y_key=banana_error_key,
-        xlabel="Banana Current Scale [-]",
         ylabel=banana_error_label,
-        title="Banana Current Scale vs QS/Error Metric",
+        title="Banana Current vs QS/Error Metric",
         output_root=output_root,
-        stem="banana_current_scale_vs_qs_proxy",
         formats=plot_formats,
     )
-    generated_plots["banana_current_scale_vs_iota"] = _plot_xy(
-        banana_rows,
-        x_key="banana_current_scale",
+    _record_banana_xy_plot(
+        generated_plots,
+        suffix="iota",
+        rows=banana_rows,
         y_key="final_iota",
-        xlabel="Banana Current Scale [-]",
         ylabel="Final Iota [-]",
-        title="Banana Current Scale vs Final Iota",
+        title="Banana Current vs Final Iota",
         output_root=output_root,
-        stem="banana_current_scale_vs_iota",
         formats=plot_formats,
     )
-    generated_plots["banana_current_scale_vs_startup_outcome"] = (
-        _plot_banana_success_status(
+    _record_plot_with_legacy_alias(
+        generated_plots,
+        key="banana_current_a_vs_startup_outcome",
+        legacy_key="banana_current_scale_vs_startup_outcome",
+        paths=_plot_banana_success_status(
             banana_rows,
             output_root=output_root,
             formats=plot_formats,
-        )
+        ),
     )
 
     field_error_rows = _external_or_fallback_field_error_rows(

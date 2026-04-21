@@ -144,7 +144,28 @@ class IotaTargetSweepTests(unittest.TestCase):
 
 
 class BananaCurrentScanTests(unittest.TestCase):
-    def test_dry_run_scales_optimized_current_and_writes_csv(self):
+    _EXPECTED_BANANA_CURRENTS_A = [0.0, 8000.0, 16000.0]
+    _EXPECTED_CASE_IDS = [
+        "banana_current_0A",
+        "banana_current_8000A",
+        "banana_current_16000A",
+    ]
+
+    def _assert_amp_based_summary_contract(self, summary: dict) -> None:
+        self.assertEqual(
+            [case["banana_current_a"] for case in summary["cases"]],
+            self._EXPECTED_BANANA_CURRENTS_A,
+        )
+        self.assertEqual(
+            [case["case_id"] for case in summary["cases"]],
+            self._EXPECTED_CASE_IDS,
+        )
+        self.assertEqual(
+            summary["requested_banana_currents_a"],
+            self._EXPECTED_BANANA_CURRENTS_A,
+        )
+
+    def test_dry_run_writes_amp_based_summary_and_csv(self):
         module = load_banana_scan_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -188,21 +209,18 @@ class BananaCurrentScanTests(unittest.TestCase):
                         str(summary_path),
                         "--summary-csv",
                         str(summary_csv_path),
-                        "--banana-current-scales",
-                        "0,0.5,1.0",
+                        "--banana-currents-A",
+                        "0,8000,16000",
                     ]
                 )
 
             self.assertEqual(result, 0)
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
-            self.assertEqual(
-                [case["banana_current_a"] for case in summary["cases"]],
-                [0.0, 8000.0, 16000.0],
-            )
+            self._assert_amp_based_summary_contract(summary)
             self.assertTrue(
                 all(case["poincare_status"] == "dry_run" for case in summary["cases"])
             )
-            self.assertIn("banana_current_scale", summary_csv_path.read_text(encoding="utf-8"))
+            self.assertIn("banana_current_a", summary_csv_path.read_text(encoding="utf-8"))
 
     def test_failed_boozer_case_can_still_report_poincare_only_fallback(self):
         module = load_banana_scan_module()
@@ -263,7 +281,7 @@ class BananaCurrentScanTests(unittest.TestCase):
                         str(tmpdir_path / "outputs"),
                         "--summary-json",
                         str(summary_path),
-                        "--banana-current-scales",
+                        "--banana-currents-A",
                         "0.0",
                     ]
                 )
@@ -274,6 +292,56 @@ class BananaCurrentScanTests(unittest.TestCase):
             self.assertEqual(case["classification"], "poincare_only_fallback")
             self.assertEqual(case["single_stage_status"], "failed")
             self.assertEqual(case["poincare_status"], "completed")
+
+    def test_legacy_scale_alias_still_writes_amp_based_summary_contract(self):
+        module = load_banana_scan_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            summary_path = tmpdir_path / "summary.json"
+            stage2_bs_path = tmpdir_path / "stage2" / "biot_savart_opt.json"
+            stage2_results_path = tmpdir_path / "stage2" / "results.json"
+
+            with patch.object(
+                module.goal_mode_runner,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path,
+                    stage2_results_path,
+                    {
+                        "PLASMA_SURF_FILENAME": "demo.nc",
+                        "BANANA_CURRENT_A": 16000.0,
+                        "init_only": False,
+                    },
+                ),
+            ), patch.object(
+                module.goal_mode_runner,
+                "run_goal_mode_case",
+                side_effect=[
+                    {"command": ["python", "single_stage.py"]},
+                    {"command": ["python", "single_stage.py"]},
+                    {"command": ["python", "single_stage.py"]},
+                ],
+            ):
+                result = module.main(
+                    [
+                        "--dry-run",
+                        "--plasma-surf-filename",
+                        "demo.nc",
+                        "--stage2-bs-path",
+                        str(stage2_bs_path),
+                        "--output-root",
+                        str(tmpdir_path / "outputs"),
+                        "--summary-json",
+                        str(summary_path),
+                        "--banana-current-scales",
+                        "0,0.5,1.0",
+                    ]
+                )
+
+            self.assertEqual(result, 0)
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            self._assert_amp_based_summary_contract(summary)
 
     def test_missing_poincare_fallback_inputs_do_not_abort_scan(self):
         module = load_banana_scan_module()
@@ -319,7 +387,7 @@ class BananaCurrentScanTests(unittest.TestCase):
                         str(tmpdir_path / "outputs"),
                         "--summary-json",
                         str(summary_path),
-                        "--banana-current-scales",
+                        "--banana-currents-A",
                         "0.0",
                     ]
                 )
@@ -599,8 +667,7 @@ class IshwPlotTests(unittest.TestCase):
                     {
                         "cases": [
                             {
-                                "case_id": "banana_scale_1p0",
-                                "banana_current_scale": 1.0,
+                                "case_id": "banana_current_16000A",
                                 "banana_current_a": 16000.0,
                                 "classification": "success",
                                 "results_summary": {
@@ -633,7 +700,19 @@ class IshwPlotTests(unittest.TestCase):
                 )
             )
             self.assertTrue(manifest["generated_plots"]["iota_target_vs_coil_length"])
-            self.assertTrue(manifest["generated_plots"]["banana_current_scale_vs_iota"])
+            self.assertTrue(manifest["generated_plots"]["banana_current_a_vs_iota"])
+            self.assertEqual(
+                manifest["generated_plots"]["banana_current_scale_vs_iota"],
+                manifest["generated_plots"]["banana_current_a_vs_iota"],
+            )
+            self.assertEqual(
+                manifest["generated_plots"]["banana_current_scale_vs_qs_proxy"],
+                manifest["generated_plots"]["banana_current_a_vs_qs_proxy"],
+            )
+            self.assertEqual(
+                manifest["generated_plots"]["banana_current_scale_vs_startup_outcome"],
+                manifest["generated_plots"]["banana_current_a_vs_startup_outcome"],
+            )
             self.assertTrue(
                 Path(
                     manifest["generated_plots"]["field_error_vs_coil_length"][0]
