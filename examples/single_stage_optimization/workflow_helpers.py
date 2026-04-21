@@ -4,13 +4,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
+from banana_opt.hardware_contracts import (
+    COIL_LENGTH_TARGET_M as DEFAULT_STAGE2_LENGTH_TARGET,
+    TARGET_LCFS_MAX_MAJOR_RADIUS_M as DEFAULT_TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+    TARGET_LCFS_MAX_MINOR_RADIUS_M as DEFAULT_TARGET_LCFS_MAX_MINOR_RADIUS_M,
+)
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_WATARU_VF_TEMPLATE_PATH = (
     SCRIPT_DIR / "banana_opt" / "wataru_vf_template.json"
 )
-DEFAULT_STAGE2_LENGTH_TARGET = 1.7
-DEFAULT_TARGET_LCFS_MAX_MAJOR_RADIUS_M = 0.92
-DEFAULT_TARGET_LCFS_MAX_MINOR_RADIUS_M = 0.15
 _FLOAT_DEFAULT_ABS_TOL = 1.0e-12
 
 

@@ -7,7 +7,7 @@ import json
 import shutil
 import sys
 import tempfile
-from dataclasses import astuple, dataclass
+from dataclasses import astuple, dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
@@ -694,7 +694,7 @@ def load_stage2_seed_biot_savart(
     )
     if int(seed_order_upgrade) == int(loaded_master_banana_curve.order):
         return bs, coil_partitions
-    upgraded_bs, _, _ = upgrade_loaded_seed_biot_savart_order(
+    upgraded_bs, _, upgraded_banana_coils = upgrade_loaded_seed_biot_savart_order(
         bs,
         banana_coils=coil_partitions.banana_coils,
         tf_coils=coil_partitions.tf_coils,
@@ -702,10 +702,9 @@ def load_stage2_seed_biot_savart(
         vf_coils=coil_partitions.vf_coils,
         new_order=int(seed_order_upgrade),
     )
-    upgraded_partitions = partition_loaded_stage2_coils(
-        upgraded_bs.coils,
-        stage2_results,
-        num_tf_coils,
+    upgraded_partitions = replace(
+        coil_partitions,
+        banana_coils=tuple(upgraded_banana_coils),
     )
     return upgraded_bs, upgraded_partitions
 
