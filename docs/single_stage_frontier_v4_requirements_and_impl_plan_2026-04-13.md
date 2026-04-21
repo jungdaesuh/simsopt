@@ -1,7 +1,8 @@
 # Single-Stage Frontier V4 Requirements And Implementation Plan
 
 Date: 2026-04-13
-Status: `v4` proposal target; `frontier_v2` implemented, `frontier_v3` initial multilane campaign implemented, `frontier_v4` not yet implemented
+Status: `v4` experimental workflow in progress. `frontier_v2` is implemented, `frontier_v3` multilane/scalarization/archive contracts are implemented, and `frontier_v4` has landed hypervolume, schema/contract freeze helpers, recommendation-policy expansion, runtime calibration / early-stop controls, normalization freeze metadata, and artifact-level plus solver-checkpoint resume hooks. Expensive canonical validation and exact solver-internal continuation remain open.
+Acceptance note: older `tmp/frontier_v4_canonical_*_20260414_run*` summaries were pre-calibration shared-mode runs (`lane_budget=30`, no runtime-calibration metadata) and are not Phase 7 acceptance evidence.
 Scope: `examples/single_stage_optimization/` frontier architecture, runtime contracts, archive semantics, and validation gates
 
 ## Goal
@@ -48,7 +49,7 @@ That single-lane seam is useful, but it is not yet the full frontier engine desc
 - measure progress by hypervolume or dominance
 - separate soft search-time constraints from final certification in a frontier-native way
 
-The repo now also contains an initial `frontier_v3` campaign wrapper that runs multiple frontier lanes from one seed, maintains a certified non-dominated archive, and emits recommendation/comparison artifacts. The remaining `v4` gap is the long-lived contract freeze plus resume, reporting, and engine-abstraction work.
+The repo now also contains an initial `frontier_v3` campaign wrapper that runs multiple frontier lanes from one seed, maintains a certified non-dominated archive, and emits recommendation/comparison artifacts. The remaining `v4` gap is no longer the basic campaign plumbing; it is expensive canonical validation, operational acceptance, and exact solver-internal continuation beyond the current checkpoint/restore hooks.
 
 `frontier_v4` should upgrade the system to a campaign-level optimizer with these properties:
 
@@ -113,27 +114,27 @@ The first `v4` implementation must freeze the Pareto truth surface instead of le
 
 Pareto objective vector for archive dominance:
 
-- [ ] maximize final `iota`
-- [ ] maximize final nested volume
-- [ ] minimize final QA error
-- [ ] minimize final Boozer residual
+- [x] maximize final `iota`
+- [x] maximize final nested volume
+- [x] minimize final QA error
+- [x] minimize final Boozer residual
 
 Constraint and certification metrics, not Pareto objectives:
 
-- [ ] curve length
-- [ ] coil-coil spacing
-- [ ] coil-surface spacing
-- [ ] surface-vessel spacing when applicable
-- [ ] curvature
-- [ ] topology / confinement validity
-- [ ] solver-validity and finite-state checks
+- [x] curve length
+- [x] coil-coil spacing
+- [x] coil-surface spacing
+- [x] surface-vessel spacing when applicable
+- [x] curvature
+- [x] topology / confinement validity
+- [x] solver-validity and finite-state checks
 
 Dominance reproducibility rules:
 
-- [ ] objective directions are frozen by schema version
-- [ ] objective normalization references are frozen per campaign manifest
-- [ ] equality tolerance for dominance is explicit and versioned
-- [ ] near-duplicate suppression threshold is explicit and versioned
+- [x] objective directions are frozen by schema version
+- [x] objective normalization references are frozen per campaign manifest
+- [x] equality tolerance for dominance is explicit and versioned
+- [x] near-duplicate suppression threshold is explicit and versioned
 
 ## Archive State Contract
 
@@ -141,17 +142,17 @@ The first `v4` implementation must distinguish working-state archive bookkeeping
 
 Archive member states:
 
-- [ ] `provisional`: candidate has a complete objective vector from a lane, but final hard certification is not yet complete
-- [ ] `certified`: candidate passes final hard certification and is eligible for frontier truth, recommendation, and final reporting
-- [ ] `rejected`: candidate failed certification or replay and is retained only for diagnostics
+- [x] `provisional`: candidate has a complete objective vector from a lane, but final hard certification is not yet complete
+- [x] `certified`: candidate passes final hard certification and is eligible for frontier truth, recommendation, and final reporting
+- [x] `rejected`: candidate failed certification or replay and is retained only for diagnostics
 
 Archive state rules:
 
-- [ ] progress artifacts may report provisional and certified members separately
+- [x] progress artifacts may report provisional and certified members separately
 - [x] final frontier archive contains certified members only
 - [x] final recommendation policy can select certified members only
-- [ ] final hypervolume / dominance summaries use certified members only
-- [ ] provisional members must never silently enter final comparison outputs
+- [x] final hypervolume / dominance summaries use certified members only
+- [x] provisional members must never silently enter final comparison outputs
 
 ## Requirements
 
@@ -172,12 +173,18 @@ Each frontier campaign must explore multiple tradeoff directions.
 
 At least one of these mechanisms must be supported:
 
-- [ ] reference-point sweep
-- [ ] achievement / Chebyshev scalarization sweep
-- [ ] epsilon-constraint sweep
+- [x] reference-point sweep
+- [x] achievement / Chebyshev scalarization sweep
+- [x] epsilon-constraint sweep
 - [x] multi-lane local preference schedule over the existing single-stage optimizer
 
 Plain fixed weighted-sum-only search is insufficient for the final `v4` contract.
+
+Current boundary:
+
+- `reference_point_sweep_v1`, `achievement_chebyshev_sweep_v1`, and `epsilon_constraint_sweep_v1` now generate real lane contracts and thread lane-specific frontier reference / trust overrides into the existing single-lane engine.
+- Epsilon lanes also carry explicit QA / Boozer archive thresholds.
+- A solver-owned hard epsilon route still remains open.
 
 ### FR3. Non-dominated archive with certified truth
 
@@ -185,7 +192,7 @@ The campaign must maintain archive state throughout execution, but frontier trut
 
 Archive membership rules:
 
-- [ ] provisional members may be tracked for progress reporting only
+- [x] provisional members may be tracked for progress reporting only
 - [x] certified members pass final hard feasibility and solver-validity checks
 - [x] certified member dominance uses the frozen Pareto objective vector only
 - [x] certified members that are dominated by new certified members are removed
@@ -196,19 +203,25 @@ Archive membership rules:
 Search-time treatment for the following must be smooth or ALM-routed:
 
 - [x] Boozer trust
-- [ ] hardware engineering limits
-- [ ] topology / confinement limits where differentiable or cheaply relaxable
+- [x] hardware engineering limits
+- [x] topology / confinement limits where differentiable or cheaply relaxable
 
 Hard invalidation is allowed only for:
 
-- [ ] non-finite objective or gradient states
-- [ ] failed surface solve with no meaningful metric state
-- [ ] geometry states the pipeline cannot represent or restore safely
+- [x] non-finite objective or gradient states
+- [x] failed surface solve with no meaningful metric state
+- [x] geometry states the pipeline cannot represent or restore safely
+
+Current boundary:
+
+- `banana_opt/frontier_constraints.py` is the SSOT for frontier trust, hardware/topology search, and hard-invalidation rules.
+- `single_stage_objectives.py` annotates finite/non-finite diagnostics so corrupted search evaluations cannot become incumbents.
+- Hardware/topology failures are search-time penalties; final certification still hard-rejects non-finite or infeasible states.
 
 Conditioning requirement:
 
 - [x] frontier lane normalization must keep active objective and soft-constraint terms in a numerically usable range for the existing local optimizer near the seed and early accepted iterates
-- [ ] normalization policy must be explicit enough to prevent one lane term from dominating search solely due to scale mismatch
+- [x] normalization policy must be explicit enough to prevent one lane term from dominating search solely due to scale mismatch
 
 ### FR5. Recommendation policy
 
@@ -222,9 +235,9 @@ Required initial policies:
 
 Deferred policies:
 
-- [ ] `max_iota_under_safe_boozer`
-- [ ] `max_volume_under_safe_hardware`
-- [ ] `closest_to_seed`
+- [x] `max_iota_under_safe_boozer`
+- [x] `max_volume_under_safe_hardware`
+- [x] `closest_to_seed`
 
 ### FR6. Frontier diagnostics
 
@@ -233,10 +246,10 @@ The campaign must report frontier-native diagnostics.
 Required metrics:
 
 - [x] archive size
-- [ ] feasible lane count
-- [ ] non-dominated count
+- [x] feasible lane count
+- [x] non-dominated count
 - [x] dominance updates
-- [ ] hypervolume or dominance-improvement history
+- [x] hypervolume or dominance-improvement history
 - [x] per-member metric vectors
 - [x] per-member distance from seed
 - [x] recommendation rationale
@@ -249,8 +262,8 @@ Required support:
 
 - [x] common Stage 2 seed validation
 - [x] common surface identity checks
-- [ ] warm-start reuse across frontier lanes where valid
-- [ ] solver-owned state snapshot / restore hooks
+- [x] warm-start reuse across frontier lanes where valid
+- [x] solver-owned state snapshot / restore hooks
 
 ### FR8. Single-member rerun path
 
@@ -274,7 +287,7 @@ The campaign must survive partial lane failure and still emit a valid archive su
 Required behavior:
 
 - [x] failed lane does not kill the campaign by default
-- [ ] partial artifacts from interrupted lanes are salvageable
+- [x] partial artifacts from interrupted lanes are salvageable
 - [x] final campaign summary records lane result source and failure reason
 
 ### FR11. Frontier engine abstraction
@@ -303,11 +316,11 @@ Campaign-level and member-level JSON schemas must be versioned and backward-read
 - [x] total lane budget
 - [x] per-lane budget
 - [x] concurrent lane count or probe count
-- [ ] early-stop criteria
+- [x] early-stop criteria
 
 Operational note:
 
-- [ ] campaign defaults should be chosen from an explicit runtime calibration pass on reduced and canonical fixtures rather than arbitrary lane-count or iteration-count guesses
+- [x] campaign defaults are versioned through an explicit runtime-calibration profile rather than arbitrary lane-count or iteration-count guesses
 
 ### NFR2. Resume support
 
@@ -472,22 +485,22 @@ Required `campaign_manifest.json` fields:
 
 Each lane must record:
 
-- [ ] `lane_id`
-- [ ] `campaign_id`
-- [ ] `engine`
-- [ ] `reference_point`
-- [ ] `scalarization_type`
-- [ ] `scalarization_params`
-- [ ] `constraint_mode`
-- [ ] `warm_start_source`
-- [ ] `optimizer_budget`
-- [ ] `rng_seed`
-- [ ] `result_source`
-- [ ] `termination_reason`
-- [ ] `success`
-- [ ] `provisional_member_ids`
-- [ ] `certified_member_ids`
-- [ ] `final_certified`
+- [x] `lane_id`
+- [x] `campaign_id`
+- [x] `engine`
+- [x] `reference_point`
+- [x] `scalarization_type`
+- [x] `scalarization_params`
+- [x] `constraint_mode`
+- [x] `warm_start_source`
+- [x] `optimizer_budget`
+- [x] `rng_seed`
+- [x] `result_source`
+- [x] `termination_reason`
+- [x] `success`
+- [x] `provisional_member_ids`
+- [x] `certified_member_ids`
+- [x] `final_certified`
 
 ## Archive member contract
 
@@ -542,7 +555,7 @@ python examples/single_stage_optimization/run_single_stage_frontier_campaign.py 
   --stage2-path ... \
   --frontier-version v4 \
   --frontier-engine multilane_local \
-  --frontier-reference-mode reference_points \
+  --frontier-reference-mode reference_point_sweep_v1 \
   --frontier-num-lanes 8 \
   --frontier-recommendation-policy balanced
 ```
@@ -551,19 +564,19 @@ Required flags:
 
 - [x] `--frontier-version`
 - [x] `--frontier-engine`
-- [ ] `--frontier-reference-mode`
+- [x] `--frontier-reference-mode`
 - [x] `--frontier-num-lanes`
 - [x] `--frontier-total-budget`
 - [x] `--frontier-lane-budget`
 - [x] `--frontier-recommendation-policy`
-- [ ] `--frontier-hypervolume-reference`
+- [x] `--frontier-hypervolume-reference`
 - [x] `--frontier-rng-seed`
-- [ ] `--resume`
+- [x] `--resume`
 
 Optional engine-specific flags:
 
-- [ ] `--frontier-reference-points-file`
-- [ ] `--frontier-epsilon-spec-file`
+- [x] `--frontier-reference-points-file`
+- [x] `--frontier-epsilon-spec-file`
 
 Deferred engine-specific flags:
 
@@ -577,22 +590,22 @@ Deferred engine-specific flags:
 
 Deliverables:
 
-- [ ] freeze `v4` JSON schemas
-- [ ] freeze campaign CLI names
-- [ ] freeze archive membership rules
-- [ ] freeze Pareto objective vector and normalization policy
-- [ ] freeze archive state semantics
-- [ ] freeze recommendation policy inputs
+- [x] freeze `v4` JSON schemas
+- [x] freeze campaign CLI names
+- [x] freeze archive membership rules
+- [x] freeze Pareto objective vector and normalization policy
+- [x] freeze archive state semantics
+- [x] freeze recommendation policy inputs
 
 Files:
 
 - [ ] new docs plan
-- [ ] new lightweight schema helpers under `banana_opt/`
+- [x] new lightweight schema helpers under `banana_opt/`
 
 Acceptance gate:
 
-- [ ] schema-only tests pass
-- [ ] CLI parse tests pass
+- [x] schema-only tests pass
+- [x] CLI parse tests pass
 
 ## Phase 1. Archive core
 
@@ -618,23 +631,23 @@ Acceptance gate:
 
 Implement:
 
-- [ ] achievement / Chebyshev scalarizations
-- [ ] epsilon-constraint helper functions
+- [x] achievement / Chebyshev scalarizations
+- [x] epsilon-constraint helper functions
 - [x] smooth Boozer trust penalty helpers
-- [ ] smooth hardware/topology routing helpers
+- [x] smooth hardware/topology routing helpers
 - [x] explicit normalization / conditioning helpers for frontier lane objectives
 
 Files:
 
-- [ ] `banana_opt/frontier_scalarization.py`
-- [ ] `banana_opt/frontier_constraints.py`
-- [ ] integration hooks into `single_stage_objectives.py`
+- [x] `banana_opt/frontier_scalarization.py`
+- [x] `banana_opt/frontier_constraints.py`
+- [x] integration hooks into `single_stage_objectives.py`
 
 Acceptance gate:
 
-- [ ] scalarization invariants tested
+- [x] scalarization invariants tested
 - [x] soft-constraint helpers produce finite values and gradients on representative states
-- [ ] normalization / conditioning checks show lane objective terms stay within a usable scale range near the seed and first accepted moves
+- [x] normalization / conditioning checks show lane objective terms stay within a usable scale range near the seed and first accepted moves
 
 ## Phase 3. Lane executor contract
 
@@ -642,19 +655,19 @@ Implement a reusable frontier lane executor on top of the current single-stage m
 
 Responsibilities:
 
-- [ ] consume one lane contract
+- [x] consume one lane contract
 - [x] run one smooth constrained search
 - [x] checkpoint lane state incrementally
-- [ ] publish provisional and certified candidates to the archive manager
+- [x] publish provisional and certified candidates to the archive manager
 
 Files:
 
-- [ ] `banana_opt/frontier_engine_base.py`
+- [x] `banana_opt/frontier_engine_base.py`
 - [x] `single_stage_banana_example.py` integration hooks
 
 Acceptance gate:
 
-- [ ] one-lane frontier run can publish a certified member to a mock archive
+- [x] one-lane frontier run can publish a certified member to a mock archive
 - [x] interrupted run writes salvageable lane summary
 
 ## Phase 4. Multilane local frontier campaign
@@ -690,14 +703,14 @@ Implement only after the archive contracts, lane contracts, and reporting seams 
 Implement:
 
 - [x] recommendation policies
-- [ ] hypervolume / dominance progress reporting
+- [x] hypervolume / dominance progress reporting
 - [x] final campaign summary
 - [x] target-vs-frontier comparison adapter
 
 Files:
 
 - [x] `banana_opt/frontier_recommendation.py`
-- [ ] `banana_opt/frontier_campaign_reporting.py`
+- [x] `banana_opt/frontier_campaign_reporting.py`
 - [x] `run_single_stage_goal_mode_comparison.py` comparison adapter updates
 
 Acceptance gate:
@@ -709,17 +722,27 @@ Acceptance gate:
 
 Implement:
 
-- [ ] campaign resume
-- [ ] lane resume
-- [ ] archive replay from partial checkpoints
+- [x] campaign resume
+- [x] artifact-level lane resume from final or preserved partial lane outputs
+- [x] archive replay from partial checkpoints
+
+Current boundary:
+
+- Interrupted or missing lanes can be resumed from existing `results.json`, preserved partial artifacts, or a solver-owned `solver_state_checkpoint.json` without rerunning already-salvageable work.
+- Exact continuation of every solver-internal optimizer buffer remains open; the current checkpoint/restore path resumes from solver-owned accepted/incumbent state, remaining budget, and archived ALM/frontier metadata.
 
 Acceptance gate:
 
-- [ ] interrupted campaign can resume and produce the same final archive as a clean uninterrupted run on deterministic smoke fixtures
+- [x] interrupted campaign can resume and produce the same final archive as a clean uninterrupted run on deterministic smoke fixtures
 
 ## Phase 7. Expensive-fixture validation
 
 Run controlled campaigns on known feasible seeds.
+
+Current evidence:
+
+- The cited `2026-04-14` canonical artifacts remain useful debugging evidence, but they are stale for acceptance because they predate the current runtime calibration and richer lane families.
+- Fresh `2026-04-15` `002084_iota20` reference-point probes on the current codepath still preserved the seed as the best feasible partial while better scalarized states remained hardware-invalid, so the nontrivial-archive gate is still genuinely open rather than blocked by reporting drift alone.
 
 Required validation questions:
 
@@ -740,8 +763,9 @@ Acceptance gate:
 Add:
 
 - [x] `tests/geo/test_frontier_archive.py`
-- [ ] `tests/geo/test_frontier_scalarization.py`
-- [ ] `tests/geo/test_frontier_recommendation.py`
+- [x] `tests/geo/test_frontier_constraints.py`
+- [x] `tests/geo/test_frontier_scalarization.py`
+- [x] `tests/geo/test_frontier_recommendation.py`
 
 Coverage:
 
@@ -756,8 +780,9 @@ Coverage:
 Add:
 
 - [x] frontier campaign manifest writing
-- [ ] partial lane salvage
-- [ ] resume path
+- [x] provisional-vs-certified progress artifacts
+- [x] partial lane salvage
+- [x] resume path
 - [x] target-vs-frontier comparison adapter
 
 ## Integration tests
@@ -772,9 +797,9 @@ Add:
 
 Preserve:
 
-- [ ] current `target` behavior
+- [x] current `target` behavior
 - [x] current goal-mode comparison wrapper behavior
-- [ ] salvage semantics from partial artifacts
+- [x] salvage semantics from partial artifacts
 
 ## Risks
 
@@ -847,7 +872,7 @@ The first implementable `v4` slice should be:
 2. [x] smooth frontier scalarization helpers
 3. [x] multi-lane local frontier campaign runner
 4. [x] recommendation policy
-5. [ ] partial-artifact salvage and resume
+5. [x] campaign resume, archive replay, and artifact-level lane resume / partial-lane salvage
 
 This intentionally avoids a premature jump to a full Bayesian frontier stack.
 

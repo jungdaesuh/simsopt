@@ -10,6 +10,34 @@ PARETO_OBJECTIVE_SPECS = (
     ("boozer_residual", "min", "BOOZER_RESIDUAL"),
 )
 
+PARETO_OBJECTIVE_NORMALIZATION_SCHEMA_VERSION = "frontier_pareto_normalization_v1"
+PARETO_OBJECTIVE_NORMALIZATION_RULES = {
+    "iota": {
+        "direction": "max",
+        "scale_kind": "reference_fraction_with_floor",
+        "reference_fraction": 0.25,
+        "floor": 0.05,
+    },
+    "volume": {
+        "direction": "max",
+        "scale_kind": "reference_fraction_with_floor",
+        "reference_fraction": 0.10,
+        "floor": 0.01,
+    },
+    "qa_error": {
+        "direction": "min",
+        "scale_kind": "reference_fraction_with_floor",
+        "reference_fraction": 1.0,
+        "floor": 1.0e-6,
+    },
+    "boozer_residual": {
+        "direction": "min",
+        "scale_kind": "reference_fraction_with_floor",
+        "reference_fraction": 1.0,
+        "floor": 1.0e-6,
+    },
+}
+
 REFERENCE_METRIC_FIELDS = {
     "iota": "FRONTIER_REFERENCE_IOTA",
     "volume": "FRONTIER_REFERENCE_VOLUME",
@@ -157,15 +185,37 @@ def normalized_objective_distance(
 
 
 def objective_metric_scale(metric_name: str, reference_value: float | None) -> float:
+    rules = PARETO_OBJECTIVE_NORMALIZATION_RULES[metric_name]
     base = 0.0 if reference_value is None else abs(float(reference_value))
-    if metric_name == "iota":
-        return max(base * 0.25, 0.05)
-    if metric_name == "volume":
-        return max(base * 0.10, 0.01)
-    return max(base, 1.0e-6)
+    return max(
+        base * float(rules["reference_fraction"]),
+        float(rules["floor"]),
+    )
 
 
 def objective_metric_direction_map() -> dict[str, str]:
     return {
         metric_name: direction for metric_name, direction, _ in PARETO_OBJECTIVE_SPECS
+    }
+
+
+def build_pareto_objective_normalization(
+    reference_metrics: Mapping[str, float] | None,
+) -> dict[str, object]:
+    resolved_reference_metrics = None
+    if reference_metrics is not None:
+        resolved_reference_metrics = {
+            metric_name: float(reference_metrics[metric_name])
+            for metric_name, _, _ in PARETO_OBJECTIVE_SPECS
+            if reference_metrics.get(metric_name) is not None
+        }
+    return {
+        "schema_version": PARETO_OBJECTIVE_NORMALIZATION_SCHEMA_VERSION,
+        "kind": "seed_relative_reference_fraction_with_floor",
+        "distance_metric": "euclidean",
+        "reference_metrics": resolved_reference_metrics,
+        "metric_rules": {
+            metric_name: dict(rule_payload)
+            for metric_name, rule_payload in PARETO_OBJECTIVE_NORMALIZATION_RULES.items()
+        },
     }

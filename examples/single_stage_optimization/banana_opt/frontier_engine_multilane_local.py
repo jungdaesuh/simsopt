@@ -16,6 +16,27 @@ class FrontierLaneSpec:
     def to_json_dict(self) -> dict[str, object]:
         return asdict(self)
 
+    @classmethod
+    def from_json_dict(
+        cls,
+        payload: dict[str, object],
+    ) -> FrontierLaneSpec:
+        scalarization_params_payload = payload.get("scalarization_params", {})
+        return cls(
+            lane_id=str(payload["lane_id"]),
+            scalarization_type=str(payload["scalarization_type"]),
+            scalarization_params={
+                str(key): float(value)
+                for key, value in scalarization_params_payload.items()
+            },
+            iotas_weight=float(payload["iotas_weight"]),
+            frontier_volume_weight=float(payload["frontier_volume_weight"]),
+            res_weight=float(payload["res_weight"]),
+            lane_budget=None
+            if payload.get("lane_budget") is None
+            else int(payload["lane_budget"]),
+        )
+
 
 def generate_multilane_local_specs(
     *,
