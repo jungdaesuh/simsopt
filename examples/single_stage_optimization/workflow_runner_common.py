@@ -122,11 +122,6 @@ class Stage2ArtifactConfig:
             self.toroidal_flux,
             field_name="Stage2ArtifactConfig.toroidal_flux",
         )
-        object.__setattr__(
-            self,
-            "vf_template_path",
-            resolve_wataru_vf_template_path(self.vf_template_path),
-        )
         if self.stage2_iota_mode != "off" and self.stage2_iota_target is None:
             raise ValueError(
                 "Stage2ArtifactConfig.stage2_iota_target is required when "
@@ -146,6 +141,12 @@ class Stage2ArtifactConfig:
                 "Stage2ArtifactConfig.stage2_iota_mode='alm' requires "
                 "constraint_method='alm'."
             )
+
+    @property
+    def effective_vf_template_path(self) -> str | None:
+        # Fresh Stage 2 wrappers materialize the repo-default VF template only
+        # when building command/identity artifacts; keep the stored field raw.
+        return resolve_wataru_vf_template_path(self.vf_template_path)
 
 
 def parse_csv(raw: str, cast: Callable[[str], T]) -> list[T]:
@@ -174,7 +175,7 @@ def build_stage2_seed_spec(config: Stage2ArtifactConfig) -> Stage2SeedSpec:
         finite_current_mode=config.finite_current_mode,
         proxy_plasma_current_A=config.proxy_plasma_current_A,
         vf_current_A=config.vf_current_A,
-        vf_template_path=config.vf_template_path,
+        vf_template_path=config.effective_vf_template_path,
         target_lcfs_max_major_radius_m=config.target_lcfs_max_major_radius_m,
         target_lcfs_max_minor_radius_m=config.target_lcfs_max_minor_radius_m,
     )
@@ -276,8 +277,9 @@ def build_stage2_command(
         )
     if abs(float(config.vf_current_A)) > 1.0e-12:
         command.extend(["--vf-current-A", str(config.vf_current_A)])
-    if config.vf_template_path not in {None, ""}:
-        command.extend(["--vf-template-path", str(config.vf_template_path)])
+    effective_vf_template_path = config.effective_vf_template_path
+    if effective_vf_template_path not in {None, ""}:
+        command.extend(["--vf-template-path", str(effective_vf_template_path)])
     if config.equilibria_dir is not None:
         command.extend(["--equilibria-dir", config.equilibria_dir])
     if constraint_profile_label not in {None, ""}:

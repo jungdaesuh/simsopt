@@ -47,17 +47,31 @@ def _args(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
+def _legacy_zero_vf_donor_results():
+    return {
+        "FINITE_CURRENT_MODE": "wataru_proxy_field",
+        "PROXY_PLASMA_CURRENT_A": 0.0,
+        "VF_CURRENT_A": 0.0,
+        "VF_TEMPLATE_PATH": None,
+        "NUM_VF_COILS": 0,
+    }
+
+
+def _full_vf_donor_results():
+    return {
+        "FINITE_CURRENT_MODE": "wataru_proxy_field",
+        "PROXY_PLASMA_CURRENT_A": -1.0e3,
+        "VF_CURRENT_A": 3.0e3,
+        "VF_TEMPLATE_PATH": "/recorded/donor_vf_template.json",
+        "NUM_VF_COILS": 4,
+    }
+
+
 class SeededRestartTrustsDonorMetadataTests(unittest.TestCase):
     def test_legacy_zero_vf_donor_keeps_null_vf_template_path(self):
         # Legacy donor: no VF template recorded, no VF coils in the artifact.
         # Restart must NOT silently upgrade to the bundled default.
-        donor_results = {
-            "FINITE_CURRENT_MODE": "wataru_proxy_field",
-            "PROXY_PLASMA_CURRENT_A": 0.0,
-            "VF_CURRENT_A": 0.0,
-            "VF_TEMPLATE_PATH": None,
-            "NUM_VF_COILS": 0,
-        }
+        donor_results = _legacy_zero_vf_donor_results()
 
         config = stage2_solver._resolve_stage2_finite_current_config(
             _args(stage2_bs_path="/some/donor.json"),
@@ -69,40 +83,59 @@ class SeededRestartTrustsDonorMetadataTests(unittest.TestCase):
         self.assertEqual(config.proxy_plasma_current_A, 0.0)
 
     def test_full_vf_donor_roundtrips_its_recorded_template(self):
-        donor_template = "/recorded/donor_vf_template.json"
-        donor_results = {
-            "FINITE_CURRENT_MODE": "wataru_proxy_field",
-            "PROXY_PLASMA_CURRENT_A": -1.0e3,
-            "VF_CURRENT_A": 3.0e3,
-            "VF_TEMPLATE_PATH": donor_template,
-            "NUM_VF_COILS": 4,
-        }
+        donor_results = _full_vf_donor_results()
 
         config = stage2_solver._resolve_stage2_finite_current_config(
             _args(stage2_bs_path="/some/donor.json"),
             stage2_results=donor_results,
         )
 
-        self.assertEqual(config.vf_template_path, donor_template)
+        self.assertEqual(config.vf_template_path, donor_results["VF_TEMPLATE_PATH"])
 
-    def test_explicit_cli_path_overrides_donor_on_restart(self):
-        donor_results = {
-            "FINITE_CURRENT_MODE": "wataru_proxy_field",
-            "PROXY_PLASMA_CURRENT_A": 0.0,
-            "VF_CURRENT_A": 0.0,
-            "VF_TEMPLATE_PATH": None,
-            "NUM_VF_COILS": 0,
-        }
+    def test_legacy_zero_vf_donor_rejects_cli_vf_template_override(self):
+        donor_results = _legacy_zero_vf_donor_results()
 
-        config = stage2_solver._resolve_stage2_finite_current_config(
-            _args(
-                stage2_bs_path="/some/donor.json",
-                vf_template_path="/cli/override.json",
-            ),
-            stage2_results=donor_results,
-        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "Legacy zero-VF Stage 2 donors cannot override --vf-template-path",
+        ):
+            stage2_solver._resolve_stage2_finite_current_config(
+                _args(
+                    stage2_bs_path="/some/donor.json",
+                    vf_template_path="/cli/override.json",
+                ),
+                stage2_results=donor_results,
+            )
 
-        self.assertEqual(config.vf_template_path, "/cli/override.json")
+    def test_seeded_restart_rejects_cli_path_mismatch_against_recorded_template(self):
+        donor_results = _full_vf_donor_results()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"--vf-template-path=.*does not match the loaded Stage 2 artifact metadata value",
+        ):
+            stage2_solver._resolve_stage2_finite_current_config(
+                _args(
+                    stage2_bs_path="/some/donor.json",
+                    vf_template_path="/cli/override.json",
+                ),
+                stage2_results=donor_results,
+            )
+
+    def test_seeded_restart_rejects_cli_numeric_mismatch_against_recorded_current(self):
+        donor_results = _full_vf_donor_results()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"--vf-current-A=.*does not match the loaded Stage 2 artifact metadata value",
+        ):
+            stage2_solver._resolve_stage2_finite_current_config(
+                _args(
+                    stage2_bs_path="/some/donor.json",
+                    vf_current_A=2.5e3,
+                ),
+                stage2_results=donor_results,
+            )
 
 
 class FreshRunAutoResolvesBundledTemplateTests(unittest.TestCase):

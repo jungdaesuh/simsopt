@@ -1280,6 +1280,16 @@ def _resolve_seeded_path_field(cli_value, artifact_value, *, field_name):
     return cli_value
 
 
+def _is_legacy_zero_vf_donor(stage2_results):
+    vf_current_A = stage2_results.get("VF_CURRENT_A")
+    num_vf_coils = stage2_results.get("NUM_VF_COILS")
+    return (
+        stage2_results.get("VF_TEMPLATE_PATH") in {None, ""}
+        and float(0.0 if vf_current_A is None else vf_current_A) == 0.0
+        and int(0 if num_vf_coils is None else num_vf_coils) == 0
+    )
+
+
 def _resolve_stage2_finite_current_config(
     args,
     *,
@@ -1333,6 +1343,14 @@ def _resolve_stage2_finite_current_config(
             stage2_results.get("VF_CURRENT_A"),
             field_name="--vf-current-A",
         )
+        if (
+            requested_vf_template_path not in {None, ""}
+            and _is_legacy_zero_vf_donor(stage2_results)
+        ):
+            raise ValueError(
+                "Legacy zero-VF Stage 2 donors cannot override --vf-template-path "
+                "on restart; migrate the artifact to a full-VF layout first."
+            )
         vf_template_path = _resolve_seeded_path_field(
             requested_vf_template_path,
             stage2_results.get("VF_TEMPLATE_PATH"),

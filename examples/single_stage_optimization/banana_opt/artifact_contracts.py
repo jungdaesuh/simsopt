@@ -362,7 +362,7 @@ def expected_locked_baseline_stage2_artifact_metadata(
         ),
         "PROXY_PLASMA_CURRENT_A": config.proxy_plasma_current_A,
         "VF_CURRENT_A": config.vf_current_A,
-        "VF_TEMPLATE_PATH": config.vf_template_path,
+        "VF_TEMPLATE_PATH": config.effective_vf_template_path,
         "MAJOR_RADIUS": config.major_radius,
         "TOROIDAL_FLUX": config.toroidal_flux,
         "LENGTH_WEIGHT": config.length_weight,

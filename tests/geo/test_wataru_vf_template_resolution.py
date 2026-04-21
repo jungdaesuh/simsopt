@@ -64,17 +64,13 @@ class Stage2SeedSpecVfTemplateResolutionTests(unittest.TestCase):
         kwargs.update(overrides)
         return workflow_helpers.Stage2SeedSpec(**kwargs)
 
-    def test_auto_resolves_bundled_template_at_zero_current(self):
+    def test_preserves_null_template_path_at_zero_current(self):
         spec = self._minimal_spec(
             proxy_plasma_current_A=0.0,
             vf_current_A=0.0,
             vf_template_path=None,
         )
-        self.assertIsNotNone(spec.vf_template_path)
-        self.assertEqual(
-            Path(spec.vf_template_path),
-            workflow_helpers.DEFAULT_WATARU_VF_TEMPLATE_PATH,
-        )
+        self.assertIsNone(spec.vf_template_path)
 
     def test_preserves_explicit_template_path(self):
         spec = self._minimal_spec(vf_template_path="/explicit/vf_template.json")
@@ -106,13 +102,13 @@ class FormatStage2FiniteCurrentSuffixTests(unittest.TestCase):
             vf_template_path=vf_template_path,
         )
 
-    def test_baseline_stays_unsuffixed_even_with_resolved_template(self):
+    def test_baseline_stays_unsuffixed_with_null_template(self):
         spec = self._spec(
             proxy_plasma_current_A=0.0,
             vf_current_A=0.0,
-            vf_template_path=None,  # auto-resolves to bundled path
+            vf_template_path=None,
         )
-        self.assertIsNotNone(spec.vf_template_path)
+        self.assertIsNone(spec.vf_template_path)
         self.assertEqual(workflow_helpers.format_stage2_finite_current_suffix(spec), "")
 
     def test_nonzero_plasma_current_emits_suffix(self):

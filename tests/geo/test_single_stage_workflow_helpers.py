@@ -748,7 +748,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             helpers.default_wataru_vf_template_path(),
         )
 
-    def test_stage2_artifact_config_normalizes_repo_default_vf_template_for_identity(self):
+    def test_stage2_artifact_config_preserves_raw_template_and_resolves_identity_default(self):
         common = load_workflow_common_module()
         baseline = load_baseline_sweep_module()
         helpers = load_workflow_helpers_module()
@@ -780,8 +780,9 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             vf_template_path=None,
         )
 
+        self.assertIsNone(config.vf_template_path)
         self.assertEqual(
-            config.vf_template_path,
+            config.effective_vf_template_path,
             helpers.default_wataru_vf_template_path(),
         )
         artifact_path = common.resolve_stage2_artifact_path(config)

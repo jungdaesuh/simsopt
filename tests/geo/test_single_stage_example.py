@@ -8175,6 +8175,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "stage2_iota_ntor": 6,
             "length_weight": 5e-4,
             "length_target": 1.7,
+            "allow_offspec_engineering_constraints": False,
             "target_lcfs_max_major_radius_m": 0.92,
             "target_lcfs_max_minor_radius_m": 0.15,
             "cc_threshold": 0.05,
@@ -8376,7 +8377,6 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             gamma=lambda: np.ones((2, 2, 3), dtype=float) * 0.1,
             to_vtk=lambda *_a, **_k: None,
         )
-        fake_curve_names = ["curve_a", "curve_b", "curve_c"]
         fake_banana_curve = SimpleNamespace(
             order=2,
             kappa=lambda: np.array([39.0, 41.0], dtype=float),
@@ -8386,39 +8386,48 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         ]
         fake_tf_coils = self._make_fake_tf_coils(FakeCurve, FakeCurrent)
 
-        def build_coil_bundle(*, wataru_proxy_field):
-            proxy_coils = []
-            vf_coils = []
-            curves = list(fake_curve_names)
-            if wataru_proxy_field:
-                proxy_coils = [
-                    SimpleNamespace(curve="proxy_curve", current=FakeCurrent(9000.0))
-                ]
-                vf_coils = [
-                    SimpleNamespace(curve="vf_curve", current=FakeCurrent(-500.0))
-                ]
-                curves = [
-                    *(f"tf_curve_{index}" for index in range(20)),
-                    fake_banana_curve,
-                    "proxy_curve",
-                    "vf_curve",
-                ]
+        def seed_results_payload():
+            return (
+                {
+                    "FINITE_CURRENT_MODE": "wataru_proxy_field",
+                    "NUM_PROXY_COILS": 1,
+                    "NUM_VF_COILS": 1,
+                }
+                if seed_stage2_results is None
+                else dict(seed_stage2_results)
+            )
+
+        def build_coil_bundle(*, num_proxy_coils, num_vf_coils):
+            proxy_coils = [
+                SimpleNamespace(
+                    curve=f"proxy_curve_{index}",
+                    current=FakeCurrent(9000.0),
+                )
+                for index in range(int(num_proxy_coils))
+            ]
+            vf_coils = [
+                SimpleNamespace(
+                    curve=f"vf_curve_{index}",
+                    current=FakeCurrent(-500.0),
+                )
+                for index in range(int(num_vf_coils))
+            ]
+            curves = [
+                *(coil.curve for coil in fake_tf_coils),
+                fake_banana_curve,
+                *(coil.curve for coil in proxy_coils),
+                *(coil.curve for coil in vf_coils),
+            ]
             return curves, proxy_coils, vf_coils
 
         def fake_seed_loader(seed_bs_path, surf, num_tf_coils, out_dir, **_kwargs):
             runtime["seed_loads"] += 1
             self.assertEqual(num_tf_coils, 20)
             self.assertIs(surf, fake_working_surface)
-            effective_seed_stage2_results = (
-                seed_stage2_results
-                if seed_stage2_results is not None
-                else {"FINITE_CURRENT_MODE": "wataru_proxy_field"}
-            )
+            seed_results = seed_results_payload()
             curves, proxy_coils, vf_coils = build_coil_bundle(
-                wataru_proxy_field=(
-                    effective_seed_stage2_results.get("FINITE_CURRENT_MODE")
-                    == "wataru_proxy_field"
-                ),
+                num_proxy_coils=seed_results.get("NUM_PROXY_COILS", 0),
+                num_vf_coils=seed_results.get("NUM_VF_COILS", 0),
             )
             fake_bs.coils = [*fake_tf_coils, *fake_banana_coils, *proxy_coils, *vf_coils]
             return (
@@ -8462,7 +8471,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             # Proxy is always built; VF is built iff vf_template_path is set —
             # that kwarg is the SSOT the mock must mirror.
             curves, proxy_coils, vf_coils = build_coil_bundle(
-                wataru_proxy_field=bool(extra_kwargs.get("vf_template_path")),
+                num_proxy_coils=1,
+                num_vf_coils=1 if extra_kwargs.get("vf_template_path") else 0,
             )
             fake_bs.coils = [*fake_tf_coils, *fake_banana_coils, *proxy_coils, *vf_coils]
             return (
@@ -8678,18 +8688,13 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 for patcher in common_patches:
                     stack.enter_context(patcher)
                 if use_seed and seed_has_results_sidecar:
-                    effective_seed_stage2_results = (
-                        seed_stage2_results
-                        if seed_stage2_results is not None
-                        else {"FINITE_CURRENT_MODE": "wataru_proxy_field"}
-                    )
                     stack.enter_context(
                         patch.object(
                             module,
                             "load_stage2_seed_results",
                             return_value=(
                                 Path(stage2_bs_path).with_name("results.json"),
-                                dict(effective_seed_stage2_results),
+                                seed_results_payload(),
                             ),
                         )
                     )
@@ -8878,6 +8883,45 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertEqual(runtime["results"]["FINITE_CURRENT_MODE"], "wataru_proxy_field")
         self.assertEqual(runtime["results"]["NUM_PROXY_COILS"], 1)
         self.assertEqual(runtime["results"]["NUM_VF_COILS"], 1)
+        self.assertEqual(len(runtime["curve_curve_curves"]), 1)
+        self.assertEqual(len(runtime["curve_surface_curves"]), 1)
+        self.assertEqual(
+            runtime["curve_surface_curves"][0],
+            runtime["curve_curve_curves"][0],
+        )
+
+    def test_stage2_main_init_only_legacy_zero_vf_seed_restart_keeps_donor_partition(self):
+        runtime = self._run_stage2_main(
+            init_only=True,
+            constraint_method="penalty",
+            use_seed=True,
+            arg_overrides={"finite_current_mode": "wataru_proxy_field"},
+            seed_stage2_results={
+                "PLASMA_SURF_FILENAME": "demo.nc",
+                "TF_CURRENT_A": 8.0e4,
+                "NUM_TF_COILS": 20,
+                "NUM_BANANA_COILS": 1,
+                "NUM_PROXY_COILS": 1,
+                "NUM_VF_COILS": 0,
+                "FINITE_CURRENT_MODE": "wataru_proxy_field",
+                "BOOZER_CURRENT_CONVENTION": "mu0",
+                "PROXY_PLASMA_CURRENT_A": 0.0,
+                "VF_CURRENT_A": 0.0,
+                "VF_TEMPLATE_PATH": None,
+            },
+        )
+
+        self._assert_init_only_runtime_counts(
+            runtime,
+            seed_loads=1,
+            initialize_calls=0,
+        )
+        self.assertEqual(runtime["results"]["FINITE_CURRENT_MODE"], "wataru_proxy_field")
+        self.assertEqual(runtime["results"]["NUM_PROXY_COILS"], 1)
+        self.assertEqual(runtime["results"]["NUM_VF_COILS"], 0)
+        self.assertEqual(runtime["results"]["PROXY_PLASMA_CURRENT_A"], 0.0)
+        self.assertEqual(runtime["results"]["VF_CURRENT_A"], 0.0)
+        self.assertIsNone(runtime["results"]["VF_TEMPLATE_PATH"])
         self.assertEqual(len(runtime["curve_curve_curves"]), 1)
         self.assertEqual(len(runtime["curve_surface_curves"]), 1)
         self.assertEqual(

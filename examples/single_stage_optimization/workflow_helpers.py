@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
+
+# Allow direct file-based loading from tests/scripts without package install.
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 from banana_opt.hardware_contracts import (
     COIL_LENGTH_TARGET_M as DEFAULT_STAGE2_LENGTH_TARGET,
@@ -10,7 +16,6 @@ from banana_opt.hardware_contracts import (
     TARGET_LCFS_MAX_MINOR_RADIUS_M as DEFAULT_TARGET_LCFS_MAX_MINOR_RADIUS_M,
 )
 
-SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_WATARU_VF_TEMPLATE_PATH = (
     SCRIPT_DIR / "banana_opt" / "wataru_vf_template.json"
 )
@@ -84,11 +89,6 @@ class Stage2SeedSpec:
                 self.toroidal_flux,
                 field_name="Stage2SeedSpec.toroidal_flux",
             ),
-        )
-        object.__setattr__(
-            self,
-            "vf_template_path",
-            resolve_wataru_vf_template_path(self.vf_template_path),
         )
 
 
