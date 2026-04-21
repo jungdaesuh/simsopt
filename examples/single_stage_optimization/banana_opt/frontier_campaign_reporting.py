@@ -43,7 +43,11 @@ from .frontier_runtime_calibration import (
     effective_total_budget,
     resolve_frontier_runtime_defaults,
 )
-from .frontier_scalarization import frontier_scalarization_family
+from .frontier_scalarization import (
+    FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
+    FRONTIER_REFERENCE_MODE_EPSILON,
+    frontier_scalarization_family,
+)
 
 DEFAULT_SUMMARY_JSON = "single_stage_frontier_campaign_summary.json"
 DEFAULT_MANIFEST_JSON = "campaign_manifest.json"
@@ -148,9 +152,9 @@ def resolve_frontier_campaign_paths(
 def frontier_constraint_mode(lane_specs: list[FrontierLaneSpec]) -> str:
     constraint_modes: list[str] = []
     for lane_spec in lane_specs:
-        if lane_spec.scalarization_type == "epsilon_constraint_sweep_v1":
+        if lane_spec.scalarization_type == FRONTIER_REFERENCE_MODE_EPSILON:
             constraint_modes.append("frontier_epsilon_constraint_v1")
-        elif lane_spec.scalarization_type == "achievement_chebyshev_sweep_v1":
+        elif lane_spec.scalarization_type == FRONTIER_REFERENCE_MODE_ACHIEVEMENT:
             constraint_modes.append("frontier_achievement_chebyshev_v1")
         else:
             constraint_modes.append("frontier_v2_single_lane_contract")

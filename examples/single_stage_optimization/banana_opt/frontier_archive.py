@@ -27,6 +27,7 @@ from .frontier_dominance import (
     normalized_objective_distance,
     objective_metric_direction_map,
 )
+from .frontier_scalarization import FRONTIER_REFERENCE_MODE_EPSILON
 
 DEFAULT_DUPLICATE_DISTANCE_THRESHOLD = 0.10
 
@@ -582,7 +583,7 @@ def _evaluate_epsilon_constraint_status(
     rerun_contract: Mapping[str, object],
 ) -> dict[str, object]:
     scalarization_type = str(rerun_contract.get("scalarization_type", ""))
-    if scalarization_type != "epsilon_constraint_sweep_v1":
+    if scalarization_type != FRONTIER_REFERENCE_MODE_EPSILON:
         return {"ok": True, "violations": {}}
     scalarization_params = rerun_contract.get("scalarization_params", {})
     if not isinstance(scalarization_params, Mapping):

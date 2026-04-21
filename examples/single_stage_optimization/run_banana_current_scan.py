@@ -243,10 +243,13 @@ def _materialize_poincare_fallback_inputs(
     fallback_root: Path,
 ) -> Path:
     recorded_equilibrium_path = stage2_results.get("PLASMA_SURF_PATH")
-    if recorded_equilibrium_path is not None and Path(
-        str(recorded_equilibrium_path)
-    ).exists():
-        equilibrium_file = str(Path(str(recorded_equilibrium_path)).resolve())
+    recorded_candidate = (
+        Path(str(recorded_equilibrium_path))
+        if recorded_equilibrium_path is not None
+        else None
+    )
+    if recorded_candidate is not None and recorded_candidate.exists():
+        equilibrium_file = str(recorded_candidate.resolve())
     else:
         if args.equilibrium_path is None and args.equilibria_dir is None:
             raise ValueError(
