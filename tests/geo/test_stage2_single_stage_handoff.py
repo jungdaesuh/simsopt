@@ -757,6 +757,7 @@ class HandoffModuleTests(unittest.TestCase):
             G0,
             boozer_I=0.0,
             *,
+            initial_surface_guess=None,
             nfp,
         ):
             recorded.update(
@@ -766,6 +767,7 @@ class HandoffModuleTests(unittest.TestCase):
                 iota=iota,
                 G0=G0,
                 boozer_I=boozer_I,
+                initial_surface_guess=initial_surface_guess,
                 nfp=nfp,
             )
             return module.BoozerInitializationResult(
@@ -838,12 +840,14 @@ class HandoffModuleTests(unittest.TestCase):
             G0,
             boozer_I=0.0,
             *,
+            initial_surface_guess=None,
             nfp,
         ):
             recorded.update(
                 bs=bs,
                 G0=G0,
                 boozer_I=boozer_I,
+                initial_surface_guess=initial_surface_guess,
                 nfp=nfp,
                 total_loaded_coils=len(bs.coils),
             )
@@ -890,6 +894,189 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertAlmostEqual(recorded["G0"], module.compute_tf_G0(tf_coils))
         self.assertAlmostEqual(recorded["boozer_I"], plasma_settings.boozer_I)
 
+    def test_probe_stage2_seed_bootability_uses_loaded_surface_as_seed_surface(self):
+        module = load_handoff_module()
+        tf_coils, fake_bs, stage2_artifact_results = self._bootability_smoke_inputs(
+            include_proxy_vf=False
+        )
+        warm_start_surface = SimpleNamespace(
+            nfp=5,
+            dofs=np.array([3.0, -2.0], dtype=float),
+        )
+        recorded = {}
+
+        def fake_attempt_initialize_boozer_surface(
+            surf_prev,
+            mpol,
+            ntor,
+            bs,
+            vol_target,
+            constraint_weight,
+            iota,
+            G0,
+            boozer_I=0.0,
+            *,
+            initial_surface_guess,
+            nfp,
+        ):
+            recorded.update(
+                surf_prev=surf_prev,
+                initial_surface_guess=initial_surface_guess,
+                iota=iota,
+                G0=G0,
+                boozer_I=boozer_I,
+                nfp=nfp,
+            )
+            return module.BoozerInitializationResult(
+                boozer_surface=SimpleNamespace(surface=SimpleNamespace(volume=lambda: 0.1)),
+                solve_success=True,
+                self_intersecting=False,
+                success=True,
+                solved_iota=0.2,
+                solved_G=G0,
+                volume=0.1,
+            )
+
+        with patch.object(
+            module,
+            "build_equilibrium_path",
+            side_effect=AssertionError("warm-start probe should not read the equilibrium"),
+        ), patch.object(
+            module,
+            "build_surface_configs",
+            side_effect=AssertionError("warm-start probe should not rebuild a cold-start surface"),
+        ), patch.object(
+            module,
+            "load_warm_start_boozer_seed",
+            return_value=module.WarmStartBoozerSeed(
+                surface=warm_start_surface,
+                iota=0.2,
+                G=module.compute_tf_G0(tf_coils),
+                source_path=Path("/tmp/legacy/surf_opt_boozer_surface.json"),
+            ),
+        ), patch.object(
+            module,
+            "attempt_initialize_boozer_surface",
+            side_effect=fake_attempt_initialize_boozer_surface,
+        ):
+            status = module.probe_stage2_seed_bootability(
+                stage2_bs_path="/tmp/legacy/biot_savart_opt.json",
+                stage2_artifact_results=stage2_artifact_results,
+                plasma_surf_filename="demo.nc",
+                equilibria_dir="/tmp/equilibria",
+                num_tf_coils=20,
+                nphi=31,
+                ntheta=16,
+                mpol=8,
+                ntor=6,
+                vol_target=0.1,
+                iota_target=0.2,
+                iota_tolerance=5.0e-3,
+                constraint_weight=1.0,
+                boozer_I=0.0,
+                stage2_seed_surf_path="/tmp/legacy/surf_opt_boozer_surface.json",
+                bs_loader=lambda _path: fake_bs,
+            )
+
+        self.assertTrue(module.bootability_passes(status))
+        self.assertIs(recorded["surf_prev"], warm_start_surface)
+        self.assertIs(recorded["initial_surface_guess"], warm_start_surface)
+        self.assertAlmostEqual(recorded["iota"], 0.2)
+        self.assertEqual(recorded["nfp"], 5)
+
+    def test_probe_stage2_seed_bootability_uses_warm_start_boozer_surface_artifact(self):
+        module = load_handoff_module()
+        _, fake_bs, stage2_artifact_results = self._bootability_smoke_inputs(
+            include_proxy_vf=False
+        )
+        warm_start_surface = SimpleNamespace(nfp=5)
+        warm_start_path = Path(
+            "/tmp/recovery/surf_best_feasible_outer_boozer_surface.json"
+        )
+        recorded = {}
+
+        def fake_loader(path):
+            if path == "/tmp/recovery/biot_savart_best_feasible.json":
+                return fake_bs
+            if path == str(warm_start_path):
+                return SimpleNamespace(
+                    surface=warm_start_surface,
+                    res={"iota": 0.2003, "G": 0.377},
+                )
+            raise AssertionError(f"unexpected load path: {path}")
+
+        def fake_attempt_initialize_boozer_surface(
+            surf_prev,
+            mpol,
+            ntor,
+            bs,
+            vol_target,
+            constraint_weight,
+            iota,
+            G0,
+            boozer_I=0.0,
+            *,
+            initial_surface_guess=None,
+            nfp,
+        ):
+            recorded.update(
+                surf_prev=surf_prev,
+                bs=bs,
+                iota=iota,
+                G0=G0,
+                initial_surface_guess=initial_surface_guess,
+                nfp=nfp,
+            )
+            return module.BoozerInitializationResult(
+                boozer_surface=SimpleNamespace(surface=SimpleNamespace(volume=lambda: 0.1)),
+                solve_success=True,
+                self_intersecting=False,
+                success=True,
+                solved_iota=0.2003,
+                solved_G=0.377,
+                volume=0.1,
+            )
+
+        with patch.object(
+            module,
+            "build_equilibrium_path",
+            side_effect=AssertionError("warm-start probe should not read the equilibrium"),
+        ), patch.object(
+            module,
+            "build_surface_configs",
+            side_effect=AssertionError("warm-start probe should not rebuild a cold-start surface"),
+        ), patch.object(
+            module,
+            "attempt_initialize_boozer_surface",
+            side_effect=fake_attempt_initialize_boozer_surface,
+        ):
+            status = module.probe_stage2_seed_bootability(
+                stage2_bs_path="/tmp/recovery/biot_savart_best_feasible.json",
+                stage2_artifact_results=stage2_artifact_results,
+                plasma_surf_filename="demo.nc",
+                equilibria_dir="/tmp/equilibria",
+                num_tf_coils=20,
+                nphi=31,
+                ntheta=16,
+                mpol=8,
+                ntor=6,
+                vol_target=0.1,
+                iota_target=0.2,
+                iota_tolerance=5.0e-3,
+                constraint_weight=1.0,
+                boozer_I=0.0,
+                stage2_seed_surf_path=warm_start_path,
+                bs_loader=fake_loader,
+            )
+
+        self.assertTrue(module.bootability_passes(status))
+        self.assertIs(recorded["surf_prev"], warm_start_surface)
+        self.assertIs(recorded["bs"], fake_bs)
+        self.assertAlmostEqual(recorded["iota"], 0.2003)
+        self.assertAlmostEqual(recorded["G0"], 0.377)
+        self.assertIs(recorded["initial_surface_guess"], warm_start_surface)
+        self.assertEqual(recorded["nfp"], 5)
+
 
 class UnifiedRunnerTests(unittest.TestCase):
     def _stage2_seed_paths(self, root: Path) -> tuple[Path, Path]:
@@ -906,6 +1093,41 @@ class UnifiedRunnerTests(unittest.TestCase):
             },
         )
         return stage2_bs_path, stage2_results_path
+
+    def test_parse_args_accepts_seed_order_upgrade(self):
+        wrapper = load_wrapper_module()
+
+        args = wrapper.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/stage2/biot_savart_opt.json",
+                "--seed-order-upgrade",
+                "4",
+            ]
+        )
+
+        self.assertEqual(args.seed_order_upgrade, 4)
+
+    def test_parse_args_accepts_stage2_seed_surf_path(self):
+        wrapper = load_wrapper_module()
+
+        args = wrapper.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/stage2/biot_savart_opt.json",
+                "--stage2-seed-surf-path",
+                "/tmp/stage2/surf_opt_boozer_surface.json",
+            ]
+        )
+
+        self.assertEqual(
+            args.stage2_seed_surf_path,
+            "/tmp/stage2/surf_opt_boozer_surface.json",
+        )
 
     def test_probe_only_writes_summary_with_bootability_status(self):
         wrapper = load_wrapper_module()
@@ -1045,6 +1267,33 @@ class UnifiedRunnerTests(unittest.TestCase):
             4.0e-7 * 3.141592653589793 * 9000.0,
         )
 
+    def test_build_probe_status_forwards_stage2_seed_surface_path(self):
+        wrapper = load_wrapper_module()
+
+        args = wrapper.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/stage2/biot_savart_opt.json",
+                "--stage2-seed-surf-path",
+                "seed/surf_opt_boozer_surface.json",
+            ]
+        )
+
+        with patch.object(wrapper, "probe_stage2_seed_bootability", return_value={}) as probe:
+            wrapper.build_probe_status(
+                args,
+                stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+                stage2_results={"PLASMA_SURF_FILENAME": "demo.nc"},
+                stage="probe",
+            )
+
+        self.assertEqual(
+            probe.call_args.kwargs["stage2_seed_surf_path"],
+            Path("seed/surf_opt_boozer_surface.json").resolve(),
+        )
+
     def test_build_probe_status_uses_stage2_proxy_current_default_in_wataru_mode(self):
         wrapper = load_wrapper_module()
 
@@ -1100,6 +1349,31 @@ class UnifiedRunnerTests(unittest.TestCase):
                 },
                 stage="probe",
             )
+
+    def test_build_recovery_command_forwards_stage2_seed_surface_path(self):
+        wrapper = load_wrapper_module()
+
+        args = wrapper.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/stage2/biot_savart_opt.json",
+                "--stage2-seed-surf-path",
+                "seed/surf_opt_boozer_surface.json",
+            ]
+        )
+
+        command = wrapper.build_recovery_command(
+            args,
+            stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            recovery_output_root=Path("/tmp/recovery"),
+        )
+
+        self.assertEqual(
+            command[command.index("--stage2-seed-surf-path") + 1],
+            str(Path("seed/surf_opt_boozer_surface.json").resolve()),
+        )
 
     def test_recovery_only_updates_recovery_results_with_handoff_metadata(self):
         wrapper = load_wrapper_module()
@@ -1239,8 +1513,18 @@ class UnifiedRunnerTests(unittest.TestCase):
                     ),
                 )
 
-            def fake_full_run(args, *, stage2_bs_path, full_output_root):
+            def fake_full_run(
+                args,
+                *,
+                stage2_bs_path,
+                full_output_root,
+                warm_start_surface_stem=None,
+            ):
                 full_case_dir.mkdir(parents=True, exist_ok=True)
+                self.assertEqual(
+                    warm_start_surface_stem.resolve(),
+                    (recovery_case_dir / "surf_opt").resolve(),
+                )
                 _write_json(
                     full_case_dir / "results.json",
                     {
@@ -1407,12 +1691,20 @@ class UnifiedRunnerTests(unittest.TestCase):
 
             captured_probe_calls: list[dict[str, object]] = []
 
-            def fake_build_probe_status(args, *, stage2_bs_path, stage2_results, stage):
+            def fake_build_probe_status(
+                args,
+                *,
+                stage2_bs_path,
+                stage2_results,
+                stage,
+                warm_start_boozer_surface_path=None,
+            ):
                 captured_probe_calls.append(
                     {
                         "stage2_bs_path": stage2_bs_path,
                         "stage2_results": stage2_results,
                         "stage": stage,
+                        "warm_start_boozer_surface_path": warm_start_boozer_surface_path,
                     }
                 )
                 return _bootability_status(
@@ -1462,6 +1754,10 @@ class UnifiedRunnerTests(unittest.TestCase):
                 probe_call["stage2_bs_path"],
                 recovery_case_dir / "biot_savart_opt.json",
             )
+            self.assertEqual(
+                probe_call["warm_start_boozer_surface_path"],
+                recovery_case_dir / "surf_opt_boozer_surface.json",
+            )
             # But the probe must receive the *original* Stage 2 metadata so that
             # TF_CURRENT_A / NUM_TF_COILS / FINITE_CURRENT_MODE / banana_surf_radius
             # can be validated. The recovery single-stage results.json does not
@@ -1473,3 +1769,127 @@ class UnifiedRunnerTests(unittest.TestCase):
                 probe_call["stage2_results"]["FINITE_CURRENT_MODE"],
                 "boozer_surrogate",
             )
+
+    def test_run_recovery_stage_uses_preserved_artifact_bundle_for_salvaged_results(self):
+        wrapper = load_wrapper_module()
+        handoff = load_handoff_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stage2_bs_path, stage2_results_path = self._stage2_seed_paths(root)
+            recovery_output_root = root / "recovery"
+            recovery_case_dir = recovery_output_root / "mpol=8-ntor=6-test"
+
+            original_stage2_results = {
+                "PLASMA_SURF_FILENAME": "demo.nc",
+                "TF_CURRENT_A": 8.0e4,
+                "NUM_TF_COILS": 20,
+                "MAJOR_RADIUS": 0.976,
+                "TOROIDAL_FLUX": 0.24,
+                "banana_surf_radius": 0.21,
+                "FINITE_CURRENT_MODE": "boozer_surrogate",
+                "CURVATURE_THRESHOLD": 100.0,
+            }
+
+            def fake_recovery_run(command, *, output_root, timeout_seconds):
+                recovery_case_dir.mkdir(parents=True, exist_ok=True)
+                partial_results = {
+                    "PLASMA_SURF_FILENAME": "demo.nc",
+                    "init_only": False,
+                    "iterations": 9,
+                }
+                partial_results_path = (
+                    recovery_case_dir / "results_best_feasible.partial.json"
+                )
+                _write_json(partial_results_path, partial_results)
+                (recovery_case_dir / "biot_savart_best_feasible.json").write_text(
+                    "{}",
+                    encoding="utf-8",
+                )
+                (recovery_case_dir / "surf_best_feasible_outer_boozer_surface.json").write_text(
+                    "{}",
+                    encoding="utf-8",
+                )
+                return (
+                    "best_feasible_partial",
+                    partial_results_path,
+                    partial_results,
+                )
+
+            captured_probe_calls: list[dict[str, object]] = []
+
+            def fake_build_probe_status(
+                args,
+                *,
+                stage2_bs_path,
+                stage2_results,
+                stage,
+                warm_start_boozer_surface_path=None,
+            ):
+                captured_probe_calls.append(
+                    {
+                        "stage2_bs_path": stage2_bs_path,
+                        "stage2_results": stage2_results,
+                        "stage": stage,
+                        "warm_start_boozer_surface_path": warm_start_boozer_surface_path,
+                    }
+                )
+                return _bootability_status(
+                    handoff,
+                    stage=stage,
+                    reason=handoff.BOOTABILITY_REASON_OK,
+                    bootable=True,
+                    iota_feasible=True,
+                    solved_iota=0.2002,
+                    self_intersecting=False,
+                )
+
+            args = wrapper.parse_args(
+                [
+                    "--recovery-only",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(root / "outputs"),
+                ]
+            )
+
+            with patch.object(
+                wrapper,
+                "build_probe_status",
+                side_effect=fake_build_probe_status,
+            ), patch.object(
+                wrapper,
+                "run_single_stage_command_with_salvage",
+                side_effect=fake_recovery_run,
+            ):
+                payload = wrapper.run_recovery_stage(
+                    args,
+                    original_stage2_bs_path=stage2_bs_path,
+                    original_stage2_results_path=stage2_results_path,
+                    original_stage2_results=original_stage2_results,
+                    recovery_output_root=recovery_output_root,
+                )
+
+            self.assertEqual(payload["status"], "completed")
+            self.assertEqual(
+                payload["recovered_bs_path"],
+                str(recovery_case_dir / "biot_savart_best_feasible.json"),
+            )
+            self.assertEqual(
+                payload["warm_start_surface_stem"],
+                str(recovery_case_dir / "surf_best_feasible"),
+            )
+            self.assertEqual(len(captured_probe_calls), 1)
+            probe_call = captured_probe_calls[0]
+            self.assertEqual(
+                probe_call["stage2_bs_path"],
+                recovery_case_dir / "biot_savart_best_feasible.json",
+            )
+            self.assertEqual(
+                probe_call["warm_start_boozer_surface_path"],
+                recovery_case_dir / "surf_best_feasible_outer_boozer_surface.json",
+            )
+            self.assertIs(probe_call["stage2_results"], original_stage2_results)

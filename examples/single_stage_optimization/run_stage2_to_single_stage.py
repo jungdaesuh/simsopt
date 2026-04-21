@@ -402,7 +402,13 @@ def build_probe_status(
     stage2_bs_path: Path,
     stage2_results: dict,
     stage: str,
+    warm_start_boozer_surface_path: Path | None = None,
 ) -> dict[str, object]:
+    effective_seed_surf_path = warm_start_boozer_surface_path
+    if effective_seed_surf_path is None:
+        explicit_seed_surf_path = getattr(args, "stage2_seed_surf_path", None)
+        if explicit_seed_surf_path is not None:
+            effective_seed_surf_path = resolved_path(explicit_seed_surf_path)
     constraint_weight = (
         None
         if float(args.constraint_weight) < 0.0
@@ -439,6 +445,7 @@ def build_probe_status(
         constraint_weight=constraint_weight,
         boozer_I=current_settings.boozer_I,
         stage=stage,
+        stage2_seed_surf_path=effective_seed_surf_path,
     )
 
 
@@ -455,6 +462,7 @@ def build_recovery_command(
         allow_init_only_stage2_seed=args.allow_init_only_stage2_seed,
         equilibria_dir=args.equilibria_dir,
         equilibrium_path=args.equilibrium_path,
+        stage2_seed_surf_path=getattr(args, "stage2_seed_surf_path", None),
         plasma_surf_filename=Path(args.plasma_surf_filename).name,
         nphi=args.nphi,
         ntheta=args.ntheta,
@@ -556,7 +564,11 @@ def run_recovery_stage(
                 else "subprocess_failed"
             ),
         }
-    recovered_bs_path = results_path.with_name("biot_savart_opt.json")
+    artifact_bundle = goal_mode_runner.single_stage_artifact_bundle_from_results(
+        result_source,
+        results_path,
+    )
+    recovered_bs_path = artifact_bundle["bs_path"]
     if not recovered_bs_path.exists():
         return {
             "status": "failed",
@@ -581,6 +593,7 @@ def run_recovery_stage(
         stage2_bs_path=recovered_bs_path,
         stage2_results=original_stage2_results,
         stage=BOOTABILITY_STAGE_RECOVERY,
+        warm_start_boozer_surface_path=artifact_bundle["outer_boozer_surface_path"],
     )
     recovery_iters = results.get("iterations")
     recovery_succeeded = bootability_passes(recovery_probe)
@@ -605,6 +618,7 @@ def run_recovery_stage(
         "result_source": result_source,
         "results": load_json(results_path),
         "recovered_bs_path": str(recovered_bs_path),
+        "warm_start_surface_stem": str(artifact_bundle["surface_stem"]),
         "recovery_probe": recovery_probe,
         "recovery_succeeded": recovery_succeeded,
         "recovery_iters": None if recovery_iters is None else int(recovery_iters),
@@ -614,14 +628,28 @@ def run_recovery_stage(
     }
 
 
+def _with_warm_start_surface_stem(
+    args: argparse.Namespace,
+    warm_start_surface_stem: Path | None,
+) -> argparse.Namespace:
+    if warm_start_surface_stem is None:
+        return args
+    return SimpleNamespace(
+        **vars(args),
+        warm_start_surface_stem=str(warm_start_surface_stem),
+    )
+
+
 def build_full_single_stage_command(
     args: argparse.Namespace,
     *,
     stage2_bs_path: Path,
     full_output_root: Path,
+    warm_start_surface_stem: Path | None = None,
 ) -> list[str]:
+    goal_mode_args = _with_warm_start_surface_stem(args, warm_start_surface_stem)
     command = goal_mode_runner.build_single_stage_goal_mode_command(
-        args,
+        goal_mode_args,
         goal_mode=args.goal_mode,
         stage2_bs_path=stage2_bs_path,
         case_output_root=full_output_root / args.goal_mode,
@@ -634,6 +662,7 @@ def run_full_single_stage(
     *,
     stage2_bs_path: Path,
     full_output_root: Path,
+    warm_start_surface_stem: Path | None = None,
 ) -> dict[str, object]:
     full_payload = {
         "status": "dry_run" if args.dry_run else "completed",
@@ -641,14 +670,16 @@ def run_full_single_stage(
             args,
             stage2_bs_path=stage2_bs_path,
             full_output_root=full_output_root,
+            warm_start_surface_stem=warm_start_surface_stem,
         ),
         "output_root": str(full_output_root),
     }
     if args.dry_run:
         return full_payload
     goal_mode_output_root = full_output_root
+    goal_mode_args = _with_warm_start_surface_stem(args, warm_start_surface_stem)
     result_payload = goal_mode_runner.run_goal_mode_case(
-        args,
+        goal_mode_args,
         goal_mode=args.goal_mode,
         stage2_bs_path=stage2_bs_path,
         output_root=goal_mode_output_root,
@@ -764,6 +795,7 @@ def main(argv: list[str] | None = None) -> int:
 
     recovery_payload = None
     handoff_bs_path = original_stage2_bs_path
+    handoff_warm_start_surface_stem = None
     handoff_bootability = initial_probe
     recovery_attempted = False
     recovery_succeeded = False
@@ -806,6 +838,9 @@ def main(argv: list[str] | None = None) -> int:
                 recovery_iters = recovery_payload["recovery_iters"]
                 if recovery_succeeded:
                     handoff_bs_path = resolved_path(recovery_payload["recovered_bs_path"])
+                    handoff_warm_start_surface_stem = resolved_path(
+                        recovery_payload["warm_start_surface_stem"]
+                    )
                     handoff_bootability = recovery_payload["recovery_probe"]
                     seed_source = SEED_SOURCE_RECOVERED_STAGE2_DONOR
             if args.recovery_only:
@@ -854,6 +889,7 @@ def main(argv: list[str] | None = None) -> int:
         args,
         stage2_bs_path=handoff_bs_path,
         full_output_root=full_output_root,
+        warm_start_surface_stem=handoff_warm_start_surface_stem,
     )
     if full_payload["status"] == "completed":
         full_results_path = Path(full_payload["results_path"])

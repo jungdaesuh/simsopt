@@ -261,6 +261,8 @@ def make_single_stage_thresholded_physics_rerun_args(**overrides):
         "output_root": "outputs",
         "equilibria_dir": None,
         "equilibrium_path": None,
+        "stage2_seed_surf_path": None,
+        "seed_order_upgrade": None,
         "summary_json": None,
         "allow_init_only_stage2_seed": False,
         "single_stage_timeout_seconds": 0.0,
@@ -1666,11 +1668,77 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             str(Path("eqdir").resolve()),
         )
 
+    def test_single_stage_thresholded_physics_rerun_wrapper_parse_args_accepts_seed_order_upgrade(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_single_stage_thresholded_physics_alm.py",
+                "--plasma-surf-filename",
+                DEFAULT_ALM_WRAPPER_SURFACE,
+                "--stage2-bs-path",
+                "seed.json",
+                "--seed-order-upgrade",
+                "4",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.seed_order_upgrade, 4)
+
+    def test_single_stage_thresholded_physics_rerun_wrapper_parse_args_accepts_warm_start_surface_stem(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_single_stage_thresholded_physics_alm.py",
+                "--plasma-surf-filename",
+                DEFAULT_ALM_WRAPPER_SURFACE,
+                "--stage2-bs-path",
+                "seed.json",
+                "--warm-start-surface-stem",
+                "recovery/surf_best_feasible",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.warm_start_surface_stem, "recovery/surf_best_feasible")
+
+    def test_single_stage_thresholded_physics_rerun_wrapper_parse_args_accepts_stage2_seed_surf_path(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_single_stage_thresholded_physics_alm.py",
+                "--plasma-surf-filename",
+                DEFAULT_ALM_WRAPPER_SURFACE,
+                "--stage2-bs-path",
+                "seed.json",
+                "--stage2-seed-surf-path",
+                "stage2/surf_opt_boozer_surface.json",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(
+            args.stage2_seed_surf_path,
+            "stage2/surf_opt_boozer_surface.json",
+        )
+
     def test_single_stage_thresholded_physics_rerun_wrapper_forwards_stage2_handoff_flags(self):
         module = load_single_stage_thresholded_physics_rerun_module()
         args = make_single_stage_thresholded_physics_rerun_args(
             allow_init_only_stage2_seed=True,
             equilibrium_path="eq/demo.nc",
+            stage2_seed_surf_path="stage2/surf_opt_boozer_surface.json",
+            warm_start_surface_stem="recovery/surf_best_feasible",
+            seed_order_upgrade=4,
             constraint_weight=-1.0,
             boozer_I=0.031,
             plasma_current_A=9000.0,
@@ -1686,6 +1754,15 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             command[command.index("--equilibrium-path") + 1],
             str(Path("eq/demo.nc").resolve()),
         )
+        self.assertEqual(
+            command[command.index("--stage2-seed-surf-path") + 1],
+            str(Path("stage2/surf_opt_boozer_surface.json").resolve()),
+        )
+        self.assertEqual(
+            command[command.index("--warm-start-surface-stem") + 1],
+            str(Path("recovery/surf_best_feasible").resolve()),
+        )
+        self.assertEqual(command[command.index("--seed-order-upgrade") + 1], "4")
         self.assertEqual(command[command.index("--constraint-weight") + 1], "-1.0")
         self.assertEqual(command[command.index("--boozer-I") + 1], "0.031")
         self.assertEqual(

@@ -665,6 +665,23 @@ def append_single_stage_handoff_flags(command: list[str], args: object) -> None:
     equilibrium_path = resolved_optional_path(getattr(args, "equilibrium_path", None))
     if equilibrium_path is not None:
         command.extend(["--equilibrium-path", str(equilibrium_path)])
+    stage2_seed_surf_path = resolved_optional_path(
+        getattr(args, "stage2_seed_surf_path", None)
+    )
+    if stage2_seed_surf_path is not None:
+        command.extend(["--stage2-seed-surf-path", str(stage2_seed_surf_path)])
+    warm_start_surface_stem = resolved_optional_path(
+        getattr(args, "warm_start_surface_stem", None)
+    )
+    if warm_start_surface_stem is not None:
+        command.extend(
+            ["--warm-start-surface-stem", str(warm_start_surface_stem)]
+        )
+    append_optional_flag(
+        command,
+        "--seed-order-upgrade",
+        getattr(args, "seed_order_upgrade", None),
+    )
     append_optional_flag(
         command,
         "--constraint-weight",

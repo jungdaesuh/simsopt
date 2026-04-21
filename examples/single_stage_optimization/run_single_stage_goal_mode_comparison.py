@@ -24,6 +24,10 @@ from workflow_runner_common import (  # noqa: E402
     snapshot_single_results_paths,
     timeout_or_none,
 )
+from banana_opt.surface_mode_contracts import (  # noqa: E402
+    DEFAULT_INNER_SURFACE_RATIO,
+    SURFACE_MODE_CHOICES,
+)
 
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_single_stage_goal_mode_comparison"
 DEFAULT_SUMMARY_JSON = "single_stage_goal_mode_comparison_summary.json"
@@ -32,6 +36,22 @@ PRESERVED_RESULT_SOURCES = (
     ("best_feasible_partial", "results_best_feasible.partial.json"),
     ("best_accepted_partial", "results_best_accepted.partial.json"),
 )
+_PRESERVED_BIOTSAVART_FILENAMES = {
+    "best_feasible_partial": "biot_savart_best_feasible.json",
+    "best_accepted_partial": "biot_savart_best_accepted.json",
+}
+_PRESERVED_SURFACE_STEMS = {
+    "best_feasible_partial": "surf_best_feasible",
+    "best_accepted_partial": "surf_best_accepted",
+}
+_RESULT_BIOTSAVART_FILENAMES = {
+    "final": "biot_savart_opt.json",
+    **_PRESERVED_BIOTSAVART_FILENAMES,
+}
+_RESULT_SURFACE_STEMS = {
+    "final": "surf_opt",
+    **_PRESERVED_SURFACE_STEMS,
+}
 
 
 def _append_optional_flag(command: list[str], flag: str, value) -> None:
@@ -128,6 +148,31 @@ def discover_single_stage_salvage_results_path(
     )
 
 
+def single_stage_artifact_bundle_from_results(
+    result_source: str,
+    results_path: str | Path,
+) -> dict[str, Path]:
+    results_path = Path(results_path)
+    if result_source in _RESULT_BIOTSAVART_FILENAMES:
+        surface_stem = results_path.with_name(_RESULT_SURFACE_STEMS[result_source])
+        outer_boozer_surface_name = (
+            "surf_opt_boozer_surface.json"
+            if result_source == "final"
+            else f"{surface_stem.name}_outer_boozer_surface.json"
+        )
+        return {
+            "results_path": results_path,
+            "bs_path": results_path.with_name(
+                _RESULT_BIOTSAVART_FILENAMES[result_source]
+            ),
+            "surface_stem": surface_stem,
+            "outer_boozer_surface_path": results_path.with_name(
+                outer_boozer_surface_name
+            ),
+        }
+    raise ValueError(f"Unsupported single-stage result source {result_source!r}.")
+
+
 def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -162,6 +207,37 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         "--equilibrium-path",
         default=None,
         help="Optional explicit equilibrium path forwarded into the single-stage run.",
+    )
+    parser.add_argument(
+        "--seed-order-upgrade",
+        type=int,
+        default=(
+            int(os.environ["SEED_ORDER_UPGRADE"])
+            if "SEED_ORDER_UPGRADE" in os.environ
+            else None
+        ),
+        help=(
+            "Optional Fourier order upgrade applied by the single-stage entrypoint "
+            "when loading the shared Stage 2 seed."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-seed-surf-path",
+        default=os.environ.get("STAGE2_SEED_SURF_PATH"),
+        help=(
+            "Optional saved surface or Boozer-surface artifact forwarded into the "
+            "single-stage entrypoint as a Stage 2 warm-start seed."
+        ),
+    )
+    parser.add_argument(
+        "--warm-start-surface-stem",
+        default=None,
+        help=(
+            "Optional stem for saved single-stage surface artifacts "
+            "(for example /path/to/surf_best_feasible). When set, the single-stage "
+            "entrypoint reuses the saved Boozer surface geometry/iota/G as its "
+            "initialization seed."
+        ),
     )
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument(
@@ -240,14 +316,19 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--num-surfaces", type=int, choices=[1, 2], default=int(os.environ.get("NUM_SURFACES", "1")))
-    parser.add_argument("--inner-surface-ratio", type=float, default=float(os.environ.get("INNER_SURFACE_RATIO", "0.8")))
+    parser.add_argument(
+        "--inner-surface-ratio",
+        type=float,
+        default=float(
+            os.environ.get(
+                "INNER_SURFACE_RATIO",
+                str(DEFAULT_INNER_SURFACE_RATIO),
+            )
+        ),
+    )
     parser.add_argument(
         "--surface-mode",
-        choices=[
-            "single_surface",
-            "published_multisurface",
-            "experimental_multisurface",
-        ],
+        choices=SURFACE_MODE_CHOICES,
         default=os.environ.get("SURFACE_MODE"),
     )
     parser.add_argument("--surface-gap-threshold", type=float, default=float(os.environ.get("SURFACE_GAP_THRESHOLD", "0.0")))
@@ -272,6 +353,22 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
             "as-is (None) so the single-stage script falls back to --iotas-weight."
         ),
     )
+    parser.add_argument("--frontier-scalarization-type", default=None)
+    parser.add_argument("--frontier-reference-iota", type=float, default=None)
+    parser.add_argument("--frontier-reference-iota-scale", type=float, default=None)
+    parser.add_argument("--frontier-reference-volume", type=float, default=None)
+    parser.add_argument("--frontier-reference-volume-scale", type=float, default=None)
+    parser.add_argument("--frontier-reference-qa", type=float, default=None)
+    parser.add_argument("--frontier-reference-boozer", type=float, default=None)
+    parser.add_argument("--frontier-boozer-trust-threshold", type=float, default=None)
+    parser.add_argument("--frontier-boozer-trust-penalty-scale", type=float, default=None)
+    parser.add_argument("--frontier-chebyshev-rho", type=float, default=None)
+    parser.add_argument("--frontier-chebyshev-weight-iota", type=float, default=None)
+    parser.add_argument("--frontier-chebyshev-weight-volume", type=float, default=None)
+    parser.add_argument("--frontier-chebyshev-weight-qa", type=float, default=None)
+    parser.add_argument("--frontier-chebyshev-weight-boozer", type=float, default=None)
+    parser.add_argument("--epsilon-constraint-qa-max", type=float, default=None)
+    parser.add_argument("--epsilon-constraint-boozer-max", type=float, default=None)
     parser.add_argument("--cc-weight", type=float, default=100.0)
     parser.add_argument("--curvature-weight", type=float, default=0.1)
     parser.add_argument("--length-weight", type=float, default=1.0)
@@ -283,6 +380,11 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--ss-dist", type=float, default=0.04)
     parser.add_argument("--curvature-threshold", type=float, default=100.0)
     parser.add_argument("--checkpoint-every", type=int, default=int(os.environ.get("CHECKPOINT_EVERY", "0")))
+    parser.add_argument(
+        "--resume-solver-checkpoint",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--topology-gate-fieldlines", type=int, default=int(os.environ.get("TOPOLOGY_GATE_FIELDLINES", "4")))
     parser.add_argument("--topology-gate-tmax", type=float, default=float(os.environ.get("TOPOLOGY_GATE_TMAX", "2.0")))
     parser.add_argument("--topology-gate-tol", type=float, default=float(os.environ.get("TOPOLOGY_GATE_TOL", "1e-7")))
@@ -406,70 +508,162 @@ def build_single_stage_goal_mode_command(
         str(args.num_surfaces),
         "--inner-surface-ratio",
         str(args.inner_surface_ratio),
-    ] + ([
-        "--surface-mode",
-        str(args.surface_mode),
-    ] if getattr(args, "surface_mode", None) else []) + [
-        "--surface-gap-threshold",
-        str(args.surface_gap_threshold),
-        "--multisurface-ramp-iterations",
-        str(args.multisurface_ramp_iterations),
-        "--inner-surface-initial-weight",
-        str(args.inner_surface_initial_weight),
-        "--multisurface-initial-step-scale",
-        str(args.multisurface_initial_step_scale),
-        "--multisurface-initial-step-maxiter",
-        str(args.multisurface_initial_step_maxiter),
-        "--boozer-stage",
-        args.boozer_stage,
-        "--refinement-boozer-stage",
-        args.refinement_boozer_stage,
-        "--refinement-maxiter",
-        str(args.refinement_maxiter),
-        "--refinement-chunk-maxiter",
-        str(args.refinement_chunk_maxiter),
-        "--refinement-max-stalled-chunks",
-        str(args.refinement_max_stalled_chunks),
-        "--checkpoint-every",
-        str(args.checkpoint_every),
-        "--topology-gate-fieldlines",
-        str(args.topology_gate_fieldlines),
-        "--topology-gate-tmax",
-        str(args.topology_gate_tmax),
-        "--topology-gate-tol",
-        str(args.topology_gate_tol),
-        "--topology-gate-survival-threshold",
-        str(args.topology_gate_survival_threshold),
-        "--topology-gate-penalty-scale",
-        str(args.topology_gate_penalty_scale),
-        "--topology-scorer-every",
-        str(args.topology_scorer_every),
-        "--topology-scorer-nfieldlines",
-        str(args.topology_scorer_nfieldlines),
-        "--topology-scorer-tmax",
-        str(args.topology_scorer_tmax),
-        "--confinement-objective-weight",
-        str(args.confinement_objective_weight),
-        "--confinement-surrogate-worst-k",
-        str(args.confinement_surrogate_worst_k),
-        "--confinement-surrogate-early-threshold",
-        str(args.confinement_surrogate_early_threshold),
-        "--confinement-surrogate-mean-weight",
-        str(args.confinement_surrogate_mean_weight),
-        "--confinement-surrogate-worst-weight",
-        str(args.confinement_surrogate_worst_weight),
-        "--confinement-surrogate-early-weight",
-        str(args.confinement_surrogate_early_weight),
-        "--hardware-search-mode",
-        args.hardware_search_mode,
-        "--hardware-search-soft-iterations",
-        str(args.hardware_search_soft_iterations),
     ]
+    if getattr(args, "surface_mode", None):
+        command.extend(
+            [
+                "--surface-mode",
+                str(args.surface_mode),
+            ]
+        )
+    command.extend(
+        [
+            "--surface-gap-threshold",
+            str(args.surface_gap_threshold),
+            "--multisurface-ramp-iterations",
+            str(args.multisurface_ramp_iterations),
+            "--inner-surface-initial-weight",
+            str(args.inner_surface_initial_weight),
+            "--multisurface-initial-step-scale",
+            str(args.multisurface_initial_step_scale),
+            "--multisurface-initial-step-maxiter",
+            str(args.multisurface_initial_step_maxiter),
+            "--boozer-stage",
+            args.boozer_stage,
+            "--refinement-boozer-stage",
+            args.refinement_boozer_stage,
+            "--refinement-maxiter",
+            str(args.refinement_maxiter),
+            "--refinement-chunk-maxiter",
+            str(args.refinement_chunk_maxiter),
+            "--refinement-max-stalled-chunks",
+            str(args.refinement_max_stalled_chunks),
+            "--checkpoint-every",
+            str(args.checkpoint_every),
+            "--topology-gate-fieldlines",
+            str(args.topology_gate_fieldlines),
+            "--topology-gate-tmax",
+            str(args.topology_gate_tmax),
+            "--topology-gate-tol",
+            str(args.topology_gate_tol),
+            "--topology-gate-survival-threshold",
+            str(args.topology_gate_survival_threshold),
+            "--topology-gate-penalty-scale",
+            str(args.topology_gate_penalty_scale),
+            "--topology-scorer-every",
+            str(args.topology_scorer_every),
+            "--topology-scorer-nfieldlines",
+            str(args.topology_scorer_nfieldlines),
+            "--topology-scorer-tmax",
+            str(args.topology_scorer_tmax),
+            "--confinement-objective-weight",
+            str(args.confinement_objective_weight),
+            "--confinement-surrogate-worst-k",
+            str(args.confinement_surrogate_worst_k),
+            "--confinement-surrogate-early-threshold",
+            str(args.confinement_surrogate_early_threshold),
+            "--confinement-surrogate-mean-weight",
+            str(args.confinement_surrogate_mean_weight),
+            "--confinement-surrogate-worst-weight",
+            str(args.confinement_surrogate_worst_weight),
+            "--confinement-surrogate-early-weight",
+            str(args.confinement_surrogate_early_weight),
+            "--hardware-search-mode",
+            args.hardware_search_mode,
+            "--hardware-search-soft-iterations",
+            str(args.hardware_search_soft_iterations),
+        ]
+    )
     if equilibria_dir is not None:
         command.extend(["--equilibria-dir", str(equilibria_dir)])
     append_single_stage_handoff_flags(command, args)
     _append_optional_flag(command, "--length-target", args.length_target)
     _append_optional_flag(command, "--frontier-volume-weight", args.frontier_volume_weight)
+    _append_optional_flag(
+        command,
+        "--resume-solver-checkpoint",
+        getattr(args, "resume_solver_checkpoint", None),
+    )
+    _append_optional_flag(
+        command,
+        "--frontier-scalarization-type",
+        getattr(args, "frontier_scalarization_type", None),
+    )
+    _append_optional_flag(
+        command,
+        "--frontier-reference-iota",
+        getattr(args, "frontier_reference_iota", None),
+    )
+    _append_optional_flag(
+        command,
+        "--frontier-reference-iota-scale",
+        getattr(args, "frontier_reference_iota_scale", None),
+    )
+    _append_optional_flag(
+        command,
+        "--frontier-reference-volume",
+        getattr(args, "frontier_reference_volume", None),
+    )
+    _append_optional_flag(
+        command,
+        "--frontier-reference-volume-scale",
+        getattr(args, "frontier_reference_volume_scale", None),
+    )
+    _append_optional_flag(
+        command,
+        "--frontier-reference-qa",
+        getattr(args, "frontier_reference_qa", None),
+    )
+    _append_optional_flag(
+        command,
+        "--frontier-reference-boozer",
+        getattr(args, "frontier_reference_boozer", None),
+    )
+    _append_optional_flag(
+        command,
+        "--frontier-boozer-trust-threshold",
+        getattr(args, "frontier_boozer_trust_threshold", None),
+    )
+    _append_optional_flag(
+        command,
+        "--frontier-boozer-trust-penalty-scale",
+        getattr(args, "frontier_boozer_trust_penalty_scale", None),
+    )
+    _append_optional_flag(
+        command,
+        "--frontier-chebyshev-rho",
+        getattr(args, "frontier_chebyshev_rho", None),
+    )
+    _append_optional_flag(
+        command,
+        "--frontier-chebyshev-weight-iota",
+        getattr(args, "frontier_chebyshev_weight_iota", None),
+    )
+    _append_optional_flag(
+        command,
+        "--frontier-chebyshev-weight-volume",
+        getattr(args, "frontier_chebyshev_weight_volume", None),
+    )
+    _append_optional_flag(
+        command,
+        "--frontier-chebyshev-weight-qa",
+        getattr(args, "frontier_chebyshev_weight_qa", None),
+    )
+    _append_optional_flag(
+        command,
+        "--frontier-chebyshev-weight-boozer",
+        getattr(args, "frontier_chebyshev_weight_boozer", None),
+    )
+    _append_optional_flag(
+        command,
+        "--epsilon-constraint-qa-max",
+        getattr(args, "epsilon_constraint_qa_max", None),
+    )
+    _append_optional_flag(
+        command,
+        "--epsilon-constraint-boozer-max",
+        getattr(args, "epsilon_constraint_boozer_max", None),
+    )
     _append_optional_flag(command, "--alm-qs-threshold", args.alm_qs_threshold)
     _append_optional_flag(command, "--alm-boozer-threshold", args.alm_boozer_threshold)
     _append_optional_flag(command, "--alm-iota-penalty-threshold", args.alm_iota_penalty_threshold)

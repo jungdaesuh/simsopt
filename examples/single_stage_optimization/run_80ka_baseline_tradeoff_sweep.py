@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -99,6 +100,19 @@ def parse_args() -> argparse.Namespace:
         "--stage2-bs-path",
         default=None,
         help="Explicit Stage 2 biot_savart_opt.json path. Overrides derived seed settings.",
+    )
+    parser.add_argument(
+        "--seed-order-upgrade",
+        type=int,
+        default=(
+            int(os.environ["SEED_ORDER_UPGRADE"])
+            if "SEED_ORDER_UPGRADE" in os.environ
+            else None
+        ),
+        help=(
+            "Optional Fourier order upgrade applied by the single-stage entrypoint "
+            "when loading the Stage 2 seed."
+        ),
     )
     parser.add_argument(
         "--stage2-init-only",
@@ -334,6 +348,8 @@ def build_single_stage_command(
         "--surf-dist-weight",
         str(case.surf_dist_weight),
     ]
+    if getattr(args, "seed_order_upgrade", None) is not None:
+        command.extend(["--seed-order-upgrade", str(args.seed_order_upgrade)])
     if args.equilibria_dir is not None:
         command.extend(["--equilibria-dir", args.equilibria_dir])
     if args.single_stage_init_only:

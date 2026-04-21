@@ -387,7 +387,14 @@ class SingleStageExampleTests(unittest.TestCase):
     def load_module(self):
         return load_single_stage_example_module()
 
-    def initialize_boozer_surface(self, module, surf_prev, *, constraint_weight):
+    def initialize_boozer_surface(
+        self,
+        module,
+        surf_prev,
+        *,
+        constraint_weight,
+        initial_surface_guess=None,
+    ):
         with patch.object(module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier), patch.object(
             module, "Volume", FakeVolume
         ), patch.object(module, "BoozerSurface", FakeBoozerSurface):
@@ -401,6 +408,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 iota=TEST_IOTA,
                 G0=TEST_G0,
                 boozer_I=TEST_BOOZER_I,
+                initial_surface_guess=initial_surface_guess,
             )
 
     def run_exact_boozer_objective(self, module, *, current_I):
@@ -560,6 +568,24 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(len(FakeSurfaceXYZTensorFourier.instances), 1)
         self.assertIs(boozer_surface.surface, FakeSurfaceXYZTensorFourier.instances[0])
         self.assertEqual(boozer_surface.I, TEST_BOOZER_I)
+
+    def test_initialize_boozer_surface_uses_loaded_surface_as_initial_guess(self):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        initial_surface_guess = SimpleNamespace(dofs=np.array([2.5, -1.5], dtype=float))
+
+        boozer_surface = self.initialize_boozer_surface(
+            module,
+            surf_prev,
+            constraint_weight=0.0,
+            initial_surface_guess=initial_surface_guess,
+        )
+
+        self.assertIsInstance(boozer_surface, FakeBoozerSurface)
+        self.assertEqual(len(FakeSurfaceXYZTensorFourier.instances), 1)
+        seeded_surface = FakeSurfaceXYZTensorFourier.instances[0]
+        np.testing.assert_allclose(seeded_surface.dofs, np.array([2.5, -1.5]))
+        self.assertFalse(hasattr(seeded_surface, "fitted_gamma"))
 
     def test_initialize_boozer_surface_exact_threads_negative_current(self):
         module = self.load_module()
@@ -2719,6 +2745,7 @@ class HardwareConstraintTests(unittest.TestCase):
             max_iterations=30,
             target_volume=0.10,
             target_iota=0.15,
+            stage2_seed_surf_path="/seeds/surf_opt_boozer_surface.json",
         )
         run_dict = {
             "search_eval": {
@@ -2765,6 +2792,10 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertEqual(payload["PLASMA_SURF_PATH"], "/equilibria/wout_test.nc")
         self.assertEqual(payload["STAGE2_BS_PATH"], "/seeds/biot_savart_opt.json")
+        self.assertEqual(
+            payload["STAGE2_SEED_SURF_PATH"],
+            "/seeds/surf_opt_boozer_surface.json",
+        )
         self.assertEqual(payload["STAGE2_RESULTS_PATH"], "/seeds/results.json")
         self.assertEqual(payload["mpol"], 8)
         self.assertEqual(payload["ntor"], 6)
@@ -7264,6 +7295,41 @@ class CurrentBaselineContractTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertEqual(args.seed_regime, "bridge_only")
+
+    def test_single_stage_parse_args_accepts_stage2_seed_surf_path(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--stage2-seed-surf-path",
+                "archives/surf_opt_boozer_surface.json",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(
+            args.stage2_seed_surf_path,
+            "archives/surf_opt_boozer_surface.json",
+        )
+
+    def test_single_stage_parse_args_accepts_warm_start_surface_stem(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--warm-start-surface-stem",
+                "recovery/surf_best_feasible",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.warm_start_surface_stem, "recovery/surf_best_feasible")
 
     def test_single_stage_parse_args_accepts_frontier_volume_weight_flag(self):
         module = load_single_stage_example_module()

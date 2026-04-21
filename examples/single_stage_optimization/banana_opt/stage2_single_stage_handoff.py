@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -22,9 +23,12 @@ from .coil_groups import (
 )
 from .current_contracts import resolve_finite_current_mode, resolve_loaded_tf_current_A
 from .hardware_contracts import (
+    ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV,
     BANANA_WINDING_MINOR_RADIUS_M,
     MAX_CURVATURE_INV_M,
+    env_flag,
     validate_banana_winding_surface_radius,
+    validate_plasma_vessel_clearance,
     validate_tf_current_limit,
 )
 from .single_stage_geometry import build_surface_configs
@@ -55,13 +59,16 @@ __all__ = [
     "BoozerSolveAttempt",
     "BoozerSolveSnapshot",
     "Stage2CoilPartitions",
+    "WarmStartBoozerSeed",
     "bootability_passes",
     "build_equilibrium_path",
     "classify_bootability_result",
     "compute_tf_G0",
     "initialize_boozer_surface",
+    "load_warm_start_boozer_seed",
     "partition_loaded_stage2_coils",
     "probe_stage2_seed_bootability",
+    "resolve_warm_start_boozer_surface_path",
     "restore_boozer_solve_state",
     "resolve_stage2_finite_current_mode",
     "resolve_single_stage_banana_surf_radius",
@@ -102,6 +109,14 @@ class BoozerSolveAttempt:
     solved_G: float | None
     error_type: str | None = None
     error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class WarmStartBoozerSeed:
+    surface: object
+    iota: float | None
+    G: float | None
+    source_path: Path
 
 
 @dataclass(frozen=True)
@@ -287,6 +302,22 @@ def validate_stage2_seed_contract(stage2_results):
             "Stage 2 seed curvature threshold exceeds the hardware ceiling of "
             f"{MAX_CURVATURE_INV_M:.1f} m^-1."
         )
+    surface_vessel_min_dist = stage2_results.get(
+        "SURFACE_VESSEL_MIN_DIST",
+        stage2_results.get("PLASMA_VESSEL_MIN_DIST"),
+    )
+    if surface_vessel_min_dist is None:
+        warnings.warn(
+            "Stage 2 seed artifact predates the plasma-vessel clearance gate "
+            "(missing SURFACE_VESSEL_MIN_DIST). Re-run stage-2 to verify the "
+            "LCFS clearance against the HBT-EP vacuum vessel.",
+            stacklevel=2,
+        )
+        return
+    validate_plasma_vessel_clearance(
+        surface_vessel_min_dist,
+        accept_offspec=env_flag(ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV),
+    )
 
 
 def compute_tf_G0(tf_coils) -> float:
@@ -303,8 +334,15 @@ def _coerce_boozer_scalar(value) -> float | None:
     return float(value)
 
 
+def _boozer_result_state(boozer_surface) -> Mapping[str, object]:
+    res = getattr(boozer_surface, "res", None)
+    if res is None:
+        return {}
+    return res
+
+
 def _read_boozer_solve_scalars(boozer_surface) -> tuple[float | None, float | None]:
-    res = boozer_surface.res
+    res = _boozer_result_state(boozer_surface)
     return (
         _coerce_boozer_scalar(res.get("iota")),
         _coerce_boozer_scalar(res.get("G")),
@@ -328,7 +366,7 @@ def _attempt_from_current_boozer_state(
 
 
 def snapshot_boozer_solve_state(boozer_surface) -> BoozerSolveSnapshot:
-    res = boozer_surface.res
+    res = _boozer_result_state(boozer_surface)
     _, solved_G = _read_boozer_solve_scalars(boozer_surface)
     return BoozerSolveSnapshot(
         surface_dofs=np.asarray(boozer_surface.surface.x, dtype=float).copy(),
@@ -343,9 +381,13 @@ def restore_boozer_solve_state(
     snapshot: BoozerSolveSnapshot,
 ) -> None:
     boozer_surface.surface.x = snapshot.surface_dofs.copy()
-    boozer_surface.res["iota"] = snapshot.iota
-    boozer_surface.res["G"] = snapshot.G
-    boozer_surface.res["success"] = snapshot.success
+    res = getattr(boozer_surface, "res", None)
+    if res is None:
+        res = {}
+        boozer_surface.res = res
+    res["iota"] = snapshot.iota
+    res["G"] = snapshot.G
+    res["success"] = snapshot.success
     if hasattr(boozer_surface, "need_to_run_code"):
         boozer_surface.need_to_run_code = False
 
@@ -358,7 +400,7 @@ def run_boozer_with_failure_policy(
     failure_policy: str,
     last_successful_state: BoozerSolveSnapshot | None = None,
 ) -> BoozerSolveAttempt:
-    res = boozer_surface.res
+    res = _boozer_result_state(boozer_surface)
     if failure_policy not in (
         BOOZER_FAILURE_POLICY_REPORT_FAILURE,
         BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS,
@@ -387,6 +429,7 @@ def run_boozer_with_failure_policy(
         _restore_if_needed()
         return attempt
 
+    res = _boozer_result_state(boozer_surface)
     if result is None:
         attempt = _attempt_from_current_boozer_state(
             boozer_surface,
@@ -415,6 +458,61 @@ def _surface_volume_or_none(surface) -> float | None:
         return None
 
 
+def _surface_dofs(surface) -> np.ndarray:
+    get_dofs = getattr(surface, "get_dofs", None)
+    if callable(get_dofs):
+        return np.asarray(get_dofs(), dtype=float)
+    return np.asarray(surface.dofs, dtype=float)
+
+
+def resolve_warm_start_boozer_surface_path(
+    warm_start_surface_stem: str | Path,
+    *,
+    surface_name: str,
+) -> Path:
+    surface_stem = Path(warm_start_surface_stem)
+    candidate_paths = [
+        surface_stem.with_name(
+            f"{surface_stem.name}_{surface_name}_boozer_surface.json"
+        )
+    ]
+    if surface_name == "outer":
+        candidate_paths.append(
+            surface_stem.with_name(f"{surface_stem.name}_boozer_surface.json")
+        )
+    for candidate_path in candidate_paths:
+        if candidate_path.is_file():
+            return candidate_path
+    raise FileNotFoundError(
+        "Warm-start Boozer surface artifact not found. Checked: "
+        + ", ".join(str(path) for path in candidate_paths)
+    )
+
+
+def load_warm_start_boozer_seed(
+    warm_start_boozer_surface_path: str | Path,
+    *,
+    artifact_loader=load,
+) -> WarmStartBoozerSeed:
+    source_path = Path(warm_start_boozer_surface_path)
+    warm_start_artifact = artifact_loader(str(source_path))
+    if hasattr(warm_start_artifact, "surface"):
+        res = _boozer_result_state(warm_start_artifact)
+        iota = _coerce_boozer_scalar(res.get("iota"))
+        G = _coerce_boozer_scalar(res.get("G"))
+        warm_start_surface = warm_start_artifact.surface
+    else:
+        iota = None
+        G = None
+        warm_start_surface = warm_start_artifact
+    return WarmStartBoozerSeed(
+        surface=warm_start_surface,
+        iota=iota,
+        G=G,
+        source_path=source_path,
+    )
+
+
 def attempt_initialize_boozer_surface(
     surf_prev,
     mpol,
@@ -426,6 +524,7 @@ def attempt_initialize_boozer_surface(
     G0,
     boozer_I=0.0,
     *,
+    initial_surface_guess=None,
     nfp=5,
     surface_cls=SurfaceXYZTensorFourier,
     volume_cls=Volume,
@@ -438,8 +537,14 @@ def attempt_initialize_boozer_surface(
         stellsym=True,
         quadpoints_theta=surf_prev.quadpoints_theta,
         quadpoints_phi=surf_prev.quadpoints_phi,
+        dofs=(
+            None
+            if initial_surface_guess is None
+            else _surface_dofs(initial_surface_guess)
+        ),
     )
-    surf.least_squares_fit(surf_prev.gamma())
+    if initial_surface_guess is None:
+        surf.least_squares_fit(surf_prev.gamma())
 
     if constraint_weight is not None:
         vol = volume_cls(surf)
@@ -460,7 +565,7 @@ def attempt_initialize_boozer_surface(
             stellsym=True,
             quadpoints_theta=np.linspace(0, 1, 2 * mpol + 1, endpoint=False),
             quadpoints_phi=np.linspace(0, 1.0 / nfp, 2 * ntor + 1, endpoint=False),
-            dofs=surf.dofs,
+            dofs=_surface_dofs(surf),
         )
         vol = volume_cls(surf_exact)
         boozer_surface = boozer_surface_cls(
@@ -519,6 +624,7 @@ def initialize_boozer_surface(
     G0,
     boozer_I=0.0,
     *,
+    initial_surface_guess=None,
     nfp=5,
     surface_cls=SurfaceXYZTensorFourier,
     volume_cls=Volume,
@@ -545,6 +651,7 @@ def initialize_boozer_surface(
         iota,
         G0,
         boozer_I,
+        initial_surface_guess=initial_surface_guess,
         nfp=nfp,
         surface_cls=surface_cls,
         volume_cls=volume_cls,
@@ -678,6 +785,61 @@ def _required_handoff_metadata_keys(
     return [key for key in required_keys if stage2_artifact_results.get(key) is None]
 
 
+def _probe_initialization_inputs(
+    *,
+    stage2_artifact_results: Mapping[str, object],
+    plasma_surf_filename: str,
+    equilibria_dir: str | Path,
+    equilibrium_path: str | Path | None,
+    database_equilibria_dir: str | Path | None,
+    nphi: int,
+    ntheta: int,
+    vol_target: float,
+    iota_target: float,
+    tf_coils,
+    stage2_seed_surf_path: str | Path | None,
+    artifact_loader,
+) -> tuple[object, float, object | None, float, float]:
+    default_G = compute_tf_G0(tf_coils)
+    if stage2_seed_surf_path is not None:
+        warm_start_seed = load_warm_start_boozer_seed(
+            stage2_seed_surf_path,
+            artifact_loader=artifact_loader,
+        )
+        return (
+            warm_start_seed.surface,
+            float(vol_target),
+            warm_start_seed.surface,
+            iota_target if warm_start_seed.iota is None else warm_start_seed.iota,
+            default_G if warm_start_seed.G is None else warm_start_seed.G,
+        )
+
+    equilibrium_file = build_equilibrium_path(
+        plasma_surf_filename,
+        equilibria_dir,
+        equilibrium_path=equilibrium_path,
+        database_equilibria_dir=database_equilibria_dir,
+    )
+    surface_configs = build_surface_configs(
+        equilibrium_file,
+        nphi,
+        ntheta,
+        float(stage2_artifact_results["TOROIDAL_FLUX"]),
+        float(stage2_artifact_results["MAJOR_RADIUS"]),
+        vol_target,
+        1,
+        0.8,
+    )
+    outer_surface_config = surface_configs[-1]
+    return (
+        outer_surface_config["initial_surface"],
+        outer_surface_config["target_volume"],
+        None,
+        iota_target,
+        default_G,
+    )
+
+
 def probe_stage2_seed_bootability(
     *,
     stage2_bs_path: str | Path,
@@ -697,6 +859,7 @@ def probe_stage2_seed_bootability(
     stage: str = BOOTABILITY_STAGE_PROBE,
     equilibrium_path: str | Path | None = None,
     database_equilibria_dir: str | Path | None = None,
+    stage2_seed_surf_path: str | Path | None = None,
     bs_loader=load,
 ) -> dict[str, object]:
     missing_metadata = _required_handoff_metadata_keys(stage2_artifact_results)
@@ -712,12 +875,6 @@ def probe_stage2_seed_bootability(
         )
     try:
         validate_stage2_seed_contract(stage2_artifact_results)
-        equilibrium_file = build_equilibrium_path(
-            plasma_surf_filename,
-            equilibria_dir,
-            equilibrium_path=equilibrium_path,
-            database_equilibria_dir=database_equilibria_dir,
-        )
         bs = bs_loader(stage2_bs_path)
         coil_partitions = partition_loaded_stage2_coils(
             bs.coils,
@@ -726,28 +883,38 @@ def probe_stage2_seed_bootability(
         )
         tf_coils = coil_partitions.tf_coils
         resolve_stage2_tf_current_A(stage2_artifact_results, tf_coils)
-        surface_configs = build_surface_configs(
-            equilibrium_file,
-            nphi,
-            ntheta,
-            float(stage2_artifact_results["TOROIDAL_FLUX"]),
-            float(stage2_artifact_results["MAJOR_RADIUS"]),
-            vol_target,
-            1,
-            0.8,
+        (
+            initial_surface,
+            target_volume,
+            initial_surface_guess,
+            initial_iota,
+            initial_G,
+        ) = _probe_initialization_inputs(
+            stage2_artifact_results=stage2_artifact_results,
+            plasma_surf_filename=plasma_surf_filename,
+            equilibria_dir=equilibria_dir,
+            equilibrium_path=equilibrium_path,
+            database_equilibria_dir=database_equilibria_dir,
+            nphi=nphi,
+            ntheta=ntheta,
+            vol_target=vol_target,
+            iota_target=iota_target,
+            tf_coils=tf_coils,
+            stage2_seed_surf_path=stage2_seed_surf_path,
+            artifact_loader=bs_loader,
         )
-        outer_surface_config = surface_configs[-1]
         initialization = attempt_initialize_boozer_surface(
-            outer_surface_config["initial_surface"],
+            initial_surface,
             mpol,
             ntor,
             bs,
-            outer_surface_config["target_volume"],
+            target_volume,
             constraint_weight,
-            iota_target,
-            compute_tf_G0(tf_coils),
+            initial_iota,
+            initial_G,
             boozer_I,
-            nfp=outer_surface_config["initial_surface"].nfp,
+            initial_surface_guess=initial_surface_guess,
+            nfp=initial_surface.nfp,
         )
     except (FileNotFoundError, KeyError, TypeError, ValueError) as error:
         return _bootability_failure(

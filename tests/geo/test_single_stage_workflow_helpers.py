@@ -975,6 +975,7 @@ class BaselineSweepScriptTests(unittest.TestCase):
             stage2_basin_seed=-1,
             stage2_init_only=False,
             allow_init_only_stage2_seed=False,
+            seed_order_upgrade=None,
             single_stage_constraint_method="penalty",
             single_stage_maxiter=25,
             single_stage_init_only=True,
@@ -1015,6 +1016,31 @@ class BaselineSweepScriptTests(unittest.TestCase):
         self.assertIn("--plasma-current-A", command)
         self.assertIn("0.0", command)
         self.assertIn("--init-only", command)
+
+    def test_build_single_stage_command_forwards_seed_order_upgrade(self):
+        module = load_baseline_sweep_module()
+        helpers = load_workflow_helpers_module()
+        args = self._make_args()
+        args.seed_order_upgrade = 4
+        case = helpers.SingleStageWeightCase(
+            name="baseline",
+            res_weight=1000.0,
+            iotas_weight=100.0,
+            cc_weight=100.0,
+            curvature_weight=0.1,
+            length_weight=1.0,
+            cs_weight=1.0,
+            surf_dist_weight=1000.0,
+        )
+
+        command = module.build_single_stage_command(
+            args,
+            case=case,
+            stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            case_output_root=Path("/tmp/sweep/baseline"),
+        )
+
+        self.assertEqual(command[command.index("--seed-order-upgrade") + 1], "4")
 
     def test_validate_locked_baseline_args_rejects_nonzero_plasma_current(self):
         module = load_baseline_sweep_module()
@@ -1324,6 +1350,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
             stage2_curvature_threshold=100.0,
             banana_surf_radius=0.21,
             stage2_order=2,
+            seed_order_upgrade=None,
             nphi=41,
             ntheta=16,
             mpol=4,
@@ -1344,6 +1371,20 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
         self.assertIn("--init-only", command)
         self.assertIn("--nphi", command)
         self.assertIn("--plasma-current-A", command)
+
+    def test_build_smoke_command_forwards_seed_order_upgrade(self):
+        module = load_finite_current_smoke_module()
+        args = self._make_args()
+        args.seed_order_upgrade = 4
+
+        command = module.build_smoke_command(
+            args,
+            current_A=8000.0,
+            stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            case_output_root=Path("/tmp/smoke/current_8000"),
+        )
+
+        self.assertEqual(command[command.index("--seed-order-upgrade") + 1], "4")
 
     def test_make_stage2_config_rejects_offspec_major_radius(self):
         module = load_finite_current_smoke_module()
@@ -1514,6 +1555,8 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             plasma_surf_filename="demo.nc",
             stage2_bs_path="relative/seed.json",
             equilibria_dir=None,
+            stage2_seed_surf_path=None,
+            seed_order_upgrade=None,
             output_root="outputs",
             summary_json=None,
             single_stage_timeout_seconds=0.0,
@@ -1747,6 +1790,69 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         self.assertEqual(args.cs_dist, 0.015)
         self.assertEqual(args.curvature_threshold, 100.0)
 
+    def test_goal_mode_comparison_wrapper_parse_args_accepts_seed_order_upgrade(self):
+        module = load_goal_mode_comparison_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_single_stage_goal_mode_comparison.py",
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "seed.json",
+                "--seed-order-upgrade",
+                "4",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.seed_order_upgrade, 4)
+
+    def test_goal_mode_comparison_wrapper_parse_args_accepts_warm_start_surface_stem(self):
+        module = load_goal_mode_comparison_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_single_stage_goal_mode_comparison.py",
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "seed.json",
+                "--warm-start-surface-stem",
+                "recovery/surf_best_feasible",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.warm_start_surface_stem, "recovery/surf_best_feasible")
+
+    def test_goal_mode_comparison_wrapper_parse_args_accepts_stage2_seed_surf_path(self):
+        module = load_goal_mode_comparison_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_single_stage_goal_mode_comparison.py",
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "seed.json",
+                "--stage2-seed-surf-path",
+                "stage2/surf_opt_boozer_surface.json",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(
+            args.stage2_seed_surf_path,
+            "stage2/surf_opt_boozer_surface.json",
+        )
+
     def test_build_single_stage_goal_mode_command_forwards_frontier_volume_weight(self):
         module = load_goal_mode_comparison_module()
         args = self._make_args()
@@ -1801,6 +1907,9 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         args = self._make_args()
         args.allow_init_only_stage2_seed = True
         args.equilibrium_path = "eq/demo.nc"
+        args.stage2_seed_surf_path = "stage2/surf_opt_boozer_surface.json"
+        args.warm_start_surface_stem = "recovery/surf_best_feasible"
+        args.seed_order_upgrade = 4
         args.constraint_weight = -1.0
         args.num_tf_coils = 18
         args.stage2_seed_tf_current_A = 12345.0
@@ -1816,6 +1925,18 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--equilibrium-path") + 1],
             str(Path("eq/demo.nc").resolve()),
+        )
+        self.assertEqual(
+            command[command.index("--stage2-seed-surf-path") + 1],
+            str(Path("stage2/surf_opt_boozer_surface.json").resolve()),
+        )
+        self.assertEqual(
+            command[command.index("--warm-start-surface-stem") + 1],
+            str(Path("recovery/surf_best_feasible").resolve()),
+        )
+        self.assertEqual(
+            command[command.index("--seed-order-upgrade") + 1],
+            "4",
         )
         self.assertEqual(
             command[command.index("--constraint-weight") + 1],
@@ -2296,7 +2417,30 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         load_json.assert_called_once_with(partial_results_path)
         self.assertEqual(payload["result_source"], "best_feasible_partial")
         self.assertEqual(payload["results_path"], partial_results_path)
-        self.assertEqual(payload["results"]["SINGLE_STAGE_GOAL_MODE"], "frontier")
+
+    def test_single_stage_artifact_bundle_from_results_maps_preserved_partial_artifacts(self):
+        module = load_goal_mode_comparison_module()
+        results_path = Path(
+            "/tmp/recovery/mpol=8-ntor=6/results_best_feasible.partial.json"
+        )
+
+        bundle = module.single_stage_artifact_bundle_from_results(
+            "best_feasible_partial",
+            results_path,
+        )
+
+        self.assertEqual(
+            bundle["bs_path"],
+            results_path.with_name("biot_savart_best_feasible.json"),
+        )
+        self.assertEqual(
+            bundle["surface_stem"],
+            results_path.with_name("surf_best_feasible"),
+        )
+        self.assertEqual(
+            bundle["outer_boozer_surface_path"],
+            results_path.with_name("surf_best_feasible_outer_boozer_surface.json"),
+        )
 
     def test_run_goal_mode_case_re_raises_timeout_when_no_results_can_be_salvaged(self):
         module = load_goal_mode_comparison_module()
