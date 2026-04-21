@@ -303,7 +303,7 @@ def resolve_constraint_contract(
     _validate_engineering_values(contract)
     _validate_target_plasma_ceiling(contract)
 
-    return MappingProxyType(dict(contract)), MappingProxyType(dict(trace))
+    return MappingProxyType(contract), MappingProxyType(trace)
 
 
 def resolve_constraint_contract_from_wire_names(
@@ -332,15 +332,22 @@ def resolve_constraint_contract_from_wire_names(
     )
 
 
-def compute_constraint_contract_hash(contract: Mapping[str, Any]) -> str:
+def _canonical_payload(contract: Mapping[str, Any]) -> dict[str, float]:
     missing = sorted(set(CONSTRAINT_FIELD_TYPES) - set(contract))
     if missing:
         raise ValueError(
             f"Cannot hash partial constraint contract; missing: {', '.join(missing)}"
         )
-    payload = {key: float(contract[key]) for key in sorted(contract)}
+    return {key: float(contract[key]) for key in sorted(contract)}
+
+
+def _hash_payload(payload: Mapping[str, float]) -> str:
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def compute_constraint_contract_hash(contract: Mapping[str, Any]) -> str:
+    return _hash_payload(_canonical_payload(contract))
 
 
 def contract_is_all_hardware_defaults(trace: Mapping[str, str]) -> bool:
@@ -354,12 +361,12 @@ def build_constraint_metadata(
     override_reason: str | None = None,
     trace: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    effective_values = {key: float(contract[key]) for key in sorted(contract)}
+    effective_values = _canonical_payload(contract)
     metadata: dict[str, Any] = {
         "CONSTRAINT_PROFILE": profile_name,
         "EFFECTIVE_VALUES": effective_values,
         "OVERRIDE_REASON": override_reason,
-        "CONTRACT_HASH": compute_constraint_contract_hash(contract),
+        "CONTRACT_HASH": _hash_payload(effective_values),
         "CONTRACT_SCHEMA_VERSION": CONSTRAINT_SCHEMA_VERSION,
     }
     if trace is not None:

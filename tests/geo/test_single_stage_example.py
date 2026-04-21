@@ -7949,6 +7949,15 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
 
 class Stage2ArtifactWriterTests(unittest.TestCase):
+    def _fake_constraint_metadata(self):
+        return {
+            "CONSTRAINT_PROFILE": "unit-test",
+            "EFFECTIVE_VALUES": {"TF_CURRENT_A": 80000.0},
+            "OVERRIDE_REASON": None,
+            "CONTRACT_HASH": "deadbeef",
+            "CONTRACT_SCHEMA_VERSION": 1,
+        }
+
     def test_materialize_stage2_artifact_results_rejects_biot_savart_partition_mismatch(self):
         module = load_stage2_module()
 
@@ -7973,6 +7982,34 @@ class Stage2ArtifactWriterTests(unittest.TestCase):
                 stage2_iota_runtime=None,
                 new_bs=fake_bs,
                 new_surf=SimpleNamespace(),
+                constraint_metadata=self._fake_constraint_metadata(),
+            )
+
+    def test_materialize_stage2_artifact_results_requires_constraint_metadata(self):
+        module = load_stage2_module()
+
+        fake_bs = SimpleNamespace(
+            coils=[object()],
+            save=lambda *_args, **_kwargs: None,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir, self.assertRaisesRegex(
+            ValueError,
+            "requires constraint_metadata",
+        ):
+            module.materialize_stage2_artifact_results(
+                args=SimpleNamespace(),
+                stage2_bs_artifact_path=str(Path(tmpdir) / "biot_savart_opt.json"),
+                results_kwargs={
+                    "num_tf_coils": 1,
+                    "num_banana_coils": 0,
+                    "num_proxy_coils": 0,
+                    "num_vf_coils": 0,
+                },
+                stage2_iota_runtime=None,
+                new_bs=fake_bs,
+                new_surf=SimpleNamespace(),
+                constraint_metadata=None,
             )
 
     def test_materialize_stage2_artifact_results_emits_matching_checksum(self):
@@ -8000,6 +8037,7 @@ class Stage2ArtifactWriterTests(unittest.TestCase):
             return_value={},
         ):
             artifact_path = Path(tmpdir) / "biot_savart_opt.json"
+            constraint_metadata = self._fake_constraint_metadata()
             results = module.materialize_stage2_artifact_results(
                 args=SimpleNamespace(),
                 stage2_bs_artifact_path=str(artifact_path),
@@ -8012,6 +8050,7 @@ class Stage2ArtifactWriterTests(unittest.TestCase):
                 stage2_iota_runtime=None,
                 new_bs=fake_bs,
                 new_surf=SimpleNamespace(),
+                constraint_metadata=constraint_metadata,
             )
             expected_digest = module.compute_stage2_bs_sha256(artifact_path)
 
@@ -8019,6 +8058,9 @@ class Stage2ArtifactWriterTests(unittest.TestCase):
             results["STAGE2_BS_SHA256"],
             expected_digest,
         )
+        self.assertEqual(results["CONTRACT_HASH"], "deadbeef")
+        self.assertEqual(results["CONSTRAINT_PROFILE"], "unit-test")
+        self.assertEqual(results["CONTRACT_SCHEMA_VERSION"], 1)
 
 
 class Stage2RuntimeSmokeTests(unittest.TestCase):

@@ -15,12 +15,16 @@ from .current_contracts import (
 )
 from .hardware_contracts import fixed_stage2_artifact_hardware_contract
 from .hardware_constraint_schema import build_bootability_recovery_payload_fields
+from .constraint_contract import CONSTRAINT_SCHEMA_VERSION
 from workflow_helpers import canonical_stage2_iota_constraint_weight
+
+import warnings
 
 DEFAULT_LEGACY_BANANA_INIT_CURRENT_A = 1.0e4
 _BOOZER_CURRENT_CONVENTION_INFERENCE_ABS_TOL = 1.0e-12
 STAGE2_BS_SHA256_KEY = "STAGE2_BS_SHA256"
 LEGACY_CONSTRAINT_CONTRACT_SCHEMA_VERSION = 0
+CURRENT_CONSTRAINT_CONTRACT_SCHEMA_VERSION = CONSTRAINT_SCHEMA_VERSION
 STAGE2_SEED_CONTRACT_HASH_KEY = "STAGE2_SEED_CONTRACT_HASH"
 
 
@@ -392,6 +396,51 @@ def _allows_missing_legacy_zero_vf_template_path(
     )
 
 
+def validate_constraint_contract_schema_version(
+    stage2_results_path: Path,
+    stage2_artifact_results: dict,
+    *,
+    owner_label: str,
+) -> None:
+    """Enforce forward compatibility of the persisted constraint contract.
+
+    * Absent / legacy schema (``CONTRACT_SCHEMA_VERSION=0``) emits a
+      :class:`RuntimeWarning` but is accepted, matching the legacy policy
+      already used for ``STAGE2_BS_SHA256`` (workflow_runner_common). This
+      keeps pre-contract artifacts usable for resume/reuse while flagging
+      provenance gaps loudly.
+    * The current schema version is accepted silently.
+    * Any other value — typically a future version produced by newer
+      code — is rejected so we never silently misread an artifact whose
+      schema we do not understand.
+    """
+    raw_version = stage2_artifact_results.get("CONTRACT_SCHEMA_VERSION")
+    if raw_version is None:
+        recorded_version = LEGACY_CONSTRAINT_CONTRACT_SCHEMA_VERSION
+    else:
+        recorded_version = int(raw_version)
+    if recorded_version == CURRENT_CONSTRAINT_CONTRACT_SCHEMA_VERSION:
+        return
+    if recorded_version == LEGACY_CONSTRAINT_CONTRACT_SCHEMA_VERSION:
+        warnings.warn(
+            (
+                f"{owner_label}: {stage2_results_path} uses legacy constraint "
+                f"contract schema v{LEGACY_CONSTRAINT_CONTRACT_SCHEMA_VERSION} "
+                "(no CONTRACT_HASH); allowing legacy artifact without "
+                "constraint-contract binding."
+            ),
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
+    raise ValueError(
+        f"{owner_label}: {stage2_results_path} reports CONTRACT_SCHEMA_VERSION="
+        f"{recorded_version!r}, which is incompatible with the current schema "
+        f"v{CURRENT_CONSTRAINT_CONTRACT_SCHEMA_VERSION}. Upgrade the reader "
+        "before loading this artifact."
+    )
+
+
 def validate_stage2_artifact_metadata(
     stage2_results_path: Path,
     stage2_artifact_results: dict,
@@ -400,6 +449,11 @@ def validate_stage2_artifact_metadata(
     owner_label: str,
     experiment_family: str,
 ) -> None:
+    validate_constraint_contract_schema_version(
+        stage2_results_path,
+        stage2_artifact_results,
+        owner_label=owner_label,
+    )
     for key, expected in expected_metadata.items():
         actual = stage2_artifact_results.get(key)
         if _allows_missing_legacy_zero_vf_template_path(

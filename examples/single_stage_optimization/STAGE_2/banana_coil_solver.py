@@ -988,8 +988,15 @@ def materialize_stage2_artifact_results(
     stage2_iota_runtime,
     new_bs,
     new_surf,
-    constraint_metadata=None,
+    constraint_metadata,
 ):
+    if constraint_metadata is None:
+        raise ValueError(
+            "materialize_stage2_artifact_results requires constraint_metadata; "
+            "call build_stage2_constraint_artifact_metadata before writing the "
+            "Stage 2 artifact so CONTRACT_HASH, CONSTRAINT_PROFILE, EFFECTIVE_VALUES, "
+            "OVERRIDE_REASON and CONTRACT_SCHEMA_VERSION are always persisted."
+        )
     artifact_output_root = os.path.dirname(stage2_bs_artifact_path)
     os.makedirs(artifact_output_root, exist_ok=True)
     validate_stage2_coil_partition_counts(
@@ -1009,8 +1016,7 @@ def materialize_stage2_artifact_results(
     results[STAGE2_BS_SHA256_KEY] = compute_stage2_bs_sha256(
         stage2_bs_artifact_path
     )
-    if constraint_metadata is not None:
-        results.update(constraint_metadata)
+    results.update(constraint_metadata)
     results.update(
         build_stage2_iota_report_payload(
             args=args,

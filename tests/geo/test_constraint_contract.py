@@ -315,6 +315,88 @@ class ConstraintContractWireNamesTests(unittest.TestCase):
             )
 
 
+class ArtifactContractsSchemaVersionTests(unittest.TestCase):
+    def test_current_schema_version_accepted_silently(self):
+        import warnings
+        module = load_artifact_contracts_module()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            module.validate_constraint_contract_schema_version(
+                Path("/tmp/fake_results.json"),
+                {
+                    "CONTRACT_SCHEMA_VERSION": (
+                        module.CURRENT_CONSTRAINT_CONTRACT_SCHEMA_VERSION
+                    ),
+                    "CONTRACT_HASH": "deadbeef",
+                },
+                owner_label="unit-test",
+            )
+
+    def test_legacy_schema_version_warns_but_accepts(self):
+        import warnings
+        module = load_artifact_contracts_module()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            module.validate_constraint_contract_schema_version(
+                Path("/tmp/fake_results.json"),
+                {
+                    "CONTRACT_SCHEMA_VERSION": (
+                        module.LEGACY_CONSTRAINT_CONTRACT_SCHEMA_VERSION
+                    ),
+                },
+                owner_label="unit-test",
+            )
+
+        warnings_matched = [
+            w for w in caught
+            if issubclass(w.category, RuntimeWarning)
+            and "legacy constraint contract schema" in str(w.message)
+        ]
+        self.assertEqual(len(warnings_matched), 1)
+
+    def test_missing_schema_version_treated_as_legacy(self):
+        import warnings
+        module = load_artifact_contracts_module()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            module.validate_constraint_contract_schema_version(
+                Path("/tmp/fake_results.json"),
+                {},
+                owner_label="unit-test",
+            )
+
+        warnings_matched = [
+            w for w in caught if issubclass(w.category, RuntimeWarning)
+        ]
+        self.assertEqual(len(warnings_matched), 1)
+
+    def test_future_schema_version_rejected(self):
+        module = load_artifact_contracts_module()
+
+        future_version = module.CURRENT_CONSTRAINT_CONTRACT_SCHEMA_VERSION + 1
+        with self.assertRaisesRegex(ValueError, "incompatible with the current schema"):
+            module.validate_constraint_contract_schema_version(
+                Path("/tmp/fake_results.json"),
+                {"CONTRACT_SCHEMA_VERSION": future_version},
+                owner_label="unit-test",
+            )
+
+    def test_validate_stage2_artifact_metadata_rejects_future_schema(self):
+        module = load_artifact_contracts_module()
+
+        with self.assertRaisesRegex(ValueError, "incompatible with the current schema"):
+            module.validate_stage2_artifact_metadata(
+                Path("/tmp/fake_results.json"),
+                {"CONTRACT_SCHEMA_VERSION": 999},
+                expected_metadata={},
+                owner_label="unit-test",
+                experiment_family="unit-test",
+            )
+
+
 class ArtifactContractsLegacyUpgradeTests(unittest.TestCase):
     def test_legacy_upgrade_injects_schema_version_zero_and_no_synthetic_hash(self):
         module = load_artifact_contracts_module()

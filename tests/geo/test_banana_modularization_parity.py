@@ -371,7 +371,11 @@ class SnapshotParityTests(unittest.TestCase):
             )
 
     def test_single_stage_reference_surface_wrapper_order(self):
-        surfaces = SimpleNamespace(vessel="VV", hbt="HBT", coil_winding_surface="CWS")
+        surfaces = SimpleNamespace(
+            vessel="VV",
+            lcfs_clearance_reference="LCFS",
+            coil_winding_surface="CWS",
+        )
 
         with mock.patch.object(
             self.current_single_stage,
@@ -380,7 +384,7 @@ class SnapshotParityTests(unittest.TestCase):
         ):
             self.assertEqual(
                 self.current_single_stage.build_hbt_reference_surfaces(5, 0.2),
-                ("VV", "HBT", "CWS"),
+                ("VV", "LCFS", "CWS"),
             )
 
     def test_stage2_reference_surface_wrapper_order(self):
@@ -388,7 +392,11 @@ class SnapshotParityTests(unittest.TestCase):
             EXAMPLES_ROOT / "STAGE_2" / "banana_coil_solver.py",
             "banana_stage2_solver",
         )
-        surfaces = SimpleNamespace(vessel="VV", hbt="HBT", coil_winding_surface="CWS")
+        surfaces = SimpleNamespace(
+            vessel="VV",
+            lcfs_clearance_reference="LCFS",
+            coil_winding_surface="CWS",
+        )
 
         with mock.patch.object(
             stage2_module,
@@ -397,7 +405,7 @@ class SnapshotParityTests(unittest.TestCase):
         ):
             self.assertEqual(
                 stage2_module.build_hbt_reference_surfaces(5, 0.2),
-                ("HBT", "CWS", "VV"),
+                ("LCFS", "CWS", "VV"),
             )
 
     def test_compute_surface_vessel_min_dist_matches_snapshot(self):
