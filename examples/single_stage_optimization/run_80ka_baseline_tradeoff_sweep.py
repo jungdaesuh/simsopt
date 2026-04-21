@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -19,6 +18,7 @@ from workflow_helpers import (  # noqa: E402
 from workflow_runner_common import (  # noqa: E402
     SINGLE_STAGE_SCRIPT_PATH,
     Stage2ArtifactConfig,
+    add_seed_order_upgrade_argument,
     build_stage2_command,
     discover_single_results_path,
     ensure_stage2_artifact,
@@ -101,19 +101,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Explicit Stage 2 biot_savart_opt.json path. Overrides derived seed settings.",
     )
-    parser.add_argument(
-        "--seed-order-upgrade",
-        type=int,
-        default=(
-            int(os.environ["SEED_ORDER_UPGRADE"])
-            if "SEED_ORDER_UPGRADE" in os.environ
-            else None
-        ),
-        help=(
-            "Optional Fourier order upgrade applied by the single-stage entrypoint "
-            "when loading the Stage 2 seed."
-        ),
-    )
+    add_seed_order_upgrade_argument(parser)
     parser.add_argument(
         "--stage2-init-only",
         action="store_true",

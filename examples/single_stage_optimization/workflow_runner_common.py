@@ -661,6 +661,44 @@ def append_bool_flag(command: list[str], flag: str, enabled: bool) -> None:
         command.append(flag)
 
 
+def env_optional_int(name: str) -> int | None:
+    value = os.environ.get(name)
+    return None if value is None else int(value)
+
+
+def add_seed_order_upgrade_argument(parser) -> None:
+    parser.add_argument(
+        "--seed-order-upgrade",
+        type=int,
+        default=env_optional_int("SEED_ORDER_UPGRADE"),
+        help=(
+            "Optional Fourier order upgrade applied by the single-stage entrypoint "
+            "when loading the Stage 2 seed."
+        ),
+    )
+
+
+def add_stage2_warm_start_seed_arguments(parser) -> None:
+    parser.add_argument(
+        "--stage2-seed-surf-path",
+        default=os.environ.get("STAGE2_SEED_SURF_PATH"),
+        help=(
+            "Optional saved surface or Boozer-surface artifact forwarded into the "
+            "single-stage entrypoint as a Stage 2 warm-start seed."
+        ),
+    )
+    parser.add_argument(
+        "--warm-start-surface-stem",
+        default=None,
+        help=(
+            "Optional stem for saved single-stage surface artifacts "
+            "(for example /path/to/surf_best_feasible). When set, the single-stage "
+            "entrypoint reuses the saved Boozer surface geometry/iota/G as its "
+            "initialization seed."
+        ),
+    )
+
+
 def append_single_stage_handoff_flags(command: list[str], args: object) -> None:
     equilibrium_path = resolved_optional_path(getattr(args, "equilibrium_path", None))
     if equilibrium_path is not None:

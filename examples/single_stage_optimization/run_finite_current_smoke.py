@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -13,6 +12,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from workflow_runner_common import (  # noqa: E402
     SINGLE_STAGE_SCRIPT_PATH,
     Stage2ArtifactConfig,
+    add_seed_order_upgrade_argument,
     build_stage2_command,
     discover_single_results_path,
     ensure_stage2_artifact,
@@ -40,7 +40,6 @@ from banana_opt.hardware_contracts import (  # noqa: E402
     MAX_CURVATURE_INV_M,
     TF_CURRENT_HARD_LIMIT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
-    validate_major_radius,
 )
 from banana_opt.constraint_contract import (  # noqa: E402
     resolve_constraint_contract_from_wire_names,
@@ -82,19 +81,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Explicit Stage 2 biot_savart_opt.json path. Overrides derived seed settings.",
     )
-    parser.add_argument(
-        "--seed-order-upgrade",
-        type=int,
-        default=(
-            int(os.environ["SEED_ORDER_UPGRADE"])
-            if "SEED_ORDER_UPGRADE" in os.environ
-            else None
-        ),
-        help=(
-            "Optional Fourier order upgrade applied by the single-stage entrypoint "
-            "when loading the Stage 2 seed."
-        ),
-    )
+    add_seed_order_upgrade_argument(parser)
     parser.add_argument("--stage2-timeout-seconds", type=float, default=0.0)
     parser.add_argument("--single-stage-timeout-seconds", type=float, default=0.0)
     parser.add_argument("--currents-A", default="0,8000,-35200")
@@ -116,7 +103,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def _resolve_smoke_constraint_contract(args: argparse.Namespace) -> dict[str, float]:
-    validate_major_radius(args.major_radius)
     contract, _trace = resolve_constraint_contract_from_wire_names(
         cli_overrides={
             "tf_current_A": args.tf_current_A,
@@ -124,6 +110,8 @@ def _resolve_smoke_constraint_contract(args: argparse.Namespace) -> dict[str, fl
             "curvature_threshold": args.stage2_curvature_threshold,
             "banana_surf_radius": args.banana_surf_radius,
         },
+        offspec_major_radius_m=args.major_radius,
+        accept_offspec_major_radius=False,
     )
     return dict(contract)
 

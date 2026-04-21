@@ -13,6 +13,10 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from workflow_runner_common import (  # noqa: E402
     SINGLE_STAGE_SCRIPT_PATH,
+    add_seed_order_upgrade_argument,
+    add_stage2_warm_start_seed_arguments,
+    append_bool_flag,
+    append_optional_flag,
     append_single_stage_handoff_flags,
     discover_single_results_path,
     load_json,
@@ -52,16 +56,6 @@ _RESULT_SURFACE_STEMS = {
     "final": "surf_opt",
     **_PRESERVED_SURFACE_STEMS,
 }
-
-
-def _append_optional_flag(command: list[str], flag: str, value) -> None:
-    if value is not None:
-        command.extend([flag, str(value)])
-
-
-def _append_bool_flag(command: list[str], flag: str, enabled: bool) -> None:
-    if enabled:
-        command.append(flag)
 
 
 def _single_stage_preserved_result_matches(
@@ -208,37 +202,8 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         default=None,
         help="Optional explicit equilibrium path forwarded into the single-stage run.",
     )
-    parser.add_argument(
-        "--seed-order-upgrade",
-        type=int,
-        default=(
-            int(os.environ["SEED_ORDER_UPGRADE"])
-            if "SEED_ORDER_UPGRADE" in os.environ
-            else None
-        ),
-        help=(
-            "Optional Fourier order upgrade applied by the single-stage entrypoint "
-            "when loading the shared Stage 2 seed."
-        ),
-    )
-    parser.add_argument(
-        "--stage2-seed-surf-path",
-        default=os.environ.get("STAGE2_SEED_SURF_PATH"),
-        help=(
-            "Optional saved surface or Boozer-surface artifact forwarded into the "
-            "single-stage entrypoint as a Stage 2 warm-start seed."
-        ),
-    )
-    parser.add_argument(
-        "--warm-start-surface-stem",
-        default=None,
-        help=(
-            "Optional stem for saved single-stage surface artifacts "
-            "(for example /path/to/surf_best_feasible). When set, the single-stage "
-            "entrypoint reuses the saved Boozer surface geometry/iota/G as its "
-            "initialization seed."
-        ),
-    )
+    add_seed_order_upgrade_argument(parser)
+    add_stage2_warm_start_seed_arguments(parser)
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument(
         "--summary-json",
@@ -577,98 +542,98 @@ def build_single_stage_goal_mode_command(
     if equilibria_dir is not None:
         command.extend(["--equilibria-dir", str(equilibria_dir)])
     append_single_stage_handoff_flags(command, args)
-    _append_optional_flag(command, "--length-target", args.length_target)
-    _append_optional_flag(command, "--frontier-volume-weight", args.frontier_volume_weight)
-    _append_optional_flag(
+    append_optional_flag(command, "--length-target", args.length_target)
+    append_optional_flag(command, "--frontier-volume-weight", args.frontier_volume_weight)
+    append_optional_flag(
         command,
         "--resume-solver-checkpoint",
         getattr(args, "resume_solver_checkpoint", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--frontier-scalarization-type",
         getattr(args, "frontier_scalarization_type", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--frontier-reference-iota",
         getattr(args, "frontier_reference_iota", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--frontier-reference-iota-scale",
         getattr(args, "frontier_reference_iota_scale", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--frontier-reference-volume",
         getattr(args, "frontier_reference_volume", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--frontier-reference-volume-scale",
         getattr(args, "frontier_reference_volume_scale", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--frontier-reference-qa",
         getattr(args, "frontier_reference_qa", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--frontier-reference-boozer",
         getattr(args, "frontier_reference_boozer", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--frontier-boozer-trust-threshold",
         getattr(args, "frontier_boozer_trust_threshold", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--frontier-boozer-trust-penalty-scale",
         getattr(args, "frontier_boozer_trust_penalty_scale", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--frontier-chebyshev-rho",
         getattr(args, "frontier_chebyshev_rho", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--frontier-chebyshev-weight-iota",
         getattr(args, "frontier_chebyshev_weight_iota", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--frontier-chebyshev-weight-volume",
         getattr(args, "frontier_chebyshev_weight_volume", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--frontier-chebyshev-weight-qa",
         getattr(args, "frontier_chebyshev_weight_qa", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--frontier-chebyshev-weight-boozer",
         getattr(args, "frontier_chebyshev_weight_boozer", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--epsilon-constraint-qa-max",
         getattr(args, "epsilon_constraint_qa_max", None),
     )
-    _append_optional_flag(
+    append_optional_flag(
         command,
         "--epsilon-constraint-boozer-max",
         getattr(args, "epsilon_constraint_boozer_max", None),
     )
-    _append_optional_flag(command, "--alm-qs-threshold", args.alm_qs_threshold)
-    _append_optional_flag(command, "--alm-boozer-threshold", args.alm_boozer_threshold)
-    _append_optional_flag(command, "--alm-iota-penalty-threshold", args.alm_iota_penalty_threshold)
-    _append_optional_flag(command, "--alm-length-penalty-threshold", args.alm_length_penalty_threshold)
-    _append_bool_flag(command, "--boozer-stage-refinement", args.boozer_stage_refinement)
+    append_optional_flag(command, "--alm-qs-threshold", args.alm_qs_threshold)
+    append_optional_flag(command, "--alm-boozer-threshold", args.alm_boozer_threshold)
+    append_optional_flag(command, "--alm-iota-penalty-threshold", args.alm_iota_penalty_threshold)
+    append_optional_flag(command, "--alm-length-penalty-threshold", args.alm_length_penalty_threshold)
+    append_bool_flag(command, "--boozer-stage-refinement", args.boozer_stage_refinement)
     if args.constraint_method == "alm":
         command.extend(
             [

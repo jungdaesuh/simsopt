@@ -400,7 +400,6 @@ def run_boozer_with_failure_policy(
     failure_policy: str,
     last_successful_state: BoozerSolveSnapshot | None = None,
 ) -> BoozerSolveAttempt:
-    res = _boozer_result_state(boozer_surface)
     if failure_policy not in (
         BOOZER_FAILURE_POLICY_REPORT_FAILURE,
         BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS,
