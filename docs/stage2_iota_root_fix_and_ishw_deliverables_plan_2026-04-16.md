@@ -633,7 +633,7 @@ Success criteria:
 ### Test And Smoke Requirements
 
 - [x] Add at least one small Stage 2 `iota` smoke test or fixture-driven regression test. → `tests/geo/test_stage2_single_stage_handoff.py` (11 tests covering probe, classification, handoff, recovery-only, full-mode).
-- [ ] Add at least one runner test for the new sweep wrappers that validates command construction and summary schema. → **remaining follow-up**; no automated test for `run_single_stage_iota_target_sweep.py` / `run_banana_current_scan.py` / `run_stage2_iota_decision_gate.py` exists yet.
+- [x] Add at least one runner test for the new sweep wrappers that validates command construction and summary schema. → covered by `tests/geo/test_ishw_deliverables.py` (`run_single_stage_iota_target_sweep.py`, `run_banana_current_scan.py`, and `plot_ishw_tradeoffs.py`) plus `tests/geo/test_stage2_track_b_wrappers.py` (`run_stage2_iota_decision_gate.py`).
 - [x] Validate that feature-disabled Stage 2 output remains contract-compatible with existing readers. → `--stage2-iota-mode=off` preserves the legacy Stage 2 schema (no new keys emitted); legacy artifact upgrade is covered by `test_upgrade_legacy_stage2_artifact_results_backfills_handoff_defaults`.
 - [x] Validate that Poincare runners can be invoked non-interactively from the new scan scripts. → `run_banana_current_scan.py` uses `POINCARE_OUT_DIR` for non-interactive invocation.
 - [x] Validate that sweep scripts continue past per-case failures and preserve partial results. → classification into `success`/`Boozer-failed`/`Poincare-only fallback` with per-case summaries.

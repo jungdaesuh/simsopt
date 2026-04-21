@@ -39,7 +39,7 @@ from workflow_runner_common import (  # noqa: E402
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_banana_current_scan"
 DEFAULT_SUMMARY_JSON = "banana_current_scan_summary.json"
 DEFAULT_SUMMARY_CSV = "banana_current_scan_summary.csv"
-DEFAULT_DONOR_RELATIVE_BANANA_CURRENT_SCALES = "0,0.25,0.5,0.75,1.0"
+DEFAULT_BANANA_CURRENT_FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
 CSV_FIELDNAMES = (
     "case_id",
     "banana_current_a",
@@ -86,14 +86,9 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         default=None,
         help=(
             "Comma-separated banana-current setpoints in physical amperes. "
-            "When omitted, the scan falls back to donor-relative quartile points."
+            "When omitted, the scan defaults to five evenly spaced amp setpoints "
+            "from zero through donor current."
         ),
-    )
-    parser.add_argument(
-        "--banana-current-scales",
-        dest="banana_current_scales",
-        default=None,
-        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--summary-csv",
@@ -296,14 +291,13 @@ def _single_stage_case_args(
     return SimpleNamespace(**payload)
 
 
-def _scaled_banana_currents_a(
-    scale_csv: str,
+def _default_banana_currents_a(
     *,
     donor_banana_current_a: float,
 ) -> list[float]:
     return [
-        float(scale) * donor_banana_current_a
-        for scale in parse_csv(scale_csv, float)
+        fraction * donor_banana_current_a
+        for fraction in DEFAULT_BANANA_CURRENT_FRACTIONS
     ]
 
 
@@ -314,15 +308,7 @@ def _resolved_banana_currents_a(
 ) -> list[float]:
     if args.banana_currents_a not in {None, ""}:
         return parse_csv(str(args.banana_currents_a), float)
-    if args.banana_current_scales not in {None, ""}:
-        return _scaled_banana_currents_a(
-            str(args.banana_current_scales),
-            donor_banana_current_a=donor_banana_current_a,
-        )
-    return _scaled_banana_currents_a(
-        DEFAULT_DONOR_RELATIVE_BANANA_CURRENT_SCALES,
-        donor_banana_current_a=donor_banana_current_a,
-    )
+    return _default_banana_currents_a(donor_banana_current_a=donor_banana_current_a)
 
 
 def run_current_case(
