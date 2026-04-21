@@ -183,27 +183,27 @@ Rationale:
 
 ### 2.2 Serializable evaluator spec
 
-- [ ] Define `SingleStageFrontierEvaluatorSpec`
-- [ ] Add `from_spec()` constructor
-- [ ] Require that evaluator instances depend only on the spec and explicit runtime inputs
-- [ ] Remove dependence on live module globals from the evaluation path
+- [x] Define `SingleStageFrontierEvaluatorSpec`
+- [x] Add `from_spec()` constructor
+- [x] Require that evaluator instances depend only on the spec and explicit runtime inputs
+- [x] Remove dependence on live module globals from the evaluation path
 - [ ] Make evaluator instances pickle-safe / serializable
 
 Acceptance criterion:
 
-- [ ] A serialized evaluator spec can be re-instantiated in a fresh Python process and produce the same outputs for the same inputs
+- [x] A serialized evaluator spec can be re-instantiated in a fresh Python process and produce the same outputs for the same inputs
 
 ### 2.3 Fatal init vs per-candidate invalid separation
 
-- [ ] Add an explicit fatal initialization error type for bad specs or missing artifacts
-- [ ] Return `valid=False` plus diagnostics for candidate-specific failures
-- [ ] Never blur “campaign misconfigured” with “candidate infeasible / invalid”
+- [x] Add an explicit fatal initialization error type for bad specs or missing artifacts
+- [x] Return `valid=False` plus diagnostics for candidate-specific failures
+- [x] Never blur “campaign misconfigured” with “candidate infeasible / invalid”
 
 ### 2.4 Determinism contract
 
-- [ ] Define canonical fresh surface initialization per call
-- [ ] Use a fixed stored seed surface state as the initial guess for every evaluation unless the contract explicitly says otherwise
-- [ ] Do not reuse mutable state from the previous candidate evaluation
+- [x] Define canonical fresh surface initialization per call
+- [x] Use a fixed stored seed surface state as the initial guess for every evaluation unless the contract explicitly says otherwise
+- [x] Do not reuse mutable state from the previous candidate evaluation
 - [ ] Only introduce an evaluator RNG seed if a stochastic subroutine is actually admitted into the evaluation path
 
 Rationale:
@@ -212,25 +212,25 @@ Rationale:
 
 ### 2.5 Cache and CV contract
 
-- [ ] Add evaluation caching keyed by the explicit evaluator contract plus candidate vector
-- [ ] Define `evaluate_batch(X)` semantics:
+- [x] Add evaluation caching keyed by the explicit evaluator contract plus candidate vector
+- [x] Define `evaluate_batch(X)` semantics:
   - split cache hits and misses
   - evaluate misses only
   - merge results back in original order
-- [ ] Start with per-worker caching plus shared persistence, not shared mutable in-memory cache
-- [ ] Map current invalidation reasons into real-valued CV buckets
+- [x] Start with per-worker caching plus shared persistence, not shared mutable in-memory cache
+- [x] Map current invalidation reasons into real-valued CV buckets
 
 Suggested initial invalidation buckets:
 
-- [ ] `surface_solve_failed`
-- [ ] `geometry_state_unrestorable`
-- [ ] `missing_search_eval`
-- [ ] `nonfinite_evaluation`
-- [ ] topology-broken equivalent failures
+- [x] `surface_solve_failed`
+- [x] `geometry_state_unrestorable`
+- [x] `missing_search_eval`
+- [x] `nonfinite_evaluation`
+- [x] topology-broken equivalent failures
 
 ### 2.6 Shadow-run validation
 
-- [ ] Run the extracted evaluator side-by-side against the current inline path
+- [x] Run the extracted evaluator side-by-side against the current inline path
 - [ ] Define a concrete sample budget before opening Phase 2 implementation tickets:
   - `N_seed_baselines`
   - `N_lane_optima`
@@ -255,9 +255,9 @@ Suggested initial invalidation buckets:
 ### Phase 2 exit criteria
 
 - [ ] Decision-variable schema is explicit and documented
-- [ ] Evaluator is serializable and re-instantiable from spec
+- [x] Evaluator is serializable and re-instantiable from spec
 - [ ] Determinism holds for fixed spec plus candidate input
-- [ ] Cache semantics are explicit
+- [x] Cache semantics are explicit
 - [ ] Shadow-run agreement passes on a mixed sample including failures
 
 ## Phase 3: First Global Engine
@@ -477,7 +477,7 @@ Deferred because:
 - [ ] Keep fast-feedback tests for frontier contracts and archive behavior green while Phase 1 lands
 - [ ] Add replay round-trip tests for non-default scalarization params
 - [ ] Add evaluator determinism property tests in Phase 2
-- [ ] Add shadow-run agreement tests before enabling any global engine by default
+- [x] Add shadow-run agreement tests before enabling any global engine by default
 - [ ] Add engine-comparison benchmark harness for Phase 3 go/no-go review
 
 ## Citations

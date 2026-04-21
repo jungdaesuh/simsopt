@@ -243,6 +243,16 @@ def build_frontier_campaign_manifest(
         pareto_objective_vector=pareto_objective_vector_contract(),
         pareto_objective_normalization=build_pareto_objective_normalization(
             hypervolume_reference,
+            kind=getattr(
+                args,
+                "frontier_normalization_kind",
+                "seed_relative_reference_fraction_with_floor",
+            ),
+            normalization_spec_path=getattr(
+                args,
+                "frontier_normalization_spec_file",
+                None,
+            ),
         ),
         dominance_tolerance=dict(DEFAULT_DOMINANCE_TOLERANCE),
         duplicate_distance_threshold=DEFAULT_DUPLICATE_DISTANCE_THRESHOLD,
@@ -272,6 +282,7 @@ def build_frontier_hypervolume_history(
     lane_records: list[dict[str, object]],
     *,
     hypervolume_reference: dict[str, float] | None,
+    pareto_objective_normalization: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
     if hypervolume_reference is None:
         return []
@@ -286,6 +297,7 @@ def build_frontier_hypervolume_history(
             running_archive, _ = update_frontier_archive(
                 running_archive,
                 archive_member,
+                pareto_objective_normalization=pareto_objective_normalization,
             )
         certified_members = certified_archive_members(running_archive)
         annotated_members = annotate_hypervolume_contributions(
@@ -395,6 +407,19 @@ def build_frontier_campaign_summary(
         seed_results=stage2_results,
         members=archive_members,
     )
+    pareto_objective_normalization = build_pareto_objective_normalization(
+        hypervolume_reference,
+        kind=getattr(
+            args,
+            "frontier_normalization_kind",
+            "seed_relative_reference_fraction_with_floor",
+        ),
+        normalization_spec_path=getattr(
+            args,
+            "frontier_normalization_spec_file",
+            None,
+        ),
+    )
     certified_members = certified_archive_members(archive_members)
     annotated_certified_members = annotate_hypervolume_contributions(
         certified_members,
@@ -403,6 +428,7 @@ def build_frontier_campaign_summary(
     hypervolume_history = build_frontier_hypervolume_history(
         lane_records,
         hypervolume_reference=hypervolume_reference,
+        pareto_objective_normalization=pareto_objective_normalization,
     )
     recommended_member = build_recommended_summary(
         recommendation_payload,

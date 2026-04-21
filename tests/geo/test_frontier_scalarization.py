@@ -195,6 +195,48 @@ class FrontierScalarizationTests(unittest.TestCase):
             0.007,
         )
 
+    def test_epsilon_lane_specs_reject_unknown_epsilon_metric_keys(self):
+        module = load_frontier_scalarization_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            epsilon_path = Path(tmpdir) / "epsilon.json"
+            epsilon_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "frontier_epsilon_spec_v1",
+                        "lanes": [
+                            {
+                                "lane_id": "lane_bad",
+                                "objective": "iota",
+                                "epsilon_constraints": {
+                                    "qa_error": 0.011,
+                                    "unknown_metric": 0.5,
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "unsupported keys"):
+                module.generate_frontier_lane_specs(
+                    reference_mode=module.FRONTIER_REFERENCE_MODE_EPSILON,
+                    num_lanes=1,
+                    iotas_weight=100.0,
+                    frontier_volume_weight=150.0,
+                    res_weight=900.0,
+                    lane_budget=275,
+                    stage2_results={
+                        "FINAL_IOTA": 0.15,
+                        "FINAL_VOLUME": 0.10,
+                        "NONQS_RATIO": 0.012,
+                        "BOOZER_RESIDUAL": 0.008,
+                    },
+                    reference_points_file=None,
+                    epsilon_spec_file=str(epsilon_path),
+                )
+
     def test_achievement_chebyshev_lane_specs_use_reference_points_file(self):
         module = load_frontier_scalarization_module()
 
@@ -220,6 +262,7 @@ class FrontierScalarizationTests(unittest.TestCase):
                                     "boozer_residual": 0.5,
                                 },
                                 "rho": 0.02,
+                                "sharpness": 18.0,
                                 "iota_share": 0.7,
                                 "volume_share": 0.3,
                             }
@@ -256,6 +299,10 @@ class FrontierScalarizationTests(unittest.TestCase):
         self.assertEqual(lane_spec.scalarization_params["frontier_reference_qa"], 0.011)
         self.assertEqual(lane_spec.scalarization_params["frontier_reference_boozer"], 0.007)
         self.assertEqual(lane_spec.scalarization_params["frontier_chebyshev_rho"], 0.02)
+        self.assertEqual(
+            lane_spec.scalarization_params["frontier_chebyshev_sharpness"],
+            18.0,
+        )
         self.assertEqual(
             lane_spec.scalarization_params["frontier_chebyshev_weight_iota"],
             2.0,
@@ -343,6 +390,7 @@ class FrontierScalarizationTests(unittest.TestCase):
                 "frontier_reference_qa": 0.011,
                 "frontier_reference_boozer": 0.0075,
                 "frontier_chebyshev_rho": 0.02,
+                "frontier_chebyshev_sharpness": 18.0,
                 "frontier_chebyshev_weight_iota": 2.0,
                 "frontier_chebyshev_weight_volume": 1.5,
                 "frontier_chebyshev_weight_qa": 1.0,
@@ -367,6 +415,10 @@ class FrontierScalarizationTests(unittest.TestCase):
             "achievement_chebyshev_sweep_v1",
         )
         self.assertEqual(command[command.index("--frontier-chebyshev-rho") + 1], "0.02")
+        self.assertEqual(
+            command[command.index("--frontier-chebyshev-sharpness") + 1],
+            "18.0",
+        )
         self.assertEqual(
             command[command.index("--frontier-chebyshev-weight-iota") + 1],
             "2.0",
@@ -394,6 +446,7 @@ class FrontierScalarizationTests(unittest.TestCase):
                 "frontier_reference_boozer": 0.007,
                 "epsilon_constraint_qa_max": 0.011,
                 "epsilon_constraint_boozer_max": 0.007,
+                "frontier_epsilon_penalty_weight": 9.0,
             },
             iotas_weight=250.0,
             frontier_volume_weight=0.0,
@@ -420,6 +473,122 @@ class FrontierScalarizationTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--epsilon-constraint-boozer-max") + 1],
             "0.007",
+        )
+        self.assertEqual(
+            command[command.index("--frontier-epsilon-penalty-weight") + 1],
+            "9.0",
+        )
+
+    def test_generate_frontier_lane_specs_full_simplex_mode_uses_seed_reference_metrics(self):
+        module = load_frontier_scalarization_module()
+
+        lane_specs = module.generate_frontier_lane_specs(
+            reference_mode=module.FRONTIER_REFERENCE_MODE_ACHIEVEMENT_FULL_SIMPLEX,
+            num_lanes=5,
+            iotas_weight=100.0,
+            frontier_volume_weight=200.0,
+            res_weight=1000.0,
+            lane_budget=250,
+            stage2_results={
+                "FINAL_IOTA": 0.17,
+                "FINAL_VOLUME": 0.105,
+                "NONQS_RATIO": 0.011,
+                "BOOZER_RESIDUAL": 0.007,
+            },
+            reference_points_file=None,
+            epsilon_spec_file=None,
+        )
+
+        self.assertEqual(len(lane_specs), 5)
+        self.assertTrue(
+            all(
+                lane.scalarization_type
+                == module.FRONTIER_REFERENCE_MODE_ACHIEVEMENT
+                for lane in lane_specs
+            )
+        )
+        self.assertTrue(
+            all(
+                lane.scalarization_params["frontier_reference_iota"] == 0.17
+                and lane.scalarization_params["frontier_reference_volume"] == 0.105
+                for lane in lane_specs
+            )
+        )
+        self.assertTrue(
+            all(
+                lane.scalarization_params["frontier_chebyshev_sharpness"] == 12.0
+                for lane in lane_specs
+            )
+        )
+        self.assertTrue(
+            all(
+                lane.scalarization_params["frontier_chebyshev_weight_iota"] > 0.0
+                and lane.scalarization_params["frontier_chebyshev_weight_volume"] > 0.0
+                and lane.scalarization_params["frontier_chebyshev_weight_qa"] > 0.0
+                and lane.scalarization_params["frontier_chebyshev_weight_boozer"] > 0.0
+                for lane in lane_specs
+            )
+        )
+
+    def test_generate_frontier_lane_specs_full_simplex_partitions_emit_full_direction_family(self):
+        module = load_frontier_scalarization_module()
+
+        lane_specs = module.generate_frontier_lane_specs(
+            reference_mode=module.FRONTIER_REFERENCE_MODE_ACHIEVEMENT_FULL_SIMPLEX,
+            num_lanes=3,
+            iotas_weight=100.0,
+            frontier_volume_weight=200.0,
+            res_weight=1000.0,
+            lane_budget=250,
+            stage2_results={
+                "FINAL_IOTA": 0.17,
+                "FINAL_VOLUME": 0.105,
+                "NONQS_RATIO": 0.011,
+                "BOOZER_RESIDUAL": 0.007,
+            },
+            reference_points_file=None,
+            epsilon_spec_file=None,
+            full_simplex_partitions=1,
+        )
+
+        self.assertEqual(len(lane_specs), 4)
+        observed_weight_vectors = {
+            (
+                lane.scalarization_params["frontier_chebyshev_weight_iota"],
+                lane.scalarization_params["frontier_chebyshev_weight_volume"],
+                lane.scalarization_params["frontier_chebyshev_weight_qa"],
+                lane.scalarization_params["frontier_chebyshev_weight_boozer"],
+            )
+            for lane in lane_specs
+        }
+        self.assertEqual(
+            observed_weight_vectors,
+            {
+                (1.0, 1.0e-12, 1.0e-12, 1.0e-12),
+                (1.0e-12, 1.0, 1.0e-12, 1.0e-12),
+                (1.0e-12, 1.0e-12, 1.0, 1.0e-12),
+                (1.0e-12, 1.0e-12, 1.0e-12, 1.0),
+            },
+        )
+
+    def test_generate_frontier_reference_directions_public_api_reuses_full_simplex_logic(self):
+        module = load_frontier_scalarization_module()
+
+        directions = module.generate_frontier_reference_directions(
+            requested_num_directions=3,
+            n_dim=4,
+            partitions=1,
+        )
+
+        self.assertEqual(len(directions), 4)
+        self.assertEqual(
+            set(directions),
+            {
+                (1.0, 0.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0, 0.0),
+                (0.0, 0.0, 1.0, 0.0),
+                (0.0, 0.0, 0.0, 1.0),
+            },
         )
 
 

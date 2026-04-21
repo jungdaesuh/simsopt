@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 from typing import Mapping
 
 PARETO_OBJECTIVE_SPECS = (
@@ -11,6 +13,15 @@ PARETO_OBJECTIVE_SPECS = (
 )
 
 PARETO_OBJECTIVE_NORMALIZATION_SCHEMA_VERSION = "frontier_pareto_normalization_v1"
+PARETO_OBJECTIVE_NORMALIZATION_KIND_SEED_RELATIVE = (
+    "seed_relative_reference_fraction_with_floor"
+)
+PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR = (
+    "fixed_ideal_nadir_span_with_floor"
+)
+PARETO_OBJECTIVE_NORMALIZATION_SPEC_SCHEMA_VERSION = (
+    "frontier_pareto_normalization_spec_v1"
+)
 PARETO_OBJECTIVE_NORMALIZATION_RULES = {
     "iota": {
         "direction": "max",
@@ -37,6 +48,32 @@ PARETO_OBJECTIVE_NORMALIZATION_RULES = {
         "floor": 1.0e-6,
     },
 }
+PARETO_OBJECTIVE_NORMALIZATION_IDEAL_NADIR_RULES = {
+    "iota": {
+        "direction": "max",
+        "scale_kind": "ideal_nadir_span_with_floor",
+        "floor": 0.05,
+    },
+    "volume": {
+        "direction": "max",
+        "scale_kind": "ideal_nadir_span_with_floor",
+        "floor": 0.01,
+    },
+    "qa_error": {
+        "direction": "min",
+        "scale_kind": "ideal_nadir_span_with_floor",
+        "floor": 1.0e-6,
+    },
+    "boozer_residual": {
+        "direction": "min",
+        "scale_kind": "ideal_nadir_span_with_floor",
+        "floor": 1.0e-6,
+    },
+}
+SUPPORTED_PARETO_NORMALIZATION_KINDS = (
+    PARETO_OBJECTIVE_NORMALIZATION_KIND_SEED_RELATIVE,
+    PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR,
+)
 
 REFERENCE_METRIC_FIELDS = {
     "iota": "FRONTIER_REFERENCE_IOTA",
@@ -171,6 +208,7 @@ def normalized_objective_distance(
     right_metrics: Mapping[str, float],
     *,
     reference_metrics: Mapping[str, float | None] | None = None,
+    pareto_objective_normalization: Mapping[str, object] | None = None,
 ) -> float | None:
     squared_distance = 0.0
     for metric_name, _, _ in PARETO_OBJECTIVE_SPECS:
@@ -179,12 +217,41 @@ def normalized_objective_distance(
         if left_value is None or right_value is None:
             return None
         reference_value = None if reference_metrics is None else reference_metrics.get(metric_name)
-        scale = objective_metric_scale(metric_name, reference_value)
+        scale = objective_metric_scale(
+            metric_name,
+            reference_value,
+            pareto_objective_normalization=pareto_objective_normalization,
+        )
         squared_distance += ((float(left_value) - float(right_value)) / scale) ** 2
     return math.sqrt(squared_distance)
 
 
-def objective_metric_scale(metric_name: str, reference_value: float | None) -> float:
+def objective_metric_scale(
+    metric_name: str,
+    reference_value: float | None,
+    *,
+    pareto_objective_normalization: Mapping[str, object] | None = None,
+) -> float:
+    if (
+        pareto_objective_normalization is not None
+        and str(pareto_objective_normalization.get("kind"))
+        == PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR
+    ):
+        ideal_metrics = pareto_objective_normalization.get("ideal_metrics")
+        nadir_metrics = pareto_objective_normalization.get("nadir_metrics")
+        if not isinstance(ideal_metrics, Mapping) or not isinstance(nadir_metrics, Mapping):
+            raise ValueError(
+                "fixed ideal/nadir Pareto normalization requires ideal_metrics and nadir_metrics"
+            )
+        if metric_name not in ideal_metrics or metric_name not in nadir_metrics:
+            raise ValueError(
+                f"fixed ideal/nadir Pareto normalization is missing {metric_name!r}"
+            )
+        rules = PARETO_OBJECTIVE_NORMALIZATION_IDEAL_NADIR_RULES[metric_name]
+        return max(
+            abs(float(ideal_metrics[metric_name]) - float(nadir_metrics[metric_name])),
+            float(rules["floor"]),
+        )
     rules = PARETO_OBJECTIVE_NORMALIZATION_RULES[metric_name]
     base = 0.0 if reference_value is None else abs(float(reference_value))
     return max(
@@ -199,8 +266,24 @@ def objective_metric_direction_map() -> dict[str, str]:
     }
 
 
+def load_pareto_normalization_spec(path: str | Path) -> dict[str, object]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected JSON object in {path}")
+    schema_version = payload.get("schema_version", payload.get("SCHEMA_VERSION"))
+    if schema_version != PARETO_OBJECTIVE_NORMALIZATION_SPEC_SCHEMA_VERSION:
+        raise ValueError(
+            f"{path} must declare schema_version="
+            f"{PARETO_OBJECTIVE_NORMALIZATION_SPEC_SCHEMA_VERSION!r}; got {schema_version!r}"
+        )
+    return payload
+
+
 def build_pareto_objective_normalization(
     reference_metrics: Mapping[str, float] | None,
+    *,
+    kind: str = PARETO_OBJECTIVE_NORMALIZATION_KIND_SEED_RELATIVE,
+    normalization_spec_path: str | Path | None = None,
 ) -> dict[str, object]:
     resolved_reference_metrics = None
     if reference_metrics is not None:
@@ -209,13 +292,82 @@ def build_pareto_objective_normalization(
             for metric_name, _, _ in PARETO_OBJECTIVE_SPECS
             if reference_metrics.get(metric_name) is not None
         }
+    if kind == PARETO_OBJECTIVE_NORMALIZATION_KIND_SEED_RELATIVE:
+        return {
+            "schema_version": PARETO_OBJECTIVE_NORMALIZATION_SCHEMA_VERSION,
+            "kind": PARETO_OBJECTIVE_NORMALIZATION_KIND_SEED_RELATIVE,
+            "distance_metric": "euclidean",
+            "reference_metrics": resolved_reference_metrics,
+            "metric_rules": {
+                metric_name: dict(rule_payload)
+                for metric_name, rule_payload in PARETO_OBJECTIVE_NORMALIZATION_RULES.items()
+            },
+        }
+    if kind != PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR:
+        raise ValueError(f"Unsupported Pareto normalization kind: {kind}")
+    if normalization_spec_path is None:
+        raise ValueError(
+            "fixed ideal/nadir normalization requires --frontier-normalization-spec-file"
+        )
+    normalization_spec = load_pareto_normalization_spec(normalization_spec_path)
+    ideal_metrics = _coerce_defined_normalization_metrics(
+        normalization_spec,
+        field_name="ideal_metrics",
+    )
+    nadir_metrics = _coerce_defined_normalization_metrics(
+        normalization_spec,
+        field_name="nadir_metrics",
+    )
     return {
         "schema_version": PARETO_OBJECTIVE_NORMALIZATION_SCHEMA_VERSION,
-        "kind": "seed_relative_reference_fraction_with_floor",
+        "kind": PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR,
         "distance_metric": "euclidean",
         "reference_metrics": resolved_reference_metrics,
+        "ideal_metrics": ideal_metrics,
+        "nadir_metrics": nadir_metrics,
         "metric_rules": {
             metric_name: dict(rule_payload)
-            for metric_name, rule_payload in PARETO_OBJECTIVE_NORMALIZATION_RULES.items()
+            for metric_name, rule_payload in PARETO_OBJECTIVE_NORMALIZATION_IDEAL_NADIR_RULES.items()
         },
     }
+
+
+def resolve_pareto_normalization_reference_metrics(
+    fallback_reference_metrics: Mapping[str, float | None] | None,
+    *,
+    pareto_objective_normalization: Mapping[str, object] | None = None,
+) -> Mapping[str, float | None] | None:
+    if pareto_objective_normalization is None:
+        return fallback_reference_metrics
+    reference_metrics = pareto_objective_normalization.get("reference_metrics")
+    if not isinstance(reference_metrics, Mapping):
+        return fallback_reference_metrics
+    return {
+        metric_name: (
+            None if reference_metrics.get(metric_name) is None else float(reference_metrics[metric_name])
+        )
+        for metric_name, _, _ in PARETO_OBJECTIVE_SPECS
+    }
+
+
+def _coerce_defined_normalization_metrics(
+    payload: Mapping[str, object],
+    *,
+    field_name: str,
+) -> dict[str, float]:
+    metrics_payload = payload.get(field_name)
+    if not isinstance(metrics_payload, Mapping):
+        raise ValueError(f"{field_name} must be a mapping")
+    metrics = {
+        metric_name: float(metrics_payload[metric_name])
+        for metric_name, _, _ in PARETO_OBJECTIVE_SPECS
+        if metric_name in metrics_payload
+    }
+    if len(metrics) != len(PARETO_OBJECTIVE_SPECS):
+        missing = [
+            metric_name
+            for metric_name, _, _ in PARETO_OBJECTIVE_SPECS
+            if metric_name not in metrics
+        ]
+        raise ValueError(f"{field_name} is missing metrics: {missing}")
+    return metrics

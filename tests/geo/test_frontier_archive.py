@@ -40,6 +40,7 @@ class FrontierArchiveTests(unittest.TestCase):
         qa_error: float,
         boozer_residual: float,
         soft_search_score: float,
+        reference_metrics: dict[str, float] | None = None,
     ):
         return archive_module.FrontierArchiveMember(
             member_id=member_id,
@@ -53,12 +54,16 @@ class FrontierArchiveTests(unittest.TestCase):
                 "qa_error": qa_error,
                 "boozer_residual": boozer_residual,
             },
-            reference_metrics={
-                "iota": 0.15,
-                "volume": 0.10,
-                "qa_error": 0.012,
-                "boozer_residual": 0.008,
-            },
+            reference_metrics=(
+                {
+                    "iota": 0.15,
+                    "volume": 0.10,
+                    "qa_error": 0.012,
+                    "boozer_residual": 0.008,
+                }
+                if reference_metrics is None
+                else dict(reference_metrics)
+            ),
             constraint_metrics={},
             hard_certification_ok=True,
             soft_search_score=soft_search_score,
@@ -215,6 +220,83 @@ class FrontierArchiveTests(unittest.TestCase):
         self.assertEqual(update["replaced_member_id"], "campaign:lane_01")
         self.assertEqual(update["dominated_members"], ["campaign:lane_01"])
         self.assertEqual([member.member_id for member in updated_members], ["campaign:lane_02"])
+
+    def test_update_frontier_archive_uses_fixed_ideal_nadir_normalization_for_duplicates(self):
+        archive_module = load_frontier_archive_module()
+        dominance_module = load_frontier_dominance_module()
+
+        incumbent = self._make_member(
+            archive_module,
+            member_id="campaign:lane_01",
+            iota=0.15,
+            volume=0.10,
+            qa_error=0.012,
+            boozer_residual=0.008,
+            soft_search_score=-1.0,
+            reference_metrics={
+                "iota": 0.15,
+                "volume": 0.10,
+                "qa_error": 0.012,
+                "boozer_residual": 0.008,
+            },
+        )
+        candidate = self._make_member(
+            archive_module,
+            member_id="campaign:lane_02",
+            iota=0.156,
+            volume=0.09995,
+            qa_error=0.012,
+            boozer_residual=0.008,
+            soft_search_score=-1.5,
+            reference_metrics={
+                "iota": 0.15,
+                "volume": 0.10,
+                "qa_error": 0.012,
+                "boozer_residual": 0.008,
+            },
+        )
+        fixed_ideal_nadir_normalization = {
+            "schema_version": dominance_module.PARETO_OBJECTIVE_NORMALIZATION_SCHEMA_VERSION,
+            "kind": dominance_module.PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR,
+            "distance_metric": "euclidean",
+            "reference_metrics": {
+                "iota": 0.15,
+                "volume": 0.10,
+                "qa_error": 0.012,
+                "boozer_residual": 0.008,
+            },
+            "ideal_metrics": {
+                "iota": 0.30,
+                "volume": 0.12,
+                "qa_error": 0.008,
+                "boozer_residual": 0.004,
+            },
+            "nadir_metrics": {
+                "iota": 0.10,
+                "volume": 0.08,
+                "qa_error": 0.020,
+                "boozer_residual": 0.012,
+            },
+            "metric_rules": dict(
+                dominance_module.PARETO_OBJECTIVE_NORMALIZATION_IDEAL_NADIR_RULES
+            ),
+        }
+
+        default_members, default_update = archive_module.update_frontier_archive(
+            [incumbent],
+            candidate,
+        )
+        normalized_members, normalized_update = archive_module.update_frontier_archive(
+            [incumbent],
+            candidate,
+            pareto_objective_normalization=fixed_ideal_nadir_normalization,
+        )
+
+        self.assertEqual(default_update["action"], "inserted")
+        self.assertEqual(len(default_members), 2)
+        self.assertEqual(normalized_update["action"], "duplicate_replaced")
+        self.assertEqual(normalized_update["replaced_member_id"], incumbent.member_id)
+        self.assertEqual(len(normalized_members), 1)
 
     def test_replay_archive_from_lane_records_reapplies_dominance_updates(self):
         archive_module = load_frontier_archive_module()

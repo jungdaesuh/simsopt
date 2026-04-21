@@ -329,12 +329,14 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--frontier-boozer-trust-threshold", type=float, default=None)
     parser.add_argument("--frontier-boozer-trust-penalty-scale", type=float, default=None)
     parser.add_argument("--frontier-chebyshev-rho", type=float, default=None)
+    parser.add_argument("--frontier-chebyshev-sharpness", type=float, default=None)
     parser.add_argument("--frontier-chebyshev-weight-iota", type=float, default=None)
     parser.add_argument("--frontier-chebyshev-weight-volume", type=float, default=None)
     parser.add_argument("--frontier-chebyshev-weight-qa", type=float, default=None)
     parser.add_argument("--frontier-chebyshev-weight-boozer", type=float, default=None)
     parser.add_argument("--epsilon-constraint-qa-max", type=float, default=None)
     parser.add_argument("--epsilon-constraint-boozer-max", type=float, default=None)
+    parser.add_argument("--frontier-epsilon-penalty-weight", type=float, default=None)
     parser.add_argument("--cc-weight", type=float, default=100.0)
     parser.add_argument("--curvature-weight", type=float, default=0.1)
     parser.add_argument("--length-weight", type=float, default=1.0)
@@ -607,6 +609,11 @@ def build_single_stage_goal_mode_command(
     )
     append_optional_flag(
         command,
+        "--frontier-chebyshev-sharpness",
+        getattr(args, "frontier_chebyshev_sharpness", None),
+    )
+    append_optional_flag(
+        command,
         "--frontier-chebyshev-weight-iota",
         getattr(args, "frontier_chebyshev_weight_iota", None),
     )
@@ -634,6 +641,11 @@ def build_single_stage_goal_mode_command(
         command,
         "--epsilon-constraint-boozer-max",
         getattr(args, "epsilon_constraint_boozer_max", None),
+    )
+    append_optional_flag(
+        command,
+        "--frontier-epsilon-penalty-weight",
+        getattr(args, "frontier_epsilon_penalty_weight", None),
     )
     append_optional_flag(command, "--alm-qs-threshold", args.alm_qs_threshold)
     append_optional_flag(command, "--alm-boozer-threshold", args.alm_boozer_threshold)

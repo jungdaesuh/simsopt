@@ -186,6 +186,133 @@ class FrontierContractTests(unittest.TestCase):
         self.assertEqual(status["best_archive_size"], 0)
         self.assertFalse(status["triggered"])
 
+    def test_summary_validator_accepts_optional_nsga3_fields(self):
+        campaign_module = load_frontier_campaign_module()
+        contracts = load_frontier_contracts_module()
+        reporting = load_frontier_reporting_module()
+        runtime_calibration = load_frontier_runtime_calibration_module()
+
+        args = campaign_module.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/demo/biot_savart_opt.json",
+                "--frontier-engine",
+                "nsga3",
+                "--frontier-reference-mode",
+                "achievement_chebyshev_full_simplex_v1",
+            ]
+        )
+        runtime_defaults = runtime_calibration.resolve_frontier_runtime_defaults(
+            profile_name=args.frontier_runtime_calibration_profile,
+            requested_num_lanes=args.frontier_num_lanes,
+            requested_lane_budget=args.frontier_lane_budget,
+            requested_total_budget=args.frontier_total_budget,
+            requested_checkpoint_every=args.checkpoint_every,
+            requested_early_stop_patience_lanes=args.frontier_early_stop_patience_lanes,
+            requested_early_stop_min_certified=args.frontier_early_stop_min_certified,
+            requested_early_stop_min_hypervolume_gain=args.frontier_early_stop_min_hypervolume_gain,
+        )
+        lane_specs = campaign_module.generate_frontier_lane_specs(
+            reference_mode=args.frontier_reference_mode,
+            num_lanes=1,
+            iotas_weight=args.iotas_weight,
+            frontier_volume_weight=args.frontier_volume_weight,
+            res_weight=args.res_weight,
+            lane_budget=runtime_defaults.lane_budget,
+            stage2_results={
+                "FINAL_IOTA": 0.15,
+                "FINAL_VOLUME": 0.10,
+                "NONQS_RATIO": 0.012,
+                "BOOZER_RESIDUAL": 0.008,
+            },
+            reference_points_file=None,
+            epsilon_spec_file=None,
+            full_simplex_partitions=1,
+        )
+        stage2_bs_path = Path("/tmp/demo/biot_savart_opt.json")
+        stage2_results = {
+            "PLASMA_SURF_FILENAME": "demo.nc",
+            "init_only": False,
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.10,
+            "NONQS_RATIO": 0.012,
+            "BOOZER_RESIDUAL": 0.008,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_root = Path(tmpdir) / "outputs"
+            paths = reporting.resolve_frontier_campaign_paths(
+                output_root,
+                summary_path=output_root / "summary.json",
+            )
+            summary = reporting.build_frontier_campaign_summary(
+                args,
+                campaign_id="campaign123",
+                stage2_bs_path=stage2_bs_path,
+                stage2_results_path=stage2_bs_path.with_name("results.json"),
+                stage2_results=stage2_results,
+                paths=paths,
+                lane_specs=lane_specs,
+                target_payload=None,
+                lane_records=[],
+                archive_members=[],
+                recommendation_payload=None,
+                delta_fn=lambda left, right: None,
+                runtime_defaults=runtime_defaults,
+                early_stop_status={
+                    "policy": runtime_calibration.build_frontier_early_stop_policy(
+                        runtime_defaults
+                    ),
+                    "triggered": False,
+                    "reason": None,
+                    "no_improvement_streak": 0,
+                    "best_hypervolume": None,
+                    "best_archive_size": 0,
+                    "stopped_after_lane_id": None,
+                },
+            )
+        summary["frontier_generation_history"] = [
+            {
+                "generation": 1,
+                "population_size": 3,
+                "feasible_count": 2,
+                "archive_size": 1,
+                "archive_growth": 1,
+                "cv_min": 0.0,
+                "cv_mean": 0.1,
+                "cv_max": 0.2,
+                "failure_histogram": {"evaluator_candidate_valid": 2},
+                "cache_hits": 3,
+                "cache_misses": 3,
+                "hypervolume": 1.0e-4,
+            }
+        ]
+        summary["frontier_hypervolume_history"] = [
+            {
+                "lane_id": "generation_0001",
+                "status": "completed",
+                "archive_size": 1,
+                "hypervolume": 1.0e-4,
+            }
+        ]
+        summary["frontier_engine_stats"] = {
+            "population_size": 3,
+            "generations": 1,
+            "archive_size": 1,
+            "cache_hits": 3,
+            "cache_misses": 3,
+        }
+        summary["frontier_evaluator_spec"] = {
+            "schema_version": "single_stage_frontier_evaluator_spec_v1",
+            "run_identity": "nsga3-test",
+        }
+        summary["frontier_evaluator_spec_path"] = "/tmp/demo/evaluator_spec.json"
+        summary["frontier_population_checkpoint_path"] = "/tmp/demo/population_checkpoint.json"
+        summary["frontier_generation_history_path"] = "/tmp/demo/generation_history.json"
+
+        contracts.validate_frontier_campaign_summary_payload(summary)
+
     def test_archive_validator_rejects_provisional_member_in_final_archive(self):
         archive_module = load_frontier_archive_module()
         contracts = load_frontier_contracts_module()

@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import Mapping
 
 from .frontier_dominance import (
+    PARETO_OBJECTIVE_NORMALIZATION_IDEAL_NADIR_RULES,
+    PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR,
+    PARETO_OBJECTIVE_NORMALIZATION_KIND_SEED_RELATIVE,
     DEFAULT_DOMINANCE_TOLERANCE,
     PARETO_OBJECTIVE_NORMALIZATION_SCHEMA_VERSION,
     PARETO_OBJECTIVE_NORMALIZATION_RULES,
@@ -380,6 +383,10 @@ def validate_frontier_campaign_summary_payload(payload: Mapping[str, object]) ->
     )
     _require_list(payload, "frontier_lane_specs")
     frontier_lanes = _require_list(payload, "frontier_lanes")
+    frontier_hypervolume_history = _require_list(
+        payload,
+        "frontier_hypervolume_history",
+    )
     frontier_archive = _require_mapping(payload, "frontier_archive")
     frontier_runtime_calibration = _require_mapping(
         payload,
@@ -391,6 +398,13 @@ def validate_frontier_campaign_summary_payload(payload: Mapping[str, object]) ->
     validate_frontier_recommended_payload(recommended_member)
     _require_mapping(frontier_runtime_calibration, "resolved_defaults")
     _require_mapping(frontier_early_stop, "policy")
+    for history_entry in frontier_hypervolume_history:
+        if not isinstance(history_entry, Mapping):
+            raise ValueError("frontier_hypervolume_history entries must be mappings")
+        _require_keys(
+            history_entry,
+            ("lane_id", "status", "archive_size", "hypervolume"),
+        )
     for lane_payload in frontier_lanes:
         if not isinstance(lane_payload, Mapping):
             raise ValueError("frontier_lanes entries must be mappings")
@@ -399,6 +413,7 @@ def validate_frontier_campaign_summary_payload(payload: Mapping[str, object]) ->
             raise ValueError(
                 "frontier_lanes in final summary must not expose provisional_member_ids"
             )
+    _validate_optional_nsga3_summary_payload(payload)
 
 
 def _validate_pareto_normalization_payload(payload: Mapping[str, object]) -> None:
@@ -407,13 +422,70 @@ def _validate_pareto_normalization_payload(payload: Mapping[str, object]) -> Non
         expected=PARETO_OBJECTIVE_NORMALIZATION_SCHEMA_VERSION,
         field="schema_version",
     )
-    if str(payload.get("kind")) != "seed_relative_reference_fraction_with_floor":
-        raise ValueError("Unsupported Pareto normalization kind")
+    normalization_kind = str(payload.get("kind"))
     if str(payload.get("distance_metric")) != "euclidean":
         raise ValueError("Unsupported Pareto normalization distance metric")
     metric_rules = _require_mapping(payload, "metric_rules")
-    if metric_rules != PARETO_OBJECTIVE_NORMALIZATION_RULES:
-        raise ValueError("Pareto normalization metric rules drifted from the frozen contract")
+    if normalization_kind == PARETO_OBJECTIVE_NORMALIZATION_KIND_SEED_RELATIVE:
+        if metric_rules != PARETO_OBJECTIVE_NORMALIZATION_RULES:
+            raise ValueError(
+                "Pareto normalization metric rules drifted from the frozen contract"
+            )
+        return
+    if normalization_kind == PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR:
+        if metric_rules != PARETO_OBJECTIVE_NORMALIZATION_IDEAL_NADIR_RULES:
+            raise ValueError(
+                "Ideal/nadir Pareto normalization metric rules drifted from the frozen contract"
+            )
+        _require_mapping(payload, "ideal_metrics")
+        _require_mapping(payload, "nadir_metrics")
+        return
+    raise ValueError("Unsupported Pareto normalization kind")
+
+
+def _validate_optional_nsga3_summary_payload(payload: Mapping[str, object]) -> None:
+    generation_history = payload.get("frontier_generation_history")
+    if generation_history is not None:
+        generation_history_list = _require_list(
+            payload,
+            "frontier_generation_history",
+        )
+        for entry in generation_history_list:
+            if not isinstance(entry, Mapping):
+                raise ValueError("frontier_generation_history entries must be mappings")
+            _require_keys(
+                entry,
+                (
+                    "generation",
+                    "population_size",
+                    "feasible_count",
+                    "archive_size",
+                    "archive_growth",
+                    "cv_min",
+                    "cv_mean",
+                    "cv_max",
+                    "failure_histogram",
+                    "cache_hits",
+                    "cache_misses",
+                    "hypervolume",
+                ),
+            )
+            _require_mapping(entry, "failure_histogram")
+    engine_stats = payload.get("frontier_engine_stats")
+    if engine_stats is not None:
+        _require_mapping(payload, "frontier_engine_stats")
+    evaluator_spec = payload.get("frontier_evaluator_spec")
+    if evaluator_spec is not None:
+        spec_payload = _require_mapping(payload, "frontier_evaluator_spec")
+        _require_keys(spec_payload, ("schema_version", "run_identity"))
+    for path_field in (
+        "frontier_evaluator_spec_path",
+        "frontier_population_checkpoint_path",
+        "frontier_generation_history_path",
+    ):
+        path_value = payload.get(path_field)
+        if path_value is not None and not isinstance(path_value, str):
+            raise ValueError(f"{path_field} must be a string when present")
 
 
 def _require_schema_version(

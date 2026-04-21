@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Mapping
 
@@ -13,15 +14,24 @@ FRONTIER_REFERENCE_MODE_SHARED = "shared_seed_relative_frontier_v2"
 FRONTIER_REFERENCE_MODE_REFERENCE_POINTS = "reference_point_sweep_v1"
 FRONTIER_REFERENCE_MODE_EPSILON = "epsilon_constraint_sweep_v1"
 FRONTIER_REFERENCE_MODE_ACHIEVEMENT = "achievement_chebyshev_sweep_v1"
+FRONTIER_REFERENCE_MODE_ACHIEVEMENT_FULL_SIMPLEX = (
+    "achievement_chebyshev_full_simplex_v1"
+)
 SUPPORTED_FRONTIER_REFERENCE_MODES = (
     FRONTIER_REFERENCE_MODE_SHARED,
     FRONTIER_REFERENCE_MODE_REFERENCE_POINTS,
     FRONTIER_REFERENCE_MODE_EPSILON,
     FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
+    FRONTIER_REFERENCE_MODE_ACHIEVEMENT_FULL_SIMPLEX,
 )
 FRONTIER_REFERENCE_POINTS_SCHEMA_VERSION = "frontier_reference_points_v1"
 FRONTIER_EPSILON_SPEC_SCHEMA_VERSION = "frontier_epsilon_spec_v1"
 FRONTIER_ACHIEVEMENT_SPEC_SCHEMA_VERSION = "frontier_achievement_spec_v1"
+_STRICT_TOP_LEVEL_KEYS = frozenset({"schema_version", "SCHEMA_VERSION", "lanes"})
+_REFERENCE_METRIC_KEYS = frozenset(
+    {"iota", "volume", "qa_error", "boozer_residual"}
+)
+_EPSILON_METRIC_KEYS = frozenset({"qa_error", "boozer_residual"})
 
 
 def frontier_scalarization_family(
@@ -53,12 +63,28 @@ def _optional_float(payload: Mapping[str, object], key: str) -> float | None:
     return float(value)
 
 
+def _require_allowed_keys(
+    payload: Mapping[str, object],
+    *,
+    allowed_keys: frozenset[str],
+    context: str,
+) -> None:
+    unknown_keys = sorted(set(payload) - set(allowed_keys))
+    if unknown_keys:
+        raise ValueError(f"{context} contains unsupported keys: {unknown_keys}")
+
+
 def _require_lane_entries(
     payload: Mapping[str, object],
     *,
     schema_version: str,
     path: str | Path,
 ) -> list[dict[str, object]]:
+    _require_allowed_keys(
+        payload,
+        allowed_keys=_STRICT_TOP_LEVEL_KEYS,
+        context=str(path),
+    )
     observed_schema = payload.get("schema_version", payload.get("SCHEMA_VERSION"))
     if observed_schema != schema_version:
         raise ValueError(
@@ -178,6 +204,11 @@ def _reference_scalarization_params(
     reference_point_payload = lane_payload.get("reference_point")
     reference_point = None
     if isinstance(reference_point_payload, Mapping):
+        _require_allowed_keys(
+            reference_point_payload,
+            allowed_keys=_REFERENCE_METRIC_KEYS,
+            context="reference_point",
+        )
         reference_point = _coerce_float_mapping(reference_point_payload)
         if "iota" in reference_point:
             params["frontier_reference_iota"] = reference_point["iota"]
@@ -202,6 +233,12 @@ def _reference_scalarization_params(
             "frontier_boozer_trust_penalty_scale",
             "frontier_boozer_trust_penalty_scale",
             1e-6,
+        ),
+        ("frontier_chebyshev_sharpness", "frontier_chebyshev_sharpness", 1.0e-12),
+        (
+            "frontier_epsilon_penalty_weight",
+            "frontier_epsilon_penalty_weight",
+            0.0,
         ),
     ):
         value = _optional_float(lane_payload, payload_key)
@@ -252,6 +289,101 @@ def _reference_point_lane_specs(
             )
         )
     return lane_specs
+
+
+def _das_dennis_integer_compositions(
+    total: int,
+    parts: int,
+) -> list[tuple[int, ...]]:
+    if parts == 1:
+        return [(total,)]
+    compositions: list[tuple[int, ...]] = []
+    for value in range(total + 1):
+        for remainder in _das_dennis_integer_compositions(total - value, parts - 1):
+            compositions.append((value, *remainder))
+    return compositions
+
+
+def _das_dennis_reference_directions(
+    *,
+    n_dim: int,
+    partitions: int,
+) -> list[tuple[float, ...]]:
+    if partitions <= 0:
+        raise ValueError("frontier full-simplex partitions must be positive")
+    return [
+        tuple(float(component) / float(partitions) for component in composition)
+        for composition in _das_dennis_integer_compositions(partitions, n_dim)
+    ]
+
+
+def _direction_count(
+    *,
+    n_dim: int,
+    partitions: int,
+) -> int:
+    return math.comb(partitions + n_dim - 1, n_dim - 1)
+
+
+def _select_reference_directions(
+    *,
+    requested_num_directions: int,
+    n_dim: int,
+    partitions: int | None,
+) -> list[tuple[float, ...]]:
+    if requested_num_directions <= 0:
+        raise ValueError("--frontier-num-lanes must be positive")
+    if partitions is not None:
+        return _das_dennis_reference_directions(
+            n_dim=n_dim,
+            partitions=partitions,
+        )
+    resolved_partitions = 1
+    while _direction_count(
+        n_dim=n_dim,
+        partitions=resolved_partitions,
+    ) < requested_num_directions:
+        resolved_partitions += 1
+    directions = _das_dennis_reference_directions(
+        n_dim=n_dim,
+        partitions=resolved_partitions,
+    )
+    if len(directions) <= requested_num_directions:
+        return directions
+    if requested_num_directions == 1:
+        return [directions[0]]
+    selected_indices = [
+        round(index * (len(directions) - 1) / float(requested_num_directions - 1))
+        for index in range(requested_num_directions)
+    ]
+    unique_indices: list[int] = []
+    seen: set[int] = set()
+    for index in selected_indices:
+        if index in seen:
+            continue
+        unique_indices.append(index)
+        seen.add(index)
+    next_index = 0
+    while len(unique_indices) < requested_num_directions:
+        if next_index not in seen:
+            unique_indices.append(next_index)
+            seen.add(next_index)
+        next_index += 1
+    unique_indices.sort()
+    return [directions[index] for index in unique_indices]
+
+
+def generate_frontier_reference_directions(
+    *,
+    requested_num_directions: int,
+    n_dim: int = 4,
+    partitions: int | None = None,
+) -> list[tuple[float, ...]]:
+    return _select_reference_directions(
+        requested_num_directions=requested_num_directions,
+        n_dim=n_dim,
+        partitions=partitions,
+    )
 
 
 def _resolve_metric_weights(
@@ -308,6 +440,14 @@ def _achievement_chebyshev_lane_specs(
                     if _optional_float(lane_payload, "rho") is None
                     else float(_optional_float(lane_payload, "rho")),
                 ),
+                "frontier_chebyshev_sharpness": max(
+                    1.0e-12,
+                    float(
+                        scalarization_params.get("frontier_chebyshev_sharpness", 12.0)
+                    )
+                    if _optional_float(lane_payload, "sharpness") is None
+                    else float(_optional_float(lane_payload, "sharpness")),
+                ),
                 "frontier_chebyshev_weight_iota": metric_weights["iota"],
                 "frontier_chebyshev_weight_volume": metric_weights["volume"],
                 "frontier_chebyshev_weight_qa": metric_weights["qa_error"],
@@ -336,6 +476,68 @@ def _achievement_chebyshev_lane_specs(
     return lane_specs
 
 
+def _achievement_full_simplex_lane_specs(
+    *,
+    num_lanes: int,
+    default_iotas_weight: float,
+    default_frontier_volume_weight: float | None,
+    default_res_weight: float,
+    default_lane_budget: int | None,
+    seed_reference_metrics: Mapping[str, float],
+    full_simplex_partitions: int | None,
+) -> list[FrontierLaneSpec]:
+    required_metrics = ("iota", "volume", "qa_error", "boozer_residual")
+    if any(metric_name not in seed_reference_metrics for metric_name in required_metrics):
+        missing_metrics = [
+            metric_name
+            for metric_name in required_metrics
+            if metric_name not in seed_reference_metrics
+        ]
+        raise ValueError(
+            "full-simplex achievement mode requires seed reference metrics for "
+            f"{missing_metrics}"
+        )
+    directions = _select_reference_directions(
+        requested_num_directions=num_lanes,
+        n_dim=4,
+        partitions=full_simplex_partitions,
+    )
+    default_volume_weight = (
+        float(default_iotas_weight)
+        if default_frontier_volume_weight is None
+        else float(default_frontier_volume_weight)
+    )
+    return [
+        FrontierLaneSpec(
+            lane_id=f"simplex_{index + 1:02d}",
+            scalarization_type=FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
+            scalarization_params={
+                "frontier_reference_iota": float(seed_reference_metrics["iota"]),
+                "frontier_reference_volume": float(seed_reference_metrics["volume"]),
+                "frontier_reference_qa": max(
+                    float(seed_reference_metrics["qa_error"]),
+                    1.0e-6,
+                ),
+                "frontier_reference_boozer": max(
+                    float(seed_reference_metrics["boozer_residual"]),
+                    1.0e-6,
+                ),
+                "frontier_chebyshev_rho": 1.0e-3,
+                "frontier_chebyshev_sharpness": 12.0,
+                "frontier_chebyshev_weight_iota": max(direction[0], 1.0e-12),
+                "frontier_chebyshev_weight_volume": max(direction[1], 1.0e-12),
+                "frontier_chebyshev_weight_qa": max(direction[2], 1.0e-12),
+                "frontier_chebyshev_weight_boozer": max(direction[3], 1.0e-12),
+            },
+            iotas_weight=float(default_iotas_weight),
+            frontier_volume_weight=default_volume_weight,
+            res_weight=float(default_res_weight),
+            lane_budget=default_lane_budget,
+        )
+        for index, direction in enumerate(directions)
+    ]
+
+
 def _epsilon_constraint_lane_specs(
     *,
     path: str | Path,
@@ -351,12 +553,40 @@ def _epsilon_constraint_lane_specs(
         schema_version=FRONTIER_EPSILON_SPEC_SCHEMA_VERSION,
         path=path,
     )
+    allowed_lane_keys = frozenset(
+        {
+            "lane_id",
+            "objective",
+            "epsilon_constraints",
+            "reference_point",
+            "iotas_weight",
+            "frontier_volume_weight",
+            "iota_share",
+            "volume_share",
+            "res_weight",
+            "lane_budget",
+            "frontier_reference_iota",
+            "frontier_reference_iota_scale",
+            "frontier_reference_volume",
+            "frontier_reference_volume_scale",
+            "frontier_reference_qa",
+            "frontier_reference_boozer",
+            "frontier_boozer_trust_threshold",
+            "frontier_boozer_trust_penalty_scale",
+            "frontier_epsilon_penalty_weight",
+        }
+    )
     total_reward = _total_reward_weight(
         default_iotas_weight,
         default_frontier_volume_weight,
     )
     lane_specs: list[FrontierLaneSpec] = []
     for index, lane_payload in enumerate(lanes_payload):
+        _require_allowed_keys(
+            lane_payload,
+            allowed_keys=allowed_lane_keys,
+            context=f"epsilon lane {index + 1}",
+        )
         objective_name = str(lane_payload.get("objective", "iota"))
         if objective_name == "iota":
             iota_weight = total_reward
@@ -373,9 +603,23 @@ def _epsilon_constraint_lane_specs(
         )
         epsilon_payload = lane_payload.get("epsilon_constraints")
         if isinstance(epsilon_payload, Mapping):
+            _require_allowed_keys(
+                epsilon_payload,
+                allowed_keys=_EPSILON_METRIC_KEYS,
+                context=f"epsilon lane {index + 1} epsilon_constraints",
+            )
             epsilon_constraints = _coerce_float_mapping(epsilon_payload)
         else:
             epsilon_constraints = {}
+        epsilon_penalty_weight = _optional_float(
+            lane_payload,
+            "frontier_epsilon_penalty_weight",
+        )
+        if epsilon_penalty_weight is not None:
+            scalarization_params["frontier_epsilon_penalty_weight"] = max(
+                float(epsilon_penalty_weight),
+                0.0,
+            )
         qa_epsilon = epsilon_constraints.get("qa_error")
         if qa_epsilon is not None:
             scalarization_params["epsilon_constraint_qa_max"] = float(qa_epsilon)
@@ -454,6 +698,7 @@ def generate_frontier_lane_specs(
     stage2_results: Mapping[str, object] | None,
     reference_points_file: str | None,
     epsilon_spec_file: str | None,
+    full_simplex_partitions: int | None = None,
 ) -> list[FrontierLaneSpec]:
     if reference_mode == FRONTIER_REFERENCE_MODE_SHARED:
         return generate_multilane_local_specs(
@@ -502,5 +747,15 @@ def generate_frontier_lane_specs(
             default_frontier_volume_weight=frontier_volume_weight,
             default_res_weight=res_weight,
             default_lane_budget=lane_budget,
+        )
+    if reference_mode == FRONTIER_REFERENCE_MODE_ACHIEVEMENT_FULL_SIMPLEX:
+        return _achievement_full_simplex_lane_specs(
+            num_lanes=num_lanes,
+            default_iotas_weight=iotas_weight,
+            default_frontier_volume_weight=frontier_volume_weight,
+            default_res_weight=res_weight,
+            default_lane_budget=lane_budget,
+            seed_reference_metrics=_seed_reference_metrics(stage2_results),
+            full_simplex_partitions=full_simplex_partitions,
         )
     raise ValueError(f"Unsupported frontier reference mode {reference_mode!r}")

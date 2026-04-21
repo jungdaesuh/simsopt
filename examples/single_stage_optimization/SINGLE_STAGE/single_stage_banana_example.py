@@ -219,6 +219,7 @@ from banana_opt.single_stage_constraints import (
 )
 from banana_opt.single_stage_search_policy import HardwareSearchPolicy, SearchContext
 from banana_opt.single_stage_objectives import (
+    apply_frontier_scalarization_override as _apply_frontier_scalarization_override_impl,
     average_surface_objectives as _average_surface_objectives_impl,
     build_total_objective as _build_total_objective_impl,
     evaluate_base_objective as _evaluate_base_objective_impl,
@@ -934,12 +935,14 @@ def parse_args():
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--frontier-chebyshev-rho", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--frontier-chebyshev-sharpness", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--frontier-chebyshev-weight-iota", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--frontier-chebyshev-weight-volume", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--frontier-chebyshev-weight-qa", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--frontier-chebyshev-weight-boozer", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--epsilon-constraint-qa-max", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--epsilon-constraint-boozer-max", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--frontier-epsilon-penalty-weight", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--vol-target",
         type=float,
@@ -2094,12 +2097,14 @@ class PreservedTimeoutReplayConfig:
     frontier_effective_volume_weight: float | None = None
     frontier_scalarization_type: str | None = None
     frontier_chebyshev_rho: float | None = None
+    frontier_chebyshev_sharpness: float | None = None
     frontier_chebyshev_weight_iota: float | None = None
     frontier_chebyshev_weight_volume: float | None = None
     frontier_chebyshev_weight_qa: float | None = None
     frontier_chebyshev_weight_boozer: float | None = None
     epsilon_constraint_qa_max: float | None = None
     epsilon_constraint_boozer_max: float | None = None
+    frontier_epsilon_penalty_weight: float | None = None
     stage2_seed_surf_path: str | None = None
     major_radius: float = VACUUM_VESSEL_MAJOR_RADIUS_M
 
@@ -2126,12 +2131,14 @@ class FrontierGoalConfig:
     effective_volume_weight: float
     scalarization_type: str
     chebyshev_rho: float
+    chebyshev_sharpness: float
     chebyshev_weight_iota: float
     chebyshev_weight_volume: float
     chebyshev_weight_qa: float
     chebyshev_weight_boozer: float
     epsilon_constraint_qa_max: float | None
     epsilon_constraint_boozer_max: float | None
+    epsilon_penalty_weight: float
 
 
 FRONTIER_GOAL_MODE_IMPL = "frontier_tradeoff_score_v2"
@@ -2219,12 +2226,14 @@ def build_frontier_goal_config(
     boozer_trust_penalty_scale_override=None,
     scalarization_type=None,
     chebyshev_rho_override=None,
+    chebyshev_sharpness_override=None,
     chebyshev_weight_iota_override=None,
     chebyshev_weight_volume_override=None,
     chebyshev_weight_qa_override=None,
     chebyshev_weight_boozer_override=None,
     epsilon_constraint_qa_max_override=None,
     epsilon_constraint_boozer_max_override=None,
+    epsilon_penalty_weight_override=None,
 ):
     if volume_weight is None:
         volume_weight = iotas_weight
@@ -2296,6 +2305,11 @@ def build_frontier_goal_config(
             1.0e-3,
             minimum=0.0,
         ),
+        chebyshev_sharpness=_frontier_override_or_default(
+            chebyshev_sharpness_override,
+            _FRONTIER_CHEBYSHEV_SHARPNESS,
+            minimum=1.0e-12,
+        ),
         chebyshev_weight_iota=_frontier_override_or_default(
             chebyshev_weight_iota_override,
             1.0,
@@ -2325,6 +2339,11 @@ def build_frontier_goal_config(
             None
             if epsilon_constraint_boozer_max_override is None
             else max(float(epsilon_constraint_boozer_max_override), 1.0e-6)
+        ),
+        epsilon_penalty_weight=_frontier_override_or_default(
+            epsilon_penalty_weight_override,
+            _FRONTIER_EPSILON_PENALTY_WEIGHT,
+            minimum=0.0,
         ),
     )
 
@@ -2364,12 +2383,14 @@ PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
     frontier_effective_volume_weight=None,
     frontier_scalarization_type=None,
     frontier_chebyshev_rho=None,
+    frontier_chebyshev_sharpness=None,
     frontier_chebyshev_weight_iota=None,
     frontier_chebyshev_weight_volume=None,
     frontier_chebyshev_weight_qa=None,
     frontier_chebyshev_weight_boozer=None,
     epsilon_constraint_qa_max=None,
     epsilon_constraint_boozer_max=None,
+    frontier_epsilon_penalty_weight=None,
 )
 
 
@@ -2924,240 +2945,33 @@ def frontier_goal_mode_warning_message(frontier_goal_config):
     )
 
 
-def _current_search_gradient(objective):
-    objective_optimizable = globals().get("JF")
-    if objective_optimizable is None:
-        return np.asarray(objective.dJ(), dtype=float)
-    try:
-        partial_gradient = objective.dJ(partials=True)
-    except TypeError:
-        return np.asarray(objective.dJ(), dtype=float)
-    if callable(partial_gradient):
-        return np.asarray(partial_gradient(objective_optimizable), dtype=float)
-    return np.asarray(partial_gradient, dtype=float)
-
-
-def _augment_frontier_metric_state(objective_eval):
-    annotated = dict(objective_eval)
-    raw_iota_term = surface_iota_terms[-1]
-    annotated["J_iota_metric"] = float(raw_iota_term.J())
-    annotated["dJ_iota_metric"] = _current_search_gradient(raw_iota_term)
-    if surface_volume_term is None:
-        annotated["J_volume_metric"] = 0.0
-        annotated["dJ_volume_metric"] = np.zeros_like(annotated["grad"], dtype=float)
-    else:
-        annotated["J_volume_metric"] = float(surface_volume_term.J())
-        annotated["dJ_volume_metric"] = _current_search_gradient(surface_volume_term)
-    return annotated
-
-
-def _frontier_goal_component_total_grad(objective_eval):
-    total = (
-        float(objective_eval["J_QS_objective"])
-        + EFFECTIVE_RES_WEIGHT * float(objective_eval["J_Boozer_objective"])
-        + EFFECTIVE_IOTAS_WEIGHT * float(objective_eval["J_iota"])
-        + EFFECTIVE_VOLUME_WEIGHT * float(objective_eval.get("J_volume", 0.0))
-    )
-    grad = (
-        np.asarray(objective_eval["dJ_QS_objective"], dtype=float)
-        + EFFECTIVE_RES_WEIGHT * np.asarray(objective_eval["dJ_Boozer_objective"], dtype=float)
-        + EFFECTIVE_IOTAS_WEIGHT * np.asarray(objective_eval["dJ_iota"], dtype=float)
-        + EFFECTIVE_VOLUME_WEIGHT * np.asarray(objective_eval.get("dJ_volume", 0.0), dtype=float)
-    )
-    return float(total), grad
-
-
-def _frontier_penalty_geometry_total_grad(objective_eval):
-    total = (
-        LENGTH_WEIGHT * float(objective_eval["J_len"])
-        + CC_WEIGHT * float(objective_eval["J_cc"])
-        + CS_WEIGHT * float(objective_eval["J_cs"])
-        + CURVATURE_WEIGHT * float(objective_eval["J_curvature"])
-        + SURF_DIST_WEIGHT * float(objective_eval.get("J_surf", 0.0))
-    )
-    grad = (
-        LENGTH_WEIGHT * np.asarray(objective_eval["dJ_len"], dtype=float)
-        + CC_WEIGHT * np.asarray(objective_eval["dJ_cc"], dtype=float)
-        + CS_WEIGHT * np.asarray(objective_eval["dJ_cs"], dtype=float)
-        + CURVATURE_WEIGHT * np.asarray(objective_eval["dJ_curvature"], dtype=float)
-        + SURF_DIST_WEIGHT * np.asarray(objective_eval.get("dJ_surf", 0.0), dtype=float)
-    )
-    return float(total), grad
-
-
-def _frontier_alm_base_total_grad(objective_eval):
-    total = LENGTH_WEIGHT * float(objective_eval["J_len"])
-    grad = LENGTH_WEIGHT * np.asarray(objective_eval["dJ_len"], dtype=float)
-    return float(total), grad
-
-
-def _frontier_chebyshev_goal(objective_eval, frontier_goal_config):
-    deltas = np.asarray(
-        [
-            frontier_goal_config.chebyshev_weight_iota
-            * (
-                (frontier_goal_config.iota_reference - float(objective_eval["J_iota_metric"]))
-                / frontier_goal_config.iota_scale
-            ),
-            frontier_goal_config.chebyshev_weight_volume
-            * (
-                (frontier_goal_config.volume_reference - float(objective_eval["J_volume_metric"]))
-                / frontier_goal_config.volume_scale
-            ),
-            frontier_goal_config.chebyshev_weight_qa
-            * (
-                (float(objective_eval["J_QS"]) - frontier_goal_config.qs_reference)
-                / frontier_goal_config.qs_reference
-            ),
-            frontier_goal_config.chebyshev_weight_boozer
-            * (
-                (float(objective_eval["J_Boozer"]) - frontier_goal_config.boozer_reference)
-                / frontier_goal_config.boozer_reference
-            ),
-        ],
-        dtype=float,
-    )
-    sharpness = float(_FRONTIER_CHEBYSHEV_SHARPNESS)
-    shifted = sharpness * (deltas - np.max(deltas))
-    softmax_weights = np.exp(shifted)
-    softmax_weights = softmax_weights / np.sum(softmax_weights)
-    chebyshev_total = (
-        np.max(deltas)
-        + np.log(np.sum(np.exp(shifted))) / sharpness
-        + frontier_goal_config.chebyshev_rho * float(np.sum(deltas))
-    )
-    directional_grads = [
-        -frontier_goal_config.chebyshev_weight_iota
-        * np.asarray(objective_eval["dJ_iota_metric"], dtype=float)
-        / frontier_goal_config.iota_scale,
-        -frontier_goal_config.chebyshev_weight_volume
-        * np.asarray(objective_eval["dJ_volume_metric"], dtype=float)
-        / frontier_goal_config.volume_scale,
-        frontier_goal_config.chebyshev_weight_qa
-        * np.asarray(objective_eval["dJ_QS"], dtype=float)
-        / frontier_goal_config.qs_reference,
-        frontier_goal_config.chebyshev_weight_boozer
-        * np.asarray(objective_eval["dJ_Boozer"], dtype=float)
-        / frontier_goal_config.boozer_reference,
-    ]
-    coeffs = softmax_weights + frontier_goal_config.chebyshev_rho
-    chebyshev_grad = sum(
-        float(coeff) * directional_grad
-        for coeff, directional_grad in zip(coeffs, directional_grads)
-    )
-    return {
-        "frontier_scalarization_total": float(chebyshev_total),
-        "frontier_scalarization_grad": np.asarray(chebyshev_grad, dtype=float),
-        "frontier_chebyshev_deltas": deltas.tolist(),
-        "frontier_chebyshev_softmax_weights": softmax_weights.tolist(),
-    }
-
-
-def _frontier_excess_penalty(value, grad, *, threshold, scale):
-    excess = max(float(value) - float(threshold), 0.0)
-    excess_ratio = excess / float(scale)
-    penalty = float(_FRONTIER_EPSILON_PENALTY_WEIGHT) * float(excess_ratio ** 2)
-    penalty_grad = (
-        np.zeros_like(np.asarray(grad, dtype=float))
-        if excess <= 0.0
-        else (
-            float(_FRONTIER_EPSILON_PENALTY_WEIGHT)
-            * 2.0
-            * excess_ratio
-            / float(scale)
-            * np.asarray(grad, dtype=float)
-        )
-    )
-    return {
-        "enabled": True,
-        "threshold": float(threshold),
-        "scale": float(scale),
-        "excess": float(excess),
-        "excess_ratio": float(excess_ratio),
-        "penalty": float(penalty),
-        "grad": np.asarray(penalty_grad, dtype=float),
-    }
-
-
 def apply_frontier_scalarization_override(objective_eval, *, alm_formulation="weighted_sum"):
     frontier_goal_config = current_frontier_goal_config()
-    if not frontier_mode_enabled() or frontier_goal_config is None:
-        return dict(objective_eval)
-    annotated = _augment_frontier_metric_state(objective_eval)
-
-    annotated["frontier_scalarization_type"] = frontier_goal_config.scalarization_type
-    frontier_goal_total, frontier_goal_grad = _frontier_goal_component_total_grad(annotated)
-    replacement_total = float(frontier_goal_total)
-    replacement_grad = np.asarray(frontier_goal_grad, dtype=float)
-
-    if frontier_goal_config.scalarization_type == FRONTIER_SCALARIZATION_TYPE_ACHIEVEMENT:
-        chebyshev_eval = _frontier_chebyshev_goal(annotated, frontier_goal_config)
-        replacement_total = float(chebyshev_eval["frontier_scalarization_total"])
-        replacement_grad = np.asarray(
-            chebyshev_eval["frontier_scalarization_grad"],
-            dtype=float,
-        )
-        annotated.update(chebyshev_eval)
-    elif frontier_goal_config.scalarization_type == FRONTIER_SCALARIZATION_TYPE_EPSILON:
-        epsilon_penalties: dict[str, dict[str, object]] = {}
-        if frontier_goal_config.epsilon_constraint_qa_max is not None:
-            epsilon_penalties["qa_error"] = _frontier_excess_penalty(
-                annotated["J_QS"],
-                annotated["dJ_QS"],
-                threshold=frontier_goal_config.epsilon_constraint_qa_max,
-                scale=max(frontier_goal_config.qs_reference, 1.0e-6),
-            )
-        if frontier_goal_config.epsilon_constraint_boozer_max is not None:
-            epsilon_penalties["boozer_residual"] = _frontier_excess_penalty(
-                annotated["J_Boozer"],
-                annotated["dJ_Boozer"],
-                threshold=frontier_goal_config.epsilon_constraint_boozer_max,
-                scale=max(frontier_goal_config.boozer_reference, 1.0e-6),
-            )
-        epsilon_penalty_total = float(
-            sum(entry["penalty"] for entry in epsilon_penalties.values())
-        )
-        epsilon_penalty_grad = sum(
-            (np.asarray(entry["grad"], dtype=float) for entry in epsilon_penalties.values()),
-            np.zeros_like(replacement_grad),
-        )
-        replacement_total += epsilon_penalty_total
-        replacement_grad = replacement_grad + epsilon_penalty_grad
-        annotated["frontier_epsilon_penalty"] = float(epsilon_penalty_total)
-        annotated["frontier_epsilon_constraints"] = {
-            metric_name: {
-                "threshold": entry["threshold"],
-                "excess": entry["excess"],
-                "excess_ratio": entry["excess_ratio"],
-                "penalty": entry["penalty"],
-            }
-            for metric_name, entry in epsilon_penalties.items()
-        }
-
-    annotated["frontier_goal_total"] = float(replacement_total)
-    annotated["frontier_goal_grad"] = np.asarray(replacement_grad, dtype=float)
-
-    if alm_formulation == "weighted_sum":
-        if "constraint_values" in annotated and "constraint_grads" in annotated:
-            base_total, base_grad = _frontier_alm_base_total_grad(annotated)
-            base_total += float(replacement_total)
-            base_grad = base_grad + replacement_grad
-            alm_eval = augmented_inequality_objective(
-                base_total,
-                base_grad,
-                annotated["constraint_values"],
-                annotated["constraint_grads"],
-                ALM_MULTIPLIERS,
-                ALM_PENALTY,
-            )
-            annotated.update(alm_eval)
-            annotated["physics_total"] = float(base_total)
-            annotated["base_total"] = float(base_total)
-        else:
-            penalty_total, penalty_grad = _frontier_penalty_geometry_total_grad(annotated)
-            annotated["total"] = penalty_total + float(replacement_total)
-            annotated["grad"] = penalty_grad + replacement_grad
-    return annotated
+    surface_iota_terms_local = globals().get("surface_iota_terms")
+    surface_iota_term = (
+        None
+        if not surface_iota_terms_local
+        else surface_iota_terms_local[-1]
+    )
+    return _apply_frontier_scalarization_override_impl(
+        objective_eval,
+        enabled=frontier_mode_enabled(),
+        frontier_goal_config=frontier_goal_config,
+        surface_iota_term=surface_iota_term,
+        surface_volume_term=globals().get("surface_volume_term"),
+        effective_res_weight=globals().get("EFFECTIVE_RES_WEIGHT", 0.0),
+        effective_iotas_weight=globals().get("EFFECTIVE_IOTAS_WEIGHT", 0.0),
+        effective_volume_weight=globals().get("EFFECTIVE_VOLUME_WEIGHT", 0.0),
+        length_weight=globals().get("LENGTH_WEIGHT", 0.0),
+        cc_weight=globals().get("CC_WEIGHT", 0.0),
+        cs_weight=globals().get("CS_WEIGHT", 0.0),
+        curvature_weight=globals().get("CURVATURE_WEIGHT", 0.0),
+        surf_dist_weight=globals().get("SURF_DIST_WEIGHT", 0.0),
+        objective_optimizable=globals().get("JF"),
+        alm_formulation=alm_formulation,
+        alm_multipliers=globals().get("ALM_MULTIPLIERS"),
+        alm_penalty=globals().get("ALM_PENALTY"),
+    )
 
 
 def resolve_single_stage_goal_objective_terms(
@@ -4371,6 +4185,10 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
             "frontier_chebyshev_rho",
             "chebyshev_rho",
         ),
+        frontier_chebyshev_sharpness=frontier_replay_value(
+            "frontier_chebyshev_sharpness",
+            "chebyshev_sharpness",
+        ),
         frontier_chebyshev_weight_iota=frontier_replay_value(
             "frontier_chebyshev_weight_iota",
             "chebyshev_weight_iota",
@@ -4394,6 +4212,10 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
         epsilon_constraint_boozer_max=frontier_replay_value(
             "epsilon_constraint_boozer_max",
             "epsilon_constraint_boozer_max",
+        ),
+        frontier_epsilon_penalty_weight=frontier_replay_value(
+            "frontier_epsilon_penalty_weight",
+            "epsilon_penalty_weight",
         ),
     )
 
@@ -4550,12 +4372,14 @@ def build_preserved_timeout_results_payload(
         "FRONTIER_REFERENCE_BOOZER": replay_config.frontier_boozer_reference,
         "FRONTIER_SCALARIZATION_TYPE": replay_config.frontier_scalarization_type,
         "FRONTIER_CHEBYSHEV_RHO": replay_config.frontier_chebyshev_rho,
+        "FRONTIER_CHEBYSHEV_SHARPNESS": replay_config.frontier_chebyshev_sharpness,
         "FRONTIER_CHEBYSHEV_WEIGHT_IOTA": replay_config.frontier_chebyshev_weight_iota,
         "FRONTIER_CHEBYSHEV_WEIGHT_VOLUME": replay_config.frontier_chebyshev_weight_volume,
         "FRONTIER_CHEBYSHEV_WEIGHT_QA": replay_config.frontier_chebyshev_weight_qa,
         "FRONTIER_CHEBYSHEV_WEIGHT_BOOZER": replay_config.frontier_chebyshev_weight_boozer,
         "EPSILON_CONSTRAINT_QA_MAX": replay_config.epsilon_constraint_qa_max,
         "EPSILON_CONSTRAINT_BOOZER_MAX": replay_config.epsilon_constraint_boozer_max,
+        "FRONTIER_EPSILON_PENALTY_WEIGHT": replay_config.frontier_epsilon_penalty_weight,
         "FRONTIER_EFFECTIVE_QA_WEIGHT": replay_config.frontier_effective_qs_weight,
         "FRONTIER_EFFECTIVE_BOOZER_WEIGHT": replay_config.frontier_effective_boozer_weight,
         "FRONTIER_EFFECTIVE_IOTA_WEIGHT": replay_config.frontier_effective_iota_weight,
@@ -6129,12 +5953,14 @@ if __name__ == "__main__":
             boozer_trust_penalty_scale_override=args.frontier_boozer_trust_penalty_scale,
             scalarization_type=args.frontier_scalarization_type,
             chebyshev_rho_override=args.frontier_chebyshev_rho,
+            chebyshev_sharpness_override=args.frontier_chebyshev_sharpness,
             chebyshev_weight_iota_override=args.frontier_chebyshev_weight_iota,
             chebyshev_weight_volume_override=args.frontier_chebyshev_weight_volume,
             chebyshev_weight_qa_override=args.frontier_chebyshev_weight_qa,
             chebyshev_weight_boozer_override=args.frontier_chebyshev_weight_boozer,
             epsilon_constraint_qa_max_override=args.epsilon_constraint_qa_max,
             epsilon_constraint_boozer_max_override=args.epsilon_constraint_boozer_max,
+            epsilon_penalty_weight_override=args.frontier_epsilon_penalty_weight,
         )
         print(frontier_goal_mode_warning_message(frontier_goal_config))
 
@@ -7503,6 +7329,11 @@ if __name__ == "__main__":
         "FRONTIER_CHEBYSHEV_RHO": (
             None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.chebyshev_rho
         ),
+        "FRONTIER_CHEBYSHEV_SHARPNESS": (
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.chebyshev_sharpness
+        ),
         "FRONTIER_CHEBYSHEV_WEIGHT_IOTA": (
             None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.chebyshev_weight_iota
         ),
@@ -7520,6 +7351,11 @@ if __name__ == "__main__":
         ),
         "EPSILON_CONSTRAINT_BOOZER_MAX": (
             None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.epsilon_constraint_boozer_max
+        ),
+        "FRONTIER_EPSILON_PENALTY_WEIGHT": (
+            None
+            if FRONTIER_GOAL_CONFIG is None
+            else FRONTIER_GOAL_CONFIG.epsilon_penalty_weight
         ),
         "FRONTIER_BOOZER_TRUST_PENALTY_SCALE": (
             None

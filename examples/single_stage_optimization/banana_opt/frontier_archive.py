@@ -26,6 +26,7 @@ from .frontier_dominance import (
     is_certified_results,
     normalized_objective_distance,
     objective_metric_direction_map,
+    resolve_pareto_normalization_reference_metrics,
 )
 from .frontier_scalarization import FRONTIER_REFERENCE_MODE_EPSILON
 
@@ -71,14 +72,20 @@ def build_archive_member_from_results(
     payload: Mapping[str, object],
     rerun_contract: Mapping[str, object],
     archive_state: str | None = None,
+    pareto_objective_normalization: Mapping[str, object] | None = None,
 ) -> FrontierArchiveMember:
     results = payload["results"]
     objective_metrics = extract_objective_metrics(results)
     reference_metrics = extract_reference_metrics(results)
+    normalization_reference_metrics = resolve_pareto_normalization_reference_metrics(
+        reference_metrics,
+        pareto_objective_normalization=pareto_objective_normalization,
+    )
     distance_from_seed = normalized_objective_distance(
         _defined_metrics(objective_metrics),
         _defined_metrics(reference_metrics),
-        reference_metrics=reference_metrics,
+        reference_metrics=normalization_reference_metrics,
+        pareto_objective_normalization=pareto_objective_normalization,
     )
     epsilon_constraint_status = _evaluate_epsilon_constraint_status(
         objective_metrics,
@@ -204,6 +211,7 @@ def update_frontier_archive(
     *,
     dominance_tolerance: Mapping[str, float] | None = None,
     duplicate_distance_threshold: float = DEFAULT_DUPLICATE_DISTANCE_THRESHOLD,
+    pareto_objective_normalization: Mapping[str, object] | None = None,
 ) -> tuple[list[FrontierArchiveMember], dict[str, object]]:
     tolerances = DEFAULT_DOMINANCE_TOLERANCE if dominance_tolerance is None else dominance_tolerance
     if candidate.archive_state != FRONTIER_ARCHIVE_STATE_CERTIFIED:
@@ -228,6 +236,7 @@ def update_frontier_archive(
         members,
         candidate,
         duplicate_distance_threshold=duplicate_distance_threshold,
+        pareto_objective_normalization=pareto_objective_normalization,
     )
     if duplicate_index is not None:
         incumbent = members[duplicate_index]
@@ -525,12 +534,18 @@ def _find_duplicate_member_index(
     candidate: FrontierArchiveMember,
     *,
     duplicate_distance_threshold: float,
+    pareto_objective_normalization: Mapping[str, object] | None = None,
 ) -> int | None:
     for index, member in enumerate(members):
+        reference_metrics = resolve_pareto_normalization_reference_metrics(
+            _shared_reference_metrics(member, candidate),
+            pareto_objective_normalization=pareto_objective_normalization,
+        )
         distance = normalized_objective_distance(
             member.objective_metrics,
             candidate.objective_metrics,
-            reference_metrics=_shared_reference_metrics(member, candidate),
+            reference_metrics=reference_metrics,
+            pareto_objective_normalization=pareto_objective_normalization,
         )
         if distance is not None and distance <= duplicate_distance_threshold:
             return index

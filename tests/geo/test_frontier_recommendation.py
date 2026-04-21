@@ -34,6 +34,7 @@ class FrontierRecommendationTests(unittest.TestCase):
         distance_from_seed: float,
         frontier_trust_ok: bool = True,
         hardware_constraints_ok: bool = True,
+        reference_metrics: dict[str, float] | None = None,
     ):
         return archive_module.FrontierArchiveMember(
             member_id=member_id,
@@ -47,12 +48,16 @@ class FrontierRecommendationTests(unittest.TestCase):
                 "qa_error": qa_error,
                 "boozer_residual": boozer_residual,
             },
-            reference_metrics={
-                "iota": 0.15,
-                "volume": 0.10,
-                "qa_error": 0.012,
-                "boozer_residual": 0.008,
-            },
+            reference_metrics=(
+                {
+                    "iota": 0.15,
+                    "volume": 0.10,
+                    "qa_error": 0.012,
+                    "boozer_residual": 0.008,
+                }
+                if reference_metrics is None
+                else dict(reference_metrics)
+            ),
             constraint_metrics={
                 "frontier_trust_ok": frontier_trust_ok,
                 "hardware_constraints_ok": hardware_constraints_ok,
@@ -107,6 +112,7 @@ class FrontierRecommendationTests(unittest.TestCase):
             recommendation["policy_name"],
             "max_iota_under_safe_boozer",
         )
+        self.assertTrue(recommendation["policy_inputs"]["gate_missing_is_eligible"])
 
     def test_recommend_frontier_member_max_volume_under_safe_hardware_prefers_highest_volume(self):
         archive_module = load_frontier_archive_module()
@@ -146,6 +152,7 @@ class FrontierRecommendationTests(unittest.TestCase):
             recommendation["policy_name"],
             "max_volume_under_safe_hardware",
         )
+        self.assertFalse(recommendation["policy_inputs"]["gate_missing_is_eligible"])
 
     def test_recommend_frontier_member_closest_to_seed_prefers_smallest_distance(self):
         archive_module = load_frontier_archive_module()
@@ -182,3 +189,156 @@ class FrontierRecommendationTests(unittest.TestCase):
             "campaign:lane_02",
         )
         self.assertEqual(recommendation["policy_name"], "closest_to_seed")
+
+    def test_safe_boozer_policy_treats_missing_trust_as_eligible(self):
+        archive_module = load_frontier_archive_module()
+        recommendation_module = load_frontier_recommendation_module()
+
+        missing_trust_high_iota = self._make_member(
+            archive_module,
+            member_id="campaign:lane_01",
+            iota=0.20,
+            volume=0.101,
+            qa_error=0.012,
+            boozer_residual=0.008,
+            distance_from_seed=0.40,
+            frontier_trust_ok=None,
+        )
+        explicit_safe_lower_iota = self._make_member(
+            archive_module,
+            member_id="campaign:lane_02",
+            iota=0.18,
+            volume=0.11,
+            qa_error=0.011,
+            boozer_residual=0.007,
+            distance_from_seed=0.20,
+            frontier_trust_ok=True,
+        )
+
+        recommendation = recommendation_module.recommend_frontier_member(
+            [explicit_safe_lower_iota, missing_trust_high_iota],
+            policy_name="max_iota_under_safe_boozer",
+        )
+
+        self.assertIsNotNone(recommendation)
+        assert recommendation is not None
+        self.assertEqual(
+            recommendation["recommended_member"].member_id,
+            "campaign:lane_01",
+        )
+
+    def test_safe_hardware_policy_treats_missing_hardware_as_ineligible(self):
+        archive_module = load_frontier_archive_module()
+        recommendation_module = load_frontier_recommendation_module()
+
+        missing_hardware_high_volume = self._make_member(
+            archive_module,
+            member_id="campaign:lane_01",
+            iota=0.19,
+            volume=0.13,
+            qa_error=0.011,
+            boozer_residual=0.007,
+            distance_from_seed=0.30,
+            hardware_constraints_ok=None,
+        )
+        explicit_safe_lower_volume = self._make_member(
+            archive_module,
+            member_id="campaign:lane_02",
+            iota=0.17,
+            volume=0.11,
+            qa_error=0.010,
+            boozer_residual=0.0065,
+            distance_from_seed=0.20,
+            hardware_constraints_ok=True,
+        )
+
+        recommendation = recommendation_module.recommend_frontier_member(
+            [missing_hardware_high_volume, explicit_safe_lower_volume],
+            policy_name="max_volume_under_safe_hardware",
+        )
+
+        self.assertIsNotNone(recommendation)
+        assert recommendation is not None
+        self.assertEqual(
+            recommendation["recommended_member"].member_id,
+            "campaign:lane_02",
+        )
+
+    def test_recommend_frontier_member_balanced_uses_fixed_ideal_nadir_normalization(self):
+        archive_module = load_frontier_archive_module()
+        recommendation_module = load_frontier_recommendation_module()
+
+        aggressive_iota_tradeoff = self._make_member(
+            archive_module,
+            member_id="campaign:lane_01",
+            iota=0.17,
+            volume=0.10,
+            qa_error=0.012,
+            boozer_residual=0.012,
+            distance_from_seed=0.10,
+            reference_metrics={
+                "iota": 0.15,
+                "volume": 0.10,
+                "qa_error": 0.012,
+                "boozer_residual": 0.008,
+            },
+        )
+        near_seed_member = self._make_member(
+            archive_module,
+            member_id="campaign:lane_02",
+            iota=0.15,
+            volume=0.10,
+            qa_error=0.012,
+            boozer_residual=0.008,
+            distance_from_seed=0.0,
+            reference_metrics={
+                "iota": 0.15,
+                "volume": 0.10,
+                "qa_error": 0.012,
+                "boozer_residual": 0.008,
+            },
+        )
+        fixed_ideal_nadir_normalization = {
+            "kind": "fixed_ideal_nadir_span_with_floor",
+            "reference_metrics": {
+                "iota": 0.15,
+                "volume": 0.10,
+                "qa_error": 0.012,
+                "boozer_residual": 0.008,
+            },
+            "ideal_metrics": {
+                "iota": 0.30,
+                "volume": 0.12,
+                "qa_error": 0.008,
+                "boozer_residual": 0.0,
+            },
+            "nadir_metrics": {
+                "iota": 0.10,
+                "volume": 0.08,
+                "qa_error": 0.020,
+                "boozer_residual": 0.20,
+            },
+        }
+
+        default_recommendation = recommendation_module.recommend_frontier_member(
+            [aggressive_iota_tradeoff, near_seed_member],
+            policy_name="balanced",
+        )
+        normalized_recommendation = recommendation_module.recommend_frontier_member(
+            [aggressive_iota_tradeoff, near_seed_member],
+            policy_name="balanced",
+            pareto_objective_normalization=fixed_ideal_nadir_normalization,
+        )
+
+        self.assertIsNotNone(default_recommendation)
+        self.assertIsNotNone(normalized_recommendation)
+        assert default_recommendation is not None
+        assert normalized_recommendation is not None
+        self.assertEqual(
+            default_recommendation["recommended_member"].member_id,
+            "campaign:lane_02",
+        )
+        self.assertEqual(
+            normalized_recommendation["recommended_member"].member_id,
+            "campaign:lane_01",
+        )

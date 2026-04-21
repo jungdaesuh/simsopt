@@ -2818,7 +2818,15 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             output_root = tmpdir_path / "outputs"
             summary_path = tmpdir_path / "summary.json"
             stage2_bs_path, stage2_results_path, stage2_results = (
-                self._write_stage2_seed_artifact(tmpdir_path)
+                self._write_stage2_seed_artifact(
+                    tmpdir_path,
+                    overrides={
+                        "FINAL_IOTA": 0.15,
+                        "FINAL_VOLUME": 0.10,
+                        "NONQS_RATIO": 0.012,
+                        "BOOZER_RESIDUAL": 0.008,
+                    },
+                )
             )
 
             target_payload = self._minimal_target_payload(output_root)
@@ -3035,6 +3043,40 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             "reuse_latest_certified",
         )
 
+    def test_frontier_campaign_parse_args_accepts_normalization_and_full_simplex_flags(self):
+        module = load_frontier_campaign_module()
+
+        args = module.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/demo/biot_savart_opt.json",
+                "--frontier-reference-mode",
+                "achievement_chebyshev_full_simplex_v1",
+                "--frontier-full-simplex-partitions",
+                "2",
+                "--frontier-normalization-kind",
+                "fixed_ideal_nadir_span_with_floor",
+                "--frontier-normalization-spec-file",
+                "/tmp/frontier_norm.json",
+            ]
+        )
+
+        self.assertEqual(
+            args.frontier_reference_mode,
+            "achievement_chebyshev_full_simplex_v1",
+        )
+        self.assertEqual(args.frontier_full_simplex_partitions, 2)
+        self.assertEqual(
+            args.frontier_normalization_kind,
+            "fixed_ideal_nadir_span_with_floor",
+        )
+        self.assertEqual(
+            args.frontier_normalization_spec_file,
+            "/tmp/frontier_norm.json",
+        )
+
     def test_frontier_campaign_manifest_records_resolved_hypervolume_reference_metrics(self):
         module = load_frontier_campaign_module()
 
@@ -3097,6 +3139,79 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 "reference_fraction": 0.25,
                 "floor": 0.05,
             },
+        )
+
+    def test_frontier_campaign_manifest_records_fixed_ideal_nadir_normalization(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            normalization_spec_path = Path(tmpdir) / "normalization.json"
+            normalization_spec_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "frontier_pareto_normalization_spec_v1",
+                        "ideal_metrics": {
+                            "iota": 0.22,
+                            "volume": 0.13,
+                            "qa_error": 0.008,
+                            "boozer_residual": 0.004,
+                        },
+                        "nadir_metrics": {
+                            "iota": 0.14,
+                            "volume": 0.09,
+                            "qa_error": 0.02,
+                            "boozer_residual": 0.012,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = module.parse_args(
+                [
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    "/tmp/demo/biot_savart_opt.json",
+                    "--frontier-num-lanes",
+                    "1",
+                    "--frontier-normalization-kind",
+                    "fixed_ideal_nadir_span_with_floor",
+                    "--frontier-normalization-spec-file",
+                    str(normalization_spec_path),
+                ]
+            )
+            lane_specs = [
+                module.FrontierLaneSpec(
+                    lane_id="lane_01",
+                    scalarization_type="weight_schedule_v1",
+                    scalarization_params={"iota_share": 0.5, "volume_share": 0.5},
+                    iotas_weight=150.0,
+                    frontier_volume_weight=150.0,
+                    res_weight=1000.0,
+                    lane_budget=30,
+                )
+            ]
+
+            manifest = module.build_frontier_campaign_manifest(
+                args,
+                campaign_id="campaign",
+                stage2_bs_path=Path("/tmp/demo/biot_savart_opt.json"),
+                stage2_results_path=None,
+                stage2_results=None,
+                lane_specs=lane_specs,
+            )
+
+        self.assertEqual(
+            manifest["PARETO_OBJECTIVE_NORMALIZATION"]["kind"],
+            "fixed_ideal_nadir_span_with_floor",
+        )
+        self.assertEqual(
+            manifest["PARETO_OBJECTIVE_NORMALIZATION"]["ideal_metrics"]["iota"],
+            0.22,
+        )
+        self.assertEqual(
+            manifest["PARETO_OBJECTIVE_NORMALIZATION"]["nadir_metrics"]["boozer_residual"],
+            0.012,
         )
 
     def test_frontier_campaign_manifest_uses_effective_lane_budget_from_lane_specs(self):
@@ -3230,7 +3345,15 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             output_root = tmpdir_path / "outputs"
             summary_path = tmpdir_path / "summary.json"
             stage2_bs_path, stage2_results_path, stage2_results = (
-                self._write_stage2_seed_artifact(tmpdir_path)
+                self._write_stage2_seed_artifact(
+                    tmpdir_path,
+                    overrides={
+                        "FINAL_IOTA": 0.15,
+                        "FINAL_VOLUME": 0.10,
+                        "NONQS_RATIO": 0.012,
+                        "BOOZER_RESIDUAL": 0.008,
+                    },
+                )
             )
 
             base_args = module.parse_args(
@@ -3560,7 +3683,15 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             output_root = tmpdir_path / "outputs"
             summary_path = tmpdir_path / "summary.json"
             stage2_bs_path, stage2_results_path, stage2_results = (
-                self._write_stage2_seed_artifact(tmpdir_path)
+                self._write_stage2_seed_artifact(
+                    tmpdir_path,
+                    overrides={
+                        "FINAL_IOTA": 0.15,
+                        "FINAL_VOLUME": 0.10,
+                        "NONQS_RATIO": 0.012,
+                        "BOOZER_RESIDUAL": 0.008,
+                    },
+                )
             )
 
             base_args = module.parse_args(
@@ -4166,6 +4297,352 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 "lane_02",
             )
             self.assertEqual(summary["frontier_archive_size"], 1)
+
+    def test_frontier_campaign_nsga3_records_generation_summary(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            stage2_bs_path, stage2_results_path, stage2_results = (
+                self._write_stage2_seed_artifact(
+                    tmpdir_path,
+                    overrides={
+                        "FINAL_IOTA": 0.15,
+                        "FINAL_VOLUME": 0.10,
+                        "NONQS_RATIO": 0.012,
+                        "BOOZER_RESIDUAL": 0.008,
+                    },
+                )
+            )
+            archive_payload = {
+                "status": "completed",
+                **self._minimal_frontier_payload(
+                    output_root,
+                    lane_id="gen_0001_cand_0000",
+                    final_iota=0.182,
+                    final_volume=0.112,
+                    nonqs_ratio=0.0104,
+                    boozer_residual=0.0069,
+                ),
+            }
+            archive_member = module.build_archive_member_from_results(
+                campaign_id="nsga3-campaign",
+                lane_id="gen_0001_cand_0000",
+                payload=archive_payload,
+                rerun_contract={
+                    "frontier_engine": "nsga3",
+                    "candidate_x": [0.0, 1.0],
+                },
+            )
+            engine_artifacts = SimpleNamespace(
+                evaluator_spec={
+                    "schema_version": "single_stage_frontier_evaluator_spec_v1",
+                    "run_identity": "nsga3-test",
+                },
+                evaluator_spec_path=str(
+                    output_root / "global_engine_nsga3" / "evaluator_spec.json"
+                ),
+                generation_history=[
+                    {
+                        "generation": 1,
+                        "population_size": 3,
+                        "feasible_count": 2,
+                        "archive_size": 1,
+                        "archive_growth": 1,
+                        "cv_min": 0.0,
+                        "cv_mean": 0.1,
+                        "cv_max": 0.3,
+                        "failure_histogram": {"evaluator_candidate_valid": 2},
+                        "cache_hits": 3,
+                        "cache_misses": 3,
+                        "hypervolume": 1.0e-4,
+                    }
+                ],
+                archive_members=[archive_member],
+                provisional_archive_members=[],
+                population_checkpoint_path=str(
+                    output_root / "global_engine_nsga3" / "population_checkpoint.json"
+                ),
+                generation_history_path=str(
+                    output_root / "global_engine_nsga3" / "generation_history.json"
+                ),
+                engine_stats={
+                    "population_size": 3,
+                    "generations": 1,
+                    "archive_size": 1,
+                    "cache_hits": 3,
+                    "cache_misses": 3,
+                },
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--skip-target",
+                    "--frontier-engine",
+                    "nsga3",
+                    "--frontier-reference-mode",
+                    "achievement_chebyshev_full_simplex_v1",
+                    "--frontier-full-simplex-partitions",
+                    "1",
+                    "--frontier-num-lanes",
+                    "3",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    stage2_results_path.resolve(),
+                    stage2_results,
+                ),
+            ), patch.object(
+                module,
+                "run_nsga3_frontier_campaign",
+                return_value=engine_artifacts,
+            ) as run_engine:
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(run_engine.call_count, 1)
+            self.assertEqual(summary["frontier_engine"], "nsga3")
+            self.assertEqual(summary["frontier_archive_size"], 1)
+            self.assertEqual(summary["frontier_feasible_lane_count"], 2)
+            self.assertEqual(summary["frontier_generation_history"][0]["generation"], 1)
+            self.assertEqual(
+                summary["frontier_hypervolume_history"][0]["lane_id"],
+                "generation_0001",
+            )
+            self.assertEqual(
+                summary["frontier_hypervolume_history"][0]["hypervolume"],
+                1.0e-4,
+            )
+            module.validate_frontier_campaign_summary_payload(summary)
+            self.assertEqual(
+                summary["frontier_evaluator_spec_path"],
+                engine_artifacts.evaluator_spec_path,
+            )
+            self.assertEqual(
+                summary["frontier_population_checkpoint_path"],
+                engine_artifacts.population_checkpoint_path,
+            )
+            self.assertEqual(
+                summary["frontier_generation_history_path"],
+                engine_artifacts.generation_history_path,
+            )
+            self.assertEqual(
+                summary["frontier_engine_stats"]["cache_hits"],
+                3,
+            )
+            self.assertEqual(
+                summary["frontier_evaluator_spec"]["schema_version"],
+                "single_stage_frontier_evaluator_spec_v1",
+            )
+
+    def test_frontier_campaign_nsga3_resume_reuses_saved_engine_artifacts(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            stage2_bs_path, stage2_results_path, stage2_results = (
+                self._write_stage2_seed_artifact(
+                    tmpdir_path,
+                    overrides={
+                        "FINAL_IOTA": 0.15,
+                        "FINAL_VOLUME": 0.10,
+                        "NONQS_RATIO": 0.012,
+                        "BOOZER_RESIDUAL": 0.008,
+                    },
+                )
+            )
+            archive_payload = {
+                "status": "completed",
+                **self._minimal_frontier_payload(
+                    output_root,
+                    lane_id="gen_0001_cand_0000",
+                    final_iota=0.182,
+                    final_volume=0.112,
+                    nonqs_ratio=0.0104,
+                    boozer_residual=0.0069,
+                ),
+            }
+            archive_member = module.build_archive_member_from_results(
+                campaign_id="nsga3-campaign",
+                lane_id="gen_0001_cand_0000",
+                payload=archive_payload,
+                rerun_contract={
+                    "frontier_engine": "nsga3",
+                    "candidate_x": [0.0, 1.0],
+                },
+            )
+            progress = module.FrontierCampaignProgress(
+                schema_version="frontier_campaign_progress_v1",
+                campaign_id="nsga3-campaign",
+                frontier_version="frontier_v3_multilane_local_v1",
+                frontier_engine="nsga3",
+                target_payload=None,
+                lane_records=[],
+                provisional_archive_members=[],
+                archive_members=[archive_member],
+            )
+            engine_dir = output_root / "global_engine_nsga3"
+            engine_dir.mkdir(parents=True, exist_ok=True)
+            module.write_frontier_campaign_progress(
+                output_root / "campaign_progress.json",
+                progress,
+            )
+            (engine_dir / "evaluator_spec.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "single_stage_frontier_evaluator_spec_v1",
+                        "args_payload": {
+                            "single_stage_goal_mode": "frontier",
+                            "frontier_engine": "nsga3",
+                        },
+                        "stage2_bs_path": str(stage2_bs_path),
+                        "stage2_results_path": str(stage2_results_path),
+                        "stage2_results": dict(stage2_results),
+                        "run_identity": "nsga3-test",
+                        "decision_variables": [
+                            {
+                                "name": "phic(1)",
+                                "semantic_role": "phic",
+                                "harmonic_index": 1,
+                                "lower_bound": -1.0,
+                                "upper_bound": 1.0,
+                            },
+                            {
+                                "name": "zs(1)",
+                                "semantic_role": "zs",
+                                "harmonic_index": 1,
+                                "lower_bound": 0.0,
+                                "upper_bound": 1.0,
+                            },
+                        ],
+                        "lower_bounds": [-1.0, 0.0],
+                        "upper_bounds": [1.0, 1.0],
+                        "seed_x": [0.0, 1.0],
+                        "reference_metrics": {
+                            "iota": 0.15,
+                            "volume": 0.10,
+                            "qa_error": 0.012,
+                            "boozer_residual": 0.008,
+                        },
+                        "cv_bucket_names": [
+                            "surface_solve_failed",
+                            "geometry_state_unrestorable",
+                            "missing_search_eval",
+                            "nonfinite_evaluation",
+                            "topology_broken",
+                            "topology_deficit",
+                            "hardware_violation_ratio",
+                            "frontier_trust_excess_ratio",
+                        ],
+                        "surface_weight_schedule": [1.0],
+                        "search_gate": {"surface_gap_threshold": 0.0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (engine_dir / "population_checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "population_size": 3,
+                        "generations": 1,
+                        "ref_dirs": [[1.0, 0.0, 0.0, 0.0]],
+                        "X": [[0.0, 1.0]],
+                        "F": [[-0.182, -0.112, 0.0104, 0.0069]],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (engine_dir / "generation_history.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "generation": 1,
+                            "population_size": 3,
+                            "feasible_count": 2,
+                            "archive_size": 1,
+                            "archive_growth": 1,
+                            "cv_min": 0.0,
+                            "cv_mean": 0.1,
+                            "cv_max": 0.3,
+                            "failure_histogram": {
+                                "evaluator_candidate_valid": 2
+                            },
+                            "cache_hits": 3,
+                            "cache_misses": 3,
+                            "hypervolume": 1.0e-4,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--skip-target",
+                    "--frontier-engine",
+                    "nsga3",
+                    "--frontier-reference-mode",
+                    "achievement_chebyshev_full_simplex_v1",
+                    "--frontier-full-simplex-partitions",
+                    "1",
+                    "--frontier-num-lanes",
+                    "3",
+                    "--resume",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    stage2_results_path.resolve(),
+                    stage2_results,
+                ),
+            ), patch.object(
+                module,
+                "run_nsga3_frontier_campaign",
+            ) as run_engine:
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(run_engine.call_count, 0)
+            self.assertEqual(summary["frontier_engine"], "nsga3")
+            self.assertEqual(summary["frontier_archive_size"], 1)
+            self.assertEqual(summary["frontier_feasible_lane_count"], 2)
+            self.assertEqual(
+                Path(summary["frontier_population_checkpoint_path"]).resolve(),
+                (engine_dir / "population_checkpoint.json").resolve(),
+            )
 
     def test_resolve_frontier_lane_warm_start_reuses_latest_certified_final_artifact(self):
         module = load_frontier_campaign_module()

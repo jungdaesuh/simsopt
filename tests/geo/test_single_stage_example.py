@@ -183,12 +183,14 @@ def make_frontier_goal_config(module, **overrides):
         "effective_volume_weight": 1.0,
         "scalarization_type": "weight_schedule_v1",
         "chebyshev_rho": 1.0e-3,
+        "chebyshev_sharpness": 12.0,
         "chebyshev_weight_iota": 1.0,
         "chebyshev_weight_volume": 1.0,
         "chebyshev_weight_qa": 1.0,
         "chebyshev_weight_boozer": 1.0,
         "epsilon_constraint_qa_max": None,
         "epsilon_constraint_boozer_max": None,
+        "epsilon_penalty_weight": 4.0,
     }
     config.update(overrides)
     return module.FrontierGoalConfig(**config)
@@ -3038,6 +3040,8 @@ class HardwareConstraintTests(unittest.TestCase):
             frontier_effective_boozer_weight=1.0,
             frontier_effective_iota_weight=1.0,
             frontier_effective_volume_weight=1.0,
+            frontier_chebyshev_sharpness=18.0,
+            frontier_epsilon_penalty_weight=9.0,
         )
         run_dict = {
             "search_eval": {
@@ -3089,6 +3093,87 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["FRONTIER_BOOZER_TRUST_PENALTY_SCALE"], 5.0e-5)
         self.assertEqual(payload["FRONTIER_BOOZER_TRUST_EXCESS_RATIO"], 0.0)
         self.assertEqual(payload["FRONTIER_TRUST_PENALTY"], 0.0)
+        self.assertEqual(payload["FRONTIER_CHEBYSHEV_SHARPNESS"], 18.0)
+        self.assertEqual(payload["FRONTIER_EPSILON_PENALTY_WEIGHT"], 9.0)
+
+    def test_current_preserved_timeout_replay_config_round_trips_frontier_scalarization_overrides(
+        self,
+    ):
+        module = load_single_stage_example_module()
+        replay_seed = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_test.nc",
+            plasma_surf_path="/equilibria/wout_test.nc",
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+            single_stage_goal_mode="frontier",
+            single_stage_goal_mode_impl="frontier_tradeoff_score_v2",
+        )
+        frontier_goal_config = make_frontier_goal_config(
+            module,
+            scalarization_type="achievement_chebyshev_sweep_v1",
+            chebyshev_rho=0.02,
+            chebyshev_sharpness=18.0,
+            epsilon_penalty_weight=9.0,
+        )
+        run_dict = {
+            "search_eval": {
+                "total": 7.5e-4,
+                "base_total": 7.4e-4,
+                "frontier_rank_total": 7.5e-4,
+            },
+            "J": 7.5e-4,
+            "intersecting": False,
+            "surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"success": True},
+        }
+
+        with patch.object(module, "PRESERVED_TIMEOUT_REPLAY_CONFIG", replay_seed), patch.object(
+            module,
+            "FRONTIER_GOAL_CONFIG",
+            frontier_goal_config,
+        ):
+            replay_config = module.current_preserved_timeout_replay_config()
+
+        payload = module.build_preserved_timeout_results_payload(
+            replay_config=replay_config,
+            preservation_kind="best_feasible",
+            incumbent_stage="initial",
+            run_dict=run_dict,
+            objective_eval={"J_QS": 2.7e-4, "J_Boozer": 4.8e-7},
+            field_error=3.5e-4,
+            final_iota=0.14997,
+            final_volume=0.09998,
+            hardware_snapshot={
+                "search_hardware_status": {"success": True, "violations": []},
+                "artifact_hardware_status": {"success": True, "violations": []},
+                "max_curvature": 19.8,
+                "curve_curve_min_dist": 0.0496,
+                "curve_surface_min_dist": 0.067,
+                "surface_vessel_min_dist": 0.082,
+            },
+            coil_length=2.91,
+            accepted_iteration=1,
+        )
+
+        self.assertEqual(replay_config.frontier_scalarization_type, "achievement_chebyshev_sweep_v1")
+        self.assertEqual(replay_config.frontier_chebyshev_rho, 0.02)
+        self.assertEqual(replay_config.frontier_chebyshev_sharpness, 18.0)
+        self.assertEqual(replay_config.frontier_epsilon_penalty_weight, 9.0)
+        self.assertEqual(payload["FRONTIER_SCALARIZATION_TYPE"], "achievement_chebyshev_sweep_v1")
+        self.assertEqual(payload["FRONTIER_CHEBYSHEV_RHO"], 0.02)
+        self.assertEqual(payload["FRONTIER_CHEBYSHEV_SHARPNESS"], 18.0)
+        self.assertEqual(payload["FRONTIER_EPSILON_PENALTY_WEIGHT"], 9.0)
 
     def test_build_best_feasible_results_summary_emits_schema_backed_hardware_fields(self):
         module = load_single_stage_example_module()

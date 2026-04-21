@@ -517,7 +517,7 @@ def format_local_stage2_run_dir(
     stage2_iota_mpol: int = _DEFAULT_STAGE2_IOTA_MPOL,
     stage2_iota_ntor: int = _DEFAULT_STAGE2_IOTA_NTOR,
 ) -> str:
-    return (
+    full = (
         format_local_stage2_seed_dir(spec)
         + format_stage2_constraint_suffix(
             constraint_method,
@@ -557,6 +557,11 @@ def format_local_stage2_run_dir(
             stage2_iota_ntor,
         )
     )
+    if len(full) > 200:
+        import hashlib as _hashlib
+        digest = _hashlib.sha1(full.encode("utf-8")).hexdigest()[:12]
+        full = full[:180] + "-H=" + digest
+    return full
 
 
 def local_stage2_bs_path(
