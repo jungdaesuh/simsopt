@@ -464,6 +464,18 @@ def _surface_dofs(surface) -> np.ndarray:
     return np.asarray(surface.dofs, dtype=float)
 
 
+def _assign_surface_dofs(surface, dofs) -> None:
+    resolved_dofs = np.asarray(dofs, dtype=float)
+    if hasattr(surface, "local_full_x"):
+        surface.local_full_x = resolved_dofs
+        return
+    set_dofs = getattr(surface, "set_dofs", None)
+    if callable(set_dofs):
+        set_dofs(resolved_dofs)
+        return
+    surface.dofs = resolved_dofs
+
+
 def resolve_warm_start_boozer_surface_path(
     warm_start_surface_stem: str | Path,
     *,
@@ -536,14 +548,11 @@ def attempt_initialize_boozer_surface(
         stellsym=True,
         quadpoints_theta=surf_prev.quadpoints_theta,
         quadpoints_phi=surf_prev.quadpoints_phi,
-        dofs=(
-            None
-            if initial_surface_guess is None
-            else _surface_dofs(initial_surface_guess)
-        ),
     )
     if initial_surface_guess is None:
         surf.least_squares_fit(surf_prev.gamma())
+    else:
+        _assign_surface_dofs(surf, _surface_dofs(initial_surface_guess))
 
     if constraint_weight is not None:
         vol = volume_cls(surf)
@@ -564,8 +573,8 @@ def attempt_initialize_boozer_surface(
             stellsym=True,
             quadpoints_theta=np.linspace(0, 1, 2 * mpol + 1, endpoint=False),
             quadpoints_phi=np.linspace(0, 1.0 / nfp, 2 * ntor + 1, endpoint=False),
-            dofs=_surface_dofs(surf),
         )
+        _assign_surface_dofs(surf_exact, _surface_dofs(surf))
         vol = volume_cls(surf_exact)
         boozer_surface = boozer_surface_cls(
             bs,

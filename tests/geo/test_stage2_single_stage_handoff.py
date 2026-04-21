@@ -442,6 +442,113 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertIsNone(result.error_type)
         np.testing.assert_allclose(result.boozer_surface.surface.x, [9.0, -4.0])
 
+    def test_attempt_initialize_boozer_surface_assigns_seed_dofs_after_construction(self):
+        module = load_handoff_module()
+        surf_prev = SimpleNamespace(
+            quadpoints_theta=np.array([0.0, 0.5]),
+            quadpoints_phi=np.array([0.0, 0.2]),
+            gamma=lambda: np.zeros((2, 2, 3), dtype=float),
+        )
+        initial_surface_guess = SimpleNamespace(
+            get_dofs=lambda: np.array([2.5, -1.5], dtype=float)
+        )
+
+        class _CtorRejectsRawArraySurface:
+            assigned_dofs = []
+
+            def __init__(
+                self,
+                *,
+                mpol,
+                ntor,
+                nfp,
+                stellsym,
+                quadpoints_theta,
+                quadpoints_phi,
+                dofs=None,
+            ):
+                del mpol, ntor, nfp, stellsym
+                if dofs is not None:
+                    raise AssertionError(
+                        "Warm-start regression: attempt_initialize_boozer_surface "
+                        "should not pass raw arrays through the constructor."
+                    )
+                self.quadpoints_theta = quadpoints_theta
+                self.quadpoints_phi = quadpoints_phi
+                self._local_full_x = np.zeros(2, dtype=float)
+                self._gamma = np.zeros((2, 2, 3), dtype=float)
+
+            @property
+            def local_full_x(self):
+                return self._local_full_x
+
+            @local_full_x.setter
+            def local_full_x(self, value):
+                resolved = np.asarray(value, dtype=float)
+                self._local_full_x = resolved
+                self.dofs = resolved
+                type(self).assigned_dofs.append(resolved.copy())
+
+            def least_squares_fit(self, gamma):
+                self._gamma = np.asarray(gamma, dtype=float)
+
+            def gamma(self):
+                return self._gamma.copy()
+
+            def is_self_intersecting(self):
+                return False
+
+            def volume(self):
+                return 0.1
+
+        class _FakeVolume:
+            def __init__(self, surface):
+                self.surface = surface
+
+        class _FakeBoozerSurface:
+            def __init__(
+                self,
+                bs,
+                surf,
+                vol,
+                vol_target,
+                constraint_weight,
+                options,
+                I=0.0,
+            ):
+                del bs, vol, vol_target, constraint_weight, options, I
+                self.surface = surf
+                self.res = {"iota": 0.2, "G": 0.35, "success": True}
+
+            def run_code(self, iota, G):
+                del iota, G
+                return {"success": True}
+
+        result = module.attempt_initialize_boozer_surface(
+            surf_prev,
+            mpol=8,
+            ntor=6,
+            bs=object(),
+            vol_target=0.1,
+            constraint_weight=1.0,
+            iota=0.2,
+            G0=0.35,
+            boozer_I=0.0,
+            initial_surface_guess=initial_surface_guess,
+            nfp=5,
+            surface_cls=_CtorRejectsRawArraySurface,
+            volume_cls=_FakeVolume,
+            boozer_surface_cls=_FakeBoozerSurface,
+        )
+
+        self.assertTrue(result.solve_success)
+        self.assertTrue(result.success)
+        self.assertGreaterEqual(len(_CtorRejectsRawArraySurface.assigned_dofs), 1)
+        np.testing.assert_allclose(
+            _CtorRejectsRawArraySurface.assigned_dofs[0],
+            np.array([2.5, -1.5], dtype=float),
+        )
+
     def test_run_boozer_with_failure_policy_accepts_cached_result_state(self):
         module = load_handoff_module()
 
