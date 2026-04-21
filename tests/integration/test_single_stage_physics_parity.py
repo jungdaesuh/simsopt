@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import sys
 import tempfile
 from pathlib import Path
@@ -89,6 +90,28 @@ def _single_stage_outer_loop_probe_path() -> Path:
     return REPO_ROOT / "benchmarks" / "single_stage_outer_loop_probe.py"
 
 
+def _single_stage_parity_cache_key() -> str:
+    """Namespace the persistent JAX cache by the live target-lane sources.
+
+    JAX's persistent cache can reuse compiled executables across reruns, but
+    these subprocess proofs exercise large traced closures whose CPU executables
+    are brittle across in-flight source changes. Salt the cache directory with
+    the relevant source contents so warm reruns stay fast without reviving stale
+    executables from an older objective/optimizer contract.
+    """
+    digest = hashlib.sha256()
+    for path in (
+        _single_stage_script_path(),
+        REPO_ROOT / "src" / "simsopt" / "geo" / "boozersurface_jax.py",
+        REPO_ROOT / "src" / "simsopt" / "geo" / "optimizer_jax.py",
+        REPO_ROOT / "src" / "simsopt" / "geo" / "surfaceobjectives_jax.py",
+        REPO_ROOT / "src" / "simsopt" / "field" / "biotsavart.py",
+    ):
+        digest.update(path.relative_to(REPO_ROOT).as_posix().encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:16]
+
+
 def _single_stage_subprocess_env(
     *,
     backend: str,
@@ -104,13 +127,22 @@ def _single_stage_subprocess_env(
         clear_backend_guardrails=(backend != "jax"),
     )
     if backend == "jax":
-        cache_dir = (
+        cache_root = (
             REPO_ROOT
             / ".artifacts"
             / "jax_compilation_cache"
-            / "test_single_stage_physics_parity"
+            / (
+                "test_single_stage_physics_parity"
+                f"-{platform}-{_single_stage_parity_cache_key()}"
+            )
         )
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        cache_dir = Path(
+            tempfile.mkdtemp(
+                prefix="run-",
+                dir=str(cache_root),
+            )
+        )
         env["JAX_COMPILATION_CACHE_DIR"] = str(cache_dir)
         env["SIMSOPT_JAX_COMPILATION_CACHE_POLICY"] = "explicit"
         env.pop("SIMSOPT_DISABLE_JAX_COMPILATION_CACHE", None)
@@ -133,6 +165,10 @@ def _build_single_stage_script_command(
     disable_target_lane_success_filter: bool = False,
     target_lane_accepted_step_sync: str | None = None,
 ) -> list[str]:
+    # Keep the parity module on one explicit outer-loop budget. The production
+    # donor-aware auto initial phase is a search-policy heuristic, not a physics
+    # invariant, and it now differs intentionally between the CPU/reference and
+    # JAX/ondevice lanes.
     command = [
         "--backend",
         backend,
@@ -154,6 +190,10 @@ def _build_single_stage_script_command(
         str(DEFAULT_IOTA_TARGET),
         "--maxiter",
         str(maxiter),
+        "--initial-step-scale",
+        "1.0",
+        "--initial-step-maxiter",
+        "0",
         "--equilibria-dir",
         str(DEFAULT_EQUILIBRIA_DIR),
     ]
@@ -493,6 +533,80 @@ def _assert_physics_quantity_parity(
         )
 
 
+def _assert_outer_loop_single_step_consistency(
+    cpu_run: SingleStageOuterRun,
+    jax_run: SingleStageOuterRun,
+    *,
+    context: str,
+) -> None:
+    """Check one-step outer-loop consistency without assuming path equality.
+
+    The CPU/reference and ondevice target lanes use different L-BFGS
+    implementations, so a one-iteration budget does not guarantee identical
+    accepted line-search steps even when both optimize the same objective.
+    Require the objective and core field quantities to remain close while hard
+    geometry constraints stay satisfied on both lanes.
+    """
+    cpu = cpu_run.summary
+    jax = jax_run.summary
+    assert cpu.self_intersecting is False, f"{context}: CPU step self-intersected"
+    assert jax.self_intersecting is False, f"{context}: JAX step self-intersected"
+
+    np.testing.assert_allclose(
+        float(jax_run.results["FINAL_OBJECTIVE"]),
+        float(cpu_run.results["FINAL_OBJECTIVE"]),
+        rtol=5e-4,
+        atol=1e-6,
+        err_msg=f"{context}: final objective diverged",
+    )
+    np.testing.assert_allclose(
+        jax.final_volume,
+        cpu.final_volume,
+        rtol=2e-3,
+        atol=1e-6,
+        err_msg=f"{context}: final volume parity failed",
+    )
+    np.testing.assert_allclose(
+        jax.final_iota,
+        cpu.final_iota,
+        rtol=0.0,
+        atol=3e-4,
+        err_msg=f"{context}: final iota drift exceeded absolute tolerance",
+    )
+    for label, cpu_value, jax_value, ceiling in (
+        ("mean_abs_bdotn_over_b", cpu.mean_abs_bdotn_over_b, jax.mean_abs_bdotn_over_b, 5e-3),
+    ):
+        assert np.isfinite(cpu_value), f"{context}: CPU {label} was non-finite"
+        assert np.isfinite(jax_value), f"{context}: JAX {label} was non-finite"
+        assert cpu_value <= ceiling, (
+            f"{context}: CPU {label} exceeded physical ceiling {ceiling}"
+        )
+        assert jax_value <= ceiling, (
+            f"{context}: JAX {label} exceeded physical ceiling {ceiling}"
+        )
+
+    for label, threshold, cpu_value, jax_value in (
+        ("curve_curve_distance", 0.05, cpu.curve_curve_distance, jax.curve_curve_distance),
+        ("curve_surface_distance", 0.02, cpu.curve_surface_distance, jax.curve_surface_distance),
+    ):
+        assert cpu_value >= threshold, (
+            f"{context}: CPU {label} violated hard threshold {threshold}"
+        )
+        assert jax_value >= threshold, (
+            f"{context}: JAX {label} violated hard threshold {threshold}"
+        )
+    for label, limit, cpu_value, jax_value in (
+        (
+            "banana_curve_max_curvature",
+            40.0,
+            cpu.banana_curve_max_curvature,
+            jax.banana_curve_max_curvature,
+        ),
+    ):
+        assert cpu_value <= limit, f"{context}: CPU {label} exceeded hard limit {limit}"
+        assert jax_value <= limit, f"{context}: JAX {label} exceeded hard limit {limit}"
+
+
 @pytest.fixture(scope="module")
 def outer_baseline_runs() -> tuple[SingleStageOuterRun, SingleStageOuterRun]:
     cpu_run = _run_single_stage_script(
@@ -529,11 +643,11 @@ class TestSingleStagePhysicsSmokeParity:
         self,
         outer_baseline_runs,
     ):
-        """One-step-budget outer-loop smoke parity for key physics quantities."""
+        """One-step-budget outer loop stays objective-consistent and feasible."""
         cpu_run, jax_run = outer_baseline_runs
-        _assert_physics_quantity_parity(
-            cpu_run.summary,
-            jax_run.summary,
+        _assert_outer_loop_single_step_consistency(
+            cpu_run,
+            jax_run,
             context="single-stage outer-loop smoke parity",
         )
         assert cpu_run.results["max_iterations"] == 1
@@ -616,7 +730,7 @@ class TestSingleStageOuterLoopGpuProof:
             == contract["required_outer_optimizer_method"]
         )
         assert probe["boozer_optimizer_backend"] == "ondevice"
-        assert probe["boozer_optimizer_method"] == "lm-ondevice"
+        assert probe["boozer_optimizer_method"] == "bfgs-ondevice"
         assert probe["initial_objective"] is not None
         assert probe["final_objective"] is not None
         assert probe["objective_decreased"] is True

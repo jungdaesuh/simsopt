@@ -1071,6 +1071,8 @@ def _make_traceable_levenberg_marquardt_runner(
     residual_fn,
     maxiter,
     tol,
+    materialize_dense_linearization,
+    max_dense_linearization_bytes,
     callback,
     progress_callback,
 ):
@@ -1136,12 +1138,40 @@ def _make_traceable_levenberg_marquardt_runner(
             return next_state
 
         state = lax.while_loop(cond_fun, body_fun, state0)
-        residual_final, residual_jacobian, _flat_grad, hessian = (
-            _materialize_dense_least_squares_linearization(
-                residual_eval,
-                state["x"],
-            )
+        residual_final = residual_eval(state["x"])
+        linearization_rows = int(np.asarray(jnp.asarray(residual_final).size))
+        linearization_cols = sum(
+            int(np.asarray(jnp.asarray(leaf).size))
+            for leaf in jax.tree_util.tree_leaves(state["x"])
         )
+        materialize_linearization = bool(materialize_dense_linearization)
+        dense_report = _least_squares_dense_linearization_report(
+            linearization_rows,
+            linearization_cols,
+            x_dtype,
+            max_dense_linearization_bytes,
+        )
+        dense_report["failure_category"] = None
+        dense_report["failure_stage"] = None
+        dense_report["message"] = None
+        residual_jacobian = None
+        hessian = None
+        if materialize_linearization:
+            materialize_linearization, dense_report = (
+                _least_squares_dense_linearization_policy(
+                    linearization_rows,
+                    linearization_cols,
+                    x_dtype,
+                    max_dense_linearization_bytes,
+                )
+            )
+            if materialize_linearization:
+                residual_final, residual_jacobian, _flat_grad, hessian = (
+                    _materialize_dense_least_squares_linearization(
+                        residual_eval,
+                        state["x"],
+                    )
+                )
         return {
             "x": state["x"],
             "residual": residual_final,
@@ -1153,6 +1183,8 @@ def _make_traceable_levenberg_marquardt_runner(
             "nit": state["nit"],
             "status": state["status"],
             "success": state["success"],
+            "dense_linearization_materialized": materialize_linearization,
+            **dense_report,
         }
 
     run_solver.__name__ = "traceable_levenberg_marquardt_run_solver"
@@ -1352,6 +1384,8 @@ def levenberg_marquardt(
     *,
     maxiter=1500,
     tol=1e-10,
+    materialize_dense_linearization=True,
+    max_dense_linearization_bytes=None,
     callback=None,
     progress_callback=None,
 ):
@@ -1411,9 +1445,37 @@ def levenberg_marquardt(
         if status == 2:
             break
 
-    residual, residual_jacobian, _flat_grad, hessian = (
-        _materialize_dense_least_squares_linearization(residual_eval, x)
+    residual = residual_eval(x)
+    linearization_rows = int(np.asarray(jnp.asarray(residual).size))
+    linearization_cols = sum(
+        int(np.asarray(jnp.asarray(leaf).size))
+        for leaf in jax.tree_util.tree_leaves(x)
     )
+    dense_report = _least_squares_dense_linearization_report(
+        linearization_rows,
+        linearization_cols,
+        x_dtype,
+        max_dense_linearization_bytes,
+    )
+    dense_report["failure_category"] = None
+    dense_report["failure_stage"] = None
+    dense_report["message"] = None
+    residual_jacobian = None
+    hessian = None
+    dense_linearization_materialized = bool(materialize_dense_linearization)
+    if dense_linearization_materialized:
+        dense_linearization_materialized, dense_report = (
+            _least_squares_dense_linearization_policy(
+                linearization_rows,
+                linearization_cols,
+                x_dtype,
+                max_dense_linearization_bytes,
+            )
+        )
+        if dense_linearization_materialized:
+            residual, residual_jacobian, _flat_grad, hessian = (
+                _materialize_dense_least_squares_linearization(residual_eval, x)
+            )
 
     return {
         "x": x,
@@ -1426,6 +1488,8 @@ def levenberg_marquardt(
         "nit": nit,
         "status": status,
         "success": success,
+        "dense_linearization_materialized": dense_linearization_materialized,
+        **dense_report,
     }
 
 
@@ -1435,6 +1499,8 @@ def levenberg_marquardt_traceable(
     *,
     maxiter=1500,
     tol=1e-10,
+    materialize_dense_linearization=True,
+    max_dense_linearization_bytes=None,
     callback=None,
     progress_callback=None,
     args=(),
@@ -1444,6 +1510,8 @@ def levenberg_marquardt_traceable(
         residual_fn,
         int(maxiter),
         float(tol),
+        bool(materialize_dense_linearization),
+        max_dense_linearization_bytes,
         callback,
         progress_callback,
     )
@@ -1487,6 +1555,33 @@ def _dense_operator_exceeds_bytes_limit(rows, cols, dtype, max_dense_bytes):
     if max_dense_bytes is None:
         return False
     return _dense_operator_nbytes(rows, cols, dtype) > int(max_dense_bytes)
+
+
+def _dense_square_operator_report(name, size, dtype, max_dense_bytes):
+    return {
+        f"dense_{name}_shape": (int(size), int(size)),
+        f"dense_{name}_bytes": _dense_operator_nbytes(size, size, dtype),
+        f"max_dense_{name}_bytes": (
+            None if max_dense_bytes is None else int(max_dense_bytes)
+        ),
+    }
+
+
+def _dense_square_operator_message(
+    *,
+    solver_name,
+    artifact_name,
+    size,
+    dtype,
+    max_dense_bytes,
+):
+    required_bytes = _dense_operator_nbytes(size, size, dtype)
+    return (
+        f"{solver_name} skipped dense {artifact_name} materialization because "
+        f"the final {int(size)}x{int(size)} matrix in dtype {np.dtype(dtype)} "
+        f"would require {required_bytes} bytes, exceeding "
+        f"max_dense_{artifact_name}_bytes={int(max_dense_bytes)}."
+    )
 
 
 def _exact_newton_dense_jacobian_report(rows, cols, dtype, max_dense_bytes):
@@ -1542,6 +1637,104 @@ def _stabilize_dense_hessian(H, stab):
     return H + stab_value * jnp.eye(H.shape[0], dtype=H.dtype)
 
 
+def _least_squares_dense_hessian_report(size, dtype, max_dense_bytes):
+    return _dense_square_operator_report(
+        "hessian",
+        size,
+        dtype,
+        max_dense_bytes,
+    )
+
+
+def _least_squares_dense_hessian_message(size, dtype, max_dense_bytes):
+    return _dense_square_operator_message(
+        solver_name="Newton polish",
+        artifact_name="hessian",
+        size=size,
+        dtype=dtype,
+        max_dense_bytes=max_dense_bytes,
+    )
+
+
+def _least_squares_dense_hessian_policy(size, dtype, max_dense_bytes):
+    report = _least_squares_dense_hessian_report(size, dtype, max_dense_bytes)
+    materialize_hessian = not _dense_operator_exceeds_bytes_limit(
+        size,
+        size,
+        dtype,
+        max_dense_bytes,
+    )
+    report["failure_category"] = None
+    report["failure_stage"] = None
+    report["message"] = None
+    if not materialize_hessian:
+        report["failure_category"] = "scaling_limit"
+        report["failure_stage"] = "dense_hessian_finalization"
+        report["message"] = _least_squares_dense_hessian_message(
+            size,
+            dtype,
+            max_dense_bytes,
+        )
+    return materialize_hessian, report
+
+
+def _least_squares_dense_linearization_report(rows, cols, dtype, max_dense_bytes):
+    jacobian_bytes = _dense_operator_nbytes(rows, cols, dtype)
+    hessian_bytes = _dense_operator_nbytes(cols, cols, dtype)
+    return {
+        "dense_residual_jacobian_shape": (int(rows), int(cols)),
+        "dense_residual_jacobian_bytes": jacobian_bytes,
+        "dense_hessian_shape": (int(cols), int(cols)),
+        "dense_hessian_bytes": hessian_bytes,
+        "dense_linearization_bytes": jacobian_bytes + hessian_bytes,
+        "max_dense_linearization_bytes": (
+            None if max_dense_bytes is None else int(max_dense_bytes)
+        ),
+    }
+
+
+def _least_squares_dense_linearization_message(rows, cols, dtype, max_dense_bytes):
+    report = _least_squares_dense_linearization_report(
+        rows,
+        cols,
+        dtype,
+        max_dense_bytes,
+    )
+    return (
+        "Levenberg-Marquardt skipped dense linearization materialization because "
+        f"the final residual Jacobian/Hessian compatibility artifacts would "
+        f"require {report['dense_linearization_bytes']} bytes in dtype "
+        f"{np.dtype(dtype)}, exceeding "
+        f"max_dense_linearization_bytes={int(max_dense_bytes)}."
+    )
+
+
+def _least_squares_dense_linearization_policy(rows, cols, dtype, max_dense_bytes):
+    report = _least_squares_dense_linearization_report(
+        rows,
+        cols,
+        dtype,
+        max_dense_bytes,
+    )
+    materialize_linearization = (
+        max_dense_bytes is None
+        or report["dense_linearization_bytes"] <= int(max_dense_bytes)
+    )
+    report["failure_category"] = None
+    report["failure_stage"] = None
+    report["message"] = None
+    if not materialize_linearization:
+        report["failure_category"] = "scaling_limit"
+        report["failure_stage"] = "dense_linearization_finalization"
+        report["message"] = _least_squares_dense_linearization_message(
+            rows,
+            cols,
+            dtype,
+            max_dense_bytes,
+        )
+    return materialize_linearization, report
+
+
 def _newton_candidate_status(current_norm, x_next, grad_next):
     candidate_norm = jnp.linalg.norm(grad_next)
     accepted = (
@@ -1593,6 +1786,130 @@ def _gmres_solve_exact_newton_system(jvp_fn, x, rhs, *, tol):
     return dx, residual, matvec
 
 
+def _gmres_solve_array_system(matvec, rhs, *, tol):
+    n = rhs.shape[0]
+    restart = max(5, min(n, 50))
+    maxiter = max(10, min(4 * n, 200))
+    solution, _ = gmres(
+        matvec,
+        rhs,
+        tol=tol,
+        atol=0.0,
+        restart=restart,
+        maxiter=maxiter,
+    )
+    residual = rhs - matvec(solution)
+    return solution, residual
+
+
+def _least_squares_normal_operator(residual_fn, x):
+    flat_residual_fn = jax.jit(_flattened_residual_output(residual_fn))
+    _, pullback = jax.vjp(flat_residual_fn, x)
+    first_leaf = _require_tree_first_leaf(
+        x,
+        detail="Least-squares linear operator state must contain at least one leaf.",
+    )
+    dtype = first_leaf.dtype
+    decision_size = sum(
+        int(np.asarray(jnp.asarray(leaf).size))
+        for leaf in jax.tree_util.tree_leaves(x)
+    )
+
+    def matvec(v):
+        return _least_squares_matvec(flat_residual_fn, x, pullback, v)
+
+    return {
+        "kind": "least_squares_normal",
+        "shape": (decision_size, decision_size),
+        "dtype": dtype,
+        "matvec": matvec,
+        "transpose_matvec": matvec,
+    }
+
+
+def _solve_least_squares_normal_system(
+    residual_fn,
+    x,
+    rhs,
+    *,
+    tol,
+):
+    operator = _least_squares_normal_operator(residual_fn, x)
+    solution, _ = _gmres_solve_array_system(operator["matvec"], rhs, tol=tol)
+    return solution
+
+
+def _hessian_linear_operator(objective_fn, x, *, stab=0.0):
+    hvp_fn = _hessian_vector_product_fn(objective_fn)
+    first_leaf = _require_tree_first_leaf(
+        x,
+        detail="Hessian linear operator state must contain at least one leaf.",
+    )
+    dtype = first_leaf.dtype
+    decision_size = int(np.asarray(jnp.asarray(x).size))
+    stab_value = jnp.asarray(stab, dtype=dtype)
+
+    def matvec(v):
+        return hvp_fn(x, v) + stab_value * v
+
+    return {
+        "kind": "hessian",
+        "shape": (decision_size, decision_size),
+        "dtype": dtype,
+        "matvec": matvec,
+        "transpose_matvec": matvec,
+    }
+
+
+def _solve_hessian_system(
+    objective_fn,
+    x,
+    rhs,
+    *,
+    stab,
+    tol,
+):
+    operator = _hessian_linear_operator(objective_fn, x, stab=stab)
+    solution, _ = _gmres_solve_array_system(operator["matvec"], rhs, tol=tol)
+    return solution
+
+
+def _jacobian_linear_operator(residual_fn, x):
+    jvp_fn = _jacobian_vector_product_fn(residual_fn)
+    residual_x, pullback = jax.vjp(residual_fn, x)
+    residual_size = int(np.asarray(jnp.asarray(residual_x).size))
+    decision_size = int(np.asarray(jnp.asarray(x).size))
+    dtype = jnp.asarray(x).dtype
+
+    def matvec(v):
+        return jvp_fn(x, v)
+
+    def transpose_matvec(v):
+        return pullback(v)[0]
+
+    return {
+        "kind": "jacobian",
+        "shape": (residual_size, decision_size),
+        "dtype": dtype,
+        "matvec": matvec,
+        "transpose_matvec": transpose_matvec,
+    }
+
+
+def _solve_jacobian_system(
+    residual_fn,
+    x,
+    rhs,
+    *,
+    transpose,
+    tol,
+):
+    operator = _jacobian_linear_operator(residual_fn, x)
+    matvec = operator["transpose_matvec"] if transpose else operator["matvec"]
+    solution, _ = _gmres_solve_array_system(matvec, rhs, tol=tol)
+    return solution
+
+
 def newton_polish(
     objective_fn,
     x0,
@@ -1600,6 +1917,8 @@ def newton_polish(
     maxiter=40,
     tol=1e-11,
     stab=0.0,
+    materialize_hessian=True,
+    max_dense_hessian_bytes=None,
     progress_callback=None,
 ):
     """Newton polish using exact Hessian-vector products.
@@ -1666,7 +1985,15 @@ def newton_polish(
         if progress_callback is not None:
             progress_callback(nit, float(val), float(norm))
 
-    H = _stabilize_dense_hessian(_materialize_dense_hessian(hvp_fn, x), stab)
+    hessian_size = int(np.asarray(jnp.asarray(x).size))
+    materialize_hessian, dense_report = _least_squares_dense_hessian_policy(
+        hessian_size,
+        x.dtype,
+        max_dense_hessian_bytes,
+    )
+    H = None
+    if materialize_hessian:
+        H = _stabilize_dense_hessian(_materialize_dense_hessian(hvp_fn, x), stab)
 
     return {
         "x": x,
@@ -1675,6 +2002,8 @@ def newton_polish(
         "hessian": H,
         "nit": nit,
         "success": bool(float(norm) <= tol),
+        "hessian_materialized": materialize_hessian,
+        **dense_report,
     }
 
 
@@ -1684,6 +2013,8 @@ def _make_traceable_newton_polish_runner(
     maxiter,
     tol,
     stab,
+    materialize_hessian,
+    max_dense_hessian_bytes,
     progress_callback,
 ):
     def run_solver(x_init, fn_args):
@@ -1809,10 +2140,18 @@ def _make_traceable_newton_polish_runner(
 
         val_final, grad_final = val_and_grad_fn(state["x"])
         norm_final = jnp.linalg.norm(grad_final)
-        H = _stabilize_dense_hessian(
-            _materialize_dense_hessian(hvp_fn, state["x"]),
-            stab,
+        hessian_size = int(np.asarray(jnp.asarray(x_init).size))
+        materialize_hessian, dense_report = _least_squares_dense_hessian_policy(
+            hessian_size,
+            x_init.dtype,
+            max_dense_hessian_bytes,
         )
+        H = None
+        if materialize_hessian:
+            H = _stabilize_dense_hessian(
+                _materialize_dense_hessian(hvp_fn, state["x"]),
+                stab,
+            )
 
         return {
             "x": state["x"],
@@ -1821,6 +2160,8 @@ def _make_traceable_newton_polish_runner(
             "hessian": H,
             "nit": state["nit"],
             "success": norm_final <= tol_value,
+            "hessian_materialized": materialize_hessian,
+            **dense_report,
         }
 
     run_solver.__name__ = "traceable_newton_polish_run_solver"
@@ -1834,6 +2175,8 @@ def newton_polish_traceable(
     maxiter=40,
     tol=1e-11,
     stab=0.0,
+    materialize_hessian=True,
+    max_dense_hessian_bytes=None,
     progress_callback=None,
     args=(),
 ):
@@ -1848,6 +2191,8 @@ def newton_polish_traceable(
         int(maxiter),
         float(tol),
         float(stab),
+        bool(materialize_hessian),
+        max_dense_hessian_bytes,
         progress_callback,
     )
     return runner(x0, _normalize_solver_args(args))
@@ -2151,6 +2496,10 @@ def target_least_squares(
         x0,
         maxiter=maxiter,
         tol=tol,
+        materialize_dense_linearization=bool(
+            options.get("materialize_dense_linearization", True)
+        ),
+        max_dense_linearization_bytes=options.get("max_dense_linearization_bytes"),
         callback=options.get("callback"),
         progress_callback=options.get("progress_callback"),
     )
@@ -2175,6 +2524,15 @@ def target_least_squares(
             status,
             success,
         ),
+        dense_linearization_materialized=result["dense_linearization_materialized"],
+        dense_residual_jacobian_shape=result.get("dense_residual_jacobian_shape"),
+        dense_residual_jacobian_bytes=result.get("dense_residual_jacobian_bytes"),
+        dense_hessian_shape=result.get("dense_hessian_shape"),
+        dense_hessian_bytes=result.get("dense_hessian_bytes"),
+        dense_linearization_bytes=result.get("dense_linearization_bytes"),
+        max_dense_linearization_bytes=result.get("max_dense_linearization_bytes"),
+        failure_category=result.get("failure_category"),
+        failure_stage=result.get("failure_stage"),
     )
 
 

@@ -15,8 +15,9 @@ Architecture (implicit differentiation):
       \\frac{dJ}{d\\text{coils}} = \\frac{\\partial J}{\\partial \\text{coils}}
       - \\text{adj}^T \\frac{\\partial g}{\\partial \\text{coils}}
 
-  where adj solves ``(PLU)^T adj = ∂J/∂x_inner`` and g is the
-  stationarity condition of the inner solve.
+  where adj solves the inner transposed linearization system
+  ``dg/dx_inner^T adj = ∂J/∂x_inner`` and g is the stationarity condition
+  of the inner solve.
 
   Wrapper consumers now obtain solved/adjoint state through explicit
   runtime-summary accessors on ``BoozerSurfaceJAX``. The mutable
@@ -71,6 +72,7 @@ from .boozersurface_jax import (
     _compute_label,
     _make_boozer_penalty_objective_closure,
 )
+from . import optimizer_jax as _optimizer_jax
 from .label_constraints_jax import compute_G_from_currents
 from ._surface_stellsym import (
     compute_stellsym_mask_indices_for_grid as _compute_stellsym_mask_indices_for_grid,
@@ -112,6 +114,8 @@ _TRACEABLE_RUNTIME_OPTION_KEYS = (
     "newton_maxiter",
     "newton_tol",
     "newton_stab",
+    "materialize_dense_linearization",
+    "max_dense_linearization_bytes",
 )
 logger = logging.getLogger(__name__)
 
@@ -961,16 +965,33 @@ def _canonicalize_traceable_exact_quadrature(booz_jax):
 
 
 def _solve_boozer_adjoint(adjoint_state, rhs):
-    """Solve the transposed PLU adjoint system for one adjoint runtime state.
+    """Solve the transposed inner linearization for one adjoint runtime state."""
+    return adjoint_state.solve_transpose(rhs)
 
-    The stored PLU factors come from dense LS/exact linearizations of the inner
-    Boozer solve. Those systems are typically well posed but can still be
-    moderately ill-conditioned on finer grids, so adjoint sensitivity solves
-    always request iterative refinement explicitly. ``rhs`` may be a vector or
-    a matrix of right-hand sides.
-    """
-    P, L, U = adjoint_state.plu
-    return _solve_plu_transpose_with_refinement(P, L, U, rhs)
+
+def _solve_boozer_forward(adjoint_state, rhs):
+    """Solve the forward inner linearization for one adjoint runtime state."""
+    return adjoint_state.solve_forward(rhs)
+
+
+def _solve_boozer_adjoint_batch(adjoint_state, rhs_batch):
+    """Solve several adjoint right-hand sides while preserving vector semantics."""
+    rhs_batch = jnp.asarray(rhs_batch)
+    if rhs_batch.ndim != 2:
+        raise ValueError(
+            "_solve_boozer_adjoint_batch expects a rank-2 array with shape "
+            "(num_rhs, decision_size)."
+        )
+    if adjoint_state.plu is not None:
+        solved_columns = _solve_boozer_adjoint(
+            adjoint_state,
+            jnp.swapaxes(rhs_batch, 0, 1),
+        )
+        return jnp.swapaxes(solved_columns, 0, 1)
+    return jnp.stack(
+        [_solve_boozer_adjoint(adjoint_state, rhs) for rhs in rhs_batch],
+        axis=0,
+    )
 
 
 def _solve_plu_transpose_with_refinement(P, L, U, rhs):
@@ -981,6 +1002,14 @@ def _solve_plu_transpose_with_refinement(P, L, U, rhs):
 def _solve_plu_with_refinement(P, L, U, rhs):
     """Solve ``PLU x = rhs`` with explicit iterative refinement."""
     return plu_solve_jax(P, L, U, rhs, iterative_refinement=True)
+
+
+def _adjoint_state_decision_size(adjoint_state):
+    return int(adjoint_state.decision_size)
+
+
+def _adjoint_state_dtype(adjoint_state):
+    return adjoint_state.dtype
 
 
 def _iter_adjoint_coil_cotangents(stream_group_vjps, adjoint):
@@ -1272,7 +1301,10 @@ def _ensure_solved_value_state(booz_surf):
             )
         booz_surf.run_code(booz_surf.res["iota"], G=booz_surf.res["G"])
     _log_boozer_solve_state(booz_surf)
-    if booz_surf.res is None or not booz_surf.res.get("success"):
+    if booz_surf.res is None or not booz_surf.res.get(
+        "primal_success",
+        booz_surf.res.get("success"),
+    ):
         raise RuntimeError(
             "BoozerSurfaceJAX has not been solved yet or the last solve failed "
             "to produce a valid solved state."
@@ -1331,8 +1363,24 @@ def _resolved_boozer_adjoint_runtime_state(booz_surf):
     vjp_groups_fn = booz_surf.res["vjp_groups"]
 
     class _FallbackAdjointRuntimeState:
-        def __init__(self, solved_state, plu, stream_group_vjps):
+        def __init__(
+            self,
+            solved_state,
+            *,
+            linearization_kind,
+            decision_size,
+            dtype,
+            solve_forward,
+            solve_transpose,
+            stream_group_vjps,
+            plu,
+        ):
             self.solved_state = solved_state
+            self.linearization_kind = linearization_kind
+            self.decision_size = decision_size
+            self.dtype = dtype
+            self.solve_forward = solve_forward
+            self.solve_transpose = solve_transpose
             self.plu = plu
             self.stream_group_vjps = stream_group_vjps
 
@@ -1344,8 +1392,24 @@ def _resolved_boozer_adjoint_runtime_state(booz_surf):
             solved_state.G,
         )
 
+    P, L, U = booz_surf.res["PLU"]
+
+    def solve_forward(rhs):
+        return _solve_plu_with_refinement(P, L, U, rhs)
+
+    def solve_transpose(rhs):
+        return _solve_plu_transpose_with_refinement(P, L, U, rhs)
+
     return _FallbackAdjointRuntimeState(
         solved_state=solved_state,
+        linearization_kind=booz_surf.res.get(
+            "linearization_kind",
+            "exact_jacobian" if booz_surf.res.get("type") == "exact" else "hessian",
+        ),
+        decision_size=int(np.asarray(L.shape[0])),
+        dtype=L.dtype,
+        solve_forward=solve_forward,
+        solve_transpose=solve_transpose,
         plu=booz_surf.res["PLU"],
         stream_group_vjps=stream_group_vjps,
     )
@@ -1674,12 +1738,12 @@ class IotasJAX(Optimizable):
         adjoint_state = _resolved_boozer_adjoint_runtime_state(booz_surf)
 
         # dJ/dx_inner for iota: unit vector at the iota position
-        L = adjoint_state.plu[1]
-        n = L.shape[0]
+        lhs_dtype = _adjoint_state_dtype(adjoint_state)
+        n = _adjoint_state_decision_size(adjoint_state)
         if G is not None:
-            dJ_ds = _explicit_cotangent_basis(n, n - 2, dtype=L.dtype)
+            dJ_ds = _explicit_cotangent_basis(n, n - 2, dtype=lhs_dtype)
         else:
-            dJ_ds = _explicit_cotangent_basis(n, n - 1, dtype=L.dtype)
+            dJ_ds = _explicit_cotangent_basis(n, n - 1, dtype=lhs_dtype)
 
         adj = _solve_boozer_adjoint(adjoint_state, dJ_ds)
 
@@ -1811,7 +1875,7 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         dJ_ds = self._compute_dJ_ds(
             coil_set_spec,
             sdofs,
-            adjoint_state.plu[1].shape[0],
+            _adjoint_state_decision_size(adjoint_state),
         )
 
         adj = _solve_boozer_adjoint(adjoint_state, dJ_ds)
@@ -1880,8 +1944,8 @@ def compute_standard_surface_objective_gradients(
         weight_inv_modB,
     )
 
-    lhs_dtype = adjoint_state.plu[1].dtype
-    n = adjoint_state.plu[1].shape[0]
+    lhs_dtype = _adjoint_state_dtype(adjoint_state)
+    n = _adjoint_state_decision_size(adjoint_state)
     iota_rhs_index = n - 2 if G is not None else n - 1
     iota_rhs = _explicit_cotangent_basis(n, iota_rhs_index, dtype=lhs_dtype)
 
@@ -1901,11 +1965,7 @@ def compute_standard_surface_objective_gradients(
         )
 
     rhs_batch = jnp.stack((residual_rhs, iota_rhs, non_qs_rhs), axis=0)
-    adjoint_batch = jax.vmap(
-        lambda rhs: _solve_boozer_adjoint(adjoint_state, rhs),
-        in_axes=0,
-        out_axes=0,
-    )(rhs_batch)
+    adjoint_batch = _solve_boozer_adjoint_batch(adjoint_state, rhs_batch)
 
     # Keep adjoint extraction on the JAX side so strict transfer_guard mode
     # does not materialize Python scalar indices against device-resident state.
@@ -2142,6 +2202,171 @@ def _traceable_directional_inner_objective(
     )
 
 
+def _traceable_solve_hessian_linearization(
+    solved_x,
+    rhs,
+    coil_set_spec,
+    objective_kwargs,
+    *,
+    dense_plu,
+    linear_solve_tol,
+    linear_solve_stab,
+    transpose,
+):
+    dense_solution = _traceable_solve_dense_linearization(
+        dense_plu,
+        rhs,
+        transpose=transpose,
+    )
+    if dense_solution is not None:
+        return dense_solution
+    objective_fn = _make_boozer_penalty_objective_closure(
+        coil_set_spec=coil_set_spec,
+        **_traceable_inner_objective_kwargs(objective_kwargs),
+    )
+    return _optimizer_jax._solve_hessian_system(
+        objective_fn,
+        solved_x,
+        rhs,
+        stab=linear_solve_stab,
+        tol=linear_solve_tol,
+    )
+
+
+def _traceable_solve_exact_linearization(
+    solved_x,
+    rhs,
+    coil_set_spec,
+    objective_kwargs,
+    *,
+    dense_plu,
+    linear_solve_tol,
+    transpose,
+):
+    dense_solution = _traceable_solve_dense_linearization(
+        dense_plu,
+        rhs,
+        transpose=transpose,
+    )
+    if dense_solution is not None:
+        return dense_solution
+
+    def residual_fn(x_inner):
+        return _boozer_exact_residual(
+            x_inner,
+            coil_set_spec=coil_set_spec,
+            **_traceable_exact_residual_kwargs(objective_kwargs),
+        )
+
+    return _optimizer_jax._solve_jacobian_system(
+        residual_fn,
+        solved_x,
+        rhs,
+        transpose=transpose,
+        tol=linear_solve_tol,
+    )
+
+
+def _traceable_solve_linearization(
+    solved_x,
+    rhs,
+    coil_set_spec,
+    objective_kwargs,
+    *,
+    dense_plu,
+    linearization_kind,
+    linear_solve_tol,
+    linear_solve_stab,
+    transpose,
+):
+    if linearization_kind == "hessian":
+        return _traceable_solve_hessian_linearization(
+            solved_x,
+            rhs,
+            coil_set_spec,
+            objective_kwargs,
+            dense_plu=dense_plu,
+            linear_solve_tol=linear_solve_tol,
+            linear_solve_stab=linear_solve_stab,
+            transpose=transpose,
+        )
+    if linearization_kind == "exact_jacobian":
+        return _traceable_solve_exact_linearization(
+            solved_x,
+            rhs,
+            coil_set_spec,
+            objective_kwargs,
+            dense_plu=dense_plu,
+            linear_solve_tol=linear_solve_tol,
+            transpose=transpose,
+        )
+    raise ValueError(
+        f"Unsupported traceable linearization kind {linearization_kind!r}."
+    )
+
+
+def _traceable_solve_dense_linearization(dense_plu, rhs, *, transpose):
+    if dense_plu is None:
+        return None
+    solver = (
+        _solve_plu_transpose_with_refinement
+        if transpose
+        else _solve_plu_with_refinement
+    )
+    return solver(*dense_plu, rhs)
+
+
+def _pack_traceable_forward_result(
+    *,
+    value,
+    x,
+    sdofs,
+    iota,
+    G,
+    dense_plu,
+    success,
+    primal_success,
+    adjoint_linear_solve_available,
+):
+    """Return the normalized traceable forward-result contract."""
+    return {
+        "value": value,
+        "x": x,
+        "sdofs": sdofs,
+        "iota": iota,
+        "G": G,
+        "dense_plu": dense_plu,
+        "success": success,
+        "primal_success": primal_success,
+        "adjoint_linear_solve_available": adjoint_linear_solve_available,
+    }
+
+
+def _resolve_traceable_solved_state(
+    booz_jax,
+    solve_result,
+    *,
+    optimize_G,
+    coil_set_spec,
+):
+    """Return solved ``(sdofs, iota, G)`` even when the solve only returns ``x``."""
+    if (
+        "sdofs" in solve_result
+        and "iota" in solve_result
+        and ("G" in solve_result or not optimize_G)
+    ):
+        return (
+            solve_result["sdofs"],
+            solve_result["iota"],
+            solve_result.get("G"),
+        )
+    return booz_jax._unpack_decision_vector_jax(
+        solve_result["x"],
+        optimize_G,
+        coil_set_spec=coil_set_spec,
+    )
+
+
 def _traceable_forward_result(
     booz_jax,
     coil_set_spec_from_dofs,
@@ -2149,7 +2374,10 @@ def _traceable_forward_result(
     coil_dofs,
     baseline_x,
     baseline_value,
-    baseline_plu,
+    baseline_dense_plu,
+    linearization_kind,
+    linear_solve_tol,
+    linear_solve_stab,
     optimize_G,
     baseline_coil_dofs,
     failure_value,
@@ -2162,16 +2390,25 @@ def _traceable_forward_result(
     same_coils = jnp.all(coil_dofs == baseline_coil_dofs)
 
     def baseline_case(_):
-        return {
+        baseline_sdofs, baseline_iota, baseline_G = _split_x_inner_runtime(
+            baseline_x,
+            optimize_G,
+        )
+        return _pack_traceable_forward_result(
             # The exact baseline state must return the solved reference objective so
             # the outer optimizer can obtain a real descent direction even when the
             # seed is hardware-invalid. Candidate (non-baseline) states remain
             # subject to the hard success filter below.
-            "value": baseline_value,
-            "x": baseline_x,
-            "plu": baseline_plu,
-            "success": jnp.array(True, dtype=bool),
-        }
+            value=baseline_value,
+            x=baseline_x,
+            sdofs=baseline_sdofs,
+            iota=baseline_iota,
+            G=baseline_G,
+            dense_plu=baseline_dense_plu,
+            success=jnp.array(True, dtype=bool),
+            primal_success=jnp.array(True, dtype=bool),
+            adjoint_linear_solve_available=jnp.array(True, dtype=bool),
+        )
 
     def general_case(_):
         coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
@@ -2181,7 +2418,10 @@ def _traceable_forward_result(
             coil_dofs=coil_dofs,
             baseline_coil_dofs=baseline_coil_dofs,
             baseline_x=baseline_x,
-            baseline_plu=baseline_plu,
+            baseline_dense_plu=baseline_dense_plu,
+            linearization_kind=linearization_kind,
+            linear_solve_tol=linear_solve_tol,
+            linear_solve_stab=linear_solve_stab,
             predictor_kind=predictor_kind,
             objective_kwargs=objective_kwargs,
         )
@@ -2198,10 +2438,21 @@ def _traceable_forward_result(
             warmstart_iota,
             warmstart_G,
         )
-        success = solve_result["success"]
+        solved_sdofs, solved_iota, solved_G = _resolve_traceable_solved_state(
+            booz_jax,
+            solve_result,
+            optimize_G=optimize_G,
+            coil_set_spec=coil_set_spec,
+        )
+        primal_success = solve_result.get("primal_success", solve_result["success"])
+        adjoint_linear_solve_available = solve_result.get(
+            "adjoint_linear_solve_available",
+            solve_result["success"],
+        )
+        success = primal_success & adjoint_linear_solve_available
         if success_filter is not None:
-            success = jax.lax.cond(
-                solve_result["success"],
+            success = success & jax.lax.cond(
+                primal_success,
                 lambda _: success_filter(coil_dofs, solve_result["x"]),
                 lambda _: jnp.array(False, dtype=bool),
                 operand=None,
@@ -2216,8 +2467,8 @@ def _traceable_forward_result(
             * failure_scale_jax
             * jnp.dot(delta, delta, precision=lax.Precision.HIGHEST)
         )
-        return {
-            "value": jnp.where(
+        return _pack_traceable_forward_result(
+            value=jnp.where(
                 success,
                 _evaluate_traceable_total_objective(
                     solve_result["x"],
@@ -2227,10 +2478,15 @@ def _traceable_forward_result(
                 ),
                 failure_penalty,
             ),
-            "x": solve_result["x"],
-            "plu": solve_result["plu"],
-            "success": success,
-        }
+            x=solve_result["x"],
+            sdofs=solved_sdofs,
+            iota=solved_iota,
+            G=solved_G,
+            dense_plu=solve_result["plu"],
+            success=success,
+            primal_success=primal_success,
+            adjoint_linear_solve_available=adjoint_linear_solve_available,
+        )
 
     return jax.lax.cond(same_coils, baseline_case, general_case, operand=None)
 
@@ -2241,7 +2497,10 @@ def _traceable_total_gradient(
     *,
     coil_dofs,
     solved_x,
-    solved_plu,
+    solved_dense_plu,
+    linearization_kind,
+    linear_solve_tol,
+    linear_solve_stab,
     objective_kwargs,
 ):
     """Implicit total derivative of the pure traceable objective."""
@@ -2250,7 +2509,10 @@ def _traceable_total_gradient(
         coil_set_spec_from_dofs,
         coil_dofs=coil_dofs,
         solved_x=solved_x,
-        solved_plu=solved_plu,
+        solved_dense_plu=solved_dense_plu,
+        linearization_kind=linearization_kind,
+        linear_solve_tol=linear_solve_tol,
+        linear_solve_stab=linear_solve_stab,
         objective_kwargs=objective_kwargs,
     )[2]
 
@@ -2261,7 +2523,10 @@ def _traceable_objective_gradient_parts(
     *,
     coil_dofs,
     solved_x,
-    solved_plu,
+    solved_dense_plu,
+    linearization_kind,
+    linear_solve_tol,
+    linear_solve_stab,
     objective_kwargs,
     term_name=None,
     scalar_objective_fn=None,
@@ -2301,7 +2566,17 @@ def _traceable_objective_gradient_parts(
     dJ_dx = jax.grad(lambda x: _evaluate_objective(x, coil_dofs, coil_set_spec))(
         solved_x
     )
-    adjoint = _solve_plu_transpose_with_refinement(*solved_plu, dJ_dx)
+    adjoint = _traceable_solve_linearization(
+        solved_x,
+        dJ_dx,
+        coil_set_spec,
+        objective_kwargs,
+        dense_plu=solved_dense_plu,
+        linearization_kind=linearization_kind,
+        linear_solve_tol=linear_solve_tol,
+        linear_solve_stab=linear_solve_stab,
+        transpose=True,
+    )
 
     def objective_and_stationarity_of_coils(current_coil_dofs):
         current_coil_set_spec = coil_set_spec_from_dofs(current_coil_dofs)
@@ -2336,7 +2611,10 @@ def _traceable_predict_warmstart_x(
     coil_dofs,
     baseline_coil_dofs,
     baseline_x,
-    baseline_plu,
+    baseline_dense_plu,
+    linearization_kind,
+    linear_solve_tol,
+    linear_solve_stab,
     predictor_kind,
     objective_kwargs,
 ):
@@ -2374,7 +2652,17 @@ def _traceable_predict_warmstart_x(
             (delta,),
         )[1]
 
-    dx = _solve_plu_with_refinement(*baseline_plu, -forcing)
+    dx = _traceable_solve_linearization(
+        baseline_x,
+        -forcing,
+        coil_set_spec_from_dofs(baseline_coil_dofs),
+        objective_kwargs,
+        dense_plu=baseline_dense_plu,
+        linearization_kind=linearization_kind,
+        linear_solve_tol=linear_solve_tol,
+        linear_solve_stab=linear_solve_stab,
+        transpose=False,
+    )
     return baseline_x + dx
 
 
@@ -2453,7 +2741,13 @@ def _build_traceable_objective_state(
         "mask_indices": mask_indices,
         "stellsym_surface": booz_jax.stellsym,
     }
-    baseline_plu = booz_jax.res["PLU"]
+    baseline_dense_plu = booz_jax.res["PLU"]
+    linearization_kind = booz_jax.res.get(
+        "linearization_kind",
+        "exact_jacobian" if booz_jax.boozer_type == "exact" else "hessian",
+    )
+    linear_solve_tol = booz_jax._linear_solve_tolerance()
+    linear_solve_stab = float(booz_jax.options.get("newton_stab", 0.0))
 
     baseline_x = booz_jax._pack_decision_vector(
         warmstart_iota,
@@ -2475,12 +2769,15 @@ def _build_traceable_objective_state(
         "objective_kwargs": _traceable_runtime_hostify_tree(objective_kwargs),
         "baseline_x": _traceable_runtime_hostify_tree(baseline_x),
         "baseline_value": _traceable_runtime_hostify_tree(baseline_value),
-        "baseline_plu": _traceable_runtime_hostify_tree(baseline_plu),
+        "baseline_dense_plu": _traceable_runtime_hostify_tree(baseline_dense_plu),
         "baseline_coil_dofs": _traceable_runtime_hostify_tree(baseline_coil_dofs),
         "coil_dof_extraction_spec": coil_dof_extraction_spec,
         "coil_set_spec_from_dofs": coil_set_spec_from_dofs,
         "optimize_G": optimize_G,
         "predictor_kind": predictor_kind,
+        "linearization_kind": linearization_kind,
+        "linear_solve_tol": linear_solve_tol,
+        "linear_solve_stab": linear_solve_stab,
         "failure_value": _traceable_runtime_hostify_tree(failure_value),
         "failure_scale": _traceable_runtime_hostify_tree(failure_scale),
     }
@@ -2498,10 +2795,13 @@ def _build_traceable_objective_compiled_bundle_from_state(
     objective_kwargs = state["objective_kwargs"]
     baseline_x = state["baseline_x"]
     baseline_value = state["baseline_value"]
-    baseline_plu = state["baseline_plu"]
+    baseline_dense_plu = state["baseline_dense_plu"]
     baseline_coil_dofs = state["baseline_coil_dofs"]
     optimize_G = state["optimize_G"]
     predictor_kind = state["predictor_kind"]
+    linearization_kind = state["linearization_kind"]
+    linear_solve_tol = state["linear_solve_tol"]
+    linear_solve_stab = state["linear_solve_stab"]
     coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
     failure_value = state["failure_value"]
     failure_scale = state["failure_scale"]
@@ -2513,7 +2813,10 @@ def _build_traceable_objective_compiled_bundle_from_state(
             coil_dofs=coil_dofs,
             baseline_x=baseline_x,
             baseline_value=_as_jax_float64(baseline_value),
-            baseline_plu=baseline_plu,
+            baseline_dense_plu=baseline_dense_plu,
+            linearization_kind=linearization_kind,
+            linear_solve_tol=linear_solve_tol,
+            linear_solve_stab=linear_solve_stab,
             optimize_G=optimize_G,
             baseline_coil_dofs=baseline_coil_dofs,
             failure_value=failure_value,
@@ -2525,13 +2828,16 @@ def _build_traceable_objective_compiled_bundle_from_state(
 
     compiled_forward_result_for = jax.jit(_forward_result_for)
 
-    def _total_gradient_for(coil_dofs, solved_x, solved_plu):
+    def _total_gradient_for(coil_dofs, solved_x, solved_dense_plu):
         return _traceable_total_gradient(
             booz_jax,
             coil_set_spec_from_dofs,
             coil_dofs=coil_dofs,
             solved_x=solved_x,
-            solved_plu=solved_plu,
+            solved_dense_plu=solved_dense_plu,
+            linearization_kind=linearization_kind,
+            linear_solve_tol=linear_solve_tol,
+            linear_solve_stab=linear_solve_stab,
             objective_kwargs=objective_kwargs,
         )
 
@@ -2547,7 +2853,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
             return compiled_total_gradient_for(
                 coil_dofs,
                 result["x"],
-                result["plu"],
+                result["dense_plu"],
             )
 
         grad = jax.lax.cond(
@@ -2655,6 +2961,7 @@ def _get_cached_traceable_runtime_entry(
         "public_objective": None,
         "public_value_and_grad": None,
         "public_batched_value_and_grad": None,
+        "public_forward_result": None,
         "public_reporting_metrics": None,
         "host_objective": None,
         "host_value_and_grad": None,
@@ -2706,6 +3013,12 @@ def _ensure_traceable_runtime_public_boundaries(runtime_entry):
         runtime_entry["public_batched_value_and_grad"] = (
             _make_traceable_batched_value_and_grad_boundary(
                 runtime_entry["batched_value_and_grad"]
+            )
+        )
+    if runtime_entry["public_forward_result"] is None:
+        runtime_entry["public_forward_result"] = (
+            _make_traceable_forward_result_boundary(
+                runtime_entry["compiled_bundle"]["compiled_forward_result_for"]
             )
         )
     if runtime_entry["public_reporting_metrics"] is None:
@@ -2788,7 +3101,9 @@ def _ensure_traceable_runtime_host_wrappers(runtime_entry, booz_jax):
             state["baseline_coil_dofs"]
         )
         baseline_x = _traceable_runtime_deviceify_tree(state["baseline_x"])
-        baseline_plu = _traceable_runtime_deviceify_tree(state["baseline_plu"])
+        baseline_dense_plu = _traceable_runtime_deviceify_tree(
+            state["baseline_dense_plu"]
+        )
         with jax.transfer_guard("allow"):
             baseline_gradient = _host_array(
                 _traceable_total_gradient(
@@ -2796,7 +3111,10 @@ def _ensure_traceable_runtime_host_wrappers(runtime_entry, booz_jax):
                     state["coil_set_spec_from_dofs"],
                     coil_dofs=baseline_coil_dofs_jax,
                     solved_x=baseline_x,
-                    solved_plu=baseline_plu,
+                    solved_dense_plu=baseline_dense_plu,
+                    linearization_kind=state["linearization_kind"],
+                    linear_solve_tol=state["linear_solve_tol"],
+                    linear_solve_stab=state["linear_solve_stab"],
                     objective_kwargs=state["objective_kwargs"],
                 ),
                 dtype=np.float64,
@@ -2832,15 +3150,19 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
         return result["value"], (
             coil_dofs,
             result["x"],
-            result["plu"],
+            result["dense_plu"],
             result["success"],
         )
 
     def f_bwd(saved_state, cotangent):
-        coil_dofs, solved_x, solved_plu, success = saved_state
+        coil_dofs, solved_x, solved_dense_plu, success = saved_state
 
         def _success(_):
-            return compiled_total_gradient_for(coil_dofs, solved_x, solved_plu)
+            return compiled_total_gradient_for(
+                coil_dofs,
+                solved_x,
+                solved_dense_plu,
+            )
 
         def _failure(_):
             return failure_gradient_for(coil_dofs)
@@ -2921,6 +3243,15 @@ def _make_traceable_objective_boundary(pure_objective):
         return pure_objective(_as_jax_float64(coil_dofs))
 
     return objective
+
+
+def _make_traceable_forward_result_boundary(compiled_forward_result_for):
+    """Build the public pure-JAX forward-result entrypoint for one runtime bundle."""
+
+    def forward_result(coil_dofs):
+        return compiled_forward_result_for(_as_jax_float64(coil_dofs))
+
+    return forward_result
 
 
 def _make_traceable_host_value_and_grad(
@@ -3173,12 +3504,12 @@ def _make_traceable_host_reporting_metrics(reporting_metrics):
 
 
 def _make_traceable_batched_value_and_grad_pipeline(compiled_value_and_grad_for):
-    """Build a fused batched ``(value, grad)`` pipeline for nearby seed scoring."""
+    """Build a scalar-equivalent batched ``(value, grad)`` pipeline for seed scoring."""
     from .optimizer_jax import _mark_cacheable_jit_value_and_grad
 
     def _batched_value_and_grad_for(coil_dofs_batch):
         coil_dofs_batch = _as_jax_float64(coil_dofs_batch)
-        return jax.vmap(compiled_value_and_grad_for)(coil_dofs_batch)
+        return lax.map(compiled_value_and_grad_for, coil_dofs_batch)
 
     return _mark_cacheable_jit_value_and_grad(jax.jit(_batched_value_and_grad_for))
 
@@ -3257,7 +3588,9 @@ def diagnose_traceable_objective_runtime(
 
     baseline_coil_dofs = _traceable_runtime_deviceify_tree(state["baseline_coil_dofs"])
     baseline_x = _traceable_runtime_deviceify_tree(state["baseline_x"])
-    baseline_plu = _traceable_runtime_deviceify_tree(state["baseline_plu"])
+    baseline_dense_plu = _traceable_runtime_deviceify_tree(
+        state["baseline_dense_plu"]
+    )
     coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
     baseline_coil_set_spec = coil_set_spec_from_dofs(baseline_coil_dofs)
     forward_result = compiled_bundle["compiled_forward_result_for"](baseline_coil_dofs)
@@ -3290,7 +3623,10 @@ def diagnose_traceable_objective_runtime(
                 coil_set_spec_from_dofs,
                 coil_dofs=baseline_coil_dofs,
                 solved_x=baseline_x,
-                solved_plu=baseline_plu,
+                solved_dense_plu=baseline_dense_plu,
+                linearization_kind=state["linearization_kind"],
+                linear_solve_tol=state["linear_solve_tol"],
+                linear_solve_stab=state["linear_solve_stab"],
                 objective_kwargs=objective_kwargs,
                 term_name=term_name,
             )
@@ -3440,9 +3776,12 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
     objective_kwargs = state["objective_kwargs"]
     baseline_coil_dofs = state["baseline_coil_dofs"]
     baseline_x = state["baseline_x"]
-    baseline_plu = state["baseline_plu"]
+    baseline_dense_plu = state["baseline_dense_plu"]
     optimize_G = state["optimize_G"]
     predictor_kind = state["predictor_kind"]
+    linearization_kind = state["linearization_kind"]
+    linear_solve_tol = state["linear_solve_tol"]
+    linear_solve_stab = state["linear_solve_stab"]
     coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
     compiled_forward_result_for = compiled_bundle["compiled_forward_result_for"]
     resolved_value_and_grad_pipeline = (
@@ -3465,7 +3804,10 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
             coil_dofs=coil_dofs,
             baseline_coil_dofs=baseline_coil_dofs,
             baseline_x=baseline_x,
-            baseline_plu=baseline_plu,
+            baseline_dense_plu=baseline_dense_plu,
+            linearization_kind=linearization_kind,
+            linear_solve_tol=linear_solve_tol,
+            linear_solve_stab=linear_solve_stab,
             predictor_kind=predictor_kind,
             objective_kwargs=objective_kwargs,
         )
@@ -3486,13 +3828,19 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
             warmstart_iota,
             warmstart_G,
         )
+        solved_sdofs, solved_iota, solved_G = _resolve_traceable_solved_state(
+            booz_jax,
+            solve_result,
+            optimize_G=optimize_G,
+            coil_set_spec=coil_set_spec,
+        )
         return {
             "x": solve_result["x"],
-            "sdofs": solve_result["sdofs"],
-            "iota": solve_result["iota"],
-            "G": solve_result["G"],
+            "sdofs": solved_sdofs,
+            "iota": solved_iota,
+            "G": solved_G,
             "fun": solve_result["fun"],
-            "plu": solve_result["plu"],
+            "dense_plu": solve_result["plu"],
             "success": solve_result["success"],
             "nit": solve_result["nit"],
         }
@@ -3528,13 +3876,16 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
             objective_kwargs,
         )
 
-    def _total_gradient_for(coil_dofs, solved_x, solved_plu):
+    def _total_gradient_for(coil_dofs, solved_x, solved_dense_plu):
         return _traceable_total_gradient(
             booz_jax,
             coil_set_spec_from_dofs,
             coil_dofs=coil_dofs,
             solved_x=solved_x,
-            solved_plu=solved_plu,
+            solved_dense_plu=solved_dense_plu,
+            linearization_kind=linearization_kind,
+            linear_solve_tol=linear_solve_tol,
+            linear_solve_stab=linear_solve_stab,
             objective_kwargs=objective_kwargs,
         )
 
@@ -3592,6 +3943,10 @@ def make_traceable_objective_runtime_bundle(
     ``batched_value_and_grad``
         Pure JAX callable returning batched ``(value, grad)`` outputs for a
         ``(batch, dof)`` seed array.
+    ``forward_result``
+        Pure JAX callable returning the traceable inner-solve result used by
+        the target-lane objective, including the solved decision vector,
+        unpacked Boozer state, and success flags.
     ``reporting_metrics``
         Pure JAX callable returning the solved-state reporting scalars used by
         the single-stage example. Callers that need Python/NumPy materialization
@@ -3623,6 +3978,7 @@ def make_traceable_objective_runtime_bundle(
         "objective": runtime_entry["public_objective"],
         "value_and_grad": runtime_entry["public_value_and_grad"],
         "batched_value_and_grad": runtime_entry["public_batched_value_and_grad"],
+        "forward_result": runtime_entry["public_forward_result"],
         "reporting_metrics": runtime_entry["public_reporting_metrics"],
     }
     if include_host_wrappers:
@@ -3701,6 +4057,9 @@ def make_traceable_single_stage_alm_runtime_bundle(
     coil_set_spec_from_dofs = state["coil_set_spec_from_dofs"]
     compiled_forward_result_for = compiled_bundle["compiled_forward_result_for"]
     failure_gradient_for = compiled_bundle["failure_gradient_for"]
+    linearization_kind = state["linearization_kind"]
+    linear_solve_tol = state["linear_solve_tol"]
+    linear_solve_stab = state["linear_solve_stab"]
     constraint_names = tuple(
         str(name) for name in normalized_alm_config["constraint_names"]
     )
@@ -3727,7 +4086,7 @@ def make_traceable_single_stage_alm_runtime_bundle(
             "constraint_values": constraint_values,
             "feasibility_values": constraint_values,
             "x": forward_result["x"],
-            "plu": forward_result["plu"],
+            "dense_plu": forward_result["dense_plu"],
             "success": forward_result["success"],
         }
 
@@ -3757,7 +4116,7 @@ def make_traceable_single_stage_alm_runtime_bundle(
                 penalty=penalty,
             )
             evaluation["x"] = forward_result["x"]
-            evaluation["plu"] = forward_result["plu"]
+            evaluation["dense_plu"] = forward_result["dense_plu"]
             evaluation["success"] = forward_result["success"]
             return evaluation
 
@@ -3770,7 +4129,13 @@ def make_traceable_single_stage_alm_runtime_bundle(
 
     compiled_evaluation_for = jax.jit(_alm_evaluation_for)
 
-    def _alm_total_gradient_for(coil_dofs, solved_x, solved_plu, multipliers, penalty):
+    def _alm_total_gradient_for(
+        coil_dofs,
+        solved_x,
+        solved_dense_plu,
+        multipliers,
+        penalty,
+    ):
         def _scalar_objective_fn(
             x_inner,
             current_coil_dofs,
@@ -3793,7 +4158,10 @@ def make_traceable_single_stage_alm_runtime_bundle(
             coil_set_spec_from_dofs,
             coil_dofs=coil_dofs,
             solved_x=solved_x,
-            solved_plu=solved_plu,
+            solved_dense_plu=solved_dense_plu,
+            linearization_kind=linearization_kind,
+            linear_solve_tol=linear_solve_tol,
+            linear_solve_stab=linear_solve_stab,
             objective_kwargs=objective_kwargs,
             scalar_objective_fn=_scalar_objective_fn,
         )[2]
@@ -3809,20 +4177,27 @@ def make_traceable_single_stage_alm_runtime_bundle(
         return evaluation["total"], (
             coil_dofs,
             evaluation["x"],
-            evaluation["plu"],
+            evaluation["dense_plu"],
             evaluation["success"],
             multipliers,
             penalty,
         )
 
     def _objective_bwd(saved_state, cotangent):
-        coil_dofs, solved_x, solved_plu, success, multipliers, penalty = saved_state
+        (
+            coil_dofs,
+            solved_x,
+            solved_dense_plu,
+            success,
+            multipliers,
+            penalty,
+        ) = saved_state
 
         def _success(_):
             return compiled_total_gradient_for(
                 coil_dofs,
                 solved_x,
-                solved_plu,
+                solved_dense_plu,
                 multipliers,
                 penalty,
             )

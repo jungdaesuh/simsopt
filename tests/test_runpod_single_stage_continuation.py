@@ -204,7 +204,10 @@ class RunpodSingleStageContinuationTests(unittest.TestCase):
             "/workspace/columbia/simsopt-jax/build",
             command[-1],
         )
-        self.assertIn("tar -xzf - -C /workspace/columbia", command[-1])
+        self.assertIn(
+            "tar --no-same-owner --no-same-permissions -xzf - -C /workspace/columbia",
+            command[-1],
+        )
 
     def test_build_remote_execution_script_threads_thresholds_and_paths(self):
         module = load_module_globals()

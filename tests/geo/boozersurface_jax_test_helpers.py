@@ -474,6 +474,12 @@ def _patch_newton_polish_runner(monkeypatch, fake_newton_polish):
     supports_objective_args = (
         "objective_args" in inspect.signature(fake_newton_polish).parameters
     )
+    supports_materialize_hessian = (
+        "materialize_hessian" in inspect.signature(fake_newton_polish).parameters
+    )
+    supports_max_dense_hessian_bytes = (
+        "max_dense_hessian_bytes" in inspect.signature(fake_newton_polish).parameters
+    )
 
     def fake_runner(
         self,
@@ -484,6 +490,8 @@ def _patch_newton_polish_runner(monkeypatch, fake_newton_polish):
         maxiter,
         tol,
         stab,
+        materialize_hessian=True,
+        max_dense_hessian_bytes=None,
         progress_callback=None,
         objective_args=(),
     ):
@@ -494,6 +502,10 @@ def _patch_newton_polish_runner(monkeypatch, fake_newton_polish):
             "stab": stab,
             "progress_callback": progress_callback,
         }
+        if supports_materialize_hessian:
+            kwargs["materialize_hessian"] = materialize_hessian
+        if supports_max_dense_hessian_bytes:
+            kwargs["max_dense_hessian_bytes"] = max_dense_hessian_bytes
         if supports_objective_args:
             kwargs["objective_args"] = objective_args
         return fake_newton_polish(obj_fn, x0, **kwargs)

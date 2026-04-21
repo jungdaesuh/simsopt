@@ -108,11 +108,14 @@ def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
         "objective_kwargs": {},
         "baseline_x": jnp.asarray([0.0], dtype=jnp.float64),
         "baseline_value": jnp.asarray(0.0, dtype=jnp.float64),
-        "baseline_plu": None,
+        "baseline_dense_plu": None,
         "baseline_coil_dofs": jnp.asarray([0.0], dtype=jnp.float64),
         "coil_set_spec_from_dofs": lambda coil_dofs: coil_dofs,
         "optimize_G": False,
         "predictor_kind": "none",
+        "linearization_kind": "hessian",
+        "linear_solve_tol": 1.0e-10,
+        "linear_solve_stab": 0.0,
         "failure_value": jnp.asarray(1.0, dtype=jnp.float64),
         "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
     }
@@ -168,12 +171,15 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
         "coil_dof_extraction_spec": {"unused": True},
         "baseline_x": jnp.arange(5, dtype=jnp.float64),
         "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
-        "baseline_plu": (
+        "baseline_dense_plu": (
             jnp.eye(3, dtype=jnp.float64),
             jnp.eye(3, dtype=jnp.float64),
             jnp.arange(3, dtype=jnp.int32),
         ),
         "baseline_coil_dofs": jnp.arange(4, dtype=jnp.float64),
+        "linearization_kind": "hessian",
+        "linear_solve_tol": 1.0e-10,
+        "linear_solve_stab": 0.0,
         "failure_value": jnp.asarray(2.0, dtype=jnp.float64),
         "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
     }
@@ -188,10 +194,79 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
     assert not any(tree is state["objective_kwargs"] for tree in seen_trees)
     assert not any(tree is state["baseline_x"] for tree in seen_trees)
     assert not any(tree is state["baseline_value"] for tree in seen_trees)
-    assert not any(tree is state["baseline_plu"] for tree in seen_trees)
+    assert not any(tree is state["baseline_dense_plu"] for tree in seen_trees)
     assert not any(tree is state["baseline_coil_dofs"] for tree in seen_trees)
     assert not any(tree is state["failure_value"] for tree in seen_trees)
     assert not any(tree is state["failure_scale"] for tree in seen_trees)
+
+
+def test_traceable_forward_result_requires_adjoint_runtime_even_with_success_filter(
+    monkeypatch,
+):
+    objective_value = jnp.asarray(-123.0, dtype=jnp.float64)
+    baseline_x = jnp.asarray([0.5, -0.25, 0.31], dtype=jnp.float64)
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_predict_warmstart_x",
+        lambda *_args, **_kwargs: baseline_x,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_evaluate_traceable_total_objective",
+        lambda *_args, **_kwargs: objective_value,
+    )
+
+    booz = types.SimpleNamespace(
+        _unpack_decision_vector_jax=lambda x, optimize_G, coil_set_spec: (
+            x[:-1],
+            x[-1],
+            None,
+        ),
+        run_code_traceable=lambda coil_set_spec, warmstart_sdofs, warmstart_iota, warmstart_G: {
+            "x": jnp.concatenate(
+                (
+                    warmstart_sdofs + 1.0,
+                    jnp.asarray([warmstart_iota], dtype=jnp.float64),
+                )
+            ),
+            "plu": None,
+            "success": jnp.asarray(True, dtype=bool),
+            "primal_success": jnp.asarray(True, dtype=bool),
+            "adjoint_linear_solve_available": jnp.asarray(False, dtype=bool),
+        },
+    )
+
+    coil_dofs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+    baseline_coil_dofs = jnp.asarray([0.0, 0.0], dtype=jnp.float64)
+    failure_value = jnp.asarray(10.0, dtype=jnp.float64)
+    failure_scale = jnp.asarray(4.0, dtype=jnp.float64)
+    result = surfaceobjectives_jax_module._traceable_forward_result(
+        booz,
+        lambda dofs: {"coil_dofs": dofs},
+        coil_dofs=coil_dofs,
+        baseline_x=baseline_x,
+        baseline_value=jnp.asarray(3.0, dtype=jnp.float64),
+        baseline_dense_plu=None,
+        linearization_kind="hessian",
+        linear_solve_tol=1.0e-10,
+        linear_solve_stab=0.0,
+        optimize_G=False,
+        baseline_coil_dofs=baseline_coil_dofs,
+        failure_value=failure_value,
+        failure_scale=failure_scale,
+        predictor_kind="ls",
+        objective_kwargs={},
+        success_filter=lambda _coil_dofs, _solved_x: jnp.asarray(True, dtype=bool),
+    )
+
+    expected_penalty = 10.0 + 0.5 * 4.0 * 5.0
+
+    assert bool(result["primal_success"]) is True
+    assert bool(result["adjoint_linear_solve_available"]) is False
+    assert bool(result["success"]) is False
+    np.testing.assert_allclose(np.asarray(result["value"]), expected_penalty)
+    np.testing.assert_allclose(np.asarray(objective_value), -123.0)
 
 
 def test_traceable_runtime_cache_key_uses_structural_success_filter_signature():
@@ -354,6 +429,9 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         def _resolve_optimizer_method(self):
             return "lbfgs-ondevice"
 
+        def _linear_solve_tolerance(self):
+            return 1.0e-10
+
         def _pack_decision_vector(self, iota, G, *, sdofs):
             return jnp.concatenate(
                 [
@@ -395,7 +473,7 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         "objective_kwargs": state["objective_kwargs"],
         "baseline_x": state["baseline_x"],
         "baseline_value": state["baseline_value"],
-        "baseline_plu": state["baseline_plu"],
+        "baseline_dense_plu": state["baseline_dense_plu"],
         "baseline_coil_dofs": state["baseline_coil_dofs"],
         "failure_value": state["failure_value"],
         "failure_scale": state["failure_scale"],
@@ -412,7 +490,7 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         np.ndarray,
     )
     assert isinstance(state["baseline_x"], np.ndarray)
-    assert isinstance(state["baseline_plu"][0], np.ndarray)
+    assert isinstance(state["baseline_dense_plu"][0], np.ndarray)
     assert isinstance(state["baseline_coil_dofs"], np.ndarray)
 
 
@@ -446,10 +524,8 @@ def test_iotas_jax_gradient_path_reads_adjoint_runtime_state(monkeypatch):
         "_solve_boozer_adjoint",
         lambda adjoint_state, rhs: (
             np.testing.assert_allclose(np.asarray(rhs), np.asarray([0.0, 1.0])),
-            np.testing.assert_allclose(
-                np.asarray(adjoint_state.plu[1]),
-                np.eye(2, dtype=np.float64),
-            ),
+            np.testing.assert_equal(adjoint_state.decision_size, 2),
+            np.testing.assert_equal(adjoint_state.dtype, jnp.float64),
             jnp.asarray([2.0, -3.0], dtype=jnp.float64),
         )[-1],
     )
@@ -474,11 +550,11 @@ def test_iotas_jax_gradient_path_reads_adjoint_runtime_state(monkeypatch):
         ),
         get_adjoint_runtime_state=lambda: types.SimpleNamespace(
             solved_state=None,
-            plu=(
-                jnp.eye(2, dtype=jnp.float64),
-                jnp.eye(2, dtype=jnp.float64),
-                jnp.asarray([0, 1], dtype=jnp.int32),
-            ),
+            decision_size=2,
+            dtype=jnp.float64,
+            plu=None,
+            solve_forward=lambda rhs: rhs,
+            solve_transpose=lambda rhs: rhs,
             stream_group_vjps=lambda _adj: iter([("group-cotangent", (0,))]),
         ),
         biotsavart=None,
@@ -525,12 +601,15 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solver_genera
             "coil_dof_extraction_spec": {"spec": "marker"},
             "baseline_x": jnp.arange(4, dtype=jnp.float64),
             "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
-            "baseline_plu": (
+            "baseline_dense_plu": (
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.arange(2, dtype=jnp.int32),
             ),
             "baseline_coil_dofs": jnp.arange(3, dtype=jnp.float64),
+            "linearization_kind": "hessian",
+            "linear_solve_tol": 1.0e-10,
+            "linear_solve_stab": 0.0,
             "failure_value": jnp.asarray(2.0, dtype=jnp.float64),
             "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
         }
@@ -629,12 +708,15 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
             "coil_dof_extraction_spec": {"spec": "marker"},
             "baseline_x": jnp.arange(4, dtype=jnp.float64),
             "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
-            "baseline_plu": (
+            "baseline_dense_plu": (
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.arange(2, dtype=jnp.int32),
             ),
             "baseline_coil_dofs": jnp.arange(3, dtype=jnp.float64),
+            "linearization_kind": "hessian",
+            "linear_solve_tol": 1.0e-10,
+            "linear_solve_stab": 0.0,
             "failure_value": jnp.asarray(2.0, dtype=jnp.float64),
             "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
         }
@@ -742,12 +824,15 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_solver_generation_cha
             "coil_dof_extraction_spec": {"spec": "marker"},
             "baseline_x": jnp.arange(2, dtype=jnp.float64),
             "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
-            "baseline_plu": (
+            "baseline_dense_plu": (
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.arange(2, dtype=jnp.int32),
             ),
             "baseline_coil_dofs": jnp.arange(2, dtype=jnp.float64),
+            "linearization_kind": "hessian",
+            "linear_solve_tol": 1.0e-10,
+            "linear_solve_stab": 0.0,
             "failure_value": jnp.asarray(2.0, dtype=jnp.float64),
             "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
         }
@@ -840,12 +925,15 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
             "coil_dof_extraction_spec": {"spec": "marker"},
             "baseline_x": jnp.arange(2, dtype=jnp.float64),
             "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
-            "baseline_plu": (
+            "baseline_dense_plu": (
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.arange(2, dtype=jnp.int32),
             ),
             "baseline_coil_dofs": jnp.arange(2, dtype=jnp.float64),
+            "linearization_kind": "hessian",
+            "linear_solve_tol": 1.0e-10,
+            "linear_solve_stab": 0.0,
             "failure_value": jnp.asarray(2.0, dtype=jnp.float64),
             "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
         }
@@ -916,12 +1004,16 @@ def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
     monkeypatch,
 ):
     runtime_entry = {
-        "compiled_bundle": {"compiled_value_and_grad_for": object()},
+        "compiled_bundle": {
+            "compiled_value_and_grad_for": object(),
+            "compiled_forward_result_for": object(),
+        },
         "objective": object(),
         "batched_value_and_grad": object(),
         "public_objective": None,
         "public_value_and_grad": None,
         "public_batched_value_and_grad": None,
+        "public_forward_result": None,
         "public_reporting_metrics": None,
         "host_objective": None,
         "host_value_and_grad": None,
@@ -941,6 +1033,10 @@ def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
         entry["public_batched_value_and_grad"] = (
             "public_batched_value_and_grad",
             entry["batched_value_and_grad"],
+        )
+        entry["public_forward_result"] = (
+            "public_forward_result",
+            entry["compiled_bundle"]["compiled_forward_result_for"],
         )
         entry["public_reporting_metrics"] = (
             "public_reporting_metrics",
@@ -980,6 +1076,10 @@ def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
             "public_batched_value_and_grad",
             runtime_entry["batched_value_and_grad"],
         ),
+        "forward_result": (
+            "public_forward_result",
+            runtime_entry["compiled_bundle"]["compiled_forward_result_for"],
+        ),
         "reporting_metrics": (
             "public_reporting_metrics",
             runtime_entry["compiled_bundle"],
@@ -993,12 +1093,16 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
     monkeypatch,
 ):
     runtime_entry = {
-        "compiled_bundle": {"compiled_value_and_grad_for": object()},
+        "compiled_bundle": {
+            "compiled_value_and_grad_for": object(),
+            "compiled_forward_result_for": object(),
+        },
         "objective": object(),
         "batched_value_and_grad": object(),
         "public_objective": None,
         "public_value_and_grad": None,
         "public_batched_value_and_grad": None,
+        "public_forward_result": None,
         "public_reporting_metrics": None,
         "host_objective": None,
         "host_value_and_grad": None,
@@ -1018,6 +1122,10 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
         entry["public_batched_value_and_grad"] = (
             "public_batched_value_and_grad",
             entry["batched_value_and_grad"],
+        )
+        entry["public_forward_result"] = (
+            "public_forward_result",
+            entry["compiled_bundle"]["compiled_forward_result_for"],
         )
         entry["public_reporting_metrics"] = (
             "public_reporting_metrics",
@@ -1070,6 +1178,10 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
             "public_batched_value_and_grad",
             runtime_entry["batched_value_and_grad"],
         ),
+        "forward_result": (
+            "public_forward_result",
+            runtime_entry["compiled_bundle"]["compiled_forward_result_for"],
+        ),
         "reporting_metrics": (
             "public_reporting_metrics",
             runtime_entry["compiled_bundle"],
@@ -1092,19 +1204,24 @@ def test_make_traceable_objective_runtime_bundle_reuses_stable_public_boundaries
     monkeypatch,
 ):
     runtime_entry = {
-        "compiled_bundle": {"compiled_value_and_grad_for": object()},
+        "compiled_bundle": {
+            "compiled_value_and_grad_for": object(),
+            "compiled_forward_result_for": object(),
+        },
         "objective": object(),
         "batched_value_and_grad": object(),
         "reporting_metrics": None,
         "public_objective": None,
         "public_value_and_grad": None,
         "public_batched_value_and_grad": None,
+        "public_forward_result": None,
         "public_reporting_metrics": None,
     }
     expected_public_boundaries = {
         "objective": object(),
         "value_and_grad": object(),
         "batched_value_and_grad": object(),
+        "forward_result": object(),
         "reporting_metrics": object(),
     }
     build_counts = {name: 0 for name in expected_public_boundaries}
@@ -1128,6 +1245,10 @@ def test_make_traceable_objective_runtime_bundle_reuses_stable_public_boundaries
         (
             "_make_traceable_batched_value_and_grad_boundary",
             "batched_value_and_grad",
+        ),
+        (
+            "_make_traceable_forward_result_boundary",
+            "forward_result",
         ),
         (
             "_make_traceable_lazy_reporting_metrics_boundary",
@@ -1159,13 +1280,17 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
     monkeypatch,
 ):
     runtime_entry = {
-        "compiled_bundle": {"compiled_value_and_grad_for": object()},
+        "compiled_bundle": {
+            "compiled_value_and_grad_for": object(),
+            "compiled_forward_result_for": object(),
+        },
         "objective": object(),
         "batched_value_and_grad": object(),
         "reporting_metrics": None,
         "public_objective": None,
         "public_value_and_grad": None,
         "public_batched_value_and_grad": None,
+        "public_forward_result": None,
         "public_reporting_metrics": None,
     }
     reporting_calls = []
@@ -1189,6 +1314,14 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
         lambda batched_value_and_grad: (
             "public_batched_value_and_grad",
             batched_value_and_grad,
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_traceable_forward_result_boundary",
+        lambda compiled_forward_result_for: (
+            "public_forward_result",
+            compiled_forward_result_for,
         ),
     )
     monkeypatch.setattr(
@@ -1231,6 +1364,10 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
         "public_batched_value_and_grad",
         runtime_entry["batched_value_and_grad"],
     )
+    assert runtime_entry["public_forward_result"] == (
+        "public_forward_result",
+        runtime_entry["compiled_bundle"]["compiled_forward_result_for"],
+    )
 
     assert runtime_entry["public_reporting_metrics"](
         "coil_dofs",
@@ -1253,7 +1390,7 @@ def test_ensure_traceable_runtime_host_wrappers_defers_reporting_metrics_until_u
                 "baseline_coil_dofs": np.asarray([0.0], dtype=np.float64),
                 "baseline_value": np.asarray(1.0, dtype=np.float64),
                 "baseline_x": np.asarray([0.0], dtype=np.float64),
-                "baseline_plu": (
+                "baseline_dense_plu": (
                     np.eye(1, dtype=np.float64),
                     np.eye(1, dtype=np.float64),
                     np.asarray([0], dtype=np.int32),
@@ -1261,6 +1398,9 @@ def test_ensure_traceable_runtime_host_wrappers_defers_reporting_metrics_until_u
                 "coil_set_spec_from_dofs": lambda coil_dofs: coil_dofs,
                 "objective_kwargs": {"outer_objective_config": None},
                 "optimize_G": False,
+                "linearization_kind": "hessian",
+                "linear_solve_tol": 1.0e-10,
+                "linear_solve_stab": 0.0,
             },
         },
         "objective": object(),
@@ -1379,7 +1519,7 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
                 "baseline_coil_dofs": baseline_coil_dofs,
                 "baseline_value": np.asarray(1.25, dtype=np.float64),
                 "baseline_x": np.asarray([0.0, 1.0], dtype=np.float64),
-                "baseline_plu": (
+                "baseline_dense_plu": (
                     np.eye(2, dtype=np.float64),
                     np.eye(2, dtype=np.float64),
                     np.asarray([0, 1], dtype=np.int32),
@@ -1387,6 +1527,9 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
                 "coil_set_spec_from_dofs": lambda coil_dofs: coil_dofs,
                 "objective_kwargs": {"outer_objective_config": {"enabled": True}},
                 "optimize_G": False,
+                "linearization_kind": "hessian",
+                "linear_solve_tol": 1.0e-10,
+                "linear_solve_stab": 0.0,
             },
         },
         "objective": lambda _coil_dofs: (_ for _ in ()).throw(
@@ -1561,7 +1704,10 @@ def test_traceable_objective_gradient_parts_use_combined_vjp(monkeypatch):
             lambda coil_dofs: coil_dofs,
             coil_dofs=jnp.asarray([3.0, 4.0], dtype=jnp.float64),
             solved_x=jnp.asarray([1.0, 2.0], dtype=jnp.float64),
-            solved_plu=(object(), object(), object()),
+            solved_dense_plu=(object(), object(), object()),
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
             objective_kwargs={},
         )
     )
@@ -1619,14 +1765,18 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         *,
         coil_dofs,
         solved_x,
-        solved_plu,
+        solved_dense_plu,
+        linearization_kind,
+        linear_solve_tol,
+        linear_solve_stab,
         objective_kwargs,
         term_name=None,
     ):
+        del linearization_kind, linear_solve_tol, linear_solve_stab
         _record_array("gradient_parts_coil_dofs", coil_dofs)
         _record_array("gradient_parts_solved_x", solved_x)
-        plu_leaves = jax.tree_util.tree_leaves(solved_plu)
-        call_checks["gradient_parts_solved_plu"] = all(
+        plu_leaves = jax.tree_util.tree_leaves(solved_dense_plu)
+        call_checks["gradient_parts_solved_dense_plu"] = all(
             isinstance(leaf, jax.Array) for leaf in plu_leaves
         )
         assert objective_kwargs["outer_objective_config"] is objective_config
@@ -1639,13 +1789,16 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
             "state": {
                 "objective_kwargs": {"outer_objective_config": objective_config},
                 "baseline_x": np.asarray([1.0, 2.0], dtype=np.float64),
-                "baseline_plu": (
+                "baseline_dense_plu": (
                     np.eye(2, dtype=np.float64),
                     np.asarray([0, 1], dtype=np.int32),
                     np.asarray([0, 1], dtype=np.int32),
                 ),
                 "baseline_coil_dofs": np.asarray([3.0, 4.0], dtype=np.float64),
                 "coil_set_spec_from_dofs": lambda coil_dofs: ("coil-set", coil_dofs),
+                "linearization_kind": "hessian",
+                "linear_solve_tol": 1.0e-10,
+                "linear_solve_stab": 0.0,
             },
             "compiled_forward_result_for": compiled_forward_result_for,
             "compiled_value_and_grad_for": compiled_value_and_grad_for,
@@ -1696,7 +1849,7 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         "raw_terms_coil_dofs": True,
         "gradient_parts_coil_dofs": True,
         "gradient_parts_solved_x": True,
-        "gradient_parts_solved_plu": True,
+        "gradient_parts_solved_dense_plu": True,
     }
 
 

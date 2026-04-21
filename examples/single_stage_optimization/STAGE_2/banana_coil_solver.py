@@ -671,9 +671,9 @@ def parse_args():
         default=os.environ.get("STAGE2_LEAST_SQUARES_ALGORITHM"),
         help=(
             "Stage 2 least-squares algorithm. 'lm' routes the JAX ondevice "
-            "lane through the pure JAX LM residual solver. Defaults to 'lm' "
-            "on the JAX ondevice lane and 'quasi-newton' elsewhere when no "
-            "explicit override is provided."
+            "lane through the pure JAX LM residual solver. Defaults to "
+            "'quasi-newton' when no explicit override is provided; 'lm' is "
+            "explicit opt-in only."
         ),
     )
     parser.add_argument(
@@ -734,8 +734,6 @@ def resolve_stage2_default_least_squares_algorithm(
     """Resolve the implicit Stage 2 least-squares algorithm for the active lane."""
     if least_squares_algorithm is not None:
         return least_squares_algorithm
-    if field_backend == "jax" and optimizer_backend == "ondevice":
-        return "lm"
     return "quasi-newton"
 
 

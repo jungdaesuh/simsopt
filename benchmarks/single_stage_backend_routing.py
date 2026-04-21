@@ -67,4 +67,4 @@ def resolve_boozer_least_squares_algorithm(
         )
     if least_squares_algorithm is not None:
         return least_squares_algorithm
-    return "lm"
+    return "quasi-newton"

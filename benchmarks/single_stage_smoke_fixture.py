@@ -76,7 +76,7 @@ def build_real_single_stage_init_fixture(
     optimizer_backend: str | None = None,
     boozer_optimizer_backend: str | None = None,
     boozer_least_squares_algorithm: str | None = None,
-    boozer_limited_memory: bool = False,
+    boozer_limited_memory: bool | None = None,
     bs_dofs_override: np.ndarray | None = None,
     boozer_surface_dofs_override: np.ndarray | None = None,
     boozer_iota_override: float | None = None,
@@ -107,6 +107,51 @@ def build_real_single_stage_init_fixture(
             backend,
             resolved_optimizer_backend,
             boozer_optimizer_backend,
+        )
+    )
+    resolved_boozer_limited_memory = (
+        single_stage_example.resolve_single_stage_boozer_limited_memory(
+            backend,
+            resolved_optimizer_backend,
+            resolved_boozer_optimizer_backend,
+            boozer_limited_memory,
+        )
+    )
+    resolved_boozer_init_base_overrides = (
+        single_stage_example.resolve_target_lane_boozer_init_base_overrides(
+            field_backend=backend,
+            optimizer_backend=resolved_optimizer_backend,
+            boozer_limited_memory=resolved_boozer_limited_memory,
+            target_lane_boozer_bfgs_tol=(
+                single_stage_example.resolve_target_lane_boozer_bfgs_tol(
+                    backend,
+                    resolved_optimizer_backend,
+                    None,
+                    benchmark_mode=False,
+                )
+            ),
+            target_lane_boozer_bfgs_maxiter=(
+                single_stage_example.resolve_target_lane_boozer_bfgs_maxiter(
+                    backend,
+                    resolved_optimizer_backend,
+                    None,
+                    benchmark_mode=False,
+                )
+            ),
+            target_lane_boozer_newton_tol=(
+                single_stage_example.resolve_target_lane_boozer_newton_tol(
+                    backend,
+                    resolved_optimizer_backend,
+                    None,
+                )
+            ),
+            target_lane_boozer_newton_maxiter=(
+                single_stage_example.resolve_target_lane_boozer_newton_maxiter(
+                    backend,
+                    resolved_optimizer_backend,
+                    None,
+                )
+            ),
         )
     )
 
@@ -170,7 +215,17 @@ def build_real_single_stage_init_fixture(
         backend=backend,
         optimizer_backend=resolved_boozer_optimizer_backend,
         boozer_least_squares_algorithm=boozer_least_squares_algorithm,
-        boozer_limited_memory=boozer_limited_memory,
+        boozer_limited_memory=resolved_boozer_limited_memory,
+        bfgs_tol_override=resolved_boozer_init_base_overrides["bfgs_tol_override"],
+        bfgs_maxiter_override=resolved_boozer_init_base_overrides[
+            "bfgs_maxiter_override"
+        ],
+        newton_tol_override=resolved_boozer_init_base_overrides[
+            "newton_tol_override"
+        ],
+        newton_maxiter_override=resolved_boozer_init_base_overrides[
+            "newton_maxiter_override"
+        ],
         surface_dofs_override=boozer_surface_dofs_override,
         iota_override=boozer_iota_override,
         G_override=boozer_G_override,
@@ -181,6 +236,7 @@ def build_real_single_stage_init_fixture(
         "boozer_surface": boozer_surface,
         "boozer_optimizer_backend": resolved_boozer_optimizer_backend,
         "boozer_least_squares_algorithm": boozer_least_squares_algorithm,
+        "boozer_limited_memory": resolved_boozer_limited_memory,
         "equilibrium_path": str(equilibrium_file),
         "stage2_bs_path": str(stage2_bs_path),
         "vol_target": float(vol_target),

@@ -56,6 +56,9 @@ _TAR_EXCLUDES = (
     ".DS_Store",
     "._*",
     ".venv-simsopt-jax",
+    ".conda",
+    ".miniforge",
+    ".tmp",
     "build",
     ".artifacts",
     ".pytest_cache",
@@ -382,7 +385,7 @@ def build_remote_repo_extract_command(plan: LaunchPlan, ssh_info: SshInfo) -> li
         f"mv {quoted_repo_root}/build {quoted_build_cache_root}; "
         f"fi && "
         f"rm -rf {quoted_repo_root} && "
-        f"tar -xzf - -C {quoted_columbia_root} && "
+        f"tar --no-same-owner --no-same-permissions -xzf - -C {quoted_columbia_root} && "
         f"if [ -d {quoted_build_cache_root} ]; then "
         f"mv {quoted_build_cache_root} {quoted_repo_root}/build; "
         f"fi"
@@ -506,6 +509,22 @@ def build_remote_execution_script(plan: LaunchPlan) -> str:
         'conda activate "${ENV_NAME}"',
         'cd "${REPO_ROOT}"',
         'python -m pip install -e ".[JAX_GPU,dev]"',
+        # Pin NVIDIA CUDA wheels to the 12.8.x line so pip-shipped ptxas/nvJitLink
+        # match a host CUDA 12.8 toolkit (system nvlink). Required on the
+        # runpod/pytorch:*-cuda12.8.* image because jax-cuda12-plugin 0.10
+        # otherwise pulls 12.9 wheels, emitting cubin that system nvlink rejects.
+        "python -m pip install --upgrade --force-reinstall --no-deps "
+        "'nvidia-cuda-nvcc-cu12==12.8.93' "
+        "'nvidia-nvjitlink-cu12==12.8.93' "
+        "'nvidia-cuda-runtime-cu12==12.8.90' "
+        "'nvidia-cuda-cupti-cu12==12.8.90' "
+        "'nvidia-cuda-nvrtc-cu12==12.8.93' "
+        "'nvidia-cublas-cu12==12.8.4.1' "
+        "'nvidia-cusparse-cu12==12.5.8.93' "
+        "'nvidia-cusolver-cu12==11.7.3.90' "
+        "'nvidia-cufft-cu12==11.3.3.83' "
+        "'nvidia-cudnn-cu12==9.8.0.87' "
+        "'nvidia-nccl-cu12==2.26.2'",
         f"mkdir -p {shlex.quote(plan.remote_output_root)} {shlex.quote(plan.remote_cache_dir)}",
         "export PYTHONUNBUFFERED=1",
         "export HF_HUB_DISABLE_TELEMETRY=1",
@@ -515,6 +534,7 @@ def build_remote_execution_script(plan: LaunchPlan) -> str:
         "export JAX_PLATFORMS=cuda",
         "export SIMSOPT_JAX_PLATFORM=cuda",
         "export XLA_PYTHON_CLIENT_PREALLOCATE=false",
+        'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_cuda_data_dir=/usr/local/cuda --xla_gpu_enable_llvm_module_compilation_parallelism=false"',
         f"export JAX_COMPILATION_CACHE_DIR={shlex.quote(plan.remote_cache_dir)}",
         "export JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0",
         "export JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES=-1",

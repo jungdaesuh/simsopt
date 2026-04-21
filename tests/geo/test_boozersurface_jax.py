@@ -1244,7 +1244,7 @@ class TestBoozerSurfaceJAXClass:
         ("optimizer_backend", "expected_algorithm"),
         [
             ("scipy", "quasi-newton"),
-            ("ondevice", "lm"),
+            ("ondevice", "quasi-newton"),
         ],
     )
     def test_instantiation_defaults_least_squares_algorithm_from_backend(
@@ -1270,7 +1270,7 @@ class TestBoozerSurfaceJAXClass:
         ("backend_mode", "expected_optimizer_backend", "expected_algorithm"),
         [
             (None, "scipy", "quasi-newton"),
-            ("jax_cpu_parity", "ondevice", "lm"),
+            ("jax_cpu_parity", "ondevice", "quasi-newton"),
         ],
     )
     def test_instantiation_defaults_optimizer_backend_from_runtime_contract(
@@ -1889,10 +1889,21 @@ class TestBoozerSurfaceJAXClass:
             maxiter,
             tol,
             stab,
+            materialize_hessian=True,
+            max_dense_hessian_bytes=None,
             progress_callback=None,
             objective_args=(),
         ):
-            del obj_fn, maxiter, tol, stab, progress_callback, objective_args
+            del (
+                obj_fn,
+                maxiter,
+                tol,
+                stab,
+                materialize_hessian,
+                max_dense_hessian_bytes,
+                progress_callback,
+                objective_args,
+            )
             captured["method"] = method
             np.testing.assert_allclose(
                 np.asarray(x0),
@@ -2239,6 +2250,7 @@ class TestBoozerSurfaceJAXClass:
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = optimizer_backend
         booz.options["limited_memory"] = limited_memory
+        booz.options["materialize_dense_linearization"] = optimizer_backend != "ondevice"
 
         captured = {}
 
@@ -2273,10 +2285,29 @@ class TestBoozerSurfaceJAXClass:
             maxiter,
             tol,
             stab,
+            materialize_hessian=True,
+            max_dense_hessian_bytes=None,
             progress_callback=None,
             objective_args=(),
         ):
-            del maxiter, tol, stab, progress_callback, objective_args
+            del (
+                maxiter,
+                tol,
+                stab,
+                max_dense_hessian_bytes,
+                progress_callback,
+                objective_args,
+            )
+            if not materialize_hessian:
+                return {
+                    "x": x0,
+                    "fun": jnp.asarray(0.0),
+                    "grad": jnp.zeros_like(x0),
+                    "hessian": None,
+                    "nit": 0,
+                    "success": True,
+                    "hessian_materialized": False,
+                }
             return _successful_newton_polish_result(x0)
 
         monkeypatch.setattr(_bsj, "reference_minimize", fake_minimize_runner)
@@ -2287,9 +2318,17 @@ class TestBoozerSurfaceJAXClass:
 
         assert captured["method"] == expected_method
         assert res["success"] is True
-        assert isinstance(res["PLU"], tuple)
-        assert len(res["PLU"]) == 3
-        assert all(piece is not None for piece in res["PLU"])
+        assert res["adjoint_linear_solve_available"] is True
+        if optimizer_backend == "ondevice":
+            assert res["PLU"] is None
+            adjoint_state = booz.get_adjoint_runtime_state()
+            assert adjoint_state.plu is None
+            assert callable(adjoint_state.solve_forward)
+            assert callable(adjoint_state.solve_transpose)
+        else:
+            assert isinstance(res["PLU"], tuple)
+            assert len(res["PLU"]) == 3
+            assert all(piece is not None for piece in res["PLU"])
         assert callable(res["vjp"])
         assert "iota" in res
         assert booz.need_to_run_code is False
@@ -3162,10 +3201,12 @@ class TestBoozerSurfaceJAXClass:
             maxiter,
             tol,
             stab,
+            materialize_hessian=True,
+            max_dense_hessian_bytes=None,
             progress_callback=None,
             args=(),
         ):
-            del maxiter, tol, stab, args
+            del maxiter, tol, stab, materialize_hessian, max_dense_hessian_bytes, args
             captured["progress_callback"] = progress_callback
             return _successful_newton_polish_result(x0, nit=2)
 
@@ -3503,7 +3544,9 @@ class TestBoozerSurfaceJAXExactPath:
         )
         assert res["max_dense_jacobian_bytes"] == _bsj._DEFAULT_MAX_DENSE_JACOBIAN_BYTES
 
-    def test_run_code_exact_marks_dense_jacobian_ceiling_as_failure(self, monkeypatch):
+    def test_run_code_exact_keeps_matrix_free_runtime_when_dense_jacobian_is_skipped(
+        self, monkeypatch
+    ):
         booz = _make_mock_boozer_surface_exact(options={"max_dense_jacobian_bytes": 77})
         captured = {}
         original_newton_exact = _bsj.newton_exact
@@ -3527,12 +3570,18 @@ class TestBoozerSurfaceJAXExactPath:
         assert captured["max_dense_jacobian_bytes"] == 77
         assert res["jacobian"] is None
         assert res["PLU"] is None
-        assert res["success"] is False
+        assert res["success"] is True
+        assert res["primal_success"] is True
+        assert res["adjoint_linear_solve_available"] is True
         assert res["failure_category"] == "scaling_limit"
         assert res["failure_stage"] == "dense_jacobian_finalization"
         assert res["jacobian_materialized"] is False
         assert res["max_dense_jacobian_bytes"] == 77
         assert res["message"] == "dense Jacobian skipped"
+        adjoint_state = booz.get_adjoint_runtime_state()
+        assert adjoint_state.plu is None
+        assert callable(adjoint_state.solve_forward)
+        assert callable(adjoint_state.solve_transpose)
 
     def test_run_code_exact_reports_dense_jacobian_ceiling_when_verbose(
         self, monkeypatch, capsys
@@ -3650,7 +3699,9 @@ class TestBoozerSurfaceJAXExactPath:
         assert captured["max_dense_jacobian_bytes"] == 12345
         assert result["jacobian"] is None
         assert result["plu"] is None
-        assert bool(result["success"]) is False
+        assert bool(result["success"]) is True
+        assert bool(result["primal_success"]) is True
+        assert bool(result["adjoint_linear_solve_available"]) is True
         assert result["failure_category"] == "scaling_limit"
         assert result["failure_stage"] == "dense_jacobian_finalization"
         assert result["jacobian_materialized"] is False
@@ -3866,11 +3917,20 @@ class TestBoozerSurfaceJAXExactPath:
             *,
             maxiter,
             tol,
+            materialize_dense_linearization=True,
+            max_dense_linearization_bytes=None,
             callback=None,
             progress_callback=None,
             args=(),
         ):
-            del maxiter, tol, callback, progress_callback
+            del (
+                maxiter,
+                tol,
+                materialize_dense_linearization,
+                max_dense_linearization_bytes,
+                callback,
+                progress_callback,
+            )
             captured["residual"] = residual_fn(x0, *args)
             return {
                 "x": x0,
@@ -4012,11 +4072,20 @@ class TestBoozerSurfaceJAXExactPath:
             *,
             maxiter,
             tol,
+            materialize_dense_linearization=True,
+            max_dense_linearization_bytes=None,
             callback=None,
             progress_callback=None,
             args=(),
         ):
-            del maxiter, tol, callback, progress_callback
+            del (
+                maxiter,
+                tol,
+                materialize_dense_linearization,
+                max_dense_linearization_bytes,
+                callback,
+                progress_callback,
+            )
             residual_ids.append(id(residual_fn))
             residual = residual_fn(x0, *args)
             return {
@@ -4081,11 +4150,20 @@ class TestBoozerSurfaceJAXExactPath:
             *,
             maxiter,
             tol,
+            materialize_dense_linearization=True,
+            max_dense_linearization_bytes=None,
             callback=None,
             progress_callback=None,
             args=(),
         ):
-            del maxiter, tol, callback, progress_callback
+            del (
+                maxiter,
+                tol,
+                materialize_dense_linearization,
+                max_dense_linearization_bytes,
+                callback,
+                progress_callback,
+            )
             residual_ids.append(id(residual_fn))
             residual = residual_fn(x0, *args)
             residuals.append(np.asarray(residual))
@@ -5538,7 +5616,7 @@ class TestBuildBoozerSurfaceRuntimeState:
             "vjp_groups": fake_vjp_groups,
         }
         booz.need_to_run_code = False
-        booz._surface_dofs = jnp.asarray([1.0, 2.0], dtype=jnp.float64)
+        booz._surface_dofs = jnp.asarray([], dtype=jnp.float64)
 
         adjoint_state = booz.get_adjoint_runtime_state()
         streamed = list(
@@ -5546,6 +5624,8 @@ class TestBuildBoozerSurfaceRuntimeState:
         )
 
         assert adjoint_state.plu == expected_plu
+        assert adjoint_state.decision_size == 2
+        assert adjoint_state.dtype == jnp.float64
         assert streamed == [("cotangent", (0, 1))]
         assert recorded["booz"] is booz
         np.testing.assert_allclose(recorded["adjoint"], np.asarray([5.0, -1.0]))

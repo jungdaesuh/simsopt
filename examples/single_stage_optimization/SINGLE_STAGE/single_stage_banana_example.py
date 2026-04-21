@@ -78,7 +78,7 @@ from banana_opt.single_stage_constraints import (
 from banana_opt.single_stage_objectives import evaluate_alm_objective
 
 # SIMSOPT imports
-from simsopt._core.derivative import derivative_dec
+from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable, load
 from simsopt.config import maybe_initialize_distributed_jax
 from simsopt.field import BiotSavart
@@ -153,8 +153,8 @@ _TARGET_OUTER_MAXLS_DEFAULT = 8
 _TARGET_OUTER_INITIAL_STEP_SIZE_BENCHMARK_DEFAULT = 1.0e-4
 _REFERENCE_OUTER_MAXCOR_DEFAULT = 300
 _TARGET_OUTER_MAXCOR_DEFAULT = 20
-_TARGET_LANE_BOOZER_BFGS_TOL_DEFAULT = 1e-8
 _TARGET_LANE_BOOZER_BFGS_TOL_BENCHMARK_DEFAULT = 1e-6
+_TARGET_LANE_BOOZER_NEWTON_TOL_FULL_MEMORY_DEFAULT = 1e-8
 _TARGET_LANE_BOOZER_BFGS_MAXITER_BENCHMARK_DEFAULT = 64
 _SINGLE_STAGE_RESULTS_SCHEMA_VERSION = 1
 _JAX_COMPILE_DIAGNOSTICS_SAMPLE_LIMIT = 25
@@ -1514,28 +1514,35 @@ def resolve_target_lane_post_run_state_sync(
     use_target_lane: bool,
     accepted_step_callback,
     scaled_phase_step_scale: float | None = None,
+    scaled_phase_anchor_dofs=None,
 ):
     """Return explicit accepted-state sync for target-lane runs."""
     if not use_target_lane:
         return None
-    explicit_state_sync = (
+    final_state_sync = (
         adapter.sync_accepted_step
         if accepted_step_callback is None
         else adapter.sync_accepted_step_state
     )
+
+    def explicit_state_sync(result_x):
+        final_state_sync(result_x)
+
+    explicit_state_sync.simsopt_skip_failed_attempt_sync = True
     if scaled_phase_step_scale is None:
         return explicit_state_sync
 
     def sync(result_x):
         explicit_state_sync(
             resolve_scaled_outer_phase_final_dofs(
-                None,
+                scaled_phase_anchor_dofs,
                 result_x,
                 scaled_phase_step_scale,
                 use_target_lane=True,
             )
         )
 
+    sync.simsopt_skip_failed_attempt_sync = True
     return sync
 
 
@@ -1999,9 +2006,31 @@ def resolve_single_stage_policy_initial_phase_settings(
     *,
     initial_step_scale,
     initial_step_maxiter,
+    initial_step_scale_explicit=False,
+    initial_step_maxiter_explicit=False,
+    field_backend=None,
+    optimizer_backend=None,
 ):
-    """Auto-enable a conservative scaled phase only when the caller left defaults."""
+    """Auto-enable a conservative scaled phase only when the caller left defaults.
+
+    The JAX/ondevice target lane keeps the scaled initial phase as an explicit
+    opt-in only. That path creates a second compiled outer-optimizer objective
+    boundary, which is useful for diagnosis but too expensive for the default
+    reduced single-stage proof/runtime lane.
+    """
+    if initial_step_scale_explicit or initial_step_maxiter_explicit:
+        return {
+            "initial_step_scale": float(initial_step_scale),
+            "initial_step_maxiter": int(initial_step_maxiter),
+            "auto_enabled": False,
+        }
     if initial_step_maxiter > 0 or initial_step_scale < 1.0:
+        return {
+            "initial_step_scale": float(initial_step_scale),
+            "initial_step_maxiter": int(initial_step_maxiter),
+            "auto_enabled": False,
+        }
+    if field_backend == "jax" and optimizer_backend == "ondevice":
         return {
             "initial_step_scale": float(initial_step_scale),
             "initial_step_maxiter": int(initial_step_maxiter),
@@ -2018,6 +2047,13 @@ def resolve_single_stage_policy_initial_phase_settings(
         "initial_step_maxiter": int(search_policy.auto_initial_step_maxiter),
         "auto_enabled": True,
     }
+
+
+def _cli_option_was_provided(raw_argv, option, env_var=None):
+    """Return whether a CLI option or its env-backed default was set explicitly."""
+    if any(arg == option or arg.startswith(f"{option}=") for arg in raw_argv):
+        return True
+    return env_var is not None and env_var in os.environ
 
 
 def snapshot_single_stage_local_incumbent_state(run_dict):
@@ -2175,6 +2211,18 @@ def resolve_single_stage_contract_policy_context(
                 single_stage_search_policy,
                 initial_step_scale=args.initial_step_scale,
                 initial_step_maxiter=args.initial_step_maxiter,
+                initial_step_scale_explicit=getattr(
+                    args,
+                    "initial_step_scale_explicit",
+                    False,
+                ),
+                initial_step_maxiter_explicit=getattr(
+                    args,
+                    "initial_step_maxiter_explicit",
+                    False,
+                ),
+                field_backend=getattr(args, "backend", None),
+                optimizer_backend=getattr(args, "optimizer_backend", None),
             )
         )
     return single_stage_search_policy, effective_initial_phase_settings
@@ -3302,8 +3350,17 @@ def parse_args():
         default=os.environ.get("BOOZER_LEAST_SQUARES_ALGORITHM"),
         help=(
             "Optional override for the inner JAX Boozer LS algorithm. "
-            "Defaults to 'lm' on the JAX ondevice lane and 'quasi-newton' "
-            "elsewhere when omitted."
+            "Defaults to 'quasi-newton' on all lanes when omitted. "
+            "'lm' is explicit opt-in only."
+        ),
+    )
+    parser.add_argument(
+        "--boozer-limited-memory",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Use L-BFGS instead of full-memory BFGS for the inner JAX Boozer "
+            "quasi-Newton stage. Defaults to disabled unless explicitly enabled."
         ),
     )
     parser.add_argument(
@@ -3421,11 +3478,22 @@ def parse_args():
             "now uses the fused runtime-bundle (value, grad) contract by default."
         ),
     )
+    raw_argv = list(sys.argv[1:])
     args = parser.parse_args()
     args.diagnostic_callbacks = target_lane_diagnostic_callbacks_enabled(args)
     args.record_target_lane_invalid_state_events = bool(args.diagnostic_callbacks)
     args.boozer_least_squares_algorithm_explicit = (
         args.boozer_least_squares_algorithm is not None
+    )
+    args.initial_step_scale_explicit = _cli_option_was_provided(
+        raw_argv,
+        "--initial-step-scale",
+        env_var="OUTER_INITIAL_STEP_SCALE",
+    )
+    args.initial_step_maxiter_explicit = _cli_option_was_provided(
+        raw_argv,
+        "--initial-step-maxiter",
+        env_var="OUTER_INITIAL_STEP_MAXITER",
     )
     args.optimizer_backend = resolve_single_stage_default_optimizer_backend(
         args.backend,
@@ -3601,8 +3669,7 @@ class BoozerResidualExact(Optimizable):
         self._J = 0.5 * np.sum(rtil**2)
 
         booz_surf = self.boozer_surface
-        P, L, U = booz_surf.res["PLU"]
-        dconstraint_dcoils_vjp = booz_surf.res["vjp"]
+        adjoint_state = booz_surf.get_adjoint_runtime_state()
 
         dJ_by_dB = self.dJ_by_dB()
         dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
@@ -3617,9 +3684,13 @@ class BoozerResidualExact(Optimizable):
         )
         dJ_ds = Jtil.T @ rtil
 
-        adj = forward_backward(P, L, U, dJ_ds)
-
-        adj_times_dg_dcoil = dconstraint_dcoils_vjp(adj, booz_surf, iota, G)
+        adj = adjoint_state.solve_transpose(jnp.asarray(dJ_ds, dtype=jnp.float64))
+        adj_times_dg_dcoil = Derivative({})
+        for d_coil_array, coil_group_indices in adjoint_state.stream_group_vjps(adj):
+            adj_times_dg_dcoil += self.biotsavart.coil_cotangents_to_derivative(
+                [d_coil_array],
+                [coil_group_indices],
+            )
         self._dJ = dJ_by_dcoils - adj_times_dg_dcoil
 
     def dJ_by_dB(self):
@@ -3687,13 +3758,13 @@ def initialize_boozer_surface(
     boozer_limited_memory: force the JAX Boozer LS solve through ondevice
         limited-memory routing without changing the default contract elsewhere
     bfgs_tol_override: optional first-stage least-squares tolerance override
-        for warm-started JAX Boozer initialization
+        for JAX/ondevice Boozer initialization
     bfgs_maxiter_override: optional first-stage least-squares iteration cap
-        override for warm-started JAX Boozer initialization
+        override for JAX/ondevice Boozer initialization
     newton_tol_override: optional Newton polish tolerance override for
-        warm-started JAX Boozer initialization
+        JAX/ondevice Boozer initialization
     newton_maxiter_override: optional Newton polish iteration cap override
-        for warm-started JAX Boozer initialization
+        for JAX/ondevice Boozer initialization
     surface_dofs_override: optional converged surface DOFs to reuse as the
         initial Boozer state instead of the fitted Stage 2 seed surface
     iota_override: optional solved iota warm start for the Boozer replay
@@ -4805,28 +4876,45 @@ def build_single_stage_target_lane_accepted_step_sync(
     )
     reporting_metrics_fn = runtime_bundle["reporting_metrics"]
     value_and_grad = runtime_bundle["value_and_grad"]
+    forward_result_fn = runtime_bundle.get("forward_result")
+
+    def accepted_step_solve_result(run_dict, coil_dofs):
+        if forward_result_fn is None:
+            return boozer_surface.run_code_traceable(
+                bs.coil_set_spec_from_dofs(coil_dofs),
+                _as_jax_float64(run_dict["sdofs"]),
+                _as_jax_float64(run_dict["iota"]),
+                _as_jax_float64(run_dict["G"]),
+            )
+        forward_result = forward_result_fn(coil_dofs)
+        solve_success = forward_result.get(
+            "primal_success",
+            forward_result["success"],
+        )
+        return {
+            "success": solve_success,
+            "sdofs": forward_result["sdofs"],
+            "iota": forward_result["iota"],
+            "G": forward_result["G"],
+        }
 
     def sync(run_dict, coil_dofs, *, benchmark_mode, update_run_state=True):
         coil_dofs = _as_jax_float64(_single_stage_optimizer_dofs_array(coil_dofs))
-        solve_result = boozer_surface.run_code_traceable(
-            bs.coil_set_spec_from_dofs(coil_dofs),
-            _as_jax_float64(run_dict["sdofs"]),
-            _as_jax_float64(run_dict["iota"]),
-            _as_jax_float64(run_dict["G"]),
-        )
+        solve_result = accepted_step_solve_result(run_dict, coil_dofs)
         if not host_bool(solve_result["success"]):
             raise RuntimeError(
                 "target-lane accepted-step replay failed while refreshing "
                 "single-stage array-native state."
             )
 
+        include_distance_metrics = not benchmark_mode
         traceable_reporting_metrics = reporting_metrics_fn(
             coil_dofs,
-            include_distance_metrics=not benchmark_mode,
+            include_distance_metrics=include_distance_metrics,
         )
         reporting_metrics = _hostify_traceable_reporting_metrics(
             traceable_reporting_metrics,
-            include_distance_metrics=not benchmark_mode,
+            include_distance_metrics=include_distance_metrics,
         )
         if benchmark_mode:
             hardware_status = {
@@ -5318,10 +5406,9 @@ def build_target_lane_outer_objectives(
             success_filter=success_filter,
         )
 
+    target_scalar_objective = runtime_bundle["objective"]
     if use_value_and_grad:
         target_value_and_grad_objective = runtime_bundle["value_and_grad"]
-    else:
-        target_scalar_objective = runtime_bundle["objective"]
 
     if profile_target_lane:
         target_lane_profile = profile_traceable_target_lane_objective(
@@ -5904,6 +5991,27 @@ def resolve_single_stage_default_boozer_least_squares_algorithm(
     return default_least_squares_algorithm_for_backend(effective_boozer_backend)
 
 
+def resolve_single_stage_boozer_limited_memory(
+    field_backend,
+    optimizer_backend,
+    boozer_optimizer_backend=None,
+    boozer_limited_memory=None,
+):
+    """Resolve the effective single-stage Boozer quasi-Newton memory policy."""
+    if field_backend != "jax":
+        return False
+    effective_boozer_backend = resolve_boozer_optimizer_backend(
+        field_backend,
+        optimizer_backend,
+        boozer_optimizer_backend,
+    )
+    if effective_boozer_backend != "ondevice":
+        return False
+    if boozer_limited_memory is not None:
+        return bool(boozer_limited_memory)
+    return False
+
+
 def resolve_single_stage_default_optimizer_backend(
     field_backend,
     optimizer_backend=None,
@@ -5983,12 +6091,12 @@ def resolve_target_lane_boozer_bfgs_tol(
     """Resolve the temporary Boozer LS tolerance override for target-lane trials."""
     if target_lane_boozer_bfgs_tol is not None:
         resolved = float(target_lane_boozer_bfgs_tol)
-    elif field_backend == "jax" and optimizer_backend == "ondevice":
-        resolved = (
-            _TARGET_LANE_BOOZER_BFGS_TOL_BENCHMARK_DEFAULT
-            if benchmark_mode
-            else _TARGET_LANE_BOOZER_BFGS_TOL_DEFAULT
-        )
+    elif (
+        field_backend == "jax"
+        and optimizer_backend == "ondevice"
+        and benchmark_mode
+    ):
+        resolved = _TARGET_LANE_BOOZER_BFGS_TOL_BENCHMARK_DEFAULT
     else:
         return None
     if resolved <= 0.0:
@@ -6188,12 +6296,31 @@ def should_force_strict_target_lane_final_sync(
     *,
     use_target_lane,
     res_nit,
+    optimizer_status,
     accepted_step_callback,
     trial_boozer_override_active,
 ):
     """Return whether the final accepted state must be re-synced strictly."""
     del accepted_step_callback, trial_boozer_override_active
-    return bool(use_target_lane) and int(res_nit) > 0
+    return (
+        bool(use_target_lane)
+        and int(res_nit) > 0
+        and target_lane_result_status_allows_state_sync(optimizer_status)
+    )
+
+
+def target_lane_result_status_allows_state_sync(status) -> bool:
+    """Return whether a target-lane result status preserves a syncable state."""
+    if status is None:
+        return True
+    return int(status) != 5
+
+
+def target_lane_result_has_syncable_state(result) -> bool:
+    """Return whether a target-lane optimizer result should update the graph."""
+    return int(getattr(result, "nit", 0)) > 0 and (
+        target_lane_result_status_allows_state_sync(getattr(result, "status", None))
+    )
 
 
 def _wrap_single_stage_outer_scalar_objective(fun):
@@ -6507,7 +6634,7 @@ def profile_traceable_target_lane_objective(profile_suite, coil_dofs):
         coil_dofs,
     )
     solved_x = forward_result["x"]
-    solved_plu = forward_result["plu"]
+    solved_dense_plu = forward_result["dense_plu"]
     _, profiled["surface_geometry"] = _profile_tree_callable_pair(
         profile_suite["surface_geometry"],
         solved_x,
@@ -6526,7 +6653,7 @@ def profile_traceable_target_lane_objective(profile_suite, coil_dofs):
         profile_suite["solved_total_gradient"],
         coil_dofs,
         solved_x,
-        solved_plu,
+        solved_dense_plu,
     )
     _, profiled["value_and_grad_pipeline"] = _profile_tree_callable_pair(
         profile_suite["value_and_grad_pipeline"],
@@ -6790,6 +6917,8 @@ def run_single_stage_target_lane_optimizer_with_retries(
     def sync_failed_attempt_state(result, *, event_start_index):
         if result_state_sync is None:
             return
+        if getattr(result_state_sync, "simsopt_skip_failed_attempt_sync", False):
+            return
         if int(getattr(result, "nit", 0)) <= 0 or result.success:
             return
         if single_stage_retry_triggered_by_invalid_state(
@@ -6891,7 +7020,11 @@ def run_single_stage_target_lane_optimizer_with_retries(
         result.nfev = total_nfev
     if total_njev is not None:
         result.njev = total_njev
-    if not result.success:
+    if (not result.success) and (
+        not target_lane_result_status_allows_state_sync(
+            getattr(result, "status", None)
+        )
+    ):
         anchor_state, anchor_stage = resolve_single_stage_retry_anchor(
             run_dict,
             single_stage_search_policy,
@@ -7033,6 +7166,61 @@ def resolve_warm_start_boozer_init_overrides(
         "bfgs_maxiter_override": bfgs_maxiter_override,
         "newton_tol_override": None,
         "newton_maxiter_override": None,
+    }
+
+
+def resolve_target_lane_boozer_init_base_overrides(
+    *,
+    field_backend,
+    optimizer_backend,
+    boozer_limited_memory=False,
+    target_lane_boozer_bfgs_tol,
+    target_lane_boozer_bfgs_maxiter,
+    target_lane_boozer_newton_tol,
+    target_lane_boozer_newton_maxiter,
+):
+    """Return the baseline target-lane init overrides for JAX/ondevice solves."""
+    if field_backend != "jax" or optimizer_backend != "ondevice":
+        return {
+            "least_squares_algorithm_override": None,
+            "bfgs_tol_override": None,
+            "bfgs_maxiter_override": None,
+            "newton_tol_override": None,
+            "newton_maxiter_override": None,
+        }
+
+    bfgs_tol_override = (
+        None
+        if target_lane_boozer_bfgs_tol is None
+        else float(target_lane_boozer_bfgs_tol)
+    )
+    newton_tol_override = (
+        _TARGET_LANE_BOOZER_NEWTON_TOL_FULL_MEMORY_DEFAULT
+        if (
+            target_lane_boozer_newton_tol is None
+            and not bool(boozer_limited_memory)
+        )
+        else (
+            None
+            if target_lane_boozer_newton_tol is None
+            else float(target_lane_boozer_newton_tol)
+        )
+    )
+
+    return {
+        "least_squares_algorithm_override": None,
+        "bfgs_tol_override": bfgs_tol_override,
+        "bfgs_maxiter_override": (
+            None
+            if target_lane_boozer_bfgs_maxiter is None
+            else max(int(target_lane_boozer_bfgs_maxiter), 128)
+        ),
+        "newton_tol_override": newton_tol_override,
+        "newton_maxiter_override": (
+            None
+            if target_lane_boozer_newton_maxiter is None
+            else int(target_lane_boozer_newton_maxiter)
+        ),
     }
 
 
@@ -7758,6 +7946,7 @@ def restore_from_pytree(
     coil_dofs=None,
     *,
     apply_coil_dofs=None,
+    diagnostic_bs=None,
 ):
     """Write optimization state back into the Optimizable graph.
 
@@ -7765,12 +7954,14 @@ def restore_from_pytree(
     (``iota``, ``G``) so post-optimization consumers see values
     consistent with the last accepted step.
 
-    Note: ``res["success"]``, ``res["PLU"]``, and ``res["vjp"]`` are
-    NOT directly restored.  Setting ``surface.x`` or ``JF.x`` marks
-    the Boozer surface dirty (``need_to_run_code = True``), so the
-    next access through an ``IotasJAX`` / ``NonQuasiSymmetricRatioJAX``
-    wrapper will trigger ``_ensure_solved`` which re-runs the inner
-    solve and refreshes the full ``res`` dict automatically.
+    Note: only the solved-value state is restored directly here. Dense
+    linearization artifacts are optional compatibility outputs now, so
+    adjoint consumers must rebuild the runtime state by re-solving after
+    ``surface.x`` or ``JF.x`` dirties the Boozer surface
+    (``need_to_run_code = True``). The next access through an
+    ``IotasJAX`` / ``NonQuasiSymmetricRatioJAX`` wrapper will trigger
+    ``_ensure_solved`` and refresh the full runtime contract
+    automatically.
 
     Args:
         JF: Composite objective (``Optimizable``).
@@ -7785,6 +7976,8 @@ def restore_from_pytree(
             JF.x = coil_dofs
         else:
             apply_coil_dofs(coil_dofs)
+        if diagnostic_bs is not None:
+            diagnostic_bs.x = coil_dofs
     boozer_surface.surface.x = run_dict["sdofs"]
     boozer_surface.res["iota"] = run_dict["iota"]
     boozer_surface.res["G"] = run_dict["G"]
@@ -8004,6 +8197,18 @@ if __name__ == "__main__":
             single_stage_search_policy,
             initial_step_scale=args.initial_step_scale,
             initial_step_maxiter=args.initial_step_maxiter,
+            initial_step_scale_explicit=getattr(
+                args,
+                "initial_step_scale_explicit",
+                False,
+            ),
+            initial_step_maxiter_explicit=getattr(
+                args,
+                "initial_step_maxiter_explicit",
+                False,
+            ),
+            field_backend=args.backend,
+            optimizer_backend=args.optimizer_backend,
         )
     )
     effective_initial_step_scale = effective_initial_phase_settings[
@@ -8110,6 +8315,21 @@ if __name__ == "__main__":
         maxiter=args.maxiter,
         sync_policy=effective_target_lane_sync_policy,
     )
+    effective_boozer_limited_memory = resolve_single_stage_boozer_limited_memory(
+        args.backend,
+        optimizer_backend_record,
+        boozer_optimizer_backend_record,
+        args.boozer_limited_memory,
+    )
+    base_boozer_init_overrides = resolve_target_lane_boozer_init_base_overrides(
+        field_backend=args.backend,
+        optimizer_backend=optimizer_backend_record,
+        boozer_limited_memory=effective_boozer_limited_memory,
+        target_lane_boozer_bfgs_tol=target_lane_boozer_bfgs_tol_record,
+        target_lane_boozer_bfgs_maxiter=target_lane_boozer_bfgs_maxiter_record,
+        target_lane_boozer_newton_tol=target_lane_boozer_newton_tol_record,
+        target_lane_boozer_newton_maxiter=target_lane_boozer_newton_maxiter_record,
+    )
     warm_start_boozer_init_overrides = resolve_warm_start_boozer_init_overrides(
         warm_start_state=warm_start_state,
         explicit_surface_warm_start=warm_start_surface_dofs is not None,
@@ -8125,8 +8345,12 @@ if __name__ == "__main__":
         target_lane_boozer_bfgs_tol=target_lane_boozer_bfgs_tol_record,
         target_lane_boozer_bfgs_maxiter=target_lane_boozer_bfgs_maxiter_record,
     )
-    effective_warm_start_boozer_least_squares_algorithm = (
-        warm_start_boozer_init_overrides["least_squares_algorithm_override"]
+    effective_boozer_init_overrides = dict(base_boozer_init_overrides)
+    for key, value in warm_start_boozer_init_overrides.items():
+        if value is not None:
+            effective_boozer_init_overrides[key] = value
+    effective_boozer_init_least_squares_algorithm = (
+        effective_boozer_init_overrides["least_squares_algorithm_override"]
         or boozer_least_squares_algorithm_record
     )
 
@@ -8191,8 +8415,9 @@ if __name__ == "__main__":
     ]
     if boozer_optimizer_backend_hash_record is not None:
         config_parts.append(str(boozer_optimizer_backend_hash_record))
-    if effective_warm_start_boozer_least_squares_algorithm is not None:
-        config_parts.append(str(effective_warm_start_boozer_least_squares_algorithm))
+    if effective_boozer_init_least_squares_algorithm is not None:
+        config_parts.append(str(effective_boozer_init_least_squares_algorithm))
+    config_parts.append(str(effective_boozer_limited_memory))
     config_str = "|".join(config_parts)
     config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:8]
     OUT_DIR_ITER = OUT_DIR + f"/mpol={mpol}-ntor={ntor}-{config_hash}"
@@ -8210,15 +8435,17 @@ if __name__ == "__main__":
             boozer_least_squares_algorithm_record
         ),
         effective_boozer_least_squares_algorithm=(
-            effective_warm_start_boozer_least_squares_algorithm
+            effective_boozer_init_least_squares_algorithm
         ),
-        boozer_least_squares_algorithm_override=warm_start_boozer_init_overrides[
+        requested_boozer_limited_memory=args.boozer_limited_memory,
+        effective_boozer_limited_memory=effective_boozer_limited_memory,
+        boozer_least_squares_algorithm_override=effective_boozer_init_overrides[
             "least_squares_algorithm_override"
         ],
-        bfgs_tol_override=warm_start_boozer_init_overrides["bfgs_tol_override"],
-        bfgs_maxiter_override=warm_start_boozer_init_overrides["bfgs_maxiter_override"],
-        newton_tol_override=warm_start_boozer_init_overrides["newton_tol_override"],
-        newton_maxiter_override=warm_start_boozer_init_overrides[
+        bfgs_tol_override=effective_boozer_init_overrides["bfgs_tol_override"],
+        bfgs_maxiter_override=effective_boozer_init_overrides["bfgs_maxiter_override"],
+        newton_tol_override=effective_boozer_init_overrides["newton_tol_override"],
+        newton_maxiter_override=effective_boozer_init_overrides[
             "newton_maxiter_override"
         ],
     )
@@ -8241,14 +8468,15 @@ if __name__ == "__main__":
             backend=args.backend,
             optimizer_backend=boozer_optimizer_backend_record,
             boozer_least_squares_algorithm=(
-                effective_warm_start_boozer_least_squares_algorithm
+                effective_boozer_init_least_squares_algorithm
             ),
-            bfgs_tol_override=warm_start_boozer_init_overrides["bfgs_tol_override"],
-            bfgs_maxiter_override=warm_start_boozer_init_overrides[
+            boozer_limited_memory=effective_boozer_limited_memory,
+            bfgs_tol_override=effective_boozer_init_overrides["bfgs_tol_override"],
+            bfgs_maxiter_override=effective_boozer_init_overrides[
                 "bfgs_maxiter_override"
             ],
-            newton_tol_override=warm_start_boozer_init_overrides["newton_tol_override"],
-            newton_maxiter_override=warm_start_boozer_init_overrides[
+            newton_tol_override=effective_boozer_init_overrides["newton_tol_override"],
+            newton_maxiter_override=effective_boozer_init_overrides[
                 "newton_maxiter_override"
             ],
             surface_dofs_override=warm_start_surface_dofs,
@@ -8918,6 +9146,7 @@ if __name__ == "__main__":
                 run_dict,
                 coil_dofs=res.x,
                 apply_coil_dofs=dof_setter,
+                diagnostic_bs=bs_diag if use_target_lane else None,
             )
             final_artifacts_start_s = _perf_counter_s()
             if write_restart_artifacts:
@@ -9296,14 +9525,7 @@ if __name__ == "__main__":
                     if use_target_lane and not diagnostic_target_lane_callbacks:
                         accepted_step_callback = None
                     retry_step_callback = accepted_step_callback
-                    target_lane_phase1_state_sync = (
-                        resolve_target_lane_post_run_state_sync(
-                            adapter,
-                            use_target_lane=use_target_lane,
-                            accepted_step_callback=accepted_step_callback,
-                            scaled_phase_step_scale=effective_initial_step_scale,
-                        )
-                    )
+                    target_lane_phase1_state_sync = None
                     target_lane_post_run_state_sync = (
                         resolve_target_lane_post_run_state_sync(
                             adapter,
@@ -9312,9 +9534,7 @@ if __name__ == "__main__":
                         )
                     )
                     phase1_dofs = dofs
-                    phase1_base_fun = (
-                        target_value_and_grad_objective if use_target_lane else adapter
-                    )
+                    phase1_base_fun = None if use_target_lane else adapter
                     phase1_base_scalar_fun = (
                         target_scalar_objective if use_target_lane else None
                     )
@@ -9337,13 +9557,6 @@ if __name__ == "__main__":
                                 use_target_lane=use_target_lane,
                             )
                             if use_target_lane:
-                                phase1_dofs = (
-                                    build_target_lane_scaled_outer_phase_state(
-                                        phase1_anchor_dofs,
-                                        phase1_dofs,
-                                    )
-                                )
-                            if use_target_lane:
                                 if phase1_fun is not None:
                                     phase1_fun, phase1_callback = (
                                         build_scaled_outer_problem(
@@ -9351,7 +9564,6 @@ if __name__ == "__main__":
                                             accepted_step_callback,
                                             phase1_anchor_dofs,
                                             effective_initial_step_scale,
-                                            anchor_in_state=True,
                                         )
                                     )
                                     phase1_scalar_fun = None
@@ -9364,9 +9576,19 @@ if __name__ == "__main__":
                                         accepted_step_callback,
                                         phase1_anchor_dofs,
                                         effective_initial_step_scale,
-                                        anchor_in_state=True,
                                     )
                                 phase1_retry_callback = phase1_callback
+                                target_lane_phase1_state_sync = (
+                                    resolve_target_lane_post_run_state_sync(
+                                        adapter,
+                                        use_target_lane=use_target_lane,
+                                        accepted_step_callback=accepted_step_callback,
+                                        scaled_phase_step_scale=(
+                                            effective_initial_step_scale
+                                        ),
+                                        scaled_phase_anchor_dofs=phase1_anchor_dofs,
+                                    )
+                                )
                                 phase1_post_run_state_sync = (
                                     resolve_target_lane_post_run_state_sync(
                                         adapter,
@@ -9375,6 +9597,7 @@ if __name__ == "__main__":
                                         scaled_phase_step_scale=(
                                             effective_initial_step_scale
                                         ),
+                                        scaled_phase_anchor_dofs=phase1_anchor_dofs,
                                     )
                                 )
                                 if phase1_retry_callback is None:
@@ -9385,7 +9608,6 @@ if __name__ == "__main__":
                                                 retry_step_callback,
                                                 phase1_anchor_dofs,
                                                 effective_initial_step_scale,
-                                                anchor_in_state=True,
                                             )
                                         )
                                     else:
@@ -9395,7 +9617,6 @@ if __name__ == "__main__":
                                                 retry_step_callback,
                                                 phase1_anchor_dofs,
                                                 effective_initial_step_scale,
-                                                anchor_in_state=True,
                                             )
                                         )
                             else:
@@ -9471,21 +9692,23 @@ if __name__ == "__main__":
                                             ),
                                             retry_dofs_factory=(
                                                 lambda anchor_state: (
-                                                    build_single_stage_scaled_phase_retry_state(
+                                                    build_scaled_outer_phase_initial_dofs(
                                                         host_array(
                                                             anchor_state["coil_dofs"],
                                                             dtype=np.float64,
-                                                        )
+                                                        ),
+                                                        use_target_lane=True,
                                                     )
                                                 )
                                             ),
                                             restored_result_x_factory=(
                                                 lambda anchor_state: (
-                                                    build_single_stage_scaled_phase_retry_state(
+                                                    build_scaled_outer_phase_initial_dofs(
                                                         host_array(
                                                             anchor_state["coil_dofs"],
                                                             dtype=np.float64,
-                                                        )
+                                                        ),
+                                                        use_target_lane=True,
                                                     )
                                                 )
                                             ),
@@ -9540,7 +9763,7 @@ if __name__ == "__main__":
                             )
                             if (
                                 target_lane_phase1_state_sync is not None
-                                and phase1_iterations > 0
+                                and target_lane_result_has_syncable_state(phase1_res)
                             ):
                                 target_lane_phase1_sync_start_s = _perf_counter_s()
                                 with maybe_trace_single_stage_phase(
@@ -9674,7 +9897,7 @@ if __name__ == "__main__":
                             use_target_lane
                             and args.benchmark_mode
                             and target_lane_post_run_state_sync is not None
-                            and int(res.nit) > 0
+                            and target_lane_result_has_syncable_state(res)
                         ):
                             target_lane_sync_start_s = _perf_counter_s()
                             with maybe_trace_single_stage_phase(
@@ -9721,6 +9944,7 @@ if __name__ == "__main__":
         if (not args.benchmark_mode) and should_force_strict_target_lane_final_sync(
             use_target_lane=use_target_lane,
             res_nit=res_nit,
+            optimizer_status=None if res is None else getattr(res, "status", None),
             accepted_step_callback=accepted_step_callback,
             trial_boozer_override_active=target_lane_trial_boozer_override_active,
         ):
@@ -9747,6 +9971,7 @@ if __name__ == "__main__":
                 run_dict,
                 coil_dofs=res.x,
                 apply_coil_dofs=dof_setter,
+                diagnostic_bs=bs_diag if use_target_lane else None,
             )
 
         # ==============================================================================
@@ -10044,6 +10269,8 @@ if __name__ == "__main__":
         "optimizer_backend": optimizer_backend_record,
         "boozer_optimizer_backend": boozer_optimizer_backend_record,
         "boozer_least_squares_algorithm": boozer_least_squares_algorithm_record,
+        "boozer_limited_memory_requested": args.boozer_limited_memory,
+        "boozer_limited_memory": effective_boozer_limited_memory,
         "boozer_optimizer_method": boozer_surface.res.get("optimizer_method"),
         "outer_optimizer_method": outer_optimizer_method_record,
         "target_lane_accepted_step_sync": target_lane_sync_record,

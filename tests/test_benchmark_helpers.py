@@ -2202,7 +2202,7 @@ def _single_stage_probe_results(**overrides):
         "SELF_INTERSECTION_CHECK_AVAILABLE": True,
         "iterations": 10,
         "boozer_optimizer_backend": "ondevice",
-        "boozer_optimizer_method": "lm-ondevice",
+        "boozer_optimizer_method": "bfgs-ondevice",
         "outer_optimizer_method": TARGET_OUTER_OPTIMIZER_METHOD,
         "INITIAL_OBJECTIVE": 10.0,
         "FINAL_OBJECTIVE": 8.0,
@@ -2260,7 +2260,7 @@ def test_single_stage_outer_loop_probe_accepts_finite_target_lane_result():
             SELF_INTERSECTION_CHECK_AVAILABLE=False,
         ),
         expected_boozer_optimizer_backend="ondevice",
-        expected_boozer_optimizer_method="lm-ondevice",
+        expected_boozer_optimizer_method="bfgs-ondevice",
     )
 
     assert failures == []
@@ -2277,7 +2277,7 @@ def test_single_stage_outer_loop_probe_rejects_missing_step_or_wrong_method():
         _single_stage_probe_results(
             iterations=0,
             boozer_optimizer_backend="ondevice",
-            boozer_optimizer_method="bfgs-ondevice",
+            boozer_optimizer_method="lm-ondevice",
             outer_optimizer_method="bfgs",
             SELF_INTERSECTING=True,
             FINAL_IOTA=np.nan,
@@ -2286,7 +2286,7 @@ def test_single_stage_outer_loop_probe_rejects_missing_step_or_wrong_method():
             MAX_CURVATURE=32.0,
         ),
         expected_boozer_optimizer_backend="ondevice",
-        expected_boozer_optimizer_method="lm-ondevice",
+        expected_boozer_optimizer_method="bfgs-ondevice",
     )
 
     assert any("required 10 accepted optimizer iterations" in failure for failure in failures)
@@ -2303,11 +2303,11 @@ def test_single_stage_outer_loop_probe_profile_only_allows_zero_iterations():
         _single_stage_probe_results(
             iterations=0,
             boozer_optimizer_backend="ondevice",
-            boozer_optimizer_method="lm-ondevice",
+            boozer_optimizer_method="bfgs-ondevice",
             outer_optimizer_method=TARGET_OUTER_OPTIMIZER_METHOD,
         ),
         expected_boozer_optimizer_backend="ondevice",
-        expected_boozer_optimizer_method="lm-ondevice",
+        expected_boozer_optimizer_method="bfgs-ondevice",
         require_accepted_step=False,
     )
 
@@ -3309,7 +3309,7 @@ def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():
         resolve_boozer_least_squares_algorithm("scipy")
     with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
         resolve_boozer_least_squares_algorithm("hybrid")
-    assert resolve_boozer_least_squares_algorithm("ondevice") == "lm"
+    assert resolve_boozer_least_squares_algorithm("ondevice") == "quasi-newton"
     with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
         resolve_boozer_optimizer_method("scipy")
     with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
@@ -3318,7 +3318,7 @@ def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():
         resolve_boozer_optimizer_method("hybrid")
     with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
         resolve_boozer_optimizer_method("hybrid", limited_memory=True)
-    assert resolve_boozer_optimizer_method("ondevice") == "lm-ondevice"
+    assert resolve_boozer_optimizer_method("ondevice") == "bfgs-ondevice"
     assert (
         resolve_boozer_optimizer_method(
             "ondevice",
@@ -3335,7 +3335,11 @@ def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():
         == "lbfgs-ondevice"
     )
     with pytest.raises(ValueError, match="least_squares_algorithm='lm'"):
-        resolve_boozer_optimizer_method("ondevice", limited_memory=True)
+        resolve_boozer_optimizer_method(
+            "ondevice",
+            limited_memory=True,
+            least_squares_algorithm="lm",
+        )
 
 
 def test_single_stage_outer_loop_probe_rejects_non_ondevice_boozer_backend():

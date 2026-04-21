@@ -118,13 +118,24 @@ class BiotSavart(sopp.BiotSavart, MagneticField):
         res_current = [np.sum(v * dB_by_dcoilcurrents[i]) for i in range(len(dB_by_dcoilcurrents))]
         return sum([coils[i].vjp(res_gamma[i], res_gammadash[i], np.asarray([res_current[i]])) for i in range(len(coils))])
 
+    def _compute_vector_potential_family(self, derivatives):
+        # `compute_A` is implemented in the C++ backend but is not exposed as a
+        # Python method on `simsoptpp.BiotSavart`. Trigger the same cache fill
+        # through the public vector-potential accessors instead.
+        if derivatives <= 0:
+            self.A()
+        elif derivatives == 1:
+            self.dA_by_dX()
+        else:
+            self.d2A_by_dXdX()
+
     def dA_by_dcoilcurrents(self, compute_derivatives=0):
         points = self.get_points_cart_ref()
         npoints = len(points)
         ncoils = len(self._coils)
         if any([not self.fieldcache_get_status(f'A_{i}') for i in range(ncoils)]):
             assert compute_derivatives >= 0
-            self.compute_A(compute_derivatives)
+            self._compute_vector_potential_family(compute_derivatives)
         self._dA_by_dcoilcurrents = [self.fieldcache_get_or_create(f'A_{i}', [npoints, 3]) for i in range(ncoils)]
         return self._dA_by_dcoilcurrents
 
@@ -134,7 +145,7 @@ class BiotSavart(sopp.BiotSavart, MagneticField):
         ncoils = len(self._coils)
         if any([not self.fieldcache_get_status(f'dA_{i}') for i in range(ncoils)]):
             assert compute_derivatives >= 1
-            self.compute_A(compute_derivatives)
+            self._compute_vector_potential_family(compute_derivatives)
         self._d2A_by_dXdcoilcurrents = [self.fieldcache_get_or_create(f'dA_{i}', [npoints, 3, 3]) for i in range(ncoils)]
         return self._d2A_by_dXdcoilcurrents
 
@@ -144,7 +155,7 @@ class BiotSavart(sopp.BiotSavart, MagneticField):
         ncoils = len(self._coils)
         if any([not self.fieldcache_get_status(f'ddA_{i}') for i in range(ncoils)]):
             assert compute_derivatives >= 2
-            self.compute_A(compute_derivatives)
+            self._compute_vector_potential_family(compute_derivatives)
         self._d3A_by_dXdXdcoilcurrents = [self.fieldcache_get_or_create(f'ddA_{i}', [npoints, 3, 3, 3]) for i in range(ncoils)]
         return self._d3A_by_dXdXdcoilcurrents
 

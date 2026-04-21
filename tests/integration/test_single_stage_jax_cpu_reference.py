@@ -1677,6 +1677,9 @@ def _build_real_resolve_fd_suite():
 
     _restore_real_resolve_fd_seed_state(baseline_state, bs_jax, booz_jax)
     booz_jax.res = baseline_state.result
+    booz_jax._solver_generation = int(
+        baseline_state.result.get("solve_generation", booz_jax._solver_generation)
+    )
     booz_jax.need_to_run_code = False
 
     return _RealResolveFDSuite(
@@ -2000,6 +2003,7 @@ def _snapshot_solver_state(booz):
     return {
         "need_to_run_code": booz.need_to_run_code,
         "run_code": booz.run_code,
+        "solver_generation": getattr(booz, "_solver_generation", None),
         "res_ref": booz.res,
         "res": None if booz.res is None else dict(booz.res),
     }
@@ -2035,6 +2039,8 @@ def _restore_solver_state(booz, state):
         state["res_ref"],
         state["res"],
     )
+    if state["solver_generation"] is not None:
+        booz._solver_generation = state["solver_generation"]
     booz.need_to_run_code = state["need_to_run_code"]
 
 
@@ -2365,6 +2371,67 @@ class TestAdjointSolveConsistency:
         adj_jax = np.asarray(forward_backward_jax(P, L, U, rhs_matrix))
 
         np.testing.assert_allclose(adj_jax, adj_host, rtol=1e-12, atol=1e-12)
+
+    def test_iterative_refinement_batched_plu_solves_match_column_solves(
+        self,
+        boozer_setup,
+    ):
+        """Iterative-refinement PLU solves should be column-stable for multiple RHS."""
+        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
+            boozer_setup
+        )
+        from simsopt.objectives.utilities import forward_backward_jax, plu_solve_jax
+
+        P, L, U = booz_jax.res["PLU"]
+        rng = np.random.RandomState(0)
+        rhs_matrix = rng.standard_normal((L.shape[0], 3))
+
+        def solve_columns(solver):
+            return np.stack(
+                [
+                    np.asarray(solver(rhs_matrix[:, i]))
+                    for i in range(rhs_matrix.shape[1])
+                ],
+                axis=1,
+            )
+
+        adjoint_batched = np.asarray(
+            forward_backward_jax(P, L, U, rhs_matrix, iterative_refinement=True)
+        )
+        adjoint_columns = solve_columns(
+            lambda rhs: forward_backward_jax(
+                P,
+                L,
+                U,
+                rhs,
+                iterative_refinement=True,
+            )
+        )
+        np.testing.assert_allclose(
+            adjoint_batched,
+            adjoint_columns,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+        forward_batched = np.asarray(
+            plu_solve_jax(P, L, U, rhs_matrix, iterative_refinement=True)
+        )
+        forward_columns = solve_columns(
+            lambda rhs: plu_solve_jax(
+                P,
+                L,
+                U,
+                rhs,
+                iterative_refinement=True,
+            )
+        )
+        np.testing.assert_allclose(
+            forward_batched,
+            forward_columns,
+            rtol=1e-12,
+            atol=1e-12,
+        )
 
     def test_vjp_produces_finite_derivative(self, boozer_setup):
         """VJP hook produces a finite, non-zero Derivative from a non-trivial adjoint."""
@@ -3605,7 +3672,7 @@ class TestAdjointSolveConsistency:
         )
         booz_jax.res["vjp_groups"] = None
 
-        with pytest.raises(RuntimeError, match="legacy full-pytree adjoint fallback"):
+        with pytest.raises(RuntimeError, match="no valid adjoint state"):
             objective_factory(booz_jax, bs_jax).dJ()
 
     def test_ls_coil_vjp_matches_reverse_over_reverse_reference(self, boozer_setup):
@@ -4004,15 +4071,15 @@ class TestCompositeObjective:
             bs_jax,
         )
 
-        original_solve = soj._solve_boozer_adjoint
+        original_solve_batch = soj._solve_boozer_adjoint_batch
         recorded = {"calls": 0}
 
-        def counting_solve(booz_surf, rhs):
+        def counting_solve(adjoint_state, rhs_batch):
             recorded["calls"] += 1
-            recorded["rhs_shape"] = tuple(np.shape(rhs))
-            return original_solve(booz_surf, rhs)
+            recorded["rhs_shape"] = tuple(np.shape(rhs_batch))
+            return original_solve_batch(adjoint_state, rhs_batch)
 
-        monkeypatch.setattr(soj, "_solve_boozer_adjoint", counting_solve)
+        monkeypatch.setattr(soj, "_solve_boozer_adjoint_batch", counting_solve)
 
         returned_gradients = compute_standard_surface_objective_gradients(
             boozer_residual,
@@ -4024,7 +4091,7 @@ class TestCompositeObjective:
         ]
 
         assert recorded["calls"] == 1
-        assert recorded["rhs_shape"] == (booz_jax.res["PLU"][1].shape[0],)
+        assert recorded["rhs_shape"] == (3, booz_jax.res["PLU"][1].shape[0])
         for batched_gradient, reference_gradient in zip(
             batched_gradients,
             reference_gradients,
@@ -4992,6 +5059,8 @@ class TestEnsureSolvedCrashGuard:
 
         bad_res = dict(old_res)
         bad_res["success"] = False
+        bad_res["primal_success"] = False
+        bad_res["adjoint_linear_solve_available"] = False
         bad_res["PLU"] = tuple(np.eye(2) for _ in range(3))
         bad_res["vjp"] = lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("vjp must not be touched for failed solves")
@@ -5008,7 +5077,8 @@ class TestEnsureSolvedCrashGuard:
                 obj = NonQuasiSymmetricRatioJAX(booz_jax, bs_jax)
 
             with pytest.raises(
-                RuntimeError, match="failed to produce valid adjoint state"
+                RuntimeError,
+                match="valid solved state|valid adjoint state",
             ):
                 obj.J()
 
@@ -7612,6 +7682,7 @@ class TestBoozerResidualCPUParity:
         perturbation so the residual value is non-trivial.
         """
         from simsopt.geo.boozer_residual_jax import boozer_residual_scalar
+        from simsopt.geo.boozersurface import _call_boozer_residual
 
         gamma, xphi, xtheta, B, iota, G, surf, coils, bs_cpu = self._build_shared_state(
             seed=42
@@ -7620,7 +7691,7 @@ class TestBoozerResidualCPUParity:
         num_res = 3 * nphi * ntheta
 
         # CPU: sopp.boozer_residual returns the raw half-sum-of-squares
-        val_cpu = sopp.boozer_residual(G, iota, xphi, xtheta, B, True)
+        val_cpu = _call_boozer_residual(G, iota, xphi, xtheta, B, True)
         val_cpu_normalized = val_cpu / num_res
 
         # JAX: boozer_residual_scalar includes the / num_res normalization
@@ -7656,6 +7727,7 @@ class TestBoozerResidualCPUParity:
     def test_raw_boozer_residual_scalar_parity_no_weight(self):
         """Same as above but with weight_inv_modB=False."""
         from simsopt.geo.boozer_residual_jax import boozer_residual_scalar
+        from simsopt.geo.boozersurface import _call_boozer_residual
 
         gamma, xphi, xtheta, B, iota, G, surf, coils, bs_cpu = self._build_shared_state(
             seed=43
@@ -7663,7 +7735,7 @@ class TestBoozerResidualCPUParity:
         nphi, ntheta, _ = B.shape
         num_res = 3 * nphi * ntheta
 
-        val_cpu = sopp.boozer_residual(G, iota, xphi, xtheta, B, False)
+        val_cpu = _call_boozer_residual(G, iota, xphi, xtheta, B, False)
         val_cpu_normalized = val_cpu / num_res
 
         val_jax = float(
@@ -7709,6 +7781,7 @@ class TestBoozerResidualCPUParity:
             boozer_residual_scalar,
             boozer_residual_vector,
         )
+        from simsopt.geo.boozersurface import _call_boozer_residual
 
         gamma, xphi, xtheta, B, iota, G, surf, coils, bs_cpu = self._build_shared_state(
             seed=44
@@ -7731,7 +7804,7 @@ class TestBoozerResidualCPUParity:
             )
         )
 
-        val_cpu = sopp.boozer_residual(G, iota, xphi, xtheta, B, True) / num_res
+        val_cpu = _call_boozer_residual(G, iota, xphi, xtheta, B, True) / num_res
 
         logger.info(
             f"Vector consistency:\n"

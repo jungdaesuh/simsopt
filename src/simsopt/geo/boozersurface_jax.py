@@ -118,6 +118,7 @@ from .optimizer_jax import (
     target_least_squares,
     target_minimize,
 )
+from ..objectives.utilities import forward_backward_jax, plu_solve_jax
 
 __all__ = ["BoozerSurfaceJAX", "build_boozer_surface_runtime_state"]
 
@@ -181,8 +182,13 @@ class _BoozerAdjointRuntimeState:
     """Immutable adjoint-state summary for wrapper gradient consumers."""
 
     solved_state: _BoozerSolvedRuntimeState
-    plu: tuple[jax.Array, jax.Array, jax.Array]
+    linearization_kind: str
+    decision_size: int
+    dtype: object
+    solve_forward: callable
+    solve_transpose: callable
     stream_group_vjps: callable
+    plu: tuple[jax.Array, jax.Array, jax.Array] | None = None
 
 
 def _surface_geometry_kind(surface) -> str:
@@ -1358,6 +1364,8 @@ _DEFAULT_OPTIONS_LS = {
     "newton_maxiter": 40,
     "newton_stab": 0.0,
     "weight_inv_modB": True,
+    "materialize_dense_linearization": None,
+    "max_dense_linearization_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES,
     "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES,
 }
 
@@ -1386,7 +1394,9 @@ _CALLBACK_OPTIONS = frozenset({"stage_callback", "progress_callback"})
 _ONDEVICE_OPTIMIZER_METHODS = frozenset(
     {"bfgs-ondevice", "lbfgs-ondevice", "lm-ondevice"}
 )
-_LS_DYNAMIC_OPTION_KEYS = frozenset({"least_squares_algorithm"})
+_LS_DYNAMIC_OPTION_KEYS = frozenset(
+    {"least_squares_algorithm", "materialize_dense_linearization"}
+)
 
 _ALLOWED_OPTIONS_LS = (
     frozenset(_DEFAULT_OPTIONS_LS)
@@ -1403,8 +1413,12 @@ _ALLOWED_OPTIONS_EXACT = frozenset(_DEFAULT_OPTIONS_EXACT) | {
 
 def default_least_squares_algorithm_for_backend(optimizer_backend):
     if optimizer_backend == "ondevice":
-        return "lm"
+        return "quasi-newton"
     return "quasi-newton"
+
+
+def default_materialize_dense_linearization_for_backend(optimizer_backend):
+    return optimizer_backend != "ondevice"
 
 
 def _default_ls_optimizer_backend() -> str:
@@ -1462,6 +1476,12 @@ def _normalize_solver_options(raw_options, boozer_type):
         if "least_squares_algorithm" not in normalized_options:
             normalized_options["least_squares_algorithm"] = (
                 default_least_squares_algorithm_for_backend(
+                    normalized_options["optimizer_backend"]
+                )
+            )
+        if normalized_options.get("materialize_dense_linearization") is None:
+            normalized_options["materialize_dense_linearization"] = (
+                default_materialize_dense_linearization_for_backend(
                     normalized_options["optimizer_backend"]
                 )
             )
@@ -1615,7 +1635,9 @@ class BoozerSurfaceJAX(Optimizable):
                 "BoozerSurfaceJAX solve state is stale. Re-run "
                 "boozer_surface.run_code(...) before requesting a runtime summary."
             )
-        if self.res is None or not self.res.get("success"):
+        if self.res is None or not bool(
+            self.res.get("primal_success", self.res.get("success"))
+        ):
             raise RuntimeError(
                 "BoozerSurfaceJAX has no successful solve state. "
                 "Call boozer_surface.run_code(...) before requesting a solved "
@@ -1632,12 +1654,122 @@ class BoozerSurfaceJAX(Optimizable):
             ),
         )
 
+    def _linear_solve_tolerance(self):
+        if self.boozer_type == "exact":
+            return min(1e-10, max(float(self.options["newton_tol"]) * 0.1, 1e-14))
+        return min(
+            1e-10,
+            max(
+                min(
+                    float(self.options["bfgs_tol"]),
+                    float(self.options["newton_tol"]),
+                )
+                * 0.1,
+                1e-14,
+            ),
+        )
+
+    def _resolved_linearization_kind(self):
+        if self.boozer_type == "exact":
+            return "exact_jacobian"
+        if self.res.get("hessian") is not None:
+            return "hessian"
+        optimizer_method = self.res.get("optimizer_method")
+        if optimizer_method in {"lm", "lm-ondevice"}:
+            return "least_squares_normal"
+        return "hessian"
+
+    def _build_runtime_linear_solve_callbacks(self, solved_state):
+        linearization_kind = self._resolved_linearization_kind()
+        dense_plu = self.res.get("PLU")
+        optimize_G = solved_state.G is not None
+        x = self._pack_decision_vector(
+            solved_state.iota,
+            solved_state.G,
+            sdofs=solved_state.sdofs,
+        )
+        tol = self._linear_solve_tolerance()
+
+        if dense_plu is not None:
+            P, L, U = dense_plu
+
+            def solve_forward(rhs):
+                return plu_solve_jax(P, L, U, rhs, iterative_refinement=True)
+
+            def solve_transpose(rhs):
+                return forward_backward_jax(P, L, U, rhs, iterative_refinement=True)
+
+            return linearization_kind, x.shape[0], x.dtype, solve_forward, solve_transpose
+
+        if linearization_kind == "least_squares_normal":
+            residual_fn = self._make_penalty_residual_with(
+                optimize_G,
+                solved_state.weight_inv_modB,
+                coil_set_spec=self.coil_set_spec,
+                hostify_inputs=False,
+            )
+
+            def solve_forward(rhs):
+                return _optimizer_jax._solve_least_squares_normal_system(
+                    residual_fn,
+                    x,
+                    rhs,
+                    tol=tol,
+                )
+
+            return linearization_kind, x.shape[0], x.dtype, solve_forward, solve_forward
+
+        if linearization_kind == "hessian":
+            objective_fn = self._make_penalty_objective_with(
+                optimize_G,
+                solved_state.weight_inv_modB,
+                coil_set_spec=self.coil_set_spec,
+                hostify_inputs=False,
+            )
+
+            def solve_forward(rhs):
+                return _optimizer_jax._solve_hessian_system(
+                    objective_fn,
+                    x,
+                    rhs,
+                    stab=self.options["newton_stab"],
+                    tol=tol,
+                )
+
+            return linearization_kind, x.shape[0], x.dtype, solve_forward, solve_forward
+
+        if linearization_kind == "exact_jacobian":
+            residual_fn = self._make_exact_residual(self._compute_stellsym_mask_indices())
+
+            def solve_forward(rhs):
+                return _optimizer_jax._solve_jacobian_system(
+                    residual_fn,
+                    x,
+                    rhs,
+                    transpose=False,
+                    tol=tol,
+                )
+
+            def solve_transpose(rhs):
+                return _optimizer_jax._solve_jacobian_system(
+                    residual_fn,
+                    x,
+                    rhs,
+                    transpose=True,
+                    tol=tol,
+                )
+
+            return linearization_kind, x.shape[0], x.dtype, solve_forward, solve_transpose
+
+        raise RuntimeError(
+            f"Unsupported BoozerSurfaceJAX linearization kind {linearization_kind!r}."
+        )
+
     def get_adjoint_runtime_state(self):
         """Return the last successful adjoint-state summary for wrapper gradients."""
         solved_state = self.get_solved_runtime_state()
         if (
-            "PLU" not in self.res
-            or self.res["PLU"] is None
+            not bool(self.res.get("adjoint_linear_solve_available", True))
             or "vjp_groups" not in self.res
             or self.res["vjp_groups"] is None
         ):
@@ -1651,10 +1783,19 @@ class BoozerSurfaceJAX(Optimizable):
         def stream_group_vjps(adjoint):
             yield from vjp_groups(adjoint, self, solved_state.iota, solved_state.G)
 
+        linearization_kind, decision_size, dtype, solve_forward, solve_transpose = (
+            self._build_runtime_linear_solve_callbacks(solved_state)
+        )
+
         return _BoozerAdjointRuntimeState(
             solved_state=solved_state,
-            plu=self.res["PLU"],
+            linearization_kind=linearization_kind,
+            decision_size=decision_size,
+            dtype=dtype,
+            solve_forward=solve_forward,
+            solve_transpose=solve_transpose,
             stream_group_vjps=stream_group_vjps,
+            plu=self.res.get("PLU"),
         )
 
     @property
@@ -2371,9 +2512,8 @@ class BoozerSurfaceJAX(Optimizable):
                 True,
             )
             half = _as_runtime_float64(0.5, reference=result["residual"])
-            jacobian_available_jax = jax.device_put(
-                np.asarray(jacobian_available, dtype=np.bool_)
-            )
+            primal_success = result["success"] & finite
+            adjoint_linear_solve_available = primal_success
             return {
                 "x": result["x"],
                 "sdofs": sdofs_exact,
@@ -2384,7 +2524,10 @@ class BoozerSurfaceJAX(Optimizable):
                 "jacobian": jacobian,
                 "plu": plu,
                 "nit": result["nit"],
-                "success": result["success"] & finite & jacobian_available_jax,
+                "success": primal_success,
+                "primal_success": primal_success,
+                "adjoint_linear_solve_available": adjoint_linear_solve_available,
+                "linearization_kind": "exact_jacobian",
                 "type": "exact",
                 "weight_inv_modB": weight_inv_modB,
                 **_exact_newton_reporting_fields(result),
@@ -2408,6 +2551,12 @@ class BoozerSurfaceJAX(Optimizable):
                 x0,
                 maxiter=self.options["bfgs_maxiter"],
                 tol=self.options["bfgs_tol"],
+                materialize_dense_linearization=bool(
+                    self.options["materialize_dense_linearization"]
+                ),
+                max_dense_linearization_bytes=self.options[
+                    "max_dense_linearization_bytes"
+                ],
                 args=(coil_set_spec,),
             )
             x_ls = ls_state["x"]
@@ -2457,6 +2606,8 @@ class BoozerSurfaceJAX(Optimizable):
             maxiter=self.options["newton_maxiter"],
             tol=self.options["newton_tol"],
             stab=self.options["newton_stab"],
+            materialize_hessian=bool(self.options["materialize_dense_linearization"]),
+            max_dense_hessian_bytes=self.options["max_dense_linearization_bytes"],
             objective_args=(coil_set_spec,),
         )
         sdofs_out, iota_out, G_out = self._unpack_decision_vector_jax(
@@ -2467,12 +2618,18 @@ class BoozerSurfaceJAX(Optimizable):
         finite = (
             jnp.all(jnp.isfinite(newton_result["x"]))
             & jnp.all(jnp.isfinite(newton_result["grad"]))
-            & jnp.all(jnp.isfinite(newton_result["hessian"]))
         )
-        P, L, U = _traceable_plu_or_dummy(
-            newton_result["hessian"],
-            finite=finite,
-        )
+        hessian = newton_result["hessian"]
+        if hessian is not None:
+            finite = finite & jnp.all(jnp.isfinite(hessian))
+            P, L, U = _traceable_plu_or_dummy(
+                hessian,
+                finite=finite,
+            )
+            plu = (P, L, U)
+        else:
+            plu = None
+        primal_success = newton_result["success"] & finite
         return {
             "x": newton_result["x"],
             "sdofs": sdofs_out,
@@ -2480,13 +2637,25 @@ class BoozerSurfaceJAX(Optimizable):
             "G": G_out,
             "fun": newton_result["fun"],
             "grad": newton_result["grad"],
-            "hessian": newton_result["hessian"],
-            "plu": (P, L, U),
+            "hessian": hessian,
+            "plu": plu,
             "nit": newton_result["nit"],
-            "success": newton_result["success"] & finite,
+            "success": primal_success,
+            "primal_success": primal_success,
+            "adjoint_linear_solve_available": primal_success,
+            "linearization_kind": "hessian",
             "optimizer_method": method,
             "type": "ls",
             "weight_inv_modB": weight_inv_modB,
+            "hessian_materialized": newton_result.get("hessian_materialized"),
+            "dense_hessian_shape": newton_result.get("dense_hessian_shape"),
+            "dense_hessian_bytes": newton_result.get("dense_hessian_bytes"),
+            "max_dense_hessian_bytes": newton_result.get(
+                "max_dense_hessian_bytes"
+            ),
+            "failure_category": newton_result.get("failure_category"),
+            "failure_stage": newton_result.get("failure_stage"),
+            "message": newton_result.get("message"),
         }
 
     def _compute_residual_vector(
@@ -2638,6 +2807,8 @@ class BoozerSurfaceJAX(Optimizable):
         maxiter,
         tol,
         stab,
+        materialize_hessian,
+        max_dense_hessian_bytes,
         progress_callback=None,
         objective_args=(),
     ):
@@ -2649,6 +2820,8 @@ class BoozerSurfaceJAX(Optimizable):
                 maxiter=maxiter,
                 tol=tol,
                 stab=stab,
+                materialize_hessian=materialize_hessian,
+                max_dense_hessian_bytes=max_dense_hessian_bytes,
                 progress_callback=progress_callback,
                 args=objective_args,
             )
@@ -2662,6 +2835,8 @@ class BoozerSurfaceJAX(Optimizable):
             maxiter=maxiter,
             tol=tol,
             stab=stab,
+            materialize_hessian=materialize_hessian,
+            max_dense_hessian_bytes=max_dense_hessian_bytes,
             progress_callback=progress_callback,
         )
 
@@ -2825,6 +3000,8 @@ class BoozerSurfaceJAX(Optimizable):
             maxiter=maxiter,
             tol=tol,
             stab=stab,
+            materialize_hessian=bool(self.options["materialize_dense_linearization"]),
+            max_dense_hessian_bytes=self.options["max_dense_linearization_bytes"],
             progress_callback=self._resolve_newton_progress_callback(method),
         )
 
@@ -2835,7 +3012,7 @@ class BoozerSurfaceJAX(Optimizable):
         if (
             not _host_all_finite(result["x"])
             or not _host_all_finite(result["grad"])
-            or not _host_all_finite(result["hessian"])
+            or (result["hessian"] is not None and not _host_all_finite(result["hessian"]))
         ):
             solve_generation = _advance_solver_generation(self)
             res = {
@@ -2854,6 +3031,9 @@ class BoozerSurfaceJAX(Optimizable):
                 "solve_generation": solve_generation,
                 "weight_inv_modB": weight_inv_modB,
                 "fun": float(_host_scalar(result["fun"])),
+                "primal_success": False,
+                "adjoint_linear_solve_available": False,
+                "linearization_kind": "hessian",
             }
             self.res = res
             self.need_to_run_code = False
@@ -2861,7 +3041,11 @@ class BoozerSurfaceJAX(Optimizable):
 
         self._set_surface_dofs(sdofs_final)
         H = result["hessian"]
-        P, L, U = jax.scipy.linalg.lu(H)
+        if H is not None:
+            P, L, U = jax.scipy.linalg.lu(H)
+            plu = (P, L, U)
+        else:
+            plu = None
 
         G_for_res = (
             G_out
@@ -2904,16 +3088,26 @@ class BoozerSurfaceJAX(Optimizable):
             "hessian": H,
             "iter": int(_host_scalar(result["nit"], dtype=np.int64)),
             "success": bool(_host_scalar(result["success"])),
+            "primal_success": bool(_host_scalar(result["success"])),
+            "adjoint_linear_solve_available": bool(_host_scalar(result["success"])),
             "G": G_out,
             "s": s,
             "iota": iota_out,
-            "PLU": (P, L, U),
+            "PLU": plu,
             "vjp": vjp_callback,
             "vjp_groups": vjp_groups_callback,
             "type": "ls",
+            "linearization_kind": "hessian",
             "solve_generation": solve_generation,
             "weight_inv_modB": weight_inv_modB,
             "fun": float(_host_scalar(result["fun"])),
+            "hessian_materialized": result.get("hessian_materialized"),
+            "dense_hessian_shape": result.get("dense_hessian_shape"),
+            "dense_hessian_bytes": result.get("dense_hessian_bytes"),
+            "max_dense_hessian_bytes": result.get("max_dense_hessian_bytes"),
+            "failure_category": result.get("failure_category"),
+            "failure_stage": result.get("failure_stage"),
+            "message": result.get("message"),
         }
         self.res = res
         self.need_to_run_code = False
@@ -3189,8 +3383,7 @@ class BoozerSurfaceJAX(Optimizable):
             not bool(_host_scalar(result["success"]))
             or not _host_all_finite(x_final)
             or not _host_all_finite(exact_residual)
-            or not jacobian_available
-            or not _host_all_finite(jacobian)
+            or (jacobian_available and not _host_all_finite(jacobian))
         ):
             solve_generation = _advance_solver_generation(self)
             res = {
@@ -3209,6 +3402,9 @@ class BoozerSurfaceJAX(Optimizable):
                 "vjp_groups": None,
                 "solve_generation": solve_generation,
                 "weight_inv_modB": self.options["weight_inv_modB"],
+                "primal_success": False,
+                "adjoint_linear_solve_available": False,
+                "linearization_kind": "exact_jacobian",
                 **exact_reporting,
             }
             self.res = res
@@ -3219,7 +3415,11 @@ class BoozerSurfaceJAX(Optimizable):
 
         self._set_surface_dofs(sdofs_final)
         J = jacobian
-        P, L, U = jax.scipy.linalg.lu(J)
+        if jacobian_available:
+            P, L, U = jax.scipy.linalg.lu(J)
+            plu = (P, L, U)
+        else:
+            plu = None
 
         nphi = len(self.quadpoints_phi)
         ntheta = len(self.quadpoints_theta)
@@ -3279,14 +3479,17 @@ class BoozerSurfaceJAX(Optimizable):
             "jacobian": J,
             "iter": int(_host_scalar(result["nit"], dtype=np.int64)),
             "success": bool(_host_scalar(result["success"])),
+            "primal_success": bool(_host_scalar(result["success"])),
+            "adjoint_linear_solve_available": bool(_host_scalar(result["success"])),
             "G": G_final,
             "s": s,
             "iota": iota_final,
-            "PLU": (P, L, U),
+            "PLU": plu,
             "mask": bool_mask,
             "type": "exact",
             "vjp": vjp_callback,
             "vjp_groups": vjp_groups_callback,
+            "linearization_kind": "exact_jacobian",
             "solve_generation": solve_generation,
             "weight_inv_modB": self.options["weight_inv_modB"],
             **exact_reporting,
@@ -3295,6 +3498,8 @@ class BoozerSurfaceJAX(Optimizable):
         self.need_to_run_code = False
 
         if verbose:
+            if materialization_message is not None:
+                print(materialization_message, flush=True)
             res_norm = _host_inf_norm(res["residual"])
             print(
                 f"NEWTON solve - success={res['success']}  "

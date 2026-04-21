@@ -223,6 +223,7 @@ class SingleStageExampleTests(unittest.TestCase):
         *,
         objective_value=1.25,
         objective_grad=None,
+        forward_result=None,
     ):
         resolved_grad = (
             np.asarray(objective_grad, dtype=np.float64)
@@ -259,10 +260,13 @@ class SingleStageExampleTests(unittest.TestCase):
                     jnp.asarray(resolved_grad, dtype=jnp.float64),
                 )
 
-            return {
+            runtime_bundle = {
                 "reporting_metrics": _reporting_metrics,
                 "value_and_grad": _value_and_grad,
             }
+            if forward_result is not None:
+                runtime_bundle["forward_result"] = forward_result
+            return runtime_bundle
 
         return _runtime_builder
 
@@ -887,6 +891,94 @@ class SingleStageExampleTests(unittest.TestCase):
             },
         )
 
+    def test_resolve_target_lane_boozer_init_base_overrides_uses_target_lane_defaults(
+        self,
+    ):
+        module = self.load_module()
+
+        overrides = module.resolve_target_lane_boozer_init_base_overrides(
+            field_backend="jax",
+            optimizer_backend="ondevice",
+            boozer_limited_memory=False,
+            target_lane_boozer_bfgs_tol=1.0e-8,
+            target_lane_boozer_bfgs_maxiter=None,
+            target_lane_boozer_newton_tol=None,
+            target_lane_boozer_newton_maxiter=12,
+        )
+
+        self.assertEqual(
+            overrides,
+            {
+                "least_squares_algorithm_override": None,
+                "bfgs_tol_override": 1.0e-8,
+                "bfgs_maxiter_override": None,
+                "newton_tol_override": 1.0e-8,
+                "newton_maxiter_override": 12,
+            },
+        )
+
+    def test_resolve_target_lane_boozer_init_base_overrides_is_empty_off_target_lane(
+        self,
+    ):
+        module = self.load_module()
+
+        overrides = module.resolve_target_lane_boozer_init_base_overrides(
+            field_backend="cpu",
+            optimizer_backend="scipy",
+            boozer_limited_memory=False,
+            target_lane_boozer_bfgs_tol=1.0e-8,
+            target_lane_boozer_bfgs_maxiter=48,
+            target_lane_boozer_newton_tol=1.0e-10,
+            target_lane_boozer_newton_maxiter=12,
+        )
+
+        self.assertEqual(
+            overrides,
+            {
+                "least_squares_algorithm_override": None,
+                "bfgs_tol_override": None,
+                "bfgs_maxiter_override": None,
+                "newton_tol_override": None,
+                "newton_maxiter_override": None,
+            },
+        )
+
+    def test_resolve_target_lane_boozer_init_base_overrides_floors_bfgs_maxiter(
+        self,
+    ):
+        module = self.load_module()
+
+        overrides = module.resolve_target_lane_boozer_init_base_overrides(
+            field_backend="jax",
+            optimizer_backend="ondevice",
+            boozer_limited_memory=False,
+            target_lane_boozer_bfgs_tol=1.0e-8,
+            target_lane_boozer_bfgs_maxiter=48,
+            target_lane_boozer_newton_tol=None,
+            target_lane_boozer_newton_maxiter=None,
+        )
+
+        self.assertEqual(overrides["bfgs_maxiter_override"], 128)
+        self.assertEqual(overrides["newton_tol_override"], 1.0e-8)
+
+    def test_resolve_target_lane_boozer_init_base_overrides_skips_full_memory_newton_floor_for_lbfgs(
+        self,
+    ):
+        module = self.load_module()
+
+        overrides = module.resolve_target_lane_boozer_init_base_overrides(
+            field_backend="jax",
+            optimizer_backend="ondevice",
+            boozer_limited_memory=True,
+            target_lane_boozer_bfgs_tol=None,
+            target_lane_boozer_bfgs_maxiter=None,
+            target_lane_boozer_newton_tol=None,
+            target_lane_boozer_newton_maxiter=None,
+        )
+
+        self.assertIsNone(overrides["bfgs_tol_override"])
+        self.assertIsNone(overrides["newton_tol_override"])
+
     def test_resolve_warm_start_boozer_init_overrides_keeps_explicit_surface_algorithm(
         self,
     ):
@@ -1283,7 +1375,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 "jax",
                 "ondevice",
             ),
-            "lm",
+            "quasi-newton",
         )
         with self.assertRaisesRegex(
             ValueError, "requires boozer_optimizer_backend='ondevice'"
@@ -1308,6 +1400,32 @@ class SingleStageExampleTests(unittest.TestCase):
                 "quasi-newton",
             ),
             "quasi-newton",
+        )
+
+    def test_resolve_single_stage_boozer_limited_memory_defaults_to_full_memory(self):
+        module = self.load_module()
+
+        self.assertFalse(
+            module.resolve_single_stage_boozer_limited_memory("cpu", "scipy")
+        )
+        self.assertFalse(
+            module.resolve_single_stage_boozer_limited_memory("jax", "ondevice")
+        )
+        self.assertFalse(
+            module.resolve_single_stage_boozer_limited_memory(
+                "jax",
+                "ondevice",
+                None,
+                False,
+            )
+        )
+        self.assertTrue(
+            module.resolve_single_stage_boozer_limited_memory(
+                "jax",
+                "ondevice",
+                None,
+                True,
+            )
         )
 
     def test_parse_args_does_not_treat_optimizer_env_as_explicit_boozer_override(self):
@@ -1336,8 +1454,9 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(args.optimizer_backend, "ondevice")
         self.assertIsNone(args.boozer_optimizer_backend)
-        self.assertEqual(args.boozer_least_squares_algorithm, "lm")
+        self.assertEqual(args.boozer_least_squares_algorithm, "quasi-newton")
         self.assertFalse(args.boozer_least_squares_algorithm_explicit)
+        self.assertIsNone(args.boozer_limited_memory)
 
     def test_parse_args_preserves_cpu_default_reference_lane(self):
         module = self.load_module()
@@ -1353,6 +1472,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(args.optimizer_backend, "scipy")
         self.assertIsNone(args.boozer_optimizer_backend)
         self.assertIsNone(args.boozer_least_squares_algorithm)
+        self.assertIsNone(args.boozer_limited_memory)
 
     def test_parse_args_defaults_boozer_algorithm_from_explicit_inner_backend(self):
         module = self.load_module()
@@ -1372,8 +1492,26 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(args.optimizer_backend, "ondevice")
         self.assertEqual(args.boozer_optimizer_backend, "ondevice")
-        self.assertEqual(args.boozer_least_squares_algorithm, "lm")
+        self.assertEqual(args.boozer_least_squares_algorithm, "quasi-newton")
         self.assertFalse(args.boozer_least_squares_algorithm_explicit)
+        self.assertIsNone(args.boozer_limited_memory)
+
+    def test_parse_args_accepts_boozer_limited_memory_override(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--boozer-limited-memory",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.boozer_limited_memory)
 
     def test_parse_args_defaults_target_lane_sync_to_final_only(self):
         module = self.load_module()
@@ -1404,7 +1542,9 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(args.maxcor, 20)
         self.assertEqual(args.initial_step_scale, 1.0)
         self.assertEqual(args.initial_step_maxiter, 0)
-        self.assertEqual(args.target_lane_boozer_bfgs_tol, 1e-8)
+        self.assertFalse(args.initial_step_scale_explicit)
+        self.assertFalse(args.initial_step_maxiter_explicit)
+        self.assertIsNone(args.target_lane_boozer_bfgs_tol)
         self.assertIsNone(args.target_lane_boozer_bfgs_maxiter)
         self.assertIsNone(args.target_lane_boozer_newton_tol)
         self.assertIsNone(args.target_lane_boozer_newton_maxiter)
@@ -1446,10 +1586,33 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(args.target_lane_outer_initial_step_size)
         self.assertEqual(args.initial_step_scale, 1.0)
         self.assertEqual(args.initial_step_maxiter, 0)
+        self.assertFalse(args.initial_step_scale_explicit)
+        self.assertFalse(args.initial_step_maxiter_explicit)
         self.assertIsNone(args.target_lane_boozer_bfgs_tol)
         self.assertIsNone(args.target_lane_boozer_bfgs_maxiter)
         self.assertIsNone(args.target_lane_boozer_newton_tol)
         self.assertIsNone(args.target_lane_boozer_newton_maxiter)
+
+    def test_parse_args_marks_explicit_initial_phase_defaults(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--initial-step-scale",
+                "1.0",
+                "--initial-step-maxiter",
+                "0",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.initial_step_scale, 1.0)
+        self.assertEqual(args.initial_step_maxiter, 0)
+        self.assertTrue(args.initial_step_scale_explicit)
+        self.assertTrue(args.initial_step_maxiter_explicit)
 
     def test_build_scaled_outer_problem_scales_coordinates_gradients_and_callback(self):
         module = self.load_module()
@@ -2024,6 +2187,58 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(explicit_settings["initial_step_scale"], 0.5)
         self.assertEqual(explicit_settings["initial_step_maxiter"], 2)
         self.assertFalse(explicit_settings["auto_enabled"])
+
+    def test_resolve_single_stage_policy_initial_phase_settings_respects_explicit_default_disable(
+        self,
+    ):
+        module = self.load_module()
+        policy = module.SingleStageSearchPolicy(
+            donor_class="stage2_seed_only",
+            search_policy="repair_first",
+            adaptive_failure_penalty_weight=1.5,
+            auto_initial_step_scale=0.25,
+            auto_initial_step_maxiter=3,
+        )
+
+        explicit_default_settings = (
+            module.resolve_single_stage_policy_initial_phase_settings(
+                policy,
+                initial_step_scale=1.0,
+                initial_step_maxiter=0,
+                initial_step_scale_explicit=True,
+                initial_step_maxiter_explicit=True,
+                field_backend="cpu",
+                optimizer_backend="scipy",
+            )
+        )
+
+        self.assertEqual(explicit_default_settings["initial_step_scale"], 1.0)
+        self.assertEqual(explicit_default_settings["initial_step_maxiter"], 0)
+        self.assertFalse(explicit_default_settings["auto_enabled"])
+
+    def test_resolve_single_stage_policy_initial_phase_settings_skips_target_lane_auto_phase(
+        self,
+    ):
+        module = self.load_module()
+        policy = module.SingleStageSearchPolicy(
+            donor_class="stage2_seed_only",
+            search_policy="repair_first",
+            adaptive_failure_penalty_weight=1.5,
+            auto_initial_step_scale=0.25,
+            auto_initial_step_maxiter=3,
+        )
+
+        target_lane_settings = module.resolve_single_stage_policy_initial_phase_settings(
+            policy,
+            initial_step_scale=1.0,
+            initial_step_maxiter=0,
+            field_backend="jax",
+            optimizer_backend="ondevice",
+        )
+
+        self.assertEqual(target_lane_settings["initial_step_scale"], 1.0)
+        self.assertEqual(target_lane_settings["initial_step_maxiter"], 0)
+        self.assertFalse(target_lane_settings["auto_enabled"])
 
     def test_record_single_stage_local_incumbent_tracks_latest_and_best(self):
         module = self.load_module()
@@ -3260,7 +3475,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 )
             )
 
-        self.assertIsNone(scalar_fun)
+        self.assertIsNotNone(scalar_fun)
         self.assertIs(value_and_grad_fun, value_and_grad_marker)
         self.assertIsNone(target_lane_profile)
         self.assertEqual(runtime_calls, [(False, False, None, None)])
@@ -3643,6 +3858,71 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(run_dict["x_prev"], run_dict_before["x_prev"])
         self.assertEqual(run_dict["it"], run_dict_before["it"])
 
+    def test_build_single_stage_target_lane_accepted_step_sync_prefers_runtime_forward_result(
+        self,
+    ):
+        module = self.load_module()
+        captured = {}
+        runtime_summary = self._make_reporting_runtime_summary(
+            include_distance_metrics=True
+        )
+        forward_result = {
+            "success": jnp.asarray(True, dtype=bool),
+            "primal_success": jnp.asarray(True, dtype=bool),
+            "sdofs": jnp.asarray([0.6, -0.3], dtype=jnp.float64),
+            "iota": jnp.asarray(0.24, dtype=jnp.float64),
+            "G": jnp.asarray(1.9, dtype=jnp.float64),
+            "x": jnp.asarray([0.6, -0.3, 0.24, 1.9], dtype=jnp.float64),
+        }
+        fake_boozer_surface = types.SimpleNamespace(
+            run_code_traceable=lambda *_args: (_ for _ in ()).throw(
+                AssertionError("runtime forward_result should be used")
+            )
+        )
+        fake_bs = types.SimpleNamespace(
+            coil_set_spec_from_dofs=lambda coil_dofs: coil_dofs
+        )
+
+        with patch.object(
+            module,
+            "get_traceable_single_stage_runtime_bundle_builder",
+            return_value=self._make_reporting_runtime_builder(
+                captured,
+                runtime_summary,
+                forward_result=lambda _coil_dofs: forward_result,
+            ),
+        ), patch.object(module, "CC_DIST", 0.05, create=True), patch.object(
+            module, "CS_DIST", 0.02, create=True
+        ), patch.object(module, "SS_DIST", 0.04, create=True), patch.object(
+            module, "CURVATURE_THRESHOLD", 40.0, create=True
+        ):
+            sync = module.build_single_stage_target_lane_accepted_step_sync(
+                fake_boozer_surface,
+                fake_bs,
+                0.21,
+                outer_objective_config="config-marker",
+                success_filter="success-filter-marker",
+            )
+            run_dict = {
+                "sdofs": np.array([0.1, -0.05], dtype=np.float64),
+                "iota": 0.2,
+                "G": 1.0,
+                "J": 1.0,
+                "dJ": np.zeros(2, dtype=np.float64),
+            }
+            sync(
+                run_dict,
+                jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
+                benchmark_mode=False,
+            )
+
+        np.testing.assert_allclose(
+            run_dict["sdofs"],
+            np.array([0.6, -0.3], dtype=np.float64),
+        )
+        self.assertAlmostEqual(run_dict["iota"], 0.24)
+        self.assertAlmostEqual(run_dict["G"], 1.9)
+
     def test_build_target_lane_outer_objectives_profiles_with_jax_coil_dofs(self):
         module = self.load_module()
         bs = types.SimpleNamespace(x=np.array([1.0, -2.0], dtype=np.float64))
@@ -3909,7 +4189,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 curvature_weight=70.0,
             )
 
-        self.assertIsNone(scalar_fun)
+        self.assertIsNotNone(scalar_fun)
         self.assertIs(value_and_grad_fun, value_and_grad_marker)
         self.assertIsNone(target_lane_profile)
         self.assertIs(success_filter, success_filter_marker)
@@ -4601,6 +4881,7 @@ class SingleStageExampleTests(unittest.TestCase):
             module.should_force_strict_target_lane_final_sync(
                 use_target_lane=False,
                 res_nit=3,
+                optimizer_status=0,
                 accepted_step_callback=None,
                 trial_boozer_override_active=True,
             )
@@ -4609,22 +4890,16 @@ class SingleStageExampleTests(unittest.TestCase):
             module.should_force_strict_target_lane_final_sync(
                 use_target_lane=True,
                 res_nit=0,
+                optimizer_status=0,
                 accepted_step_callback=None,
                 trial_boozer_override_active=True,
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             module.should_force_strict_target_lane_final_sync(
                 use_target_lane=True,
                 res_nit=2,
-                accepted_step_callback=object(),
-                trial_boozer_override_active=False,
-            )
-        )
-        self.assertTrue(
-            module.should_force_strict_target_lane_final_sync(
-                use_target_lane=True,
-                res_nit=2,
+                optimizer_status=5,
                 accepted_step_callback=None,
                 trial_boozer_override_active=False,
             )
@@ -4633,8 +4908,51 @@ class SingleStageExampleTests(unittest.TestCase):
             module.should_force_strict_target_lane_final_sync(
                 use_target_lane=True,
                 res_nit=2,
+                optimizer_status=1,
+                accepted_step_callback=object(),
+                trial_boozer_override_active=False,
+            )
+        )
+        self.assertTrue(
+            module.should_force_strict_target_lane_final_sync(
+                use_target_lane=True,
+                res_nit=2,
+                optimizer_status=0,
+                accepted_step_callback=None,
+                trial_boozer_override_active=False,
+            )
+        )
+        self.assertTrue(
+            module.should_force_strict_target_lane_final_sync(
+                use_target_lane=True,
+                res_nit=2,
+                optimizer_status=None,
                 accepted_step_callback=object(),
                 trial_boozer_override_active=True,
+            )
+        )
+
+    def test_target_lane_result_syncability_helpers(self):
+        module = self.load_module()
+
+        self.assertTrue(module.target_lane_result_status_allows_state_sync(None))
+        self.assertTrue(module.target_lane_result_status_allows_state_sync(0))
+        self.assertTrue(module.target_lane_result_status_allows_state_sync(1))
+        self.assertFalse(module.target_lane_result_status_allows_state_sync(5))
+
+        self.assertFalse(
+            module.target_lane_result_has_syncable_state(
+                types.SimpleNamespace(nit=0, status=0)
+            )
+        )
+        self.assertTrue(
+            module.target_lane_result_has_syncable_state(
+                types.SimpleNamespace(nit=1, status=1)
+            )
+        )
+        self.assertFalse(
+            module.target_lane_result_has_syncable_state(
+                types.SimpleNamespace(nit=1, status=5)
             )
         )
 
@@ -5312,6 +5630,153 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(retry_summary["restored_preserved_local_stage"], "best")
         np.testing.assert_allclose(result.x, np.array([4.0, 5.0]))
         np.testing.assert_allclose(run_dict["x_prev"], np.array([4.0, 5.0]))
+
+    def test_run_single_stage_target_lane_optimizer_with_retries_keeps_syncable_unsuccessful_result(
+        self,
+    ):
+        module = self.load_module()
+        contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        anchor_state = {
+            "coil_dofs": np.array([4.0, 5.0]),
+            "sdofs": np.array([6.0, 7.0]),
+            "iota": TEST_IOTA,
+            "G": TEST_G0,
+            "J": 1.0,
+            "dJ": np.zeros(5),
+            "intersecting": False,
+            "self_intersection_check_available": True,
+            "hardware_constraint_status": {"success": True, "violations": []},
+        }
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        run_dict["latest_local_incumbent"] = copy.deepcopy(anchor_state)
+        run_dict["latest_local_stage"] = "latest"
+        run_dict["best_local_incumbent"] = copy.deepcopy(anchor_state)
+        run_dict["best_local_stage"] = "best"
+        candidate_x = np.array([9.0, 8.0])
+
+        def maxiter_result(*args, **kwargs):
+            del args, kwargs
+            return types.SimpleNamespace(
+                x=candidate_x.copy(),
+                nit=1,
+                success=False,
+                message="maxiter",
+                status=1,
+            )
+
+        policy = module.SingleStageSearchPolicy(
+            donor_class="serialized_surface_state",
+            search_policy="preserve_first",
+            adaptive_failure_penalty_weight=1.0,
+            invalid_step_retry_budget=0,
+            retry_step_shrink_factor=0.35,
+        )
+
+        with patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=maxiter_result,
+        ):
+            result, retry_summary = (
+                module.run_single_stage_target_lane_optimizer_with_retries(
+                    lambda x: x,
+                    np.array([0.0, 0.0]),
+                    phase="phase2",
+                    callback=None,
+                    retry_callback=None,
+                    result_state_sync=None,
+                    contract=contract,
+                    maxiter=5,
+                    ftol=0.0,
+                    gtol=1.0e-6,
+                    maxcor=5,
+                    outer_maxls=6,
+                    scalar_fun=None,
+                    target_lane_initial_step_size=None,
+                    failure_callback=None,
+                    invalid_state_events=[],
+                    run_dict=run_dict,
+                    single_stage_search_policy=policy,
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertFalse(retry_summary["restored_preserved_local_state"])
+        self.assertIsNone(retry_summary["restored_preserved_local_stage"])
+        np.testing.assert_allclose(result.x, candidate_x)
+        np.testing.assert_allclose(run_dict["x_prev"], np.zeros(5))
+
+    def test_run_single_stage_target_lane_optimizer_with_retries_skips_flagged_failed_attempt_sync(
+        self,
+    ):
+        module = self.load_module()
+        contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        invalid_state_events = [
+            {
+                "line_search_failed": True,
+                "nonfinite_step": False,
+                "stalled_step": False,
+                "valid_curvature": True,
+                "step_scale": {"value": 0.2},
+            }
+        ]
+        sync_calls = []
+
+        def flagged_result_state_sync(x):
+            sync_calls.append(np.asarray(x, dtype=float))
+
+        flagged_result_state_sync.simsopt_skip_failed_attempt_sync = True
+
+        def failed_result(*args, **kwargs):
+            del args, kwargs
+            return types.SimpleNamespace(
+                x=np.array([9.0, 8.0]),
+                nit=1,
+                success=False,
+                message="failed",
+                status=5,
+            )
+
+        policy = module.SingleStageSearchPolicy(
+            donor_class="serialized_surface_state",
+            search_policy="preserve_first",
+            adaptive_failure_penalty_weight=1.0,
+            invalid_step_retry_budget=0,
+            retry_step_shrink_factor=0.35,
+        )
+
+        with patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=failed_result,
+        ):
+            result, retry_summary = (
+                module.run_single_stage_target_lane_optimizer_with_retries(
+                    lambda x: x,
+                    np.array([0.0, 0.0]),
+                    phase="phase2",
+                    callback=None,
+                    retry_callback=None,
+                    result_state_sync=flagged_result_state_sync,
+                    contract=contract,
+                    maxiter=5,
+                    ftol=0.0,
+                    gtol=1.0e-6,
+                    maxcor=5,
+                    outer_maxls=6,
+                    scalar_fun=None,
+                    target_lane_initial_step_size=None,
+                    failure_callback=None,
+                    invalid_state_events=invalid_state_events,
+                    run_dict=run_dict,
+                    single_stage_search_policy=policy,
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(sync_calls, [])
+        self.assertFalse(retry_summary["restored_preserved_local_state"])
 
     def test_run_single_stage_target_lane_optimizer_with_retries_tracks_total_iterations(
         self,
@@ -7987,6 +8452,31 @@ class SingleStageExampleTests(unittest.TestCase):
 
         np.testing.assert_allclose(captured["x"], np.array([6.0, 7.0]))
         np.testing.assert_allclose(jf.x, np.array([1.0, 2.0]))
+        np.testing.assert_allclose(booz.surface.x, np.array([3.0, 4.0]))
+        self.assertEqual(booz.res["iota"], 0.2)
+        self.assertEqual(booz.res["G"], 5.0)
+
+    def test_restore_from_pytree_updates_diagnostic_field_when_provided(self):
+        module = self.load_module()
+
+        jf = types.SimpleNamespace(x=np.array([1.0, 2.0]))
+        booz = types.SimpleNamespace(
+            surface=types.SimpleNamespace(x=np.array([10.0, 20.0])),
+            res={"iota": 0.1, "G": 2.0},
+        )
+        diagnostic_bs = types.SimpleNamespace(x=np.array([9.0, 9.0]))
+        run_dict = {"sdofs": np.array([3.0, 4.0]), "iota": 0.2, "G": 5.0}
+
+        module.restore_from_pytree(
+            jf,
+            booz,
+            run_dict,
+            coil_dofs=np.array([6.0, 7.0]),
+            diagnostic_bs=diagnostic_bs,
+        )
+
+        np.testing.assert_allclose(jf.x, np.array([6.0, 7.0]))
+        np.testing.assert_allclose(diagnostic_bs.x, np.array([6.0, 7.0]))
         np.testing.assert_allclose(booz.surface.x, np.array([3.0, 4.0]))
         self.assertEqual(booz.res["iota"], 0.2)
         self.assertEqual(booz.res["G"], 5.0)

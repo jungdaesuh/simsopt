@@ -2971,7 +2971,7 @@ class TestStage2OptimizerContract:
 
         assert args.backend == "jax"
         assert args.optimizer_backend == "ondevice"
-        assert args.least_squares_algorithm == "lm"
+        assert args.least_squares_algorithm == "quasi-newton"
 
     def test_parse_args_preserves_cpu_default_reference_lane(self, monkeypatch):
         stage2_script = _load_stage2_script_module()
