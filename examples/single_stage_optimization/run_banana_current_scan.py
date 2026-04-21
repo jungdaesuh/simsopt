@@ -187,8 +187,7 @@ def _scale_banana_current_chain(
         raise ValueError(
             "Banana-current scan requires at least one banana coil in the partition."
         )
-    base_coil_current = banana_coils[0].current
-    innermost_current = base_coil_current
+    innermost_current = banana_coils[0].current
     chain_scale = 1.0
     while hasattr(innermost_current, "current_to_scale"):
         chain_scale *= float(innermost_current.scale)
@@ -199,7 +198,9 @@ def _scale_banana_current_chain(
             "ScaledCurrent wrapper has zero scale."
         )
     new_dof_value = float(target_banana_current_a) / chain_scale
-    innermost_current.x = [new_dof_value]
+    # The banana scan deliberately overrides the donor current even when the
+    # underlying Current DOF is fixed in the saved artifact.
+    innermost_current.local_full_x = [new_dof_value]
 
 
 def _materialize_stage2_seed_variant(

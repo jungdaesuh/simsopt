@@ -342,7 +342,12 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
     """
 
     @staticmethod
-    def _build_banana_partitions(banana_init_current_A: float):
+    def _build_banana_partitions(
+        banana_init_current_A: float,
+        *,
+        num_tf_coils: int = 20,
+        fixed_leaf_current: bool = False,
+    ):
         from simsopt._core.optimizable import load as load_optimizable
         from simsopt.field import BiotSavart, Coil, Current
         from simsopt.field.coil import ScaledCurrent, coils_via_symmetries
@@ -354,7 +359,10 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
 
         banana_curve = CurveXYZFourier(96, 1)
         banana_curve.set_dofs([0.9, 0.2, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 0.0])
-        base_banana_current = ScaledCurrent(Current(1.0), banana_init_current_A)
+        leaf_current = Current(1.0)
+        if fixed_leaf_current:
+            leaf_current.fix_all()
+        base_banana_current = ScaledCurrent(leaf_current, banana_init_current_A)
         banana_coils = coils_via_symmetries(
             [banana_curve],
             [base_banana_current],
@@ -362,26 +370,28 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
             True,
         )
         tf_coils = []
-        for coil_index in range(20):
+        for coil_index in range(num_tf_coils):
             tf_curve = CurveXYZFourier(96, 1)
             tf_curve.set_dofs(
                 [0.9 + 0.01 * coil_index, 0.18, 0.0, 0.0, 0.18, 0.0, 0.0, 0.0, 0.0]
             )
             tf_coils.append(Coil(tf_curve, Current(8.0e4)))
         bs = BiotSavart([*tf_coils, *banana_coils])
-        return bs, handoff, load_optimizable
+        stage2_results = {
+            "NUM_TF_COILS": num_tf_coils,
+            "NUM_BANANA_COILS": 10,
+            "NUM_PROXY_COILS": 0,
+            "NUM_VF_COILS": 0,
+        }
+        return bs, stage2_results, handoff, load_optimizable
 
     def test_scale_banana_current_chain_preserves_stellsym_signs_under_round_trip(
         self,
     ):
         module = load_banana_scan_module()
-        bs, handoff, load_optimizable = self._build_banana_partitions(11000.0)
-        stage2_results = {
-            "NUM_TF_COILS": 20,
-            "NUM_BANANA_COILS": 10,
-            "NUM_PROXY_COILS": 0,
-            "NUM_VF_COILS": 0,
-        }
+        bs, stage2_results, handoff, load_optimizable = self._build_banana_partitions(
+            11000.0
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             save_path = Path(tmpdir) / "seed.json"
@@ -451,6 +461,39 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
             module._scale_banana_current_chain(
                 (),
                 target_banana_current_a=1.0,
+            )
+
+    def test_scale_banana_current_chain_updates_fixed_leaf_current(self):
+        module = load_banana_scan_module()
+        bs, stage2_results, handoff, load_optimizable = self._build_banana_partitions(
+            11000.0,
+            num_tf_coils=1,
+            fixed_leaf_current=True,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "seed.json"
+            bs.save(str(save_path))
+            loaded = load_optimizable(str(save_path))
+            partitions = handoff.partition_loaded_stage2_coils(
+                loaded.coils,
+                stage2_results=stage2_results,
+                requested_num_tf_coils=stage2_results["NUM_TF_COILS"],
+            )
+
+            module._scale_banana_current_chain(
+                partitions.banana_coils,
+                target_banana_current_a=5500.0,
+            )
+
+            scaled_values = [
+                coil.current.get_value() for coil in partitions.banana_coils
+            ]
+            self.assertTrue(
+                all(
+                    abs(abs(value) - 5500.0) < 1.0e-9
+                    for value in scaled_values
+                )
             )
 
     def test_materialize_stage2_seed_variant_emits_matching_checksum(self):

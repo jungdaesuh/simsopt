@@ -745,7 +745,7 @@ class CoilNormalField(NormalField):
         dofs = JF.x
 
         res = minimize(fun, dofs, jac=True, method='L-BFGS-B',
-                       options={'maxiter': MAXITER, 'maxcor': 300, 'iprint': 5}, tol=1e-15)
+                       options={'maxiter': MAXITER, 'maxcor': 300}, tol=1e-15)
         print(f'the maximum difference between coil Vns and target Vns is: {np.max(np.abs(self.vns-targetvns))}')
         print(f'The root mean squared difference between the Vns produced by the coils and the target is: {np.sqrt(np.mean((self.vns-targetvns)**2))}')
         return res

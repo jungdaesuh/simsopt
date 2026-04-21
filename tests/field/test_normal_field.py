@@ -2,6 +2,7 @@ import os
 import unittest
 import logging
 import re
+import warnings
 
 import numpy as np
 from monty.tempfile import ScratchDir
@@ -452,7 +453,21 @@ class CoilNormalFieldTests(unittest.TestCase):
         surface = SurfaceRZFourier(nfp=3, stellsym=False)
         coilset = CoilSet(surface=surface)
         cnf = CoilNormalField(coilset)
-        cnf.optimize_coils(targetvns=np.zeros_like(cnf.vns), targetvnc=np.zeros_like(cnf.vnc), TARGET_LENGTH=500, MAXITER=10)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cnf.optimize_coils(
+                targetvns=np.zeros_like(cnf.vns),
+                targetvnc=np.zeros_like(cnf.vnc),
+                TARGET_LENGTH=500,
+                MAXITER=10,
+            )
+        self.assertFalse(
+            any(
+                isinstance(warning.message, DeprecationWarning)
+                and "L-BFGS-B solver are deprecated" in str(warning.message)
+                for warning in caught
+            )
+        )
 
     def test_inherited_methods_handled_correctly(self):
         cnf = CoilNormalField()

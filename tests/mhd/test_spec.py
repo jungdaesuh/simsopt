@@ -9,29 +9,16 @@ from scipy.constants import mu_0
 from simsopt._core.util import ObjectiveFailure
 
 try:
-    import spec as spec_mod
-except ImportError:
-    spec_mod = None
-
-try:
     import pyoculus
 except ImportError:
     pyoculus = None
 
-try:
-    from mpi4py import MPI
-except ImportError:
-    MPI = None
-
 from simsopt.geo import SurfaceGarabedian
-from simsopt.mhd import ProfileSpec, spec_runtime_available
+from simsopt.mhd import ProfileSpec, Residue, Spec, spec_runtime_available
 from simsopt.field import NormalField
 from simsopt.objectives import LeastSquaresProblem
 from simsopt.solve import least_squares_serial_solve
 import simsopt.mhd.spec as spec_module
-
-if (MPI is not None) and (spec_mod is not None):
-    from simsopt.mhd import Spec, Residue
 
 from . import TEST_DIR
 
@@ -47,7 +34,7 @@ class SpecAvailabilityTests(unittest.TestCase):
         )
 
 
-@unittest.skipIf(spec_mod is None, "SPEC python module not found")
+@unittest.skipUnless(spec_runtime_available(), "SPEC runtime not found")
 class SpecTests(unittest.TestCase):
     def test_init_defaults(self):
         """
@@ -553,8 +540,10 @@ class SpecTests(unittest.TestCase):
             self.assertAlmostEqual(equil.iota(), -0.4114567, places=3)
             self.assertAlmostEqual(prob.objective(), 7.912501330E-04, places=3)
 
-    @unittest.skipIf((spec_mod is None) or (pyoculus is None),
-                     "SPEC python module or pyoculus not found")
+    @unittest.skipUnless(
+        spec_runtime_available() and pyoculus is not None,
+        "SPEC runtime or pyoculus not found",
+    )
     def test_residue(self):
         """
         Check that we can compute residues from a Spec equilibrium.
