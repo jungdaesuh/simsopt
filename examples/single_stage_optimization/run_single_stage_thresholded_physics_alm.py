@@ -14,6 +14,7 @@ from workflow_runner_common import (  # noqa: E402
     SINGLE_STAGE_SCRIPT_PATH,
     add_seed_order_upgrade_argument,
     add_stage2_warm_start_seed_arguments,
+    append_allow_offspec_engineering_flag,
     append_single_stage_handoff_flags,
     clear_dry_run_marker,
     discover_single_results_path,
@@ -285,6 +286,10 @@ def build_single_stage_thresholded_physics_command(
     if equilibria_dir is not None:
         command.extend(["--equilibria-dir", str(equilibria_dir)])
     append_single_stage_handoff_flags(command, args)
+    append_allow_offspec_engineering_flag(
+        command,
+        curvature_threshold=args.curvature_threshold,
+    )
     return command
 
 

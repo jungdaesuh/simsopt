@@ -173,6 +173,53 @@ class ConstraintContractResolverTests(unittest.TestCase):
                 cli_overrides={"COIL_LENGTH_TARGET_M": 1.75},
             )
 
+    def test_allow_offspec_engineering_accepts_raised_length_and_banana_limits(self):
+        module = load_constraint_contract_module()
+
+        contract, _trace = module.resolve_constraint_contract(
+            cli_overrides={
+                "COIL_LENGTH_TARGET_M": 3.0,
+                "BANANA_CURRENT_MAX_A": 20000.0,
+                "CURVATURE_THRESHOLD": 150.0,
+            },
+            allow_offspec_engineering=True,
+        )
+
+        self.assertEqual(contract["COIL_LENGTH_TARGET_M"], 3.0)
+        self.assertEqual(contract["BANANA_CURRENT_MAX_A"], 20000.0)
+        self.assertEqual(contract["CURVATURE_THRESHOLD"], 150.0)
+
+    def test_curvature_threshold_above_hardware_limit_requires_offspec_flag(self):
+        module = load_constraint_contract_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "CURVATURE_THRESHOLD exceeds the hardware limit",
+        ):
+            module.resolve_constraint_contract(
+                cli_overrides={"CURVATURE_THRESHOLD": 150.0},
+            )
+
+    def test_engineering_offspec_fields_reports_current_length_and_curvature(self):
+        module = load_constraint_contract_module()
+
+        offspec = module.engineering_offspec_fields(
+            {
+                "banana_current_max_A": 20000.0,
+                "length_target": 3.0,
+                "curvature_threshold": 150.0,
+            }
+        )
+
+        self.assertEqual(
+            offspec,
+            (
+                "BANANA_CURRENT_MAX_A",
+                "COIL_LENGTH_TARGET_M",
+                "CURVATURE_THRESHOLD",
+            ),
+        )
+
     def test_tf_current_limit_rejects_zero_and_negative(self):
         module = load_constraint_contract_module()
 
@@ -265,6 +312,24 @@ class ConstraintContractMetadataTests(unittest.TestCase):
             {key: float(contract[key]) for key in contract},
         )
         self.assertIn("CONSTRAINT_PROVENANCE", metadata)
+
+    def test_merge_override_reason_deduplicates_and_uses_semicolon_separator(self):
+        module = load_constraint_contract_module()
+
+        self.assertEqual(
+            module.merge_override_reason(
+                "cli:cc_threshold",
+                "allow_offspec_engineering_constraints",
+            ),
+            "cli:cc_threshold;allow_offspec_engineering_constraints",
+        )
+        self.assertEqual(
+            module.merge_override_reason(
+                "cli:cc_threshold;allow_offspec_engineering_constraints",
+                "allow_offspec_engineering_constraints",
+            ),
+            "cli:cc_threshold;allow_offspec_engineering_constraints",
+        )
 
 
 class ConstraintContractWireNamesTests(unittest.TestCase):

@@ -14,6 +14,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from workflow_runner_common import (  # noqa: E402
     SINGLE_STAGE_SCRIPT_PATH,
     add_seed_order_upgrade_argument,
+    append_allow_offspec_engineering_flag,
     add_stage2_warm_start_seed_arguments,
     append_bool_flag,
     append_optional_flag,
@@ -543,6 +544,11 @@ def build_single_stage_goal_mode_command(
         command.extend(["--equilibria-dir", str(equilibria_dir)])
     append_single_stage_handoff_flags(command, args)
     append_optional_flag(command, "--length-target", args.length_target)
+    append_allow_offspec_engineering_flag(
+        command,
+        length_target=args.length_target,
+        curvature_threshold=args.curvature_threshold,
+    )
     append_optional_flag(command, "--frontier-volume-weight", args.frontier_volume_weight)
     append_optional_flag(
         command,

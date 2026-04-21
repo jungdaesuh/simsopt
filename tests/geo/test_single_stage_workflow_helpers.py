@@ -541,6 +541,37 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
         self.assertIn("--output-root", command)
         self.assertIn("--init-only", command)
 
+    def test_build_stage2_command_adds_offspec_engineering_flag(self):
+        module = load_workflow_common_module()
+        config = module.Stage2ArtifactConfig(
+            plasma_surf_filename="demo.nc",
+            output_root=Path("/tmp/stage2"),
+            equilibria_dir=None,
+            tf_current_A=8.0e4,
+            major_radius=0.976,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=150.0,
+            banana_surf_radius=0.22,
+            order=2,
+            constraint_method="penalty",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            basin_hops=0,
+            basin_stepsize=0.01,
+            basin_seed=None,
+            init_only=False,
+            length_target=3.0,
+        )
+
+        command = module.build_stage2_command(config, python_executable="python")
+
+        self.assertIn("--allow-offspec-engineering-constraints", command)
+
     def test_build_stage2_command_threads_extended_basin_controls(self):
         module = load_workflow_common_module()
         config = module.Stage2ArtifactConfig(
@@ -1950,6 +1981,21 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             command[command.index("--stage2-seed-tf-current-A") + 1],
             "12345.0",
         )
+
+    def test_build_single_stage_goal_mode_command_adds_offspec_flag(self):
+        module = load_goal_mode_comparison_module()
+        args = self._make_args()
+        args.length_target = 3.0
+        args.curvature_threshold = 150.0
+
+        command = module.build_single_stage_goal_mode_command(
+            args,
+            goal_mode="target",
+            stage2_bs_path=Path("relative/seed.json").resolve(),
+            case_output_root=Path("outputs/target").resolve(),
+        )
+
+        self.assertIn("--allow-offspec-engineering-constraints", command)
 
     def test_build_single_stage_goal_mode_command_forwards_chebyshev_flags(self):
         module = load_goal_mode_comparison_module()

@@ -986,6 +986,54 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "0.22",
         )
 
+    def test_stage2_alm_wrapper_command_adds_offspec_engineering_flag(self):
+        module = load_stage2_alm_wrapper_module()
+        args = make_stage2_alm_wrapper_args()
+        args.allow_offspec_engineering_constraints = True
+        resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
+        config = module.build_stage2_alm_config(
+            args,
+            resolved_spec={**resolved_spec, "length_target": 3.0},
+        )
+        metadata = module.build_stage2_constraint_artifacts(
+            args=args,
+            config=config,
+            source_label=resolved_spec_source,
+        )
+        command = module.build_stage2_command(
+            config,
+            python_executable=args.python_executable,
+        )
+
+        self.assertIn("--allow-offspec-engineering-constraints", command)
+        self.assertEqual(config.length_target, 3.0)
+        self.assertEqual(metadata["EFFECTIVE_VALUES"]["COIL_LENGTH_TARGET_M"], 3.0)
+        self.assertEqual(
+            metadata["OVERRIDE_REASON"],
+            "allow_offspec_engineering_constraints",
+        )
+
+    def test_stage2_alm_wrapper_metadata_keeps_cli_override_and_offspec_tag(self):
+        module = load_stage2_alm_wrapper_module()
+        args = make_stage2_alm_wrapper_args(cc_threshold=0.06)
+        args.allow_offspec_engineering_constraints = True
+        resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
+        config = module.build_stage2_alm_config(
+            args,
+            resolved_spec={**resolved_spec, "length_target": 3.0},
+        )
+
+        metadata = module.build_stage2_constraint_artifacts(
+            args=args,
+            config=config,
+            source_label=resolved_spec_source,
+        )
+
+        self.assertEqual(
+            metadata["OVERRIDE_REASON"],
+            "cli:cc_threshold;allow_offspec_engineering_constraints",
+        )
+
     def test_stage2_alm_wrapper_spec_json_must_be_complete(self):
         module = load_stage2_alm_wrapper_module()
 
@@ -1778,6 +1826,16 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             command[command.index("--stage2-seed-tf-current-A") + 1],
             "12345.0",
         )
+
+    def test_single_stage_thresholded_physics_rerun_wrapper_adds_offspec_flag(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+        args = make_single_stage_thresholded_physics_rerun_args(
+            curvature_threshold=150.0,
+        )
+
+        command = module.build_single_stage_thresholded_physics_command(args)
+
+        self.assertIn("--allow-offspec-engineering-constraints", command)
 
     def test_single_stage_thresholded_physics_rerun_wrapper_parse_args_rejects_adaptive_mode(self):
         module = load_single_stage_thresholded_physics_rerun_module()

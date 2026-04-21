@@ -55,6 +55,7 @@ from banana_opt.artifact_contracts import (
     upgrade_legacy_stage2_artifact_results,
 )
 from banana_opt.constraint_contract import (
+    apply_offspec_engineering_override_reason,
     build_constraint_metadata,
     resolve_constraint_contract_from_wire_names,
 )
@@ -184,13 +185,30 @@ def _print_taylor_test_summary(name: str, result: dict) -> None:
 def validate_banana_current_cli_args(args) -> None:
     banana_init_current_A = float(args.banana_init_current_A)
     banana_current_max_A = float(args.banana_current_max_A)
-    if not (0.0 < banana_init_current_A <= BANANA_CURRENT_HARD_LIMIT_A):
+    allow_offspec_engineering_constraints = bool(
+        getattr(args, "allow_offspec_engineering_constraints", False)
+    )
+    if banana_init_current_A <= 0.0:
+        raise ValueError("--banana-init-current-A must be positive.")
+    if (
+        banana_init_current_A > BANANA_CURRENT_HARD_LIMIT_A
+        and not allow_offspec_engineering_constraints
+    ):
         raise ValueError(
-            f"--banana-init-current-A must be in the interval (0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
+            f"--banana-init-current-A must be in the interval "
+            f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}] unless "
+            "--allow-offspec-engineering-constraints is set."
         )
-    if not (0.0 < banana_current_max_A <= BANANA_CURRENT_HARD_LIMIT_A):
+    if banana_current_max_A <= 0.0:
+        raise ValueError("--banana-current-max-A must be positive.")
+    if (
+        banana_current_max_A > BANANA_CURRENT_HARD_LIMIT_A
+        and not allow_offspec_engineering_constraints
+    ):
         raise ValueError(
-            f"--banana-current-max-A must be in the interval (0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
+            f"--banana-current-max-A must be in the interval "
+            f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}] unless "
+            "--allow-offspec-engineering-constraints is set."
         )
     if banana_init_current_A > banana_current_max_A:
         raise ValueError(
@@ -278,6 +296,11 @@ def parse_args():
     parser.add_argument(
         "--constraint-override-reason",
         default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--allow-offspec-engineering-constraints",
+        action="store_true",
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -1045,6 +1068,9 @@ def build_stage2_constraint_artifact_metadata(
     override_reason=None,
 ):
     """Route clamped/validated Stage 2 solver values through the shared contract."""
+    allow_offspec_engineering_constraints = bool(
+        getattr(args, "allow_offspec_engineering_constraints", False)
+    )
     cli_overrides = {
         "tf_current_A": float(tf_current_A),
         "banana_current_max_A": float(banana_current_max_A),
@@ -1062,10 +1088,16 @@ def build_stage2_constraint_artifact_metadata(
         cli_overrides=cli_overrides,
         accept_offspec_major_radius=accept_offspec_r0_seed,
         offspec_major_radius_m=offspec_major_radius_m,
+        allow_offspec_engineering=allow_offspec_engineering_constraints,
     )
     resolved_override_reason = override_reason
     if resolved_override_reason is None and accept_offspec_r0_seed:
         resolved_override_reason = "accept_offspec_r0_seed"
+    resolved_override_reason = apply_offspec_engineering_override_reason(
+        resolved_override_reason,
+        layer=cli_overrides,
+        allow_offspec_engineering=allow_offspec_engineering_constraints,
+    )
     return build_constraint_metadata(
         contract,
         profile_name=(
@@ -1509,8 +1541,15 @@ def main(parsed_args=None):
     # Weight on the curve lengths in the objective function
     # We'll penalize the coil if it becomes longer than the hardware contract target.
     LENGTH_WEIGHT = args.length_weight
-    LENGTH_TARGET = min(args.length_target, COIL_LENGTH_TARGET_M)
-    if args.length_target > COIL_LENGTH_TARGET_M:
+    allow_offspec_engineering_constraints = bool(
+        args.allow_offspec_engineering_constraints
+    )
+    LENGTH_TARGET = float(args.length_target)
+    if (
+        not allow_offspec_engineering_constraints
+        and args.length_target > COIL_LENGTH_TARGET_M
+    ):
+        LENGTH_TARGET = COIL_LENGTH_TARGET_M
         print(
             f"WARNING: --length-target {args.length_target} above hardware ceiling, "
             f"clamped to {COIL_LENGTH_TARGET_M}"
@@ -1528,8 +1567,12 @@ def main(parsed_args=None):
 
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = min(args.curvature_threshold, MAX_CURVATURE_INV_M)
-    if args.curvature_threshold > MAX_CURVATURE_INV_M:
+    CURVATURE_THRESHOLD = float(args.curvature_threshold)
+    if (
+        not allow_offspec_engineering_constraints
+        and args.curvature_threshold > MAX_CURVATURE_INV_M
+    ):
+        CURVATURE_THRESHOLD = MAX_CURVATURE_INV_M
         print(
             f"WARNING: --curvature-threshold {args.curvature_threshold} above hardware ceiling, "
             f"clamped to {MAX_CURVATURE_INV_M}"

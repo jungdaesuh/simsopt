@@ -91,6 +91,12 @@ CONSTRAINT_SOURCE_SPEC_JSON = "spec_json"
 CONSTRAINT_SOURCE_CLI = "cli"
 CONSTRAINT_SOURCE_OFFSPEC_MAJOR_RADIUS = "offspec_major_radius_override"
 
+OFFSPEC_ENGINEERING_KEYS: frozenset[str] = frozenset({
+    _KEY_BANANA_CURRENT_MAX_A,
+    _KEY_COIL_LENGTH_TARGET_M,
+    _KEY_CURVATURE_THRESHOLD,
+})
+
 WIRE_NAME_ALIASES: Mapping[str, str] = MappingProxyType({
     _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M: _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M,
     _KEY_VACUUM_VESSEL_MINOR_RADIUS_M: _KEY_VACUUM_VESSEL_MINOR_RADIUS_M,
@@ -208,23 +214,13 @@ def _apply_layer(
 def _validate_engineering_values(contract: dict[str, float]) -> None:
     _hc.validate_tf_current_limit(contract[_KEY_TF_CURRENT_A])
     _hc.validate_banana_winding_surface_radius(contract[_KEY_BANANA_SURF_RADIUS])
-    banana_current_max_A = contract[_KEY_BANANA_CURRENT_MAX_A]
-    if banana_current_max_A <= 0.0:
+    if contract[_KEY_BANANA_CURRENT_MAX_A] <= 0.0:
         raise ValueError(
-            f"BANANA_CURRENT_MAX_A must be positive; got {banana_current_max_A!r}."
-        )
-    if banana_current_max_A > _hc.BANANA_CURRENT_HARD_LIMIT_A:
-        raise ValueError(
-            "BANANA_CURRENT_MAX_A exceeds the hardware limit "
-            f"{_hc.BANANA_CURRENT_HARD_LIMIT_A:.0f} A."
+            "BANANA_CURRENT_MAX_A must be positive; got "
+            f"{contract[_KEY_BANANA_CURRENT_MAX_A]!r}."
         )
     if contract[_KEY_COIL_LENGTH_TARGET_M] <= 0.0:
         raise ValueError("COIL_LENGTH_TARGET_M must be positive.")
-    if contract[_KEY_COIL_LENGTH_TARGET_M] > _hc.COIL_LENGTH_TARGET_M:
-        raise ValueError(
-            "COIL_LENGTH_TARGET_M exceeds the hardware limit "
-            f"{_hc.COIL_LENGTH_TARGET_M:.3f} m."
-        )
     if contract[_KEY_CC_THRESHOLD] <= 0.0:
         raise ValueError("CC_THRESHOLD must be positive.")
     if contract[_KEY_COIL_PLASMA_MIN_DIST_M] <= 0.0:
@@ -233,6 +229,64 @@ def _validate_engineering_values(contract: dict[str, float]) -> None:
         raise ValueError("PLASMA_VESSEL_MIN_DIST_M must be positive.")
     if contract[_KEY_CURVATURE_THRESHOLD] <= 0.0:
         raise ValueError("CURVATURE_THRESHOLD must be positive.")
+
+
+def engineering_offspec_fields(
+    layer: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    translated = _translate_layer(layer)
+    offspec: list[str] = []
+    banana_current_max_A = translated.get(_KEY_BANANA_CURRENT_MAX_A)
+    if (
+        banana_current_max_A is not None
+        and float(banana_current_max_A) > _hc.BANANA_CURRENT_HARD_LIMIT_A
+    ):
+        offspec.append(_KEY_BANANA_CURRENT_MAX_A)
+    coil_length_target_m = translated.get(_KEY_COIL_LENGTH_TARGET_M)
+    if (
+        coil_length_target_m is not None
+        and float(coil_length_target_m) > _hc.COIL_LENGTH_TARGET_M
+    ):
+        offspec.append(_KEY_COIL_LENGTH_TARGET_M)
+    curvature_threshold = translated.get(_KEY_CURVATURE_THRESHOLD)
+    if (
+        curvature_threshold is not None
+        and float(curvature_threshold) > _hc.MAX_CURVATURE_INV_M
+    ):
+        offspec.append(_KEY_CURVATURE_THRESHOLD)
+    return tuple(offspec)
+
+
+def merge_override_reason(
+    primary_reason: str | None,
+    extra_reason: str | None,
+) -> str | None:
+    primary = None if primary_reason in {None, ""} else str(primary_reason)
+    extra = None if extra_reason in {None, ""} else str(extra_reason)
+    if primary is None:
+        return extra
+    if extra is None:
+        return primary
+    primary_parts = [part.strip() for part in primary.split(";") if part.strip()]
+    if extra in primary_parts:
+        return primary
+    return ";".join([*primary_parts, extra])
+
+
+def apply_offspec_engineering_override_reason(
+    override_reason: str | None,
+    *,
+    layer: Mapping[str, Any] | None,
+    allow_offspec_engineering: bool,
+) -> str | None:
+    if not allow_offspec_engineering:
+        return override_reason
+    if not engineering_offspec_fields(layer):
+        return override_reason
+    return merge_override_reason(
+        override_reason,
+        "allow_offspec_engineering_constraints",
+    )
 
 
 def _validate_target_plasma_ceiling(contract: dict[str, float]) -> None:
@@ -247,6 +301,7 @@ def resolve_constraint_contract(
     cli_overrides: Mapping[str, Any] | None = None,
     accept_offspec_major_radius: bool = False,
     offspec_major_radius_m: float | None = None,
+    allow_offspec_engineering: bool = False,
 ) -> tuple[Mapping[str, float], Mapping[str, str]]:
     """Resolve the full constraint contract from layered inputs.
 
@@ -263,6 +318,10 @@ def resolve_constraint_contract(
         value. Provenance is tagged as ``offspec_major_radius_override``.
     offspec_major_radius_m
         Replacement vessel major radius for historical reproduction.
+    allow_offspec_engineering
+        When ``True``, explicit off-spec sensitivity runs may raise the banana
+        current ceiling, coil-length target, and curvature threshold above the
+        hardware defaults.
 
     Returns
     -------
@@ -301,6 +360,22 @@ def resolve_constraint_contract(
             )
 
     _validate_engineering_values(contract)
+    if not allow_offspec_engineering:
+        if contract[_KEY_BANANA_CURRENT_MAX_A] > _hc.BANANA_CURRENT_HARD_LIMIT_A:
+            raise ValueError(
+                "BANANA_CURRENT_MAX_A exceeds the hardware limit "
+                f"{_hc.BANANA_CURRENT_HARD_LIMIT_A:.0f} A."
+            )
+        if contract[_KEY_COIL_LENGTH_TARGET_M] > _hc.COIL_LENGTH_TARGET_M:
+            raise ValueError(
+                "COIL_LENGTH_TARGET_M exceeds the hardware limit "
+                f"{_hc.COIL_LENGTH_TARGET_M:.3f} m."
+            )
+        if contract[_KEY_CURVATURE_THRESHOLD] > _hc.MAX_CURVATURE_INV_M:
+            raise ValueError(
+                "CURVATURE_THRESHOLD exceeds the hardware limit "
+                f"{_hc.MAX_CURVATURE_INV_M:.0f} m^-1."
+            )
     _validate_target_plasma_ceiling(contract)
 
     return MappingProxyType(contract), MappingProxyType(trace)
@@ -313,6 +388,7 @@ def resolve_constraint_contract_from_wire_names(
     cli_overrides: Mapping[str, Any] | None = None,
     accept_offspec_major_radius: bool = False,
     offspec_major_radius_m: float | None = None,
+    allow_offspec_engineering: bool = False,
 ) -> tuple[Mapping[str, float], Mapping[str, str]]:
     """Like :func:`resolve_constraint_contract` but accepts legacy wire names.
 
@@ -329,6 +405,7 @@ def resolve_constraint_contract_from_wire_names(
         cli_overrides=_translate_layer(cli_overrides),
         accept_offspec_major_radius=accept_offspec_major_radius,
         offspec_major_radius_m=offspec_major_radius_m,
+        allow_offspec_engineering=allow_offspec_engineering,
     )
 
 
@@ -384,12 +461,16 @@ __all__ = [
     "CONSTRAINT_SOURCE_SPEC_JSON",
     "ENGINEERING_DEFAULT_KEYS",
     "FIXED_GEOMETRY_KEYS",
+    "OFFSPEC_ENGINEERING_KEYS",
     "TARGET_PLASMA_CEILING_KEYS",
     "WIRE_NAME_ALIASES",
+    "apply_offspec_engineering_override_reason",
     "build_constraint_metadata",
     "compute_constraint_contract_hash",
     "contract_is_all_hardware_defaults",
+    "engineering_offspec_fields",
     "hardware_default_contract",
+    "merge_override_reason",
     "resolve_constraint_contract",
     "resolve_constraint_contract_from_wire_names",
 ]

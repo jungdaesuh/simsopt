@@ -26,6 +26,7 @@ from banana_opt.artifact_contracts import (
     compute_stage2_bs_sha256,
     upgrade_legacy_stage2_artifact_results,
 )
+from banana_opt.constraint_contract import engineering_offspec_fields
 
 STAGE2_SCRIPT_PATH = SCRIPT_DIR / "STAGE_2" / "banana_coil_solver.py"
 SINGLE_STAGE_SCRIPT_PATH = SCRIPT_DIR / "SINGLE_STAGE" / "single_stage_banana_example.py"
@@ -37,6 +38,26 @@ STAGE2_SIDECAR_REQUIRED_ERROR = (
 )
 
 T = TypeVar("T")
+
+
+def append_allow_offspec_engineering_flag(
+    command: list[str],
+    *,
+    banana_current_max_A: float | None = None,
+    length_target: float | None = None,
+    curvature_threshold: float | None = None,
+) -> None:
+    override_layer: dict[str, float] = {}
+    if banana_current_max_A is not None:
+        override_layer["banana_current_max_A"] = float(banana_current_max_A)
+    if length_target is not None:
+        override_layer["length_target"] = float(length_target)
+    if curvature_threshold is not None:
+        override_layer["curvature_threshold"] = float(curvature_threshold)
+    if not override_layer:
+        return
+    if engineering_offspec_fields(override_layer):
+        command.append("--allow-offspec-engineering-constraints")
 
 
 @dataclass(frozen=True)
@@ -263,6 +284,12 @@ def build_stage2_command(
         command.extend(["--constraint-profile-label", constraint_profile_label])
     if constraint_override_reason not in {None, ""}:
         command.extend(["--constraint-override-reason", constraint_override_reason])
+    append_allow_offspec_engineering_flag(
+        command,
+        banana_current_max_A=config.banana_current_max_A,
+        length_target=config.length_target,
+        curvature_threshold=config.curvature_threshold,
+    )
     if config.constraint_method == "alm":
         command.extend(
             [

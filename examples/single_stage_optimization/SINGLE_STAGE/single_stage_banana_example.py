@@ -79,6 +79,8 @@ from banana_opt.artifact_contracts import (
     upgrade_legacy_stage2_artifact_results,
 )
 from banana_opt.constraint_contract import (
+    apply_offspec_engineering_override_reason,
+    build_constraint_metadata,
     resolve_constraint_contract_from_wire_names as _resolve_constraint_contract_from_wire_names_impl,
 )
 from banana_opt.coil_order_upgrade import upgrade_loaded_seed_biot_savart_order
@@ -1412,6 +1414,21 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--constraint-profile-label",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--constraint-override-reason",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--allow-offspec-engineering-constraints",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--seed-regime",
         choices=[
             _SINGLE_STAGE_SEED_REGIME_AUTO,
@@ -1947,10 +1964,19 @@ def validate_confinement_surrogate_args(args):
 
 def validate_single_stage_current_args(args):
     banana_current_max_A = float(args.banana_current_max_A)
-    if not (0.0 < banana_current_max_A <= BANANA_CURRENT_HARD_LIMIT_A):
+    allow_offspec_engineering_constraints = bool(
+        getattr(args, "allow_offspec_engineering_constraints", False)
+    )
+    if banana_current_max_A <= 0.0:
+        raise ValueError("--banana-current-max-A must be positive.")
+    if (
+        banana_current_max_A > BANANA_CURRENT_HARD_LIMIT_A
+        and not allow_offspec_engineering_constraints
+    ):
         raise ValueError(
             f"--banana-current-max-A must be in the interval "
-            f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
+            f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}] unless "
+            "--allow-offspec-engineering-constraints is set."
         )
 
 
@@ -6055,9 +6081,16 @@ if __name__ == "__main__":
             f"WARNING: --ss-dist {args.ss_dist} below hardware floor, "
             f"clamped to {PLASMA_VESSEL_MIN_DIST_M}"
         )
+    allow_offspec_engineering_constraints = bool(
+        args.allow_offspec_engineering_constraints
+    )
     CURVATURE_WEIGHT = args.curvature_weight
-    CURVATURE_THRESHOLD = min(args.curvature_threshold, MAX_CURVATURE_INV_M)
-    if args.curvature_threshold > MAX_CURVATURE_INV_M:
+    CURVATURE_THRESHOLD = float(args.curvature_threshold)
+    if (
+        not allow_offspec_engineering_constraints
+        and args.curvature_threshold > MAX_CURVATURE_INV_M
+    ):
+        CURVATURE_THRESHOLD = MAX_CURVATURE_INV_M
         print(
             f"WARNING: --curvature-threshold {args.curvature_threshold} above hardware ceiling, "
             f"clamped to {MAX_CURVATURE_INV_M}"
@@ -6066,8 +6099,12 @@ if __name__ == "__main__":
     if len(surface_data) > 1 and SURF_DIST_WEIGHT != 0:
         print("WARNING: SURF_DIST_WEIGHT is diagnostic-only in multi-surface mode; outer-vessel spacing is enforced as a rejection gate.")
 
-    length_target = min(args.length_target, COIL_LENGTH_TARGET_M)
-    if args.length_target > COIL_LENGTH_TARGET_M:
+    length_target = float(args.length_target)
+    if (
+        not allow_offspec_engineering_constraints
+        and args.length_target > COIL_LENGTH_TARGET_M
+    ):
+        length_target = COIL_LENGTH_TARGET_M
         print(
             f"WARNING: --length-target {args.length_target} above hardware ceiling, "
             f"clamped to {COIL_LENGTH_TARGET_M}"
@@ -7170,6 +7207,38 @@ if __name__ == "__main__":
             "frontier_conditioning_first_accepted_report"
         ),
     )
+    constraint_cli_layer = {
+        "tf_current_A": float(stage2_tf_current_A),
+        "banana_current_max_A": float(args.banana_current_max_A),
+        "length_target": float(length_target),
+        "cc_threshold": float(CC_DIST),
+        "coil_plasma_min_dist_m": float(CS_DIST),
+        "plasma_vessel_min_dist_m": float(SS_DIST),
+        "curvature_threshold": float(CURVATURE_THRESHOLD),
+        "banana_surf_radius": float(banana_surf_radius),
+    }
+    single_stage_constraint_contract, single_stage_constraint_trace = (
+        _resolve_constraint_contract_from_wire_names_impl(
+            cli_overrides=constraint_cli_layer,
+            allow_offspec_engineering=allow_offspec_engineering_constraints,
+        )
+    )
+    constraint_override_reason = apply_offspec_engineering_override_reason(
+        args.constraint_override_reason,
+        layer=constraint_cli_layer,
+        allow_offspec_engineering=allow_offspec_engineering_constraints,
+    )
+    constraint_profile_label = (
+        "single_stage_solver"
+        if args.constraint_profile_label in {None, ""}
+        else str(args.constraint_profile_label)
+    )
+    constraint_metadata = build_constraint_metadata(
+        single_stage_constraint_contract,
+        profile_name=constraint_profile_label,
+        override_reason=constraint_override_reason,
+        trace=single_stage_constraint_trace,
+    )
     results = {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
@@ -7490,6 +7559,7 @@ if __name__ == "__main__":
         "OBJECTIVE_J": objective_j,
         "BASE_OBJECTIVE_J": base_objective_j,
         "SEARCH_OBJECTIVE_J": search_objective_j,
+        **constraint_metadata,
         "FRONTIER_RANK_OBJECTIVE_J": (
             None if frontier_rank_objective_j is None else float(frontier_rank_objective_j)
         ),

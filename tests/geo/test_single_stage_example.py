@@ -7817,6 +7817,31 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.curvature_threshold, 100.0)
         self.assertEqual(args.banana_current_max_A, 16000.0)
 
+    def test_single_stage_parse_args_accepts_hidden_offspec_engineering_flag(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--allow-offspec-engineering-constraints",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.allow_offspec_engineering_constraints)
+
+    def test_validate_single_stage_current_args_allows_offspec_with_flag(self):
+        module = load_single_stage_example_module()
+
+        args = SimpleNamespace(
+            banana_current_max_A=20000.0,
+            allow_offspec_engineering_constraints=True,
+        )
+
+        module.validate_single_stage_current_args(args)
+
     def test_apply_default_stage2_seed_args_uses_legacy_seed_defaults(self):
         module = load_single_stage_example_module()
         args = SimpleNamespace(
@@ -7908,6 +7933,18 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(args.banana_init_current_A, 12000.0)
         self.assertEqual(args.banana_current_max_A, 16000.0)
+
+    def test_stage2_validate_banana_current_cli_args_allows_offspec_with_flag(self):
+        module = load_stage2_module()
+
+        args = SimpleNamespace(
+            banana_init_current_A=18000.0,
+            banana_current_max_A=20000.0,
+            tf_current_A=80000.0,
+            allow_offspec_engineering_constraints=True,
+        )
+
+        module.validate_banana_current_cli_args(args)
 
     def test_penalty_traversal_helper_applies_symmetric_box_bound(self):
         module = load_stage2_module()
