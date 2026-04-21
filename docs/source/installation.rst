@@ -44,6 +44,10 @@ Also,
     * py_spec
     * pyoculus
     * h5py
+    * the external SPEC python wrapper from the
+      ``PrincetonUniversity/SPEC`` repository for
+      ``simsopt.mhd.Spec`` and any tests that instantiate ``Spec``
+      directly
 
 For requirements of separate physics modules like VMEC, see the
 documentation of the module you wish to use.
@@ -113,6 +117,10 @@ optional dependencies related to SPEC and MPI, run the following command:
 .. code-block::
 
     pip install simsopt[MPI,SPEC]
+
+This installs the Python-side SPEC helpers used by Simsopt. Full
+``simsopt.mhd.Spec`` support still requires the external SPEC python
+wrapper so that ``import spec.spec_f90wrapped`` succeeds.
     
 On some systems, you may not have permission to install packages to
 the default location. In this case, add the ``--user`` flag to ``pip``
@@ -185,6 +193,10 @@ you'll need to run instead
 
     pip install --user -e ".[MPI,SPEC]"
 
+As with the PyPI install, this installs the Python-side SPEC helpers.
+Using ``simsopt.mhd.Spec`` still requires the external SPEC python
+wrapper from ``PrincetonUniversity/SPEC``.
+
 
 Docker container
 ----------------
@@ -213,4 +225,3 @@ python environment. You should now be able to import the module from
 python::
 
   >>> import simsopt
-

@@ -547,7 +547,7 @@ def frametwist_pure(n1,n2,b1,b2,b1dash,n2dash):
         val = val.at[i].set(val[i-1] + (integrand[i-1] + integrand[i]))
         return val
     data = lax.fori_loop(1, len(n1[:,0]), body_fun, data)
-    data = data.at[-1].set(data[-2] + (integrand[-1] + integrand[1]))
+    data = data.at[-1].set(data[-2] + (integrand[-1] + integrand[0]))
     return data
 
 @jit
@@ -665,8 +665,7 @@ class FramedCurveTwist(Optimizable):
             grad0 = self.lp_grad0(data,gammadash,self.p)
             grad1 = self.lp_grad1(data,gammadash,self.p)
         else:
-            return Derivative({})
-            # raise Exception('incorrect wrapping function f provided')
+            raise NotImplementedError(f"dJ() not implemented for f={self.f!r}; only 'lp' is supported")
         _, n1, b1 = self.framedcurve.rotated_frame()
         _, n2, b2 = self.framedcurve_centroid.rotated_frame()
         _, _, b1dash = self.framedcurve.rotated_frame_dash()
@@ -739,7 +738,6 @@ class MinCurveCurveDistance(Optimizable):
         g1 = self.curve1.gamma()
         g2 = self.curve2.gamma()
         dists = jnp.sqrt(jnp.sum( (g1[:, None, :] - g2[None, :, :])**2, axis=2))
-        print(np.shape(dists))
         mindists = jnp.min(dists,axis=1)
 
         return mindists 

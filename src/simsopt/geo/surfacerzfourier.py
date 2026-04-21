@@ -735,7 +735,7 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
             )
     
     def dgammadphi_by_dcoeff_vjp_impl(self, v):
-        pass
+        raise NotImplementedError("dgammadphi_by_dcoeff_vjp_impl not yet implemented for pure-Python SurfaceRZFourier")
 
     def dgammadtheta(self):
         """
@@ -759,31 +759,6 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
             dRdtheta*np.cos(phi[:,None]), dRdtheta*np.sin(phi[:,None]), dZdtheta], axis=-1
             )
     
-
-    def test_gamma(self): 
-        theta = self.quadpoints_theta*2*np.pi
-        phi = self.quadpoints_phi*2*np.pi
-        cosa = np.zeros((phi.size, theta.size, self.mpol+1, 2*self.ntor+1))
-        sina = np.zeros((phi.size, theta.size, self.mpol+1, 2*self.ntor+1))
-        # R = np.zeros((phi.size, theta.size))
-        # Z = np.zeros((phi.size, theta.size))
-        for mm in range(0, self.mpol+1):
-            for nn in range(-self.ntor, self.ntor+1):
-                if mm==0 and nn<0:
-                    continue
-                cosa[:,:,mm,nn+self.ntor] = np.cos(mm*theta[None,:]-nn*self.nfp*phi[:,None])
-                sina[:,:,mm,nn+self.ntor] = np.sin(mm*theta[None,:]-nn*self.nfp*phi[:,None])
-                # cosa = np.cos(mm*theta[None,:]-nn*self.nfp*phi[:,None])
-                # sina = np.sin(mm*theta[None,:]-nn*self.nfp*phi[:,None])
-                # R += self.get_rc(mm,nn) * cosa #+ self.get_rs(mm,nn) * sina
-                # Z += self.get_zs(mm,nn) * sina #+ self.get_zc(mm,nn) * cosa
-        
-        R = np.einsum('mn,tpmn->tp', self.rc, cosa) + np.einsum('mn,tpmn->tp', self.rs, sina)
-        Z = np.einsum('mn,tpmn->tp', self.zc, cosa) + np.einsum('mn,tpmn->tp', self.zs, sina)
-
-        return R, Z
-
-
 
 
     def fixed_range(self, mmin, mmax, nmin, nmax, fixed=True):

@@ -24,10 +24,11 @@ except ImportError:
     MPI = None
 
 from simsopt.geo import SurfaceGarabedian
-from simsopt.mhd import ProfileSpec
+from simsopt.mhd import ProfileSpec, spec_runtime_available
 from simsopt.field import NormalField
 from simsopt.objectives import LeastSquaresProblem
 from simsopt.solve import least_squares_serial_solve
+import simsopt.mhd.spec as spec_module
 
 if (MPI is not None) and (spec_mod is not None):
     from simsopt.mhd import Spec, Residue
@@ -36,6 +37,14 @@ from . import TEST_DIR
 
 logger = logging.getLogger(__name__)
 # logging.basicConfig(level=logging.DEBUG)
+
+
+class SpecAvailabilityTests(unittest.TestCase):
+    def test_spec_runtime_available_matches_imports(self):
+        self.assertEqual(
+            spec_runtime_available(),
+            spec_module.spec is not None and spec_module.py_spec is not None,
+        )
 
 
 @unittest.skipIf(spec_mod is None, "SPEC python module not found")

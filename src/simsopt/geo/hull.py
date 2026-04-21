@@ -145,7 +145,7 @@ class hull2D():
             key1 = tuple(keys[ind[0]])
             return self.triangles[key1], None
         else:
-            return ValueError('Segment is not part of a triangle')
+            raise ValueError('Segment is not part of a triangle')
 
     def is_segment_at_edge(self, s):
         """Check if segment is forming the edge of the hull. This is easily identified - if the segment is only appearing in one triangle, then it is an edge segment.
@@ -196,34 +196,36 @@ class hull2D():
     def pop_singular_triangle(self, triangle):
         # Find point indices
         pindex = np.sort([p.index for p in triangle.points])
-        if self.is_segment_at_edge( self.segments[(pindex[0],pindex[1])] ):
-            key = (pindex[0],pindex[1])
-            self.segments.pop( key )
+        edge_keys = [
+            (pindex[0], pindex[1]),
+            (pindex[1], pindex[2]),
+            (pindex[0], pindex[2]),
+        ]
 
-            ind = self.edges.index( key )
-            self.edges.pop( ind )
-        else:
-            new_edge = (pindex[0],pindex[1])
+        new_edge = None
+        insert_ind = None
+        for ek in edge_keys:
+            if self.is_segment_at_edge(self.segments[ek]):
+                self.segments.pop(ek)
+                idx = self.edges.index(ek)
+                self.edges.pop(idx)
+                if insert_ind is None:
+                    insert_ind = idx
+            else:
+                new_edge = ek
 
-        if self.is_segment_at_edge( self.segments[(pindex[1],pindex[2])] ):
-            key = (pindex[1],pindex[2])
-            self.segments.pop( key )
+        if new_edge is None:
+            raise ValueError(
+                'All edges of the triangle are boundary edges; '
+                'removing it would leave a degenerate hull'
+            )
+        if insert_ind is None:
+            raise ValueError(
+                'No boundary edges found on triangle; '
+                'cannot determine edge insertion position'
+            )
 
-            ind = self.edges.index( key )
-            self.edges.pop( ind )
-        else:
-            new_edge = (pindex[1],pindex[2])
-
-        if self.is_segment_at_edge( self.segments[(pindex[0],pindex[2])] ):
-            key = (pindex[0],pindex[2])
-            self.segments.pop( key )
-
-            ind = self.edges.index( key )
-            self.edges.pop( ind )
-        else:
-            new_edge = (pindex[0],pindex[2])
-
-        self.edges.insert(ind, new_edge)
+        self.edges.insert(insert_ind, new_edge)
         self.triangles.pop(triangle.key)
 
 
@@ -308,7 +310,7 @@ class hull2D():
         Output:
             - sorted_edges
         """
-        tmp = np.unique(self.edges,axis=0)
+        tmp = np.unique(edges, axis=0)
         edges = [tuple(e) for e in tmp]
         sorted_edges = [edges[0]]
         last_pt = sorted_edges[-1][1]

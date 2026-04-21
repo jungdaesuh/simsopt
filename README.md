@@ -70,6 +70,10 @@ repositories. These separate modules include
   equilibrium.
 - [booz_xform](https://hiddensymmetries.github.io/booz_xform), for
   Boozer coordinates.
+
+The `SPEC` extra installs the Python-side helpers used by Simsopt.
+Using `simsopt.mhd.Spec` also requires the external SPEC python
+wrapper from the `PrincetonUniversity/SPEC` repository.
   
 If you use `simsopt` in your research, kindly cite the code using
 [this reference](https://doi.org/10.21105/joss.03525):

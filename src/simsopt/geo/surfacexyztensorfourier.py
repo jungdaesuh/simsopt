@@ -50,7 +50,10 @@ class SurfaceXYZTensorFourier(sopp.SurfaceXYZTensorFourier, Surface):
           symmetry under rotation by :math:`\pi` about the x-axis.
         mpol: Maximum poloidal mode number included.
         ntor: Maximum toroidal mode number included, divided by ``nfp``.
-        clamped_dims: ???
+        clamped_dims: Length-3 boolean mask for ``x``, ``y``, and ``z`` that
+          applies the boundary enforcer
+          ``sin(nfp * phi / 2)^2 + sin(theta / 2)^2`` to low-order tensor modes
+          with ``n <= ntor`` and ``m <= mpol`` in the selected coordinates.
         quadpoints_phi: Set this to a list or 1D array to set the :math:`\phi_j` grid points directly.
         quadpoints_theta: Set this to a list or 1D array to set the :math:`\theta_j` grid points directly.
     """

@@ -1,12 +1,8 @@
-from deprecated import deprecated
-
 from jax import grad
 import jax.numpy as jnp
 
-from ..geo.jit import jit
 from .._core.optimizable import Optimizable
-from .._core.derivative import derivative_dec, Derivative
-import simsoptpp as sopp
+from .._core.derivative import derivative_dec
 
 __all__ = ['CurrentPenalty']
 
@@ -32,4 +28,4 @@ class CurrentPenalty(Optimizable):
     @derivative_dec
     def dJ(self):
         grad0 = self.this_grad(self.current.get_value())
-        return self.current.vjp(grad0)
+        return self.current.vjp(jnp.asarray([grad0]))

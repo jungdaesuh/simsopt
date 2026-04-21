@@ -830,6 +830,7 @@ Array SurfaceRZFourier<Array>::dgamma_by_dcoeff_vjp(Array& v) {
                 resptr[i] += resptr_private[i];
             }
         }
+        delete[] resptr_private;
     }
     return res;
 }
@@ -870,9 +871,10 @@ Array SurfaceRZFourier<Array>::dgamma_by_dcoeff_vjp(Array& v) {
                         int i = n + ntor;
                          // recompute the angle from scratch every so often, to
                          // avoid accumulating floating point error
-                        if(i % ANGLE_RECOMPUTE == 0)
+                        if(i % ANGLE_RECOMPUTE == 0) {
                             sinterm = sin(m*theta-n*nfp*phi);
                             costerm = cos(m*theta-n*nfp*phi);
+                        }
                         if(!(m==0 && n<0)){
                             resptr_private[counter+shift0] += cosphi * costerm * v0;
                             resptr_private[counter+shift0] += sinphi * costerm * v1;
@@ -904,6 +906,8 @@ Array SurfaceRZFourier<Array>::dgamma_by_dcoeff_vjp(Array& v) {
                 resptr[i] += resptr_private[i];
             }
         }
+        delete[] resptr_private;
+    }
     return res;
 }
 
@@ -1038,6 +1042,7 @@ Array SurfaceRZFourier<Array>::dgammadash1_by_dcoeff_vjp(Array& v) {
                 resptr[i] += resptr_private[i];
             }
         }
+        delete[] resptr_private;
     }
     simsoptpp::scale_array(res, 2 * M_PI);
     return res;
@@ -1082,9 +1087,10 @@ Array SurfaceRZFourier<Array>::dgammadash1_by_dcoeff_vjp(Array& v) {
                         int i = n + ntor;
                         // recompute the angle from scratch every so often, to
                         // avoid accumulating floating point error
-                        if(i % ANGLE_RECOMPUTE == 0)
+                        if(i % ANGLE_RECOMPUTE == 0) {
                             sinterm = sin(m*theta-n*nfp*phi);
                             costerm = cos(m*theta-n*nfp*phi);
+                        }
                         if(!(m==0 && n<0)){
                             resptr_private[counter+shift0] += ((sinterm * ((n*nfp) * cosphi) - costerm * sinphi) * v0);
                             resptr_private[counter+shift0] += ((sinterm * ((n*nfp) * sinphi) + costerm * cosphi) * v1);
@@ -1116,6 +1122,7 @@ Array SurfaceRZFourier<Array>::dgammadash1_by_dcoeff_vjp(Array& v) {
                 resptr[i] += resptr_private[i];
             }
         }
+        delete[] resptr_private;
     }
     simsoptpp::scale_array(res, 2 * M_PI);
     return res;
@@ -1362,6 +1369,7 @@ Array SurfaceRZFourier<Array>::dgammadash2_by_dcoeff_vjp(Array& v) {
                 resptr[i] += resptr_private[i];
             }
         }
+        delete[] resptr_private;
     }
     simsoptpp::scale_array(res, 2 * M_PI);
     return res;
@@ -1406,9 +1414,10 @@ Array SurfaceRZFourier<Array>::dgammadash2_by_dcoeff_vjp(Array& v) {
                         int i = n + ntor;
                         // recompute the angle from scratch every so often, to
                         // avoid accumulating floating point error
-                        if(i % ANGLE_RECOMPUTE == 0)
+                        if(i % ANGLE_RECOMPUTE == 0) {
                             sinterm = sin(m*theta-n*nfp*phi);
                             costerm = cos(m*theta-n*nfp*phi);
+                        }
                         if(!(m==0 && n<0)){
                             resptr_private[counter+shift0] -= (cosphi * m) * (sinterm * v0);
                             resptr_private[counter+shift0] -= (sinphi * m) * (sinterm * v1);
@@ -1440,6 +1449,7 @@ Array SurfaceRZFourier<Array>::dgammadash2_by_dcoeff_vjp(Array& v) {
                 resptr[i] += resptr_private[i];
             }
         }
+        delete[] resptr_private;
     }
     simsoptpp::scale_array(res, 2 * M_PI);
     return res;

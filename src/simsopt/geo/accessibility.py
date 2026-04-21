@@ -116,7 +116,7 @@ class PortSize(Optimizable):
                     self.port.set(key, self.port.get(key)*(0.9**oo))
                     key = f'theta{par}({oo})'
                     self.port.set(key, self.port.get(key)*(0.9**oo))
-
+            counter += 1
             if counter==20:
                 raise ValueError('Initial port does not satisfy constraints')
 
@@ -548,7 +548,8 @@ def min_xy_distance(gamma1, gamma2):
     g2 = gamma2[:,:2]
 
     dists = np.linalg.norm(g1[:,None,:]-g2[None,:,:], axis=2)
-    f = np.maximum(g2cyl[None,:,0]-g1cyl[:,None,0], 0) / (g2cyl[None,:,0]-g1cyl[:,None,0])
+    dz = g2cyl[None,:,0]-g1cyl[:,None,0]
+    f = np.where(dz != 0, np.maximum(dz, 0) / dz, 0.0)
 
     if (f==0).all():
         return np.nan
@@ -792,7 +793,7 @@ def xy_convexity( pts, g, gd, gdd ):
     integral_of_kappa = jnp.trapz(jnp.abs(kappa)*jnp.linalg.norm(gd,axis=1), pts)
 
     # Allow 5% margin of error for numerical integration error
-    return jnp.max( jnp.array([integral_of_kappa - 1.05*2.0*jnp.pi]), 0 )**2
+    return jnp.maximum(integral_of_kappa - 1.05*2.0*jnp.pi, 0.0)**2
 
 def zphi_convexity( pts, g, gd, gdd):
     local_project = lambda x: project(x, g)
@@ -809,7 +810,7 @@ def zphi_convexity( pts, g, gd, gdd):
     integral_of_kappa = jnp.trapz(jnp.abs(kappa)*jnp.linalg.norm(gd_projected,axis=1), pts)
 
     # Allow 5% margin of error for numerical integration error
-    return jnp.max( jnp.array([integral_of_kappa - 1.05*2.0*jnp.pi]), 0 )**2
+    return jnp.maximum(integral_of_kappa - 1.05*2.0*jnp.pi, 0.0)**2
 
 class ProjectedCurveConvexity( Optimizable ):
     def __init__(self, curve, projection='xy'):

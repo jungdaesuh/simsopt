@@ -1,21 +1,13 @@
-from math import sin, cos
-
 import numpy as np
-from jax import vjp, jacfwd, jvp, hessian, grad
+from jax import vjp, jacfwd, jvp
 import jax.numpy as jnp
 
 import simsoptpp as sopp
-from .._core.optimizable import Optimizable
 from .._core.derivative import Derivative
-from .surfacerzfourier import SurfaceRZFourier
-from.surfacexyzfourier import SurfaceXYZFourier
-from .surfacexyztensorfourier import SurfaceXYZTensorFourier
 from .curve import Curve
-
 
 from .jit import jit
 from .._core.derivative import derivative_dec
-from .plotting import fix_matplotlib_3d
 
 __all__ = ['CurveCWSFourierCPP']
 
@@ -89,24 +81,20 @@ class CurveCWSFourierCPP( Curve, sopp.Curve ):
 
         self.numquadpoints = self.quadpoints.size
 
-        # useful functions
-        points = np.asarray(self.quadpoints)
-        ones = jnp.ones_like(points)
-
         ## gamma
-        self.gamma_2d_pure = jit(lambda cdofs, qpts: gamma_2d(cdofs, qpts, self.order, self.G, self.H)) 
-        self.gamma_2d_jax = jit(lambda cdofs: self.gamma_2d_pure(cdofs, self.quadpoints)) 
+        self.gamma_2d_pure = jit(lambda cdofs, qpts: gamma_2d(cdofs, qpts, self.order, self.G, self.H))
+        self.gamma_2d_jax = jit(lambda cdofs: self.gamma_2d_pure(cdofs, self.quadpoints))
         self.dgamma_2d_by_dcoeff_jax = jit(lambda cdofs: jacfwd(self.gamma_2d_jax)(cdofs))
         self.dgamma_2d_by_dcoeff_vjp = jit(lambda cdofs, v: vjp(self.gamma_2d_jax, cdofs)[1](v)[0])
 
         ## gammadash
-        self.gammadash_2d_pure = jit(lambda cdofs, q: jvp(lambda qpts: self.gamma_2d_pure(cdofs, qpts), (q,), (ones,))[1])
+        self.gammadash_2d_pure = jit(lambda cdofs, q: jvp(lambda qpts: self.gamma_2d_pure(cdofs, qpts), (q,), (jnp.ones_like(q),))[1])
         self.gammadash_2d_jax = jit(lambda cdofs: self.gammadash_2d_pure(cdofs, self.quadpoints))
         self.dgammadash_2d_by_dcoeff_jax = jit(lambda cdofs: jacfwd(self.gammadash_2d_jax)(cdofs))
         self.dgammadash_2d_by_dcoeff_vjp = jit(lambda cdofs, v: vjp(self.gammadash_2d_jax, cdofs)[1](v)[0])
 
         ## gammadashdash
-        self.gammadashdash_2d_pure = jit(lambda cdofs, q: jvp(lambda qpts: self.gammadash_2d_pure(cdofs, qpts), (q,), (ones,))[1])
+        self.gammadashdash_2d_pure = jit(lambda cdofs, q: jvp(lambda qpts: self.gammadash_2d_pure(cdofs, qpts), (q,), (jnp.ones_like(q),))[1])
         self.gammadashdash_2d_jax = jit(lambda cdofs: self.gammadashdash_2d_pure(cdofs, self.quadpoints))
         self.dgammadashdash_2d_by_dcoeff_jax = jit(lambda cdofs: jacfwd(self.gammadashdash_2d_jax)(cdofs))
         self.dgammadashdash_2d_by_dcoeff_vjp = jit(lambda cdofs, v: vjp(self.gammadashdash_2d_jax, cdofs)[1](v)[0])

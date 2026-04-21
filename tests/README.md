@@ -13,6 +13,10 @@ The layout of the subfolders within **tests** nearly mimics that of the simsopt 
 To run the tests, you must first install simsopt with `pip install .` from the main simsopt directory.
 Then, change to the `tests` directory, and run `python -m unittest` to run all tests.
 
+Tests that instantiate `simsopt.mhd.Spec` require the full SPEC
+runtime, not just `py_spec`. In those environments,
+`import spec.spec_f90wrapped` must also succeed.
+
 To run unittests only in one folder, for example, `geo`, run `python -m unittest -t . -s geo`.
 
 To run unittests only in one file for example `geo/test_surface.py", run `python -m unittest geo.test_surface`.

@@ -330,7 +330,7 @@ void Surface<Array>::dsurface_curvatures_by_dcoeff_impl(Array& data) {
           auto denom = first(i,j,0)*first(i,j,2) - first(i,j,1)*first(i,j,1);
           auto data_0 = (second(i,j,0)*first(i,j,2) - 2*first(i,j,1)*second(i,j,1) + second(i,j,2)*first(i,j,0))/(2*denom);
           auto data_1 = (second(i,j,0)*second(i,j,2) - second(i,j,1)*second(i,j,1))/denom;
-          auto term2 = std::sqrt(data_0*data_0 - data_1);
+          auto term2 = std::sqrt(std::max(0.0, data_0*data_0 - data_1));
           for (int m = 0; m < ndofs; ++m ) {
               auto d_denom = dfirst_0_dc_ptr[m] * first(i,j,2) \
                            + first(i,j,0) * dfirst_2_dc_ptr[m] \
@@ -344,7 +344,7 @@ void Surface<Array>::dsurface_curvatures_by_dcoeff_impl(Array& data) {
                             - data_0*d_denom/denom;
               data_1_ptr[m] = (dsecond_0_dc_ptr[m]*second(i,j,2) + second(i,j,0)*dsecond_2_dc_ptr[m] - 2*dsecond_1_dc_ptr[m]*second(i,j,1))/denom \
                             - data_1*d_denom/denom;
-              auto d_term2 = (data_0*data_0_ptr[m] - 0.5*data_1_ptr[m])/term2;
+              auto d_term2 = (term2 > 0.0) ? (data_0*data_0_ptr[m] - 0.5*data_1_ptr[m])/term2 : 0.0;
 
               data_2_ptr[m] = data_0_ptr[m] + d_term2;
               data_3_ptr[m] = data_0_ptr[m] - d_term2;
@@ -361,9 +361,6 @@ void Surface<Array>::surface_curvatures_impl(Array& data) {
   auto d2rd1d1 = this->gammadash1dash1();
   auto d2rd1d2 = this->gammadash1dash2();
   auto d2rd2d2 = this->gammadash2dash2();
-  auto dg1_dc = this->dgammadash1_by_dcoeff();
-  auto dg2_dc = this->dgammadash2_by_dcoeff();
-  int ndofs = num_dofs();
 
   auto first = this->first_fund_form();
   auto second = this->second_fund_form();
@@ -372,8 +369,8 @@ void Surface<Array>::surface_curvatures_impl(Array& data) {
           auto denom = first(i,j,0)*first(i,j,2) - first(i,j,1)*first(i,j,1);
           data(i, j, 0) = (second(i,j,0)*first(i,j,2) - 2*first(i,j,1)*second(i,j,1) + second(i,j,2)*first(i,j,0))/(2*denom); // H
           data(i, j, 1) = (second(i,j,0)*second(i,j,2) - second(i,j,1)*second(i,j,1))/denom; // K
-          data(i, j, 2) = data(i, j, 0) + std::sqrt(data(i, j, 0)*data(i, j, 0) - data(i, j, 1));
-          data(i, j, 3) = data(i, j, 0) - std::sqrt(data(i, j, 0)*data(i, j, 0) - data(i, j, 1));
+          data(i, j, 2) = data(i, j, 0) + std::sqrt(std::max(0.0, data(i, j, 0)*data(i, j, 0) - data(i, j, 1)));
+          data(i, j, 3) = data(i, j, 0) - std::sqrt(std::max(0.0, data(i, j, 0)*data(i, j, 0) - data(i, j, 1)));
       }
   }
 };

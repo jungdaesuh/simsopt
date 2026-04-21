@@ -1018,6 +1018,8 @@ def gamma_curve_on_surface(curve_dofs, qpts, order, G, H, surf_dofs, surf_type, 
         gamma = surfxyztensor_gamma_lin(phi, theta, mpol, ntor, surf_dofs, nfp, stellsym)
     elif surf_type is None:
         return phi, theta
+    else:
+        raise ValueError(f"Unknown surf_type: {surf_type!r}. Expected 'RZ_Fourier', 'XYZ_Tensor_Fourier', or None.")
 
     return gamma
 

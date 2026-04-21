@@ -287,7 +287,7 @@ void SurfaceXYZFourier<Array>::gammadash1dash2dash2_lin(Array& data, Array& quad
                 double dyhatdphidthetadtheta =  - get_coeff(1, true, m, i) * m*m*n*nfp*sin(m*theta-n*nfp*phi) + get_coeff(1, false, m, i) * m*m*n*nfp*cos(m*theta-n*nfp*phi);
                 dxdphidthetadtheta += dxhatdphidthetadtheta * cos(phi) - dxhatdthetadtheta * sin(phi) - dyhatdphidthetadtheta * sin(phi) - dyhatdthetadtheta * cos(phi);
                 dydphidthetadtheta += dxhatdphidthetadtheta * sin(phi) + dxhatdthetadtheta * cos(phi) + dyhatdphidthetadtheta * cos(phi) - dyhatdthetadtheta * sin(phi);
-                dzdphidthetadtheta += - get_coeff(2, true , m, i) * m*m*n*nfp*sin(m*theta-n*nfp*phi) + get_coeff(2, false, m, i) * m*m*n*nfp*coshf(m*theta-n*nfp*phi);
+                dzdphidthetadtheta += - get_coeff(2, true , m, i) * m*m*n*nfp*sin(m*theta-n*nfp*phi) + get_coeff(2, false, m, i) * m*m*n*nfp*cos(m*theta-n*nfp*phi);
             }
         }
         data(k1, 0) = pow(2*M_PI,3)*dxdphidthetadtheta;
