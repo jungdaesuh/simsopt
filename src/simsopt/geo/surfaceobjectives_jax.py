@@ -982,7 +982,10 @@ def _solve_boozer_adjoint_batch(adjoint_state, rhs_batch):
             "_solve_boozer_adjoint_batch expects a rank-2 array with shape "
             "(num_rhs, decision_size)."
         )
-    if adjoint_state.plu is not None:
+    if (
+        adjoint_state.linearization_kind == "exact_jacobian"
+        and adjoint_state.plu is not None
+    ):
         solved_columns = _solve_boozer_adjoint(
             adjoint_state,
             jnp.swapaxes(rhs_batch, 0, 1),
@@ -1314,105 +1317,27 @@ def _ensure_solved_value_state(booz_surf):
 def _resolved_boozer_solved_runtime_state(booz_surf):
     """Return the solved-state runtime summary for value-path consumers."""
     _ensure_solved_value_state(booz_surf)
-    if hasattr(booz_surf, "get_solved_runtime_state"):
-        return booz_surf.get_solved_runtime_state()
-
-    get_cached_surface_dofs = getattr(booz_surf, "_get_cached_surface_dofs", None)
-    if callable(get_cached_surface_dofs):
-        sdofs = get_cached_surface_dofs()
-    else:
-        sdofs = booz_surf._get_surface_dofs()
-
-    class _FallbackSolvedRuntimeState:
-        def __init__(self, sdofs, iota, G, weight_inv_modB):
-            self.sdofs = sdofs
-            self.iota = iota
-            self.G = G
-            self.weight_inv_modB = weight_inv_modB
-
-    G = booz_surf.res["G"]
-    solved_G = None if G is None else _as_jax_float64(G)
-    return _FallbackSolvedRuntimeState(
-        sdofs=_as_jax_float64(sdofs),
-        iota=_as_jax_float64(booz_surf.res["iota"]),
-        G=solved_G,
-        weight_inv_modB=bool(
-            booz_surf.res.get("weight_inv_modB", booz_surf.options["weight_inv_modB"])
-        ),
-    )
+    return _require_boozer_runtime_state_method(
+        booz_surf, "get_solved_runtime_state"
+    )()
 
 
 def _resolved_boozer_adjoint_runtime_state(booz_surf):
     """Return the adjoint-state runtime summary for gradient-path consumers."""
     _ensure_solved_value_state(booz_surf)
-    if hasattr(booz_surf, "get_adjoint_runtime_state"):
-        return booz_surf.get_adjoint_runtime_state()
+    return _require_boozer_runtime_state_method(
+        booz_surf, "get_adjoint_runtime_state"
+    )()
 
-    solved_state = _resolved_boozer_solved_runtime_state(booz_surf)
-    if (
-        "PLU" not in booz_surf.res
-        or booz_surf.res["PLU"] is None
-        or "vjp_groups" not in booz_surf.res
-        or booz_surf.res["vjp_groups"] is None
-    ):
-        raise RuntimeError(
-            "BoozerSurfaceJAX has not been solved yet or the last solve failed "
-            "to produce valid adjoint state."
+
+def _require_boozer_runtime_state_method(booz_surf, method_name):
+    method = getattr(booz_surf, method_name, None)
+    if not callable(method):
+        raise TypeError(
+            "JAX Boozer objective wrappers require a BoozerSurfaceJAX runtime "
+            f"object with {method_name}()."
         )
-
-    vjp_groups_fn = booz_surf.res["vjp_groups"]
-
-    class _FallbackAdjointRuntimeState:
-        def __init__(
-            self,
-            solved_state,
-            *,
-            linearization_kind,
-            decision_size,
-            dtype,
-            solve_forward,
-            solve_transpose,
-            stream_group_vjps,
-            plu,
-        ):
-            self.solved_state = solved_state
-            self.linearization_kind = linearization_kind
-            self.decision_size = decision_size
-            self.dtype = dtype
-            self.solve_forward = solve_forward
-            self.solve_transpose = solve_transpose
-            self.plu = plu
-            self.stream_group_vjps = stream_group_vjps
-
-    def stream_group_vjps(adjoint):
-        yield from vjp_groups_fn(
-            adjoint,
-            booz_surf,
-            solved_state.iota,
-            solved_state.G,
-        )
-
-    P, L, U = booz_surf.res["PLU"]
-
-    def solve_forward(rhs):
-        return _solve_plu_with_refinement(P, L, U, rhs)
-
-    def solve_transpose(rhs):
-        return _solve_plu_transpose_with_refinement(P, L, U, rhs)
-
-    return _FallbackAdjointRuntimeState(
-        solved_state=solved_state,
-        linearization_kind=booz_surf.res.get(
-            "linearization_kind",
-            "exact_jacobian" if booz_surf.res.get("type") == "exact" else "hessian",
-        ),
-        decision_size=int(np.asarray(L.shape[0])),
-        dtype=L.dtype,
-        solve_forward=solve_forward,
-        solve_transpose=solve_transpose,
-        plu=booz_surf.res["PLU"],
-        stream_group_vjps=stream_group_vjps,
-    )
+    return method
 
 
 def _qs_ratio_pure(

@@ -4905,8 +4905,13 @@ class TestOnDeviceBackendIntegration:
         assert np.isfinite(res["fun"]), (
             f"{optimizer_backend} backend returned non-finite fun"
         )
-        assert res["PLU"] is not None, f"{optimizer_backend} backend did not build PLU"
-        assert callable(res["vjp"]), f"{optimizer_backend} backend did not expose VJP"
+        adjoint_state = booz_jax.get_adjoint_runtime_state()
+        assert callable(adjoint_state.solve_transpose), (
+            f"{optimizer_backend} backend did not expose adjoint solve"
+        )
+        assert callable(adjoint_state.stream_group_vjps), (
+            f"{optimizer_backend} backend did not expose grouped adjoint stream"
+        )
         if pass_explicit_G:
             assert res["G"] is not None
         else:
@@ -5605,117 +5610,19 @@ class TestBoozerResidualAdjointFD:
 # (lax.while_loop) on the supported path.
 #
 # Dependency order:
-#   Test 3 (run_code_functional)
-#     -> Test 1 (pure objective value)
-#       -> Test 2 (jax.grad differentiable)
-#         -> Test 4 (jaxpr traces without error)
-#           -> Test 6 (routes through lax.while_loop)
-#             -> Test 7 (parity with fused value/grad path)
+#   Test 1 (pure objective value)
+#     -> Test 2 (jax.grad differentiable)
+#       -> Test 4 (jaxpr traces without error)
+#         -> Test 6 (routes through lax.while_loop)
+#           -> Test 7 (parity with fused value/grad path)
 #   Test 5 (no run_dict/Optimizable dependency) is independent
 #
 # This slice is green for the current traceable-objective path. Tests 1-7
 # validate the pure array-backed custom_vjp objective built by
-# make_traceable_objective(), while Tests 3a/3b continue to pin the lower-level
-# legacy-result wrapper exposed by run_code_functional().
+# make_traceable_objective().
 # This does not claim that the whole repo is fallback-free: reference/transitional
 # optimizer lanes and compatibility adapters still exist elsewhere by design.
 # =======================================================================
-
-
-class TestRunCodeFunctional:
-    """Test 3: BoozerSurfaceJAX.run_code_functional() — compatibility wrapper.
-
-    The current run_code() mutates self state (need_to_run_code, surface DOFs
-    via _set_surface_dofs), uses Python assertions, and branches on dirty flags.
-
-    run_code_functional() must:
-    - Accept explicit (coil_arrays, sdofs, iota, G) arguments
-    - Return matching iota/G/success/PLU; s=None, vjp=None,
-      vjp_groups=None (CPU callbacks incompatible with functional
-      contract); sdofs=solved surface DOFs array
-    - NOT mutate any self.* state
-
-    Internally the solve now reuses run_code_traceable(), so the inner
-    computation stays on the same pure-array target lane as the traceable
-    single-stage objective. This wrapper still returns the historical
-    run_code()-shaped dict, so the wrapper itself is not the JIT boundary.
-    """
-
-    def test_run_code_functional_exists_and_matches(self):
-        """run_code_functional returns same iota/G/success as run_code."""
-        (_, _, _, _, bs_jax, _, booz_jax, _, iota0, G0) = _make_boozer_setup(
-            constraint_weight=1.0,
-        )
-
-        # Capture inputs before any solve.
-        coil_arrays = booz_jax._coil_arrays
-        sdofs = np.array(booz_jax.surface.get_dofs())
-
-        # Call functional version FIRST — self.surface is still in the
-        # pre-solve state, so this exercises the true functional contract
-        # (no dependency on prior stateful mutation).
-        res_functional = booz_jax.run_code_functional(
-            coil_arrays,
-            sdofs,
-            iota0,
-            G0,
-        )
-
-        # Stateful version with the same starting point.
-        res_stateful = booz_jax.run_code(iota0, G0)
-        assert res_stateful is not None and res_stateful["success"]
-
-        np.testing.assert_allclose(
-            res_functional["iota"],
-            res_stateful["iota"],
-            rtol=1e-9,
-            atol=1e-12,
-        )
-        if res_stateful["G"] is not None:
-            np.testing.assert_allclose(
-                res_functional["G"],
-                res_stateful["G"],
-                rtol=1e-9,
-                atol=1e-12,
-            )
-        assert res_functional["success"] == res_stateful["success"]
-        assert res_functional["PLU"] is not None
-        # Functional path returns solved sdofs, not a CPU surface object.
-        assert res_functional["s"] is None
-        assert res_functional["sdofs"] is not None
-
-    def test_run_code_functional_does_not_mutate_self(self):
-        """run_code_functional must not change booz_surf internal state."""
-        (_, _, _, _, bs_jax, _, booz_jax, _, iota0, G0) = _make_boozer_setup(
-            constraint_weight=1.0,
-        )
-
-        # Establish baseline state
-        res0 = booz_jax.run_code(iota0, G0)
-        assert res0 is not None
-
-        sdofs_before = np.array(booz_jax.surface.get_dofs())
-        need_to_run_before = booz_jax.need_to_run_code
-        res_ref = booz_jax.res
-
-        # Call functional version with perturbed surface DOFs
-        rng = np.random.RandomState(42)
-        sdofs_perturbed = sdofs_before + 0.001 * rng.randn(len(sdofs_before))
-
-        booz_jax.run_code_functional(
-            booz_jax._coil_arrays,
-            sdofs_perturbed,
-            iota0,
-            G0,
-        )
-
-        # Self state must be unchanged
-        np.testing.assert_array_equal(
-            np.array(booz_jax.surface.get_dofs()),
-            sdofs_before,
-        )
-        assert booz_jax.need_to_run_code == need_to_run_before
-        assert booz_jax.res is res_ref
 
 
 class TestTraceableObjective:

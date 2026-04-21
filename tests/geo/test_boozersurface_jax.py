@@ -3102,6 +3102,52 @@ class TestBoozerSurfaceJAXClass:
         assert res["PLU"] is not None
         assert callable(res["vjp"])
 
+    def test_get_adjoint_runtime_state_prefers_operator_callbacks_for_ls(self, monkeypatch):
+        """LS runtime adjoints must stay operator-backed even when PLU exists."""
+        booz = _make_mock_boozer_surface()
+        booz.need_to_run_code = False
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "hessian",
+            "PLU": tuple(jnp.eye(booz.x.size, dtype=jnp.float64) for _ in range(3)),
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+
+        recorded = {}
+
+        def fake_solve_hessian_system(objective_fn, x, rhs, *, stab, tol):
+            del objective_fn
+            recorded["x_shape"] = tuple(np.asarray(x).shape)
+            recorded["rhs"] = np.asarray(rhs)
+            recorded["stab"] = stab
+            recorded["tol"] = tol
+            return rhs
+
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_solve_hessian_system",
+            fake_solve_hessian_system,
+        )
+        monkeypatch.setattr(
+            _bsj,
+            "forward_backward_jax",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("LS adjoint runtime should not use dense PLU solves")
+            ),
+        )
+
+        adjoint_state = booz.get_adjoint_runtime_state()
+        solved = adjoint_state.solve_transpose(jnp.asarray([1.0, -2.0], dtype=jnp.float64))
+
+        np.testing.assert_allclose(np.asarray(solved), np.asarray([1.0, -2.0]))
+        np.testing.assert_allclose(recorded["rhs"], np.asarray([1.0, -2.0]))
+        assert recorded["x_shape"][0] == booz._pack_decision_vector(0.3, 0.05).size
+
     def test_run_code_emits_newton_progress_updates(self, monkeypatch):
         """run_code() should surface Newton start/progress/completion through stage_callback."""
         booz = _make_mock_boozer_surface()
@@ -4269,60 +4315,52 @@ class TestBoozerSurfaceJAXExactPath:
                 "silent zero-gradient propagation"
             )
 
-    def test_run_code_functional_reuses_traceable_inner_solve(self, monkeypatch):
-        """run_code_functional() should just repackage run_code_traceable()."""
+    def test_run_code_functional_aliases_run_code_traceable_schema(self, monkeypatch):
+        """run_code_functional() should forward to the runtime-native traceable schema."""
         booz = _make_mock_boozer_surface()
         coil_arrays = booz._coil_arrays
         sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
         iota = jnp.asarray(0.3, dtype=jnp.float64)
         G = jnp.asarray(0.05, dtype=jnp.float64)
-        captured = {}
+        expected = {
+            "x": booz._pack_decision_vector(iota, G, sdofs=sdofs),
+            "sdofs": sdofs,
+            "iota": iota,
+            "G": G,
+            "fun": jnp.asarray(1.25, dtype=jnp.float64),
+            "grad": jnp.arange(sdofs.size + 2, dtype=jnp.float64),
+            "hessian": jnp.eye(sdofs.size + 2, dtype=jnp.float64),
+            "plu": tuple(jnp.eye(sdofs.size + 2, dtype=jnp.float64) for _ in range(3)),
+            "nit": jnp.asarray(3, dtype=jnp.int32),
+            "success": jnp.asarray(True),
+            "optimizer_method": "lbfgs-ondevice",
+            "type": "ls",
+            "weight_inv_modB": booz.options["weight_inv_modB"],
+        }
 
         def fake_run_code_traceable(coil_source, sdofs_arg, iota_arg, G_arg):
-            captured["coil_source"] = coil_source
-            captured["sdofs"] = sdofs_arg
-            captured["iota"] = iota_arg
-            captured["G"] = G_arg
-            return {
-                "x": booz._pack_decision_vector(iota_arg, G_arg, sdofs=sdofs_arg),
-                "sdofs": sdofs_arg,
-                "iota": iota_arg,
-                "G": G_arg,
-                "fun": jnp.asarray(1.25, dtype=jnp.float64),
-                "grad": jnp.arange(sdofs_arg.size + 2, dtype=jnp.float64),
-                "hessian": jnp.eye(sdofs_arg.size + 2, dtype=jnp.float64),
-                "plu": tuple(
-                    jnp.eye(sdofs_arg.size + 2, dtype=jnp.float64) for _ in range(3)
-                ),
-                "nit": jnp.asarray(3, dtype=jnp.int32),
-                "success": jnp.asarray(True),
-                "optimizer_method": "lbfgs-ondevice",
-                "type": "ls",
-                "weight_inv_modB": booz.options["weight_inv_modB"],
-            }
+            if coil_source is not coil_arrays:
+                raise AssertionError("unexpected functional call")
+            if not np.allclose(np.asarray(sdofs_arg), np.asarray(sdofs)):
+                raise AssertionError("unexpected functional call")
+            if not np.allclose(np.asarray(iota_arg), np.asarray(iota)):
+                raise AssertionError("unexpected functional call")
+            if not np.allclose(np.asarray(G_arg), np.asarray(G)):
+                raise AssertionError("unexpected functional call")
+            return expected
 
-        def forbid_optimizer_entrypoint(*_args, **_kwargs):
-            raise AssertionError(
-                "run_code_functional() should not rerun an optimizer entrypoint"
-            )
-
-        monkeypatch.setattr(booz, "run_code_traceable", fake_run_code_traceable)
-        for runner_name in (
-            "reference_least_squares",
-            "reference_minimize",
-            "target_least_squares",
-            "target_minimize",
-        ):
-            monkeypatch.setattr(_bsj, runner_name, forbid_optimizer_entrypoint)
+        monkeypatch.setattr(
+            booz,
+            "run_code_traceable",
+            fake_run_code_traceable,
+        )
 
         result = booz.run_code_functional(coil_arrays, sdofs, iota, G)
 
-        assert captured["coil_source"] is coil_arrays
-        np.testing.assert_allclose(np.asarray(captured["sdofs"]), np.asarray(sdofs))
+        assert result is expected
+        assert "PLU" not in result
+        assert result["plu"] is not None
         np.testing.assert_allclose(np.asarray(result["sdofs"]), np.asarray(sdofs))
-        assert result["optimizer_method"] == "lbfgs-ondevice"
-        assert result["success"] is True
-        assert result["PLU"] is not None
 
     def test_run_code_traceable_exact_skips_lu_for_nonfinite_newton_result(
         self, monkeypatch
@@ -5579,8 +5617,8 @@ class TestBuildBoozerSurfaceRuntimeState:
         np.testing.assert_allclose(np.asarray(solved_state.G), 1.7)
         assert solved_state.weight_inv_modB is False
 
-    def test_get_adjoint_runtime_state_wraps_plu_and_group_vjp_stream(self):
-        """Adjoint runtime summary must expose PLU plus a bound streaming callback."""
+    def test_get_adjoint_runtime_state_exposes_runtime_callbacks_and_stream(self):
+        """Adjoint runtime summary must expose operator callbacks plus group VJPs."""
         s = self._make_real_surface(mpol=3, ntor=3, nfp=2)
         coils = _make_mock_coils()
         bs = _MockBiotSavart(coils)
@@ -5596,7 +5634,7 @@ class TestBuildBoozerSurfaceRuntimeState:
         expected_plu = (
             jnp.eye(2, dtype=jnp.float64),
             jnp.eye(2, dtype=jnp.float64),
-            jnp.asarray([0, 1], dtype=jnp.int32),
+            jnp.eye(2, dtype=jnp.float64),
         )
         recorded = {}
 
@@ -5612,6 +5650,7 @@ class TestBuildBoozerSurfaceRuntimeState:
             "iota": jnp.asarray(0.23, dtype=jnp.float64),
             "G": jnp.asarray(1.7, dtype=jnp.float64),
             "weight_inv_modB": True,
+            "linearization_kind": "exact_jacobian",
             "PLU": expected_plu,
             "vjp_groups": fake_vjp_groups,
         }
@@ -5619,13 +5658,18 @@ class TestBuildBoozerSurfaceRuntimeState:
         booz._surface_dofs = jnp.asarray([], dtype=jnp.float64)
 
         adjoint_state = booz.get_adjoint_runtime_state()
+        solved = adjoint_state.solve_transpose(jnp.asarray([2.0, -4.0], dtype=jnp.float64))
         streamed = list(
             adjoint_state.stream_group_vjps(jnp.asarray([5.0, -1.0], dtype=jnp.float64))
         )
 
-        assert adjoint_state.plu == expected_plu
+        np.testing.assert_allclose(np.asarray(solved), np.asarray([2.0, -4.0]))
         assert adjoint_state.decision_size == 2
         assert adjoint_state.dtype == jnp.float64
+        np.testing.assert_allclose(
+            np.asarray(adjoint_state.apply_transpose(jnp.asarray([1.0, 3.0], dtype=jnp.float64))),
+            np.asarray([1.0, 3.0]),
+        )
         assert streamed == [("cotangent", (0, 1))]
         assert recorded["booz"] is booz
         np.testing.assert_allclose(recorded["adjoint"], np.asarray([5.0, -1.0]))

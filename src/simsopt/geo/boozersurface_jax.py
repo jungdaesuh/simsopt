@@ -185,6 +185,8 @@ class _BoozerAdjointRuntimeState:
     linearization_kind: str
     decision_size: int
     dtype: object
+    apply_forward: callable
+    apply_transpose: callable
     solve_forward: callable
     solve_transpose: callable
     stream_group_vjps: callable
@@ -1672,8 +1674,8 @@ class BoozerSurfaceJAX(Optimizable):
     def _resolved_linearization_kind(self):
         if self.boozer_type == "exact":
             return "exact_jacobian"
-        if self.res.get("hessian") is not None:
-            return "hessian"
+        if self.res is not None and self.res.get("linearization_kind") is not None:
+            return self.res["linearization_kind"]
         optimizer_method = self.res.get("optimizer_method")
         if optimizer_method in {"lm", "lm-ondevice"}:
             return "least_squares_normal"
@@ -1690,17 +1692,27 @@ class BoozerSurfaceJAX(Optimizable):
         )
         tol = self._linear_solve_tolerance()
 
-        if dense_plu is not None:
-            P, L, U = dense_plu
+        def pack_callbacks(
+            apply_forward,
+            apply_transpose,
+            solve_forward,
+            solve_transpose=None,
+        ):
+            if solve_transpose is None:
+                solve_transpose = solve_forward
+            return (
+                linearization_kind,
+                x.shape[0],
+                x.dtype,
+                apply_forward,
+                apply_transpose,
+                solve_forward,
+                solve_transpose,
+            )
 
-            def solve_forward(rhs):
-                return plu_solve_jax(P, L, U, rhs, iterative_refinement=True)
-
-            def solve_transpose(rhs):
-                return forward_backward_jax(P, L, U, rhs, iterative_refinement=True)
-
-            return linearization_kind, x.shape[0], x.dtype, solve_forward, solve_transpose
-
+        # On the supported JAX/CUDA LS lane, runtime adjoints stay
+        # operator-backed even if a dense Hessian/PLU was materialized for
+        # diagnostics or parity probes.
         if linearization_kind == "least_squares_normal":
             residual_fn = self._make_penalty_residual_with(
                 optimize_G,
@@ -1708,6 +1720,7 @@ class BoozerSurfaceJAX(Optimizable):
                 coil_set_spec=self.coil_set_spec,
                 hostify_inputs=False,
             )
+            operator = _optimizer_jax._least_squares_normal_operator(residual_fn, x)
 
             def solve_forward(rhs):
                 return _optimizer_jax._solve_least_squares_normal_system(
@@ -1717,7 +1730,11 @@ class BoozerSurfaceJAX(Optimizable):
                     tol=tol,
                 )
 
-            return linearization_kind, x.shape[0], x.dtype, solve_forward, solve_forward
+            return pack_callbacks(
+                operator["matvec"],
+                operator["transpose_matvec"],
+                solve_forward,
+            )
 
         if linearization_kind == "hessian":
             objective_fn = self._make_penalty_objective_with(
@@ -1725,6 +1742,11 @@ class BoozerSurfaceJAX(Optimizable):
                 solved_state.weight_inv_modB,
                 coil_set_spec=self.coil_set_spec,
                 hostify_inputs=False,
+            )
+            operator = _optimizer_jax._hessian_linear_operator(
+                objective_fn,
+                x,
+                stab=self.options["newton_stab"],
             )
 
             def solve_forward(rhs):
@@ -1736,10 +1758,38 @@ class BoozerSurfaceJAX(Optimizable):
                     tol=tol,
                 )
 
-            return linearization_kind, x.shape[0], x.dtype, solve_forward, solve_forward
+            return pack_callbacks(
+                operator["matvec"],
+                operator["transpose_matvec"],
+                solve_forward,
+            )
+
+        if dense_plu is not None:
+            P, L, U = dense_plu
+            dense_operator = P @ L @ U
+
+            def apply_forward(rhs):
+                return dense_operator @ rhs
+
+            def apply_transpose(rhs):
+                return dense_operator.T @ rhs
+
+            def solve_forward(rhs):
+                return plu_solve_jax(P, L, U, rhs, iterative_refinement=True)
+
+            def solve_transpose(rhs):
+                return forward_backward_jax(P, L, U, rhs, iterative_refinement=True)
+
+            return pack_callbacks(
+                apply_forward,
+                apply_transpose,
+                solve_forward,
+                solve_transpose,
+            )
 
         if linearization_kind == "exact_jacobian":
             residual_fn = self._make_exact_residual(self._compute_stellsym_mask_indices())
+            operator = _optimizer_jax._jacobian_linear_operator(residual_fn, x)
 
             def solve_forward(rhs):
                 return _optimizer_jax._solve_jacobian_system(
@@ -1759,7 +1809,12 @@ class BoozerSurfaceJAX(Optimizable):
                     tol=tol,
                 )
 
-            return linearization_kind, x.shape[0], x.dtype, solve_forward, solve_transpose
+            return pack_callbacks(
+                operator["matvec"],
+                operator["transpose_matvec"],
+                solve_forward,
+                solve_transpose,
+            )
 
         raise RuntimeError(
             f"Unsupported BoozerSurfaceJAX linearization kind {linearization_kind!r}."
@@ -1783,15 +1838,23 @@ class BoozerSurfaceJAX(Optimizable):
         def stream_group_vjps(adjoint):
             yield from vjp_groups(adjoint, self, solved_state.iota, solved_state.G)
 
-        linearization_kind, decision_size, dtype, solve_forward, solve_transpose = (
-            self._build_runtime_linear_solve_callbacks(solved_state)
-        )
+        (
+            linearization_kind,
+            decision_size,
+            dtype,
+            apply_forward,
+            apply_transpose,
+            solve_forward,
+            solve_transpose,
+        ) = self._build_runtime_linear_solve_callbacks(solved_state)
 
         return _BoozerAdjointRuntimeState(
             solved_state=solved_state,
             linearization_kind=linearization_kind,
             decision_size=decision_size,
             dtype=dtype,
+            apply_forward=apply_forward,
+            apply_transpose=apply_transpose,
             solve_forward=solve_forward,
             solve_transpose=solve_transpose,
             stream_group_vjps=stream_group_vjps,
@@ -3021,6 +3084,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "hessian": None,
                 "iter": int(_host_scalar(result["nit"], dtype=np.int64)),
                 "success": False,
+                "sdofs": _as_jax_float64(sdofs_final),
                 "G": G_out,
                 "s": s,
                 "iota": iota_out,
@@ -3028,6 +3092,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "vjp": None,
                 "vjp_groups": None,
                 "type": "ls",
+                "optimizer_method": method,
                 "solve_generation": solve_generation,
                 "weight_inv_modB": weight_inv_modB,
                 "fun": float(_host_scalar(result["fun"])),
@@ -3090,6 +3155,7 @@ class BoozerSurfaceJAX(Optimizable):
             "success": bool(_host_scalar(result["success"])),
             "primal_success": bool(_host_scalar(result["success"])),
             "adjoint_linear_solve_available": bool(_host_scalar(result["success"])),
+            "sdofs": _as_jax_float64(sdofs_final),
             "G": G_out,
             "s": s,
             "iota": iota_out,
@@ -3097,6 +3163,7 @@ class BoozerSurfaceJAX(Optimizable):
             "vjp": vjp_callback,
             "vjp_groups": vjp_groups_callback,
             "type": "ls",
+            "optimizer_method": method,
             "linearization_kind": "hessian",
             "solve_generation": solve_generation,
             "weight_inv_modB": weight_inv_modB,
@@ -3509,6 +3576,21 @@ class BoozerSurfaceJAX(Optimizable):
             )
         return res
 
+    def run_code_functional(self, coil_arrays, sdofs, iota, G):
+        """Compatibility shim returning the runtime-native traceable schema.
+
+        This entrypoint survives only as a migration alias for callers that
+        still expect a pure-function named solve. The historical
+        ``run_code()``-shaped packaging has been retired; downstream users
+        should migrate to ``run_code_traceable()`` directly.
+        """
+        return self.run_code_traceable(
+            coil_arrays,
+            _as_jax_float64(sdofs),
+            iota,
+            G,
+        )
+
     def minimize_boozer_exact_constraints_newton(
         self,
         tol=1e-12,
@@ -3759,108 +3841,3 @@ class BoozerSurfaceJAX(Optimizable):
             ),
         )
         return res
-
-    def run_code_functional(self, coil_arrays, sdofs, iota, G):
-        """Pure functional form of ``run_code()`` — no self mutation.
-
-        Accepts explicit arguments instead of reading from self state.
-        Does NOT set ``self.res``, ``self.need_to_run_code``, or
-        ``self.surface`` DOFs.
-
-        This is the legacy-result compatibility wrapper over the trace-safe
-        array solve in ``run_code_traceable()``. The inner computation stays on
-        the pure-array target lane; this wrapper only repackages that result
-        into the historical ``run_code()``-shaped dict with ``s=None`` and
-        CPU-only adjoint hooks omitted.
-
-        Differences from the stateful ``run_code()`` result dict:
-
-        * ``sdofs`` — solved surface DOFs as a JAX array (new key).
-        * ``s`` — ``None``.  The functional path does not produce a
-          CPU surface object; use ``sdofs`` instead.
-        * ``vjp``, ``vjp_groups`` — ``None``.  The CPU VJP callbacks
-          read from ``self`` state at call/construction time and are
-          structurally incompatible with the functional contract.
-          Downstream traceable consumers should use JAX autodiff
-          through ``coil_arrays → objective`` instead.
-
-        Args:
-            coil_arrays: list of ``(gammas, gammadashs, currents)`` tuples.
-            sdofs: surface DOFs as a 1-D array.
-            iota: initial guess for rotational transform.
-            G: initial guess for G.
-
-        Returns:
-            dict with solver results.  See docstring for keys that
-            differ from the stateful ``run_code()`` path.
-        """
-        traceable_result = self.run_code_traceable(
-            coil_arrays,
-            _as_jax_float64(sdofs),
-            iota,
-            G,
-        )
-        success = bool(np.asarray(traceable_result["success"]))
-        result_type = traceable_result["type"]
-        legacy_result = {
-            "iter": int(np.asarray(traceable_result["nit"])),
-            "success": success,
-            "G": traceable_result["G"],
-            "s": None,
-            "sdofs": traceable_result["sdofs"],
-            "iota": traceable_result["iota"],
-            "PLU": None,
-            "vjp": None,
-            "vjp_groups": None,
-            "type": result_type,
-            "weight_inv_modB": traceable_result["weight_inv_modB"],
-            "fun": float(_host_scalar(traceable_result["fun"])),
-            "message": traceable_result.get("message"),
-        }
-
-        if result_type == "exact":
-            mask = None
-            if success:
-                mask_indices = np.asarray(self._compute_stellsym_mask_indices())
-                mask = np.zeros(
-                    3 * len(self.quadpoints_phi) * len(self.quadpoints_theta),
-                    dtype=bool,
-                )
-                mask[mask_indices] = True
-            legacy_result.update(
-                {
-                    "residual": None if not success else traceable_result["residual"],
-                    "jacobian": None if not success else traceable_result["jacobian"],
-                    "mask": mask,
-                }
-            )
-            if success:
-                legacy_result["PLU"] = tuple(traceable_result["plu"])
-            return legacy_result
-
-        legacy_result["optimizer_method"] = traceable_result["optimizer_method"]
-        if not success:
-            legacy_result.update(
-                {
-                    "residual": None,
-                    "jacobian": None,
-                    "hessian": None,
-                }
-            )
-            return legacy_result
-
-        legacy_result.update(
-            {
-                "residual": self._compute_residual_vector(
-                    traceable_result["sdofs"],
-                    traceable_result["iota"],
-                    traceable_result["G"],
-                    weight_inv_modB=traceable_result["weight_inv_modB"],
-                    coil_arrays=coil_arrays,
-                ),
-                "jacobian": traceable_result["grad"],
-                "hessian": traceable_result["hessian"],
-                "PLU": tuple(traceable_result["plu"]),
-            }
-        )
-        return legacy_result

@@ -2526,14 +2526,9 @@ def test_compute_derivative_l2_metrics_ignores_missing_dependency_keys():
 def test_grouped_adjoint_helpers_require_streaming_vjp_groups():
     jr_jax = types.SimpleNamespace(
         boozer_surface=types.SimpleNamespace(
-            res={
-                "iota": 0.1,
-                "G": 0.2,
-                "vjp_groups": None,
-                "vjp": lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                    AssertionError("legacy full VJP fallback should stay disabled")
-                ),
-            }
+            get_adjoint_runtime_state=lambda: (_ for _ in ()).throw(
+                RuntimeError("legacy full-pytree adjoint fallback should stay disabled")
+            )
         )
     )
 
@@ -2541,22 +2536,8 @@ def test_grouped_adjoint_helpers_require_streaming_vjp_groups():
         list(adjoint_probe_common.iter_grouped_adjoint_cotangents(jr_jax, np.ones(2)))
 
 
-def test_compute_adjoint_state_uses_device_native_forward_backward(monkeypatch):
+def test_compute_adjoint_state_uses_runtime_adjoint_state():
     recorded = {}
-
-    def fake_forward_backward_jax(P, L, U, rhs, iterative_refinement=False):
-        recorded["args"] = (P, L, U, rhs)
-        recorded["iterative_refinement"] = iterative_refinement
-        return rhs
-
-    monkeypatch.setattr(
-        adjoint_probe_common,
-        "forward_backward_jax",
-        fake_forward_backward_jax,
-    )
-    p_mat = np.eye(2)
-    l_mat = np.eye(2)
-    u_mat = np.eye(2)
     rhs = np.array([1.0, -2.0])
     expected_spec = object()
 
@@ -2564,14 +2545,25 @@ def test_compute_adjoint_state_uses_device_native_forward_backward(monkeypatch):
         recorded["compute_dJ_ds_args"] = (coil_set_spec, iota, G, weight_inv_modB)
         return rhs
 
+    def fake_solve_transpose(passed_rhs):
+        recorded["solve_transpose_rhs"] = np.asarray(passed_rhs)
+        return passed_rhs
+
+    def fake_apply_transpose(passed_adjoint):
+        recorded["apply_transpose_adjoint"] = np.asarray(passed_adjoint)
+        return passed_adjoint
+
     jr_jax = types.SimpleNamespace(
         boozer_surface=types.SimpleNamespace(
-            res={
-                "PLU": (p_mat, l_mat, u_mat),
-                "iota": 0.1,
-                "G": 0.2,
-                "weight_inv_modB": False,
-            }
+            get_adjoint_runtime_state=lambda: types.SimpleNamespace(
+                solved_state=types.SimpleNamespace(
+                    iota=0.1,
+                    G=0.2,
+                    weight_inv_modB=False,
+                ),
+                solve_transpose=fake_solve_transpose,
+                apply_transpose=fake_apply_transpose,
+            )
         ),
         biotsavart=types.SimpleNamespace(
             x=np.array([3.0, 4.0]),
@@ -2587,8 +2579,8 @@ def test_compute_adjoint_state_uses_device_native_forward_backward(monkeypatch):
 
     np.testing.assert_allclose(np.asarray(adjoint), rhs)
     assert residual_rel == pytest.approx(0.0)
-    assert recorded["args"] == (p_mat, l_mat, u_mat, rhs)
-    assert recorded["iterative_refinement"] is True
+    np.testing.assert_allclose(recorded["solve_transpose_rhs"], rhs)
+    np.testing.assert_allclose(recorded["apply_transpose_adjoint"], rhs)
     np.testing.assert_allclose(recorded["coil_dofs"], np.array([3.0, 4.0]))
     assert recorded["compute_dJ_ds_args"] == (expected_spec, 0.1, 0.2, False)
 

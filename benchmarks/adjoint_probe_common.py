@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from simsopt.objectives.utilities import forward_backward_jax
-
 
 _STREAMING_GROUP_VJP_REQUIRED = (
-    "Grouped adjoint probes require res['vjp_groups']; "
+    "Grouped adjoint probes require a valid Boozer runtime adjoint state; "
     "legacy full-pytree adjoint fallback is not allowed."
 )
 
@@ -16,29 +14,25 @@ _STREAMING_GROUP_VJP_REQUIRED = (
 def iter_grouped_adjoint_cotangents(jr_jax, adj: np.ndarray):
     """Yield grouped adjoint cotangents one coil block at a time."""
     booz_jax = jr_jax.boozer_surface
-    iota = booz_jax.res["iota"]
-    G = booz_jax.res["G"]
-    vjp_groups_fn = booz_jax.res.get("vjp_groups")
-    if vjp_groups_fn is None:
-        raise RuntimeError(_STREAMING_GROUP_VJP_REQUIRED)
-    yield from vjp_groups_fn(adj, booz_jax, iota, G)
+    adjoint_state = booz_jax.get_adjoint_runtime_state()
+    yield from adjoint_state.stream_group_vjps(adj)
 
 
 def compute_adjoint_state(jr_jax) -> tuple[np.ndarray, float]:
     """Return the objective-consistent adjoint vector and its residual."""
     booz_jax = jr_jax.boozer_surface
-    p_mat, l_mat, u_mat = booz_jax.res["PLU"]
+    adjoint_state = booz_jax.get_adjoint_runtime_state()
+    solved_state = adjoint_state.solved_state
     coil_dofs = jr_jax.biotsavart.x.copy()
     coil_set_spec = jr_jax.biotsavart.coil_set_spec_from_dofs(coil_dofs)
     dJ_ds = jr_jax._compute_dJ_ds(
         coil_set_spec,
-        booz_jax.res["iota"],
-        booz_jax.res["G"],
-        booz_jax.res.get("weight_inv_modB", True),
+        solved_state.iota,
+        solved_state.G,
+        solved_state.weight_inv_modB,
     )
-    adj = forward_backward_jax(p_mat, l_mat, u_mat, dJ_ds, iterative_refinement=True)
-    hessian = p_mat @ l_mat @ u_mat
-    residual = hessian.T @ adj - dJ_ds
+    adj = adjoint_state.solve_transpose(dJ_ds)
+    residual = adjoint_state.apply_transpose(adj) - dJ_ds
     rel = float(np.linalg.norm(residual) / (np.linalg.norm(dJ_ds) + 1e-30))
     return adj, rel
 

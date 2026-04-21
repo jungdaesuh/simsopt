@@ -3638,6 +3638,31 @@ class BoozerResidualExact(Optimizable):
         self._J = None
         self._dJ = None
 
+    def _adjoint_coil_derivative(self, dJ_ds, *, iota, G):
+        booz_surf = self.boozer_surface
+        get_adjoint_runtime_state = getattr(booz_surf, "get_adjoint_runtime_state", None)
+        if callable(get_adjoint_runtime_state):
+            adjoint_state = get_adjoint_runtime_state()
+            adjoint = adjoint_state.solve_transpose(
+                jnp.asarray(dJ_ds, dtype=jnp.float64)
+            )
+            adjoint_coil_derivative = Derivative({})
+            for d_coil_array, coil_group_indices in adjoint_state.stream_group_vjps(
+                adjoint
+            ):
+                adjoint_coil_derivative += (
+                    self.biotsavart.coil_cotangents_to_derivative(
+                        [d_coil_array],
+                        [coil_group_indices],
+                    )
+                )
+            return adjoint_coil_derivative
+
+        P, L, U = booz_surf.res["PLU"]
+        dconstraint_dcoils_vjp = booz_surf.res["vjp"]
+        adjoint = forward_backward(P, L, U, dJ_ds)
+        return dconstraint_dcoils_vjp(adjoint, booz_surf, iota, G)
+
     def compute(self):
         if self.boozer_surface.need_to_run_code:
             res = self.boozer_surface.res
@@ -3668,9 +3693,6 @@ class BoozerResidualExact(Optimizable):
         )
         self._J = 0.5 * np.sum(rtil**2)
 
-        booz_surf = self.boozer_surface
-        adjoint_state = booz_surf.get_adjoint_runtime_state()
-
         dJ_by_dB = self.dJ_by_dB()
         dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
 
@@ -3683,14 +3705,7 @@ class BoozerResidualExact(Optimizable):
             axis=0,
         )
         dJ_ds = Jtil.T @ rtil
-
-        adj = adjoint_state.solve_transpose(jnp.asarray(dJ_ds, dtype=jnp.float64))
-        adj_times_dg_dcoil = Derivative({})
-        for d_coil_array, coil_group_indices in adjoint_state.stream_group_vjps(adj):
-            adj_times_dg_dcoil += self.biotsavart.coil_cotangents_to_derivative(
-                [d_coil_array],
-                [coil_group_indices],
-            )
+        adj_times_dg_dcoil = self._adjoint_coil_derivative(dJ_ds, iota=iota, G=G)
         self._dJ = dJ_by_dcoils - adj_times_dg_dcoil
 
     def dJ_by_dB(self):
@@ -5925,6 +5940,10 @@ def prepare_target_lane_outer_objectives(
         outer_objective_config=target_lane_outer_objective_config,
         success_filter=target_lane_success_filter,
     )
+    if target_scalar_objective is None:
+        target_scalar_objective = _scalar_objective_from_value_and_grad(
+            target_value_and_grad_objective
+        )
     return (
         target_scalar_objective,
         target_value_and_grad_objective,
@@ -6341,6 +6360,18 @@ def _wrap_single_stage_outer_value_and_grad_objective(fun):
         optimizer_state = _single_stage_outer_optimizer_state(state)
         value, grad = fun(optimizer_state.coil_dofs)
         return value, SingleStageOuterOptimizerState(coil_dofs=grad)
+
+    return wrapped
+
+
+def _scalar_objective_from_value_and_grad(fun):
+    """Derive a scalar objective from a fused ``(value, grad)`` callable."""
+    if fun is None:
+        return None
+
+    def wrapped(state):
+        value, _ = fun(state)
+        return value
 
     return wrapped
 

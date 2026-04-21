@@ -1802,6 +1802,31 @@ def _gmres_solve_array_system(matvec, rhs, *, tol):
     return solution, residual
 
 
+def _materialize_dense_square_array_operator(matvec, rhs):
+    eye = jnp.eye(rhs.shape[0], dtype=rhs.dtype)
+    columns = jax.vmap(matvec)(eye)
+    dense_operator = jnp.swapaxes(columns, 0, 1)
+    return 0.5 * (dense_operator + dense_operator.T)
+
+
+def _solve_dense_square_array_system(matvec, rhs):
+    dense_operator = _materialize_dense_square_array_operator(matvec, rhs)
+    return jnp.linalg.solve(dense_operator, rhs)
+
+
+def _solve_square_array_system_with_dense_fallback(matvec, rhs, *, tol):
+    """Prefer GMRES but recover with a private dense solve when it goes nonfinite."""
+    solution, residual = _gmres_solve_array_system(matvec, rhs, tol=tol)
+    gmres_finite = jnp.all(jnp.isfinite(solution)) & jnp.all(jnp.isfinite(residual))
+
+    return lax.cond(
+        gmres_finite,
+        lambda _: solution,
+        lambda _: _solve_dense_square_array_system(matvec, rhs),
+        operand=None,
+    )
+
+
 def _least_squares_normal_operator(residual_fn, x):
     flat_residual_fn = jax.jit(_flattened_residual_output(residual_fn))
     _, pullback = jax.vjp(flat_residual_fn, x)
@@ -1835,8 +1860,11 @@ def _solve_least_squares_normal_system(
     tol,
 ):
     operator = _least_squares_normal_operator(residual_fn, x)
-    solution, _ = _gmres_solve_array_system(operator["matvec"], rhs, tol=tol)
-    return solution
+    return _solve_square_array_system_with_dense_fallback(
+        operator["matvec"],
+        rhs,
+        tol=tol,
+    )
 
 
 def _hessian_linear_operator(objective_fn, x, *, stab=0.0):
@@ -1870,8 +1898,11 @@ def _solve_hessian_system(
     tol,
 ):
     operator = _hessian_linear_operator(objective_fn, x, stab=stab)
-    solution, _ = _gmres_solve_array_system(operator["matvec"], rhs, tol=tol)
-    return solution
+    return _solve_square_array_system_with_dense_fallback(
+        operator["matvec"],
+        rhs,
+        tol=tol,
+    )
 
 
 def _jacobian_linear_operator(residual_fn, x):

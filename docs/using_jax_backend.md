@@ -175,6 +175,10 @@ Single-stage traceable target-lane contract:
 - When available, solved-state snapshots should come from the explicit
   `BoozerSurfaceJAX.get_solved_runtime_state()` contract rather than by
   reconstructing solved geometry from mutable host wrappers.
+- On the supported on-device LS lane, adjoint consumers should call
+  `BoozerSurfaceJAX.get_adjoint_runtime_state()` and use its solve callbacks.
+  Dense `PLU` artifacts may still exist for parity/debug purposes, but they are
+  no longer the supported JAX runtime contract.
 
 The current CPU reference lane remains the oracle for broad workflow trust.
 Public acceptance still centers on the `native_cpu` / `scipy` oracle lane.

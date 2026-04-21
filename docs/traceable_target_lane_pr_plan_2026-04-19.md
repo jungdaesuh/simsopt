@@ -227,7 +227,6 @@ solve without forcing the exact primal path to fail at dense-Jacobian finalizati
    Update:
 
    - `src/simsopt/geo/boozersurface_jax.py:_BoozerAdjointRuntimeState`
-   - `src/simsopt/geo/surfaceobjectives_jax.py:_FallbackAdjointRuntimeState`
 
    so they no longer assume a concrete `.plu` payload as the only valid adjoint state.
 

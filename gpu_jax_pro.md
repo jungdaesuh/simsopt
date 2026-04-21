@@ -336,7 +336,7 @@ The clearest evidence is that you already have:
 * a distinct backend selector (`cpu` vs `jax`, plus JAX platform selection), 
 * a `BoozerSurfaceJAX` class that explicitly defines `scipy` as the trusted reference lane, `hybrid` as the transitional lane, and `ondevice` as the target full-GPU lane, 
 * a substantial parity and validation ladder covering Stage 2 value/gradient parity, single-stage init parity, run-code parity, and adjoint/FD validation,    
-* and, most importantly, a **traceable target path** around `run_code_traceable()` / `make_traceable_objective()` that is explicitly intended to avoid the stateful path and route through JAX control flow, while `run_code_functional()` remains the lower-level transition seam.
+* and, most importantly, a **traceable target path** around `run_code_traceable()` / `make_traceable_objective()` that is explicitly intended to avoid the stateful path and route through JAX control flow, with `run_code_functional()` reduced to a thin alias over the same runtime-native schema.
 
 That still leaves the public acceptance posture intentionally conservative:
 the trusted public gates remain `scipy`-centric, while `hybrid` / `ondevice`
@@ -357,7 +357,7 @@ The second major strength is the **testing philosophy**. The repo is not just te
 
 That is exactly the kind of parity contract I recommended: not vague “GPU should match CPU,” but concrete staged checks.
 
-The third major strength is the **traceable objective contract**. Your tests explicitly say the goal is to make the single-stage objective fully JAX-traceable so the outer optimizer can route through JAX control flow rather than the host-callback fallback, and they now distinguish `run_code_functional()` as the non-mutating but still transitional seam from the actual trace-safe route built around `run_code_traceable()` plus the traceable objective builders. That is the right long-term architecture, because it matches JAX’s pure-function model. ([JAX][1])
+The third major strength is the **traceable objective contract**. The goal is to make the single-stage objective fully JAX-traceable so the outer optimizer can route through JAX control flow rather than the host-callback fallback, with the actual trace-safe route built around `run_code_traceable()` plus the traceable objective builders. That is the right long-term architecture, because it matches JAX’s pure-function model. ([JAX][1])
 
 You are also testing purity rather than just assuming it. The traceable-path tests snapshot `bs_jax.x`, surface DOFs, `booz_jax.res`, dirty flags, and caches, then verify the traceable objective does **not** mutate them and does **not** accumulate child graph state.   That is very good engineering.
 
@@ -472,7 +472,7 @@ Treat the current code as two layers:
 
 Do not keep adding ad hoc traceable escape hatches. Instead, make the pure layer the official implementation target.
 
-The strongest clue that this is the right next step is your own `run_code_functional()` / traceable-objective test contract. 
+The strongest clue that this is the right next step is your own `run_code_traceable()` / traceable-objective contract.
 
 ### 2. Rework Biot–Savart around chunked reductions
 
@@ -558,7 +558,7 @@ According to a document from March 31, 2026, here is the module-by-module implem
    pressure, with the existing memory-scaling benchmarks as the gate.
 
 3. **Broaden the pure JAX layer beyond the current hot-path coverage.**
-   You already have it concretely via `make_traceable_objective()`, `run_code_functional()`, the `jax_core` subtree, and the current immutable spec pytrees. The next step is to widen that coverage instead of letting pure kernels and mutable wrapper/orchestration code keep mixing.
+   You already have it concretely via `make_traceable_objective()`, `run_code_traceable()`, the `jax_core` subtree, and the current immutable spec pytrees. The next step is to widen that coverage instead of letting pure kernels and mutable wrapper/orchestration code keep mixing.
 
    The hot-path spec layer is already broader than a toy first slice: concrete
    curve/current/coil/field-eval specs and `to_spec()` adapters already exist
@@ -883,14 +883,12 @@ This is the file where the mixed architecture is most visible.
 The code already admits that:
 
 * `run_code()` is still stateful
-* `run_code_functional()` avoids mutating `self`
-* but `run_code_functional()` itself is not the final traceable path because it still uses Python `if`, `float()`, and `np.asarray`
+* `run_code_traceable()` keeps the inner solve on explicit array state
 * full traceability is one layer up in `make_traceable_objective()` 
 
 That is the right diagnosis. So the implementation decision should be:
 
-**Do not spend too much effort trying to make `run_code_functional()` itself the final JIT/grad path.**
-Treat it as a host-functional helper.
+**Do not spend too much effort trying to make a legacy host wrapper the final JIT/grad path.**
 Make `make_traceable_objective()` the canonical compiled path.
 
 ### Specific refactors

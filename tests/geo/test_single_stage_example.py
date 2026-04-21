@@ -4143,7 +4143,11 @@ class SingleStageExampleTests(unittest.TestCase):
     ):
         module = self.load_module()
         success_filter_marker = object()
-        value_and_grad_marker = object()
+        recorded_states = []
+
+        def value_and_grad_marker(state):
+            recorded_states.append(state)
+            return ("objective-value", "objective-grad")
 
         with patch.object(
             module,
@@ -4190,9 +4194,12 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(scalar_fun)
+        self.assertIsNot(scalar_fun, value_and_grad_marker)
         self.assertIs(value_and_grad_fun, value_and_grad_marker)
         self.assertIsNone(target_lane_profile)
         self.assertIs(success_filter, success_filter_marker)
+        self.assertEqual(scalar_fun("trial-state"), "objective-value")
+        self.assertEqual(recorded_states, ["trial-state"])
         build_success_filter.assert_called_once()
         build_objective_config.assert_called_once()
         build_objectives.assert_called_once_with(
@@ -4836,9 +4843,12 @@ class SingleStageExampleTests(unittest.TestCase):
         self,
     ):
         module = self.load_module()
+        recorded = []
         adapter = types.SimpleNamespace(
-            sync_accepted_step=object(),
-            sync_accepted_step_state=object(),
+            sync_accepted_step=lambda x: (_ for _ in ()).throw(
+                AssertionError("callback-active sync should use explicit state sync")
+            ),
+            sync_accepted_step_state=lambda x: recorded.append(x),
         )
 
         sync = module.resolve_target_lane_post_run_state_sync(
@@ -4847,7 +4857,9 @@ class SingleStageExampleTests(unittest.TestCase):
             accepted_step_callback=object(),
         )
 
-        self.assertIs(sync, adapter.sync_accepted_step_state)
+        self.assertTrue(sync.simsopt_skip_failed_attempt_sync)
+        sync("accepted-state")
+        self.assertEqual(recorded, ["accepted-state"])
 
     def test_resolve_target_lane_post_run_state_sync_maps_scaled_phase_state(self):
         module = self.load_module()
@@ -8661,6 +8673,77 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(run_dict["sdofs"], np.array([10.0, 20.0, 30.0]))
         self.assertEqual(run_dict["iota"], 0.15)
         self.assertEqual(run_dict["G"], 1.0)
+
+    def test_boozer_residual_exact_compute_supports_cpu_vjp_contract(
+        self,
+    ):
+        module = self.load_module()
+        recorded = {}
+
+        def fake_vjp(adjoint, boozer_surface, iota, G):
+            recorded["adjoint"] = np.asarray(adjoint)
+            recorded["boozer_surface"] = boozer_surface
+            recorded["iota"] = iota
+            recorded["G"] = G
+            return module.Derivative({})
+
+        in_surface = module.SurfaceXYZTensorFourier(
+            mpol=1,
+            ntor=1,
+            stellsym=True,
+            nfp=1,
+            quadpoints_phi=np.linspace(0.0, 1.0, 4, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+        )
+        in_surface.set_dofs(np.zeros_like(in_surface.get_dofs()))
+        decision_size = in_surface.get_dofs().size + 2
+
+        class _Label:
+            def J(self):
+                return 0.0
+
+            def dJ_by_dsurfacecoefficients(self):
+                return np.zeros(in_surface.get_dofs().size)
+
+        class _BS:
+            def set_points(self, _points):
+                return None
+
+            def B_vjp(self, _dJ_by_dB):
+                return module.Derivative({})
+
+        class _BoozerSurface(module.Optimizable):
+            def __init__(self):
+                module.Optimizable.__init__(self)
+                self.surface = in_surface
+                self.need_to_run_code = False
+                self.label = _Label()
+                self.targetlabel = 0.0
+                self.res = {
+                    "iota": 0.15,
+                    "G": 1.0,
+                    "PLU": tuple(np.eye(decision_size) for _ in range(3)),
+                    "vjp": fake_vjp,
+                }
+
+        boozer_surface = _BoozerSurface()
+
+        with patch.object(
+            module,
+            "boozer_surface_residual",
+            return_value=(np.zeros(1), np.zeros((1, decision_size))),
+        ), patch.object(
+            module.BoozerResidualExact,
+            "dJ_by_dB",
+            lambda self: np.zeros((1, 3)),
+        ):
+            residual = module.BoozerResidualExact(boozer_surface, _BS())
+            residual.compute()
+
+        np.testing.assert_allclose(recorded["adjoint"], np.zeros(decision_size))
+        self.assertIs(recorded["boozer_surface"], boozer_surface)
+        self.assertEqual(recorded["iota"], 0.15)
+        self.assertEqual(recorded["G"], 1.0)
 
     def test_snapshot_to_pytree_accepts_deferred_surface_parent_graph(self):
         module = self.load_module()
