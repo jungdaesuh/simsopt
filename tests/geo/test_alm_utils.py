@@ -997,6 +997,7 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.termination_reason, "max_outer_after_infeasible_stall")
         self.assertEqual(len(minimize_calls), 1)
+        self.assertEqual(len(history_snapshots), 1)
         self.assertEqual(result.history[0]["action"], "infeasible_stall_penalty_increase")
         self.assertTrue(result.history[0]["infeasible_stall"])
         self.assertEqual(result.history[0]["inner_attempts"], 1)

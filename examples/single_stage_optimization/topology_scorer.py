@@ -103,7 +103,7 @@ def build_extended_surface_seed_contract(
         "extend_distance": float(extend_distance),
         "phi": 0.0,
         "Z": 0.0,
-        # Baseline-style physics renders launch at phi=0, Z=0 using the
+        # Baseline-style default presentation renders launch at phi=0, Z=0 using the
         # global radial envelope of the outward-extended surface rather than
         # the phi=0 cross-section span itself.
         "radial_sampling_source": "global_extended_surface_bounds",

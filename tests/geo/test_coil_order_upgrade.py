@@ -249,6 +249,61 @@ class CoilOrderUpgradeTests(unittest.TestCase):
         )
         self.assertTrue(upgraded_curve.dofs.free_status[new_mode_index])
 
+    def test_upgrade_cws_order_preserves_fix_status_by_name_across_blocks(self):
+        # Guards against the positional-copy regression: because DOFs are laid
+        # out as [phic, phis, thetac, thetas] with block sizes
+        # [O+1, O, O+1, O], growing the order shifts the starting index of
+        # every block after phic. Fix status must follow the DOF *name*, not
+        # its flat-vector index.
+        module = _load_module(COIL_ORDER_UPGRADE_PATH, "coil_order_upgrade")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            seed = _build_cws_seed(Path(tmpdir))
+            source_curve = seed["banana_curve"]
+            source_curve.fix("phis(2)")
+            source_curve.fix("thetac(2)")
+            source_curve.fix("thetas(1)")
+            upgraded_curve = module.upgrade_cws_order(source_curve, 4)
+
+        for name in ("phic(1)", "phis(2)", "thetac(2)", "thetas(1)"):
+            self.assertFalse(
+                upgraded_curve.dofs.is_free(name),
+                msg=f"{name} should remain fixed after upgrade",
+            )
+        for name in (
+            "phic(0)", "phic(2)", "phic(3)", "phic(4)",
+            "phis(1)", "phis(3)", "phis(4)",
+            "thetac(0)", "thetac(1)", "thetac(3)", "thetac(4)",
+            "thetas(2)", "thetas(3)", "thetas(4)",
+        ):
+            self.assertTrue(
+                upgraded_curve.dofs.is_free(name),
+                msg=f"{name} should be free after upgrade",
+            )
+
+    def test_upgrade_cws_order_is_idempotent_when_order_matches(self):
+        module = _load_module(COIL_ORDER_UPGRADE_PATH, "coil_order_upgrade")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            seed = _build_cws_seed(Path(tmpdir))
+            source_curve = seed["banana_curve"]
+            source_curve.fix("thetas(1)")
+            upgraded_curve = module.upgrade_cws_order(
+                source_curve, int(source_curve.order)
+            )
+
+        self.assertEqual(upgraded_curve.order, int(source_curve.order))
+        np.testing.assert_array_equal(
+            upgraded_curve.get_dofs(), source_curve.get_dofs()
+        )
+        np.testing.assert_array_equal(
+            upgraded_curve.dofs.free_status,
+            source_curve.dofs.free_status,
+        )
+        # The source curve must not have been mutated.
+        self.assertIsNot(upgraded_curve, source_curve)
+        self.assertIsNot(upgraded_curve.modes, source_curve.modes)
+
     def test_upgrade_cws_order_warns_when_truncating_modes(self):
         module = _load_module(COIL_ORDER_UPGRADE_PATH, "coil_order_upgrade")
 

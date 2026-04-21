@@ -1500,6 +1500,8 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             alm_result=alm_result,
             alm_taylor_result={"passed": True},
             final_volume=0.12,
+            final_plasma_major_radius_m=0.92,
+            final_plasma_minor_radius_m=0.15,
             field_error=0.03,
             intersecting=True,
             final_max_curvature=41.0,

@@ -82,7 +82,14 @@ def _closed_rz(cross_section):
     return np.append(r, r[0]), np.append(z, z[0])
 
 
-def cross_section_plot(surf_coils, surf, banana_curve, filename, hbt, VV):
+def cross_section_plot(
+    surf_coils,
+    surf,
+    banana_curve,
+    filename,
+    lcfs_clearance_reference,
+    VV,
+):
     """Plot toroidal cross-sections of the plasma, coil surface, and vessel.
 
     Args:
@@ -90,7 +97,7 @@ def cross_section_plot(surf_coils, surf, banana_curve, filename, hbt, VV):
         surf: Plasma surface.
         banana_curve: Banana coil curve (plotted as R-Z projection).
         filename: Output path (without extension; .png is appended).
-        hbt: HBT LCFS surface.
+        lcfs_clearance_reference: Concentric LCFS clearance-reference surface.
         VV: Vacuum vessel surface.
     """
     plt.figure(figsize=(7, 6))
@@ -99,7 +106,11 @@ def cross_section_plot(surf_coils, surf, banana_curve, filename, hbt, VV):
     plt.plot(np.sqrt(gamma[:, 0]**2 + gamma[:, 1]**2), gamma[:, 2],
              'k--', linewidth=1.5, label='Banana Coil')
     # Fixed geometry cross-sections at phi=0
-    for surface, label in [(surf_coils, 'Banana Surface'), (hbt, 'HBT LCFS'), (VV, 'Vacuum Vessel')]:
+    for surface, label in [
+        (surf_coils, "Banana Surface"),
+        (lcfs_clearance_reference, "LCFS Clearance Ref"),
+        (VV, "Vacuum Vessel"),
+    ]:
         r, z = _closed_rz(surface.cross_section(0))
         plt.plot(r, z, label=label)
     # Plasma cross-sections at multiple toroidal angles

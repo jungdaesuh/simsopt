@@ -165,23 +165,23 @@ if __name__ == "__main__":
             inset_fraction=seed_inset_fraction,
         )
         midplane_Z0 = np.zeros(nfieldlines)
-        physics_extend_distance = 0.05
-        physics_radii = extended_surface_seed_radii(
+        default_extend_distance = 0.05
+        default_radii = extended_surface_seed_radii(
             surf,
             nfieldlines,
-            extend_distance=physics_extend_distance,
+            extend_distance=default_extend_distance,
         )
-        physics_Z0 = np.zeros(nfieldlines)
+        default_Z0 = np.zeros(nfieldlines)
         phis = [(i/4)*(2*np.pi/nfp) for i in range(4)]
         validation_seed_contract = build_midplane_seed_contract(
             nfieldlines,
             seed_inset_fraction,
             midplane_radii,
         )
-        physics_seed_contract = build_extended_surface_seed_contract(
+        default_seed_contract = build_extended_surface_seed_contract(
             nfieldlines,
-            physics_extend_distance,
-            physics_radii,
+            default_extend_distance,
+            default_radii,
         )
 
         def trace_and_plot(
@@ -272,16 +272,16 @@ if __name__ == "__main__":
             "diagnostic",
             validation_seed_contract,
         )
-        physics_metrics = trace_and_plot(
-            physics_radii,
-            physics_Z0,
+        default_metrics = trace_and_plot(
+            default_radii,
+            default_Z0,
             stop_crit_box,
             stop_labels_diagnostic,
-            "_physics",
-            "_physics",
-            "physics: extended-surface seeds, box-bounded only",
-            "physics",
-            physics_seed_contract,
+            "_default",
+            "_default",
+            "default: extended-surface seeds, box-bounded only",
+            "default",
+            default_seed_contract,
         )
         metrics_path = os.path.join(OUT_DIR, f"PoincareMetrics_{field_label}.json")
         artifact = {
@@ -291,11 +291,11 @@ if __name__ == "__main__":
             "tol": tol,
             "phis": [float(phi) for phi in phis],
             "seed_contract": validation_seed_contract,
-            "physics_seed_contract": physics_seed_contract,
+            "default_seed_contract": default_seed_contract,
             "field_model": field_model,
             "validation": validation_metrics,
             "diagnostic": diagnostic_metrics,
-            "physics": physics_metrics,
+            "default": default_metrics,
             "validation_status": validation_metrics["validation_status"],
         }
         with open(metrics_path, "w", encoding="utf-8") as f:

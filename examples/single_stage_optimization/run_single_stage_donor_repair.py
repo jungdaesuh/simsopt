@@ -66,12 +66,7 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         add_help=add_help,
         conflict_handler="resolve",
     )
-    parser.set_defaults(
-        output_root=str(DEFAULT_OUTPUT_ROOT),
-        summary_json=None,
-        probe_only=False,
-        recovery_only=False,
-    )
+    parser.set_defaults(output_root=str(DEFAULT_OUTPUT_ROOT), summary_json=None)
     parser.add_argument(
         "--summary-csv",
         default=None,
@@ -268,9 +263,9 @@ def run_repair_case(
             recovery_output_root.mkdir(parents=True, exist_ok=True)
             recovery_payload = unified_runner.run_recovery_stage(
                 case_args,
-                stage2_bs_path=original_stage2_bs_path,
                 original_stage2_bs_path=original_stage2_bs_path,
                 original_stage2_results_path=original_stage2_results_path,
+                original_stage2_results=stage2_results,
                 recovery_output_root=recovery_output_root,
             )
             recovery_termination_reason = recovery_payload.get(

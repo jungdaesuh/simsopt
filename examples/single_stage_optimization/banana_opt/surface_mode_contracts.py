@@ -13,6 +13,7 @@ SURFACE_MODE_CHOICES = (
     EXPERIMENTAL_MULTISURFACE,
 )
 SURFACE_MODE_VERSION_V1 = 1
+DEFAULT_INNER_SURFACE_RATIO = 0.8
 
 SURFACE_MODE_SOURCE_EXPLICIT_CLI = "explicit_cli"
 SURFACE_MODE_SOURCE_LEGACY_NUM_SURFACES_MAPPING = "legacy_num_surfaces_mapping"
@@ -159,7 +160,7 @@ def resolve_surface_mode_inner_surface_ratio(
     if contract.mode == EXPERIMENTAL_MULTISURFACE:
         return float(contract.label_fractions[0])
     if fallback_inner_surface_ratio is None:
-        return 0.8
+        return DEFAULT_INNER_SURFACE_RATIO
     return float(fallback_inner_surface_ratio)
 
 
@@ -245,12 +246,6 @@ def surface_mode_supports_boozer_stage_refinement(
 
 
 def surface_mode_supports_topology_gate(
-    mode_or_contract: str | SurfaceModeContract,
-) -> bool:
-    return _resolve_mode_name(mode_or_contract) == EXPERIMENTAL_MULTISURFACE
-
-
-def surface_mode_uses_continuation_gate(
     mode_or_contract: str | SurfaceModeContract,
 ) -> bool:
     return _resolve_mode_name(mode_or_contract) == EXPERIMENTAL_MULTISURFACE

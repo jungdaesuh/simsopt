@@ -243,8 +243,7 @@ def _plot_banana_success_status(
 
 def _load_field_error_coil_length_rows(path: Path) -> list[dict]:
     if path.suffix.lower() == ".json":
-        with path.open("r", encoding="utf-8") as infile:
-            loaded = json.load(infile)
+        loaded = load_json(path)
         if isinstance(loaded, dict):
             rows = loaded.get("rows", [])
         else:

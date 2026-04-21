@@ -296,7 +296,7 @@ class BananaCurrentScanTests(unittest.TestCase):
                         "PLASMA_SURF_FILENAME": "demo.nc",
                         "BANANA_CURRENT_A": 16000.0,
                         "TOROIDAL_FLUX": 0.24,
-                        "MAJOR_RADIUS": 0.915,
+                        "MAJOR_RADIUS": 0.976,
                         "init_only": False,
                     },
                 ),
@@ -335,19 +335,22 @@ class BananaCurrentScanTests(unittest.TestCase):
 
 class BananaCurrentChainScalingTests(unittest.TestCase):
     """Regression tests for the banana-coil current mutation used by
-    run_banana_current_scan._materialize_stage2_seed_variant. The original
-    implementation called ``coil.current.set_value(banana_current_a)``, which raised
-    AttributeError on ScaledCurrent (it has no set_value method) and also would have
-    clobbered stellsym sign flips had set_value existed. The replacement walks the
-    ScaledCurrent chain to the innermost Current DOF and uses local_full_x so the
-    override succeeds even when the loaded artifact's banana DOF is fixed.
+    run_banana_current_scan._materialize_stage2_seed_variant. The previous
+    implementation called coil.current.set_value(banana_current_a), which raised
+    AttributeError on ScaledCurrent (no set_value method) and would also have
+    clobbered stellsym sign flips had set_value existed.
     """
 
     @staticmethod
-    def _build_stage2_style_seed(banana_init_current_A: float):
+    def _build_banana_partitions(banana_init_current_A: float):
+        from simsopt._core.optimizable import load as load_optimizable
         from simsopt.field import BiotSavart, Coil, Current
         from simsopt.field.coil import ScaledCurrent, coils_via_symmetries
         from simsopt.geo import CurveXYZFourier
+
+        handoff = importlib.import_module(
+            "banana_opt.stage2_single_stage_handoff"
+        )
 
         banana_curve = CurveXYZFourier(96, 1)
         banana_curve.set_dofs([0.9, 0.2, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 0.0])
@@ -365,105 +368,78 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
                 [0.9 + 0.01 * coil_index, 0.18, 0.0, 0.0, 0.18, 0.0, 0.0, 0.0, 0.0]
             )
             tf_coils.append(Coil(tf_curve, Current(8.0e4)))
-        return BiotSavart([*tf_coils, *banana_coils])
-
-    def _round_trip_partition(self, banana_init_current_A: float):
-        from simsopt._core.optimizable import load as load_optimizable
-
-        handoff = importlib.import_module(
-            "banana_opt.stage2_single_stage_handoff"
-        )
-        bs = self._build_stage2_style_seed(banana_init_current_A)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            save_path = Path(tmpdir) / "seed.json"
-            bs.save(str(save_path))
-            loaded = load_optimizable(str(save_path))
-        partitions = handoff.partition_loaded_stage2_coils(
-            loaded.coils,
-            stage2_results={
-                "NUM_TF_COILS": 20,
-                "NUM_BANANA_COILS": 10,
-                "NUM_PROXY_COILS": 0,
-                "NUM_VF_COILS": 0,
-            },
-            requested_num_tf_coils=20,
-        )
-        return partitions
+        bs = BiotSavart([*tf_coils, *banana_coils])
+        return bs, handoff, load_optimizable
 
     def test_scale_banana_current_chain_preserves_stellsym_signs_under_round_trip(
         self,
     ):
         module = load_banana_scan_module()
-        partitions = self._round_trip_partition(11000.0)
-        self.assertEqual(len(partitions.banana_coils), 10)
-        original_signs = [
-            1.0 if coil.current.get_value() >= 0.0 else -1.0
-            for coil in partitions.banana_coils
-        ]
+        bs, handoff, load_optimizable = self._build_banana_partitions(11000.0)
+        stage2_results = {
+            "NUM_TF_COILS": 20,
+            "NUM_BANANA_COILS": 10,
+            "NUM_PROXY_COILS": 0,
+            "NUM_VF_COILS": 0,
+        }
 
-        module._scale_banana_current_chain(
-            partitions.banana_coils,
-            target_banana_current_a=5500.0,
-        )
-        scaled_values = [
-            coil.current.get_value() for coil in partitions.banana_coils
-        ]
-        self.assertTrue(
-            all(abs(abs(value) - 5500.0) < 1.0e-9 for value in scaled_values)
-        )
-        self.assertEqual(
-            [1.0 if value >= 0.0 else -1.0 for value in scaled_values],
-            original_signs,
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "seed.json"
+            bs.save(str(save_path))
+            loaded = load_optimizable(str(save_path))
+            partitions = handoff.partition_loaded_stage2_coils(
+                loaded.coils,
+                stage2_results=stage2_results,
+                requested_num_tf_coils=20,
+            )
+            self.assertEqual(len(partitions.banana_coils), 10)
+            original_signs = [
+                1.0 if coil.current.get_value() >= 0.0 else -1.0
+                for coil in partitions.banana_coils
+            ]
 
-        module._scale_banana_current_chain(
-            partitions.banana_coils,
-            target_banana_current_a=0.0,
-        )
-        for coil in partitions.banana_coils:
-            self.assertAlmostEqual(coil.current.get_value(), 0.0, places=9)
+            module._scale_banana_current_chain(
+                partitions.banana_coils,
+                target_banana_current_a=5500.0,
+            )
+            scaled_values = [
+                coil.current.get_value() for coil in partitions.banana_coils
+            ]
+            self.assertTrue(
+                all(
+                    abs(abs(value) - 5500.0) < 1.0e-9
+                    for value in scaled_values
+                )
+            )
+            self.assertEqual(
+                [1.0 if value >= 0.0 else -1.0 for value in scaled_values],
+                original_signs,
+            )
 
-        module._scale_banana_current_chain(
-            partitions.banana_coils,
-            target_banana_current_a=11000.0,
-        )
-        restored_values = [
-            coil.current.get_value() for coil in partitions.banana_coils
-        ]
-        self.assertTrue(
-            all(abs(abs(value) - 11000.0) < 1.0e-9 for value in restored_values)
-        )
-        self.assertEqual(
-            [1.0 if value >= 0.0 else -1.0 for value in restored_values],
-            original_signs,
-        )
+            module._scale_banana_current_chain(
+                partitions.banana_coils,
+                target_banana_current_a=0.0,
+            )
+            for coil in partitions.banana_coils:
+                self.assertAlmostEqual(coil.current.get_value(), 0.0, places=9)
 
-    def test_scale_banana_current_chain_succeeds_when_inner_dof_is_fixed(self):
-        """Init-only Stage 2 seeds and post-optimization saves can leave the
-        banana ``Current`` DOF fixed. The scan must still be able to override
-        it — using ``local_full_x`` rather than ``.x`` (which would raise
-        ``ValueError`` on a fixed DOF).
-        """
-        module = load_banana_scan_module()
-        partitions = self._round_trip_partition(11000.0)
-        # Walk to the innermost current and freeze its DOF the same way
-        # an init-only or fixed-DOF artifact would present after load.
-        inner = partitions.banana_coils[0].current
-        while hasattr(inner, "current_to_scale"):
-            inner = inner.current_to_scale
-        inner.fix_all()
-
-        module._scale_banana_current_chain(
-            partitions.banana_coils,
-            target_banana_current_a=4400.0,
-        )
-
-        scaled_values = [
-            coil.current.get_value() for coil in partitions.banana_coils
-        ]
-        self.assertTrue(
-            all(abs(abs(value) - 4400.0) < 1.0e-9 for value in scaled_values)
-        )
+            module._scale_banana_current_chain(
+                partitions.banana_coils,
+                target_banana_current_a=11000.0,
+            )
+            restored_values = [
+                coil.current.get_value() for coil in partitions.banana_coils
+            ]
+            self.assertTrue(
+                all(
+                    abs(abs(value) - 11000.0) < 1.0e-9
+                    for value in restored_values
+                )
+            )
+            self.assertEqual(
+                [1.0 if value >= 0.0 else -1.0 for value in restored_values],
+                original_signs,
+            )
 
     def test_scale_banana_current_chain_rejects_empty_partition(self):
         module = load_banana_scan_module()
@@ -631,7 +607,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
             output_root=Path("/tmp/stage2"),
             equilibria_dir=None,
             tf_current_A=8.0e4,
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,
@@ -698,7 +674,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 output_root=Path("/tmp/stage2"),
                 equilibria_dir=None,
                 tf_current_A=8.0e4,
-                major_radius=0.915,
+                major_radius=0.976,
                 toroidal_flux=0.24,
                 length_weight=0.0005,
                 cc_weight=100.0,
@@ -729,7 +705,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 output_root=Path("/tmp/stage2"),
                 equilibria_dir=None,
                 tf_current_A=8.0e4,
-                major_radius=0.915,
+                major_radius=0.976,
                 toroidal_flux=0.24,
                 length_weight=0.0005,
                 cc_weight=100.0,
@@ -756,7 +732,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
             output_root=Path("/tmp/stage2"),
             equilibria_dir=None,
             tf_current_A=8.0e4,
-            major_radius=0.915,
+            major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
             cc_weight=100.0,

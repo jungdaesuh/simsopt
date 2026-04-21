@@ -17,18 +17,19 @@ def _resize_mode(mode: np.ndarray, target_size: int) -> np.ndarray:
     return resized
 
 
-def _resize_free_status(free_status: np.ndarray, target_size: int) -> np.ndarray:
-    resized = np.ones(target_size, dtype=bool)
-    overlap = min(free_status.size, target_size)
-    resized[:overlap] = np.asarray(free_status, dtype=bool)[:overlap]
-    return resized
-
-
 def upgrade_cws_order(
     curve: CurveCWSFourierCPP,
     new_order: int,
 ) -> CurveCWSFourierCPP:
-    """Clone a CWS Fourier curve at a new order without mutating the source."""
+    """Clone a CWS Fourier curve at a new order without mutating the source.
+
+    Modes and per-DOF fix status are re-bound by semantic name
+    (``phic(k)``, ``phis(k)``, ``thetac(k)``, ``thetas(k)``) rather than by
+    flat-vector position. This matters as soon as ``new_order != old_order``:
+    the layout groups DOFs as ``[phic, phis, thetac, thetas]`` with block
+    sizes ``[O+1, O, O+1, O]``, so changing the order shifts the starting
+    index of every block after ``phic``.
+    """
     old_order = int(curve.order)
     target_order = int(new_order)
     if target_order < 0:
@@ -56,18 +57,18 @@ def upgrade_cws_order(
     )
     upgraded_curve.set_dofs(np.concatenate(resized_modes))
 
-    source_free_status = _resize_free_status(
-        np.asarray(curve.dofs.free_status, dtype=bool),
-        upgraded_curve.full_x.size,
-    )
-    upgraded_curve.unfix_all()
-    for dof_name, is_free in zip(
-        upgraded_curve.local_dof_names,
-        source_free_status,
-        strict=True,
-    ):
-        if not is_free:
-            upgraded_curve.fix(dof_name)
+    source_full_names = list(curve.local_full_dof_names)
+    source_free_status = np.asarray(curve.dofs.free_status, dtype=bool)
+    fixed_source_names = {
+        name
+        for name, is_free in zip(
+            source_full_names, source_free_status, strict=True
+        )
+        if not is_free
+    }
+    upgraded_full_names = set(upgraded_curve.local_full_dof_names)
+    for name in fixed_source_names & upgraded_full_names:
+        upgraded_curve.fix(name)
     return upgraded_curve
 
 
@@ -101,6 +102,13 @@ def upgrade_loaded_seed_biot_savart_order(
             upgraded_curve.surf.stellsym,
         )
     )
+    if len(upgraded_banana_coils) != len(banana_coils):
+        raise ValueError(
+            "Upgraded banana symmetry family has "
+            f"{len(upgraded_banana_coils)} coils but the loaded seed "
+            f"contains {len(banana_coils)}; refusing to silently reshape the "
+            "Stage 2 coil-groups manifest."
+        )
     upgraded_bs = BiotSavart(
         [*tf_coils, *upgraded_banana_coils, *proxy_coils, *vf_coils]
     )

@@ -224,6 +224,7 @@ Useful notes:
 - `--probe-only` stops after the bootability probe
 - `--recovery-only` stops after the bounded recovery stage
 - `--skip-recovery` keeps this as a pure reporting / handoff classification run
+- when recovery finishes via a preserved partial artifact, the wrapper now reuses the matching `biot_savart_*` file and saved `surf_*_boozer_surface.json` seed instead of silently cold-starting from the equilibrium again
 - final single-stage `results.json` is augmented with the shared `BOOTABILITY_*`, `RECOVERY_*`, and `UNIFIED_SEED_SOURCE` provenance fields
 
 ### Standalone Donor Repair
@@ -406,11 +407,18 @@ Basic penalty-mode example:
 cd /path/to/simsopt-surrogate/examples/single_stage_optimization/STAGE_2
 python banana_coil_solver.py \
   --plasma-surf-filename wout_nfp22ginsburg_000_014417_iota15.nc \
+  --equilibria-dir ../equilibria \
   --major-radius 0.976 \
   --toroidal-flux 0.24 \
   --banana-surf-radius 0.21 \
   --constraint-method penalty
 ```
+
+The bundled `014417` donor is historically useful but off-spec under the direct
+LCFS-to-vessel clearance check. Fresh Stage 2 runs now measure the true LCFS and
+reject this donor unless you explicitly set
+`ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE=1` to reproduce historical artifacts.
+For truthful handoff/fit validation, repair or replace the donor first.
 
 Key Stage 2 controls:
 
@@ -469,6 +477,8 @@ If you do not pass `--stage2-bs-path`, single-stage resolves a Stage 2 seed usin
 - `--stage2-seed-banana-surf-radius`
 - `--stage2-seed-tf-current-A`
 - `--stage2-seed-order`
+- `--seed-order-upgrade` to rebuild a loaded `--stage2-bs-path` banana family at a
+  different Fourier order by zero-padding or truncating the saved CWS modes
 
 For the common nfp22 example equilibria, defaults are filled automatically when those seed parameters are omitted.
 
@@ -517,7 +527,7 @@ Current high-level flag groups:
 - optimizer controls:
   `--maxiter`, `--maxcor`, `--ftol`, `--gtol`
 - Stage 2 seed resolution:
-  `--stage2-source`, `--stage2-bs-path`, `--local-stage2-root`, `--database-stage2-root`, plus the `--stage2-seed-*` family
+  `--stage2-source`, `--stage2-bs-path`, `--seed-order-upgrade`, `--local-stage2-root`, `--database-stage2-root`, plus the `--stage2-seed-*` family
 - ALM path:
   `--constraint-method alm`, `--alm-max-outer-iters`, `--alm-penalty-init`, `--alm-penalty-scale`, `--alm-feas-tol`, `--alm-stationarity-tol`, `--alm-trust-radius-*`, `--alm-max-inner-attempts`, `--alm-max-subproblem-continuations`, `--alm-distance-smoothing`, `--alm-curvature-smoothing`
 - staged Boozer refinement:
@@ -629,16 +639,16 @@ Current outputs include:
 
 - `PoincarePlot_init.png` or `PoincarePlot_opt.png`
 - `PoincarePlot_init_diagnostic.png` or `PoincarePlot_opt_diagnostic.png`
-- `PoincarePlot_init_physics.png` or `PoincarePlot_opt_physics.png`
+- `PoincarePlot_init_default.png` or `PoincarePlot_opt_default.png`
 - `PoincareMetrics_init.json` or `PoincareMetrics_opt.json`
-- `PoincareMetrics_init_validation.json` / `_diagnostic.json` / `_physics.json`
-  or `PoincareMetrics_opt_validation.json` / `_diagnostic.json` / `_physics.json`
+- `PoincareMetrics_init_validation.json` / `_diagnostic.json` / `_default.json`
+  or `PoincareMetrics_opt_validation.json` / `_diagnostic.json` / `_default.json`
 - `curves_init_poincare*` or `curves_opt_poincare*`
 - `surf_init_poincare*` or `surf_opt_poincare*`
 
 The aggregate `PoincareMetrics_*.json` file nests all three render modes.
 Mode-sensitive downstream tooling should read the explicit sidecars
-(`*_validation.json`, `*_diagnostic.json`, `*_physics.json`) instead of
+(`*_validation.json`, `*_diagnostic.json`, `*_default.json`) instead of
 inferring a seed contract from the combined artifact.
 
 By default, the script auto-selects the newest single-stage output under `SINGLE_STAGE/outputs`. Override that with:
@@ -659,7 +669,7 @@ Interpretation:
 
 - validation plots stop field lines on Boozer-surface exit
 - diagnostic plots use only the box-bounded stopping set
-- physics plots use box-bounded stopping plus the extended-surface radial sweep
+- default plots use box-bounded stopping plus the extended-surface radial sweep
 - well-nested closed contours indicate better magnetic surfaces
 - scattered or chaotic hits indicate poor confinement / field-line loss
 

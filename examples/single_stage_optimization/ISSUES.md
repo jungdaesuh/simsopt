@@ -1072,7 +1072,7 @@ The existing distance constraints are:
 |---|---|---|---|
 | `CurveCurveDistance` | coil-to-coil | Yes (0.05 m) | Yes (0.05 m) |
 | `CurveSurfaceDistance` | coil-to-plasma | No | Yes (0.02 m) |
-| `SurfaceSurfaceDistance` | plasma-to-vessel | No | Yes (0.04 m) |
+| `SurfaceSurfaceDistance` | plasma-to-vessel | Yes (0.04 m, direct LCFS gate) | Yes (0.04 m) |
 | **coil-to-vessel** | **missing** | **No** | **No** |
 
 The CWS parameterization provides an implicit 2 mm coil-to-vessel gap in the default

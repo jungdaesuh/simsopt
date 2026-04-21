@@ -13,6 +13,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import run_stage2_alm as stage2_alm_runner  # noqa: E402
 from workflow_runner_common import (  # noqa: E402
+    load_json,
     parse_csv,
     resolved_optional_path,
     resolved_path,
@@ -337,8 +338,7 @@ def run_mode_case(
 def _load_donor_repair_signal(path: Path | None) -> dict[str, object] | None:
     if path is None:
         return None
-    with path.open("r", encoding="utf-8") as infile:
-        summary = json.load(infile)
+    summary = load_json(path)
     if not isinstance(summary, dict):
         raise ValueError(
             f"Donor-repair summary must be a JSON object: {path}"

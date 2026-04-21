@@ -182,18 +182,13 @@ def _scale_banana_current_chain(
     wrappers for the stellsym pair, so every coil ultimately points at the same
     underlying scalar ``Current`` DOF. ``ScaledCurrent`` does not expose
     ``set_value``; we have to mutate the innermost ``Current`` DOF instead.
-
-    Uses ``local_full_x`` rather than ``.x`` so the override succeeds even when
-    the loaded artifact's banana ``Current`` DOF is fixed (init-only Stage 2
-    seeds, post-optimization saves with locked DOFs, etc.). The banana scan
-    intentionally overrides the optimization-time current; the scan owner
-    always wants the requested value regardless of the donor's free/fixed state.
     """
     if not banana_coils:
         raise ValueError(
             "Banana-current scan requires at least one banana coil in the partition."
         )
-    innermost_current = banana_coils[0].current
+    base_coil_current = banana_coils[0].current
+    innermost_current = base_coil_current
     chain_scale = 1.0
     while hasattr(innermost_current, "current_to_scale"):
         chain_scale *= float(innermost_current.scale)
@@ -204,7 +199,7 @@ def _scale_banana_current_chain(
             "ScaledCurrent wrapper has zero scale."
         )
     new_dof_value = float(target_banana_current_a) / chain_scale
-    innermost_current.local_full_x = [new_dof_value]
+    innermost_current.x = [new_dof_value]
 
 
 def _materialize_stage2_seed_variant(
@@ -231,7 +226,7 @@ def _materialize_stage2_seed_variant(
     variant_results_path = variant_root / "results.json"
     bs.save(str(variant_bs_path))
 
-    variant_results = dict(upgrade_legacy_stage2_artifact_results(stage2_results))
+    variant_results = dict(stage2_results)
     variant_results["BANANA_CURRENT_A"] = float(banana_current_a)
     variant_results["STAGE2_BS_PATH"] = str(stage2_bs_path)
     variant_results[STAGE2_BS_SHA256_KEY] = compute_stage2_bs_sha256(variant_bs_path)
@@ -466,7 +461,6 @@ def main(argv: list[str] | None = None) -> int:
     stage2_bs_path, stage2_results_path, stage2_results = (
         goal_mode_runner.load_validated_stage2_seed_metadata(args)
     )
-    stage2_results = upgrade_legacy_stage2_artifact_results(stage2_results)
     scales = parse_csv(args.banana_current_scales, float)
     poincare_timeout_seconds = timeout_or_none(args.poincare_timeout_seconds)
     case_payloads = [
