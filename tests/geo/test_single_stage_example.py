@@ -8030,6 +8030,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "stage2_iota_ntor": 6,
             "length_weight": 5e-4,
             "length_target": 1.7,
+            "target_lcfs_max_major_radius_m": 0.92,
+            "target_lcfs_max_minor_radius_m": 0.15,
             "cc_threshold": 0.05,
             "cc_weight": 100.0,
             "curvature_weight": 1e-4,
@@ -8230,7 +8232,10 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             to_vtk=lambda *_a, **_k: None,
         )
         fake_curve_names = ["curve_a", "curve_b", "curve_c"]
-        fake_banana_curve = SimpleNamespace(kappa=lambda: np.array([39.0, 41.0], dtype=float))
+        fake_banana_curve = SimpleNamespace(
+            order=2,
+            kappa=lambda: np.array([39.0, 41.0], dtype=float),
+        )
         fake_banana_coils = [
             SimpleNamespace(curve=fake_banana_curve, current=FakeCurrent(banana_current_A))
         ]

@@ -92,6 +92,9 @@ CONSTRAINT_SOURCE_CLI = "cli"
 CONSTRAINT_SOURCE_OFFSPEC_MAJOR_RADIUS = "offspec_major_radius_override"
 
 WIRE_NAME_ALIASES: Mapping[str, str] = MappingProxyType({
+    _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M: _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M,
+    _KEY_VACUUM_VESSEL_MINOR_RADIUS_M: _KEY_VACUUM_VESSEL_MINOR_RADIUS_M,
+    _KEY_BANANA_WINDING_SURFACE_MAJOR_RADIUS_M: _KEY_BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
     "tf_current_A": _KEY_TF_CURRENT_A,
     "TF_CURRENT_A": _KEY_TF_CURRENT_A,
     "banana_current_max_A": _KEY_BANANA_CURRENT_MAX_A,
@@ -125,8 +128,6 @@ def _translate_layer(layer: Mapping[str, Any] | None) -> dict[str, Any]:
     translated: dict[str, Any] = {}
     unknown: set[str] = set()
     for key, value in layer.items():
-        if key in FIXED_GEOMETRY_KEYS:
-            continue
         if key in _LEGACY_FIXED_GEOMETRY_WIRE_NAMES:
             continue
         canonical = WIRE_NAME_ALIASES.get(key)
@@ -315,10 +316,12 @@ def resolve_constraint_contract_from_wire_names(
 ) -> tuple[Mapping[str, float], Mapping[str, str]]:
     """Like :func:`resolve_constraint_contract` but accepts legacy wire names.
 
-    Fixed-geometry keys present in any input layer are silently dropped so the
-    resolver's overriding-is-illegal rule is not tripped by historical profile
-    dictionaries that carry ``major_radius`` as a mirror of the fixed vessel
-    radius. All other unknown wire-name keys still raise.
+    The historical ``major_radius`` mirror key is silently dropped so the
+    resolver's overriding-is-illegal rule is not tripped by legacy profile
+    dictionaries that copied the fixed vessel radius into the wire-name layer.
+    Canonical fixed-geometry contract keys are still passed through so the
+    shared resolver can reject them explicitly, and all other unknown
+    wire-name keys still raise.
     """
     return resolve_constraint_contract(
         profile=_translate_layer(profile),

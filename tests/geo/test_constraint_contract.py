@@ -298,6 +298,14 @@ class ConstraintContractWireNamesTests(unittest.TestCase):
         )
         self.assertEqual(contract["TF_CURRENT_A"], 70000.0)
 
+    def test_wire_name_resolver_rejects_canonical_fixed_geometry_override_keys(self):
+        module = load_constraint_contract_module()
+
+        with self.assertRaisesRegex(ValueError, "Fixed-geometry field"):
+            module.resolve_constraint_contract_from_wire_names(
+                cli_overrides={"VACUUM_VESSEL_MAJOR_RADIUS_M": 0.976},
+            )
+
     def test_wire_name_resolver_rejects_unknown_typos(self):
         module = load_constraint_contract_module()
 

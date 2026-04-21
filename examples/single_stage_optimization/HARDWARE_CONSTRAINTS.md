@@ -2,7 +2,7 @@
 
 ## Background
 
-The baseline solver code (`baseline-original`) hardcoded all constraint thresholds as constants. The `candidate-fixed` branch exposed them as CLI arguments to enable automated search. Constraint floors are clamped via `max()` to match baseline defaults.
+The baseline solver code (`baseline-original`) hardcoded all constraint thresholds as constants. The `candidate-fixed` branch exposed them as CLI arguments to enable automated search. Lower-bound floors are clamped via `max()`, while upper-bound ceilings are clamped via `min()`, to match the HBT hardware contract.
 
 Updated HBT constraint SSOT:
 - TF coil current is fixed at `80 kA`
@@ -12,24 +12,31 @@ Updated HBT constraint SSOT:
 - maximum curvature is `100 m^-1`
 - banana winding surface minor radius is `0.21 m`
 
-## Enforced Baseline Floors
+## Enforced Baseline Limits
 
-All constraint thresholds are clamped via `max()` in the solver code to match the current HBT hardware baseline. CLI arguments below these floors are raised with a printed warning. Optimization weights remain freely adjustable.
+All constraint thresholds are clamped in the solver code to match the current HBT hardware baseline. CLI arguments below a floor are raised with a printed warning, while values above a ceiling are lowered with a printed warning. Optimization weights remain freely adjustable.
 
 ### Stage 2 (`banana_coil_solver.py`)
 
-| Constraint | CLI Flag | Baseline Floor | Enforcement |
+| Constraint | CLI Flag | Baseline Limit | Enforcement |
 |-----------|----------|---------------|-------------|
 | Coil-coil distance | `--cc-threshold` | 0.05m (5cm) | `max(args.cc_threshold, 0.05)` |
-| Curvature limit | `--curvature-threshold` | 100 | `max(args.curvature_threshold, 100)` |
-| Coil length | `--length-target` | 1.75m | `max(args.length_target, 1.75)` |
+| Curvature limit | `--curvature-threshold` | 100 | `min(args.curvature_threshold, 100)` |
+| Coil length | `--length-target` | 1.7m | `min(args.length_target, 1.7)` |
+
+Stage 2 also enforces the fixed LCFS-to-vessel clearance contract directly on the
+loaded plasma boundary. This is not a CLI-tunable floor because the plasma
+geometry is inherited from the donor equilibrium, not optimized by Stage 2.
+Historical off-spec reproduction can bypass the check only via
+`ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE=1`.
 
 ### Single-Stage (`single_stage_banana_example.py`)
 
-| Constraint | CLI Flag | Baseline Floor | Enforcement |
+| Constraint | CLI Flag | Baseline Limit | Enforcement |
 |-----------|----------|---------------|-------------|
 | Coil-coil distance | `--cc-dist` | 0.05m (5cm) | `max(args.cc_dist, 0.05)` |
-| Curvature limit | `--curvature-threshold` | 100 | `max(args.curvature_threshold, 100)` |
+| Curvature limit | `--curvature-threshold` | 100 | `min(args.curvature_threshold, 100)` |
+| Coil length | `--length-target` | 1.7m | `min(args.length_target, 1.7)` |
 | Coil-surface clearance | `--cs-dist` | 0.015m (1.5cm) | `max(args.cs_dist, 0.015)` |
 | Surface-vessel clearance | `--ss-dist` | 0.04m (4cm) | `max(args.ss_dist, 0.04)` |
 
