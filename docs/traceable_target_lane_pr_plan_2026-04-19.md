@@ -1,7 +1,7 @@
 # simsopt-jax traceable target-lane PR plan
 
 **Date:** 2026-04-19  
-**Status:** Validated implementation plan  
+**Status:** Historical implementation plan; materially stale after 2026-04-22 landing work
 **Scope:** Single-stage target-lane `same_coils` hot-path cleanup and exact-mode adjoint-state generalization
 
 This note complements [docs/single_stage_banana_ondevice_hot_path_diagnosis_2026-04-19.md](docs/single_stage_banana_ondevice_hot_path_diagnosis_2026-04-19.md).
@@ -10,7 +10,49 @@ It records the validated two-PR plan after checking the current tree, the
 single-stage target-lane launcher, the private on-device L-BFGS implementation,
 and the current dense-PLU exact-adjoint contract.
 
+## 2026-04-23 status update
+
+The plan below remains useful as a design record, but it is no longer a pure
+future-work list. The seeded target-lane seam has landed, and the adjoint
+runtime seam has partially landed. Treat the rest of this file as historical
+context plus remaining follow-up.
+
+### Completed from this plan
+
+- [x] Private on-device L-BFGS accepts `initial_value_and_grad`.
+- [x] Seeded L-BFGS finalization reuses the initial value/gradient when
+  `state.k == 0` instead of always reevaluating.
+- [x] `target_minimize(...)` threads `initial_value_and_grad` through the
+  `lbfgs-ondevice` explicit value-and-grad lane.
+- [x] The traceable single-stage runtime exposes
+  `make_traceable_objective_seeded_value_and_grad(...)` for the optimizer-facing
+  seeded path.
+- [x] The single-stage example uses the seeded explicit value-and-grad helper
+  on the target lane instead of always routing through the older public
+  baseline-aware boundary.
+- [x] The main adjoint seam is now operator-first through
+  `get_adjoint_runtime_state()`, `solve_forward(_with_status)`,
+  `solve_transpose_with_status`, and `stream_group_vjps`.
+- [x] Legacy CPU/reference surface-objective consumers were migrated off direct
+  `res["PLU"]` / `res["vjp"]` access onto the runtime-state seam.
+- [x] Much of the dense-specific traceable payload was renamed from `*_plu` to
+  `*_linear_solve_factors`, matching the active seam more closely.
+
+### Still open
+
+- [ ] Matrix-free exact adjoint mode behind an explicit option is still not
+  implemented.
+- [ ] Exact-mode success semantics are still not fully split into separate
+  primal-success and adjoint-state-availability contracts.
+- [ ] Some compatibility payloads still expose legacy `plu` / `PLU` aliases,
+  mainly in lower-level Boozer result dictionaries and CPU fallback wrappers.
+- [ ] The historical line references and some wording below were validated on
+  2026-04-19 and should not be treated as current line-accurate anchors.
+
 ## Confirmed current-tree facts
+
+Historical snapshot from 2026-04-19. The status update above is the current
+source of truth.
 
 | Claim | Location | Status |
 | --- | --- | --- |
@@ -31,6 +73,8 @@ and the current dense-PLU exact-adjoint contract.
 - Do not make matrix-free adjoints the default in PR 2.
 
 ## PR 1: Remove `same_coils` from the optimizer hot path
+
+Status on 2026-04-23: landed.
 
 ### Goal
 
@@ -214,6 +258,10 @@ never traces the baseline `lax.cond` in its hot path.
 
 ## PR 2: Generalize exact-mode adjoint state and add matrix-free mode
 
+Status on 2026-04-23: partially landed. The adjoint runtime seam and much of the
+renaming/generalization are in place, but the matrix-free exact mode itself is
+still pending.
+
 ### Goal
 
 Keep dense-PLU exact adjoints as the default compatibility path, but introduce an
@@ -342,6 +390,8 @@ This validated plan differs from earlier drafts in four important ways:
    including both transpose and forward linear solves plus the success-contract split.
 
 ## Recommended merge order
+
+Historical recommendation from 2026-04-19:
 
 1. PR 1: seeded explicit-VG single-stage target-lane optimizer path
 2. PR 2a: adjoint-state renaming/generalization with dense-only behavior

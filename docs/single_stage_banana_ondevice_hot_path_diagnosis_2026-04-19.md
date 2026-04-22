@@ -6,6 +6,37 @@ single-stage target lane, with the main correction that "exactly one
 persistent-cache candidate per solve" only applies to the outer optimization
 artifact, not to every public runtime-bundle entrypoint.
 
+## 2026-04-23 status update
+
+This diagnosis is still directionally correct, but part of the optimizer hot
+path changed after 2026-04-19. The main compile-cost drivers remain structural,
+yet the seeded target-lane path now avoids some previously flagged overhead.
+
+### Landed since this note was written
+
+- [x] The optimizer-facing single-stage seeded helper now lowers through a
+  general-only value-and-grad path, so the baseline-aware `same_coils`
+  `lax.cond` no longer sits on the seeded outer-optimizer hot path.
+- [x] Private on-device L-BFGS can reuse a seeded initial value/gradient when
+  `state.k == 0`, which avoids an otherwise redundant objective/gradient
+  reevaluation in that seeded early-exit case.
+- [x] L-BFGS history allocation is capped to the reachable correction budget,
+  which reduces traced solver state and memory pressure for small-dimensional or
+  low-iteration solves.
+- [x] The stale runtime-array tracer split described below is still fixed at the
+  root and remains closed.
+
+### Still true after the landing work
+
+- [ ] Nested `lax.while_loop` / `lax.cond` structure remains a primary
+  compile-cost driver.
+- [ ] The implicit-gradient path still uses forward-over-reverse composition for
+  the stationarity term.
+- [ ] Final dense Jacobian / dense linearization materialization still
+  contributes meaningful compile and runtime cost when those paths are active.
+- [ ] The new dense least-squares fallback is a robustness path, not a
+  performance path; when it triggers it can increase memory and runtime.
+
 ## Verified from the current tree
 
 | Claim | Location | Status |
@@ -79,20 +110,34 @@ port leaks a per-iteration host transfer:
    branches inside those regions. That lowers to deep HLO even when each body is
    traced only once.
 
-2. Double AD over the coil-side geometry pipeline.
-   `_traceable_objective_gradient_parts(...)` computes
-   `direct_grad = jax.grad(objective_of_coils)(coil_dofs)` and
-   `implicit_grad = jax.grad(directional_of_coils)(coil_dofs)` at
-   `src/simsopt/geo/surfaceobjectives_jax.py:2283-2284`.
+2. Forward-over-reverse composition on the coil-side geometry pipeline.
+   `_traceable_objective_gradient_parts(...)` at
+   `src/simsopt/geo/surfaceobjectives_jax.py:2558` splits the gradient into two
+   distinct sweeps:
+   - `direct_grad` via a single reverse-mode pullback —
+     `_strict_scalar_grad(_evaluate_objective_of_coils, coil_dofs)` at `:2696`.
+   - `implicit_grad` via forward-over-reverse —
+     `jax.vjp(stationarity_of_coils, coil_dofs)` at `:2711-2715`, where
+     `stationarity_of_coils` internally calls
+     `_traceable_inner_stationarity_grad(...)` at `:2221-2241`. That inner grad
+     is deliberately `vmap(jvp)` (forward mode) over an identity basis; the
+     adjacent comment at `:2232-2235` records the rationale — a reverse-over-
+     reverse trace would trip strict transfer guard on the JAX 0.9.2
+     implicit-adjoint path.
+   Net: one reverse sweep + one forward-over-reverse pair inline into the same
+   HLO per outer step.
 
-3. Both `lax.cond` branches trace.
+3. Both `lax.cond` branches trace on the baseline-aware public forward path.
    `_traceable_forward_result(...)` traces both the baseline and general cases
-   at `src/simsopt/geo/surfaceobjectives_jax.py:2126-2199`, even though only one
-   executes for a given input.
+   at `src/simsopt/geo/surfaceobjectives_jax.py:2379-2500`, even though only
+   one executes for a given input. That statement is still true for the public
+   baseline-aware runtime bundle. It is no longer the whole optimizer story,
+   because the seeded optimizer-facing helper now uses a general-only compiled
+   value-and-grad path for the outer target-lane hot path.
 
 4. Final dense Jacobian materialization.
-   `_materialize_dense_linear_operator(...)` uses `lax.map(...)` over an
-   identity basis at `src/simsopt/geo/optimizer_jax.py:1459-1462`. That is
+   `_materialize_dense_linear_operator(...)` uses `jax.vmap(...)` over an
+   identity basis at `src/simsopt/geo/optimizer_jax.py:1526-1529`. That is
    compile-cost O(1) in trace structure but execution-cost O(n) in JVPs, and it
    still contributes to the late-stage exact-Newton footprint.
 
@@ -191,3 +236,37 @@ Python process.
 5. The stale `_math_utils.is_tracer(...)` cleanup item is closed.
    The shared runtime-float helpers now go through one callback-free JAX array
    conversion path, and backend tests lock in the traced-reference behavior.
+
+## 2026-04-22 update: vmap audit outcome
+
+A focused audit of every `jax.vmap` site in the JAX-port-specific code
+identified two suspicious uses of `vmap(jvp) @ eye` for scalar-output
+gradients. Resolution:
+
+- `_traceable_objective_gradient_parts.direct_grad` —
+  `src/simsopt/geo/surfaceobjectives_jax.py:2695-2696` — **switched** from
+  `jax.vmap(lambda t: jax.jvp(objective_of_coils, (coil_dofs,), (t,))[1])(coil_basis)`
+  to `_strict_scalar_grad(_evaluate_objective_of_coils, coil_dofs)`. For a
+  scalar objective the two are mathematically identical; the reverse-mode
+  variant drops compute from O(n_coil) JVPs to a single VJP and removes the
+  vmap memory-replication peak on the coil-DOF axis.
+
+- `_traceable_inner_stationarity_grad` —
+  `src/simsopt/geo/surfaceobjectives_jax.py:2221-2241` — **kept in forward
+  mode by design**, now with an inline comment. Because the outer gradient
+  path differentiates this map again via `jax.vjp(stationarity_of_coils, ...)`
+  at `:2711-2715`, an all-reverse choice would be reverse-over-reverse and
+  trip JAX 0.9.2's strict-transfer-guard host-scalar materialization on null
+  tangent paths. Forward-over-reverse is the correct compose for the mixed
+  IFT term `(∂²g/∂x_inner ∂coils)^T · adjoint`.
+
+The other five vmap sites were verified clean on the same pass:
+`_materialize_dense_linear_operator` (dense operator basis, size-gated by
+`max_dense_jacobian_bytes`), `jax_core/biotsavart.py:506` (3×3 tangent set,
+forward = reverse cost), `jax_core/biotsavart.py:514` (point-chunk batch),
+`jax_core/curve_geometry.py:627` (pairwise distance inside `lax.scan`), and
+`objectives/stage2_target_objective_jax.py:265` (banana-symmetry
+replication with explicit `in_axes=(0, 0)`).
+
+No nested `vmap`, no `pmap`, and no `vmap` crossing the `@jax.custom_vjp`
+boundary was found in port-specific code.
