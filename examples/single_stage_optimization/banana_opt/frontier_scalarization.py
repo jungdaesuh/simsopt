@@ -27,6 +27,11 @@ SUPPORTED_FRONTIER_REFERENCE_MODES = (
 FRONTIER_REFERENCE_POINTS_SCHEMA_VERSION = "frontier_reference_points_v1"
 FRONTIER_EPSILON_SPEC_SCHEMA_VERSION = "frontier_epsilon_spec_v1"
 FRONTIER_ACHIEVEMENT_SPEC_SCHEMA_VERSION = "frontier_achievement_spec_v1"
+_REFERENCE_METRIC_FLOOR = 1.0e-6
+_TRUST_THRESHOLD_FLOOR = 1.0e-5
+_WEIGHT_FLOOR = 1.0e-12
+_DEFAULT_CHEBYSHEV_RHO = 1.0e-3
+_DEFAULT_CHEBYSHEV_SHARPNESS = 12.0
 _STRICT_TOP_LEVEL_KEYS = frozenset({"schema_version", "SCHEMA_VERSION", "lanes"})
 _REFERENCE_METRIC_KEYS = frozenset(
     {"iota", "volume", "qa_error", "boozer_residual"}
@@ -215,26 +220,28 @@ def _reference_scalarization_params(
         if "volume" in reference_point:
             params["frontier_reference_volume"] = reference_point["volume"]
         if "qa_error" in reference_point:
-            params["frontier_reference_qa"] = max(reference_point["qa_error"], 1e-6)
+            params["frontier_reference_qa"] = max(
+                reference_point["qa_error"], _REFERENCE_METRIC_FLOOR
+            )
         if "boozer_residual" in reference_point:
             params["frontier_reference_boozer"] = max(
                 reference_point["boozer_residual"],
-                1e-6,
+                _REFERENCE_METRIC_FLOOR,
             )
     for payload_key, param_key, minimum in (
         ("frontier_reference_iota", "frontier_reference_iota", None),
-        ("frontier_reference_iota_scale", "frontier_reference_iota_scale", 1e-6),
+        ("frontier_reference_iota_scale", "frontier_reference_iota_scale", _REFERENCE_METRIC_FLOOR),
         ("frontier_reference_volume", "frontier_reference_volume", None),
-        ("frontier_reference_volume_scale", "frontier_reference_volume_scale", 1e-6),
-        ("frontier_reference_qa", "frontier_reference_qa", 1e-6),
-        ("frontier_reference_boozer", "frontier_reference_boozer", 1e-6),
-        ("frontier_boozer_trust_threshold", "frontier_boozer_trust_threshold", 1e-5),
+        ("frontier_reference_volume_scale", "frontier_reference_volume_scale", _REFERENCE_METRIC_FLOOR),
+        ("frontier_reference_qa", "frontier_reference_qa", _REFERENCE_METRIC_FLOOR),
+        ("frontier_reference_boozer", "frontier_reference_boozer", _REFERENCE_METRIC_FLOOR),
+        ("frontier_boozer_trust_threshold", "frontier_boozer_trust_threshold", _TRUST_THRESHOLD_FLOOR),
         (
             "frontier_boozer_trust_penalty_scale",
             "frontier_boozer_trust_penalty_scale",
-            1e-6,
+            _REFERENCE_METRIC_FLOOR,
         ),
-        ("frontier_chebyshev_sharpness", "frontier_chebyshev_sharpness", 1.0e-12),
+        ("frontier_chebyshev_sharpness", "frontier_chebyshev_sharpness", _WEIGHT_FLOOR),
         (
             "frontier_epsilon_penalty_weight",
             "frontier_epsilon_penalty_weight",
@@ -436,14 +443,17 @@ def _achievement_chebyshev_lane_specs(
             {
                 "frontier_chebyshev_rho": max(
                     0.0,
-                    1.0e-3
+                    _DEFAULT_CHEBYSHEV_RHO
                     if _optional_float(lane_payload, "rho") is None
                     else float(_optional_float(lane_payload, "rho")),
                 ),
                 "frontier_chebyshev_sharpness": max(
-                    1.0e-12,
+                    _WEIGHT_FLOOR,
                     float(
-                        scalarization_params.get("frontier_chebyshev_sharpness", 12.0)
+                        scalarization_params.get(
+                            "frontier_chebyshev_sharpness",
+                            _DEFAULT_CHEBYSHEV_SHARPNESS,
+                        )
                     )
                     if _optional_float(lane_payload, "sharpness") is None
                     else float(_optional_float(lane_payload, "sharpness")),
@@ -516,18 +526,18 @@ def _achievement_full_simplex_lane_specs(
                 "frontier_reference_volume": float(seed_reference_metrics["volume"]),
                 "frontier_reference_qa": max(
                     float(seed_reference_metrics["qa_error"]),
-                    1.0e-6,
+                    _REFERENCE_METRIC_FLOOR,
                 ),
                 "frontier_reference_boozer": max(
                     float(seed_reference_metrics["boozer_residual"]),
-                    1.0e-6,
+                    _REFERENCE_METRIC_FLOOR,
                 ),
-                "frontier_chebyshev_rho": 1.0e-3,
-                "frontier_chebyshev_sharpness": 12.0,
-                "frontier_chebyshev_weight_iota": max(direction[0], 1.0e-12),
-                "frontier_chebyshev_weight_volume": max(direction[1], 1.0e-12),
-                "frontier_chebyshev_weight_qa": max(direction[2], 1.0e-12),
-                "frontier_chebyshev_weight_boozer": max(direction[3], 1.0e-12),
+                "frontier_chebyshev_rho": _DEFAULT_CHEBYSHEV_RHO,
+                "frontier_chebyshev_sharpness": _DEFAULT_CHEBYSHEV_SHARPNESS,
+                "frontier_chebyshev_weight_iota": max(direction[0], _WEIGHT_FLOOR),
+                "frontier_chebyshev_weight_volume": max(direction[1], _WEIGHT_FLOOR),
+                "frontier_chebyshev_weight_qa": max(direction[2], _WEIGHT_FLOOR),
+                "frontier_chebyshev_weight_boozer": max(direction[3], _WEIGHT_FLOOR),
             },
             iotas_weight=float(default_iotas_weight),
             frontier_volume_weight=default_volume_weight,
@@ -625,7 +635,7 @@ def _epsilon_constraint_lane_specs(
             scalarization_params["epsilon_constraint_qa_max"] = float(qa_epsilon)
             scalarization_params.setdefault(
                 "frontier_reference_qa",
-                max(float(qa_epsilon), 1e-6),
+                max(float(qa_epsilon), _REFERENCE_METRIC_FLOOR),
             )
         boozer_epsilon = epsilon_constraints.get("boozer_residual")
         if boozer_epsilon is not None:
@@ -634,11 +644,11 @@ def _epsilon_constraint_lane_specs(
             )
             scalarization_params.setdefault(
                 "frontier_reference_boozer",
-                max(float(boozer_epsilon), 1e-6),
+                max(float(boozer_epsilon), _REFERENCE_METRIC_FLOOR),
             )
             scalarization_params.setdefault(
                 "frontier_boozer_trust_threshold",
-                max(float(boozer_epsilon), 1e-5),
+                max(float(boozer_epsilon), _TRUST_THRESHOLD_FLOOR),
             )
         if reference_point is None:
             reference_point = {
@@ -659,12 +669,12 @@ def _epsilon_constraint_lane_specs(
         if "qa_error" in reference_point:
             scalarization_params.setdefault(
                 "frontier_reference_qa",
-                max(float(reference_point["qa_error"]), 1e-6),
+                max(float(reference_point["qa_error"]), _REFERENCE_METRIC_FLOOR),
             )
         if "boozer_residual" in reference_point:
             scalarization_params.setdefault(
                 "frontier_reference_boozer",
-                max(float(reference_point["boozer_residual"]), 1e-6),
+                max(float(reference_point["boozer_residual"]), _REFERENCE_METRIC_FLOOR),
             )
         lane_specs.append(
             FrontierLaneSpec(

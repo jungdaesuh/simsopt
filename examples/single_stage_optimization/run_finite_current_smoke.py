@@ -44,6 +44,10 @@ from banana_opt.hardware_contracts import (  # noqa: E402
 from banana_opt.constraint_contract import (  # noqa: E402
     resolve_constraint_contract_from_wire_names,
 )
+from banana_opt.single_stage_banana_current_mode import (  # noqa: E402
+    BANANA_CURRENT_MODE_INDEPENDENT,
+    BANANA_CURRENT_MODE_SHARED,
+)
 
 DEFAULT_PLASMA_SURF_FILENAME = "wout_nfp22ginsburg_000_014417_iota15.nc"
 DEFAULT_SMOKE_OUTPUT_ROOT = SCRIPT_DIR / "outputs_finite_current_smoke"
@@ -85,6 +89,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stage2-timeout-seconds", type=float, default=0.0)
     parser.add_argument("--single-stage-timeout-seconds", type=float, default=0.0)
     parser.add_argument("--currents-A", default="0,8000,-35200")
+    parser.add_argument(
+        "--single-stage-banana-current-mode",
+        choices=[BANANA_CURRENT_MODE_SHARED, BANANA_CURRENT_MODE_INDEPENDENT],
+        default=BANANA_CURRENT_MODE_SHARED,
+        help=(
+            "Banana-current control mode forwarded into the single-stage run. "
+            "'shared' preserves the legacy one-current contract, while "
+            "'independent' gives each loaded banana coil its own current DOF."
+        ),
+    )
     parser.add_argument("--tf-current-A", type=float, default=TF_CURRENT_HARD_LIMIT_A)
     parser.add_argument("--major-radius", type=float, default=VACUUM_VESSEL_MAJOR_RADIUS_M)
     parser.add_argument("--toroidal-flux", type=float, default=0.24)
@@ -164,6 +178,8 @@ def build_smoke_command(
         str(case_output_root),
         "--plasma-current-A",
         str(current_A),
+        "--single-stage-banana-current-mode",
+        args.single_stage_banana_current_mode,
         "--nphi",
         str(args.nphi),
         "--ntheta",

@@ -280,6 +280,7 @@ def make_single_stage_thresholded_physics_rerun_args(**overrides):
         "constraint_weight": 1.0,
         "boozer_I": None,
         "plasma_current_A": None,
+        "single_stage_banana_current_mode": "shared",
         "num_tf_coils": 20,
         "banana_surf_radius": None,
         "stage2_seed_tf_current_A": None,
@@ -372,6 +373,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "published_multisurface",
             ),
             "BANANA_CURRENT_HARD_LIMIT_A": 1.6e4,
+            "BANANA_CURRENT_MODE_SHARED": "shared",
+            "BANANA_CURRENT_MODE_INDEPENDENT": "independent",
             "MAX_CURVATURE_INV_M": 100.0,
             "PLASMA_VESSEL_MIN_DIST_M": 0.04,
             "ACCEPT_OFFSPEC_R0_SEED_ENV": "ACCEPT_OFFSPEC_R0_SEED",
@@ -739,13 +742,15 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
 
     def test_single_stage_partial_alm_state_payload_serializes_numpy_fields(self):
+        from pathlib import PurePath
+
         functions = extract_functions(
             SINGLE_STAGE_MODULE_PATH,
             [
                 "_jsonable_value",
                 "build_single_stage_alm_partial_state",
             ],
-            {"np": np},
+            {"np": np, "PurePath": PurePath},
         )
         build_single_stage_alm_partial_state = functions[
             "build_single_stage_alm_partial_state"
@@ -1188,7 +1193,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         module = load_stage2_alm_wrapper_module()
         args = make_stage2_alm_wrapper_args(
             cc_threshold=0.01,
-            curvature_threshold=200.0,
+            curvature_threshold=50.0,
         )
         resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
         config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
@@ -1200,7 +1205,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
 
         self.assertEqual(metadata["EFFECTIVE_VALUES"]["CC_THRESHOLD"], 0.05)
-        self.assertEqual(metadata["EFFECTIVE_VALUES"]["CURVATURE_THRESHOLD"], 100.0)
+        self.assertEqual(metadata["EFFECTIVE_VALUES"]["CURVATURE_THRESHOLD"], 50.0)
         self.assertEqual(
             metadata["EFFECTIVE_VALUES"]["VACUUM_VESSEL_MAJOR_RADIUS_M"],
             0.976,
@@ -1797,6 +1802,26 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "stage2/surf_opt_boozer_surface.json",
         )
 
+    def test_single_stage_thresholded_physics_rerun_wrapper_parse_args_accepts_independent_banana_current_mode(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_single_stage_thresholded_physics_alm.py",
+                "--plasma-surf-filename",
+                DEFAULT_ALM_WRAPPER_SURFACE,
+                "--stage2-bs-path",
+                "seed.json",
+                "--single-stage-banana-current-mode",
+                "independent",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.single_stage_banana_current_mode, "independent")
+
     def test_single_stage_thresholded_physics_rerun_wrapper_forwards_stage2_handoff_flags(self):
         module = load_single_stage_thresholded_physics_rerun_module()
         args = make_single_stage_thresholded_physics_rerun_args(
@@ -1843,6 +1868,10 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--stage2-seed-tf-current-A") + 1],
             "12345.0",
+        )
+        self.assertEqual(
+            command[command.index("--single-stage-banana-current-mode") + 1],
+            "shared",
         )
 
     def test_single_stage_thresholded_physics_rerun_wrapper_adds_offspec_flag(self):
@@ -1894,6 +1923,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertEqual(args.cs_dist, 0.015)
         self.assertEqual(args.curvature_threshold, 100.0)
+        self.assertEqual(args.single_stage_banana_current_mode, "shared")
 
     def test_single_stage_thresholded_physics_rerun_wrapper_rejects_stage2_surface_mismatch(self):
         module = load_single_stage_thresholded_physics_rerun_module()

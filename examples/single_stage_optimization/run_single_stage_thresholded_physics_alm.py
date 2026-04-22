@@ -29,6 +29,10 @@ from workflow_runner_common import (  # noqa: E402
     snapshot_single_results_paths,
     write_dry_run_marker,
 )
+from banana_opt.single_stage_banana_current_mode import (  # noqa: E402
+    BANANA_CURRENT_MODE_INDEPENDENT,
+    BANANA_CURRENT_MODE_SHARED,
+)
 
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_single_stage_thresholded_physics_alm"
 DEFAULT_SUMMARY_JSON = "single_stage_thresholded_physics_alm_summary.json"
@@ -114,6 +118,19 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=float(os.environ["PLASMA_CURRENT_A"]) if "PLASMA_CURRENT_A" in os.environ else None,
         help="User-facing enclosed toroidal plasma current in physical SI amperes.",
+    )
+    parser.add_argument(
+        "--single-stage-banana-current-mode",
+        choices=[BANANA_CURRENT_MODE_SHARED, BANANA_CURRENT_MODE_INDEPENDENT],
+        default=os.environ.get(
+            "SINGLE_STAGE_BANANA_CURRENT_MODE",
+            BANANA_CURRENT_MODE_SHARED,
+        ),
+        help=(
+            "Banana-current control mode forwarded into the single-stage run. "
+            "'shared' preserves the legacy one-current contract, while "
+            "'independent' gives each loaded banana coil its own current DOF."
+        ),
     )
     parser.add_argument(
         "--num-tf-coils",
@@ -244,6 +261,8 @@ def build_single_stage_thresholded_physics_command(
         "target",
         "--constraint-method",
         "alm",
+        "--single-stage-banana-current-mode",
+        args.single_stage_banana_current_mode,
         "--alm-formulation",
         "thresholded_physics",
         "--alm-max-outer-iters",

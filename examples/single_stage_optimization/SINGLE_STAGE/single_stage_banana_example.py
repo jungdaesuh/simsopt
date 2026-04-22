@@ -8,7 +8,7 @@ import shutil
 import sys
 import tempfile
 from dataclasses import astuple, dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePath
 from types import SimpleNamespace
 import numpy as np
 from scipy.optimize import minimize
@@ -226,6 +226,8 @@ from banana_opt.single_stage_objectives import (
     evaluate_alm_objective as _evaluate_alm_objective_impl,
 )
 from banana_opt.single_stage_banana_current_mode import (
+    BANANA_CURRENT_MODE_INDEPENDENT,
+    BANANA_CURRENT_MODE_SHARED,
     SingleStageBananaCurrentState,
     apply_single_stage_penalty_banana_current_bounds,
     build_single_stage_banana_current_state,
@@ -772,7 +774,7 @@ def coerce_single_stage_banana_current_state(
         return None
     return build_single_stage_banana_current_state(
         banana_coils,
-        mode="shared",
+        mode=BANANA_CURRENT_MODE_SHARED,
     )
 
 
@@ -1399,8 +1401,11 @@ def parse_args():
     )
     parser.add_argument(
         "--single-stage-banana-current-mode",
-        choices=["shared", "independent"],
-        default=os.environ.get("SINGLE_STAGE_BANANA_CURRENT_MODE", "shared"),
+        choices=[BANANA_CURRENT_MODE_SHARED, BANANA_CURRENT_MODE_INDEPENDENT],
+        default=os.environ.get(
+            "SINGLE_STAGE_BANANA_CURRENT_MODE",
+            BANANA_CURRENT_MODE_SHARED,
+        ),
         help=(
             "Single-stage banana-current control contract. 'shared' preserves the "
             "historical single shared banana-current DOF. 'independent' creates one "
@@ -2035,16 +2040,23 @@ def validate_confinement_surrogate_args(args):
 
 def validate_single_stage_current_args(args):
     banana_current_max_A = float(args.banana_current_max_A)
-    banana_current_mode = getattr(args, "single_stage_banana_current_mode", "shared")
+    banana_current_mode = getattr(
+        args,
+        "single_stage_banana_current_mode",
+        BANANA_CURRENT_MODE_SHARED,
+    )
     constraint_method = getattr(args, "constraint_method", "penalty")
     allow_offspec_engineering_constraints = bool(
         getattr(args, "allow_offspec_engineering_constraints", False)
     )
-    if banana_current_mode not in {"shared", "independent"}:
+    if banana_current_mode not in {
+        BANANA_CURRENT_MODE_SHARED,
+        BANANA_CURRENT_MODE_INDEPENDENT,
+    }:
         raise ValueError(
             "--single-stage-banana-current-mode must be one of {shared, independent}"
         )
-    if banana_current_mode == "independent" and constraint_method == "alm":
+    if banana_current_mode == BANANA_CURRENT_MODE_INDEPENDENT and constraint_method == "alm":
         raise ValueError(
             "--single-stage-banana-current-mode=independent is not supported with "
             "--constraint-method=alm"
@@ -2556,7 +2568,7 @@ def make_run_identity_config(
         single_stage_banana_current_mode=getattr(
             args,
             "single_stage_banana_current_mode",
-            "shared",
+            BANANA_CURRENT_MODE_SHARED,
         ),
         num_banana_current_controls=int(num_banana_current_controls),
         nphi=nphi,
@@ -3971,7 +3983,7 @@ def build_single_stage_alm_settings(args):
 
 
 def _jsonable_value(value):
-    if value.__class__.__module__ == "pathlib":
+    if isinstance(value, PurePath):
         return str(value)
     if isinstance(value, np.ndarray):
         return _jsonable_value(value.tolist())

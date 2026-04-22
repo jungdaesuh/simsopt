@@ -44,6 +44,8 @@ CSV_FIELDNAMES = (
     "coil_length",
     "max_curvature",
     "banana_current_a",
+    "banana_current_mode",
+    "banana_current_max_abs_a",
     "error_type",
     "error_message",
 )
@@ -58,6 +60,7 @@ NUMERIC_RESULT_SUMMARY_KEYS = (
     "coil_length",
     "max_curvature",
     "banana_current_a",
+    "banana_current_max_abs_a",
     "plasma_current_a",
     "initial_iota",
 )
@@ -118,7 +121,6 @@ def _result_summary(results: dict) -> dict:
     summary.update(
         {
             "field_error": results.get("FIELD_ERROR"),
-            "banana_current_a": results.get("BANANA_CURRENT_A"),
             "plasma_current_a": results.get("PLASMA_CURRENT_A"),
             "initial_iota": results.get("INITIAL_IOTA"),
         }

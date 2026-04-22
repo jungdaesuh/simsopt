@@ -354,15 +354,16 @@ def _frontier_chebyshev_goal(objective_eval, frontier_goal_config):
         dtype=float,
     )
     sharpness = float(frontier_goal_config.chebyshev_sharpness)
-    shifted = sharpness * (deltas - np.max(deltas))
-    softmax_weights = np.exp(shifted)
-    softmax_weights = softmax_weights / np.sum(softmax_weights)
+    max_delta = float(np.max(deltas))
+    exp_shifted = np.exp(sharpness * (deltas - max_delta))
+    sum_exp = float(np.sum(exp_shifted))
+    softmax_weights = exp_shifted / sum_exp
     chebyshev_total = (
-        np.max(deltas)
-        + np.log(np.sum(np.exp(shifted))) / sharpness
+        max_delta
+        + np.log(sum_exp) / sharpness
         + frontier_goal_config.chebyshev_rho * float(np.sum(deltas))
     )
-    directional_grads = [
+    directional_grads = np.stack([
         -frontier_goal_config.chebyshev_weight_iota
         * np.asarray(objective_eval["dJ_iota_metric"], dtype=float)
         / frontier_goal_config.iota_scale,
@@ -375,15 +376,12 @@ def _frontier_chebyshev_goal(objective_eval, frontier_goal_config):
         frontier_goal_config.chebyshev_weight_boozer
         * np.asarray(objective_eval["dJ_Boozer"], dtype=float)
         / frontier_goal_config.boozer_reference,
-    ]
+    ])
     coeffs = softmax_weights + frontier_goal_config.chebyshev_rho
-    chebyshev_grad = sum(
-        float(coeff) * directional_grad
-        for coeff, directional_grad in zip(coeffs, directional_grads)
-    )
+    chebyshev_grad = (coeffs[:, None] * directional_grads).sum(axis=0)
     return {
         "frontier_scalarization_total": float(chebyshev_total),
-        "frontier_scalarization_grad": np.asarray(chebyshev_grad, dtype=float),
+        "frontier_scalarization_grad": chebyshev_grad,
         "frontier_chebyshev_deltas": deltas.tolist(),
         "frontier_chebyshev_softmax_weights": softmax_weights.tolist(),
     }

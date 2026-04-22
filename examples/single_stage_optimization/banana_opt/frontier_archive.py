@@ -283,29 +283,29 @@ def annotate_archive_members(
     tolerances: Mapping[str, float] | None = None,
 ) -> list[FrontierArchiveMember]:
     effective_tolerances = DEFAULT_DOMINANCE_TOLERANCE if tolerances is None else tolerances
-    annotated_members: list[FrontierArchiveMember] = []
-    for member in members:
-        dominates_ids = [
-            other.member_id
-            for other in members
-            if other.member_id != member.member_id
-            and dominates(member.objective_metrics, other.objective_metrics, tolerance=effective_tolerances)
-        ]
-        dominated_by_ids = [
-            other.member_id
-            for other in members
-            if other.member_id != member.member_id
-            and dominates(other.objective_metrics, member.objective_metrics, tolerance=effective_tolerances)
-        ]
-        annotated_members.append(
-            replace(
-                member,
-                dominance_signature={
-                    "dominates": dominates_ids,
-                    "dominated_by": dominated_by_ids,
-                },
-            )
+    dominates_by_id: dict[str, list[str]] = {member.member_id: [] for member in members}
+    dominated_by_id: dict[str, list[str]] = {member.member_id: [] for member in members}
+    for source in members:
+        for target in members:
+            if source.member_id == target.member_id:
+                continue
+            if dominates(
+                source.objective_metrics,
+                target.objective_metrics,
+                tolerance=effective_tolerances,
+            ):
+                dominates_by_id[source.member_id].append(target.member_id)
+                dominated_by_id[target.member_id].append(source.member_id)
+    annotated_members = [
+        replace(
+            member,
+            dominance_signature={
+                "dominates": dominates_by_id[member.member_id],
+                "dominated_by": dominated_by_id[member.member_id],
+            },
         )
+        for member in members
+    ]
     return sorted(annotated_members, key=lambda member: member.member_id)
 
 

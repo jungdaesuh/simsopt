@@ -134,6 +134,14 @@ def resolve_single_stage_banana_current_state(
         id(original_coil): rebuilt_coil
         for original_coil, rebuilt_coil in zip(banana_coils, rebuilt_banana_coils)
     }
+    biot_savart_coil_ids = {id(coil) for coil in biot_savart.coils}
+    missing_banana_coil_ids = set(rebuilt_banana_by_original_id) - biot_savart_coil_ids
+    if missing_banana_coil_ids:
+        raise ValueError(
+            "Stage 2 banana coils are not all present in the Biot-Savart coil list; "
+            "cannot rebuild independent-mode banana currents without losing the "
+            "original coil ordering."
+        )
     rebuilt_coils = [
         rebuilt_banana_by_original_id.get(id(coil), coil) for coil in biot_savart.coils
     ]
@@ -176,33 +184,30 @@ def build_single_stage_banana_current_payload_fields(
     prefix: str = "",
 ) -> dict[str, object]:
     if state is None:
-        return {
-            f"{prefix}BANANA_CURRENT_MODE": None,
-            f"{prefix}BANANA_CURRENTS_A": None,
-            f"{prefix}BANANA_CURRENT_MAX_ABS_A": None,
-            f"{prefix}BANANA_CURRENT_CONTROL_METRIC": None,
-            f"{prefix}BANANA_NUM_CURRENT_CONTROLS": None,
-            f"{prefix}BANANA_CURRENT_A": None,
-        }
-
-    current_values_A = list(state.current_values_A())
-    control_current_A = state.control_current_A()
-    compatibility_current_A = state.compatibility_current_A()
+        mode = None
+        current_values_A: list[float] | None = None
+        max_abs_A: float | None = None
+        control_metric: str | None = None
+        num_controls: int | None = None
+        scalar_current_A: float | None = None
+    else:
+        values = state.current_values_A()
+        max_abs = max((abs(value) for value in values), default=None)
+        representative = state.representative_current_A()
+        mode = state.mode
+        current_values_A = list(values)
+        max_abs_A = None if max_abs is None else float(max_abs)
+        control_metric = (
+            None if max_abs is None else BANANA_CURRENT_CONTROL_METRIC_MAX_ABS
+        )
+        num_controls = state.num_control_currents()
+        scalar = representative if representative is not None else max_abs
+        scalar_current_A = None if scalar is None else float(scalar)
     return {
-        f"{prefix}BANANA_CURRENT_MODE": state.mode,
+        f"{prefix}BANANA_CURRENT_MODE": mode,
         f"{prefix}BANANA_CURRENTS_A": current_values_A,
-        f"{prefix}BANANA_CURRENT_MAX_ABS_A": (
-            None if control_current_A is None else float(control_current_A)
-        ),
-        f"{prefix}BANANA_CURRENT_CONTROL_METRIC": (
-            None
-            if control_current_A is None
-            else BANANA_CURRENT_CONTROL_METRIC_MAX_ABS
-        ),
-        f"{prefix}BANANA_NUM_CURRENT_CONTROLS": state.num_control_currents(),
-        f"{prefix}BANANA_CURRENT_A": (
-            None
-            if compatibility_current_A is None
-            else float(compatibility_current_A)
-        ),
+        f"{prefix}BANANA_CURRENT_MAX_ABS_A": max_abs_A,
+        f"{prefix}BANANA_CURRENT_CONTROL_METRIC": control_metric,
+        f"{prefix}BANANA_NUM_CURRENT_CONTROLS": num_controls,
+        f"{prefix}BANANA_CURRENT_A": scalar_current_A,
     }

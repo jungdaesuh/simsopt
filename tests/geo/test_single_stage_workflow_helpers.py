@@ -1011,6 +1011,7 @@ class BaselineSweepScriptTests(unittest.TestCase):
             single_stage_constraint_method="penalty",
             single_stage_maxiter=25,
             single_stage_init_only=True,
+            single_stage_banana_current_mode="shared",
             plasma_current_A=0.0,
             res_weight=1000.0,
             iotas_weight=100.0,
@@ -1048,6 +1049,10 @@ class BaselineSweepScriptTests(unittest.TestCase):
         self.assertIn("--plasma-current-A", command)
         self.assertIn("0.0", command)
         self.assertIn("--init-only", command)
+        self.assertEqual(
+            command[command.index("--single-stage-banana-current-mode") + 1],
+            "shared",
+        )
 
     def test_build_single_stage_command_forwards_seed_order_upgrade(self):
         module = load_baseline_sweep_module()
@@ -1383,6 +1388,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
             banana_surf_radius=0.21,
             stage2_order=2,
             seed_order_upgrade=None,
+            single_stage_banana_current_mode="shared",
             nphi=41,
             ntheta=16,
             mpol=4,
@@ -1403,6 +1409,10 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
         self.assertIn("--init-only", command)
         self.assertIn("--nphi", command)
         self.assertIn("--plasma-current-A", command)
+        self.assertEqual(
+            command[command.index("--single-stage-banana-current-mode") + 1],
+            "shared",
+        )
 
     def test_build_smoke_command_forwards_seed_order_upgrade(self):
         module = load_finite_current_smoke_module()
@@ -1623,6 +1633,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             vol_target=0.10,
             boozer_I=0.123,
             plasma_current_A=8000.0,
+            single_stage_banana_current_mode="shared",
             banana_surf_radius=0.22,
             num_surfaces=2,
             inner_surface_ratio=0.8,
@@ -1772,6 +1783,12 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             str(Path("relative/seed.json").resolve()),
         )
         self.assertEqual(
+            target_command[
+                target_command.index("--single-stage-banana-current-mode") + 1
+            ],
+            "shared",
+        )
+        self.assertEqual(
             target_command[target_command.index("--equilibria-dir") + 1],
             str(Path("eqdir").resolve()),
         )
@@ -1821,6 +1838,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
 
         self.assertEqual(args.cs_dist, 0.015)
         self.assertEqual(args.curvature_threshold, 100.0)
+        self.assertEqual(args.single_stage_banana_current_mode, "shared")
 
     def test_goal_mode_comparison_wrapper_parse_args_accepts_seed_order_upgrade(self):
         module = load_goal_mode_comparison_module()
@@ -1884,6 +1902,26 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             args.stage2_seed_surf_path,
             "stage2/surf_opt_boozer_surface.json",
         )
+
+    def test_goal_mode_comparison_wrapper_parse_args_accepts_independent_banana_current_mode(self):
+        module = load_goal_mode_comparison_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_single_stage_goal_mode_comparison.py",
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "seed.json",
+                "--single-stage-banana-current-mode",
+                "independent",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.single_stage_banana_current_mode, "independent")
 
     def test_build_single_stage_goal_mode_command_forwards_frontier_volume_weight(self):
         module = load_goal_mode_comparison_module()
@@ -2148,6 +2186,11 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
                     "FINAL_TOPOLOGY_GATE_SUCCESS": True,
                     "FINAL_IOTA": 0.15,
                     "FINAL_VOLUME": 0.10,
+                    "BANANA_CURRENT_A": 12000.0,
+                    "BANANA_CURRENT_MODE": "shared",
+                    "BANANA_CURRENTS_A": [12000.0],
+                    "BANANA_CURRENT_MAX_ABS_A": 12000.0,
+                    "BANANA_CURRENT_CONTROL_METRIC": "max_abs",
                     "NONQS_RATIO": 0.012,
                     "BOOZER_RESIDUAL": 0.008,
                     "COIL_LENGTH": 1.7,
@@ -2194,6 +2237,11 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
                     "FINAL_TOPOLOGY_GATE_SUCCESS": True,
                     "FINAL_IOTA": 0.18,
                     "FINAL_VOLUME": 0.11,
+                    "BANANA_CURRENT_A": 15000.0,
+                    "BANANA_CURRENT_MODE": "independent",
+                    "BANANA_CURRENTS_A": [12000.0, -15000.0],
+                    "BANANA_CURRENT_MAX_ABS_A": 15000.0,
+                    "BANANA_CURRENT_CONTROL_METRIC": "max_abs",
                     "NONQS_RATIO": 0.014,
                     "BOOZER_RESIDUAL": 0.010,
                     "COIL_LENGTH": 1.72,
@@ -2270,6 +2318,15 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         self.assertEqual(
             summary["mode_runs"]["frontier"]["results"]["goal_mode_impl"],
             "frontier_tradeoff_score_v2",
+        )
+        self.assertEqual(summary["mode_runs"]["target"]["results"]["banana_current_mode"], "shared")
+        self.assertEqual(
+            summary["mode_runs"]["frontier"]["results"]["banana_currents_a"],
+            [12000.0, -15000.0],
+        )
+        self.assertEqual(
+            summary["mode_runs"]["frontier"]["results"]["banana_current_max_abs_a"],
+            15000.0,
         )
         self.assertIsNone(summary["mode_runs"]["frontier"]["results"]["target_iota"])
         self.assertEqual(

@@ -57,7 +57,6 @@ from banana_opt.constraint_contract import (  # noqa: E402
 
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_stage2_alm"
 STAGE2_CC_THRESHOLD_FLOOR = COIL_COIL_MIN_DIST_M
-STAGE2_CURVATURE_THRESHOLD_CEILING = MAX_CURVATURE_INV_M
 DEFAULT_SUMMARY_JSON = "stage2_alm_summary.json"
 _BASE_STAGE2_PROFILE = {
     "major_radius": VACUUM_VESSEL_MAJOR_RADIUS_M,
@@ -550,21 +549,7 @@ def build_stage2_alm_config(
             f"WARNING: cc_threshold {raw_cc} below Stage 2 "
             f"solver floor, clamped to {STAGE2_CC_THRESHOLD_FLOOR}"
         )
-    raw_curvature = float(constraint_contract["CURVATURE_THRESHOLD"])
-    allow_offspec_engineering_constraints = bool(
-        getattr(args, "allow_offspec_engineering_constraints", False)
-    )
-    curvature_threshold = raw_curvature
-    if (
-        not allow_offspec_engineering_constraints
-        and raw_curvature > STAGE2_CURVATURE_THRESHOLD_CEILING
-    ):
-        curvature_threshold = STAGE2_CURVATURE_THRESHOLD_CEILING
-        print(
-            f"WARNING: curvature_threshold {raw_curvature} "
-            f"above Stage 2 hardware ceiling, clamped to "
-            f"{STAGE2_CURVATURE_THRESHOLD_CEILING}"
-        )
+    curvature_threshold = float(constraint_contract["CURVATURE_THRESHOLD"])
     tf_current_A = float(constraint_contract["TF_CURRENT_A"])
     stage2_iota_mode = getattr(args, "stage2_iota_mode", "off")
     stage2_iota_target = getattr(args, "stage2_iota_target", None)

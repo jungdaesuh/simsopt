@@ -125,6 +125,9 @@ _DEFAULT_STAGE2_IOTA_NTHETA = 32
 _DEFAULT_STAGE2_IOTA_MPOL = 8
 _DEFAULT_STAGE2_IOTA_NTOR = 6
 _MAX_LOCAL_STAGE2_RUN_DIR_COMPONENT_LEN = 255
+# 8 hex chars = 32 bits of discriminator. The visible prefix already carries
+# the distinguishing parameters; the hash is only a tie-breaker for truncated
+# names, so 32 bits is far more than enough for a human researcher's run set.
 _LOCAL_STAGE2_RUN_DIR_HASH_HEX_LEN = 8
 
 

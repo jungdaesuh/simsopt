@@ -19,6 +19,7 @@ from .frontier_constraints import (
     hardware_violation_ratios,
 )
 from .frontier_dominance import PARETO_OBJECTIVE_SPECS
+from .single_stage_banana_current_mode import BANANA_CURRENT_MODE_SHARED
 from .single_stage_geometry import (
     build_surface_search_gate,
     build_surface_search_weights,
@@ -588,7 +589,10 @@ def build_single_stage_frontier_runtime(
     args = single_stage.apply_default_stage2_seed_args(
         argparse.Namespace(**dict(spec.args_payload))
     )
-    if getattr(args, "single_stage_banana_current_mode", "shared") != "shared":
+    if (
+        getattr(args, "single_stage_banana_current_mode", BANANA_CURRENT_MODE_SHARED)
+        != BANANA_CURRENT_MODE_SHARED
+    ):
         raise FrontierEvaluatorInitializationError(
             "single-stage frontier evaluator does not support "
             "--single-stage-banana-current-mode=independent; the evaluator "

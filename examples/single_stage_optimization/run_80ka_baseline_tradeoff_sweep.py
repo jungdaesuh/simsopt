@@ -43,6 +43,10 @@ from banana_opt.hardware_contracts import (  # noqa: E402
 from banana_opt.constraint_contract import (  # noqa: E402
     resolve_constraint_contract_from_wire_names,
 )
+from banana_opt.single_stage_banana_current_mode import (  # noqa: E402
+    BANANA_CURRENT_MODE_INDEPENDENT,
+    BANANA_CURRENT_MODE_SHARED,
+)
 
 DEFAULT_PLASMA_SURF_FILENAME = "wout_nfp22ginsburg_000_014417_iota15.nc"
 DEFAULT_SWEEP_OUTPUT_ROOT = SCRIPT_DIR / "outputs_80ka_baseline_sweep"
@@ -129,6 +133,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--single-stage-maxiter", type=int, default=300)
     parser.add_argument("--single-stage-timeout-seconds", type=float, default=0.0)
     parser.add_argument("--single-stage-init-only", action="store_true")
+    parser.add_argument(
+        "--single-stage-banana-current-mode",
+        choices=[BANANA_CURRENT_MODE_SHARED, BANANA_CURRENT_MODE_INDEPENDENT],
+        default=BANANA_CURRENT_MODE_SHARED,
+        help=(
+            "Banana-current control mode forwarded into the single-stage run. "
+            "'shared' preserves the legacy one-current contract, while "
+            "'independent' gives each loaded banana coil its own current DOF."
+        ),
+    )
     parser.add_argument("--plasma-current-A", type=float, default=0.0)
     parser.add_argument("--res-weight", type=float, default=1000.0)
     parser.add_argument("--iotas-weight", type=float, default=100.0)
@@ -317,6 +331,8 @@ def build_single_stage_command(
         str(case_output_root),
         "--constraint-method",
         args.single_stage_constraint_method,
+        "--single-stage-banana-current-mode",
+        args.single_stage_banana_current_mode,
         "--maxiter",
         str(args.single_stage_maxiter),
         "--plasma-current-A",

@@ -29,6 +29,10 @@ from workflow_runner_common import (  # noqa: E402
     snapshot_single_results_paths,
     timeout_or_none,
 )
+from banana_opt.single_stage_banana_current_mode import (  # noqa: E402
+    BANANA_CURRENT_MODE_INDEPENDENT,
+    BANANA_CURRENT_MODE_SHARED,
+)
 from banana_opt.surface_mode_contracts import (  # noqa: E402
     DEFAULT_INNER_SURFACE_RATIO,
     SURFACE_MODE_CHOICES,
@@ -266,6 +270,19 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         default=float(os.environ["PLASMA_CURRENT_A"]) if "PLASMA_CURRENT_A" in os.environ else None,
     )
     parser.add_argument(
+        "--single-stage-banana-current-mode",
+        choices=[BANANA_CURRENT_MODE_SHARED, BANANA_CURRENT_MODE_INDEPENDENT],
+        default=os.environ.get(
+            "SINGLE_STAGE_BANANA_CURRENT_MODE",
+            BANANA_CURRENT_MODE_SHARED,
+        ),
+        help=(
+            "Banana-current control mode forwarded into the single-stage run. "
+            "'shared' preserves the legacy one-current contract, while "
+            "'independent' gives each loaded banana coil its own current DOF."
+        ),
+    )
+    parser.add_argument(
         "--num-tf-coils",
         type=int,
         default=int(os.environ.get("NUM_TF_COILS", "20")),
@@ -444,6 +461,8 @@ def build_single_stage_goal_mode_command(
         str(args.gtol),
         "--constraint-method",
         args.constraint_method,
+        "--single-stage-banana-current-mode",
+        args.single_stage_banana_current_mode,
         "--alm-formulation",
         args.alm_formulation,
         "--iota-target",
@@ -765,6 +784,20 @@ def result_metric_subset(results: dict) -> dict:
         "frontier_effective_volume_weight": results.get("FRONTIER_EFFECTIVE_VOLUME_WEIGHT"),
         "frontier_effective_boozer_weight": results.get("FRONTIER_EFFECTIVE_BOOZER_WEIGHT"),
         "frontier_volume_objective": results.get("FRONTIER_VOLUME_OBJECTIVE"),
+        "banana_current_a": results.get("BANANA_CURRENT_A"),
+        "banana_current_mode": results.get("BANANA_CURRENT_MODE"),
+        "banana_currents_a": results.get("BANANA_CURRENTS_A"),
+        "banana_current_max_abs_a": results.get("BANANA_CURRENT_MAX_ABS_A"),
+        "banana_current_control_metric": results.get("BANANA_CURRENT_CONTROL_METRIC"),
+        "best_feasible_banana_current_a": results.get("BEST_FEASIBLE_BANANA_CURRENT_A"),
+        "best_feasible_banana_current_mode": results.get("BEST_FEASIBLE_BANANA_CURRENT_MODE"),
+        "best_feasible_banana_currents_a": results.get("BEST_FEASIBLE_BANANA_CURRENTS_A"),
+        "best_feasible_banana_current_max_abs_a": results.get(
+            "BEST_FEASIBLE_BANANA_CURRENT_MAX_ABS_A"
+        ),
+        "best_feasible_banana_current_control_metric": results.get(
+            "BEST_FEASIBLE_BANANA_CURRENT_CONTROL_METRIC"
+        ),
     }
 
 

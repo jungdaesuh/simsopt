@@ -57,6 +57,22 @@ def load_stage2_module():
 
 
 class IotaTargetSweepTests(unittest.TestCase):
+    def test_parse_args_accepts_independent_banana_current_mode(self):
+        module = load_iota_sweep_module()
+
+        args = module.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "seed.json",
+                "--single-stage-banana-current-mode",
+                "independent",
+            ]
+        )
+
+        self.assertEqual(args.single_stage_banana_current_mode, "independent")
+
     def test_dry_run_writes_summary_and_csv(self):
         module = load_iota_sweep_module()
 
@@ -125,6 +141,9 @@ class IotaTargetSweepTests(unittest.TestCase):
                 "TARGET_IOTA": 0.15,
                 "FIELD_ERROR": None,
                 "BANANA_CURRENT_A": None,
+                "BANANA_CURRENT_MODE": None,
+                "BANANA_CURRENTS_A": None,
+                "BANANA_CURRENT_MAX_ABS_A": None,
                 "PLASMA_CURRENT_A": None,
                 "INITIAL_IOTA": None,
             }
@@ -132,9 +151,12 @@ class IotaTargetSweepTests(unittest.TestCase):
 
         self.assertEqual(summary["goal_mode"], "target")
         self.assertEqual(summary["target_iota"], 0.15)
+        self.assertIsNone(summary["banana_current_mode"])
+        self.assertIsNone(summary["banana_currents_a"])
         for key in (
             "field_error",
             "banana_current_a",
+            "banana_current_max_abs_a",
             "plasma_current_a",
             "initial_iota",
             "final_iota",
