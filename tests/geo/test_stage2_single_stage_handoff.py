@@ -1468,6 +1468,8 @@ class UnifiedRunnerTests(unittest.TestCase):
                 "/tmp/stage2/biot_savart_opt.json",
                 "--stage2-seed-surf-path",
                 "seed/surf_opt_boozer_surface.json",
+                "--single-stage-banana-current-mode",
+                "independent",
             ]
         )
 
@@ -1480,6 +1482,10 @@ class UnifiedRunnerTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--stage2-seed-surf-path") + 1],
             str(Path("seed/surf_opt_boozer_surface.json").resolve()),
+        )
+        self.assertEqual(
+            command[command.index("--single-stage-banana-current-mode") + 1],
+            "independent",
         )
 
     def test_recovery_only_updates_recovery_results_with_handoff_metadata(self):

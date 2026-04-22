@@ -471,6 +471,7 @@ def build_recovery_command(
         constraint_weight=args.constraint_weight,
         boozer_I=args.boozer_I,
         plasma_current_A=args.plasma_current_A,
+        single_stage_banana_current_mode=args.single_stage_banana_current_mode,
         num_tf_coils=args.num_tf_coils,
         banana_surf_radius=args.banana_surf_radius,
         stage2_seed_tf_current_A=args.stage2_seed_tf_current_A,
