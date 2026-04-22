@@ -36,6 +36,13 @@ SINGLE_STAGE_OBJECTIVES_MODULE_PATH = (
     / "banana_opt"
     / "single_stage_objectives.py"
 )
+SINGLE_STAGE_BANANA_CURRENT_MODE_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "banana_opt"
+    / "single_stage_banana_current_mode.py"
+)
 STAGE2_MODULE_PATH = (
     Path(__file__).resolve().parents[2]
     / "examples"
@@ -649,10 +656,13 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
     def test_penalty_traversal_policy_execution_is_centralized_in_shared_helper(self):
         single_stage_source = SINGLE_STAGE_MODULE_PATH.read_text()
+        single_stage_helper_source = (
+            SINGLE_STAGE_BANANA_CURRENT_MODE_MODULE_PATH.read_text()
+        )
         stage2_source = STAGE2_MODULE_PATH.read_text()
 
         self.assertIn(
-            "apply_penalty_traversal_forbidden_box_bounds(",
+            "apply_single_stage_penalty_banana_current_bounds(",
             single_stage_source,
         )
         self.assertIn(
@@ -663,6 +673,14 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertNotIn("banana_current_exceeds_limit(", single_stage_source)
         self.assertNotIn("apply_banana_current_upper_bound(", stage2_source)
         self.assertNotIn("banana_current_exceeds_limit(", stage2_source)
+        self.assertIn(
+            "apply_banana_current_upper_bound(",
+            single_stage_helper_source,
+        )
+        self.assertIn(
+            "banana_current_exceeds_limit(",
+            single_stage_helper_source,
+        )
 
     def test_single_stage_alm_constraint_names_follow_shared_schema(self):
         schema_module = load_hardware_constraint_schema_module()

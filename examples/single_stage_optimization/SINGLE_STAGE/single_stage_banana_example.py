@@ -114,7 +114,6 @@ from banana_opt.frontier_solver_checkpoint import (
     build_solver_checkpoint_payload,
 )
 from banana_opt.current_contracts import (
-    apply_penalty_traversal_forbidden_box_bounds,
     DEFAULT_FINITE_CURRENT_MODE,
     infer_uniform_coil_current_A as _infer_uniform_coil_current_A,
     resolve_penalty_traversal_forbidden_box_bounds,
@@ -225,6 +224,18 @@ from banana_opt.single_stage_objectives import (
     evaluate_base_objective as _evaluate_base_objective_impl,
     evaluate_total_objective as _evaluate_total_objective_impl,
     evaluate_alm_objective as _evaluate_alm_objective_impl,
+)
+from banana_opt.single_stage_banana_current_mode import (
+    SingleStageBananaCurrentState,
+    apply_single_stage_penalty_banana_current_bounds,
+    build_single_stage_banana_current_state,
+    build_single_stage_banana_current_payload_fields,
+    resolve_single_stage_banana_current_state as _resolve_single_stage_banana_current_state_impl,
+)
+from banana_opt.frontier_scalarization import (
+    FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
+    FRONTIER_REFERENCE_MODE_EPSILON,
+    FRONTIER_REFERENCE_MODE_REFERENCE_POINTS,
 )
 from banana_opt.surface_mode_contracts import (
     DEFAULT_INNER_SURFACE_RATIO,
@@ -735,6 +746,34 @@ def resolve_plasma_current_settings(
         "mode": settings.mode,
         "effective_mode": settings.effective_mode,
     }
+
+
+def resolve_single_stage_banana_current_state(
+    biot_savart,
+    coil_partitions,
+    *,
+    mode,
+):
+    return _resolve_single_stage_banana_current_state_impl(
+        biot_savart,
+        coil_partitions,
+        mode=mode,
+    )
+
+
+def coerce_single_stage_banana_current_state(
+    banana_current_state: SingleStageBananaCurrentState | None = None,
+    *,
+    banana_coils=None,
+) -> SingleStageBananaCurrentState | None:
+    if banana_current_state is not None:
+        return banana_current_state
+    if not banana_coils:
+        return None
+    return build_single_stage_banana_current_state(
+        banana_coils,
+        mode="shared",
+    )
 
 
 def resolve_surface_mode_contract(args, *, warn_on_legacy_mapping=True):
@@ -1359,6 +1398,17 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--single-stage-banana-current-mode",
+        choices=["shared", "independent"],
+        default=os.environ.get("SINGLE_STAGE_BANANA_CURRENT_MODE", "shared"),
+        help=(
+            "Single-stage banana-current control contract. 'shared' preserves the "
+            "historical single shared banana-current DOF. 'independent' creates one "
+            "current DOF per loaded banana coil while preserving the loaded Stage 2 "
+            "current state at the handoff."
+        ),
+    )
+    parser.add_argument(
         "--length-target",
         type=float,
         default=float(os.environ.get("SS_LENGTH_TARGET", str(COIL_LENGTH_TARGET_M))),
@@ -1843,10 +1893,12 @@ def current_single_stage_hardware_snapshot_kwargs(*, coil_length=None):
         resolved_coil_length = float(coil_length)
     resolved_length_target = globals().get("length_target")
     resolved_tf_current_A = globals().get("stage2_tf_current_A")
-    banana_coils_value = globals().get("banana_coils")
-    resolved_banana_current_A = None
-    if banana_coils_value:
-        resolved_banana_current_A = float(banana_coils_value[0].current.get_value())
+    banana_current_state = globals().get("banana_current_state")
+    resolved_banana_current_A = (
+        None
+        if banana_current_state is None
+        else banana_current_state.control_current_A()
+    )
     args_value = globals().get("args")
     resolved_banana_current_max_A = getattr(
         args_value,
@@ -1871,6 +1923,22 @@ def current_single_stage_hardware_snapshot_kwargs(*, coil_length=None):
             else float(penalty_banana_current_max_A)
         ),
     }
+
+
+def current_single_stage_alm_banana_current():
+    banana_current_state = globals().get("banana_current_state")
+    if banana_current_state is not None:
+        representative_current_A = banana_current_state.representative_current_A()
+        if representative_current_A is None:
+            raise ValueError(
+                "single-stage ALM banana-current constraints require "
+                "--single-stage-banana-current-mode=shared"
+            )
+        return banana_current_state.currents[0]
+    banana_coils_value = globals().get("banana_coils")
+    if banana_coils_value:
+        return banana_coils_value[0].current
+    return None
 
 
 def evaluate_topology_gate(surface, bfield, nfieldlines, tmax, tol, survival_threshold):
@@ -1967,9 +2035,20 @@ def validate_confinement_surrogate_args(args):
 
 def validate_single_stage_current_args(args):
     banana_current_max_A = float(args.banana_current_max_A)
+    banana_current_mode = getattr(args, "single_stage_banana_current_mode", "shared")
+    constraint_method = getattr(args, "constraint_method", "penalty")
     allow_offspec_engineering_constraints = bool(
         getattr(args, "allow_offspec_engineering_constraints", False)
     )
+    if banana_current_mode not in {"shared", "independent"}:
+        raise ValueError(
+            "--single-stage-banana-current-mode must be one of {shared, independent}"
+        )
+    if banana_current_mode == "independent" and constraint_method == "alm":
+        raise ValueError(
+            "--single-stage-banana-current-mode=independent is not supported with "
+            "--constraint-method=alm"
+        )
     if banana_current_max_A <= 0.0:
         raise ValueError("--banana-current-max-A must be positive.")
     if (
@@ -2010,6 +2089,8 @@ class RunIdentityConfig:
     curvature_threshold: float
     banana_surf_radius: float
     banana_current_max_A: float
+    single_stage_banana_current_mode: str
+    num_banana_current_controls: int
     nphi: int
     ntheta: int
     init_only: bool
@@ -2081,6 +2162,8 @@ class PreservedTimeoutReplayConfig:
     requested_seed_regime: str | None = None
     effective_seed_regime: str | None = None
     single_stage_goal_mode: str | None = None
+    single_stage_banana_current_mode: str | None = None
+    num_banana_current_controls: int | None = None
     single_stage_goal_mode_impl: str | None = None
     boozer_surface_target_volumes: tuple[float, ...] | None = None
     frontier_iota_reference: float | None = None
@@ -2143,9 +2226,9 @@ class FrontierGoalConfig:
 
 FRONTIER_GOAL_MODE_IMPL = "frontier_tradeoff_score_v2"
 FRONTIER_SCALARIZATION_TYPE_WEIGHT_SCHEDULE = "weight_schedule_v1"
-FRONTIER_SCALARIZATION_TYPE_REFERENCE_POINT = "reference_point_sweep_v1"
-FRONTIER_SCALARIZATION_TYPE_ACHIEVEMENT = "achievement_chebyshev_sweep_v1"
-FRONTIER_SCALARIZATION_TYPE_EPSILON = "epsilon_constraint_sweep_v1"
+FRONTIER_SCALARIZATION_TYPE_REFERENCE_POINT = FRONTIER_REFERENCE_MODE_REFERENCE_POINTS
+FRONTIER_SCALARIZATION_TYPE_ACHIEVEMENT = FRONTIER_REFERENCE_MODE_ACHIEVEMENT
+FRONTIER_SCALARIZATION_TYPE_EPSILON = FRONTIER_REFERENCE_MODE_EPSILON
 _FRONTIER_LEGACY_RES_WEIGHT_BASELINE = 1000.0
 _FRONTIER_LEGACY_IOTA_WEIGHT_BASELINE = 100.0
 _FRONTIER_LEGACY_VOLUME_WEIGHT_BASELINE = 100.0
@@ -2367,6 +2450,8 @@ PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
     requested_seed_regime=None,
     effective_seed_regime=None,
     single_stage_goal_mode=None,
+    single_stage_banana_current_mode=None,
+    num_banana_current_controls=None,
     single_stage_goal_mode_impl=None,
     boozer_surface_target_volumes=None,
     frontier_iota_reference=None,
@@ -2412,6 +2497,7 @@ def make_run_identity_config(
     surface_mode_contract: SurfaceModeContract | None = None,
     effective_num_surfaces: int | None = None,
     effective_inner_surface_ratio: float | None = None,
+    num_banana_current_controls: int = 1,
 ):
     resolved_contract = (
         resolve_surface_mode_contract(args, warn_on_legacy_mapping=False)
@@ -2467,6 +2553,12 @@ def make_run_identity_config(
             "banana_current_max_A",
             BANANA_CURRENT_HARD_LIMIT_A,
         ),
+        single_stage_banana_current_mode=getattr(
+            args,
+            "single_stage_banana_current_mode",
+            "shared",
+        ),
+        num_banana_current_controls=int(num_banana_current_controls),
         nphi=nphi,
         ntheta=ntheta,
         init_only=args.init_only,
@@ -3114,11 +3206,16 @@ def build_best_feasible_results_summary(
     curvature_threshold,
     length_target,
     tf_current_A,
-    banana_coils,
-    banana_current_max_A,
-    outer_surface,
-    vessel_surface,
+    banana_current_state: SingleStageBananaCurrentState | None = None,
+    banana_current_max_A=None,
+    outer_surface=None,
+    vessel_surface=None,
+    banana_coils=None,
 ):
+    resolved_banana_current_state = coerce_single_stage_banana_current_state(
+        banana_current_state,
+        banana_coils=banana_coils,
+    )
     incumbent = run_dict.get("best_feasible_incumbent")
     if (
         incumbent is None
@@ -3137,6 +3234,10 @@ def build_best_feasible_results_summary(
             "BEST_FEASIBLE_FRONTIER_TRUST_OK": None,
             "BEST_FEASIBLE_FINAL_IOTA": None,
             "BEST_FEASIBLE_FINAL_VOLUME": None,
+            **build_single_stage_banana_current_payload_fields(
+                None,
+                prefix="BEST_FEASIBLE_",
+            ),
             **build_hardware_constraint_artifact_payload_fields(
                 None,
                 prefix="BEST_FEASIBLE_",
@@ -3169,7 +3270,11 @@ def build_best_feasible_results_summary(
             length_target=length_target,
             tf_current_A=tf_current_A,
             tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
-            banana_current_A=float(banana_coils[0].current.get_value()),
+            banana_current_A=(
+                None
+                if resolved_banana_current_state is None
+                else resolved_banana_current_state.control_current_A()
+            ),
             banana_current_max_A=banana_current_max_A,
         )
         surface_status = run_dict["surface_status"]
@@ -3192,6 +3297,10 @@ def build_best_feasible_results_summary(
             "BEST_FEASIBLE_FRONTIER_TRUST_OK": search_eval.get("frontier_trust_ok"),
             "BEST_FEASIBLE_FINAL_IOTA": float(surface_status["iotas"][-1]),
             "BEST_FEASIBLE_FINAL_VOLUME": float(surface_status["volumes"][-1]),
+            **build_single_stage_banana_current_payload_fields(
+                resolved_banana_current_state,
+                prefix="BEST_FEASIBLE_",
+            ),
             **build_hardware_constraint_artifact_payload_fields(
                 hardware_snapshot,
                 prefix="BEST_FEASIBLE_",
@@ -3785,7 +3894,7 @@ def evaluate_alm_objective(
             length_penalty_threshold=args.alm_length_penalty_threshold,
             coil_length_objective=curvelength,
             coil_length_threshold=length_target,
-            banana_current=banana_coils[0].current,
+            banana_current=current_single_stage_alm_banana_current(),
             banana_current_threshold=args.banana_current_max_A,
             JNonQSObjective=objective_terms["JNonQSObjective"],
             JBoozerObjective=objective_terms["JBoozerObjective"],
@@ -3862,6 +3971,8 @@ def build_single_stage_alm_settings(args):
 
 
 def _jsonable_value(value):
+    if value.__class__.__module__ == "pathlib":
+        return str(value)
     if isinstance(value, np.ndarray):
         return _jsonable_value(value.tolist())
     if isinstance(value, np.generic):
@@ -4097,6 +4208,14 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
     stage2_results_path = globals().get("stage2_results_path")
     frontier_goal_config = globals().get("FRONTIER_GOAL_CONFIG", replay_config)
     surface_data_value = globals().get("surface_data")
+    banana_current_state = globals().get("banana_current_state")
+    replay_banana_current_mode = replay_config.single_stage_banana_current_mode
+    replay_num_banana_current_controls = replay_config.num_banana_current_controls
+    if banana_current_state is not None:
+        replay_banana_current_mode = banana_current_state.mode
+        replay_num_banana_current_controls = (
+            banana_current_state.num_control_currents()
+        )
 
     def frontier_replay_value(replay_attr, config_attr):
         if isinstance(frontier_goal_config, FrontierGoalConfig):
@@ -4135,6 +4254,8 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
             replay_config.effective_seed_regime,
         ),
         single_stage_goal_mode=globals().get("SINGLE_STAGE_GOAL_MODE", replay_config.single_stage_goal_mode),
+        single_stage_banana_current_mode=replay_banana_current_mode,
+        num_banana_current_controls=replay_num_banana_current_controls,
         single_stage_goal_mode_impl=current_frontier_goal_mode_impl(),
         boozer_surface_target_volumes=(
             replay_config.boozer_surface_target_volumes
@@ -4272,6 +4393,7 @@ def build_preserved_timeout_results_payload(
     final_iota,
     final_volume,
     hardware_snapshot,
+    banana_current_state: SingleStageBananaCurrentState | None = None,
     coil_length,
     accepted_iteration,
     alm_runtime_state: PreservedTimeoutALMState | None = None,
@@ -4348,6 +4470,7 @@ def build_preserved_timeout_results_payload(
         "FINAL_VOLUME": float(final_volume),
         "FINAL_FEASIBILITY_OK": bool(final_feasibility_ok),
         "SELF_INTERSECTING": bool(run_dict["intersecting"]),
+        **build_single_stage_banana_current_payload_fields(banana_current_state),
         **build_hardware_constraint_artifact_payload_fields(artifact_hardware_snapshot),
         "FINAL_TOPOLOGY_GATE_SUCCESS": bool(run_dict["topology_gate_status"]["success"]),
         "FINAL_TOPOLOGY_GATE_STATE": run_dict["topology_gate_status"].get("state"),
@@ -4528,6 +4651,7 @@ def write_preserved_timeout_artifacts_for_current_state(
             final_iota=run_dict["surface_status"]["iotas"][-1],
             final_volume=run_dict["surface_status"]["volumes"][-1],
             hardware_snapshot=hardware_snapshot,
+            banana_current_state=globals().get("banana_current_state"),
             coil_length=coil_length,
             accepted_iteration=int(run_dict.get("accepted_iterations", 0)),
             alm_runtime_state=current_preserved_timeout_alm_state(),
@@ -5255,6 +5379,7 @@ def callback(x):
                 final_iota=iota_values[-1],
                 final_volume=volume_values[-1],
                 hardware_snapshot=hardware_snapshot,
+                banana_current_state=globals().get("banana_current_state"),
                 coil_length=length,
                 accepted_iteration=accepted_iteration,
                 alm_runtime_state=current_preserved_timeout_alm_state(),
@@ -5276,6 +5401,7 @@ def callback(x):
                 final_iota=iota_values[-1],
                 final_volume=volume_values[-1],
                 hardware_snapshot=hardware_snapshot,
+                banana_current_state=globals().get("banana_current_state"),
                 coil_length=length,
                 accepted_iteration=accepted_iteration,
                 alm_runtime_state=current_preserved_timeout_alm_state(),
@@ -5705,6 +5831,8 @@ if __name__ == "__main__":
         target_volume=vol_target,
         target_iota=iota_target,
         single_stage_goal_mode=args.single_stage_goal_mode,
+        single_stage_banana_current_mode=args.single_stage_banana_current_mode,
+        num_banana_current_controls=None,
         single_stage_goal_mode_impl=current_frontier_goal_mode_impl(),
         major_radius=R0,
     )
@@ -5732,6 +5860,16 @@ if __name__ == "__main__":
         surf_coils,
     ) = build_hbt_reference_surfaces(banana_surf_nfp, banana_surf_radius)
 
+    bs, coil_partitions, banana_current_state = resolve_single_stage_banana_current_state(
+        bs,
+        coil_partitions,
+        mode=args.single_stage_banana_current_mode,
+    )
+    PRESERVED_TIMEOUT_REPLAY_CONFIG = replace(
+        PRESERVED_TIMEOUT_REPLAY_CONFIG,
+        num_banana_current_controls=banana_current_state.num_control_currents(),
+    )
+
     # Extract coil information
     coils = bs.coils
     curves = [c.curve for c in coils]
@@ -5745,12 +5883,11 @@ if __name__ == "__main__":
     objective_curves = banana_curves
     stage2_tf_current_A = resolve_stage2_tf_current_A(stage2_results, tf_coils)
     tf_current_sum_abs_A = float(sum(abs(c.current.get_value()) for c in tf_coils))
-    initial_banana_current_A = float(banana_coils[0].current.get_value())
+    initial_banana_current_A = banana_current_state.compatibility_current_A()
     if CONSTRAINT_METHOD == "penalty":
-        apply_penalty_traversal_forbidden_box_bounds(
-            bound_targets={"banana_current": banana_coils[0].current},
-            requested_thresholds={"banana_current": args.banana_current_max_A},
-            seed_values={"banana_current": initial_banana_current_A},
+        apply_single_stage_penalty_banana_current_bounds(
+            banana_current_state,
+            banana_current_max_A=args.banana_current_max_A,
             validate_seed=not args.init_only,
             seed_context="Loaded Stage 2 banana current",
         )
@@ -5790,6 +5927,7 @@ if __name__ == "__main__":
         surface_mode_contract=surface_mode_contract,
         effective_num_surfaces=effective_num_surfaces,
         effective_inner_surface_ratio=effective_inner_surface_ratio,
+        num_banana_current_controls=banana_current_state.num_control_currents(),
     )
     config_str = build_run_identity_config(run_identity_config)
     config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:8]
@@ -6077,7 +6215,7 @@ if __name__ == "__main__":
         length_target=length_target,
         tf_current_A=stage2_tf_current_A,
         tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
-        banana_current_A=initial_banana_current_A,
+        banana_current_A=banana_current_state.control_current_A(),
         banana_current_max_A=getattr(
             args,
             "banana_current_max_A",
@@ -6929,7 +7067,7 @@ if __name__ == "__main__":
             length_target=length_target,
             tf_current_A=stage2_tf_current_A,
             tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
-            banana_current_A=float(banana_coils[0].current.get_value()),
+            banana_current_A=banana_current_state.control_current_A(),
             banana_current_max_A=args.banana_current_max_A,
         )
         final_max_curvature = final_hardware_snapshot["max_curvature"]
@@ -6991,7 +7129,7 @@ if __name__ == "__main__":
             length_target=length_target,
             tf_current_A=stage2_tf_current_A,
             tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
-            banana_current_A=float(banana_coils[0].current.get_value()),
+            banana_current_A=banana_current_state.control_current_A(),
             banana_current_max_A=args.banana_current_max_A,
         )
     nonqs_ratio = None if args.init_only else float(JnonQSRatio.J())
@@ -7014,7 +7152,7 @@ if __name__ == "__main__":
         CURVATURE_THRESHOLD,
         length_target,
         stage2_tf_current_A,
-        banana_coils,
+        banana_current_state,
         args.banana_current_max_A,
         outer_surface_data["boozer_surface"].surface,
         VV,
@@ -7402,6 +7540,7 @@ if __name__ == "__main__":
         "FINAL_SEARCH_SURFACE_WEIGHTS": final_search_surface_weights,
         "FINAL_FEASIBILITY_OK": final_feasibility_ok,
         "SELF_INTERSECTING": run_dict['intersecting'],
+        **build_single_stage_banana_current_payload_fields(banana_current_state),
         **build_hardware_constraint_artifact_payload_fields(final_hardware_snapshot),
         "INVALID_STATE_REJECTS_TOTAL": run_dict["invalid_state_rejects_total"],
         "TOPOLOGY_GATE_REJECTS": run_dict["topology_gate_rejects"],

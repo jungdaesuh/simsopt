@@ -124,6 +124,8 @@ _DEFAULT_STAGE2_IOTA_NPHI = 91
 _DEFAULT_STAGE2_IOTA_NTHETA = 32
 _DEFAULT_STAGE2_IOTA_MPOL = 8
 _DEFAULT_STAGE2_IOTA_NTOR = 6
+_MAX_LOCAL_STAGE2_RUN_DIR_COMPONENT_LEN = 255
+_LOCAL_STAGE2_RUN_DIR_HASH_HEX_LEN = 8
 
 
 def canonical_stage2_iota_constraint_weight(
@@ -384,21 +386,6 @@ def format_stage2_constraint_suffix(
                 _DEFAULT_STAGE2_ALM_TRUST_RADIUS_INIT,
             ),
             (
-                "ALMTRMin",
-                float(alm_trust_radius_min),
-                _DEFAULT_STAGE2_ALM_TRUST_RADIUS_MIN,
-            ),
-            (
-                "ALMTRShrink",
-                float(alm_trust_radius_shrink),
-                _DEFAULT_STAGE2_ALM_TRUST_RADIUS_SHRINK,
-            ),
-            (
-                "ALMTRGrow",
-                float(alm_trust_radius_grow),
-                _DEFAULT_STAGE2_ALM_TRUST_RADIUS_GROW,
-            ),
-            (
                 "ALMInner",
                 int(alm_max_inner_attempts),
                 _DEFAULT_STAGE2_ALM_MAX_INNER_ATTEMPTS,
@@ -412,6 +399,21 @@ def format_stage2_constraint_suffix(
                 "ALMCurv",
                 float(alm_curvature_smoothing),
                 _DEFAULT_STAGE2_ALM_CURVATURE_SMOOTHING,
+            ),
+            (
+                "ALMTRMin",
+                float(alm_trust_radius_min),
+                _DEFAULT_STAGE2_ALM_TRUST_RADIUS_MIN,
+            ),
+            (
+                "ALMTRShrink",
+                float(alm_trust_radius_shrink),
+                _DEFAULT_STAGE2_ALM_TRUST_RADIUS_SHRINK,
+            ),
+            (
+                "ALMTRGrow",
+                float(alm_trust_radius_grow),
+                _DEFAULT_STAGE2_ALM_TRUST_RADIUS_GROW,
             ),
         )
         for label, value, default in optional_alm_segments:
@@ -471,14 +473,16 @@ def format_stage2_iota_suffix(
         f"-ITol={format_compact_float(stage2_iota_tolerance)}"
         f"-IVol={format_compact_float(stage2_iota_vol_target)}"
         f"-ICW={'exact' if canonical_constraint_weight is None else format_compact_float(canonical_constraint_weight)}"
+    )
+    if stage2_iota_mode == "soft":
+        suffix += f"-IW={format_compact_float(stage2_iota_weight)}"
+    suffix += (
         f"-INTF={int(stage2_iota_num_tf_coils)}"
         f"-INPhi={int(stage2_iota_nphi)}"
         f"-INTheta={int(stage2_iota_ntheta)}"
         f"-IMPol={int(stage2_iota_mpol)}"
         f"-INTor={int(stage2_iota_ntor)}"
     )
-    if stage2_iota_mode == "soft":
-        suffix += f"-IW={format_compact_float(stage2_iota_weight)}"
     return suffix
 
 
@@ -557,10 +561,15 @@ def format_local_stage2_run_dir(
             stage2_iota_ntor,
         )
     )
-    if len(full) > 200:
+    if len(full) > _MAX_LOCAL_STAGE2_RUN_DIR_COMPONENT_LEN:
         import hashlib as _hashlib
-        digest = _hashlib.sha1(full.encode("utf-8")).hexdigest()[:12]
-        full = full[:180] + "-H=" + digest
+        digest = _hashlib.sha1(full.encode("utf-8")).hexdigest()[
+            :_LOCAL_STAGE2_RUN_DIR_HASH_HEX_LEN
+        ]
+        visible_prefix_len = (
+            _MAX_LOCAL_STAGE2_RUN_DIR_COMPONENT_LEN - len("-H=") - len(digest)
+        )
+        full = full[:visible_prefix_len] + "-H=" + digest
     return full
 
 

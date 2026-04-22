@@ -588,6 +588,12 @@ def build_single_stage_frontier_runtime(
     args = single_stage.apply_default_stage2_seed_args(
         argparse.Namespace(**dict(spec.args_payload))
     )
+    if getattr(args, "single_stage_banana_current_mode", "shared") != "shared":
+        raise FrontierEvaluatorInitializationError(
+            "single-stage frontier evaluator does not support "
+            "--single-stage-banana-current-mode=independent; the evaluator "
+            "runtime still assumes a scalar banana-current contract."
+        )
     stage2_results = dict(spec.stage2_results)
     stage2_bs_path = Path(spec.stage2_bs_path)
 
@@ -882,7 +888,9 @@ def build_single_stage_frontier_runtime(
     except FrontierEvaluatorInitializationError:
         raise
     except Exception as error:
-        raise FrontierEvaluatorInitializationError(str(error)) from error
+        raise FrontierEvaluatorInitializationError(
+            f"{type(error).__name__}: {error}"
+        ) from error
 
 
 def build_single_stage_frontier_evaluator_spec(
@@ -1180,15 +1188,4 @@ def _build_decision_variable_specs(
     return specs
 
 
-def _jsonable_value(value):
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, np.ndarray):
-        return [_jsonable_value(item) for item in value.tolist()]
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, dict):
-        return {str(key): _jsonable_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable_value(item) for item in value]
-    return value
+_jsonable_value = single_stage._jsonable_value

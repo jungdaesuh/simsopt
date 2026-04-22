@@ -16,6 +16,7 @@ import numpy as np
 
 from simsopt._core.derivative import Derivative
 from simsopt._core.optimizable import Optimizable
+from simsopt.field.coil import Current
 from simsopt.geo.surfaceobjectives import boozer_surface_residual, boozer_surface_residual_dB
 from simsopt.objectives.utilities import forward_backward
 
@@ -2821,6 +2822,74 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["BANANA_CURRENT_A"], 1.4e4)
         self.assertEqual(payload["BANANA_CURRENT_MAX_A"], 1.6e4)
         self.assertIsNone(payload["FINAL_TOPOLOGY_TRANSPORT_DIAGNOSTICS"])
+
+    def test_build_preserved_timeout_results_payload_reports_banana_current_mode_fields(self):
+        module = load_single_stage_example_module()
+        replay_config = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_test.nc",
+            plasma_surf_path="/equilibria/wout_test.nc",
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+            single_stage_banana_current_mode="independent",
+            num_banana_current_controls=2,
+        )
+        run_dict = {
+            "search_eval": {
+                "total": 7.5e-4,
+                "base_total": 7.4e-4,
+            },
+            "J": 7.5e-4,
+            "intersecting": False,
+            "surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"success": True},
+        }
+        banana_current_state = module.SingleStageBananaCurrentState(
+            mode="independent",
+            currents=(Current(1.2e4), Current(-1.5e4)),
+            seed_currents_A=(1.0e4, -1.0e4),
+        )
+
+        payload = module.build_preserved_timeout_results_payload(
+            replay_config=replay_config,
+            preservation_kind="best_feasible",
+            incumbent_stage="initial",
+            run_dict=run_dict,
+            objective_eval={"J_QS": 2.7e-4, "J_Boozer": 4.8e-7},
+            field_error=3.5e-4,
+            final_iota=0.14997,
+            final_volume=0.09998,
+            hardware_snapshot={
+                "search_hardware_status": {"success": True, "violations": []},
+                "artifact_hardware_status": {"success": True, "violations": []},
+                "max_curvature": 19.8,
+                "curve_curve_min_dist": 0.0496,
+                "curve_surface_min_dist": 0.067,
+                "surface_vessel_min_dist": 0.082,
+                "banana_current_A": 1.5e4,
+                "banana_current_max_A": 1.6e4,
+            },
+            banana_current_state=banana_current_state,
+            coil_length=2.91,
+            accepted_iteration=1,
+        )
+
+        self.assertEqual(payload["BANANA_CURRENT_MODE"], "independent")
+        self.assertEqual(payload["BANANA_CURRENTS_A"], [1.2e4, -1.5e4])
+        self.assertEqual(payload["BANANA_CURRENT_MAX_ABS_A"], 1.5e4)
+        self.assertEqual(payload["BANANA_CURRENT_CONTROL_METRIC"], "max_abs")
+        self.assertEqual(payload["BANANA_NUM_CURRENT_CONTROLS"], 2)
+        self.assertEqual(payload["BANANA_CURRENT_A"], 1.5e4)
 
     def test_build_preserved_timeout_results_payload_includes_alm_runtime_state(self):
         module = load_single_stage_example_module()
@@ -7901,6 +7970,23 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.cs_dist, 0.015)
         self.assertEqual(args.curvature_threshold, 100.0)
         self.assertEqual(args.banana_current_max_A, 16000.0)
+        self.assertEqual(args.single_stage_banana_current_mode, "shared")
+
+    def test_single_stage_parse_args_accepts_independent_banana_current_mode(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--single-stage-banana-current-mode",
+                "independent",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.single_stage_banana_current_mode, "independent")
 
     def test_single_stage_parse_args_accepts_hidden_offspec_engineering_flag(self):
         module = load_single_stage_example_module()
@@ -7926,6 +8012,61 @@ class CurrentBaselineContractTests(unittest.TestCase):
         )
 
         module.validate_single_stage_current_args(args)
+
+    def test_validate_single_stage_current_args_rejects_independent_alm(self):
+        module = load_single_stage_example_module()
+
+        args = SimpleNamespace(
+            banana_current_max_A=16000.0,
+            single_stage_banana_current_mode="independent",
+            constraint_method="alm",
+            allow_offspec_engineering_constraints=False,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "--single-stage-banana-current-mode=independent is not supported with "
+            "--constraint-method=alm",
+        ):
+            module.validate_single_stage_current_args(args)
+
+    def test_validate_single_stage_current_args_rejects_invalid_mode(self):
+        module = load_single_stage_example_module()
+
+        args = SimpleNamespace(
+            banana_current_max_A=16000.0,
+            single_stage_banana_current_mode="bogus",
+            constraint_method="penalty",
+            allow_offspec_engineering_constraints=False,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "--single-stage-banana-current-mode must be one of \\{shared, independent\\}",
+        ):
+            module.validate_single_stage_current_args(args)
+
+    def test_current_single_stage_alm_banana_current_rejects_independent_mode(self):
+        module = load_single_stage_example_module()
+        original_state = getattr(module, "banana_current_state", None)
+        had_state = hasattr(module, "banana_current_state")
+        module.banana_current_state = module.SingleStageBananaCurrentState(
+            mode="independent",
+            currents=(Current(1.2e4), Current(-1.2e4)),
+            seed_currents_A=(1.0e4, -1.0e4),
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "single-stage ALM banana-current constraints require "
+                "--single-stage-banana-current-mode=shared",
+            ):
+                module.current_single_stage_alm_banana_current()
+        finally:
+            if had_state:
+                module.banana_current_state = original_state
+            else:
+                delattr(module, "banana_current_state")
 
     def test_apply_default_stage2_seed_args_uses_legacy_seed_defaults(self):
         module = load_single_stage_example_module()

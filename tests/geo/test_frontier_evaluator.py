@@ -448,6 +448,23 @@ print(
 
             self.assertEqual(first.to_json_dict(), second.to_json_dict())
 
+    def test_frontier_runtime_rejects_independent_banana_current_mode(self):
+        module = load_frontier_evaluator_module()
+        spec = self._demo_spec(module)
+
+        with patch.object(
+            module.single_stage,
+            "apply_default_stage2_seed_args",
+            return_value=SimpleNamespace(
+                single_stage_banana_current_mode="independent",
+            ),
+        ):
+            with self.assertRaisesRegex(
+                module.FrontierEvaluatorInitializationError,
+                "does not support .*single-stage-banana-current-mode=independent",
+            ):
+                module.build_single_stage_frontier_runtime(spec)
+
     def test_evaluate_batch_reuses_in_batch_duplicates_and_preserves_order(self):
         module = load_frontier_evaluator_module()
         spec = self._demo_spec(module)
