@@ -22,6 +22,7 @@ jobs:
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
       SIMSOPT_BACKEND_STRICT: "1"
       SIMSOPT_JAX_TRANSFER_GUARD: disallow
+      XLA_FLAGS: --xla_gpu_deterministic_ops=true
       JAX_PLATFORMS: cuda
       JAX_ENABLE_X64: "1"
 
@@ -192,6 +193,7 @@ jobs:
       SIMSOPT_BACKEND_MODE: jax_gpu_parity
       SIMSOPT_BACKEND_STRICT: "1"
       SIMSOPT_JAX_TRANSFER_GUARD: disallow
+      XLA_FLAGS: --xla_gpu_deterministic_ops=true
       JAX_PLATFORMS: cuda
       JAX_ENABLE_X64: "1"
       PYTHONUNBUFFERED: "1"

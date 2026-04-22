@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 from typing import Callable
@@ -52,6 +53,7 @@ _DISTRIBUTED_NUM_PROCESSES_ENV = "SIMSOPT_JAX_NUM_PROCESSES"
 _DISTRIBUTED_PROCESS_ID_ENV = "SIMSOPT_JAX_PROCESS_ID"
 _DISTRIBUTED_LOCAL_DEVICE_IDS_ENV = "SIMSOPT_JAX_LOCAL_DEVICE_IDS"
 _JAX_PLATFORMS_ENV = "JAX_PLATFORMS"
+_XLA_FLAGS_ENV = "XLA_FLAGS"
 _VALID_TRANSFER_GUARDS = ("allow", "log", "disallow")
 _VALID_SHARDING_STRATEGIES = ("none", "points", "pairwise_rows", "hybrid")
 _GUARDRAIL_ENV_VARS = (
@@ -77,6 +79,10 @@ _SYNCED_RUNTIME_ENV_VALUES = (
     (_PLATFORM_ENV, "jax_platform"),
     (_PLATFORM_LEGACY_ENV, "jax_platform"),
     (_JAX_PLATFORMS_ENV, "jax_platform"),
+)
+_GPU_DETERMINISM_XLA_FLAGS = (
+    "--xla_gpu_deterministic_ops",
+    "--xla_gpu_exclude_nondeterministic_ops",
 )
 
 VALID_BACKEND_MODES = (
@@ -293,14 +299,45 @@ class BackendConfig:
     compilation_cache_dir: str | None = None
 
 
+def _xla_flag_value(token: str, flag_name: str) -> bool | None:
+    if token == flag_name:
+        return True
+    if not token.startswith(f"{flag_name}="):
+        return None
+    _, raw_value = token.split("=", 1)
+    return raw_value.strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def _split_xla_flag_tokens(xla_flags: str | None) -> tuple[str, ...]:
+    if not xla_flags:
+        return ()
+    try:
+        return tuple(shlex.split(xla_flags))
+    except ValueError:
+        return ()
+
+
+def _xla_flags_enable_gpu_determinism(xla_flags: str | None) -> bool:
+    effective_values: dict[str, bool] = {}
+    for token in _split_xla_flag_tokens(xla_flags):
+        for flag_name in _GPU_DETERMINISM_XLA_FLAGS:
+            resolved = _xla_flag_value(token, flag_name)
+            if resolved is None:
+                continue
+            effective_values[flag_name] = resolved
+            break
+    return any(effective_values.values())
+
+
 @dataclass(frozen=True)
 class BackendPolicy:
     """Numerical-policy contract for one resolved backend mode.
 
     The GPU reproducibility fields are reporting/acceptance metadata for parity
     lanes. They document the expected tolerance budget and sampling defaults
-    used by CI and diagnostics; they do not, by themselves, force deterministic
-    CUDA/XLA kernel execution or reduction ordering.
+    used by CI and diagnostics. For CUDA parity lanes, runtime configuration
+    validates the required pre-import XLA determinism flags, but the policy
+    fields themselves do not directly force kernel execution behavior.
     """
 
     mode: str
@@ -1433,11 +1470,35 @@ def _validate_initialized_jax_runtime(jax_module, config: BackendConfig) -> None
     warnings.warn(message, RuntimeWarning, stacklevel=2)
 
 
+def _validate_cuda_parity_determinism_env(
+    config: BackendConfig,
+    policy: BackendPolicy,
+) -> None:
+    if config.jax_platform != "cuda" or policy.gpu_reproducibility_seed is None:
+        return
+    if _xla_flags_enable_gpu_determinism(os.environ.get(_XLA_FLAGS_ENV)):
+        return
+    expected_flags = " or ".join(
+        f"{flag_name}=true" for flag_name in _GPU_DETERMINISM_XLA_FLAGS
+    )
+    message = (
+        f"Backend mode {config.mode!r} expects GPU-deterministic XLA execution "
+        f"for parity/reproducibility lanes, but {_XLA_FLAGS_ENV} does not enable "
+        f"{expected_flags}. Set {_XLA_FLAGS_ENV} before importing or touching JAX "
+        "devices, because changing XLA flags after JAX backend initialization has "
+        "no effect."
+    )
+    if config.strict:
+        raise RuntimeError(message)
+    warnings.warn(message, RuntimeWarning, stacklevel=2)
+
+
 def apply_jax_runtime_config() -> None:
     """Apply the resolved JAX runtime settings to the active process."""
     config = get_backend_config()
     if config.backend != "jax":
         return
+    _validate_cuda_parity_determinism_env(config, get_backend_policy(config.mode))
 
     import jax
 

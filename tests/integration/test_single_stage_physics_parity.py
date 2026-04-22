@@ -53,6 +53,7 @@ pytest.importorskip(
 from simsopt._core.optimizable import load  # noqa: E402
 from simsopt.geo import CurveLength  # noqa: E402
 from simsopt.geo.curveobjectives import CurveCurveDistance, CurveSurfaceDistance  # noqa: E402
+from conftest import ensure_gpu_determinism_xla_flag  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -149,6 +150,8 @@ def _single_stage_subprocess_env(
     if strict_backend_mode is not None:
         env["SIMSOPT_BACKEND_MODE"] = str(strict_backend_mode)
         env["SIMSOPT_BACKEND_STRICT"] = "1"
+        if strict_backend_mode == "jax_gpu_parity":
+            ensure_gpu_determinism_xla_flag(env)
     if transfer_guard is not None:
         env["SIMSOPT_JAX_TRANSFER_GUARD"] = str(transfer_guard)
     return env
@@ -211,6 +214,28 @@ def _build_single_stage_script_command(
             str(target_lane_accepted_step_sync),
         ]
     return command
+
+
+def test_single_stage_subprocess_env_preserves_existing_xla_flags(monkeypatch):
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "repo_pythonpath_env",
+        lambda **_kwargs: {
+            "XLA_FLAGS": "--xla_gpu_cuda_data_dir=/tmp/cuda --other-flag=1"
+        },
+    )
+
+    env = _single_stage_subprocess_env(
+        backend="jax",
+        platform="cuda",
+        strict_backend_mode="jax_gpu_parity",
+    )
+
+    assert env["XLA_FLAGS"].split() == [
+        "--xla_gpu_cuda_data_dir=/tmp/cuda",
+        "--other-flag=1",
+        "--xla_gpu_deterministic_ops=true",
+    ]
 
 
 def _run_single_stage_script(

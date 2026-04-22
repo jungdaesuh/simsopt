@@ -372,8 +372,10 @@ For GPU parity modes, treat the policy fields
 `gpu_reduction_order_max_ulp`, `gpu_reduction_order_rel_tol`,
 `gpu_reproducibility_seed`, `gpu_reproducibility_sample_size`, and
 `tolerance_ratchet_factor` as reporting/acceptance metadata. They document the
-expected tolerance budget and diagnostic defaults; they do not force
-deterministic CUDA/XLA execution by themselves.
+expected tolerance budget and diagnostic defaults. For CUDA parity lanes, the
+runtime validates that a deterministic XLA GPU flag was configured before JAX
+initialization, but these policy fields do not directly force kernel execution
+behavior by themselves.
 
 ## Benchmark and reporting contract
 

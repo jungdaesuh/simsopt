@@ -14,6 +14,7 @@ from conftest import (
     _BACKEND_RUNTIME_ENV_VARS as _BACKEND_ENV_VARS,
     _require_jax,
     _restore_loaded_jax_runtime_config,
+    ensure_gpu_determinism_xla_flag,
 )
 _BACKEND_MODULE_NAMES = (
     "simsopt",
@@ -71,6 +72,12 @@ def _fresh_backend():
     return mod
 
 
+def _fresh_backend_with_fake_runtime_home(monkeypatch):
+    backend = _fresh_backend()
+    _patch_fake_runtime_home(monkeypatch)
+    return backend
+
+
 def _clear_backend_env(monkeypatch) -> None:
     for name in _BACKEND_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
@@ -78,6 +85,26 @@ def _clear_backend_env(monkeypatch) -> None:
 
 def _disable_chunk_autotune(monkeypatch) -> None:
     monkeypatch.setenv("SIMSOPT_JAX_CHUNK_AUTOTUNE", "0")
+
+
+def _patch_fake_runtime_home(monkeypatch) -> None:
+    runtime_module = sys.modules["simsopt.backend.runtime"]
+    fake_home = Path("/tmp/simsopt-jax-cache-home")
+    monkeypatch.setattr(runtime_module.Path, "home", lambda: fake_home)
+
+
+def _install_fake_jax(monkeypatch, *, calls=None, default_backend=None) -> None:
+    update = (
+        (lambda name, value: None)
+        if calls is None
+        else (lambda name, value: calls.append((name, value)))
+    )
+    fake_jax = types.SimpleNamespace(
+        config=types.SimpleNamespace(update=update),
+    )
+    if default_backend is not None:
+        fake_jax.default_backend = lambda: default_backend
+    monkeypatch.setitem(sys.modules, "jax", fake_jax)
 
 
 def _set_distributed_init_env(
@@ -1412,6 +1439,47 @@ def test_apply_jax_runtime_config_applies_metal_smoke_mode(monkeypatch):
     ) in calls
 
 
+def test_apply_jax_runtime_config_warns_without_cuda_determinism_flag(
+    monkeypatch,
+):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend_with_fake_runtime_home(monkeypatch)
+    monkeypatch.delenv("XLA_FLAGS", raising=False)
+    calls: list[tuple[str, object]] = []
+    _install_fake_jax(monkeypatch, calls=calls)
+
+    backend.set_backend("jax_gpu_parity", configure_runtime=False)
+    with pytest.warns(RuntimeWarning, match="XLA_FLAGS does not enable"):
+        backend.apply_jax_runtime_config()
+
+    assert ("jax_platforms", "cuda") in calls
+
+
+@pytest.mark.parametrize(
+    "xla_flag",
+    (
+        "--xla_gpu_deterministic_ops",
+        "--xla_gpu_deterministic_ops=true",
+        "--xla_gpu_exclude_nondeterministic_ops",
+        "--xla_gpu_exclude_nondeterministic_ops=true",
+    ),
+)
+def test_apply_jax_runtime_config_accepts_supported_cuda_determinism_flags(
+    monkeypatch,
+    xla_flag,
+):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend_with_fake_runtime_home(monkeypatch)
+    monkeypatch.setenv("XLA_FLAGS", xla_flag)
+    calls: list[tuple[str, object]] = []
+    _install_fake_jax(monkeypatch, calls=calls)
+
+    backend.set_backend("jax_gpu_parity", configure_runtime=False)
+    backend.apply_jax_runtime_config()
+
+    assert ("jax_platforms", "cuda") in calls
+
+
 def test_apply_jax_runtime_config_warns_on_initialized_backend_mismatch(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()
@@ -1479,6 +1547,106 @@ def test_apply_jax_runtime_config_raises_on_initialized_backend_mismatch_in_stri
     backend.set_backend("jax_gpu_fast", strict=True, configure_runtime=False)
     with pytest.raises(RuntimeError, match="active JAX default backend is 'cpu'"):
         backend.apply_jax_runtime_config()
+
+
+def test_apply_jax_runtime_config_raises_without_cuda_determinism_flag_in_strict_mode(
+    monkeypatch,
+):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend_with_fake_runtime_home(monkeypatch)
+    monkeypatch.delenv("XLA_FLAGS", raising=False)
+    _install_fake_jax(monkeypatch)
+
+    backend.set_backend("jax_gpu_parity", strict=True, configure_runtime=False)
+    with pytest.raises(RuntimeError, match="XLA_FLAGS does not enable"):
+        backend.apply_jax_runtime_config()
+
+
+def test_apply_jax_runtime_config_rejects_last_override_to_disabled_flag(
+    monkeypatch,
+):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend_with_fake_runtime_home(monkeypatch)
+    monkeypatch.setenv(
+        "XLA_FLAGS",
+        "--xla_gpu_deterministic_ops=true --xla_gpu_deterministic_ops=false",
+    )
+    _install_fake_jax(monkeypatch)
+
+    backend.set_backend("jax_gpu_parity", strict=True, configure_runtime=False)
+    with pytest.raises(RuntimeError, match="XLA_FLAGS does not enable"):
+        backend.apply_jax_runtime_config()
+
+
+def test_apply_jax_runtime_config_accepts_last_override_to_enabled_flag(
+    monkeypatch,
+):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend_with_fake_runtime_home(monkeypatch)
+    monkeypatch.setenv(
+        "XLA_FLAGS",
+        "--xla_gpu_deterministic_ops=false --xla_gpu_deterministic_ops=true",
+    )
+    calls: list[tuple[str, object]] = []
+    _install_fake_jax(monkeypatch, calls=calls)
+
+    backend.set_backend("jax_gpu_parity", strict=True, configure_runtime=False)
+    backend.apply_jax_runtime_config()
+
+    assert ("jax_platforms", "cuda") in calls
+
+
+def test_ensure_gpu_determinism_xla_flag_preserves_unrelated_xla_flags():
+    env = {
+        "XLA_FLAGS": "--xla_gpu_cuda_data_dir=/tmp/cuda --other-flag=1",
+    }
+
+    ensure_gpu_determinism_xla_flag(env)
+
+    assert env["XLA_FLAGS"].split() == [
+        "--xla_gpu_cuda_data_dir=/tmp/cuda",
+        "--other-flag=1",
+        "--xla_gpu_deterministic_ops=true",
+    ]
+
+
+def test_ensure_gpu_determinism_xla_flag_replaces_disabled_value():
+    env = {
+        "XLA_FLAGS": "--xla_gpu_deterministic_ops=false --xla_gpu_cuda_data_dir=/tmp/cuda",
+    }
+
+    ensure_gpu_determinism_xla_flag(env)
+
+    assert env["XLA_FLAGS"].split() == [
+        "--xla_gpu_cuda_data_dir=/tmp/cuda",
+        "--xla_gpu_deterministic_ops=true",
+    ]
+
+
+def test_ensure_gpu_determinism_xla_flag_preserves_enabled_official_flag():
+    env = {
+        "XLA_FLAGS": "--xla_gpu_exclude_nondeterministic_ops=true --other-flag=1",
+    }
+
+    ensure_gpu_determinism_xla_flag(env)
+
+    assert env["XLA_FLAGS"].split() == [
+        "--xla_gpu_exclude_nondeterministic_ops=true",
+        "--other-flag=1",
+    ]
+
+
+def test_ensure_gpu_determinism_xla_flag_rewrites_disabled_last_override():
+    env = {
+        "XLA_FLAGS": "--xla_gpu_deterministic_ops=true --xla_gpu_deterministic_ops=false --other-flag=1",
+    }
+
+    ensure_gpu_determinism_xla_flag(env)
+
+    assert env["XLA_FLAGS"].split() == [
+        "--other-flag=1",
+        "--xla_gpu_deterministic_ops=true",
+    ]
 
 
 def test_strict_fallback_helper_ignores_native_cpu(monkeypatch):

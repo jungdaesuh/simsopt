@@ -3159,6 +3159,7 @@ def test_gpu_parity_workflow_enforces_strict_transfer_guard_contract():
     assert "SIMSOPT_BACKEND_MODE: jax_gpu_parity" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
+    assert 'XLA_FLAGS: --xla_gpu_deterministic_ops=true' in workflow_text
     assert "setuptools_scm" not in workflow_text
     assert "benchmarks/stage2_value_gradient_parity.py" in workflow_text
     assert "--fixture real" in workflow_text
@@ -3179,6 +3180,7 @@ def test_gpu_parity_workflow_adds_full_suite_disallow_lane():
     assert "runs-on: [self-hosted, gpu]" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
+    assert 'XLA_FLAGS: --xla_gpu_deterministic_ops=true' in workflow_text
     assert 'JAX_ENABLE_X64: "1"' in workflow_text
     assert 'PYTHONUNBUFFERED: "1"' in workflow_text
     assert 'XLA_PYTHON_CLIENT_PREALLOCATE: "false"' in workflow_text
@@ -3208,6 +3210,7 @@ def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
     assert "runs-on: [self-hosted, gpu]" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
+    assert 'XLA_FLAGS: --xla_gpu_deterministic_ops=true' in workflow_text
     assert 'JAX_ENABLE_X64: "1"' in workflow_text
     assert "benchmarks/stage2_e2e_comparison.py" in workflow_text
     assert "benchmarks/single_stage_init_parity.py" in workflow_text
@@ -3227,6 +3230,7 @@ def test_smoke_workflow_adds_cuda_strict_transfer_guard_pytest_lane():
     assert "runs-on: [self-hosted, gpu]" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
+    assert 'XLA_FLAGS: --xla_gpu_deterministic_ops=true' in workflow_text
     assert 'JAX_ENABLE_X64: "1"' in workflow_text
     assert "tests/test_jax_import_smoke.py" in workflow_text
     assert "gpu_ondevice_loops_with_host_constants" in workflow_text
@@ -3241,6 +3245,23 @@ def test_smoke_workflow_adds_cuda_strict_transfer_guard_pytest_lane():
     assert "test_ls_solve_parity_production_scale_gpu_under_disallow" in workflow_text
     assert "tests/integration/test_single_stage_physics_parity.py" in workflow_text
     assert "TestSingleStageOuterLoopGpuProof" in workflow_text
+
+
+def test_smoke_workflow_pins_jax_ci_contract_ratchet_gate():
+    workflow_text = _smoke_workflow_path().read_text(encoding="utf-8")
+
+    assert "Run CI contract helper tests" in workflow_text
+    assert "tests/test_benchmark_helpers.py \\" in workflow_text
+    assert (
+        'jax_ci_contract_ratchet_rel_tol_tightens_without_loosening'
+        in workflow_text
+    )
+    assert "jax_ci_contract_reduction_order_probe_tracks_ulp_distance" in workflow_text
+    assert (
+        "jax_ci_contract_same_device_probe_requires_bitwise_identity"
+        in workflow_text
+    )
+    assert "jax_ci_contract_payload_tracks_ratchet_and_pass_state" in workflow_text
 
 
 def test_legacy_gpu_benchmark_wrapper_delegates_to_local_validation_ladder():

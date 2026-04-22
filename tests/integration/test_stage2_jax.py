@@ -28,6 +28,7 @@ import jax.numpy as jnp
 import pytest
 from conftest import (
     enable_non_strict_jax_backend,
+    ensure_gpu_determinism_xla_flag,
     enable_strict_jax_backend,
     relative_error,
 )
@@ -1560,6 +1561,9 @@ class TestOptimizerTrajectoryParity:
 
         monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_parity")
         monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
+        merged_env = dict(os.environ)
+        ensure_gpu_determinism_xla_flag(merged_env)
+        monkeypatch.setenv("XLA_FLAGS", merged_env["XLA_FLAGS"])
         invalidate_backend_cache()
 
         try:

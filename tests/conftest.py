@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -50,6 +51,7 @@ _BACKEND_RUNTIME_ENV_VARS = (
     "SIMSOPT_JAX_PLATFORM",
     "SIMSOPT_JAX_BACKEND",
     "JAX_PLATFORMS",
+    "XLA_FLAGS",
     "CUDA_VISIBLE_DEVICES",
 )
 _JAX_RUNTIME_CONFIG_DEFAULTS = {
@@ -91,6 +93,12 @@ _REDUCTION_ACCEPTANCE_TIERS = {
         "gpu": (1e-10, 1e-14),
     },
 }
+_GPU_DETERMINISM_XLA_FLAGS = (
+    "--xla_gpu_deterministic_ops",
+    "--xla_gpu_exclude_nondeterministic_ops",
+)
+_DEFAULT_GPU_DETERMINISM_XLA_FLAG = "--xla_gpu_deterministic_ops=true"
+_TRUTHY_XLA_FLAG_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
 def _require_jax():
@@ -152,6 +160,62 @@ def _restore_backend_runtime_env(snapshot: dict[str, str | None]) -> None:
             os.environ[name] = value
 
 
+def _determinism_xla_flag_state(token: str) -> tuple[str, bool] | None:
+    for flag_name in _GPU_DETERMINISM_XLA_FLAGS:
+        if token == flag_name:
+            return (flag_name, True)
+        if not token.startswith(f"{flag_name}="):
+            continue
+        return (
+            flag_name,
+            token.split("=", 1)[1].strip().lower() in _TRUTHY_XLA_FLAG_VALUES,
+        )
+    return None
+
+
+def _split_xla_flag_tokens(xla_flags: str | None) -> tuple[str, ...]:
+    if not xla_flags:
+        return ()
+    try:
+        return tuple(shlex.split(xla_flags))
+    except ValueError:
+        return tuple(xla_flags.split())
+
+
+def _effective_determinism_xla_flag_states(
+    tokens: tuple[str, ...],
+) -> dict[str, bool]:
+    effective_states: dict[str, bool] = {}
+    for token in tokens:
+        resolved = _determinism_xla_flag_state(token)
+        if resolved is None:
+            continue
+        flag_name, enabled = resolved
+        effective_states[flag_name] = enabled
+    return effective_states
+
+
+def ensure_gpu_determinism_xla_flag(
+    env: dict[str, str],
+    *,
+    deterministic_flag: str = _DEFAULT_GPU_DETERMINISM_XLA_FLAG,
+) -> None:
+    tokens = _split_xla_flag_tokens(env.get("XLA_FLAGS"))
+    effective_states = _effective_determinism_xla_flag_states(tokens)
+    if any(effective_states.values()):
+        return
+    rewritten = [
+        token
+        for token in tokens
+        if not any(
+            token == flag_name or token.startswith(f"{flag_name}=")
+            for flag_name in _GPU_DETERMINISM_XLA_FLAGS
+        )
+    ]
+    rewritten.append(deterministic_flag)
+    env["XLA_FLAGS"] = " ".join(rewritten)
+
+
 @pytest.fixture(autouse=True)
 def _guard_backend_runtime_state():
     env_snapshot = {
@@ -173,6 +237,10 @@ def _activate_backend_mode(monkeypatch, request, *, mode, strict):
 
     invalidate_backend_cache()
     previous = get_backend_config()
+    if mode == "jax_gpu_parity":
+        merged_env = dict(os.environ)
+        ensure_gpu_determinism_xla_flag(merged_env)
+        monkeypatch.setenv("XLA_FLAGS", merged_env["XLA_FLAGS"])
     requested_transfer_guard = os.environ.get("SIMSOPT_JAX_TRANSFER_GUARD")
     if mode == "native_cpu":
         transfer_guard = None
