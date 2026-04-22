@@ -408,6 +408,16 @@ def _build_penalty_phase1_problem(
     objective_fn,
     callback_fn,
 ):
+    report_bounds = (
+        build_local_relative_bounds(
+            anchor_x,
+            local_radius,
+            lower_bounds,
+            upper_bounds,
+        )
+        if use_local_bounds
+        else build_scipy_bounds(lower_bounds, upper_bounds)
+    )
     if phase1_scale < 1.0:
         phase1_fun, phase1_callback = build_scaled_outer_problem(
             objective_fn,
@@ -432,19 +442,9 @@ def _build_penalty_phase1_problem(
                 upper_bounds,
             )
         )
-        return phase1_fun, phase1_callback, x0, bounds
+        return phase1_fun, phase1_callback, x0, bounds, report_bounds
 
-    bounds = (
-        build_local_relative_bounds(
-            anchor_x,
-            local_radius,
-            lower_bounds,
-            upper_bounds,
-        )
-        if use_local_bounds
-        else build_scipy_bounds(lower_bounds, upper_bounds)
-    )
-    return objective_fn, callback_fn, anchor_x.copy(), bounds
+    return objective_fn, callback_fn, anchor_x.copy(), report_bounds, report_bounds
 
 
 def build_penalty_phase2_bounds(
@@ -638,7 +638,13 @@ def run_penalty_phase1(
             phase1_config=phase1_config,
         )
 
-        phase1_fun, phase1_callback, x0, bounds = _build_penalty_phase1_problem(
+        (
+            phase1_fun,
+            phase1_callback,
+            x0,
+            bounds,
+            report_bounds,
+        ) = _build_penalty_phase1_problem(
             anchor_x,
             phase1_scale=phase1_scale,
             use_local_bounds=settings["use_local_bounds"],
@@ -653,20 +659,25 @@ def run_penalty_phase1(
             seed_regime == _SEED_REGIME_REPAIR_FIRST
         )
         try:
-            last_result = minimize_fn(
-                phase1_fun,
-                x0,
-                jac=True,
-                method="L-BFGS-B",
-                bounds=bounds,
-                callback=tracked_phase1_callback,
-                options={
-                    "maxiter": remaining_maxiter,
-                    "maxcor": maxcor,
-                    "ftol": ftol,
-                    "gtol": gtol,
-                },
-            )
+            previous_active_bounds = run_dict.get("active_optimizer_bounds")
+            run_dict["active_optimizer_bounds"] = report_bounds
+            try:
+                last_result = minimize_fn(
+                    phase1_fun,
+                    x0,
+                    jac=True,
+                    method="L-BFGS-B",
+                    bounds=bounds,
+                    callback=tracked_phase1_callback,
+                    options={
+                        "maxiter": remaining_maxiter,
+                        "maxcor": maxcor,
+                        "ftol": ftol,
+                        "gtol": gtol,
+                    },
+                )
+            finally:
+                run_dict["active_optimizer_bounds"] = previous_active_bounds
         finally:
             run_dict["phase1_repair_mode_active"] = False
         phase1_iterations += int(last_result.nit)

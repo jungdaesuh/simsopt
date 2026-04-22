@@ -123,6 +123,53 @@ class SingleStageBananaCurrentModeTests(unittest.TestCase):
         self.assertEqual(state.control_current_A(), 1.2e4)
         self.assertEqual(state.compatibility_current_A(), 1.2e4)
 
+    def test_resolve_banana_current_coordinate_spec_deduplicates_shared_mode(self):
+        module = load_current_mode_module()
+        biot_savart, coil_partitions = build_stage2_seed_fixture()
+
+        _, _, state = module.resolve_single_stage_banana_current_state(
+            biot_savart,
+            coil_partitions,
+            mode="shared",
+        )
+        coordinate_spec = module.resolve_banana_current_coordinate_spec(
+            biot_savart,
+            state,
+        )
+
+        self.assertEqual(
+            coordinate_spec.dof_names,
+            tuple(state.currents[0].dof_names),
+        )
+        self.assertEqual(coordinate_spec.indices, (1,))
+
+    def test_resolve_banana_current_coordinate_spec_tracks_independent_currents(self):
+        module = load_current_mode_module()
+        biot_savart, coil_partitions = build_stage2_seed_fixture()
+
+        resolved_bs, _, state = module.resolve_single_stage_banana_current_state(
+            biot_savart,
+            coil_partitions,
+            mode="independent",
+        )
+        coordinate_spec = module.resolve_banana_current_coordinate_spec(
+            resolved_bs,
+            state,
+        )
+
+        self.assertEqual(
+            coordinate_spec.dof_names,
+            (
+                *state.currents[0].dof_names,
+                *state.currents[1].dof_names,
+            ),
+        )
+        expected_indices = tuple(
+            list(resolved_bs.dof_names).index(dof_name)
+            for dof_name in coordinate_spec.dof_names
+        )
+        self.assertEqual(coordinate_spec.indices, expected_indices)
+
     def test_apply_penalty_bounds_applies_per_independent_current(self):
         module = load_current_mode_module()
         state = module.SingleStageBananaCurrentState(

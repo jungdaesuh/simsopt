@@ -7,6 +7,7 @@ import json
 import shutil
 import sys
 import tempfile
+from contextlib import contextmanager
 from dataclasses import astuple, dataclass, replace
 from pathlib import Path, PurePath
 from types import SimpleNamespace
@@ -233,6 +234,7 @@ from banana_opt.single_stage_banana_current_mode import (
     build_single_stage_banana_current_state,
     build_single_stage_banana_current_payload_fields,
     resolve_single_stage_banana_current_state as _resolve_single_stage_banana_current_state_impl,
+    resolve_banana_current_coordinate_spec,
 )
 from banana_opt.frontier_scalarization import (
     FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
@@ -1411,6 +1413,16 @@ def parse_args():
             "historical single shared banana-current DOF. 'independent' creates one "
             "current DOF per loaded banana coil while preserving the loaded Stage 2 "
             "current state at the handoff."
+        ),
+    )
+    parser.add_argument(
+        "--banana-current-diagnostics",
+        action="store_true",
+        default=env_flag("BANANA_CURRENT_DIAGNOSTICS"),
+        help=(
+            "Emit explicit banana-current coordinate diagnostics for the optimizer "
+            "seed, each accepted iterate, and recent rejected trial points. "
+            "Writes banana_current_diagnostics.json next to results.json."
         ),
     )
     parser.add_argument(
@@ -3581,20 +3593,22 @@ def run_refinement_chunk(
     run_dict["best_feasible_metric"] = None
     run_dict["best_feasible_stage"] = None
     maybe_update_best_feasible_incumbent(run_dict, refinement_stage)
-    chunk_result = minimize(
-        fun,
-        run_dict["accepted_x"].copy(),
-        jac=True,
-        method="L-BFGS-B",
-        bounds=current_optimizer_bounds(),
-        callback=callback,
-        options={
-            "maxiter": refinement_chunk_maxiter,
-            "maxcor": maxcor,
-            "ftol": ftol,
-            "gtol": gtol,
-        },
-    )
+    bounds = current_optimizer_bounds()
+    with temporary_run_dict_value(run_dict, "active_optimizer_bounds", bounds):
+        chunk_result = minimize(
+            fun,
+            run_dict["accepted_x"].copy(),
+            jac=True,
+            method="L-BFGS-B",
+            bounds=bounds,
+            callback=callback,
+            options={
+                "maxiter": refinement_chunk_maxiter,
+                "maxcor": maxcor,
+                "ftol": ftol,
+                "gtol": gtol,
+            },
+        )
     return chunk_result, run_dict.get("best_feasible_incumbent")
 
 
@@ -4022,6 +4036,410 @@ def append_jsonl_artifact(path, payload):
         outfile.flush()
         os.fsync(outfile.fileno())
     os.replace(temp_path, archive_path)
+
+
+@contextmanager
+def temporary_run_dict_value(run_dict, key, value):
+    previous_value = run_dict.get(key)
+    run_dict[key] = value
+    try:
+        yield
+    finally:
+        run_dict[key] = previous_value
+
+
+SINGLE_STAGE_BANANA_CURRENT_DIAGNOSTICS_SCHEMA_VERSION = (
+    "single_stage_banana_current_diagnostics_v1"
+)
+BANANA_CURRENT_DIAGNOSTICS_FILENAME = "banana_current_diagnostics.json"
+BANANA_CURRENT_DIAGNOSTIC_REJECT_REPORT_LIMIT = 20
+
+
+def _bound_is_active(value, bound):
+    return bool(
+        np.isfinite(bound)
+        and np.isclose(
+            value,
+            bound,
+            atol=1.0e-6,
+            rtol=1.0e-9,
+        )
+    )
+
+
+def _active_bound_mask(values, bounds):
+    return np.asarray(
+        [_bound_is_active(value, bound) for value, bound in zip(values, bounds)],
+        dtype=bool,
+    )
+
+
+def _banana_current_bound_activity(
+    coordinate_values_A,
+    coordinate_lower_bounds_A,
+    coordinate_upper_bounds_A,
+):
+    entries = []
+    for value_A, lower_bound_A, upper_bound_A in zip(
+        coordinate_values_A,
+        coordinate_lower_bounds_A,
+        coordinate_upper_bounds_A,
+    ):
+        lower_is_finite = bool(np.isfinite(lower_bound_A))
+        upper_is_finite = bool(np.isfinite(upper_bound_A))
+        entries.append(
+            {
+                "lower_bound_A": None if not lower_is_finite else float(lower_bound_A),
+                "upper_bound_A": None if not upper_is_finite else float(upper_bound_A),
+                "distance_to_lower_A": (
+                    None if not lower_is_finite else float(value_A - lower_bound_A)
+                ),
+                "distance_to_upper_A": (
+                    None if not upper_is_finite else float(upper_bound_A - value_A)
+                ),
+                "at_lower_bound": bool(
+                    lower_is_finite
+                    and _bound_is_active(value_A, lower_bound_A)
+                ),
+                "at_upper_bound": bool(
+                    upper_is_finite
+                    and _bound_is_active(value_A, upper_bound_A)
+                ),
+            }
+        )
+    return entries
+
+
+def _optimizer_bounds_arrays(objective_optimizable, active_optimizer_bounds=None):
+    default_lower_bounds = np.asarray(
+        objective_optimizable.lower_bounds,
+        dtype=float,
+    )
+    default_upper_bounds = np.asarray(
+        objective_optimizable.upper_bounds,
+        dtype=float,
+    )
+    if active_optimizer_bounds is None:
+        return default_lower_bounds, default_upper_bounds
+
+    if hasattr(active_optimizer_bounds, "lb") and hasattr(active_optimizer_bounds, "ub"):
+        lower_bounds = np.asarray(active_optimizer_bounds.lb, dtype=float)
+        upper_bounds = np.asarray(active_optimizer_bounds.ub, dtype=float)
+    else:
+        bounds = np.asarray(active_optimizer_bounds, dtype=float)
+        if bounds.ndim != 2 or bounds.shape[1] != 2:
+            raise ValueError(
+                "Active optimizer bounds must be a scipy Bounds object or a "
+                "sequence of (lower, upper) pairs."
+            )
+        lower_bounds = bounds[:, 0]
+        upper_bounds = bounds[:, 1]
+    if (
+        lower_bounds.shape != default_lower_bounds.shape
+        or upper_bounds.shape != default_upper_bounds.shape
+    ):
+        raise ValueError(
+            "Active optimizer bounds must match the objective coordinate shape."
+        )
+    return lower_bounds, upper_bounds
+
+
+def _gradient_report_key(prefix, suffix):
+    return suffix if not prefix else f"{prefix}_{suffix}"
+
+
+def _safe_gradient_ratio(numerator_l2, denominator_l2):
+    if denominator_l2 == 0.0:
+        return None
+    return float(numerator_l2 / denominator_l2)
+
+
+def _empty_gradient_report_fields(*, prefix=""):
+    return {
+        _gradient_report_key(prefix, "coordinate_gradients"): None,
+        _gradient_report_key(prefix, "coordinate_gradient_l2"): None,
+        _gradient_report_key(prefix, "noncurrent_gradient_l2"): None,
+        _gradient_report_key(prefix, "full_gradient_l2"): None,
+        _gradient_report_key(prefix, "coordinate_to_noncurrent_gradient_ratio"): None,
+        _gradient_report_key(prefix, "coordinate_to_full_gradient_ratio"): None,
+    }
+
+
+def _gradient_report_fields(
+    gradient,
+    coordinate_indices,
+    noncurrent_mask,
+    *,
+    prefix="",
+):
+    coordinate_gradient = gradient[coordinate_indices]
+    noncurrent_gradient = gradient[noncurrent_mask]
+    coordinate_gradient_l2 = float(np.linalg.norm(coordinate_gradient))
+    noncurrent_gradient_l2 = float(np.linalg.norm(noncurrent_gradient))
+    full_gradient_l2 = float(np.linalg.norm(gradient))
+    return {
+        _gradient_report_key(prefix, "coordinate_gradients"): coordinate_gradient.tolist(),
+        _gradient_report_key(prefix, "coordinate_gradient_l2"): coordinate_gradient_l2,
+        _gradient_report_key(prefix, "noncurrent_gradient_l2"): noncurrent_gradient_l2,
+        _gradient_report_key(prefix, "full_gradient_l2"): full_gradient_l2,
+        _gradient_report_key(
+            prefix,
+            "coordinate_to_noncurrent_gradient_ratio",
+        ): _safe_gradient_ratio(
+            coordinate_gradient_l2,
+            noncurrent_gradient_l2,
+        ),
+        _gradient_report_key(
+            prefix,
+            "coordinate_to_full_gradient_ratio",
+        ): _safe_gradient_ratio(
+            coordinate_gradient_l2,
+            full_gradient_l2,
+        ),
+    }
+
+
+def _project_lbfgsb_gradient(
+    gradient,
+    x,
+    lower_bounds,
+    upper_bounds,
+):
+    gradient_array = np.asarray(gradient, dtype=float)
+    x_array = np.asarray(x, dtype=float)
+    lower_bounds_array = np.asarray(lower_bounds, dtype=float)
+    upper_bounds_array = np.asarray(upper_bounds, dtype=float)
+    if (
+        gradient_array.shape != x_array.shape
+        or gradient_array.shape != lower_bounds_array.shape
+        or gradient_array.shape != upper_bounds_array.shape
+    ):
+        raise ValueError(
+            "Projected-gradient diagnostics require gradient, coordinates, and "
+            "bounds arrays with matching shapes."
+        )
+
+    lower_active = _active_bound_mask(x_array, lower_bounds_array)
+    upper_active = _active_bound_mask(x_array, upper_bounds_array)
+    projected_gradient = gradient_array.copy()
+    fixed_coordinate_mask = lower_active & upper_active
+    projected_gradient[fixed_coordinate_mask] = 0.0
+    projected_gradient[lower_active & ~fixed_coordinate_mask & (gradient_array > 0.0)] = 0.0
+    projected_gradient[upper_active & ~fixed_coordinate_mask & (gradient_array < 0.0)] = 0.0
+    return projected_gradient
+
+
+def build_banana_current_coordinate_report(
+    objective_optimizable,
+    banana_current_state,
+    x,
+    grad,
+    *,
+    active_optimizer_bounds=None,
+    phase,
+    accepted_iteration=None,
+    line_search_evaluations=None,
+    step_norm=None,
+    rejection_reason=None,
+):
+    if banana_current_state is None:
+        return None
+    coordinate_spec = resolve_banana_current_coordinate_spec(
+        objective_optimizable,
+        banana_current_state,
+    )
+    if not coordinate_spec.indices:
+        return None
+
+    lower_bounds, upper_bounds = _optimizer_bounds_arrays(
+        objective_optimizable,
+        active_optimizer_bounds=active_optimizer_bounds,
+    )
+    coordinate_indices = np.asarray(coordinate_spec.indices, dtype=int)
+    coordinate_values_A = np.asarray(x, dtype=float)[coordinate_indices]
+    coordinate_lower_bounds_A = lower_bounds[coordinate_indices]
+    coordinate_upper_bounds_A = upper_bounds[coordinate_indices]
+    report = {
+        "phase": str(phase),
+        "accepted_iteration": (
+            None if accepted_iteration is None else int(accepted_iteration)
+        ),
+        "line_search_evaluations": (
+            None if line_search_evaluations is None else int(line_search_evaluations)
+        ),
+        "step_norm": None if step_norm is None else float(step_norm),
+        "rejection_reason": rejection_reason,
+        "coordinate_indices": coordinate_indices.tolist(),
+        "coordinate_dof_names": list(coordinate_spec.dof_names),
+        "coordinate_values_A": coordinate_values_A.tolist(),
+        "coordinate_lower_bounds_A": coordinate_lower_bounds_A.tolist(),
+        "coordinate_upper_bounds_A": coordinate_upper_bounds_A.tolist(),
+        "bound_activity": _banana_current_bound_activity(
+            coordinate_values_A,
+            coordinate_lower_bounds_A,
+            coordinate_upper_bounds_A,
+        ),
+    }
+    if grad is None:
+        report.update(_empty_gradient_report_fields())
+        report.update(_empty_gradient_report_fields(prefix="projected"))
+        return report
+
+    gradient = np.asarray(grad, dtype=float)
+    noncurrent_mask = np.ones(gradient.size, dtype=bool)
+    noncurrent_mask[coordinate_indices] = False
+    report.update(
+        _gradient_report_fields(
+            gradient,
+            coordinate_indices,
+            noncurrent_mask,
+        )
+    )
+    projected_gradient = _project_lbfgsb_gradient(
+        gradient,
+        np.asarray(x, dtype=float),
+        lower_bounds,
+        upper_bounds,
+    )
+    report.update(
+        _gradient_report_fields(
+            projected_gradient,
+            coordinate_indices,
+            noncurrent_mask,
+            prefix="projected",
+        )
+    )
+    return report
+
+
+def _add_banana_current_seed_delta(report, *, seed_coordinate_values_A):
+    coordinate_values_A = np.asarray(report["coordinate_values_A"], dtype=float)
+    seed_values_A = np.asarray(seed_coordinate_values_A, dtype=float)
+    if coordinate_values_A.shape != seed_values_A.shape:
+        raise ValueError(
+            "Banana current diagnostics require seed and current coordinate vectors "
+            "to share the same shape."
+        )
+    delta_from_seed_A = coordinate_values_A - seed_values_A
+    report["delta_from_seed_A"] = delta_from_seed_A.tolist()
+    report["max_abs_delta_from_seed_A"] = float(np.max(np.abs(delta_from_seed_A)))
+    return report
+
+
+def build_banana_current_diagnostics_state(
+    objective_optimizable,
+    banana_current_state,
+    x,
+    grad,
+    *,
+    active_optimizer_bounds=None,
+    accepted_iteration,
+):
+    seed_report = build_banana_current_coordinate_report(
+        objective_optimizable,
+        banana_current_state,
+        x,
+        grad,
+        active_optimizer_bounds=active_optimizer_bounds,
+        phase="seed",
+        accepted_iteration=accepted_iteration,
+    )
+    if seed_report is None:
+        return None
+    seed_coordinate_values_A = tuple(seed_report["coordinate_values_A"])
+    _add_banana_current_seed_delta(
+        seed_report,
+        seed_coordinate_values_A=seed_coordinate_values_A,
+    )
+    return {
+        "schema_version": SINGLE_STAGE_BANANA_CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        "enabled": True,
+        "mode": banana_current_state.mode,
+        "num_control_currents": int(banana_current_state.num_control_currents()),
+        "seed_currents_A": [float(value) for value in seed_coordinate_values_A],
+        "configured_seed_currents_A": [
+            float(value) for value in banana_current_state.seed_currents_A
+        ],
+        "seed_report": seed_report,
+        "latest_accepted_report": None,
+        "latest_rejected_trial_report": None,
+        "accepted_reports": [],
+        "recent_rejected_trial_reports": [],
+        "rejected_trial_reports_recorded": 0,
+        "rejected_trial_reports_dropped": 0,
+    }
+
+
+def record_banana_current_diagnostics_report(
+    diagnostics_state,
+    report,
+    *,
+    rejected_trial=False,
+):
+    if diagnostics_state is None or report is None:
+        return
+    seed_coordinate_values_A = diagnostics_state["seed_report"]["coordinate_values_A"]
+    _add_banana_current_seed_delta(
+        report,
+        seed_coordinate_values_A=seed_coordinate_values_A,
+    )
+    if rejected_trial:
+        diagnostics_state["latest_rejected_trial_report"] = report
+        diagnostics_state["rejected_trial_reports_recorded"] = int(
+            diagnostics_state.get("rejected_trial_reports_recorded", 0)
+        ) + 1
+        rejected_reports = diagnostics_state.setdefault(
+            "recent_rejected_trial_reports",
+            [],
+        )
+        rejected_reports.append(report)
+        if len(rejected_reports) > BANANA_CURRENT_DIAGNOSTIC_REJECT_REPORT_LIMIT:
+            rejected_reports.pop(0)
+            diagnostics_state["rejected_trial_reports_dropped"] = int(
+                diagnostics_state.get("rejected_trial_reports_dropped", 0)
+            ) + 1
+        return
+    diagnostics_state["latest_accepted_report"] = report
+    diagnostics_state.setdefault("accepted_reports", []).append(report)
+
+
+def finalize_banana_current_diagnostics_report(
+    out_dir,
+    diagnostics_state,
+    report,
+    *,
+    rejected_trial=False,
+):
+    if diagnostics_state is None or report is None:
+        return
+    record_banana_current_diagnostics_report(
+        diagnostics_state,
+        report,
+        rejected_trial=rejected_trial,
+    )
+    emit_banana_current_diagnostics_report(report)
+    write_banana_current_diagnostics_artifact(
+        out_dir,
+        diagnostics_state,
+    )
+
+
+def emit_banana_current_diagnostics_report(report):
+    if report is None:
+        return
+    print(
+        "[banana-current-diagnostics] "
+        + json.dumps(_jsonable_value(report), sort_keys=True)
+    )
+
+
+def write_banana_current_diagnostics_artifact(out_dir, diagnostics_state):
+    if diagnostics_state is None:
+        return
+    write_json_artifact(
+        os.path.join(out_dir, BANANA_CURRENT_DIAGNOSTICS_FILENAME),
+        diagnostics_state,
+    )
 
 
 SINGLE_STAGE_TOPOLOGY_DIAGNOSTICS_SCHEMA_VERSION = (
@@ -5179,6 +5597,30 @@ def evaluate_search_step(x):
         hardware_status = run_dict.get("trial_hardware_status")
         if hardware_status is not None and not hardware_status["success"]:
             print("Hardware constraints violated")
+        banana_current_diagnostics = run_dict.get("banana_current_diagnostics")
+        if banana_current_diagnostics is not None:
+            rejected_trial_report = build_banana_current_coordinate_report(
+                JF,
+                banana_current_state,
+                x,
+                None if objective_eval is None else objective_eval.get("grad"),
+                active_optimizer_bounds=run_dict.get("active_optimizer_bounds"),
+                phase="rejected_trial",
+                accepted_iteration=int(run_dict.get("accepted_iterations", 0)),
+                line_search_evaluations=int(run_dict.get("lscount", 0)),
+                step_norm=float(dx),
+                rejection_reason=(
+                    rejection_reason
+                    if rejection_reason is not None
+                    else "surface_solve"
+                ),
+            )
+            finalize_banana_current_diagnostics_report(
+                OUT_DIR_ITER,
+                banana_current_diagnostics,
+                rejected_trial_report,
+                rejected_trial=True,
+            )
 
         # Elevated J violates Armijo, so the line search backtracks.
         # Returning dJ_old (not negated) avoids the old -dJ corruption path
@@ -5307,6 +5749,22 @@ def callback(x):
     # Evaluate diagnostics
     J = run_dict['J']
     grad = run_dict['dJ']
+    banana_current_diagnostics = run_dict.get("banana_current_diagnostics")
+    if banana_current_diagnostics is not None:
+        accepted_report = build_banana_current_coordinate_report(
+            JF,
+            banana_current_state,
+            x,
+            grad,
+            active_optimizer_bounds=run_dict.get("active_optimizer_bounds"),
+            phase="accepted",
+            accepted_iteration=int(run_dict["accepted_iterations"]) + 1,
+        )
+        finalize_banana_current_diagnostics_report(
+            OUT_DIR_ITER,
+            banana_current_diagnostics,
+            accepted_report,
+        )
     
     J_QS = objective_eval['J_QS']
     dJ_QS = np.linalg.norm(objective_eval['dJ_QS'])
@@ -6265,6 +6723,8 @@ if __name__ == "__main__":
         'hardware_rejects': 0,
         'surface_solve_rejects': 0,
         'frontier_trust_rejects': 0,
+        'active_optimizer_bounds': current_optimizer_bounds(),
+        'banana_current_diagnostics': None,
         'frontier_conditioning_seed_report': initial_frontier_conditioning_report,
         'frontier_conditioning_first_accepted_report': None,
     }
@@ -6360,6 +6820,24 @@ if __name__ == "__main__":
         basin_hops=args.basin_hops,
         init_only=args.init_only,
     )
+    if args.banana_current_diagnostics:
+        run_dict["banana_current_diagnostics"] = build_banana_current_diagnostics_state(
+            JF,
+            banana_current_state,
+            run_dict["accepted_x"],
+            run_dict["dJ"],
+            active_optimizer_bounds=run_dict.get("active_optimizer_bounds"),
+            accepted_iteration=int(run_dict.get("accepted_iterations", 0)),
+        )
+        emit_banana_current_diagnostics_report(
+            None
+            if run_dict["banana_current_diagnostics"] is None
+            else run_dict["banana_current_diagnostics"]["seed_report"]
+        )
+        write_banana_current_diagnostics_artifact(
+            OUT_DIR_ITER,
+            run_dict["banana_current_diagnostics"],
+        )
     if CHECKPOINT_EVERY > 0 and not args.init_only:
         write_single_stage_solver_checkpoint_state(
             OUT_DIR_ITER,
@@ -6716,6 +7194,7 @@ if __name__ == "__main__":
         print(termination_message)
     elif args.basin_hops > 0:
         # Basin-hopping: perturb DOFs and re-run L-BFGS-B multiple times, keep best
+        run_dict["active_optimizer_bounds"] = current_optimizer_bounds()
         minimizer_kwargs = {
             'method': 'L-BFGS-B',
             'jac': True,
@@ -6894,15 +7373,20 @@ if __name__ == "__main__":
                     "Continuing penalty search with donor-local bounds at "
                     f"radius={startup_local_preservation_radius:.3e}"
                 )
-            res = minimize(
-                fun,
-                dofs,
-                jac=True,
-                method='L-BFGS-B',
-                bounds=phase2_bounds,
-                callback=callback,
-                options={'maxiter': remaining_maxiter, 'maxcor': args.maxcor, 'ftol': ftol, 'gtol': gtol},
-            )
+            with temporary_run_dict_value(
+                run_dict,
+                "active_optimizer_bounds",
+                phase2_bounds,
+            ):
+                res = minimize(
+                    fun,
+                    dofs,
+                    jac=True,
+                    method='L-BFGS-B',
+                    bounds=phase2_bounds,
+                    callback=callback,
+                    options={'maxiter': remaining_maxiter, 'maxcor': args.maxcor, 'ftol': ftol, 'gtol': gtol},
+                )
             res_nit = (phase1_iterations or 0) + res.nit
             optimizer_status = getattr(res, "status", None)
             termination_message = normalize_optimizer_termination_message(
@@ -7553,6 +8037,14 @@ if __name__ == "__main__":
         "FINAL_FEASIBILITY_OK": final_feasibility_ok,
         "SELF_INTERSECTING": run_dict['intersecting'],
         **build_single_stage_banana_current_payload_fields(banana_current_state),
+        "BANANA_CURRENT_DIAGNOSTICS_ENABLED": (
+            run_dict.get("banana_current_diagnostics") is not None
+        ),
+        "BANANA_CURRENT_DIAGNOSTICS_FILENAME": (
+            BANANA_CURRENT_DIAGNOSTICS_FILENAME
+            if run_dict.get("banana_current_diagnostics") is not None
+            else None
+        ),
         **build_hardware_constraint_artifact_payload_fields(final_hardware_snapshot),
         "INVALID_STATE_REJECTS_TOTAL": run_dict["invalid_state_rejects_total"],
         "TOPOLOGY_GATE_REJECTS": run_dict["topology_gate_rejects"],

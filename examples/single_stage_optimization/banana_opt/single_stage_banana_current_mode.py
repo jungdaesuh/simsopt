@@ -16,6 +16,7 @@ BANANA_CURRENT_MODE_INDEPENDENT: BananaCurrentMode = "independent"
 BANANA_CURRENT_CONTROL_METRIC_MAX_ABS = "max_abs"
 
 __all__ = [
+    "BananaCurrentCoordinateSpec",
     "BANANA_CURRENT_CONTROL_METRIC_MAX_ABS",
     "BANANA_CURRENT_MODE_INDEPENDENT",
     "BANANA_CURRENT_MODE_SHARED",
@@ -25,11 +26,18 @@ __all__ = [
     "build_single_stage_banana_current_state",
     "build_single_stage_banana_current_payload_fields",
     "resolve_single_stage_banana_current_state",
+    "resolve_banana_current_coordinate_spec",
 ]
 
 
 class CurrentLike(Protocol):
     def get_value(self) -> float: ...
+
+
+@dataclass(frozen=True)
+class BananaCurrentCoordinateSpec:
+    dof_names: tuple[str, ...]
+    indices: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -93,6 +101,65 @@ def build_single_stage_banana_current_state(
         mode=_validated_banana_current_mode(str(mode)),
         currents=tuple(coil.current for coil in banana_coils),
         seed_currents_A=resolved_seed_currents_A,
+    )
+
+
+def _unique_current_control_dof_names(
+    state: SingleStageBananaCurrentState,
+) -> tuple[str, ...]:
+    ordered_names: list[str] = []
+    seen_names: set[str] = set()
+    for current in state.currents:
+        dof_names = getattr(current, "dof_names", ())
+        for dof_name in dof_names:
+            resolved_name = str(dof_name)
+            if resolved_name in seen_names:
+                continue
+            seen_names.add(resolved_name)
+            ordered_names.append(resolved_name)
+    return tuple(ordered_names)
+
+
+def resolve_banana_current_coordinate_spec(
+    objective_optimizable,
+    state: SingleStageBananaCurrentState,
+) -> BananaCurrentCoordinateSpec:
+    current_dof_names = _unique_current_control_dof_names(state)
+    expected_control_count = int(state.num_control_currents())
+    if len(current_dof_names) != expected_control_count:
+        raise ValueError(
+            "Banana current diagnostics expected "
+            f"{expected_control_count} free current controls but found "
+            f"{len(current_dof_names)} current DOF names: {current_dof_names!r}."
+        )
+
+    objective_dof_names = tuple(str(name) for name in objective_optimizable.dof_names)
+    objective_index_by_name: dict[str, int] = {}
+    duplicate_names: list[str] = []
+    for index, dof_name in enumerate(objective_dof_names):
+        if dof_name in objective_index_by_name:
+            duplicate_names.append(dof_name)
+            continue
+        objective_index_by_name[dof_name] = index
+    if duplicate_names:
+        raise ValueError(
+            "Banana current diagnostics require unique optimizer DOF names, but "
+            f"found duplicates: {duplicate_names!r}."
+        )
+
+    missing_names = [
+        dof_name for dof_name in current_dof_names if dof_name not in objective_index_by_name
+    ]
+    if missing_names:
+        raise ValueError(
+            "Banana current diagnostics could not locate current DOFs in the "
+            "optimizer coordinate vector. Missing names: "
+            f"{missing_names!r}."
+        )
+
+    return BananaCurrentCoordinateSpec(
+        dof_names=current_dof_names,
+        indices=tuple(objective_index_by_name[dof_name] for dof_name in current_dof_names),
     )
 
 

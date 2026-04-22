@@ -168,6 +168,22 @@ def phase1_runtime_kwargs(module, *, phase1_config=None):
     }
 
 
+def build_banana_current_report_fixture(module, *, seed_currents_A=(1.5e4, -1.5e4)):
+    current_a = Current(1.5e4)
+    current_b = Current(-1.5e4)
+    banana_current_state = module.SingleStageBananaCurrentState(
+        mode="independent",
+        currents=(current_a, current_b),
+        seed_currents_A=seed_currents_A,
+    )
+    objective = SimpleNamespace(
+        dof_names=("geom:0", *current_a.dof_names, "geom:1", *current_b.dof_names),
+        lower_bounds=np.array([-1.0, -1.6e4, -1.0, -1.6e4], dtype=float),
+        upper_bounds=np.array([1.0, 1.6e4, 1.0, 1.6e4], dtype=float),
+    )
+    return current_a, current_b, banana_current_state, objective
+
+
 def make_frontier_goal_config(module, **overrides):
     config = {
         "iota_reference": 0.10,
@@ -2374,6 +2390,186 @@ class HardwareConstraintTests(unittest.TestCase):
                 {"accepted_iteration": 0},
                 {"accepted_iteration": 1, "weights": [1.0, 0.5]},
             ],
+        )
+
+    def test_build_banana_current_coordinate_report_tracks_indices_bounds_and_gradients(self):
+        module = load_single_stage_example_module()
+        current_a, current_b, banana_current_state, objective = (
+            build_banana_current_report_fixture(module)
+        )
+        x = np.array([0.25, 1.6e4, -0.5, -1.6e4], dtype=float)
+        grad = np.array([2.0, 3.0e-4, -4.0, -4.0e-4], dtype=float)
+
+        report = module.build_banana_current_coordinate_report(
+            objective,
+            banana_current_state,
+            x,
+            grad,
+            phase="accepted",
+            accepted_iteration=7,
+        )
+
+        self.assertEqual(report["phase"], "accepted")
+        self.assertEqual(report["accepted_iteration"], 7)
+        self.assertEqual(report["coordinate_indices"], [1, 3])
+        self.assertEqual(
+            report["coordinate_dof_names"],
+            [*current_a.dof_names, *current_b.dof_names],
+        )
+        self.assertEqual(report["coordinate_values_A"], [1.6e4, -1.6e4])
+        self.assertEqual(report["coordinate_gradients"], [3.0e-4, -4.0e-4])
+        self.assertTrue(report["bound_activity"][0]["at_upper_bound"])
+        self.assertTrue(report["bound_activity"][1]["at_lower_bound"])
+        self.assertAlmostEqual(
+            report["coordinate_gradient_l2"],
+            float(np.linalg.norm([3.0e-4, -4.0e-4])),
+        )
+        self.assertAlmostEqual(
+            report["noncurrent_gradient_l2"],
+            float(np.linalg.norm([2.0, -4.0])),
+        )
+
+    def test_build_banana_current_coordinate_report_prefers_active_optimizer_bounds(self):
+        module = load_single_stage_example_module()
+        _, _, banana_current_state, objective = build_banana_current_report_fixture(
+            module
+        )
+        x = np.array([0.25, 1.505e4, -0.5, -1.505e4], dtype=float)
+        active_bounds = [
+            (-1.0, 1.0),
+            (1.495e4, 1.505e4),
+            (-1.0, 1.0),
+            (-1.505e4, -1.495e4),
+        ]
+
+        report = module.build_banana_current_coordinate_report(
+            objective,
+            banana_current_state,
+            x,
+            grad=None,
+            active_optimizer_bounds=active_bounds,
+            phase="accepted",
+            accepted_iteration=3,
+        )
+
+        self.assertEqual(report["coordinate_lower_bounds_A"], [1.495e4, -1.505e4])
+        self.assertEqual(report["coordinate_upper_bounds_A"], [1.505e4, -1.495e4])
+        self.assertTrue(report["bound_activity"][0]["at_upper_bound"])
+        self.assertTrue(report["bound_activity"][1]["at_lower_bound"])
+
+    def test_build_banana_current_coordinate_report_tracks_projected_gradients(self):
+        module = load_single_stage_example_module()
+        _, _, banana_current_state, objective = build_banana_current_report_fixture(
+            module
+        )
+        x = np.array([0.25, 1.6e4, -0.5, -1.6e4], dtype=float)
+        grad = np.array([2.0, -3.0e-4, -4.0, 4.0e-4], dtype=float)
+
+        report = module.build_banana_current_coordinate_report(
+            objective,
+            banana_current_state,
+            x,
+            grad,
+            phase="accepted",
+            accepted_iteration=7,
+        )
+
+        self.assertEqual(report["coordinate_gradients"], [-3.0e-4, 4.0e-4])
+        self.assertEqual(report["projected_coordinate_gradients"], [0.0, 0.0])
+        self.assertEqual(report["projected_coordinate_gradient_l2"], 0.0)
+        self.assertAlmostEqual(
+            report["projected_noncurrent_gradient_l2"],
+            float(np.linalg.norm([2.0, -4.0])),
+        )
+        self.assertEqual(report["projected_coordinate_to_noncurrent_gradient_ratio"], 0.0)
+
+    def test_write_banana_current_diagnostics_artifact_serializes_seed_and_recent_rejects(self):
+        module = load_single_stage_example_module()
+        _, _, banana_current_state, objective = build_banana_current_report_fixture(
+            module
+        )
+        seed_x = np.array([0.1, 1.5e4, -0.2, -1.5e4], dtype=float)
+        seed_grad = np.array([1.0, 2.0e-4, -2.0, -3.0e-4], dtype=float)
+        rejected_x = np.array([0.1, 1.6e4, -0.2, -1.4e4], dtype=float)
+        rejected_grad = np.array([1.0, 4.0e-4, -2.0, -1.0e-4], dtype=float)
+
+        diagnostics_state = module.build_banana_current_diagnostics_state(
+            objective,
+            banana_current_state,
+            seed_x,
+            seed_grad,
+            accepted_iteration=0,
+        )
+        rejected_report = module.build_banana_current_coordinate_report(
+            objective,
+            banana_current_state,
+            rejected_x,
+            rejected_grad,
+            phase="rejected_trial",
+            accepted_iteration=0,
+            line_search_evaluations=3,
+            step_norm=0.5,
+            rejection_reason="hardware",
+        )
+        module.record_banana_current_diagnostics_report(
+            diagnostics_state,
+            rejected_report,
+            rejected_trial=True,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module.write_banana_current_diagnostics_artifact(
+                tmpdir,
+                diagnostics_state,
+            )
+            payload = json.loads(
+                (Path(tmpdir) / module.BANANA_CURRENT_DIAGNOSTICS_FILENAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(
+            payload["schema_version"],
+            module.SINGLE_STAGE_BANANA_CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        )
+        self.assertEqual(payload["seed_report"]["delta_from_seed_A"], [0.0, 0.0])
+        self.assertEqual(payload["rejected_trial_reports_recorded"], 1)
+        self.assertEqual(payload["latest_rejected_trial_report"]["rejection_reason"], "hardware")
+        self.assertEqual(
+            payload["latest_rejected_trial_report"]["delta_from_seed_A"],
+            [1.0e3, 1.0e3],
+        )
+        self.assertEqual(len(payload["recent_rejected_trial_reports"]), 1)
+
+    def test_build_banana_current_diagnostics_state_anchors_seed_to_effective_start(self):
+        module = load_single_stage_example_module()
+        _, _, banana_current_state, objective = build_banana_current_report_fixture(
+            module,
+            seed_currents_A=(1.45e4, -1.45e4),
+        )
+        seed_x = np.array([0.1, 1.5e4, -0.2, -1.5e4], dtype=float)
+        seed_grad = np.array([1.0, 2.0e-4, -2.0, -3.0e-4], dtype=float)
+
+        diagnostics_state = module.build_banana_current_diagnostics_state(
+            objective,
+            banana_current_state,
+            seed_x,
+            seed_grad,
+            accepted_iteration=4,
+        )
+
+        self.assertEqual(diagnostics_state["seed_currents_A"], [1.5e4, -1.5e4])
+        self.assertEqual(
+            diagnostics_state["configured_seed_currents_A"],
+            [1.45e4, -1.45e4],
+        )
+        self.assertEqual(
+            diagnostics_state["seed_report"]["coordinate_values_A"],
+            diagnostics_state["seed_currents_A"],
+        )
+        self.assertEqual(
+            diagnostics_state["seed_report"]["delta_from_seed_A"],
+            [0.0, 0.0],
         )
 
     def test_normalize_optimizer_termination_message_enriches_blank_abnormal(self):
@@ -4997,6 +5193,81 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(result["phase1_first_accepted_step_rms"], 0.015)
         self.assertAlmostEqual(result["phase1_max_accepted_step_rms"], 0.015)
         np.testing.assert_allclose(result["next_dofs"], [1.01, -0.99])
+
+    def test_run_penalty_phase1_reports_active_bounds_in_real_coordinates(self):
+        module = self.load_module()
+        run_dict = {
+            "accepted_iterations": 0,
+            "accepted_x": np.array([1.0, -1.0]),
+            "invalid_state_rejects_total": 0,
+            "surface_solve_rejects": 0,
+            "hardware_rejects": 0,
+            "topology_gate_rejects": 0,
+            "surface_status": {"success": True},
+            "intersecting": False,
+            "search_eval": {"total": 1.0},
+            "accepted_hardware_status": {"success": True},
+            "surface_state": {"seed": "anchor"},
+            "J": 1.0,
+            "dJ": np.zeros(2),
+            "search_surface_status": {"success": True},
+            "topology_gate_status": {"enabled": False},
+            "x_prev": np.array([1.0, -1.0]),
+            "best_accepted_incumbent": None,
+            "best_accepted_metric": None,
+            "best_accepted_stage": None,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+            "it": 0,
+            "active_optimizer_bounds": [(-5.0, 5.0), (-5.0, 5.0)],
+        }
+        captured = {}
+
+        def fake_callback(x):
+            captured["callback_x"] = np.asarray(x, dtype=float).copy()
+            captured["active_bounds"] = list(run_dict["active_optimizer_bounds"])
+            run_dict["accepted_iterations"] += 1
+            run_dict["accepted_x"] = np.asarray(x, dtype=float).copy()
+            run_dict["accepted_hardware_status"] = {"success": True}
+
+        def fake_minimize(fun, x0, **kwargs):
+            captured["solver_bounds"] = kwargs["bounds"]
+            kwargs["callback"](np.array([0.1, -0.1]))
+            return SimpleNamespace(nit=1, success=True, message="CONVERGENCE", status=0)
+
+        result = module.run_penalty_phase1(
+            np.array([1.0, -1.0]),
+            total_maxiter=4,
+            maxcor=5,
+            ftol=1e-15,
+            gtol=1e-15,
+            initial_step_scale=0.5,
+            initial_step_maxiter=1,
+            enable_local_preservation=True,
+            lower_bounds=np.array([-5.0, -5.0]),
+            upper_bounds=np.array([5.0, 5.0]),
+            run_dict=run_dict,
+            objective_fn=lambda x: (0.0, np.zeros_like(x)),
+            callback_fn=fake_callback,
+            normalize_message_fn=lambda *args, **kwargs: "phase1_ok",
+            restore_accepted_state_fn=lambda: None,
+            minimize_fn=fake_minimize,
+            **phase1_runtime_kwargs(module),
+        )
+
+        self.assertEqual(len(captured["solver_bounds"]), 2)
+        np.testing.assert_allclose(
+            np.asarray(captured["solver_bounds"], dtype=float),
+            np.array([[-0.1, 0.1], [-0.1, 0.1]], dtype=float),
+        )
+        np.testing.assert_allclose(
+            np.asarray(captured["active_bounds"], dtype=float),
+            np.array([[0.95, 1.05], [-1.05, -0.95]], dtype=float),
+        )
+        np.testing.assert_allclose(captured["callback_x"], [1.05, -1.05])
+        self.assertEqual(run_dict["active_optimizer_bounds"], [(-5.0, 5.0), (-5.0, 5.0)])
+        np.testing.assert_allclose(result["next_dofs"], [1.0, -1.0])
 
     def test_run_penalty_phase1_repair_first_accepts_local_violation_reduction_not_preserve_gate(self):
         module = self.load_module()
