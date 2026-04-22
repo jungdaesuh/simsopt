@@ -65,6 +65,97 @@ def _call_boozer_dresidual_dc(
     )
 
 
+def _get_boozer_adjoint_runtime_state(booz_surf):
+    getter = getattr(booz_surf, "get_adjoint_runtime_state", None)
+    if callable(getter):
+        return getter()
+    return None
+
+
+def _solve_boozer_runtime_transpose(adjoint_state, rhs):
+    rhs_runtime = _runtime_as_jax_float64(rhs) if _HAS_JAX else rhs
+    solve_with_status = getattr(adjoint_state, "solve_transpose_with_status", None)
+    if callable(solve_with_status):
+        adjoint, success = solve_with_status(rhs_runtime)
+        if not bool(np.asarray(success)):
+            raise RuntimeError(
+                "Boozer adjoint linear solve failed on the runtime-state path "
+                f"({adjoint_state.linearization_kind})."
+            )
+        return adjoint
+    solve = getattr(adjoint_state, "solve_transpose", None)
+    if not callable(solve):
+        raise RuntimeError(
+            "Boozer adjoint runtime state exposes neither "
+            "solve_transpose_with_status nor solve_transpose."
+        )
+    return solve(rhs_runtime)
+
+
+def _project_boozer_runtime_adjoint_derivative(
+    booz_surf,
+    adjoint_state,
+    adjoint,
+    *,
+    projection_biotsavart=None,
+):
+    projector = getattr(adjoint_state, "project_coil_adjoint_derivative", None)
+    if callable(projector):
+        return projector(adjoint)
+    projector_owner = projection_biotsavart
+    projector = (
+        None
+        if projector_owner is None
+        else getattr(projector_owner, "coil_cotangents_to_derivative", None)
+    )
+    if not callable(projector):
+        projector_owner = getattr(booz_surf, "biotsavart", None)
+        projector = getattr(projector_owner, "coil_cotangents_to_derivative", None)
+    if not callable(projector):
+        raise RuntimeError(
+            "Boozer adjoint runtime-state projection requires a BiotSavart object "
+            "with coil_cotangents_to_derivative()."
+        )
+    total_derivative = Derivative({})
+    for d_coil_array, coil_group_indices in adjoint_state.stream_group_vjps(adjoint):
+        total_derivative += projector_owner.coil_cotangents_to_derivative(
+            [d_coil_array],
+            [coil_group_indices],
+        )
+    return total_derivative
+
+
+def _solve_boozer_coil_adjoint_derivative(
+    booz_surf,
+    dJ_ds,
+    *,
+    projection_biotsavart=None,
+):
+    adjoint_state = _get_boozer_adjoint_runtime_state(booz_surf)
+    if adjoint_state is None:
+        raise RuntimeError(
+            "Boozer adjoint runtime state is unavailable; "
+            "call boozer_surface.run_code(...) before requesting derivatives."
+        )
+    adjoint = _solve_boozer_runtime_transpose(adjoint_state, dJ_ds)
+    return _project_boozer_runtime_adjoint_derivative(
+        booz_surf,
+        adjoint_state,
+        adjoint,
+        projection_biotsavart=projection_biotsavart,
+    )
+
+
+def _boozer_adjoint_decision_size(booz_surf):
+    adjoint_state = _get_boozer_adjoint_runtime_state(booz_surf)
+    if adjoint_state is None:
+        raise RuntimeError(
+            "Boozer adjoint runtime state is unavailable; "
+            "call boozer_surface.run_code(...) before requesting derivatives."
+        )
+    return int(adjoint_state.decision_size)
+
+
 class AspectRatio(Optimizable):
     """
     Wrapper class for surface aspect ratio.
@@ -822,19 +913,15 @@ class MajorRadius(Optimizable):
             return
 
         booz_surf = self.boozer_surface
-        iota = booz_surf.res["iota"]
-        G = booz_surf.res["G"]
-        P, L, U = booz_surf.res["PLU"]
-        dconstraint_dcoils_vjp = self.boozer_surface.res["vjp"]
-
-        # tack on dJ_diota = dJ_dG = 0 to the end of dJ_ds
-        dJ_ds = np.zeros(L.shape[0])
+        decision_size = _boozer_adjoint_decision_size(booz_surf)
+        dJ_ds = np.zeros(decision_size)
         dj_ds = surface.dmajor_radius_by_dcoeff()
         dJ_ds[: dj_ds.size] = dj_ds
-        adj = forward_backward(P, L, U, dJ_ds)
-
-        adj_times_dg_dcoil = dconstraint_dcoils_vjp(adj, booz_surf, iota, G)
-        self._dJ = -1 * adj_times_dg_dcoil
+        adjoint_derivative = _solve_boozer_coil_adjoint_derivative(
+            booz_surf,
+            dJ_ds,
+        )
+        self._dJ = -1 * adjoint_derivative
 
 
 class NonQuasiSymmetricRatio(Optimizable):
@@ -942,22 +1029,19 @@ class NonQuasiSymmetricRatio(Optimizable):
             return
 
         booz_surf = self.boozer_surface
-        iota = booz_surf.res["iota"]
-        G = booz_surf.res["G"]
-        P, L, U = booz_surf.res["PLU"]
-        dconstraint_dcoils_vjp = self.boozer_surface.res["vjp"]
-
         dJ_by_dB = self.dJ_by_dB().reshape((-1, 3))
         dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
 
-        # tack on dJ_diota = dJ_dG = 0 to the end of dJ_ds
-        dJ_ds = np.zeros(L.shape[0])
+        decision_size = _boozer_adjoint_decision_size(booz_surf)
+        dJ_ds = np.zeros(decision_size)
         dj_ds = self.dJ_by_dsurfacecoefficients()
         dJ_ds[: dj_ds.size] = dj_ds
-        adj = forward_backward(P, L, U, dJ_ds)
-
-        adj_times_dg_dcoil = dconstraint_dcoils_vjp(adj, booz_surf, iota, G)
-        self._dJ = dJ_by_dcoils - adj_times_dg_dcoil
+        adjoint_derivative = _solve_boozer_coil_adjoint_derivative(
+            booz_surf,
+            dJ_ds,
+            projection_biotsavart=self.biotsavart,
+        )
+        self._dJ = dJ_by_dcoils - adjoint_derivative
 
     def dJ_by_dB(self):
         """
@@ -1108,12 +1192,9 @@ class Iotas(Optimizable):
             return
 
         booz_surf = self.boozer_surface
-        iota = booz_surf.res["iota"]
         G = booz_surf.res["G"]
-        P, L, U = booz_surf.res["PLU"]
-        dconstraint_dcoils_vjp = self.boozer_surface.res["vjp"]
-
-        dJ_ds = np.zeros(L.shape[0])
+        decision_size = _boozer_adjoint_decision_size(booz_surf)
+        dJ_ds = np.zeros(decision_size)
         if G is not None:
             # tack on dJ_diota = 1, and  dJ_dG = 0 to the end of dJ_ds
             dJ_ds[-2] = 1.0
@@ -1121,10 +1202,12 @@ class Iotas(Optimizable):
             # tack on dJ_diota = 1 to the end of dJ_ds
             dJ_ds[-1] = 1.0
 
-        adj = forward_backward(P, L, U, dJ_ds)
-
-        adj_times_dg_dcoil = dconstraint_dcoils_vjp(adj, booz_surf, iota, G)
-        self._dJ = -1.0 * adj_times_dg_dcoil
+        adjoint_derivative = _solve_boozer_coil_adjoint_derivative(
+            booz_surf,
+            dJ_ds,
+            projection_biotsavart=self.biotsavart,
+        )
+        self._dJ = -1.0 * adjoint_derivative
 
 
 if _HAS_JAX:
@@ -1309,8 +1392,6 @@ class BoozerResidual(Optimizable):
         J = residual_parts[1]
 
         booz_surf = self.boozer_surface
-        P, L, U = booz_surf.res["PLU"]
-        dconstraint_dcoils_vjp = booz_surf.res["vjp"]
 
         dJ_by_dB = self.dJ_by_dB()
         dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
@@ -1324,11 +1405,12 @@ class BoozerResidual(Optimizable):
             axis=0,
         )
         dJ_ds = Jtil.T @ rtil
-
-        adj = forward_backward(P, L, U, dJ_ds)
-
-        adj_times_dg_dcoil = dconstraint_dcoils_vjp(adj, booz_surf, iota, G)
-        self._dJ = dJ_by_dcoils - adj_times_dg_dcoil
+        adjoint_derivative = _solve_boozer_coil_adjoint_derivative(
+            booz_surf,
+            dJ_ds,
+            projection_biotsavart=self.biotsavart,
+        )
+        self._dJ = dJ_by_dcoils - adjoint_derivative
 
     def dJ_by_dB(self):
         """

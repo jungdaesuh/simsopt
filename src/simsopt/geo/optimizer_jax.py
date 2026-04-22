@@ -1872,6 +1872,20 @@ def _solve_square_array_system_operator_only(matvec, rhs, *, tol):
     return solution, success
 
 
+def _solve_dense_square_array_system_with_status(matrix, rhs, *, tol):
+    """Solve a dense fallback system and report the same success contract."""
+    solution, _, _, _ = jnp.linalg.lstsq(matrix, rhs, rcond=None)
+    residual = rhs - matrix @ solution
+    residual_norm = jnp.linalg.norm(residual)
+    residual_tol = _linear_solve_residual_tolerance(rhs, tol)
+    success = (
+        _linear_solve_finite(solution, residual)
+        & jnp.isfinite(residual_norm)
+        & (residual_norm <= residual_tol)
+    )
+    return solution, success
+
+
 def _least_squares_normal_operator(residual_fn, x):
     flat_residual_fn = jax.jit(_flattened_residual_output(residual_fn))
     _, pullback = jax.vjp(flat_residual_fn, x)
@@ -1892,6 +1906,7 @@ def _least_squares_normal_operator(residual_fn, x):
         "kind": "least_squares_normal",
         "shape": (decision_size, decision_size),
         "dtype": dtype,
+        "flat_residual_fn": flat_residual_fn,
         "matvec": matvec,
         "transpose_matvec": matvec,
     }
@@ -1904,9 +1919,9 @@ def _solve_least_squares_normal_system(
     *,
     tol,
 ):
-    operator = _least_squares_normal_operator(residual_fn, x)
-    solution, _ = _solve_square_array_system_operator_only(
-        operator["matvec"],
+    solution, _ = _solve_least_squares_normal_system_with_status(
+        residual_fn,
+        x,
         rhs,
         tol=tol,
     )
@@ -1921,8 +1936,19 @@ def _solve_least_squares_normal_system_with_status(
     tol,
 ):
     operator = _least_squares_normal_operator(residual_fn, x)
-    return _solve_square_array_system_operator_only(
+    solution, success = _solve_square_array_system_operator_only(
         operator["matvec"],
+        rhs,
+        tol=tol,
+    )
+    if _host_bool(success):
+        return solution, success
+    _, _, _, dense_hessian = _materialize_dense_least_squares_linearization(
+        operator["flat_residual_fn"],
+        x,
+    )
+    return _solve_dense_square_array_system_with_status(
+        dense_hessian,
         rhs,
         tol=tol,
     )
@@ -2733,12 +2759,21 @@ def target_minimize(
     callback=None,
     progress_callback=None,
     failure_callback=None,
+    initial_value_and_grad=None,
 ):
     """Explicit JAX target scalar optimizer entrypoint."""
     if failure_callback is not None and method != "lbfgs-ondevice":
         raise ValueError(
             "target_minimize() only supports failure_callback for "
             "method='lbfgs-ondevice'."
+        )
+    if (
+        initial_value_and_grad is not None
+        and (method != "lbfgs-ondevice" or not value_and_grad)
+    ):
+        raise ValueError(
+            "target_minimize() only supports initial_value_and_grad for "
+            "explicit value-and-gradient objectives with method='lbfgs-ondevice'."
         )
     if method in _TARGET_PUBLIC_METHODS:
         require_target_backend_x64("ondevice")
@@ -2798,6 +2833,7 @@ def target_minimize(
             callback=options.get("callback"),
             progress_callback=options.get("progress_callback"),
             failure_callback=options.get("failure_callback"),
+            initial_value_and_grad=initial_value_and_grad,
         )
         return finalize(_private_lbfgs_result_to_optimize_result(state))
 

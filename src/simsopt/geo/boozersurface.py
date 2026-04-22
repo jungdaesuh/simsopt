@@ -21,6 +21,7 @@ from ._simsoptpp_boozer_compat import (
     _call_with_abi_fallback,
 )
 from .._core.optimizable import Optimizable
+from ..objectives.utilities import forward_backward
 from functools import partial
 
 __all__ = ["BoozerSurface"]
@@ -60,6 +61,23 @@ _BOOZER_EXACT_SURFACE_SPEC = (
     "SurfaceXYZTensorFourier",
     _BOOZER_EXACT_SURFACE_REQUIRED_ATTRIBUTES,
 )
+
+
+class _LegacyBoozerAdjointRuntimeState:
+    """Compatibility adjoint runtime wrapper for the legacy CPU Boozer solver."""
+
+    def __init__(
+        self,
+        *,
+        linearization_kind,
+        decision_size,
+        solve_transpose,
+        project_coil_adjoint_derivative,
+    ):
+        self.linearization_kind = linearization_kind
+        self.decision_size = int(decision_size)
+        self.solve_transpose = solve_transpose
+        self.project_coil_adjoint_derivative = project_coil_adjoint_derivative
 
 
 def _matches_supported_surface_spec(surface, surface_spec):
@@ -343,6 +361,40 @@ class BoozerSurface(Optimizable):
 
     def recompute_bell(self, parent=None):
         self.need_to_run_code = True
+
+    def get_adjoint_runtime_state(self):
+        """Expose the legacy dense adjoint contract through the runtime seam."""
+        if self.need_to_run_code:
+            raise RuntimeError(
+                "BoozerSurface has no valid adjoint state. "
+                "Call boozer_surface.run_code(...) before requesting adjoints."
+            )
+        linear_solve_factors = self.res.get("PLU")
+        legacy_vjp = self.res.get("vjp")
+        if linear_solve_factors is None or legacy_vjp is None:
+            raise RuntimeError(
+                "BoozerSurface has no valid adjoint state. "
+                "Call boozer_surface.run_code(...) before requesting adjoints."
+            )
+        P, L, U = linear_solve_factors
+        iota = self.res["iota"]
+        G = self.res["G"]
+        linearization_kind = (
+            "exact_jacobian" if self.res.get("type") == "exact" else "hessian"
+        )
+
+        def solve_transpose(rhs):
+            return forward_backward(P, L, U, rhs)
+
+        def project_coil_adjoint_derivative(adjoint):
+            return legacy_vjp(adjoint, self, iota, G)
+
+        return _LegacyBoozerAdjointRuntimeState(
+            linearization_kind=linearization_kind,
+            decision_size=L.shape[0],
+            solve_transpose=solve_transpose,
+            project_coil_adjoint_derivative=project_coil_adjoint_derivative,
+        )
 
     def _validate_none_G_precondition(self, G):
         if G is not None:

@@ -285,6 +285,18 @@ def _coerce_value_and_grad_result(fun, x):
     return value, grad
 
 
+def _coerce_initial_value_and_grad_result(initial_value_and_grad, x):
+    value, grad = initial_value_and_grad
+    value = _as_jax_dtype(value, x.dtype)
+    grad = _as_jax_dtype(grad, x.dtype)
+    if grad.shape != x.shape:
+        raise ValueError(
+            "initial_value_and_grad must provide a gradient matching "
+            f"x.shape={x.shape}, got {grad.shape}."
+        )
+    return value, grad
+
+
 def _lbfgs_step_tolerances(x):
     eps = _as_jax_dtype(jnp.finfo(x.dtype).eps, x.dtype)
     step_eps = jnp.sqrt(eps)
@@ -320,6 +332,7 @@ def _minimize_lbfgs_private_impl(
     callback=None,
     progress_callback=None,
     failure_callback=None,
+    initial_value_and_grad=None,
 ):
     value_and_grad_fun, x0, callback, adapter = _prepare_optimizer_callable_inputs(
         value_and_grad_fun,
@@ -348,7 +361,10 @@ def _minimize_lbfgs_private_impl(
     ftol_value = np.asarray(ftol, dtype=np.dtype(dtype)).item()
     gtol_value = np.asarray(gtol, dtype=np.dtype(dtype)).item()
 
-    f_0, g_0 = _coerce_value_and_grad_result(value_and_grad_fun, x0)
+    if initial_value_and_grad is None:
+        f_0, g_0 = _coerce_value_and_grad_result(value_and_grad_fun, x0)
+    else:
+        f_0, g_0 = _coerce_initial_value_and_grad_result(initial_value_and_grad, x0)
     state_initial = _LBFGSResults(
         converged=_norm(g_0, ord=norm) < _as_jax_dtype(gtol_value, dtype),
         failed=_bool_scalar(False),
@@ -664,7 +680,27 @@ def _minimize_lbfgs_private_impl(
             ls_status=state.ls_status,
             converged=state.converged,
         )
-        f_final, g_final = _coerce_value_and_grad_result(value_and_grad_fun, state.x_k)
+        if initial_value_and_grad is None:
+            f_final, g_final = _coerce_value_and_grad_result(
+                value_and_grad_fun,
+                state.x_k,
+            )
+            final_eval_increment = _int_scalar(1)
+        else:
+            final_eval_increment = jnp.where(
+                state.k == _int_scalar(0),
+                _int_scalar(0),
+                _int_scalar(1),
+            )
+            f_final, g_final = lax.cond(
+                state.k == _int_scalar(0),
+                lambda _: (
+                    _as_jax_dtype(f_0, state.x_k.dtype),
+                    _as_jax_dtype(g_0, state.x_k.dtype),
+                ),
+                lambda _: _coerce_value_and_grad_result(value_and_grad_fun, state.x_k),
+                operand=None,
+            )
         _emit_lbfgs_runtime_debug(
             "post_final_eval",
             iteration=state.k,
@@ -681,8 +717,8 @@ def _minimize_lbfgs_private_impl(
         state = state._replace(
             converged=converged_final,
             failed=state.failed | state_nonfinite,
-            nfev=state.nfev + _int_scalar(1),
-            ngev=state.ngev + _int_scalar(1),
+            nfev=state.nfev + final_eval_increment,
+            ngev=state.ngev + final_eval_increment,
             f_k=_as_jax_dtype(f_final, state.f_k.dtype),
             g_k=_as_jax_dtype(g_final, state.g_k.dtype),
         )
@@ -799,6 +835,7 @@ def _minimize_lbfgs_private_value_and_grad(
     callback=None,
     progress_callback=None,
     failure_callback=None,
+    initial_value_and_grad=None,
 ):
     return _minimize_lbfgs_private_impl(
         fun,
@@ -816,4 +853,5 @@ def _minimize_lbfgs_private_value_and_grad(
         callback=callback,
         progress_callback=progress_callback,
         failure_callback=failure_callback,
+        initial_value_and_grad=initial_value_and_grad,
     )

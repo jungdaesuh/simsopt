@@ -35,6 +35,7 @@ from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 from simsopt.field.coil import Current, coils_via_symmetries
 from simsopt.configs.zoo import get_data
 from simsopt.geo.curve import create_equally_spaced_curves
+from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.geo import optimizer_jax as optimizer_jax_module
 from simsopt.geo import surfaceobjectives as surfaceobjectives_module
 from simsopt.geo import surfaceobjectives_jax as surfaceobjectives_jax_module
@@ -128,7 +129,7 @@ def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
         "objective_kwargs": {},
         "baseline_x": jnp.asarray([0.0], dtype=jnp.float64),
         "baseline_value": jnp.asarray(0.0, dtype=jnp.float64),
-        "baseline_dense_plu": None,
+        "baseline_linear_solve_factors": None,
         "baseline_coil_dofs": jnp.asarray([0.0], dtype=jnp.float64),
         "coil_set_spec_from_dofs": lambda coil_dofs: coil_dofs,
         "optimize_G": False,
@@ -223,7 +224,7 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
         "coil_dof_extraction_spec": {"unused": True},
         "baseline_x": jnp.arange(5, dtype=jnp.float64),
         "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
-        "baseline_dense_plu": (
+        "baseline_linear_solve_factors": (
             jnp.eye(3, dtype=jnp.float64),
             jnp.eye(3, dtype=jnp.float64),
             jnp.arange(3, dtype=jnp.int32),
@@ -246,7 +247,7 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
     assert not any(tree is state["objective_kwargs"] for tree in seen_trees)
     assert not any(tree is state["baseline_x"] for tree in seen_trees)
     assert not any(tree is state["baseline_value"] for tree in seen_trees)
-    assert not any(tree is state["baseline_dense_plu"] for tree in seen_trees)
+    assert not any(tree is state["baseline_linear_solve_factors"] for tree in seen_trees)
     assert not any(tree is state["baseline_coil_dofs"] for tree in seen_trees)
     assert not any(tree is state["failure_value"] for tree in seen_trees)
     assert not any(tree is state["failure_scale"] for tree in seen_trees)
@@ -299,7 +300,7 @@ def test_traceable_forward_result_requires_adjoint_runtime_even_with_success_fil
         coil_dofs=coil_dofs,
         baseline_x=baseline_x,
         baseline_value=jnp.asarray(3.0, dtype=jnp.float64),
-        baseline_dense_plu=None,
+        baseline_linear_solve_factors=None,
         linearization_kind="hessian",
         linear_solve_tol=1.0e-10,
         linear_solve_stab=0.0,
@@ -525,7 +526,7 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         "objective_kwargs": state["objective_kwargs"],
         "baseline_x": state["baseline_x"],
         "baseline_value": state["baseline_value"],
-        "baseline_dense_plu": state["baseline_dense_plu"],
+        "baseline_linear_solve_factors": state["baseline_linear_solve_factors"],
         "baseline_coil_dofs": state["baseline_coil_dofs"],
         "failure_value": state["failure_value"],
         "failure_scale": state["failure_scale"],
@@ -542,7 +543,7 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         np.ndarray,
     )
     assert isinstance(state["baseline_x"], np.ndarray)
-    assert isinstance(state["baseline_dense_plu"][0], np.ndarray)
+    assert isinstance(state["baseline_linear_solve_factors"][0], np.ndarray)
     assert isinstance(state["baseline_coil_dofs"], np.ndarray)
 
 
@@ -622,6 +623,122 @@ def test_iotas_jax_gradient_path_reads_adjoint_runtime_state(monkeypatch):
     np.testing.assert_allclose(np.asarray(obj._J), 0.37)
 
 
+def test_boozersurface_get_adjoint_runtime_state_wraps_legacy_cpu_contract():
+    captured = {}
+
+    def legacy_vjp(adjoint, passed_booz, iota, G):
+        captured["adjoint"] = np.asarray(adjoint)
+        captured["booz"] = passed_booz
+        captured["iota"] = iota
+        captured["G"] = G
+        return "legacy-derivative"
+
+    fake_booz = types.SimpleNamespace(
+        need_to_run_code=False,
+        res={
+            "PLU": (
+                np.eye(2, dtype=np.float64),
+                np.eye(2, dtype=np.float64),
+                np.eye(2, dtype=np.float64),
+            ),
+            "vjp": legacy_vjp,
+            "iota": 0.23,
+            "G": 1.7,
+            "type": "ls",
+        },
+    )
+
+    adjoint_state = BoozerSurface.get_adjoint_runtime_state(fake_booz)
+
+    assert adjoint_state.linearization_kind == "hessian"
+    assert adjoint_state.decision_size == 2
+    np.testing.assert_allclose(
+        adjoint_state.solve_transpose(np.asarray([1.0, -2.0], dtype=np.float64)),
+        np.asarray([1.0, -2.0], dtype=np.float64),
+    )
+    assert (
+        adjoint_state.project_coil_adjoint_derivative(
+            np.asarray([3.0, 4.0], dtype=np.float64)
+        )
+        == "legacy-derivative"
+    )
+    np.testing.assert_allclose(captured["adjoint"], np.asarray([3.0, 4.0]))
+    assert captured["booz"] is fake_booz
+    assert captured["iota"] == 0.23
+    assert captured["G"] == 1.7
+
+
+def test_solve_boozer_coil_adjoint_derivative_uses_runtime_projection_hook():
+    adjoint_state = types.SimpleNamespace(
+        linearization_kind="hessian",
+        decision_size=2,
+        solve_transpose=lambda rhs: 2.0 * np.asarray(rhs, dtype=np.float64),
+        project_coil_adjoint_derivative=lambda adjoint: (
+            "projected",
+            tuple(np.asarray(adjoint, dtype=np.float64)),
+        ),
+    )
+    fake_booz = types.SimpleNamespace(
+        get_adjoint_runtime_state=lambda: adjoint_state,
+    )
+
+    derivative = surfaceobjectives_module._solve_boozer_coil_adjoint_derivative(
+        fake_booz,
+        np.asarray([1.0, -3.0], dtype=np.float64),
+    )
+
+    assert derivative == ("projected", (2.0, -6.0))
+
+
+def test_major_radius_gradient_uses_boozer_surface_biotsavart_fallback():
+    captured = {}
+
+    class _FakeBiotSavart:
+        def coil_cotangents_to_derivative(self, coil_arrays, coil_group_indices):
+            captured["coil_arrays"] = coil_arrays
+            captured["coil_group_indices"] = coil_group_indices
+            return surfaceobjectives_module.Derivative({})
+
+    fake_surface = types.SimpleNamespace(
+        major_radius=lambda: 7.5,
+        dmajor_radius_by_dcoeff=lambda: np.asarray([1.0, -2.0], dtype=np.float64),
+    )
+    adjoint_state = types.SimpleNamespace(
+        linearization_kind="hessian",
+        decision_size=2,
+        solve_transpose=lambda rhs: np.asarray(rhs, dtype=np.float64),
+        stream_group_vjps=lambda adjoint: iter(
+            [
+                (
+                    np.asarray(adjoint, dtype=np.float64),
+                    (0,),
+                )
+            ]
+        ),
+    )
+    fake_booz = types.SimpleNamespace(
+        need_to_run_code=False,
+        surface=fake_surface,
+        biotsavart=_FakeBiotSavart(),
+        get_adjoint_runtime_state=lambda: adjoint_state,
+    )
+
+    obj = object.__new__(surfaceobjectives_module.MajorRadius)
+    obj.boozer_surface = fake_booz
+    obj.surface = fake_surface
+    obj._J = None
+    obj._dJ = None
+    obj.compute(compute_gradient=True)
+
+    assert obj._J == 7.5
+    assert isinstance(obj._dJ, surfaceobjectives_module.Derivative)
+    np.testing.assert_allclose(
+        np.asarray(captured["coil_arrays"][0], dtype=np.float64),
+        np.asarray([1.0, -2.0], dtype=np.float64),
+    )
+    assert captured["coil_group_indices"] == [(0,)]
+
+
 def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solver_generation(
     monkeypatch,
 ):
@@ -653,7 +770,7 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solver_genera
             "coil_dof_extraction_spec": {"spec": "marker"},
             "baseline_x": jnp.arange(4, dtype=jnp.float64),
             "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
-            "baseline_dense_plu": (
+            "baseline_linear_solve_factors": (
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.arange(2, dtype=jnp.int32),
@@ -760,7 +877,7 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
             "coil_dof_extraction_spec": {"spec": "marker"},
             "baseline_x": jnp.arange(4, dtype=jnp.float64),
             "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
-            "baseline_dense_plu": (
+            "baseline_linear_solve_factors": (
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.arange(2, dtype=jnp.int32),
@@ -876,7 +993,7 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_solver_generation_cha
             "coil_dof_extraction_spec": {"spec": "marker"},
             "baseline_x": jnp.arange(2, dtype=jnp.float64),
             "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
-            "baseline_dense_plu": (
+            "baseline_linear_solve_factors": (
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.arange(2, dtype=jnp.int32),
@@ -977,7 +1094,7 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
             "coil_dof_extraction_spec": {"spec": "marker"},
             "baseline_x": jnp.arange(2, dtype=jnp.float64),
             "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
-            "baseline_dense_plu": (
+            "baseline_linear_solve_factors": (
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.eye(2, dtype=jnp.float64),
                 jnp.arange(2, dtype=jnp.int32),
@@ -1443,7 +1560,7 @@ def test_ensure_traceable_runtime_host_wrappers_defers_reporting_metrics_until_u
                 "baseline_coil_dofs": np.asarray([0.0], dtype=np.float64),
                 "baseline_value": np.asarray(1.0, dtype=np.float64),
                 "baseline_x": np.asarray([0.0], dtype=np.float64),
-                "baseline_dense_plu": (
+                "baseline_linear_solve_factors": (
                     np.eye(1, dtype=np.float64),
                     np.eye(1, dtype=np.float64),
                     np.asarray([0], dtype=np.int32),
@@ -1578,7 +1695,7 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
                 "baseline_coil_dofs": baseline_coil_dofs,
                 "baseline_value": np.asarray(1.25, dtype=np.float64),
                 "baseline_x": np.asarray([0.0, 1.0], dtype=np.float64),
-                "baseline_dense_plu": (
+                "baseline_linear_solve_factors": (
                     np.eye(2, dtype=np.float64),
                     np.eye(2, dtype=np.float64),
                     np.asarray([0, 1], dtype=np.int32),
@@ -1841,7 +1958,7 @@ def test_traceable_objective_gradient_parts_use_strict_vjp_helpers(monkeypatch):
                 lambda coil_dofs: coil_dofs,
                 coil_dofs=coil_dofs,
                 solved_x=solved_x,
-                solved_dense_plu=(object(), object(), object()),
+                solved_linear_solve_factors=(object(), object(), object()),
                 linearization_kind="hessian",
                 linear_solve_tol=1.0e-10,
                 linear_solve_stab=0.0,
@@ -1911,7 +2028,7 @@ def test_traceable_objective_gradient_parts_skips_direct_vjp_for_iota_term(
                 lambda coil_dofs: coil_dofs,
                 coil_dofs=coil_dofs,
                 solved_x=solved_x,
-                solved_dense_plu=(object(), object(), object()),
+                solved_linear_solve_factors=(object(), object(), object()),
                 linearization_kind="hessian",
                 linear_solve_tol=1.0e-10,
                 linear_solve_stab=0.0,
@@ -2054,7 +2171,7 @@ def test_traceable_objective_gradient_parts_term_diagnostics_use_strict_vjp_dire
                 lambda coil_dofs: coil_dofs,
                 coil_dofs=coil_dofs,
                 solved_x=solved_x,
-                solved_dense_plu=(object(), object(), object()),
+                solved_linear_solve_factors=(object(), object(), object()),
                 linearization_kind="hessian",
                 linear_solve_tol=1.0e-10,
                 linear_solve_stab=0.0,
@@ -2113,7 +2230,7 @@ def test_traceable_objective_gradient_parts_skip_all_autodiff_for_zero_weight_te
                 lambda current_coil_dofs: current_coil_dofs,
                 coil_dofs=coil_dofs,
                 solved_x=solved_x,
-                solved_dense_plu=(object(), object(), object()),
+                solved_linear_solve_factors=(object(), object(), object()),
                 linearization_kind="hessian",
                 linear_solve_tol=1.0e-10,
                 linear_solve_stab=0.0,
@@ -2197,7 +2314,7 @@ def test_traceable_total_gradient_skips_direct_vjp_when_active_weights_are_inner
                 lambda current_coil_dofs: current_coil_dofs,
                 coil_dofs=coil_dofs,
                 solved_x=solved_x,
-                solved_dense_plu=(object(), object(), object()),
+                solved_linear_solve_factors=(object(), object(), object()),
                 linearization_kind="hessian",
                 linear_solve_tol=1.0e-10,
                 linear_solve_stab=0.0,
@@ -2271,7 +2388,7 @@ def test_traceable_objective_gradient_parts_skips_direct_jvp_for_surface_vessel_
                 lambda coil_dofs: coil_dofs,
                 coil_dofs=coil_dofs,
                 solved_x=solved_x,
-                solved_dense_plu=(object(), object(), object()),
+                solved_linear_solve_factors=(object(), object(), object()),
                 linearization_kind="hessian",
                 linear_solve_tol=1.0e-10,
                 linear_solve_stab=0.0,
@@ -2308,7 +2425,7 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         *,
         coil_dofs,
         solved_x,
-        solved_dense_plu,
+        solved_linear_solve_factors,
         linearization_kind,
         linear_solve_tol,
         linear_solve_stab,
@@ -2317,8 +2434,8 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         del linearization_kind, linear_solve_tol, linear_solve_stab
         _record_array("total_gradient_coil_dofs", coil_dofs)
         _record_array("total_gradient_solved_x", solved_x)
-        plu_leaves = jax.tree_util.tree_leaves(solved_dense_plu)
-        call_checks["total_gradient_solved_dense_plu"] = all(
+        plu_leaves = jax.tree_util.tree_leaves(solved_linear_solve_factors)
+        call_checks["total_gradient_solved_linear_solve_factors"] = all(
             isinstance(leaf, jax.Array) for leaf in plu_leaves
         )
         assert objective_kwargs["outer_objective_config"] is objective_config
@@ -2347,7 +2464,7 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         *,
         coil_dofs,
         solved_x,
-        solved_dense_plu,
+        solved_linear_solve_factors,
         linearization_kind,
         linear_solve_tol,
         linear_solve_stab,
@@ -2357,8 +2474,8 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         del linearization_kind, linear_solve_tol, linear_solve_stab
         _record_array("gradient_parts_coil_dofs", coil_dofs)
         _record_array("gradient_parts_solved_x", solved_x)
-        plu_leaves = jax.tree_util.tree_leaves(solved_dense_plu)
-        call_checks["gradient_parts_solved_dense_plu"] = all(
+        plu_leaves = jax.tree_util.tree_leaves(solved_linear_solve_factors)
+        call_checks["gradient_parts_solved_linear_solve_factors"] = all(
             isinstance(leaf, jax.Array) for leaf in plu_leaves
         )
         assert objective_kwargs["outer_objective_config"] is objective_config
@@ -2373,7 +2490,7 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
                 "optimize_G": False,
                 "baseline_x": np.asarray([1.0, 2.0], dtype=np.float64),
                 "baseline_value": np.asarray(1.25, dtype=np.float64),
-                "baseline_dense_plu": (
+                "baseline_linear_solve_factors": (
                     np.eye(2, dtype=np.float64),
                     np.asarray([0, 1], dtype=np.int32),
                     np.asarray([0, 1], dtype=np.int32),
@@ -2433,12 +2550,12 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
     assert call_checks == {
         "total_gradient_coil_dofs": True,
         "total_gradient_solved_x": True,
-        "total_gradient_solved_dense_plu": True,
+        "total_gradient_solved_linear_solve_factors": True,
         "raw_terms_solved_x": True,
         "raw_terms_coil_dofs": True,
         "gradient_parts_coil_dofs": True,
         "gradient_parts_solved_x": True,
-        "gradient_parts_solved_dense_plu": True,
+        "gradient_parts_solved_linear_solve_factors": True,
     }
 
 

@@ -1424,6 +1424,40 @@ class TestLBFGSMethodPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LBFGS_RUNTIME
+    def test_lbfgs_ondevice_seeded_converged_entry_reuses_seed_without_extra_evals(
+        self,
+    ):
+        """A converged seed must keep eval counters exact on the zero-iteration path."""
+        x0 = jnp.zeros((2,), dtype=jnp.float64)
+        optimizer_seed = (
+            jnp.asarray(0.0, dtype=jnp.float64),
+            jnp.zeros_like(x0),
+        )
+
+        def quad_value_and_grad(x):
+            x = jnp.asarray(x, dtype=jnp.float64)
+            return 0.5 * jnp.dot(x, x), x
+
+        result = _opt.target_minimize(
+            quad_value_and_grad,
+            x0,
+            method="lbfgs-ondevice",
+            maxiter=5,
+            value_and_grad=True,
+            initial_value_and_grad=optimizer_seed,
+        )
+
+        assert result.success is True
+        assert result.nit == 0
+        assert result.status == 0
+        assert result.nfev == 1
+        assert result.njev == 1
+        np.testing.assert_allclose(np.asarray(result.x), np.asarray(x0))
+        np.testing.assert_allclose(np.asarray(result.jac), np.asarray(optimizer_seed[1]))
+        assert float(result.fun) == pytest.approx(0.0)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_LBFGS_RUNTIME
     def test_lbfgs_ondevice_repeated_calls_are_stable(self):
         """Repeated lbfgs-ondevice runs must not accumulate divergent state."""
 

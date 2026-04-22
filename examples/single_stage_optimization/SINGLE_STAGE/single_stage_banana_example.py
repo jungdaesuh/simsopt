@@ -3714,10 +3714,17 @@ class BoozerResidualExact(Optimizable):
                 if not bool(np.asarray(success)):
                     raise RuntimeError(
                         "BoozerResidualExact adjoint solve failed on the "
-                        f"operator-backed runtime path ({adjoint_state.linearization_kind})."
+                        f"runtime path ({adjoint_state.linearization_kind})."
                     )
             else:
                 adjoint = adjoint_state.solve_transpose(rhs)
+            projector = getattr(
+                adjoint_state,
+                "project_coil_adjoint_derivative",
+                None,
+            )
+            if callable(projector):
+                return projector(adjoint)
             adjoint_coil_derivative = Derivative({})
             for d_coil_array, coil_group_indices in adjoint_state.stream_group_vjps(
                 adjoint
@@ -3730,10 +3737,16 @@ class BoozerResidualExact(Optimizable):
                 )
             return adjoint_coil_derivative
 
-        P, L, U = booz_surf.res["PLU"]
-        dconstraint_dcoils_vjp = booz_surf.res["vjp"]
-        adjoint = forward_backward(P, L, U, dJ_ds)
-        return dconstraint_dcoils_vjp(adjoint, booz_surf, iota, G)
+        linear_solve_factors = booz_surf.res.get("PLU")
+        legacy_vjp = booz_surf.res.get("vjp")
+        if linear_solve_factors is None or not callable(legacy_vjp):
+            raise RuntimeError(
+                "BoozerResidualExact requires either "
+                "boozer_surface.get_adjoint_runtime_state() or the legacy "
+                "PLU/vjp adjoint contract."
+            )
+        adjoint = forward_backward(*linear_solve_factors, dJ_ds)
+        return legacy_vjp(adjoint, booz_surf, iota, G)
 
     def compute(self):
         if self.boozer_surface.need_to_run_code:
@@ -4929,6 +4942,33 @@ def get_traceable_single_stage_runtime_bundle_builder():
     return make_traceable_objective_runtime_bundle
 
 
+def get_traceable_single_stage_seeded_value_and_grad_builder():
+    """Load the optimizer-only seeded target-lane value/gradient helper."""
+    from simsopt.geo.surfaceobjectives_jax import (
+        make_traceable_objective_seeded_value_and_grad,
+    )
+
+    return make_traceable_objective_seeded_value_and_grad
+
+
+def build_traceable_single_stage_seeded_value_and_grad(
+    boozer_surface,
+    bs,
+    iota_target,
+    *,
+    outer_objective_config,
+    success_filter,
+):
+    """Build the optimizer-seeded target-lane fused objective."""
+    return get_traceable_single_stage_seeded_value_and_grad_builder()(
+        boozer_surface,
+        bs,
+        iota_target,
+        outer_objective_config=outer_objective_config,
+        success_filter=success_filter,
+    )
+
+
 def get_traceable_single_stage_alm_runtime_bundle_builder():
     """Load the pure single-stage ALM runtime bundle on demand."""
     from simsopt.geo.surfaceobjectives_jax import (
@@ -5485,6 +5525,7 @@ def build_target_lane_outer_objectives(
     """Build the target-lane objective(s) needed by the selected outer-loop mode."""
     target_scalar_objective = None
     target_value_and_grad_objective = None
+    target_optimizer_initial_value_and_grad = None
     target_lane_profile = None
     runtime_bundle = None
 
@@ -5502,7 +5543,17 @@ def build_target_lane_outer_objectives(
 
     target_scalar_objective = runtime_bundle["objective"]
     if use_value_and_grad:
-        target_value_and_grad_objective = runtime_bundle["value_and_grad"]
+        seeded_value_and_grad = build_traceable_single_stage_seeded_value_and_grad(
+            boozer_surface,
+            bs,
+            iota_target,
+            outer_objective_config=outer_objective_config,
+            success_filter=success_filter,
+        )
+        target_value_and_grad_objective = seeded_value_and_grad.value_and_grad
+        target_optimizer_initial_value_and_grad = (
+            seeded_value_and_grad.optimizer_initial_value_and_grad
+        )
 
     if profile_target_lane:
         target_lane_profile = profile_traceable_target_lane_objective(
@@ -5528,6 +5579,7 @@ def build_target_lane_outer_objectives(
         target_scalar_objective,
         target_value_and_grad_objective,
         target_lane_profile,
+        target_optimizer_initial_value_and_grad,
     )
 
 
@@ -5821,13 +5873,28 @@ def build_target_lane_scaled_phase1_diagnosis(
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
     )
+    seeded_value_and_grad = build_traceable_single_stage_seeded_value_and_grad(
+        boozer_surface,
+        bs,
+        iota_target,
+        outer_objective_config=outer_objective_config,
+        success_filter=success_filter,
+    )
     _persist_payload("runtime_bundle_ready", diagnosis_complete=False)
     phase1_fun, phase1_callback = build_scaled_outer_problem(
-        runtime_bundle["value_and_grad"],
+        seeded_value_and_grad.value_and_grad,
         callback,
         anchor_dofs,
         step_scale,
         anchor_in_state=True,
+    )
+    phase1_optimizer_initial_value_and_grad = (
+        build_scaled_outer_problem_initial_value_and_grad(
+            seeded_value_and_grad.optimizer_initial_value_and_grad,
+            anchor_dofs,
+            step_scale,
+            anchor_in_state=True,
+        )
     )
     anchor_host_dofs = np.asarray(host_array(anchor_dofs), dtype=np.float64).reshape(-1)
 
@@ -5887,6 +5954,7 @@ def build_target_lane_scaled_phase1_diagnosis(
         maxcor=maxcor,
         outer_maxls=outer_maxls,
         scalar_fun=None,
+        optimizer_initial_value_and_grad=phase1_optimizer_initial_value_and_grad,
     )
     optimizer_payload = {
         "success": bool(phase1_res.success),
@@ -5959,6 +6027,7 @@ def prepare_target_lane_outer_objectives(
     """Build target-lane outer objectives with an optional hard success filter."""
     target_scalar_objective = None
     target_value_and_grad_objective = None
+    target_optimizer_initial_value_and_grad = None
     target_lane_profile = None
     target_lane_success_filter = None
     target_lane_outer_objective_config = None
@@ -5967,6 +6036,7 @@ def prepare_target_lane_outer_objectives(
         return (
             target_scalar_objective,
             target_value_and_grad_objective,
+            target_optimizer_initial_value_and_grad,
             target_lane_profile,
             target_lane_success_filter,
         )
@@ -6009,6 +6079,7 @@ def prepare_target_lane_outer_objectives(
         target_scalar_objective,
         target_value_and_grad_objective,
         target_lane_profile,
+        target_optimizer_initial_value_and_grad,
     ) = build_target_lane_outer_objectives(
         boozer_surface,
         bs,
@@ -6026,6 +6097,7 @@ def prepare_target_lane_outer_objectives(
     return (
         target_scalar_objective,
         target_value_and_grad_objective,
+        target_optimizer_initial_value_and_grad,
         target_lane_profile,
         target_lane_success_filter,
     )
@@ -6373,6 +6445,11 @@ def _scaled_outer_problem_gradient(z, grad, scale):
             z.step_dofs,
             z.anchor_dofs,
         )
+        step_scale = (
+            float(scale)
+            if runtime_reference is None
+            else _as_runtime_float64(scale, reference=runtime_reference)
+        )
         anchor_scale = (
             0.0
             if runtime_reference is None
@@ -6384,10 +6461,16 @@ def _scaled_outer_problem_gradient(z, grad, scale):
             else _as_runtime_float64(z.anchor_dofs, reference=runtime_reference)
         )
         return ScaledOuterPhaseOptimizerState(
-            step_dofs=scale * grad,
+            step_dofs=step_scale * grad,
             anchor_dofs=anchor_scale * anchor_dofs,
         )
-    return scale * grad
+    runtime_reference = _scaled_outer_problem_runtime_reference(grad, scale)
+    step_scale = (
+        float(scale)
+        if runtime_reference is None
+        else _as_runtime_float64(scale, reference=runtime_reference)
+    )
+    return step_scale * grad
 
 
 def should_force_strict_target_lane_final_sync(
@@ -6527,6 +6610,34 @@ def build_scaled_outer_problem(
         base_callback(x)
 
     return scaled_fun, scaled_callback
+
+
+def build_scaled_outer_problem_initial_value_and_grad(
+    initial_value_and_grad,
+    anchor_x,
+    step_scale,
+    *,
+    anchor_in_state=False,
+):
+    """Map one fused target-lane seed into scaled optimizer coordinates."""
+    if initial_value_and_grad is None:
+        return None
+    value, grad = initial_value_and_grad
+    if anchor_in_state:
+        zero_step_dofs = build_scaled_outer_phase_initial_dofs(
+            anchor_x,
+            use_target_lane=True,
+        )
+        seed_state = build_target_lane_scaled_outer_phase_state(
+            anchor_x,
+            zero_step_dofs,
+        )
+    else:
+        seed_state = build_scaled_outer_phase_initial_dofs(
+            anchor_x,
+            use_target_lane=True,
+        )
+    return value, _scaled_outer_problem_gradient(seed_state, grad, step_scale)
 
 
 def build_scaled_outer_scalar_problem(
@@ -6744,7 +6855,7 @@ def profile_traceable_target_lane_objective(profile_suite, coil_dofs):
         coil_dofs,
     )
     solved_x = forward_result["x"]
-    solved_dense_plu = forward_result["dense_plu"]
+    solved_linear_solve_factors = forward_result["linear_solve_factors"]
     _, profiled["surface_geometry"] = _profile_tree_callable_pair(
         profile_suite["surface_geometry"],
         solved_x,
@@ -6763,7 +6874,7 @@ def profile_traceable_target_lane_objective(profile_suite, coil_dofs):
         profile_suite["solved_total_gradient"],
         coil_dofs,
         solved_x,
-        solved_dense_plu,
+        solved_linear_solve_factors,
     )
     _, profiled["value_and_grad_pipeline"] = _profile_tree_callable_pair(
         profile_suite["value_and_grad_pipeline"],
@@ -6909,6 +7020,7 @@ def run_single_stage_optimizer(
     scalar_fun=None,
     target_lane_initial_step_size=None,
     failure_callback=None,
+    optimizer_initial_value_and_grad=None,
 ):
     """Run the single-stage outer optimization through the lane-specific adapters."""
     from simsopt.geo.optimizer_jax import (
@@ -6957,6 +7069,10 @@ def run_single_stage_optimizer(
             )
         if failure_callback is not None:
             target_minimize_kwargs["failure_callback"] = failure_callback
+        if optimizer_initial_value_and_grad is not None:
+            target_minimize_kwargs["initial_value_and_grad"] = (
+                optimizer_initial_value_and_grad
+            )
         return target_minimize(
             optimizer_fun,
             optimizer_dofs,
@@ -6971,6 +7087,11 @@ def run_single_stage_optimizer(
             "Single-stage reference-lane optimization does not support "
             "failure_callback; use the target ondevice lane for "
             "line-search failure diagnostics."
+        )
+    if optimizer_initial_value_and_grad is not None:
+        raise ValueError(
+            "Single-stage reference-lane optimization does not support "
+            "optimizer_initial_value_and_grad."
         )
     return reference_minimize(
         optimizer_fun,
@@ -7007,6 +7128,7 @@ def run_single_stage_target_lane_optimizer_with_retries(
     progress_callback=None,
     target_lane_initial_step_size,
     failure_callback,
+    optimizer_initial_value_and_grad=None,
     invalid_state_events,
     run_dict,
     single_stage_search_policy,
@@ -7038,6 +7160,11 @@ def run_single_stage_target_lane_optimizer_with_retries(
 
     initial_step_size = target_lane_initial_step_size
     event_start = len(invalid_state_events)
+    optimizer_kwargs = {}
+    if optimizer_initial_value_and_grad is not None:
+        optimizer_kwargs["optimizer_initial_value_and_grad"] = (
+            optimizer_initial_value_and_grad
+        )
     result = run_single_stage_optimizer(
         fun,
         dofs,
@@ -7052,6 +7179,7 @@ def run_single_stage_target_lane_optimizer_with_retries(
         progress_callback=progress_callback,
         target_lane_initial_step_size=initial_step_size,
         failure_callback=failure_callback,
+        **optimizer_kwargs,
     )
     extend_target_lane_invalid_state_events_from_result(
         invalid_state_events,
@@ -7099,6 +7227,7 @@ def run_single_stage_target_lane_optimizer_with_retries(
         )
         event_start = len(invalid_state_events)
         remaining_maxiter = max(int(maxiter) - total_nit, 1)
+        optimizer_initial_value_and_grad = None
         result = run_single_stage_optimizer(
             fun,
             retry_dofs_factory(anchor_state),
@@ -8831,6 +8960,7 @@ if __name__ == "__main__":
     update_self_intersection_status(run_dict, boozer_surface.surface)
     record_single_stage_local_incumbent(run_dict, stage="initial")
     target_lane_profile = None
+    target_lane_optimizer_initial_value_and_grad = None
     adapter = SingleStageAdapter(
         run_dict=run_dict,
         boozer_surface=boozer_surface,
@@ -9385,6 +9515,7 @@ if __name__ == "__main__":
                     (
                         target_scalar_objective,
                         target_value_and_grad_objective,
+                        target_lane_optimizer_initial_value_and_grad,
                         target_lane_profile,
                         target_lane_success_filter,
                     ) = prepare_target_lane_outer_objectives(
@@ -9683,7 +9814,9 @@ if __name__ == "__main__":
                         )
                     )
                     phase1_dofs = dofs
-                    phase1_base_fun = None if use_target_lane else adapter
+                    phase1_base_fun = (
+                        target_value_and_grad_objective if use_target_lane else adapter
+                    )
                     phase1_base_scalar_fun = (
                         target_scalar_objective if use_target_lane else None
                     )
@@ -9693,6 +9826,10 @@ if __name__ == "__main__":
                     phase1_retry_callback = phase1_callback
                     phase1_post_run_state_sync = None
                     phase1_final_dofs = None
+                    phase1_optimizer_initial_value_and_grad = None
+                    main_optimizer_initial_value_and_grad = (
+                        target_lane_optimizer_initial_value_and_grad
+                    )
                     remaining_maxiter = MAXITER
                     if (
                         effective_initial_step_maxiter > 0
@@ -9715,6 +9852,14 @@ if __name__ == "__main__":
                                             effective_initial_step_scale,
                                         )
                                     )
+                                    phase1_optimizer_initial_value_and_grad = (
+                                        build_scaled_outer_problem_initial_value_and_grad(
+                                            target_lane_optimizer_initial_value_and_grad,
+                                            phase1_anchor_dofs,
+                                            effective_initial_step_scale,
+                                        )
+                                    )
+                                    main_optimizer_initial_value_and_grad = None
                                     phase1_scalar_fun = None
                                 else:
                                     (
@@ -9832,6 +9977,9 @@ if __name__ == "__main__":
                                             progress_callback=phase1_progress_callback,
                                             target_lane_initial_step_size=None,
                                             failure_callback=phase1_failure_callback,
+                                            optimizer_initial_value_and_grad=(
+                                                phase1_optimizer_initial_value_and_grad
+                                            ),
                                             invalid_state_events=(
                                                 target_lane_invalid_state_events
                                             ),
@@ -9998,6 +10146,9 @@ if __name__ == "__main__":
                                             args.target_lane_outer_initial_step_size
                                         ),
                                         failure_callback=main_failure_callback,
+                                        optimizer_initial_value_and_grad=(
+                                            main_optimizer_initial_value_and_grad
+                                        ),
                                         invalid_state_events=target_lane_invalid_state_events,
                                         run_dict=run_dict,
                                         single_stage_search_policy=single_stage_search_policy,
