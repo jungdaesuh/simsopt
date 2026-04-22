@@ -1727,6 +1727,57 @@ def test_traceable_inner_stationarity_grad_matches_directional_inner_objective(
     )
 
 
+def test_traceable_inner_stationarity_grad_stays_forward_mode_under_transfer_guard(
+    monkeypatch,
+):
+    half = jax.device_put(np.asarray(0.5, dtype=np.float64))
+
+    def _strict_quadratic_inner_objective_closure(*, coil_set_spec, **_kwargs):
+        def inner_objective(x_inner):
+            return half * jnp.dot(x_inner, x_inner) + jnp.dot(coil_set_spec, x_inner)
+
+        return inner_objective
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_make_boozer_penalty_objective_closure",
+        _strict_quadratic_inner_objective_closure,
+    )
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module.jax,
+        "vjp",
+        lambda *_args, **_kwargs: pytest.fail(
+            "_traceable_inner_stationarity_grad should stay on the forward-mode "
+            "path so the downstream outer VJP does not become reverse-over-reverse."
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module.jax,
+        "grad",
+        lambda *_args, **_kwargs: pytest.fail(
+            "_traceable_inner_stationarity_grad should use strict scalar VJP "
+            "helpers instead of jax.grad under transfer guard."
+        ),
+    )
+
+    x_inner = jax.device_put(np.asarray([1.5, -0.25], dtype=np.float64))
+    coil_set_spec = jax.device_put(np.asarray([0.5, -1.25], dtype=np.float64))
+
+    with jax.transfer_guard("disallow"):
+        stationarity_grad = (
+            surfaceobjectives_jax_module._traceable_inner_stationarity_grad(
+                x_inner,
+                coil_set_spec,
+            )
+        )
+
+    np.testing.assert_allclose(
+        stationarity_grad,
+        np.asarray(x_inner + coil_set_spec, dtype=np.float64),
+    )
+
+
 def test_traceable_objective_gradient_parts_use_strict_vjp_helpers(monkeypatch):
     half = jax.device_put(np.asarray(0.5, dtype=np.float64))
     true_value = jax.device_put(np.asarray(True, dtype=bool))
@@ -1876,11 +1927,70 @@ def test_traceable_objective_gradient_parts_skips_direct_vjp_for_iota_term(
     assert vjp_calls["count"] == 2
 
 
-def test_traceable_objective_gradient_parts_term_diagnostics_use_forward_direct_grad(
+@pytest.mark.parametrize(
+    ("term_name", "depends_on_x_inner", "depends_on_coil_dofs"),
+    [
+        ("non_qs", True, True),
+        ("residual", True, True),
+        ("iota", True, False),
+        ("length", False, True),
+        ("curvature", False, True),
+        ("curve_curve", False, True),
+        ("curve_surface", True, True),
+        ("surface_vessel", True, False),
+    ],
+)
+def test_traceable_single_stage_outer_term_dependency_flags(
+    term_name,
+    depends_on_x_inner,
+    depends_on_coil_dofs,
+):
+    assert (
+        surfaceobjectives_jax_module._traceable_single_stage_outer_term_dependency_flags(
+            term_name
+        )
+        == (depends_on_x_inner, depends_on_coil_dofs)
+    )
+
+
+@pytest.mark.parametrize(
+    ("term_name", "outer_objective_config", "expected_flags"),
+    [
+        ("non_qs", {"non_qs_weight": 0.0}, (False, False)),
+        ("surface_vessel", {"surface_vessel_weight": 1.0}, (True, False)),
+        (None, {"surface_vessel_weight": 1.0}, (True, False)),
+        (None, {"length_weight": 1.0}, (False, True)),
+        (None, {"non_qs_weight": 1.0}, (True, True)),
+        (
+            None,
+            {
+                weight_key: 0.0
+                for _, weight_key, _, _ in (
+                    surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+                )
+            },
+            (False, False),
+        ),
+    ],
+)
+def test_traceable_single_stage_effective_dependency_flags_respect_active_weights(
+    term_name,
+    outer_objective_config,
+    expected_flags,
+):
+    assert (
+        surfaceobjectives_jax_module._traceable_single_stage_effective_dependency_flags(
+            term_name,
+            objective_kwargs={"outer_objective_config": outer_objective_config},
+        )
+        == expected_flags
+    )
+
+
+def test_traceable_objective_gradient_parts_term_diagnostics_use_strict_vjp_direct_grad(
     monkeypatch,
 ):
     half = jax.device_put(np.asarray(0.5, dtype=np.float64))
-    true_value = jax.device_put(np.asarray(True, dtype=bool))
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
@@ -1897,8 +2007,232 @@ def test_traceable_objective_gradient_parts_term_diagnostics_use_forward_direct_
         "_evaluate_traceable_weighted_single_stage_outer_term",
         lambda term_name, x_inner, coil_dofs, coil_set_spec, objective_kwargs: (
             half * jnp.dot(coil_dofs, coil_dofs)
-            + surfaceobjectives_jax_module._take_runtime_scalar(x_inner, 0)
             if term_name == "length"
+            else pytest.fail("unexpected term")
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_solve_linearization",
+        lambda *_args, **_kwargs: pytest.fail(
+            "coil-only term diagnostics should skip the inner linear solve."
+        ),
+    )
+
+    original_vjp = surfaceobjectives_jax_module.jax.vjp
+    vjp_calls = {"count": 0}
+
+    def counting_vjp(fun, *primals, **kwargs):
+        vjp_calls["count"] += 1
+        return original_vjp(fun, *primals, **kwargs)
+
+    monkeypatch.setattr(surfaceobjectives_jax_module.jax, "vjp", counting_vjp)
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module.jax,
+        "jvp",
+        lambda *_args, **_kwargs: pytest.fail(
+            "coil-only term diagnostics should use strict scalar VJP instead "
+            "of forward-mode coil JVP."
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module.jax,
+        "grad",
+        lambda *_args, **_kwargs: pytest.fail(
+            "coil-only term diagnostics should use strict scalar VJP helpers "
+            "instead of jax.grad under transfer guard."
+        ),
+    )
+
+    coil_dofs = jax.device_put(np.asarray([3.0, 4.0], dtype=np.float64))
+    solved_x = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64))
+
+    with jax.transfer_guard("disallow"):
+        direct_grad, implicit_grad, total_grad, linear_solve_success = (
+            surfaceobjectives_jax_module._traceable_objective_gradient_parts(
+                object(),
+                lambda coil_dofs: coil_dofs,
+                coil_dofs=coil_dofs,
+                solved_x=solved_x,
+                solved_dense_plu=(object(), object(), object()),
+                linearization_kind="hessian",
+                linear_solve_tol=1.0e-10,
+                linear_solve_stab=0.0,
+                objective_kwargs={},
+                term_name="length",
+            )
+        )
+
+    np.testing.assert_allclose(direct_grad, np.asarray([3.0, 4.0], dtype=np.float64))
+    np.testing.assert_allclose(implicit_grad, np.zeros(2, dtype=np.float64))
+    np.testing.assert_allclose(total_grad, np.asarray([3.0, 4.0], dtype=np.float64))
+    assert bool(np.asarray(linear_solve_success))
+    assert vjp_calls["count"] == 1
+
+
+def test_traceable_objective_gradient_parts_skip_all_autodiff_for_zero_weight_term(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_evaluate_traceable_weighted_single_stage_outer_term",
+        lambda *_args, **_kwargs: pytest.fail(
+            "zero-weight term diagnostics should not evaluate the weighted term."
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_solve_linearization",
+        lambda *_args, **_kwargs: pytest.fail(
+            "zero-weight term diagnostics should skip the inner linear solve."
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module.jax,
+        "jvp",
+        lambda *_args, **_kwargs: pytest.fail(
+            "zero-weight term diagnostics should skip forward-mode coil JVP."
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module.jax,
+        "vjp",
+        lambda *_args, **_kwargs: pytest.fail(
+            "zero-weight term diagnostics should skip reverse-mode VJP."
+        ),
+    )
+
+    coil_dofs = jax.device_put(np.asarray([3.0, 4.0], dtype=np.float64))
+    solved_x = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64))
+    objective_kwargs = {"outer_objective_config": {"non_qs_weight": 0.0}}
+
+    with jax.transfer_guard("disallow"):
+        direct_grad, implicit_grad, total_grad, linear_solve_success = (
+            surfaceobjectives_jax_module._traceable_objective_gradient_parts(
+                object(),
+                lambda current_coil_dofs: current_coil_dofs,
+                coil_dofs=coil_dofs,
+                solved_x=solved_x,
+                solved_dense_plu=(object(), object(), object()),
+                linearization_kind="hessian",
+                linear_solve_tol=1.0e-10,
+                linear_solve_stab=0.0,
+                objective_kwargs=objective_kwargs,
+                term_name="non_qs",
+            )
+        )
+
+    np.testing.assert_allclose(direct_grad, np.zeros(2, dtype=np.float64))
+    np.testing.assert_allclose(implicit_grad, np.zeros(2, dtype=np.float64))
+    np.testing.assert_allclose(total_grad, np.zeros(2, dtype=np.float64))
+    assert bool(np.asarray(linear_solve_success))
+
+
+def test_traceable_total_gradient_skips_direct_vjp_when_active_weights_are_inner_only(
+    monkeypatch,
+):
+    true_value = jax.device_put(np.asarray(True, dtype=bool))
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_inner_objective_kwargs",
+        lambda _objective_kwargs: {"kind": "inner"},
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_inner_stationarity_grad",
+        lambda _solved_x, current_coil_set_spec, **_kwargs: current_coil_set_spec,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_evaluate_traceable_total_objective",
+        lambda x_inner, coil_dofs, coil_set_spec, objective_kwargs: (
+            surfaceobjectives_jax_module._take_runtime_scalar(x_inner, 0)
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_solve_linearization",
+        lambda solved_x, rhs, coil_set_spec, objective_kwargs, **_kwargs: (
+            rhs,
+            true_value,
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module.jax,
+        "jvp",
+        lambda *_args, **_kwargs: pytest.fail(
+            "inner-only active weights should skip direct coil JVP on the total objective."
+        ),
+    )
+
+    original_vjp = surfaceobjectives_jax_module.jax.vjp
+    vjp_calls = {"count": 0}
+
+    def counting_vjp(fun, *primals, **kwargs):
+        vjp_calls["count"] += 1
+        return original_vjp(fun, *primals, **kwargs)
+
+    monkeypatch.setattr(surfaceobjectives_jax_module.jax, "vjp", counting_vjp)
+
+    coil_dofs = jax.device_put(np.asarray([3.0, 4.0], dtype=np.float64))
+    solved_x = jax.device_put(np.asarray([1.0, 2.0], dtype=np.float64))
+    objective_kwargs = {
+        "outer_objective_config": {
+            "surface_vessel_weight": 1.0,
+            "non_qs_weight": 0.0,
+            "residual_weight": 0.0,
+            "iota_weight": 0.0,
+            "length_weight": 0.0,
+            "curvature_weight": 0.0,
+            "curve_curve_weight": 0.0,
+            "curve_surface_weight": 0.0,
+        }
+    }
+
+    with jax.transfer_guard("disallow"):
+        direct_grad, implicit_grad, total_grad, linear_solve_success = (
+            surfaceobjectives_jax_module._traceable_objective_gradient_parts(
+                object(),
+                lambda current_coil_dofs: current_coil_dofs,
+                coil_dofs=coil_dofs,
+                solved_x=solved_x,
+                solved_dense_plu=(object(), object(), object()),
+                linearization_kind="hessian",
+                linear_solve_tol=1.0e-10,
+                linear_solve_stab=0.0,
+                objective_kwargs=objective_kwargs,
+            )
+        )
+
+    np.testing.assert_allclose(direct_grad, np.zeros(2, dtype=np.float64))
+    np.testing.assert_allclose(implicit_grad, np.asarray([1.0, 0.0], dtype=np.float64))
+    np.testing.assert_allclose(total_grad, np.asarray([-1.0, 0.0], dtype=np.float64))
+    assert bool(np.asarray(linear_solve_success))
+    assert vjp_calls["count"] == 2
+
+
+def test_traceable_objective_gradient_parts_skips_direct_jvp_for_surface_vessel_term(
+    monkeypatch,
+):
+    true_value = jax.device_put(np.asarray(True, dtype=bool))
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_inner_objective_kwargs",
+        lambda _objective_kwargs: {"kind": "inner"},
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_inner_stationarity_grad",
+        lambda _solved_x, current_coil_set_spec, **_kwargs: current_coil_set_spec,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_evaluate_traceable_weighted_single_stage_outer_term",
+        lambda term_name, x_inner, coil_dofs, coil_set_spec, objective_kwargs: (
+            surfaceobjectives_jax_module._take_runtime_scalar(x_inner, 0)
+            if term_name == "surface_vessel"
             else pytest.fail("unexpected term")
         ),
     )
@@ -1908,6 +2242,13 @@ def test_traceable_objective_gradient_parts_term_diagnostics_use_forward_direct_
         lambda solved_x, rhs, coil_set_spec, objective_kwargs, **_kwargs: (
             rhs,
             true_value,
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module.jax,
+        "jvp",
+        lambda *_args, **_kwargs: pytest.fail(
+            "surface_vessel diagnostics should skip coil JVP for inner-only terms."
         ),
     )
 
@@ -1935,15 +2276,15 @@ def test_traceable_objective_gradient_parts_term_diagnostics_use_forward_direct_
                 linear_solve_tol=1.0e-10,
                 linear_solve_stab=0.0,
                 objective_kwargs={},
-                term_name="length",
+                term_name="surface_vessel",
             )
         )
 
-    np.testing.assert_allclose(direct_grad, np.asarray([3.0, 4.0], dtype=np.float64))
-    np.testing.assert_allclose(implicit_grad, np.zeros(2, dtype=np.float64))
-    np.testing.assert_allclose(total_grad, np.asarray([3.0, 4.0], dtype=np.float64))
+    np.testing.assert_allclose(direct_grad, np.zeros(2, dtype=np.float64))
+    np.testing.assert_allclose(implicit_grad, np.asarray([1.0, 0.0], dtype=np.float64))
+    np.testing.assert_allclose(total_grad, np.asarray([-1.0, 0.0], dtype=np.float64))
     assert bool(np.asarray(linear_solve_success))
-    assert vjp_calls["count"] == 0
+    assert vjp_calls["count"] == 2
 
 
 def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
@@ -1951,7 +2292,9 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
 ):
     objective_config = {
         weight_key: 1.0
-        for _, weight_key in surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+        for _, weight_key, _, _ in (
+            surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+        )
     }
     call_checks: dict[str, bool] = {}
 
@@ -1989,7 +2332,7 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         _record_array("raw_terms_coil_dofs", coil_dofs)
         return {
             term_name: jnp.asarray(float(index + 1), dtype=jnp.float64)
-            for index, (term_name, _weight_key) in enumerate(
+            for index, (term_name, _weight_key, _, _) in enumerate(
                 surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
             )
         }

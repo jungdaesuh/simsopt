@@ -66,7 +66,13 @@ def host_tree(value, *, dtype=None):
 
 def scalar_pullback_seed(value):
     jax = _require_jax()
-    return jax.device_put(np.array(1.0, dtype=np.dtype(value.dtype)))
+    # Build the pullback seed from ``value`` itself so the scalar cotangent stays
+    # on-device under ``jax.transfer_guard("disallow")``.
+    always_true = jax.numpy.logical_or(
+        jax.numpy.equal(value, value),
+        jax.numpy.not_equal(value, value),
+    )
+    return always_true.astype(value.dtype)
 
 
 def strict_scalar_grad(fun, arg):

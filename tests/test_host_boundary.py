@@ -57,6 +57,27 @@ def test_strict_scalar_grad_helpers_use_explicit_scalar_seed():
     )
 
 
+def test_strict_scalar_grad_helpers_respect_transfer_guard():
+    half = jax.device_put(np.asarray(0.5, dtype=np.float64))
+    x = jax.device_put(np.asarray([1.0, -2.0], dtype=np.float64))
+    scale = half
+
+    with jax.transfer_guard("disallow"):
+        value, grad = strict_scalar_value_and_grad(
+            lambda arg, coeff: coeff * jnp.sum(arg * arg),
+            x,
+            scale,
+        )
+        grad_only = strict_scalar_grad(
+            lambda arg: scale * jnp.sum(arg * arg),
+            x,
+        )
+
+    np.testing.assert_allclose(host_array(value), np.array(2.5))
+    np.testing.assert_allclose(host_array(grad), np.array([1.0, -2.0]))
+    np.testing.assert_allclose(host_array(grad_only), np.array([1.0, -2.0]))
+
+
 def test_explicit_cotangent_basis_returns_runtime_unit_vector():
     basis = explicit_cotangent_basis(4, 2, dtype=jnp.float64)
 

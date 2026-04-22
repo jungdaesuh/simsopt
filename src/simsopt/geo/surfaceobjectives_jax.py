@@ -132,23 +132,80 @@ def _traceable_diag_progress(message):
 logger = logging.getLogger(__name__)
 
 _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS = (
-    ("non_qs", "non_qs_weight"),
-    ("residual", "residual_weight"),
-    ("iota", "iota_weight"),
-    ("length", "length_weight"),
-    ("curvature", "curvature_weight"),
-    ("curve_curve", "curve_curve_weight"),
-    ("curve_surface", "curve_surface_weight"),
-    ("surface_vessel", "surface_vessel_weight"),
+    # (term_name, weight_key, depends_on_x_inner, depends_on_coil_dofs)
+    ("non_qs", "non_qs_weight", True, True),
+    ("residual", "residual_weight", True, True),
+    ("iota", "iota_weight", True, False),
+    ("length", "length_weight", False, True),
+    ("curvature", "curvature_weight", False, True),
+    ("curve_curve", "curve_curve_weight", False, True),
+    ("curve_surface", "curve_surface_weight", True, True),
+    ("surface_vessel", "surface_vessel_weight", True, False),
 )
 _TRACEABLE_SINGLE_STAGE_OUTER_TERM_WEIGHT_KEYS = {
     term_name: weight_key
-    for term_name, weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+    for term_name, weight_key, _, _ in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
 }
-_TRACEABLE_ZERO_COIL_GRAD_TERM_NAMES = frozenset({"iota"})
-_TRACEABLE_ZERO_INNER_GRAD_TERM_NAMES = frozenset(
-    {"length", "curvature", "curve_curve"}
-)
+
+
+def _traceable_single_stage_outer_term_dependency_flags(term_name):
+    """Return which state families a diagnostic outer term depends on."""
+    if term_name is None:
+        return True, True
+    for (
+        candidate_term_name,
+        _weight_key,
+        depends_on_x_inner,
+        depends_on_coil_dofs,
+    ) in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+        if candidate_term_name == term_name:
+            return depends_on_x_inner, depends_on_coil_dofs
+    raise ValueError(f"Unknown traceable single-stage outer term {term_name!r}.")
+
+
+def _traceable_single_stage_weight_is_active(weight):
+    return float(_host_scalar(weight)) != 0.0
+
+
+def _traceable_single_stage_effective_dependency_flags(
+    term_name,
+    *,
+    objective_kwargs,
+):
+    """Resolve effective dependencies after applying configured outer weights."""
+    outer_objective_config = objective_kwargs.get("outer_objective_config")
+    if outer_objective_config is None:
+        return _traceable_single_stage_outer_term_dependency_flags(term_name)
+
+    if term_name is not None:
+        weight_key = _TRACEABLE_SINGLE_STAGE_OUTER_TERM_WEIGHT_KEYS[term_name]
+        if not _traceable_single_stage_weight_is_active(
+            outer_objective_config.get(weight_key, 0.0)
+        ):
+            return False, False
+        return _traceable_single_stage_outer_term_dependency_flags(term_name)
+
+    depends_on_x_inner = False
+    depends_on_coil_dofs = False
+    for (
+        candidate_term_name,
+        weight_key,
+        _depends_on_x_inner,
+        _depends_on_coil_dofs,
+    ) in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+        if not _traceable_single_stage_weight_is_active(
+            outer_objective_config.get(weight_key, 0.0)
+        ):
+            continue
+        (
+            candidate_depends_on_x_inner,
+            candidate_depends_on_coil_dofs,
+        ) = _traceable_single_stage_outer_term_dependency_flags(
+            candidate_term_name
+        )
+        depends_on_x_inner = depends_on_x_inner or candidate_depends_on_x_inner
+        depends_on_coil_dofs = depends_on_coil_dofs or candidate_depends_on_coil_dofs
+    return depends_on_x_inner, depends_on_coil_dofs
 
 
 def _strict_scalar_grad(fun, arg):
@@ -449,7 +506,7 @@ def _traceable_weighted_single_stage_outer_term_values(
 ):
     """Apply configured weights to raw single-stage outer-objective terms."""
     weighted_terms = {}
-    for term_name, weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+    for term_name, weight_key, _, _ in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
         term_value = term_values[term_name]
         weight = outer_objective_config.get(weight_key, 0.0)
         if weight:
@@ -926,7 +983,7 @@ def _traceable_full_single_stage_outer_objective(
         outer_objective_config=outer_objective_config,
     )
     total = _runtime_float64_scalar(0.0, reference=next(iter(weighted_terms.values())))
-    for term_name, _weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+    for term_name, _weight_key, _, _ in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
         total = total + weighted_terms[term_name]
     return total
 
@@ -2172,6 +2229,10 @@ def _traceable_inner_stationarity_grad(
         coil_set_spec=coil_set_spec,
         **runtime_objective_kwargs,
     )
+    # This stationarity map is differentiated again by an outer VJP in
+    # ``_traceable_objective_gradient_parts``. Keeping the inner derivative in
+    # forward mode avoids a reverse-over-reverse trace that trips strict
+    # transfer guard on JAX 0.9.2 in the implicit-adjoint path.
     basis = jax.device_put(
         np.eye(int(x_inner.shape[0]), dtype=np.dtype(x_inner.dtype))
     )
@@ -2556,7 +2617,6 @@ def _traceable_objective_gradient_parts(
             "scalar_objective_fn and term_name are mutually exclusive traceable "
             "gradient selectors."
         )
-    inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
 
     def _evaluate_objective(x_inner, current_coil_dofs, coil_set_spec):
         if scalar_objective_fn is not None:
@@ -2581,8 +2641,25 @@ def _traceable_objective_gradient_parts(
             objective_kwargs,
         )
 
+    def _evaluate_objective_of_coils(current_coil_dofs):
+        return _evaluate_objective(
+            solved_x,
+            current_coil_dofs,
+            coil_set_spec_from_dofs(current_coil_dofs),
+        )
+
     coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
-    if term_name in _TRACEABLE_ZERO_INNER_GRAD_TERM_NAMES and scalar_objective_fn is None:
+    depends_on_x_inner = True
+    depends_on_coil_dofs = True
+    if scalar_objective_fn is None:
+        depends_on_x_inner, depends_on_coil_dofs = (
+            _traceable_single_stage_effective_dependency_flags(
+                term_name,
+                objective_kwargs=objective_kwargs,
+            )
+        )
+
+    if not depends_on_x_inner:
         dJ_dx = _runtime_zeros_like(solved_x)
         adjoint = _runtime_zeros_like(solved_x)
         linear_solve_success = _runtime_bool(True)
@@ -2609,44 +2686,20 @@ def _traceable_objective_gradient_parts(
             operand=None,
         )
 
-    if (
-        term_name in _TRACEABLE_ZERO_COIL_GRAD_TERM_NAMES
-        and scalar_objective_fn is None
-    ):
-        # The frozen-state iota penalty depends only on the solved inner state,
-        # so its explicit coil derivative is exactly zero. Avoid reverse-mode
-        # on this constant-in-coils scalar under strict transfer guard because
-        # JAX 0.9.2 instantiates a host scalar zero for the null tangent path.
+    if not depends_on_coil_dofs:
+        # Some diagnostic terms depend only on the solved inner state, so
+        # their explicit coil derivative is exactly zero. Avoid autodiff on
+        # these constant-in-coils scalars under strict transfer guard because
+        # JAX 0.9.2 instantiates host scalar zeros for null tangent paths.
         direct_grad = _runtime_zeros_like(coil_dofs)
-    elif term_name is not None:
-        objective_of_coils = lambda current_coil_dofs: _evaluate_objective(
-            solved_x,
-            current_coil_dofs,
-            coil_set_spec_from_dofs(current_coil_dofs),
-        )
-        coil_basis = jax.device_put(
-            np.eye(int(coil_dofs.shape[0]), dtype=np.dtype(coil_dofs.dtype))
-        )
-        direct_grad = jax.vmap(
-            lambda tangent: jax.jvp(
-                objective_of_coils,
-                (coil_dofs,),
-                (tangent,),
-            )[1]
-        )(coil_basis)
     else:
-        direct_grad = _strict_scalar_grad(
-            lambda current_coil_dofs: _evaluate_objective(
-                solved_x,
-                current_coil_dofs,
-                coil_set_spec_from_dofs(current_coil_dofs),
-            ),
-            coil_dofs,
-        )
+        direct_grad = _strict_scalar_grad(_evaluate_objective_of_coils, coil_dofs)
 
-    if term_name in _TRACEABLE_ZERO_INNER_GRAD_TERM_NAMES and scalar_objective_fn is None:
+    if not depends_on_x_inner:
         implicit_grad = _runtime_zeros_like(coil_dofs)
         return direct_grad, implicit_grad, direct_grad, linear_solve_success
+
+    inner_objective_kwargs = _traceable_inner_objective_kwargs(objective_kwargs)
 
     def stationarity_of_coils(current_coil_dofs):
         return _traceable_inner_stationarity_grad(
@@ -3739,7 +3792,7 @@ def diagnose_traceable_objective_runtime(
         "terms": {},
     }
     nonfinite_terms = []
-    for term_name, weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+    for term_name, weight_key, _, _ in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
         _traceable_diag_progress(f"term_gradient:{term_name}")
         direct_grad, implicit_grad, term_total_grad, linear_solve_success = (
             _traceable_objective_gradient_parts(
