@@ -189,6 +189,8 @@ class _BoozerAdjointRuntimeState:
     apply_transpose: callable
     solve_forward: callable
     solve_transpose: callable
+    solve_forward_with_status: callable
+    solve_transpose_with_status: callable
     stream_group_vjps: callable
     plu: tuple[jax.Array, jax.Array, jax.Array] | None = None
 
@@ -1671,6 +1673,33 @@ class BoozerSurfaceJAX(Optimizable):
             ),
         )
 
+    def _adjoint_hessian_stabilization_schedule(self):
+        """Return escalating ridge values for nearly singular LS adjoint Hessians.
+
+        The ondevice quasi-Newton lane can converge to a point whose Hessian is
+        numerically singular in directions that do not affect the primal accept
+        step but do matter when wrapper gradients solve the adjoint system. Use
+        a tolerance-scaled ridge schedule on the runtime-only adjoint path so
+        the matrix-free solve can recover without forcing dense artifacts.
+        """
+        base_stab = max(float(self.options["newton_stab"]), 0.0)
+        tol_floor = float(
+            np.sqrt(max(float(self.options["newton_tol"]), np.finfo(np.float64).eps))
+        )
+        max_promoted_stab = max(base_stab, 1.0e-2)
+        candidate_stabs = []
+        for candidate in (
+            base_stab,
+            min(max(base_stab, tol_floor), max_promoted_stab),
+            min(max(base_stab, tol_floor * 10.0), max_promoted_stab),
+            min(max(base_stab, tol_floor * 100.0), max_promoted_stab),
+            min(max(base_stab, tol_floor * 1000.0), max_promoted_stab),
+        ):
+            candidate = float(candidate)
+            if not candidate_stabs or candidate > candidate_stabs[-1]:
+                candidate_stabs.append(candidate)
+        return tuple(candidate_stabs)
+
     def _resolved_linearization_kind(self):
         if self.boozer_type == "exact":
             return "exact_jacobian"
@@ -1697,9 +1726,31 @@ class BoozerSurfaceJAX(Optimizable):
             apply_transpose,
             solve_forward,
             solve_transpose=None,
+            solve_forward_with_status=None,
+            solve_transpose_with_status=None,
         ):
+            # Auto-wrapped status callbacks sniff finiteness rather than claim
+            # unconditional success: dense-PLU iterative refinement can silently
+            # return non-finite entries on singular factors, and the checked
+            # adjoint path at _checked_boozer_linear_solve trusts this bit.
+            def _with_finiteness_status(solver):
+                def wrapped(rhs):
+                    solution = solver(rhs)
+                    success = jnp.all(jnp.isfinite(solution))
+                    return solution, success
+
+                return wrapped
+
             if solve_transpose is None:
                 solve_transpose = solve_forward
+            if solve_forward_with_status is None:
+                solve_forward_with_status = _with_finiteness_status(solve_forward)
+            if solve_transpose_with_status is None:
+                solve_transpose_with_status = (
+                    solve_forward_with_status
+                    if solve_transpose is solve_forward
+                    else _with_finiteness_status(solve_transpose)
+                )
             return (
                 linearization_kind,
                 x.shape[0],
@@ -1708,6 +1759,8 @@ class BoozerSurfaceJAX(Optimizable):
                 apply_transpose,
                 solve_forward,
                 solve_transpose,
+                solve_forward_with_status,
+                solve_transpose_with_status,
             )
 
         # On the supported JAX/CUDA LS lane, runtime adjoints stay
@@ -1723,17 +1776,29 @@ class BoozerSurfaceJAX(Optimizable):
             operator = _optimizer_jax._least_squares_normal_operator(residual_fn, x)
 
             def solve_forward(rhs):
+                tol_value = _as_runtime_float64(tol, reference=rhs)
                 return _optimizer_jax._solve_least_squares_normal_system(
                     residual_fn,
                     x,
                     rhs,
-                    tol=tol,
+                    tol=tol_value,
+                )
+
+            def solve_forward_with_status(rhs):
+                tol_value = _as_runtime_float64(tol, reference=rhs)
+                return _optimizer_jax._solve_least_squares_normal_system_with_status(
+                    residual_fn,
+                    x,
+                    rhs,
+                    tol=tol_value,
                 )
 
             return pack_callbacks(
                 operator["matvec"],
                 operator["transpose_matvec"],
                 solve_forward,
+                solve_forward_with_status=solve_forward_with_status,
+                solve_transpose_with_status=solve_forward_with_status,
             )
 
         if linearization_kind == "hessian":
@@ -1743,25 +1808,60 @@ class BoozerSurfaceJAX(Optimizable):
                 coil_set_spec=self.coil_set_spec,
                 hostify_inputs=False,
             )
-            operator = _optimizer_jax._hessian_linear_operator(
-                objective_fn,
-                x,
-                stab=self.options["newton_stab"],
-            )
+            hvp_fn = _optimizer_jax._hessian_vector_product_fn(objective_fn)
+            # solve_state["stab"] is promoted by solve_forward_with_status when
+            # the base ridge cannot invert the Hessian. apply_forward and the
+            # plain solve_forward read the latest promoted value so that any
+            # subsequent linearization call stays algebraically consistent with
+            # the solve it paired with. Call sites must therefore remain eager
+            # (host-resident) — do NOT jit apply_forward or the mutation will
+            # be invisible to the cached trace.
+            solve_state = {
+                "stab": _as_runtime_float64(float(self.options["newton_stab"]), reference=x)
+            }
+
+            def apply_forward(rhs):
+                rhs = jnp.asarray(rhs)
+                stab_value = jnp.asarray(solve_state["stab"], dtype=rhs.dtype)
+                return hvp_fn(x, rhs) + stab_value * rhs
 
             def solve_forward(rhs):
+                tol_value = _as_runtime_float64(tol, reference=rhs)
                 return _optimizer_jax._solve_hessian_system(
                     objective_fn,
                     x,
                     rhs,
-                    stab=self.options["newton_stab"],
-                    tol=tol,
+                    stab=solve_state["stab"],
+                    tol=tol_value,
                 )
 
+            def solve_forward_with_status(rhs):
+                last_solution = None
+                last_success = False
+                for candidate_stab in self._adjoint_hessian_stabilization_schedule():
+                    candidate_stab_value = _as_runtime_float64(
+                        candidate_stab, reference=rhs
+                    )
+                    solution, success = _optimizer_jax._solve_hessian_system_with_status(
+                        objective_fn,
+                        x,
+                        rhs,
+                        stab=candidate_stab_value,
+                        tol=_as_runtime_float64(tol, reference=rhs),
+                    )
+                    last_solution = solution
+                    last_success = success
+                    if bool(np.asarray(success)):
+                        solve_state["stab"] = candidate_stab_value
+                        break
+                return last_solution, last_success
+
             return pack_callbacks(
-                operator["matvec"],
-                operator["transpose_matvec"],
+                apply_forward,
+                apply_forward,
                 solve_forward,
+                solve_forward_with_status=solve_forward_with_status,
+                solve_transpose_with_status=solve_forward_with_status,
             )
 
         if dense_plu is not None:
@@ -1792,21 +1892,43 @@ class BoozerSurfaceJAX(Optimizable):
             operator = _optimizer_jax._jacobian_linear_operator(residual_fn, x)
 
             def solve_forward(rhs):
+                tol_value = _as_runtime_float64(tol, reference=rhs)
                 return _optimizer_jax._solve_jacobian_system(
                     residual_fn,
                     x,
                     rhs,
                     transpose=False,
-                    tol=tol,
+                    tol=tol_value,
                 )
 
             def solve_transpose(rhs):
+                tol_value = _as_runtime_float64(tol, reference=rhs)
                 return _optimizer_jax._solve_jacobian_system(
                     residual_fn,
                     x,
                     rhs,
                     transpose=True,
-                    tol=tol,
+                    tol=tol_value,
+                )
+
+            def solve_forward_with_status(rhs):
+                tol_value = _as_runtime_float64(tol, reference=rhs)
+                return _optimizer_jax._solve_jacobian_system_with_status(
+                    residual_fn,
+                    x,
+                    rhs,
+                    transpose=False,
+                    tol=tol_value,
+                )
+
+            def solve_transpose_with_status(rhs):
+                tol_value = _as_runtime_float64(tol, reference=rhs)
+                return _optimizer_jax._solve_jacobian_system_with_status(
+                    residual_fn,
+                    x,
+                    rhs,
+                    transpose=True,
+                    tol=tol_value,
                 )
 
             return pack_callbacks(
@@ -1814,6 +1936,8 @@ class BoozerSurfaceJAX(Optimizable):
                 operator["transpose_matvec"],
                 solve_forward,
                 solve_transpose,
+                solve_forward_with_status=solve_forward_with_status,
+                solve_transpose_with_status=solve_transpose_with_status,
             )
 
         raise RuntimeError(
@@ -1846,6 +1970,8 @@ class BoozerSurfaceJAX(Optimizable):
             apply_transpose,
             solve_forward,
             solve_transpose,
+            solve_forward_with_status,
+            solve_transpose_with_status,
         ) = self._build_runtime_linear_solve_callbacks(solved_state)
 
         return _BoozerAdjointRuntimeState(
@@ -1857,6 +1983,8 @@ class BoozerSurfaceJAX(Optimizable):
             apply_transpose=apply_transpose,
             solve_forward=solve_forward,
             solve_transpose=solve_transpose,
+            solve_forward_with_status=solve_forward_with_status,
+            solve_transpose_with_status=solve_transpose_with_status,
             stream_group_vjps=stream_group_vjps,
             plu=self.res.get("PLU"),
         )

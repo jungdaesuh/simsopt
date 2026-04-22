@@ -2325,6 +2325,8 @@ class TestBoozerSurfaceJAXClass:
             assert adjoint_state.plu is None
             assert callable(adjoint_state.solve_forward)
             assert callable(adjoint_state.solve_transpose)
+            assert callable(adjoint_state.solve_forward_with_status)
+            assert callable(adjoint_state.solve_transpose_with_status)
         else:
             assert isinstance(res["PLU"], tuple)
             assert len(res["PLU"]) == 3
@@ -3147,6 +3149,110 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(np.asarray(solved), np.asarray([1.0, -2.0]))
         np.testing.assert_allclose(recorded["rhs"], np.asarray([1.0, -2.0]))
         assert recorded["x_shape"][0] == booz._pack_decision_vector(0.3, 0.05).size
+
+    def test_get_adjoint_runtime_state_dense_plu_status_sniffs_nonfinite(
+        self, monkeypatch
+    ):
+        """Auto-wrapped dense-PLU status callbacks must flag non-finite solves."""
+        booz = _make_mock_boozer_surface()
+        booz.need_to_run_code = False
+        rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        identity = jnp.eye(rhs.size, dtype=jnp.float64)
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "unknown_kind_forcing_dense_plu_branch",
+            "PLU": (identity, identity, identity),
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+
+        nan_solution = jnp.full((rhs.size,), jnp.nan, dtype=jnp.float64)
+
+        monkeypatch.setattr(
+            _bsj,
+            "plu_solve_jax",
+            lambda *_args, **_kwargs: nan_solution,
+        )
+        monkeypatch.setattr(
+            _bsj,
+            "forward_backward_jax",
+            lambda *_args, **_kwargs: nan_solution,
+        )
+
+        adjoint_state = booz.get_adjoint_runtime_state()
+        solved_fwd, success_fwd = adjoint_state.solve_forward_with_status(rhs)
+        solved_trp, success_trp = adjoint_state.solve_transpose_with_status(rhs)
+
+        assert bool(np.asarray(success_fwd)) is False
+        assert bool(np.asarray(success_trp)) is False
+        assert np.all(np.isnan(np.asarray(solved_fwd)))
+        assert np.all(np.isnan(np.asarray(solved_trp)))
+
+    def test_get_adjoint_runtime_state_promotes_hessian_stabilization_on_retry(
+        self, monkeypatch
+    ):
+        """Failed operator solves should retry with a stabilized Hessian runtime."""
+        booz = _make_mock_boozer_surface()
+        booz.need_to_run_code = False
+        booz.options["newton_stab"] = 0.0
+        booz.options["newton_tol"] = 1e-8
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "hessian",
+            "PLU": None,
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+
+        recorded_stabs = []
+
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_hessian_vector_product_fn",
+            lambda _objective_fn: (lambda _x, vec: vec),
+        )
+
+        def fake_solve_hessian_system_with_status(
+            _objective_fn,
+            _x,
+            rhs,
+            *,
+            stab,
+            tol,
+        ):
+            del tol
+            stab_value = float(np.asarray(stab))
+            recorded_stabs.append(stab_value)
+            if stab_value < 1.0e-4:
+                return rhs, False
+            return rhs / (1.0 + stab_value), True
+
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_solve_hessian_system_with_status",
+            fake_solve_hessian_system_with_status,
+        )
+
+        adjoint_state = booz.get_adjoint_runtime_state()
+        rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        solved, success = adjoint_state.solve_transpose_with_status(rhs)
+
+        assert bool(np.asarray(success)) is True
+        np.testing.assert_allclose(recorded_stabs, np.asarray([0.0, 1.0e-4]))
+        np.testing.assert_allclose(
+            np.asarray(adjoint_state.apply_transpose(solved)),
+            np.asarray(rhs),
+            rtol=0.0,
+            atol=1e-12,
+        )
 
     def test_run_code_emits_newton_progress_updates(self, monkeypatch):
         """run_code() should surface Newton start/progress/completion through stage_callback."""
@@ -5659,11 +5765,19 @@ class TestBuildBoozerSurfaceRuntimeState:
 
         adjoint_state = booz.get_adjoint_runtime_state()
         solved = adjoint_state.solve_transpose(jnp.asarray([2.0, -4.0], dtype=jnp.float64))
+        solved_with_status, solve_success = adjoint_state.solve_transpose_with_status(
+            jnp.asarray([2.0, -4.0], dtype=jnp.float64)
+        )
         streamed = list(
             adjoint_state.stream_group_vjps(jnp.asarray([5.0, -1.0], dtype=jnp.float64))
         )
 
         np.testing.assert_allclose(np.asarray(solved), np.asarray([2.0, -4.0]))
+        np.testing.assert_allclose(
+            np.asarray(solved_with_status),
+            np.asarray([2.0, -4.0]),
+        )
+        assert bool(np.asarray(solve_success)) is True
         assert adjoint_state.decision_size == 2
         assert adjoint_state.dtype == jnp.float64
         np.testing.assert_allclose(
