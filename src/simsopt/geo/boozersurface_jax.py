@@ -44,6 +44,7 @@ from ..backend import (
 )
 from .._core.jax_host_boundary import (
     host_all_finite as _host_all_finite,
+    host_bool as _host_bool,
     host_array as _host_numpy,
     host_inf_norm as _host_inf_norm,
     host_scalar as _host_scalar,
@@ -1851,7 +1852,7 @@ class BoozerSurfaceJAX(Optimizable):
                     )
                     last_solution = solution
                     last_success = success
-                    if bool(np.asarray(success)):
+                    if _host_bool(success):
                         solve_state["stab"] = candidate_stab_value
                         break
                 return last_solution, last_success

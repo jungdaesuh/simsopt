@@ -865,6 +865,50 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(options["newton_tol"], 1.0e-7)
         self.assertEqual(options["newton_maxiter"], 9)
 
+    def test_initialize_boozer_surface_skips_self_intersection_after_failed_solve(
+        self,
+    ):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        base_boozer_surface_jax = self.build_fake_boozer_surface_jax_class(
+            record_run_calls=False
+        )
+
+        class FailingBoozerSurfaceJAX(base_boozer_surface_jax):
+            instances = []
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.res = {
+                    "success": False,
+                    "iter": 0,
+                    "iota": TEST_IOTA,
+                    "G": TEST_G0,
+                }
+
+        with patch.object(
+            module,
+            "evaluate_surface_self_intersection",
+            side_effect=AssertionError(
+                "self-intersection check must not run after a failed Boozer solve"
+            ),
+        ), self.patch_initialize_boozer_surface_jax(module, FailingBoozerSurfaceJAX):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Something went wrong with the Boozer solve",
+            ):
+                module.initialize_boozer_surface(
+                    surf_prev,
+                    mpol=TEST_MPOL,
+                    ntor=TEST_NTOR,
+                    bs=object(),
+                    vol_target=TEST_VOL_TARGET,
+                    constraint_weight=1.0,
+                    iota=TEST_IOTA,
+                    G0=TEST_G0,
+                    backend="jax",
+                )
+
     def test_resolve_warm_start_boozer_init_overrides_is_empty_without_warm_start(self):
         module = self.load_module()
 
@@ -916,6 +960,24 @@ class SingleStageExampleTests(unittest.TestCase):
                 "newton_maxiter_override": 12,
             },
         )
+
+    def test_resolve_target_lane_boozer_init_base_overrides_floors_bfgs_tol(
+        self,
+    ):
+        module = self.load_module()
+
+        overrides = module.resolve_target_lane_boozer_init_base_overrides(
+            field_backend="jax",
+            optimizer_backend="ondevice",
+            boozer_limited_memory=False,
+            target_lane_boozer_bfgs_tol=3.0e-6,
+            target_lane_boozer_bfgs_maxiter=None,
+            target_lane_boozer_newton_tol=None,
+            target_lane_boozer_newton_maxiter=None,
+        )
+
+        self.assertEqual(overrides["bfgs_tol_override"], 1.0e-8)
+        self.assertEqual(overrides["newton_tol_override"], 1.0e-8)
 
     def test_resolve_target_lane_boozer_init_base_overrides_is_empty_off_target_lane(
         self,
@@ -1614,6 +1676,23 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertTrue(args.initial_step_scale_explicit)
         self.assertTrue(args.initial_step_maxiter_explicit)
 
+    def test_parse_args_marks_explicit_stage2_bs_path(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--stage2-bs-path",
+                "/tmp/stage2/biot_savart_opt.json",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.stage2_bs_path, "/tmp/stage2/biot_savart_opt.json")
+        self.assertTrue(args.stage2_bs_path_explicit)
+
     def test_build_scaled_outer_problem_scales_coordinates_gradients_and_callback(self):
         module = self.load_module()
         seen = {"fun": [], "callback": []}
@@ -2069,6 +2148,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 json.dumps({"FINAL_IOTA": 0.123, "FINAL_G": 4.5}),
                 encoding="utf-8",
             )
+            (run_dir / "biot_savart_opt.json").write_text("{}", encoding="utf-8")
 
             with patch.object(module, "load", return_value=surface_marker):
                 warm_start = module.load_single_stage_warm_start_state(str(run_dir))
@@ -2078,6 +2158,9 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(warm_start["G"], 4.5)
         self.assertTrue(warm_start["surface_path"].endswith("surf_opt.json"))
         self.assertTrue(warm_start["results_path"].endswith("results.json"))
+        self.assertTrue(
+            warm_start["biot_savart_path"].endswith("biot_savart_opt.json")
+        )
 
     def test_load_single_stage_warm_start_state_reads_serialized_surface_payload(self):
         module = self.load_module()
@@ -2115,6 +2198,85 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(warm_start["surface"].dofs, surface_dofs)
         self.assertEqual(warm_start["iota"], 0.123)
         self.assertEqual(warm_start["G"], 4.5)
+        self.assertIsNone(warm_start["biot_savart_path"])
+
+    def test_resolve_single_stage_startup_seed_contract_prefers_warm_start_donor_seed(
+        self,
+    ):
+        module = self.load_module()
+        args = types.SimpleNamespace(
+            stage2_bs_path_explicit=False,
+            stage2_source="database",
+        )
+
+        contract = module.resolve_single_stage_startup_seed_contract(
+            args,
+            warm_start_state={
+                "biot_savart_path": "/tmp/warm-start/biot_savart_opt.json",
+            },
+        )
+
+        self.assertEqual(
+            contract["stage2_bs_path"],
+            "/tmp/warm-start/biot_savart_opt.json",
+        )
+        self.assertEqual(contract["stage2_source"], "warm_start_donor")
+        self.assertFalse(contract["tf_current_limit_enforced"])
+        self.assertFalse(contract["seed_hardware_validation_enforced"])
+
+    def test_resolve_single_stage_startup_seed_contract_respects_explicit_stage2_seed(
+        self,
+    ):
+        module = self.load_module()
+        args = types.SimpleNamespace(
+            stage2_bs_path_explicit=True,
+            stage2_source="database",
+        )
+
+        with patch.object(
+            module,
+            "build_stage2_bs_path",
+            return_value="/tmp/stage2/biot_savart_opt.json",
+        ):
+            contract = module.resolve_single_stage_startup_seed_contract(
+                args,
+                warm_start_state={
+                    "biot_savart_path": "/tmp/warm-start/biot_savart_opt.json",
+                },
+            )
+
+        self.assertEqual(
+            contract["stage2_bs_path"],
+            "/tmp/stage2/biot_savart_opt.json",
+        )
+        self.assertEqual(contract["stage2_source"], "explicit_path")
+        self.assertFalse(contract["tf_current_limit_enforced"])
+        self.assertFalse(contract["seed_hardware_validation_enforced"])
+
+    def test_resolve_single_stage_startup_seed_contract_keeps_derived_seed_guard(self):
+        module = self.load_module()
+        args = types.SimpleNamespace(
+            stage2_bs_path_explicit=False,
+            stage2_source="database",
+        )
+
+        with patch.object(
+            module,
+            "build_stage2_bs_path",
+            return_value="/tmp/database/biot_savart_opt.json",
+        ):
+            contract = module.resolve_single_stage_startup_seed_contract(
+                args,
+                warm_start_state=None,
+            )
+
+        self.assertEqual(
+            contract["stage2_bs_path"],
+            "/tmp/database/biot_savart_opt.json",
+        )
+        self.assertEqual(contract["stage2_source"], "database")
+        self.assertTrue(contract["tf_current_limit_enforced"])
+        self.assertTrue(contract["seed_hardware_validation_enforced"])
 
     def test_resolve_single_stage_search_policy_preserves_serialized_surface_state(
         self,
@@ -2746,6 +2908,51 @@ class SingleStageExampleTests(unittest.TestCase):
             rtol=1e-10,
             atol=1e-12,
         )
+
+    def test_project_surface_dofs_to_resolution_avoids_jax_lstsq_solver_path(
+        self,
+    ):
+        module = self.load_module()
+        source_surface = module.SurfaceRZFourier(
+            mpol=2,
+            ntor=1,
+            nfp=5,
+            stellsym=True,
+            quadpoints_phi=np.linspace(0.0, 0.2, 4, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+        )
+        source_dofs = source_surface.get_dofs().copy()
+        source_dofs[:] = np.linspace(0.03, 0.03 * source_dofs.size, source_dofs.size)
+        source_surface.set_dofs(source_dofs)
+        quadpoints_phi = np.linspace(0.0, 0.2, 6, endpoint=False)
+        quadpoints_theta = np.linspace(0.0, 1.0, 7, endpoint=False)
+
+        original_host_lstsq = np.linalg.lstsq
+        with patch.object(
+            module.jnp.linalg,
+            "lstsq",
+            side_effect=AssertionError(
+                "project_surface_dofs_to_resolution must not use jax.linalg.lstsq"
+            ),
+        ), patch.object(
+            module.np.linalg,
+            "lstsq",
+            wraps=original_host_lstsq,
+        ) as host_lstsq:
+            projected_dofs = module.project_surface_dofs_to_resolution(
+                source_surface,
+                mpol=4,
+                ntor=3,
+                quadpoints_phi=quadpoints_phi,
+                quadpoints_theta=quadpoints_theta,
+            )
+
+        self.assertTrue(host_lstsq.called)
+        self.assertEqual(
+            projected_dofs.shape,
+            (len(module.stellsym_scatter_indices(4, 3)),),
+        )
+        self.assertTrue(np.all(np.isfinite(projected_dofs)))
 
     def test_surface_gamma_from_dofs_allows_strict_transfer_guard_for_eager_stellsym_xyz(
         self,

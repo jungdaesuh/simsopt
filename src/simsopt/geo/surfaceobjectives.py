@@ -1152,7 +1152,10 @@ if _HAS_JAX:
     def surface_to_surface_pairwise_distances(gamma1, gamma2):
         gamma1 = gamma1.reshape((-1, 3))
         gamma2 = gamma2.reshape((-1, 3))
-        return jnp.sqrt(jnp.sum((gamma1[:, None, :] - gamma2[None, :, :]) ** 2, axis=2))
+        # Avoid integer_pow so strict CUDA transfer_guard does not stage the
+        # scalar exponent from host during traceable single-stage diagnostics.
+        delta = gamma1[:, None, :] - gamma2[None, :, :]
+        return jnp.sqrt(jnp.sum(jnp.square(delta), axis=2))
 
     def surface_to_surface_shortest_distance_pure(gamma1, gamma2):
         return jnp.min(surface_to_surface_pairwise_distances(gamma1, gamma2))

@@ -214,8 +214,13 @@ def test_single_stage_curvature_threshold_policy_caps_at_40():
 def _iota_unit_rhs(plu):
     """Return the standard IotasJAX inner cotangent for the LS path."""
     n = plu[1].shape[0]
+    return _iota_unit_rhs_from_decision_size(n, optimize_G=True)
+
+
+def _iota_unit_rhs_from_decision_size(n, *, optimize_G):
+    """Return the standard IotasJAX inner cotangent from one runtime size."""
     rhs = np.zeros(n)
-    rhs[-2] = 1.0
+    rhs[-2 if optimize_G else -1] = 1.0
     return rhs
 
 
@@ -2316,35 +2321,41 @@ class TestAdjointSolveConsistency:
     """
 
     def test_device_native_adjoint_solve_matches_host(self, boozer_setup):
-        """JAX PLU solve matches the legacy host triangular solve."""
+        """The runtime adjoint solve stays internally consistent on the LS path."""
         (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
             boozer_setup
         )
-        from simsopt.objectives.utilities import forward_backward, forward_backward_jax
+        adjoint_state = booz_jax.get_adjoint_runtime_state()
+        dJ_ds = _iota_unit_rhs_from_decision_size(
+            adjoint_state.decision_size,
+            optimize_G=booz_jax.res["G"] is not None,
+        )
+        adjoint, success = adjoint_state.solve_transpose_with_status(dJ_ds)
+        residual = np.asarray(adjoint_state.apply_transpose(adjoint) - dJ_ds, dtype=float)
 
-        P, L, U = booz_jax.res["PLU"]
-        dJ_ds = _iota_unit_rhs((P, L, U))
-
-        adj_host = forward_backward(P, L, U, dJ_ds)
-        adj_jax = np.asarray(forward_backward_jax(P, L, U, dJ_ds))
-
-        np.testing.assert_allclose(adj_jax, adj_host, rtol=1e-12, atol=1e-12)
+        assert bool(np.asarray(success))
+        assert np.all(np.isfinite(np.asarray(adjoint, dtype=float)))
+        np.testing.assert_allclose(
+            residual,
+            np.zeros_like(residual),
+            rtol=0.0,
+            atol=1e-10,
+        )
 
     def test_adjoint_residual(self, boozer_setup):
-        """Check that forward_backward_jax(PLU, dJ_ds) solves H^T adj = dJ_ds."""
+        """Check that the runtime solve satisfies the exposed transpose operator."""
         (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
             boozer_setup
         )
-        from simsopt.objectives.utilities import forward_backward_jax
+        adjoint_state = booz_jax.get_adjoint_runtime_state()
+        dJ_ds = _iota_unit_rhs_from_decision_size(
+            adjoint_state.decision_size,
+            optimize_G=booz_jax.res["G"] is not None,
+        )
+        adj, success = adjoint_state.solve_transpose_with_status(dJ_ds)
+        assert bool(np.asarray(success))
 
-        P, L, U = booz_jax.res["PLU"]
-        dJ_ds = _iota_unit_rhs((P, L, U))
-
-        adj = np.asarray(forward_backward_jax(P, L, U, dJ_ds))
-
-        # Verify: (P @ L @ U)^T @ adj should equal dJ_ds
-        H = P @ L @ U
-        residual = H.T @ adj - dJ_ds
+        residual = np.asarray(adjoint_state.apply_transpose(adj) - dJ_ds, dtype=float)
         rel = np.linalg.norm(residual) / (np.linalg.norm(dJ_ds) + 1e-30)
         logger.info(f"Adjoint residual: ||H^T adj - dJ_ds|| / ||dJ_ds|| = {rel:.2e}")
         assert rel < 1e-10, f"Adjoint solve residual too large: {rel:.2e}"
@@ -4091,7 +4102,10 @@ class TestCompositeObjective:
         ]
 
         assert recorded["calls"] == 1
-        assert recorded["rhs_shape"] == (3, booz_jax.res["PLU"][1].shape[0])
+        assert recorded["rhs_shape"] == (
+            3,
+            booz_jax.get_adjoint_runtime_state().decision_size,
+        )
         for batched_gradient, reference_gradient in zip(
             batched_gradients,
             reference_gradients,
@@ -7038,6 +7052,21 @@ class TestTraceableObjective:
         assert "pure_callback" not in str(jaxpr), (
             "Traceable objective still routes through jax.pure_callback"
         )
+
+    def test_traceable_value_and_grad_stays_operator_only(self, boozer_setup):
+        """The compiled target-lane gradient path must not stage dense LU solves."""
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        runtime_bundle, coil_dofs = self._make_traceable_runtime_bundle(
+            bs_jax,
+            booz_jax,
+            include_profile_suite=False,
+        )
+
+        jaxpr = jax.make_jaxpr(runtime_bundle["value_and_grad"])(coil_dofs)
+        jaxpr_text = str(jaxpr)
+
+        assert "_lu_solve" not in jaxpr_text
+        assert "lu_pivots_to_permutation" not in jaxpr_text
 
     def test_traceable_single_stage_alm_runtime_bundle_traces_without_pure_callback(
         self,

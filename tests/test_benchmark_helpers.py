@@ -2545,9 +2545,9 @@ def test_compute_adjoint_state_uses_runtime_adjoint_state():
         recorded["compute_dJ_ds_args"] = (coil_set_spec, iota, G, weight_inv_modB)
         return rhs
 
-    def fake_solve_transpose(passed_rhs):
+    def fake_solve_transpose_with_status(passed_rhs):
         recorded["solve_transpose_rhs"] = np.asarray(passed_rhs)
-        return passed_rhs
+        return passed_rhs, True
 
     def fake_apply_transpose(passed_adjoint):
         recorded["apply_transpose_adjoint"] = np.asarray(passed_adjoint)
@@ -2561,7 +2561,8 @@ def test_compute_adjoint_state_uses_runtime_adjoint_state():
                     G=0.2,
                     weight_inv_modB=False,
                 ),
-                solve_transpose=fake_solve_transpose,
+                solve_transpose=fake_solve_transpose_with_status,
+                solve_transpose_with_status=fake_solve_transpose_with_status,
                 apply_transpose=fake_apply_transpose,
             )
         ),
@@ -2583,6 +2584,30 @@ def test_compute_adjoint_state_uses_runtime_adjoint_state():
     np.testing.assert_allclose(recorded["apply_transpose_adjoint"], rhs)
     np.testing.assert_allclose(recorded["coil_dofs"], np.array([3.0, 4.0]))
     assert recorded["compute_dJ_ds_args"] == (expected_spec, 0.1, 0.2, False)
+
+
+def test_compute_adjoint_state_raises_when_runtime_operator_solve_fails():
+    jr_jax = types.SimpleNamespace(
+        boozer_surface=types.SimpleNamespace(
+            get_adjoint_runtime_state=lambda: types.SimpleNamespace(
+                solved_state=types.SimpleNamespace(
+                    iota=0.1,
+                    G=0.2,
+                    weight_inv_modB=False,
+                ),
+                linearization_kind="hessian",
+                solve_transpose_with_status=lambda rhs: (rhs, False),
+            )
+        ),
+        biotsavart=types.SimpleNamespace(
+            x=np.array([3.0, 4.0]),
+            coil_set_spec_from_dofs=lambda _coil_dofs: object(),
+        ),
+        _compute_dJ_ds=lambda *_args: np.array([1.0, -2.0]),
+    )
+
+    with pytest.raises(RuntimeError, match="operator-backed transpose solve"):
+        adjoint_probe_common.compute_adjoint_state(jr_jax)
 
 
 def test_accumulate_grouped_adjoint_derivative_uses_biotsavart_projection_api(

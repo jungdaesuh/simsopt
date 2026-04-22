@@ -18,6 +18,7 @@ should live in real Python modules rather than inline ``python -c`` blobs.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import subprocess
 import sys
@@ -42,6 +43,9 @@ _JAX_SUBPROCESS_CASES_PATH = (
 )
 _IMPORT_SMOKE_CASES_PATH = (
     Path(_REPO_ROOT) / "tests" / "subprocess" / "import_smoke_cases.py"
+)
+_SINGLE_STAGE_SURFACE_REPROJECTION_PROBE_PATH = (
+    Path(_REPO_ROOT) / "benchmarks" / "single_stage_surface_reprojection_probe.py"
 )
 _ENTRYPOINT_RUNTIME_AUDIT_PATHS = (
     Path(_REPO_ROOT) / "benchmarks" / "biot_savart_kernel_scaling.py",
@@ -814,6 +818,31 @@ def test_transfer_guard_disallow_allows_project_surface_dofs_to_resolution():
         args=("project-surface-dofs-to-resolution",),
         failure_message="project_surface_dofs_to_resolution strict transfer-guard smoke failed",
     )
+
+
+def test_single_stage_surface_reprojection_probe_emits_structured_cpu_result(tmp_path):
+    """The staged reprojection probe should complete on CPU and write stage metadata."""
+    output_json = tmp_path / "single_stage_surface_reprojection_probe.json"
+
+    rc, err = _run_python_script(
+        _SINGLE_STAGE_SURFACE_REPROJECTION_PROBE_PATH,
+        args=("--platform", "cpu", "--output-json", str(output_json)),
+        timeout=180,
+        extra_env={"XLA_PYTHON_CLIENT_PREALLOCATE": "false"},
+    )
+
+    assert rc == 0, f"single-stage reprojection probe failed:\n{err}"
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["passed"] is True
+    assert payload["failure_stage"] is None
+    assert [stage["name"] for stage in payload["stages"]] == [
+        "load_source_surface",
+        "device_put_source_dofs",
+        "surface_rz_fourier_spec_from_dofs",
+        "surface_rz_fourier_gamma_from_spec",
+        "surface_rz_fourier_gamma_from_dofs",
+        "project_surface_dofs_to_resolution",
+    ]
 
 
 def test_transfer_guard_disallow_allows_coil_symmetry_spec_identity_default():

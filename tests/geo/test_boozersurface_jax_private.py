@@ -43,6 +43,16 @@ def test_solve_boozer_adjoint_enables_iterative_refinement(monkeypatch):
     assert recorded["iterative_refinement"] is True
 
 
+def test_solve_boozer_adjoint_raises_on_failed_operator_runtime():
+    adjoint_state = types.SimpleNamespace(
+        linearization_kind="hessian",
+        solve_transpose_with_status=lambda rhs: (rhs, False),
+    )
+
+    with pytest.raises(RuntimeError, match="operator-backed runtime path"):
+        _soj._solve_boozer_adjoint(adjoint_state, jnp.ones((2,), dtype=jnp.float64))
+
+
 def _assert_plu_tuple_matches(actual, expected) -> None:
     for actual_part, expected_part in zip(actual, expected):
         np.testing.assert_allclose(actual_part, expected_part, atol=1e-14)
@@ -1518,6 +1528,29 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_hessian_system_status_jaxpr_stays_operator_only(self):
+        x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        rhs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+
+        def objective(z):
+            return 0.5 * jnp.dot(z, z)
+
+        jaxpr = jax.make_jaxpr(
+            lambda vec: _opt._solve_hessian_system_with_status(
+                objective,
+                x,
+                vec,
+                stab=0.0,
+                tol=1e-10,
+            )
+        )(rhs)
+        jaxpr_text = str(jaxpr)
+
+        assert "_lu_solve" not in jaxpr_text
+        assert "lu_pivots_to_permutation" not in jaxpr_text
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_newton_polish_traceable_skips_debug_callback_without_progress(
         self, monkeypatch
     ):
@@ -1552,20 +1585,58 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_nonfinite_linear_step_stalls_without_dense_fallback(
+        self, monkeypatch
+    ):
+        """Traceable Newton must fail closed instead of materializing a dense step."""
+
+        def fake_operator_only_linear_solve(_matvec, rhs, *, tol):
+            del _matvec, tol
+            return jnp.full_like(rhs, jnp.nan), jnp.array(False, dtype=bool)
+
+        def forbid_dense_hessian(*_args, **_kwargs):
+            raise AssertionError(
+                "traceable Newton should not materialize a dense Hessian fallback"
+            )
+
+        monkeypatch.setattr(
+            _opt,
+            "_solve_square_array_system_operator_only",
+            fake_operator_only_linear_solve,
+        )
+        monkeypatch.setattr(_opt, "_materialize_dense_hessian", forbid_dense_hessian)
+
+        x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        result = _opt.newton_polish_traceable(
+            lambda x: 0.5 * jnp.dot(x, x),
+            x0,
+            maxiter=3,
+            tol=1e-12,
+            stab=0.0,
+            materialize_hessian=False,
+        )
+
+        np.testing.assert_allclose(np.asarray(result["x"]), np.asarray(x0))
+        assert int(result["nit"]) == 0
+        assert bool(result["success"]) is False
+        assert result["hessian"] is None
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_newton_polish_traceable_rejected_step_keeps_zero_iterations(
         self, monkeypatch
     ):
         """Rejected traceable Newton steps must not increment nit or emit progress."""
         observed = {"progress_calls": 0}
 
-        def fake_gmres_solve(_hvp_fn, _x, rhs, *, stab, tol):
-            del _hvp_fn, _x, stab, tol
-            return -rhs, jnp.zeros_like(rhs), None
+        def fake_operator_only_linear_solve(_matvec, rhs, *, tol):
+            del _matvec, tol
+            return -rhs, jnp.array(True, dtype=bool)
 
         monkeypatch.setattr(
             _opt,
-            "_gmres_solve_newton_system",
-            fake_gmres_solve,
+            "_solve_square_array_system_operator_only",
+            fake_operator_only_linear_solve,
         )
 
         x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)

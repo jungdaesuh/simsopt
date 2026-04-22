@@ -788,12 +788,19 @@ def build_single_stage_problem_contract(
         },
         "stage2_seed": {
             "source": stage2_source,
+            "requested_source": getattr(args, "stage2_source", stage2_source),
             "biot_savart_path": os.path.abspath(stage2_bs_path),
             "results_path": os.path.abspath(stage2_results_path),
             "major_radius": float(R0),
             "toroidal_flux": float(s),
             "banana_surface_radius": float(stage2_results["banana_surf_radius"]),
             "order": int(order),
+            "tf_current_limit_enforced": bool(
+                getattr(args, "stage2_tf_current_limit_enforced", True)
+            ),
+            "hardware_seed_validation_enforced": bool(
+                getattr(args, "stage2_seed_hardware_validation_enforced", True)
+            ),
         },
         "warm_start": {
             "run_dir": None
@@ -801,10 +808,13 @@ def build_single_stage_problem_contract(
             else os.path.abspath(warm_start_run_dir),
             "surface_path": None
             if warm_start_state is None
-            else warm_start_state["surface_path"],
+            else warm_start_state.get("surface_path"),
             "results_path": None
             if warm_start_state is None
-            else warm_start_state["results_path"],
+            else warm_start_state.get("results_path"),
+            "biot_savart_path": None
+            if warm_start_state is None
+            else warm_start_state.get("biot_savart_path"),
             "donor_class": single_stage_search_policy.donor_class,
             "search_policy": single_stage_search_policy.search_policy,
         },
@@ -1745,6 +1755,13 @@ def resolve_single_stage_warm_start_paths(run_dir):
     return surface_path, results_path
 
 
+def resolve_single_stage_warm_start_biotsavart_path(run_dir):
+    candidate = os.path.join(os.path.abspath(run_dir), "biot_savart_opt.json")
+    if os.path.exists(candidate):
+        return candidate
+    return None
+
+
 @dataclass(frozen=True)
 class SerializedSurfaceState:
     surface_class: str
@@ -1923,6 +1940,7 @@ def _reconstruct_live_surface_from_serialized_state(surface):
 
 def load_single_stage_warm_start_state(run_dir):
     surface_path, results_path = resolve_single_stage_warm_start_paths(run_dir)
+    biot_savart_path = resolve_single_stage_warm_start_biotsavart_path(run_dir)
     try:
         surface = load_serialized_surface_state(surface_path)
     except (KeyError, TypeError, ValueError):
@@ -1939,6 +1957,40 @@ def load_single_stage_warm_start_state(run_dir):
         "G": warm_start_g,
         "surface_path": surface_path,
         "results_path": results_path,
+        "biot_savart_path": biot_savart_path,
+    }
+
+
+def resolve_single_stage_startup_seed_contract(args, *, warm_start_state):
+    donor_biot_savart_path = (
+        None if warm_start_state is None else warm_start_state.get("biot_savart_path")
+    )
+    if donor_biot_savart_path is not None and not getattr(
+        args,
+        "stage2_bs_path_explicit",
+        False,
+    ):
+        return {
+            "stage2_bs_path": donor_biot_savart_path,
+            "stage2_source": "warm_start_donor",
+            "tf_current_limit_enforced": False,
+            "seed_hardware_validation_enforced": False,
+        }
+
+    stage2_bs_path = build_stage2_bs_path(args)
+    if getattr(args, "stage2_bs_path_explicit", False):
+        return {
+            "stage2_bs_path": stage2_bs_path,
+            "stage2_source": "explicit_path",
+            "tf_current_limit_enforced": False,
+            "seed_hardware_validation_enforced": False,
+        }
+
+    return {
+        "stage2_bs_path": stage2_bs_path,
+        "stage2_source": args.stage2_source,
+        "tf_current_limit_enforced": True,
+        "seed_hardware_validation_enforced": True,
     }
 
 
@@ -2326,27 +2378,30 @@ def _fit_surface_xyz_tensor_dofs_to_gamma(
     quadpoints_phi,
     quadpoints_theta,
 ):
-    quadpoints_phi_host, quadpoints_phi_jax = _host_and_jax_float64(quadpoints_phi)
-    quadpoints_theta_host, quadpoints_theta_jax = _host_and_jax_float64(
-        quadpoints_theta
-    )
-    target_gamma_jax = _as_jax_float64(target_gamma).reshape(
-        quadpoints_phi_jax.size,
-        quadpoints_theta_jax.size,
+    quadpoints_phi_host = host_array(quadpoints_phi, dtype=np.float64)
+    quadpoints_theta_host = host_array(quadpoints_theta, dtype=np.float64)
+    target_gamma_host = host_array(target_gamma, dtype=np.float64).reshape(
+        quadpoints_phi_host.size,
+        quadpoints_theta_host.size,
         3,
     )
-    design_matrix = _surface_xyz_tensor_design_matrix(
+    # Keep the reprojection solve on the host. This path is a one-off compatibility
+    # fit, and routing it through the GPU solver stack has triggered Hopper-only
+    # cuSolver/runtime failures even when the target geometry itself is valid.
+    design_matrix_host = _surface_xyz_tensor_design_matrix_host(
         mpol=max(1, int(mpol)),
         ntor=max(1, int(ntor)),
         nfp=int(nfp),
         stellsym=bool(stellsym),
-        quadpoints_phi=quadpoints_phi_jax,
-        quadpoints_theta=quadpoints_theta_jax,
+        quadpoints_phi=quadpoints_phi_host,
+        quadpoints_theta=quadpoints_theta_host,
     )
-    rhs = jnp.reshape(target_gamma_jax, (-1,))
-    fitted_dofs, _, rank, _ = jnp.linalg.lstsq(design_matrix, rhs, rcond=None)
+    rhs_host = np.reshape(target_gamma_host, (-1,))
+    fitted_dofs, _, rank, _ = np.linalg.lstsq(
+        design_matrix_host, rhs_host, rcond=None
+    )
     fitted_dofs_host = _canonicalize_surface_xyz_tensor_fit_dofs(
-        np.asarray(jax.device_get(fitted_dofs), dtype=float),
+        np.asarray(fitted_dofs, dtype=float),
         mpol=mpol,
         ntor=ntor,
         nfp=nfp,
@@ -2354,8 +2409,8 @@ def _fit_surface_xyz_tensor_dofs_to_gamma(
         quadpoints_phi=quadpoints_phi_host,
         quadpoints_theta=quadpoints_theta_host,
     )
-    design_rank = int(np.asarray(jax.device_get(rank)))
-    return fitted_dofs_host, design_rank == int(design_matrix.shape[1])
+    design_rank = int(rank)
+    return fitted_dofs_host, design_rank == int(design_matrix_host.shape[1])
 
 
 def _quadpoints_cache_key(values):
@@ -3485,6 +3540,11 @@ def parse_args():
     args.boozer_least_squares_algorithm_explicit = (
         args.boozer_least_squares_algorithm is not None
     )
+    args.stage2_bs_path_explicit = _cli_option_was_provided(
+        raw_argv,
+        "--stage2-bs-path",
+        env_var="STAGE2_BS_PATH",
+    )
     args.initial_step_scale_explicit = _cli_option_was_provided(
         raw_argv,
         "--initial-step-scale",
@@ -3643,9 +3703,21 @@ class BoozerResidualExact(Optimizable):
         get_adjoint_runtime_state = getattr(booz_surf, "get_adjoint_runtime_state", None)
         if callable(get_adjoint_runtime_state):
             adjoint_state = get_adjoint_runtime_state()
-            adjoint = adjoint_state.solve_transpose(
-                jnp.asarray(dJ_ds, dtype=jnp.float64)
+            rhs = jnp.asarray(dJ_ds, dtype=jnp.float64)
+            solve_with_status = getattr(
+                adjoint_state,
+                "solve_transpose_with_status",
+                None,
             )
+            if callable(solve_with_status):
+                adjoint, success = solve_with_status(rhs)
+                if not bool(np.asarray(success)):
+                    raise RuntimeError(
+                        "BoozerResidualExact adjoint solve failed on the "
+                        f"operator-backed runtime path ({adjoint_state.linearization_kind})."
+                    )
+            else:
+                adjoint = adjoint_state.solve_transpose(rhs)
             adjoint_coil_derivative = Derivative({})
             for d_coil_array, coil_group_indices in adjoint_state.stream_group_vjps(
                 adjoint
@@ -3994,13 +4066,20 @@ def initialize_boozer_surface(
     # Check if boozer algo is successful
     success1 = host_bool(res["success"])  # True if the boozer surface algo converged
     postprocess_start_s = _perf_counter_s()
-    (
-        self_intersecting,
-        self_intersection_check_available,
-    ) = evaluate_surface_self_intersection(boozer_surface.surface)
-    success2 = not self_intersecting  # True if surface is not self intersecting
+    self_intersection_status = "not_evaluated"
+    if success1:
+        (
+            self_intersecting,
+            self_intersection_check_available,
+        ) = evaluate_surface_self_intersection(boozer_surface.surface)
+        success2 = not self_intersecting  # True if surface is not self intersecting
+        self_intersection_status = str(self_intersecting)
+    else:
+        self_intersecting = False
+        self_intersection_check_available = False
+        success2 = True
     success = success1 and success2
-    if not self_intersection_check_available:
+    if success1 and not self_intersection_check_available:
         print(
             "Skipping surface self-intersection check because "
             "ground+bentley_ottmann or shapely is unavailable."
@@ -4009,7 +4088,7 @@ def initialize_boozer_surface(
         print(
             "Boozer initialization failed: "
             f"solve_success={success1}, "
-            f"self_intersecting={self_intersecting}, "
+            f"self_intersecting={self_intersection_status}, "
             f"volume={host_float(boozer_surface.surface.volume())}, "
             f"iota_guess={solve_iota}, "
             f"iota_solved={host_float(res['iota'])}"
@@ -7223,7 +7302,7 @@ def resolve_target_lane_boozer_init_base_overrides(
     bfgs_tol_override = (
         None
         if target_lane_boozer_bfgs_tol is None
-        else float(target_lane_boozer_bfgs_tol)
+        else min(float(target_lane_boozer_bfgs_tol), 1.0e-8)
     )
     newton_tol_override = (
         _TARGET_LANE_BOOZER_NEWTON_TOL_FULL_MEMORY_DEFAULT
@@ -8087,8 +8166,33 @@ if __name__ == "__main__":
     stop_jax_profile_trace = begin_jax_profile_trace(args.jax_profile_dir)
     jax_profile_enabled = stop_jax_profile_trace is not None
     args.curvature_threshold = resolve_curvature_threshold(args.curvature_threshold)
+    warm_start_state_load_start_s = _perf_counter_s()
+    warm_start_state = (
+        None
+        if args.warm_start_run_dir is None
+        else load_single_stage_warm_start_state(args.warm_start_run_dir)
+    )
+    _mark_startup_progress(
+        "warm_start_state_loaded",
+        start_s=warm_start_state_load_start_s,
+    )
     stage2_seed_setup_start_s = _perf_counter_s()
-    stage2_bs_path = build_stage2_bs_path(args)
+    stage2_seed_contract = resolve_single_stage_startup_seed_contract(
+        args,
+        warm_start_state=warm_start_state,
+    )
+    stage2_bs_path = stage2_seed_contract["stage2_bs_path"]
+    stage2_source = stage2_seed_contract["stage2_source"]
+    stage2_tf_current_limit_enforced = stage2_seed_contract[
+        "tf_current_limit_enforced"
+    ]
+    stage2_seed_hardware_validation_enforced = stage2_seed_contract[
+        "seed_hardware_validation_enforced"
+    ]
+    args.stage2_tf_current_limit_enforced = stage2_tf_current_limit_enforced
+    args.stage2_seed_hardware_validation_enforced = (
+        stage2_seed_hardware_validation_enforced
+    )
     stage2_results_path, stage2_results = load_stage2_results(stage2_bs_path)
     _mark_startup_progress(
         "stage2_seed_resolved",
@@ -8156,16 +8260,6 @@ if __name__ == "__main__":
     stage2_bs_load_start_s = _perf_counter_s()
     bs = load(stage2_bs_path)
     _mark_startup_progress("stage2_bs_loaded", start_s=stage2_bs_load_start_s)
-    warm_start_state_load_start_s = _perf_counter_s()
-    warm_start_state = (
-        None
-        if args.warm_start_run_dir is None
-        else load_single_stage_warm_start_state(args.warm_start_run_dir)
-    )
-    _mark_startup_progress(
-        "warm_start_state_loaded",
-        start_s=warm_start_state_load_start_s,
-    )
 
     use_jax = args.backend == "jax"
     write_full_artifacts = should_write_single_stage_full_artifacts(
@@ -8260,15 +8354,39 @@ if __name__ == "__main__":
     stage2_tf_current_A = resolve_loaded_tf_current_A(
         stage2_results.get("TF_CURRENT_A"),
         tf_coils,
+        enforce_limit=stage2_tf_current_limit_enforced,
     )
+    if (
+        not stage2_tf_current_limit_enforced
+        and stage2_tf_current_A > TF_CURRENT_HARD_LIMIT_A
+    ):
+        print(
+            "Warning: loaded continuation seed TF current "
+            f"{stage2_tf_current_A:.6f} A exceeds the configured hard limit "
+            f"{TF_CURRENT_HARD_LIMIT_A:.6f} A. Startup is continuing because "
+            f"the seed source {stage2_source!r} was supplied explicitly rather "
+            "than derived from the default Stage 2 hardware-valid archive."
+        )
     current_sum = sum(abs(c.current.get_value()) for c in tf_coils)
 
     if CONSTRAINT_METHOD == "penalty":
+        banana_seed_current_A = float(banana_coils[0].current.get_value())
+        if (
+            not stage2_seed_hardware_validation_enforced
+            and banana_seed_current_A > float(args.banana_current_max_A)
+        ):
+            print(
+                "Warning: loaded continuation seed banana current "
+                f"{banana_seed_current_A:.6f} A exceeds the configured traversal "
+                f"box bound {float(args.banana_current_max_A):.6f} A. Startup is "
+                "continuing because the seed source was supplied explicitly rather "
+                "than derived from the default Stage 2 hardware-valid archive."
+            )
         apply_penalty_traversal_forbidden_box_bounds(
             bound_targets={"banana_current": banana_coils[0].current},
             requested_thresholds={"banana_current": args.banana_current_max_A},
-            seed_values={"banana_current": banana_coils[0].current.get_value()},
-            validate_seed=True,
+            seed_values={"banana_current": banana_seed_current_A},
+            validate_seed=stage2_seed_hardware_validation_enforced,
             seed_context="Loaded Stage 2 seed banana_current",
         )
 
@@ -10208,7 +10326,7 @@ if __name__ == "__main__":
             iota_target=iota_target,
             stage2_bs_path=stage2_bs_path,
             stage2_results_path=stage2_results_path,
-            stage2_source=args.stage2_source,
+            stage2_source=stage2_source,
             stage2_results=stage2_results,
             warm_start_run_dir=args.warm_start_run_dir,
             warm_start_state=warm_start_state,
@@ -10261,13 +10379,21 @@ if __name__ == "__main__":
         "WARM_START_RESULTS_PATH": None
         if warm_start_state is None
         else warm_start_state["results_path"],
-        "STAGE2_SOURCE": args.stage2_source,
+        "WARM_START_BIOT_SAVART_PATH": None
+        if warm_start_state is None
+        else warm_start_state.get("biot_savart_path"),
+        "STAGE2_SOURCE": stage2_source,
+        "STAGE2_SOURCE_REQUESTED": args.stage2_source,
         "STAGE2_BS_PATH": stage2_bs_path,
         "STAGE2_RESULTS_PATH": stage2_results_path,
         "STAGE2_SEED_MAJOR_RADIUS": R0,
         "STAGE2_SEED_TOROIDAL_FLUX": s,
         "STAGE2_SEED_BANANA_SURF_RADIUS": float(stage2_results["banana_surf_radius"]),
         "STAGE2_SEED_ORDER": order,
+        "STAGE2_TF_CURRENT_LIMIT_ENFORCED": bool(stage2_tf_current_limit_enforced),
+        "STAGE2_SEED_HARDWARE_VALIDATION_ENFORCED": bool(
+            stage2_seed_hardware_validation_enforced
+        ),
         "mpol": mpol,
         "ntor": ntor,
         "nphi": nphi,

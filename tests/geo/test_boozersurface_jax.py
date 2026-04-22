@@ -3254,6 +3254,73 @@ class TestBoozerSurfaceJAXClass:
             atol=1e-12,
         )
 
+    def test_get_adjoint_runtime_state_retry_uses_explicit_host_bool_boundary(
+        self, monkeypatch
+    ):
+        """Retry promotion must not coerce device bools through module np.asarray."""
+        booz = _make_mock_boozer_surface()
+        booz.need_to_run_code = False
+        booz.options["newton_stab"] = 0.0
+        booz.options["newton_tol"] = 1e-8
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "hessian",
+            "PLU": None,
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_hessian_vector_product_fn",
+            lambda _objective_fn: (lambda _x, vec: vec),
+        )
+
+        def fake_solve_hessian_system_with_status(
+            _objective_fn,
+            _x,
+            rhs,
+            *,
+            stab,
+            tol,
+        ):
+            del tol
+            stab_value = float(np.asarray(stab))
+            if stab_value < 1.0e-4:
+                return rhs, jnp.asarray(False)
+            return rhs / (1.0 + stab_value), jnp.asarray(True)
+
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_solve_hessian_system_with_status",
+            fake_solve_hessian_system_with_status,
+        )
+
+        original_asarray = _bsj.np.asarray
+
+        def reject_jax_array_asarray(value, *args, **kwargs):
+            if isinstance(value, jax.Array):
+                raise AssertionError("unexpected implicit device bool materialization")
+            return original_asarray(value, *args, **kwargs)
+
+        monkeypatch.setattr(_bsj.np, "asarray", reject_jax_array_asarray)
+
+        adjoint_state = booz.get_adjoint_runtime_state()
+        rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        solved, success = adjoint_state.solve_transpose_with_status(rhs)
+
+        assert bool(np.asarray(success)) is True
+        np.testing.assert_allclose(
+            np.asarray(adjoint_state.apply_transpose(solved)),
+            np.asarray(rhs),
+            rtol=0.0,
+            atol=1e-12,
+        )
+
     def test_run_code_emits_newton_progress_updates(self, monkeypatch):
         """run_code() should surface Newton start/progress/completion through stage_callback."""
         booz = _make_mock_boozer_surface()

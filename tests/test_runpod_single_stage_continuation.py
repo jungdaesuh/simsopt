@@ -1,4 +1,5 @@
 import argparse
+import os
 import runpy
 import subprocess
 import tempfile
@@ -94,6 +95,19 @@ class RunpodSingleStageContinuationTests(unittest.TestCase):
         self.assertIn(".venv-simsopt-jax", command)
         self.assertEqual(command[-1], "simsopt-jax")
 
+    def test_build_repo_tar_command_supports_file_backed_archive_mode(self):
+        module = load_module_globals()
+
+        command = module["build_repo_tar_command"](
+            local_columbia_root=Path("/tmp/columbia"),
+            repo_relative_path=Path("simsopt-jax"),
+            output_path=Path("/tmp/repo.tar.gz"),
+        )
+
+        self.assertIn("--file", command)
+        self.assertIn("/tmp/repo.tar.gz", command)
+        self.assertIn("--gzip", command)
+
     def test_build_repo_tar_env_disables_macos_copyfile_metadata(self):
         module = load_module_globals()
 
@@ -138,6 +152,94 @@ class RunpodSingleStageContinuationTests(unittest.TestCase):
             )
 
             self.assertIn("payload/hello.txt", completed.stdout)
+
+    def test_portable_tar_probes_runtime_flag_support_when_help_omits_flags(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            archive_root = root / "payload"
+            archive_root.mkdir()
+            (archive_root / "hello.txt").write_text("hello\n", encoding="utf-8")
+            archive_path = root / "payload.tar"
+            fake_tar_log = root / "fake-tar.log"
+            fake_tar = root / "tar"
+            fake_tar.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$FAKE_TAR_LOG"
+if [ "${1:-}" = "--help" ]; then
+  cat <<'EOF'
+tar(bsdtar): manipulate archive files
+Common Options:
+  -f <filename>  Location of archive
+EOF
+  exit 0
+fi
+has_no_mac=0
+has_no_xattrs=0
+archive_path=""
+prev=""
+for arg in "$@"; do
+  if [ "$arg" = "--no-mac-metadata" ]; then
+    has_no_mac=1
+  fi
+  if [ "$arg" = "--no-xattrs" ]; then
+    has_no_xattrs=1
+  fi
+  if [ "$prev" = "-cf" ] || [ "$prev" = "-czf" ]; then
+    archive_path="$arg"
+  fi
+  prev="$arg"
+done
+if [ "$archive_path" = "/dev/null" ]; then
+  if [ "$has_no_mac" -eq 1 ] || [ "$has_no_xattrs" -eq 1 ]; then
+    exit 0
+  fi
+  exit 64
+fi
+if [ "$has_no_mac" -ne 1 ] || [ "$has_no_xattrs" -ne 1 ]; then
+  echo "missing metadata suppression flags" >&2
+  exit 41
+fi
+if [ -n "$archive_path" ] && [ "$archive_path" != "-" ]; then
+  : > "$archive_path"
+fi
+exit 0
+""",
+                encoding="utf-8",
+            )
+            fake_tar.chmod(0o755)
+            env = dict(os.environ)
+            env["PATH"] = f"{root}:{env['PATH']}"
+            env["FAKE_TAR_LOG"] = str(fake_tar_log)
+
+            run_portable_tar(
+                "--file",
+                str(archive_path),
+                "--root",
+                str(root),
+                "payload",
+                check=True,
+                env=env,
+            )
+
+            calls = fake_tar_log.read_text(encoding="utf-8").splitlines()
+            self.assertIn(
+                "--no-mac-metadata -cf /dev/null --files-from /dev/null",
+                calls,
+            )
+            self.assertIn(
+                "--no-xattrs -cf /dev/null --files-from /dev/null",
+                calls,
+            )
+            self.assertTrue(
+                any(
+                    "--no-mac-metadata --no-xattrs" in call
+                    and f"-cf {archive_path}" in call
+                    and f"-C {root}" in call
+                    and call.endswith(" payload")
+                    for call in calls
+                )
+            )
 
     def test_build_remote_repo_extract_command_wraps_remote_shell_payload(self):
         module = load_module_globals()
@@ -188,7 +290,11 @@ class RunpodSingleStageContinuationTests(unittest.TestCase):
             pod_id="pod123",
         )
 
-        command = module["build_remote_repo_extract_command"](plan, ssh_info)
+        command = module["build_remote_repo_extract_command"](
+            plan,
+            ssh_info,
+            remote_archive_path=PurePosixPath("/tmp/simsopt-jax-run-001.tar.gz"),
+        )
 
         self.assertEqual(command[-2], "root@157.157.221.29")
         self.assertTrue(command[-1].startswith("bash -lc "))
@@ -199,13 +305,16 @@ class RunpodSingleStageContinuationTests(unittest.TestCase):
             command[-1],
         )
         self.assertIn("rm -rf /workspace/columbia/simsopt-jax", command[-1])
+        self.assertIn("rm -f /tmp/simsopt-jax-run-001.tar.gz", command[-1])
+        self.assertIn("EXIT", command[-1])
         self.assertIn(
             "mv /workspace/columbia/.runpod-build-cache-simsopt-jax "
             "/workspace/columbia/simsopt-jax/build",
             command[-1],
         )
         self.assertIn(
-            "tar --no-same-owner --no-same-permissions -xzf - -C /workspace/columbia",
+            "tar --no-same-owner --no-same-permissions -xzf "
+            "/tmp/simsopt-jax-run-001.tar.gz -C /workspace/columbia",
             command[-1],
         )
 
@@ -261,7 +370,17 @@ class RunpodSingleStageContinuationTests(unittest.TestCase):
         self.assertIn('if ! mkdir "${RUN_LOCK_DIR}" 2>/dev/null; then', script)
         self.assertIn('printf "%s\\n" "$$" > "${RUN_LOCK_DIR}/pid"', script)
         self.assertIn("Miniforge3-Linux-x86_64.sh", script)
+        self.assertIn('local required_release="12.9"', script)
+        self.assertIn("cuda-keyring_1.1-1_all.deb", script)
+        self.assertIn('apt-get install -y --no-install-recommends "cuda-toolkit-${required_release//./-}"', script)
+        self.assertIn('ln -sfn "/usr/local/cuda-${required_release}" /usr/local/cuda', script)
+        self.assertIn('export SIMSOPT_JAX_CUDA_LIBRARY_MODE="bundled"', script)
+        self.assertIn(
+            'python -m pip install --upgrade --force-reinstall \'jax[cuda12]==0.9.2\'',
+            script,
+        )
         self.assertIn('python -m pip install -e ".[JAX_GPU,dev]"', script)
+        self.assertIn('expected = "0.9.2"', script)
         self.assertIn(
             "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT=0.0.dev0+gdeadbeef",
             script,
@@ -287,6 +406,62 @@ class RunpodSingleStageContinuationTests(unittest.TestCase):
             script,
         )
         self.assertIn("--strict-validation", script)
+
+    def test_build_remote_execution_script_appends_single_stage_passthrough_args(self):
+        module = load_module_globals()
+        plan = module["LaunchPlan"](
+            pod_id="pod123",
+            run_id="run-001",
+            pretend_version="0.0.dev0+gdeadbeef",
+            local_columbia_root=Path("/tmp/columbia"),
+            local_repo_root=Path("/tmp/columbia/simsopt-jax"),
+            local_equilibrium_path=Path("/tmp/columbia/DATABASE/EQUILIBRIA/wout.nc"),
+            local_donor_run_dir=Path("/tmp/columbia/autoresearch/run"),
+            local_output_dir=Path("/tmp/out"),
+            remote_columbia_root="/workspace/columbia",
+            remote_repo_root="/workspace/columbia/simsopt-jax",
+            remote_equilibrium_path="/workspace/columbia/DATABASE/EQUILIBRIA/wout.nc",
+            remote_donor_run_dir="/workspace/columbia/autoresearch/run",
+            remote_output_root="/workspace/continuation-runs",
+            remote_run_root="/workspace/continuation-runs/continuation-run-001",
+            remote_jax_profile_dir=None,
+            remote_summary_path="/workspace/continuation-runs/continuation-run-001/continuation_summary.json",
+            remote_validation_path="/workspace/continuation-runs/continuation-run-001/continuation_validation.json",
+            remote_cache_dir="/workspace/.jax-cache/cont",
+            remote_conda_root="/opt/conda",
+            plasma_surf_filename="wout.nc",
+            system_deps_mode="auto",
+            backend_mode="jax_gpu_parity",
+            transfer_guard="disallow",
+            trial_policy="validated-fast",
+            run_mode="new",
+            max_final_field_error=5e-4,
+            max_final_abs_iota_error=None,
+            max_final_non_qs=0.05,
+            mpol=10,
+            ntor=10,
+            nphi=255,
+            ntheta=64,
+            maxiter=40,
+            coarse_maxiter=1,
+            medium_maxiter=1,
+            prefinal_maxiter=2,
+            fetch_full_run_root=False,
+            single_stage_passthrough_args=(
+                "--iota-target",
+                "0.28",
+                "--vol-target",
+                "0.04",
+                "--constraint-method",
+                "penalty",
+            ),
+        )
+
+        script = module["build_remote_execution_script"](plan)
+
+        self.assertIn("--iota-target 0.28", script)
+        self.assertIn("--vol-target 0.04", script)
+        self.assertIn("--constraint-method penalty", script)
 
     def test_build_remote_execution_script_supports_resume_mode(self):
         module = load_module_globals()
@@ -564,7 +739,10 @@ class RunpodSingleStageContinuationTests(unittest.TestCase):
                 local_output_root=str(columbia_root / ".artifacts"),
             )
 
-            plan = module["resolve_launch_plan"](args)
+            plan = module["resolve_launch_plan"](
+                args,
+                passthrough_args=("--iota-target", "0.28", "--vol-target", "0.04"),
+            )
 
         self.assertEqual(plan.run_id, "run-xyz")
         self.assertEqual(plan.pretend_version, "0.0.dev0+gdeadbeef")
@@ -585,6 +763,10 @@ class RunpodSingleStageContinuationTests(unittest.TestCase):
             "/workspace/continuation-runs/continuation-run-xyz/xprof",
         )
         self.assertEqual(plan.run_mode, "new")
+        self.assertEqual(
+            plan.single_stage_passthrough_args,
+            ("--iota-target", "0.28", "--vol-target", "0.04"),
+        )
 
     def test_resolve_launch_plan_supports_multiple_donors(self):
         module = load_module_globals()

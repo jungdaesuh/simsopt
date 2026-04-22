@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -22,6 +23,8 @@ DEFAULT_REMOTE_CACHE_DIR = PurePosixPath("/workspace/.jax-cache/single-stage-con
 DEFAULT_REMOTE_CONDA_ROOT = PurePosixPath("/opt/conda")
 DEFAULT_ENV_NAME = "jax-0.9.2"
 DEFAULT_SYSTEM_DEPS_MODE = "auto"
+EXACT_JAX_GPU_WHEEL_SPEC = "jax[cuda12]==0.9.2"
+REQUIRED_RUNPOD_CUDA_TOOLKIT_RELEASE = "12.9"
 DEFAULT_PLASMA_SURF_FILENAME = "wout_nfp5ginsburg_desc_iota21.nc"
 DEFAULT_LOCAL_EQUILIBRIUM_PATH = (
     LOCAL_COLUMBIA_ROOT
@@ -120,6 +123,7 @@ class LaunchPlan:
     medium_maxiter: int
     prefinal_maxiter: int
     fetch_full_run_root: bool
+    single_stage_passthrough_args: tuple[str, ...] = ()
     local_donor_run_dirs: tuple[Path, ...] = ()
     remote_donor_run_dirs: tuple[str, ...] = ()
 
@@ -158,6 +162,10 @@ def remote_donor_run_dirs(plan: LaunchPlan) -> tuple[str, ...]:
     if plan.remote_donor_run_dirs:
         return plan.remote_donor_run_dirs
     return (plan.remote_donor_run_dir,)
+
+
+def _normalize_passthrough_args(raw_args: list[str]) -> tuple[str, ...]:
+    return tuple(token for token in raw_args if token != "--")
 
 
 def launch_plan_uses_campaign(plan: LaunchPlan) -> bool:
@@ -349,14 +357,18 @@ def build_repo_tar_command(
     *,
     local_columbia_root: Path,
     repo_relative_path: Path,
+    output_path: Path | None = None,
 ) -> list[str]:
     command = [
         "bash",
         str(_PORTABLE_TAR_SCRIPT),
-        "--gzip",
         "--root",
         str(local_columbia_root),
     ]
+    if output_path is None:
+        command.append("--gzip")
+    else:
+        command.extend(["--file", str(output_path), "--gzip"])
     for pattern in _TAR_EXCLUDES:
         command.extend(["--exclude", pattern])
     command.append(str(repo_relative_path))
@@ -370,7 +382,12 @@ def build_repo_tar_env() -> dict[str, str]:
     return env
 
 
-def build_remote_repo_extract_command(plan: LaunchPlan, ssh_info: SshInfo) -> list[str]:
+def build_remote_repo_extract_command(
+    plan: LaunchPlan,
+    ssh_info: SshInfo,
+    *,
+    remote_archive_path: PurePosixPath,
+) -> list[str]:
     repo_root = PurePosixPath(plan.remote_repo_root)
     build_cache_root = PurePosixPath(plan.remote_columbia_root) / (
         f"{_REMOTE_REPO_BUILD_CACHE_PREFIX}{repo_root.name}"
@@ -378,6 +395,7 @@ def build_remote_repo_extract_command(plan: LaunchPlan, ssh_info: SshInfo) -> li
     quoted_columbia_root = shlex.quote(plan.remote_columbia_root)
     quoted_repo_root = shlex.quote(plan.remote_repo_root)
     quoted_build_cache_root = shlex.quote(str(build_cache_root))
+    quoted_remote_archive_path = shlex.quote(str(remote_archive_path))
     remote_command = (
         f"mkdir -p {quoted_columbia_root} && "
         f"if [ -d {quoted_repo_root}/build ]; then "
@@ -385,7 +403,8 @@ def build_remote_repo_extract_command(plan: LaunchPlan, ssh_info: SshInfo) -> li
         f"mv {quoted_repo_root}/build {quoted_build_cache_root}; "
         f"fi && "
         f"rm -rf {quoted_repo_root} && "
-        f"tar --no-same-owner --no-same-permissions -xzf - -C {quoted_columbia_root} && "
+        f"trap 'rm -f {quoted_remote_archive_path}' EXIT && "
+        f"tar --no-same-owner --no-same-permissions -xzf {quoted_remote_archive_path} -C {quoted_columbia_root} && "
         f"if [ -d {quoted_build_cache_root} ]; then "
         f"mv {quoted_build_cache_root} {quoted_repo_root}/build; "
         f"fi"
@@ -465,6 +484,25 @@ def build_remote_execution_script(plan: LaunchPlan) -> str:
         "  rm -rf /var/lib/apt/lists/*",
         "}",
         "",
+        "ensure_required_cuda_toolkit() {",
+        f'  local required_release="{REQUIRED_RUNPOD_CUDA_TOOLKIT_RELEASE}"',
+        '  local keyring_deb="/tmp/cuda-keyring_1.1-1_all.deb"',
+        '  if [[ ! -d "/usr/local/cuda-${required_release}" ]]; then',
+        "    python - <<'PY'",
+        "import urllib.request",
+        "urllib.request.urlretrieve(",
+        '    "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb",',
+        '    "/tmp/cuda-keyring_1.1-1_all.deb",',
+        ")",
+        "PY",
+        '    dpkg -i "${keyring_deb}"',
+        "    apt-get update",
+        '    apt-get install -y --no-install-recommends "cuda-toolkit-${required_release//./-}"',
+        '    rm -f "${keyring_deb}"',
+        "  fi",
+        '  ln -sfn "/usr/local/cuda-${required_release}" /usr/local/cuda',
+        "}",
+        "",
         'if [[ "${SYSTEM_DEPS_MODE}" == "always" ]]; then',
         "  install_system_deps",
         'elif [[ "${SYSTEM_DEPS_MODE}" == "auto" ]]; then',
@@ -485,6 +523,18 @@ def build_remote_execution_script(plan: LaunchPlan) -> str:
         ")",
         "PY",
         '  bash /tmp/miniforge.sh -b -p "${CONDA_ROOT}"',
+        "fi",
+        "",
+        'CUDA_TOOLKIT_RELEASE=""',
+        'if [[ -L "/usr/local/cuda" ]]; then',
+        '  CUDA_TOOLKIT_RELEASE="$(readlink -f /usr/local/cuda | sed -n \'s#.*/cuda-\\([0-9][0-9]*\\.[0-9][0-9]*\\).*#\\1#p\')"',
+        "fi",
+        'if [[ -z "${CUDA_TOOLKIT_RELEASE}" ]] && [[ -x "/usr/local/cuda/bin/nvcc" ]]; then',
+        '  CUDA_TOOLKIT_RELEASE="$(/usr/local/cuda/bin/nvcc --version | sed -n \'s/.*release \\([0-9][0-9]*\\.[0-9][0-9]*\\).*/\\1/p\' | head -n 1)"',
+        "fi",
+        f'if [[ -z "${{CUDA_TOOLKIT_RELEASE}}" ]] || dpkg --compare-versions "${{CUDA_TOOLKIT_RELEASE}}" lt "{REQUIRED_RUNPOD_CUDA_TOOLKIT_RELEASE}"; then',
+        "  ensure_required_cuda_toolkit",
+        f'  CUDA_TOOLKIT_RELEASE="{REQUIRED_RUNPOD_CUDA_TOOLKIT_RELEASE}"',
         "fi",
         "",
         (
@@ -508,23 +558,19 @@ def build_remote_execution_script(plan: LaunchPlan) -> str:
         "fi",
         'conda activate "${ENV_NAME}"',
         'cd "${REPO_ROOT}"',
+        'export SIMSOPT_JAX_CUDA_LIBRARY_MODE="bundled"',
+        'python -m pip install --upgrade pip setuptools wheel',
+        f'python -m pip install --upgrade --force-reinstall {shlex.quote(EXACT_JAX_GPU_WHEEL_SPEC)}',
         'python -m pip install -e ".[JAX_GPU,dev]"',
-        # Pin NVIDIA CUDA wheels to the 12.8.x line so pip-shipped ptxas/nvJitLink
-        # match a host CUDA 12.8 toolkit (system nvlink). Required on the
-        # runpod/pytorch:*-cuda12.8.* image because jax-cuda12-plugin 0.10
-        # otherwise pulls 12.9 wheels, emitting cubin that system nvlink rejects.
-        "python -m pip install --upgrade --force-reinstall --no-deps "
-        "'nvidia-cuda-nvcc-cu12==12.8.93' "
-        "'nvidia-nvjitlink-cu12==12.8.93' "
-        "'nvidia-cuda-runtime-cu12==12.8.90' "
-        "'nvidia-cuda-cupti-cu12==12.8.90' "
-        "'nvidia-cuda-nvrtc-cu12==12.8.93' "
-        "'nvidia-cublas-cu12==12.8.4.1' "
-        "'nvidia-cusparse-cu12==12.5.8.93' "
-        "'nvidia-cusolver-cu12==11.7.3.90' "
-        "'nvidia-cufft-cu12==11.3.3.83' "
-        "'nvidia-cudnn-cu12==9.8.0.87' "
-        "'nvidia-nccl-cu12==2.26.2'",
+        "python - <<'PY'",
+        "import jax",
+        "import jaxlib",
+        'expected = "0.9.2"',
+        "if jax.__version__ != expected or jaxlib.__version__ != expected:",
+        "    raise SystemExit(",
+        '        f\"Expected jax/jaxlib {expected}, got jax={jax.__version__} jaxlib={jaxlib.__version__}\"',
+        "    )",
+        "PY",
         f"mkdir -p {shlex.quote(plan.remote_output_root)} {shlex.quote(plan.remote_cache_dir)}",
         "export PYTHONUNBUFFERED=1",
         "export HF_HUB_DISABLE_TELEMETRY=1",
@@ -624,6 +670,7 @@ def build_remote_execution_script(plan: LaunchPlan) -> str:
         command.extend(
             ["--jax-profile-dir", plan.remote_jax_profile_dir]
         )
+    command.extend(plan.single_stage_passthrough_args)
     lines.append(_shell_join(command))
     return "\n".join(lines)
 
@@ -642,31 +689,34 @@ def stream_repo_archive(
         plan.local_columbia_root,
         description="local repo root",
     )
-    tar_command = build_repo_tar_command(
-        local_columbia_root=plan.local_columbia_root,
-        repo_relative_path=repo_relative_path,
+    remote_archive_path = PurePosixPath("/tmp") / (
+        f"{repo_relative_path.name}-{plan.run_id}.tar.gz"
     )
-    ssh_command = build_remote_repo_extract_command(plan, ssh_info)
-    tar_process = subprocess.Popen(
-        tar_command,
-        stdout=subprocess.PIPE,
-        env=build_repo_tar_env(),
-    )
-    try:
-        ssh_process = subprocess.run(
-            ssh_command,
-            check=False,
-            stdin=tar_process.stdout,
-            text=False,
+    with tempfile.TemporaryDirectory(prefix="runpod-repo-archive-") as tmpdir:
+        local_archive_path = Path(tmpdir) / f"{repo_relative_path.name}.tar.gz"
+        tar_command = build_repo_tar_command(
+            local_columbia_root=plan.local_columbia_root,
+            repo_relative_path=repo_relative_path,
+            output_path=local_archive_path,
         )
-    finally:
-        if tar_process.stdout is not None:
-            tar_process.stdout.close()
-    tar_returncode = tar_process.wait()
-    if tar_returncode != 0:
-        raise subprocess.CalledProcessError(tar_returncode, tar_command)
-    if ssh_process.returncode != 0:
-        raise subprocess.CalledProcessError(ssh_process.returncode, ssh_command)
+        subprocess.run(
+            tar_command,
+            check=True,
+            env=build_repo_tar_env(),
+        )
+        scp_to_remote(
+            ssh_info=ssh_info,
+            source=local_archive_path,
+            remote_destination=remote_archive_path,
+            recursive=False,
+        )
+        run_checked(
+            build_remote_repo_extract_command(
+                plan,
+                ssh_info,
+                remote_archive_path=remote_archive_path,
+            )
+        )
 
 
 def run_ssh_script(
@@ -712,7 +762,11 @@ def scp_from_remote(
     run_checked(command)
 
 
-def resolve_launch_plan(args: argparse.Namespace) -> LaunchPlan:
+def resolve_launch_plan(
+    args: argparse.Namespace,
+    *,
+    passthrough_args: tuple[str, ...] = (),
+) -> LaunchPlan:
     if args.resume_existing_run and args.summarize_existing_run:
         raise SystemExit(
             "Pass at most one of --resume-existing-run or --summarize-existing-run."
@@ -839,6 +893,7 @@ def resolve_launch_plan(args: argparse.Namespace) -> LaunchPlan:
         medium_maxiter=int(args.medium_maxiter),
         prefinal_maxiter=int(args.prefinal_maxiter),
         fetch_full_run_root=bool(args.fetch_full_run_root),
+        single_stage_passthrough_args=passthrough_args,
         local_donor_run_dirs=local_donor_run_dirs_value,
         remote_donor_run_dirs=tuple(
             _posix(remote_donor_run_dir_value)
@@ -939,12 +994,15 @@ def print_dry_run(plan: LaunchPlan, ssh_info: SshInfo) -> None:
     )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(
+    argv: list[str] | None = None,
+) -> tuple[argparse.Namespace, tuple[str, ...]]:
     parser = argparse.ArgumentParser(
         description=(
             "Sync the current local simsopt-jax workspace plus donor artifacts to a "
             "Runpod pod, bootstrap the GPU environment, run the single-stage "
-            "continuation workflow, and fetch the validation reports."
+            "continuation workflow, and fetch the validation reports. Extra args "
+            "after '--' are forwarded to the remote continuation driver."
         )
     )
     parser.add_argument("--pod-id", default=DEFAULT_POD_ID)
@@ -1068,7 +1126,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print the resolved Runpod plan and commands without executing them.",
     )
-    return parser.parse_args()
+    args, passthrough_args = parser.parse_known_args(argv)
+    return args, _normalize_passthrough_args(passthrough_args)
 
 
 def fetch_results(plan: LaunchPlan, ssh_info: SshInfo) -> FetchReport:
@@ -1194,8 +1253,8 @@ def build_local_candidate_ledger(plan: LaunchPlan) -> Path:
 
 
 def main() -> None:
-    args = parse_args()
-    plan = resolve_launch_plan(args)
+    args, passthrough_args = parse_args()
+    plan = resolve_launch_plan(args, passthrough_args=passthrough_args)
     ssh_info = resolve_ssh_info(args)
     _write_plan_json(plan, ssh_info)
     if args.dry_run:

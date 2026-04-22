@@ -184,7 +184,12 @@ def infer_uniform_coil_current_A(coils) -> float | None:
     return None
 
 
-def resolve_loaded_tf_current_A(recorded_tf_current_A, tf_coils) -> float:
+def resolve_loaded_tf_current_A(
+    recorded_tf_current_A,
+    tf_coils,
+    *,
+    enforce_limit: bool = True,
+) -> float:
     realized_tf_current_A = infer_uniform_coil_current_A(tf_coils)
     if realized_tf_current_A is None:
         raise ValueError(
@@ -202,7 +207,9 @@ def resolve_loaded_tf_current_A(recorded_tf_current_A, tf_coils) -> float:
             f"{realized_tf_current_A:.6f} A does not match the artifact metadata "
             f"TF_CURRENT_A={float(recorded_tf_current_A):.6f} A."
         )
-    return validate_tf_current_limit(realized_tf_current_A)
+    if enforce_limit:
+        return validate_tf_current_limit(realized_tf_current_A)
+    return float(realized_tf_current_A)
 
 
 def resolve_plasma_current_settings(

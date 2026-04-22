@@ -31,7 +31,16 @@ def compute_adjoint_state(jr_jax) -> tuple[np.ndarray, float]:
         solved_state.G,
         solved_state.weight_inv_modB,
     )
-    adj = adjoint_state.solve_transpose(dJ_ds)
+    solve_with_status = getattr(adjoint_state, "solve_transpose_with_status", None)
+    if callable(solve_with_status):
+        adj, success = solve_with_status(dJ_ds)
+        if not bool(np.asarray(success)):
+            raise RuntimeError(
+                "Grouped adjoint probe failed because the operator-backed "
+                f"transpose solve did not converge ({adjoint_state.linearization_kind})."
+            )
+    else:
+        adj = adjoint_state.solve_transpose(dJ_ds)
     residual = adjoint_state.apply_transpose(adj) - dJ_ds
     rel = float(np.linalg.norm(residual) / (np.linalg.norm(dJ_ds) + 1e-30))
     return adj, rel

@@ -1282,7 +1282,7 @@ def _lm_iteration(flat_residual_fn, state, *, tol):
     linear_tol = jnp.minimum(
         _device_scalar(1.0e-10, dtype=state["cost"].dtype),
         jnp.maximum(
-            jnp.asarray(tol, dtype=state["cost"].dtype)
+            _optimizer_scalar(tol, dtype=state["cost"].dtype)
             * _device_scalar(0.1, dtype=state["cost"].dtype),
             _device_scalar(1.0e-14, dtype=state["cost"].dtype),
         ),
@@ -1426,7 +1426,7 @@ def levenberg_marquardt(
                 "accepted": jnp.asarray(False),
                 "success": jnp.asarray(False),
             },
-            tol=jnp.asarray(tol, dtype=x_dtype),
+            tol=_optimizer_scalar(tol, dtype=x_dtype),
         )
         nit = int(step_state["nit"])
         status = int(step_state["status"])
@@ -1633,7 +1633,7 @@ def _exact_newton_dense_jacobian_policy(rows, cols, dtype, max_dense_bytes):
 
 
 def _stabilize_dense_hessian(H, stab):
-    stab_value = jnp.asarray(stab, dtype=H.dtype)
+    stab_value = _optimizer_scalar(stab, dtype=H.dtype)
     return H + stab_value * jnp.eye(H.shape[0], dtype=H.dtype)
 
 
@@ -1676,6 +1676,21 @@ def _least_squares_dense_hessian_policy(size, dtype, max_dense_bytes):
             max_dense_bytes,
         )
     return materialize_hessian, report
+
+
+def _resolve_dense_hessian_materialization(
+    requested,
+    size,
+    dtype,
+    max_dense_bytes,
+):
+    if not requested:
+        report = _least_squares_dense_hessian_report(size, dtype, max_dense_bytes)
+        report["failure_category"] = None
+        report["failure_stage"] = None
+        report["message"] = None
+        return False, report
+    return _least_squares_dense_hessian_policy(size, dtype, max_dense_bytes)
 
 
 def _least_squares_dense_linearization_report(rows, cols, dtype, max_dense_bytes):
@@ -1745,86 +1760,116 @@ def _newton_candidate_status(current_norm, x_next, grad_next):
     return accepted, candidate_norm
 
 
-def _gmres_solve_newton_system(hvp_fn, x, rhs, *, stab, tol):
-    n = rhs.shape[0]
+def _gmres_iteration_limits(n):
     restart = max(5, min(n, 50))
     maxiter = max(10, min(4 * n, 200))
-    stab_value = jnp.asarray(stab, dtype=rhs.dtype)
+    return restart, maxiter
+
+
+def _run_operator_gmres(matvec, rhs, *, tol):
+    n = rhs.shape[0]
+    restart, maxiter = _gmres_iteration_limits(n)
+    # JAX's gmres implementation currently lowers a few scalar literals through
+    # host-to-device conversions even when the caller provides fully device-
+    # resident operands. Keep the allowance scoped to the library call so the
+    # surrounding operator path remains strict-transfer clean.
+    with jax.transfer_guard("allow"):
+        return gmres(
+            matvec,
+            rhs,
+            tol=tol,
+            atol=0.0,
+            restart=restart,
+            maxiter=maxiter,
+            # JAX documents the incremental method as numerically stabler than the
+            # default batched variant, which matters more than lower GPU overhead
+            # on the checked operator-only runtime path.
+            solve_method="incremental",
+        )
+
+
+def _gmres_solve_newton_system(hvp_fn, x, rhs, *, stab, tol):
+    stab_value = _optimizer_scalar(stab, dtype=rhs.dtype)
 
     def matvec(v):
         return hvp_fn(x, v) + stab_value * v
 
-    dx, _ = gmres(
-        matvec,
-        rhs,
-        tol=tol,
-        atol=0.0,
-        restart=restart,
-        maxiter=maxiter,
-    )
+    dx, _ = _run_operator_gmres(matvec, rhs, tol=tol)
     residual = rhs - matvec(dx)
     return dx, residual, matvec
 
 
 def _gmres_solve_exact_newton_system(jvp_fn, x, rhs, *, tol):
-    n = rhs.shape[0]
-    restart = max(5, min(n, 50))
-    maxiter = max(10, min(4 * n, 200))
-
     def matvec(v):
         return jvp_fn(x, v)
 
-    dx, _ = gmres(
-        matvec,
-        rhs,
-        tol=tol,
-        atol=0.0,
-        restart=restart,
-        maxiter=maxiter,
-    )
+    dx, _ = _run_operator_gmres(matvec, rhs, tol=tol)
     residual = rhs - matvec(dx)
     return dx, residual, matvec
 
 
 def _gmres_solve_array_system(matvec, rhs, *, tol):
-    n = rhs.shape[0]
-    restart = max(5, min(n, 50))
-    maxiter = max(10, min(4 * n, 200))
-    solution, _ = gmres(
-        matvec,
-        rhs,
-        tol=tol,
-        atol=0.0,
-        restart=restart,
-        maxiter=maxiter,
-    )
+    solution, _ = _run_operator_gmres(matvec, rhs, tol=tol)
     residual = rhs - matvec(solution)
     return solution, residual
 
 
-def _materialize_dense_square_array_operator(matvec, rhs):
-    eye = jnp.eye(rhs.shape[0], dtype=rhs.dtype)
-    columns = jax.vmap(matvec)(eye)
-    dense_operator = jnp.swapaxes(columns, 0, 1)
-    return 0.5 * (dense_operator + dense_operator.T)
+def _linear_solve_finite(solution, residual):
+    return jnp.all(jnp.isfinite(solution)) & jnp.all(jnp.isfinite(residual))
 
 
-def _solve_dense_square_array_system(matvec, rhs):
-    dense_operator = _materialize_dense_square_array_operator(matvec, rhs)
-    return jnp.linalg.solve(dense_operator, rhs)
+def _linear_solve_residual_tolerance(rhs, tol):
+    dtype = rhs.dtype
+    rhs_norm = jnp.linalg.norm(rhs)
+    tol_value = _optimizer_scalar(tol, dtype=dtype)
+    one = _device_scalar(1.0, dtype=dtype)
+    ten = _device_scalar(10.0, dtype=dtype)
+    minimum = _device_scalar(1e-12, dtype=dtype)
+    scale = jnp.maximum(rhs_norm, one)
+    return jnp.maximum(
+        minimum,
+        ten * tol_value * scale,
+    )
 
 
-def _solve_square_array_system_with_dense_fallback(matvec, rhs, *, tol):
-    """Prefer GMRES but recover with a private dense solve when it goes nonfinite."""
+def _solve_square_array_system_operator_only(matvec, rhs, *, tol):
+    """Solve one square linear system with operator-only GMRES refinement."""
     solution, residual = _gmres_solve_array_system(matvec, rhs, tol=tol)
-    gmres_finite = jnp.all(jnp.isfinite(solution)) & jnp.all(jnp.isfinite(residual))
+    residual_norm = jnp.linalg.norm(residual)
+    residual_tol = _linear_solve_residual_tolerance(rhs, tol)
+    solve_finite = _linear_solve_finite(solution, residual) & jnp.isfinite(
+        residual_norm
+    )
 
-    return lax.cond(
-        gmres_finite,
-        lambda _: solution,
-        lambda _: _solve_dense_square_array_system(matvec, rhs),
+    def refine(_):
+        correction, correction_residual = _gmres_solve_array_system(
+            matvec,
+            residual,
+            tol=tol,
+        )
+        correction_finite = _linear_solve_finite(correction, correction_residual)
+        refined_solution = lax.cond(
+            correction_finite,
+            lambda _: solution + correction,
+            lambda _: solution,
+            operand=None,
+        )
+        refined_residual = rhs - matvec(refined_solution)
+        return refined_solution, refined_residual
+
+    solution, residual = lax.cond(
+        solve_finite & (residual_norm > residual_tol),
+        refine,
+        lambda _: (solution, residual),
         operand=None,
     )
+    residual_norm = jnp.linalg.norm(residual)
+    success = (
+        _linear_solve_finite(solution, residual)
+        & jnp.isfinite(residual_norm)
+        & (residual_norm <= residual_tol)
+    )
+    return solution, success
 
 
 def _least_squares_normal_operator(residual_fn, x):
@@ -1860,7 +1905,23 @@ def _solve_least_squares_normal_system(
     tol,
 ):
     operator = _least_squares_normal_operator(residual_fn, x)
-    return _solve_square_array_system_with_dense_fallback(
+    solution, _ = _solve_square_array_system_operator_only(
+        operator["matvec"],
+        rhs,
+        tol=tol,
+    )
+    return solution
+
+
+def _solve_least_squares_normal_system_with_status(
+    residual_fn,
+    x,
+    rhs,
+    *,
+    tol,
+):
+    operator = _least_squares_normal_operator(residual_fn, x)
+    return _solve_square_array_system_operator_only(
         operator["matvec"],
         rhs,
         tol=tol,
@@ -1875,7 +1936,7 @@ def _hessian_linear_operator(objective_fn, x, *, stab=0.0):
     )
     dtype = first_leaf.dtype
     decision_size = int(np.asarray(jnp.asarray(x).size))
-    stab_value = jnp.asarray(stab, dtype=dtype)
+    stab_value = _optimizer_scalar(stab, dtype=dtype)
 
     def matvec(v):
         return hvp_fn(x, v) + stab_value * v
@@ -1898,7 +1959,24 @@ def _solve_hessian_system(
     tol,
 ):
     operator = _hessian_linear_operator(objective_fn, x, stab=stab)
-    return _solve_square_array_system_with_dense_fallback(
+    solution, _ = _solve_square_array_system_operator_only(
+        operator["matvec"],
+        rhs,
+        tol=tol,
+    )
+    return solution
+
+
+def _solve_hessian_system_with_status(
+    objective_fn,
+    x,
+    rhs,
+    *,
+    stab,
+    tol,
+):
+    operator = _hessian_linear_operator(objective_fn, x, stab=stab)
+    return _solve_square_array_system_operator_only(
         operator["matvec"],
         rhs,
         tol=tol,
@@ -1937,8 +2015,21 @@ def _solve_jacobian_system(
 ):
     operator = _jacobian_linear_operator(residual_fn, x)
     matvec = operator["transpose_matvec"] if transpose else operator["matvec"]
-    solution, _ = _gmres_solve_array_system(matvec, rhs, tol=tol)
+    solution, _ = _solve_square_array_system_operator_only(matvec, rhs, tol=tol)
     return solution
+
+
+def _solve_jacobian_system_with_status(
+    residual_fn,
+    x,
+    rhs,
+    *,
+    transpose,
+    tol,
+):
+    operator = _jacobian_linear_operator(residual_fn, x)
+    matvec = operator["transpose_matvec"] if transpose else operator["matvec"]
+    return _solve_square_array_system_operator_only(matvec, rhs, tol=tol)
 
 
 def newton_polish(
@@ -2017,7 +2108,8 @@ def newton_polish(
             progress_callback(nit, float(val), float(norm))
 
     hessian_size = int(np.asarray(jnp.asarray(x).size))
-    materialize_hessian, dense_report = _least_squares_dense_hessian_policy(
+    materialize_hessian, dense_report = _resolve_dense_hessian_materialization(
+        materialize_hessian,
         hessian_size,
         x.dtype,
         max_dense_hessian_bytes,
@@ -2048,6 +2140,8 @@ def _make_traceable_newton_polish_runner(
     max_dense_hessian_bytes,
     progress_callback,
 ):
+    requested_materialize_hessian = materialize_hessian
+
     def run_solver(x_init, fn_args):
         def objective_eval(x):
             return objective_fn(x, *fn_args)
@@ -2059,12 +2153,12 @@ def _make_traceable_newton_polish_runner(
             return jax.jvp(grad_fn, (x,), (v,))[1]
 
         dtype = jnp.asarray(x_init).dtype
-        tol_value = jnp.asarray(tol, dtype=dtype)
+        tol_value = _optimizer_scalar(tol, dtype=dtype)
         linear_tol = jnp.minimum(
-            jnp.asarray(1e-10, dtype=dtype),
+            _device_scalar(1e-10, dtype=dtype),
             jnp.maximum(
-                tol_value * jnp.asarray(0.1, dtype=dtype),
-                jnp.asarray(1e-14, dtype=dtype),
+                tol_value * _device_scalar(0.1, dtype=dtype),
+                _device_scalar(1e-14, dtype=dtype),
             ),
         )
         val0, grad0 = val_and_grad_fn(x_init)
@@ -2078,62 +2172,27 @@ def _make_traceable_newton_polish_runner(
             )
 
         def body_fun(state):
-            dx, linear_residual, _ = _gmres_solve_newton_system(
-                hvp_fn,
-                state["x"],
+            stab_value = _optimizer_scalar(stab, dtype=state["x"].dtype)
+
+            def matvec(v):
+                return hvp_fn(state["x"], v) + stab_value * v
+
+            dx, linear_success = _solve_square_array_system_operator_only(
+                matvec,
                 state["grad"],
-                stab=stab,
                 tol=linear_tol,
             )
-            linear_residual_norm = jnp.linalg.norm(linear_residual)
-            dense_threshold = jnp.maximum(1e-10, 1e-3 * state["norm"])
-
-            def use_dense_fallback(_):
-                H_solve = _stabilize_dense_hessian(
-                    _materialize_dense_hessian(hvp_fn, state["x"]),
-                    stab,
-                )
-                dx_dense = jnp.linalg.solve(H_solve, state["grad"])
-                residual_dense = state["grad"] - H_solve @ dx_dense
-                return dx_dense, residual_dense, jnp.linalg.norm(residual_dense)
-
-            def keep_gmres_step(_):
-                return dx, linear_residual, linear_residual_norm
-
-            dx, linear_residual, linear_residual_norm = lax.cond(
-                (~jnp.all(jnp.isfinite(dx))) | (linear_residual_norm > dense_threshold),
-                use_dense_fallback,
-                keep_gmres_step,
+            x_next = lax.cond(
+                linear_success,
+                lambda _: state["x"] - dx,
+                lambda _: state["x"],
                 operand=None,
             )
-
-            def add_correction(current_dx):
-                correction, _, _ = _gmres_solve_newton_system(
-                    hvp_fn,
-                    state["x"],
-                    linear_residual,
-                    stab=stab,
-                    tol=linear_tol,
-                )
-                return lax.cond(
-                    jnp.all(jnp.isfinite(correction)),
-                    lambda corr: current_dx + corr,
-                    lambda _corr: current_dx,
-                    correction,
-                )
-
-            dx = lax.cond(
-                linear_residual_norm > linear_tol,
-                add_correction,
-                lambda current_dx: current_dx,
-                dx,
-            )
-
-            x_next = state["x"] - dx
             val_next, grad_next = val_and_grad_fn(x_next)
             accepted, candidate_norm = _newton_candidate_status(
                 state["norm"], x_next, grad_next
             )
+            accepted = linear_success & accepted
             next_nit = state["nit"] + 1
             if progress_callback is not None:
                 lax.cond(
@@ -2172,7 +2231,8 @@ def _make_traceable_newton_polish_runner(
         val_final, grad_final = val_and_grad_fn(state["x"])
         norm_final = jnp.linalg.norm(grad_final)
         hessian_size = int(np.asarray(jnp.asarray(x_init).size))
-        materialize_hessian, dense_report = _least_squares_dense_hessian_policy(
+        materialize_hessian, dense_report = _resolve_dense_hessian_materialization(
+            requested_materialize_hessian,
             hessian_size,
             x_init.dtype,
             max_dense_hessian_bytes,
@@ -2330,12 +2390,12 @@ def _make_traceable_exact_newton_runner(
             return jax.jvp(residual_eval, (x,), (v,))[1]
 
         dtype = jnp.asarray(x_init).dtype
-        tol_value = jnp.asarray(tol, dtype=dtype)
+        tol_value = _optimizer_scalar(tol, dtype=dtype)
         linear_tol = jnp.minimum(
-            jnp.asarray(1e-10, dtype=dtype),
+            _device_scalar(1e-10, dtype=dtype),
             jnp.maximum(
-                tol_value * jnp.asarray(0.1, dtype=dtype),
-                jnp.asarray(1e-14, dtype=dtype),
+                tol_value * _device_scalar(0.1, dtype=dtype),
+                _device_scalar(1e-14, dtype=dtype),
             ),
         )
         r0 = residual_eval(x_init)
