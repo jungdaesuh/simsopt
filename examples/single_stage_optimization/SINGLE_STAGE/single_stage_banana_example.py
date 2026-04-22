@@ -1426,6 +1426,32 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--banana-current-fd-diagnostics",
+        action="store_true",
+        default=env_flag("BANANA_CURRENT_FD_DIAGNOSTICS"),
+        help=(
+            "Augment banana-current diagnostics with a seed-only finite-difference "
+            "probe that compares banana-current coordinates against a matched set of "
+            "noncurrent optimizer coordinates using symmetric in-bounds relative "
+            "perturbations through the live single-stage objective path."
+        ),
+    )
+    parser.add_argument(
+        "--banana-current-fd-relative-step-fraction",
+        type=float,
+        default=float(
+            os.environ.get(
+                "BANANA_CURRENT_FD_RELATIVE_STEP_FRACTION",
+                "0.01",
+            )
+        ),
+        help=(
+            "Relative coordinate perturbation used by --banana-current-fd-diagnostics. "
+            "A value of 0.01 means symmetric +/-1%% perturbations, clipped to stay "
+            "inside the active optimizer bounds."
+        ),
+    )
+    parser.add_argument(
         "--length-target",
         type=float,
         default=float(os.environ.get("SS_LENGTH_TARGET", str(COIL_LENGTH_TARGET_M))),
@@ -4049,10 +4075,357 @@ def temporary_run_dict_value(run_dict, key, value):
 
 
 SINGLE_STAGE_BANANA_CURRENT_DIAGNOSTICS_SCHEMA_VERSION = (
-    "single_stage_banana_current_diagnostics_v1"
+    "single_stage_banana_current_diagnostics_v2"
 )
 BANANA_CURRENT_DIAGNOSTICS_FILENAME = "banana_current_diagnostics.json"
 BANANA_CURRENT_DIAGNOSTIC_REJECT_REPORT_LIMIT = 20
+BANANA_CURRENT_FD_NONCURRENT_SELECTION = "largest_abs_baseline_value"
+
+
+def _safe_optional_mean(values):
+    if not values:
+        return None
+    return float(np.mean(np.asarray(values, dtype=float)))
+
+
+def _safe_optional_median(values):
+    if not values:
+        return None
+    return float(np.median(np.asarray(values, dtype=float)))
+
+
+def _safe_optional_ratio(numerator, denominator):
+    if numerator is None or denominator is None or float(denominator) == 0.0:
+        return None
+    return float(numerator) / float(denominator)
+
+
+def _sanitize_banana_current_fd_probe_result(result):
+    if isinstance(result, dict):
+        objective_total = result.get("objective_total")
+        resolved_success = bool(
+            result.get("success", objective_total is not None)
+        )
+        resolved_surface_success = bool(
+            result.get("surface_success", resolved_success)
+        )
+        return {
+            "success": resolved_success,
+            "surface_success": resolved_surface_success,
+            "objective_total": (
+                None if objective_total is None else float(objective_total)
+            ),
+            "rejection_reason": result.get("rejection_reason"),
+            "topology_state": result.get("topology_state"),
+            "hardware_ok": (
+                None
+                if "hardware_ok" not in result
+                else bool(result.get("hardware_ok"))
+            ),
+        }
+    return {
+        "success": True,
+        "surface_success": True,
+        "objective_total": float(result),
+        "rejection_reason": None,
+        "topology_state": None,
+        "hardware_ok": None,
+    }
+
+
+def _build_banana_current_fd_trial_probe(
+    probe_result,
+    *,
+    trial_value,
+    baseline_total,
+):
+    probe = _sanitize_banana_current_fd_probe_result(probe_result)
+    objective_total = probe["objective_total"]
+    probe["trial_value"] = float(trial_value)
+    probe["objective_delta_total"] = (
+        None
+        if objective_total is None
+        else float(objective_total - float(baseline_total))
+    )
+    return probe
+
+
+def _relative_bounded_coordinate_step(
+    value,
+    lower_bound,
+    upper_bound,
+    *,
+    relative_step_fraction,
+):
+    requested_step = abs(float(value)) * float(relative_step_fraction)
+    if requested_step <= 0.0:
+        return requested_step, 0.0
+    applied_step = requested_step
+    if np.isfinite(lower_bound):
+        applied_step = min(applied_step, float(value) - float(lower_bound))
+    if np.isfinite(upper_bound):
+        applied_step = min(applied_step, float(upper_bound) - float(value))
+    return requested_step, max(float(applied_step), 0.0)
+
+
+def _select_largest_abs_noncurrent_coordinate_indices(
+    x,
+    coordinate_indices,
+    *,
+    max_count,
+):
+    x = np.asarray(x, dtype=float)
+    current_index_set = {int(index) for index in coordinate_indices}
+    ranked_indices = sorted(
+        (
+            int(index)
+            for index in range(x.size)
+            if int(index) not in current_index_set
+        ),
+        key=lambda index: abs(float(x[index])),
+        reverse=True,
+    )
+    return tuple(ranked_indices[: max(0, int(max_count))])
+
+
+def _build_relative_fd_coordinate_group(
+    *,
+    baseline_x,
+    baseline_total,
+    coordinate_indices,
+    coordinate_dof_names,
+    lower_bounds,
+    upper_bounds,
+    relative_step_fraction,
+    objective_probe_fn,
+    selection,
+):
+    baseline_x = np.asarray(baseline_x, dtype=float)
+    baseline_total = float(baseline_total)
+    lower_bounds = np.asarray(lower_bounds, dtype=float)
+    upper_bounds = np.asarray(upper_bounds, dtype=float)
+    samples = []
+    max_abs_objective_deltas = []
+    abs_central_differences = []
+
+    for coordinate_index, coordinate_dof_name in zip(
+        coordinate_indices,
+        coordinate_dof_names,
+    ):
+        baseline_value = float(baseline_x[coordinate_index])
+        requested_step, applied_step = _relative_bounded_coordinate_step(
+            baseline_value,
+            lower_bounds[coordinate_index],
+            upper_bounds[coordinate_index],
+            relative_step_fraction=relative_step_fraction,
+        )
+        sample = {
+            "coordinate_index": int(coordinate_index),
+            "coordinate_dof_name": str(coordinate_dof_name),
+            "baseline_value": baseline_value,
+            "requested_step": float(requested_step),
+            "applied_step": float(applied_step),
+            "step_clipped_to_bounds": bool(
+                requested_step > 0.0 and applied_step < requested_step
+            ),
+            "applied_relative_step_fraction": (
+                None
+                if baseline_value == 0.0
+                else float(applied_step / abs(baseline_value))
+            ),
+        }
+        if applied_step <= 0.0:
+            sample.update(
+                {
+                    "minus_probe": None,
+                    "plus_probe": None,
+                    "central_difference_per_unit": None,
+                    "max_abs_objective_delta": None,
+                    "mean_abs_objective_delta": None,
+                    "step_status": "unavailable",
+                }
+            )
+            samples.append(sample)
+            continue
+
+        minus_x = baseline_x.copy()
+        minus_x[coordinate_index] = baseline_value - applied_step
+        plus_x = baseline_x.copy()
+        plus_x[coordinate_index] = baseline_value + applied_step
+        minus_probe = _build_banana_current_fd_trial_probe(
+            objective_probe_fn(minus_x),
+            trial_value=baseline_value - applied_step,
+            baseline_total=baseline_total,
+        )
+        plus_probe = _build_banana_current_fd_trial_probe(
+            objective_probe_fn(plus_x),
+            trial_value=baseline_value + applied_step,
+            baseline_total=baseline_total,
+        )
+
+        successful_abs_deltas = [
+            abs(float(probe["objective_delta_total"]))
+            for probe in (minus_probe, plus_probe)
+            if probe["objective_delta_total"] is not None
+        ]
+        central_difference_per_unit = None
+        if (
+            minus_probe["objective_total"] is not None
+            and plus_probe["objective_total"] is not None
+        ):
+            central_difference_per_unit = float(
+                (plus_probe["objective_total"] - minus_probe["objective_total"])
+                / (2.0 * applied_step)
+            )
+            abs_central_differences.append(abs(central_difference_per_unit))
+        max_abs_objective_delta = (
+            None
+            if not successful_abs_deltas
+            else float(max(successful_abs_deltas))
+        )
+        mean_abs_objective_delta = (
+            None
+            if not successful_abs_deltas
+            else float(np.mean(np.asarray(successful_abs_deltas, dtype=float)))
+        )
+        if max_abs_objective_delta is not None:
+            max_abs_objective_deltas.append(max_abs_objective_delta)
+        sample.update(
+            {
+                "minus_probe": minus_probe,
+                "plus_probe": plus_probe,
+                "central_difference_per_unit": central_difference_per_unit,
+                "max_abs_objective_delta": max_abs_objective_delta,
+                "mean_abs_objective_delta": mean_abs_objective_delta,
+                "step_status": "ok",
+            }
+        )
+        samples.append(sample)
+
+    bidirectional_success_count = sum(
+        sample["central_difference_per_unit"] is not None for sample in samples
+    )
+    successful_coordinate_count = sum(
+        sample["max_abs_objective_delta"] is not None for sample in samples
+    )
+    return {
+        "selection": str(selection),
+        "relative_step_fraction": float(relative_step_fraction),
+        "coordinate_indices": [int(index) for index in coordinate_indices],
+        "coordinate_dof_names": [str(name) for name in coordinate_dof_names],
+        "samples": samples,
+        "summary": {
+            "requested_coordinate_count": int(len(coordinate_indices)),
+            "sample_count": int(len(samples)),
+            "successful_coordinate_count": int(successful_coordinate_count),
+            "bidirectional_success_count": int(bidirectional_success_count),
+            "mean_max_abs_objective_delta": _safe_optional_mean(
+                max_abs_objective_deltas
+            ),
+            "median_max_abs_objective_delta": _safe_optional_median(
+                max_abs_objective_deltas
+            ),
+            "mean_abs_central_difference_per_unit": _safe_optional_mean(
+                abs_central_differences
+            ),
+            "median_abs_central_difference_per_unit": _safe_optional_median(
+                abs_central_differences
+            ),
+        },
+    }
+
+
+def build_banana_current_finite_difference_probe(
+    objective_optimizable,
+    banana_current_state,
+    x,
+    *,
+    baseline_total,
+    objective_probe_fn,
+    active_optimizer_bounds=None,
+    relative_step_fraction,
+):
+    coordinate_spec = resolve_banana_current_coordinate_spec(
+        objective_optimizable,
+        banana_current_state,
+    )
+    if not coordinate_spec.indices:
+        return None
+
+    baseline_total = float(baseline_total)
+    lower_bounds, upper_bounds = _optimizer_bounds_arrays(
+        objective_optimizable,
+        active_optimizer_bounds=active_optimizer_bounds,
+    )
+    baseline_x = np.asarray(x, dtype=float)
+    current_indices = tuple(int(index) for index in coordinate_spec.indices)
+    noncurrent_indices = _select_largest_abs_noncurrent_coordinate_indices(
+        baseline_x,
+        current_indices,
+        max_count=len(current_indices),
+    )
+    objective_dof_names = tuple(
+        str(name) for name in objective_optimizable.dof_names
+    )
+    current_group = _build_relative_fd_coordinate_group(
+        baseline_x=baseline_x,
+        baseline_total=baseline_total,
+        coordinate_indices=current_indices,
+        coordinate_dof_names=coordinate_spec.dof_names,
+        lower_bounds=lower_bounds,
+        upper_bounds=upper_bounds,
+        relative_step_fraction=relative_step_fraction,
+        objective_probe_fn=objective_probe_fn,
+        selection="banana_current_coordinates",
+    )
+    noncurrent_group = _build_relative_fd_coordinate_group(
+        baseline_x=baseline_x,
+        baseline_total=baseline_total,
+        coordinate_indices=noncurrent_indices,
+        coordinate_dof_names=tuple(
+            objective_dof_names[index] for index in noncurrent_indices
+        ),
+        lower_bounds=lower_bounds,
+        upper_bounds=upper_bounds,
+        relative_step_fraction=relative_step_fraction,
+        objective_probe_fn=objective_probe_fn,
+        selection=BANANA_CURRENT_FD_NONCURRENT_SELECTION,
+    )
+    current_summary = current_group["summary"]
+    noncurrent_summary = noncurrent_group["summary"]
+    return {
+        "baseline_total": baseline_total,
+        "relative_step_fraction": float(relative_step_fraction),
+        "noncurrent_selection": BANANA_CURRENT_FD_NONCURRENT_SELECTION,
+        "current_group": current_group,
+        "matched_noncurrent_group": noncurrent_group,
+        "comparison": {
+            "current_to_noncurrent_mean_max_abs_objective_delta_ratio": (
+                _safe_optional_ratio(
+                    current_summary["mean_max_abs_objective_delta"],
+                    noncurrent_summary["mean_max_abs_objective_delta"],
+                )
+            ),
+            "current_to_noncurrent_median_max_abs_objective_delta_ratio": (
+                _safe_optional_ratio(
+                    current_summary["median_max_abs_objective_delta"],
+                    noncurrent_summary["median_max_abs_objective_delta"],
+                )
+            ),
+            "current_to_noncurrent_mean_abs_central_difference_ratio": (
+                _safe_optional_ratio(
+                    current_summary["mean_abs_central_difference_per_unit"],
+                    noncurrent_summary["mean_abs_central_difference_per_unit"],
+                )
+            ),
+            "current_to_noncurrent_median_abs_central_difference_ratio": (
+                _safe_optional_ratio(
+                    current_summary["median_abs_central_difference_per_unit"],
+                    noncurrent_summary["median_abs_central_difference_per_unit"],
+                )
+            ),
+        },
+    }
 
 
 def _bound_is_active(value, bound):
@@ -4334,6 +4707,9 @@ def build_banana_current_diagnostics_state(
     *,
     active_optimizer_bounds=None,
     accepted_iteration,
+    baseline_total=None,
+    finite_difference_probe_fn=None,
+    finite_difference_relative_step_fraction=None,
 ):
     seed_report = build_banana_current_coordinate_report(
         objective_optimizable,
@@ -4351,6 +4727,30 @@ def build_banana_current_diagnostics_state(
         seed_report,
         seed_coordinate_values_A=seed_coordinate_values_A,
     )
+    seed_finite_difference_probe = None
+    if finite_difference_probe_fn is not None:
+        if baseline_total is None:
+            raise ValueError(
+                "Banana current finite-difference diagnostics require baseline_total."
+            )
+        if finite_difference_relative_step_fraction is None:
+            raise ValueError(
+                "Banana current finite-difference diagnostics require a positive "
+                "relative-step fraction."
+            )
+        baseline_total = float(baseline_total)
+        finite_difference_relative_step_fraction = float(
+            finite_difference_relative_step_fraction
+        )
+        seed_finite_difference_probe = build_banana_current_finite_difference_probe(
+            objective_optimizable,
+            banana_current_state,
+            x,
+            baseline_total=baseline_total,
+            objective_probe_fn=finite_difference_probe_fn,
+            active_optimizer_bounds=active_optimizer_bounds,
+            relative_step_fraction=finite_difference_relative_step_fraction,
+        )
     return {
         "schema_version": SINGLE_STAGE_BANANA_CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
         "enabled": True,
@@ -4361,6 +4761,7 @@ def build_banana_current_diagnostics_state(
             float(value) for value in banana_current_state.seed_currents_A
         ],
         "seed_report": seed_report,
+        "seed_finite_difference_probe": seed_finite_difference_probe,
         "latest_accepted_report": None,
         "latest_rejected_trial_report": None,
         "accepted_reports": [],
@@ -4440,6 +4841,87 @@ def write_banana_current_diagnostics_artifact(out_dir, diagnostics_state):
         os.path.join(out_dir, BANANA_CURRENT_DIAGNOSTICS_FILENAME),
         diagnostics_state,
     )
+
+
+def evaluate_banana_current_fd_probe(
+    trial_x,
+    *,
+    reference_x,
+    reference_surface_state,
+    accepted_iterations,
+):
+    reference_x = np.asarray(reference_x, dtype=float)
+    search_gate = build_surface_search_gate(
+        len(surface_data),
+        accepted_iterations,
+        MULTISURFACE_RAMP_ITERATIONS,
+        INNER_SURFACE_INITIAL_WEIGHT,
+        SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
+        SS_DIST if len(surface_data) > 1 else 0.0,
+    )
+    search_surface_weights = build_surface_search_weights(
+        len(surface_data),
+        accepted_iterations,
+        MULTISURFACE_RAMP_ITERATIONS,
+        INNER_SURFACE_INITIAL_WEIGHT,
+    )
+    stack_status = solve_surface_stack_at_dofs(
+        np.asarray(trial_x, dtype=float),
+        JF,
+        surface_data,
+        reference_surface_state,
+        vessel_surface=VV if len(surface_data) > 1 else None,
+        surface_gap_threshold=search_gate["surface_gap_threshold"],
+        vessel_gap_threshold=search_gate["vessel_gap_threshold"],
+        enforce_nesting=search_gate["enforce_nesting"],
+    )
+    try:
+        if not stack_status["success"]:
+            return {
+                "success": False,
+                "surface_success": False,
+                "objective_total": None,
+                "rejection_reason": "surface_solve",
+                "topology_state": None,
+                "hardware_ok": None,
+            }
+        objective_eval = evaluate_search_objective(search_surface_weights)
+        topology_status = evaluate_search_topology_gate(
+            len(surface_data),
+            surface_data[-1]["boozer_surface"].surface,
+            bs,
+            surface_mode_contract=globals().get("surface_mode_contract"),
+        )
+        topology_state = _topology_gate_state(topology_status)
+        hardware_snapshot = evaluate_single_stage_hardware_snapshot(
+            JCurveCurve,
+            CC_DIST,
+            JCurveSurface,
+            CS_DIST,
+            JSurfSurf,
+            stack_status,
+            SS_DIST,
+            banana_curve,
+            CURVATURE_THRESHOLD,
+            **current_single_stage_hardware_snapshot_kwargs(),
+        )
+        hardware_status = hardware_snapshot["search_hardware_status"]
+        rejection_reason = None
+        if topology_state == "broken":
+            rejection_reason = "topology_broken"
+        elif not hardware_status["success"]:
+            rejection_reason = "hardware"
+        return {
+            "success": True,
+            "surface_success": True,
+            "objective_total": float(objective_eval["total"]),
+            "rejection_reason": rejection_reason,
+            "topology_state": topology_state,
+            "hardware_ok": bool(hardware_status["success"]),
+        }
+    finally:
+        JF.x = reference_x.copy()
+        restore_surface_states(surface_data, reference_surface_state)
 
 
 SINGLE_STAGE_TOPOLOGY_DIAGNOSTICS_SCHEMA_VERSION = (
@@ -6145,6 +6627,12 @@ if __name__ == "__main__":
     # CONFIGURATION PARAMETERS
     # ==============================================================================
     args = apply_default_stage2_seed_args(parse_args())
+    if args.banana_current_fd_diagnostics:
+        args.banana_current_diagnostics = True
+    if args.banana_current_fd_relative_step_fraction <= 0.0:
+        raise ValueError(
+            "--banana-current-fd-relative-step-fraction must be positive."
+        )
     stage2_bs_path = build_stage2_bs_path(args)
     stage2_results_path, stage2_results = load_stage2_artifact_results(stage2_bs_path)
     stage2_results = upgrade_legacy_stage2_artifact_results(
@@ -6821,6 +7309,21 @@ if __name__ == "__main__":
         init_only=args.init_only,
     )
     if args.banana_current_diagnostics:
+        finite_difference_probe_fn = None
+        if args.banana_current_fd_diagnostics:
+            reference_x = np.asarray(run_dict["accepted_x"], dtype=float).copy()
+            reference_surface_state = snapshot_surface_states(surface_data)
+
+            def finite_difference_probe_fn(trial_x):
+                return evaluate_banana_current_fd_probe(
+                    trial_x,
+                    reference_x=reference_x,
+                    reference_surface_state=reference_surface_state,
+                    accepted_iterations=int(
+                        run_dict.get("accepted_iterations", 0)
+                    ),
+                )
+
         run_dict["banana_current_diagnostics"] = build_banana_current_diagnostics_state(
             JF,
             banana_current_state,
@@ -6828,6 +7331,11 @@ if __name__ == "__main__":
             run_dict["dJ"],
             active_optimizer_bounds=run_dict.get("active_optimizer_bounds"),
             accepted_iteration=int(run_dict.get("accepted_iterations", 0)),
+            baseline_total=float(run_dict["J"]),
+            finite_difference_probe_fn=finite_difference_probe_fn,
+            finite_difference_relative_step_fraction=(
+                args.banana_current_fd_relative_step_fraction
+            ),
         )
         emit_banana_current_diagnostics_report(
             None
@@ -8043,6 +8551,14 @@ if __name__ == "__main__":
         "BANANA_CURRENT_DIAGNOSTICS_FILENAME": (
             BANANA_CURRENT_DIAGNOSTICS_FILENAME
             if run_dict.get("banana_current_diagnostics") is not None
+            else None
+        ),
+        "BANANA_CURRENT_FD_DIAGNOSTICS_ENABLED": bool(
+            args.banana_current_fd_diagnostics
+        ),
+        "BANANA_CURRENT_FD_RELATIVE_STEP_FRACTION": (
+            float(args.banana_current_fd_relative_step_fraction)
+            if args.banana_current_fd_diagnostics
             else None
         ),
         **build_hardware_constraint_artifact_payload_fields(final_hardware_snapshot),

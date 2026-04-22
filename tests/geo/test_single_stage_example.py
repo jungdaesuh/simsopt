@@ -1,6 +1,7 @@
 import copy
 import importlib.util
 from contextlib import ExitStack
+import io
 import json
 import os
 import re
@@ -2493,12 +2494,22 @@ class HardwareConstraintTests(unittest.TestCase):
         rejected_x = np.array([0.1, 1.6e4, -0.2, -1.4e4], dtype=float)
         rejected_grad = np.array([1.0, 4.0e-4, -2.0, -1.0e-4], dtype=float)
 
+        def finite_difference_probe_fn(trial_x):
+            return {
+                "objective_total": float(np.sum(np.asarray(trial_x, dtype=float) ** 2)),
+                "hardware_ok": True,
+                "topology_state": "ok",
+            }
+
         diagnostics_state = module.build_banana_current_diagnostics_state(
             objective,
             banana_current_state,
             seed_x,
             seed_grad,
             accepted_iteration=0,
+            baseline_total=float(np.sum(seed_x**2)),
+            finite_difference_probe_fn=finite_difference_probe_fn,
+            finite_difference_relative_step_fraction=0.01,
         )
         rejected_report = module.build_banana_current_coordinate_report(
             objective,
@@ -2533,6 +2544,11 @@ class HardwareConstraintTests(unittest.TestCase):
             module.SINGLE_STAGE_BANANA_CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
         )
         self.assertEqual(payload["seed_report"]["delta_from_seed_A"], [0.0, 0.0])
+        self.assertIsNotNone(payload["seed_finite_difference_probe"])
+        self.assertEqual(
+            payload["seed_finite_difference_probe"]["noncurrent_selection"],
+            module.BANANA_CURRENT_FD_NONCURRENT_SELECTION,
+        )
         self.assertEqual(payload["rejected_trial_reports_recorded"], 1)
         self.assertEqual(payload["latest_rejected_trial_report"]["rejection_reason"], "hardware")
         self.assertEqual(
@@ -2571,6 +2587,81 @@ class HardwareConstraintTests(unittest.TestCase):
             diagnostics_state["seed_report"]["delta_from_seed_A"],
             [0.0, 0.0],
         )
+
+    def test_build_banana_current_finite_difference_probe_matches_noncurrent_coordinates(self):
+        module = load_single_stage_example_module()
+        _, _, banana_current_state, objective = build_banana_current_report_fixture(
+            module
+        )
+        baseline_x = np.array([0.5, 1.5e4, -0.25, -1.5e4], dtype=float)
+
+        def objective_probe_fn(trial_x):
+            trial_x = np.asarray(trial_x, dtype=float)
+            return {
+                "objective_total": float(
+                    trial_x[0] ** 2
+                    + 4.0 * trial_x[2] ** 2
+                    + 1.0e-6 * trial_x[1] ** 2
+                    + 2.0e-6 * trial_x[3] ** 2
+                ),
+                "hardware_ok": True,
+                "topology_state": "ok",
+            }
+
+        probe = module.build_banana_current_finite_difference_probe(
+            objective,
+            banana_current_state,
+            baseline_x,
+            baseline_total=float(objective_probe_fn(baseline_x)["objective_total"]),
+            objective_probe_fn=objective_probe_fn,
+            relative_step_fraction=0.01,
+        )
+
+        self.assertEqual(probe["current_group"]["coordinate_indices"], [1, 3])
+        self.assertEqual(
+            probe["matched_noncurrent_group"]["coordinate_indices"],
+            [0, 2],
+        )
+        self.assertEqual(
+            probe["matched_noncurrent_group"]["selection"],
+            module.BANANA_CURRENT_FD_NONCURRENT_SELECTION,
+        )
+        self.assertEqual(
+            probe["current_group"]["summary"]["successful_coordinate_count"],
+            2,
+        )
+        self.assertEqual(
+            probe["matched_noncurrent_group"]["summary"]["successful_coordinate_count"],
+            2,
+        )
+        self.assertIsNotNone(
+            probe["comparison"]["current_to_noncurrent_mean_max_abs_objective_delta_ratio"]
+        )
+
+    def test_build_banana_current_finite_difference_probe_clips_steps_to_bounds(self):
+        module = load_single_stage_example_module()
+        _, _, banana_current_state, objective = build_banana_current_report_fixture(
+            module
+        )
+        baseline_x = np.array([0.25, 1.599e4, -0.5, -1.599e4], dtype=float)
+
+        def objective_probe_fn(trial_x):
+            trial_x = np.asarray(trial_x, dtype=float)
+            return float(np.sum(trial_x**2))
+
+        probe = module.build_banana_current_finite_difference_probe(
+            objective,
+            banana_current_state,
+            baseline_x,
+            baseline_total=float(objective_probe_fn(baseline_x)),
+            objective_probe_fn=objective_probe_fn,
+            relative_step_fraction=0.01,
+        )
+
+        first_current_sample = probe["current_group"]["samples"][0]
+        self.assertTrue(first_current_sample["step_clipped_to_bounds"])
+        self.assertAlmostEqual(first_current_sample["requested_step"], 159.9)
+        self.assertAlmostEqual(first_current_sample["applied_step"], 10.0)
 
     def test_normalize_optimizer_termination_message_enriches_blank_abnormal(self):
         module = load_single_stage_example_module()
@@ -7688,6 +7779,25 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(args.hardware_search_mode, "adaptive")
         self.assertEqual(args.hardware_search_soft_iterations, 3)
+
+    def test_single_stage_parse_args_help_renders_with_fd_flag_text(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--help",
+            ],
+        ), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            with self.assertRaises(SystemExit) as excinfo:
+                module.parse_args()
+
+        help_text = stdout.getvalue()
+        self.assertEqual(excinfo.exception.code, 0)
+        self.assertIn("--banana-current-fd-diagnostics", help_text)
+        self.assertIn("+/-1% perturbations", help_text)
 
     def test_single_stage_parse_args_accepts_goal_mode_flag(self):
         module = load_single_stage_example_module()
