@@ -1965,7 +1965,7 @@ def test_traceable_single_stage_outer_term_dependency_flags(
             None,
             {
                 weight_key: 0.0
-                for _, weight_key, _, _ in (
+                for _, weight_key in (
                     surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
                 )
             },
@@ -2292,7 +2292,7 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
 ):
     objective_config = {
         weight_key: 1.0
-        for _, weight_key, _, _ in (
+        for _, weight_key in (
             surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
         )
     }
@@ -2332,7 +2332,7 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         _record_array("raw_terms_coil_dofs", coil_dofs)
         return {
             term_name: jnp.asarray(float(index + 1), dtype=jnp.float64)
-            for index, (term_name, _weight_key, _, _) in enumerate(
+            for index, (term_name, _weight_key) in enumerate(
                 surfaceobjectives_jax_module._TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
             )
         }

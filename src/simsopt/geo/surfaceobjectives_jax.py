@@ -132,19 +132,28 @@ def _traceable_diag_progress(message):
 logger = logging.getLogger(__name__)
 
 _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS = (
-    # (term_name, weight_key, depends_on_x_inner, depends_on_coil_dofs)
-    ("non_qs", "non_qs_weight", True, True),
-    ("residual", "residual_weight", True, True),
-    ("iota", "iota_weight", True, False),
-    ("length", "length_weight", False, True),
-    ("curvature", "curvature_weight", False, True),
-    ("curve_curve", "curve_curve_weight", False, True),
-    ("curve_surface", "curve_surface_weight", True, True),
-    ("surface_vessel", "surface_vessel_weight", True, False),
+    ("non_qs", "non_qs_weight"),
+    ("residual", "residual_weight"),
+    ("iota", "iota_weight"),
+    ("length", "length_weight"),
+    ("curvature", "curvature_weight"),
+    ("curve_curve", "curve_curve_weight"),
+    ("curve_surface", "curve_surface_weight"),
+    ("surface_vessel", "surface_vessel_weight"),
 )
 _TRACEABLE_SINGLE_STAGE_OUTER_TERM_WEIGHT_KEYS = {
     term_name: weight_key
-    for term_name, weight_key, _, _ in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+    for term_name, weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS
+}
+_TRACEABLE_SINGLE_STAGE_OUTER_TERM_DEPENDENCY_FLAGS = {
+    "non_qs": (True, True),
+    "residual": (True, True),
+    "iota": (True, False),
+    "length": (False, True),
+    "curvature": (False, True),
+    "curve_curve": (False, True),
+    "curve_surface": (True, True),
+    "surface_vessel": (True, False),
 }
 
 
@@ -152,15 +161,10 @@ def _traceable_single_stage_outer_term_dependency_flags(term_name):
     """Return which state families a diagnostic outer term depends on."""
     if term_name is None:
         return True, True
-    for (
-        candidate_term_name,
-        _weight_key,
-        depends_on_x_inner,
-        depends_on_coil_dofs,
-    ) in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
-        if candidate_term_name == term_name:
-            return depends_on_x_inner, depends_on_coil_dofs
-    raise ValueError(f"Unknown traceable single-stage outer term {term_name!r}.")
+    try:
+        return _TRACEABLE_SINGLE_STAGE_OUTER_TERM_DEPENDENCY_FLAGS[term_name]
+    except KeyError as exc:
+        raise ValueError(f"Unknown traceable single-stage outer term {term_name!r}.") from exc
 
 
 def _traceable_single_stage_weight_is_active(weight):
@@ -187,12 +191,7 @@ def _traceable_single_stage_effective_dependency_flags(
 
     depends_on_x_inner = False
     depends_on_coil_dofs = False
-    for (
-        candidate_term_name,
-        weight_key,
-        _depends_on_x_inner,
-        _depends_on_coil_dofs,
-    ) in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+    for candidate_term_name, weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
         if not _traceable_single_stage_weight_is_active(
             outer_objective_config.get(weight_key, 0.0)
         ):
@@ -506,7 +505,7 @@ def _traceable_weighted_single_stage_outer_term_values(
 ):
     """Apply configured weights to raw single-stage outer-objective terms."""
     weighted_terms = {}
-    for term_name, weight_key, _, _ in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+    for term_name, weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
         term_value = term_values[term_name]
         weight = outer_objective_config.get(weight_key, 0.0)
         if weight:
@@ -983,7 +982,7 @@ def _traceable_full_single_stage_outer_objective(
         outer_objective_config=outer_objective_config,
     )
     total = _runtime_float64_scalar(0.0, reference=next(iter(weighted_terms.values())))
-    for term_name, _weight_key, _, _ in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+    for term_name, _weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
         total = total + weighted_terms[term_name]
     return total
 
@@ -3792,7 +3791,7 @@ def diagnose_traceable_objective_runtime(
         "terms": {},
     }
     nonfinite_terms = []
-    for term_name, weight_key, _, _ in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
+    for term_name, weight_key in _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS:
         _traceable_diag_progress(f"term_gradient:{term_name}")
         direct_grad, implicit_grad, term_total_grad, linear_solve_success = (
             _traceable_objective_gradient_parts(
