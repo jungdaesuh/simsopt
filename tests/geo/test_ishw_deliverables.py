@@ -20,8 +20,12 @@ EXAMPLE_ROOT = (
     / "examples"
     / "single_stage_optimization"
 )
+if str(EXAMPLE_ROOT) not in sys.path:
+    sys.path.insert(0, str(EXAMPLE_ROOT))
+
 IOTA_SWEEP_PATH = EXAMPLE_ROOT / "run_single_stage_iota_target_sweep.py"
 BANANA_SCAN_PATH = EXAMPLE_ROOT / "run_banana_current_scan.py"
+PERTURBED_SEED_PATH = EXAMPLE_ROOT / "make_perturbed_banana_seed.py"
 PLOT_PATH = EXAMPLE_ROOT / "plot_ishw_tradeoffs.py"
 WORKFLOW_COMMON_PATH = EXAMPLE_ROOT / "workflow_runner_common.py"
 STAGE2_ENTRYPOINT_PATH = EXAMPLE_ROOT / "STAGE_2" / "banana_coil_solver.py"
@@ -42,6 +46,14 @@ def load_iota_sweep_module():
 
 def load_banana_scan_module():
     return load_module(BANANA_SCAN_PATH, "run_banana_current_scan")
+
+
+def load_perturbed_seed_module():
+    return load_module(PERTURBED_SEED_PATH, "make_perturbed_banana_seed")
+
+
+def load_handoff_module():
+    return importlib.import_module("banana_opt.stage2_single_stage_handoff")
 
 
 def load_plot_module():
@@ -636,7 +648,14 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
         ), patch.object(
             module,
             "partition_loaded_stage2_coils",
-            return_value=SimpleNamespace(banana_coils=[object()]),
+            return_value=SimpleNamespace(
+                tf_coils=[
+                    SimpleNamespace(
+                        current=SimpleNamespace(get_value=lambda: 8.0e4)
+                    )
+                ],
+                banana_coils=[object()],
+            ),
         ), patch.object(
             module,
             "_scale_banana_current_chain",
@@ -663,6 +682,259 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
         )
         self.assertEqual(variant_results["BANANA_CURRENT_A"], 5500.0)
         self.assertEqual(variant_results["STAGE2_BS_PATH"], str(seed_bs_path))
+
+    def test_materialize_stage2_seed_variant_from_currents_round_trips_vector(self):
+        module = load_banana_scan_module()
+        handoff_module = load_handoff_module()
+        bs, stage2_results, handoff, load_optimizable = self._build_banana_partitions(
+            11000.0
+        )
+        bs.set_points(
+            [
+                [0.20, -0.10, 0.05],
+                [0.35, 0.15, -0.20],
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            seed_bs_path = tmpdir_path / "seed" / "biot_savart_opt.json"
+            seed_bs_path.parent.mkdir(parents=True, exist_ok=True)
+            bs.save(str(seed_bs_path))
+
+            donor_loaded = load_optimizable(str(seed_bs_path))
+            donor_partitions = handoff.partition_loaded_stage2_coils(
+                donor_loaded.coils,
+                stage2_results=stage2_results,
+                requested_num_tf_coils=20,
+            )
+            donor_tf_currents = [
+                coil.current.get_value() for coil in donor_partitions.tf_coils
+            ]
+            target_banana_currents = [
+                float((coil_index + 1) * 1000.0)
+                if coil_index % 2 == 0
+                else float(-((coil_index + 1) * 1000.0))
+                for coil_index in range(len(donor_partitions.banana_coils))
+            ]
+
+            variant_bs_path, variant_results_path = (
+                module.materialize_stage2_seed_variant_from_currents(
+                    stage2_bs_path=seed_bs_path,
+                    stage2_results=stage2_results,
+                    variant_root=tmpdir_path / "variant",
+                    banana_currents_a=target_banana_currents,
+                    requested_num_tf_coils=20,
+                    extra_results_updates={"CUSTOM_PROVENANCE": "test-vector"},
+                )
+            )
+
+            variant_loaded = load_optimizable(str(variant_bs_path))
+            variant_partitions = handoff.partition_loaded_stage2_coils(
+                variant_loaded.coils,
+                stage2_results=stage2_results,
+                requested_num_tf_coils=20,
+            )
+            variant_results = json.loads(
+                variant_results_path.read_text(encoding="utf-8")
+            )
+            expected_digest = module.compute_stage2_bs_sha256(variant_bs_path)
+            variant_points = variant_loaded.get_points_cart_ref().tolist()
+            donor_points = donor_loaded.get_points_cart_ref().tolist()
+
+        self.assertEqual(
+            [coil.current.get_value() for coil in variant_partitions.banana_coils],
+            target_banana_currents,
+        )
+        self.assertEqual(
+            [coil.current.get_value() for coil in variant_partitions.tf_coils],
+            donor_tf_currents,
+        )
+        self.assertEqual(
+            variant_results["BANANA_CURRENT_MODE"],
+            "independent",
+        )
+        self.assertEqual(
+            variant_results["BANANA_CURRENTS_A"],
+            target_banana_currents,
+        )
+        self.assertEqual(
+            variant_results["BANANA_CURRENT_A"],
+            max(abs(value) for value in target_banana_currents),
+        )
+        self.assertEqual(variant_results["TF_CURRENT_A"], 8.0e4)
+        self.assertEqual(variant_results["TF_CURRENT_SUM_ABS_A"], 1.6e6)
+        self.assertEqual(
+            variant_results["DONOR_BANANA_CURRENTS_A"],
+            [
+                coil.current.get_value()
+                for coil in donor_partitions.banana_coils
+            ],
+        )
+        self.assertEqual(variant_results["DONOR_BANANA_CURRENT_A"], 11000.0)
+        self.assertEqual(variant_results["CUSTOM_PROVENANCE"], "test-vector")
+        self.assertEqual(variant_results["STAGE2_BS_SHA256"], expected_digest)
+        self.assertEqual(variant_points, donor_points)
+        handoff_module.validate_stage2_seed_contract(variant_results)
+
+    def test_materialize_stage2_seed_variant_from_currents_rejects_length_mismatch(self):
+        module = load_banana_scan_module()
+        bs, stage2_results, _, _ = self._build_banana_partitions(11000.0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            seed_bs_path = tmpdir_path / "seed" / "biot_savart_opt.json"
+            seed_bs_path.parent.mkdir(parents=True, exist_ok=True)
+            bs.save(str(seed_bs_path))
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "vector length mismatch",
+            ):
+                module.materialize_stage2_seed_variant_from_currents(
+                    stage2_bs_path=seed_bs_path,
+                    stage2_results=stage2_results,
+                    variant_root=tmpdir_path / "variant",
+                    banana_currents_a=[1.0, -1.0],
+                    requested_num_tf_coils=20,
+                )
+
+
+class PerturbedBananaSeedTests(unittest.TestCase):
+    def test_main_materializes_explicit_independent_seed_bundle(self):
+        banana_scan_module = load_banana_scan_module()
+        handoff_module = load_handoff_module()
+        module = load_perturbed_seed_module()
+        bs, stage2_results, _, _ = (
+            BananaCurrentChainScalingTests._build_banana_partitions(11000.0)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            seed_bs_path = tmpdir_path / "seed" / "biot_savart_opt.json"
+            seed_bs_path.parent.mkdir(parents=True, exist_ok=True)
+            bs.save(str(seed_bs_path))
+            seed_results_path = seed_bs_path.with_name("results.json")
+            seed_results_path.write_text(
+                json.dumps(stage2_results),
+                encoding="utf-8",
+            )
+            output_root = tmpdir_path / "variant"
+            target_banana_currents = [
+                9000.0 if index % 2 == 0 else -9500.0
+                for index in range(stage2_results["NUM_BANANA_COILS"])
+            ]
+
+            result = module.main(
+                [
+                    "--stage2-bs-path",
+                    str(seed_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--banana-currents-A",
+                    ",".join(str(value) for value in target_banana_currents),
+                ]
+            )
+
+            self.assertEqual(result, 0)
+            summary = json.loads(
+                (output_root / module.DEFAULT_SUMMARY_JSON).read_text(
+                    encoding="utf-8"
+                )
+            )
+            variant_results = json.loads(
+                (output_root / "results.json").read_text(encoding="utf-8")
+            )
+            expected_digest = banana_scan_module.compute_stage2_bs_sha256(
+                output_root / "biot_savart_opt.json"
+            )
+
+        self.assertEqual(summary["experiment_family"], "perturbed_banana_seed")
+        self.assertEqual(summary["banana_current_mode"], "independent")
+        self.assertEqual(
+            summary["perturbed_banana_currents_a"],
+            target_banana_currents,
+        )
+        self.assertEqual(
+            summary["recommended_single_stage_flags"][-2:],
+            ["--single-stage-banana-current-mode", "independent"],
+        )
+        self.assertEqual(
+            variant_results["BANANA_CURRENTS_A"],
+            target_banana_currents,
+        )
+        self.assertEqual(
+            variant_results["DONOR_STAGE2_BS_PATH"],
+            str(seed_bs_path.resolve()),
+        )
+        self.assertEqual(
+            variant_results["DONOR_STAGE2_RESULTS_PATH"],
+            str(seed_results_path.resolve()),
+        )
+        self.assertEqual(
+            variant_results["PERTURBATION_MODE"],
+            "explicit_vector",
+        )
+        self.assertEqual(
+            variant_results["DONOR_BANANA_CURRENTS_A"],
+            [11000.0 if index % 2 == 0 else -11000.0 for index in range(10)],
+        )
+        self.assertEqual(variant_results["DONOR_BANANA_CURRENT_A"], 11000.0)
+        self.assertEqual(variant_results["TF_CURRENT_A"], 8.0e4)
+        self.assertEqual(variant_results["TF_CURRENT_SUM_ABS_A"], 1.6e6)
+        self.assertEqual(
+            variant_results["BANANA_CURRENT_A"],
+            9500.0,
+        )
+        self.assertEqual(variant_results["STAGE2_BS_SHA256"], expected_digest)
+        handoff_module.validate_stage2_seed_contract(variant_results)
+
+    def test_main_keeps_init_only_donor_metadata_without_unsupported_single_stage_flag(self):
+        module = load_perturbed_seed_module()
+        bs, stage2_results, _, _ = (
+            BananaCurrentChainScalingTests._build_banana_partitions(11000.0)
+        )
+        stage2_results = dict(stage2_results)
+        stage2_results["init_only"] = True
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            seed_bs_path = tmpdir_path / "seed" / "biot_savart_opt.json"
+            seed_bs_path.parent.mkdir(parents=True, exist_ok=True)
+            bs.save(str(seed_bs_path))
+            seed_bs_path.with_name("results.json").write_text(
+                json.dumps(stage2_results),
+                encoding="utf-8",
+            )
+            output_root = tmpdir_path / "variant"
+
+            result = module.main(
+                [
+                    "--stage2-bs-path",
+                    str(seed_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--banana-currents-A",
+                    ",".join(["9000.0", "-9500.0"] * 5),
+                ]
+            )
+
+            self.assertEqual(result, 0)
+            summary = json.loads(
+                (output_root / module.DEFAULT_SUMMARY_JSON).read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertTrue(summary["donor_init_only"])
+        self.assertEqual(
+            summary["recommended_single_stage_flags"][-2:],
+            ["--single-stage-banana-current-mode", "independent"],
+        )
+        self.assertNotIn(
+            "--allow-init-only-stage2-seed",
+            summary["recommended_single_stage_flags"],
+        )
 
 
 class IshwPlotTests(unittest.TestCase):

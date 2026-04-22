@@ -27,15 +27,24 @@ def load_handoff_module():
     return importlib.import_module("banana_opt.stage2_single_stage_handoff")
 
 
-def build_stage2_seed_fixture():
+def _build_stage2_seed_fixture(
+    *,
+    shared_current_A: float | None = None,
+    banana_currents_a: tuple[float, float] | None = None,
+):
     handoff_module = load_handoff_module()
-    shared_current = Current(1.0e4)
     tf_coil = Coil(CurveXYZFourier(10, 1), Current(8.0e4))
-    banana_coil_a = Coil(CurveXYZFourier(10, 1), shared_current)
-    banana_coil_b = Coil(
-        CurveXYZFourier(10, 1),
-        ScaledCurrent(shared_current, -1.0),
-    )
+    if banana_currents_a is None:
+        assert shared_current_A is not None
+        shared_current = Current(shared_current_A)
+        banana_coil_a = Coil(CurveXYZFourier(10, 1), shared_current)
+        banana_coil_b = Coil(
+            CurveXYZFourier(10, 1),
+            ScaledCurrent(shared_current, -1.0),
+        )
+    else:
+        banana_coil_a = Coil(CurveXYZFourier(10, 1), Current(banana_currents_a[0]))
+        banana_coil_b = Coil(CurveXYZFourier(10, 1), Current(banana_currents_a[1]))
     biot_savart = BiotSavart([tf_coil, banana_coil_a, banana_coil_b])
     coil_partitions = handoff_module.Stage2CoilPartitions(
         tf_coils=(tf_coil,),
@@ -49,6 +58,16 @@ def build_stage2_seed_fixture():
         finite_current_mode="wataru_proxy_field",
     )
     return biot_savart, coil_partitions
+
+
+def build_stage2_seed_fixture():
+    return _build_stage2_seed_fixture(shared_current_A=1.0e4)
+
+
+def build_asymmetric_stage2_seed_fixture():
+    return _build_stage2_seed_fixture(
+        banana_currents_a=(1.2e4, -9.5e3),
+    )
 
 
 class SingleStageBananaCurrentModeTests(unittest.TestCase):
@@ -152,6 +171,28 @@ class SingleStageBananaCurrentModeTests(unittest.TestCase):
         )
         self.assertEqual(payload["BEST_FEASIBLE_BANANA_NUM_CURRENT_CONTROLS"], 2)
         self.assertEqual(payload["BEST_FEASIBLE_BANANA_CURRENT_A"], 1.5e4)
+
+    def test_resolve_independent_mode_preserves_loaded_asymmetric_seed_vector(self):
+        module = load_current_mode_module()
+        biot_savart, coil_partitions = build_asymmetric_stage2_seed_fixture()
+
+        resolved_bs, resolved_partitions, state = (
+            module.resolve_single_stage_banana_current_state(
+                biot_savart,
+                coil_partitions,
+                mode="independent",
+            )
+        )
+
+        self.assertIsNot(resolved_bs, biot_savart)
+        self.assertEqual(state.seed_currents_A, (1.2e4, -9.5e3))
+        self.assertEqual(state.current_values_A(), (1.2e4, -9.5e3))
+        self.assertEqual(state.compatibility_current_A(), 1.2e4)
+        self.assertEqual(state.num_control_currents(), 2)
+        self.assertIsNot(
+            resolved_partitions.banana_coils[0].current,
+            resolved_partitions.banana_coils[1].current,
+        )
 
 
 if __name__ == "__main__":

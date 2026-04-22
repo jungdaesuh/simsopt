@@ -6,8 +6,12 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Mapping
 
+import numpy as np
 from simsopt._core.optimizable import load
+from simsopt.field import BiotSavart
+from simsopt.field.coil import Coil, Current
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -204,6 +208,164 @@ def _scale_banana_current_chain(
     innermost_current.local_full_x = [new_dof_value]
 
 
+def _validated_banana_current_vector(
+    banana_currents_a,
+    *,
+    expected_count: int,
+) -> tuple[float, ...]:
+    resolved_currents_a = tuple(float(value) for value in banana_currents_a)
+    if not resolved_currents_a:
+        raise ValueError(
+            "Stage 2 seed variant materialization requires at least one banana "
+            "current value."
+        )
+    if len(resolved_currents_a) != int(expected_count):
+        raise ValueError(
+            "Banana-current vector length mismatch: expected "
+            f"{int(expected_count)} values, got {len(resolved_currents_a)}."
+    )
+    return resolved_currents_a
+
+
+def _coil_current_values_a(coils) -> tuple[float, ...]:
+    return tuple(float(coil.current.get_value()) for coil in coils)
+
+
+def _max_abs_current_A(currents_a) -> float:
+    return max(abs(current_A) for current_A in currents_a)
+
+
+def _rebuild_biot_savart_with_banana_currents(
+    bs: BiotSavart,
+    banana_coils,
+    *,
+    banana_currents_a,
+) -> BiotSavart:
+    resolved_currents_a = _validated_banana_current_vector(
+        banana_currents_a,
+        expected_count=len(banana_coils),
+    )
+    rebuilt_banana_coils = tuple(
+        Coil(coil.curve, Current(current_A))
+        for coil, current_A in zip(
+            banana_coils,
+            resolved_currents_a,
+            strict=True,
+        )
+    )
+    rebuilt_banana_by_original_id = {
+        id(original_coil): rebuilt_coil
+        for original_coil, rebuilt_coil in zip(
+            banana_coils,
+            rebuilt_banana_coils,
+            strict=True,
+        )
+    }
+    missing_banana_coil_ids = set(rebuilt_banana_by_original_id) - {
+        id(coil) for coil in bs.coils
+    }
+    if missing_banana_coil_ids:
+        raise ValueError(
+            "Stage 2 banana coils are not all present in the Biot-Savart coil "
+            "list; cannot rebuild a current-vector seed without losing coil "
+            "ordering."
+        )
+    rebuilt_bs = BiotSavart(
+        [
+            rebuilt_banana_by_original_id.get(id(coil), coil)
+            for coil in bs.coils
+        ]
+    )
+    rebuilt_bs.set_points(np.array(bs.get_points_cart_ref(), copy=True))
+    return rebuilt_bs
+
+
+def _variant_results_payload(
+    *,
+    stage2_bs_path: Path,
+    stage2_results: Mapping[str, object],
+    variant_bs_path: Path,
+    results_updates: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    variant_results = dict(stage2_results)
+    if results_updates is not None:
+        variant_results.update(results_updates)
+    variant_results["STAGE2_BS_PATH"] = str(stage2_bs_path)
+    variant_results[STAGE2_BS_SHA256_KEY] = compute_stage2_bs_sha256(variant_bs_path)
+    return variant_results
+
+
+def _repaired_stage2_results_with_loaded_tf_metadata(
+    stage2_results: Mapping[str, object],
+    *,
+    tf_coils,
+) -> dict[str, object]:
+    repaired_results = dict(stage2_results)
+    tf_currents_a = _coil_current_values_a(tf_coils)
+    if repaired_results.get("NUM_TF_COILS") is None:
+        repaired_results["NUM_TF_COILS"] = int(len(tf_currents_a))
+    if not tf_currents_a:
+        return repaired_results
+    tf_current_sum_abs_A = float(sum(abs(current_A) for current_A in tf_currents_a))
+    if repaired_results.get("TF_CURRENT_A") is None:
+        tf_current_abs_A = abs(tf_currents_a[0])
+        if not all(
+            np.isclose(abs(current_A), tf_current_abs_A, rtol=0.0, atol=1.0e-9)
+            for current_A in tf_currents_a[1:]
+        ):
+            raise ValueError(
+                "Cannot infer scalar TF_CURRENT_A from the loaded donor because "
+                "the TF coil currents do not share one magnitude."
+            )
+        repaired_results["TF_CURRENT_A"] = float(tf_current_abs_A)
+    if repaired_results.get("TF_CURRENT_SUM_ABS_A") is None:
+        repaired_results["TF_CURRENT_SUM_ABS_A"] = tf_current_sum_abs_A
+    return repaired_results
+
+
+def _load_stage2_seed_variant_context(
+    *,
+    stage2_bs_path: Path,
+    stage2_results: dict,
+    requested_num_tf_coils: int,
+):
+    bs = load(str(stage2_bs_path))
+    coil_partitions = partition_loaded_stage2_coils(
+        bs.coils,
+        stage2_results=stage2_results,
+        requested_num_tf_coils=requested_num_tf_coils,
+    )
+    repaired_stage2_results = _repaired_stage2_results_with_loaded_tf_metadata(
+        stage2_results,
+        tf_coils=coil_partitions.tf_coils,
+    )
+    return bs, coil_partitions, repaired_stage2_results
+
+
+def _write_stage2_seed_variant_artifacts(
+    *,
+    bs: BiotSavart,
+    stage2_bs_path: Path,
+    stage2_results: Mapping[str, object],
+    variant_root: Path,
+    results_updates: Mapping[str, object] | None = None,
+) -> tuple[Path, Path]:
+    variant_root.mkdir(parents=True, exist_ok=True)
+    variant_bs_path = variant_root / "biot_savart_opt.json"
+    variant_results_path = variant_root / "results.json"
+    bs.save(str(variant_bs_path))
+    write_json(
+        variant_results_path,
+        _variant_results_payload(
+            stage2_bs_path=stage2_bs_path,
+            stage2_results=stage2_results,
+            variant_bs_path=variant_bs_path,
+            results_updates=results_updates,
+        ),
+    )
+    return variant_bs_path, variant_results_path
+
+
 def _materialize_stage2_seed_variant(
     *,
     stage2_bs_path: Path,
@@ -212,9 +374,8 @@ def _materialize_stage2_seed_variant(
     banana_current_a: float,
     requested_num_tf_coils: int,
 ) -> tuple[Path, Path]:
-    bs = load(str(stage2_bs_path))
-    coil_partitions = partition_loaded_stage2_coils(
-        bs.coils,
+    bs, coil_partitions, repaired_stage2_results = _load_stage2_seed_variant_context(
+        stage2_bs_path=stage2_bs_path,
         stage2_results=stage2_results,
         requested_num_tf_coils=requested_num_tf_coils,
     )
@@ -222,18 +383,60 @@ def _materialize_stage2_seed_variant(
         coil_partitions.banana_coils,
         target_banana_current_a=banana_current_a,
     )
+    return _write_stage2_seed_variant_artifacts(
+        bs=bs,
+        stage2_bs_path=stage2_bs_path,
+        stage2_results=repaired_stage2_results,
+        variant_root=variant_root,
+        results_updates={
+            "BANANA_CURRENT_A": float(banana_current_a),
+        },
+    )
 
-    variant_root.mkdir(parents=True, exist_ok=True)
-    variant_bs_path = variant_root / "biot_savart_opt.json"
-    variant_results_path = variant_root / "results.json"
-    bs.save(str(variant_bs_path))
 
-    variant_results = dict(stage2_results)
-    variant_results["BANANA_CURRENT_A"] = float(banana_current_a)
-    variant_results["STAGE2_BS_PATH"] = str(stage2_bs_path)
-    variant_results[STAGE2_BS_SHA256_KEY] = compute_stage2_bs_sha256(variant_bs_path)
-    write_json(variant_results_path, variant_results)
-    return variant_bs_path, variant_results_path
+def materialize_stage2_seed_variant_from_currents(
+    *,
+    stage2_bs_path: Path,
+    stage2_results: dict,
+    variant_root: Path,
+    banana_currents_a,
+    requested_num_tf_coils: int,
+    extra_results_updates: Mapping[str, object] | None = None,
+) -> tuple[Path, Path]:
+    bs, coil_partitions, repaired_stage2_results = _load_stage2_seed_variant_context(
+        stage2_bs_path=stage2_bs_path,
+        stage2_results=stage2_results,
+        requested_num_tf_coils=requested_num_tf_coils,
+    )
+    donor_currents_a = _coil_current_values_a(coil_partitions.banana_coils)
+    resolved_currents_a = _validated_banana_current_vector(
+        banana_currents_a,
+        expected_count=len(coil_partitions.banana_coils),
+    )
+    rebuilt_bs = _rebuild_biot_savart_with_banana_currents(
+        bs,
+        coil_partitions.banana_coils,
+        banana_currents_a=resolved_currents_a,
+    )
+    compatibility_current_A = _max_abs_current_A(resolved_currents_a)
+    donor_compatibility_current_A = _max_abs_current_A(donor_currents_a)
+    results_updates: dict[str, object] = {
+        "BANANA_CURRENT_MODE": "independent",
+        "BANANA_CURRENTS_A": [float(value) for value in resolved_currents_a],
+        "BANANA_CURRENT_MAX_ABS_A": float(compatibility_current_A),
+        "BANANA_CURRENT_A": float(compatibility_current_A),
+        "DONOR_BANANA_CURRENTS_A": [float(value) for value in donor_currents_a],
+        "DONOR_BANANA_CURRENT_A": float(donor_compatibility_current_A),
+    }
+    if extra_results_updates is not None:
+        results_updates.update(extra_results_updates)
+    return _write_stage2_seed_variant_artifacts(
+        bs=rebuilt_bs,
+        stage2_bs_path=stage2_bs_path,
+        stage2_results=repaired_stage2_results,
+        variant_root=variant_root,
+        results_updates=results_updates,
+    )
 
 
 def _materialize_poincare_fallback_inputs(

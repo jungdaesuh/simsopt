@@ -21,6 +21,7 @@ EXAMPLE_ROOT = (
     / "single_stage_optimization"
 )
 WRAPPER_PATH = EXAMPLE_ROOT / "run_stage2_to_single_stage.py"
+BANANA_SCAN_PATH = EXAMPLE_ROOT / "run_banana_current_scan.py"
 if str(EXAMPLE_ROOT) not in sys.path:
     sys.path.insert(0, str(EXAMPLE_ROOT))
 
@@ -38,6 +39,10 @@ def load_wrapper_module():
     return load_module(WRAPPER_PATH, "run_stage2_to_single_stage")
 
 
+def load_banana_scan_module():
+    return load_module(BANANA_SCAN_PATH, "run_banana_current_scan")
+
+
 def load_hardware_schema_module():
     return importlib.import_module("banana_opt.hardware_constraint_schema")
 
@@ -48,6 +53,14 @@ def load_artifact_contracts_module():
 
 def load_handoff_module():
     return importlib.import_module("banana_opt.stage2_single_stage_handoff")
+
+
+def load_current_mode_module():
+    return importlib.import_module("banana_opt.single_stage_banana_current_mode")
+
+
+def load_workflow_runner_common_module():
+    return importlib.import_module("workflow_runner_common")
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -784,6 +797,133 @@ class HandoffModuleTests(unittest.TestCase):
                 },
                 requested_num_tf_coils=20,
             )
+
+    def test_materialize_stage2_seed_variant_from_currents_preserves_order_and_metadata(self):
+        handoff_module = load_handoff_module()
+        banana_scan_module = load_banana_scan_module()
+        workflow_runner_common = load_workflow_runner_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stage2_bs_path, stage2_results, points, _ = _build_round_trip_seed(
+                Path(tmpdir),
+                include_proxy_vf=True,
+            )
+            stage2_results = {
+                **stage2_results,
+                "COIL_GROUPS": [
+                    {"role": "tf", "start": 0, "count": 20},
+                    {"role": "banana", "start": 20, "count": 2},
+                    {"role": "proxy", "start": 22, "count": 1},
+                    {"role": "vf", "start": 23, "count": 1},
+                ],
+                "BANANA_CURRENT_A": 1.1e4,
+                "MAJOR_RADIUS": 0.976,
+                "TOROIDAL_FLUX": 0.24,
+                "banana_surf_radius": 0.21,
+            }
+            _write_json(stage2_bs_path.with_name("results.json"), stage2_results)
+            donor_loaded = handoff_module.load(str(stage2_bs_path))
+            donor_currents = [
+                float(coil.current.get_value()) for coil in donor_loaded.coils
+            ]
+
+            variant_bs_path, variant_results_path = (
+                banana_scan_module.materialize_stage2_seed_variant_from_currents(
+                    stage2_bs_path=stage2_bs_path,
+                    stage2_results=stage2_results,
+                    variant_root=Path(tmpdir) / "variant",
+                    banana_currents_a=[1.2e4, -9.5e3],
+                    requested_num_tf_coils=20,
+                    extra_results_updates={"CUSTOM_PROVENANCE": "handoff-test"},
+                )
+            )
+
+            loaded_results_path, loaded_results = (
+                workflow_runner_common.load_stage2_artifact_results(variant_bs_path)
+            )
+            variant_loaded = handoff_module.load(str(variant_bs_path))
+            variant_loaded.set_points(points)
+            variant_currents = [
+                float(coil.current.get_value()) for coil in variant_loaded.coils
+            ]
+            partitions = handoff_module.partition_loaded_stage2_coils(
+                variant_loaded.coils,
+                stage2_results=loaded_results,
+                requested_num_tf_coils=20,
+            )
+            expected_digest = banana_scan_module.compute_stage2_bs_sha256(
+                variant_bs_path
+            )
+            raw_variant_results = json.loads(
+                variant_results_path.read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(loaded_results_path, variant_results_path)
+        self.assertEqual(variant_currents[:20], donor_currents[:20])
+        self.assertEqual(variant_currents[20:22], [1.2e4, -9.5e3])
+        self.assertEqual(variant_currents[22:], donor_currents[22:])
+        self.assertEqual(
+            [coil.current.get_value() for coil in partitions.banana_coils],
+            [1.2e4, -9.5e3],
+        )
+        self.assertEqual(loaded_results["COIL_GROUPS"], stage2_results["COIL_GROUPS"])
+        self.assertEqual(loaded_results["NUM_PROXY_COILS"], 1)
+        self.assertEqual(loaded_results["NUM_VF_COILS"], 1)
+        self.assertEqual(loaded_results["BANANA_CURRENT_MODE"], "independent")
+        self.assertEqual(loaded_results["BANANA_CURRENTS_A"], [1.2e4, -9.5e3])
+        self.assertEqual(loaded_results["BANANA_CURRENT_A"], 1.2e4)
+        self.assertEqual(
+            loaded_results["DONOR_BANANA_CURRENTS_A"],
+            [1.1e4, -1.1e4],
+        )
+        self.assertEqual(loaded_results["DONOR_BANANA_CURRENT_A"], 1.1e4)
+        self.assertEqual(loaded_results["CUSTOM_PROVENANCE"], "handoff-test")
+        self.assertEqual(loaded_results["STAGE2_BS_SHA256"], expected_digest)
+        self.assertEqual(raw_variant_results["STAGE2_BS_SHA256"], expected_digest)
+
+    def test_materialized_vector_seed_survives_into_independent_single_stage_state(self):
+        handoff_module = load_handoff_module()
+        banana_scan_module = load_banana_scan_module()
+        current_mode_module = load_current_mode_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stage2_bs_path, stage2_results, points, _ = _build_round_trip_seed(
+                Path(tmpdir),
+                include_proxy_vf=False,
+            )
+            variant_bs_path, _ = (
+                banana_scan_module.materialize_stage2_seed_variant_from_currents(
+                    stage2_bs_path=stage2_bs_path,
+                    stage2_results=stage2_results,
+                    variant_root=Path(tmpdir) / "variant",
+                    banana_currents_a=[1.2e4, -9.5e3],
+                    requested_num_tf_coils=20,
+                )
+            )
+            variant_loaded = handoff_module.load(str(variant_bs_path))
+            variant_loaded.set_points(points)
+            partitions = handoff_module.partition_loaded_stage2_coils(
+                variant_loaded.coils,
+                stage2_results=stage2_results,
+                requested_num_tf_coils=20,
+            )
+
+            _, resolved_partitions, current_state = (
+                current_mode_module.resolve_single_stage_banana_current_state(
+                    variant_loaded,
+                    partitions,
+                    mode="independent",
+                )
+            )
+
+        self.assertEqual(current_state.seed_currents_A, (1.2e4, -9.5e3))
+        self.assertEqual(current_state.current_values_A(), (1.2e4, -9.5e3))
+        self.assertEqual(current_state.num_control_currents(), 2)
+        self.assertEqual(current_state.compatibility_current_A(), 1.2e4)
+        self.assertIsNot(
+            resolved_partitions.banana_coils[0].current,
+            resolved_partitions.banana_coils[1].current,
+        )
 
     def test_wataru_round_trip_field_parity_survives_stage2_write_and_reload(self):
         module = load_handoff_module()
