@@ -1900,26 +1900,9 @@ class BoozerSurfaceJAX(Optimizable):
             operator = _optimizer_jax._jacobian_linear_operator(residual_fn, x)
             linear_solve_backend = self._exact_adjoint_linear_solve_backend()
 
-            def solve_jacobian_system(rhs, *, transpose):
-                if linear_solve_backend == "dense_jax":
-                    solution, _ = _optimizer_jax._solve_dense_jacobian_system_with_status(
-                        residual_fn,
-                        x,
-                        rhs,
-                        transpose=transpose,
-                        tol=tol_host,
-                    )
-                    return solution
-                return _optimizer_jax._solve_jacobian_system(
-                    residual_fn,
-                    x,
-                    rhs,
-                    transpose=transpose,
-                    tol=tol_host,
-                )
+            if linear_solve_backend == "dense_jax":
 
-            def solve_jacobian_system_with_status(rhs, *, transpose):
-                if linear_solve_backend == "dense_jax":
+                def solve_jacobian_system_with_status(rhs, *, transpose):
                     return _optimizer_jax._solve_dense_jacobian_system_with_status(
                         residual_fn,
                         x,
@@ -1927,13 +1910,33 @@ class BoozerSurfaceJAX(Optimizable):
                         transpose=transpose,
                         tol=tol_host,
                     )
-                return _optimizer_jax._solve_jacobian_system_with_status(
-                    residual_fn,
-                    x,
-                    rhs,
-                    transpose=transpose,
-                    tol=tol_host,
-                )
+
+                def solve_jacobian_system(rhs, *, transpose):
+                    solution, _ = solve_jacobian_system_with_status(
+                        rhs,
+                        transpose=transpose,
+                    )
+                    return solution
+
+            else:
+
+                def solve_jacobian_system_with_status(rhs, *, transpose):
+                    return _optimizer_jax._solve_jacobian_system_with_status(
+                        residual_fn,
+                        x,
+                        rhs,
+                        transpose=transpose,
+                        tol=tol_host,
+                    )
+
+                def solve_jacobian_system(rhs, *, transpose):
+                    return _optimizer_jax._solve_jacobian_system(
+                        residual_fn,
+                        x,
+                        rhs,
+                        transpose=transpose,
+                        tol=tol_host,
+                    )
 
             def solve_forward(rhs):
                 return solve_jacobian_system(rhs, transpose=False)

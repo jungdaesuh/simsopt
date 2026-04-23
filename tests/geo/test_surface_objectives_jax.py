@@ -81,6 +81,15 @@ _SURFACE_TYPES = (
     "SurfaceRZFourier",
     "SurfaceXYZTensorFourier",
 )
+
+
+def _assert_nonfinite_gradient(grad):
+    assert not np.any(np.isfinite(np.asarray(grad)))
+
+
+def _assert_fail_closed_value_and_grad(value, grad):
+    assert np.isposinf(float(np.asarray(value)))
+    _assert_nonfinite_gradient(grad)
 _STELLSYM_OPTIONS = (True, False)
 _TOROIDAL_FLUX_VALUE_RTOL = 1e-10
 _TOROIDAL_FLUX_VALUE_ATOL = 1e-12
@@ -213,9 +222,7 @@ def test_traceable_value_and_grad_surfaces_adjoint_solve_failure_as_nan_gradient
     )
 
     value, grad = bundle["compiled_value_and_grad_for"](baseline_coil_dofs)
-
-    assert np.isposinf(float(np.asarray(value)))
-    assert not np.any(np.isfinite(np.asarray(grad)))
+    _assert_fail_closed_value_and_grad(value, grad)
 
 
 def test_checked_boozer_linear_solve_uses_explicit_host_bool_boundary(monkeypatch):
@@ -2143,8 +2150,7 @@ def test_traceable_seeded_initial_value_surfaces_failed_solve_gradient(monkeypat
     )
 
     value, grad = seeded.optimizer_initial_value_and_grad
-    assert np.isposinf(float(np.asarray(value)))
-    assert not np.any(np.isfinite(np.asarray(grad)))
+    _assert_fail_closed_value_and_grad(value, grad)
 
 
 def test_host_boundary_with_baseline_peel_falls_through_for_traced_inputs():
@@ -2340,8 +2346,7 @@ def test_traceable_runtime_host_wrappers_surface_failed_solve_baseline_gradient(
     )
 
     value, grad = runtime_entry["host_value_and_grad"](baseline_coil_dofs.copy())
-    assert np.isposinf(value)
-    assert not np.any(np.isfinite(grad))
+    _assert_fail_closed_value_and_grad(value, grad)
 
 
 def test_traceable_custom_vjp_surfaces_adjoint_solve_failure_as_nan_gradient():
@@ -2367,8 +2372,7 @@ def test_traceable_custom_vjp_surfaces_adjoint_solve_failure_as_nan_gradient():
     )
 
     grad = jax.grad(objective)(jnp.asarray([0.5, -0.25], dtype=jnp.float64))
-
-    assert not np.any(np.isfinite(np.asarray(grad)))
+    _assert_nonfinite_gradient(grad)
 
 
 def _quadratic_inner_objective_closure(*, coil_set_spec, **_kwargs):

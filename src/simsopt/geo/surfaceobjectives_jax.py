@@ -2640,22 +2640,19 @@ def _traceable_total_gradient_with_status(
     objective_kwargs,
     scalar_objective_fn=None,
 ):
-    direct_grad, implicit_grad, total_grad, linear_solve_success = (
-        _traceable_objective_gradient_parts(
-            booz_jax,
-            coil_set_spec_from_dofs,
-            coil_dofs=coil_dofs,
-            solved_x=solved_x,
-            solved_linear_solve_factors=solved_linear_solve_factors,
-            linearization_kind=linearization_kind,
-            linear_solve_backend=linear_solve_backend,
-            linear_solve_tol=linear_solve_tol,
-            linear_solve_stab=linear_solve_stab,
-            objective_kwargs=objective_kwargs,
-            scalar_objective_fn=scalar_objective_fn,
-        )
+    _, _, total_grad, linear_solve_success = _traceable_objective_gradient_parts(
+        booz_jax,
+        coil_set_spec_from_dofs,
+        coil_dofs=coil_dofs,
+        solved_x=solved_x,
+        solved_linear_solve_factors=solved_linear_solve_factors,
+        linearization_kind=linearization_kind,
+        linear_solve_backend=linear_solve_backend,
+        linear_solve_tol=linear_solve_tol,
+        linear_solve_stab=linear_solve_stab,
+        objective_kwargs=objective_kwargs,
+        scalar_objective_fn=scalar_objective_fn,
     )
-    del direct_grad, implicit_grad
     return total_grad, linear_solve_success
 
 
