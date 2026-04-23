@@ -245,7 +245,7 @@ def engineering_offspec_fields(
     coil_length_target_m = translated.get(_KEY_COIL_LENGTH_TARGET_M)
     if (
         coil_length_target_m is not None
-        and float(coil_length_target_m) > _hc.COIL_LENGTH_TARGET_M
+        and float(coil_length_target_m) > _hc.COIL_LENGTH_HARD_LIMIT_M
     ):
         offspec.append(_KEY_COIL_LENGTH_TARGET_M)
     curvature_threshold = translated.get(_KEY_CURVATURE_THRESHOLD)
@@ -366,10 +366,10 @@ def resolve_constraint_contract(
                 "BANANA_CURRENT_MAX_A exceeds the hardware limit "
                 f"{_hc.BANANA_CURRENT_HARD_LIMIT_A:.0f} A."
             )
-        if contract[_KEY_COIL_LENGTH_TARGET_M] > _hc.COIL_LENGTH_TARGET_M:
+        if contract[_KEY_COIL_LENGTH_TARGET_M] > _hc.COIL_LENGTH_HARD_LIMIT_M:
             raise ValueError(
                 "COIL_LENGTH_TARGET_M exceeds the hardware limit "
-                f"{_hc.COIL_LENGTH_TARGET_M:.3f} m."
+                f"{_hc.COIL_LENGTH_HARD_LIMIT_M:.3f} m."
             )
         if contract[_KEY_CURVATURE_THRESHOLD] > _hc.MAX_CURVATURE_INV_M:
             raise ValueError(

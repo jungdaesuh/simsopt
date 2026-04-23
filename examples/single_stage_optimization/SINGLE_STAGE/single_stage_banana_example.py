@@ -142,6 +142,7 @@ from banana_opt.hardware_constraint_schema import (
     hardware_constraint_alm_names,
 )
 from banana_opt.incumbents import (
+    COIL_LENGTH_HARD_LIMIT_M,
     restore_single_stage_incumbent_state,
     snapshot_single_stage_incumbent_state,
 )
@@ -1477,9 +1478,10 @@ def parse_args():
         default=float(os.environ.get("SS_LENGTH_TARGET", str(COIL_LENGTH_TARGET_M))),
         help=(
             "Curve length quadratic penalty target in meters (applies to banana_curves[0] via "
-            "QuadraticPenalty(..., 'max')). Defaults to the hardware contract ceiling of 1.7 m. "
-            "Passing a larger value is clamped back to the contract; passing a smaller value "
-            "makes the run stricter."
+            f"QuadraticPenalty(..., 'max')). Defaults to the preferred hardware target of "
+            f"{COIL_LENGTH_TARGET_M:.1f} m, with a hard ceiling at "
+            f"{COIL_LENGTH_HARD_LIMIT_M:.1f} m. Passing a larger value is clamped back to "
+            "the hardware ceiling; passing a smaller value makes the run stricter."
         ),
     )
     parser.add_argument("--res-weight", type=float, default=float(os.environ.get("RES_WEIGHT", "1000")),
@@ -7111,15 +7113,16 @@ if __name__ == "__main__":
     if len(surface_data) > 1 and SURF_DIST_WEIGHT != 0:
         print("WARNING: SURF_DIST_WEIGHT is diagnostic-only in multi-surface mode; outer-vessel spacing is enforced as a rejection gate.")
 
-    length_target = float(args.length_target)
+    requested_length_target = float(args.length_target)
+    length_target = requested_length_target
     if (
         not allow_offspec_engineering_constraints
-        and args.length_target > COIL_LENGTH_TARGET_M
+        and requested_length_target > COIL_LENGTH_HARD_LIMIT_M
     ):
-        length_target = COIL_LENGTH_TARGET_M
+        length_target = COIL_LENGTH_HARD_LIMIT_M
         print(
-            f"WARNING: --length-target {args.length_target} above hardware ceiling, "
-            f"clamped to {COIL_LENGTH_TARGET_M}"
+            f"WARNING: --length-target {requested_length_target} above hardware ceiling, "
+            f"clamped to {COIL_LENGTH_HARD_LIMIT_M}"
         )
     frontier_goal_config = None
     if args.single_stage_goal_mode == "frontier":

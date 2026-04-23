@@ -281,16 +281,19 @@ def evaluate_single_stage_hardware_constraints(
     banana_current_A=None,
     banana_current_max_A=None,
 ):
-    threshold_overrides = build_threshold_overrides(
-        (
-            ("coil_coil_spacing", cc_dist),
-            ("coil_surface_spacing", cs_dist),
-            ("surface_vessel_spacing", ss_dist),
-            ("max_curvature", curvature_threshold),
-            ("coil_length", length_target),
-            ("tf_current", tf_current_limit_A),
-            ("banana_current", banana_current_max_A),
-        )
+    shared_threshold_inputs = (
+        ("coil_coil_spacing", cc_dist),
+        ("coil_surface_spacing", cs_dist),
+        ("surface_vessel_spacing", ss_dist),
+        ("max_curvature", curvature_threshold),
+        ("tf_current", tf_current_limit_A),
+        ("banana_current", banana_current_max_A),
+    )
+    search_threshold_overrides = build_threshold_overrides(
+        shared_threshold_inputs + (("coil_length", length_target),)
+    )
+    artifact_threshold_overrides = build_threshold_overrides(
+        shared_threshold_inputs
     )
     measured_values = {
         "coil_coil_spacing": curve_curve_min_dist,
@@ -304,12 +307,12 @@ def evaluate_single_stage_hardware_constraints(
     search_hardware_status = build_hardware_constraint_status(
         measured_values,
         applies_to="penalty",
-        threshold_overrides=threshold_overrides,
+        threshold_overrides=search_threshold_overrides,
     )
     artifact_hardware_status = build_hardware_constraint_status(
         measured_values,
         applies_to="artifact",
-        threshold_overrides=threshold_overrides,
+        threshold_overrides=artifact_threshold_overrides,
     )
     return {
         "success": search_hardware_status["success"],

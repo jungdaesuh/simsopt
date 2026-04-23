@@ -705,7 +705,10 @@ def build_single_stage_frontier_runtime(
         length_target = (
             float(args.length_target)
             if allow_offspec
-            else min(float(args.length_target), float(single_stage.COIL_LENGTH_TARGET_M))
+            else min(
+                float(args.length_target),
+                float(single_stage.COIL_LENGTH_HARD_LIMIT_M),
+            )
         )
         curvature_threshold = (
             float(args.curvature_threshold)

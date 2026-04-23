@@ -16,6 +16,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from workflow_helpers import (
+    DEFAULT_STAGE2_LENGTH_TARGET,
     Stage2SeedSpec,
     local_stage2_bs_path,
     resolve_wataru_vf_template_path,
@@ -98,7 +99,7 @@ class Stage2ArtifactConfig:
     init_only: bool = False
     banana_init_current_A: float = 1.0e4
     banana_current_max_A: float = 1.6e4
-    length_target: float = 1.7
+    length_target: float = DEFAULT_STAGE2_LENGTH_TARGET
     finite_current_mode: str = "wataru_proxy_field"
     proxy_plasma_current_A: float = 0.0
     vf_current_A: float = 0.0

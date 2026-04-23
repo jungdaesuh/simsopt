@@ -2556,7 +2556,7 @@ class HardwareConstraintTests(unittest.TestCase):
         module = load_stage2_module()
 
         status = module.evaluate_stage2_hardware_constraints(
-            coil_length=1.8,
+            coil_length=2.1,
             length_target=1.75,
             curve_curve_min_dist=0.04,
             cc_threshold=0.05,
@@ -2603,7 +2603,7 @@ class HardwareConstraintTests(unittest.TestCase):
             ss_dist=0.04,
             max_curvature=40.0,
             curvature_threshold=40.0,
-            coil_length=1.8,
+            coil_length=2.1,
             length_target=1.7,
             tf_current_A=9.0e4,
             tf_current_limit_A=8.0e4,
@@ -2632,7 +2632,7 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertIn("tf_current", artifact_status["violations"][2])
         self.assertEqual(
             artifact_status["allowed_traversal_status"]["violations"],
-            ["coil_length 1.800000 exceeds threshold 1.700000"],
+            ["coil_length 2.100000 exceeds threshold 2.000000"],
         )
         self.assertEqual(
             artifact_status["forbidden_traversal_status"]["violations"],
@@ -2643,7 +2643,7 @@ class HardwareConstraintTests(unittest.TestCase):
         )
         self.assertEqual(
             artifact_status["constraints"]["coil_length"]["threshold"],
-            1.7,
+            2.0,
         )
         self.assertEqual(
             artifact_status["constraints"]["tf_current"]["threshold"],
@@ -3725,14 +3725,14 @@ class HardwareConstraintTests(unittest.TestCase):
                 "search_hardware_status": {"success": True, "violations": []},
                 "artifact_hardware_status": {
                     "success": False,
-                    "violations": ["coil_length 1.800000 exceeds threshold 1.700000"],
+                    "violations": ["coil_length 2.100000 exceeds threshold 2.000000"],
                 },
                 "max_curvature": 19.8,
                 "curve_curve_min_dist": 0.0501,
                 "curve_surface_min_dist": 0.067,
                 "surface_vessel_min_dist": 0.082,
             },
-            coil_length=1.8,
+            coil_length=2.1,
             accepted_iteration=1,
         )
 
@@ -3740,7 +3740,7 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertIs(payload["HARDWARE_CONSTRAINTS_OK"], False)
         self.assertEqual(
             payload["HARDWARE_CONSTRAINT_VIOLATIONS"],
-            ["coil_length 1.800000 exceeds threshold 1.700000"],
+            ["coil_length 2.100000 exceeds threshold 2.000000"],
         )
 
     def test_build_preserved_timeout_results_payload_backfills_missing_coil_length(self):
@@ -3995,14 +3995,14 @@ class HardwareConstraintTests(unittest.TestCase):
         hardware_snapshot = {
             "artifact_hardware_status": {
                 "success": False,
-                "violations": ["coil_length 1.800000 exceeds threshold 1.700000"],
+                "violations": ["coil_length 2.100000 exceeds threshold 2.000000"],
             },
             "curve_curve_min_dist": 0.0501,
             "curve_surface_min_dist": 0.067,
             "surface_vessel_min_dist": 0.082,
             "max_curvature": 19.8,
-            "coil_length": 1.8,
-            "length_target": 1.7,
+            "coil_length": 2.1,
+            "length_target": 1.9,
             "tf_current_A": 8.0e4,
             "tf_current_limit_A": 8.0e4,
             "banana_current_A": 1.4e4,
@@ -4031,7 +4031,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 curve_surface_distance_obj=object(),
                 surface_surface_distance_obj=object(),
                 banana_curve=object(),
-                curvelength_obj=SimpleNamespace(J=lambda: 1.8),
+                curvelength_obj=SimpleNamespace(J=lambda: 2.1),
                 cc_dist=0.05,
                 cs_dist=0.015,
                 ss_dist=0.04,
@@ -4050,8 +4050,8 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(summary["BEST_FEASIBLE_CURVE_SURFACE_MIN_DIST"], 0.067)
         self.assertEqual(summary["BEST_FEASIBLE_SURFACE_VESSEL_MIN_DIST"], 0.082)
         self.assertEqual(summary["BEST_FEASIBLE_MAX_CURVATURE"], 19.8)
-        self.assertEqual(summary["BEST_FEASIBLE_COIL_LENGTH"], 1.8)
-        self.assertEqual(summary["BEST_FEASIBLE_LENGTH_TARGET"], 1.7)
+        self.assertEqual(summary["BEST_FEASIBLE_COIL_LENGTH"], 2.1)
+        self.assertEqual(summary["BEST_FEASIBLE_LENGTH_TARGET"], 1.9)
         self.assertEqual(summary["BEST_FEASIBLE_TF_CURRENT_A"], 8.0e4)
         self.assertEqual(summary["BEST_FEASIBLE_TF_CURRENT_LIMIT_A"], 8.0e4)
         self.assertEqual(summary["BEST_FEASIBLE_BANANA_CURRENT_A"], 1.4e4)
@@ -4059,7 +4059,7 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertFalse(summary["BEST_FEASIBLE_HARDWARE_CONSTRAINTS_OK"])
         self.assertEqual(
             summary["BEST_FEASIBLE_HARDWARE_CONSTRAINT_VIOLATIONS"],
-            ["coil_length 1.800000 exceeds threshold 1.700000"],
+            ["coil_length 2.100000 exceeds threshold 2.000000"],
         )
 
     def test_validate_boozer_stage_refinement_args_rejects_unsupported_scope(self):
@@ -9267,7 +9267,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "stage2_iota_mpol": 8,
             "stage2_iota_ntor": 6,
             "length_weight": 5e-4,
-            "length_target": 1.7,
+            "length_target": 1.9,
             "allow_offspec_engineering_constraints": False,
             "target_lcfs_max_major_radius_m": 0.92,
             "target_lcfs_max_minor_radius_m": 0.15,
@@ -10088,7 +10088,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             curve_curve_min_dist=0.06,
             max_curvature=41.0,
         ):
-            violations = [] if success else [f"coil_length {coil_length:.6f} > 1.700000"]
+            violations = [] if success else [f"coil_length {coil_length:.6f} > 2.000000"]
             return {
                 "field_objective": float(field_objective),
                 "coil_length": float(coil_length),
@@ -10109,7 +10109,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             use_seed=True,
             alm_accepted_candidate_x=np.array([0.9, 0.8], dtype=float),
             artifact_state_by_x={
-                (0.0, 0.0): make_artifact_state(0.9, 1.7004, success=False),
+                (0.0, 0.0): make_artifact_state(0.9, 2.0004, success=False),
                 (0.9, 0.8): make_artifact_state(
                     0.4,
                     1.69,
@@ -10117,7 +10117,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     curve_curve_min_dist=0.07,
                     max_curvature=39.0,
                 ),
-                (0.1, 0.2): make_artifact_state(0.6, 1.7002, success=False),
+                (0.1, 0.2): make_artifact_state(0.6, 2.0002, success=False),
             },
         )
 

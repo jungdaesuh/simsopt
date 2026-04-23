@@ -990,9 +990,8 @@ def evaluate_stage2_hardware_constraints(
     tf_current_A=None,
     tf_current_threshold=None,
 ):
-    threshold_overrides = build_threshold_overrides(
+    artifact_threshold_overrides = build_threshold_overrides(
         (
-            ("coil_length", length_target),
             ("coil_coil_spacing", cc_threshold),
             ("max_curvature", curvature_threshold),
             ("coil_surface_spacing", coil_surface_threshold),
@@ -1013,7 +1012,7 @@ def evaluate_stage2_hardware_constraints(
     status = build_hardware_constraint_status(
         measured_values,
         applies_to="artifact",
-        threshold_overrides=threshold_overrides,
+        threshold_overrides=artifact_threshold_overrides,
     )
     status.update(
         {

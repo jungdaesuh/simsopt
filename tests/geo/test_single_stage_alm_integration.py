@@ -350,7 +350,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "argparse": _argparse,
             "os": _os,
             "COIL_COIL_MIN_DIST_M": 0.05,
-            "COIL_LENGTH_TARGET_M": 1.7,
+            "COIL_LENGTH_HARD_LIMIT_M": 2.0,
+            "COIL_LENGTH_TARGET_M": 1.9,
             "COIL_PLASMA_MIN_DIST_M": 0.015,
             "DEFAULT_EQUILIBRIA_DIR": "/tmp/fake_eq",
             "DEFAULT_SINGLE_STAGE_OUTPUT_ROOT": "/tmp/fake_out",
@@ -375,6 +376,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "BANANA_CURRENT_HARD_LIMIT_A": 1.6e4,
             "BANANA_CURRENT_MODE_SHARED": "shared",
             "BANANA_CURRENT_MODE_INDEPENDENT": "independent",
+            "BANANA_CURRENT_COORDINATE_SCALING_NONE": "none",
+            "BANANA_CURRENT_COORDINATE_SCALING_SEED_RELATIVE": "seed-relative",
             "MAX_CURVATURE_INV_M": 100.0,
             "PLASMA_VESSEL_MIN_DIST_M": 0.04,
             "ACCEPT_OFFSPEC_R0_SEED_ENV": "ACCEPT_OFFSPEC_R0_SEED",
@@ -616,13 +619,13 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "coil_surface_spacing": 0.02,
                 "surface_vessel_spacing": 0.04,
                 "max_curvature": 40.0,
-                "coil_length": 1.8,
+                "coil_length": 2.1,
                 "banana_current": 1.7e4,
                 "tf_current": 9.0e4,
             },
             applies_to="artifact",
             threshold_overrides={
-                "coil_length": 1.7,
+                "coil_length": 2.0,
                 "banana_current": 1.6e4,
                 "tf_current": 8.0e4,
             },
@@ -647,7 +650,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             allowed_status["violations"],
-            ["coil_length 1.800000 exceeds threshold 1.700000"],
+            ["coil_length 2.100000 exceeds threshold 2.000000"],
         )
         self.assertEqual(
             forbidden_status["violations"],
@@ -1296,7 +1299,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(metadata["basin_seed"], 11)
         self.assertEqual(metadata["COIL_PLASMA_MIN_DIST_M"], 0.015)
         self.assertEqual(metadata["PLASMA_VESSEL_MIN_DIST_M"], 0.04)
-        self.assertEqual(metadata["LENGTH_TARGET"], 1.7)
+        self.assertEqual(metadata["LENGTH_TARGET"], 1.9)
 
     def test_stage2_alm_wrapper_load_validated_artifact_backfills_clearance_metadata(self):
         module = load_stage2_alm_wrapper_module()
@@ -1331,7 +1334,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(loaded_results_path, results_path)
         self.assertEqual(loaded_results["COIL_PLASMA_MIN_DIST_M"], 0.015)
         self.assertEqual(loaded_results["PLASMA_VESSEL_MIN_DIST_M"], 0.04)
-        self.assertEqual(loaded_results["LENGTH_TARGET"], 1.7)
+        self.assertEqual(loaded_results["LENGTH_TARGET"], 1.9)
         self.assertEqual(loaded_results["ALM_DISTANCE_SMOOTHING"], 0.005)
         self.assertEqual(loaded_results["ALM_CURVATURE_SMOOTHING"], 0.25)
 

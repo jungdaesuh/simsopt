@@ -78,6 +78,7 @@ from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
     BANANA_WINDING_MINOR_RADIUS_M,
     COIL_COIL_MIN_DIST_M,
+    COIL_LENGTH_HARD_LIMIT_M,
     COIL_LENGTH_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
     MAX_CURVATURE_INV_M,
@@ -1562,15 +1563,16 @@ def main(parsed_args=None):
     allow_offspec_engineering_constraints = bool(
         args.allow_offspec_engineering_constraints
     )
-    LENGTH_TARGET = float(args.length_target)
+    requested_length_target = float(args.length_target)
+    LENGTH_TARGET = requested_length_target
     if (
         not allow_offspec_engineering_constraints
-        and args.length_target > COIL_LENGTH_TARGET_M
+        and requested_length_target > COIL_LENGTH_HARD_LIMIT_M
     ):
-        LENGTH_TARGET = COIL_LENGTH_TARGET_M
+        LENGTH_TARGET = COIL_LENGTH_HARD_LIMIT_M
         print(
-            f"WARNING: --length-target {args.length_target} above hardware ceiling, "
-            f"clamped to {COIL_LENGTH_TARGET_M}"
+            f"WARNING: --length-target {requested_length_target} above hardware ceiling, "
+            f"clamped to {COIL_LENGTH_HARD_LIMIT_M}"
         )
 
     # Threshold and weight for the coil-to-coil distance penalty

@@ -37,6 +37,7 @@ from banana_opt.current_contracts import DEFAULT_FINITE_CURRENT_MODE  # noqa: E4
 from banana_opt.hardware_contracts import (  # noqa: E402
     BANANA_CURRENT_HARD_LIMIT_A,
     COIL_COIL_MIN_DIST_M,
+    COIL_LENGTH_HARD_LIMIT_M,
     COIL_LENGTH_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
     MAX_CURVATURE_INV_M,
@@ -259,7 +260,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--length-target",
         type=float,
         default=None,
-        help="Optional override for the Stage 2 coil-length ceiling in meters.",
+        help=(
+            "Optional override for the Stage 2 coil-length target in meters "
+            f"(default {COIL_LENGTH_TARGET_M:.1f}, hardware ceiling {COIL_LENGTH_HARD_LIMIT_M:.1f})."
+        ),
     )
     parser.add_argument(
         "--target-lcfs-max-major-radius-m",

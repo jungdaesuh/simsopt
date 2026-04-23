@@ -196,7 +196,7 @@ Useful notes:
 - the built-in `standard_80ka` profile now matches the canonical hardware baseline:
   `tf_current_A=8.0e4`, `banana_surf_radius=0.21`, `cc_threshold=0.05`, `curvature_threshold=100`
 - the wrapper also exposes the fixed Stage 2 solver-owned clearance contract in its summary/artifact validation:
-  `coil-plasma >= 0.015 m`, `plasma-vessel >= 0.04 m`, `coil_length <= 1.7 m`
+  `coil-plasma >= 0.015 m`, `plasma-vessel >= 0.04 m`, `coil_length <= 2.0 m`
 - `--stage2-spec-json` is the fully explicit path for non-profile Stage 2 contracts
 - `--dry-run` prints and records the resolved config and exact Stage 2 command without launching it
 - dry runs write `DRY_RUN_ONLY.txt` next to the summary so a summary-only directory is not mistaken for a real solver artifact root

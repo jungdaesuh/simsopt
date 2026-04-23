@@ -5,7 +5,9 @@ import os
 TF_CURRENT_HARD_LIMIT_A = 8.0e4
 BANANA_CURRENT_HARD_LIMIT_A = 1.6e4
 
-COIL_LENGTH_TARGET_M = 1.7
+# Preferred engineering target leaves buffer under the absolute hardware ceiling.
+COIL_LENGTH_TARGET_M = 1.9
+COIL_LENGTH_HARD_LIMIT_M = 2.0
 COIL_COIL_MIN_DIST_M = 0.05
 COIL_PLASMA_MIN_DIST_M = 0.015
 PLASMA_VESSEL_MIN_DIST_M = 0.04

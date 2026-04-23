@@ -6,7 +6,7 @@ from typing import Collection, Iterable, Literal, Mapping
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
     COIL_COIL_MIN_DIST_M,
-    COIL_LENGTH_TARGET_M,
+    COIL_LENGTH_HARD_LIMIT_M,
     COIL_PLASMA_MIN_DIST_M,
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
@@ -62,7 +62,7 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
     HardwareConstraintSpec(
         name="coil_length",
         kind="upper_bound",
-        threshold=COIL_LENGTH_TARGET_M,
+        threshold=COIL_LENGTH_HARD_LIMIT_M,
         applies_to=frozenset({"alm", "artifact"}),
         traversal_policy="allowed",
     ),

@@ -165,12 +165,21 @@ class ConstraintContractResolverTests(unittest.TestCase):
             contract["VACUUM_VESSEL_MINOR_RADIUS_M"],
         )
 
+    def test_length_target_allows_values_between_target_and_hard_limit(self):
+        module = load_constraint_contract_module()
+
+        contract, _trace = module.resolve_constraint_contract(
+            cli_overrides={"COIL_LENGTH_TARGET_M": 1.95},
+        )
+
+        self.assertEqual(contract["COIL_LENGTH_TARGET_M"], 1.95)
+
     def test_length_target_rejects_values_above_hardware_limit(self):
         module = load_constraint_contract_module()
 
         with self.assertRaisesRegex(ValueError, "COIL_LENGTH_TARGET_M exceeds the hardware limit"):
             module.resolve_constraint_contract(
-                cli_overrides={"COIL_LENGTH_TARGET_M": 1.75},
+                cli_overrides={"COIL_LENGTH_TARGET_M": 2.0001},
             )
 
     def test_allow_offspec_engineering_accepts_raised_length_and_banana_limits(self):
