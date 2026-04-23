@@ -35,7 +35,6 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
-from scipy.optimize import root
 
 from ..backend import (
     get_backend_config,
@@ -3729,92 +3728,31 @@ class BoozerSurfaceJAX(Optimizable):
         )
         residual, jacobian = residual_and_jacobian(xl)
         norm = jnp.linalg.norm(residual)
-        if self.stellsym:
-            nit = 0
-            while nit < maxiter and float(_host_scalar(norm)) > tol:
-                linear_matrix = jacobian[:-1, :-1]
-                rhs = residual[:-1]
-                dx = jnp.linalg.solve(linear_matrix, rhs)
-                if float(_host_scalar(norm)) < 1e-9:
-                    dx = dx + jnp.linalg.solve(linear_matrix, rhs - linear_matrix @ dx)
+        norm_value = float(_host_scalar(norm))
+        nit = 0
+        while nit < maxiter and norm_value > tol:
+            if self.stellsym:
+                solve_matrix = jacobian[:-1, :-1]
+                solve_rhs = residual[:-1]
+            else:
+                solve_matrix = jacobian
+                solve_rhs = residual
+
+            dx = jnp.linalg.solve(solve_matrix, solve_rhs)
+            if norm_value < 1e-9:
+                dx = dx + jnp.linalg.solve(
+                    solve_matrix,
+                    solve_rhs - solve_matrix @ dx,
+                )
+
+            if self.stellsym:
                 xl = _concat_jax_float64(xl[:-1] - dx, [xl[-1]])
-                residual, jacobian = residual_and_jacobian(xl)
-                norm = jnp.linalg.norm(residual)
-                nit += 1
-        else:
-            best_xl = xl
-            best_residual = residual
-            best_jacobian = jacobian
-            best_norm = norm
-
-            def exact_residual_and_jacobian(x_host):
-                residual_host, jacobian_host = residual_and_jacobian(
-                    _as_jax_float64(x_host)
-                )
-                return _host_numpy(residual_host), _host_numpy(jacobian_host)
-
-            def solve_exact_fallback(x0_host, *, xtol, maxfev):
-                return root(
-                    exact_residual_and_jacobian,
-                    x0_host,
-                    jac=True,
-                    method="hybr",
-                    options={
-                        "xtol": xtol,
-                        "maxfev": maxfev,
-                    },
-                )
-
-            fallback_xtol = max(1e-12, tol * 1e-2)
-            fallback = solve_exact_fallback(
-                _host_numpy(xl),
-                xtol=fallback_xtol,
-                maxfev=max(400, 4 * maxiter),
-            )
-            fallback_xl = _as_jax_float64(np.asarray(fallback.x))
-            fallback_residual, fallback_jacobian = residual_and_jacobian(fallback_xl)
-            fallback_norm = jnp.linalg.norm(fallback_residual)
-            fallback_norm_value = float(_host_scalar(fallback_norm))
-            nit = int(getattr(fallback, "nfev", 0))
-            # Make the optional second hybr pass meaningfully tighter than the
-            # coarse fallback solve, even at the default tolerance.
-            polish_xtol = max(1e-14, min(1e-10, fallback_xtol * 1e-2))
-            if (
-                np.isfinite(fallback_norm_value)
-                and fallback_norm_value > tol
-                and polish_xtol < fallback_xtol
-            ):
-                polished = solve_exact_fallback(
-                    _host_numpy(fallback_xl),
-                    xtol=polish_xtol,
-                    maxfev=max(200, 2 * maxiter),
-                )
-                polished_xl = _as_jax_float64(np.asarray(polished.x))
-                polished_residual, polished_jacobian = residual_and_jacobian(polished_xl)
-                polished_norm = jnp.linalg.norm(polished_residual)
-                polished_norm_value = float(_host_scalar(polished_norm))
-                if (
-                    np.isfinite(polished_norm_value)
-                    and polished_norm_value <= fallback_norm_value
-                ):
-                    fallback_xl = polished_xl
-                    fallback_residual = polished_residual
-                    fallback_jacobian = polished_jacobian
-                    fallback_norm = polished_norm
-                    fallback_norm_value = polished_norm_value
-                nit += int(getattr(polished, "nfev", 0))
-            if (
-                np.isfinite(fallback_norm_value)
-                and fallback_norm_value <= float(_host_scalar(best_norm))
-            ):
-                best_xl = fallback_xl
-                best_residual = fallback_residual
-                best_jacobian = fallback_jacobian
-                best_norm = fallback_norm
-            xl = best_xl
-            residual = best_residual
-            jacobian = best_jacobian
-            norm = best_norm
+            else:
+                xl = xl - dx
+            residual, jacobian = residual_and_jacobian(xl)
+            norm = jnp.linalg.norm(residual)
+            norm_value = float(_host_scalar(norm))
+            nit += 1
 
         if optimize_G:
             sdofs_final = xl[:-4]

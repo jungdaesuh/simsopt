@@ -2875,17 +2875,7 @@ def _traceable_predict_warmstart_x(
         transpose=False,
     )
     predicted_x = baseline_x + dx
-    if predictor_kind == "exact" or linearization_kind == "exact_jacobian":
-        return predicted_x, linear_solve_success
-    return (
-        lax.cond(
-            linear_solve_success,
-            lambda _: predicted_x,
-            lambda _: baseline_x,
-            operand=None,
-        ),
-        linear_solve_success,
-    )
+    return predicted_x, linear_solve_success
 
 
 def _build_traceable_objective_state(

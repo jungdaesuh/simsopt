@@ -1824,7 +1824,7 @@ class TestBoozerSurfaceJAXClass:
                 atol=1e-12,
             )
 
-    def test_public_exact_constraints_newton_nonstellsym_uses_hybr_fallback(
+    def test_public_exact_constraints_newton_nonstellsym_stays_native_without_root(
         self,
         monkeypatch,
     ):
@@ -1832,60 +1832,21 @@ class TestBoozerSurfaceJAXClass:
         initial_G = 0.05
         x0 = booz._pack_decision_vector(0.3, initial_G)
         xl0 = jnp.concatenate([x0, jnp.array([0.0, 0.0], dtype=x0.dtype)])
-        target = xl0.at[0].set(xl0[0]).at[1:].add(-0.02)
-        captured = {}
+        target = xl0 - 0.02
 
         monkeypatch.setattr(
             booz,
             "_make_exact_constraints_residual_with",
-            lambda *args, **kwargs: lambda xl: (xl - target) ** 2,
+            lambda *args, **kwargs: lambda xl: xl - target,
         )
-
-        def fake_root(fun, x_init, *, jac, method, options):
-            del jac
-            captured["method"] = method
-            captured["xtol"] = options["xtol"]
-            captured["maxfev"] = options["maxfev"]
-            residual, jacobian = fun(np.asarray(target))
-            np.testing.assert_allclose(residual, 0.0, atol=1e-12)
-            np.testing.assert_allclose(jacobian, 0.0, atol=1e-12)
-            return types.SimpleNamespace(x=np.asarray(target), nfev=7)
-
-        monkeypatch.setattr(_bsj, "root", fake_root)
-
-        res = booz.minimize_boozer_exact_constraints_newton(
-            iota=0.3,
-            G=initial_G,
-            maxiter=5,
-            tol=1e-10,
-        )
-
-        assert captured["method"] == "hybr"
-        assert res["success"] is True
-        np.testing.assert_allclose(np.asarray(res["residual"]), 0.0, atol=1e-12)
-
-    def test_public_exact_constraints_newton_nonstellsym_keeps_better_prefallback_iterate(
-        self,
-        monkeypatch,
-    ):
-        booz = _make_mock_boozer_surface_exact(stellsym=False)
-        initial_G = 0.05
-        x0 = booz._pack_decision_vector(0.3, initial_G)
-        xl0 = jnp.concatenate([x0, jnp.array([0.0, 0.0], dtype=x0.dtype)])
-        worse = xl0 + 1.0
-
         monkeypatch.setattr(
-            booz,
-            "_make_exact_constraints_residual_with",
-            lambda *args, **kwargs: lambda xl: xl - xl0,
+            _bsj,
+            "root",
+            lambda *_args, **_kwargs: pytest.fail(
+                "nonstellsym exact Newton must stay on the native JAX solve path"
+            ),
+            raising=False,
         )
-
-        def fake_root(fun, x_init, *, jac, method, options):
-            del fun, x_init, jac, options
-            assert method == "hybr"
-            return types.SimpleNamespace(x=np.asarray(worse), nfev=5)
-
-        monkeypatch.setattr(_bsj, "root", fake_root)
 
         res = booz.minimize_boozer_exact_constraints_newton(
             iota=0.3,
@@ -1896,9 +1857,8 @@ class TestBoozerSurfaceJAXClass:
 
         assert res["success"] is True
         np.testing.assert_allclose(np.asarray(res["residual"]), 0.0, atol=1e-12)
-        assert res["G"] == pytest.approx(initial_G)
 
-    def test_public_exact_constraints_newton_nonstellsym_uses_tighter_polish_xtol(
+    def test_public_exact_constraints_newton_nonstellsym_uses_full_jacobian_solve(
         self,
         monkeypatch,
     ):
@@ -1906,38 +1866,32 @@ class TestBoozerSurfaceJAXClass:
         initial_G = 0.05
         x0 = booz._pack_decision_vector(0.3, initial_G)
         xl0 = jnp.concatenate([x0, jnp.array([0.0, 0.0], dtype=x0.dtype)])
-        offset = jnp.full_like(xl0, 1e-11)
-        xtols = []
+        target = xl0 - jnp.linspace(0.01, 0.01 * xl0.size, xl0.size, dtype=xl0.dtype)
+        solve_calls = []
+        original_solve = _bsj.jnp.linalg.solve
 
         monkeypatch.setattr(
             booz,
             "_make_exact_constraints_residual_with",
-            lambda *args, **kwargs: lambda xl: xl - xl0 + offset,
+            lambda *args, **kwargs: lambda xl: xl - target,
         )
 
-        def fake_root(fun, x_init, *, jac, method, options):
-            del x_init, jac, method
-            xtols.append(options["xtol"])
-            residual, jacobian = fun(np.asarray(xl0))
-            np.testing.assert_allclose(np.asarray(residual), np.asarray(offset))
-            np.testing.assert_allclose(
-                np.asarray(jacobian),
-                np.eye(xl0.size),
-                atol=1e-12,
-            )
-            return types.SimpleNamespace(x=np.asarray(xl0), nfev=4)
+        def recording_solve(matrix, rhs):
+            solve_calls.append((matrix.shape, rhs.shape))
+            return original_solve(matrix, rhs)
 
-        monkeypatch.setattr(_bsj, "root", fake_root)
+        monkeypatch.setattr(_bsj.jnp.linalg, "solve", recording_solve)
 
         res = booz.minimize_boozer_exact_constraints_newton(
             iota=0.3,
             G=initial_G,
             maxiter=5,
-            tol=1e-12,
+            tol=1e-10,
         )
 
-        assert res["success"] is False
-        assert xtols == [pytest.approx(1e-12), pytest.approx(1e-14)]
+        assert res["success"] is True
+        np.testing.assert_allclose(np.asarray(res["residual"]), 0.0, atol=1e-12)
+        assert solve_calls == [((xl0.size, xl0.size), (xl0.size,))]
 
     def test_public_newton_api_accepts_legacy_vectorize_kwarg(self, monkeypatch):
         booz = _make_mock_boozer_surface()

@@ -715,7 +715,7 @@ def test_traceable_exact_warmstart_failure_keeps_failed_operator_step(monkeypatc
     )
 
 
-def test_traceable_ls_warmstart_failure_preserves_baseline_state(monkeypatch):
+def test_traceable_ls_warmstart_failure_keeps_failed_operator_step(monkeypatch):
     baseline_x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
     baseline_coil_dofs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
     coil_dofs = jnp.asarray([0.75, 0.25], dtype=jnp.float64)
@@ -756,7 +756,10 @@ def test_traceable_ls_warmstart_failure_preserves_baseline_state(monkeypatch):
     )
 
     assert bool(np.asarray(success)) is False
-    np.testing.assert_allclose(np.asarray(predicted), np.asarray(baseline_x))
+    np.testing.assert_allclose(
+        np.asarray(predicted),
+        np.asarray(baseline_x + failed_dx),
+    )
 
 
 def test_traceable_exact_warmstart_failure_surfaces_unsuccessful_forward_result(
