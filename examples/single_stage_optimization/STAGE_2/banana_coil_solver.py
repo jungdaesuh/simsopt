@@ -59,6 +59,7 @@ from banana_opt.hardware_contracts import (
     COIL_COIL_MIN_DIST_M,
     COIL_LENGTH_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
+    COIL_VESSEL_MIN_DIST_M,
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
     TF_CURRENT_HARD_LIMIT_A,
@@ -2162,6 +2163,7 @@ def run_stage2_alm_optimizer_timed(
     gtol,
     maxcor=300,
     inner_optimizer_contract=None,
+    target_inner_value_and_grad=None,
     accepted_callback=None,
     outer_state_callback=None,
 ):
@@ -2178,6 +2180,7 @@ def run_stage2_alm_optimizer_timed(
             "gtol": float(gtol),
         },
         inner_optimizer_contract=inner_optimizer_contract,
+        target_inner_value_and_grad=target_inner_value_and_grad,
         accepted_callback=accepted_callback,
         outer_state_callback=outer_state_callback,
     )
@@ -2379,6 +2382,9 @@ def build_stage2_problem_contract(
         "hardware_thresholds": {
             "length_target": float(LENGTH_TARGET),
             "coil_coil_distance": float(CC_THRESHOLD),
+            "coil_plasma_distance": float(COIL_PLASMA_MIN_DIST_M),
+            "coil_vessel_clearance": float(COIL_VESSEL_MIN_DIST_M),
+            "plasma_vessel_distance": float(PLASMA_VESSEL_MIN_DIST_M),
             "curvature": float(CURVATURE_THRESHOLD),
         },
         "runtime_contract": {
@@ -2804,7 +2810,9 @@ if __name__ == "__main__":
 
     target_objective_bundle = None
     needs_target_objective_bundle = (
-        use_target_objective_lane or needs_target_probe_payload
+        use_target_objective_lane
+        or needs_target_probe_payload
+        or alm_inner_optimizer_contract is not None
     )
     if needs_target_objective_bundle:
         target_objective_bundle = build_stage2_target_objective(
@@ -3180,6 +3188,18 @@ if __name__ == "__main__":
             dofs,
             source=initial_artifact_source,
         )
+        alm_target_value_and_grad = None
+        if alm_inner_optimizer_contract is not None:
+            assert target_objective_bundle is not None
+            assert target_objective_bundle.alm_value_and_grad_builder is not None
+            alm_target_value_and_grad = target_objective_bundle.alm_value_and_grad_builder(
+                distance_smoothing=float(args.alm_distance_smoothing),
+                curvature_smoothing=float(args.alm_curvature_smoothing),
+                curve_surface_threshold=(
+                    float(CS_THRESHOLD) if Jcsdist is not None else None
+                ),
+                banana_current_threshold=float(args.banana_current_max_A),
+            )
         res, _ = run_stage2_alm_optimizer_timed(
             dofs,
             constraint_names=alm_constraint_names,
@@ -3190,6 +3210,7 @@ if __name__ == "__main__":
             ftol=args.ftol,
             gtol=args.gtol,
             inner_optimizer_contract=alm_inner_optimizer_contract,
+            target_inner_value_and_grad=alm_target_value_and_grad,
             accepted_callback=accepted_callback,
             outer_state_callback=outer_state_callback,
         )

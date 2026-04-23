@@ -103,6 +103,7 @@ from simsopt.geo import (  # noqa: E402
     CurveXYZFourier,
     create_equally_spaced_curves,
     CurveCurveDistance,
+    CurveSurfaceDistance,
     CurveLength,
     LpCurveCurvature,
 )
@@ -3511,6 +3512,22 @@ class TestStage2OptimizerContract:
             )
             return evaluation
 
+        def target_inner_value_and_grad(dofs, multipliers, penalty):
+            dofs = jnp.asarray(dofs, dtype=jnp.float64).reshape((-1,))
+            multipliers_arr = jnp.asarray(multipliers, dtype=jnp.float64).reshape((-1,))
+            penalty_value = jnp.asarray(penalty, dtype=jnp.float64)
+            base_value = jnp.vdot(dofs, dofs)
+            signed_constraint = jnp.asarray([-0.25], dtype=jnp.float64)
+            positive_shift = jnp.maximum(
+                0.0,
+                multipliers_arr + penalty_value * signed_constraint,
+            )
+            total_value = base_value + 0.5 / penalty_value * (
+                jnp.vdot(positive_shift, positive_shift)
+                - jnp.vdot(multipliers_arr, multipliers_arr)
+            )
+            return total_value, 2.0 * dofs
+
         stage2_script.run_stage2_alm_optimizer_timed(
             np.asarray([1.0, -2.0], dtype=float),
             constraint_names=constraint_names,
@@ -3524,6 +3541,7 @@ class TestStage2OptimizerContract:
                 "jax",
                 "ondevice",
             ),
+            target_inner_value_and_grad=target_inner_value_and_grad,
         )
 
         assert calls["target"] == 1
@@ -3537,6 +3555,91 @@ class TestStage2OptimizerContract:
         assert calls["progress_callback"] is None
         assert calls["failure_callback"] is None
         np.testing.assert_allclose(calls["x0"], np.asarray([1.0, -2.0], dtype=float))
+
+    def test_stage2_target_alm_value_and_grad_matches_host_evaluation(self):
+        stage2_script = _load_stage2_script_module()
+        _objective, target_bundle, context = _build_stage2_target_objective_contract_case(
+            return_context=True
+        )
+        dofs = jax.device_put(
+            np.asarray(
+                stage2_target_optimizer_state_to_dofs(
+                    stage2_target_optimizer_state_from_dofs(
+                        np.asarray(_objective.x, dtype=np.float64),
+                        curve_dof_count=target_bundle.expected_dof_count - 1,
+                    )
+                ),
+                dtype=np.float64,
+            )
+        )
+        assert target_bundle.alm_value_and_grad_builder is not None
+        alm_value_and_grad = target_bundle.alm_value_and_grad_builder(
+            distance_smoothing=0.005,
+            curvature_smoothing=0.25,
+            curve_surface_threshold=0.015,
+            banana_current_threshold=1.6e4,
+        )
+        multipliers = jnp.asarray([0.2, 0.3, 0.4, 0.5, 0.6], dtype=jnp.float64)
+        penalty = jnp.asarray(3.0, dtype=jnp.float64)
+
+        value_vg, grad_vg = alm_value_and_grad(dofs, multipliers, penalty)
+        jaxpr = jax.make_jaxpr(alm_value_and_grad)(dofs, multipliers, penalty)
+
+        all_coils = list(context["tf_coils"]) + list(context["banana_coils"])
+        bs_jax = BiotSavartJAX(all_coils)
+        squared_flux = SquaredFluxJAX(
+            context["eval_surf"],
+            bs_jax,
+            definition="quadratic flux",
+        )
+        curve_length = CurveLength(context["banana_curve"])
+        curve_curve = CurveCurveDistance([coil.curve for coil in all_coils], 0.05)
+        curve_surface = CurveSurfaceDistance(
+            [coil.curve for coil in all_coils],
+            context["eval_surf"],
+            0.015,
+        )
+        curvature = LpCurveCurvature(context["banana_curve"], 4, 40.0)
+        host_evaluation = stage2_script._evaluate_stage2_alm_problem_impl(
+            np.asarray(dofs, dtype=np.float64),
+            squared_flux,
+            bs_jax,
+            context["eval_surf"],
+            squared_flux,
+            curve_length,
+            1.75,
+            curve_curve,
+            curvature,
+            context["banana_coils"][0].current,
+            1.6e4,
+            0.005,
+            0.25,
+            np.asarray(multipliers, dtype=np.float64),
+            float(penalty),
+            stage2_script._stage2_constraint_activity_tolerances_impl,
+            stage2_script.smooth_min_distance_signed_constraint,
+            stage2_script.smooth_max_curvature_signed_constraint,
+            Jcsdist=curve_surface,
+            smooth_min_curve_surface_signed_constraint=(
+                stage2_script._smooth_min_curve_surface_signed_constraint_impl
+            ),
+        )
+
+        assert np.isfinite(float(np.asarray(value_vg)))
+        assert np.all(np.isfinite(np.asarray(grad_vg, dtype=float)))
+        np.testing.assert_allclose(
+            float(np.asarray(value_vg)),
+            float(host_evaluation["total"]),
+            rtol=1e-8,
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            np.asarray(grad_vg, dtype=float),
+            np.asarray(host_evaluation["grad"], dtype=float),
+            rtol=1e-8,
+            atol=1e-9,
+        )
+        assert "pure_callback" not in str(jaxpr)
 
     def test_make_fun_caches_field_diagnostics_between_stride_refreshes(
         self,

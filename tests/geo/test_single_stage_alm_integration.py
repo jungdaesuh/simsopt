@@ -50,6 +50,7 @@ LEGACY_STAGE2_UPGRADED_FIELDS = {
     "TF_CURRENT_SUM_ABS_A": 80000.0,
     "LENGTH_TARGET": 1.7,
     "COIL_PLASMA_MIN_DIST_M": 0.015,
+    "COIL_VESSEL_MIN_DIST_M": 0.002,
     "PLASMA_VESSEL_MIN_DIST_M": 0.04,
 }
 
@@ -77,6 +78,11 @@ def single_stage_example_package_root() -> str:
 def load_hardware_constraint_schema_module():
     single_stage_example_package_root()
     return importlib.import_module("banana_opt.hardware_constraint_schema")
+
+
+def load_hardware_contracts_module():
+    single_stage_example_package_root()
+    return importlib.import_module("banana_opt.hardware_contracts")
 
 
 def load_stage2_artifact_contracts_module():
@@ -177,6 +183,16 @@ def make_single_stage_thresholded_physics_rerun_args(**overrides):
 
 
 class SingleStageAlmIntegrationTests(unittest.TestCase):
+    def test_validate_banana_winding_surface_radius_enforces_coil_vessel_clearance(self):
+        contracts_module = load_hardware_contracts_module()
+
+        self.assertEqual(
+            contracts_module.validate_banana_winding_surface_radius(0.220),
+            0.220,
+        )
+        with self.assertRaisesRegex(ValueError, "coil-to-vessel clearance contract"):
+            contracts_module.validate_banana_winding_surface_radius(0.2201)
+
     def test_single_stage_alm_inner_optimizer_contract_selects_target_only_for_alm(self):
         from simsopt.geo.optimizer_jax import (
             ReferenceOptimizerContract,
@@ -277,6 +293,30 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIsNone(config["boozer_threshold"])
         self.assertIsNone(config["iota_penalty_threshold"])
         self.assertIsNone(config["length_penalty_threshold"])
+
+    def test_resolve_single_stage_banana_surface_radius_uses_shared_validator(self):
+        contracts_module = load_hardware_contracts_module()
+        functions = extract_functions(
+            SINGLE_STAGE_MODULE_PATH,
+            ["resolve_single_stage_banana_surface_radius"],
+            {
+                "validate_banana_winding_surface_radius": (
+                    contracts_module.validate_banana_winding_surface_radius
+                ),
+            },
+        )
+
+        args = SimpleNamespace(banana_surf_radius=None)
+        stage2_results = {"banana_surf_radius": 0.220}
+
+        self.assertEqual(
+            functions["resolve_single_stage_banana_surface_radius"](args, stage2_results),
+            0.220,
+        )
+
+        args = SimpleNamespace(banana_surf_radius=0.2201)
+        with self.assertRaisesRegex(ValueError, "coil-to-vessel clearance contract"):
+            functions["resolve_single_stage_banana_surface_radius"](args, stage2_results)
 
     def test_single_stage_load_stage2_results_upgrades_legacy_artifact_metadata(self):
         artifact_contracts_module = load_stage2_artifact_contracts_module()
@@ -611,6 +651,73 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertTrue(
             np.all(np.isfinite(np.asarray(result.constraint_values, dtype=float)))
         )
+
+    def test_target_alm_requires_native_value_and_grad(self):
+        from simsopt.geo.optimizer_jax import TargetOptimizerContract
+
+        alm_utils = load_alm_utils_module()
+        settings = alm_utils.ALMSettings(
+            max_outer_iterations=1,
+            max_subproblem_continuations=0,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-6,
+            stationarity_tol=1e-6,
+            max_inner_attempts=1,
+        )
+        inner_options = {
+            "maxiter": 10,
+            "maxcor": 5,
+            "ftol": 1e-12,
+            "gtol": 1e-12,
+            "maxls": 20,
+        }
+
+        def evaluate_problem(x, multipliers, penalty):
+            x_arr = np.asarray(x, dtype=float).reshape((-1,))
+            signed_constraint = np.asarray([x_arr[0] - 1.0], dtype=float)
+            base_value = float(np.dot(x_arr, x_arr))
+            base_grad = 2.0 * x_arr
+            evaluation = alm_utils.augmented_inequality_objective(
+                base_value,
+                base_grad,
+                signed_constraint,
+                [np.asarray([1.0], dtype=float)],
+                multipliers,
+                penalty,
+            )
+            evaluation.update(
+                {
+                    "constraint_names": ["x_upper_bound"],
+                    "dual_update_values": signed_constraint.copy(),
+                    "constraint_grads": [np.asarray([1.0], dtype=float)],
+                    "constraint_activity_tolerances": np.asarray([1.0e-6], dtype=float),
+                    "feasibility_values": np.maximum(signed_constraint, 0.0),
+                    "hard_signed_constraint_values": signed_constraint.copy(),
+                    "hard_violation_values": np.maximum(signed_constraint, 0.0),
+                    "surrogate_signed_constraint_values": signed_constraint.copy(),
+                    "hard_dual_update_values": signed_constraint.copy(),
+                    "max_feasibility_violation": float(
+                        np.maximum(signed_constraint, 0.0)[0]
+                    ),
+                    "metric_grad": base_grad.copy(),
+                    "metric_stationarity_norm": float(np.linalg.norm(base_grad)),
+                }
+            )
+            return evaluation
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "target_inner_value_and_grad",
+        ):
+            alm_utils.minimize_alm(
+                np.asarray([1.5], dtype=float),
+                ["x_upper_bound"],
+                evaluate_problem,
+                settings,
+                inner_options,
+                inner_optimizer_contract=TargetOptimizerContract(method="lbfgs-ondevice"),
+            )
 
     def test_single_stage_results_surface_keeps_surrogate_alm_aliases(self):
         source = SINGLE_STAGE_MODULE_PATH.read_text()

@@ -718,8 +718,7 @@ def _target_inner_physical_x(opt_x, center: np.ndarray, widths: np.ndarray | Non
 
 def _build_target_inner_value_and_grad(
     *,
-    evaluate_value_and_grad: Callable[[np.ndarray], tuple[float, np.ndarray]],
-    native_value_and_grad: Callable[[object], tuple[object, object]] | None = None,
+    native_value_and_grad: Callable[[object], tuple[object, object]],
     center: np.ndarray,
     widths: np.ndarray | None,
 ):
@@ -728,10 +727,6 @@ def _build_target_inner_value_and_grad(
 
     center_arr = np.asarray(center, dtype=float).copy()
     widths_arr = None if widths is None else np.asarray(widths, dtype=float).copy()
-    result_spec = (
-        jax.ShapeDtypeStruct((), np.float64),
-        jax.ShapeDtypeStruct(center_arr.shape, np.float64),
-    )
 
     if widths_arr is None:
 
@@ -749,34 +744,16 @@ def _build_target_inner_value_and_grad(
 
         optimizer_x0 = np.zeros_like(center_arr, dtype=float)
 
-    if native_value_and_grad is not None:
-
-        def _value_and_grad(opt_x):
-            opt_x = jnp.asarray(opt_x, dtype=jnp.float64)
-            physical_x = _physical_x_jax(opt_x)
-            value, grad_x = native_value_and_grad(physical_x)
-            value = jnp.asarray(value, dtype=jnp.float64)
-            grad_x = jnp.asarray(grad_x, dtype=jnp.float64)
-            if widths_arr is None:
-                return value, grad_x
-            grad_scale = widths_jax * (1.0 - jnp.square(jnp.tanh(opt_x)))
-            return value, grad_x * grad_scale
-
-        return _value_and_grad, optimizer_x0
-
-    def _host_eval(host_x):
-        value, grad = evaluate_value_and_grad(np.asarray(host_x, dtype=float))
-        return np.asarray(value, dtype=np.float64), np.asarray(grad, dtype=np.float64)
-
     def _value_and_grad(opt_x):
         opt_x = jnp.asarray(opt_x, dtype=jnp.float64)
         physical_x = _physical_x_jax(opt_x)
-        value, grad_x = jax.pure_callback(_host_eval, result_spec, physical_x)
+        value, grad_x = native_value_and_grad(physical_x)
+        value = jnp.asarray(value, dtype=jnp.float64)
         grad_x = jnp.asarray(grad_x, dtype=jnp.float64)
         if widths_arr is None:
-            return jnp.asarray(value, dtype=jnp.float64), grad_x
+            return value, grad_x
         grad_scale = widths_jax * (1.0 - jnp.square(jnp.tanh(opt_x)))
-        return jnp.asarray(value, dtype=jnp.float64), grad_x * grad_scale
+        return value, grad_x * grad_scale
 
     return _value_and_grad, optimizer_x0
 
@@ -960,8 +937,7 @@ def _build_target_inner_options(inner_attempt_options: dict) -> dict:
 
 def _run_target_inner_solve(
     *,
-    evaluate_value_and_grad: Callable[[np.ndarray], tuple[float, np.ndarray]],
-    native_value_and_grad: Callable[[object], tuple[object, object]] | None = None,
+    native_value_and_grad: Callable[[object], tuple[object, object]],
     center: np.ndarray,
     attempt_radius: float | None,
     inner_attempt_options: dict,
@@ -971,7 +947,6 @@ def _run_target_inner_solve(
 ):
     trust_widths = _trust_region_widths(center, attempt_radius)
     target_fun, target_x0 = _build_target_inner_value_and_grad(
-        evaluate_value_and_grad=evaluate_value_and_grad,
         native_value_and_grad=native_value_and_grad,
         center=center,
         widths=trust_widths,
@@ -1368,6 +1343,10 @@ def minimize_alm(
     target_inner_method, target_inner_optimizer = _resolve_target_inner_optimizer(
         inner_optimizer_contract
     )
+    if target_inner_optimizer is not None and target_inner_value_and_grad is None:
+        raise ValueError(
+            "minimize_alm() target inner solves require target_inner_value_and_grad."
+        )
     if settings.penalty_max is not None and settings.penalty_max <= 0.0:
         raise ValueError("settings.penalty_max must be positive when provided")
     if settings.penalty_max is not None and settings.penalty_max < settings.penalty_init:
@@ -1923,15 +1902,10 @@ def minimize_alm(
                         candidate_x = np.asarray(result.x, dtype=float).copy()
                     else:
                         result, candidate_x = _run_target_inner_solve(
-                            evaluate_value_and_grad=inner_fun,
-                            native_value_and_grad=(
-                                None
-                                if target_inner_value_and_grad is None
-                                else lambda inner_x: target_inner_value_and_grad(
-                                    inner_x,
-                                    multipliers,
-                                    penalty,
-                                )
+                            native_value_and_grad=lambda inner_x: target_inner_value_and_grad(
+                                inner_x,
+                                multipliers,
+                                penalty,
                             ),
                             center=x,
                             attempt_radius=attempt_radius,

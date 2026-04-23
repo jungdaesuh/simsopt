@@ -60,6 +60,11 @@ __all__ = [
 Stage2ObjectiveFn = Callable[[jnp.ndarray], jnp.ndarray]
 Stage2ValueAndGradFn = Callable[[jnp.ndarray], tuple[jnp.ndarray, jnp.ndarray]]
 Stage2ResidualFn = Callable[[jnp.ndarray], jnp.ndarray]
+Stage2ALMValueAndGradFn = Callable[
+    [jnp.ndarray, jnp.ndarray, jnp.ndarray],
+    tuple[jnp.ndarray, jnp.ndarray],
+]
+Stage2ALMValueAndGradBuilder = Callable[..., Stage2ALMValueAndGradFn]
 
 
 class Stage2TargetObjectiveTerm(NamedTuple):
@@ -101,6 +106,7 @@ class Stage2TargetObjectiveBundle(NamedTuple):
     terms: tuple[Stage2TargetObjectiveTerm, ...] = ()
     raw_terms: Stage2ObjectiveFn | None = None
     least_squares_residual: Stage2ResidualFn | None = None
+    alm_value_and_grad_builder: Stage2ALMValueAndGradBuilder | None = None
     field_sharding_summary: Callable[[jnp.ndarray], dict[str, object]] | None = None
     pairwise_penalty_sharding_summary: (
         Callable[[jnp.ndarray], dict[str, object]] | None
@@ -121,6 +127,40 @@ def _runtime_float64_array(value, *, reference) -> jax.Array:
 
 def _runtime_float64_scalar(value, *, reference) -> jax.Array:
     return _as_runtime_float64(value, reference=reference)
+
+
+def _selected_smoothmin(values, temperature):
+    values = _as_jax_float64(values).reshape((-1,))
+    if int(values.shape[0]) == 0:
+        return _runtime_float64_scalar(np.inf, reference=values)
+    bounded_temperature = jnp.maximum(
+        _runtime_float64_scalar(temperature, reference=values),
+        _runtime_float64_scalar(np.finfo(np.float64).eps, reference=values),
+    )
+    hard_min = jnp.min(values)
+    logits = -(values - hard_min) / bounded_temperature
+    selection_mask = values <= (
+        hard_min + _runtime_float64_scalar(4.0, reference=values) * bounded_temperature
+    )
+    masked_logits = jnp.where(selection_mask, logits, -jnp.inf)
+    return hard_min - bounded_temperature * jax.nn.logsumexp(masked_logits)
+
+
+def _selected_smoothmax(values, temperature):
+    values = _as_jax_float64(values).reshape((-1,))
+    if int(values.shape[0]) == 0:
+        return _runtime_float64_scalar(-np.inf, reference=values)
+    bounded_temperature = jnp.maximum(
+        _runtime_float64_scalar(temperature, reference=values),
+        _runtime_float64_scalar(np.finfo(np.float64).eps, reference=values),
+    )
+    hard_max = jnp.max(values)
+    logits = (values - hard_max) / bounded_temperature
+    selection_mask = values >= (
+        hard_max - _runtime_float64_scalar(4.0, reference=values) * bounded_temperature
+    )
+    masked_logits = jnp.where(selection_mask, logits, -jnp.inf)
+    return hard_max + bounded_temperature * jax.nn.logsumexp(masked_logits)
 
 
 def _as_objective_dofs(value) -> jax.Array:
@@ -429,6 +469,7 @@ def build_stage2_target_objective(
     curvature_threshold = float(curvature_threshold)
     half = 0.5
     zero = 0.0
+    surface_gamma = _host_float64_array(surface.gamma()).reshape((-1, 3))
 
     if tf_coils:
         tf_coil_spec = grouped_coil_set_spec_from_coil_specs(
@@ -447,12 +488,52 @@ def build_stage2_target_objective(
         tf_curve_groups = ()
         fixed_curve_penalty = 0.0
 
+    fixed_curve_curve_distance_blocks = []
+    fixed_curve_surface_distance_blocks = []
+    for tf_gammas, _tf_gammadashs in tf_curve_groups:
+        fixed_curve_surface_distance_blocks.append(
+            np.linalg.norm(
+                tf_gammas[:, :, None, :] - surface_gamma[None, None, :, :],
+                axis=3,
+            ).reshape((-1,))
+        )
+    for left_group_index, (left_group_gammas, _left_gammadashs) in enumerate(
+        tf_curve_groups
+    ):
+        left_group_size = int(left_group_gammas.shape[0])
+        for left_curve_index in range(left_group_size):
+            left_gamma = left_group_gammas[left_curve_index]
+            for right_group_index in range(left_group_index + 1):
+                right_group_gammas, _right_gammadashs = tf_curve_groups[
+                    right_group_index
+                ]
+                right_limit = (
+                    left_curve_index
+                    if right_group_index == left_group_index
+                    else int(right_group_gammas.shape[0])
+                )
+                for right_curve_index in range(right_limit):
+                    right_gamma = right_group_gammas[right_curve_index]
+                    fixed_curve_curve_distance_blocks.append(
+                        np.linalg.norm(
+                            left_gamma[:, None, :] - right_gamma[None, :, :],
+                            axis=2,
+                        ).reshape((-1,))
+                    )
+
     banana_rotmats, banana_current_scales = _banana_symmetry_runtime_inputs_from_coils(
         banana_coils
     )
     banana_curve_spec_runtime = _runtimeify_tree(banana_curve_spec)
     tf_curve_groups_runtime = _runtimeify_tree(tf_curve_groups)
     flux_spec_runtime = _runtimeify_tree(flux_spec)
+    surface_gamma_runtime = _runtimeify_tree(surface_gamma)
+    fixed_curve_curve_distance_blocks_runtime = _runtimeify_tree(
+        tuple(fixed_curve_curve_distance_blocks)
+    )
+    fixed_curve_surface_distance_blocks_runtime = _runtimeify_tree(
+        tuple(fixed_curve_surface_distance_blocks)
+    )
 
     def _dynamic_curve_runtime_state(dofs):
         state = stage2_target_optimizer_state_from_dofs(
@@ -636,6 +717,158 @@ def build_stage2_target_objective(
     raw_terms_fun = jax.jit(_raw_terms)
     least_squares_residual = jax.jit(_least_squares_residual)
 
+    def build_alm_value_and_grad(
+        *,
+        distance_smoothing,
+        curvature_smoothing,
+        curve_surface_threshold=None,
+        banana_current_threshold,
+    ):
+        include_coil_surface = curve_surface_threshold is not None
+
+        def _curve_curve_signed_constraint(dynamic_gammas, *, reference):
+            pairwise_blocks = []
+            for fixed_block in fixed_curve_curve_distance_blocks_runtime:
+                pairwise_blocks.append(
+                    _runtime_float64_array(fixed_block, reference=reference)
+                )
+            for dynamic_index in range(int(dynamic_gammas.shape[0])):
+                gamma_i = dynamic_gammas[dynamic_index]
+                for tf_gammas, _tf_gammadashs in tf_curve_groups_runtime:
+                    dists = jnp.linalg.norm(
+                        gamma_i[:, None, None, :] - tf_gammas[None, :, :, :],
+                        axis=3,
+                    )
+                    pairwise_blocks.append(dists.reshape((-1,)))
+                for previous_index in range(dynamic_index):
+                    gamma_j = dynamic_gammas[previous_index]
+                    dists = jnp.linalg.norm(
+                        gamma_i[:, None, :] - gamma_j[None, :, :],
+                        axis=2,
+                    )
+                    pairwise_blocks.append(dists.reshape((-1,)))
+            if not pairwise_blocks:
+                return _runtime_float64_scalar(cc_threshold, reference=reference)
+            smooth_min = _selected_smoothmin(
+                jnp.concatenate(pairwise_blocks),
+                temperature=distance_smoothing,
+            )
+            return _runtime_float64_scalar(cc_threshold, reference=smooth_min) - smooth_min
+
+        def _curve_surface_signed_constraint(dynamic_gammas, *, reference):
+            pairwise_blocks = []
+            flat_surface = _runtime_float64_array(
+                surface_gamma_runtime,
+                reference=reference,
+            ).reshape((-1, 3))
+            for fixed_block in fixed_curve_surface_distance_blocks_runtime:
+                pairwise_blocks.append(
+                    _runtime_float64_array(fixed_block, reference=reference)
+                )
+            for dynamic_index in range(int(dynamic_gammas.shape[0])):
+                dists = jnp.linalg.norm(
+                    dynamic_gammas[dynamic_index][:, None, :] - flat_surface[None, :, :],
+                    axis=2,
+                )
+                pairwise_blocks.append(dists.reshape((-1,)))
+            if not pairwise_blocks:
+                return _runtime_float64_scalar(
+                    curve_surface_threshold,
+                    reference=reference,
+                )
+            smooth_min = _selected_smoothmin(
+                jnp.concatenate(pairwise_blocks),
+                temperature=distance_smoothing,
+            )
+            return (
+                _runtime_float64_scalar(curve_surface_threshold, reference=smooth_min)
+                - smooth_min
+            )
+
+        def _constraint_values(dofs):
+            (
+                flat_dofs,
+                _base_gamma,
+                base_gammadash,
+                base_gammadashdash,
+                dynamic_gammas,
+                _dynamic_gammadashs,
+                dynamic_current_array,
+            ) = _dynamic_curve_runtime_state(dofs)
+            coil_length = curve_length_pure(incremental_arclength_pure(base_gammadash))
+            max_curvature = _selected_smoothmax(
+                kappa_pure(base_gammadash, base_gammadashdash),
+                temperature=curvature_smoothing,
+            )
+            banana_current_abs = jnp.max(jnp.abs(dynamic_current_array))
+            constraint_values = [
+                _curve_curve_signed_constraint(dynamic_gammas, reference=flat_dofs),
+            ]
+            if include_coil_surface:
+                constraint_values.append(
+                    _curve_surface_signed_constraint(
+                        dynamic_gammas,
+                        reference=flat_dofs,
+                    )
+                )
+            constraint_values.extend(
+                (
+                    max_curvature
+                    - _runtime_float64_scalar(
+                        curvature_threshold,
+                        reference=max_curvature,
+                    ),
+                    coil_length
+                    - _runtime_float64_scalar(length_target, reference=coil_length),
+                    banana_current_abs
+                    - _runtime_float64_scalar(
+                        banana_current_threshold,
+                        reference=banana_current_abs,
+                    ),
+                )
+            )
+            return jnp.stack(constraint_values)
+
+        def _alm_objective_impl(dofs, multipliers, penalty):
+            raw_terms_value = raw_terms_fun(dofs)
+            squared_flux_weight_jax = _runtime_float64_scalar(
+                squared_flux_weight,
+                reference=raw_terms_value,
+            )
+            base_value = squared_flux_weight_jax * raw_terms_value[0]
+            constraint_values = _constraint_values(dofs)
+            multipliers_arr = _as_jax_float64(multipliers).reshape((-1,))
+            penalty_value = jnp.asarray(penalty, dtype=jnp.float64)
+            positive_shift = jnp.maximum(
+                _runtime_float64_scalar(0.0, reference=constraint_values),
+                multipliers_arr + penalty_value * constraint_values,
+            )
+            return base_value + _runtime_float64_scalar(
+                0.5, reference=constraint_values
+            ) / penalty_value * (
+                jnp.vdot(positive_shift, positive_shift)
+                - jnp.vdot(multipliers_arr, multipliers_arr)
+            )
+
+        alm_value_and_grad = _mark_cacheable_jit_value_and_grad(
+            jax.jit(jax.value_and_grad(_alm_objective_impl))
+        )
+        return _mark_structured_private_solver_cacheable(
+            alm_value_and_grad,
+            cache_token=(
+                "stage2-target-alm",
+                bool(include_coil_surface),
+                float(distance_smoothing),
+                float(curvature_smoothing),
+                (
+                    None
+                    if curve_surface_threshold is None
+                    else float(curve_surface_threshold)
+                ),
+                float(banana_current_threshold),
+            ),
+        )
+
     def objective_impl(dofs):
         raw_terms_value = raw_terms_fun(dofs)
         squared_flux_weight_jax = _runtime_float64_scalar(
@@ -728,6 +961,7 @@ def build_stage2_target_objective(
         terms=terms,
         raw_terms=raw_terms_fun,
         least_squares_residual=least_squares_residual,
+        alm_value_and_grad_builder=build_alm_value_and_grad,
         field_sharding_summary=field_sharding_summary,
         pairwise_penalty_sharding_summary=pairwise_penalty_sharding_summary,
     )

@@ -6,6 +6,7 @@ BANANA_CURRENT_HARD_LIMIT_A = 1.6e4
 COIL_LENGTH_TARGET_M = 1.7
 COIL_COIL_MIN_DIST_M = 0.05
 COIL_PLASMA_MIN_DIST_M = 0.015
+COIL_VESSEL_MIN_DIST_M = 0.002
 PLASMA_VESSEL_MIN_DIST_M = 0.04
 MAX_CURVATURE_INV_M = 100.0
 
@@ -17,6 +18,7 @@ BANANA_WINDING_MINOR_RADIUS_M = 0.21
 def fixed_stage2_clearance_contract() -> dict[str, float]:
     return {
         "COIL_PLASMA_MIN_DIST_M": COIL_PLASMA_MIN_DIST_M,
+        "COIL_VESSEL_MIN_DIST_M": COIL_VESSEL_MIN_DIST_M,
         "PLASMA_VESSEL_MIN_DIST_M": PLASMA_VESSEL_MIN_DIST_M,
     }
 
@@ -39,9 +41,13 @@ def validate_tf_current_limit(tf_current_A: float) -> float:
 
 def validate_banana_winding_surface_radius(banana_surf_radius: float) -> float:
     radius = float(banana_surf_radius)
-    if not (0.0 < radius < VACUUM_VESSEL_MINOR_RADIUS_M):
+    max_radius = float(VACUUM_VESSEL_MINOR_RADIUS_M - COIL_VESSEL_MIN_DIST_M)
+    clearance = float(VACUUM_VESSEL_MINOR_RADIUS_M - radius)
+    if not (0.0 < radius <= max_radius):
         raise ValueError(
-            "Banana winding-surface radius must stay strictly inside the vacuum vessel "
-            f"minor radius {VACUUM_VESSEL_MINOR_RADIUS_M:.3f} m."
+            "Banana winding-surface radius must preserve the shared coil-to-vessel "
+            f"clearance contract: radius={radius:.3f} m leaves {clearance:.3f} m, "
+            f"but at least {COIL_VESSEL_MIN_DIST_M:.3f} m is required inside the "
+            f"vacuum-vessel minor radius {VACUUM_VESSEL_MINOR_RADIUS_M:.3f} m."
         )
     return radius

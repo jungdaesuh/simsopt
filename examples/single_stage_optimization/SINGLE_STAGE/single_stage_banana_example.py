@@ -60,8 +60,10 @@ from banana_opt.hardware_contracts import (
     COIL_COIL_MIN_DIST_M,
     COIL_LENGTH_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
+    COIL_VESSEL_MIN_DIST_M,
     PLASMA_VESSEL_MIN_DIST_M,
     TF_CURRENT_HARD_LIMIT_A,
+    validate_banana_winding_surface_radius,
 )
 from banana_opt.hardware_constraint_schema import (
     build_hardware_constraint_artifact_payload_fields,
@@ -697,6 +699,7 @@ def build_single_stage_problem_contract(
     stage2_results,
     warm_start_run_dir,
     warm_start_state,
+    banana_surf_radius,
     R0,
     s,
     order,
@@ -832,6 +835,7 @@ def build_single_stage_problem_contract(
         "hardware_thresholds": {
             "coil_coil_distance": float(CC_DIST),
             "curve_surface_distance": float(CS_DIST),
+            "coil_vessel_clearance": float(COIL_VESSEL_MIN_DIST_M),
             "surface_vessel_distance": float(SS_DIST),
             "curvature": float(CURVATURE_THRESHOLD),
             "coil_length": float(length_target),
@@ -879,6 +883,7 @@ def build_single_stage_problem_contract(
             "target_lane_boozer_bfgs_maxiter": target_lane_boozer_bfgs_maxiter_record,
             "target_lane_boozer_newton_tol": target_lane_boozer_newton_tol_record,
             "target_lane_boozer_newton_maxiter": target_lane_boozer_newton_maxiter_record,
+            "effective_banana_surface_radius": float(banana_surf_radius),
             "benchmark_mode": bool(args.benchmark_mode),
             "minimal_artifacts": bool(args.minimal_artifacts),
             "init_only": bool(args.init_only),
@@ -991,6 +996,7 @@ def build_single_stage_results_envelope(
     stage2_results,
     warm_start_run_dir,
     warm_start_state,
+    banana_surf_radius,
     R0,
     s,
     order,
@@ -1100,6 +1106,7 @@ def build_single_stage_results_envelope(
             stage2_results=stage2_results,
             warm_start_run_dir=warm_start_run_dir,
             warm_start_state=warm_start_state,
+            banana_surf_radius=banana_surf_radius,
             R0=R0,
             s=s,
             order=order,
@@ -2830,6 +2837,15 @@ def build_single_stage_alm_settings(args):
         trust_radius_grow=args.alm_trust_radius_grow,
         max_inner_attempts=args.alm_max_inner_attempts,
     )
+
+
+def resolve_single_stage_banana_surface_radius(args, stage2_results):
+    requested_radius = (
+        args.banana_surf_radius
+        if args.banana_surf_radius is not None
+        else float(stage2_results["banana_surf_radius"])
+    )
+    return validate_banana_winding_surface_radius(requested_radius)
 
 
 def _jsonable_value(value):
@@ -8419,10 +8435,9 @@ if __name__ == "__main__":
     s = float(stage2_results["TOROIDAL_FLUX"])
     order = int(stage2_results.get("order", args.stage2_seed_order))
 
-    banana_surf_radius = (
-        args.banana_surf_radius
-        if args.banana_surf_radius is not None
-        else float(stage2_results["banana_surf_radius"])
+    banana_surf_radius = resolve_single_stage_banana_surface_radius(
+        args,
+        stage2_results,
     )
     banana_surf_nfp = 5
     nphi = args.nphi
@@ -10732,6 +10747,7 @@ if __name__ == "__main__":
             stage2_results=stage2_results,
             warm_start_run_dir=args.warm_start_run_dir,
             warm_start_state=warm_start_state,
+            banana_surf_radius=banana_surf_radius,
             R0=R0,
             s=s,
             order=order,
@@ -10934,6 +10950,7 @@ if __name__ == "__main__":
         "CURVE_CURVE_MIN_DIST": final_curve_curve_min_dist,
         "CURVE_SURFACE_MIN_DIST": final_curve_surface_min_dist,
         "SURFACE_VESSEL_MIN_DIST": final_surface_vessel_min_dist,
+        "COIL_VESSEL_MIN_DIST_M": COIL_VESSEL_MIN_DIST_M,
         "HARDWARE_CONSTRAINTS_OK": final_hardware_status["success"],
         "HARDWARE_CONSTRAINT_VIOLATIONS": final_hardware_status["violations"],
         **build_hardware_constraint_artifact_payload_fields(

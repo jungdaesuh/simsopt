@@ -108,7 +108,7 @@ Unless otherwise noted, the issue descriptions below still describe the pre-fix 
 | [35](#35) | L | shell | ~~various~~ | ~~Shell scripts hardcoded to `~/simsopt/` and `conda activate simsopt`~~ :white_check_mark: |
 | [36](#36) | L | banana_coil | ~~377-388~~ | ~~`fun()` closes over many globals~~ :white_check_mark: (factory pattern + banana coil R-Z plot) |
 | [37](#37) | -- | banana_coil | 81 | ~~Default `s=0.24` is an interior VMEC surface~~ (intentional) |
-| [38](#38) | M | cross-file | -- | No direct coil-to-vessel clearance constraint in either stage (discovered via #25/#26 audit) |
+| [38](#38) | M | cross-file | fixed | Winding-surface radius now enforces the coil-to-vessel clearance contract |
 
 ---
 
@@ -156,7 +156,7 @@ Checklist meaning:
 - [x] [Issue 35](#35) Shell scripts hardcoded to `~/simsopt/` and `conda activate simsopt`
 - [x] [Issue 36](#36) `fun()` closes over many globals (factory pattern; banana coil R-Z projection implemented)
 - [x] [Issue 37](#37) Default `s=0.24` is an interior VMEC surface (closed, intentional)
-- [ ] [Issue 38](#38) No direct coil-to-vessel clearance constraint in either stage
+- [x] [Issue 38](#38) Root-fixed: winding-surface radius now enforces the coil-to-vessel clearance contract
 
 ---
 
@@ -801,17 +801,11 @@ The `shapely.geometry.Polygon` import (line 18) exists solely for this dead vari
 The feature was never wired into behavior, and a 2D polygon test is the wrong approach — the
 proper tool is `CurveSurfaceDistance` (3D coil-to-surface minimum distance penalty).
 
-**Gap analysis (verified against code and literature):** Neither Stage 2 nor single-stage
-currently enforces a direct **coil-to-vessel** clearance constraint. The existing constraints
-are: coil-to-coil (`CurveCurveDistance`), coil-to-plasma (`CurveSurfaceDistance` in
-single-stage only), and plasma-to-vessel (`SurfaceSurfaceDistance` in single-stage only).
-The CWS parameterization provides an implicit 2mm coil-to-vessel gap (banana surface
-a=0.22 vs VV a=0.222), but this is a geometric coincidence of the default parameters, not
-an enforced engineering constraint. The Baillod 2025 CSX paper (Nucl. Fusion 65 026046)
-uses an explicit coil-to-wall term `wcw` with threshold `dcw=0.08m`. If a direct
-coil-to-vessel penalty is needed for the HBT workflow, it would require adding
-`CurveSurfaceDistance(new_curves, VV, CV_THRESHOLD)` to the objective — see
-`examples/2_Intermediate/stage_two_optimization.py` for the reference pattern.
+**Gap analysis (historical):** This gap is now closed at the correct contract boundary.
+Because both stages optimize banana coils on a fixed winding surface, the real control knob is
+`banana_surf_radius`, not a new inner-loop penalty term. The shared hardware contract now
+enforces a minimum 2 mm winding-surface-to-vessel clearance through
+`validate_banana_winding_surface_radius(...)`, which both Stage 2 and single-stage use.
 
 ---
 
@@ -1051,12 +1045,13 @@ but the choice could benefit from a code comment explaining the rationale.
 ---
 
 <a id="38"></a>
-### 38. [M] No direct coil-to-vessel clearance constraint in either stage
+### 38. [M] Fixed: winding-surface radius now enforces the coil-to-vessel clearance contract
 
-**Files:** `banana_coil_solver.py`, `single_stage_banana_example.py`
+**Files:** `hardware_contracts.py`, `banana_coil_solver.py`, `single_stage_banana_example.py`
 
-**Validation status:** Latent / design. Not a runtime failure, but a missing engineering
-constraint that could produce physically unbuildable coil configurations.
+**Validation status:** Fixed. The real control variable is the banana winding-surface
+radius, because both stages optimize banana coils on `CurveCWSFourierCPP` curves
+constrained to that surface. A direct curve-to-vessel penalty was the wrong seam.
 
 **Discovery path:** Issues #25/#26 removed a dead `hbt_poly = Polygon(...)` variable from
 `crossSectionPlot`. Audit of whether this was an intended feature revealed it was likely the
@@ -1065,25 +1060,19 @@ start of an unfinished 2D containment check. Investigating the proper 3D replace
 clearance — a real engineering constraint per Baillod 2025 (Nucl. Fusion 65 026046,
 `dcw = 0.08 m` for CSX).
 
-Neither Stage 2 nor single-stage enforces a direct coil-to-vessel minimum distance.
-The existing distance constraints are:
+The implemented fix is:
 
-| Constraint | Type | Stage 2 | Single-stage |
-|---|---|---|---|
-| `CurveCurveDistance` | coil-to-coil | Yes (0.05 m) | Yes (0.05 m) |
-| `CurveSurfaceDistance` | coil-to-plasma | No | Yes (0.02 m) |
-| `SurfaceSurfaceDistance` | plasma-to-vessel | No | Yes (0.04 m) |
-| **coil-to-vessel** | **missing** | **No** | **No** |
+- Shared hardware contract now includes `COIL_VESSEL_MIN_DIST_M = 0.002`.
+- `validate_banana_winding_surface_radius(...)` enforces
+  `banana_surf_radius <= VACUUM_VESSEL_MINOR_RADIUS_M - COIL_VESSEL_MIN_DIST_M`.
+- Stage 2 already called that validator; single-stage now resolves the effective
+  `banana_surf_radius` through the same validator before building `surf_coils`.
+- The fixed-contract metadata now exposes `COIL_VESSEL_MIN_DIST_M` in Stage 2 artifacts,
+  and single-stage results also record the same contract threshold.
 
-The CWS parameterization provides an implicit 2 mm coil-to-vessel gap in the default
-geometry (`surf_coils` a=0.22 vs `VV` a=0.222), but this is a coincidence of the default
-parameters, not an enforced threshold. For comparison, the CSX project (Baillod 2025,
-Nucl. Fusion 65 026046) uses an explicit coil-to-wall penalty with threshold `dcw = 0.08 m`.
-
-**Potential fix:** Add `CurveSurfaceDistance(curves, VV, CV_THRESHOLD)` to the objective in
-one or both stages. The threshold value should be determined by the hardware team based on
-HBT port access, assembly clearance, and finite-build coil width requirements. See
-`examples/2_Intermediate/stage_two_optimization.py` for the reference implementation pattern.
+The previous “add `CurveSurfaceDistance(curves, VV, ...)` to the objective” idea was not the
+right root fix here, because the coil DOFs do not move the banana coils off the winding
+surface. Enforcing the winding-surface radius is the actual contract boundary.
 
 ---
 

@@ -10725,18 +10725,25 @@ class ResultsEnvelopeTests(unittest.TestCase):
             )
 
         self.assertEqual(envelope["schema_version"], 1)
+        problem_contract = envelope["problem_contract"]
+        runtime_contract = problem_contract["runtime_contract"]
+        hardware_thresholds = problem_contract["hardware_thresholds"]
         self.assertEqual(
-            envelope["problem_contract"]["runtime_contract"]["constraint_method"],
+            runtime_contract["constraint_method"],
             "penalty",
         )
         self.assertEqual(envelope["provenance"]["repo_sha"], "deadbeef")
         self.assertEqual(
-            envelope["problem_contract"]["equilibrium"]["filename"], "wout_fixture.nc"
+            problem_contract["equilibrium"]["filename"],
+            "wout_fixture.nc",
         )
         self.assertEqual(
-            envelope["problem_contract"]["runtime_contract"]["optimizer_backend"],
+            runtime_contract["optimizer_backend"],
             "ondevice",
         )
+        self.assertEqual(hardware_thresholds["coil_plasma_distance"], 0.015)
+        self.assertEqual(hardware_thresholds["coil_vessel_clearance"], 0.002)
+        self.assertEqual(hardware_thresholds["plasma_vessel_distance"], 0.04)
         self.assertTrue(envelope["artifacts"]["required"]["results.json"]["exists"])
         self.assertFalse(
             envelope["artifacts"]["required"]["biot_savart_opt.json"]["exists"]
@@ -10783,6 +10790,7 @@ class ResultsEnvelopeTests(unittest.TestCase):
                     "surface_path": "/tmp/warm-start/surf_opt.json",
                     "results_path": "/tmp/warm-start/results.json",
                 },
+                banana_surf_radius=0.219,
                 R0=0.915,
                 s=0.24,
                 order=2,
@@ -10816,6 +10824,16 @@ class ResultsEnvelopeTests(unittest.TestCase):
             )
 
         self.assertEqual(envelope["schema_version"], 1)
+        problem_contract = envelope["problem_contract"]
+        runtime_contract = problem_contract["runtime_contract"]
+        hardware_thresholds = problem_contract["hardware_thresholds"]
+        stage2_seed = problem_contract["stage2_seed"]
+        self.assertEqual(hardware_thresholds["coil_vessel_clearance"], 0.002)
+        self.assertEqual(runtime_contract["effective_banana_surface_radius"], 0.219)
+        self.assertEqual(
+            stage2_seed["banana_surface_radius"],
+            0.22,
+        )
 
     def test_single_stage_results_envelope_records_scaled_phase1_diagnostic_artifact(
         self,
@@ -10857,6 +10875,7 @@ class ResultsEnvelopeTests(unittest.TestCase):
                 stage2_results=stage2_results,
                 warm_start_run_dir=None,
                 warm_start_state=None,
+                banana_surf_radius=0.22,
                 R0=0.915,
                 s=0.24,
                 order=2,
@@ -10946,6 +10965,7 @@ class ResultsEnvelopeTests(unittest.TestCase):
                 stage2_results=stage2_results,
                 warm_start_run_dir=None,
                 warm_start_state=None,
+                banana_surf_radius=0.22,
                 R0=0.915,
                 s=0.24,
                 order=2,
