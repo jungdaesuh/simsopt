@@ -40,17 +40,14 @@ from simsopt.geo.surfaceobjectives import (
     Iotas,
     NonQuasiSymmetricRatio,
     SurfaceSurfaceDistance,
-    boozer_surface_residual,
-    boozer_surface_residual_dB,
 )
 from simsopt.geo.curveobjectives import CurveCurveDistance, CurveSurfaceDistance
 from simsopt.field import (
     BiotSavart,
 )
 from simsopt.objectives import QuadraticPenalty
-from simsopt.objectives.utilities import forward_backward
 from simsopt._core.optimizable import load
-from simsopt._core.derivative import Derivative, derivative_dec
+from simsopt._core.derivative import Derivative
 
 from alm_utils import (
     ALMSettings,
@@ -78,6 +75,10 @@ from workflow_runner_common import load_stage2_artifact_results
 from banana_opt.artifact_contracts import (
     STAGE2_SEED_CONTRACT_HASH_KEY,
     upgrade_legacy_stage2_artifact_results,
+)
+from banana_opt.boozer_residuals import (  # noqa: F401 - re-exported for importlib-loaded tests
+    BoozerResidualExact,
+    RefinedBoozerResidual,
 )
 from banana_opt.constraint_contract import (
     apply_offspec_engineering_override_reason,
@@ -1692,102 +1693,6 @@ def parse_args():
     )
     return parser.parse_args()
 
-
-class BoozerResidualExact(Optimizable):
-    r"""
-    This term returns the exact-stage Boozer residual penalty term
-
-    .. math::
-       J = \int_0^{1/n_{\text{fp}}} \int_0^1 \| \mathbf r \|^2 ~d\theta ~d\varphi.
-
-    where
-
-    .. math::
-        \mathbf r = \frac{1}{\|\mathbf B\|}[(G + \iota I)\mathbf B_\text{BS}(\mathbf x) - ||\mathbf B_\text{BS}(\mathbf x)||^2  (\mathbf x_\varphi + \iota  \mathbf x_\theta)]
-    
-    """
-
-    def __init__(self, boozer_surface, bs):
-        Optimizable.__init__(self, depends_on=[boozer_surface])
-        in_surface = boozer_surface.surface
-        self.boozer_surface = boozer_surface
-
-        # same number of points as on the solved surface
-        nphis = in_surface.quadpoints_phi.size
-        phis = np.linspace(0,1./in_surface.nfp,nphis*4,endpoint=False)
-        nthetas = in_surface.quadpoints_theta.size
-        thetas = np.linspace(0,1,nthetas*4,endpoint=False)
-
-        s = SurfaceXYZTensorFourier(mpol=in_surface.mpol, ntor=in_surface.ntor, stellsym=in_surface.stellsym, nfp=in_surface.nfp, quadpoints_phi=phis, quadpoints_theta=thetas)
-        s.set_dofs(in_surface.get_dofs())
-
-        self.in_surface = in_surface
-        self.surface = s
-        self.biotsavart = bs
-        self.recompute_bell()
-
-    def J(self):
-        """
-        Return the value of the penalty function.
-        """
-        
-        if self._J is None:
-            self.compute()
-        return self._J
-    
-    @derivative_dec
-    def dJ(self):
-        """
-        Return the derivative of the penalty function with respect to the coil degrees of freedom.
-        """
-
-        if self._dJ is None:
-            self.compute()
-        return self._dJ
-
-    def recompute_bell(self, parent=None):
-        self._J = None
-        self._dJ = None
-
-    def _boozer_current_I(self):
-        return self.boozer_surface.res.get("I", getattr(self.boozer_surface, "I", 0.0))
-
-    def compute(self):
-        if self.boozer_surface.need_to_run_code:
-            res = self.boozer_surface.res
-            res = self.boozer_surface.run_code(res['iota'], G=res['G'])
-
-        self.surface.set_dofs(self.in_surface.get_dofs())
-        self.biotsavart.set_points(self.surface.gamma().reshape((-1, 3)))
-
-        surface = self.surface
-        nphi = surface.quadpoints_phi.size
-        ntheta = surface.quadpoints_theta.size
-        num_points = 3 * nphi * ntheta
-        sqrt_n = np.sqrt(num_points)
-
-        iota = self.boozer_surface.res['iota']
-        G = self.boozer_surface.res['G']
-        I = self._boozer_current_I()
-
-        r, J = boozer_surface_residual(surface, iota, G, self.biotsavart, derivatives=1, weight_inv_modB=True, I=I)
-        rtil = r / sqrt_n
-        self._J = 0.5 * np.sum(rtil ** 2)
-
-        _, r_dB = boozer_surface_residual_dB(surface, iota, G, self.biotsavart, derivatives=0, weight_inv_modB=True, I=I)
-        r_dB /= sqrt_n
-        dJ_by_dB = rtil[:, None] * r_dB
-        dJ_by_dB = np.sum(dJ_by_dB.reshape((-1, 3, 3)), axis=1)
-        dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
-
-        # Adjoint correction through the implicit Boozer constraint.
-        booz_surf = self.boozer_surface
-        P, L, U = booz_surf.res['PLU']
-        Jtil = J / sqrt_n
-        dJ_ds = Jtil.T @ rtil
-        adj = forward_backward(P, L, U, dJ_ds)
-        adj_times_dg_dcoil = booz_surf.res['vjp'](adj, booz_surf, iota, G)
-        self._dJ = dJ_by_dcoils - adj_times_dg_dcoil
 
 def initialize_boozer_surface(
     surf_prev,
