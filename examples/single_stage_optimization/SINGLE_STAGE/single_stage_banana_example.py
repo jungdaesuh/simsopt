@@ -115,6 +115,21 @@ from banana_opt.frontier_solver_checkpoint import (
     write_solver_checkpoint,
     build_solver_checkpoint_payload,
 )
+from banana_opt.banana_current_replay import (
+    BANANA_CURRENT_REJECTED_TRIAL_REPLAY_FILENAME,
+    BANANA_CURRENT_REJECTED_TRIAL_REPLAY_SCHEMA_VERSION,
+    BANANA_CURRENT_REPLAY_CONTEXT_FILENAME,
+    banana_current_rejected_trial_replay_path,
+    build_banana_current_replay_context_state,
+    build_replayed_candidate_x,
+    load_banana_current_replay_context,
+    record_banana_current_replay_context_snapshot,
+    restore_banana_current_replay_incumbent,
+    validate_banana_current_replay_coordinate_contract,
+    validate_banana_current_replay_context_contract,
+    set_banana_current_replay_context_contract,
+    write_banana_current_replay_context_artifact,
+)
 from banana_opt.current_contracts import (
     DEFAULT_FINITE_CURRENT_MODE,
     infer_uniform_coil_current_A as _infer_uniform_coil_current_A,
@@ -1470,6 +1485,36 @@ def parse_args():
             "Relative coordinate perturbation used by --banana-current-fd-diagnostics. "
             "A value of 0.01 means symmetric +/-1%% perturbations, clipped to stay "
             "inside the active optimizer bounds."
+        ),
+    )
+    parser.add_argument(
+        "--banana-current-replay-diagnostics-path",
+        default=os.environ.get("BANANA_CURRENT_REPLAY_DIAGNOSTICS_PATH"),
+        help=(
+            "Offline replay study input banana_current_diagnostics.json. "
+            "When set, the script replays stored rejected trial current blocks "
+            "from their accepted incumbents through the live surface/topology/"
+            "hardware evaluation path. Requires banana_current_replay_context.json "
+            "next to the diagnostics input, unless --banana-current-replay-context-path "
+            "is provided."
+        ),
+    )
+    parser.add_argument(
+        "--banana-current-replay-context-path",
+        default=os.environ.get("BANANA_CURRENT_REPLAY_CONTEXT_PATH"),
+        help=(
+            "Optional banana_current_replay_context.json override for the replay "
+            "study. Defaults to the sibling replay-context artifact next to the "
+            "diagnostics file."
+        ),
+    )
+    parser.add_argument(
+        "--banana-current-replay-output-path",
+        default=os.environ.get("BANANA_CURRENT_REPLAY_OUTPUT_PATH"),
+        help=(
+            "Optional output path for the rejected-trial replay study artifact. "
+            "Defaults to banana_current_rejected_trial_replay.json next to the "
+            "diagnostics input."
         ),
     )
     parser.add_argument(
@@ -4961,6 +5006,8 @@ def evaluate_banana_current_fd_probe(
                 "success": False,
                 "surface_success": False,
                 "objective_total": None,
+                "final_iota": None,
+                "final_volume": None,
                 "rejection_reason": "surface_solve",
                 "topology_state": None,
                 "hardware_ok": None,
@@ -4991,10 +5038,13 @@ def evaluate_banana_current_fd_probe(
             rejection_reason = "topology_broken"
         elif not hardware_status["success"]:
             rejection_reason = "hardware"
+        outer_surface = surface_data[-1]["boozer_surface"].surface
         return {
             "success": True,
             "surface_success": True,
             "objective_total": float(objective_eval["total"]),
+            "final_iota": float(Iotas(surface_data[-1]["boozer_surface"]).J()),
+            "final_volume": float(Volume(outer_surface).J()),
             "rejection_reason": rejection_reason,
             "topology_state": topology_state,
             "hardware_ok": bool(hardware_status["success"]),
@@ -5002,6 +5052,230 @@ def evaluate_banana_current_fd_probe(
     finally:
         JF.x = reference_x.copy()
         restore_surface_states(surface_data, reference_surface_state)
+
+
+def _load_banana_current_replay_context_state(
+    diagnostics_path,
+    *,
+    replay_context_path=None,
+):
+    diagnostics_artifact_path = Path(diagnostics_path)
+    resolved_context_path = (
+        diagnostics_artifact_path.with_name(BANANA_CURRENT_REPLAY_CONTEXT_FILENAME)
+        if replay_context_path is None
+        else Path(replay_context_path)
+    )
+    if replay_context_path is not None and not resolved_context_path.is_file():
+        raise FileNotFoundError(
+            "Explicit banana-current replay context artifact was not found: "
+            f"{resolved_context_path}"
+        )
+    if resolved_context_path.is_file():
+        return (
+            load_banana_current_replay_context(
+                resolved_context_path,
+                require_replay_contract=True,
+            ),
+            {
+                "kind": "replay_context",
+                "path": str(resolved_context_path),
+            },
+        )
+    raise FileNotFoundError(
+        "Banana-current replay requires a replay context artifact alongside the "
+        "diagnostics input."
+    )
+
+
+def run_banana_current_rejected_trial_replay_study(
+    diagnostics_path,
+    *,
+    replay_context_path=None,
+    replay_output_path=None,
+):
+    diagnostics_artifact_path = Path(diagnostics_path)
+    diagnostics_payload = json.loads(
+        diagnostics_artifact_path.read_text(encoding="utf-8")
+    )
+    if diagnostics_payload.get("mode") != banana_current_state.mode:
+        raise ValueError(
+            "Banana-current replay diagnostics mode does not match the live "
+            "single-stage banana-current mode."
+        )
+    if int(diagnostics_payload.get("num_control_currents", -1)) != int(
+        banana_current_state.num_control_currents()
+    ):
+        raise ValueError(
+            "Banana-current replay diagnostics control-count does not match the "
+            "live single-stage banana-current configuration."
+        )
+    live_coordinate_spec = resolve_banana_current_coordinate_spec(
+        JF,
+        banana_current_state,
+    )
+    validate_banana_current_replay_coordinate_contract(
+        diagnostics_payload["seed_report"],
+        live_dof_names=live_coordinate_spec.dof_names,
+        live_scale_factors_A=live_coordinate_spec.scale_factors_A,
+    )
+    live_coordinate_indices = np.asarray(live_coordinate_spec.indices, dtype=int)
+    live_coordinate_scale_factors_A = np.asarray(
+        live_coordinate_spec.scale_factors_A,
+        dtype=float,
+    )
+    replay_context_state, replay_context_source = (
+        _load_banana_current_replay_context_state(
+            diagnostics_artifact_path,
+            replay_context_path=replay_context_path,
+        )
+    )
+    validate_banana_current_replay_context_contract(
+        replay_context_state,
+        diagnostics_payload,
+    )
+    rejected_reports = list(
+        diagnostics_payload.get("recent_rejected_trial_reports", [])
+    )
+    original_incumbent = snapshot_single_stage_incumbent_state(run_dict)
+    original_stage = run_dict.get("accepted_boozer_stage", stage)
+    original_accepted_iterations = int(run_dict.get("accepted_iterations", 0))
+    replay_reports = []
+    try:
+        for report_index, report in enumerate(rejected_reports):
+            accepted_iteration = int(report["accepted_iteration"])
+            if str(accepted_iteration) not in replay_context_state["accepted_incumbents"]:
+                replay_reports.append(
+                    {
+                        "report_index": int(report_index),
+                        "accepted_iteration": accepted_iteration,
+                        "original_rejection_reason": report.get("rejection_reason"),
+                        "replay_status": "missing_incumbent_context",
+                    }
+                )
+                continue
+            replay_stage, replay_incumbent = restore_banana_current_replay_incumbent(
+                replay_context_state,
+                accepted_iteration,
+            )
+            run_dict["accepted_iterations"] = accepted_iteration
+            restore_incumbent_for_stage(
+                run_dict,
+                replay_incumbent,
+                replay_stage,
+                rebuild_stage_objective_bundle,
+            )
+            report_dof_names = tuple(report["coordinate_dof_names"])
+            if report_dof_names != tuple(live_coordinate_spec.dof_names):
+                raise ValueError(
+                    "Banana-current replay report DOF names do not match the live "
+                    "banana-current coordinate contract."
+                )
+            replay_optimizer_coordinates = np.asarray(
+                report["optimizer_coordinate_values"],
+                dtype=float,
+            )
+            reference_x = np.asarray(run_dict["accepted_x"], dtype=float).copy()
+            trial_x = build_replayed_candidate_x(
+                reference_x,
+                live_coordinate_indices,
+                replay_optimizer_coordinates,
+            )
+            incumbent_optimizer_coordinates = reference_x[live_coordinate_indices]
+            replay_probe = evaluate_banana_current_fd_probe(
+                trial_x,
+                reference_x=reference_x,
+                reference_surface_state=copy.deepcopy(run_dict["surface_state"]),
+                accepted_iterations=accepted_iteration,
+            )
+            replay_success = bool(
+                replay_probe["success"]
+                and replay_probe["rejection_reason"] is None
+            )
+            replay_reports.append(
+                {
+                    "report_index": int(report_index),
+                    "accepted_iteration": accepted_iteration,
+                    "accepted_boozer_stage": replay_stage,
+                    "original_rejection_reason": report.get("rejection_reason"),
+                    "replay_status": "completed",
+                    "replay_success": replay_success,
+                    "replay_result": replay_probe,
+                    "max_abs_delta_from_incumbent_A": float(
+                        np.max(
+                            np.abs(
+                                (
+                                    replay_optimizer_coordinates
+                                    - incumbent_optimizer_coordinates
+                                )
+                                * live_coordinate_scale_factors_A
+                            )
+                        )
+                    ),
+                    "max_abs_delta_from_seed_A": float(
+                        report.get("max_abs_delta_from_seed_A", 0.0)
+                    ),
+                }
+            )
+    finally:
+        run_dict["accepted_iterations"] = original_accepted_iterations
+        restore_incumbent_for_stage(
+            run_dict,
+            original_incumbent,
+            original_stage,
+            rebuild_stage_objective_bundle,
+        )
+
+    rejection_counts = {}
+    rescue_counts = {}
+    completed_replays = 0
+    rescued_replays = 0
+    for replay_report in replay_reports:
+        rejection_reason = replay_report.get("original_rejection_reason")
+        rejection_counts[rejection_reason] = rejection_counts.get(rejection_reason, 0) + 1
+        if replay_report.get("replay_status") != "completed":
+            continue
+        completed_replays += 1
+        if replay_report.get("replay_success"):
+            rescued_replays += 1
+            rescue_counts[rejection_reason] = rescue_counts.get(rejection_reason, 0) + 1
+
+    artifact_path = (
+        banana_current_rejected_trial_replay_path(diagnostics_artifact_path.parent)
+        if replay_output_path is None
+        else Path(replay_output_path)
+    )
+    replay_summary = {
+        "schema_version": BANANA_CURRENT_REJECTED_TRIAL_REPLAY_SCHEMA_VERSION,
+        "diagnostics_path": str(diagnostics_artifact_path),
+        "artifact_path": str(artifact_path),
+        "replay_context_source": replay_context_source,
+        "rejected_trial_reports_recorded": int(
+            diagnostics_payload.get("rejected_trial_reports_recorded", 0)
+        ),
+        "rejected_trial_reports_dropped": int(
+            diagnostics_payload.get("rejected_trial_reports_dropped", 0)
+        ),
+        "stored_rejected_trial_reports": len(rejected_reports),
+        "completed_replays": int(completed_replays),
+        "rescued_replays": int(rescued_replays),
+        "rejection_counts": rejection_counts,
+        "rescue_counts": rescue_counts,
+        "reports": replay_reports,
+    }
+    write_json_artifact(str(artifact_path), replay_summary)
+    print(
+        "[banana-current-replay] "
+        + json.dumps(
+            {
+                "artifact_path": str(artifact_path),
+                "stored_rejected_trial_reports": len(rejected_reports),
+                "completed_replays": int(completed_replays),
+                "rescued_replays": int(rescued_replays),
+            },
+            sort_keys=True,
+        )
+    )
+    return replay_summary
 
 
 SINGLE_STAGE_TOPOLOGY_DIAGNOSTICS_SCHEMA_VERSION = (
@@ -6545,6 +6819,18 @@ def callback(x):
     # Advance iteration counter
     run_dict['accepted_iterations'] += 1
     run_dict['it'] += 1
+    banana_current_replay_context = run_dict.get("banana_current_replay_context")
+    if banana_current_replay_context is not None:
+        record_banana_current_replay_context_snapshot(
+            banana_current_replay_context,
+            accepted_iteration=int(run_dict["accepted_iterations"]),
+            accepted_boozer_stage=incumbent_stage,
+            incumbent=snapshot_single_stage_incumbent_state(run_dict),
+        )
+        write_banana_current_replay_context_artifact(
+            OUT_DIR_ITER,
+            banana_current_replay_context,
+        )
 
     if CHECKPOINT_EVERY > 0:
         write_single_stage_solver_checkpoint_state(
@@ -7308,6 +7594,7 @@ if __name__ == "__main__":
         'frontier_trust_rejects': 0,
         'active_optimizer_bounds': current_optimizer_bounds(),
         'banana_current_diagnostics': None,
+        'banana_current_replay_context': None,
         'frontier_conditioning_seed_report': initial_frontier_conditioning_report,
         'frontier_conditioning_first_accepted_report': None,
     }
@@ -7403,7 +7690,12 @@ if __name__ == "__main__":
         basin_hops=args.basin_hops,
         init_only=args.init_only,
     )
+    banana_current_replay_summary = None
     if args.banana_current_diagnostics:
+        coordinate_spec = resolve_banana_current_coordinate_spec(
+            JF,
+            banana_current_state,
+        )
         finite_difference_probe_fn = None
         if args.banana_current_fd_diagnostics:
             reference_x = np.asarray(run_dict["accepted_x"], dtype=float).copy()
@@ -7432,6 +7724,24 @@ if __name__ == "__main__":
                 args.banana_current_fd_relative_step_fraction
             ),
         )
+        run_dict["banana_current_replay_context"] = (
+            build_banana_current_replay_context_state()
+        )
+        set_banana_current_replay_context_contract(
+            run_dict["banana_current_replay_context"],
+            mode=banana_current_state.mode,
+            num_control_currents=banana_current_state.num_control_currents(),
+            coordinate_dof_names=coordinate_spec.dof_names,
+            current_coordinate_scale_factors_A=coordinate_spec.scale_factors_A,
+            seed_currents_A=run_dict["banana_current_diagnostics"]["seed_currents_A"],
+            configured_seed_currents_A=banana_current_state.seed_currents_A,
+        )
+        record_banana_current_replay_context_snapshot(
+            run_dict["banana_current_replay_context"],
+            accepted_iteration=int(run_dict.get("accepted_iterations", 0)),
+            accepted_boozer_stage=run_dict.get("accepted_boozer_stage", stage),
+            incumbent=snapshot_single_stage_incumbent_state(run_dict),
+        )
         emit_banana_current_diagnostics_report(
             None
             if run_dict["banana_current_diagnostics"] is None
@@ -7441,6 +7751,25 @@ if __name__ == "__main__":
             OUT_DIR_ITER,
             run_dict["banana_current_diagnostics"],
         )
+        write_banana_current_replay_context_artifact(
+            OUT_DIR_ITER,
+            run_dict["banana_current_replay_context"],
+        )
+    if args.banana_current_replay_diagnostics_path:
+        banana_current_replay_summary = (
+            run_banana_current_rejected_trial_replay_study(
+                args.banana_current_replay_diagnostics_path,
+                replay_context_path=args.banana_current_replay_context_path,
+                replay_output_path=args.banana_current_replay_output_path,
+            )
+        )
+        if not args.banana_current_diagnostics:
+            args.init_only = True
+            print(
+                "Skipping single-stage optimizer because "
+                "--banana-current-replay-diagnostics-path was provided without "
+                "--banana-current-diagnostics."
+            )
     if CHECKPOINT_EVERY > 0 and not args.init_only:
         write_single_stage_solver_checkpoint_state(
             OUT_DIR_ITER,
@@ -8648,6 +8977,11 @@ if __name__ == "__main__":
             if run_dict.get("banana_current_diagnostics") is not None
             else None
         ),
+        "BANANA_CURRENT_REPLAY_CONTEXT_FILENAME": (
+            BANANA_CURRENT_REPLAY_CONTEXT_FILENAME
+            if run_dict.get("banana_current_replay_context") is not None
+            else None
+        ),
         "BANANA_CURRENT_FD_DIAGNOSTICS_ENABLED": bool(
             args.banana_current_fd_diagnostics
         ),
@@ -8655,6 +8989,19 @@ if __name__ == "__main__":
             float(args.banana_current_fd_relative_step_fraction)
             if args.banana_current_fd_diagnostics
             else None
+        ),
+        "BANANA_CURRENT_REPLAY_STUDY_ENABLED": bool(
+            args.banana_current_replay_diagnostics_path
+        ),
+        "BANANA_CURRENT_REPLAY_STUDY_ARTIFACT_PATH": (
+            None
+            if banana_current_replay_summary is None
+            else str(banana_current_replay_summary["artifact_path"])
+        ),
+        "BANANA_CURRENT_REPLAY_STUDY_FILENAME": (
+            None
+            if banana_current_replay_summary is None
+            else BANANA_CURRENT_REJECTED_TRIAL_REPLAY_FILENAME
         ),
         **build_hardware_constraint_artifact_payload_fields(final_hardware_snapshot),
         "INVALID_STATE_REJECTS_TOTAL": run_dict["invalid_state_rejects_total"],
