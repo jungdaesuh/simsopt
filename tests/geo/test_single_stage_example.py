@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,7 +18,7 @@ import numpy as np
 
 from simsopt._core.derivative import Derivative
 from simsopt._core.optimizable import Optimizable
-from simsopt.field.coil import Current
+from simsopt.field.coil import Current, ScaledCurrent
 from simsopt.geo.surfaceobjectives import boozer_surface_residual, boozer_surface_residual_dB
 from simsopt.objectives.utilities import forward_backward
 
@@ -2483,6 +2484,53 @@ class HardwareConstraintTests(unittest.TestCase):
             float(np.linalg.norm([2.0, -4.0])),
         )
         self.assertEqual(report["projected_coordinate_to_noncurrent_gradient_ratio"], 0.0)
+
+    def test_build_banana_current_coordinate_report_separates_scaled_optimizer_units_from_amps(self):
+        module = load_single_stage_example_module()
+        current_a = ScaledCurrent(Current(1.5), 1.0e4)
+        current_b = ScaledCurrent(Current(-2.0), 8.0e3)
+        banana_current_state = module.SingleStageBananaCurrentState(
+            mode="independent",
+            currents=(current_a, current_b),
+            seed_currents_A=(1.5e4, -1.6e4),
+            coordinate_scaling="seed-relative",
+            current_coordinate_scale_factors_A=(1.0e4, 8.0e3),
+        )
+        objective = SimpleNamespace(
+            dof_names=("geom:0", *current_a.dof_names, "geom:1", *current_b.dof_names),
+            lower_bounds=np.array([-1.0, -1.6, -1.0, -2.0], dtype=float),
+            upper_bounds=np.array([1.0, 1.6, 1.0, 2.0], dtype=float),
+        )
+        x = np.array([0.25, 1.5, -0.5, -2.0], dtype=float)
+        grad = np.array([2.0, 3.0, -4.0, 4.0], dtype=float)
+
+        report = module.build_banana_current_coordinate_report(
+            objective,
+            banana_current_state,
+            x,
+            grad,
+            phase="accepted",
+            accepted_iteration=7,
+        )
+
+        self.assertEqual(report["coordinate_values_A"], [1.5e4, -1.6e4])
+        self.assertEqual(report["coordinate_lower_bounds_A"], [-1.6e4, -1.6e4])
+        self.assertEqual(report["coordinate_upper_bounds_A"], [1.6e4, 1.6e4])
+        self.assertEqual(report["optimizer_coordinate_values"], [1.5, -2.0])
+        self.assertEqual(report["optimizer_coordinate_lower_bounds"], [-1.6, -2.0])
+        self.assertEqual(report["optimizer_coordinate_upper_bounds"], [1.6, 2.0])
+        self.assertEqual(report["current_coordinate_scale_factors_A"], [1.0e4, 8.0e3])
+        self.assertEqual(report["coordinate_gradients"], [3.0e-4, 5.0e-4])
+        self.assertAlmostEqual(
+            report["full_gradient_l2"],
+            float(np.linalg.norm([2.0, 3.0e-4, -4.0, 5.0e-4])),
+        )
+        self.assertEqual(report["optimizer_coordinate_gradients"], [3.0, 4.0])
+        self.assertAlmostEqual(report["optimizer_coordinate_gradient_l2"], 5.0)
+        self.assertEqual(report["projected_optimizer_coordinate_gradients"], [3.0, 0.0])
+        self.assertEqual(report["projected_coordinate_gradients"], [3.0e-4, 0.0])
+        self.assertFalse(report["bound_activity"][0]["at_upper_bound"])
+        self.assertTrue(report["bound_activity"][1]["at_lower_bound"])
 
     def test_write_banana_current_diagnostics_artifact_serializes_seed_and_recent_rejects(self):
         module = load_single_stage_example_module()
@@ -7241,12 +7289,64 @@ class RunIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "cannot assign to field"):
             config.stage = "other"
 
+    def test_run_identity_rejects_unresolved_banana_current_control_count(self):
+        module = load_single_stage_example_module()
+        args = self._make_identity_args()
+
+        with self.assertRaisesRegex(ValueError, "num_banana_current_controls"):
+            module.make_run_identity_config(
+                args,
+                "stage2-seed.json",
+                "final",
+                0.1,
+                args.constraint_method,
+                0.15,
+                0.15,
+                0.37,
+                1850000.0,
+                0.22,
+                80,
+                80,
+                None,
+                num_banana_current_controls=None,
+            )
+
     def test_run_identity_omits_default_target_goal_mode(self):
         module = load_single_stage_example_module()
         args = self._make_identity_args()
         config = self._make_identity_config(module, args)
 
         self.assertIsNone(config.single_stage_goal_mode)
+
+    def test_run_identity_omits_default_banana_current_coordinate_scaling_from_hash(self):
+        module = load_single_stage_example_module()
+        args = self._make_identity_args()
+        config = self._make_identity_config(module, args)
+        legacy_values = [
+            value
+            for field, value in zip(
+                fields(config),
+                module.astuple(config),
+            )
+            if field.name != "single_stage_banana_current_coordinate_scaling"
+        ]
+
+        self.assertEqual(
+            module.build_run_identity_config(config),
+            "|".join(str(value) for value in legacy_values),
+        )
+
+    def test_run_identity_changes_when_banana_current_coordinate_scaling_changes(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        scaled_args = self._make_identity_args()
+        scaled_args.single_stage_banana_current_mode = "independent"
+        scaled_args.single_stage_banana_current_coordinate_scaling = "seed-relative"
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, scaled_args),
+        )
 
     def test_run_identity_distinguishes_explicit_preserve_first_from_auto(self):
         module = load_single_stage_example_module()
@@ -8352,6 +8452,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.curvature_threshold, 100.0)
         self.assertEqual(args.banana_current_max_A, 16000.0)
         self.assertEqual(args.single_stage_banana_current_mode, "shared")
+        self.assertEqual(args.single_stage_banana_current_coordinate_scaling, "none")
 
     def test_single_stage_parse_args_accepts_independent_banana_current_mode(self):
         module = load_single_stage_example_module()
@@ -8368,6 +8469,28 @@ class CurrentBaselineContractTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertEqual(args.single_stage_banana_current_mode, "independent")
+
+    def test_single_stage_parse_args_accepts_banana_current_coordinate_scaling(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--single-stage-banana-current-mode",
+                "independent",
+                "--single-stage-banana-current-coordinate-scaling",
+                "seed-relative",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.single_stage_banana_current_mode, "independent")
+        self.assertEqual(
+            args.single_stage_banana_current_coordinate_scaling,
+            "seed-relative",
+        )
 
     def test_single_stage_parse_args_accepts_hidden_offspec_engineering_flag(self):
         module = load_single_stage_example_module()
@@ -8408,6 +8531,42 @@ class CurrentBaselineContractTests(unittest.TestCase):
             ValueError,
             "--single-stage-banana-current-mode=independent is not supported with "
             "--constraint-method=alm",
+        ):
+            module.validate_single_stage_current_args(args)
+
+    def test_validate_single_stage_current_args_rejects_seed_relative_scaling_without_independent_mode(self):
+        module = load_single_stage_example_module()
+
+        args = SimpleNamespace(
+            banana_current_max_A=16000.0,
+            single_stage_banana_current_mode="shared",
+            single_stage_banana_current_coordinate_scaling="seed-relative",
+            constraint_method="penalty",
+            allow_offspec_engineering_constraints=False,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "--single-stage-banana-current-coordinate-scaling=seed-relative "
+            "requires --single-stage-banana-current-mode=independent",
+        ):
+            module.validate_single_stage_current_args(args)
+
+    def test_validate_single_stage_current_args_rejects_invalid_coordinate_scaling(self):
+        module = load_single_stage_example_module()
+
+        args = SimpleNamespace(
+            banana_current_max_A=16000.0,
+            single_stage_banana_current_mode="independent",
+            single_stage_banana_current_coordinate_scaling="bogus",
+            constraint_method="penalty",
+            allow_offspec_engineering_constraints=False,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "--single-stage-banana-current-coordinate-scaling must be one of "
+            "\\{none, seed-relative\\}",
         ):
             module.validate_single_stage_current_args(args)
 

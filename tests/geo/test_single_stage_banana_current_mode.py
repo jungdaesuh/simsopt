@@ -2,6 +2,7 @@ import importlib
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -123,6 +124,49 @@ class SingleStageBananaCurrentModeTests(unittest.TestCase):
         self.assertEqual(state.control_current_A(), 1.2e4)
         self.assertEqual(state.compatibility_current_A(), 1.2e4)
 
+    def test_resolve_independent_mode_can_use_seed_relative_scaled_coordinates(self):
+        module = load_current_mode_module()
+        biot_savart, coil_partitions = build_asymmetric_stage2_seed_fixture()
+
+        resolved_bs, resolved_partitions, state = (
+            module.resolve_single_stage_banana_current_state(
+                biot_savart,
+                coil_partitions,
+                mode="independent",
+                coordinate_scaling="seed-relative",
+            )
+        )
+
+        self.assertEqual(state.coordinate_scaling, "seed-relative")
+        self.assertEqual(state.current_values_A(), (1.2e4, -9.5e3))
+        self.assertEqual(state.seed_currents_A, (1.2e4, -9.5e3))
+        self.assertEqual(state.coordinate_scale_factors_A(), (1.2e4, 9.5e3))
+        self.assertTrue(
+            all(
+                isinstance(coil.current, ScaledCurrent)
+                for coil in resolved_partitions.banana_coils
+            )
+        )
+        self.assertEqual(state.optimizer_coordinate_values(), (1.0, -1.0))
+
+        first_current = resolved_partitions.banana_coils[0].current
+        first_inner_current = first_current.current_to_scale
+        first_inner_current.set_dofs(np.asarray([1.1], dtype=float))
+        self.assertAlmostEqual(first_current.get_value(), 1.32e4)
+        self.assertTrue(np.allclose(state.current_values_A(), (1.32e4, -9.5e3)))
+
+    def test_resolve_shared_mode_rejects_coordinate_scaling(self):
+        module = load_current_mode_module()
+        biot_savart, coil_partitions = build_stage2_seed_fixture()
+
+        with self.assertRaisesRegex(ValueError, "independent banana-current mode"):
+            module.resolve_single_stage_banana_current_state(
+                biot_savart,
+                coil_partitions,
+                mode="shared",
+                coordinate_scaling="seed-relative",
+            )
+
     def test_resolve_banana_current_coordinate_spec_deduplicates_shared_mode(self):
         module = load_current_mode_module()
         biot_savart, coil_partitions = build_stage2_seed_fixture()
@@ -193,6 +237,50 @@ class SingleStageBananaCurrentModeTests(unittest.TestCase):
                 np.allclose(current.local_upper_bounds, np.asarray([1.6e4]))
             )
 
+    def test_apply_penalty_bounds_respects_scaled_current_coordinate_units(self):
+        module = load_current_mode_module()
+        scaled_positive = ScaledCurrent(Current(1.0), 1.0e4)
+        scaled_negative = ScaledCurrent(Current(-1.0), 8.0e3)
+        state = module.SingleStageBananaCurrentState(
+            mode="independent",
+            currents=(scaled_positive, scaled_negative),
+            seed_currents_A=(1.0e4, -8.0e3),
+            coordinate_scaling="seed-relative",
+            current_coordinate_scale_factors_A=(1.0e4, 8.0e3),
+        )
+
+        module.apply_single_stage_penalty_banana_current_bounds(
+            state,
+            banana_current_max_A=1.6e4,
+            validate_seed=True,
+            seed_context="Loaded Stage 2 banana current",
+        )
+
+        self.assertTrue(
+            np.allclose(
+                scaled_positive.current_to_scale.local_lower_bounds,
+                np.asarray([-1.6]),
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                scaled_positive.current_to_scale.local_upper_bounds,
+                np.asarray([1.6]),
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                scaled_negative.current_to_scale.local_lower_bounds,
+                np.asarray([-2.0]),
+            )
+        )
+        self.assertTrue(
+            np.allclose(
+                scaled_negative.current_to_scale.local_upper_bounds,
+                np.asarray([2.0]),
+            )
+        )
+
     def test_build_payload_fields_reports_mode_vector_and_control_metric(self):
         module = load_current_mode_module()
         state = module.SingleStageBananaCurrentState(
@@ -207,9 +295,18 @@ class SingleStageBananaCurrentModeTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["BEST_FEASIBLE_BANANA_CURRENT_MODE"], "independent")
+        self.assertEqual(payload["BEST_FEASIBLE_BANANA_CURRENT_COORDINATE_SCALING"], "none")
         self.assertEqual(
             payload["BEST_FEASIBLE_BANANA_CURRENTS_A"],
             [1.2e4, -1.5e4],
+        )
+        self.assertEqual(
+            payload["BEST_FEASIBLE_BANANA_CURRENT_OPTIMIZER_COORDINATES"],
+            [1.2e4, -1.5e4],
+        )
+        self.assertEqual(
+            payload["BEST_FEASIBLE_BANANA_CURRENT_COORDINATE_SCALE_FACTORS_A"],
+            [1.0, 1.0],
         )
         self.assertEqual(payload["BEST_FEASIBLE_BANANA_CURRENT_MAX_ABS_A"], 1.5e4)
         self.assertEqual(
@@ -218,6 +315,28 @@ class SingleStageBananaCurrentModeTests(unittest.TestCase):
         )
         self.assertEqual(payload["BEST_FEASIBLE_BANANA_NUM_CURRENT_CONTROLS"], 2)
         self.assertEqual(payload["BEST_FEASIBLE_BANANA_CURRENT_A"], 1.5e4)
+
+    def test_build_payload_fields_falls_back_for_summary_only_current_objects(self):
+        module = load_current_mode_module()
+        state = module.SingleStageBananaCurrentState(
+            mode="shared",
+            currents=(SimpleNamespace(get_value=lambda: 1.4e4),),
+            seed_currents_A=(1.4e4,),
+        )
+
+        payload = module.build_single_stage_banana_current_payload_fields(
+            state,
+            prefix="BEST_FEASIBLE_",
+        )
+
+        self.assertEqual(
+            payload["BEST_FEASIBLE_BANANA_CURRENT_OPTIMIZER_COORDINATES"],
+            [1.4e4],
+        )
+        self.assertEqual(
+            payload["BEST_FEASIBLE_BANANA_CURRENT_COORDINATE_SCALE_FACTORS_A"],
+            [1.0],
+        )
 
     def test_resolve_independent_mode_preserves_loaded_asymmetric_seed_vector(self):
         module = load_current_mode_module()

@@ -8,7 +8,7 @@ import shutil
 import sys
 import tempfile
 from contextlib import contextmanager
-from dataclasses import astuple, dataclass, replace
+from dataclasses import astuple, dataclass, fields, replace
 from pathlib import Path, PurePath
 from types import SimpleNamespace
 import numpy as np
@@ -55,7 +55,7 @@ from simsopt._core.derivative import Derivative, derivative_dec
 from alm_utils import (
     ALMSettings,
     alm_result_diagnostics_fields,
-    augmented_inequality_objective,
+    augmented_inequality_objective,  # noqa: F401 - legacy module-level export.
     minimize_alm,
     validate_alm_cli_args,
 )
@@ -118,7 +118,6 @@ from banana_opt.current_contracts import (
     DEFAULT_FINITE_CURRENT_MODE,
     infer_uniform_coil_current_A as _infer_uniform_coil_current_A,
     resolve_penalty_traversal_forbidden_box_bounds,
-    resolve_loaded_tf_current_A as _resolve_loaded_tf_current_A,
     resolve_plasma_current_settings_for_num_surfaces as _resolve_plasma_current_settings_for_num_surfaces_impl,
 )
 from banana_opt.hardware_contracts import (
@@ -135,9 +134,7 @@ from banana_opt.hardware_contracts import (
     VACUUM_VESSEL_MAJOR_RADIUS_M,
     env_flag,
     is_major_radius_offspec,
-    validate_banana_winding_surface_radius,
     validate_major_radius,
-    validate_tf_current_limit,
 )
 from banana_opt.hardware_constraint_schema import (
     build_hardware_constraint_artifact_payload_fields,
@@ -227,6 +224,8 @@ from banana_opt.single_stage_objectives import (
     evaluate_alm_objective as _evaluate_alm_objective_impl,
 )
 from banana_opt.single_stage_banana_current_mode import (
+    BANANA_CURRENT_COORDINATE_SCALING_NONE,
+    BANANA_CURRENT_COORDINATE_SCALING_SEED_RELATIVE,
     BANANA_CURRENT_MODE_INDEPENDENT,
     BANANA_CURRENT_MODE_SHARED,
     SingleStageBananaCurrentState,
@@ -757,11 +756,13 @@ def resolve_single_stage_banana_current_state(
     coil_partitions,
     *,
     mode,
+    coordinate_scaling=BANANA_CURRENT_COORDINATE_SCALING_NONE,
 ):
     return _resolve_single_stage_banana_current_state_impl(
         biot_savart,
         coil_partitions,
         mode=mode,
+        coordinate_scaling=coordinate_scaling,
     )
 
 
@@ -1413,6 +1414,24 @@ def parse_args():
             "historical single shared banana-current DOF. 'independent' creates one "
             "current DOF per loaded banana coil while preserving the loaded Stage 2 "
             "current state at the handoff."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-banana-current-coordinate-scaling",
+        choices=[
+            BANANA_CURRENT_COORDINATE_SCALING_NONE,
+            BANANA_CURRENT_COORDINATE_SCALING_SEED_RELATIVE,
+        ],
+        default=os.environ.get(
+            "SINGLE_STAGE_BANANA_CURRENT_COORDINATE_SCALING",
+            BANANA_CURRENT_COORDINATE_SCALING_NONE,
+        ),
+        help=(
+            "Optimizer coordinate scaling for independent banana-current controls. "
+            "'none' keeps optimizer coordinates in amps. 'seed-relative' wraps each "
+            "independent current as ScaledCurrent(Current(I_seed/|I_seed|), |I_seed|), "
+            "so L-BFGS-B sees order-one current coordinates while physical currents "
+            "and artifacts remain in amps."
         ),
     )
     parser.add_argument(
@@ -2083,6 +2102,11 @@ def validate_single_stage_current_args(args):
         "single_stage_banana_current_mode",
         BANANA_CURRENT_MODE_SHARED,
     )
+    banana_current_coordinate_scaling = getattr(
+        args,
+        "single_stage_banana_current_coordinate_scaling",
+        BANANA_CURRENT_COORDINATE_SCALING_NONE,
+    )
     constraint_method = getattr(args, "constraint_method", "penalty")
     allow_offspec_engineering_constraints = bool(
         getattr(args, "allow_offspec_engineering_constraints", False)
@@ -2093,6 +2117,23 @@ def validate_single_stage_current_args(args):
     }:
         raise ValueError(
             "--single-stage-banana-current-mode must be one of {shared, independent}"
+        )
+    if banana_current_coordinate_scaling not in {
+        BANANA_CURRENT_COORDINATE_SCALING_NONE,
+        BANANA_CURRENT_COORDINATE_SCALING_SEED_RELATIVE,
+    }:
+        raise ValueError(
+            "--single-stage-banana-current-coordinate-scaling must be one of "
+            "{none, seed-relative}"
+        )
+    if (
+        banana_current_coordinate_scaling
+        != BANANA_CURRENT_COORDINATE_SCALING_NONE
+        and banana_current_mode != BANANA_CURRENT_MODE_INDEPENDENT
+    ):
+        raise ValueError(
+            "--single-stage-banana-current-coordinate-scaling=seed-relative "
+            "requires --single-stage-banana-current-mode=independent"
         )
     if banana_current_mode == BANANA_CURRENT_MODE_INDEPENDENT and constraint_method == "alm":
         raise ValueError(
@@ -2140,6 +2181,7 @@ class RunIdentityConfig:
     banana_surf_radius: float
     banana_current_max_A: float
     single_stage_banana_current_mode: str
+    single_stage_banana_current_coordinate_scaling: str
     num_banana_current_controls: int
     nphi: int
     ntheta: int
@@ -2213,6 +2255,7 @@ class PreservedTimeoutReplayConfig:
     effective_seed_regime: str | None = None
     single_stage_goal_mode: str | None = None
     single_stage_banana_current_mode: str | None = None
+    single_stage_banana_current_coordinate_scaling: str | None = None
     num_banana_current_controls: int | None = None
     single_stage_goal_mode_impl: str | None = None
     boozer_surface_target_volumes: tuple[float, ...] | None = None
@@ -2501,6 +2544,7 @@ PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
     effective_seed_regime=None,
     single_stage_goal_mode=None,
     single_stage_banana_current_mode=None,
+    single_stage_banana_current_coordinate_scaling=None,
     num_banana_current_controls=None,
     single_stage_goal_mode_impl=None,
     boozer_surface_target_volumes=None,
@@ -2549,6 +2593,10 @@ def make_run_identity_config(
     effective_inner_surface_ratio: float | None = None,
     num_banana_current_controls: int = 1,
 ):
+    if num_banana_current_controls is None:
+        raise ValueError(
+            "num_banana_current_controls must be resolved before run identity construction."
+        )
     resolved_contract = (
         resolve_surface_mode_contract(args, warn_on_legacy_mapping=False)
         if surface_mode_contract is None
@@ -2607,6 +2655,11 @@ def make_run_identity_config(
             args,
             "single_stage_banana_current_mode",
             BANANA_CURRENT_MODE_SHARED,
+        ),
+        single_stage_banana_current_coordinate_scaling=getattr(
+            args,
+            "single_stage_banana_current_coordinate_scaling",
+            BANANA_CURRENT_COORDINATE_SCALING_NONE,
         ),
         num_banana_current_controls=int(num_banana_current_controls),
         nphi=nphi,
@@ -2669,7 +2722,15 @@ def make_run_identity_config(
 
 
 def build_run_identity_config(config):
-    return "|".join(str(value) for value in astuple(config))
+    values = []
+    for field, value in zip(fields(config), astuple(config)):
+        if (
+            field.name == "single_stage_banana_current_coordinate_scaling"
+            and value == BANANA_CURRENT_COORDINATE_SCALING_NONE
+        ):
+            continue
+        values.append(value)
+    return "|".join(str(value) for value in values)
 
 
 def validate_boozer_stage_refinement_args(
@@ -4075,7 +4136,7 @@ def temporary_run_dict_value(run_dict, key, value):
 
 
 SINGLE_STAGE_BANANA_CURRENT_DIAGNOSTICS_SCHEMA_VERSION = (
-    "single_stage_banana_current_diagnostics_v2"
+    "single_stage_banana_current_diagnostics_v3"
 )
 BANANA_CURRENT_DIAGNOSTICS_FILENAME = "banana_current_diagnostics.json"
 BANANA_CURRENT_DIAGNOSTIC_REJECT_REPORT_LIMIT = 20
@@ -4527,6 +4588,39 @@ def _safe_gradient_ratio(numerator_l2, denominator_l2):
     return float(numerator_l2 / denominator_l2)
 
 
+def _physical_current_values_from_optimizer_coordinates(
+    optimizer_values,
+    scale_factors_A,
+):
+    return np.asarray(optimizer_values, dtype=float) * np.asarray(
+        scale_factors_A,
+        dtype=float,
+    )
+
+
+def _physical_current_bounds_from_optimizer_bounds(
+    optimizer_lower_bounds,
+    optimizer_upper_bounds,
+    scale_factors_A,
+):
+    lower = np.asarray(optimizer_lower_bounds, dtype=float)
+    upper = np.asarray(optimizer_upper_bounds, dtype=float)
+    scale = np.asarray(scale_factors_A, dtype=float)
+    lower_A = lower * scale
+    upper_A = upper * scale
+    return np.minimum(lower_A, upper_A), np.maximum(lower_A, upper_A)
+
+
+def _physical_current_gradients_from_optimizer_gradients(
+    optimizer_gradients,
+    scale_factors_A,
+):
+    return np.asarray(optimizer_gradients, dtype=float) / np.asarray(
+        scale_factors_A,
+        dtype=float,
+    )
+
+
 def _empty_gradient_report_fields(*, prefix=""):
     return {
         _gradient_report_key(prefix, "coordinate_gradients"): None,
@@ -4538,18 +4632,45 @@ def _empty_gradient_report_fields(*, prefix=""):
     }
 
 
+def _empty_optimizer_coordinate_gradient_report_fields(*, prefix=""):
+    return {
+        _gradient_report_key(prefix, "optimizer_coordinate_gradients"): None,
+        _gradient_report_key(prefix, "optimizer_coordinate_gradient_l2"): None,
+        _gradient_report_key(
+            prefix,
+            "optimizer_coordinate_to_noncurrent_gradient_ratio",
+        ): None,
+        _gradient_report_key(
+            prefix,
+            "optimizer_coordinate_to_full_gradient_ratio",
+        ): None,
+    }
+
+
 def _gradient_report_fields(
     gradient,
     coordinate_indices,
     noncurrent_mask,
     *,
     prefix="",
+    coordinate_scale_factors_A=None,
 ):
-    coordinate_gradient = gradient[coordinate_indices]
+    gradient = np.asarray(gradient, dtype=float)
+    optimizer_coordinate_gradient = gradient[coordinate_indices]
+    coordinate_gradient = (
+        optimizer_coordinate_gradient
+        if coordinate_scale_factors_A is None
+        else _physical_current_gradients_from_optimizer_gradients(
+            optimizer_coordinate_gradient,
+            coordinate_scale_factors_A,
+        )
+    )
     noncurrent_gradient = gradient[noncurrent_mask]
+    physical_report_gradient = gradient.copy()
+    physical_report_gradient[coordinate_indices] = coordinate_gradient
     coordinate_gradient_l2 = float(np.linalg.norm(coordinate_gradient))
     noncurrent_gradient_l2 = float(np.linalg.norm(noncurrent_gradient))
-    full_gradient_l2 = float(np.linalg.norm(gradient))
+    full_gradient_l2 = float(np.linalg.norm(physical_report_gradient))
     return {
         _gradient_report_key(prefix, "coordinate_gradients"): coordinate_gradient.tolist(),
         _gradient_report_key(prefix, "coordinate_gradient_l2"): coordinate_gradient_l2,
@@ -4565,6 +4686,44 @@ def _gradient_report_fields(
         _gradient_report_key(
             prefix,
             "coordinate_to_full_gradient_ratio",
+        ): _safe_gradient_ratio(
+            coordinate_gradient_l2,
+            full_gradient_l2,
+        ),
+    }
+
+
+def _optimizer_coordinate_gradient_report_fields(
+    gradient,
+    coordinate_indices,
+    noncurrent_mask,
+    *,
+    prefix="",
+):
+    coordinate_gradient = gradient[coordinate_indices]
+    noncurrent_gradient = gradient[noncurrent_mask]
+    coordinate_gradient_l2 = float(np.linalg.norm(coordinate_gradient))
+    noncurrent_gradient_l2 = float(np.linalg.norm(noncurrent_gradient))
+    full_gradient_l2 = float(np.linalg.norm(gradient))
+    return {
+        _gradient_report_key(
+            prefix,
+            "optimizer_coordinate_gradients",
+        ): coordinate_gradient.tolist(),
+        _gradient_report_key(
+            prefix,
+            "optimizer_coordinate_gradient_l2",
+        ): coordinate_gradient_l2,
+        _gradient_report_key(
+            prefix,
+            "optimizer_coordinate_to_noncurrent_gradient_ratio",
+        ): _safe_gradient_ratio(
+            coordinate_gradient_l2,
+            noncurrent_gradient_l2,
+        ),
+        _gradient_report_key(
+            prefix,
+            "optimizer_coordinate_to_full_gradient_ratio",
         ): _safe_gradient_ratio(
             coordinate_gradient_l2,
             full_gradient_l2,
@@ -4629,9 +4788,24 @@ def build_banana_current_coordinate_report(
         active_optimizer_bounds=active_optimizer_bounds,
     )
     coordinate_indices = np.asarray(coordinate_spec.indices, dtype=int)
-    coordinate_values_A = np.asarray(x, dtype=float)[coordinate_indices]
-    coordinate_lower_bounds_A = lower_bounds[coordinate_indices]
-    coordinate_upper_bounds_A = upper_bounds[coordinate_indices]
+    coordinate_scale_factors_A = np.asarray(
+        coordinate_spec.scale_factors_A,
+        dtype=float,
+    )
+    optimizer_coordinate_values = np.asarray(x, dtype=float)[coordinate_indices]
+    optimizer_coordinate_lower_bounds = lower_bounds[coordinate_indices]
+    optimizer_coordinate_upper_bounds = upper_bounds[coordinate_indices]
+    coordinate_values_A = _physical_current_values_from_optimizer_coordinates(
+        optimizer_coordinate_values,
+        coordinate_scale_factors_A,
+    )
+    coordinate_lower_bounds_A, coordinate_upper_bounds_A = (
+        _physical_current_bounds_from_optimizer_bounds(
+            optimizer_coordinate_lower_bounds,
+            optimizer_coordinate_upper_bounds,
+            coordinate_scale_factors_A,
+        )
+    )
     report = {
         "phase": str(phase),
         "accepted_iteration": (
@@ -4647,6 +4821,10 @@ def build_banana_current_coordinate_report(
         "coordinate_values_A": coordinate_values_A.tolist(),
         "coordinate_lower_bounds_A": coordinate_lower_bounds_A.tolist(),
         "coordinate_upper_bounds_A": coordinate_upper_bounds_A.tolist(),
+        "optimizer_coordinate_values": optimizer_coordinate_values.tolist(),
+        "optimizer_coordinate_lower_bounds": optimizer_coordinate_lower_bounds.tolist(),
+        "optimizer_coordinate_upper_bounds": optimizer_coordinate_upper_bounds.tolist(),
+        "current_coordinate_scale_factors_A": coordinate_scale_factors_A.tolist(),
         "bound_activity": _banana_current_bound_activity(
             coordinate_values_A,
             coordinate_lower_bounds_A,
@@ -4656,6 +4834,10 @@ def build_banana_current_coordinate_report(
     if grad is None:
         report.update(_empty_gradient_report_fields())
         report.update(_empty_gradient_report_fields(prefix="projected"))
+        report.update(_empty_optimizer_coordinate_gradient_report_fields())
+        report.update(
+            _empty_optimizer_coordinate_gradient_report_fields(prefix="projected")
+        )
         return report
 
     gradient = np.asarray(grad, dtype=float)
@@ -4663,6 +4845,14 @@ def build_banana_current_coordinate_report(
     noncurrent_mask[coordinate_indices] = False
     report.update(
         _gradient_report_fields(
+            gradient,
+            coordinate_indices,
+            noncurrent_mask,
+            coordinate_scale_factors_A=coordinate_scale_factors_A,
+        )
+    )
+    report.update(
+        _optimizer_coordinate_gradient_report_fields(
             gradient,
             coordinate_indices,
             noncurrent_mask,
@@ -4676,6 +4866,15 @@ def build_banana_current_coordinate_report(
     )
     report.update(
         _gradient_report_fields(
+            projected_gradient,
+            coordinate_indices,
+            noncurrent_mask,
+            prefix="projected",
+            coordinate_scale_factors_A=coordinate_scale_factors_A,
+        )
+    )
+    report.update(
+        _optimizer_coordinate_gradient_report_fields(
             projected_gradient,
             coordinate_indices,
             noncurrent_mask,
@@ -5122,9 +5321,13 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
     surface_data_value = globals().get("surface_data")
     banana_current_state = globals().get("banana_current_state")
     replay_banana_current_mode = replay_config.single_stage_banana_current_mode
+    replay_banana_current_coordinate_scaling = (
+        replay_config.single_stage_banana_current_coordinate_scaling
+    )
     replay_num_banana_current_controls = replay_config.num_banana_current_controls
     if banana_current_state is not None:
         replay_banana_current_mode = banana_current_state.mode
+        replay_banana_current_coordinate_scaling = banana_current_state.coordinate_scaling
         replay_num_banana_current_controls = (
             banana_current_state.num_control_currents()
         )
@@ -5167,6 +5370,9 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
         ),
         single_stage_goal_mode=globals().get("SINGLE_STAGE_GOAL_MODE", replay_config.single_stage_goal_mode),
         single_stage_banana_current_mode=replay_banana_current_mode,
+        single_stage_banana_current_coordinate_scaling=(
+            replay_banana_current_coordinate_scaling
+        ),
         num_banana_current_controls=replay_num_banana_current_controls,
         single_stage_goal_mode_impl=current_frontier_goal_mode_impl(),
         boozer_surface_target_volumes=(
@@ -6790,6 +6996,9 @@ if __name__ == "__main__":
         target_iota=iota_target,
         single_stage_goal_mode=args.single_stage_goal_mode,
         single_stage_banana_current_mode=args.single_stage_banana_current_mode,
+        single_stage_banana_current_coordinate_scaling=(
+            args.single_stage_banana_current_coordinate_scaling
+        ),
         num_banana_current_controls=None,
         single_stage_goal_mode_impl=current_frontier_goal_mode_impl(),
         major_radius=R0,
@@ -6822,9 +7031,13 @@ if __name__ == "__main__":
         bs,
         coil_partitions,
         mode=args.single_stage_banana_current_mode,
+        coordinate_scaling=args.single_stage_banana_current_coordinate_scaling,
     )
     PRESERVED_TIMEOUT_REPLAY_CONFIG = replace(
         PRESERVED_TIMEOUT_REPLAY_CONFIG,
+        single_stage_banana_current_coordinate_scaling=(
+            banana_current_state.coordinate_scaling
+        ),
         num_banana_current_controls=banana_current_state.num_control_currents(),
     )
 
