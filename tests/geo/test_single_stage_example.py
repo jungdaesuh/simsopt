@@ -405,18 +405,15 @@ class FakeDifferentiableBoozerSurface(Optimizable):
         biotsavart,
         current_I,
         weight_inv_modB,
-        label=None,
-        targetlabel=0.1,
-        constraint_weight=1.3,
         implicit_scale=(0.0, 0.0),
     ):
         super().__init__(depends_on=[biotsavart])
         nsurfdofs = surface.get_dofs().size
         self.surface = surface
         self.biotsavart = biotsavart
-        self.label = FakeDifferentiableLabel() if label is None else label
-        self.targetlabel = float(targetlabel)
-        self.constraint_weight = float(constraint_weight)
+        self.label = FakeDifferentiableLabel()
+        self.targetlabel = 0.1
+        self.constraint_weight = 1.3
         self.need_to_run_code = False
         self.implicit_scale = np.asarray(implicit_scale, dtype=float)
         self.res = {
@@ -588,28 +585,12 @@ class SingleStageExampleTests(unittest.TestCase):
         return tracked_residual, tracked_residual_dB
 
     @contextmanager
-    def patched_boozer_residual_evaluators(
-        self,
-        modules,
-        residual,
-        residual_dB,
-        *,
-        forward_backward_module=None,
-        forward_backward_result=None,
-    ):
+    def patched_boozer_residual_evaluators(self, modules, residual, residual_dB):
         with ExitStack() as stack:
             for module in modules:
                 stack.enter_context(patch.object(module, "SurfaceXYZTensorFourier", FakeResolvedSurface))
                 stack.enter_context(patch.object(module, "boozer_surface_residual", side_effect=residual))
                 stack.enter_context(patch.object(module, "boozer_surface_residual_dB", side_effect=residual_dB))
-            if forward_backward_module is not None:
-                stack.enter_context(
-                    patch.object(
-                        forward_backward_module,
-                        "forward_backward",
-                        return_value=forward_backward_result,
-                    )
-                )
             yield
 
     def build_differentiable_boozer_case(self, *, current_I, weight_inv_modB, implicit_scale=(0.0, 0.0)):
@@ -634,7 +615,6 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def assert_directional_derivative_matches_fd(
         self,
-        residual_module,
         residual_cls,
         boozer_surface,
         biotsavart,
@@ -661,7 +641,6 @@ class SingleStageExampleTests(unittest.TestCase):
 
         finite_difference = (plus - minus) / (2.0 * eps)
         self.assertAlmostEqual(analytical, finite_difference, places=8)
-        self.assertIs(residual_module.RefinedBoozerResidual, residual_cls)
 
     def run_exact_boozer_objective(self, module, *, current_I):
         input_surface = FakeResolvedSurface(
@@ -702,13 +681,12 @@ class SingleStageExampleTests(unittest.TestCase):
             return np.ones(num_points), np.ones((num_points, 3))
 
         residual_module = self.residual_module(module)
+        adjoint_solution = np.zeros(nsurfdofs + 2)
         with self.patched_boozer_residual_evaluators(
             (residual_module,),
             fake_residual,
             fake_residual_dB,
-            forward_backward_module=residual_module,
-            forward_backward_result=np.zeros(nsurfdofs + 2),
-        ):
+        ), patch.object(residual_module, "forward_backward", return_value=adjoint_solution):
             objective = module.BoozerResidualExact(fake_boozer_surface, fake_bs)
             value = objective.J()
             gradient = objective.dJ(partials=True)
@@ -1048,7 +1026,6 @@ class SingleStageExampleTests(unittest.TestCase):
                     self.differentiable_residual_dB,
                 ):
                     self.assert_directional_derivative_matches_fd(
-                        residual_module,
                         residual_module.RefinedBoozerResidual,
                         boozer_surface,
                         biotsavart,

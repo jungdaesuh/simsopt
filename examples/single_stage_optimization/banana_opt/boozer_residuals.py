@@ -47,7 +47,10 @@ class RefinedBoozerResidual(Optimizable):
 
     ``grid_multiplier=1`` preserves the same quadrature grid as
     :class:`simsopt.geo.surfaceobjectives.BoozerResidual`. Larger multipliers
-    evaluate the same solved surface on a uniformly refined field-period grid.
+    evaluate the same solved surface on a fresh uniform ``linspace`` grid over
+    one field period, not by subdividing the input quadrature. The label
+    constraint path follows ``BoozerResidual`` and expects a numeric
+    ``constraint_weight``.
     """
 
     def __init__(
