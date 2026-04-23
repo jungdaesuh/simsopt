@@ -5749,7 +5749,7 @@ class TestExactSolveCPUJAXParity:
         adjoint_state = exact_pair.booz_jax_exact.get_adjoint_runtime_state()
         assert adjoint_state.linear_solve_backend == "operator"
         assert adjoint_state.linear_solve_factors is None
-        assert adjoint_state.dense_linear_solve_factors_available is True
+        assert adjoint_state.dense_linear_solve_factors_available is False
 
         iotas_cpu_grad = np.array(Iotas(exact_pair.booz_cpu_exact).dJ())
         iotas_jax_grad = np.array(IotasJAX(exact_pair.booz_jax_exact).dJ())

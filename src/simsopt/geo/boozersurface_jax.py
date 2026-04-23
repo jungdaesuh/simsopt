@@ -39,6 +39,7 @@ from scipy.optimize import root
 
 from ..backend import (
     get_backend_config,
+    is_parity_mode,
     raise_if_strict_jax_fallback,
     warn_if_jax_fallback,
 )
@@ -1385,6 +1386,7 @@ _DEFAULT_OPTIONS_EXACT = {
     "newton_maxiter": 40,
     "weight_inv_modB": False,
     "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES,
+    "exact_adjoint_linear_solve_backend": "operator",
 }
 
 # Options only meaningful for the target/private optimizer backend.
@@ -1407,6 +1409,7 @@ _ONDEVICE_OPTIMIZER_METHODS = frozenset(
 _LS_DYNAMIC_OPTION_KEYS = frozenset(
     {"least_squares_algorithm", "materialize_dense_linearization"}
 )
+_EXACT_ADJOINT_LINEAR_SOLVE_BACKENDS = frozenset({"operator", "dense_jax"})
 
 _ALLOWED_OPTIONS_LS = (
     frozenset(_DEFAULT_OPTIONS_LS)
@@ -1466,6 +1469,21 @@ def _normalize_solver_options(raw_options, boozer_type):
     ):
         allowed = ", ".join(sorted(VALID_LEAST_SQUARES_ALGORITHMS))
         raise ValueError(f"least_squares_algorithm must be one of: {allowed}.")
+    exact_adjoint_backend = raw_options.get("exact_adjoint_linear_solve_backend")
+    if (
+        exact_adjoint_backend is not None
+        and exact_adjoint_backend not in _EXACT_ADJOINT_LINEAR_SOLVE_BACKENDS
+    ):
+        allowed = ", ".join(sorted(_EXACT_ADJOINT_LINEAR_SOLVE_BACKENDS))
+        raise ValueError(
+            "exact_adjoint_linear_solve_backend must be one of: "
+            f"{allowed}."
+        )
+    if is_parity_mode() and float(raw_options.get("newton_stab", 0.0)) != 0.0:
+        raise ValueError(
+            "BoozerSurfaceJAX parity mode requires newton_stab=0.0 so "
+            "linear residuals are checked against the undamped operator."
+        )
 
     if boozer_type == "ls":
         effective_backend = raw_options.get(
@@ -1679,6 +1697,9 @@ class BoozerSurfaceJAX(Optimizable):
             ),
         )
 
+    def _exact_adjoint_linear_solve_backend(self):
+        return self.options.get("exact_adjoint_linear_solve_backend", "operator")
+
     def _adjoint_hessian_stabilization_schedule(self):
         """Return escalating ridge values for nearly singular LS adjoint Hessians.
 
@@ -1734,6 +1755,7 @@ class BoozerSurfaceJAX(Optimizable):
             solve_transpose=None,
             solve_forward_with_status=None,
             solve_transpose_with_status=None,
+            linear_solve_backend="operator",
         ):
             def _with_host_status(solver):
                 def wrapped(rhs):
@@ -1776,6 +1798,7 @@ class BoozerSurfaceJAX(Optimizable):
                 solve_transpose,
                 solve_forward_with_status,
                 solve_transpose_with_status,
+                linear_solve_backend,
             )
 
         # On the supported JAX/CUDA LS lane, runtime adjoints stay
@@ -1875,42 +1898,54 @@ class BoozerSurfaceJAX(Optimizable):
         if linearization_kind == "exact_jacobian":
             residual_fn = self._make_exact_residual(self._compute_stellsym_mask_indices())
             operator = _optimizer_jax._jacobian_linear_operator(residual_fn, x)
+            linear_solve_backend = self._exact_adjoint_linear_solve_backend()
+
+            def solve_jacobian_system(rhs, *, transpose):
+                if linear_solve_backend == "dense_jax":
+                    solution, _ = _optimizer_jax._solve_dense_jacobian_system_with_status(
+                        residual_fn,
+                        x,
+                        rhs,
+                        transpose=transpose,
+                        tol=tol_host,
+                    )
+                    return solution
+                return _optimizer_jax._solve_jacobian_system(
+                    residual_fn,
+                    x,
+                    rhs,
+                    transpose=transpose,
+                    tol=tol_host,
+                )
+
+            def solve_jacobian_system_with_status(rhs, *, transpose):
+                if linear_solve_backend == "dense_jax":
+                    return _optimizer_jax._solve_dense_jacobian_system_with_status(
+                        residual_fn,
+                        x,
+                        rhs,
+                        transpose=transpose,
+                        tol=tol_host,
+                    )
+                return _optimizer_jax._solve_jacobian_system_with_status(
+                    residual_fn,
+                    x,
+                    rhs,
+                    transpose=transpose,
+                    tol=tol_host,
+                )
 
             def solve_forward(rhs):
-                return _optimizer_jax._solve_jacobian_system(
-                    residual_fn,
-                    x,
-                    rhs,
-                    transpose=False,
-                    tol=tol_host,
-                )
+                return solve_jacobian_system(rhs, transpose=False)
 
             def solve_transpose(rhs):
-                return _optimizer_jax._solve_jacobian_system(
-                    residual_fn,
-                    x,
-                    rhs,
-                    transpose=True,
-                    tol=tol_host,
-                )
+                return solve_jacobian_system(rhs, transpose=True)
 
             def solve_forward_with_status(rhs):
-                return _optimizer_jax._solve_jacobian_system_with_status(
-                    residual_fn,
-                    x,
-                    rhs,
-                    transpose=False,
-                    tol=tol_host,
-                )
+                return solve_jacobian_system_with_status(rhs, transpose=False)
 
             def solve_transpose_with_status(rhs):
-                return _optimizer_jax._solve_jacobian_system_with_status(
-                    residual_fn,
-                    x,
-                    rhs,
-                    transpose=True,
-                    tol=tol_host,
-                )
+                return solve_jacobian_system_with_status(rhs, transpose=True)
 
             return pack_callbacks(
                 operator["matvec"],
@@ -1919,6 +1954,7 @@ class BoozerSurfaceJAX(Optimizable):
                 solve_transpose,
                 solve_forward_with_status=solve_forward_with_status,
                 solve_transpose_with_status=solve_transpose_with_status,
+                linear_solve_backend=linear_solve_backend,
             )
 
         raise RuntimeError(
@@ -1953,6 +1989,7 @@ class BoozerSurfaceJAX(Optimizable):
             solve_transpose,
             solve_forward_with_status,
             solve_transpose_with_status,
+            linear_solve_backend,
         ) = self._build_runtime_linear_solve_callbacks(solved_state)
 
         return _BoozerAdjointRuntimeState(
@@ -1967,8 +2004,8 @@ class BoozerSurfaceJAX(Optimizable):
             solve_forward_with_status=solve_forward_with_status,
             solve_transpose_with_status=solve_transpose_with_status,
             stream_group_vjps=stream_group_vjps,
-            linear_solve_backend="operator",
-            dense_linear_solve_factors_available=self.res.get("PLU") is not None,
+            linear_solve_backend=linear_solve_backend,
+            dense_linear_solve_factors_available=False,
             linear_solve_factors=None,
         )
 
@@ -2695,7 +2732,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "primal_success": primal_success,
                 "adjoint_linear_solve_available": adjoint_linear_solve_available,
                 "linearization_kind": "exact_jacobian",
-                "linear_solve_backend": "operator",
+                "linear_solve_backend": self._exact_adjoint_linear_solve_backend(),
                 "dense_linear_solve_factors_available": False,
                 "type": "exact",
                 "weight_inv_modB": weight_inv_modB,
@@ -3584,7 +3621,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "primal_success": False,
                 "adjoint_linear_solve_available": False,
                 "linearization_kind": "exact_jacobian",
-                "linear_solve_backend": "operator",
+                "linear_solve_backend": self._exact_adjoint_linear_solve_backend(),
                 "dense_linear_solve_factors_available": False,
                 **exact_reporting,
             }
@@ -3671,7 +3708,7 @@ class BoozerSurfaceJAX(Optimizable):
             "vjp": vjp_callback,
             "vjp_groups": vjp_groups_callback,
             "linearization_kind": "exact_jacobian",
-            "linear_solve_backend": "operator",
+            "linear_solve_backend": self._exact_adjoint_linear_solve_backend(),
             "dense_linear_solve_factors_available": plu is not None,
             "solve_generation": solve_generation,
             "weight_inv_modB": self.options["weight_inv_modB"],

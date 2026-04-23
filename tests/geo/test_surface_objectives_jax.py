@@ -136,10 +136,9 @@ def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
         "optimize_G": False,
         "predictor_kind": "none",
         "linearization_kind": "hessian",
+        "linear_solve_backend": "operator",
         "linear_solve_tol": 1.0e-10,
         "linear_solve_stab": 0.0,
-        "failure_value": jnp.asarray(1.0, dtype=jnp.float64),
-        "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
     }
 
     bundle = surfaceobjectives_jax_module._build_traceable_objective_compiled_bundle_from_state(
@@ -159,11 +158,13 @@ def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
     )
 
 
-def test_traceable_value_and_grad_uses_direct_fallback_on_adjoint_solve_failure(
+@pytest.mark.parametrize("linearization_kind", ["exact_jacobian", "hessian"])
+def test_traceable_value_and_grad_surfaces_adjoint_solve_failure_as_nan_gradient(
     monkeypatch,
+    linearization_kind,
 ):
     baseline_coil_dofs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
-    fallback_gradient = jnp.asarray([0.25, -0.5], dtype=jnp.float64)
+    failed_gradient = jnp.asarray([0.25, -0.5], dtype=jnp.float64)
     state = {
         "objective_kwargs": {},
         "baseline_x": jnp.asarray([1.0, -1.0], dtype=jnp.float64),
@@ -173,11 +174,10 @@ def test_traceable_value_and_grad_uses_direct_fallback_on_adjoint_solve_failure(
         "coil_set_spec_from_dofs": lambda coil_dofs: coil_dofs,
         "optimize_G": False,
         "predictor_kind": "none",
-        "linearization_kind": "exact_jacobian",
+        "linearization_kind": linearization_kind,
+        "linear_solve_backend": "operator",
         "linear_solve_tol": 1.0e-10,
         "linear_solve_stab": 0.0,
-        "failure_value": jnp.asarray(20.0, dtype=jnp.float64),
-        "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
     }
 
     def fake_forward_result(_booz_jax, _coil_set_spec_from_dofs, **_kwargs):
@@ -202,7 +202,7 @@ def test_traceable_value_and_grad_uses_direct_fallback_on_adjoint_solve_failure(
         surfaceobjectives_jax_module,
         "_traceable_total_gradient_with_status",
         lambda *_args, **_kwargs: (
-            fallback_gradient,
+            failed_gradient,
             jnp.asarray(False, dtype=bool),
         ),
     )
@@ -214,8 +214,8 @@ def test_traceable_value_and_grad_uses_direct_fallback_on_adjoint_solve_failure(
 
     value, grad = bundle["compiled_value_and_grad_for"](baseline_coil_dofs)
 
-    assert float(np.asarray(value)) == pytest.approx(10.0)
-    np.testing.assert_allclose(np.asarray(grad), np.asarray(fallback_gradient))
+    assert np.isposinf(float(np.asarray(value)))
+    assert not np.any(np.isfinite(np.asarray(grad)))
 
 
 def test_checked_boozer_linear_solve_uses_explicit_host_bool_boundary(monkeypatch):
@@ -348,11 +348,7 @@ def test_traceable_solve_exact_linearization_uses_operator_with_factors_present(
         rhs,
         coil_set_spec,
         {},
-        linear_solve_factors=(
-            jnp.eye(2, dtype=jnp.float64),
-            jnp.eye(2, dtype=jnp.float64),
-            jnp.eye(2, dtype=jnp.float64),
-        ),
+        linear_solve_backend="operator",
         linear_solve_tol=1.0e-8,
         transpose=True,
     )
@@ -360,6 +356,61 @@ def test_traceable_solve_exact_linearization_uses_operator_with_factors_present(
     assert calls == {"transpose": True, "tol": 1.0e-8}
     assert bool(np.asarray(success))
     np.testing.assert_allclose(np.asarray(solved), np.asarray(rhs + 1.0))
+
+
+def test_traceable_exact_dense_jax_and_operator_share_residual_contract(monkeypatch):
+    solved_x = jnp.asarray([0.2, -0.3], dtype=jnp.float64)
+    rhs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+    matrix = jnp.asarray([[2.0, 0.25], [-0.1, 1.5]], dtype=jnp.float64)
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_traceable_exact_residual_kwargs",
+        lambda _objective_kwargs: {},
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_boozer_exact_residual",
+        lambda x_inner, coil_set_spec, **_kwargs: matrix @ x_inner + coil_set_spec,
+    )
+
+    operator_solved, operator_success = (
+        surfaceobjectives_jax_module._traceable_solve_exact_linearization(
+            solved_x,
+            rhs,
+            jnp.zeros_like(rhs),
+            {},
+            linear_solve_backend="operator",
+            linear_solve_tol=1.0e-10,
+            transpose=True,
+        )
+    )
+    dense_solved, dense_success = (
+        surfaceobjectives_jax_module._traceable_solve_exact_linearization(
+            solved_x,
+            rhs,
+            jnp.zeros_like(rhs),
+            {},
+            linear_solve_backend="dense_jax",
+            linear_solve_tol=1.0e-10,
+            transpose=True,
+        )
+    )
+
+    assert bool(np.asarray(operator_success)) is True
+    assert bool(np.asarray(dense_success)) is True
+    np.testing.assert_allclose(
+        np.asarray(matrix.T @ operator_solved),
+        np.asarray(rhs),
+        rtol=1e-9,
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(
+        np.asarray(matrix.T @ dense_solved),
+        np.asarray(rhs),
+        rtol=1e-9,
+        atol=1e-9,
+    )
 
 
 def test_traceable_exact_warmstart_prediction_uses_operator_solve(monkeypatch):
@@ -416,6 +467,7 @@ def test_traceable_exact_warmstart_prediction_uses_operator_solve(monkeypatch):
             jnp.eye(2, dtype=jnp.float64),
         ),
         linearization_kind="exact_jacobian",
+        linear_solve_backend="operator",
         linear_solve_tol=1.0e-7,
         linear_solve_stab=0.0,
         predictor_kind="exact",
@@ -470,10 +522,9 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
         ),
         "baseline_coil_dofs": jnp.arange(4, dtype=jnp.float64),
         "linearization_kind": "hessian",
+        "linear_solve_backend": "operator",
         "linear_solve_tol": 1.0e-10,
         "linear_solve_stab": 0.0,
-        "failure_value": jnp.asarray(2.0, dtype=jnp.float64),
-        "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
     }
 
     surfaceobjectives_jax_module._traceable_runtime_cache_key(
@@ -488,11 +539,9 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
     assert not any(tree is state["baseline_value"] for tree in seen_trees)
     assert not any(tree is state["baseline_linear_solve_factors"] for tree in seen_trees)
     assert not any(tree is state["baseline_coil_dofs"] for tree in seen_trees)
-    assert not any(tree is state["failure_value"] for tree in seen_trees)
-    assert not any(tree is state["failure_scale"] for tree in seen_trees)
 
 
-def test_traceable_forward_result_requires_adjoint_runtime_even_with_success_filter(
+def test_traceable_forward_result_keeps_primal_success_separate_from_adjoint_status(
     monkeypatch,
 ):
     objective_value = jnp.asarray(-123.0, dtype=jnp.float64)
@@ -531,8 +580,6 @@ def test_traceable_forward_result_requires_adjoint_runtime_even_with_success_fil
 
     coil_dofs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
     baseline_coil_dofs = jnp.asarray([0.0, 0.0], dtype=jnp.float64)
-    failure_value = jnp.asarray(10.0, dtype=jnp.float64)
-    failure_scale = jnp.asarray(4.0, dtype=jnp.float64)
     result = surfaceobjectives_jax_module._traceable_forward_result(
         booz,
         lambda dofs: {"coil_dofs": dofs},
@@ -541,23 +588,20 @@ def test_traceable_forward_result_requires_adjoint_runtime_even_with_success_fil
         baseline_value=jnp.asarray(3.0, dtype=jnp.float64),
         baseline_linear_solve_factors=None,
         linearization_kind="hessian",
+        linear_solve_backend="operator",
         linear_solve_tol=1.0e-10,
         linear_solve_stab=0.0,
         optimize_G=False,
         baseline_coil_dofs=baseline_coil_dofs,
-        failure_value=failure_value,
-        failure_scale=failure_scale,
         predictor_kind="ls",
         objective_kwargs={},
         success_filter=lambda _coil_dofs, _solved_x: jnp.asarray(True, dtype=bool),
     )
 
-    expected_penalty = 10.0 + 0.5 * 4.0 * 5.0
-
     assert bool(result["primal_success"]) is True
     assert bool(result["adjoint_linear_solve_available"]) is False
-    assert bool(result["success"]) is False
-    np.testing.assert_allclose(np.asarray(result["value"]), expected_penalty)
+    assert bool(result["success"]) is True
+    np.testing.assert_allclose(np.asarray(result["value"]), -123.0)
     np.testing.assert_allclose(np.asarray(objective_value), -123.0)
 
 
@@ -574,6 +618,7 @@ def test_traceable_runtime_cache_key_uses_structural_success_filter_signature():
         },
         "optimize_G": False,
         "predictor_kind": "ls",
+        "linear_solve_backend": "operator",
     }
 
     def success_filter_a(_coil_dofs, _solved_x):
@@ -629,6 +674,7 @@ def test_traceable_runtime_cache_key_does_not_hostify_jax_array_contract_leaves(
         },
         "optimize_G": False,
         "predictor_kind": "ls",
+        "linear_solve_backend": "operator",
     }
 
     key = surfaceobjectives_jax_module._traceable_runtime_cache_key(
@@ -638,7 +684,7 @@ def test_traceable_runtime_cache_key_does_not_hostify_jax_array_contract_leaves(
         success_filter=None,
     )
 
-    assert key[5][0] == "tree"
+    assert key[6][0] == "tree"
 
 
 def test_traceable_runtime_hostify_tree_explicitly_materializes_jax_array_leaves():
@@ -767,8 +813,7 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         "baseline_value": state["baseline_value"],
         "baseline_linear_solve_factors": state["baseline_linear_solve_factors"],
         "baseline_coil_dofs": state["baseline_coil_dofs"],
-        "failure_value": state["failure_value"],
-        "failure_scale": state["failure_scale"],
+        "linear_solve_backend": state["linear_solve_backend"],
         "coil_dof_extraction_spec": state["coil_dof_extraction_spec"],
     }
 
@@ -1183,10 +1228,9 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solver_genera
             ),
             "baseline_coil_dofs": jnp.arange(3, dtype=jnp.float64),
             "linearization_kind": "hessian",
+            "linear_solve_backend": "operator",
             "linear_solve_tol": 1.0e-10,
             "linear_solve_stab": 0.0,
-            "failure_value": jnp.asarray(2.0, dtype=jnp.float64),
-            "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
         }
 
     def build_bundle(_booz, state, *, success_filter=None):
@@ -1198,7 +1242,6 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solver_genera
             "compiled_forward_result_for": object(),
             "compiled_total_gradient_for": object(),
             "compiled_value_and_grad_for": object(),
-            "failure_gradient_for": object(),
         }
 
     monkeypatch.setattr(
@@ -1290,10 +1333,9 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
             ),
             "baseline_coil_dofs": jnp.arange(3, dtype=jnp.float64),
             "linearization_kind": "hessian",
+            "linear_solve_backend": "operator",
             "linear_solve_tol": 1.0e-10,
             "linear_solve_stab": 0.0,
-            "failure_value": jnp.asarray(2.0, dtype=jnp.float64),
-            "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
         }
 
     def build_bundle(_booz, state, *, success_filter=None):
@@ -1305,7 +1347,6 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
             "compiled_forward_result_for": object(),
             "compiled_total_gradient_for": object(),
             "compiled_value_and_grad_for": object(),
-            "failure_gradient_for": object(),
         }
 
     monkeypatch.setattr(
@@ -1406,10 +1447,9 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_solver_generation_cha
             ),
             "baseline_coil_dofs": jnp.arange(2, dtype=jnp.float64),
             "linearization_kind": "hessian",
+            "linear_solve_backend": "operator",
             "linear_solve_tol": 1.0e-10,
             "linear_solve_stab": 0.0,
-            "failure_value": jnp.asarray(2.0, dtype=jnp.float64),
-            "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
         }
 
     def build_bundle(_booz, state, *, success_filter=None):
@@ -1420,7 +1460,6 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_solver_generation_cha
             "compiled_forward_result_for": object(),
             "compiled_total_gradient_for": object(),
             "compiled_value_and_grad_for": object(),
-            "failure_gradient_for": object(),
         }
 
     monkeypatch.setattr(
@@ -1507,10 +1546,9 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
             ),
             "baseline_coil_dofs": jnp.arange(2, dtype=jnp.float64),
             "linearization_kind": "hessian",
+            "linear_solve_backend": "operator",
             "linear_solve_tol": 1.0e-10,
             "linear_solve_stab": 0.0,
-            "failure_value": jnp.asarray(2.0, dtype=jnp.float64),
-            "failure_scale": jnp.asarray(1.0, dtype=jnp.float64),
         }
 
     def build_bundle(_booz, state, *, success_filter=None):
@@ -1521,7 +1559,6 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
             "compiled_forward_result_for": object(),
             "compiled_total_gradient_for": object(),
             "compiled_value_and_grad_for": object(),
-            "failure_gradient_for": object(),
         }
 
     monkeypatch.setattr(
@@ -1582,6 +1619,7 @@ def test_make_traceable_objective_runtime_bundle_omits_host_wrappers_by_default(
         "compiled_bundle": {
             "compiled_value_and_grad_for": object(),
             "compiled_forward_result_for": object(),
+            "state": {"linear_solve_backend": "operator"},
         },
         "objective": object(),
         "batched_value_and_grad": object(),
@@ -1671,6 +1709,7 @@ def test_make_traceable_objective_runtime_bundle_materializes_host_wrappers_on_d
         "compiled_bundle": {
             "compiled_value_and_grad_for": object(),
             "compiled_forward_result_for": object(),
+            "state": {"linear_solve_backend": "operator"},
         },
         "objective": object(),
         "batched_value_and_grad": object(),
@@ -1782,6 +1821,7 @@ def test_make_traceable_objective_runtime_bundle_reuses_stable_public_boundaries
         "compiled_bundle": {
             "compiled_value_and_grad_for": object(),
             "compiled_forward_result_for": object(),
+            "state": {"linear_solve_backend": "operator"},
         },
         "objective": object(),
         "batched_value_and_grad": object(),
@@ -1808,7 +1848,7 @@ def test_make_traceable_objective_runtime_bundle_reuses_stable_public_boundaries
     )
 
     def build_boundary(name, boundary):
-        def _build(_):
+        def _build(*_args):
             build_counts[name] += 1
             return boundary
 
@@ -1858,6 +1898,7 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
         "compiled_bundle": {
             "compiled_value_and_grad_for": object(),
             "compiled_forward_result_for": object(),
+            "state": {"linear_solve_backend": "operator"},
         },
         "objective": object(),
         "batched_value_and_grad": object(),
@@ -1894,9 +1935,10 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
         "_make_traceable_forward_result_boundary",
-        lambda compiled_forward_result_for: (
+        lambda compiled_forward_result_for, linear_solve_backend: (
             "public_forward_result",
             compiled_forward_result_for,
+            linear_solve_backend,
         ),
     )
     monkeypatch.setattr(
@@ -1942,6 +1984,7 @@ def test_ensure_traceable_runtime_public_boundaries_defers_reporting_metrics_unt
     assert runtime_entry["public_forward_result"] == (
         "public_forward_result",
         runtime_entry["compiled_bundle"]["compiled_forward_result_for"],
+        "operator",
     )
 
     assert runtime_entry["public_reporting_metrics"](
@@ -1961,7 +2004,6 @@ def test_ensure_traceable_runtime_host_wrappers_defers_reporting_metrics_until_u
     runtime_entry = {
         "compiled_bundle": {
             "compiled_value_and_grad_for": object(),
-            "failure_gradient_for": lambda coil_dofs: jnp.zeros_like(coil_dofs),
             "state": {
                 "baseline_coil_dofs": np.asarray([0.0], dtype=np.float64),
                 "baseline_value": np.asarray(1.0, dtype=np.float64),
@@ -1975,6 +2017,7 @@ def test_ensure_traceable_runtime_host_wrappers_defers_reporting_metrics_until_u
                 "objective_kwargs": {"outer_objective_config": None},
                 "optimize_G": False,
                 "linearization_kind": "hessian",
+                "linear_solve_backend": "operator",
                 "linear_solve_tol": 1.0e-10,
                 "linear_solve_stab": 0.0,
             },
@@ -2064,9 +2107,9 @@ def test_ensure_traceable_runtime_host_wrappers_defers_reporting_metrics_until_u
     assert reporting_calls == [runtime_entry]
 
 
-def test_traceable_seeded_initial_value_keeps_failed_solve_gradient(monkeypatch):
+def test_traceable_seeded_initial_value_surfaces_failed_solve_gradient(monkeypatch):
     baseline_coil_dofs = np.asarray([0.5, -0.25], dtype=np.float64)
-    fallback_gradient = jnp.asarray([0.5, -0.75], dtype=jnp.float64)
+    failed_gradient = jnp.asarray([0.5, -0.75], dtype=jnp.float64)
     state = {
         "baseline_coil_dofs": baseline_coil_dofs,
         "baseline_value": np.asarray(1.25, dtype=np.float64),
@@ -2075,14 +2118,13 @@ def test_traceable_seeded_initial_value_keeps_failed_solve_gradient(monkeypatch)
     }
     seeded_compiled_bundle = {
         "compiled_total_gradient_for": lambda *_args: (
-            fallback_gradient,
+            failed_gradient,
             jnp.asarray(False, dtype=bool),
         ),
         "compiled_value_and_grad_for": lambda coil_dofs: (
             jnp.asarray(1.25, dtype=jnp.float64),
             jnp.zeros_like(coil_dofs),
         ),
-        "failure_gradient_for": lambda coil_dofs: jnp.zeros_like(coil_dofs),
     }
     runtime_entry = {
         "compiled_bundle": {"state": state},
@@ -2101,8 +2143,8 @@ def test_traceable_seeded_initial_value_keeps_failed_solve_gradient(monkeypatch)
     )
 
     value, grad = seeded.optimizer_initial_value_and_grad
-    assert float(np.asarray(value)) == pytest.approx(1.25)
-    np.testing.assert_allclose(np.asarray(grad), np.asarray(fallback_gradient))
+    assert np.isposinf(float(np.asarray(value)))
+    assert not np.any(np.isfinite(np.asarray(grad)))
 
 
 def test_host_boundary_with_baseline_peel_falls_through_for_traced_inputs():
@@ -2135,9 +2177,6 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
             "compiled_value_and_grad_for": lambda _coil_dofs: (_ for _ in ()).throw(
                 AssertionError("baseline peel should skip compiled value_and_grad")
             ),
-            "failure_gradient_for": lambda _coil_dofs: jnp.asarray(
-                [-9.0, 9.0], dtype=jnp.float64
-            ),
             "state": {
                 "baseline_coil_dofs": baseline_coil_dofs,
                 "baseline_value": np.asarray(1.25, dtype=np.float64),
@@ -2151,6 +2190,7 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
                 "objective_kwargs": {"outer_objective_config": {"enabled": True}},
                 "optimize_G": False,
                 "linearization_kind": "hessian",
+                "linear_solve_backend": "operator",
                 "linear_solve_tol": 1.0e-10,
                 "linear_solve_stab": 0.0,
             },
@@ -2252,17 +2292,16 @@ def test_traceable_runtime_host_wrappers_peel_baseline_without_touching_jitted_b
     )
 
 
-def test_traceable_runtime_host_wrappers_keep_failed_solve_baseline_gradient(
+def test_traceable_runtime_host_wrappers_surface_failed_solve_baseline_gradient(
     monkeypatch,
 ):
     baseline_coil_dofs = np.asarray([0.5, -0.25], dtype=np.float64)
-    fallback_gradient = np.asarray([0.5, -0.75], dtype=np.float64)
+    failed_gradient = np.asarray([0.5, -0.75], dtype=np.float64)
     runtime_entry = {
         "compiled_bundle": {
             "compiled_value_and_grad_for": lambda _coil_dofs: (_ for _ in ()).throw(
                 AssertionError("baseline peel should skip compiled value_and_grad")
             ),
-            "failure_gradient_for": lambda coil_dofs: jnp.zeros_like(coil_dofs),
             "state": {
                 "baseline_coil_dofs": baseline_coil_dofs,
                 "baseline_value": np.asarray(1.25, dtype=np.float64),
@@ -2272,6 +2311,7 @@ def test_traceable_runtime_host_wrappers_keep_failed_solve_baseline_gradient(
                 "objective_kwargs": {"outer_objective_config": {"enabled": True}},
                 "optimize_G": False,
                 "linearization_kind": "exact_jacobian",
+                "linear_solve_backend": "operator",
                 "linear_solve_tol": 1.0e-10,
                 "linear_solve_stab": 0.0,
             },
@@ -2289,7 +2329,7 @@ def test_traceable_runtime_host_wrappers_keep_failed_solve_baseline_gradient(
         surfaceobjectives_jax_module,
         "_traceable_total_gradient_with_status",
         lambda *_args, **_kwargs: (
-            jnp.asarray(fallback_gradient, dtype=jnp.float64),
+            jnp.asarray(failed_gradient, dtype=jnp.float64),
             jnp.asarray(False, dtype=bool),
         ),
     )
@@ -2300,12 +2340,12 @@ def test_traceable_runtime_host_wrappers_keep_failed_solve_baseline_gradient(
     )
 
     value, grad = runtime_entry["host_value_and_grad"](baseline_coil_dofs.copy())
-    assert value == pytest.approx(1.25)
-    np.testing.assert_allclose(grad, fallback_gradient)
+    assert np.isposinf(value)
+    assert not np.any(np.isfinite(grad))
 
 
-def test_traceable_custom_vjp_keeps_compiled_gradient_on_adjoint_solve_failure():
-    fallback_gradient = jnp.asarray([0.5, -0.75], dtype=jnp.float64)
+def test_traceable_custom_vjp_surfaces_adjoint_solve_failure_as_nan_gradient():
+    failed_gradient = jnp.asarray([0.5, -0.75], dtype=jnp.float64)
 
     def compiled_forward_result_for(coil_dofs):
         return {
@@ -2318,10 +2358,9 @@ def test_traceable_custom_vjp_keeps_compiled_gradient_on_adjoint_solve_failure()
     compiled_bundle = {
         "compiled_forward_result_for": compiled_forward_result_for,
         "compiled_total_gradient_for": lambda *_args: (
-            fallback_gradient,
+            failed_gradient,
             jnp.asarray(False, dtype=bool),
         ),
-        "failure_gradient_for": lambda coil_dofs: jnp.zeros_like(coil_dofs),
     }
     objective = surfaceobjectives_jax_module._make_traceable_objective_from_compiled_bundle(
         compiled_bundle
@@ -2329,7 +2368,7 @@ def test_traceable_custom_vjp_keeps_compiled_gradient_on_adjoint_solve_failure()
 
     grad = jax.grad(objective)(jnp.asarray([0.5, -0.25], dtype=jnp.float64))
 
-    np.testing.assert_allclose(np.asarray(grad), np.asarray(fallback_gradient))
+    assert not np.any(np.isfinite(np.asarray(grad)))
 
 
 def _quadratic_inner_objective_closure(*, coil_set_spec, **_kwargs):
@@ -2539,6 +2578,7 @@ def test_traceable_objective_gradient_parts_use_strict_vjp_helpers(monkeypatch):
                 solved_x=solved_x,
                 solved_linear_solve_factors=(object(), object(), object()),
                 linearization_kind="hessian",
+                linear_solve_backend="operator",
                 linear_solve_tol=1.0e-10,
                 linear_solve_stab=0.0,
                 objective_kwargs={},
@@ -2617,6 +2657,7 @@ def test_traceable_objective_gradient_parts_skips_direct_vjp_for_iota_term(
                 solved_x=solved_x,
                 solved_linear_solve_factors=(object(), object(), object()),
                 linearization_kind="hessian",
+                linear_solve_backend="operator",
                 linear_solve_tol=1.0e-10,
                 linear_solve_stab=0.0,
                 objective_kwargs={},
@@ -2760,6 +2801,7 @@ def test_traceable_objective_gradient_parts_term_diagnostics_use_strict_vjp_dire
                 solved_x=solved_x,
                 solved_linear_solve_factors=(object(), object(), object()),
                 linearization_kind="hessian",
+                linear_solve_backend="operator",
                 linear_solve_tol=1.0e-10,
                 linear_solve_stab=0.0,
                 objective_kwargs={},
@@ -2819,6 +2861,7 @@ def test_traceable_objective_gradient_parts_skip_all_autodiff_for_zero_weight_te
                 solved_x=solved_x,
                 solved_linear_solve_factors=(object(), object(), object()),
                 linearization_kind="hessian",
+                linear_solve_backend="operator",
                 linear_solve_tol=1.0e-10,
                 linear_solve_stab=0.0,
                 objective_kwargs=objective_kwargs,
@@ -2911,6 +2954,7 @@ def test_traceable_total_gradient_skips_direct_vjp_when_active_weights_are_inner
                 solved_x=solved_x,
                 solved_linear_solve_factors=(object(), object(), object()),
                 linearization_kind="hessian",
+                linear_solve_backend="operator",
                 linear_solve_tol=1.0e-10,
                 linear_solve_stab=0.0,
                 objective_kwargs=objective_kwargs,
@@ -2993,6 +3037,7 @@ def test_traceable_objective_gradient_parts_skips_direct_jvp_for_surface_vessel_
                 solved_x=solved_x,
                 solved_linear_solve_factors=(object(), object(), object()),
                 linearization_kind="hessian",
+                linear_solve_backend="operator",
                 linear_solve_tol=1.0e-10,
                 linear_solve_stab=0.0,
                 objective_kwargs={},
@@ -3030,11 +3075,12 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         solved_x,
         solved_linear_solve_factors,
         linearization_kind,
+        linear_solve_backend,
         linear_solve_tol,
         linear_solve_stab,
         objective_kwargs,
     ):
-        del linearization_kind, linear_solve_tol, linear_solve_stab
+        del linearization_kind, linear_solve_backend, linear_solve_tol, linear_solve_stab
         _record_array("total_gradient_coil_dofs", coil_dofs)
         _record_array("total_gradient_solved_x", solved_x)
         plu_leaves = jax.tree_util.tree_leaves(solved_linear_solve_factors)
@@ -3069,12 +3115,13 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
         solved_x,
         solved_linear_solve_factors,
         linearization_kind,
+        linear_solve_backend,
         linear_solve_tol,
         linear_solve_stab,
         objective_kwargs,
         term_name=None,
     ):
-        del linearization_kind, linear_solve_tol, linear_solve_stab
+        del linearization_kind, linear_solve_backend, linear_solve_tol, linear_solve_stab
         _record_array("gradient_parts_coil_dofs", coil_dofs)
         _record_array("gradient_parts_solved_x", solved_x)
         plu_leaves = jax.tree_util.tree_leaves(solved_linear_solve_factors)
@@ -3101,10 +3148,10 @@ def test_diagnose_traceable_objective_runtime_redevices_cached_baseline_arrays(
                 "baseline_coil_dofs": np.asarray([3.0, 4.0], dtype=np.float64),
                 "coil_set_spec_from_dofs": lambda coil_dofs: ("coil-set", coil_dofs),
                 "linearization_kind": "hessian",
+                "linear_solve_backend": "operator",
                 "linear_solve_tol": 1.0e-10,
                 "linear_solve_stab": 0.0,
             },
-            "failure_gradient_for": lambda coil_dofs: coil_dofs,
         }
     }
 

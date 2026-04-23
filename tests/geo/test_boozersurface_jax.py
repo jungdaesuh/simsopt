@@ -841,10 +841,10 @@ class TestOptimizerAdapter:
         assert len(calls) == 2
         np.testing.assert_allclose(result["x"], np.array([0.0]), atol=1e-12)
 
-    def test_least_squares_normal_system_dense_fallback_recovers_nonfinite_operator_solve(
+    def test_least_squares_normal_system_fails_closed_on_nonfinite_operator_solve(
         self, monkeypatch
     ):
-        """LS adjoint solves should retry once through a dense normal fallback."""
+        """LS adjoint solves should not cascade into a dense normal fallback."""
         x = jnp.asarray([1.0, -1.0], dtype=jnp.float64)
         rhs = jnp.asarray([2.0, -3.0], dtype=jnp.float64)
         operator_calls = []
@@ -887,9 +887,9 @@ class TestOptimizerAdapter:
         )
 
         assert len(operator_calls) == 1
-        assert len(dense_calls) == 1
-        assert bool(np.asarray(success)) is True
-        np.testing.assert_allclose(np.asarray(solved), np.asarray(rhs), atol=1e-12)
+        assert dense_calls == []
+        assert bool(np.asarray(success)) is False
+        assert not np.any(np.isfinite(np.asarray(solved)))
 
     def test_newton_polish_rejects_worsening_step(self, monkeypatch):
         """A Newton step that increases the gradient norm should be rejected."""
@@ -2042,6 +2042,12 @@ class TestBoozerSurfaceJAXClass:
                 constraint_weight=1.0,
                 options={"optimizer_backend_typo": "ondevice"},
             )
+
+    def test_parity_mode_rejects_damped_boozer_linearization(self, monkeypatch):
+        monkeypatch.setattr(_bsj, "is_parity_mode", lambda: True)
+
+        with pytest.raises(ValueError, match="parity mode requires newton_stab=0.0"):
+            _bsj._normalize_solver_options({"newton_stab": 1.0e-3}, "ls")
 
     def test_private_options_rejected_with_scipy_backend(self):
         """Private optimizer options must be rejected when backend is scipy."""
@@ -3203,7 +3209,7 @@ class TestBoozerSurfaceJAXClass:
 
         _assert_operator_adjoint_state(
             adjoint_state,
-            dense_factors_available=True,
+            dense_factors_available=False,
         )
         np.testing.assert_allclose(np.asarray(solved), np.asarray([1.0, -2.0]))
         np.testing.assert_allclose(recorded["rhs"], np.asarray([1.0, -2.0]))
@@ -3501,7 +3507,7 @@ class TestBoozerSurfaceJAXClass:
 
         _assert_operator_adjoint_state(
             adjoint_state,
-            dense_factors_available=True,
+            dense_factors_available=False,
         )
         assert bool(np.asarray(success)) is True
         np.testing.assert_allclose(
@@ -3522,7 +3528,7 @@ class TestBoozerSurfaceJAXClass:
             atol=exact_lane["residual_rel_tol"],
         )
 
-    def test_exact_well_conditioned_operator_adjoint_matches_dense_and_plu(
+    def test_exact_well_conditioned_operator_adjoint_matches_dense_reference_and_plu(
         self, monkeypatch
     ):
         """Well-conditioned exact operator GMRES matches dense JAX and PLU adjoints."""
@@ -3578,7 +3584,7 @@ class TestBoozerSurfaceJAXClass:
 
         _assert_operator_adjoint_state(
             adjoint_state,
-            dense_factors_available=True,
+            dense_factors_available=False,
         )
         assert bool(np.asarray(success)) is True
         np.testing.assert_allclose(
@@ -3621,6 +3627,64 @@ class TestBoozerSurfaceJAXClass:
             rtol=exact_lane["gradient_rtol"],
             atol=exact_lane["gradient_atol"],
         )
+
+    def test_exact_adjoint_dense_jax_backend_is_explicit_policy(self, monkeypatch):
+        booz = _make_mock_boozer_surface_exact(
+            options={"exact_adjoint_linear_solve_backend": "dense_jax"}
+        )
+        booz.need_to_run_code = False
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "exact_jacobian",
+            "PLU": None,
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+        dense_calls = []
+
+        monkeypatch.setattr(
+            _bsj.BoozerSurfaceJAX,
+            "_compute_stellsym_mask_indices",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            _bsj.BoozerSurfaceJAX,
+            "_make_exact_residual",
+            lambda _self, _mask: (lambda x: x),
+        )
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_solve_jacobian_system_with_status",
+            lambda *_args, **_kwargs: pytest.fail(
+                "dense_jax policy must not cascade through operator GMRES"
+            ),
+        )
+
+        def fake_dense_solve(_residual_fn, _x, rhs, *, transpose, tol):
+            dense_calls.append((bool(transpose), float(tol)))
+            return rhs + 1.0, jnp.asarray(True)
+
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_solve_dense_jacobian_system_with_status",
+            fake_dense_solve,
+        )
+
+        adjoint_state = booz.get_adjoint_runtime_state()
+        rhs = jnp.asarray([2.0, -1.0], dtype=jnp.float64)
+        solved, success = adjoint_state.solve_transpose_with_status(rhs)
+
+        assert adjoint_state.linear_solve_backend == "dense_jax"
+        assert adjoint_state.dense_linear_solve_factors_available is False
+        assert len(dense_calls) == 1
+        assert dense_calls[0][0] is True
+        assert dense_calls[0][1] == pytest.approx(booz._linear_solve_tolerance())
+        assert bool(np.asarray(success)) is True
+        np.testing.assert_allclose(np.asarray(solved), np.asarray(rhs + 1.0))
 
     def test_run_code_emits_newton_progress_updates(self, monkeypatch):
         """run_code() should surface Newton start/progress/completion through stage_callback."""
@@ -6192,7 +6256,7 @@ class TestBuildBoozerSurfaceRuntimeState:
         assert adjoint_state.dtype == jnp.float64
         _assert_operator_adjoint_state(
             adjoint_state,
-            dense_factors_available=True,
+            dense_factors_available=False,
         )
         np.testing.assert_allclose(
             np.asarray(adjoint_state.apply_transpose(jnp.asarray([1.0, 3.0], dtype=jnp.float64))),
