@@ -2,7 +2,6 @@ import importlib
 import sys
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 
@@ -315,28 +314,6 @@ class SingleStageBananaCurrentModeTests(unittest.TestCase):
         )
         self.assertEqual(payload["BEST_FEASIBLE_BANANA_NUM_CURRENT_CONTROLS"], 2)
         self.assertEqual(payload["BEST_FEASIBLE_BANANA_CURRENT_A"], 1.5e4)
-
-    def test_build_payload_fields_falls_back_for_summary_only_current_objects(self):
-        module = load_current_mode_module()
-        state = module.SingleStageBananaCurrentState(
-            mode="shared",
-            currents=(SimpleNamespace(get_value=lambda: 1.4e4),),
-            seed_currents_A=(1.4e4,),
-        )
-
-        payload = module.build_single_stage_banana_current_payload_fields(
-            state,
-            prefix="BEST_FEASIBLE_",
-        )
-
-        self.assertEqual(
-            payload["BEST_FEASIBLE_BANANA_CURRENT_OPTIMIZER_COORDINATES"],
-            [1.4e4],
-        )
-        self.assertEqual(
-            payload["BEST_FEASIBLE_BANANA_CURRENT_COORDINATE_SCALE_FACTORS_A"],
-            [1.0],
-        )
 
     def test_resolve_independent_mode_preserves_loaded_asymmetric_seed_vector(self):
         module = load_current_mode_module()

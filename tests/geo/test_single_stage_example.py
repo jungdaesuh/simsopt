@@ -7289,28 +7289,6 @@ class RunIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "cannot assign to field"):
             config.stage = "other"
 
-    def test_run_identity_rejects_unresolved_banana_current_control_count(self):
-        module = load_single_stage_example_module()
-        args = self._make_identity_args()
-
-        with self.assertRaisesRegex(ValueError, "num_banana_current_controls"):
-            module.make_run_identity_config(
-                args,
-                "stage2-seed.json",
-                "final",
-                0.1,
-                args.constraint_method,
-                0.15,
-                0.15,
-                0.37,
-                1850000.0,
-                0.22,
-                80,
-                80,
-                None,
-                num_banana_current_controls=None,
-            )
-
     def test_run_identity_omits_default_target_goal_mode(self):
         module = load_single_stage_example_module()
         args = self._make_identity_args()
@@ -8531,42 +8509,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
             ValueError,
             "--single-stage-banana-current-mode=independent is not supported with "
             "--constraint-method=alm",
-        ):
-            module.validate_single_stage_current_args(args)
-
-    def test_validate_single_stage_current_args_rejects_seed_relative_scaling_without_independent_mode(self):
-        module = load_single_stage_example_module()
-
-        args = SimpleNamespace(
-            banana_current_max_A=16000.0,
-            single_stage_banana_current_mode="shared",
-            single_stage_banana_current_coordinate_scaling="seed-relative",
-            constraint_method="penalty",
-            allow_offspec_engineering_constraints=False,
-        )
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "--single-stage-banana-current-coordinate-scaling=seed-relative "
-            "requires --single-stage-banana-current-mode=independent",
-        ):
-            module.validate_single_stage_current_args(args)
-
-    def test_validate_single_stage_current_args_rejects_invalid_coordinate_scaling(self):
-        module = load_single_stage_example_module()
-
-        args = SimpleNamespace(
-            banana_current_max_A=16000.0,
-            single_stage_banana_current_mode="independent",
-            single_stage_banana_current_coordinate_scaling="bogus",
-            constraint_method="penalty",
-            allow_offspec_engineering_constraints=False,
-        )
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "--single-stage-banana-current-coordinate-scaling must be one of "
-            "\\{none, seed-relative\\}",
         ):
             module.validate_single_stage_current_args(args)
 

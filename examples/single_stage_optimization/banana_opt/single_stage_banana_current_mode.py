@@ -104,24 +104,12 @@ class SingleStageBananaCurrentState:
                     continue
                 seen_names.add(resolved_name)
                 values.append(float(current_optimizable.get_value()))
-        if values:
-            return tuple(values)
-        if self.mode == BANANA_CURRENT_MODE_SHARED:
-            representative_current_A = self.representative_current_A()
-            if representative_current_A is None:
-                return ()
-            return (representative_current_A,)
-        return self.current_values_A()
+        return tuple(values)
 
     def coordinate_scale_factors_A(self) -> tuple[float, ...]:
         if len(self.current_coordinate_scale_factors_A) == self.num_control_currents():
             return self.current_coordinate_scale_factors_A
-        scale_factors_A = tuple(
-            scale for _, scale in _unique_current_control_entries(self)
-        )
-        if scale_factors_A:
-            return scale_factors_A
-        return tuple(1.0 for _ in range(self.num_control_currents()))
+        return tuple(scale for _, scale in _unique_current_control_entries(self))
 
 
 def _validated_banana_current_mode(mode: str) -> BananaCurrentMode:

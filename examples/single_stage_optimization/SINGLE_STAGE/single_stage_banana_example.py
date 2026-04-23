@@ -2102,11 +2102,6 @@ def validate_single_stage_current_args(args):
         "single_stage_banana_current_mode",
         BANANA_CURRENT_MODE_SHARED,
     )
-    banana_current_coordinate_scaling = getattr(
-        args,
-        "single_stage_banana_current_coordinate_scaling",
-        BANANA_CURRENT_COORDINATE_SCALING_NONE,
-    )
     constraint_method = getattr(args, "constraint_method", "penalty")
     allow_offspec_engineering_constraints = bool(
         getattr(args, "allow_offspec_engineering_constraints", False)
@@ -2117,23 +2112,6 @@ def validate_single_stage_current_args(args):
     }:
         raise ValueError(
             "--single-stage-banana-current-mode must be one of {shared, independent}"
-        )
-    if banana_current_coordinate_scaling not in {
-        BANANA_CURRENT_COORDINATE_SCALING_NONE,
-        BANANA_CURRENT_COORDINATE_SCALING_SEED_RELATIVE,
-    }:
-        raise ValueError(
-            "--single-stage-banana-current-coordinate-scaling must be one of "
-            "{none, seed-relative}"
-        )
-    if (
-        banana_current_coordinate_scaling
-        != BANANA_CURRENT_COORDINATE_SCALING_NONE
-        and banana_current_mode != BANANA_CURRENT_MODE_INDEPENDENT
-    ):
-        raise ValueError(
-            "--single-stage-banana-current-coordinate-scaling=seed-relative "
-            "requires --single-stage-banana-current-mode=independent"
         )
     if banana_current_mode == BANANA_CURRENT_MODE_INDEPENDENT and constraint_method == "alm":
         raise ValueError(
@@ -2593,10 +2571,6 @@ def make_run_identity_config(
     effective_inner_surface_ratio: float | None = None,
     num_banana_current_controls: int = 1,
 ):
-    if num_banana_current_controls is None:
-        raise ValueError(
-            "num_banana_current_controls must be resolved before run identity construction."
-        )
     resolved_contract = (
         resolve_surface_mode_contract(args, warn_on_legacy_mapping=False)
         if surface_mode_contract is None
