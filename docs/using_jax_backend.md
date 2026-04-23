@@ -215,6 +215,9 @@ Adjoint and warm-start linear solve note:
 - Batched exact adjoints intentionally call the operator solve once per RHS
   column; current standard-wrapper batch width is small, and exact mode is not
   the production hot path for the wrapper trio.
+- If a traceable forward solve succeeds but the adjoint operator solve fails,
+  the forward value remains the primal value and the gradient is non-finite.
+  Do not replace that with a direct-gradient or failure-penalty fallback.
 
 ## Copy-paste workflow examples
 

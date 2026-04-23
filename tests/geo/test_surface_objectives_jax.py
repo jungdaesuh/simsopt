@@ -494,18 +494,24 @@ def test_traceable_exact_operator_and_dense_reference_share_residual_contract(
             transpose=True,
         )
     )
-    dense_solved, dense_success = (
-        surfaceobjectives_jax_module._optimizer_jax._solve_dense_jacobian_system_with_status(
-            lambda x_inner: matrix @ x_inner,
-            solved_x,
-            rhs,
-            transpose=True,
-            tol=1.0e-10,
-        )
+    dense_matrix_t = np.asarray(matrix.T)
+    rhs_np = np.asarray(rhs)
+    dense_solved = np.linalg.solve(dense_matrix_t, rhs_np)
+    dense_residual = rhs_np - dense_matrix_t @ dense_solved
+    dense_residual_norm = np.linalg.norm(dense_residual)
+    dense_residual_tol = max(
+        1.0e-12,
+        10.0 * 1.0e-10 * max(np.linalg.norm(rhs_np), 1.0),
+    )
+    dense_success = (
+        np.all(np.isfinite(dense_solved))
+        and np.all(np.isfinite(dense_residual))
+        and np.isfinite(dense_residual_norm)
+        and dense_residual_norm <= dense_residual_tol
     )
 
     assert bool(np.asarray(operator_success)) is True
-    assert bool(np.asarray(dense_success)) is True
+    assert dense_success
     np.testing.assert_allclose(
         np.asarray(matrix.T @ operator_solved),
         np.asarray(rhs),
@@ -513,8 +519,8 @@ def test_traceable_exact_operator_and_dense_reference_share_residual_contract(
         atol=1e-9,
     )
     np.testing.assert_allclose(
-        np.asarray(matrix.T @ dense_solved),
-        np.asarray(rhs),
+        dense_matrix_t @ dense_solved,
+        rhs_np,
         rtol=1e-9,
         atol=1e-9,
     )
@@ -715,7 +721,7 @@ def test_traceable_exact_warmstart_failure_keeps_failed_operator_step(monkeypatc
     )
 
 
-def test_traceable_ls_warmstart_failure_keeps_failed_operator_step(monkeypatch):
+def test_traceable_ls_warmstart_failure_preserves_baseline_state(monkeypatch):
     baseline_x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
     baseline_coil_dofs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
     coil_dofs = jnp.asarray([0.75, 0.25], dtype=jnp.float64)
@@ -756,10 +762,7 @@ def test_traceable_ls_warmstart_failure_keeps_failed_operator_step(monkeypatch):
     )
 
     assert bool(np.asarray(success)) is False
-    np.testing.assert_allclose(
-        np.asarray(predicted),
-        np.asarray(baseline_x + failed_dx),
-    )
+    np.testing.assert_allclose(np.asarray(predicted), np.asarray(baseline_x))
 
 
 def test_traceable_exact_warmstart_failure_surfaces_unsuccessful_forward_result(

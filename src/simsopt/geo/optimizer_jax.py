@@ -1872,20 +1872,6 @@ def _solve_square_array_system_operator_only(matvec, rhs, *, tol):
     return solution, success
 
 
-def _solve_dense_square_array_system_with_status(matrix, rhs, *, tol):
-    """Solve one explicit dense square system and report the same contract."""
-    solution, _, _, _ = jnp.linalg.lstsq(matrix, rhs, rcond=None)
-    residual = rhs - matrix @ solution
-    residual_norm = jnp.linalg.norm(residual)
-    residual_tol = _linear_solve_residual_tolerance(rhs, tol)
-    success = (
-        _linear_solve_finite(solution, residual)
-        & jnp.isfinite(residual_norm)
-        & (residual_norm <= residual_tol)
-    )
-    return solution, success
-
-
 def _least_squares_normal_operator(residual_fn, x):
     flat_residual_fn = jax.jit(_flattened_residual_output(residual_fn))
     _, pullback = jax.vjp(flat_residual_fn, x)
@@ -2045,20 +2031,6 @@ def _solve_jacobian_system_with_status(
     operator = _jacobian_linear_operator(residual_fn, x)
     matvec = operator["transpose_matvec"] if transpose else operator["matvec"]
     return _solve_square_array_system_operator_only(matvec, rhs, tol=tol)
-
-
-def _solve_dense_jacobian_system_with_status(
-    residual_fn,
-    x,
-    rhs,
-    *,
-    transpose,
-    tol,
-):
-    jvp_fn = _jacobian_vector_product_fn(residual_fn)
-    jacobian = _materialize_dense_jacobian(jvp_fn, x)
-    matrix = jacobian.T if transpose else jacobian
-    return _solve_dense_square_array_system_with_status(matrix, rhs, tol=tol)
 
 
 def newton_polish(

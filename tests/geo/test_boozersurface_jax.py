@@ -3648,13 +3648,6 @@ class TestBoozerSurfaceJAXClass:
             "_make_exact_residual",
             lambda _self, _mask: (lambda x: x),
         )
-        monkeypatch.setattr(
-            _bsj._optimizer_jax,
-            "_solve_dense_jacobian_system_with_status",
-            lambda *_args, **_kwargs: pytest.fail(
-                "dense metadata must not resurrect the dense exact backend"
-            ),
-        )
 
         def fake_operator_solve(_residual_fn, _x, rhs, *, transpose, tol):
             operator_calls.append((bool(transpose), float(tol)))

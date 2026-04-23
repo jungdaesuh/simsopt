@@ -34,8 +34,11 @@ yet the seeded target-lane path now avoids some previously flagged overhead.
   the stationarity term.
 - [ ] Final dense Jacobian / dense linearization materialization still
   contributes meaningful compile and runtime cost when those paths are active.
-- [ ] The new dense least-squares fallback is a robustness path, not a
-  performance path; when it triggers it can increase memory and runtime.
+- [x] The dense least-squares normal-equation fallback is gone; that path is now
+  operator-only.
+- [x] Exact runtime backend cleanup landed: the exact JAX lane is now strict
+  operator-only end to end, with dense exact work retained only as optional
+  metadata/reference-oracle materialization.
 
 ## Verified from the current tree
 
@@ -140,9 +143,12 @@ port leaks a per-iteration host transfer:
    identity basis at `src/simsopt/geo/optimizer_jax.py:1526-1529`. That is
    compile-cost O(1) in trace structure but execution-cost O(n) in JVPs, and it
    still contributes to optional exact-Newton metadata finalization. It is no
-   longer part of the JAX exact-adjoint contract: exact adjoints and traceable
-   warm-start prediction solve through operator callbacks even when public
-   result dictionaries expose dense `PLU` metadata.
+   longer part of the strict JAX exact-adjoint runtime contract. Exact runtime
+   is now operator-only, traceable exact warm-start failure surfaces explicitly,
+   and adjoint-only wrapper failure keeps the real primal value with a
+   non-finite gradient. Dense finalization remains only as optional metadata /
+   reference-oracle work, so this cost is still relevant for diagnostics but no
+   longer defines the supported exact-JAX runtime lane.
 
 Related non-fixes:
 
@@ -257,8 +263,10 @@ gradients. Resolution:
 - `_traceable_inner_stationarity_grad` remains a forward-mode helper, but the
   traceable implicit-gradient and warm-start paths now avoid materializing the
   full stationarity vector when they only need a directional pullback/JVP.
-  Exact linear solves in those paths are operator-backed; stored dense factors
-  are not a traceable solve shortcut.
+  The active exact-JAX end state is now in tree: operator-backed exact linear
+  solves, explicit exact warm-start failure surfacing, and real primal value
+  plus non-finite gradient on adjoint-only failure. Dense exact solves remain
+  reference/metadata only.
 
 The other five vmap sites were verified clean on the same pass:
 `_materialize_dense_linear_operator` (dense operator basis, size-gated by
