@@ -99,6 +99,7 @@ from benchmarks.validation_ladder_common import (
     _SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR,
     _SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR,
     _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR,
+    PARITY_LADDER_TOLERANCES,
     TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG,
     apply_benchmark_compilation_cache_policy,
     apply_compilation_cache_policy,
@@ -109,6 +110,8 @@ from benchmarks.validation_ladder_common import (
     grouped_adjoint_memory_budget,
     max_pointwise_geometry_drift,
     optimizer_drift_tolerances,
+    parity_ladder_ratchet_rel_tol,
+    parity_ladder_tolerances,
     repo_pythonpath_env,
     require_requested_platform_runtime,
     require_x64_runtime,
@@ -308,6 +311,30 @@ def test_jax_ci_contract_ratchet_rel_tol_tightens_without_loosening():
     assert jax_ci_contract.ratchet_rel_tol(1e-12, 1e-10, factor=10.0) == pytest.approx(
         1e-12
     )
+
+
+def test_parity_ladder_ratchet_rel_tol_respects_lane_contracts():
+    assert parity_ladder_ratchet_rel_tol(
+        "direct-kernel",
+        1e-10,
+        1e-12,
+    ) == pytest.approx(1e-11)
+    assert parity_ladder_ratchet_rel_tol(
+        "direct-kernel",
+        1e-10,
+        2e-11,
+    ) == pytest.approx(1e-10)
+    assert parity_ladder_ratchet_rel_tol(
+        "exact-ill-conditioned-adjoint",
+        1e-6,
+        1e-12,
+    ) == pytest.approx(1e-6)
+    assert parity_ladder_ratchet_rel_tol(
+        "branch-stable-resolve",
+        1e-6,
+        1e-12,
+        branch_divergent=True,
+    ) == pytest.approx(1e-6)
 
 
 def _mock_gpu_reduction_sum() -> np.float64:
@@ -1014,6 +1041,78 @@ def test_optimizer_drift_tolerances_tier2_geometry_gate_tracks_iteration_budget(
     assert "final_objective_rel_tol_default" not in tol_20
     assert "geometry_rel_tol_20_iter" not in tol_20
     assert "geometry_rel_tol_default" not in tol_20
+
+
+def test_parity_ladder_tolerances_capture_precision_lanes():
+    expected_lanes = {
+        "direct_kernel",
+        "ls_wrapper_gradient",
+        "derivative_heavy",
+        "exact_well_conditioned_adjoint",
+        "exact_ill_conditioned_adjoint",
+        "branch_stable_resolve",
+        "fd_gradient",
+        "gpu_runtime",
+    }
+    assert set(PARITY_LADDER_TOLERANCES) == expected_lanes
+
+    direct = parity_ladder_tolerances("direct-kernel")
+    assert direct["rtol"] == pytest.approx(1e-10)
+    assert direct["atol"] == pytest.approx(1e-12)
+    assert direct["requires_direct_cpp_oracle"] is True
+
+    derivative = parity_ladder_tolerances("derivative-heavy")
+    assert derivative["first_derivative_rtol"] == pytest.approx(1e-8)
+    assert derivative["first_derivative_atol"] == pytest.approx(1e-10)
+    assert derivative["second_derivative_rtol"] == pytest.approx(1e-6)
+    assert derivative["second_derivative_atol"] == pytest.approx(1e-8)
+
+    exact_well_conditioned = parity_ladder_tolerances(
+        "exact-well-conditioned-adjoint"
+    )
+    assert exact_well_conditioned["adjoint_rtol"] == pytest.approx(1e-6)
+    assert exact_well_conditioned["adjoint_atol"] == pytest.approx(1e-8)
+    assert exact_well_conditioned["residual_rel_tol"] == pytest.approx(1e-10)
+    assert exact_well_conditioned["vector_parity_required"] is True
+
+    exact_ill_conditioned = parity_ladder_tolerances(
+        "exact-ill-conditioned-adjoint"
+    )
+    assert exact_ill_conditioned["adjoint_rtol"] is None
+    assert exact_ill_conditioned["residual_rel_tol"] == pytest.approx(1e-10)
+    assert exact_ill_conditioned["operator_failure_allowed"] is True
+    assert exact_ill_conditioned["vector_parity_required"] is False
+
+    branch_stable = parity_ladder_tolerances("branch-stable-resolve")
+    assert branch_stable["core_value_rtol"] == pytest.approx(1e-6)
+    assert branch_stable["core_value_atol"] == pytest.approx(1e-7)
+    assert branch_stable["derived_value_rtol"] == pytest.approx(5e-5)
+    assert branch_stable["derived_value_atol"] == pytest.approx(1e-7)
+
+    fd_gradient = parity_ladder_tolerances("FD-gradient")
+    assert fd_gradient["directional_fd_rtol"] == pytest.approx(1e-5)
+    assert fd_gradient["directional_fd_atol"] == pytest.approx(1e-7)
+
+    gpu_runtime = parity_ladder_tolerances("GPU-runtime")
+    assert gpu_runtime["same_state_forward_rtol"] == pytest.approx(1e-10)
+    assert gpu_runtime["same_state_gradient_rtol"] == pytest.approx(1e-8)
+    assert gpu_runtime["whole_solve_value_rtol"] == pytest.approx(1e-6)
+    assert gpu_runtime["whole_solve_value_atol"] == pytest.approx(1e-7)
+    assert gpu_runtime["requires_runtime_metadata"] is True
+
+
+def test_parity_ladder_tolerances_return_independent_copy():
+    direct = parity_ladder_tolerances("direct_kernel")
+    direct["rtol"] = 1.0
+
+    assert parity_ladder_tolerances("direct_kernel")["rtol"] == pytest.approx(
+        1e-10
+    )
+
+
+def test_parity_ladder_tolerances_reject_unknown_lane():
+    with pytest.raises(ValueError, match="Unknown parity ladder lane"):
+        parity_ladder_tolerances("exact-dense-plu-parity")
 
 
 def test_describe_compile_behavior_tracks_cache_state(monkeypatch):

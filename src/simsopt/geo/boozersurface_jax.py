@@ -119,8 +119,6 @@ from .optimizer_jax import (
     target_least_squares,
     target_minimize,
 )
-from ..objectives.utilities import forward_backward_jax, plu_solve_jax
-
 __all__ = ["BoozerSurfaceJAX", "build_boozer_surface_runtime_state"]
 
 
@@ -193,6 +191,8 @@ class _BoozerAdjointRuntimeState:
     solve_forward_with_status: callable
     solve_transpose_with_status: callable
     stream_group_vjps: callable
+    linear_solve_backend: str = "operator"
+    dense_linear_solve_factors_available: bool = False
     linear_solve_factors: tuple[jax.Array, jax.Array, jax.Array] | None = None
 
     @property
@@ -1718,7 +1718,6 @@ class BoozerSurfaceJAX(Optimizable):
 
     def _build_runtime_linear_solve_callbacks(self, solved_state):
         linearization_kind = self._resolved_linearization_kind()
-        linear_solve_factors = self.res.get("PLU")
         optimize_G = solved_state.G is not None
         x = self._pack_decision_vector(
             solved_state.iota,
@@ -1744,9 +1743,7 @@ class BoozerSurfaceJAX(Optimizable):
                 return wrapped
 
             # Auto-wrapped status callbacks sniff finiteness rather than claim
-            # unconditional success: dense-PLU iterative refinement can silently
-            # return non-finite entries on singular factors, and the checked
-            # adjoint path at _checked_boozer_linear_solve trusts this bit.
+            # unconditional success; the checked adjoint path trusts this bit.
             def _with_finiteness_status(solver):
                 def wrapped(rhs):
                     solution = solver(rhs)
@@ -1875,29 +1872,6 @@ class BoozerSurfaceJAX(Optimizable):
                 solve_transpose_with_status=solve_forward_with_status,
             )
 
-        if linear_solve_factors is not None:
-            P, L, U = linear_solve_factors
-            dense_operator = P @ L @ U
-
-            def apply_forward(rhs):
-                return dense_operator @ rhs
-
-            def apply_transpose(rhs):
-                return dense_operator.T @ rhs
-
-            def solve_forward(rhs):
-                return plu_solve_jax(P, L, U, rhs, iterative_refinement=True)
-
-            def solve_transpose(rhs):
-                return forward_backward_jax(P, L, U, rhs, iterative_refinement=True)
-
-            return pack_callbacks(
-                apply_forward,
-                apply_transpose,
-                solve_forward,
-                solve_transpose,
-            )
-
         if linearization_kind == "exact_jacobian":
             residual_fn = self._make_exact_residual(self._compute_stellsym_mask_indices())
             operator = _optimizer_jax._jacobian_linear_operator(residual_fn, x)
@@ -1993,7 +1967,9 @@ class BoozerSurfaceJAX(Optimizable):
             solve_forward_with_status=solve_forward_with_status,
             solve_transpose_with_status=solve_transpose_with_status,
             stream_group_vjps=stream_group_vjps,
-            linear_solve_factors=self.res.get("PLU"),
+            linear_solve_backend="operator",
+            dense_linear_solve_factors_available=self.res.get("PLU") is not None,
+            linear_solve_factors=None,
         )
 
     @property
@@ -2698,13 +2674,6 @@ class BoozerSurfaceJAX(Optimizable):
             )
             if jacobian_available:
                 finite = finite & jnp.all(jnp.isfinite(jacobian))
-                P, L, U = _traceable_plu_or_dummy(
-                    jacobian,
-                    finite=finite,
-                )
-                plu = (P, L, U)
-            else:
-                plu = None
             sdofs_exact, iota_exact, G_exact = self._unpack_decision_vector_jax(
                 result["x"],
                 True,
@@ -2720,12 +2689,14 @@ class BoozerSurfaceJAX(Optimizable):
                 "fun": half * jnp.mean(jnp.square(result["residual"])),
                 "residual": result["residual"],
                 "jacobian": jacobian,
-                "plu": plu,
+                "plu": None,
                 "nit": result["nit"],
                 "success": primal_success,
                 "primal_success": primal_success,
                 "adjoint_linear_solve_available": adjoint_linear_solve_available,
                 "linearization_kind": "exact_jacobian",
+                "linear_solve_backend": "operator",
+                "dense_linear_solve_factors_available": False,
                 "type": "exact",
                 "weight_inv_modB": weight_inv_modB,
                 **_exact_newton_reporting_fields(result),
@@ -2842,6 +2813,8 @@ class BoozerSurfaceJAX(Optimizable):
             "primal_success": primal_success,
             "adjoint_linear_solve_available": primal_success,
             "linearization_kind": "hessian",
+            "linear_solve_backend": "operator",
+            "dense_linear_solve_factors_available": plu is not None,
             "optimizer_method": method,
             "type": "ls",
             "weight_inv_modB": weight_inv_modB,
@@ -3234,6 +3207,8 @@ class BoozerSurfaceJAX(Optimizable):
                 "primal_success": False,
                 "adjoint_linear_solve_available": False,
                 "linearization_kind": "hessian",
+                "linear_solve_backend": "operator",
+                "dense_linear_solve_factors_available": False,
             }
             self.res = res
             self.need_to_run_code = False
@@ -3300,6 +3275,8 @@ class BoozerSurfaceJAX(Optimizable):
             "type": "ls",
             "optimizer_method": method,
             "linearization_kind": "hessian",
+            "linear_solve_backend": "operator",
+            "dense_linear_solve_factors_available": plu is not None,
             "solve_generation": solve_generation,
             "weight_inv_modB": weight_inv_modB,
             "fun": float(_host_scalar(result["fun"])),
@@ -3607,6 +3584,8 @@ class BoozerSurfaceJAX(Optimizable):
                 "primal_success": False,
                 "adjoint_linear_solve_available": False,
                 "linearization_kind": "exact_jacobian",
+                "linear_solve_backend": "operator",
+                "dense_linear_solve_factors_available": False,
                 **exact_reporting,
             }
             self.res = res
@@ -3692,6 +3671,8 @@ class BoozerSurfaceJAX(Optimizable):
             "vjp": vjp_callback,
             "vjp_groups": vjp_groups_callback,
             "linearization_kind": "exact_jacobian",
+            "linear_solve_backend": "operator",
+            "dense_linear_solve_factors_available": plu is not None,
             "solve_generation": solve_generation,
             "weight_inv_modB": self.options["weight_inv_modB"],
             **exact_reporting,

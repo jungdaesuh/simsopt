@@ -1394,6 +1394,11 @@ class SingleStageExampleTests(unittest.TestCase):
             [event["label"] for event in payload["events"]],
             ["phase1_started", "phase1_progress_iter_1"],
         )
+        self.assertEqual(
+            [event["event_index"] for event in payload["events"]],
+            [0, 1],
+        )
+        self.assertGreaterEqual(payload["events"][0]["event_elapsed_s"], 0.0)
         self.assertEqual(payload["events"][0]["phase"], "phase1")
         self.assertEqual(payload["events"][1]["iteration"], 1)
 
@@ -3266,6 +3271,16 @@ class SingleStageExampleTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertTrue(args.minimal_artifacts)
+
+    def test_outer_optimizer_progress_records_for_all_target_lane_runs(self):
+        module = self.load_module()
+
+        self.assertTrue(
+            module.should_record_single_stage_outer_optimizer_progress(True)
+        )
+        self.assertFalse(
+            module.should_record_single_stage_outer_optimizer_progress(False)
+        )
 
     def test_extract_optimizer_diagnostics_flags_nonfinite_state(self):
         module = self.load_module()
@@ -5805,6 +5820,7 @@ class SingleStageExampleTests(unittest.TestCase):
         run_dict["best_local_stage"] = "initial"
         invalid_state_events = []
         optimizer_calls = []
+        progress_events = []
 
         def fake_run_single_stage_optimizer(
             fun,
@@ -5891,6 +5907,11 @@ class SingleStageExampleTests(unittest.TestCase):
                     invalid_state_events=invalid_state_events,
                     run_dict=run_dict,
                     single_stage_search_policy=policy,
+                    progress_event_callback=(
+                        lambda label, **extra: progress_events.append(
+                            (label, extra)
+                        )
+                    ),
                 )
             )
 
@@ -5900,6 +5921,22 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(optimizer_calls[1]["dofs"], np.array([1.0, 2.0]))
         self.assertIs(optimizer_calls[1]["callback"], retry_callback)
         self.assertEqual(optimizer_calls[1]["initial_step_size"], 0.1)
+        self.assertEqual(
+            [label for label, _ in progress_events],
+            [
+                "phase2_attempt_0_started",
+                "phase2_attempt_0_returned",
+                "phase2_retry_1_started",
+                "phase2_retry_1_returned",
+            ],
+        )
+        self.assertEqual(progress_events[0][1]["phase"], "phase2")
+        self.assertEqual(progress_events[0][1]["attempt_index"], 0)
+        self.assertEqual(progress_events[2][1]["anchor_stage"], "initial")
+        self.assertEqual(
+            progress_events[3][1]["result"]["message"],
+            "ok",
+        )
 
     def test_run_single_stage_target_lane_optimizer_with_retries_uses_seed_only_on_first_attempt(
         self,
@@ -8834,6 +8871,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(rd1["G"], 1.0)
         self.assertEqual(rd1["J"], 42.0)
         self.assertEqual(rd1["initial_objective"], 42.0)
+        self.assertFalse(rd1["initial_objective_pending"])
         self.assertEqual(rd1["it"], 1)
         self.assertEqual(rd1["lscount"], 0)
         self.assertTrue(rd1["self_intersection_check_available"])
@@ -8890,6 +8928,82 @@ class SingleStageExampleTests(unittest.TestCase):
                 sc1["tf_gammadash"][i], sc2["tf_gammadash"][i]
             )
             self.assertEqual(sc1["tf_currents"][i], sc2["tf_currents"][i])
+
+    def test_snapshot_to_pytree_can_defer_legacy_initial_objective_for_target_lane(
+        self,
+    ):
+        module = self.load_module()
+
+        class _JF:
+            x = np.array([99.0, 99.0])
+
+            def J(self):
+                raise AssertionError("legacy objective should not be evaluated")
+
+            def dJ(self):
+                raise AssertionError("legacy gradient should not be evaluated")
+
+        class _Surface:
+            x = np.array([10.0, 20.0, 30.0])
+
+        class _BoozerSurface:
+            def __init__(self):
+                self.surface = _Surface()
+                self.res = {
+                    "success": True,
+                    "iota": 0.15,
+                    "G": 1.0,
+                    "sdofs": np.array([10.0, 20.0, 30.0]),
+                }
+
+        class _Curve:
+            def gamma(self):
+                return np.ones((4, 3))
+
+            def gammadash(self):
+                return np.ones((4, 3)) * 2.0
+
+        class _Current:
+            def get_value(self):
+                return 100.0
+
+        class _Coil:
+            curve = _Curve()
+            current = _Current()
+
+        class _BS:
+            coils = [_Coil()]
+
+        optimizer_dofs = np.array([1.0, 2.0, 3.0])
+        with patch.object(
+            module, "surface_self_intersection_check_available", return_value=True
+        ):
+            dofs, run_dict, _ = module.snapshot_to_pytree(
+                _JF(),
+                _BoozerSurface(),
+                _BS(),
+                num_tf_coils=1,
+                coil_dofs_override=optimizer_dofs,
+                evaluate_initial_objective=False,
+            )
+
+        np.testing.assert_allclose(dofs, optimizer_dofs)
+        np.testing.assert_allclose(run_dict["x_prev"], optimizer_dofs)
+        np.testing.assert_allclose(run_dict["dJ"], np.zeros_like(optimizer_dofs))
+        self.assertTrue(np.isnan(run_dict["J"]))
+        self.assertTrue(np.isnan(run_dict["initial_objective"]))
+        self.assertTrue(run_dict["initial_objective_pending"])
+
+        target_grad = np.array([4.0, 5.0, 6.0])
+        module.seed_single_stage_initial_objective_from_values(
+            run_dict,
+            objective_value=12.5,
+            objective_grad=target_grad,
+        )
+        self.assertEqual(run_dict["J"], 12.5)
+        self.assertEqual(run_dict["initial_objective"], 12.5)
+        np.testing.assert_allclose(run_dict["dJ"], target_grad)
+        self.assertFalse(run_dict["initial_objective_pending"])
 
     def test_resolve_single_stage_outer_optimizer_initial_dofs_uses_target_lane_bs_space(
         self,

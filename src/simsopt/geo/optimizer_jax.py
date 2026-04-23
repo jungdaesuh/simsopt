@@ -2327,8 +2327,8 @@ def newton_exact(
 
     Iterations solve the linearized system with GMRES against exact
     Jacobian-vector products, avoiding dense Jacobian materialization in the
-    hot loop. The dense Jacobian is rebuilt once at the final iterate so the
-    existing Boozer PLU / adjoint contract stays intact.
+    hot loop. The dense Jacobian is rebuilt once at the final iterate only for
+    public compatibility metadata and diagnostics.
     """
     res_fn = jax.jit(residual_fn)
     jvp_fn = _jacobian_vector_product_fn(residual_fn)

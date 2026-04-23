@@ -9,7 +9,7 @@ paths should consume these explicit specs rather than live object graphs.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
+from typing import Literal, Union
 
 import jax
 import numpy as np
@@ -351,7 +351,7 @@ jax.tree_util.register_dataclass(
 )
 
 
-RotationSpec = FrameRotationSpec | ZeroRotationSpec
+RotationSpec = Union[FrameRotationSpec, ZeroRotationSpec]
 
 
 @dataclass(frozen=True)
@@ -413,17 +413,17 @@ jax.tree_util.register_dataclass(
 )
 
 
-CurveSpec: TypeAlias = (
-    CurveXYZFourierSpec
-    | CurveRZFourierSpec
-    | CurvePlanarFourierSpec
-    | CurveHelicalSpec
-    | CurveCWSFourierRZSpec
-    | CurvePerturbedSpec
-    | CurveFilamentSpec
-)
+CurveSpec = Union[
+    CurveXYZFourierSpec,
+    CurveRZFourierSpec,
+    CurvePlanarFourierSpec,
+    CurveHelicalSpec,
+    CurveCWSFourierRZSpec,
+    CurvePerturbedSpec,
+    CurveFilamentSpec,
+]
 
-CurveSpecKind: TypeAlias = Literal[
+CurveSpecKind = Literal[
     "xyz_fourier",
     "rz_fourier",
     "planar_fourier",

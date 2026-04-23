@@ -12,27 +12,11 @@ __all__ = [
     "QuadraticPenalty",
     "Weight",
     "forward_backward",
-    "forward_backward_jax",
-    "plu_solve_jax",
 ]
 
 
 def _host_float_scalar(value):
     return float(_shared_host_scalar(value, dtype=float))
-
-
-def _solve_vector_or_matrix_rhs(rhs, solve_vector, *, jnp, solver_name):
-    """Apply a vector solve to either one RHS or a column-stacked RHS matrix."""
-    if rhs.ndim == 1:
-        return solve_vector(rhs)
-    if rhs.ndim == 2:
-        return jnp.stack(
-            [solve_vector(rhs[:, i]) for i in range(rhs.shape[1])],
-            axis=1,
-        )
-    raise ValueError(
-        f"{solver_name} expects a vector or matrix right-hand side."
-    )
 
 
 def forward_backward(P, L, U, rhs, iterative_refinement=False):
@@ -58,115 +42,6 @@ def forward_backward(P, L, U, rhs, iterative_refinement=False):
         adj += P @ zp
 
     return adj
-
-
-def forward_backward_jax(P, L, U, rhs, iterative_refinement=False):
-    """
-    Solve ``(PLU)^T * adj = rhs`` using JAX triangular solves.
-
-    This preserves the existing PLU contract while keeping the adjoint
-    linear solve on the active JAX device for JAX-native implicit paths.
-    ``rhs`` may be either a vector or a matrix of right-hand sides.
-    """
-    import jax
-    import jax.numpy as jnp
-
-    P_jax = jnp.asarray(P)
-    L_jax = jnp.asarray(L)
-    U_jax = jnp.asarray(U)
-    rhs_jax = jnp.asarray(rhs)
-
-    def solve_vector(rhs_vector):
-        y = jax.scipy.linalg.solve_triangular(
-            U_jax,
-            rhs_vector,
-            trans="T",
-            lower=False,
-        )
-        z = jax.scipy.linalg.solve_triangular(
-            L_jax,
-            y,
-            trans="T",
-            lower=True,
-            unit_diagonal=True,
-        )
-        adj_vector = P_jax @ z
-
-        if iterative_refinement:
-            residual = rhs_vector - (P_jax @ L_jax @ U_jax).T @ adj_vector
-            yp = jax.scipy.linalg.solve_triangular(
-                U_jax,
-                residual,
-                trans="T",
-                lower=False,
-            )
-            zp = jax.scipy.linalg.solve_triangular(
-                L_jax,
-                yp,
-                trans="T",
-                lower=True,
-                unit_diagonal=True,
-            )
-            adj_vector = adj_vector + P_jax @ zp
-
-        return adj_vector
-
-    # For the ill-conditioned Boozer adjoint systems that use iterative
-    # refinement, fused matrix RHS solves can drift measurably from the
-    # corresponding per-column vector solves. Preserve vector semantics
-    # explicitly so batched callers match the single-RHS contract.
-    return _solve_vector_or_matrix_rhs(
-        rhs_jax,
-        solve_vector,
-        jnp=jnp,
-        solver_name="forward_backward_jax",
-    )
-
-
-def plu_solve_jax(P, L, U, rhs, iterative_refinement=False):
-    """
-    Solve ``(PLU) * x = rhs`` using JAX triangular solves.
-
-    This complements ``forward_backward_jax()``, which solves the transposed
-    system.  The factorization contract matches the rest of simsopt: callers
-    provide ``P, L, U`` from ``jax.scipy.linalg.lu``.
-    """
-    import jax
-    import jax.numpy as jnp
-
-    P_jax = jnp.asarray(P)
-    L_jax = jnp.asarray(L)
-    U_jax = jnp.asarray(U)
-    rhs_jax = jnp.asarray(rhs)
-
-    def solve_vector(rhs_vector):
-        y = jax.scipy.linalg.solve_triangular(
-            L_jax,
-            P_jax.T @ rhs_vector,
-            lower=True,
-            unit_diagonal=True,
-        )
-        x_vector = jax.scipy.linalg.solve_triangular(U_jax, y, lower=False)
-
-        if iterative_refinement:
-            residual = rhs_vector - (P_jax @ L_jax @ U_jax) @ x_vector
-            yp = jax.scipy.linalg.solve_triangular(
-                L_jax,
-                P_jax.T @ residual,
-                lower=True,
-                unit_diagonal=True,
-            )
-            xp = jax.scipy.linalg.solve_triangular(U_jax, yp, lower=False)
-            x_vector = x_vector + xp
-
-        return x_vector
-
-    return _solve_vector_or_matrix_rhs(
-        rhs_jax,
-        solve_vector,
-        jnp=jnp,
-        solver_name="plu_solve_jax",
-    )
 
 
 def sum_across_comm(derivative, comm):

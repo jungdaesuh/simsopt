@@ -224,11 +224,11 @@ exit 0
 
             calls = fake_tar_log.read_text(encoding="utf-8").splitlines()
             self.assertIn(
-                "--no-mac-metadata -cf /dev/null --files-from /dev/null",
+                "--no-mac-metadata -cf /dev/null -T /dev/null",
                 calls,
             )
             self.assertIn(
-                "--no-xattrs -cf /dev/null --files-from /dev/null",
+                "--no-xattrs -cf /dev/null -T /dev/null",
                 calls,
             )
             self.assertTrue(

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from typing import Union
+
 
 SHORT_RUN_SMOKE_MAXITER = 20
 _SMOKE_STAGE2_RUNG_NAMES = ("stage2_cold", "stage2_warm")
 _GEOMETRY_REPRO_STAGE2_RUNG_NAME = "stage2_warm_repro"
 TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG = "tier3_single_stage_outer_loop"
+
+ParityToleranceValue = Union[float, bool, None]
 
 OPTIMIZER_DRIFT_TOLERANCES = {
     "tier1_stage2_value_gradient": {
@@ -34,6 +38,78 @@ OPTIMIZER_DRIFT_TOLERANCES = {
         "fixed_surface_fd_abs_tol": 1e-8,
         "full_resolve_fd_rel_tol": 1e-2,
         "full_resolve_fd_abs_tol": 1e-8,
+    },
+}
+
+PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
+    "direct_kernel": {
+        "rtol": 1e-10,
+        "atol": 1e-12,
+        "requires_same_state": True,
+        "requires_direct_cpp_oracle": True,
+        "vector_parity_required": True,
+    },
+    "ls_wrapper_gradient": {
+        "rtol": 1e-10,
+        "atol": 1e-12,
+        "requires_same_state": True,
+        "requires_direct_cpp_oracle": True,
+        "vector_parity_required": True,
+    },
+    "derivative_heavy": {
+        "first_derivative_rtol": 1e-8,
+        "first_derivative_atol": 1e-10,
+        "second_derivative_rtol": 1e-6,
+        "second_derivative_atol": 1e-8,
+        "requires_same_input": True,
+        "requires_direct_cpp_oracle": True,
+        "fd_validation_secondary": True,
+    },
+    "exact_well_conditioned_adjoint": {
+        "adjoint_rtol": 1e-6,
+        "adjoint_atol": 1e-8,
+        "gradient_rtol": 1e-6,
+        "gradient_atol": 1e-8,
+        "residual_rel_tol": 1e-10,
+        "requires_same_state": True,
+        "requires_well_conditioned_jacobian": True,
+        "vector_parity_required": True,
+    },
+    "exact_ill_conditioned_adjoint": {
+        "adjoint_rtol": None,
+        "adjoint_atol": None,
+        "gradient_rtol": None,
+        "gradient_atol": None,
+        "residual_rel_tol": 1e-10,
+        "requires_same_state": True,
+        "requires_well_conditioned_jacobian": False,
+        "operator_failure_allowed": True,
+        "vector_parity_required": False,
+    },
+    "branch_stable_resolve": {
+        "core_value_rtol": 1e-6,
+        "core_value_atol": 1e-7,
+        "derived_value_rtol": 5e-5,
+        "derived_value_atol": 1e-7,
+        "requires_branch_stable_state": True,
+        "branch_divergence_downgrades_to_health_only": True,
+    },
+    "fd_gradient": {
+        "directional_fd_rtol": 1e-5,
+        "directional_fd_atol": 1e-7,
+        "requires_branch_stable_state": True,
+        "compares_directional_derivative": True,
+    },
+    "gpu_runtime": {
+        "same_state_forward_rtol": 1e-10,
+        "same_state_forward_atol": 1e-12,
+        "same_state_gradient_rtol": 1e-8,
+        "same_state_gradient_atol": 1e-10,
+        "whole_solve_value_rtol": 1e-6,
+        "whole_solve_value_atol": 1e-7,
+        "requires_x64": True,
+        "requires_fixed_seed": True,
+        "requires_runtime_metadata": True,
     },
 }
 
@@ -96,6 +172,17 @@ def _normalize_platform_key(value: str) -> str:
     if platform_key == "gpu":
         return "cuda"
     return platform_key
+
+
+def parity_ladder_tolerances(lane: str) -> dict[str, ParityToleranceValue]:
+    """Return the precision contract for a named parity-validation lane."""
+    lane_key = _normalize_contract_key(lane)
+    if lane_key not in PARITY_LADDER_TOLERANCES:
+        valid = ", ".join(sorted(PARITY_LADDER_TOLERANCES))
+        raise ValueError(
+            f"Unknown parity ladder lane {lane!r}. Expected one of: {valid}."
+        )
+    return dict(PARITY_LADDER_TOLERANCES[lane_key])
 
 
 def grouped_adjoint_memory_budget(
@@ -273,6 +360,35 @@ def ratchet_rel_tol(
 ) -> float:
     """Tighten a relative tolerance gate to the requested ratchet factor."""
     return min(float(current_rel_tol), float(factor) * float(achieved_rel_err))
+
+
+def parity_ladder_ratchet_rel_tol(
+    lane: str,
+    current_rel_tol: float,
+    achieved_rel_err: float,
+    *,
+    branch_divergent: bool = False,
+    factor: float | None = None,
+) -> float:
+    """Return the ratcheted tolerance allowed by a parity-ladder lane.
+
+    Lanes without vector parity, and branch-divergent branch-stable samples,
+    keep their current tolerance even if one run reports a smaller error.
+    """
+    tolerances = parity_ladder_tolerances(lane)
+    if branch_divergent or tolerances.get("vector_parity_required") is False:
+        return float(current_rel_tol)
+
+    ratchet_factor = (
+        CI_REPRODUCIBILITY_CONTRACT["tolerance_ratchet_factor"]
+        if factor is None
+        else factor
+    )
+    return ratchet_rel_tol(
+        current_rel_tol,
+        achieved_rel_err,
+        factor=float(ratchet_factor),
+    )
 
 
 def _smoke_geometry_override_error(maxiter: int) -> str:

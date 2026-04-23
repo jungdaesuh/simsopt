@@ -8,14 +8,15 @@ This note complements [docs/single_stage_banana_ondevice_hot_path_diagnosis_2026
 
 It records the validated two-PR plan after checking the current tree, the
 single-stage target-lane launcher, the private on-device L-BFGS implementation,
-and the current dense-PLU exact-adjoint contract.
+and the former dense-PLU exact-adjoint contract.
 
 ## 2026-04-23 status update
 
 The plan below remains useful as a design record, but it is no longer a pure
-future-work list. The seeded target-lane seam has landed, and the adjoint
-runtime seam has partially landed. Treat the rest of this file as historical
-context plus remaining follow-up.
+future-work list. The seeded target-lane seam has landed, and the JAX adjoint
+runtime contract is now operator-backed by definition. Treat the rest of this
+file as historical context; no historical dense-PLU item below overrides the
+active operator-only exact-adjoint contract.
 
 ### Completed from this plan
 
@@ -37,17 +38,26 @@ context plus remaining follow-up.
   `res["PLU"]` / `res["vjp"]` access onto the runtime-state seam.
 - [x] Much of the dense-specific traceable payload was renamed from `*_plu` to
   `*_linear_solve_factors`, matching the active seam more closely.
+- [x] Exact-JAX runtime adjoints and traceable warm-start solves use operator
+  callbacks only. Public dense `PLU` may still be present as metadata, reported
+  with `dense_linear_solve_factors_available`, but runtime state exposes
+  `linear_solve_factors=None`.
+- [x] The dense JAX PLU utility path was removed from
+  `simsopt.objectives.utilities`.
 
-### Still open
+### Historical caveats
 
-- [ ] Matrix-free exact adjoint mode behind an explicit option is still not
-  implemented.
-- [ ] Exact-mode success semantics are still not fully split into separate
-  primal-success and adjoint-state-availability contracts.
-- [ ] Some compatibility payloads still expose legacy `plu` / `PLU` aliases,
-  mainly in lower-level Boozer result dictionaries and CPU fallback wrappers.
-- [ ] The historical line references and some wording below were validated on
-  2026-04-19 and should not be treated as current line-accurate anchors.
+- There are no remaining operator-only exact-adjoint implementation blockers in
+  this plan.
+- Exact-mode success semantics are split in the active JAX path. Historical
+  prose below may still describe the old combined dense-finalization contract
+  because it records the 2026-04-19 plan, not the current runtime contract.
+- Compatibility payloads may still expose legacy `plu` / `PLU` aliases in
+  lower-level Boozer result dictionaries and CPU fallback wrappers. In the JAX
+  exact-adjoint contract, those aliases are metadata only and do not feed
+  runtime or traceable exact linear solves.
+- Historical line references and wording below were validated on 2026-04-19 and
+  should not be treated as current line-accurate anchors.
 
 ## Confirmed current-tree facts
 
@@ -61,9 +71,9 @@ source of truth.
 | The single-stage traceable forward path still carries a baseline-aware `same_coils` `lax.cond` | `src/simsopt/geo/surfaceobjectives_jax.py:2145-2235` | verified |
 | The compiled single-stage bundle is built in one place and already separates public runtime boundaries from internal compiled closures | `src/simsopt/geo/surfaceobjectives_jax.py:2489-2569` and `:2693-2715` | verified |
 | The single-stage example already has an explicit target-lane `value_and_grad` path | `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py:5292-5348`, `:6660-6727` | verified |
-| The exact-mode warm-start predictor still uses a forward PLU solve, not just the transposed adjoint solve | `src/simsopt/geo/surfaceobjectives_jax.py:2377` | verified |
-| Exact-mode `run_code_traceable()` still defines success as `result["success"] & finite & jacobian_available_jax` | `src/simsopt/geo/boozersurface_jax.py:2387` | verified |
-| Wrapper/runtime adjoint state is still hard-coded to `.plu` | `src/simsopt/geo/boozersurface_jax.py:180-187` and `src/simsopt/geo/surfaceobjectives_jax.py:963-973` | verified |
+| The exact-mode warm-start predictor still uses a forward PLU solve, not just the transposed adjoint solve | superseded | fixed: exact warm-start prediction uses `_solve_jacobian_system_with_status(..., transpose=False)` |
+| Exact-mode `run_code_traceable()` still defines success as `result["success"] & finite & jacobian_available_jax` | superseded | fixed: dense Jacobian availability is not required for traceable exact adjoint availability |
+| Wrapper/runtime adjoint state is still hard-coded to `.plu` | superseded | fixed: JAX runtime state is operator-backed and exposes dense factors only as availability metadata |
 
 ## Non-goals
 
@@ -258,15 +268,16 @@ never traces the baseline `lax.cond` in its hot path.
 
 ## PR 2: Generalize exact-mode adjoint state and add matrix-free mode
 
-Status on 2026-04-23: partially landed. The adjoint runtime seam and much of the
-renaming/generalization are in place, but the matrix-free exact mode itself is
-still pending.
+Status on 2026-04-23: superseded by the operator-only exact-adjoint contract.
+No new mode flag was added; exact-JAX adjoints are operator-backed by definition.
 
 ### Goal
 
-Keep dense-PLU exact adjoints as the default compatibility path, but introduce an
-abstract adjoint-state contract that can also support a matrix-free exact adjoint
-solve without forcing the exact primal path to fail at dense-Jacobian finalization.
+Historical goal: keep dense-PLU exact adjoints as the default compatibility path,
+but introduce an abstract adjoint-state contract that can also support a
+matrix-free exact adjoint solve without forcing the exact primal path to fail at
+dense-Jacobian finalization. Current implementation chose the simpler contract:
+JAX exact adjoints are always operator-backed, and dense `PLU` is metadata only.
 
 ### Planned changes
 
@@ -319,22 +330,19 @@ solve without forcing the exact primal path to fail at dense-Jacobian finalizati
 
    - the transposed adjoint solve currently routed through `_solve_boozer_adjoint`
    - the forward warm-start solve currently routed through
-     `_solve_plu_with_refinement(*baseline_plu, -forcing)` at
-     `surfaceobjectives_jax.py:2377`
+     the exact Jacobian operator with `transpose=False`
 
 5. Add matrix-free exact adjoint mode behind an option.
 
-   In `BoozerSurfaceJAX`, add an exact-mode option such as:
+   Superseded: no option was added. The active contract is always
+   operator-backed. The inactive historical option sketch would have kept dense
+   PLU as the default, but that sketch was not implemented.
 
-   - `exact_adjoint_mode="dense_plu" | "matrix_free"`
-
-   with dense PLU remaining the default.
-
-   Dense mode:
+   Inactive dense-mode sketch:
 
    - preserves current `jacobian`, `plu`, and `scaling_limit` behavior
 
-   Matrix-free mode:
+   Inactive matrix-free-mode sketch:
 
    - skips dense-Jacobian finalization for adjoint availability
    - carries an abstract adjoint-state payload instead
@@ -342,17 +350,15 @@ solve without forcing the exact primal path to fail at dense-Jacobian finalizati
 
 6. Route both exact-mode linear solves through the new abstraction.
 
-   Dense mode:
-
-   - `_solve_boozer_forward(...)` -> `_solve_plu_with_refinement(...)`
-   - `_solve_boozer_adjoint(...)` -> `_solve_plu_transpose_with_refinement(...)`
-
-   Matrix-free mode:
+   Active result:
 
    - forward solve through a non-transposed linear operator
    - adjoint solve through the transposed operator
+   - batched exact adjoints run the operator solve once per RHS column
 
 ### Tests for PR 2
+
+Historical test plan, superseded by the active operator-only exact-adjoint tests:
 
 1. Dense-mode compatibility tests
 

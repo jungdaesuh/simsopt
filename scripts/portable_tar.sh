@@ -27,10 +27,8 @@ EOF
 }
 
 supports_tar_flag() {
-  case "${TAR_HELP_TEXT}" in
-    *"$1"*) return 0 ;;
-    *) return 1 ;;
-  esac
+  local flag="$1"
+  tar "$flag" -cf /dev/null -T /dev/null >/dev/null 2>&1
 }
 
 mode="stdout"
@@ -114,7 +112,6 @@ if [ "${#archive_paths[@]}" -eq 0 ] && [ "${#files_from_paths[@]}" -eq 0 ]; then
   exit 2
 fi
 
-TAR_HELP_TEXT="$(tar --help 2>&1 || true)"
 declare -a tar_args=()
 
 if supports_tar_flag "--no-mac-metadata"; then

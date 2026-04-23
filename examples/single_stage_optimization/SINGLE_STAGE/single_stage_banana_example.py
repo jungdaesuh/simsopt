@@ -1582,6 +1582,11 @@ def should_write_single_stage_restart_artifacts(benchmark_mode: bool) -> bool:
     return not benchmark_mode
 
 
+def should_record_single_stage_outer_optimizer_progress(use_target_lane: bool) -> bool:
+    """Return whether durable outer-optimizer progress should be written."""
+    return bool(use_target_lane)
+
+
 def use_experimental_target_lane_value_and_grad(
     *,
     backend: str,
@@ -7134,6 +7139,7 @@ def run_single_stage_target_lane_optimizer_with_retries(
     single_stage_search_policy,
     retry_dofs_factory=None,
     restored_result_x_factory=None,
+    progress_event_callback=None,
 ):
     """Retry invalid-state target-lane failures from preserved local anchors."""
 
@@ -7145,6 +7151,11 @@ def run_single_stage_target_lane_optimizer_with_retries(
 
     if restored_result_x_factory is None:
         restored_result_x_factory = retry_dofs_factory
+
+    def record_progress_event(label, **extra):
+        if progress_event_callback is None:
+            return
+        progress_event_callback(label, phase=phase, **extra)
 
     def sync_failed_attempt_state(result, *, event_start_index):
         if result_state_sync is None:
@@ -7165,6 +7176,15 @@ def run_single_stage_target_lane_optimizer_with_retries(
         optimizer_kwargs["optimizer_initial_value_and_grad"] = (
             optimizer_initial_value_and_grad
         )
+    record_progress_event(
+        f"{phase}_attempt_0_started",
+        attempt_index=0,
+        maxiter=int(maxiter),
+        initial_step_size=None
+        if initial_step_size is None
+        else float(initial_step_size),
+        optimizer_dofs=_summarize_host_vector(dofs),
+    )
     result = run_single_stage_optimizer(
         fun,
         dofs,
@@ -7180,6 +7200,11 @@ def run_single_stage_target_lane_optimizer_with_retries(
         target_lane_initial_step_size=initial_step_size,
         failure_callback=failure_callback,
         **optimizer_kwargs,
+    )
+    record_progress_event(
+        f"{phase}_attempt_0_returned",
+        attempt_index=0,
+        result=summarize_optimizer_result_for_progress(result),
     )
     extend_target_lane_invalid_state_events_from_result(
         invalid_state_events,
@@ -7225,6 +7250,14 @@ def run_single_stage_target_lane_optimizer_with_retries(
                 "triggered_by_invalid_state": True,
             }
         )
+        record_progress_event(
+            f"{phase}_retry_{retry_index + 1}_started",
+            attempt_index=int(retry_index + 1),
+            anchor_stage=None if anchor_stage is None else str(anchor_stage),
+            anchor_metric=float(anchor_state["J"]),
+            initial_step_size=float(initial_step_size),
+            remaining_maxiter=int(max(int(maxiter) - total_nit, 1)),
+        )
         event_start = len(invalid_state_events)
         remaining_maxiter = max(int(maxiter) - total_nit, 1)
         optimizer_initial_value_and_grad = None
@@ -7242,6 +7275,11 @@ def run_single_stage_target_lane_optimizer_with_retries(
             progress_callback=progress_callback,
             target_lane_initial_step_size=initial_step_size,
             failure_callback=failure_callback,
+        )
+        record_progress_event(
+            f"{phase}_retry_{retry_index + 1}_returned",
+            attempt_index=int(retry_index + 1),
+            result=summarize_optimizer_result_for_progress(result),
         )
         extend_target_lane_invalid_state_events_from_result(
             invalid_state_events,
@@ -7278,6 +7316,11 @@ def run_single_stage_target_lane_optimizer_with_retries(
             retry_summary["restored_preserved_local_state"] = True
             retry_summary["restored_preserved_local_stage"] = (
                 None if anchor_stage is None else str(anchor_stage)
+            )
+            record_progress_event(
+                f"{phase}_restored_preserved_local_state",
+                anchor_stage=None if anchor_stage is None else str(anchor_stage),
+                anchor_metric=float(anchor_state["J"]),
             )
     return result, retry_summary
 
@@ -7329,9 +7372,16 @@ def build_stage_progress_recorder(path):
 def build_event_progress_recorder(path):
     """Build a JSON event recorder that preserves chronological history."""
     events = []
+    started_s = _perf_counter_s()
 
     def record_event(label, **extra):
-        events.append({"label": label, **dict(extra)})
+        event = {
+            "label": label,
+            "event_index": int(len(events)),
+            "event_elapsed_s": float(_perf_counter_s() - started_s),
+            **dict(extra),
+        }
+        events.append(event)
         write_json_file(
             path,
             {
@@ -8107,7 +8157,15 @@ class SingleStageAdapter:
         self.sync_accepted_step(x)
 
 
-def snapshot_to_pytree(JF, boozer_surface, bs, *, num_tf_coils):
+def snapshot_to_pytree(
+    JF,
+    boozer_surface,
+    bs,
+    *,
+    num_tf_coils,
+    coil_dofs_override=None,
+    evaluate_initial_objective=True,
+):
     """Extract pre-optimization state from the Optimizable graph.
 
     Converts the mutable Optimizable graph into plain arrays and metadata.
@@ -8122,6 +8180,13 @@ def snapshot_to_pytree(JF, boozer_surface, bs, *, num_tf_coils):
         bs: Biot-Savart field object with ``.coils``.
         num_tf_coils: Number of TF coils (first ``num_tf_coils`` in
             ``bs.coils`` are frozen; the rest are banana coils).
+        coil_dofs_override: Optional optimizer-lane coil DOFs to store in
+            ``run_dict``.  The JAX target lane optimizes ``bs.x`` directly,
+            while ``JF.x`` belongs to the legacy Optimizable graph.
+        evaluate_initial_objective: Whether to evaluate the legacy host
+            objective and gradient while snapshotting.  Target-lane runs seed
+            these fields from the fused JAX value/gradient after the runtime
+            bundle is built, avoiding an expensive duplicate host-gradient path.
 
     Returns:
         (coil_dofs, run_dict, static_config):
@@ -8137,12 +8202,21 @@ def snapshot_to_pytree(JF, boozer_surface, bs, *, num_tf_coils):
             "snapshot_to_pytree requires a successful Boozer solve; "
             "call initialize_boozer_surface() first."
         )
-    coil_dofs = JF.x.copy()
+    coil_dofs = (
+        JF.x.copy()
+        if coil_dofs_override is None
+        else host_array(coil_dofs_override, dtype=np.float64).copy()
+    )
     coils = bs.coils
     tf_coils = coils[:num_tf_coils]
 
-    initial_objective = host_float(JF.J())
-    initial_objective_grad = host_array(JF.dJ())
+    initial_objective_pending = not bool(evaluate_initial_objective)
+    if evaluate_initial_objective:
+        initial_objective = host_float(JF.J())
+        initial_objective_grad = host_array(JF.dJ())
+    else:
+        initial_objective = float("nan")
+        initial_objective_grad = np.zeros_like(coil_dofs, dtype=np.float64)
     solved_state = _resolved_single_stage_boozer_solved_state(boozer_surface)
 
     run_dict = {
@@ -8152,6 +8226,7 @@ def snapshot_to_pytree(JF, boozer_surface, bs, *, num_tf_coils):
         "J": initial_objective,
         "dJ": initial_objective_grad,
         "initial_objective": initial_objective,
+        "initial_objective_pending": initial_objective_pending,
         "it": 1,
         "lscount": 0,
         "failure_count": 0,
@@ -8176,6 +8251,19 @@ def snapshot_to_pytree(JF, boozer_surface, bs, *, num_tf_coils):
     }
 
     return coil_dofs, run_dict, static_config
+
+
+def seed_single_stage_initial_objective_from_values(
+    run_dict,
+    *,
+    objective_value,
+    objective_grad,
+):
+    """Seed the initial accepted objective from an already-computed lane value."""
+    run_dict["J"] = host_float(objective_value)
+    run_dict["dJ"] = host_array(objective_grad, dtype=np.float64)
+    run_dict["initial_objective"] = host_float(objective_value)
+    run_dict["initial_objective_pending"] = False
 
 
 def restore_from_pytree(
@@ -8704,6 +8792,35 @@ if __name__ == "__main__":
     boozer_init_progress = build_stage_progress_recorder(
         os.path.join(OUT_DIR_ITER, "boozer_init_progress.json")
     )
+    outer_contract = resolve_single_stage_optimizer_contract(
+        args.backend,
+        args.optimizer_backend,
+    )
+    from simsopt.geo.optimizer_jax import TargetOptimizerContract
+
+    use_target_lane = CONSTRAINT_METHOD == "penalty" and isinstance(
+        outer_contract,
+        TargetOptimizerContract,
+    )
+    outer_optimizer_progress = (
+        build_event_progress_recorder(
+            os.path.join(OUT_DIR_ITER, "outer_optimizer_progress.json")
+        )
+        if should_record_single_stage_outer_optimizer_progress(use_target_lane)
+        else None
+    )
+
+    def record_outer_optimizer_event(label, **extra):
+        if outer_optimizer_progress is None:
+            return
+        outer_optimizer_progress(label, **extra)
+
+    record_outer_optimizer_event(
+        "pre_optimizer_startup_ready",
+        use_target_lane=bool(use_target_lane),
+        output_dir=OUT_DIR_ITER,
+        optimizer_method=getattr(outer_contract, "method", None),
+    )
     boozer_init_progress(
         "starting",
         backend=args.backend,
@@ -8730,6 +8847,7 @@ if __name__ == "__main__":
 
     # Initialize Boozer surface with target parameters
     timings = {}
+    record_outer_optimizer_event("boozer_init_started")
     with maybe_trace_single_stage_phase(
         "single_stage.initialize_boozer_surface",
         enabled=jax_profile_enabled,
@@ -8766,11 +8884,22 @@ if __name__ == "__main__":
             timings_out=timings,
         )
     boozer_init_progress("completed")
+    record_outer_optimizer_event(
+        "boozer_init_returned",
+        solve_success=bool(boozer_surface.res.get("success", False)),
+        iterations=None
+        if boozer_surface.res.get("iter", None) is None
+        else _summarize_host_scalar(boozer_surface.res["iter"]),
+    )
 
     # ==============================================================================
     # SAVE INITIAL STATE
     # ==============================================================================
     initial_artifacts_start_s = _perf_counter_s()
+    record_outer_optimizer_event(
+        "initial_diagnostics_started",
+        write_full_artifacts=bool(write_full_artifacts),
+    )
     if write_full_artifacts:
         # Save initial coil configurations
         curves_to_vtk(curves, OUT_DIR_ITER + "/curves_init", close=True)
@@ -8820,11 +8949,20 @@ if __name__ == "__main__":
         initial_artifacts_start_s,
         _perf_counter_s(),
     )
+    record_outer_optimizer_event(
+        "initial_diagnostics_returned",
+        elapsed_s=float(_perf_counter_s() - initial_artifacts_start_s),
+        initial_volume=_summarize_host_scalar(initial_volume),
+        initial_iota=_summarize_host_scalar(initial_iota),
+        initial_field_error=_summarize_host_scalar(initial_field_error),
+        initial_max_curvature=_summarize_host_scalar(initial_max_curvature),
+    )
 
     # ==============================================================================
     # DEFINE OBJECTIVE FUNCTION COMPONENTS
     # ==============================================================================
     objective_setup_start_s = _perf_counter_s()
+    record_outer_optimizer_event("objective_setup_started")
     # Biot-Savart field calculation
     if use_jax:
         bs_obj = BiotSavartJAX(coils)
@@ -8887,30 +9025,14 @@ if __name__ == "__main__":
         objective_setup_start_s,
         _perf_counter_s(),
     )
+    record_outer_optimizer_event(
+        "objective_setup_returned",
+        elapsed_s=float(_perf_counter_s() - objective_setup_start_s),
+    )
 
     # ==============================================================================
     # SNAPSHOT PRE-OPTIMIZATION STATE
     # ==============================================================================
-    dofs, run_dict, static_config = snapshot_to_pytree(
-        JF, boozer_surface, bs, num_tf_coils=num_tf_coils
-    )
-    outer_contract = resolve_single_stage_optimizer_contract(
-        args.backend,
-        args.optimizer_backend,
-    )
-    from simsopt.geo.optimizer_jax import TargetOptimizerContract
-
-    outer_optimizer_method_record = (
-        "alm" if CONSTRAINT_METHOD == "alm" else outer_contract.method
-    )
-    alm_inner_optimizer_contract = resolve_single_stage_alm_inner_optimizer_contract(
-        CONSTRAINT_METHOD,
-        outer_contract,
-    )
-    use_target_lane = CONSTRAINT_METHOD == "penalty" and isinstance(
-        outer_contract,
-        TargetOptimizerContract,
-    )
     dof_setter = resolve_single_stage_outer_dof_setter(
         JF,
         bs,
@@ -8920,6 +9042,34 @@ if __name__ == "__main__":
         JF,
         bs,
         use_target_lane=use_target_lane,
+    )
+    snapshot_start_s = _perf_counter_s()
+    record_outer_optimizer_event(
+        "snapshot_started",
+        evaluate_initial_objective=not bool(use_target_lane),
+        optimizer_dofs=_summarize_host_vector(dofs),
+    )
+    dofs, run_dict, static_config = snapshot_to_pytree(
+        JF,
+        boozer_surface,
+        bs,
+        num_tf_coils=num_tf_coils,
+        coil_dofs_override=dofs,
+        evaluate_initial_objective=not use_target_lane,
+    )
+    record_outer_optimizer_event(
+        "snapshot_returned",
+        elapsed_s=float(_perf_counter_s() - snapshot_start_s),
+        initial_objective_pending=bool(
+            run_dict.get("initial_objective_pending", False)
+        ),
+    )
+    outer_optimizer_method_record = (
+        "alm" if CONSTRAINT_METHOD == "alm" else outer_contract.method
+    )
+    alm_inner_optimizer_contract = resolve_single_stage_alm_inner_optimizer_contract(
+        CONSTRAINT_METHOD,
+        outer_contract,
     )
     run_dict["x_prev"] = _single_stage_optimizer_dofs_array(dofs).copy()
     run_dict["donor_class"] = single_stage_search_policy.donor_class
@@ -8953,12 +9103,20 @@ if __name__ == "__main__":
         "banana_curve": banana_curve,
         "curvelength": curvelength,
     }
+    initial_hardware_start_s = _perf_counter_s()
+    record_outer_optimizer_event("initial_hardware_status_started")
     run_dict["hardware_constraint_status"] = _evaluate_single_stage_hardware_status(
         objectives,
         diagnostics_refs,
     )
+    record_outer_optimizer_event(
+        "initial_hardware_status_returned",
+        elapsed_s=float(_perf_counter_s() - initial_hardware_start_s),
+        success=run_dict["hardware_constraint_status"].get("success"),
+    )
     update_self_intersection_status(run_dict, boozer_surface.surface)
-    record_single_stage_local_incumbent(run_dict, stage="initial")
+    if not bool(run_dict.get("initial_objective_pending", False)):
+        record_single_stage_local_incumbent(run_dict, stage="initial")
     target_lane_profile = None
     target_lane_optimizer_initial_value_and_grad = None
     adapter = SingleStageAdapter(
@@ -9008,18 +9166,6 @@ if __name__ == "__main__":
     diagnostic_target_lane_callbacks = bool(
         use_target_lane and target_lane_diagnostic_callbacks_enabled(args)
     )
-    outer_optimizer_progress = (
-        build_event_progress_recorder(
-            os.path.join(OUT_DIR_ITER, "outer_optimizer_progress.json")
-        )
-        if use_target_lane and args.benchmark_mode
-        else None
-    )
-
-    def record_outer_optimizer_event(label, **extra):
-        if outer_optimizer_progress is None:
-            return
-        outer_optimizer_progress(label, **extra)
 
     def build_outer_optimizer_progress_callback(phase):
         if outer_optimizer_progress is None:
@@ -9502,6 +9648,19 @@ if __name__ == "__main__":
                 value is not None
                 for value in target_lane_trial_boozer_overrides.values()
             )
+            target_lane_bundle_setup_start_s = _perf_counter_s()
+            record_outer_optimizer_event(
+                "target_lane_bundle_setup_started",
+                method=outer_contract.method,
+                maxiter=int(MAXITER),
+                use_value_and_grad=bool(use_target_lane_vg),
+                profile_target_lane=bool(args.profile_target_lane),
+                success_filter_disabled=bool(args.disable_target_lane_success_filter),
+                trial_boozer_overrides={
+                    key: None if value is None else float(value)
+                    for key, value in target_lane_trial_boozer_overrides.items()
+                },
+            )
             with maybe_record_jax_compile_diagnostics(
                 bool(args.record_jax_compile_diagnostics and use_target_lane)
             ) as jax_compile_diagnostics_recorder, temporary_boozer_surface_option_overrides(
@@ -9582,6 +9741,49 @@ if __name__ == "__main__":
                     )
                     outer_optimizer_run_start_s = _perf_counter_s()
                     print("Target-lane outer objective/runtime bundle ready.")
+                    record_outer_optimizer_event(
+                        "target_lane_bundle_setup_returned",
+                        elapsed_s=float(
+                            _perf_counter_s() - target_lane_bundle_setup_start_s
+                        ),
+                        scalar_objective_available=target_scalar_objective is not None,
+                        value_and_grad_objective_available=(
+                            target_value_and_grad_objective is not None
+                        ),
+                        optimizer_initial_value_and_grad_available=(
+                            target_lane_optimizer_initial_value_and_grad is not None
+                        ),
+                    )
+                    if bool(run_dict.get("initial_objective_pending", False)):
+                        if target_lane_optimizer_initial_value_and_grad is None:
+                            raise RuntimeError(
+                                "Target-lane startup skipped the legacy initial "
+                                "objective/gradient snapshot, but the fused "
+                                "target-lane initial value/gradient was not "
+                                "available to seed the retry state."
+                            )
+                        (
+                            initial_target_value,
+                            initial_target_grad,
+                        ) = target_lane_optimizer_initial_value_and_grad
+                        seed_single_stage_initial_objective_from_values(
+                            run_dict,
+                            objective_value=initial_target_value,
+                            objective_grad=initial_target_grad,
+                        )
+                        record_single_stage_local_incumbent(
+                            run_dict,
+                            stage="initial",
+                        )
+                        record_outer_optimizer_event(
+                            "target_lane_initial_objective_seeded",
+                            objective_value=_summarize_host_scalar(
+                                initial_target_value
+                            ),
+                            objective_grad=_summarize_host_vector(
+                                initial_target_grad
+                            ),
+                        )
                 if args.diagnose_target_lane_scaled_phase1:
                     if not use_target_lane:
                         raise RuntimeError(
@@ -10009,6 +10211,9 @@ if __name__ == "__main__":
                                                     )
                                                 )
                                             ),
+                                            progress_event_callback=(
+                                                record_outer_optimizer_event
+                                            ),
                                         )
                                     )
                                 else:
@@ -10063,6 +10268,13 @@ if __name__ == "__main__":
                                 and target_lane_result_has_syncable_state(phase1_res)
                             ):
                                 target_lane_phase1_sync_start_s = _perf_counter_s()
+                                record_outer_optimizer_event(
+                                    "target_lane_initial_phase_sync_started",
+                                    phase="phase1",
+                                    result=summarize_optimizer_result_for_progress(
+                                        phase1_res
+                                    ),
+                                )
                                 with maybe_trace_single_stage_phase(
                                     "single_stage.target_lane_initial_phase_sync",
                                     enabled=jax_profile_enabled,
@@ -10073,6 +10285,13 @@ if __name__ == "__main__":
                                     "target_lane_initial_phase_sync_s",
                                     target_lane_phase1_sync_start_s,
                                     _perf_counter_s(),
+                                )
+                                record_outer_optimizer_event(
+                                    "target_lane_initial_phase_sync_returned",
+                                    phase="phase1",
+                                    elapsed_s=timings.get(
+                                        "target_lane_initial_phase_sync_s"
+                                    ),
                                 )
                             if phase1_iterations > 0:
                                 dofs = phase1_final_dofs
@@ -10152,6 +10371,9 @@ if __name__ == "__main__":
                                         invalid_state_events=target_lane_invalid_state_events,
                                         run_dict=run_dict,
                                         single_stage_search_policy=single_stage_search_policy,
+                                        progress_event_callback=(
+                                            record_outer_optimizer_event
+                                        ),
                                     )
                                 )
                             else:
@@ -10200,6 +10422,11 @@ if __name__ == "__main__":
                             and target_lane_result_has_syncable_state(res)
                         ):
                             target_lane_sync_start_s = _perf_counter_s()
+                            record_outer_optimizer_event(
+                                "target_lane_final_sync_started",
+                                phase="phase2",
+                                result=summarize_optimizer_result_for_progress(res),
+                            )
                             with maybe_trace_single_stage_phase(
                                 "single_stage.target_lane_final_sync",
                                 enabled=jax_profile_enabled,
@@ -10210,6 +10437,11 @@ if __name__ == "__main__":
                                 "target_lane_final_sync_s",
                                 target_lane_sync_start_s,
                                 _perf_counter_s(),
+                            )
+                            record_outer_optimizer_event(
+                                "target_lane_final_sync_returned",
+                                phase="phase2",
+                                elapsed_s=timings.get("target_lane_final_sync_s"),
                             )
                         if phase1_termination_message is not None:
                             termination_message = (
@@ -10249,6 +10481,11 @@ if __name__ == "__main__":
             trial_boozer_override_active=target_lane_trial_boozer_override_active,
         ):
             target_lane_sync_start_s = _perf_counter_s()
+            record_outer_optimizer_event(
+                "target_lane_strict_final_sync_started",
+                phase="final",
+                result=summarize_optimizer_result_for_progress(res),
+            )
             with maybe_trace_single_stage_phase(
                 "single_stage.target_lane_final_sync",
                 enabled=jax_profile_enabled,
@@ -10260,11 +10497,21 @@ if __name__ == "__main__":
                 target_lane_sync_start_s,
                 _perf_counter_s(),
             )
+            record_outer_optimizer_event(
+                "target_lane_strict_final_sync_returned",
+                phase="final",
+                elapsed_s=timings.get("target_lane_final_sync_s"),
+            )
         if not skip_outer_optimizer and not optimized_artifacts_already_materialized:
             # Optimization now keeps accepted state in ``run_dict`` on the
             # target lane. Host-only diagnostics and artifact emission get one
             # explicit handoff here instead of reading the live surface during
             # the optimizer callback path.
+            record_outer_optimizer_event(
+                "host_state_restore_started",
+                coil_dofs=_summarize_host_vector(res.x),
+            )
+            host_state_restore_start_s = _perf_counter_s()
             restore_from_pytree(
                 JF,
                 boozer_surface,
@@ -10272,6 +10519,10 @@ if __name__ == "__main__":
                 coil_dofs=res.x,
                 apply_coil_dofs=dof_setter,
                 diagnostic_bs=bs_diag if use_target_lane else None,
+            )
+            record_outer_optimizer_event(
+                "host_state_restore_returned",
+                elapsed_s=float(_perf_counter_s() - host_state_restore_start_s),
             )
 
         # ==============================================================================

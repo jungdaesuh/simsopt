@@ -139,7 +139,10 @@ port leaks a per-iteration host transfer:
    `_materialize_dense_linear_operator(...)` uses `jax.vmap(...)` over an
    identity basis at `src/simsopt/geo/optimizer_jax.py:1526-1529`. That is
    compile-cost O(1) in trace structure but execution-cost O(n) in JVPs, and it
-   still contributes to the late-stage exact-Newton footprint.
+   still contributes to optional exact-Newton metadata finalization. It is no
+   longer part of the JAX exact-adjoint contract: exact adjoints and traceable
+   warm-start prediction solve through operator callbacks even when public
+   result dictionaries expose dense `PLU` metadata.
 
 Related non-fixes:
 
@@ -251,14 +254,11 @@ gradients. Resolution:
   variant drops compute from O(n_coil) JVPs to a single VJP and removes the
   vmap memory-replication peak on the coil-DOF axis.
 
-- `_traceable_inner_stationarity_grad` —
-  `src/simsopt/geo/surfaceobjectives_jax.py:2221-2241` — **kept in forward
-  mode by design**, now with an inline comment. Because the outer gradient
-  path differentiates this map again via `jax.vjp(stationarity_of_coils, ...)`
-  at `:2711-2715`, an all-reverse choice would be reverse-over-reverse and
-  trip JAX 0.9.2's strict-transfer-guard host-scalar materialization on null
-  tangent paths. Forward-over-reverse is the correct compose for the mixed
-  IFT term `(∂²g/∂x_inner ∂coils)^T · adjoint`.
+- `_traceable_inner_stationarity_grad` remains a forward-mode helper, but the
+  traceable implicit-gradient and warm-start paths now avoid materializing the
+  full stationarity vector when they only need a directional pullback/JVP.
+  Exact linear solves in those paths are operator-backed; stored dense factors
+  are not a traceable solve shortcut.
 
 The other five vmap sites were verified clean on the same pass:
 `_materialize_dense_linear_operator` (dense operator basis, size-gated by

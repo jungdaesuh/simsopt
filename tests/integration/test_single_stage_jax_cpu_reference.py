@@ -12,9 +12,14 @@ Validates:
 8. Composite objective value and gradient are finite and non-zero.
 9. Backend selection constructs correct object types.
 
-Gradient validation uses two complementary lanes:
-- direct CPU-vs-JAX parity on the shared reduced real-fixture CPU-reference vs JAX-ondevice path
-- finite-difference checks on the JAX fixed-surface and re-solve paths
+Gradient validation uses named parity-ladder lanes from
+``benchmarks.validation_ladder_contract``:
+- ``ls-wrapper-gradient`` for direct CPU-vs-JAX reduced-real wrapper parity
+- ``derivative-heavy`` for direct C++ oracle checks on derivative kernels
+- ``branch-stable-resolve`` and ``fd-gradient`` for finite-difference checks
+  on JAX fixed-surface and branch-stable re-solve paths
+- ``exact-ill-conditioned-adjoint`` for residual/failure-only exact coverage
+- ``gpu-runtime`` for CPU-JAX vs GPU-JAX runtime-specific parity gates
 
 The FD checks remain necessary for the full re-solve lane, where CPU and JAX
 can use different internal linear algebra while still targeting the same
@@ -59,6 +64,10 @@ from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_NUM_TF_COILS,
     build_real_single_stage_init_fixture,
 )
+from benchmarks.validation_ladder_contract import (
+    optimizer_drift_tolerances,
+    parity_ladder_tolerances,
+)
 
 sopp = pytest.importorskip(
     "simsoptpp",
@@ -93,6 +102,7 @@ from simsopt.geo.surfaceobjectives import (  # noqa: E402
     BoozerResidual,
     Iotas,
     NonQuasiSymmetricRatio,
+    boozer_surface_residual,
 )
 from simsopt.objectives import QuadraticPenalty  # noqa: E402
 
@@ -143,6 +153,9 @@ from simsopt.geo.surfaceobjectives_jax import (  # noqa: E402
     _qs_ratio_pure,
     compute_standard_surface_objective_gradients,
 )
+from simsopt.geo.boozer_residual_jax import (  # noqa: E402
+    boozer_residual_jacobian_composed,
+)
 from simsopt.geo.curve import Curve, RotatedCurve  # noqa: E402
 
 from examples.single_stage_optimization.SINGLE_STAGE import (  # noqa: E402
@@ -167,26 +180,64 @@ _PUBLIC_COIL_VJP_STRICT_PATTERN = (
     "BiotSavartJAX.*public CPU coil\\.vjp\\(\\) pullback compatibility "
     "path.*strict=True"
 )
+_LS_WRAPPER_GRADIENT_TOLS = parity_ladder_tolerances("ls-wrapper-gradient")
+_DERIVATIVE_HEAVY_TOLS = parity_ladder_tolerances("derivative-heavy")
+_BRANCH_STABLE_RESOLVE_TOLS = parity_ladder_tolerances("branch-stable-resolve")
+_FD_GRADIENT_TOLS = parity_ladder_tolerances("fd-gradient")
+_GPU_RUNTIME_TOLS = parity_ladder_tolerances("gpu-runtime")
+_ADJOINT_RESIDUAL_REL_TOL = optimizer_drift_tolerances("tier4_adjoint_fd")[
+    "adjoint_residual_rel_tol"
+]
 # Solved-state objective parity can land in the ~1e-24 range, where tiny
 # evaluation-order differences need a small absolute floor to stay meaningful.
 _TRACEABLE_OBJECTIVE_ABS_TOL = 1e-28
 _REAL_FIXTURE_SOLVER_CPU_JAX_TOLS = {
-    "objective": (1e-12, 1e-18),
-    "residual_inf": (1e-12, 1e-12),
-    "iota": (0.0, 1e-12),
-    "G": (0.0, 1e-12),
-    "label_value": (1e-12, 1e-12),
-    "label_error": (1e-12, 1e-12),
-    "axis_z_abs": (0.0, 1e-12),
+    "objective": (
+        _BRANCH_STABLE_RESOLVE_TOLS["core_value_rtol"],
+        _BRANCH_STABLE_RESOLVE_TOLS["core_value_atol"],
+    ),
+    "residual_inf": (
+        _BRANCH_STABLE_RESOLVE_TOLS["core_value_rtol"],
+        _BRANCH_STABLE_RESOLVE_TOLS["core_value_atol"],
+    ),
+    "iota": (0.0, _BRANCH_STABLE_RESOLVE_TOLS["core_value_atol"]),
+    "G": (
+        _BRANCH_STABLE_RESOLVE_TOLS["core_value_rtol"],
+        _BRANCH_STABLE_RESOLVE_TOLS["core_value_atol"],
+    ),
+    "label_value": (
+        _BRANCH_STABLE_RESOLVE_TOLS["core_value_rtol"],
+        _BRANCH_STABLE_RESOLVE_TOLS["core_value_atol"],
+    ),
+    "label_error": (
+        _BRANCH_STABLE_RESOLVE_TOLS["core_value_rtol"],
+        _BRANCH_STABLE_RESOLVE_TOLS["core_value_atol"],
+    ),
+    "axis_z_abs": (0.0, _BRANCH_STABLE_RESOLVE_TOLS["core_value_atol"]),
 }
 _REAL_FIXTURE_SOLVER_CPU_GPU_TOLS = {
-    "objective": (1e-8, 1e-16),
-    "residual_inf": (1e-8, 1e-10),
-    "iota": (0.0, 1e-10),
-    "G": (0.0, 1e-10),
-    "label_value": (1e-10, 1e-10),
-    "label_error": (1e-10, 1e-10),
-    "axis_z_abs": (0.0, 1e-10),
+    "objective": (
+        _GPU_RUNTIME_TOLS["whole_solve_value_rtol"],
+        _GPU_RUNTIME_TOLS["whole_solve_value_atol"],
+    ),
+    "residual_inf": (
+        _GPU_RUNTIME_TOLS["whole_solve_value_rtol"],
+        _GPU_RUNTIME_TOLS["whole_solve_value_atol"],
+    ),
+    "iota": (0.0, _GPU_RUNTIME_TOLS["whole_solve_value_atol"]),
+    "G": (
+        _GPU_RUNTIME_TOLS["whole_solve_value_rtol"],
+        _GPU_RUNTIME_TOLS["whole_solve_value_atol"],
+    ),
+    "label_value": (
+        _GPU_RUNTIME_TOLS["whole_solve_value_rtol"],
+        _GPU_RUNTIME_TOLS["whole_solve_value_atol"],
+    ),
+    "label_error": (
+        _GPU_RUNTIME_TOLS["whole_solve_value_rtol"],
+        _GPU_RUNTIME_TOLS["whole_solve_value_atol"],
+    ),
+    "axis_z_abs": (0.0, _GPU_RUNTIME_TOLS["whole_solve_value_atol"]),
 }
 _EXACT_SOLVER_END_STATE_TOLS = {
     "objective": (1e-10, 1e-24),
@@ -211,12 +262,6 @@ def test_single_stage_curvature_threshold_policy_caps_at_40():
     assert single_stage_example.resolve_curvature_threshold(80.0) == pytest.approx(40.0)
 
 
-def _iota_unit_rhs(plu):
-    """Return the standard IotasJAX inner cotangent for the LS path."""
-    n = plu[1].shape[0]
-    return _iota_unit_rhs_from_decision_size(n, optimize_G=True)
-
-
 def _iota_unit_rhs_from_decision_size(n, *, optimize_G):
     """Return the standard IotasJAX inner cotangent from one runtime size."""
     rhs = np.zeros(n)
@@ -237,30 +282,6 @@ def _solve_runtime_iota_adjoint(booz_surf):
         assert bool(np.asarray(success))
         return adjoint_state, rhs, adjoint
     return adjoint_state, rhs, adjoint_state.solve_transpose(rhs)
-
-
-def _host_linear_solve_factors(linear_solve_factors):
-    return tuple(np.asarray(piece, dtype=float) for piece in linear_solve_factors)
-
-
-def _dense_linear_solve_factors_for_test(booz_jax, *, fallback_boozer_surface=None):
-    """Return dense factors for factor-level utility checks when available."""
-    if fallback_boozer_surface is not None:
-        linear_solve_factors = fallback_boozer_surface.res.get("PLU")
-        if linear_solve_factors is not None:
-            host_factors = _host_linear_solve_factors(linear_solve_factors)
-            jax_factors = tuple(
-                jnp.asarray(piece, dtype=jnp.float64) for piece in host_factors
-            )
-            return host_factors, jax_factors
-    adjoint_state = booz_jax.get_adjoint_runtime_state()
-    linear_solve_factors = getattr(adjoint_state, "linear_solve_factors", None)
-    if linear_solve_factors is not None:
-        host_factors = _host_linear_solve_factors(linear_solve_factors)
-        return host_factors, linear_solve_factors
-    raise RuntimeError(
-        "No dense linear-solve factors are available for this adjoint configuration."
-    )
 
 
 def _runtime_iota_streamed_group_vjps(booz_surf):
@@ -609,6 +630,29 @@ def _build_real_fixture_ondevice_m5_pair():
     return cpu_fixture, jax_fixture
 
 
+def _build_real_fixture_ondevice_m5_same_state_pair():
+    cpu_fixture = build_real_single_stage_init_fixture(
+        backend="cpu",
+        optimizer_backend="scipy",
+    )
+    cpu_boozer = cpu_fixture["boozer_surface"]
+    cpu_result = cpu_boozer.res
+    assert cpu_result is not None and cpu_result.get("success", False), (
+        "CPU reduced-real fixture did not converge"
+    )
+    jax_fixture = build_real_single_stage_init_fixture(
+        backend="jax",
+        optimizer_backend="ondevice",
+        boozer_surface_dofs_override=np.asarray(
+            cpu_boozer.surface.get_dofs(),
+            dtype=float,
+        ),
+        boozer_iota_override=float(cpu_result["iota"]),
+        boozer_G_override=float(cpu_result["G"]),
+    )
+    return cpu_fixture, jax_fixture
+
+
 def _host_metric_array(value):
     if value is None:
         return None
@@ -814,6 +858,36 @@ def _assert_gpu_boozer_solver_result_on_device(gpu, gpu_fixture, gpu_result):
         assert_arrays_on_device(gpu, *gpu_result["PLU"])
     adjoint_state = gpu_fixture["boozer_surface"].get_adjoint_runtime_state()
     assert int(adjoint_state.decision_size) > 0
+
+
+def _collect_gpu_runtime_metadata(gpu):
+    devices = tuple(jax.devices("gpu"))
+    platform_versions = tuple(
+        sorted(
+            {
+                str(getattr(getattr(device, "client", None), "platform_version", ""))
+                for device in devices
+            }
+        )
+    )
+    return {
+        "jax_version": str(jax.__version__),
+        "jax_enable_x64": bool(jax.config.jax_enable_x64),
+        "selected_device": str(gpu),
+        "device_kinds": tuple(str(device.device_kind) for device in devices),
+        "platforms": tuple(str(device.platform) for device in devices),
+        "platform_versions": platform_versions,
+    }
+
+
+def _assert_gpu_runtime_metadata(metadata):
+    assert metadata["jax_version"]
+    assert metadata["jax_enable_x64"] is True
+    assert metadata["selected_device"]
+    assert metadata["device_kinds"]
+    assert metadata["platforms"]
+    assert all(platform in {"gpu", "cuda"} for platform in metadata["platforms"])
+    assert metadata["platform_versions"]
 
 
 def _assert_streaming_group_vjp_matches_full(
@@ -1399,6 +1473,9 @@ _REAL_RESOLVE_FD_MIN_STABLE_SAMPLES = 3
 _REAL_RESOLVE_FD_MIN_STABLE_EPS = 2
 _REAL_RESOLVE_FD_AXIS_DIRECTION_FRACTIONS = (0.0, 0.5, 1.0)
 _REAL_RESOLVE_FD_NQSR_SDIM = 6
+_COMPOSITE_GRADIENT_PENALTY_WEIGHT = 10.0
+_COMPOSITE_GRADIENT_IOTA_OFFSET = 1e-2
+_COMPOSITE_FD_MIN_STRICT_MATCHES = 2
 _STABLE_IOTA_ABS_TOL = 5e-4
 _STABLE_G_REL_TOL = 1e-4
 _STABLE_FUN_REL_TOL = 1e-2
@@ -1533,6 +1610,35 @@ def _real_resolve_fd_boozer_residual_value(real_resolve_fd_suite, outcome):
     return float(np.asarray(jax.device_get(objective_value)))
 
 
+def _real_resolve_fd_composite_iota_target(booz_jax):
+    return float(booz_jax.res["iota"]) + _COMPOSITE_GRADIENT_IOTA_OFFSET
+
+
+def _real_resolve_fd_composite_gradient(booz_jax, bs_jax):
+    iotas_jax = IotasJAX(booz_jax)
+    return (
+        BoozerResidualJAX(booz_jax, bs_jax)
+        + _COMPOSITE_GRADIENT_PENALTY_WEIGHT
+        * QuadraticPenalty(
+            iotas_jax,
+            _real_resolve_fd_composite_iota_target(booz_jax),
+        )
+    ).dJ()
+
+
+def _real_resolve_fd_composite_value(real_resolve_fd_suite, outcome):
+    assert outcome.iota is not None
+    residual_value = _real_resolve_fd_boozer_residual_value(
+        real_resolve_fd_suite,
+        outcome,
+    )
+    iota_target = (
+        real_resolve_fd_suite.baseline_state.iota + _COMPOSITE_GRADIENT_IOTA_OFFSET
+    )
+    iota_penalty = 0.5 * (float(outcome.iota) - iota_target) ** 2
+    return residual_value + _COMPOSITE_GRADIENT_PENALTY_WEIGHT * iota_penalty
+
+
 _REAL_RESOLVE_FD_WRAPPER_SPECS = (
     _RealResolveFDWrapperSpec(
         label="IotasJAX",
@@ -1548,6 +1654,11 @@ _REAL_RESOLVE_FD_WRAPPER_SPECS = (
         label="BoozerResidualJAX",
         gradient_builder=_real_resolve_fd_boozer_residual_gradient,
         value_builder=_real_resolve_fd_boozer_residual_value,
+    ),
+    _RealResolveFDWrapperSpec(
+        label="CompositeBoozerResidualIotaPenaltyJAX",
+        gradient_builder=_real_resolve_fd_composite_gradient,
+        value_builder=_real_resolve_fd_composite_value,
     ),
 )
 _REAL_RESOLVE_FD_WRAPPER_SPECS_BY_LABEL = {
@@ -1636,6 +1747,23 @@ def _real_resolve_fd_probe_directions(dof_count):
 def _restore_real_resolve_fd_seed_state(baseline_state, bs_jax, booz_jax):
     bs_jax.x = np.asarray(baseline_state.coil_dofs, dtype=float)
     booz_jax.surface.set_dofs(np.asarray(baseline_state.surface_dofs, dtype=float))
+
+
+def _restore_real_resolve_fd_suite_baseline(real_resolve_fd_suite):
+    baseline_state = real_resolve_fd_suite.baseline_state
+    _restore_real_resolve_fd_seed_state(
+        baseline_state,
+        real_resolve_fd_suite.bs_jax,
+        real_resolve_fd_suite.booz_jax,
+    )
+    real_resolve_fd_suite.booz_jax.res = baseline_state.result
+    real_resolve_fd_suite.booz_jax._solver_generation = int(
+        baseline_state.result.get(
+            "solve_generation",
+            real_resolve_fd_suite.booz_jax._solver_generation,
+        )
+    )
+    real_resolve_fd_suite.booz_jax.need_to_run_code = False
 
 
 def _resolve_real_fixture_probe_outcome(baseline_state, bs_jax, booz_jax, coil_dofs):
@@ -1791,6 +1919,21 @@ def _real_resolve_fd_wrapper_value(
     if not outcome.stable:
         raise AssertionError("Expected a stable reduced real-fixture outcome")
     return wrapper_spec.value_builder(real_resolve_fd_suite, outcome)
+
+
+def _real_resolve_fd_baseline_outcome(real_resolve_fd_suite):
+    baseline_state = real_resolve_fd_suite.baseline_state
+    return _RealResolveFDProbeOutcome(
+        stable=True,
+        reason="ok",
+        coil_dofs=np.asarray(baseline_state.coil_dofs, dtype=float).copy(),
+        surface_dofs=np.asarray(baseline_state.surface_dofs, dtype=float).copy(),
+        iota=baseline_state.iota,
+        G=baseline_state.G,
+        weight_inv_modB=bool(
+            baseline_state.result.get("weight_inv_modB", True)
+        ),
+    )
 
 
 def _assert_wrapper_resolve_fd_matches_real_fixture(
@@ -2364,7 +2507,8 @@ class TestIotasValue:
         j_jax = iotas_jax.J()
 
         logger.info(f"Iotas J: cpu={j_cpu:.12e} jax={j_jax:.12e}")
-        # Both must be finite (solvers may converge to different branches)
+        # Branch-divergent small-grid coverage stays health-only; branch-stable
+        # value parity belongs to the ``branch-stable-resolve`` lane.
         assert np.isfinite(j_cpu) and np.isfinite(j_jax), "Iotas J not finite"
 
 
@@ -2378,10 +2522,12 @@ class TestAdjointSolveConsistency:
 
     This proves the adjoint pipeline is correct without relying on
     re-solve FD (which branch-switches on small grids — confirmed
-    to happen on BOTH CPU and JAX solvers on this config).
+    to happen on BOTH CPU and JAX solvers on this config).  This is
+    Tier 4 adjoint residual self-consistency evidence, not vector parity
+    with a dense PLU solve.
     """
 
-    def test_device_native_adjoint_solve_matches_host(self, boozer_setup):
+    def test_device_native_adjoint_solve_satisfies_runtime_operator(self, boozer_setup):
         """The runtime adjoint solve stays internally consistent on the LS path."""
         (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
             boozer_setup
@@ -2400,7 +2546,7 @@ class TestAdjointSolveConsistency:
             residual,
             np.zeros_like(residual),
             rtol=0.0,
-            atol=1e-10,
+            atol=_ADJOINT_RESIDUAL_REL_TOL,
         )
 
     def test_adjoint_residual(self, boozer_setup):
@@ -2419,96 +2565,8 @@ class TestAdjointSolveConsistency:
         residual = np.asarray(adjoint_state.apply_transpose(adj) - dJ_ds, dtype=float)
         rel = np.linalg.norm(residual) / (np.linalg.norm(dJ_ds) + 1e-30)
         logger.info(f"Adjoint residual: ||H^T adj - dJ_ds|| / ||dJ_ds|| = {rel:.2e}")
-        assert rel < 1e-10, f"Adjoint solve residual too large: {rel:.2e}"
-
-    def test_device_native_batched_adjoint_solve_matches_host(self, boozer_setup):
-        """Dense transpose solves should match host on the available runtime factors."""
-        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
-            boozer_setup
-        )
-        from simsopt.objectives.utilities import forward_backward, forward_backward_jax
-
-        (host_P, host_L, host_U), (jax_P, jax_L, jax_U) = _dense_linear_solve_factors_for_test(
-            booz_jax,
-            fallback_boozer_surface=booz_cpu,
-        )
-        iota_rhs = _iota_unit_rhs((host_P, host_L, host_U))
-        rhs_matrix = np.stack(
-            (
-                iota_rhs,
-                2.0 * iota_rhs,
-                -0.5 * iota_rhs,
-            ),
-            axis=1,
-        )
-
-        adj_host = forward_backward(host_P, host_L, host_U, rhs_matrix)
-        adj_jax = np.asarray(forward_backward_jax(jax_P, jax_L, jax_U, rhs_matrix))
-
-        np.testing.assert_allclose(adj_jax, adj_host, rtol=1e-12, atol=1e-12)
-
-    def test_iterative_refinement_batched_plu_solves_match_column_solves(
-        self,
-        boozer_setup,
-    ):
-        """Iterative-refinement dense solves should be column-stable for multiple RHS."""
-        (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
-            boozer_setup
-        )
-        from simsopt.objectives.utilities import forward_backward_jax, plu_solve_jax
-
-        _, (P, L, U) = _dense_linear_solve_factors_for_test(
-            booz_jax,
-            fallback_boozer_surface=booz_cpu,
-        )
-        rng = np.random.RandomState(0)
-        rhs_matrix = rng.standard_normal((L.shape[0], 3))
-
-        def solve_columns(solver):
-            return np.stack(
-                [
-                    np.asarray(solver(rhs_matrix[:, i]))
-                    for i in range(rhs_matrix.shape[1])
-                ],
-                axis=1,
-            )
-
-        adjoint_batched = np.asarray(
-            forward_backward_jax(P, L, U, rhs_matrix, iterative_refinement=True)
-        )
-        adjoint_columns = solve_columns(
-            lambda rhs: forward_backward_jax(
-                P,
-                L,
-                U,
-                rhs,
-                iterative_refinement=True,
-            )
-        )
-        np.testing.assert_allclose(
-            adjoint_batched,
-            adjoint_columns,
-            rtol=1e-12,
-            atol=1e-12,
-        )
-
-        forward_batched = np.asarray(
-            plu_solve_jax(P, L, U, rhs_matrix, iterative_refinement=True)
-        )
-        forward_columns = solve_columns(
-            lambda rhs: plu_solve_jax(
-                P,
-                L,
-                U,
-                rhs,
-                iterative_refinement=True,
-            )
-        )
-        np.testing.assert_allclose(
-            forward_batched,
-            forward_columns,
-            rtol=1e-12,
-            atol=1e-12,
+        assert rel < _ADJOINT_RESIDUAL_REL_TOL, (
+            f"Adjoint solve residual too large: {rel:.2e}"
         )
 
     def test_vjp_produces_finite_derivative(self, boozer_setup):
@@ -3639,9 +3697,9 @@ class TestAdjointSolveConsistency:
         """Grouped LS VJPs should also match when ``optimize_G=False``.
 
         The fixed-``G`` LS lane can stop with a finite low-cost Newton exit
-        while still producing the PLU/VJP state needed by the adjoint path.
-        This test only requires that adjoint state, not a globally successful
-        Newton polish flag.
+        while still producing the runtime VJP state needed by the adjoint path.
+        This test only requires that runtime adjoint state, not a globally
+        successful Newton polish flag.
         """
         (
             coils,
@@ -3929,8 +3987,8 @@ class TestNonQSRatioValue:
         j_jax = nqs_jax.J()
 
         logger.info(f"NonQSRatio J: cpu={j_cpu:.12e} jax={j_jax:.12e}")
-        # Both must be finite and non-negative (solvers converge to different
-        # surfaces, so exact parity is not expected)
+        # Branch-divergent small-grid coverage stays health-only; branch-stable
+        # derived-value parity belongs to the ``branch-stable-resolve`` lane.
         assert np.isfinite(j_jax) and j_jax >= 0, f"JAX NonQSRatio invalid: {j_jax}"
         assert np.isfinite(j_cpu) and j_cpu >= 0, f"CPU NonQSRatio invalid: {j_cpu}"
 
@@ -4272,6 +4330,8 @@ class TestCompositeGradientPipeline:
     (J_JAX ≈ 0.047 vs J_CPU ≈ 2.5e-6), making the IFT adjoint term
     unreliable for determining descent direction.  The direct term is
     validated separately in ``TestBoozerResidualGradientFD``.
+    The parity-ladder ``fd-gradient`` descent gate requires a branch-stable
+    representative fixture where the adjoint term materially matters.
 
     This test verifies the end-to-end pipeline: value + gradient are
     finite, gradient is non-zero, and both terms (BoozerResidual + iota
@@ -4297,6 +4357,119 @@ class TestCompositeGradientPipeline:
         assert np.isfinite(j0), "Composite J is not finite"
         assert np.all(np.isfinite(dj0)), "Composite dJ contains NaN/inf"
         assert grad_norm > 0, "Gradient is zero — pipeline may be broken"
+
+    @pytest.mark.slow
+    def test_branch_stable_composite_gradient_fd_and_descent(
+        self,
+        real_resolve_fd_suite,
+    ):
+        """Branch-stable composite gradient satisfies FD and one descent step."""
+        wrapper_label = "CompositeBoozerResidualIotaPenaltyJAX"
+        wrapper_spec = _REAL_RESOLVE_FD_WRAPPER_SPECS_BY_LABEL[wrapper_label]
+        baseline = real_resolve_fd_suite.baseline_state
+        gradients = real_resolve_fd_suite.gradients
+        residual_gradient = gradients["BoozerResidualJAX"]
+        iota_gradient = gradients["IotasJAX"]
+        composite_gradient = np.asarray(gradients[wrapper_label], dtype=float)
+        iota_term = (
+            _COMPOSITE_GRADIENT_PENALTY_WEIGHT
+            * (baseline.iota - (baseline.iota + _COMPOSITE_GRADIENT_IOTA_OFFSET))
+            * iota_gradient
+        )
+
+        np.testing.assert_allclose(
+            composite_gradient,
+            residual_gradient + iota_term,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        assert np.linalg.norm(iota_term) > 1e-6 * max(
+            1.0,
+            np.linalg.norm(composite_gradient),
+        )
+
+        stable_directional_matches = 0
+        mismatch_details = []
+        for sample_index, direction_sample in enumerate(
+            real_resolve_fd_suite.direction_samples
+        ):
+            directional_adjoint = float(np.dot(composite_gradient, direction_sample.direction))
+            for epsilon_sample in direction_sample.epsilon_samples:
+                if not epsilon_sample.plus.stable or not epsilon_sample.minus.stable:
+                    continue
+                directional_fd = (
+                    _real_resolve_fd_wrapper_value(
+                        real_resolve_fd_suite,
+                        wrapper_spec=wrapper_spec,
+                        outcome=epsilon_sample.plus,
+                    )
+                    - _real_resolve_fd_wrapper_value(
+                        real_resolve_fd_suite,
+                        wrapper_spec=wrapper_spec,
+                        outcome=epsilon_sample.minus,
+                    )
+                ) / (2.0 * epsilon_sample.eps)
+                if np.isclose(
+                    directional_adjoint,
+                    directional_fd,
+                    rtol=_FD_GRADIENT_TOLS["directional_fd_rtol"],
+                    atol=_FD_GRADIENT_TOLS["directional_fd_atol"],
+                ):
+                    stable_directional_matches += 1
+                    break
+                mismatch_details.append(
+                    f"sample {sample_index} eps={epsilon_sample.eps:.1e}: "
+                    f"adjoint={directional_adjoint:.6e} "
+                    f"fd={directional_fd:.6e}"
+                )
+
+        assert stable_directional_matches >= _COMPOSITE_FD_MIN_STRICT_MATCHES, (
+            f"{wrapper_label} found too few branch-stable FD matches: "
+            f"{stable_directional_matches}/"
+            f"{len(real_resolve_fd_suite.direction_samples)}. "
+            + " | ".join(mismatch_details)
+        )
+
+        gradient_norm = np.linalg.norm(composite_gradient)
+        assert gradient_norm > 0.0
+        descent_direction = -composite_gradient / gradient_norm
+        assert float(np.dot(composite_gradient, descent_direction)) < 0.0
+
+        baseline_value = _real_resolve_fd_wrapper_value(
+            real_resolve_fd_suite,
+            wrapper_spec=wrapper_spec,
+            outcome=_real_resolve_fd_baseline_outcome(real_resolve_fd_suite),
+        )
+        descent_failures = []
+        try:
+            for eps in _REAL_RESOLVE_FD_EPSILONS:
+                outcome = _resolve_real_fixture_probe_outcome(
+                    baseline,
+                    real_resolve_fd_suite.bs_jax,
+                    real_resolve_fd_suite.booz_jax,
+                    baseline.coil_dofs + eps * descent_direction,
+                )
+                if not outcome.stable:
+                    descent_failures.append(f"eps={eps:.1e}: {outcome.reason}")
+                    continue
+                descent_value = _real_resolve_fd_wrapper_value(
+                    real_resolve_fd_suite,
+                    wrapper_spec=wrapper_spec,
+                    outcome=outcome,
+                )
+                if descent_value < baseline_value:
+                    break
+                descent_failures.append(
+                    f"eps={eps:.1e}: value={descent_value:.6e} "
+                    f"baseline={baseline_value:.6e}"
+                )
+            else:
+                pytest.fail(
+                    "Composite branch-stable descent step did not decrease: "
+                    + "; ".join(descent_failures)
+                )
+        finally:
+            _restore_real_resolve_fd_suite_baseline(real_resolve_fd_suite)
 
 
 # -----------------------------------------------------------------------
@@ -4552,7 +4725,7 @@ class TestRealFixtureOndeviceM5Parity:
     """Reduced real single-stage fixture covers the public on-device M5 lane."""
 
     def test_real_fixture_ondevice_solver_end_state_contracts_match(self):
-        """CPU reference and JAX on-device lanes should match on solved-state quality, not iterates."""
+        """Independent CPU/JAX on-device solves satisfy ``branch-stable-resolve``."""
         cpu_fixture, jax_fixture = _build_real_fixture_ondevice_m5_pair()
 
         _assert_boozer_surfaces_end_state_parity(
@@ -4563,9 +4736,56 @@ class TestRealFixtureOndeviceM5Parity:
             tolerances=_REAL_FIXTURE_SOLVER_CPU_JAX_TOLS,
         )
 
-    def test_real_fixture_ondevice_parity_and_wrapper_gradients(self):
-        """CPU reference and JAX reduced-real on-device fixtures agree, and wrappers stay healthy."""
+    def test_real_fixture_ondevice_branch_stable_wrapper_values_match(self):
+        """Independent branch-stable CPU/JAX solves compare wrapper values."""
         cpu_fixture, jax_fixture = _build_real_fixture_ondevice_m5_pair()
+        _assert_boozer_surfaces_end_state_parity(
+            "CPU",
+            cpu_fixture["boozer_surface"],
+            "JAX CPU",
+            jax_fixture["boozer_surface"],
+            tolerances=_REAL_FIXTURE_SOLVER_CPU_JAX_TOLS,
+        )
+
+        cpu_values = _cpu_single_stage_wrapper_values(
+            cpu_fixture["boozer_surface"],
+            cpu_fixture["bs"],
+        )
+        jax_values = _jax_single_stage_wrapper_values(
+            jax_fixture["boozer_surface"],
+            jax_fixture["bs"],
+        )
+        value_tolerances = (
+            (
+                _BRANCH_STABLE_RESOLVE_TOLS["core_value_rtol"],
+                _BRANCH_STABLE_RESOLVE_TOLS["core_value_atol"],
+            ),
+            (
+                _BRANCH_STABLE_RESOLVE_TOLS["core_value_rtol"],
+                _BRANCH_STABLE_RESOLVE_TOLS["core_value_atol"],
+            ),
+            (
+                _BRANCH_STABLE_RESOLVE_TOLS["derived_value_rtol"],
+                _BRANCH_STABLE_RESOLVE_TOLS["derived_value_atol"],
+            ),
+        )
+        for label, cpu_value, jax_value, (rtol, atol) in zip(
+            ("BoozerResidual", "Iotas", "NonQuasiSymmetricRatio"),
+            cpu_values,
+            jax_values,
+            value_tolerances,
+        ):
+            np.testing.assert_allclose(
+                jax_value,
+                cpu_value,
+                rtol=rtol,
+                atol=atol,
+                err_msg=f"{label} value mismatch on branch-stable reduced fixture",
+            )
+
+    def test_real_fixture_ondevice_parity_and_wrapper_gradients(self):
+        """CPU/JAX reduced-real same-state fixture covers ``ls-wrapper-gradient``."""
+        cpu_fixture, jax_fixture = _build_real_fixture_ondevice_m5_same_state_pair()
 
         booz_cpu = cpu_fixture["boozer_surface"]
         bs_cpu = cpu_fixture["bs"]
@@ -4587,22 +4807,32 @@ class TestRealFixtureOndeviceM5Parity:
             booz_jax.res["iota"],
             booz_cpu.res["iota"],
             rtol=0.0,
-            atol=1e-12,
+            atol=_LS_WRAPPER_GRADIENT_TOLS["atol"],
         )
         np.testing.assert_allclose(
             booz_jax.res["G"],
             booz_cpu.res["G"],
             rtol=0.0,
-            atol=1e-12,
+            atol=_LS_WRAPPER_GRADIENT_TOLS["atol"],
         )
-        np.testing.assert_allclose(iota_jax, iota_cpu, rtol=0.0, atol=1e-12)
+        np.testing.assert_allclose(
+            iota_jax,
+            iota_cpu,
+            rtol=0.0,
+            atol=_LS_WRAPPER_GRADIENT_TOLS["atol"],
+        )
         np.testing.assert_allclose(
             residual_jax,
             residual_cpu,
-            rtol=1e-12,
-            atol=1e-12,
+            rtol=_LS_WRAPPER_GRADIENT_TOLS["rtol"],
+            atol=_LS_WRAPPER_GRADIENT_TOLS["atol"],
         )
-        np.testing.assert_allclose(nqs_jax, nqs_cpu, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(
+            nqs_jax,
+            nqs_cpu,
+            rtol=_LS_WRAPPER_GRADIENT_TOLS["rtol"],
+            atol=_LS_WRAPPER_GRADIENT_TOLS["atol"],
+        )
 
         cpu_gradients = _cpu_single_stage_wrapper_gradients(booz_cpu, bs_cpu)
         jax_gradients = _jax_single_stage_wrapper_gradients(booz_jax, bs_jax)
@@ -4623,8 +4853,8 @@ class TestRealFixtureOndeviceM5Parity:
             np.testing.assert_allclose(
                 jax_gradient,
                 cpu_gradient,
-                rtol=1e-10,
-                atol=1e-12,
+                rtol=_LS_WRAPPER_GRADIENT_TOLS["rtol"],
+                atol=_LS_WRAPPER_GRADIENT_TOLS["atol"],
                 err_msg=f"{label} gradient mismatch on reduced real ondevice fixture",
             )
 
@@ -4639,6 +4869,7 @@ class TestRealFixtureGpuM5Parity:
         request,
     ):
         gpu = parity_device("gpu")
+        _assert_gpu_runtime_metadata(_collect_gpu_runtime_metadata(gpu))
         monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
         _enable_strict_jax_backend(monkeypatch, request)
         booz_cpu, gpu_fixture, gpu_result = _build_real_fixture_gpu_solver_pair()
@@ -4661,6 +4892,7 @@ class TestRealFixtureGpuM5Parity:
         request,
     ):
         gpu = parity_device("gpu")
+        _assert_gpu_runtime_metadata(_collect_gpu_runtime_metadata(gpu))
         _enable_strict_jax_backend(monkeypatch, request)
         booz_cpu, gpu_fixture, gpu_result = _build_real_fixture_gpu_solver_pair()
         _assert_gpu_boozer_solver_result_on_device(gpu, gpu_fixture, gpu_result)
@@ -4681,6 +4913,7 @@ class TestRealFixtureGpuM5Parity:
     ):
         """GPU wrapper values/gradients should match the reduced real CPU reference."""
         gpu = parity_device("gpu")
+        _assert_gpu_runtime_metadata(_collect_gpu_runtime_metadata(gpu))
         monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
         _enable_strict_jax_backend(monkeypatch, request)
 
@@ -4722,22 +4955,32 @@ class TestRealFixtureGpuM5Parity:
             gpu_result["iota"],
             cpu_result["iota"],
             rtol=0.0,
-            atol=1e-12,
+            atol=_GPU_RUNTIME_TOLS["same_state_forward_atol"],
         )
         np.testing.assert_allclose(
             gpu_result["G"],
             cpu_result["G"],
             rtol=0.0,
-            atol=1e-12,
+            atol=_GPU_RUNTIME_TOLS["same_state_forward_atol"],
         )
-        np.testing.assert_allclose(iota_gpu, iota_cpu, rtol=1e-10, atol=1e-12)
+        np.testing.assert_allclose(
+            iota_gpu,
+            iota_cpu,
+            rtol=_GPU_RUNTIME_TOLS["same_state_forward_rtol"],
+            atol=_GPU_RUNTIME_TOLS["same_state_forward_atol"],
+        )
         np.testing.assert_allclose(
             residual_gpu,
             residual_cpu,
-            rtol=1e-10,
-            atol=1e-12,
+            rtol=_GPU_RUNTIME_TOLS["same_state_forward_rtol"],
+            atol=_GPU_RUNTIME_TOLS["same_state_forward_atol"],
         )
-        np.testing.assert_allclose(nqs_gpu, nqs_cpu, rtol=1e-10, atol=1e-12)
+        np.testing.assert_allclose(
+            nqs_gpu,
+            nqs_cpu,
+            rtol=_GPU_RUNTIME_TOLS["same_state_forward_rtol"],
+            atol=_GPU_RUNTIME_TOLS["same_state_forward_atol"],
+        )
 
         cpu_gradients = _cpu_single_stage_wrapper_gradients(booz_cpu, bs_cpu)
         gpu_gradients = _jax_single_stage_wrapper_gradients(booz_gpu, bs_gpu)
@@ -4758,8 +5001,8 @@ class TestRealFixtureGpuM5Parity:
             np.testing.assert_allclose(
                 gpu_gradient,
                 cpu_gradient,
-                rtol=1e-8,
-                atol=1e-10,
+                rtol=_GPU_RUNTIME_TOLS["same_state_gradient_rtol"],
+                atol=_GPU_RUNTIME_TOLS["same_state_gradient_atol"],
                 err_msg=f"{label} GPU gradient mismatch on reduced real fixture",
             )
 
@@ -5063,7 +5306,7 @@ class TestEnsureSolvedCrashGuard:
         """All M5 wrappers must stop at _ensure_solved when res is unset.
 
         This guards the negative path where a failed inner solve would leave
-        no PLU/VJP contract to consume.
+        no runtime adjoint contract to consume.
         """
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
         old_res = booz_jax.res
@@ -5241,13 +5484,61 @@ class TestBVjpCPUParityPerComponent:
             f"||jax||={np.linalg.norm(grad_jax):.6e} "
             f"||diff||={np.linalg.norm(grad_cpu - grad_jax):.6e}"
         )
-        b_vjp_rel_tol = 1e-10
-        b_vjp_abs_tol = 1e-12
         np.testing.assert_allclose(
             grad_jax,
             grad_cpu,
-            rtol=b_vjp_rel_tol,
-            atol=b_vjp_abs_tol,
+            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
+
+
+class TestBoozerResidualDerivativeCPUParity:
+    """Composed Boozer residual Jacobians use direct CPU/C++ oracle parity."""
+
+    def test_composed_residual_jacobian_matches_cpu_oracle(self, boozer_setup):
+        (_, surf_cpu, _, bs_cpu, _, booz_cpu, booz_jax, _) = boozer_setup
+        iota = float(booz_cpu.res["iota"])
+        G = float(booz_cpu.res["G"])
+        weight_inv_modB = bool(booz_cpu.res.get("weight_inv_modB", True))
+
+        residual_cpu, jacobian_cpu = boozer_surface_residual(
+            surf_cpu,
+            iota,
+            G,
+            bs_cpu,
+            derivatives=1,
+            weight_inv_modB=weight_inv_modB,
+        )
+        x = booz_jax._pack_decision_vector(
+            iota,
+            G,
+            sdofs=jnp.asarray(surf_cpu.get_dofs(), dtype=jnp.float64),
+        )
+        residual_jax, jacobian_jax = boozer_residual_jacobian_composed(
+            x,
+            coil_arrays=booz_jax._coil_arrays,
+            quadpoints_phi=booz_jax.quadpoints_phi,
+            quadpoints_theta=booz_jax.quadpoints_theta,
+            mpol=booz_jax.mpol,
+            ntor=booz_jax.ntor,
+            nfp=booz_jax.nfp,
+            stellsym=booz_jax.stellsym,
+            scatter_indices=booz_jax.scatter_indices,
+            optimize_G=True,
+            weight_inv_modB=weight_inv_modB,
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(residual_jax, dtype=float),
+            residual_cpu,
+            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
+        np.testing.assert_allclose(
+            np.asarray(jacobian_jax, dtype=float),
+            jacobian_cpu,
+            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
         )
 
 
@@ -5437,22 +5728,28 @@ class TestExactSolveCPUJAXParity:
             atol=nqs_abs_tol,
         )
 
-    def test_gradient_wrappers_healthy_on_exact_state(self):
-        """IotasJAX.dJ() and NonQuasiSymmetricRatioJAX.dJ() are healthy on exact surface.
+    def test_gradient_wrappers_operator_status_on_exact_state(self):
+        """Exact adjoints use checked operator solves, not dense PLU fallbacks.
 
-        The exact Newton Jacobian is ill-conditioned: scipy and JAX PLU
-        factorizations choose different pivots, producing adjoint vectors
-        that both satisfy J^T adj = rhs to machine precision but differ in
-        norm by ~3x.  This makes direct gradient parity impossible on the
-        exact path.
+        The exact Newton Jacobian can be rank deficient.  ``IotasJAX.dJ()``
+        has a compatible RHS on this fixture and remains healthy, while the
+        non-QS RHS is outside the transpose operator range and must surface the
+        operator-solve failure instead of returning a finite dense-PLU artifact.
 
-        Direct gradient parity IS validated on the LS on-device path at
-        rtol=1e-10 in test_real_fixture_ondevice_parity_and_wrapper_gradients.
-        FD correctness is validated on the LS re-solve path (not exact) in
-        TestIotasJAXResolveFD and TestNonQSRatioJAXResolveFD.  This test
-        covers only gradient health (finite, non-zero) on the exact state.
+        This is the parity-ladder ``exact-ill-conditioned-adjoint`` lane:
+        residual/failure-only coverage with no vector parity assertion.
+        Direct gradient parity is validated on the ``ls-wrapper-gradient``
+        lane in test_real_fixture_ondevice_parity_and_wrapper_gradients.  A
+        future well-conditioned exact fixture must use the
+        ``exact-well-conditioned-adjoint`` lane before asserting operator-vs-
+        dense vector parity. FD correctness is validated on the LS re-solve
+        path (not exact) in TestIotasJAXResolveFD and TestNonQSRatioJAXResolveFD.
         """
         exact_pair = _solve_exact_cpu_jax_parity_pair()
+        adjoint_state = exact_pair.booz_jax_exact.get_adjoint_runtime_state()
+        assert adjoint_state.linear_solve_backend == "operator"
+        assert adjoint_state.linear_solve_factors is None
+        assert adjoint_state.dense_linear_solve_factors_available is True
 
         iotas_cpu_grad = np.array(Iotas(exact_pair.booz_cpu_exact).dJ())
         iotas_jax_grad = np.array(IotasJAX(exact_pair.booz_jax_exact).dJ())
@@ -5466,15 +5763,13 @@ class TestExactSolveCPUJAXParity:
                 exact_pair.booz_cpu_exact, exact_pair.bs_cpu, sDIM=6
             ).dJ()
         )
-        nqs_jax_grad = np.array(
+        _assert_gradients_finite_nonzero(
+            [nqs_cpu_grad], "Exact-path CPU NonQuasiSymmetricRatio.dJ()"
+        )
+        with pytest.raises(RuntimeError, match="operator-backed runtime path"):
             NonQuasiSymmetricRatioJAX(
                 exact_pair.booz_jax_exact, exact_pair.bs_jax, sDIM=6
             ).dJ()
-        )
-        assert nqs_cpu_grad.shape == nqs_jax_grad.shape
-        _assert_gradients_finite_nonzero(
-            [nqs_cpu_grad, nqs_jax_grad], "Exact-path NonQuasiSymmetricRatio.dJ()"
-        )
 
     def test_exact_coil_vjp_matches_fixed_state_directional_fd(self):
         exact_pair = _solve_exact_cpu_jax_parity_pair()
@@ -5483,8 +5778,8 @@ class TestExactSolveCPUJAXParity:
         res_exact = exact_pair.res_jax
         iota = res_exact["iota"]
         G = res_exact["G"]
-        fd_rel_tol = 1e-4
-        fd_abs_tol = 1e-8
+        fd_rel_tol = _FD_GRADIENT_TOLS["directional_fd_rtol"]
+        fd_abs_tol = _FD_GRADIENT_TOLS["directional_fd_atol"]
 
         runtime_state = booz_jax.get_adjoint_runtime_state()
         lm = np.ones(runtime_state.decision_size, dtype=float)

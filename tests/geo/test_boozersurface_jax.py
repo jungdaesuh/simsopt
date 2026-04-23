@@ -23,7 +23,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import simsopt.geo.optimizer_jax_reference as _opt_ref
+import scipy.linalg
 from jax.flatten_util import ravel_pytree
+from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from conftest import (
     assert_array_on_device,
     assert_arrays_on_device,
@@ -42,6 +44,7 @@ from simsopt.jax_core import (
     make_current_value_spec,
 )
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
+from simsopt.objectives.utilities import forward_backward
 
 from .boozersurface_jax_test_helpers import (
     BoozerSurfaceJAX,
@@ -91,6 +94,16 @@ _STOKES_FLUX_RTOL = 1e-5
 _STOKES_FLUX_ATOL = 5e-7
 _STOKES_DISK_NR = 96
 _STOKES_DISK_NTHETA = 192
+
+
+def _assert_operator_adjoint_state(adjoint_state, *, dense_factors_available):
+    assert adjoint_state.linear_solve_backend == "operator"
+    assert adjoint_state.linear_solve_factors is None
+    assert adjoint_state.plu is None
+    assert (
+        adjoint_state.dense_linear_solve_factors_available
+        is dense_factors_available
+    )
 
 
 def _disk_flux_through_circle_z0(*, radius, nr, ntheta, gammas, gammadashs, currents):
@@ -3086,7 +3099,7 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(booz.surface.get_dofs(), lbfgs_surface, atol=1e-12)
 
     def test_run_code_invalid_newton_iterate_aborts_adjoint_state(self, monkeypatch):
-        """Finite iterates with invalid Newton derivatives must not build PLU/VJP."""
+        """Finite iterates with invalid Newton derivatives must not build adjoint metadata."""
         booz = _make_mock_boozer_surface()
 
         def fake_newton_polish(
@@ -3122,7 +3135,7 @@ class TestBoozerSurfaceJAXClass:
         assert np.all(np.isfinite(booz.surface.get_dofs()))
 
     def test_run_code_finite_unsuccessful_newton_keeps_adjoint_state(self, monkeypatch):
-        """Finite maxiter-exhausted Newton exits must still keep PLU/VJP state."""
+        """Finite maxiter-exhausted Newton exits must still keep dense metadata/VJPs."""
         booz = _make_mock_boozer_surface()
 
         def fake_newton_polish(
@@ -3185,25 +3198,21 @@ class TestBoozerSurfaceJAXClass:
             "_solve_hessian_system",
             fake_solve_hessian_system,
         )
-        monkeypatch.setattr(
-            _bsj,
-            "forward_backward_jax",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("LS adjoint runtime should not use dense PLU solves")
-            ),
-        )
-
         adjoint_state = booz.get_adjoint_runtime_state()
         solved = adjoint_state.solve_transpose(jnp.asarray([1.0, -2.0], dtype=jnp.float64))
 
+        _assert_operator_adjoint_state(
+            adjoint_state,
+            dense_factors_available=True,
+        )
         np.testing.assert_allclose(np.asarray(solved), np.asarray([1.0, -2.0]))
         np.testing.assert_allclose(recorded["rhs"], np.asarray([1.0, -2.0]))
         assert recorded["x_shape"][0] == booz._pack_decision_vector(0.3, 0.05).size
 
-    def test_get_adjoint_runtime_state_dense_plu_status_sniffs_nonfinite(
-        self, monkeypatch
+    def test_get_adjoint_runtime_state_rejects_unknown_kind_even_when_plu_exists(
+        self,
     ):
-        """Auto-wrapped dense-PLU status callbacks must flag non-finite solves."""
+        """Dense factors must not provide an implicit fallback JAX runtime branch."""
         booz = _make_mock_boozer_surface()
         booz.need_to_run_code = False
         rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
@@ -3215,32 +3224,13 @@ class TestBoozerSurfaceJAXClass:
             "iota": jnp.asarray(0.3, dtype=jnp.float64),
             "G": jnp.asarray(0.05, dtype=jnp.float64),
             "weight_inv_modB": True,
-            "linearization_kind": "unknown_kind_forcing_dense_plu_branch",
+            "linearization_kind": "unknown_kind_forcing_unsupported_branch",
             "PLU": (identity, identity, identity),
             "vjp_groups": lambda *_args, **_kwargs: iter(()),
         }
 
-        nan_solution = jnp.full((rhs.size,), jnp.nan, dtype=jnp.float64)
-
-        monkeypatch.setattr(
-            _bsj,
-            "plu_solve_jax",
-            lambda *_args, **_kwargs: nan_solution,
-        )
-        monkeypatch.setattr(
-            _bsj,
-            "forward_backward_jax",
-            lambda *_args, **_kwargs: nan_solution,
-        )
-
-        adjoint_state = booz.get_adjoint_runtime_state()
-        solved_fwd, success_fwd = adjoint_state.solve_forward_with_status(rhs)
-        solved_trp, success_trp = adjoint_state.solve_transpose_with_status(rhs)
-
-        assert bool(np.asarray(success_fwd)) is False
-        assert bool(np.asarray(success_trp)) is False
-        assert np.all(np.isnan(np.asarray(solved_fwd)))
-        assert np.all(np.isnan(np.asarray(solved_trp)))
+        with pytest.raises(RuntimeError, match="Unsupported BoozerSurfaceJAX"):
+            booz.get_adjoint_runtime_state()
 
     def test_get_adjoint_runtime_state_promotes_hessian_stabilization_on_retry(
         self, monkeypatch
@@ -3441,7 +3431,8 @@ class TestBoozerSurfaceJAXClass:
     def test_get_adjoint_runtime_state_exact_jacobian_uses_host_tolerance_boundary(
         self, monkeypatch
     ):
-        """Exact-Jacobian runtime solves must keep eager scalar inputs on host."""
+        """Exact-Jacobian runtime solves use the well-conditioned adjoint lane."""
+        exact_lane = parity_ladder_tolerances("exact-well-conditioned-adjoint")
         booz = _make_mock_boozer_surface_exact()
         booz.need_to_run_code = False
         booz.options["newton_tol"] = 1e-12
@@ -3453,7 +3444,7 @@ class TestBoozerSurfaceJAXClass:
             "G": jnp.asarray(0.05, dtype=jnp.float64),
             "weight_inv_modB": True,
             "linearization_kind": "exact_jacobian",
-            "PLU": None,
+            "PLU": tuple(jnp.eye(booz.x.size, dtype=jnp.float64) for _ in range(3)),
             "vjp_groups": lambda *_args, **_kwargs: iter(()),
         }
 
@@ -3508,13 +3499,127 @@ class TestBoozerSurfaceJAXClass:
         rhs = jnp.asarray([2.0, -1.0], dtype=jnp.float64)
         solved, success = adjoint_state.solve_transpose_with_status(rhs)
 
+        _assert_operator_adjoint_state(
+            adjoint_state,
+            dense_factors_available=True,
+        )
         assert bool(np.asarray(success)) is True
-        np.testing.assert_allclose(original_asarray(solved), original_asarray(rhs))
         np.testing.assert_allclose(
-            original_asarray(adjoint_state.apply_transpose(solved)),
+            original_asarray(solved),
             original_asarray(rhs),
+            rtol=exact_lane["adjoint_rtol"],
+            atol=exact_lane["adjoint_atol"],
+        )
+        applied = original_asarray(adjoint_state.apply_transpose(solved))
+        rhs_host = original_asarray(rhs)
+        residual = applied - rhs_host
+        residual_rel = np.linalg.norm(residual) / (1.0 + np.linalg.norm(rhs_host))
+        assert residual_rel <= exact_lane["residual_rel_tol"]
+        np.testing.assert_allclose(
+            residual,
+            np.zeros_like(residual),
             rtol=0.0,
-            atol=1e-12,
+            atol=exact_lane["residual_rel_tol"],
+        )
+
+    def test_exact_well_conditioned_operator_adjoint_matches_dense_and_plu(
+        self, monkeypatch
+    ):
+        """Well-conditioned exact operator GMRES matches dense JAX and PLU adjoints."""
+        exact_lane = parity_ladder_tolerances("exact-well-conditioned-adjoint")
+        booz = _make_mock_boozer_surface_exact(options={"newton_tol": 1e-12})
+        booz.need_to_run_code = False
+        solved_x = booz._pack_decision_vector(0.3, 0.05)
+        n = int(solved_x.size)
+
+        diagonal = np.linspace(2.0, 2.5, n)
+        A_np = np.diag(diagonal)
+        A_np += 0.01 * np.tril(np.ones((n, n)), k=-1)
+        A_np += 0.005 * np.triu(np.ones((n, n)), k=1)
+        A = jnp.asarray(A_np, dtype=jnp.float64)
+        P_lu, L_lu, U_lu = scipy.linalg.lu(A_np)
+
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "exact_jacobian",
+            "PLU": tuple(jnp.asarray(piece, dtype=jnp.float64) for piece in (P_lu, L_lu, U_lu)),
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+
+        def matrix_residual(_self, _mask):
+            return lambda x: A @ x
+
+        monkeypatch.setattr(
+            _bsj.BoozerSurfaceJAX,
+            "_compute_stellsym_mask_indices",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            _bsj.BoozerSurfaceJAX,
+            "_make_exact_residual",
+            matrix_residual,
+        )
+
+        adjoint_state = booz.get_adjoint_runtime_state()
+        rhs_np = np.linspace(-0.4, 0.6, n)
+        rhs = jnp.asarray(rhs_np, dtype=jnp.float64)
+        operator_adj, success = adjoint_state.solve_transpose_with_status(rhs)
+        operator_adj_np = np.asarray(jax.device_get(operator_adj), dtype=float)
+        jax_dense_adj_np = np.asarray(
+            jax.device_get(jnp.linalg.solve(A.T, rhs)),
+            dtype=float,
+        )
+        plu_adj_np = forward_backward(P_lu, L_lu, U_lu, rhs_np)
+
+        _assert_operator_adjoint_state(
+            adjoint_state,
+            dense_factors_available=True,
+        )
+        assert bool(np.asarray(success)) is True
+        np.testing.assert_allclose(
+            operator_adj_np,
+            jax_dense_adj_np,
+            rtol=exact_lane["adjoint_rtol"],
+            atol=exact_lane["adjoint_atol"],
+        )
+        np.testing.assert_allclose(
+            operator_adj_np,
+            plu_adj_np,
+            rtol=exact_lane["adjoint_rtol"],
+            atol=exact_lane["adjoint_atol"],
+        )
+
+        residual_rel = np.linalg.norm(A_np.T @ operator_adj_np - rhs_np) / (
+            1.0 + np.linalg.norm(rhs_np)
+        )
+        assert residual_rel <= exact_lane["residual_rel_tol"]
+
+        gradient_projection = np.vstack(
+            (
+                np.ones(n),
+                np.linspace(-1.0, 1.0, n),
+                np.cos(np.linspace(0.0, np.pi, n)),
+            )
+        )
+        operator_gradient = gradient_projection @ operator_adj_np
+        dense_gradient = gradient_projection @ jax_dense_adj_np
+        plu_gradient = gradient_projection @ plu_adj_np
+        np.testing.assert_allclose(
+            operator_gradient,
+            dense_gradient,
+            rtol=exact_lane["gradient_rtol"],
+            atol=exact_lane["gradient_atol"],
+        )
+        np.testing.assert_allclose(
+            operator_gradient,
+            plu_gradient,
+            rtol=exact_lane["gradient_rtol"],
+            atol=exact_lane["gradient_atol"],
         )
 
     def test_run_code_emits_newton_progress_updates(self, monkeypatch):
@@ -3900,12 +4005,16 @@ class TestBoozerSurfaceJAXExactPath:
             "type",
             "vjp",
             "jacobian_materialized",
+            "linear_solve_backend",
+            "dense_linear_solve_factors_available",
         }
         assert expected_keys <= set(res.keys())
         assert res["jacobian_materialized"] is True
         assert isinstance(res["PLU"], tuple)
         assert len(res["PLU"]) == 3
         assert all(piece is not None for piece in res["PLU"])
+        assert res["linear_solve_backend"] == "operator"
+        assert res["dense_linear_solve_factors_available"] is True
         assert res["vjp"] is _boozer_exact_coil_vjp
         assert callable(res["vjp"])
 
@@ -3995,6 +4104,8 @@ class TestBoozerSurfaceJAXExactPath:
         assert res["message"] == "dense Jacobian skipped"
         adjoint_state = booz.get_adjoint_runtime_state()
         assert adjoint_state.plu is None
+        assert adjoint_state.linear_solve_backend == "operator"
+        assert adjoint_state.dense_linear_solve_factors_available is False
         assert callable(adjoint_state.solve_forward)
         assert callable(adjoint_state.solve_transpose)
 
@@ -4074,6 +4185,9 @@ class TestBoozerSurfaceJAXExactPath:
 
         assert result["type"] == "exact"
         assert bool(result["success"])
+        assert result["plu"] is None
+        assert result["linear_solve_backend"] == "operator"
+        assert result["dense_linear_solve_factors_available"] is False
         assert "residual" in captured
         assert jnp.all(jnp.isfinite(captured["residual"]))
 
@@ -4114,6 +4228,8 @@ class TestBoozerSurfaceJAXExactPath:
         assert captured["max_dense_jacobian_bytes"] == 12345
         assert result["jacobian"] is None
         assert result["plu"] is None
+        assert result["linear_solve_backend"] == "operator"
+        assert result["dense_linear_solve_factors_available"] is False
         assert bool(result["success"]) is True
         assert bool(result["primal_success"]) is True
         assert bool(result["adjoint_linear_solve_available"]) is True
@@ -4734,7 +4850,7 @@ class TestBoozerSurfaceJAXExactPath:
     def test_run_code_traceable_exact_skips_lu_for_nonfinite_newton_result(
         self, monkeypatch
     ):
-        """Exact traceable failures must return the dummy PLU payload."""
+        """Exact traceable failures must not build or carry PLU payloads."""
         booz = _make_mock_boozer_surface_exact()
         coil_set_spec = booz.coil_set_spec
         sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
@@ -4774,12 +4890,9 @@ class TestBoozerSurfaceJAXExactPath:
 
         assert result["type"] == "exact"
         assert bool(result["success"]) is False
-        assert result["plu"] is not None
-        for factor in result["plu"]:
-            assert np.all(np.isnan(np.asarray(factor))), (
-                "Dummy PLU for failed solves must be NaN-filled to prevent "
-                "silent zero-gradient propagation"
-            )
+        assert result["plu"] is None
+        assert result["linear_solve_backend"] == "operator"
+        assert result["dense_linear_solve_factors_available"] is False
 
     def test_exact_accepts_and_ignores_optimizer_backend_option(self):
         """Exact solves accept optimizer_backend but ignore it."""
@@ -4895,7 +5008,7 @@ class TestBoozerSurfaceJAXExactPath:
         assert booz.run_code(iota=0.3, G=0.05) is None
 
     def test_exact_invalid_newton_iterate_aborts_adjoint_state(self):
-        """Exact-path failures must not expose PLU/VJP placeholders."""
+        """Exact-path failures must not expose dense metadata/VJP placeholders."""
         booz = _make_mock_boozer_surface_exact()
         dofs_before = booz.surface.get_dofs()
 
@@ -5237,7 +5350,7 @@ class TestEnsureSolvedGuard:
         assert booz.need_to_run_code is False
 
     def test_finite_unsuccessful_state_with_adjoint_contract_is_rejected(self):
-        """_ensure_solved must reject unsuccessful solves even with PLU/VJP."""
+        """_ensure_solved must reject unsuccessful solves even with adjoint metadata."""
         booz = _make_mock_boozer_surface()
         booz.need_to_run_code = False
         booz.res = {
@@ -5986,7 +6099,10 @@ class TestBuildBoozerSurfaceRuntimeState:
         np.testing.assert_allclose(np.asarray(solved_state.G), 1.7)
         assert solved_state.weight_inv_modB is False
 
-    def test_get_adjoint_runtime_state_exposes_runtime_callbacks_and_stream(self):
+    def test_get_adjoint_runtime_state_exposes_runtime_callbacks_and_stream(
+        self,
+        monkeypatch,
+    ):
         """Adjoint runtime summary must expose operator callbacks plus group VJPs."""
         s = self._make_real_surface(mpol=3, ntor=3, nfp=2)
         coils = _make_mock_coils()
@@ -6025,6 +6141,37 @@ class TestBuildBoozerSurfaceRuntimeState:
         }
         booz.need_to_run_code = False
         booz._surface_dofs = jnp.asarray([], dtype=jnp.float64)
+        monkeypatch.setattr(
+            _bsj.BoozerSurfaceJAX,
+            "_compute_stellsym_mask_indices",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            _bsj.BoozerSurfaceJAX,
+            "_make_exact_residual",
+            lambda self, _mask: (lambda _x: _x),
+        )
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_jacobian_linear_operator",
+            lambda _residual_fn, _x: {
+                "matvec": lambda vec: vec,
+                "transpose_matvec": lambda vec: vec,
+            },
+        )
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_solve_jacobian_system",
+            lambda _residual_fn, _x, rhs, *, transpose, tol: rhs,
+        )
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_solve_jacobian_system_with_status",
+            lambda _residual_fn, _x, rhs, *, transpose, tol: (
+                rhs,
+                jnp.asarray(True),
+            ),
+        )
 
         adjoint_state = booz.get_adjoint_runtime_state()
         solved = adjoint_state.solve_transpose(jnp.asarray([2.0, -4.0], dtype=jnp.float64))
@@ -6043,6 +6190,10 @@ class TestBuildBoozerSurfaceRuntimeState:
         assert bool(np.asarray(solve_success)) is True
         assert adjoint_state.decision_size == 2
         assert adjoint_state.dtype == jnp.float64
+        _assert_operator_adjoint_state(
+            adjoint_state,
+            dense_factors_available=True,
+        )
         np.testing.assert_allclose(
             np.asarray(adjoint_state.apply_transpose(jnp.asarray([1.0, 3.0], dtype=jnp.float64))),
             np.asarray([1.0, 3.0]),

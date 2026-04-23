@@ -179,6 +179,9 @@ Single-stage traceable target-lane contract:
   `BoozerSurfaceJAX.get_adjoint_runtime_state()` and use its solve callbacks.
   Dense `PLU` artifacts may still exist for parity/debug purposes, but they are
   no longer the supported JAX runtime contract.
+- JAX runtime states now report `linear_solve_backend="operator"` and
+  `dense_linear_solve_factors_available`; `linear_solve_factors` is not used by
+  the JAX adjoint runtime.
 
 The current CPU reference lane remains the oracle for broad workflow trust.
 Public acceptance still centers on the `native_cpu` / `scipy` oracle lane.
@@ -188,10 +191,14 @@ the retained `scipy` adapter stays available only on the CPU/reference path.
 Exact Boozer note:
 
 - The exact Newton solve keeps the loop matrix-free with JAX JVP + GMRES.
-- The final dense Jacobian and PLU contract remains size-limited by
+- The final dense Jacobian and optional public `PLU` metadata remains size-limited by
   `BoozerSurfaceJAX(..., options={"max_dense_jacobian_bytes": ...})`.
+- Exact JAX adjoints do not use those dense factors. They solve forward and
+  transposed systems through the Jacobian operator callbacks, including traceable
+  warm-start prediction.
 - If the dense finalization step would exceed that byte ceiling, the solve now
-  fails deterministically instead of attempting a multi-GB allocation.
+  skips dense metadata materialization instead of attempting a multi-GB
+  allocation.
 - Ceiling hits are reported explicitly as
   `failure_category="scaling_limit"` at
   `failure_stage="dense_jacobian_finalization"`, with
@@ -203,11 +210,11 @@ Exact Boozer note:
 
 Adjoint and warm-start linear solve note:
 
-- The adjoint and warm-start PLU solves intentionally request iterative
-  refinement.
-- That is a numerical-stability choice for dense Boozer linearizations, not a
-  signal that the primal solve was invalid or that the objective wrapper has
-  fallen back to a different algorithm.
+- JAX adjoint and warm-start solves are operator-backed. Exact JAX has no dense
+  PLU shortcut or fallback.
+- Batched exact adjoints intentionally call the operator solve once per RHS
+  column; current standard-wrapper batch width is small, and exact mode is not
+  the production hot path for the wrapper trio.
 
 ## Copy-paste workflow examples
 

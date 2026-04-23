@@ -16,14 +16,22 @@ Parity Gates
 Before using the JAX path for production research runs, all of the following
 must hold:
 
+Precision gates are lane-specific. The source of truth is
+``benchmarks/validation_ladder_contract.py::PARITY_LADDER_TOLERANCES``; do not
+apply a same-state ``1e-10`` tolerance to branch-divergent solves,
+ill-conditioned exact adjoints, or derivative-heavy paths without the matching
+lane evidence.
+
 **Value parity**
 
 - Stage 2 objective (``SquaredFluxJAX.J()``) matches CPU within
   ``rel_err < 1e-10`` on the same coil/surface configuration.
-- Boozer residual (``BoozerResidualJAX.J()``) is finite and small
-  (< 1.0) at a converged Boozer surface.
-- ``IotasJAX.J()`` and ``NonQuasiSymmetricRatioJAX.J()`` are finite
-  and non-negative at converged solutions.
+- Same-state direct kernels use the ``direct-kernel`` lane
+  (``rtol=1e-10``, ``atol=1e-12``) when a direct C++ oracle is present.
+- Branch-stable re-solves use the ``branch-stable-resolve`` lane: core values
+  at ``rtol=1e-6``, ``atol=1e-7`` and derived NQS-style values at
+  ``rtol=5e-5``, ``atol=1e-7``. Branch-divergent small-grid cases remain
+  finite/residual health checks, not parity evidence.
 - Label constraints (Volume, Area, ToroidalFlux) match CPU within
   ``rel_err < 1e-12``.
 
@@ -31,14 +39,26 @@ must hold:
 
 - Stage 2 gradient (``SquaredFluxJAX.dJ()``) matches CPU within
   ``rtol < 1e-9``.
-- Single-stage direct gradient term (``∂J/∂coils``) passes
-  fixed-surface FD validation with ``rel_err < 1e-3``.
+- Existing reduced-real LS wrapper gradients use the ``ls-wrapper-gradient``
+  lane (``rtol=1e-10``, ``atol=1e-12``).
+- Derivative-heavy direct C++ oracle tests use the ``derivative-heavy`` lane:
+  representative first derivatives (``dB/dX``, Biot-Savart VJPs, surface
+  coefficient Jacobians, composed Boozer residual Jacobians) at
+  ``rtol=1e-8``, ``atol=1e-10``. Second derivatives/Hessians remain TODOs at
+  ``rtol=1e-6``, ``atol=1e-8``.
+- Full directional FD checks use the ``fd-gradient`` lane
+  (``rtol=1e-5``, ``atol=1e-7``) on branch-stable fixtures.
+- Exact adjoints are split: ``exact-well-conditioned-adjoint`` permits vector
+  parity at ``rtol=1e-6``, ``atol=1e-8`` plus residual ``<=1e-10``;
+  ``exact-ill-conditioned-adjoint`` is residual/failure-only and must not
+  assert vector parity.
 
   *Status:* The original ~10x FD discrepancy was caused by the Boozer
   inner solve finding different local minima during FD perturbation on
   small test grids. Fixed-surface FD (perturbing coils without
   re-solving) validates the direct term correctly. Full adjoint-term
-  validation requires a well-conditioned representative case.
+  validation uses branch-stable reduced-real fixtures; exact adjoint vector
+  parity is asserted only on well-conditioned operator-vs-dense/PLU fixtures.
 
 **Reduction-order stress tiers**
 

@@ -17,6 +17,7 @@ import numpy as np
 import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
+from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "simsopt"
 
@@ -33,9 +34,13 @@ surface_gamma = _sf.surface_gamma
 surface_gammadash1 = _sf.surface_gammadash1
 surface_gammadash2 = _sf.surface_gammadash2
 surface_normal = _sf.surface_normal
+dgamma_by_dcoeff = _sf.dgamma_by_dcoeff
+dgammadash1_by_dcoeff = _sf.dgammadash1_by_dcoeff
+dgammadash2_by_dcoeff = _sf.dgammadash2_by_dcoeff
 surface_xyzfourier_gamma_from_dofs = _sf.surface_xyzfourier_gamma_from_dofs
 surface_xyzfourier_gammadash1_from_dofs = _sf.surface_xyzfourier_gammadash1_from_dofs
 surface_xyzfourier_gammadash2_from_dofs = _sf.surface_xyzfourier_gammadash2_from_dofs
+_DERIVATIVE_HEAVY_TOLS = parity_ladder_tolerances("derivative-heavy")
 
 
 def _make_simple_torus_coeffs(R=1.0, r=0.1, mpol=1, ntor=0, nfp=1):
@@ -224,6 +229,49 @@ class TestSurfaceFourierJaxCppParity:
         )
 
         np.testing.assert_allclose(np.array(gamma_jax), gamma_cpp, atol=1e-13)
+
+    @pytest.mark.parametrize(
+        ("jax_fn", "cpp_method"),
+        [
+            (dgamma_by_dcoeff, "dgamma_by_dcoeff"),
+            (dgammadash1_by_dcoeff, "dgammadash1_by_dcoeff"),
+            (dgammadash2_by_dcoeff, "dgammadash2_by_dcoeff"),
+        ],
+    )
+    def test_coefficient_derivatives_match_cpp(self, jax_fn, cpp_method):
+        from simsopt.geo import SurfaceXYZTensorFourier
+
+        mpol, ntor, nfp = 2, 2, 2
+        surface = SurfaceXYZTensorFourier(
+            mpol=mpol,
+            ntor=ntor,
+            nfp=nfp,
+            stellsym=False,
+            quadpoints_phi=np.linspace(0, 1.0 / nfp, 7, endpoint=False),
+            quadpoints_theta=np.linspace(0, 1.0, 6, endpoint=False),
+        )
+        rng = np.random.default_rng(7)
+        dofs = surface.get_dofs().copy()
+        dofs[:] = rng.normal(scale=0.1, size=dofs.shape)
+        surface.set_dofs(dofs)
+
+        derivative_jax = jax_fn(
+            jnp.asarray(dofs),
+            jnp.asarray(surface.quadpoints_phi),
+            jnp.asarray(surface.quadpoints_theta),
+            mpol,
+            ntor,
+            nfp,
+            False,
+        )
+        derivative_cpp = getattr(surface, cpp_method)()
+
+        np.testing.assert_allclose(
+            np.asarray(derivative_jax),
+            derivative_cpp,
+            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
 
 
 class TestSurfaceXYZFourierJaxCppParity:

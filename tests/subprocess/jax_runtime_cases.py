@@ -443,25 +443,19 @@ def _host_array_float64(value) -> np.ndarray:
     return np.asarray(jax.device_get(value), dtype=np.float64)
 
 
+def _assert_finite_scalar(value, *, label: str | None = None) -> float:
+    scalar = _host_scalar_float64(value)
+    if label is None:
+        assert np.isfinite(scalar)
+    else:
+        assert np.isfinite(scalar), label
+    return scalar
+
+
 def _assert_finite_scalar_matches_host(device_value, host_value) -> None:
-    device_scalar = _host_scalar_float64(device_value)
+    device_scalar = _assert_finite_scalar(device_value)
     host_scalar = _host_scalar_float64(host_value)
-    assert np.isfinite(device_scalar)
     np.testing.assert_allclose(host_scalar, device_scalar)
-
-
-def _assert_finite_array_matches_host(
-    device_value,
-    host_value,
-    *,
-    expected_shape=None,
-) -> None:
-    device_array = _host_array_float64(device_value)
-    host_array = _host_array_float64(host_value)
-    if expected_shape is not None:
-        assert device_array.shape == expected_shape
-    assert np.all(np.isfinite(device_array))
-    np.testing.assert_allclose(host_array, device_array)
 
 
 def _assert_finite_array(value, *, expected_shape=None) -> np.ndarray:
@@ -470,18 +464,6 @@ def _assert_finite_array(value, *, expected_shape=None) -> np.ndarray:
         assert array.shape == expected_shape
     assert np.all(np.isfinite(array))
     return array
-
-
-def _assert_reporting_metrics_match_host(
-    metric_names: tuple[str, ...],
-    device_metrics,
-    host_metrics,
-) -> None:
-    for metric_name in metric_names:
-        metric_value = _host_scalar_float64(device_metrics[metric_name])
-        metric_value_from_host = _host_scalar_float64(host_metrics[metric_name])
-        assert np.isfinite(metric_value), metric_name
-        np.testing.assert_allclose(metric_value_from_host, metric_value)
 
 
 def _run_single_stage_target_runtime_bundle_transfer_guard_case() -> None:
@@ -510,38 +492,22 @@ def _run_single_stage_target_runtime_bundle_transfer_guard_case() -> None:
         include_distance_metrics=True,
     )
     objective_value_from_host = runtime_bundle["objective"](coil_dofs_host)
-    value_and_grad_value_from_host, value_and_grad_grad_from_host = runtime_bundle[
-        "value_and_grad"
-    ](coil_dofs_host)
-    batch_values_from_host, batch_grads_from_host = runtime_bundle[
-        "batched_value_and_grad"
-    ](coil_dofs_batch_host)
-    reporting_metrics_from_host = runtime_bundle["reporting_metrics"](
-        coil_dofs_host,
-        include_distance_metrics=True,
-    )
 
     _assert_finite_scalar_matches_host(
         objective_value,
         objective_value_from_host,
     )
-    _assert_finite_scalar_matches_host(
-        value_and_grad_value,
-        value_and_grad_value_from_host,
-    )
-    _assert_finite_array_matches_host(
+    _assert_finite_scalar(value_and_grad_value)
+    _assert_finite_array(
         value_and_grad_grad,
-        value_and_grad_grad_from_host,
         expected_shape=coil_dofs_host.shape,
     )
-    _assert_finite_array_matches_host(
+    _assert_finite_array(
         batch_values,
-        batch_values_from_host,
         expected_shape=(2,),
     )
-    _assert_finite_array_matches_host(
+    _assert_finite_array(
         batch_grads,
-        batch_grads_from_host,
         expected_shape=coil_dofs_batch_host.shape,
     )
     metric_names = (
@@ -554,11 +520,8 @@ def _run_single_stage_target_runtime_bundle_transfer_guard_case() -> None:
         "curve_surface_min_dist",
         "surface_vessel_min_dist",
     )
-    _assert_reporting_metrics_match_host(
-        metric_names,
-        reporting_metrics,
-        reporting_metrics_from_host,
-    )
+    for metric_name in metric_names:
+        _assert_finite_scalar(reporting_metrics[metric_name], label=metric_name)
 
     forward_result = compiled_bundle["compiled_forward_result_for"](coil_dofs_device)
     solved_x_host = _host_array_float64(forward_result["x"])

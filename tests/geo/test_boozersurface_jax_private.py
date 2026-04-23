@@ -25,22 +25,15 @@ from .boozersurface_jax_test_helpers import (
 )
 
 
-def test_solve_boozer_adjoint_enables_iterative_refinement(monkeypatch):
-    recorded = {}
+def test_solve_boozer_adjoint_rejects_factor_only_runtime_state():
+    adjoint_state = types.SimpleNamespace(
+        linearization_kind="exact_jacobian",
+        linear_solve_factors=("P", "L", "U"),
+        plu=("P", "L", "U"),
+    )
 
-    def fake_forward_backward_jax(P, L, U, rhs, *, iterative_refinement=False):
-        recorded["args"] = (P, L, U, rhs)
-        recorded["iterative_refinement"] = iterative_refinement
-        return "adjoint"
-
-    monkeypatch.setattr(_soj, "forward_backward_jax", fake_forward_backward_jax)
-    adjoint_state = types.SimpleNamespace(plu=("P", "L", "U"))
-
-    result = _soj._solve_boozer_adjoint(adjoint_state, "rhs")
-
-    assert result == "adjoint"
-    assert recorded["args"] == ("P", "L", "U", "rhs")
-    assert recorded["iterative_refinement"] is True
+    with pytest.raises(RuntimeError, match="solve_transpose"):
+        _soj._solve_boozer_adjoint(adjoint_state, "rhs")
 
 
 def test_solve_boozer_adjoint_raises_on_failed_operator_runtime():

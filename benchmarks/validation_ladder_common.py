@@ -59,9 +59,12 @@ _REQUESTED_PLATFORM_RUNTIME_BACKENDS = {
     "cuda": frozenset({"cuda", "gpu"}),
 }
 OPTIMIZER_DRIFT_TOLERANCES = ladder_contract.OPTIMIZER_DRIFT_TOLERANCES
+PARITY_LADDER_TOLERANCES = ladder_contract.PARITY_LADDER_TOLERANCES
 _SHORT_RUN_SMOKE_MAXITER = ladder_contract.SHORT_RUN_SMOKE_MAXITER
 TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG = ladder_contract.TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG
 optimizer_drift_tolerances = ladder_contract.optimizer_drift_tolerances
+parity_ladder_ratchet_rel_tol = ladder_contract.parity_ladder_ratchet_rel_tol
+parity_ladder_tolerances = ladder_contract.parity_ladder_tolerances
 resolve_probe_lane = ladder_contract.resolve_probe_lane
 short_run_geometry_rel_tolerance = ladder_contract.short_run_geometry_rel_tolerance
 short_run_stage2_final_objective_rel_tolerance = (

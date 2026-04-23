@@ -32,6 +32,7 @@ from repo_bootstrap import bootstrap_local_simsopt
 bootstrap_local_simsopt(Path(__file__).resolve().parents[2] / "src")
 
 from conftest import parity_acceptance_modes
+from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 
 from simsopt.backend import invalidate_backend_cache
 from simsopt.jax_core.field import (
@@ -96,6 +97,7 @@ biot_savart_A = _bs.biot_savart_A
 biot_savart_dA_by_dX = _bs.biot_savart_dA_by_dX
 
 MU0 = 4.0 * np.pi * 1e-7
+_DERIVATIVE_HEAVY_TOLS = parity_ladder_tolerances("derivative-heavy")
 _KERNEL_TUNING_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",
     "SIMSOPT_JAX_COIL_CHUNK_SIZE",
@@ -506,7 +508,12 @@ class TestBiotSavartJaxCppParity:
             jnp.array(currents_np),
         )
 
-        np.testing.assert_allclose(np.array(dB_jax), dB_ref, rtol=1e-10, atol=1e-13)
+        np.testing.assert_allclose(
+            np.array(dB_jax),
+            dB_ref,
+            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
 
 
 class TestBiotSavartJaxChunkedParity:
