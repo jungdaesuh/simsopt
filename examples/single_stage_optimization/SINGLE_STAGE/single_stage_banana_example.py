@@ -127,6 +127,7 @@ from banana_opt.hardware_contracts import (
     ACCEPT_OFFSPEC_R0_SEED_HELP,
     BANANA_WINDING_MINOR_RADIUS_M,
     COIL_COIL_MIN_DIST_M,
+    COIL_LENGTH_HARD_LIMIT_M,
     COIL_LENGTH_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
     MAX_CURVATURE_INV_M,
@@ -142,7 +143,6 @@ from banana_opt.hardware_constraint_schema import (
     hardware_constraint_alm_names,
 )
 from banana_opt.incumbents import (
-    COIL_LENGTH_HARD_LIMIT_M,
     restore_single_stage_incumbent_state,
     snapshot_single_stage_incumbent_state,
 )
