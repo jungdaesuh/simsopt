@@ -71,6 +71,18 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--target-banana-current-max-abs-A",
+        dest="target_banana_current_max_abs_a",
+        type=float,
+        default=None,
+        help=(
+            "Optional final max-|banana current| envelope in amperes. Rescales "
+            "the resolved current vector uniformly, preserving signs and relative "
+            "coil-to-coil variation. Use this to pull near-limit seeds inward "
+            "before seed-relative current-coordinate validation runs."
+        ),
+    )
+    parser.add_argument(
         "--perturbation-seed",
         type=int,
         default=42,
@@ -162,10 +174,19 @@ def _resolved_banana_currents_a(
     args: argparse.Namespace,
     *,
     donor_banana_currents_a: list[float],
-) -> tuple[str, list[float]]:
+) -> tuple[str, list[float], float | None]:
     perturbation_mode = _resolved_perturbation_mode(args)
     if perturbation_mode == "explicit_vector":
-        return perturbation_mode, parse_csv(str(args.banana_currents_a), float)
+        resolved_currents_a = parse_csv(str(args.banana_currents_a), float)
+        resolved_currents_a, envelope_scale_factor = _rescale_to_target_max_abs_a(
+            resolved_currents_a,
+            target_max_abs_a=args.target_banana_current_max_abs_a,
+        )
+        return (
+            perturbation_mode,
+            resolved_currents_a,
+            envelope_scale_factor,
+        )
     relative_perturbation_max = float(args.relative_perturbation_max)
     if relative_perturbation_max < 0.0:
         raise ValueError("--relative-perturbation-max must be non-negative.")
@@ -175,17 +196,19 @@ def _resolved_banana_currents_a(
         relative_perturbation_max,
         size=len(donor_banana_currents_a),
     )
-    return (
-        perturbation_mode,
-        [
-            float(donor_current_A) * (1.0 + float(perturbation))
-            for donor_current_A, perturbation in zip(
-                donor_banana_currents_a,
-                perturbations,
-                strict=True,
-            )
-        ],
+    resolved_currents_a = [
+        float(donor_current_A) * (1.0 + float(perturbation))
+        for donor_current_A, perturbation in zip(
+            donor_banana_currents_a,
+            perturbations,
+            strict=True,
+        )
+    ]
+    resolved_currents_a, envelope_scale_factor = _rescale_to_target_max_abs_a(
+        resolved_currents_a,
+        target_max_abs_a=args.target_banana_current_max_abs_a,
     )
+    return perturbation_mode, resolved_currents_a, envelope_scale_factor
 
 
 def _recommended_single_stage_flags(variant_bs_path: Path) -> list[str]:
@@ -194,7 +217,24 @@ def _recommended_single_stage_flags(variant_bs_path: Path) -> list[str]:
         str(variant_bs_path),
         "--single-stage-banana-current-mode",
         "independent",
+        "--single-stage-banana-current-coordinate-scaling",
+        "seed-relative",
+        "--banana-current-diagnostics",
     ]
+
+
+def _rescale_to_target_max_abs_a(
+    currents_a: list[float],
+    *,
+    target_max_abs_a: float | None,
+) -> tuple[list[float], float | None]:
+    if target_max_abs_a is None:
+        return [float(value) for value in currents_a], None
+    target_max_abs_a = float(target_max_abs_a)
+    if target_max_abs_a <= 0.0:
+        raise ValueError("--target-banana-current-max-abs-A must be positive.")
+    scale_factor = target_max_abs_a / max(abs(value) for value in currents_a)
+    return [float(value) * scale_factor for value in currents_a], scale_factor
 
 
 def _variant_results_updates(
@@ -203,6 +243,8 @@ def _variant_results_updates(
     stage2_results_path: Path,
     perturbation_mode: str,
     relative_perturbation_max: float | None,
+    target_banana_current_max_abs_a: float | None,
+    banana_current_envelope_scale_factor: float | None,
     perturbation_seed: int,
 ) -> dict[str, object]:
     return {
@@ -210,6 +252,8 @@ def _variant_results_updates(
         "DONOR_STAGE2_RESULTS_PATH": str(stage2_results_path),
         "PERTURBATION_MODE": perturbation_mode,
         "RELATIVE_PERTURBATION_MAX": relative_perturbation_max,
+        "TARGET_BANANA_CURRENT_MAX_ABS_A": target_banana_current_max_abs_a,
+        "BANANA_CURRENT_ENVELOPE_SCALE_FACTOR": banana_current_envelope_scale_factor,
         "PERTURBATION_SEED": _effective_perturbation_seed(
             perturbation_mode=perturbation_mode,
             perturbation_seed=perturbation_seed,
@@ -242,6 +286,8 @@ def build_summary(
     banana_currents_a: list[float],
     perturbation_mode: str,
     relative_perturbation_max: float | None,
+    target_banana_current_max_abs_a: float | None,
+    banana_current_envelope_scale_factor: float | None,
     perturbation_seed: int | None,
 ) -> dict[str, object]:
     compatibility_current_A = max(abs(current_A) for current_A in banana_currents_a)
@@ -263,6 +309,16 @@ def build_summary(
             None
             if relative_perturbation_max is None
             else float(relative_perturbation_max)
+        ),
+        "target_banana_current_max_abs_a": (
+            None
+            if target_banana_current_max_abs_a is None
+            else float(target_banana_current_max_abs_a)
+        ),
+        "banana_current_envelope_scale_factor": (
+            None
+            if banana_current_envelope_scale_factor is None
+            else float(banana_current_envelope_scale_factor)
         ),
         "perturbation_seed": _effective_perturbation_seed(
             perturbation_mode=perturbation_mode,
@@ -294,7 +350,11 @@ def main(argv: list[str] | None = None) -> int:
         stage2_results=stage2_results,
         requested_num_tf_coils=requested_num_tf_coils,
     )
-    perturbation_mode, banana_currents_a = _resolved_banana_currents_a(
+    (
+        perturbation_mode,
+        banana_currents_a,
+        banana_current_envelope_scale_factor,
+    ) = _resolved_banana_currents_a(
         args,
         donor_banana_currents_a=donor_banana_currents_a,
     )
@@ -310,6 +370,12 @@ def main(argv: list[str] | None = None) -> int:
                 stage2_results_path=stage2_results_path,
                 perturbation_mode=perturbation_mode,
                 relative_perturbation_max=args.relative_perturbation_max,
+                target_banana_current_max_abs_a=(
+                    args.target_banana_current_max_abs_a
+                ),
+                banana_current_envelope_scale_factor=(
+                    banana_current_envelope_scale_factor
+                ),
                 perturbation_seed=args.perturbation_seed,
             ),
         )
@@ -326,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
         banana_currents_a=[float(value) for value in banana_currents_a],
         perturbation_mode=perturbation_mode,
         relative_perturbation_max=args.relative_perturbation_max,
+        target_banana_current_max_abs_a=args.target_banana_current_max_abs_a,
+        banana_current_envelope_scale_factor=banana_current_envelope_scale_factor,
         perturbation_seed=args.perturbation_seed,
     )
     write_json(summary_path, summary)

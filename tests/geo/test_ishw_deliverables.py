@@ -856,8 +856,16 @@ class PerturbedBananaSeedTests(unittest.TestCase):
             target_banana_currents,
         )
         self.assertEqual(
-            summary["recommended_single_stage_flags"][-2:],
-            ["--single-stage-banana-current-mode", "independent"],
+            summary["recommended_single_stage_flags"],
+            [
+                "--stage2-bs-path",
+                str((output_root / "biot_savart_opt.json").resolve()),
+                "--single-stage-banana-current-mode",
+                "independent",
+                "--single-stage-banana-current-coordinate-scaling",
+                "seed-relative",
+                "--banana-current-diagnostics",
+            ],
         )
         self.assertEqual(
             variant_results["BANANA_CURRENTS_A"],
@@ -888,6 +896,105 @@ class PerturbedBananaSeedTests(unittest.TestCase):
         )
         self.assertEqual(variant_results["STAGE2_BS_SHA256"], expected_digest)
         handoff_module.validate_stage2_seed_contract(variant_results)
+
+    def test_main_materializes_target_envelope_seed_bundle(self):
+        banana_scan_module = load_banana_scan_module()
+        module = load_perturbed_seed_module()
+        bs, stage2_results, _, _ = (
+            BananaCurrentChainScalingTests._build_banana_partitions(11000.0)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            seed_bs_path = tmpdir_path / "seed" / "biot_savart_opt.json"
+            seed_bs_path.parent.mkdir(parents=True, exist_ok=True)
+            bs.save(str(seed_bs_path))
+            seed_bs_path.with_name("results.json").write_text(
+                json.dumps(stage2_results),
+                encoding="utf-8",
+            )
+            output_root = tmpdir_path / "variant"
+
+            result = module.main(
+                [
+                    "--stage2-bs-path",
+                    str(seed_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--relative-perturbation-max",
+                    "0.0",
+                    "--target-banana-current-max-abs-A",
+                    "9500",
+                ]
+            )
+
+            self.assertEqual(result, 0)
+            summary = json.loads(
+                (output_root / module.DEFAULT_SUMMARY_JSON).read_text(
+                    encoding="utf-8"
+                )
+            )
+            variant_results = json.loads(
+                (output_root / "results.json").read_text(encoding="utf-8")
+            )
+            expected_digest = banana_scan_module.compute_stage2_bs_sha256(
+                output_root / "biot_savart_opt.json"
+            )
+
+        target_banana_currents = [
+            9500.0 if index % 2 == 0 else -9500.0
+            for index in range(stage2_results["NUM_BANANA_COILS"])
+        ]
+        self.assertEqual(summary["perturbed_banana_currents_a"], target_banana_currents)
+        self.assertEqual(summary["target_banana_current_max_abs_a"], 9500.0)
+        self.assertEqual(
+            summary["banana_current_envelope_scale_factor"],
+            9500.0 / 11000.0,
+        )
+        self.assertEqual(variant_results["BANANA_CURRENTS_A"], target_banana_currents)
+        self.assertEqual(variant_results["BANANA_CURRENT_A"], 9500.0)
+        self.assertEqual(
+            variant_results["TARGET_BANANA_CURRENT_MAX_ABS_A"],
+            9500.0,
+        )
+        self.assertEqual(
+            variant_results["BANANA_CURRENT_ENVELOPE_SCALE_FACTOR"],
+            9500.0 / 11000.0,
+        )
+        self.assertEqual(variant_results["STAGE2_BS_SHA256"], expected_digest)
+
+    def test_main_rejects_negative_target_envelope(self):
+        module = load_perturbed_seed_module()
+        bs, stage2_results, _, _ = (
+            BananaCurrentChainScalingTests._build_banana_partitions(11000.0)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            seed_bs_path = tmpdir_path / "seed" / "biot_savart_opt.json"
+            seed_bs_path.parent.mkdir(parents=True, exist_ok=True)
+            bs.save(str(seed_bs_path))
+            seed_bs_path.with_name("results.json").write_text(
+                json.dumps(stage2_results),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "--target-banana-current-max-abs-A must be positive",
+            ):
+                module.main(
+                    [
+                        "--stage2-bs-path",
+                        str(seed_bs_path),
+                        "--output-root",
+                        str(tmpdir_path / "variant"),
+                        "--relative-perturbation-max",
+                        "0.0",
+                        "--target-banana-current-max-abs-A",
+                        "-9500",
+                    ]
+                )
 
     def test_main_keeps_init_only_donor_metadata_without_unsupported_single_stage_flag(self):
         module = load_perturbed_seed_module()
@@ -928,8 +1035,14 @@ class PerturbedBananaSeedTests(unittest.TestCase):
 
         self.assertTrue(summary["donor_init_only"])
         self.assertEqual(
-            summary["recommended_single_stage_flags"][-2:],
-            ["--single-stage-banana-current-mode", "independent"],
+            summary["recommended_single_stage_flags"][-5:],
+            [
+                "--single-stage-banana-current-mode",
+                "independent",
+                "--single-stage-banana-current-coordinate-scaling",
+                "seed-relative",
+                "--banana-current-diagnostics",
+            ],
         )
         self.assertNotIn(
             "--allow-init-only-stage2-seed",
