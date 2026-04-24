@@ -1534,6 +1534,43 @@ class TestOptimizerTrajectoryParity:
 class TestBiotSavartJAXParity:
     """BiotSavartJAX.B() must match BiotSavart.B()."""
 
+    @staticmethod
+    def _assert_pullback_projects_to_public(
+        bs_jax,
+        pullback,
+        public_derivative,
+        coils,
+    ):
+        assert pullback.d_coil_arrays
+        assert len(pullback.d_coil_arrays) == len(pullback.coil_indices)
+
+        projected = bs_jax.coil_cotangents_to_derivative(
+            pullback.d_coil_arrays,
+            pullback.coil_indices,
+        )
+        for coil in coils:
+            np.testing.assert_allclose(
+                projected(coil),
+                public_derivative(coil),
+                rtol=1e-12,
+                atol=1e-14,
+            )
+
+    def _assert_pullback_pair_projects_to_public(
+        self,
+        bs_jax,
+        pullbacks,
+        public_derivatives,
+        coils,
+    ):
+        for pullback, public_derivative in zip(pullbacks, public_derivatives):
+            self._assert_pullback_projects_to_public(
+                bs_jax,
+                pullback,
+                public_derivative,
+                coils,
+            )
+
     def test_b_parity(self, coil_surf_setup):
         coils, surf, _, _ = coil_surf_setup
         points = surf.gamma().reshape((-1, 3))
@@ -1591,22 +1628,12 @@ class TestBiotSavartJAXParity:
         bs_jax.set_points(points)
         v = np.asarray(bs_jax.B())
 
-        pullback = bs_jax.B_pullback_native(v)
-        projected = bs_jax.coil_cotangents_to_derivative(
-            pullback.d_coil_arrays,
-            pullback.coil_indices,
+        self._assert_pullback_projects_to_public(
+            bs_jax,
+            bs_jax.B_pullback_native(v),
+            bs_jax.B_vjp(v),
+            coils,
         )
-        public = bs_jax.B_vjp(v)
-
-        assert pullback.d_coil_arrays
-        assert len(pullback.d_coil_arrays) == len(pullback.coil_indices)
-        for coil in coils:
-            np.testing.assert_allclose(
-                projected(coil),
-                public(coil),
-                rtol=1e-12,
-                atol=1e-14,
-            )
 
     def test_pullback_native_payload_is_jax_pytree(self, coil_surf_setup):
         """Native pullback payloads are pytrees with static coil index metadata."""
@@ -1751,27 +1778,12 @@ class TestBiotSavartJAXParity:
         B = np.asarray(bs_jax.B())
         dB = np.asarray(bs_jax.dB_by_dX())
 
-        native_pullbacks = bs_jax.B_and_dB_pullback_native(B, dB)
-        projected = tuple(
-            bs_jax.coil_cotangents_to_derivative(
-                pullback.d_coil_arrays,
-                pullback.coil_indices,
-            )
-            for pullback in native_pullbacks
+        self._assert_pullback_pair_projects_to_public(
+            bs_jax,
+            bs_jax.B_and_dB_pullback_native(B, dB),
+            bs_jax.B_and_dB_vjp(B, dB),
+            coils,
         )
-        public = bs_jax.B_and_dB_vjp(B, dB)
-
-        for pullback in native_pullbacks:
-            assert pullback.d_coil_arrays
-            assert len(pullback.d_coil_arrays) == len(pullback.coil_indices)
-        for projected_deriv, public_deriv in zip(projected, public):
-            for coil in coils:
-                np.testing.assert_allclose(
-                    projected_deriv(coil),
-                    public_deriv(coil),
-                    rtol=1e-12,
-                    atol=1e-14,
-                )
 
     def test_A_parity(self, coil_surf_setup):
         """Vector potential A must match CPU at the same evaluation points."""
@@ -1830,22 +1842,12 @@ class TestBiotSavartJAXParity:
         bs_jax.set_points(points)
         v = np.asarray(bs_jax.A())
 
-        pullback = bs_jax.A_pullback_native(v)
-        projected = bs_jax.coil_cotangents_to_derivative(
-            pullback.d_coil_arrays,
-            pullback.coil_indices,
+        self._assert_pullback_projects_to_public(
+            bs_jax,
+            bs_jax.A_pullback_native(v),
+            bs_jax.A_vjp(v),
+            coils,
         )
-        public = bs_jax.A_vjp(v)
-
-        assert pullback.d_coil_arrays
-        assert len(pullback.d_coil_arrays) == len(pullback.coil_indices)
-        for coil in coils:
-            np.testing.assert_allclose(
-                projected(coil),
-                public(coil),
-                rtol=1e-12,
-                atol=1e-14,
-            )
 
     def test_A_and_dA_vjp_parity(self, coil_surf_setup):
         """A_and_dA_vjp returns the same pair of Derivatives as CPU."""
@@ -1887,27 +1889,12 @@ class TestBiotSavartJAXParity:
         A = np.asarray(bs_jax.A())
         dA = np.asarray(bs_jax.dA_by_dX())
 
-        native_pullbacks = bs_jax.A_and_dA_pullback_native(A, dA)
-        projected = tuple(
-            bs_jax.coil_cotangents_to_derivative(
-                pullback.d_coil_arrays,
-                pullback.coil_indices,
-            )
-            for pullback in native_pullbacks
+        self._assert_pullback_pair_projects_to_public(
+            bs_jax,
+            bs_jax.A_and_dA_pullback_native(A, dA),
+            bs_jax.A_and_dA_vjp(A, dA),
+            coils,
         )
-        public = bs_jax.A_and_dA_vjp(A, dA)
-
-        for pullback in native_pullbacks:
-            assert pullback.d_coil_arrays
-            assert len(pullback.d_coil_arrays) == len(pullback.coil_indices)
-        for projected_deriv, public_deriv in zip(projected, public):
-            for coil in coils:
-                np.testing.assert_allclose(
-                    projected_deriv(coil),
-                    public_deriv(coil),
-                    rtol=1e-12,
-                    atol=1e-14,
-                )
 
 
 # -----------------------------------------------------------------------
