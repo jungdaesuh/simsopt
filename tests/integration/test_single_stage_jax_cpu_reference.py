@@ -161,9 +161,9 @@ from examples.single_stage_optimization.SINGLE_STAGE import (  # noqa: E402
     single_stage_banana_example as single_stage_example,
 )
 
-_REMOVED_CPU_COIL_PULLBACK_PATTERN = (
-    "BiotSavartJAX.*immutable JAX curve specs.*"
-    "CPU coil-pullback fallback was removed"
+_IMMUTABLE_SPEC_REQUIRED_PATTERN = (
+    "BiotSavartJAX coil cotangent projection requires immutable JAX "
+    "curve specs.*Provide a native curve spec"
 )
 _LS_WRAPPER_GRADIENT_TOLS = parity_ladder_tolerances("ls-wrapper-gradient")
 _DERIVATIVE_HEAVY_TOLS = parity_ladder_tolerances("derivative-heavy")
@@ -883,7 +883,7 @@ class _RecordingVJPCoil:
 
     Includes ``curve`` and ``current`` attributes so
     ``_unwrap_coil_curve_and_current`` can process this coil
-    before rejecting the removed CPU ``coil.vjp()`` seam.
+    before rejecting the unsupported public ``coil.vjp()`` path.
     """
 
     def __init__(self):
@@ -962,7 +962,7 @@ class _RecordingCurrent:
         return Derivative({self: v_current})
 
 
-class _FallbackBombCoil:
+class _CoilVJPBombCoil:
     """Coil stub whose ``vjp`` must never be called on the JAX projection path."""
 
     def __init__(self):
@@ -970,7 +970,7 @@ class _FallbackBombCoil:
         self.current = _RecordingCurrent()
 
     def vjp(self, dg, dgd, dc):
-        raise AssertionError("JAX-projectable coils should not fall back to coil.vjp()")
+        raise AssertionError("JAX-projectable coils should not call coil.vjp()")
 
 
 class _SpecBackedBombCoil:
@@ -996,10 +996,10 @@ class _SpecBackedBombCoil:
         self.current = _RecordingCurrent()
 
     def vjp(self, dg, dgd, dc):
-        raise AssertionError("Spec-backed coils should not fall back to coil.vjp()")
+        raise AssertionError("Spec-backed coils should not call coil.vjp()")
 
 
-class _CpuFallbackRecordingCoil:
+class _PublicCoilVJPRecordingCoil:
     """Coil stub that records use of the public CPU ``coil.vjp()`` contract."""
 
     def __init__(self, *, rotated=False, phi=np.pi / 2.0):
@@ -1038,6 +1038,16 @@ class _RotatedUnsupportedRecordingCoil:
         raise AssertionError(
             "Rotated unsupported curves should be rejected before coil.vjp()"
         )
+
+
+def _assert_no_coil_vjp_calls(*coils):
+    for coil in coils:
+        assert coil.calls == []
+
+
+def _assert_no_current_vjp_calls(*coils):
+    for coil in coils:
+        assert coil.current.calls == []
 
 
 _GENERIC_JAXCURVE_DOFS = np.array([0.1, -0.03, 0.02, 0.04, -0.01])
@@ -3287,7 +3297,7 @@ class TestAdjointSolveConsistency:
     ):
         """Non-strict JAX mode should reject the public CPU pullback seam."""
         _enable_non_strict_jax_backend(monkeypatch, request)
-        coils = [_CpuFallbackRecordingCoil(), _CpuFallbackRecordingCoil()]
+        coils = [_PublicCoilVJPRecordingCoil(), _PublicCoilVJPRecordingCoil()]
         bs_jax = _make_biotsavart_jax_for_coils(coils)
         d_coil_arrays = [
             (
@@ -3309,14 +3319,12 @@ class TestAdjointSolveConsistency:
 
         with pytest.raises(
             TypeError,
-            match=_REMOVED_CPU_COIL_PULLBACK_PATTERN,
+            match=_IMMUTABLE_SPEC_REQUIRED_PATTERN,
         ):
             bs_jax.coil_cotangents_to_derivative(d_coil_arrays, [[0, 1]])
 
-        assert coils[0].calls == []
-        assert coils[1].calls == []
-        assert coils[0].current.calls == []
-        assert coils[1].current.calls == []
+        _assert_no_coil_vjp_calls(*coils)
+        _assert_no_current_vjp_calls(*coils)
 
     def test_strict_mode_rejects_public_cpu_coil_vjp_pullback(
         self,
@@ -3325,12 +3333,12 @@ class TestAdjointSolveConsistency:
     ):
         """Strict JAX mode should reject the public CPU pullback seam outright."""
         _enable_strict_jax_backend(monkeypatch, request)
-        coils = [_CpuFallbackRecordingCoil()]
+        coils = [_PublicCoilVJPRecordingCoil()]
         bs_jax = _make_biotsavart_jax_for_coils(coils)
 
         with pytest.raises(
             TypeError,
-            match=_REMOVED_CPU_COIL_PULLBACK_PATTERN,
+            match=_IMMUTABLE_SPEC_REQUIRED_PATTERN,
         ):
             bs_jax.coil_cotangents_to_derivative(
                 _single_coil_cotangent_arrays(
@@ -3341,8 +3349,8 @@ class TestAdjointSolveConsistency:
                 [[0]],
             )
 
-        assert coils[0].calls == []
-        assert coils[0].current.calls == []
+        _assert_no_coil_vjp_calls(*coils)
+        _assert_no_current_vjp_calls(*coils)
 
     def test_fast_mode_rejects_public_cpu_coil_vjp_pullback(
         self,
@@ -3351,12 +3359,12 @@ class TestAdjointSolveConsistency:
     ):
         """The fast/ondevice lane must not silently route through ``coil.vjp()``."""
         _enable_fast_non_strict_jax_backend(monkeypatch, request)
-        coils = [_CpuFallbackRecordingCoil()]
+        coils = [_PublicCoilVJPRecordingCoil()]
         bs_jax = _make_biotsavart_jax_for_coils(coils)
 
         with pytest.raises(
             TypeError,
-            match=_REMOVED_CPU_COIL_PULLBACK_PATTERN,
+            match=_IMMUTABLE_SPEC_REQUIRED_PATTERN,
         ):
             bs_jax.coil_cotangents_to_derivative(
                 _single_coil_cotangent_arrays(
@@ -3367,41 +3375,41 @@ class TestAdjointSolveConsistency:
                 [[0]],
             )
 
-        assert coils[0].calls == []
-        assert coils[0].current.calls == []
+        _assert_no_coil_vjp_calls(*coils)
+        _assert_no_current_vjp_calls(*coils)
 
     def test_biotsavart_projection_rejects_rotated_public_cpu_coil_vjp_pullback(
         self,
         monkeypatch,
         request,
     ):
-        """Rotated public fallback coils must not route through ``coil.vjp()``."""
+        """Rotated public VJP-only coils must not route through ``coil.vjp()``."""
         _enable_non_strict_jax_backend(monkeypatch, request)
-        coils = [_CpuFallbackRecordingCoil(rotated=True, phi=np.pi / 2.0)]
+        coils = [_PublicCoilVJPRecordingCoil(rotated=True, phi=np.pi / 2.0)]
         bs_jax = _make_biotsavart_jax_for_coils(coils)
         d_gamma = np.array([1.0, 2.0, 3.0])
         d_gammadash = np.array([4.0, 5.0, 6.0])
 
         with pytest.raises(
             TypeError,
-            match=_REMOVED_CPU_COIL_PULLBACK_PATTERN,
+            match=_IMMUTABLE_SPEC_REQUIRED_PATTERN,
         ):
             bs_jax.coil_cotangents_to_derivative(
                 _single_coil_cotangent_arrays(d_gamma, d_gammadash, 1.5),
                 [[0]],
             )
 
-        assert coils[0].calls == []
-        assert coils[0].current.calls == []
+        _assert_no_coil_vjp_calls(*coils)
+        _assert_no_current_vjp_calls(*coils)
 
-    def test_biotsavart_projection_rejects_unsupported_curves_without_coil_fallback(
+    def test_biotsavart_projection_rejects_unsupported_curves_without_public_coil_vjp(
         self,
     ):
-        """Unsupported curves should fail fast instead of falling back to ``coil.vjp()``."""
+        """Unsupported curves should fail before calling ``coil.vjp()``."""
         coils = [_RecordingVJPCoil()]
         bs_jax = _make_biotsavart_jax_for_coils(coils)
 
-        with pytest.raises(TypeError, match=_REMOVED_CPU_COIL_PULLBACK_PATTERN):
+        with pytest.raises(TypeError, match=_IMMUTABLE_SPEC_REQUIRED_PATTERN):
             bs_jax.coil_cotangents_to_derivative(
                 _single_coil_cotangent_arrays(
                     np.array([1.0, 2.0, 3.0]),
@@ -3411,16 +3419,16 @@ class TestAdjointSolveConsistency:
                 [[0]],
             )
 
-        assert coils[0].calls == []
+        _assert_no_coil_vjp_calls(*coils)
 
-    def test_biotsavart_projection_rejects_rotated_unsupported_curves_without_coil_fallback(
+    def test_biotsavart_projection_rejects_rotated_unsupported_curves_without_public_coil_vjp(
         self,
     ):
         """Rotated wrappers must not make unsupported base curves look pullback-capable."""
         coils = [_RotatedUnsupportedRecordingCoil()]
         bs_jax = _make_biotsavart_jax_for_coils(coils)
 
-        with pytest.raises(TypeError, match=_REMOVED_CPU_COIL_PULLBACK_PATTERN):
+        with pytest.raises(TypeError, match=_IMMUTABLE_SPEC_REQUIRED_PATTERN):
             bs_jax.coil_cotangents_to_derivative(
                 _single_coil_cotangent_arrays(
                     np.array([1.0, 2.0, 3.0]),
@@ -3430,15 +3438,15 @@ class TestAdjointSolveConsistency:
                 [[0]],
             )
 
-        assert coils[0].calls == []
-        assert coils[0].current.calls == []
+        _assert_no_coil_vjp_calls(*coils)
+        _assert_no_current_vjp_calls(*coils)
 
     def test_coil_cotangent_projection_rejects_method_only_jax_pullback_hooks(self):
         """Method-only JAX pullback hooks are not a native spec contract."""
-        coils = [_FallbackBombCoil()]
+        coils = [_CoilVJPBombCoil()]
         bs_jax = object.__new__(BiotSavartJAX)
         bs_jax._coils = coils
-        with pytest.raises(TypeError, match=_REMOVED_CPU_COIL_PULLBACK_PATTERN):
+        with pytest.raises(TypeError, match=_IMMUTABLE_SPEC_REQUIRED_PATTERN):
             bs_jax.coil_cotangents_to_derivative(
                 [
                     (
@@ -3450,27 +3458,7 @@ class TestAdjointSolveConsistency:
                 [[0]],
             )
 
-        assert coils[0].current.calls == []
-
-    def test_legacy_surfaceobjectives_projection_helper_is_unsupported(self):
-        """The old surfaceobjectives compatibility helper should hard-fail now."""
-        from simsopt.geo.surfaceobjectives_jax import _coil_cotangents_to_derivative
-
-        with pytest.raises(
-            RuntimeError,
-            match="BiotSavartJAX\\.coil_cotangents_to_derivative",
-        ):
-            _coil_cotangents_to_derivative(
-                [_RecordingVJPCoil()],
-                [
-                    (
-                        jnp.array([[1.0, 2.0, 3.0]]),
-                        jnp.array([[4.0, 5.0, 6.0]]),
-                        jnp.array([1.5]),
-                    )
-                ],
-                [[0]],
-            )
+        _assert_no_current_vjp_calls(*coils)
 
     def test_refresh_coil_data_reuses_grouped_currents_without_host_reads(
         self, monkeypatch

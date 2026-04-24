@@ -1458,9 +1458,8 @@ class BiotSavartJAX(Optimizable):
     def coil_cotangents_to_derivative(self, d_coil_arrays, coil_indices):
         """Project grouped coil cotangent arrays to a :class:`Derivative`.
 
-        This is the JAX-native replacement for the standalone
-        ``_coil_cotangents_to_derivative()`` helper. Curves are projected
-        through immutable specs; unsupported curves are rejected explicitly.
+        Curves are projected through immutable specs; unsupported curves are
+        rejected explicitly.
 
         Args:
             d_coil_arrays: list of ``(d_gammas, d_gammadashs, d_currents)``

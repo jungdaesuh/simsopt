@@ -102,10 +102,6 @@ _MISSING_STREAMING_GROUP_VJP_ERROR = (
     "BoozerSurfaceJAX objective wrappers require a streaming grouped-adjoint "
     "callback; the legacy full-pytree adjoint fallback is no longer supported."
 )
-_LEGACY_PROJECTION_HELPER_ERROR = (
-    "surfaceobjectives_jax._coil_cotangents_to_derivative() is no longer "
-    "supported; use BiotSavartJAX.coil_cotangents_to_derivative()."
-)
 _TRACEABLE_RUNTIME_OPTION_KEYS = (
     "optimizer_backend",
     "least_squares_algorithm",
@@ -1113,12 +1109,6 @@ def _iter_adjoint_coil_cotangents(stream_group_vjps, adjoint):
     if stream_group_vjps is None:
         raise RuntimeError(_MISSING_STREAMING_GROUP_VJP_ERROR)
     yield from stream_group_vjps(adjoint)
-
-
-def _coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
-    """Deprecated compatibility helper kept only as an explicit hard-fail seam."""
-    del coils, d_coil_arrays, coil_indices
-    raise RuntimeError(_LEGACY_PROJECTION_HELPER_ERROR)
 
 
 def _adjoint_coil_dofs_gradient(stream_group_vjps, adjoint, biotsavart, coil_dofs):

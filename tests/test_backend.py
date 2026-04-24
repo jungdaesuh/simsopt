@@ -433,9 +433,9 @@ def test_backend_cache_clear_callbacks_replace_reloaded_registrations(monkeypatc
         calls.append("second")
 
     callback_first.__module__ = "simsopt.geo.boozersurface_jax"
-    callback_first.__qualname__ = "_clear_hidden_grouped_fallback_warning_cache"
+    callback_first.__qualname__ = "_clear_backend_warning_cache"
     callback_second.__module__ = "simsopt.geo.boozersurface_jax"
-    callback_second.__qualname__ = "_clear_hidden_grouped_fallback_warning_cache"
+    callback_second.__qualname__ = "_clear_backend_warning_cache"
 
     runtime.register_backend_cache_clear(callback_first)
     runtime.register_backend_cache_clear(callback_second)

@@ -299,7 +299,7 @@ Solver drift is dominated by:
   - Not rerun in this audit.
 - [ ] `integral_BdotN` parity remains green after reduction changes
   - Not rerun in this audit.
-- [ ] Stage 2 parity remains green with no hidden fallback seams
+- [ ] Stage 2 parity remains green with no hidden compatibility seams
   - Not rerun in this audit.
 - [ ] Single-stage parity remains green under the documented solver-contract acceptance model
   - Not rerun in this audit.

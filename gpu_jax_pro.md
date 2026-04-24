@@ -3,7 +3,7 @@ Here is the best combined plan:
 Update as of 2026-04-01:
 
 * the public mode-based backend API now exists
-* strict fallback mode now exists
+* strict compatibility-rejection mode now exists
 * a first `jax_core/` subtree now exists
 * first-wave immutable specs now exist for grouped coils, fixed-surface flux,
   `SurfaceRZFourier`, `CurveXYZFourier`, `CurveRZFourier`,
@@ -31,8 +31,8 @@ Update as of 2026-04-01:
 * the next immutable-spec broadening slice is also landed:
   `CurvePlanarFourier`, `CurveHelical`, `CurvePerturbed`, and
   `CurveFilament` now round-trip through immutable curve specs, and
-  `BiotSavartJAX` prefers that spec path over grouped-array fallback for those
-  families
+  `BiotSavartJAX` rejects unsupported curve families instead of using grouped
+  live-graph reconstruction
 * `docs/using_jax_backend.md` now includes copy-paste Stage 2 and single-stage
   examples plus honest performance guidance for compile time, warm timing,
   parity lanes, fast lanes, and memory tradeoffs
@@ -357,7 +357,7 @@ The second major strength is the **testing philosophy**. The repo is not just te
 
 That is exactly the kind of parity contract I recommended: not vague “GPU should match CPU,” but concrete staged checks.
 
-The third major strength is the **traceable objective contract**. The goal is to make the single-stage objective fully JAX-traceable so the outer optimizer can route through JAX control flow rather than the host-callback fallback, with the actual trace-safe route built around `run_code_traceable()` plus the traceable objective builders. That is the right long-term architecture, because it matches JAX’s pure-function model. ([JAX][1])
+The third major strength is the **traceable objective contract**. The goal is to make the single-stage objective fully JAX-traceable so the outer optimizer can route through JAX control flow rather than the old host-callback bridge, with the actual trace-safe route built around `run_code_traceable()` plus the traceable objective builders. That is the right long-term architecture, because it matches JAX’s pure-function model. ([JAX][1])
 
 You are also testing purity rather than just assuming it. The traceable-path tests snapshot `bs_jax.x`, surface DOFs, `booz_jax.res`, dirty flags, and caches, then verify the traceable objective does **not** mutate them and does **not** accumulate child graph state.   That is very good engineering.
 
@@ -568,12 +568,11 @@ According to a document from March 31, 2026, here is the module-by-module implem
    non-hot-path objective families.
 
    `BiotSavartJAX` is also thinner than the earlier draft state: the old CPU
-   curve-geometry / coil-pullback fallbacks are gone, explicit DOF
-   reconstruction now prefers immutable per-coil specs, and grouped array
-   rebuilding is reduced to a compatibility fallback for legacy curve families
-   that still lack immutable-spec support. In strict mode, the hidden
-   grouped-array/live-graph spec fallback is now rejected explicitly instead
-   of being taken silently.
+   curve-geometry / coil-pullback paths are gone, explicit DOF
+   reconstruction now uses immutable per-coil specs, and legacy curve families
+   without immutable-spec support are rejected until a native spec is added.
+   In strict mode, hidden grouped-array/live-graph spec reconstruction is
+   rejected explicitly instead of being taken silently.
 
    The current objective cleanup slice is now materially better than the
    earlier draft state:
@@ -583,10 +582,10 @@ According to a document from March 31, 2026, here is the module-by-module implem
    * target-objective gradients now have centered-FD plus first-order Taylor
      checks
    * the traceable single-stage path keeps the explicit `surface_kind`
-     contract instead of relying on hidden geometry fallbacks
+     contract instead of relying on hidden geometry reconstruction
    * the stateful single-stage wrappers now require streaming grouped adjoint
      callbacks (`res["vjp_groups"]`) instead of silently carrying the legacy
-     full-pytree adjoint fallback
+     full-pytree adjoint path
    * the single-stage `ondevice` outer lane now consumes the scalar
      traceable objective directly instead of the older explicit
      `(value, grad)` adapter contract
@@ -609,12 +608,13 @@ According to a document from March 31, 2026, here is the module-by-module implem
      penalty on the same pure immutable-spec forward path instead of dropping
      back to the inner Boozer objective value
    * active non-strict JAX mode now warns once per component/detail when code
-     crosses known old-path seams instead of silently mixing legacy CPU paths
-     into JAX execution; strict mode still rejects those same seams
-   * the current warning-covered seams include `BiotSavartJAX` CPU
-     geometry/pullback fallbacks, hidden immutable-spec compatibility fallbacks
-     in `coil_set_spec_from_dofs()` / `coil_set_spec()`, and the
-     `SquaredFluxJAX` CPU fallback objective path
+     crosses explicitly supported compatibility seams instead of silently
+     mixing legacy CPU paths into JAX execution; strict mode rejects those same
+     seams
+   * stale warning-covered CPU geometry/pullback paths have been replaced
+     by immutable-spec contracts in `BiotSavartJAX` and `SquaredFluxJAX`;
+     unsupported inputs are rejected instead of routed through CPU objective
+     or coil-pullback paths
 
 4. **Finish mode-owned numerical policy.**
    Backend modes are now real, and chunk tuning is materially more centralized
@@ -819,7 +819,7 @@ You already have label-constraint FD tests that lean on these functions, which i
 ### Keep
 
 * `SquaredFluxJAX` is thoughtfully designed.
-* The docstring is honest: it is a drop-in replacement, uses full JAX when the field adapter supports the native path, and otherwise falls back to a mixed path.
+* The docstring is honest: it is a drop-in replacement, uses the native JAX path when the field adapter exposes immutable specs, and rejects unsupported fields instead of routing through a mixed CPU/JAX path.
 * It also correctly states that surface geometry is frozen at construction, which is valid for Stage 2 because the plasma surface is fixed. 
 
 ### Change now
@@ -830,7 +830,7 @@ You already have label-constraint FD tests that lean on these functions, which i
 ### Architectural note
 
 * This module is already very close to the right design: pure kernel underneath, adapter behavior above.
-* Keep the “native JAX path vs fallback path” split, but do not advertise the fallback path as “fully GPU.”
+* Keep the native JAX path separate from explicit compatibility/reporting boundaries; do not advertise host compatibility paths as “fully GPU.”
 
 ### Add tests
 

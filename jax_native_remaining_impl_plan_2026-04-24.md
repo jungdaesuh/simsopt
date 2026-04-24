@@ -77,12 +77,12 @@ last script-local/native-boundary seams, and extend multi-device sharding.
 
 ## Non-Goals
 
-- [ ] Do not add silent CPU fallback paths to JAX target mode.
-- [ ] Do not make `Derivative` a pytree keyed by Python `Optimizable` objects.
-- [ ] Do not replace `get_adjoint_runtime_state()` with a new gradient
+- [x] Do not add silent CPU fallback paths to JAX target mode.
+- [x] Do not make `Derivative` a pytree keyed by Python `Optimizable` objects.
+- [x] Do not replace `get_adjoint_runtime_state()` with a new gradient
   abstraction.
 - [ ] Do not inline new numerical tolerances outside the parity ladder SSOT.
-- [ ] Do not refactor upstream SIMSOPT object graph semantics.
+- [x] Do not refactor upstream SIMSOPT object graph semantics.
 
 ## Source Contracts
 
@@ -273,7 +273,7 @@ Tasks:
   optimizer use.
 - [x] Keep CPU/reference mode explicit and separate.
 - [ ] Keep host reporting and artifact writing outside compiled kernels.
-- [ ] Remove fallback wording from docs/tests when the path has been deleted.
+- [x] Remove fallback wording from docs/tests when the path has been deleted.
 - [x] Add tests that reject JAX target mode with host/SciPy optimizer contracts.
 
 Files likely touched:
@@ -291,19 +291,19 @@ Goal: remove compatibility leftovers only after native parity is proven.
 
 Delete candidates:
 
-- [ ] Script-local runtime-spec Biot-Savart adapter.
+- [x] Script-local runtime-spec Biot-Savart adapter.
 - [ ] Duplicate runtime-spec loading helpers.
-- [ ] Tests that patch removed fallback helpers.
-- [ ] Docs claiming CPU fallback behavior that no longer exists.
-- [ ] Dead host pullback helpers that are no longer reachable.
+- [x] Tests that patch removed host-compatibility helpers.
+- [x] Docs claiming CPU fallback behavior that no longer exists.
+- [x] Dead host pullback helpers that are no longer reachable.
 
 Keep:
 
-- [ ] Public `Derivative` returns.
-- [ ] `Optimizable` compatibility wrappers.
-- [ ] CPU/reference parity oracle.
-- [ ] `BoozerSurfaceJAX.get_adjoint_runtime_state()`.
-- [ ] Host reporting and artifact materialization outside compiled kernels.
+- [x] Public `Derivative` returns.
+- [x] `Optimizable` compatibility wrappers.
+- [x] CPU/reference parity oracle.
+- [x] `BoozerSurfaceJAX.get_adjoint_runtime_state()`.
+- [x] Host reporting and artifact materialization outside compiled kernels.
 
 ## Validation Matrix
 
@@ -361,4 +361,4 @@ Do not inline new tolerances.
 - [ ] `coil_groups` and `points_coils` both lower to collective reductions.
 - [x] Stage 2 and single-stage JAX target modes reject host optimizer seams.
 - [ ] Validation uses the parity ladder SSOT.
-- [ ] Stale fallback code/docs/tests are removed only after parity coverage.
+- [x] Stale fallback code/docs/tests are removed only after parity coverage.
