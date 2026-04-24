@@ -3099,9 +3099,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
             linear_solve_success,
         )
 
-    jitted_value_and_grad_for = _mark_cacheable_jit_value_and_grad(
-        jax.jit(_value_and_grad_for)
-    )
+    jitted_value_and_grad_for = jax.jit(_value_and_grad_for)
     compiled_forward_result_for = _make_traceable_runtime_jax_array_boundary(
         jitted_forward_result_for,
         "compiled_forward_result_for",
@@ -3650,11 +3648,29 @@ def _traceable_reporting_metrics_from_solution(
         surface_kind=objective_kwargs["surface_kind"],
     )
     surface_normal = jnp.cross(xphi, xtheta)
+    nphi, ntheta = surface_gamma.shape[:2]
+    surface_points = surface_gamma.reshape(-1, 3)
+    surface_B = grouped_biot_savart_B_from_spec(
+        surface_points,
+        coil_set_spec,
+    ).reshape(nphi, ntheta, 3)
+    surface_normal_norm = jnp.sqrt(jnp.sum(surface_normal * surface_normal, axis=-1))
+    surface_unit_normal = surface_normal / surface_normal_norm[:, :, None]
+    surface_B_normal = jnp.sum(surface_B * surface_unit_normal, axis=-1)
+    surface_B_norm = jnp.sqrt(jnp.sum(surface_B * surface_B, axis=-1))
+    surface_area = surface_normal_norm / surface_normal_norm.size
+    field_error = (
+        jnp.sum(jnp.abs(surface_B_normal / surface_B_norm) * surface_area)
+        / jnp.sum(surface_area)
+    )
     coil_specs = coil_specs_from_dof_extraction_spec(
         coil_dof_extraction_spec,
         coil_dofs,
     )
     banana_curve_spec = coil_specs[banana_curve_index].curve
+    banana_current = jnp.abs(
+        _take_runtime_scalar(coil_specs[banana_curve_index].current.value, 0)
+    )
     _gamma, banana_gammadash, banana_gammadashdash = curve_geometry_from_spec(
         banana_curve_spec
     )
@@ -3704,6 +3720,8 @@ def _traceable_reporting_metrics_from_solution(
         "final_curvature_penalty": weighted_terms["curvature"],
         "coil_length": coil_length,
         "max_curvature": max_curvature,
+        "banana_current_A": banana_current,
+        "field_error": field_error,
         "curve_curve_min_dist": curve_curve_min_dist,
         "curve_surface_min_dist": curve_surface_min_dist,
         "surface_vessel_min_dist": surface_vessel_min_dist,
@@ -3771,6 +3789,8 @@ def _hostify_traceable_reporting_metrics(metrics, *, include_distance_metrics):
         "final_curvature_penalty",
         "coil_length",
         "max_curvature",
+        "banana_current_A",
+        "field_error",
         "final_volume",
         "final_iota",
     )

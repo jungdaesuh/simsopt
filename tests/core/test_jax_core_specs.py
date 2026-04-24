@@ -24,6 +24,8 @@ from simsopt.jax_core import (
     make_fixed_surface_flux_spec,
     make_grouped_coil_set_spec,
     make_optimizable_dof_map_spec,
+    make_single_stage_runtime_spec,
+    make_single_stage_seed_spec,
     make_surface_rzfourier_spec,
     make_surface_xyz_fourier_spec,
     make_surface_xyz_tensor_fourier_spec,
@@ -322,6 +324,64 @@ def test_grouped_coil_set_spec_is_a_real_jittable_pytree():
         return total
 
     np.testing.assert_allclose(current_sum(grouped), np.array(1.0))
+
+
+def test_single_stage_runtime_spec_is_a_real_jittable_pytree():
+    surface = _make_surface_xyztensor_spec()
+    coil_set = make_grouped_coil_set_spec(
+        [
+            (
+                np.full((1, 4, 3), 2.0, dtype=np.float32),
+                np.full((1, 4, 3), -1.0, dtype=np.float32),
+                np.array([3.0], dtype=np.float32),
+                [1],
+            )
+        ]
+    )
+    seed = make_single_stage_seed_spec(
+        surface=surface,
+        coil_set=coil_set,
+        coil_dof_extraction=make_coil_set_dof_extraction_spec(()),
+        coil_dofs=np.array([0.5, -0.25], dtype=np.float64),
+        boozer_iota=0.123,
+        boozer_G=4.5,
+        target_labels=("qs_error", "boozer_residual"),
+        hardware_constants=(("tf_current_hard_limit_A", 2.0),),
+        self_intersection_mode="supported-surface-jax",
+        schema_version=1,
+        num_tf_coils=1,
+        banana_curve_index=0,
+        tf_current_A=80000.0,
+        banana_current_A=123.0,
+    )
+    runtime = make_single_stage_runtime_spec(
+        seed=seed,
+        mpol=surface.mpol,
+        ntor=surface.ntor,
+        nfp=surface.nfp,
+        nphi=surface.quadpoints_phi.shape[0],
+        ntheta=surface.quadpoints_theta.shape[0],
+    )
+
+    leaves, treedef = jax.tree_util.tree_flatten(runtime)
+    rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
+
+    assert rebuilt.mpol == surface.mpol
+    assert rebuilt.seed.target_labels == ("qs_error", "boozer_residual")
+    assert rebuilt.seed.hardware_constants == (("tf_current_hard_limit_A", 2.0),)
+    _assert_is_float64_array(rebuilt.seed.boozer_iota)
+    _assert_is_float64_array(rebuilt.seed.boozer_G)
+    _assert_is_float64_array(rebuilt.seed.coil_dofs)
+    assert rebuilt.seed.num_tf_coils == 1
+    assert rebuilt.seed.banana_curve_index == 0
+    assert rebuilt.seed.tf_current_A == 80000.0
+    assert rebuilt.seed.banana_current_A == 123.0
+
+    @jax.jit
+    def seed_scalar(spec):
+        return spec.seed.boozer_iota[0] + spec.seed.boozer_G[0] + spec.seed.surface.dofs[0]
+
+    np.testing.assert_allclose(seed_scalar(runtime), np.array(5.623))
 
 
 def test_coil_set_dof_extraction_spec_is_a_real_jittable_pytree():

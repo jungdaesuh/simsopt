@@ -2,7 +2,7 @@ import argparse
 import atexit
 import copy
 from contextlib import contextmanager
-from dataclasses import dataclass, fields as dataclass_fields, is_dataclass
+from dataclasses import dataclass, fields as dataclass_fields, is_dataclass, replace
 import faulthandler
 from functools import lru_cache
 import hashlib
@@ -121,7 +121,27 @@ from simsopt.geo.surfaceobjectives import (
 )
 from simsopt.objectives import QuadraticPenalty
 from simsopt.objectives.utilities import forward_backward
-from simsopt.jax_core.curve_geometry import closed_curve_self_intersection_summary
+from simsopt.jax_core.curve_geometry import (
+    closed_curve_self_intersection_summary,
+    curve_gamma_and_dash_from_spec,
+    curve_geometry_from_spec,
+)
+from simsopt.jax_core.field import (
+    coil_set_spec_from_dof_extraction_spec,
+    coil_specs_from_dof_extraction_spec,
+    grouped_biot_savart_A_from_spec,
+    grouped_biot_savart_B_and_dB_from_spec,
+    grouped_biot_savart_B_from_spec,
+    grouped_biot_savart_d2A_by_dXdX_from_spec,
+    grouped_biot_savart_dA_by_dX_from_spec,
+    grouped_biot_savart_dB_by_dX_from_spec,
+)
+import simsopt.jax_core.specs as jax_specs
+from simsopt.jax_core.specs import (
+    make_single_stage_runtime_spec,
+    make_single_stage_seed_spec,
+    make_surface_xyz_tensor_fourier_spec,
+)
 from simsopt.jax_core.surface_rzfourier import (
     surface_rz_fourier_gamma_from_dofs,
     surface_rz_fourier_spec_from_dofs,
@@ -159,6 +179,10 @@ _TARGET_LANE_BOOZER_BFGS_TOL_BENCHMARK_DEFAULT = 1e-6
 _TARGET_LANE_BOOZER_NEWTON_TOL_FULL_MEMORY_DEFAULT = 1e-8
 _TARGET_LANE_BOOZER_BFGS_MAXITER_BENCHMARK_DEFAULT = 64
 _SINGLE_STAGE_RESULTS_SCHEMA_VERSION = 1
+_SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME = "single_stage_jax_runtime_spec.json"
+_SINGLE_STAGE_JAX_RUNTIME_SPEC_SCHEMA = "simsopt.single_stage.jax_runtime_spec"
+_SINGLE_STAGE_JAX_RUNTIME_SPEC_VERSION = 1
+_SINGLE_STAGE_JAX_SELF_INTERSECTION_MODE = "supported-surface-jax"
 _JAX_COMPILE_DIAGNOSTICS_SAMPLE_LIMIT = 25
 _SURFACE_SELF_INTERSECTION_BISECTION_STEPS = 48
 _SURFACE_SELF_INTERSECTION_TOLERANCE_FACTOR = 1.0e-9
@@ -239,6 +263,31 @@ jax.tree_util.register_dataclass(
 class ScaledOuterPhaseOptimizerState:
     step_dofs: object
     anchor_dofs: object
+
+
+@dataclass(frozen=True)
+class SingleStageHostPostprocessResult:
+    self_intersecting: bool
+    self_intersection_check_available: bool
+
+
+@dataclass(frozen=True)
+class SingleStageFinalResultSnapshot:
+    final_coil_dofs: object
+    solved_surface_state: object
+    final_metrics: dict
+    final_distances: dict
+    hardware_status: dict
+    artifact_hardware_payload: dict
+    optimizer_result: dict
+    optimizer_diagnostics: dict
+    timings: dict
+    artifact_policy: dict
+    boozer_optimizer_method: object
+    results_payload: dict
+    field_error: object
+    self_intersecting: bool
+    self_intersection_check_available: bool
 
 
 jax.tree_util.register_dataclass(
@@ -818,6 +867,9 @@ def build_single_stage_problem_contract(
             "biot_savart_path": None
             if warm_start_state is None
             else warm_start_state.get("biot_savart_path"),
+            "jax_runtime_spec_path": None
+            if warm_start_state is None
+            else warm_start_state.get("jax_runtime_spec_path"),
             "donor_class": single_stage_search_policy.donor_class,
             "search_policy": single_stage_search_policy.search_policy,
         },
@@ -1070,7 +1122,9 @@ def build_single_stage_results_envelope(
         required_files.append("alm_state.partial.json")
         planned_files.append("alm_state.partial.json")
     if write_restart_artifacts:
-        required_files.extend(("biot_savart_opt.json", "surf_opt.json"))
+        restart_files = single_stage_restart_artifact_filenames(args)
+        required_files.extend(restart_files)
+        planned_files.extend(restart_files)
     artifacts = build_artifact_manifest(
         output_root,
         required_files=tuple(required_files),
@@ -1424,6 +1478,8 @@ _TRACEABLE_REPORTING_FLOAT_FIELDS = (
     "final_curvature_penalty",
     "coil_length",
     "max_curvature",
+    "banana_current_A",
+    "field_error",
     "final_volume",
     "final_iota",
 )
@@ -1593,6 +1649,17 @@ def should_write_single_stage_full_artifacts(
 def should_write_single_stage_restart_artifacts(benchmark_mode: bool) -> bool:
     """Return whether the run should emit final JSON artifacts for warm restarts."""
     return not benchmark_mode
+
+
+def single_stage_restart_artifact_filenames(args):
+    """Return restart artifacts required by this backend's warm-start contract."""
+    if args.backend == "jax":
+        return (_SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME,)
+    return (
+        "biot_savart_opt.json",
+        "surf_opt.json",
+        _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME,
+    )
 
 
 def should_record_single_stage_outer_optimizer_progress(use_target_lane: bool) -> bool:
@@ -1869,6 +1936,178 @@ class DeferredVolume:
         return self.surface.d2volume_by_dcoeffdcoeff()
 
 
+class SpecBackedCurrent:
+    """Minimal current view reconstructed from a serialized JAX seed spec."""
+
+    def __init__(self, value):
+        self._value = float(value)
+        self.local_lower_bounds = np.asarray([-np.inf], dtype=np.float64)
+        self.local_upper_bounds = np.asarray([np.inf], dtype=np.float64)
+
+    def get_value(self):
+        return self._value
+
+
+class SpecBackedCurve(Optimizable):
+    """Read-only curve view backed by an immutable curve spec."""
+
+    return_fn_map = {}
+
+    def __init__(self, curve_spec, symmetry):
+        self._curve_spec = curve_spec
+        self._symmetry = symmetry
+        self.quadpoints = np.asarray(host_array(curve_spec.quadpoints), dtype=np.float64)
+        Optimizable.__init__(self, x0=np.asarray([], dtype=np.float64))
+
+    def to_spec(self):
+        return self._curve_spec
+
+    def get_dofs(self):
+        return self._curve_spec.dofs
+
+    def _apply_symmetry(self, gamma, *derivatives):
+        if not self._symmetry.has_rotation:
+            return (gamma, *derivatives)
+        rotmat = self._symmetry.rotmat
+        return (gamma @ rotmat, *(derivative @ rotmat for derivative in derivatives))
+
+    def _geometry(self):
+        return self._apply_symmetry(*curve_geometry_from_spec(self._curve_spec))
+
+    def gamma(self):
+        gamma, _gammadash = curve_gamma_and_dash_from_spec(self._curve_spec)
+        return host_array(self._apply_symmetry(gamma)[0], dtype=np.float64)
+
+    def gammadash(self):
+        _gamma, gammadash = curve_gamma_and_dash_from_spec(self._curve_spec)
+        return host_array(self._apply_symmetry(_gamma, gammadash)[1], dtype=np.float64)
+
+    def gammadashdash(self):
+        _gamma, _gammadash, gammadashdash = self._geometry()
+        return host_array(gammadashdash, dtype=np.float64)
+
+    def incremental_arclength(self):
+        return np.linalg.norm(self.gammadash(), axis=1)
+
+    def kappa(self):
+        gammadash = self.gammadash()
+        gammadashdash = self.gammadashdash()
+        numerator = np.linalg.norm(np.cross(gammadash, gammadashdash), axis=1)
+        denominator = np.linalg.norm(gammadash, axis=1) ** 3
+        return numerator / denominator
+
+    def dgamma_by_dcoeff_vjp(self, _v):
+        return Derivative({})
+
+    def dgammadash_by_dcoeff_vjp(self, _v):
+        return Derivative({})
+
+    def dincremental_arclength_by_dcoeff_vjp(self, _v):
+        return Derivative({})
+
+    def dkappa_by_dcoeff_vjp(self, _v):
+        return Derivative({})
+
+
+class SpecBackedCoil:
+    """Read-only coil view reconstructed from a serialized JAX seed spec."""
+
+    def __init__(self, coil_spec):
+        self.curve = SpecBackedCurve(coil_spec.curve, coil_spec.symmetry)
+        self.current = SpecBackedCurrent(
+            host_float(coil_spec.current.value[0]) * float(coil_spec.symmetry.scale)
+        )
+
+
+class SingleStageRuntimeSpecBiotSavartJAX:
+    """Biot-Savart adapter whose source of truth is a runtime seed spec."""
+
+    def __init__(self, runtime_spec):
+        self.runtime_spec = runtime_spec
+        self._coil_dof_extraction_spec = runtime_spec.seed.coil_dof_extraction
+        self._x = _as_jax_float64(runtime_spec.seed.coil_dofs)
+        self._points_jax = None
+        self._points_version = 0
+        self._coils = tuple(
+            SpecBackedCoil(coil_spec)
+            for coil_spec in coil_specs_from_dof_extraction_spec(
+                self._coil_dof_extraction_spec,
+                self._x,
+            )
+        )
+
+    @property
+    def x(self):
+        return self._x
+
+    @x.setter
+    def x(self, coil_dofs):
+        self._x = _as_jax_float64(coil_dofs)
+
+    @property
+    def coils(self):
+        return self._coils
+
+    def coil_dof_extraction_spec(self):
+        return self._coil_dof_extraction_spec
+
+    def coil_set_spec_from_dofs(self, coil_dofs):
+        return coil_set_spec_from_dof_extraction_spec(
+            self._coil_dof_extraction_spec,
+            _as_jax_float64(coil_dofs),
+        )
+
+    def coil_set_spec(self):
+        return self.coil_set_spec_from_dofs(self._x)
+
+    def grouped_coil_arrays_from_dofs(self, coil_dofs):
+        return list(self.coil_set_spec_from_dofs(coil_dofs).field_inputs())
+
+    def set_points(self, points):
+        self._points_jax = _as_jax_float64(points)
+        self._points_version += 1
+
+    def set_points_from_spec(self, field_eval_spec):
+        self._points_jax = _as_jax_float64(field_eval_spec.points)
+        self._points_version += 1
+
+    def field_eval_spec(self):
+        return jax_specs.make_field_eval_spec(self._points_jax)
+
+    def B(self):
+        return grouped_biot_savart_B_from_spec(self._points_jax, self.coil_set_spec())
+
+    def A(self):
+        return grouped_biot_savart_A_from_spec(self._points_jax, self.coil_set_spec())
+
+    def dA_by_dX(self):
+        return grouped_biot_savart_dA_by_dX_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def d2A_by_dXdX(self):
+        return grouped_biot_savart_d2A_by_dXdX_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def dB_by_dX(self):
+        return grouped_biot_savart_dB_by_dX_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def B_and_dB(self):
+        return grouped_biot_savart_B_and_dB_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def save(self, _path):
+        raise RuntimeError("JAX runtime seed specs split runtime from host export.")
+
+
 def _decode_gson_array(value, *, field_name):
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} is not a serialized array payload")
@@ -1959,10 +2198,7 @@ def _reconstruct_live_surface_from_serialized_state(surface):
 def load_single_stage_warm_start_state(run_dir):
     surface_path, results_path = resolve_single_stage_warm_start_paths(run_dir)
     biot_savart_path = resolve_single_stage_warm_start_biotsavart_path(run_dir)
-    try:
-        surface = load_serialized_surface_state(surface_path)
-    except (KeyError, TypeError, ValueError):
-        surface = load(surface_path)
+    surface = load_serialized_surface_state(surface_path)
     with open(results_path, "r", encoding="utf-8") as infile:
         results = json.load(infile)
     warm_start_iota = float(results["FINAL_IOTA"])
@@ -1977,6 +2213,518 @@ def load_single_stage_warm_start_state(run_dir):
         "results_path": results_path,
         "biot_savart_path": biot_savart_path,
     }
+
+
+def load_single_stage_jax_warm_start_state(run_dir, *, runtime_spec_path=None):
+    resolved_run_dir = os.path.abspath(run_dir)
+    resolved_runtime_spec_path = resolve_single_stage_jax_runtime_spec_path(
+        runtime_spec_path if runtime_spec_path is not None else resolved_run_dir
+    )
+    if not os.path.exists(resolved_runtime_spec_path):
+        raise FileNotFoundError(
+            "JAX warm start requires "
+            f"{_SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME}; run seed conversion first: "
+            f"{resolved_runtime_spec_path}"
+        )
+    results_path = os.path.join(resolved_run_dir, "results.json")
+    return {
+        "surface": None,
+        "iota": None,
+        "G": None,
+        "surface_path": None,
+        "results_path": results_path if os.path.exists(results_path) else None,
+        "biot_savart_path": resolve_single_stage_warm_start_biotsavart_path(run_dir),
+        "jax_runtime_spec_path": resolved_runtime_spec_path,
+    }
+
+
+def resolve_single_stage_jax_runtime_spec_path(path_or_run_dir):
+    resolved = os.path.abspath(path_or_run_dir)
+    if os.path.isdir(resolved):
+        return os.path.join(resolved, _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME)
+    return resolved
+
+
+def _single_stage_jax_spec_array_payload(values):
+    array = np.asarray(host_array(values), dtype=np.float64)
+    return {
+        "dtype": str(array.dtype),
+        "shape": list(array.shape),
+        "data": array.tolist(),
+    }
+
+
+def _single_stage_jax_spec_array_from_payload(payload, *, field_name):
+    if payload.get("dtype") != "float64":
+        raise ValueError(f"{field_name} must be a float64 runtime-spec array")
+    return np.asarray(payload["data"], dtype=np.float64).reshape(payload["shape"])
+
+
+_SINGLE_STAGE_JAX_SPEC_DATACLASSES = {
+    cls.__name__: cls
+    for cls in (
+        jax_specs.CoilDofExtractionSpec,
+        jax_specs.CoilGroupSpec,
+        jax_specs.CoilSetDofExtractionSpec,
+        jax_specs.CoilSpec,
+        jax_specs.CoilSymmetrySpec,
+        jax_specs.CurrentValueSpec,
+        jax_specs.CurveCWSFourierRZSpec,
+        jax_specs.CurveFilamentSpec,
+        jax_specs.CurveHelicalSpec,
+        jax_specs.CurvePerturbedSpec,
+        jax_specs.CurvePlanarFourierSpec,
+        jax_specs.CurveRZFourierSpec,
+        jax_specs.CurveXYZFourierSpec,
+        jax_specs.FrameRotationSpec,
+        jax_specs.GroupedCoilSetSpec,
+        jax_specs.OptimizableDofMapSpec,
+        jax_specs.SurfaceRZFourierSpec,
+        jax_specs.SurfaceXYZFourierSpec,
+        jax_specs.SurfaceXYZTensorFourierSpec,
+        jax_specs.ZeroRotationSpec,
+    )
+}
+
+
+def _single_stage_jax_spec_tree_payload(value):
+    if is_dataclass(value):
+        return {
+            "kind": "dataclass",
+            "class": type(value).__name__,
+            "fields": {
+                field.name: _single_stage_jax_spec_tree_payload(
+                    getattr(value, field.name)
+                )
+                for field in dataclass_fields(value)
+            },
+        }
+    if isinstance(value, jax.Array):
+        array = np.asarray(host_array(value))
+        return {
+            "kind": "array",
+            "dtype": str(array.dtype),
+            "shape": list(array.shape),
+            "data": array.tolist(),
+        }
+    if isinstance(value, np.ndarray):
+        array = np.asarray(value)
+        return {
+            "kind": "array",
+            "dtype": str(array.dtype),
+            "shape": list(array.shape),
+            "data": array.tolist(),
+        }
+    if isinstance(value, tuple):
+        return {
+            "kind": "tuple",
+            "items": [_single_stage_jax_spec_tree_payload(item) for item in value],
+        }
+    if isinstance(value, list):
+        return {
+            "kind": "list",
+            "items": [_single_stage_jax_spec_tree_payload(item) for item in value],
+        }
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return {"kind": "scalar", "value": value}
+    if isinstance(value, np.generic):
+        return {"kind": "scalar", "value": value.item()}
+    raise TypeError(
+        "JAX runtime seed specs can only serialize immutable spec dataclasses, "
+        f"arrays, tuples, lists, and scalars; got {type(value).__name__}."
+    )
+
+
+def _single_stage_jax_spec_tree_from_payload(payload, *, field_name):
+    kind = payload["kind"]
+    if kind == "array":
+        return jax.device_put(
+            np.asarray(payload["data"], dtype=np.dtype(payload["dtype"])).reshape(
+                payload["shape"]
+            )
+        )
+    if kind == "tuple":
+        return tuple(
+            _single_stage_jax_spec_tree_from_payload(
+                item,
+                field_name=f"{field_name}[]",
+            )
+            for item in payload["items"]
+        )
+    if kind == "list":
+        return [
+            _single_stage_jax_spec_tree_from_payload(
+                item,
+                field_name=f"{field_name}[]",
+            )
+            for item in payload["items"]
+        ]
+    if kind == "scalar":
+        return payload["value"]
+    if kind == "dataclass":
+        class_name = payload["class"]
+        spec_cls = _SINGLE_STAGE_JAX_SPEC_DATACLASSES.get(class_name)
+        if spec_cls is None:
+            raise ValueError(
+                f"{field_name} uses unsupported runtime-spec class {class_name!r}"
+            )
+        return spec_cls(
+            **{
+                name: _single_stage_jax_spec_tree_from_payload(
+                    value,
+                    field_name=f"{field_name}.{name}",
+                )
+                for name, value in payload["fields"].items()
+            }
+        )
+    raise ValueError(f"{field_name} has unsupported runtime-spec payload kind {kind!r}")
+
+
+def _single_stage_hardware_constants_payload():
+    return {
+        "coil_coil_min_dist_m": float(COIL_COIL_MIN_DIST_M),
+        "coil_length_target_m": float(COIL_LENGTH_TARGET_M),
+        "coil_plasma_min_dist_m": float(COIL_PLASMA_MIN_DIST_M),
+        "coil_vessel_min_dist_m": float(COIL_VESSEL_MIN_DIST_M),
+        "plasma_vessel_min_dist_m": float(PLASMA_VESSEL_MIN_DIST_M),
+        "banana_current_hard_limit_A": float(BANANA_CURRENT_HARD_LIMIT_A),
+        "tf_current_hard_limit_A": float(TF_CURRENT_HARD_LIMIT_A),
+    }
+
+
+def _single_stage_hardware_constants_tuple(payload):
+    return tuple((str(name), float(value)) for name, value in payload.items())
+
+
+def build_single_stage_jax_runtime_seed_spec_payload(
+    surface,
+    *,
+    iota,
+    G,
+    mpol,
+    ntor,
+    quadpoints_phi,
+    quadpoints_theta,
+    coil_dof_extraction_spec,
+    coil_dofs,
+    num_tf_coils,
+    banana_curve_index,
+    tf_current_A,
+    banana_current_A,
+    surface_dofs=None,
+):
+    """Build the durable JAX startup spec payload for a canonical seed surface."""
+    if G is None:
+        raise ValueError(
+            "JAX runtime seed spec requires FINAL_G in the donor results; "
+            "run seed conversion first."
+        )
+    target_surface_dofs = (
+        np.asarray(host_array(surface_dofs), dtype=np.float64)
+        if surface_dofs is not None
+        else project_surface_dofs_to_resolution(
+            surface,
+            mpol=mpol,
+            ntor=ntor,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+    )
+    nfp = int(getattr(surface, "nfp", 5))
+    stellsym = bool(getattr(surface, "stellsym", True))
+    coil_dofs_array = np.asarray(host_array(coil_dofs), dtype=np.float64)
+    coil_set_spec = coil_set_spec_from_dof_extraction_spec(
+        coil_dof_extraction_spec,
+        coil_dofs_array,
+    )
+    return {
+        "schema": _SINGLE_STAGE_JAX_RUNTIME_SPEC_SCHEMA,
+        "schema_version": _SINGLE_STAGE_JAX_RUNTIME_SPEC_VERSION,
+        "surface": {
+            "surface_class": "SurfaceXYZTensorFourier",
+            "dofs": _single_stage_jax_spec_array_payload(target_surface_dofs),
+            "mpol": int(mpol),
+            "ntor": int(ntor),
+            "nfp": nfp,
+            "stellsym": stellsym,
+            "quadpoints_phi": _single_stage_jax_spec_array_payload(quadpoints_phi),
+            "quadpoints_theta": _single_stage_jax_spec_array_payload(quadpoints_theta),
+        },
+        "field": {
+            "coil_dof_extraction": _single_stage_jax_spec_tree_payload(
+                coil_dof_extraction_spec
+            ),
+            "coil_set": _single_stage_jax_spec_tree_payload(coil_set_spec),
+            "coil_dofs": _single_stage_jax_spec_array_payload(coil_dofs_array),
+            "num_tf_coils": int(num_tf_coils),
+            "banana_curve_index": int(banana_curve_index),
+            "tf_current_A": float(tf_current_A),
+            "banana_current_A": float(banana_current_A),
+        },
+        "boozer_init": {
+            "iota": float(iota),
+            "G": float(G),
+        },
+        "quadrature": {
+            "nphi": int(np.asarray(quadpoints_phi).size),
+            "ntheta": int(np.asarray(quadpoints_theta).size),
+        },
+        "target_labels": list(SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES),
+        "hardware_constants": _single_stage_hardware_constants_payload(),
+        "self_intersection_mode": _SINGLE_STAGE_JAX_SELF_INTERSECTION_MODE,
+    }
+
+
+def write_single_stage_jax_runtime_seed_spec(path_or_run_dir, **kwargs):
+    path = resolve_single_stage_jax_runtime_spec_path(path_or_run_dir)
+    write_json_file(
+        path,
+        build_single_stage_jax_runtime_seed_spec_payload(**kwargs),
+    )
+    return path
+
+
+def compile_single_stage_jax_runtime_seed_spec(
+    run_dir,
+    *,
+    mpol,
+    ntor,
+    quadpoints_phi,
+    quadpoints_theta,
+    num_tf_coils,
+):
+    warm_start_state = load_single_stage_warm_start_state(run_dir)
+    biot_savart_path = warm_start_state["biot_savart_path"]
+    if biot_savart_path is None:
+        raise FileNotFoundError(
+            "JAX runtime seed conversion requires biot_savart_opt.json; "
+            "run the donor with restart artifacts first."
+        )
+    from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+    donor_bs = load(biot_savart_path)
+    donor_bs_jax = BiotSavartJAX(donor_bs.coils)
+    donor_results_path = warm_start_state["results_path"]
+    with open(donor_results_path, "r", encoding="utf-8") as infile:
+        donor_results = json.load(infile)
+    tf_coils = donor_bs.coils[:num_tf_coils]
+    banana_coils = donor_bs.coils[num_tf_coils:]
+    tf_current_A = resolve_loaded_tf_current_A(
+        donor_results.get("TF_CURRENT_A"),
+        tf_coils,
+        enforce_limit=False,
+    )
+    banana_current_A = float(banana_coils[0].current.get_value())
+    return write_single_stage_jax_runtime_seed_spec(
+        run_dir,
+        surface=warm_start_state["surface"],
+        iota=warm_start_state["iota"],
+        G=warm_start_state["G"],
+        mpol=mpol,
+        ntor=ntor,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        coil_dof_extraction_spec=donor_bs_jax.coil_dof_extraction_spec(),
+        coil_dofs=donor_bs_jax.x.copy(),
+        num_tf_coils=num_tf_coils,
+        banana_curve_index=int(num_tf_coils),
+        tf_current_A=tf_current_A,
+        banana_current_A=banana_current_A,
+    )
+
+
+def _require_matching_single_stage_jax_runtime_surface(
+    surface_payload,
+    *,
+    mpol,
+    ntor,
+    quadpoints_phi=None,
+    quadpoints_theta=None,
+    nfp=None,
+    stellsym=None,
+):
+    if surface_payload["surface_class"] != "SurfaceXYZTensorFourier":
+        raise ValueError(
+            "JAX warm start requires a canonical SurfaceXYZTensorFourier runtime "
+            "spec; run seed conversion first."
+        )
+    if int(surface_payload["mpol"]) != int(mpol) or int(surface_payload["ntor"]) != int(
+        ntor
+    ):
+        raise ValueError(
+            "JAX warm-start runtime spec resolution does not match this run; "
+            "run seed conversion first."
+        )
+    if nfp is not None and int(surface_payload["nfp"]) != int(nfp):
+        raise ValueError(
+            "JAX warm-start runtime spec nfp does not match this run; "
+            "run seed conversion first."
+        )
+    if stellsym is not None and bool(surface_payload["stellsym"]) != bool(stellsym):
+        raise ValueError(
+            "JAX warm-start runtime spec stellsym does not match this run; "
+            "run seed conversion first."
+        )
+    spec_phi = _single_stage_jax_spec_array_from_payload(
+        surface_payload["quadpoints_phi"],
+        field_name="surface.quadpoints_phi",
+    )
+    spec_theta = _single_stage_jax_spec_array_from_payload(
+        surface_payload["quadpoints_theta"],
+        field_name="surface.quadpoints_theta",
+    )
+    if quadpoints_phi is not None and not np.array_equal(
+        spec_phi,
+        np.asarray(quadpoints_phi, dtype=np.float64),
+    ):
+        raise ValueError(
+            "JAX warm-start runtime spec phi quadrature does not match this run; "
+            "run seed conversion first."
+        )
+    if quadpoints_theta is not None and not np.array_equal(
+        spec_theta,
+        np.asarray(quadpoints_theta, dtype=np.float64),
+    ):
+        raise ValueError(
+            "JAX warm-start runtime spec theta quadrature does not match this run; "
+            "run seed conversion first."
+        )
+    return spec_phi, spec_theta
+
+
+def load_single_stage_jax_runtime_seed_spec(
+    path_or_run_dir,
+    *,
+    mpol,
+    ntor,
+    quadpoints_phi=None,
+    quadpoints_theta=None,
+    nphi=None,
+    ntheta=None,
+    nfp=None,
+    stellsym=None,
+):
+    path = resolve_single_stage_jax_runtime_spec_path(path_or_run_dir)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "JAX warm start requires "
+            f"{_SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME}; run seed conversion first: "
+            f"{path}"
+        )
+    with open(path, "r", encoding="utf-8") as infile:
+        payload = json.load(infile)
+    if payload["schema"] != _SINGLE_STAGE_JAX_RUNTIME_SPEC_SCHEMA:
+        raise ValueError("JAX warm-start runtime spec has the wrong schema")
+    if int(payload["schema_version"]) != _SINGLE_STAGE_JAX_RUNTIME_SPEC_VERSION:
+        raise ValueError("JAX warm-start runtime spec has an unsupported schema version")
+    if payload["self_intersection_mode"] != _SINGLE_STAGE_JAX_SELF_INTERSECTION_MODE:
+        raise ValueError(
+            "JAX warm-start runtime spec must use supported-surface JAX "
+            "self-intersection; run seed conversion first."
+        )
+    surface_payload = payload["surface"]
+    spec_phi, spec_theta = _require_matching_single_stage_jax_runtime_surface(
+        surface_payload,
+        mpol=mpol,
+        ntor=ntor,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        nfp=nfp,
+        stellsym=stellsym,
+    )
+    if nphi is not None and int(payload["quadrature"]["nphi"]) != int(nphi):
+        raise ValueError(
+            "JAX warm-start runtime spec nphi does not match this run; "
+            "run seed conversion first."
+        )
+    if ntheta is not None and int(payload["quadrature"]["ntheta"]) != int(ntheta):
+        raise ValueError(
+            "JAX warm-start runtime spec ntheta does not match this run; "
+            "run seed conversion first."
+        )
+    surface_dofs = _single_stage_jax_spec_array_from_payload(
+        surface_payload["dofs"],
+        field_name="surface.dofs",
+    )
+    surface_spec = make_surface_xyz_tensor_fourier_spec(
+        dofs=surface_dofs,
+        quadpoints_phi=spec_phi,
+        quadpoints_theta=spec_theta,
+        nfp=int(surface_payload["nfp"]),
+        stellsym=bool(surface_payload["stellsym"]),
+        mpol=int(surface_payload["mpol"]),
+        ntor=int(surface_payload["ntor"]),
+    )
+    field_payload = payload["field"]
+    coil_dof_extraction_spec = _single_stage_jax_spec_tree_from_payload(
+        field_payload["coil_dof_extraction"],
+        field_name="field.coil_dof_extraction",
+    )
+    coil_set_spec = _single_stage_jax_spec_tree_from_payload(
+        field_payload["coil_set"],
+        field_name="field.coil_set",
+    )
+    coil_dofs = _single_stage_jax_spec_array_from_payload(
+        field_payload["coil_dofs"],
+        field_name="field.coil_dofs",
+    )
+    seed_spec = make_single_stage_seed_spec(
+        surface=surface_spec,
+        coil_set=coil_set_spec,
+        coil_dof_extraction=coil_dof_extraction_spec,
+        coil_dofs=coil_dofs,
+        boozer_iota=float(payload["boozer_init"]["iota"]),
+        boozer_G=float(payload["boozer_init"]["G"]),
+        target_labels=payload["target_labels"],
+        hardware_constants=_single_stage_hardware_constants_tuple(
+            payload["hardware_constants"]
+        ),
+        self_intersection_mode=payload["self_intersection_mode"],
+        schema_version=int(payload["schema_version"]),
+        num_tf_coils=int(field_payload["num_tf_coils"]),
+        banana_curve_index=int(field_payload["banana_curve_index"]),
+        tf_current_A=float(field_payload["tf_current_A"]),
+        banana_current_A=float(field_payload["banana_current_A"]),
+    )
+    runtime_spec = make_single_stage_runtime_spec(
+        seed=seed_spec,
+        mpol=int(surface_payload["mpol"]),
+        ntor=int(surface_payload["ntor"]),
+        nfp=int(surface_payload["nfp"]),
+        nphi=int(payload["quadrature"]["nphi"]),
+        ntheta=int(payload["quadrature"]["ntheta"]),
+    )
+    return {
+        "path": path,
+        "payload": payload,
+        "runtime_spec": runtime_spec,
+        "surface_spec": surface_spec,
+        "surface_dofs": runtime_spec.seed.surface.dofs,
+        "coil_dof_extraction_spec": runtime_spec.seed.coil_dof_extraction,
+        "coil_dofs": runtime_spec.seed.coil_dofs,
+        "coil_set_spec": runtime_spec.seed.coil_set,
+        "iota": runtime_spec.seed.boozer_iota[0],
+        "G": runtime_spec.seed.boozer_G[0],
+    }
+
+
+def resolve_jax_warm_start_surface_dofs_from_spec(path_or_run_dir, **kwargs):
+    return load_single_stage_jax_runtime_seed_spec(path_or_run_dir, **kwargs)[
+        "surface_dofs"
+    ]
+
+
+def build_single_stage_surface_from_jax_runtime_spec(runtime_spec):
+    surface_spec = runtime_spec.seed.surface
+    return DeferredSurfaceXYZTensorFourier(
+        mpol=surface_spec.mpol,
+        ntor=surface_spec.ntor,
+        nfp=surface_spec.nfp,
+        stellsym=surface_spec.stellsym,
+        quadpoints_phi=host_array(surface_spec.quadpoints_phi, dtype=np.float64),
+        quadpoints_theta=host_array(surface_spec.quadpoints_theta, dtype=np.float64),
+        dofs=surface_spec.dofs,
+    )
 
 
 def resolve_single_stage_startup_seed_contract(args, *, warm_start_state):
@@ -2956,6 +3704,16 @@ def parse_args():
             "Optional prior single-stage run directory containing surf_opt.json "
             "and results.json. When provided, the Boozer initialization reuses "
             "that optimized surface geometry and solved iota/G as a warm start."
+        ),
+    )
+    parser.add_argument(
+        "--jax-runtime-seed-spec",
+        default=os.environ.get("JAX_RUNTIME_SEED_SPEC"),
+        help=(
+            "Immutable single-stage JAX runtime seed spec. Required by the "
+            "production JAX lane when --warm-start-run-dir is omitted; warm-start "
+            "runs read the same artifact from the donor directory unless this "
+            "path is provided explicitly."
         ),
     )
     parser.add_argument(
@@ -3969,8 +4727,8 @@ def initialize_boozer_surface(
             return DeferredSurfaceXYZTensorFourier(
                 mpol=mpol,
                 ntor=ntor,
-                nfp=5,
-                stellsym=True,
+                nfp=surf_prev.nfp,
+                stellsym=surf_prev.stellsym,
                 quadpoints_theta=quadpoints_theta,
                 quadpoints_phi=quadpoints_phi,
                 dofs=initial_surface_dofs,
@@ -3978,8 +4736,8 @@ def initialize_boozer_surface(
         surface = SurfaceXYZTensorFourier(
             mpol=mpol,
             ntor=ntor,
-            nfp=5,
-            stellsym=True,
+            nfp=surf_prev.nfp,
+            stellsym=surf_prev.stellsym,
             quadpoints_theta=quadpoints_theta,
             quadpoints_phi=quadpoints_phi,
         )
@@ -4120,7 +4878,12 @@ def initialize_boozer_surface(
         (
             self_intersecting,
             self_intersection_check_available,
-        ) = evaluate_surface_self_intersection(boozer_surface.surface)
+        ) = evaluate_surface_self_intersection(
+            boozer_surface.surface,
+            require_supported_surface=_boozer_surface_requires_jax_supported_self_intersection(
+                boozer_surface
+            ),
+        )
         success2 = not self_intersecting  # True if surface is not self intersecting
         self_intersection_status = str(self_intersecting)
     else:
@@ -4241,35 +5004,49 @@ def _cache_target_lane_reporting_summary(
     )
 
 
-def _resolve_cached_target_lane_reporting_metrics(
+def _require_cached_target_lane_reporting_metrics(
     run_dict,
     coil_dofs,
     *,
     benchmark_mode,
 ):
     """Return cached accepted-step reporting metrics when they match the final state."""
-    if run_dict is None:
-        return None
-
-    cached_metrics = run_dict.get("target_lane_reporting_metrics")
-    cached_coil_dofs = run_dict.get("target_lane_reporting_coil_dofs")
-    include_distance_metrics = run_dict.get(
-        "target_lane_reporting_include_distance_metrics"
-    )
+    if run_dict is None or not all(
+        key in run_dict
+        for key in (
+            "target_lane_reporting_metrics",
+            "target_lane_reporting_coil_dofs",
+            "target_lane_reporting_include_distance_metrics",
+        )
+    ):
+        raise RuntimeError(
+            "Missing cached target-lane final reporting metrics for results.json. "
+            "The JAX final result path must use the accepted-step reporting snapshot "
+            "instead of rebuilding host objective wrappers."
+        )
+    cached_metrics = run_dict["target_lane_reporting_metrics"]
+    cached_coil_dofs = run_dict["target_lane_reporting_coil_dofs"]
+    include_distance_metrics = run_dict["target_lane_reporting_include_distance_metrics"]
     if (
         cached_metrics is None
         or cached_coil_dofs is None
         or include_distance_metrics is None
         or bool(include_distance_metrics) != bool(not benchmark_mode)
     ):
-        return None
+        raise RuntimeError(
+            "Cached target-lane final reporting metrics do not match the "
+            "results.json artifact policy."
+        )
 
     final_coil_dofs = host_array(_single_stage_optimizer_dofs_array(coil_dofs))
     if final_coil_dofs.shape != cached_coil_dofs.shape or not np.array_equal(
         final_coil_dofs,
         cached_coil_dofs,
     ):
-        return None
+        raise RuntimeError(
+            "Cached target-lane final reporting metrics do not match the final "
+            "optimizer DOFs."
+        )
 
     resolved_metrics = dict(cached_metrics)
     hardware_status = resolved_metrics.get("hardware_status")
@@ -4315,46 +5092,11 @@ def resolve_single_stage_final_penalty_metrics(
     }
 
     if use_target_lane and not skip_outer_optimizer:
-        cached_metrics = _resolve_cached_target_lane_reporting_metrics(
+        return _require_cached_target_lane_reporting_metrics(
             run_dict,
             coil_dofs,
             benchmark_mode=benchmark_mode,
         )
-        if cached_metrics is not None:
-            return cached_metrics
-        runtime_bundle = get_traceable_single_stage_runtime_bundle_builder()(
-            boozer_surface,
-            bs,
-            iota_target,
-            include_profile_suite=False,
-            include_host_wrappers=False,
-            outer_objective_config=outer_objective_config,
-            success_filter=success_filter,
-        )
-        traceable_metrics = runtime_bundle["reporting_metrics"](
-            _as_jax_float64(coil_dofs),
-            include_distance_metrics=not benchmark_mode,
-        )
-        metrics = _hostify_traceable_reporting_metrics(
-            traceable_metrics,
-            include_distance_metrics=not benchmark_mode,
-        )
-        if benchmark_mode:
-            metrics["hardware_status"] = benchmark_hardware_status
-        else:
-            metrics["hardware_status"] = _hostify_single_stage_hardware_constraints(
-                evaluate_single_stage_hardware_constraints_pure(
-                    traceable_metrics["curve_curve_min_dist"],
-                    cc_dist,
-                    traceable_metrics["curve_surface_min_dist"],
-                    cs_dist,
-                    traceable_metrics["surface_vessel_min_dist"],
-                    ss_dist,
-                    traceable_metrics["max_curvature"],
-                    curvature_threshold,
-                )
-            )
-        return metrics
 
     max_curvature = float(np.max(j_curvature.curve.kappa()))
     final_curve_curve_min_dist = None
@@ -4378,6 +5120,10 @@ def resolve_single_stage_final_penalty_metrics(
             max_curvature,
             curvature_threshold,
         )
+    field_error, _, _, _, _, _ = norm_field_summary(
+        boozer_surface.surface,
+        bs,
+    )
     return {
         "final_G": host_float(boozer_surface.res["G"]),
         "final_non_qs": host_float(j_non_qs.J()),
@@ -4390,6 +5136,7 @@ def resolve_single_stage_final_penalty_metrics(
         "final_curvature_penalty": host_float(j_curvature.J()),
         "coil_length": host_float(curvelength.J()),
         "max_curvature": max_curvature,
+        "field_error": host_float(field_error),
         "final_volume": host_float(boozer_surface.surface.volume()),
         "final_iota": host_float(boozer_surface.res["iota"]),
         "curve_curve_min_dist": final_curve_curve_min_dist,
@@ -4458,6 +5205,18 @@ def evaluate_single_stage_artifact_hardware_snapshot(
         threshold_overrides=threshold_overrides,
     )
     return {**snapshot, "artifact_hardware_status": artifact_hardware_status}
+
+
+def resolve_single_stage_final_banana_current_A(
+    *,
+    use_target_lane,
+    final_metrics,
+    banana_current,
+):
+    """Resolve final banana current from target-lane metrics or restored host state."""
+    if use_target_lane:
+        return final_metrics["banana_current_A"]
+    return banana_current.get_value()
 
 
 def _failed_single_stage_alm_evaluation(
@@ -4552,7 +5311,13 @@ def evaluate_single_stage_alm_problem(
         )
 
     success_solve = host_bool(boozer_surface.res["success"])
-    is_intersecting = update_self_intersection_status(run_dict, boozer_surface.surface)
+    is_intersecting = update_self_intersection_status(
+        run_dict,
+        boozer_surface.surface,
+        require_supported_surface=_boozer_surface_requires_jax_supported_self_intersection(
+            boozer_surface
+        ),
+    )
     if not success_solve or is_intersecting:
         failure_penalty, failure_summary = compute_single_stage_failure_penalty(
             candidate_x,
@@ -4931,23 +5696,31 @@ def build_single_stage_target_lane_self_intersection_success_filter(
     return success_filter
 
 
-def evaluate_surface_self_intersection(surface):
+def evaluate_surface_self_intersection(surface, *, require_supported_surface=False):
     """Return (intersecting, check_available) for a SIMSOPT surface."""
     supported_intersection = _evaluate_supported_surface_self_intersection(surface)
     if supported_intersection is not None:
         return supported_intersection, True
+    if require_supported_surface:
+        raise TypeError(
+            "JAX production self-intersection requires a supported serialized/spec-backed "
+            "surface; run seed conversion first."
+        )
     check_available = surface_self_intersection_check_available()
     if not check_available:
         return False, False
     return bool(surface.is_self_intersecting()), True
 
 
-def update_self_intersection_status(run_dict, surface):
+def update_self_intersection_status(run_dict, surface, *, require_supported_surface=False):
     """Refresh self-intersection status in the shared run-state dictionary."""
     (
         run_dict["intersecting"],
         run_dict["self_intersection_check_available"],
-    ) = evaluate_surface_self_intersection(surface)
+    ) = evaluate_surface_self_intersection(
+        surface,
+        require_supported_surface=require_supported_surface,
+    )
     return run_dict["intersecting"]
 
 
@@ -5082,9 +5855,11 @@ def build_single_stage_target_lane_accepted_step_sync(
             coil_dofs,
             include_distance_metrics=include_distance_metrics,
         )
-        reporting_metrics = _hostify_traceable_reporting_metrics(
-            traceable_reporting_metrics,
-            include_distance_metrics=include_distance_metrics,
+        reporting_metrics = dict(
+            _hostify_traceable_reporting_metrics(
+                traceable_reporting_metrics,
+                include_distance_metrics=include_distance_metrics,
+            )
         )
         if benchmark_mode:
             hardware_status = {
@@ -5135,12 +5910,12 @@ def build_single_stage_target_lane_accepted_step_sync(
                 run_dict,
                 stage=f"iter_{run_dict.get('it', 0)}",
             )
-            _cache_target_lane_reporting_summary(
-                run_dict,
-                coil_dofs,
-                accepted_step_summary,
-                benchmark_mode=benchmark_mode,
-            )
+        _cache_target_lane_reporting_summary(
+            run_dict,
+            coil_dofs,
+            accepted_step_summary,
+            benchmark_mode=benchmark_mode,
+        )
         return accepted_step_summary
 
     return sync
@@ -5167,6 +5942,22 @@ def configure_single_stage_target_lane_accepted_step_sync(
         success_filter=success_filter,
     )
     adapter.reevaluate_before_accept = False
+
+
+def cache_single_stage_target_lane_reporting_snapshot(
+    adapter,
+    run_dict,
+    coil_dofs,
+    *,
+    benchmark_mode,
+):
+    """Prime final reporting from the pure target-lane runtime without host restore."""
+    return adapter.accepted_step_state_sync(
+        run_dict,
+        coil_dofs,
+        benchmark_mode=benchmark_mode,
+        update_run_state=False,
+    )
 
 
 def log_single_stage_target_lane_accepted_step(
@@ -7567,6 +8358,10 @@ def _boozer_surface_supports_explicit_surface_warm_start(boozer_surface):
     )
 
 
+def _boozer_surface_requires_jax_supported_self_intersection(boozer_surface):
+    return boozer_surface.__class__.__name__ == "BoozerSurfaceJAX"
+
+
 def _update_line_search_state(x, run_dict):
     """Track step size and increment line-search counter."""
     dx = np.linalg.norm(x - run_dict["x_prev"])
@@ -7694,7 +8489,13 @@ def _evaluate_candidate_impl(
             run_dict["iota"], run_dict["G"], sdofs=run_dict["sdofs"]
         )
     success_solve = host_bool(boozer_surface.res["success"])
-    is_intersecting = update_self_intersection_status(run_dict, boozer_surface.surface)
+    is_intersecting = update_self_intersection_status(
+        run_dict,
+        boozer_surface.surface,
+        require_supported_surface=_boozer_surface_requires_jax_supported_self_intersection(
+            boozer_surface
+        ),
+    )
     success = success_solve and not is_intersecting
 
     if success and _can_evaluate_single_stage_hardware_status(objectives, diagnostics):
@@ -7776,7 +8577,13 @@ def _refresh_single_stage_runtime_state(
         )
     success = host_bool(
         boozer_surface.res["success"]
-    ) and not update_self_intersection_status(run_dict, boozer_surface.surface)
+    ) and not update_self_intersection_status(
+        run_dict,
+        boozer_surface.surface,
+        require_supported_surface=_boozer_surface_requires_jax_supported_self_intersection(
+            boozer_surface
+        ),
+    )
     if not success and uses_legacy_warm_start:
         _restore_cpu_boozer_state(boozer_surface, run_dict)
     return success
@@ -7950,7 +8757,13 @@ def accept_step(
     # Restore bs state — no persistent mutation
     if _bs_pts_before is not None:
         bs.set_points(_bs_pts_before)
-    update_self_intersection_status(run_dict, boozer_surface.surface)
+    update_self_intersection_status(
+        run_dict,
+        boozer_surface.surface,
+        require_supported_surface=_boozer_surface_requires_jax_supported_self_intersection(
+            boozer_surface
+        ),
+    )
     record_single_stage_local_incumbent(
         run_dict,
         stage=f"iter_{run_dict.get('it', 0)}",
@@ -8341,6 +9154,249 @@ def restore_from_pytree(
     boozer_surface.res["G"] = run_dict["G"]
 
 
+def single_stage_host_postprocess_required(
+    *,
+    use_target_lane,
+    write_restart_artifacts,
+    write_full_artifacts,
+):
+    """Return whether final host graph restore/export is part of this run."""
+    return (not use_target_lane) or bool(write_restart_artifacts or write_full_artifacts)
+
+
+def restore_single_stage_host_state(
+    *,
+    use_target_lane,
+    JF,
+    boozer_surface,
+    run_dict,
+    coil_dofs,
+    apply_coil_dofs,
+    bs_diag,
+    record_outer_optimizer_event,
+):
+    """Restore the mutable host object graph at an explicit I/O boundary."""
+    record_outer_optimizer_event(
+        "host_state_restore_started",
+        coil_dofs=_summarize_host_vector(coil_dofs),
+    )
+    host_state_restore_start_s = _perf_counter_s()
+    restore_from_pytree(
+        JF,
+        boozer_surface,
+        run_dict,
+        coil_dofs=coil_dofs,
+        apply_coil_dofs=apply_coil_dofs,
+        diagnostic_bs=bs_diag if use_target_lane else None,
+    )
+    record_outer_optimizer_event(
+        "host_state_restore_returned",
+        elapsed_s=float(_perf_counter_s() - host_state_restore_start_s),
+    )
+
+
+def export_requested_single_stage_artifacts(
+    *,
+    solved_surface_state,
+    coil_dofs,
+    num_tf_coils,
+    tf_current_A,
+    banana_current_A,
+    output_dir,
+    boozer_surface,
+    bs_diag,
+    curves,
+    banana_curve,
+    surf_coils,
+    hbt,
+    VV,
+    write_restart_artifacts,
+    write_host_restart_artifacts,
+    write_full_artifacts,
+    timings,
+):
+    """Export requested host artifacts from a restored host object graph."""
+    final_artifacts_start_s = _perf_counter_s()
+    if write_host_restart_artifacts:
+        bs_diag.save(os.path.join(output_dir, "biot_savart_opt.json"))
+        boozer_surface.surface.save(os.path.join(output_dir, "surf_opt.json"))
+    if write_restart_artifacts:
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+        runtime_seed_bs = BiotSavartJAX(bs_diag.coils)
+        write_single_stage_jax_runtime_seed_spec(
+            output_dir,
+            surface=boozer_surface.surface,
+            surface_dofs=solved_surface_state["sdofs"],
+            iota=solved_surface_state["iota"],
+            G=solved_surface_state["G"],
+            mpol=boozer_surface.surface.mpol,
+            ntor=boozer_surface.surface.ntor,
+            quadpoints_phi=boozer_surface.surface.quadpoints_phi,
+            quadpoints_theta=boozer_surface.surface.quadpoints_theta,
+            coil_dof_extraction_spec=runtime_seed_bs.coil_dof_extraction_spec(),
+            coil_dofs=coil_dofs,
+            num_tf_coils=num_tf_coils,
+            banana_curve_index=int(num_tf_coils),
+            tf_current_A=tf_current_A,
+            banana_current_A=banana_current_A,
+        )
+        if write_full_artifacts:
+            curves_to_vtk(curves, os.path.join(output_dir, "curves_opt"), close=True)
+            bs_diag.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
+            unitn = boozer_surface.surface.unitnormal()
+            pointData = {
+                "B_N/B": np.sum(
+                    bs_diag.B().reshape(unitn.shape) * unitn,
+                    axis=2,
+                )[:, :, None]
+                / np.sqrt(np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2))[
+                    :, :, None
+                ]
+            }
+            boozer_surface.surface.to_vtk(
+                os.path.join(output_dir, "surf_opt"),
+                extra_data=pointData,
+            )
+
+    if write_full_artifacts:
+        normPlot(
+            boozer_surface.surface,
+            bs_diag,
+            os.path.join(output_dir, "NormPlotOptimized"),
+        )
+        cross_section_plot(
+            surf_coils,
+            boozer_surface.surface,
+            banana_curve,
+            os.path.join(output_dir, "CrossSectionOptimized"),
+            hbt,
+            VV,
+        )
+    _record_timing(
+        timings,
+        "final_artifacts_s",
+        final_artifacts_start_s,
+        _perf_counter_s(),
+    )
+
+
+def run_single_stage_host_diagnostics(
+    *,
+    boozer_surface,
+    run_dict,
+    timings,
+):
+    """Run explicit host diagnostics after host state restoration."""
+    final_diagnostics_start_s = _perf_counter_s()
+    self_intersecting = update_self_intersection_status(
+        run_dict,
+        boozer_surface.surface,
+        require_supported_surface=_boozer_surface_requires_jax_supported_self_intersection(
+            boozer_surface
+        ),
+    )
+    _record_timing(
+        timings,
+        "final_host_diagnostics_s",
+        final_diagnostics_start_s,
+        _perf_counter_s(),
+    )
+    return SingleStageHostPostprocessResult(
+        self_intersecting=bool(self_intersecting),
+        self_intersection_check_available=bool(
+            run_dict["self_intersection_check_available"]
+        ),
+    )
+
+
+def build_single_stage_final_result_snapshot(
+    *,
+    final_coil_dofs,
+    run_dict,
+    final_metrics,
+    final_distances,
+    hardware_status,
+    artifact_hardware_payload,
+    optimizer_result,
+    optimizer_diagnostics,
+    timings,
+    write_restart_artifacts,
+    write_full_artifacts,
+    boozer_optimizer_method,
+    field_error,
+    self_intersecting,
+    self_intersection_check_available,
+):
+    """Collect final result truth before host serialization."""
+    return SingleStageFinalResultSnapshot(
+        final_coil_dofs=host_array(final_coil_dofs, dtype=np.float64).copy(),
+        solved_surface_state={
+            "sdofs": host_array(run_dict["sdofs"], dtype=np.float64).copy(),
+            "iota": host_float(run_dict["iota"]),
+            "G": host_float(run_dict["G"]),
+        },
+        final_metrics=dict(final_metrics),
+        final_distances=dict(final_distances),
+        hardware_status=dict(hardware_status),
+        artifact_hardware_payload=dict(artifact_hardware_payload),
+        optimizer_result=dict(optimizer_result),
+        optimizer_diagnostics=dict(optimizer_diagnostics),
+        timings=dict(timings),
+        artifact_policy={
+            "write_restart_artifacts": bool(write_restart_artifacts),
+            "write_full_artifacts": bool(write_full_artifacts),
+        },
+        boozer_optimizer_method=boozer_optimizer_method,
+        results_payload={},
+        field_error=field_error,
+        self_intersecting=bool(self_intersecting),
+        self_intersection_check_available=bool(self_intersection_check_available),
+    )
+
+
+def summarize_single_stage_final_optimizer_result(
+    *,
+    result,
+    ran_optimizer,
+    iterations,
+    optimizer_success,
+    termination_message,
+):
+    """Return the final optimizer status values used by results.json."""
+    if not ran_optimizer:
+        return {
+            "iterations": int(iterations),
+            "success": bool(optimizer_success),
+            "termination_message": termination_message,
+            "status": None,
+            "nfev": None,
+            "njev": None,
+            "ls_status": None,
+        }
+    return {
+        "iterations": int(iterations),
+        "success": bool(optimizer_success),
+        "termination_message": termination_message,
+        "status": int(getattr(result, "status", -1)),
+        "nfev": int(getattr(result, "nfev", 0)),
+        "njev": int(getattr(result, "njev", 0)),
+        "ls_status": _optional_int(getattr(result, "ls_status", None)),
+    }
+
+
+def with_single_stage_results_payload(snapshot, results):
+    """Return a final snapshot carrying the exact results.json payload."""
+    payload = dict(results)
+    payload["TIMINGS"] = snapshot.timings
+    return replace(snapshot, results_payload=payload)
+
+
+def write_single_stage_results_json(output_dir, snapshot):
+    """Write results.json from the finalized result snapshot payload."""
+    write_json_file(os.path.join(output_dir, "results.json"), snapshot.results_payload)
+
+
 # Convergence tolerances for different mpol values (module-level for testability)
 ftol_by_mpol = {
     8: 1e-5,
@@ -8414,11 +9470,19 @@ if __name__ == "__main__":
     stop_jax_profile_trace = begin_jax_profile_trace(args.jax_profile_dir)
     jax_profile_enabled = stop_jax_profile_trace is not None
     args.curvature_threshold = resolve_curvature_threshold(args.curvature_threshold)
+    use_jax = args.backend == "jax"
     warm_start_state_load_start_s = _perf_counter_s()
     warm_start_state = (
         None
         if args.warm_start_run_dir is None
-        else load_single_stage_warm_start_state(args.warm_start_run_dir)
+        else (
+            load_single_stage_jax_warm_start_state(
+                args.warm_start_run_dir,
+                runtime_spec_path=args.jax_runtime_seed_spec,
+            )
+            if use_jax
+            else load_single_stage_warm_start_state(args.warm_start_run_dir)
+        )
     )
     _mark_startup_progress(
         "warm_start_state_loaded",
@@ -8471,6 +9535,39 @@ if __name__ == "__main__":
 
     boozer_type = {"initial": "least_squares", "final": "exact"}  # example
     stage = args.boozer_stage
+    warm_start_runtime_spec_state = None
+    if use_jax:
+        jax_runtime_spec_source = (
+            args.jax_runtime_seed_spec
+            if args.jax_runtime_seed_spec is not None
+            else args.warm_start_run_dir
+        )
+        if jax_runtime_spec_source is None:
+            raise FileNotFoundError(
+                "JAX startup requires an immutable runtime seed spec; "
+                "run seed conversion first."
+            )
+        warm_start_runtime_spec_state = load_single_stage_jax_runtime_seed_spec(
+            jax_runtime_spec_source,
+            mpol=mpol,
+            ntor=ntor,
+            nphi=nphi,
+            ntheta=ntheta,
+        )
+        if int(warm_start_runtime_spec_state["runtime_spec"].seed.num_tf_coils) != int(
+            num_tf_coils
+        ):
+            raise ValueError(
+                "JAX runtime seed spec num_tf_coils does not match this run; "
+                "run seed conversion first."
+            )
+        if warm_start_state is not None:
+            warm_start_state = {
+                **warm_start_state,
+                "iota": host_float(warm_start_runtime_spec_state["iota"]),
+                "G": host_float(warm_start_runtime_spec_state["G"]),
+                "jax_runtime_spec_path": warm_start_runtime_spec_state["path"],
+            }
 
     # ==============================================================================
     # SURFACE GEOMETRY DEFINITIONS
@@ -8504,11 +9601,6 @@ if __name__ == "__main__":
     # ==============================================================================
     plasma_surf_filename = args.plasma_surf_filename
     file_loc = build_equilibrium_path(args)
-    stage2_bs_load_start_s = _perf_counter_s()
-    bs = load(stage2_bs_path)
-    _mark_startup_progress("stage2_bs_loaded", start_s=stage2_bs_load_start_s)
-
-    use_jax = args.backend == "jax"
     write_full_artifacts = should_write_single_stage_full_artifacts(
         args.benchmark_mode,
         args.minimal_artifacts,
@@ -8519,17 +9611,19 @@ if __name__ == "__main__":
         args.benchmark_mode
     )
 
-    # JAX backend: wrap the loaded BiotSavart coils in BiotSavartJAX.
-    # Keep a CPU reference for diagnostics and artifact output.
-    bs_cpu_diag = bs if use_jax else None
     biotsavart_wrap_start_s = _perf_counter_s()
     if use_jax:
-        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
-
         _, IotasJAX, NonQuasiSymmetricRatioJAX = get_jax_surface_objective_classes()
-        bs = BiotSavartJAX(bs.coils)
+        bs = SingleStageRuntimeSpecBiotSavartJAX(
+            warm_start_runtime_spec_state["runtime_spec"]
+        )
+        bs_cpu_diag = None
         iota_cls = IotasJAX
     else:
+        stage2_bs_load_start_s = _perf_counter_s()
+        bs = load(stage2_bs_path)
+        _mark_startup_progress("stage2_bs_loaded", start_s=stage2_bs_load_start_s)
+        bs_cpu_diag = None
         iota_cls = Iotas
     _mark_startup_progress("biotsavart_ready", start_s=biotsavart_wrap_start_s)
 
@@ -8537,27 +9631,33 @@ if __name__ == "__main__":
 
     # Initialize the boundary magnetic surface and scale it to the target major radius
     plasma_surface_load_start_s = _perf_counter_s()
-    surf = SurfaceRZFourier.from_wout(
-        file_loc, range="half period", nphi=nphi, ntheta=ntheta, s=s
-    )
-    # scale the surface down to the target appropriate major radius
-    surf.set_dofs(surf.get_dofs() * R0 / surf.major_radius())
+    if use_jax:
+        surf = build_single_stage_surface_from_jax_runtime_spec(
+            warm_start_runtime_spec_state["runtime_spec"]
+        )
+    else:
+        surf = SurfaceRZFourier.from_wout(
+            file_loc, range="half period", nphi=nphi, ntheta=ntheta, s=s
+        )
+        # scale the surface down to the target appropriate major radius
+        surf.set_dofs(surf.get_dofs() * R0 / surf.major_radius())
     _mark_startup_progress(
         "plasma_surface_loaded",
         start_s=plasma_surface_load_start_s,
     )
     warm_start_surface_project_start_s = _perf_counter_s()
-    warm_start_surface_dofs = (
-        None
-        if warm_start_state is None
-        else project_surface_dofs_to_resolution(
+    if use_jax:
+        warm_start_surface_dofs = warm_start_runtime_spec_state["surface_dofs"]
+    elif warm_start_state is None:
+        warm_start_surface_dofs = None
+    else:
+        warm_start_surface_dofs = project_surface_dofs_to_resolution(
             warm_start_state["surface"],
             mpol=mpol,
             ntor=ntor,
             quadpoints_phi=surf.quadpoints_phi,
             quadpoints_theta=surf.quadpoints_theta,
         )
-    )
     _mark_startup_progress(
         "warm_start_surface_projected",
         start_s=warm_start_surface_project_start_s,
@@ -8600,10 +9700,14 @@ if __name__ == "__main__":
     banana_coils = coils[num_tf_coils:]
     banana_curves = [c.curve for c in banana_coils]
     banana_curve = banana_curves[0]
-    stage2_tf_current_A = resolve_loaded_tf_current_A(
-        stage2_results.get("TF_CURRENT_A"),
-        tf_coils,
-        enforce_limit=stage2_tf_current_limit_enforced,
+    stage2_tf_current_A = (
+        float(warm_start_runtime_spec_state["runtime_spec"].seed.tf_current_A)
+        if use_jax
+        else resolve_loaded_tf_current_A(
+            stage2_results.get("TF_CURRENT_A"),
+            tf_coils,
+            enforce_limit=stage2_tf_current_limit_enforced,
+        )
     )
     if (
         not stage2_tf_current_limit_enforced
@@ -8880,6 +9984,16 @@ if __name__ == "__main__":
     # Initialize Boozer surface with target parameters
     timings = {}
     record_outer_optimizer_event("boozer_init_started")
+    jax_seed_iota_override = (
+        None
+        if warm_start_runtime_spec_state is None
+        else host_float(warm_start_runtime_spec_state["iota"])
+    )
+    jax_seed_G_override = (
+        None
+        if warm_start_runtime_spec_state is None
+        else host_float(warm_start_runtime_spec_state["G"])
+    )
     with maybe_trace_single_stage_phase(
         "single_stage.initialize_boozer_surface",
         enabled=jax_profile_enabled,
@@ -8908,10 +10022,12 @@ if __name__ == "__main__":
                 "newton_maxiter_override"
             ],
             surface_dofs_override=warm_start_surface_dofs,
-            iota_override=None
-            if warm_start_state is None
-            else warm_start_state["iota"],
-            G_override=None if warm_start_state is None else warm_start_state["G"],
+            iota_override=jax_seed_iota_override
+            if use_jax
+            else (None if warm_start_state is None else warm_start_state["iota"]),
+            G_override=jax_seed_G_override
+            if use_jax
+            else (None if warm_start_state is None else warm_start_state["G"]),
             on_stage=boozer_init_progress,
             timings_out=timings,
         )
@@ -8997,7 +10113,7 @@ if __name__ == "__main__":
     record_outer_optimizer_event("objective_setup_started")
     # Biot-Savart field calculation
     if use_jax:
-        bs_obj = BiotSavartJAX(coils)
+        bs_obj = bs
     else:
         bs_obj = BiotSavart(coils)
 
@@ -9146,7 +10262,13 @@ if __name__ == "__main__":
         elapsed_s=float(_perf_counter_s() - initial_hardware_start_s),
         success=run_dict["hardware_constraint_status"].get("success"),
     )
-    update_self_intersection_status(run_dict, boozer_surface.surface)
+    update_self_intersection_status(
+        run_dict,
+        boozer_surface.surface,
+        require_supported_surface=_boozer_surface_requires_jax_supported_self_intersection(
+            boozer_surface
+        ),
+    )
     if not bool(run_dict.get("initial_objective_pending", False)):
         record_single_stage_local_incumbent(run_dict, stage="initial")
     target_lane_profile = None
@@ -9284,7 +10406,8 @@ if __name__ == "__main__":
     target_lane_trial_boozer_override_active = False
     accepted_step_callback = None
     target_lane_success_filter = None
-    optimized_artifacts_already_materialized = False
+    host_state_restored_for_final = False
+    host_postprocess_result = None
     record_outer_optimizer_event(
         "starting",
         use_target_lane=bool(use_target_lane),
@@ -9597,72 +10720,27 @@ if __name__ == "__main__":
                 outer_optimizer_run_start_s,
                 outer_optimizer_end_s,
             )
-            restore_from_pytree(
-                JF,
-                boozer_surface,
-                run_dict,
-                coil_dofs=res.x,
-                apply_coil_dofs=dof_setter,
-                diagnostic_bs=bs_diag if use_target_lane else None,
-            )
-            final_artifacts_start_s = _perf_counter_s()
-            if write_restart_artifacts:
-                bs_diag.save(OUT_DIR_ITER + "/biot_savart_opt.json")
-                boozer_surface.surface.save(OUT_DIR_ITER + "/surf_opt.json")
-                if write_full_artifacts:
-                    curves_to_vtk(curves, OUT_DIR_ITER + "/curves_opt", close=True)
-                    bs_diag.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
-                    unitn = boozer_surface.surface.unitnormal()
-                    pointData = {
-                        "B_N/B": np.sum(
-                            bs_diag.B().reshape(unitn.shape) * unitn,
-                            axis=2,
-                        )[:, :, None]
-                        / np.sqrt(
-                            np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2)
-                        )[:, :, None]
-                    }
-                    boozer_surface.surface.to_vtk(
-                        OUT_DIR_ITER + "/surf_opt",
-                        extra_data=pointData,
-                    )
-
-            final_volume = host_float(boozer_surface.surface.volume())
-            final_iota = resolve_single_stage_iota_metric(
-                boozer_surface,
-                iota_cls,
-                benchmark_mode=args.benchmark_mode,
-            )
-            final_max_curvature = _host_curve_max_curvature(banana_curve)
-            print(f"Volume: {final_volume}")
-            print(f"Iota: {final_iota}")
-            print(f"Max Curvature: {final_max_curvature}")
-            if write_full_artifacts:
-                fieldError = normPlot(
-                    boozer_surface.surface,
-                    bs_diag,
-                    OUT_DIR_ITER + "/NormPlotOptimized",
+            if single_stage_host_postprocess_required(
+                use_target_lane=use_target_lane,
+                write_restart_artifacts=write_restart_artifacts,
+                write_full_artifacts=write_full_artifacts,
+            ) and not use_target_lane:
+                restore_single_stage_host_state(
+                    use_target_lane=use_target_lane,
+                    JF=JF,
+                    boozer_surface=boozer_surface,
+                    run_dict=run_dict,
+                    coil_dofs=res.x,
+                    apply_coil_dofs=dof_setter,
+                    bs_diag=bs_diag,
+                    record_outer_optimizer_event=record_outer_optimizer_event,
                 )
-                cross_section_plot(
-                    surf_coils,
-                    boozer_surface.surface,
-                    banana_curve,
-                    OUT_DIR_ITER + "/CrossSectionOptimized",
-                    hbt,
-                    VV,
+                host_postprocess_result = run_single_stage_host_diagnostics(
+                    boozer_surface=boozer_surface,
+                    run_dict=run_dict,
+                    timings=timings,
                 )
-            else:
-                fieldError, _, _, _, _, _ = norm_field_summary(
-                    boozer_surface.surface,
-                    bs_diag,
-                )
-            _record_timing(
-                timings,
-                "final_artifacts_s",
-                final_artifacts_start_s,
-                _perf_counter_s(),
-            )
-            optimized_artifacts_already_materialized = True
+                host_state_restored_for_final = True
         elif use_target_lane:
             print(
                 "Preparing target-lane outer objective/runtime bundle "
@@ -9785,6 +10863,12 @@ if __name__ == "__main__":
                         optimizer_initial_value_and_grad_available=(
                             target_lane_optimizer_initial_value_and_grad is not None
                         ),
+                    )
+                    cache_single_stage_target_lane_reporting_snapshot(
+                        adapter,
+                        run_dict,
+                        dofs,
+                        benchmark_mode=bool(args.benchmark_mode),
                     )
                     if bool(run_dict.get("initial_objective_pending", False)):
                         if target_lane_optimizer_initial_value_and_grad is None:
@@ -10534,119 +11618,33 @@ if __name__ == "__main__":
                 phase="final",
                 elapsed_s=timings.get("target_lane_final_sync_s"),
             )
-        if not skip_outer_optimizer and not optimized_artifacts_already_materialized:
-            # Optimization now keeps accepted state in ``run_dict`` on the
-            # target lane. Host-only diagnostics and artifact emission get one
-            # explicit handoff here instead of reading the live surface during
-            # the optimizer callback path.
-            record_outer_optimizer_event(
-                "host_state_restore_started",
-                coil_dofs=_summarize_host_vector(res.x),
+        if (
+            not skip_outer_optimizer
+            and not host_state_restored_for_final
+            and single_stage_host_postprocess_required(
+                use_target_lane=use_target_lane,
+                write_restart_artifacts=write_restart_artifacts,
+                write_full_artifacts=write_full_artifacts,
             )
-            host_state_restore_start_s = _perf_counter_s()
-            restore_from_pytree(
-                JF,
-                boozer_surface,
-                run_dict,
+            and not use_target_lane
+        ):
+            restore_single_stage_host_state(
+                use_target_lane=use_target_lane,
+                JF=JF,
+                boozer_surface=boozer_surface,
+                run_dict=run_dict,
                 coil_dofs=res.x,
                 apply_coil_dofs=dof_setter,
-                diagnostic_bs=bs_diag if use_target_lane else None,
+                bs_diag=bs_diag,
+                record_outer_optimizer_event=record_outer_optimizer_event,
             )
-            record_outer_optimizer_event(
-                "host_state_restore_returned",
-                elapsed_s=float(_perf_counter_s() - host_state_restore_start_s),
+            host_postprocess_result = run_single_stage_host_diagnostics(
+                boozer_surface=boozer_surface,
+                run_dict=run_dict,
+                timings=timings,
             )
+            host_state_restored_for_final = True
 
-        # ==============================================================================
-        # SAVE OPTIMIZED STATE
-        # ==============================================================================
-        if not skip_outer_optimizer and not optimized_artifacts_already_materialized:
-            final_artifacts_start_s = _perf_counter_s()
-            if write_restart_artifacts:
-                bs_diag.save(OUT_DIR_ITER + "/biot_savart_opt.json")
-
-                boozer_surface.surface.save(OUT_DIR_ITER + "/surf_opt.json")
-                if write_full_artifacts:
-                    # Save optimized coil configurations
-                    curves_to_vtk(curves, OUT_DIR_ITER + "/curves_opt", close=True)
-
-                    # Save optimized surface with magnetic field normal component data
-                    bs_diag.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
-                    unitn = boozer_surface.surface.unitnormal()
-                    pointData = {
-                        "B_N/B": np.sum(
-                            bs_diag.B().reshape(unitn.shape) * unitn, axis=2
-                        )[:, :, None]
-                        / np.sqrt(
-                            np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2)
-                        )[:, :, None]
-                    }
-                    boozer_surface.surface.to_vtk(
-                        OUT_DIR_ITER + "/surf_opt",
-                        extra_data=pointData,
-                    )
-
-            final_volume = host_float(boozer_surface.surface.volume())
-            final_iota = resolve_single_stage_iota_metric(
-                boozer_surface,
-                iota_cls,
-                benchmark_mode=args.benchmark_mode,
-            )
-            final_max_curvature = _host_curve_max_curvature(banana_curve)
-            print(f"Volume: {final_volume}")
-            print(f"Iota: {final_iota}")
-            print(f"Max Curvature: {final_max_curvature}")
-
-            # Generate final diagnostic plots
-            if write_full_artifacts:
-                fieldError = normPlot(
-                    boozer_surface.surface,
-                    bs_diag,
-                    OUT_DIR_ITER + "/NormPlotOptimized",
-                )
-                cross_section_plot(
-                    surf_coils,
-                    boozer_surface.surface,
-                    banana_curve,
-                    OUT_DIR_ITER + "/CrossSectionOptimized",
-                    hbt,
-                    VV,
-                )
-            else:
-                fieldError, _, _, _, _, _ = norm_field_summary(
-                    boozer_surface.surface,
-                    bs_diag,
-                )
-            _record_timing(
-                timings,
-                "final_artifacts_s",
-                final_artifacts_start_s,
-                _perf_counter_s(),
-            )
-
-    final_target_lane_outer_objective_config = None
-    if use_target_lane and not skip_outer_optimizer:
-        final_target_lane_outer_objective_config = (
-            build_target_lane_outer_objective_config(
-                boozer_surface,
-                bs,
-                banana_curve,
-                VV,
-                non_qs_weight=1.0,
-                residual_weight=RES_WEIGHT,
-                iota_weight=IOTAS_WEIGHT,
-                length_weight=LENGTH_WEIGHT,
-                length_target=length_target,
-                curve_curve_threshold=CC_DIST,
-                curve_curve_weight=CC_WEIGHT,
-                curve_surface_threshold=CS_DIST,
-                curve_surface_weight=CS_WEIGHT,
-                surface_vessel_threshold=SS_DIST,
-                surface_vessel_weight=SURF_DIST_WEIGHT,
-                curvature_threshold=CURVATURE_THRESHOLD,
-                curvature_weight=CURVATURE_WEIGHT,
-            )
-        )
     final_penalty_metrics = resolve_single_stage_final_penalty_metrics(
         use_target_lane=use_target_lane,
         benchmark_mode=bool(args.benchmark_mode),
@@ -10655,7 +11653,7 @@ if __name__ == "__main__":
         bs=bs,
         iota_target=iota_target,
         coil_dofs=bs.x.copy() if res is None else res.x,
-        outer_objective_config=final_target_lane_outer_objective_config,
+        outer_objective_config=None,
         success_filter=target_lane_success_filter,
         curvelength=curvelength,
         j_non_qs=JnonQSRatio,
@@ -10675,15 +11673,23 @@ if __name__ == "__main__":
         termination_message=termination_message,
         optimizer_success=optimizer_success,
     )
-    if use_target_lane and not skip_outer_optimizer:
-        final_max_curvature = float(final_penalty_metrics["max_curvature"])
-    final_self_intersecting = update_self_intersection_status(
-        run_dict, boozer_surface.surface
+    final_volume = float(final_penalty_metrics["final_volume"])
+    final_iota = float(final_penalty_metrics["final_iota"])
+    final_max_curvature = float(final_penalty_metrics["max_curvature"])
+    fieldError = final_penalty_metrics["field_error"]
+    final_self_intersecting = bool(run_dict["intersecting"])
+    final_self_intersection_check_available = bool(
+        run_dict["self_intersection_check_available"]
     )
-    final_self_intersection_check_available = run_dict[
-        "self_intersection_check_available"
-    ]
+    if host_postprocess_result is not None:
+        final_self_intersecting = host_postprocess_result.self_intersecting
+        final_self_intersection_check_available = (
+            host_postprocess_result.self_intersection_check_available
+        )
     final_coil_length = float(final_penalty_metrics["coil_length"])
+    print(f"Volume: {final_volume}")
+    print(f"Iota: {final_iota}")
+    print(f"Max Curvature: {final_max_curvature}")
     final_hardware_metrics_start_s = _perf_counter_s()
     final_artifact_hardware_snapshot = None
     with maybe_trace_single_stage_phase(
@@ -10716,7 +11722,11 @@ if __name__ == "__main__":
                     curvature_threshold=CURVATURE_THRESHOLD,
                     coil_length=final_coil_length,
                     length_target=length_target,
-                    banana_current_A=banana_coils[0].current.get_value(),
+                    banana_current_A=resolve_single_stage_final_banana_current_A(
+                        use_target_lane=use_target_lane,
+                        final_metrics=final_penalty_metrics,
+                        banana_current=banana_coils[0].current,
+                    ),
                     banana_current_max_A=args.banana_current_max_A,
                     tf_current_A=stage2_tf_current_A,
                     tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
@@ -10746,6 +11756,44 @@ if __name__ == "__main__":
         "final_hardware_metrics_s",
         final_hardware_metrics_start_s,
         _perf_counter_s(),
+    )
+    final_distances = {
+        "curve_curve_min_dist": final_curve_curve_min_dist,
+        "curve_surface_min_dist": final_curve_surface_min_dist,
+        "surface_vessel_min_dist": final_surface_vessel_min_dist,
+    }
+    final_artifact_hardware_payload = build_hardware_constraint_artifact_payload_fields(
+        final_artifact_hardware_snapshot
+    )
+    final_optimizer_result = summarize_single_stage_final_optimizer_result(
+        result=res,
+        ran_optimizer=not skip_outer_optimizer,
+        iterations=res_nit,
+        optimizer_success=optimizer_success,
+        termination_message=termination_message,
+    )
+    optimizer_diag = extract_optimizer_diagnostics(
+        None if skip_outer_optimizer else res,
+        ran_optimizer=not skip_outer_optimizer,
+        termination_message=termination_message,
+    )
+    timings["script_total_s"] = _elapsed_s(run_wall_start_s, _perf_counter_s())
+    final_result_snapshot = build_single_stage_final_result_snapshot(
+        final_coil_dofs=bs.x.copy() if res is None else res.x,
+        run_dict=run_dict,
+        final_metrics=final_penalty_metrics,
+        final_distances=final_distances,
+        hardware_status=final_hardware_status,
+        artifact_hardware_payload=final_artifact_hardware_payload,
+        optimizer_result=final_optimizer_result,
+        optimizer_diagnostics=optimizer_diag,
+        timings=timings,
+        write_restart_artifacts=write_restart_artifacts,
+        write_full_artifacts=write_full_artifacts,
+        boozer_optimizer_method=boozer_surface.res.get("optimizer_method"),
+        field_error=fieldError,
+        self_intersecting=final_self_intersecting,
+        self_intersection_check_available=final_self_intersection_check_available,
     )
     results = {
         **build_single_stage_results_envelope(
@@ -10817,6 +11865,12 @@ if __name__ == "__main__":
         "WARM_START_BIOT_SAVART_PATH": None
         if warm_start_state is None
         else warm_start_state.get("biot_savart_path"),
+        "WARM_START_JAX_RUNTIME_SPEC_PATH": None
+        if warm_start_state is None
+        else warm_start_state.get("jax_runtime_spec_path"),
+        "JAX_RUNTIME_SEED_SPEC_PATH": None
+        if warm_start_runtime_spec_state is None
+        else warm_start_runtime_spec_state["path"],
         "STAGE2_SOURCE": stage2_source,
         "STAGE2_SOURCE_REQUESTED": args.stage2_source,
         "STAGE2_BS_PATH": stage2_bs_path,
@@ -10863,7 +11917,7 @@ if __name__ == "__main__":
         "boozer_least_squares_algorithm": boozer_least_squares_algorithm_record,
         "boozer_limited_memory_requested": args.boozer_limited_memory,
         "boozer_limited_memory": effective_boozer_limited_memory,
-        "boozer_optimizer_method": boozer_surface.res.get("optimizer_method"),
+        "boozer_optimizer_method": final_result_snapshot.boozer_optimizer_method,
         "outer_optimizer_method": outer_optimizer_method_record,
         "target_lane_accepted_step_sync": target_lane_sync_record,
         "experimental_target_lane_value_and_grad": requested_experimental_target_lane_vg,
@@ -10928,52 +11982,64 @@ if __name__ == "__main__":
         "INITIAL_PHASE_ITERATIONS": phase1_iterations,
         "INITIAL_PHASE_TERMINATION_MESSAGE": phase1_termination_message,
         "INITIAL_PHASE_SUCCESS": phase1_success,
-        "iterations": res_nit,
-        "TERMINATION_MESSAGE": termination_message,
-        "OPTIMIZER_SUCCESS": optimizer_success,
-        "OPTIMIZER_STATUS": None
-        if skip_outer_optimizer
-        else int(getattr(res, "status", -1)),
-        "OPTIMIZER_NFEV": None
-        if skip_outer_optimizer
-        else int(getattr(res, "nfev", 0)),
-        "OPTIMIZER_NJEV": None
-        if skip_outer_optimizer
-        else int(getattr(res, "njev", 0)),
-        "OPTIMIZER_LS_STATUS": None
-        if skip_outer_optimizer or getattr(res, "ls_status", None) is None
-        else int(res.ls_status),
+        "iterations": final_result_snapshot.optimizer_result["iterations"],
+        "TERMINATION_MESSAGE": final_result_snapshot.optimizer_result[
+            "termination_message"
+        ],
+        "OPTIMIZER_SUCCESS": final_result_snapshot.optimizer_result["success"],
+        "OPTIMIZER_STATUS": final_result_snapshot.optimizer_result["status"],
+        "OPTIMIZER_NFEV": final_result_snapshot.optimizer_result["nfev"],
+        "OPTIMIZER_NJEV": final_result_snapshot.optimizer_result["njev"],
+        "OPTIMIZER_LS_STATUS": final_result_snapshot.optimizer_result["ls_status"],
         "TARGET_VOLUME": float(vol_target),
         "TARGET_IOTA": float(iota_target),
-        "FINAL_VOLUME": float(final_volume),
-        "FINAL_IOTA": float(final_iota),
-        "FINAL_G": final_penalty_metrics["final_G"],
-        "FINAL_NON_QS": final_penalty_metrics["final_non_qs"],
-        "FINAL_BOOZER_RESIDUAL": final_penalty_metrics["final_boozer_residual"],
-        "FINAL_IOTA_PENALTY": final_penalty_metrics["final_iota_penalty"],
-        "FINAL_LENGTH_PENALTY": final_penalty_metrics["final_length_penalty"],
-        "FINAL_CURVE_CURVE_PENALTY": final_penalty_metrics["final_curve_curve_penalty"],
-        "FINAL_CURVE_SURFACE_PENALTY": final_penalty_metrics[
+        "FINAL_VOLUME": float(final_result_snapshot.final_metrics["final_volume"]),
+        "FINAL_IOTA": float(final_result_snapshot.final_metrics["final_iota"]),
+        "FINAL_G": final_result_snapshot.final_metrics["final_G"],
+        "FINAL_NON_QS": final_result_snapshot.final_metrics["final_non_qs"],
+        "FINAL_BOOZER_RESIDUAL": final_result_snapshot.final_metrics[
+            "final_boozer_residual"
+        ],
+        "FINAL_IOTA_PENALTY": final_result_snapshot.final_metrics[
+            "final_iota_penalty"
+        ],
+        "FINAL_LENGTH_PENALTY": final_result_snapshot.final_metrics[
+            "final_length_penalty"
+        ],
+        "FINAL_CURVE_CURVE_PENALTY": final_result_snapshot.final_metrics[
+            "final_curve_curve_penalty"
+        ],
+        "FINAL_CURVE_SURFACE_PENALTY": final_result_snapshot.final_metrics[
             "final_curve_surface_penalty"
         ],
-        "FINAL_SURFACE_VESSEL_PENALTY": final_penalty_metrics[
+        "FINAL_SURFACE_VESSEL_PENALTY": final_result_snapshot.final_metrics[
             "final_surface_vessel_penalty"
         ],
-        "FINAL_CURVATURE_PENALTY": final_penalty_metrics["final_curvature_penalty"],
-        "FIELD_ERROR": float(fieldError),
-        "SELF_INTERSECTING": final_self_intersecting,
-        "SELF_INTERSECTION_CHECK_AVAILABLE": final_self_intersection_check_available,
-        "MAX_CURVATURE": float(final_max_curvature),
-        "COIL_LENGTH": final_coil_length,
-        "CURVE_CURVE_MIN_DIST": final_curve_curve_min_dist,
-        "CURVE_SURFACE_MIN_DIST": final_curve_surface_min_dist,
-        "SURFACE_VESSEL_MIN_DIST": final_surface_vessel_min_dist,
-        "COIL_VESSEL_MIN_DIST_M": COIL_VESSEL_MIN_DIST_M,
-        "HARDWARE_CONSTRAINTS_OK": final_hardware_status["success"],
-        "HARDWARE_CONSTRAINT_VIOLATIONS": final_hardware_status["violations"],
-        **build_hardware_constraint_artifact_payload_fields(
-            final_artifact_hardware_snapshot
+        "FINAL_CURVATURE_PENALTY": final_result_snapshot.final_metrics[
+            "final_curvature_penalty"
+        ],
+        "FIELD_ERROR": float(final_result_snapshot.field_error),
+        "SELF_INTERSECTING": final_result_snapshot.self_intersecting,
+        "SELF_INTERSECTION_CHECK_AVAILABLE": (
+            final_result_snapshot.self_intersection_check_available
         ),
+        "MAX_CURVATURE": float(final_result_snapshot.final_metrics["max_curvature"]),
+        "COIL_LENGTH": float(final_result_snapshot.final_metrics["coil_length"]),
+        "CURVE_CURVE_MIN_DIST": final_result_snapshot.final_distances[
+            "curve_curve_min_dist"
+        ],
+        "CURVE_SURFACE_MIN_DIST": final_result_snapshot.final_distances[
+            "curve_surface_min_dist"
+        ],
+        "SURFACE_VESSEL_MIN_DIST": final_result_snapshot.final_distances[
+            "surface_vessel_min_dist"
+        ],
+        "COIL_VESSEL_MIN_DIST_M": COIL_VESSEL_MIN_DIST_M,
+        "HARDWARE_CONSTRAINTS_OK": final_result_snapshot.hardware_status["success"],
+        "HARDWARE_CONSTRAINT_VIOLATIONS": final_result_snapshot.hardware_status[
+            "violations"
+        ],
+        **final_result_snapshot.artifact_hardware_payload,
         "INITIAL_VOLUME": float(initial_volume),
         "INITIAL_IOTA": float(initial_iota),
         "INITIAL_FIELD_ERROR": float(initial_field_error),
@@ -11058,27 +12124,33 @@ if __name__ == "__main__":
                 **alm_result_diagnostics_fields(alm_result),
             }
         )
-    optimizer_diag = extract_optimizer_diagnostics(
-        None if skip_outer_optimizer else res,
-        ran_optimizer=not skip_outer_optimizer,
-        termination_message=termination_message,
-    )
     initial_objective = float(run_dict["initial_objective"])
-    final_objective = optimizer_diag["fun"]
+    final_objective = final_result_snapshot.optimizer_diagnostics["fun"]
     objective_decrease = (
         None if final_objective is None else initial_objective - float(final_objective)
     )
-    results["OPTIMIZER_FUN"] = optimizer_diag["fun"]
-    results["OPTIMIZER_FUN_FINITE"] = optimizer_diag["fun_finite"]
-    results["OPTIMIZER_JAC_FINITE"] = optimizer_diag["jac_finite"]
-    results["OPTIMIZER_JAC_INF_NORM"] = optimizer_diag["jac_inf_norm"]
-    results["OPTIMIZER_X_FINITE"] = optimizer_diag["x_finite"]
-    results["OPTIMIZER_INVALID_STATE"] = optimizer_diag["invalid_state"]
+    results["OPTIMIZER_FUN"] = final_result_snapshot.optimizer_diagnostics["fun"]
+    results["OPTIMIZER_FUN_FINITE"] = final_result_snapshot.optimizer_diagnostics[
+        "fun_finite"
+    ]
+    results["OPTIMIZER_JAC_FINITE"] = final_result_snapshot.optimizer_diagnostics[
+        "jac_finite"
+    ]
+    results["OPTIMIZER_JAC_INF_NORM"] = final_result_snapshot.optimizer_diagnostics[
+        "jac_inf_norm"
+    ]
+    results["OPTIMIZER_X_FINITE"] = final_result_snapshot.optimizer_diagnostics[
+        "x_finite"
+    ]
+    results["OPTIMIZER_INVALID_STATE"] = final_result_snapshot.optimizer_diagnostics[
+        "invalid_state"
+    ]
     results["INITIAL_OBJECTIVE"] = initial_objective
     results["FINAL_OBJECTIVE"] = final_objective
     results["OBJECTIVE_DECREASE"] = objective_decrease
     if use_target_lane and (
-        target_lane_invalid_state_events or optimizer_diag["invalid_state"]
+        target_lane_invalid_state_events
+        or final_result_snapshot.optimizer_diagnostics["invalid_state"]
     ):
         results["TARGET_LANE_INVALID_STATE_DIAGNOSIS"] = {
             "event_count": int(len(target_lane_invalid_state_events)),
@@ -11107,8 +12179,6 @@ if __name__ == "__main__":
                 )
             ),
         }
-    timings["script_total_s"] = _elapsed_s(run_wall_start_s, _perf_counter_s())
-    results["TIMINGS"] = timings
     if target_lane_profile is not None:
         results["TARGET_LANE_PROFILE"] = target_lane_profile
     if jax_compile_diagnostics is not None:
@@ -11143,4 +12213,72 @@ if __name__ == "__main__":
             os.path.join(OUT_DIR_ITER, "target_lane_invalid_state_diagnosis.json"),
             results["TARGET_LANE_INVALID_STATE_DIAGNOSIS"],
         )
-    write_json_file(os.path.join(OUT_DIR_ITER, "results.json"), results)
+    final_result_snapshot = with_single_stage_results_payload(
+        final_result_snapshot,
+        results,
+    )
+    write_single_stage_results_json(OUT_DIR_ITER, final_result_snapshot)
+    if use_target_lane and write_restart_artifacts:
+        write_single_stage_jax_runtime_seed_spec(
+            OUT_DIR_ITER,
+            surface=boozer_surface.surface,
+            surface_dofs=final_result_snapshot.solved_surface_state["sdofs"],
+            iota=final_result_snapshot.solved_surface_state["iota"],
+            G=final_result_snapshot.solved_surface_state["G"],
+            mpol=boozer_surface.surface.mpol,
+            ntor=boozer_surface.surface.ntor,
+            quadpoints_phi=boozer_surface.surface.quadpoints_phi,
+            quadpoints_theta=boozer_surface.surface.quadpoints_theta,
+            coil_dof_extraction_spec=bs.coil_dof_extraction_spec(),
+            coil_dofs=final_result_snapshot.final_coil_dofs,
+            num_tf_coils=num_tf_coils,
+            banana_curve_index=int(num_tf_coils),
+            tf_current_A=stage2_tf_current_A,
+            banana_current_A=resolve_single_stage_final_banana_current_A(
+                use_target_lane=use_target_lane,
+                final_metrics=final_penalty_metrics,
+                banana_current=banana_coils[0].current,
+            ),
+        )
+    if (
+        not skip_outer_optimizer
+        and single_stage_host_postprocess_required(
+            use_target_lane=use_target_lane,
+            write_restart_artifacts=write_restart_artifacts,
+            write_full_artifacts=write_full_artifacts,
+        )
+    ):
+        if not host_state_restored_for_final:
+            restore_single_stage_host_state(
+                use_target_lane=use_target_lane,
+                JF=JF,
+                boozer_surface=boozer_surface,
+                run_dict=run_dict,
+                coil_dofs=final_result_snapshot.final_coil_dofs,
+                apply_coil_dofs=dof_setter,
+                bs_diag=bs_diag,
+                record_outer_optimizer_event=record_outer_optimizer_event,
+            )
+        export_requested_single_stage_artifacts(
+            solved_surface_state=final_result_snapshot.solved_surface_state,
+            coil_dofs=final_result_snapshot.final_coil_dofs,
+            num_tf_coils=num_tf_coils,
+            tf_current_A=stage2_tf_current_A,
+            banana_current_A=resolve_single_stage_final_banana_current_A(
+                use_target_lane=use_target_lane,
+                final_metrics=final_penalty_metrics,
+                banana_current=banana_coils[0].current,
+            ),
+            output_dir=OUT_DIR_ITER,
+            boozer_surface=boozer_surface,
+            bs_diag=bs_diag,
+            curves=curves,
+            banana_curve=banana_curve,
+            surf_coils=surf_coils,
+            hbt=hbt,
+            VV=VV,
+            write_restart_artifacts=write_restart_artifacts,
+            write_host_restart_artifacts=not use_target_lane,
+            write_full_artifacts=write_full_artifacts,
+            timings=timings,
+        )

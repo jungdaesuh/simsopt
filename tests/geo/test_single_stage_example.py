@@ -86,6 +86,7 @@ def load_stage2_module():
 class FakeSurfPrev:
     def __init__(self):
         self.nfp = 5
+        self.stellsym = True
         self.quadpoints_phi = np.linspace(0, 1 / self.nfp, 13, endpoint=False)
         self.quadpoints_theta = np.linspace(0, 1, 17, endpoint=False)
 
@@ -194,6 +195,19 @@ class SingleStageExampleTests(unittest.TestCase):
         return load_single_stage_example_module()
 
     @staticmethod
+    def _jax_runtime_seed_spec_field_kwargs(module):
+        return {
+            "coil_dof_extraction_spec": module.jax_specs.make_coil_set_dof_extraction_spec(
+                ()
+            ),
+            "coil_dofs": np.asarray([], dtype=np.float64),
+            "num_tf_coils": 0,
+            "banana_curve_index": 0,
+            "tf_current_A": 0.0,
+            "banana_current_A": 0.0,
+        }
+
+    @staticmethod
     def _make_reporting_runtime_summary(*, include_distance_metrics):
         return {
             "solver_success": True,
@@ -209,6 +223,8 @@ class SingleStageExampleTests(unittest.TestCase):
             "final_curvature_penalty": 0.88,
             "coil_length": 4.25,
             "max_curvature": 12.5,
+            "banana_current_A": 123.0,
+            "field_error": 0.013,
             "final_volume": 6.5,
             "final_iota": 0.21,
             "curve_curve_min_dist": 0.8 if include_distance_metrics else None,
@@ -2167,9 +2183,8 @@ class SingleStageExampleTests(unittest.TestCase):
             ):
                 module.resolve_single_stage_warm_start_paths(tmpdir)
 
-    def test_load_single_stage_warm_start_state_reads_surface_and_metrics(self):
+    def test_load_single_stage_warm_start_state_rejects_live_surface_fallback(self):
         module = self.load_module()
-        surface_marker = object()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
@@ -2180,17 +2195,12 @@ class SingleStageExampleTests(unittest.TestCase):
             )
             (run_dir / "biot_savart_opt.json").write_text("{}", encoding="utf-8")
 
-            with patch.object(module, "load", return_value=surface_marker):
-                warm_start = module.load_single_stage_warm_start_state(str(run_dir))
-
-        self.assertIs(warm_start["surface"], surface_marker)
-        self.assertEqual(warm_start["iota"], 0.123)
-        self.assertEqual(warm_start["G"], 4.5)
-        self.assertTrue(warm_start["surface_path"].endswith("surf_opt.json"))
-        self.assertTrue(warm_start["results_path"].endswith("results.json"))
-        self.assertTrue(
-            warm_start["biot_savart_path"].endswith("biot_savart_opt.json")
-        )
+            with patch.object(
+                module,
+                "load",
+                side_effect=AssertionError("JAX warm-start loader must not call load()"),
+            ), self.assertRaisesRegex(ValueError, "surface payload is not a SIMSON"):
+                module.load_single_stage_warm_start_state(str(run_dir))
 
     def test_load_single_stage_warm_start_state_reads_serialized_surface_payload(self):
         module = self.load_module()
@@ -2229,6 +2239,156 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(warm_start["iota"], 0.123)
         self.assertEqual(warm_start["G"], 4.5)
         self.assertIsNone(warm_start["biot_savart_path"])
+
+    def test_single_stage_jax_runtime_seed_spec_round_trips_target_surface_dofs(self):
+        module = self.load_module()
+        surface = module.SurfaceXYZTensorFourier(
+            mpol=2,
+            ntor=1,
+            nfp=5,
+            stellsym=True,
+            quadpoints_phi=np.linspace(0.0, 0.2, 4, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+        )
+        surface_dofs = surface.get_dofs().copy()
+        surface_dofs[:] = np.linspace(0.01, 0.01 * surface_dofs.size, surface_dofs.size)
+        surface.set_dofs(surface_dofs)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = module.write_single_stage_jax_runtime_seed_spec(
+                tmpdir,
+                surface=surface,
+                surface_dofs=surface_dofs,
+                iota=0.123,
+                G=4.5,
+                mpol=2,
+                ntor=1,
+                quadpoints_phi=surface.quadpoints_phi,
+                quadpoints_theta=surface.quadpoints_theta,
+                **self._jax_runtime_seed_spec_field_kwargs(module),
+            )
+            with patch.object(
+                module,
+                "project_surface_dofs_to_resolution",
+                side_effect=AssertionError(
+                    "JAX runtime spec load must not reproject warm-start surfaces"
+                ),
+            ):
+                loaded = module.load_single_stage_jax_runtime_seed_spec(
+                    tmpdir,
+                    mpol=2,
+                    ntor=1,
+                    quadpoints_phi=surface.quadpoints_phi,
+                    quadpoints_theta=surface.quadpoints_theta,
+                )
+
+        self.assertTrue(path.endswith(module._SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME))
+        np.testing.assert_allclose(module.host_array(loaded["surface_dofs"]), surface_dofs)
+        self.assertEqual(float(module.host_array(loaded["iota"])), 0.123)
+        self.assertEqual(float(module.host_array(loaded["G"])), 4.5)
+
+    def test_load_single_stage_jax_warm_start_state_uses_spec_not_surface_json(self):
+        module = self.load_module()
+        surface = module.SurfaceXYZTensorFourier(
+            mpol=2,
+            ntor=1,
+            nfp=5,
+            stellsym=True,
+            quadpoints_phi=np.linspace(0.0, 0.2, 4, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spec_path = module.write_single_stage_jax_runtime_seed_spec(
+                tmpdir,
+                surface=surface,
+                surface_dofs=surface.get_dofs(),
+                iota=0.123,
+                G=4.5,
+                mpol=2,
+                ntor=1,
+                quadpoints_phi=surface.quadpoints_phi,
+                quadpoints_theta=surface.quadpoints_theta,
+                **self._jax_runtime_seed_spec_field_kwargs(module),
+            )
+            (Path(tmpdir) / "biot_savart_opt.json").write_text("{}", encoding="utf-8")
+            with patch.object(
+                module,
+                "load_serialized_surface_state",
+                side_effect=AssertionError("JAX warm start must not load surf_opt.json"),
+            ), patch.object(
+                module,
+                "load",
+                side_effect=AssertionError("JAX warm start must not load live objects"),
+            ):
+                warm_start = module.load_single_stage_jax_warm_start_state(tmpdir)
+
+        self.assertIsNone(warm_start["surface"])
+        self.assertIsNone(warm_start["surface_path"])
+        self.assertEqual(warm_start["jax_runtime_spec_path"], spec_path)
+        self.assertTrue(warm_start["biot_savart_path"].endswith("biot_savart_opt.json"))
+
+    def test_load_single_stage_jax_warm_start_state_honors_explicit_seed_spec(self):
+        module = self.load_module()
+        surface = module.SurfaceXYZTensorFourier(
+            mpol=2,
+            ntor=1,
+            nfp=5,
+            stellsym=True,
+            quadpoints_phi=np.linspace(0.0, 0.2, 4, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            donor_dir = Path(tmpdir) / "donor"
+            spec_dir = Path(tmpdir) / "spec"
+            donor_dir.mkdir()
+            spec_dir.mkdir()
+            spec_path = module.write_single_stage_jax_runtime_seed_spec(
+                spec_dir,
+                surface=surface,
+                surface_dofs=surface.get_dofs(),
+                iota=0.123,
+                G=4.5,
+                mpol=2,
+                ntor=1,
+                quadpoints_phi=surface.quadpoints_phi,
+                quadpoints_theta=surface.quadpoints_theta,
+                **self._jax_runtime_seed_spec_field_kwargs(module),
+            )
+            (donor_dir / "biot_savart_opt.json").write_text("{}", encoding="utf-8")
+            (donor_dir / "results.json").write_text("{}", encoding="utf-8")
+            with patch.object(
+                module,
+                "load_serialized_surface_state",
+                side_effect=AssertionError("JAX warm start must not load surf_opt.json"),
+            ), patch.object(
+                module,
+                "load",
+                side_effect=AssertionError("JAX warm start must not load live objects"),
+            ):
+                warm_start = module.load_single_stage_jax_warm_start_state(
+                    donor_dir,
+                    runtime_spec_path=spec_path,
+                )
+
+        self.assertEqual(warm_start["jax_runtime_spec_path"], spec_path)
+        self.assertTrue(warm_start["biot_savart_path"].endswith("biot_savart_opt.json"))
+
+    def test_jax_warm_start_surface_dofs_require_seed_spec_artifact(self):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir, self.assertRaisesRegex(
+            FileNotFoundError,
+            "run seed conversion first",
+        ):
+            module.resolve_jax_warm_start_surface_dofs_from_spec(
+                tmpdir,
+                mpol=2,
+                ntor=1,
+                quadpoints_phi=np.linspace(0.0, 0.2, 4, endpoint=False),
+                quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+            )
 
     def test_resolve_single_stage_startup_seed_contract_prefers_warm_start_donor_seed(
         self,
@@ -3833,14 +3993,10 @@ class SingleStageExampleTests(unittest.TestCase):
             ],
         )
 
-    def test_resolve_single_stage_final_penalty_metrics_prefers_target_lane_runtime_summary(
+    def test_resolve_single_stage_final_penalty_metrics_rejects_missing_target_lane_snapshot(
         self,
     ):
         module = self.load_module()
-        captured = {}
-        runtime_summary = self._make_reporting_runtime_summary(
-            include_distance_metrics=True
-        )
 
         class RejectingPenalty:
             def J(self):
@@ -3853,50 +4009,41 @@ class SingleStageExampleTests(unittest.TestCase):
         with patch.object(
             module,
             "get_traceable_single_stage_runtime_bundle_builder",
-            return_value=self._make_reporting_runtime_builder(
-                captured, runtime_summary
+            side_effect=AssertionError(
+                "final results must not rebuild target-lane host runtime bundles"
             ),
         ):
-            metrics = module.resolve_single_stage_final_penalty_metrics(
-                use_target_lane=True,
-                benchmark_mode=False,
-                skip_outer_optimizer=False,
-                boozer_surface=object(),
-                bs=object(),
-                iota_target=0.21,
-                coil_dofs=jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
-                outer_objective_config="config-marker",
-                success_filter="success-filter-marker",
-                curvelength=RejectingPenalty(),
-                j_non_qs=RejectingPenalty(),
-                j_boozer_residual=RejectingPenalty(),
-                j_iota=RejectingPenalty(),
-                j_curve_length=RejectingPenalty(),
-                j_curve_curve=RejectingDistance(),
-                j_curve_surface=RejectingDistance(),
-                j_surface_surface=RejectingDistance(),
-                j_curvature=RejectingPenalty(),
-                cc_dist=0.05,
-                cs_dist=0.02,
-                ss_dist=0.04,
-                curvature_threshold=40.0,
-                init_only=False,
-                termination_message="ok",
-                optimizer_success=True,
-            )
-
-        self.assertEqual(captured["include_profile_suite"], False)
-        self.assertEqual(captured["include_host_wrappers"], False)
-        self.assertEqual(captured["outer_objective_config"], "config-marker")
-        self.assertEqual(captured["success_filter"], "success-filter-marker")
-        self.assertEqual(
-            captured["reporting_metrics_kwargs"],
-            {"include_distance_metrics": True},
-        )
-        for metric_name, expected_value in runtime_summary.items():
-            self.assertEqual(metrics[metric_name], expected_value)
-        self.assertTrue(metrics["hardware_status"]["success"])
-        self.assertEqual(metrics["hardware_status"]["violations"], [])
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Missing cached target-lane final reporting metrics",
+            ):
+                module.resolve_single_stage_final_penalty_metrics(
+                    use_target_lane=True,
+                    benchmark_mode=False,
+                    skip_outer_optimizer=False,
+                    boozer_surface=object(),
+                    bs=object(),
+                    iota_target=0.21,
+                    coil_dofs=jax.device_put(np.array([1.0, -2.0], dtype=np.float64)),
+                    outer_objective_config="config-marker",
+                    success_filter="success-filter-marker",
+                    curvelength=RejectingPenalty(),
+                    j_non_qs=RejectingPenalty(),
+                    j_boozer_residual=RejectingPenalty(),
+                    j_iota=RejectingPenalty(),
+                    j_curve_length=RejectingPenalty(),
+                    j_curve_curve=RejectingDistance(),
+                    j_curve_surface=RejectingDistance(),
+                    j_surface_surface=RejectingDistance(),
+                    j_curvature=RejectingPenalty(),
+                    cc_dist=0.05,
+                    cs_dist=0.02,
+                    ss_dist=0.04,
+                    curvature_threshold=40.0,
+                    init_only=False,
+                    termination_message="ok",
+                    optimizer_success=True,
+                )
 
     def test_resolve_single_stage_final_penalty_metrics_prefers_cached_target_lane_summary(
         self,
@@ -3946,20 +4093,314 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(metrics, cached_metrics)
 
+    def test_target_restart_artifact_export_skips_host_field_diagnostics(
+        self,
+    ):
+        module = self.load_module()
+        saved_paths = []
+        events = []
+
+        class RestartSurface:
+            x = np.array([0.0, 0.0], dtype=np.float64)
+            mpol = 1
+            ntor = 1
+            nfp = 5
+            stellsym = True
+            quadpoints_phi = np.linspace(0.0, 0.2, 3, endpoint=False)
+            quadpoints_theta = np.linspace(0.0, 1.0, 3, endpoint=False)
+
+            def save(self, path):
+                saved_paths.append(str(path))
+
+            def gamma(self):
+                raise AssertionError("restart-only target export should not sample gamma")
+
+            def unitnormal(self):
+                raise AssertionError(
+                    "restart-only target export should not sample unit normals"
+                )
+
+            def volume(self):
+                raise AssertionError("final JSON should use snapshot metrics")
+
+        class RestartField:
+            x = np.array([0.0, 0.0], dtype=np.float64)
+            coils = []
+
+            def save(self, path):
+                saved_paths.append(str(path))
+
+            def B(self):
+                raise AssertionError("restart-only target export should not evaluate B")
+
+        run_dict = {
+            "sdofs": np.array([0.1, -0.2], dtype=np.float64),
+            "iota": 0.21,
+            "G": 1.75,
+            "self_intersection_check_available": True,
+        }
+        snapshot = types.SimpleNamespace(
+            solved_surface_state={
+                "sdofs": run_dict["sdofs"],
+                "iota": run_dict["iota"],
+                "G": run_dict["G"],
+            },
+        )
+        boozer_surface = types.SimpleNamespace(
+            surface=RestartSurface(),
+            res={"iota": 0.0, "G": 0.0},
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            module,
+            "update_self_intersection_status",
+            side_effect=lambda rd, _surface, **_kwargs: rd.__setitem__(
+                "self_intersection_check_available", True
+            )
+            or False,
+        ):
+            module.restore_single_stage_host_state(
+                use_target_lane=True,
+                JF=types.SimpleNamespace(),
+                boozer_surface=boozer_surface,
+                run_dict=run_dict,
+                coil_dofs=np.array([1.0, -2.0], dtype=np.float64),
+                apply_coil_dofs=lambda _dofs: None,
+                bs_diag=RestartField(),
+                record_outer_optimizer_event=lambda name, **payload: events.append(
+                    (name, payload)
+                ),
+            )
+            module.export_requested_single_stage_artifacts(
+                solved_surface_state=snapshot.solved_surface_state,
+                coil_dofs=np.array([1.0, -2.0], dtype=np.float64),
+                num_tf_coils=0,
+                tf_current_A=0.0,
+                banana_current_A=0.0,
+                output_dir=tmpdir,
+                boozer_surface=boozer_surface,
+                bs_diag=RestartField(),
+                curves=[],
+                banana_curve=object(),
+                surf_coils=object(),
+                hbt=object(),
+                VV=object(),
+                write_restart_artifacts=True,
+                write_host_restart_artifacts=True,
+                write_full_artifacts=False,
+                timings={},
+            )
+            result = module.run_single_stage_host_diagnostics(
+                boozer_surface=boozer_surface,
+                run_dict=run_dict,
+                timings={},
+            )
+            runtime_spec_written = os.path.exists(
+                os.path.join(tmpdir, module._SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME)
+            )
+
+        self.assertFalse(result.self_intersecting)
+        self.assertTrue(result.self_intersection_check_available)
+        self.assertTrue(
+            any(path.endswith("biot_savart_opt.json") for path in saved_paths)
+        )
+        self.assertTrue(any(path.endswith("surf_opt.json") for path in saved_paths))
+        self.assertTrue(runtime_spec_written)
+        self.assertEqual(events[0][0], "host_state_restore_started")
+        np.testing.assert_allclose(boozer_surface.surface.x, run_dict["sdofs"])
+        self.assertEqual(boozer_surface.res["iota"], run_dict["iota"])
+        self.assertEqual(boozer_surface.res["G"], run_dict["G"])
+
+    def test_target_restart_artifacts_require_host_postprocess_boundary(self):
+        module = self.load_module()
+
+        self.assertTrue(
+            module.single_stage_host_postprocess_required(
+                use_target_lane=True,
+                write_restart_artifacts=True,
+                write_full_artifacts=False,
+            )
+        )
+        self.assertFalse(
+            module.single_stage_host_postprocess_required(
+                use_target_lane=True,
+                write_restart_artifacts=False,
+                write_full_artifacts=False,
+            )
+        )
+
+    def test_build_single_stage_final_result_snapshot_copies_result_state(self):
+        module = self.load_module()
+        run_dict = {
+            "sdofs": np.array([0.1, -0.2], dtype=np.float64),
+            "iota": 0.21,
+            "G": 1.75,
+        }
+        final_metrics = self._make_reporting_runtime_summary(
+            include_distance_metrics=True
+        )
+        hardware_status = {"success": True, "violations": []}
+        final_distances = {
+            "curve_curve_min_dist": 0.11,
+            "curve_surface_min_dist": 0.22,
+            "surface_vessel_min_dist": 0.33,
+        }
+        artifact_hardware_payload = {"COIL_LENGTH_M": 1.0}
+        optimizer_result = {
+            "iterations": 7,
+            "success": True,
+            "termination_message": "done",
+            "status": 0,
+            "nfev": 8,
+            "njev": 9,
+            "ls_status": None,
+        }
+        optimizer_diagnostics = {"fun": 1.25, "invalid_state": False}
+        timings = {"outer_optimizer_s": 2.0}
+
+        snapshot = module.build_single_stage_final_result_snapshot(
+            final_coil_dofs=np.array([1.0, -2.0], dtype=np.float64),
+            run_dict=run_dict,
+            final_metrics=final_metrics,
+            final_distances=final_distances,
+            hardware_status=hardware_status,
+            artifact_hardware_payload=artifact_hardware_payload,
+            optimizer_result=optimizer_result,
+            optimizer_diagnostics=optimizer_diagnostics,
+            timings=timings,
+            write_restart_artifacts=True,
+            write_full_artifacts=False,
+            boozer_optimizer_method="BFGS",
+            field_error=final_metrics["field_error"],
+            self_intersecting=False,
+            self_intersection_check_available=True,
+        )
+
+        final_metrics["final_iota"] = 99.0
+        final_distances["curve_curve_min_dist"] = 99.0
+        hardware_status["success"] = False
+        artifact_hardware_payload["COIL_LENGTH_M"] = 99.0
+        optimizer_result["iterations"] = 99
+        optimizer_diagnostics["fun"] = 99.0
+        timings["outer_optimizer_s"] = 99.0
+        run_dict["sdofs"][0] = 99.0
+
+        self.assertEqual(snapshot.final_metrics["final_iota"], 0.21)
+        self.assertEqual(snapshot.final_distances["curve_curve_min_dist"], 0.11)
+        self.assertTrue(snapshot.hardware_status["success"])
+        self.assertEqual(snapshot.artifact_hardware_payload["COIL_LENGTH_M"], 1.0)
+        self.assertEqual(snapshot.optimizer_result["iterations"], 7)
+        self.assertEqual(snapshot.optimizer_diagnostics["fun"], 1.25)
+        self.assertEqual(snapshot.timings["outer_optimizer_s"], 2.0)
+        self.assertEqual(snapshot.boozer_optimizer_method, "BFGS")
+        self.assertEqual(snapshot.results_payload, {})
+        np.testing.assert_allclose(
+            snapshot.solved_surface_state["sdofs"],
+            np.array([0.1, -0.2], dtype=np.float64),
+        )
+
+    def test_write_single_stage_results_json_uses_snapshot_payload(self):
+        module = self.load_module()
+        snapshot = module.SingleStageFinalResultSnapshot(
+            final_coil_dofs=np.array([1.0], dtype=np.float64),
+            solved_surface_state={"sdofs": np.array([0.1], dtype=np.float64)},
+            final_metrics={},
+            final_distances={},
+            hardware_status={},
+            artifact_hardware_payload={},
+            optimizer_result={},
+            optimizer_diagnostics={},
+            timings={"script_total_s": 1.5},
+            artifact_policy={
+                "write_restart_artifacts": False,
+                "write_full_artifacts": False,
+            },
+            boozer_optimizer_method="BFGS",
+            results_payload={},
+            field_error=0.01,
+            self_intersecting=False,
+            self_intersection_check_available=True,
+        )
+        mutable_results = {"TIMINGS": {"script_total_s": 99.0}, "FIELD_ERROR": 0.01}
+        final_snapshot = module.with_single_stage_results_payload(
+            snapshot,
+            mutable_results,
+        )
+        mutable_results["FIELD_ERROR"] = 99.0
+        mutable_results["TIMINGS"] = {"script_total_s": 99.0}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            module.write_single_stage_results_json(tmpdir, final_snapshot)
+            payload = json.loads((Path(tmpdir) / "results.json").read_text())
+
+        self.assertEqual(payload["FIELD_ERROR"], 0.01)
+        self.assertEqual(payload["TIMINGS"], {"script_total_s": 1.5})
+
+    def test_summarize_single_stage_final_optimizer_result_copies_status(self):
+        module = self.load_module()
+        result = types.SimpleNamespace(status=2, nfev=5, njev=3, ls_status=4)
+
+        summary = module.summarize_single_stage_final_optimizer_result(
+            result=result,
+            ran_optimizer=True,
+            iterations=11,
+            optimizer_success=False,
+            termination_message="line search failed",
+        )
+
+        self.assertEqual(
+            summary,
+            {
+                "iterations": 11,
+                "success": False,
+                "termination_message": "line search failed",
+                "status": 2,
+                "nfev": 5,
+                "njev": 3,
+                "ls_status": 4,
+            },
+        )
+
+        result.status = 99
+        self.assertEqual(summary["status"], 2)
+
+    def test_resolve_single_stage_final_banana_current_uses_target_snapshot(self):
+        module = self.load_module()
+
+        class RejectingCurrent:
+            def get_value(self):
+                raise AssertionError("target results must not read host current")
+
+        current = module.resolve_single_stage_final_banana_current_A(
+            use_target_lane=True,
+            final_metrics={"banana_current_A": 456.0},
+            banana_current=RejectingCurrent(),
+        )
+
+        self.assertEqual(current, 456.0)
+
     def test_resolve_single_stage_final_penalty_metrics_skips_target_lane_distances_in_benchmark_mode(
         self,
     ):
         module = self.load_module()
-        captured = {}
         runtime_summary = self._make_reporting_runtime_summary(
             include_distance_metrics=False
         )
+        runtime_summary["hardware_status"] = {
+            "success": None,
+            "violations": ["skipped_in_benchmark_mode"],
+        }
+        run_dict = {
+            "target_lane_reporting_metrics": dict(runtime_summary),
+            "target_lane_reporting_coil_dofs": np.array([1.0, -2.0], dtype=np.float64),
+            "target_lane_reporting_include_distance_metrics": False,
+        }
 
         with patch.object(
             module,
             "get_traceable_single_stage_runtime_bundle_builder",
-            return_value=self._make_reporting_runtime_builder(
-                captured, runtime_summary
+            side_effect=AssertionError(
+                "cached accepted-step reporting should avoid rebuilding the runtime bundle"
             ),
         ):
             metrics = module.resolve_single_stage_final_penalty_metrics(
@@ -3985,12 +4426,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 cs_dist=0.02,
                 ss_dist=0.04,
                 curvature_threshold=40.0,
+                run_dict=run_dict,
             )
 
-        self.assertEqual(
-            captured["reporting_metrics_kwargs"],
-            {"include_distance_metrics": False},
-        )
         self.assertIsNone(metrics["curve_curve_min_dist"])
         self.assertIsNone(metrics["curve_surface_min_dist"])
         self.assertIsNone(metrics["surface_vessel_min_dist"])
@@ -4139,9 +4577,15 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIn("objective_value", summary)
         self.assertNotIn("value_and_grad_called", captured)
         self.assertNotIn("hardware_constraint_status", run_dict)
-        self.assertNotIn("target_lane_reporting_metrics", run_dict)
-        self.assertNotIn("target_lane_reporting_coil_dofs", run_dict)
-        self.assertNotIn("target_lane_reporting_include_distance_metrics", run_dict)
+        self.assertEqual(
+            run_dict["target_lane_reporting_metrics"],
+            summary["reporting_metrics"],
+        )
+        np.testing.assert_allclose(
+            run_dict["target_lane_reporting_coil_dofs"],
+            np.array([1.0, -2.0], dtype=np.float64),
+        )
+        self.assertTrue(run_dict["target_lane_reporting_include_distance_metrics"])
         np.testing.assert_allclose(run_dict["sdofs"], run_dict_before["sdofs"])
         self.assertEqual(run_dict["iota"], run_dict_before["iota"])
         self.assertEqual(run_dict["G"], run_dict_before["G"])
@@ -7840,6 +8284,21 @@ class SingleStageExampleTests(unittest.TestCase):
                 (False, False),
             )
 
+    def test_evaluate_surface_self_intersection_jax_requires_supported_surface(self):
+        module = self.load_module()
+
+        class SentinelSurface:
+            def is_self_intersecting(self):
+                raise AssertionError(
+                    "JAX production self-intersection must not use host fallback"
+                )
+
+        with self.assertRaisesRegex(TypeError, "run seed conversion first"):
+            module.evaluate_surface_self_intersection(
+                SentinelSurface(),
+                require_supported_surface=True,
+            )
+
     def test_surface_self_intersection_check_available_accepts_supported_surface_without_backend(
         self,
     ):
@@ -10860,6 +11319,32 @@ class ResultsEnvelopeTests(unittest.TestCase):
         self.assertEqual(
             stage2_seed["banana_surface_radius"],
             0.22,
+        )
+        self.assertIn(
+            module._SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME,
+            envelope["artifacts"]["required"],
+        )
+        self.assertNotIn("biot_savart_opt.json", envelope["artifacts"]["required"])
+        self.assertNotIn("surf_opt.json", envelope["artifacts"]["required"])
+
+    def test_single_stage_restart_artifact_filenames_are_backend_specific(self):
+        module = load_single_stage_example_module()
+
+        jax_files = module.single_stage_restart_artifact_filenames(
+            types.SimpleNamespace(backend="jax")
+        )
+        cpu_files = module.single_stage_restart_artifact_filenames(
+            types.SimpleNamespace(backend="cpu")
+        )
+
+        self.assertEqual(jax_files, (module._SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME,))
+        self.assertEqual(
+            cpu_files,
+            (
+                "biot_savart_opt.json",
+                "surf_opt.json",
+                module._SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME,
+            ),
         )
 
     def test_single_stage_results_envelope_records_scaled_phase1_diagnostic_artifact(

@@ -403,6 +403,68 @@ def surface_spec_kind(spec: SurfaceSpec) -> SurfaceSpecKind:
 
 
 @dataclass(frozen=True)
+class SingleStageSeedSpec:
+    """Immutable startup seed payload for the single-stage JAX runner."""
+
+    surface: SurfaceXYZTensorFourierSpec
+    coil_set: GroupedCoilSetSpec
+    coil_dof_extraction: CoilSetDofExtractionSpec
+    coil_dofs: jax.Array
+    boozer_iota: jax.Array
+    boozer_G: jax.Array
+    target_labels: tuple[str, ...]
+    hardware_constants: tuple[tuple[str, float], ...]
+    self_intersection_mode: str
+    schema_version: int
+    num_tf_coils: int
+    banana_curve_index: int
+    tf_current_A: float
+    banana_current_A: float
+
+
+jax.tree_util.register_dataclass(
+    SingleStageSeedSpec,
+    data_fields=[
+        "surface",
+        "coil_set",
+        "coil_dof_extraction",
+        "coil_dofs",
+        "boozer_iota",
+        "boozer_G",
+    ],
+    meta_fields=[
+        "target_labels",
+        "hardware_constants",
+        "self_intersection_mode",
+        "schema_version",
+        "num_tf_coils",
+        "banana_curve_index",
+        "tf_current_A",
+        "banana_current_A",
+    ],
+)
+
+
+@dataclass(frozen=True)
+class SingleStageRuntimeSpec:
+    """Immutable resolved runtime contract for single-stage JAX optimization."""
+
+    seed: SingleStageSeedSpec
+    mpol: int
+    ntor: int
+    nfp: int
+    nphi: int
+    ntheta: int
+
+
+jax.tree_util.register_dataclass(
+    SingleStageRuntimeSpec,
+    data_fields=["seed"],
+    meta_fields=["mpol", "ntor", "nfp", "nphi", "ntheta"],
+)
+
+
+@dataclass(frozen=True)
 class CurveCWSFourierRZSpec:
     """Immutable curve-on-RZ-surface payload for pure JAX geometry."""
 
@@ -812,6 +874,62 @@ def make_grouped_coil_set_spec(groups: object) -> GroupedCoilSetSpec:
             )
         )
     return GroupedCoilSetSpec(groups=tuple(group_specs))
+
+
+def make_single_stage_seed_spec(
+    *,
+    surface: SurfaceXYZTensorFourierSpec,
+    coil_set: GroupedCoilSetSpec,
+    coil_dof_extraction: CoilSetDofExtractionSpec,
+    coil_dofs: object,
+    boozer_iota: object,
+    boozer_G: object,
+    target_labels: object,
+    hardware_constants: object,
+    self_intersection_mode: str,
+    schema_version: int,
+    num_tf_coils: int,
+    banana_curve_index: int,
+    tf_current_A: float,
+    banana_current_A: float,
+) -> SingleStageSeedSpec:
+    return SingleStageSeedSpec(
+        surface=surface,
+        coil_set=coil_set,
+        coil_dof_extraction=coil_dof_extraction,
+        coil_dofs=_as_float64_array(coil_dofs),
+        boozer_iota=_as_float64_array([boozer_iota]),
+        boozer_G=_as_float64_array([boozer_G]),
+        target_labels=tuple(str(label) for label in target_labels),
+        hardware_constants=tuple(
+            (str(name), float(value)) for name, value in hardware_constants
+        ),
+        self_intersection_mode=str(self_intersection_mode),
+        schema_version=int(schema_version),
+        num_tf_coils=int(num_tf_coils),
+        banana_curve_index=int(banana_curve_index),
+        tf_current_A=float(tf_current_A),
+        banana_current_A=float(banana_current_A),
+    )
+
+
+def make_single_stage_runtime_spec(
+    *,
+    seed: SingleStageSeedSpec,
+    mpol: int,
+    ntor: int,
+    nfp: int,
+    nphi: int,
+    ntheta: int,
+) -> SingleStageRuntimeSpec:
+    return SingleStageRuntimeSpec(
+        seed=seed,
+        mpol=int(mpol),
+        ntor=int(ntor),
+        nfp=int(nfp),
+        nphi=int(nphi),
+        ntheta=int(ntheta),
+    )
 
 
 def make_fixed_surface_flux_spec(
