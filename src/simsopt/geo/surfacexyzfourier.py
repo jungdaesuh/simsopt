@@ -128,6 +128,24 @@ class SurfaceXYZFourier(sopp.SurfaceXYZFourier, Surface):
         """
         self.local_full_x = dofs
 
+    def surface_spec(self):
+        """Build an immutable JAX geometry spec from the current surface state."""
+        from ..jax_core import make_surface_xyz_fourier_spec
+
+        return make_surface_xyz_fourier_spec(
+            dofs=self.get_dofs(),
+            quadpoints_phi=self.quadpoints_phi,
+            quadpoints_theta=self.quadpoints_theta,
+            nfp=self.nfp,
+            stellsym=self.stellsym,
+            mpol=self.mpol,
+            ntor=self.ntor,
+        )
+
+    def to_spec(self):
+        """Alias for :meth:`surface_spec`."""
+        return self.surface_spec()
+
     def recompute_bell(self, parent=None):
         self.invalidate_cache()
 

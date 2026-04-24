@@ -12,7 +12,6 @@ from ._math_utils import (
 from .field import grouped_biot_savart_B_from_spec
 from .specs import (
     FieldEvalSpec,
-    FixedSurfaceGeometrySpec,
     FixedSurfaceFluxSpec,
     SurfaceRZFourierSpec,
     SurfaceXYZFourierSpec,
@@ -99,8 +98,6 @@ def fixed_surface_geometry_from_surface(surface):
 
 
 def fixed_surface_geometry_from_spec(surface_spec):
-    if isinstance(surface_spec, FixedSurfaceGeometrySpec):
-        return surface_spec.gamma, surface_spec.normal
     if isinstance(surface_spec, SurfaceRZFourierSpec):
         return (
             surface_rz_fourier_gamma_from_spec(surface_spec),

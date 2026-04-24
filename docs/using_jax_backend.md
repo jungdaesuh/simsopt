@@ -76,7 +76,7 @@ Default rollout lane:
 
 ## Strict mode
 
-Strict mode is for catching unsupported compatibility fallbacks early:
+Strict mode is for catching unsupported compatibility routes early:
 
 ```python
 import simsopt.config
@@ -84,8 +84,8 @@ import simsopt.config
 simsopt.config.set_backend("jax_gpu_parity", strict=True)
 ```
 
-Use `strict=True` to fail immediately instead of silently dropping to known
-forbidden compatibility seams.
+Use `strict=True` to fail immediately instead of silently using known forbidden
+compatibility seams.
 
 ## Reporting contract
 
@@ -192,14 +192,20 @@ Exact Boozer note:
 
 - The exact Newton solve keeps the loop matrix-free with JAX JVP + GMRES.
 - The final dense Jacobian and optional public `PLU` metadata remains size-limited by
-  `BoozerSurfaceJAX(..., options={"max_dense_jacobian_bytes": ...})`.
+  `BoozerSurfaceJAX(..., options={"max_dense_jacobian_bytes": ...})` on the
+  public `run_code()` / CPU-compatible result lane.
+- `run_code_traceable()` disables exact dense-Jacobian finalization entirely so
+  the target runtime lane stays operator-only even for small exact fixtures.
 - Exact JAX adjoints do not use those dense factors. They solve forward and
   transposed systems through the Jacobian operator callbacks, including traceable
   warm-start prediction.
-- If the dense finalization step would exceed that byte ceiling, the solve now
-  skips dense metadata materialization instead of attempting a multi-GB
-  allocation.
-- Ceiling hits are reported explicitly as
+- Newton-polish runtime steps use the Hessian operator only. Dense Hessian
+  materialization is limited to the explicit final public metadata path when
+  requested.
+- On the public exact result lane, if dense finalization would exceed that byte
+  ceiling, the solve skips dense metadata materialization instead of attempting
+  a multi-GB allocation.
+- Public-lane ceiling hits are reported explicitly as
   `failure_category="scaling_limit"` at
   `failure_stage="dense_jacobian_finalization"`, with
   `jacobian_materialized=False`,
@@ -211,13 +217,13 @@ Exact Boozer note:
 Adjoint and warm-start linear solve note:
 
 - JAX adjoint and warm-start solves are operator-backed. Exact JAX has no dense
-  PLU shortcut or fallback.
+  PLU shortcut or substitute path.
 - Batched exact adjoints intentionally call the operator solve once per RHS
   column; current standard-wrapper batch width is small, and exact mode is not
   the production hot path for the wrapper trio.
 - If a traceable forward solve succeeds but the adjoint operator solve fails,
   the forward value remains the primal value and the gradient is non-finite.
-  Do not replace that with a direct-gradient or failure-penalty fallback.
+  Do not replace that with a direct-gradient or failure-penalty substitute.
 
 ## Copy-paste workflow examples
 
@@ -464,7 +470,21 @@ Keep the timing claims narrow and honest:
 
 - `native_cpu` is still the default and the broadest trusted lane.
 - Routine GPU regression CI is still intentionally minimal.
-- Not every legacy object family is fully routed through immutable specs yet.
+- Not every legacy object family is fully routed through immutable specs yet:
+  - spec-backed launch paths currently cover the grouped-coil Biot-Savart
+    lane, scalar currents, field evaluation points, fixed-surface flux,
+    `SurfaceRZFourier`, `SurfaceXYZFourier`, unclamped
+    `SurfaceXYZTensorFourier`, and curve specs for `CurveXYZFourier`,
+    `CurveRZFourier`, `CurvePlanarFourier`, `CurveHelical`,
+    `CurveCWSFourierRZ`, `CurvePerturbed`, and `CurveFilament`
+  - remaining upstream-visible families such as `SurfaceGarabedian`,
+    `SurfaceHenneberg`, `SurfaceRZPseudospectral`, clamped
+    `SurfaceXYZTensorFourier`, analytic/interpolated magnetic fields,
+    wireframe/permanent-magnet fields, field tracing, and broad objective
+    wrappers remain native-CPU/reference territory unless a dedicated
+    immutable spec and parity test exists
+  - unsupported live-graph conversion is a strict JAX boundary; use
+    `native_cpu` for those families until their spec contracts are implemented
 - Some broader workflow families remain planned rather than fully implemented.
 
 ## What this file does not claim

@@ -913,14 +913,6 @@ def time_stage2_callback(callback):
     _block_until_ready_tree(callback())
     return float(time.perf_counter() - start)
 
-
-def time_stage2_callback_result(callback):
-    start = time.perf_counter()
-    result = callback()
-    _block_until_ready_tree(result)
-    return float(time.perf_counter() - start), result
-
-
 def profile_stage2_named_callbacks(callbacks):
     return {
         name: time_stage2_callback(callback) for name, callback in callbacks.items()
@@ -998,49 +990,8 @@ def profile_stage2_objective_terms(context):
 
 
 def profile_stage2_squared_flux_internal_components(Jf):
-    if getattr(Jf, "_use_jax_native", True):
-        return {}, 0.0, [], {}, [], []
-
-    field_B_for_J_s, field_B_for_J = time_stage2_callback_result(Jf.field.B)
-    integral_only_s = time_stage2_callback(lambda: Jf._jit_integral(field_B_for_J))
-    field_B_for_dJ_s, field_B_for_dJ = time_stage2_callback_result(Jf.field.B)
-    integral_value_grad_s, (_, dJ_dB) = time_stage2_callback_result(
-        lambda: Jf._jit_integral_value_grad(field_B_for_dJ)
-    )
-    field_B_vjp_component_timings = {}
-    dominant_field_B_vjp_components = []
-    dominant_field_B_vjp_coils = []
-    if hasattr(Jf.field, "profile_B_vjp"):
-        field_B_vjp_profile = Jf.field.profile_B_vjp(host_array(dJ_dB))
-        field_B_vjp_s = float(field_B_vjp_profile["wall_time_s"])
-        field_B_vjp_component_timings = {
-            name: float(elapsed_s)
-            for name, elapsed_s in field_B_vjp_profile["component_timings_s"].items()
-        }
-        dominant_field_B_vjp_components = list(
-            field_B_vjp_profile["dominant_components"]
-        )
-        dominant_field_B_vjp_coils = list(field_B_vjp_profile["dominant_coils"])
-    else:
-        field_B_vjp_s, _ = time_stage2_callback_result(
-            lambda: Jf.field.B_vjp(host_array(dJ_dB))
-        )
-    timings = {
-        "field_B_for_J_s": field_B_for_J_s,
-        "integral_only_s": integral_only_s,
-        "field_B_for_dJ_s": field_B_for_dJ_s,
-        "integral_value_grad_s": integral_value_grad_s,
-        "field_B_vjp_s": field_B_vjp_s,
-    }
-    total_s, dominant = build_stage2_profile_breakdown(timings)
-    return (
-        timings,
-        total_s,
-        dominant,
-        field_B_vjp_component_timings,
-        dominant_field_B_vjp_components,
-        dominant_field_B_vjp_coils,
-    )
+    del Jf
+    return {}, 0.0, [], {}, [], []
 
 
 @dataclass(frozen=True)

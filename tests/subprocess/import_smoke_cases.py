@@ -1175,6 +1175,15 @@ def case_transfer_guard_disallow_allows_squaredfluxjax_construction() -> None:
         objective = SquaredFluxJAX(surf, BiotSavartJAX(coils))
         assert objective._flux_spec.normal.shape == (8, 8, 3)
 
+    curve_mixed = CurveXYZFourier(12, 1)
+    curve_mixed.x = np.array([1.1, -0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.08])
+    mixed_coils = [Coil(curve, Current(1.0)), Coil(curve_mixed, Current(0.5))]
+    mixed_objective = SquaredFluxJAX(
+        surfaces[0],
+        BiotSavartJAX(mixed_coils),
+    )
+    assert np.isfinite(mixed_objective.J())
+
 
 def case_transfer_guard_disallow_rejects_clamped_xyztensor_surface_spec() -> None:
     import numpy as np
@@ -1344,7 +1353,6 @@ def case_import_jax_core_specs() -> None:
         CurveRZFourierSpec,
         CurveXYZFourierSpec,
         FieldEvalSpec,
-        FixedSurfaceGeometrySpec,
         FrameRotationSpec,
         GroupedCoilSetSpec,
         FixedSurfaceFluxSpec,
@@ -1373,7 +1381,6 @@ def case_import_jax_core_specs() -> None:
     assert CurveRZFourierSpec is not None
     assert CurveXYZFourierSpec is not None
     assert FieldEvalSpec is not None
-    assert FixedSurfaceGeometrySpec is not None
     assert FrameRotationSpec is not None
     assert GroupedCoilSetSpec is not None
     assert FixedSurfaceFluxSpec is not None
@@ -1405,7 +1412,6 @@ def case_jax_core_specs_are_pytrees() -> None:
         CurveRZFourierSpec,
         CurveXYZFourierSpec,
         FieldEvalSpec,
-        FixedSurfaceGeometrySpec,
         FrameRotationSpec,
         FixedSurfaceFluxSpec,
         GroupedCoilSetSpec,
@@ -1440,7 +1446,6 @@ def case_jax_core_specs_are_pytrees() -> None:
         make_curve_xyzfourier_spec,
         make_field_eval_spec,
         make_frame_rotation_spec,
-        make_fixed_surface_geometry_spec,
         make_grouped_coil_set_spec,
         make_optimizable_dof_map_spec,
         make_surface_rzfourier_spec,
@@ -1558,10 +1563,6 @@ def case_jax_core_specs_are_pytrees() -> None:
     )
     current_spec = make_current_value_spec(2.0)
     field_eval_spec = make_field_eval_spec(jnp.zeros((4, 3)))
-    fixed_geometry_spec = make_fixed_surface_geometry_spec(
-        gamma=jnp.zeros((2, 2, 3)),
-        normal=jnp.ones((2, 2, 3)),
-    )
     coil_value_spec = make_coil_spec(
         curve=curve_xyz_spec,
         current=current_spec,
@@ -1632,7 +1633,6 @@ def case_jax_core_specs_are_pytrees() -> None:
     assert isinstance(curve_rz_spec, CurveRZFourierSpec)
     assert isinstance(curve_xyz_spec, CurveXYZFourierSpec)
     assert isinstance(field_eval_spec, FieldEvalSpec)
-    assert isinstance(fixed_geometry_spec, FixedSurfaceGeometrySpec)
     assert isinstance(frame_rotation_spec, FrameRotationSpec)
     assert isinstance(coil_spec, GroupedCoilSetSpec)
     assert isinstance(flux_spec, FixedSurfaceFluxSpec)
@@ -1641,7 +1641,6 @@ def case_jax_core_specs_are_pytrees() -> None:
     assert isinstance(surface_xyz_spec, SurfaceXYZFourierSpec)
     assert isinstance(surface_xyztensor_spec, SurfaceXYZTensorFourierSpec)
     assert isinstance(zero_rotation_spec, ZeroRotationSpec)
-    assert surface_spec_kind(fixed_geometry_spec) == "fixed_geometry"
     assert surface_spec_kind(surface_spec) == "rz_fourier"
     assert surface_spec_kind(surface_xyz_spec) == "xyz_fourier"
     assert surface_spec_kind(surface_xyztensor_spec) == "xyz_tensor_fourier"
@@ -1656,7 +1655,6 @@ def case_jax_core_specs_are_pytrees() -> None:
     coil_symmetry_leaves, _ = jax.tree_util.tree_flatten(coil_symmetry_spec)
     current_leaves, _ = jax.tree_util.tree_flatten(current_spec)
     field_eval_leaves, _ = jax.tree_util.tree_flatten(field_eval_spec)
-    fixed_geometry_leaves, _ = jax.tree_util.tree_flatten(fixed_geometry_spec)
     coil_value_leaves, _ = jax.tree_util.tree_flatten(coil_value_spec)
     coil_leaves, _ = jax.tree_util.tree_flatten(coil_spec)
     flux_leaves, _ = jax.tree_util.tree_flatten(flux_spec)
@@ -1688,7 +1686,6 @@ def case_jax_core_specs_are_pytrees() -> None:
     assert len(coil_symmetry_leaves) == 1
     assert len(current_leaves) == 1
     assert len(field_eval_leaves) == 1
-    assert len(fixed_geometry_leaves) == 2
     assert len(frame_rotation_leaves) == 2
     assert len(coil_value_leaves) == 4
     assert len(coil_leaves) == 3

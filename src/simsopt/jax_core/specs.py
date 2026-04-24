@@ -300,21 +300,6 @@ jax.tree_util.register_dataclass(
 
 
 @dataclass(frozen=True)
-class FixedSurfaceGeometrySpec:
-    """Immutable fixed-surface point/normal payload."""
-
-    gamma: jax.Array
-    normal: jax.Array
-
-
-jax.tree_util.register_dataclass(
-    FixedSurfaceGeometrySpec,
-    data_fields=["gamma", "normal"],
-    meta_fields=[],
-)
-
-
-@dataclass(frozen=True)
 class SurfaceRZFourierSpec:
     """Immutable fixed-surface payload for pure JAX SurfaceRZFourier geometry."""
 
@@ -394,14 +379,12 @@ jax.tree_util.register_dataclass(
 
 
 SurfaceSpec = Union[
-    FixedSurfaceGeometrySpec,
     SurfaceRZFourierSpec,
     SurfaceXYZFourierSpec,
     SurfaceXYZTensorFourierSpec,
 ]
 
 SurfaceSpecKind = Literal[
-    "fixed_geometry",
     "rz_fourier",
     "xyz_fourier",
     "xyz_tensor_fourier",
@@ -410,8 +393,6 @@ SurfaceSpecKind = Literal[
 
 def surface_spec_kind(spec: SurfaceSpec) -> SurfaceSpecKind:
     """Return the closed discriminant for a surface spec variant."""
-    if isinstance(spec, FixedSurfaceGeometrySpec):
-        return "fixed_geometry"
     if isinstance(spec, SurfaceRZFourierSpec):
         return "rz_fourier"
     if isinstance(spec, SurfaceXYZFourierSpec):
@@ -851,17 +832,6 @@ def make_fixed_surface_flux_spec(
     )
 
 
-def make_fixed_surface_geometry_spec(
-    *,
-    gamma: object,
-    normal: object,
-) -> FixedSurfaceGeometrySpec:
-    return FixedSurfaceGeometrySpec(
-        gamma=_as_float64_array(gamma),
-        normal=_as_float64_array(normal),
-    )
-
-
 def make_surface_rzfourier_spec(
     *,
     rc: object,
@@ -917,9 +887,8 @@ def _surface_rz_fourier_gather_modes(
     positions: np.ndarray,
     flat_size: int,
 ) -> jax.Array:
-    return jnp.reshape(_as_float64_array(coeffs), (flat_size,))[
-        _as_int32_array(positions)
-    ]
+    coeff_vector = jnp.reshape(_as_float64_array(coeffs), (flat_size,))
+    return jnp.take(coeff_vector, _as_int32_array(positions), axis=0)
 
 
 def surface_rz_fourier_dofs_from_spec(spec: SurfaceRZFourierSpec) -> jax.Array:

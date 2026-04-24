@@ -21,7 +21,6 @@ from simsopt.jax_core import (
     make_curve_xyzfourier_spec,
     make_field_eval_spec,
     make_frame_rotation_spec,
-    make_fixed_surface_geometry_spec,
     make_fixed_surface_flux_spec,
     make_grouped_coil_set_spec,
     make_optimizable_dof_map_spec,
@@ -34,7 +33,6 @@ from simsopt.jax_core import (
     surface_xyz_tensor_fourier_gamma_from_spec,
     surface_xyz_tensor_fourier_normal_from_spec,
 )
-from simsopt.jax_core.objectives_flux import fixed_surface_geometry_from_spec
 
 
 jax.config.update("jax_enable_x64", True)
@@ -210,29 +208,13 @@ def test_curve_spec_kind_rejects_unrelated_same_name_lookalike():
 
 
 def test_surface_spec_kind_covers_supported_fixed_surface_variants():
-    fixed_geometry_spec = make_fixed_surface_geometry_spec(
-        gamma=np.zeros((4, 5, 3), dtype=np.float64),
-        normal=np.ones((4, 5, 3), dtype=np.float64),
-    )
     rz_spec = _make_surface_spec()
     xyz_spec = _make_surface_xyz_spec()
     xyztensor_spec = _make_surface_xyztensor_spec()
 
-    assert surface_spec_kind(fixed_geometry_spec) == "fixed_geometry"
     assert surface_spec_kind(rz_spec) == "rz_fourier"
     assert surface_spec_kind(xyz_spec) == "xyz_fourier"
     assert surface_spec_kind(xyztensor_spec) == "xyz_tensor_fourier"
-
-
-def test_fixed_surface_geometry_spec_round_trips_geometry_payload():
-    gamma = np.arange(24, dtype=np.float64).reshape((4, 2, 3))
-    normal = np.ones((4, 2, 3), dtype=np.float64)
-    spec = make_fixed_surface_geometry_spec(gamma=gamma, normal=normal)
-
-    actual_gamma, actual_normal = fixed_surface_geometry_from_spec(spec)
-
-    np.testing.assert_array_equal(actual_gamma, gamma)
-    np.testing.assert_array_equal(actual_normal, normal)
 
 
 def test_apply_coil_symmetry_rotates_geometry_and_scales_current():

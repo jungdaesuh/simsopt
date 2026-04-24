@@ -7,8 +7,11 @@ import jax.numpy as jnp
 import numpy as np
 
 from ._device_scalars import device_one, float_scalar, two_pi
-from .specs import make_surface_rzfourier_spec
-from .specs import SurfaceRZFourierSpec
+from .specs import (
+    SurfaceRZFourierSpec,
+    make_surface_rzfourier_spec,
+    surface_rz_fourier_dofs_from_spec as _surface_rz_fourier_dofs_from_spec,
+)
 
 
 def _as_jax_float64(value) -> jax.Array:
@@ -227,27 +230,7 @@ def _coefficients_from_dofs(
 
 
 def surface_rz_fourier_dofs_from_spec(spec: SurfaceRZFourierSpec) -> jax.Array:
-    include_positions = _block_mode_positions(
-        mpol=spec.mpol,
-        ntor=spec.ntor,
-        include_zero_mode=True,
-    )
-    exclude_positions = _block_mode_positions(
-        mpol=spec.mpol,
-        ntor=spec.ntor,
-        include_zero_mode=False,
-    )
-    flat_size = int((spec.mpol + 1) * (2 * spec.ntor + 1))
-    include_selector = _gather_matrix(include_positions, flat_size)
-    exclude_selector = _gather_matrix(exclude_positions, flat_size)
-    rc = include_selector @ jnp.reshape(_as_jax_float64(spec.rc), (flat_size,))
-    if spec.stellsym:
-        zs = exclude_selector @ jnp.reshape(_as_jax_float64(spec.zs), (flat_size,))
-        return jnp.concatenate((rc, zs))
-    rs = exclude_selector @ jnp.reshape(_as_jax_float64(spec.rs), (flat_size,))
-    zc = include_selector @ jnp.reshape(_as_jax_float64(spec.zc), (flat_size,))
-    zs = exclude_selector @ jnp.reshape(_as_jax_float64(spec.zs), (flat_size,))
-    return jnp.concatenate((rc, rs, zc, zs))
+    return _surface_rz_fourier_dofs_from_spec(spec)
 
 
 def surface_rz_fourier_spec_from_dofs(
