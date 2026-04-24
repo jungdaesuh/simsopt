@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import sys
+from typing import Sequence
+
+
+def _load_config(script_path: Path) -> dict[str, object]:
+    config_path = script_path.resolve().parents[1] / "fake_proof_config.json"
+    return json.loads(config_path.read_text(encoding="utf-8"))
+
+
+def _output_json_path(argv: Sequence[str]) -> Path:
+    for index, token in enumerate(argv):
+        if token == "--output-json":
+            return Path(argv[index + 1])
+    raise SystemExit("missing --output-json")
+
+
+def _append_call_record(
+    config: dict[str, object],
+    argv: Sequence[str],
+    output_json: Path,
+) -> None:
+    call_log = Path(str(config["call_log"]))
+    call_log.parent.mkdir(parents=True, exist_ok=True)
+    with call_log.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "argv": list(argv),
+                    "output_json": str(output_json),
+                    "ld_library_path": os.environ.get("LD_LIBRARY_PATH"),
+                    "cuda_library_mode": os.environ.get(
+                        "SIMSOPT_JAX_CUDA_LIBRARY_MODE"
+                    ),
+                }
+            )
+            + "\n"
+        )
+
+
+def _write_payload(output_json: Path, *, elapsed_s: float) -> None:
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    output_json.write_text(
+        json.dumps({"passed": True, "elapsed_s": elapsed_s, "failures": []}),
+        encoding="utf-8",
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    script_path = Path(__file__)
+    args = list(sys.argv[1:] if argv is None else argv)
+    output_json = _output_json_path(args)
+    config = _load_config(script_path)
+    _append_call_record(config, args, output_json)
+
+    is_stage2 = script_path.name == "stage2_e2e_comparison.py"
+    if is_stage2 and output_json.name == "stage2_warm.json":
+        stage2_warm_mode = str(config["stage2_warm_mode"])
+        if stage2_warm_mode == "missing":
+            return 3
+        if stage2_warm_mode == "corrupt":
+            output_json.parent.mkdir(parents=True, exist_ok=True)
+            output_json.write_text("{bad json", encoding="utf-8")
+            return 3
+
+    _write_payload(output_json, elapsed_s=1.0 if is_stage2 else 2.0)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -7,7 +7,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import textwrap
 
 import pytest
 
@@ -25,11 +24,19 @@ LADDER_CONTRACT = REPO_ROOT / "benchmarks" / "validation_ladder_contract.py"
 LAUNCHER_SCRIPT = (
     REPO_ROOT / "benchmarks" / "hf_jobs" / "launch_production_gpu_proof.py"
 )
+FAKE_PROOF_SCRIPT = (
+    REPO_ROOT / "tests" / "subprocess" / "hf_production_gpu_fake_runner.py"
+)
 
 
 def _write_executable(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def _copy_executable(source: Path, target: Path) -> None:
+    shutil.copy2(source, target)
+    target.chmod(target.stat().st_mode | stat.S_IXUSR)
 
 
 def _read_call_records(call_log: Path) -> list[dict[str, object]]:
@@ -52,87 +59,19 @@ def _build_fake_proof_repo(
     shutil.copy2(RUNNER_SCRIPT, hf_jobs_dir / "run_production_gpu_proof.sh")
     shutil.copy2(LADDER_CONTRACT, benchmarks_dir / "validation_ladder_contract.py")
     call_log = repo_root / "call_log.jsonl"
-    stage2_script = textwrap.dedent(
-        f"""\
-        #!/usr/bin/env python3
-        import json
-        import sys
-        from pathlib import Path
-
-        argv = sys.argv[1:]
-        output_json = None
-        for index, token in enumerate(argv):
-            if token == "--output-json":
-                output_json = Path(argv[index + 1])
-                break
-        if output_json is None:
-            raise SystemExit("missing --output-json")
-        call_log = Path({str(call_log)!r})
-        call_log.parent.mkdir(parents=True, exist_ok=True)
-        with call_log.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {{
-                        "argv": argv,
-                        "output_json": str(output_json),
-                        "ld_library_path": __import__("os").environ.get("LD_LIBRARY_PATH"),
-                        "cuda_library_mode": __import__("os").environ.get("SIMSOPT_JAX_CUDA_LIBRARY_MODE"),
-                    }}
-                )
-                + "\\n"
-            )
-        if output_json.name == "stage2_warm.json":
-            if {stage2_warm_mode!r} == "missing":
-                raise SystemExit(3)
-            if {stage2_warm_mode!r} == "corrupt":
-                output_json.parent.mkdir(parents=True, exist_ok=True)
-                output_json.write_text("{{bad json", encoding="utf-8")
-                raise SystemExit(3)
-        output_json.parent.mkdir(parents=True, exist_ok=True)
-        output_json.write_text(
-            json.dumps({{"passed": True, "elapsed_s": 1.0, "failures": []}}),
-            encoding="utf-8",
-        )
-        """
+    (repo_root / "fake_proof_config.json").write_text(
+        json.dumps(
+            {
+                "call_log": str(call_log),
+                "stage2_warm_mode": stage2_warm_mode,
+            }
+        ),
+        encoding="utf-8",
     )
-    single_stage_script = textwrap.dedent(
-        f"""\
-        #!/usr/bin/env python3
-        import json
-        import sys
-        from pathlib import Path
-
-        argv = sys.argv[1:]
-        output_json = None
-        for index, token in enumerate(argv):
-            if token == "--output-json":
-                output_json = Path(argv[index + 1])
-                break
-        if output_json is None:
-            raise SystemExit("missing --output-json")
-        call_log = Path({str(call_log)!r})
-        with call_log.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {{
-                        "argv": argv,
-                        "output_json": str(output_json),
-                        "ld_library_path": __import__("os").environ.get("LD_LIBRARY_PATH"),
-                        "cuda_library_mode": __import__("os").environ.get("SIMSOPT_JAX_CUDA_LIBRARY_MODE"),
-                    }}
-                )
-                + "\\n"
-            )
-        output_json.parent.mkdir(parents=True, exist_ok=True)
-        output_json.write_text(
-            json.dumps({{"passed": True, "elapsed_s": 2.0, "failures": []}}),
-            encoding="utf-8",
-        )
-        """
-    )
-    _write_executable(benchmarks_dir / "stage2_e2e_comparison.py", stage2_script)
-    _write_executable(
-        benchmarks_dir / "single_stage_init_parity.py", single_stage_script
+    _copy_executable(FAKE_PROOF_SCRIPT, benchmarks_dir / "stage2_e2e_comparison.py")
+    _copy_executable(
+        FAKE_PROOF_SCRIPT,
+        benchmarks_dir / "single_stage_init_parity.py",
     )
     return repo_root, call_log
 
