@@ -29,7 +29,10 @@ from benchmarks.adjoint_fd_validation import (
 )
 import benchmarks.adjoint_fd_validation as adjoint_fd_validation_module
 import benchmarks.adjoint_probe_common as adjoint_probe_common
-from benchmarks.adjoint_probe_common import compute_derivative_l2_metrics
+from benchmarks.adjoint_probe_common import (
+    compute_derivative_l2_metrics,
+    compute_gradient_l2_metrics,
+)
 from benchmarks.single_stage_backend_routing import (
     resolve_boozer_least_squares_algorithm,
     resolve_boozer_optimizer_backend,
@@ -2578,7 +2581,7 @@ def _complete_grouped_adjoint_snapshots():
         _grouped_adjoint_snapshot("before_grouped_adjoint_vjp", 6.0),
         _grouped_adjoint_snapshot("after_grouped_adjoint_vjp_first_group", 6.25),
         _grouped_adjoint_snapshot("after_grouped_adjoint_vjp_end", 6.5),
-        _grouped_adjoint_snapshot("after_derivative_projection", 6.75),
+        _grouped_adjoint_snapshot("after_dofs_gradient_projection", 6.75),
         _grouped_adjoint_snapshot("after_norm_metrics", 7.0),
     ]
 
@@ -2798,34 +2801,24 @@ def test_compute_adjoint_state_raises_when_runtime_operator_solve_fails():
         adjoint_probe_common.compute_adjoint_state(jr_jax)
 
 
-def test_accumulate_grouped_adjoint_derivative_uses_biotsavart_projection_api(
-    monkeypatch,
-):
+def test_accumulate_grouped_adjoint_dofs_gradient_uses_biotsavart_projection_api():
     recorded = {}
 
-    class FakeDerivative:
-        def __init__(self, blocks):
-            self.blocks = tuple(blocks)
-
-        def __iadd__(self, other):
-            self.blocks = self.blocks + other.blocks
-            return self
-
-    def fake_projection(d_coil_arrays, coil_indices):
+    def fake_projection(d_coil_arrays, coil_indices, *, coil_dofs):
         recorded.setdefault("projection_args", []).append((d_coil_arrays, coil_indices))
-        blocks = ((tuple(map(tuple, d_coil_arrays)), tuple(map(tuple, coil_indices))),)
-        return FakeDerivative(blocks)
+        projection_index = len(recorded["projection_args"])
+        return np.asarray(coil_dofs, dtype=float) + float(projection_index)
 
-    bs_jax = types.SimpleNamespace(coil_cotangents_to_derivative=fake_projection)
+    bs_jax = types.SimpleNamespace(
+        x=np.array([3.0, 4.0]),
+        coil_cotangents_to_dofs_gradient=fake_projection,
+    )
     grouped = [
         (np.array([[1.0, 2.0, 3.0]]), [0, 2]),
         (np.array([[4.0, 5.0, 6.0]]), [1]),
     ]
 
-    from simsopt._core import derivative as derivative_module
-
-    monkeypatch.setattr(derivative_module, "Derivative", FakeDerivative)
-    derivative = adjoint_probe_common.accumulate_grouped_adjoint_derivative(
+    gradient = adjoint_probe_common.accumulate_grouped_adjoint_dofs_gradient(
         bs_jax,
         iter(grouped),
     )
@@ -2835,7 +2828,14 @@ def test_accumulate_grouped_adjoint_derivative_uses_biotsavart_projection_api(
     assert recorded["projection_args"][0][1] == [[0, 2]]
     np.testing.assert_allclose(recorded["projection_args"][1][0][0], grouped[1][0])
     assert recorded["projection_args"][1][1] == [[1]]
-    assert len(derivative.blocks) == 2
+    np.testing.assert_allclose(np.asarray(gradient), np.array([9.0, 11.0]))
+
+
+def test_compute_gradient_l2_metrics_matches_flat_gradient_norm():
+    norm, finite = compute_gradient_l2_metrics(np.array([3.0, 4.0]))
+
+    assert norm == pytest.approx(5.0)
+    assert finite is True
 
 
 def test_grouped_vjp_timing_recorder_streams_without_materializing_all_groups():
@@ -2862,7 +2862,7 @@ def test_grouped_vjp_timing_recorder_streams_without_materializing_all_groups():
     first_stream = recorder.timed_cotangents(
         jr_jax,
         np.ones(2),
-        label="production_derivative_projection",
+        label="production_dofs_gradient_projection",
     )
 
     first_entry = next(first_stream)
@@ -2889,12 +2889,7 @@ def test_compute_direct_and_total_gradients_uses_live_boozer_g(monkeypatch):
     implicit_correction = np.array([2.0, 2.0])
     recorded = {}
 
-    class FakeDerivative:
-        def __call__(self, _optim):
-            return direct_gradient
-
-    def fake_value_and_direct_coil_derivative(
-        biotsavart,
+    def fake_value_and_direct_coil_gradient(
         objective_value_and_grad,
         coil_dofs,
         x_inner,
@@ -2902,14 +2897,13 @@ def test_compute_direct_and_total_gradients_uses_live_boozer_g(monkeypatch):
         weight_inv_modB,
     ):
         recorded["value_and_direct_args"] = (
-            biotsavart,
             objective_value_and_grad,
             coil_dofs.copy(),
             x_inner.copy(),
             optimize_G,
             weight_inv_modB,
         )
-        return 0.0, FakeDerivative()
+        return 0.0, direct_gradient
 
     booz_jax = types.SimpleNamespace(
         res={"iota": 0.1, "G": 0.2, "weight_inv_modB": False},
@@ -2930,8 +2924,8 @@ def test_compute_direct_and_total_gradients_uses_live_boozer_g(monkeypatch):
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_value_and_direct_coil_derivative",
-        fake_value_and_direct_coil_derivative,
+        "_value_and_direct_coil_gradient",
+        fake_value_and_direct_coil_gradient,
     )
     direct, total, recomposed_rel = compute_direct_and_total_gradients(
         jr_jax,
@@ -2946,14 +2940,12 @@ def test_compute_direct_and_total_gradients_uses_live_boozer_g(monkeypatch):
     assert G == 0.2
     np.testing.assert_allclose(sdofs, np.array([0.3, 0.4]))
     (
-        called_bs_jax,
         objective_value_and_grad,
         coil_dofs,
         x_inner,
         optimize_G,
         weight_inv_modB,
     ) = recorded["value_and_direct_args"]
-    assert called_bs_jax is bs_jax
     assert objective_value_and_grad is jr_jax._direct_objective_value_and_grad
     np.testing.assert_allclose(coil_dofs, np.array([9.0, 8.0]))
     np.testing.assert_allclose(x_inner, np.array([1.0, 2.0, 3.0]))

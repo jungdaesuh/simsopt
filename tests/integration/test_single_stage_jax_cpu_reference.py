@@ -2319,7 +2319,6 @@ class TestBoozerResidualValue:
         monkeypatch,
     ):
         """BoozerResidualJAX value must use the CPU-parity residual helper."""
-        from simsopt._core.derivative import Derivative
         import simsopt.geo.surfaceobjectives_jax as soj
 
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
@@ -2343,7 +2342,7 @@ class TestBoozerResidualValue:
         monkeypatch.setattr(soj, "_ensure_solved", lambda _booz: None)
         monkeypatch.setattr(
             soj,
-            "_value_and_direct_coil_derivative",
+            "_value_and_direct_coil_gradient",
             lambda *args, **kwargs: raise_unexpected_call(
                 "BoozerResidualJAX.J() must not request the direct coil gradient"
             ),
@@ -2352,7 +2351,11 @@ class TestBoozerResidualValue:
             soj, "_solve_boozer_adjoint", lambda booz_surf, dJ_ds: dJ_ds
         )
         monkeypatch.setattr(
-            soj, "_adjoint_coil_derivative", lambda *args, **kwargs: Derivative({})
+            soj,
+            "_adjoint_coil_dofs_gradient",
+            lambda *args, **kwargs: raise_unexpected_call(
+                "BoozerResidualJAX.J() must not request the adjoint coil gradient"
+            ),
         )
         monkeypatch.setattr(
             soj,
@@ -3872,7 +3875,6 @@ class TestNonQSRatioValue:
 
     def test_threads_surface_kind_into_qs_ratio(self, boozer_setup, monkeypatch):
         """The QS-ratio wrapper must pass the active surface geometry contract through."""
-        from simsopt._core.derivative import Derivative
         import simsopt.geo.surfaceobjectives_jax as soj
 
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
@@ -3889,7 +3891,9 @@ class TestNonQSRatioValue:
             soj, "_solve_boozer_adjoint", lambda booz_surf, dJ_ds: dJ_ds
         )
         monkeypatch.setattr(
-            soj, "_adjoint_coil_derivative", lambda *args, **kwargs: Derivative({})
+            soj,
+            "_adjoint_coil_dofs_gradient",
+            lambda *args, **kwargs: np.zeros_like(bs_jax.x),
         )
 
         value = NonQuasiSymmetricRatioJAX(booz_jax, bs_jax, sDIM=6).J()
@@ -4022,6 +4026,12 @@ class TestCompositeObjective:
                 "BoozerResidualJAX should not call B_vjp() on the spec path"
             )
 
+        def _reject_public_projection(*_args, **_kwargs):
+            raise AssertionError(
+                "BoozerResidualJAX should keep adjoint cotangents native until "
+                "the final Derivative boundary"
+            )
+
         monkeypatch.setattr(
             bs_jax,
             "coil_set_spec_from_dofs",
@@ -4029,6 +4039,11 @@ class TestCompositeObjective:
         )
         monkeypatch.setattr(bs_jax, "set_points", _reject_set_points)
         monkeypatch.setattr(bs_jax, "B_vjp", _reject_B_vjp)
+        monkeypatch.setattr(
+            bs_jax,
+            "coil_cotangents_to_derivative",
+            _reject_public_projection,
+        )
 
         jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
         gradient = np.array(jr_jax.dJ())
@@ -5841,10 +5856,10 @@ class TestBoozerResidualAdjointFD:
         correctness regardless of the fraction.
         """
         from simsopt.geo.surfaceobjectives_jax import (
-            _adjoint_coil_derivative,
+            _adjoint_coil_dofs_gradient,
             _current_coil_dofs_and_spec,
             _solve_boozer_adjoint,
-            _value_and_direct_coil_derivative,
+            _value_and_direct_coil_gradient,
         )
 
         bs_jax, booz_jax, base_state = _make_real_resolve_fd_setup()
@@ -5860,8 +5875,7 @@ class TestBoozerResidualAdjointFD:
             iota, G, sdofs=booz_surf._get_surface_dofs()
         )
         current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(jr.biotsavart)
-        _, direct_deriv = _value_and_direct_coil_derivative(
-            jr.biotsavart,
+        _, direct_gradient = _value_and_direct_coil_gradient(
             jr._direct_objective_value_and_grad,
             current_coil_dofs,
             x_inner,
@@ -5871,14 +5885,15 @@ class TestBoozerResidualAdjointFD:
         dJ_ds = jr._compute_dJ_ds(coil_set_spec, iota, G, weight_inv_modB)
         adjoint_state = booz_surf.get_adjoint_runtime_state()
         adj = _solve_boozer_adjoint(adjoint_state, dJ_ds)
-        adj_deriv = _adjoint_coil_derivative(
+        adjoint_gradient = _adjoint_coil_dofs_gradient(
             adjoint_state.stream_group_vjps,
             adj,
             jr.biotsavart,
+            current_coil_dofs,
         )
 
-        direct_norm = np.linalg.norm(np.asarray(direct_deriv(jr.biotsavart)))
-        adj_norm = np.linalg.norm(np.asarray(adj_deriv(jr.biotsavart)))
+        direct_norm = np.linalg.norm(np.asarray(direct_gradient))
+        adj_norm = np.linalg.norm(np.asarray(adjoint_gradient))
         total_norm = np.linalg.norm(np.asarray(jr.dJ()))
         adjoint_fraction = adj_norm / (direct_norm + 1e-30)
 

@@ -21,9 +21,9 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
 from benchmarks.adjoint_probe_common import (
-    accumulate_grouped_adjoint_derivative,
+    accumulate_grouped_adjoint_dofs_gradient,
     compute_adjoint_state,
-    compute_derivative_l2_metrics,
+    compute_gradient_l2_metrics,
     iter_grouped_adjoint_cotangents,
 )
 from benchmarks.single_stage_backend_routing import (
@@ -188,7 +188,7 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help=(
             "Total streamed grouped-VJP timing passes to record. The first "
-            "pass is the production derivative projection; later passes are "
+            "pass is the production DOF-gradient projection; later passes are "
             "warm streaming-only cache-stability probes."
         ),
     )
@@ -716,7 +716,7 @@ def _representative_run_wall_s(
         next(
             snapshot["elapsed_s"]
             for snapshot in reversed(snapshots)
-            if snapshot["label"] == "after_derivative_projection"
+            if snapshot["label"] == "after_dofs_gradient_projection"
         )
     )
 
@@ -746,7 +746,7 @@ def evaluate_grouped_adjoint_memory_probe(
         "before_grouped_adjoint_vjp",
         "after_grouped_adjoint_vjp_first_group",
         "after_grouped_adjoint_vjp_end",
-        "after_derivative_projection",
+        "after_dofs_gradient_projection",
         "after_norm_metrics",
     }
     labels = {str(snapshot.get("label")) for snapshot in snapshots}
@@ -915,9 +915,9 @@ def main() -> None:
         grouped_cotangents = grouped_vjp_timing_recorder.timed_cotangents(
             jr_jax,
             adjoint,
-            label="production_derivative_projection",
+            label="production_dofs_gradient_projection",
         )
-        implicit_derivative = accumulate_grouped_adjoint_derivative(
+        implicit_gradient = accumulate_grouped_adjoint_dofs_gradient(
             fixture["bs"],
             grouped_cotangents,
             on_stage=capture_snapshot,
@@ -936,8 +936,8 @@ def main() -> None:
                 )
             )
 
-    implicit_gradient_norm, implicit_gradient_finite = compute_derivative_l2_metrics(
-        implicit_derivative, fixture["bs"]
+    implicit_gradient_norm, implicit_gradient_finite = compute_gradient_l2_metrics(
+        implicit_gradient
     )
     capture_snapshot("after_norm_metrics")
     total_representative_run_wall_s = _representative_run_wall_s(snapshots)

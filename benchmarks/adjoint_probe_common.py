@@ -46,28 +46,32 @@ def compute_adjoint_state(jr_jax) -> tuple[np.ndarray, float]:
     return adj, rel
 
 
-def accumulate_grouped_adjoint_derivative(
+def accumulate_grouped_adjoint_dofs_gradient(
     bs_jax,
     grouped_adj_cotangents,
     *,
+    coil_dofs=None,
     on_stage=None,
 ):
-    """Project grouped adjoint cotangents incrementally to a coil ``Derivative``."""
-    from simsopt._core.derivative import Derivative
+    """Project grouped adjoint cotangents incrementally to flat coil DOFs."""
+    import jax.numpy as jnp
 
     def emit(label: str, *, group_count: int) -> None:
         if on_stage is not None:
             on_stage(label, group_count=group_count)
 
-    total_derivative = Derivative({})
+    if coil_dofs is None:
+        coil_dofs = bs_jax.x.copy()
+    coil_dofs = jnp.asarray(coil_dofs)
+    total_gradient = jnp.zeros_like(coil_dofs)
     grouped_iter = iter(grouped_adj_cotangents)
     emit("before_grouped_adjoint_vjp", group_count=0)
     try:
         current_entry = next(grouped_iter)
     except StopIteration:
         emit("after_grouped_adjoint_vjp_end", group_count=0)
-        emit("after_derivative_projection", group_count=0)
-        return total_derivative
+        emit("after_dofs_gradient_projection", group_count=0)
+        return total_gradient
 
     group_count = 0
     emit("after_grouped_adjoint_vjp_first_group", group_count=1)
@@ -79,15 +83,28 @@ def accumulate_grouped_adjoint_derivative(
             next_entry = None
 
         d_coil_array, coil_group_indices = current_entry
-        total_derivative += bs_jax.coil_cotangents_to_derivative(
+        total_gradient = total_gradient + bs_jax.coil_cotangents_to_dofs_gradient(
             [d_coil_array],
             [coil_group_indices],
+            coil_dofs=coil_dofs,
         )
         group_count += 1
         if next_entry is None:
-            emit("after_derivative_projection", group_count=group_count)
-            return total_derivative
+            emit("after_dofs_gradient_projection", group_count=group_count)
+            return total_gradient
         current_entry = next_entry
+
+
+def compute_gradient_l2_metrics(gradient) -> tuple[float, bool]:
+    """Compute finite-ness and L2 norm for a flat coil-DOF gradient."""
+    import jax
+    import jax.numpy as jnp
+
+    gradient = jnp.asarray(gradient)
+    return (
+        float(jax.device_get(jnp.linalg.norm(gradient))),
+        bool(jax.device_get(jnp.all(jnp.isfinite(gradient)))),
+    )
 
 
 def compute_derivative_l2_metrics(derivative, optim) -> tuple[float, bool]:
@@ -108,8 +125,10 @@ def compute_derivative_l2_metrics(derivative, optim) -> tuple[float, bool]:
 
 def compute_implicit_gradient_correction(jr_jax, bs_jax, adj: np.ndarray) -> np.ndarray:
     """Project the grouped coil cotangents back to coil DOFs."""
-    adj_deriv = accumulate_grouped_adjoint_derivative(
+    import jax
+
+    adjoint_gradient = accumulate_grouped_adjoint_dofs_gradient(
         bs_jax,
         iter_grouped_adjoint_cotangents(jr_jax, adj),
     )
-    return np.asarray(adj_deriv(bs_jax), dtype=float)
+    return np.asarray(jax.device_get(adjoint_gradient), dtype=float)

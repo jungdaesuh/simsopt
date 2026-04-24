@@ -502,6 +502,37 @@ def _scatter_free_values(template: jax.Array, free_positions, free_values: jax.A
     return template.at[free_positions].set(free_values)
 
 
+def _add_local_cotangent_to_dofs_gradient(
+    dofs_gradient: jax.Array,
+    opt,
+    full_cotangent,
+    dof_indices,
+):
+    if opt.local_dof_size == 0:
+        return dofs_gradient
+    start, end = dof_indices[opt]
+    free_positions = np.flatnonzero(opt.local_dofs_free_status)
+    free_cotangent = _as_jax_float64(full_cotangent)[free_positions]
+    return dofs_gradient.at[int(start) : int(end)].add(free_cotangent)
+
+
+def _add_full_curve_cotangent_to_dofs_gradient(
+    dofs_gradient: jax.Array,
+    curve,
+    full_cotangent,
+    dof_indices,
+):
+    full_cotangent = _as_jax_float64(full_cotangent)
+    for opt, (start, end) in curve._full_dof_indices.items():
+        dofs_gradient = _add_local_cotangent_to_dofs_gradient(
+            dofs_gradient,
+            opt,
+            _slice_1d(full_cotangent, start, end),
+            dof_indices,
+        )
+    return dofs_gradient
+
+
 def _curve_pullback_data_from_spec(curve, dg, dgd):
     spec = curve_spec_from_curve(curve)
     coeff_cotangent, surface_cotangent = curve_pullback_from_dofs(
@@ -1328,6 +1359,94 @@ class BiotSavartJAX(Optimizable):
             self._pullback_to_derivative(b_pullback),
             self._pullback_to_derivative(db_pullback),
         )
+
+    def _add_single_coil_cotangent_to_dofs_gradient(
+        self,
+        dofs_gradient,
+        coil,
+        dg,
+        dgd,
+        dc,
+        coil_dofs,
+    ):
+        curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
+        if not _supports_native_curve_geometry(curve):
+            raise TypeError(
+                "BiotSavartJAX coil cotangent projection requires immutable JAX "
+                f"curve specs; unsupported type {type(curve).__name__}. "
+                "Provide a native curve spec."
+            )
+
+        if rotmat is not None:
+            rotmat_t = _as_jax_float64(rotmat).T
+            dg = _as_jax_float64(dg) @ rotmat_t
+            dgd = _as_jax_float64(dgd) @ rotmat_t
+
+        coeff_cotangent, surface_cotangent = curve_pullback_from_dofs(
+            curve_spec_from_curve(curve),
+            self._curve_dofs_from_free_vector(curve, coil_dofs),
+            dg,
+            dgd,
+        )
+        if _curve_dof_mode(curve) == "full":
+            dofs_gradient = _add_full_curve_cotangent_to_dofs_gradient(
+                dofs_gradient,
+                curve,
+                coeff_cotangent,
+                self.dof_indices,
+            )
+        else:
+            dofs_gradient = _add_local_cotangent_to_dofs_gradient(
+                dofs_gradient,
+                curve,
+                coeff_cotangent,
+                self.dof_indices,
+            )
+            if surface_cotangent is not None and curve.surf in self.dof_indices:
+                dofs_gradient = _add_local_cotangent_to_dofs_gradient(
+                    dofs_gradient,
+                    curve.surf,
+                    surface_cotangent,
+                    self.dof_indices,
+                )
+
+        if current.dof_size > 0:
+            dofs_gradient = _add_local_cotangent_to_dofs_gradient(
+                dofs_gradient,
+                current,
+                jnp.atleast_1d(_as_jax_float64(scale) * _as_jax_float64(dc)),
+                self.dof_indices,
+            )
+        return dofs_gradient
+
+    def coil_cotangents_to_dofs_gradient(
+        self,
+        d_coil_arrays,
+        coil_indices,
+        *,
+        coil_dofs=None,
+    ):
+        """Project grouped coil cotangents to the flat free-DOF gradient."""
+        if coil_dofs is None:
+            coil_dofs = self.x.copy()
+        coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
+        dofs_gradient = jnp.zeros_like(coil_dofs)
+        for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
+            for dg_i, dgd_i, dc_i, global_i in zip(
+                _axis0_entries(d_g),
+                _axis0_entries(d_gd),
+                _axis0_entries(d_c),
+                indices,
+            ):
+                dofs_gradient = self._add_single_coil_cotangent_to_dofs_gradient(
+                    dofs_gradient,
+                    self._coils[global_i],
+                    dg_i,
+                    dgd_i,
+                    dc_i,
+                    coil_dofs,
+                )
+        return dofs_gradient
 
     def coil_cotangents_to_derivative(self, d_coil_arrays, coil_indices):
         """Project grouped coil cotangent arrays to a :class:`Derivative`.

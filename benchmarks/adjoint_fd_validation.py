@@ -192,7 +192,7 @@ def compute_direct_and_total_gradients(
     implicit_correction: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Return the fixed-surface direct term and the full reduced gradient."""
-    from simsopt.geo.surfaceobjectives_jax import _value_and_direct_coil_derivative
+    from simsopt.geo.surfaceobjectives_jax import _value_and_direct_coil_gradient
 
     booz_jax = jr_jax.boozer_surface
     total_gradient = np.asarray(jr_jax.dJ(), dtype=float)
@@ -206,15 +206,14 @@ def compute_direct_and_total_gradients(
         sdofs=surface_dofs,
     )
     coil_dofs = np.asarray(bs_jax.x.copy(), dtype=float)
-    _, direct_derivative = _value_and_direct_coil_derivative(
-        bs_jax,
+    _, direct_gradient = _value_and_direct_coil_gradient(
         jr_jax._direct_objective_value_and_grad,
         coil_dofs,
         x_inner,
         optimize_G,
         weight_inv_modB,
     )
-    direct_gradient = np.asarray(direct_derivative(bs_jax), dtype=float)
+    direct_gradient = np.asarray(jax.device_get(direct_gradient), dtype=float)
     recomposed_total = direct_gradient - implicit_correction
     recomposed_rel = float(
         np.linalg.norm(total_gradient - recomposed_total)

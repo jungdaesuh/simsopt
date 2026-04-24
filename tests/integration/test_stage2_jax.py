@@ -1635,6 +1635,29 @@ class TestBiotSavartJAXParity:
             coils,
         )
 
+    def test_b_pullback_native_projects_to_free_dof_gradient(self, coil_surf_setup):
+        """Native B cotangents can stay in flat BiotSavart free-DOF order."""
+        coils, surf, _, _ = coil_surf_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        v = np.asarray(bs_jax.B())
+        pullback = bs_jax.B_pullback_native(v)
+
+        dof_gradient = bs_jax.coil_cotangents_to_dofs_gradient(
+            pullback.d_coil_arrays,
+            pullback.coil_indices,
+        )
+        public_gradient = bs_jax.B_vjp(v)(bs_jax)
+
+        np.testing.assert_allclose(
+            np.asarray(dof_gradient),
+            np.asarray(public_gradient),
+            rtol=1e-12,
+            atol=1e-14,
+        )
+
     def test_pullback_native_payload_is_jax_pytree(self, coil_surf_setup):
         """Native pullback payloads are pytrees with static coil index metadata."""
         coils, surf, _, _ = coil_surf_setup

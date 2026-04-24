@@ -1419,10 +1419,24 @@ def test_iotas_jax_gradient_path_reads_adjoint_runtime_state(monkeypatch):
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_adjoint_coil_derivative",
-        lambda stream_group_vjps, adjoint, biotsavart: (
+        "_current_coil_dofs",
+        lambda _biotsavart: jnp.asarray([0.0], dtype=jnp.float64),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_adjoint_coil_dofs_gradient",
+        lambda stream_group_vjps, adjoint, biotsavart, coil_dofs: (
             np.testing.assert_allclose(np.asarray(adjoint), np.asarray([2.0, -3.0])),
             list(stream_group_vjps(adjoint)),
+            np.testing.assert_allclose(np.asarray(coil_dofs), np.asarray([0.0])),
+            jnp.asarray([0.0], dtype=jnp.float64),
+        )[-1],
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_coil_dofs_gradient_to_derivative",
+        lambda _biotsavart, gradient: (
+            np.testing.assert_allclose(np.asarray(gradient), np.asarray([0.0])),
             surfaceobjectives_jax_module.Derivative({}),
         )[-1],
     )
@@ -1445,12 +1459,12 @@ def test_iotas_jax_gradient_path_reads_adjoint_runtime_state(monkeypatch):
             solve_transpose=lambda rhs: rhs,
             stream_group_vjps=lambda _adj: iter([("group-cotangent", (0,))]),
         ),
-        biotsavart=None,
+        biotsavart=object(),
     )
 
     obj = object.__new__(surfaceobjectives_jax_module.IotasJAX)
     obj.boozer_surface = fake_booz
-    obj.biotsavart = None
+    obj.biotsavart = fake_booz.biotsavart
     obj._J = None
     obj._dJ = None
     obj.compute(compute_gradient=True)
@@ -1497,11 +1511,21 @@ def test_iotas_jax_exact_well_conditioned_gradient_matches_dense_projection(
 
     monkeypatch.setattr(
         surfaceobjectives_jax_module,
-        "_adjoint_coil_derivative",
-        lambda stream_group_vjps, adjoint, _biotsavart: (
+        "_current_coil_dofs",
+        lambda _biotsavart: jnp.zeros(3, dtype=jnp.float64),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_adjoint_coil_dofs_gradient",
+        lambda stream_group_vjps, adjoint, _biotsavart, _coil_dofs: (
             list(stream_group_vjps(adjoint)),
-            projection @ np.asarray(adjoint),
+            jnp.asarray(projection @ np.asarray(adjoint), dtype=jnp.float64),
         )[-1],
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_coil_dofs_gradient_to_derivative",
+        lambda _biotsavart, gradient: np.asarray(gradient, dtype=float),
     )
     fake_booz = types.SimpleNamespace(
         res={"success": True},
@@ -1513,12 +1537,12 @@ def test_iotas_jax_exact_well_conditioned_gradient_matches_dense_projection(
             weight_inv_modB=True,
         ),
         get_adjoint_runtime_state=lambda: adjoint_state,
-        biotsavart=None,
+        biotsavart=object(),
     )
 
     obj = object.__new__(surfaceobjectives_jax_module.IotasJAX)
     obj.boozer_surface = fake_booz
-    obj.biotsavart = None
+    obj.biotsavart = fake_booz.biotsavart
     obj._J = None
     obj._dJ = None
     obj.compute(compute_gradient=True)

@@ -1124,20 +1124,33 @@ def _coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
 def _adjoint_coil_derivative(stream_group_vjps, adjoint, biotsavart):
     """Project grouped adjoint cotangents to a coil ``Derivative``.
 
-    Uses ``BiotSavartJAX.coil_cotangents_to_derivative()`` for
-    shared coil DOF projection. Supported curves project through immutable
-    JAX specs; unsupported curves are rejected instead of routing through
-    ``Coil.vjp()``.
+    Compatibility wrapper for callers that still need the public
+    ``Derivative`` contract. The projection itself uses the native flat
+    coil-DOF cotangent path.
     """
-    total_derivative = Derivative({})
+    coil_dofs = _current_coil_dofs(biotsavart)
+    coil_gradient = _adjoint_coil_dofs_gradient(
+        stream_group_vjps,
+        adjoint,
+        biotsavart,
+        coil_dofs,
+    )
+    return _coil_dofs_gradient_to_derivative(biotsavart, coil_gradient)
+
+
+def _adjoint_coil_dofs_gradient(stream_group_vjps, adjoint, biotsavart, coil_dofs):
+    """Project streamed adjoint cotangents to flat BiotSavart free-DOF order."""
+    coil_dofs = _as_jax_float64(coil_dofs)
+    total_gradient = jnp.zeros_like(coil_dofs)
     for d_coil_array, coil_group_indices in _iter_adjoint_coil_cotangents(
         stream_group_vjps, adjoint
     ):
-        total_derivative += biotsavart.coil_cotangents_to_derivative(
+        total_gradient = total_gradient + biotsavart.coil_cotangents_to_dofs_gradient(
             [d_coil_array],
             [coil_group_indices],
+            coil_dofs=coil_dofs,
         )
-    return total_derivative
+    return total_gradient
 
 
 def _coil_dofs_gradient_to_derivative(biotsavart, coil_dofs_gradient):
@@ -1322,8 +1335,26 @@ def _evaluate_direct_coil_objective_value(
 
 def _current_coil_dofs_and_spec(biotsavart):
     """Return the current free coil DOFs and their immutable grouped spec."""
-    current_coil_dofs = _as_jax_float64(biotsavart.x.copy())
+    current_coil_dofs = _current_coil_dofs(biotsavart)
     return current_coil_dofs, biotsavart.coil_set_spec_from_dofs(current_coil_dofs)
+
+
+def _current_coil_dofs(biotsavart):
+    return _as_jax_float64(biotsavart.x.copy())
+
+
+def _value_and_direct_coil_gradient(
+    objective_or_value_and_grad,
+    coil_dofs,
+    *objective_args,
+):
+    """Evaluate a cached coil-DOF objective/gradient pair."""
+    objective_value, coil_dofs_gradient = _evaluate_scalar_or_value_and_grad(
+        objective_or_value_and_grad,
+        coil_dofs,
+        *objective_args,
+    )
+    return _host_scalar(objective_value), coil_dofs_gradient
 
 
 def _value_and_direct_coil_derivative(
@@ -1333,16 +1364,15 @@ def _value_and_direct_coil_derivative(
     *objective_args,
 ):
     """Evaluate a cached coil-DOF objective/gradient pair and map its gradient."""
-    objective_value, coil_dofs_gradient = _evaluate_scalar_or_value_and_grad(
+    objective_value, coil_dofs_gradient = _value_and_direct_coil_gradient(
         objective_or_value_and_grad,
         coil_dofs,
         *objective_args,
     )
-    direct_derivative = _coil_dofs_gradient_to_derivative(
+    return objective_value, _coil_dofs_gradient_to_derivative(
         biotsavart,
         coil_dofs_gradient,
     )
-    return _host_scalar(objective_value), direct_derivative
 
 
 def _qs_ratio_from_coil_dofs(sdofs, coil_dofs, biotsavart, **qs_kwargs):
@@ -1659,8 +1689,7 @@ class BoozerResidualJAX(Optimizable):
             return
 
         adjoint_state = _resolved_boozer_adjoint_runtime_state(booz_surf)
-        self._J, dJ_by_dcoils = _value_and_direct_coil_derivative(
-            self.biotsavart,
+        self._J, direct_gradient = _value_and_direct_coil_gradient(
             self._direct_objective_value_and_grad,
             current_coil_dofs,
             *direct_objective_args,
@@ -1668,13 +1697,17 @@ class BoozerResidualJAX(Optimizable):
         dJ_ds = self._compute_dJ_ds(coil_set_spec, iota, G, weight_inv_modB)
         adj = _solve_boozer_adjoint(adjoint_state, dJ_ds)
 
-        adj_derivative = _adjoint_coil_derivative(
+        adjoint_gradient = _adjoint_coil_dofs_gradient(
             adjoint_state.stream_group_vjps,
             adj,
             self.biotsavart,
+            current_coil_dofs,
         )
 
-        self._dJ = dJ_by_dcoils - adj_derivative
+        self._dJ = _coil_dofs_gradient_to_derivative(
+            self.biotsavart,
+            direct_gradient - adjoint_gradient,
+        )
 
     def _compute_dJ_ds(self, coil_set_spec, iota, G, weight_inv_modB):
         """Compute ∂J_BR/∂[surface_dofs, iota, G] via JAX autodiff."""
@@ -1766,14 +1799,19 @@ class IotasJAX(Optimizable):
             dJ_ds = _explicit_cotangent_basis(n, n - 1, dtype=lhs_dtype)
 
         adj = _solve_boozer_adjoint(adjoint_state, dJ_ds)
+        current_coil_dofs = _current_coil_dofs(self.biotsavart)
 
-        adj_derivative = _adjoint_coil_derivative(
+        adjoint_gradient = _adjoint_coil_dofs_gradient(
             adjoint_state.stream_group_vjps,
             adj,
             self.biotsavart,
+            current_coil_dofs,
         )
 
-        self._dJ = -1.0 * adj_derivative
+        self._dJ = _coil_dofs_gradient_to_derivative(
+            self.biotsavart,
+            -adjoint_gradient,
+        )
 
 
 class NonQuasiSymmetricRatioJAX(Optimizable):
@@ -1849,7 +1887,7 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
             )
         )
 
-    def _direct_coil_derivative(self, current_coil_dofs, sdofs):
+    def _direct_coil_gradient(self, current_coil_dofs, sdofs):
         qs_kwargs = self._qs_objective_kwargs()
 
         def J_of_coils(coil_dofs):
@@ -1860,9 +1898,12 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
                 **qs_kwargs,
             )
 
+        return _strict_scalar_grad(J_of_coils, current_coil_dofs)
+
+    def _direct_coil_derivative(self, current_coil_dofs, sdofs):
         return _coil_dofs_gradient_to_derivative(
             self.biotsavart,
-            _strict_scalar_grad(J_of_coils, current_coil_dofs),
+            self._direct_coil_gradient(current_coil_dofs, sdofs),
         )
 
     def _compute_dJ_ds(self, coil_set_spec, sdofs, decision_size):
@@ -1891,7 +1932,7 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
         if not compute_gradient:
             return
         adjoint_state = _resolved_boozer_adjoint_runtime_state(booz_surf)
-        dJ_by_dcoils = self._direct_coil_derivative(current_coil_dofs, sdofs)
+        direct_gradient = self._direct_coil_gradient(current_coil_dofs, sdofs)
         dJ_ds = self._compute_dJ_ds(
             coil_set_spec,
             sdofs,
@@ -1900,13 +1941,17 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
 
         adj = _solve_boozer_adjoint(adjoint_state, dJ_ds)
 
-        adj_derivative = _adjoint_coil_derivative(
+        adjoint_gradient = _adjoint_coil_dofs_gradient(
             adjoint_state.stream_group_vjps,
             adj,
             self.biotsavart,
+            current_coil_dofs,
         )
 
-        self._dJ = dJ_by_dcoils - adj_derivative
+        self._dJ = _coil_dofs_gradient_to_derivative(
+            self.biotsavart,
+            direct_gradient - adjoint_gradient,
+        )
 
 
 def compute_standard_surface_objective_gradients(
@@ -1951,8 +1996,7 @@ def compute_standard_surface_objective_gradients(
         sdofs=sdofs,
     )
     direct_objective_args = (x_inner, optimize_G, weight_inv_modB)
-    residual_value, residual_direct = _value_and_direct_coil_derivative(
-        boozer_residual.biotsavart,
+    residual_value, residual_direct_gradient = _value_and_direct_coil_gradient(
         boozer_residual._direct_objective_value_and_grad,
         current_coil_dofs,
         *direct_objective_args,
@@ -1970,18 +2014,22 @@ def compute_standard_surface_objective_gradients(
     iota_rhs = _explicit_cotangent_basis(n, iota_rhs_index, dtype=lhs_dtype)
 
     non_qs_value = non_qs_ratio._compute_value(sdofs, coil_set_spec)
-    non_qs_direct = non_qs_ratio._direct_coil_derivative(current_coil_dofs, sdofs)
+    non_qs_direct_gradient = non_qs_ratio._direct_coil_gradient(
+        current_coil_dofs,
+        sdofs,
+    )
     non_qs_rhs = non_qs_ratio._compute_dJ_ds(
         coil_set_spec,
         sdofs,
         n,
     )
 
-    def _project_adjoint(adjoint, biotsavart):
-        return _adjoint_coil_derivative(
+    def _project_adjoint_gradient(adjoint, biotsavart):
+        return _adjoint_coil_dofs_gradient(
             adjoint_state.stream_group_vjps,
             adjoint,
             biotsavart,
+            current_coil_dofs,
         )
 
     rhs_batch = jnp.stack((residual_rhs, iota_rhs, non_qs_rhs), axis=0)
@@ -1994,16 +2042,31 @@ def compute_standard_surface_objective_gradients(
         for chunk in jnp.split(adjoint_batch, rhs_batch.shape[0], axis=0)
     )
 
-    residual_adjoint = _project_adjoint(residual_batch, boozer_residual.biotsavart)
-    iota_adjoint = _project_adjoint(iota_batch, iotas.biotsavart)
-    non_qs_adjoint = _project_adjoint(non_qs_batch, non_qs_ratio.biotsavart)
+    residual_adjoint_gradient = _project_adjoint_gradient(
+        residual_batch,
+        boozer_residual.biotsavart,
+    )
+    iota_adjoint_gradient = _project_adjoint_gradient(iota_batch, iotas.biotsavart)
+    non_qs_adjoint_gradient = _project_adjoint_gradient(
+        non_qs_batch,
+        non_qs_ratio.biotsavart,
+    )
 
     boozer_residual._J = residual_value
-    boozer_residual._dJ = residual_direct - residual_adjoint
+    boozer_residual._dJ = _coil_dofs_gradient_to_derivative(
+        boozer_residual.biotsavart,
+        residual_direct_gradient - residual_adjoint_gradient,
+    )
     iotas._J = iota_value
-    iotas._dJ = -1.0 * iota_adjoint
+    iotas._dJ = _coil_dofs_gradient_to_derivative(
+        iotas.biotsavart,
+        -iota_adjoint_gradient,
+    )
     non_qs_ratio._J = non_qs_value
-    non_qs_ratio._dJ = non_qs_direct - non_qs_adjoint
+    non_qs_ratio._dJ = _coil_dofs_gradient_to_derivative(
+        non_qs_ratio.biotsavart,
+        non_qs_direct_gradient - non_qs_adjoint_gradient,
+    )
 
     return boozer_residual.dJ(), iotas.dJ(), non_qs_ratio.dJ()
 
