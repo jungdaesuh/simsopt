@@ -56,15 +56,8 @@ from ..jax_core._math_utils import (
     as_runtime_float64 as _as_runtime_float64,
     concat_jax_float64 as _concat_jax_float64,
 )
-
-try:
-    from simsopt._core.optimizable import Optimizable
-except (ImportError, ModuleNotFoundError):
-    # Fallback when simsoptpp is unavailable (standalone JAX tests).
-    # In production with simsopt fully installed, the real Optimizable is used.
-    class Optimizable:  # type: ignore[no-redef]
-        def __init__(self, *args, depends_on=None, **kwargs):
-            pass
+from .._core.optimizable import Optimizable
+from .surfacexyztensorfourier import SurfaceXYZTensorFourier
 
 
 from .surface_fourier_jax import (
@@ -215,10 +208,10 @@ def _surface_geometry_kind(surface) -> str:
     return "generic"
 
 
-def _is_surface_xyztensorfourier_like(surface) -> bool:
-    return bool(
-        getattr(surface, "deferred_surface_class", None) == "SurfaceXYZTensorFourier"
-        or type(surface).__name__ == "SurfaceXYZTensorFourier"
+def _is_exact_surface_xyz_tensor_fourier(surface) -> bool:
+    return (
+        isinstance(surface, SurfaceXYZTensorFourier)
+        or getattr(surface, "deferred_surface_class", None) == "SurfaceXYZTensorFourier"
     )
 
 
@@ -2656,7 +2649,6 @@ class BoozerSurfaceJAX(Optimizable):
                 maxiter=self.options["newton_maxiter"],
                 tol=self.options["newton_tol"],
                 args=(coil_set_spec,),
-                max_dense_jacobian_bytes=self.options["max_dense_jacobian_bytes"],
             )
             jacobian = result["jacobian"]
             jacobian_available = jacobian is not None
@@ -3500,20 +3492,11 @@ class BoozerSurfaceJAX(Optimizable):
 
         s = self.surface
         G_provided = G is not None
-        try:
-            from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
-
-            if not (
-                isinstance(s, SurfaceXYZTensorFourier)
-                or _is_surface_xyztensorfourier_like(s)
-            ):
-                raise RuntimeError(
-                    "Exact solution of Boozer Surfaces only supported for "
-                    "SurfaceXYZTensorFourier"
-                )
-        except (ImportError, ModuleNotFoundError):
-            # simsoptpp unavailable — skip type check (tests with mock surfaces)
-            pass
+        if not _is_exact_surface_xyz_tensor_fourier(s):
+            raise RuntimeError(
+                "Exact solution of Boozer Surfaces only supported for "
+                "SurfaceXYZTensorFourier"
+            )
 
         tol = tol if tol is not None else self.options["newton_tol"]
         maxiter = maxiter if maxiter is not None else self.options["newton_maxiter"]

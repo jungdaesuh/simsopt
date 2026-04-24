@@ -31,6 +31,7 @@ import simsopt.geo.label_constraints_jax as _lc
 import simsopt.geo.optimizer_jax as _opt
 import simsopt.geo.surface_fourier_jax as _sf
 import simsopt.geo.surfaceobjectives_jax as _soj
+from simsopt.jax_core.field import grouped_coil_set_spec_from_lists
 
 surface_gamma = _sf.surface_gamma
 surface_gammadash1 = _sf.surface_gammadash1
@@ -557,7 +558,7 @@ class _MockBiotSavart(_bsj.Optimizable):
     def __init__(self, coils):
         super().__init__(x0=np.asarray([]))
         self._coils = coils
-        self._coil_spec = _bs_backend.grouped_coil_set_spec_from_lists(
+        self._coil_spec = grouped_coil_set_spec_from_lists(
             [coil.curve.gamma() for coil in coils],
             [coil.curve.gammadash() for coil in coils],
             [coil.current.get_value() for coil in coils],

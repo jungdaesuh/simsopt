@@ -57,6 +57,7 @@ import benchmarks.production_boozer_parity_probe as production_boozer_parity_pro
 import benchmarks.run_code_parity_probe as run_code_parity_probe_module
 import benchmarks.stage2_value_gradient_parity as stage2_value_gradient_parity_module
 import benchmarks.tier5_performance_characterization as tier5_performance_characterization
+from benchmarks.traceable_compile_shape import summarize_lowered_text
 from benchmarks.run_code_benchmark_common import summarize_result_fun
 from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_EQUILIBRIA_DIR,
@@ -172,6 +173,34 @@ def test_resolve_configs_preserves_requested_order():
 def test_resolve_configs_rejects_unknown_labels():
     with pytest.raises(ValueError, match="Unknown benchmark config"):
         resolve_configs(["does-not-exist"])
+
+
+def test_summarize_lowered_text_counts_control_flow_tokens():
+    lowered_text = "\n".join(
+        (
+            "module @shape {",
+            "  stablehlo.while {...}",
+            "  stablehlo.case {...}",
+            "  stablehlo.if {...}",
+            "  mhlo.while {...}",
+            "}",
+        )
+    )
+
+    summary = summarize_lowered_text(
+        "unit",
+        lowered_text,
+        lower_s=0.125,
+    )
+
+    assert summary["label"] == "unit"
+    assert summary["lower_s"] == pytest.approx(0.125)
+    assert summary["text_lines"] == 6
+    assert summary["stablehlo_while_count"] == 1
+    assert summary["stablehlo_case_count"] == 1
+    assert summary["stablehlo_if_count"] == 1
+    assert summary["mhlo_while_count"] == 1
+    assert summary["mhlo_case_count"] == 0
 
 
 def test_summarize_result_fun_prefers_fun():

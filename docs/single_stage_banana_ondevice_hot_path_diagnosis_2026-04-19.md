@@ -26,19 +26,106 @@ yet the seeded target-lane path now avoids some previously flagged overhead.
 - [x] The stale runtime-array tracer split described below is still fixed at the
   root and remains closed.
 
-### Still true after the landing work
+### 2026-04-24 source/doc/upstream validation
 
-- [ ] Nested `lax.while_loop` / `lax.cond` structure remains a primary
-  compile-cost driver.
-- [ ] The implicit-gradient path still uses forward-over-reverse composition for
-  the stationarity term.
-- [ ] Final dense Jacobian / dense linearization materialization still
-  contributes meaningful compile and runtime cost when those paths are active.
+The following items are now source-checked against the current tree, official
+JAX/CUDA/SIMSOPT docs, and upstream SIMSOPT CPU/C++ code. The boxes mean
+"verified", not "fixed".
+
+- [x] Verified open: nested `lax.while_loop` / `lax.cond` structure remains a
+  primary compile-cost driver. The target lane still stages private L-BFGS,
+  line-search/zoom, exact Newton/LM, and traceable-success filtering as nested
+  control-flow regions.
+- [x] Verified scoped/open: the implicit-gradient path no longer materializes
+  the full stationarity vector on the optimizer target lane, but it still
+  differentiates a directional stationarity JVP. The old
+  `vjp(stationarity_of_coils)` description below is superseded for the active
+  target lane; the remaining cost is reverse-over-forward composition around
+  `_traceable_directional_inner_stationarity(...)`.
+- [x] Fixed for the exact traceable target lane: final dense Jacobian
+  materialization is now disabled in `run_code_traceable()`, while public
+  `run_code()` keeps the upstream-compatible dense metadata path size-limited.
+  Dense linearization still contributes meaningful compile and runtime cost
+  when callers explicitly request public metadata/reference-oracle artifacts.
 - [x] The dense least-squares normal-equation fallback is gone; that path is now
   operator-only.
-- [x] Exact runtime backend cleanup landed: the exact JAX lane is now strict
-  operator-only end to end, with dense exact work retained only as optional
-  metadata/reference-oracle materialization.
+- [x] The Newton-polish loop no longer rescues a poor/non-finite GMRES step by
+  materializing a dense Hessian. Dense Hessian materialization remains only as
+  the explicit final public metadata path when requested.
+- [x] Exact runtime backend cleanup landed: the exact traceable JAX lane is now
+  strict operator-only end to end, with dense exact work retained only as
+  optional public metadata/reference-oracle materialization.
+
+External cross-checks:
+
+- JAX official docs match the structural diagnosis: `lax.cond` executes one
+  branch but traces both branches, while `lax.while_loop` lowers to a single
+  WhileOp and requires fixed-shape loop carry. See:
+  <https://docs.jax.dev/en/latest/_autosummary/jax.lax.cond.html> and
+  <https://docs.jax.dev/en/latest/_autosummary/jax.lax.while_loop.html>.
+- JAX official autodiff docs match the derivative-cost model: `jvp` is a
+  forward-mode Jacobian-vector product, `vjp` is a reverse-mode
+  vector-Jacobian product, and basis-mapped `vmap(jvp)` / `vmap(vjp)` builds
+  dense Jacobian actions. See:
+  <https://docs.jax.dev/en/latest/jacobian-vector-products.html>.
+- CUDA official docs match the launch/graph framing: repeated piecewise work
+  submission pays host/driver setup cost, and CUDA Graphs reduce repeated
+  launch setup when graph structure is stable. That supports treating deep
+  staged JAX control-flow artifacts as a compile/work-submission cost surface,
+  not as evidence of a per-iteration host transfer bug. See:
+  <https://docs.nvidia.com/cuda/cuda-c-programming-guide/>.
+- SIMSOPT official docs and upstream code still define the CPU Boozer contract
+  around dense result metadata (`jacobian`, `hessian`, `PLU`) and VJP hooks.
+  Upstream `BoozerSurface.run_code()` documents `PLU` in the result dict, and
+  `/Users/suhjungdae/code/opensource/simsopt/src/simsopt/geo/boozersurface.py`
+  materializes dense `J` / `H` plus LU for CPU compatibility. The upstream C++
+  kernel in `src/simsoptpp/boozerresidual_impl.h` computes residual,
+  gradient, and Hessian entries directly, while
+  `src/simsoptpp/biot_savart_vjp_py.cpp` routes Biot-Savart VJPs through
+  OpenMP C++ kernels. The JAX operator-only lane is therefore a runtime
+  implementation change, not a public-physics-contract change. See:
+  <https://simsopt.readthedocs.io/stable/simsopt.geo.html>.
+
+### 2026-04-24 CPU structural probe
+
+The CPU-lowering proof layer is now implemented in tree:
+
+- [x] `benchmarks/traceable_compile_shape.py` lowers JAX callables with
+  `lower(...).as_text()` and counts StableHLO/MHLO control-flow markers.
+- [x] `benchmarks/traceable_target_lane_compile_shape.py` builds the real
+  traceable target-lane fixture and writes a JSON payload for seeded/public,
+  LS/exact compile-shape comparisons.
+- [x] `tests/geo/test_surface_objectives_jax.py` now pins the seeded optimizer
+  helper to `general_only_forward=True` and proves that the seeded compiled
+  bundle does not route through the public `same_coils` forward path.
+- [x] `tests/test_benchmark_helpers.py` covers the StableHLO/MHLO counting
+  helper.
+
+CPU smoke command:
+
+```bash
+PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src \
+python benchmarks/traceable_target_lane_compile_shape.py \
+  --platform cpu \
+  --boozer-kind ls \
+  --nphi 5 \
+  --ntheta 4 \
+  --mpol 1 \
+  --ntor 1 \
+  --output-json .artifacts/traceable_compile_shape_smoke.json
+```
+
+Observed smoke result on the tiny LS fixture:
+
+| Label | Lowering time | StableHLO text | `stablehlo.while` | `stablehlo.case` |
+| --- | ---: | ---: | ---: | ---: |
+| `ls.seeded_value_and_grad` | 5.185 s | 7,580,144 bytes / 75,166 lines | 67 | 28 |
+
+This is sufficient to prove the structural lowering issue on CPU: the seeded
+path already bypasses the old public `same_coils` branch, yet it still lowers a
+large nested control-flow graph. CUDA is not required for that proof. CUDA is
+still required before claiming runtime dominance, compile-memory pressure, or a
+specific LS-vs-exact bottleneck on accelerator hardware.
 
 ## Verified from the current tree
 
@@ -113,22 +200,21 @@ port leaks a per-iteration host transfer:
    branches inside those regions. That lowers to deep HLO even when each body is
    traced only once.
 
-2. Forward-over-reverse composition on the coil-side geometry pipeline.
+2. Reverse-over-forward composition on the coil-side geometry pipeline.
    `_traceable_objective_gradient_parts(...)` at
-   `src/simsopt/geo/surfaceobjectives_jax.py:2558` splits the gradient into two
-   distinct sweeps:
-   - `direct_grad` via a single reverse-mode pullback —
-     `_strict_scalar_grad(_evaluate_objective_of_coils, coil_dofs)` at `:2696`.
-   - `implicit_grad` via forward-over-reverse —
-     `jax.vjp(stationarity_of_coils, coil_dofs)` at `:2711-2715`, where
-     `stationarity_of_coils` internally calls
-     `_traceable_inner_stationarity_grad(...)` at `:2221-2241`. That inner grad
-     is deliberately `vmap(jvp)` (forward mode) over an identity basis; the
-     adjacent comment at `:2232-2235` records the rationale — a reverse-over-
-     reverse trace would trip strict transfer guard on the JAX 0.9.2
-     implicit-adjoint path.
-   Net: one reverse sweep + one forward-over-reverse pair inline into the same
-   HLO per outer step.
+   `src/simsopt/geo/surfaceobjectives_jax.py:2705` still splits the gradient
+   into distinct direct and implicit sweeps:
+   - `direct_grad` uses one scalar reverse-mode pullback through
+     `_strict_scalar_grad(_evaluate_objective_of_coils, coil_dofs)` at `:2796`.
+   - `implicit_grad` now avoids the old full
+     `vjp(stationarity_of_coils, coil_dofs)` path. It differentiates the scalar
+     `directional_stationarity_of_coils(...)` at `:2804-2815`, whose body calls
+     `_traceable_directional_inner_stationarity(...)` at `:2217-2229` and uses
+     one `jax.jvp(inner_objective, (x_inner,), (adjoint,))`.
+   Net: the old full `vmap(jvp)` stationarity vector is no longer on the active
+   optimizer target lane, but the HLO still contains a reverse-mode coil
+   derivative around an inner-state JVP. This remains a real performance cost
+   surface, just narrower than the original diagnosis.
 
 3. Both `lax.cond` branches trace on the baseline-aware public forward path.
    `_traceable_forward_result(...)` traces both the baseline and general cases
@@ -260,9 +346,9 @@ gradients. Resolution:
   variant drops compute from O(n_coil) JVPs to a single VJP and removes the
   vmap memory-replication peak on the coil-DOF axis.
 
-- `_traceable_inner_stationarity_grad` remains a forward-mode helper, but the
-  traceable implicit-gradient and warm-start paths now avoid materializing the
-  full stationarity vector when they only need a directional pullback/JVP.
+- The unused `_traceable_inner_stationarity_grad` full-vector helper has been
+  removed. The traceable implicit-gradient and warm-start paths now retain only
+  directional stationarity helpers when they need a directional pullback/JVP.
   The active exact-JAX end state is now in tree: operator-backed exact linear
   solves, explicit exact warm-start failure surfacing, and real primal value
   plus non-finite gradient on adjoint-only failure. Dense exact solves remain

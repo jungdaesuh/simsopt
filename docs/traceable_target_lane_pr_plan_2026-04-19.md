@@ -397,15 +397,19 @@ reference oracles and metadata producers, not runtime fallbacks.
 
 7. Keep dense exact solves as reference-only validation tools.
 
-   The well-conditioned exact validation fixture should compare:
+   Status: landed for the well-conditioned exact oracle lane in
+   `tests/geo/test_boozersurface_jax.py::
+   test_exact_well_conditioned_operator_adjoint_matches_dense_reference_and_plu`.
+   That fixture compares:
 
    - JAX operator solve on the native runtime path
    - dense JAX exact reference solve
    - upstream SIMSOPT `PLU` reference solve
 
-   but dense exact solves must not remain a supported runtime backend.
+   Dense exact solves remain reference-only validation tools and must not
+   return as a supported runtime backend.
 
-8. Add explicit native JAX CPU/GPU parity coverage.
+8. Add explicit native JAX CPU/GPU parity coverage on the exact lane.
 
    Required runtime lane:
 
@@ -413,6 +417,11 @@ reference oracles and metadata producers, not runtime fallbacks.
    - fixed seeds
    - recorded JAX/CUDA/device metadata
    - no host or SciPy fallback in the supported JAX lane
+
+   Status: landed in `tests/geo/test_boozersurface_jax.py::
+   test_exact_well_conditioned_operator_adjoint_cpu_gpu_same_state_parity`.
+   Keep the reduced real public CPU/GPU parity coverage as-is; it complements
+   the exact-lane same-state adjoint gate rather than replacing it.
 
 ### Acceptance criteria
 
@@ -450,14 +459,18 @@ contract:
 
 2. Well-conditioned exact reference-oracle tests
 
+   - landed in `tests/geo/test_boozersurface_jax.py::
+     test_exact_well_conditioned_operator_adjoint_matches_dense_reference_and_plu`
    - operator exact adjoint agrees with dense JAX reference and upstream SIMSOPT
      `PLU` on the same well-conditioned state to the precision gates above
 
 3. Warm-start predictor tests
 
-   - failed exact warm-start solve does not silently reuse `baseline_x`
-   - successful exact warm-start solve still agrees with the reference operator
-     linearization on a branch-stable fixture
+   - landed: failed exact warm-start solve does not silently reuse `baseline_x`
+   - landed: successful exact warm-start solve agrees with the reference
+     operator linearization on a branch-stable fixture in
+     `tests/geo/test_surface_objectives_jax.py::
+     test_traceable_exact_warmstart_success_matches_reference_operator_linearization`
 
 4. Success-semantics tests
 
@@ -468,9 +481,14 @@ contract:
 
 5. Native CPU/GPU parity tests
 
-   - same-state forward parity on the operator-only exact lane
-   - same-state gradient parity on the operator-only exact lane
-   - whole-solve parity at the looser GPU-runtime lane thresholds
+   - landed: reduced real public runtime lane has CPU/GPU parity coverage in
+     `tests/integration/test_single_stage_jax_cpu_reference.py`
+   - landed: the well-conditioned exact-adjoint lane has an explicit same-state
+     CPU-vs-GPU parity assertion using the existing exact oracle fixture
+   - landed: same-state adjoint parity on the operator-only exact lane
+   - landed: same-state projected-gradient parity on the operator-only exact lane
+   - retained separately: whole-solve parity at the looser GPU-runtime lane
+     thresholds
 
 ## Final comparison against earlier drafts
 

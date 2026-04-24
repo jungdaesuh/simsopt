@@ -106,6 +106,170 @@ def _assert_operator_adjoint_state(adjoint_state, *, dense_factors_available):
     )
 
 
+def _collect_exact_well_conditioned_runtime_metadata(device):
+    metadata = {
+        "jax_version": str(jax.__version__),
+        "jax_enable_x64": bool(jax.config.jax_enable_x64),
+        "selected_device": str(device),
+        "platform": str(device.platform),
+        "device_kind": str(device.device_kind),
+        "platform_version": str(
+            getattr(getattr(device, "client", None), "platform_version", "")
+        ),
+    }
+    assert metadata["jax_version"]
+    assert metadata["jax_enable_x64"] is True
+    assert metadata["selected_device"]
+    assert metadata["platform"] in {"cpu", "gpu"}
+    assert metadata["device_kind"]
+    if metadata["platform"] == "gpu":
+        assert metadata["platform_version"]
+    return metadata
+
+
+def _build_exact_well_conditioned_operator_fixture(monkeypatch, *, device):
+    metadata = _collect_exact_well_conditioned_runtime_metadata(device)
+    with jax.default_device(device):
+        booz = _make_mock_boozer_surface_exact(options={"newton_tol": 1e-12})
+        booz.need_to_run_code = False
+        solved_x = booz._pack_decision_vector(0.3, 0.05)
+        n = int(solved_x.size)
+
+        diagonal = np.linspace(2.0, 2.5, n)
+        A_np = np.diag(diagonal)
+        A_np += 0.01 * np.tril(np.ones((n, n)), k=-1)
+        A_np += 0.005 * np.triu(np.ones((n, n)), k=1)
+        A = jnp.asarray(A_np, dtype=jnp.float64)
+        rhs_np = np.linspace(-0.4, 0.6, n)
+        rhs = jnp.asarray(rhs_np, dtype=jnp.float64)
+        P_lu, L_lu, U_lu = scipy.linalg.lu(A_np)
+        gradient_projection = np.vstack(
+            (
+                np.ones(n),
+                np.linspace(-1.0, 1.0, n),
+                np.cos(np.linspace(0.0, np.pi, n)),
+            )
+        )
+
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "exact_jacobian",
+            "PLU": tuple(
+                jnp.asarray(piece, dtype=jnp.float64) for piece in (P_lu, L_lu, U_lu)
+            ),
+            "dense_linear_solve_factors_available": True,
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+
+    def matrix_residual(_self, _mask):
+        return lambda x: A @ x
+
+    monkeypatch.setattr(
+        _bsj.BoozerSurfaceJAX,
+        "_compute_stellsym_mask_indices",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        _bsj.BoozerSurfaceJAX,
+        "_make_exact_residual",
+        matrix_residual,
+    )
+
+    return {
+        "A": A,
+        "A_np": A_np,
+        "P_lu": P_lu,
+        "L_lu": L_lu,
+        "U_lu": U_lu,
+        "booz": booz,
+        "device": device,
+        "gradient_projection": gradient_projection,
+        "metadata": metadata,
+        "rhs": rhs,
+        "rhs_np": rhs_np,
+    }
+
+
+def _solve_exact_well_conditioned_operator_case(monkeypatch, *, device):
+    case = _build_exact_well_conditioned_operator_fixture(
+        monkeypatch,
+        device=device,
+    )
+    with jax.default_device(device):
+        adjoint_state = case["booz"].get_adjoint_runtime_state()
+        operator_adj, success = adjoint_state.solve_transpose_with_status(case["rhs"])
+        jax_dense_adj = jnp.linalg.solve(case["A"].T, case["rhs"])
+        operator_adj_np = np.asarray(jax.device_get(operator_adj), dtype=float)
+        jax_dense_adj_np = np.asarray(jax.device_get(jax_dense_adj), dtype=float)
+        assert_array_on_device(case["rhs"], device)
+        assert_array_on_device(operator_adj, device)
+        assert_array_on_device(jax_dense_adj, device)
+
+    plu_adj_np = forward_backward(
+        case["P_lu"],
+        case["L_lu"],
+        case["U_lu"],
+        case["rhs_np"],
+    )
+    residual_rel = np.linalg.norm(case["A_np"].T @ operator_adj_np - case["rhs_np"]) / (
+        1.0 + np.linalg.norm(case["rhs_np"])
+    )
+    operator_gradient = case["gradient_projection"] @ operator_adj_np
+    dense_gradient = case["gradient_projection"] @ jax_dense_adj_np
+    plu_gradient = case["gradient_projection"] @ plu_adj_np
+    return {
+        **case,
+        "adjoint_state": adjoint_state,
+        "dense_gradient": dense_gradient,
+        "jax_dense_adj_np": jax_dense_adj_np,
+        "operator_adj_np": operator_adj_np,
+        "operator_gradient": operator_gradient,
+        "plu_adj_np": plu_adj_np,
+        "plu_gradient": plu_gradient,
+        "residual_rel": residual_rel,
+        "success": bool(np.asarray(success)),
+    }
+
+
+def _assert_exact_well_conditioned_operator_case(case, exact_lane):
+    assert case["metadata"]["platform"] == case["device"].platform
+    _assert_operator_adjoint_state(
+        case["adjoint_state"],
+        dense_factors_available=True,
+    )
+    assert case["success"] is True
+    np.testing.assert_allclose(
+        case["operator_adj_np"],
+        case["jax_dense_adj_np"],
+        rtol=exact_lane["adjoint_rtol"],
+        atol=exact_lane["adjoint_atol"],
+    )
+    np.testing.assert_allclose(
+        case["operator_adj_np"],
+        case["plu_adj_np"],
+        rtol=exact_lane["adjoint_rtol"],
+        atol=exact_lane["adjoint_atol"],
+    )
+    assert case["residual_rel"] <= exact_lane["residual_rel_tol"]
+    np.testing.assert_allclose(
+        case["operator_gradient"],
+        case["dense_gradient"],
+        rtol=exact_lane["gradient_rtol"],
+        atol=exact_lane["gradient_atol"],
+    )
+    np.testing.assert_allclose(
+        case["operator_gradient"],
+        case["plu_gradient"],
+        rtol=exact_lane["gradient_rtol"],
+        atol=exact_lane["gradient_atol"],
+    )
+
+
 def _disk_flux_through_circle_z0(*, radius, nr, ntheta, gammas, gammadashs, currents):
     rs = (np.arange(nr) + 0.5) * (radius / nr)
     thetas = (np.arange(ntheta) + 0.5) * (2.0 * np.pi / ntheta)
@@ -914,6 +1078,48 @@ class TestOptimizerAdapter:
         assert result["nit"] == 0
         assert not result["success"]
 
+    def test_newton_polish_nonfinite_operator_step_fails_without_dense_fallback(
+        self,
+        monkeypatch,
+    ):
+        """Newton polish must not materialize a dense Hessian rescue in the loop."""
+
+        def obj(x):
+            return 0.5 * x[0] ** 2
+
+        def fake_hvp_fn(_objective_fn):
+            return lambda _x, v: v
+
+        def fake_gmres(_hvp_fn, _x, rhs, *, stab, tol):
+            del rhs, stab, tol
+            return jnp.asarray([jnp.nan]), jnp.asarray([jnp.nan]), None
+
+        def fake_materialize_dense_hessian(_hvp_fn, _x):
+            raise AssertionError("newton_polish must stay operator-only in the loop")
+
+        monkeypatch.setattr(_opt, "_hessian_vector_product_fn", fake_hvp_fn)
+        monkeypatch.setattr(_opt, "_gmres_solve_newton_system", fake_gmres)
+        monkeypatch.setattr(
+            _opt,
+            "_materialize_dense_hessian",
+            fake_materialize_dense_hessian,
+        )
+
+        result = newton_polish(
+            obj,
+            jnp.asarray([1.0]),
+            maxiter=5,
+            tol=1e-12,
+            materialize_hessian=False,
+        )
+
+        np.testing.assert_allclose(result["x"], np.asarray([1.0]), atol=1e-12)
+        np.testing.assert_allclose(result["grad"], np.asarray([1.0]), atol=1e-12)
+        assert result["nit"] == 0
+        assert not result["success"]
+        assert result["hessian"] is None
+        assert result["hessian_materialized"] is False
+
     def test_newton_exact_linear_system(self):
         """Newton exact solver finds root of a linear system in 1 step."""
         A = jnp.array([[3.0, 1.0], [1.0, 4.0]])
@@ -951,14 +1157,19 @@ class TestOptimizerAdapter:
         np.testing.assert_allclose(result["jacobian"], np.asarray(A), atol=1e-12)
         assert result["success"]
 
-    def test_newton_exact_traceable_materializes_dense_jacobian_once_at_final_iterate(
-        self, monkeypatch
-    ):
-        """Traceable exact Newton rebuilds the dense Jacobian only at the final boundary."""
+    def test_newton_exact_traceable_is_operator_only(self, monkeypatch):
+        """Traceable exact Newton must keep finalization strictly operator-only."""
         A = jnp.array([[3.0, 1.0], [1.0, 4.0]])
         b = jnp.array([5.0, 7.0])
-        dense_calls = _patch_matrix_free_exact_linear_solver(monkeypatch, A=A)
+        _patch_matrix_free_exact_linear_solver(monkeypatch, A=A)
         x_exact = np.linalg.solve(np.asarray(A), np.asarray(b))
+        materialize_calls = []
+
+        def fake_materialize(_jvp_fn, _x):
+            materialize_calls.append(True)
+            raise AssertionError("traceable exact Newton must not materialize dense J")
+
+        monkeypatch.setattr(_opt, "_materialize_dense_jacobian", fake_materialize)
 
         def residual(x):
             return A @ x - b
@@ -970,9 +1181,13 @@ class TestOptimizerAdapter:
             tol=1e-14,
         )
 
-        assert len(dense_calls) == 1
+        assert not materialize_calls
         np.testing.assert_allclose(result["x"], x_exact)
-        np.testing.assert_allclose(result["jacobian"], np.asarray(A), atol=1e-12)
+        assert result["jacobian"] is None
+        assert result["jacobian_materialized"] is False
+        assert result["failure_category"] is None
+        assert result["failure_stage"] is None
+        assert result["message"] is None
         assert bool(result["success"])
 
     def test_newton_exact_skips_dense_jacobian_when_ceiling_is_exceeded(
@@ -1011,43 +1226,7 @@ class TestOptimizerAdapter:
         assert "max_dense_jacobian_bytes=8" in result["message"]
         assert result["success"]
 
-    def test_newton_exact_traceable_skips_dense_jacobian_when_ceiling_is_exceeded(
-        self, monkeypatch
-    ):
-        """Traceable exact Newton must skip dense finalization once the byte ceiling is hit."""
-        A = jnp.array([[3.0, 1.0], [1.0, 4.0]])
-        b = jnp.array([5.0, 7.0])
-        materialize_calls = []
-
-        def fake_materialize(_jvp_fn, _x):
-            materialize_calls.append(True)
-            raise AssertionError("dense Jacobian materialization should be skipped")
-
-        monkeypatch.setattr(_opt, "_materialize_dense_jacobian", fake_materialize)
-
-        def residual(x):
-            return A @ x - b
-
-        result = _opt.newton_exact_traceable(
-            residual,
-            jnp.zeros(2),
-            maxiter=5,
-            tol=1e-14,
-            max_dense_jacobian_bytes=8,
-        )
-
-        assert not materialize_calls
-        assert result["jacobian"] is None
-        assert result["jacobian_materialized"] is False
-        assert result["failure_category"] == "scaling_limit"
-        assert result["failure_stage"] == "dense_jacobian_finalization"
-        assert result["dense_jacobian_shape"] == (2, 2)
-        assert result["dense_jacobian_bytes"] == 32
-        assert result["max_dense_jacobian_bytes"] == 8
-        assert "max_dense_jacobian_bytes=8" in result["message"]
-        assert bool(result["success"])
-
-    def test_newton_exact_traceable_ceiling_remains_jittable(self):
+    def test_newton_exact_traceable_operator_only_path_remains_jittable(self):
         """Traceable exact Newton must remain composable under an enclosing jax.jit."""
         A = jnp.array([[3.0, 1.0], [1.0, 4.0]])
         b = jnp.array([5.0, 7.0])
@@ -1062,7 +1241,6 @@ class TestOptimizerAdapter:
                 x0,
                 maxiter=5,
                 tol=1e-14,
-                max_dense_jacobian_bytes=8,
             )["success"]
 
         assert bool(solve_success(jnp.zeros(2)))
@@ -1181,10 +1359,13 @@ _fake_exact_surface_module.SurfaceXYZTensorFourier = _MockSurface
 def _patched_exact_surface_module():
     module_name = "simsopt.geo.surfacexyztensorfourier"
     original_module = sys.modules.get(module_name)
+    original_surface_type = _bsj.SurfaceXYZTensorFourier
+    _bsj.SurfaceXYZTensorFourier = _MockSurface
     sys.modules[module_name] = _fake_exact_surface_module
     try:
         yield
     finally:
+        _bsj.SurfaceXYZTensorFourier = original_surface_type
         if original_module is None:
             sys.modules.pop(module_name, None)
         else:
@@ -3497,122 +3678,40 @@ class TestBoozerSurfaceJAXClass:
         """Well-conditioned exact operator GMRES matches dense JAX and PLU adjoints."""
         exact_lane = parity_ladder_tolerances("exact-well-conditioned-adjoint")
         enable_strict_jax_backend(monkeypatch, request, mode=mode)
-        device = parity_device(lane)
-        metadata = {
-            "jax_version": str(jax.__version__),
-            "jax_enable_x64": bool(jax.config.jax_enable_x64),
-            "selected_device": str(device),
-            "platform": str(device.platform),
-            "device_kind": str(device.device_kind),
-            "platform_version": str(
-                getattr(getattr(device, "client", None), "platform_version", "")
-            ),
-        }
-        assert metadata["jax_version"]
-        assert metadata["jax_enable_x64"] is True
-        assert metadata["selected_device"]
-        assert metadata["platform"] == lane
-        assert metadata["device_kind"]
-        if lane == "gpu":
-            assert metadata["platform_version"]
-
-        with jax.default_device(device):
-            booz = _make_mock_boozer_surface_exact(options={"newton_tol": 1e-12})
-            booz.need_to_run_code = False
-            solved_x = booz._pack_decision_vector(0.3, 0.05)
-            n = int(solved_x.size)
-
-            diagonal = np.linspace(2.0, 2.5, n)
-            A_np = np.diag(diagonal)
-            A_np += 0.01 * np.tril(np.ones((n, n)), k=-1)
-            A_np += 0.005 * np.triu(np.ones((n, n)), k=1)
-            A = jnp.asarray(A_np, dtype=jnp.float64)
-            P_lu, L_lu, U_lu = scipy.linalg.lu(A_np)
-
-            booz.res = {
-                "success": True,
-                "primal_success": True,
-                "adjoint_linear_solve_available": True,
-                "iota": jnp.asarray(0.3, dtype=jnp.float64),
-                "G": jnp.asarray(0.05, dtype=jnp.float64),
-                "weight_inv_modB": True,
-                "linearization_kind": "exact_jacobian",
-                "PLU": tuple(
-                    jnp.asarray(piece, dtype=jnp.float64)
-                    for piece in (P_lu, L_lu, U_lu)
-                ),
-                "dense_linear_solve_factors_available": True,
-                "vjp_groups": lambda *_args, **_kwargs: iter(()),
-            }
-
-            def matrix_residual(_self, _mask):
-                return lambda x: A @ x
-
-            monkeypatch.setattr(
-                _bsj.BoozerSurfaceJAX,
-                "_compute_stellsym_mask_indices",
-                lambda *_args, **_kwargs: None,
-            )
-            monkeypatch.setattr(
-                _bsj.BoozerSurfaceJAX,
-                "_make_exact_residual",
-                matrix_residual,
-            )
-
-            adjoint_state = booz.get_adjoint_runtime_state()
-            rhs_np = np.linspace(-0.4, 0.6, n)
-            rhs = jnp.asarray(rhs_np, dtype=jnp.float64)
-            operator_adj, success = adjoint_state.solve_transpose_with_status(rhs)
-            jax_dense_adj = jnp.linalg.solve(A.T, rhs)
-            operator_adj_np = np.asarray(jax.device_get(operator_adj), dtype=float)
-            jax_dense_adj_np = np.asarray(jax.device_get(jax_dense_adj), dtype=float)
-            plu_adj_np = forward_backward(P_lu, L_lu, U_lu, rhs_np)
-            assert_array_on_device(rhs, device)
-            assert_array_on_device(operator_adj, device)
-            assert_array_on_device(jax_dense_adj, device)
-
-        _assert_operator_adjoint_state(
-            adjoint_state,
-            dense_factors_available=True,
+        case = _solve_exact_well_conditioned_operator_case(
+            monkeypatch,
+            device=parity_device(lane),
         )
-        assert bool(np.asarray(success)) is True
+        _assert_exact_well_conditioned_operator_case(case, exact_lane)
+
+    def test_exact_well_conditioned_operator_adjoint_cpu_gpu_same_state_parity(
+        self,
+        monkeypatch,
+        request,
+    ):
+        """CPU and GPU exact adjoints should agree on the same well-conditioned state."""
+        exact_lane = parity_ladder_tolerances("exact-well-conditioned-adjoint")
+        enable_strict_jax_backend(monkeypatch, request, mode="jax_gpu_parity")
+        cpu_case = _solve_exact_well_conditioned_operator_case(
+            monkeypatch,
+            device=parity_device("cpu"),
+        )
+        gpu_case = _solve_exact_well_conditioned_operator_case(
+            monkeypatch,
+            device=parity_device("gpu"),
+        )
+
+        _assert_exact_well_conditioned_operator_case(cpu_case, exact_lane)
+        _assert_exact_well_conditioned_operator_case(gpu_case, exact_lane)
         np.testing.assert_allclose(
-            operator_adj_np,
-            jax_dense_adj_np,
+            cpu_case["operator_adj_np"],
+            gpu_case["operator_adj_np"],
             rtol=exact_lane["adjoint_rtol"],
             atol=exact_lane["adjoint_atol"],
         )
         np.testing.assert_allclose(
-            operator_adj_np,
-            plu_adj_np,
-            rtol=exact_lane["adjoint_rtol"],
-            atol=exact_lane["adjoint_atol"],
-        )
-
-        residual_rel = np.linalg.norm(A_np.T @ operator_adj_np - rhs_np) / (
-            1.0 + np.linalg.norm(rhs_np)
-        )
-        assert residual_rel <= exact_lane["residual_rel_tol"]
-
-        gradient_projection = np.vstack(
-            (
-                np.ones(n),
-                np.linspace(-1.0, 1.0, n),
-                np.cos(np.linspace(0.0, np.pi, n)),
-            )
-        )
-        operator_gradient = gradient_projection @ operator_adj_np
-        dense_gradient = gradient_projection @ jax_dense_adj_np
-        plu_gradient = gradient_projection @ plu_adj_np
-        np.testing.assert_allclose(
-            operator_gradient,
-            dense_gradient,
-            rtol=exact_lane["gradient_rtol"],
-            atol=exact_lane["gradient_atol"],
-        )
-        np.testing.assert_allclose(
-            operator_gradient,
-            plu_gradient,
+            cpu_case["operator_gradient"],
+            gpu_case["operator_gradient"],
             rtol=exact_lane["gradient_rtol"],
             atol=exact_lane["gradient_atol"],
         )
@@ -3949,6 +4048,27 @@ def _dense_jacobian_scaling_limit_result(
     }
 
 
+def _operator_only_exact_newton_result(
+    x0,
+    *,
+    residual=None,
+):
+    n = x0.shape[0]
+    if residual is None:
+        residual = jnp.zeros(n, dtype=x0.dtype)
+    return {
+        "x": x0,
+        "residual": residual,
+        "jacobian": None,
+        "nit": 0,
+        "success": True,
+        "message": None,
+        "failure_category": None,
+        "failure_stage": None,
+        "jacobian_materialized": False,
+    }
+
+
 def _successful_exact_newton_result(
     x0,
     *,
@@ -4213,16 +4333,14 @@ class TestBoozerSurfaceJAXExactPath:
             maxiter,
             tol,
             args=(),
-            max_dense_jacobian_bytes=None,
         ):
-            del maxiter, tol, max_dense_jacobian_bytes
+            del maxiter, tol
             residual = residual_fn(x0, *args)
             captured["residual"] = residual
-            n = x0.shape[0]
             return {
                 "x": x0,
                 "residual": residual,
-                "jacobian": jnp.eye(n, dtype=x0.dtype),
+                "jacobian": None,
                 "nit": 0,
                 "success": True,
                 "message": None,
@@ -4240,12 +4358,8 @@ class TestBoozerSurfaceJAXExactPath:
         assert "residual" in captured
         assert jnp.all(jnp.isfinite(captured["residual"]))
 
-    def test_run_code_traceable_exact_propagates_dense_jacobian_ceiling(
-        self, monkeypatch
-    ):
-        booz = _make_mock_boozer_surface_exact(
-            options={"max_dense_jacobian_bytes": 12345}
-        )
+    def test_run_code_traceable_exact_uses_operator_only_newton(self, monkeypatch):
+        booz = _make_mock_boozer_surface_exact()
         coil_set_spec = booz.coil_set_spec
         sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
         iota = jnp.asarray(0.3, dtype=jnp.float64)
@@ -4259,14 +4373,12 @@ class TestBoozerSurfaceJAXExactPath:
             maxiter,
             tol,
             args=(),
-            max_dense_jacobian_bytes=None,
         ):
             del maxiter, tol
-            captured["max_dense_jacobian_bytes"] = max_dense_jacobian_bytes
+            captured["called"] = True
             residual = residual_fn(x0, *args)
-            return _dense_jacobian_scaling_limit_result(
+            return _operator_only_exact_newton_result(
                 x0,
-                max_dense_jacobian_bytes=max_dense_jacobian_bytes,
                 residual=residual,
             )
 
@@ -4274,7 +4386,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
-        assert captured["max_dense_jacobian_bytes"] == 12345
+        assert captured["called"] is True
         assert result["jacobian"] is None
         assert result["plu"] is None
         assert result["linear_solve_backend"] == "operator"
@@ -4282,11 +4394,11 @@ class TestBoozerSurfaceJAXExactPath:
         assert bool(result["success"]) is True
         assert bool(result["primal_success"]) is True
         assert bool(result["adjoint_linear_solve_available"]) is True
-        assert result["failure_category"] == "scaling_limit"
-        assert result["failure_stage"] == "dense_jacobian_finalization"
+        assert result["failure_category"] is None
+        assert result["failure_stage"] is None
         assert result["jacobian_materialized"] is False
-        assert result["max_dense_jacobian_bytes"] == 12345
-        assert result["message"] == "dense Jacobian skipped"
+        assert result["max_dense_jacobian_bytes"] is None
+        assert result["message"] is None
 
     def test_run_code_traceable_exact_reuses_stable_residual_callable(
         self, monkeypatch
@@ -4305,16 +4417,14 @@ class TestBoozerSurfaceJAXExactPath:
             maxiter,
             tol,
             args=(),
-            max_dense_jacobian_bytes=None,
         ):
-            del maxiter, tol, max_dense_jacobian_bytes
+            del maxiter, tol
             captured_ids.append(id(residual_fn))
             residual = residual_fn(x0, *args)
-            n = x0.shape[0]
             return {
                 "x": x0,
                 "residual": residual,
-                "jacobian": jnp.eye(n, dtype=x0.dtype),
+                "jacobian": None,
                 "nit": 0,
                 "success": True,
                 "message": None,
@@ -4348,17 +4458,15 @@ class TestBoozerSurfaceJAXExactPath:
             maxiter,
             tol,
             args=(),
-            max_dense_jacobian_bytes=None,
         ):
-            del maxiter, tol, max_dense_jacobian_bytes
+            del maxiter, tol
             residual_ids.append(id(residual_fn))
             residual = residual_fn(x0, *args)
             residuals.append(np.asarray(residual))
-            n = x0.shape[0]
             return {
                 "x": x0,
                 "residual": residual,
-                "jacobian": jnp.eye(n, dtype=x0.dtype),
+                "jacobian": None,
                 "nit": 0,
                 "success": True,
                 "message": None,
@@ -4913,14 +5021,13 @@ class TestBoozerSurfaceJAXExactPath:
             maxiter,
             tol,
             args=(),
-            max_dense_jacobian_bytes=None,
         ):
-            del maxiter, tol, args, max_dense_jacobian_bytes
+            del maxiter, tol, args
             n = x0.shape[0]
             return {
                 "x": x0,
                 "residual": jnp.full((n - 1,), jnp.nan, dtype=x0.dtype),
-                "jacobian": jnp.full((n, n), jnp.nan, dtype=x0.dtype),
+                "jacobian": None,
                 "nit": 0,
                 "success": False,
                 "message": None,
@@ -5891,6 +5998,17 @@ class TestUpstreamFactoryBoozerMatrix:
                 G=case.initial_G,
                 maxiter=1,
             )
+
+    def test_run_code_exact_accepts_deferred_xyztensor_contract(self):
+        """The JAX-native deferred tensor surface is part of the exact contract."""
+        booz = _make_mock_boozer_surface_exact()
+        booz.surface.deferred_surface_class = "SurfaceXYZTensorFourier"
+
+        with _patched_exact_newton_result(success=True):
+            res = booz.run_code(iota=0.3, G=0.05)
+
+        assert res["success"] is True
+        assert res["type"] == "exact"
 
     def test_exact_surface_factory_tensor_residual_is_finite(self):
         """The exact factory data remains valid for SurfaceXYZTensorFourier."""

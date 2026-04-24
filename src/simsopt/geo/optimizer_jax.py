@@ -2071,19 +2071,7 @@ def newton_polish(
             tol=linear_tol,
         )
         linear_residual_norm = float(np.linalg.norm(np.asarray(linear_residual)))
-        used_dense_fallback = False
-        if not np.all(np.isfinite(np.asarray(dx))) or (
-            linear_residual_norm > max(1e-10, 1e-3 * float(norm))
-        ):
-            H_solve = _stabilize_dense_hessian(
-                _materialize_dense_hessian(hvp_fn, x),
-                stab,
-            )
-            dx = jnp.linalg.solve(H_solve, grad)
-            linear_residual = grad - H_solve @ dx
-            linear_residual_norm = float(np.linalg.norm(np.asarray(linear_residual)))
-            used_dense_fallback = True
-        if (not used_dense_fallback) and linear_residual_norm > linear_tol:
+        if np.all(np.isfinite(np.asarray(dx))) and linear_residual_norm > linear_tol:
             correction, _, _ = _gmres_solve_newton_system(
                 hvp_fn,
                 x,
@@ -2274,7 +2262,7 @@ def newton_polish_traceable(
 ):
     """Trace-safe Newton polish for JAX-traceable objective paths.
 
-    This variant keeps all loop state and fallback decisions inside JAX control
+    This variant keeps all loop state and step decisions inside JAX control
     flow so higher-level traced objectives can invoke the Newton stage without
     crossing back into Python.
     """
@@ -2381,7 +2369,6 @@ def _make_traceable_exact_newton_runner(
     residual_fn,
     maxiter,
     tol,
-    materialize_jacobian,
 ):
     def run_solver(x_init, fn_args):
         def residual_eval(x):
@@ -2453,15 +2440,12 @@ def _make_traceable_exact_newton_runner(
                 "nit": jnp.asarray(0, dtype=jnp.int32),
             },
         )
-        result = {
+        return {
             "x": state["x"],
             "residual": state["residual"],
             "nit": state["nit"],
             "success": state["norm"] <= tol_value,
         }
-        if materialize_jacobian:
-            result["jacobian"] = _materialize_dense_jacobian(jvp_fn, state["x"])
-        return result
 
     run_solver.__name__ = "traceable_exact_newton_run_solver"
     return jax.jit(run_solver)
@@ -2474,44 +2458,25 @@ def newton_exact_traceable(
     maxiter=40,
     tol=1e-13,
     args=(),
-    max_dense_jacobian_bytes=None,
 ):
     """Trace-safe Newton solver for the exact Boozer residual system.
 
-    The loop keeps Jacobian application matrix-free via JVPs and materializes a
-    dense Jacobian only once at the final iterate for downstream LU-based
-    contracts.
+    The loop keeps Jacobian application matrix-free via JVPs and does not
+    materialize dense Jacobians. Public dense metadata belongs to
+    ``newton_exact(...)`` / ``BoozerSurfaceJAX.run_code()``.
     """
     normalized_args = _normalize_solver_args(args)
-    x0_shape = tuple(int(dim) for dim in np.shape(x0))
-    residual_shape = jax.eval_shape(
-        lambda x, fn_args: residual_fn(x, *fn_args),
-        x0,
-        normalized_args,
-    ).shape
-    rows = int(np.prod(residual_shape))
-    cols = int(np.prod(x0_shape))
-    x0_dtype = np.dtype(x0.dtype) if hasattr(x0, "dtype") else np.result_type(x0)
-    materialize_jacobian, report = _exact_newton_dense_jacobian_policy(
-        rows,
-        cols,
-        x0_dtype,
-        max_dense_jacobian_bytes,
-    )
     runner = _make_traceable_exact_newton_runner(
         residual_fn,
         int(maxiter),
         float(tol),
-        materialize_jacobian,
     )
     result = runner(x0, normalized_args)
-    if materialize_jacobian:
-        result["jacobian_materialized"] = True
-        result.update(report)
-        return result
     result["jacobian"] = None
     result["jacobian_materialized"] = False
-    result.update(report)
+    result["failure_category"] = None
+    result["failure_stage"] = None
+    result["message"] = None
     return result
 
 

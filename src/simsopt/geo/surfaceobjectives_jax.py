@@ -2191,29 +2191,6 @@ def _evaluate_traceable_total_objective(
     )
 
 
-def _traceable_inner_stationarity_grad(
-    x_inner,
-    coil_set_spec,
-    **objective_kwargs,
-):
-    """Gradient of the LS inner objective w.r.t. the explicit inner state."""
-    runtime_objective_kwargs = _traceable_runtime_deviceify_tree(objective_kwargs)
-    inner_objective = _make_boozer_penalty_objective_closure(
-        coil_set_spec=coil_set_spec,
-        **runtime_objective_kwargs,
-    )
-    # This stationarity map is differentiated again by an outer VJP in
-    # ``_traceable_objective_gradient_parts``. Keeping the inner derivative in
-    # forward mode avoids a reverse-over-reverse trace that trips strict
-    # transfer guard on JAX 0.9.2 in the implicit-adjoint path.
-    basis = jax.device_put(
-        np.eye(int(x_inner.shape[0]), dtype=np.dtype(x_inner.dtype))
-    )
-    return jax.vmap(
-        lambda tangent: jax.jvp(inner_objective, (x_inner,), (tangent,))[1]
-    )(basis)
-
-
 def _traceable_directional_inner_stationarity(
     x_inner,
     tangent,
@@ -3006,6 +2983,25 @@ def _build_traceable_objective_state(
     }
 
 
+def _traceable_runtime_reject_host_input(coil_dofs, entrypoint_name):
+    if isinstance(coil_dofs, (np.ndarray, np.generic, list, tuple, float, int)):
+        raise RuntimeError(
+            f"{entrypoint_name} requires a JAX array. Host inputs must enter "
+            "through an explicit staging boundary; transfer_guard=disallow "
+            "rejects implicit host-to-device transfer."
+        )
+    return coil_dofs
+
+
+def _make_traceable_runtime_jax_array_boundary(compiled_callable, entrypoint_name):
+    def boundary(coil_dofs):
+        return compiled_callable(
+            _traceable_runtime_reject_host_input(coil_dofs, entrypoint_name)
+        )
+
+    return boundary
+
+
 def _build_traceable_objective_compiled_bundle_from_state(
     booz_jax,
     state,
@@ -3062,7 +3058,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
             success_filter=success_filter,
         )
 
-    compiled_forward_result_for = jax.jit(_forward_result_for)
+    jitted_forward_result_for = jax.jit(_forward_result_for)
 
     def _total_gradient_for(coil_dofs, solved_x, solved_linear_solve_factors):
         return _traceable_total_gradient_with_status(
@@ -3080,7 +3076,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
     compiled_total_gradient_for = jax.jit(_total_gradient_for)
 
     def _value_and_grad_for(coil_dofs):
-        result = compiled_forward_result_for(coil_dofs)
+        result = jitted_forward_result_for(coil_dofs)
 
         def _success(_):
             return compiled_total_gradient_for(
@@ -3103,8 +3099,18 @@ def _build_traceable_objective_compiled_bundle_from_state(
             linear_solve_success,
         )
 
-    compiled_value_and_grad_for = _mark_cacheable_jit_value_and_grad(
+    jitted_value_and_grad_for = _mark_cacheable_jit_value_and_grad(
         jax.jit(_value_and_grad_for)
+    )
+    compiled_forward_result_for = _make_traceable_runtime_jax_array_boundary(
+        jitted_forward_result_for,
+        "compiled_forward_result_for",
+    )
+    compiled_value_and_grad_for = _mark_cacheable_jit_value_and_grad(
+        _make_traceable_runtime_jax_array_boundary(
+            jitted_value_and_grad_for,
+            "compiled_value_and_grad_for",
+        )
     )
 
     return {
