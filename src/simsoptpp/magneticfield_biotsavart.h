@@ -71,16 +71,18 @@ class BiotSavart : public MagneticField<T> {
 
     protected:
 
+        void compute_total_only(int derivatives);
+
         void _B_impl(Tensor2& B) override {
-            this->compute(0);
+            this->compute_total_only(0);
         }
         
         void _dB_by_dX_impl(Tensor3& dB_by_dX) override {
-            this->compute(1);
+            this->compute_total_only(1);
         }
 
         void _d2B_by_dXdX_impl(Tensor4& d2B_by_dXdX) override {
-            this->compute(2);
+            this->compute_total_only(2);
         }
         
         void _A_impl(Tensor2& A) override {
@@ -127,4 +129,3 @@ class BiotSavart : public MagneticField<T> {
         }
 
 };
-

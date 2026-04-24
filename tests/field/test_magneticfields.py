@@ -3,6 +3,7 @@ import unittest
 import tempfile
 import numpy as np
 from pathlib import Path
+from unittest.mock import patch
 
 from monty.tempfile import ScratchDir
 from scipy.io import netcdf_file
@@ -33,6 +34,19 @@ TEST_DIR = (Path(__file__).parent / ".." / "test_files").resolve()
 
 
 class Testing(unittest.TestCase):
+
+    def test_magnetic_field_sum_accumulates_without_list_sum(self):
+        field = MagneticFieldSum.__new__(MagneticFieldSum)
+        field.Bfields = [
+            type("Field", (), {"B": lambda self: np.full((2, 3), 1.0)})(),
+            type("Field", (), {"B": lambda self: np.full((2, 3), 2.0)})(),
+        ]
+        output = np.zeros((2, 3))
+
+        with patch("simsopt.field.magneticfield.np.sum", side_effect=AssertionError("np.sum called")):
+            MagneticFieldSum._B_impl(field, output)
+
+        np.testing.assert_allclose(output, np.full((2, 3), 3.0))
 
     def test_toroidal_field(self):
         R0test = 1.3

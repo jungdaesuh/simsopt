@@ -1,6 +1,7 @@
 import numpy as np
 
 import simsoptpp as sopp
+from .._core.derivative import sum_derivatives
 from .._core.optimizable import Optimizable
 from .._core.json import GSONDecoder
 from .mgrid import MGrid
@@ -247,26 +248,31 @@ class MagneticFieldSum(MagneticField):
         for bf in self.Bfields:
             bf.set_points_cart(self.get_points_cart_ref())
 
+    def _sum_outputs(self, output, getter):
+        output[:] = getter(self.Bfields[0])
+        for bf in self.Bfields[1:]:
+            output += getter(bf)
+
     def _B_impl(self, B):
-        B[:] = np.sum([bf.B() for bf in self.Bfields], axis=0)
+        self._sum_outputs(B, lambda bf: bf.B())
 
     def _dB_by_dX_impl(self, dB):
-        dB[:] = np.sum([bf.dB_by_dX() for bf in self.Bfields], axis=0)
+        self._sum_outputs(dB, lambda bf: bf.dB_by_dX())
 
     def _d2B_by_dXdX_impl(self, ddB):
-        ddB[:] = np.sum([bf.d2B_by_dXdX() for bf in self.Bfields], axis=0)
+        self._sum_outputs(ddB, lambda bf: bf.d2B_by_dXdX())
 
     def _A_impl(self, A):
-        A[:] = np.sum([bf.A() for bf in self.Bfields], axis=0)
+        self._sum_outputs(A, lambda bf: bf.A())
 
     def _dA_by_dX_impl(self, dA):
-        dA[:] = np.sum([bf.dA_by_dX() for bf in self.Bfields], axis=0)
+        self._sum_outputs(dA, lambda bf: bf.dA_by_dX())
 
     def _d2A_by_dXdX_impl(self, ddA):
-        ddA[:] = np.sum([bf.d2A_by_dXdX() for bf in self.Bfields], axis=0)
+        self._sum_outputs(ddA, lambda bf: bf.d2A_by_dXdX())
 
     def B_vjp(self, v):
-        return sum([bf.B_vjp(v) for bf in self.Bfields if np.any(bf.dofs_free_status)])
+        return sum_derivatives(bf.B_vjp(v) for bf in self.Bfields if np.any(bf.dofs_free_status))
 
     def as_dict(self, serial_objs_dict) -> dict:
         d = super().as_dict(serial_objs_dict=serial_objs_dict)

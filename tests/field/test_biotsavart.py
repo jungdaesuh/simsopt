@@ -32,6 +32,22 @@ class Testing(unittest.TestCase):
         assert np.linalg.norm(B1) > 1e-5
         assert np.allclose(B1, B2)
 
+    def test_biotsavart_total_field_does_not_materialize_per_coil_cache(self):
+        coils = [
+            Coil(get_curve(), Current(1e4)),
+            Coil(get_curve(perturb=True), Current(2e4)),
+        ]
+        points = np.asarray(8 * [[-1.41513202e-03, 8.99999382e-01, -3.14473221e-04]])
+        total_only = BiotSavart(coils).set_points(points)
+        cached = BiotSavart(coils).set_points(points)
+        cached.compute(1)
+
+        np.testing.assert_allclose(total_only.B(), cached.B())
+        np.testing.assert_allclose(total_only.dB_by_dX(), cached.dB_by_dX())
+        self.assertFalse(total_only.fieldcache_get_status("B_0"))
+        total_only.dB_by_dcoilcurrents()
+        self.assertTrue(total_only.fieldcache_get_status("B_0"))
+
     def test_biotsavart_exponential_convergence(self):
         BiotSavart([Coil(get_curve(), Current(1e4))])
         points = np.asarray(10 * [[-1.41513202e-03, 8.99999382e-01, -3.14473221e-04]])

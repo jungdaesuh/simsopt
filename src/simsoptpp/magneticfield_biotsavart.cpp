@@ -89,6 +89,71 @@ void BiotSavart<T, Array>::compute(int derivatives) {
 
 
 template<template<class, std::size_t, xt::layout_type> class T, class Array>
+void BiotSavart<T, Array>::compute_total_only(int derivatives) {
+    auto points = this->get_points_cart_ref();
+    this->fill_points(points);
+    int ncoils = this->coils.size();
+    Tensor2& B = data_B.get_or_create({npoints, 3});
+    Array Bi = xt::zeros<double>({npoints, 3});
+
+    set_array_to_zero(B);
+
+    std::vector<double> currents(ncoils, 0.);
+    for (int i = 0; i < ncoils; ++i) {
+        this->coils[i]->curve->gamma();
+        this->coils[i]->curve->gammadash();
+        currents[i] = this->coils[i]->current->get_value();
+    }
+
+    if(derivatives == 0) {
+        Array dummyjac = xt::zeros<double>({1, 1, 1});
+        Array dummyhess = xt::zeros<double>({1, 1, 1, 1});
+        for (int i = 0; i < ncoils; ++i) {
+            set_array_to_zero(Bi);
+            Array& gamma = this->coils[i]->curve->gamma();
+            Array& gammadash = this->coils[i]->curve->gammadash();
+            biot_savart_kernel<Array, 0>(pointsx, pointsy, pointsz, gamma, gammadash, Bi, dummyjac, dummyhess);
+            xt::noalias(B) = B + currents[i] * Bi;
+        }
+    } else if(derivatives == 1) {
+        Array dummyhess = xt::zeros<double>({1, 1, 1, 1});
+        Tensor3& dB = data_dB.get_or_create({npoints, 3, 3});
+        Array dBi = xt::zeros<double>({npoints, 3, 3});
+        set_array_to_zero(dB);
+        for (int i = 0; i < ncoils; ++i) {
+            set_array_to_zero(Bi);
+            set_array_to_zero(dBi);
+            Array& gamma = this->coils[i]->curve->gamma();
+            Array& gammadash = this->coils[i]->curve->gammadash();
+            biot_savart_kernel<Array, 1>(pointsx, pointsy, pointsz, gamma, gammadash, Bi, dBi, dummyhess);
+            xt::noalias(B) = B + currents[i] * Bi;
+            xt::noalias(dB) = dB + currents[i] * dBi;
+        }
+    } else if(derivatives == 2) {
+        Tensor3& dB = data_dB.get_or_create({npoints, 3, 3});
+        Tensor4& ddB = data_ddB.get_or_create({npoints, 3, 3, 3});
+        Array dBi = xt::zeros<double>({npoints, 3, 3});
+        Array ddBi = xt::zeros<double>({npoints, 3, 3, 3});
+        set_array_to_zero(dB);
+        set_array_to_zero(ddB);
+        for (int i = 0; i < ncoils; ++i) {
+            set_array_to_zero(Bi);
+            set_array_to_zero(dBi);
+            set_array_to_zero(ddBi);
+            Array& gamma = this->coils[i]->curve->gamma();
+            Array& gammadash = this->coils[i]->curve->gammadash();
+            biot_savart_kernel<Array, 2>(pointsx, pointsy, pointsz, gamma, gammadash, Bi, dBi, ddBi);
+            xt::noalias(B) = B + currents[i] * Bi;
+            xt::noalias(dB) = dB + currents[i] * dBi;
+            xt::noalias(ddB) = ddB + currents[i] * ddBi;
+        }
+    } else {
+        throw logic_error("Only two derivatives of Biot Savart implemented");
+    }
+}
+
+
+template<template<class, std::size_t, xt::layout_type> class T, class Array>
 void BiotSavart<T, Array>::compute_A(int derivatives) {
     //fmt::print("Calling compute({})\n", derivatives);
     auto points = this->get_points_cart_ref();
