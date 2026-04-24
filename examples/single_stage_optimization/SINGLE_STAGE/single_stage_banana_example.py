@@ -9195,6 +9195,36 @@ def restore_single_stage_host_state(
     )
 
 
+def write_single_stage_final_runtime_seed_spec(
+    *,
+    output_dir,
+    surface,
+    solved_surface_state,
+    field_source,
+    final_coil_dofs,
+    num_tf_coils,
+    tf_current_A,
+    banana_current_A,
+):
+    return write_single_stage_jax_runtime_seed_spec(
+        output_dir,
+        surface=surface,
+        surface_dofs=solved_surface_state["sdofs"],
+        iota=solved_surface_state["iota"],
+        G=solved_surface_state["G"],
+        mpol=surface.mpol,
+        ntor=surface.ntor,
+        quadpoints_phi=surface.quadpoints_phi,
+        quadpoints_theta=surface.quadpoints_theta,
+        coil_dof_extraction_spec=field_source.coil_dof_extraction_spec(),
+        coil_dofs=final_coil_dofs,
+        num_tf_coils=num_tf_coils,
+        banana_curve_index=int(num_tf_coils),
+        tf_current_A=tf_current_A,
+        banana_current_A=banana_current_A,
+    )
+
+
 def export_requested_single_stage_artifacts(
     *,
     solved_surface_state,
@@ -9224,20 +9254,13 @@ def export_requested_single_stage_artifacts(
         from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 
         runtime_seed_bs = BiotSavartJAX(bs_diag.coils)
-        write_single_stage_jax_runtime_seed_spec(
-            output_dir,
+        write_single_stage_final_runtime_seed_spec(
+            output_dir=output_dir,
             surface=boozer_surface.surface,
-            surface_dofs=solved_surface_state["sdofs"],
-            iota=solved_surface_state["iota"],
-            G=solved_surface_state["G"],
-            mpol=boozer_surface.surface.mpol,
-            ntor=boozer_surface.surface.ntor,
-            quadpoints_phi=boozer_surface.surface.quadpoints_phi,
-            quadpoints_theta=boozer_surface.surface.quadpoints_theta,
-            coil_dof_extraction_spec=runtime_seed_bs.coil_dof_extraction_spec(),
-            coil_dofs=coil_dofs,
+            solved_surface_state=solved_surface_state,
+            field_source=runtime_seed_bs,
+            final_coil_dofs=coil_dofs,
             num_tf_coils=num_tf_coils,
-            banana_curve_index=int(num_tf_coils),
             tf_current_A=tf_current_A,
             banana_current_A=banana_current_A,
         )
@@ -11677,6 +11700,11 @@ if __name__ == "__main__":
     final_iota = float(final_penalty_metrics["final_iota"])
     final_max_curvature = float(final_penalty_metrics["max_curvature"])
     fieldError = final_penalty_metrics["field_error"]
+    final_banana_current_A = resolve_single_stage_final_banana_current_A(
+        use_target_lane=use_target_lane,
+        final_metrics=final_penalty_metrics,
+        banana_current=banana_coils[0].current,
+    )
     final_self_intersecting = bool(run_dict["intersecting"])
     final_self_intersection_check_available = bool(
         run_dict["self_intersection_check_available"]
@@ -11722,11 +11750,7 @@ if __name__ == "__main__":
                     curvature_threshold=CURVATURE_THRESHOLD,
                     coil_length=final_coil_length,
                     length_target=length_target,
-                    banana_current_A=resolve_single_stage_final_banana_current_A(
-                        use_target_lane=use_target_lane,
-                        final_metrics=final_penalty_metrics,
-                        banana_current=banana_coils[0].current,
-                    ),
+                    banana_current_A=final_banana_current_A,
                     banana_current_max_A=args.banana_current_max_A,
                     tf_current_A=stage2_tf_current_A,
                     tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
@@ -12219,26 +12243,15 @@ if __name__ == "__main__":
     )
     write_single_stage_results_json(OUT_DIR_ITER, final_result_snapshot)
     if use_target_lane and write_restart_artifacts:
-        write_single_stage_jax_runtime_seed_spec(
-            OUT_DIR_ITER,
+        write_single_stage_final_runtime_seed_spec(
+            output_dir=OUT_DIR_ITER,
             surface=boozer_surface.surface,
-            surface_dofs=final_result_snapshot.solved_surface_state["sdofs"],
-            iota=final_result_snapshot.solved_surface_state["iota"],
-            G=final_result_snapshot.solved_surface_state["G"],
-            mpol=boozer_surface.surface.mpol,
-            ntor=boozer_surface.surface.ntor,
-            quadpoints_phi=boozer_surface.surface.quadpoints_phi,
-            quadpoints_theta=boozer_surface.surface.quadpoints_theta,
-            coil_dof_extraction_spec=bs.coil_dof_extraction_spec(),
-            coil_dofs=final_result_snapshot.final_coil_dofs,
+            solved_surface_state=final_result_snapshot.solved_surface_state,
+            field_source=bs,
+            final_coil_dofs=final_result_snapshot.final_coil_dofs,
             num_tf_coils=num_tf_coils,
-            banana_curve_index=int(num_tf_coils),
             tf_current_A=stage2_tf_current_A,
-            banana_current_A=resolve_single_stage_final_banana_current_A(
-                use_target_lane=use_target_lane,
-                final_metrics=final_penalty_metrics,
-                banana_current=banana_coils[0].current,
-            ),
+            banana_current_A=final_banana_current_A,
         )
     if (
         not skip_outer_optimizer
@@ -12264,11 +12277,7 @@ if __name__ == "__main__":
             coil_dofs=final_result_snapshot.final_coil_dofs,
             num_tf_coils=num_tf_coils,
             tf_current_A=stage2_tf_current_A,
-            banana_current_A=resolve_single_stage_final_banana_current_A(
-                use_target_lane=use_target_lane,
-                final_metrics=final_penalty_metrics,
-                banana_current=banana_coils[0].current,
-            ),
+            banana_current_A=final_banana_current_A,
             output_dir=OUT_DIR_ITER,
             boozer_surface=boozer_surface,
             bs_diag=bs_diag,
