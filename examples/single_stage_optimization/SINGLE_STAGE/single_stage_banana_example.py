@@ -6532,10 +6532,9 @@ def hardware_status_with_curvature_traversal(hardware_status, precheck_status):
     adjusted_status["violations"] = []
     adjusted_status["constraints"] = adjusted_constraints
     adjusted_status["allowed_traversal_status"] = adjusted_allowed_status
-    if "violation_ratios" in hardware_status:
-        adjusted_ratios = dict(hardware_status["violation_ratios"])
-        adjusted_ratios["max_curvature_penalty"] = 0.0
-        adjusted_status["violation_ratios"] = adjusted_ratios
+    adjusted_ratios = dict(hardware_status["violation_ratios"])
+    adjusted_ratios["max_curvature_penalty"] = 0.0
+    adjusted_status["violation_ratios"] = adjusted_ratios
     adjusted_status["curvature_traversal_allowed"] = True
     adjusted_status["curvature_traversal_status"] = dict(precheck_status)
     adjusted_status["curvature_traversal_original_violations"] = list(

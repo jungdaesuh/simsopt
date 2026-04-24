@@ -9876,6 +9876,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "toroidal_flux": 0.24,
             "order": 2,
             "maxiter": 30,
+            "maxcor": 40,
             "ftol": 1e-15,
             "gtol": 1e-15,
             "constraint_method": "penalty",
@@ -9945,7 +9946,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         alm_accepted_candidate_x=None,
         artifact_state_by_x=None,
         seed_stage2_results=None,
-        arg_overrides=None,
+        arg_overrides=(),
         missing_attr_names=(),
     ):
         module = load_stage2_module()
@@ -10334,9 +10335,6 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             stage2_bs_path = str(Path(tmpdir) / "seed.json") if use_seed else None
-            stage2_arg_overrides = {"maxcor": module.DEFAULT_LBFGSB_MAXCOR}
-            if arg_overrides is not None:
-                stage2_arg_overrides.update(arg_overrides)
             args = self._make_stage2_args(
                 tmpdir,
                 init_only=init_only,
@@ -10344,7 +10342,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 stage2_bs_path=stage2_bs_path,
                 equilibrium_path=str(Path(tmpdir) / "demo.nc"),
                 basin_hops=basin_hops,
-                **stage2_arg_overrides,
+                **dict(arg_overrides),
             )
             for attr_name in missing_attr_names:
                 delattr(args, attr_name)
