@@ -32,7 +32,6 @@ therefore requires ``simsoptpp``.
 
 import gc
 import logging
-import re
 from functools import partial
 import types
 
@@ -162,23 +161,9 @@ from examples.single_stage_optimization.SINGLE_STAGE import (  # noqa: E402
     single_stage_banana_example as single_stage_example,
 )
 
-_HIDDEN_SPEC_FALLBACK_PATTERN = (
-    "BiotSavartJAX.*hidden immutable-spec compatibility fallback.*"
-)
-_HIDDEN_SPEC_WARNING_PATTERN = (
-    "BiotSavartJAX.*hidden immutable-spec compatibility fallback.*legacy adapter seam"
-)
-_REMOVED_LIVE_GRAPH_SPEC_SEAM_PATTERN = (
-    "BiotSavartJAX.*coil_set_spec\\(\\).*legacy adapter seam via "
-    "live-graph geometry extraction was removed"
-)
-_PUBLIC_COIL_VJP_WARNING_PATTERN = (
-    "BiotSavartJAX.*public CPU coil\\.vjp\\(\\) pullback compatibility "
-    "path.*legacy adapter seam"
-)
-_PUBLIC_COIL_VJP_STRICT_PATTERN = (
-    "BiotSavartJAX.*public CPU coil\\.vjp\\(\\) pullback compatibility "
-    "path.*strict=True"
+_REMOVED_CPU_COIL_PULLBACK_PATTERN = (
+    "BiotSavartJAX.*immutable JAX curve specs.*"
+    "CPU coil-pullback fallback was removed"
 )
 _LS_WRAPPER_GRADIENT_TOLS = parity_ladder_tolerances("ls-wrapper-gradient")
 _DERIVATIVE_HEAVY_TOLS = parity_ladder_tolerances("derivative-heavy")
@@ -341,43 +326,7 @@ _enable_fast_non_strict_jax_backend = partial(
 )
 
 
-def _assert_hidden_spec_fallback_rejected(
-    monkeypatch,
-    request,
-    callback,
-    *,
-    api_name,
-    mode="jax_gpu_parity",
-):
-    _enable_strict_jax_backend(monkeypatch, request, mode=mode)
-    with pytest.raises(
-        RuntimeError,
-        match=_HIDDEN_SPEC_FALLBACK_PATTERN
-        + rf".*{re.escape(api_name)}\(\).*strict=True",
-    ):
-        callback()
-
-
-def _assert_hidden_spec_fallback_warns(
-    monkeypatch,
-    request,
-    callback,
-    *,
-    api_name,
-    mode="jax_gpu_parity",
-):
-    _enable_non_strict_jax_backend(monkeypatch, request, mode=mode)
-    with pytest.warns(
-        RuntimeWarning,
-        match=(
-            _HIDDEN_SPEC_WARNING_PATTERN.replace(".*legacy adapter seam", "")
-            + rf".*{re.escape(api_name)}\(\).*legacy adapter seam"
-        ),
-    ):
-        return callback()
-
-
-def _assert_removed_live_graph_spec_seam(
+def _assert_immutable_spec_contract_rejects(
     monkeypatch,
     request,
     callback,
@@ -388,10 +337,7 @@ def _assert_removed_live_graph_spec_seam(
         _enable_strict_jax_backend(monkeypatch, request)
     else:
         _enable_non_strict_jax_backend(monkeypatch, request)
-    with pytest.raises(
-        RuntimeError,
-        match=_REMOVED_LIVE_GRAPH_SPEC_SEAM_PATTERN,
-    ):
+    with pytest.raises(NotImplementedError):
         callback()
 
 
@@ -920,19 +866,6 @@ class _WholeGroupArrayConversionBomb:
         return self._slices[index]
 
 
-class _ArrayScalarNoFloat:
-    """Scalar-like wrapper that can be array-converted but must not hit float()."""
-
-    def __init__(self, value):
-        self._value = value
-
-    def __array__(self, dtype=None, copy=None):
-        return np.asarray(self._value, dtype=dtype)
-
-    def __float__(self):
-        raise AssertionError("Fallback coil current extraction should not call float()")
-
-
 class _FakeCurve:
     """Non-native curve stub for _unwrap_coil_curve_and_current."""
 
@@ -950,7 +883,7 @@ class _RecordingVJPCoil:
 
     Includes ``curve`` and ``current`` attributes so
     ``_unwrap_coil_curve_and_current`` can process this coil
-    (non-native curve path → falls through to ``coil.vjp()``).
+    before rejecting the removed CPU ``coil.vjp()`` seam.
     """
 
     def __init__(self):
@@ -1000,7 +933,7 @@ class _CpuProjectableCurve(Curve):
 
 
 class _JaxProjectableCurve:
-    """Curve stub exposing JAX pullback methods without native geometry support."""
+    """Legacy method-only curve stub without an immutable JAX spec."""
 
     def __init__(self):
         self.dof_size = 2
@@ -1307,7 +1240,7 @@ def _assert_coil_set_spec_prefers_immutable_curve_specs(
 
     monkeypatch.setattr(
         bs_jax,
-        "_coil_set_spec_from_dofs_via_grouped_arrays",
+        "_coil_arrays_in_order_from_dofs",
         lambda _coil_dofs: (_ for _ in ()).throw(AssertionError(message)),
     )
 
@@ -2713,7 +2646,7 @@ class TestAdjointSolveConsistency:
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError(
                     "coil_set_spec_from_dofs() should use immutable per-coil specs "
-                    "before the grouped-array compatibility path"
+                    "without grouped-array reconstruction"
                 )
             ),
         )
@@ -2793,29 +2726,8 @@ class TestAdjointSolveConsistency:
         grouped_spec = bs_jax.coil_set_spec()
         assert isinstance(grouped_spec, GroupedCoilSetSpec)
 
-    def test_non_strict_mode_warns_on_grouped_spec_fallback_in_coil_set_spec_from_dofs(
-        self,
-        monkeypatch,
-        request,
-    ):
-        curve = CurveXYZFourier(16, 1)
-        curve.x = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
-        current = Current(1.23)
-        bs_jax = BiotSavartJAX([Coil(curve, current)])
-        monkeypatch.setattr(
-            bs_jax,
-            "coil_specs_from_dofs",
-            lambda _coil_dofs: (_ for _ in ()).throw(NotImplementedError),
-        )
-        _assert_hidden_spec_fallback_warns(
-            monkeypatch,
-            request,
-            lambda: bs_jax.coil_set_spec_from_dofs(jnp.asarray(bs_jax.x)),
-            api_name="coil_set_spec_from_dofs",
-        )
-
     @pytest.mark.parametrize("mode", ["strict", "non_strict"])
-    def test_coil_set_spec_rejects_removed_live_graph_spec_seam(
+    def test_coil_set_spec_from_dofs_requires_immutable_specs(
         self,
         monkeypatch,
         request,
@@ -2827,24 +2739,22 @@ class TestAdjointSolveConsistency:
         bs_jax = BiotSavartJAX([Coil(curve, current)])
         monkeypatch.setattr(
             bs_jax,
-            "_coil_set_spec_from_dofs_prefer_specs",
+            "coil_specs_from_dofs",
             lambda _coil_dofs: (_ for _ in ()).throw(NotImplementedError),
         )
-        monkeypatch.setattr(
-            bs_jax,
-            "coil_specs",
-            lambda: (_ for _ in ()).throw(NotImplementedError),
-        )
-        _assert_removed_live_graph_spec_seam(
+        _assert_immutable_spec_contract_rejects(
             monkeypatch,
             request,
-            bs_jax.coil_set_spec,
+            lambda: bs_jax.coil_set_spec_from_dofs(jnp.asarray(bs_jax.x)),
             mode=mode,
         )
 
-    def test_extract_coil_data_grouped_uses_explicit_live_graph_compatibility_path(
+    @pytest.mark.parametrize("mode", ["strict", "non_strict"])
+    def test_coil_set_spec_requires_explicit_immutable_state(
         self,
         monkeypatch,
+        request,
+        mode,
     ):
         curve = CurveXYZFourier(16, 1)
         curve.x = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
@@ -2852,15 +2762,40 @@ class TestAdjointSolveConsistency:
         bs_jax = BiotSavartJAX([Coil(curve, current)])
         monkeypatch.setattr(
             bs_jax,
-            "_coil_set_spec_from_dofs_prefer_specs",
-            lambda _coil_dofs: (_ for _ in ()).throw(NotImplementedError),
+            "_coil_set_spec_from_explicit_state",
+            lambda: (_ for _ in ()).throw(NotImplementedError),
         )
         monkeypatch.setattr(
             bs_jax,
             "coil_specs",
             lambda: (_ for _ in ()).throw(NotImplementedError),
         )
-        expected = bs_jax._coil_set_spec_from_live_geometry()
+        _assert_immutable_spec_contract_rejects(
+            monkeypatch,
+            request,
+            bs_jax.coil_set_spec,
+            mode=mode,
+        )
+
+    def test_extract_coil_data_grouped_reads_explicit_grouped_spec_state(
+        self,
+        monkeypatch,
+    ):
+        curve = CurveXYZFourier(16, 1)
+        curve.x = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+        current = Current(1.23)
+        bs_jax = BiotSavartJAX([Coil(curve, current)])
+        expected = bs_jax.coil_set_spec()
+        monkeypatch.setattr(
+            bs_jax,
+            "_coil_geometry_inputs",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "_extract_coil_data_grouped() should read grouped spec state "
+                    "instead of rebuilding live geometry"
+                )
+            ),
+        )
         observed = bs_jax._extract_coil_data_grouped()
         _assert_grouped_field_data_matches_spec(observed, expected)
 
@@ -3244,7 +3179,7 @@ class TestAdjointSolveConsistency:
             monkeypatch,
             _build_helical_curve(24),
             1.23,
-            "CurveHelical should use immutable specs before grouped-array fallback",
+            "CurveHelical should stay off grouped-array reconstruction",
         )
 
     def test_coil_set_spec_from_dofs_prefers_immutable_curveplanarfourier_specs(
@@ -3255,7 +3190,7 @@ class TestAdjointSolveConsistency:
             monkeypatch,
             _build_planar_curve(24),
             2.5,
-            "CurvePlanarFourier should use immutable specs before grouped-array fallback",
+            "CurvePlanarFourier should stay off grouped-array reconstruction",
         )
 
     def test_grouped_coil_arrays_from_dofs_supports_curveperturbed_fullgraph_geometry(
@@ -3272,7 +3207,7 @@ class TestAdjointSolveConsistency:
             monkeypatch,
             _build_perturbed_helical_curve(24),
             1.7,
-            "CurvePerturbed should use immutable specs before grouped-array fallback",
+            "CurvePerturbed should stay off grouped-array reconstruction",
         )
 
     def test_coil_set_spec_from_dofs_prefers_immutable_curvefilament_specs(
@@ -3283,7 +3218,7 @@ class TestAdjointSolveConsistency:
             monkeypatch,
             _build_filament_curve(32),
             8.0e4,
-            "CurveFilament should use immutable specs before grouped-array fallback",
+            "CurveFilament should stay off grouped-array reconstruction",
         )
 
     def test_biotsavart_B_vjp_bypasses_coil_vjp_for_curvefilament(self, monkeypatch):
@@ -3310,12 +3245,12 @@ class TestAdjointSolveConsistency:
             "BiotSavartJAX.B_vjp() should bypass Coil.vjp() for finite-build CWS curves",
         )
 
-    def test_non_strict_mode_warns_on_public_cpu_coil_vjp_pullback(
+    def test_non_strict_mode_rejects_public_cpu_coil_vjp_pullback(
         self,
         monkeypatch,
         request,
     ):
-        """Non-strict JAX mode should warn before using the public CPU pullback seam."""
+        """Non-strict JAX mode should reject the public CPU pullback seam."""
         _enable_non_strict_jax_backend(monkeypatch, request)
         coils = [_CpuFallbackRecordingCoil(), _CpuFallbackRecordingCoil()]
         bs_jax = _make_biotsavart_jax_for_coils(coils)
@@ -3337,36 +3272,16 @@ class TestAdjointSolveConsistency:
             )
         ]
 
-        with pytest.warns(
-            RuntimeWarning,
-            match=_PUBLIC_COIL_VJP_WARNING_PATTERN,
+        with pytest.raises(
+            TypeError,
+            match=_REMOVED_CPU_COIL_PULLBACK_PATTERN,
         ):
-            derivative = bs_jax.coil_cotangents_to_derivative(d_coil_arrays, [[0, 1]])
+            bs_jax.coil_cotangents_to_derivative(d_coil_arrays, [[0, 1]])
 
-        np.testing.assert_allclose(
-            np.asarray(derivative.data[coils[0].curve], dtype=float),
-            np.array([71.0, 82.0]),
-            atol=1e-12,
-        )
-        np.testing.assert_allclose(
-            np.asarray(derivative.data[coils[1].curve], dtype=float),
-            np.array([104.0, 115.0]),
-            atol=1e-12,
-        )
-        np.testing.assert_allclose(
-            np.asarray(derivative.data[coils[0].current], dtype=float),
-            np.array([1.5]),
-            atol=1e-12,
-        )
-        np.testing.assert_allclose(
-            np.asarray(derivative.data[coils[1].current], dtype=float),
-            np.array([2.5]),
-            atol=1e-12,
-        )
-        assert len(coils[0].calls) == 1
-        assert len(coils[1].calls) == 1
-        assert len(coils[0].current.calls) == 1
-        assert len(coils[1].current.calls) == 1
+        assert coils[0].calls == []
+        assert coils[1].calls == []
+        assert coils[0].current.calls == []
+        assert coils[1].current.calls == []
 
     def test_strict_mode_rejects_public_cpu_coil_vjp_pullback(
         self,
@@ -3379,8 +3294,8 @@ class TestAdjointSolveConsistency:
         bs_jax = _make_biotsavart_jax_for_coils(coils)
 
         with pytest.raises(
-            RuntimeError,
-            match=_PUBLIC_COIL_VJP_STRICT_PATTERN,
+            TypeError,
+            match=_REMOVED_CPU_COIL_PULLBACK_PATTERN,
         ):
             bs_jax.coil_cotangents_to_derivative(
                 _single_coil_cotangent_arrays(
@@ -3405,8 +3320,8 @@ class TestAdjointSolveConsistency:
         bs_jax = _make_biotsavart_jax_for_coils(coils)
 
         with pytest.raises(
-            RuntimeError,
-            match="BiotSavartJAX.*public CPU coil\\.vjp\\(\\) pullback compatibility path.*jax_gpu_fast.*fast/ondevice lane",
+            TypeError,
+            match=_REMOVED_CPU_COIL_PULLBACK_PATTERN,
         ):
             bs_jax.coil_cotangents_to_derivative(
                 _single_coil_cotangent_arrays(
@@ -3420,42 +3335,29 @@ class TestAdjointSolveConsistency:
         assert coils[0].calls == []
         assert coils[0].current.calls == []
 
-    def test_biotsavart_projection_preserves_raw_rotated_cpu_coil_vjp_inputs(
+    def test_biotsavart_projection_rejects_rotated_public_cpu_coil_vjp_pullback(
         self,
         monkeypatch,
         request,
     ):
-        """Rotated public fallback coils should receive raw cotangents at ``coil.vjp()``."""
+        """Rotated public fallback coils must not route through ``coil.vjp()``."""
         _enable_non_strict_jax_backend(monkeypatch, request)
         coils = [_CpuFallbackRecordingCoil(rotated=True, phi=np.pi / 2.0)]
         bs_jax = _make_biotsavart_jax_for_coils(coils)
         d_gamma = np.array([1.0, 2.0, 3.0])
         d_gammadash = np.array([4.0, 5.0, 6.0])
 
-        with pytest.warns(
-            RuntimeWarning,
-            match=_PUBLIC_COIL_VJP_WARNING_PATTERN,
+        with pytest.raises(
+            TypeError,
+            match=_REMOVED_CPU_COIL_PULLBACK_PATTERN,
         ):
-            derivative = bs_jax.coil_cotangents_to_derivative(
+            bs_jax.coil_cotangents_to_derivative(
                 _single_coil_cotangent_arrays(d_gamma, d_gammadash, 1.5),
                 [[0]],
             )
 
-        np.testing.assert_allclose(
-            np.asarray(derivative.data[coils[0].curve.curve], dtype=float),
-            np.array([52.0, -41.0]),
-            atol=1e-12,
-        )
-        np.testing.assert_allclose(
-            np.asarray(derivative.data[coils[0].current], dtype=float),
-            np.array([1.5]),
-            atol=1e-12,
-        )
-        np.testing.assert_allclose(coils[0].calls[0][0], d_gamma, atol=1e-12)
-        np.testing.assert_allclose(coils[0].calls[0][1], d_gammadash, atol=1e-12)
-        np.testing.assert_allclose(coils[0].calls[0][2], np.array([1.5]), atol=1e-12)
-        assert len(coils[0].calls) == 1
-        assert len(coils[0].current.calls) == 1
+        assert coils[0].calls == []
+        assert coils[0].current.calls == []
 
     def test_biotsavart_projection_rejects_unsupported_curves_without_coil_fallback(
         self,
@@ -3464,7 +3366,7 @@ class TestAdjointSolveConsistency:
         coils = [_RecordingVJPCoil()]
         bs_jax = _make_biotsavart_jax_for_coils(coils)
 
-        with pytest.raises(TypeError, match="supported JAX or CPU pullback contract"):
+        with pytest.raises(TypeError, match=_REMOVED_CPU_COIL_PULLBACK_PATTERN):
             bs_jax.coil_cotangents_to_derivative(
                 _single_coil_cotangent_arrays(
                     np.array([1.0, 2.0, 3.0]),
@@ -3483,7 +3385,7 @@ class TestAdjointSolveConsistency:
         coils = [_RotatedUnsupportedRecordingCoil()]
         bs_jax = _make_biotsavart_jax_for_coils(coils)
 
-        with pytest.raises(TypeError, match="supported JAX or CPU pullback contract"):
+        with pytest.raises(TypeError, match=_REMOVED_CPU_COIL_PULLBACK_PATTERN):
             bs_jax.coil_cotangents_to_derivative(
                 _single_coil_cotangent_arrays(
                     np.array([1.0, 2.0, 3.0]),
@@ -3496,80 +3398,24 @@ class TestAdjointSolveConsistency:
         assert coils[0].calls == []
         assert coils[0].current.calls == []
 
-    def test_biotsavart_projection_uses_jax_pullbacks_for_projectable_curves(self):
-        """JAX-capable curves should bypass ``coil.vjp()`` even if they are not native."""
-        bs_jax = object.__new__(BiotSavartJAX)
-        coils = [_FallbackBombCoil()]
-        bs_jax._coils = coils
-
-        derivative = bs_jax.coil_cotangents_to_derivative(
-            [
-                (
-                    jnp.array([[1.0, 2.0, 3.0]]),
-                    jnp.array([[4.0, 5.0, 6.0]]),
-                    jnp.array([1.5]),
-                )
-            ],
-            [[0]],
-        )
-
-        np.testing.assert_allclose(
-            np.asarray(derivative.data[coils[0].curve], dtype=float),
-            np.array([41.0, 52.0]),
-            atol=1e-12,
-        )
-        np.testing.assert_allclose(
-            np.asarray(derivative.data[coils[0].current], dtype=float),
-            np.array([1.5]),
-            atol=1e-12,
-        )
-
-    def test_biotsavart_grouped_extraction_keeps_array_like_cpu_currents(self):
-        """Legacy fallback extraction should preserve array-like current scalars."""
-        bs_jax = object.__new__(BiotSavartJAX)
-        bs_jax._coils = [object()]
-        bs_jax._jax_native = False
-        bs_jax._coil_geometry_inputs = lambda coil, geometry_cache: (
-            None,
-            None,
-            np.array([[1.0, 0.0, 0.0]]),
-            np.array([[0.0, 1.0, 0.0]]),
-            _ArrayScalarNoFloat(1.5),
-        )
-
-        groups = bs_jax._extract_coil_data_grouped()
-
-        assert len(groups) == 1
-        _, _, currents, indices = groups[0]
-        np.testing.assert_allclose(np.asarray(currents, dtype=float), np.array([1.5]))
-        assert indices == [0]
-
-    def test_coil_cotangent_projection_uses_jax_path_for_projectable_curves(self):
-        """BiotSavartJAX should project directly through the shared JAX path."""
+    def test_coil_cotangent_projection_rejects_method_only_jax_pullback_hooks(self):
+        """Method-only JAX pullback hooks are not a native spec contract."""
         coils = [_FallbackBombCoil()]
         bs_jax = object.__new__(BiotSavartJAX)
         bs_jax._coils = coils
-        derivative = bs_jax.coil_cotangents_to_derivative(
-            [
-                (
-                    jnp.array([[1.0, 2.0, 3.0]]),
-                    jnp.array([[4.0, 5.0, 6.0]]),
-                    jnp.array([1.5]),
-                )
-            ],
-            [[0]],
-        )
+        with pytest.raises(TypeError, match=_REMOVED_CPU_COIL_PULLBACK_PATTERN):
+            bs_jax.coil_cotangents_to_derivative(
+                [
+                    (
+                        jnp.array([[1.0, 2.0, 3.0]]),
+                        jnp.array([[4.0, 5.0, 6.0]]),
+                        jnp.array([1.5]),
+                    )
+                ],
+                [[0]],
+            )
 
-        np.testing.assert_allclose(
-            np.asarray(derivative.data[coils[0].curve], dtype=float),
-            np.array([41.0, 52.0]),
-            atol=1e-12,
-        )
-        np.testing.assert_allclose(
-            np.asarray(derivative.data[coils[0].current], dtype=float),
-            np.array([1.5]),
-            atol=1e-12,
-        )
+        assert coils[0].current.calls == []
 
     def test_legacy_surfaceobjectives_projection_helper_is_unsupported(self):
         """The old surfaceobjectives compatibility helper should hard-fail now."""
@@ -5739,11 +5585,12 @@ class TestExactSolveCPUJAXParity:
         This is the parity-ladder ``exact-ill-conditioned-adjoint`` lane:
         residual/failure-only coverage with no vector parity assertion.
         Direct gradient parity is validated on the ``ls-wrapper-gradient``
-        lane in test_real_fixture_ondevice_parity_and_wrapper_gradients.  A
-        future well-conditioned exact fixture must use the
-        ``exact-well-conditioned-adjoint`` lane before asserting operator-vs-
-        dense vector parity. FD correctness is validated on the LS re-solve
-        path (not exact) in TestIotasJAXResolveFD and TestNonQSRatioJAXResolveFD.
+        lane in test_real_fixture_ondevice_parity_and_wrapper_gradients.  The
+        well-conditioned exact oracle lane now lives in
+        ``tests/geo/test_boozersurface_jax.py::
+        test_exact_well_conditioned_operator_adjoint_matches_dense_reference_and_plu``.
+        FD correctness is validated on the LS re-solve path (not exact) in
+        TestIotasJAXResolveFD and TestNonQSRatioJAXResolveFD.
         """
         exact_pair = _solve_exact_cpu_jax_parity_pair()
         adjoint_state = exact_pair.booz_jax_exact.get_adjoint_runtime_state()

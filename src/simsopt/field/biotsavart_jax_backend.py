@@ -12,16 +12,10 @@ M0 rewrite contract (adapter pattern, §5).
 from dataclasses import dataclass
 import time
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 
-from ..backend import (
-    get_backend_config,
-    is_parity_mode,
-    raise_if_strict_jax_fallback,
-    warn_if_jax_fallback,
-)
 from .._core.derivative import Derivative
 from .._core.optimizable import Optimizable
 from ..jax_core import (
@@ -46,7 +40,6 @@ from ..jax_core.field import (
     grouped_coil_set_spec_from_coil_specs,
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
-    grouped_coil_set_spec_from_lists,
 )
 from ..jax_core.specs import make_field_eval_spec
 from ..jax_core.biotsavart import (
@@ -136,49 +129,6 @@ def _build_coil_profile_entry(coil_index, coil_timings):
     }
 
 
-def _raise_if_strict_biot_savart_fallback(detail: str) -> None:
-    raise_if_strict_jax_fallback(
-        component="BiotSavartJAX",
-        detail=detail,
-    )
-
-
-def _warn_biot_savart_fallback(detail: str) -> None:
-    warn_if_jax_fallback(
-        component="BiotSavartJAX",
-        detail=detail,
-    )
-
-
-def _raise_if_strict_hidden_spec_fallback(detail: str) -> None:
-    _raise_if_strict_biot_savart_fallback(
-        f"the hidden immutable-spec compatibility fallback via {detail}"
-    )
-
-
-def _warn_hidden_spec_fallback(detail: str) -> None:
-    _warn_biot_savart_fallback(
-        f"the hidden immutable-spec compatibility fallback via {detail}"
-    )
-
-
-def _handle_hidden_spec_fallback(detail: str) -> None:
-    _raise_if_strict_hidden_spec_fallback(detail)
-    _warn_hidden_spec_fallback(detail)
-
-
-def _handle_grouped_spec_compat_fallback(api_name: str, detail: str) -> None:
-    _handle_hidden_spec_fallback(f"{detail} in {api_name}()")
-
-
-def _removed_live_graph_spec_seam_error(api_name: str) -> RuntimeError:
-    return RuntimeError(
-        "BiotSavartJAX requires explicit immutable grouped-coil state in "
-        f"{api_name}(); legacy adapter seam via live-graph geometry extraction "
-        "was removed."
-    )
-
-
 def _build_pullback_group_profile_entry(*, kind, coil_indices, elapsed_s, native_curve):
     return {
         "kind": kind,
@@ -218,10 +168,14 @@ class _CoilVJPInfo:
 
 
 def _supports_native_curve_geometry(curve):
-    from ..geo.curvexyzfourier import CurveXYZFourier
+    if callable(getattr(curve, "to_spec", None)):
+        return True
 
-    return isinstance(curve, CurveXYZFourier) or (
-        hasattr(curve, "gamma_jax") and hasattr(curve, "gammadash_jax")
+    surface = getattr(curve, "surf", None)
+    return (
+        surface is not None
+        and getattr(curve, "surf_type", None) == "RZ_Fourier"
+        and callable(getattr(surface, "surface_spec", None))
     )
 
 
@@ -245,64 +199,6 @@ def _curve_live_dofs(curve):
 
 def _curve_quadpoints_jax(curve):
     return _as_jax_float64(curve.quadpoints)
-
-
-def _curve_surface_dofs(curve):
-    surf = getattr(curve, "surf", None)
-    if surf is None or surf.dof_size == 0:
-        return None
-    return _as_jax_float64(surf.get_dofs())
-
-
-def _supports_jax_curve_pullback(curve):
-    from ..geo.curvexyzfourier import CurveXYZFourier
-
-    if isinstance(curve, CurveXYZFourier):
-        return True
-
-    if not (
-        hasattr(curve, "dgamma_by_dcoeff_vjp_jax")
-        and hasattr(curve, "dgammadash_by_dcoeff_vjp_jax")
-    ):
-        return False
-
-    if _curve_surface_dofs(curve) is None:
-        return True
-
-    return hasattr(curve, "dgamma_by_dsurf_vjp_jax") and hasattr(
-        curve, "dgammadash_by_dsurf_vjp_jax"
-    )
-
-
-_PUBLIC_CURVE_PULLBACK_METHODS = (
-    ("dgamma_by_dcoeff_vjp", "dgamma_by_dcoeff_vjp_impl"),
-    ("dgammadash_by_dcoeff_vjp", "dgammadash_by_dcoeff_vjp_impl"),
-)
-
-
-def _has_concrete_curve_pullback_method(curve, method_name, impl_name):
-    from ..geo.curve import Curve
-
-    curve_type = type(curve)
-    curve_method = getattr(curve_type, method_name, None)
-    curve_impl = getattr(curve_type, impl_name, None)
-    base_method = getattr(Curve, method_name, None)
-    base_impl = getattr(Curve, impl_name, None)
-    return (curve_method is not None and curve_method is not base_method) or (
-        curve_impl is not None and curve_impl is not base_impl
-    )
-
-
-def _supports_public_curve_pullback(curve):
-    return all(
-        _has_concrete_curve_pullback_method(curve, method_name, impl_name)
-        for method_name, impl_name in _PUBLIC_CURVE_PULLBACK_METHODS
-    )
-
-
-_PUBLIC_COIL_VJP_PULLBACK_DETAIL = (
-    "the public CPU coil.vjp() pullback compatibility path"
-)
 
 
 def _merge_derivative_data(target, derivative_like):
@@ -402,145 +298,41 @@ def _curve_pullback_data_from_spec(curve, dg, dgd):
 
 
 def _merge_curve_pullback_data(deriv_data, curve, dg, dgd):
-    try:
-        _merge_derivative_data(
-            deriv_data,
-            _curve_pullback_data_from_spec(curve, dg, dgd),
-        )
-    except NotImplementedError:
-        _merge_derivative_data(
-            deriv_data,
-            _curve_coeff_pullback_data_from_methods(curve, dg, dgd),
-        )
-        _merge_derivative_data(
-            deriv_data,
-            _curve_surface_pullback_data(curve, dg, dgd),
-        )
-
-
-def _curve_coeff_pullback_data_from_methods(curve, dg, dgd):
-    if curve.dof_size == 0:
-        return {}
-
-    curve_dofs = _curve_live_dofs(curve)
-    coeff_cotangent = curve.dgamma_by_dcoeff_vjp_jax(
-        curve_dofs,
-        dg,
-    ) + curve.dgammadash_by_dcoeff_vjp_jax(curve_dofs, dgd)
-    if _curve_dof_mode(curve) == "full":
-        return _full_curve_cotangent_to_derivative(curve, coeff_cotangent)
-    return {curve: coeff_cotangent}
+    _merge_derivative_data(
+        deriv_data,
+        _curve_pullback_data_from_spec(curve, dg, dgd),
+    )
 
 
 def _curve_gamma_and_dash_from_dofs(curve, curve_dofs):
-    # Spec-capable curves, including full-graph wrappers, use the canonical spec path.
-    try:
-        return curve_gamma_and_dash_from_spec_dofs(
-            curve_spec_from_curve(curve),
-            curve_dofs,
-        )
-    except NotImplementedError:
-        pass
-
-    # Method-based fallback for non-spec curves with gamma_jax.
-    surf_dofs = _curve_surface_dofs(curve)
-    if surf_dofs is not None:
-        return (
-            curve.gamma_jax(curve_dofs, surf_dofs),
-            curve.gammadash_jax(curve_dofs, surf_dofs),
-        )
-    return curve.gamma_jax(curve_dofs), curve.gammadash_jax(curve_dofs)
-
-
-def _curve_surface_pullback_data(curve, dg, dgd):
-    surf_dofs = _curve_surface_dofs(curve)
-    if surf_dofs is None:
-        return {}
-    if not (
-        hasattr(curve, "dgamma_by_dsurf_vjp_jax")
-        and hasattr(curve, "dgammadash_by_dsurf_vjp_jax")
-    ):
-        return {}
-
-    return {
-        curve.surf: curve.dgamma_by_dsurf_vjp_jax(surf_dofs, dg)
-        + curve.dgammadash_by_dsurf_vjp_jax(surf_dofs, dgd)
-    }
-
-
-def _nonzero_dof_derivative_data(derivative_like):
-    items = (
-        derivative_like.data.items()
-        if isinstance(derivative_like, Derivative)
-        else derivative_like.items()
-    )
-    filtered = {}
-    for opt, block in items:
-        if getattr(opt, "dof_size", None) == 0:
-            continue
-        filtered[opt] = block
-    return filtered
-
-
-def _handle_public_coil_vjp_pullback_fallback() -> None:
-    _raise_if_strict_biot_savart_fallback(_PUBLIC_COIL_VJP_PULLBACK_DETAIL)
-    config = get_backend_config()
-    if (
-        config.backend == "jax"
-        and not config.strict
-        and not is_parity_mode(config.mode)
-    ):
-        raise RuntimeError(
-            "BiotSavartJAX cannot use the public CPU coil.vjp() pullback "
-            "compatibility path while simsopt backend mode "
-            f"{config.mode!r} targets the fast/ondevice lane. This legacy "
-            "adapter seam is only supported on CPU/reference or parity lanes."
-        )
-    _warn_biot_savart_fallback(_PUBLIC_COIL_VJP_PULLBACK_DETAIL)
-
-
-def _coil_pullback_data_from_public_vjp(coil, dg, dgd, dc):
-    return _nonzero_dof_derivative_data(
-        coil.vjp(
-            np.asarray(dg, dtype=np.float64),
-            np.asarray(dgd, dtype=np.float64),
-            np.atleast_1d(np.asarray(dc, dtype=np.float64)),
-        )
+    return curve_gamma_and_dash_from_spec_dofs(
+        curve_spec_from_curve(curve),
+        curve_dofs,
     )
 
 
 def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
     curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
-    supports_jax_pullback = _supports_jax_curve_pullback(curve)
-    supports_public_pullback = hasattr(coil, "vjp") and _supports_public_curve_pullback(
-        curve
-    )
+    if not _supports_native_curve_geometry(curve):
+        raise TypeError(
+            "BiotSavartJAX coil cotangent projection requires immutable JAX "
+            f"curve specs; unsupported type {type(curve).__name__}. "
+            "The CPU coil-pullback fallback was removed."
+        )
 
-    if rotmat is not None and supports_jax_pullback:
+    if rotmat is not None:
         rotmat_t = _as_jax_float64(rotmat).T
         dg = _as_jax_float64(dg) @ rotmat_t
         dgd = _as_jax_float64(dgd) @ rotmat_t
 
-    if supports_jax_pullback:
-        deriv_data = {}
-        _merge_curve_pullback_data(deriv_data, curve, dg, dgd)
-        if current.dof_size > 0:
-            current_cotangent = jnp.atleast_1d(
-                _as_jax_float64(scale) * _as_jax_float64(dc)
-            )
-            _merge_derivative_data(deriv_data, current.vjp(current_cotangent))
-        return deriv_data
-
-    if supports_public_pullback:
-        _handle_public_coil_vjp_pullback_fallback()
-        return _coil_pullback_data_from_public_vjp(coil, dg, dgd, dc)
-
-    raise TypeError(
-        "BiotSavartJAX coil cotangent projection requires curves that expose "
-        "a supported JAX or CPU pullback contract with JAX pullback hooks; "
-        "CPU coil-pullback fallback was removed. Unsupported type "
-        f"{type(curve).__name__}."
-    )
+    deriv_data = {}
+    _merge_curve_pullback_data(deriv_data, curve, dg, dgd)
+    if current.dof_size > 0:
+        current_cotangent = jnp.atleast_1d(
+            _as_jax_float64(scale) * _as_jax_float64(dc)
+        )
+        _merge_derivative_data(deriv_data, current.vjp(current_cotangent))
+    return deriv_data
 
 
 def project_coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
@@ -609,8 +401,8 @@ class BiotSavartJAX(Optimizable):
     ``RotatedCurve``), the JAX-native path is enabled: coil geometry
     is evaluated from DOFs via a precomputed Fourier basis matrix
     entirely inside the JIT boundary, eliminating CPU round-trips.
-    More general curve families can still participate when they expose the
-    JAX geometry and pullback hooks used below. Unsupported curves are now
+    More general curve families can still participate when they expose
+    immutable JAX specs used below. Unsupported curves are now
     rejected explicitly instead of falling back to CPU geometry/pullback code.
 
     Args:
@@ -623,8 +415,8 @@ class BiotSavartJAX(Optimizable):
         self._points_version = 0
         Optimizable.__init__(self, x0=np.asarray([]), depends_on=self._coils)
 
-        # JAX-native path metadata (populated by _introspect_coils)
-        self._jax_native = False
+        # Uniform CurveXYZFourier fast-path metadata (populated by _introspect_coils)
+        self._uses_uniform_curve_xyz_fourier_fastpath = False
         self._unique_base_curves = []
         self._unique_base_currents = []
         self._coil_descs = []  # list of (curve_idx, current_idx, rotmat_jax, scale)
@@ -632,11 +424,7 @@ class BiotSavartJAX(Optimizable):
         self._curve_dof_size = 0
         self._curve_quadpoints_jax = None
         self._introspect_coils()
-        self._coil_dof_extraction_spec = None
-        try:
-            self._coil_dof_extraction_spec = self._build_coil_dof_extraction_spec()
-        except NotImplementedError:
-            pass
+        self._coil_dof_extraction_spec = self._build_coil_dof_extraction_spec()
 
     def _introspect_coils(self):
         """Walk coil tree to identify unique base curves/currents.
@@ -645,11 +433,8 @@ class BiotSavartJAX(Optimizable):
         ``CurveXYZFourier`` (possibly wrapped in ``RotatedCurve``)
         with uniform Fourier order and quadrature point count.
         """
-        try:
-            from ..geo.curvexyzfourier import CurveXYZFourier
-            from .coil import Current
-        except ImportError:
-            return
+        from ..geo.curvexyzfourier import CurveXYZFourier
+        from .coil import Current
 
         base_curve_ids = {}  # id(obj) → index
         base_current_ids = {}
@@ -661,7 +446,7 @@ class BiotSavartJAX(Optimizable):
             curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
 
             if not isinstance(curve, CurveXYZFourier):
-                return  # unsupported curve type → stay on fallback path
+                return
 
             cid = id(curve)
             if cid not in base_curve_ids:
@@ -695,7 +480,7 @@ class BiotSavartJAX(Optimizable):
             if not np.array_equal(ref_qp, np.asarray(c.quadpoints)):
                 return
 
-        self._jax_native = True
+        self._uses_uniform_curve_xyz_fourier_fastpath = True
         self._unique_base_curves = base_curves
         self._unique_base_currents = base_currents
         self._coil_descs = descs
@@ -725,25 +510,10 @@ class BiotSavartJAX(Optimizable):
 
     def coil_dof_extraction_spec(self):
         """Return the cached immutable owner-DOF reconstruction contract."""
-        if self._coil_dof_extraction_spec is None:
-            raise NotImplementedError(
-                "coil_dof_extraction_spec() requires immutable JAX curve specs for "
-                "every base curve."
-            )
         return self._coil_dof_extraction_spec
 
-    def supports_jax_objective_fallback(self):
-        """Return whether the mixed-quadrature objective path stays JAX-native."""
-        return all(
-            _supports_native_curve_geometry(curve)
-            and _supports_jax_curve_pullback(curve)
-            for curve, _rotmat, _current, _scale in (
-                _unwrap_coil_curve_and_current(coil) for coil in self._coils
-            )
-        )
-
     def _coil_arrays_in_order_from_dofs_generic_jax(self, coil_dofs):
-        """Rebuild per-coil arrays for any JAX-geometry-capable curve set."""
+        """Rebuild per-coil arrays for curve sets with immutable JAX specs."""
         from .coil import Current
 
         coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
@@ -755,7 +525,7 @@ class BiotSavartJAX(Optimizable):
             curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
             if not _supports_native_curve_geometry(curve):
                 raise RuntimeError(
-                    "grouped_coil_arrays_from_dofs() requires JAX geometry support "
+                    "grouped_coil_arrays_from_dofs() requires immutable JAX specs "
                     f"for every base curve; unsupported type {type(curve).__name__}."
                 )
             if not isinstance(current, Current):
@@ -882,22 +652,11 @@ class BiotSavartJAX(Optimizable):
             coil_dofs,
         )
 
-    def _coil_set_spec_from_dofs_prefer_specs(self, coil_dofs):
+    def _coil_set_spec_from_dofs_immutable_specs(self, coil_dofs):
         coil_dofs = self._normalize_explicit_coil_dofs(coil_dofs)
-        try:
-            return grouped_coil_set_spec_from_coil_specs(
-                self.coil_specs_from_dofs(coil_dofs),
-            )
-        except NotImplementedError:
-            _handle_grouped_spec_compat_fallback(
-                "coil_set_spec_from_dofs",
-                "grouped-array reconstruction",
-            )
-            return self._coil_set_spec_from_dofs_via_grouped_arrays(coil_dofs)
-
-    def _coil_set_spec_from_dofs_via_grouped_arrays(self, coil_dofs):
-        gammas, gammadashs, currents = self._coil_arrays_in_order_from_dofs(coil_dofs)
-        return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
+        return grouped_coil_set_spec_from_coil_specs(
+            self.coil_specs_from_dofs(coil_dofs),
+        )
 
     def _scalar_current_value_from_dofs(self, current, coil_dofs, lane_label):
         current_full_x = self._local_full_dofs_from_free_vector(current, coil_dofs)
@@ -916,10 +675,9 @@ class BiotSavartJAX(Optimizable):
         flat ``coil_dofs`` vector without assigning ``self.x``.
 
         The fast path uses the JAX-native uniform-``CurveXYZFourier`` lane.
-        Other curves can still use this helper when they expose the
-        JAX geometry hooks needed to rebuild per-coil arrays from DOFs.
+        Other curves use their immutable specs to rebuild per-coil arrays from DOFs.
         """
-        if not self._jax_native:
+        if not self._uses_uniform_curve_xyz_fourier_fastpath:
             return self._coil_arrays_in_order_from_dofs_generic_jax(coil_dofs)
         from ..geo.curvexyzfourier import jaxfouriercurve_pure
 
@@ -983,7 +741,7 @@ class BiotSavartJAX(Optimizable):
 
     def coil_set_spec_from_dofs(self, coil_dofs):
         """Build an immutable grouped coil spec from an explicit flat DOF vector."""
-        return self._coil_set_spec_from_dofs_prefer_specs(coil_dofs)
+        return self._coil_set_spec_from_dofs_immutable_specs(coil_dofs)
 
     @property
     def coils(self):
@@ -1035,7 +793,7 @@ class BiotSavartJAX(Optimizable):
             )
         else:
             raise TypeError(
-                "BiotSavartJAX requires curves that expose JAX geometry hooks; "
+                "BiotSavartJAX requires curves that expose immutable JAX specs; "
                 f"unsupported type {type(curve).__name__}. "
                 "The CPU curve-geometry fallback was removed."
             )
@@ -1122,68 +880,24 @@ class BiotSavartJAX(Optimizable):
     def _extract_coil_data_grouped(self):
         """Read coil geometry grouped by quadrature point count.
 
-        Explicit compatibility wrapper over the immutable grouped-coil spec.
-
-        ``coil_set_spec()`` now requires explicit immutable grouped-coil state.
-        Legacy callers that still need grouped arrays rebuilt from the live
-        coil graph must opt in through this helper instead.
+        Read-only view over the explicit immutable grouped-coil state.
 
         Returns:
             list of ``(gammas, gammadashs, currents, coil_indices)``
             tuples, one per distinct quadrature count.
         """
-        if not hasattr(self, "_unique_dof_opts"):
-            coil_set_spec = self._coil_set_spec_from_live_geometry()
-        else:
-            try:
-                coil_set_spec = self._coil_set_spec_from_explicit_state()
-            except NotImplementedError:
-                coil_set_spec = self._coil_set_spec_from_live_geometry()
-
-        return list(grouped_field_data_from_spec(coil_set_spec))
-
-    def _coil_set_spec_from_live_geometry(self):
-        """Build a grouped coil spec directly from the live coil graph.
-
-        This is the last explicit compatibility seam after immutable-spec
-        reconstruction has failed.
-        """
-        geometry_cache = {}
-        gammas = []
-        gammadashs = []
-        currents = []
-        for coil in self._coils:
-            *_prefix, gamma, gammadash, current_value = self._coil_geometry_inputs(
-                coil,
-                geometry_cache,
-            )
-            gammas.append(gamma)
-            gammadashs.append(gammadash)
-            currents.append(current_value)
-        return grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
+        return list(grouped_field_data_from_spec(self.coil_set_spec()))
 
     def _coil_set_spec_from_explicit_state(self):
-        try:
-            return self._coil_set_spec_from_dofs_prefer_specs(_as_jax_float64(self.x))
-        except NotImplementedError:
-            return grouped_coil_set_spec_from_coil_specs(self.coil_specs())
+        return self._coil_set_spec_from_dofs_immutable_specs(_as_jax_float64(self.x))
 
     def coil_set_spec(self):
         """Build the grouped coil spec for the current coil graph.
 
-        The preferred path stays in immutable-spec space:
-        1. Reconstruct from the live DOF vector with explicit grouped specs.
-        2. Rebuild from per-coil immutable specs.
-
-        If both fail for a legacy curve family, ``coil_set_spec()`` now rejects
-        that hidden live-graph compatibility seam outright. Legacy callers that
-        still need grouped arrays from the live coil graph must use
-        ``_extract_coil_data_grouped()`` explicitly.
+        The path stays in immutable-spec space: reconstruct from the live
+        free-DOF vector with the cached explicit grouped-spec contract.
         """
-        try:
-            return self._coil_set_spec_from_explicit_state()
-        except NotImplementedError as exc:
-            raise _removed_live_graph_spec_seam_error("coil_set_spec") from exc
+        return self._coil_set_spec_from_explicit_state()
 
     def coil_specs(self):
         """Build immutable per-coil specs from the live coil graph."""
@@ -1268,11 +982,8 @@ class BiotSavartJAX(Optimizable):
         contribution to the scalar objective.
 
         Uses ``jax.vjp`` through the pure Biot-Savart kernel, then
-        projects each coil's geometry/current cotangents back to coil
-        DOFs. Curves with JAX pullback hooks stay on the JAX path.
-        A public CPU ``coil.vjp()`` compatibility path remains for
-        non-strict JAX mode only; unsupported curves are rejected
-        explicitly.
+        projects each coil's geometry/current cotangents through immutable
+        curve specs. Unsupported curves are rejected explicitly.
 
         Args:
             v: (npoints, 3) cotangent, same shape as ``B()``.
@@ -1345,11 +1056,8 @@ class BiotSavartJAX(Optimizable):
         """Project grouped coil cotangent arrays to a :class:`Derivative`.
 
         This is the JAX-native replacement for the standalone
-        ``_coil_cotangents_to_derivative()`` helper. Curves that
-        expose JAX pullback methods stay on the JAX path through the
-        projection step, while CPU/projected curves use the public
-        ``coil.vjp()`` compatibility path only in non-strict mode.
-        Unsupported curves are rejected explicitly.
+        ``_coil_cotangents_to_derivative()`` helper. Curves are projected
+        through immutable specs; unsupported curves are rejected explicitly.
 
         Args:
             d_coil_arrays: list of ``(d_gammas, d_gammadashs, d_currents)``
@@ -1375,7 +1083,7 @@ class BiotSavartJAX(Optimizable):
             "curve_geometry_s": 0.0,
             "current_value_s": 0.0,
             "single_coil_pullback_s": 0.0,
-            "coil_vjp_s": 0.0,
+            "coil_projection_s": 0.0,
         }
         pullback_group_timings = []
         per_coil_timings = [
@@ -1427,7 +1135,7 @@ class BiotSavartJAX(Optimizable):
                 _axis0_entries(dc_group),
                 group["infos"],
             ):
-                coil_vjp_s, _ = _time_call_result(
+                coil_projection_s, _ = _time_call_result(
                     lambda: _project_single_coil_cotangent_data(
                         info.coil,
                         dg_i,
@@ -1435,12 +1143,12 @@ class BiotSavartJAX(Optimizable):
                         dc_i,
                     )
                 )
-                component_totals["coil_vjp_s"] += coil_vjp_s
+                component_totals["coil_projection_s"] += coil_projection_s
                 coil_timings = dict(info.timings)
                 coil_timings.update(
                     {
                         "single_coil_pullback_s": 0.0,
-                        "coil_vjp_s": coil_vjp_s,
+                        "coil_projection_s": coil_projection_s,
                     }
                 )
                 for name in ("curve_geometry_s", "current_value_s"):
