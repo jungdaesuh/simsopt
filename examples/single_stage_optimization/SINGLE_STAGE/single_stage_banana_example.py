@@ -2400,6 +2400,29 @@ def _single_stage_hardware_constants_tuple(payload):
     return tuple((str(name), float(value)) for name, value in payload.items())
 
 
+def build_single_stage_runtime_stage2_seed_payload(
+    stage2_results,
+    *,
+    banana_surf_radius,
+    stage2_seed_order,
+):
+    return {
+        "major_radius": float(stage2_results["MAJOR_RADIUS"]),
+        "toroidal_flux": float(stage2_results["TOROIDAL_FLUX"]),
+        "order": int(stage2_results.get("order", stage2_seed_order)),
+        "banana_surf_radius": float(banana_surf_radius),
+    }
+
+
+def stage2_results_from_single_stage_runtime_seed_payload(stage2_seed_payload):
+    return {
+        "MAJOR_RADIUS": float(stage2_seed_payload["major_radius"]),
+        "TOROIDAL_FLUX": float(stage2_seed_payload["toroidal_flux"]),
+        "order": int(stage2_seed_payload["order"]),
+        "banana_surf_radius": float(stage2_seed_payload["banana_surf_radius"]),
+    }
+
+
 def build_single_stage_jax_runtime_seed_spec_payload(
     surface,
     *,
@@ -2415,6 +2438,7 @@ def build_single_stage_jax_runtime_seed_spec_payload(
     banana_curve_index,
     tf_current_A,
     banana_current_A,
+    stage2_seed,
     surface_dofs=None,
 ):
     """Build the durable JAX startup spec payload for a canonical seed surface."""
@@ -2473,6 +2497,7 @@ def build_single_stage_jax_runtime_seed_spec_payload(
             "nphi": int(np.asarray(quadpoints_phi).size),
             "ntheta": int(np.asarray(quadpoints_theta).size),
         },
+        "stage2_seed": dict(stage2_seed),
         "target_labels": list(SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES),
         "hardware_constants": _single_stage_hardware_constants_payload(),
         "self_intersection_mode": _SINGLE_STAGE_JAX_SELF_INTERSECTION_MODE,
@@ -2496,6 +2521,7 @@ def compile_single_stage_jax_runtime_seed_spec(
     quadpoints_phi,
     quadpoints_theta,
     num_tf_coils,
+    stage2_seed_order,
 ):
     warm_start_state = load_single_stage_warm_start_state(run_dir)
     biot_savart_path = warm_start_state["biot_savart_path"]
@@ -2518,6 +2544,10 @@ def compile_single_stage_jax_runtime_seed_spec(
         tf_coils,
         enforce_limit=False,
     )
+    banana_surf_radius = resolve_single_stage_banana_surface_radius(
+        types.SimpleNamespace(banana_surf_radius=None),
+        donor_results,
+    )
     banana_current_A = float(banana_coils[0].current.get_value())
     return write_single_stage_jax_runtime_seed_spec(
         run_dir,
@@ -2534,6 +2564,11 @@ def compile_single_stage_jax_runtime_seed_spec(
         banana_curve_index=int(num_tf_coils),
         tf_current_A=tf_current_A,
         banana_current_A=banana_current_A,
+        stage2_seed=build_single_stage_runtime_stage2_seed_payload(
+            donor_results,
+            banana_surf_radius=banana_surf_radius,
+            stage2_seed_order=stage2_seed_order,
+        ),
     )
 
 
@@ -2707,6 +2742,7 @@ def load_single_stage_jax_runtime_seed_spec(
         "coil_dof_extraction_spec": runtime_spec.seed.coil_dof_extraction,
         "coil_dofs": runtime_spec.seed.coil_dofs,
         "coil_set_spec": runtime_spec.seed.coil_set,
+        "stage2_seed": dict(payload["stage2_seed"]),
         "iota": runtime_spec.seed.boozer_iota[0],
         "G": runtime_spec.seed.boozer_G[0],
     }
@@ -9167,6 +9203,15 @@ def single_stage_host_postprocess_required(
     return (not use_target_lane) or bool(write_full_artifacts)
 
 
+def require_single_stage_jax_target_lane(*, use_jax, use_target_lane):
+    if use_jax and not use_target_lane:
+        raise ValueError(
+            "JAX production startup consumes immutable runtime seed specs only on "
+            "the target optimizer lane; use --constraint-method penalty with "
+            "--optimizer-backend ondevice, or use the CPU/reference lane."
+        )
+
+
 def restore_single_stage_host_state(
     *,
     use_target_lane,
@@ -9208,6 +9253,7 @@ def write_single_stage_final_runtime_seed_spec(
     num_tf_coils,
     tf_current_A,
     banana_current_A,
+    stage2_seed,
 ):
     return write_single_stage_jax_runtime_seed_spec(
         output_dir,
@@ -9225,6 +9271,7 @@ def write_single_stage_final_runtime_seed_spec(
         banana_curve_index=int(num_tf_coils),
         tf_current_A=tf_current_A,
         banana_current_A=banana_current_A,
+        stage2_seed=stage2_seed,
     )
 
 
@@ -9235,6 +9282,7 @@ def export_requested_single_stage_artifacts(
     num_tf_coils,
     tf_current_A,
     banana_current_A,
+    stage2_seed,
     output_dir,
     boozer_surface,
     bs_diag,
@@ -9264,6 +9312,7 @@ def export_requested_single_stage_artifacts(
             num_tf_coils=num_tf_coils,
             tf_current_A=tf_current_A,
             banana_current_A=banana_current_A,
+            stage2_seed=stage2_seed,
         )
 
     if write_full_artifacts:
@@ -9533,36 +9582,10 @@ if __name__ == "__main__":
     args.stage2_seed_hardware_validation_enforced = (
         stage2_seed_hardware_validation_enforced
     )
-    stage2_results_path, stage2_results = load_stage2_results(stage2_bs_path)
-    _mark_startup_progress(
-        "stage2_seed_resolved",
-        start_s=stage2_seed_setup_start_s,
-    )
-    R0 = float(stage2_results["MAJOR_RADIUS"])
-    s = float(stage2_results["TOROIDAL_FLUX"])
-    order = int(stage2_results.get("order", args.stage2_seed_order))
-
-    banana_surf_radius = resolve_single_stage_banana_surface_radius(
-        args,
-        stage2_results,
-    )
-    banana_surf_nfp = 5
     nphi = args.nphi
     ntheta = args.ntheta
     mpol = args.mpol
     ntor = args.ntor
-
-    # Optimization targets and weights
-    vol_target = args.vol_target
-    CONSTRAINT_WEIGHT = args.constraint_weight
-    CONSTRAINT_METHOD = args.constraint_method
-    ALM_FORMULATION = args.alm_formulation
-    MAXITER = args.maxiter
-    iota_target = args.iota_target
-    num_tf_coils = args.num_tf_coils
-
-    boozer_type = {"initial": "least_squares", "final": "exact"}  # example
-    stage = args.boozer_stage
     warm_start_runtime_spec_state = None
     if use_jax:
         jax_runtime_spec_source = (
@@ -9582,6 +9605,58 @@ if __name__ == "__main__":
             nphi=nphi,
             ntheta=ntheta,
         )
+        stage2_results_path = warm_start_runtime_spec_state["path"]
+        stage2_results = stage2_results_from_single_stage_runtime_seed_payload(
+            warm_start_runtime_spec_state["stage2_seed"]
+        )
+    else:
+        stage2_results_path, stage2_results = load_stage2_results(stage2_bs_path)
+    _mark_startup_progress(
+        "stage2_seed_resolved",
+        start_s=stage2_seed_setup_start_s,
+    )
+    R0 = float(stage2_results["MAJOR_RADIUS"])
+    s = float(stage2_results["TOROIDAL_FLUX"])
+    order = int(stage2_results.get("order", args.stage2_seed_order))
+
+    if use_jax:
+        if args.banana_surf_radius is not None and not np.isclose(
+            float(args.banana_surf_radius),
+            float(stage2_results["banana_surf_radius"]),
+            rtol=0.0,
+            atol=1.0e-12,
+        ):
+            raise ValueError(
+                "JAX runtime seed spec banana_surf_radius does not match this run; "
+                "run seed conversion first."
+            )
+        banana_surf_radius = validate_banana_winding_surface_radius(
+            float(stage2_results["banana_surf_radius"])
+        )
+    else:
+        banana_surf_radius = resolve_single_stage_banana_surface_radius(
+            args,
+            stage2_results,
+        )
+    stage2_seed_payload = build_single_stage_runtime_stage2_seed_payload(
+        stage2_results,
+        banana_surf_radius=banana_surf_radius,
+        stage2_seed_order=args.stage2_seed_order,
+    )
+    banana_surf_nfp = 5
+
+    # Optimization targets and weights
+    vol_target = args.vol_target
+    CONSTRAINT_WEIGHT = args.constraint_weight
+    CONSTRAINT_METHOD = args.constraint_method
+    ALM_FORMULATION = args.alm_formulation
+    MAXITER = args.maxiter
+    iota_target = args.iota_target
+    num_tf_coils = args.num_tf_coils
+
+    boozer_type = {"initial": "least_squares", "final": "exact"}  # example
+    stage = args.boozer_stage
+    if use_jax:
         if int(warm_start_runtime_spec_state["runtime_spec"].seed.num_tf_coils) != int(
             num_tf_coils
         ):
@@ -9965,6 +10040,10 @@ if __name__ == "__main__":
     use_target_lane = CONSTRAINT_METHOD == "penalty" and isinstance(
         outer_contract,
         TargetOptimizerContract,
+    )
+    require_single_stage_jax_target_lane(
+        use_jax=use_jax,
+        use_target_lane=use_target_lane,
     )
     outer_optimizer_progress = (
         build_event_progress_recorder(
@@ -12255,6 +12334,7 @@ if __name__ == "__main__":
             num_tf_coils=num_tf_coils,
             tf_current_A=stage2_tf_current_A,
             banana_current_A=final_banana_current_A,
+            stage2_seed=stage2_seed_payload,
         )
     if (
         not skip_outer_optimizer
@@ -12280,6 +12360,7 @@ if __name__ == "__main__":
             num_tf_coils=num_tf_coils,
             tf_current_A=stage2_tf_current_A,
             banana_current_A=final_banana_current_A,
+            stage2_seed=stage2_seed_payload,
             output_dir=OUT_DIR_ITER,
             boozer_surface=boozer_surface,
             bs_diag=bs_diag,

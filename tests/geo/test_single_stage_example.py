@@ -205,6 +205,12 @@ class SingleStageExampleTests(unittest.TestCase):
             "banana_curve_index": 0,
             "tf_current_A": 0.0,
             "banana_current_A": 0.0,
+            "stage2_seed": {
+                "major_radius": 1.0,
+                "toroidal_flux": 0.5,
+                "order": 2,
+                "banana_surf_radius": 0.22,
+            },
         }
 
     @staticmethod
@@ -2286,6 +2292,21 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(module.host_array(loaded["surface_dofs"]), surface_dofs)
         self.assertEqual(float(module.host_array(loaded["iota"])), 0.123)
         self.assertEqual(float(module.host_array(loaded["G"])), 4.5)
+        self.assertEqual(loaded["stage2_seed"]["banana_surf_radius"], 0.22)
+
+    def test_jax_runtime_seed_spec_lane_rejects_non_target_outer_contract(self):
+        module = self.load_module()
+
+        with self.assertRaisesRegex(ValueError, "target optimizer lane"):
+            module.require_single_stage_jax_target_lane(
+                use_jax=True,
+                use_target_lane=False,
+            )
+
+        module.require_single_stage_jax_target_lane(
+            use_jax=True,
+            use_target_lane=True,
+        )
 
     def test_load_single_stage_jax_warm_start_state_uses_spec_not_surface_json(self):
         module = self.load_module()
@@ -2528,6 +2549,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 num_tf_coils=0,
                 tf_current_A=0.0,
                 banana_current_A=float(updated_coil_dofs[-1]),
+                stage2_seed=self._jax_runtime_seed_spec_field_kwargs(module)[
+                    "stage2_seed"
+                ],
                 output_dir=tmpdir,
                 boozer_surface=types.SimpleNamespace(surface=ExportSurface()),
                 bs_diag=ExportField(bs.coils),
@@ -4351,6 +4375,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 num_tf_coils=0,
                 tf_current_A=0.0,
                 banana_current_A=0.0,
+                stage2_seed=self._jax_runtime_seed_spec_field_kwargs(module)[
+                    "stage2_seed"
+                ],
                 output_dir=tmpdir,
                 boozer_surface=boozer_surface,
                 bs_diag=RestartField(),
