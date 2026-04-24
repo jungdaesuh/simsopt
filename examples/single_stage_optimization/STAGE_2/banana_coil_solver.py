@@ -1,6 +1,7 @@
 import argparse
 from dataclasses import dataclass
 from functools import lru_cache
+import logging
 import os
 import sys
 import json
@@ -64,7 +65,6 @@ from banana_opt.hardware_contracts import (
     PLASMA_VESSEL_MIN_DIST_M,
     TF_CURRENT_HARD_LIMIT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
-    VACUUM_VESSEL_MINOR_RADIUS_M,
     validate_banana_winding_surface_radius,
     validate_tf_current_limit,
 )
@@ -86,6 +86,7 @@ from simsopt.jax_core import (
 )
 
 maybe_initialize_distributed_jax()
+LOGGER = logging.getLogger(__name__)
 DATABASE_EQUILIBRIA_DIR = str(WORKSPACE_EQUILIBRIA_DIR)
 STAGE2_TARGET_OBJECTIVE_DOF_LAYOUT_ERROR = (
     "Stage 2 target objective DOF layout does not match the composite objective."
@@ -1764,7 +1765,7 @@ def evaluate_stage2_alm_problem(
     evaluation.update(
         {
             "base_value": base_value,
-            "constraint_names": list(STAGE2_ALM_CONSTRAINT_NAMES),
+            "constraint_names": list(STAGE2_ALM_CONSTRAINT_NAMES),  # noqa: F821
             "dual_update_values": [
                 coil_length - length_target,
                 curve_curve_signed_value,
@@ -2323,6 +2324,16 @@ def write_json_file(path, payload):
         os.makedirs(output_dir, exist_ok=True)
     with open(path, "w", encoding="utf-8") as outfile:
         json.dump(sanitize_json_payload(payload), outfile, indent=2, allow_nan=False)
+
+
+def _log_taylor_test_summary(label, result):
+    LOGGER.info(
+        "%s: passed=%s, directional_derivative=%.3e, max_ratio=%s",
+        label,
+        result["passed"],
+        result["directional_derivative"],
+        result["max_ratio"],
+    )
 
 
 def build_stage2_problem_contract(
@@ -3036,7 +3047,7 @@ if __name__ == "__main__":
                 alm_settings.penalty_init,
                 seed=args.alm_taylor_test_seed,
             )
-            _print_taylor_test_summary("ALM Taylor", alm_taylor_result)
+            _log_taylor_test_summary("ALM Taylor", alm_taylor_result)
     if args.export_objective_json:
         initial_self_intersection_summary = build_curve_self_intersection_summary(
             new_banana_curve
