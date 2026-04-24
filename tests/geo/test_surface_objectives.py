@@ -1,5 +1,8 @@
 import unittest
+from unittest.mock import patch
+
 import numpy as np
+import simsopt.geo.surfaceobjectives as surfaceobjectives_module
 from simsopt._core.optimizable import Optimizable
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.field.coil import coils_via_symmetries
@@ -437,6 +440,29 @@ class NonQSRatioTests(unittest.TestCase):
 
 
 class BoozerResidualTests(unittest.TestCase):
+    def test_boozerresidual_compute_uses_one_field_point_update(self):
+        bs, boozer_surface = get_boozer_surface(label="Volume", boozer_type='ls')
+        self.assertFalse(boozer_surface.need_to_run_code)
+        residual_dB_calls = 0
+        original_residual_dB = surfaceobjectives_module.boozer_surface_residual_dB
+
+        def counted_residual_dB(*args, **kwargs):
+            nonlocal residual_dB_calls
+            residual_dB_calls += 1
+            return original_residual_dB(*args, **kwargs)
+
+        br = BoozerResidual(boozer_surface, bs)
+
+        with patch.object(
+            surfaceobjectives_module,
+            "boozer_surface_residual_dB",
+            counted_residual_dB,
+        ):
+            br.J()
+            br.dJ()
+
+        self.assertEqual(residual_dB_calls, 1)
+
     def test_boozerresidual_derivative(self):
         """
         Taylor test for derivative of surface non QS ratio wrt coil parameters

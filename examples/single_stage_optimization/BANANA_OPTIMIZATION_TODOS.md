@@ -504,10 +504,33 @@ Impact measure:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Impact:
+
+- `BoozerResidual.compute()` and banana `RefinedBoozerResidual.compute()` now
+  obtain residuals, residual-by-B, surface Jacobian, and LS adjoint inputs from
+  one `boozer_surface_residual_dB(..., derivatives=1)` evaluation instead of
+  recomputing the residual-by-B path for `dJ_by_dB()` and the LS adjoint VJP.
+- A focused LS `BoozerResidual` regression verifies one residual-by-B kernel
+  call for `J(); dJ()` on an already solved Boozer surface.
+- `build_single_stage_objective_bundle()` now builds one `BiotSavart(coils)`
+  per Boozer surface for the Boozer-derived QS and residual terms, rather than
+  separate mutable field objects for `NonQuasiSymmetricRatio` and
+  `BoozerResidual`.
+
+Validation:
+
+- `python3 -m pytest tests/geo/test_surface_objectives.py::BoozerResidualTests::test_boozerresidual_compute_uses_one_field_point_update -q`
+- `python3 -m pytest tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_boozer_derived_objective_terms_share_one_biotsavart_per_surface -q`
+- `python3 -m pytest tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_boozer_residual_exact_threads_fixed_current_into_example_adjoint_path -q`
+- `python3 -m pytest tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_refined_boozer_residual_ls_uses_cached_adjoint_state -q`
+- `python3 -m pytest tests/geo/test_surface_objectives.py::BoozerResidualTests::test_boozerresidual_derivative -q`
+- `python3 -m pytest tests/geo/test_surface_objectives.py::BoozerResidualTests -q`
+- `python3 -m pytest tests/geo/test_single_stage_example.py -q`
 
 ### P6. Optimize candidate distance objective loops only after hot-loop cleanup
 

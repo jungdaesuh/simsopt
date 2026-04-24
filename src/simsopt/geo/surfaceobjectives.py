@@ -41,6 +41,50 @@ def _call_boozer_dresidual_dc(alpha, G, I, dB_dc, B, tang, B2, dxphi_dc, iota, d
     _BOOZER_DRESIDUAL_DC_CALL_MODE = "with_I"
     return dresidual_dc
 
+
+def _boozer_residual_dJ_by_dB(r, r_dB, sqrt_num_components):
+    scaled_r = r / sqrt_num_components
+    scaled_r_dB = r_dB / sqrt_num_components
+    dJ_by_dB = scaled_r[:, None] * scaled_r_dB
+    return np.sum(dJ_by_dB.reshape((-1, 3, 3)), axis=1)
+
+
+def _boozer_lsqgrad_vjp_from_residual_state(
+    lm,
+    biotsavart,
+    r,
+    dr_dB,
+    dr_ds,
+    d2r_dsdB,
+    d2r_dsdgradB,
+    sqrt_num_components,
+):
+    r = r / sqrt_num_components
+    dr_dB = dr_dB.reshape((-1, 3, 3)) / sqrt_num_components
+    dr_ds = dr_ds / sqrt_num_components
+    d2r_dsdB = d2r_dsdB / sqrt_num_components
+    d2r_dsdgradB = d2r_dsdgradB / sqrt_num_components
+
+    v1 = np.sum(
+        np.sum(lm[:, None] * dr_ds.T, axis=0).reshape((-1, 3, 1)) * dr_dB,
+        axis=1,
+    )
+    v2 = np.sum(
+        r.reshape((-1, 3, 1))
+        * np.sum(lm[None, None, :] * d2r_dsdB, axis=-1).reshape((-1, 3, 3)),
+        axis=1,
+    )
+    v3 = np.sum(
+        r.reshape((-1, 3, 1, 1))
+        * np.sum(lm[None, None, None, :] * d2r_dsdgradB, axis=-1).reshape(
+            (-1, 3, 3, 3)
+        ),
+        axis=1,
+    )
+    dres_dcoils = biotsavart.B_and_dB_vjp(v1 + v2, v3)
+    return dres_dcoils[0] + dres_dcoils[1]
+
+
 class AspectRatio(Optimizable):
     """
     Wrapper class for surface aspect ratio.
@@ -1078,38 +1122,80 @@ class BoozerResidual(Optimizable):
         self.boozer_surface.run_code_from_last_solution()
 
         self.surface.set_dofs(self.in_surface.get_dofs())
-        self.biotsavart.set_points(self.surface.gamma().reshape((-1, 3)))
 
         nphi = self.surface.quadpoints_phi.size
         ntheta = self.surface.quadpoints_theta.size
         num_points = 3 * nphi * ntheta
+        sqrt_num_points = np.sqrt(num_points)
 
         # compute J
         surface = self.surface
-        iota = self.boozer_surface.res['iota']
-        G = self.boozer_surface.res['G']
-        I = _resolve_boozer_current_I(self.boozer_surface)
-        r, J = boozer_surface_residual(surface, iota, G, self.biotsavart, derivatives=1, weight_inv_modB=self.boozer_surface.res['weight_inv_modB'], I=I)
-        rtil = np.concatenate((r/np.sqrt(num_points), [np.sqrt(self.constraint_weight)*(self.boozer_surface.label.J()-self.boozer_surface.targetlabel)]))
+        booz_surf = self.boozer_surface
+        iota = booz_surf.res['iota']
+        G = booz_surf.res['G']
+        I = _resolve_boozer_current_I(booz_surf)
+        weight_inv_modB = booz_surf.res['weight_inv_modB']
+        if booz_surf.res["type"] == "ls":
+            r, r_dB, J, d2r_dsdB, d2r_dsdgradB = boozer_surface_residual_dB(
+                surface,
+                iota,
+                G,
+                self.biotsavart,
+                derivatives=1,
+                weight_inv_modB=weight_inv_modB,
+                I=I,
+            )
+        else:
+            r, J = boozer_surface_residual(
+                surface,
+                iota,
+                G,
+                self.biotsavart,
+                derivatives=1,
+                weight_inv_modB=weight_inv_modB,
+                I=I,
+            )
+            _, r_dB = boozer_surface_residual_dB(
+                surface,
+                iota,
+                G,
+                self.biotsavart,
+                derivatives=0,
+                weight_inv_modB=weight_inv_modB,
+                I=I,
+            )
+        constraint_scale = np.sqrt(self.constraint_weight)
+        label_residual = self.boozer_surface.label.J() - self.boozer_surface.targetlabel
+        rtil = np.concatenate((r/sqrt_num_points, [constraint_scale*label_residual]))
         self._J = 0.5*np.sum(rtil**2)
 
-        booz_surf = self.boozer_surface
         P, L, U = booz_surf.res['PLU']
-        dconstraint_dcoils_vjp = booz_surf.res['vjp']
 
-        dJ_by_dB = self.dJ_by_dB()
+        dJ_by_dB = _boozer_residual_dJ_by_dB(r, r_dB, sqrt_num_points)
         dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
 
         # dJ_diota, dJ_dG  to the end of dJ_ds are on the end
         dl = np.zeros((J.shape[1],))
         dlabel_dsurface = self.boozer_surface.label.dJ_by_dsurfacecoefficients()
         dl[:dlabel_dsurface.size] = dlabel_dsurface
-        Jtil = np.concatenate((J/np.sqrt(num_points), np.sqrt(self.constraint_weight) * dl[None, :]), axis=0)
+        Jtil = np.concatenate((J/sqrt_num_points, constraint_scale * dl[None, :]), axis=0)
         dJ_ds = Jtil.T@rtil
 
         adj = forward_backward(P, L, U, dJ_ds)
 
-        adj_times_dg_dcoil = dconstraint_dcoils_vjp(adj, booz_surf, iota, G)
+        if booz_surf.res["type"] == "ls":
+            adj_times_dg_dcoil = _boozer_lsqgrad_vjp_from_residual_state(
+                adj,
+                self.biotsavart,
+                r,
+                r_dB,
+                J,
+                d2r_dsdB,
+                d2r_dsdgradB,
+                sqrt_num_points,
+            )
+        else:
+            adj_times_dg_dcoil = booz_surf.res['vjp'](adj, booz_surf, iota, G)
         self._dJ = dJ_by_dcoils - adj_times_dg_dcoil
 
     def dJ_by_dB(self):
@@ -1125,12 +1211,7 @@ class BoozerResidual(Optimizable):
         I = _resolve_boozer_current_I(self.boozer_surface)
         r, r_dB = boozer_surface_residual_dB(surface, self.boozer_surface.res['iota'], self.boozer_surface.res['G'], self.biotsavart, derivatives=0, weight_inv_modB=res['weight_inv_modB'], I=I)
 
-        r /= np.sqrt(num_points)
-        r_dB /= np.sqrt(num_points)
-
-        dJ_by_dB = r[:, None]*r_dB
-        dJ_by_dB = np.sum(dJ_by_dB.reshape((-1, 3, 3)), axis=1)
-        return dJ_by_dB
+        return _boozer_residual_dJ_by_dB(r, r_dB, np.sqrt(num_points))
 
 
 def boozer_surface_dexactresidual_dcoils_dcurrents_vjp(lm, booz_surf, iota, G):

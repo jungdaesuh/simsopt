@@ -6,6 +6,8 @@ from simsopt._core.derivative import derivative_dec
 from simsopt._core.optimizable import Optimizable
 from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt.geo.surfaceobjectives import (
+    _boozer_lsqgrad_vjp_from_residual_state,
+    _boozer_residual_dJ_by_dB,
     _resolve_boozer_current_I,
     boozer_surface_residual,
     boozer_surface_residual_dB,
@@ -125,7 +127,6 @@ class RefinedBoozerResidual(Optimizable):
             self.boozer_surface.run_code(res["iota"], G=res["G"])
 
         self.surface.set_dofs(self.in_surface.get_dofs())
-        self.biotsavart.set_points(self.surface.gamma().reshape((-1, 3)))
 
         surface = self.surface
         sqrt_n = np.sqrt(_num_boozer_components(surface))
@@ -135,15 +136,35 @@ class RefinedBoozerResidual(Optimizable):
         I = _resolve_boozer_current_I(self.boozer_surface)
         weight_inv_modB = self._weight_inv_modB()
 
-        r, J = boozer_surface_residual(
-            surface,
-            iota,
-            G,
-            self.biotsavart,
-            derivatives=1,
-            weight_inv_modB=weight_inv_modB,
-            I=I,
-        )
+        if self.boozer_surface.res["type"] == "ls":
+            r, r_dB, J, d2r_dsdB, d2r_dsdgradB = boozer_surface_residual_dB(
+                surface,
+                iota,
+                G,
+                self.biotsavart,
+                derivatives=1,
+                weight_inv_modB=weight_inv_modB,
+                I=I,
+            )
+        else:
+            r, J = boozer_surface_residual(
+                surface,
+                iota,
+                G,
+                self.biotsavart,
+                derivatives=1,
+                weight_inv_modB=weight_inv_modB,
+                I=I,
+            )
+            _, r_dB = boozer_surface_residual_dB(
+                surface,
+                iota,
+                G,
+                self.biotsavart,
+                derivatives=0,
+                weight_inv_modB=weight_inv_modB,
+                I=I,
+            )
         rtil = r / sqrt_n
         Jtil = J / sqrt_n
         if self.include_label_constraint:
@@ -164,14 +185,26 @@ class RefinedBoozerResidual(Optimizable):
             )
         self._J = 0.5 * np.sum(rtil**2)
 
-        dJ_by_dB = self.dJ_by_dB()
+        dJ_by_dB = _boozer_residual_dJ_by_dB(r, r_dB, sqrt_n)
         dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
 
         booz_surf = self.boozer_surface
         P, L, U = booz_surf.res["PLU"]
         dJ_ds = Jtil.T @ rtil
         adj = forward_backward(P, L, U, dJ_ds)
-        adj_times_dg_dcoil = booz_surf.res["vjp"](adj, booz_surf, iota, G)
+        if booz_surf.res["type"] == "ls":
+            adj_times_dg_dcoil = _boozer_lsqgrad_vjp_from_residual_state(
+                adj,
+                self.biotsavart,
+                r,
+                r_dB,
+                J,
+                d2r_dsdB,
+                d2r_dsdgradB,
+                sqrt_n,
+            )
+        else:
+            adj_times_dg_dcoil = booz_surf.res["vjp"](adj, booz_surf, iota, G)
         self._dJ = dJ_by_dcoils - adj_times_dg_dcoil
 
     def dJ_by_dB(self):
@@ -192,12 +225,7 @@ class RefinedBoozerResidual(Optimizable):
             I=I,
         )
 
-        r /= sqrt_n
-        r_dB /= sqrt_n
-
-        dJ_by_dB = r[:, None] * r_dB
-        dJ_by_dB = np.sum(dJ_by_dB.reshape((-1, 3, 3)), axis=1)
-        return dJ_by_dB
+        return _boozer_residual_dJ_by_dB(r, r_dB, sqrt_n)
 
 
 class BoozerResidualExact(RefinedBoozerResidual):

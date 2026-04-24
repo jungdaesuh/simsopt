@@ -84,8 +84,7 @@ def _load_module_from_path(module_path, name_prefix, *, register_in_sys_modules=
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    if register_in_sys_modules:
-        sys.modules[spec.name] = module
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -363,6 +362,7 @@ class FakeDifferentiableBiotSavart(Optimizable):
     def __init__(self, x0):
         super().__init__(x0=np.asarray(x0, dtype=float))
         self.points = None
+        self.b_and_dB_vjp_calls = 0
 
     def set_points(self, points):
         self.points = np.asarray(points, dtype=float)
@@ -385,6 +385,12 @@ class FakeDifferentiableBiotSavart(Optimizable):
     def B_vjp(self, dJ_by_dB):
         flat_dJ_by_dB = np.asarray(dJ_by_dB, dtype=float).reshape(-1)
         return Derivative({self: self.weights(flat_dJ_by_dB.size).T @ flat_dJ_by_dB})
+
+    def B_and_dB_vjp(self, v, vgrad):
+        del v, vgrad
+        self.b_and_dB_vjp_calls += 1
+        zero = Derivative({self: np.zeros_like(self.x)})
+        return zero, zero
 
 
 class FakeDifferentiableLabel:
@@ -436,6 +442,7 @@ class FakeDifferentiableBoozerSurface(Optimizable):
         current_I,
         weight_inv_modB,
         implicit_scale=(0.0, 0.0),
+        res_type="exact",
     ):
         super().__init__(depends_on=[biotsavart])
         nsurfdofs = surface.get_dofs().size
@@ -450,6 +457,7 @@ class FakeDifferentiableBoozerSurface(Optimizable):
             "iota": -0.4,
             "G": 1.2,
             "I": float(current_I),
+            "type": res_type,
             "weight_inv_modB": bool(weight_inv_modB),
             "PLU": (
                 np.eye(nsurfdofs + 2),
@@ -560,6 +568,79 @@ class SingleStageExampleTests(unittest.TestCase):
     def residual_module(self, module):
         return sys.modules[module.BoozerResidualExact.__module__]
 
+    def test_boozer_derived_objective_terms_share_one_biotsavart_per_surface(self):
+        module = self.load_module()
+        constructed_biot_savarts = []
+
+        class _BiotSavart:
+            def __init__(self, coils):
+                self.coils = coils
+                constructed_biot_savarts.append(self)
+
+        class _Iotas:
+            def __init__(self, boozer_surface):
+                self.boozer_surface = boozer_surface
+
+        class _NonQS:
+            def __init__(self, boozer_surface, biotsavart):
+                self.boozer_surface = boozer_surface
+                self.biotsavart = biotsavart
+
+        class _Residual:
+            def __init__(self, boozer_surface, biotsavart):
+                self.boozer_surface = boozer_surface
+                self.biotsavart = biotsavart
+
+        class _ExactResidual(_Residual):
+            pass
+
+        surface_data = [
+            {"boozer_surface": object()},
+            {"boozer_surface": object()},
+        ]
+
+        with patch.object(module, "BiotSavart", _BiotSavart), patch.object(
+            module,
+            "Iotas",
+            _Iotas,
+        ), patch.object(module, "NonQuasiSymmetricRatio", _NonQS), patch.object(
+            module,
+            "BoozerResidual",
+            _Residual,
+        ), patch.object(
+            module,
+            "BoozerResidualExact",
+            _ExactResidual,
+        ):
+            search_terms = module.build_boozer_derived_objective_terms(
+                "search",
+                surface_data,
+                ["coil"],
+            )
+            final_terms = module.build_boozer_derived_objective_terms(
+                "final",
+                surface_data,
+                ["coil"],
+            )
+
+        self.assertEqual(len(search_terms["boozer_objective_biot_savarts"]), 2)
+        self.assertIs(
+            search_terms["nonQSs"][0].biotsavart,
+            search_terms["brs"][0].biotsavart,
+        )
+        self.assertIs(
+            search_terms["nonQSs"][1].biotsavart,
+            search_terms["brs"][1].biotsavart,
+        )
+        self.assertIsNot(
+            search_terms["brs"][0].biotsavart,
+            search_terms["brs"][1].biotsavart,
+        )
+        self.assertIsInstance(search_terms["brs"][0], _Residual)
+        self.assertNotIsInstance(search_terms["brs"][0], _ExactResidual)
+        self.assertIsInstance(final_terms["brs"][0], _ExactResidual)
+        self.assertEqual(len(constructed_biot_savarts), 4)
+
     def differentiable_residual_vector(self, surface, biotsavart, *, weight_inv_modB, I):
         return biotsavart.residual_vector(
             surface,
@@ -568,7 +649,7 @@ class SingleStageExampleTests(unittest.TestCase):
         )
 
     def differentiable_residual(self, surface, iota, G, biotsavart, derivatives=0, weight_inv_modB=False, I=0.0):
-        del iota, G, derivatives
+        del iota, G
         residual = self.differentiable_residual_vector(
             surface,
             biotsavart,
@@ -576,10 +657,20 @@ class SingleStageExampleTests(unittest.TestCase):
             I=I,
         )
         nsurfdofs = surface.get_dofs().size
-        return residual, np.zeros((residual.size, nsurfdofs + 2))
+        J = np.zeros((residual.size, nsurfdofs + 2))
+        if derivatives == 0:
+            return residual,
+        return residual, J
+
+    def differentiable_residual_dB_derivatives(self, residual_size, nsurfdofs):
+        residual_jacobian = np.zeros((residual_size, nsurfdofs + 2))
+        second_by_field = np.zeros((residual_size, 3, nsurfdofs + 2))
+        second_by_field_gradient = np.zeros((residual_size, 3, 3, nsurfdofs + 2))
+        return residual_jacobian, second_by_field, second_by_field_gradient
 
     def differentiable_residual_dB(self, surface, iota, G, biotsavart, derivatives=0, weight_inv_modB=False, I=0.0):
-        del iota, G, derivatives
+        del iota, G
+        biotsavart.set_points(surface.gamma().reshape((-1, 3)))
         residual = self.differentiable_residual_vector(
             surface,
             biotsavart,
@@ -588,7 +679,11 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         residual_dB = np.zeros((residual.size, 3))
         residual_dB[np.arange(residual.size), np.arange(residual.size) % 3] = 1.0
-        return residual, residual_dB
+        if derivatives == 0:
+            return residual, residual_dB
+        nsurfdofs = surface.get_dofs().size
+        derivative_terms = self.differentiable_residual_dB_derivatives(residual.size, nsurfdofs)
+        return residual, residual_dB, *derivative_terms
 
     def tracked_differentiable_residuals(self, calls):
         def tracked_residual(surface, iota, G, bs, derivatives=0, weight_inv_modB=False, I=0.0):
@@ -626,7 +721,14 @@ class SingleStageExampleTests(unittest.TestCase):
                 stack.enter_context(patch.object(module, "boozer_surface_residual_dB", side_effect=residual_dB))
             yield
 
-    def build_differentiable_boozer_case(self, *, current_I, weight_inv_modB, implicit_scale=(0.0, 0.0)):
+    def build_differentiable_boozer_case(
+        self,
+        *,
+        current_I,
+        weight_inv_modB,
+        implicit_scale=(0.0, 0.0),
+        res_type="exact",
+    ):
         input_surface = FakeResolvedSurface(
             mpol=2,
             ntor=2,
@@ -643,6 +745,7 @@ class SingleStageExampleTests(unittest.TestCase):
             current_I=current_I,
             weight_inv_modB=weight_inv_modB,
             implicit_scale=implicit_scale,
+            res_type=res_type,
         )
         return input_surface, boozer_surface, biotsavart
 
@@ -694,6 +797,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 "iota": -0.4,
                 "G": 1.2,
                 "I": current_I,
+                "type": "exact",
                 "PLU": (None, None, None),
                 "vjp": lambda adj, booz_surf, iota, G: np.zeros(2),
             },
@@ -711,7 +815,13 @@ class SingleStageExampleTests(unittest.TestCase):
         def fake_residual_dB(surface, iota, G, biotsavart, derivatives=0, weight_inv_modB=False, I=0.0):
             num_points = 3 * surface.quadpoints_phi.size * surface.quadpoints_theta.size
             residual_dB_calls.append((derivatives, weight_inv_modB, I))
-            return np.ones(num_points), np.ones((num_points, 3))
+            biotsavart.set_points(surface.gamma().reshape((-1, 3)))
+            residual = np.ones(num_points)
+            residual_dB = np.ones((num_points, 3))
+            if derivatives == 0:
+                return residual, residual_dB
+            derivative_terms = self.differentiable_residual_dB_derivatives(num_points, nsurfdofs)
+            return residual, residual_dB, *derivative_terms
 
         residual_module = self.residual_module(module)
         adjoint_solution = np.zeros(nsurfdofs + 2)
@@ -946,6 +1056,35 @@ class SingleStageExampleTests(unittest.TestCase):
 
                     self.assertEqual({call[1] for call in residual_calls}, {stored_weight_inv_modB})
                     self.assertEqual({call[2] for call in residual_calls}, {current_I})
+
+    def test_refined_boozer_residual_ls_uses_cached_adjoint_state(self):
+        module = self.load_module()
+        residual_module = self.residual_module(module)
+        _, boozer_surface, biotsavart = self.build_differentiable_boozer_case(
+            current_I=TEST_BOOZER_I,
+            weight_inv_modB=True,
+            res_type="ls",
+        )
+        residual_calls = []
+        tracked_residual, tracked_residual_dB = self.tracked_differentiable_residuals(residual_calls)
+
+        with self.patched_boozer_residual_evaluators(
+            (residual_module,),
+            tracked_residual,
+            tracked_residual_dB,
+        ):
+            objective = residual_module.RefinedBoozerResidual(
+                boozer_surface,
+                biotsavart,
+                grid_multiplier=1,
+                include_label_constraint=True,
+                weight_inv_modB=None,
+            )
+            objective.J()
+            objective.dJ(partials=True)(biotsavart)
+
+        self.assertEqual(residual_calls, [(1, True, TEST_BOOZER_I)])
+        self.assertEqual(biotsavart.b_and_dB_vjp_calls, 1)
 
     def test_boozer_residual_exact_matches_refined_k4_compatibility_config(self):
         module = self.load_module()

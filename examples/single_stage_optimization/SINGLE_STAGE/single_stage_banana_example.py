@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import copy
 import hashlib
@@ -3443,6 +3445,27 @@ def build_best_feasible_results_summary(
         restore_single_stage_incumbent_state(run_dict, current_state)
 
 
+def build_boozer_derived_objective_terms(stage, surface_data, coils):
+    boozer_surfaces = [entry["boozer_surface"] for entry in surface_data]
+    boozer_objective_biot_savarts = [BiotSavart(coils) for _surface in boozer_surfaces]
+    surface_iota_terms = [Iotas(surface) for surface in boozer_surfaces]
+    nonQSs = [
+        NonQuasiSymmetricRatio(surface, boozer_objective_biot_savarts[index])
+        for index, surface in enumerate(boozer_surfaces)
+    ]
+    boozer_residual_cls = BoozerResidualExact if stage == "final" else BoozerResidual
+    brs = [
+        boozer_residual_cls(surface, boozer_objective_biot_savarts[index])
+        for index, surface in enumerate(boozer_surfaces)
+    ]
+    return {
+        "boozer_objective_biot_savarts": boozer_objective_biot_savarts,
+        "surface_iota_terms": surface_iota_terms,
+        "nonQSs": nonQSs,
+        "brs": brs,
+    }
+
+
 def build_single_stage_objective_bundle(
     stage,
     surface_data,
@@ -3466,12 +3489,10 @@ def build_single_stage_objective_bundle(
     goal_mode="target",
     frontier_goal_config=None,
 ):
-    surface_iota_terms = [Iotas(entry["boozer_surface"]) for entry in surface_data]
-    nonQSs = [NonQuasiSymmetricRatio(entry["boozer_surface"], BiotSavart(coils)) for entry in surface_data]
-    if stage == "final":
-        brs = [BoozerResidualExact(entry["boozer_surface"], BiotSavart(coils)) for entry in surface_data]
-    else:
-        brs = [BoozerResidual(entry["boozer_surface"], BiotSavart(coils)) for entry in surface_data]
+    boozer_terms = build_boozer_derived_objective_terms(stage, surface_data, coils)
+    surface_iota_terms = boozer_terms["surface_iota_terms"]
+    nonQSs = boozer_terms["nonQSs"]
+    brs = boozer_terms["brs"]
 
     curvelength = CurveLength(banana_curves[0])
     if length_target is None:
@@ -3529,6 +3550,9 @@ def build_single_stage_objective_bundle(
     )
     return {
         "surface_iota_terms": surface_iota_terms,
+        "boozer_objective_biot_savarts": boozer_terms[
+            "boozer_objective_biot_savarts"
+        ],
         "nonQSs": nonQSs,
         "brs": brs,
         "curvelength": curvelength,
