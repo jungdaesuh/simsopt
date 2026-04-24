@@ -342,6 +342,20 @@ class MajorRadiusTests(unittest.TestCase):
 
 
 class IotasTests(unittest.TestCase):
+    def test_unsolved_boozer_surface_fails_with_contract_error(self):
+        bs, boozer_surface = get_boozer_surface(boozer_type='ls', converge=False)
+        objectives = [
+            Iotas(boozer_surface),
+            NonQuasiSymmetricRatio(boozer_surface, bs),
+            BoozerResidual(boozer_surface, bs),
+            MajorRadius(boozer_surface),
+        ]
+
+        for objective in objectives:
+            with self.subTest(objective=type(objective).__name__):
+                with self.assertRaisesRegex(RuntimeError, "Call run_code\\(iota, G=\\.\\.\\.\\)"):
+                    objective.J()
+
     def test_iotas_derivative(self):
         """
         Taylor test for derivative of surface rotational transform wrt coil parameters

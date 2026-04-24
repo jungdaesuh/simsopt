@@ -55,12 +55,15 @@ class SquaredFlux(Optimizable):
         else:
             self.target = np.zeros(self.surface.normal().shape[:2])
         self.field = field
-        xyz = self.surface.gamma()
-        self.field.set_points(xyz.reshape((-1, 3)))
         if definition not in ["quadratic flux", "normalized", "local"]:
             raise ValueError("Unrecognized option for 'definition'.")
         self.definition = definition
         Optimizable.__init__(self, x0=np.asarray([]), depends_on=[field])
+        self.add_recompute_dependency(self.surface)
+
+    def recompute_bell(self, parent=None):
+        xyz = np.ascontiguousarray(self.surface.gamma().reshape((-1, 3)))
+        self.field.set_points(xyz)
 
     def J(self):
         n = self.surface.normal()

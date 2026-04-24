@@ -496,18 +496,17 @@ def boozer_surface_residual(surface, iota, G, biotsavart, derivatives=0, weight_
 
     term1 = np.einsum('ijlm,ijln->ijmn', dB_dc, dB_dc, optimize=True)
     term2 = np.einsum('ijlmn,ijl->ijmn', d2B_dcdc, B, optimize=True)
-    d2B2_dcdc = 2*(term1 + term2)
+    d2_B_squared_dcdc = 2*(term1 + term2)
 
     term1 = -(dxphi_dc[..., None, :] + iota * dxtheta_dc[..., None, :]) * dB2_dc[..., None, :, None]
     term2 = -(dxphi_dc[..., :, None] + iota * dxtheta_dc[..., :, None]) * dB2_dc[..., None, None, :]
-    term3 = -(xphi[..., None, None] + iota * xtheta[..., None, None]) * d2B2_dcdc[..., None, :, :]
+    term3 = -(xphi[..., None, None] + iota * xtheta[..., None, None]) * d2_B_squared_dcdc[..., None, :, :]
     d2residual_by_dcdc = alpha * d2B_dcdc + term1 + term2 + term3
     d2residual_by_dcdiota = I * dB_dc - (dB2_dc[..., None, :] * xtheta[..., :, None] + B2[..., None, None] * dxtheta_dc)
     d2residual_by_diotadiota = np.zeros(dresidual_diota.shape)
 
     if weight_inv_modB:
-        d2B2_dcdc = 2*(np.einsum('ijlm,ijln->ijmn', dB_dc, dB_dc, optimize=True)+np.einsum('ijkpl,ijpn,ijkm,ijl->ijmn', d2B_by_dXdX, dx_dc, dx_dc, B, optimize=True))
-        d2modB_dc2 = (2*B2[:, :, None, None] * d2B2_dcdc - dB2_dc[:, :, :, None]*dB2_dc[:, :, None, :])*(1/(4*B2[:, :, None, None]**1.5))
+        d2modB_dc2 = (2*B2[:, :, None, None] * d2_B_squared_dcdc - dB2_dc[:, :, :, None]*dB2_dc[:, :, None, :])*(1/(4*B2[:, :, None, None]**1.5))
         d2w_dc2 = (2*dmodB_dc[:, :, :, None] * dmodB_dc[:, :, None, :] - modB[:, :, None, None] * d2modB_dc2)/modB[:, :, None, None]**3.
 
         d2rtil_dcdc = residual[..., None, None] * d2w_dc2[:, :, None, ...] \
@@ -699,9 +698,7 @@ class MajorRadius(Optimizable):
         self._dJ = None
 
     def compute(self):
-        if self.boozer_surface.need_to_run_code:
-            res = self.boozer_surface.res
-            res = self.boozer_surface.run_code(res['iota'], G=res['G'])
+        self.boozer_surface.run_code_from_last_solution()
 
         surface = self.surface
         self._J = surface.major_radius()
@@ -787,9 +784,7 @@ class NonQuasiSymmetricRatio(Optimizable):
         return self._dJ
 
     def compute(self):
-        if self.boozer_surface.need_to_run_code:
-            res = self.boozer_surface.res
-            res = self.boozer_surface.run_code(res['iota'], G=res['G'])
+        self.boozer_surface.run_code_from_last_solution()
 
         self.biotsavart.set_points(self.surface.gamma().reshape((-1, 3)))
         axis = self.axis
@@ -952,11 +947,8 @@ class Iotas(Optimizable):
         self._dJ_by_dcoilcurrents = None
 
     def compute(self):
-        if self.boozer_surface.need_to_run_code:
-            res = self.boozer_surface.res
-            res = self.boozer_surface.run_code(res['iota'], G=res['G'])
-
-        self._J = self.boozer_surface.res['iota']
+        res = self.boozer_surface.run_code_from_last_solution()
+        self._J = res['iota']
 
         booz_surf = self.boozer_surface
         iota = booz_surf.res['iota']
@@ -1083,9 +1075,7 @@ class BoozerResidual(Optimizable):
         self._dJ = None
 
     def compute(self):
-        if self.boozer_surface.need_to_run_code:
-            res = self.boozer_surface.res
-            res = self.boozer_surface.run_code(res['iota'], G=res['G'])
+        self.boozer_surface.run_code_from_last_solution()
 
         self.surface.set_dofs(self.in_surface.get_dofs())
         self.biotsavart.set_points(self.surface.gamma().reshape((-1, 3)))

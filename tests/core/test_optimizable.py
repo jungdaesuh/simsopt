@@ -58,6 +58,17 @@ class Adder(Optimizable):
     #                d.get("dof_fixed", None))
 
 
+class RecomputeCounter(Optimizable):
+    def __init__(self):
+        self.recompute_count = 0
+        self.recompute_parent = None
+        super().__init__(x0=[1.0])
+
+    def recompute_bell(self, parent=None):
+        self.recompute_count += 1
+        self.recompute_parent = parent
+
+
 class OptClassWithParents(Optimizable):
     def __init__(self, val, depends_on=None):
         if depends_on is None:
@@ -402,6 +413,23 @@ class OptimizableTests(unittest.TestCase):
 
         opt_with_parents.append_parent(opt2)
         self.assertAlmostEqual(opt_with_parents(), 28.0/13.0)
+
+    def test_add_recompute_dependency(self):
+        parent = Adder(3, x0=[2, 3, 4])
+        child = RecomputeCounter()
+        initial_count = child.recompute_count
+
+        child.add_recompute_dependency(parent)
+        self.assertEqual(child.parents, [])
+        self.assertEqual(child.dof_size, 1)
+        self.assertIs(child.recompute_parent, parent)
+
+        count_after_registration = child.recompute_count
+        self.assertEqual(count_after_registration, initial_count + 1)
+
+        parent.set(0, 5)
+        self.assertEqual(child.recompute_count, count_after_registration + 1)
+        self.assertIs(child.recompute_parent, parent)
 
     def test_append_parent_dof_sizes(self):
         # vmec is the parent, prob is the child
@@ -859,12 +887,12 @@ class OptimizableTests(unittest.TestCase):
         adder = Adder(n=3, x0=[1, 2, 3])
         self.assertEqual(len(iden.dof_names), 0)
         self.assertEqual(len(adder.dof_names), 3)
-        patt = re.compile("Adder\d+:x\d+")
+        patt = re.compile(r"Adder\d+:x\d+")
         for name in adder.dof_names:
             self.assertTrue(patt.match(name))
 
-        patt1 = "Adder\d+:x\d+"
-        patt2 = "OptClassWithParents\d+:val"
+        patt1 = r"Adder\d+:x\d+"
+        patt2 = r"OptClassWithParents\d+:val"
         comb_patt = re.compile("|".join([patt1, patt2]))
         test_obj = OptClassWithParents(10, depends_on=[iden, adder])
         self.assertEqual(len(test_obj.dof_names), 4)
@@ -875,7 +903,7 @@ class OptimizableTests(unittest.TestCase):
         self.assertEqual(len(test_obj.dof_names), 3)
         for name in test_obj.dof_names:
             self.assertTrue(comb_patt.match(name))
-        exc_patt = re.compile("OptClassWithParents\d+:val")
+        exc_patt = re.compile(r"OptClassWithParents\d+:val")
         for name in test_obj.dof_names:
             self.assertFalse(exc_patt.match(name))
 
@@ -883,14 +911,14 @@ class OptimizableTests(unittest.TestCase):
         self.assertEqual(len(test_obj.dof_names), 2)
         for name in test_obj.dof_names:
             self.assertTrue(comb_patt.match(name))
-        exc_patt = re.compile("Adder\d+:x1")
+        exc_patt = re.compile(r"Adder\d+:x1")
         for name in test_obj.dof_names:
             self.assertFalse(exc_patt.match(name))
 
         test_obj2 = OptClassWith2LevelParents(10, 20)
-        patt1 = "Adder\d+:x\d+"
-        patt2 = "OptClassWithParents\d+:val"
-        patt3 = "OptClassWith2LevelParents\d+:v\d"
+        patt1 = r"Adder\d+:x\d+"
+        patt2 = r"OptClassWithParents\d+:val"
+        patt3 = r"OptClassWith2LevelParents\d+:v\d"
         comb_patt = re.compile("|".join([patt1, patt2, patt3]))
         self.assertEqual(len(test_obj2.dof_names), 10)
         for name in test_obj2.dof_names:
@@ -900,7 +928,7 @@ class OptimizableTests(unittest.TestCase):
         self.assertEqual(len(test_obj2.dof_names), 9)
         for name in test_obj2.dof_names:
             self.assertTrue(comb_patt.match(name))
-        exc_patt = re.compile("OptClassWith2LevelParents\d+:v1")
+        exc_patt = re.compile(r"OptClassWith2LevelParents\d+:v1")
         for name in test_obj.dof_names:
             self.assertFalse(exc_patt.match(name))
 
@@ -921,9 +949,9 @@ class OptimizableTests(unittest.TestCase):
         self.assertEqual(len(test_obj2.full_dof_names), 10)
         test_obj2.fix(0)
         self.assertEqual(len(test_obj2.full_dof_names), 10)
-        patt1 = "Adder\d+:x\d+"
-        patt2 = "OptClassWithParents\d+:val"
-        patt3 = "OptClassWith2LevelParents\d+:v\d"
+        patt1 = r"Adder\d+:x\d+"
+        patt2 = r"OptClassWithParents\d+:val"
+        patt3 = r"OptClassWith2LevelParents\d+:v\d"
         comb_patt = re.compile("|".join([patt1, patt2, patt3]))
         for name in test_obj2.full_dof_names:
             self.assertTrue(comb_patt.match(name))

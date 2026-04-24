@@ -3,7 +3,6 @@ from deprecated import deprecated
 import numpy as np
 from jax import grad, vjp, lax
 import jax.numpy as jnp
-import jax
 
 from .jit import jit
 from .._core.optimizable import Optimizable
@@ -301,7 +300,8 @@ class CurveSurfaceDistance(Optimizable):
         self.thisgrad0 = jit(lambda gammac, lc, gammas, ns: grad(self.J_jax, argnums=0)(gammac, lc, gammas, ns))
         self.thisgrad1 = jit(lambda gammac, lc, gammas, ns: grad(self.J_jax, argnums=1)(gammac, lc, gammas, ns))
         self.candidates = None
-        super().__init__(depends_on=curves)  # Bharat's comment: Shouldn't we add surface here
+        super().__init__(depends_on=curves)
+        self.add_recompute_dependency(self.surface)
 
     def recompute_bell(self, parent=None):
         self.candidates = None
@@ -348,8 +348,6 @@ class CurveSurfaceDistance(Optimizable):
         self.compute_candidates()
         dgamma_by_dcoeff_vjp_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
         dgammadash_by_dcoeff_vjp_vecs = [np.zeros_like(c.gammadash()) for c in self.curves]
-        gammas = self.surface.gamma().reshape((-1, 3))
-
         gammas = self.surface.gamma().reshape((-1, 3))
         ns = self.surface.normal().reshape((-1, 3))
         for i, _ in self.candidates:

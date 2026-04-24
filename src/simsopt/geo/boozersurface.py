@@ -221,6 +221,7 @@ class BoozerSurface(Optimizable):
         self.I = float(I)
         self.boozer_type = 'ls' if constraint_weight is not None else 'exact'
         self.need_to_run_code = True
+        self.res = None
 
         if options is None:
             options = {}
@@ -256,6 +257,16 @@ class BoozerSurface(Optimizable):
     def _with_fixed_current(self, resdict):
         resdict["I"] = self.I
         return resdict
+
+    def run_code_from_last_solution(self):
+        if self.res is None:
+            raise RuntimeError(
+                "BoozerSurface has no solved state. Call run_code(iota, G=...) "
+                "before evaluating dependent Boozer objectives."
+            )
+        if self.need_to_run_code:
+            return self.run_code(self.res['iota'], G=self.res['G'])
+        return self.res
 
     def run_code(self, iota, G=None):
         """

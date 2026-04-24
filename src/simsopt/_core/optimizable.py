@@ -873,6 +873,19 @@ class Optimizable(ABC_Callable, Hashable, GSONable, metaclass=OptimizableMeta):
         """
         self.add_parent(len(self.parents), other)
 
+    def add_recompute_dependency(self, other: Optimizable) -> None:
+        """
+        Register another Optimizable as a recompute source without adding its DOFs.
+
+        Use this when the current object caches data derived from ``other`` but
+        does not expose derivatives with respect to ``other``.
+
+        Args:
+            other: Optimizable object whose DOF changes should invalidate this object
+        """
+        other._add_child(self)
+        self.set_recompute_flag(parent=other)
+
     def pop_parent(self, index: int = -1) -> Optimizable:
         """
         Removes the parent Optimizable object at specified index.

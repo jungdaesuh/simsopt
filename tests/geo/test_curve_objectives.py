@@ -357,6 +357,23 @@ class Testing(unittest.TestCase):
             assert err_new < 0.3 * err
             err = err_new
 
+    def test_curve_surface_distance_surface_change_invalidates_candidates(self):
+        base_curves, base_currents, _ = get_ncsx_data(Nt_coils=3)
+        curves = [c.curve for c in coils_via_symmetries(base_curves, base_currents, 3, True)]
+        surface = SurfaceRZFourier.from_nphi_ntheta(nfp=3, nphi=16, ntheta=16, ntor=0)
+        J = CurveSurfaceDistance(curves, surface, 0.5)
+        J.compute_candidates()
+        assert J.candidates is not None
+
+        dofs = surface.get_dofs()
+        dofs[0] *= 1.05
+        surface.set_dofs(dofs)
+
+        assert J.candidates is None
+        fresh = CurveSurfaceDistance(curves, surface, 0.5)
+        self.assertAlmostEqual(J.J(), fresh.J())
+        self.assertAlmostEqual(J.shortest_distance(), fresh.shortest_distance())
+
     def test_linking_number(self):
         for downsample in [1, 2, 5]:
             curves1 = create_equally_spaced_curves(2, 1, stellsym=True, R0=1, R1=0.5, order=5, numquadpoints=120)

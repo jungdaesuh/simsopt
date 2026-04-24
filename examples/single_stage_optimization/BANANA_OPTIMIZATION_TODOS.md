@@ -36,9 +36,12 @@ Effort: small
 
 Current anchors:
 
+- `src/simsopt/_core/optimizable.py` :: `Optimizable.add_recompute_dependency`
 - `src/simsopt/objectives/fluxobjective.py` :: `SquaredFlux.__init__`
+- `src/simsopt/objectives/fluxobjective.py` :: `SquaredFlux.recompute_bell`
 - `src/simsopt/objectives/fluxobjective.py` :: `SquaredFlux.J`
 - `src/simsopt/objectives/fluxobjective.py` :: `SquaredFlux.dJ`
+- `tests/core/test_optimizable.py`
 - `tests/objectives/test_fluxobjective.py`
 
 Problem:
@@ -49,7 +52,9 @@ the objective can combine stale `B(x_old)` with current surface normals.
 
 Fix direction:
 
-- Add `surface` to the dependency graph.
+- Register the surface as an invalidation source without exposing surface DOFs
+  through `SquaredFlux.x`, using `Optimizable.add_recompute_dependency`; the
+  class still differentiates only through the magnetic field/coils.
 - Refresh field points from the current surface geometry when the surface
   invalidates the objective.
 - Add a test that mutates only surface DOFs and compares against a freshly
@@ -57,10 +62,16 @@ Fix direction:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Validation:
+
+- `python3 -m pytest tests/objectives/test_fluxobjective.py -q`
+- `python3 -m pytest tests/core/test_optimizable.py tests/objectives/test_fluxobjective.py tests/geo/test_curve_objectives.py tests/geo/test_banana_impact_benchmark.py tests/geo/test_single_stage_example.py -q`
+- `python3 examples/single_stage_optimization/benchmark_banana_impact.py --fixture squared-flux --repeat 1 --warmup 0 --output /tmp/banana_impact_squared_flux_after_c1.json`
 
 ### C2. Fix `CurveSurfaceDistance` surface invalidation
 
@@ -71,9 +82,11 @@ Effort: small
 
 Current anchors:
 
+- `src/simsopt/_core/optimizable.py` :: `Optimizable.add_recompute_dependency`
 - `src/simsopt/geo/curveobjectives.py` :: `CurveSurfaceDistance.__init__`
 - `src/simsopt/geo/curveobjectives.py` :: `CurveSurfaceDistance.recompute_bell`
 - `src/simsopt/geo/curveobjectives.py` :: `CurveSurfaceDistance.compute_candidates`
+- `tests/core/test_optimizable.py`
 - `tests/geo/test_curve_objectives.py`
 
 Problem:
@@ -84,17 +97,26 @@ the candidate cache can remain stale and miss newly close curve/surface pairs.
 
 Fix direction:
 
-- Add the surface to `depends_on`.
+- Register the surface as an invalidation source without exposing surface DOFs
+  through `CurveSurfaceDistance.x`, using
+  `Optimizable.add_recompute_dependency`; the class still differentiates only
+  through curve DOFs.
 - Keep candidate invalidation centralized in `recompute_bell`.
 - Add a test that moves only the surface and verifies `J()` /
   `shortest_distance()` match a fresh object.
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Validation:
+
+- `python3 -m pytest tests/geo/test_curve_objectives.py -q`
+- `python3 -m pytest tests/core/test_optimizable.py tests/objectives/test_fluxobjective.py tests/geo/test_curve_objectives.py tests/geo/test_banana_impact_benchmark.py tests/geo/test_single_stage_example.py -q`
+- `python3 examples/single_stage_optimization/benchmark_banana_impact.py --fixture curve-surface-distance --repeat 1 --warmup 0 --output /tmp/banana_impact_curve_surface_after_c2.json`
 
 ### C3. Tighten Boozer first-use lifecycle
 
@@ -106,7 +128,9 @@ Effort: small to medium
 Current anchors:
 
 - `src/simsopt/geo/boozersurface.py` :: `BoozerSurface.__init__`
+- `src/simsopt/geo/boozersurface.py` :: `BoozerSurface.run_code_from_last_solution`
 - `src/simsopt/geo/boozersurface.py` :: `BoozerSurface.run_code`
+- `src/simsopt/geo/surfaceobjectives.py` :: `MajorRadius.compute`
 - `src/simsopt/geo/surfaceobjectives.py` :: `NonQuasiSymmetricRatio.compute`
 - `src/simsopt/geo/surfaceobjectives.py` :: `Iotas.compute`
 - `src/simsopt/geo/surfaceobjectives.py` :: `BoozerResidual.compute`
@@ -129,10 +153,21 @@ Fix direction:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Validation:
+
+- `python3 -m pytest tests/geo/test_surface_objectives.py::IotasTests::test_unsolved_boozer_surface_fails_with_contract_error tests/geo/test_boozersurface.py::BoozerSurfaceTests::test_run_code -q`
+- `python3 -m pytest tests/geo/test_surface_objectives.py::IotasTests tests/geo/test_surface_objectives.py::NonQSRatioTests tests/geo/test_surface_objectives.py::BoozerResidualTests tests/geo/test_boozersurface.py::BoozerSurfaceTests::test_run_code -q`
+- Downstream smoke: `single_stage_banana_example.py --init-only` against
+  `/Users/suhjungdae/code/columbia/autoresearch/harvested_seeds/R_nv2_iota305_hbtclean_2026-04-23/biot_savart_opt.json`
+  plus matching `surf_opt.json`, native `mpol=10`, `ntor=10`, reduced
+  `nphi=31`, `ntheta=16`. Result: Boozer Newton success with
+  `iota=0.3048386265857189`, `volume=0.039921036663101706`, optimizer skipped
+  by `--init-only`. Legacy missing-`STAGE2_BS_SHA256` warning observed.
 
 ### C4. De-risk Boozer second-order residual semantics
 
@@ -160,10 +195,14 @@ Fix direction:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Validation:
+
+- `python3 -m pytest tests/geo/test_boozersurface.py::BoozerSurfaceTests::test_boozer_penalty_constraints_cpp_notcpp -q`
 
 ## Performance
 
@@ -491,6 +530,8 @@ Effort: small
 
 Current anchors:
 
+- `examples/single_stage_optimization/benchmark_banana_impact.py`
+- `tests/geo/test_banana_impact_benchmark.py`
 - `tests/geo/test_curve_objectives.py`
 - `tests/objectives/test_fluxobjective.py`
 - `tests/geo/test_surface_objectives.py`
@@ -514,10 +555,17 @@ Impact measure:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Validation:
+
+- `python3 -m pytest tests/geo/test_banana_impact_benchmark.py -q`
+- `python3 -m py_compile examples/single_stage_optimization/benchmark_banana_impact.py tests/geo/test_banana_impact_benchmark.py`
+- `python3 -m ruff check examples/single_stage_optimization/benchmark_banana_impact.py tests/geo/test_banana_impact_benchmark.py`
+- `python3 examples/single_stage_optimization/benchmark_banana_impact.py --repeat 1 --warmup 0 --output /tmp/banana_impact_sample.json`
 
 ### M2. Reduce `Derivative` accumulation copies
 

@@ -112,3 +112,30 @@ class FluxObjectiveTests(unittest.TestCase):
                 ALPHA = 1e-5
                 JF_scaled_summed = Jf + ALPHA * sum(Jls)
                 self.check_taylor_test(JF_scaled_summed)
+
+    def test_surface_dof_change_refreshes_field_points(self):
+        s = SurfaceRZFourier(mpol=1, ntor=0, nfp=1)
+        base_curves = create_equally_spaced_curves(
+            2,
+            s.nfp,
+            stellsym=s.stellsym,
+            R0=1.0,
+            R1=0.3,
+            order=3,
+        )
+        base_currents = [Current(1e5) for _ in base_curves]
+        coils = coils_via_symmetries(base_curves, base_currents, s.nfp, s.stellsym)
+        bs = BiotSavart(coils)
+        SquaredFlux(s, bs, definition="quadratic flux")
+
+        initial_points = bs.get_points_cart().copy()
+        dofs = s.get_dofs()
+        dofs[0] *= 1.1
+        s.set_dofs(dofs)
+        moved_points = s.gamma().reshape((-1, 3))
+        fresh_bs = BiotSavart(coils)
+        SquaredFlux(s, fresh_bs, definition="quadratic flux")
+
+        self.assertFalse(np.allclose(initial_points, moved_points))
+        np.testing.assert_allclose(bs.get_points_cart(), moved_points)
+        np.testing.assert_allclose(bs.get_points_cart(), fresh_bs.get_points_cart())
