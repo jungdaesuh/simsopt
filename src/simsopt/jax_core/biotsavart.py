@@ -37,6 +37,7 @@ __all__ = [
     "biot_savart_dB_by_dX",
     "biot_savart_d2B_by_dXdX",
     "biot_savart_B_and_dB",
+    "biot_savart_B_and_dB_with_point_axis",
     "biot_savart_A",
     "biot_savart_dA_by_dX",
     "biot_savart_d2A_by_dXdX",
@@ -436,17 +437,25 @@ def _one_point_dense(
 # ── Kernel factory ────────────────────────────────────────────────────
 
 
-@lru_cache(maxsize=16)
-def _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs):
+@lru_cache(maxsize=32)
+def _make_kernel(
+    integrand_key,
+    diff_mode,
+    coil_cs,
+    quad_bs,
+    point_cs,
+    point_vma_axis_name,
+):
     """Build and JIT-compile a Biot-Savart kernel for the given tuning config.
 
     All tiling parameters are captured in closures — callers never thread them.
     ``lru_cache`` ensures the same config returns the same compiled function.
 
-    Cache keyed on ``(integrand_key, diff_mode, coil_cs, quad_bs, point_cs)``.
-    A config change that produces different int values naturally creates a new
-    cache entry.  Call ``_make_kernel.cache_clear()`` if you need to force
-    recompilation (e.g. after hot-patching an integrand function in tests).
+    Cache keyed on ``(integrand_key, diff_mode, coil_cs, quad_bs, point_cs,
+    point_vma_axis_name)``.  A config change that produces different values
+    naturally creates a new cache entry.  Call ``_make_kernel.cache_clear()`` if
+    you need to force recompilation (e.g. after hot-patching an integrand
+    function in tests).
     """
     integrand = _INTEGRANDS.get(integrand_key)
     if integrand is None:
@@ -503,7 +512,10 @@ def _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs):
         def per_point(x, gammas, gammadashs, currents):
             f = lambda xx: one_point(xx, gammas, gammadashs, currents)
             primals, tangents_fn = jax.linearize(f, x)
-            return primals, jax.vmap(tangents_fn)(_eye(3, dtype=jnp.float64))
+            basis = _eye(3, dtype=jnp.float64)
+            if point_vma_axis_name is not None:
+                basis = lax.pcast(basis, point_vma_axis_name, to="varying")
+            return primals, jax.vmap(tangents_fn)(basis)
 
     else:
         raise ValueError(f"Unknown diff_mode: {diff_mode!r}")
@@ -520,10 +532,17 @@ def _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs):
     return kernel
 
 
-def _get_kernel(integrand_key, diff_mode):
+def _get_kernel(integrand_key, diff_mode, *, point_vma_axis_name=None):
     """Read tuning config and return the cached JIT-compiled kernel."""
     coil_cs, quad_bs, point_cs = _read_tuning_config()
-    return _make_kernel(integrand_key, diff_mode, coil_cs, quad_bs, point_cs)
+    return _make_kernel(
+        integrand_key,
+        diff_mode,
+        coil_cs,
+        quad_bs,
+        point_cs,
+        point_vma_axis_name,
+    )
 
 
 @lru_cache(maxsize=16)
@@ -541,6 +560,7 @@ def _make_B_vjp_kernel(coil_cs, quad_bs, point_cs):
         coil_cs,
         quad_bs,
         point_cs,
+        None,
     )
 
     @jax.jit
@@ -603,6 +623,20 @@ def biot_savart_B_and_dB(points, gammas, gammadashs, currents):
     return _get_kernel(_Integrand.B, _DiffMode.VALUE_AND_JACOBIAN)(
         points, gammas, gammadashs, currents
     )
+
+
+def biot_savart_B_and_dB_with_point_axis(
+    points,
+    gammas,
+    gammadashs,
+    currents,
+    point_axis_name: str,
+):
+    return _get_kernel(
+        _Integrand.B,
+        _DiffMode.VALUE_AND_JACOBIAN,
+        point_vma_axis_name=point_axis_name,
+    )(points, gammas, gammadashs, currents)
 
 
 def biot_savart_A(points, gammas, gammadashs, currents):

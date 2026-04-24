@@ -14,6 +14,7 @@ from .biotsavart import (
     biot_savart_A,
     biot_savart_B,
     biot_savart_B_and_dB,
+    biot_savart_B_and_dB_with_point_axis,
     biot_savart_B_vjp,
     biot_savart_d2A_by_dXdX,
     biot_savart_dA_by_dX,
@@ -24,6 +25,7 @@ from .sharding import (
     coil_group_collective_config,
     collective_field_sharding_summary,
     maybe_shard_grouped_field_inputs,
+    points_coils_collective_config,
 )
 from ._math_utils import as_runtime_float64 as _as_runtime_float64
 from .curve_geometry import (
@@ -113,39 +115,88 @@ def _pad_coil_axis_to_device_count(gammas, gammadashs, currents, device_count: i
     )
 
 
-def _field_out_specs(kernel):
+def _pad_point_axis_to_device_count(points, device_count: int):
+    point_count = int(points.shape[0])
+    pad_count = (-point_count) % device_count
+    if pad_count == 0:
+        return points
+    return jnp.concatenate(
+        (
+            points,
+            jnp.zeros((pad_count,) + points.shape[1:], dtype=points.dtype),
+        ),
+        axis=0,
+    )
+
+
+def _field_out_specs(kernel, config):
+    point_axis_name = config.point_axis_name
+    if point_axis_name is None:
+        if kernel is biot_savart_B_and_dB:
+            return P(), P()
+        return P()
     if kernel is biot_savart_B_and_dB:
-        return P(), P()
-    return P()
+        return P(point_axis_name, None), P(point_axis_name, None, None)
+    if kernel in {biot_savart_B, biot_savart_A}:
+        return P(point_axis_name, None)
+    if kernel in {biot_savart_dA_by_dX, biot_savart_dB_by_dX}:
+        return P(point_axis_name, None, None)
+    return P(point_axis_name, None, None, None)
+
+
+def _collective_kernel(kernel, config):
+    if config.point_axis_name is not None and kernel is biot_savart_B_and_dB:
+        return partial(
+            biot_savart_B_and_dB_with_point_axis,
+            point_axis_name=config.point_axis_name,
+        )
+    return kernel
 
 
 def _collective_group_field(points, gammas, gammadashs, currents, kernel, config):
+    point_count = int(points.shape[0])
+    if config.point_axis_name is not None:
+        points = _pad_point_axis_to_device_count(points, config.point_device_count)
+    group_kernel = _collective_kernel(kernel, config)
     gammas, gammadashs, currents = _pad_coil_axis_to_device_count(
         gammas,
         gammadashs,
         currents,
-        config.device_count,
+        config.coil_device_count,
+    )
+    point_spec = (
+        P()
+        if config.point_axis_name is None
+        else P(config.point_axis_name, None)
     )
 
     @partial(
         jax.shard_map,
         mesh=config.mesh,
         in_specs=(
-            P(),
-            P(config.axis_name, None, None),
-            P(config.axis_name, None, None),
-            P(config.axis_name),
+            point_spec,
+            P(config.coil_axis_name, None, None),
+            P(config.coil_axis_name, None, None),
+            P(config.coil_axis_name),
         ),
-        out_specs=_field_out_specs(kernel),
+        out_specs=_field_out_specs(kernel, config),
         check_vma=True,
     )
     def _group_kernel(points_block, gammas_block, gammadashs_block, currents_block):
         return jax.tree_util.tree_map(
-            lambda value: lax.psum(value, config.axis_name),
-            kernel(points_block, gammas_block, gammadashs_block, currents_block),
+            lambda value: lax.psum(value, config.reduced_axis_name),
+            group_kernel(
+                points_block,
+                gammas_block,
+                gammadashs_block,
+                currents_block,
+            ),
         )
 
-    return _group_kernel(points, gammas, gammadashs, currents)
+    result = _group_kernel(points, gammas, gammadashs, currents)
+    if config.point_axis_name is None:
+        return result
+    return _tree_trim_axis0(result, point_count)
 
 
 def _evaluate_grouped_field_group(points, gammas, gammadashs, currents, kernel):
@@ -156,6 +207,8 @@ def _evaluate_grouped_field_group(points, gammas, gammadashs, currents, kernel):
         currents,
     )
     config = coil_group_collective_config(currents)
+    if config is None:
+        config = points_coils_collective_config(points, currents)
     if config is None:
         return kernel(points, gammas, gammadashs, currents), config
     return (
@@ -225,6 +278,8 @@ def biot_savart_B_vjp_maybe_collective(points, v, gammas, gammadashs, currents):
     )
     config = coil_group_collective_config(currents)
     if config is None:
+        config = points_coils_collective_config(points, currents)
+    if config is None:
         return biot_savart_B_vjp(points, v, gammas, gammadashs, currents)
 
     coil_count = int(currents.shape[0])
@@ -233,7 +288,7 @@ def biot_savart_B_vjp_maybe_collective(points, v, gammas, gammadashs, currents):
             gammas,
             gammadashs,
             currents,
-            config.device_count,
+            config.coil_device_count,
         )
     )
 
