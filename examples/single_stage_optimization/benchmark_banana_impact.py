@@ -19,7 +19,7 @@ import time
 import tracemalloc
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -247,7 +247,7 @@ def build_report(
         )
     return {
         "schema_version": SCHEMA_VERSION,
-        "created_at_utc": datetime.now(UTC).isoformat(),
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "python_version": sys.version,
         "platform": platform.platform(),
         "repeat": repeat,

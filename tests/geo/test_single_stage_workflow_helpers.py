@@ -1839,6 +1839,8 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         self.assertEqual(args.cs_dist, 0.015)
         self.assertEqual(args.curvature_threshold, 100.0)
         self.assertEqual(args.single_stage_banana_current_mode, "shared")
+        self.assertEqual(args.maxcor, module.DEFAULT_LBFGSB_MAXCOR)
+        self.assertEqual(args.maxcor, 40)
 
     def test_goal_mode_comparison_wrapper_parse_args_accepts_seed_order_upgrade(self):
         module = load_goal_mode_comparison_module()

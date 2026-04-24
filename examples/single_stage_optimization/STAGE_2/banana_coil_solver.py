@@ -96,6 +96,7 @@ from banana_opt.hardware_constraint_schema import (
     build_bootability_recovery_payload_fields,
     hardware_constraint_alm_names,
 )
+from banana_opt.lbfgsb_defaults import DEFAULT_LBFGSB_MAXCOR
 from banana_opt.current_contracts import (
     BoozerCurrentConvention,
     apply_penalty_traversal_forbidden_box_bounds,
@@ -415,6 +416,15 @@ def parse_args():
         type=int,
         default=int(os.environ.get("MAXITER", "300")),
         help="Maximum optimizer iterations.",
+    )
+    parser.add_argument(
+        "--maxcor",
+        type=int,
+        default=int(os.environ.get("MAXCOR", str(DEFAULT_LBFGSB_MAXCOR))),
+        help=(
+            "L-BFGS-B memory (number of correction pairs, "
+            f"default {DEFAULT_LBFGSB_MAXCOR})."
+        ),
     )
     parser.add_argument(
         "--ftol",
@@ -1891,6 +1901,13 @@ def main(parsed_args=None):
             )
             _print_taylor_test_summary("ALM Taylor", alm_taylor_result)
 
+    lbfgsb_options = {
+        "maxiter": MAXITER,
+        "maxcor": args.maxcor,
+        "ftol": args.ftol,
+        "gtol": args.gtol,
+    }
+
     if args.init_only:
         res_nit = 0
         optimizer_success = True
@@ -1908,12 +1925,7 @@ def main(parsed_args=None):
             alm_constraint_names,
             evaluate_problem,
             alm_settings,
-            {
-                "maxiter": MAXITER,
-                "maxcor": 300,
-                "ftol": args.ftol,
-                "gtol": args.gtol,
-            },
+            lbfgsb_options,
             accepted_callback=lambda candidate_x: maybe_record_exact_stage2_pass(
                 candidate_x,
                 source="accepted_iterate",
@@ -1952,7 +1964,7 @@ def main(parsed_args=None):
             'method': 'L-BFGS-B',
             'jac': True,
             'bounds': lbfgsb_bounds,
-            'options': {'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol},
+            'options': lbfgsb_options,
         }
         basin_niter_success = args.basin_niter_success if args.basin_niter_success > 0 else None
         print(
@@ -2009,7 +2021,7 @@ def main(parsed_args=None):
             jac=True,
             method='L-BFGS-B',
             bounds=lbfgsb_bounds,
-            options={'maxiter': MAXITER, 'maxcor': 300, 'ftol': args.ftol, 'gtol': args.gtol},
+            options=lbfgsb_options,
         )
         res_nit = res.nit
         termination_message = str(res.message)

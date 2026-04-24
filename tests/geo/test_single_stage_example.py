@@ -2421,6 +2421,9 @@ class HardwareConstraintTests(unittest.TestCase):
         hardware_search_mode="hard",
         hardware_search_soft_iterations=0,
         accepted_iterations=0,
+        curvature_traversal_band=0.0,
+        curvature_traversal_eval_budget=0,
+        search_hardware_values=(0.25, 0.0, 0.0),
     ):
         module = load_single_stage_example_module()
 
@@ -2528,8 +2531,8 @@ class HardwareConstraintTests(unittest.TestCase):
         module.TOPOLOGY_GATE_PENALTY_SCALE = 4.0
         module.HARDWARE_SEARCH_MODE = hardware_search_mode
         module.HARDWARE_SEARCH_SOFT_ITERATIONS = hardware_search_soft_iterations
-        module.CURVATURE_TRAVERSAL_BAND = 0.0
-        module.CURVATURE_TRAVERSAL_EVAL_BUDGET = 0
+        module.CURVATURE_TRAVERSAL_BAND = curvature_traversal_band
+        module.CURVATURE_TRAVERSAL_EVAL_BUDGET = curvature_traversal_eval_budget
         module.banana_curve = _Curve()
 
         with patch.object(
@@ -2564,7 +2567,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 "dJ_surf": np.zeros(3),
                 "J_curvature": 0.0,
                 "dJ_curvature": np.zeros(3),
-                **search_hardware_penalty_payload((0.25, 0.0, 0.0)),
+                **search_hardware_penalty_payload(search_hardware_values),
             },
         ), patch.object(module, "restore_surface_states") as restore_mock, patch.object(
             module,
@@ -4824,6 +4827,72 @@ class HardwareConstraintTests(unittest.TestCase):
         payload = module.search_step_metrics_payload(module.run_dict)
         self.assertEqual(payload["SEARCH_STEP_REJECTED_BEFORE_SURFACE_SOLVE"], 1)
         self.assertEqual(payload["SEARCH_STEP_CURVATURE_PRECHECK_REJECTS"], 1)
+
+    def test_curvature_traversal_precheck_tracks_overcap_budget(self):
+        module = self.load_module()
+
+        class _JF:
+            x = np.zeros(2)
+
+        class _Curve:
+            def kappa(self):
+                return np.array([104.0])
+
+        module.CONSTRAINT_METHOD = "penalty"
+        module.CURVATURE_THRESHOLD = 100.0
+        module.CURVATURE_TRAVERSAL_BAND = 0.05
+        module.CURVATURE_TRAVERSAL_EVAL_BUDGET = 1
+        module.JF = _JF()
+        module.banana_curve = _Curve()
+        module.run_dict = {
+            "curvature_overcap_boozer_evals": 0,
+            "curvature_overcap_boozer_evals_this_iteration": 0,
+        }
+        metrics = module.new_search_step_metrics()
+
+        first_status = module.evaluate_curvature_traversal_precheck(
+            np.array([1.0, 2.0]),
+            metrics,
+        )
+        second_status = module.evaluate_curvature_traversal_precheck(
+            np.array([3.0, 4.0]),
+            metrics,
+        )
+
+        self.assertTrue(first_status["allow_boozer_eval"])
+        self.assertEqual(first_status["reason"], "within_traversal_band")
+        self.assertFalse(second_status["allow_boozer_eval"])
+        self.assertEqual(second_status["reason"], "curvature_traversal_budget_exhausted")
+        self.assertEqual(module.run_dict["curvature_overcap_boozer_evals"], 1)
+        self.assertEqual(
+            module.run_dict["curvature_overcap_boozer_evals_this_iteration"],
+            1,
+        )
+        self.assertEqual(metrics["curvature_overcap_boozer_evals"], 1)
+
+    def test_fun_allows_inside_band_curvature_only_violation_in_hard_mode(self):
+        module, J_out, dJ_out, _last_dJ, restore_mock = self._run_fun_with_hardware_violation(
+            hardware_search_mode="hard",
+            curvature_traversal_band=0.05,
+            curvature_traversal_eval_budget=1,
+            search_hardware_values=(0.0, 0.0, 0.25),
+        )
+
+        self.assertEqual(J_out, 7.0)
+        np.testing.assert_array_equal(dJ_out, np.arange(3, dtype=float))
+        restore_mock.assert_not_called()
+        hardware_status = module.run_dict["trial_hardware_status"]
+
+        self.assertTrue(hardware_status["success"])
+        self.assertTrue(hardware_status["curvature_traversal_allowed"])
+        self.assertTrue(hardware_status["constraints"]["max_curvature"]["success"])
+        self.assertTrue(hardware_status["allowed_traversal_status"]["success"])
+        self.assertTrue(hardware_status["curvature_traversal_original_violations"])
+        violation_ratios = module._hardware_violation_ratios(hardware_status)
+        self.assertEqual(max(violation_ratios.values()), 0.0)
+        self.assertEqual(module.run_dict["hardware_rejects"], 0)
+        self.assertEqual(module.run_dict["invalid_state_rejects_total"], 0)
+        self.assertEqual(module.run_dict["curvature_overcap_boozer_evals"], 1)
 
     def test_fun_warns_only_on_hardware_constraint_failure_in_warn_mode(self):
         module, J_out, dJ_out, _last_dJ, restore_mock = self._run_fun_with_hardware_violation(
@@ -7515,11 +7584,18 @@ class HardwareConstraintTests(unittest.TestCase):
                 "lscount": 0,
                 "x_prev": np.zeros(2),
                 "intersecting": False,
+                "curvature_overcap_boozer_evals": 7,
+                "curvature_overcap_boozer_evals_this_iteration": 3,
                 "topology_gate_status": {"enabled": False, "success": True, "nfieldlines": 0, "survived_lines": 0, "survival_fraction": 1.0, "survival_threshold": 0.25, "tmax": 2.0, "tol": 1e-7, "stop_reason_counts": {}, "first_exit_time": None, "first_exit_angle": None, "first_exit_reason": None},
             }
 
             module.callback(np.zeros(2))
 
+            self.assertEqual(
+                module.run_dict["curvature_overcap_boozer_evals_this_iteration"],
+                0,
+            )
+            self.assertEqual(module.run_dict["curvature_overcap_boozer_evals"], 7)
             self.assertTrue(module.run_dict["search_surface_status"]["success"])
             self.assertTrue(module.run_dict["search_surface_status"]["nesting_ok"])
             self.assertFalse(module.run_dict["surface_status"]["success"])
@@ -8789,6 +8865,15 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.curvature_traversal_band, 0.05)
         self.assertEqual(args.curvature_traversal_eval_budget, 2)
 
+    def test_single_stage_parse_args_uses_measured_lbfgsb_maxcor_default(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(sys, "argv", ["single_stage_banana_example.py"]):
+            args = module.parse_args()
+
+        self.assertEqual(args.maxcor, module.DEFAULT_LBFGSB_MAXCOR)
+        self.assertEqual(args.maxcor, 40)
+
     def test_single_stage_parse_args_help_renders_with_fd_flag_text(self):
         module = load_single_stage_example_module()
 
@@ -9351,6 +9436,15 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(args.tf_current_A, 80000.0)
 
+    def test_stage2_parse_args_uses_measured_lbfgsb_maxcor_default(self):
+        module = load_stage2_module()
+
+        with patch.object(sys, "argv", ["banana_coil_solver.py"]):
+            args = module.parse_args()
+
+        self.assertEqual(args.maxcor, module.DEFAULT_LBFGSB_MAXCOR)
+        self.assertEqual(args.maxcor, 40)
+
     def test_single_stage_parse_args_preserve_wrapper_default_hardware_thresholds(self):
         module = load_single_stage_example_module()
 
@@ -9861,8 +9955,12 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "minimize_calls": 0,
             "minimize_alm_calls": 0,
             "run_basin_hopping_calls": 0,
+            "default_maxcor": module.DEFAULT_LBFGSB_MAXCOR,
             "minimize_bounds": None,
+            "minimize_options": None,
+            "minimize_alm_options": None,
             "basin_bounds": None,
+            "basin_options": None,
             "initialize_extra_kwargs": None,
             "curve_curve_curves": None,
             "curve_surface_curves": None,
@@ -10143,6 +10241,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         def fake_minimize(*_args, **_kwargs):
             runtime["minimize_calls"] += 1
             runtime["minimize_bounds"] = _kwargs.get("bounds")
+            runtime["minimize_options"] = dict(_kwargs["options"])
             return SimpleNamespace(
                 x=np.array([0.3, -0.2], dtype=float),
                 nit=4,
@@ -10152,6 +10251,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
 
         def fake_minimize_alm(*_args, **_kwargs):
             runtime["minimize_alm_calls"] += 1
+            runtime["minimize_alm_options"] = dict(_args[4])
             accepted_callback = _kwargs.get("accepted_callback")
             if accepted_callback is not None and alm_accepted_candidate_x is not None:
                 accepted_callback(np.asarray(alm_accepted_candidate_x, dtype=float))
@@ -10216,6 +10316,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             self.assertEqual(_kwargs["basin_temperature"], 2.5)
             self.assertEqual(_kwargs["basin_niter_success"], 6)
             runtime["basin_bounds"] = _kwargs["minimizer_kwargs"].get("bounds")
+            runtime["basin_options"] = dict(_kwargs["minimizer_kwargs"]["options"])
             return (
                 SimpleNamespace(
                     x=np.array([0.6, -0.1], dtype=float),
@@ -10233,6 +10334,9 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             stage2_bs_path = str(Path(tmpdir) / "seed.json") if use_seed else None
+            stage2_arg_overrides = {"maxcor": module.DEFAULT_LBFGSB_MAXCOR}
+            if arg_overrides is not None:
+                stage2_arg_overrides.update(arg_overrides)
             args = self._make_stage2_args(
                 tmpdir,
                 init_only=init_only,
@@ -10240,7 +10344,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 stage2_bs_path=stage2_bs_path,
                 equilibrium_path=str(Path(tmpdir) / "demo.nc"),
                 basin_hops=basin_hops,
-                **({} if arg_overrides is None else dict(arg_overrides)),
+                **stage2_arg_overrides,
             )
             for attr_name in missing_attr_names:
                 delattr(args, attr_name)
@@ -10624,6 +10728,10 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertTrue(runtime["results"]["ALM_MULTIPLIER_CAP_BINDING"])
         self.assertEqual(runtime["results"]["ALM_MULTIPLIER_CAP_BINDING_INDICES"], [1])
         self.assertEqual(runtime["results"]["TERMINATION_MESSAGE"], "alm_ok")
+        self.assertEqual(
+            runtime["minimize_alm_options"]["maxcor"],
+            runtime["default_maxcor"],
+        )
 
     def test_stage2_main_alm_restores_best_exact_hardware_pass_for_artifact_output(self):
         def make_artifact_state(
@@ -10698,6 +10806,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertEqual(runtime["results"]["BANANA_INIT_CURRENT_A"], 9500.0)
         self.assertEqual(runtime["results"]["BANANA_CURRENT_MAX_A"], 1.6e4)
         self.assertIsNotNone(runtime["minimize_bounds"])
+        self.assertEqual(runtime["minimize_options"]["maxcor"], runtime["default_maxcor"])
 
     def test_stage2_main_basin_hopping_persists_telemetry(self):
         runtime = self._run_stage2_main(
@@ -10729,6 +10838,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertEqual(runtime["results"]["basin_nonfinite_rejections"], 0)
         self.assertEqual(runtime["results"]["basin_normalized_step_rejections"], 1)
         self.assertIsNotNone(runtime["basin_bounds"])
+        self.assertEqual(runtime["basin_options"]["maxcor"], runtime["default_maxcor"])
 
     def test_stage2_main_rejects_final_banana_current_above_cap(self):
         runtime = self._run_stage2_main(

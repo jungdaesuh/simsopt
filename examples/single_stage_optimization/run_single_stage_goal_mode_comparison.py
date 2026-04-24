@@ -33,6 +33,7 @@ from banana_opt.single_stage_banana_current_mode import (  # noqa: E402
     BANANA_CURRENT_MODE_INDEPENDENT,
     BANANA_CURRENT_MODE_SHARED,
 )
+from banana_opt.lbfgsb_defaults import DEFAULT_LBFGSB_MAXCOR  # noqa: E402
 from banana_opt.surface_mode_contracts import (  # noqa: E402
     DEFAULT_INNER_SURFACE_RATIO,
     SURFACE_MODE_CHOICES,
@@ -221,7 +222,7 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--mpol", type=int, default=8)
     parser.add_argument("--ntor", type=int, default=6)
     parser.add_argument("--maxiter", type=int, default=300)
-    parser.add_argument("--maxcor", type=int, default=300)
+    parser.add_argument("--maxcor", type=int, default=DEFAULT_LBFGSB_MAXCOR)
     parser.add_argument("--ftol", type=float, default=1e-15)
     parser.add_argument("--gtol", type=float, default=1e-15)
     parser.add_argument("--constraint-method", choices=["penalty", "alm"], default="penalty")

@@ -162,6 +162,7 @@ from banana_opt.incumbents import (
     restore_single_stage_incumbent_state,
     snapshot_single_stage_incumbent_state,
 )
+from banana_opt.lbfgsb_defaults import DEFAULT_LBFGSB_MAXCOR
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
 from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for test access via importlib
     DEFAULT_PHASE1_CONFIG,
@@ -1580,8 +1581,15 @@ def parse_args():
                         help="Surface-vessel distance penalty weight (default 1000).")
     parser.add_argument("--ss-dist", type=float, default=float(os.environ.get("SS_DIST", str(PLASMA_VESSEL_MIN_DIST_M))),
                         help="Minimum surface-vessel distance in meters (default 0.04).")
-    parser.add_argument("--maxcor", type=int, default=int(os.environ.get("MAXCOR", "300")),
-                        help="L-BFGS-B memory (number of corrections, default 300).")
+    parser.add_argument(
+        "--maxcor",
+        type=int,
+        default=int(os.environ.get("MAXCOR", str(DEFAULT_LBFGSB_MAXCOR))),
+        help=(
+            "L-BFGS-B memory (number of correction pairs, "
+            f"default {DEFAULT_LBFGSB_MAXCOR})."
+        ),
+    )
     parser.add_argument(
         "--stage2-source",
         choices=["database", "local"],
@@ -6489,6 +6497,53 @@ def evaluate_curvature_traversal_precheck(x, metrics):
     return status
 
 
+def hardware_status_with_curvature_traversal(hardware_status, precheck_status):
+    if (
+        not precheck_status["enabled"]
+        or not precheck_status["allow_boozer_eval"]
+        or not precheck_status["over_threshold"]
+    ):
+        return hardware_status
+
+    failed_constraint_names = {
+        name
+        for name, constraint in hardware_status["constraints"].items()
+        if not constraint["success"]
+    }
+    if failed_constraint_names != {"max_curvature"}:
+        return hardware_status
+
+    adjusted_constraints = dict(hardware_status["constraints"])
+    adjusted_curvature = dict(adjusted_constraints["max_curvature"])
+    adjusted_curvature["success"] = True
+    adjusted_curvature["violation"] = 0.0
+    adjusted_curvature["curvature_traversal_allowed"] = True
+    adjusted_constraints["max_curvature"] = adjusted_curvature
+
+    adjusted_allowed_status = dict(hardware_status["allowed_traversal_status"])
+    adjusted_allowed_constraints = dict(adjusted_allowed_status["constraints"])
+    adjusted_allowed_constraints["max_curvature"] = adjusted_curvature
+    adjusted_allowed_status["success"] = True
+    adjusted_allowed_status["violations"] = []
+    adjusted_allowed_status["constraints"] = adjusted_allowed_constraints
+
+    adjusted_status = dict(hardware_status)
+    adjusted_status["success"] = True
+    adjusted_status["violations"] = []
+    adjusted_status["constraints"] = adjusted_constraints
+    adjusted_status["allowed_traversal_status"] = adjusted_allowed_status
+    if "violation_ratios" in hardware_status:
+        adjusted_ratios = dict(hardware_status["violation_ratios"])
+        adjusted_ratios["max_curvature_penalty"] = 0.0
+        adjusted_status["violation_ratios"] = adjusted_ratios
+    adjusted_status["curvature_traversal_allowed"] = True
+    adjusted_status["curvature_traversal_status"] = dict(precheck_status)
+    adjusted_status["curvature_traversal_original_violations"] = list(
+        hardware_status["violations"]
+    )
+    return adjusted_status
+
+
 def reject_search_step_on_curvature_precheck(metrics, precheck_status, step_start):
     rejection_increment = hardware_rejection_increment(run_dict["J"])
     run_dict["curvature_precheck_rejects"] = (
@@ -6733,7 +6788,10 @@ def evaluate_search_step(x):
             metrics["hardware_snapshot_seconds"] += (
                 time.perf_counter() - hardware_snapshot_start
             )
-            hardware_status = hardware_snapshot["search_hardware_status"]
+            hardware_status = hardware_status_with_curvature_traversal(
+                hardware_snapshot["search_hardware_status"],
+                curvature_precheck_status,
+            )
             run_dict["trial_hardware_status"] = hardware_status
             if not hardware_status["success"]:
                 hardware_contract = _evaluate_frontier_hardware_search_contract_impl(
