@@ -136,6 +136,19 @@ def diagnostic_search_eval_payload(base_payload):
     }
 
 
+def search_hardware_penalty_payload(values=(0.0, 0.0, 0.0)):
+    return {
+        "constraint_names": [
+            "coil_coil_spacing",
+            "coil_surface_spacing",
+            "max_curvature",
+        ],
+        "dual_update_values": np.asarray(values, dtype=float),
+        "feasibility_values": np.asarray(values, dtype=float).copy(),
+        "search_hardware_constraint_payload_kind": "penalty_objective",
+    }
+
+
 def load_workflow_helpers_module():
     return _load_module_from_path(
         WORKFLOW_HELPERS_MODULE_PATH,
@@ -2515,6 +2528,8 @@ class HardwareConstraintTests(unittest.TestCase):
         module.TOPOLOGY_GATE_PENALTY_SCALE = 4.0
         module.HARDWARE_SEARCH_MODE = hardware_search_mode
         module.HARDWARE_SEARCH_SOFT_ITERATIONS = hardware_search_soft_iterations
+        module.CURVATURE_TRAVERSAL_BAND = 0.0
+        module.CURVATURE_TRAVERSAL_EVAL_BUDGET = 0
         module.banana_curve = _Curve()
 
         with patch.object(
@@ -2549,6 +2564,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 "dJ_surf": np.zeros(3),
                 "J_curvature": 0.0,
                 "dJ_curvature": np.zeros(3),
+                **search_hardware_penalty_payload((0.25, 0.0, 0.0)),
             },
         ), patch.object(module, "restore_surface_states") as restore_mock, patch.object(
             module,
@@ -2783,6 +2799,8 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["SEARCH_STEP_REJECTED_AFTER_SURFACE_SOLVE"], 0)
         self.assertEqual(payload["SEARCH_STEP_FAST_OBJECTIVE_EVALS"], 0)
         self.assertEqual(payload["SEARCH_STEP_CURVATURE_REJECTS"], 0)
+        self.assertEqual(payload["SEARCH_STEP_CURVATURE_PRECHECK_REJECTS"], 0)
+        self.assertEqual(payload["SEARCH_STEP_CURVATURE_OVERCAP_BOOZER_EVALS"], 0)
         self.assertIsNone(payload["SEARCH_STEP_LAST_REJECTION_REASON"])
 
     def test_search_step_metrics_records_fast_curvature_reject(self):
@@ -2819,6 +2837,8 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["SEARCH_STEP_REJECTED_AFTER_SURFACE_SOLVE"], 1)
         self.assertEqual(payload["SEARCH_STEP_HARDWARE_REJECTS"], 1)
         self.assertEqual(payload["SEARCH_STEP_CURVATURE_REJECTS"], 1)
+        self.assertEqual(payload["SEARCH_STEP_CURVATURE_PRECHECK_REJECTS"], 0)
+        self.assertEqual(payload["SEARCH_STEP_CURVATURE_OVERCAP_BOOZER_EVALS"], 0)
         self.assertEqual(payload["SEARCH_STEP_FAST_OBJECTIVE_EVALS"], 1)
         self.assertEqual(payload["SEARCH_STEP_DIAGNOSTIC_OBJECTIVE_EVALS"], 0)
         self.assertEqual(payload["SEARCH_STEP_LAST_REJECTION_REASON"], "hardware")
@@ -4741,6 +4761,70 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertFalse(module.run_dict["trial_hardware_status"]["success"])
         self.assertIsNone(module.run_dict["accepted_hardware_status"])
 
+    def test_evaluate_search_step_curvature_precheck_rejects_before_boozer(self):
+        module = self.load_module()
+        last_dJ = np.array([1.0, -2.0])
+
+        class _JF:
+            x = np.zeros(2)
+
+        class _Curve:
+            def kappa(self):
+                return np.array([106.0])
+
+        module.CONSTRAINT_METHOD = "penalty"
+        module.CURVATURE_THRESHOLD = 100.0
+        module.CURVATURE_TRAVERSAL_BAND = 0.05
+        module.CURVATURE_TRAVERSAL_EVAL_BUDGET = 2
+        module.MULTISURFACE_RAMP_ITERATIONS = 0
+        module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
+        module.SURFACE_GAP_THRESHOLD = 0.0
+        module.SS_DIST = 0.04
+        module.JF = _JF()
+        module.banana_curve = _Curve()
+        module.surface_data = [
+            {"boozer_surface": SimpleNamespace(surface=object())}
+        ]
+        module.run_dict = {
+            "x_prev": np.zeros(2),
+            "lscount": 0,
+            "surface_state": {"sdofs": [], "iota": [], "G": []},
+            "accepted_x": np.zeros(2),
+            "J": 5.0,
+            "dJ": last_dJ.copy(),
+            "accepted_iterations": 0,
+            "trial_hardware_status": None,
+            "invalid_state_rejects_total": 0,
+            "topology_gate_rejects": 0,
+            "hardware_rejects": 0,
+            "surface_solve_rejects": 0,
+            "frontier_trust_rejects": 0,
+            "curvature_precheck_rejects": 0,
+            "curvature_overcap_boozer_evals": 0,
+            "curvature_overcap_boozer_evals_this_iteration": 0,
+        }
+
+        with patch.object(
+            module,
+            "solve_surface_stack_at_dofs",
+            side_effect=AssertionError("Boozer solve should not run"),
+        ), patch.object(module, "restore_surface_states") as restore_mock:
+            evaluation = module.evaluate_search_step(np.ones(2))
+
+        self.assertEqual(evaluation["total"], 10.0)
+        np.testing.assert_array_equal(evaluation["grad"], last_dJ)
+        self.assertEqual(module.run_dict["invalid_state_rejects_total"], 1)
+        self.assertEqual(module.run_dict["curvature_precheck_rejects"], 1)
+        self.assertEqual(module.run_dict["curvature_overcap_boozer_evals"], 0)
+        self.assertEqual(
+            module.run_dict["curvature_traversal_status"]["reason"],
+            "far_invalid_curvature",
+        )
+        restore_mock.assert_called_once()
+        payload = module.search_step_metrics_payload(module.run_dict)
+        self.assertEqual(payload["SEARCH_STEP_REJECTED_BEFORE_SURFACE_SOLVE"], 1)
+        self.assertEqual(payload["SEARCH_STEP_CURVATURE_PRECHECK_REJECTS"], 1)
+
     def test_fun_warns_only_on_hardware_constraint_failure_in_warn_mode(self):
         module, J_out, dJ_out, _last_dJ, restore_mock = self._run_fun_with_hardware_violation(
             hardware_search_mode="warn",
@@ -4808,6 +4892,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 "dJ_surf": np.zeros(3),
                 "J_curvature": 0.0,
                 "dJ_curvature": np.zeros(3),
+                **search_hardware_penalty_payload((0.25, 0.0, 0.0)),
             },
         ):
             J_out, dJ_out = module.fun(np.ones(3))
@@ -5119,6 +5204,7 @@ class HardwareConstraintTests(unittest.TestCase):
             "frontier_trust_penalty": 0.09,
             "frontier_boozer_trust_excess_ratio": 0.3,
             "surface_weights": np.array([1.0]),
+            **search_hardware_penalty_payload(),
         }
 
         with patch.object(
@@ -5136,16 +5222,9 @@ class HardwareConstraintTests(unittest.TestCase):
         ), patch.object(
             module,
             "evaluate_single_stage_hardware_snapshot",
-            return_value={
-                "success": True,
-                "violations": [],
-                "search_hardware_status": {"success": True, "violations": []},
-                "artifact_hardware_status": {"success": True, "violations": []},
-                "curve_curve_min_dist": 0.06,
-                "curve_surface_min_dist": 0.02,
-                "surface_vessel_min_dist": None,
-                "max_curvature": 15.0,
-            },
+            side_effect=AssertionError(
+                "exact hardware snapshot should not be evaluated"
+            ),
         ):
             evaluation = module.evaluate_search_step(np.ones(2))
 
@@ -5221,6 +5300,7 @@ class HardwareConstraintTests(unittest.TestCase):
             "J_Boozer": 5.0e-6,
             "dJ_Boozer": np.array([0.0, 0.0]),
             "surface_weights": np.array([1.0]),
+            **search_hardware_penalty_payload(),
         }
 
         with patch.object(
@@ -5248,16 +5328,9 @@ class HardwareConstraintTests(unittest.TestCase):
         ), patch.object(
             module,
             "evaluate_single_stage_hardware_snapshot",
-            return_value={
-                "success": True,
-                "violations": [],
-                "search_hardware_status": {"success": True, "violations": []},
-                "artifact_hardware_status": {"success": True, "violations": []},
-                "curve_curve_min_dist": 0.06,
-                "curve_surface_min_dist": 0.02,
-                "surface_vessel_min_dist": None,
-                "max_curvature": 15.0,
-            },
+            side_effect=AssertionError(
+                "exact hardware snapshot should not be evaluated"
+            ),
         ):
             evaluation = module.evaluate_search_step(np.ones(2))
 
@@ -5335,6 +5408,7 @@ class HardwareConstraintTests(unittest.TestCase):
             "J_Boozer": 5.0e-6,
             "dJ_Boozer": np.array([0.0, 0.0]),
             "surface_weights": np.array([1.0]),
+            **search_hardware_penalty_payload((0.25, 0.0, 0.0)),
         }
 
         with patch.object(
@@ -5352,30 +5426,9 @@ class HardwareConstraintTests(unittest.TestCase):
         ), patch.object(
             module,
             "evaluate_single_stage_hardware_snapshot",
-            return_value={
-                "success": False,
-                "violations": ["coil_coil_min_dist low"],
-                "search_hardware_status": {
-                    "success": False,
-                    "violations": ["coil_coil_min_dist low"],
-                    "curve_curve_min_dist": 0.06,
-                    "cc_dist": 0.08,
-                    "curve_surface_min_dist": 0.02,
-                    "cs_dist": 0.015,
-                    "surface_vessel_min_dist": None,
-                    "ss_dist": None,
-                    "max_curvature": 15.0,
-                    "curvature_threshold": 40.0,
-                },
-                "artifact_hardware_status": {
-                    "success": False,
-                    "violations": ["coil_coil_min_dist low"],
-                },
-                "curve_curve_min_dist": 0.06,
-                "curve_surface_min_dist": 0.02,
-                "surface_vessel_min_dist": None,
-                "max_curvature": 15.0,
-            },
+            side_effect=AssertionError(
+                "exact hardware snapshot should not be evaluated"
+            ),
         ):
             evaluation = module.evaluate_search_step(np.ones(2))
 
@@ -5455,6 +5508,7 @@ class HardwareConstraintTests(unittest.TestCase):
             "J_surf": 0.0,
             "dJ_surf": np.zeros(2),
             "surface_weights": np.array([1.0]),
+            **search_hardware_penalty_payload((0.1, 0.0, 0.0)),
         }
 
         with patch.object(
@@ -5472,30 +5526,9 @@ class HardwareConstraintTests(unittest.TestCase):
         ), patch.object(
             module,
             "evaluate_single_stage_hardware_snapshot",
-            return_value={
-                "success": False,
-                "violations": ["coil_coil_min_dist low"],
-                "search_hardware_status": {
-                    "success": False,
-                    "violations": ["coil_coil_min_dist low"],
-                    "curve_curve_min_dist": 0.06,
-                    "cc_dist": 0.08,
-                    "curve_surface_min_dist": 0.02,
-                    "cs_dist": 0.015,
-                    "surface_vessel_min_dist": None,
-                    "ss_dist": None,
-                    "max_curvature": 15.0,
-                    "curvature_threshold": 40.0,
-                },
-                "artifact_hardware_status": {
-                    "success": False,
-                    "violations": ["coil_coil_min_dist low"],
-                },
-                "curve_curve_min_dist": 0.06,
-                "curve_surface_min_dist": 0.02,
-                "surface_vessel_min_dist": None,
-                "max_curvature": 15.0,
-            },
+            side_effect=AssertionError(
+                "exact hardware snapshot should not be evaluated"
+            ),
         ):
             evaluation = module.evaluate_search_step(np.ones(2))
 
@@ -8133,6 +8166,8 @@ class RunIdentityTests(unittest.TestCase):
             topology_gate_penalty_scale=4.0,
             hardware_search_mode="hard",
             hardware_search_soft_iterations=0,
+            curvature_traversal_band=0.0,
+            curvature_traversal_eval_budget=0,
             topology_scorer_every=10,
             topology_scorer_nfieldlines=12,
             topology_scorer_tmax=50.0,
@@ -8741,12 +8776,18 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 "adaptive",
                 "--hardware-search-soft-iterations",
                 "3",
+                "--curvature-traversal-band",
+                "0.05",
+                "--curvature-traversal-eval-budget",
+                "2",
             ],
         ):
             args = module.parse_args()
 
         self.assertEqual(args.hardware_search_mode, "adaptive")
         self.assertEqual(args.hardware_search_soft_iterations, 3)
+        self.assertEqual(args.curvature_traversal_band, 0.05)
+        self.assertEqual(args.curvature_traversal_eval_budget, 2)
 
     def test_single_stage_parse_args_help_renders_with_fd_flag_text(self):
         module = load_single_stage_example_module()

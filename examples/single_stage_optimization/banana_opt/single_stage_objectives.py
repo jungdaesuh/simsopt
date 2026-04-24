@@ -445,6 +445,28 @@ def _frontier_excess_penalty(
     }
 
 
+def _penalty_search_constraint_payload(
+    JCurveCurve,
+    JCurveSurface,
+    JCurvature,
+    JSurfSurf,
+):
+    constraint_terms = [
+        ("coil_coil_spacing", JCurveCurve),
+        ("coil_surface_spacing", JCurveSurface),
+        ("max_curvature", JCurvature),
+    ]
+    if JSurfSurf is not None:
+        constraint_terms.append(("surface_vessel_spacing", JSurfSurf))
+    return (
+        [name for name, _ in constraint_terms],
+        np.asarray(
+            [max(float(objective.J()), 0.0) for _, objective in constraint_terms],
+            dtype=float,
+        ),
+    )
+
+
 def evaluate_total_objective(
     surface_weights,
     nonQSs,
@@ -501,11 +523,21 @@ def evaluate_total_objective(
         JSurfSurf=JSurfSurf,
     )
     total_grad = _objective_gradient(total_objective, objective_optimizable)
+    constraint_names, constraint_values = _penalty_search_constraint_payload(
+        JCurveCurve,
+        JCurveSurface,
+        JCurvature,
+        JSurfSurf,
+    )
     evaluation = {
         "total": float(total_objective.J()),
         "grad": total_grad,
         "surface_weights": np.asarray(surface_weights, dtype=float).copy(),
         "diagnostics_included": False,
+        "constraint_names": constraint_names,
+        "dual_update_values": constraint_values,
+        "feasibility_values": constraint_values.copy(),
+        "search_hardware_constraint_payload_kind": "penalty_objective",
     }
     if not include_diagnostics:
         return annotate_search_evaluation_finiteness(evaluation)
@@ -827,6 +859,7 @@ def evaluate_alm_objective(
     base_eval["feasibility_values"] = np.asarray(feasibility_values, dtype=float)
     base_eval["max_feasibility_violation"] = float(max(feasibility_values))
     base_eval["constraint_grads"] = [np.asarray(grad, dtype=float) for grad in constraint_grads]
+    base_eval["search_hardware_constraint_payload_kind"] = "signed_residual"
     geometry_tolerances = np.asarray(
         activity_tolerances_fn(
             distance_smoothing,

@@ -115,6 +115,11 @@ class _FakeCurveDistance:
         return self._shortest_distance
 
 
+class _UnexpectedCurveDistance(_FakeCurveDistance):
+    def shortest_distance(self):
+        raise AssertionError("exact sampled distance should not be evaluated")
+
+
 class _FakeCurvatureObjective:
     def __init__(self, threshold, kappa_values, objective_value):
         self.threshold = float(threshold)
@@ -671,7 +676,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         new_bs = _FakeBiotSavart((4, 3))
         Jf = _FakeScalarObjective(0.25)
         Jls = _FakeLengthObjective(2.2, [0.3, 0.4])
-        Jccdist = _FakeCurveDistance(0.05, 0.04)
+        Jccdist = _UnexpectedCurveDistance(0.05, 0.04)
         Jc = _FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5)
         banana_current = _FakeCurrentObjective(9500.0, [0.7, -0.4])
 
@@ -738,11 +743,11 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(
             result["hard_signed_constraint_values"],
-            [0.01, 1.0, 0.2, -6500.0],
+            [-0.008, 1.0, 0.2, -6500.0],
         )
         np.testing.assert_allclose(
             result["hard_violation_values"],
-            [0.01, 1.0, 0.2, 0.0],
+            [0.0, 1.0, 0.2, 0.0],
         )
         np.testing.assert_allclose(
             result["surrogate_signed_constraint_values"],
@@ -750,11 +755,11 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(
             result["hard_dual_update_values"],
-            [0.01, 1.0, 0.2, -6500.0],
+            [-0.008, 1.0, 0.2, -6500.0],
         )
         np.testing.assert_allclose(
             result["feasibility_values"],
-            [0.01, 1.0, 0.2, 0.0],
+            [0.0, 1.0, 0.2, 0.0],
         )
         np.testing.assert_allclose(
             result["constraint_activity_tolerances"],
@@ -785,7 +790,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             Jf=_UnexpectedFluxObjective(),
             Jls=_FakeLengthObjective(2.2, [0.3, 0.4]),
             length_target=2.0,
-            Jccdist=_FakeCurveDistance(0.05, 0.04),
+            Jccdist=_UnexpectedCurveDistance(0.05, 0.04),
             Jc=_FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5),
             banana_current=_FakeCurrentObjective(9500.0, [0.7, -0.4]),
             banana_current_max_A=16000.0,
@@ -881,22 +886,36 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertTrue(result["nonfinite_inputs_sanitized"])
         self.assertEqual(
             result["nonfinite_input_fields"],
-            ["base_grad", "base_value", "constraint_values[0]", "constraint_grads[0]"],
+            [
+                "base_grad",
+                "base_value",
+                "constraint_values[0]",
+                "constraint_grads[0]",
+                "hard_signed_constraint_values[0]",
+                "hard_violation_values[0]",
+            ],
         )
         self.assertTrue(result["nonfinite_evaluation"])
         self.assertEqual(
             result["nonfinite_fields"],
-            ["base_grad", "base_value", "constraint_values[0]", "constraint_grads[0]"],
+            [
+                "base_grad",
+                "base_value",
+                "constraint_values[0]",
+                "constraint_grads[0]",
+                "hard_signed_constraint_values[0]",
+                "hard_violation_values[0]",
+            ],
         )
         self.assertTrue(np.isnan(result["total"]))
         np.testing.assert_allclose(result["dual_update_values"], [1.0, 0.75, 0.2, -6500.0])
         np.testing.assert_allclose(
             result["hard_signed_constraint_values"],
-            [0.01, 1.0, 0.2, -6500.0],
+            [1.0, 1.0, 0.2, -6500.0],
         )
         np.testing.assert_allclose(
             result["hard_violation_values"],
-            [0.01, 1.0, 0.2, 0.0],
+            [1.0, 1.0, 0.2, 0.0],
         )
         np.testing.assert_allclose(
             result["surrogate_signed_constraint_values"],
@@ -1093,7 +1112,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(
             result["hard_violation_values"],
-            [0.01, 1.0, 0.2, 0.0, 0.1],
+            [0.0, 1.0, 0.2, 0.0, 0.1],
         )
         np.testing.assert_allclose(
             result["constraint_activity_tolerances"],
@@ -1194,7 +1213,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(
             result["hard_violation_values"],
-            [0.01, 1.0, 0.2, 0.0, 1.0],
+            [0.0, 1.0, 0.2, 0.0, 1.0],
         )
 
     def test_build_stage2_iota_runtime_instruments_boozer_hot_loop(self):
@@ -1798,12 +1817,67 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 "grad",
                 "surface_weights",
                 "diagnostics_included",
+                "constraint_names",
+                "dual_update_values",
+                "feasibility_values",
+                "search_hardware_constraint_payload_kind",
                 "finite_eval_ok",
                 "nonfinite_fields",
             },
         )
+        self.assertEqual(
+            result["search_hardware_constraint_payload_kind"],
+            "penalty_objective",
+        )
+        self.assertEqual(
+            result["constraint_names"],
+            ["coil_coil_spacing", "coil_surface_spacing", "max_curvature"],
+        )
+        np.testing.assert_allclose(result["dual_update_values"], [0.0, 0.0, 0.0])
+        np.testing.assert_allclose(result["feasibility_values"], [0.0, 0.0, 0.0])
         self.assertAlmostEqual(result["total"], 25.0)
         np.testing.assert_allclose(result["grad"], [4.6, 2.8])
+
+    def test_evaluate_total_objective_fast_path_emits_penalty_constraint_payload(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+
+        result = self.module.evaluate_total_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=_FakeAlgebraicObjective(0.6, [0.1, 0.0]),
+            CC_WEIGHT=1.0,
+            JCurveSurface=_FakeAlgebraicObjective(0.7, [0.0, 0.1]),
+            CS_WEIGHT=1.0,
+            JCurvature=_FakeAlgebraicObjective(0.8, [0.2, 0.3]),
+            CURVATURE_WEIGHT=1.0,
+            JSurfSurf=_FakeAlgebraicObjective(0.9, [0.4, 0.5]),
+            SURF_DIST_WEIGHT=1.0,
+            include_diagnostics=False,
+        )
+
+        self.assertEqual(
+            result["constraint_names"],
+            [
+                "coil_coil_spacing",
+                "coil_surface_spacing",
+                "max_curvature",
+                "surface_vessel_spacing",
+            ],
+        )
+        np.testing.assert_allclose(
+            result["dual_update_values"],
+            [0.6, 0.7, 0.8, 0.9],
+        )
+        self.assertEqual(
+            result["search_hardware_constraint_payload_kind"],
+            "penalty_objective",
+        )
 
     def test_evaluate_total_objective_supports_frontier_specific_objective_terms(self):
         nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]
@@ -2402,6 +2476,97 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
             result["search_hardware_status"]["constraints"],
         )
 
+    def test_evaluate_single_stage_search_hardware_snapshot_uses_surrogate_constraints(self):
+        result = self.module.evaluate_single_stage_search_hardware_snapshot(
+            {
+                "constraint_names": [
+                    "coil_coil_spacing",
+                    "coil_surface_spacing",
+                    "surface_vessel_spacing",
+                    "max_curvature",
+                    "banana_current_upper_bound",
+                ],
+                "dual_update_values": np.array([0.01, -0.003, 0.004, 0.5, 1000.0]),
+                "search_hardware_constraint_payload_kind": "signed_residual",
+            },
+            cc_dist=0.05,
+            cs_dist=0.02,
+            ss_dist=0.04,
+            curvature_threshold=40.0,
+            banana_current_max_A=1.6e4,
+        )
+
+        self.assertAlmostEqual(result["curve_curve_min_dist"], 0.04)
+        self.assertAlmostEqual(result["curve_surface_min_dist"], 0.023)
+        self.assertAlmostEqual(result["surface_vessel_min_dist"], 0.036)
+        self.assertAlmostEqual(result["max_curvature"], 40.5)
+        self.assertAlmostEqual(result["banana_current_A"], 1.7e4)
+        self.assertFalse(result["search_hardware_status"]["success"])
+        self.assertIn(
+            "coil_coil_spacing",
+            result["search_hardware_status"]["constraints"],
+        )
+        self.assertIn(
+            "max_curvature",
+            result["search_hardware_status"]["constraints"],
+        )
+        self.assertIn(
+            "banana_current",
+            result["search_hardware_status"]["constraints"],
+        )
+
+    def test_evaluate_single_stage_search_hardware_snapshot_uses_penalty_objective_payload(self):
+        result = self.module.evaluate_single_stage_search_hardware_snapshot(
+            {
+                "constraint_names": [
+                    "coil_coil_spacing",
+                    "coil_surface_spacing",
+                    "max_curvature",
+                ],
+                "dual_update_values": np.array([0.6, 0.0, 0.8]),
+                "search_hardware_constraint_payload_kind": "penalty_objective",
+            },
+            cc_dist=0.05,
+            cs_dist=0.02,
+            ss_dist=0.04,
+            curvature_threshold=40.0,
+            banana_current_A=1.7e4,
+            banana_current_max_A=1.6e4,
+        )
+
+        self.assertIsNone(result["curve_curve_min_dist"])
+        self.assertIsNone(result["max_curvature"])
+        self.assertFalse(result["search_hardware_status"]["success"])
+        self.assertAlmostEqual(
+            result["search_hardware_status"]["banana_current_A"],
+            1.7e4,
+        )
+        self.assertEqual(
+            result["search_hardware_status"]["violation_ratios"],
+            {
+                "coil_coil_spacing_penalty": 0.6,
+                "coil_surface_spacing_penalty": 0.0,
+                "max_curvature_penalty": 0.8,
+            },
+        )
+
+    def test_evaluate_single_stage_search_hardware_snapshot_requires_payload_kind(self):
+        with self.assertRaises(KeyError):
+            self.module.evaluate_single_stage_search_hardware_snapshot(
+                {
+                    "constraint_names": [
+                        "coil_coil_spacing",
+                        "coil_surface_spacing",
+                        "max_curvature",
+                    ],
+                    "dual_update_values": np.array([0.0, 0.0, 0.0]),
+                },
+                cc_dist=0.05,
+                cs_dist=0.02,
+                ss_dist=0.04,
+                curvature_threshold=40.0,
+            )
+
 
 class SingleStageIncumbentsModuleTests(_ModuleTestCase):
     MODULE_PATH = SINGLE_STAGE_INCUMBENTS_PATH
@@ -2627,3 +2792,52 @@ class SingleStageSearchPolicyModuleTests(_ModuleTestCase):
         self.assertFalse(decision.warning_only)
         self.assertEqual(decision.rejection_increment, 7.0)
         self.assertEqual(decision.reason, "hard_reject")
+
+    def test_curvature_traversal_allows_inside_threshold(self):
+        decision = self.module.decide_curvature_traversal(
+            max_curvature=99.0,
+            curvature_threshold=100.0,
+            policy=self.module.CurvatureTraversalPolicy(0.05, 0),
+            used_budget=0,
+        )
+
+        self.assertTrue(decision.allow_boozer_eval)
+        self.assertFalse(decision.over_threshold)
+        self.assertEqual(decision.reason, "within_threshold")
+        self.assertEqual(decision.far_invalid_limit, 105.0)
+
+    def test_curvature_traversal_allows_overcap_inside_budgeted_band(self):
+        decision = self.module.decide_curvature_traversal(
+            max_curvature=104.0,
+            curvature_threshold=100.0,
+            policy=self.module.CurvatureTraversalPolicy(0.05, 2),
+            used_budget=1,
+        )
+
+        self.assertTrue(decision.allow_boozer_eval)
+        self.assertTrue(decision.over_threshold)
+        self.assertEqual(decision.reason, "within_traversal_band")
+
+    def test_curvature_traversal_rejects_far_invalid_curvature(self):
+        decision = self.module.decide_curvature_traversal(
+            max_curvature=106.0,
+            curvature_threshold=100.0,
+            policy=self.module.CurvatureTraversalPolicy(0.05, 2),
+            used_budget=0,
+        )
+
+        self.assertFalse(decision.allow_boozer_eval)
+        self.assertTrue(decision.over_threshold)
+        self.assertEqual(decision.reason, "far_invalid_curvature")
+
+    def test_curvature_traversal_rejects_after_budget_exhausts(self):
+        decision = self.module.decide_curvature_traversal(
+            max_curvature=104.0,
+            curvature_threshold=100.0,
+            policy=self.module.CurvatureTraversalPolicy(0.05, 2),
+            used_budget=2,
+        )
+
+        self.assertFalse(decision.allow_boozer_eval)
+        self.assertTrue(decision.over_threshold)
+        self.assertEqual(decision.reason, "curvature_traversal_budget_exhausted")

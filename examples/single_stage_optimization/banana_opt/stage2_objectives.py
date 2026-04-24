@@ -8,7 +8,6 @@ from alm_utils import (
     ALMSettings,
     alm_result_diagnostics_fields,
     augmented_inequality_objective,
-    lower_bound_residual,
     upper_bound_residual,
     zero_gradient_like,
 )
@@ -1338,6 +1337,13 @@ def smooth_min_curve_surface_signed_constraint(
     return float(minimum_distance) - smooth_min, -grad
 
 
+def _stage2_distance_signal(distance_obj, signed_value, emit_diagnostics):
+    if emit_diagnostics:
+        min_dist = float(distance_obj.shortest_distance())
+        return min_dist, distance_obj.minimum_distance - min_dist
+    return None, signed_value
+
+
 def evaluate_stage2_alm_problem(
     dofs,
     base_objective,
@@ -1371,26 +1377,25 @@ def evaluate_stage2_alm_problem(
     length_violation = upper_bound_residual(coil_length, length_target)
     length_grad = np.asarray(Jls.dJ(partials=True)(base_objective_optimizable), dtype=float)
 
-    curve_curve_min_dist = float(Jccdist.shortest_distance())
-    curve_curve_violation = lower_bound_residual(
-        curve_curve_min_dist,
-        Jccdist.minimum_distance,
-    )
     curve_curve_signed_value, curve_curve_grad = smooth_min_distance_signed_constraint(
         Jccdist.curves,
         Jccdist.minimum_distance,
         distance_smoothing,
         base_objective_optimizable,
     )
+    curve_curve_min_dist, curve_curve_hard_signed_value = _stage2_distance_signal(
+        Jccdist,
+        curve_curve_signed_value,
+        emit_diagnostics,
+    )
+    curve_curve_violation = upper_bound_residual(
+        curve_curve_hard_signed_value,
+        0.0,
+    )
     include_coil_surface = (
         Jcsdist is not None and smooth_min_curve_surface_signed_constraint is not None
     )
     if include_coil_surface:
-        curve_surface_min_dist = float(Jcsdist.shortest_distance())
-        curve_surface_violation = lower_bound_residual(
-            curve_surface_min_dist,
-            Jcsdist.minimum_distance,
-        )
         curve_surface_signed_value, curve_surface_grad = (
             smooth_min_curve_surface_signed_constraint(
                 Jcsdist.curves,
@@ -1399,6 +1404,17 @@ def evaluate_stage2_alm_problem(
                 distance_smoothing,
                 base_objective_optimizable,
             )
+        )
+        curve_surface_min_dist, curve_surface_hard_signed_value = (
+            _stage2_distance_signal(
+                Jcsdist,
+                curve_surface_signed_value,
+                emit_diagnostics,
+            )
+        )
+        curve_surface_violation = upper_bound_residual(
+            curve_surface_hard_signed_value,
+            0.0,
         )
 
     max_curvature = float(np.max(Jc.curve.kappa()))
@@ -1452,7 +1468,7 @@ def evaluate_stage2_alm_problem(
     )
     hard_by_name = {
         "coil_length_upper_bound": coil_length - length_target,
-        "coil_coil_spacing": Jccdist.minimum_distance - curve_curve_min_dist,
+        "coil_coil_spacing": curve_curve_hard_signed_value,
         "max_curvature": max_curvature - Jc.threshold,
         "banana_current_upper_bound": banana_current_signed_value,
     }
@@ -1475,9 +1491,7 @@ def evaluate_stage2_alm_problem(
         "banana_current_upper_bound": banana_current_violation,
     }
     if include_coil_surface:
-        hard_by_name["coil_surface_spacing"] = (
-            Jcsdist.minimum_distance - curve_surface_min_dist
-        )
+        hard_by_name["coil_surface_spacing"] = curve_surface_hard_signed_value
         surrogate_by_name["coil_surface_spacing"] = curve_surface_signed_value
         grad_by_name["coil_surface_spacing"] = curve_surface_grad
         feasibility_by_name["coil_surface_spacing"] = curve_surface_violation

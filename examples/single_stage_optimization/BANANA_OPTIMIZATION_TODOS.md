@@ -285,7 +285,7 @@ Validation:
 ### P2. Remove exact sampled distances from optimizer hot loops
 
 Category: performance
-Scope: shared SIMSOPT path plus fork-local callers
+Scope: fork-local banana callers; shared SIMSOPT distance APIs reviewed and left unchanged
 Impact: very high
 Effort: small
 
@@ -314,10 +314,37 @@ Impact measure:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Impact:
+
+- Stage 2 ALM fast-path feasibility now uses smooth distance constraint
+  payloads and keeps exact `shortest_distance()` calls behind diagnostic
+  emission.
+- Single-stage `evaluate_search_step` now builds search hardware status from
+  surrogate constraint payloads; exact sampled distance snapshots remain on
+  accepted-step, preserved-timeout, initial, and final artifact paths.
+- Penalty-mode compact objective payloads now include the small geometry
+  constraint signal needed by the search gate, without restoring per-term
+  diagnostic derivatives, and frontier hardware penalties consume those values
+  as explicit objective-space violation ratios merged with physical current
+  violation ratios rather than fake physical distances.
+- Stage 2 parity now distinguishes the fast path, which uses smooth constraint
+  feasibility, from the diagnostic path, which still emits exact sampled
+  shortest-distance values for reports.
+
+Validation:
+
+- `python3 -m pytest tests/geo/test_banana_objective_modules.py -k "evaluate_total_objective_fast_path or stage2_alm_problem or search_hardware_snapshot" -q`
+- `python3 -m pytest tests/geo/test_single_stage_example.py -k "evaluate_search_step_frontier_trust_excess_remains_search_penalty or evaluate_search_step_frontier_topology_reject_becomes_penalty or evaluate_search_step_frontier_hardware_reject_becomes_penalty or evaluate_search_step_repair_phase1_keeps_valid_hardware_bad_candidate_live" -q`
+- `python3 -m pytest tests/geo/test_frontier_constraints.py -q`
+- `python3 -m pytest tests/geo/test_frontier_constraints.py tests/geo/test_banana_objective_modules.py tests/geo/test_single_stage_example.py -q`
+- `python3 -m pytest tests/geo/test_banana_modularization_parity.py tests/geo/test_single_stage_alm_integration.py tests/geo/test_stage2_single_stage_handoff.py tests/geo/test_single_stage_workflow_helpers.py -q`
+- `python3 -m pytest tests/geo/test_alm_utils.py -q`
+- `python3 -m ruff check examples/single_stage_optimization/banana_opt/stage2_objectives.py examples/single_stage_optimization/banana_opt/single_stage_geometry.py examples/single_stage_optimization/banana_opt/single_stage_objectives.py examples/single_stage_optimization/banana_opt/frontier_constraints.py examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py tests/geo/test_banana_objective_modules.py tests/geo/test_single_stage_example.py tests/geo/test_frontier_constraints.py tests/geo/test_banana_modularization_parity.py`
 
 ### P3. Tune L-BFGS-B `maxcor`
 

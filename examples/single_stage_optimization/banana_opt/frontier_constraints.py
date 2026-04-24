@@ -390,7 +390,7 @@ def evaluate_frontier_hard_invalidation(
 def hardware_violation_ratios(
     hardware_status: Mapping[str, object],
 ) -> dict[str, float]:
-    return {
+    ratios = {
         "curve_curve_min_dist": _lower_bound_violation_ratio(
             hardware_status.get("curve_curve_min_dist"),
             hardware_status.get("cc_dist"),
@@ -407,7 +407,27 @@ def hardware_violation_ratios(
             hardware_status.get("max_curvature"),
             hardware_status.get("curvature_threshold"),
         ),
+        "banana_current": _box_bound_violation_ratio(
+            hardware_status.get("banana_current_A"),
+            hardware_status.get("banana_current_max_A"),
+        ),
+        "tf_current": _box_bound_violation_ratio(
+            hardware_status.get("tf_current_A"),
+            hardware_status.get("tf_current_limit_A"),
+        ),
     }
+    for name, entry in dict(hardware_status.get("constraints", {})).items():
+        threshold = abs(float(entry["threshold"]))
+        if threshold > 0.0:
+            ratios[str(name)] = float(entry["violation"]) / max(
+                threshold,
+                _FINITE_EPS,
+            )
+    explicit_ratios = hardware_status.get("violation_ratios")
+    if explicit_ratios is not None:
+        for name, value in dict(explicit_ratios).items():
+            ratios[str(name)] = float(value)
+    return ratios
 
 
 def _lower_bound_violation_ratio(value, minimum) -> float:
@@ -422,6 +442,13 @@ def _upper_bound_violation_ratio(value, maximum) -> float:
         return 0.0
     maximum_value = max(abs(float(maximum)), _FINITE_EPS)
     return max(float(value) - float(maximum), 0.0) / maximum_value
+
+
+def _box_bound_violation_ratio(value, maximum) -> float:
+    if value is None or maximum is None:
+        return 0.0
+    maximum_value = max(abs(float(maximum)), _FINITE_EPS)
+    return max(abs(float(value)) - float(maximum), 0.0) / maximum_value
 
 
 def _frontier_search_contract_penalty_base(previous_objective: float) -> float:

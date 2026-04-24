@@ -328,18 +328,182 @@ def evaluate_single_stage_hardware_constraints(
         "ss_dist": float(ss_dist),
         "max_curvature": float(max_curvature),
         "curvature_threshold": float(curvature_threshold),
-        "coil_length": None if coil_length is None else float(coil_length),
-        "length_target": None if length_target is None else float(length_target),
-        "tf_current_A": None if tf_current_A is None else float(tf_current_A),
-        "tf_current_limit_A": (
-            None if tf_current_limit_A is None else float(tf_current_limit_A)
-        ),
-        "banana_current_A": (
-            None if banana_current_A is None else float(banana_current_A)
-        ),
-        "banana_current_max_A": (
-            None if banana_current_max_A is None else float(banana_current_max_A)
-        ),
+        "coil_length": _optional_float(coil_length),
+        "length_target": _optional_float(length_target),
+        "tf_current_A": _optional_float(tf_current_A),
+        "tf_current_limit_A": _optional_float(tf_current_limit_A),
+        "banana_current_A": _optional_float(banana_current_A),
+        "banana_current_max_A": _optional_float(banana_current_max_A),
+    }
+
+
+def _lower_bound_measurement_from_signed(threshold, signed_value):
+    return float(threshold) - float(signed_value)
+
+
+def _upper_bound_measurement_from_signed(threshold, signed_value):
+    return float(threshold) + float(signed_value)
+
+
+def _optional_float(value):
+    return None if value is None else float(value)
+
+
+def _constraint_signed_value_by_name(objective_eval):
+    names = list(objective_eval["constraint_names"])
+    values = np.asarray(objective_eval["dual_update_values"], dtype=float)
+    return {
+        str(name): float(value)
+        for name, value in zip(names, values, strict=True)
+    }
+
+
+def _penalty_objective_constraint_entry(name, value):
+    penalty_value = max(float(value), 0.0)
+    return {
+        "name": str(name),
+        "kind": "penalty_objective",
+        "threshold": 0.0,
+        "value": penalty_value,
+        "signed_value": penalty_value,
+        "violation": penalty_value,
+        "success": penalty_value == 0.0,
+        "applies_to": ("penalty",),
+        "traversal_policy": "allowed",
+    }
+
+
+def _add_penalty_objective_status_entries(search_hardware_status, constraint_values):
+    violation_ratios = {}
+    allowed_status = search_hardware_status["allowed_traversal_status"]
+    for name, value in constraint_values.items():
+        entry = _penalty_objective_constraint_entry(name, value)
+        search_hardware_status["constraints"][name] = entry
+        allowed_status["constraints"][name] = entry
+        violation_ratios[f"{name}_penalty"] = float(entry["violation"])
+        if not entry["success"]:
+            message = f"{name} penalty {entry['violation']:.6e} exceeds 0"
+            search_hardware_status["violations"].append(message)
+            allowed_status["violations"].append(message)
+            search_hardware_status["success"] = False
+            allowed_status["success"] = False
+    search_hardware_status["violation_ratios"] = violation_ratios
+
+
+def evaluate_single_stage_search_hardware_snapshot(
+    objective_eval,
+    cc_dist,
+    cs_dist,
+    ss_dist,
+    curvature_threshold,
+    *,
+    coil_length=None,
+    length_target=None,
+    tf_current_A=None,
+    tf_current_limit_A=None,
+    banana_current_A=None,
+    banana_current_max_A=None,
+):
+    signed_values = _constraint_signed_value_by_name(objective_eval)
+    payload_kind = objective_eval["search_hardware_constraint_payload_kind"]
+    if payload_kind not in {"signed_residual", "penalty_objective"}:
+        raise ValueError(
+            "search hardware constraint payload kind must be "
+            "'signed_residual' or 'penalty_objective'."
+        )
+    curve_curve_min_dist = None
+    if payload_kind == "signed_residual" and "coil_coil_spacing" in signed_values:
+        curve_curve_min_dist = _lower_bound_measurement_from_signed(
+            cc_dist,
+            signed_values["coil_coil_spacing"],
+        )
+    curve_surface_min_dist = None
+    if payload_kind == "signed_residual" and "coil_surface_spacing" in signed_values:
+        curve_surface_min_dist = _lower_bound_measurement_from_signed(
+            cs_dist,
+            signed_values["coil_surface_spacing"],
+        )
+    surface_vessel_min_dist = None
+    if payload_kind == "signed_residual" and "surface_vessel_spacing" in signed_values:
+        surface_vessel_min_dist = _lower_bound_measurement_from_signed(
+            ss_dist,
+            signed_values["surface_vessel_spacing"],
+        )
+    max_curvature = None
+    if payload_kind == "signed_residual" and "max_curvature" in signed_values:
+        max_curvature = _upper_bound_measurement_from_signed(
+            curvature_threshold,
+            signed_values["max_curvature"],
+        )
+    if banana_current_A is None and banana_current_max_A is not None:
+        banana_current_signed_value = signed_values.get("banana_current_upper_bound")
+        if banana_current_signed_value is not None:
+            banana_current_A = _upper_bound_measurement_from_signed(
+                banana_current_max_A,
+                banana_current_signed_value,
+            )
+
+    threshold_overrides = build_threshold_overrides(
+        (
+            ("coil_coil_spacing", cc_dist),
+            ("coil_surface_spacing", cs_dist),
+            ("surface_vessel_spacing", ss_dist),
+            ("max_curvature", curvature_threshold),
+            ("banana_current", banana_current_max_A),
+        )
+    )
+    measured_values = {
+        "coil_coil_spacing": curve_curve_min_dist,
+        "coil_surface_spacing": curve_surface_min_dist,
+        "surface_vessel_spacing": surface_vessel_min_dist,
+        "max_curvature": max_curvature,
+        "coil_length": coil_length,
+        "tf_current": tf_current_A,
+        "banana_current": banana_current_A,
+    }
+    search_hardware_status = build_hardware_constraint_status(
+        measured_values,
+        applies_to="penalty",
+        threshold_overrides=threshold_overrides,
+    )
+    if payload_kind == "penalty_objective":
+        _add_penalty_objective_status_entries(search_hardware_status, signed_values)
+    search_hardware_status.update(
+        {
+            "curve_curve_min_dist": curve_curve_min_dist,
+            "cc_dist": float(cc_dist),
+            "curve_surface_min_dist": curve_surface_min_dist,
+            "cs_dist": float(cs_dist),
+            "surface_vessel_min_dist": surface_vessel_min_dist,
+            "ss_dist": float(ss_dist),
+            "max_curvature": max_curvature,
+            "curvature_threshold": float(curvature_threshold),
+            "tf_current_A": _optional_float(tf_current_A),
+            "tf_current_limit_A": _optional_float(tf_current_limit_A),
+            "banana_current_A": _optional_float(banana_current_A),
+            "banana_current_max_A": _optional_float(banana_current_max_A),
+        }
+    )
+    return {
+        "success": search_hardware_status["success"],
+        "violations": list(search_hardware_status["violations"]),
+        "constraints": search_hardware_status["constraints"],
+        "search_hardware_status": search_hardware_status,
+        "artifact_hardware_status": None,
+        "curve_curve_min_dist": curve_curve_min_dist,
+        "cc_dist": float(cc_dist),
+        "curve_surface_min_dist": curve_surface_min_dist,
+        "cs_dist": float(cs_dist),
+        "surface_vessel_min_dist": surface_vessel_min_dist,
+        "ss_dist": float(ss_dist),
+        "max_curvature": max_curvature,
+        "curvature_threshold": float(curvature_threshold),
+        "coil_length": _optional_float(coil_length),
+        "length_target": _optional_float(length_target),
+        "tf_current_A": _optional_float(tf_current_A),
+        "tf_current_limit_A": _optional_float(tf_current_limit_A),
+        "banana_current_A": _optional_float(banana_current_A),
+        "banana_current_max_A": _optional_float(banana_current_max_A),
     }
 
 

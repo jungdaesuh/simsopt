@@ -359,6 +359,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "DEFAULT_LOCAL_STAGE2_ROOT": "/tmp/fake_local",
             "DEFAULT_HARDWARE_SEARCH_MODE": "hard",
             "DEFAULT_HARDWARE_SEARCH_SOFT_ITERATIONS": 0,
+            "DEFAULT_CURVATURE_TRAVERSAL_BAND": 0.0,
+            "DEFAULT_CURVATURE_TRAVERSAL_EVAL_BUDGET": 0,
             "DEFAULT_INNER_SURFACE_RATIO": 0.8,
             "DEFAULT_STAGE2_SEEDS_BY_PLASMA": {},
             "FRONTIER_SCALARIZATION_TYPE_WEIGHT_SCHEDULE": "weight_schedule_v1",

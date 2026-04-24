@@ -536,12 +536,16 @@ class SnapshotParityTests(unittest.TestCase):
             multipliers=np.array([0.1, 0.2, 0.3]),
             penalty=common_args["penalty"],
         )
-        actual = self.current_stage2_objectives.evaluate_stage2_alm_problem(
-            **common_args,
-            stage2_constraint_activity_tolerances=stage2_constraint_activity_tolerances,
-            smooth_min_distance_signed_constraint=smooth_min_distance_signed_constraint,
-            smooth_max_curvature_signed_constraint=smooth_max_curvature_signed_constraint,
-        )
+        def evaluate_current(**overrides):
+            return self.current_stage2_objectives.evaluate_stage2_alm_problem(
+                **common_args,
+                **overrides,
+                stage2_constraint_activity_tolerances=stage2_constraint_activity_tolerances,
+                smooth_min_distance_signed_constraint=smooth_min_distance_signed_constraint,
+                smooth_max_curvature_signed_constraint=smooth_max_curvature_signed_constraint,
+            )
+
+        actual = evaluate_current()
 
         self.assertEqual(
             actual["constraint_names"],
@@ -564,11 +568,11 @@ class SnapshotParityTests(unittest.TestCase):
         np.testing.assert_allclose(actual["dual_update_values"][3], -6500.0)
         np.testing.assert_allclose(
             actual["hard_signed_constraint_values"],
-            [0.01, 2.0, 0.05, -6500.0],
+            [-0.008, 2.0, 0.05, -6500.0],
         )
         np.testing.assert_allclose(
             actual["hard_violation_values"],
-            [0.01, 2.0, 0.05, 0.0],
+            [0.0, 2.0, 0.05, 0.0],
         )
         np.testing.assert_allclose(
             actual["surrogate_signed_constraint_values"][0],
@@ -588,9 +592,9 @@ class SnapshotParityTests(unittest.TestCase):
         )
         np.testing.assert_allclose(
             actual["hard_dual_update_values"],
-            [0.01, 2.0, 0.05, -6500.0],
+            [-0.008, 2.0, 0.05, -6500.0],
         )
-        np.testing.assert_allclose(actual["feasibility_values"][0], expected["feasibility_values"][1])
+        np.testing.assert_allclose(actual["feasibility_values"][0], 0.0)
         np.testing.assert_allclose(actual["feasibility_values"][1], expected["feasibility_values"][2])
         np.testing.assert_allclose(actual["feasibility_values"][2], expected["feasibility_values"][0])
         np.testing.assert_allclose(actual["feasibility_values"][3], 0.0)
@@ -598,6 +602,15 @@ class SnapshotParityTests(unittest.TestCase):
         self.assertAlmostEqual(
             actual["max_feasibility_violation"],
             expected["max_feasibility_violation"],
+        )
+        actual_diagnostics = evaluate_current(emit_diagnostics=True)
+        np.testing.assert_allclose(
+            actual_diagnostics["hard_signed_constraint_values"],
+            [0.01, 2.0, 0.05, -6500.0],
+        )
+        np.testing.assert_allclose(
+            actual_diagnostics["hard_violation_values"],
+            [0.01, 2.0, 0.05, 0.0],
         )
 
     def test_build_stage2_bs_path_prefers_init_current_aware_contract(self):

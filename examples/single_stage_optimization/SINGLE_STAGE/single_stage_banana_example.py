@@ -209,6 +209,7 @@ from banana_opt.single_stage_geometry import (
     disabled_topology_gate_status,
     evaluate_single_stage_hardware_constraints as _evaluate_single_stage_hardware_constraints,
     evaluate_single_stage_hardware_snapshot,
+    evaluate_single_stage_search_hardware_snapshot,
     evaluate_surface_stack,
     evaluate_topology_gate as _evaluate_topology_gate_impl,
     restore_surface_states,
@@ -232,7 +233,13 @@ from banana_opt.single_stage_constraints import (
     smooth_min_curve_surface_signed_constraint as _smooth_min_curve_surface_signed_constraint,
     smooth_min_surface_surface_signed_constraint as _smooth_min_surface_surface_signed_constraint,
 )
-from banana_opt.single_stage_search_policy import HardwareSearchPolicy, SearchContext
+from banana_opt.single_stage_search_policy import (
+    CurvatureTraversalPolicy,
+    HardwareSearchPolicy,
+    SearchContext,
+    decide_curvature_traversal,
+    hardware_rejection_increment,
+)
 from banana_opt.single_stage_objectives import (
     apply_frontier_scalarization_override as _apply_frontier_scalarization_override_impl,
     average_surface_objectives as _average_surface_objectives_impl,
@@ -282,6 +289,8 @@ DEFAULT_SINGLE_STAGE_OUTPUT_ROOT = os.path.join(SCRIPT_DIR, "outputs")
 LEGACY_STAGE2_BANANA_WINDING_MINOR_RADIUS_M = 0.22
 DEFAULT_HARDWARE_SEARCH_MODE = "hard"
 DEFAULT_HARDWARE_SEARCH_SOFT_ITERATIONS = 0
+DEFAULT_CURVATURE_TRAVERSAL_BAND = 0.0
+DEFAULT_CURVATURE_TRAVERSAL_EVAL_BUDGET = 0
 _DEFAULT_SINGLE_STAGE_SEED_REGIME = "auto"
 _SINGLE_STAGE_SEED_REGIME_AUTO = "auto"
 # Derive from single_stage_phase1 to keep one canonical source of truth for string values.
@@ -1197,6 +1206,35 @@ def parse_args():
             "multisurface search gate remains relaxed (gate_scale < 1.0). When this value is "
             "positive, it caps the number of accepted relaxed-gate iterations that may use the "
             "warning-only path before reverting to hard rejection."
+        ),
+    )
+    parser.add_argument(
+        "--curvature-traversal-band",
+        type=float,
+        default=float(
+            os.environ.get(
+                "CURVATURE_TRAVERSAL_BAND",
+                str(DEFAULT_CURVATURE_TRAVERSAL_BAND),
+            )
+        ),
+        help=(
+            "Relative over-curvature band allowed to reach Boozer before hard search-time "
+            "curvature rejection. A value of 0.05 allows trials up to 5 percent above "
+            "--curvature-threshold while budget remains."
+        ),
+    )
+    parser.add_argument(
+        "--curvature-traversal-eval-budget",
+        type=int,
+        default=int(
+            os.environ.get(
+                "CURVATURE_TRAVERSAL_EVAL_BUDGET",
+                str(DEFAULT_CURVATURE_TRAVERSAL_EVAL_BUDGET),
+            )
+        ),
+        help=(
+            "Per accepted iteration budget for Boozer evaluations whose cheap precheck "
+            "curvature is above --curvature-threshold but inside --curvature-traversal-band."
         ),
     )
     parser.add_argument(
@@ -2144,6 +2182,8 @@ class RunIdentityConfig:
     topology_gate_penalty_scale: float
     hardware_search_mode: str
     hardware_search_soft_iterations: int
+    curvature_traversal_band: float
+    curvature_traversal_eval_budget: int
     topology_scorer_every: int
     topology_scorer_nfieldlines: int
     topology_scorer_tmax: float
@@ -2619,6 +2659,8 @@ def make_run_identity_config(
         topology_gate_penalty_scale=args.topology_gate_penalty_scale,
         hardware_search_mode=args.hardware_search_mode,
         hardware_search_soft_iterations=args.hardware_search_soft_iterations,
+        curvature_traversal_band=args.curvature_traversal_band,
+        curvature_traversal_eval_budget=args.curvature_traversal_eval_budget,
         topology_scorer_every=args.topology_scorer_every,
         topology_scorer_nfieldlines=args.topology_scorer_nfieldlines,
         topology_scorer_tmax=args.topology_scorer_tmax,
@@ -6090,6 +6132,14 @@ def build_single_stage_solver_checkpoint_state(
             ),
             "topology_gate_rejects": run_dict.get("topology_gate_rejects", 0),
             "hardware_rejects": run_dict.get("hardware_rejects", 0),
+            "curvature_precheck_rejects": run_dict.get(
+                "curvature_precheck_rejects",
+                0,
+            ),
+            "curvature_overcap_boozer_evals": run_dict.get(
+                "curvature_overcap_boozer_evals",
+                0,
+            ),
             "surface_solve_rejects": run_dict.get("surface_solve_rejects", 0),
             "frontier_trust_rejects": run_dict.get("frontier_trust_rejects", 0),
         },
@@ -6230,10 +6280,13 @@ def new_search_step_metrics():
         "topology_rejects": 0,
         "hardware_rejects": 0,
         "curvature_rejects": 0,
+        "curvature_precheck_rejects": 0,
+        "curvature_overcap_boozer_evals": 0,
         "other_rejects": 0,
         "objective_evaluations": 0,
         "fast_objective_evaluations": 0,
         "diagnostic_objective_evaluations": 0,
+        "curvature_precheck_seconds": 0.0,
         "surface_solve_seconds": 0.0,
         "objective_eval_seconds": 0.0,
         "topology_gate_seconds": 0.0,
@@ -6299,6 +6352,9 @@ def record_search_step_rejection(
         metrics["hardware_rejects"] += 1
         if hardware_status_has_curvature_violation(hardware_status):
             metrics["curvature_rejects"] += 1
+    elif reason == "curvature_precheck":
+        metrics["curvature_rejects"] += 1
+        metrics["curvature_precheck_rejects"] += 1
     else:
         metrics["other_rejects"] += 1
 
@@ -6326,6 +6382,12 @@ def search_step_metrics_payload(run_dict):
         "SEARCH_STEP_TOPOLOGY_REJECTS": int(metrics["topology_rejects"]),
         "SEARCH_STEP_HARDWARE_REJECTS": int(metrics["hardware_rejects"]),
         "SEARCH_STEP_CURVATURE_REJECTS": int(metrics["curvature_rejects"]),
+        "SEARCH_STEP_CURVATURE_PRECHECK_REJECTS": int(
+            metrics["curvature_precheck_rejects"]
+        ),
+        "SEARCH_STEP_CURVATURE_OVERCAP_BOOZER_EVALS": int(
+            metrics["curvature_overcap_boozer_evals"]
+        ),
         "SEARCH_STEP_OTHER_REJECTS": int(metrics["other_rejects"]),
         "SEARCH_STEP_OBJECTIVE_EVALS": int(metrics["objective_evaluations"]),
         "SEARCH_STEP_FAST_OBJECTIVE_EVALS": int(
@@ -6333,6 +6395,9 @@ def search_step_metrics_payload(run_dict):
         ),
         "SEARCH_STEP_DIAGNOSTIC_OBJECTIVE_EVALS": int(
             metrics["diagnostic_objective_evaluations"]
+        ),
+        "SEARCH_STEP_CURVATURE_PRECHECK_SECONDS": float(
+            metrics["curvature_precheck_seconds"]
         ),
         "SEARCH_STEP_SURFACE_SOLVE_SECONDS": float(
             metrics["surface_solve_seconds"]
@@ -6357,6 +6422,98 @@ def search_step_metrics_payload(run_dict):
             "last_rejection_increment",
         ),
     }
+
+
+def current_curvature_traversal_policy():
+    return CurvatureTraversalPolicy(
+        float(
+            globals().get(
+                "CURVATURE_TRAVERSAL_BAND",
+                DEFAULT_CURVATURE_TRAVERSAL_BAND,
+            )
+        ),
+        int(
+            globals().get(
+                "CURVATURE_TRAVERSAL_EVAL_BUDGET",
+                DEFAULT_CURVATURE_TRAVERSAL_EVAL_BUDGET,
+            )
+        ),
+    )
+
+
+def curvature_traversal_precheck_enabled(policy):
+    return (
+        globals().get("CONSTRAINT_METHOD", "penalty") != "alm"
+        and (policy.band_ratio > 0.0 or policy.eval_budget > 0)
+    )
+
+
+def evaluate_curvature_traversal_precheck(x, metrics):
+    policy = current_curvature_traversal_policy()
+    if not curvature_traversal_precheck_enabled(policy):
+        return {"enabled": False, "allow_boozer_eval": True}
+
+    precheck_start = time.perf_counter()
+    JF.x = x
+    max_curvature = float(np.max(banana_curve.kappa()))
+    used_budget = int(
+        run_dict.get("curvature_overcap_boozer_evals_this_iteration", 0)
+    )
+    decision = decide_curvature_traversal(
+        max_curvature=max_curvature,
+        curvature_threshold=CURVATURE_THRESHOLD,
+        policy=policy,
+        used_budget=used_budget,
+    )
+    metrics["curvature_precheck_seconds"] += time.perf_counter() - precheck_start
+
+    status = {
+        "enabled": True,
+        "allow_boozer_eval": bool(decision.allow_boozer_eval),
+        "over_threshold": bool(decision.over_threshold),
+        "reason": decision.reason,
+        "max_curvature": max_curvature,
+        "curvature_threshold": float(CURVATURE_THRESHOLD),
+        "far_invalid_limit": float(decision.far_invalid_limit),
+        "used_budget": used_budget,
+        "eval_budget": int(policy.eval_budget),
+        "band_ratio": float(policy.band_ratio),
+    }
+    run_dict["curvature_traversal_status"] = status
+    if decision.allow_boozer_eval and decision.over_threshold:
+        run_dict["curvature_overcap_boozer_evals_this_iteration"] = used_budget + 1
+        run_dict["curvature_overcap_boozer_evals"] = (
+            int(run_dict.get("curvature_overcap_boozer_evals", 0)) + 1
+        )
+        metrics["curvature_overcap_boozer_evals"] += 1
+    return status
+
+
+def reject_search_step_on_curvature_precheck(metrics, precheck_status, step_start):
+    rejection_increment = hardware_rejection_increment(run_dict["J"])
+    run_dict["curvature_precheck_rejects"] = (
+        int(run_dict.get("curvature_precheck_rejects", 0)) + 1
+    )
+    run_dict["invalid_state_rejects_total"] += 1
+    print("/!\\ /!\\ Curvature precheck rejected candidate /!\\ /!\\")
+    print(
+        "Trial max curvature "
+        f"{precheck_status['max_curvature']:.6e} exceeds traversal limit "
+        f"{precheck_status['far_invalid_limit']:.6e} "
+        f"(threshold={precheck_status['curvature_threshold']:.6e}, "
+        f"reason={precheck_status['reason']})"
+    )
+    record_search_step_rejection(
+        metrics,
+        rejection_reason="curvature_precheck",
+        stack_status={"success": False},
+        hardware_status=None,
+        rejection_increment=rejection_increment,
+    )
+    JF.x = run_dict["accepted_x"]
+    restore_surface_states(surface_data, run_dict["surface_state"])
+    metrics["total_seconds"] += time.perf_counter() - step_start
+    return {"total": run_dict["J"] + rejection_increment, "grad": run_dict["dJ"].copy()}
 
 
 def evaluate_search_step(x):
@@ -6391,6 +6548,9 @@ def evaluate_search_step(x):
     run_dict.setdefault("hardware_rejects", 0)
     run_dict.setdefault("surface_solve_rejects", 0)
     run_dict.setdefault("frontier_trust_rejects", 0)
+    run_dict.setdefault("curvature_precheck_rejects", 0)
+    run_dict.setdefault("curvature_overcap_boozer_evals", 0)
+    run_dict.setdefault("curvature_overcap_boozer_evals_this_iteration", 0)
     search_gate = build_surface_search_gate(
         len(surface_data),
         run_dict['accepted_iterations'],
@@ -6399,6 +6559,14 @@ def evaluate_search_step(x):
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
         SS_DIST if len(surface_data) > 1 else 0.0,
     )
+
+    curvature_precheck_status = evaluate_curvature_traversal_precheck(x, metrics)
+    if not curvature_precheck_status["allow_boozer_eval"]:
+        return reject_search_step_on_curvature_precheck(
+            metrics,
+            curvature_precheck_status,
+            step_start,
+        )
 
     surface_solve_start = time.perf_counter()
     stack_status = solve_surface_stack_at_dofs(
@@ -6554,15 +6722,11 @@ def evaluate_search_step(x):
 
         if success:
             hardware_snapshot_start = time.perf_counter()
-            hardware_snapshot = evaluate_single_stage_hardware_snapshot(
-                JCurveCurve,
+            hardware_snapshot = evaluate_single_stage_search_hardware_snapshot(
+                objective_eval,
                 CC_DIST,
-                JCurveSurface,
                 CS_DIST,
-                JSurfSurf,
-                stack_status,
                 SS_DIST,
-                banana_curve,
                 CURVATURE_THRESHOLD,
                 **current_single_stage_hardware_snapshot_kwargs(),
             )
@@ -6801,6 +6965,7 @@ def callback(x):
     """
     # Update count for tracking
     run_dict['lscount'] = 0
+    run_dict["curvature_overcap_boozer_evals_this_iteration"] = 0
     outer_entry = surface_data[-1]
 
     # Store last accepted state
@@ -7376,6 +7541,18 @@ if __name__ == "__main__":
         raise ValueError("--topology-gate-penalty-scale must be non-negative")
     if args.hardware_search_soft_iterations < 0:
         raise ValueError("--hardware-search-soft-iterations must be non-negative")
+    if args.curvature_traversal_band < 0.0:
+        raise ValueError("--curvature-traversal-band must be non-negative")
+    if args.curvature_traversal_eval_budget < 0:
+        raise ValueError("--curvature-traversal-eval-budget must be non-negative")
+    if (
+        (
+            args.curvature_traversal_band > 0.0
+            or args.curvature_traversal_eval_budget > 0
+        )
+        and args.curvature_threshold <= 0.0
+    ):
+        raise ValueError("--curvature-threshold must be positive for curvature traversal")
     validate_alm_cli_args(args)
     validate_single_stage_alm_formulation_args(args)
     validate_confinement_surrogate_args(args)
@@ -7394,6 +7571,8 @@ if __name__ == "__main__":
     TOPOLOGY_GATE_PENALTY_SCALE = args.topology_gate_penalty_scale
     HARDWARE_SEARCH_MODE = args.hardware_search_mode
     HARDWARE_SEARCH_SOFT_ITERATIONS = args.hardware_search_soft_iterations
+    CURVATURE_TRAVERSAL_BAND = args.curvature_traversal_band
+    CURVATURE_TRAVERSAL_EVAL_BUDGET = args.curvature_traversal_eval_budget
 
     # Output directory setup
     OUT_DIR = args.output_root
@@ -7857,6 +8036,9 @@ if __name__ == "__main__":
         'invalid_state_rejects_total': 0,
         'topology_gate_rejects': 0,
         'hardware_rejects': 0,
+        'curvature_precheck_rejects': 0,
+        'curvature_overcap_boozer_evals': 0,
+        'curvature_overcap_boozer_evals_this_iteration': 0,
         'surface_solve_rejects': 0,
         'frontier_trust_rejects': 0,
         'active_optimizer_bounds': current_optimizer_bounds(),
@@ -7895,6 +8077,13 @@ if __name__ == "__main__":
         run_dict["hardware_rejects"] = int(
             run_counters.get("hardware_rejects", 0)
         )
+        run_dict["curvature_precheck_rejects"] = int(
+            run_counters.get("curvature_precheck_rejects", 0)
+        )
+        run_dict["curvature_overcap_boozer_evals"] = int(
+            run_counters.get("curvature_overcap_boozer_evals", 0)
+        )
+        run_dict["curvature_overcap_boozer_evals_this_iteration"] = 0
         run_dict["surface_solve_rejects"] = int(
             run_counters.get("surface_solve_rejects", 0)
         )
@@ -8961,6 +9150,8 @@ if __name__ == "__main__":
         "TOPOLOGY_GATE_PENALTY_SCALE": TOPOLOGY_GATE_PENALTY_SCALE,
         "HARDWARE_SEARCH_MODE": HARDWARE_SEARCH_MODE,
         "HARDWARE_SEARCH_SOFT_ITERATIONS": HARDWARE_SEARCH_SOFT_ITERATIONS,
+        "CURVATURE_TRAVERSAL_BAND": CURVATURE_TRAVERSAL_BAND,
+        "CURVATURE_TRAVERSAL_EVAL_BUDGET": CURVATURE_TRAVERSAL_EVAL_BUDGET,
         "boozer_stage": reported_boozer_stage(args.boozer_stage, final_source_stage),
         "REQUESTED_BOOZER_STAGE": args.boozer_stage,
         "BOOZER_STAGE_REFINEMENT": bool(args.boozer_stage_refinement),
@@ -9288,6 +9479,10 @@ if __name__ == "__main__":
         "INVALID_STATE_REJECTS_TOTAL": run_dict["invalid_state_rejects_total"],
         "TOPOLOGY_GATE_REJECTS": run_dict["topology_gate_rejects"],
         "HARDWARE_REJECTS": run_dict["hardware_rejects"],
+        "CURVATURE_PRECHECK_REJECTS": run_dict["curvature_precheck_rejects"],
+        "CURVATURE_OVERCAP_BOOZER_EVALS": run_dict[
+            "curvature_overcap_boozer_evals"
+        ],
         "SURFACE_SOLVE_REJECTS": run_dict["surface_solve_rejects"],
         "FRONTIER_TRUST_REJECTS": run_dict["frontier_trust_rejects"],
         **search_step_metrics_payload(run_dict),

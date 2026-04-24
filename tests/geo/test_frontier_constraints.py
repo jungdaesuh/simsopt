@@ -147,6 +147,87 @@ class FrontierConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(penalty["max_violation_ratio"], 0.25)
         self.assertAlmostEqual(penalty["penalty"], 3.5)
 
+    def test_evaluate_frontier_hardware_search_penalty_uses_explicit_violation_ratios(self):
+        module = load_frontier_constraints_module()
+
+        penalty = module.evaluate_frontier_hardware_search_penalty(
+            {
+                "success": False,
+                "violations": ["coil_coil_spacing penalty 2.5e-1 exceeds 0"],
+                "violation_ratios": {
+                    "coil_coil_spacing_penalty": 0.25,
+                    "max_curvature_penalty": 0.0,
+                },
+                "curve_curve_min_dist": None,
+                "cc_dist": 0.08,
+            },
+            previous_objective=3.5,
+            penalty_scale=4.0,
+        )
+
+        self.assertAlmostEqual(
+            penalty["violation_ratios"]["coil_coil_spacing_penalty"],
+            0.25,
+        )
+        self.assertAlmostEqual(
+            penalty["violation_ratios"]["max_curvature_penalty"],
+            0.0,
+        )
+        self.assertAlmostEqual(penalty["max_violation_ratio"], 0.25)
+        self.assertAlmostEqual(penalty["penalty"], 3.5)
+
+    def test_evaluate_frontier_hardware_search_penalty_merges_explicit_and_current_ratios(self):
+        module = load_frontier_constraints_module()
+
+        penalty = module.evaluate_frontier_hardware_search_penalty(
+            {
+                "success": False,
+                "violations": ["|banana_current| exceeds threshold"],
+                "violation_ratios": {
+                    "coil_coil_spacing_penalty": 0.0,
+                    "max_curvature_penalty": 0.0,
+                },
+                "banana_current_A": 2.4e4,
+                "banana_current_max_A": 1.6e4,
+            },
+            previous_objective=3.5,
+            penalty_scale=4.0,
+        )
+
+        self.assertAlmostEqual(penalty["violation_ratios"]["banana_current"], 0.5)
+        self.assertAlmostEqual(
+            penalty["violation_ratios"]["coil_coil_spacing_penalty"],
+            0.0,
+        )
+        self.assertAlmostEqual(penalty["max_violation_ratio"], 0.5)
+        self.assertAlmostEqual(penalty["penalty"], 7.0)
+
+    def test_evaluate_frontier_hardware_search_penalty_uses_schema_constraint_ratios(self):
+        module = load_frontier_constraints_module()
+
+        penalty = module.evaluate_frontier_hardware_search_penalty(
+            {
+                "success": False,
+                "violations": ["|banana_current| exceeds threshold"],
+                "constraints": {
+                    "banana_current": {
+                        "threshold": 1.6e4,
+                        "violation": 4.0e3,
+                    },
+                },
+                "violation_ratios": {
+                    "coil_coil_spacing_penalty": 0.0,
+                    "max_curvature_penalty": 0.0,
+                },
+            },
+            previous_objective=3.5,
+            penalty_scale=4.0,
+        )
+
+        self.assertAlmostEqual(penalty["violation_ratios"]["banana_current"], 0.25)
+        self.assertAlmostEqual(penalty["max_violation_ratio"], 0.25)
+        self.assertAlmostEqual(penalty["penalty"], 3.5)
+
     def test_evaluate_frontier_topology_search_penalty_scales_with_deficit(self):
         module = load_frontier_constraints_module()
 
