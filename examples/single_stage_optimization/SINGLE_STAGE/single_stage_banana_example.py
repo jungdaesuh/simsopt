@@ -3445,7 +3445,7 @@ def build_boozer_derived_objective_terms(stage, surface_data, coils):
         NonQuasiSymmetricRatio(surface, boozer_objective_biot_savarts[index])
         for index, surface in enumerate(boozer_surfaces)
     ]
-    boozer_residual_cls = BoozerResidualExact if stage == "final" else BoozerResidual
+    boozer_residual_cls = boozer_residual_class_for_stage(stage)
     brs = [
         boozer_residual_cls(surface, boozer_objective_biot_savarts[index])
         for index, surface in enumerate(boozer_surfaces)
@@ -3456,6 +3456,10 @@ def build_boozer_derived_objective_terms(stage, surface_data, coils):
         "nonQSs": nonQSs,
         "brs": brs,
     }
+
+
+def boozer_residual_class_for_stage(stage):
+    return BoozerResidualExact if stage == "final" else BoozerResidual
 
 
 def build_single_stage_objective_bundle(
