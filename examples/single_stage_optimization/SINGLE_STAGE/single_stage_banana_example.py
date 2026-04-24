@@ -2923,18 +2923,10 @@ def require_frontier_goal_config(frontier_goal_config):
 
 
 def measure_frontier_reference_metrics(stage, surface_data, coils):
-    reference_nonqs = [
-        NonQuasiSymmetricRatio(entry["boozer_surface"], BiotSavart(coils))
-        for entry in surface_data
-    ]
-    boozer_residual_cls = BoozerResidualExact if stage == "final" else BoozerResidual
-    reference_boozer = [
-        boozer_residual_cls(entry["boozer_surface"], BiotSavart(coils))
-        for entry in surface_data
-    ]
+    reference_terms = build_boozer_derived_objective_terms(stage, surface_data, coils)
     return (
-        float(average_surface_objectives(reference_nonqs).J()),
-        float(average_surface_objectives(reference_boozer).J()),
+        float(average_surface_objectives(reference_terms["nonQSs"]).J()),
+        float(average_surface_objectives(reference_terms["brs"]).J()),
     )
 
 

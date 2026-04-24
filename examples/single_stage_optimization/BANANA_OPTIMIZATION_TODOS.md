@@ -521,11 +521,15 @@ Impact:
   per Boozer surface for the Boozer-derived QS and residual terms, rather than
   separate mutable field objects for `NonQuasiSymmetricRatio` and
   `BoozerResidual`.
+- `measure_frontier_reference_metrics()` uses the same per-surface Boozer
+  objective term builder, so frontier reference diagnostics keep the same field
+  object sharing contract as the optimization bundle.
 
 Validation:
 
 - `python3 -m pytest tests/geo/test_surface_objectives.py::BoozerResidualTests::test_boozerresidual_compute_uses_one_field_point_update -q`
 - `python3 -m pytest tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_boozer_derived_objective_terms_share_one_biotsavart_per_surface -q`
+- `python3 -m pytest tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_frontier_reference_metrics_share_boozer_objective_biot_savarts -q`
 - `python3 -m pytest tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_boozer_residual_exact_threads_fixed_current_into_example_adjoint_path -q`
 - `python3 -m pytest tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_refined_boozer_residual_ls_uses_cached_adjoint_state -q`
 - `python3 -m pytest tests/geo/test_surface_objectives.py::BoozerResidualTests::test_boozerresidual_derivative -q`

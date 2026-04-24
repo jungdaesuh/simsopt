@@ -568,8 +568,8 @@ class SingleStageExampleTests(unittest.TestCase):
     def residual_module(self, module):
         return sys.modules[module.BoozerResidualExact.__module__]
 
-    def test_boozer_derived_objective_terms_share_one_biotsavart_per_surface(self):
-        module = self.load_module()
+    @contextmanager
+    def patched_boozer_objective_term_types(self, module):
         constructed_biot_savarts = []
 
         class _BiotSavart:
@@ -594,11 +594,6 @@ class SingleStageExampleTests(unittest.TestCase):
         class _ExactResidual(_Residual):
             pass
 
-        surface_data = [
-            {"boozer_surface": object()},
-            {"boozer_surface": object()},
-        ]
-
         with patch.object(module, "BiotSavart", _BiotSavart), patch.object(
             module,
             "Iotas",
@@ -612,6 +607,20 @@ class SingleStageExampleTests(unittest.TestCase):
             "BoozerResidualExact",
             _ExactResidual,
         ):
+            yield SimpleNamespace(
+                biot_savarts=constructed_biot_savarts,
+                residual_cls=_Residual,
+                exact_residual_cls=_ExactResidual,
+            )
+
+    def test_boozer_derived_objective_terms_share_one_biotsavart_per_surface(self):
+        module = self.load_module()
+        surface_data = [
+            {"boozer_surface": object()},
+            {"boozer_surface": object()},
+        ]
+
+        with self.patched_boozer_objective_term_types(module) as patched_types:
             search_terms = module.build_boozer_derived_objective_terms(
                 "search",
                 surface_data,
@@ -636,10 +645,47 @@ class SingleStageExampleTests(unittest.TestCase):
             search_terms["brs"][0].biotsavart,
             search_terms["brs"][1].biotsavart,
         )
-        self.assertIsInstance(search_terms["brs"][0], _Residual)
-        self.assertNotIsInstance(search_terms["brs"][0], _ExactResidual)
-        self.assertIsInstance(final_terms["brs"][0], _ExactResidual)
-        self.assertEqual(len(constructed_biot_savarts), 4)
+        self.assertIsInstance(search_terms["brs"][0], patched_types.residual_cls)
+        self.assertNotIsInstance(search_terms["brs"][0], patched_types.exact_residual_cls)
+        self.assertIsInstance(final_terms["brs"][0], patched_types.exact_residual_cls)
+        self.assertEqual(len(patched_types.biot_savarts), 4)
+
+    def test_frontier_reference_metrics_share_boozer_objective_biot_savarts(self):
+        module = self.load_module()
+        averaged_objectives = []
+
+        def average_surface_objectives(objectives):
+            averaged_objectives.append(list(objectives))
+            return SimpleNamespace(J=lambda: float(len(averaged_objectives)))
+
+        surface_data = [
+            {"boozer_surface": object()},
+            {"boozer_surface": object()},
+        ]
+
+        with self.patched_boozer_objective_term_types(module) as patched_types, patch.object(
+            module,
+            "average_surface_objectives",
+            side_effect=average_surface_objectives,
+        ):
+            metrics = module.measure_frontier_reference_metrics(
+                "final",
+                surface_data,
+                ["coil"],
+            )
+
+        self.assertEqual(metrics, (1.0, 2.0))
+        self.assertEqual(len(patched_types.biot_savarts), 2)
+        self.assertEqual(len(averaged_objectives), 2)
+        self.assertIs(
+            averaged_objectives[0][0].biotsavart,
+            averaged_objectives[1][0].biotsavart,
+        )
+        self.assertIs(
+            averaged_objectives[0][1].biotsavart,
+            averaged_objectives[1][1].biotsavart,
+        )
+        self.assertIsInstance(averaged_objectives[1][0], patched_types.exact_residual_cls)
 
     def differentiable_residual_vector(self, surface, biotsavart, *, weight_inv_modB, I):
         return biotsavart.residual_vector(
