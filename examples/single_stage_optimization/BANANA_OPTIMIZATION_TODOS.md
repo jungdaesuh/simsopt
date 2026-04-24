@@ -168,6 +168,17 @@ Validation:
   `nphi=31`, `ntheta=16`. Result: Boozer Newton success with
   `iota=0.3048386265857189`, `volume=0.039921036663101706`, optimizer skipped
   by `--init-only`. Legacy missing-`STAGE2_BS_SHA256` warning observed.
+- Downstream e2e: non-`--init-only` run against the same harvested seed pair,
+  `wout_nfp5ginsburg_000_014417_iota15.nc`, native `mpol=10`, `ntor=10`,
+  reduced `nphi=31`, `ntheta=16`, and `--maxiter 1` completed with exit code
+  0. Result artifact:
+  `/tmp/simsopt_surrogate_full_e2e_R_nv2/mpol=10-ntor=10-b0f93213/results.json`.
+  Software path succeeded: Boozer init completed, optimizer iteration 1 ran,
+  an unsafe self-intersecting trial was rejected, and final artifacts were
+  written. Optimizer convergence was intentionally not expected because
+  `maxiter=1`; final state preserved the feasible start with
+  `FINAL_IOTA=0.30483862658571914`, `FINAL_VOLUME=0.03992103666310177`,
+  `HARDWARE_CONSTRAINTS_OK=true`, and `FINAL_FEASIBILITY_OK=true`.
 
 ### C4. De-risk Boozer second-order residual semantics
 
