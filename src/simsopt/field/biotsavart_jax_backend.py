@@ -42,7 +42,6 @@ from ..jax_core.field import (
     grouped_biot_savart_dA_by_dX_from_spec,
     grouped_biot_savart_dB_by_dX_from_inputs,
     grouped_biot_savart_dB_by_dX_from_spec,
-    grouped_coil_index_lists_from_spec,
     grouped_coil_set_spec_from_coil_specs,
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
@@ -1287,10 +1286,18 @@ class BiotSavartJAX(Optimizable):
         grouped_forward,
         cotangent,
     ):
-        coil_spec = self.coil_set_spec()
-        coil_arrays = grouped_field_inputs_from_spec(coil_spec)
+        free_groups = self._group_coil_vjp_infos(
+            self._collect_free_coil_vjp_infos(geometry_cache={})
+        )
+        coil_arrays = tuple(
+            (group["gammas"], group["gammadashs"], group["currents"])
+            for group in free_groups
+        )
         if not coil_arrays:
             return BiotSavartFieldPullback((), ())
+        coil_indices = tuple(
+            tuple(info.coil_index for info in group["infos"]) for group in free_groups
+        )
 
         _, pullback = jax.vjp(
             lambda grouped_inputs: grouped_forward(self._points_jax, grouped_inputs),
@@ -1299,7 +1306,7 @@ class BiotSavartJAX(Optimizable):
         d_coil_arrays = pullback(_as_jax_float64(cotangent))[0]
         return BiotSavartFieldPullback(
             d_coil_arrays=tuple(d_coil_arrays),
-            coil_indices=tuple(grouped_coil_index_lists_from_spec(coil_spec)),
+            coil_indices=coil_indices,
         )
 
     def A_pullback_native(self, v):

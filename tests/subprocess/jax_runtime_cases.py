@@ -45,6 +45,7 @@ import simsopt.config as simsopt_config  # type: ignore[import-untyped]
 from simsopt.field import Coil, Current, coils_via_symmetries  # type: ignore[import-untyped]
 from simsopt.field.coil import ScaledCurrent  # type: ignore[import-untyped]
 from simsopt.field.biotsavart_jax_backend import (  # type: ignore[import-untyped]
+    BiotSavartFieldPullback,
     BiotSavartJAX,
 )
 from simsopt.geo import (  # type: ignore[import-untyped]
@@ -106,6 +107,7 @@ from simsopt.jax_core.field import (  # type: ignore[import-untyped]
     grouped_biot_savart_dA_by_dX_from_spec,
     grouped_biot_savart_dA_by_dX_from_inputs,
     grouped_biot_savart_dB_by_dX_from_spec,
+    grouped_biot_savart_dB_by_dX_from_inputs,
     grouped_coil_set_spec_from_lists,
     grouped_field_sharding_summary,
 )
@@ -113,7 +115,10 @@ from simsopt.jax_core.surface_rzfourier import (  # type: ignore[import-untyped]
     surface_rz_fourier_gamma_from_spec,
     surface_rz_fourier_normal_from_spec,
 )
-from simsopt.jax_core.specs import make_coil_symmetry_spec  # type: ignore[import-untyped]
+from simsopt.jax_core.specs import (  # type: ignore[import-untyped]
+    GroupedCoilSetSpec,
+    make_coil_symmetry_spec,
+)
 from simsopt.objectives.stage2_target_objective_jax import (  # type: ignore[import-untyped]
     Stage2PenaltyConfig,
     build_stage2_target_objective,
@@ -807,6 +812,108 @@ def _assert_mixed_quadrature_collective_parity(points: jax.Array) -> None:
     assert grouped_field_sharding_summary(points, coil_spec)["field_collective"] is True
 
 
+def _assert_pullback_payloads_allclose(
+    observed: BiotSavartFieldPullback,
+    expected: BiotSavartFieldPullback,
+) -> None:
+    assert len(observed.d_coil_arrays) == len(expected.d_coil_arrays)
+    assert observed.coil_indices == expected.coil_indices
+    for observed_group, expected_group in zip(
+        observed.d_coil_arrays,
+        expected.d_coil_arrays,
+    ):
+        assert len(observed_group) == len(expected_group)
+        for observed_leaf, expected_leaf in zip(observed_group, expected_group):
+            _assert_allclose_to_reference(observed_leaf, expected_leaf)
+
+
+def _assert_native_pullback_matches_grouped_forward(
+    points: jax.Array,
+    coil_spec: GroupedCoilSetSpec,
+    native_pullback: BiotSavartFieldPullback,
+    cotangent: jax.Array,
+    grouped_forward: Callable[[jax.Array, object], jax.Array],
+) -> None:
+    grouped_inputs = grouped_field_inputs_from_spec(coil_spec)
+    assert native_pullback.coil_indices == coil_spec.coil_index_lists()
+    _assert_native_pullback_matches_grouped_inputs(
+        points,
+        native_pullback,
+        cotangent,
+        grouped_forward,
+        grouped_inputs,
+    )
+
+
+def _assert_native_pullback_matches_grouped_inputs(
+    points: jax.Array,
+    native_pullback: BiotSavartFieldPullback,
+    cotangent: jax.Array,
+    grouped_forward: Callable[[jax.Array, object], jax.Array],
+    grouped_inputs: tuple[tuple[jax.Array, jax.Array, jax.Array], ...],
+) -> None:
+    assert len(native_pullback.d_coil_arrays) == len(grouped_inputs)
+
+    _, direct_pullback = jax.vjp(
+        lambda grouped_inputs_arg: grouped_forward(points, grouped_inputs_arg),
+        grouped_inputs,
+    )
+    direct_groups = direct_pullback(cotangent)[0]
+    assert len(native_pullback.d_coil_arrays) == len(direct_groups)
+    for native_group, direct_group in zip(
+        native_pullback.d_coil_arrays,
+        direct_groups,
+    ):
+        assert len(native_group) == len(direct_group)
+        for native_leaf, direct_leaf in zip(native_group, direct_group):
+            _assert_allclose_to_reference(native_leaf, direct_leaf)
+
+
+def _assert_native_pullback_matches_expected_inputs(
+    points: jax.Array,
+    native_pullback: BiotSavartFieldPullback,
+    expected_indices: tuple[tuple[int, ...], ...],
+    cotangent: jax.Array,
+    grouped_forward: Callable[[jax.Array, object], jax.Array],
+    grouped_inputs: tuple[tuple[jax.Array, jax.Array, jax.Array], ...],
+) -> None:
+    assert native_pullback.coil_indices == expected_indices
+    _assert_native_pullback_matches_grouped_inputs(
+        points,
+        native_pullback,
+        cotangent,
+        grouped_forward,
+        grouped_inputs,
+    )
+
+
+def _assert_native_pullback_projects_to_public(
+    bs_jax: BiotSavartJAX,
+    pullback: BiotSavartFieldPullback,
+    public: Callable[[object], object],
+    coils: list[Coil],
+) -> None:
+    projected = bs_jax.coil_cotangents_to_derivative(
+        pullback.d_coil_arrays,
+        pullback.coil_indices,
+    )
+    for coil in coils:
+        _assert_allclose_to_reference(projected(coil), public(coil))
+
+
+def _compiled_pullback_hlo(
+    pullback: Callable[..., BiotSavartFieldPullback],
+    *cotangents: jax.Array,
+) -> str:
+    return (
+        jax.jit(pullback)
+        .lower(*cotangents)
+        .compile()
+        .as_text()
+        .lower()
+    )
+
+
 def _assert_biot_savart_jax_native_pullback_collective_path(
     points: jax.Array,
 ) -> None:
@@ -821,10 +928,10 @@ def _assert_biot_savart_jax_native_pullback_collective_path(
     assert summary["strategy"] == "coil_groups"
     assert summary["collective_axis"] == "coil"
 
-    native_pullback = bs_jax.B_pullback_native(cotangent)
-    assert native_pullback.coil_indices == ((0, 1, 2, 3, 4),)
-    assert len(native_pullback.d_coil_arrays) == 1
-    native_group = native_pullback.d_coil_arrays[0]
+    native_B = bs_jax.B_pullback_native(cotangent)
+    assert native_B.coil_indices == ((0, 1, 2, 3, 4),)
+    assert len(native_B.d_coil_arrays) == 1
+    native_group = native_B.d_coil_arrays[0]
     grouped_inputs = grouped_field_inputs_from_spec(coil_spec)
     assert len(grouped_inputs) == 1
     direct_collective_pullback = biot_savart_B_vjp_maybe_collective(
@@ -839,28 +946,155 @@ def _assert_biot_savart_jax_native_pullback_collective_path(
     ):
         _assert_allclose_to_reference(native_leaf, direct_leaf)
 
-    projected = bs_jax.coil_cotangents_to_derivative(
-        native_pullback.d_coil_arrays,
-        native_pullback.coil_indices,
-    )
-    public = bs_jax.B_vjp(cotangent)
-    for coil in coils:
-        _assert_allclose_to_reference(projected(coil), public(coil))
-
+    public_B = bs_jax.B_vjp(cotangent)
+    _assert_native_pullback_projects_to_public(bs_jax, native_B, public_B, coils)
     dofs_gradient = bs_jax.coil_cotangents_to_dofs_gradient(
-        native_pullback.d_coil_arrays,
-        native_pullback.coil_indices,
+        native_B.d_coil_arrays,
+        native_B.coil_indices,
     )
-    _assert_allclose_to_reference(dofs_gradient, public(bs_jax))
+    _assert_allclose_to_reference(dofs_gradient, public_B(bs_jax))
 
-    compiled_hlo = (
-        jax.jit(lambda v: bs_jax.B_pullback_native(v))
-        .lower(cotangent)
-        .compile()
-        .as_text()
-        .lower()
+    A_cotangent = jnp.asarray(bs_jax.A())
+    native_A = bs_jax.A_pullback_native(A_cotangent)
+    _assert_native_pullback_matches_grouped_forward(
+        points,
+        coil_spec,
+        native_A,
+        A_cotangent,
+        grouped_biot_savart_A_from_inputs,
     )
-    assert "all-gather" in compiled_hlo
+    _assert_native_pullback_projects_to_public(
+        bs_jax,
+        native_A,
+        bs_jax.A_vjp(A_cotangent),
+        coils,
+    )
+
+    dA_cotangent = jnp.asarray(bs_jax.dA_by_dX())
+    native_dA = bs_jax.dA_by_dX_pullback_native(dA_cotangent)
+    _assert_native_pullback_matches_grouped_forward(
+        points,
+        coil_spec,
+        native_dA,
+        dA_cotangent,
+        grouped_biot_savart_dA_by_dX_from_inputs,
+    )
+    _, public_dA = bs_jax.A_and_dA_vjp(jnp.zeros_like(A_cotangent), dA_cotangent)
+    _assert_native_pullback_projects_to_public(bs_jax, native_dA, public_dA, coils)
+
+    dB_cotangent = jnp.asarray(bs_jax.dB_by_dX())
+    native_dB = bs_jax.dB_by_dX_pullback_native(dB_cotangent)
+    _assert_native_pullback_matches_grouped_forward(
+        points,
+        coil_spec,
+        native_dB,
+        dB_cotangent,
+        grouped_biot_savart_dB_by_dX_from_inputs,
+    )
+    _, public_dB = bs_jax.B_and_dB_vjp(jnp.zeros_like(cotangent), dB_cotangent)
+    _assert_native_pullback_projects_to_public(bs_jax, native_dB, public_dB, coils)
+
+    pair_A, pair_dA = bs_jax.A_and_dA_pullback_native(A_cotangent, dA_cotangent)
+    _assert_pullback_payloads_allclose(pair_A, native_A)
+    _assert_pullback_payloads_allclose(pair_dA, native_dA)
+    pair_B, pair_dB = bs_jax.B_and_dB_pullback_native(cotangent, dB_cotangent)
+    _assert_pullback_payloads_allclose(pair_B, native_B)
+    _assert_pullback_payloads_allclose(pair_dB, native_dB)
+
+    native_pullback_hlos = (
+        _compiled_pullback_hlo(lambda v: bs_jax.B_pullback_native(v), cotangent),
+        _compiled_pullback_hlo(lambda v: bs_jax.A_pullback_native(v), A_cotangent),
+        _compiled_pullback_hlo(
+            lambda v: bs_jax.dA_by_dX_pullback_native(v),
+            dA_cotangent,
+        ),
+        _compiled_pullback_hlo(
+            lambda v: bs_jax.dB_by_dX_pullback_native(v),
+            dB_cotangent,
+        ),
+        _compiled_pullback_hlo(
+            lambda v, vgrad: bs_jax.A_and_dA_pullback_native(v, vgrad),
+            A_cotangent,
+            dA_cotangent,
+        ),
+        _compiled_pullback_hlo(
+            lambda v, vgrad: bs_jax.B_and_dB_pullback_native(v, vgrad),
+            cotangent,
+            dB_cotangent,
+        ),
+    )
+    for compiled_hlo in native_pullback_hlos:
+        assert "all-gather" in compiled_hlo
+
+
+def _assert_biot_savart_jax_native_pullbacks_skip_fixed_coils(
+    points: jax.Array,
+) -> None:
+    coils = _build_collective_curve_coils()
+    coils[0].curve.fix_all()
+    coils[0].current.fix_all()
+    bs_jax = BiotSavartJAX(coils)
+    bs_jax.set_points(np.asarray(points, dtype=np.float64))
+
+    coil_group = bs_jax.coil_set_spec().groups[0]
+    free_grouped_inputs = (
+        (
+            coil_group.gammas[1:],
+            coil_group.gammadashs[1:],
+            coil_group.currents[1:],
+        ),
+    )
+    free_coils = coils[1:]
+    expected_indices = ((1, 2, 3, 4),)
+
+    B_cotangent = jnp.asarray(bs_jax.B())
+    native_B = bs_jax.B_pullback_native(B_cotangent)
+    assert native_B.coil_indices == expected_indices
+    _assert_native_pullback_projects_to_public(
+        bs_jax,
+        native_B,
+        bs_jax.B_vjp(B_cotangent),
+        free_coils,
+    )
+
+    A_cotangent = jnp.asarray(bs_jax.A())
+    native_A = bs_jax.A_pullback_native(A_cotangent)
+    _assert_native_pullback_matches_expected_inputs(
+        points,
+        native_A,
+        expected_indices,
+        A_cotangent,
+        grouped_biot_savart_A_from_inputs,
+        free_grouped_inputs,
+    )
+    _assert_native_pullback_projects_to_public(
+        bs_jax,
+        native_A,
+        bs_jax.A_vjp(A_cotangent),
+        free_coils,
+    )
+
+    dA_cotangent = jnp.asarray(bs_jax.dA_by_dX())
+    native_dA = bs_jax.dA_by_dX_pullback_native(dA_cotangent)
+    _assert_native_pullback_matches_expected_inputs(
+        points,
+        native_dA,
+        expected_indices,
+        dA_cotangent,
+        grouped_biot_savart_dA_by_dX_from_inputs,
+        free_grouped_inputs,
+    )
+
+    dB_cotangent = jnp.asarray(bs_jax.dB_by_dX())
+    native_dB = bs_jax.dB_by_dX_pullback_native(dB_cotangent)
+    _assert_native_pullback_matches_expected_inputs(
+        points,
+        native_dB,
+        expected_indices,
+        dB_cotangent,
+        grouped_biot_savart_dB_by_dX_from_inputs,
+        free_grouped_inputs,
+    )
 
 
 def _assert_grouped_pullback_matches_dense(
@@ -1014,6 +1248,7 @@ def _run_grouped_biot_savart_coil_collective_case() -> None:
     )
     _assert_mixed_quadrature_collective_parity(points)
     _assert_biot_savart_jax_native_pullback_collective_path(points)
+    _assert_biot_savart_jax_native_pullbacks_skip_fixed_coils(points)
 
     summary = grouped_field_sharding_summary(points, coil_spec)
     assert summary["field_collective"] is True
