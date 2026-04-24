@@ -2028,11 +2028,14 @@ class SingleStageRuntimeSpecBiotSavartJAX:
         self._x = _as_jax_float64(runtime_spec.seed.coil_dofs)
         self._points_jax = None
         self._points_version = 0
-        self._coils = tuple(
+        self._coils = self._coils_from_dofs(self._x)
+
+    def _coils_from_dofs(self, coil_dofs):
+        return tuple(
             SpecBackedCoil(coil_spec)
             for coil_spec in coil_specs_from_dof_extraction_spec(
                 self._coil_dof_extraction_spec,
-                self._x,
+                coil_dofs,
             )
         )
 
@@ -2043,6 +2046,7 @@ class SingleStageRuntimeSpecBiotSavartJAX:
     @x.setter
     def x(self, coil_dofs):
         self._x = _as_jax_float64(coil_dofs)
+        self._coils = self._coils_from_dofs(self._x)
 
     @property
     def coils(self):
@@ -9234,8 +9238,6 @@ def export_requested_single_stage_artifacts(
     output_dir,
     boozer_surface,
     bs_diag,
-    curves,
-    banana_curve,
     surf_coils,
     hbt,
     VV,
@@ -9263,25 +9265,29 @@ def export_requested_single_stage_artifacts(
             tf_current_A=tf_current_A,
             banana_current_A=banana_current_A,
         )
-        if write_full_artifacts:
-            curves_to_vtk(curves, os.path.join(output_dir, "curves_opt"), close=True)
-            bs_diag.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
-            unitn = boozer_surface.surface.unitnormal()
-            pointData = {
-                "B_N/B": np.sum(
-                    bs_diag.B().reshape(unitn.shape) * unitn,
-                    axis=2,
-                )[:, :, None]
-                / np.sqrt(np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2))[
-                    :, :, None
-                ]
-            }
-            boozer_surface.surface.to_vtk(
-                os.path.join(output_dir, "surf_opt"),
-                extra_data=pointData,
-            )
 
     if write_full_artifacts:
+        artifact_coils = bs_diag.coils
+        curves_to_vtk(
+            [coil.curve for coil in artifact_coils],
+            os.path.join(output_dir, "curves_opt"),
+            close=True,
+        )
+        bs_diag.set_points(boozer_surface.surface.gamma().reshape((-1, 3)))
+        unitn = boozer_surface.surface.unitnormal()
+        pointData = {
+            "B_N/B": np.sum(
+                bs_diag.B().reshape(unitn.shape) * unitn,
+                axis=2,
+            )[:, :, None]
+            / np.sqrt(np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2))[
+                :, :, None
+            ]
+        }
+        boozer_surface.surface.to_vtk(
+            os.path.join(output_dir, "surf_opt"),
+            extra_data=pointData,
+        )
         normPlot(
             boozer_surface.surface,
             bs_diag,
@@ -9290,7 +9296,7 @@ def export_requested_single_stage_artifacts(
         cross_section_plot(
             surf_coils,
             boozer_surface.surface,
-            banana_curve,
+            artifact_coils[num_tf_coils].curve,
             os.path.join(output_dir, "CrossSectionOptimized"),
             hbt,
             VV,
@@ -12277,8 +12283,6 @@ if __name__ == "__main__":
             output_dir=OUT_DIR_ITER,
             boozer_surface=boozer_surface,
             bs_diag=bs_diag,
-            curves=curves,
-            banana_curve=banana_curve,
             surf_coils=surf_coils,
             hbt=hbt,
             VV=VV,

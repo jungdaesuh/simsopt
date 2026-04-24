@@ -2375,6 +2375,180 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(warm_start["jax_runtime_spec_path"], spec_path)
         self.assertTrue(warm_start["biot_savart_path"].endswith("biot_savart_opt.json"))
 
+    def test_runtime_spec_biotsavart_full_artifact_curves_follow_updated_dofs(self):
+        module = self.load_module()
+        curve_dofs = np.linspace(0.1, 0.9, 9, dtype=np.float64)
+        initial_coil_dofs = np.concatenate(
+            (curve_dofs, np.asarray([3.0], dtype=np.float64))
+        )
+        updated_coil_dofs = initial_coil_dofs + np.linspace(
+            0.2, 1.1, initial_coil_dofs.size, dtype=np.float64
+        )
+
+        def make_map(template_full_dofs, owner_segments):
+            return module.jax_specs.make_optimizable_dof_map_spec(
+                template_full_dofs=template_full_dofs,
+                owner_segments=owner_segments,
+                input_mode="full",
+                input_start=0,
+                input_end=len(template_full_dofs),
+            )
+
+        curve_template = module.jax_specs.make_curve_xyzfourier_spec(
+            dofs=np.zeros(9, dtype=np.float64),
+            quadpoints=np.linspace(0.0, 1.0, 4, endpoint=False, dtype=np.float64),
+            order=1,
+        )
+        extraction_spec = module.jax_specs.make_coil_set_dof_extraction_spec(
+            (
+                module.jax_specs.make_coil_dof_extraction_spec(
+                    curve=curve_template,
+                    curve_map=make_map(
+                        np.zeros(9, dtype=np.float64),
+                        ((0, 9, 0, 9),),
+                    ),
+                    current_map=make_map(
+                        np.zeros(1, dtype=np.float64),
+                        ((9, 10, 0, 1),),
+                    ),
+                ),
+            )
+        )
+        surface_spec = module.make_surface_xyz_tensor_fourier_spec(
+            dofs=np.array([1.0, 0.1, 0.0, 0.1], dtype=np.float64),
+            quadpoints_phi=np.linspace(0.0, 1.0, 4, endpoint=False, dtype=np.float64),
+            quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False, dtype=np.float64),
+            nfp=1,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+        )
+        runtime_spec = module.make_single_stage_runtime_spec(
+            seed=module.make_single_stage_seed_spec(
+                surface=surface_spec,
+                coil_set=module.coil_set_spec_from_dof_extraction_spec(
+                    extraction_spec,
+                    initial_coil_dofs,
+                ),
+                coil_dof_extraction=extraction_spec,
+                coil_dofs=initial_coil_dofs,
+                boozer_iota=0.1,
+                boozer_G=1.2,
+                target_labels=(),
+                hardware_constants=(),
+                self_intersection_mode=module._SINGLE_STAGE_JAX_SELF_INTERSECTION_MODE,
+                schema_version=module._SINGLE_STAGE_JAX_RUNTIME_SPEC_VERSION,
+                num_tf_coils=0,
+                banana_curve_index=0,
+                tf_current_A=0.0,
+                banana_current_A=float(initial_coil_dofs[-1]),
+            ),
+            mpol=1,
+            ntor=0,
+            nfp=1,
+            nphi=4,
+            ntheta=5,
+        )
+
+        bs = module.SingleStageRuntimeSpecBiotSavartJAX(runtime_spec)
+        captured_curves = [coil.curve for coil in bs.coils]
+        initial_gamma = captured_curves[0].gamma()
+        bs.x = updated_coil_dofs
+
+        np.testing.assert_allclose(
+            module.host_array(bs.coils[0].curve.get_dofs()),
+            updated_coil_dofs[:9],
+        )
+        self.assertEqual(bs.coils[0].current.get_value(), updated_coil_dofs[-1])
+        self.assertFalse(np.allclose(bs.coils[0].curve.gamma(), initial_gamma))
+        np.testing.assert_allclose(
+            module.host_array(captured_curves[0].get_dofs()),
+            initial_coil_dofs[:9],
+        )
+
+        captured = {}
+
+        class ExportSurface:
+            mpol = 1
+            ntor = 0
+            quadpoints_phi = np.asarray([0.0], dtype=np.float64)
+            quadpoints_theta = np.asarray([0.0], dtype=np.float64)
+
+            def gamma(self):
+                return np.zeros((1, 1, 3), dtype=np.float64)
+
+            def unitnormal(self):
+                unit_normal = np.zeros((1, 1, 3), dtype=np.float64)
+                unit_normal[:, :, 2] = 1.0
+                return unit_normal
+
+            def to_vtk(self, *_args, **_kwargs):
+                return None
+
+        class ExportField:
+            def __init__(self, coils):
+                self.coils = coils
+
+            def set_points(self, points):
+                captured["points"] = np.asarray(points)
+
+            def B(self):
+                return np.ones((1, 3), dtype=np.float64)
+
+        def capture_curves_to_vtk(curves, *_args, **_kwargs):
+            captured["curves_to_vtk_dofs"] = module.host_array(
+                curves[0].get_dofs()
+            )
+
+        def capture_cross_section(_surf_coils, _surface, banana_curve, *_args):
+            captured["cross_section_banana_dofs"] = module.host_array(
+                banana_curve.get_dofs()
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            module,
+            "curves_to_vtk",
+            side_effect=capture_curves_to_vtk,
+        ), patch.object(
+            module,
+            "normPlot",
+            return_value=None,
+        ), patch.object(
+            module,
+            "cross_section_plot",
+            side_effect=capture_cross_section,
+        ):
+            module.export_requested_single_stage_artifacts(
+                solved_surface_state={
+                    "sdofs": module.host_array(surface_spec.dofs),
+                    "iota": 0.1,
+                    "G": 1.2,
+                },
+                coil_dofs=updated_coil_dofs,
+                num_tf_coils=0,
+                tf_current_A=0.0,
+                banana_current_A=float(updated_coil_dofs[-1]),
+                output_dir=tmpdir,
+                boozer_surface=types.SimpleNamespace(surface=ExportSurface()),
+                bs_diag=ExportField(bs.coils),
+                surf_coils=object(),
+                hbt=object(),
+                VV=object(),
+                write_restart_artifacts=False,
+                write_host_restart_artifacts=False,
+                write_full_artifacts=True,
+                timings={},
+            )
+
+        np.testing.assert_allclose(
+            captured["curves_to_vtk_dofs"],
+            updated_coil_dofs[:9],
+        )
+        np.testing.assert_allclose(
+            captured["cross_section_banana_dofs"],
+            updated_coil_dofs[:9],
+        )
+
     def test_jax_warm_start_surface_dofs_require_seed_spec_artifact(self):
         module = self.load_module()
 
@@ -4180,8 +4354,6 @@ class SingleStageExampleTests(unittest.TestCase):
                 output_dir=tmpdir,
                 boozer_surface=boozer_surface,
                 bs_diag=RestartField(),
-                curves=[],
-                banana_curve=object(),
                 surf_coils=object(),
                 hbt=object(),
                 VV=object(),
