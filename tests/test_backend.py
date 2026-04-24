@@ -1087,7 +1087,7 @@ def test_points_coils_collective_config_reports_metadata(monkeypatch):
     monkeypatch.setenv("SIMSOPT_JAX_COIL_SHARDING_DEVICES", "2")
     monkeypatch.setenv("SIMSOPT_JAX_MIN_POINTS_TO_SHARD", "4")
     monkeypatch.setenv("SIMSOPT_JAX_MIN_COILS_TO_SHARD", "3")
-    backend = _fresh_backend()
+    _fresh_backend()
     runtime = sys.modules["simsopt.backend.runtime"]
     monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 4)
     sharding = _fresh_sharding_module()

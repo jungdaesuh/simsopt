@@ -38,6 +38,7 @@ from simsopt.backend import invalidate_backend_cache
 from simsopt.jax_core.field import (
     grouped_biot_savart_B_from_spec,
     grouped_coil_set_spec_from_lists,
+    grouped_field_sharding_summary,
 )
 from simsopt.jax_core import sharding as sharding_core
 
@@ -887,7 +888,18 @@ class TestBiotSavartJaxChunkedParity:
                 atol=1e-14,
             )
 
-    def test_grouped_biot_savart_accepts_explicit_point_sharding(self):
+    def test_grouped_biot_savart_accepts_explicit_point_sharding(self, monkeypatch):
+        invalidate_backend_cache()
+        monkeypatch.setattr(
+            sharding_core,
+            "get_sharding_tuning",
+            lambda mode=None: types.SimpleNamespace(
+                active=False,
+                strategy="none",
+                min_points_to_shard=1 << 30,
+                min_coils_to_shard=1 << 30,
+            ),
+        )
         mesh = Mesh(np.asarray(jax.devices(), dtype=object), ("d",))
         points = jax.device_put(
             np.array(
@@ -947,6 +959,47 @@ class TestBiotSavartJaxChunkedParity:
 
         assert result.shape == (4, 3)
         assert jnp.all(jnp.isfinite(result))
+
+    def test_grouped_biot_savart_uses_points_coils_collective(self, monkeypatch):
+        monkeypatch.setattr(
+            sharding_core,
+            "get_sharding_tuning",
+            lambda mode=None: types.SimpleNamespace(
+                active=True,
+                strategy="points_coils",
+                min_points_to_shard=1,
+                min_coils_to_shard=1,
+                platform="cpu",
+                point_axis_name="point_batch",
+                coil_axis_name="coil_batch",
+                point_device_count=1,
+                coil_device_count=1,
+            ),
+        )
+
+        points = jnp.array(
+            [
+                [0.2, 0.1, -0.3],
+                [0.1, -0.4, 0.0],
+            ],
+            dtype=jnp.float64,
+        )
+        gammas, gammadashs, currents = _make_shifted_circular_coils(2, nquad=16)
+        coil_spec = grouped_coil_set_spec_from_lists(
+            [gammas[0], gammas[1]],
+            [gammadashs[0], gammadashs[1]],
+            [currents[0], currents[1]],
+        )
+
+        dense_B = biot_savart_B(points, gammas, gammadashs, currents)
+        grouped_B = grouped_biot_savart_B_from_spec(points, coil_spec)
+        summary = grouped_field_sharding_summary(points, coil_spec)
+
+        np.testing.assert_allclose(np.asarray(grouped_B), np.asarray(dense_B), atol=1e-14)
+        assert summary["field_collective"] is True
+        assert summary["strategy"] == "points_coils"
+        assert summary["point_axis"] == "point_batch"
+        assert summary["coil_axis"] == "coil_batch"
 
     @pytest.mark.parametrize(
         ("mode", "rtol", "atol"),
