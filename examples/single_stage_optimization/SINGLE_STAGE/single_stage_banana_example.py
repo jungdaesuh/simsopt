@@ -7,6 +7,7 @@ import json
 import shutil
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import astuple, dataclass, fields, replace
 from pathlib import Path, PurePath
@@ -3013,6 +3014,39 @@ def accepted_search_metric(run_dict):
     return float(search_eval["total"])
 
 
+def snapshot_diagnostic_incumbent_state(run_dict):
+    search_eval = diagnostic_search_eval_for_current_state(run_dict)
+    if search_eval is run_dict["search_eval"]:
+        return snapshot_single_stage_incumbent_state(run_dict)
+    compact_search_eval = run_dict["search_eval"]
+    run_dict["search_eval"] = search_eval
+    try:
+        return snapshot_single_stage_incumbent_state(run_dict)
+    finally:
+        run_dict["search_eval"] = compact_search_eval
+
+
+def normalize_diagnostic_incumbent_for_stage(
+    run_dict,
+    incumbent,
+    incumbent_stage,
+    current_stage,
+    rebuild_stage_objective_bundle,
+):
+    if incumbent is None or search_eval_has_diagnostics(incumbent.search_eval):
+        return incumbent
+    current_state = snapshot_single_stage_incumbent_state(run_dict)
+    restore_single_stage_incumbent_state(run_dict, incumbent)
+    try:
+        rebuild_stage_objective_bundle(incumbent_stage)
+        refresh_accepted_search_state(run_dict, incumbent_stage)
+        return snapshot_diagnostic_incumbent_state(run_dict)
+    finally:
+        restore_single_stage_incumbent_state(run_dict, current_state)
+        rebuild_stage_objective_bundle(current_stage)
+        refresh_accepted_search_state(run_dict, current_stage)
+
+
 def maybe_update_best_accepted_incumbent(run_dict, incumbent_stage):
     if not preserved_incumbent_eligible(run_dict):
         return False
@@ -3020,7 +3054,7 @@ def maybe_update_best_accepted_incumbent(run_dict, incumbent_stage):
     best_metric = run_dict.get("best_accepted_metric")
     if best_metric is not None and metric >= best_metric:
         return False
-    run_dict["best_accepted_incumbent"] = snapshot_single_stage_incumbent_state(run_dict)
+    run_dict["best_accepted_incumbent"] = snapshot_diagnostic_incumbent_state(run_dict)
     run_dict["best_accepted_metric"] = metric
     run_dict["best_accepted_stage"] = str(incumbent_stage)
     return True
@@ -3033,7 +3067,7 @@ def maybe_update_best_feasible_incumbent(run_dict, incumbent_stage):
     best_metric = run_dict.get("best_feasible_metric")
     if best_metric is not None and metric >= best_metric:
         return False
-    run_dict["best_feasible_incumbent"] = snapshot_single_stage_incumbent_state(run_dict)
+    run_dict["best_feasible_incumbent"] = snapshot_diagnostic_incumbent_state(run_dict)
     run_dict["best_feasible_metric"] = metric
     run_dict["best_feasible_stage"] = str(incumbent_stage)
     return True
@@ -3812,6 +3846,7 @@ def evaluate_total_objective(
     CURVATURE_WEIGHT,
     JSurfSurf=None,
     SURF_DIST_WEIGHT=0.0,
+    include_diagnostics=True,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
     return apply_frontier_scalarization_override(
@@ -3837,6 +3872,7 @@ def evaluate_total_objective(
             JVolume=objective_terms["JVolume"],
             VOLUME_WEIGHT=objective_terms["effective_volume_weight"],
             objective_optimizable=globals().get("JF"),
+            include_diagnostics=include_diagnostics,
         ),
         alm_formulation="weighted_sum",
     )
@@ -3851,6 +3887,8 @@ def evaluate_base_objective(
     IOTAS_WEIGHT,
     JCurveLength,
     LENGTH_WEIGHT,
+    *,
+    include_diagnostics=True,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
     return _evaluate_base_objective_impl(
@@ -3869,6 +3907,7 @@ def evaluate_base_objective(
         ),
         JNonQSObjective=objective_terms["JNonQSObjective"],
         JBoozerObjective=objective_terms["JBoozerObjective"],
+        include_diagnostics=include_diagnostics,
     )
 
 
@@ -3887,6 +3926,7 @@ def evaluate_alm_objective(
     multipliers,
     penalty,
     JSurfSurf=None,
+    include_diagnostics=True,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
     return apply_frontier_scalarization_override(
@@ -3937,12 +3977,15 @@ def evaluate_alm_objective(
             banana_current_threshold=args.banana_current_max_A,
             JNonQSObjective=objective_terms["JNonQSObjective"],
             JBoozerObjective=objective_terms["JBoozerObjective"],
+            include_diagnostics=include_diagnostics,
         ),
         alm_formulation=args.alm_formulation,
     )
 
 
-def evaluate_search_objective(surface_weights):
+def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
+    if include_diagnostics is None:
+        include_diagnostics = frontier_mode_enabled()
     if globals().get("CONSTRAINT_METHOD") == "alm":
         return annotate_frontier_search_eval(
             evaluate_alm_objective(
@@ -3960,6 +4003,7 @@ def evaluate_search_objective(surface_weights):
                 ALM_MULTIPLIERS,
                 ALM_PENALTY,
                 JSurfSurf=JSurfSurf,
+                include_diagnostics=include_diagnostics,
             )
         )
     return annotate_frontier_search_eval(
@@ -3980,6 +4024,7 @@ def evaluate_search_objective(surface_weights):
             CURVATURE_WEIGHT,
             JSurfSurf=JSurfSurf,
             SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+            include_diagnostics=include_diagnostics,
         )
     )
 
@@ -5745,6 +5790,7 @@ def build_preserved_timeout_results_payload(
         "SELF_INTERSECTING": bool(run_dict["intersecting"]),
         **build_single_stage_banana_current_payload_fields(banana_current_state),
         **build_hardware_constraint_artifact_payload_fields(artifact_hardware_snapshot),
+        **search_step_metrics_payload(run_dict),
         "FINAL_TOPOLOGY_GATE_SUCCESS": bool(run_dict["topology_gate_status"]["success"]),
         "FINAL_TOPOLOGY_GATE_STATE": run_dict["topology_gate_status"].get("state"),
         "FINAL_TOPOLOGY_GATE_ERROR": run_dict["topology_gate_status"].get("evaluation_error"),
@@ -5899,6 +5945,24 @@ def remove_preserved_timeout_artifacts(out_dir, *, preservation_kind, surface_da
             os.remove(artifact_path)
 
 
+def diagnostic_search_eval_for_current_state(run_dict):
+    search_eval = run_dict["search_eval"]
+    if search_eval_has_diagnostics(search_eval):
+        return search_eval
+    surface_weights = search_eval.get("surface_weights")
+    if surface_weights is None:
+        surface_weights = build_surface_search_weights(
+            len(surface_data),
+            run_dict.get("accepted_iterations", 0),
+            MULTISURFACE_RAMP_ITERATIONS,
+            INNER_SURFACE_INITIAL_WEIGHT,
+        )
+    return evaluate_search_objective(
+        np.asarray(surface_weights, dtype=float),
+        include_diagnostics=True,
+    )
+
+
 def write_preserved_timeout_artifacts_for_current_state(
     out_dir,
     *,
@@ -5919,7 +5983,7 @@ def write_preserved_timeout_artifacts_for_current_state(
             preservation_kind=preservation_kind,
             incumbent_stage=incumbent_stage,
             run_dict=run_dict,
-            objective_eval=run_dict["search_eval"],
+            objective_eval=diagnostic_search_eval_for_current_state(run_dict),
             field_error=field_error,
             final_iota=run_dict["surface_status"]["iotas"][-1],
             final_volume=run_dict["surface_status"]["volumes"][-1],
@@ -6010,7 +6074,7 @@ def build_single_stage_solver_checkpoint_state(
         runtime_maxiter=int(runtime_maxiter),
         accepted_iterations=int(run_dict.get("accepted_iterations", 0)),
         accepted_boozer_stage=str(accepted_stage),
-        accepted_incumbent=snapshot_single_stage_incumbent_state(run_dict),
+        accepted_incumbent=snapshot_diagnostic_incumbent_state(run_dict),
         best_accepted_incumbent=run_dict.get("best_accepted_incumbent"),
         best_accepted_stage=run_dict.get("best_accepted_stage"),
         best_accepted_metric=run_dict.get("best_accepted_metric"),
@@ -6155,6 +6219,146 @@ def normPlot(surf, bs, filename):
     return mean_abs_relBfinal_norm
 
 
+def new_search_step_metrics():
+    return {
+        "evaluations": 0,
+        "accepted_evaluations": 0,
+        "rejected_evaluations": 0,
+        "rejected_after_surface_solve": 0,
+        "rejected_before_surface_solve": 0,
+        "surface_solve_rejects": 0,
+        "topology_rejects": 0,
+        "hardware_rejects": 0,
+        "curvature_rejects": 0,
+        "other_rejects": 0,
+        "objective_evaluations": 0,
+        "fast_objective_evaluations": 0,
+        "diagnostic_objective_evaluations": 0,
+        "surface_solve_seconds": 0.0,
+        "objective_eval_seconds": 0.0,
+        "topology_gate_seconds": 0.0,
+        "hardware_snapshot_seconds": 0.0,
+        "total_seconds": 0.0,
+        "last_rejection_reason": None,
+        "last_step_norm": None,
+        "last_rejection_increment": None,
+    }
+
+
+def search_step_metrics_for_run(run_dict):
+    if "search_step_metrics" not in run_dict:
+        run_dict["search_step_metrics"] = new_search_step_metrics()
+    return run_dict["search_step_metrics"]
+
+
+def record_search_step_objective_eval(metrics, objective_eval):
+    metrics["objective_evaluations"] += 1
+    if objective_eval.get("diagnostics_included", True):
+        metrics["diagnostic_objective_evaluations"] += 1
+    else:
+        metrics["fast_objective_evaluations"] += 1
+
+
+def hardware_status_has_curvature_violation(hardware_status):
+    return not hardware_status["constraints"]["max_curvature"]["success"]
+
+
+def search_step_rejection_reason(rejection_reason):
+    if rejection_reason is None:
+        return "surface_solve"
+    return rejection_reason
+
+
+def record_search_step_acceptance(metrics):
+    metrics["accepted_evaluations"] += 1
+    metrics["last_rejection_reason"] = None
+    metrics["last_rejection_increment"] = None
+
+
+def record_search_step_rejection(
+    metrics,
+    *,
+    rejection_reason,
+    stack_status,
+    hardware_status,
+    rejection_increment,
+):
+    reason = search_step_rejection_reason(rejection_reason)
+    metrics["rejected_evaluations"] += 1
+    metrics["last_rejection_reason"] = reason
+    metrics["last_rejection_increment"] = float(rejection_increment)
+    if stack_status["success"]:
+        metrics["rejected_after_surface_solve"] += 1
+    else:
+        metrics["rejected_before_surface_solve"] += 1
+    if reason == "surface_solve":
+        metrics["surface_solve_rejects"] += 1
+    elif reason.startswith("topology"):
+        metrics["topology_rejects"] += 1
+    elif reason == "hardware":
+        metrics["hardware_rejects"] += 1
+        if hardware_status_has_curvature_violation(hardware_status):
+            metrics["curvature_rejects"] += 1
+    else:
+        metrics["other_rejects"] += 1
+
+
+def optional_search_step_float(metrics, key):
+    value = metrics[key]
+    if value is None:
+        return None
+    return float(value)
+
+
+def search_step_metrics_payload(run_dict):
+    metrics = run_dict.get("search_step_metrics", new_search_step_metrics())
+    return {
+        "SEARCH_STEP_EVALS": int(metrics["evaluations"]),
+        "SEARCH_STEP_ACCEPTED_EVALS": int(metrics["accepted_evaluations"]),
+        "SEARCH_STEP_REJECTED_EVALS": int(metrics["rejected_evaluations"]),
+        "SEARCH_STEP_REJECTED_AFTER_SURFACE_SOLVE": int(
+            metrics["rejected_after_surface_solve"]
+        ),
+        "SEARCH_STEP_REJECTED_BEFORE_SURFACE_SOLVE": int(
+            metrics["rejected_before_surface_solve"]
+        ),
+        "SEARCH_STEP_SURFACE_SOLVE_REJECTS": int(metrics["surface_solve_rejects"]),
+        "SEARCH_STEP_TOPOLOGY_REJECTS": int(metrics["topology_rejects"]),
+        "SEARCH_STEP_HARDWARE_REJECTS": int(metrics["hardware_rejects"]),
+        "SEARCH_STEP_CURVATURE_REJECTS": int(metrics["curvature_rejects"]),
+        "SEARCH_STEP_OTHER_REJECTS": int(metrics["other_rejects"]),
+        "SEARCH_STEP_OBJECTIVE_EVALS": int(metrics["objective_evaluations"]),
+        "SEARCH_STEP_FAST_OBJECTIVE_EVALS": int(
+            metrics["fast_objective_evaluations"]
+        ),
+        "SEARCH_STEP_DIAGNOSTIC_OBJECTIVE_EVALS": int(
+            metrics["diagnostic_objective_evaluations"]
+        ),
+        "SEARCH_STEP_SURFACE_SOLVE_SECONDS": float(
+            metrics["surface_solve_seconds"]
+        ),
+        "SEARCH_STEP_OBJECTIVE_EVAL_SECONDS": float(
+            metrics["objective_eval_seconds"]
+        ),
+        "SEARCH_STEP_TOPOLOGY_GATE_SECONDS": float(
+            metrics["topology_gate_seconds"]
+        ),
+        "SEARCH_STEP_HARDWARE_SNAPSHOT_SECONDS": float(
+            metrics["hardware_snapshot_seconds"]
+        ),
+        "SEARCH_STEP_TOTAL_SECONDS": float(metrics["total_seconds"]),
+        "SEARCH_STEP_LAST_REJECTION_REASON": metrics["last_rejection_reason"],
+        "SEARCH_STEP_LAST_STEP_NORM": optional_search_step_float(
+            metrics,
+            "last_step_norm",
+        ),
+        "SEARCH_STEP_LAST_REJECTION_INCREMENT": optional_search_step_float(
+            metrics,
+            "last_rejection_increment",
+        ),
+    }
+
+
 def evaluate_search_step(x):
     """
     Objective function for L-BFGS-B optimization.
@@ -6171,12 +6375,16 @@ def evaluate_search_step(x):
     Returns:
         Dictionary with objective value and gradient for the current search step.
     """
+    step_start = time.perf_counter()
     dx = np.linalg.norm(x - run_dict['x_prev'])
+    metrics = search_step_metrics_for_run(run_dict)
+    metrics["evaluations"] += 1
+    metrics["last_step_norm"] = float(dx)
     outer_entry = surface_data[-1]
     run_dict['x_prev'] = x.copy()
     print(f"Step size: {dx:.2e}")
 
-    run_dict['lscount']+=1
+    run_dict['lscount'] += 1
     run_dict["trial_hardware_status"] = None
     run_dict.setdefault("invalid_state_rejects_total", 0)
     run_dict.setdefault("topology_gate_rejects", 0)
@@ -6192,6 +6400,7 @@ def evaluate_search_step(x):
         SS_DIST if len(surface_data) > 1 else 0.0,
     )
 
+    surface_solve_start = time.perf_counter()
     stack_status = solve_surface_stack_at_dofs(
         x,
         JF,
@@ -6202,6 +6411,7 @@ def evaluate_search_step(x):
         vessel_gap_threshold=search_gate['vessel_gap_threshold'],
         enforce_nesting=search_gate['enforce_nesting'],
     )
+    metrics["surface_solve_seconds"] += time.perf_counter() - surface_solve_start
     success = stack_status['success']
 
     rejection_increment = None
@@ -6216,7 +6426,13 @@ def evaluate_search_step(x):
             MULTISURFACE_RAMP_ITERATIONS,
             INNER_SURFACE_INITIAL_WEIGHT,
         )
-        objective_eval = evaluate_search_objective(search_surface_weights)
+        objective_eval_start = time.perf_counter()
+        objective_eval = evaluate_search_objective(
+            search_surface_weights,
+            include_diagnostics=frontier_mode_enabled(),
+        )
+        metrics["objective_eval_seconds"] += time.perf_counter() - objective_eval_start
+        record_search_step_objective_eval(metrics, objective_eval)
         J = objective_eval['total']
         dJ = objective_eval['grad']
         frontier_trust_status = evaluate_frontier_trust_status(objective_eval)
@@ -6256,11 +6472,15 @@ def evaluate_search_step(x):
 
         if success:
             active_surface_mode_contract = globals().get("surface_mode_contract")
+            topology_gate_start = time.perf_counter()
             topology_status = evaluate_search_topology_gate(
                 len(surface_data),
                 outer_entry['boozer_surface'].surface,
                 bs,
                 surface_mode_contract=active_surface_mode_contract,
+            )
+            metrics["topology_gate_seconds"] += (
+                time.perf_counter() - topology_gate_start
             )
             run_dict['topology_gate_status'] = topology_status
             topology_state = _topology_gate_state(topology_status)
@@ -6333,6 +6553,7 @@ def evaluate_search_step(x):
                             )
 
         if success:
+            hardware_snapshot_start = time.perf_counter()
             hardware_snapshot = evaluate_single_stage_hardware_snapshot(
                 JCurveCurve,
                 CC_DIST,
@@ -6344,6 +6565,9 @@ def evaluate_search_step(x):
                 banana_curve,
                 CURVATURE_THRESHOLD,
                 **current_single_stage_hardware_snapshot_kwargs(),
+            )
+            metrics["hardware_snapshot_seconds"] += (
+                time.perf_counter() - hardware_snapshot_start
             )
             hardware_status = hardware_snapshot["search_hardware_status"]
             run_dict["trial_hardware_status"] = hardware_status
@@ -6471,10 +6695,19 @@ def evaluate_search_step(x):
         # the BFGS Hessian update.
         if rejection_increment is None:
             rejection_increment = max(abs(run_dict['J']), 1.0)
+        record_search_step_rejection(
+            metrics,
+            rejection_reason=rejection_reason,
+            stack_status=stack_status,
+            hardware_status=hardware_status,
+            rejection_increment=rejection_increment,
+        )
         J = run_dict['J'] + rejection_increment
         dJ = run_dict['dJ'].copy()
         JF.x = run_dict['accepted_x']
         restore_surface_states(surface_data, run_dict['surface_state'])
+    else:
+        record_search_step_acceptance(metrics)
 
     evaluation = {"total": J, "grad": dJ}
     if CONSTRAINT_METHOD == "alm":
@@ -6523,12 +6756,36 @@ def evaluate_search_step(x):
                     ),
                 }
             )
+    metrics["total_seconds"] += time.perf_counter() - step_start
     return evaluation
 
 
 def fun(x):
     evaluation = evaluate_search_step(x)
     return evaluation["total"], evaluation["grad"]
+
+
+def search_eval_has_diagnostics(objective_eval):
+    return bool(
+        objective_eval is not None
+        and objective_eval.get("diagnostics_included", True)
+        and all(
+            field_name in objective_eval
+            for field_name in (
+                "J_QS",
+                "dJ_QS",
+                "J_Boozer",
+                "dJ_Boozer",
+                "J_iota",
+                "dJ_iota",
+                "J_surf",
+                "dJ_surf",
+                "J_curvature",
+                "dJ_curvature",
+            )
+        )
+    )
+
 
 def callback(x):
     """
@@ -6561,10 +6818,20 @@ def callback(x):
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
         SS_DIST if len(surface_data) > 1 else 0.0,
     )
-    if 'last_successful_eval' in run_dict and np.array_equal(run_dict.get('last_successful_eval_weights', None), search_surface_weights):
+    if (
+        'last_successful_eval' in run_dict
+        and np.array_equal(
+            run_dict.get('last_successful_eval_weights', None),
+            search_surface_weights,
+        )
+        and search_eval_has_diagnostics(run_dict['last_successful_eval'])
+    ):
         objective_eval = run_dict['last_successful_eval']
     else:
-        objective_eval = evaluate_search_objective(search_surface_weights)
+        objective_eval = evaluate_search_objective(
+            search_surface_weights,
+            include_diagnostics=True,
+        )
     run_dict['surface_state'] = snapshot_surface_states(surface_data)
     run_dict['accepted_x'] = x.copy()
     run_dict['J'] = objective_eval['total']
@@ -7634,22 +7901,36 @@ if __name__ == "__main__":
         run_dict["frontier_trust_rejects"] = int(
             run_counters.get("frontier_trust_rejects", 0)
         )
-        run_dict["best_accepted_incumbent"] = restore_optional_incumbent(
+        restored_best_accepted_incumbent = restore_optional_incumbent(
             resume_solver_checkpoint_payload,
             "best_accepted_incumbent",
         )
         run_dict["best_accepted_stage"] = resume_solver_checkpoint_payload.get(
             "best_accepted_stage"
         )
+        run_dict["best_accepted_incumbent"] = normalize_diagnostic_incumbent_for_stage(
+            run_dict,
+            restored_best_accepted_incumbent,
+            run_dict["best_accepted_stage"],
+            restored_stage,
+            rebuild_stage_objective_bundle,
+        )
         run_dict["best_accepted_metric"] = resume_solver_checkpoint_payload.get(
             "best_accepted_metric"
         )
-        run_dict["best_feasible_incumbent"] = restore_optional_incumbent(
+        restored_best_feasible_incumbent = restore_optional_incumbent(
             resume_solver_checkpoint_payload,
             "best_feasible_incumbent",
         )
         run_dict["best_feasible_stage"] = resume_solver_checkpoint_payload.get(
             "best_feasible_stage"
+        )
+        run_dict["best_feasible_incumbent"] = normalize_diagnostic_incumbent_for_stage(
+            run_dict,
+            restored_best_feasible_incumbent,
+            run_dict["best_feasible_stage"],
+            restored_stage,
+            rebuild_stage_objective_bundle,
         )
         run_dict["best_feasible_metric"] = resume_solver_checkpoint_payload.get(
             "best_feasible_metric"
@@ -9009,6 +9290,7 @@ if __name__ == "__main__":
         "HARDWARE_REJECTS": run_dict["hardware_rejects"],
         "SURFACE_SOLVE_REJECTS": run_dict["surface_solve_rejects"],
         "FRONTIER_TRUST_REJECTS": run_dict["frontier_trust_rejects"],
+        **search_step_metrics_payload(run_dict),
         "NONQS_RATIO": nonqs_ratio,
         "BOOZER_RESIDUAL": boozer_residual,
         "FRONTIER_TRUST_OK": final_frontier_trust_status["ok"],

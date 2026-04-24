@@ -119,6 +119,23 @@ def load_alm_utils_module():
     )
 
 
+def diagnostic_search_eval_payload(base_payload):
+    return {
+        "J_QS": 2.5e-4,
+        "dJ_QS": np.array([0.1, -0.1]),
+        "J_Boozer": 4.0e-7,
+        "dJ_Boozer": np.array([0.2, -0.2]),
+        "J_iota": 1.0e-3,
+        "dJ_iota": np.array([0.3, -0.3]),
+        "J_surf": 0.0,
+        "dJ_surf": np.array([0.0, 0.0]),
+        "J_curvature": 0.0,
+        "dJ_curvature": np.array([0.0, 0.0]),
+        **base_payload,
+        "diagnostics_included": True,
+    }
+
+
 def load_workflow_helpers_module():
     return _load_module_from_path(
         WORKFLOW_HELPERS_MODULE_PATH,
@@ -432,6 +449,9 @@ class FakeDifferentiableBoozerSurface(Optimizable):
     def run_code(self, iota, G):
         del iota, G
         return self.res
+
+    def run_code_from_last_solution(self):
+        return self.run_code(self.res["iota"], self.res["G"])
 
     def _vjp(self, adj, booz_surf, iota, G):
         del booz_surf, iota, G
@@ -2754,6 +2774,57 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertIs(payload["nested"]["success"], False)
         self.assertEqual(payload["nested"]["violations"], ["cc"])
 
+    def test_search_step_metrics_payload_defaults_to_zero(self):
+        module = load_single_stage_example_module()
+
+        payload = module.search_step_metrics_payload({})
+
+        self.assertEqual(payload["SEARCH_STEP_EVALS"], 0)
+        self.assertEqual(payload["SEARCH_STEP_REJECTED_AFTER_SURFACE_SOLVE"], 0)
+        self.assertEqual(payload["SEARCH_STEP_FAST_OBJECTIVE_EVALS"], 0)
+        self.assertEqual(payload["SEARCH_STEP_CURVATURE_REJECTS"], 0)
+        self.assertIsNone(payload["SEARCH_STEP_LAST_REJECTION_REASON"])
+
+    def test_search_step_metrics_records_fast_curvature_reject(self):
+        module = load_single_stage_example_module()
+        run_dict = {}
+        metrics = module.search_step_metrics_for_run(run_dict)
+        metrics["evaluations"] += 1
+        metrics["last_step_norm"] = 0.125
+
+        module.record_search_step_objective_eval(
+            metrics,
+            {"total": 1.0, "grad": np.array([0.0]), "diagnostics_included": False},
+        )
+        module.record_search_step_rejection(
+            metrics,
+            rejection_reason="hardware",
+            stack_status={"success": True},
+            hardware_status={
+                "success": False,
+                "violations": [
+                    "max_curvature 101.0 exceeds threshold 100.0",
+                ],
+                "constraints": {
+                    "max_curvature": {"success": False},
+                },
+            },
+            rejection_increment=2.5,
+        )
+
+        payload = module.search_step_metrics_payload(run_dict)
+
+        self.assertEqual(payload["SEARCH_STEP_EVALS"], 1)
+        self.assertEqual(payload["SEARCH_STEP_REJECTED_EVALS"], 1)
+        self.assertEqual(payload["SEARCH_STEP_REJECTED_AFTER_SURFACE_SOLVE"], 1)
+        self.assertEqual(payload["SEARCH_STEP_HARDWARE_REJECTS"], 1)
+        self.assertEqual(payload["SEARCH_STEP_CURVATURE_REJECTS"], 1)
+        self.assertEqual(payload["SEARCH_STEP_FAST_OBJECTIVE_EVALS"], 1)
+        self.assertEqual(payload["SEARCH_STEP_DIAGNOSTIC_OBJECTIVE_EVALS"], 0)
+        self.assertEqual(payload["SEARCH_STEP_LAST_REJECTION_REASON"], "hardware")
+        self.assertEqual(payload["SEARCH_STEP_LAST_STEP_NORM"], 0.125)
+        self.assertEqual(payload["SEARCH_STEP_LAST_REJECTION_INCREMENT"], 2.5)
+
     def test_append_jsonl_artifact_rewrites_archive_without_partial_lines(self):
         module = load_single_stage_example_module()
 
@@ -3160,22 +3231,63 @@ class HardwareConstraintTests(unittest.TestCase):
             "best_feasible_stage": None,
         }
 
-        self.assertTrue(module.maybe_update_best_feasible_incumbent(run_dict, "initial"))
-        self.assertEqual(run_dict["best_feasible_metric"], 4.0)
-        self.assertEqual(run_dict["best_feasible_stage"], "initial")
-        np.testing.assert_allclose(run_dict["best_feasible_incumbent"].x, [1.0, 2.0])
+        def rich_eval_for_current_state(surface_weights, *, include_diagnostics=None):
+            self.assertTrue(include_diagnostics)
+            np.testing.assert_allclose(
+                surface_weights,
+                run_dict["search_eval"]["surface_weights"],
+            )
+            return diagnostic_search_eval_payload(run_dict["search_eval"])
 
-        run_dict["search_eval"] = {"total": 5.0, "surface_weights": np.array([1.0])}
-        run_dict["J"] = 5.0
-        self.assertFalse(module.maybe_update_best_feasible_incumbent(run_dict, "final"))
-        self.assertEqual(run_dict["best_feasible_metric"], 4.0)
-        self.assertEqual(run_dict["best_feasible_stage"], "initial")
+        with patch.object(
+            module,
+            "evaluate_search_objective",
+            side_effect=rich_eval_for_current_state,
+        ) as evaluate_mock:
+            self.assertTrue(
+                module.maybe_update_best_feasible_incumbent(run_dict, "initial")
+            )
+            self.assertEqual(evaluate_mock.call_count, 1)
 
-        run_dict["search_eval"] = {"total": 3.0, "surface_weights": np.array([1.0])}
-        run_dict["J"] = 3.0
-        self.assertTrue(module.maybe_update_best_feasible_incumbent(run_dict, "final"))
-        self.assertEqual(run_dict["best_feasible_metric"], 3.0)
-        self.assertEqual(run_dict["best_feasible_stage"], "final")
+            self.assertEqual(run_dict["best_feasible_metric"], 4.0)
+            self.assertEqual(run_dict["best_feasible_stage"], "initial")
+            np.testing.assert_allclose(
+                run_dict["best_feasible_incumbent"].x,
+                [1.0, 2.0],
+            )
+            self.assertNotIn("J_QS", run_dict["search_eval"])
+            self.assertAlmostEqual(
+                run_dict["best_feasible_incumbent"].search_eval["J_QS"],
+                2.5e-4,
+            )
+
+            run_dict["search_eval"] = {
+                "total": 5.0,
+                "surface_weights": np.array([1.0]),
+            }
+            run_dict["J"] = 5.0
+            self.assertFalse(
+                module.maybe_update_best_feasible_incumbent(run_dict, "final")
+            )
+            self.assertEqual(evaluate_mock.call_count, 1)
+            self.assertEqual(run_dict["best_feasible_metric"], 4.0)
+            self.assertEqual(run_dict["best_feasible_stage"], "initial")
+
+            run_dict["search_eval"] = {
+                "total": 3.0,
+                "surface_weights": np.array([1.0]),
+            }
+            run_dict["J"] = 3.0
+            self.assertTrue(
+                module.maybe_update_best_feasible_incumbent(run_dict, "final")
+            )
+            self.assertEqual(evaluate_mock.call_count, 2)
+            self.assertEqual(run_dict["best_feasible_metric"], 3.0)
+            self.assertEqual(run_dict["best_feasible_stage"], "final")
+            self.assertAlmostEqual(
+                run_dict["best_feasible_incumbent"].search_eval["J_QS"],
+                2.5e-4,
+            )
 
     def test_maybe_update_best_accepted_incumbent_tracks_valid_nonself_intersecting_states(self):
         module = load_single_stage_example_module()
@@ -3187,7 +3299,10 @@ class HardwareConstraintTests(unittest.TestCase):
             "search_eval": {"total": 4.0, "surface_weights": np.array([1.0])},
             "surface_status": {"success": True},
             "search_surface_status": {"success": True},
-            "accepted_hardware_status": {"success": False, "violations": ["max_curvature"]},
+            "accepted_hardware_status": {
+                "success": False,
+                "violations": ["max_curvature"],
+            },
             "topology_gate_status": {"enabled": False, "success": True},
             "intersecting": False,
             "best_accepted_incumbent": None,
@@ -3195,21 +3310,171 @@ class HardwareConstraintTests(unittest.TestCase):
             "best_accepted_stage": None,
         }
 
-        self.assertTrue(module.maybe_update_best_accepted_incumbent(run_dict, "initial"))
-        self.assertEqual(run_dict["best_accepted_metric"], 4.0)
-        self.assertEqual(run_dict["best_accepted_stage"], "initial")
-        np.testing.assert_allclose(run_dict["best_accepted_incumbent"].x, [1.0, 2.0])
+        def rich_eval_for_current_state(surface_weights, *, include_diagnostics=None):
+            self.assertTrue(include_diagnostics)
+            np.testing.assert_allclose(
+                surface_weights,
+                run_dict["search_eval"]["surface_weights"],
+            )
+            return diagnostic_search_eval_payload(run_dict["search_eval"])
 
-        run_dict["search_eval"] = {"total": 5.0, "surface_weights": np.array([1.0])}
-        run_dict["J"] = 5.0
-        self.assertFalse(module.maybe_update_best_accepted_incumbent(run_dict, "middle"))
-        self.assertEqual(run_dict["best_accepted_metric"], 4.0)
+        with patch.object(
+            module,
+            "evaluate_search_objective",
+            side_effect=rich_eval_for_current_state,
+        ) as evaluate_mock:
+            self.assertTrue(
+                module.maybe_update_best_accepted_incumbent(run_dict, "initial")
+            )
+            self.assertEqual(evaluate_mock.call_count, 1)
+            self.assertEqual(run_dict["best_accepted_metric"], 4.0)
+            self.assertEqual(run_dict["best_accepted_stage"], "initial")
+            np.testing.assert_allclose(
+                run_dict["best_accepted_incumbent"].x,
+                [1.0, 2.0],
+            )
+            self.assertNotIn("J_QS", run_dict["search_eval"])
+            self.assertAlmostEqual(
+                run_dict["best_accepted_incumbent"].search_eval["J_QS"],
+                2.5e-4,
+            )
 
-        run_dict["intersecting"] = True
-        run_dict["search_eval"] = {"total": 3.0, "surface_weights": np.array([1.0])}
-        run_dict["J"] = 3.0
-        self.assertFalse(module.maybe_update_best_accepted_incumbent(run_dict, "final"))
-        self.assertEqual(run_dict["best_accepted_metric"], 4.0)
+            run_dict["search_eval"] = {
+                "total": 5.0,
+                "surface_weights": np.array([1.0]),
+            }
+            run_dict["J"] = 5.0
+            self.assertFalse(
+                module.maybe_update_best_accepted_incumbent(run_dict, "middle")
+            )
+            self.assertEqual(evaluate_mock.call_count, 1)
+            self.assertEqual(run_dict["best_accepted_metric"], 4.0)
+
+            run_dict["intersecting"] = True
+            run_dict["search_eval"] = {
+                "total": 3.0,
+                "surface_weights": np.array([1.0]),
+            }
+            run_dict["J"] = 3.0
+            self.assertFalse(
+                module.maybe_update_best_accepted_incumbent(run_dict, "final")
+            )
+            self.assertEqual(evaluate_mock.call_count, 1)
+            self.assertEqual(run_dict["best_accepted_metric"], 4.0)
+
+    def test_solver_checkpoint_accepted_incumbent_recomputes_compact_diagnostics(self):
+        module = load_single_stage_example_module()
+        run_dict = {
+            "accepted_x": np.array([1.0, 2.0]),
+            "surface_state": {"sdofs": [np.array([1.0])], "iota": [0.15], "G": [1.0]},
+            "J": 4.0,
+            "dJ": np.array([1.0, -1.0]),
+            "search_eval": {"total": 4.0, "surface_weights": np.array([1.0])},
+            "surface_status": {"success": True},
+            "search_surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"enabled": False, "success": True},
+            "accepted_iterations": 2,
+        }
+
+        def rich_eval_for_current_state(surface_weights, *, include_diagnostics=None):
+            self.assertTrue(include_diagnostics)
+            np.testing.assert_allclose(
+                surface_weights,
+                run_dict["search_eval"]["surface_weights"],
+            )
+            return diagnostic_search_eval_payload(run_dict["search_eval"])
+
+        with patch.object(
+            module,
+            "evaluate_search_objective",
+            side_effect=rich_eval_for_current_state,
+        ) as evaluate_mock:
+            payload = module.build_single_stage_solver_checkpoint_state(
+                run_dict,
+                requested_maxiter=10,
+                runtime_maxiter=10,
+                accepted_stage="initial",
+                goal_mode="target",
+                constraint_method="penalty",
+                stage2_bs_path="/tmp/biot_savart.json",
+                out_dir_iter="/tmp/out",
+            )
+
+        self.assertEqual(evaluate_mock.call_count, 1)
+        self.assertNotIn("J_QS", run_dict["search_eval"])
+        self.assertAlmostEqual(
+            payload["accepted_incumbent"]["search_eval"]["J_QS"],
+            2.5e-4,
+        )
+
+    def test_resume_incumbent_normalization_recomputes_legacy_compact_best_state(self):
+        module = load_single_stage_example_module()
+        compact_best_state = {
+            "accepted_x": np.array([1.0, 2.0]),
+            "surface_state": {"sdofs": [np.array([1.0])], "iota": [0.15], "G": [1.0]},
+            "J": 4.0,
+            "dJ": np.array([1.0, -1.0]),
+            "search_eval": {"total": 4.0, "surface_weights": np.array([1.0])},
+            "surface_status": {"success": True},
+            "search_surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"enabled": False, "success": True},
+        }
+        current_state = {
+            "accepted_x": np.array([9.0, 8.0]),
+            "surface_state": {"sdofs": [np.array([9.0])], "iota": [0.16], "G": [1.0]},
+            "J": 6.0,
+            "dJ": np.array([2.0, -2.0]),
+            "search_eval": diagnostic_search_eval_payload(
+                {"total": 6.0, "surface_weights": np.array([1.0])}
+            ),
+            "surface_status": {"success": True},
+            "search_surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"enabled": False, "success": True},
+            "accepted_boozer_stage": "current_stage",
+        }
+        compact_incumbent = module.snapshot_single_stage_incumbent_state(
+            compact_best_state
+        )
+        rebuilt_stages = []
+
+        def rebuild_stage(stage_name):
+            rebuilt_stages.append(stage_name)
+            return {}
+
+        def refresh_state(run_state, accepted_stage):
+            run_state["accepted_boozer_stage"] = accepted_stage
+            return float(run_state["search_eval"]["total"])
+
+        def rich_eval_for_current_state(surface_weights, *, include_diagnostics=None):
+            self.assertTrue(include_diagnostics)
+            np.testing.assert_allclose(surface_weights, [1.0])
+            return diagnostic_search_eval_payload({"total": 4.0, "surface_weights": surface_weights})
+
+        with patch.object(
+            module,
+            "refresh_accepted_search_state",
+            side_effect=refresh_state,
+        ), patch.object(
+            module,
+            "evaluate_search_objective",
+            side_effect=rich_eval_for_current_state,
+        ) as evaluate_mock:
+            normalized = module.normalize_diagnostic_incumbent_for_stage(
+                current_state,
+                compact_incumbent,
+                "best_stage",
+                "current_stage",
+                rebuild_stage,
+            )
+
+        self.assertEqual(evaluate_mock.call_count, 1)
+        self.assertEqual(rebuilt_stages, ["best_stage", "current_stage"])
+        self.assertAlmostEqual(normalized.search_eval["J_QS"], 2.5e-4)
+        np.testing.assert_allclose(current_state["accepted_x"], [9.0, 8.0])
+        self.assertEqual(current_state["accepted_boozer_stage"], "current_stage")
 
     def test_frontier_preserved_incumbents_require_trust_and_frontier_rank_metric(self):
         module = load_single_stage_example_module()
@@ -3219,12 +3484,14 @@ class HardwareConstraintTests(unittest.TestCase):
             "surface_state": {"sdofs": [np.array([1.0])], "iota": [0.15], "G": [1.0]},
             "J": 4.0,
             "dJ": np.array([1.0, -1.0]),
-            "search_eval": {
-                "total": 100.0,
-                "frontier_rank_total": 4.0,
-                "frontier_trust_ok": True,
-                "surface_weights": np.array([1.0]),
-            },
+            "search_eval": diagnostic_search_eval_payload(
+                {
+                    "total": 100.0,
+                    "frontier_rank_total": 4.0,
+                    "frontier_trust_ok": True,
+                    "surface_weights": np.array([1.0]),
+                }
+            ),
             "surface_status": {"success": True},
             "search_surface_status": {"success": True},
             "accepted_hardware_status": {"success": True, "violations": []},
@@ -3317,6 +3584,112 @@ class HardwareConstraintTests(unittest.TestCase):
                 fake_outer.saved,
                 [str(out_dir / "surf_best_feasible_outer_boozer_surface.json")],
             )
+
+    def test_preserved_timeout_artifacts_recompute_diagnostics_for_compact_search_eval(self):
+        module = load_single_stage_example_module()
+
+        class FakeBiotSavart:
+            def __init__(self):
+                self.saved = []
+
+            def save(self, path):
+                self.saved.append(path)
+
+        class FakeSurface:
+            def save(self, path):
+                self.saved = path
+
+        class FakeBoozerSurface:
+            def __init__(self):
+                self.surface = FakeSurface()
+
+            def save(self, path):
+                self.saved = path
+
+        fake_bs = FakeBiotSavart()
+        fake_outer = FakeBoozerSurface()
+        module.PRESERVED_TIMEOUT_REPLAY_CONFIG = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_test.nc",
+            plasma_surf_path="/equilibria/wout_test.nc",
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+            stage2_seed_surf_path="/seeds/surf_opt_boozer_surface.json",
+            single_stage_goal_mode="target",
+        )
+        compact_eval = {
+            "total": 7.5e-4,
+            "base_total": 7.4e-4,
+            "grad": np.array([1.0]),
+            "surface_weights": np.array([1.0]),
+            "diagnostics_included": False,
+        }
+        run_dict = {
+            "search_eval": compact_eval,
+            "J": 7.5e-4,
+            "intersecting": False,
+            "accepted_iterations": 0,
+            "surface_status": {
+                "success": True,
+                "iotas": [0.14997],
+                "volumes": [0.09998],
+            },
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {"success": True},
+        }
+        hardware_snapshot = {
+            "search_hardware_status": {"success": True, "violations": []},
+            "artifact_hardware_status": {"success": True, "violations": []},
+            "max_curvature": 19.8,
+            "length_target": 1.7,
+            "tf_current_A": 8.0e4,
+            "tf_current_limit_A": 8.0e4,
+            "banana_current_A": 1.4e4,
+            "banana_current_max_A": 1.6e4,
+            "curve_curve_min_dist": 0.0496,
+            "curve_surface_min_dist": 0.067,
+            "surface_vessel_min_dist": 0.082,
+        }
+        rich_eval = dict(compact_eval, J_QS=2.7e-4, J_Boozer=4.8e-7)
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            module,
+            "evaluate_search_objective",
+            return_value=rich_eval,
+        ) as evaluate_mock:
+            out_dir = Path(tmpdir)
+            module.write_preserved_timeout_artifacts_for_current_state(
+                out_dir,
+                preservation_kind="best_accepted",
+                incumbent_stage="initial",
+                run_dict=run_dict,
+                bs=fake_bs,
+                surface_data=[{"name": "outer", "boozer_surface": fake_outer}],
+                hardware_snapshot=hardware_snapshot,
+                field_error=3.5e-4,
+                coil_length=2.91,
+            )
+            payload = json.loads(
+                (out_dir / "results_best_accepted.partial.json").read_text(
+                    encoding="utf-8",
+                )
+            )
+
+        self.assertTrue(evaluate_mock.called)
+        np.testing.assert_allclose(evaluate_mock.call_args.args[0], [1.0])
+        self.assertTrue(evaluate_mock.call_args.kwargs["include_diagnostics"])
+        self.assertAlmostEqual(payload["SEARCH_OBJECTIVE_J"], compact_eval["total"])
+        self.assertAlmostEqual(payload["NONQS_RATIO"], rich_eval["J_QS"])
+        self.assertAlmostEqual(payload["BOOZER_RESIDUAL"], rich_eval["J_Boozer"])
 
     def test_build_topology_gate_diagnostics_distinguishes_pass_reject_and_broken(self):
         module = load_single_stage_example_module()
@@ -4061,6 +4434,104 @@ class HardwareConstraintTests(unittest.TestCase):
             summary["BEST_FEASIBLE_HARDWARE_CONSTRAINT_VIOLATIONS"],
             ["coil_length 2.100000 exceeds threshold 2.000000"],
         )
+
+    def test_build_best_feasible_results_summary_uses_diagnostic_incumbent_snapshot(self):
+        module = load_single_stage_example_module()
+        compact_eval = {
+            "total": 7.5e-4,
+            "physics_total": 7.4e-4,
+            "grad": np.array([1.0, -1.0]),
+            "surface_weights": np.array([1.0]),
+            "diagnostics_included": False,
+        }
+        rich_eval = diagnostic_search_eval_payload(
+            {
+                **compact_eval,
+                "J_QS": 2.7e-4,
+                "J_Boozer": 4.8e-7,
+            }
+        )
+        run_dict = {
+            "accepted_x": np.array([1.0, 2.0]),
+            "surface_state": {"sdofs": [np.array([1.0])], "iota": [0.15], "G": [1.0]},
+            "J": compact_eval["total"],
+            "dJ": np.array([1.0, -1.0]),
+            "search_eval": compact_eval,
+            "surface_status": {
+                "iotas": [0.14997],
+                "volumes": [0.09998],
+                "success": True,
+                "self_intersections": [False],
+            },
+            "search_surface_status": {"success": True},
+            "accepted_hardware_status": {"success": True, "violations": []},
+            "topology_gate_status": {
+                "enabled": False,
+                "success": True,
+                "state": "pass",
+                "evaluation_error": None,
+                "transport_diagnostics": None,
+            },
+            "intersecting": False,
+            "best_feasible_incumbent": None,
+            "best_feasible_metric": None,
+            "best_feasible_stage": None,
+        }
+        hardware_snapshot = {
+            "artifact_hardware_status": {"success": True, "violations": []},
+            "curve_curve_min_dist": 0.0501,
+            "curve_surface_min_dist": 0.067,
+            "surface_vessel_min_dist": 0.082,
+            "max_curvature": 19.8,
+            "coil_length": 2.1,
+            "length_target": 1.9,
+            "tf_current_A": 8.0e4,
+            "tf_current_limit_A": 8.0e4,
+            "banana_current_A": 1.4e4,
+            "banana_current_max_A": 1.6e4,
+        }
+
+        with patch.object(
+            module,
+            "evaluate_search_objective",
+            return_value=rich_eval,
+        ) as evaluate_mock:
+            self.assertTrue(module.maybe_update_best_feasible_incumbent(run_dict, "initial"))
+
+        self.assertTrue(evaluate_mock.call_args.kwargs["include_diagnostics"])
+        self.assertNotIn("J_QS", run_dict["search_eval"])
+
+        with patch.object(
+            module,
+            "evaluate_single_stage_hardware_snapshot",
+            return_value=hardware_snapshot,
+        ), patch.object(
+            module,
+            "build_topology_gate_diagnostics",
+            return_value={"kind": "gate", "outcome": "pass"},
+        ):
+            summary = module.build_best_feasible_results_summary(
+                run_dict,
+                curve_curve_distance_obj=object(),
+                curve_surface_distance_obj=object(),
+                surface_surface_distance_obj=object(),
+                banana_curve=object(),
+                curvelength_obj=SimpleNamespace(J=lambda: 2.1),
+                cc_dist=0.05,
+                cs_dist=0.015,
+                ss_dist=0.04,
+                curvature_threshold=100.0,
+                length_target=1.7,
+                tf_current_A=8.0e4,
+                banana_coils=[SimpleNamespace(current=SimpleNamespace(get_value=lambda: 1.4e4))],
+                banana_current_max_A=1.6e4,
+                outer_surface=object(),
+                vessel_surface=object(),
+            )
+
+        self.assertTrue(summary["BEST_FEASIBLE_AVAILABLE"])
+        self.assertAlmostEqual(summary["BEST_FEASIBLE_QA_OBJECTIVE"], 2.7e-4)
+        self.assertAlmostEqual(summary["BEST_FEASIBLE_BOOZER_OBJECTIVE"], 4.8e-7)
 
     def test_validate_boozer_stage_refinement_args_rejects_unsupported_scope(self):
         module = load_single_stage_example_module()
@@ -6216,6 +6687,40 @@ class HardwareConstraintTests(unittest.TestCase):
         np.testing.assert_allclose(ramped["dJ_Boozer"], [7.0 / 3.0, 7.0 / 3.0])
         self.assertAlmostEqual(ramped["total"], 38.0)
         np.testing.assert_allclose(ramped["grad"], [8.0, 14.0 / 3.0])
+
+    def test_evaluate_search_objective_uses_fast_payload_outside_frontier_mode(self):
+        module = self.load_module()
+        module.SINGLE_STAGE_GOAL_MODE = "target"
+        module.CONSTRAINT_METHOD = "penalty"
+        module.nonQSs = ["nonqs"]
+        module.brs = ["brs"]
+        module.RES_WEIGHT = 1.0
+        module.Jiota = "jiota"
+        module.IOTAS_WEIGHT = 2.0
+        module.JCurveLength = "length"
+        module.LENGTH_WEIGHT = 3.0
+        module.JCurveCurve = "curve_curve"
+        module.CC_WEIGHT = 4.0
+        module.JCurveSurface = "curve_surface"
+        module.CS_WEIGHT = 5.0
+        module.JCurvature = "curvature"
+        module.CURVATURE_WEIGHT = 6.0
+        module.JSurfSurf = None
+        module.SURF_DIST_WEIGHT = 0.0
+
+        with patch.object(
+            module,
+            "evaluate_total_objective",
+            return_value={
+                "total": 7.0,
+                "grad": np.array([1.0]),
+                "diagnostics_included": False,
+            },
+        ) as evaluate_mock:
+            result = module.evaluate_search_objective(np.array([1.0]))
+
+        self.assertFalse(result["diagnostics_included"])
+        self.assertFalse(evaluate_mock.call_args.kwargs["include_diagnostics"])
 
     def test_build_total_objective_skips_missing_volume_and_surface_vessel_terms(self):
         module = self.load_module()

@@ -467,6 +467,7 @@ def evaluate_total_objective(
     JVolume=None,
     VOLUME_WEIGHT=0.0,
     objective_optimizable=None,
+    include_diagnostics=True,
 ):
     (
         raw_J_QS_obj,
@@ -500,14 +501,22 @@ def evaluate_total_objective(
         JSurfSurf=JSurfSurf,
     )
     total_grad = _objective_gradient(total_objective, objective_optimizable)
+    evaluation = {
+        "total": float(total_objective.J()),
+        "grad": total_grad,
+        "surface_weights": np.asarray(surface_weights, dtype=float).copy(),
+        "diagnostics_included": False,
+    }
+    if not include_diagnostics:
+        return annotate_search_evaluation_finiteness(evaluation)
+
     volume_grad = (
         np.zeros_like(total_grad)
         if JVolume is None
         else _objective_gradient(JVolume, objective_optimizable)
     )
-    return annotate_search_evaluation_finiteness({
-        "total": float(total_objective.J()),
-        "grad": total_grad,
+    evaluation.update({
+        "diagnostics_included": True,
         "J_QS": float(raw_J_QS_obj.J()),
         "dJ_QS": _objective_gradient(raw_J_QS_obj, objective_optimizable),
         "J_QS_objective": float(objective_J_QS_obj.J()),
@@ -540,8 +549,8 @@ def evaluate_total_objective(
         ),
         "J_curvature": float(JCurvature.J()),
         "dJ_curvature": _objective_gradient(JCurvature, objective_optimizable),
-        "surface_weights": np.asarray(surface_weights, dtype=float).copy(),
     })
+    return annotate_search_evaluation_finiteness(evaluation)
 
 
 def evaluate_base_objective(
@@ -561,6 +570,7 @@ def evaluate_base_objective(
     _surface_pair=None,
     JNonQSObjective=None,
     JBoozerObjective=None,
+    include_diagnostics=True,
 ):
     if _surface_pair is not None:
         raw_J_QS_obj, raw_J_Boozer_obj = _surface_pair
@@ -578,11 +588,6 @@ def evaluate_base_objective(
         base_objective = base_objective + VOLUME_WEIGHT * JVolume
     physics_total = float(base_objective.J())
     base_grad = _objective_gradient(base_objective, objective_optimizable)
-    volume_grad = (
-        np.zeros_like(base_grad)
-        if JVolume is None
-        else _objective_gradient(JVolume, objective_optimizable)
-    )
     if alm_formulation == "thresholded_physics":
         total = 0.0
         grad = np.zeros_like(base_grad)
@@ -591,10 +596,23 @@ def evaluate_base_objective(
         grad = base_grad
     else:
         raise ValueError(f"Unsupported ALM formulation {alm_formulation!r}")
-    return annotate_search_evaluation_finiteness({
+    evaluation = {
         "total": total,
         "grad": grad,
         "physics_total": physics_total,
+        "surface_weights": np.asarray(surface_weights, dtype=float).copy(),
+        "diagnostics_included": False,
+    }
+    if not include_diagnostics:
+        return annotate_search_evaluation_finiteness(evaluation)
+
+    volume_grad = (
+        np.zeros_like(base_grad)
+        if JVolume is None
+        else _objective_gradient(JVolume, objective_optimizable)
+    )
+    evaluation.update({
+        "diagnostics_included": True,
         "J_QS": float(raw_J_QS_obj.J()),
         "dJ_QS": _objective_gradient(raw_J_QS_obj, objective_optimizable),
         "J_QS_objective": float(objective_J_QS_obj.J()),
@@ -609,8 +627,8 @@ def evaluate_base_objective(
         "dJ_volume": volume_grad,
         "J_len": float(JCurveLength.J()),
         "dJ_len": _objective_gradient(JCurveLength, objective_optimizable),
-        "surface_weights": np.asarray(surface_weights, dtype=float).copy(),
     })
+    return annotate_search_evaluation_finiteness(evaluation)
 
 
 def evaluate_alm_objective(
@@ -660,6 +678,7 @@ def evaluate_alm_objective(
     banana_current_threshold=None,
     JNonQSObjective=None,
     JBoozerObjective=None,
+    include_diagnostics=True,
 ):
     raw_surface_pair = _surface_objective_pair(surface_weights, nonQSs, brs)
     raw_J_QS_obj, raw_J_Boozer_obj = raw_surface_pair
@@ -679,6 +698,7 @@ def evaluate_alm_objective(
         _surface_pair=raw_surface_pair,
         JNonQSObjective=JNonQSObjective,
         JBoozerObjective=JBoozerObjective,
+        include_diagnostics=include_diagnostics,
     )
 
     curve_curve_signed_value, curve_curve_grad, curve_curve_violation = curve_curve_constraint_fn(
@@ -833,30 +853,32 @@ def evaluate_alm_objective(
         dtype=float,
     )
     base_eval["constraint_activity_tolerances"] = constraint_activity_tolerances
-    base_eval["J_cc"] = float(JCurveCurve.J())
-    base_eval["dJ_cc"] = np.asarray(JCurveCurve.dJ(), dtype=float)
-    base_eval["J_cs"] = float(JCurveSurface.J())
-    base_eval["dJ_cs"] = np.asarray(JCurveSurface.dJ(), dtype=float)
-    base_eval["J_surf"] = 0.0 if JSurfSurf is None else float(JSurfSurf.J())
-    base_eval["dJ_surf"] = (
-        np.zeros_like(np.asarray(base_eval["grad"], dtype=float))
-        if JSurfSurf is None
-        else np.asarray(JSurfSurf.dJ(), dtype=float)
-    )
-    base_eval["J_curvature"] = float(JCurvature.J())
-    base_eval["dJ_curvature"] = np.asarray(JCurvature.dJ(), dtype=float)
-    if coil_length_objective is not None:
-        coil_length_spec = get_hardware_constraint_spec("coil_length")
-        base_eval["coil_length_upper_bound_threshold"] = (
-            coil_length_spec.threshold
-            if coil_length_threshold is None
-            else float(coil_length_threshold)
+    if include_diagnostics:
+        base_eval["diagnostics_included"] = True
+        base_eval["J_cc"] = float(JCurveCurve.J())
+        base_eval["dJ_cc"] = np.asarray(JCurveCurve.dJ(), dtype=float)
+        base_eval["J_cs"] = float(JCurveSurface.J())
+        base_eval["dJ_cs"] = np.asarray(JCurveSurface.dJ(), dtype=float)
+        base_eval["J_surf"] = 0.0 if JSurfSurf is None else float(JSurfSurf.J())
+        base_eval["dJ_surf"] = (
+            np.zeros_like(np.asarray(base_eval["grad"], dtype=float))
+            if JSurfSurf is None
+            else np.asarray(JSurfSurf.dJ(), dtype=float)
         )
-    if banana_current_threshold is not None:
-        banana_current_spec = get_hardware_constraint_spec("banana_current")
-        base_eval["banana_current_upper_bound_threshold"] = min(
-            banana_current_spec.threshold,
-            float(banana_current_threshold),
-        )
+        base_eval["J_curvature"] = float(JCurvature.J())
+        base_eval["dJ_curvature"] = np.asarray(JCurvature.dJ(), dtype=float)
+        if coil_length_objective is not None:
+            coil_length_spec = get_hardware_constraint_spec("coil_length")
+            base_eval["coil_length_upper_bound_threshold"] = (
+                coil_length_spec.threshold
+                if coil_length_threshold is None
+                else float(coil_length_threshold)
+            )
+        if banana_current_threshold is not None:
+            banana_current_spec = get_hardware_constraint_spec("banana_current")
+            base_eval["banana_current_upper_bound_threshold"] = min(
+                banana_current_spec.threshold,
+                float(banana_current_threshold),
+            )
     base_eval["alm_formulation"] = alm_formulation
     return annotate_search_evaluation_finiteness(base_eval)

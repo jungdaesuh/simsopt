@@ -912,6 +912,8 @@ def make_stage2_fun(
     Jccdist,
     Jc,
     stage2_iota_runtime: Stage2IotaRuntime | None = None,
+    *,
+    emit_diagnostics=False,
 ):
     soft_mode_enabled = (
         stage2_iota_runtime is not None and stage2_iota_runtime.mode == "soft"
@@ -942,33 +944,37 @@ def make_stage2_fun(
                     effective_weight
                     * np.asarray(iota_evaluation.penalty_grad, dtype=float)
                 )
-        unitn = new_surf.unitnormal()
-        BdotN = np.mean(np.abs(np.sum(new_bs.B().reshape(unitn.shape) * unitn, axis=2)))
-        outstr = f"J={J:.1e}, Jf={Jf.J():.1e}, ⟨B·n⟩={BdotN:.1e}"
-        outstr += f", Len={Jls.J():.1f}m"
-        outstr += f", C-C-Sep={Jccdist.shortest_distance():.2f}m"
-        outstr += f", Curvature={Jc.J():.2f}"
-        if stage2_iota_runtime is not None:
-            if iota_state is None:
-                iota_state = evaluate_stage2_iota_state(stage2_iota_runtime)
-            outstr += (
-                f", Iota={iota_state.iota:.4f}, Jiota={iota_state.penalty:.2e}"
+        if emit_diagnostics:
+            unitn = new_surf.unitnormal()
+            BdotN = np.mean(
+                np.abs(np.sum(new_bs.B().reshape(unitn.shape) * unitn, axis=2))
             )
-            if iota_state.solve_failed:
-                evaluator = getattr(
-                    stage2_iota_runtime,
-                    "guarded_boozer_evaluator",
-                    None,
+            outstr = f"J={J:.1e}, Jf={Jf.J():.1e}, ⟨B·n⟩={BdotN:.1e}"
+            outstr += f", Len={Jls.J():.1f}m"
+            outstr += f", C-C-Sep={Jccdist.shortest_distance():.2f}m"
+            outstr += f", Curvature={Jc.J():.2f}"
+            if stage2_iota_runtime is not None:
+                if iota_state is None:
+                    iota_state = evaluate_stage2_iota_state(stage2_iota_runtime)
+                outstr += (
+                    f", Iota={iota_state.iota:.4f}, Jiota={iota_state.penalty:.2e}"
                 )
-                reason = (
-                    evaluator.last_failure_reason
-                    if evaluator is not None
-                    and getattr(evaluator, "last_failure_reason", None) is not None
-                    else _STAGE2_FAILURE_REASON_SOLVE
-                )
-                outstr += f", IotaSolveFailed=1, IotaFailureReason={reason}"
-        outstr += f", ║∇J║={np.linalg.norm(grad):.1e}"
-        print(outstr)
+                if iota_state.solve_failed:
+                    evaluator = getattr(
+                        stage2_iota_runtime,
+                        "guarded_boozer_evaluator",
+                        None,
+                    )
+                    reason = (
+                        evaluator.last_failure_reason
+                        if evaluator is not None
+                        and getattr(evaluator, "last_failure_reason", None)
+                        is not None
+                        else _STAGE2_FAILURE_REASON_SOLVE
+                    )
+                    outstr += f", IotaSolveFailed=1, IotaFailureReason={reason}"
+            outstr += f", ║∇J║={np.linalg.norm(grad):.1e}"
+            print(outstr)
         return J, grad
 
     return fun
@@ -992,6 +998,7 @@ def evaluate_stage2_hardware_constraints(
 ):
     artifact_threshold_overrides = build_threshold_overrides(
         (
+            ("coil_length", length_target),
             ("coil_coil_spacing", cc_threshold),
             ("max_curvature", curvature_threshold),
             ("coil_surface_spacing", coil_surface_threshold),
@@ -1353,6 +1360,7 @@ def evaluate_stage2_alm_problem(
     Jcsdist=None,
     smooth_min_curve_surface_signed_constraint=None,
     stage2_iota_runtime: Stage2IotaRuntime | None = None,
+    emit_diagnostics=False,
 ):
     base_objective.x = dofs
     base_value = float(base_objective.J())
@@ -1563,39 +1571,45 @@ def evaluate_stage2_alm_problem(
         evaluation["nonfinite_evaluation"] = True
         evaluation["nonfinite_fields"] = list(invalid_fields)
 
-    unitn = new_surf.unitnormal()
-    BdotN = np.mean(np.abs(np.sum(new_bs.B().reshape(unitn.shape) * unitn, axis=2)))
-    outstr = (
-        f"ALM J={evaluation['total']:.1e}, Jflux={sanitized_base_value:.1e}, "
-        f"Jf={Jf.J():.1e}, ⟨B·n⟩={BdotN:.1e}"
-    )
-    outstr += (
-        f", Len={coil_length:.1f}m, Len+={length_violation:.2e}, "
-        f"Leng={coil_length - length_target:.2e}"
-    )
-    outstr += (
-        f", C-C-Sep={curve_curve_min_dist:.2f}m, CC+={curve_curve_violation:.2e}, "
-        f"CCg={curve_curve_signed_value:.2e}"
-    )
-    if include_coil_surface:
-        outstr += (
-            f", C-S-Sep={curve_surface_min_dist:.2f}m, CS+={curve_surface_violation:.2e}, "
-            f"CSg={curve_surface_signed_value:.2e}"
+    if emit_diagnostics:
+        unitn = new_surf.unitnormal()
+        BdotN = np.mean(
+            np.abs(np.sum(new_bs.B().reshape(unitn.shape) * unitn, axis=2))
         )
-    outstr += (
-        f", Curvature={max_curvature:.2f}, Curv+={curvature_violation:.2e}, "
-        f"Curvg={curvature_signed_value:.2e}"
-    )
-    outstr += (
-        f", |BananaI|={banana_current_abs_A:.2f}A, BananaI+={banana_current_violation:.2e}, "
-        f"BananaIg={banana_current_signed_value:.2e}"
-    )
-    if iota_state is not None:
-        outstr += f", Iota={iota_state.iota:.4f}, Jiota={iota_state.penalty:.2e}"
-    if include_iota_penalty:
-        outstr += f", Iota+={iota_violation:.2e}, Iotag={iota_signed_value:.2e}"
-    outstr += f", ║∇L_A║={evaluation['stationarity_norm']:.1e}, μ={penalty:.1e}"
-    print(outstr)
+        outstr = (
+            f"ALM J={evaluation['total']:.1e}, Jflux={sanitized_base_value:.1e}, "
+            f"Jf={Jf.J():.1e}, ⟨B·n⟩={BdotN:.1e}"
+        )
+        outstr += (
+            f", Len={coil_length:.1f}m, Len+={length_violation:.2e}, "
+            f"Leng={coil_length - length_target:.2e}"
+        )
+        outstr += (
+            f", C-C-Sep={curve_curve_min_dist:.2f}m, "
+            f"CC+={curve_curve_violation:.2e}, "
+            f"CCg={curve_curve_signed_value:.2e}"
+        )
+        if include_coil_surface:
+            outstr += (
+                f", C-S-Sep={curve_surface_min_dist:.2f}m, "
+                f"CS+={curve_surface_violation:.2e}, "
+                f"CSg={curve_surface_signed_value:.2e}"
+            )
+        outstr += (
+            f", Curvature={max_curvature:.2f}, Curv+={curvature_violation:.2e}, "
+            f"Curvg={curvature_signed_value:.2e}"
+        )
+        outstr += (
+            f", |BananaI|={banana_current_abs_A:.2f}A, "
+            f"BananaI+={banana_current_violation:.2e}, "
+            f"BananaIg={banana_current_signed_value:.2e}"
+        )
+        if iota_state is not None:
+            outstr += f", Iota={iota_state.iota:.4f}, Jiota={iota_state.penalty:.2e}"
+        if include_iota_penalty:
+            outstr += f", Iota+={iota_violation:.2e}, Iotag={iota_signed_value:.2e}"
+        outstr += f", ║∇L_A║={evaluation['stationarity_norm']:.1e}, μ={penalty:.1e}"
+        print(outstr)
     return evaluation
 
 

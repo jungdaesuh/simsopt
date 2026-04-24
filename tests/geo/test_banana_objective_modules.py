@@ -391,6 +391,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             _FakeScalarObjective(1.75),
             SimpleNamespace(shortest_distance=lambda: 0.055),
             _FakeScalarObjective(39.5),
+            emit_diagnostics=True,
         )
 
         with mock.patch("builtins.print") as print_mock:
@@ -404,6 +405,49 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertIn("Len=1.8m", log_line)
         self.assertIn("C-C-Sep=0.06m", log_line)
         self.assertIn("Curvature=39.50", log_line)
+
+    def test_make_stage2_fun_fast_path_skips_diagnostics(self):
+        class _JF:
+            def __init__(self):
+                self.x = None
+
+            def J(self):
+                return 1.23
+
+            def dJ(self):
+                return np.array([1.0, -2.0])
+
+        class _UnexpectedDiagnostic:
+            def J(self):
+                raise AssertionError("diagnostic objective should not be evaluated")
+
+            def shortest_distance(self):
+                raise AssertionError("diagnostic distance should not be evaluated")
+
+        class _UnexpectedBiotSavart:
+            def B(self):
+                raise AssertionError("diagnostic field should not be evaluated")
+
+        class _UnexpectedSurface:
+            def unitnormal(self):
+                raise AssertionError("diagnostic normal should not be evaluated")
+
+        fun = self.module.make_stage2_fun(
+            _JF(),
+            _UnexpectedBiotSavart(),
+            _UnexpectedSurface(),
+            _UnexpectedDiagnostic(),
+            _UnexpectedDiagnostic(),
+            _UnexpectedDiagnostic(),
+            _UnexpectedDiagnostic(),
+        )
+
+        with mock.patch("builtins.print") as print_mock:
+            value, grad = fun(np.array([0.2, -0.1]))
+
+        self.assertAlmostEqual(value, 1.23)
+        np.testing.assert_allclose(grad, [1.0, -2.0])
+        print_mock.assert_not_called()
 
     def test_make_stage2_fun_soft_mode_computes_and_freezes_effective_weight(self):
         class _JF:
@@ -460,6 +504,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             SimpleNamespace(shortest_distance=lambda: 0.055),
             _FakeScalarObjective(39.5),
             stage2_iota_runtime=stage2_iota_runtime,
+            emit_diagnostics=True,
         )
 
         with mock.patch.object(
@@ -544,6 +589,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             SimpleNamespace(shortest_distance=lambda: 0.055),
             _FakeScalarObjective(39.5),
             stage2_iota_runtime=stage2_iota_runtime,
+            emit_diagnostics=True,
         )
 
         with mock.patch.object(
@@ -717,6 +763,62 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["max_feasibility_violation"], 1.0)
         self.assertAlmostEqual(result["total"], 9.0)
         np.testing.assert_allclose(result["grad"], [7.0, -3.0])
+
+    def test_evaluate_stage2_alm_problem_fast_path_skips_report_diagnostics(self):
+        class _UnexpectedBiotSavart:
+            def B(self):
+                raise AssertionError("diagnostic field should not be evaluated")
+
+        class _UnexpectedSurfaceNormals:
+            def unitnormal(self):
+                raise AssertionError("diagnostic normals should not be evaluated")
+
+        class _UnexpectedFluxObjective:
+            def J(self):
+                raise AssertionError("diagnostic flux should not be evaluated")
+
+        result = self.module.evaluate_stage2_alm_problem(
+            dofs=np.array([0.25, -0.4]),
+            base_objective=_FakeBaseObjective(3.5, [1.2, -0.5]),
+            new_bs=_UnexpectedBiotSavart(),
+            new_surf=_UnexpectedSurfaceNormals(),
+            Jf=_UnexpectedFluxObjective(),
+            Jls=_FakeLengthObjective(2.2, [0.3, 0.4]),
+            length_target=2.0,
+            Jccdist=_FakeCurveDistance(0.05, 0.04),
+            Jc=_FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5),
+            banana_current=_FakeCurrentObjective(9500.0, [0.7, -0.4]),
+            banana_current_max_A=16000.0,
+            distance_smoothing=0.005,
+            curvature_smoothing=0.02,
+            multipliers=np.array([0.1, 0.2, 0.3, 0.4]),
+            penalty=12.0,
+            stage2_constraint_activity_tolerances=lambda ds, cs: [
+                1e-3,
+                ds * 4.0,
+                cs * 4.0,
+                1e-3,
+            ],
+            smooth_min_distance_signed_constraint=lambda *_args: (
+                -0.008,
+                np.array([0.6, 0.2]),
+            ),
+            smooth_max_curvature_signed_constraint=lambda *_args: (
+                0.75,
+                np.array([0.9, -0.1]),
+            ),
+        )
+
+        self.assertAlmostEqual(result["base_value"], 3.5)
+        self.assertEqual(
+            result["constraint_names"],
+            [
+                "coil_coil_spacing",
+                "max_curvature",
+                "coil_length_upper_bound",
+                "banana_current_upper_bound",
+            ],
+        )
 
     def test_evaluate_stage2_alm_problem_sanitizes_nonfinite_inputs(self):
         base_objective = _FakeBaseObjective(np.nan, [np.inf, np.nan])
@@ -1663,6 +1765,46 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["total"], 50.0)
         np.testing.assert_allclose(result["grad"], [8.8, 6.266666666666667])
 
+    def test_evaluate_total_objective_fast_path_skips_component_breakdown(self):
+        nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]
+        brs = [_FakeAlgebraicObjective(3.0, [0.5, 0.5])]
+        jiota = _FakeAlgebraicObjective(4.0, [0.2, 0.1])
+        jlength = _FakeAlgebraicObjective(5.0, [1.0, 1.5])
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+
+        result = self.module.evaluate_total_objective(
+            np.array([1.0]),
+            nonqs,
+            brs,
+            RES_WEIGHT=2.0,
+            Jiota=jiota,
+            IOTAS_WEIGHT=3.0,
+            JCurveLength=jlength,
+            LENGTH_WEIGHT=1.0,
+            JCurveCurve=zero,
+            CC_WEIGHT=5.0,
+            JCurveSurface=zero,
+            CS_WEIGHT=6.0,
+            JCurvature=zero,
+            CURVATURE_WEIGHT=7.0,
+            include_diagnostics=False,
+        )
+
+        self.assertFalse(result["diagnostics_included"])
+        self.assertEqual(
+            set(result),
+            {
+                "total",
+                "grad",
+                "surface_weights",
+                "diagnostics_included",
+                "finite_eval_ok",
+                "nonfinite_fields",
+            },
+        )
+        self.assertAlmostEqual(result["total"], 25.0)
+        np.testing.assert_allclose(result["grad"], [4.6, 2.8])
+
     def test_evaluate_total_objective_supports_frontier_specific_objective_terms(self):
         nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]
         brs = [_FakeAlgebraicObjective(3.0, [0.5, 0.5])]
@@ -1792,6 +1934,84 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["J_surf"], 0.9)
         self.assertAlmostEqual(result["J_curvature"], 0.8)
         np.testing.assert_allclose(result["grad"], [8.0, -3.0])
+
+    def test_evaluate_alm_objective_fast_path_keeps_constraint_payload_only(self):
+        nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]
+        brs = [_FakeAlgebraicObjective(3.0, [0.5, 0.5])]
+        jiota = _FakeAlgebraicObjective(4.0, [0.2, 0.1])
+        jlength = _FakeAlgebraicObjective(5.0, [1.0, 1.5])
+        jcc = _FakeAlgebraicObjective(0.6, [0.3, 0.4])
+        jcs = _FakeAlgebraicObjective(0.7, [0.5, 0.6])
+        jcurv = _FakeAlgebraicObjective(0.8, [0.7, 0.8])
+
+        result = self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            nonqs,
+            brs,
+            RES_WEIGHT=2.0,
+            Jiota=jiota,
+            IOTAS_WEIGHT=3.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=jlength,
+            LENGTH_WEIGHT=1.0,
+            JCurveCurve=jcc,
+            JCurveSurface=jcs,
+            JCurvature=jcurv,
+            multipliers=np.array([0.1, 0.2, 0.3]),
+            penalty=9.0,
+            objective_optimizable=SimpleNamespace(),
+            curves=["curve_a"],
+            curve_curve_min_distance=0.05,
+            outer_surface="outer",
+            curve_surface_min_distance=0.02,
+            banana_curve="banana",
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=(
+                "coil_coil_spacing",
+                "coil_surface_spacing",
+                "max_curvature",
+            ),
+            curve_curve_constraint_fn=lambda *_args: (
+                -0.1,
+                np.array([1.0, 0.0]),
+                0.0,
+            ),
+            curve_surface_constraint_fn=lambda *_args: (
+                0.2,
+                np.array([0.0, 1.0]),
+                0.2,
+            ),
+            curvature_constraint_fn=lambda *_args: (
+                0.3,
+                np.array([1.0, -1.0]),
+                0.3,
+            ),
+            include_diagnostics=False,
+        )
+
+        self.assertFalse(result["diagnostics_included"])
+        for diagnostic_key in (
+            "J_QS",
+            "dJ_QS",
+            "J_Boozer",
+            "dJ_Boozer",
+            "J_cc",
+            "dJ_cc",
+            "J_cs",
+            "dJ_cs",
+            "J_curvature",
+            "dJ_curvature",
+        ):
+            self.assertNotIn(diagnostic_key, result)
+        self.assertEqual(
+            result["constraint_names"],
+            ["coil_coil_spacing", "coil_surface_spacing", "max_curvature"],
+        )
+        np.testing.assert_allclose(result["dual_update_values"], [-0.1, 0.2, 0.3])
+        self.assertAlmostEqual(result["max_feasibility_violation"], 0.3)
 
     def test_evaluate_base_objective_projects_total_gradient_when_requested(self):
         objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()

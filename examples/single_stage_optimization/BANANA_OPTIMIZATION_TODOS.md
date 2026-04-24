@@ -259,10 +259,28 @@ Impact measure:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Impact:
+
+- Target-mode `evaluate_search_step` now calls the compact objective payload
+  path; accepted-step, preserved-timeout, and solver-checkpoint artifacts
+  recompute rich diagnostics only when artifact fields require them.
+- Resumed legacy checkpoints normalize compact best-incumbent payloads before
+  carrying them forward into new checkpoint or preserved-timeout artifacts.
+- Final and preserved-timeout payloads now emit `SEARCH_STEP_*` counters and
+  timers for surface solve, objective evaluation, topology gate, hardware
+  snapshot, fast-vs-diagnostic objective calls, rejected-after-surface-solve
+  trials, hardware rejects, and curvature rejects.
+
+Validation:
+
+- `python -m pytest tests/geo/test_single_stage_example.py -k "resume_incumbent_normalization or best_accepted_incumbent or solver_checkpoint_accepted_incumbent or best_feasible_incumbent or search_step_metrics or evaluate_search_objective_uses_fast_payload_outside_frontier_mode"`
+- `python -m pytest tests/geo/test_single_stage_example.py tests/geo/test_banana_objective_modules.py -q`
+- `python -m ruff check examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py tests/geo/test_single_stage_example.py`
 
 ### P2. Remove exact sampled distances from optimizer hot loops
 
