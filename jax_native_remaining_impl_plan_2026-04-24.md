@@ -46,6 +46,22 @@ last script-local/native-boundary seams, and extend multi-device sharding.
   `tests/test_backend.py`, targeted `tests/test_jax_import_smoke.py`, and
   targeted Stage 2/single-stage integration tests pass.
 
+## Wave 4A Closure Status
+
+- [x] Native `B` pullbacks are checked directly against
+  `biot_savart_B_vjp_maybe_collective(...)`, not only through projected public
+  `Derivative` output.
+- [x] Native `A`, `dA/dX`, `dB/dX`, `A_and_dA`, and `B_and_dB` pullbacks are
+  checked against grouped JAX forward-kernel VJPs.
+- [x] Native field pullbacks build payloads only from free-coil groups; a
+  fixed-coil regression verifies fixed coils stay out of native cotangent
+  metadata.
+- [x] Forced CPU four-device `coil_groups` subprocess coverage proves the
+  native pullback lowerings still contain a device collective. Forward grouped
+  field lowering still asserts `all_reduce`; native pullback lowering asserts
+  the compiled collective path with `all-gather`.
+- [ ] Real CUDA `coil_groups` smoke remains open.
+
 ## Architecture Decision
 
 - [x] Do not rewrite upstream SIMSOPT `Optimizable` as a JAX-native class.
@@ -135,6 +151,9 @@ Current state:
   projects the native pullback payload into `Derivative`.
 - `BiotSavartJAX.coil_cotangents_to_derivative(...)` already owns the public
   projection boundary.
+- `BiotSavartJAX` exposes native pullbacks for `A`, `dA/dX`, `dB/dX`,
+  `A_and_dA`, and `B_and_dB`; public VJP methods continue to project those
+  payloads back into `Derivative`.
 
 Tasks:
 
@@ -149,7 +168,7 @@ Tasks:
 - [x] Preserve `B_vjp(v) -> Derivative` for public SIMSOPT compatibility.
 - [x] Add parity tests comparing:
   native cotangents -> projected `Derivative` vs current `B_vjp`.
-- [ ] Add multi-device tests proving native cotangents still lower through
+- [x] Add multi-device tests proving native cotangents still lower through
   the collective path when `SIMSOPT_JAX_SHARDING=coil_groups`.
 
 Files likely touched:
@@ -315,7 +334,7 @@ Do not inline new tolerances.
 
 ### Multi-Device Lowering
 
-- [ ] CPU subprocess test with:
+- [x] CPU subprocess test with:
   `XLA_FLAGS=--xla_force_host_platform_device_count=4`
 - [x] Assert StableHLO text contains `all_reduce`.
 - [x] Assert `grouped_field_sharding_summary(...)["field_collective"] is True`.
