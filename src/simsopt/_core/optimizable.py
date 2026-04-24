@@ -27,7 +27,7 @@ from .dev import SimsoptRequires
 from .types import RealArray, StrArray, BoolArray, Key
 from .util import ImmutableId, OptimizableMeta, WeakKeyDefaultDict, \
     DofLengthMismatchError
-from .derivative import derivative_dec
+from .derivative import derivative_dec, sum_derivatives
 from .json import GSONable, SIMSON, GSONDecoder, GSONEncoder
 
 try:
@@ -1837,5 +1837,4 @@ class OptimizableSum(Optimizable):
 
     @derivative_dec
     def dJ(self):
-        # Next line uses __add__ function for the Derivative class
-        return sum(opt.dJ(partials=True) for opt in self.opts)
+        return sum_derivatives(opt.dJ(partials=True) for opt in self.opts)

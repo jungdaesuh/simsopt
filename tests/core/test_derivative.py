@@ -1,7 +1,7 @@
 import unittest
 import numpy as np
 from simsopt._core.optimizable import Optimizable, ScaledOptimizable, OptimizableSum
-from simsopt._core.derivative import Derivative, derivative_dec
+from simsopt._core.derivative import Derivative, derivative_dec, sum_derivatives
 from simsopt.objectives.utilities import Weight
 
 
@@ -115,6 +115,30 @@ def taylor_test(obj):
 
 
 class DerivativeTests(unittest.TestCase):
+
+    def test_sum_derivatives_accumulates_without_aliasing_inputs(self):
+        opt1 = Opt(n=3)
+        opt2 = Opt(n=2)
+        first = Derivative(
+            {
+                opt1: np.array([1.0, 2.0, 3.0]),
+                opt2: np.array([4.0, 5.0]),
+            }
+        )
+        second = Derivative(
+            {
+                opt1: np.array([0.5, 1.5, 2.5]),
+            }
+        )
+
+        total = sum_derivatives([first, second])
+
+        np.testing.assert_allclose(total.data[opt1], [1.5, 3.5, 5.5])
+        np.testing.assert_allclose(total.data[opt2], [4.0, 5.0])
+        total.data[opt1][0] = -1.0
+        total.data[opt2][0] = -2.0
+        np.testing.assert_allclose(first.data[opt1], [1.0, 2.0, 3.0])
+        np.testing.assert_allclose(first.data[opt2], [4.0, 5.0])
 
     def test_taylor_graph(self):
         # built a reasonably complex graph of two inputs, that both feed into

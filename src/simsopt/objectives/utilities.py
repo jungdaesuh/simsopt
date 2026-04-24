@@ -3,9 +3,9 @@ import scipy
 # from monty.json import MSONable, MontyDecoder
 
 from .._core.optimizable import Optimizable
-from .._core.derivative import Derivative, derivative_dec
+from .._core.derivative import Derivative, derivative_dec, sum_derivatives
 
-__all__ = ['MPIOptimizable', 'MPIObjective', 'QuadraticPenalty', 'Weight', 'forward_backward']
+__all__ = ['MPIOptimizable', 'MPIObjective', 'QuadraticPenalty', 'Weight', 'forward_backward', 'forward_solve']
 
 
 def forward_backward(P, L, U, rhs, iterative_refinement=False):
@@ -33,6 +33,21 @@ def forward_backward(P, L, U, rhs, iterative_refinement=False):
     return adj
 
 
+def forward_solve(P, L, U, rhs, iterative_refinement=False):
+    """
+    Solve a linear system of the form (PLU)*x = rhs for x.
+    """
+    y = scipy.linalg.solve_triangular(L, P.T@rhs, lower=True, unit_diagonal=True)
+    x = scipy.linalg.solve_triangular(U, y, lower=False)
+
+    if iterative_refinement:
+        yp = scipy.linalg.solve_triangular(L, P.T@(rhs-(P@L@U)@x), lower=True, unit_diagonal=True)
+        xp = scipy.linalg.solve_triangular(U, yp, lower=False)
+        x += xp
+
+    return x
+
+
 def sum_across_comm(derivative, comm):
     r"""
     Compute the sum of :mod:`simsopt._core.derivative.Derivative` objects from
@@ -42,9 +57,14 @@ def sum_across_comm(derivative, comm):
     newdict = {}
     for k in derivative.data.keys():
         data = derivative.data[k]
-        alldata = sum(comm.allgather(data))
-        if isinstance(alldata, float):
+        gathered = comm.allgather(data)
+        if np.isscalar(gathered[0]):
+            alldata = sum(gathered)
             alldata = np.asarray([alldata])
+        else:
+            alldata = gathered[0].copy()
+            for entry in gathered[1:]:
+                alldata += entry
         newdict[k] = alldata
     return Derivative(newdict)
 
@@ -137,7 +157,7 @@ class MPIObjective(Optimizable):
     def dJ(self):
         if len(self.objectives) == 0:
             raise NotImplementedError("`MPIObjective.dJ` currently requires that there is at least one objective per process.")
-        local_derivs = sum([J.dJ(partials=True) for J in self.objectives])
+        local_derivs = sum_derivatives(J.dJ(partials=True) for J in self.objectives)
         all_derivs = local_derivs if self.comm is None else sum_across_comm(local_derivs, self.comm)
         all_derivs *= 1./self.n
         return all_derivs

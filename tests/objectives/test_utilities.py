@@ -6,7 +6,16 @@ import numpy as np
 from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.geo.curveobjectives import CurveLength, LpCurveTorsion
-from simsopt.objectives.utilities import MPIObjective, QuadraticPenalty, MPIOptimizable
+from scipy.linalg import lu
+
+from simsopt._core.derivative import Derivative
+from simsopt.objectives.utilities import (
+    MPIObjective,
+    QuadraticPenalty,
+    MPIOptimizable,
+    forward_solve,
+    sum_across_comm,
+)
 from simsopt.geo import parameters
 from simsopt._core.json import GSONDecoder, GSONEncoder, SIMSON
 from simsopt._core.util import parallel_loop_bounds
@@ -18,6 +27,35 @@ except:
 
 
 class UtilityObjectiveTesting(unittest.TestCase):
+
+    def test_forward_solve_matches_dense_solve_for_plu_factors(self):
+        matrix = np.array(
+            [
+                [4.0, 1.0, 0.5],
+                [2.0, 5.0, 1.5],
+                [1.0, 0.25, 3.0],
+            ]
+        )
+        rhs = np.array([2.0, -1.0, 0.5])
+        P, L, U = lu(matrix)
+
+        np.testing.assert_allclose(forward_solve(P, L, U, rhs), np.linalg.solve(matrix, rhs))
+        np.testing.assert_allclose(
+            forward_solve(P, L, U, rhs, iterative_refinement=True),
+            np.linalg.solve(matrix, rhs),
+        )
+
+    def test_sum_across_comm_preserves_scalar_payload_contract(self):
+        class FakeComm:
+            def allgather(self, _data):
+                return [1.25, 2.75]
+
+        key = object()
+        derivative = Derivative({key: 1.25})
+
+        result = sum_across_comm(derivative, FakeComm())
+
+        np.testing.assert_allclose(result.data[key], [4.0])
 
     def create_curve(self):
         np.random.seed(1)

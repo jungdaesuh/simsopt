@@ -2,7 +2,7 @@ import numpy as np
 import numbers
 import collections
 
-__all__ = ['Derivative']
+__all__ = ['Derivative', 'sum_derivatives']
 
 
 class OptimizableDefaultDict(collections.defaultdict):
@@ -26,6 +26,17 @@ def copy_numpy_dict(d):
     for k, v in d.items():
         res[k] = v.copy()
     return res
+
+
+def sum_derivatives(derivatives):
+    result = OptimizableDefaultDict({})
+    for derivative in derivatives:
+        for key, value in derivative.data.items():
+            if key in result:
+                result[key] += value
+            else:
+                result[key] = value.copy()
+    return Derivative(result)
 
 
 class Derivative:
@@ -108,19 +119,13 @@ class Derivative:
     the decorator :obj:`derivative_dec`.
     """
 
-    def __init__(self, data=OptimizableDefaultDict({})):
+    def __init__(self, data=None):
+        if data is None:
+            data = OptimizableDefaultDict({})
         self.data = OptimizableDefaultDict(data)
 
     def __add__(self, other):
-        x = self.data
-        y = other.data
-        z = copy_numpy_dict(x)
-        for k in y:
-            if k in z:
-                z[k] += y[k]
-            else:
-                z[k] = y[k].copy()
-        return Derivative(z)
+        return sum_derivatives((self, other))
 
     def __sub__(self, other):
         x = self.data
