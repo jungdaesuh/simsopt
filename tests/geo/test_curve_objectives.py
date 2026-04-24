@@ -14,6 +14,7 @@ from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.field.coil import coils_via_symmetries
 from simsopt.configs.zoo import get_ncsx_data
 from simsopt._core.json import GSONDecoder, GSONEncoder, SIMSON
+from simsopt._core.derivative import Derivative
 import simsoptpp as sopp
 
 parameters['jit'] = False
@@ -54,6 +55,51 @@ class Testing(unittest.TestCase):
         if rotated:
             coil = RotatedCurve(coil, 0.5, flip=False)
         return coil
+
+    def test_curve_curve_distance_reuses_candidate_geometry_and_touches_only_active_curves(self):
+        class CountingCurve:
+            def __init__(self, value):
+                self.value = value
+                self.gamma_calls = 0
+                self.gammadash_calls = 0
+                self.vjp_calls = 0
+
+            def gamma(self):
+                self.gamma_calls += 1
+                return np.full((2, 3), self.value)
+
+            def gammadash(self):
+                self.gammadash_calls += 1
+                return np.full((2, 3), self.value + 1.0)
+
+            def dgamma_by_dcoeff_vjp(self, v):
+                self.vjp_calls += 1
+                return Derivative({self: np.array([np.sum(v)])})
+
+            def dgammadash_by_dcoeff_vjp(self, v):
+                self.vjp_calls += 1
+                return Derivative({self: np.array([np.sum(v)])})
+
+        curves = [CountingCurve(float(i)) for i in range(4)]
+        objective = CurveCurveDistance.__new__(CurveCurveDistance)
+        objective.curves = curves
+        objective.candidates = [(0, 1), (0, 2)]
+        objective.compute_candidates = lambda: None
+        objective.J_jax = lambda gamma1, l1, gamma2, l2: 1.0
+        objective.thisgrad0 = lambda gamma1, l1, gamma2, l2: np.ones_like(gamma1)
+        objective.thisgrad1 = lambda gamma1, l1, gamma2, l2: np.ones_like(l1)
+        objective.thisgrad2 = lambda gamma1, l1, gamma2, l2: np.ones_like(gamma2)
+        objective.thisgrad3 = lambda gamma1, l1, gamma2, l2: np.ones_like(l2)
+
+        self.assertEqual(objective.J(), 2.0)
+        objective.dJ(partials=True)
+
+        self.assertEqual(curves[0].gamma_calls, 2)
+        self.assertEqual(curves[0].gammadash_calls, 2)
+        self.assertEqual(curves[1].gamma_calls, 2)
+        self.assertEqual(curves[2].gamma_calls, 2)
+        self.assertEqual(curves[3].gamma_calls, 0)
+        self.assertEqual(curves[3].vjp_calls, 0)
 
     def subtest_curve_length_taylor_test(self, curve):
         J = CurveLength(curve)

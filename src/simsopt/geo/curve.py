@@ -1,7 +1,7 @@
 from math import sin, cos
 
 import numpy as np
-from jax import vjp, jacfwd, jvp, hessian, grad
+from jax import vjp, jacfwd, jvp, hessian
 import jax.numpy as jnp
 
 import simsoptpp as sopp
@@ -11,7 +11,6 @@ from .surfacerzfourier import SurfaceRZFourier
 from .surfacexyztensorfourier import SurfaceXYZTensorFourier
 
 from .jit import jit
-from .._core.derivative import derivative_dec
 from .plotting import fix_matplotlib_3d
 
 __all__ = ['Curve', 'JaxCurve', 'RotatedCurve', 'curves_to_vtk', 'create_equally_spaced_curves', 'create_equally_spaced_oriented_curves', 'CurveCWSFourier', 'create_equally_spaced_planar_curves']
@@ -364,7 +363,6 @@ class Curve(Optimizable):
         where :math:`\mathbf{c}` are the curve dofs, and :math:`\kappa` is the curvature.
         """
 
-        dkappadash_by_dcoeff = np.zeros((len(self.quadpoints), self.num_dofs()))
         dgamma = self.gammadash()
         d2gamma = self.gammadashdash()
         d3gamma = self.gammadashdashdash()
@@ -372,6 +370,9 @@ class Curve(Optimizable):
         def norm(a): return np.linalg.norm(a, axis=1)
         def inner(a, b): return np.sum(a*b, axis=1)
         def cross(a, b): return np.cross(a, b, axis=1)
+        def inner_dof(a, b): return np.sum(a*b, axis=1)
+        def inner_curve_dof(a, b): return np.sum(a*b[:, :, None], axis=1)
+        def cross_curve_dof(a, b): return np.cross(a, b[:, :, None], axis=1)
         d1_dot_d2 = inner(dgamma, d2gamma)
         d1_x_d2 = cross(dgamma, d2gamma)
         d1_x_d3 = cross(dgamma, d3gamma)
@@ -380,35 +381,40 @@ class Curve(Optimizable):
         dgamma_dcoeff_ = self.dgammadash_by_dcoeff()
         d2gamma_dcoeff_ = self.dgammadashdash_by_dcoeff()
         d3gamma_dcoeff_ = self.dgammadashdashdash_by_dcoeff()
-        for i in range(self.num_dofs()):
-            dgamma_dcoeff = dgamma_dcoeff_[:, :, i]
-            d2gamma_dcoeff = d2gamma_dcoeff_[:, :, i]
-            d3gamma_dcoeff = d3gamma_dcoeff_[:, :, i]
+        d1coeff_x_d2 = cross_curve_dof(dgamma_dcoeff_, d2gamma)
+        d1coeff_dot_d2 = inner_curve_dof(dgamma_dcoeff_, d2gamma)
+        d1coeff_x_d3 = cross_curve_dof(dgamma_dcoeff_, d3gamma)
+        d1_x_d2coeff = cross_curve_dof(d2gamma_dcoeff_, dgamma) * -1
+        d1_dot_d2coeff = inner_curve_dof(d2gamma_dcoeff_, dgamma)
+        d1_dot_d1coeff = inner_curve_dof(dgamma_dcoeff_, dgamma)
+        d1_x_d3coeff = cross_curve_dof(d3gamma_dcoeff_, dgamma) * -1
+        d1_x_d2_variation = d1coeff_x_d2 + d1_x_d2coeff
 
-            d1coeff_x_d2 = cross(dgamma_dcoeff, d2gamma)
-            d1coeff_dot_d2 = inner(dgamma_dcoeff, d2gamma)
-            d1coeff_x_d3 = cross(dgamma_dcoeff, d3gamma)
-            d1_x_d2coeff = cross(dgamma, d2gamma_dcoeff)
-            d1_dot_d2coeff = inner(dgamma, d2gamma_dcoeff)
-            d1_dot_d1coeff = inner(dgamma, dgamma_dcoeff)
-            d1_x_d3coeff = cross(dgamma, d3gamma_dcoeff)
-
-            dkappadash_by_dcoeff[:, i] = (
-                +inner(d1coeff_x_d2 + d1_x_d2coeff, d1_x_d3)
-                + inner(d1_x_d2, d1coeff_x_d3 + d1_x_d3coeff)
-            )/(norm_d1_x_d2 * normdgamma**3) \
-                - inner(d1_x_d2, d1_x_d3) * (
-                    (
-                        inner(d1coeff_x_d2 + d1_x_d2coeff, d1_x_d2)/(norm_d1_x_d2**3 * normdgamma**3)
-                        + 3 * inner(dgamma, dgamma_dcoeff)/(norm_d1_x_d2 * normdgamma**5)
-                    )
-            ) \
-                - 3 * (
-                    + (d1coeff_dot_d2 + d1_dot_d2coeff) * norm_d1_x_d2/normdgamma**5
-                    + d1_dot_d2 * inner(d1coeff_x_d2 + d1_x_d2coeff, d1_x_d2)/(norm_d1_x_d2 * normdgamma**5)
-                    - 5 * d1_dot_d2 * norm_d1_x_d2 * d1_dot_d1coeff/normdgamma**7
+        return (
+            (
+                inner_curve_dof(d1_x_d2_variation, d1_x_d3)
+                + inner_dof(d1_x_d2[:, :, None], d1coeff_x_d3 + d1_x_d3coeff)
+            ) / (norm_d1_x_d2[:, None] * normdgamma[:, None]**3)
+            - inner(d1_x_d2, d1_x_d3)[:, None] * (
+                inner_curve_dof(d1_x_d2_variation, d1_x_d2)
+                / (norm_d1_x_d2[:, None]**3 * normdgamma[:, None]**3)
+                + 3 * inner_curve_dof(dgamma_dcoeff_, dgamma)
+                / (norm_d1_x_d2[:, None] * normdgamma[:, None]**5)
             )
-        return dkappadash_by_dcoeff
+            - 3 * (
+                (d1coeff_dot_d2 + d1_dot_d2coeff)
+                * norm_d1_x_d2[:, None]
+                / normdgamma[:, None]**5
+                + d1_dot_d2[:, None]
+                * inner_curve_dof(d1_x_d2_variation, d1_x_d2)
+                / (norm_d1_x_d2[:, None] * normdgamma[:, None]**5)
+                - 5
+                * d1_dot_d2[:, None]
+                * norm_d1_x_d2[:, None]
+                * d1_dot_d1coeff
+                / normdgamma[:, None]**7
+            )
+        )
 
 
 class JaxCurve(sopp.Curve, Curve):

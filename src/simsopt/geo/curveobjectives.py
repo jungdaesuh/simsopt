@@ -6,7 +6,7 @@ import jax.numpy as jnp
 
 from .jit import jit
 from .._core.optimizable import Optimizable
-from .._core.derivative import derivative_dec, Derivative
+from .._core.derivative import derivative_dec, Derivative, sum_derivatives
 import simsoptpp as sopp
 from simsopt.geo.framedcurve import FramedCurveCentroid 
 
@@ -225,11 +225,19 @@ class CurveCurveDistance(Optimizable):
         """
         self.compute_candidates()
         res = 0
+        gamma = {}
+        gammadash = {}
         for i, j in self.candidates:
-            gamma1 = self.curves[i].gamma()
-            l1 = self.curves[i].gammadash()
-            gamma2 = self.curves[j].gamma()
-            l2 = self.curves[j].gammadash()
+            if i not in gamma:
+                gamma[i] = self.curves[i].gamma()
+                gammadash[i] = self.curves[i].gammadash()
+            if j not in gamma:
+                gamma[j] = self.curves[j].gamma()
+                gammadash[j] = self.curves[j].gammadash()
+            gamma1 = gamma[i]
+            l1 = gammadash[i]
+            gamma2 = gamma[j]
+            l2 = gammadash[j]
             res += self.J_jax(gamma1, l1, gamma2, l2)
 
         return res
@@ -240,21 +248,36 @@ class CurveCurveDistance(Optimizable):
         This returns the derivative of the quantity with respect to the curve dofs.
         """
         self.compute_candidates()
-        dgamma_by_dcoeff_vjp_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
-        dgammadash_by_dcoeff_vjp_vecs = [np.zeros_like(c.gammadash()) for c in self.curves]
+        gamma = {}
+        gammadash = {}
+        dgamma_by_dcoeff_vjp_vecs = {}
+        dgammadash_by_dcoeff_vjp_vecs = {}
 
         for i, j in self.candidates:
-            gamma1 = self.curves[i].gamma()
-            l1 = self.curves[i].gammadash()
-            gamma2 = self.curves[j].gamma()
-            l2 = self.curves[j].gammadash()
+            if i not in gamma:
+                gamma[i] = self.curves[i].gamma()
+                gammadash[i] = self.curves[i].gammadash()
+                dgamma_by_dcoeff_vjp_vecs[i] = np.zeros_like(gamma[i])
+                dgammadash_by_dcoeff_vjp_vecs[i] = np.zeros_like(gammadash[i])
+            if j not in gamma:
+                gamma[j] = self.curves[j].gamma()
+                gammadash[j] = self.curves[j].gammadash()
+                dgamma_by_dcoeff_vjp_vecs[j] = np.zeros_like(gamma[j])
+                dgammadash_by_dcoeff_vjp_vecs[j] = np.zeros_like(gammadash[j])
+            gamma1 = gamma[i]
+            l1 = gammadash[i]
+            gamma2 = gamma[j]
+            l2 = gammadash[j]
             dgamma_by_dcoeff_vjp_vecs[i] += self.thisgrad0(gamma1, l1, gamma2, l2)
             dgammadash_by_dcoeff_vjp_vecs[i] += self.thisgrad1(gamma1, l1, gamma2, l2)
             dgamma_by_dcoeff_vjp_vecs[j] += self.thisgrad2(gamma1, l1, gamma2, l2)
             dgammadash_by_dcoeff_vjp_vecs[j] += self.thisgrad3(gamma1, l1, gamma2, l2)
 
-        res = [self.curves[i].dgamma_by_dcoeff_vjp(dgamma_by_dcoeff_vjp_vecs[i]) + self.curves[i].dgammadash_by_dcoeff_vjp(dgammadash_by_dcoeff_vjp_vecs[i]) for i in range(len(self.curves))]
-        return sum(res)
+        return sum_derivatives(
+            self.curves[i].dgamma_by_dcoeff_vjp(dgamma_by_dcoeff_vjp_vecs[i])
+            + self.curves[i].dgammadash_by_dcoeff_vjp(dgammadash_by_dcoeff_vjp_vecs[i])
+            for i in dgamma_by_dcoeff_vjp_vecs
+        )
 
     return_fn_map = {'J': J, 'dJ': dJ}
 
@@ -332,11 +355,16 @@ class CurveSurfaceDistance(Optimizable):
         """
         self.compute_candidates()
         res = 0
+        gamma = {}
+        gammadash = {}
         gammas = self.surface.gamma().reshape((-1, 3))
         ns = self.surface.normal().reshape((-1, 3))
         for i, _ in self.candidates:
-            gammac = self.curves[i].gamma()
-            lc = self.curves[i].gammadash()
+            if i not in gamma:
+                gamma[i] = self.curves[i].gamma()
+                gammadash[i] = self.curves[i].gammadash()
+            gammac = gamma[i]
+            lc = gammadash[i]
             res += self.J_jax(gammac, lc, gammas, ns)
         return res
 
@@ -346,17 +374,27 @@ class CurveSurfaceDistance(Optimizable):
         This returns the derivative of the quantity with respect to the curve dofs.
         """
         self.compute_candidates()
-        dgamma_by_dcoeff_vjp_vecs = [np.zeros_like(c.gamma()) for c in self.curves]
-        dgammadash_by_dcoeff_vjp_vecs = [np.zeros_like(c.gammadash()) for c in self.curves]
+        gamma = {}
+        gammadash = {}
+        dgamma_by_dcoeff_vjp_vecs = {}
+        dgammadash_by_dcoeff_vjp_vecs = {}
         gammas = self.surface.gamma().reshape((-1, 3))
         ns = self.surface.normal().reshape((-1, 3))
         for i, _ in self.candidates:
-            gammac = self.curves[i].gamma()
-            lc = self.curves[i].gammadash()
+            if i not in gamma:
+                gamma[i] = self.curves[i].gamma()
+                gammadash[i] = self.curves[i].gammadash()
+                dgamma_by_dcoeff_vjp_vecs[i] = np.zeros_like(gamma[i])
+                dgammadash_by_dcoeff_vjp_vecs[i] = np.zeros_like(gammadash[i])
+            gammac = gamma[i]
+            lc = gammadash[i]
             dgamma_by_dcoeff_vjp_vecs[i] += self.thisgrad0(gammac, lc, gammas, ns)
             dgammadash_by_dcoeff_vjp_vecs[i] += self.thisgrad1(gammac, lc, gammas, ns)
-        res = [self.curves[i].dgamma_by_dcoeff_vjp(dgamma_by_dcoeff_vjp_vecs[i]) + self.curves[i].dgammadash_by_dcoeff_vjp(dgammadash_by_dcoeff_vjp_vecs[i]) for i in range(len(self.curves))]
-        return sum(res)
+        return sum_derivatives(
+            self.curves[i].dgamma_by_dcoeff_vjp(dgamma_by_dcoeff_vjp_vecs[i])
+            + self.curves[i].dgammadash_by_dcoeff_vjp(dgammadash_by_dcoeff_vjp_vecs[i])
+            for i in dgamma_by_dcoeff_vjp_vecs
+        )
 
     return_fn_map = {'J': J, 'dJ': dJ}
 
