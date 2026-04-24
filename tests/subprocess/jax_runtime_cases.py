@@ -92,10 +92,12 @@ from simsopt.jax_core.curve_geometry import (  # type: ignore[import-untyped]
 from simsopt.jax_core.field import (  # type: ignore[import-untyped]
     biot_savart_B_vjp_maybe_collective,
     grouped_biot_savart_A_from_spec,
+    grouped_biot_savart_A_from_inputs,
     grouped_biot_savart_B_and_dB_from_spec,
     grouped_biot_savart_B_from_spec,
     grouped_biot_savart_d2A_by_dXdX_from_spec,
     grouped_biot_savart_dA_by_dX_from_spec,
+    grouped_biot_savart_dA_by_dX_from_inputs,
     grouped_biot_savart_dB_by_dX_from_spec,
     grouped_coil_set_spec_from_lists,
     grouped_field_sharding_summary,
@@ -775,6 +777,77 @@ def _assert_mixed_quadrature_collective_parity(points: jax.Array) -> None:
     assert grouped_field_sharding_summary(points, coil_spec)["field_collective"] is True
 
 
+def _assert_collective_field_pullback_parity(
+    points: jax.Array,
+    stacked_gammas: jax.Array,
+    stacked_gammadashs: jax.Array,
+    stacked_currents: jax.Array,
+) -> None:
+    coil_arrays = ((stacked_gammas, stacked_gammadashs, stacked_currents),)
+    A_cotangent = jnp.linspace(
+        0.3,
+        1.2,
+        points.size,
+        dtype=jnp.float64,
+    ).reshape(points.shape)
+    dA_cotangent = jnp.linspace(
+        -0.2,
+        0.7,
+        points.shape[0] * 9,
+        dtype=jnp.float64,
+    ).reshape(points.shape[0], 3, 3)
+
+    _, dense_A_pullback = jax.vjp(
+        lambda group_gammas, group_gammadashs, group_currents: biot_savart_A(
+            points,
+            group_gammas,
+            group_gammadashs,
+            group_currents,
+        ),
+        stacked_gammas,
+        stacked_gammadashs,
+        stacked_currents,
+    )
+    _, collective_A_pullback = jax.vjp(
+        lambda grouped_inputs: grouped_biot_savart_A_from_inputs(
+            points,
+            grouped_inputs,
+        ),
+        coil_arrays,
+    )
+    collective_A_vjp = collective_A_pullback(A_cotangent)[0][0]
+    for collective_leaf, dense_leaf in zip(
+        collective_A_vjp,
+        dense_A_pullback(A_cotangent),
+    ):
+        _assert_allclose_to_reference(collective_leaf, dense_leaf)
+
+    _, dense_dA_pullback = jax.vjp(
+        lambda group_gammas, group_gammadashs, group_currents: biot_savart_dA_by_dX(
+            points,
+            group_gammas,
+            group_gammadashs,
+            group_currents,
+        ),
+        stacked_gammas,
+        stacked_gammadashs,
+        stacked_currents,
+    )
+    _, collective_dA_pullback = jax.vjp(
+        lambda grouped_inputs: grouped_biot_savart_dA_by_dX_from_inputs(
+            points,
+            grouped_inputs,
+        ),
+        coil_arrays,
+    )
+    collective_dA_vjp = collective_dA_pullback(dA_cotangent)[0][0]
+    for collective_leaf, dense_leaf in zip(
+        collective_dA_vjp,
+        dense_dA_pullback(dA_cotangent),
+    ):
+        _assert_allclose_to_reference(collective_leaf, dense_leaf)
+
+
 def _run_grouped_biot_savart_coil_collective_case() -> None:
     points = jnp.linspace(0.1, 0.9, 18, dtype=jnp.float64).reshape(6, 3)
     gammas, gammadashs, currents = _build_collective_circular_coils()
@@ -854,6 +927,12 @@ def _run_grouped_biot_savart_coil_collective_case() -> None:
     for collective_leaf, dense_leaf in zip(collective_vjp, dense_pullback(v)):
         _assert_allclose_to_reference(collective_leaf, dense_leaf)
 
+    _assert_collective_field_pullback_parity(
+        points,
+        stacked_gammas,
+        stacked_gammadashs,
+        stacked_currents,
+    )
     _assert_mixed_quadrature_collective_parity(points)
 
     summary = grouped_field_sharding_summary(points, coil_spec)
