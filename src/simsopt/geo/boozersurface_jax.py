@@ -71,10 +71,13 @@ from ._boozersurface_current_guard import (
     require_fixed_currents_for_none_G as _require_fixed_currents_for_none_G,
 )
 from ..jax_core.field import (
+    _evaluate_grouped_field_group,
     grouped_biot_savart_A_from_inputs,
     grouped_biot_savart_A_from_spec,
+    grouped_biot_savart_B_and_dB_from_spec,
     grouped_biot_savart_B_from_inputs,
     grouped_biot_savart_B_from_spec,
+    grouped_biot_savart_dA_by_dX_from_spec,
     grouped_coil_currents_from_inputs,
     grouped_coil_currents_from_spec,
     grouped_coil_index_lists_from_spec,
@@ -82,7 +85,12 @@ from ..jax_core.field import (
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
 )
-from ..jax_core.specs import CoilGroupSpec, GroupedCoilSetSpec
+from ..jax_core.biotsavart import (
+    biot_savart_A,
+    biot_savart_B_and_dB,
+    biot_savart_dA_by_dX,
+)
+from ..jax_core.specs import GroupedCoilSetSpec
 from .boozer_residual_jax import (
     _split_decision_vector as _split_boozer_decision_vector,
     boozer_residual_scalar,
@@ -167,6 +175,83 @@ class _BoozerSolvedRuntimeState:
     iota: jax.Array
     G: jax.Array | None
     weight_inv_modB: bool = field(metadata={"static": True})
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class _BoozerPenaltyGeometry:
+    gamma: jax.Array
+    xphi: jax.Array
+    xtheta: jax.Array
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class _BoozerForwardLocalFieldTerms:
+    B: jax.Array
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class _BoozerForwardToroidalFluxFieldTerms:
+    B: jax.Array
+    A: jax.Array
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class _BoozerLocalFieldTerms:
+    B: jax.Array
+    dB_dX: jax.Array
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class _BoozerToroidalFluxFieldTerms:
+    B: jax.Array
+    dB_dX: jax.Array
+    A: jax.Array
+    dA_dX: jax.Array
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class _BoozerPenaltyParams:
+    iota: jax.Array
+    G: jax.Array
+    targetlabel: jax.Array
+    constraint_weight: jax.Array
+    label_type: str = field(metadata={"static": True})
+    phi_idx: int = field(metadata={"static": True})
+    weight_inv_modB: bool = field(metadata={"static": True})
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class _BoozerLSGroupedVJPSnapshot:
+    quadpoints_phi: jax.Array
+    quadpoints_theta: jax.Array
+    scatter_indices: jax.Array | None
+    surface_dofs: jax.Array
+    x: jax.Array
+    iota: jax.Array
+    G: jax.Array
+    field_terms: _BoozerLocalFieldTerms | _BoozerToroidalFluxFieldTerms
+    coil_set_spec: GroupedCoilSetSpec
+    geometry: _BoozerPenaltyGeometry
+    mpol: int = field(metadata={"static": True})
+    ntor: int = field(metadata={"static": True})
+    nfp: int = field(metadata={"static": True})
+    stellsym: bool = field(metadata={"static": True})
+    label_type: str = field(metadata={"static": True})
+    phi_idx: int = field(metadata={"static": True})
+    surface_kind: str = field(metadata={"static": True})
+    constraint_weight: float = field(metadata={"static": True})
+    targetlabel: float = field(metadata={"static": True})
+    optimize_G: bool = field(metadata={"static": True})
+    weight_inv_modB: bool = field(metadata={"static": True})
+    coil_indices: tuple[tuple[int, ...], ...] = field(metadata={"static": True})
+    solver_generation: int = field(metadata={"static": True})
 
 
 @dataclass(frozen=True)
@@ -436,23 +521,6 @@ def _replace_group_coil_array(coil_arrays, group_index, group_array):
     return grouped_arrays
 
 
-def _replace_group_coil_set_spec(
-    coil_set_spec: GroupedCoilSetSpec,
-    group_index: int,
-    group_array,
-) -> GroupedCoilSetSpec:
-    gammas, gammadashs, currents = group_array
-    groups = list(coil_set_spec.groups)
-    group = groups[group_index]
-    groups[group_index] = CoilGroupSpec(
-        gammas=gammas,
-        gammadashs=gammadashs,
-        currents=currents,
-        coil_indices=group.coil_indices,
-    )
-    return GroupedCoilSetSpec(groups=tuple(groups))
-
-
 def _yield_group_vjps(lm, group_runners, coil_arrays, coil_indices):
     for group_runner, group_array, group_index_list in zip(
         group_runners,
@@ -501,6 +569,215 @@ def _grouped_biot_savart_A_points(points, *, coil_arrays=None, coil_set_spec=Non
     if coil_set_spec is not None:
         return grouped_biot_savart_A_from_spec(points, coil_set_spec)
     return grouped_biot_savart_A_from_inputs(points, coil_arrays)
+
+
+def _geometry_from_x(
+    x,
+    *,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    surface_kind,
+    optimize_G,
+):
+    optimizer_state = _as_boozer_penalty_optimizer_state(x, optimize_G=optimize_G)
+    gamma, xphi, xtheta = _surface_geometry_from_dofs(
+        optimizer_state.surface_dofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        scatter_indices,
+        surface_kind=surface_kind,
+    )
+    return _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta), optimizer_state
+
+
+def _penalty_params(
+    *,
+    iota,
+    G_value,
+    targetlabel,
+    constraint_weight,
+    label_type,
+    phi_idx,
+    weight_inv_modB,
+):
+    return _BoozerPenaltyParams(
+        iota=_as_jax_float64(iota),
+        G=_as_jax_float64(G_value),
+        targetlabel=_as_jax_float64(targetlabel),
+        constraint_weight=_as_jax_float64(constraint_weight),
+        label_type=label_type,
+        phi_idx=phi_idx,
+        weight_inv_modB=weight_inv_modB,
+    )
+
+
+def _field_shape_from_geometry(geometry: _BoozerPenaltyGeometry):
+    return tuple(int(dim) for dim in geometry.gamma.shape[:2])
+
+
+def _field_points_from_geometry(geometry: _BoozerPenaltyGeometry):
+    return geometry.gamma.reshape(-1, 3)
+
+
+def _reshape_vector_field(field_values, field_shape):
+    return field_values.reshape(field_shape + (3,))
+
+
+def _reshape_field_jacobian(field_values, field_shape):
+    return field_values.reshape(field_shape + (3, 3))
+
+
+def _forward_field_terms_for_local_label(
+    points,
+    field_shape,
+    *,
+    coil_arrays=None,
+    coil_set_spec=None,
+):
+    return _BoozerForwardLocalFieldTerms(
+        B=_reshape_vector_field(
+            _grouped_biot_savart_B_points(
+                points,
+                coil_arrays=coil_arrays,
+                coil_set_spec=coil_set_spec,
+            ),
+            field_shape,
+        )
+    )
+
+
+def _forward_field_terms_for_toroidal_flux(
+    points,
+    field_shape,
+    *,
+    coil_arrays=None,
+    coil_set_spec=None,
+):
+    return _BoozerForwardToroidalFluxFieldTerms(
+        B=_reshape_vector_field(
+            _grouped_biot_savart_B_points(
+                points,
+                coil_arrays=coil_arrays,
+                coil_set_spec=coil_set_spec,
+            ),
+            field_shape,
+        ),
+        A=_reshape_vector_field(
+            _grouped_biot_savart_A_points(
+                points,
+                coil_arrays=coil_arrays,
+                coil_set_spec=coil_set_spec,
+            ),
+            field_shape,
+        ),
+    )
+
+
+def _field_terms_for_local_label(points, field_shape, *, coil_set_spec=None, group=None):
+    if group is None:
+        B, dB_dX = grouped_biot_savart_B_and_dB_from_spec(points, coil_set_spec)
+    else:
+        (B, dB_dX), _config = _evaluate_grouped_field_group(
+            points,
+            *group,
+            biot_savart_B_and_dB,
+        )
+    return _BoozerLocalFieldTerms(
+        B=_reshape_vector_field(B, field_shape),
+        dB_dX=_reshape_field_jacobian(dB_dX, field_shape),
+    )
+
+
+def _field_terms_for_toroidal_flux(
+    points,
+    field_shape,
+    *,
+    coil_set_spec=None,
+    group=None,
+):
+    local_terms = _field_terms_for_local_label(
+        points,
+        field_shape,
+        coil_set_spec=coil_set_spec,
+        group=group,
+    )
+    if group is None:
+        A = grouped_biot_savart_A_from_spec(points, coil_set_spec)
+        dA_dX = grouped_biot_savart_dA_by_dX_from_spec(points, coil_set_spec)
+    else:
+        A, _config = _evaluate_grouped_field_group(points, *group, biot_savart_A)
+        dA_dX, _config = _evaluate_grouped_field_group(
+            points,
+            *group,
+            biot_savart_dA_by_dX,
+        )
+    return _BoozerToroidalFluxFieldTerms(
+        B=local_terms.B,
+        dB_dX=local_terms.dB_dX,
+        A=_reshape_vector_field(A, field_shape),
+        dA_dX=_reshape_field_jacobian(dA_dX, field_shape),
+    )
+
+
+def _select_forward_field_terms_builder(label_type):
+    if label_type == "toroidal_flux":
+        return _forward_field_terms_for_toroidal_flux
+    return _forward_field_terms_for_local_label
+
+
+def _select_structured_field_terms_builder(label_type):
+    if label_type == "toroidal_flux":
+        return _field_terms_for_toroidal_flux
+    return _field_terms_for_local_label
+
+
+def _label_from_geometry_and_field_terms(
+    geometry: _BoozerPenaltyGeometry,
+    field_terms,
+    params: _BoozerPenaltyParams,
+):
+    normal = _cross_product(geometry.xphi, geometry.xtheta)
+    if params.label_type == "volume":
+        return volume_jax(geometry.gamma, normal)
+    if params.label_type == "area":
+        return area_jax(normal)
+    ntheta = geometry.gamma.shape[1]
+    return toroidal_flux_jax(
+        _select_axis0(field_terms.A, params.phi_idx),
+        _select_axis0(geometry.xtheta, params.phi_idx),
+        ntheta,
+    )
+
+
+def _penalty_from_geometry_and_field_terms(
+    geometry: _BoozerPenaltyGeometry,
+    field_terms,
+    params: _BoozerPenaltyParams,
+):
+    J_boozer = boozer_residual_scalar(
+        params.G,
+        params.iota,
+        field_terms.B,
+        geometry.xphi,
+        geometry.xtheta,
+        params.weight_inv_modB,
+    )
+    label_val = _label_from_geometry_and_field_terms(geometry, field_terms, params)
+    gamma_axis_z = _surface_sample_z(geometry.gamma)
+    half = _as_jax_float64(0.5)
+    label_delta = label_val - params.targetlabel
+    J_label = half * params.constraint_weight * label_delta * label_delta
+    J_z = half * params.constraint_weight * gamma_axis_z * gamma_axis_z
+    return J_boozer + J_label + J_z
 
 
 def _compute_label(
@@ -591,57 +868,44 @@ def _boozer_penalty_objective(
     ``[surface_dofs, iota]`` / ``[surface_dofs, iota, G]`` or the structured
     Boozer penalty optimizer pytree that carries the same fields explicitly.
     """
-    optimizer_state = _as_boozer_penalty_optimizer_state(x, optimize_G=optimize_G)
-    sdofs = optimizer_state.surface_dofs
-    iota = optimizer_state.iota
-    G = optimizer_state.G if optimize_G else None
-    if not optimize_G:
-        G = compute_G_from_currents(
-            _grouped_coil_currents(coil_arrays=coil_arrays, coil_set_spec=coil_set_spec)
-        )
-
-    gamma, xphi, xtheta = _surface_geometry_from_dofs(
-        sdofs,
-        quadpoints_phi,
-        quadpoints_theta,
-        mpol,
-        ntor,
-        nfp,
-        stellsym,
-        scatter_indices,
+    geometry, optimizer_state = _geometry_from_x(
+        x,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
         surface_kind=surface_kind,
+        optimize_G=optimize_G,
     )
-    nphi, ntheta = gamma.shape[:2]
-
-    points = gamma.reshape(-1, 3)
-    B = _grouped_biot_savart_B_points(
-        points,
-        coil_arrays=coil_arrays,
-        coil_set_spec=coil_set_spec,
-    )
-    B = B.reshape(nphi, ntheta, 3)
-
-    J_boozer = boozer_residual_scalar(G, iota, B, xphi, xtheta, weight_inv_modB)
-
-    label_val, gamma_axis_z = _compute_label_and_axis_z(
-        gamma=gamma,
-        xphi=xphi,
-        xtheta=xtheta,
-        points=points,
+    if optimize_G:
+        G = optimizer_state.G
+    else:
+        G = compute_G_from_currents(
+            _grouped_coil_currents(
+                coil_arrays=coil_arrays,
+                coil_set_spec=coil_set_spec,
+            )
+        )
+    params = _penalty_params(
+        iota=optimizer_state.iota,
+        G_value=G,
+        targetlabel=targetlabel,
+        constraint_weight=constraint_weight,
         label_type=label_type,
         phi_idx=phi_idx,
+        weight_inv_modB=weight_inv_modB,
+    )
+    points = _field_points_from_geometry(geometry)
+    field_terms = _select_forward_field_terms_builder(label_type)(
+        points,
+        _field_shape_from_geometry(geometry),
         coil_arrays=coil_arrays,
         coil_set_spec=coil_set_spec,
     )
-
-    half = _as_jax_float64(0.5)
-    constraint_weight_jax = _as_jax_float64(constraint_weight)
-    targetlabel_jax = _as_jax_float64(targetlabel)
-    label_delta = label_val - targetlabel_jax
-    J_label = half * constraint_weight_jax * label_delta * label_delta
-    J_z = half * constraint_weight_jax * gamma_axis_z * gamma_axis_z
-
-    return J_boozer + J_label + J_z
+    return _penalty_from_geometry_and_field_terms(geometry, field_terms, params)
 
 
 def _boozer_penalty_residual_vector(
@@ -1117,76 +1381,245 @@ def _build_ls_group_vjp_callback(
     weight_inv_modB=True,
 ):
     """Build stable LS group runners for repeated streaming VJPs."""
-    x, optimize_G = _ls_decision_vector(booz_surf, iota, G)
-
-    coil_set_spec = booz_surf.coil_set_spec
-    coil_arrays = grouped_field_inputs_from_spec(coil_set_spec)
-    coil_indices = booz_surf._coil_index_lists
-
-    group_runners = tuple(
-        _make_ls_group_runner(
-            x,
-            coil_set_spec,
-            booz_surf,
-            optimize_G,
-            weight_inv_modB,
-            group_index,
-        )
-        for group_index in range(len(coil_arrays))
+    snapshot = _build_ls_grouped_vjp_snapshot(
+        booz_surf,
+        iota,
+        G,
+        solve_generation=solve_generation,
+        weight_inv_modB=weight_inv_modB,
     )
+    coil_arrays = grouped_field_inputs_from_spec(snapshot.coil_set_spec)
 
     def vjp_groups(lm, _booz_surf, _iota, _G):
         current_generation = getattr(booz_surf, "_solver_generation", None)
-        if booz_surf.need_to_run_code or current_generation != solve_generation:
+        if booz_surf.need_to_run_code or current_generation != snapshot.solver_generation:
             raise RuntimeError(
                 "BoozerSurfaceJAX LS grouped VJP callback is stale; "
                 "re-run boozer_surface.run_code(...) before requesting adjoints."
             )
-        for group_runner, group_array, group_index_list in zip(
-            group_runners,
-            coil_arrays,
-            coil_indices,
-        ):
-            _, pullback = jax.vjp(group_runner, group_array, lm)
-            yield pullback(_as_jax_float64(1.0))[0], group_index_list
+        bar_field_terms, bar_G = _ls_field_term_cotangents(snapshot, lm)
+        field_terms_builder = _select_structured_field_terms_builder(snapshot.label_type)
+        points = _field_points_from_geometry(snapshot.geometry)
+        field_shape = _field_shape_from_geometry(snapshot.geometry)
+        for group_array, group_index_tuple in zip(coil_arrays, snapshot.coil_indices):
+
+            def field_terms_of_group(group):
+                return field_terms_builder(points, field_shape, group=group)
+
+            _, pullback = jax.vjp(field_terms_of_group, group_array)
+            d_group = pullback(bar_field_terms)[0]
+            d_group = _add_G_current_cotangent(
+                d_group,
+                group_array,
+                bar_G,
+                optimize_G=snapshot.optimize_G,
+            )
+            yield d_group, list(group_index_tuple)
 
     return vjp_groups
 
 
-def _make_ls_group_runner(
-    x,
-    coil_set_spec,
+def _build_ls_grouped_vjp_snapshot(
     booz_surf,
-    optimize_G,
-    weight_inv_modB,
-    group_index,
+    iota,
+    G,
+    *,
+    solve_generation: int,
+    weight_inv_modB=True,
 ):
-    def directional_of_group(group_array, tangent):
-        return _group_penalty_directional_objective(
-            x,
-            tangent,
-            _replace_group_coil_set_spec(
-                coil_set_spec,
-                group_index,
-                group_array,
-            ),
-            booz_surf.quadpoints_phi,
-            booz_surf.quadpoints_theta,
-            booz_surf.mpol,
-            booz_surf.ntor,
-            booz_surf.nfp,
-            booz_surf.stellsym,
-            booz_surf.scatter_indices,
-            booz_surf._surface_geometry_kind,
-            booz_surf.targetlabel,
-            booz_surf.constraint_weight,
-            booz_surf.label_type,
-            booz_surf.phi_idx,
-            optimize_G,
-            weight_inv_modB,
+    """Freeze every value needed by an LS grouped-VJP callback."""
+    x, optimize_G = _ls_decision_vector(booz_surf, iota, G)
+    coil_set_spec = booz_surf.coil_set_spec
+    geometry, optimizer_state = _geometry_from_x(
+        x,
+        quadpoints_phi=booz_surf.quadpoints_phi,
+        quadpoints_theta=booz_surf.quadpoints_theta,
+        mpol=booz_surf.mpol,
+        ntor=booz_surf.ntor,
+        nfp=booz_surf.nfp,
+        stellsym=booz_surf.stellsym,
+        scatter_indices=booz_surf.scatter_indices,
+        surface_kind=booz_surf._surface_geometry_kind,
+        optimize_G=optimize_G,
+    )
+    coil_currents = _grouped_coil_currents(coil_set_spec=coil_set_spec)
+    G_value = optimizer_state.G if optimize_G else compute_G_from_currents(coil_currents)
+    field_terms = _select_structured_field_terms_builder(booz_surf.label_type)(
+        _field_points_from_geometry(geometry),
+        _field_shape_from_geometry(geometry),
+        coil_set_spec=coil_set_spec,
+    )
+    return _BoozerLSGroupedVJPSnapshot(
+        quadpoints_phi=booz_surf.quadpoints_phi,
+        quadpoints_theta=booz_surf.quadpoints_theta,
+        scatter_indices=booz_surf.scatter_indices,
+        surface_dofs=optimizer_state.surface_dofs,
+        x=x,
+        iota=optimizer_state.iota,
+        G=G_value,
+        field_terms=field_terms,
+        coil_set_spec=coil_set_spec,
+        geometry=geometry,
+        mpol=booz_surf.mpol,
+        ntor=booz_surf.ntor,
+        nfp=booz_surf.nfp,
+        stellsym=booz_surf.stellsym,
+        label_type=booz_surf.label_type,
+        phi_idx=booz_surf.phi_idx,
+        surface_kind=booz_surf._surface_geometry_kind,
+        constraint_weight=booz_surf.constraint_weight,
+        targetlabel=booz_surf.targetlabel,
+        optimize_G=optimize_G,
+        weight_inv_modB=weight_inv_modB,
+        coil_indices=tuple(tuple(indices) for indices in booz_surf._coil_index_lists),
+        solver_generation=solve_generation,
+    )
+
+
+def _geometry_tangent_from_decision_tangent(
+    snapshot: _BoozerLSGroupedVJPSnapshot,
+    tangent_state,
+):
+    def geometry_of_surface_dofs(surface_dofs):
+        gamma, xphi, xtheta = _surface_geometry_from_dofs(
+            surface_dofs,
+            snapshot.quadpoints_phi,
+            snapshot.quadpoints_theta,
+            snapshot.mpol,
+            snapshot.ntor,
+            snapshot.nfp,
+            snapshot.stellsym,
+            snapshot.scatter_indices,
+            surface_kind=snapshot.surface_kind,
+        )
+        return _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta)
+
+    _, geometry_tangent = jax.jvp(
+        geometry_of_surface_dofs,
+        (snapshot.surface_dofs,),
+        (tangent_state.surface_dofs,),
+    )
+    return geometry_tangent
+
+
+def _spatial_field_dot(field_jacobian, geometry_tangent: _BoozerPenaltyGeometry):
+    return jnp.einsum("...j,...jl->...l", geometry_tangent.gamma, field_jacobian)
+
+
+def _forward_field_values_from_structured_terms(field_terms):
+    if isinstance(field_terms, _BoozerToroidalFluxFieldTerms):
+        return _BoozerForwardToroidalFluxFieldTerms(B=field_terms.B, A=field_terms.A)
+    return _BoozerForwardLocalFieldTerms(B=field_terms.B)
+
+
+def _forward_field_tangent_from_structured_terms(
+    field_terms,
+    geometry_tangent: _BoozerPenaltyGeometry,
+):
+    B_dot = _spatial_field_dot(field_terms.dB_dX, geometry_tangent)
+    if isinstance(field_terms, _BoozerToroidalFluxFieldTerms):
+        return _BoozerForwardToroidalFluxFieldTerms(
+            B=B_dot,
+            A=_spatial_field_dot(field_terms.dA_dX, geometry_tangent),
+        )
+    return _BoozerForwardLocalFieldTerms(B=B_dot)
+
+
+def _penalty_params_tangent_from_decision_tangent(
+    params: _BoozerPenaltyParams,
+    tangent_state,
+):
+    if isinstance(tangent_state, _BoozerPenaltyOptimizerStateWithG):
+        G_dot = tangent_state.G
+    else:
+        G_dot = jnp.zeros_like(params.G)
+    return _BoozerPenaltyParams(
+        iota=tangent_state.iota,
+        G=G_dot,
+        targetlabel=jnp.zeros_like(params.targetlabel),
+        constraint_weight=jnp.zeros_like(params.constraint_weight),
+        label_type=params.label_type,
+        phi_idx=params.phi_idx,
+        weight_inv_modB=params.weight_inv_modB,
+    )
+
+
+def _ls_directional_from_field_terms(
+    snapshot: _BoozerLSGroupedVJPSnapshot,
+    field_terms,
+    tangent,
+    *,
+    G_value=None,
+):
+    tangent_state = _as_boozer_penalty_optimizer_state(
+        tangent,
+        optimize_G=snapshot.optimize_G,
+    )
+    G_value = snapshot.G if G_value is None else G_value
+    params = _penalty_params(
+        iota=snapshot.iota,
+        G_value=G_value,
+        targetlabel=snapshot.targetlabel,
+        constraint_weight=snapshot.constraint_weight,
+        label_type=snapshot.label_type,
+        phi_idx=snapshot.phi_idx,
+        weight_inv_modB=snapshot.weight_inv_modB,
+    )
+    geometry_tangent = _geometry_tangent_from_decision_tangent(snapshot, tangent_state)
+    field_values = _forward_field_values_from_structured_terms(field_terms)
+    field_tangent = _forward_field_tangent_from_structured_terms(
+        field_terms,
+        geometry_tangent,
+    )
+    params_tangent = _penalty_params_tangent_from_decision_tangent(
+        params,
+        tangent_state,
+    )
+
+    def reduced(geometry, values, reduced_params):
+        return _penalty_from_geometry_and_field_terms(
+            geometry,
+            values,
+            reduced_params,
         )
 
-    return directional_of_group
+    _, directional = jax.jvp(
+        reduced,
+        (snapshot.geometry, field_values, params),
+        (geometry_tangent, field_tangent, params_tangent),
+    )
+    return directional
+
+
+def _ls_field_term_cotangents(snapshot: _BoozerLSGroupedVJPSnapshot, tangent):
+    unit_cotangent = _as_jax_float64(1.0)
+    if snapshot.optimize_G:
+        _, field_pullback = jax.vjp(
+            lambda terms: _ls_directional_from_field_terms(snapshot, terms, tangent),
+            snapshot.field_terms,
+        )
+        return field_pullback(unit_cotangent)[0], None
+    _, field_pullback = jax.vjp(
+        lambda terms, G_value: _ls_directional_from_field_terms(
+            snapshot,
+            terms,
+            tangent,
+            G_value=G_value,
+        ),
+        snapshot.field_terms,
+        snapshot.G,
+    )
+    bar_field_terms, bar_G = field_pullback(unit_cotangent)
+    return bar_field_terms, bar_G
+
+
+def _add_G_current_cotangent(d_group, group_array, bar_G, *, optimize_G):
+    if optimize_G:
+        return d_group
+    d_gammas, d_gammadashs, d_currents = d_group
+    _, current_pullback = jax.vjp(compute_G_from_currents, group_array[2])
+    dG_dcurrents = current_pullback(bar_G)[0]
+    return d_gammas, d_gammadashs, d_currents + dG_dcurrents
 
 
 def _ls_decision_vector(booz_surf, iota, G):
@@ -1213,48 +1646,6 @@ def _ls_penalty_directional_objective(
             coil_arrays,
             optimize_G,
             weight_inv_modB,
-        ),
-        x,
-        tangent,
-    )
-
-
-def _group_penalty_directional_objective(
-    x,
-    tangent,
-    coil_set_spec,
-    quadpoints_phi,
-    quadpoints_theta,
-    mpol,
-    ntor,
-    nfp,
-    stellsym,
-    scatter_indices,
-    surface_kind,
-    targetlabel,
-    constraint_weight,
-    label_type,
-    phi_idx,
-    optimize_G,
-    weight_inv_modB,
-):
-    return _directional_derivative(
-        _make_boozer_penalty_objective_closure(
-            coil_set_spec=coil_set_spec,
-            quadpoints_phi=quadpoints_phi,
-            quadpoints_theta=quadpoints_theta,
-            mpol=mpol,
-            ntor=ntor,
-            nfp=nfp,
-            stellsym=stellsym,
-            scatter_indices=scatter_indices,
-            surface_kind=surface_kind,
-            targetlabel=targetlabel,
-            constraint_weight=constraint_weight,
-            label_type=label_type,
-            phi_idx=phi_idx,
-            optimize_G=optimize_G,
-            weight_inv_modB=weight_inv_modB,
         ),
         x,
         tangent,
@@ -1424,6 +1815,42 @@ def default_materialize_dense_linearization_for_backend(optimizer_backend):
     return optimizer_backend != "ondevice"
 
 
+class _BoozerSolverOptions(dict):
+    """Mutable solver options with backend-derived dense-finalization defaults."""
+
+    def __init__(
+        self,
+        values,
+        *,
+        materialize_dense_linearization_explicit=False,
+    ):
+        super().__init__(values)
+        self.materialize_dense_linearization_explicit = (
+            materialize_dense_linearization_explicit
+        )
+
+    def __setitem__(self, key, value):
+        if key == "materialize_dense_linearization":
+            self.materialize_dense_linearization_explicit = True
+        super().__setitem__(key, value)
+        if key == "optimizer_backend":
+            self._refresh_backend_dense_linearization_default(value)
+
+    def update(self, other=(), /, **kwargs):
+        for key, value in dict(other, **kwargs).items():
+            self[key] = value
+
+    def _refresh_backend_dense_linearization_default(self, optimizer_backend):
+        if self.materialize_dense_linearization_explicit:
+            return
+        if "materialize_dense_linearization" not in self:
+            return
+        super().__setitem__(
+            "materialize_dense_linearization",
+            default_materialize_dense_linearization_for_backend(optimizer_backend),
+        )
+
+
 def _default_ls_optimizer_backend() -> str:
     if get_backend_config().backend == "jax":
         return "ondevice"
@@ -1581,14 +2008,24 @@ class BoozerSurfaceJAX(Optimizable):
                 "Supported: Volume, Area, ToroidalFlux."
             )
 
+        user_options = dict(options or {})
+        materialize_dense_linearization_explicit = (
+            self.boozer_type == "ls"
+            and user_options.get("materialize_dense_linearization") is not None
+        )
         raw_options = _normalize_solver_options(
-            dict(options or {}),
+            user_options,
             self.boozer_type,
         )
         defaults = (
             _DEFAULT_OPTIONS_LS if self.boozer_type == "ls" else _DEFAULT_OPTIONS_EXACT
         )
-        self.options = {**defaults, **raw_options}
+        self.options = _BoozerSolverOptions(
+            {**defaults, **raw_options},
+            materialize_dense_linearization_explicit=(
+                materialize_dense_linearization_explicit
+            ),
+        )
         if self.boozer_type == "ls":
             if self.options["optimizer_backend"] not in VALID_OPTIMIZER_BACKENDS:
                 raise ValueError(
@@ -2952,6 +3389,17 @@ class BoozerSurfaceJAX(Optimizable):
             if k in self.options
         }
 
+    def _collect_least_squares_linearization_options(self):
+        """Gather target LM dense-linearization policy from self.options."""
+        return {
+            "materialize_dense_linearization": bool(
+                self.options["materialize_dense_linearization"]
+            ),
+            "max_dense_linearization_bytes": self.options[
+                "max_dense_linearization_bytes"
+            ],
+        }
+
     def _run_newton_polish_for_method(
         self,
         method,
@@ -3049,6 +3497,11 @@ class BoozerSurfaceJAX(Optimizable):
                 method=method,
                 tol=tol,
                 maxiter=maxiter,
+                options=(
+                    self._collect_least_squares_linearization_options()
+                    if method == "lm-ondevice"
+                    else None
+                ),
                 progress_callback=progress_callback,
             )
         else:
@@ -3362,6 +3815,7 @@ class BoozerSurfaceJAX(Optimizable):
                 method="lm-ondevice",
                 tol=tol,
                 maxiter=maxiter,
+                options=self._collect_least_squares_linearization_options(),
             )
             optimizer_method = "lm-ondevice"
         else:

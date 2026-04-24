@@ -37,6 +37,7 @@ from benchmarks.single_stage_backend_routing import (
     resolve_boozer_optimizer_method,
 )
 from benchmarks.grouped_adjoint_memory_probe import (
+    _GroupedVJPTimingRecorder,
     _build_grouped_adjoint_payload,
     evaluate_grouped_adjoint_memory_probe,
 )
@@ -2533,6 +2534,8 @@ def _grouped_adjoint_memory_metrics(*, snapshots, **overrides):
         "implicit_gradient_finite": True,
         "implicit_gradient_norm": 1.0,
         "snapshots": snapshots,
+        "grouped_vjp_timings": _complete_grouped_vjp_timings(),
+        "cache_stability": _complete_grouped_vjp_cache_stability(),
     }
     metrics.update(overrides)
     return metrics
@@ -2576,6 +2579,51 @@ def _complete_grouped_adjoint_snapshots():
         _grouped_adjoint_snapshot("after_derivative_projection", 6.75),
         _grouped_adjoint_snapshot("after_norm_metrics", 7.0),
     ]
+
+
+def _complete_grouped_vjp_timings():
+    return {
+        "requested_stream_pass_count": 3,
+        "stream_pass_count": 3,
+        "group_count": 2,
+        "first_stream_s": 0.4,
+        "first_compile_time_s": 0.25,
+        "first_compile_time_note": (
+            "First grouped-VJP group call measured with block_until_ready; "
+            "includes compilation plus first group execution."
+        ),
+        "first_stream_steady_state_group_median_s": 0.1,
+        "warm_stream_times_s": [0.2, 0.22],
+        "steady_state_grouped_vjp_time_s": 0.21,
+        "steady_state_grouped_vjp_per_group_s": 0.1,
+        "total_representative_run_wall_s": 3.5,
+        "passes": [],
+    }
+
+
+def _complete_grouped_vjp_cache_stability():
+    return {
+        "diagnostics_requested": True,
+        "diagnostics_enabled": True,
+        "jax_log_compiles": True,
+        "jax_explain_cache_misses": True,
+        "warm_pass_count": 2,
+        "warm_compile_event_count": 0,
+        "warm_cache_miss_count": 0,
+        "unexpected_steady_state_recompile": False,
+        "production_pass": {
+            "compile_event_count": 1,
+            "cache_miss_count": 1,
+            "compile_messages": ["Compiling production grouped VJP"],
+            "cache_miss_messages": ["cache miss production grouped VJP"],
+        },
+        "warm_passes": {
+            "compile_event_count": 0,
+            "cache_miss_count": 0,
+            "compile_messages": [],
+            "cache_miss_messages": [],
+        },
+    }
 
 
 def _weekly_tier5_manifest_path() -> Path:
@@ -2778,6 +2826,51 @@ def test_accumulate_grouped_adjoint_derivative_uses_biotsavart_projection_api(
     assert len(derivative.blocks) == 2
 
 
+def test_grouped_vjp_timing_recorder_streams_without_materializing_all_groups():
+    yielded_groups = [
+        (np.array([[1.0, 2.0, 3.0]]), [0]),
+        (np.array([[4.0, 5.0, 6.0]]), [1]),
+    ]
+    pull_count = 0
+
+    def stream_group_vjps(_adjoint):
+        nonlocal pull_count
+        for entry in yielded_groups:
+            pull_count += 1
+            yield entry
+
+    jr_jax = types.SimpleNamespace(
+        boozer_surface=types.SimpleNamespace(
+            get_adjoint_runtime_state=lambda: types.SimpleNamespace(
+                stream_group_vjps=stream_group_vjps,
+            )
+        )
+    )
+    recorder = _GroupedVJPTimingRecorder(requested_stream_pass_count=2)
+    first_stream = recorder.timed_cotangents(
+        jr_jax,
+        np.ones(2),
+        label="production_derivative_projection",
+    )
+
+    first_entry = next(first_stream)
+    assert pull_count == 1
+    np.testing.assert_allclose(first_entry[0], yielded_groups[0][0])
+    second_entry = next(first_stream)
+    assert pull_count == 2
+    np.testing.assert_allclose(second_entry[0], yielded_groups[1][0])
+    with pytest.raises(StopIteration):
+        next(first_stream)
+
+    summary = recorder.summary(total_representative_run_wall_s=1.25)
+
+    assert summary["requested_stream_pass_count"] == 2
+    assert summary["stream_pass_count"] == 1
+    assert summary["group_count"] == 2
+    assert summary["first_compile_time_s"] >= 0.0
+    assert summary["total_representative_run_wall_s"] == pytest.approx(1.25)
+
+
 def test_compute_direct_and_total_gradients_uses_live_boozer_g(monkeypatch):
     direct_gradient = np.array([7.0, 11.0])
     total_gradient = np.array([5.0, 9.0])
@@ -2881,6 +2974,23 @@ def test_grouped_adjoint_memory_probe_rejects_missing_snapshots_or_nonfinite_gra
     assert any("non-finite implicit gradient" in failure for failure in failures)
 
 
+def test_grouped_adjoint_memory_probe_rejects_missing_timings_or_warm_recompile():
+    failures = evaluate_grouped_adjoint_memory_probe(
+        _grouped_adjoint_memory_metrics(
+            snapshots=_complete_grouped_adjoint_snapshots(),
+            grouped_vjp_timings={},
+            cache_stability={
+                **_complete_grouped_vjp_cache_stability(),
+                "unexpected_steady_state_recompile": True,
+            },
+        ),
+        budget=_grouped_adjoint_budget("cpu"),
+    )
+
+    assert any("required timing fields" in failure for failure in failures)
+    assert any("steady-state grouped-VJP recompilation" in failure for failure in failures)
+
+
 def test_grouped_adjoint_memory_probe_rejects_budget_regressions():
     snapshots = _complete_grouped_adjoint_snapshots()
     snapshots[-1]["rss_mb"] = 9000.0
@@ -2931,6 +3041,8 @@ def test_grouped_adjoint_memory_payload_records_limited_memory_route():
     assert payload["baseline"]["optimizer_method"] == "lbfgs-ondevice"
     assert payload["baseline"]["boozer_limited_memory"] is True
     assert payload["baseline"]["boozer_limited_memory_requested"] is True
+    assert payload["timings"]["first_compile_time_s"] == pytest.approx(0.25)
+    assert payload["cache_stability"]["warm_compile_event_count"] == 0
     assert payload["memory"]["budget"]["max_peak_gpu_memory_mb"] == pytest.approx(12288.0)
     assert payload["memory"]["device_memory_profile_path"] == "/tmp/grouped.prof"
 
@@ -3254,6 +3366,7 @@ def test_weekly_tier5_manifest_includes_grouped_adjoint_memory_probe_command():
             "benchmark_artifacts/jax-compilation-cache/jax_gpu_fast-dense-audit"
         ),
     }
+    assert "--record-jax-compile-diagnostics" in grouped_command["args"]
     assert grouped_command["args"][-2:] == [
         "--device-memory-profile-out",
         "benchmark_artifacts/grouped_adjoint_memory_profile.prof",
@@ -3275,6 +3388,7 @@ def test_weekly_tier5_workflow_sets_cache_and_ondevice_contract():
     assert "--benchmark-mode" in workflow_text
     assert "continue-on-error: true" in workflow_text
     assert "benchmarks/grouped_adjoint_memory_probe.py" in workflow_text
+    assert "--record-jax-compile-diagnostics" in workflow_text
     assert "--device-memory-profile-out benchmark_artifacts/grouped_adjoint_memory_profile.prof" in workflow_text
     assert "if-no-files-found: ignore" in workflow_text
     assert "Fail on benchmark gate regressions" in workflow_text

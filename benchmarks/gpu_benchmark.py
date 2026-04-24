@@ -153,6 +153,7 @@ def main() -> None:
             args.optimizer_backend,
             "--output-json",
             str(grouped_json),
+            "--record-jax-compile-diagnostics",
             "--device-memory-profile-out",
             str(grouped_profile),
         ],

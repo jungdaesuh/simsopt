@@ -64,6 +64,7 @@ jobs:
             --platform cuda \
             --optimizer-backend ondevice \
             --output-json benchmark_artifacts/grouped_adjoint_memory_probe.json \
+            --record-jax-compile-diagnostics \
             --device-memory-profile-out benchmark_artifacts/grouped_adjoint_memory_profile.prof
 
       - name: Render standardized benchmark report

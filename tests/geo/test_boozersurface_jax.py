@@ -1388,6 +1388,31 @@ def _make_mock_boozer_surface_mixed_quad(nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1
     return BoozerSurfaceJAX(bs, surf, label, target, constraint_weight=1.0)
 
 
+class _MockToroidalFluxLabel:
+    def J(self):
+        return 0.0
+
+
+def _make_mock_toroidal_flux_boozer_surface(
+    nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1
+):
+    R0, r = 1.0, 0.1
+    xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
+    qphi = np.linspace(0, 1.0 / nfp, nphi, endpoint=False)
+    qtheta = np.linspace(0, 1.0, ntheta, endpoint=False)
+    sdofs = np.concatenate([xc.ravel(), yc.ravel(), zc.ravel()])
+
+    bs = _MockBiotSavart(_make_mock_coils())
+    surf = _MockSurface(sdofs, mpol, ntor, nfp, False, qphi, qtheta)
+    return BoozerSurfaceJAX(
+        bs,
+        surf,
+        _MockToroidalFluxLabel(),
+        0.0,
+        constraint_weight=1.0,
+    )
+
+
 def _make_spec_only_biotsavart(coils):
     class _SpecOnlyBiotSavart(_MockBiotSavart):
         def __init__(self, grouped_coils):
@@ -1509,6 +1534,73 @@ class TestBoozerSurfaceJAXClass:
         )
 
         assert booz.options["least_squares_algorithm"] == expected_algorithm
+
+    @pytest.mark.parametrize(
+        ("optimizer_backend", "expected_materialize"),
+        [
+            ("scipy", True),
+            ("ondevice", False),
+        ],
+    )
+    def test_instantiation_defaults_materialize_dense_linearization_from_backend(
+        self,
+        optimizer_backend,
+        expected_materialize,
+    ):
+        """Ondevice keeps dense finalization off unless explicitly requested."""
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf, label = _make_basic_mock_surface_and_label()
+
+        booz = BoozerSurfaceJAX(
+            bs,
+            surf,
+            label,
+            1.0,
+            constraint_weight=1.0,
+            options={"optimizer_backend": optimizer_backend},
+        )
+
+        assert booz.options["materialize_dense_linearization"] is expected_materialize
+
+    def test_backend_mutation_refreshes_implicit_dense_linearization_default(self):
+        """Backend mutation must not carry the SciPy dense default into ondevice."""
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf, label = _make_basic_mock_surface_and_label()
+        booz = BoozerSurfaceJAX(
+            bs,
+            surf,
+            label,
+            1.0,
+            constraint_weight=1.0,
+        )
+
+        assert booz.options["optimizer_backend"] == "scipy"
+        assert booz.options["materialize_dense_linearization"] is True
+
+        booz.options["optimizer_backend"] = "ondevice"
+
+        assert booz.options["materialize_dense_linearization"] is False
+
+        booz.options["optimizer_backend"] = "scipy"
+
+        assert booz.options["materialize_dense_linearization"] is True
+
+    def test_backend_mutation_preserves_explicit_dense_linearization_request(self):
+        """Dense artifacts remain available when materialization is explicit."""
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf, label = _make_basic_mock_surface_and_label()
+        booz = BoozerSurfaceJAX(
+            bs,
+            surf,
+            label,
+            1.0,
+            constraint_weight=1.0,
+            options={"materialize_dense_linearization": True},
+        )
+
+        booz.options["optimizer_backend"] = "ondevice"
+
+        assert booz.options["materialize_dense_linearization"] is True
 
     @pytest.mark.parametrize(
         ("backend_mode", "expected_optimizer_backend", "expected_algorithm"),
@@ -1765,10 +1857,24 @@ class TestBoozerSurfaceJAXClass:
         assert captured_methods == ["bfgs"]
         assert res["optimizer_method"] == "bfgs"
 
-    def test_public_ls_api_routes_ondevice_lm(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("explicit_materialize", "expected_materialize"),
+        [
+            (None, False),
+            (True, True),
+        ],
+    )
+    def test_public_ls_api_routes_ondevice_lm(
+        self,
+        monkeypatch,
+        explicit_materialize,
+        expected_materialize,
+    ):
         """The restored public LS method should route to the ondevice LM lane."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
+        if explicit_materialize is not None:
+            booz.options["materialize_dense_linearization"] = explicit_materialize
         captured = {}
 
         def fake_target_least_squares(
@@ -1782,8 +1888,9 @@ class TestBoozerSurfaceJAXClass:
             callback=None,
             progress_callback=None,
         ):
-            del residual_fn, tol, maxiter, options, callback, progress_callback
+            del residual_fn, tol, maxiter, callback, progress_callback
             captured["method"] = method
+            captured["options"] = dict(options or {})
             flat_x0, _ = ravel_pytree(x0)
             return types.SimpleNamespace(
                 x=x0,
@@ -1802,6 +1909,14 @@ class TestBoozerSurfaceJAXClass:
         )
 
         assert captured["method"] == "lm-ondevice"
+        assert (
+            captured["options"]["materialize_dense_linearization"]
+            is expected_materialize
+        )
+        assert (
+            captured["options"]["max_dense_linearization_bytes"]
+            == booz.options["max_dense_linearization_bytes"]
+        )
         assert res["optimizer_method"] == "lm-ondevice"
         assert res["success"] is True
         assert booz.need_to_run_code is False
@@ -2411,6 +2526,55 @@ class TestBoozerSurfaceJAXClass:
             atol=1e-12,
         )
 
+    def test_newton_polish_dense_hessian_matches_jacfwd_grad_candidate(self):
+        """Benchmark candidates must preserve the current dense Hessian value."""
+
+        def obj(x):
+            return (
+                0.5 * jnp.dot(x, jnp.array([2.0, 3.0, 4.0]) * x)
+                + 0.1 * x[0] * x[1]
+                + 1.0e-3 * jnp.sum(jnp.sin(x) ** 2)
+            )
+
+        x = jnp.asarray([0.25, -0.5, 0.75], dtype=jnp.float64)
+        hvp_fn = _opt._hessian_vector_product_fn(obj)
+
+        current = _opt._materialize_dense_hessian(hvp_fn, x)
+        candidate = jax.jacfwd(jax.grad(obj))(x)
+
+        np.testing.assert_allclose(
+            np.asarray(current),
+            np.asarray(candidate),
+            rtol=1e-10,
+            atol=1e-10,
+        )
+
+    def test_newton_polish_dense_hessian_symmetrizes_numerical_asymmetry(self):
+        """Dense-compatible Hessian artifacts keep the current symmetrization."""
+        operator = jnp.asarray(
+            [
+                [2.0, 0.5 + 1.0e-8, -0.25],
+                [0.5 - 2.0e-8, 3.0, 0.75 + 3.0e-8],
+                [-0.25, 0.75 - 1.0e-8, 4.0],
+            ],
+            dtype=jnp.float64,
+        )
+
+        def hvp_fn(_x, v):
+            return operator @ v
+
+        dense = _opt._materialize_dense_hessian(
+            hvp_fn,
+            jnp.zeros(3, dtype=jnp.float64),
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(dense),
+            np.asarray(0.5 * (operator + operator.T)),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
     def test_recompute_bell(self):
         """recompute_bell sets the dirty flag."""
         booz = _make_mock_boozer_surface()
@@ -2539,6 +2703,77 @@ class TestBoozerSurfaceJAXClass:
         assert "iota" in res
         assert booz.need_to_run_code is False
 
+    def test_run_code_ondevice_default_keeps_dense_hessian_materialization_off(
+        self,
+        monkeypatch,
+    ):
+        """The target lane must pass materialize_hessian=False by default."""
+        bs = _MockBiotSavart(_make_mock_coils())
+        surf, label = _make_basic_mock_surface_and_label()
+        booz = BoozerSurfaceJAX(
+            bs,
+            surf,
+            label,
+            1.0,
+            constraint_weight=1.0,
+            options={"optimizer_backend": "ondevice"},
+        )
+        captured = {}
+
+        def fake_target_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            progress_callback=None,
+        ):
+            del fun, method, tol, maxiter, options, progress_callback
+            return _successful_minimize_result(x0)
+
+        def fake_newton_polish(
+            _objective_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            stab,
+            materialize_hessian=True,
+            max_dense_hessian_bytes=None,
+            progress_callback=None,
+            objective_args=(),
+        ):
+            del (
+                maxiter,
+                tol,
+                stab,
+                max_dense_hessian_bytes,
+                progress_callback,
+                objective_args,
+            )
+            captured["materialize_hessian"] = materialize_hessian
+            return {
+                "x": x0,
+                "fun": jnp.asarray(0.0),
+                "grad": jnp.zeros_like(x0),
+                "hessian": None,
+                "nit": 0,
+                "success": True,
+                "hessian_materialized": False,
+            }
+
+        monkeypatch.setattr(_bsj, "target_minimize", fake_target_minimize)
+        _patch_newton_polish_runner(monkeypatch, fake_newton_polish)
+
+        res = booz.run_code(iota=0.3, G=0.05)
+
+        assert captured["materialize_hessian"] is False
+        assert res["hessian"] is None
+        assert res["PLU"] is None
+        assert res["hessian_materialized"] is False
+
     def test_run_code_rejects_removed_hybrid_backend_after_options_mutation(self):
         """Mutated option dicts must not revive the removed hybrid backend."""
         booz = _make_mock_boozer_surface()
@@ -2555,10 +2790,24 @@ class TestBoozerSurfaceJAXClass:
         with pytest.raises(ValueError, match="optimizer_backend must be one of"):
             booz.run_code(iota=0.3, G=0.05)
 
-    def test_run_code_routes_lm_least_squares_contract(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("explicit_materialize", "expected_materialize"),
+        [
+            (None, False),
+            (True, True),
+        ],
+    )
+    def test_run_code_routes_lm_least_squares_contract(
+        self,
+        monkeypatch,
+        explicit_materialize,
+        expected_materialize,
+    ):
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["least_squares_algorithm"] = "lm"
+        if explicit_materialize is not None:
+            booz.options["materialize_dense_linearization"] = explicit_materialize
 
         captured = {}
 
@@ -2573,8 +2822,9 @@ class TestBoozerSurfaceJAXClass:
             callback=None,
             progress_callback=None,
         ):
-            del residual_fn, tol, maxiter, options, callback, progress_callback
+            del residual_fn, tol, maxiter, callback, progress_callback
             captured["method"] = method
+            captured["options"] = dict(options or {})
             flat_x0, _ = ravel_pytree(x0)
             return types.SimpleNamespace(
                 x=x0,
@@ -2610,6 +2860,14 @@ class TestBoozerSurfaceJAXClass:
         res = booz.run_code(iota=0.3, G=0.05)
 
         assert captured["method"] == "lm-ondevice"
+        assert (
+            captured["options"]["materialize_dense_linearization"]
+            is expected_materialize
+        )
+        assert (
+            captured["options"]["max_dense_linearization_bytes"]
+            == booz.options["max_dense_linearization_bytes"]
+        )
         assert res["optimizer_method"] == "lm-ondevice"
         assert res["success"] is True
 
@@ -4586,10 +4844,24 @@ class TestBoozerSurfaceJAXExactPath:
             np.asarray(expected_grad),
         )
 
-    def test_run_code_traceable_ls_routes_lm_ondevice(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("explicit_materialize", "expected_materialize"),
+        [
+            (None, False),
+            (True, True),
+        ],
+    )
+    def test_run_code_traceable_ls_routes_lm_ondevice(
+        self,
+        monkeypatch,
+        explicit_materialize,
+        expected_materialize,
+    ):
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["least_squares_algorithm"] = "lm"
+        if explicit_materialize is not None:
+            booz.options["materialize_dense_linearization"] = explicit_materialize
         coil_set_spec = booz.coil_set_spec
         sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
         iota = jnp.asarray(0.3, dtype=jnp.float64)
@@ -4611,13 +4883,12 @@ class TestBoozerSurfaceJAXExactPath:
             progress_callback=None,
             args=(),
         ):
-            del (
-                maxiter,
-                tol,
-                materialize_dense_linearization,
-                max_dense_linearization_bytes,
-                callback,
-                progress_callback,
+            del maxiter, tol, callback, progress_callback
+            captured["materialize_dense_linearization"] = (
+                materialize_dense_linearization
+            )
+            captured["max_dense_linearization_bytes"] = (
+                max_dense_linearization_bytes
             )
             captured["residual"] = residual_fn(x0, *args)
             return {
@@ -4655,6 +4926,11 @@ class TestBoozerSurfaceJAXExactPath:
 
         assert result["optimizer_method"] == "lm-ondevice"
         assert bool(result["success"])
+        assert captured["materialize_dense_linearization"] is expected_materialize
+        assert (
+            captured["max_dense_linearization_bytes"]
+            == booz.options["max_dense_linearization_bytes"]
+        )
         assert jnp.all(jnp.isfinite(captured["residual"]))
 
     def test_run_code_traceable_lm_ondevice_executes_inner_solve_on_gpu(
@@ -5319,6 +5595,123 @@ class TestVJPHooks:
         grouped_entries = list(vjp_groups_fn(lm, booz, res["iota"], res["G"]))
 
         assert len(grouped_entries) == len(booz.coil_groups)
+
+    def test_ls_reduced_directional_requires_spatial_field_derivatives(self):
+        """Symmetric FD catches the missing dB/dX * dgamma LS adjoint term."""
+        booz = _make_mock_boozer_surface()
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+        x, optimize_G = _bsj._ls_decision_vector(booz, iota, G)
+
+        direction = np.zeros(int(x.shape[0]), dtype=np.float64)
+        direction[: min(5, direction.size - 2)] = np.linspace(
+            0.2,
+            1.0,
+            min(5, direction.size - 2),
+        )
+        direction /= np.linalg.norm(direction)
+        direction = jnp.asarray(direction, dtype=jnp.float64)
+
+        snapshot = _bsj._build_ls_grouped_vjp_snapshot(
+            booz,
+            iota,
+            G,
+            solve_generation=booz._solver_generation,
+            weight_inv_modB=True,
+        )
+        full_directional = _bsj._ls_directional_from_field_terms(
+            snapshot,
+            snapshot.field_terms,
+            direction,
+        )
+        dropped_spatial = _bsj._BoozerLocalFieldTerms(
+            B=snapshot.field_terms.B,
+            dB_dX=jnp.zeros_like(snapshot.field_terms.dB_dX),
+        )
+        dropped_directional = _bsj._ls_directional_from_field_terms(
+            snapshot,
+            dropped_spatial,
+            direction,
+        )
+
+        objective = _bsj._make_ls_penalty_objective(
+            booz,
+            booz._coil_arrays,
+            optimize_G,
+            True,
+        )
+        eps = 1.0e-5
+        fd_directional = (
+            objective(x + eps * direction) - objective(x - eps * direction)
+        ) / (2.0 * eps)
+
+        np.testing.assert_allclose(
+            np.asarray(full_directional),
+            np.asarray(fd_directional),
+            rtol=1e-8,
+            atol=1e-10,
+        )
+        assert abs(float(dropped_directional - fd_directional)) > 1e-7
+
+    @pytest.mark.parametrize("stellsym", [False, True])
+    def test_ls_group_vjp_snapshot_static_metadata_is_hashable(self, stellsym):
+        """Registered callback snapshots must be valid JIT pytrees."""
+        booz = _make_mock_boozer_surface(stellsym=stellsym)
+        snapshot = _bsj._build_ls_grouped_vjp_snapshot(
+            booz,
+            jnp.asarray(0.3, dtype=jnp.float64),
+            jnp.asarray(0.05, dtype=jnp.float64),
+            solve_generation=booz._solver_generation,
+            weight_inv_modB=True,
+        )
+
+        assert all(isinstance(indices, tuple) for indices in snapshot.coil_indices)
+
+        @jax.jit
+        def snapshot_scalar(snap):
+            return snap.iota + snap.G
+
+        np.testing.assert_allclose(
+            np.asarray(snapshot_scalar(snapshot)),
+            np.asarray(snapshot.iota + snapshot.G),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    def test_ls_group_vjp_toroidal_flux_matches_full_vjp(self):
+        """Streaming LS VJP must include A and dA/dX terms for toroidal flux."""
+        booz = _make_mock_toroidal_flux_boozer_surface()
+        booz.need_to_run_code = False
+        booz._solver_generation = 1
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+        x, _ = _bsj._ls_decision_vector(booz, iota, G)
+        lm = jnp.linspace(0.25, 1.25, int(x.shape[0]), dtype=jnp.float64)
+
+        full_d_coil_arrays, full_coil_indices = _bsj._boozer_ls_coil_vjp(
+            lm,
+            booz,
+            iota,
+            G,
+        )
+        streamed = list(
+            _bsj._boozer_ls_coil_vjp_groups(
+                lm,
+                booz,
+                iota,
+                G,
+            )
+        )
+
+        assert [indices for _, indices in streamed] == full_coil_indices
+        for (streamed_arrays, _), full_arrays in zip(streamed, full_d_coil_arrays):
+            for streamed_arr, full_arr in zip(streamed_arrays, full_arrays):
+                np.testing.assert_allclose(
+                    np.asarray(streamed_arr, dtype=float),
+                    np.asarray(full_arr, dtype=float),
+                    rtol=1e-10,
+                    atol=1e-10,
+                )
 
     def test_run_code_rejects_bad_group_vjp_signature(self, monkeypatch):
         """run_code() must fail fast when grouped VJP hooks have the wrong arity."""

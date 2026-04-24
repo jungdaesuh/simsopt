@@ -1906,6 +1906,9 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert res["type"] == "ls"
         assert np.isfinite(res["fun"])
         assert np.max(np.abs(np.asarray(res["jacobian"]))) < 1.0e-6
-        assert res["PLU"] is not None
+        assert res["PLU"] is None
+        assert bool(np.asarray(res["hessian_materialized"])) is False
+        assert res["dense_linear_solve_factors_available"] is False
+        assert res["linear_solve_backend"] == "operator"
         assert callable(res["vjp"])
         assert res["optimizer_method"] == "lbfgs-ondevice"
