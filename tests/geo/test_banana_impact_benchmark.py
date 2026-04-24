@@ -65,10 +65,7 @@ class BananaImpactBenchmarkTests(unittest.TestCase):
         self.assertEqual(result["dimension"], 8)
         self.assertGreaterEqual(result["seconds_min"], 0.0)
         self.assertGreaterEqual(result["python_peak_bytes"], 0)
-        self.assertGreaterEqual(
-            result["process_maxrss_after_bytes"],
-            result["process_maxrss_before_bytes"],
-        )
+        self.assertGreaterEqual(result["process_peak_rss_bytes"], 0)
         self.assertGreaterEqual(result["iterations_median"], 0)
         self.assertGreaterEqual(result["function_evaluations_median"], 1)
         self.assertGreaterEqual(result["final_objective_median"], 0.0)

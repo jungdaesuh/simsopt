@@ -393,33 +393,37 @@ Impact:
 
 - Added `benchmark_lbfgsb_maxcor.py` and measured the P3 comparison set on a
   deterministic 160-DOF, 30-iteration L-BFGS-B fixture.
-- Selected `maxcor=40` as the shared banana default. `20` used less memory but
-  ended the fixed short run with a worse gradient norm. `40`, `60`, and `300`
+- Selected `maxcor=40` as the shared banana default. `20` used less Python heap
+  but ended the fixed short run with a worse gradient norm. `40`, `60`, and `300`
   reached the same final objective and gradient on the fixture, while `40`
   avoided most of the allocation growth from larger histories.
-- Benchmark output from
-  `/tmp/banana_lbfgsb_maxcor_p3.json`:
-  - `20`: median 0.006651 s, Python peak 257420 bytes, final objective
-    `1.111026e+01`, gradient infinity norm `8.814162e+00`.
-  - `40`: median 0.006725 s, Python peak 571674 bytes, final objective
-    `1.109831e+01`, gradient infinity norm `4.840545e+00`.
-  - `60`: median 0.006579 s, Python peak 1028468 bytes, final objective
-    `1.109831e+01`, gradient infinity norm `4.840545e+00`.
-  - `300`: median 0.007171 s, Python peak 17493703 bytes, final objective
-    `1.109831e+01`, gradient infinity norm `4.840545e+00`.
+- Benchmark output from the isolated per-`maxcor` process run
+  `/tmp/banana_lbfgsb_maxcor_p3_remaining.json`:
+  - `20`: median 0.006907 s, Python peak 257629 bytes, process peak RSS
+    79953920 bytes, final objective `1.111026e+01`, gradient infinity norm
+    `8.814162e+00`.
+  - `40`: median 0.006795 s, Python peak 574832 bytes, process peak RSS
+    79642624 bytes, final objective `1.109831e+01`, gradient infinity norm
+    `4.840545e+00`.
+  - `60`: median 0.007010 s, Python peak 1029686 bytes, process peak RSS
+    80543744 bytes, final objective `1.109831e+01`, gradient infinity norm
+    `4.840545e+00`.
+  - `300`: median 0.006869 s, Python peak 17496539 bytes, process peak RSS
+    87310336 bytes, final objective `1.109831e+01`, gradient infinity norm
+    `4.840545e+00`.
 - Single-stage, Stage 2, and the goal-mode wrapper now share the measured
   banana default through `banana_opt.lbfgsb_defaults.DEFAULT_LBFGSB_MAXCOR`;
   Stage 2 now exposes `--maxcor`, so explicit CLI/env overrides remain
   available.
-- `BoozerSurface` limited-memory LS now uses `maxcor=40` instead of `200`,
-  matching the measured banana default while preserving the existing
-  `limited_memory=False` BFGS path.
+- `BoozerSurface` limited-memory LS was reviewed and left at its prior core
+  default because the banana quadratic fixture is not a Boozer residual
+  convergence proof.
 
 Validation:
 
 - `npx ctx7@latest library SciPy "P3 maxcor L-BFGS-B SciPy minimize option maxcor limited memory correction pairs"`
 - `npx ctx7@latest docs /scipy/scipy "L-BFGS-B maxcor option number of correction pairs minimize options memory"`
-- `python examples/single_stage_optimization/benchmark_lbfgsb_maxcor.py --maxcor 20 --maxcor 40 --maxcor 60 --maxcor 300 --dimension 160 --maxiter 30 --repeat 3 --warmup 1 --output /tmp/banana_lbfgsb_maxcor_p3.json`
+- `python examples/single_stage_optimization/benchmark_lbfgsb_maxcor.py --maxcor 20 --maxcor 40 --maxcor 60 --maxcor 300 --dimension 160 --maxiter 30 --repeat 3 --warmup 1 --output /tmp/banana_lbfgsb_maxcor_p3_remaining.json`
 - `python -m ruff check examples/single_stage_optimization/banana_opt/lbfgsb_defaults.py examples/single_stage_optimization/benchmark_lbfgsb_maxcor.py examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py examples/single_stage_optimization/STAGE_2/banana_coil_solver.py examples/single_stage_optimization/run_single_stage_goal_mode_comparison.py tests/geo/test_banana_impact_benchmark.py tests/geo/test_single_stage_example.py tests/geo/test_single_stage_workflow_helpers.py src/simsopt/geo/boozersurface.py`
 - `python -m py_compile examples/single_stage_optimization/banana_opt/lbfgsb_defaults.py examples/single_stage_optimization/benchmark_lbfgsb_maxcor.py examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py examples/single_stage_optimization/STAGE_2/banana_coil_solver.py examples/single_stage_optimization/run_single_stage_goal_mode_comparison.py src/simsopt/geo/boozersurface.py`
 - `python -m pytest tests/geo/test_banana_impact_benchmark.py -q`

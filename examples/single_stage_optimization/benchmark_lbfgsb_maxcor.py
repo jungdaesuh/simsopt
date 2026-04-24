@@ -9,6 +9,7 @@ import json
 import platform
 import resource
 import statistics
+import subprocess
 import sys
 import time
 import tracemalloc
@@ -84,6 +85,33 @@ def measure_maxcor(
     repeat: int,
     warmup: int,
 ) -> dict[str, object]:
+    command = [
+        sys.executable,
+        __file__,
+        "--measure-one",
+        "--maxcor",
+        str(maxcor),
+        "--dimension",
+        str(dimension),
+        "--maxiter",
+        str(maxiter),
+        "--repeat",
+        str(repeat),
+        "--warmup",
+        str(warmup),
+    ]
+    completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    return json.loads(completed.stdout)
+
+
+def _measure_maxcor_in_process(
+    *,
+    maxcor: int,
+    dimension: int,
+    maxiter: int,
+    repeat: int,
+    warmup: int,
+) -> dict[str, object]:
     scale, target = _fixture_parameters(dimension)
     objective = _fixture_objective(scale, target)
     x0 = np.full(dimension, 0.35, dtype=float)
@@ -101,7 +129,6 @@ def measure_maxcor(
 
     gc.collect()
     tracemalloc.start()
-    rss_before = _maxrss_bytes()
     times = []
     final_objectives = []
     projected_grad_norms = []
@@ -139,8 +166,7 @@ def measure_maxcor(
         "seconds_median": statistics.median(times),
         "seconds_mean": statistics.mean(times),
         "python_peak_bytes": int(peak_bytes),
-        "process_maxrss_before_bytes": int(rss_before),
-        "process_maxrss_after_bytes": int(_maxrss_bytes()),
+        "process_peak_rss_bytes": int(_maxrss_bytes()),
         "iterations_median": statistics.median(iterations),
         "function_evaluations_median": statistics.median(evaluations),
         "final_objective_median": statistics.median(final_objectives),
@@ -192,6 +218,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=_positive_int,
         help="maxcor value to benchmark. Repeat to compare values. Defaults to the P3 set.",
     )
+    parser.add_argument("--measure-one", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dimension", type=_positive_int, default=160)
     parser.add_argument("--maxiter", type=_positive_int, default=30)
     parser.add_argument("--repeat", type=_positive_int, default=3)
@@ -202,6 +229,23 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    if args.measure_one:
+        if args.maxcor is None or len(args.maxcor) != 1:
+            raise ValueError("--measure-one requires exactly one --maxcor")
+        print(
+            json.dumps(
+                _measure_maxcor_in_process(
+                    maxcor=args.maxcor[0],
+                    dimension=args.dimension,
+                    maxiter=args.maxiter,
+                    repeat=args.repeat,
+                    warmup=args.warmup,
+                ),
+                sort_keys=True,
+            )
+        )
+        return 0
+
     maxcor_values = args.maxcor if args.maxcor is not None else LBFGSB_MAXCOR_BENCHMARK_VALUES
     report = build_report(
         maxcor_values,

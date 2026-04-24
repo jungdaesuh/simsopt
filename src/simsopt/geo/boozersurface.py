@@ -670,7 +670,7 @@ class BoozerSurface(Optimizable):
         method = 'L-BFGS-B' if limited_memory else 'BFGS'
         options = {'maxiter': maxiter, 'gtol': tol}
         if limited_memory:
-            options['maxcor'] = 40
+            options['maxcor'] = 200
             options['ftol'] = tol
 
         res = minimize(
