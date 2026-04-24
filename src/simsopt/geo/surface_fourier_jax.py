@@ -90,6 +90,10 @@ def _selector_matrix(size, positions):
     return _as_jax_float64(matrix)
 
 
+def _slice_indices(start: int, size: int):
+    return _as_jax_int32(start) + jnp.arange(size, dtype=jnp.int32)
+
+
 _SCATTER_SET_DIMS_1D = lax.ScatterDimensionNumbers(
     update_window_dims=(),
     inserted_window_dims=(0,),
@@ -444,9 +448,8 @@ def _scatter_surface_xyzfourier_dofs(dofs, mpol, ntor, stellsym):
 
     def _scatter_segment(source, start, count, fill_start):
         flat = _zeros(n_per, source.dtype)
-        return flat.at[fill_start : fill_start + count].set(
-            source[start : start + count]
-        )
+        values = jnp.take(source, _slice_indices(start, count), axis=0)
+        return flat.at[_slice_indices(fill_start, count)].set(values)
 
     if stellsym:
         xc = _scatter_segment(dofs, 0, cos_count, ntor).reshape(shape)
