@@ -677,6 +677,12 @@ Impact measure:
 
 - The harness itself should produce stable JSON/markdown output for before/after
   comparisons.
+- The JSON schema now includes `process_peak_rss_bytes`; markdown output renders
+  the same fixture timing, Python allocation, RSS, and checksum fields as a
+  comparison table.
+- Default fixture reports now measure each built-in fixture in a fresh subprocess
+  so `process_peak_rss_bytes` is attributable to that fixture instead of a
+  previous fixture in the same process.
 
 Completion:
 
@@ -691,6 +697,8 @@ Validation:
 - `python3 -m py_compile examples/single_stage_optimization/benchmark_banana_impact.py tests/geo/test_banana_impact_benchmark.py`
 - `python3 -m ruff check examples/single_stage_optimization/benchmark_banana_impact.py tests/geo/test_banana_impact_benchmark.py`
 - `python3 examples/single_stage_optimization/benchmark_banana_impact.py --repeat 1 --warmup 0 --output /tmp/banana_impact_sample.json`
+- `python3 examples/single_stage_optimization/benchmark_banana_impact.py --fixture biot-savart --repeat 1 --warmup 0 --format markdown --output /tmp/banana_impact_sample.md`
+- `/opt/homebrew/Caskroom/miniforge/base/bin/python3 /Users/suhjungdae/code/columbia/simsopt-surrogate/examples/single_stage_optimization/benchmark_banana_impact.py --fixture biot-savart --repeat 1 --warmup 0 --format json`
 
 ### M2. Reduce `Derivative` accumulation copies
 

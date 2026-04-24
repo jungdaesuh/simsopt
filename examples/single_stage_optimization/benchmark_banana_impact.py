@@ -14,6 +14,7 @@ import json
 import platform
 import resource
 import statistics
+import subprocess
 import sys
 import time
 import tracemalloc
@@ -23,6 +24,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+
+from import_provenance import configure_local_simsopt_imports
+
+SIMSOPT_ROOT = Path(__file__).resolve().parents[2]
+configure_local_simsopt_imports(simsopt_root=str(SIMSOPT_ROOT))
 
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.field.coil import Current, coils_via_symmetries
@@ -219,11 +225,33 @@ def measure_operation(
         "seconds_median": statistics.median(times),
         "seconds_mean": statistics.mean(times),
         "python_peak_bytes": int(peak_bytes),
+        "process_peak_rss_bytes": int(rss_after),
         "process_maxrss_before_bytes": int(rss_before),
         "process_maxrss_after_bytes": int(rss_after),
         "checksum_first": checksums[0],
         "checksum_last": checksums[-1],
     }
+
+
+def measure_fixture(
+    fixture_name: str,
+    *,
+    repeat: int,
+    warmup: int,
+) -> dict[str, object]:
+    command = [
+        sys.executable,
+        __file__,
+        "--measure-one",
+        "--fixture",
+        fixture_name,
+        "--repeat",
+        str(repeat),
+        "--warmup",
+        str(warmup),
+    ]
+    completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    return json.loads(completed.stdout)
 
 
 def build_report(
@@ -236,15 +264,24 @@ def build_report(
     results = []
     for fixture_name in selected_fixture_names:
         fixture = fixtures[fixture_name]
-        results.append(
-            measure_operation(
-                name=fixture.name,
-                description=fixture.description,
-                build=fixture.build,
-                repeat=repeat,
-                warmup=warmup,
+        if fixtures is FIXTURES:
+            results.append(
+                measure_fixture(
+                    fixture.name,
+                    repeat=repeat,
+                    warmup=warmup,
+                )
             )
-        )
+        else:
+            results.append(
+                measure_operation(
+                    name=fixture.name,
+                    description=fixture.description,
+                    build=fixture.build,
+                    repeat=repeat,
+                    warmup=warmup,
+                )
+            )
     return {
         "schema_version": SCHEMA_VERSION,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -255,6 +292,36 @@ def build_report(
         "fixtures": selected_fixture_names,
         "results": results,
     }
+
+
+def _format_bytes(num_bytes: object) -> str:
+    return f"{int(num_bytes) / (1024 * 1024):.3f} MiB"
+
+
+def render_markdown_report(report: Mapping[str, object]) -> str:
+    lines = [
+        "# Banana Impact Benchmark",
+        "",
+        f"- Schema: `{report['schema_version']}`",
+        f"- Created UTC: `{report['created_at_utc']}`",
+        f"- Repeat: `{report['repeat']}`",
+        f"- Warmup: `{report['warmup']}`",
+        "",
+        "| Fixture | Median seconds | Mean seconds | Python peak | Process peak RSS | Checksum first | Checksum last |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for result in report["results"]:
+        lines.append(
+            "| "
+            f"{result['name']} | "
+            f"{float(result['seconds_median']):.9g} | "
+            f"{float(result['seconds_mean']):.9g} | "
+            f"{_format_bytes(result['python_peak_bytes'])} | "
+            f"{_format_bytes(result['process_peak_rss_bytes'])} | "
+            f"{float(result['checksum_first']):.9g} | "
+            f"{float(result['checksum_last']):.9g} |"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _positive_int(value: str) -> int:
@@ -281,23 +348,46 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         choices=["all", *sorted(FIXTURES)],
         help="Fixture to run. Repeat the flag to run several fixtures. Defaults to all.",
     )
+    parser.add_argument("--measure-one", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--repeat", type=_positive_int, default=5)
     parser.add_argument("--warmup", type=_nonnegative_int, default=1)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--format", choices=["json", "markdown"], default="json")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     fixture_names = args.fixture if args.fixture is not None else ["all"]
+    if args.measure_one:
+        if len(fixture_names) != 1 or fixture_names[0] == "all":
+            raise ValueError("--measure-one requires exactly one concrete --fixture")
+        fixture = FIXTURES[fixture_names[0]]
+        print(
+            json.dumps(
+                measure_operation(
+                    name=fixture.name,
+                    description=fixture.description,
+                    build=fixture.build,
+                    repeat=args.repeat,
+                    warmup=args.warmup,
+                ),
+                sort_keys=True,
+            )
+        )
+        return 0
+
     report = build_report(fixture_names, repeat=args.repeat, warmup=args.warmup)
-    payload = json.dumps(report, indent=2, sort_keys=True)
+    if args.format == "json":
+        payload = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    else:
+        payload = render_markdown_report(report)
 
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(payload + "\n", encoding="utf-8")
+        args.output.write_text(payload, encoding="utf-8")
     else:
-        print(payload)
+        print(payload, end="")
 
     return 0
 
