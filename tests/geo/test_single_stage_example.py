@@ -3272,6 +3272,18 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertTrue(args.minimal_artifacts)
 
+    def test_parse_args_accepts_full_artifacts(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            ["single_stage_banana_example.py", "--full-artifacts"],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.full_artifacts)
+
     def test_outer_optimizer_progress_records_for_all_target_lane_runs(self):
         module = self.load_module()
 
@@ -3597,6 +3609,21 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertFalse(module.should_write_single_stage_full_artifacts(False, True))
         self.assertFalse(module.should_write_single_stage_full_artifacts(True, False))
         self.assertFalse(module.should_write_single_stage_full_artifacts(True, True))
+        self.assertFalse(
+            module.should_write_single_stage_full_artifacts(
+                False,
+                False,
+                backend="jax",
+            )
+        )
+        self.assertTrue(
+            module.should_write_single_stage_full_artifacts(
+                False,
+                False,
+                backend="jax",
+                full_artifacts=True,
+            )
+        )
 
     def test_should_write_single_stage_restart_artifacts_only_skips_benchmark(self):
         module = self.load_module()

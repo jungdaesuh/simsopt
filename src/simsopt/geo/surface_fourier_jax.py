@@ -25,8 +25,6 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
-from simsopt.jax_core._math_utils import as_runtime_float64 as _as_runtime_float64
-
 __all__ = [
     "build_theta_basis",
     "build_phi_basis",
@@ -55,6 +53,11 @@ def _as_jax_float64(value):
     if isinstance(value, jax.Array):
         return jnp.asarray(value, dtype=jnp.float64)
     return jax.device_put(np.asarray(value, dtype=np.float64))
+
+
+def _as_runtime_float64(value, *, reference):
+    del reference
+    return _as_jax_float64(value)
 
 
 def _as_jax_int32(value):
@@ -439,10 +442,25 @@ def _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices):
     return _split_flat_to_xyzc(dofs, mpol, ntor)
 
 
-def _scatter_surface_xyzfourier_dofs(dofs, mpol, ntor, stellsym):
+def _scatter_surface_xyzfourier_dofs(
+    dofs,
+    mpol,
+    ntor,
+    stellsym,
+    scatter_indices=None,
+    coeff_template=None,
+):
     """Unpack ``SurfaceXYZFourier`` DOFs into six coefficient matrices."""
     shape = (mpol + 1, 2 * ntor + 1)
     n_per = shape[0] * shape[1]
+    if scatter_indices is not None and coeff_template is not None:
+        return _scatter_surface_xyzfourier_dofs_from_template(
+            dofs,
+            shape,
+            scatter_indices,
+            coeff_template,
+        )
+
     cos_count = n_per - ntor
     sin_count = n_per - (ntor + 1)
 
@@ -476,6 +494,24 @@ def _scatter_surface_xyzfourier_dofs(dofs, mpol, ntor, stellsym):
     offset += cos_count
     zs = _scatter_segment(dofs, offset, sin_count, ntor + 1).reshape(shape)
     return xc, xs, yc, ys, zc, zs
+
+
+def _scatter_surface_xyzfourier_dofs_from_template(
+    dofs,
+    shape,
+    scatter_indices,
+    coeff_template,
+):
+    coeffs = lax.scatter(
+        coeff_template,
+        _as_jax_int32(scatter_indices).reshape(-1, 1),
+        _as_jax_float64(dofs),
+        _SCATTER_SET_DIMS_1D,
+        indices_are_sorted=True,
+        unique_indices=True,
+        mode=lax.GatherScatterMode.PROMISE_IN_BOUNDS,
+    )
+    return tuple(jnp.reshape(coeffs, (6, *shape)))
 
 
 def _surface_xyzfourier_basis(quadpoints_phi, quadpoints_theta, mpol, ntor, nfp):
@@ -529,6 +565,8 @@ def surface_xyzfourier_gamma_from_dofs(
     ntor,
     nfp,
     stellsym,
+    scatter_indices=None,
+    coeff_template=None,
 ):
     """Evaluate ``SurfaceXYZFourier.gamma()`` as a pure JAX function."""
     xc, xs, yc, ys, zc, zs = _scatter_surface_xyzfourier_dofs(
@@ -536,6 +574,8 @@ def surface_xyzfourier_gamma_from_dofs(
         mpol,
         ntor,
         stellsym,
+        scatter_indices,
+        coeff_template,
     )
     cos_angle, sin_angle, _m, _n = _surface_xyzfourier_basis(
         quadpoints_phi,
@@ -563,6 +603,8 @@ def surface_xyzfourier_gammadash1_from_dofs(
     ntor,
     nfp,
     stellsym,
+    scatter_indices=None,
+    coeff_template=None,
 ):
     """Evaluate ``SurfaceXYZFourier.gammadash1()`` as a pure JAX function."""
     xc, xs, yc, ys, zc, zs = _scatter_surface_xyzfourier_dofs(
@@ -570,6 +612,8 @@ def surface_xyzfourier_gammadash1_from_dofs(
         mpol,
         ntor,
         stellsym,
+        scatter_indices,
+        coeff_template,
     )
     cos_angle, sin_angle, _m, n = _surface_xyzfourier_basis(
         quadpoints_phi,
@@ -614,6 +658,8 @@ def surface_xyzfourier_gammadash2_from_dofs(
     ntor,
     nfp,
     stellsym,
+    scatter_indices=None,
+    coeff_template=None,
 ):
     """Evaluate ``SurfaceXYZFourier.gammadash2()`` as a pure JAX function."""
     xc, xs, yc, ys, zc, zs = _scatter_surface_xyzfourier_dofs(
@@ -621,6 +667,8 @@ def surface_xyzfourier_gammadash2_from_dofs(
         mpol,
         ntor,
         stellsym,
+        scatter_indices,
+        coeff_template,
     )
     cos_angle, sin_angle, m, _n = _surface_xyzfourier_basis(
         quadpoints_phi,

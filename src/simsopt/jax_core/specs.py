@@ -12,10 +12,12 @@ from dataclasses import dataclass
 from typing import Literal, Union
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from ._math_utils import (
     as_jax_float64 as _as_float64_array,
+    as_jax_int32 as _as_int32_array,
     as_runtime_float64 as _as_runtime_float64,
 )
 
@@ -298,6 +300,21 @@ jax.tree_util.register_dataclass(
 
 
 @dataclass(frozen=True)
+class FixedSurfaceGeometrySpec:
+    """Immutable fixed-surface point/normal payload."""
+
+    gamma: jax.Array
+    normal: jax.Array
+
+
+jax.tree_util.register_dataclass(
+    FixedSurfaceGeometrySpec,
+    data_fields=["gamma", "normal"],
+    meta_fields=[],
+)
+
+
+@dataclass(frozen=True)
 class SurfaceRZFourierSpec:
     """Immutable fixed-surface payload for pure JAX SurfaceRZFourier geometry."""
 
@@ -328,6 +345,83 @@ jax.tree_util.register_dataclass(
 
 
 @dataclass(frozen=True)
+class SurfaceXYZFourierSpec:
+    """Immutable fixed-surface payload for pure JAX SurfaceXYZFourier geometry."""
+
+    dofs: jax.Array
+    quadpoints_phi: jax.Array
+    quadpoints_theta: jax.Array
+    scatter_indices: jax.Array
+    coeff_template: jax.Array
+    nfp: int
+    stellsym: bool
+    mpol: int
+    ntor: int
+
+
+jax.tree_util.register_dataclass(
+    SurfaceXYZFourierSpec,
+    data_fields=[
+        "dofs",
+        "quadpoints_phi",
+        "quadpoints_theta",
+        "scatter_indices",
+        "coeff_template",
+    ],
+    meta_fields=["nfp", "stellsym", "mpol", "ntor"],
+)
+
+
+@dataclass(frozen=True)
+class SurfaceXYZTensorFourierSpec:
+    """Immutable fixed-surface payload for pure JAX SurfaceXYZTensorFourier geometry."""
+
+    dofs: jax.Array
+    quadpoints_phi: jax.Array
+    quadpoints_theta: jax.Array
+    scatter_indices: jax.Array
+    nfp: int
+    stellsym: bool
+    mpol: int
+    ntor: int
+
+
+jax.tree_util.register_dataclass(
+    SurfaceXYZTensorFourierSpec,
+    data_fields=["dofs", "quadpoints_phi", "quadpoints_theta", "scatter_indices"],
+    meta_fields=["nfp", "stellsym", "mpol", "ntor"],
+)
+
+
+SurfaceSpec = Union[
+    FixedSurfaceGeometrySpec,
+    SurfaceRZFourierSpec,
+    SurfaceXYZFourierSpec,
+    SurfaceXYZTensorFourierSpec,
+]
+
+SurfaceSpecKind = Literal[
+    "fixed_geometry",
+    "rz_fourier",
+    "xyz_fourier",
+    "xyz_tensor_fourier",
+]
+
+
+def surface_spec_kind(spec: SurfaceSpec) -> SurfaceSpecKind:
+    """Return the closed discriminant for a surface spec variant."""
+    if isinstance(spec, FixedSurfaceGeometrySpec):
+        return "fixed_geometry"
+    if isinstance(spec, SurfaceRZFourierSpec):
+        return "rz_fourier"
+    if isinstance(spec, SurfaceXYZFourierSpec):
+        return "xyz_fourier"
+    if isinstance(spec, SurfaceXYZTensorFourierSpec):
+        return "xyz_tensor_fourier"
+    raise TypeError(f"Unsupported surface spec type: {type(spec).__name__}")
+
+
+@dataclass(frozen=True)
 class CurveCWSFourierRZSpec:
     """Immutable curve-on-RZ-surface payload for pure JAX geometry."""
 
@@ -339,8 +433,6 @@ class CurveCWSFourierRZSpec:
     H: float
 
     def surface_dofs(self) -> jax.Array:
-        from .surface_rzfourier import surface_rz_fourier_dofs_from_spec
-
         return surface_rz_fourier_dofs_from_spec(self.surface)
 
 
@@ -759,6 +851,17 @@ def make_fixed_surface_flux_spec(
     )
 
 
+def make_fixed_surface_geometry_spec(
+    *,
+    gamma: object,
+    normal: object,
+) -> FixedSurfaceGeometrySpec:
+    return FixedSurfaceGeometrySpec(
+        gamma=_as_float64_array(gamma),
+        normal=_as_float64_array(normal),
+    )
+
+
 def make_surface_rzfourier_spec(
     *,
     rc: object,
@@ -786,4 +889,168 @@ def make_surface_rzfourier_spec(
         stellsym=bool(stellsym),
         mpol=int(rc_jax.shape[0] - 1),
         ntor=int((rc_jax.shape[1] - 1) // 2),
+    )
+
+
+def _surface_rz_fourier_block_mode_positions(
+    *,
+    mpol: int,
+    ntor: int,
+    include_zero_mode: bool,
+) -> np.ndarray:
+    width = 2 * ntor + 1
+    positions: list[int] = []
+
+    start_n = 0 if include_zero_mode else 1
+    for n in range(start_n, ntor + 1):
+        positions.append(n + ntor)
+
+    for m in range(1, mpol + 1):
+        for n in range(-ntor, ntor + 1):
+            positions.append(m * width + n + ntor)
+
+    return np.asarray(positions, dtype=np.int32)
+
+
+def _surface_rz_fourier_gather_modes(
+    coeffs: jax.Array,
+    positions: np.ndarray,
+    flat_size: int,
+) -> jax.Array:
+    return jnp.reshape(_as_float64_array(coeffs), (flat_size,))[
+        _as_int32_array(positions)
+    ]
+
+
+def surface_rz_fourier_dofs_from_spec(spec: SurfaceRZFourierSpec) -> jax.Array:
+    include_positions = _surface_rz_fourier_block_mode_positions(
+        mpol=spec.mpol,
+        ntor=spec.ntor,
+        include_zero_mode=True,
+    )
+    exclude_positions = _surface_rz_fourier_block_mode_positions(
+        mpol=spec.mpol,
+        ntor=spec.ntor,
+        include_zero_mode=False,
+    )
+    flat_size = int((spec.mpol + 1) * (2 * spec.ntor + 1))
+    rc = _surface_rz_fourier_gather_modes(spec.rc, include_positions, flat_size)
+    zs = _surface_rz_fourier_gather_modes(spec.zs, exclude_positions, flat_size)
+    if spec.stellsym:
+        return jnp.concatenate((rc, zs))
+    rs = _surface_rz_fourier_gather_modes(spec.rs, exclude_positions, flat_size)
+    zc = _surface_rz_fourier_gather_modes(spec.zc, include_positions, flat_size)
+    return jnp.concatenate((rc, rs, zc, zs))
+
+
+def make_surface_xyz_fourier_spec(
+    *,
+    dofs: object,
+    quadpoints_phi: object,
+    quadpoints_theta: object,
+    nfp: int,
+    stellsym: bool,
+    mpol: int,
+    ntor: int,
+) -> SurfaceXYZFourierSpec:
+    mpol_int = int(mpol)
+    ntor_int = int(ntor)
+    stellsym_bool = bool(stellsym)
+    return SurfaceXYZFourierSpec(
+        dofs=_as_float64_array(dofs),
+        quadpoints_phi=_as_float64_array(quadpoints_phi),
+        quadpoints_theta=_as_float64_array(quadpoints_theta),
+        scatter_indices=_as_int32_array(
+            _surface_xyz_fourier_scatter_indices(
+                mpol=mpol_int,
+                ntor=ntor_int,
+                stellsym=stellsym_bool,
+            )
+        ),
+        coeff_template=_as_float64_array(
+            np.zeros(6 * (mpol_int + 1) * (2 * ntor_int + 1), dtype=np.float64)
+        ),
+        nfp=int(nfp),
+        stellsym=stellsym_bool,
+        mpol=mpol_int,
+        ntor=ntor_int,
+    )
+
+
+def _surface_xyz_fourier_scatter_indices(
+    *,
+    mpol: int,
+    ntor: int,
+    stellsym: bool,
+) -> np.ndarray:
+    n_per = int((mpol + 1) * (2 * ntor + 1))
+    cos_positions = np.arange(ntor, n_per, dtype=np.int32)
+    sin_positions = np.arange(ntor + 1, n_per, dtype=np.int32)
+
+    if stellsym:
+        return np.concatenate(
+            (
+                cos_positions,
+                3 * n_per + sin_positions,
+                5 * n_per + sin_positions,
+            )
+        ).astype(np.int32)
+
+    return np.concatenate(
+        (
+            cos_positions,
+            n_per + sin_positions,
+            2 * n_per + cos_positions,
+            3 * n_per + sin_positions,
+            4 * n_per + cos_positions,
+            5 * n_per + sin_positions,
+        )
+    ).astype(np.int32)
+
+
+def _surface_xyz_tensor_scatter_indices(
+    *,
+    mpol: int,
+    ntor: int,
+    stellsym: bool,
+    scatter_indices: object | None,
+) -> jax.Array:
+    if scatter_indices is not None:
+        return _as_int32_array(scatter_indices)
+    if not stellsym:
+        return _as_int32_array(np.zeros((0,), dtype=np.int32))
+
+    from ..geo.surface_fourier_jax import stellsym_scatter_indices
+
+    return _as_int32_array(stellsym_scatter_indices(mpol, ntor))
+
+
+def make_surface_xyz_tensor_fourier_spec(
+    *,
+    dofs: object,
+    quadpoints_phi: object,
+    quadpoints_theta: object,
+    nfp: int,
+    stellsym: bool,
+    mpol: int,
+    ntor: int,
+    scatter_indices: object | None = None,
+) -> SurfaceXYZTensorFourierSpec:
+    mpol_int = int(mpol)
+    ntor_int = int(ntor)
+    stellsym_bool = bool(stellsym)
+    return SurfaceXYZTensorFourierSpec(
+        dofs=_as_float64_array(dofs),
+        quadpoints_phi=_as_float64_array(quadpoints_phi),
+        quadpoints_theta=_as_float64_array(quadpoints_theta),
+        scatter_indices=_surface_xyz_tensor_scatter_indices(
+            mpol=mpol_int,
+            ntor=ntor_int,
+            stellsym=stellsym_bool,
+            scatter_indices=scatter_indices,
+        ),
+        nfp=int(nfp),
+        stellsym=stellsym_bool,
+        mpol=mpol_int,
+        ntor=ntor_int,
     )

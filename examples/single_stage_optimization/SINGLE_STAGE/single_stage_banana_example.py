@@ -886,6 +886,7 @@ def build_single_stage_problem_contract(
             "effective_banana_surface_radius": float(banana_surf_radius),
             "benchmark_mode": bool(args.benchmark_mode),
             "minimal_artifacts": bool(args.minimal_artifacts),
+            "full_artifacts": bool(getattr(args, "full_artifacts", False)),
             "init_only": bool(args.init_only),
             "profile_target_lane_only": bool(args.profile_target_lane_only),
             "profile_target_lane_batch_size": int(args.profile_target_lane_batch_size),
@@ -1579,9 +1580,14 @@ def resolve_target_lane_accepted_step_sync_record(
 def should_write_single_stage_full_artifacts(
     benchmark_mode: bool,
     minimal_artifacts: bool,
+    *,
+    backend: str = "cpu",
+    full_artifacts: bool = False,
 ) -> bool:
     """Return whether the run should emit heavy plotting/VTK artifacts."""
-    return (not benchmark_mode) and (not minimal_artifacts)
+    if benchmark_mode or minimal_artifacts:
+        return False
+    return backend != "jax" or bool(full_artifacts)
 
 
 def should_write_single_stage_restart_artifacts(benchmark_mode: bool) -> bool:
@@ -2958,6 +2964,15 @@ def parse_args():
         help=(
             "Write only the JSON artifacts needed for warm restarts and skip "
             "heavy VTK/plot outputs."
+        ),
+    )
+    parser.add_argument(
+        "--full-artifacts",
+        action="store_true",
+        help=(
+            "Opt in to heavy VTK/plot artifacts on JAX runs. CPU/reference runs "
+            "write full artifacts by default unless --minimal-artifacts or "
+            "--benchmark-mode is set."
         ),
     )
     parser.add_argument(
@@ -8497,6 +8512,8 @@ if __name__ == "__main__":
     write_full_artifacts = should_write_single_stage_full_artifacts(
         args.benchmark_mode,
         args.minimal_artifacts,
+        backend=args.backend,
+        full_artifacts=args.full_artifacts,
     )
     write_restart_artifacts = should_write_single_stage_restart_artifacts(
         args.benchmark_mode
@@ -10878,6 +10895,7 @@ if __name__ == "__main__":
         ),
         "structured_invalid_step_log": bool(use_target_lane),
         "minimal_artifacts": bool(args.minimal_artifacts),
+        "full_artifacts": bool(args.full_artifacts),
         "init_only": args.init_only,
         "max_iterations": MAXITER,
         "maxcor": args.maxcor,

@@ -1131,24 +1131,78 @@ def case_transfer_guard_disallow_allows_boozer_residual_host_scalars() -> None:
 def case_transfer_guard_disallow_allows_squaredfluxjax_construction() -> None:
     import numpy as np
     import simsopt.config as simsopt_config
-    from simsopt.geo import SurfaceRZFourier, CurveXYZFourier
+    from simsopt.geo import (
+        CurveXYZFourier,
+        SurfaceRZFourier,
+        SurfaceXYZFourier,
+        SurfaceXYZTensorFourier,
+    )
     from simsopt.field import BiotSavartJAX, Coil, Current
     from simsopt.objectives import SquaredFluxJAX
 
     simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
-    surf = SurfaceRZFourier(
+    quadpoints = np.arange(8) / 8
+    surfaces = [
+        SurfaceRZFourier(
+            nfp=1,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=quadpoints,
+            quadpoints_theta=quadpoints,
+        ),
+        SurfaceXYZFourier(
+            nfp=1,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=quadpoints,
+            quadpoints_theta=quadpoints,
+        ),
+        SurfaceXYZTensorFourier(
+            nfp=1,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=quadpoints,
+            quadpoints_theta=quadpoints,
+        ),
+    ]
+    curve = CurveXYZFourier(16, 1)
+    curve.x = np.array([1.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1])
+    coils = [Coil(curve, Current(1.0))]
+    for surf in surfaces:
+        objective = SquaredFluxJAX(surf, BiotSavartJAX(coils))
+        assert objective._flux_spec.normal.shape == (8, 8, 3)
+
+
+def case_transfer_guard_disallow_rejects_clamped_xyztensor_surface_spec() -> None:
+    import numpy as np
+    import simsopt.config as simsopt_config
+    from simsopt.geo import CurveXYZFourier, SurfaceXYZTensorFourier
+    from simsopt.field import BiotSavartJAX, Coil, Current
+    from simsopt.objectives import SquaredFluxJAX
+
+    simsopt_config.set_backend("jax_cpu_parity", transfer_guard="disallow")
+    quadpoints = np.arange(8) / 8
+    surf = SurfaceXYZTensorFourier(
         nfp=1,
         stellsym=True,
         mpol=1,
         ntor=0,
-        quadpoints_phi=np.arange(8) / 8,
-        quadpoints_theta=np.arange(8) / 8,
+        clamped_dims=[True, False, False],
+        quadpoints_phi=quadpoints,
+        quadpoints_theta=quadpoints,
     )
     curve = CurveXYZFourier(16, 1)
     curve.x = np.array([1.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1])
     bs_jax = BiotSavartJAX([Coil(curve, Current(1.0))])
-    objective = SquaredFluxJAX(surf, bs_jax)
-    assert objective._flux_spec.normal.shape == (8, 8, 3)
+    try:
+        SquaredFluxJAX(surf, bs_jax)
+    except NotImplementedError as exc:
+        assert "clamped_dims" in str(exc)
+    else:
+        raise AssertionError("expected clamped SurfaceXYZTensorFourier to fail")
 
 
 def case_transfer_guard_disallow_rejects_squaredfluxjax_surface_without_spec() -> None:
@@ -1290,13 +1344,19 @@ def case_import_jax_core_specs() -> None:
         CurveRZFourierSpec,
         CurveXYZFourierSpec,
         FieldEvalSpec,
+        FixedSurfaceGeometrySpec,
         FrameRotationSpec,
         GroupedCoilSetSpec,
         FixedSurfaceFluxSpec,
         OptimizableDofMapSpec,
         SurfaceRZFourierSpec,
+        SurfaceSpec,
+        SurfaceSpecKind,
+        SurfaceXYZFourierSpec,
+        SurfaceXYZTensorFourierSpec,
         ZeroRotationSpec,
         curve_spec_kind,
+        surface_spec_kind,
     )
 
     assert CoilSpec is not None
@@ -1313,13 +1373,19 @@ def case_import_jax_core_specs() -> None:
     assert CurveRZFourierSpec is not None
     assert CurveXYZFourierSpec is not None
     assert FieldEvalSpec is not None
+    assert FixedSurfaceGeometrySpec is not None
     assert FrameRotationSpec is not None
     assert GroupedCoilSetSpec is not None
     assert FixedSurfaceFluxSpec is not None
     assert OptimizableDofMapSpec is not None
     assert SurfaceRZFourierSpec is not None
+    assert SurfaceSpec is not None
+    assert SurfaceSpecKind is not None
+    assert SurfaceXYZFourierSpec is not None
+    assert SurfaceXYZTensorFourierSpec is not None
     assert ZeroRotationSpec is not None
     assert curve_spec_kind is not None
+    assert surface_spec_kind is not None
 
 
 def case_jax_core_specs_are_pytrees() -> None:
@@ -1339,11 +1405,14 @@ def case_jax_core_specs_are_pytrees() -> None:
         CurveRZFourierSpec,
         CurveXYZFourierSpec,
         FieldEvalSpec,
+        FixedSurfaceGeometrySpec,
         FrameRotationSpec,
         FixedSurfaceFluxSpec,
         GroupedCoilSetSpec,
         OptimizableDofMapSpec,
         SurfaceRZFourierSpec,
+        SurfaceXYZFourierSpec,
+        SurfaceXYZTensorFourierSpec,
         ZeroRotationSpec,
         curve_gamma_and_dash_from_dofs,
         curve_gamma_and_dash_from_spec,
@@ -1371,12 +1440,18 @@ def case_jax_core_specs_are_pytrees() -> None:
         make_curve_xyzfourier_spec,
         make_field_eval_spec,
         make_frame_rotation_spec,
+        make_fixed_surface_geometry_spec,
         make_grouped_coil_set_spec,
         make_optimizable_dof_map_spec,
         make_surface_rzfourier_spec,
+        make_surface_xyz_fourier_spec,
+        make_surface_xyz_tensor_fourier_spec,
         make_zero_rotation_spec,
         surface_rz_fourier_dofs_from_spec,  # noqa: F401
         surface_rz_fourier_gamma_from_spec,
+        surface_spec_kind,
+        surface_xyz_fourier_gamma_from_spec,
+        surface_xyz_tensor_fourier_gamma_from_spec,
     )
 
     coil_spec = make_grouped_coil_set_spec(
@@ -1483,6 +1558,10 @@ def case_jax_core_specs_are_pytrees() -> None:
     )
     current_spec = make_current_value_spec(2.0)
     field_eval_spec = make_field_eval_spec(jnp.zeros((4, 3)))
+    fixed_geometry_spec = make_fixed_surface_geometry_spec(
+        gamma=jnp.zeros((2, 2, 3)),
+        normal=jnp.ones((2, 2, 3)),
+    )
     coil_value_spec = make_coil_spec(
         curve=curve_xyz_spec,
         current=current_spec,
@@ -1494,6 +1573,24 @@ def case_jax_core_specs_are_pytrees() -> None:
         quadpoints_theta=jnp.asarray([0.0, 0.5]),
         nfp=1,
         stellsym=True,
+    )
+    surface_xyz_spec = make_surface_xyz_fourier_spec(
+        dofs=jnp.asarray([1.0, 0.1, 0.0, 0.1]),
+        quadpoints_phi=jnp.asarray([0.0, 0.5]),
+        quadpoints_theta=jnp.asarray([0.0, 0.5]),
+        nfp=1,
+        stellsym=True,
+        mpol=1,
+        ntor=0,
+    )
+    surface_xyztensor_spec = make_surface_xyz_tensor_fourier_spec(
+        dofs=jnp.asarray([1.0, 0.1, 0.0, 0.1]),
+        quadpoints_phi=jnp.asarray([0.0, 0.5]),
+        quadpoints_theta=jnp.asarray([0.0, 0.5]),
+        nfp=1,
+        stellsym=True,
+        mpol=1,
+        ntor=0,
     )
     curve_cws_spec = make_curve_cwsfourier_rz_spec(
         dofs=jnp.asarray([0.1, 0.0, 0.2, 0.0, 0.0, 0.0]),
@@ -1535,12 +1632,19 @@ def case_jax_core_specs_are_pytrees() -> None:
     assert isinstance(curve_rz_spec, CurveRZFourierSpec)
     assert isinstance(curve_xyz_spec, CurveXYZFourierSpec)
     assert isinstance(field_eval_spec, FieldEvalSpec)
+    assert isinstance(fixed_geometry_spec, FixedSurfaceGeometrySpec)
     assert isinstance(frame_rotation_spec, FrameRotationSpec)
     assert isinstance(coil_spec, GroupedCoilSetSpec)
     assert isinstance(flux_spec, FixedSurfaceFluxSpec)
     assert isinstance(identity_curve_map, OptimizableDofMapSpec)
     assert isinstance(surface_spec, SurfaceRZFourierSpec)
+    assert isinstance(surface_xyz_spec, SurfaceXYZFourierSpec)
+    assert isinstance(surface_xyztensor_spec, SurfaceXYZTensorFourierSpec)
     assert isinstance(zero_rotation_spec, ZeroRotationSpec)
+    assert surface_spec_kind(fixed_geometry_spec) == "fixed_geometry"
+    assert surface_spec_kind(surface_spec) == "rz_fourier"
+    assert surface_spec_kind(surface_xyz_spec) == "xyz_fourier"
+    assert surface_spec_kind(surface_xyztensor_spec) == "xyz_tensor_fourier"
 
     curve_xyz_leaves, _ = jax.tree_util.tree_flatten(curve_xyz_spec)
     curve_rz_leaves, _ = jax.tree_util.tree_flatten(curve_rz_spec)
@@ -1552,12 +1656,17 @@ def case_jax_core_specs_are_pytrees() -> None:
     coil_symmetry_leaves, _ = jax.tree_util.tree_flatten(coil_symmetry_spec)
     current_leaves, _ = jax.tree_util.tree_flatten(current_spec)
     field_eval_leaves, _ = jax.tree_util.tree_flatten(field_eval_spec)
+    fixed_geometry_leaves, _ = jax.tree_util.tree_flatten(fixed_geometry_spec)
     coil_value_leaves, _ = jax.tree_util.tree_flatten(coil_value_spec)
     coil_leaves, _ = jax.tree_util.tree_flatten(coil_spec)
     flux_leaves, _ = jax.tree_util.tree_flatten(flux_spec)
     frame_rotation_leaves, _ = jax.tree_util.tree_flatten(frame_rotation_spec)
     dof_map_leaves, _ = jax.tree_util.tree_flatten(identity_curve_map)
     surface_leaves, _ = jax.tree_util.tree_flatten(surface_spec)
+    surface_xyz_leaves, _ = jax.tree_util.tree_flatten(surface_xyz_spec)
+    surface_xyztensor_leaves, _ = jax.tree_util.tree_flatten(
+        surface_xyztensor_spec
+    )
     zero_rotation_leaves, _ = jax.tree_util.tree_flatten(zero_rotation_spec)
 
     def assert_round_trip(spec):
@@ -1579,12 +1688,15 @@ def case_jax_core_specs_are_pytrees() -> None:
     assert len(coil_symmetry_leaves) == 1
     assert len(current_leaves) == 1
     assert len(field_eval_leaves) == 1
+    assert len(fixed_geometry_leaves) == 2
     assert len(frame_rotation_leaves) == 2
     assert len(coil_value_leaves) == 4
     assert len(coil_leaves) == 3
     assert len(dof_map_leaves) == 1
     assert len(flux_leaves) == 3
     assert len(surface_leaves) == 6
+    assert len(surface_xyz_leaves) == 5
+    assert len(surface_xyztensor_leaves) == 4
     assert len(zero_rotation_leaves) == 1
     assert len(grouped_field_inputs_from_spec(coil_spec)) == 1
     assert len(grouped_field_data_from_spec(coil_spec)) == 1
@@ -1599,6 +1711,8 @@ def case_jax_core_specs_are_pytrees() -> None:
     assert_surface_dofs_derivable(curve_cws_nonstellsym_spec, 6)  # 2rc+1rs+2zc+1zs
     assert_round_trip(curve_perturbed_spec)
     assert_round_trip(curve_filament_spec)
+    assert_round_trip(surface_xyz_spec)
+    assert_round_trip(surface_xyztensor_spec)
     assert_round_trip(coil_spec)
 
     curve_xyz_gamma, curve_xyz_gammadash = jax.jit(curve_gamma_and_dash_from_spec)(
@@ -1628,6 +1742,10 @@ def case_jax_core_specs_are_pytrees() -> None:
     B = jax.jit(grouped_biot_savart_B_from_spec)(jnp.zeros((4, 3)), coil_spec)
     value = jax.jit(fixed_surface_flux_integral_from_B)(B, flux_spec)
     gamma = jax.jit(surface_rz_fourier_gamma_from_spec)(surface_spec)
+    xyz_gamma = jax.jit(surface_xyz_fourier_gamma_from_spec)(surface_xyz_spec)
+    xyztensor_gamma = jax.jit(surface_xyz_tensor_fourier_gamma_from_spec)(
+        surface_xyztensor_spec
+    )
 
     assert B.shape == (4, 3)
     assert curve_xyz_gamma.shape == (2, 3)
@@ -1644,6 +1762,8 @@ def case_jax_core_specs_are_pytrees() -> None:
     assert curve_cws_gammadashdash.shape == (2, 3)
     assert curve_cws_gammadashdash_from_dofs.shape == (2, 3)
     assert gamma.shape == (2, 2, 3)
+    assert xyz_gamma.shape == (2, 2, 3)
+    assert xyztensor_gamma.shape == (2, 2, 3)
     assert np.isfinite(np.asarray(value))
 
 

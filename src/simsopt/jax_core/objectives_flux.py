@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
 from ._device_scalars import float_scalar, two_pi
@@ -13,9 +12,19 @@ from ._math_utils import (
 from .field import grouped_biot_savart_B_from_spec
 from .specs import (
     FieldEvalSpec,
+    FixedSurfaceGeometrySpec,
     FixedSurfaceFluxSpec,
+    SurfaceRZFourierSpec,
+    SurfaceXYZFourierSpec,
+    SurfaceXYZTensorFourierSpec,
     make_field_eval_spec,
     make_fixed_surface_flux_spec,
+)
+from .surface_fourier import (
+    surface_xyz_fourier_gamma_from_spec,
+    surface_xyz_fourier_normal_from_spec,
+    surface_xyz_tensor_fourier_gamma_from_spec,
+    surface_xyz_tensor_fourier_normal_from_spec,
 )
 from .surface_rzfourier import (
     surface_rz_fourier_gamma_from_spec,
@@ -82,13 +91,34 @@ def fixed_surface_flux_integral(
 def fixed_surface_geometry_from_surface(surface):
     surface_spec_fn = getattr(surface, "surface_spec", None)
     if callable(surface_spec_fn):
-        surface_spec = surface_spec_fn()
-        gamma = surface_rz_fourier_gamma_from_spec(surface_spec)
-        normal = surface_rz_fourier_normal_from_spec(surface_spec)
-        return gamma, normal
+        return fixed_surface_geometry_from_spec(surface_spec_fn())
     raise NotImplementedError(
         "SquaredFluxJAX fixed-surface setup requires a surface exposing "
         "surface_spec()."
+    )
+
+
+def fixed_surface_geometry_from_spec(surface_spec):
+    if isinstance(surface_spec, FixedSurfaceGeometrySpec):
+        return surface_spec.gamma, surface_spec.normal
+    if isinstance(surface_spec, SurfaceRZFourierSpec):
+        return (
+            surface_rz_fourier_gamma_from_spec(surface_spec),
+            surface_rz_fourier_normal_from_spec(surface_spec),
+        )
+    if isinstance(surface_spec, SurfaceXYZFourierSpec):
+        return (
+            surface_xyz_fourier_gamma_from_spec(surface_spec),
+            surface_xyz_fourier_normal_from_spec(surface_spec),
+        )
+    if isinstance(surface_spec, SurfaceXYZTensorFourierSpec):
+        return (
+            surface_xyz_tensor_fourier_gamma_from_spec(surface_spec),
+            surface_xyz_tensor_fourier_normal_from_spec(surface_spec),
+        )
+    raise NotImplementedError(
+        "SquaredFluxJAX fixed-surface setup received unsupported surface spec "
+        f"{type(surface_spec).__name__}."
     )
 
 

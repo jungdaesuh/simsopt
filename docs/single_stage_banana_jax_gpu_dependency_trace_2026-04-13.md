@@ -10,7 +10,7 @@ path, see `docs/single_stage_banana_ondevice_hot_path_diagnosis_2026-04-19.md`.
 The key conclusion is:
 
 - [x] The core single-stage target lane is already on the JAX/ondevice path.
-- [ ] The remaining gaps are now narrower than the original startup/sync wording implied: startup object loading still restores Python/SIMSOPT objects, warm-start reprojection still has a narrow host alias-convention fallback, and self-intersection/reporting/artifact paths remain host-side; the supported JAX Boozer setup path itself already stays on the deferred/device-first lane.
+- [ ] The remaining gaps are narrower than the original startup/sync wording implied: startup object loading still restores Python/SIMSOPT objects, warm-start reprojection is an explicit setup-time host fit, self-intersection remains a host validation gate, and requested artifact/result-file assembly still runs on the host; the supported JAX Boozer setup, accepted-step compute, and final penalty metrics already stay on the deferred/device-first lane.
 - [x] The current repo backlog is consistent with this: `jax_gpu_port_todos_2026-04-08.md:115` says the main remaining single-stage work after the GPU proof is algorithmic donor/seed/search policy, not more proof scaffolding.
 
 ## Entry-point dependency spine
@@ -88,12 +88,12 @@ These are not the main remaining porting blockers:
 
 Tracking checklist:
 
-- [ ] Startup object loading and warm-start reprojection
-- [ ] Boozer pre-fit and self-intersection postprocess
-- [ ] Accepted-step synchronization and callback diagnostics
-- [ ] Initial/final artifacts and plotting
-- [ ] Final metrics and results assembly
-- [ ] Optional diagnosis modes remain clearly separated from the GPU-pure target lane
+- [ ] Startup object loading and warm-start reprojection remain setup-time host seams
+- [ ] Boozer setup compatibility and self-intersection postprocess remain host-visible seams
+- [x] Accepted-step synchronization compute is device-first; callback diagnostics remain optional host observability
+- [x] Heavy plotting/VTK artifacts are no longer default on the JAX path; requested artifact export remains host-side
+- [x] Final penalty metrics come from the traceable runtime bundle on the target lane; final JSON assembly remains host-side
+- [x] Optional diagnosis modes remain clearly separated from the GPU-pure target lane
 
 ### 1. Startup object loading and warm-start reprojection
 
@@ -106,18 +106,18 @@ Code:
 Why it is still host-bound:
 
 - `load(...)` restores Python/SIMSOPT objects.
-- the supported-surface path is narrower than before:
+- the supported-surface path is narrower than the legacy object path:
   - target geometry extraction already uses JAX-backed `surface_gamma_from_dofs(...)` / `surface_rz_fourier_gamma_from_dofs(...)` for `SurfaceXYZTensorFourier`, `SurfaceRZFourier`, and serialized equivalents.
-  - unsupported surfaces still fall back to host `surface.cross_section(...)` sampling.
-- the actual reprojection fit is no longer the old host `least_squares_fit(...)` path:
-  - `_fit_surface_xyz_tensor_dofs_to_gamma(...)` uses JAX geometry evaluation plus `jnp.linalg.lstsq(...)`
-  - the remaining host seam is narrower and only exists to preserve the legacy alias-equivalent coefficient convention when a degenerate `SurfaceXYZTensorFourier` basis group must be canonicalized
-  - on the standard single-stage quadrature grids, that host surface construction is now avoided entirely
+  - unsupported surfaces are rejected at this boundary rather than silently falling back to a host sampling path.
+- the reprojection fit is an explicit setup-time host boundary, not a hidden target-lane transfer:
+  - `_fit_surface_xyz_tensor_dofs_to_gamma(...)` hostifies the target geometry/design matrix and solves with `np.linalg.lstsq(...)`
+  - this avoids the prior GPU `lstsq`/cuSolver startup failure mode while keeping the optimization hot path device-first
+  - the legacy alias-equivalent coefficient convention still uses host `SurfaceXYZTensorFourier.least_squares_fit(...)` only while resolving the canonical representative for degenerate basis groups
 
 What would need porting:
 
 - a JAX-native seed/spec loader for stage-2 coil state
-- a fully device-native replacement for the rare alias-convention fallback, or an explicit decision that the legacy host coefficient convention is only required for backward-compatibility/reporting parity
+- a fully device-native replacement for the warm-start fit and alias-convention canonicalization, or an explicit decision that this setup-time compatibility fit is outside the GPU-pure optimization contract
 
 ### 2. Boozer pre-fit and self-intersection postprocess
 
@@ -173,13 +173,14 @@ Code:
 
 Why it is still host-bound:
 
-- VTK/JSON export and matplotlib plots are CPU-side
+- restart JSON export, requested VTK export, and matplotlib plots are CPU-side
 - `bs_diag.save(...)`, `curves_to_vtk(...)`, `surface.to_vtk(...)`, `surface.save(...)`, `normPlot(...)`, and `cross_section_plot(...)` all imply host materialization
+- the default JAX path now skips heavy VTK/plot artifacts unless `--full-artifacts` is explicitly requested; benchmark mode still skips restart JSON as well
 
 What would need porting:
 
-- either make these explicitly non-default for JAX/GPU runs
-- or create a separate post-run export stage that consumes saved device-independent specs/results
+- keep heavy visualization artifacts as explicit opt-in for JAX/GPU runs
+- create a separate post-run export stage if artifact generation itself must become decoupled from live host SIMSOPT objects
 
 ### 5. Final metrics and results assembly
 
@@ -189,7 +190,7 @@ Code:
 - final penalty/result assembly in `single_stage_banana_example.py:6839-7099`
 - optimizer diagnostics and final JSON emission in `single_stage_banana_example.py:7079-7166`
 
-Why it is still host-bound:
+Why it is no longer the main compute-path blocker:
 
 - hardware-constraint evaluation itself is already pure on the target lane:
   - `evaluate_single_stage_hardware_constraints_pure(...)` computes the feasibility result in JAX space
@@ -209,7 +210,7 @@ Why it is still host-bound:
 
 What would need porting:
 
-- expose final scalar term values directly from the traceable runtime bundle, rather than re-entering the mutable `Optimizable` graph for reporting
+- if result writing must be GPU-pure end to end, assemble the final JSON from device-independent specs/results in a separate host export step instead of live mutable objects
 
 ### 6. Optional diagnosis modes intentionally reintroduce host wrappers
 
@@ -237,14 +238,14 @@ The highest-leverage remaining work is to keep shrinking the explicit host seams
 
 ## Recommended port order
 
-- [ ] Remove mutable-graph final reporting from the default JAX path.
-  Keep expanding the explicit runtime-state/reporting contract so final objective term scalars and hardware metrics come from the traceable runtime bundle rather than host wrapper recomputation.
-- [ ] Keep the default JAX path artifact-light.
-  No VTK/plot export unless explicitly requested.
-- [ ] Keep accepted-step sync compute device-first by default.
+- [x] Remove mutable-graph final reporting from the default JAX path.
+  Final objective term scalars and hardware metrics now come from the traceable runtime bundle rather than host wrapper recomputation on the target lane.
+- [x] Keep the default JAX path artifact-light.
+  Heavy VTK/plot export is skipped unless `--full-artifacts` is explicitly requested.
+- [x] Keep accepted-step sync compute device-first by default.
   Preserve the current runtime-bundle-first path and keep `per-accept` logging a clearly host-observability mode.
 - [ ] Decide whether startup must be GPU-pure or just the optimization lane.
-  If truly end-to-end, port seed loading and warm-start reprojection/setup to immutable JAX specs and a device-native Boozer setup contract.
+  If truly end-to-end, port seed loading and the setup-time warm-start fit/canonicalization to immutable JAX specs and a device-native Boozer setup contract.
 - [ ] Treat self-intersection as a separate design decision.
   Either leave it as an explicit host validation gate or implement a JAX approximation; do not leave it as an implicit mixed-mode dependency.
 
@@ -281,6 +282,8 @@ If the question is "what else must be ported for full JAX/GPU support?", the ans
 - [ ] Warm-start reprojection and Boozer setup, if startup purity matters end to end
 - [x] Accepted-step sync compute path is already device-first; keep host work explicit at the reporting/logging boundary
 - [x] Hardware-constraint evaluation is already pure on the target lane; keep host normalization explicit at the public/report boundary
-- [ ] Artifact generation and final reporting
+- [x] Default heavy artifact generation is opt-in on the JAX path
+- [x] Final penalty metrics are runtime-bundle-backed on the target lane
+- [ ] Final result-file assembly and requested artifact export remain host-side
 
 The core optimize path is already on the target lane. The remaining work is mostly about preventing startup/setup and post-solve reporting paths from re-entering host-side SIMSOPT objects beyond their now-explicit boundaries.
