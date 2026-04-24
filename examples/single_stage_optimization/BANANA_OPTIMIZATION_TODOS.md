@@ -178,7 +178,10 @@ Validation:
   written. Optimizer convergence was intentionally not expected because
   `maxiter=1`; final state preserved the feasible start with
   `FINAL_IOTA=0.30483862658571914`, `FINAL_VOLUME=0.03992103666310177`,
-  `HARDWARE_CONSTRAINTS_OK=true`, and `FINAL_FEASIBILITY_OK=true`.
+  `HARDWARE_CONSTRAINTS_OK=true`, and `FINAL_FEASIBILITY_OK=true`. This
+  downstream e2e artifact is historical evidence. The lightweight current-tree
+  regression for this contract is the named pytest coverage above; the
+  downstream e2e command requires the harvested seeds plus VMEC `wout` artifact.
 
 ### C4. De-risk Boozer second-order residual semantics
 
@@ -214,6 +217,7 @@ Completion:
 Validation:
 
 - `python3 -m pytest tests/geo/test_boozersurface.py::BoozerSurfaceTests::test_boozer_penalty_constraints_cpp_notcpp -q`
+- `python3 -m pytest tests/geo/test_boozersurface.py::BoozerSurfaceTests::test_boozer_penalty_constraints_derivatives2_weighted_unweighted_cpp_notcpp -q`
 
 ## Performance
 
@@ -465,10 +469,25 @@ Impact measure:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Impact:
+
+- `BoozerSurface.solve_residual_equation_exactly_newton()` now factors each
+  assembled exact Newton Jacobian once per iteration and reuses the same
+  `(P, L, U)` factors for the Newton correction plus iterative refinement.
+- `forward_solve(P, L, U, rhs)` is the forward-system counterpart to the
+  existing `forward_backward(...)` adjoint solve, keeping the PLU contract
+  explicit.
+
+Validation:
+
+- `python3 -m pytest tests/objectives/test_utilities.py::UtilityObjectiveTesting::test_forward_solve_matches_dense_solve_for_plu_factors -q`
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-surrogate/build/cp313-cp313-macosx_26_0_arm64:/Users/suhjungdae/code/columbia/simsopt-surrogate/src:/opt/homebrew/Caskroom/miniforge/base/lib/python3.13/site-packages python3 -S -m pytest tests/geo/test_boozersurface.py tests/geo/test_surface_objectives.py -q`
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-surrogate/build/cp313-cp313-macosx_26_0_arm64:/Users/suhjungdae/code/columbia/simsopt-surrogate/src:/opt/homebrew/Caskroom/miniforge/base/lib/python3.13/site-packages python3 -S -m pytest tests/core/test_derivative.py tests/objectives/test_utilities.py tests/field/test_magneticfields.py tests/field/test_biotsavart.py tests/geo/test_curve.py::Testing::test_curve_dkappa_by_dphi_derivative tests/geo/test_curve_objectives.py tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_boozer_residual_stage_selection_keeps_exact_residual_final_only -q`
 
 ### P5. Share Boozer-derived objective evaluation state
 
@@ -515,6 +534,11 @@ Impact:
   obtain residuals, residual-by-B, surface Jacobian, and LS adjoint inputs from
   one `boozer_surface_residual_dB(..., derivatives=1)` evaluation instead of
   recomputing the residual-by-B path for `dJ_by_dB()` and the LS adjoint VJP.
+- The exact/non-LS `BoozerResidual.compute()` path also obtains `r`, `r_dB`,
+  and the surface Jacobian from that same residual-by-B evaluation, so it no
+  longer computes `r` through both residual helper families. The exact adjoint
+  still goes through the solved surface's `res["vjp"]` callback contract, and
+  the default exact VJP computes only `dresidual_dB` instead of rebuilding `r`.
 - A focused LS `BoozerResidual` regression verifies one residual-by-B kernel
   call for `J(); dJ()` on an already solved Boozer surface.
 - `build_single_stage_objective_bundle()` now builds one `BiotSavart(coils)`
@@ -528,6 +552,7 @@ Impact:
 Validation:
 
 - `python3 -m pytest tests/geo/test_surface_objectives.py::BoozerResidualTests::test_boozerresidual_compute_uses_one_field_point_update -q`
+- `python3 -m pytest tests/geo/test_surface_objectives.py::BoozerResidualTests::test_exact_boozerresidual_compute_reuses_main_residual_dB_and_preserves_vjp -q`
 - `python3 -m pytest tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_boozer_derived_objective_terms_share_one_biotsavart_per_surface -q`
 - `python3 -m pytest tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_frontier_reference_metrics_share_boozer_objective_biot_savarts -q`
 - `python3 -m pytest tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_boozer_residual_exact_threads_fixed_current_into_example_adjoint_path -q`
@@ -570,10 +595,26 @@ Impact measure:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Impact:
+
+- `CurveCurveDistance.J()` / `dJ()` and `CurveSurfaceDistance.J()` / `dJ()`
+  now cache candidate curve `gamma()` and `gammadash()` arrays per evaluation
+  instead of fetching the same active curve geometry once per candidate pair.
+- Fixed benchmark fixture `curve-surface-distance`, repeat 1, warmup 0:
+  median wall time `0.002773875s -> 0.001617792s`; Python peak
+  `745338 -> 478766` bytes; process peak RSS `287768576 -> 285982720`
+  bytes.
+
+Validation:
+
+- `python3 -m pytest tests/geo/test_curve_objectives.py::Testing::test_curve_curve_distance_reuses_candidate_geometry_and_touches_only_active_curves -q`
+- `python3 examples/single_stage_optimization/benchmark_banana_impact.py --fixture all --repeat 1 --warmup 0 --output /tmp/banana_remaining_before.json`
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-surrogate/build/cp313-cp313-macosx_26_0_arm64:/Users/suhjungdae/code/columbia/simsopt-surrogate/src:/opt/homebrew/Caskroom/miniforge/base/lib/python3.13/site-packages python3 -S examples/single_stage_optimization/benchmark_banana_impact.py --fixture all --repeat 1 --warmup 0 --output /tmp/banana_remaining_after.json`
 
 ### P7. Vectorize `Curve.dkappadash_by_dcoeff`
 
@@ -604,10 +645,22 @@ Impact measure:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Impact:
+
+- `Curve.dkappadash_by_dcoeff()` now evaluates all coefficient columns through
+  broadcasted NumPy operations instead of a Python loop over every curve DOF.
+- Existing Taylor coverage for `kappadash()` derivatives passed across 26
+  subtests after vectorization.
+
+Validation:
+
+- `python3 -m pytest tests/geo/test_curve.py::Testing::test_curve_dkappa_by_dphi_derivative -q`
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-surrogate/build/cp313-cp313-macosx_26_0_arm64:/Users/suhjungdae/code/columbia/simsopt-surrogate/src:/opt/homebrew/Caskroom/miniforge/base/lib/python3.13/site-packages python3 -S -m pytest tests/core/test_derivative.py tests/objectives/test_utilities.py tests/field/test_magneticfields.py tests/field/test_biotsavart.py tests/geo/test_curve.py::Testing::test_curve_dkappa_by_dphi_derivative tests/geo/test_curve_objectives.py tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_boozer_residual_stage_selection_keeps_exact_residual_final_only -q`
 
 ### P8. Keep `CurveCWSFourierCPP` and low-level kernel rewrites last
 
@@ -639,10 +692,23 @@ Impact measure:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Impact:
+
+- Re-profiled through the fixed banana impact harness after the higher-return
+  Python orchestration, derivative aggregation, field accumulation, and
+  Biot-Savart total-only work. No `CurveCWSFourierCPP` rewrite was introduced.
+- Low-level native work stayed limited to the explicit `BiotSavart`
+  total-field mode covered under M4.
+
+Validation:
+
+- `python3 examples/single_stage_optimization/benchmark_banana_impact.py --fixture all --repeat 1 --warmup 0 --output /tmp/banana_remaining_before.json`
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-surrogate/build/cp313-cp313-macosx_26_0_arm64:/Users/suhjungdae/code/columbia/simsopt-surrogate/src:/opt/homebrew/Caskroom/miniforge/base/lib/python3.13/site-packages python3 -S examples/single_stage_optimization/benchmark_banana_impact.py --fixture all --repeat 1 --warmup 0 --output /tmp/banana_remaining_after.json`
 
 ## Memory
 
@@ -734,10 +800,24 @@ Impact measure:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Impact:
+
+- Added `sum_derivatives(...)` as the single-pass derivative aggregation SSOT.
+  `Derivative.__add__`, `OptimizableSum.dJ()`, `MPIObjective.dJ()`,
+  `MagneticFieldSum.B_vjp()`, and curve-distance derivative aggregation now
+  use it instead of repeated Python `sum(...)` over `Derivative` objects.
+- Regression verifies the accumulator copies source arrays once and does not
+  alias input derivative dictionaries.
+
+Validation:
+
+- `python3 -m pytest tests/core/test_derivative.py::DerivativeTests::test_sum_derivatives_accumulates_without_aliasing_inputs -q`
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-surrogate/build/cp313-cp313-macosx_26_0_arm64:/Users/suhjungdae/code/columbia/simsopt-surrogate/src:/opt/homebrew/Caskroom/miniforge/base/lib/python3.13/site-packages python3 -S -m pytest tests/core/test_derivative.py tests/objectives/test_utilities.py tests/field/test_magneticfields.py tests/field/test_biotsavart.py tests/geo/test_curve.py::Testing::test_curve_dkappa_by_dphi_derivative tests/geo/test_curve_objectives.py tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_boozer_residual_stage_selection_keeps_exact_residual_final_only -q`
 
 ### M3. Accumulate `MagneticFieldSum` outputs in place
 
@@ -770,10 +850,26 @@ Impact measure:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Impact:
+
+- `MagneticFieldSum` now accumulates each component directly into the output
+  buffer instead of building a full list of arrays and calling `np.sum`.
+- `sum_across_comm(...)` now accumulates gathered ndarray payloads into one
+  copied output buffer instead of relying on Python `sum(...)`.
+- Fixed benchmark fixture `magnetic-field-sum`, repeat 1, warmup 0:
+  median wall time `0.001021416s -> 0.000873499997s`; Python peak
+  `233316 -> 142236` bytes.
+
+Validation:
+
+- `python3 -m pytest tests/field/test_magneticfields.py::Testing::test_magnetic_field_sum_accumulates_without_list_sum -q`
+- `python3 -m pytest tests/objectives/test_utilities.py::UtilityObjectiveTesting::test_sum_across_comm_preserves_scalar_payload_contract -q`
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-surrogate/build/cp313-cp313-macosx_26_0_arm64:/Users/suhjungdae/code/columbia/simsopt-surrogate/src:/opt/homebrew/Caskroom/miniforge/base/lib/python3.13/site-packages python3 -S -m pytest tests/core/test_derivative.py tests/objectives/test_utilities.py tests/field/test_magneticfields.py tests/field/test_biotsavart.py tests/geo/test_curve.py::Testing::test_curve_dkappa_by_dphi_derivative tests/geo/test_curve_objectives.py tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_boozer_residual_stage_selection_keeps_exact_residual_final_only -q`
 
 ### M4. Add a lower-memory `BiotSavart` compute mode
 
@@ -806,10 +902,30 @@ Impact measure:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Impact:
+
+- Added native `BiotSavart::compute_total_only(...)` and wired total `B`,
+  `dB_by_dX`, and `d2B_by_dXdX` evaluation through it. Total-field callers no
+  longer materialize per-coil `B_i` caches; current-derivative and VJP callers
+  still use the existing per-coil cache path when those derivatives are needed.
+- Review follow-up kept the total-only helper internal to the native class and
+  made its point-sized scratch arrays derivative-specific: `B()` allocates
+  only `B_i`, `dB_by_dX()` allocates `B_i` and `dB_i`, and `d2B_by_dXdX()`
+  allocates the second-derivative scratch only on that path.
+- Fixed benchmark fixture `biot-savart`, repeat 1, warmup 0: median wall time
+  `0.002471166s -> 0.002320875s`; Python peak `809026 -> 151035` bytes.
+
+Validation:
+
+- `cmake -S . -B build/cp313-cp313-macosx_26_0_arm64 -DPython_EXECUTABLE=$(python3 -c 'import sys; print(sys.executable)') -DPython3_EXECUTABLE=$(python3 -c 'import sys; print(sys.executable)') -DPython_NumPy_INCLUDE_DIR=$(python3 -c 'import numpy; print(numpy.get_include())') -DPython3_NumPy_INCLUDE_DIR=$(python3 -c 'import numpy; print(numpy.get_include())')`
+- `cmake --build build/cp313-cp313-macosx_26_0_arm64 --target simsoptpp -j2`
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-surrogate/build/cp313-cp313-macosx_26_0_arm64:/Users/suhjungdae/code/columbia/simsopt-surrogate/src:/opt/homebrew/Caskroom/miniforge/base/lib/python3.13/site-packages python3 -S -m pytest tests/field/test_biotsavart.py::Testing::test_biotsavart_total_field_does_not_materialize_per_coil_cache -q`
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-surrogate/build/cp313-cp313-macosx_26_0_arm64:/Users/suhjungdae/code/columbia/simsopt-surrogate/src:/opt/homebrew/Caskroom/miniforge/base/lib/python3.13/site-packages python3 -S examples/single_stage_optimization/benchmark_banana_impact.py --fixture biot-savart --repeat 1 --warmup 0 --output /tmp/banana_biot_savart_review_after.json`
 
 ### M5. Make Boozer LS second-order path lower-memory
 
@@ -844,10 +960,23 @@ Impact measure:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Impact:
+
+- The LS Newton path no longer allocates a dense identity matrix for
+  stabilization; it updates the Hessian diagonal in place when `stab != 0`.
+- The second-order LS path now reuses one PLU factorization for Newton
+  correction and optional iterative refinement in each iteration.
+
+Validation:
+
+- `python3 -m pytest tests/objectives/test_utilities.py::UtilityObjectiveTesting::test_forward_solve_matches_dense_solve_for_plu_factors -q`
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-surrogate/build/cp313-cp313-macosx_26_0_arm64:/Users/suhjungdae/code/columbia/simsopt-surrogate/src:/opt/homebrew/Caskroom/miniforge/base/lib/python3.13/site-packages python3 -S -m pytest tests/geo/test_boozersurface.py tests/geo/test_surface_objectives.py -q`
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-surrogate/build/cp313-cp313-macosx_26_0_arm64:/Users/suhjungdae/code/columbia/simsopt-surrogate/src:/opt/homebrew/Caskroom/miniforge/base/lib/python3.13/site-packages python3 -S -m pytest tests/core/test_derivative.py tests/objectives/test_utilities.py tests/field/test_magneticfields.py tests/field/test_biotsavart.py tests/geo/test_curve.py::Testing::test_curve_dkappa_by_dphi_derivative tests/geo/test_curve_objectives.py tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_boozer_residual_stage_selection_keeps_exact_residual_final_only -q`
 
 ### M6. Reduce curve-distance VJP accumulator over-allocation
 
@@ -879,10 +1008,23 @@ Impact measure:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Impact:
+
+- `CurveCurveDistance.dJ()` and `CurveSurfaceDistance.dJ()` allocate VJP
+  buffers only for active candidate curve indices instead of every curve in
+  the objective.
+- Regression verifies inactive curves are not asked for geometry or VJP work
+  when the candidate subset is sparse.
+
+Validation:
+
+- `python3 -m pytest tests/geo/test_curve_objectives.py::Testing::test_curve_curve_distance_reuses_candidate_geometry_and_touches_only_active_curves -q`
+- `PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-surrogate/build/cp313-cp313-macosx_26_0_arm64:/Users/suhjungdae/code/columbia/simsopt-surrogate/src:/opt/homebrew/Caskroom/miniforge/base/lib/python3.13/site-packages python3 -S -m pytest tests/core/test_derivative.py tests/objectives/test_utilities.py tests/field/test_magneticfields.py tests/field/test_biotsavart.py tests/geo/test_curve.py::Testing::test_curve_dkappa_by_dphi_derivative tests/geo/test_curve_objectives.py tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_boozer_residual_stage_selection_keeps_exact_residual_final_only -q`
 
 ### M7. Clean up ALM copy discipline
 
@@ -972,10 +1114,22 @@ Fix direction:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Impact:
+
+- `build_boozer_derived_objective_terms(...)` now delegates stage selection to
+  `boozer_residual_class_for_stage(...)`, making the final-stage/refinement
+  exact-residual contract explicit in one place.
+- Regression covers that `"initial"` and `"search"` use `BoozerResidual`, while
+  `"final"` uses `BoozerResidualExact`.
+
+Validation:
+
+- `python3 -m pytest tests/geo/test_single_stage_example.py::SingleStageExampleTests::test_boozer_residual_stage_selection_keeps_exact_residual_final_only -q`
 
 ### O2. Enable frontier-lane parallelism only within independent groups
 
@@ -1040,10 +1194,15 @@ Completion:
   - Targeted regression fixture confirms worker overlap for a two-lane
     independent seed group (`max_active_lane_count >= 2`) while preserving
     deterministic lane records and certified archive output.
+  - `/usr/bin/time -l python3 -m pytest tests/geo/test_single_stage_workflow_helpers.py::FrontierCampaignScriptTests::test_frontier_campaign_parallel_seed_group_matches_serial_archive_outputs -q`
+    recorded `2.50 real`, `306167808` maximum resident set size, and
+    `228607176` peak memory footprint for the fixed small serial-vs-parallel
+    parity fixture.
 - [x] Validation command recorded
   - `python3 -m ruff check examples/single_stage_optimization/run_single_stage_frontier_campaign.py tests/geo/test_single_stage_workflow_helpers.py`
   - `python3 -m py_compile examples/single_stage_optimization/run_single_stage_frontier_campaign.py tests/geo/test_single_stage_workflow_helpers.py`
   - `python3 -m pytest tests/geo/test_single_stage_workflow_helpers.py -k "frontier_campaign" -q`
+  - `/usr/bin/time -l python3 -m pytest tests/geo/test_single_stage_workflow_helpers.py::FrontierCampaignScriptTests::test_frontier_campaign_parallel_seed_group_matches_serial_archive_outputs -q`
 
 ### O3. Keep excluded claims excluded unless new evidence appears
 
@@ -1074,9 +1233,9 @@ Do not re-open these without current code evidence:
 6. P2: remove exact sampled distances from search evaluation.
 7. P3: tune `maxcor` with measured defaults.
 8. M7: clean ALM history/copy discipline.
-9. P4/P5: reuse Boozer solve/evaluation state.
-10. M2/M3/M6: reduce generic derivative and field aggregation allocations.
-11. M4/M5/P7/P8/O2: larger work only after fresh measurements justify it.
+9. P4/P5: reuse Boozer solve/evaluation state. Done.
+10. M2/M3/M6: reduce generic derivative and field aggregation allocations. Done.
+11. M4/M5/P7/P8/O2: larger work only after fresh measurements justify it. Done.
 
 ## Validation Commands To Record Per Patch
 

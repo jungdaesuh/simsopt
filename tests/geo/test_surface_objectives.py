@@ -463,6 +463,52 @@ class BoozerResidualTests(unittest.TestCase):
 
         self.assertEqual(residual_dB_calls, 1)
 
+    def test_exact_boozerresidual_compute_reuses_main_residual_dB_and_preserves_vjp(self):
+        bs, boozer_surface = get_boozer_surface(label="Volume", boozer_type='exact')
+        self.assertFalse(boozer_surface.need_to_run_code)
+        boozer_surface.constraint_weight = 100.
+        residual_calls = 0
+        residual_dB_calls = 0
+        vjp_calls = 0
+        residual_dB_kwargs = []
+        original_residual = surfaceobjectives_module.boozer_surface_residual
+        original_residual_dB = surfaceobjectives_module.boozer_surface_residual_dB
+        original_vjp = boozer_surface.res["vjp"]
+
+        def counted_residual(*args, **kwargs):
+            nonlocal residual_calls
+            residual_calls += 1
+            return original_residual(*args, **kwargs)
+
+        def counted_residual_dB(*args, **kwargs):
+            nonlocal residual_dB_calls
+            residual_dB_calls += 1
+            residual_dB_kwargs.append(kwargs.copy())
+            return original_residual_dB(*args, **kwargs)
+
+        def counted_vjp(*args, **kwargs):
+            nonlocal vjp_calls
+            vjp_calls += 1
+            return original_vjp(*args, **kwargs)
+
+        boozer_surface.res["vjp"] = counted_vjp
+        br = BoozerResidual(boozer_surface, bs)
+
+        with patch.object(surfaceobjectives_module, "boozer_surface_residual", counted_residual), \
+                patch.object(surfaceobjectives_module, "boozer_surface_residual_dB", counted_residual_dB):
+            br.J()
+            br.dJ()
+
+        self.assertEqual(residual_calls, 0)
+        self.assertEqual(residual_dB_calls, 1)
+        self.assertEqual(vjp_calls, 1)
+        mixed_derivative_flags = [
+            kwargs.get("include_mixed_derivatives", True)
+            for kwargs in residual_dB_kwargs
+            if kwargs.get("derivatives", 0) == 1
+        ]
+        self.assertIn(False, mixed_derivative_flags)
+
     def test_boozerresidual_derivative(self):
         """
         Taylor test for derivative of surface non QS ratio wrt coil parameters

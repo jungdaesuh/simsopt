@@ -20,7 +20,7 @@ import simsopt.geo.surfaceobjectives as surfaceobjectives_module
 from simsopt._core.derivative import Derivative
 from simsopt._core.optimizable import Optimizable
 from simsopt.field.coil import Current, ScaledCurrent
-from simsopt.geo.surfaceobjectives import boozer_surface_residual, boozer_surface_residual_dB
+from simsopt.geo.surfaceobjectives import boozer_surface_residual_dB
 from simsopt.objectives.utilities import forward_backward
 
 
@@ -650,6 +650,23 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsInstance(final_terms["brs"][0], patched_types.exact_residual_cls)
         self.assertEqual(len(patched_types.biot_savarts), 4)
 
+    def test_boozer_residual_stage_selection_keeps_exact_residual_final_only(self):
+        module = self.load_module()
+
+        with self.patched_boozer_objective_term_types(module) as patched_types:
+            self.assertIs(
+                module.boozer_residual_class_for_stage("initial"),
+                patched_types.residual_cls,
+            )
+            self.assertIs(
+                module.boozer_residual_class_for_stage("search"),
+                patched_types.residual_cls,
+            )
+            self.assertIs(
+                module.boozer_residual_class_for_stage("final"),
+                patched_types.exact_residual_cls,
+            )
+
     def test_frontier_reference_metrics_share_boozer_objective_biot_savarts(self):
         module = self.load_module()
         averaged_objectives = []
@@ -694,27 +711,23 @@ class SingleStageExampleTests(unittest.TestCase):
             current_I=I,
         )
 
-    def differentiable_residual(self, surface, iota, G, biotsavart, derivatives=0, weight_inv_modB=False, I=0.0):
-        del iota, G
-        residual = self.differentiable_residual_vector(
-            surface,
-            biotsavart,
-            weight_inv_modB=weight_inv_modB,
-            I=I,
-        )
-        nsurfdofs = surface.get_dofs().size
-        J = np.zeros((residual.size, nsurfdofs + 2))
-        if derivatives == 0:
-            return residual,
-        return residual, J
-
     def differentiable_residual_dB_derivatives(self, residual_size, nsurfdofs):
         residual_jacobian = np.zeros((residual_size, nsurfdofs + 2))
         second_by_field = np.zeros((residual_size, 3, nsurfdofs + 2))
         second_by_field_gradient = np.zeros((residual_size, 3, 3, nsurfdofs + 2))
         return residual_jacobian, second_by_field, second_by_field_gradient
 
-    def differentiable_residual_dB(self, surface, iota, G, biotsavart, derivatives=0, weight_inv_modB=False, I=0.0):
+    def differentiable_residual_dB(
+        self,
+        surface,
+        iota,
+        G,
+        biotsavart,
+        derivatives=0,
+        weight_inv_modB=False,
+        I=0.0,
+        include_mixed_derivatives=True,
+    ):
         del iota, G
         biotsavart.set_points(surface.gamma().reshape((-1, 3)))
         residual = self.differentiable_residual_vector(
@@ -729,22 +742,21 @@ class SingleStageExampleTests(unittest.TestCase):
             return residual, residual_dB
         nsurfdofs = surface.get_dofs().size
         derivative_terms = self.differentiable_residual_dB_derivatives(residual.size, nsurfdofs)
+        if not include_mixed_derivatives:
+            return residual, residual_dB, derivative_terms[0]
         return residual, residual_dB, *derivative_terms
 
-    def tracked_differentiable_residuals(self, calls):
-        def tracked_residual(surface, iota, G, bs, derivatives=0, weight_inv_modB=False, I=0.0):
-            calls.append((derivatives, weight_inv_modB, I))
-            return self.differentiable_residual(
-                surface,
-                iota,
-                G,
-                bs,
-                derivatives=derivatives,
-                weight_inv_modB=weight_inv_modB,
-                I=I,
-            )
-
-        def tracked_residual_dB(surface, iota, G, bs, derivatives=0, weight_inv_modB=False, I=0.0):
+    def tracked_differentiable_residual_dB(self, calls):
+        def tracked_residual_dB(
+            surface,
+            iota,
+            G,
+            bs,
+            derivatives=0,
+            weight_inv_modB=False,
+            I=0.0,
+            include_mixed_derivatives=True,
+        ):
             calls.append((derivatives, weight_inv_modB, I))
             return self.differentiable_residual_dB(
                 surface,
@@ -754,16 +766,16 @@ class SingleStageExampleTests(unittest.TestCase):
                 derivatives=derivatives,
                 weight_inv_modB=weight_inv_modB,
                 I=I,
+                include_mixed_derivatives=include_mixed_derivatives,
             )
 
-        return tracked_residual, tracked_residual_dB
+        return tracked_residual_dB
 
     @contextmanager
-    def patched_boozer_residual_evaluators(self, modules, residual, residual_dB):
+    def patched_boozer_residual_dB_evaluators(self, modules, residual_dB):
         with ExitStack() as stack:
             for module in modules:
                 stack.enter_context(patch.object(module, "SurfaceXYZTensorFourier", FakeResolvedSurface))
-                stack.enter_context(patch.object(module, "boozer_surface_residual", side_effect=residual))
                 stack.enter_context(patch.object(module, "boozer_surface_residual_dB", side_effect=residual_dB))
             yield
 
@@ -850,37 +862,41 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         fake_bs = FakeObjectiveBiotSavart()
         nsurfdofs = input_surface.get_dofs().size
-        residual_calls = []
         residual_dB_calls = []
 
-        def fake_residual(surface, iota, G, biotsavart, derivatives=0, weight_inv_modB=False, I=0.0):
+        def fake_residual_dB(
+            surface,
+            iota,
+            G,
+            biotsavart,
+            derivatives=0,
+            weight_inv_modB=False,
+            I=0.0,
+            include_mixed_derivatives=True,
+        ):
             num_points = 3 * surface.quadpoints_phi.size * surface.quadpoints_theta.size
-            residual_calls.append((derivatives, weight_inv_modB, I))
-            return np.ones(num_points), np.zeros((num_points, nsurfdofs + 2))
-
-        def fake_residual_dB(surface, iota, G, biotsavart, derivatives=0, weight_inv_modB=False, I=0.0):
-            num_points = 3 * surface.quadpoints_phi.size * surface.quadpoints_theta.size
-            residual_dB_calls.append((derivatives, weight_inv_modB, I))
+            residual_dB_calls.append((derivatives, weight_inv_modB, I, include_mixed_derivatives))
             biotsavart.set_points(surface.gamma().reshape((-1, 3)))
             residual = np.ones(num_points)
             residual_dB = np.ones((num_points, 3))
             if derivatives == 0:
                 return residual, residual_dB
             derivative_terms = self.differentiable_residual_dB_derivatives(num_points, nsurfdofs)
+            if not include_mixed_derivatives:
+                return residual, residual_dB, derivative_terms[0]
             return residual, residual_dB, *derivative_terms
 
         residual_module = self.residual_module(module)
         adjoint_solution = np.zeros(nsurfdofs + 2)
-        with self.patched_boozer_residual_evaluators(
+        with self.patched_boozer_residual_dB_evaluators(
             (residual_module,),
-            fake_residual,
             fake_residual_dB,
         ), patch.object(residual_module, "forward_backward", return_value=adjoint_solution):
             objective = module.BoozerResidualExact(fake_boozer_surface, fake_bs)
             value = objective.J()
             gradient = objective.dJ(partials=True)
 
-        return objective, fake_bs, residual_calls, residual_dB_calls, value, gradient
+        return objective, fake_bs, residual_dB_calls, value, gradient
 
     def test_exact_boozer_residual_is_imported_from_banana_module(self):
         module = self.load_module()
@@ -888,7 +904,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertIs(module.BoozerResidualExact, residual_module.BoozerResidualExact)
         self.assertIs(module.RefinedBoozerResidual, residual_module.RefinedBoozerResidual)
-        self.assertIs(residual_module.boozer_surface_residual, boozer_surface_residual)
+        self.assertNotIn("boozer_surface_residual", vars(residual_module))
         self.assertIs(residual_module.boozer_surface_residual_dB, boozer_surface_residual_dB)
         self.assertIs(residual_module.forward_backward, forward_backward)
 
@@ -1043,15 +1059,14 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_boozer_residual_exact_threads_fixed_current_into_example_adjoint_path(self):
         module = self.load_module()
-        objective, fake_bs, residual_calls, residual_dB_calls, value, gradient = self.run_exact_boozer_objective(
+        objective, fake_bs, residual_dB_calls, value, gradient = self.run_exact_boozer_objective(
             module,
             current_I=TEST_BOOZER_I,
         )
 
         self.assertIsInstance(value, float)
         np.testing.assert_allclose(gradient, np.array([3.0, -1.0]))
-        self.assertEqual(residual_calls, [(1, True, TEST_BOOZER_I)])
-        self.assertEqual(residual_dB_calls, [(0, True, TEST_BOOZER_I)])
+        self.assertEqual(residual_dB_calls, [(1, True, TEST_BOOZER_I, False)])
         expected_point_count = objective.surface.quadpoints_phi.size * objective.surface.quadpoints_theta.size
         self.assertEqual(fake_bs.points.shape, (expected_point_count, 3))
         self.assertEqual(fake_bs.last_vjp_input.shape, (expected_point_count, 3))
@@ -1072,11 +1087,10 @@ class SingleStageExampleTests(unittest.TestCase):
                         implicit_scale=(0.03, -0.02),
                     )
                     residual_calls = []
-                    tracked_residual, tracked_residual_dB = self.tracked_differentiable_residuals(residual_calls)
+                    tracked_residual_dB = self.tracked_differentiable_residual_dB(residual_calls)
 
-                    with self.patched_boozer_residual_evaluators(
+                    with self.patched_boozer_residual_dB_evaluators(
                         (surfaceobjectives_module, residual_module),
-                        tracked_residual,
                         tracked_residual_dB,
                     ):
                         standard = surfaceobjectives_module.BoozerResidual(boozer_surface, biotsavart)
@@ -1112,11 +1126,10 @@ class SingleStageExampleTests(unittest.TestCase):
             res_type="ls",
         )
         residual_calls = []
-        tracked_residual, tracked_residual_dB = self.tracked_differentiable_residuals(residual_calls)
+        tracked_residual_dB = self.tracked_differentiable_residual_dB(residual_calls)
 
-        with self.patched_boozer_residual_evaluators(
+        with self.patched_boozer_residual_dB_evaluators(
             (residual_module,),
-            tracked_residual,
             tracked_residual_dB,
         ):
             objective = residual_module.RefinedBoozerResidual(
@@ -1140,9 +1153,8 @@ class SingleStageExampleTests(unittest.TestCase):
             weight_inv_modB=False,
         )
 
-        with self.patched_boozer_residual_evaluators(
+        with self.patched_boozer_residual_dB_evaluators(
             (residual_module,),
-            self.differentiable_residual,
             self.differentiable_residual_dB,
         ):
             exact = residual_module.BoozerResidualExact(boozer_surface, biotsavart)
@@ -1201,11 +1213,10 @@ class SingleStageExampleTests(unittest.TestCase):
             weight_inv_modB=True,
         )
         residual_calls = []
-        tracked_residual, tracked_residual_dB = self.tracked_differentiable_residuals(residual_calls)
+        tracked_residual_dB = self.tracked_differentiable_residual_dB(residual_calls)
 
-        with self.patched_boozer_residual_evaluators(
+        with self.patched_boozer_residual_dB_evaluators(
             (residual_module,),
-            tracked_residual,
             tracked_residual_dB,
         ):
             objective = residual_module.RefinedBoozerResidual(
@@ -1238,9 +1249,8 @@ class SingleStageExampleTests(unittest.TestCase):
                     current_I=TEST_BOOZER_I,
                     weight_inv_modB=False,
                 )
-                with self.patched_boozer_residual_evaluators(
+                with self.patched_boozer_residual_dB_evaluators(
                     (residual_module,),
-                    self.differentiable_residual,
                     self.differentiable_residual_dB,
                 ):
                     self.assert_directional_derivative_matches_fd(

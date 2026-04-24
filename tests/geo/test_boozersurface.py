@@ -220,6 +220,13 @@ class BoozerSurfaceTests(unittest.TestCase):
         np.testing.assert_allclose(J0@h1, J1@h1, atol=1e-13, rtol=1e-13)
         print(np.abs(f0-f1)/np.abs(f0), np.abs(J0@h1-J1@h1)/np.abs(J0@h1))
 
+        H0, H1 = self._assert_penalty_constraints_derivatives2_cpp_python_match(
+            boozer_surface, x, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB,
+        )
+        return H0, H1
+
+    def _assert_penalty_constraints_derivatives2_cpp_python_match(self, boozer_surface, x, *, optimize_G, weight_inv_modB):
+        w = 0.
         f0, J0, H0 = boozer_surface.boozer_penalty_constraints(
             x, derivatives=2, constraint_weight=w, optimize_G=optimize_G, weight_inv_modB=weight_inv_modB)
         f1, J1, H1 = boozer_surface.boozer_penalty_constraints_vectorized(
@@ -228,6 +235,7 @@ class BoozerSurfaceTests(unittest.TestCase):
         np.testing.assert_allclose(J0, J1, atol=1e-11, rtol=1e-11)
         np.testing.assert_allclose(H0, H1, atol=1e-10, rtol=1e-10)
 
+        h1 = np.random.rand(J0.size)-0.5
         h2 = np.random.rand(J0.size)-0.5
         np.testing.assert_allclose(J0@h1, J1@h1, atol=1e-13, rtol=1e-13)
         np.testing.assert_allclose((H0@h1)@h2, (H1@h1)@h2, atol=1e-13, rtol=1e-13)
@@ -674,6 +682,40 @@ class BoozerSurfaceTests(unittest.TestCase):
                                           mpol=mpol,
                                           ntor=ntor):
                             self.subtest_boozer_penalty_constraints_cpp_notcpp(surfacetype, stellsym, optimize_G, nphi, ntheta, weight_inv_modB, mpol, ntor)
+
+    def test_boozer_penalty_constraints_derivatives2_weighted_unweighted_cpp_notcpp(self):
+        for weight_inv_modB in [False, True]:
+            with self.subTest(weight_inv_modB=weight_inv_modB):
+                self.subtest_boozer_penalty_constraints_derivatives2_cpp_notcpp(weight_inv_modB)
+
+    def subtest_boozer_penalty_constraints_derivatives2_cpp_notcpp(self, weight_inv_modB):
+        np.random.seed(1)
+        curves, currents, ma = get_ncsx_data()
+        coils = coils_via_symmetries(curves, currents, 3, True)
+        bs = BiotSavart(coils)
+        bs_tf = BiotSavart(coils)
+        current_sum = sum(abs(c.current.get_value()) for c in coils)
+
+        s = get_surface(
+            "SurfaceXYZTensorFourier", True, nphi=2, ntheta=2,
+            thetas=[0.2432101234, 0.9832134],
+            phis=[0.2234567989, 0.432123451],
+            mpol=3, ntor=3,
+        )
+        s.fit_to_curve(ma, 0.1)
+        s.x = s.x + np.random.rand(s.x.size)*1e-6
+
+        tf = ToroidalFlux(s, bs_tf, nphi=51, ntheta=51)
+        tf_target = 0.1
+        G = 2.*np.pi*current_sum*(4*np.pi*10**(-7)/(2 * np.pi))
+        iota = -0.3
+
+        for current_I in [0.0, 0.37]:
+            boozer_surface = BoozerSurface(bs, s, tf, tf_target, I=current_I)
+            x = np.concatenate((s.get_dofs(), [iota, G]))
+            self._assert_penalty_constraints_derivatives2_cpp_python_match(
+                boozer_surface, x, optimize_G=True, weight_inv_modB=weight_inv_modB,
+            )
 
     def subtest_boozer_penalty_constraints_cpp_notcpp(self, surfacetype, stellsym, optimize_G, nphi, ntheta, weight_inv_modB, mpol, ntor):
 

@@ -5,6 +5,7 @@ import simsoptpp as sopp
 
 from .surfaceobjectives import boozer_surface_residual, boozer_surface_dexactresidual_dcoils_dcurrents_vjp, boozer_surface_dlsqgrad_dcoils_vjp
 from .._core.optimizable import Optimizable
+from ..objectives.utilities import forward_solve
 from functools import partial
 
 __all__ = ['BoozerSurface']
@@ -746,10 +747,12 @@ class BoozerSurface(Optimizable):
 
         norm = np.linalg.norm(dval)
         while i < maxiter and norm > tol:
-            d2val += stab*np.identity(d2val.shape[0])
-            dx = np.linalg.solve(d2val, dval)
+            if stab != 0.:
+                d2val.flat[::d2val.shape[0] + 1] += stab
+            P, L, U = lu(d2val)
+            dx = forward_solve(P, L, U, dval)
             if norm < 1e-9:
-                dx += np.linalg.solve(d2val, dval - d2val@dx)
+                dx += forward_solve(P, L, U, dval - d2val@dx)
             x = x - dx
             val, dval, d2val = fun_name(x, derivatives=2, constraint_weight=constraint_weight, optimize_G=G is not None, weight_inv_modB=weight_inv_modB)
             norm = np.linalg.norm(dval)
@@ -1106,8 +1109,9 @@ class BoozerSurface(Optimizable):
                     np.concatenate((label.dJ(partials=True)(s), [0., 0.])),
                     np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0., 0.]))
                 ))
-            dx = np.linalg.solve(J, b)
-            dx += np.linalg.solve(J, b-J@dx)
+            P, L, U = lu(J)
+            dx = forward_solve(P, L, U, b)
+            dx += forward_solve(P, L, U, b-J@dx)
             x -= dx
             s.set_dofs(x[:-2])
             iota = x[-2]
@@ -1130,7 +1134,8 @@ class BoozerSurface(Optimizable):
         P, L, U = lu(J)
         res = {
             "residual": r, "jacobian": J, "iter": i, "success": norm <= tol, "G": G, "s": s, "iota": iota, "PLU": (P, L, U),
-            "mask": mask, 'type': 'exact', "vjp": boozer_surface_dexactresidual_dcoils_dcurrents_vjp
+            "mask": mask, 'type': 'exact', "weight_inv_modB": False,
+            "vjp": boozer_surface_dexactresidual_dcoils_dcurrents_vjp
         }
         res = self._with_fixed_current(res)
 

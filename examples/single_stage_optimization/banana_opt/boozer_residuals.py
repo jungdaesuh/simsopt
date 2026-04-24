@@ -9,7 +9,6 @@ from simsopt.geo.surfaceobjectives import (
     _boozer_lsqgrad_vjp_from_residual_state,
     _boozer_residual_dJ_by_dB,
     _resolve_boozer_current_I,
-    boozer_surface_residual,
     boozer_surface_residual_dB,
 )
 from simsopt.objectives.utilities import forward_backward
@@ -147,7 +146,7 @@ class RefinedBoozerResidual(Optimizable):
                 I=I,
             )
         else:
-            r, J = boozer_surface_residual(
+            r, r_dB, J = boozer_surface_residual_dB(
                 surface,
                 iota,
                 G,
@@ -155,15 +154,7 @@ class RefinedBoozerResidual(Optimizable):
                 derivatives=1,
                 weight_inv_modB=weight_inv_modB,
                 I=I,
-            )
-            _, r_dB = boozer_surface_residual_dB(
-                surface,
-                iota,
-                G,
-                self.biotsavart,
-                derivatives=0,
-                weight_inv_modB=weight_inv_modB,
-                I=I,
+                include_mixed_derivatives=False,
             )
         rtil = r / sqrt_n
         Jtil = J / sqrt_n
