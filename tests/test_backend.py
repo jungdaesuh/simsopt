@@ -1016,116 +1016,13 @@ def test_sharding_tuning_accepts_coil_groups_strategy(monkeypatch):
     assert backend.should_shard_coil_groups() is True
 
 
-def test_sharding_tuning_accepts_points_coils_strategy(monkeypatch):
+def test_sharding_tuning_rejects_points_coils_strategy(monkeypatch):
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
     monkeypatch.setenv("SIMSOPT_JAX_SHARDING", "points_coils")
-    monkeypatch.setenv("SIMSOPT_JAX_SHARDING_AXIS", "pts")
-    monkeypatch.setenv("SIMSOPT_JAX_COIL_SHARDING_AXIS", "coil_batch")
-    monkeypatch.setenv("SIMSOPT_JAX_POINT_SHARDING_DEVICES", "2")
-    monkeypatch.setenv("SIMSOPT_JAX_COIL_SHARDING_DEVICES", "2")
-    monkeypatch.setenv("SIMSOPT_JAX_MIN_POINTS_TO_SHARD", "11")
-    monkeypatch.setenv("SIMSOPT_JAX_MIN_COILS_TO_SHARD", "5")
     backend = _fresh_backend()
-    runtime = sys.modules["simsopt.backend.runtime"]
-    monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 4)
-
-    tuning = backend.get_sharding_tuning()
-
-    assert tuning.strategy == "points_coils"
-    assert tuning.mesh_axis_name == "pts"
-    assert tuning.point_axis_name == "pts"
-    assert tuning.coil_axis_name == "coil_batch"
-    assert tuning.mesh_axes == ("pts", "coil_batch")
-    assert tuning.point_device_count == 2
-    assert tuning.coil_device_count == 2
-    assert tuning.reduced_axis_name == "coil_batch"
-    assert tuning.min_points_to_shard == 11
-    assert tuning.min_coils_to_shard == 5
-    assert tuning.active is True
-    assert backend.should_shard_points() is False
-    assert backend.should_shard_pairwise_rows() is False
-    assert backend.should_shard_coil_groups() is False
-
-
-def test_sharding_tuning_rejects_points_coils_device_product_mismatch(monkeypatch):
-    _clear_backend_env(monkeypatch)
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
-    monkeypatch.setenv("SIMSOPT_JAX_SHARDING", "points_coils")
-    monkeypatch.setenv("SIMSOPT_JAX_POINT_SHARDING_DEVICES", "3")
-    monkeypatch.setenv("SIMSOPT_JAX_COIL_SHARDING_DEVICES", "2")
-    backend = _fresh_backend()
-    runtime = sys.modules["simsopt.backend.runtime"]
-    monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 4)
-
-    with pytest.raises(ValueError, match="must equal detected JAX device count 4"):
+    with pytest.raises(ValueError, match="SIMSOPT_JAX_SHARDING='points_coils'"):
         backend.get_sharding_tuning()
-
-
-def test_sharding_tuning_rejects_points_coils_without_device_counts(monkeypatch):
-    _clear_backend_env(monkeypatch)
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
-    monkeypatch.setenv("SIMSOPT_JAX_SHARDING", "points_coils")
-    backend = _fresh_backend()
-    runtime = sys.modules["simsopt.backend.runtime"]
-    monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 4)
-
-    with pytest.raises(
-        ValueError,
-        match="SIMSOPT_JAX_POINT_SHARDING_DEVICES is required",
-    ):
-        backend.get_sharding_tuning()
-
-
-def test_points_coils_collective_config_reports_metadata(monkeypatch):
-    _clear_backend_env(monkeypatch)
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
-    monkeypatch.setenv("SIMSOPT_JAX_SHARDING", "points_coils")
-    monkeypatch.setenv("SIMSOPT_JAX_SHARDING_AXIS", "pts")
-    monkeypatch.setenv("SIMSOPT_JAX_COIL_SHARDING_AXIS", "coil_batch")
-    monkeypatch.setenv("SIMSOPT_JAX_POINT_SHARDING_DEVICES", "2")
-    monkeypatch.setenv("SIMSOPT_JAX_COIL_SHARDING_DEVICES", "2")
-    monkeypatch.setenv("SIMSOPT_JAX_MIN_POINTS_TO_SHARD", "4")
-    monkeypatch.setenv("SIMSOPT_JAX_MIN_COILS_TO_SHARD", "3")
-    _fresh_backend()
-    runtime = sys.modules["simsopt.backend.runtime"]
-    monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 4)
-    sharding = _fresh_sharding_module()
-    fake_mesh = types.SimpleNamespace(shape={"pts": 2, "coil_batch": 2})
-
-    def fake_points_coils_mesh_for(
-        platform,
-        point_axis_name,
-        coil_axis_name,
-        point_device_count,
-        coil_device_count,
-    ):
-        return fake_mesh
-
-    monkeypatch.setattr(
-        sharding,
-        "_points_coils_mesh_for",
-        fake_points_coils_mesh_for,
-    )
-
-    points = np.zeros((8, 3))
-    currents = np.ones((5,))
-    config = sharding.points_coils_collective_config(points, currents)
-    summary = sharding.collective_field_sharding_summary(points, config=config)
-
-    assert config is not None
-    assert config.mesh_axes == ("pts", "coil_batch")
-    assert config.reduced_axis_name == "coil_batch"
-    assert config.device_count == 4
-    assert summary["field_collective"] is True
-    assert summary["strategy"] == "points_coils"
-    assert summary["mesh_axes"] == ("pts", "coil_batch")
-    assert summary["point_axis"] == "pts"
-    assert summary["coil_axis"] == "coil_batch"
-    assert summary["collective_axis"] == "coil_batch"
-    assert summary["mesh_shape"] == {"pts": 2, "coil_batch": 2}
-    assert summary["point_device_count"] == 2
-    assert summary["coil_device_count"] == 2
 
 
 def test_distributed_runtime_config_reads_env(monkeypatch):

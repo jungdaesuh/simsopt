@@ -82,8 +82,6 @@ _BACKEND_SELECTOR_ENV_VARS = (
     "SIMSOPT_JAX_SHARDING",
     "SIMSOPT_JAX_SHARDING_AXIS",
     "SIMSOPT_JAX_COIL_SHARDING_AXIS",
-    "SIMSOPT_JAX_POINT_SHARDING_DEVICES",
-    "SIMSOPT_JAX_COIL_SHARDING_DEVICES",
     "SIMSOPT_JAX_MIN_POINTS_TO_SHARD",
     "SIMSOPT_JAX_MIN_PAIRWISE_ROWS_TO_SHARD",
     "SIMSOPT_JAX_MIN_COILS_TO_SHARD",
@@ -684,27 +682,6 @@ def test_grouped_biot_savart_coil_collective_parity_and_lowering():
             "XLA_FLAGS": "--xla_force_host_platform_device_count=4",
             "SIMSOPT_BACKEND_MODE": "jax_cpu_parity",
             "SIMSOPT_JAX_SHARDING": "coil_groups",
-            "SIMSOPT_JAX_MIN_COILS_TO_SHARD": "1",
-            "SIMSOPT_JAX_TRANSFER_GUARD": "allow",
-        },
-    )
-
-
-def test_grouped_biot_savart_points_coils_collective_parity_and_lowering():
-    """Point-by-coil grouped-field collectives must lower to an all-reduce."""
-    _assert_python_script_passes(
-        _JAX_SUBPROCESS_CASES_PATH,
-        args=("grouped-points-coils-collective",),
-        failure_message="grouped Biot-Savart points-coils collective smoke failed",
-        timeout=60,
-        extra_env={
-            "JAX_PLATFORMS": "cpu",
-            "XLA_FLAGS": "--xla_force_host_platform_device_count=4",
-            "SIMSOPT_BACKEND_MODE": "jax_cpu_parity",
-            "SIMSOPT_JAX_SHARDING": "points_coils",
-            "SIMSOPT_JAX_POINT_SHARDING_DEVICES": "2",
-            "SIMSOPT_JAX_COIL_SHARDING_DEVICES": "2",
-            "SIMSOPT_JAX_MIN_POINTS_TO_SHARD": "1",
             "SIMSOPT_JAX_MIN_COILS_TO_SHARD": "1",
             "SIMSOPT_JAX_TRANSFER_GUARD": "allow",
         },

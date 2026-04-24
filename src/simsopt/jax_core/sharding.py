@@ -16,15 +16,12 @@ from ..backend.runtime import register_backend_cache_clear
 
 __all__ = [
     "CoilGroupCollectiveConfig",
-    "PointsCoilsCollectiveConfig",
     "coil_group_collective_config",
     "collective_field_sharding_summary",
     "inspect_array_sharding_summary",
     "maybe_shard_grouped_field_inputs",
     "maybe_shard_pairwise_row_inputs",
     "maybe_shard_pairwise_row_trees",
-    "points_coils_collective_config",
-    "points_coils_mesh",
     "summarize_array_sharding",
 ]
 
@@ -63,31 +60,7 @@ class CoilGroupCollectiveConfig:
         return self.device_count
 
 
-@dataclass(frozen=True)
-class PointsCoilsCollectiveConfig:
-    """Resolved mesh contract for 2D point-by-coil collectives."""
-
-    mesh: Mesh
-    point_axis_name: str
-    coil_axis_name: str
-    point_device_count: int
-    coil_device_count: int
-    strategy: str
-
-    @property
-    def mesh_axes(self) -> tuple[str, ...]:
-        return (self.point_axis_name, self.coil_axis_name)
-
-    @property
-    def reduced_axis_name(self) -> str:
-        return self.coil_axis_name
-
-    @property
-    def device_count(self) -> int:
-        return self.point_device_count * self.coil_device_count
-
-
-FieldCollectiveConfig = CoilGroupCollectiveConfig | PointsCoilsCollectiveConfig
+FieldCollectiveConfig = CoilGroupCollectiveConfig
 
 
 def _devices_for_platform(platform: str) -> tuple[object, ...]:
@@ -105,22 +78,6 @@ def _mesh_for(platform: str, axis_name: str) -> Mesh | None:
     if not devices:
         return None
     return Mesh(np.asarray(devices, dtype=object), (axis_name,))
-
-
-@lru_cache(maxsize=8)
-def _points_coils_mesh_for(
-    platform: str,
-    point_axis_name: str,
-    coil_axis_name: str,
-    point_device_count: int,
-    coil_device_count: int,
-) -> Mesh:
-    devices = _devices_for_platform(platform)
-    device_count = point_device_count * coil_device_count
-    device_grid = np.asarray(devices[:device_count], dtype=object).reshape(
-        (point_device_count, coil_device_count)
-    )
-    return Mesh(device_grid, (point_axis_name, coil_axis_name))
 
 
 def _partition_spec_for_axis(axis_name: str, ndim: int) -> P:
@@ -210,14 +167,6 @@ def _should_shard_coil_group(currents, tuning) -> bool:
     return int(currents.shape[0]) >= int(tuning.min_coils_to_shard)
 
 
-def _should_shard_points_coils(points, currents, tuning) -> bool:
-    if not tuning.active or tuning.strategy != "points_coils":
-        return False
-    enough_points = int(points.shape[0]) >= int(tuning.min_points_to_shard)
-    enough_coils = int(currents.shape[0]) >= int(tuning.min_coils_to_shard)
-    return enough_points and enough_coils
-
-
 def coil_group_collective_config(
     currents,
     *,
@@ -234,45 +183,6 @@ def coil_group_collective_config(
         mesh=mesh,
         axis_name=axis_name,
         device_count=device_count,
-        strategy=tuning.strategy,
-    )
-
-
-def points_coils_mesh(*, mode: str | None = None) -> Mesh:
-    """Return the resolved 2D point-by-coil mesh for the active runtime."""
-    tuning = get_sharding_tuning(mode)
-    return _points_coils_mesh_for(
-        tuning.platform,
-        tuning.point_axis_name,
-        tuning.coil_axis_name,
-        tuning.point_device_count,
-        tuning.coil_device_count,
-    )
-
-
-def points_coils_collective_config(
-    points,
-    currents,
-    *,
-    mode: str | None = None,
-) -> PointsCoilsCollectiveConfig | None:
-    """Return the active 2D point-by-coil collective config for a group."""
-    tuning = get_sharding_tuning(mode)
-    if not _should_shard_points_coils(points, currents, tuning):
-        return None
-    mesh = _points_coils_mesh_for(
-        tuning.platform,
-        tuning.point_axis_name,
-        tuning.coil_axis_name,
-        tuning.point_device_count,
-        tuning.coil_device_count,
-    )
-    return PointsCoilsCollectiveConfig(
-        mesh=mesh,
-        point_axis_name=tuning.point_axis_name,
-        coil_axis_name=tuning.coil_axis_name,
-        point_device_count=tuning.point_device_count,
-        coil_device_count=tuning.coil_device_count,
         strategy=tuning.strategy,
     )
 
@@ -441,7 +351,6 @@ def inspect_array_sharding_summary(value) -> dict[str, object]:
 
 def _clear_sharding_caches() -> None:
     _mesh_for.cache_clear()
-    _points_coils_mesh_for.cache_clear()
     _point_sharding_for.cache_clear()
     _replicated_sharding_for.cache_clear()
 

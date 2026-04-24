@@ -25,7 +25,6 @@ from .sharding import (
     coil_group_collective_config,
     collective_field_sharding_summary,
     maybe_shard_grouped_field_inputs,
-    points_coils_collective_config,
 )
 from ._math_utils import as_runtime_float64 as _as_runtime_float64
 from .curve_geometry import (
@@ -208,8 +207,6 @@ def _evaluate_grouped_field_group(points, gammas, gammadashs, currents, kernel):
     )
     config = coil_group_collective_config(currents)
     if config is None:
-        config = points_coils_collective_config(points, currents)
-    if config is None:
         return kernel(points, gammas, gammadashs, currents), config
     return (
         _collective_group_field(
@@ -277,8 +274,6 @@ def biot_savart_B_vjp_maybe_collective(points, v, gammas, gammadashs, currents):
         currents,
     )
     config = coil_group_collective_config(currents)
-    if config is None:
-        config = points_coils_collective_config(points, currents)
     if config is None:
         return biot_savart_B_vjp(points, v, gammas, gammadashs, currents)
 
