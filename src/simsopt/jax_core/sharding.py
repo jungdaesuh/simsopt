@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 
 import jax
@@ -14,12 +15,25 @@ from ..backend import get_sharding_tuning, maybe_initialize_distributed_jax
 from ..backend.runtime import register_backend_cache_clear
 
 __all__ = [
+    "CoilGroupCollectiveConfig",
+    "coil_group_collective_config",
+    "collective_field_sharding_summary",
     "inspect_array_sharding_summary",
     "maybe_shard_grouped_field_inputs",
     "maybe_shard_pairwise_row_inputs",
     "maybe_shard_pairwise_row_trees",
     "summarize_array_sharding",
 ]
+
+
+@dataclass(frozen=True)
+class CoilGroupCollectiveConfig:
+    """Resolved mesh contract for coil-axis grouped-field collectives."""
+
+    mesh: Mesh
+    axis_name: str
+    device_count: int
+    strategy: str
 
 
 def _devices_for_platform(platform: str) -> tuple[object, ...]:
@@ -118,6 +132,32 @@ def _should_shard_pairwise_rows(points_a, tuning) -> bool:
     if not tuning.active or tuning.strategy not in {"pairwise_rows", "hybrid"}:
         return False
     return int(points_a.shape[0]) >= int(tuning.min_pairwise_rows_to_shard)
+
+
+def _should_shard_coil_group(currents, tuning) -> bool:
+    if not tuning.active or tuning.strategy != "coil_groups":
+        return False
+    return int(currents.shape[0]) >= int(tuning.min_coils_to_shard)
+
+
+def coil_group_collective_config(
+    currents,
+    *,
+    mode: str | None = None,
+) -> CoilGroupCollectiveConfig | None:
+    """Return the active coil-axis collective config for a rectangular group."""
+    tuning = get_sharding_tuning(mode)
+    if not _should_shard_coil_group(currents, tuning):
+        return None
+    axis_name = tuning.coil_axis_name
+    mesh = _mesh_for(tuning.platform, axis_name)
+    device_count = int(mesh.shape[axis_name])
+    return CoilGroupCollectiveConfig(
+        mesh=mesh,
+        axis_name=axis_name,
+        device_count=device_count,
+        strategy=tuning.strategy,
+    )
 
 
 def maybe_shard_grouped_field_inputs(points, coil_arrays, *, mode: str | None = None):
@@ -235,6 +275,22 @@ def summarize_array_sharding(value) -> dict[str, object]:
     }
     if mesh is not None:
         summary["mesh_shape"] = dict(getattr(mesh, "shape", {}))
+    return summary
+
+
+def collective_field_sharding_summary(
+    value,
+    *,
+    config: CoilGroupCollectiveConfig | None,
+) -> dict[str, object]:
+    """Return array sharding plus grouped-field collective metadata."""
+    summary = summarize_array_sharding(value)
+    summary["field_collective"] = config is not None
+    if config is not None:
+        summary["strategy"] = config.strategy
+        summary["collective_axis"] = config.axis_name
+        summary["mesh_shape"] = dict(config.mesh.shape)
+        summary["collective_device_count"] = config.device_count
     return summary
 
 

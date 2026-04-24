@@ -45,8 +45,10 @@ _CHUNK_AUTOTUNE_ENV = "SIMSOPT_JAX_CHUNK_AUTOTUNE"
 _GPU_MEMORY_TOTAL_MB_ENV = "SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB"
 _SHARDING_STRATEGY_ENV = "SIMSOPT_JAX_SHARDING"
 _SHARDING_AXIS_ENV = "SIMSOPT_JAX_SHARDING_AXIS"
+_SHARDING_COIL_AXIS_ENV = "SIMSOPT_JAX_COIL_SHARDING_AXIS"
 _MIN_POINTS_TO_SHARD_ENV = "SIMSOPT_JAX_MIN_POINTS_TO_SHARD"
 _MIN_PAIRWISE_ROWS_TO_SHARD_ENV = "SIMSOPT_JAX_MIN_PAIRWISE_ROWS_TO_SHARD"
+_MIN_COILS_TO_SHARD_ENV = "SIMSOPT_JAX_MIN_COILS_TO_SHARD"
 _DISTRIBUTED_INIT_ENV = "SIMSOPT_JAX_DISTRIBUTED_INIT"
 _DISTRIBUTED_COORDINATOR_ADDRESS_ENV = "SIMSOPT_JAX_COORDINATOR_ADDRESS"
 _DISTRIBUTED_NUM_PROCESSES_ENV = "SIMSOPT_JAX_NUM_PROCESSES"
@@ -55,7 +57,13 @@ _DISTRIBUTED_LOCAL_DEVICE_IDS_ENV = "SIMSOPT_JAX_LOCAL_DEVICE_IDS"
 _JAX_PLATFORMS_ENV = "JAX_PLATFORMS"
 _XLA_FLAGS_ENV = "XLA_FLAGS"
 _VALID_TRANSFER_GUARDS = ("allow", "log", "disallow")
-_VALID_SHARDING_STRATEGIES = ("none", "points", "pairwise_rows", "hybrid")
+_VALID_SHARDING_STRATEGIES = (
+    "none",
+    "points",
+    "pairwise_rows",
+    "hybrid",
+    "coil_groups",
+)
 _GUARDRAIL_ENV_VARS = (
     _DEBUG_NANS_ENV,
     _TRANSFER_GUARD_ENV,
@@ -182,6 +190,7 @@ _MODE_SHARDING_DEFAULTS = {
     "jax_metal_smoke": "none",
 }
 _DEFAULT_SHARDING_AXIS_NAME = "d"
+_DEFAULT_COIL_SHARDING_AXIS_NAME = "coil"
 _MIN_POINTS_TO_SHARD_BY_POLICY = {
     "host_reference": 1 << 30,
     "stable_default": 4096,
@@ -191,6 +200,11 @@ _MIN_PAIRWISE_ROWS_TO_SHARD_BY_POLICY = {
     "host_reference": 1 << 30,
     "stable_default": 64,
     "performance_tuned": 32,
+}
+_MIN_COILS_TO_SHARD_BY_POLICY = {
+    "host_reference": 1 << 30,
+    "stable_default": 8,
+    "performance_tuned": 4,
 }
 _AUTOTUNED_CHUNK_SIZES_BY_POLICY = {
     "host_reference": (),
@@ -386,8 +400,10 @@ class ShardingTuning:
     mode: str
     strategy: str
     mesh_axis_name: str
+    coil_axis_name: str
     min_points_to_shard: int
     min_pairwise_rows_to_shard: int
+    min_coils_to_shard: int
     device_count: int
     local_device_count: int
     active: bool
@@ -532,6 +548,20 @@ def _resolve_sharding_axis_name() -> str:
     if raw_value is None:
         return _DEFAULT_SHARDING_AXIS_NAME
     return raw_value
+
+
+def _resolve_coil_sharding_axis_name() -> str:
+    raw_value = _optional_nonempty_env(_SHARDING_COIL_AXIS_ENV)
+    if raw_value is None:
+        return _DEFAULT_COIL_SHARDING_AXIS_NAME
+    return raw_value
+
+
+def _resolve_min_coils_to_shard(policy: BackendPolicy) -> int:
+    value = _optional_nonneg_int_env(_MIN_COILS_TO_SHARD_ENV)
+    if value is not None:
+        return value
+    return _MIN_COILS_TO_SHARD_BY_POLICY[policy.chunk_policy]
 
 
 def _runtime_jax_platform_value(platform: str) -> str:
@@ -815,8 +845,10 @@ def _build_sharding_tuning(
         mode=mode,
         strategy=strategy,
         mesh_axis_name=_resolve_sharding_axis_name(),
+        coil_axis_name=_resolve_coil_sharding_axis_name(),
         min_points_to_shard=_resolve_min_points_to_shard(policy),
         min_pairwise_rows_to_shard=_resolve_min_pairwise_rows_to_shard(policy),
+        min_coils_to_shard=_resolve_min_coils_to_shard(policy),
         device_count=device_count,
         local_device_count=local_device_count,
         active=strategy != "none" and device_count > 1,
@@ -1232,6 +1264,12 @@ def should_shard_pairwise_rows(mode: str | None = None) -> bool:
     """Return ``True`` when row-owned pairwise sharding is active for the mode."""
     tuning = get_sharding_tuning(mode)
     return tuning.active and tuning.strategy in {"pairwise_rows", "hybrid"}
+
+
+def should_shard_coil_groups(mode: str | None = None) -> bool:
+    """Return ``True`` when coil-group collective sharding is active."""
+    tuning = get_sharding_tuning(mode)
+    return tuning.active and tuning.strategy == "coil_groups"
 
 
 def get_debug_nans(mode: str | None = None) -> bool:

@@ -902,13 +902,16 @@ def test_sharding_tuning_defaults_fast_mode_to_hybrid_strategy(monkeypatch):
     assert tuning.mode == "jax_gpu_fast"
     assert tuning.strategy == "hybrid"
     assert tuning.mesh_axis_name == "d"
+    assert tuning.coil_axis_name == "coil"
     assert tuning.min_points_to_shard == 2048
     assert tuning.min_pairwise_rows_to_shard == 32
+    assert tuning.min_coils_to_shard == 4
     assert tuning.device_count == 4
     assert tuning.active is True
     assert backend.get_sharding_strategy() == "hybrid"
     assert backend.should_shard_points() is True
     assert backend.should_shard_pairwise_rows() is True
+    assert backend.should_shard_coil_groups() is False
 
 
 def test_sharding_tuning_defaults_parity_modes_to_none(monkeypatch):
@@ -930,8 +933,10 @@ def test_sharding_tuning_respects_env_overrides(monkeypatch):
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
     monkeypatch.setenv("SIMSOPT_JAX_SHARDING", "none")
     monkeypatch.setenv("SIMSOPT_JAX_SHARDING_AXIS", "pts")
+    monkeypatch.setenv("SIMSOPT_JAX_COIL_SHARDING_AXIS", "coils")
     monkeypatch.setenv("SIMSOPT_JAX_MIN_POINTS_TO_SHARD", "123")
     monkeypatch.setenv("SIMSOPT_JAX_MIN_PAIRWISE_ROWS_TO_SHARD", "7")
+    monkeypatch.setenv("SIMSOPT_JAX_MIN_COILS_TO_SHARD", "3")
     backend = _fresh_backend()
     runtime = sys.modules["simsopt.backend.runtime"]
     monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 8)
@@ -940,8 +945,10 @@ def test_sharding_tuning_respects_env_overrides(monkeypatch):
 
     assert tuning.strategy == "none"
     assert tuning.mesh_axis_name == "pts"
+    assert tuning.coil_axis_name == "coils"
     assert tuning.min_points_to_shard == 123
     assert tuning.min_pairwise_rows_to_shard == 7
+    assert tuning.min_coils_to_shard == 3
     assert tuning.active is False
 
 
@@ -981,6 +988,26 @@ def test_sharding_tuning_accepts_pairwise_rows_strategy(monkeypatch):
     assert tuning.min_pairwise_rows_to_shard == 9
     assert backend.should_shard_points() is False
     assert backend.should_shard_pairwise_rows() is True
+
+
+def test_sharding_tuning_accepts_coil_groups_strategy(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setenv("SIMSOPT_JAX_SHARDING", "coil_groups")
+    monkeypatch.setenv("SIMSOPT_JAX_COIL_SHARDING_AXIS", "coil_batch")
+    monkeypatch.setenv("SIMSOPT_JAX_MIN_COILS_TO_SHARD", "5")
+    backend = _fresh_backend()
+    runtime = sys.modules["simsopt.backend.runtime"]
+    monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 4)
+
+    tuning = backend.get_sharding_tuning()
+
+    assert tuning.strategy == "coil_groups"
+    assert tuning.coil_axis_name == "coil_batch"
+    assert tuning.min_coils_to_shard == 5
+    assert backend.should_shard_points() is False
+    assert backend.should_shard_pairwise_rows() is False
+    assert backend.should_shard_coil_groups() is True
 
 
 def test_distributed_runtime_config_reads_env(monkeypatch):

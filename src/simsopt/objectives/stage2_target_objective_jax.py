@@ -20,6 +20,7 @@ from ..jax_core._math_utils import (
     as_runtime_float64 as _as_runtime_float64,
 )
 from ..jax_core.field import (
+    grouped_field_sharding_summary,
     grouped_biot_savart_B_from_spec,
     grouped_coil_set_spec_from_coil_specs,
     grouped_coil_set_spec_from_lists,
@@ -903,9 +904,40 @@ def build_stage2_target_objective(
         cache_token=("stage2-target-objective",),
     )
 
+    def _dynamic_field_collective_summary(dofs):
+        (
+            flat_dofs,
+            base_gamma,
+            base_gammadash,
+            base_gammadashdash,
+            dynamic_gammas,
+            dynamic_gammadashs,
+            dynamic_current_array,
+        ) = _dynamic_curve_runtime_state(dofs)
+        del base_gamma, base_gammadash, base_gammadashdash
+        dynamic_coil_spec = grouped_coil_set_spec_from_lists(
+            dynamic_gammas,
+            dynamic_gammadashs,
+            dynamic_current_array,
+        )
+        return grouped_field_sharding_summary(
+            _runtime_float64_array(points, reference=flat_dofs),
+            dynamic_coil_spec,
+        )
+
     def field_sharding_summary(dofs):
         _, total_field, *_ = _evaluate_dynamic_stage2_state(dofs)
-        return summarize_array_sharding(total_field)
+        summary = summarize_array_sharding(total_field)
+        dynamic_summary = _dynamic_field_collective_summary(dofs)
+        summary["field_collective"] = dynamic_summary["field_collective"]
+        if dynamic_summary["field_collective"]:
+            summary["strategy"] = dynamic_summary["strategy"]
+            summary["collective_axis"] = dynamic_summary["collective_axis"]
+            summary["collective_mesh_shape"] = dynamic_summary["mesh_shape"]
+            summary["collective_device_count"] = dynamic_summary[
+                "collective_device_count"
+            ]
+        return summary
 
     def pairwise_penalty_sharding_summary(dofs):
         (

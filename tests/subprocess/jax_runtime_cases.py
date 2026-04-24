@@ -81,13 +81,24 @@ from simsopt.geo.optimizer_jax import (  # type: ignore[import-untyped]
 from simsopt.jax_core.biotsavart import (  # type: ignore[import-untyped]
     biot_savart_A,
     biot_savart_B,
+    biot_savart_B_and_dB,
+    biot_savart_d2A_by_dXdX,
+    biot_savart_dA_by_dX,
+    biot_savart_dB_by_dX,
 )
 from simsopt.jax_core.curve_geometry import (  # type: ignore[import-untyped]
     closed_curve_self_intersection_summary,
 )
 from simsopt.jax_core.field import (  # type: ignore[import-untyped]
+    biot_savart_B_vjp_maybe_collective,
+    grouped_biot_savart_A_from_spec,
+    grouped_biot_savart_B_and_dB_from_spec,
     grouped_biot_savart_B_from_spec,
+    grouped_biot_savart_d2A_by_dXdX_from_spec,
+    grouped_biot_savart_dA_by_dX_from_spec,
+    grouped_biot_savart_dB_by_dX_from_spec,
     grouped_coil_set_spec_from_lists,
+    grouped_field_sharding_summary,
 )
 from simsopt.jax_core.surface_rzfourier import (  # type: ignore[import-untyped]
     surface_rz_fourier_gamma_from_spec,
@@ -684,6 +695,177 @@ def _run_grouped_biot_savart_explicit_point_sharding_case() -> None:
     assert magnetic_field.shape == (4, 3)
     assert isinstance(magnetic_field.sharding, NamedSharding)
     assert bool(jax.device_get(jnp.all(jnp.isfinite(magnetic_field))))
+
+
+def _build_collective_circular_coils() -> tuple[
+    list[jax.Array],
+    list[jax.Array],
+    list[jax.Array],
+]:
+    phi = np.linspace(0.0, 2.0 * np.pi, 16, endpoint=False)
+    gammas: list[jax.Array] = []
+    gammadashs: list[jax.Array] = []
+    currents: list[jax.Array] = []
+    for index in range(5):
+        radius = 1.0 + 0.05 * index
+        gamma = np.stack(
+            (
+                radius * np.cos(phi),
+                radius * np.sin(phi),
+                np.full_like(phi, 0.03 * index),
+            ),
+            axis=1,
+        )
+        gammadash = np.stack(
+            (
+                -2.0 * np.pi * radius * np.sin(phi),
+                2.0 * np.pi * radius * np.cos(phi),
+                np.zeros_like(phi),
+            ),
+            axis=1,
+        )
+        gammas.append(jnp.asarray(gamma, dtype=jnp.float64))
+        gammadashs.append(jnp.asarray(gammadash, dtype=jnp.float64))
+        currents.append(jnp.asarray(1.0 + 0.2 * index, dtype=jnp.float64))
+    return gammas, gammadashs, currents
+
+
+def _circular_coil_entry(index: int, *, nquad: int) -> tuple[jax.Array, jax.Array, jax.Array]:
+    phi = np.linspace(0.0, 2.0 * np.pi, nquad, endpoint=False)
+    radius = 1.0 + 0.05 * index
+    gamma = np.stack(
+        (
+            radius * np.cos(phi),
+            radius * np.sin(phi),
+            np.full_like(phi, 0.03 * index),
+        ),
+        axis=1,
+    )
+    gammadash = np.stack(
+        (
+            -2.0 * np.pi * radius * np.sin(phi),
+            2.0 * np.pi * radius * np.cos(phi),
+            np.zeros_like(phi),
+        ),
+        axis=1,
+    )
+    current = 1.0 + 0.2 * index
+    return (
+        jnp.asarray(gamma, dtype=jnp.float64),
+        jnp.asarray(gammadash, dtype=jnp.float64),
+        jnp.asarray(current, dtype=jnp.float64),
+    )
+
+
+def _assert_allclose_to_reference(value, reference) -> None:
+    np.testing.assert_allclose(
+        np.asarray(value),
+        np.asarray(reference),
+        rtol=1e-12,
+        atol=1e-14,
+    )
+
+
+def _run_grouped_biot_savart_coil_collective_case() -> None:
+    points = jnp.linspace(0.1, 0.9, 18, dtype=jnp.float64).reshape(6, 3)
+    gammas, gammadashs, currents = _build_collective_circular_coils()
+    coil_spec = grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
+    stacked_gammas = jnp.stack(gammas)
+    stacked_gammadashs = jnp.stack(gammadashs)
+    stacked_currents = jnp.stack(currents)
+
+    _assert_allclose_to_reference(
+        grouped_biot_savart_B_from_spec(points, coil_spec),
+        biot_savart_B(points, stacked_gammas, stacked_gammadashs, stacked_currents),
+    )
+    _assert_allclose_to_reference(
+        grouped_biot_savart_A_from_spec(points, coil_spec),
+        biot_savart_A(points, stacked_gammas, stacked_gammadashs, stacked_currents),
+    )
+    _assert_allclose_to_reference(
+        grouped_biot_savart_dA_by_dX_from_spec(points, coil_spec),
+        biot_savart_dA_by_dX(
+            points,
+            stacked_gammas,
+            stacked_gammadashs,
+            stacked_currents,
+        ),
+    )
+    _assert_allclose_to_reference(
+        grouped_biot_savart_d2A_by_dXdX_from_spec(points, coil_spec),
+        biot_savart_d2A_by_dXdX(
+            points,
+            stacked_gammas,
+            stacked_gammadashs,
+            stacked_currents,
+        ),
+    )
+    _assert_allclose_to_reference(
+        grouped_biot_savart_dB_by_dX_from_spec(points, coil_spec),
+        biot_savart_dB_by_dX(
+            points,
+            stacked_gammas,
+            stacked_gammadashs,
+            stacked_currents,
+        ),
+    )
+
+    dense_B, dense_dB = biot_savart_B_and_dB(
+        points,
+        stacked_gammas,
+        stacked_gammadashs,
+        stacked_currents,
+    )
+    collective_B, collective_dB = grouped_biot_savart_B_and_dB_from_spec(
+        points,
+        coil_spec,
+    )
+    _assert_allclose_to_reference(collective_B, dense_B)
+    _assert_allclose_to_reference(collective_dB, dense_dB)
+
+    v = jnp.linspace(0.2, 1.1, points.size, dtype=jnp.float64).reshape(points.shape)
+    _, dense_pullback = jax.vjp(
+        lambda group_gammas, group_gammadashs, group_currents: biot_savart_B(
+            points,
+            group_gammas,
+            group_gammadashs,
+            group_currents,
+        ),
+        stacked_gammas,
+        stacked_gammadashs,
+        stacked_currents,
+    )
+    collective_vjp = biot_savart_B_vjp_maybe_collective(
+        points,
+        v,
+        stacked_gammas,
+        stacked_gammadashs,
+        stacked_currents,
+    )
+    for collective_leaf, dense_leaf in zip(collective_vjp, dense_pullback(v)):
+        _assert_allclose_to_reference(collective_leaf, dense_leaf)
+
+    summary = grouped_field_sharding_summary(points, coil_spec)
+    assert summary["field_collective"] is True
+    assert summary["strategy"] == "coil_groups"
+    assert summary["collective_axis"] == "coil"
+    assert summary["collective_device_count"] == 4
+
+    small_gamma, small_gammadash, small_current = _circular_coil_entry(8, nquad=12)
+    multi_group_spec = grouped_coil_set_spec_from_lists(
+        [small_gamma, *gammas],
+        [small_gammadash, *gammadashs],
+        [small_current, *currents],
+    )
+    multi_group_summary = grouped_field_sharding_summary(points, multi_group_spec)
+    assert multi_group_summary["field_collective"] is True
+    assert multi_group_summary["strategy"] == "coil_groups"
+
+    lowered = jax.jit(grouped_biot_savart_B_from_spec).lower(
+        points,
+        coil_spec,
+    ).as_text()
+    assert "all_reduce" in lowered.lower()
 
 
 def _run_pairwise_penalty_explicit_row_sharding_case() -> None:
@@ -1527,6 +1709,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers.add_parser("structured-mutable-objective-state")
     subparsers.add_parser("grouped-gpu-spec-eval")
     subparsers.add_parser("grouped-explicit-point-sharding")
+    subparsers.add_parser("grouped-coil-collective")
     subparsers.add_parser("pairwise-penalty-explicit-row-sharding")
     subparsers.add_parser("shifted-grid-axis-sample")
     subparsers.add_parser("gamma-2d-eager-host-constants")
@@ -1604,6 +1787,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.case == "grouped-explicit-point-sharding":
         _run_grouped_biot_savart_explicit_point_sharding_case()
+        return 0
+    if args.case == "grouped-coil-collective":
+        _run_grouped_biot_savart_coil_collective_case()
         return 0
     if args.case == "pairwise-penalty-explicit-row-sharding":
         _run_pairwise_penalty_explicit_row_sharding_case()

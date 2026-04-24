@@ -2,19 +2,29 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import jax
+from jax import lax
+import jax.numpy as jnp
 import numpy as np
+from jax.sharding import PartitionSpec as P
 
 from .biotsavart import (
     biot_savart_A,
     biot_savart_B,
     biot_savart_B_and_dB,
+    biot_savart_B_vjp,
     biot_savart_d2A_by_dXdX,
     biot_savart_dA_by_dX,
     biot_savart_dB_by_dX,
     group_coil_data,
 )
-from .sharding import maybe_shard_grouped_field_inputs
+from .sharding import (
+    coil_group_collective_config,
+    collective_field_sharding_summary,
+    maybe_shard_grouped_field_inputs,
+)
 from ._math_utils import as_runtime_float64 as _as_runtime_float64
 from .curve_geometry import (
     curve_gamma_and_dash_from_spec,
@@ -58,6 +68,10 @@ def _tree_add(left, right):
     return jax.tree_util.tree_map(lambda x, y: x + y, left, right)
 
 
+def _tree_trim_axis0(tree, size: int):
+    return jax.tree_util.tree_map(lambda leaf: leaf[:size], tree)
+
+
 def _runtime_group_inputs(reference, gammas, gammadashs, currents):
     return (
         _as_runtime_float64(gammas, reference=reference),
@@ -66,23 +80,183 @@ def _runtime_group_inputs(reference, gammas, gammadashs, currents):
     )
 
 
-def _accumulate_grouped_field(points: object, coil_spec: GroupedCoilSetSpec, kernel):
-    coil_arrays = grouped_field_inputs_from_spec(coil_spec)
-    if not coil_arrays:
-        return _empty_grouped_field_result(points, kernel)
-    points, coil_arrays = maybe_shard_grouped_field_inputs(points, coil_arrays)
+def _pad_coil_axis_to_device_count(gammas, gammadashs, currents, device_count: int):
+    coil_count = int(currents.shape[0])
+    pad_count = (-coil_count) % device_count
+    if pad_count == 0:
+        return gammas, gammadashs, currents
+    return (
+        jnp.concatenate(
+            (
+                gammas,
+                jnp.zeros((pad_count,) + gammas.shape[1:], dtype=gammas.dtype),
+            ),
+            axis=0,
+        ),
+        jnp.concatenate(
+            (
+                gammadashs,
+                jnp.zeros(
+                    (pad_count,) + gammadashs.shape[1:],
+                    dtype=gammadashs.dtype,
+                ),
+            ),
+            axis=0,
+        ),
+        jnp.concatenate(
+            (
+                currents,
+                jnp.zeros((pad_count,), dtype=currents.dtype),
+            ),
+            axis=0,
+        ),
+    )
 
-    gammas, gammadashs, currents = _runtime_group_inputs(points, *coil_arrays[0])
-    result = kernel(points, gammas, gammadashs, currents)
-    for gammas, gammadashs, currents in coil_arrays[1:]:
-        gammas, gammadashs, currents = _runtime_group_inputs(
+
+def _field_out_specs(kernel):
+    if kernel is biot_savart_B_and_dB:
+        return P(), P()
+    return P()
+
+
+def _collective_group_field(points, gammas, gammadashs, currents, kernel, config):
+    gammas, gammadashs, currents = _pad_coil_axis_to_device_count(
+        gammas,
+        gammadashs,
+        currents,
+        config.device_count,
+    )
+
+    @partial(
+        jax.shard_map,
+        mesh=config.mesh,
+        in_specs=(
+            P(),
+            P(config.axis_name, None, None),
+            P(config.axis_name, None, None),
+            P(config.axis_name),
+        ),
+        out_specs=_field_out_specs(kernel),
+        check_vma=True,
+    )
+    def _group_kernel(points_block, gammas_block, gammadashs_block, currents_block):
+        return jax.tree_util.tree_map(
+            lambda value: lax.psum(value, config.axis_name),
+            kernel(points_block, gammas_block, gammadashs_block, currents_block),
+        )
+
+    return _group_kernel(points, gammas, gammadashs, currents)
+
+
+def _evaluate_grouped_field_group(points, gammas, gammadashs, currents, kernel):
+    gammas, gammadashs, currents = _runtime_group_inputs(
+        points,
+        gammas,
+        gammadashs,
+        currents,
+    )
+    config = coil_group_collective_config(currents)
+    if config is None:
+        return kernel(points, gammas, gammadashs, currents), config
+    return (
+        _collective_group_field(
             points,
             gammas,
             gammadashs,
             currents,
+            kernel,
+            config,
+        ),
+        config,
+    )
+
+
+def _accumulate_grouped_field_with_config(
+    points: object,
+    coil_spec: GroupedCoilSetSpec,
+    kernel,
+):
+    coil_arrays = grouped_field_inputs_from_spec(coil_spec)
+    if not coil_arrays:
+        return _empty_grouped_field_result(points, kernel), None
+    points, coil_arrays = maybe_shard_grouped_field_inputs(points, coil_arrays)
+
+    result, collective_config = _evaluate_grouped_field_group(
+        points,
+        *coil_arrays[0],
+        kernel,
+    )
+    for gammas, gammadashs, currents in coil_arrays[1:]:
+        group_result, group_config = _evaluate_grouped_field_group(
+            points,
+            gammas,
+            gammadashs,
+            currents,
+            kernel,
         )
-        result = _tree_add(result, kernel(points, gammas, gammadashs, currents))
+        result = _tree_add(result, group_result)
+        if collective_config is None:
+            collective_config = group_config
+    return result, collective_config
+
+
+def _accumulate_grouped_field(points: object, coil_spec: GroupedCoilSetSpec, kernel):
+    result, _config = _accumulate_grouped_field_with_config(points, coil_spec, kernel)
     return result
+
+
+def grouped_field_sharding_summary(points: object, coil_spec: GroupedCoilSetSpec):
+    """Return grouped-field output sharding plus collective-route metadata."""
+    result, config = _accumulate_grouped_field_with_config(
+        points,
+        coil_spec,
+        biot_savart_B,
+    )
+    return collective_field_sharding_summary(result, config=config)
+
+
+def biot_savart_B_vjp_maybe_collective(points, v, gammas, gammadashs, currents):
+    """Return B pullback, using the coil-axis collective path when active."""
+    gammas, gammadashs, currents = _runtime_group_inputs(
+        points,
+        gammas,
+        gammadashs,
+        currents,
+    )
+    config = coil_group_collective_config(currents)
+    if config is None:
+        return biot_savart_B_vjp(points, v, gammas, gammadashs, currents)
+
+    coil_count = int(currents.shape[0])
+    padded_gammas, padded_gammadashs, padded_currents = (
+        _pad_coil_axis_to_device_count(
+            gammas,
+            gammadashs,
+            currents,
+            config.device_count,
+        )
+    )
+
+    def _collective_forward(group_gammas, group_gammadashs, group_currents):
+        return _collective_group_field(
+            points,
+            group_gammas,
+            group_gammadashs,
+            group_currents,
+            biot_savart_B,
+            config,
+        )
+
+    _, pullback = jax.vjp(
+        _collective_forward,
+        padded_gammas,
+        padded_gammadashs,
+        padded_currents,
+    )
+    return _tree_trim_axis0(
+        pullback(_as_runtime_float64(v, reference=points)),
+        coil_count,
+    )
 
 
 def grouped_coil_set_spec_from_lists(

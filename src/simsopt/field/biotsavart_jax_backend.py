@@ -28,6 +28,7 @@ from ..jax_core import (
     make_optimizable_dof_map_spec,
 )
 from ..jax_core.field import (
+    biot_savart_B_vjp_maybe_collective,
     grouped_biot_savart_A_from_inputs,
     grouped_biot_savart_A_from_spec,
     grouped_biot_savart_B_and_dB_from_spec,
@@ -42,9 +43,6 @@ from ..jax_core.field import (
     grouped_field_inputs_from_spec,
 )
 from ..jax_core.specs import make_field_eval_spec
-from ..jax_core.biotsavart import (
-    biot_savart_B_vjp,
-)
 from ._coil_graph import _unwrap_coil_curve_and_current_objects
 
 __all__ = ["BiotSavartJAX"]
@@ -997,7 +995,7 @@ class BiotSavartJAX(Optimizable):
         geometry_cache = {}
         coil_infos = self._collect_free_coil_vjp_infos(geometry_cache)
         for group in self._group_coil_vjp_infos(coil_infos):
-            dg_group, dgd_group, dc_group = biot_savart_B_vjp(
+            dg_group, dgd_group, dc_group = biot_savart_B_vjp_maybe_collective(
                 points,
                 v_jax,
                 group["gammas"],
@@ -1112,7 +1110,7 @@ class BiotSavartJAX(Optimizable):
             )
         for group in grouped_infos:
             pullback_s, (dg_group, dgd_group, dc_group) = _time_call_result(
-                lambda: biot_savart_B_vjp(
+                lambda: biot_savart_B_vjp_maybe_collective(
                     points,
                     v_jax,
                     group["gammas"],
