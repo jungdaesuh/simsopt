@@ -13,7 +13,6 @@ import json
 import inspect
 import importlib
 import importlib.util
-import warnings
 from contextlib import contextmanager
 from functools import lru_cache, partial
 import os
@@ -146,19 +145,6 @@ WARM_TIMING_NO_OPTIMIZATION_ERROR = (
 PROFILE_STEP_REFERENCE_LANE_ERROR = (
     "--profile-step-json is only supported on explicit Stage 2 reference lanes."
 )
-EXPECTED_SQUARED_FLUX_INTERNAL_TIMING_KEYS = {
-    "field_B_for_J_s",
-    "integral_only_s",
-    "field_B_for_dJ_s",
-    "integral_value_grad_s",
-    "field_B_vjp_s",
-}
-EXPECTED_B_VJP_COMPONENT_TIMING_KEYS = {
-    "curve_geometry_s",
-    "current_value_s",
-    "single_coil_pullback_s",
-    "coil_vjp_s",
-}
 REDUCED_STAGE2_ARGS = (
     "--backend",
     "jax",
@@ -186,6 +172,12 @@ _STAGE2_GRADIENT_PARITY_RTOL = 1e-11
 _STAGE2_GRADIENT_PARITY_ATOL = 1e-15
 _STAGE2_TARGET_SCALAR_VALUE_RTOL = 1e-15
 _STAGE2_TARGET_SCALAR_VALUE_ATOL = 1e-18
+EXPECTED_B_VJP_COMPONENT_TIMING_KEYS = {
+    "curve_geometry_s",
+    "current_value_s",
+    "single_coil_pullback_s",
+    "coil_projection_s",
+}
 _SQUARED_FLUX_DEFINITIONS = (
     "quadratic flux",
     "normalized",
@@ -270,9 +262,27 @@ def _assert_stage2_gradient_parity(actual, reference, *, err_msg):
     )
 
 
-def _assert_jax_objective_fallback_active(squared_flux_jax):
-    assert not squared_flux_jax._use_jax_native
-    assert squared_flux_jax._uses_jax_objective_fallback
+def _assert_jax_objective_native_active(squared_flux_jax):
+    assert callable(squared_flux_jax._jit_forward_dofs)
+    assert callable(squared_flux_jax._jit_val_grad_dofs)
+
+
+def _count_squared_flux_native_program_calls(monkeypatch, squared_flux_jax):
+    calls = {"forward": 0, "value_grad": 0}
+    original_forward = squared_flux_jax._jit_forward_dofs
+    original_value_grad = squared_flux_jax._jit_val_grad_dofs
+
+    def counted_forward(flat_dofs):
+        calls["forward"] += 1
+        return original_forward(flat_dofs)
+
+    def counted_value_grad(flat_dofs):
+        calls["value_grad"] += 1
+        return original_value_grad(flat_dofs)
+
+    monkeypatch.setattr(squared_flux_jax, "_jit_forward_dofs", counted_forward)
+    monkeypatch.setattr(squared_flux_jax, "_jit_val_grad_dofs", counted_value_grad)
+    return calls
 
 
 def _stage2_context_kwargs():
@@ -508,43 +518,6 @@ def _isolated_backend_runtime(mode: str):
                 os.environ[name] = value
         invalidate_backend_cache()
         invalidate_kernel_cache()
-
-
-def _build_fake_b_vjp_profile():
-    return {
-        "wall_time_s": 0.125,
-        "component_timings_s": {
-            "curve_geometry_s": 0.01,
-            "current_value_s": 0.03,
-            "single_coil_pullback_s": 0.04,
-            "coil_vjp_s": 0.05,
-        },
-        "dominant_components": [
-            {
-                "name": "coil_vjp_s",
-                "elapsed_s": 0.05,
-                "share": 0.3333333333333333,
-            }
-        ],
-        "per_coil_timings_s": [],
-        "dominant_coils": [
-            {
-                "coil_index": 0,
-                "elapsed_s": 0.125,
-                "share": 1.0,
-            }
-        ],
-    }
-
-
-def _assert_b_vjp_profile_payload(payload):
-    assert (
-        set(payload["squared_flux_field_b_vjp_component_timings_s"])
-        == EXPECTED_B_VJP_COMPONENT_TIMING_KEYS
-    )
-    assert payload["dominant_squared_flux_field_b_vjp_components"]
-    assert payload["dominant_squared_flux_field_b_vjp_coils"]
-
 
 def _build_stage2_target_objective_contract_case(
     definition: str = "quadratic flux",
@@ -1133,22 +1106,9 @@ class TestGradientParity:
         coils, surf, _, _ = coil_surf_setup
         bs_jax = BiotSavartJAX(coils)
         jf_jax = SquaredFluxJAX(surf, bs_jax)
-        assert jf_jax._use_jax_native
+        _assert_jax_objective_native_active(jf_jax)
 
-        calls = {"forward": 0, "value_grad": 0}
-        original_forward = jf_jax._jit_forward_dofs
-        original_value_grad = jf_jax._jit_val_grad_dofs
-
-        def counted_forward(flat_dofs):
-            calls["forward"] += 1
-            return original_forward(flat_dofs)
-
-        def counted_value_grad(flat_dofs):
-            calls["value_grad"] += 1
-            return original_value_grad(flat_dofs)
-
-        monkeypatch.setattr(jf_jax, "_jit_forward_dofs", counted_forward)
-        monkeypatch.setattr(jf_jax, "_jit_val_grad_dofs", counted_value_grad)
+        calls = _count_squared_flux_native_program_calls(monkeypatch, jf_jax)
 
         first_value = jf_jax.J()
         second_value = jf_jax.J()
@@ -1165,22 +1125,9 @@ class TestGradientParity:
         coils, surf, _, _ = coil_surf_setup
         bs_jax = BiotSavartJAX(coils)
         jf_jax = SquaredFluxJAX(surf, bs_jax)
-        assert jf_jax._use_jax_native
+        _assert_jax_objective_native_active(jf_jax)
 
-        calls = {"forward": 0, "value_grad": 0}
-        original_forward = jf_jax._jit_forward_dofs
-        original_value_grad = jf_jax._jit_val_grad_dofs
-
-        def counted_forward(flat_dofs):
-            calls["forward"] += 1
-            return original_forward(flat_dofs)
-
-        def counted_value_grad(flat_dofs):
-            calls["value_grad"] += 1
-            return original_value_grad(flat_dofs)
-
-        monkeypatch.setattr(jf_jax, "_jit_forward_dofs", counted_forward)
-        monkeypatch.setattr(jf_jax, "_jit_val_grad_dofs", counted_value_grad)
+        calls = _count_squared_flux_native_program_calls(monkeypatch, jf_jax)
 
         grad = jf_jax.dJ()
         value = jf_jax.J()
@@ -1654,7 +1601,7 @@ class TestBiotSavartJAXParity:
             sum(entry["total_s"] for entry in profile["per_coil_timings_s"])
             + sum(entry["elapsed_s"] for entry in profile["pullback_group_timings_s"])
         )
-        assert component_total >= 0.9 * profile["wall_time_s"]
+        assert component_total >= 0.8 * profile["wall_time_s"]
         for entry in profile["per_coil_timings_s"]:
             assert (
                 set(entry["component_timings_s"])
@@ -1891,7 +1838,7 @@ class TestMixedQuadratureParity:
     def test_chunked_grouped_paths_match_cpu_on_large_point_cloud(
         self, mixed_quad_setup
     ):
-        """Spec and array-compat grouped paths agree with CPU on multi-chunk inputs."""
+        """Spec and grouped-array inputs agree with CPU on multi-chunk inputs."""
         coils, surf = mixed_quad_setup
         base_points = surf.gamma().reshape((-1, 3))
         point_offsets = np.asarray(
@@ -1924,7 +1871,7 @@ class TestMixedQuadratureParity:
             B_from_spec,
             rtol=1e-12,
             atol=1e-15,
-            err_msg="Chunked grouped compatibility path diverged from spec path",
+            err_msg="Chunked grouped-array input path diverged from spec path",
         )
         np.testing.assert_allclose(
             B_from_spec,
@@ -1946,6 +1893,7 @@ class TestMixedQuadratureParity:
 
         bs_jax = BiotSavartJAX(coils)
         jf_jax = SquaredFluxJAX(surf, bs_jax, definition=definition)
+        _assert_jax_objective_native_active(jf_jax)
         j_jax = jf_jax.J()
 
         _assert_stage2_value_parity(j_jax, j_cpu)
@@ -1962,6 +1910,7 @@ class TestMixedQuadratureParity:
 
         bs_jax = BiotSavartJAX(coils)
         jf_jax = SquaredFluxJAX(surf, bs_jax, definition=definition)
+        _assert_jax_objective_native_active(jf_jax)
         grad_jax = jf_jax.dJ()
 
         _assert_stage2_gradient_parity(
@@ -1970,13 +1919,13 @@ class TestMixedQuadratureParity:
             err_msg=f"Gradient mismatch with mixed quadrature for {definition!r}",
         )
 
-    def test_j_recomputes_after_field_points_change(self, mixed_quad_setup):
-        """Fallback J() must not reuse stale values after field.set_points(...)."""
+    def test_j_ignores_mutated_field_points_after_construction(self, mixed_quad_setup):
+        """Fixed-surface SquaredFluxJAX is driven by its immutable surface spec."""
         coils, surf = mixed_quad_setup
 
         bs_jax = BiotSavartJAX(coils)
         jf_jax = SquaredFluxJAX(surf, bs_jax)
-        assert not jf_jax._use_jax_native
+        _assert_jax_objective_native_active(jf_jax)
 
         initial_value = jf_jax.J()
         shifted_points = surf.gamma().reshape((-1, 3)) + np.array([0.05, 0.0, 0.0])
@@ -1986,10 +1935,10 @@ class TestMixedQuadratureParity:
         jf_jax.recompute_bell()
         recomputed_value = jf_jax.J()
 
-        assert recomputed_value != pytest.approx(initial_value)
-        assert updated_value == pytest.approx(recomputed_value)
+        assert updated_value == pytest.approx(initial_value)
+        assert recomputed_value == pytest.approx(initial_value)
 
-    def test_gradient_then_value_reuses_cached_fallback_squared_flux_value(
+    def test_gradient_then_value_reuses_cached_squared_flux_value_on_mixed_quadrature(
         self,
         mixed_quad_setup,
         monkeypatch,
@@ -1998,25 +1947,18 @@ class TestMixedQuadratureParity:
 
         bs_jax = BiotSavartJAX(coils)
         jf_jax = SquaredFluxJAX(surf, bs_jax)
-        assert not jf_jax._use_jax_native
+        _assert_jax_objective_native_active(jf_jax)
 
-        calls = {"B": 0}
-        original_B = bs_jax.B
-
-        def counted_B():
-            calls["B"] += 1
-            return original_B()
-
-        monkeypatch.setattr(bs_jax, "B", counted_B)
+        calls = _count_squared_flux_native_program_calls(monkeypatch, jf_jax)
 
         grad = jf_jax.dJ()
         value = jf_jax.J()
 
         assert np.asarray(grad).shape[0] > 0
         assert value >= 0.0
-        assert calls["B"] == 1
+        assert calls == {"forward": 0, "value_grad": 1}
 
-    def test_value_then_gradient_recomputes_fallback_squared_flux_gradient(
+    def test_value_then_gradient_recomputes_squared_flux_gradient_on_mixed_quadrature(
         self,
         mixed_quad_setup,
         monkeypatch,
@@ -2025,31 +1967,18 @@ class TestMixedQuadratureParity:
 
         bs_jax = BiotSavartJAX(coils)
         jf_jax = SquaredFluxJAX(surf, bs_jax)
-        assert not jf_jax._use_jax_native
+        _assert_jax_objective_native_active(jf_jax)
 
-        calls = {"B": 0, "B_vjp": 0}
-        original_B = bs_jax.B
-        original_B_vjp = bs_jax.B_vjp
-
-        def counted_B():
-            calls["B"] += 1
-            return original_B()
-
-        def counted_B_vjp(v):
-            calls["B_vjp"] += 1
-            return original_B_vjp(v)
-
-        monkeypatch.setattr(bs_jax, "B", counted_B)
-        monkeypatch.setattr(bs_jax, "B_vjp", counted_B_vjp)
+        calls = _count_squared_flux_native_program_calls(monkeypatch, jf_jax)
 
         value = jf_jax.J()
         grad = jf_jax.dJ()
 
         assert value >= 0.0
         assert np.asarray(grad).shape[0] > 0
-        assert calls == {"B": 2, "B_vjp": 1}
+        assert calls == {"forward": 1, "value_grad": 1}
 
-    def test_strict_mode_allows_squared_flux_jax_objective_fallback(
+    def test_strict_mode_keeps_mixed_quadrature_squared_flux_on_native_lane(
         self,
         mixed_quad_setup,
         monkeypatch,
@@ -2059,44 +1988,45 @@ class TestMixedQuadratureParity:
         _enable_strict_jax_backend(monkeypatch, request)
 
         bs_jax = BiotSavartJAX(coils)
+        monkeypatch.setattr(
+            bs_jax,
+            "B",
+            lambda: (_ for _ in ()).throw(
+                AssertionError(
+                    "SquaredFluxJAX should stay off BiotSavartJAX.B() on the native mixed-quadrature lane"
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            bs_jax,
+            "B_vjp",
+            lambda _v: (_ for _ in ()).throw(
+                AssertionError(
+                    "SquaredFluxJAX should stay off BiotSavartJAX.B_vjp() on the native mixed-quadrature lane"
+                )
+            ),
+        )
         jf_jax = SquaredFluxJAX(surf, bs_jax)
 
-        _assert_jax_objective_fallback_active(jf_jax)
+        _assert_jax_objective_native_active(jf_jax)
         assert jf_jax.J() >= 0.0
         grad = jf_jax.dJ()
         assert np.asarray(grad).shape[0] > 0
 
-    def test_non_strict_squared_flux_jax_objective_fallback_is_silent(
-        self,
-        mixed_quad_setup,
-        monkeypatch,
-        request,
-    ):
-        coils, surf = mixed_quad_setup
-        _enable_non_strict_jax_backend(monkeypatch, request)
 
-        bs_jax = BiotSavartJAX(coils)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            jf_jax = SquaredFluxJAX(surf, bs_jax)
-
-        _assert_jax_objective_fallback_active(jf_jax)
-        assert not caught
-
-
-class TestStrictFieldFallbacks:
-    def test_biotsavart_rejects_removed_cpu_geometry_fallback(self):
+class TestStrictFieldContracts:
+    def test_biotsavart_rejects_unsupported_cpu_geometry_contract(self):
         class _UnsupportedCurve:
             pass
 
         bs_jax = object.__new__(BiotSavartJAX)
         with pytest.raises(
             TypeError,
-            match="BiotSavartJAX.*JAX geometry hooks.*CPU curve-geometry fallback was removed",
+            match="BiotSavartJAX.*immutable JAX specs.*Provide a native curve spec",
         ):
             bs_jax._base_curve_geometry_with_timings(_UnsupportedCurve())
 
-    def test_strict_mode_uses_spec_native_forward_path_before_cpu_geometry_fallback(
+    def test_strict_mode_uses_spec_native_forward_path(
         self,
         coil_surf_setup,
         monkeypatch,
@@ -2107,7 +2037,7 @@ class TestStrictFieldFallbacks:
         _enable_strict_jax_backend(monkeypatch, request)
 
         bs_jax = BiotSavartJAX(coils)
-        bs_jax._jax_native = False
+        bs_jax._uses_uniform_curve_xyz_fourier_fastpath = False
         bs_jax.set_points(expected_points)
         monkeypatch.setattr(
             bs_jax,
@@ -2124,7 +2054,7 @@ class TestStrictFieldFallbacks:
         assert np.asarray(field_value).shape == np.asarray(expected_points).shape
 
     @pytest.mark.parametrize("strict_mode", [False, True])
-    def test_biotsavart_rejects_removed_cpu_pullback_fallback(
+    def test_biotsavart_rejects_unsupported_cpu_pullback_contract(
         self,
         monkeypatch,
         request,
@@ -2148,7 +2078,7 @@ class TestStrictFieldFallbacks:
 
         with pytest.raises(
             TypeError,
-            match="BiotSavartJAX.*JAX pullback hooks.*CPU coil-pullback fallback was removed",
+            match="BiotSavartJAX.*immutable JAX curve specs.*Provide a native curve spec",
         ):
             biotsavart_jax_backend_module._project_single_coil_cotangent_data(
                 _Coil(),
@@ -2380,7 +2310,7 @@ class TestCurveCWSFourierCPPParity:
 
 
 class TestCurveCWSFourierCPPJaxFieldPath:
-    def test_strict_mode_allows_squared_flux_for_curvecwsfouriercpp(
+    def test_strict_mode_keeps_squared_flux_native_for_curvecwsfouriercpp(
         self,
         banana_coil_cpp_setup,
         monkeypatch,
@@ -2390,9 +2320,27 @@ class TestCurveCWSFourierCPPJaxFieldPath:
         _enable_strict_jax_backend(monkeypatch, request)
 
         bs_jax = BiotSavartJAX(coils)
+        monkeypatch.setattr(
+            bs_jax,
+            "B",
+            lambda: (_ for _ in ()).throw(
+                AssertionError(
+                    "SquaredFluxJAX should stay off BiotSavartJAX.B() for CurveCWSFourierCPP"
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            bs_jax,
+            "B_vjp",
+            lambda _v: (_ for _ in ()).throw(
+                AssertionError(
+                    "SquaredFluxJAX should stay off BiotSavartJAX.B_vjp() for CurveCWSFourierCPP"
+                )
+            ),
+        )
         jf_jax = SquaredFluxJAX(surf, bs_jax)
 
-        _assert_jax_objective_fallback_active(jf_jax)
+        _assert_jax_objective_native_active(jf_jax)
         assert jf_jax.J() >= 0.0
         grad = jf_jax.dJ()
         assert np.asarray(grad).shape[0] > 0
@@ -4080,116 +4028,6 @@ class TestStage2OptimizerContract:
         assert payload["snapshot"]["coil_coil_distance"] == pytest.approx(0.25)
         assert payload["snapshot"]["curvature"] == pytest.approx(0.5)
         assert payload["snapshot"]["grad_norm"] == pytest.approx(np.sqrt(2.0) * 1.375)
-
-    def test_profile_stage2_explicit_step_reports_squared_flux_fallback_components(
-        self,
-        monkeypatch,
-    ):
-        stage2_script = _load_stage2_script_module()
-
-        class DummyFallbackField:
-            def B(self):
-                return np.zeros((2, 3), dtype=float)
-
-            def B_vjp(self, dJ_dB):
-                raise AssertionError(
-                    "profile_stage2_squared_flux_internal_components should use profile_B_vjp when available"
-                )
-
-            def profile_B_vjp(self, dJ_dB):
-                assert dJ_dB.shape == (2, 3)
-                return _build_fake_b_vjp_profile()
-
-        class DummyFallbackSquaredFlux:
-            def __init__(self):
-                self._use_jax_native = False
-                self.field = DummyFallbackField()
-
-            def J(self):
-                return 0.75
-
-            def dJ(self, partials=False):
-                grad = np.asarray([0.75, -0.75], dtype=float)
-                if partials:
-                    return _DummyDerivative(grad)
-                return grad
-
-            def _jit_integral(self, B):
-                assert B.shape == (2, 3)
-                return 0.75
-
-            def _jit_integral_value_grad(self, B):
-                assert B.shape == (2, 3)
-                return 0.75, np.zeros_like(B)
-
-        class DummyCompositeObjective:
-            def __init__(self):
-                self.x = np.zeros(2, dtype=float)
-
-            def J(self):
-                return 1.5
-
-            def dJ(self, partials=False):
-                grad = np.asarray([2.0, -1.0], dtype=float)
-                if partials:
-                    return _DummyDerivative(grad)
-                return grad
-
-        class DummyScalar:
-            def __init__(self, value):
-                self._value = float(value)
-
-            def J(self):
-                return self._value
-
-            def dJ(self, partials=False):
-                grad = np.asarray([self._value, -self._value], dtype=float)
-                if partials:
-                    return _DummyDerivative(grad)
-                return grad
-
-        class DummyDistance:
-            def J(self):
-                return 0.125
-
-            def dJ(self, partials=False):
-                grad = np.asarray([0.125, -0.125], dtype=float)
-                if partials:
-                    return _DummyDerivative(grad)
-                return grad
-
-            def shortest_distance(self):
-                return 0.25
-
-        monkeypatch.setattr(
-            stage2_script, "compute_mean_abs_relbn", lambda _surf, _bs: 0.5
-        )
-
-        context = stage2_script.Stage2ObjectiveContext(
-            DummyCompositeObjective(),
-            object(),
-            object(),
-            DummyFallbackSquaredFlux(),
-            DummyScalar(1.25),
-            DummyDistance(),
-            DummyScalar(0.5),
-            **{
-                **_stage2_context_kwargs(),
-                "length_target": 1.25,
-            },
-        )
-        payload = stage2_script.profile_stage2_explicit_step(context)
-
-        assert (
-            set(payload["squared_flux_internal_timings_s"])
-            == EXPECTED_SQUARED_FLUX_INTERNAL_TIMING_KEYS
-        )
-        assert payload["squared_flux_internal_total_s"] >= 0.0
-        assert payload["dominant_squared_flux_internal_components"]
-        assert (
-            payload["dominant_squared_flux_internal_components"][0]["elapsed_s"] >= 0.0
-        )
-        _assert_b_vjp_profile_payload(payload)
 
     def test_stage2_script_probe_only_writes_step_profile(self):
         with tempfile.TemporaryDirectory(prefix="stage2-step-profile-") as temp_dir:

@@ -1125,9 +1125,9 @@ def _adjoint_coil_derivative(stream_group_vjps, adjoint, biotsavart):
     """Project grouped adjoint cotangents to a coil ``Derivative``.
 
     Uses ``BiotSavartJAX.coil_cotangents_to_derivative()`` for
-    shared coil DOF projection. JAX-capable curves stay on the JAX
-    projection path; unsupported curves fall back to ``Coil.vjp()``
-    slice by slice.
+    shared coil DOF projection. Supported curves project through immutable
+    JAX specs; unsupported curves are rejected instead of routing through
+    ``Coil.vjp()``.
     """
     total_derivative = Derivative({})
     for d_coil_array, coil_group_indices in _iter_adjoint_coil_cotangents(

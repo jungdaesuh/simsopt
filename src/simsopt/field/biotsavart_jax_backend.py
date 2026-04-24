@@ -317,7 +317,7 @@ def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
         raise TypeError(
             "BiotSavartJAX coil cotangent projection requires immutable JAX "
             f"curve specs; unsupported type {type(curve).__name__}. "
-            "The CPU coil-pullback fallback was removed."
+            "Provide a native curve spec."
         )
 
     if rotmat is not None:
@@ -402,8 +402,8 @@ class BiotSavartJAX(Optimizable):
     is evaluated from DOFs via a precomputed Fourier basis matrix
     entirely inside the JIT boundary, eliminating CPU round-trips.
     More general curve families can still participate when they expose
-    immutable JAX specs used below. Unsupported curves are now
-    rejected explicitly instead of falling back to CPU geometry/pullback code.
+    immutable JAX specs used below. Unsupported curves are rejected explicitly;
+    CPU geometry/pullback code is not used by this adapter.
 
     Args:
         coils: list of :class:`simsopt.field.coil.Coil` objects.
@@ -795,7 +795,7 @@ class BiotSavartJAX(Optimizable):
             raise TypeError(
                 "BiotSavartJAX requires curves that expose immutable JAX specs; "
                 f"unsupported type {type(curve).__name__}. "
-                "The CPU curve-geometry fallback was removed."
+                "Provide a native curve spec."
             )
 
         if geometry_cache is not None:

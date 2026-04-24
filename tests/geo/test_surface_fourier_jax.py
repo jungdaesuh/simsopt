@@ -329,5 +329,72 @@ class TestSurfaceXYZFourierJaxCppParity:
         )
 
 
+class TestSurfaceFourierSpecCppParity:
+    """Compare immutable non-RZ surface specs against CPU surface geometry."""
+
+    @pytest.fixture(autouse=True)
+    def _require_simsoptpp(self):
+        pytest.importorskip("simsoptpp")
+        pytest.importorskip("simsopt")
+
+    @pytest.mark.parametrize("surface_cls_name", [
+        "SurfaceXYZFourier",
+        "SurfaceXYZTensorFourier",
+    ])
+    @pytest.mark.parametrize("stellsym", [True, False])
+    def test_spec_geometry_and_normals_match_cpp(self, surface_cls_name, stellsym):
+        from simsopt import geo
+        from simsopt.jax_core import (
+            surface_xyz_fourier_gamma_from_spec,
+            surface_xyz_fourier_normal_from_spec,
+            surface_xyz_tensor_fourier_gamma_from_spec,
+            surface_xyz_tensor_fourier_normal_from_spec,
+        )
+
+        case_by_class = {
+            "SurfaceXYZFourier": (
+                geo.SurfaceXYZFourier,
+                surface_xyz_fourier_gamma_from_spec,
+                surface_xyz_fourier_normal_from_spec,
+                11,
+            ),
+            "SurfaceXYZTensorFourier": (
+                geo.SurfaceXYZTensorFourier,
+                surface_xyz_tensor_fourier_gamma_from_spec,
+                surface_xyz_tensor_fourier_normal_from_spec,
+                21,
+            ),
+        }
+        surface_cls, gamma_from_spec, normal_from_spec, seed_base = case_by_class[
+            surface_cls_name
+        ]
+        rng = np.random.default_rng(seed_base + int(not stellsym))
+        surface = surface_cls(
+            mpol=2,
+            ntor=1,
+            nfp=2,
+            stellsym=stellsym,
+            quadpoints_phi=np.linspace(0, 0.5, 7, endpoint=False),
+            quadpoints_theta=np.linspace(0, 1.0, 6, endpoint=False),
+        )
+        dofs = surface.get_dofs().copy()
+        dofs[:] = rng.normal(size=dofs.shape)
+        surface.set_dofs(dofs)
+        spec = surface.surface_spec()
+
+        np.testing.assert_allclose(
+            np.asarray(jax.jit(gamma_from_spec)(spec)),
+            surface.gamma(),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax.jit(normal_from_spec)(spec)),
+            surface.normal(),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

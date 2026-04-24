@@ -970,6 +970,17 @@ def test_transfer_guard_disallow_rejects_squaredfluxjax_surface_without_spec():
     )
 
 
+def test_transfer_guard_disallow_rejects_clamped_xyztensor_surface_spec():
+    """Clamped tensor surfaces need their own immutable spec before JAX routing."""
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=(
+            "case_transfer_guard_disallow_rejects_clamped_xyztensor_surface_spec",
+        ),
+        failure_message="Clamped SurfaceXYZTensorFourier rejection smoke failed",
+    )
+
+
 def test_transfer_guard_disallow_allows_lpcurveforce_shared_state_packing():
     """LpCurveForce shared-state packing must explicitly place host geometry on JAX arrays."""
     _assert_python_script_passes(

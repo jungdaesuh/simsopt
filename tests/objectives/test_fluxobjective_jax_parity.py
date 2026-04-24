@@ -35,7 +35,7 @@ _GRADIENT_ATOL = 1e-14
 
 class _NonNativeFakeField(Optimizable):
     def __init__(self):
-        self._jax_native = False
+        self._uses_uniform_curve_xyz_fourier_fastpath = False
         self._points = None
         super().__init__(x0=np.zeros(1, dtype=np.float64))
 
@@ -90,7 +90,6 @@ def _make_native_flux_objectives(definition, *, target=None):
         bs_jax,
         target=target,
         definition=definition,
-        parity_mode="native_only",
     )
     return objective_cpu, objective_jax
 
@@ -120,7 +119,6 @@ def _make_flux_objectives_for_surface(definition, surface, *, target=None):
         BiotSavartJAX(coils),
         target=target,
         definition=definition,
-        parity_mode="native_only",
     )
     return objective_cpu, objective_jax
 
@@ -172,7 +170,6 @@ def _strict_parity_lane(monkeypatch, request, parity_lane):
 def test_fluxobjective_value_parity(definition):
     objective_cpu, objective_jax = _make_native_flux_objectives(definition)
 
-    assert objective_jax._use_jax_native
     _assert_flux_value_parity(objective_jax.J(), objective_cpu.J())
 
 
@@ -194,7 +191,6 @@ def test_non_rz_fixed_surface_value_and_gradient_parity(surface_cls, definition)
         surface,
     )
 
-    assert objective_jax._use_jax_native
     _assert_flux_value_parity(objective_jax.J(), objective_cpu.J())
     _assert_flux_gradient_parity(objective_jax.dJ(), objective_cpu.dJ())
 

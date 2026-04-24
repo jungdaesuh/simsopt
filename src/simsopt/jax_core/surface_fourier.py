@@ -1,0 +1,116 @@
+"""Pure JAX non-RZ surface geometry built on immutable specs."""
+
+from __future__ import annotations
+
+import jax.numpy as jnp
+
+from ..geo.surface_fourier_jax import (
+    surface_gamma_from_dofs as _surface_xyz_tensor_gamma_from_dofs,
+    surface_gammadash1_from_dofs as _surface_xyz_tensor_gammadash1_from_dofs,
+    surface_gammadash2_from_dofs as _surface_xyz_tensor_gammadash2_from_dofs,
+    surface_xyzfourier_gamma_from_dofs as _surface_xyz_fourier_gamma_from_dofs,
+    surface_xyzfourier_gammadash1_from_dofs as _surface_xyz_fourier_gammadash1_from_dofs,
+    surface_xyzfourier_gammadash2_from_dofs as _surface_xyz_fourier_gammadash2_from_dofs,
+)
+from .specs import SurfaceXYZFourierSpec, SurfaceXYZTensorFourierSpec
+
+
+def surface_xyz_fourier_gamma_from_spec(spec: SurfaceXYZFourierSpec):
+    return _surface_xyz_fourier_gamma_from_dofs(
+        spec.dofs,
+        spec.quadpoints_phi,
+        spec.quadpoints_theta,
+        spec.mpol,
+        spec.ntor,
+        spec.nfp,
+        spec.stellsym,
+        spec.scatter_indices,
+        spec.coeff_template,
+    )
+
+
+def surface_xyz_fourier_gammadash1_from_spec(spec: SurfaceXYZFourierSpec):
+    return _surface_xyz_fourier_gammadash1_from_dofs(
+        spec.dofs,
+        spec.quadpoints_phi,
+        spec.quadpoints_theta,
+        spec.mpol,
+        spec.ntor,
+        spec.nfp,
+        spec.stellsym,
+        spec.scatter_indices,
+        spec.coeff_template,
+    )
+
+
+def surface_xyz_fourier_gammadash2_from_spec(spec: SurfaceXYZFourierSpec):
+    return _surface_xyz_fourier_gammadash2_from_dofs(
+        spec.dofs,
+        spec.quadpoints_phi,
+        spec.quadpoints_theta,
+        spec.mpol,
+        spec.ntor,
+        spec.nfp,
+        spec.stellsym,
+        spec.scatter_indices,
+        spec.coeff_template,
+    )
+
+
+def surface_xyz_fourier_normal_from_spec(spec: SurfaceXYZFourierSpec):
+    return jnp.cross(
+        surface_xyz_fourier_gammadash1_from_spec(spec),
+        surface_xyz_fourier_gammadash2_from_spec(spec),
+    )
+
+
+def _scatter_indices_or_none(spec: SurfaceXYZTensorFourierSpec):
+    if spec.stellsym:
+        return spec.scatter_indices
+    return None
+
+
+def surface_xyz_tensor_fourier_gamma_from_spec(spec: SurfaceXYZTensorFourierSpec):
+    return _surface_xyz_tensor_gamma_from_dofs(
+        spec.dofs,
+        spec.quadpoints_phi,
+        spec.quadpoints_theta,
+        spec.mpol,
+        spec.ntor,
+        spec.nfp,
+        spec.stellsym,
+        _scatter_indices_or_none(spec),
+    )
+
+
+def surface_xyz_tensor_fourier_gammadash1_from_spec(spec: SurfaceXYZTensorFourierSpec):
+    return _surface_xyz_tensor_gammadash1_from_dofs(
+        spec.dofs,
+        spec.quadpoints_phi,
+        spec.quadpoints_theta,
+        spec.mpol,
+        spec.ntor,
+        spec.nfp,
+        spec.stellsym,
+        _scatter_indices_or_none(spec),
+    )
+
+
+def surface_xyz_tensor_fourier_gammadash2_from_spec(spec: SurfaceXYZTensorFourierSpec):
+    return _surface_xyz_tensor_gammadash2_from_dofs(
+        spec.dofs,
+        spec.quadpoints_phi,
+        spec.quadpoints_theta,
+        spec.mpol,
+        spec.ntor,
+        spec.nfp,
+        spec.stellsym,
+        _scatter_indices_or_none(spec),
+    )
+
+
+def surface_xyz_tensor_fourier_normal_from_spec(spec: SurfaceXYZTensorFourierSpec):
+    return jnp.cross(
+        surface_xyz_tensor_fourier_gammadash1_from_spec(spec),
+        surface_xyz_tensor_fourier_gammadash2_from_spec(spec),
+    )
