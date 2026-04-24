@@ -94,7 +94,9 @@ The CPU-lowering proof layer is now implemented in tree:
   `lower(...).as_text()` and counts StableHLO/MHLO control-flow markers.
 - [x] `benchmarks/traceable_target_lane_compile_shape.py` builds the real
   traceable target-lane fixture and writes a JSON payload for seeded/public,
-  LS/exact compile-shape comparisons.
+  LS/exact compile-shape comparisons. It explicitly bootstraps the local
+  `simsopt-jax/src` package before importing `simsopt` so sibling checkouts do
+  not contaminate measurements.
 - [x] `tests/geo/test_surface_objectives_jax.py` now pins the seeded optimizer
   helper to `general_only_forward=True` and proves that the seeded compiled
   bundle does not route through the public `same_coils` forward path.
@@ -119,13 +121,48 @@ Observed smoke result on the tiny LS fixture:
 
 | Label | Lowering time | StableHLO text | `stablehlo.while` | `stablehlo.case` |
 | --- | ---: | ---: | ---: | ---: |
-| `ls.seeded_value_and_grad` | 5.185 s | 7,580,144 bytes / 75,166 lines | 67 | 28 |
+| `ls.seeded_value_and_grad` | 5.425 s | 7,580,144 bytes / 75,166 lines | 67 | 28 |
 
 This is sufficient to prove the structural lowering issue on CPU: the seeded
 path already bypasses the old public `same_coils` branch, yet it still lowers a
 large nested control-flow graph. CUDA is not required for that proof. CUDA is
 still required before claiming runtime dominance, compile-memory pressure, or a
 specific LS-vs-exact bottleneck on accelerator hardware.
+
+Broader seeded-vs-public CPU comparison:
+
+```bash
+PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src \
+python benchmarks/traceable_target_lane_compile_shape.py \
+  --platform cpu \
+  --boozer-kind both \
+  --include-public \
+  --output-json .artifacts/traceable_compile_shape_cpu_full.json
+```
+
+Observed result:
+
+| Label | Fixture | Lowering time | StableHLO text | `stablehlo.while` | `stablehlo.case` |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `ls.seeded_value_and_grad` | real single-stage, 31x16, `mpol=2`, `ntor=2` | 4.693 s | 8,048,136 bytes / 76,299 lines | 67 | 28 |
+| `ls.public_value_and_grad` | real single-stage, 31x16, `mpol=2`, `ntor=2` | 5.066 s | 8,080,550 bytes / 76,313 lines | 67 | 29 |
+| `exact.seeded_value_and_grad` | simple LS-warm-start exact, 5x5, `mpol=2`, `ntor=2` | 1.880 s | 4,543,751 bytes / 31,921 lines | 37 | 10 |
+| `exact.public_value_and_grad` | simple LS-warm-start exact, 5x5, `mpol=2`, `ntor=2` | 2.377 s | 4,555,873 bytes / 31,935 lines | 37 | 11 |
+
+The seeded-vs-public structural delta is the same in both modes: the public
+baseline-aware path carries one additional `stablehlo.case`, while the seeded
+optimizer path does not. The remaining control-flow markers are therefore not
+the old public `same_coils` complaint; they are nested solver/objective
+control-flow cost.
+
+Exact-mode note: the default reduced real single-stage exact initialization
+still fails before lowering on this fixture family, so the exact comparison uses
+the integration-test-proven simple fixture that first converges LS, then seeds
+exact Newton from that state. The exact fixture keeps `boozer_type="exact"` for
+`run_code_traceable()` and sets the traceable scalar objective's label
+constraint weight to `0.0` after the exact solve so the benchmark can evaluate
+the baseline scalar without reintroducing a least-squares label penalty. This
+is a compile-shape fixture, not a production physics result.
 
 ## Verified from the current tree
 
