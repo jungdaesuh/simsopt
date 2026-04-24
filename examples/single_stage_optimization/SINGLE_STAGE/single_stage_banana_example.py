@@ -8576,7 +8576,7 @@ if __name__ == "__main__":
             )
 
         def history_callback(history, latest_history_entry, multipliers, penalty):
-            alm_partial_state["history"] = history  # already shallow-copied by _emit_history_snapshot
+            alm_partial_state["history"] = history
             emit_alm_partial_state(
                 multipliers,
                 penalty,

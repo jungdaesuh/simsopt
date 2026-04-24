@@ -404,6 +404,7 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(result.history[0]["action"], "penalty_increase")
         self.assertTrue(result.history[0]["nonfinite_candidate_evaluation"])
         self.assertEqual(result.history[0]["nonfinite_candidate_fields"], ["total", "grad"])
+        np.testing.assert_allclose(result.x, np.array([0.0]))
 
     def test_candidate_is_acceptable_allows_near_equal_feasible_trial(self):
         module = load_alm_utils_module()
@@ -1001,8 +1002,47 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(result.history[0]["action"], "infeasible_stall_penalty_increase")
         self.assertTrue(result.history[0]["infeasible_stall"])
         self.assertEqual(result.history[0]["inner_attempts"], 1)
+        self.assertIs(history_snapshots[-1]["history"], result.history)
+        self.assertIsNot(history_snapshots[-1]["latest_entry"], result.history[0])
         self.assertEqual(history_snapshots[-1]["latest_entry"]["action"], "infeasible_stall_penalty_increase")
         self.assertEqual(history_snapshots[-1]["latest_entry"]["outer_termination"], "max_outer")
+        history_snapshots[-1]["latest_entry"]["action"] = "mutated_by_callback_owner"
+        history_snapshots[-1]["latest_entry"]["constraint_values"][0] = 99.0
+        self.assertEqual(result.history[0]["action"], "infeasible_stall_penalty_increase")
+        self.assertEqual(result.history[0]["constraint_values"], [2.0])
+
+    def test_sanitize_nonfinite_evaluation_copies_only_owned_gradient_arrays(self):
+        module = load_alm_utils_module()
+        fallback_grad = np.array([1.0, 2.0])
+        fallback_metric_grad = np.array([3.0, 4.0])
+        fallback_base_grad = np.array([5.0, 6.0])
+        borrowed_metadata = {"constraint": "borrowed"}
+        fallback_evaluation = {
+            "total": 1.0,
+            "grad": fallback_grad,
+            "metric_grad": fallback_metric_grad,
+            "base_grad": fallback_base_grad,
+            "constraint_values": np.array([0.25]),
+            "metadata": borrowed_metadata,
+        }
+
+        sanitized = module._sanitize_nonfinite_inner_evaluation(
+            {"total": np.nan, "grad": np.array([np.nan, 0.0])},
+            fallback_evaluation=fallback_evaluation,
+        )
+
+        self.assertGreater(sanitized["total"], fallback_evaluation["total"])
+        self.assertIs(sanitized["metadata"], borrowed_metadata)
+        self.assertIs(sanitized["constraint_values"], fallback_evaluation["constraint_values"])
+        for field, fallback_array in (
+            ("grad", fallback_grad),
+            ("metric_grad", fallback_metric_grad),
+            ("base_grad", fallback_base_grad),
+        ):
+            self.assertIsNot(sanitized[field], fallback_array)
+            np.testing.assert_allclose(sanitized[field], fallback_array)
+        sanitized["grad"][0] = 99.0
+        self.assertEqual(fallback_grad[0], 1.0)
 
     def test_minimize_alm_classifies_relative_reduction_false_success_as_infeasible_stall(self):
         module = load_alm_utils_module()

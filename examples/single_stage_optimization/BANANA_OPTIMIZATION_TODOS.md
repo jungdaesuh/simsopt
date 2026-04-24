@@ -915,10 +915,31 @@ Impact measure:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+- [x] Fix implemented
+- [x] Impact measured
+- [x] Validation command recorded
+
+Resolution notes:
+
+- `minimize_alm` history callbacks now receive the ALM history list as
+  borrowed/read-only state, plus an owned latest-entry snapshot and multiplier
+  snapshot for checkpoint writers.
+- Non-finite inner-evaluation rejection now shallow-copies the evaluation dict
+  and owns only mutable gradient arrays (`grad`, `metric_grad`, `base_grad`);
+  other evaluation metadata stays borrowed until result/checkpoint persistence.
+- Regression coverage asserts callback/history ownership and owned gradient
+  array isolation.
+- Remaining cleanup removes the duplicate post-solve `result.x` ownership copy
+  by carrying the accepted candidate vector through the inner-attempt loop, and
+  removes the duplicate restored-state copy before failure-result construction.
+- Impact measurement on a 10,000-entry ALM history callback proxy:
+  old full-history clone median 3481.8 us / peak 2,805,668 bytes;
+  borrowed-history plus latest-entry snapshot median 2.2 us / peak 636 bytes.
+- Validation: `python3 -m py_compile examples/single_stage_optimization/alm_utils.py examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py tests/geo/test_alm_utils.py`
+- Validation: `python3 -m ruff check examples/single_stage_optimization/alm_utils.py examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py tests/geo/test_alm_utils.py`
+- Validation: `python3 -m pytest tests/geo/test_alm_utils.py -q`
+- Validation: `python3 -m pytest tests/geo/test_single_stage_alm_integration.py -q`
 
 ## Other / Needs Benchmark
 

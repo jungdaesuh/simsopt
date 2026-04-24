@@ -1,4 +1,3 @@
-from copy import deepcopy
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Callable, Sequence
@@ -111,6 +110,7 @@ _BOXED_INNER_PROFILES = {
     (True, False): _BOXED_FEASIBLE_INITIAL_PROFILE,
     (True, True): _BOXED_FEASIBLE_CONTINUATION_PROFILE,
 }
+_OWNED_EVALUATION_ARRAY_FIELDS = ("grad", "metric_grad", "base_grad")
 _ACCEPTANCE_TOTAL_ATOL = 1e-10
 _ACCEPTANCE_TOTAL_RTOL = 1e-3
 _ACCEPTANCE_MOVE_TOL = 1e-12
@@ -447,22 +447,21 @@ def _sanitize_nonfinite_inner_evaluation(
     if not invalid_fields:
         return evaluation
 
-    sanitized = deepcopy(fallback_evaluation)
+    sanitized = dict(fallback_evaluation)
     sanitized["total"] = _elevated_rejection_total(float(fallback_evaluation["total"]))
-    sanitized["grad"] = np.asarray(fallback_evaluation["grad"], dtype=float).copy()
-    if "metric_grad" in fallback_evaluation:
-        sanitized["metric_grad"] = np.asarray(
-            fallback_evaluation["metric_grad"],
-            dtype=float,
-        ).copy()
-    if "base_grad" in fallback_evaluation:
-        sanitized["base_grad"] = np.asarray(
-            fallback_evaluation["base_grad"],
-            dtype=float,
-        ).copy()
+    for field in _OWNED_EVALUATION_ARRAY_FIELDS:
+        if field in fallback_evaluation:
+            sanitized[field] = np.asarray(fallback_evaluation[field], dtype=float).copy()
     sanitized["nonfinite_evaluation"] = True
     sanitized["nonfinite_fields"] = list(invalid_fields)
     return sanitized
+
+
+def _snapshot_history_entry(entry: dict) -> dict:
+    return {
+        key: value.copy() if isinstance(value, list) else value
+        for key, value in entry.items()
+    }
 
 
 def _move_tolerance(reference_x) -> float:
@@ -1225,9 +1224,12 @@ def minimize_alm(
     def _emit_history_snapshot(latest_entry: dict) -> None:
         if history_callback is None:
             return
+        # Callback contract: history is borrowed/read-only ALM state. The
+        # latest entry and multipliers are owned snapshots for checkpoint
+        # writers that persist the current iteration.
         history_callback(
-            [dict(entry) for entry in history],
-            dict(latest_entry),
+            history,
+            _snapshot_history_entry(latest_entry),
             multipliers.copy(),
             float(penalty),
         )
@@ -1447,7 +1449,7 @@ def minimize_alm(
             inner_result=inner_result,
             final_max_feasibility_violation=_extract_constraint_state(evaluation)[3],
         )
-        x = restored_state.x.copy()
+        x = restored_state.x
         restored_routing_state = _constraint_routing_state(
             restored_state.evaluation,
             restored_state.multipliers_state,
@@ -1700,6 +1702,7 @@ def minimize_alm(
 
             accepted_result = None
             accepted_eval = None
+            accepted_x = None
             attempts = 0
             attempt_iterations = 0
             attempt_radius = trust_radius
@@ -1785,6 +1788,7 @@ def minimize_alm(
                 if acceptable and not infeasible_inner_stall:
                     accepted_result = result
                     accepted_eval = candidate_eval
+                    accepted_x = candidate_x
                     if attempt_radius is not None:
                         if moved_norm >= 0.5 * float(attempt_radius):
                             trust_radius = float(attempt_radius) * float(settings.trust_radius_grow)
@@ -1794,6 +1798,7 @@ def minimize_alm(
                 if infeasible_inner_stall:
                     accepted_result = result
                     accepted_eval = current_eval
+                    accepted_x = start_x
                     forced_infeasible_penalty_cycle = True
                     forced_infeasible_penalty_reason = inner_stall_reason
                     forced_inner_false_success = bool(inner_false_success)
@@ -1803,6 +1808,7 @@ def minimize_alm(
                 if attempt_radius is None:
                     accepted_result = result
                     accepted_eval = current_eval
+                    accepted_x = start_x
                     break
                 next_radius = max(
                     settings.trust_radius_min,
@@ -1812,30 +1818,27 @@ def minimize_alm(
                 if attempt_radius <= settings.trust_radius_min or exhausted_attempts:
                     accepted_result = result
                     accepted_eval = current_eval
+                    accepted_x = start_x
                     trust_radius = float(attempt_radius)
                     break
                 attempt_radius = float(next_radius)
                 trust_radius = float(attempt_radius)
                 continue
 
-            if accepted_result is None or accepted_eval is None:
+            if accepted_result is None or accepted_eval is None or accepted_x is None:
                 if last_attempt_result is None:
                     raise RuntimeError("ALM failed before any inner optimization result was produced.")
                 accepted_result = last_attempt_result
                 accepted_eval = current_eval
+                accepted_x = start_x
 
             result = accepted_result
             last_result = result
             total_inner_iterations += attempt_iterations
-            candidate_x = np.asarray(result.x, dtype=float).copy()
-            if accepted_eval is current_eval:
-                x = start_x.copy()
-                final_eval = current_eval
-            else:
-                x = candidate_x
-                final_eval = accepted_eval
-                if accepted_callback is not None:
-                    accepted_callback(x.copy())
+            x = accepted_x
+            final_eval = accepted_eval
+            if accepted_eval is not current_eval and accepted_callback is not None:
+                accepted_callback(x.copy())
             accepted_move_norm = float(np.linalg.norm(x - start_x))
             (
                 solver_constraint_values,
