@@ -21,6 +21,9 @@ from simsopt.geo.surfaceobjectives import (
     boozer_surface_residual,
     boozer_surface_residual_dB,
 )
+from simsopt.field.biotsavart_jax_backend import (
+    SingleStageRuntimeSpecBiotSavartJAX,
+)
 from simsopt.jax_core.specs import (
     CoilDofExtractionSpec,
     CoilSetDofExtractionSpec,
@@ -2494,6 +2497,14 @@ class SingleStageExampleTests(unittest.TestCase):
 
     def test_runtime_spec_biotsavart_full_artifact_curves_follow_updated_dofs(self):
         module = self.load_module()
+        from simsopt.field import (
+            SingleStageRuntimeSpecBiotSavartJAX as PackageRuntimeSpecBiotSavartJAX,
+        )
+
+        self.assertIs(
+            PackageRuntimeSpecBiotSavartJAX,
+            SingleStageRuntimeSpecBiotSavartJAX,
+        )
         curve_dofs = np.linspace(0.1, 0.9, 9, dtype=np.float64)
         initial_coil_dofs = np.concatenate(
             (curve_dofs, np.asarray([3.0], dtype=np.float64))
@@ -2567,7 +2578,7 @@ class SingleStageExampleTests(unittest.TestCase):
             ntheta=5,
         )
 
-        bs = module.SingleStageRuntimeSpecBiotSavartJAX(runtime_spec)
+        bs = SingleStageRuntimeSpecBiotSavartJAX(runtime_spec)
         captured_curves = [coil.curve for coil in bs.coils]
         initial_gamma = captured_curves[0].gamma()
         bs.x = updated_coil_dofs

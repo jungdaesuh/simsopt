@@ -1821,6 +1821,14 @@ def resolve_stage2_optimizer_method(
     ).method
 
 
+def resolve_stage2_alm_inner_optimizer_contract(field_backend, optimizer_backend):
+    """Resolve the ALM inner optimizer contract for the Stage 2 lane."""
+    from simsopt.geo.optimizer_jax import TargetOptimizerContract
+
+    contract = resolve_stage2_optimizer_contract(field_backend, optimizer_backend)
+    return contract if isinstance(contract, TargetOptimizerContract) else None
+
+
 def should_build_stage2_target_objective(
     field_backend,
     optimizer_backend,
@@ -2747,13 +2755,9 @@ if __name__ == "__main__":
         use_target_objective_lane = False
         needs_target_probe_payload = False
         probe_only_target_payload = False
-        alm_inner_optimizer_contract = (
-            resolve_stage2_optimizer_contract(
-                args.backend,
-                args.optimizer_backend,
-            )
-            if args.backend == "jax" and args.optimizer_backend == "ondevice"
-            else None
+        alm_inner_optimizer_contract = resolve_stage2_alm_inner_optimizer_contract(
+            args.backend,
+            args.optimizer_backend,
         )
     else:
         (

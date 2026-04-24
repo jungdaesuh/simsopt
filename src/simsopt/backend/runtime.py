@@ -46,6 +46,8 @@ _GPU_MEMORY_TOTAL_MB_ENV = "SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB"
 _SHARDING_STRATEGY_ENV = "SIMSOPT_JAX_SHARDING"
 _SHARDING_AXIS_ENV = "SIMSOPT_JAX_SHARDING_AXIS"
 _SHARDING_COIL_AXIS_ENV = "SIMSOPT_JAX_COIL_SHARDING_AXIS"
+_POINT_SHARDING_DEVICES_ENV = "SIMSOPT_JAX_POINT_SHARDING_DEVICES"
+_COIL_SHARDING_DEVICES_ENV = "SIMSOPT_JAX_COIL_SHARDING_DEVICES"
 _MIN_POINTS_TO_SHARD_ENV = "SIMSOPT_JAX_MIN_POINTS_TO_SHARD"
 _MIN_PAIRWISE_ROWS_TO_SHARD_ENV = "SIMSOPT_JAX_MIN_PAIRWISE_ROWS_TO_SHARD"
 _MIN_COILS_TO_SHARD_ENV = "SIMSOPT_JAX_MIN_COILS_TO_SHARD"
@@ -63,6 +65,7 @@ _VALID_SHARDING_STRATEGIES = (
     "pairwise_rows",
     "hybrid",
     "coil_groups",
+    "points_coils",
 )
 _GUARDRAIL_ENV_VARS = (
     _DEBUG_NANS_ENV,
@@ -400,7 +403,12 @@ class ShardingTuning:
     mode: str
     strategy: str
     mesh_axis_name: str
+    point_axis_name: str
     coil_axis_name: str
+    mesh_axes: tuple[str, ...]
+    point_device_count: int
+    coil_device_count: int
+    reduced_axis_name: str | None
     min_points_to_shard: int
     min_pairwise_rows_to_shard: int
     min_coils_to_shard: int
@@ -562,6 +570,68 @@ def _resolve_min_coils_to_shard(policy: BackendPolicy) -> int:
     if value is not None:
         return value
     return _MIN_COILS_TO_SHARD_BY_POLICY[policy.chunk_policy]
+
+
+def _required_positive_int_env(name: str, *, strategy: str) -> int:
+    raw_value = _optional_env_value(name)
+    if raw_value is None:
+        raise ValueError(f"{name} is required when {_SHARDING_STRATEGY_ENV}={strategy!r}")
+    value = int(raw_value)
+    if value <= 0:
+        raise ValueError(f"{name}={raw_value!r} must be > 0")
+    return value
+
+
+def _points_coils_device_counts(device_count: int) -> tuple[int, int]:
+    point_device_count = _required_positive_int_env(
+        _POINT_SHARDING_DEVICES_ENV,
+        strategy="points_coils",
+    )
+    coil_device_count = _required_positive_int_env(
+        _COIL_SHARDING_DEVICES_ENV,
+        strategy="points_coils",
+    )
+    requested_device_count = point_device_count * coil_device_count
+    if requested_device_count != device_count:
+        raise ValueError(
+            f"{_POINT_SHARDING_DEVICES_ENV} * {_COIL_SHARDING_DEVICES_ENV} "
+            f"must equal detected JAX device count {device_count}; got "
+            f"{point_device_count} * {coil_device_count} = {requested_device_count}"
+        )
+    return point_device_count, coil_device_count
+
+
+def _strategy_device_counts(strategy: str, device_count: int) -> tuple[int, int]:
+    if strategy == "points_coils":
+        return _points_coils_device_counts(device_count)
+    if device_count <= 0:
+        return (0, 0)
+    if strategy == "coil_groups":
+        return (1, device_count)
+    if strategy in {"points", "pairwise_rows", "hybrid"}:
+        return (device_count, 1)
+    return (0, 0)
+
+
+def _strategy_mesh_axis_names(
+    strategy: str,
+    *,
+    point_axis_name: str,
+    coil_axis_name: str,
+) -> tuple[str, ...]:
+    if strategy == "points_coils":
+        return (point_axis_name, coil_axis_name)
+    if strategy == "coil_groups":
+        return (coil_axis_name,)
+    if strategy in {"points", "pairwise_rows", "hybrid"}:
+        return (point_axis_name,)
+    return ()
+
+
+def _strategy_reduced_axis_name(strategy: str, *, coil_axis_name: str) -> str | None:
+    if strategy in {"coil_groups", "points_coils"}:
+        return coil_axis_name
+    return None
 
 
 def _runtime_jax_platform_value(platform: str) -> str:
@@ -841,11 +911,29 @@ def _build_sharding_tuning(
         if distributed.initialized
         else local_device_count
     )
+    point_axis_name = _resolve_sharding_axis_name()
+    coil_axis_name = _resolve_coil_sharding_axis_name()
+    point_device_count, coil_device_count = _strategy_device_counts(
+        strategy,
+        device_count,
+    )
     return ShardingTuning(
         mode=mode,
         strategy=strategy,
-        mesh_axis_name=_resolve_sharding_axis_name(),
-        coil_axis_name=_resolve_coil_sharding_axis_name(),
+        mesh_axis_name=point_axis_name,
+        point_axis_name=point_axis_name,
+        coil_axis_name=coil_axis_name,
+        mesh_axes=_strategy_mesh_axis_names(
+            strategy,
+            point_axis_name=point_axis_name,
+            coil_axis_name=coil_axis_name,
+        ),
+        point_device_count=point_device_count,
+        coil_device_count=coil_device_count,
+        reduced_axis_name=_strategy_reduced_axis_name(
+            strategy,
+            coil_axis_name=coil_axis_name,
+        ),
         min_points_to_shard=_resolve_min_points_to_shard(policy),
         min_pairwise_rows_to_shard=_resolve_min_pairwise_rows_to_shard(policy),
         min_coils_to_shard=_resolve_min_coils_to_shard(policy),

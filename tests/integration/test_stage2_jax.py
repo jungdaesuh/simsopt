@@ -1580,6 +1580,32 @@ class TestBiotSavartJAXParity:
                 err_msg="BiotSavartJAX.B_vjp() does not match CPU",
             )
 
+    def test_b_pullback_native_projects_to_public_derivative(self, coil_surf_setup):
+        """Native B cotangents are the source for the public Derivative."""
+        coils, surf, _, _ = coil_surf_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        v = np.asarray(bs_jax.B())
+
+        pullback = bs_jax.B_pullback_native(v)
+        projected = bs_jax.coil_cotangents_to_derivative(
+            pullback.d_coil_arrays,
+            pullback.coil_indices,
+        )
+        public = bs_jax.B_vjp(v)
+
+        assert pullback.d_coil_arrays
+        assert len(pullback.d_coil_arrays) == len(pullback.coil_indices)
+        for coil in coils:
+            np.testing.assert_allclose(
+                projected(coil),
+                public(coil),
+                rtol=1e-12,
+                atol=1e-14,
+            )
+
     def test_profile_b_vjp_reports_component_breakdown(self, coil_surf_setup):
         coils, surf, _, _ = coil_surf_setup
         points = surf.gamma().reshape((-1, 3))
@@ -3060,6 +3086,28 @@ class TestStage2OptimizerContract:
                 "scipy",
                 least_squares_algorithm="lm",
             )
+
+    def test_stage2_alm_inner_optimizer_contract_validates_backend_pair(self):
+        from simsopt.geo.optimizer_jax import TargetOptimizerContract
+
+        stage2_script = _load_stage2_script_module()
+
+        assert (
+            stage2_script.resolve_stage2_alm_inner_optimizer_contract("cpu", "scipy")
+            is None
+        )
+        target_contract = stage2_script.resolve_stage2_alm_inner_optimizer_contract(
+            "jax",
+            "ondevice",
+        )
+        assert isinstance(target_contract, TargetOptimizerContract)
+        assert target_contract.method == "lbfgs-ondevice"
+        with pytest.raises(
+            ValueError,
+            match="the Stage 2 outer loop with backend='jax' requires "
+            "optimizer_backend='ondevice'",
+        ):
+            stage2_script.resolve_stage2_alm_inner_optimizer_contract("jax", "scipy")
 
     @pytest.mark.parametrize(
         ("field_backend", "optimizer_backend", "least_squares_algorithm", "expected"),

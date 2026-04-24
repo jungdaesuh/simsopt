@@ -17,10 +17,14 @@ import jax.numpy as jnp
 import numpy as np
 
 from .._core.derivative import Derivative
+from .._core.jax_host_boundary import host_array, host_float
 from .._core.optimizable import Optimizable
 from ..jax_core import (
+    coil_set_spec_from_dof_extraction_spec,
     coil_specs_from_dof_extraction_spec,
     curve_gamma_and_dash_from_dofs as curve_gamma_and_dash_from_spec_dofs,
+    curve_gamma_and_dash_from_spec,
+    curve_geometry_from_spec,
     curve_pullback_from_dofs,
     curve_spec_from_curve,
     make_coil_dof_extraction_spec,
@@ -42,10 +46,26 @@ from ..jax_core.field import (
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
 )
-from ..jax_core.specs import make_field_eval_spec
+from ..jax_core.specs import (
+    CoilSetDofExtractionSpec,
+    CoilSpec,
+    CoilSymmetrySpec,
+    CurveSpec,
+    FieldEvalSpec,
+    GroupedCoilSetSpec,
+    SingleStageRuntimeSpec,
+    make_field_eval_spec,
+)
 from ._coil_graph import _unwrap_coil_curve_and_current_objects
 
-__all__ = ["BiotSavartJAX"]
+__all__ = [
+    "BiotSavartJAX",
+    "BiotSavartBPullback",
+    "SingleStageRuntimeSpecBiotSavartJAX",
+    "SpecBackedCoil",
+    "SpecBackedCurve",
+    "SpecBackedCurrent",
+]
 
 
 def _time_call_result(callback):
@@ -165,6 +185,215 @@ class _CoilVJPInfo:
     timings: dict[str, float] | None = None
 
 
+@dataclass(frozen=True)
+class BiotSavartBPullback:
+    """Native grouped cotangent payload for ``BiotSavartJAX.B``.
+
+    ``d_coil_arrays`` mirrors the grouped field-input structure:
+    one ``(d_gammas, d_gammadashs, d_currents)`` tuple per quadrature group.
+    ``coil_indices`` maps each group row back to the public coil list.
+    """
+
+    d_coil_arrays: tuple[tuple[jax.Array, jax.Array, jax.Array], ...]
+    coil_indices: tuple[tuple[int, ...], ...]
+
+
+class SpecBackedCurrent:
+    """Minimal current view reconstructed from a serialized JAX seed spec."""
+
+    def __init__(self, value: float) -> None:
+        self._value = float(value)
+        self.local_lower_bounds = np.asarray([-np.inf], dtype=np.float64)
+        self.local_upper_bounds = np.asarray([np.inf], dtype=np.float64)
+
+    def get_value(self) -> float:
+        return self._value
+
+
+class SpecBackedCurve(Optimizable):
+    """Read-only curve view backed by an immutable curve spec."""
+
+    return_fn_map = {}
+
+    def __init__(
+        self,
+        curve_spec: CurveSpec,
+        symmetry: CoilSymmetrySpec,
+    ) -> None:
+        self._curve_spec = curve_spec
+        self._symmetry = symmetry
+        self.quadpoints = host_array(curve_spec.quadpoints, dtype=np.float64)
+        Optimizable.__init__(self, x0=np.asarray([], dtype=np.float64))
+
+    def to_spec(self) -> CurveSpec:
+        return self._curve_spec
+
+    def get_dofs(self) -> jax.Array:
+        return self._curve_spec.dofs
+
+    def _apply_symmetry(
+        self,
+        gamma: jax.Array,
+        *derivatives: jax.Array,
+    ) -> tuple[jax.Array, ...]:
+        if not self._symmetry.has_rotation:
+            return (gamma, *derivatives)
+        rotmat = self._symmetry.rotmat
+        return (gamma @ rotmat, *(derivative @ rotmat for derivative in derivatives))
+
+    def _geometry(self) -> tuple[jax.Array, ...]:
+        return self._apply_symmetry(*curve_geometry_from_spec(self._curve_spec))
+
+    def gamma(self) -> np.ndarray:
+        gamma, _gammadash = curve_gamma_and_dash_from_spec(self._curve_spec)
+        return host_array(self._apply_symmetry(gamma)[0], dtype=np.float64)
+
+    def gammadash(self) -> np.ndarray:
+        gamma, gammadash = curve_gamma_and_dash_from_spec(self._curve_spec)
+        return host_array(self._apply_symmetry(gamma, gammadash)[1], dtype=np.float64)
+
+    def gammadashdash(self) -> np.ndarray:
+        _gamma, _gammadash, gammadashdash = self._geometry()
+        return host_array(gammadashdash, dtype=np.float64)
+
+    def incremental_arclength(self) -> np.ndarray:
+        return np.linalg.norm(self.gammadash(), axis=1)
+
+    def kappa(self) -> np.ndarray:
+        gammadash = self.gammadash()
+        gammadashdash = self.gammadashdash()
+        numerator = np.linalg.norm(np.cross(gammadash, gammadashdash), axis=1)
+        denominator = np.linalg.norm(gammadash, axis=1) ** 3
+        return numerator / denominator
+
+    def dgamma_by_dcoeff_vjp(self, _v: object) -> Derivative:
+        return Derivative({})
+
+    def dgammadash_by_dcoeff_vjp(self, _v: object) -> Derivative:
+        return Derivative({})
+
+    def dincremental_arclength_by_dcoeff_vjp(self, _v: object) -> Derivative:
+        return Derivative({})
+
+    def dkappa_by_dcoeff_vjp(self, _v: object) -> Derivative:
+        return Derivative({})
+
+
+class SpecBackedCoil:
+    """Read-only coil view reconstructed from a serialized JAX seed spec."""
+
+    def __init__(self, coil_spec: CoilSpec) -> None:
+        self.curve = SpecBackedCurve(coil_spec.curve, coil_spec.symmetry)
+        self.current = SpecBackedCurrent(
+            host_float(coil_spec.current.value[0]) * float(coil_spec.symmetry.scale)
+        )
+
+
+class SingleStageRuntimeSpecBiotSavartJAX:
+    """Biot-Savart adapter whose source of truth is a runtime seed spec."""
+
+    def __init__(self, runtime_spec: SingleStageRuntimeSpec) -> None:
+        self.runtime_spec = runtime_spec
+        self._coil_dof_extraction_spec = runtime_spec.seed.coil_dof_extraction
+        self._x = _as_jax_float64(runtime_spec.seed.coil_dofs)
+        self._points_jax: jax.Array | None = None
+        self._points_version = 0
+        self._coils = self._coils_from_dofs(self._x)
+
+    def _coils_from_dofs(
+        self,
+        coil_dofs: object,
+    ) -> tuple[SpecBackedCoil, ...]:
+        return tuple(
+            SpecBackedCoil(coil_spec)
+            for coil_spec in coil_specs_from_dof_extraction_spec(
+                self._coil_dof_extraction_spec,
+                coil_dofs,
+            )
+        )
+
+    @property
+    def x(self) -> jax.Array:
+        return self._x
+
+    @x.setter
+    def x(self, coil_dofs: object) -> None:
+        self._x = _as_jax_float64(coil_dofs)
+        self._coils = self._coils_from_dofs(self._x)
+
+    @property
+    def coils(self) -> tuple[SpecBackedCoil, ...]:
+        return self._coils
+
+    def coil_dof_extraction_spec(self) -> CoilSetDofExtractionSpec:
+        return self._coil_dof_extraction_spec
+
+    def coil_set_spec_from_dofs(self, coil_dofs: object) -> GroupedCoilSetSpec:
+        return coil_set_spec_from_dof_extraction_spec(
+            self._coil_dof_extraction_spec,
+            _as_jax_float64(coil_dofs),
+        )
+
+    def coil_set_spec(self) -> GroupedCoilSetSpec:
+        return self.coil_set_spec_from_dofs(self._x)
+
+    def grouped_coil_arrays_from_dofs(
+        self,
+        coil_dofs: object,
+    ) -> list[tuple[jax.Array, jax.Array, jax.Array]]:
+        return list(self.coil_set_spec_from_dofs(coil_dofs).field_inputs())
+
+    def set_points(self, points: object) -> None:
+        self._points_jax = _as_jax_float64(points)
+        self._points_version += 1
+
+    def set_points_from_spec(self, field_eval_spec: FieldEvalSpec) -> None:
+        self._points_jax = _as_jax_float64(field_eval_spec.points)
+        self._points_version += 1
+
+    def field_eval_spec(self) -> FieldEvalSpec:
+        return make_field_eval_spec(self._points_jax)
+
+    def B(self) -> jax.Array:
+        return grouped_biot_savart_B_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def A(self) -> jax.Array:
+        return grouped_biot_savart_A_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def dA_by_dX(self) -> jax.Array:
+        return grouped_biot_savart_dA_by_dX_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def d2A_by_dXdX(self) -> jax.Array:
+        return grouped_biot_savart_d2A_by_dXdX_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def dB_by_dX(self) -> jax.Array:
+        return grouped_biot_savart_dB_by_dX_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def B_and_dB(self) -> tuple[jax.Array, jax.Array]:
+        return grouped_biot_savart_B_and_dB_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
+    def save(self, _path: object) -> None:
+        raise RuntimeError("JAX runtime seed specs split runtime from host export.")
+
+
 def _supports_native_curve_geometry(curve):
     if callable(getattr(curve, "to_spec", None)):
         return True
@@ -223,22 +452,11 @@ def _full_curve_cotangent_to_derivative(curve, full_cotangent):
 
 
 def _slice_1d(array: jax.Array, start: int, end: int) -> jax.Array:
-    positions = np.arange(int(start), int(end), dtype=np.int64)
-    selector = np.zeros((positions.size, array.shape[0]), dtype=np.float64)
-    selector[np.arange(positions.size), positions] = 1.0
-    return _as_jax_float64(selector) @ array
+    return array[int(start) : int(end)]
 
 
 def _axis0_entries(array):
     """Yield axis-0 slices without materializing the whole grouped object."""
-    if isinstance(array, jax.Array):
-        length = int(array.shape[0])
-        if length == 0:
-            return
-        for chunk in jnp.split(array, length, axis=0):
-            yield jnp.squeeze(chunk, axis=0)
-        return
-
     shape = getattr(array, "shape", None)
     if shape is not None:
         for index in range(int(shape[0])):
@@ -255,12 +473,7 @@ def _axis0_entries(array):
 
 
 def _update_1d(array: jax.Array, start: int, values: jax.Array) -> jax.Array:
-    positions = np.arange(int(start), int(start) + values.shape[0], dtype=np.int64)
-    insert = np.zeros((array.shape[0], positions.size), dtype=np.float64)
-    insert[positions, np.arange(positions.size)] = 1.0
-    keep_mask = np.ones(array.shape[0], dtype=np.float64)
-    keep_mask[positions] = 0.0
-    return array * _as_jax_float64(keep_mask) + _as_jax_float64(insert) @ values
+    return array.at[int(start) : int(start) + values.shape[0]].set(values)
 
 
 def _ones_like_float64(array: jax.Array) -> jax.Array:
@@ -272,11 +485,7 @@ def _ones_like_float64(array: jax.Array) -> jax.Array:
 
 def _scatter_free_values(template: jax.Array, free_positions, free_values: jax.Array):
     free_positions = np.asarray(free_positions, dtype=np.int64)
-    insert = np.zeros((template.shape[0], free_positions.size), dtype=np.float64)
-    insert[free_positions, np.arange(free_positions.size)] = 1.0
-    keep_mask = np.ones(template.shape[0], dtype=np.float64)
-    keep_mask[free_positions] = 0.0
-    return template * _as_jax_float64(keep_mask) + _as_jax_float64(insert) @ free_values
+    return template.at[free_positions].set(free_values)
 
 
 def _curve_pullback_data_from_spec(curve, dg, dgd):
@@ -972,6 +1181,37 @@ class BiotSavartJAX(Optimizable):
         }
         return curve, rotmat, current, scale, gamma, gammadash, current_value, timings
 
+    def B_pullback_native(self, v):
+        r"""Return the native grouped cotangents for ``B``.
+
+        This is the JAX-native pullback boundary. It returns cotangents with
+        respect to grouped coil geometry/current arrays, without projecting
+        them into SIMSOPT's public :class:`Derivative` object graph.
+        """
+        points = self._points_jax
+        v_jax = _as_jax_float64(v)
+        geometry_cache = {}
+        d_coil_arrays = []
+        coil_indices = []
+        coil_infos = self._collect_free_coil_vjp_infos(geometry_cache)
+        for group in self._group_coil_vjp_infos(coil_infos):
+            d_coil_arrays.append(
+                biot_savart_B_vjp_maybe_collective(
+                    points,
+                    v_jax,
+                    group["gammas"],
+                    group["gammadashs"],
+                    group["currents"],
+                )
+            )
+            coil_indices.append(tuple(info.coil_index for info in group["infos"]))
+        return BiotSavartBPullback(
+            d_coil_arrays=tuple(d_coil_arrays),
+            coil_indices=tuple(coil_indices),
+        )
+
+    B_cotangents = B_pullback_native
+
     def B_vjp(self, v):
         r"""Vector-Jacobian product of B w.r.t. coil DOFs.
 
@@ -989,35 +1229,11 @@ class BiotSavartJAX(Optimizable):
         Returns:
             :class:`Derivative` (sum over all coils).
         """
-        deriv_data = {}
-        points = self._points_jax
-        v_jax = _as_jax_float64(v)
-        geometry_cache = {}
-        coil_infos = self._collect_free_coil_vjp_infos(geometry_cache)
-        for group in self._group_coil_vjp_infos(coil_infos):
-            dg_group, dgd_group, dc_group = biot_savart_B_vjp_maybe_collective(
-                points,
-                v_jax,
-                group["gammas"],
-                group["gammadashs"],
-                group["currents"],
-            )
-            for dg_i, dgd_i, dc_i, info in zip(
-                _axis0_entries(dg_group),
-                _axis0_entries(dgd_group),
-                _axis0_entries(dc_group),
-                group["infos"],
-            ):
-                _merge_derivative_data(
-                    deriv_data,
-                    _project_single_coil_cotangent_data(
-                        info.coil,
-                        dg_i,
-                        dgd_i,
-                        dc_i,
-                    ),
-                )
-        return Derivative(deriv_data)
+        pullback = self.B_pullback_native(v)
+        return self.coil_cotangents_to_derivative(
+            pullback.d_coil_arrays,
+            pullback.coil_indices,
+        )
 
     def _field_pullback(
         self,
