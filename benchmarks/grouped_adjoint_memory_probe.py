@@ -63,6 +63,7 @@ from benchmarks.validation_ladder_common import (
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
 apply_requested_platform(REQUESTED_PLATFORM)
 apply_compilation_cache_policy()
+bootstrap_local_simsopt()
 
 import jax
 import jaxlib
@@ -665,7 +666,6 @@ def _save_device_memory_profile(path: str) -> str:
 
 def main() -> None:
     args = parse_args()
-    bootstrap_local_simsopt()
     resolved_boozer_optimizer_backend = resolve_boozer_optimizer_backend(
         args.optimizer_backend,
         args.boozer_optimizer_backend,
