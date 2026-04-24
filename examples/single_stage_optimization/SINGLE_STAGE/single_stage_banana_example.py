@@ -822,6 +822,7 @@ def build_single_stage_problem_contract(
             args=args,
         )
     )
+    uses_jax_runtime_seed = getattr(args, "backend", None) == "jax"
     return {
         "workflow": "single-stage-banana-optimization",
         "equilibrium": {
@@ -841,7 +842,12 @@ def build_single_stage_problem_contract(
         "stage2_seed": {
             "source": stage2_source,
             "requested_source": getattr(args, "stage2_source", stage2_source),
-            "biot_savart_path": os.path.abspath(stage2_bs_path),
+            "biot_savart_path": None
+            if uses_jax_runtime_seed
+            else os.path.abspath(stage2_bs_path),
+            "jax_runtime_spec_path": (
+                os.path.abspath(stage2_results_path) if uses_jax_runtime_seed else None
+            ),
             "results_path": os.path.abspath(stage2_results_path),
             "major_radius": float(R0),
             "toroidal_flux": float(s),
@@ -2237,7 +2243,7 @@ def load_single_stage_jax_warm_start_state(run_dir, *, runtime_spec_path=None):
         "G": None,
         "surface_path": None,
         "results_path": results_path if os.path.exists(results_path) else None,
-        "biot_savart_path": resolve_single_stage_warm_start_biotsavart_path(run_dir),
+        "biot_savart_path": None,
         "jax_runtime_spec_path": resolved_runtime_spec_path,
     }
 
@@ -2404,12 +2410,11 @@ def build_single_stage_runtime_stage2_seed_payload(
     stage2_results,
     *,
     banana_surf_radius,
-    stage2_seed_order,
 ):
     return {
         "major_radius": float(stage2_results["MAJOR_RADIUS"]),
         "toroidal_flux": float(stage2_results["TOROIDAL_FLUX"]),
-        "order": int(stage2_results.get("order", stage2_seed_order)),
+        "order": int(stage2_results["order"]),
         "banana_surf_radius": float(banana_surf_radius),
     }
 
@@ -2458,8 +2463,8 @@ def build_single_stage_jax_runtime_seed_spec_payload(
             quadpoints_theta=quadpoints_theta,
         )
     )
-    nfp = int(getattr(surface, "nfp", 5))
-    stellsym = bool(getattr(surface, "stellsym", True))
+    nfp = int(surface.nfp)
+    stellsym = bool(surface.stellsym)
     coil_dofs_array = np.asarray(host_array(coil_dofs), dtype=np.float64)
     coil_set_spec = coil_set_spec_from_dof_extraction_spec(
         coil_dof_extraction_spec,
@@ -2513,17 +2518,35 @@ def write_single_stage_jax_runtime_seed_spec(path_or_run_dir, **kwargs):
     return path
 
 
+def make_single_stage_half_period_quadpoints(*, nphi, ntheta, nfp):
+    quadpoints_phi, quadpoints_theta = surface_module.Surface.get_quadpoints(
+        nphi,
+        ntheta,
+        nfp=nfp,
+        range=surface_module.Surface.RANGE_HALF_PERIOD,
+    )
+    return (
+        np.asarray(quadpoints_phi, dtype=np.float64),
+        np.asarray(quadpoints_theta, dtype=np.float64),
+    )
+
+
 def compile_single_stage_jax_runtime_seed_spec(
     run_dir,
     *,
     mpol,
     ntor,
-    quadpoints_phi,
-    quadpoints_theta,
+    nphi,
+    ntheta,
     num_tf_coils,
-    stage2_seed_order,
+    output_path_or_run_dir=None,
 ):
     warm_start_state = load_single_stage_warm_start_state(run_dir)
+    quadpoints_phi, quadpoints_theta = make_single_stage_half_period_quadpoints(
+        nphi=nphi,
+        ntheta=ntheta,
+        nfp=warm_start_state["surface"].nfp,
+    )
     biot_savart_path = warm_start_state["biot_savart_path"]
     if biot_savart_path is None:
         raise FileNotFoundError(
@@ -2549,8 +2572,11 @@ def compile_single_stage_jax_runtime_seed_spec(
         donor_results,
     )
     banana_current_A = float(banana_coils[0].current.get_value())
+    runtime_spec_destination = (
+        output_path_or_run_dir if output_path_or_run_dir is not None else run_dir
+    )
     return write_single_stage_jax_runtime_seed_spec(
-        run_dir,
+        runtime_spec_destination,
         surface=warm_start_state["surface"],
         iota=warm_start_state["iota"],
         G=warm_start_state["G"],
@@ -2567,8 +2593,23 @@ def compile_single_stage_jax_runtime_seed_spec(
         stage2_seed=build_single_stage_runtime_stage2_seed_payload(
             donor_results,
             banana_surf_radius=banana_surf_radius,
-            stage2_seed_order=stage2_seed_order,
         ),
+    )
+
+
+def compile_requested_single_stage_jax_runtime_seed_spec(args):
+    if args.warm_start_run_dir is None:
+        raise ValueError(
+            "--compile-jax-runtime-seed-spec requires --warm-start-run-dir"
+        )
+    return compile_single_stage_jax_runtime_seed_spec(
+        args.warm_start_run_dir,
+        mpol=args.mpol,
+        ntor=args.ntor,
+        nphi=args.nphi,
+        ntheta=args.ntheta,
+        num_tf_coils=args.num_tf_coils,
+        output_path_or_run_dir=args.jax_runtime_seed_spec,
     )
 
 
@@ -3421,10 +3462,10 @@ def _target_gamma_from_supported_surface(
         if not hasattr(surface, "get_dofs"):
             return None
         source_dofs = _as_jax_float64(surface.get_dofs())
-        source_mpol = int(getattr(surface, "mpol", 0))
-        source_ntor = int(getattr(surface, "ntor", 0))
-        source_nfp = int(getattr(surface, "nfp", 5))
-        source_stellsym = bool(getattr(surface, "stellsym", True))
+        source_mpol = int(surface.mpol)
+        source_ntor = int(surface.ntor)
+        source_nfp = int(surface.nfp)
+        source_stellsym = bool(surface.stellsym)
 
     if surface_class == "SurfaceXYZTensorFourier" or isinstance(
         surface, SurfaceXYZTensorFourier
@@ -3480,8 +3521,8 @@ def project_surface_dofs_to_resolution(
         target_gamma,
         mpol=max(1, int(mpol)),
         ntor=max(1, int(ntor)),
-        nfp=int(getattr(surface, "nfp", 5)),
-        stellsym=bool(getattr(surface, "stellsym", True)),
+        nfp=int(surface.nfp),
+        stellsym=bool(surface.stellsym),
         quadpoints_phi=quadpoints_phi,
         quadpoints_theta=quadpoints_theta,
     )
@@ -3754,6 +3795,15 @@ def parse_args():
             "production JAX lane when --warm-start-run-dir is omitted; warm-start "
             "runs read the same artifact from the donor directory unless this "
             "path is provided explicitly."
+        ),
+    )
+    parser.add_argument(
+        "--compile-jax-runtime-seed-spec",
+        action="store_true",
+        help=(
+            "Convert --warm-start-run-dir into an immutable JAX runtime seed spec "
+            "and exit. Writes --jax-runtime-seed-spec when provided, otherwise "
+            "writes into the donor run directory."
         ),
     )
     parser.add_argument(
@@ -9516,6 +9566,11 @@ if __name__ == "__main__":
     # CONFIGURATION PARAMETERS
     # ==============================================================================
     args = apply_default_stage2_seed_args(parse_args())
+    if args.compile_jax_runtime_seed_spec:
+        compiled_spec_path = compile_requested_single_stage_jax_runtime_seed_spec(args)
+        print(f"Wrote JAX runtime seed spec: {compiled_spec_path}")
+        sys.exit(0)
+
     OUT_DIR = args.output_root
     os.makedirs(OUT_DIR, exist_ok=True)
     fatal_error_log_stream = open(
@@ -9565,28 +9620,12 @@ if __name__ == "__main__":
         "warm_start_state_loaded",
         start_s=warm_start_state_load_start_s,
     )
-    stage2_seed_setup_start_s = _perf_counter_s()
-    stage2_seed_contract = resolve_single_stage_startup_seed_contract(
-        args,
-        warm_start_state=warm_start_state,
-    )
-    stage2_bs_path = stage2_seed_contract["stage2_bs_path"]
-    stage2_source = stage2_seed_contract["stage2_source"]
-    stage2_tf_current_limit_enforced = stage2_seed_contract[
-        "tf_current_limit_enforced"
-    ]
-    stage2_seed_hardware_validation_enforced = stage2_seed_contract[
-        "seed_hardware_validation_enforced"
-    ]
-    args.stage2_tf_current_limit_enforced = stage2_tf_current_limit_enforced
-    args.stage2_seed_hardware_validation_enforced = (
-        stage2_seed_hardware_validation_enforced
-    )
     nphi = args.nphi
     ntheta = args.ntheta
     mpol = args.mpol
     ntor = args.ntor
     warm_start_runtime_spec_state = None
+    stage2_seed_setup_start_s = _perf_counter_s()
     if use_jax:
         jax_runtime_spec_source = (
             args.jax_runtime_seed_spec
@@ -9598,6 +9637,12 @@ if __name__ == "__main__":
                 "JAX startup requires an immutable runtime seed spec; "
                 "run seed conversion first."
             )
+        stage2_bs_path = resolve_single_stage_jax_runtime_spec_path(
+            jax_runtime_spec_source
+        )
+        stage2_source = "jax_runtime_seed_spec"
+        stage2_tf_current_limit_enforced = False
+        stage2_seed_hardware_validation_enforced = False
         warm_start_runtime_spec_state = load_single_stage_jax_runtime_seed_spec(
             jax_runtime_spec_source,
             mpol=mpol,
@@ -9610,14 +9655,30 @@ if __name__ == "__main__":
             warm_start_runtime_spec_state["stage2_seed"]
         )
     else:
+        stage2_seed_contract = resolve_single_stage_startup_seed_contract(
+            args,
+            warm_start_state=warm_start_state,
+        )
+        stage2_bs_path = stage2_seed_contract["stage2_bs_path"]
+        stage2_source = stage2_seed_contract["stage2_source"]
+        stage2_tf_current_limit_enforced = stage2_seed_contract[
+            "tf_current_limit_enforced"
+        ]
+        stage2_seed_hardware_validation_enforced = stage2_seed_contract[
+            "seed_hardware_validation_enforced"
+        ]
         stage2_results_path, stage2_results = load_stage2_results(stage2_bs_path)
+    args.stage2_tf_current_limit_enforced = stage2_tf_current_limit_enforced
+    args.stage2_seed_hardware_validation_enforced = (
+        stage2_seed_hardware_validation_enforced
+    )
     _mark_startup_progress(
         "stage2_seed_resolved",
         start_s=stage2_seed_setup_start_s,
     )
     R0 = float(stage2_results["MAJOR_RADIUS"])
     s = float(stage2_results["TOROIDAL_FLUX"])
-    order = int(stage2_results.get("order", args.stage2_seed_order))
+    order = int(stage2_results["order"])
 
     if use_jax:
         if args.banana_surf_radius is not None and not np.isclose(
@@ -9641,7 +9702,6 @@ if __name__ == "__main__":
     stage2_seed_payload = build_single_stage_runtime_stage2_seed_payload(
         stage2_results,
         banana_surf_radius=banana_surf_radius,
-        stage2_seed_order=args.stage2_seed_order,
     )
     banana_surf_nfp = 5
 

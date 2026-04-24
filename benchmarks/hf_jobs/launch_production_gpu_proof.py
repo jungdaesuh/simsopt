@@ -41,9 +41,6 @@ DEFAULT_CUDA_LIBRARY_MODE = "bundled"
 def _resolve_hf_cli() -> str:
     if shutil.which("hf"):
         return "hf"
-    fallback = Path("/tmp/hfhub18/bin/hf")
-    if fallback.exists():
-        return str(fallback)
     raise RuntimeError("Could not find the Hugging Face CLI ('hf').")
 
 

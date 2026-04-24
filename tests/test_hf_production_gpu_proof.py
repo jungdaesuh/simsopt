@@ -389,6 +389,17 @@ def test_launch_production_gpu_proof_help_works_without_site_packages():
     assert "Launch the production GPU proof on Hugging Face Jobs." in completed.stdout
 
 
+def test_resolve_hf_cli_requires_hf_on_path(monkeypatch):
+    def forbidden_path_lookup(_path):
+        raise AssertionError("HF CLI resolution must not consult hard-coded paths")
+
+    monkeypatch.setattr(launcher.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(launcher, "Path", forbidden_path_lookup)
+
+    with pytest.raises(RuntimeError, match="Could not find the Hugging Face CLI"):
+        launcher._resolve_hf_cli()
+
+
 def test_resolve_repo_defaults_prefers_current_branch_upstream_remote(monkeypatch):
     responses = {
         ("symbolic-ref", "--short", "HEAD"): "feature",

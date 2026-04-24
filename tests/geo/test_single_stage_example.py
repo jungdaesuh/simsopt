@@ -2308,6 +2308,18 @@ class SingleStageExampleTests(unittest.TestCase):
             use_target_lane=True,
         )
 
+    def test_single_stage_runtime_stage2_seed_payload_requires_order(self):
+        module = self.load_module()
+
+        with self.assertRaises(KeyError):
+            module.build_single_stage_runtime_stage2_seed_payload(
+                {
+                    "MAJOR_RADIUS": 1.0,
+                    "TOROIDAL_FLUX": 0.5,
+                },
+                banana_surf_radius=0.22,
+            )
+
     def test_load_single_stage_jax_warm_start_state_uses_spec_not_surface_json(self):
         module = self.load_module()
         surface = module.SurfaceXYZTensorFourier(
@@ -2347,7 +2359,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(warm_start["surface"])
         self.assertIsNone(warm_start["surface_path"])
         self.assertEqual(warm_start["jax_runtime_spec_path"], spec_path)
-        self.assertTrue(warm_start["biot_savart_path"].endswith("biot_savart_opt.json"))
+        self.assertIsNone(warm_start["biot_savart_path"])
 
     def test_load_single_stage_jax_warm_start_state_honors_explicit_seed_spec(self):
         module = self.load_module()
@@ -2394,7 +2406,48 @@ class SingleStageExampleTests(unittest.TestCase):
                 )
 
         self.assertEqual(warm_start["jax_runtime_spec_path"], spec_path)
-        self.assertTrue(warm_start["biot_savart_path"].endswith("biot_savart_opt.json"))
+        self.assertIsNone(warm_start["biot_savart_path"])
+
+    def test_compile_requested_single_stage_jax_runtime_seed_spec_uses_explicit_command_contract(
+        self,
+    ):
+        module = self.load_module()
+        args = types.SimpleNamespace(
+            warm_start_run_dir="/tmp/donor-run",
+            mpol=2,
+            ntor=1,
+            nphi=7,
+            ntheta=5,
+            num_tf_coils=4,
+            jax_runtime_seed_spec="/tmp/runtime-spec.json",
+        )
+
+        with patch.object(
+            module,
+            "compile_single_stage_jax_runtime_seed_spec",
+            return_value="/tmp/runtime-spec.json",
+        ) as compile_spec:
+            path = module.compile_requested_single_stage_jax_runtime_seed_spec(args)
+
+        self.assertEqual(path, "/tmp/runtime-spec.json")
+        compile_spec.assert_called_once_with(
+            "/tmp/donor-run",
+            mpol=2,
+            ntor=1,
+            nphi=7,
+            ntheta=5,
+            num_tf_coils=4,
+            output_path_or_run_dir="/tmp/runtime-spec.json",
+        )
+
+    def test_compile_requested_single_stage_jax_runtime_seed_spec_requires_donor_dir(
+        self,
+    ):
+        module = self.load_module()
+        args = types.SimpleNamespace(warm_start_run_dir=None)
+
+        with self.assertRaisesRegex(ValueError, "--warm-start-run-dir"):
+            module.compile_requested_single_stage_jax_runtime_seed_spec(args)
 
     def test_runtime_spec_biotsavart_full_artifact_curves_follow_updated_dofs(self):
         module = self.load_module()
@@ -11516,6 +11569,11 @@ class ResultsEnvelopeTests(unittest.TestCase):
         self.assertEqual(
             stage2_seed["banana_surface_radius"],
             0.22,
+        )
+        self.assertIsNone(stage2_seed["biot_savart_path"])
+        self.assertEqual(
+            stage2_seed["jax_runtime_spec_path"],
+            "/tmp/stage2/results.json",
         )
         self.assertIn(
             module._SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME,
