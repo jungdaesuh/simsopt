@@ -487,60 +487,22 @@ def test_launch_production_gpu_proof_requires_explicit_image_or_env(tmp_path):
     assert "requires a prebuilt image via SIMSOPT_HF_GPU_IMAGE or --image" in completed.stderr
 
 
-def test_launch_production_gpu_proof_rejects_fallback_image_without_always_bootstrap(
-    tmp_path,
-):
-    env = _launcher_env(tmp_path, image=None)
-    remote_args = _default_remote_launcher_args(tmp_path)
+def test_launch_production_gpu_proof_rejects_ad_hoc_always_bootstrap():
     completed = subprocess.run(
         [
             sys.executable,
             str(LAUNCHER_SCRIPT),
-            "--dry-run",
-            "--hardware",
-            "a100-large",
-            "--image",
-            launcher.DEFAULT_FALLBACK_IMAGE,
-            *remote_args,
+            "--bootstrap-mode",
+            "always",
         ],
         check=False,
         capture_output=True,
         text=True,
-        env=env,
         cwd=str(REPO_ROOT),
     )
 
     assert completed.returncode != 0
-    assert "requires --bootstrap-mode always" in completed.stderr
-
-
-def test_launch_production_gpu_proof_allows_explicit_fallback_image_with_always_bootstrap(
-    tmp_path,
-):
-    env = _launcher_env(tmp_path, image=None)
-    remote_args = _default_remote_launcher_args(tmp_path)
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(LAUNCHER_SCRIPT),
-            "--dry-run",
-            "--hardware",
-            "a100-large",
-            "--image",
-            launcher.DEFAULT_FALLBACK_IMAGE,
-            "--bootstrap-mode",
-            "always",
-            *remote_args,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=str(REPO_ROOT),
-    )
-
-    assert completed.returncode == 0
-    assert launcher.DEFAULT_FALLBACK_IMAGE in completed.stdout
+    assert "invalid choice: 'always'" in completed.stderr
 
 
 def test_launch_production_gpu_proof_reports_default_long_run_geometry_gate(tmp_path):

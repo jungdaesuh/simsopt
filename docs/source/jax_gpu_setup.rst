@@ -320,14 +320,6 @@ separate ship gates.
          python benchmarks/hf_jobs/launch_production_gpu_proof.py \
          --stage2-maxiter 60 --geometry-rel-tol 1e-6
 
-3. **Fallback mode**::
-
-       python benchmarks/hf_jobs/launch_production_gpu_proof.py \
-         --image python:3.11-bookworm --bootstrap-mode always
-
-   This keeps the old ad hoc bootstrap behavior for environments where the
-   reusable image has not been published yet.
-
 Troubleshooting
 ---------------
 

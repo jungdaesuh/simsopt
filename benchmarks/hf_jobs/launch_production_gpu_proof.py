@@ -31,7 +31,6 @@ from benchmarks.single_stage_smoke_defaults import (  # noqa: E402
 DEFAULT_STAGE2_SEED_REL = str(DEFAULT_STAGE2_BS_REL_PATH)
 DEFAULT_EQUILIBRIA_REL = "examples/single_stage_optimization/equilibria"
 DEFAULT_PLASMA = DEFAULT_PLASMA_SURF_FILENAME
-DEFAULT_FALLBACK_IMAGE = "python:3.11-bookworm"
 DEFAULT_IMAGE = os.environ.get("SIMSOPT_HF_GPU_IMAGE") or None
 DEFAULT_TARGET_OPTIMIZER_BACKEND = "ondevice"
 DEFAULT_JAX_GPU_WHEEL_SPEC = "jax[cuda12]==0.9.2"
@@ -154,13 +153,7 @@ def _validate_runtime_contract(args: argparse.Namespace) -> argparse.Namespace:
     if not args.image:
         raise SystemExit(
             "Production GPU proof requires a prebuilt image via SIMSOPT_HF_GPU_IMAGE "
-            "or --image. For the fallback ad hoc path, pass "
-            f"--image {DEFAULT_FALLBACK_IMAGE} --bootstrap-mode always."
-        )
-    if args.image == DEFAULT_FALLBACK_IMAGE and args.bootstrap_mode != "always":
-        raise SystemExit(
-            f"Fallback image {DEFAULT_FALLBACK_IMAGE} requires --bootstrap-mode always. "
-            "Use a prebuilt pinned image for the exact proof path."
+            "or --image."
         )
     return args
 
@@ -391,8 +384,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_IMAGE,
         help=(
             "Docker image to use for the job. Defaults to SIMSOPT_HF_GPU_IMAGE when "
-            "set. For the fallback ad hoc bootstrap path, pass "
-            f"{DEFAULT_FALLBACK_IMAGE} explicitly with --bootstrap-mode always."
+            "set."
         ),
     )
     parser.add_argument(
@@ -424,7 +416,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--bootstrap-mode",
-        choices=("auto", "always", "never"),
+        choices=("auto", "never"),
         default="auto",
         help=(
             "Runtime bootstrap mode. 'auto' reuses /opt/venv when the image "
