@@ -33,6 +33,8 @@ from conftest import (
 )
 import numpy as np
 
+from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STAGE2_SCRIPT = (
     REPO_ROOT
@@ -1606,6 +1608,32 @@ class TestBiotSavartJAXParity:
                 atol=1e-14,
             )
 
+    def test_pullback_native_payload_is_jax_pytree(self, coil_surf_setup):
+        """Native pullback payloads are pytrees with static coil index metadata."""
+        coils, surf, _, _ = coil_surf_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        pullback = bs_jax.B_pullback_native(np.asarray(bs_jax.B()))
+        leaves, treedef = jax.tree_util.tree_flatten(pullback)
+        rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
+        doubled = jax.tree_util.tree_map(lambda leaf: 2.0 * leaf, pullback)
+
+        assert isinstance(
+            rebuilt,
+            biotsavart_jax_backend_module.BiotSavartFieldPullback,
+        )
+        assert rebuilt.coil_indices == pullback.coil_indices
+        assert doubled.coil_indices == pullback.coil_indices
+        assert leaves
+        assert all(isinstance(leaf, jax.Array) for leaf in leaves)
+        for scaled_leaf, leaf in zip(
+            jax.tree_util.tree_leaves(doubled),
+            leaves,
+        ):
+            np.testing.assert_allclose(np.asarray(scaled_leaf), 2.0 * np.asarray(leaf))
+
     def test_profile_b_vjp_reports_component_breakdown(self, coil_surf_setup):
         coils, surf, _, _ = coil_surf_setup
         points = surf.gamma().reshape((-1, 3))
@@ -1671,6 +1699,80 @@ class TestBiotSavartJAXParity:
             err_msg="BiotSavartJAX.dB_by_dX() does not match CPU",
         )
 
+    def test_B_and_dB_vjp_parity(self, coil_surf_setup):
+        """B_and_dB_vjp returns the same Derivatives as CPU."""
+        coils, surf, _, _ = coil_surf_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_cpu = BiotSavart(coils)
+        bs_cpu.set_points(points)
+        B_cpu = bs_cpu.B()
+        dB_cpu = bs_cpu.dB_by_dX()
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+
+        derivs_cpu = bs_cpu.B_and_dB_vjp(B_cpu, dB_cpu)
+        derivs_jax = bs_jax.B_and_dB_vjp(B_cpu, dB_cpu)
+        tolerances = parity_ladder_tolerances("derivative_heavy")
+        component_tolerances = (
+            (
+                tolerances["first_derivative_rtol"],
+                tolerances["first_derivative_atol"],
+            ),
+            (
+                tolerances["second_derivative_rtol"],
+                tolerances["second_derivative_atol"],
+            ),
+        )
+        for (deriv_jax, deriv_cpu), (rtol, atol) in zip(
+            zip(derivs_jax, derivs_cpu),
+            component_tolerances,
+        ):
+            for coil in coils:
+                np.testing.assert_allclose(
+                    deriv_jax(coil),
+                    deriv_cpu(coil),
+                    rtol=rtol,
+                    atol=atol,
+                    err_msg="BiotSavartJAX.B_and_dB_vjp() does not match CPU",
+                )
+
+    def test_b_and_db_pullback_native_projects_to_public_derivatives(
+        self,
+        coil_surf_setup,
+    ):
+        """Native B and dB/dX cotangents source the public Derivatives."""
+        coils, surf, _, _ = coil_surf_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        B = np.asarray(bs_jax.B())
+        dB = np.asarray(bs_jax.dB_by_dX())
+
+        native_pullbacks = bs_jax.B_and_dB_pullback_native(B, dB)
+        projected = tuple(
+            bs_jax.coil_cotangents_to_derivative(
+                pullback.d_coil_arrays,
+                pullback.coil_indices,
+            )
+            for pullback in native_pullbacks
+        )
+        public = bs_jax.B_and_dB_vjp(B, dB)
+
+        for pullback in native_pullbacks:
+            assert pullback.d_coil_arrays
+            assert len(pullback.d_coil_arrays) == len(pullback.coil_indices)
+        for projected_deriv, public_deriv in zip(projected, public):
+            for coil in coils:
+                np.testing.assert_allclose(
+                    projected_deriv(coil),
+                    public_deriv(coil),
+                    rtol=1e-12,
+                    atol=1e-14,
+                )
+
     def test_A_parity(self, coil_surf_setup):
         """Vector potential A must match CPU at the same evaluation points."""
         coils, surf, _, _ = coil_surf_setup
@@ -1719,6 +1821,32 @@ class TestBiotSavartJAXParity:
                 err_msg="BiotSavartJAX.A_vjp() does not match CPU",
             )
 
+    def test_a_pullback_native_projects_to_public_derivative(self, coil_surf_setup):
+        """Native A cotangents are the source for the public Derivative."""
+        coils, surf, _, _ = coil_surf_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        v = np.asarray(bs_jax.A())
+
+        pullback = bs_jax.A_pullback_native(v)
+        projected = bs_jax.coil_cotangents_to_derivative(
+            pullback.d_coil_arrays,
+            pullback.coil_indices,
+        )
+        public = bs_jax.A_vjp(v)
+
+        assert pullback.d_coil_arrays
+        assert len(pullback.d_coil_arrays) == len(pullback.coil_indices)
+        for coil in coils:
+            np.testing.assert_allclose(
+                projected(coil),
+                public(coil),
+                rtol=1e-12,
+                atol=1e-14,
+            )
+
     def test_A_and_dA_vjp_parity(self, coil_surf_setup):
         """A_and_dA_vjp returns the same pair of Derivatives as CPU."""
         coils, surf, _, _ = coil_surf_setup
@@ -1744,6 +1872,41 @@ class TestBiotSavartJAXParity:
                     rtol=1e-10,
                     atol=1e-14,
                     err_msg="BiotSavartJAX.A_and_dA_vjp() does not match CPU",
+                )
+
+    def test_a_and_da_pullback_native_projects_to_public_derivatives(
+        self,
+        coil_surf_setup,
+    ):
+        """Native A and dA/dX cotangents source the public Derivatives."""
+        coils, surf, _, _ = coil_surf_setup
+        points = surf.gamma().reshape((-1, 3))
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points)
+        A = np.asarray(bs_jax.A())
+        dA = np.asarray(bs_jax.dA_by_dX())
+
+        native_pullbacks = bs_jax.A_and_dA_pullback_native(A, dA)
+        projected = tuple(
+            bs_jax.coil_cotangents_to_derivative(
+                pullback.d_coil_arrays,
+                pullback.coil_indices,
+            )
+            for pullback in native_pullbacks
+        )
+        public = bs_jax.A_and_dA_vjp(A, dA)
+
+        for pullback in native_pullbacks:
+            assert pullback.d_coil_arrays
+            assert len(pullback.d_coil_arrays) == len(pullback.coil_indices)
+        for projected_deriv, public_deriv in zip(projected, public):
+            for coil in coils:
+                np.testing.assert_allclose(
+                    projected_deriv(coil),
+                    public_deriv(coil),
+                    rtol=1e-12,
+                    atol=1e-14,
                 )
 
 

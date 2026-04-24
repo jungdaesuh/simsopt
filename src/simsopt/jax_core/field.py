@@ -520,6 +520,13 @@ def grouped_biot_savart_dB_by_dX_from_spec(
     return _accumulate_grouped_field(points, coil_spec, biot_savart_dB_by_dX)
 
 
+def grouped_biot_savart_dB_by_dX_from_inputs(points: object, coil_arrays: object):
+    return grouped_biot_savart_dB_by_dX_from_spec(
+        points,
+        grouped_coil_set_spec_from_inputs(coil_arrays),
+    )
+
+
 def grouped_biot_savart_B_and_dB_from_spec(
     points: object,
     coil_spec: GroupedCoilSetSpec,

@@ -973,6 +973,32 @@ class _FallbackBombCoil:
         raise AssertionError("JAX-projectable coils should not fall back to coil.vjp()")
 
 
+class _SpecBackedBombCoil:
+    """Native-spec coil stub whose ``vjp`` must never be called."""
+
+    def __init__(self, offset=0.0):
+        self.curve = CurveXYZFourier(2, 1)
+        self.curve.set_dofs(
+            np.array(
+                [
+                    1.0 + offset,
+                    0.1,
+                    0.2,
+                    0.5 + offset,
+                    -0.1,
+                    0.3,
+                    0.2 * offset,
+                    0.2,
+                    -0.05,
+                ]
+            )
+        )
+        self.current = _RecordingCurrent()
+
+    def vjp(self, dg, dgd, dc):
+        raise AssertionError("Spec-backed coils should not fall back to coil.vjp()")
+
+
 class _CpuFallbackRecordingCoil:
     """Coil stub that records use of the public CPU ``coil.vjp()`` contract."""
 
@@ -2539,43 +2565,49 @@ class TestAdjointSolveConsistency:
 
     def test_coil_cotangent_projection_avoids_whole_group_host_materialization(self):
         """Projection should convert one coil slice at a time, not a whole group."""
-        coils = [_FallbackBombCoil(), _FallbackBombCoil()]
+        coils = [_SpecBackedBombCoil(), _SpecBackedBombCoil(offset=0.2)]
         bs_jax = object.__new__(BiotSavartJAX)
         bs_jax._coils = coils
+        dg_slices = [
+            np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+            np.array([[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]),
+        ]
+        dgd_slices = [
+            np.array([[13.0, 14.0, 15.0], [16.0, 17.0, 18.0]]),
+            np.array([[19.0, 20.0, 21.0], [22.0, 23.0, 24.0]]),
+        ]
+        dc_slices = [1.5, 2.5]
         d_coil_arrays = [
             (
-                _WholeGroupArrayConversionBomb(
-                    [
-                        np.array([1.0, 2.0, 3.0]),
-                        np.array([4.0, 5.0, 6.0]),
-                    ]
-                ),
-                _WholeGroupArrayConversionBomb(
-                    [
-                        np.array([7.0, 8.0, 9.0]),
-                        np.array([10.0, 11.0, 12.0]),
-                    ]
-                ),
-                _WholeGroupArrayConversionBomb([1.5, 2.5]),
+                _WholeGroupArrayConversionBomb(dg_slices),
+                _WholeGroupArrayConversionBomb(dgd_slices),
+                _WholeGroupArrayConversionBomb(dc_slices),
             )
         ]
 
         derivative = bs_jax.coil_cotangents_to_derivative(d_coil_arrays, [[0, 1]])
 
-        np.testing.assert_allclose(
-            np.asarray(derivative.data[coils[0].curve], dtype=float),
-            np.array([71.0, 82.0]),
-            atol=1e-12,
-        )
-        np.testing.assert_allclose(
-            np.asarray(derivative.data[coils[1].curve], dtype=float),
-            np.array([104.0, 115.0]),
-            atol=1e-12,
-        )
-        assert len(coils[0].current.calls) == 1
-        assert len(coils[1].current.calls) == 1
-        np.testing.assert_allclose(coils[0].current.calls[0], np.array([1.5]))
-        np.testing.assert_allclose(coils[1].current.calls[0], np.array([2.5]))
+        for coil, dg, dgd, dc in zip(coils, dg_slices, dgd_slices, dc_slices):
+            expected_curve, expected_surface = curve_pullback_from_spec(
+                curve_spec_from_curve(coil.curve),
+                jnp.asarray(dg, dtype=jnp.float64),
+                jnp.asarray(dgd, dtype=jnp.float64),
+            )
+            assert expected_surface is None
+            np.testing.assert_allclose(
+                np.asarray(derivative.data[coil.curve], dtype=float),
+                np.asarray(expected_curve, dtype=float),
+                rtol=1e-12,
+                atol=1e-12,
+            )
+            np.testing.assert_allclose(
+                np.asarray(derivative.data[coil.current], dtype=float),
+                np.array([dc]),
+                rtol=1e-12,
+                atol=1e-12,
+            )
+            assert len(coil.current.calls) == 1
+            np.testing.assert_allclose(coil.current.calls[0], np.array([dc]))
 
     def test_grouped_coil_arrays_from_dofs_respects_unique_dof_lineage_order(self):
         """Native grouped reconstruction must decode free current DOFs by lineage slice."""

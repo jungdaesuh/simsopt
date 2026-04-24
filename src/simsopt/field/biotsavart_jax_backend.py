@@ -40,6 +40,7 @@ from ..jax_core.field import (
     grouped_biot_savart_d2A_by_dXdX_from_spec,
     grouped_biot_savart_dA_by_dX_from_inputs,
     grouped_biot_savart_dA_by_dX_from_spec,
+    grouped_biot_savart_dB_by_dX_from_inputs,
     grouped_biot_savart_dB_by_dX_from_spec,
     grouped_coil_index_lists_from_spec,
     grouped_coil_set_spec_from_coil_specs,
@@ -61,6 +62,7 @@ from ._coil_graph import _unwrap_coil_curve_and_current_objects
 __all__ = [
     "BiotSavartJAX",
     "BiotSavartBPullback",
+    "BiotSavartFieldPullback",
     "SingleStageRuntimeSpecBiotSavartJAX",
     "SpecBackedCoil",
     "SpecBackedCurve",
@@ -185,9 +187,10 @@ class _CoilVJPInfo:
     timings: dict[str, float] | None = None
 
 
+@jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
-class BiotSavartBPullback:
-    """Native grouped cotangent payload for ``BiotSavartJAX.B``.
+class BiotSavartFieldPullback:
+    """Native grouped cotangent payload for ``BiotSavartJAX`` fields.
 
     ``d_coil_arrays`` mirrors the grouped field-input structure:
     one ``(d_gammas, d_gammadashs, d_currents)`` tuple per quadrature group.
@@ -196,6 +199,17 @@ class BiotSavartBPullback:
 
     d_coil_arrays: tuple[tuple[jax.Array, jax.Array, jax.Array], ...]
     coil_indices: tuple[tuple[int, ...], ...]
+
+    def tree_flatten(self):
+        return (self.d_coil_arrays,), self.coil_indices
+
+    @classmethod
+    def tree_unflatten(cls, coil_indices, children):
+        (d_coil_arrays,) = children
+        return cls(d_coil_arrays=d_coil_arrays, coil_indices=coil_indices)
+
+
+BiotSavartBPullback = BiotSavartFieldPullback
 
 
 class SpecBackedCurrent:
@@ -1205,12 +1219,18 @@ class BiotSavartJAX(Optimizable):
                 )
             )
             coil_indices.append(tuple(info.coil_index for info in group["infos"]))
-        return BiotSavartBPullback(
+        return BiotSavartFieldPullback(
             d_coil_arrays=tuple(d_coil_arrays),
             coil_indices=tuple(coil_indices),
         )
 
     B_cotangents = B_pullback_native
+
+    def _pullback_to_derivative(self, pullback):
+        return self.coil_cotangents_to_derivative(
+            pullback.d_coil_arrays,
+            pullback.coil_indices,
+        )
 
     def B_vjp(self, v):
         r"""Vector-Jacobian product of B w.r.t. coil DOFs.
@@ -1229,13 +1249,9 @@ class BiotSavartJAX(Optimizable):
         Returns:
             :class:`Derivative` (sum over all coils).
         """
-        pullback = self.B_pullback_native(v)
-        return self.coil_cotangents_to_derivative(
-            pullback.d_coil_arrays,
-            pullback.coil_indices,
-        )
+        return self._pullback_to_derivative(self.B_pullback_native(v))
 
-    def _field_pullback(
+    def _field_pullback_native(
         self,
         grouped_forward,
         cotangent,
@@ -1243,27 +1259,74 @@ class BiotSavartJAX(Optimizable):
         coil_spec = self.coil_set_spec()
         coil_arrays = grouped_field_inputs_from_spec(coil_spec)
         if not coil_arrays:
-            return Derivative({})
+            return BiotSavartFieldPullback((), ())
 
         _, pullback = jax.vjp(
             lambda grouped_inputs: grouped_forward(self._points_jax, grouped_inputs),
             coil_arrays,
         )
         d_coil_arrays = pullback(_as_jax_float64(cotangent))[0]
-        return self.coil_cotangents_to_derivative(
-            d_coil_arrays,
-            grouped_coil_index_lists_from_spec(coil_spec),
+        return BiotSavartFieldPullback(
+            d_coil_arrays=tuple(d_coil_arrays),
+            coil_indices=tuple(grouped_coil_index_lists_from_spec(coil_spec)),
+        )
+
+    def A_pullback_native(self, v):
+        r"""Return native grouped cotangents for ``A``."""
+        return self._field_pullback_native(grouped_biot_savart_A_from_inputs, v)
+
+    A_cotangents = A_pullback_native
+
+    def dA_by_dX_pullback_native(self, vgrad):
+        r"""Return native grouped cotangents for ``dA/dX``."""
+        return self._field_pullback_native(
+            grouped_biot_savart_dA_by_dX_from_inputs,
+            vgrad,
+        )
+
+    dA_by_dX_cotangents = dA_by_dX_pullback_native
+
+    def dB_by_dX_pullback_native(self, vgrad):
+        r"""Return native grouped cotangents for ``dB/dX``."""
+        return self._field_pullback_native(
+            grouped_biot_savart_dB_by_dX_from_inputs,
+            vgrad,
+        )
+
+    dB_by_dX_cotangents = dB_by_dX_pullback_native
+
+    def A_and_dA_pullback_native(self, v, vgrad):
+        r"""Return separate native grouped cotangents for ``A`` and ``dA/dX``."""
+        return (
+            self.A_pullback_native(v),
+            self.dA_by_dX_pullback_native(vgrad),
+        )
+
+    def B_and_dB_pullback_native(self, v, vgrad):
+        r"""Return separate native grouped cotangents for ``B`` and ``dB/dX``."""
+        return (
+            self.B_pullback_native(v),
+            self.dB_by_dX_pullback_native(vgrad),
         )
 
     def A_vjp(self, v):
         r"""Vector-Jacobian product of A w.r.t. coil DOFs."""
-        return self._field_pullback(grouped_biot_savart_A_from_inputs, v)
+        return self._pullback_to_derivative(self.A_pullback_native(v))
 
     def A_and_dA_vjp(self, v, vgrad):
         r"""Separate vector-Jacobian products for A and dA/dX."""
+        a_pullback, da_pullback = self.A_and_dA_pullback_native(v, vgrad)
         return (
-            self._field_pullback(grouped_biot_savart_A_from_inputs, v),
-            self._field_pullback(grouped_biot_savart_dA_by_dX_from_inputs, vgrad),
+            self._pullback_to_derivative(a_pullback),
+            self._pullback_to_derivative(da_pullback),
+        )
+
+    def B_and_dB_vjp(self, v, vgrad):
+        r"""Separate vector-Jacobian products for B and dB/dX."""
+        b_pullback, db_pullback = self.B_and_dB_pullback_native(v, vgrad)
+        return (
+            self._pullback_to_derivative(b_pullback),
+            self._pullback_to_derivative(db_pullback),
         )
 
     def coil_cotangents_to_derivative(self, d_coil_arrays, coil_indices):
