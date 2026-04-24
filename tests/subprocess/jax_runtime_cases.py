@@ -697,40 +697,11 @@ def _run_grouped_biot_savart_explicit_point_sharding_case() -> None:
     assert bool(jax.device_get(jnp.all(jnp.isfinite(magnetic_field))))
 
 
-def _build_collective_circular_coils() -> tuple[
-    list[jax.Array],
-    list[jax.Array],
-    list[jax.Array],
-]:
-    phi = np.linspace(0.0, 2.0 * np.pi, 16, endpoint=False)
-    gammas: list[jax.Array] = []
-    gammadashs: list[jax.Array] = []
-    currents: list[jax.Array] = []
-    for index in range(5):
-        radius = 1.0 + 0.05 * index
-        gamma = np.stack(
-            (
-                radius * np.cos(phi),
-                radius * np.sin(phi),
-                np.full_like(phi, 0.03 * index),
-            ),
-            axis=1,
-        )
-        gammadash = np.stack(
-            (
-                -2.0 * np.pi * radius * np.sin(phi),
-                2.0 * np.pi * radius * np.cos(phi),
-                np.zeros_like(phi),
-            ),
-            axis=1,
-        )
-        gammas.append(jnp.asarray(gamma, dtype=jnp.float64))
-        gammadashs.append(jnp.asarray(gammadash, dtype=jnp.float64))
-        currents.append(jnp.asarray(1.0 + 0.2 * index, dtype=jnp.float64))
-    return gammas, gammadashs, currents
-
-
-def _circular_coil_entry(index: int, *, nquad: int) -> tuple[jax.Array, jax.Array, jax.Array]:
+def _collective_circular_coil(
+    index: int,
+    *,
+    nquad: int,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
     phi = np.linspace(0.0, 2.0 * np.pi, nquad, endpoint=False)
     radius = 1.0 + 0.05 * index
     gamma = np.stack(
@@ -749,12 +720,21 @@ def _circular_coil_entry(index: int, *, nquad: int) -> tuple[jax.Array, jax.Arra
         ),
         axis=1,
     )
-    current = 1.0 + 0.2 * index
     return (
         jnp.asarray(gamma, dtype=jnp.float64),
         jnp.asarray(gammadash, dtype=jnp.float64),
-        jnp.asarray(current, dtype=jnp.float64),
+        jnp.asarray(1.0 + 0.2 * index, dtype=jnp.float64),
     )
+
+
+def _build_collective_circular_coils() -> tuple[
+    list[jax.Array],
+    list[jax.Array],
+    list[jax.Array],
+]:
+    coils = [_collective_circular_coil(index, nquad=16) for index in range(5)]
+    gammas, gammadashs, currents = zip(*coils)
+    return list(gammas), list(gammadashs), list(currents)
 
 
 def _assert_allclose_to_reference(value, reference) -> None:
@@ -764,6 +744,35 @@ def _assert_allclose_to_reference(value, reference) -> None:
         rtol=1e-12,
         atol=1e-14,
     )
+
+
+def _assert_mixed_quadrature_collective_parity(points: jax.Array) -> None:
+    group_16 = [_collective_circular_coil(index, nquad=16) for index in range(3)]
+    group_12 = [_collective_circular_coil(index + 3, nquad=12) for index in range(2)]
+    gammas_16, gammadashs_16, currents_16 = zip(*group_16)
+    gammas_12, gammadashs_12, currents_12 = zip(*group_12)
+    coil_spec = grouped_coil_set_spec_from_lists(
+        list(gammas_16 + gammas_12),
+        list(gammadashs_16 + gammadashs_12),
+        list(currents_16 + currents_12),
+    )
+    dense_reference = biot_savart_B(
+        points,
+        jnp.stack(gammas_16),
+        jnp.stack(gammadashs_16),
+        jnp.stack(currents_16),
+    ) + biot_savart_B(
+        points,
+        jnp.stack(gammas_12),
+        jnp.stack(gammadashs_12),
+        jnp.stack(currents_12),
+    )
+
+    _assert_allclose_to_reference(
+        grouped_biot_savart_B_from_spec(points, coil_spec),
+        dense_reference,
+    )
+    assert grouped_field_sharding_summary(points, coil_spec)["field_collective"] is True
 
 
 def _run_grouped_biot_savart_coil_collective_case() -> None:
@@ -845,21 +854,13 @@ def _run_grouped_biot_savart_coil_collective_case() -> None:
     for collective_leaf, dense_leaf in zip(collective_vjp, dense_pullback(v)):
         _assert_allclose_to_reference(collective_leaf, dense_leaf)
 
+    _assert_mixed_quadrature_collective_parity(points)
+
     summary = grouped_field_sharding_summary(points, coil_spec)
     assert summary["field_collective"] is True
     assert summary["strategy"] == "coil_groups"
     assert summary["collective_axis"] == "coil"
     assert summary["collective_device_count"] == 4
-
-    small_gamma, small_gammadash, small_current = _circular_coil_entry(8, nquad=12)
-    multi_group_spec = grouped_coil_set_spec_from_lists(
-        [small_gamma, *gammas],
-        [small_gammadash, *gammadashs],
-        [small_current, *currents],
-    )
-    multi_group_summary = grouped_field_sharding_summary(points, multi_group_spec)
-    assert multi_group_summary["field_collective"] is True
-    assert multi_group_summary["strategy"] == "coil_groups"
 
     lowered = jax.jit(grouped_biot_savart_B_from_spec).lower(
         points,
