@@ -70,6 +70,14 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help="Manifest used when rendering the standardized markdown report.",
     )
     parser.add_argument(
+        "--grouped-adjoint-baseline-json",
+        default=None,
+        help=(
+            "Prior grouped_adjoint_memory_probe JSON to pass to the grouped "
+            "adjoint ship-gate comparator."
+        ),
+    )
+    parser.add_argument(
         "--benchmark-mode",
         dest="benchmark_mode",
         action="store_true",
@@ -144,19 +152,28 @@ def main() -> None:
             command_name="tier5_performance_characterization",
         ),
     )
+    grouped_probe_args = [
+        "--platform",
+        args.platform,
+        "--optimizer-backend",
+        args.optimizer_backend,
+        "--output-json",
+        str(grouped_json),
+        "--record-jax-compile-diagnostics",
+        "--device-memory-profile-out",
+        str(grouped_profile),
+    ]
+    if args.grouped_adjoint_baseline_json is not None:
+        grouped_probe_args.extend(
+            [
+                "--baseline-json",
+                str(Path(args.grouped_adjoint_baseline_json).resolve()),
+            ]
+        )
+
     _run_script(
         "grouped_adjoint_memory_probe.py",
-        [
-            "--platform",
-            args.platform,
-            "--optimizer-backend",
-            args.optimizer_backend,
-            "--output-json",
-            str(grouped_json),
-            "--record-jax-compile-diagnostics",
-            "--device-memory-profile-out",
-            str(grouped_profile),
-        ],
+        grouped_probe_args,
         env_overrides=_command_env_overrides(
             manifest,
             command_name="grouped_adjoint_memory_probe",

@@ -38,7 +38,9 @@ from benchmarks.single_stage_backend_routing import (
 )
 from benchmarks.grouped_adjoint_memory_probe import (
     _GroupedVJPTimingRecorder,
+    _build_grouped_adjoint_baseline_comparison,
     _build_grouped_adjoint_payload,
+    _representative_run_wall_s,
     evaluate_grouped_adjoint_memory_probe,
 )
 import benchmarks.single_stage_init_parity as single_stage_init_parity_module
@@ -2593,12 +2595,22 @@ def _complete_grouped_vjp_timings():
             "includes compilation plus first group execution."
         ),
         "first_stream_steady_state_group_median_s": 0.1,
-        "warm_stream_times_s": [0.2, 0.22],
-        "steady_state_grouped_vjp_time_s": 0.21,
-        "steady_state_grouped_vjp_per_group_s": 0.1,
+        "warm_stream_times_s": [0.4, 0.44],
+        "steady_state_grouped_vjp_time_s": 0.42,
+        "steady_state_grouped_vjp_per_group_s": 0.2,
         "total_representative_run_wall_s": 3.5,
+        "steady_state_grouped_vjp_wall_fraction": 0.12,
         "passes": [],
     }
+
+
+def _grouped_vjp_timings_for_fraction(steady_state_s: float, total_wall_s: float):
+    timings = _complete_grouped_vjp_timings()
+    timings["warm_stream_times_s"] = [steady_state_s]
+    timings["steady_state_grouped_vjp_time_s"] = steady_state_s
+    timings["total_representative_run_wall_s"] = total_wall_s
+    timings["steady_state_grouped_vjp_wall_fraction"] = steady_state_s / total_wall_s
+    return timings
 
 
 def _complete_grouped_vjp_cache_stability():
@@ -2991,6 +3003,38 @@ def test_grouped_adjoint_memory_probe_rejects_missing_timings_or_warm_recompile(
     assert any("steady-state grouped-VJP recompilation" in failure for failure in failures)
 
 
+def test_grouped_adjoint_memory_probe_rejects_unrepresentative_grouped_vjp():
+    cold_path_failures = evaluate_grouped_adjoint_memory_probe(
+        _grouped_adjoint_memory_metrics(
+            snapshots=_complete_grouped_adjoint_snapshots(),
+            grouped_vjp_timings=_grouped_vjp_timings_for_fraction(0.04, 1.0),
+        ),
+        budget=_grouped_adjoint_budget("cpu"),
+    )
+    gray_zone_failures = evaluate_grouped_adjoint_memory_probe(
+        _grouped_adjoint_memory_metrics(
+            snapshots=_complete_grouped_adjoint_snapshots(),
+            grouped_vjp_timings=_grouped_vjp_timings_for_fraction(0.08, 1.0),
+        ),
+        budget=_grouped_adjoint_budget("cpu"),
+    )
+
+    assert any("below 5%" in failure for failure in cold_path_failures)
+    assert any("below the 10%" in failure for failure in gray_zone_failures)
+
+
+def test_grouped_adjoint_representative_wall_time_ignores_warm_passes():
+    snapshots = _complete_grouped_adjoint_snapshots()
+    snapshots.extend(
+        [
+            _grouped_adjoint_snapshot("warm_stream_1_end", 20.0),
+            _grouped_adjoint_snapshot("after_norm_metrics", 21.0),
+        ]
+    )
+
+    assert _representative_run_wall_s(snapshots) == pytest.approx(3.375)
+
+
 def test_grouped_adjoint_memory_probe_rejects_budget_regressions():
     snapshots = _complete_grouped_adjoint_snapshots()
     snapshots[-1]["rss_mb"] = 9000.0
@@ -3003,6 +3047,57 @@ def test_grouped_adjoint_memory_probe_rejects_budget_regressions():
 
     assert any("peak RSS" in failure for failure in failures)
     assert any("peak GPU memory" in failure for failure in failures)
+
+
+def test_grouped_adjoint_baseline_comparison_enforces_ship_gate():
+    snapshots = _complete_grouped_adjoint_snapshots()
+    snapshots[-1]["gpu_memory_mb"] = 600.0
+    baseline_payload = {
+        "timings": {"steady_state_grouped_vjp_time_s": 1.0},
+        "memory": {"peak_gpu_memory_mb": 1000.0},
+    }
+    passing_metrics = _grouped_adjoint_memory_metrics(
+        snapshots=snapshots,
+        grouped_vjp_timings=_grouped_vjp_timings_for_fraction(0.75, 3.0),
+    )
+    passing_metrics["baseline_comparison"] = (
+        _build_grouped_adjoint_baseline_comparison(
+            current_metrics=passing_metrics,
+            baseline_payload=baseline_payload,
+            baseline_json="/tmp/baseline.json",
+        )
+    )
+
+    assert passing_metrics["baseline_comparison"]["speedup_gate_passed"] is True
+    assert passing_metrics["baseline_comparison"]["memory_gate_passed"] is True
+    assert (
+        evaluate_grouped_adjoint_memory_probe(
+            passing_metrics,
+            budget=_grouped_adjoint_budget("cpu"),
+        )
+        == []
+    )
+
+    snapshots = _complete_grouped_adjoint_snapshots()
+    snapshots[-1]["gpu_memory_mb"] = 800.0
+    failing_metrics = _grouped_adjoint_memory_metrics(
+        snapshots=snapshots,
+        grouped_vjp_timings=_grouped_vjp_timings_for_fraction(0.9, 3.0),
+    )
+    failing_metrics["baseline_comparison"] = (
+        _build_grouped_adjoint_baseline_comparison(
+            current_metrics=failing_metrics,
+            baseline_payload=baseline_payload,
+            baseline_json="/tmp/baseline.json",
+        )
+    )
+
+    failures = evaluate_grouped_adjoint_memory_probe(
+        failing_metrics,
+        budget=_grouped_adjoint_budget("cpu"),
+    )
+
+    assert any("ship gate missed" in failure for failure in failures)
 
 
 def test_grouped_adjoint_memory_payload_records_limited_memory_route():
@@ -3042,6 +3137,7 @@ def test_grouped_adjoint_memory_payload_records_limited_memory_route():
     assert payload["baseline"]["boozer_limited_memory"] is True
     assert payload["baseline"]["boozer_limited_memory_requested"] is True
     assert payload["timings"]["first_compile_time_s"] == pytest.approx(0.25)
+    assert payload["baseline_comparison"] is None
     assert payload["cache_stability"]["warm_compile_event_count"] == 0
     assert payload["memory"]["budget"]["max_peak_gpu_memory_mb"] == pytest.approx(12288.0)
     assert payload["memory"]["device_memory_profile_path"] == "/tmp/grouped.prof"
@@ -3554,6 +3650,7 @@ def test_legacy_gpu_benchmark_wrapper_applies_grouped_probe_env_override(
         artifacts_dir=str(artifacts_dir),
         manifest_json=str(manifest_path),
         benchmark_mode=True,
+        grouped_adjoint_baseline_json=None,
     )
     observed_invocations: list[tuple[list[str], dict[str, str]]] = []
     monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "log")
@@ -3577,6 +3674,7 @@ def test_legacy_gpu_benchmark_wrapper_applies_grouped_probe_env_override(
     assert tier5_env["SIMSOPT_JAX_TRANSFER_GUARD"] == "log"
     assert tier5_env["JAX_COMPILATION_CACHE_DIR"] == "/tmp/jax_gpu_fast-cuda"
     assert "grouped_adjoint_memory_probe.py" in grouped_command[1]
+    assert "--baseline-json" not in grouped_command
     assert grouped_env["SIMSOPT_JAX_TRANSFER_GUARD"] == "disallow"
     assert grouped_env["JAX_COMPILATION_CACHE_DIR"] == str(dense_audit_cache_dir)
     assert "render_benchmark_report.py" in report_command[1]

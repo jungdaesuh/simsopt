@@ -1794,6 +1794,78 @@ class Testing(unittest.TestCase):
         curve.surf.gamma_lin(out, phi, theta)
         self.assertTrue(np.all(np.isfinite(out)))
 
+    def test_surface_rzfourier_paired_lin_methods_match_grid_diagonal(self):
+        phi = np.array([0.13, 0.27, 0.49])
+        theta = np.array([0.21, 0.37, 0.58])
+        surf = SurfaceRZFourier(
+            nfp=3,
+            stellsym=False,
+            mpol=2,
+            ntor=1,
+            quadpoints_phi=phi,
+            quadpoints_theta=theta,
+        )
+        surf.set_dofs(np.linspace(0.05, 0.2, surf.get_dofs().size))
+
+        for name in (
+            "gamma",
+            "gammadash1",
+            "gammadash2",
+            "gammadash1dash1",
+            "gammadash1dash2",
+            "gammadash2dash2",
+        ):
+            out = np.zeros((phi.size, 3))
+            getattr(surf, f"{name}_lin")(out, phi, theta)
+            grid = getattr(surf, name)()
+            diagonal = np.stack([grid[i, i, :] for i in range(phi.size)])
+            np.testing.assert_allclose(out, diagonal, rtol=1e-12, atol=1e-12)
+
+    def test_surface_rzfourier_third_paired_lin_methods_match_fd(self):
+        phi = np.array([0.13, 0.27, 0.49])
+        theta = np.array([0.21, 0.37, 0.58])
+        surf = SurfaceRZFourier(
+            nfp=3,
+            stellsym=False,
+            mpol=2,
+            ntor=1,
+            quadpoints_phi=phi,
+            quadpoints_theta=theta,
+        )
+        surf.set_dofs(np.linspace(0.05, 0.2, surf.get_dofs().size))
+        eps = 1e-6
+
+        def eval_lin(name, phi_values, theta_values):
+            out = np.zeros((phi.size, 3))
+            getattr(surf, name)(out, phi_values, theta_values)
+            return out
+
+        third_derivatives = {
+            "gammadash1dash1dash1_lin": (
+                eval_lin("gammadash1dash1_lin", phi + eps, theta)
+                - eval_lin("gammadash1dash1_lin", phi - eps, theta)
+            )
+            / (2.0 * eps),
+            "gammadash1dash1dash2_lin": (
+                eval_lin("gammadash1dash1_lin", phi, theta + eps)
+                - eval_lin("gammadash1dash1_lin", phi, theta - eps)
+            )
+            / (2.0 * eps),
+            "gammadash1dash2dash2_lin": (
+                eval_lin("gammadash1dash2_lin", phi, theta + eps)
+                - eval_lin("gammadash1dash2_lin", phi, theta - eps)
+            )
+            / (2.0 * eps),
+            "gammadash2dash2dash2_lin": (
+                eval_lin("gammadash2dash2_lin", phi, theta + eps)
+                - eval_lin("gammadash2dash2_lin", phi, theta - eps)
+            )
+            / (2.0 * eps),
+        }
+        for name, expected in third_derivatives.items():
+            out = eval_lin(name, phi, theta)
+            np.testing.assert_allclose(out, expected, rtol=1e-8, atol=1e-7)
+
     def test_curvecwsfourier_matches_cpp_on_stage2_surface(self):
         from simsopt.geo import CurveCWSFourier
         from simsopt.geo.curvecwsfourier import CurveCWSFourierCPP

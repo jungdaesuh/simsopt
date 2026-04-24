@@ -47,9 +47,7 @@ from ..jax_core._math_utils import (
     explicit_rsqrt as _explicit_rsqrt,
 )
 from ..jax_core.surface_rzfourier import (
-    surface_rz_fourier_gamma_from_spec,
-    surface_rz_fourier_gammadash1_from_spec,
-    surface_rz_fourier_gammadash2_from_spec,
+    surface_rz_fourier_geometry_from_spec,
     surface_rz_fourier_spec_from_dofs,
 )
 from ..jax_core.reductions import (
@@ -384,11 +382,7 @@ def _surface_geometry_from_dofs(
             nfp=nfp,
             stellsym=stellsym,
         )
-        return (
-            surface_rz_fourier_gamma_from_spec(surface_spec),
-            surface_rz_fourier_gammadash1_from_spec(surface_spec),
-            surface_rz_fourier_gammadash2_from_spec(surface_spec),
-        )
+        return surface_rz_fourier_geometry_from_spec(surface_spec)
 
     if surface_kind == "xyzfourier":
         sgf, sg1f, sg2f = _get_surface_xyzfourier_fns()

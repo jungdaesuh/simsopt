@@ -1,4 +1,5 @@
 import logging
+from math import comb
 import time
 import matplotlib.colors as mpl_colors
 import matplotlib.pyplot as plt
@@ -183,6 +184,140 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
             "nfp": self.nfp,
             "stellsym": self.stellsym,
         }
+
+    def _paired_mode_terms(self, phi, theta):
+        phi = np.asarray(phi, dtype=np.float64).reshape(-1)
+        theta = np.asarray(theta, dtype=np.float64).reshape(-1)
+        point_phi = 2.0 * np.pi * phi
+        point_theta = 2.0 * np.pi * theta
+        rc = np.asarray(self.rc, dtype=np.float64)
+        zs = np.asarray(self.zs, dtype=np.float64)
+        rs = np.asarray(getattr(self, "rs", np.zeros_like(rc)), dtype=np.float64)
+        zc = np.asarray(getattr(self, "zc", np.zeros_like(rc)), dtype=np.float64)
+        m = np.arange(rc.shape[0], dtype=np.float64)[:, None]
+        ntor = (rc.shape[1] - 1) // 2
+        n = np.arange(-ntor, ntor + 1, dtype=np.float64)[None, :]
+        angles = (
+            m[None, :, :] * point_theta[:, None, None]
+            - self.nfp * n[None, :, :] * point_phi[:, None, None]
+        )
+        return {
+            "cos": np.cos(angles),
+            "sin": np.sin(angles),
+            "rc": rc,
+            "rs": rs,
+            "zc": zc,
+            "zs": zs,
+            "phi_factor": -2.0 * np.pi * self.nfp * n,
+            "theta_factor": 2.0 * np.pi * m,
+            "cos_phi": np.cos(point_phi),
+            "sin_phi": np.sin(point_phi),
+        }
+
+    @staticmethod
+    def _paired_scalar_derivative(cos_coeffs, sin_coeffs, terms, phi_order, theta_order):
+        factor = terms["phi_factor"] ** phi_order * terms["theta_factor"] ** theta_order
+        order = (phi_order + theta_order) % 4
+        if order == 0:
+            values = cos_coeffs * terms["cos"] + sin_coeffs * terms["sin"]
+        elif order == 1:
+            values = -cos_coeffs * terms["sin"] + sin_coeffs * terms["cos"]
+        elif order == 2:
+            values = -cos_coeffs * terms["cos"] - sin_coeffs * terms["sin"]
+        else:
+            values = cos_coeffs * terms["sin"] - sin_coeffs * terms["cos"]
+        return np.sum(values * factor, axis=(1, 2))
+
+    def _paired_rz_derivative(self, terms, phi_order, theta_order):
+        return (
+            self._paired_scalar_derivative(
+                terms["rc"], terms["rs"], terms, phi_order, theta_order
+            ),
+            self._paired_scalar_derivative(
+                terms["zc"], terms["zs"], terms, phi_order, theta_order
+            ),
+        )
+
+    @staticmethod
+    def _paired_cartesian(radial, toroidal, vertical, terms):
+        return np.stack(
+            (
+                radial * terms["cos_phi"] - toroidal * terms["sin_phi"],
+                radial * terms["sin_phi"] + toroidal * terms["cos_phi"],
+                vertical,
+            ),
+            axis=1,
+        )
+
+    def _paired_surface_derivative(self, phi, theta, phi_order, theta_order):
+        terms = self._paired_mode_terms(phi, theta)
+        p = 2.0 * np.pi
+        r0, z = self._paired_rz_derivative(terms, phi_order, theta_order)
+        radial = np.zeros_like(r0)
+        toroidal = np.zeros_like(r0)
+        radial_signs = (1.0, 0.0, -1.0, 0.0)
+        toroidal_signs = (0.0, 1.0, 0.0, -1.0)
+        for basis_order in range(phi_order + 1):
+            r, _ = self._paired_rz_derivative(
+                terms,
+                phi_order - basis_order,
+                theta_order,
+            )
+            scale = comb(phi_order, basis_order) * p**basis_order
+            phase = basis_order % 4
+            radial = radial + scale * radial_signs[phase] * r
+            toroidal = toroidal + scale * toroidal_signs[phase] * r
+        return self._paired_cartesian(radial, toroidal, z, terms)
+
+    def gamma_lin(self, data, quadpoints_phi, quadpoints_theta):
+        data[:, :] = self._paired_surface_derivative(
+            quadpoints_phi, quadpoints_theta, 0, 0
+        )
+
+    def gammadash1_lin(self, data, quadpoints_phi, quadpoints_theta):
+        data[:, :] = self._paired_surface_derivative(
+            quadpoints_phi, quadpoints_theta, 1, 0
+        )
+
+    def gammadash2_lin(self, data, quadpoints_phi, quadpoints_theta):
+        data[:, :] = self._paired_surface_derivative(
+            quadpoints_phi, quadpoints_theta, 0, 1
+        )
+
+    def gammadash1dash1_lin(self, data, quadpoints_phi, quadpoints_theta):
+        data[:, :] = self._paired_surface_derivative(
+            quadpoints_phi, quadpoints_theta, 2, 0
+        )
+
+    def gammadash1dash2_lin(self, data, quadpoints_phi, quadpoints_theta):
+        data[:, :] = self._paired_surface_derivative(
+            quadpoints_phi, quadpoints_theta, 1, 1
+        )
+
+    def gammadash2dash2_lin(self, data, quadpoints_phi, quadpoints_theta):
+        data[:, :] = self._paired_surface_derivative(
+            quadpoints_phi, quadpoints_theta, 0, 2
+        )
+
+    def gammadash1dash1dash1_lin(self, data, quadpoints_phi, quadpoints_theta):
+        data[:, :] = self._paired_surface_derivative(
+            quadpoints_phi, quadpoints_theta, 3, 0
+        )
+
+    def gammadash1dash1dash2_lin(self, data, quadpoints_phi, quadpoints_theta):
+        data[:, :] = self._paired_surface_derivative(
+            quadpoints_phi, quadpoints_theta, 2, 1
+        )
+
+    def gammadash1dash2dash2_lin(self, data, quadpoints_phi, quadpoints_theta):
+        data[:, :] = self._paired_surface_derivative(
+            quadpoints_phi, quadpoints_theta, 1, 2
+        )
+
+    def gammadash2dash2dash2_lin(self, data, quadpoints_phi, quadpoints_theta):
+        data[:, :] = self._paired_surface_derivative(
+            quadpoints_phi, quadpoints_theta, 0, 3
+        )
 
     def _evaluate_surface_jax(self, tool_name, feature_name):
         return _surface_rzfourier_jax_tool(tool_name, feature_name)(self.surface_spec())

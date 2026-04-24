@@ -36,7 +36,9 @@ def _toroidal_modes(spec: SurfaceRZFourierSpec) -> jax.Array:
     return zero_based - float_scalar(spec.ntor, zero_based)
 
 
-def _mode_angles(spec: SurfaceRZFourierSpec) -> tuple[jax.Array, jax.Array, jax.Array]:
+def _mode_terms(
+    spec: SurfaceRZFourierSpec,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     angle_scale = two_pi(spec.quadpoints_theta)
     theta = angle_scale * spec.quadpoints_theta
     phi = angle_scale * spec.quadpoints_phi
@@ -47,7 +49,12 @@ def _mode_angles(spec: SurfaceRZFourierSpec) -> tuple[jax.Array, jax.Array, jax.
         m[None, None, :, None] * theta[None, :, None, None]
         - nfp * n[None, None, None, :] * phi[:, None, None, None]
     )
-    return phi, jnp.cos(angles), jnp.sin(angles)
+    return phi, m, n, jnp.cos(angles), jnp.sin(angles)
+
+
+def _mode_angles(spec: SurfaceRZFourierSpec) -> tuple[jax.Array, jax.Array, jax.Array]:
+    phi, _, _, cos_terms, sin_terms = _mode_terms(spec)
+    return phi, cos_terms, sin_terms
 
 
 def _sum_fourier_modes(
@@ -76,6 +83,70 @@ def _radius_height_from_modes(
 
 def _phi_frame(phi: jax.Array) -> tuple[jax.Array, jax.Array]:
     return jnp.cos(phi)[:, None], jnp.sin(phi)[:, None]
+
+
+def _surface_rz_fourier_gamma_from_terms(
+    r: jax.Array,
+    z: jax.Array,
+    cos_phi: jax.Array,
+    sin_phi: jax.Array,
+) -> jax.Array:
+    return jnp.stack([r * cos_phi, r * sin_phi, z], axis=-1)
+
+
+def _surface_rz_fourier_gammadash1_from_terms(
+    spec: SurfaceRZFourierSpec,
+    r: jax.Array,
+    n: jax.Array,
+    cos_terms: jax.Array,
+    sin_terms: jax.Array,
+    cos_phi: jax.Array,
+    sin_phi: jax.Array,
+    angle_scale: jax.Array,
+) -> jax.Array:
+    nfp = float_scalar(spec.nfp, n)
+    scale = angle_scale * nfp * n[None, None, None, :]
+    d_r = jnp.sum(
+        spec.rc[None, None, :, :] * sin_terms * scale
+        - spec.rs[None, None, :, :] * cos_terms * scale,
+        axis=(2, 3),
+    )
+    d_z = jnp.sum(
+        spec.zc[None, None, :, :] * sin_terms * scale
+        - spec.zs[None, None, :, :] * cos_terms * scale,
+        axis=(2, 3),
+    )
+    return jnp.stack(
+        [
+            d_r * cos_phi - r * (angle_scale * sin_phi),
+            d_r * sin_phi + r * (angle_scale * cos_phi),
+            d_z,
+        ],
+        axis=-1,
+    )
+
+
+def _surface_rz_fourier_gammadash2_from_terms(
+    spec: SurfaceRZFourierSpec,
+    m: jax.Array,
+    cos_terms: jax.Array,
+    sin_terms: jax.Array,
+    cos_phi: jax.Array,
+    sin_phi: jax.Array,
+    angle_scale: jax.Array,
+) -> jax.Array:
+    scale = angle_scale * m[None, None, :, None]
+    d_r = jnp.sum(
+        -spec.rc[None, None, :, :] * sin_terms * scale
+        + spec.rs[None, None, :, :] * cos_terms * scale,
+        axis=(2, 3),
+    )
+    d_z = jnp.sum(
+        -spec.zc[None, None, :, :] * sin_terms * scale
+        + spec.zs[None, None, :, :] * cos_terms * scale,
+        axis=(2, 3),
+    )
+    return jnp.stack([d_r * cos_phi, d_r * sin_phi, d_z], axis=-1)
 
 
 def _block_mode_indices(
@@ -296,53 +367,68 @@ def surface_rz_fourier_gamma_from_spec(spec: SurfaceRZFourierSpec):
     phi, cos_terms, sin_terms = _mode_angles(spec)
     r, z = _radius_height_from_modes(spec, cos_terms, sin_terms)
     cos_phi, sin_phi = _phi_frame(phi)
-    return jnp.stack([r * cos_phi, r * sin_phi, z], axis=-1)
+    return _surface_rz_fourier_gamma_from_terms(r, z, cos_phi, sin_phi)
 
 
 def surface_rz_fourier_gammadash1_from_spec(spec: SurfaceRZFourierSpec):
-    phi, cos_terms, sin_terms = _mode_angles(spec)
-    n = _toroidal_modes(spec)
-    angle_scale = two_pi(n)
-    nfp = float_scalar(spec.nfp, n)
-    scale = angle_scale * nfp * n[None, None, None, :]
-    d_r = jnp.sum(
-        spec.rc[None, None, :, :] * sin_terms * scale
-        - spec.rs[None, None, :, :] * cos_terms * scale,
-        axis=(2, 3),
-    )
-    d_z = jnp.sum(
-        spec.zc[None, None, :, :] * sin_terms * scale
-        - spec.zs[None, None, :, :] * cos_terms * scale,
-        axis=(2, 3),
-    )
+    phi, _, n, cos_terms, sin_terms = _mode_terms(spec)
     r, _ = _radius_height_from_modes(spec, cos_terms, sin_terms)
     cos_phi, sin_phi = _phi_frame(phi)
-    return jnp.stack(
-        [
-            d_r * cos_phi - r * (angle_scale * sin_phi),
-            d_r * sin_phi + r * (angle_scale * cos_phi),
-            d_z,
-        ],
-        axis=-1,
+    return _surface_rz_fourier_gammadash1_from_terms(
+        spec,
+        r,
+        n,
+        cos_terms,
+        sin_terms,
+        cos_phi,
+        sin_phi,
+        two_pi(spec.quadpoints_theta),
     )
 
 
 def surface_rz_fourier_gammadash2_from_spec(spec: SurfaceRZFourierSpec):
-    phi, cos_terms, sin_terms = _mode_angles(spec)
-    m = _poloidal_modes(spec)
-    scale = two_pi(m) * m[None, None, :, None]
-    d_r = jnp.sum(
-        -spec.rc[None, None, :, :] * sin_terms * scale
-        + spec.rs[None, None, :, :] * cos_terms * scale,
-        axis=(2, 3),
-    )
-    d_z = jnp.sum(
-        -spec.zc[None, None, :, :] * sin_terms * scale
-        + spec.zs[None, None, :, :] * cos_terms * scale,
-        axis=(2, 3),
-    )
+    phi, m, _, cos_terms, sin_terms = _mode_terms(spec)
     cos_phi, sin_phi = _phi_frame(phi)
-    return jnp.stack([d_r * cos_phi, d_r * sin_phi, d_z], axis=-1)
+    return _surface_rz_fourier_gammadash2_from_terms(
+        spec,
+        m,
+        cos_terms,
+        sin_terms,
+        cos_phi,
+        sin_phi,
+        two_pi(spec.quadpoints_theta),
+    )
+
+
+def surface_rz_fourier_geometry_from_spec(
+    spec: SurfaceRZFourierSpec,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    phi, m, n, cos_terms, sin_terms = _mode_terms(spec)
+    r, z = _radius_height_from_modes(spec, cos_terms, sin_terms)
+    cos_phi, sin_phi = _phi_frame(phi)
+    angle_scale = two_pi(spec.quadpoints_theta)
+    return (
+        _surface_rz_fourier_gamma_from_terms(r, z, cos_phi, sin_phi),
+        _surface_rz_fourier_gammadash1_from_terms(
+            spec,
+            r,
+            n,
+            cos_terms,
+            sin_terms,
+            cos_phi,
+            sin_phi,
+            angle_scale,
+        ),
+        _surface_rz_fourier_gammadash2_from_terms(
+            spec,
+            m,
+            cos_terms,
+            sin_terms,
+            cos_phi,
+            sin_phi,
+            angle_scale,
+        ),
+    )
 
 
 def surface_rz_fourier_normal_from_spec(spec: SurfaceRZFourierSpec):

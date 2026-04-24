@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import simsopt.geo.optimizer_jax_reference as _opt_ref
+import simsopt.jax_core.biotsavart as _biotsavart_jax_core
 import scipy.linalg
 from jax.flatten_util import ravel_pytree
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
@@ -5712,6 +5713,50 @@ class TestVJPHooks:
                     rtol=1e-10,
                     atol=1e-10,
                 )
+
+    def test_ls_group_vjp_repeated_call_reuses_field_kernel_cache(self):
+        """Warm repeated grouped VJPs should not grow the field-kernel cache."""
+        booz, res, vjp_groups_fn, lm = _mock_ls_group_vjp_case()
+        kernel = _biotsavart_jax_core._get_kernel(
+            _biotsavart_jax_core._Integrand.B,
+            _biotsavart_jax_core._DiffMode.VALUE_AND_JACOBIAN,
+        )
+
+        list(vjp_groups_fn(lm, booz, res["iota"], res["G"]))
+        cache_size_after_first_call = kernel._cache_size()
+        list(vjp_groups_fn(lm, booz, res["iota"], res["G"]))
+
+        assert kernel._cache_size() == cache_size_after_first_call
+
+    def test_add_G_current_cotangent_matches_abs_vjp_at_zero_current(self):
+        """Closed-form G cotangent must match JAX's abs subgradient convention."""
+        currents = jnp.asarray([-2.0, 0.0, 3.0], dtype=jnp.float64)
+        group_array = (
+            jnp.zeros((1, 2, 3), dtype=jnp.float64),
+            jnp.zeros((1, 2, 3), dtype=jnp.float64),
+            currents,
+        )
+        d_group = (
+            jnp.zeros_like(group_array[0]),
+            jnp.zeros_like(group_array[1]),
+            jnp.ones_like(currents),
+        )
+        bar_G = jnp.asarray(2.5, dtype=jnp.float64)
+        _, current_pullback = jax.vjp(compute_G_from_currents, currents)
+
+        result = _bsj._add_G_current_cotangent(
+            d_group,
+            group_array,
+            bar_G,
+            optimize_G=False,
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(result[2]),
+            np.asarray(d_group[2] + current_pullback(bar_G)[0]),
+            rtol=1e-14,
+            atol=1e-14,
+        )
 
     def test_run_code_rejects_bad_group_vjp_signature(self, monkeypatch):
         """run_code() must fail fast when grouped VJP hooks have the wrong arity."""

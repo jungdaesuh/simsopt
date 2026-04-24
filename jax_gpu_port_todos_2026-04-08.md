@@ -135,7 +135,18 @@ The main remaining single-stage work after the GPU-port proof is donor/seed/sear
   - [x] **`#33`** is closed: `_line_search.py` now seeds zoom with a real cached bracketing sample and reuses that sample without extra eval counts when the cubic step lands back on it.
 - [ ] De-prioritize, but do **not** close, the more speculative perf items until profiling or HLO evidence says otherwise:
   - [ ] **`#24`** is not a ship blocker and may turn out to be noise, but keep it open until CUDA memory profiling says the synthetic and real-Stage-2 outer-JIT donation probes are both worthless.
-  - [ ] **`#28`** should stay open until HLO or profiler evidence shows the three geometry calls are already fully deduplicated.
+  - [ ] **`#28`** remains open pending a target-lane full-loop
+    `BoozerSurfaceJAX` measurement. RZ-only fusion now has a local HLO probe
+    (`benchmarks/surface_rz_geometry_hlo_probe.py`): on the CPU lane with
+    JAX 0.10.0, `mpol=8`, `ntor=6`, `nphi=65`, `ntheta=66`, scalar
+    composition vs fused geometry measured lowered graph counts at
+    `cosine 6 -> 2`, `sine 6 -> 2`, and `reduce 36 -> 20`. Optimized HLO
+    measured `736 -> 584` lines (20.65% lower), with unchanged compiled
+    trig/reduce counts (`cosine=6`, `sine=6`, `reduce=6`). Local CPU timing was
+    noisy rather than ship evidence: observed reruns ranged from modestly
+    faster to slower. Do not close or ship as a proven production speedup until
+    the full RZ Boozer loop on the target lane clears the >=5% threshold;
+    revert the fused route if that full-loop gate misses.
 
 #### Stage 2 reference shelf
 

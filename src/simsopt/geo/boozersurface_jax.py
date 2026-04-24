@@ -1617,8 +1617,12 @@ def _add_G_current_cotangent(d_group, group_array, bar_G, *, optimize_G):
     if optimize_G:
         return d_group
     d_gammas, d_gammadashs, d_currents = d_group
-    _, current_pullback = jax.vjp(compute_G_from_currents, group_array[2])
-    dG_dcurrents = current_pullback(bar_G)[0]
+    current_sign = jnp.where(
+        group_array[2] < 0.0,
+        -jnp.ones_like(group_array[2]),
+        jnp.ones_like(group_array[2]),
+    )
+    dG_dcurrents = bar_G * (4.0 * jnp.pi * 1e-7) * current_sign
     return d_gammas, d_gammadashs, d_currents + dG_dcurrents
 
 

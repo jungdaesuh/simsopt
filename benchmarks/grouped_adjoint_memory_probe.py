@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import json
 import logging
 from pathlib import Path
 import resource
@@ -73,6 +74,10 @@ jax.config.update("jax_enable_x64", True)
 require_x64_runtime(jax, context="Grouped adjoint memory probe")
 
 _GROUPED_ADJOINT_FIXTURE = "real-single-stage-init"
+_GROUPED_VJP_MIN_HOT_PATH_FRACTION = 0.10
+_GROUPED_VJP_IMMEDIATE_KILL_FRACTION = 0.05
+_GROUPED_VJP_MIN_STEADY_STATE_SPEEDUP_FRACTION = 0.25
+_GROUPED_VJP_MIN_PEAK_DEVICE_MEMORY_REDUCTION_FRACTION = 0.40
 
 
 def parse_args() -> argparse.Namespace:
@@ -193,6 +198,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Enable jax_log_compiles and jax_explain_cache_misses while "
             "recording grouped-VJP timing passes."
+        ),
+    )
+    parser.add_argument(
+        "--baseline-json",
+        default=None,
+        help=(
+            "Optional prior-HEAD grouped_adjoint_memory_probe JSON. When supplied, "
+            "the probe enforces the ship gate: >=25% steady-state grouped-VJP "
+            "speedup or >=40% peak device-memory reduction."
         ),
     )
     return parser.parse_args()
@@ -342,6 +356,13 @@ class _GroupedVJPTimingRecorder:
             for group_time in passed.get("group_times_s", [])
         ]
         first_pass_group_times = list(first_pass.get("group_times_s", []))
+        total_wall_s = float(total_representative_run_wall_s)
+        steady_state_grouped_vjp_time_s = _median_or_none(warm_stream_times_s)
+        wall_fraction = (
+            None
+            if steady_state_grouped_vjp_time_s is None or total_wall_s <= 0.0
+            else float(steady_state_grouped_vjp_time_s) / total_wall_s
+        )
         return {
             "requested_stream_pass_count": int(self.requested_stream_pass_count),
             "stream_pass_count": int(len(self.passes)),
@@ -356,11 +377,12 @@ class _GroupedVJPTimingRecorder:
                 [float(value) for value in first_pass_group_times[1:]]
             ),
             "warm_stream_times_s": warm_stream_times_s,
-            "steady_state_grouped_vjp_time_s": _median_or_none(warm_stream_times_s),
+            "steady_state_grouped_vjp_time_s": steady_state_grouped_vjp_time_s,
             "steady_state_grouped_vjp_per_group_s": _median_or_none(
                 warm_group_times_s
             ),
-            "total_representative_run_wall_s": float(total_representative_run_wall_s),
+            "total_representative_run_wall_s": total_wall_s,
+            "steady_state_grouped_vjp_wall_fraction": wall_fraction,
             "passes": self.passes,
         }
 
@@ -490,6 +512,100 @@ def _build_grouped_adjoint_metrics(
     }
 
 
+def _load_baseline_payload(path: str | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _positive_float(value: object, *, field: str) -> float:
+    number = float(value)
+    if not np.isfinite(number) or number <= 0.0:
+        raise ValueError(f"{field} must be positive and finite.")
+    return number
+
+
+def _payload_positive_float(
+    payload: dict[str, Any],
+    section: str,
+    key: str,
+) -> float:
+    return _positive_float(payload[section][key], field=f"{section}.{key}")
+
+
+def _peak_device_memory_mb_from_metrics(metrics: dict[str, Any]) -> float | None:
+    return _peak_snapshot_value(list(metrics["snapshots"]), "gpu_memory_mb")
+
+
+def _build_grouped_adjoint_baseline_comparison(
+    *,
+    current_metrics: dict[str, Any],
+    baseline_payload: dict[str, Any],
+    baseline_json: str,
+) -> dict[str, Any]:
+    current_time_s = _positive_float(
+        current_metrics["grouped_vjp_timings"]["steady_state_grouped_vjp_time_s"],
+        field="current.timings.steady_state_grouped_vjp_time_s",
+    )
+    baseline_time_s = _payload_positive_float(
+        baseline_payload,
+        "timings",
+        "steady_state_grouped_vjp_time_s",
+    )
+    time_ratio = current_time_s / baseline_time_s
+    speedup_fraction = 1.0 - time_ratio
+    speedup_gate_passed = (
+        speedup_fraction >= _GROUPED_VJP_MIN_STEADY_STATE_SPEEDUP_FRACTION
+    )
+
+    current_peak_device_memory_mb = _peak_device_memory_mb_from_metrics(
+        current_metrics
+    )
+    baseline_peak_device_memory_mb = baseline_payload["memory"].get(
+        "peak_gpu_memory_mb"
+    )
+    memory_reduction_fraction = None
+    memory_gate_passed = False
+    if (
+        current_peak_device_memory_mb is not None
+        and baseline_peak_device_memory_mb is not None
+    ):
+        baseline_peak_device_memory_mb = _positive_float(
+            baseline_peak_device_memory_mb,
+            field="baseline.memory.peak_gpu_memory_mb",
+        )
+        current_peak_device_memory_mb = _positive_float(
+            current_peak_device_memory_mb,
+            field="current.memory.peak_gpu_memory_mb",
+        )
+        memory_ratio = current_peak_device_memory_mb / baseline_peak_device_memory_mb
+        memory_reduction_fraction = 1.0 - memory_ratio
+        memory_gate_passed = (
+            memory_reduction_fraction
+            >= _GROUPED_VJP_MIN_PEAK_DEVICE_MEMORY_REDUCTION_FRACTION
+        )
+
+    return {
+        "baseline_json": str(baseline_json),
+        "min_steady_state_speedup_fraction": (
+            _GROUPED_VJP_MIN_STEADY_STATE_SPEEDUP_FRACTION
+        ),
+        "min_peak_device_memory_reduction_fraction": (
+            _GROUPED_VJP_MIN_PEAK_DEVICE_MEMORY_REDUCTION_FRACTION
+        ),
+        "baseline_steady_state_grouped_vjp_time_s": baseline_time_s,
+        "current_steady_state_grouped_vjp_time_s": current_time_s,
+        "current_to_baseline_time_ratio": time_ratio,
+        "steady_state_speedup_fraction": speedup_fraction,
+        "speedup_gate_passed": bool(speedup_gate_passed),
+        "baseline_peak_device_memory_mb": baseline_peak_device_memory_mb,
+        "current_peak_device_memory_mb": current_peak_device_memory_mb,
+        "peak_device_memory_reduction_fraction": memory_reduction_fraction,
+        "memory_gate_passed": bool(memory_gate_passed),
+        "passed": bool(speedup_gate_passed or memory_gate_passed),
+    }
+
+
 def _build_grouped_adjoint_payload(
     *,
     provenance: dict[str, Any],
@@ -525,6 +641,7 @@ def _build_grouped_adjoint_payload(
         },
         "timings": metrics["grouped_vjp_timings"],
         "cache_stability": metrics["cache_stability"],
+        "baseline_comparison": metrics.get("baseline_comparison"),
         "memory": {
             "snapshots": snapshots,
             "peak_rss_mb": _peak_snapshot_value(snapshots, "rss_mb"),
@@ -568,6 +685,39 @@ def _build_probe_provenance(args: argparse.Namespace) -> dict[str, Any]:
             "ntor": int(args.ntor),
             "compile_behavior": describe_compile_behavior(uses_subprocesses=False),
         },
+    )
+
+
+def _memory_budget_is_blocking(
+    snapshots: list[dict[str, float | str | None]],
+    budget: dict[str, float | None] | None,
+) -> bool:
+    if budget is None:
+        return False
+    peak_rss_mb = _peak_snapshot_value(snapshots, "rss_mb")
+    peak_gpu_memory_mb = _peak_snapshot_value(snapshots, "gpu_memory_mb")
+    max_peak_rss_mb = budget.get("max_peak_rss_mb")
+    max_peak_gpu_memory_mb = budget.get("max_peak_gpu_memory_mb")
+    return (
+        peak_rss_mb is not None
+        and max_peak_rss_mb is not None
+        and peak_rss_mb > max_peak_rss_mb
+    ) or (
+        peak_gpu_memory_mb is not None
+        and max_peak_gpu_memory_mb is not None
+        and peak_gpu_memory_mb > max_peak_gpu_memory_mb
+    )
+
+
+def _representative_run_wall_s(
+    snapshots: list[dict[str, float | str | None]],
+) -> float:
+    return float(
+        next(
+            snapshot["elapsed_s"]
+            for snapshot in reversed(snapshots)
+            if snapshot["label"] == "after_derivative_projection"
+        )
     )
 
 
@@ -635,6 +785,34 @@ def evaluate_grouped_adjoint_memory_probe(
                 failures.append(
                     f"Grouped-adjoint memory probe timing {key} is not finite."
                 )
+        steady_state_s = timings.get("steady_state_grouped_vjp_time_s")
+        total_wall_s = timings.get("total_representative_run_wall_s")
+        if isinstance(steady_state_s, (int, float)) and isinstance(
+            total_wall_s,
+            (int, float),
+        ):
+            total_wall_s = float(total_wall_s)
+            if total_wall_s > 0.0:
+                wall_fraction = float(steady_state_s) / total_wall_s
+                memory_blocking = _memory_budget_is_blocking(snapshots, budget)
+                if (
+                    wall_fraction < _GROUPED_VJP_IMMEDIATE_KILL_FRACTION
+                    and not memory_blocking
+                ):
+                    failures.append(
+                        "Grouped-adjoint steady-state VJP is below 5% of "
+                        "representative wall time and is not a hot path "
+                        f"({wall_fraction:.3%})."
+                    )
+                elif (
+                    wall_fraction < _GROUPED_VJP_MIN_HOT_PATH_FRACTION
+                    and not memory_blocking
+                ):
+                    failures.append(
+                        "Grouped-adjoint steady-state VJP is below the 10% "
+                        "representativeness gate without a peak-memory blocker "
+                        f"({wall_fraction:.3%})."
+                    )
     cache_stability = metrics.get("cache_stability")
     if not isinstance(cache_stability, dict):
         failures.append(
@@ -643,6 +821,15 @@ def evaluate_grouped_adjoint_memory_probe(
     elif cache_stability.get("unexpected_steady_state_recompile") is True:
         failures.append(
             "Grouped-adjoint memory probe recorded steady-state grouped-VJP recompilation."
+        )
+    baseline_comparison = metrics.get("baseline_comparison")
+    if baseline_comparison is not None and not bool(
+        baseline_comparison.get("passed", False)
+    ):
+        failures.append(
+            "Grouped-adjoint ship gate missed both thresholds: "
+            "requires >=25% steady-state grouped-VJP speedup or >=40% peak "
+            "device-memory reduction versus baseline."
         )
     if budget is not None:
         metric_with_peaks = dict(metrics)
@@ -753,7 +940,7 @@ def main() -> None:
         implicit_derivative, fixture["bs"]
     )
     capture_snapshot("after_norm_metrics")
-    total_representative_run_wall_s = snapshots[-1]["elapsed_s"]
+    total_representative_run_wall_s = _representative_run_wall_s(snapshots)
     grouped_vjp_timings = grouped_vjp_timing_recorder.summary(
         total_representative_run_wall_s=float(total_representative_run_wall_s)
     )
@@ -773,6 +960,13 @@ def main() -> None:
         grouped_vjp_timings,
         cache_stability,
     )
+    baseline_payload = _load_baseline_payload(args.baseline_json)
+    if baseline_payload is not None:
+        metrics["baseline_comparison"] = _build_grouped_adjoint_baseline_comparison(
+            current_metrics=metrics,
+            baseline_payload=baseline_payload,
+            baseline_json=args.baseline_json,
+        )
     budget_platform = (
         args.platform if args.platform != "auto" else str(jax.default_backend())
     )
