@@ -1013,10 +1013,37 @@ Impact measure:
 
 Completion:
 
-- [ ] Repro or baseline added
-- [ ] Fix implemented
-- [ ] Impact measured
-- [ ] Validation command recorded
+- [x] Repro or baseline added
+  - Added coverage for frontier lane execution grouping:
+    seed warm-start plus disabled early stop forms one independent group;
+    `reuse_latest_certified` and active early-stop policies form ordered
+    single-lane groups.
+  - Added an end-to-end patched campaign regression with
+    `--frontier-lane-workers 2 --frontier-early-stop-patience-lanes 0`
+    that observes two active lane workers and verifies progress/archive
+    merge output after the group completes.
+  - Added serial-vs-parallel campaign parity coverage for archive size,
+    objective metrics, hypervolume-history archive sizes, and recommendation
+    metrics.
+- [x] Fix implemented
+  - `run_single_stage_frontier_campaign.py` now accepts
+    positive `--frontier-lane-workers` values.
+  - Local multi-lane campaigns partition pending lanes by dependency before
+    execution. Parallel execution is only used for independent seed
+    warm-start groups when early stop is disabled and workers exceed one;
+    `reuse_latest_certified`, early-stop runs, and single-worker runs remain
+    serial with per-lane progress boundaries.
+  - Lane subprocesses write only per-lane outputs during parallel execution.
+    Campaign progress/archive state is merged and atomically persisted at
+    group boundaries through the existing progress writer.
+- [x] Impact measured
+  - Targeted regression fixture confirms worker overlap for a two-lane
+    independent seed group (`max_active_lane_count >= 2`) while preserving
+    deterministic lane records and certified archive output.
+- [x] Validation command recorded
+  - `python3 -m ruff check examples/single_stage_optimization/run_single_stage_frontier_campaign.py tests/geo/test_single_stage_workflow_helpers.py`
+  - `python3 -m py_compile examples/single_stage_optimization/run_single_stage_frontier_campaign.py tests/geo/test_single_stage_workflow_helpers.py`
+  - `python3 -m pytest tests/geo/test_single_stage_workflow_helpers.py -k "frontier_campaign" -q`
 
 ### O3. Keep excluded claims excluded unless new evidence appears
 

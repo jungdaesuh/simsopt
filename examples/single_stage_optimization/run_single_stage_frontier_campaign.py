@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from functools import partial
 import json
 import sys
 import uuid
@@ -44,7 +47,7 @@ from banana_opt.frontier_engine_base import (  # noqa: E402
 )
 from banana_opt.frontier_engine_multilane_local import (  # noqa: E402
     FrontierLaneSpec,
-    generate_multilane_local_specs,  # re-exported for test compatibility
+    generate_multilane_local_specs,  # noqa: F401
 )
 from banana_opt.frontier_engine_nsga3 import (  # noqa: E402
     build_nsga3_hypervolume_history,
@@ -54,7 +57,6 @@ from banana_opt.frontier_engine_nsga3 import (  # noqa: E402
 from banana_opt.frontier_scalarization import (  # noqa: E402
     FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
     FRONTIER_REFERENCE_MODE_EPSILON,
-    FRONTIER_REFERENCE_MODE_REFERENCE_POINTS,
     FRONTIER_REFERENCE_MODE_SHARED,
     SUPPORTED_FRONTIER_REFERENCE_MODES,
     generate_frontier_lane_specs,
@@ -81,6 +83,31 @@ from workflow_runner_common import (  # noqa: E402
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_single_stage_frontier_campaign"
 FRONTIER_LANE_WARM_START_MODE_SEED = "seed"
 FRONTIER_LANE_WARM_START_MODE_REUSE_LATEST_CERTIFIED = "reuse_latest_certified"
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be >= 1")
+    return parsed
+
+
+@dataclass(frozen=True)
+class FrontierLaneExecution:
+    lane_index: int
+    lane_spec: FrontierLaneSpec
+    lane_args: argparse.Namespace
+    lane_budget: int
+    stage2_bs_path: Path
+    warm_start_source: str
+    lane_contract: FrontierLaneContract
+    output_root: Path
+
+
+@dataclass(frozen=True)
+class FrontierLaneExecutionResult:
+    execution: FrontierLaneExecution
+    lane_payload: dict[str, object]
 
 
 def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
@@ -172,6 +199,16 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
             FRONTIER_LANE_WARM_START_MODE_REUSE_LATEST_CERTIFIED,
         ],
         default=FRONTIER_LANE_WARM_START_MODE_SEED,
+    )
+    parser.add_argument(
+        "--frontier-lane-workers",
+        type=_positive_int,
+        default=1,
+        help=(
+            "Maximum local worker threads for independent frontier lane groups. "
+            "Values above 1 only apply when lane warm starts and early-stop state "
+            "do not create inter-lane dependencies."
+        ),
     )
     parser.add_argument("--frontier-rng-seed", type=int, default=0)
     parser.add_argument(
@@ -386,6 +423,128 @@ def resolve_frontier_lane_warm_start(
             continue
         return warm_start_path.resolve(), str(warm_start_path.resolve())
     return resolved_base_path, str(resolved_base_path)
+
+
+def frontier_lanes_require_ordered_execution(
+    *,
+    warm_start_mode: str,
+    early_stop_patience_lanes: int,
+    lane_workers: int,
+) -> bool:
+    return (
+        int(lane_workers) == 1
+        or warm_start_mode == FRONTIER_LANE_WARM_START_MODE_REUSE_LATEST_CERTIFIED
+        or int(early_stop_patience_lanes) > 0
+    )
+
+
+def build_frontier_lane_execution_groups(
+    lane_specs: list[FrontierLaneSpec],
+    *,
+    lane_records_by_id: dict[str, FrontierLaneRecord],
+    warm_start_mode: str,
+    early_stop_patience_lanes: int,
+    lane_workers: int,
+) -> list[list[tuple[int, FrontierLaneSpec]]]:
+    def needs_run(lane_spec: FrontierLaneSpec) -> bool:
+        lane_record = lane_records_by_id.get(lane_spec.lane_id)
+        return lane_record is None or lane_record.status != "completed"
+
+    pending_lanes = [
+        (lane_index, lane_spec)
+        for lane_index, lane_spec in enumerate(lane_specs)
+        if needs_run(lane_spec)
+    ]
+    if frontier_lanes_require_ordered_execution(
+        warm_start_mode=warm_start_mode,
+        early_stop_patience_lanes=early_stop_patience_lanes,
+        lane_workers=lane_workers,
+    ):
+        return [[lane] for lane in pending_lanes]
+    return [pending_lanes] if pending_lanes else []
+
+
+def build_frontier_lane_execution(
+    args: argparse.Namespace,
+    lane_spec: FrontierLaneSpec,
+    *,
+    campaign_id: str,
+    lane_index: int,
+    lane_records_by_id: dict[str, FrontierLaneRecord],
+    lane_specs: list[FrontierLaneSpec],
+    runtime_defaults,
+    stage2_bs_path: Path,
+    output_root: Path,
+) -> FrontierLaneExecution:
+    lane_args = build_frontier_lane_args(args, lane_spec)
+    lane_budget = effective_lane_budget(
+        lane_spec.lane_budget,
+        runtime_defaults,
+    )
+    lane_args.maxiter = int(lane_budget)
+    lane_args.checkpoint_every = int(runtime_defaults.checkpoint_every)
+    lane_stage2_bs_path, warm_start_source = resolve_frontier_lane_warm_start(
+        base_stage2_bs_path=stage2_bs_path,
+        lane_records_by_id=lane_records_by_id,
+        lane_specs=lane_specs,
+        lane_index=lane_index,
+        warm_start_mode=args.frontier_lane_warm_start_mode,
+    )
+    lane_contract = build_frontier_lane_contract_for_spec(
+        lane_args,
+        lane_spec,
+        campaign_id=campaign_id,
+        stage2_bs_path=lane_stage2_bs_path,
+        warm_start_source=warm_start_source,
+        lane_budget=lane_budget,
+        lane_index=lane_index,
+    )
+    return FrontierLaneExecution(
+        lane_index=lane_index,
+        lane_spec=lane_spec,
+        lane_args=lane_args,
+        lane_budget=lane_budget,
+        stage2_bs_path=lane_stage2_bs_path,
+        warm_start_source=warm_start_source,
+        lane_contract=lane_contract,
+        output_root=output_root / "lanes" / lane_spec.lane_id,
+    )
+
+
+def run_frontier_lane_execution(
+    execution: FrontierLaneExecution,
+    *,
+    resume: bool,
+) -> FrontierLaneExecutionResult:
+    lane_payload = resume_or_run_goal_mode_case(
+        execution.lane_args,
+        goal_mode="frontier",
+        stage2_bs_path=execution.stage2_bs_path,
+        output_root=execution.output_root,
+        resume=resume,
+    )
+    return FrontierLaneExecutionResult(
+        execution=execution,
+        lane_payload=lane_payload,
+    )
+
+
+def run_frontier_lane_execution_group(
+    executions: list[FrontierLaneExecution],
+    *,
+    resume: bool,
+    lane_workers: int,
+) -> list[FrontierLaneExecutionResult]:
+    if len(executions) == 1 or int(lane_workers) == 1:
+        return [
+            run_frontier_lane_execution(execution, resume=resume)
+            for execution in executions
+        ]
+    with ThreadPoolExecutor(
+        max_workers=min(int(lane_workers), len(executions))
+    ) as executor:
+        run_lane = partial(run_frontier_lane_execution, resume=resume)
+        return list(executor.map(run_lane, executions))
 
 
 def _warm_start_path_from_lane_record(
@@ -782,81 +941,76 @@ def main() -> int:
         if not loaded_nsga3_artifacts:
             persist_progress()
     else:
-        for lane_index, lane_spec in enumerate(lane_specs):
-            existing_lane_record = lane_records_by_id.get(lane_spec.lane_id)
-            if (
-                existing_lane_record is not None
-                and existing_lane_record.status == "completed"
-            ):
-                continue
-            lane_args = build_frontier_lane_args(args, lane_spec)
-            lane_budget = effective_lane_budget(
-                lane_spec.lane_budget,
-                runtime_defaults,
-            )
-            lane_args.maxiter = int(lane_budget)
-            lane_args.checkpoint_every = int(runtime_defaults.checkpoint_every)
-            lane_stage2_bs_path, warm_start_source = resolve_frontier_lane_warm_start(
-                base_stage2_bs_path=stage2_bs_path,
-                lane_records_by_id=lane_records_by_id,
-                lane_specs=lane_specs,
-                lane_index=lane_index,
-                warm_start_mode=args.frontier_lane_warm_start_mode,
-            )
-            lane_contract = build_frontier_lane_contract_for_spec(
-                lane_args,
-                lane_spec,
-                campaign_id=campaign_id,
-                stage2_bs_path=lane_stage2_bs_path,
-                warm_start_source=warm_start_source,
-                lane_budget=lane_budget,
-                lane_index=lane_index,
-            )
-            lane_output_root = output_root / "lanes" / lane_spec.lane_id
-            lane_payload = resume_or_run_goal_mode_case(
-                lane_args,
-                goal_mode="frontier",
-                stage2_bs_path=lane_stage2_bs_path,
-                output_root=lane_output_root,
-                resume=args.resume,
-            )
-            provisional_archive_member = None
-            archive_member = None
-            archive_update = None
-            if lane_payload["status"] == "completed":
-                provisional_archive_member = build_archive_member_from_results(
+        lane_execution_groups = build_frontier_lane_execution_groups(
+            lane_specs,
+            lane_records_by_id=lane_records_by_id,
+            warm_start_mode=args.frontier_lane_warm_start_mode,
+            early_stop_patience_lanes=runtime_defaults.early_stop_patience_lanes,
+            lane_workers=args.frontier_lane_workers,
+        )
+        for lane_execution_group in lane_execution_groups:
+            executions = [
+                build_frontier_lane_execution(
+                    args,
+                    lane_spec,
                     campaign_id=campaign_id,
-                    lane_id=lane_spec.lane_id,
-                    payload=lane_payload,
-                    rerun_contract=lane_contract.rerun_contract,
-                    archive_state=FRONTIER_ARCHIVE_STATE_PROVISIONAL,
-                    pareto_objective_normalization=pareto_objective_normalization,
+                    lane_index=lane_index,
+                    lane_records_by_id=lane_records_by_id,
+                    lane_specs=lane_specs,
+                    runtime_defaults=runtime_defaults,
+                    stage2_bs_path=stage2_bs_path,
+                    output_root=output_root,
                 )
-                provisional_archive_members.append(provisional_archive_member)
-                archive_member = finalize_archive_member(provisional_archive_member)
-                archive_members, archive_update = update_frontier_archive(
-                    archive_members,
-                    archive_member,
-                    pareto_objective_normalization=pareto_objective_normalization,
-                )
-            lane_records_by_id[lane_spec.lane_id] = build_lane_record_from_payload(
-                lane_contract,
-                lane_spec,
-                lane_budget,
-                lane_payload,
-                provisional_archive_member=provisional_archive_member,
-                archive_member=archive_member,
-                archive_update=archive_update,
+                for lane_index, lane_spec in lane_execution_group
+            ]
+            lane_results = run_frontier_lane_execution_group(
+                executions,
+                resume=args.resume,
+                lane_workers=args.frontier_lane_workers,
             )
+            for lane_result in lane_results:
+                execution = lane_result.execution
+                lane_spec = execution.lane_spec
+                lane_payload = lane_result.lane_payload
+                provisional_archive_member = None
+                archive_member = None
+                archive_update = None
+                if lane_payload["status"] == "completed":
+                    provisional_archive_member = build_archive_member_from_results(
+                        campaign_id=campaign_id,
+                        lane_id=lane_spec.lane_id,
+                        payload=lane_payload,
+                        rerun_contract=execution.lane_contract.rerun_contract,
+                        archive_state=FRONTIER_ARCHIVE_STATE_PROVISIONAL,
+                        pareto_objective_normalization=pareto_objective_normalization,
+                    )
+                    provisional_archive_members.append(provisional_archive_member)
+                    archive_member = finalize_archive_member(provisional_archive_member)
+                    archive_members, archive_update = update_frontier_archive(
+                        archive_members,
+                        archive_member,
+                        pareto_objective_normalization=pareto_objective_normalization,
+                    )
+                lane_records_by_id[lane_spec.lane_id] = build_lane_record_from_payload(
+                    execution.lane_contract,
+                    lane_spec,
+                    execution.lane_budget,
+                    lane_payload,
+                    provisional_archive_member=provisional_archive_member,
+                    archive_member=archive_member,
+                    archive_update=archive_update,
+                )
+                early_stop_status = update_frontier_early_stop_status(
+                    status=early_stop_status,
+                    certified_archive_members_list=archive_members,
+                    hypervolume_reference=hypervolume_reference,
+                    runtime_defaults=runtime_defaults,
+                )
+                if early_stop_status["triggered"]:
+                    early_stop_status["stopped_after_lane_id"] = lane_spec.lane_id
+                    break
             persist_progress()
-            early_stop_status = update_frontier_early_stop_status(
-                status=early_stop_status,
-                certified_archive_members_list=archive_members,
-                hypervolume_reference=hypervolume_reference,
-                runtime_defaults=runtime_defaults,
-            )
             if early_stop_status["triggered"]:
-                early_stop_status["stopped_after_lane_id"] = lane_spec.lane_id
                 break
 
     ordered_lane_records = [

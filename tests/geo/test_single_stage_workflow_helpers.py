@@ -4,6 +4,8 @@ import math
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -3012,6 +3014,212 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 0.015,
             )
 
+    def test_frontier_campaign_runs_independent_seed_lane_group_with_workers(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            stage2_bs_path, stage2_results_path, stage2_results = (
+                self._write_stage2_seed_artifact(
+                    tmpdir_path,
+                    overrides={
+                        "FINAL_IOTA": 0.15,
+                        "FINAL_VOLUME": 0.10,
+                        "NONQS_RATIO": 0.012,
+                        "BOOZER_RESIDUAL": 0.008,
+                    },
+                )
+            )
+            active_lane_count = 0
+            max_active_lane_count = 0
+            active_lane_lock = threading.Lock()
+
+            def run_goal_mode_case(args, *, goal_mode, stage2_bs_path, output_root):
+                nonlocal active_lane_count
+                nonlocal max_active_lane_count
+                self.assertEqual(goal_mode, "frontier")
+                with active_lane_lock:
+                    active_lane_count += 1
+                    max_active_lane_count = max(
+                        max_active_lane_count,
+                        active_lane_count,
+                    )
+                time.sleep(0.05)
+                with active_lane_lock:
+                    active_lane_count -= 1
+                lane_id = output_root.name
+                lane_index = int(lane_id.removeprefix("lane_"))
+                return self._minimal_frontier_payload(
+                    output_root.parents[1],
+                    lane_id=lane_id,
+                    final_iota=0.16 + 0.01 * lane_index,
+                    final_volume=0.10 + 0.001 * lane_index,
+                    nonqs_ratio=0.011,
+                    boozer_residual=0.0075,
+                )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "2",
+                    "--frontier-lane-workers",
+                    "2",
+                    "--frontier-early-stop-patience-lanes",
+                    "0",
+                    "--skip-target",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    stage2_results_path.resolve(),
+                    stage2_results,
+                ),
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+                side_effect=run_goal_mode_case,
+            ) as run_case:
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            progress = json.loads(
+                (output_root / "campaign_progress.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(run_case.call_count, 2)
+            self.assertGreaterEqual(max_active_lane_count, 2)
+            self.assertEqual(len(summary["frontier_lanes"]), 2)
+            self.assertEqual(len(progress["lane_records"]), 2)
+            self.assertEqual(summary["frontier_feasible_lane_count"], 2)
+            self.assertEqual(summary["frontier_archive_size"], 1)
+
+    def test_frontier_campaign_parallel_seed_group_matches_serial_archive_outputs(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            stage2_bs_path, stage2_results_path, stage2_results = (
+                self._write_stage2_seed_artifact(
+                    tmpdir_path,
+                    overrides={
+                        "FINAL_IOTA": 0.15,
+                        "FINAL_VOLUME": 0.10,
+                        "NONQS_RATIO": 0.012,
+                        "BOOZER_RESIDUAL": 0.008,
+                    },
+                )
+            )
+
+            def run_goal_mode_case(args, *, goal_mode, stage2_bs_path, output_root):
+                self.assertEqual(goal_mode, "frontier")
+                lane_id = output_root.name
+                lane_index = int(lane_id.removeprefix("lane_"))
+                return self._minimal_frontier_payload(
+                    output_root.parents[1],
+                    lane_id=lane_id,
+                    final_iota=0.16 + 0.01 * lane_index,
+                    final_volume=0.104 - 0.001 * lane_index,
+                    nonqs_ratio=0.011,
+                    boozer_residual=0.0075,
+                )
+
+            def run_campaign(*, output_root: Path, summary_path: Path, lane_workers: int):
+                with patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "run_single_stage_frontier_campaign.py",
+                        "--plasma-surf-filename",
+                        "demo.nc",
+                        "--stage2-bs-path",
+                        str(stage2_bs_path),
+                        "--output-root",
+                        str(output_root),
+                        "--summary-json",
+                        str(summary_path),
+                        "--frontier-num-lanes",
+                        "2",
+                        "--frontier-lane-workers",
+                        str(lane_workers),
+                        "--frontier-early-stop-patience-lanes",
+                        "0",
+                        "--skip-target",
+                    ],
+                ), patch.object(
+                    module.goal_mode_comparison,
+                    "load_validated_stage2_seed_metadata",
+                    return_value=(
+                        stage2_bs_path.resolve(),
+                        stage2_results_path.resolve(),
+                        stage2_results,
+                    ),
+                ), patch.object(
+                    module.goal_mode_comparison,
+                    "run_goal_mode_case",
+                    side_effect=run_goal_mode_case,
+                ):
+                    self.assertEqual(module.main(), 0)
+                return json.loads(summary_path.read_text(encoding="utf-8"))
+
+            serial_summary = run_campaign(
+                output_root=tmpdir_path / "serial_outputs",
+                summary_path=tmpdir_path / "serial_summary.json",
+                lane_workers=1,
+            )
+            parallel_summary = run_campaign(
+                output_root=tmpdir_path / "parallel_outputs",
+                summary_path=tmpdir_path / "parallel_summary.json",
+                lane_workers=2,
+            )
+
+            self.assertEqual(
+                serial_summary["frontier_feasible_lane_count"],
+                parallel_summary["frontier_feasible_lane_count"],
+            )
+            self.assertEqual(
+                serial_summary["frontier_archive_size"],
+                parallel_summary["frontier_archive_size"],
+            )
+            self.assertEqual(
+                [
+                    member["objective_metrics"]
+                    for member in serial_summary["frontier_archive"]["members"]
+                ],
+                [
+                    member["objective_metrics"]
+                    for member in parallel_summary["frontier_archive"]["members"]
+                ],
+            )
+            self.assertEqual(
+                [
+                    entry["archive_size"]
+                    for entry in serial_summary["frontier_hypervolume_history"]
+                ],
+                [
+                    entry["archive_size"]
+                    for entry in parallel_summary["frontier_hypervolume_history"]
+                ],
+            )
+            self.assertEqual(
+                serial_summary["recommended_member"]["recommended_metrics"],
+                parallel_summary["recommended_member"]["recommended_metrics"],
+            )
+
     def test_frontier_campaign_parse_args_accepts_v4_resume_contract_flags(self):
         module = load_frontier_campaign_module()
 
@@ -3078,6 +3286,100 @@ class FrontierCampaignScriptTests(unittest.TestCase):
         self.assertEqual(
             args.frontier_early_stop_min_hypervolume_gain,
             0.0015,
+        )
+
+    def test_frontier_campaign_parse_args_accepts_lane_worker_count(self):
+        module = load_frontier_campaign_module()
+
+        args = module.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/demo/biot_savart_opt.json",
+                "--frontier-lane-workers",
+                "4",
+            ]
+        )
+
+        self.assertEqual(args.frontier_lane_workers, 4)
+        with self.assertRaises(SystemExit):
+            module.parse_args(
+                [
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    "/tmp/demo/biot_savart_opt.json",
+                    "--frontier-lane-workers",
+                    "0",
+                ]
+            )
+
+    def test_frontier_campaign_groups_only_independent_seed_lanes_for_parallel_run(self):
+        module = load_frontier_campaign_module()
+
+        args = module.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/demo/biot_savart_opt.json",
+                "--frontier-num-lanes",
+                "3",
+            ]
+        )
+        lane_specs = module.generate_multilane_local_specs(
+            num_lanes=3,
+            iotas_weight=args.iotas_weight,
+            frontier_volume_weight=args.frontier_volume_weight,
+            res_weight=args.res_weight,
+            lane_budget=args.frontier_lane_budget,
+        )
+
+        parallel_groups = module.build_frontier_lane_execution_groups(
+            lane_specs,
+            lane_records_by_id={},
+            warm_start_mode=module.FRONTIER_LANE_WARM_START_MODE_SEED,
+            early_stop_patience_lanes=0,
+            lane_workers=2,
+        )
+        serial_groups = module.build_frontier_lane_execution_groups(
+            lane_specs,
+            lane_records_by_id={},
+            warm_start_mode=module.FRONTIER_LANE_WARM_START_MODE_SEED,
+            early_stop_patience_lanes=0,
+            lane_workers=1,
+        )
+        reuse_groups = module.build_frontier_lane_execution_groups(
+            lane_specs,
+            lane_records_by_id={},
+            warm_start_mode=module.FRONTIER_LANE_WARM_START_MODE_REUSE_LATEST_CERTIFIED,
+            early_stop_patience_lanes=0,
+            lane_workers=2,
+        )
+        early_stop_groups = module.build_frontier_lane_execution_groups(
+            lane_specs,
+            lane_records_by_id={},
+            warm_start_mode=module.FRONTIER_LANE_WARM_START_MODE_SEED,
+            early_stop_patience_lanes=2,
+            lane_workers=2,
+        )
+
+        self.assertEqual(
+            [[lane.lane_id for _index, lane in group] for group in parallel_groups],
+            [["lane_01", "lane_02", "lane_03"]],
+        )
+        self.assertEqual(
+            [[lane.lane_id for _index, lane in group] for group in serial_groups],
+            [["lane_01"], ["lane_02"], ["lane_03"]],
+        )
+        self.assertEqual(
+            [[lane.lane_id for _index, lane in group] for group in reuse_groups],
+            [["lane_01"], ["lane_02"], ["lane_03"]],
+        )
+        self.assertEqual(
+            [[lane.lane_id for _index, lane in group] for group in early_stop_groups],
+            [["lane_01"], ["lane_02"], ["lane_03"]],
         )
 
     def test_frontier_campaign_parse_args_accepts_recommendation_and_warm_start_modes(self):
