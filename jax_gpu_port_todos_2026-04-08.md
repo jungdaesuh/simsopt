@@ -140,8 +140,8 @@ The main remaining single-stage work after the GPU-port proof is donor/seed/sear
     (`benchmarks/surface_rz_geometry_hlo_probe.py`): on the CPU lane with
     JAX 0.10.0, `mpol=8`, `ntor=6`, `nphi=65`, `ntheta=66`, scalar
     composition vs fused geometry measured lowered graph counts at
-    `cosine 6 -> 2`, `sine 6 -> 2`, and `reduce 36 -> 20`. Optimized HLO
-    measured `736 -> 584` lines (20.65% lower), with unchanged compiled
+    `cosine 6 -> 2`, `sine 6 -> 2`, and `reduce 32 -> 16`. Optimized HLO
+    measured `711 -> 546` lines (23.21% lower), with unchanged compiled
     trig/reduce counts (`cosine=6`, `sine=6`, `reduce=6`). Local CPU timing was
     noisy rather than ship evidence: observed reruns ranged from modestly
     faster to slower. Do not close or ship as a proven production speedup until
