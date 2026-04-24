@@ -823,6 +823,11 @@ def build_single_stage_problem_contract(
         )
     )
     uses_jax_runtime_seed = getattr(args, "backend", None) == "jax"
+    stage2_seed_biot_savart_path = os.path.abspath(stage2_bs_path)
+    stage2_seed_jax_runtime_spec_path = None
+    if uses_jax_runtime_seed:
+        stage2_seed_biot_savart_path = None
+        stage2_seed_jax_runtime_spec_path = os.path.abspath(stage2_results_path)
     return {
         "workflow": "single-stage-banana-optimization",
         "equilibrium": {
@@ -842,12 +847,8 @@ def build_single_stage_problem_contract(
         "stage2_seed": {
             "source": stage2_source,
             "requested_source": getattr(args, "stage2_source", stage2_source),
-            "biot_savart_path": None
-            if uses_jax_runtime_seed
-            else os.path.abspath(stage2_bs_path),
-            "jax_runtime_spec_path": (
-                os.path.abspath(stage2_results_path) if uses_jax_runtime_seed else None
-            ),
+            "biot_savart_path": stage2_seed_biot_savart_path,
+            "jax_runtime_spec_path": stage2_seed_jax_runtime_spec_path,
             "results_path": os.path.abspath(stage2_results_path),
             "major_radius": float(R0),
             "toroidal_flux": float(s),
@@ -2611,6 +2612,36 @@ def compile_requested_single_stage_jax_runtime_seed_spec(args):
         num_tf_coils=args.num_tf_coils,
         output_path_or_run_dir=args.jax_runtime_seed_spec,
     )
+
+
+def load_single_stage_jax_runtime_seed_startup_state(args, *, mpol, ntor, nphi, ntheta):
+    runtime_spec_source = (
+        args.jax_runtime_seed_spec
+        if args.jax_runtime_seed_spec is not None
+        else args.warm_start_run_dir
+    )
+    if runtime_spec_source is None:
+        raise FileNotFoundError(
+            "JAX startup requires an immutable runtime seed spec; "
+            "run seed conversion first."
+        )
+    runtime_spec_state = load_single_stage_jax_runtime_seed_spec(
+        runtime_spec_source,
+        mpol=mpol,
+        ntor=ntor,
+        nphi=nphi,
+        ntheta=ntheta,
+    )
+    return {
+        "stage2_bs_path": resolve_single_stage_jax_runtime_spec_path(
+            runtime_spec_source
+        ),
+        "stage2_results_path": runtime_spec_state["path"],
+        "stage2_results": stage2_results_from_single_stage_runtime_seed_payload(
+            runtime_spec_state["stage2_seed"]
+        ),
+        "runtime_spec_state": runtime_spec_state,
+    }
 
 
 def _require_matching_single_stage_jax_runtime_surface(
@@ -9627,33 +9658,20 @@ if __name__ == "__main__":
     warm_start_runtime_spec_state = None
     stage2_seed_setup_start_s = _perf_counter_s()
     if use_jax:
-        jax_runtime_spec_source = (
-            args.jax_runtime_seed_spec
-            if args.jax_runtime_seed_spec is not None
-            else args.warm_start_run_dir
-        )
-        if jax_runtime_spec_source is None:
-            raise FileNotFoundError(
-                "JAX startup requires an immutable runtime seed spec; "
-                "run seed conversion first."
-            )
-        stage2_bs_path = resolve_single_stage_jax_runtime_spec_path(
-            jax_runtime_spec_source
-        )
-        stage2_source = "jax_runtime_seed_spec"
-        stage2_tf_current_limit_enforced = False
-        stage2_seed_hardware_validation_enforced = False
-        warm_start_runtime_spec_state = load_single_stage_jax_runtime_seed_spec(
-            jax_runtime_spec_source,
+        jax_seed_startup_state = load_single_stage_jax_runtime_seed_startup_state(
+            args,
             mpol=mpol,
             ntor=ntor,
             nphi=nphi,
             ntheta=ntheta,
         )
-        stage2_results_path = warm_start_runtime_spec_state["path"]
-        stage2_results = stage2_results_from_single_stage_runtime_seed_payload(
-            warm_start_runtime_spec_state["stage2_seed"]
-        )
+        warm_start_runtime_spec_state = jax_seed_startup_state["runtime_spec_state"]
+        stage2_bs_path = jax_seed_startup_state["stage2_bs_path"]
+        stage2_results_path = jax_seed_startup_state["stage2_results_path"]
+        stage2_results = jax_seed_startup_state["stage2_results"]
+        stage2_source = "jax_runtime_seed_spec"
+        stage2_tf_current_limit_enforced = False
+        stage2_seed_hardware_validation_enforced = False
     else:
         stage2_seed_contract = resolve_single_stage_startup_seed_contract(
             args,

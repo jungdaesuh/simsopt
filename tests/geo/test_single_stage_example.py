@@ -2449,6 +2449,49 @@ class SingleStageExampleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "--warm-start-run-dir"):
             module.compile_requested_single_stage_jax_runtime_seed_spec(args)
 
+    def test_load_single_stage_jax_runtime_seed_startup_state_uses_spec_payload(
+        self,
+    ):
+        module = self.load_module()
+        args = types.SimpleNamespace(
+            jax_runtime_seed_spec="/tmp/runtime-spec.json",
+            warm_start_run_dir="/tmp/donor-run",
+        )
+        runtime_spec_state = {
+            "path": "/tmp/runtime-spec.json",
+            "stage2_seed": {
+                "major_radius": 1.0,
+                "toroidal_flux": 0.5,
+                "order": 2,
+                "banana_surf_radius": 0.22,
+            },
+        }
+
+        with patch.object(
+            module,
+            "load_single_stage_jax_runtime_seed_spec",
+            return_value=runtime_spec_state,
+        ) as load_spec:
+            startup_state = module.load_single_stage_jax_runtime_seed_startup_state(
+                args,
+                mpol=2,
+                ntor=1,
+                nphi=7,
+                ntheta=5,
+            )
+
+        load_spec.assert_called_once_with(
+            "/tmp/runtime-spec.json",
+            mpol=2,
+            ntor=1,
+            nphi=7,
+            ntheta=5,
+        )
+        self.assertEqual(startup_state["stage2_bs_path"], "/tmp/runtime-spec.json")
+        self.assertEqual(startup_state["stage2_results_path"], "/tmp/runtime-spec.json")
+        self.assertIs(startup_state["runtime_spec_state"], runtime_spec_state)
+        self.assertEqual(startup_state["stage2_results"]["order"], 2)
+
     def test_runtime_spec_biotsavart_full_artifact_curves_follow_updated_dofs(self):
         module = self.load_module()
         curve_dofs = np.linspace(0.1, 0.9, 9, dtype=np.float64)
