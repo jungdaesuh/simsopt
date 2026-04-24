@@ -44,6 +44,9 @@ from benchmarks.single_stage_smoke_fixture import build_real_single_stage_init_f
 import simsopt.config as simsopt_config  # type: ignore[import-untyped]
 from simsopt.field import Coil, Current, coils_via_symmetries  # type: ignore[import-untyped]
 from simsopt.field.coil import ScaledCurrent  # type: ignore[import-untyped]
+from simsopt.field.biotsavart_jax_backend import (  # type: ignore[import-untyped]
+    BiotSavartJAX,
+)
 from simsopt.geo import (  # type: ignore[import-untyped]
     FrameRotation,
     FramedCurveCentroid,
@@ -71,7 +74,10 @@ from simsopt.geo.curveobjectives import (  # type: ignore[import-untyped]
     LpCurveTorsion,
 )
 from simsopt.geo.curvecwsfourier import CurveCWSFourierCPP  # type: ignore[import-untyped]
-from simsopt.geo.curvexyzfourier import JaxCurveXYZFourier  # type: ignore[import-untyped]
+from simsopt.geo.curvexyzfourier import (  # type: ignore[import-untyped]
+    CurveXYZFourier,
+    JaxCurveXYZFourier,
+)
 from simsopt.geo.optimizer_jax import (  # type: ignore[import-untyped]
     _mark_cacheable_jit_value_and_grad,
     jax_minimize,
@@ -91,6 +97,7 @@ from simsopt.jax_core.curve_geometry import (  # type: ignore[import-untyped]
 )
 from simsopt.jax_core.field import (  # type: ignore[import-untyped]
     biot_savart_B_vjp_maybe_collective,
+    grouped_field_inputs_from_spec,
     grouped_biot_savart_A_from_spec,
     grouped_biot_savart_A_from_inputs,
     grouped_biot_savart_B_and_dB_from_spec,
@@ -739,6 +746,29 @@ def _build_collective_circular_coils() -> tuple[
     return list(gammas), list(gammadashs), list(currents)
 
 
+def _collective_curve_coil(index: int) -> Coil:
+    curve = CurveXYZFourier(16, 1)
+    curve.x = np.array(
+        [
+            0.2 + 0.01 * index,
+            0.0,
+            0.0,
+            1.0 + 0.03 * index,
+            0.0,
+            0.0,
+            0.0,
+            1.0 + 0.02 * index,
+            0.0,
+        ],
+        dtype=np.float64,
+    )
+    return Coil(curve, Current(1.0 + 0.1 * index))
+
+
+def _build_collective_curve_coils() -> list[Coil]:
+    return [_collective_curve_coil(index) for index in range(5)]
+
+
 def _assert_allclose_to_reference(value, reference) -> None:
     np.testing.assert_allclose(
         np.asarray(value),
@@ -775,6 +805,62 @@ def _assert_mixed_quadrature_collective_parity(points: jax.Array) -> None:
         dense_reference,
     )
     assert grouped_field_sharding_summary(points, coil_spec)["field_collective"] is True
+
+
+def _assert_biot_savart_jax_native_pullback_collective_path(
+    points: jax.Array,
+) -> None:
+    coils = _build_collective_curve_coils()
+    bs_jax = BiotSavartJAX(coils)
+    bs_jax.set_points(np.asarray(points, dtype=np.float64))
+    cotangent = jnp.asarray(bs_jax.B())
+    coil_spec = bs_jax.coil_set_spec()
+    summary = grouped_field_sharding_summary(points, coil_spec)
+
+    assert summary["field_collective"] is True
+    assert summary["strategy"] == "coil_groups"
+    assert summary["collective_axis"] == "coil"
+
+    native_pullback = bs_jax.B_pullback_native(cotangent)
+    assert native_pullback.coil_indices == ((0, 1, 2, 3, 4),)
+    assert len(native_pullback.d_coil_arrays) == 1
+    native_group = native_pullback.d_coil_arrays[0]
+    grouped_inputs = grouped_field_inputs_from_spec(coil_spec)
+    assert len(grouped_inputs) == 1
+    direct_collective_pullback = biot_savart_B_vjp_maybe_collective(
+        points,
+        cotangent,
+        *grouped_inputs[0],
+    )
+    assert len(native_group) == len(direct_collective_pullback)
+    for native_leaf, direct_leaf in zip(
+        native_group,
+        direct_collective_pullback,
+    ):
+        _assert_allclose_to_reference(native_leaf, direct_leaf)
+
+    projected = bs_jax.coil_cotangents_to_derivative(
+        native_pullback.d_coil_arrays,
+        native_pullback.coil_indices,
+    )
+    public = bs_jax.B_vjp(cotangent)
+    for coil in coils:
+        _assert_allclose_to_reference(projected(coil), public(coil))
+
+    dofs_gradient = bs_jax.coil_cotangents_to_dofs_gradient(
+        native_pullback.d_coil_arrays,
+        native_pullback.coil_indices,
+    )
+    _assert_allclose_to_reference(dofs_gradient, public(bs_jax))
+
+    compiled_hlo = (
+        jax.jit(lambda v: bs_jax.B_pullback_native(v))
+        .lower(cotangent)
+        .compile()
+        .as_text()
+        .lower()
+    )
+    assert "all-gather" in compiled_hlo
 
 
 def _assert_grouped_pullback_matches_dense(
@@ -927,6 +1013,7 @@ def _run_grouped_biot_savart_coil_collective_case() -> None:
         stacked_currents,
     )
     _assert_mixed_quadrature_collective_parity(points)
+    _assert_biot_savart_jax_native_pullback_collective_path(points)
 
     summary = grouped_field_sharding_summary(points, coil_spec)
     assert summary["field_collective"] is True
