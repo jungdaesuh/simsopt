@@ -72,7 +72,7 @@ last script-local/native-boundary seams, and extend multi-device sharding.
   replacement for `Optimizable`.
 - [x] Use grouped cotangent arrays, flat gradients, and pytrees as the
   JAX-native replacement for `Derivative`.
-- [ ] Make the compiled lane consume the native equivalents directly.
+- [x] Make the compiled lane consume the native equivalents directly.
 - [x] Keep projection back into `Derivative` only at compatibility boundaries.
 
 ## Non-Goals
@@ -127,7 +127,7 @@ Goal: make the architecture explicit in code and tests.
 - [x] Use `OptimizableDofMapSpec` and coil extraction specs for DOF mapping.
 - [x] Document the native replacement rule in a repo plan/status doc:
   "compiled JAX lane takes specs and arrays, not mutable Optimizable graphs."
-- [ ] Add or update tests that verify native functions accept specs directly
+- [x] Add or update tests that verify native functions accept specs directly
   without reading mutable wrapper state.
 
 ### Derivative Equivalent
@@ -135,7 +135,7 @@ Goal: make the architecture explicit in code and tests.
 - [x] Use JAX VJPs internally for Biot-Savart and objective gradients.
 - [x] Use grouped coil cotangents internally for field pullbacks.
 - [x] Add a supported public native cotangent API on `BiotSavartJAX`.
-- [ ] Make internal objective/adjoint paths consume native cotangents where
+- [x] Make internal objective/adjoint paths consume native cotangents where
   they do not need public SIMSOPT compatibility.
 - [x] Keep `Derivative` projection as a boundary adapter only.
 
@@ -163,7 +163,7 @@ Tasks:
   grouped cotangents plus corresponding coil index lists.
 - [x] Reimplement `BiotSavartJAX.B_vjp(v)` as:
   `B_pullback_native(v)` -> `coil_cotangents_to_derivative(...)`.
-- [ ] Route Boozer/objective internals through the native cotangent API when
+- [x] Route Boozer/objective internals through the native cotangent API when
   the caller does not need a `Derivative`.
 - [x] Preserve `B_vjp(v) -> Derivative` for public SIMSOPT compatibility.
 - [x] Add parity tests comparing:
@@ -351,9 +351,9 @@ Do not inline new tolerances.
 
 ## Definition of Done
 
-- [ ] JAX target lane has native replacements for `Optimizable` and
+- [x] JAX target lane has native replacements for `Optimizable` and
   `Derivative` semantics in the compiled path.
-- [ ] Public SIMSOPT compatibility remains intact.
+- [x] Public SIMSOPT compatibility remains intact.
 - [x] `BiotSavartJAX.B_vjp` still returns `Derivative`, but delegates to a
   native cotangent API.
 - [x] Single-stage runtime-spec Biot-Savart adapter is package-owned, not

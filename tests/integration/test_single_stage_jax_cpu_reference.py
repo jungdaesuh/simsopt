@@ -4115,6 +4115,26 @@ class TestCompositeObjective:
         np.testing.assert_allclose(np.asarray(iotas.dJ()), batched_gradients[1])
         np.testing.assert_allclose(np.asarray(non_qs_ratio.dJ()), batched_gradients[2])
 
+    def test_native_wrapper_gradients_match_public_derivative_boundary(
+        self,
+        boozer_setup,
+    ):
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        wrappers = _make_jax_standard_wrapper_triplet(booz_jax, bs_jax)
+
+        for wrapper in wrappers:
+            native_gradient = np.asarray(wrapper.dJ_by_dcoil_dofs(), dtype=float)
+            derivative_gradient = np.asarray(
+                wrapper.dJ(partials=True)(bs_jax),
+                dtype=float,
+            )
+            np.testing.assert_allclose(
+                native_gradient,
+                derivative_gradient,
+                rtol=5e-4,
+                atol=1e-6,
+            )
+
     def test_batched_standard_wrapper_gradients_allow_strict_transfer_guard_on_gpu(
         self,
         monkeypatch,

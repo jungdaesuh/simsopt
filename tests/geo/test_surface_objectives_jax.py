@@ -92,6 +92,18 @@ def _assert_primal_value_with_nonfinite_gradient(value, grad, expected_value):
     _assert_nonfinite_gradient(grad)
 
 
+def _reject_coil_dofs_gradient_to_derivative(*_args):
+    raise AssertionError("native gradient should not project to Derivative")
+
+
+def _patch_reject_coil_dofs_gradient_to_derivative(monkeypatch):
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_coil_dofs_gradient_to_derivative",
+        _reject_coil_dofs_gradient_to_derivative,
+    )
+
+
 _STELLSYM_OPTIONS = (True, False)
 _TOROIDAL_FLUX_VALUE_RTOL = 1e-10
 _TOROIDAL_FLUX_VALUE_ATOL = 1e-12
@@ -1470,6 +1482,247 @@ def test_iotas_jax_gradient_path_reads_adjoint_runtime_state(monkeypatch):
     obj.compute(compute_gradient=True)
 
     np.testing.assert_allclose(np.asarray(obj._J), 0.37)
+
+
+def test_boozer_residual_native_gradient_stays_flat_until_public_boundary(monkeypatch):
+    obj = object.__new__(surfaceobjectives_jax_module.BoozerResidualJAX)
+    obj.boozer_surface = types.SimpleNamespace(res={"success": True})
+    obj.biotsavart = object()
+    obj._J = None
+    obj._dJ = None
+    obj._dJ_by_dcoil_dofs = None
+    obj._direct_objective_value_and_grad = object()
+    obj._inner_objective_state = lambda _iota, _G, *, sdofs=None: (
+        jnp.asarray([0.1, 0.2], dtype=jnp.float64),
+        True,
+    )
+    obj._compute_dJ_ds = lambda _coil_set_spec, _iota, _G, _weight_inv_modB: (
+        jnp.asarray([0.0, 1.0], dtype=jnp.float64)
+    )
+
+    solved_state = types.SimpleNamespace(
+        sdofs=jnp.asarray([0.4], dtype=jnp.float64),
+        iota=jnp.asarray(0.37, dtype=jnp.float64),
+        G=jnp.asarray(1.2, dtype=jnp.float64),
+        weight_inv_modB=True,
+    )
+    adjoint_state = types.SimpleNamespace(
+        decision_size=2,
+        dtype=jnp.float64,
+        stream_group_vjps=lambda _adj: iter([("group-cotangent", (0,))]),
+    )
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_resolved_boozer_solved_runtime_state",
+        lambda _booz_surf: solved_state,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_resolved_boozer_adjoint_runtime_state",
+        lambda _booz_surf: adjoint_state,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_current_coil_dofs_and_spec",
+        lambda _biotsavart: (
+            jnp.asarray([0.5, -0.25], dtype=jnp.float64),
+            "coil-spec",
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_value_and_direct_coil_gradient",
+        lambda *_args: (
+            2.5,
+            jnp.asarray([4.0, -1.0], dtype=jnp.float64),
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_solve_boozer_adjoint",
+        lambda _adjoint_state, _rhs: jnp.asarray([2.0, -3.0], dtype=jnp.float64),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_adjoint_coil_dofs_gradient",
+        lambda stream_group_vjps, adjoint, _biotsavart, coil_dofs: (
+            list(stream_group_vjps(adjoint)),
+            np.testing.assert_allclose(
+                np.asarray(coil_dofs),
+                np.asarray([0.5, -0.25]),
+            ),
+            jnp.asarray([1.0, 2.0], dtype=jnp.float64),
+        )[-1],
+    )
+    _patch_reject_coil_dofs_gradient_to_derivative(monkeypatch)
+
+    gradient = obj.dJ_by_dcoil_dofs()
+
+    np.testing.assert_allclose(np.asarray(gradient), np.asarray([3.0, -3.0]))
+    assert obj._J == 2.5
+    assert obj._dJ is None
+
+
+def test_iotas_jax_native_gradient_stays_flat_until_public_boundary(monkeypatch):
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_solve_boozer_adjoint",
+        lambda _adjoint_state, rhs: (
+            np.testing.assert_allclose(np.asarray(rhs), np.asarray([0.0, 1.0])),
+            jnp.asarray([2.0, -3.0], dtype=jnp.float64),
+        )[-1],
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_current_coil_dofs",
+        lambda _biotsavart: jnp.asarray([0.0], dtype=jnp.float64),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_adjoint_coil_dofs_gradient",
+        lambda stream_group_vjps, adjoint, _biotsavart, _coil_dofs: (
+            list(stream_group_vjps(adjoint)),
+            jnp.asarray([7.0], dtype=jnp.float64),
+        )[-1],
+    )
+    _patch_reject_coil_dofs_gradient_to_derivative(monkeypatch)
+
+    fake_booz = types.SimpleNamespace(
+        res={"success": True},
+        need_to_run_code=False,
+        get_solved_runtime_state=lambda: types.SimpleNamespace(
+            sdofs=jnp.asarray([0.0, 1.0], dtype=jnp.float64),
+            iota=jnp.asarray(0.37, dtype=jnp.float64),
+            G=None,
+            weight_inv_modB=True,
+        ),
+        get_adjoint_runtime_state=lambda: types.SimpleNamespace(
+            decision_size=2,
+            dtype=jnp.float64,
+            stream_group_vjps=lambda _adj: iter([("group-cotangent", (0,))]),
+        ),
+        biotsavart=object(),
+    )
+    obj = object.__new__(surfaceobjectives_jax_module.IotasJAX)
+    obj.boozer_surface = fake_booz
+    obj.biotsavart = fake_booz.biotsavart
+    obj._J = None
+    obj._dJ = None
+    obj._dJ_by_dcoil_dofs = None
+
+    gradient = obj.dJ_by_dcoil_dofs()
+
+    np.testing.assert_allclose(np.asarray(gradient), np.asarray([-7.0]))
+    np.testing.assert_allclose(np.asarray(obj._J), 0.37)
+    assert obj._dJ is None
+
+
+def test_non_qs_ratio_native_gradient_stays_flat_until_public_boundary(monkeypatch):
+    obj = object.__new__(surfaceobjectives_jax_module.NonQuasiSymmetricRatioJAX)
+    obj.boozer_surface = types.SimpleNamespace(res={"success": True})
+    obj.biotsavart = object()
+    obj._J = None
+    obj._dJ = None
+    obj._dJ_by_dcoil_dofs = None
+    obj._compute_value = lambda _sdofs, _coil_set_spec: 1.75
+    obj._direct_coil_gradient = lambda _coil_dofs, _sdofs: (
+        jnp.asarray([4.0, -1.0], dtype=jnp.float64)
+    )
+    obj._compute_dJ_ds = lambda _coil_set_spec, _sdofs, _decision_size: (
+        jnp.asarray([0.0, 1.0], dtype=jnp.float64)
+    )
+
+    solved_state = types.SimpleNamespace(
+        sdofs=jnp.asarray([0.4], dtype=jnp.float64),
+        iota=jnp.asarray(0.37, dtype=jnp.float64),
+        G=None,
+        weight_inv_modB=True,
+    )
+    adjoint_state = types.SimpleNamespace(
+        decision_size=2,
+        dtype=jnp.float64,
+        stream_group_vjps=lambda _adj: iter([("group-cotangent", (0,))]),
+    )
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_resolved_boozer_solved_runtime_state",
+        lambda _booz_surf: solved_state,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_resolved_boozer_adjoint_runtime_state",
+        lambda _booz_surf: adjoint_state,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_current_coil_dofs_and_spec",
+        lambda _biotsavart: (
+            jnp.asarray([0.5, -0.25], dtype=jnp.float64),
+            "coil-spec",
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_solve_boozer_adjoint",
+        lambda _adjoint_state, _rhs: jnp.asarray([2.0, -3.0], dtype=jnp.float64),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_adjoint_coil_dofs_gradient",
+        lambda stream_group_vjps, adjoint, _biotsavart, coil_dofs: (
+            list(stream_group_vjps(adjoint)),
+            np.testing.assert_allclose(
+                np.asarray(coil_dofs),
+                np.asarray([0.5, -0.25]),
+            ),
+            jnp.asarray([1.0, 2.0], dtype=jnp.float64),
+        )[-1],
+    )
+    _patch_reject_coil_dofs_gradient_to_derivative(monkeypatch)
+
+    gradient = obj.dJ_by_dcoil_dofs()
+
+    np.testing.assert_allclose(np.asarray(gradient), np.asarray([3.0, -3.0]))
+    assert obj._J == 1.75
+    assert obj._dJ is None
+
+
+@pytest.mark.parametrize(
+    "wrapper_cls",
+    [
+        surfaceobjectives_jax_module.BoozerResidualJAX,
+        surfaceobjectives_jax_module.IotasJAX,
+        surfaceobjectives_jax_module.NonQuasiSymmetricRatioJAX,
+    ],
+)
+def test_public_dJ_projects_cached_native_gradient_without_recomputing(
+    monkeypatch,
+    wrapper_cls,
+):
+    obj = object.__new__(wrapper_cls)
+    obj.biotsavart = object()
+    obj._dJ = None
+    obj._dJ_by_dcoil_dofs = jnp.asarray([2.0, -3.0], dtype=jnp.float64)
+    projected = surfaceobjectives_jax_module.Derivative({})
+
+    def reject_compute(*_args, **_kwargs):
+        raise AssertionError("dJ should project the cached native gradient")
+
+    def project_native_gradient(biotsavart, gradient):
+        assert biotsavart is obj.biotsavart
+        np.testing.assert_allclose(np.asarray(gradient), np.asarray([2.0, -3.0]))
+        return projected
+
+    obj.compute = reject_compute
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_coil_dofs_gradient_to_derivative",
+        project_native_gradient,
+    )
+
+    assert obj.dJ(partials=True) is projected
 
 
 def test_iotas_jax_exact_well_conditioned_gradient_matches_dense_projection(

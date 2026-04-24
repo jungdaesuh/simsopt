@@ -1121,23 +1121,6 @@ def _coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
     raise RuntimeError(_LEGACY_PROJECTION_HELPER_ERROR)
 
 
-def _adjoint_coil_derivative(stream_group_vjps, adjoint, biotsavart):
-    """Project grouped adjoint cotangents to a coil ``Derivative``.
-
-    Compatibility wrapper for callers that still need the public
-    ``Derivative`` contract. The projection itself uses the native flat
-    coil-DOF cotangent path.
-    """
-    coil_dofs = _current_coil_dofs(biotsavart)
-    coil_gradient = _adjoint_coil_dofs_gradient(
-        stream_group_vjps,
-        adjoint,
-        biotsavart,
-        coil_dofs,
-    )
-    return _coil_dofs_gradient_to_derivative(biotsavart, coil_gradient)
-
-
 def _adjoint_coil_dofs_gradient(stream_group_vjps, adjoint, biotsavart, coil_dofs):
     """Project streamed adjoint cotangents to flat BiotSavart free-DOF order."""
     coil_dofs = _as_jax_float64(coil_dofs)
@@ -1177,6 +1160,24 @@ def _coil_dofs_gradient_to_derivative(biotsavart, coil_dofs_gradient):
                 deriv_data[dep_opt] = block_share.copy()
 
     return Derivative(deriv_data)
+
+
+def _project_native_dJ_by_dcoil_dofs(surface_objective):
+    return _coil_dofs_gradient_to_derivative(
+        surface_objective.biotsavart,
+        surface_objective._dJ_by_dcoil_dofs,
+    )
+
+
+def _public_dJ_from_native_cache(surface_objective):
+    if surface_objective._dJ is None:
+        if surface_objective._dJ_by_dcoil_dofs is None:
+            surface_objective.compute(compute_gradient=True)
+        else:
+            surface_objective._dJ = _project_native_dJ_by_dcoil_dofs(
+                surface_objective
+            )
+    return surface_objective._dJ
 
 
 def _make_cached_strict_scalar_value_and_grad(fun):
@@ -1355,24 +1356,6 @@ def _value_and_direct_coil_gradient(
         *objective_args,
     )
     return _host_scalar(objective_value), coil_dofs_gradient
-
-
-def _value_and_direct_coil_derivative(
-    biotsavart,
-    objective_or_value_and_grad,
-    coil_dofs,
-    *objective_args,
-):
-    """Evaluate a cached coil-DOF objective/gradient pair and map its gradient."""
-    objective_value, coil_dofs_gradient = _value_and_direct_coil_gradient(
-        objective_or_value_and_grad,
-        coil_dofs,
-        *objective_args,
-    )
-    return objective_value, _coil_dofs_gradient_to_derivative(
-        biotsavart,
-        coil_dofs_gradient,
-    )
 
 
 def _qs_ratio_from_coil_dofs(sdofs, coil_dofs, biotsavart, **qs_kwargs):
@@ -1629,6 +1612,7 @@ class BoozerResidualJAX(Optimizable):
     def recompute_bell(self, parent=None):
         self._J = None
         self._dJ = None
+        self._dJ_by_dcoil_dofs = None
 
     def J(self):
         if self._J is None:
@@ -1637,9 +1621,21 @@ class BoozerResidualJAX(Optimizable):
 
     @derivative_dec
     def dJ(self):
-        if self._dJ is None:
-            self.compute(compute_gradient=True)
-        return self._dJ
+        return _public_dJ_from_native_cache(self)
+
+    def dJ_by_dcoil_dofs(self):
+        """Return the native flat free-coil-DOF gradient as a JAX array."""
+        if self._dJ_by_dcoil_dofs is None:
+            solved_state = _resolved_boozer_solved_runtime_state(self.boozer_surface)
+            current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(
+                self.biotsavart
+            )
+            self._J, self._dJ_by_dcoil_dofs = self._value_and_dJ_by_dcoil_dofs(
+                solved_state,
+                current_coil_dofs,
+                coil_set_spec,
+            )
+        return self._dJ_by_dcoil_dofs
 
     def _direct_objective_of_coils(
         self,
@@ -1669,45 +1665,68 @@ class BoozerResidualJAX(Optimizable):
             optimize_G,
         )
 
-    def compute(self, *, compute_gradient=True):
-        booz_surf = self.boozer_surface
-        solved_state = _resolved_boozer_solved_runtime_state(booz_surf)
-        sdofs = solved_state.sdofs
+    def _value_and_dJ_by_dcoil_dofs(
+        self,
+        solved_state,
+        current_coil_dofs,
+        coil_set_spec,
+    ):
         iota = solved_state.iota
         G = solved_state.G
         weight_inv_modB = solved_state.weight_inv_modB
-        x_inner, optimize_G = self._inner_objective_state(iota, G, sdofs=sdofs)
+        x_inner, optimize_G = self._inner_objective_state(
+            iota,
+            G,
+            sdofs=solved_state.sdofs,
+        )
+        value, direct_gradient = _value_and_direct_coil_gradient(
+            self._direct_objective_value_and_grad,
+            current_coil_dofs,
+            x_inner,
+            optimize_G,
+            weight_inv_modB,
+        )
+        adjoint_state = _resolved_boozer_adjoint_runtime_state(self.boozer_surface)
+        dJ_ds = self._compute_dJ_ds(coil_set_spec, iota, G, weight_inv_modB)
+        adjoint = _solve_boozer_adjoint(adjoint_state, dJ_ds)
+        adjoint_gradient = _adjoint_coil_dofs_gradient(
+            adjoint_state.stream_group_vjps,
+            adjoint,
+            self.biotsavart,
+            current_coil_dofs,
+        )
+        return value, direct_gradient - adjoint_gradient
+
+    def compute(self, *, compute_gradient=True):
+        booz_surf = self.boozer_surface
+        solved_state = _resolved_boozer_solved_runtime_state(booz_surf)
+        iota = solved_state.iota
+        G = solved_state.G
+        weight_inv_modB = solved_state.weight_inv_modB
         current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(self.biotsavart)
-        direct_objective_args = (x_inner, optimize_G, weight_inv_modB)
 
         if not compute_gradient:
+            x_inner, optimize_G = self._inner_objective_state(
+                iota,
+                G,
+                sdofs=solved_state.sdofs,
+            )
             self._J = _evaluate_direct_coil_objective_value(
                 self._direct_objective_of_coils,
                 current_coil_dofs,
-                *direct_objective_args,
+                x_inner,
+                optimize_G,
+                weight_inv_modB,
             )
             return
 
-        adjoint_state = _resolved_boozer_adjoint_runtime_state(booz_surf)
-        self._J, direct_gradient = _value_and_direct_coil_gradient(
-            self._direct_objective_value_and_grad,
+        self._J, self._dJ_by_dcoil_dofs = self._value_and_dJ_by_dcoil_dofs(
+            solved_state,
             current_coil_dofs,
-            *direct_objective_args,
-        )
-        dJ_ds = self._compute_dJ_ds(coil_set_spec, iota, G, weight_inv_modB)
-        adj = _solve_boozer_adjoint(adjoint_state, dJ_ds)
-
-        adjoint_gradient = _adjoint_coil_dofs_gradient(
-            adjoint_state.stream_group_vjps,
-            adj,
-            self.biotsavart,
-            current_coil_dofs,
+            coil_set_spec,
         )
 
-        self._dJ = _coil_dofs_gradient_to_derivative(
-            self.biotsavart,
-            direct_gradient - adjoint_gradient,
-        )
+        self._dJ = _project_native_dJ_by_dcoil_dofs(self)
 
     def _compute_dJ_ds(self, coil_set_spec, iota, G, weight_inv_modB):
         """Compute ∂J_BR/∂[surface_dofs, iota, G] via JAX autodiff."""
@@ -1768,6 +1787,7 @@ class IotasJAX(Optimizable):
     def recompute_bell(self, parent=None):
         self._J = None
         self._dJ = None
+        self._dJ_by_dcoil_dofs = None
 
     def J(self):
         if self._J is None:
@@ -1776,42 +1796,49 @@ class IotasJAX(Optimizable):
 
     @derivative_dec
     def dJ(self):
-        if self._dJ is None:
-            self.compute(compute_gradient=True)
-        return self._dJ
+        return _public_dJ_from_native_cache(self)
+
+    def dJ_by_dcoil_dofs(self):
+        """Return the native flat free-coil-DOF gradient as a JAX array."""
+        if self._dJ_by_dcoil_dofs is None:
+            solved_state = _resolved_boozer_solved_runtime_state(self.boozer_surface)
+            current_coil_dofs = _current_coil_dofs(self.biotsavart)
+            self._J, self._dJ_by_dcoil_dofs = self._value_and_dJ_by_dcoil_dofs(
+                solved_state,
+                current_coil_dofs,
+            )
+        return self._dJ_by_dcoil_dofs
+
+    def _value_and_dJ_by_dcoil_dofs(self, solved_state, current_coil_dofs):
+        adjoint_state = _resolved_boozer_adjoint_runtime_state(self.boozer_surface)
+        lhs_dtype = _adjoint_state_dtype(adjoint_state)
+        n = _adjoint_state_decision_size(adjoint_state)
+        if solved_state.G is not None:
+            dJ_ds = _explicit_cotangent_basis(n, n - 2, dtype=lhs_dtype)
+        else:
+            dJ_ds = _explicit_cotangent_basis(n, n - 1, dtype=lhs_dtype)
+        adjoint = _solve_boozer_adjoint(adjoint_state, dJ_ds)
+        adjoint_gradient = _adjoint_coil_dofs_gradient(
+            adjoint_state.stream_group_vjps,
+            adjoint,
+            self.biotsavart,
+            current_coil_dofs,
+        )
+        return solved_state.iota, -adjoint_gradient
 
     def compute(self, *, compute_gradient=True):
         booz_surf = self.boozer_surface
         solved_state = _resolved_boozer_solved_runtime_state(booz_surf)
-        iota = solved_state.iota
-        G = solved_state.G
-        self._J = iota
+        self._J = solved_state.iota
         if not compute_gradient:
             return
-        adjoint_state = _resolved_boozer_adjoint_runtime_state(booz_surf)
-
-        # dJ/dx_inner for iota: unit vector at the iota position
-        lhs_dtype = _adjoint_state_dtype(adjoint_state)
-        n = _adjoint_state_decision_size(adjoint_state)
-        if G is not None:
-            dJ_ds = _explicit_cotangent_basis(n, n - 2, dtype=lhs_dtype)
-        else:
-            dJ_ds = _explicit_cotangent_basis(n, n - 1, dtype=lhs_dtype)
-
-        adj = _solve_boozer_adjoint(adjoint_state, dJ_ds)
         current_coil_dofs = _current_coil_dofs(self.biotsavart)
-
-        adjoint_gradient = _adjoint_coil_dofs_gradient(
-            adjoint_state.stream_group_vjps,
-            adj,
-            self.biotsavart,
+        self._J, self._dJ_by_dcoil_dofs = self._value_and_dJ_by_dcoil_dofs(
+            solved_state,
             current_coil_dofs,
         )
 
-        self._dJ = _coil_dofs_gradient_to_derivative(
-            self.biotsavart,
-            -adjoint_gradient,
-        )
+        self._dJ = _project_native_dJ_by_dcoil_dofs(self)
 
 
 class NonQuasiSymmetricRatioJAX(Optimizable):
@@ -1854,6 +1881,7 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
     def recompute_bell(self, parent=None):
         self._J = None
         self._dJ = None
+        self._dJ_by_dcoil_dofs = None
 
     def J(self):
         if self._J is None:
@@ -1862,9 +1890,21 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
 
     @derivative_dec
     def dJ(self):
-        if self._dJ is None:
-            self.compute(compute_gradient=True)
-        return self._dJ
+        return _public_dJ_from_native_cache(self)
+
+    def dJ_by_dcoil_dofs(self):
+        """Return the native flat free-coil-DOF gradient as a JAX array."""
+        if self._dJ_by_dcoil_dofs is None:
+            solved_state = _resolved_boozer_solved_runtime_state(self.boozer_surface)
+            current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(
+                self.biotsavart
+            )
+            self._J, self._dJ_by_dcoil_dofs = self._value_and_dJ_by_dcoil_dofs(
+                solved_state,
+                current_coil_dofs,
+                coil_set_spec,
+            )
+        return self._dJ_by_dcoil_dofs
 
     def _qs_objective_kwargs(self):
         booz_surf = self.boozer_surface
@@ -1900,12 +1940,6 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
 
         return _strict_scalar_grad(J_of_coils, current_coil_dofs)
 
-    def _direct_coil_derivative(self, current_coil_dofs, sdofs):
-        return _coil_dofs_gradient_to_derivative(
-            self.biotsavart,
-            self._direct_coil_gradient(current_coil_dofs, sdofs),
-        )
-
     def _compute_dJ_ds(self, coil_set_spec, sdofs, decision_size):
         qs_kwargs = self._qs_objective_kwargs()
 
@@ -1923,35 +1957,44 @@ class NonQuasiSymmetricRatioJAX(Optimizable):
             )
         )
 
-    def compute(self, *, compute_gradient=True):
-        booz_surf = self.boozer_surface
-        solved_state = _resolved_boozer_solved_runtime_state(booz_surf)
+    def _value_and_dJ_by_dcoil_dofs(
+        self,
+        solved_state,
+        current_coil_dofs,
+        coil_set_spec,
+    ):
         sdofs = solved_state.sdofs
-        current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(self.biotsavart)
-        self._J = self._compute_value(sdofs, coil_set_spec)
-        if not compute_gradient:
-            return
-        adjoint_state = _resolved_boozer_adjoint_runtime_state(booz_surf)
+        value = self._compute_value(sdofs, coil_set_spec)
         direct_gradient = self._direct_coil_gradient(current_coil_dofs, sdofs)
+        adjoint_state = _resolved_boozer_adjoint_runtime_state(self.boozer_surface)
         dJ_ds = self._compute_dJ_ds(
             coil_set_spec,
             sdofs,
             _adjoint_state_decision_size(adjoint_state),
         )
-
-        adj = _solve_boozer_adjoint(adjoint_state, dJ_ds)
-
+        adjoint = _solve_boozer_adjoint(adjoint_state, dJ_ds)
         adjoint_gradient = _adjoint_coil_dofs_gradient(
             adjoint_state.stream_group_vjps,
-            adj,
+            adjoint,
             self.biotsavart,
             current_coil_dofs,
         )
+        return value, direct_gradient - adjoint_gradient
 
-        self._dJ = _coil_dofs_gradient_to_derivative(
-            self.biotsavart,
-            direct_gradient - adjoint_gradient,
+    def compute(self, *, compute_gradient=True):
+        booz_surf = self.boozer_surface
+        solved_state = _resolved_boozer_solved_runtime_state(booz_surf)
+        current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(self.biotsavart)
+        if not compute_gradient:
+            self._J = self._compute_value(solved_state.sdofs, coil_set_spec)
+            return
+        self._J, self._dJ_by_dcoil_dofs = self._value_and_dJ_by_dcoil_dofs(
+            solved_state,
+            current_coil_dofs,
+            coil_set_spec,
         )
+
+        self._dJ = _project_native_dJ_by_dcoil_dofs(self)
 
 
 def compute_standard_surface_objective_gradients(
@@ -2052,21 +2095,19 @@ def compute_standard_surface_objective_gradients(
         non_qs_ratio.biotsavart,
     )
 
+    residual_gradient = residual_direct_gradient - residual_adjoint_gradient
+    iota_gradient = -iota_adjoint_gradient
+    non_qs_gradient = non_qs_direct_gradient - non_qs_adjoint_gradient
+
     boozer_residual._J = residual_value
-    boozer_residual._dJ = _coil_dofs_gradient_to_derivative(
-        boozer_residual.biotsavart,
-        residual_direct_gradient - residual_adjoint_gradient,
-    )
+    boozer_residual._dJ_by_dcoil_dofs = residual_gradient
+    boozer_residual._dJ = _project_native_dJ_by_dcoil_dofs(boozer_residual)
     iotas._J = iota_value
-    iotas._dJ = _coil_dofs_gradient_to_derivative(
-        iotas.biotsavart,
-        -iota_adjoint_gradient,
-    )
+    iotas._dJ_by_dcoil_dofs = iota_gradient
+    iotas._dJ = _project_native_dJ_by_dcoil_dofs(iotas)
     non_qs_ratio._J = non_qs_value
-    non_qs_ratio._dJ = _coil_dofs_gradient_to_derivative(
-        non_qs_ratio.biotsavart,
-        non_qs_direct_gradient - non_qs_adjoint_gradient,
-    )
+    non_qs_ratio._dJ_by_dcoil_dofs = non_qs_gradient
+    non_qs_ratio._dJ = _project_native_dJ_by_dcoil_dofs(non_qs_ratio)
 
     return boozer_residual.dJ(), iotas.dJ(), non_qs_ratio.dJ()
 

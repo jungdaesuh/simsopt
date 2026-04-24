@@ -262,11 +262,10 @@ def test_traceable_iota_target_penalty_uses_runtime_scalar_constants(
     _assert_allclose(penalty, 0.125)
 
 
-def test_value_and_direct_coil_derivative_hostifies_objective_value(
+def test_value_and_direct_coil_gradient_hostifies_objective_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Objective scalars should cross back to Python only via explicit device_get."""
-    biotsavart, _, _ = _build_shared_lineage_biotsavart()
     calls = {"count": 0}
     original_host_scalar = soj._host_scalar
 
@@ -284,12 +283,11 @@ def test_value_and_direct_coil_derivative_hostifies_objective_value(
         ),
     )
 
-    value, derivative = soj._value_and_direct_coil_derivative(
-        biotsavart,
+    value, gradient = soj._value_and_direct_coil_gradient(
         lambda coil_dofs: jnp.asarray(0.0, dtype=jnp.float64),
         jnp.asarray([0.0, 0.0], dtype=jnp.float64),
     )
 
     assert calls["count"] == 1
     assert value == pytest.approx(3.5)
-    _assert_allclose(derivative(biotsavart), [2.0, -3.0], dtype=float)
+    _assert_allclose(gradient, [2.0, -3.0], dtype=float)
