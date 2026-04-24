@@ -9157,11 +9157,10 @@ def restore_from_pytree(
 def single_stage_host_postprocess_required(
     *,
     use_target_lane,
-    write_restart_artifacts,
     write_full_artifacts,
 ):
     """Return whether final host graph restore/export is part of this run."""
-    return (not use_target_lane) or bool(write_restart_artifacts or write_full_artifacts)
+    return (not use_target_lane) or bool(write_full_artifacts)
 
 
 def restore_single_stage_host_state(
@@ -10745,7 +10744,6 @@ if __name__ == "__main__":
             )
             if single_stage_host_postprocess_required(
                 use_target_lane=use_target_lane,
-                write_restart_artifacts=write_restart_artifacts,
                 write_full_artifacts=write_full_artifacts,
             ) and not use_target_lane:
                 restore_single_stage_host_state(
@@ -11646,7 +11644,6 @@ if __name__ == "__main__":
             and not host_state_restored_for_final
             and single_stage_host_postprocess_required(
                 use_target_lane=use_target_lane,
-                write_restart_artifacts=write_restart_artifacts,
                 write_full_artifacts=write_full_artifacts,
             )
             and not use_target_lane
@@ -12257,7 +12254,6 @@ if __name__ == "__main__":
         not skip_outer_optimizer
         and single_stage_host_postprocess_required(
             use_target_lane=use_target_lane,
-            write_restart_artifacts=write_restart_artifacts,
             write_full_artifacts=write_full_artifacts,
         )
     ):
@@ -12286,8 +12282,8 @@ if __name__ == "__main__":
             surf_coils=surf_coils,
             hbt=hbt,
             VV=VV,
-            write_restart_artifacts=write_restart_artifacts,
-            write_host_restart_artifacts=not use_target_lane,
+            write_restart_artifacts=write_restart_artifacts and not use_target_lane,
+            write_host_restart_artifacts=write_restart_artifacts and not use_target_lane,
             write_full_artifacts=write_full_artifacts,
             timings=timings,
         )

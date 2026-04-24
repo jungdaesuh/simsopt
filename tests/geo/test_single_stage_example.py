@@ -4211,20 +4211,18 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(boozer_surface.res["iota"], run_dict["iota"])
         self.assertEqual(boozer_surface.res["G"], run_dict["G"])
 
-    def test_target_restart_artifacts_require_host_postprocess_boundary(self):
+    def test_target_restart_artifacts_do_not_require_host_postprocess_boundary(self):
         module = self.load_module()
 
-        self.assertTrue(
+        self.assertFalse(
             module.single_stage_host_postprocess_required(
                 use_target_lane=True,
-                write_restart_artifacts=True,
                 write_full_artifacts=False,
             )
         )
         self.assertFalse(
             module.single_stage_host_postprocess_required(
                 use_target_lane=True,
-                write_restart_artifacts=False,
                 write_full_artifacts=False,
             )
         )
