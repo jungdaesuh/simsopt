@@ -1612,7 +1612,7 @@ def main(parsed_args=None):
     Jf = SquaredFlux(new_surf, new_bs) # penalty on B dot n
     Jls = CurveLength(new_banana_curve) # penalty on curve length
     Jccdist = CurveCurveDistance(objective_curves, CC_THRESHOLD) #penalty on coil-to-coil distance
-    Jcsdist = CurveSurfaceDistance(objective_curves, new_surf, CS_THRESHOLD)
+    Jcsdist = CurveSurfaceDistance(objective_curves, lcfs_surf, CS_THRESHOLD)
 
     # Lp-norm curvature penalty (configurable via --curvature-p-norm)
     Jc = LpCurveCurvature(new_banana_curve, args.curvature_p_norm, CURVATURE_THRESHOLD)

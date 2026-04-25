@@ -10160,6 +10160,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "initialize_extra_kwargs": None,
             "curve_curve_curves": None,
             "curve_surface_curves": None,
+            "curve_surface_surface_label": None,
             "surface_surface_min_distance_labels": None,
             "results": None,
         }
@@ -10277,11 +10278,11 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 self.curve = SimpleNamespace(kappa=lambda: np.array([39.0, 41.0], dtype=float))
 
         class FakeCurveSurfaceDistance(FakeStage2Objective):
-            def __init__(self):
+            def __init__(self, curves, surface, minimum_distance):
                 super().__init__(0.15, [0.05, 0.06])
-                self.minimum_distance = 0.015
-                self.curves = ["curve_a", "curve_b"]
-                self.surface = fake_working_surface
+                self.minimum_distance = minimum_distance
+                self.curves = curves
+                self.surface = surface
 
             def shortest_distance(self):
                 return 0.02
@@ -10421,9 +10422,10 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             runtime["curve_curve_curves"] = tuple(curves)
             return FakeCurveDistance()
 
-        def fake_curve_surface_distance(curves, *_args, **_kwargs):
+        def fake_curve_surface_distance(curves, surface, minimum_distance, *_args, **_kwargs):
             runtime["curve_surface_curves"] = tuple(curves)
-            return FakeCurveSurfaceDistance()
+            runtime["curve_surface_surface_label"] = surface.label
+            return FakeCurveSurfaceDistance(curves, surface, minimum_distance)
 
         def fake_surface_surface_min_distance(surface_a, surface_b):
             runtime["surface_surface_min_distance_labels"] = (
@@ -10722,6 +10724,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertNotEqual(runtime["results"]["FINAL_LCFS_MAJOR_RADIUS_M"], 0.88)
         self.assertNotEqual(runtime["results"]["FINAL_LCFS_MINOR_RADIUS_M"], 0.12)
         self.assertEqual(runtime["results"]["SURFACE_VESSEL_MIN_DIST"], 0.045)
+        self.assertEqual(runtime["curve_surface_surface_label"], "lcfs")
 
     def test_stage2_main_injected_args_without_accept_offspec_flag_use_parser_default(self):
         runtime = self._run_stage2_main(
