@@ -824,6 +824,23 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 "banana_current_upper_bound",
             ],
         )
+        expected_alm_state = {
+            "hard_signed_constraint_values": [-0.008, 1.0, 0.2, -6500.0],
+            "surrogate_signed_constraint_values": [-0.008, 0.75, 0.2, -6500.0],
+            "hard_violation_values": [0.0, 1.0, 0.2, 0.0],
+            "constraint_activity_tolerances": [0.02, 0.08, 0.001, 0.001],
+            "max_feasibility_violation": 1.0,
+            "total": 7.317917333333333,
+            "grad": [10.2924, -0.3392],
+            "stationarity_norm": 10.297987881134837,
+        }
+        for key, expected in expected_alm_state.items():
+            np.testing.assert_allclose(
+                result[key],
+                expected,
+                rtol=1e-12,
+                atol=0.0,
+            )
 
     def test_evaluate_stage2_alm_problem_sanitizes_nonfinite_inputs(self):
         base_objective = _FakeBaseObjective(np.nan, [np.inf, np.nan])

@@ -36,17 +36,56 @@ TEST_DIR = (Path(__file__).parent / ".." / "test_files").resolve()
 class Testing(unittest.TestCase):
 
     def test_magnetic_field_sum_accumulates_without_list_sum(self):
+        class FakeField:
+            def __init__(self, B, dB_by_dX, A):
+                self._B = np.asarray(B, dtype=float)
+                self._dB_by_dX = np.asarray(dB_by_dX, dtype=float)
+                self._A = np.asarray(A, dtype=float)
+
+            def B(self):
+                return self._B.copy()
+
+            def dB_by_dX(self):
+                return self._dB_by_dX.copy()
+
+            def A(self):
+                return self._A.copy()
+
         field = MagneticFieldSum.__new__(MagneticFieldSum)
+        dB_by_dX = np.arange(18, dtype=float).reshape((2, 3, 3))
         field.Bfields = [
-            type("Field", (), {"B": lambda self: np.full((2, 3), 1.0)})(),
-            type("Field", (), {"B": lambda self: np.full((2, 3), 2.0)})(),
+            FakeField(
+                B=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+                dB_by_dX=dB_by_dX,
+                A=[[0.5, 1.0, 1.5], [2.0, 2.5, 3.0]],
+            ),
+            FakeField(
+                B=[[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]],
+                dB_by_dX=2.0 * dB_by_dX,
+                A=[[5.0, 10.0, 15.0], [20.0, 25.0, 30.0]],
+            ),
         ]
-        output = np.zeros((2, 3))
+        B_output = np.zeros((2, 3))
+        dB_output = np.zeros((2, 3, 3))
+        A_output = np.zeros((2, 3))
 
         with patch("simsopt.field.magneticfield.np.sum", side_effect=AssertionError("np.sum called")):
-            MagneticFieldSum._B_impl(field, output)
+            MagneticFieldSum._B_impl(field, B_output)
+            MagneticFieldSum._dB_by_dX_impl(field, dB_output)
+            MagneticFieldSum._A_impl(field, A_output)
 
-        np.testing.assert_allclose(output, np.full((2, 3), 3.0))
+        np.testing.assert_array_equal(
+            B_output,
+            np.array([[11.0, 22.0, 33.0], [44.0, 55.0, 66.0]]),
+        )
+        np.testing.assert_array_equal(
+            dB_output,
+            3.0 * dB_by_dX,
+        )
+        np.testing.assert_array_equal(
+            A_output,
+            np.array([[5.5, 11.0, 16.5], [22.0, 27.5, 33.0]]),
+        )
 
     def test_toroidal_field(self):
         R0test = 1.3

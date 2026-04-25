@@ -83,6 +83,7 @@ class Testing(unittest.TestCase):
         curves = [CountingCurve(float(i)) for i in range(4)]
         objective = CurveCurveDistance.__new__(CurveCurveDistance)
         objective.curves = curves
+        objective.downsample = 1
         objective.candidates = [(0, 1), (0, 2)]
         objective.compute_candidates = lambda: None
         objective.J_jax = lambda gamma1, l1, gamma2, l2: 1.0
@@ -92,7 +93,7 @@ class Testing(unittest.TestCase):
         objective.thisgrad3 = lambda gamma1, l1, gamma2, l2: np.ones_like(l2)
 
         self.assertEqual(objective.J(), 2.0)
-        objective.dJ(partials=True)
+        derivative = objective.dJ(partials=True)
 
         self.assertEqual(curves[0].gamma_calls, 2)
         self.assertEqual(curves[0].gammadash_calls, 2)
@@ -100,6 +101,35 @@ class Testing(unittest.TestCase):
         self.assertEqual(curves[2].gamma_calls, 2)
         self.assertEqual(curves[3].gamma_calls, 0)
         self.assertEqual(curves[3].vjp_calls, 0)
+        np.testing.assert_allclose(derivative.data[curves[0]], [24.0])
+        np.testing.assert_allclose(derivative.data[curves[1]], [12.0])
+        np.testing.assert_allclose(derivative.data[curves[2]], [12.0])
+        self.assertNotIn(curves[3], derivative.data)
+
+    def test_curve_curve_distance_downsample_reuses_upstream_contract(self):
+        class SampledCurve:
+            def __init__(self, points):
+                self._gamma = np.asarray(points, dtype=float)
+
+            def gamma(self):
+                return self._gamma.copy()
+
+            def gammadash(self):
+                return np.ones_like(self._gamma)
+
+        curves = [
+            SampledCurve([[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [10.0, 0.0, 0.0]]),
+            SampledCurve([[5.0, 0.0, 0.0], [0.1, 0.0, 0.0], [15.0, 0.0, 0.0]]),
+        ]
+        objective = CurveCurveDistance.__new__(CurveCurveDistance)
+        objective.curves = curves
+        objective.minimum_distance = 10.0
+        objective.downsample = 2
+        objective.candidates = [(0, 1)]
+        objective.compute_candidates = lambda: None
+
+        self.assertEqual(objective.downsample, 2)
+        np.testing.assert_allclose(objective.shortest_distance(), 5.0)
 
     def subtest_curve_length_taylor_test(self, curve):
         J = CurveLength(curve)

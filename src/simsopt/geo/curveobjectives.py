@@ -154,10 +154,26 @@ class LpCurveTorsion(Optimizable):
     return_fn_map = {'J': J, 'dJ': dJ}
 
 
-def cc_distance_pure(gamma1, l1, gamma2, l2, minimum_distance):
+def _downsample_quadrature(values, downsample):
+    return values[::downsample, :]
+
+
+def cc_distance_pure(gamma1, l1, gamma2, l2, minimum_distance, downsample=1):
     """
-    This function is used in a Python+Jax implementation of the curve-curve distance formula.
+    Compute the curve-curve distance penalty between two curves.
+
+    Args:
+        gamma1: Points along the first curve.
+        l1: Tangent vectors along the first curve.
+        gamma2: Points along the second curve.
+        l2: Tangent vectors along the second curve.
+        minimum_distance: The minimum allowed distance between curves.
+        downsample: Factor by which to downsample quadrature points.
     """
+    gamma1 = _downsample_quadrature(gamma1, downsample)
+    gamma2 = _downsample_quadrature(gamma2, downsample)
+    l1 = _downsample_quadrature(l1, downsample)
+    l2 = _downsample_quadrature(l2, downsample)
     dists = jnp.sqrt(jnp.sum((gamma1[:, None, :] - gamma2[None, :, :])**2, axis=2))
     alen = jnp.linalg.norm(l1, axis=1)[:, None] * jnp.linalg.norm(l2, axis=1)[None, :]
     return jnp.sum(alen * jnp.maximum(minimum_distance-dists, 0)**2)/(gamma1.shape[0]*gamma2.shape[0])
@@ -185,11 +201,13 @@ class CurveCurveDistance(Optimizable):
 
     """
 
-    def __init__(self, curves, minimum_distance, num_basecurves=None):
+    def __init__(self, curves, minimum_distance, num_basecurves=None, downsample=1):
         self.curves = curves
         self.minimum_distance = minimum_distance
+        self.downsample = downsample
 
-        self.J_jax = jit(lambda gamma1, l1, gamma2, l2: cc_distance_pure(gamma1, l1, gamma2, l2, minimum_distance))
+        dsample = downsample
+        self.J_jax = jit(lambda gamma1, l1, gamma2, l2: cc_distance_pure(gamma1, l1, gamma2, l2, minimum_distance, dsample))
         self.thisgrad0 = jit(lambda gamma1, l1, gamma2, l2: grad(self.J_jax, argnums=0)(gamma1, l1, gamma2, l2))
         self.thisgrad1 = jit(lambda gamma1, l1, gamma2, l2: grad(self.J_jax, argnums=1)(gamma1, l1, gamma2, l2))
         self.thisgrad2 = jit(lambda gamma1, l1, gamma2, l2: grad(self.J_jax, argnums=2)(gamma1, l1, gamma2, l2))
@@ -201,23 +219,33 @@ class CurveCurveDistance(Optimizable):
     def recompute_bell(self, parent=None):
         self.candidates = None
 
+    def _downsampled_gamma(self, curve_index):
+        return _downsample_quadrature(self.curves[curve_index].gamma(), self.downsample)
+
     def compute_candidates(self):
         if self.candidates is None:
+            points = [_downsample_quadrature(c.gamma(), self.downsample) for c in self.curves]
             candidates = sopp.get_pointclouds_closer_than_threshold_within_collection(
-                [c.gamma() for c in self.curves], self.minimum_distance, self.num_basecurves)
+                points, self.minimum_distance, self.num_basecurves)
             self.candidates = candidates
 
     def shortest_distance_among_candidates(self):
         self.compute_candidates()
         from scipy.spatial.distance import cdist
-        return min([self.minimum_distance] + [np.min(cdist(self.curves[i].gamma(), self.curves[j].gamma())) for i, j in self.candidates])
+        return min([self.minimum_distance] + [
+            np.min(cdist(self._downsampled_gamma(i), self._downsampled_gamma(j)))
+            for i, j in self.candidates
+        ])
 
     def shortest_distance(self):
         self.compute_candidates()
         if len(self.candidates) > 0:
             return self.shortest_distance_among_candidates()
         from scipy.spatial.distance import cdist
-        return min([np.min(cdist(self.curves[i].gamma(), self.curves[j].gamma())) for i in range(len(self.curves)) for j in range(i)])
+        return min([
+            np.min(cdist(self._downsampled_gamma(i), self._downsampled_gamma(j)))
+            for i in range(len(self.curves)) for j in range(i)
+        ])
 
     def J(self):
         """
