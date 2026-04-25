@@ -54,6 +54,29 @@ def _lbfgsb_maxcor_measure_one_command(maxcor, dimension, maxiter, repeat, warmu
     ]
 
 
+def _optimize_result(fun, jac, nit, nfev, success):
+    return SimpleNamespace(
+        fun=fun,
+        jac=np.array(jac),
+        nit=nit,
+        nfev=nfev,
+        success=success,
+    )
+
+
+def _assert_lbfgsb_minimize_call(test_case, minimize_call, dimension, maxiter, maxcor):
+    args, kwargs = minimize_call
+    test_case.assertEqual(len(args), 2)
+    np.testing.assert_array_equal(args[1], np.full(dimension, 0.35, dtype=float))
+    test_case.assertEqual(kwargs["jac"], True)
+    test_case.assertEqual(kwargs["method"], "L-BFGS-B")
+    test_case.assertEqual(kwargs["bounds"], [(-1.0, 1.0)] * dimension)
+    test_case.assertEqual(
+        kwargs["options"],
+        {"maxiter": maxiter, "maxcor": maxcor, "ftol": 1.0e-15, "gtol": 1.0e-15},
+    )
+
+
 class BananaImpactBenchmarkTests(unittest.TestCase):
     def test_measure_operation_records_timing_and_memory_contract(self):
         calls = {"build": 0, "operation": 0}
@@ -331,29 +354,77 @@ class BananaImpactBenchmarkTests(unittest.TestCase):
         )
 
     def test_lbfgsb_maxcor_in_process_records_payload_contract(self):
-        result = benchmark_lbfgsb_maxcor._measure_maxcor_in_process(
-            maxcor=20,
-            dimension=6,
-            maxiter=3,
-            repeat=1,
-            warmup=0,
-        )
+        minimize_results = [
+            _optimize_result(9.0, [9.0], 9, 9, True),
+            _optimize_result(1.5, [0.125, -0.25], 3, 5, True),
+            _optimize_result(2.5, [0.5, -0.375], 4, 6, False),
+        ]
 
-        self.assertEqual(result["maxcor"], 20)
-        self.assertEqual(result["dimension"], 6)
-        self.assertEqual(result["maxiter"], 3)
-        self.assertEqual(result["repeat"], 1)
-        self.assertEqual(result["warmup"], 0)
-        self.assertGreaterEqual(result["seconds_min"], 0.0)
-        self.assertGreaterEqual(result["seconds_median"], result["seconds_min"])
-        self.assertGreaterEqual(result["seconds_mean"], result["seconds_min"])
-        self.assertGreaterEqual(result["python_peak_bytes"], 0)
-        self.assertGreaterEqual(result["process_peak_rss_bytes"], 0)
-        self.assertGreaterEqual(result["iterations_median"], 0)
-        self.assertGreaterEqual(result["function_evaluations_median"], 1)
-        self.assertGreaterEqual(result["final_objective_median"], 0.0)
-        self.assertGreaterEqual(result["gradient_inf_norm_median"], 0.0)
-        self.assertIn(result["success_count"], (0, 1))
+        with patch.object(
+            benchmark_lbfgsb_maxcor.gc,
+            "collect",
+            return_value=0,
+        ) as gc_collect, patch.object(
+            benchmark_lbfgsb_maxcor.tracemalloc,
+            "start",
+        ) as tracemalloc_start, patch.object(
+            benchmark_lbfgsb_maxcor.tracemalloc,
+            "get_traced_memory",
+            return_value=(123, 999),
+        ) as get_traced_memory, patch.object(
+            benchmark_lbfgsb_maxcor.tracemalloc,
+            "stop",
+        ) as tracemalloc_stop, patch.object(
+            benchmark_lbfgsb_maxcor,
+            "_maxrss_bytes",
+            return_value=8888,
+        ) as maxrss_bytes, patch.object(
+            benchmark_lbfgsb_maxcor.time,
+            "perf_counter",
+            side_effect=[10.0, 10.125, 20.0, 20.375],
+        ) as perf_counter, patch.object(
+            benchmark_lbfgsb_maxcor,
+            "minimize",
+            side_effect=minimize_results,
+        ) as minimize:
+            result = benchmark_lbfgsb_maxcor._measure_maxcor_in_process(
+                maxcor=20,
+                dimension=6,
+                maxiter=3,
+                repeat=2,
+                warmup=1,
+            )
+
+        self.assertEqual(minimize.call_count, 3)
+        for minimize_call in minimize.call_args_list:
+            _assert_lbfgsb_minimize_call(self, minimize_call, 6, 3, 20)
+
+        gc_collect.assert_called_once_with()
+        tracemalloc_start.assert_called_once_with()
+        get_traced_memory.assert_called_once_with()
+        tracemalloc_stop.assert_called_once_with()
+        maxrss_bytes.assert_called_once_with()
+        self.assertEqual(perf_counter.call_count, 4)
+        self.assertEqual(
+            result,
+            {
+                "maxcor": 20,
+                "dimension": 6,
+                "maxiter": 3,
+                "repeat": 2,
+                "warmup": 1,
+                "seconds_min": 0.125,
+                "seconds_median": 0.25,
+                "seconds_mean": 0.25,
+                "python_peak_bytes": 999,
+                "process_peak_rss_bytes": 8888,
+                "iterations_median": 3.5,
+                "function_evaluations_median": 5.5,
+                "final_objective_median": 2.0,
+                "gradient_inf_norm_median": 0.375,
+                "success_count": 1,
+            },
+        )
 
     def test_lbfgsb_maxcor_report_declares_default_and_requested_values(self):
         measured_entries = [
