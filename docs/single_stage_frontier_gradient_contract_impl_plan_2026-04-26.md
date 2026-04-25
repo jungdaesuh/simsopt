@@ -128,6 +128,166 @@ archive_eligible
 recommendation_eligible
 ```
 
+## Impact Measurement Plan
+
+Measure before/after impact in layers. The first correctness patch should not be judged primarily by frontier hypervolume or final iota gain; its main outcome is that L-BFGS-B no longer receives accepted smooth objective evaluations whose scalar value and gradient describe different functions.
+
+### Measurement workloads
+
+Use the same workload set before and after each patch:
+
+1. Fake analytic objective harness
+   - exercises weighted, Chebyshev, epsilon, and Boozer-trust frontier scalarizations
+   - has cheap exact objective/gradient calls
+   - used for strict finite-difference contract tests
+2. Short live-style single-seed smoke run
+   - uses the real frontier objective assembly path
+   - keeps iteration/evaluation budget small
+   - used to catch state rollback, callback, and artifact regressions
+3. Canonical frontier campaign
+   - uses the same seed artifacts, scalarization mode, lane budget, and worker policy before and after
+   - used for archive, hypervolume, certification, wall-clock, memory, and resume behavior
+
+Every run should record:
+
+```text
+git_sha
+command
+input_seed_artifacts
+scalarization_mode
+frontier_reference_mode
+maxiter_or_eval_budget
+lane_count
+worker_policy
+thread_environment
+output_root
+```
+
+For live runs with multiple workers, set and record per-lane thread controls before NumPy/SciPy/native kernels initialize, for example `OMP_NUM_THREADS=1` unless the run intentionally allocates more cores per lane.
+
+### Primary metrics
+
+| Layer | Metric | Expected after Patch 1 |
+| --- | --- | --- |
+| Gradient contract | accepted smooth directional finite-difference relative error, p50/p95/max | finite and within the configured tolerance |
+| Gradient contract | accepted evaluations where `total` changed without matching `grad` change | exactly `0` |
+| Rejection safety | rejected trials that update accepted surface/model state | exactly `0` |
+| Rejection safety | rejected trials that update `last_successful_eval`, incumbent, checkpoint, best-feasible state, or optimizer-feasible archive records | exactly `0` |
+| Optimizer behavior | L-BFGS-B abnormal terminations and line-search failures | not worse, ideally lower |
+| Optimizer behavior | `nfev / nit`, final gradient norm, accepted-step ratio | diagnostic; compare to baseline |
+| Search accounting | reject counts by reason: topology, hardware, invalid surface, Boozer trust | explicit and stable enough to audit |
+| Archive quality | nondominated feasible count, certified archive count, hypervolume, recommendation stability | tracked, but not a hard Patch 1 gate |
+| Physics metrics | raw `iota`, `boozer_surface_volume`, `J_QS`, `J_Boozer`, hardware margins, topology survival | no silent semantic drift |
+| Runtime and memory | wall time, objective-eval time, peak RSS, cache hits/misses, cache size, resume success | tracked; hard gates start in cache/lane patches |
+
+### Summary row schema
+
+Add or generate a summary row per run with at least:
+
+```text
+git_sha
+run_id
+mode
+scalarization_mode
+frontier_reference_mode
+success
+status_message
+nit
+nfev
+njev
+nfev_per_iteration
+line_search_failure_count
+accepted_step_count
+objective_eval_count
+accepted_step_ratio
+rejected_topology_count
+rejected_hardware_count
+rejected_invalid_surface_count
+rejected_boozer_trust_count
+contract_violation_count
+rejected_state_leak_count
+fd_error_p50
+fd_error_p95
+fd_error_max
+final_grad_norm
+archive_member_count
+nondominated_feasible_count
+certified_archive_count
+hypervolume
+recommendation_count
+final_iota
+final_boozer_surface_volume
+final_j_qs
+final_j_boozer
+min_hardware_margin
+topology_survival_fraction
+wall_seconds
+peak_rss_mb
+cache_hit_count
+cache_miss_count
+cache_eviction_count
+resume_success
+corrupt_json_artifact_count
+```
+
+The extraction script should treat missing fields as missing data, not as zero, unless the field is explicitly defined as a count emitted by the run. Zero and missing have different meanings for rejected trials, cache counters, and archive certification.
+
+### Patch-specific gates
+
+Patch 1 correctness gates:
+
+- `contract_violation_count == 0`
+- `rejected_state_leak_count == 0`
+- rejected topology/hardware trials are labeled rejected in callbacks and artifacts
+- `frontier_rank_total` or `archive_rank_total` is never returned to SciPy as `total`
+- fake objective finite-difference errors meet strict tolerances
+- live-style smoke finite-difference errors meet the looser configured tolerance
+- line-search failure count and abnormal termination count are not materially worse than baseline
+
+Patch 2 differentiable hardware gates:
+
+- hardware penalty helper returns both penalty and gradient
+- finite differences match the analytic hardware penalty gradient
+- missing signed residuals or gradients cause helper failure or hard rejection, never value-only fallback
+- hardware feasibility improves or remains explainably unchanged at comparable optimization budget
+
+Patch 3 reporting gates:
+
+- `optimizer_total`, `archive_rank_total`, certification status, and recommendation eligibility are separately emitted
+- `archive_rank_total != optimizer_total` is allowed and tested
+- final reports distinguish optimizer acceptance from archive ranking and final certification
+
+Patch 4 scalarization/normalization gates:
+
+- compare nondominated feasible count, certified archive count, hypervolume, and recommendation stability
+- require raw metric reporting alongside normalized metric reporting
+- do not claim scalarization improvement from a single lane; use the canonical campaign workload
+
+Patch 5 cache/atomic-write gates:
+
+- peak RSS scales with cache capacity, not total evaluation count
+- cache hit/miss/eviction counters are emitted
+- interrupted-write tests leave either old valid JSON or new valid JSON
+- resume succeeds from the written artifacts
+
+Patch 6 NSGA3 gates:
+
+- invalid reference mode, invalid objective count, invalid reference-direction shape, and unsupported banana-current mode fail before evaluator construction
+- population size and reference-direction count policy is visible in the manifest
+
+Patch 7 lane-isolation gates:
+
+- worker policy is recorded
+- live multi-lane runs use subprocess/process isolation by default
+- fake lanes that mutate lane-local state produce distinct lane artifacts with no cross-lane leakage
+- multi-worker and single-worker runs with the same seed contract produce comparable archive accounting
+
+### Interpretation rules
+
+Some metrics may move in the "wrong" direction after the first correctness patch and still indicate an improvement. Accepted-step count may decrease if topology or hardware failures stop being treated as accepted penalized smooth evaluations. That is acceptable when the rejected-trial counters increase, accepted state is restored, and optimizer-feasible archive records remain clean.
+
+Do not require immediate hypervolume improvement for Patch 1. The expected benefit is optimizer trustworthiness: fewer inconsistent curvature updates, cleaner line-search decisions, and artifacts that state why a candidate was accepted, rejected, ranked, or certified.
+
 ## Implementation Plan
 
 ### Phase 0: Lock the current defect with tests
