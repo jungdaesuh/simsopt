@@ -1,0 +1,13 @@
+
+===== Starting single stage optimization for mpol = 10 =====
+Single-stage search policy (donor_class=serialized_surface_state, policy=preserve_first, adaptive_failure_penalty_weight=1, invalid_step_retry_budget=2, retry_step_shrink_factor=0.35, initial_phase_auto_enabled=False)
+Generating Boozer least squares surface...
+BFGS solve - False  iter=664, iota=0.2265058587240917, ||grad||_inf = 2.590e-10
+NEWTON solve - True  iter=1, iota=0.2265058587200608, ||grad||_inf = 8.545e-16
+G0 from solve: 2.010619302541896
+iota from solve: 0.22650585872006085
+Volume: 0.059907180256805706
+Skipping single-stage optimizer because --init-only was provided.
+Volume: 0.059907180256805706
+Iota: 0.22650585872006085
+Max Curvature: 99.99440906282669

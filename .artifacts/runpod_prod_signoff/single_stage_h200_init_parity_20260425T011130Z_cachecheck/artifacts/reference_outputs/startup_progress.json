@@ -1,0 +1,21 @@
+{
+  "completed_stages": [
+    "output_root_ready",
+    "warm_start_state_loaded",
+    "stage2_seed_resolved",
+    "surface_geometry_ready",
+    "biotsavart_ready",
+    "plasma_surface_loaded",
+    "warm_start_surface_projected",
+    "optimizer_output_dir_ready"
+  ],
+  "timings": {
+    "warm_start_state_loaded_s": 2.4903565645217896e-05,
+    "stage2_seed_resolved_s": 0.2322263978421688,
+    "surface_geometry_ready_s": 0.0006350167095661163,
+    "biotsavart_ready_s": 0.18798917531967163,
+    "plasma_surface_loaded_s": 0.00011745095252990723,
+    "warm_start_surface_projected_s": 1.996755599975586e-06
+  },
+  "current_stage": "optimizer_output_dir_ready"
+}
