@@ -1612,6 +1612,51 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_newton_polish_traceable_materialized_policy_keeps_operator_step(
+        self, monkeypatch
+    ):
+        """Dense compatibility metadata must not force dense Newton steps."""
+
+        observed = {"calls": 0}
+
+        def exact_operator_solve(_matvec, rhs, *, tol):
+            del tol
+            observed["calls"] += 1
+            return rhs, jnp.asarray(True)
+
+        monkeypatch.setattr(
+            _opt,
+            "_solve_square_array_system_operator_only",
+            exact_operator_solve,
+        )
+        _opt._make_traceable_newton_polish_runner.cache_clear()
+
+        x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        result = _opt.newton_polish_traceable(
+            lambda x: 0.5 * jnp.dot(x, x),
+            x0,
+            maxiter=1,
+            tol=1e-12,
+            stab=0.0,
+            materialize_hessian=True,
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(result["x"]),
+            np.zeros_like(np.asarray(x0)),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(result["hessian"]),
+            np.eye(x0.size),
+            atol=1e-12,
+        )
+        assert bool(result["success"]) is True
+        assert bool(result["hessian_materialized"]) is True
+        assert observed["calls"] == 1
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_newton_polish_traceable_nonfinite_linear_step_stalls_without_dense_fallback(
         self, monkeypatch
     ):
@@ -1632,6 +1677,7 @@ class TestBoozerSurfaceJAXClassPrivate:
             fake_operator_only_linear_solve,
         )
         monkeypatch.setattr(_opt, "_materialize_dense_hessian", forbid_dense_hessian)
+        _opt._make_traceable_newton_polish_runner.cache_clear()
 
         x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
         result = _opt.newton_polish_traceable(
@@ -1665,6 +1711,7 @@ class TestBoozerSurfaceJAXClassPrivate:
             "_solve_square_array_system_operator_only",
             fake_operator_only_linear_solve,
         )
+        _opt._make_traceable_newton_polish_runner.cache_clear()
 
         x0 = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
         result = _opt.newton_polish_traceable(
@@ -1673,6 +1720,7 @@ class TestBoozerSurfaceJAXClassPrivate:
             maxiter=3,
             tol=1e-12,
             stab=0.0,
+            materialize_hessian=False,
             progress_callback=lambda *_args: observed.__setitem__(
                 "progress_calls",
                 observed["progress_calls"] + 1,

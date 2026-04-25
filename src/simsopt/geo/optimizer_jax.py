@@ -2152,6 +2152,13 @@ def _make_traceable_newton_polish_runner(
         )
         val0, grad0 = val_and_grad_fn(x_init)
         norm0 = jnp.linalg.norm(grad0)
+        hessian_size = int(np.asarray(jnp.asarray(x_init).size))
+        materialize_final_hessian, dense_report = _resolve_dense_hessian_materialization(
+            requested_materialize_hessian,
+            hessian_size,
+            x_init.dtype,
+            max_dense_hessian_bytes,
+        )
 
         def cond_fun(state):
             return (
@@ -2219,15 +2226,8 @@ def _make_traceable_newton_polish_runner(
 
         val_final, grad_final = val_and_grad_fn(state["x"])
         norm_final = jnp.linalg.norm(grad_final)
-        hessian_size = int(np.asarray(jnp.asarray(x_init).size))
-        materialize_hessian, dense_report = _resolve_dense_hessian_materialization(
-            requested_materialize_hessian,
-            hessian_size,
-            x_init.dtype,
-            max_dense_hessian_bytes,
-        )
         H = None
-        if materialize_hessian:
+        if materialize_final_hessian:
             H = _stabilize_dense_hessian(
                 _materialize_dense_hessian(hvp_fn, state["x"]),
                 stab,
@@ -2240,7 +2240,7 @@ def _make_traceable_newton_polish_runner(
             "hessian": H,
             "nit": state["nit"],
             "success": norm_final <= tol_value,
-            "hessian_materialized": materialize_hessian,
+            "hessian_materialized": materialize_final_hessian,
             **dense_report,
         }
 
@@ -2264,7 +2264,8 @@ def newton_polish_traceable(
 
     This variant keeps all loop state and step decisions inside JAX control
     flow so higher-level traced objectives can invoke the Newton stage without
-    crossing back into Python.
+    crossing back into Python. Newton corrections use the operator-only GMRES
+    path; the dense Hessian policy only controls final compatibility metadata.
     """
     runner = _make_traceable_newton_polish_runner(
         objective_fn,
