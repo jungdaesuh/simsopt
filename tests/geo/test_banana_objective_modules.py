@@ -814,6 +814,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             ),
         )
 
+        self.assertNotIn("diagnostics_included", result)
         self.assertAlmostEqual(result["base_value"], 3.5)
         self.assertEqual(
             result["constraint_names"],
