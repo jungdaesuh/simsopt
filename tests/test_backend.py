@@ -140,13 +140,14 @@ def _assert_synced_runtime_env(
     backend, *, mode: str, backend_name: str, platform: str, strict: bool
 ) -> None:
     runtime_platform = "METAL" if platform == "metal" else platform
+    runtime_platforms = "cuda,cpu" if platform == "cuda" else runtime_platform
     assert os.environ["SIMSOPT_BACKEND_MODE"] == mode
     assert os.environ["SIMSOPT_BACKEND_STRICT"] == ("1" if strict else "0")
     assert os.environ["SIMSOPT_BACKEND"] == backend_name
     assert os.environ["STAGE2_BACKEND"] == backend_name
     assert os.environ["SIMSOPT_JAX_PLATFORM"] == runtime_platform
     assert os.environ["SIMSOPT_JAX_BACKEND"] == runtime_platform
-    assert os.environ["JAX_PLATFORMS"] == runtime_platform
+    assert os.environ["JAX_PLATFORMS"] == runtime_platforms
 
 
 def _assert_backend_policy(
@@ -1444,7 +1445,7 @@ def test_apply_jax_runtime_config_applies_fast_mode_transfer_guard(monkeypatch):
     backend.set_backend("jax_gpu_fast", configure_runtime=False)
     backend.apply_jax_runtime_config()
 
-    assert ("jax_platforms", "cuda") in calls
+    assert ("jax_platforms", "cuda,cpu") in calls
     assert ("jax_enable_x64", True) in calls
     assert ("jax_debug_nans", False) in calls
     assert ("jax_transfer_guard", "log") in calls
@@ -1494,7 +1495,7 @@ def test_apply_jax_runtime_config_warns_without_cuda_determinism_flag(
     with pytest.warns(RuntimeWarning, match="XLA_FLAGS does not enable"):
         backend.apply_jax_runtime_config()
 
-    assert ("jax_platforms", "cuda") in calls
+    assert ("jax_platforms", "cuda,cpu") in calls
 
 
 @pytest.mark.parametrize(
@@ -1519,7 +1520,7 @@ def test_apply_jax_runtime_config_accepts_supported_cuda_determinism_flags(
     backend.set_backend("jax_gpu_parity", configure_runtime=False)
     backend.apply_jax_runtime_config()
 
-    assert ("jax_platforms", "cuda") in calls
+    assert ("jax_platforms", "cuda,cpu") in calls
 
 
 def test_apply_jax_runtime_config_warns_on_initialized_backend_mismatch(monkeypatch):
@@ -1541,7 +1542,7 @@ def test_apply_jax_runtime_config_warns_on_initialized_backend_mismatch(monkeypa
     with pytest.warns(RuntimeWarning, match="active JAX default backend is 'cpu'"):
         backend.apply_jax_runtime_config()
 
-    assert ("jax_platforms", "cuda") in calls
+    assert ("jax_platforms", "cuda,cpu") in calls
 
 
 def test_restore_loaded_jax_runtime_config_restores_nullable_fields_to_none():
@@ -1635,7 +1636,7 @@ def test_apply_jax_runtime_config_accepts_last_override_to_enabled_flag(
     backend.set_backend("jax_gpu_parity", strict=True, configure_runtime=False)
     backend.apply_jax_runtime_config()
 
-    assert ("jax_platforms", "cuda") in calls
+    assert ("jax_platforms", "cuda,cpu") in calls
 
 
 def test_ensure_gpu_determinism_xla_flag_preserves_unrelated_xla_flags():

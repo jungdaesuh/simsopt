@@ -261,6 +261,7 @@ def preparse_entrypoint_jax_platform(
 def apply_entrypoint_jax_runtime_env(platform: str | None) -> str | None:
     """Synchronize platform/x64 env vars before any entrypoint imports ``jax``."""
     normalized = _normalize_entrypoint_platform_spec(platform, allow_multiple=True)
+    normalized = _ensure_cpu_callback_lane(normalized)
     os.environ.setdefault(_JAX_ENABLE_X64_ENV, "True")
     for name in _ENTRYPOINT_PLATFORM_ENV_VARS:
         os.environ.pop(name, None)

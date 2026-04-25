@@ -637,6 +637,16 @@ def test_repo_pythonpath_env_sets_all_platform_selectors(monkeypatch):
     assert env["SIMSOPT_JAX_BACKEND"] == "cpu"
 
 
+def test_repo_pythonpath_env_keeps_cpu_visible_for_cuda_callbacks(monkeypatch):
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+
+    env = repo_pythonpath_env(platform="cuda")
+
+    assert env["JAX_PLATFORMS"] == "cuda,cpu"
+    assert env["SIMSOPT_JAX_PLATFORM"] == "cuda"
+    assert env["SIMSOPT_JAX_BACKEND"] == "cuda"
+
+
 def _assert_benchmark_module_import_bootstraps_local_simsopt(module_name: str) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     completed = subprocess.run(
@@ -903,7 +913,7 @@ def test_repo_pythonpath_env_bundled_cuda_clears_local_toolchain_overrides(
     assert env["PATH"] == "/usr/bin"
     assert "LD_LIBRARY_PATH" not in env
     assert env["XLA_FLAGS"] == "--xla_gpu_deterministic_ops=true"
-    assert env["JAX_PLATFORMS"] == "cuda"
+    assert env["JAX_PLATFORMS"] == "cuda,cpu"
     assert env["SIMSOPT_JAX_PLATFORM"] == "cuda"
     assert env["SIMSOPT_JAX_BACKEND"] == "cuda"
 

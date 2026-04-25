@@ -86,7 +86,7 @@ _SYNCED_RUNTIME_ENV_VALUES = (
     (_BACKEND_LEGACY_ENV, "backend"),
     (_PLATFORM_ENV, "jax_platform"),
     (_PLATFORM_LEGACY_ENV, "jax_platform"),
-    (_JAX_PLATFORMS_ENV, "jax_platform"),
+    (_JAX_PLATFORMS_ENV, "jax_platforms"),
 )
 _GPU_DETERMINISM_XLA_FLAGS = (
     "--xla_gpu_deterministic_ops",
@@ -604,6 +604,12 @@ def _runtime_jax_platform_value(platform: str) -> str:
     return platform
 
 
+def _runtime_jax_platforms_value(platform: str) -> str:
+    if platform == "cuda":
+        return "cuda,cpu"
+    return _runtime_jax_platform_value(platform)
+
+
 def _runtime_jax_backend_name(platform: str) -> str:
     if platform == "cuda":
         return "gpu"
@@ -1014,6 +1020,8 @@ def _runtime_env_value(attribute_name: str, value: object) -> str:
         return "1" if bool(value) else "0"
     if value is None:
         return ""
+    if attribute_name == "jax_platforms":
+        return _runtime_jax_platforms_value(str(value))
     if attribute_name == "jax_platform":
         return _runtime_jax_platform_value(str(value))
     return str(value)
@@ -1592,7 +1600,10 @@ def apply_jax_runtime_config() -> None:
 
     import jax
 
-    jax.config.update("jax_platforms", _runtime_jax_platform_value(config.jax_platform))
+    jax.config.update(
+        "jax_platforms",
+        _runtime_jax_platforms_value(config.jax_platform),
+    )
     jax.config.update("jax_enable_x64", requires_x64(config.mode))
     jax.config.update("jax_debug_nans", config.debug_nans)
     if config.transfer_guard is not None:
@@ -1628,8 +1639,12 @@ def set_backend(
     _cached_backend_config = config
     _reset_backend_runtime_caches()
     for env_name, attribute_name in _SYNCED_RUNTIME_ENV_VALUES:
+        config_attribute_name = (
+            "jax_platform" if attribute_name == "jax_platforms" else attribute_name
+        )
         os.environ[env_name] = _runtime_env_value(
-            attribute_name, getattr(config, attribute_name)
+            attribute_name,
+            getattr(config, config_attribute_name),
         )
     if configure_runtime:
         apply_jax_runtime_config()

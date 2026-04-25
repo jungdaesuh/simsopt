@@ -257,7 +257,8 @@ def _apply_platform_env(env: dict[str, str], platform: str) -> None:
         env.pop(key, None)
     if platform == "auto":
         return
-    env["JAX_PLATFORMS"] = platform
+    jax_platforms = "cuda,cpu" if platform == "cuda" else platform
+    env["JAX_PLATFORMS"] = jax_platforms
     env["SIMSOPT_JAX_PLATFORM"] = platform
     env["SIMSOPT_JAX_BACKEND"] = platform
     if platform == "cuda":

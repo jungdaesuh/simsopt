@@ -531,6 +531,7 @@ def case_entrypoint_runtime_helper_adds_detected_cuda_toolchain_root() -> None:
         (cuda_root / "bin").mkdir(parents=True)
         repo_bootstrap._DEFAULT_CUDA_TOOLCHAIN_ROOT = cuda_root
         os.environ["PATH"] = "/usr/bin"
+        os.environ.pop("SIMSOPT_JAX_CUDA_LIBRARY_MODE", None)
         os.environ.pop("XLA_FLAGS", None)
 
         requested = configure_entrypoint_jax_runtime(
@@ -539,6 +540,9 @@ def case_entrypoint_runtime_helper_adds_detected_cuda_toolchain_root() -> None:
         )
 
         assert requested == "cuda"
+        assert os.environ["JAX_PLATFORMS"] == "cuda,cpu"
+        assert os.environ["SIMSOPT_JAX_PLATFORM"] == "cuda"
+        assert os.environ["SIMSOPT_JAX_BACKEND"] == "cuda"
         assert os.environ["PATH"].split(os.pathsep)[0] == str(cuda_root / "bin")
         assert (
             os.environ["XLA_FLAGS"].split()[0] == f"--xla_gpu_cuda_data_dir={cuda_root}"
