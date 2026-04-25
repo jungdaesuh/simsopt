@@ -302,8 +302,10 @@ class SpecBackedCoil:
         )
 
 
-class SingleStageRuntimeSpecBiotSavartJAX:
+class SingleStageRuntimeSpecBiotSavartJAX(Optimizable):
     """Biot-Savart adapter whose source of truth is a runtime seed spec."""
+
+    return_fn_map = {}
 
     def __init__(self, runtime_spec: SingleStageRuntimeSpec) -> None:
         self.runtime_spec = runtime_spec
@@ -312,6 +314,7 @@ class SingleStageRuntimeSpecBiotSavartJAX:
         self._points_jax: jax.Array | None = None
         self._points_version = 0
         self._coils = self._coils_from_dofs(self._x)
+        Optimizable.__init__(self, x0=np.asarray([], dtype=np.float64))
 
     def _coils_from_dofs(
         self,

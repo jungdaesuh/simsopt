@@ -2579,6 +2579,12 @@ class SingleStageExampleTests(unittest.TestCase):
         )
 
         bs = SingleStageRuntimeSpecBiotSavartJAX(runtime_spec)
+        child = Optimizable(x0=np.asarray([], dtype=np.float64), depends_on=[bs])
+
+        self.assertIsInstance(bs, Optimizable)
+        self.assertIn(bs, child.parents)
+        self.assertIn(child, [child_ref() for child_ref in bs._children])
+
         captured_curves = [coil.curve for coil in bs.coils]
         initial_gamma = captured_curves[0].gamma()
         bs.x = updated_coil_dofs
