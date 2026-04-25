@@ -604,9 +604,16 @@ def _runtime_jax_platform_value(platform: str) -> str:
     return platform
 
 
+# Mirror of ``repo_bootstrap.with_cpu_callback_lane`` for the single-platform
+# config slot. Repeated here because ``repo_bootstrap`` is not importable from
+# the installed ``simsopt`` package; keep the value synchronized with that
+# helper so the entrypoint and runtime layers agree on JAX_PLATFORMS.
+_CUDA_WITH_CPU_FALLBACK_PLATFORMS = "cuda,cpu"
+
+
 def _runtime_jax_platforms_value(platform: str) -> str:
     if platform == "cuda":
-        return "cuda,cpu"
+        return _CUDA_WITH_CPU_FALLBACK_PLATFORMS
     return _runtime_jax_platform_value(platform)
 
 

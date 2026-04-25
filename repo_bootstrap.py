@@ -221,7 +221,15 @@ def _argv_requests_flag(argv: list[str], flags: tuple[str, ...]) -> bool:
     return any(arg in flag_set for arg in argv)
 
 
-def _ensure_cpu_callback_lane(platform: str | None) -> str | None:
+def with_cpu_callback_lane(platform: str | None) -> str | None:
+    """Return the JAX_PLATFORMS spec with CPU appended for callback fallback.
+
+    JAX requires CPU to be a registered platform when ``io_callback`` /
+    ``pure_callback`` / ``debug.callback`` execute on the CUDA lane. This is
+    the single source of truth for "CUDA needs CPU as fallback". The CPU is
+    inserted immediately after CUDA so JAX still picks CUDA as the default
+    backend.
+    """
     normalized = _normalize_entrypoint_platform_spec(platform, allow_multiple=True)
     if normalized is None:
         return None
@@ -261,7 +269,7 @@ def preparse_entrypoint_jax_platform(
 def apply_entrypoint_jax_runtime_env(platform: str | None) -> str | None:
     """Synchronize platform/x64 env vars before any entrypoint imports ``jax``."""
     normalized = _normalize_entrypoint_platform_spec(platform, allow_multiple=True)
-    normalized = _ensure_cpu_callback_lane(normalized)
+    normalized = with_cpu_callback_lane(normalized)
     os.environ.setdefault(_JAX_ENABLE_X64_ENV, "True")
     for name in _ENTRYPOINT_PLATFORM_ENV_VARS:
         os.environ.pop(name, None)
@@ -296,7 +304,7 @@ def configure_entrypoint_jax_runtime(
         respect_existing_env=respect_existing_env,
     )
     if _argv_requests_flag(resolved_argv, require_cpu_platform_when_flags):
-        requested_platform = _ensure_cpu_callback_lane(requested_platform)
+        requested_platform = with_cpu_callback_lane(requested_platform)
     return apply_entrypoint_jax_runtime_env(requested_platform)
 
 

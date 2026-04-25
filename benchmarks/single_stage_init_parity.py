@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+from collections.abc import Iterator
 from pathlib import Path
 import sys
 import tempfile
@@ -396,6 +398,22 @@ def resolve_target_lane_compile_diagnostics(
     return True, None
 
 
+@contextlib.contextmanager
+def _resolved_single_stage_output_root(
+    output_root: Path | None,
+    *,
+    backend: str,
+) -> Iterator[Path]:
+    """Yield a concrete output_root, creating a temp dir only when caller omits one."""
+    if output_root is not None:
+        yield Path(output_root)
+        return
+    with tempfile.TemporaryDirectory(
+        prefix=f"single-stage-init-{backend}-"
+    ) as temp_dir:
+        yield Path(temp_dir) / "outputs"
+
+
 def _run_single_stage_case(
     args: argparse.Namespace,
     backend: str,
@@ -415,37 +433,14 @@ def _run_single_stage_case(
 ) -> dict[str, Any]:
     script_path = _single_stage_script_path()
     effective_platform = platform if backend == "jax" else "cpu"
-    if output_root is None:
-        with tempfile.TemporaryDirectory(
-            prefix=f"single-stage-init-{backend}-"
-        ) as temp_dir:
-            return _run_single_stage_case(
-                args,
-                backend,
-                platform=platform,
-                benchmark_mode=benchmark_mode,
-                load_surface_gamma=load_surface_gamma,
-                profile_target_lane=profile_target_lane,
-                profile_target_lane_only=profile_target_lane_only,
-                diagnose_target_lane_scaled_phase1=diagnose_target_lane_scaled_phase1,
-                record_target_lane_invalid_state_events=(
-                    record_target_lane_invalid_state_events
-                ),
-                experimental_target_lane_value_and_grad=(
-                    experimental_target_lane_value_and_grad
-                ),
-                enable_compile_diagnostics=enable_compile_diagnostics,
-                deterministic_gpu_reductions=deterministic_gpu_reductions,
-                output_root=Path(temp_dir) / "outputs",
-                jax_runtime_seed_spec=jax_runtime_seed_spec,
-            )
-    else:
-        output_root = Path(output_root)
+    with _resolved_single_stage_output_root(
+        output_root, backend=backend
+    ) as resolved_root:
         command = [
             "--backend",
             backend,
             "--output-root",
-            str(output_root),
+            str(resolved_root),
             "--plasma-surf-filename",
             args.plasma_surf_filename,
             "--stage2-bs-path",
@@ -548,7 +543,7 @@ def _run_single_stage_case(
         )
         elapsed_s = time.perf_counter() - start
 
-        results_json = find_single_file(output_root, "results.json")
+        results_json = find_single_file(resolved_root, "results.json")
         results = dict(load_json(results_json))
         payload = {
             "results": results,
@@ -558,7 +553,7 @@ def _run_single_stage_case(
             "run_dir": str(results_json.parent),
         }
         if load_surface_gamma:
-            surf_json = find_single_file(output_root, "surf_init.json")
+            surf_json = find_single_file(resolved_root, "surf_init.json")
             payload["surface_gamma"] = _load_surface_gamma_artifact(str(surf_json))
         return payload
 

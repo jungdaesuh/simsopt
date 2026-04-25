@@ -21,6 +21,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from repo_bootstrap import (
     apply_cuda_toolchain_env as _apply_cuda_toolchain_env,
     bootstrap_local_simsopt as _bootstrap_local_simsopt,
+    with_cpu_callback_lane as _with_cpu_callback_lane,
 )
 from benchmarks import validation_ladder_contract as ladder_contract
 
@@ -268,8 +269,7 @@ def _apply_platform_env(env: dict[str, str], platform: str) -> None:
         env.pop(key, None)
     if platform == "auto":
         return
-    jax_platforms = "cuda,cpu" if platform == "cuda" else platform
-    env["JAX_PLATFORMS"] = jax_platforms
+    env["JAX_PLATFORMS"] = _with_cpu_callback_lane(platform) or platform
     env["SIMSOPT_JAX_PLATFORM"] = platform
     env["SIMSOPT_JAX_BACKEND"] = platform
     if platform == "cuda":

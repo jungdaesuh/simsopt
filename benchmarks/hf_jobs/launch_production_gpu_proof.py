@@ -121,41 +121,38 @@ def _resolve_default_repo_url() -> str:
     )
 
 
-def _build_optional_stage2_geometry_flag(args: argparse.Namespace) -> str:
+def _build_optional_stage2_geometry_args(args: argparse.Namespace) -> list[str]:
     stage2_plan = build_stage2_hf_plan(args.stage2_maxiter, args.geometry_rel_tol)
     if stage2_plan["geometry_rel_tol"] is None:
-        return ""
-    return (
-        "--geometry-rel-tol "
-        f"{shlex.quote(str(stage2_plan['geometry_rel_tol']))} "
-    )
+        return []
+    return ["--geometry-rel-tol", str(stage2_plan["geometry_rel_tol"])]
 
 
-def _build_optional_single_stage_boozer_backend_flag(
+def _build_optional_single_stage_boozer_backend_args(
     args: argparse.Namespace,
-) -> str:
+) -> list[str]:
     if args.single_stage_boozer_optimizer_backend is None:
-        return ""
-    return (
-        "--single-stage-boozer-optimizer-backend "
-        f"{shlex.quote(args.single_stage_boozer_optimizer_backend)} "
-    )
+        return []
+    return [
+        "--single-stage-boozer-optimizer-backend",
+        args.single_stage_boozer_optimizer_backend,
+    ]
 
 
-def _build_optional_single_stage_benchmark_mode_flag(
+def _build_optional_single_stage_benchmark_mode_args(
     args: argparse.Namespace,
-) -> str:
+) -> list[str]:
     if not args.single_stage_benchmark_mode:
-        return ""
-    return "--single-stage-benchmark-mode "
+        return []
+    return ["--single-stage-benchmark-mode"]
 
 
-def _build_optional_single_stage_success_filter_flag(
+def _build_optional_single_stage_success_filter_args(
     args: argparse.Namespace,
-) -> str:
+) -> list[str]:
     if not args.single_stage_disable_target_lane_success_filter:
-        return ""
-    return "--single-stage-disable-target-lane-success-filter "
+        return []
+    return ["--single-stage-disable-target-lane-success-filter"]
 
 
 def _repo_relative_seed_path(value: str, *, option_name: str) -> str:
@@ -175,31 +172,27 @@ def _remote_repo_path(repo_dir: str, relative_path: str) -> str:
     return f"{repo_dir}/{relative_path}"
 
 
-def _build_optional_single_stage_seed_flags(
+def _build_optional_single_stage_seed_args(
     args: argparse.Namespace,
     *,
     repo_dir: str,
-) -> str:
-    flags = []
+) -> list[str]:
+    args_out: list[str] = []
     if args.single_stage_warm_start_run_dir is not None:
-        flags.extend(
+        args_out.extend(
             [
                 "--single-stage-warm-start-run-dir",
-                shlex.quote(
-                    _remote_repo_path(repo_dir, args.single_stage_warm_start_run_dir)
-                ),
+                _remote_repo_path(repo_dir, args.single_stage_warm_start_run_dir),
             ]
         )
     if args.single_stage_jax_runtime_seed_spec is not None:
-        flags.extend(
+        args_out.extend(
             [
                 "--single-stage-jax-runtime-seed-spec",
-                shlex.quote(
-                    _remote_repo_path(repo_dir, args.single_stage_jax_runtime_seed_spec)
-                ),
+                _remote_repo_path(repo_dir, args.single_stage_jax_runtime_seed_spec),
             ]
         )
-    return "" if not flags else " ".join(flags) + " "
+    return args_out
 
 
 def _resolve_repo_defaults(args: argparse.Namespace) -> argparse.Namespace:
@@ -485,11 +478,84 @@ def _build_preflight_report(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def _build_run_proof_argv(
+    args: argparse.Namespace,
+    *,
+    repo_dir: str,
+    results_dir: str,
+    equilibria_dir: str,
+    stage2_seed: str,
+) -> list[str]:
+    """Assemble the run_production_gpu_proof.sh argv as a token list."""
+    return [
+        "bash",
+        "benchmarks/hf_jobs/run_production_gpu_proof.sh",
+        "--results-dir",
+        results_dir,
+        "--equilibria-dir",
+        equilibria_dir,
+        "--plasma-surf-filename",
+        DEFAULT_PLASMA,
+        "--stage2-bs-path",
+        stage2_seed,
+        "--stage2-platform",
+        args.platform,
+        "--single-stage-platform",
+        args.platform,
+        "--stage2-nphi",
+        str(args.stage2_nphi),
+        "--stage2-ntheta",
+        str(args.stage2_ntheta),
+        "--stage2-maxiter",
+        str(args.stage2_maxiter),
+        "--stage2-optimizer-backend",
+        args.stage2_optimizer_backend,
+        *_build_optional_stage2_geometry_args(args),
+        "--single-stage-nphi",
+        str(args.single_stage_nphi),
+        "--single-stage-ntheta",
+        str(args.single_stage_ntheta),
+        "--single-stage-mpol",
+        str(args.single_stage_mpol),
+        "--single-stage-ntor",
+        str(args.single_stage_ntor),
+        "--single-stage-maxiter",
+        str(args.single_stage_maxiter),
+        "--single-stage-optimizer-backend",
+        args.single_stage_optimizer_backend,
+        *_build_optional_single_stage_boozer_backend_args(args),
+        *_build_optional_single_stage_seed_args(args, repo_dir=repo_dir),
+        *_build_optional_single_stage_benchmark_mode_args(args),
+        *_build_optional_single_stage_success_filter_args(args),
+    ]
+
+
 def _build_job_command(args: argparse.Namespace, *, resolved_repo_sha: str) -> str:
     repo_dir = "/tmp/hf-production-proof/repo"
     results_dir = "/tmp/hf-production-proof/results"
     equilibria_dir = f"{repo_dir}/{DEFAULT_EQUILIBRIA_REL}"
     stage2_seed = f"{repo_dir}/{DEFAULT_STAGE2_SEED_REL}"
+    git_clone = shlex.join(
+        [
+            "git",
+            "clone",
+            "--recursive",
+            "--branch",
+            args.repo_ref,
+            "--single-branch",
+            args.repo_url,
+            repo_dir,
+        ]
+    )
+    run_proof = shlex.join(
+        _build_run_proof_argv(
+            args,
+            repo_dir=repo_dir,
+            results_dir=results_dir,
+            equilibria_dir=equilibria_dir,
+            stage2_seed=stage2_seed,
+        )
+    )
     command_lines = [
         "set -euxo pipefail",
         "export PYTHONUNBUFFERED=1",
@@ -501,43 +567,15 @@ def _build_job_command(args: argparse.Namespace, *, resolved_repo_sha: str) -> s
         f'export SIMSOPT_JAX_CUDA_LIBRARY_MODE="{DEFAULT_CUDA_LIBRARY_MODE}"',
         "rm -rf /tmp/hf-production-proof",
         "mkdir -p /tmp/hf-production-proof",
-        (
-            "git clone --recursive"
-            f" --branch {shlex.quote(args.repo_ref)}"
-            " --single-branch"
-            f" {shlex.quote(args.repo_url)} {shlex.quote(repo_dir)}"
-        ),
+        git_clone,
         f"cd {shlex.quote(repo_dir)}",
-        f"git checkout {shlex.quote(resolved_repo_sha)}",
+        shlex.join(["git", "checkout", resolved_repo_sha]),
         "git submodule update --init --recursive",
         'export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-${PWD}/.artifacts/jax_compilation_cache/hf-production-proof}"',
         'mkdir -p "$JAX_COMPILATION_CACHE_DIR"',
         ". benchmarks/hf_jobs/bootstrap_runtime.sh",
         "python -m pip install -v -e .",
-        (
-            "bash benchmarks/hf_jobs/run_production_gpu_proof.sh "
-            f"--results-dir {shlex.quote(results_dir)} "
-            f"--equilibria-dir {shlex.quote(equilibria_dir)} "
-            f"--plasma-surf-filename {shlex.quote(DEFAULT_PLASMA)} "
-            f"--stage2-bs-path {shlex.quote(stage2_seed)} "
-            f"--stage2-platform {shlex.quote(args.platform)} "
-            f"--single-stage-platform {shlex.quote(args.platform)} "
-            f"--stage2-nphi {args.stage2_nphi} "
-            f"--stage2-ntheta {args.stage2_ntheta} "
-            f"--stage2-maxiter {args.stage2_maxiter} "
-            f"--stage2-optimizer-backend {shlex.quote(args.stage2_optimizer_backend)} "
-            f"{_build_optional_stage2_geometry_flag(args)}"
-            f"--single-stage-nphi {args.single_stage_nphi} "
-            f"--single-stage-ntheta {args.single_stage_ntheta} "
-            f"--single-stage-mpol {args.single_stage_mpol} "
-            f"--single-stage-ntor {args.single_stage_ntor} "
-            f"--single-stage-maxiter {args.single_stage_maxiter} "
-            f"--single-stage-optimizer-backend {shlex.quote(args.single_stage_optimizer_backend)} "
-            f"{_build_optional_single_stage_boozer_backend_flag(args)}"
-            f"{_build_optional_single_stage_seed_flags(args, repo_dir=repo_dir)}"
-            f"{_build_optional_single_stage_benchmark_mode_flag(args)}"
-            f"{_build_optional_single_stage_success_filter_flag(args)}"
-        ),
+        run_proof,
     ]
     return "\n".join(command_lines)
 
