@@ -293,7 +293,9 @@ separate ship gates.
 
    The image bakes the heavy system and Python dependency stack, including
    ``jax[cuda12]==0.9.2``. Runtime jobs still clone and build the exact target
-   repo SHA so the proof remains commit-accurate.
+   repo SHA so the proof remains commit-accurate. The remote proof requires
+   the image-provided ``/opt/venv`` runtime and fails immediately if it is
+   missing; it does not install system or Python dependencies inside the job.
 
 2. **Launch the proof jobs**::
 

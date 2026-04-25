@@ -141,9 +141,13 @@ def test_bootstrap_runtime_writes_gpu_smoke_payload_and_fails_closed():
     script = BOOTSTRAP_SCRIPT.read_text(encoding="utf-8")
 
     assert "BOOTSTRAP_JAX_SMOKE_JSON" in script
+    assert "Production GPU proof requires a prebuilt runtime" in script
     assert "\"default_backend\": default_backend" in script
     assert "\"devices\": [str(device) for device in jax.devices()]" in script
     assert "Expected GPU JAX backend during HF proof bootstrap" in script
+    assert "apt-get" not in script
+    assert "pip install" not in script
+    assert "BOOTSTRAP_MODE" not in script
 
 
 def test_run_production_gpu_proof_has_ptx_and_cubin_cuda_canaries():
@@ -752,7 +756,8 @@ def test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override(tmp_p
         in completed.stdout
     )
     assert "/tmp/jax-compilation-cache" not in completed.stdout
-    assert 'SIMSOPT_HF_JOB_JAX_GPU_WHEEL_SPEC="jax[cuda12]==0.9.2"' in completed.stdout
+    assert "SIMSOPT_HF_JOB_BOOTSTRAP_MODE" not in completed.stdout
+    assert "SIMSOPT_HF_JOB_JAX_GPU_WHEEL_SPEC" not in completed.stdout
     assert 'SIMSOPT_JAX_CUDA_LIBRARY_MODE="bundled"' in completed.stdout
     assert (
         "--single-stage-warm-start-run-dir "
@@ -954,7 +959,7 @@ def test_launch_production_gpu_proof_requires_single_stage_seed(tmp_path):
     assert "requires a single-stage seed" in completed.stderr
 
 
-def test_launch_production_gpu_proof_rejects_ad_hoc_always_bootstrap():
+def test_launch_production_gpu_proof_rejects_bootstrap_mode_override():
     completed = subprocess.run(
         [
             sys.executable,
@@ -969,7 +974,7 @@ def test_launch_production_gpu_proof_rejects_ad_hoc_always_bootstrap():
     )
 
     assert completed.returncode != 0
-    assert "invalid choice: 'always'" in completed.stderr
+    assert "unrecognized arguments: --bootstrap-mode" in completed.stderr
 
 
 def test_launch_production_gpu_proof_reports_default_long_run_geometry_gate(tmp_path):

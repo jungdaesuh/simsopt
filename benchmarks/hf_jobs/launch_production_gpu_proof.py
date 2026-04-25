@@ -34,7 +34,6 @@ DEFAULT_EQUILIBRIA_REL = "examples/single_stage_optimization/equilibria"
 DEFAULT_PLASMA = DEFAULT_PLASMA_SURF_FILENAME
 DEFAULT_IMAGE = os.environ.get("SIMSOPT_HF_GPU_IMAGE") or None
 DEFAULT_TARGET_OPTIMIZER_BACKEND = "ondevice"
-DEFAULT_JAX_GPU_WHEEL_SPEC = "jax[cuda12]==0.9.2"
 DEFAULT_EXPECTED_JAX_VERSION = "0.9.2"
 DEFAULT_CUDA_LIBRARY_MODE = "bundled"
 _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME = "single_stage_jax_runtime_spec.json"
@@ -534,7 +533,6 @@ def _build_preflight_report(args: argparse.Namespace) -> dict[str, object]:
         "repo_ref_commit": resolved_ref,
         "repo_url": args.repo_url,
         "image": args.image,
-        "bootstrap_mode": args.bootstrap_mode,
         "expected_jax_version": DEFAULT_EXPECTED_JAX_VERSION,
         "platform": args.platform,
         "hardware": list(args.hardware),
@@ -641,9 +639,7 @@ def _build_job_command(args: argparse.Namespace, *, resolved_repo_sha: str) -> s
         "export PYTHONUNBUFFERED=1",
         "export HF_HUB_DISABLE_TELEMETRY=1",
         'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_deterministic_ops=true"',
-        f'export SIMSOPT_HF_JOB_BOOTSTRAP_MODE="{args.bootstrap_mode}"',
         f'export SIMSOPT_HF_JOB_EXPECTED_JAX_VERSION="{DEFAULT_EXPECTED_JAX_VERSION}"',
-        f'export SIMSOPT_HF_JOB_JAX_GPU_WHEEL_SPEC="{DEFAULT_JAX_GPU_WHEEL_SPEC}"',
         f'export SIMSOPT_JAX_CUDA_LIBRARY_MODE="{DEFAULT_CUDA_LIBRARY_MODE}"',
         "rm -rf /tmp/hf-production-proof",
         "mkdir -p /tmp/hf-production-proof",
@@ -698,15 +694,6 @@ def parse_args() -> argparse.Namespace:
         choices=("cpu", "cuda"),
         default="cuda",
         help="JAX platform to request inside the proof jobs.",
-    )
-    parser.add_argument(
-        "--bootstrap-mode",
-        choices=("auto", "never"),
-        default="auto",
-        help=(
-            "Runtime bootstrap mode. 'auto' reuses /opt/venv when the image "
-            "already contains the heavy dependencies."
-        ),
     )
     parser.add_argument("--timeout", default="8h", help="HF Jobs timeout.")
     parser.add_argument(
