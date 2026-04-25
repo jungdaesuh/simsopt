@@ -97,7 +97,7 @@ from simsopt.geo import (
     SurfaceXYZTensorFourier,
     curves_to_vtk,
 )
-from simsopt.geo.curve import surfrz_gamma_lin, surfxyztensor_gamma_lin
+from simsopt.geo.curve import surfrz_gamma_lin
 from simsopt.geo.curveobjectives import (
     CurveCurveDistance,
     CurveSurfaceDistance,
@@ -109,6 +109,7 @@ from simsopt.geo.surface_fourier_jax import (
     build_theta_basis,
     stellsym_scatter_indices,
     surface_gamma_from_dofs,
+    surface_gamma_lin_from_dofs,
 )
 from simsopt.geo.surfaceobjectives import (
     BoozerResidual,
@@ -173,6 +174,10 @@ _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME = "single_stage_jax_runtime_spec.json"
 _SINGLE_STAGE_JAX_RUNTIME_SPEC_SCHEMA = "simsopt.single_stage.jax_runtime_spec"
 _SINGLE_STAGE_JAX_RUNTIME_SPEC_VERSION = 1
 _SINGLE_STAGE_JAX_SELF_INTERSECTION_MODE = "supported-surface-jax"
+_JAX_SELF_INTERSECTION_UNSUPPORTED_MESSAGE = (
+    "JAX production self-intersection requires a supported serialized/spec-backed "
+    "surface; run seed conversion first."
+)
 _JAX_COMPILE_DIAGNOSTICS_SAMPLE_LIMIT = 25
 _SURFACE_SELF_INTERSECTION_BISECTION_STEPS = 48
 _SURFACE_SELF_INTERSECTION_TOLERANCE_FACTOR = 1.0e-9
@@ -3342,6 +3347,43 @@ def _target_gamma_from_supported_surface(
     return None
 
 
+def _matching_surface_xyz_tensor_dofs(
+    surface,
+    *,
+    mpol,
+    ntor,
+    quadpoints_phi,
+    quadpoints_theta,
+):
+    if isinstance(surface, SerializedSurfaceState):
+        surface_class = surface.surface_class
+        source_dofs = surface.dofs
+    else:
+        surface_class = getattr(
+            surface,
+            "deferred_surface_class",
+            type(surface).__name__,
+        )
+        if not hasattr(surface, "get_dofs"):
+            return None
+        source_dofs = surface.get_dofs()
+    if surface_class != "SurfaceXYZTensorFourier":
+        return None
+    if int(surface.mpol) != int(mpol) or int(surface.ntor) != int(ntor):
+        return None
+    if not np.array_equal(
+        np.asarray(surface.quadpoints_phi, dtype=np.float64),
+        np.asarray(quadpoints_phi, dtype=np.float64),
+    ):
+        return None
+    if not np.array_equal(
+        np.asarray(surface.quadpoints_theta, dtype=np.float64),
+        np.asarray(quadpoints_theta, dtype=np.float64),
+    ):
+        return None
+    return np.asarray(host_array(source_dofs), dtype=np.float64)
+
+
 def project_surface_dofs_to_resolution(
     surface,
     *,
@@ -3351,6 +3393,15 @@ def project_surface_dofs_to_resolution(
     quadpoints_theta,
 ):
     """Reproject surface geometry onto the requested target resolution."""
+    matching_dofs = _matching_surface_xyz_tensor_dofs(
+        surface,
+        mpol=mpol,
+        ntor=ntor,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+    )
+    if matching_dofs is not None:
+        return matching_dofs
     target_gamma = _target_gamma_from_supported_surface(
         surface,
         quadpoints_phi=quadpoints_phi,
@@ -4715,10 +4766,12 @@ def initialize_boozer_surface(
                 optimizer_backend,
             )
             options["optimizer_backend"] = resolved_optimizer_backend
+            if resolved_optimizer_backend == "ondevice":
+                if boozer_limited_memory:
+                    options["force_ondevice_limited_memory"] = True
+                    options["materialize_dense_linearization"] = False
             if boozer_least_squares_algorithm is not None:
                 options["least_squares_algorithm"] = boozer_least_squares_algorithm
-            if resolved_optimizer_backend == "ondevice" and boozer_limited_memory:
-                options["force_ondevice_limited_memory"] = True
             if bfgs_tol_override is not None:
                 options["bfgs_tol"] = float(bfgs_tol_override)
             if bfgs_maxiter_override is not None:
@@ -4786,6 +4839,19 @@ def initialize_boozer_surface(
             "after_boozer_setup",
             boozer_type="exact",
             backend=backend,
+        )
+    if (
+        backend == "jax"
+        and _supported_surface_self_intersection_inputs(boozer_surface.surface)
+        is not None
+    ):
+        prewarm_start_s = _perf_counter_s()
+        prewarm_supported_surface_self_intersection(boozer_surface.surface)
+        _record_timing(
+            timings,
+            "jax_compile_prewarm_self_intersection_s",
+            prewarm_start_s,
+            _perf_counter_s(),
         )
     setup_end_s = _perf_counter_s()
     _record_timing(timings, "boozer_setup_s", setup_start_s, setup_end_s)
@@ -5379,9 +5445,15 @@ def _supported_surface_self_intersection_inputs(surface):
     mpol = int(surface.mpol)
     ntor = int(surface.ntor)
     stellsym = bool(surface.stellsym)
+    scatter_indices = None
     if surface_kind == "xyztensorfourier":
+        scatter_indices = (
+            _as_jax_int32(stellsym_scatter_indices(mpol, ntor))
+            if stellsym
+            else None
+        )
         expected_dofs = (
-            int(stellsym_scatter_indices(mpol, ntor).size)
+            int(scatter_indices.size)
             if stellsym
             else 3 * (2 * mpol + 1) * (2 * ntor + 1)
         )
@@ -5401,6 +5473,7 @@ def _supported_surface_self_intersection_inputs(surface):
         "ntor": ntor,
         "nfp": int(surface.nfp),
         "stellsym": stellsym,
+        "scatter_indices": scatter_indices,
         "quadpoints_theta": _as_jax_float64(surface.quadpoints_theta).reshape(-1),
     }
 
@@ -5417,6 +5490,7 @@ def _supported_surface_self_intersection_inputs(surface):
 def _surface_phi0_cross_section_from_supported_dofs(
     surface_dofs,
     quadpoints_theta,
+    scatter_indices,
     *,
     mpol,
     ntor,
@@ -5438,14 +5512,15 @@ def _surface_phi0_cross_section_from_supported_dofs(
             stellsym,
         )
 
-    gamma_zero = surfxyztensor_gamma_lin(
+    gamma_zero = surface_gamma_lin_from_dofs(
+        surface_dofs,
         zero_varphi,
         thetas,
         mpol,
         ntor,
-        surface_dofs,
         nfp,
         stellsym,
+        scatter_indices,
     )
     two_pi = _as_runtime_float64(2.0 * np.pi, reference=gamma_zero)
     phi0 = jnp.arctan2(gamma_zero[:, 1], gamma_zero[:, 0]) / two_pi
@@ -5454,14 +5529,15 @@ def _surface_phi0_cross_section_from_supported_dofs(
     target_phi = target_phi + jnp.ceil(-target_phi)
 
     def shifted_cylindrical_angle(varphi_in):
-        gamma = surfxyztensor_gamma_lin(
+        gamma = surface_gamma_lin_from_dofs(
+            surface_dofs,
             varphi_in,
             thetas,
             mpol,
             ntor,
-            surface_dofs,
             nfp,
             stellsym,
+            scatter_indices,
         )
         angle = jnp.arctan2(gamma[:, 1], gamma[:, 0]) / two_pi - phi0
         return angle + jnp.ceil(-angle)
@@ -5487,14 +5563,15 @@ def _surface_phi0_cross_section_from_supported_dofs(
         bisection_step,
         (initial_lower, initial_upper, initial_lower, initial_upper),
     )
-    return surfxyztensor_gamma_lin(
+    return surface_gamma_lin_from_dofs(
+        surface_dofs,
         0.5 * (lower + upper),
         thetas,
         mpol,
         ntor,
-        surface_dofs,
         nfp,
         stellsym,
+        scatter_indices,
     )
 
 
@@ -5513,9 +5590,17 @@ def _evaluate_supported_surface_self_intersection(surface):
                 nfp=supported_inputs["nfp"],
                 stellsym=supported_inputs["stellsym"],
                 surface_kind=supported_inputs["surface_kind"],
+                scatter_indices=supported_inputs["scatter_indices"],
             )
         )
     )
+
+
+def prewarm_supported_surface_self_intersection(surface):
+    supported_intersection = _evaluate_supported_surface_self_intersection(surface)
+    if supported_intersection is None:
+        raise TypeError(_JAX_SELF_INTERSECTION_UNSUPPORTED_MESSAGE)
+    return supported_intersection
 
 
 def _supported_surface_self_intersection_flag_from_dofs(
@@ -5527,10 +5612,12 @@ def _supported_surface_self_intersection_flag_from_dofs(
     nfp,
     stellsym,
     surface_kind,
+    scatter_indices,
 ):
     cross_section = _surface_phi0_cross_section_from_supported_dofs(
         surface_dofs,
         quadpoints_theta,
+        scatter_indices,
         mpol=mpol,
         ntor=ntor,
         nfp=nfp,
@@ -5589,6 +5676,9 @@ def build_single_stage_target_lane_self_intersection_success_filter(
         "nfp": int(supported_inputs["nfp"]),
         "stellsym": bool(supported_inputs["stellsym"]),
         "surface_kind": supported_inputs["surface_kind"],
+        "scatter_indices": _hostify_target_lane_constant_tree(
+            supported_inputs["scatter_indices"]
+        ),
     }
 
     optimize_G = boozer_surface.res.get("G") is not None
@@ -5637,10 +5727,7 @@ def evaluate_surface_self_intersection(surface, *, require_supported_surface=Fal
     if supported_intersection is not None:
         return supported_intersection, True
     if require_supported_surface:
-        raise TypeError(
-            "JAX production self-intersection requires a supported serialized/spec-backed "
-            "surface; run seed conversion first."
-        )
+        raise TypeError(_JAX_SELF_INTERSECTION_UNSUPPORTED_MESSAGE)
     check_available = surface_self_intersection_check_available()
     if not check_available:
         return False, False

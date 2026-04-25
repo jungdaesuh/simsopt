@@ -29,10 +29,12 @@ __all__ = [
     "build_theta_basis",
     "build_phi_basis",
     "surface_gamma",
+    "surface_gamma_lin",
     "surface_gammadash1",
     "surface_gammadash2",
     "surface_normal",
     "surface_gamma_from_dofs",
+    "surface_gamma_lin_from_dofs",
     "surface_gammadash1_from_dofs",
     "surface_gammadash2_from_dofs",
     "surface_normal_from_dofs",
@@ -198,6 +200,10 @@ def _eval_hat(V, W, coeffs):
     return (V @ coeffs.T) @ W.T
 
 
+def _eval_hat_paired(V, W, coeffs):
+    return jnp.sum((V @ coeffs.T) * W, axis=1)
+
+
 def surface_gamma(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp):
     """Evaluate surface Cartesian coordinates on the quadrature grid.
 
@@ -227,6 +233,25 @@ def surface_gamma(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp)
     x = xhat * cphi - yhat * sphi
     y = xhat * sphi + yhat * cphi
 
+    return jnp.stack([x, y, z], axis=-1)
+
+
+def surface_gamma_lin(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp):
+    """Evaluate surface Cartesian coordinates at paired ``(phi[i], theta[i])``."""
+    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi).reshape(-1)
+    quadpoints_theta_jax = _as_jax_float64(quadpoints_theta).reshape(-1)
+    W, _ = build_theta_basis(quadpoints_theta_jax, mpol)
+    V, _ = build_phi_basis(quadpoints_phi_jax, ntor, nfp)
+
+    xhat = _eval_hat_paired(V, W, xc)
+    yhat = _eval_hat_paired(V, W, yc)
+    z = _eval_hat_paired(V, W, zc)
+
+    phi_angle = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax
+    cphi = jnp.cos(phi_angle)
+    sphi = jnp.sin(phi_angle)
+    x = xhat * cphi - yhat * sphi
+    y = xhat * sphi + yhat * cphi
     return jnp.stack([x, y, z], axis=-1)
 
 
@@ -725,6 +750,30 @@ def surface_gamma_from_dofs(
     """
     xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
     return surface_gamma(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp)
+
+
+def surface_gamma_lin_from_dofs(
+    dofs,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices=None,
+):
+    """Evaluate paired-point gamma as a pure function of the flat DOF vector."""
+    xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
+    return surface_gamma_lin(
+        quadpoints_phi,
+        quadpoints_theta,
+        xc,
+        yc,
+        zc,
+        mpol,
+        ntor,
+        nfp,
+    )
 
 
 def surface_gammadash1_from_dofs(

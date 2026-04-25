@@ -635,6 +635,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(boozer_surface.constraint_weight, 1.0)
         self.assertEqual(boozer_surface.options["verbose"], True)
         self.assertEqual(boozer_surface.options["optimizer_backend"], "ondevice")
+        self.assertNotIn("materialize_dense_linearization", boozer_surface.options)
         self.assertEqual(
             type(boozer_surface.surface).__name__,
             "DeferredSurfaceXYZTensorFourier",
@@ -646,6 +647,45 @@ class SingleStageExampleTests(unittest.TestCase):
             boozer_surface.surface_runtime_state["quadpoints_phi"],
             surf_prev.quadpoints_phi,
         )
+
+    def test_initialize_boozer_surface_prewarms_supported_jax_self_intersection(
+        self,
+    ):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        timings = {}
+        fake_boozer_surface_jax = self.build_fake_boozer_surface_jax_class(
+            record_run_calls=False
+        )
+
+        with patch.object(
+            module,
+            "_supported_surface_self_intersection_inputs",
+            return_value={"supported": True},
+        ), patch.object(
+            module,
+            "prewarm_supported_surface_self_intersection",
+            return_value=False,
+        ) as prewarm, patch.object(
+            module,
+            "evaluate_surface_self_intersection",
+            return_value=(False, True),
+        ), self.patch_initialize_boozer_surface_jax(module, fake_boozer_surface_jax):
+            module.initialize_boozer_surface(
+                surf_prev,
+                mpol=TEST_MPOL,
+                ntor=TEST_NTOR,
+                bs=object(),
+                vol_target=TEST_VOL_TARGET,
+                constraint_weight=1.0,
+                iota=TEST_IOTA,
+                G0=TEST_G0,
+                backend="jax",
+                timings_out=timings,
+            )
+
+        prewarm.assert_called_once()
+        self.assertIn("jax_compile_prewarm_self_intersection_s", timings)
 
     def test_initialize_boozer_surface_jax_backend_materializes_surface_only_on_host_use(
         self,
@@ -857,6 +897,34 @@ class SingleStageExampleTests(unittest.TestCase):
             fake_boozer_surface_jax.instances[0].options["optimizer_backend"],
             "ondevice",
         )
+
+    def test_initialize_boozer_surface_limited_memory_disables_dense_linearization(
+        self,
+    ):
+        module = self.load_module()
+        surf_prev = FakeSurfPrev()
+        fake_boozer_surface_jax = self.build_fake_boozer_surface_jax_class(
+            record_run_calls=False
+        )
+
+        with self.patch_initialize_boozer_surface_jax(module, fake_boozer_surface_jax):
+            module.initialize_boozer_surface(
+                surf_prev,
+                mpol=TEST_MPOL,
+                ntor=TEST_NTOR,
+                bs=object(),
+                vol_target=TEST_VOL_TARGET,
+                constraint_weight=1.0,
+                iota=TEST_IOTA,
+                G0=TEST_G0,
+                backend="jax",
+                optimizer_backend="ondevice",
+                boozer_limited_memory=True,
+            )
+
+        options = fake_boozer_surface_jax.instances[0].options
+        self.assertIs(options["materialize_dense_linearization"], False)
+        self.assertIs(options["force_ondevice_limited_memory"], True)
 
     def test_initialize_boozer_surface_threads_nondefault_least_squares_algorithm(self):
         module = self.load_module()
@@ -3061,6 +3129,109 @@ class SingleStageExampleTests(unittest.TestCase):
                 quadpoints_phi=quadpoints_phi,
                 quadpoints_theta=quadpoints_theta,
             )
+
+    def test_project_surface_dofs_to_resolution_returns_matching_xyz_dofs(self):
+        module = self.load_module()
+        source_surface = module.SurfaceXYZTensorFourier(
+            mpol=2,
+            ntor=2,
+            nfp=5,
+            stellsym=True,
+            quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+            quadpoints_phi=np.linspace(0.0, 0.2, 5, endpoint=False),
+        )
+        source_dofs = source_surface.get_dofs().copy()
+        source_dofs[:] = np.linspace(0.04, 0.04 * source_dofs.size, source_dofs.size)
+        source_surface.set_dofs(source_dofs)
+
+        with patch.object(
+            module,
+            "_fit_surface_xyz_tensor_dofs_to_gamma",
+            side_effect=AssertionError("matching resolution must not refit"),
+        ):
+            projected_dofs = module.project_surface_dofs_to_resolution(
+                source_surface,
+                mpol=source_surface.mpol,
+                ntor=source_surface.ntor,
+                quadpoints_phi=source_surface.quadpoints_phi,
+                quadpoints_theta=source_surface.quadpoints_theta,
+            )
+
+        np.testing.assert_allclose(projected_dofs, source_dofs)
+
+    def test_project_surface_dofs_to_resolution_returns_matching_serialized_xyz_dofs(
+        self,
+    ):
+        module = self.load_module()
+        source_dofs = np.linspace(
+            0.02,
+            0.02 * len(module.stellsym_scatter_indices(TEST_MPOL, TEST_NTOR)),
+            len(module.stellsym_scatter_indices(TEST_MPOL, TEST_NTOR)),
+        )
+        serialized_surface = module.SerializedSurfaceState(
+            surface_class="SurfaceXYZTensorFourier",
+            dofs=source_dofs,
+            mpol=TEST_MPOL,
+            ntor=TEST_NTOR,
+            nfp=5,
+            stellsym=True,
+            quadpoints_phi=np.linspace(
+                0.0, 1.0 / 5.0, 2 * TEST_NTOR + 1, endpoint=False
+            ),
+            quadpoints_theta=np.linspace(0.0, 1.0, 2 * TEST_MPOL + 1, endpoint=False),
+        )
+
+        with patch.object(
+            module,
+            "_fit_surface_xyz_tensor_dofs_to_gamma",
+            side_effect=AssertionError("matching serialized surface must not refit"),
+        ):
+            projected_dofs = module.project_surface_dofs_to_resolution(
+                serialized_surface,
+                mpol=serialized_surface.mpol,
+                ntor=serialized_surface.ntor,
+                quadpoints_phi=serialized_surface.quadpoints_phi,
+                quadpoints_theta=serialized_surface.quadpoints_theta,
+            )
+
+        np.testing.assert_allclose(projected_dofs, source_dofs)
+
+    def test_project_surface_dofs_to_resolution_returns_matching_deferred_xyz_dofs(
+        self,
+    ):
+        module = self.load_module()
+        source_dofs = np.linspace(
+            0.03,
+            0.03 * len(module.stellsym_scatter_indices(TEST_MPOL, TEST_NTOR)),
+            len(module.stellsym_scatter_indices(TEST_MPOL, TEST_NTOR)),
+        )
+        deferred_surface = module.DeferredSurfaceXYZTensorFourier(
+            mpol=TEST_MPOL,
+            ntor=TEST_NTOR,
+            nfp=5,
+            stellsym=True,
+            quadpoints_phi=np.linspace(
+                0.0, 1.0 / 5.0, 2 * TEST_NTOR + 1, endpoint=False
+            ),
+            quadpoints_theta=np.linspace(0.0, 1.0, 2 * TEST_MPOL + 1, endpoint=False),
+            dofs=source_dofs,
+        )
+
+        with patch.object(
+            module,
+            "_fit_surface_xyz_tensor_dofs_to_gamma",
+            side_effect=AssertionError("matching deferred surface must not refit"),
+        ):
+            projected_dofs = module.project_surface_dofs_to_resolution(
+                deferred_surface,
+                mpol=deferred_surface.mpol,
+                ntor=deferred_surface.ntor,
+                quadpoints_phi=deferred_surface.quadpoints_phi,
+                quadpoints_theta=deferred_surface.quadpoints_theta,
+            )
+
+        np.testing.assert_allclose(projected_dofs, source_dofs)
+        self.assertIsNone(deferred_surface._materialized_surface)
 
     def test_project_single_stage_warm_start_surface_dofs_uses_gamma_fast_path_for_xyz_surface(
         self,
@@ -8608,6 +8779,17 @@ class SingleStageExampleTests(unittest.TestCase):
                 SentinelSurface(),
                 require_supported_surface=True,
             )
+
+    def test_prewarm_supported_surface_self_intersection_requires_supported_surface(
+        self,
+    ):
+        module = self.load_module()
+
+        class SentinelSurface:
+            pass
+
+        with self.assertRaisesRegex(TypeError, "run seed conversion first"):
+            module.prewarm_supported_surface_self_intersection(SentinelSurface())
 
     def test_surface_self_intersection_check_available_accepts_supported_surface_without_backend(
         self,

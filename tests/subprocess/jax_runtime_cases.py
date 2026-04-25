@@ -1414,6 +1414,10 @@ def _run_single_stage_surface_self_intersection_case() -> None:
             np.asarray(surface.quadpoints_theta, dtype=np.float64),
             device=gpu,
         ),
+        jax.device_put(
+            single_stage_example.stellsym_scatter_indices(surface.mpol, surface.ntor),
+            device=gpu,
+        ),
         mpol=surface.mpol,
         ntor=surface.ntor,
         nfp=surface.nfp,
