@@ -98,7 +98,7 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         "directional_fd_rtol": 1e-5,
         "directional_fd_atol": 1e-7,
         "directional_derivative_floor": 1e-12,
-        "central_fd_error_rate": 0.55,
+        "central_fd_error_rate": 0.4,
         "central_fd_min_stable_eps": 3,
         "direction_seed": 1729,
         "direction_count": 5,

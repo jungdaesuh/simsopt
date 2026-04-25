@@ -166,6 +166,35 @@ def _run_python_script_json_payload(
     return payload
 
 
+def _assert_subprocess_json_sentinel(
+    payload: dict[str, object],
+    *,
+    expected_case: str,
+    failure_message: str,
+) -> None:
+    assert payload["case"] == expected_case, failure_message
+    if payload["skipped"] is True:
+        assert payload["checked"] is False, failure_message
+        skip_reason = payload["skip_reason"]
+        assert isinstance(skip_reason, str) and skip_reason, failure_message
+        pytest.skip(f"{expected_case}: {skip_reason}")
+    assert payload["skipped"] is False, failure_message
+    assert payload["checked"] is True, failure_message
+    assert isinstance(payload["invariant"], str) and payload["invariant"], (
+        failure_message
+    )
+    assert isinstance(payload["loaded_module_count"], int), failure_message
+    assert isinstance(payload["simsopt_module_count"], int), failure_message
+
+
+def _assert_import_smoke_case_passes(case_name: str, failure_message: str) -> None:
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=(case_name,),
+        failure_message=failure_message,
+    )
+
+
 def _assert_python_script_passes(
     script_path: Path,
     *,
@@ -174,6 +203,21 @@ def _assert_python_script_passes(
     timeout: int = 30,
     extra_env: dict[str, str] | None = None,
 ) -> None:
+    if script_path == _IMPORT_SMOKE_CASES_PATH:
+        expected_case = str(args[0])
+        payload = _run_python_script_json_payload(
+            script_path,
+            args=args,
+            failure_message=failure_message,
+            timeout=timeout,
+            extra_env=extra_env,
+        )
+        _assert_subprocess_json_sentinel(
+            payload,
+            expected_case=expected_case,
+            failure_message=failure_message,
+        )
+        return
     rc, err = _run_python_script(
         script_path,
         args=args,
@@ -273,11 +317,11 @@ def test_find_private_jax_src_usages_detects_alias_attribute_access(tmp_path):
 
 def test_import_package_root():
     """simsopt package imports without simsoptpp."""
-    rc, err = _run_python_script(
+    _assert_python_script_passes(
         _IMPORT_SMOKE_CASES_PATH,
         args=("case_import_package_root",),
+        failure_message="import simsopt failed",
     )
-    assert rc == 0, f"import simsopt failed:\n{err}"
 
 
 def test_import_package_root_without_generated_version_file():
@@ -365,11 +409,11 @@ def test_repo_bootstrap_reloads_local_simsoptpp_over_foreign_module():
 
 def test_import_package_root_native_cpu_does_not_require_jax_runtime():
     """Importing package root without JAX selectors must not force a JAX import."""
-    rc, err = _run_python_script(
+    _assert_python_script_passes(
         _IMPORT_SMOKE_CASES_PATH,
         args=("case_import_package_root_native_cpu_does_not_require_jax_runtime",),
+        failure_message="package root import unexpectedly required jax",
     )
-    assert rc == 0, f"package root import unexpectedly required jax:\n{err}"
 
 
 def test_entrypoint_runtime_helper_configures_cpu_before_import():
@@ -448,11 +492,11 @@ def test_audited_entrypoints_configure_runtime_before_importing_jax():
 
 def test_programmatic_backend_selection_configures_jax_runtime():
     """The public config API should support the new mode-based backend contract."""
-    rc, err = _run_python_script(
+    _assert_python_script_passes(
         _IMPORT_SMOKE_CASES_PATH,
         args=("case_programmatic_backend_selection_configures_jax_runtime",),
+        failure_message="programmatic backend config failed",
     )
-    assert rc == 0, f"programmatic backend config failed:\n{err}"
 
 
 def test_parity_mode_defaults_transfer_guard_and_keeps_x64_enabled():
@@ -1063,132 +1107,114 @@ def test_transfer_guard_disallow_allows_lpcurveforce_shared_state_packing():
 
 def test_native_cpu_backend_selection_does_not_require_jax_runtime():
     """native_cpu config must not force a JAX import when only CPU mode is selected."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_native_cpu_backend_selection_does_not_require_jax_runtime",),
+    _assert_import_smoke_case_passes(
+        "case_native_cpu_backend_selection_does_not_require_jax_runtime",
+        "native_cpu config unexpectedly required jax",
     )
-    assert rc == 0, f"native_cpu config unexpectedly required jax:\n{err}"
 
 
 def test_native_cpu_policy_matches_import_time_x64_contract():
     """The default/native policy should match the package's import-time x64 state."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_native_cpu_policy_matches_import_time_x64_contract",),
+    _assert_import_smoke_case_passes(
+        "case_native_cpu_policy_matches_import_time_x64_contract",
+        "native_cpu x64 policy mismatch",
     )
-    assert rc == 0, f"native_cpu x64 policy mismatch:\n{err}"
 
 
 def test_import_biotsavart_jax():
     """BiotSavartJAX is importable through the real package entrypoint."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_import_biotsavart_jax",),
+    _assert_import_smoke_case_passes(
+        "case_import_biotsavart_jax",
+        "import BiotSavartJAX failed",
     )
-    assert rc == 0, f"import BiotSavartJAX failed:\n{err}"
 
 
 def test_import_jax_core_specs():
     """The pure JAX kernel-layer package imports through the real package tree."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_import_jax_core_specs",),
+    _assert_import_smoke_case_passes(
+        "case_import_jax_core_specs",
+        "import simsopt.jax_core failed",
     )
-    assert rc == 0, f"import simsopt.jax_core failed:\n{err}"
 
 
 def test_jax_core_specs_are_pytrees():
     """Immutable JAX specs must flatten and survive JIT as real pytrees."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_jax_core_specs_are_pytrees",),
+    _assert_import_smoke_case_passes(
+        "case_jax_core_specs_are_pytrees",
+        "jax_core pytree contract failed",
     )
-    assert rc == 0, f"jax_core pytree contract failed:\n{err}"
 
 
 def test_jax_core_grouped_field_chunking_matches_dense_sum():
     """Chunked grouped-field evaluation must preserve dense grouped parity."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_jax_core_grouped_field_chunking_matches_dense_sum",),
+    _assert_import_smoke_case_passes(
+        "case_jax_core_grouped_field_chunking_matches_dense_sum",
+        "jax_core grouped chunking contract failed",
     )
-    assert rc == 0, f"jax_core grouped chunking contract failed:\n{err}"
 
 
 def test_import_squaredflux_jax():
     """SquaredFluxJAX is importable through the real package entrypoint."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_import_squaredflux_jax",),
+    _assert_import_smoke_case_passes(
+        "case_import_squaredflux_jax",
+        "import SquaredFluxJAX failed",
     )
-    assert rc == 0, f"import SquaredFluxJAX failed:\n{err}"
 
 
 def test_import_boozersurface_jax():
     """BoozerSurfaceJAX is importable through the real package entrypoint."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_import_boozersurface_jax",),
+    _assert_import_smoke_case_passes(
+        "case_import_boozersurface_jax",
+        "import BoozerSurfaceJAX failed",
     )
-    assert rc == 0, f"import BoozerSurfaceJAX failed:\n{err}"
 
 
 def test_import_core_optimizable():
     """Optimizable base class imports without simsoptpp."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_import_core_optimizable",),
+    _assert_import_smoke_case_passes(
+        "case_import_core_optimizable",
+        "import Optimizable failed",
     )
-    assert rc == 0, f"import Optimizable failed:\n{err}"
 
 
 def test_optimizer_jax_import_is_lazy():
     """Importing the public optimizer module must not eagerly load the private package."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_optimizer_jax_import_is_lazy",),
+    _assert_import_smoke_case_passes(
+        "case_optimizer_jax_import_is_lazy",
+        "optimizer_jax lazy import check failed",
     )
-    assert rc == 0, f"optimizer_jax lazy import check failed:\n{err}"
 
 
 def test_optimizer_jax_public_reference_methods_work_without_private_package():
     """Public reference methods remain available on the native CPU/reference backend."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=(
-            "case_optimizer_jax_public_reference_methods_work_without_private_package",
-        ),
+    _assert_import_smoke_case_passes(
+        "case_optimizer_jax_public_reference_methods_work_without_private_package",
+        "public optimizer_jax reference methods failed",
     )
-    assert rc == 0, f"public optimizer_jax reference methods failed:\n{err}"
 
 
 def test_optimizer_jax_reference_methods_reject_all_jax_backend_modes():
     """Any JAX backend mode must reject host reference optimizer methods."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_optimizer_jax_reference_methods_reject_all_jax_backend_modes",),
+    _assert_import_smoke_case_passes(
+        "case_optimizer_jax_reference_methods_reject_all_jax_backend_modes",
+        "JAX-backend reference optimizer guard failed",
     )
-    assert rc == 0, f"JAX-backend reference optimizer guard failed:\n{err}"
 
 
 def test_optimizer_jax_private_methods_require_private_package_when_blocked():
     """Private optimizer methods must raise ImportError when the private package is absent."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=(
-            "case_optimizer_jax_private_methods_require_private_package_when_blocked",
-        ),
+    _assert_import_smoke_case_passes(
+        "case_optimizer_jax_private_methods_require_private_package_when_blocked",
+        "private optimizer import guard failed",
     )
-    assert rc == 0, f"private optimizer import guard failed:\n{err}"
 
 
 def test_optimizer_jax_private_nested_import_errors_propagate():
     """Nested private-package import failures must not be masked as package absence."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_optimizer_jax_private_nested_import_errors_propagate",),
+    _assert_import_smoke_case_passes(
+        "case_optimizer_jax_private_nested_import_errors_propagate",
+        "nested private optimizer ImportError was masked",
     )
-    assert rc == 0, f"nested private optimizer ImportError was masked:\n{err}"
 
 
 def test_optimizer_jax_public_module_has_no_private_jax_src_usage():
@@ -1224,67 +1250,58 @@ def test_backend_runtime_module_has_no_private_jax_src_usage():
 
 def test_jax_classes_inherit_optimizable():
     """JAX adapter classes use the real Optimizable metaclass."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_jax_classes_inherit_optimizable",),
+    _assert_import_smoke_case_passes(
+        "case_jax_classes_inherit_optimizable",
+        "inheritance check failed",
     )
-    assert rc == 0, f"inheritance check failed:\n{err}"
 
 
 def test_import_pure_jax_modules():
     """Pure JAX compute modules (M1) import through the package."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_import_pure_jax_modules",),
+    _assert_import_smoke_case_passes(
+        "case_import_pure_jax_modules",
+        "import pure JAX modules failed",
     )
-    assert rc == 0, f"import pure JAX modules failed:\n{err}"
 
 
 def test_m5_classes_require_simsoptpp():
     """M5 single-stage wrappers remain package-gated on simsoptpp availability."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_m5_classes_require_simsoptpp",),
+    _assert_import_smoke_case_passes(
+        "case_m5_classes_require_simsoptpp",
+        "M5 availability check failed",
     )
-    assert rc == 0, f"M5 availability check failed:\n{err}"
 
 
 def test_direct_curve_modules_raise_clear_importerror_without_simsoptpp():
     """Direct geo-module imports should fail clearly at instantiation time."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_direct_curve_modules_raise_clear_importerror_without_simsoptpp",),
+    _assert_import_smoke_case_passes(
+        "case_direct_curve_modules_raise_clear_importerror_without_simsoptpp",
+        "direct geo-module simsoptpp fallback smoke failed",
     )
-    assert rc == 0, f"direct geo-module simsoptpp fallback smoke failed:\n{err}"
 
 
 def test_direct_optional_geo_modules_import_without_simsoptpp():
     """Optional geo modules should remain directly importable without simsoptpp."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_direct_optional_geo_modules_import_without_simsoptpp",),
+    _assert_import_smoke_case_passes(
+        "case_direct_optional_geo_modules_import_without_simsoptpp",
+        "optional geo-module import smoke failed",
     )
-    assert rc == 0, f"optional geo-module import smoke failed:\n{err}"
 
 
 def test_curveobjectives_optional_cpp_helpers_raise_clear_importerror_without_simsoptpp():
     """Optional simsoptpp helpers in curveobjectives should fail clearly on use."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=(
-            "case_curveobjectives_optional_cpp_helpers_raise_clear_importerror_without_simsoptpp",
-        ),
+    _assert_import_smoke_case_passes(
+        "case_curveobjectives_optional_cpp_helpers_raise_clear_importerror_without_simsoptpp",
+        "curveobjectives simsoptpp helper smoke failed",
     )
-    assert rc == 0, f"curveobjectives simsoptpp helper smoke failed:\n{err}"
 
 
 def test_framedcurve_direct_module_import_smoke():
     """Direct import of simsopt.geo.framedcurve should not hit jax_core cycles."""
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_framedcurve_direct_module_import_smoke",),
+    _assert_import_smoke_case_passes(
+        "case_framedcurve_direct_module_import_smoke",
+        "direct framedcurve import smoke failed",
     )
-    assert rc == 0, f"direct framedcurve import smoke failed:\n{err}"
 
 
 def test_biotsavart_jax_backend_does_not_import_coil_unwrap_helper():
@@ -1338,11 +1355,10 @@ def test_import_cpu_package_entrypoints_with_simsoptpp():
     except (ImportError, AttributeError):
         pytest.skip("compiled simsoptpp symbols are not available in this environment")
 
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_import_cpu_package_entrypoints_with_simsoptpp",),
+    _assert_import_smoke_case_passes(
+        "case_import_cpu_package_entrypoints_with_simsoptpp",
+        "CPU entrypoint import check failed",
     )
-    assert rc == 0, f"CPU entrypoint import check failed:\n{err}"
 
 
 def test_field_package_import_is_lazy_with_simsoptpp():
@@ -1352,11 +1368,10 @@ def test_field_package_import_is_lazy_with_simsoptpp():
     except (ImportError, AttributeError):
         pytest.skip("compiled simsoptpp symbols are not available in this environment")
 
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_field_package_import_is_lazy_with_simsoptpp",),
+    _assert_import_smoke_case_passes(
+        "case_field_package_import_is_lazy_with_simsoptpp",
+        "field package import was not lazy",
     )
-    assert rc == 0, f"field package import was not lazy:\n{err}"
 
 
 def test_geo_package_import_is_lazy_with_simsoptpp():
@@ -1366,11 +1381,10 @@ def test_geo_package_import_is_lazy_with_simsoptpp():
     except (ImportError, AttributeError):
         pytest.skip("compiled simsoptpp symbols are not available in this environment")
 
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_geo_package_import_is_lazy_with_simsoptpp",),
+    _assert_import_smoke_case_passes(
+        "case_geo_package_import_is_lazy_with_simsoptpp",
+        "geo package import was not lazy",
     )
-    assert rc == 0, f"geo package import was not lazy:\n{err}"
 
 
 def test_import_cpu_geo_core_entrypoints_without_jax():
@@ -1380,8 +1394,7 @@ def test_import_cpu_geo_core_entrypoints_without_jax():
     except (ImportError, AttributeError):
         pytest.skip("compiled simsoptpp symbols are not available in this environment")
 
-    rc, err = _run_python_script(
-        _IMPORT_SMOKE_CASES_PATH,
-        args=("case_import_cpu_geo_core_entrypoints_without_jax",),
+    _assert_import_smoke_case_passes(
+        "case_import_cpu_geo_core_entrypoints_without_jax",
+        "CPU geo import unexpectedly required jax",
     )
-    assert rc == 0, f"CPU geo import unexpectedly required jax:\n{err}"

@@ -10,6 +10,7 @@ from .curveobjectives import ArclengthVariation
 from .jit import jit
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
+from ..jax_core import curve_geometry_from_dofs, curve_spec_from_curve
 
 from scipy.linalg import lu, lu_factor, lu_solve
 from scipy.optimize import minimize
@@ -1740,59 +1741,21 @@ class ProjectedCurveConvexity(Optimizable):
         )
 
     def ddJ_ddport(self):
-        gamma = self.curve.gamma()
-        gammadash = self.curve.gammadash()
-        gammadashdash = self.curve.gammadashdash()
-        hess0 = _projected_curve_convexity_hessian(
-            self.curve.quadpoints, gamma, gammadash, gammadashdash, self.projection, 1
-        )  # this is d^2J/dgamma_i dgamma_j. Size npts x 3 x npts x 3
-        hess1 = _projected_curve_convexity_hessian(
-            self.curve.quadpoints, gamma, gammadash, gammadashdash, self.projection, 2
-        )  # this is d^2J/dgamma_i dgamma_j. Size npts x 3 x npts x 3
-        hess2 = _projected_curve_convexity_hessian(
-            self.curve.quadpoints, gamma, gammadash, gammadashdash, self.projection, 3
-        )  # this is d^2J/dgamma_i dgamma_j. Size npts x 3 x npts x 3
-        dgdx = self.curve.dgamma_by_dcoeff()  # this is dgamma/dx, size npts x 3 x ndofs
-        dgdxdash = (
-            self.curve.dgammadash_by_dcoeff()
-        )  # this is dgamma/dx, size npts x 3 x ndofs
-        dgdxdashdash = (
-            self.curve.dgammadashdash_by_dcoeff()
-        )  # this is dgamma/dx, size npts x 3 x ndofs
+        spec = curve_spec_from_curve(self.curve)
+        quadpoints = spec.quadpoints
 
-        grad0, grad1, grad2 = _projected_curve_convexity_grad(
-            self.curve.quadpoints,
-            gamma,
-            gammadash,
-            gammadashdash,
-            self.projection,
-        )  # this is dJ/dgamma, dJ/dgammadash, dJ/dgammadashdash
-        gamma_hessian = (
-            self.curve.gamma_hessian()
-        )  # this is d^2 gamma / dx_i dx_2, size 128 x 3 x ndofs x ndofs
-        gammadash_hessian = (
-            self.curve.gammadash_hessian()
-        )  # this is d^2 gamma / dx_i dx_2, size 128 x 3 x ndofs x ndofs
-        gammadashdash_hessian = (
-            self.curve.gammadashdash_hessian()
-        )  # this is d^2 gamma / dx_i dx_2, size 128 x 3 x ndofs x ndofs
+        def objective_from_dofs(dofs):
+            gamma, gammadash, gammadashdash = curve_geometry_from_dofs(spec, dofs)
+            return _projected_curve_convexity_value(
+                quadpoints,
+                gamma,
+                gammadash,
+                gammadashdash,
+                self.projection,
+            )
 
-        # Contribution for derivatives w.r.t gamma
-        ddJ_dpport_1 = np.einsum("ijkl,ijm,kln->mn", hess0, dgdx, dgdx) + np.einsum(
-            "ij,ijkl->kl", grad0, gamma_hessian
-        )  # this should be size ndofs x ndofs
-        ddJ_dpport_2 = np.einsum("ijkl,ijm,kln->mn", hess1, dgdxdash, dgdx) + np.einsum(
-            "ij,ijkl->kl", grad1, gammadash_hessian
-        )  # this should be size ndofs x ndofs
-        ddJ_dpport_3 = np.einsum(
-            "ijkl,ijm,kln->mn", hess2, dgdxdashdash, dgdx
-        ) + np.einsum(
-            "ij,ijkl->kl", grad2, gammadashdash_hessian
-        )  # this should be size ndofs x ndofs
-
-        raise NotImplementedError("Missing mixed terms")
-
-        return ddJ_dpport_1 + ddJ_dpport_2 + ddJ_dpport_3
+        dofs = jnp.asarray(self.curve.get_dofs(), dtype=jnp.float64)
+        return np.asarray(hessian(objective_from_dofs)(dofs), dtype=float)
 
     def ddJ_dportdcoil(self, curve=None):
         return 0  # Does not depend on coils

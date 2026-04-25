@@ -182,20 +182,36 @@ run_cuda_canary() {
     CUDA_CACHE_PATH="${cuda_cache_dir}" \
     JAX_COMPILATION_CACHE_DIR="${canary_cache_dir}" \
     python - "${mode}" "${output_json}" <<'PY'
+from __future__ import annotations
+
 import json
 import os
 import sys
 from pathlib import Path
+from typing import List, Optional, TypedDict
 
 import jax
 
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
-mode = sys.argv[1]
-output_json = Path(sys.argv[2])
-backend = str(jax.default_backend()).lower()
-devices = [str(device) for device in jax.devices()]
+
+class CanaryPayload(TypedDict):
+    mode: str
+    backend: str
+    devices: List[str]
+    cuda_force_ptx_jit: Optional[str]
+    cuda_disable_ptx_jit: Optional[str]
+    cuda_cache_disable: Optional[str]
+    cuda_cache_path: Optional[str]
+    jax_compilation_cache_dir: Optional[str]
+    value: float
+
+
+mode: str = sys.argv[1]
+output_json: Path = Path(sys.argv[2])
+backend: str = str(jax.default_backend()).lower()
+devices: List[str] = [str(device) for device in jax.devices()]
 if backend not in {"gpu", "cuda"}:
     raise SystemExit(
         f"CUDA canary {mode} expected GPU backend, got {backend!r} on {devices}"
@@ -203,14 +219,14 @@ if backend not in {"gpu", "cuda"}:
 
 
 @jax.jit
-def canary_kernel(x):
+def canary_kernel(x: jax.Array) -> jax.Array:
     return jnp.sum(x @ x.T) + jnp.sum(jnp.sin(x))
 
 
-x = jnp.arange(1.0, 1025.0, dtype=jnp.float64).reshape((32, 32))
-value = canary_kernel(x)
+x: jax.Array = jnp.arange(1.0, 1025.0, dtype=jnp.float64).reshape((32, 32))
+value: jax.Array = canary_kernel(x)
 value.block_until_ready()
-payload = {
+payload: CanaryPayload = {
     "mode": mode,
     "backend": backend,
     "devices": devices,

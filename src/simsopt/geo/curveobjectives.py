@@ -76,6 +76,22 @@ def _curve_jax_position_and_tangent(curve):
     return _as_jax_float64(curve.gamma()), _as_jax_float64(curve.gammadash())
 
 
+def _curve_position_samples(curve, downsample=1):
+    gamma = curve.gamma()
+    return gamma if downsample == 1 else gamma[::downsample]
+
+
+def _curve_pair_minimum_distance(curves, i, j, downsample=1):
+    from scipy.spatial.distance import cdist
+
+    return np.min(
+        cdist(
+            _curve_position_samples(curves[i], downsample),
+            _curve_position_samples(curves[j], downsample),
+        )
+    )
+
+
 def _curve_numpy_position_and_tangent(curve):
     return _as_numpy_float64(curve.gamma()).copy(), _as_numpy_float64(
         curve.gammadash()
@@ -94,10 +110,22 @@ def _curve_surface_geometry_snapshot(curves, surface):
     return curve_positions, curve_tangents, surface_gamma, surface_normals
 
 
-def _curve_pair_jax_data(curves, i, j):
+def _curve_pair_jax_data(curves, i, j, downsample=1):
     gamma1, l1 = _curve_jax_position_and_tangent(curves[i])
     gamma2, l2 = _curve_jax_position_and_tangent(curves[j])
+    if downsample != 1:
+        gamma1 = gamma1[::downsample]
+        l1 = l1[::downsample]
+        gamma2 = gamma2[::downsample]
+        l2 = l2[::downsample]
     return gamma1, l1, gamma2, l2
+
+
+def _add_curve_vjp(buffer, values, downsample):
+    if downsample == 1:
+        buffer += values
+    else:
+        buffer[::downsample] += values
 
 
 def _curve_vjp_buffers(curves):
@@ -783,11 +811,12 @@ class CurveCurveDistance(Optimizable):
 
     """
 
-    def __init__(self, curves, minimum_distance, num_basecurves=None):
+    def __init__(self, curves, minimum_distance, num_basecurves=None, downsample=1):
         self.curves = curves
         self.minimum_distance = minimum_distance
         self.candidates = None
         self.num_basecurves = num_basecurves or len(curves)
+        self.downsample = downsample
         super().__init__(depends_on=curves)
 
     def recompute_bell(self, parent=None):
@@ -796,7 +825,7 @@ class CurveCurveDistance(Optimizable):
     def compute_candidates(self):
         if self.candidates is None:
             candidates = sopp.get_pointclouds_closer_than_threshold_within_collection(
-                [c.gamma() for c in self.curves],
+                [_curve_position_samples(c, self.downsample) for c in self.curves],
                 self.minimum_distance,
                 self.num_basecurves,
             )
@@ -804,12 +833,10 @@ class CurveCurveDistance(Optimizable):
 
     def shortest_distance_among_candidates(self):
         self.compute_candidates()
-        from scipy.spatial.distance import cdist
-
         return min(
             [self.minimum_distance]
             + [
-                np.min(cdist(self.curves[i].gamma(), self.curves[j].gamma()))
+                _curve_pair_minimum_distance(self.curves, i, j, self.downsample)
                 for i, j in self.candidates
             ]
         )
@@ -818,11 +845,10 @@ class CurveCurveDistance(Optimizable):
         self.compute_candidates()
         if len(self.candidates) > 0:
             return self.shortest_distance_among_candidates()
-        from scipy.spatial.distance import cdist
 
         return min(
             [
-                np.min(cdist(self.curves[i].gamma(), self.curves[j].gamma()))
+                _curve_pair_minimum_distance(self.curves, i, j, self.downsample)
                 for i in range(len(self.curves))
                 for j in range(i)
             ]
@@ -835,7 +861,9 @@ class CurveCurveDistance(Optimizable):
         self.compute_candidates()
         res = _as_jax_float64(0.0)
         for i, j in self.candidates:
-            gamma1, l1, gamma2, l2 = _curve_pair_jax_data(self.curves, i, j)
+            gamma1, l1, gamma2, l2 = _curve_pair_jax_data(
+                self.curves, i, j, self.downsample
+            )
             res += cc_distance_pure(gamma1, l1, gamma2, l2, self.minimum_distance)
 
         return res
@@ -851,7 +879,9 @@ class CurveCurveDistance(Optimizable):
         )
 
         for i, j in self.candidates:
-            gamma1, l1, gamma2, l2 = _curve_pair_jax_data(self.curves, i, j)
+            gamma1, l1, gamma2, l2 = _curve_pair_jax_data(
+                self.curves, i, j, self.downsample
+            )
             minimum_distance = _as_jax_float64(self.minimum_distance)
             grad0, grad1, grad2, grad3 = _cc_distance_grad(
                 gamma1,
@@ -860,10 +890,26 @@ class CurveCurveDistance(Optimizable):
                 l2,
                 minimum_distance,
             )
-            dgamma_by_dcoeff_vjp_vecs[i] += _as_numpy_float64(grad0)
-            dgammadash_by_dcoeff_vjp_vecs[i] += _as_numpy_float64(grad1)
-            dgamma_by_dcoeff_vjp_vecs[j] += _as_numpy_float64(grad2)
-            dgammadash_by_dcoeff_vjp_vecs[j] += _as_numpy_float64(grad3)
+            _add_curve_vjp(
+                dgamma_by_dcoeff_vjp_vecs[i],
+                _as_numpy_float64(grad0),
+                self.downsample,
+            )
+            _add_curve_vjp(
+                dgammadash_by_dcoeff_vjp_vecs[i],
+                _as_numpy_float64(grad1),
+                self.downsample,
+            )
+            _add_curve_vjp(
+                dgamma_by_dcoeff_vjp_vecs[j],
+                _as_numpy_float64(grad2),
+                self.downsample,
+            )
+            _add_curve_vjp(
+                dgammadash_by_dcoeff_vjp_vecs[j],
+                _as_numpy_float64(grad3),
+                self.downsample,
+            )
 
         return _sum_curve_vjp_contributions(
             self.curves,

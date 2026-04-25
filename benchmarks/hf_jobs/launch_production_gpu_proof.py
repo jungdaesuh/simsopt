@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -42,6 +43,10 @@ _SINGLE_STAGE_WARM_START_REQUIRED_FILES = (
     "results.json",
     "biot_savart_opt.json",
 )
+_HF_JOB_SUCCESS_STAGE = "COMPLETED"
+_HF_JOB_TERMINAL_FAILURE_STAGES = {"CANCELED", "ERROR", "DELETED"}
+_HF_JOB_STATUS_POLL_INTERVAL_S = 5.0
+_HF_JOB_STATUS_POLL_TIMEOUT_S = 300.0
 
 
 def _resolve_hf_cli() -> str:
@@ -83,6 +88,81 @@ def _git_optional_output(*args: str) -> str | None:
         return None
     stdout = completed.stdout.strip()
     return stdout or None
+
+
+def _parse_hf_job_id_line(line: str) -> str | None:
+    prefix = "Job started with ID:"
+    if not line.startswith(prefix):
+        return None
+    job_id = line[len(prefix) :].strip()
+    if not job_id:
+        raise RuntimeError("HF Jobs CLI emitted an empty job id.")
+    return job_id
+
+
+def _inspect_hf_job_stage(hf_cli: str, job_id: str) -> str:
+    completed = subprocess.run(
+        [hf_cli, "jobs", "inspect", job_id],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    jobs = json.loads(completed.stdout)
+    if not isinstance(jobs, list) or len(jobs) != 1:
+        raise RuntimeError(f"Expected one HF job inspection record for {job_id}.")
+    status = jobs[0].get("status")
+    if not isinstance(status, dict):
+        raise RuntimeError(f"HF job {job_id} inspection is missing status.")
+    stage = status.get("stage")
+    if not isinstance(stage, str) or not stage:
+        raise RuntimeError(f"HF job {job_id} inspection is missing status.stage.")
+    return stage
+
+
+def _wait_for_successful_hf_job(
+    hf_cli: str,
+    job_id: str,
+    *,
+    poll_interval_s: float = _HF_JOB_STATUS_POLL_INTERVAL_S,
+    timeout_s: float = _HF_JOB_STATUS_POLL_TIMEOUT_S,
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    while True:
+        stage = _inspect_hf_job_stage(hf_cli, job_id)
+        if stage == _HF_JOB_SUCCESS_STAGE:
+            return
+        if stage in _HF_JOB_TERMINAL_FAILURE_STAGES:
+            raise SystemExit(f"HF job {job_id} finished with stage {stage}.")
+        if time.monotonic() >= deadline:
+            raise SystemExit(
+                f"HF job {job_id} did not reach {_HF_JOB_SUCCESS_STAGE} "
+                f"within {timeout_s:.0f}s after log streaming ended; latest stage={stage}."
+            )
+        time.sleep(poll_interval_s)
+
+
+def _run_hf_job_foreground(hf_cli: str, cli_args: list[str]) -> None:
+    job_id = None
+    with subprocess.Popen(
+        cli_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    ) as process:
+        if process.stdout is None:
+            raise RuntimeError("HF Jobs CLI stdout pipe was not created.")
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            parsed_job_id = _parse_hf_job_id_line(line)
+            if parsed_job_id is not None:
+                job_id = parsed_job_id
+        returncode = process.wait()
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cli_args)
+    if job_id is None:
+        raise RuntimeError("Could not parse HF job id from foreground run output.")
+    _wait_for_successful_hf_job(hf_cli, job_id)
 
 
 def _list_git_remotes() -> list[str]:
@@ -681,6 +761,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print the resolved hf jobs commands without launching them.",
     )
+    parser.add_argument(
+        "--no-detach",
+        action="store_false",
+        dest="detach",
+        default=True,
+        help=(
+            "Run each HF job in the foreground so this launcher exits nonzero "
+            "when the remote proof fails."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -702,26 +792,39 @@ def main() -> None:
             hardware,
             "--timeout",
             args.timeout,
-            "--detach",
-            "--label",
-            "project=columbia",
-            "--label",
-            "task=production-gpu-proof",
-            "--label",
-            f"hardware={hardware}",
-            "--label",
-            f"sha={preflight['repo_sha']}",
-            args.image,
-            "--",
-            "bash",
-            "-lc",
-            job_command,
         ]
+        if args.detach:
+            cli_args.append("--detach")
+        cli_args.extend(
+            [
+                "--label",
+                "project=columbia",
+                "--label",
+                "task=production-gpu-proof",
+                "--label",
+                f"hardware={hardware}",
+                "--label",
+                f"sha={preflight['repo_sha']}",
+                args.image,
+                "--",
+                "bash",
+                "-lc",
+                job_command,
+            ]
+        )
         if args.dry_run:
             print(" ".join(shlex.quote(part) for part in cli_args))
             continue
-        completed = subprocess.run(cli_args, check=True, capture_output=True, text=True)
-        print(f"{hardware}: {completed.stdout.strip()}")
+        if args.detach:
+            completed = subprocess.run(
+                cli_args,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            print(f"{hardware}: {completed.stdout.strip()}")
+            continue
+        _run_hf_job_foreground(hf_cli, cli_args)
 
 
 if __name__ == "__main__":

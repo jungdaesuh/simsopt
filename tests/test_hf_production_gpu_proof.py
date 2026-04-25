@@ -159,6 +159,9 @@ def test_run_production_gpu_proof_has_ptx_and_cubin_cuda_canaries():
         "cuda_driver_cache_${mode}",
         "JAX_COMPILATION_CACHE_DIR=\"${canary_cache_dir}\"",
         "cuda_canary_cache_${mode}",
+        "class CanaryPayload(TypedDict):",
+        "def canary_kernel(x: jax.Array) -> jax.Array:",
+        "payload: CanaryPayload",
         "value.block_until_ready()",
         "CUDA canary",
     )
@@ -736,6 +739,7 @@ def test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override(tmp_p
     )
 
     assert completed.returncode == 0
+    assert "--detach" in completed.stdout
     assert '"effective_geometry_rel_tol": null' in completed.stdout
     assert '"stage2_geometry_policy": "report-only"' in completed.stdout
     assert "--geometry-rel-tol" not in completed.stdout
@@ -756,6 +760,95 @@ def test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override(tmp_p
         in completed.stdout
     )
     assert "stage2_warm_repro" not in completed.stdout
+
+
+def test_launch_production_gpu_proof_no_detach_streams_remote_result(tmp_path):
+    env = _launcher_env(tmp_path)
+    remote_args = _default_remote_launcher_args(tmp_path)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER_SCRIPT),
+            "--dry-run",
+            "--no-detach",
+            "--hardware",
+            "a100-large",
+            *remote_args,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    assert completed.returncode == 0
+    assert "--detach" not in completed.stdout
+    assert "--hardware" not in completed.stdout
+    assert "hf jobs run --flavor a100-large" in completed.stdout
+
+
+def test_run_hf_job_foreground_inspects_terminal_status(monkeypatch):
+    waited: list[tuple[str, str]] = []
+
+    class FakeProcess:
+        stdout = iter(["Job started with ID: job-123\n", "remote log\n"])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(launcher.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(
+        launcher,
+        "_wait_for_successful_hf_job",
+        lambda hf_cli, job_id: waited.append((hf_cli, job_id)),
+    )
+
+    launcher._run_hf_job_foreground("hf", ["hf", "jobs", "run"])
+
+    assert waited == [("hf", "job-123")]
+
+
+def test_run_hf_job_foreground_rejects_missing_job_id(monkeypatch):
+    class FakeProcess:
+        stdout = iter(["remote log without job id\n"])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(launcher.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+
+    with pytest.raises(RuntimeError, match="Could not parse HF job id"):
+        launcher._run_hf_job_foreground("hf", ["hf", "jobs", "run"])
+
+
+def test_wait_for_successful_hf_job_rejects_remote_failure(monkeypatch):
+    monkeypatch.setattr(launcher, "_inspect_hf_job_stage", lambda _hf_cli, _job_id: "ERROR")
+
+    with pytest.raises(SystemExit, match="finished with stage ERROR"):
+        launcher._wait_for_successful_hf_job("hf", "job-123", poll_interval_s=0.0)
+
+
+def test_wait_for_successful_hf_job_accepts_completed_status(monkeypatch):
+    monkeypatch.setattr(
+        launcher,
+        "_inspect_hf_job_stage",
+        lambda _hf_cli, _job_id: "COMPLETED",
+    )
+
+    launcher._wait_for_successful_hf_job("hf", "job-123", poll_interval_s=0.0)
 
 
 def test_launch_production_gpu_proof_dry_run_threads_single_stage_benchmark_mode(

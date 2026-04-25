@@ -11,6 +11,7 @@ are preserved: each case function handles its own imports internally.
 from __future__ import annotations
 
 import importlib.abc
+import json
 import sys
 from pathlib import Path
 
@@ -22,6 +23,15 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_DIR = _REPO_ROOT / "src"
 _CPU_RUN_CODE_BENCHMARK_PATH = _REPO_ROOT / "benchmarks" / "cpu_run_code_benchmark.py"
 _LOCAL_SIMSOPT_IMPORT_PATHS = (_REPO_ROOT, _SRC_DIR)
+
+
+class SkippedCase(RuntimeError):
+    pass
+
+
+def _skip_case(reason: str) -> None:
+    raise SkippedCase(reason)
+
 
 # ---------------------------------------------------------------------------
 # Meta-path blocker helpers
@@ -740,7 +750,7 @@ def case_transfer_guard_disallow_allows_lbfgs_ondevice_quadratic_smokes() -> Non
         transfer_guard="disallow",
     )
     if not private_optimizer_runtime_is_supported(jax.__version__):
-        raise SystemExit(0)
+        _skip_case(f"private optimizer runtime unsupported for JAX {jax.__version__}")
 
     half = jax.device_put(np.asarray(0.5, dtype=np.float64))
 
@@ -801,7 +811,7 @@ def case_transfer_guard_disallow_allows_target_minimize_structured_pytree_entry(
         transfer_guard="disallow",
     )
     if not private_optimizer_runtime_is_supported(jax.__version__):
-        raise SystemExit(0)
+        _skip_case(f"private optimizer runtime unsupported for JAX {jax.__version__}")
     half = jax.device_put(np.asarray(0.5, dtype=np.float64))
 
     def quad(state):
@@ -888,7 +898,7 @@ def case_transfer_guard_disallow_allows_adam_ondevice_quadratic_smokes() -> None
         transfer_guard="disallow",
     )
     if not private_optimizer_runtime_is_supported(jax.__version__):
-        raise SystemExit(0)
+        _skip_case(f"private optimizer runtime unsupported for JAX {jax.__version__}")
 
     half = jax.device_put(np.asarray(0.5, dtype=np.float64))
     target = jax.device_put(np.asarray([0.25, -0.75], dtype=np.float64))
@@ -930,7 +940,7 @@ def case_transfer_guard_disallow_allows_lm_ondevice_quadratic_smokes() -> None:
         transfer_guard="disallow",
     )
     if not private_optimizer_runtime_is_supported(jax.__version__):
-        raise SystemExit(0)
+        _skip_case(f"private optimizer runtime unsupported for JAX {jax.__version__}")
 
     x0 = jnp.asarray(np.array([1.5, -2.5], dtype=np.float64))
     target = jax.device_put(np.asarray([0.25, -0.75], dtype=np.float64))
@@ -1007,7 +1017,7 @@ def case_transfer_guard_disallow_allows_ondevice_loops_with_host_closure_constan
         transfer_guard="disallow",
     )
     if not private_optimizer_runtime_is_supported(jax.__version__):
-        raise SystemExit(0)
+        _skip_case(f"private optimizer runtime unsupported for JAX {jax.__version__}")
 
     captured = np.arange(9, dtype=np.float64)
     half = jax.device_put(np.asarray(0.5, dtype=np.float64))
@@ -1043,8 +1053,10 @@ def case_transfer_guard_disallow_allows_gpu_ondevice_loops_with_host_constants()
     )
 
     gpu = next((device for device in jax.devices() if device.platform == "gpu"), None)
-    if gpu is None or not private_optimizer_runtime_is_supported(jax.__version__):
-        raise SystemExit(0)
+    if gpu is None:
+        _skip_case("GPU device is required")
+    if not private_optimizer_runtime_is_supported(jax.__version__):
+        _skip_case(f"private optimizer runtime unsupported for JAX {jax.__version__}")
 
     simsopt_config.set_backend(
         "jax_gpu_fast",
@@ -2260,6 +2272,44 @@ def case_import_cpu_geo_core_entrypoints_without_jax() -> None:
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+
+def _case_invariant(case_name: str) -> str:
+    if "transfer_guard" in case_name:
+        return "transfer_guard"
+    if "entrypoint_runtime" in case_name or "backend" in case_name:
+        return "runtime_configuration"
+    if "repo_bootstrap" in case_name:
+        return "repo_bootstrap"
+    if "simsoptpp" in case_name:
+        return "optional_cpp_import"
+    if "jax" in case_name:
+        return "jax_import_contract"
+    return "import_contract"
+
+
+def _case_payload(
+    case_name: str,
+    *,
+    checked: bool,
+    skipped: bool,
+    skip_reason: str | None = None,
+) -> dict[str, object]:
+    simsopt_module_count = sum(
+        name == "simsopt" or name.startswith("simsopt.") for name in sys.modules
+    )
+    payload: dict[str, object] = {
+        "case": case_name,
+        "checked": checked,
+        "invariant": _case_invariant(case_name),
+        "loaded_module_count": len(sys.modules),
+        "skipped": skipped,
+        "simsopt_module_count": simsopt_module_count,
+    }
+    if skip_reason is not None:
+        payload["skip_reason"] = skip_reason
+    return payload
+
+
 if __name__ == "__main__":
     prefer_local_simsopt_source_tree()
     case_name = sys.argv[1]
@@ -2267,4 +2317,15 @@ if __name__ == "__main__":
     if fn is None or not callable(fn):
         print(f"Unknown case: {case_name}", file=sys.stderr)
         sys.exit(2)
-    fn()
+    try:
+        fn()
+    except SkippedCase as exc:
+        payload = _case_payload(
+            case_name,
+            checked=False,
+            skipped=True,
+            skip_reason=str(exc),
+        )
+    else:
+        payload = _case_payload(case_name, checked=True, skipped=False)
+    print(json.dumps(payload, sort_keys=True))

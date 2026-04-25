@@ -112,19 +112,26 @@ def _assert_finite_symmetric_hessian(objective, *, label):
     )
 
 
-def _assert_directional_fd_matches_dJ(objective, *, label):
-    x0 = np.asarray(objective.x, dtype=float).copy()
-    direction = np.linspace(-1.0, 1.0, x0.size, dtype=float)
+def _unit_direction(size, *, offset):
+    direction = np.linspace(-1.0 + offset, 1.0 + offset, size, dtype=float)
     direction /= np.linalg.norm(direction)
+    return direction
 
-    grad = np.asarray(objective.dJ(), dtype=float)
+
+def _assert_directional_fd_matches_dJ(objective, *, target, label):
+    x0 = np.asarray(target.x, dtype=float).copy()
+    direction = _unit_direction(x0.size, offset=0.0)
+
+    grad = np.asarray(objective.dJ(partials=True).data[target], dtype=float)
     analytic_directional = float(np.dot(grad, direction))
     eps = 1e-6
-    objective.x = x0 + eps * direction
-    value_plus = float(objective.J())
-    objective.x = x0 - eps * direction
-    value_minus = float(objective.J())
-    objective.x = x0
+    try:
+        target.x = x0 + eps * direction
+        value_plus = float(objective.J())
+        target.x = x0 - eps * direction
+        value_minus = float(objective.J())
+    finally:
+        target.x = x0
 
     fd_directional = (value_plus - value_minus) / (2.0 * eps)
     abs_error = abs(analytic_directional - fd_directional)
@@ -144,30 +151,71 @@ def _assert_directional_fd_matches_dJ(objective, *, label):
     ), label
 
 
+def _assert_directional_fd_matches_ddJ(objective, *, target, hessian_fn, label):
+    x0 = np.asarray(target.x, dtype=float).copy()
+    direction = _unit_direction(x0.size, offset=0.25)
+    hessian = np.asarray(hessian_fn(), dtype=float)
+    analytic_action = hessian @ direction
+    eps = 1e-5
+    try:
+        target.x = x0 + eps * direction
+        grad_plus = np.asarray(objective.dJ(partials=True).data[target], dtype=float)
+        target.x = x0 - eps * direction
+        grad_minus = np.asarray(objective.dJ(partials=True).data[target], dtype=float)
+    finally:
+        target.x = x0
+
+    fd_action = (grad_plus - grad_minus) / (2.0 * eps)
+    second_tols = parity_ladder_tolerances("derivative-heavy")
+    np.testing.assert_allclose(
+        analytic_action,
+        fd_action,
+        rtol=float(second_tols["second_derivative_rtol"]),
+        atol=float(second_tols["second_derivative_atol"]),
+        err_msg=label,
+    )
+
+
 def test_projected_enclosed_area_reuses_shared_jit_kernels():
     _clear_caches(
-        accessibility_module._projected_enclosed_area_zphi_grad,
-        accessibility_module._projected_enclosed_area_zphi_hessian,
+        accessibility_module._projected_enclosed_area_xy_grad,
+        accessibility_module._projected_enclosed_area_xy_hessian,
     )
     curve1 = _make_cws_curve(0.0)
-    objective1 = ProjectedEnclosedArea(curve1, projection="zphi")
+    objective1 = ProjectedEnclosedArea(curve1, projection="xy")
     _assert_finite_symmetric_hessian(
         objective1,
         label="ProjectedEnclosedArea must expose finite symmetric ddJ",
     )
+    _assert_directional_fd_matches_dJ(
+        objective1,
+        target=curve1,
+        label="ProjectedEnclosedArea dJ must match directional FD",
+    )
+    _assert_directional_fd_matches_ddJ(
+        objective1,
+        target=curve1,
+        hessian_fn=objective1.ddJ_ddport,
+        label="ProjectedEnclosedArea ddJ must match gradient FD",
+    )
 
-    assert accessibility_module._projected_enclosed_area_zphi_grad._cache_size() == 1
-    assert accessibility_module._projected_enclosed_area_zphi_hessian._cache_size() == 1
+    assert accessibility_module._projected_enclosed_area_xy_grad._cache_size() == 1
+    assert accessibility_module._projected_enclosed_area_xy_hessian._cache_size() == 1
     _assert_no_legacy_jit_attrs(objective1)
 
     curve2 = _make_cws_curve(0.1)
-    objective2 = ProjectedEnclosedArea(curve2, projection="zphi")
+    objective2 = ProjectedEnclosedArea(curve2, projection="xy")
     float(objective2.J())
     np.asarray(objective2.dJ(), dtype=float)
     objective2.ddJ_ddport()
+    _assert_directional_fd_matches_dJ(
+        objective2,
+        target=curve2,
+        label="ProjectedEnclosedArea cached dJ must match directional FD",
+    )
 
-    assert accessibility_module._projected_enclosed_area_zphi_grad._cache_size() == 1
-    assert accessibility_module._projected_enclosed_area_zphi_hessian._cache_size() == 1
+    assert accessibility_module._projected_enclosed_area_xy_grad._cache_size() == 1
+    assert accessibility_module._projected_enclosed_area_xy_hessian._cache_size() == 1
     _assert_no_legacy_jit_attrs(objective2)
 
 
@@ -177,10 +225,21 @@ def test_directed_facing_port_reuses_shared_jit_kernels():
         accessibility_module._upward_facing_hessian,
     )
     curve1 = _make_cws_curve(0.0)
-    objective1 = DirectedFacingPort(curve1, projection="xy")
+    objective1 = DirectedFacingPort(curve1, projection="zphi")
     _assert_finite_symmetric_hessian(
         objective1,
         label="DirectedFacingPort must expose finite symmetric ddJ",
+    )
+    _assert_directional_fd_matches_dJ(
+        objective1,
+        target=curve1,
+        label="DirectedFacingPort dJ must match directional FD",
+    )
+    _assert_directional_fd_matches_ddJ(
+        objective1,
+        target=curve1,
+        hessian_fn=objective1.ddJ_ddport,
+        label="DirectedFacingPort ddJ must match gradient FD",
     )
 
     assert accessibility_module._upward_facing_grad._cache_size() == 1
@@ -188,10 +247,15 @@ def test_directed_facing_port_reuses_shared_jit_kernels():
     _assert_no_legacy_jit_attrs(objective1)
 
     curve2 = _make_cws_curve(0.1)
-    objective2 = DirectedFacingPort(curve2, projection="xy")
+    objective2 = DirectedFacingPort(curve2, projection="zphi")
     float(objective2.J())
     np.asarray(objective2.dJ(), dtype=float)
     objective2.ddJ_ddport()
+    _assert_directional_fd_matches_dJ(
+        objective2,
+        target=curve2,
+        label="DirectedFacingPort cached dJ must match directional FD",
+    )
 
     assert accessibility_module._upward_facing_grad._cache_size() == 1
     assert accessibility_module._upward_facing_hessian._cache_size() == 1
@@ -210,6 +274,7 @@ def test_curve_in_port_penalty_reuses_shared_jit_kernels():
     np.asarray(objective1.dJ(), dtype=float)
     _assert_directional_fd_matches_dJ(
         objective1,
+        target=port1,
         label="CurveInPortPenalty dJ must match directional FD",
     )
 
@@ -222,6 +287,11 @@ def test_curve_in_port_penalty_reuses_shared_jit_kernels():
     objective2 = CurveInPortPenalty(port2, curves2, threshold=0.5, projection="xy")
     float(objective2.J())
     np.asarray(objective2.dJ(), dtype=float)
+    _assert_directional_fd_matches_dJ(
+        objective2,
+        target=port2,
+        label="CurveInPortPenalty cached dJ must match directional FD",
+    )
 
     assert accessibility_module._curve_in_port_penalty_xy_values._cache_size() == 1
     assert accessibility_module._curve_in_port_penalty_xy_grads._cache_size() == 1
@@ -250,7 +320,14 @@ def test_projected_curve_curve_distance_reuses_shared_jit_kernels():
     objective1.ddJ_dportdcoil(base1)
     _assert_directional_fd_matches_dJ(
         objective1,
+        target=port1,
         label="ProjectedCurveCurveDistance dJ must match directional FD",
+    )
+    _assert_directional_fd_matches_ddJ(
+        objective1,
+        target=port1,
+        hessian_fn=objective1.ddJ_ddport,
+        label="ProjectedCurveCurveDistance ddJ must match gradient FD",
     )
     hessian_cache_size = (
         accessibility_module._projected_cc_distance_xy_hessian._cache_size()
@@ -278,6 +355,11 @@ def test_projected_curve_curve_distance_reuses_shared_jit_kernels():
     np.asarray(objective2.dJ(), dtype=float)
     objective2.ddJ_ddport()
     objective2.ddJ_dportdcoil(base2)
+    _assert_directional_fd_matches_dJ(
+        objective2,
+        target=port2,
+        label="ProjectedCurveCurveDistance cached dJ must match directional FD",
+    )
 
     assert accessibility_module._projected_cc_distance_xy_values._cache_size() == 1
     assert accessibility_module._projected_cc_distance_xy_grads._cache_size() == 1
@@ -294,27 +376,43 @@ def test_projected_curve_curve_distance_reuses_shared_jit_kernels():
 
 def test_projected_curve_convexity_reuses_shared_jit_kernels():
     _clear_caches(
-        accessibility_module._projected_curve_convexity_zphi_value,
-        accessibility_module._projected_curve_convexity_zphi_grad,
+        accessibility_module._projected_curve_convexity_xy_value,
+        accessibility_module._projected_curve_convexity_xy_grad,
     )
     curve1 = _make_xyz_curve()
-    objective1 = ProjectedCurveConvexity(curve1, projection="zphi")
+    objective1 = ProjectedCurveConvexity(curve1, projection="xy")
     _assert_finite_value_and_gradient(
         objective1,
         label="ProjectedCurveConvexity must expose finite J/dJ",
     )
+    _assert_directional_fd_matches_dJ(
+        objective1,
+        target=curve1,
+        label="ProjectedCurveConvexity dJ must match directional FD",
+    )
+    _assert_directional_fd_matches_ddJ(
+        objective1,
+        target=curve1,
+        hessian_fn=objective1.ddJ_ddport,
+        label="ProjectedCurveConvexity ddJ must match gradient FD",
+    )
 
-    assert accessibility_module._projected_curve_convexity_zphi_value._cache_size() == 1
-    assert accessibility_module._projected_curve_convexity_zphi_grad._cache_size() == 1
+    assert accessibility_module._projected_curve_convexity_xy_value._cache_size() == 1
+    assert accessibility_module._projected_curve_convexity_xy_grad._cache_size() == 1
     _assert_no_legacy_jit_attrs(objective1)
 
     curve2 = _make_xyz_curve(dy=0.1)
-    objective2 = ProjectedCurveConvexity(curve2, projection="zphi")
+    objective2 = ProjectedCurveConvexity(curve2, projection="xy")
     float(objective2.J())
     np.asarray(objective2.dJ(), dtype=float)
+    _assert_directional_fd_matches_dJ(
+        objective2,
+        target=curve2,
+        label="ProjectedCurveConvexity cached dJ must match directional FD",
+    )
 
-    assert accessibility_module._projected_curve_convexity_zphi_value._cache_size() == 1
-    assert accessibility_module._projected_curve_convexity_zphi_grad._cache_size() == 1
+    assert accessibility_module._projected_curve_convexity_xy_value._cache_size() == 1
+    assert accessibility_module._projected_curve_convexity_xy_grad._cache_size() == 1
     _assert_no_legacy_jit_attrs(objective2)
 
 

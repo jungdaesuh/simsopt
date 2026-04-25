@@ -314,6 +314,14 @@ separate ship gates.
    or pass a repo-relative runtime seed spec. Host-local absolute paths are
    rejected before launch.
 
+   The same H200 acceptance path is available as the manual
+   ``JAX H200 Production Proof`` GitHub workflow. Trigger it from the target
+   commit with a published CUDA image and exactly one repo-relative
+   single-stage seed input. The workflow checks that the Hugging Face CLI sees
+   the ``h200`` flavor, then runs this launcher with ``--hardware h200`` and
+   ``--platform cuda`` against ``github.sha``. It uses ``--no-detach`` so the
+   workflow result follows the remote proof result, not just job submission.
+
    The default ``maxiter=20`` Stage 2 path is now portability smoke only:
    it runs the cold/warm Stage 2 probes without forcing an explicit end-state
    geometry override. Single-stage cold/warm probes still run even if an earlier

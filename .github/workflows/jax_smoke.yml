@@ -14,9 +14,13 @@ on:
       - 'src/simsopt/jax_core/**'
       - 'src/simsopt/field/__init__.py'
       - 'src/simsopt/geo/__init__.py'
+      - 'src/simsopt/geo/accessibility.py'
       - 'src/simsopt/objectives/__init__.py'
       - 'src/simsoptpp/**'
       - 'tests/field/test_biotsavart_jax.py'
+      - 'tests/field/test_selffieldforces.py'
+      - 'tests/geo/test_accessibility.py'
+      - 'tests/geo/test_curve_objectives.py'
       - 'tests/geo/test_surface_fourier_jax.py'
       - 'tests/geo/test_boozer_residual_jax.py'
       - 'tests/geo/test_boozer_derivatives_jax.py'
@@ -26,6 +30,7 @@ on:
       - 'tests/geo/test_surface_objectives.py'
       - 'tests/objectives/test_integral_bdotn_jax.py'
       - 'tests/integration/conftest.py'
+      - 'tests/conftest.py'
       - 'tests/integration/test_jax_native_path.py'
       - 'tests/integration/test_stage2_jax.py'
       - 'tests/integration/test_single_stage_jax.py'
@@ -39,6 +44,8 @@ on:
       - 'tests/test_field_cache_hot_path_benchmark.py'
       - 'tests/test_hf_production_gpu_proof.py'
       - 'tests/test_jax_import_smoke.py'
+      - 'tests/test_pytest_skip_xfail_audit.py'
+      - 'tests/subprocess/import_smoke_cases.py'
       - 'tests/subprocess/hf_production_gpu_fake_runner.py'
       - 'examples/single_stage_optimization/**'
       - 'benchmarks/field_cache_hot_path_benchmark.cpp'
@@ -58,6 +65,7 @@ on:
       - 'scripts/jax_ci_contract.py'
       - '.github/workflows/jax_gpu_parity.yml'
       - '.github/workflows/jax_benchmark_reporting.yml'
+      - '.github/workflows/jax_h200_production_proof.yml'
   pull_request:
     branches: [jax-port, master]
     paths:
@@ -71,9 +79,13 @@ on:
       - 'src/simsopt/jax_core/**'
       - 'src/simsopt/field/__init__.py'
       - 'src/simsopt/geo/__init__.py'
+      - 'src/simsopt/geo/accessibility.py'
       - 'src/simsopt/objectives/__init__.py'
       - 'src/simsoptpp/**'
       - 'tests/field/test_biotsavart_jax.py'
+      - 'tests/field/test_selffieldforces.py'
+      - 'tests/geo/test_accessibility.py'
+      - 'tests/geo/test_curve_objectives.py'
       - 'tests/geo/test_surface_fourier_jax.py'
       - 'tests/geo/test_boozer_residual_jax.py'
       - 'tests/geo/test_boozer_derivatives_jax.py'
@@ -83,6 +95,7 @@ on:
       - 'tests/geo/test_surface_objectives.py'
       - 'tests/objectives/test_integral_bdotn_jax.py'
       - 'tests/integration/conftest.py'
+      - 'tests/conftest.py'
       - 'tests/integration/test_jax_native_path.py'
       - 'tests/integration/test_stage2_jax.py'
       - 'tests/integration/test_single_stage_jax.py'
@@ -96,6 +109,8 @@ on:
       - 'tests/test_field_cache_hot_path_benchmark.py'
       - 'tests/test_hf_production_gpu_proof.py'
       - 'tests/test_jax_import_smoke.py'
+      - 'tests/test_pytest_skip_xfail_audit.py'
+      - 'tests/subprocess/import_smoke_cases.py'
       - 'tests/subprocess/hf_production_gpu_fake_runner.py'
       - 'examples/single_stage_optimization/**'
       - 'benchmarks/field_cache_hot_path_benchmark.cpp'
@@ -115,6 +130,7 @@ on:
       - 'scripts/jax_ci_contract.py'
       - '.github/workflows/jax_gpu_parity.yml'
       - '.github/workflows/jax_benchmark_reporting.yml'
+      - '.github/workflows/jax_h200_production_proof.yml'
 
 jobs:
   jax-public-unit:
@@ -145,13 +161,20 @@ jobs:
       - name: Import smoke tests (real package entrypoints, no simsoptpp)
         run: python -m pytest tests/test_jax_import_smoke.py -v --tb=short
 
+      - name: Audit pytest skip and xfail contracts
+        run: python -m pytest tests/test_pytest_skip_xfail_audit.py -v --tb=short
+
       - name: Collect restored upstream and JAX guardrail tests
         run: |
           python -m pytest --collect-only \
             tests/field/test_selffieldforces.py \
+            tests/geo/test_curve_objectives.py \
             tests/geo/test_surface_fourier_jax.py \
             tests/objectives/test_integral_bdotn_jax.py \
+            tests/test_backend.py \
             -q
+          python -m pytest --collect-only tests/geo/test_curve_objectives.py -q \
+            | grep -E "test_arclength_variation_circle_planar|test_linking_number_planar|test_curve_curve_distance_empty_candidates"
 
       - name: Run public pure-JAX unit tests
         run: |
@@ -177,10 +200,11 @@ jobs:
         run: |
           python -m pip install pytest-randomly
           python -m pytest \
+            tests/test_backend.py \
             tests/test_biotsavart_donation_probe.py \
             tests/test_field_cache_hot_path_benchmark.py \
             tests/test_hf_production_gpu_proof.py \
-            -k "donated_points_kernel_deletes_positional_input or benchmark_compiles_runs_and_writes_structured_json or bootstrap_runtime_writes_gpu_smoke_payload_and_fails_closed or run_production_gpu_proof_has_ptx_and_cubin_cuda_canaries or run_production_gpu_proof_rejects_fake_runner_without_test_mode or run_production_gpu_proof_preserves_explicit_proof_parity_schema or run_production_gpu_proof_rejects_proof_rtol_above_ladder or run_production_gpu_proof_rejects_stale_value_rel_diff or run_production_gpu_proof_rejects_gradient_rel_diff_above_ladder" \
+            -k "backend_state_restoration_is_explicit_without_test_order or distributed_backend_state_restoration_is_explicit_without_test_order or backend_module_guard_restores_original_backend_modules or force_x64_rejects_silent_config_update_failure or donated_points_kernel_deletes_positional_input or benchmark_compiles_runs_and_writes_structured_json or bootstrap_runtime_writes_gpu_smoke_payload_and_fails_closed or run_production_gpu_proof_has_ptx_and_cubin_cuda_canaries or run_production_gpu_proof_rejects_fake_runner_without_test_mode or run_production_gpu_proof_preserves_explicit_proof_parity_schema or run_production_gpu_proof_rejects_proof_rtol_above_ladder or run_production_gpu_proof_rejects_stale_value_rel_diff or run_production_gpu_proof_rejects_gradient_rel_diff_above_ladder" \
             --randomly-seed=20260425 \
             -v --tb=short
 
@@ -453,6 +477,9 @@ jobs:
 
       - name: Install simsopt (with simsoptpp)
         run: pip install -v -e .
+
+      - name: Run accessibility FD/Hessian tests
+        run: python -m pytest tests/geo/test_accessibility.py -v --tb=short
 
       - name: Run private optimizer tests
         run: |

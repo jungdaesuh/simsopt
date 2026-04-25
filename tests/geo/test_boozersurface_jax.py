@@ -5533,6 +5533,20 @@ def _mock_ls_group_vjp_case():
 class TestVJPHooks:
     """Test the VJP hooks stored in result dicts."""
 
+    def test_boozer_coil_vjp_callback_signatures_are_stable(self):
+        exact_signature = inspect.signature(_bsj._boozer_exact_coil_vjp)
+        ls_signature = inspect.signature(_bsj._boozer_ls_coil_vjp)
+
+        assert tuple(exact_signature.parameters) == ("lm", "booz_surf", "iota", "G")
+        assert tuple(ls_signature.parameters) == (
+            "lm",
+            "booz_surf",
+            "iota",
+            "G",
+            "weight_inv_modB",
+        )
+        assert ls_signature.parameters["weight_inv_modB"].default is True
+
     def test_ls_vjp_returns_correct_shapes(self):
         """LS VJP returns cotangent arrays with correct shapes."""
         booz = _make_mock_boozer_surface()

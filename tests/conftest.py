@@ -23,8 +23,16 @@ try:
     import jax
 except ModuleNotFoundError:
     jax = None
-else:
-    jax.config.update("jax_enable_x64", True)
+
+
+def _force_x64(jax_module) -> None:
+    jax_module.config.update("jax_enable_x64", True)
+    if jax_module.config.jax_enable_x64 is not True:
+        raise RuntimeError("tests/conftest.py requires jax_enable_x64=True")
+
+
+if jax is not None:
+    _force_x64(jax)
 
 _BACKEND_RUNTIME_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",

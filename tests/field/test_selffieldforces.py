@@ -5,6 +5,7 @@ import os
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 from scipy import constants
 from scipy.interpolate import interp1d
 from scipy.special import ellipk, ellipe
@@ -1717,19 +1718,10 @@ class CoilForcesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             SquaredMeanTorque(coil_a1, [coil_a2, coil_b1])
 
-    def test_Taylor(self):
-        """
-        Perform representative Taylor checks for the main coil force/torque objectives.
-
-        The historical version of this test swept a large Cartesian product of configurations,
-        which turned a derivative regression test into benchmark-scale work. This version keeps
-        the same objective families under both NumPy and JAX curve paths, but limits coverage
-        to representative cases suitable for default CI.
-        """
-        I = 1.7e5
+    def _self_field_taylor_configs(self, *, broad):
         a = 0.05
         b = 0.05
-        test_configs = [
+        representative_configs = [
             {
                 "ncoils": 2,
                 "nfp": 1,
@@ -1757,32 +1749,70 @@ class CoilForcesTest(unittest.TestCase):
                 "seed": 17,
             },
         ]
+        if not broad:
+            return representative_configs
+        broad_configs = [
+            {
+                "ncoils": ncoils,
+                "nfp": nfp,
+                "stellsym": stellsym,
+                "p": p,
+                "threshold": threshold,
+                "regularization": regularization,
+                "reg_name": reg_name,
+                "downsample": downsample,
+                "use_jax_curve": use_jax_curve,
+                "numquadpoints": 10,
+                "seed": seed,
+            }
+            for seed, ncoils, nfp, stellsym, p, threshold, regularization, reg_name, downsample, use_jax_curve in [
+                (101, 2, 1, True, 2.5, 0.0, regularization_circ(a), "circular", 1, False),
+                (103, 2, 1, False, 2.5, 0.0, regularization_circ(a), "circular", 1, True),
+                (107, 2, 2, True, 3.0, 1e-4, regularization_rect(a, b), "rectangular", 1, False),
+                (109, 2, 2, False, 3.0, 1e-4, regularization_rect(a, b), "rectangular", 2, True),
+                (113, 3, 1, True, 2.5, 1e-3, regularization_circ(a), "circular", 1, False),
+                (127, 3, 1, False, 2.5, 1e-3, regularization_circ(a), "circular", 2, True),
+                (131, 2, 3, True, 4.0, 0.0, regularization_rect(a, b), "rectangular", 1, False),
+                (137, 2, 3, False, 4.0, 0.0, regularization_rect(a, b), "rectangular", 2, True),
+                (139, 3, 2, True, 2.0, 5e-4, regularization_circ(a), "circular", 1, True),
+                (149, 3, 2, False, 2.0, 5e-4, regularization_rect(a, b), "rectangular", 2, False),
+                (151, 2, 4, True, 3.0, 1e-3, regularization_circ(a), "circular", 1, True),
+                (157, 2, 4, False, 3.0, 1e-3, regularization_rect(a, b), "rectangular", 2, False),
+            ]
+        ]
+        return broad_configs
 
-        def run_taylor_test_for_objective(J, dofs, h):
-            J.x = dofs  # Reset DOFs
-            dJ = J.dJ()
-            deriv = np.sum(dJ * h)
-            prev_error = None
-            for i in range(10, 16):
-                eps = 0.5**i
-                J.x = dofs + eps * h
-                Jp = float(J.J())
-                J.x = dofs - eps * h
-                Jm = float(J.J())
-                deriv_est = (Jp - Jm) / (2 * eps)
-                if np.abs(deriv) < 1e-8:
-                    err_new = np.abs(deriv_est - deriv)
-                else:
-                    err_new = np.abs(deriv_est - deriv) / np.abs(deriv)
-                if prev_error is not None and err_new > 1e-10:
-                    if err_new > 0.5 * prev_error and err_new >= 1e-8:
-                        return (
-                            False,
-                            f"Error did not decrease by factor 0.5: prev={prev_error}, curr={err_new}, eps={eps:.2e}",
-                        )
-                prev_error = err_new
-            return True, None
+    def _run_taylor_test_for_objective(self, J, dofs, h):
+        J.x = dofs
+        dJ = J.dJ()
+        deriv = np.sum(dJ * h)
+        prev_error = None
+        for i in range(10, 16):
+            eps = 0.5**i
+            J.x = dofs + eps * h
+            Jp = float(J.J())
+            J.x = dofs - eps * h
+            Jm = float(J.J())
+            deriv_est = (Jp - Jm) / (2 * eps)
+            if np.abs(deriv) < 1e-8:
+                err_new = np.abs(deriv_est - deriv)
+            else:
+                err_new = np.abs(deriv_est - deriv) / np.abs(deriv)
+            if (
+                prev_error is not None
+                and err_new > 1e-10
+                and err_new > 0.5 * prev_error
+                and err_new >= 1e-8
+            ):
+                return (
+                    False,
+                    f"Error did not decrease by factor 0.5: prev={prev_error}, curr={err_new}, eps={eps:.2e}",
+                )
+            prev_error = err_new
+        return True, None
 
+    def _run_self_field_taylor_configs(self, test_configs):
+        I = 1.7e5
         for cfg in test_configs:
             base_curves = create_equally_spaced_curves(
                 cfg["ncoils"],
@@ -1852,13 +1882,31 @@ class CoilForcesTest(unittest.TestCase):
                 with self.subTest(
                     config=config_str, objective=type(objective).__name__
                 ):
-                    success, error_msg = run_taylor_test_for_objective(
+                    success, error_msg = self._run_taylor_test_for_objective(
                         objective, dofs, h
                     )
                     self.assertTrue(
                         success,
                         msg=f"{config_str}, objective={type(objective).__name__}: {error_msg}",
                     )
+
+    def test_Taylor(self):
+        """
+        Perform representative Taylor checks for the main coil force/torque objectives.
+
+        The slow sibling restores the broader upstream-style configuration
+        coverage; this default test remains the fast CI slice.
+        """
+        self._run_self_field_taylor_configs(
+            self._self_field_taylor_configs(broad=False)
+        )
+
+    @pytest.mark.slow
+    def test_Taylor_broad_upstream_sweep(self):
+        """Run the restored broad force/torque Taylor sweep as slow coverage."""
+        self._run_self_field_taylor_configs(
+            self._self_field_taylor_configs(broad=True)
+        )
 
     @unittest.skipUnless(
         os.environ.get("SIMSOPT_RUN_FIELD_TIMING") == "1",

@@ -14,6 +14,7 @@ from simsopt.geo import parameters
 from simsopt.geo.curve import (
     RotatedCurve,
     create_equally_spaced_curves,
+    create_equally_spaced_planar_curves,
 )
 from simsopt.geo.curvexyzfourier import CurveXYZFourier, JaxCurveXYZFourier
 from simsopt.geo.curveplanarfourier import CurvePlanarFourier, JaxCurvePlanarFourier
@@ -71,6 +72,20 @@ def _legacy_curveobjective_jit_attrs(objective):
 
 def _jit_cache_sizes(*functions):
     return tuple(fn._cache_size() for fn in functions)
+
+
+def _sampled_curve_pair_minimum_distance(curves, *, downsample):
+    return min(
+        np.min(
+            np.linalg.norm(
+                curves[i].gamma()[::downsample, None, :]
+                - curves[j].gamma()[None, ::downsample, :],
+                axis=2,
+            )
+        )
+        for i in range(len(curves))
+        for j in range(i)
+    )
 
 
 @pytest.fixture
@@ -586,6 +601,7 @@ class Testing(unittest.TestCase):
                         self.subtest_curve_torsion_taylor_test(curve)
 
     def subtest_curve_minimum_distance_taylor_test(self, curve):
+        rng = np.random.default_rng(0)
         ncurves = 3
         curve_t = (
             curve.curve.__class__.__name__
@@ -597,44 +613,41 @@ class Testing(unittest.TestCase):
             for i in range(1, ncurves)
         ]
         distance_threshold = 0.4 if curve_t == "CurveHelical" else 0.2
-        J = CurveCurveDistance(curves, distance_threshold)
-        mindist = 1e10
-        for i in range(len(curves)):
-            for j in range(i):
-                mindist = min(
-                    mindist,
-                    np.min(
-                        np.linalg.norm(
-                            curves[i].gamma()[:, None, :]
-                            - curves[j].gamma()[None, :, :],
-                            axis=2,
-                        )
-                    ),
-                )
-        assert abs(J.shortest_distance() - mindist) < 1e-14
-        assert mindist > 1e-10
-
-        for k in range(ncurves):
-            curve_dofs = curves[k].x
-            h = 1e-3 * np.random.rand(len(curve_dofs)).reshape(curve_dofs.shape)
-            J0 = J.J()
-            dJ = J.dJ(partials=True)(
-                curves[k].curve if isinstance(curves[k], RotatedCurve) else curves[k]
+        for downsample in [1, 2, 3]:
+            J = CurveCurveDistance(curves, distance_threshold, downsample=downsample)
+            mindist = _sampled_curve_pair_minimum_distance(
+                curves,
+                downsample=downsample,
             )
-            deriv = np.sum(dJ * h)
-            assert np.abs(deriv) > 1e-10
-            err = 1e6
-            for i in range(5, 12):
-                eps = 0.5**i
-                curves[k].x = curve_dofs + eps * h
-                Jh = J.J()
-                deriv_est = (Jh - J0) / eps
-                err_new = np.linalg.norm(deriv_est - deriv)
-                assert err_new < 0.6 * err
-                err = err_new
-        J_str = json.dumps(SIMSON(J), cls=GSONEncoder)
-        J_regen = json.loads(J_str, cls=GSONDecoder)
-        self.assertAlmostEqual(J.J(), J_regen.J())
+            assert abs(J.shortest_distance() - mindist) < 1e-14
+            assert mindist > 1e-10
+
+            for k in range(ncurves):
+                curve_dofs = curves[k].x
+                h = 1e-3 * rng.random(len(curve_dofs)).reshape(curve_dofs.shape)
+                J0 = J.J()
+                dJ = J.dJ(partials=True)(
+                    curves[k].curve
+                    if isinstance(curves[k], RotatedCurve)
+                    else curves[k]
+                )
+                deriv = np.sum(dJ * h)
+                assert np.abs(deriv) > 1e-10
+                err = 1e6
+                try:
+                    for i in range(5, 12):
+                        eps = 0.5**i
+                        curves[k].x = curve_dofs + eps * h
+                        Jh = J.J()
+                        deriv_est = (Jh - J0) / eps
+                        err_new = np.linalg.norm(deriv_est - deriv)
+                        assert err_new < 0.6 * err
+                        err = err_new
+                finally:
+                    curves[k].x = curve_dofs
+            J_str = json.dumps(SIMSON(J), cls=GSONEncoder)
+            J_regen = json.loads(J_str, cls=GSONDecoder)
+            self.assertAlmostEqual(J.J(), J_regen.J())
 
     def test_curve_minimum_distance_taylor_test(self):
         for curvetype in self.curvetypes:
@@ -731,6 +744,16 @@ class Testing(unittest.TestCase):
         c.set("xc(1)", 4.0)
         c.set("ys(1)", 4.0)
         for nintervals in ["full", "partial", 2]:
+            a = ArclengthVariation(c, nintervals=nintervals)
+            assert np.abs(a.J()) < 1.0e-12
+
+    def test_arclength_variation_circle_planar(self):
+        """For a planar circle, the arclength variation should be 0."""
+        c = CurvePlanarFourier(16, 1)
+        c.set("X", 4.0)
+        c.set("Y", 4.0)
+        c.set("Z", 0.0)
+        for nintervals in ["full", 2]:
             a = ArclengthVariation(c, nintervals=nintervals)
             assert np.abs(a.J()) < 1.0e-12
 
@@ -905,39 +928,114 @@ class Testing(unittest.TestCase):
 
     def test_linking_number(self):
         for downsample in [1, 2, 5]:
-            curves1 = create_equally_spaced_curves(
-                2, 1, stellsym=True, R0=1, R1=0.5, order=5, numquadpoints=120
-            )
-            curve1 = CurveXYZFourier(200, 3)
-            coeffs = curve1.dofs_matrix
-            coeffs[1][0] = 1.0
-            coeffs[1][1] = 0.5
-            coeffs[2][2] = 0.5
-            curve1.set_dofs(np.concatenate(coeffs))
+            for use_jax_curve in [False, True]:
+                curves1 = create_equally_spaced_curves(
+                    2,
+                    1,
+                    stellsym=True,
+                    R0=1,
+                    R1=0.5,
+                    order=5,
+                    numquadpoints=120,
+                    use_jax_curve=use_jax_curve,
+                )
+                curve1 = CurveXYZFourier(200, 3)
+                coeffs = curve1.dofs_matrix
+                coeffs[1][0] = 1.0
+                coeffs[1][1] = 0.5
+                coeffs[2][2] = 0.5
+                curve1.set_dofs(np.concatenate(coeffs))
 
-            curve2 = CurveXYZFourier(150, 3)
-            coeffs = curve2.dofs_matrix
-            coeffs[1][0] = 0.5
-            coeffs[1][1] = 0.5
-            coeffs[0][0] = 0.1
-            coeffs[0][1] = 0.5
-            coeffs[0][2] = 0.5
-            curve2.set_dofs(np.concatenate(coeffs))
-            curves2 = [curve1, curve2]
-            curves3 = [curve2, curve1]
-            objective1 = LinkingNumber(curves1, downsample)
-            objective2 = LinkingNumber(curves2, downsample)
-            objective3 = LinkingNumber(curves3, downsample)
+                curve2 = CurveXYZFourier(150, 3)
+                coeffs = curve2.dofs_matrix
+                coeffs[1][0] = 0.5
+                coeffs[1][1] = 0.5
+                coeffs[0][0] = 0.1
+                coeffs[0][1] = 0.5
+                coeffs[0][2] = 0.5
+                curve2.set_dofs(np.concatenate(coeffs))
+                curves2 = [curve1, curve2]
+                curves3 = [curve2, curve1]
+                objective1 = LinkingNumber(curves1, downsample)
+                objective2 = LinkingNumber(curves2, downsample)
+                objective3 = LinkingNumber(curves3, downsample)
 
-            print(
-                "Linking number testing (should be 0, 1, 1):",
-                objective1.J(),
-                objective2.J(),
-                objective3.J(),
-            )
-            np.testing.assert_allclose(objective1.J(), 0, atol=1e-14, rtol=1e-14)
-            np.testing.assert_allclose(objective2.J(), 1, atol=1e-14, rtol=1e-14)
-            np.testing.assert_allclose(objective3.J(), 1, atol=1e-14, rtol=1e-14)
+                np.testing.assert_allclose(
+                    objective1.J(), 0, atol=1e-14, rtol=1e-14
+                )
+                np.testing.assert_allclose(
+                    objective2.J(), 1, atol=1e-14, rtol=1e-14
+                )
+                np.testing.assert_allclose(
+                    objective3.J(), 1, atol=1e-14, rtol=1e-14
+                )
+
+    def test_linking_number_planar(self):
+        for downsample in [1, 2, 5]:
+            for use_jax_curve in [False, True]:
+                curves1 = create_equally_spaced_planar_curves(
+                    2,
+                    1,
+                    stellsym=True,
+                    R0=1,
+                    R1=0.5,
+                    order=5,
+                    numquadpoints=120,
+                    use_jax_curve=use_jax_curve,
+                )
+                curve1 = CurvePlanarFourier(200, 0)
+                curve1.set("rc(0)", 1.0)
+                curve1.set("q0", 1.0)
+                curve1.set("qi", 1.0)
+                curve1.set("qj", 1.0)
+                curve1.set("qk", 1.0)
+                curve1.set("X", 0.25)
+                curve1.set("Y", 0.0)
+                curve1.set("Z", 0.1)
+                curve2 = CurvePlanarFourier(150, 0)
+                curve2.set("rc(0)", 1.0)
+                curve2.set("q0", 1.0)
+                curve2.set("qi", 0.0)
+                curve2.set("qj", 0.0)
+                curve2.set("qk", 1.0)
+                curve2.set("X", 0.0)
+                curve2.set("Y", 0.25)
+                curve2.set("Z", 0.1)
+                curves2 = [curve1, curve2]
+                curves3 = [curve2, curve1]
+                objective1 = LinkingNumber(curves1, downsample)
+                objective2 = LinkingNumber(curves2, downsample)
+                objective3 = LinkingNumber(curves3, downsample)
+
+                np.testing.assert_allclose(
+                    objective1.J(), 0, atol=1e-14, rtol=1e-14
+                )
+                np.testing.assert_allclose(
+                    objective2.J(), 1, atol=1e-14, rtol=1e-14
+                )
+                np.testing.assert_allclose(
+                    objective3.J(), 1, atol=1e-14, rtol=1e-14
+                )
+
+    def test_curve_curve_distance_empty_candidates(self):
+        curve1 = CurvePlanarFourier(100, 0)
+        curve2 = CurvePlanarFourier(100, 0)
+        dofs1 = np.zeros(curve1.dof_size)
+        dofs1[0] = 1.0
+        curve1.x = dofs1
+        dofs2 = np.zeros(curve2.dof_size)
+        dofs2[0] = 1.0
+        dofs2[-3] = 3.0
+        curve2.x = dofs2
+        J = CurveCurveDistance([curve1, curve2], 0.5)
+        J.candidates = []
+
+        dist_class = J.shortest_distance()
+        gamma1 = curve1.gamma()
+        gamma2 = curve2.gamma()
+        dists = np.linalg.norm(gamma1[:, None, :] - gamma2[None, :, :], axis=2)
+
+        self.assertAlmostEqual(dist_class, np.min(dists))
 
 
 if __name__ == "__main__":

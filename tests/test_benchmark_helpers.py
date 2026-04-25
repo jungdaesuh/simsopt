@@ -1117,6 +1117,7 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
         "branch_stable_resolve",
         "fd_gradient",
         "gpu_runtime",
+        "reduction_cpu_gpu",
     }
     assert set(PARITY_LADDER_TOLERANCES) == expected_lanes
 
@@ -1156,6 +1157,7 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
     fd_gradient = parity_ladder_tolerances("FD-gradient")
     assert fd_gradient["directional_fd_rtol"] == pytest.approx(1e-5)
     assert fd_gradient["directional_fd_atol"] == pytest.approx(1e-7)
+    assert fd_gradient["central_fd_error_rate"] == pytest.approx(0.4)
 
     gpu_runtime = parity_ladder_tolerances("GPU-runtime")
     assert gpu_runtime["same_state_forward_rtol"] == pytest.approx(1e-10)
@@ -1163,6 +1165,11 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
     assert gpu_runtime["whole_solve_value_rtol"] == pytest.approx(1e-6)
     assert gpu_runtime["whole_solve_value_atol"] == pytest.approx(1e-7)
     assert gpu_runtime["requires_runtime_metadata"] is True
+
+    reduction_cpu_gpu = parity_ladder_tolerances("reduction-cpu-gpu")
+    assert reduction_cpu_gpu["rtol"] == pytest.approx(1e-12)
+    assert reduction_cpu_gpu["atol"] == pytest.approx(1e-12)
+    assert reduction_cpu_gpu["requires_cpu_gpu_devices"] is True
 
 
 def test_parity_ladder_tolerances_return_independent_copy():
@@ -2747,6 +2754,10 @@ def _gpu_parity_workflow_path() -> Path:
     return _workflow_path("jax_gpu_parity.yml")
 
 
+def _h200_production_proof_workflow_path() -> Path:
+    return _workflow_path("jax_h200_production_proof.yml")
+
+
 def _assert_named_benchmark_env_bootstrap(
     workflow_text: str, *, verify_python: bool = False
 ) -> None:
@@ -3613,6 +3624,7 @@ def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
         "benchmarks/manifests/stable_hardware_weekly_tier5.json",
         ".github/workflows/jax_gpu_parity.yml",
         ".github/workflows/jax_benchmark_reporting.yml",
+        ".github/workflows/jax_h200_production_proof.yml",
     )
 
     _assert_named_benchmark_env_bootstrap(workflow_text)
@@ -3656,6 +3668,44 @@ def test_smoke_workflow_adds_cuda_strict_transfer_guard_pytest_lane():
     assert "test_ls_solve_parity_production_scale_gpu_under_disallow" in workflow_text
     assert "tests/integration/test_single_stage_physics_parity.py" in workflow_text
     assert "TestSingleStageOuterLoopGpuProof" in workflow_text
+
+
+def test_smoke_workflow_runs_accessibility_with_simsoptpp_lane():
+    workflow_text = _smoke_workflow_path().read_text(encoding="utf-8")
+    public_unit = workflow_text.split("  jax-public-guardrails:", maxsplit=1)[0]
+    private_optimizer = workflow_text.split(
+        "  jax-private-optimizer:",
+        maxsplit=1,
+    )[1]
+
+    assert "src/simsopt/geo/accessibility.py" in workflow_text
+    assert "tests/geo/test_accessibility.py" in workflow_text
+    assert "Run accessibility FD/Hessian tests" in private_optimizer
+    assert "python -m pytest tests/geo/test_accessibility.py -v --tb=short" in private_optimizer
+    assert "tests/geo/test_accessibility.py \\" not in public_unit
+
+
+def test_h200_production_proof_workflow_launches_real_h200_hf_job():
+    workflow_text = _h200_production_proof_workflow_path().read_text(
+        encoding="utf-8"
+    )
+
+    assert "workflow_dispatch:" in workflow_text
+    assert "image:" in workflow_text
+    assert "HF_TOKEN: ${{ secrets.HF_TOKEN }}" in workflow_text
+    assert 'python -m pip install --upgrade "huggingface_hub>=1.12.0"' in workflow_text
+    assert "hf jobs hardware | tee hf_jobs_hardware.txt" in workflow_text
+    assert "grep -E '^h200[[:space:]]' hf_jobs_hardware.txt" in workflow_text
+    assert "benchmarks/hf_jobs/launch_production_gpu_proof.py" in workflow_text
+    assert "--hardware h200" in workflow_text
+    assert "--platform cuda" in workflow_text
+    assert "--no-detach" in workflow_text
+    assert "--repo-url \"https://github.com/${{ github.repository }}.git\"" in workflow_text
+    assert "--repo-ref \"${{ github.ref_name }}\"" in workflow_text
+    assert "--repo-sha \"${{ github.sha }}\"" in workflow_text
+    assert "--single-stage-warm-start-run-dir" in workflow_text
+    assert "--single-stage-jax-runtime-seed-spec" in workflow_text
+    assert "Set exactly one single-stage seed input." in workflow_text
 
 
 def test_smoke_workflow_pins_jax_ci_contract_ratchet_gate():
