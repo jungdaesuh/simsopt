@@ -24,12 +24,14 @@ from benchmarks.validation_ladder_common import (
     build_provenance,
     describe_compile_behavior,
     find_single_file,
+    gpu_proof_parity_contract,
     load_json,
     max_pointwise_geometry_drift,
     maybe_initialize_distributed_runtime,
     optimizer_drift_tolerances,
     preparse_platform,
     print_provenance,
+    require_requested_platform_runtime,
     require_x64_runtime,
     relative_error,
     resolve_probe_lane,
@@ -57,6 +59,11 @@ import jaxlib
 maybe_initialize_distributed_runtime()
 jax.config.update("jax_enable_x64", True)
 require_x64_runtime(jax, context="Stage 2 end-to-end comparison")
+require_requested_platform_runtime(
+    jax,
+    requested_platform=REQUESTED_PLATFORM,
+    context="Stage 2 end-to-end comparison",
+)
 
 
 _TIER2_BASE_TOLERANCES = optimizer_drift_tolerances("tier2_stage2_e2e")
@@ -812,6 +819,7 @@ def build_stage2_e2e_payload(
     cpu_lane_kind: str,
     final_objective_rel_tol: float,
     geometry_rel_tol: float | None,
+    maxiter: int,
 ) -> dict[str, Any]:
     cpu_results = cpu_case["results"]
     jax_results = jax_case["results"]
@@ -867,6 +875,20 @@ def build_stage2_e2e_payload(
         ),
         **ondevice_metrics,
     }
+    proof_contract = gpu_proof_parity_contract(
+        "stage2",
+        maxiter=maxiter,
+    )
+    proof_parity = {
+        **proof_contract,
+        "cpu_oracle_value": float(ondevice_metrics["cpu_final_objective"]),
+        "gpu_value": float(ondevice_metrics["jax_final_objective"]),
+        "value_rel_diff": final_objective_rel_diff,
+        "gradient_rel_diff": max(
+            float(comparison["matched_cpu_state"]["gradient_l2_rel_diff"]),
+            float(comparison["matched_jax_state"]["gradient_l2_rel_diff"]),
+        ),
+    }
     failures = evaluate_stage2_e2e_comparison(comparison)
     timings = {
         "cpu_outer_elapsed_s": cpu_elapsed_s,
@@ -895,6 +917,7 @@ def build_stage2_e2e_payload(
         },
         "timings": timings,
         "comparison": comparison,
+        "proof_parity": proof_parity,
         "failures": failures,
         "passed": not failures,
     }
@@ -945,6 +968,15 @@ def main() -> None:
         "platform": cpu_platform,
         "kind": cpu_lane_kind,
     }
+    bundle_provenance = {
+        "runner": "benchmarks/stage2_e2e_comparison.py",
+        "fake": False,
+        "default_backend": provenance["backend"],
+        "devices": provenance["devices"],
+        "xla_flags": provenance["xla_flags"],
+        "cuda_force_ptx_jit": provenance["cuda_force_ptx_jit"],
+        "cuda_disable_ptx_jit": provenance["cuda_disable_ptx_jit"],
+    }
     print_provenance(provenance)
     cpu_case = _run_stage2_case(args, cpu_backend, platform=cpu_platform)
     jax_case = _run_stage2_case(args, "jax", platform=args.platform)
@@ -974,7 +1006,9 @@ def main() -> None:
         cpu_lane_kind=cpu_lane_kind,
         final_objective_rel_tol=final_objective_rel_tol,
         geometry_rel_tol=geometry_rel_tol,
+        maxiter=int(args.maxiter),
     )
+    payload["bundle_provenance"] = bundle_provenance
     comparison = payload["comparison"]
     failures = payload["failures"]
 

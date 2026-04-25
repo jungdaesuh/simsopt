@@ -1,4 +1,7 @@
+import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -63,6 +66,51 @@ def test_parse_args_allows_zero_warmup():
     args = benchmark.parse_args(["--warmup", "0"])
 
     assert args.warmup == 0
+
+
+def test_benchmark_compiles_runs_and_writes_structured_json(tmp_path):
+    try:
+        compiler = benchmark.find_cxx("")
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+
+    output_json = tmp_path / "field-cache-hot-path.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(benchmark.__file__)),
+            "--cxx",
+            compiler,
+            "--build-dir",
+            str(tmp_path / "build"),
+            "--output-json",
+            str(output_json),
+            "--ncoils",
+            "1",
+            "--npoints",
+            "4",
+            "--derivatives",
+            "1",
+            "--warmup",
+            "0",
+            "--iterations",
+            "1",
+            "--samples",
+            "1",
+        ],
+        cwd=benchmark.REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["source"] == "benchmarks/field_cache_hot_path_benchmark.cpp"
+    assert payload["config"]["npoints"] == 4
+    assert payload["legacy_compute_bookkeeping"]["median_us"] > 0.0
+    assert payload["indexed_compute_bookkeeping"]["median_us"] > 0.0
+    assert payload["speedups"]["legacy_vs_indexed_compute"] > 0.0
 
 
 @pytest.mark.parametrize(

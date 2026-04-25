@@ -8,7 +8,9 @@ import numpy as np
 import pytest
 from conftest import enable_strict_parity_backend, parity_default_device, parity_rng
 
+from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from simsopt._core.optimizable import Optimizable
+from simsopt.backend import invalidate_backend_cache
 from simsopt.field import BiotSavart, Current, coils_via_symmetries
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 from simsopt.geo.curve import create_equally_spaced_curves
@@ -31,6 +33,7 @@ _VALUE_RTOL = 1e-12
 _VALUE_ATOL = 1e-15
 _GRADIENT_RTOL = 1e-11
 _GRADIENT_ATOL = 1e-14
+_FD_GRADIENT_TOLS = parity_ladder_tolerances("fd-gradient")
 
 
 class _NonNativeFakeField(Optimizable):
@@ -75,6 +78,84 @@ def _make_native_flux_parity_case():
     surface.set_zs(1, 0, 0.2)
     surface.fix_all()
     return coils, surface
+
+
+def _make_large_grouped_flux_objective():
+    nfp = 1
+    stellsym = False
+    base_curves = [
+        *create_equally_spaced_curves(
+            2,
+            nfp,
+            stellsym=stellsym,
+            R0=1.0,
+            R1=0.45,
+            order=3,
+            numquadpoints=24,
+        ),
+        *create_equally_spaced_curves(
+            1,
+            nfp,
+            stellsym=stellsym,
+            R0=1.08,
+            R1=0.38,
+            order=4,
+            numquadpoints=28,
+        ),
+    ]
+    base_currents = [Current(value) for value in (1.0e5, -0.8e5, 0.6e5)]
+    coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym)
+
+    surface = SurfaceRZFourier(
+        nfp=nfp,
+        stellsym=stellsym,
+        mpol=1,
+        ntor=1,
+        quadpoints_phi=np.linspace(0.0, 1.0, 48, endpoint=False),
+        quadpoints_theta=np.linspace(0.0, 1.0, 48, endpoint=False),
+    )
+    surface.set_rc(0, 0, 1.0)
+    surface.set_rc(1, 0, 0.22)
+    surface.set_zs(1, 0, 0.2)
+    surface.fix_all()
+
+    objective = SquaredFluxJAX(
+        surface,
+        BiotSavartJAX(coils),
+        definition="quadratic flux",
+    )
+    assert not objective.field._uses_uniform_curve_xyz_fourier_fastpath
+    return objective
+
+
+def _set_field_kernel_tuning(
+    monkeypatch,
+    *,
+    coil_chunk_size: int,
+    quadrature_block_size: int,
+) -> None:
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_parity")
+    monkeypatch.setenv("SIMSOPT_JAX_COIL_CHUNK_SIZE", str(coil_chunk_size))
+    monkeypatch.setenv(
+        "SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE",
+        str(quadrature_block_size),
+    )
+    invalidate_backend_cache()
+
+
+def _large_grouped_flux_value_and_gradient(
+    monkeypatch,
+    *,
+    coil_chunk_size: int,
+    quadrature_block_size: int,
+):
+    _set_field_kernel_tuning(
+        monkeypatch,
+        coil_chunk_size=coil_chunk_size,
+        quadrature_block_size=quadrature_block_size,
+    )
+    objective = _make_large_grouped_flux_objective()
+    return objective.J(), objective.dJ()
 
 
 def _make_native_flux_objectives(definition, *, target=None):
@@ -123,10 +204,37 @@ def _make_flux_objectives_for_surface(definition, surface, *, target=None):
     return objective_cpu, objective_jax
 
 
-def _degenerate_point_quadrature_scale(definition):
-    if definition in {"quadratic flux", "local"}:
-        return 0.5
-    return 1.0
+def _single_valid_flux_value_and_gradient(definition):
+    """Independent NumPy oracle for the second point in the degenerate fixture."""
+    normal = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    field = np.array([2.0, 0.0, 0.0], dtype=np.float64)
+    target = 0.5
+    grid_size = 2.0
+
+    bdotn = float(np.dot(field, normal) - target)
+    norm_n = float(np.linalg.norm(normal))
+    field_norm_sq = float(np.dot(field, field))
+
+    if definition == "quadratic flux":
+        value = 0.5 * bdotn**2 * norm_n / grid_size
+        gradient = bdotn * normal * norm_n / grid_size
+    elif definition == "normalized":
+        numerator = bdotn**2 * norm_n
+        denominator = field_norm_sq * norm_n
+        value = 0.5 * numerator / denominator
+        gradient = 0.5 * (
+            (2.0 * bdotn * normal) * denominator - numerator * (2.0 * field)
+        ) / denominator**2
+    elif definition == "local":
+        value = 0.5 * bdotn**2 * norm_n / field_norm_sq / grid_size
+        gradient = 0.5 * norm_n * (
+            (2.0 * bdotn * normal) * field_norm_sq
+            - bdotn**2 * (2.0 * field)
+        ) / (field_norm_sq**2 * grid_size)
+    else:
+        raise ValueError(f"Unknown flux definition {definition!r}.")
+
+    return value, np.concatenate((np.zeros(3, dtype=np.float64), gradient))
 
 
 def _assert_flux_value_parity(actual, reference):
@@ -139,6 +247,29 @@ def _assert_flux_gradient_parity(actual, reference):
         reference,
         rtol=_GRADIENT_RTOL,
         atol=_GRADIENT_ATOL,
+    )
+
+
+def _assert_squared_flux_directional_fd(objective):
+    x0 = np.asarray(objective.x, dtype=np.float64).copy()
+    direction = np.linspace(-1.0, 1.0, x0.size, dtype=np.float64)
+    direction /= np.linalg.norm(direction)
+    gradient = np.asarray(objective.dJ(), dtype=np.float64)
+    directional_gradient = float(np.dot(gradient, direction))
+
+    eps = 1e-5
+    objective.x = x0 + eps * direction
+    value_plus = float(objective.J())
+    objective.x = x0 - eps * direction
+    value_minus = float(objective.J())
+    objective.x = x0
+
+    directional_fd = (value_plus - value_minus) / (2.0 * eps)
+    np.testing.assert_allclose(
+        directional_gradient,
+        directional_fd,
+        rtol=float(_FD_GRADIENT_TOLS["directional_fd_rtol"]),
+        atol=float(_FD_GRADIENT_TOLS["directional_fd_atol"]),
     )
 
 
@@ -177,6 +308,31 @@ def test_fluxobjective_value_parity(definition):
 def test_fluxobjective_gradient_parity(definition):
     objective_cpu, objective_jax = _make_native_flux_objectives(definition)
     _assert_flux_gradient_parity(objective_jax.dJ(), objective_cpu.dJ())
+
+
+@pytest.mark.parametrize("definition", _SQUARED_FLUX_DEFINITIONS)
+def test_squaredfluxjax_gradient_matches_directional_taylor_fd(definition):
+    _, objective_jax = _make_native_flux_objectives(definition)
+    _assert_squared_flux_directional_fd(objective_jax)
+
+
+def test_squaredfluxjax_large_point_cloud_grouped_vjp_matches_dense(monkeypatch):
+    try:
+        dense_value, dense_gradient = _large_grouped_flux_value_and_gradient(
+            monkeypatch,
+            coil_chunk_size=0,
+            quadrature_block_size=0,
+        )
+        chunked_value, chunked_gradient = _large_grouped_flux_value_and_gradient(
+            monkeypatch,
+            coil_chunk_size=2,
+            quadrature_block_size=17,
+        )
+    finally:
+        invalidate_backend_cache()
+
+    _assert_flux_value_parity(chunked_value, dense_value)
+    _assert_flux_gradient_parity(chunked_gradient, dense_gradient)
 
 
 @pytest.mark.parametrize(
@@ -228,17 +384,8 @@ def test_degenerate_normals_do_not_perturb_valid_flux_contracts(definition):
         B=[[[7.0, -3.0, 2.0], [2.0, 0.0, 0.0]]],
         target=[[11.0, 0.5]],
     )
-    reduced_value, reduced_grad = _flux_kernel_value_and_grad(
-        definition=definition,
-        normal=[[[1.0, 0.0, 0.0]]],
-        B=[[[2.0, 0.0, 0.0]]],
-        target=[[0.5]],
-    )
-
-    quadrature_scale = _degenerate_point_quadrature_scale(definition)
-    expected_value = quadrature_scale * reduced_value
-    expected_gradient = np.concatenate(
-        (np.zeros(3), quadrature_scale * np.asarray(reduced_grad).reshape(-1))
+    expected_value, expected_gradient = _single_valid_flux_value_and_gradient(
+        definition
     )
 
     np.testing.assert_allclose(full_value, expected_value, rtol=1e-12, atol=1e-15)

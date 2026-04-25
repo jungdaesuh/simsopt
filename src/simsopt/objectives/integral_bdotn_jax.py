@@ -31,7 +31,7 @@ from ..jax_core.reductions import (
     validate_reduction_mode,
 )
 
-__all__ = ["integral_BdotN", "residual_BdotN"]
+__all__ = ["integral_BdotN", "residual_BdotN", "signed_BdotN_flux"]
 
 
 @partial(jax.jit, static_argnames=("definition",))
@@ -80,6 +80,13 @@ def residual_BdotN(Bcoil, target, normal, definition="quadratic flux"):
         raise ValueError(f"Unknown definition: {definition!r}")
 
     return jnp.ravel(residual)
+
+
+@jax.jit
+def signed_BdotN_flux(Bcoil, normal):
+    """Return the raw signed average of B dot unnormalized surface normal."""
+    nphi, ntheta, _ = Bcoil.shape
+    return pairwise_sum_flat(jnp.sum(Bcoil * normal, axis=-1)) / (nphi * ntheta)
 
 
 @partial(jax.jit, static_argnames=("definition", "reduction_mode"))

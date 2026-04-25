@@ -2,6 +2,8 @@ import importlib.util
 from pathlib import Path
 import sys
 
+import pytest
+
 from simsopt.backend import get_backend_config, invalidate_backend_cache, set_backend
 
 
@@ -82,6 +84,29 @@ def test_biotsavart_donation_probe_matches_baseline():
     assert payload["comparison"]["output_shape"] == [16, 3]
     assert payload["comparison"]["max_abs_diff"] == 0.0
     assert payload["comparison"]["max_rel_diff"] == 0.0
+
+
+def test_donated_points_kernel_deletes_positional_input():
+    host_points, gammas, gammadashs, currents = biotsavart_donation_probe._make_fixture(
+        TEST_PROBE_SHAPE,
+        seed=0,
+    )
+    points = biotsavart_donation_probe._fresh_points(host_points)
+    assert points.is_deleted() is False
+
+    result = biotsavart_donation_probe._donated_points_kernel()(
+        points,
+        gammas,
+        gammadashs,
+        currents,
+    )
+    biotsavart_donation_probe.jax.block_until_ready(result)
+
+    assert points.is_deleted() is True
+    with pytest.raises(RuntimeError, match="deleted or donated buffer"):
+        biotsavart_donation_probe.jax.block_until_ready(
+            biotsavart_donation_probe.jnp.asarray(points)
+        )
 
 
 def test_biotsavart_donation_probe_supports_real_stage2_fixture():

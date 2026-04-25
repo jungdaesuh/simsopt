@@ -97,6 +97,12 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
     "fd_gradient": {
         "directional_fd_rtol": 1e-5,
         "directional_fd_atol": 1e-7,
+        "directional_derivative_floor": 1e-12,
+        "central_fd_error_rate": 0.55,
+        "central_fd_min_stable_eps": 3,
+        "direction_seed": 1729,
+        "direction_count": 5,
+        "max_direction_rejection_fraction": 0.2,
         "requires_branch_stable_state": True,
         "compares_directional_derivative": True,
     },
@@ -110,6 +116,13 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         "requires_x64": True,
         "requires_fixed_seed": True,
         "requires_runtime_metadata": True,
+    },
+    "reduction_cpu_gpu": {
+        "rtol": 1e-12,
+        "atol": 1e-12,
+        "requires_x64": True,
+        "requires_cpu_gpu_devices": True,
+        "uses_cancellation_stress": True,
     },
 }
 
@@ -160,6 +173,21 @@ SINGLE_STAGE_PROOF_CONTRACTS = {
             "MAX_CURVATURE",
         ),
     }
+}
+
+GPU_PROOF_PARITY_CONTRACTS = {
+    "stage2": {
+        "value_lane": "tier2_stage2_e2e",
+        "value_contract_key": "final_objective_rel_tol",
+        "gradient_lane": "tier1_stage2_value_gradient",
+        "gradient_contract_key": "gradient_rtol",
+    },
+    "single_stage": {
+        "value_lane": "tier3_single_stage_init",
+        "value_contract_key": "field_error_rel_tol",
+        "gradient_lane": "gpu_runtime",
+        "gradient_contract_key": "same_state_gradient_rtol",
+    },
 }
 
 
@@ -269,6 +297,37 @@ def single_stage_proof_contract(
         )
     contract = dict(SINGLE_STAGE_PROOF_CONTRACTS[rung])
     contract["required_result_keys"] = tuple(contract["required_result_keys"])
+    return contract
+
+
+def gpu_proof_parity_contract(
+    probe_kind: str,
+    *,
+    maxiter: int | None = None,
+) -> dict[str, float | str]:
+    """Return the explicit value/gradient tolerance schema for HF GPU proof."""
+    probe_key = _normalize_contract_key(probe_kind)
+    if probe_key not in GPU_PROOF_PARITY_CONTRACTS:
+        valid = ", ".join(sorted(GPU_PROOF_PARITY_CONTRACTS))
+        raise ValueError(
+            f"Unknown GPU proof parity probe kind {probe_kind!r}. "
+            f"Expected one of: {valid}."
+        )
+
+    contract = dict(GPU_PROOF_PARITY_CONTRACTS[probe_key])
+    value_lane = str(contract["value_lane"])
+    value_contract_key = str(contract["value_contract_key"])
+    gradient_lane = str(contract["gradient_lane"])
+    gradient_contract_key = str(contract["gradient_contract_key"])
+
+    value_tolerances = optimizer_drift_tolerances(value_lane, maxiter=maxiter)
+    if gradient_lane in OPTIMIZER_DRIFT_TOLERANCES:
+        gradient_tolerances = optimizer_drift_tolerances(gradient_lane)
+    else:
+        gradient_tolerances = parity_ladder_tolerances(gradient_lane)
+
+    contract["value_rtol"] = float(value_tolerances[value_contract_key])
+    contract["gradient_rtol"] = float(gradient_tolerances[gradient_contract_key])
     return contract
 
 

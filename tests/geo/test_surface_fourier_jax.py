@@ -34,6 +34,8 @@ surface_gamma = _sf.surface_gamma
 surface_gammadash1 = _sf.surface_gammadash1
 surface_gammadash2 = _sf.surface_gammadash2
 surface_normal = _sf.surface_normal
+surface_area = _sf.surface_area
+surface_volume = _sf.surface_volume
 dgamma_by_dcoeff = _sf.dgamma_by_dcoeff
 dgammadash1_by_dcoeff = _sf.dgammadash1_by_dcoeff
 dgammadash2_by_dcoeff = _sf.dgammadash2_by_dcoeff
@@ -132,8 +134,8 @@ class TestSurfaceFourierJaxSimpleTorus:
 
         np.testing.assert_allclose(gd2, gd2_fd, rtol=1e-5, atol=1e-10)
 
-    def test_normal_orthogonality(self):
-        """Normal should be orthogonal to both tangent vectors."""
+    def test_normal_matches_analytic_torus_geometry(self):
+        """Normal should match the independent circular-torus oracle."""
         args = (self.phis, self.thetas, self.xc, self.yc, self.zc,
                 self.mpol, self.ntor, self.nfp)
         gd1 = surface_gammadash1(*args)
@@ -145,6 +147,60 @@ class TestSurfaceFourierJaxSimpleTorus:
 
         np.testing.assert_allclose(np.array(dot1), 0.0, atol=1e-12)
         np.testing.assert_allclose(np.array(dot2), 0.0, atol=1e-12)
+
+        phi_rad = 2 * np.pi * np.array(self.phis)
+        theta_rad = 2 * np.pi * np.array(self.thetas)
+        phi_2d, theta_2d = np.meshgrid(phi_rad, theta_rad, indexing="ij")
+        unit_normal = np.stack(
+            (
+                np.cos(theta_2d) * np.cos(phi_2d),
+                np.cos(theta_2d) * np.sin(phi_2d),
+                np.sin(theta_2d),
+            ),
+            axis=-1,
+        )
+        expected_magnitude = (
+            (2.0 * np.pi) ** 2
+            * self.r
+            * (self.R + self.r * np.cos(theta_2d))
+        )
+        expected_normal = expected_magnitude[..., None] * unit_normal
+
+        np.testing.assert_allclose(
+            np.array(n),
+            expected_normal,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.linalg.norm(np.array(n), axis=-1),
+            expected_magnitude,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    def test_area_and_volume_match_analytic_torus(self):
+        """Area and volume should match the closed-form circular torus oracle."""
+        args = (self.phis, self.thetas, self.xc, self.yc, self.zc,
+                self.mpol, self.ntor, self.nfp)
+        gamma = surface_gamma(*args)
+        normal = surface_normal(*args)
+
+        expected_area = 4.0 * np.pi**2 * self.R * self.r
+        expected_volume = 2.0 * np.pi**2 * self.R * self.r**2
+
+        np.testing.assert_allclose(
+            float(surface_area(normal)),
+            expected_area,
+            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
+        np.testing.assert_allclose(
+            float(surface_volume(gamma, normal)),
+            expected_volume,
+            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
 
 
 class TestSurfaceFourierJaxHigherOrder:

@@ -592,11 +592,8 @@ class _MockSurface:
         return np.ones((nphi, ntheta), dtype=bool)
 
 
-class _MockVolumeLabel:
-    """Minimal mock for Volume label."""
-
-    def J(self):
-        return 0.0
+class _PlumbingVolumeLabel:
+    """Minimal plumbing-only label marker for BoozerSurfaceJAX tests."""
 
 
 def _make_mock_coils(nquad=64):
@@ -650,7 +647,7 @@ def _make_mock_boozer_surface(
 
     biot_savart = _MockBiotSavart(_make_mock_coils())
     surface = _MockSurface(sdofs, mpol, ntor, nfp, stellsym, qphi, qtheta)
-    label = _MockVolumeLabel()
+    label = _PlumbingVolumeLabel()
     target = 2.0 * np.pi**2 * R0 * r**2
 
     return BoozerSurfaceJAX(

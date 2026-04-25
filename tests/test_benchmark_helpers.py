@@ -1249,6 +1249,10 @@ def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
     monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
     monkeypatch.setenv("SIMSOPT_BACKEND_STRICT", "1")
     monkeypatch.setenv("SIMSOPT_JAX_TRANSFER_GUARD", "disallow")
+    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_deterministic_ops=true")
+    monkeypatch.setenv("CUDA_FORCE_PTX_JIT", "1")
+    monkeypatch.setenv("CUDA_DISABLE_PTX_JIT", "0")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setattr(
         "benchmarks.validation_ladder_common.get_git_sha",
         lambda: "abc123",
@@ -1260,6 +1264,10 @@ def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
     monkeypatch.setattr(
         "benchmarks.validation_ladder_common.query_gpu_memory_mb",
         lambda: None,
+    )
+    monkeypatch.setattr(
+        "benchmarks.validation_ladder_common.query_nvidia_smi_facts",
+        lambda: {"nvidia_smi_gpus": [{"name": "test-gpu"}]},
     )
     monkeypatch.setattr(
         "benchmarks.validation_ladder_common._current_sharding_metadata",
@@ -1304,6 +1312,14 @@ def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
     assert provenance["backend_mode"] == "jax_gpu_fast"
     assert provenance["backend_strict"] is True
     assert provenance["transfer_guard"] == "disallow"
+    assert provenance["xla_flags"] == "--xla_gpu_deterministic_ops=true"
+    assert provenance["cuda_force_ptx_jit"] == "1"
+    assert provenance["cuda_disable_ptx_jit"] == "0"
+    assert provenance["cuda_env"] == {
+        "CUDA_FORCE_PTX_JIT": "1",
+        "CUDA_DISABLE_PTX_JIT": "0",
+    }
+    assert provenance["nvidia_smi_gpus"] == [{"name": "test-gpu"}]
     assert provenance["compilation_cache_enabled"] is True
     assert provenance["compilation_cache_dir"] == "/tmp/probe-cache"
     assert provenance["sharding_strategy"] == "hybrid"
@@ -4517,6 +4533,7 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
         cpu_lane_kind="cpu-ondevice",
         final_objective_rel_tol=1e-4,
         geometry_rel_tol=5e-6,
+        maxiter=60,
     )
 
     assert payload["passed"] is True
@@ -4541,6 +4558,10 @@ def test_stage2_e2e_payload_preserves_trajectory_and_timing_artifacts():
     assert payload["comparison"]["cpu_lane_label"] == "CPU ondevice lane"
     assert payload["comparison"]["matched_cpu_state"]["gradient_allclose"] is True
     assert payload["comparison"]["matched_jax_state"]["gradient_allclose"] is True
+    assert payload["proof_parity"]["cpu_oracle_value"] == pytest.approx(1.0)
+    assert payload["proof_parity"]["gpu_value"] == pytest.approx(1.0 + 1e-7)
+    assert payload["proof_parity"]["value_rtol"] == pytest.approx(1e-4)
+    assert payload["proof_parity"]["gradient_rtol"] == pytest.approx(1e-9)
     assert payload["timings"]["cpu_outer_elapsed_s"] == pytest.approx(12.5)
     assert payload["timings"]["jax_outer_elapsed_s"] == pytest.approx(12.75)
     assert payload["timings"]["jax_primary_elapsed_s"] == pytest.approx(9.5)
@@ -4606,6 +4627,7 @@ def test_stage2_e2e_payload_allows_intentional_threshold_violation_entries():
         cpu_lane_kind="cpu-reference",
         final_objective_rel_tol=1e-4,
         geometry_rel_tol=5e-6,
+        maxiter=60,
     )
 
     assert payload["comparison"]["cpu_trajectory_finite"] is True

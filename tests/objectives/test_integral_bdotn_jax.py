@@ -27,7 +27,7 @@ from conftest import (
     parity_rng,
 )
 
-from simsopt.objectives.integral_bdotn_jax import integral_BdotN
+from simsopt.objectives.integral_bdotn_jax import integral_BdotN, signed_BdotN_flux
 
 
 @pytest.fixture(autouse=True)
@@ -87,6 +87,21 @@ def _quadratic_flux_scalar_stress_data():
     return device_float64(B), device_float64(target), device_float64(normal)
 
 
+def _closed_torus_normals(nphi=24, ntheta=32):
+    """Return unnormalized parametric torus normals with exact signed closure."""
+    phi = np.linspace(0.0, 2.0 * np.pi, nphi, endpoint=False)
+    theta = np.linspace(0.0, 2.0 * np.pi, ntheta, endpoint=False)
+    phi_grid, theta_grid = np.meshgrid(phi, theta, indexing="ij")
+    major_radius = 1.7
+    minor_radius = 0.35
+    radius = major_radius + minor_radius * np.cos(theta_grid)
+    normal = np.empty((nphi, ntheta, 3), dtype=np.float64)
+    normal[..., 0] = minor_radius * radius * np.cos(theta_grid) * np.cos(phi_grid)
+    normal[..., 1] = minor_radius * radius * np.cos(theta_grid) * np.sin(phi_grid)
+    normal[..., 2] = minor_radius * radius * np.sin(theta_grid)
+    return normal
+
+
 class TestIntegralBdotN:
     """Test all three definitions against NumPy reference."""
 
@@ -128,6 +143,20 @@ class TestIntegralBdotN:
         B, target, normal = _make_test_data()
         J = float(integral_BdotN(B, target, normal, "quadratic flux"))
         assert J >= 0
+
+    def test_signed_flux_keeps_raw_orientation(self):
+        """A uniform field has zero signed flux through the closed torus grid."""
+        normal = _closed_torus_normals()
+        B = np.zeros_like(normal)
+        B[..., 2] = 1.0
+
+        signed_flux = host_scalar(
+            signed_BdotN_flux(device_float64(B), device_float64(normal))
+        )
+        magnitude_flux = np.mean(np.abs(np.sum(B * normal, axis=-1)))
+
+        np.testing.assert_allclose(signed_flux, 0.0, atol=1e-16)
+        assert magnitude_flux > 0.0
 
     def test_zero_when_B_tangential(self):
         """If B is tangential to the surface (B·n = 0), flux should be zero."""

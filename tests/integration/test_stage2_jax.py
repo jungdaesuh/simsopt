@@ -1050,8 +1050,12 @@ class TestObjectiveValueParity:
 
         cpu_j = float(jf_cpu.J())
         jax_j = float(jf_jax.J())
-        assert not np.isfinite(cpu_j), f"CPU zero-current J should be non-finite, got {cpu_j}"
-        assert not np.isfinite(jax_j), f"JAX zero-current J should be non-finite, got {jax_j}"
+        assert np.isnan(cpu_j), (
+            f"CPU zero-current J should preserve legacy nan, got {cpu_j}"
+        )
+        assert np.isposinf(jax_j), (
+            f"JAX zero-current J should be +inf, got {jax_j}"
+        )
 
 
 # -----------------------------------------------------------------------

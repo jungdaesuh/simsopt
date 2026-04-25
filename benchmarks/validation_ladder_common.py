@@ -49,6 +49,13 @@ _SIMSOPT_TRANSFER_GUARD_ENV_VAR = "SIMSOPT_JAX_TRANSFER_GUARD"
 _TARGET_LANE_ACCEPTED_STEP_SYNC_ENV_VAR = "TARGET_LANE_ACCEPTED_STEP_SYNC"
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 _XLA_GPU_DETERMINISTIC_OPS_FLAG = "--xla_gpu_deterministic_ops=true"
+_CUDA_PROOF_ENV_VARS = (
+    "CUDA_FORCE_PTX_JIT",
+    "CUDA_DISABLE_PTX_JIT",
+    "CUDA_CACHE_DISABLE",
+    "CUDA_CACHE_PATH",
+    "CUDA_VISIBLE_DEVICES",
+)
 _BENCHMARK_COMPILATION_CACHE_ENV_DEFAULTS = {
     _JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR: "0",
     _JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR: "-1",
@@ -74,6 +81,7 @@ evaluate_grouped_adjoint_memory_budget = (
     ladder_contract.evaluate_grouped_adjoint_memory_budget
 )
 evaluate_tier5_performance_budget = ladder_contract.evaluate_tier5_performance_budget
+gpu_proof_parity_contract = ladder_contract.gpu_proof_parity_contract
 grouped_adjoint_memory_budget = ladder_contract.grouped_adjoint_memory_budget
 single_stage_proof_contract = ladder_contract.single_stage_proof_contract
 tier5_performance_budget = ladder_contract.tier5_performance_budget
@@ -333,6 +341,61 @@ def current_backend_guardrail_metadata() -> dict[str, Any]:
     }
 
 
+def current_xla_cuda_metadata() -> dict[str, Any]:
+    """Return XLA/CUDA environment facts needed to audit GPU proof bundles."""
+    return {
+        "xla_flags": os.environ.get("XLA_FLAGS"),
+        "jax_platforms": os.environ.get("JAX_PLATFORMS"),
+        "cuda_force_ptx_jit": os.environ.get("CUDA_FORCE_PTX_JIT"),
+        "cuda_disable_ptx_jit": os.environ.get("CUDA_DISABLE_PTX_JIT"),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "cuda_env": {
+            name: os.environ.get(name)
+            for name in _CUDA_PROOF_ENV_VARS
+            if name in os.environ
+        },
+    }
+
+
+def query_nvidia_smi_facts() -> dict[str, Any] | None:
+    """Return launcher-side NVIDIA GPU facts when nvidia-smi is available."""
+    command = [
+        "nvidia-smi",
+        "--query-gpu=name,driver_version,memory.total",
+        "--format=csv,noheader,nounits",
+    ]
+    selector = _visible_cuda_device_selector()
+    if selector is not None:
+        command.extend(["-i", selector])
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+    gpus = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 3:
+            continue
+        name, driver_version, memory_total_mb = parts
+        gpus.append(
+            {
+                "name": name,
+                "driver_version": driver_version,
+                "memory_total_mb": float(memory_total_mb),
+            }
+        )
+    if not gpus:
+        return None
+    return {"nvidia_smi_gpus": gpus}
+
+
 def describe_compile_behavior(
     *,
     uses_subprocesses: bool,
@@ -481,12 +544,16 @@ def build_provenance(
         "x64_enabled": _x64_enabled(jax_module),
         "peak_rss_mb": peak_rss_mb(),
         **backend_guardrails,
+        **current_xla_cuda_metadata(),
         **compilation_cache,
         **_current_sharding_metadata(),
     }
     gpu_memory_mb = query_gpu_memory_mb()
     if gpu_memory_mb is not None:
         provenance["gpu_memory_mb"] = gpu_memory_mb
+    nvidia_smi_facts = query_nvidia_smi_facts()
+    if nvidia_smi_facts is not None:
+        provenance.update(nvidia_smi_facts)
     if extra:
         provenance.update(extra)
     return provenance

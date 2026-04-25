@@ -52,7 +52,7 @@ from .boozersurface_jax_test_helpers import (
     _MockBiotSavart,
     _MockCoil,
     _MockSurface,
-    _MockVolumeLabel,
+    _PlumbingVolumeLabel,
     _boozer_exact_coil_vjp,
     _bsj,
     _build_penalty_problem,
@@ -1383,7 +1383,7 @@ def _make_mock_boozer_surface_mixed_quad(nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1
 
     bs = _MockBiotSavart(_make_mixed_quad_mock_coils())
     surf = _MockSurface(sdofs, mpol, ntor, nfp, False, qphi, qtheta)
-    label = _MockVolumeLabel()
+    label = _PlumbingVolumeLabel()
     target = 2.0 * np.pi**2 * R0 * r**2
 
     return BoozerSurfaceJAX(bs, surf, label, target, constraint_weight=1.0)
@@ -1460,7 +1460,7 @@ def _make_basic_mock_surface_and_label():
         np.linspace(0.0, 1.0, 3, endpoint=False),
         np.linspace(0.0, 1.0, 3, endpoint=False),
     )
-    return surface, _MockVolumeLabel()
+    return surface, _PlumbingVolumeLabel()
 
 
 class TestBoozerSurfaceJAXClass:
@@ -1699,7 +1699,7 @@ class TestBoozerSurfaceJAXClass:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _MockVolumeLabel()
+        label = _PlumbingVolumeLabel()
         booz = BoozerSurfaceJAX(
             bs,
             surf,
@@ -2260,7 +2260,7 @@ class TestBoozerSurfaceJAXClass:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _MockVolumeLabel()
+        label = _PlumbingVolumeLabel()
         with pytest.raises(ValueError, match="bfgs_method.*removed"):
             BoozerSurfaceJAX(
                 bs,
@@ -2283,7 +2283,7 @@ class TestBoozerSurfaceJAXClass:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _MockVolumeLabel()
+        label = _PlumbingVolumeLabel()
         with pytest.raises(ValueError, match="Unknown BoozerSurfaceJAX option"):
             BoozerSurfaceJAX(
                 bs,
@@ -2312,7 +2312,7 @@ class TestBoozerSurfaceJAXClass:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _MockVolumeLabel()
+        label = _PlumbingVolumeLabel()
         with pytest.raises(ValueError, match="require optimizer_backend"):
             BoozerSurfaceJAX(
                 bs,
@@ -2335,7 +2335,7 @@ class TestBoozerSurfaceJAXClass:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _MockVolumeLabel()
+        label = _PlumbingVolumeLabel()
         booz = BoozerSurfaceJAX(
             bs,
             surf,
@@ -2369,7 +2369,7 @@ class TestBoozerSurfaceJAXClass:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _MockVolumeLabel()
+        label = _PlumbingVolumeLabel()
         with pytest.raises(ValueError, match="optimizer_backend must be one of"):
             BoozerSurfaceJAX(
                 bs,
@@ -2394,7 +2394,7 @@ class TestBoozerSurfaceJAXClass:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _MockVolumeLabel()
+        label = _PlumbingVolumeLabel()
         booz = BoozerSurfaceJAX(
             bs,
             surf,
@@ -4259,7 +4259,7 @@ def _make_mock_boozer_surface_exact(
 
     bs = _MockBiotSavart(_make_mock_coils())
     surf = _MockSurface(sdofs, mpol, ntor, nfp, stellsym, qphi, qtheta)
-    label = _MockVolumeLabel()
+    label = _PlumbingVolumeLabel()
     target = 2.0 * np.pi**2 * R0 * r**2
 
     return BoozerSurfaceJAX(
@@ -5339,7 +5339,7 @@ class TestBoozerSurfaceJAXExactPath:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _MockVolumeLabel()
+        label = _PlumbingVolumeLabel()
         booz = BoozerSurfaceJAX(
             bs,
             surf,
@@ -5364,7 +5364,7 @@ class TestBoozerSurfaceJAXExactPath:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _MockVolumeLabel()
+        label = _PlumbingVolumeLabel()
 
         def stage_callback(_label, **_payload):
             return None
@@ -5393,7 +5393,7 @@ class TestBoozerSurfaceJAXExactPath:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _MockVolumeLabel()
+        label = _PlumbingVolumeLabel()
         with pytest.raises(ValueError, match="optimizer_backend must be one of"):
             BoozerSurfaceJAX(
                 bs,
@@ -6645,7 +6645,7 @@ class TestBuildBoozerSurfaceRuntimeState:
         # Build minimal mock biotsavart and label for the constructor
         coils = _make_mock_coils()
         bs = _MockBiotSavart(coils)
-        label = _MockVolumeLabel()
+        label = _PlumbingVolumeLabel()
 
         booz = BoozerSurfaceJAX(
             bs,
@@ -6673,7 +6673,7 @@ class TestBuildBoozerSurfaceRuntimeState:
         s = self._make_real_surface(mpol=3, ntor=3, nfp=2)
         coils = _make_mock_coils()
         bs = _MockBiotSavart(coils)
-        label = _MockVolumeLabel()
+        label = _PlumbingVolumeLabel()
 
         booz = BoozerSurfaceJAX(
             bs,
@@ -6712,7 +6712,7 @@ class TestBuildBoozerSurfaceRuntimeState:
         s = self._make_real_surface(mpol=3, ntor=3, nfp=2)
         coils = _make_mock_coils()
         bs = _MockBiotSavart(coils)
-        label = _MockVolumeLabel()
+        label = _PlumbingVolumeLabel()
 
         booz = BoozerSurfaceJAX(
             bs,

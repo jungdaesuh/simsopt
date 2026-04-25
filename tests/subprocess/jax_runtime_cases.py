@@ -187,7 +187,7 @@ class _CompileCounter(logging.Handler):
             self.count += 1
 
 
-def _assert_run_solver_compiles_once(run_once) -> None:
+def _assert_run_solver_compiles_once(run_once) -> int:
     logger = logging.getLogger("jax")
     old_level = logger.level
     handler = _CompileCounter()
@@ -199,6 +199,7 @@ def _assert_run_solver_compiles_once(run_once) -> None:
             for _ in range(3):
                 run_once()
         assert handler.count == 1, handler.count
+        return handler.count
     finally:
         logger.removeHandler(handler)
         logger.setLevel(old_level)
@@ -221,7 +222,18 @@ def _run_compile_count_case(method: OptimizerMethod) -> None:
         result = jax_minimize(cacheable_quad, x0, method=method, maxiter=5)
         assert result.success is True
 
-    _assert_run_solver_compiles_once(run_once)
+    compile_count = _assert_run_solver_compiles_once(run_once)
+    print(
+        json.dumps(
+            {
+                "case": "compile-count",
+                "method": str(method),
+                "compile_count": compile_count,
+                "run_count": 3,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def _run_biot_savart_point_chunking_case() -> None:
@@ -272,7 +284,19 @@ def _run_target_compile_count_case() -> None:
         )
         assert result.success is True
 
-    _assert_run_solver_compiles_once(run_once)
+    compile_count = _assert_run_solver_compiles_once(run_once)
+    print(
+        json.dumps(
+            {
+                "case": "target-compile-count",
+                "method": "lbfgs-ondevice",
+                "compile_count": compile_count,
+                "run_count": 3,
+                "value_and_grad": True,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def _load_stage2_script_module():
@@ -321,7 +345,19 @@ def _run_stage2_target_compile_count_case() -> None:
         assert final_dofs.shape == initial_dofs.shape
         assert np.all(np.isfinite(np.asarray(final_dofs, dtype=np.float64)))
 
-    _assert_run_solver_compiles_once(run_once)
+    compile_count = _assert_run_solver_compiles_once(run_once)
+    print(
+        json.dumps(
+            {
+                "case": "stage2-target-compile-count",
+                "method": contract.method,
+                "compile_count": compile_count,
+                "run_count": 3,
+                "value_and_grad": True,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def _assert_implicit_host_transfer_rejected(

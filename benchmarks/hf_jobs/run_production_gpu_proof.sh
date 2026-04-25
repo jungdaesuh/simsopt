@@ -166,6 +166,72 @@ run_probe() {
   return "${rc}"
 }
 
+run_cuda_canary() {
+  local mode="$1"
+  local force_ptx_jit="$2"
+  local disable_ptx_jit="$3"
+  local output_json="$4"
+  local canary_cache_dir="${RESULTS_DIR}/cuda_canary_cache_${mode}"
+  local cuda_cache_dir="${RESULTS_DIR}/cuda_driver_cache_${mode}"
+
+  echo "=== cuda_canary_${mode} ==="
+  mkdir -p "${canary_cache_dir}" "${cuda_cache_dir}"
+  CUDA_FORCE_PTX_JIT="${force_ptx_jit}" \
+    CUDA_DISABLE_PTX_JIT="${disable_ptx_jit}" \
+    CUDA_CACHE_DISABLE=1 \
+    CUDA_CACHE_PATH="${cuda_cache_dir}" \
+    JAX_COMPILATION_CACHE_DIR="${canary_cache_dir}" \
+    python - "${mode}" "${output_json}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+import jax
+
+jax.config.update("jax_enable_x64", True)
+import jax.numpy as jnp
+
+mode = sys.argv[1]
+output_json = Path(sys.argv[2])
+backend = str(jax.default_backend()).lower()
+devices = [str(device) for device in jax.devices()]
+if backend not in {"gpu", "cuda"}:
+    raise SystemExit(
+        f"CUDA canary {mode} expected GPU backend, got {backend!r} on {devices}"
+    )
+
+
+@jax.jit
+def canary_kernel(x):
+    return jnp.sum(x @ x.T) + jnp.sum(jnp.sin(x))
+
+
+x = jnp.arange(1.0, 1025.0, dtype=jnp.float64).reshape((32, 32))
+value = canary_kernel(x)
+value.block_until_ready()
+payload = {
+    "mode": mode,
+    "backend": backend,
+    "devices": devices,
+    "cuda_force_ptx_jit": os.environ.get("CUDA_FORCE_PTX_JIT"),
+    "cuda_disable_ptx_jit": os.environ.get("CUDA_DISABLE_PTX_JIT"),
+    "cuda_cache_disable": os.environ.get("CUDA_CACHE_DISABLE"),
+    "cuda_cache_path": os.environ.get("CUDA_CACHE_PATH"),
+    "jax_compilation_cache_dir": os.environ.get("JAX_COMPILATION_CACHE_DIR"),
+    "value": float(value),
+}
+output_json.parent.mkdir(parents=True, exist_ok=True)
+output_json.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+print(json.dumps(payload, sort_keys=True))
+PY
+}
+
+if [[ "${SIMSOPT_FAKE_GPU:-}" != "1" && ( "${STAGE2_PLATFORM}" == "cuda" || "${SINGLE_STAGE_PLATFORM}" == "cuda" ) ]]; then
+  run_cuda_canary ptx 1 0 "${RESULTS_DIR}/cuda_canary_ptx.json"
+  run_cuda_canary cubin 0 1 "${RESULTS_DIR}/cuda_canary_cubin.json"
+fi
+
 run_probe stage2_cold "${RESULTS_DIR}/stage2_cold.json" \
   python "${REPO_ROOT}/benchmarks/stage2_e2e_comparison.py" \
     --platform "${STAGE2_PLATFORM}" \
@@ -246,14 +312,197 @@ run_probe single_stage_warm "${RESULTS_DIR}/single_stage_warm.json" \
     --case-artifacts-dir "${RESULTS_DIR}/artifacts/single_stage_warm" \
     --output-json "${RESULTS_DIR}/single_stage_warm.json" || OVERALL_RC=1
 
-python - "${RESULTS_DIR}" "${EXPECTED_PROBES[@]}" <<'PY'
+python - "${RESULTS_DIR}" "${STAGE2_PLATFORM}" "${SINGLE_STAGE_PLATFORM}" "${REPO_ROOT}" "${EXPECTED_PROBES[@]}" <<'PY'
 import json
+import math
+import os
 import sys
 from pathlib import Path
 
 results_dir = Path(sys.argv[1])
-expected = sys.argv[2:]
+stage2_platform = sys.argv[2]
+single_stage_platform = sys.argv[3]
+repo_root = Path(sys.argv[4])
+sys.path.insert(0, str(repo_root))
+
+from benchmarks.validation_ladder_contract import gpu_proof_parity_contract
+
+expected = sys.argv[5:]
+fake_mode = os.environ.get("SIMSOPT_FAKE_GPU") == "1"
 summary = {}
+
+
+def _requested_platform_for_probe(probe_name):
+    if probe_name.startswith("stage2_"):
+        return stage2_platform
+    if probe_name.startswith("single_stage_"):
+        return single_stage_platform
+    return "auto"
+
+
+def _backend_is_cuda(backend):
+    return str(backend).lower() in {"cuda", "gpu"}
+
+
+def _probe_kind(probe_name):
+    if probe_name.startswith("stage2_"):
+        return "stage2"
+    if probe_name.startswith("single_stage_"):
+        return "single_stage"
+    return probe_name
+
+
+def _relative_error(actual, reference):
+    denominator = abs(float(reference)) + 1e-30
+    return abs(float(actual) - float(reference)) / denominator
+
+
+def _numeric_field(mapping, key, validation_failures):
+    if key not in mapping:
+        validation_failures.append(f"missing proof_parity.{key}")
+        return None
+    value = mapping[key]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        validation_failures.append(f"non-numeric proof_parity.{key}")
+        return None
+    return float(value)
+
+
+def _validate_proof_parity(probe_name, payload):
+    validation_failures = []
+    bundle_provenance = payload.get("bundle_provenance")
+    if not isinstance(bundle_provenance, dict):
+        validation_failures.append("missing bundle_provenance object")
+    elif "fake" not in bundle_provenance:
+        validation_failures.append("missing bundle_provenance.fake discriminator")
+
+    proof_parity = payload.get("proof_parity")
+    if not isinstance(proof_parity, dict):
+        validation_failures.append("missing proof_parity object")
+        return validation_failures
+
+    maxiter = None
+    provenance = payload.get("provenance")
+    if isinstance(provenance, dict) and probe_name.startswith("stage2_"):
+        maxiter = provenance.get("maxiter")
+    contract = gpu_proof_parity_contract(
+        _probe_kind(probe_name),
+        maxiter=None if maxiter is None else int(maxiter),
+    )
+    for key in (
+        "value_lane",
+        "value_contract_key",
+        "gradient_lane",
+        "gradient_contract_key",
+    ):
+        if proof_parity.get(key) != contract[key]:
+            validation_failures.append(
+                f"proof_parity.{key}={proof_parity.get(key)!r} "
+                f"does not match ladder contract {contract[key]!r}"
+            )
+
+    cpu_value = _numeric_field(proof_parity, "cpu_oracle_value", validation_failures)
+    gpu_value = _numeric_field(proof_parity, "gpu_value", validation_failures)
+    value_rel_diff = _numeric_field(
+        proof_parity,
+        "value_rel_diff",
+        validation_failures,
+    )
+    value_rtol = _numeric_field(proof_parity, "value_rtol", validation_failures)
+    gradient_rtol = _numeric_field(
+        proof_parity,
+        "gradient_rtol",
+        validation_failures,
+    )
+    if value_rtol is not None and value_rtol > float(contract["value_rtol"]):
+        validation_failures.append(
+            "proof_parity.value_rtol exceeds ladder contract "
+            f"{float(contract['value_rtol']):.2e}"
+        )
+    if gradient_rtol is not None and gradient_rtol > float(contract["gradient_rtol"]):
+        validation_failures.append(
+            "proof_parity.gradient_rtol exceeds ladder contract "
+            f"{float(contract['gradient_rtol']):.2e}"
+        )
+    if (
+        cpu_value is not None
+        and gpu_value is not None
+        and value_rel_diff is not None
+        and value_rtol is not None
+    ):
+        computed_value_rel_diff = _relative_error(gpu_value, cpu_value)
+        if not math.isclose(
+            value_rel_diff,
+            computed_value_rel_diff,
+            rel_tol=1e-12,
+            abs_tol=1e-15,
+        ):
+            validation_failures.append(
+                "proof_parity.value_rel_diff does not match CPU/GPU values "
+                f"({value_rel_diff:.2e} != {computed_value_rel_diff:.2e})"
+            )
+        if computed_value_rel_diff > value_rtol:
+            validation_failures.append(
+                "proof_parity CPU/GPU value rel_diff "
+                f"{computed_value_rel_diff:.2e} exceeds value_rtol {value_rtol:.2e}"
+            )
+    if _probe_kind(probe_name) == "stage2":
+        gradient_rel_diff = _numeric_field(
+            proof_parity,
+            "gradient_rel_diff",
+            validation_failures,
+        )
+        if (
+            gradient_rel_diff is not None
+            and gradient_rtol is not None
+            and gradient_rel_diff > gradient_rtol
+        ):
+            validation_failures.append(
+                "proof_parity.gradient_rel_diff "
+                f"{gradient_rel_diff:.2e} exceeds gradient_rtol "
+                f"{gradient_rtol:.2e}"
+            )
+    return validation_failures
+
+
+def _validate_payload(probe_name, payload):
+    validation_failures = []
+    provenance = payload.get("provenance")
+    bundle_provenance = payload.get("bundle_provenance") or {}
+    fake_runner = bool(bundle_provenance.get("fake"))
+    if fake_runner:
+        if not fake_mode:
+            validation_failures.append(
+                "fake proof runner payload requires SIMSOPT_FAKE_GPU=1"
+            )
+        validation_failures.extend(_validate_proof_parity(probe_name, payload))
+        return validation_failures
+
+    if not isinstance(provenance, dict):
+        validation_failures.append("missing provenance object")
+        return validation_failures
+    validation_failures.extend(_validate_proof_parity(probe_name, payload))
+    if "backend" not in provenance:
+        validation_failures.append("missing provenance.backend")
+    if not provenance.get("devices"):
+        validation_failures.append("missing provenance.devices")
+    for key in ("cuda_force_ptx_jit", "cuda_disable_ptx_jit", "xla_flags"):
+        if key not in provenance:
+            validation_failures.append(f"missing provenance.{key}")
+
+    requested_platform = _requested_platform_for_probe(probe_name)
+    if requested_platform == "cuda" and not _backend_is_cuda(provenance.get("backend")):
+        validation_failures.append(
+            "requested CUDA proof initialized backend "
+            f"{provenance.get('backend')!r}"
+        )
+    return validation_failures
+
+
 for probe_name in expected:
     path = results_dir / f"{probe_name}.json"
     if path.exists():
@@ -268,12 +517,19 @@ for probe_name in expected:
                 "corrupt_payload": True,
             }
             continue
+        validation_failures = _validate_payload(probe_name, payload)
+        failures = list(payload.get("failures") or [])
+        failures.extend(validation_failures)
         summary[path.name] = {
-            "passed": payload.get("passed"),
+            "passed": bool(payload.get("passed")) and not validation_failures,
             "elapsed_s": payload.get("elapsed_s"),
-            "failures": payload.get("failures"),
+            "failures": failures,
             "missing_payload": False,
             "corrupt_payload": False,
+            "provenance": payload.get("provenance"),
+            "bundle_provenance": payload.get("bundle_provenance"),
+            "comparison": payload.get("comparison"),
+            "proof_parity": payload.get("proof_parity"),
         }
         continue
     summary[path.name] = {
@@ -284,6 +540,8 @@ for probe_name in expected:
         "corrupt_payload": False,
     }
 print(json.dumps(summary, indent=2))
+if any(not item["passed"] for item in summary.values()):
+    raise SystemExit(1)
 PY
 
 exit "${OVERALL_RC}"

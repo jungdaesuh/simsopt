@@ -38,3 +38,10 @@ def test_private_backend_rejected_on_wrong_runtime(monkeypatch):
 
     with pytest.raises(RuntimeError, match="configured for JAX"):
         benchmark_common.resolve_benchmark_backends(["ondevice"])
+
+
+def test_target_backend_rejects_when_x64_disabled(monkeypatch, _supported_runtime):
+    monkeypatch.setattr(benchmark_common, "_x64_enabled", lambda: False)
+
+    with pytest.raises(RuntimeError, match="x64 mode"):
+        benchmark_common.resolve_benchmark_backends(["ondevice"])

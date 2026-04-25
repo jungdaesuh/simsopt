@@ -478,6 +478,28 @@ def _make_fixed_state_exact_directional_objective(
     return directional_objective
 
 
+def _assert_directional_derivative_error_matches_contract(
+    dd_vjp,
+    dd_fd,
+    *,
+    rel_tol,
+    abs_tol,
+    label,
+):
+    abs_err = abs(dd_vjp - dd_fd)
+    rel_err = abs_err / (abs(dd_fd) + 1e-30)
+    if abs(dd_fd) <= _FD_DIRECTIONAL_DERIVATIVE_FLOOR:
+        assert abs_err < abs_tol, (
+            f"{label} near-zero derivative: vjp={dd_vjp:.6e} "
+            f"fd={dd_fd:.6e} abs={abs_err:.2e}"
+        )
+    else:
+        assert rel_err < rel_tol, (
+            f"{label}: vjp={dd_vjp:.6e} fd={dd_fd:.6e} "
+            f"rel={rel_err:.2e} abs={abs_err:.2e}"
+        )
+
+
 def _assert_directional_derivative_matches_fd(
     full_gradient,
     directional_objective_at,
@@ -505,11 +527,12 @@ def _assert_directional_derivative_matches_fd(
             / (2.0 * eps)
         )
 
-        abs_err = abs(dd_vjp - dd_fd)
-        rel_err = abs_err / (abs(dd_fd) + 1e-30)
-        assert rel_err < rel_tol or abs_err < abs_tol, (
-            f"{label}[{i}]: vjp={dd_vjp:.6e} fd={dd_fd:.6e} "
-            f"rel={rel_err:.2e} abs={abs_err:.2e}"
+        _assert_directional_derivative_error_matches_contract(
+            dd_vjp,
+            dd_fd,
+            rel_tol=rel_tol,
+            abs_tol=abs_tol,
+            label=f"{label}[{i}]",
         )
 
 
@@ -1435,12 +1458,21 @@ def _assert_curve_spec_gamma_and_dash_gradient_matches_fd(curve, *, eps=1.0e-7):
     np.testing.assert_allclose(grad, grad_fd, rtol=1e-6, atol=1e-9)
 
 
-_REAL_RESOLVE_FD_ABS_TOL = 1e-8
-_REAL_RESOLVE_FD_TAYLOR_RATE = 0.55
+_FD_GRADIENT_TOLS = parity_ladder_tolerances("fd-gradient")
+_FD_DIRECTIONAL_DERIVATIVE_FLOOR = float(
+    _FD_GRADIENT_TOLS["directional_derivative_floor"]
+)
+_REAL_RESOLVE_FD_ABS_TOL = float(_FD_GRADIENT_TOLS["directional_fd_atol"])
+_REAL_RESOLVE_FD_REL_TOL = float(_FD_GRADIENT_TOLS["directional_fd_rtol"])
+_REAL_RESOLVE_FD_TAYLOR_RATE = float(_FD_GRADIENT_TOLS["central_fd_error_rate"])
 _REAL_RESOLVE_FD_EPSILONS = (4.0e-4, 2.0e-4, 1.0e-4)
 _REAL_RESOLVE_FD_MIN_STABLE_SAMPLES = 3
-_REAL_RESOLVE_FD_MIN_STABLE_EPS = 2
-_REAL_RESOLVE_FD_AXIS_DIRECTION_FRACTIONS = (0.0, 0.5, 1.0)
+_REAL_RESOLVE_FD_MIN_STABLE_EPS = int(_FD_GRADIENT_TOLS["central_fd_min_stable_eps"])
+_REAL_RESOLVE_FD_DIRECTION_SEED = int(_FD_GRADIENT_TOLS["direction_seed"])
+_REAL_RESOLVE_FD_DIRECTION_COUNT = int(_FD_GRADIENT_TOLS["direction_count"])
+_REAL_RESOLVE_FD_MAX_DIRECTION_REJECTION_FRACTION = float(
+    _FD_GRADIENT_TOLS["max_direction_rejection_fraction"]
+)
 _REAL_RESOLVE_FD_NQSR_SDIM = 6
 _COMPOSITE_GRADIENT_PENALTY_WEIGHT = 10.0
 _COMPOSITE_GRADIENT_IOTA_OFFSET = 1e-2
@@ -1694,22 +1726,12 @@ def _unique_normalized_real_resolve_fd_directions(candidate_directions):
 def _real_resolve_fd_probe_directions(dof_count):
     """Return the canonical deterministic probe family for re-solve FD checks."""
     assert dof_count > 0
-    last_index = dof_count - 1
-    candidate_directions = []
-    for fraction in _REAL_RESOLVE_FD_AXIS_DIRECTION_FRACTIONS:
-        dof_index = int(round(fraction * last_index))
-        direction = np.zeros(dof_count, dtype=float)
-        direction[dof_index] = 1.0
-        candidate_directions.append(direction)
-
-    # Add deterministic mixed probes so the fixed family covers both axis-local
-    # and coupled coil motion without relying on pseudo-random directions.
-    candidate_directions.append(np.ones(dof_count, dtype=float))
-    if dof_count > 1:
-        alternating = np.ones(dof_count, dtype=float)
-        alternating[1::2] = -1.0
-        candidate_directions.append(alternating)
-
+    rng = np.random.RandomState(_REAL_RESOLVE_FD_DIRECTION_SEED)
+    candidate_directions = rng.uniform(
+        low=-1.0,
+        high=1.0,
+        size=(_REAL_RESOLVE_FD_DIRECTION_COUNT, dof_count),
+    )
     return _unique_normalized_real_resolve_fd_directions(candidate_directions)
 
 
@@ -1917,6 +1939,7 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
     num_directions = len(real_resolve_fd_suite.direction_samples)
 
     stable_samples = 0
+    rejected_directions = 0
     instability_reasons = []
     short_series_reasons = []
     mismatch_reasons = []
@@ -1928,6 +1951,9 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
     ):
         direction = direction_sample.direction
         directional_adjoint = float(np.dot(gradient, direction))
+        if abs(directional_adjoint) <= _FD_DIRECTIONAL_DERIVATIVE_FLOOR:
+            rejected_directions += 1
+            continue
         err_old = None
         stable_eps_count = 0
         direction_ok = True
@@ -1987,7 +2013,20 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
     diagnostics = []
     if mismatch_reasons:
         diagnostics.append("Taylor mismatches: " + "; ".join(mismatch_reasons))
-    if stable_samples < _REAL_RESOLVE_FD_MIN_STABLE_SAMPLES:
+    max_rejected_directions = int(
+        np.floor(_REAL_RESOLVE_FD_MAX_DIRECTION_REJECTION_FRACTION * num_directions)
+    )
+    if rejected_directions > max_rejected_directions:
+        diagnostics.append(
+            f"near-zero projected directions={rejected_directions}/{num_directions} "
+            f"(max {max_rejected_directions})"
+        )
+    required_stable_samples = num_directions - rejected_directions
+    required_stable_samples = max(
+        required_stable_samples,
+        _REAL_RESOLVE_FD_MIN_STABLE_SAMPLES,
+    )
+    if stable_samples != required_stable_samples:
         instability_detail = (
             "; ".join(instability_reasons) if instability_reasons else "none"
         )
@@ -1996,7 +2035,8 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
         )
         diagnostics.append(
             f"stable directions={stable_samples}/{num_directions} "
-            f"(required {_REAL_RESOLVE_FD_MIN_STABLE_SAMPLES}); "
+            f"(required {required_stable_samples}; "
+            f"rejected {rejected_directions}/{num_directions}); "
             f"instabilities: {instability_detail}; "
             f"short stable series: {short_series_detail}"
         )
@@ -2010,21 +2050,26 @@ def _assert_wrapper_resolve_fd_matches_real_fixture(
 class TestRealResolveFDProbeDirections:
     def test_probe_family_is_explicit_and_deterministic(self):
         directions = _real_resolve_fd_probe_directions(7)
+        directions_again = _real_resolve_fd_probe_directions(7)
 
-        expected = []
-        for dof_index in (0, 3, 6):
-            direction = np.zeros(7, dtype=float)
-            direction[dof_index] = 1.0
-            expected.append(direction)
-
-        expected.append(np.ones(7, dtype=float) / np.sqrt(7.0))
-        alternating = np.ones(7, dtype=float)
-        alternating[1::2] = -1.0
-        expected.append(alternating / np.sqrt(7.0))
-
-        assert len(directions) == len(expected) == 5
-        for actual_direction, expected_direction in zip(directions, expected):
-            np.testing.assert_allclose(actual_direction, expected_direction)
+        assert len(directions) == _REAL_RESOLVE_FD_DIRECTION_COUNT == 5
+        for direction, repeated_direction in zip(directions, directions_again):
+            np.testing.assert_allclose(direction, repeated_direction)
+            np.testing.assert_allclose(np.linalg.norm(direction), 1.0)
+        for lhs_index, lhs_direction in enumerate(directions):
+            for rhs_direction in directions[lhs_index + 1 :]:
+                assert not np.allclose(
+                    lhs_direction,
+                    rhs_direction,
+                    rtol=0.0,
+                    atol=1e-12,
+                )
+                assert not np.allclose(
+                    lhs_direction,
+                    -rhs_direction,
+                    rtol=0.0,
+                    atol=1e-12,
+                )
 
 
 class TestRealResolveFDSuite:
@@ -3741,9 +3786,16 @@ class TestAdjointSolveConsistency:
 
             abs_err = abs(dd_vjp - dd_fd)
             rel_err = abs_err / (abs(dd_fd) + 1e-30)
-            assert rel_err < 1e-3 or abs_err < 1e-8, (
+            logger.info(
                 f"LS cotangent FD[{i}]: vjp={dd_vjp:.6e} fd={dd_fd:.6e} "
                 f"rel={rel_err:.2e} abs={abs_err:.2e}"
+            )
+            _assert_directional_derivative_error_matches_contract(
+                dd_vjp,
+                dd_fd,
+                rel_tol=_REAL_RESOLVE_FD_REL_TOL,
+                abs_tol=_REAL_RESOLVE_FD_ABS_TOL,
+                label=f"LS cotangent FD[{i}]",
             )
 
         bs_jax.x = x0
@@ -4210,8 +4262,12 @@ class TestBoozerResidualGradientFD:
                 f"E2E FD[{i}]: composed={dd_composed:.6e} fd={dd_fd:.6e} "
                 f"rel={rel_err:.2e} abs={abs_err:.2e}"
             )
-            assert rel_err < 1e-3 or abs_err < 1e-8, (
-                f"E2E FD[{i}]: rel={rel_err:.2e} abs={abs_err:.2e}"
+            _assert_directional_derivative_error_matches_contract(
+                dd_composed,
+                dd_fd,
+                rel_tol=_REAL_RESOLVE_FD_REL_TOL,
+                abs_tol=_REAL_RESOLVE_FD_ABS_TOL,
+                label=f"E2E FD[{i}]",
             )
 
         bs_jax.x = x0
@@ -4849,6 +4905,9 @@ class TestRealFixtureGpuM5Parity:
 
         cpu_values = _cpu_single_stage_wrapper_values(booz_cpu, bs_cpu)
         gpu_values = _jax_single_stage_wrapper_values(booz_gpu, bs_gpu)
+        gpu_values_again = _jax_single_stage_wrapper_values(booz_gpu, bs_gpu)
+        for first, second in zip(gpu_values, gpu_values_again):
+            np.testing.assert_array_equal(first, second)
         residual_cpu, iota_cpu, nqs_cpu = cpu_values
         residual_gpu, iota_gpu, nqs_gpu = gpu_values
 
@@ -4885,6 +4944,9 @@ class TestRealFixtureGpuM5Parity:
 
         cpu_gradients = _cpu_single_stage_wrapper_gradients(booz_cpu, bs_cpu)
         gpu_gradients = _jax_single_stage_wrapper_gradients(booz_gpu, bs_gpu)
+        gpu_gradients_again = _jax_single_stage_wrapper_gradients(booz_gpu, bs_gpu)
+        for first, second in zip(gpu_gradients, gpu_gradients_again):
+            np.testing.assert_array_equal(first, second)
         _assert_gradients_finite_nonzero(
             cpu_gradients,
             "Real-fixture CPU wrapper path",
@@ -4955,8 +5017,11 @@ class TestShortSingleStageOptRun:
             f"nit={result.nit} success={result.success}"
         )
         assert np.isfinite(j_final), "Final objective not finite"
-        assert j_final <= j0 + 1e-12, (
-            f"Objective did not decrease: {j0:.6e} -> {j_final:.6e}"
+        assert result.nit > 0, "Optimizer reported zero completed iterations"
+        min_decrease = max(1e-12, 1e-6 * abs(j0))
+        assert j_final < j0 - min_decrease, (
+            f"Objective did not strictly decrease: {j0:.6e} -> {j_final:.6e}; "
+            f"required decrease > {min_decrease:.2e}"
         )
 
         JF_jax.x = x0
@@ -5147,13 +5212,13 @@ class TestOnDeviceBackendIntegration:
             J_at_fixed_surface(x0 + eps * direction)
             - J_at_fixed_surface(x0 - eps * direction)
         ) / (2 * eps)
-        abs_err = abs(dd_composed - dd_fd)
-        rel_err = abs_err / (abs(dd_fd) + 1e-30)
 
-        assert rel_err < 1e-3 or abs_err < 1e-8, (
-            f"{optimizer_backend} pass_explicit_G={pass_explicit_G}: "
-            f"composed={dd_composed:.6e} fd={dd_fd:.6e} "
-            f"rel={rel_err:.2e} abs={abs_err:.2e}"
+        _assert_directional_derivative_error_matches_contract(
+            dd_composed,
+            dd_fd,
+            rel_tol=_REAL_RESOLVE_FD_REL_TOL,
+            abs_tol=_REAL_RESOLVE_FD_ABS_TOL,
+            label=f"{optimizer_backend} pass_explicit_G={pass_explicit_G}",
         )
 
         bs_jax.x = x0
@@ -5632,10 +5697,10 @@ class TestExactSolveCPUJAXParity:
     def test_gradient_wrappers_operator_status_on_exact_state(self):
         """Exact adjoints use checked operator solves, not dense PLU fallbacks.
 
-        The exact Newton Jacobian can be rank deficient.  ``IotasJAX.dJ()``
-        has a compatible RHS on this fixture and remains healthy, while the
-        non-QS RHS is outside the transpose operator range and must surface the
-        operator-solve failure instead of returning a finite dense-PLU artifact.
+        The exact Newton Jacobian can be rank deficient.  The Iotas and non-QS
+        RHS values are outside the transpose operator range on this fixture and
+        must surface the operator-solve failure instead of returning finite
+        dense-PLU artifacts.
 
         This is the parity-ladder ``exact-ill-conditioned-adjoint`` lane:
         residual/failure-only coverage with no vector parity assertion.
@@ -5656,12 +5721,28 @@ class TestExactSolveCPUJAXParity:
             is bool(exact_pair.res_jax["PLU"] is not None)
         )
 
-        iotas_cpu_grad = np.array(Iotas(exact_pair.booz_cpu_exact).dJ())
-        iotas_jax_grad = np.array(IotasJAX(exact_pair.booz_jax_exact).dJ())
-        assert iotas_cpu_grad.shape == iotas_jax_grad.shape
-        _assert_gradients_finite_nonzero(
-            [iotas_cpu_grad, iotas_jax_grad], "Exact-path Iotas.dJ()"
+        dJ_ds = _iota_unit_rhs_from_decision_size(
+            adjoint_state.decision_size,
+            optimize_G=exact_pair.res_jax["G"] is not None,
         )
+        iota_adjoint, iota_success = adjoint_state.solve_transpose_with_status(dJ_ds)
+        residual = np.asarray(
+            adjoint_state.apply_transpose(iota_adjoint) - dJ_ds,
+            dtype=float,
+        )
+        residual_rel = np.linalg.norm(residual) / (np.linalg.norm(dJ_ds) + 1e-30)
+        assert not bool(np.asarray(iota_success))
+        assert residual_rel >= _ADJOINT_RESIDUAL_REL_TOL, (
+            "Exact-path IotasJAX operator failure reported despite residual "
+            f"{residual_rel:.3e} below {_ADJOINT_RESIDUAL_REL_TOL:.3e}"
+        )
+
+        iotas_cpu_grad = np.array(Iotas(exact_pair.booz_cpu_exact).dJ())
+        _assert_gradients_finite_nonzero(
+            [iotas_cpu_grad], "Exact-path CPU Iotas.dJ()"
+        )
+        with pytest.raises(RuntimeError, match="operator-backed runtime path"):
+            IotasJAX(exact_pair.booz_jax_exact).dJ()
 
         nqs_cpu_grad = np.array(
             NonQuasiSymmetricRatio(
@@ -5756,6 +5837,7 @@ class TestIotasJAXResolveFD:
         directions = _real_resolve_fd_probe_directions(len(x0))[:3]
         eps_candidates = (1.0e-5, 5.0e-6, 2.5e-6, 1.0e-6)
         validated_directions = 0
+        rejected_directions = 0
         direction_failures = []
 
         def iota_at(coil_x):
@@ -5770,6 +5852,14 @@ class TestIotasJAXResolveFD:
         try:
             for sample_index, direction in enumerate(directions):
                 directional_adjoint = float(np.dot(gradient, direction))
+                if abs(directional_adjoint) <= _FD_DIRECTIONAL_DERIVATIVE_FLOOR:
+                    rejected_directions += 1
+                    direction_failures.append(
+                        f"sample {sample_index}: projected adjoint "
+                        f"{directional_adjoint:.6e} is below "
+                        f"{_FD_DIRECTIONAL_DERIVATIVE_FLOOR:.1e}"
+                    )
+                    continue
                 direction_validated = False
                 mismatch_messages = []
                 for eps in eps_candidates:
@@ -5789,9 +5879,12 @@ class TestIotasJAXResolveFD:
                         f"adjoint={directional_adjoint:.6e} fd={directional_fd:.6e} "
                         f"rel={rel_err:.2e} abs={abs_err:.2e}"
                     )
-                    if rel_err < 1e-3 or abs_err < 1e-8:
+                    if abs(directional_fd) <= _FD_DIRECTIONAL_DERIVATIVE_FLOOR:
+                        direction_validated = abs_err < _REAL_RESOLVE_FD_ABS_TOL
+                    else:
+                        direction_validated = rel_err < _REAL_RESOLVE_FD_REL_TOL
+                    if direction_validated:
                         validated_directions += 1
-                        direction_validated = True
                         break
                     mismatch_messages.append(
                         f"eps={eps:.1e}: adjoint={directional_adjoint:.6e} "
@@ -5801,9 +5894,23 @@ class TestIotasJAXResolveFD:
                     direction_failures.append(
                         f"sample {sample_index}: " + "; ".join(mismatch_messages)
                     )
-            assert validated_directions >= 2, (
+            max_rejected_directions = int(
+                np.floor(
+                    _REAL_RESOLVE_FD_MAX_DIRECTION_REJECTION_FRACTION
+                    * len(directions)
+                )
+            )
+            assert rejected_directions <= max_rejected_directions, (
+                "IotasJAX controlled LS re-solve FD rejected too many near-zero "
+                f"directions: {rejected_directions}/{len(directions)} "
+                f"(max {max_rejected_directions}). "
+                + " | ".join(direction_failures)
+            )
+            required_validated_directions = len(directions) - rejected_directions
+            assert validated_directions == required_validated_directions, (
                 "IotasJAX controlled LS re-solve FD found too few local directions: "
-                f"{validated_directions}/3 validated. "
+                f"{validated_directions}/{required_validated_directions} validated; "
+                f"rejected={rejected_directions}/{len(directions)}. "
                 + " | ".join(direction_failures)
             )
         finally:
@@ -5914,7 +6021,15 @@ class TestBoozerResidualAdjointFD:
         )
         # Diagnostic only — the re-solve FD validates correctness regardless.
         # The fraction depends on how well-converged the inner solve is.
-        assert total_norm > 0, "Total gradient is exactly zero"
+        assert np.isfinite(direct_norm) and direct_norm > 0, (
+            "Direct gradient norm is not finite and positive"
+        )
+        assert np.isfinite(adj_norm) and adj_norm > 0, (
+            "Adjoint gradient norm is not finite and positive"
+        )
+        assert np.isfinite(total_norm) and total_norm > 0, (
+            "Total gradient norm is not finite and positive"
+        )
 
 
 # =======================================================================

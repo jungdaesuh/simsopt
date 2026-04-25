@@ -25,6 +25,7 @@ from benchmarks.validation_ladder_common import (
     build_provenance,
     describe_compile_behavior,
     find_single_file,
+    gpu_proof_parity_contract,
     load_json,
     max_pointwise_geometry_drift,
     maybe_initialize_distributed_runtime,
@@ -845,6 +846,15 @@ def main() -> None:
             "optimizer_drift_tolerances": dict(_TIER3_TOLERANCES),
         },
     )
+    bundle_provenance = {
+        "runner": "benchmarks/single_stage_init_parity.py",
+        "fake": False,
+        "default_backend": provenance["backend"],
+        "devices": provenance["devices"],
+        "xla_flags": provenance["xla_flags"],
+        "cuda_force_ptx_jit": provenance["cuda_force_ptx_jit"],
+        "cuda_disable_ptx_jit": provenance["cuda_disable_ptx_jit"],
+    }
     print_provenance(provenance)
 
     case_artifacts_dir = (
@@ -893,6 +903,12 @@ def main() -> None:
         max_surface_geometry_rel=max_geom_rel,
         maxiter=int(args.maxiter),
     )
+    proof_parity = {
+        **gpu_proof_parity_contract("single_stage"),
+        "cpu_oracle_value": float(cpu_results["FIELD_ERROR"]),
+        "gpu_value": float(jax_results["FIELD_ERROR"]),
+        "value_rel_diff": float(comparison["field_error_rel_diff"]),
+    }
     warnings: list[str] = []
     if not comparison["cpu_self_intersection_check_available"]:
         warnings.append(
@@ -929,9 +945,11 @@ def main() -> None:
 
     payload = {
         "provenance": provenance,
+        "bundle_provenance": bundle_provenance,
         "cpu_results": cpu_results,
         "jax_results": jax_results,
         "comparison": comparison,
+        "proof_parity": proof_parity,
         "timings": {
             "cpu_elapsed_s": float(cpu_case["elapsed_s"]),
             "jax_elapsed_s": float(jax_case["elapsed_s"]),

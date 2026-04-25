@@ -3,7 +3,9 @@ import math
 import numpy as np
 import pytest
 
+import jax
 import jax.numpy as jnp
+from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 
 from simsopt.jax_core.reductions import (
     compensated_sum_flat,
@@ -12,6 +14,8 @@ from simsopt.jax_core.reductions import (
     scalar_square_sum,
     validate_reduction_mode,
 )
+
+_CPU_GPU_REDUCTION_TOLS = parity_ladder_tolerances("reduction_cpu_gpu")
 
 
 def _numpy_pairwise_sum_axis(array, *, axis: int):
@@ -34,6 +38,13 @@ def _numpy_pairwise_sum_axis(array, *, axis: int):
 def _assert_strict_oracle_improves_reference(*, strict_oracle, default, reference):
     np.testing.assert_allclose(strict_oracle, reference, rtol=0.0, atol=0.0)
     assert abs(strict_oracle - reference) < abs(default - reference)
+
+
+def _first_device_for_platform(platform: str):
+    for device in jax.devices():
+        if device.platform == platform:
+            return device
+    return None
 
 
 def test_validate_reduction_mode_rejects_unknown_value():
@@ -96,3 +107,35 @@ def test_scalar_square_sum_strict_oracle_beats_default_vdot_on_dynamic_range():
         default=default,
         reference=reference,
     )
+
+
+def test_pairwise_and_compensated_reductions_match_cpu_gpu_on_cancellation_stress():
+    cpu_device = _first_device_for_platform("cpu")
+    gpu_device = _first_device_for_platform("gpu") or _first_device_for_platform("cuda")
+    if cpu_device is None or gpu_device is None:
+        pytest.xfail("CPU and CUDA/GPU devices are required for reduction_cpu_gpu")
+
+    values = np.ones((3, 257), dtype=np.float64)
+    values[0, 0] = 1.0e16
+    values[0, 1] = -1.0e16
+    values[1, 0] = -1.0e12
+    values[1, 1] = 1.0e12
+    values[2, ::2] *= -1.0
+
+    def evaluate_on_device(device):
+        with jax.default_device(device):
+            array = jnp.asarray(values)
+            return (
+                np.asarray(pairwise_sum_axis(array, axis=1)),
+                float(pairwise_sum_flat(array)),
+                float(compensated_sum_flat(array.reshape((-1,)))),
+            )
+
+    cpu_axis, cpu_flat, cpu_compensated = evaluate_on_device(cpu_device)
+    gpu_axis, gpu_flat, gpu_compensated = evaluate_on_device(gpu_device)
+
+    rtol = float(_CPU_GPU_REDUCTION_TOLS["rtol"])
+    atol = float(_CPU_GPU_REDUCTION_TOLS["atol"])
+    np.testing.assert_allclose(gpu_axis, cpu_axis, rtol=rtol, atol=atol)
+    np.testing.assert_allclose(gpu_flat, cpu_flat, rtol=rtol, atol=atol)
+    np.testing.assert_allclose(gpu_compensated, cpu_compensated, rtol=rtol, atol=atol)

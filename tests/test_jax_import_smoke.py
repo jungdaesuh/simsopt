@@ -139,6 +139,33 @@ def _run_python_script(
     return result.returncode, result.stderr.strip()
 
 
+def _run_python_script_json_payload(
+    script_path: Path,
+    *,
+    args: Sequence[str] = (),
+    failure_message: str,
+    timeout: int = 30,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, object]:
+    """Run a subprocess smoke case and parse the final JSON stdout line."""
+    result = subprocess.run(
+        [sys.executable, str(script_path), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=_REPO_ROOT,
+        env=_build_clean_subprocess_env(extra_env),
+    )
+    assert result.returncode == 0, f"{failure_message}:\n{result.stderr.strip()}"
+    stdout_lines = [
+        line for line in result.stdout.strip().splitlines() if line.strip()
+    ]
+    assert stdout_lines, f"{failure_message}: subprocess emitted no JSON payload"
+    payload = json.loads(stdout_lines[-1])
+    assert isinstance(payload, dict), f"{failure_message}: payload is not an object"
+    return payload
+
+
 def _assert_python_script_passes(
     script_path: Path,
     *,
@@ -508,12 +535,18 @@ def test_transfer_guard_disallow_enforces_single_stage_target_runtime_boundaries
 
 
 def _assert_ondevice_optimizer_reuses_compiled_solver(method: str) -> None:
-    _assert_python_script_passes(
+    payload = _run_python_script_json_payload(
         _JAX_SUBPROCESS_CASES_PATH,
         args=("compile-count", method),
         failure_message=f"{method} compile-count smoke failed",
         extra_env={"JAX_ENABLE_COMPILATION_CACHE": "0"},
     )
+    assert payload == {
+        "case": "compile-count",
+        "method": method,
+        "compile_count": 1,
+        "run_count": 3,
+    }
 
 
 def test_lbfgs_ondevice_reuses_compiled_solver_across_identical_calls():
@@ -528,7 +561,7 @@ def test_bfgs_ondevice_reuses_compiled_solver_across_identical_calls():
 
 def test_target_lbfgs_ondevice_reuses_compiled_solver_across_identical_value_and_grad_calls():
     """Target-lane lbfgs-ondevice value/grad calls must reuse the compiled solver."""
-    _assert_python_script_passes(
+    payload = _run_python_script_json_payload(
         _JAX_SUBPROCESS_CASES_PATH,
         args=("target-compile-count",),
         failure_message=(
@@ -536,11 +569,18 @@ def test_target_lbfgs_ondevice_reuses_compiled_solver_across_identical_value_and
         ),
         extra_env={"JAX_ENABLE_COMPILATION_CACHE": "0"},
     )
+    assert payload == {
+        "case": "target-compile-count",
+        "method": "lbfgs-ondevice",
+        "compile_count": 1,
+        "run_count": 3,
+        "value_and_grad": True,
+    }
 
 
 def test_stage2_target_outer_loop_reuses_compiled_solver_across_identical_calls():
     """Real Stage 2 target-lane outer-loop calls must reuse the compiled solver."""
-    _assert_python_script_passes(
+    payload = _run_python_script_json_payload(
         _JAX_SUBPROCESS_CASES_PATH,
         args=("stage2-target-compile-count",),
         failure_message="Stage 2 target outer-loop compile-count smoke failed",
@@ -550,6 +590,13 @@ def test_stage2_target_outer_loop_reuses_compiled_solver_across_identical_calls(
             "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
         },
     )
+    assert payload == {
+        "case": "stage2-target-compile-count",
+        "method": "lbfgs-ondevice",
+        "compile_count": 1,
+        "run_count": 3,
+        "value_and_grad": True,
+    }
 
 
 def test_ondevice_solver_cache_respects_mutable_objective_state():
