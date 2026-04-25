@@ -116,6 +116,15 @@ def parse_args() -> argparse.Namespace:
         help="Path to write structured comparison results.",
     )
     parser.add_argument(
+        "--case-artifacts-dir",
+        default=None,
+        help=(
+            "Directory for durable per-lane single-stage outputs. When provided, "
+            "reference_outputs, target_outputs, and any compiled runtime seed spec "
+            "are preserved for post-run artifact extraction."
+        ),
+    )
+    parser.add_argument(
         "--plasma-surf-filename",
         default=DEFAULT_PLASMA_SURF_FILENAME,
         help="VMEC equilibrium filename for the real single-stage fixture.",
@@ -134,6 +143,29 @@ def parse_args() -> argparse.Namespace:
         "--stage2-bs-path",
         default=str(DEFAULT_STAGE2_BS_PATH),
         help="Path to the fixed Stage 2 seed biot_savart_opt.json fixture.",
+    )
+    parser.add_argument(
+        "--warm-start-run-dir",
+        default=None,
+        help=(
+            "Optional single-stage donor directory containing surf_opt.json, "
+            "results.json, and biot_savart_opt.json. Used as the reference "
+            "seed source and as the source for the JAX runtime seed spec."
+        ),
+    )
+    parser.add_argument(
+        "--jax-runtime-seed-spec",
+        default=None,
+        help=(
+            "Optional precompiled immutable JAX runtime seed spec. When omitted, "
+            "the parity runner compiles one from the CPU reference run."
+        ),
+    )
+    parser.add_argument(
+        "--num-tf-coils",
+        type=int,
+        default=20,
+        help="Number of fixed TF coils in the single-stage seed package.",
     )
     parser.add_argument(
         "--nphi",
@@ -205,6 +237,15 @@ def parse_args() -> argparse.Namespace:
             "Request benchmark-mode target-lane execution. "
             "This skips heavy single-stage artifacts and therefore skips the "
             "surface-geometry drift check in this parity wrapper."
+        ),
+    )
+    parser.add_argument(
+        "--disable-target-lane-success-filter",
+        action="store_true",
+        help=(
+            "Proof-only target-lane mode: bypass the outer-loop hardware "
+            "success filter while preserving the JAX value/grad and optimizer "
+            "execution path."
         ),
     )
     parser.add_argument(
@@ -368,13 +409,37 @@ def _run_single_stage_case(
     experimental_target_lane_value_and_grad: bool = False,
     enable_compile_diagnostics: bool = False,
     deterministic_gpu_reductions: bool = False,
+    output_root: Path | None = None,
+    jax_runtime_seed_spec: Path | None = None,
 ) -> dict[str, Any]:
     script_path = _single_stage_script_path()
     effective_platform = platform if backend == "jax" else "cpu"
-    with tempfile.TemporaryDirectory(
-        prefix=f"single-stage-init-{backend}-"
-    ) as temp_dir:
-        output_root = Path(temp_dir) / "outputs"
+    if output_root is None:
+        with tempfile.TemporaryDirectory(
+            prefix=f"single-stage-init-{backend}-"
+        ) as temp_dir:
+            return _run_single_stage_case(
+                args,
+                backend,
+                platform=platform,
+                benchmark_mode=benchmark_mode,
+                load_surface_gamma=load_surface_gamma,
+                profile_target_lane=profile_target_lane,
+                profile_target_lane_only=profile_target_lane_only,
+                diagnose_target_lane_scaled_phase1=diagnose_target_lane_scaled_phase1,
+                record_target_lane_invalid_state_events=(
+                    record_target_lane_invalid_state_events
+                ),
+                experimental_target_lane_value_and_grad=(
+                    experimental_target_lane_value_and_grad
+                ),
+                enable_compile_diagnostics=enable_compile_diagnostics,
+                deterministic_gpu_reductions=deterministic_gpu_reductions,
+                output_root=Path(temp_dir) / "outputs",
+                jax_runtime_seed_spec=jax_runtime_seed_spec,
+            )
+    else:
+        output_root = Path(output_root)
         command = [
             "--backend",
             backend,
@@ -396,13 +461,25 @@ def _run_single_stage_case(
             str(args.vol_target),
             "--iota-target",
             str(args.iota_target),
+            "--num-tf-coils",
+            str(getattr(args, "num_tf_coils", 20)),
         ]
+        warm_start_run_dir = getattr(args, "warm_start_run_dir", None)
+        if warm_start_run_dir is not None:
+            command.extend(["--warm-start-run-dir", str(warm_start_run_dir)])
         if int(args.maxiter) <= 0:
             command.append("--init-only")
         else:
             command.extend(["--maxiter", str(args.maxiter)])
         if backend == "jax":
             command.extend(["--optimizer-backend", args.optimizer_backend])
+            resolved_seed_spec = (
+                jax_runtime_seed_spec
+                if jax_runtime_seed_spec is not None
+                else getattr(args, "jax_runtime_seed_spec", None)
+            )
+            if resolved_seed_spec is not None:
+                command.extend(["--jax-runtime-seed-spec", str(resolved_seed_spec)])
             if args.boozer_optimizer_backend is not None:
                 command.extend(
                     [
@@ -477,11 +554,105 @@ def _run_single_stage_case(
             "surface_gamma": None,
             "elapsed_s": float(elapsed_s),
             "phase_timings": _extract_phase_timings(results),
+            "run_dir": str(results_json.parent),
         }
         if load_surface_gamma:
             surf_json = find_single_file(output_root, "surf_init.json")
             payload["surface_gamma"] = _load_surface_gamma_artifact(str(surf_json))
         return payload
+
+
+def _compile_jax_runtime_seed_spec_from_run_dir(
+    run_dir: Path,
+    output_path: Path,
+    args: argparse.Namespace,
+) -> Path:
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+
+    return Path(
+        single_stage_example.compile_single_stage_jax_runtime_seed_spec(
+            str(run_dir),
+            mpol=int(args.mpol),
+            ntor=int(args.ntor),
+            nphi=int(args.nphi),
+            ntheta=int(args.ntheta),
+            num_tf_coils=int(getattr(args, "num_tf_coils", 20)),
+            output_path_or_run_dir=str(output_path),
+        )
+    )
+
+
+def _reference_case_backend(args: argparse.Namespace) -> str:
+    """Return the backend that gives the target-lane proof an apples-to-apples reference."""
+    if (
+        getattr(args, "jax_runtime_seed_spec", None) is not None
+        or getattr(args, "warm_start_run_dir", None) is not None
+    ):
+        return "jax"
+    return "cpu"
+
+
+def _reference_case_benchmark_mode(
+    args: argparse.Namespace,
+    requested_benchmark_mode: bool,
+) -> bool:
+    """Return whether the reference can skip heavy artifacts without losing its seed."""
+    return bool(requested_benchmark_mode and _reference_case_backend(args) == "jax")
+
+
+def _run_single_stage_case_pair(
+    args: argparse.Namespace,
+    *,
+    benchmark_mode: bool,
+    reference_backend: str,
+    reference_benchmark_mode: bool,
+    case_root: Path,
+) -> tuple[dict[str, Any], dict[str, Any], Path]:
+    if reference_backend == "jax":
+        jax_seed_spec = (
+            Path(args.jax_runtime_seed_spec)
+            if args.jax_runtime_seed_spec is not None
+            else _compile_jax_runtime_seed_spec_from_run_dir(
+                Path(args.warm_start_run_dir),
+                case_root / "single_stage_jax_runtime_seed_spec.json",
+                args,
+            )
+        )
+        cpu_case = _run_single_stage_case(
+            args,
+            "jax",
+            platform="cpu",
+            benchmark_mode=reference_benchmark_mode,
+            load_surface_gamma=not benchmark_mode,
+            output_root=case_root / "reference_outputs",
+            jax_runtime_seed_spec=jax_seed_spec,
+        )
+    else:
+        cpu_case = _run_single_stage_case(
+            args,
+            "cpu",
+            platform="cpu",
+            benchmark_mode=reference_benchmark_mode,
+            load_surface_gamma=not benchmark_mode,
+            output_root=case_root / "cpu_outputs",
+        )
+        jax_seed_spec = _compile_jax_runtime_seed_spec_from_run_dir(
+            Path(cpu_case["run_dir"]),
+            case_root / "single_stage_jax_runtime_seed_spec.json",
+            args,
+        )
+    jax_case = _run_single_stage_case(
+        args,
+        "jax",
+        platform=args.platform,
+        benchmark_mode=benchmark_mode,
+        load_surface_gamma=not benchmark_mode,
+        output_root=case_root / "target_outputs",
+        jax_runtime_seed_spec=jax_seed_spec,
+    )
+    return cpu_case, jax_case, jax_seed_spec
 
 
 def _load_surface_gamma_artifact(surface_json_path: str) -> np.ndarray:
@@ -632,6 +803,8 @@ def evaluate_single_stage_init_parity(
 def main() -> None:
     args = parse_args()
     benchmark_mode = bool(args.benchmark_mode)
+    reference_backend = _reference_case_backend(args)
+    reference_benchmark_mode = _reference_case_benchmark_mode(args, benchmark_mode)
     stage2_bs_path = Path(args.stage2_bs_path)
     if not stage2_bs_path.exists():
         raise RuntimeError(f"Stage 2 seed fixture does not exist: {stage2_bs_path}")
@@ -655,6 +828,11 @@ def main() -> None:
             "boozer_optimizer_backend": args.boozer_optimizer_backend,
             "outer_maxiter": int(args.maxiter),
             "benchmark_mode": benchmark_mode,
+            "reference_backend": reference_backend,
+            "reference_platform": "cpu",
+            "target_backend": "jax",
+            "target_platform": args.platform,
+            "reference_benchmark_mode": reference_benchmark_mode,
             "nphi": int(args.nphi),
             "ntheta": int(args.ntheta),
             "mpol": int(args.mpol),
@@ -669,20 +847,37 @@ def main() -> None:
     )
     print_provenance(provenance)
 
-    cpu_case = _run_single_stage_case(
-        args,
-        "cpu",
-        platform="cpu",
-        benchmark_mode=benchmark_mode,
-        load_surface_gamma=not benchmark_mode,
+    case_artifacts_dir = (
+        None if args.case_artifacts_dir is None else Path(args.case_artifacts_dir)
     )
-    jax_case = _run_single_stage_case(
-        args,
-        "jax",
-        platform=args.platform,
-        benchmark_mode=benchmark_mode,
-        load_surface_gamma=not benchmark_mode,
-    )
+    if case_artifacts_dir is None:
+        with tempfile.TemporaryDirectory(
+            prefix="single-stage-init-reference-"
+        ) as reference_temp_dir:
+            case_root = Path(reference_temp_dir)
+            cpu_case, jax_case, jax_seed_spec = _run_single_stage_case_pair(
+                args,
+                benchmark_mode=benchmark_mode,
+                reference_backend=reference_backend,
+                reference_benchmark_mode=reference_benchmark_mode,
+                case_root=case_root,
+            )
+            case_artifacts = None
+    else:
+        case_artifacts_dir.mkdir(parents=True, exist_ok=True)
+        cpu_case, jax_case, jax_seed_spec = _run_single_stage_case_pair(
+            args,
+            benchmark_mode=benchmark_mode,
+            reference_backend=reference_backend,
+            reference_benchmark_mode=reference_benchmark_mode,
+            case_root=case_artifacts_dir,
+        )
+        case_artifacts = {
+            "case_artifacts_dir": str(case_artifacts_dir),
+            "reference_run_dir": str(cpu_case["run_dir"]),
+            "target_run_dir": str(jax_case["run_dir"]),
+            "jax_runtime_seed_spec": str(jax_seed_spec),
+        }
 
     cpu_results = cpu_case["results"]
     jax_results = jax_case["results"]
@@ -747,6 +942,8 @@ def main() -> None:
         "failures": failures,
         "passed": not failures,
     }
+    if case_artifacts is not None:
+        payload["artifacts"] = case_artifacts
     write_json(args.output_json, payload)
     if failures:
         print("SINGLE-STAGE INIT PARITY FAILED")

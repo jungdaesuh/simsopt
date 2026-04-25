@@ -4572,8 +4572,105 @@ class SingleStageExampleTests(unittest.TestCase):
                 curvature_threshold=40.0,
                 run_dict=run_dict,
             )
+            init_only_metrics = module.resolve_single_stage_final_penalty_metrics(
+                use_target_lane=True,
+                benchmark_mode=False,
+                skip_outer_optimizer=True,
+                boozer_surface=object(),
+                bs=object(),
+                iota_target=0.21,
+                coil_dofs=np.array([1.0, -2.0], dtype=np.float64),
+                outer_objective_config="config-marker",
+                success_filter="success-filter-marker",
+                curvelength=object(),
+                j_non_qs=object(),
+                j_boozer_residual=object(),
+                j_iota=object(),
+                j_curve_length=object(),
+                j_curve_curve=object(),
+                j_curve_surface=object(),
+                j_surface_surface=object(),
+                j_curvature=object(),
+                cc_dist=0.05,
+                cs_dist=0.02,
+                ss_dist=0.04,
+                curvature_threshold=40.0,
+                run_dict=run_dict,
+                init_only=True,
+            )
 
         self.assertEqual(metrics, cached_metrics)
+        self.assertEqual(init_only_metrics, cached_metrics)
+
+    def test_cache_single_stage_target_lane_init_reporting_snapshot_uses_runtime_sync(
+        self,
+    ):
+        module = self.load_module()
+        calls = []
+
+        def fake_sync(run_dict, coil_dofs, *, benchmark_mode, update_run_state):
+            calls.append((run_dict, coil_dofs, benchmark_mode, update_run_state))
+            run_dict["target_lane_reporting_metrics"] = {"banana_current_A": 123.0}
+            run_dict["target_lane_reporting_coil_dofs"] = np.asarray(coil_dofs)
+            run_dict["target_lane_reporting_include_distance_metrics"] = False
+            return {"reporting_metrics": {"banana_current_A": 123.0}}
+
+        with patch.object(
+            module,
+            "build_single_stage_target_lane_hardware_success_filter",
+            return_value="success-filter",
+        ) as success_filter_builder, patch.object(
+            module,
+            "build_target_lane_outer_objective_config",
+            return_value="objective-config",
+        ) as config_builder, patch.object(
+            module,
+            "build_single_stage_target_lane_accepted_step_sync",
+            return_value=fake_sync,
+        ) as sync_builder:
+            run_dict = {}
+            summary = module.cache_single_stage_target_lane_init_reporting_snapshot(
+                boozer_surface="boozer",
+                bs="field",
+                banana_curve="banana",
+                vessel_surface="vessel",
+                iota_target=0.21,
+                run_dict=run_dict,
+                coil_dofs=np.array([1.0, -2.0], dtype=np.float64),
+                benchmark_mode=True,
+                disable_success_filter=False,
+                length_target=1.7,
+                cc_dist=0.05,
+                cc_weight=100.0,
+                cs_dist=0.02,
+                cs_weight=1.0,
+                ss_dist=0.04,
+                surf_dist_weight=1000.0,
+                residual_weight=1000.0,
+                iota_weight=100.0,
+                length_weight=1.0,
+                curvature_threshold=40.0,
+                curvature_weight=0.1,
+            )
+
+        success_filter_builder.assert_called_once()
+        config_builder.assert_called_once()
+        sync_builder.assert_called_once_with(
+            "boozer",
+            "field",
+            0.21,
+            outer_objective_config="objective-config",
+            success_filter="success-filter",
+        )
+        self.assertEqual(summary["reporting_metrics"]["banana_current_A"], 123.0)
+        self.assertEqual(calls[0][0], run_dict)
+        np.testing.assert_allclose(calls[0][1], np.array([1.0, -2.0]))
+        self.assertTrue(calls[0][2])
+        self.assertFalse(calls[0][3])
+        self.assertEqual(
+            run_dict["target_lane_reporting_metrics"]["banana_current_A"],
+            123.0,
+        )
 
     def test_target_restart_artifact_export_skips_host_field_diagnostics(
         self,
@@ -4710,6 +4807,63 @@ class SingleStageExampleTests(unittest.TestCase):
             )
         )
 
+    def test_restart_artifact_export_requires_host_graph_on_cpu_lane(self):
+        module = self.load_module()
+
+        self.assertTrue(
+            module.single_stage_host_artifact_export_required(
+                use_target_lane=False,
+                write_restart_artifacts=True,
+                write_full_artifacts=False,
+            )
+        )
+        self.assertFalse(
+            module.single_stage_host_artifact_export_required(
+                use_target_lane=True,
+                write_restart_artifacts=True,
+                write_full_artifacts=False,
+            )
+        )
+        self.assertTrue(
+            module.single_stage_host_artifact_export_required(
+                use_target_lane=True,
+                write_restart_artifacts=True,
+                write_full_artifacts=True,
+            )
+        )
+
+    def test_init_only_cpu_restart_export_does_not_restore_optimizer_dofs(self):
+        module = self.load_module()
+
+        self.assertFalse(
+            module.single_stage_final_host_restore_required(
+                skip_outer_optimizer=True,
+                use_target_lane=False,
+                host_state_restored_for_final=False,
+            )
+        )
+        self.assertTrue(
+            module.single_stage_final_host_restore_required(
+                skip_outer_optimizer=False,
+                use_target_lane=False,
+                host_state_restored_for_final=False,
+            )
+        )
+        self.assertTrue(
+            module.single_stage_final_host_restore_required(
+                skip_outer_optimizer=True,
+                use_target_lane=True,
+                host_state_restored_for_final=False,
+            )
+        )
+        self.assertFalse(
+            module.single_stage_final_host_restore_required(
+                skip_outer_optimizer=False,
+                use_target_lane=False,
+                host_state_restored_for_final=True,
+            )
+        )
+
     def test_build_single_stage_final_result_snapshot_copies_result_state(self):
         module = self.load_module()
         run_dict = {
@@ -4726,7 +4880,6 @@ class SingleStageExampleTests(unittest.TestCase):
             "curve_surface_min_dist": 0.22,
             "surface_vessel_min_dist": 0.33,
         }
-        artifact_hardware_payload = {"COIL_LENGTH_M": 1.0}
         optimizer_result = {
             "iterations": 7,
             "success": True,
@@ -4745,7 +4898,6 @@ class SingleStageExampleTests(unittest.TestCase):
             final_metrics=final_metrics,
             final_distances=final_distances,
             hardware_status=hardware_status,
-            artifact_hardware_payload=artifact_hardware_payload,
             optimizer_result=optimizer_result,
             optimizer_diagnostics=optimizer_diagnostics,
             timings=timings,
@@ -4760,7 +4912,6 @@ class SingleStageExampleTests(unittest.TestCase):
         final_metrics["final_iota"] = 99.0
         final_distances["curve_curve_min_dist"] = 99.0
         hardware_status["success"] = False
-        artifact_hardware_payload["COIL_LENGTH_M"] = 99.0
         optimizer_result["iterations"] = 99
         optimizer_diagnostics["fun"] = 99.0
         timings["outer_optimizer_s"] = 99.0
@@ -4769,7 +4920,6 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(snapshot.final_metrics["final_iota"], 0.21)
         self.assertEqual(snapshot.final_distances["curve_curve_min_dist"], 0.11)
         self.assertTrue(snapshot.hardware_status["success"])
-        self.assertEqual(snapshot.artifact_hardware_payload["COIL_LENGTH_M"], 1.0)
         self.assertEqual(snapshot.optimizer_result["iterations"], 7)
         self.assertEqual(snapshot.optimizer_diagnostics["fun"], 1.25)
         self.assertEqual(snapshot.timings["outer_optimizer_s"], 2.0)
@@ -4788,7 +4938,6 @@ class SingleStageExampleTests(unittest.TestCase):
             final_metrics={},
             final_distances={},
             hardware_status={},
-            artifact_hardware_payload={},
             optimizer_result={},
             optimizer_diagnostics={},
             timings={"script_total_s": 1.5},

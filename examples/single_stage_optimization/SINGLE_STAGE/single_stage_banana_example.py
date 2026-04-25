@@ -66,7 +66,6 @@ from banana_opt.hardware_contracts import (
     validate_banana_winding_surface_radius,
 )
 from banana_opt.hardware_constraint_schema import (
-    build_hardware_constraint_artifact_payload_fields,
     build_hardware_constraint_status,
     build_threshold_overrides,
     hardware_constraint_alm_names,
@@ -273,7 +272,6 @@ class SingleStageFinalResultSnapshot:
     final_metrics: dict
     final_distances: dict
     hardware_status: dict
-    artifact_hardware_payload: dict
     optimizer_result: dict
     optimizer_diagnostics: dict
     timings: dict
@@ -5092,7 +5090,7 @@ def resolve_single_stage_final_penalty_metrics(
         "violations": ["skipped_in_benchmark_mode"],
     }
 
-    if use_target_lane and not skip_outer_optimizer:
+    if use_target_lane:
         return _require_cached_target_lane_reporting_metrics(
             run_dict,
             coil_dofs,
@@ -5975,6 +5973,79 @@ def cache_single_stage_target_lane_reporting_snapshot(
 ):
     """Prime final reporting from the pure target-lane runtime without host restore."""
     return adapter.accepted_step_state_sync(
+        run_dict,
+        coil_dofs,
+        benchmark_mode=benchmark_mode,
+        update_run_state=False,
+    )
+
+
+def cache_single_stage_target_lane_init_reporting_snapshot(
+    *,
+    boozer_surface,
+    bs,
+    banana_curve,
+    vessel_surface,
+    iota_target,
+    run_dict,
+    coil_dofs,
+    benchmark_mode,
+    disable_success_filter,
+    length_target,
+    cc_dist,
+    cc_weight,
+    cs_dist,
+    cs_weight,
+    ss_dist,
+    surf_dist_weight,
+    residual_weight,
+    iota_weight,
+    length_weight,
+    curvature_threshold,
+    curvature_weight,
+):
+    """Prime target-lane final reporting for init-only runs."""
+    target_lane_success_filter = None
+    if not disable_success_filter:
+        target_lane_success_filter = (
+            build_single_stage_target_lane_hardware_success_filter(
+                boozer_surface,
+                bs,
+                banana_curve,
+                vessel_surface,
+                cc_dist=cc_dist,
+                cs_dist=cs_dist,
+                ss_dist=ss_dist,
+                curvature_threshold=curvature_threshold,
+            )
+        )
+    target_lane_outer_objective_config = build_target_lane_outer_objective_config(
+        boozer_surface,
+        bs,
+        banana_curve,
+        vessel_surface,
+        non_qs_weight=1.0,
+        residual_weight=residual_weight,
+        iota_weight=iota_weight,
+        length_weight=length_weight,
+        length_target=length_target,
+        curve_curve_threshold=cc_dist,
+        curve_curve_weight=cc_weight,
+        curve_surface_threshold=cs_dist,
+        curve_surface_weight=cs_weight,
+        surface_vessel_threshold=ss_dist,
+        surface_vessel_weight=surf_dist_weight,
+        curvature_threshold=curvature_threshold,
+        curvature_weight=curvature_weight,
+    )
+    sync_target_lane_reporting = build_single_stage_target_lane_accepted_step_sync(
+        boozer_surface,
+        bs,
+        iota_target,
+        outer_objective_config=target_lane_outer_objective_config,
+        success_filter=target_lane_success_filter,
+    )
+    return sync_target_lane_reporting(
         run_dict,
         coil_dofs,
         benchmark_mode=benchmark_mode,
@@ -9185,6 +9256,29 @@ def single_stage_host_postprocess_required(
     return (not use_target_lane) or bool(write_full_artifacts)
 
 
+def single_stage_host_artifact_export_required(
+    *,
+    use_target_lane,
+    write_restart_artifacts,
+    write_full_artifacts,
+):
+    """Return whether final artifact export needs the host object graph."""
+    return bool(write_full_artifacts or (write_restart_artifacts and not use_target_lane))
+
+
+def single_stage_final_host_restore_required(
+    *,
+    skip_outer_optimizer,
+    use_target_lane,
+    host_state_restored_for_final,
+):
+    """Return whether final export must replay optimizer DOFs into host objects."""
+    return bool(
+        (not host_state_restored_for_final)
+        and (not skip_outer_optimizer or use_target_lane)
+    )
+
+
 def require_single_stage_jax_target_lane(*, use_jax, use_target_lane):
     if use_jax and not use_target_lane:
         raise ValueError(
@@ -9376,7 +9470,6 @@ def build_single_stage_final_result_snapshot(
     final_metrics,
     final_distances,
     hardware_status,
-    artifact_hardware_payload,
     optimizer_result,
     optimizer_diagnostics,
     timings,
@@ -9398,7 +9491,6 @@ def build_single_stage_final_result_snapshot(
         final_metrics=dict(final_metrics),
         final_distances=dict(final_distances),
         hardware_status=dict(hardware_status),
-        artifact_hardware_payload=dict(artifact_hardware_payload),
         optimizer_result=dict(optimizer_result),
         optimizer_diagnostics=dict(optimizer_diagnostics),
         timings=dict(timings),
@@ -11729,6 +11821,42 @@ if __name__ == "__main__":
             )
             host_state_restored_for_final = True
 
+    if use_target_lane and skip_outer_optimizer:
+        target_lane_init_reporting_start_s = _perf_counter_s()
+        cache_single_stage_target_lane_init_reporting_snapshot(
+            boozer_surface=boozer_surface,
+            bs=bs,
+            banana_curve=banana_curve,
+            vessel_surface=VV,
+            iota_target=iota_target,
+            run_dict=run_dict,
+            coil_dofs=dofs,
+            benchmark_mode=bool(args.benchmark_mode),
+            disable_success_filter=bool(args.disable_target_lane_success_filter),
+            length_target=length_target,
+            cc_dist=CC_DIST,
+            cc_weight=CC_WEIGHT,
+            cs_dist=CS_DIST,
+            cs_weight=CS_WEIGHT,
+            ss_dist=SS_DIST,
+            surf_dist_weight=SURF_DIST_WEIGHT,
+            residual_weight=RES_WEIGHT,
+            iota_weight=IOTAS_WEIGHT,
+            length_weight=LENGTH_WEIGHT,
+            curvature_threshold=CURVATURE_THRESHOLD,
+            curvature_weight=CURVATURE_WEIGHT,
+        )
+        target_lane_init_reporting_end_s = _perf_counter_s()
+        target_lane_init_reporting_snapshot_s = _record_timing(
+            timings,
+            "target_lane_init_reporting_snapshot_s",
+            target_lane_init_reporting_start_s,
+            target_lane_init_reporting_end_s,
+        )
+        timings["jax_compile_prewarm_reporting_snapshot_s"] = (
+            target_lane_init_reporting_snapshot_s
+        )
+
     final_penalty_metrics = resolve_single_stage_final_penalty_metrics(
         use_target_lane=use_target_lane,
         benchmark_mode=bool(args.benchmark_mode),
@@ -11847,9 +11975,6 @@ if __name__ == "__main__":
         "curve_surface_min_dist": final_curve_surface_min_dist,
         "surface_vessel_min_dist": final_surface_vessel_min_dist,
     }
-    final_artifact_hardware_payload = build_hardware_constraint_artifact_payload_fields(
-        final_artifact_hardware_snapshot
-    )
     final_optimizer_result = summarize_single_stage_final_optimizer_result(
         result=res,
         ran_optimizer=not skip_outer_optimizer,
@@ -11869,7 +11994,6 @@ if __name__ == "__main__":
         final_metrics=final_penalty_metrics,
         final_distances=final_distances,
         hardware_status=final_hardware_status,
-        artifact_hardware_payload=final_artifact_hardware_payload,
         optimizer_result=final_optimizer_result,
         optimizer_diagnostics=optimizer_diag,
         timings=timings,
@@ -12120,11 +12244,12 @@ if __name__ == "__main__":
             "surface_vessel_min_dist"
         ],
         "COIL_VESSEL_MIN_DIST_M": COIL_VESSEL_MIN_DIST_M,
+        "BANANA_CURRENT_A": float(final_banana_current_A),
+        "TF_CURRENT_A": float(stage2_tf_current_A),
         "HARDWARE_CONSTRAINTS_OK": final_result_snapshot.hardware_status["success"],
         "HARDWARE_CONSTRAINT_VIOLATIONS": final_result_snapshot.hardware_status[
             "violations"
         ],
-        **final_result_snapshot.artifact_hardware_payload,
         "INITIAL_VOLUME": float(initial_volume),
         "INITIAL_IOTA": float(initial_iota),
         "INITIAL_FIELD_ERROR": float(initial_field_error),
@@ -12298,11 +12423,6 @@ if __name__ == "__main__":
             os.path.join(OUT_DIR_ITER, "target_lane_invalid_state_diagnosis.json"),
             results["TARGET_LANE_INVALID_STATE_DIAGNOSIS"],
         )
-    final_result_snapshot = with_single_stage_results_payload(
-        final_result_snapshot,
-        results,
-    )
-    write_single_stage_results_json(OUT_DIR_ITER, final_result_snapshot)
     if use_target_lane and write_restart_artifacts:
         write_single_stage_final_runtime_seed_spec(
             output_dir=OUT_DIR_ITER,
@@ -12315,14 +12435,16 @@ if __name__ == "__main__":
             banana_current_A=final_banana_current_A,
             stage2_seed=stage2_seed_payload,
         )
-    if (
-        not skip_outer_optimizer
-        and single_stage_host_postprocess_required(
-            use_target_lane=use_target_lane,
-            write_full_artifacts=write_full_artifacts,
-        )
+    if single_stage_host_artifact_export_required(
+        use_target_lane=use_target_lane,
+        write_restart_artifacts=write_restart_artifacts,
+        write_full_artifacts=write_full_artifacts,
     ):
-        if not host_state_restored_for_final:
+        if single_stage_final_host_restore_required(
+            skip_outer_optimizer=skip_outer_optimizer,
+            use_target_lane=use_target_lane,
+            host_state_restored_for_final=host_state_restored_for_final,
+        ):
             restore_single_stage_host_state(
                 use_target_lane=use_target_lane,
                 JF=JF,
@@ -12351,3 +12473,9 @@ if __name__ == "__main__":
             write_full_artifacts=write_full_artifacts,
             timings=timings,
         )
+    final_result_snapshot = replace(final_result_snapshot, timings=dict(timings))
+    final_result_snapshot = with_single_stage_results_payload(
+        final_result_snapshot,
+        results,
+    )
+    write_single_stage_results_json(OUT_DIR_ITER, final_result_snapshot)

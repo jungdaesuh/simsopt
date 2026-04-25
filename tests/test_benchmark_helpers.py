@@ -1927,6 +1927,42 @@ def test_single_stage_init_case_benchmark_mode_skips_surface_gamma_artifact(
     assert payload["surface_gamma"] is None
 
 
+def test_single_stage_init_reference_case_keeps_restart_artifacts_for_seed_compile():
+    args = types.SimpleNamespace(jax_runtime_seed_spec=None, warm_start_run_dir=None)
+
+    assert (
+        single_stage_init_parity_module._reference_case_benchmark_mode(args, True)
+        is False
+    )
+    assert single_stage_init_parity_module._reference_case_backend(args) == "cpu"
+
+
+def test_single_stage_init_reference_case_uses_benchmark_mode_with_explicit_seed():
+    args = types.SimpleNamespace(
+        jax_runtime_seed_spec="/tmp/seed-spec.json",
+        warm_start_run_dir=None,
+    )
+
+    assert (
+        single_stage_init_parity_module._reference_case_benchmark_mode(args, True)
+        is True
+    )
+    assert single_stage_init_parity_module._reference_case_backend(args) == "jax"
+
+
+def test_single_stage_init_reference_case_uses_jax_cpu_with_warm_start_seed():
+    args = types.SimpleNamespace(
+        jax_runtime_seed_spec=None,
+        warm_start_run_dir="/tmp/single-stage-run",
+    )
+
+    assert (
+        single_stage_init_parity_module._reference_case_benchmark_mode(args, True)
+        is True
+    )
+    assert single_stage_init_parity_module._reference_case_backend(args) == "jax"
+
+
 def test_single_stage_init_case_threads_profile_target_lane_flag(monkeypatch, tmp_path):
     args = argparse.Namespace(
         plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
