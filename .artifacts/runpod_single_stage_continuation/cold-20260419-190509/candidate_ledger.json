@@ -1,0 +1,883 @@
+{
+  "cross_workflow_summary": {
+    "best_stage2_seed_reason": {
+      "evidence": {
+        "coil_coil_margin": null,
+        "curvature_margin": 3.842853383048187,
+        "field_error": 0.00010011762972695476,
+        "final_objective": null
+      },
+      "reasons": [
+        "best status rank (rejected)",
+        "lowest field error"
+      ],
+      "run_dir": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126"
+    }
+  },
+  "schema_version": 1,
+  "single_stage": {
+    "best_candidate": {
+      "campaign": {},
+      "continuation": {
+        "backend": "jax",
+        "optimizer_backend": "ondevice",
+        "run_mode": "new",
+        "stages": [
+          {
+            "initial_step_maxiter": 0,
+            "initial_step_scale": 0.1,
+            "maxcor": 10,
+            "maxiter": 1,
+            "minimal_artifacts": true,
+            "name": "coarse",
+            "outer_maxls": 2,
+            "shape": {
+              "mpol": 2,
+              "nphi": 31,
+              "ntheta": 16,
+              "ntor": 2
+            }
+          }
+        ],
+        "trial_policy": "validated-fast",
+        "use_target_lane_fast_trials": true
+      },
+      "failures": [
+        "coarse: stage status is 'subprocess_failed', not 'completed'",
+        "coarse: stage did not record a results snapshot",
+        "coarse: final stage OPTIMIZER_SUCCESS is not true",
+        "coarse: final stage HARDWARE_CONSTRAINTS_OK is not true",
+        "coarse: final stage FINAL_IOTA is missing or non-finite",
+        "coarse: final stage FINAL_G is missing or non-finite",
+        "coarse: final stage FIELD_ERROR is missing or non-finite",
+        "coarse: final stage FINAL_NON_QS is missing or non-finite"
+      ],
+      "margins": {
+        "curvature_margin": null,
+        "curve_curve_margin": null,
+        "curve_surface_margin": null,
+        "minimum_hardware_margin": null,
+        "surface_vessel_margin": null
+      },
+      "metrics": {
+        "ABS_IOTA_ERROR": null,
+        "ACCEPTED_STEP_COUNT": null,
+        "CURVE_CURVE_MIN_DIST": null,
+        "CURVE_SURFACE_MIN_DIST": null,
+        "FIELD_ERROR": null,
+        "FINAL_BOOZER_RESIDUAL": null,
+        "FINAL_IOTA": null,
+        "FINAL_NON_QS": null,
+        "MAX_CURVATURE": null,
+        "OBJECTIVE_EVALS_PER_ACCEPTED_STEP": null,
+        "OBJECTIVE_EVAL_COUNT": null,
+        "SURFACE_VESSEL_MIN_DIST": null
+      },
+      "passed": false,
+      "profiling": {
+        "objective_evals_per_accepted_step": null,
+        "profiled_stage_count": 1,
+        "stages": {
+          "coarse": {
+            "accepted_step_count": null,
+            "gradient_eval_count": null,
+            "initial_phase_iterations": null,
+            "jax_profile_dir": null,
+            "objective_eval_count": null,
+            "objective_evals_per_accepted_step": null,
+            "outer_optimizer_initial_phase_s": null,
+            "outer_optimizer_main_s": null,
+            "outer_optimizer_s": null,
+            "script_total_s": null,
+            "target_lane_bundle_setup_s": null,
+            "target_lane_profile_only_s": null
+          }
+        },
+        "target_lane_profiled_stage_count": 0,
+        "total_accepted_step_count": null,
+        "total_gradient_eval_count": null,
+        "total_inner_solve_compile_overhead_s": null,
+        "total_objective_eval_count": null,
+        "total_outer_optimizer_initial_phase_s": null,
+        "total_outer_optimizer_main_s": null,
+        "total_outer_optimizer_s": null,
+        "total_stage_script_time_s": null,
+        "total_target_lane_bundle_setup_s": null,
+        "total_value_and_grad_compile_overhead_s": null
+      },
+      "ranking": {
+        "sort_key": [
+          2,
+          Infinity,
+          Infinity,
+          Infinity,
+          Infinity,
+          Infinity
+        ],
+        "status_rank": 2
+      },
+      "research_grade": false,
+      "research_usable": false,
+      "research_verdicts": {
+        "acceptable_final_field_error": null,
+        "acceptable_iota_target": null,
+        "acceptable_non_qs_behavior": null,
+        "evidence_gaps": [
+          "final FIELD_ERROR metric is missing or non-finite",
+          "max_final_abs_iota_error threshold is unset",
+          "final FINAL_NON_QS metric is missing or non-finite"
+        ],
+        "full_convergence": false,
+        "hardware_feasible_final_coils": false,
+        "physics_gate_pass": null,
+        "research_grade_ready": false
+      },
+      "run_root": "/Users/suhjungdae/code/columbia/simsopt-jax/.artifacts/runpod_single_stage_continuation/cold-20260419-190509",
+      "status": "salvageable",
+      "warnings": []
+    },
+    "best_candidate_reason": {
+      "evidence": {
+        "abs_iota_error": null,
+        "field_error": null,
+        "final_non_qs": null,
+        "minimum_hardware_margin": null,
+        "objective_evals_per_accepted_step": null,
+        "status_rank": 2
+      },
+      "reasons": [
+        "best status rank (salvageable)"
+      ],
+      "run_root": "/Users/suhjungdae/code/columbia/simsopt-jax/.artifacts/runpod_single_stage_continuation/cold-20260419-190509"
+    },
+    "candidate_count": 1,
+    "reports": [
+      {
+        "campaign": {},
+        "continuation": {
+          "backend": "jax",
+          "optimizer_backend": "ondevice",
+          "run_mode": "new",
+          "stages": [
+            {
+              "initial_step_maxiter": 0,
+              "initial_step_scale": 0.1,
+              "maxcor": 10,
+              "maxiter": 1,
+              "minimal_artifacts": true,
+              "name": "coarse",
+              "outer_maxls": 2,
+              "shape": {
+                "mpol": 2,
+                "nphi": 31,
+                "ntheta": 16,
+                "ntor": 2
+              }
+            }
+          ],
+          "trial_policy": "validated-fast",
+          "use_target_lane_fast_trials": true
+        },
+        "failures": [
+          "coarse: stage status is 'subprocess_failed', not 'completed'",
+          "coarse: stage did not record a results snapshot",
+          "coarse: final stage OPTIMIZER_SUCCESS is not true",
+          "coarse: final stage HARDWARE_CONSTRAINTS_OK is not true",
+          "coarse: final stage FINAL_IOTA is missing or non-finite",
+          "coarse: final stage FINAL_G is missing or non-finite",
+          "coarse: final stage FIELD_ERROR is missing or non-finite",
+          "coarse: final stage FINAL_NON_QS is missing or non-finite"
+        ],
+        "margins": {
+          "curvature_margin": null,
+          "curve_curve_margin": null,
+          "curve_surface_margin": null,
+          "minimum_hardware_margin": null,
+          "surface_vessel_margin": null
+        },
+        "metrics": {
+          "ABS_IOTA_ERROR": null,
+          "ACCEPTED_STEP_COUNT": null,
+          "CURVE_CURVE_MIN_DIST": null,
+          "CURVE_SURFACE_MIN_DIST": null,
+          "FIELD_ERROR": null,
+          "FINAL_BOOZER_RESIDUAL": null,
+          "FINAL_IOTA": null,
+          "FINAL_NON_QS": null,
+          "MAX_CURVATURE": null,
+          "OBJECTIVE_EVALS_PER_ACCEPTED_STEP": null,
+          "OBJECTIVE_EVAL_COUNT": null,
+          "SURFACE_VESSEL_MIN_DIST": null
+        },
+        "passed": false,
+        "profiling": {
+          "objective_evals_per_accepted_step": null,
+          "profiled_stage_count": 1,
+          "stages": {
+            "coarse": {
+              "accepted_step_count": null,
+              "gradient_eval_count": null,
+              "initial_phase_iterations": null,
+              "jax_profile_dir": null,
+              "objective_eval_count": null,
+              "objective_evals_per_accepted_step": null,
+              "outer_optimizer_initial_phase_s": null,
+              "outer_optimizer_main_s": null,
+              "outer_optimizer_s": null,
+              "script_total_s": null,
+              "target_lane_bundle_setup_s": null,
+              "target_lane_profile_only_s": null
+            }
+          },
+          "target_lane_profiled_stage_count": 0,
+          "total_accepted_step_count": null,
+          "total_gradient_eval_count": null,
+          "total_inner_solve_compile_overhead_s": null,
+          "total_objective_eval_count": null,
+          "total_outer_optimizer_initial_phase_s": null,
+          "total_outer_optimizer_main_s": null,
+          "total_outer_optimizer_s": null,
+          "total_stage_script_time_s": null,
+          "total_target_lane_bundle_setup_s": null,
+          "total_value_and_grad_compile_overhead_s": null
+        },
+        "ranking": {
+          "sort_key": [
+            2,
+            Infinity,
+            Infinity,
+            Infinity,
+            Infinity,
+            Infinity
+          ],
+          "status_rank": 2
+        },
+        "research_grade": false,
+        "research_usable": false,
+        "research_verdicts": {
+          "acceptable_final_field_error": null,
+          "acceptable_iota_target": null,
+          "acceptable_non_qs_behavior": null,
+          "evidence_gaps": [
+            "final FIELD_ERROR metric is missing or non-finite",
+            "max_final_abs_iota_error threshold is unset",
+            "final FINAL_NON_QS metric is missing or non-finite"
+          ],
+          "full_convergence": false,
+          "hardware_feasible_final_coils": false,
+          "physics_gate_pass": null,
+          "research_grade_ready": false
+        },
+        "run_root": "/Users/suhjungdae/code/columbia/simsopt-jax/.artifacts/runpod_single_stage_continuation/cold-20260419-190509",
+        "status": "salvageable",
+        "warnings": []
+      }
+    ],
+    "research_usable_count": 0,
+    "status_counts": {
+      "eligible": 0,
+      "rejected": 0,
+      "research_grade": 0,
+      "salvageable": 1
+    }
+  },
+  "stage2": {
+    "best_candidate": {
+      "artifacts": {
+        "legacy_optional": {
+          "CrossSectionPlot.png": {
+            "exists": false,
+            "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/CrossSectionPlot.png"
+          },
+          "MagFieldPlot.png": {
+            "exists": false,
+            "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/MagFieldPlot.png"
+          },
+          "NormFieldPlot.png": {
+            "exists": false,
+            "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/NormFieldPlot.png"
+          },
+          "VV.vts": {
+            "exists": false,
+            "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/VV.vts"
+          },
+          "curves_opt.vtu": {
+            "exists": true,
+            "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/curves_opt.vtu"
+          },
+          "surf_opt.vts": {
+            "exists": true,
+            "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/surf_opt.vts"
+          }
+        },
+        "required": {
+          "biot_savart_opt.json": {
+            "exists": true,
+            "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/biot_savart_opt.json"
+          },
+          "results.json": {
+            "exists": true,
+            "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/results.json"
+          },
+          "surf_opt.json": {
+            "exists": true,
+            "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/surf_opt.json"
+          }
+        },
+        "run_dir": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126"
+      },
+      "downstream_eligible": false,
+      "failures": [
+        "FINAL_CURVE_LENGTH is missing or non-finite",
+        "FINAL_CC_DISTANCE is missing or non-finite",
+        "FINAL_OBJECTIVE is missing or non-finite"
+      ],
+      "margins": {
+        "coil_coil_margin": null,
+        "curvature_margin": 3.842853383048187,
+        "length_margin": null
+      },
+      "metrics": {
+        "CC_THRESHOLD": null,
+        "CURVATURE_THRESHOLD": 40.0,
+        "FIELD_ERROR": 0.00010011762972695476,
+        "FINAL_CC_DISTANCE": null,
+        "FINAL_CURVE_LENGTH": null,
+        "FINAL_OBJECTIVE": null,
+        "HARDWARE_CONSTRAINTS_OK": true,
+        "LENGTH_TARGET": null,
+        "MAX_CURVATURE": 36.15714661695181,
+        "OPTIMIZER_SUCCESS": true,
+        "TERMINATION_MESSAGE": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH"
+      },
+      "ranking": {
+        "sort_key": [
+          3,
+          0.00010011762972695476,
+          Infinity,
+          -3.842853383048187,
+          Infinity
+        ],
+        "status_rank": 3
+      },
+      "research_grade": false,
+      "run_dir": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126",
+      "status": "rejected",
+      "warnings": []
+    },
+    "candidate_count": 6,
+    "eligible_count": 0,
+    "passed": false,
+    "reports": [
+      {
+        "artifacts": {
+          "legacy_optional": {
+            "CrossSectionPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/CrossSectionPlot.png"
+            },
+            "MagFieldPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/MagFieldPlot.png"
+            },
+            "NormFieldPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/NormFieldPlot.png"
+            },
+            "VV.vts": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/VV.vts"
+            },
+            "curves_opt.vtu": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/curves_opt.vtu"
+            },
+            "surf_opt.vts": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/surf_opt.vts"
+            }
+          },
+          "required": {
+            "biot_savart_opt.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/biot_savart_opt.json"
+            },
+            "results.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/results.json"
+            },
+            "surf_opt.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126/surf_opt.json"
+            }
+          },
+          "run_dir": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126"
+        },
+        "downstream_eligible": false,
+        "failures": [
+          "FINAL_CURVE_LENGTH is missing or non-finite",
+          "FINAL_CC_DISTANCE is missing or non-finite",
+          "FINAL_OBJECTIVE is missing or non-finite"
+        ],
+        "margins": {
+          "coil_coil_margin": null,
+          "curvature_margin": 3.842853383048187,
+          "length_margin": null
+        },
+        "metrics": {
+          "CC_THRESHOLD": null,
+          "CURVATURE_THRESHOLD": 40.0,
+          "FIELD_ERROR": 0.00010011762972695476,
+          "FINAL_CC_DISTANCE": null,
+          "FINAL_CURVE_LENGTH": null,
+          "FINAL_OBJECTIVE": null,
+          "HARDWARE_CONSTRAINTS_OK": true,
+          "LENGTH_TARGET": null,
+          "MAX_CURVATURE": 36.15714661695181,
+          "OPTIMIZER_SUCCESS": true,
+          "TERMINATION_MESSAGE": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH"
+        },
+        "ranking": {
+          "sort_key": [
+            3,
+            0.00010011762972695476,
+            Infinity,
+            -3.842853383048187,
+            Infinity
+          ],
+          "status_rank": 3
+        },
+        "research_grade": false,
+        "run_dir": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=9-ntor=12-f6217306-1775585752126",
+        "status": "rejected",
+        "warnings": []
+      },
+      {
+        "artifacts": {
+          "legacy_optional": {
+            "CrossSectionPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=12-b369ead1-1775583725687/CrossSectionPlot.png"
+            },
+            "MagFieldPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=12-b369ead1-1775583725687/MagFieldPlot.png"
+            },
+            "NormFieldPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=12-b369ead1-1775583725687/NormFieldPlot.png"
+            },
+            "VV.vts": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=12-b369ead1-1775583725687/VV.vts"
+            },
+            "curves_opt.vtu": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=12-b369ead1-1775583725687/curves_opt.vtu"
+            },
+            "surf_opt.vts": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=12-b369ead1-1775583725687/surf_opt.vts"
+            }
+          },
+          "required": {
+            "biot_savart_opt.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=12-b369ead1-1775583725687/biot_savart_opt.json"
+            },
+            "results.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=12-b369ead1-1775583725687/results.json"
+            },
+            "surf_opt.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=12-b369ead1-1775583725687/surf_opt.json"
+            }
+          },
+          "run_dir": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=12-b369ead1-1775583725687"
+        },
+        "downstream_eligible": false,
+        "failures": [
+          "FINAL_CURVE_LENGTH is missing or non-finite",
+          "FINAL_CC_DISTANCE is missing or non-finite",
+          "FINAL_OBJECTIVE is missing or non-finite"
+        ],
+        "margins": {
+          "coil_coil_margin": null,
+          "curvature_margin": 3.842853383048322,
+          "length_margin": null
+        },
+        "metrics": {
+          "CC_THRESHOLD": null,
+          "CURVATURE_THRESHOLD": 40.0,
+          "FIELD_ERROR": 0.00013193052848167614,
+          "FINAL_CC_DISTANCE": null,
+          "FINAL_CURVE_LENGTH": null,
+          "FINAL_OBJECTIVE": null,
+          "HARDWARE_CONSTRAINTS_OK": true,
+          "LENGTH_TARGET": null,
+          "MAX_CURVATURE": 36.15714661695168,
+          "OPTIMIZER_SUCCESS": true,
+          "TERMINATION_MESSAGE": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH"
+        },
+        "ranking": {
+          "sort_key": [
+            3,
+            0.00013193052848167614,
+            Infinity,
+            -3.842853383048322,
+            Infinity
+          ],
+          "status_rank": 3
+        },
+        "research_grade": false,
+        "run_dir": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=12-b369ead1-1775583725687",
+        "status": "rejected",
+        "warnings": []
+      },
+      {
+        "artifacts": {
+          "legacy_optional": {
+            "CrossSectionPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=10-b69919b1-1775581979470/CrossSectionPlot.png"
+            },
+            "MagFieldPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=10-b69919b1-1775581979470/MagFieldPlot.png"
+            },
+            "NormFieldPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=10-b69919b1-1775581979470/NormFieldPlot.png"
+            },
+            "VV.vts": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=10-b69919b1-1775581979470/VV.vts"
+            },
+            "curves_opt.vtu": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=10-b69919b1-1775581979470/curves_opt.vtu"
+            },
+            "surf_opt.vts": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=10-b69919b1-1775581979470/surf_opt.vts"
+            }
+          },
+          "required": {
+            "biot_savart_opt.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=10-b69919b1-1775581979470/biot_savart_opt.json"
+            },
+            "results.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=10-b69919b1-1775581979470/results.json"
+            },
+            "surf_opt.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=10-b69919b1-1775581979470/surf_opt.json"
+            }
+          },
+          "run_dir": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=10-b69919b1-1775581979470"
+        },
+        "downstream_eligible": false,
+        "failures": [
+          "FINAL_CURVE_LENGTH is missing or non-finite",
+          "FINAL_CC_DISTANCE is missing or non-finite",
+          "FINAL_OBJECTIVE is missing or non-finite"
+        ],
+        "margins": {
+          "coil_coil_margin": null,
+          "curvature_margin": 3.8428533830484923,
+          "length_margin": null
+        },
+        "metrics": {
+          "CC_THRESHOLD": null,
+          "CURVATURE_THRESHOLD": 40.0,
+          "FIELD_ERROR": 0.00013874428168714277,
+          "FINAL_CC_DISTANCE": null,
+          "FINAL_CURVE_LENGTH": null,
+          "FINAL_OBJECTIVE": null,
+          "HARDWARE_CONSTRAINTS_OK": true,
+          "LENGTH_TARGET": null,
+          "MAX_CURVATURE": 36.15714661695151,
+          "OPTIMIZER_SUCCESS": true,
+          "TERMINATION_MESSAGE": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH"
+        },
+        "ranking": {
+          "sort_key": [
+            3,
+            0.00013874428168714277,
+            Infinity,
+            -3.8428533830484923,
+            Infinity
+          ],
+          "status_rank": 3
+        },
+        "research_grade": false,
+        "run_dir": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=10-b69919b1-1775581979470",
+        "status": "rejected",
+        "warnings": []
+      },
+      {
+        "artifacts": {
+          "legacy_optional": {
+            "CrossSectionPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=8-72e70296-1775579135662/CrossSectionPlot.png"
+            },
+            "MagFieldPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=8-72e70296-1775579135662/MagFieldPlot.png"
+            },
+            "NormFieldPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=8-72e70296-1775579135662/NormFieldPlot.png"
+            },
+            "VV.vts": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=8-72e70296-1775579135662/VV.vts"
+            },
+            "curves_opt.vtu": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=8-72e70296-1775579135662/curves_opt.vtu"
+            },
+            "surf_opt.vts": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=8-72e70296-1775579135662/surf_opt.vts"
+            }
+          },
+          "required": {
+            "biot_savart_opt.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=8-72e70296-1775579135662/biot_savart_opt.json"
+            },
+            "results.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=8-72e70296-1775579135662/results.json"
+            },
+            "surf_opt.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=8-72e70296-1775579135662/surf_opt.json"
+            }
+          },
+          "run_dir": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=8-72e70296-1775579135662"
+        },
+        "downstream_eligible": false,
+        "failures": [
+          "FINAL_CURVE_LENGTH is missing or non-finite",
+          "FINAL_CC_DISTANCE is missing or non-finite",
+          "FINAL_OBJECTIVE is missing or non-finite"
+        ],
+        "margins": {
+          "coil_coil_margin": null,
+          "curvature_margin": 3.8428533830484994,
+          "length_margin": null
+        },
+        "metrics": {
+          "CC_THRESHOLD": null,
+          "CURVATURE_THRESHOLD": 40.0,
+          "FIELD_ERROR": 0.00017016898201770319,
+          "FINAL_CC_DISTANCE": null,
+          "FINAL_CURVE_LENGTH": null,
+          "FINAL_OBJECTIVE": null,
+          "HARDWARE_CONSTRAINTS_OK": true,
+          "LENGTH_TARGET": null,
+          "MAX_CURVATURE": 36.1571466169515,
+          "OPTIMIZER_SUCCESS": true,
+          "TERMINATION_MESSAGE": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH"
+        },
+        "ranking": {
+          "sort_key": [
+            3,
+            0.00017016898201770319,
+            Infinity,
+            -3.8428533830484994,
+            Infinity
+          ],
+          "status_rank": 3
+        },
+        "research_grade": false,
+        "run_dir": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=8-72e70296-1775579135662",
+        "status": "rejected",
+        "warnings": []
+      },
+      {
+        "artifacts": {
+          "legacy_optional": {
+            "CrossSectionPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-2a3b5a77-1775645109835/CrossSectionPlot.png"
+            },
+            "MagFieldPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-2a3b5a77-1775645109835/MagFieldPlot.png"
+            },
+            "NormFieldPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-2a3b5a77-1775645109835/NormFieldPlot.png"
+            },
+            "VV.vts": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-2a3b5a77-1775645109835/VV.vts"
+            },
+            "curves_opt.vtu": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-2a3b5a77-1775645109835/curves_opt.vtu"
+            },
+            "surf_opt.vts": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-2a3b5a77-1775645109835/surf_opt.vts"
+            }
+          },
+          "required": {
+            "biot_savart_opt.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-2a3b5a77-1775645109835/biot_savart_opt.json"
+            },
+            "results.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-2a3b5a77-1775645109835/results.json"
+            },
+            "surf_opt.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-2a3b5a77-1775645109835/surf_opt.json"
+            }
+          },
+          "run_dir": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-2a3b5a77-1775645109835"
+        },
+        "downstream_eligible": false,
+        "failures": [
+          "FINAL_CURVE_LENGTH is missing or non-finite",
+          "FINAL_CC_DISTANCE is missing or non-finite",
+          "FINAL_OBJECTIVE is missing or non-finite"
+        ],
+        "margins": {
+          "coil_coil_margin": null,
+          "curvature_margin": 3.84285338304867,
+          "length_margin": null
+        },
+        "metrics": {
+          "CC_THRESHOLD": null,
+          "CURVATURE_THRESHOLD": 40.0,
+          "FIELD_ERROR": 0.00030814767919315955,
+          "FINAL_CC_DISTANCE": null,
+          "FINAL_CURVE_LENGTH": null,
+          "FINAL_OBJECTIVE": null,
+          "HARDWARE_CONSTRAINTS_OK": true,
+          "LENGTH_TARGET": null,
+          "MAX_CURVATURE": 36.15714661695133,
+          "OPTIMIZER_SUCCESS": true,
+          "TERMINATION_MESSAGE": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH"
+        },
+        "ranking": {
+          "sort_key": [
+            3,
+            0.00030814767919315955,
+            Infinity,
+            -3.84285338304867,
+            Infinity
+          ],
+          "status_rank": 3
+        },
+        "research_grade": false,
+        "run_dir": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-2a3b5a77-1775645109835",
+        "status": "rejected",
+        "warnings": []
+      },
+      {
+        "artifacts": {
+          "legacy_optional": {
+            "CrossSectionPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-d3476e33-1775578133118/CrossSectionPlot.png"
+            },
+            "MagFieldPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-d3476e33-1775578133118/MagFieldPlot.png"
+            },
+            "NormFieldPlot.png": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-d3476e33-1775578133118/NormFieldPlot.png"
+            },
+            "VV.vts": {
+              "exists": false,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-d3476e33-1775578133118/VV.vts"
+            },
+            "curves_opt.vtu": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-d3476e33-1775578133118/curves_opt.vtu"
+            },
+            "surf_opt.vts": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-d3476e33-1775578133118/surf_opt.vts"
+            }
+          },
+          "required": {
+            "biot_savart_opt.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-d3476e33-1775578133118/biot_savart_opt.json"
+            },
+            "results.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-d3476e33-1775578133118/results.json"
+            },
+            "surf_opt.json": {
+              "exists": true,
+              "path": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-d3476e33-1775578133118/surf_opt.json"
+            }
+          },
+          "run_dir": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-d3476e33-1775578133118"
+        },
+        "downstream_eligible": false,
+        "failures": [
+          "FINAL_CURVE_LENGTH is missing or non-finite",
+          "FINAL_CC_DISTANCE is missing or non-finite",
+          "FINAL_OBJECTIVE is missing or non-finite"
+        ],
+        "margins": {
+          "coil_coil_margin": null,
+          "curvature_margin": 3.84285338304867,
+          "length_margin": null
+        },
+        "metrics": {
+          "CC_THRESHOLD": null,
+          "CURVATURE_THRESHOLD": 40.0,
+          "FIELD_ERROR": 0.0003081476791931617,
+          "FINAL_CC_DISTANCE": null,
+          "FINAL_CURVE_LENGTH": null,
+          "FINAL_OBJECTIVE": null,
+          "HARDWARE_CONSTRAINTS_OK": true,
+          "LENGTH_TARGET": null,
+          "MAX_CURVATURE": 36.15714661695133,
+          "OPTIMIZER_SUCCESS": true,
+          "TERMINATION_MESSAGE": "CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH"
+        },
+        "ranking": {
+          "sort_key": [
+            3,
+            0.0003081476791931617,
+            Infinity,
+            -3.84285338304867,
+            Infinity
+          ],
+          "status_rank": 3
+        },
+        "research_grade": false,
+        "run_dir": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc/mpol=8-ntor=6-d3476e33-1775578133118",
+        "status": "rejected",
+        "warnings": []
+      }
+    ],
+    "research_grade_count": 0,
+    "scan_root": "/Users/suhjungdae/code/columbia/autoresearch/single_stage_results/outputs-wout_nfp5ginsburg_desc_iota21.nc",
+    "schema_version": 1,
+    "validation_config": {
+      "max_field_error": null,
+      "required_restart_artifacts": [
+        "results.json",
+        "biot_savart_opt.json",
+        "surf_opt.json"
+      ]
+    }
+  }
+}
