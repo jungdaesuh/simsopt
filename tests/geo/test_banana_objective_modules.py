@@ -14,9 +14,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES_ROOT = REPO_ROOT / "examples" / "single_stage_optimization"
 STAGE2_OBJECTIVES_PATH = EXAMPLES_ROOT / "banana_opt" / "stage2_objectives.py"
 SINGLE_STAGE_GEOMETRY_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_geometry.py"
-SINGLE_STAGE_CONSTRAINTS_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_constraints.py"
-SINGLE_STAGE_OBJECTIVES_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_objectives.py"
-SINGLE_STAGE_SEARCH_POLICY_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_search_policy.py"
+SINGLE_STAGE_CONSTRAINTS_PATH = (
+    EXAMPLES_ROOT / "banana_opt" / "single_stage_constraints.py"
+)
+SINGLE_STAGE_OBJECTIVES_PATH = (
+    EXAMPLES_ROOT / "banana_opt" / "single_stage_objectives.py"
+)
+SINGLE_STAGE_SEARCH_POLICY_PATH = (
+    EXAMPLES_ROOT / "banana_opt" / "single_stage_search_policy.py"
+)
 SINGLE_STAGE_INCUMBENTS_PATH = EXAMPLES_ROOT / "banana_opt" / "incumbents.py"
 
 
@@ -123,7 +129,9 @@ class _UnexpectedCurveDistance(_FakeCurveDistance):
 class _FakeCurvatureObjective:
     def __init__(self, threshold, kappa_values, objective_value):
         self.threshold = float(threshold)
-        self.curve = SimpleNamespace(kappa=lambda: np.asarray(kappa_values, dtype=float))
+        self.curve = SimpleNamespace(
+            kappa=lambda: np.asarray(kappa_values, dtype=float)
+        )
         self._objective_value = float(objective_value)
 
     def J(self):
@@ -133,7 +141,9 @@ class _FakeCurvatureObjective:
 class _FakeCurve:
     def __init__(self, gamma_points, kappa_values=None):
         self._gamma = np.asarray(gamma_points, dtype=float)
-        self._kappa = np.asarray(kappa_values if kappa_values is not None else [], dtype=float)
+        self._kappa = np.asarray(
+            kappa_values if kappa_values is not None else [], dtype=float
+        )
 
     def gamma(self):
         return self._gamma.copy()
@@ -147,7 +157,9 @@ class _FakeCurve:
 
     def dgamma_by_dcoeff_vjp(self, point_gradient):
         gradient_sum = np.sum(point_gradient, axis=0)
-        return _FakeDerivative(np.array([gradient_sum[0], gradient_sum[1]], dtype=float))
+        return _FakeDerivative(
+            np.array([gradient_sum[0], gradient_sum[1]], dtype=float)
+        )
 
 
 class _FakeSurfaceWithGradient:
@@ -159,7 +171,9 @@ class _FakeSurfaceWithGradient:
 
     def dgamma_by_dcoeff_vjp(self, point_gradient):
         gradient_sum = np.sum(point_gradient.reshape((-1, 3)), axis=0)
-        return _FakeDerivative(np.array([gradient_sum[0], gradient_sum[2]], dtype=float))
+        return _FakeDerivative(
+            np.array([gradient_sum[0], gradient_sum[2]], dtype=float)
+        )
 
 
 class _FakeSurfaceWithArrayGradient(_FakeSurfaceWithGradient):
@@ -258,10 +272,14 @@ class _FakeBoozerSurface:
         self.calls = []
         self._queued_results = []
 
-    def queue_result(self, *, surface_x=None, iota=None, G=None, success=True, raises=None):
+    def queue_result(
+        self, *, surface_x=None, iota=None, G=None, success=True, raises=None
+    ):
         self._queued_results.append(
             {
-                "surface_x": None if surface_x is None else np.asarray(surface_x, dtype=float),
+                "surface_x": None
+                if surface_x is None
+                else np.asarray(surface_x, dtype=float),
                 "iota": iota,
                 "G": G,
                 "success": bool(success),
@@ -280,7 +298,9 @@ class _FakeBoozerSurface:
                 if queued_result["iota"] is None
                 else float(queued_result["iota"])
             )
-            self.res["G"] = G if queued_result["G"] is None else float(queued_result["G"])
+            self.res["G"] = (
+                G if queued_result["G"] is None else float(queued_result["G"])
+            )
             self.res["success"] = queued_result["success"]
             self.need_to_run_code = False
             if queued_result["raises"] is not None:
@@ -363,14 +383,16 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                     "target_volume": 0.12,
                 }
             ],
-            attempt_initialize_boozer_surface_fn=lambda *_args, **_kwargs: SimpleNamespace(
-                success=True,
-                boozer_surface=fake_boozer_surface,
-                solve_success=True,
-                self_intersecting=False,
-                solved_iota=0.21,
-                error_type=None,
-                error_message=None,
+            attempt_initialize_boozer_surface_fn=lambda *_args, **_kwargs: (
+                SimpleNamespace(
+                    success=True,
+                    boozer_surface=fake_boozer_surface,
+                    solve_success=True,
+                    self_intersecting=False,
+                    solved_iota=0.21,
+                    error_type=None,
+                    error_message=None,
+                )
             ),
             compute_tf_G0_fn=lambda _tf_coils: 0.35,
             iotas_cls=_FakeIotaTerm,
@@ -512,11 +534,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             emit_diagnostics=True,
         )
 
-        with mock.patch.object(
-            self.module,
-            "evaluate_stage2_iota",
-            side_effect=[first_evaluation, second_evaluation],
-        ), mock.patch("builtins.print"):
+        with (
+            mock.patch.object(
+                self.module,
+                "evaluate_stage2_iota",
+                side_effect=[first_evaluation, second_evaluation],
+            ),
+            mock.patch("builtins.print"),
+        ):
             first_value, first_grad = fun(np.array([0.2, -0.1]))
             second_value, second_grad = fun(np.array([0.2, -0.1]))
 
@@ -559,7 +584,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             effective_weight=None,
             penalty_threshold=2.0e-2,
             penalty_objective=SimpleNamespace(
-                dJ=mock.Mock(side_effect=AssertionError("soft penalty gradient should not run"))
+                dJ=mock.Mock(
+                    side_effect=AssertionError("soft penalty gradient should not run")
+                )
             ),
         )
         soft_state = self.module.Stage2IotaState(
@@ -597,11 +624,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             emit_diagnostics=True,
         )
 
-        with mock.patch.object(
-            self.module,
-            "evaluate_stage2_iota",
-            side_effect=[soft_evaluation, failed_evaluation],
-        ), mock.patch("builtins.print") as print_mock:
+        with (
+            mock.patch.object(
+                self.module,
+                "evaluate_stage2_iota",
+                side_effect=[soft_evaluation, failed_evaluation],
+            ),
+            mock.patch("builtins.print") as print_mock,
+        ):
             value, grad = fun(np.array([0.3, -0.2]))
             failed_value, failed_grad = fun(np.array([0.4, -0.3]))
 
@@ -633,7 +663,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             effective_weight=None,
             penalty_threshold=2.0e-2,
             penalty_objective=SimpleNamespace(
-                dJ=mock.Mock(side_effect=AssertionError("soft penalty gradient should not run"))
+                dJ=mock.Mock(
+                    side_effect=AssertionError("soft penalty gradient should not run")
+                )
             ),
         )
         failed_state = self.module.Stage2IotaState(
@@ -659,11 +691,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             stage2_iota_runtime=stage2_iota_runtime,
         )
 
-        with mock.patch.object(
-            self.module,
-            "evaluate_stage2_iota",
-            return_value=failed_evaluation,
-        ), mock.patch("builtins.print"):
+        with (
+            mock.patch.object(
+                self.module,
+                "evaluate_stage2_iota",
+                return_value=failed_evaluation,
+            ),
+            mock.patch("builtins.print"),
+        ):
             value, grad = fun(np.array([0.3, -0.2]))
 
         self.assertAlmostEqual(value, 1.4)
@@ -680,7 +715,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         Jc = _FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5)
         banana_current = _FakeCurrentObjective(9500.0, [0.7, -0.4])
 
-        def fake_augmented(base_value, base_grad, signed_values, grads, multipliers, penalty):
+        def fake_augmented(
+            base_value, base_grad, signed_values, grads, multipliers, penalty
+        ):
             self.assertAlmostEqual(base_value, 3.5)
             np.testing.assert_allclose(base_grad, [1.2, -0.5])
             np.testing.assert_allclose(signed_values, [-0.008, 0.75, 0.2, -6500.0])
@@ -696,11 +733,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 "stationarity_norm": 0.5,
             }
 
-        with mock.patch.object(
-            self.module,
-            "augmented_inequality_objective",
-            side_effect=fake_augmented,
-        ), mock.patch("builtins.print"):
+        with (
+            mock.patch.object(
+                self.module,
+                "augmented_inequality_objective",
+                side_effect=fake_augmented,
+            ),
+            mock.patch("builtins.print"),
+        ):
             result = self.module.evaluate_stage2_alm_problem(
                 dofs=np.array([0.25, -0.4]),
                 base_objective=base_objective,
@@ -723,8 +763,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                     cs * 4.0,
                     1e-3,
                 ],
-                smooth_min_distance_signed_constraint=lambda *_args: (-0.008, np.array([0.6, 0.2])),
-                smooth_max_curvature_signed_constraint=lambda *_args: (0.75, np.array([0.9, -0.1])),
+                smooth_min_distance_signed_constraint=lambda *_args: (
+                    -0.008,
+                    np.array([0.6, 0.2]),
+                ),
+                smooth_max_curvature_signed_constraint=lambda *_args: (
+                    0.75,
+                    np.array([0.9, -0.1]),
+                ),
             )
 
         np.testing.assert_allclose(base_objective.x, [0.25, -0.4])
@@ -853,7 +899,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         Jc = _FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5)
         banana_current = _FakeCurrentObjective(9500.0, [0.7, -0.4])
 
-        def fake_augmented(base_value, base_grad, signed_values, grads, multipliers, penalty):
+        def fake_augmented(
+            base_value, base_grad, signed_values, grads, multipliers, penalty
+        ):
             self.assertAlmostEqual(base_value, 1.0)
             np.testing.assert_allclose(base_grad, [0.0, 0.0])
             np.testing.assert_allclose(signed_values, [1.0, 0.75, 0.2, -6500.0])
@@ -870,11 +918,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 "stationarity_norm": 0.5,
             }
 
-        with mock.patch.object(
-            self.module,
-            "augmented_inequality_objective",
-            side_effect=fake_augmented,
-        ), mock.patch("builtins.print"):
+        with (
+            mock.patch.object(
+                self.module,
+                "augmented_inequality_objective",
+                side_effect=fake_augmented,
+            ),
+            mock.patch("builtins.print"),
+        ):
             result = self.module.evaluate_stage2_alm_problem(
                 dofs=np.array([0.25, -0.4]),
                 base_objective=base_objective,
@@ -897,8 +948,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                     cs * 4.0,
                     1e-3,
                 ],
-                smooth_min_distance_signed_constraint=lambda *_args: (np.nan, np.array([np.nan, np.nan])),
-                smooth_max_curvature_signed_constraint=lambda *_args: (0.75, np.array([0.9, -0.1])),
+                smooth_min_distance_signed_constraint=lambda *_args: (
+                    np.nan,
+                    np.array([np.nan, np.nan]),
+                ),
+                smooth_max_curvature_signed_constraint=lambda *_args: (
+                    0.75,
+                    np.array([0.9, -0.1]),
+                ),
             )
 
         self.assertTrue(result["nonfinite_inputs_sanitized"])
@@ -926,7 +983,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             ],
         )
         self.assertTrue(np.isnan(result["total"]))
-        np.testing.assert_allclose(result["dual_update_values"], [1.0, 0.75, 0.2, -6500.0])
+        np.testing.assert_allclose(
+            result["dual_update_values"], [1.0, 0.75, 0.2, -6500.0]
+        )
         np.testing.assert_allclose(
             result["hard_signed_constraint_values"],
             [1.0, 1.0, 0.2, -6500.0],
@@ -955,7 +1014,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(tolerances, [2e-3, 0.02, 0.2, 3e-3])
 
     def test_evaluate_stage2_alm_problem_caps_banana_current_by_magnitude(self):
-        base_objective = _FakeAlgebraicObjective(3.5, [1.2, -0.5], projected_gradient=[0.25, -0.4])
+        base_objective = _FakeAlgebraicObjective(
+            3.5, [1.2, -0.5], projected_gradient=[0.25, -0.4]
+        )
         new_bs = _FakeBiotSavart((1, 1, 3))
         new_surf = _FakeSurfaceNormals((1, 1, 3))
         Jf = _FakeAlgebraicObjective(3.5, [1.2, -0.5])
@@ -980,9 +1041,20 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             curvature_smoothing=0.02,
             multipliers=np.array([0.1, 0.2, 0.3, 0.4]),
             penalty=12.0,
-            stage2_constraint_activity_tolerances=lambda ds, cs: [1e-3, ds * 4.0, cs * 4.0, 1e-3],
-            smooth_min_distance_signed_constraint=lambda *_args: (-0.008, np.array([0.6, 0.2])),
-            smooth_max_curvature_signed_constraint=lambda *_args: (0.75, np.array([0.9, -0.1])),
+            stage2_constraint_activity_tolerances=lambda ds, cs: [
+                1e-3,
+                ds * 4.0,
+                cs * 4.0,
+                1e-3,
+            ],
+            smooth_min_distance_signed_constraint=lambda *_args: (
+                -0.008,
+                np.array([0.6, 0.2]),
+            ),
+            smooth_max_curvature_signed_constraint=lambda *_args: (
+                0.75,
+                np.array([0.9, -0.1]),
+            ),
         )
 
         self.assertEqual(result["constraint_names"][3], "banana_current_upper_bound")
@@ -991,7 +1063,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         np.testing.assert_allclose(result["constraint_grads"][3], [-0.7, 0.4])
 
     def test_evaluate_stage2_alm_problem_uses_activity_tolerance_helper(self):
-        base_objective = _FakeAlgebraicObjective(3.5, [1.2, -0.5], projected_gradient=[0.25, -0.4])
+        base_objective = _FakeAlgebraicObjective(
+            3.5, [1.2, -0.5], projected_gradient=[0.25, -0.4]
+        )
         new_bs = _FakeBiotSavart((1, 1, 3))
         new_surf = _FakeSurfaceNormals((1, 1, 3))
         Jf = _FakeAlgebraicObjective(3.5, [1.2, -0.5])
@@ -1016,9 +1090,20 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             curvature_smoothing=0.02,
             multipliers=np.array([0.1, 0.2, 0.3, 0.4]),
             penalty=12.0,
-            stage2_constraint_activity_tolerances=lambda ds, cs: [2e-3, ds * 5.0, cs * 6.0, 7e-3],
-            smooth_min_distance_signed_constraint=lambda *_args: (-0.008, np.array([0.6, 0.2])),
-            smooth_max_curvature_signed_constraint=lambda *_args: (0.75, np.array([0.9, -0.1])),
+            stage2_constraint_activity_tolerances=lambda ds, cs: [
+                2e-3,
+                ds * 5.0,
+                cs * 6.0,
+                7e-3,
+            ],
+            smooth_min_distance_signed_constraint=lambda *_args: (
+                -0.008,
+                np.array([0.6, 0.2]),
+            ),
+            smooth_max_curvature_signed_constraint=lambda *_args: (
+                0.75,
+                np.array([0.9, -0.1]),
+            ),
         )
 
         np.testing.assert_allclose(
@@ -1061,7 +1146,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             penalty_grad=np.array([0.2, 0.1]),
         )
 
-        def fake_augmented(base_value, base_grad, signed_values, grads, multipliers, penalty):
+        def fake_augmented(
+            base_value, base_grad, signed_values, grads, multipliers, penalty
+        ):
             self.assertAlmostEqual(base_value, 3.5)
             np.testing.assert_allclose(base_grad, [1.2, -0.5])
             np.testing.assert_allclose(
@@ -1077,15 +1164,19 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 "stationarity_norm": 0.5,
             }
 
-        with mock.patch.object(
-            self.module,
-            "evaluate_stage2_iota",
-            return_value=iota_evaluation,
-        ), mock.patch.object(
-            self.module,
-            "augmented_inequality_objective",
-            side_effect=fake_augmented,
-        ), mock.patch("builtins.print"):
+        with (
+            mock.patch.object(
+                self.module,
+                "evaluate_stage2_iota",
+                return_value=iota_evaluation,
+            ),
+            mock.patch.object(
+                self.module,
+                "augmented_inequality_objective",
+                side_effect=fake_augmented,
+            ),
+            mock.patch("builtins.print"),
+        ):
             result = self.module.evaluate_stage2_alm_problem(
                 dofs=np.array([0.25, -0.4]),
                 base_objective=base_objective,
@@ -1109,8 +1200,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                     1e-3,
                     0.5,
                 ],
-                smooth_min_distance_signed_constraint=lambda *_args: (-0.008, np.array([0.6, 0.2])),
-                smooth_max_curvature_signed_constraint=lambda *_args: (0.75, np.array([0.9, -0.1])),
+                smooth_min_distance_signed_constraint=lambda *_args: (
+                    -0.008,
+                    np.array([0.6, 0.2]),
+                ),
+                smooth_max_curvature_signed_constraint=lambda *_args: (
+                    0.75,
+                    np.array([0.9, -0.1]),
+                ),
                 stage2_iota_runtime=stage2_iota_runtime,
             )
 
@@ -1137,7 +1234,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             [0.02, 0.08, 1e-3, 1e-3, 0.5],
         )
 
-    def test_evaluate_stage2_alm_problem_rejects_failed_iota_solves_without_penalty_gradient(self):
+    def test_evaluate_stage2_alm_problem_rejects_failed_iota_solves_without_penalty_gradient(
+        self,
+    ):
         base_objective = _FakeBaseObjective(3.5, [1.2, -0.5])
         new_surf = _FakeSurfaceNormals((2, 2, 3))
         new_bs = _FakeBiotSavart((4, 3))
@@ -1153,11 +1252,15 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             penalty_threshold=0.5,
             iota_term=SimpleNamespace(J=lambda: 0.18),
             penalty_objective=SimpleNamespace(
-                dJ=mock.Mock(side_effect=AssertionError("penalty gradient should not run"))
+                dJ=mock.Mock(
+                    side_effect=AssertionError("penalty gradient should not run")
+                )
             ),
         )
 
-        def fake_augmented(base_value, base_grad, signed_values, grads, multipliers, penalty):
+        def fake_augmented(
+            base_value, base_grad, signed_values, grads, multipliers, penalty
+        ):
             self.assertAlmostEqual(base_value, 3.5)
             np.testing.assert_allclose(base_grad, [1.2, -0.5])
             np.testing.assert_allclose(
@@ -1184,15 +1287,19 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             state=failed_state,
             penalty_grad=None,
         )
-        with mock.patch.object(
-            self.module,
-            "evaluate_stage2_iota",
-            return_value=failed_evaluation,
-        ), mock.patch.object(
-            self.module,
-            "augmented_inequality_objective",
-            side_effect=fake_augmented,
-        ), mock.patch("builtins.print"):
+        with (
+            mock.patch.object(
+                self.module,
+                "evaluate_stage2_iota",
+                return_value=failed_evaluation,
+            ),
+            mock.patch.object(
+                self.module,
+                "augmented_inequality_objective",
+                side_effect=fake_augmented,
+            ),
+            mock.patch("builtins.print"),
+        ):
             result = self.module.evaluate_stage2_alm_problem(
                 dofs=np.array([0.25, -0.4]),
                 base_objective=base_objective,
@@ -1216,8 +1323,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                     1e-3,
                     0.5,
                 ],
-                smooth_min_distance_signed_constraint=lambda *_args: (-0.008, np.array([0.6, 0.2])),
-                smooth_max_curvature_signed_constraint=lambda *_args: (0.75, np.array([0.9, -0.1])),
+                smooth_min_distance_signed_constraint=lambda *_args: (
+                    -0.008,
+                    np.array([0.6, 0.2]),
+                ),
+                smooth_max_curvature_signed_constraint=lambda *_args: (
+                    0.75,
+                    np.array([0.9, -0.1]),
+                ),
                 stage2_iota_runtime=stage2_iota_runtime,
             )
 
@@ -1252,12 +1365,16 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(runtime.stats.runtime_calls, 1)
         self.assertGreaterEqual(runtime.stats.runtime_seconds, 0.0)
 
-    def test_evaluate_stage2_iota_state_guarded_path_does_not_require_penalty_gradient(self):
+    def test_evaluate_stage2_iota_state_guarded_path_does_not_require_penalty_gradient(
+        self,
+    ):
         fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
         runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
         runtime.penalty_objective = SimpleNamespace(
             J=lambda: 5.0e-5,
-            dJ=mock.Mock(side_effect=AssertionError("state-only path should not evaluate dJ")),
+            dJ=mock.Mock(
+                side_effect=AssertionError("state-only path should not evaluate dJ")
+            ),
         )
         fake_boozer_surface.need_to_run_code = True
 
@@ -1267,7 +1384,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertFalse(state.solve_failed)
         self.assertEqual(runtime.stats.runtime_calls, 1)
 
-    def test_build_stage2_iota_runtime_restores_last_successful_state_on_failed_solve(self):
+    def test_build_stage2_iota_runtime_restores_last_successful_state_on_failed_solve(
+        self,
+    ):
         fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
         runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
         fake_boozer_surface.queue_result(
@@ -1295,7 +1414,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertTrue(second_state.solve_failed)
         self.assertEqual(runtime.stats.runtime_calls, 1)
 
-    def test_build_stage2_iota_runtime_restores_last_successful_state_on_boozer_exception(self):
+    def test_build_stage2_iota_runtime_restores_last_successful_state_on_boozer_exception(
+        self,
+    ):
         fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
         runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
         fake_boozer_surface.queue_result(
@@ -1322,7 +1443,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertTrue(second_state.solve_failed)
         self.assertEqual(runtime.stats.runtime_calls, 1)
 
-    def test_build_stage2_iota_runtime_keeps_last_successful_snapshot_across_failures(self):
+    def test_build_stage2_iota_runtime_keeps_last_successful_snapshot_across_failures(
+        self,
+    ):
         fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
         runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
         fake_boozer_surface.queue_result(
@@ -1406,7 +1529,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self._assert_restored_fake_boozer_state(fake_boozer_surface)
         self.assertEqual(fake_boozer_surface.surface.self_intersection_calls, 1)
 
-    def test_build_stage2_iota_runtime_treats_self_intersection_check_exception_as_failure(self):
+    def test_build_stage2_iota_runtime_treats_self_intersection_check_exception_as_failure(
+        self,
+    ):
         fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
         runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
         fake_boozer_surface.queue_result(
@@ -1430,7 +1555,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         self._assert_restored_fake_boozer_state(fake_boozer_surface)
 
-    def test_build_stage2_iota_runtime_does_not_check_self_intersection_on_solve_failure(self):
+    def test_build_stage2_iota_runtime_does_not_check_self_intersection_on_solve_failure(
+        self,
+    ):
         fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
         runtime = self._build_fake_stage2_iota_runtime(fake_boozer_surface)
         fake_boozer_surface.queue_result(
@@ -1717,7 +1844,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertGreater(signed_value, 1.0)
         np.testing.assert_allclose(grad, [1.0, -1.0])
 
-    def test_smooth_min_distance_signed_constraint_returns_zero_grad_without_pairs(self):
+    def test_smooth_min_distance_signed_constraint_returns_zero_grad_without_pairs(
+        self,
+    ):
         objective = SimpleNamespace(x=np.array([2.0, -3.0]))
         curve = _FakeCurve(gamma_points=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
 
@@ -1730,6 +1859,41 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
 
         self.assertAlmostEqual(signed_value, 0.05)
         np.testing.assert_allclose(grad, [0.0, 0.0])
+
+    def test_smooth_min_curve_surface_signed_constraint_includes_surface_vjp(self):
+        curve = _FakeCurve(gamma_points=[[0.0, 0.0, 0.0]])
+        surface = _FakeSurfaceWithGradient(gamma_points=[[[0.02, 0.0, 0.04]]])
+
+        with (
+            mock.patch.object(
+                self.module,
+                "_new_derivative",
+                side_effect=lambda: _FakeDerivative({}),
+            ),
+            mock.patch.object(
+                self.module,
+                "surface_dgamma_by_dcoeff_derivative",
+                side_effect=lambda _surface, point_gradient: _FakeDerivative(
+                    np.array(
+                        [
+                            np.sum(point_gradient.reshape((-1, 3)), axis=0)[0],
+                            np.sum(point_gradient.reshape((-1, 3)), axis=0)[2],
+                        ],
+                        dtype=float,
+                    )
+                ),
+            ),
+        ):
+            signed_value, grad = self.module.smooth_min_curve_surface_signed_constraint(
+                [curve],
+                surface,
+                minimum_distance=0.05,
+                temperature=0.01,
+                base_objective_optimizable=SimpleNamespace(),
+            )
+
+        self.assertAlmostEqual(signed_value, 0.05 - np.sqrt(0.02**2 + 0.04**2))
+        np.testing.assert_allclose(grad, [0.0, -0.04 / np.sqrt(0.02**2 + 0.04**2)])
 
 
 class SingleStageObjectiveModuleTests(_ModuleTestCase):
@@ -1946,7 +2110,14 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         jcurv = _FakeAlgebraicObjective(0.8, [0.7, 0.8])
         jsurf = _FakeAlgebraicObjective(0.9, [0.9, 1.0])
 
-        def fake_augmented(base_value, base_grad, constraint_values, constraint_grads, multipliers, penalty):
+        def fake_augmented(
+            base_value,
+            base_grad,
+            constraint_values,
+            constraint_grads,
+            multipliers,
+            penalty,
+        ):
             self.assertAlmostEqual(base_value, 25.0)
             np.testing.assert_allclose(base_grad, [4.6, 2.8])
             np.testing.assert_allclose(constraint_values, [-0.1, 0.2, 0.3, -0.4])
@@ -1999,10 +2170,16 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             JSurfSurf=jsurf,
             vessel_surface="vessel",
             surface_surface_min_distance=0.04,
-            surface_surface_constraint_fn=lambda *_args: (-0.4, np.array([0.5, 0.5]), 0.0),
+            surface_surface_constraint_fn=lambda *_args: (
+                -0.4,
+                np.array([0.5, 0.5]),
+                0.0,
+            ),
             augmented_inequality_objective_fn=fake_augmented,
             activity_tolerances_fn=lambda ds, cs, include_surface_surface: np.array(
-                [ds * 4.0, ds * 4.0, cs * 4.0, ds * 4.0] if include_surface_surface else [ds * 4.0, ds * 4.0, cs * 4.0],
+                [ds * 4.0, ds * 4.0, cs * 4.0, ds * 4.0]
+                if include_surface_surface
+                else [ds * 4.0, ds * 4.0, cs * 4.0],
                 dtype=float,
             ),
         )
@@ -2018,7 +2195,9 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(result["dual_update_values"], [-0.1, 0.2, 0.3, -0.4])
         np.testing.assert_allclose(result["feasibility_values"], [0.0, 0.2, 0.3, 0.0])
-        np.testing.assert_allclose(result["constraint_activity_tolerances"], [0.04, 0.04, 0.2, 0.04])
+        np.testing.assert_allclose(
+            result["constraint_activity_tolerances"], [0.04, 0.04, 0.2, 0.04]
+        )
         self.assertAlmostEqual(result["base_total"], 25.0)
         self.assertAlmostEqual(result["max_feasibility_violation"], 0.3)
         self.assertAlmostEqual(result["J_cc"], 0.6)
@@ -2124,7 +2303,9 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
 
         np.testing.assert_allclose(result["grad"], [4.6, 2.8, 0.0, 0.0])
 
-    def test_evaluate_base_objective_thresholded_physics_formulation_zeros_base_value_and_grad(self):
+    def test_evaluate_base_objective_thresholded_physics_formulation_zeros_base_value_and_grad(
+        self,
+    ):
         objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
 
         result = self.module.evaluate_base_objective(
@@ -2168,7 +2349,14 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
     def test_evaluate_alm_objective_projects_base_gradient_into_constraint_space(self):
         objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
 
-        def fake_augmented(base_value, base_grad, constraint_values, constraint_grads, multipliers, penalty):
+        def fake_augmented(
+            base_value,
+            base_grad,
+            constraint_values,
+            constraint_grads,
+            multipliers,
+            penalty,
+        ):
             self.assertAlmostEqual(base_value, 25.0)
             np.testing.assert_allclose(base_grad, [4.6, 2.8, 0.0, 0.0])
             np.testing.assert_allclose(constraint_values, [-0.1, 0.2, 0.3])
@@ -2213,9 +2401,21 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 "coil_surface_spacing",
                 "max_curvature",
             ),
-            curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([1.0, 0.0, 0.0, 0.0]), 0.0),
-            curve_surface_constraint_fn=lambda *_args: (0.2, np.array([0.0, 1.0, 0.0, 0.0]), 0.2),
-            curvature_constraint_fn=lambda *_args: (0.3, np.array([1.0, -1.0, 0.0, 0.0]), 0.3),
+            curve_curve_constraint_fn=lambda *_args: (
+                -0.1,
+                np.array([1.0, 0.0, 0.0, 0.0]),
+                0.0,
+            ),
+            curve_surface_constraint_fn=lambda *_args: (
+                0.2,
+                np.array([0.0, 1.0, 0.0, 0.0]),
+                0.2,
+            ),
+            curvature_constraint_fn=lambda *_args: (
+                0.3,
+                np.array([1.0, -1.0, 0.0, 0.0]),
+                0.3,
+            ),
             augmented_inequality_objective_fn=fake_augmented,
             activity_tolerances_fn=lambda ds, cs, include_surface_surface: np.array(
                 [ds * 4.0, ds * 4.0, cs * 4.0],
@@ -2225,10 +2425,19 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
 
         np.testing.assert_allclose(result["grad"], [9.0, -2.0, 0.0, 0.0])
 
-    def test_evaluate_alm_objective_thresholded_physics_formulation_promotes_physics_terms_to_constraints(self):
+    def test_evaluate_alm_objective_thresholded_physics_formulation_promotes_physics_terms_to_constraints(
+        self,
+    ):
         objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
 
-        def fake_augmented(base_value, base_grad, constraint_values, constraint_grads, multipliers, penalty):
+        def fake_augmented(
+            base_value,
+            base_grad,
+            constraint_values,
+            constraint_grads,
+            multipliers,
+            penalty,
+        ):
             self.assertAlmostEqual(base_value, 0.0)
             np.testing.assert_allclose(base_grad, [0.0, 0.0, 0.0, 0.0])
             np.testing.assert_allclose(
@@ -2281,9 +2490,21 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 "iota_penalty",
                 "length_penalty",
             ),
-            curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([1.0, 0.0, 0.0, 0.0]), 0.0),
-            curve_surface_constraint_fn=lambda *_args: (0.2, np.array([0.0, 1.0, 0.0, 0.0]), 0.2),
-            curvature_constraint_fn=lambda *_args: (0.3, np.array([1.0, -1.0, 0.0, 0.0]), 0.3),
+            curve_curve_constraint_fn=lambda *_args: (
+                -0.1,
+                np.array([1.0, 0.0, 0.0, 0.0]),
+                0.0,
+            ),
+            curve_surface_constraint_fn=lambda *_args: (
+                0.2,
+                np.array([0.0, 1.0, 0.0, 0.0]),
+                0.2,
+            ),
+            curvature_constraint_fn=lambda *_args: (
+                0.3,
+                np.array([1.0, -1.0, 0.0, 0.0]),
+                0.3,
+            ),
             augmented_inequality_objective_fn=fake_augmented,
             activity_tolerances_fn=lambda ds, cs, include_surface_surface: np.array(
                 [ds * 4.0, ds * 4.0, cs * 4.0],
@@ -2310,10 +2531,15 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         )
         self.assertAlmostEqual(result["physics_total"], 25.0)
         self.assertAlmostEqual(result["base_total"], 25.0)
-        np.testing.assert_allclose(result["constraint_activity_tolerances"], [0.04, 0.04, 0.2, 0.0, 0.0, 0.0, 0.0])
+        np.testing.assert_allclose(
+            result["constraint_activity_tolerances"],
+            [0.04, 0.04, 0.2, 0.0, 0.0, 0.0, 0.0],
+        )
         np.testing.assert_allclose(result["grad"], [7.0, -4.0, 0.0, 0.0])
 
-    def test_evaluate_alm_objective_thresholded_physics_formulation_requires_explicit_thresholds(self):
+    def test_evaluate_alm_objective_thresholded_physics_formulation_requires_explicit_thresholds(
+        self,
+    ):
         objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
 
         with self.assertRaisesRegex(
@@ -2354,9 +2580,21 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                     "iota_penalty",
                     "length_penalty",
                 ),
-                curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([1.0, 0.0, 0.0, 0.0]), 0.0),
-                curve_surface_constraint_fn=lambda *_args: (0.2, np.array([0.0, 1.0, 0.0, 0.0]), 0.2),
-                curvature_constraint_fn=lambda *_args: (0.3, np.array([1.0, -1.0, 0.0, 0.0]), 0.3),
+                curve_curve_constraint_fn=lambda *_args: (
+                    -0.1,
+                    np.array([1.0, 0.0, 0.0, 0.0]),
+                    0.0,
+                ),
+                curve_surface_constraint_fn=lambda *_args: (
+                    0.2,
+                    np.array([0.0, 1.0, 0.0, 0.0]),
+                    0.2,
+                ),
+                curvature_constraint_fn=lambda *_args: (
+                    0.3,
+                    np.array([1.0, -1.0, 0.0, 0.0]),
+                    0.3,
+                ),
                 alm_formulation="thresholded_physics",
                 qs_threshold=1.0,
                 boozer_threshold=1.0,
@@ -2382,7 +2620,9 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
 
         self.module.restore_surface_states(surface_data, state)
 
-        np.testing.assert_allclose(surface_data[0]["boozer_surface"].surface.x, [1.0, 2.0])
+        np.testing.assert_allclose(
+            surface_data[0]["boozer_surface"].surface.x, [1.0, 2.0]
+        )
         self.assertAlmostEqual(surface_data[0]["boozer_surface"].res["iota"], 0.31)
         self.assertAlmostEqual(surface_data[0]["boozer_surface"].res["G"], 5.0)
         np.testing.assert_allclose(state["sdofs"][0], [1.0, 2.0])
@@ -2416,8 +2656,12 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
             )
 
         np.testing.assert_allclose(objective.x, [7.0, -2.0])
-        np.testing.assert_allclose(surface_data[0]["boozer_surface"].surface.x, [1.0, 2.0])
-        np.testing.assert_allclose(surface_data[1]["boozer_surface"].surface.x, [3.0, 4.0])
+        np.testing.assert_allclose(
+            surface_data[0]["boozer_surface"].surface.x, [1.0, 2.0]
+        )
+        np.testing.assert_allclose(
+            surface_data[1]["boozer_surface"].surface.x, [3.0, 4.0]
+        )
         self.assertEqual(surface_data[0]["boozer_surface"].calls, [(0.11, 5.5)])
         self.assertEqual(surface_data[1]["boozer_surface"].calls, [(0.22, 6.6)])
         evaluate_mock.assert_called_once_with(
@@ -2469,7 +2713,9 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
         self.assertFalse(result["search_hardware_status"]["success"])
         self.assertEqual(len(result["search_hardware_status"]["violations"]), 3)
 
-    def test_evaluate_single_stage_hardware_snapshot_keeps_top_level_constraints_in_search_role(self):
+    def test_evaluate_single_stage_hardware_snapshot_keeps_top_level_constraints_in_search_role(
+        self,
+    ):
         result = self.module.evaluate_single_stage_hardware_snapshot(
             curve_curve_distance_obj=SimpleNamespace(shortest_distance=lambda: 0.05),
             cc_dist=0.05,
@@ -2494,7 +2740,9 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
             result["search_hardware_status"]["constraints"],
         )
 
-    def test_evaluate_single_stage_search_hardware_snapshot_uses_surrogate_constraints(self):
+    def test_evaluate_single_stage_search_hardware_snapshot_uses_surrogate_constraints(
+        self,
+    ):
         result = self.module.evaluate_single_stage_search_hardware_snapshot(
             {
                 "constraint_names": [
@@ -2533,7 +2781,9 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
             result["search_hardware_status"]["constraints"],
         )
 
-    def test_evaluate_single_stage_search_hardware_snapshot_uses_penalty_objective_payload(self):
+    def test_evaluate_single_stage_search_hardware_snapshot_uses_penalty_objective_payload(
+        self,
+    ):
         result = self.module.evaluate_single_stage_search_hardware_snapshot(
             {
                 "constraint_names": [
@@ -2648,33 +2898,41 @@ class SingleStageConstraintModuleTests(_ModuleTestCase):
             kappa_values=[3.0, 5.0, 4.4],
         )
 
-        signed_value, grad, violation = self.module.smooth_max_curvature_signed_constraint(
-            curve,
-            threshold=4.0,
-            temperature=0.2,
-            objective_optimizable=SimpleNamespace(),
+        signed_value, grad, violation = (
+            self.module.smooth_max_curvature_signed_constraint(
+                curve,
+                threshold=4.0,
+                temperature=0.2,
+                objective_optimizable=SimpleNamespace(),
+            )
         )
 
         self.assertGreater(signed_value, 1.0)
         self.assertEqual(violation, signed_value)
         np.testing.assert_allclose(grad, [1.0, -1.0])
 
-    def test_smooth_min_curve_curve_signed_constraint_returns_zero_grad_without_pairs(self):
+    def test_smooth_min_curve_curve_signed_constraint_returns_zero_grad_without_pairs(
+        self,
+    ):
         objective = SimpleNamespace(x=np.array([2.0, -3.0]))
         curve = _FakeCurve(gamma_points=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
 
-        signed_value, grad, violation = self.module.smooth_min_curve_curve_signed_constraint(
-            [curve],
-            minimum_distance=0.05,
-            temperature=0.01,
-            objective_optimizable=objective,
+        signed_value, grad, violation = (
+            self.module.smooth_min_curve_curve_signed_constraint(
+                [curve],
+                minimum_distance=0.05,
+                temperature=0.01,
+                objective_optimizable=objective,
+            )
         )
 
         self.assertAlmostEqual(signed_value, 0.05)
         self.assertEqual(violation, 0.0)
         np.testing.assert_allclose(grad, [0.0, 0.0])
 
-    def test_smooth_min_surface_surface_signed_constraint_reports_positive_violation(self):
+    def test_smooth_min_surface_surface_signed_constraint_reports_positive_violation(
+        self,
+    ):
         surface_1 = _FakeSurfaceWithArrayGradient(
             gamma_points=[[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]]
         )
@@ -2682,29 +2940,34 @@ class SingleStageConstraintModuleTests(_ModuleTestCase):
             gamma_points=[[[0.1, 0.0, 0.0], [1.1, 0.0, 0.0]]]
         )
 
-        with mock.patch.object(
-            self.module,
-            "_new_derivative",
-            side_effect=lambda: _FakeDerivative({}),
-        ), mock.patch.object(
-            self.module,
-            "_surface_dgamma_by_dcoeff_derivative",
-            side_effect=lambda _surface, point_gradient: _FakeDerivative(
-                np.array(
-                    [
-                        np.sum(point_gradient.reshape((-1, 3)), axis=0)[0],
-                        np.sum(point_gradient.reshape((-1, 3)), axis=0)[2],
-                    ],
-                    dtype=float,
-                )
+        with (
+            mock.patch.object(
+                self.module,
+                "_new_derivative",
+                side_effect=lambda: _FakeDerivative({}),
+            ),
+            mock.patch.object(
+                self.module,
+                "surface_dgamma_by_dcoeff_derivative",
+                side_effect=lambda _surface, point_gradient: _FakeDerivative(
+                    np.array(
+                        [
+                            np.sum(point_gradient.reshape((-1, 3)), axis=0)[0],
+                            np.sum(point_gradient.reshape((-1, 3)), axis=0)[2],
+                        ],
+                        dtype=float,
+                    )
+                ),
             ),
         ):
-            signed_value, grad, violation = self.module.smooth_min_surface_surface_signed_constraint(
-                surface_1,
-                surface_2,
-                minimum_distance=0.5,
-                temperature=0.01,
-                objective_optimizable=SimpleNamespace(),
+            signed_value, grad, violation = (
+                self.module.smooth_min_surface_surface_signed_constraint(
+                    surface_1,
+                    surface_2,
+                    minimum_distance=0.5,
+                    temperature=0.01,
+                    objective_optimizable=SimpleNamespace(),
+                )
             )
 
         self.assertGreater(violation, 0.0)
@@ -2717,7 +2980,7 @@ class SingleStageConstraintModuleTests(_ModuleTestCase):
             gamma_points=[[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]]
         )
 
-        derivative += self.module._surface_dgamma_by_dcoeff_derivative(
+        derivative += self.module.surface_dgamma_by_dcoeff_derivative(
             surface,
             np.array([[[1.0, 0.0, 2.0], [0.5, 0.0, 3.0]]], dtype=float),
         )
