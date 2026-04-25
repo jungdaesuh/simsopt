@@ -37,6 +37,10 @@ def _append_call_record(
                     "cuda_library_mode": os.environ.get(
                         "SIMSOPT_JAX_CUDA_LIBRARY_MODE"
                     ),
+                    "xla_flags": os.environ.get("XLA_FLAGS"),
+                    "jax_compilation_cache_dir": os.environ.get(
+                        "JAX_COMPILATION_CACHE_DIR"
+                    ),
                 }
             )
             + "\n"

@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shlex
 import shutil
 import subprocess
@@ -36,6 +36,12 @@ DEFAULT_TARGET_OPTIMIZER_BACKEND = "ondevice"
 DEFAULT_JAX_GPU_WHEEL_SPEC = "jax[cuda12]==0.9.2"
 DEFAULT_EXPECTED_JAX_VERSION = "0.9.2"
 DEFAULT_CUDA_LIBRARY_MODE = "bundled"
+_SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME = "single_stage_jax_runtime_spec.json"
+_SINGLE_STAGE_WARM_START_REQUIRED_FILES = (
+    "surf_opt.json",
+    "results.json",
+    "biot_savart_opt.json",
+)
 
 
 def _resolve_hf_cli() -> str:
@@ -132,8 +138,68 @@ def _build_optional_single_stage_boozer_backend_flag(
         return ""
     return (
         "--single-stage-boozer-optimizer-backend "
-        f"{shlex.quote(args.single_stage_boozer_optimizer_backend)}"
+        f"{shlex.quote(args.single_stage_boozer_optimizer_backend)} "
     )
+
+
+def _build_optional_single_stage_benchmark_mode_flag(
+    args: argparse.Namespace,
+) -> str:
+    if not args.single_stage_benchmark_mode:
+        return ""
+    return "--single-stage-benchmark-mode "
+
+
+def _build_optional_single_stage_success_filter_flag(
+    args: argparse.Namespace,
+) -> str:
+    if not args.single_stage_disable_target_lane_success_filter:
+        return ""
+    return "--single-stage-disable-target-lane-success-filter "
+
+
+def _repo_relative_seed_path(value: str, *, option_name: str) -> str:
+    remote_path = PurePosixPath(value)
+    if remote_path.is_absolute() or ".." in remote_path.parts:
+        raise SystemExit(
+            f"{option_name} must be a repo-relative path available "
+            "inside the target repo."
+        )
+    normalized = str(remote_path)
+    if not normalized or normalized == ".":
+        raise SystemExit(f"{option_name} must not be empty.")
+    return normalized
+
+
+def _remote_repo_path(repo_dir: str, relative_path: str) -> str:
+    return f"{repo_dir}/{relative_path}"
+
+
+def _build_optional_single_stage_seed_flags(
+    args: argparse.Namespace,
+    *,
+    repo_dir: str,
+) -> str:
+    flags = []
+    if args.single_stage_warm_start_run_dir is not None:
+        flags.extend(
+            [
+                "--single-stage-warm-start-run-dir",
+                shlex.quote(
+                    _remote_repo_path(repo_dir, args.single_stage_warm_start_run_dir)
+                ),
+            ]
+        )
+    if args.single_stage_jax_runtime_seed_spec is not None:
+        flags.extend(
+            [
+                "--single-stage-jax-runtime-seed-spec",
+                shlex.quote(
+                    _remote_repo_path(repo_dir, args.single_stage_jax_runtime_seed_spec)
+                ),
+            ]
+        )
+    return "" if not flags else " ".join(flags) + " "
 
 
 def _resolve_repo_defaults(args: argparse.Namespace) -> argparse.Namespace:
@@ -152,7 +218,95 @@ def _validate_runtime_contract(args: argparse.Namespace) -> argparse.Namespace:
             "Production GPU proof requires a prebuilt image via SIMSOPT_HF_GPU_IMAGE "
             "or --image."
         )
+    if (
+        args.single_stage_warm_start_run_dir is None
+        and args.single_stage_jax_runtime_seed_spec is None
+    ):
+        raise SystemExit(
+            "Production GPU proof requires a single-stage seed via "
+            "--single-stage-warm-start-run-dir or "
+            "--single-stage-jax-runtime-seed-spec."
+        )
+    if args.single_stage_warm_start_run_dir is not None:
+        args.single_stage_warm_start_run_dir = _repo_relative_seed_path(
+            args.single_stage_warm_start_run_dir,
+            option_name="--single-stage-warm-start-run-dir",
+        )
+    if args.single_stage_jax_runtime_seed_spec is not None:
+        args.single_stage_jax_runtime_seed_spec = _repo_relative_seed_path(
+            args.single_stage_jax_runtime_seed_spec,
+            option_name="--single-stage-jax-runtime-seed-spec",
+        )
     return args
+
+
+def _remote_single_stage_seed_contract_paths(
+    args: argparse.Namespace,
+) -> list[tuple[str, str]]:
+    paths = []
+    if args.single_stage_warm_start_run_dir is not None:
+        for filename in _SINGLE_STAGE_WARM_START_REQUIRED_FILES:
+            paths.append(
+                (
+                    "--single-stage-warm-start-run-dir",
+                    f"{args.single_stage_warm_start_run_dir}/{filename}",
+                )
+            )
+    if args.single_stage_jax_runtime_seed_spec is not None:
+        paths.append(
+            (
+                "--single-stage-jax-runtime-seed-spec",
+                args.single_stage_jax_runtime_seed_spec,
+            )
+        )
+    return paths
+
+
+def _remote_object_type(temp_dir: str, resolved_sha: str, relative_path: str) -> str:
+    object_type = subprocess.run(
+        [
+            "git",
+            "-C",
+            temp_dir,
+            "cat-file",
+            "-t",
+            f"{resolved_sha}:{relative_path}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if object_type.returncode != 0:
+        raise SystemExit(
+            f"path is not present at repo SHA {resolved_sha}: {relative_path}"
+        )
+    return object_type.stdout.strip()
+
+
+def _verify_remote_runtime_seed_spec_path(
+    temp_dir: str,
+    resolved_sha: str,
+    relative_path: str,
+) -> None:
+    object_type = _remote_object_type(temp_dir, resolved_sha, relative_path)
+    if object_type == "tree":
+        nested_type = _remote_object_type(
+            temp_dir,
+            resolved_sha,
+            f"{relative_path}/{_SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME}",
+        )
+        if nested_type != "blob":
+            raise SystemExit(
+                "--single-stage-jax-runtime-seed-spec directory must contain "
+                f"a file named {_SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME} at "
+                f"repo SHA {resolved_sha}: {relative_path}"
+            )
+        return
+    if object_type != "blob":
+        raise SystemExit(
+            "--single-stage-jax-runtime-seed-spec must point to a file or "
+            f"directory at repo SHA {resolved_sha}: {relative_path}"
+        )
 
 
 def _resolve_remote_ref(repo_url: str, repo_ref: str) -> tuple[str, str]:
@@ -279,6 +433,15 @@ def _verify_remote_sha_ref_contract(args: argparse.Namespace) -> tuple[str, str]
                 f"repo SHA {resolved_sha} is not reachable from repo ref {args.repo_ref} "
                 f"on {args.repo_url}; HF clone --single-branch would fail."
             )
+        for option_name, relative_path in _remote_single_stage_seed_contract_paths(args):
+            if option_name == "--single-stage-jax-runtime-seed-spec":
+                _verify_remote_runtime_seed_spec_path(
+                    temp_dir,
+                    resolved_sha,
+                    relative_path,
+                )
+            else:
+                _remote_object_type(temp_dir, resolved_sha, relative_path)
     return resolved_sha, resolved_ref_commit
 
 
@@ -310,6 +473,8 @@ def _build_preflight_report(args: argparse.Namespace) -> dict[str, object]:
         ),
         "stage2_rungs": list(stage2_plan["stage2_rungs"]),
         "single_stage_rungs": ["single_stage_cold", "single_stage_warm"],
+        "single_stage_warm_start_run_dir": args.single_stage_warm_start_run_dir,
+        "single_stage_jax_runtime_seed_spec": args.single_stage_jax_runtime_seed_spec,
         "stage2_maxiter": int(args.stage2_maxiter),
         "stage2_geometry_override": stage2_plan["geometry_rel_tol"],
         "stage2_geometry_policy": stage2_plan["geometry_policy"],
@@ -329,13 +494,13 @@ def _build_job_command(args: argparse.Namespace, *, resolved_repo_sha: str) -> s
         "set -euxo pipefail",
         "export PYTHONUNBUFFERED=1",
         "export HF_HUB_DISABLE_TELEMETRY=1",
-        'export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-/tmp/jax-compilation-cache}"',
+        'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_deterministic_ops=true"',
         f'export SIMSOPT_HF_JOB_BOOTSTRAP_MODE="{args.bootstrap_mode}"',
         f'export SIMSOPT_HF_JOB_EXPECTED_JAX_VERSION="{DEFAULT_EXPECTED_JAX_VERSION}"',
         f'export SIMSOPT_HF_JOB_JAX_GPU_WHEEL_SPEC="{DEFAULT_JAX_GPU_WHEEL_SPEC}"',
         f'export SIMSOPT_JAX_CUDA_LIBRARY_MODE="{DEFAULT_CUDA_LIBRARY_MODE}"',
         "rm -rf /tmp/hf-production-proof",
-        'mkdir -p /tmp/hf-production-proof "$JAX_COMPILATION_CACHE_DIR"',
+        "mkdir -p /tmp/hf-production-proof",
         (
             "git clone --recursive"
             f" --branch {shlex.quote(args.repo_ref)}"
@@ -345,6 +510,8 @@ def _build_job_command(args: argparse.Namespace, *, resolved_repo_sha: str) -> s
         f"cd {shlex.quote(repo_dir)}",
         f"git checkout {shlex.quote(resolved_repo_sha)}",
         "git submodule update --init --recursive",
+        'export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-${PWD}/.artifacts/jax_compilation_cache/hf-production-proof}"',
+        'mkdir -p "$JAX_COMPILATION_CACHE_DIR"',
         ". benchmarks/hf_jobs/bootstrap_runtime.sh",
         "python -m pip install -v -e .",
         (
@@ -367,6 +534,9 @@ def _build_job_command(args: argparse.Namespace, *, resolved_repo_sha: str) -> s
             f"--single-stage-maxiter {args.single_stage_maxiter} "
             f"--single-stage-optimizer-backend {shlex.quote(args.single_stage_optimizer_backend)} "
             f"{_build_optional_single_stage_boozer_backend_flag(args)}"
+            f"{_build_optional_single_stage_seed_flags(args, repo_dir=repo_dir)}"
+            f"{_build_optional_single_stage_benchmark_mode_flag(args)}"
+            f"{_build_optional_single_stage_success_filter_flag(args)}"
         ),
     ]
     return "\n".join(command_lines)
@@ -449,6 +619,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--single-stage-mpol", type=int, default=8)
     parser.add_argument("--single-stage-ntor", type=int, default=6)
     parser.add_argument("--single-stage-maxiter", type=int, default=300)
+    parser.add_argument("--single-stage-warm-start-run-dir", default=None)
+    parser.add_argument("--single-stage-jax-runtime-seed-spec", default=None)
+    parser.add_argument(
+        "--single-stage-benchmark-mode",
+        action="store_true",
+        help=(
+            "Run the single-stage parity probes in benchmark/proof mode. "
+            "This preserves CPU-vs-JAX comparison while using the short "
+            "target-lane proof settings."
+        ),
+    )
+    parser.add_argument(
+        "--single-stage-disable-target-lane-success-filter",
+        action="store_true",
+        help=(
+            "Thread the single-stage proof-only hardware success-filter bypass "
+            "into the target-lane parity probes."
+        ),
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",

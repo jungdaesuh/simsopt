@@ -195,6 +195,9 @@ def apply_benchmark_compilation_cache_policy(
     """Enable a stable cache dir for benchmark probes unless the run is CPU-only."""
     if requested_platform == "cpu":
         return apply_compilation_cache_policy()
+    explicit_cache_dir = os.environ.get(_JAX_COMPILATION_CACHE_ENV_VAR)
+    if explicit_cache_dir:
+        return apply_compilation_cache_policy(explicit_cache_dir)
     return apply_compilation_cache_policy(
         benchmark_compilation_cache_dir(
             label,

@@ -298,7 +298,8 @@ separate ship gates.
 2. **Launch the proof jobs**::
 
        SIMSOPT_HF_GPU_IMAGE=<registry>/simsopt-jax:cuda12-jax092 \
-         python benchmarks/hf_jobs/launch_production_gpu_proof.py
+         python benchmarks/hf_jobs/launch_production_gpu_proof.py \
+           --single-stage-warm-start-run-dir <tracked-single-stage-run-dir>
 
    By default this launches both ``a100-large`` and ``h200`` jobs, pins the
    current ``fork`` remote SHA, prints a local preflight summary, and runs the
@@ -306,6 +307,12 @@ separate ship gates.
 
    - ``benchmarks/stage2_e2e_comparison.py``
    - ``benchmarks/single_stage_init_parity.py``
+
+   Single-stage proof jobs require a seed path that exists inside the cloned
+   target repo at the requested SHA. Pass a repo-relative warm-start directory
+   containing ``surf_opt.json``, ``results.json``, and ``biot_savart_opt.json``,
+   or pass a repo-relative runtime seed spec. Host-local absolute paths are
+   rejected before launch.
 
    The default ``maxiter=20`` Stage 2 path is now portability smoke only:
    it runs the cold/warm Stage 2 probes without forcing an explicit end-state

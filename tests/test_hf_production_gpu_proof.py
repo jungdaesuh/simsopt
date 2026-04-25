@@ -76,6 +76,40 @@ def _build_fake_proof_repo(
     return repo_root, call_log
 
 
+def _single_stage_seed_args(tmp_path: Path) -> list[str]:
+    seed_spec = tmp_path / "single_stage_seed_spec.json"
+    seed_spec.write_text("{}", encoding="utf-8")
+    return ["--single-stage-jax-runtime-seed-spec", str(seed_spec)]
+
+
+def test_run_production_gpu_proof_requires_single_stage_seed(tmp_path):
+    repo_root, _ = _build_fake_proof_repo(tmp_path)
+    results_dir = tmp_path / "results"
+    stage2_seed = tmp_path / "stage2_seed.json"
+    stage2_seed.write_text("{}", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(repo_root / "benchmarks" / "hf_jobs" / "run_production_gpu_proof.sh"),
+            "--results-dir",
+            str(results_dir),
+            "--equilibria-dir",
+            str(repo_root / "examples" / "single_stage_optimization" / "equilibria"),
+            "--stage2-bs-path",
+            str(stage2_seed),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HEARTBEAT_INTERVAL_S": "0.01"},
+    )
+
+    assert completed.returncode == 1
+    assert "requires --single-stage-warm-start-run-dir" in completed.stderr
+    assert not results_dir.exists()
+
+
 def test_run_production_gpu_proof_continues_after_missing_payload(tmp_path):
     repo_root, call_log = _build_fake_proof_repo(tmp_path, stage2_warm_mode="missing")
     results_dir = tmp_path / "results"
@@ -92,6 +126,7 @@ def test_run_production_gpu_proof_continues_after_missing_payload(tmp_path):
             str(repo_root / "examples" / "single_stage_optimization" / "equilibria"),
             "--stage2-bs-path",
             str(stage2_seed),
+            *_single_stage_seed_args(tmp_path),
         ],
         check=False,
         capture_output=True,
@@ -130,6 +165,7 @@ def test_run_production_gpu_proof_survives_corrupt_payload(tmp_path):
             str(repo_root / "examples" / "single_stage_optimization" / "equilibria"),
             "--stage2-bs-path",
             str(stage2_seed),
+            *_single_stage_seed_args(tmp_path),
         ],
         check=False,
         capture_output=True,
@@ -164,6 +200,7 @@ def test_run_production_gpu_proof_adds_optional_repro_rung(tmp_path):
             "60",
             "--geometry-rel-tol",
             "1e-6",
+            *_single_stage_seed_args(tmp_path),
         ],
         check=False,
         capture_output=True,
@@ -199,6 +236,7 @@ def test_run_production_gpu_proof_omits_boozer_override_by_default(tmp_path):
             str(repo_root / "examples" / "single_stage_optimization" / "equilibria"),
             "--stage2-bs-path",
             str(stage2_seed),
+            *_single_stage_seed_args(tmp_path),
         ],
         check=False,
         capture_output=True,
@@ -215,6 +253,129 @@ def test_run_production_gpu_proof_omits_boozer_override_by_default(tmp_path):
     ]
     assert len(single_stage_calls) == 1
     assert "--boozer-optimizer-backend" not in single_stage_calls[0]["argv"]
+
+
+def test_run_production_gpu_proof_threads_single_stage_seed_contract(tmp_path):
+    repo_root, call_log = _build_fake_proof_repo(tmp_path)
+    results_dir = tmp_path / "results"
+    stage2_seed = tmp_path / "stage2_seed.json"
+    warm_start_run_dir = tmp_path / "single_stage_seed"
+    jax_runtime_seed_spec = tmp_path / "single_stage_seed_spec.json"
+    stage2_seed.write_text("{}", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(repo_root / "benchmarks" / "hf_jobs" / "run_production_gpu_proof.sh"),
+            "--results-dir",
+            str(results_dir),
+            "--equilibria-dir",
+            str(repo_root / "examples" / "single_stage_optimization" / "equilibria"),
+            "--stage2-bs-path",
+            str(stage2_seed),
+            "--single-stage-warm-start-run-dir",
+            str(warm_start_run_dir),
+            "--single-stage-jax-runtime-seed-spec",
+            str(jax_runtime_seed_spec),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HEARTBEAT_INTERVAL_S": "0.01"},
+    )
+
+    assert completed.returncode == 0
+    call_records = _read_call_records(call_log)
+    single_stage_calls = [
+        record
+        for record in call_records
+        if record["output_json"].endswith("single_stage_cold.json")
+    ]
+    assert len(single_stage_calls) == 1
+    assert "--warm-start-run-dir" in single_stage_calls[0]["argv"]
+    assert str(warm_start_run_dir) in single_stage_calls[0]["argv"]
+    assert "--jax-runtime-seed-spec" in single_stage_calls[0]["argv"]
+    assert str(jax_runtime_seed_spec) in single_stage_calls[0]["argv"]
+    assert "--case-artifacts-dir" in single_stage_calls[0]["argv"]
+    artifacts_flag_index = single_stage_calls[0]["argv"].index("--case-artifacts-dir")
+    assert (
+        single_stage_calls[0]["argv"][artifacts_flag_index + 1]
+        == str(results_dir / "artifacts" / "single_stage_cold")
+    )
+
+
+def test_run_production_gpu_proof_threads_single_stage_benchmark_mode(tmp_path):
+    repo_root, call_log = _build_fake_proof_repo(tmp_path)
+    results_dir = tmp_path / "results"
+    stage2_seed = tmp_path / "stage2_seed.json"
+    stage2_seed.write_text("{}", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(repo_root / "benchmarks" / "hf_jobs" / "run_production_gpu_proof.sh"),
+            "--results-dir",
+            str(results_dir),
+            "--equilibria-dir",
+            str(repo_root / "examples" / "single_stage_optimization" / "equilibria"),
+            "--stage2-bs-path",
+            str(stage2_seed),
+            "--single-stage-benchmark-mode",
+            *_single_stage_seed_args(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HEARTBEAT_INTERVAL_S": "0.01"},
+    )
+
+    assert completed.returncode == 0
+    call_records = _read_call_records(call_log)
+    single_stage_calls = [
+        record
+        for record in call_records
+        if record["output_json"].endswith("single_stage_cold.json")
+    ]
+    assert len(single_stage_calls) == 1
+    assert "--benchmark-mode" in single_stage_calls[0]["argv"]
+
+
+def test_run_production_gpu_proof_threads_single_stage_success_filter_bypass(
+    tmp_path,
+):
+    repo_root, call_log = _build_fake_proof_repo(tmp_path)
+    results_dir = tmp_path / "results"
+    stage2_seed = tmp_path / "stage2_seed.json"
+    stage2_seed.write_text("{}", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(repo_root / "benchmarks" / "hf_jobs" / "run_production_gpu_proof.sh"),
+            "--results-dir",
+            str(results_dir),
+            "--equilibria-dir",
+            str(repo_root / "examples" / "single_stage_optimization" / "equilibria"),
+            "--stage2-bs-path",
+            str(stage2_seed),
+            "--single-stage-disable-target-lane-success-filter",
+            *_single_stage_seed_args(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HEARTBEAT_INTERVAL_S": "0.01"},
+    )
+
+    assert completed.returncode == 0
+    call_records = _read_call_records(call_log)
+    single_stage_calls = [
+        record
+        for record in call_records
+        if record["output_json"].endswith("single_stage_cold.json")
+    ]
+    assert len(single_stage_calls) == 1
+    assert "--disable-target-lane-success-filter" in single_stage_calls[0]["argv"]
 
 
 def test_run_production_gpu_proof_preserves_ld_library_path(tmp_path):
@@ -234,6 +395,7 @@ def test_run_production_gpu_proof_preserves_ld_library_path(tmp_path):
             str(repo_root / "examples" / "single_stage_optimization" / "equilibria"),
             "--stage2-bs-path",
             str(stage2_seed),
+            *_single_stage_seed_args(tmp_path),
         ],
         check=False,
         capture_output=True,
@@ -252,6 +414,49 @@ def test_run_production_gpu_proof_preserves_ld_library_path(tmp_path):
         record["ld_library_path"] for record in call_records
     } == {ld_library_path}
     assert {record["cuda_library_mode"] for record in call_records} == {"bundled"}
+    assert all(
+        "--xla_gpu_deterministic_ops=true" in str(record["xla_flags"]).split()
+        for record in call_records
+    )
+
+
+def test_run_production_gpu_proof_uses_repo_artifact_compilation_cache_by_default(
+    tmp_path,
+):
+    repo_root, call_log = _build_fake_proof_repo(tmp_path)
+    results_dir = tmp_path / "results"
+    stage2_seed = tmp_path / "stage2_seed.json"
+    stage2_seed.write_text("{}", encoding="utf-8")
+    env = {**os.environ, "HEARTBEAT_INTERVAL_S": "0.01"}
+    env.pop("JAX_COMPILATION_CACHE_DIR", None)
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(repo_root / "benchmarks" / "hf_jobs" / "run_production_gpu_proof.sh"),
+            "--results-dir",
+            str(results_dir),
+            "--equilibria-dir",
+            str(repo_root / "examples" / "single_stage_optimization" / "equilibria"),
+            "--stage2-bs-path",
+            str(stage2_seed),
+            *_single_stage_seed_args(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0
+    expected_cache_dir = (
+        repo_root / ".artifacts" / "jax_compilation_cache" / "hf-production-proof"
+    )
+    call_records = _read_call_records(call_log)
+    assert {record["jax_compilation_cache_dir"] for record in call_records} == {
+        str(expected_cache_dir)
+    }
+    assert expected_cache_dir.is_dir()
 
 
 def test_build_stage2_hf_plan_keeps_smoke_jobs_geometry_report_only():
@@ -328,8 +533,17 @@ def _git(cwd: Path, *args: str) -> str:
 
 
 def _build_remote_validation_repo(tmp_path: Path) -> tuple[str, str, str]:
+    return _build_remote_validation_repo_with_seed(tmp_path)
+
+
+def _build_remote_validation_repo_with_seed(
+    tmp_path: Path,
+    *,
+    runtime_spec_tree: bool = False,
+) -> tuple[str, str, str]:
     remote_repo = tmp_path / "remote.git"
     work_repo = tmp_path / "work"
+    single_stage_seed = work_repo / "benchmarks" / "fixtures" / "single_stage_seed_iota15"
     subprocess.run(
         ["git", "init", "--bare", str(remote_repo)],
         check=True,
@@ -344,8 +558,17 @@ def _build_remote_validation_repo(tmp_path: Path) -> tuple[str, str, str]:
     )
     _git(work_repo, "config", "user.email", "test@example.com")
     _git(work_repo, "config", "user.name", "test")
+    single_stage_seed.mkdir(parents=True)
     (work_repo / "proof.txt").write_text("main\n", encoding="utf-8")
+    (single_stage_seed / "surf_opt.json").write_text("{}", encoding="utf-8")
+    (single_stage_seed / "results.json").write_text("{}", encoding="utf-8")
+    (single_stage_seed / "biot_savart_opt.json").write_text("{}", encoding="utf-8")
+    if runtime_spec_tree:
+        runtime_spec_tree_path = single_stage_seed / "single_stage_jax_runtime_spec.json"
+        runtime_spec_tree_path.mkdir()
+        (runtime_spec_tree_path / "placeholder.txt").write_text("", encoding="utf-8")
     _git(work_repo, "add", "proof.txt")
+    _git(work_repo, "add", "benchmarks/fixtures/single_stage_seed_iota15")
     _git(work_repo, "commit", "-m", "main")
     _git(work_repo, "branch", "-M", "main")
     _git(work_repo, "remote", "add", "origin", str(remote_repo))
@@ -368,6 +591,8 @@ def _default_remote_launcher_args(tmp_path: Path) -> list[str]:
         "main",
         "--repo-sha",
         main_sha,
+        "--single-stage-warm-start-run-dir",
+        "benchmarks/fixtures/single_stage_seed_iota15",
     ]
 
 
@@ -470,9 +695,73 @@ def test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override(tmp_p
     assert "--geometry-rel-tol" not in completed.stdout
     assert "--single-stage-boozer-optimizer-backend" not in completed.stdout
     assert "unset LD_LIBRARY_PATH" not in completed.stdout
+    assert 'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_deterministic_ops=true"' in completed.stdout
+    assert (
+        'export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-'
+        '${PWD}/.artifacts/jax_compilation_cache/hf-production-proof}"'
+        in completed.stdout
+    )
+    assert "/tmp/jax-compilation-cache" not in completed.stdout
     assert 'SIMSOPT_HF_JOB_JAX_GPU_WHEEL_SPEC="jax[cuda12]==0.9.2"' in completed.stdout
     assert 'SIMSOPT_JAX_CUDA_LIBRARY_MODE="bundled"' in completed.stdout
+    assert (
+        "--single-stage-warm-start-run-dir "
+        "/tmp/hf-production-proof/repo/benchmarks/fixtures/single_stage_seed_iota15"
+        in completed.stdout
+    )
     assert "stage2_warm_repro" not in completed.stdout
+
+
+def test_launch_production_gpu_proof_dry_run_threads_single_stage_benchmark_mode(
+    tmp_path,
+):
+    env = _launcher_env(tmp_path)
+    remote_args = _default_remote_launcher_args(tmp_path)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER_SCRIPT),
+            "--dry-run",
+            "--hardware",
+            "a100-large",
+            "--single-stage-benchmark-mode",
+            *remote_args,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    assert completed.returncode == 0
+    assert "--single-stage-benchmark-mode" in completed.stdout
+
+
+def test_launch_production_gpu_proof_dry_run_threads_single_stage_success_filter_bypass(
+    tmp_path,
+):
+    env = _launcher_env(tmp_path)
+    remote_args = _default_remote_launcher_args(tmp_path)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER_SCRIPT),
+            "--dry-run",
+            "--hardware",
+            "a100-large",
+            "--single-stage-disable-target-lane-success-filter",
+            *remote_args,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    assert completed.returncode == 0
+    assert "--single-stage-disable-target-lane-success-filter" in completed.stdout
 
 
 def test_launch_production_gpu_proof_requires_explicit_image_or_env(tmp_path):
@@ -496,6 +785,34 @@ def test_launch_production_gpu_proof_requires_explicit_image_or_env(tmp_path):
 
     assert completed.returncode != 0
     assert "requires a prebuilt image via SIMSOPT_HF_GPU_IMAGE or --image" in completed.stderr
+
+
+def test_launch_production_gpu_proof_requires_single_stage_seed(tmp_path):
+    env = _launcher_env(tmp_path)
+    repo_url, main_sha, _ = _build_remote_validation_repo(tmp_path)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER_SCRIPT),
+            "--dry-run",
+            "--hardware",
+            "a100-large",
+            "--repo-url",
+            repo_url,
+            "--repo-ref",
+            "main",
+            "--repo-sha",
+            main_sha,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    assert completed.returncode != 0
+    assert "requires a single-stage seed" in completed.stderr
 
 
 def test_launch_production_gpu_proof_rejects_ad_hoc_always_bootstrap():
@@ -585,6 +902,8 @@ def test_launch_production_gpu_proof_rejects_remote_sha_not_on_repo_ref(tmp_path
             feature_sha,
             "--hardware",
             "a100-large",
+            "--single-stage-warm-start-run-dir",
+            "benchmarks/fixtures/single_stage_seed_iota15",
         ],
         check=False,
         capture_output=True,
@@ -616,6 +935,8 @@ def test_launch_production_gpu_proof_accepts_matching_remote_repo_ref_and_sha(tm
             main_sha,
             "--hardware",
             "a100-large",
+            "--single-stage-warm-start-run-dir",
+            "benchmarks/fixtures/single_stage_seed_iota15",
         ],
         check=False,
         capture_output=True,
@@ -626,6 +947,135 @@ def test_launch_production_gpu_proof_accepts_matching_remote_repo_ref_and_sha(tm
 
     assert completed.returncode == 0
     assert f'"repo_sha": "{main_sha}"' in completed.stdout
+
+
+def test_launch_production_gpu_proof_rejects_host_absolute_seed_path(tmp_path):
+    env = _launcher_env(tmp_path)
+    repo_url, main_sha, _ = _build_remote_validation_repo(tmp_path)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER_SCRIPT),
+            "--dry-run",
+            "--repo-url",
+            repo_url,
+            "--repo-ref",
+            "main",
+            "--repo-sha",
+            main_sha,
+            "--hardware",
+            "a100-large",
+            "--single-stage-jax-runtime-seed-spec",
+            str(tmp_path / "single_stage_seed_spec.json"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    assert completed.returncode != 0
+    assert "repo-relative path" in completed.stderr
+
+
+def test_launch_production_gpu_proof_rejects_seed_path_missing_from_target_sha(
+    tmp_path,
+):
+    env = _launcher_env(tmp_path)
+    repo_url, main_sha, _ = _build_remote_validation_repo(tmp_path)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER_SCRIPT),
+            "--dry-run",
+            "--repo-url",
+            repo_url,
+            "--repo-ref",
+            "main",
+            "--repo-sha",
+            main_sha,
+            "--hardware",
+            "a100-large",
+            "--single-stage-warm-start-run-dir",
+            "missing/single-stage-seed",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    assert completed.returncode != 0
+    assert "path is not present at repo SHA" in completed.stderr
+
+
+def test_launch_production_gpu_proof_rejects_runtime_seed_directory_without_spec(
+    tmp_path,
+):
+    env = _launcher_env(tmp_path)
+    repo_url, main_sha, _ = _build_remote_validation_repo(tmp_path)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER_SCRIPT),
+            "--dry-run",
+            "--repo-url",
+            repo_url,
+            "--repo-ref",
+            "main",
+            "--repo-sha",
+            main_sha,
+            "--hardware",
+            "a100-large",
+            "--single-stage-jax-runtime-seed-spec",
+            "benchmarks/fixtures/single_stage_seed_iota15",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    assert completed.returncode != 0
+    assert "single_stage_jax_runtime_spec.json" in completed.stderr
+
+
+def test_launch_production_gpu_proof_rejects_runtime_seed_spec_tree(
+    tmp_path,
+):
+    env = _launcher_env(tmp_path)
+    repo_url, main_sha, _ = _build_remote_validation_repo_with_seed(
+        tmp_path,
+        runtime_spec_tree=True,
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER_SCRIPT),
+            "--dry-run",
+            "--repo-url",
+            repo_url,
+            "--repo-ref",
+            "main",
+            "--repo-sha",
+            main_sha,
+            "--hardware",
+            "a100-large",
+            "--single-stage-jax-runtime-seed-spec",
+            "benchmarks/fixtures/single_stage_seed_iota15",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    assert completed.returncode != 0
+    assert "directory must contain a file named" in completed.stderr
 
 
 def test_launch_production_gpu_proof_allows_explicit_long_run_geometry_rung(tmp_path):

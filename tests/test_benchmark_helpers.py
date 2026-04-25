@@ -1026,6 +1026,7 @@ def test_apply_benchmark_compilation_cache_policy_uses_explicit_cache_dir(
         "benchmarks.validation_ladder_common._benchmark_cuda_cache_target_suffix",
         lambda: "cuda-nvidia-geforce-rtx-5090",
     )
+    monkeypatch.delenv(_JAX_COMPILATION_CACHE_ENV_VAR, raising=False)
     monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)
 
     metadata = apply_benchmark_compilation_cache_policy(
@@ -1044,6 +1045,24 @@ def test_apply_benchmark_compilation_cache_policy_uses_explicit_cache_dir(
     assert os.environ[_JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR] == "0"
     assert os.environ[_JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR] == "-1"
     assert os.environ[_JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR] == "all"
+
+
+def test_apply_benchmark_compilation_cache_policy_honors_shared_cache_env(
+    monkeypatch, tmp_path
+):
+    shared_cache_dir = tmp_path / "shared-jax-cache"
+    monkeypatch.setenv(_JAX_COMPILATION_CACHE_ENV_VAR, str(shared_cache_dir))
+    monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)
+
+    metadata = apply_benchmark_compilation_cache_policy(
+        "single_stage_outer_loop_probe",
+        requested_platform="cuda",
+    )
+
+    assert metadata["compilation_cache_enabled"] is True
+    assert metadata["compilation_cache_policy"] == "explicit"
+    assert metadata["compilation_cache_dir"] == str(shared_cache_dir)
+    assert shared_cache_dir.is_dir()
 
 
 def test_apply_benchmark_compilation_cache_policy_keeps_cpu_only_runs_disabled(

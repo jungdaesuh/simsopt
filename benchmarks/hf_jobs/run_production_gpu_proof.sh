@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HEARTBEAT_INTERVAL_S="${HEARTBEAT_INTERVAL_S:-60}"
+GPU_DETERMINISM_XLA_FLAG="--xla_gpu_deterministic_ops=true"
 
 RESULTS_DIR=""
 EQUILIBRIA_DIR=""
@@ -22,6 +23,10 @@ SINGLE_STAGE_NTOR="6"
 SINGLE_STAGE_MAXITER="300"
 SINGLE_STAGE_OPTIMIZER_BACKEND="ondevice"
 SINGLE_STAGE_BOOZER_OPTIMIZER_BACKEND=""
+SINGLE_STAGE_WARM_START_RUN_DIR=""
+SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC=""
+SINGLE_STAGE_BENCHMARK_MODE="0"
+SINGLE_STAGE_DISABLE_TARGET_LANE_SUCCESS_FILTER="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,6 +48,10 @@ while [[ $# -gt 0 ]]; do
     --single-stage-maxiter) SINGLE_STAGE_MAXITER="$2"; shift 2 ;;
     --single-stage-optimizer-backend) SINGLE_STAGE_OPTIMIZER_BACKEND="$2"; shift 2 ;;
     --single-stage-boozer-optimizer-backend) SINGLE_STAGE_BOOZER_OPTIMIZER_BACKEND="$2"; shift 2 ;;
+    --single-stage-warm-start-run-dir) SINGLE_STAGE_WARM_START_RUN_DIR="$2"; shift 2 ;;
+    --single-stage-jax-runtime-seed-spec) SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC="$2"; shift 2 ;;
+    --single-stage-benchmark-mode) SINGLE_STAGE_BENCHMARK_MODE="1"; shift ;;
+    --single-stage-disable-target-lane-success-filter) SINGLE_STAGE_DISABLE_TARGET_LANE_SUCCESS_FILTER="1"; shift ;;
     *)
       echo "Unknown argument: $1" >&2
       exit 1
@@ -53,6 +62,13 @@ done
 if [[ -z "${RESULTS_DIR}" || -z "${EQUILIBRIA_DIR}" || -z "${STAGE2_BS_PATH}" ]]; then
   echo "Missing required arguments: --results-dir, --equilibria-dir, --stage2-bs-path" >&2
   exit 1
+fi
+if [[ -z "${SINGLE_STAGE_WARM_START_RUN_DIR}" && -z "${SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC}" ]]; then
+  echo "Production single-stage GPU proof requires --single-stage-warm-start-run-dir or --single-stage-jax-runtime-seed-spec" >&2
+  exit 1
+fi
+if [[ "${STAGE2_PLATFORM}" == "cuda" || "${SINGLE_STAGE_PLATFORM}" == "cuda" ]]; then
+  export XLA_FLAGS="${XLA_FLAGS:-} ${GPU_DETERMINISM_XLA_FLAG}"
 fi
 
 GEOMETRY_REL_TOL_ARG="${GEOMETRY_REL_TOL}"
@@ -84,7 +100,7 @@ PY
 fi
 
 export HF_HUB_DISABLE_TELEMETRY=1
-export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-/tmp/jax-compilation-cache}"
+export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-${REPO_ROOT}/.artifacts/jax_compilation_cache/hf-production-proof}"
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE="${SIMSOPT_JAX_CUDA_LIBRARY_MODE:-bundled}"
 mkdir -p "${RESULTS_DIR}" "${JAX_COMPILATION_CACHE_DIR}"
 
@@ -199,17 +215,35 @@ if [[ -n "${SINGLE_STAGE_BOOZER_OPTIMIZER_BACKEND}" ]]; then
     --boozer-optimizer-backend "${SINGLE_STAGE_BOOZER_OPTIMIZER_BACKEND}"
   )
 fi
+if [[ -n "${SINGLE_STAGE_WARM_START_RUN_DIR}" ]]; then
+  single_stage_probe_args+=(
+    --warm-start-run-dir "${SINGLE_STAGE_WARM_START_RUN_DIR}"
+  )
+fi
+if [[ -n "${SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC}" ]]; then
+  single_stage_probe_args+=(
+    --jax-runtime-seed-spec "${SINGLE_STAGE_JAX_RUNTIME_SEED_SPEC}"
+  )
+fi
+if [[ "${SINGLE_STAGE_BENCHMARK_MODE}" == "1" ]]; then
+  single_stage_probe_args+=(--benchmark-mode)
+fi
+if [[ "${SINGLE_STAGE_DISABLE_TARGET_LANE_SUCCESS_FILTER}" == "1" ]]; then
+  single_stage_probe_args+=(--disable-target-lane-success-filter)
+fi
 
 run_probe single_stage_cold "${RESULTS_DIR}/single_stage_cold.json" \
   python "${REPO_ROOT}/benchmarks/single_stage_init_parity.py" \
     --platform "${SINGLE_STAGE_PLATFORM}" \
     "${single_stage_probe_args[@]}" \
+    --case-artifacts-dir "${RESULTS_DIR}/artifacts/single_stage_cold" \
     --output-json "${RESULTS_DIR}/single_stage_cold.json" || OVERALL_RC=1
 
 run_probe single_stage_warm "${RESULTS_DIR}/single_stage_warm.json" \
   python "${REPO_ROOT}/benchmarks/single_stage_init_parity.py" \
     --platform "${SINGLE_STAGE_PLATFORM}" \
     "${single_stage_probe_args[@]}" \
+    --case-artifacts-dir "${RESULTS_DIR}/artifacts/single_stage_warm" \
     --output-json "${RESULTS_DIR}/single_stage_warm.json" || OVERALL_RC=1
 
 python - "${RESULTS_DIR}" "${EXPECTED_PROBES[@]}" <<'PY'
