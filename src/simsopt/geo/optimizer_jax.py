@@ -1761,7 +1761,7 @@ def _newton_candidate_status(current_norm, x_next, grad_next):
 
 
 def _gmres_iteration_limits(n):
-    restart = max(5, min(n, 20))
+    restart = max(5, min(n, 64))
     maxiter = 10
     return restart, maxiter
 

@@ -1139,6 +1139,11 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
     assert direct["atol"] == pytest.approx(1e-12)
     assert direct["requires_direct_cpp_oracle"] is True
 
+    ls_wrapper = parity_ladder_tolerances("ls-wrapper-gradient")
+    assert ls_wrapper["rtol"] == pytest.approx(1e-10)
+    assert ls_wrapper["atol"] == pytest.approx(1e-12)
+    assert ls_wrapper["requires_same_state"] is True
+
     derivative = parity_ladder_tolerances("derivative-heavy")
     assert derivative["first_derivative_rtol"] == pytest.approx(1e-8)
     assert derivative["first_derivative_atol"] == pytest.approx(1e-10)

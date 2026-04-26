@@ -1816,7 +1816,8 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert "lu_pivots_to_permutation" not in jaxpr_text
 
     def test_gmres_iteration_limits_bound_hvp_work(self):
-        assert _opt._gmres_iteration_limits(663) == (20, 10)
+        assert _opt._gmres_iteration_limits(39) == (39, 10)
+        assert _opt._gmres_iteration_limits(663) == (64, 10)
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME

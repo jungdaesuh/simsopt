@@ -6114,6 +6114,17 @@ class TestTraceableObjective:
         return fun_vg, coil_dofs, jr_jax, iotas_jax, iota_target
 
     @staticmethod
+    def _eval_traceable_value_and_grad_host(fun_vg, x, *, dtype):
+        """Evaluate a traceable value/grad callable at exactly one host point."""
+        value, grad = fun_vg(jnp.asarray(x, dtype=dtype))
+        value = jax.block_until_ready(value)
+        grad = jax.block_until_ready(grad)
+        return (
+            float(jax.device_get(value)),
+            np.asarray(jax.device_get(grad), dtype=np.dtype(dtype)),
+        )
+
+    @staticmethod
     def _make_traceable_profile_suite(bs_jax, booz_jax, *, iota_target_shift=0.0):
         """Build the profiled traceable target-lane closure suite and coil DOFs."""
         runtime_bundle, coil_dofs = (
@@ -7893,6 +7904,122 @@ class TestTraceableObjective:
         )
         assert calls["count"] == 1
         assert np.isfinite(float(result.fun)), "Optimizer produced non-finite J"
+
+    def test_traceable_solver_path_localizes_delta_to_optimizer_driver(
+        self,
+        boozer_setup,
+    ):
+        """Same objective/gradient evaluator isolates SciPy-vs-target drift."""
+        from scipy.optimize import minimize as scipy_minimize
+
+        (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
+        fun_vg, x0, _, _, _ = self._make_traceable_value_and_grad(
+            bs_jax,
+            booz_jax,
+            iota_target_shift=1.0e-3,
+        )
+        dtype = x0.dtype
+        x0_host = np.asarray(jax.device_get(x0), dtype=np.dtype(dtype))
+
+        initial_value, initial_grad = self._eval_traceable_value_and_grad_host(
+            fun_vg,
+            x0_host,
+            dtype=dtype,
+        )
+        assert np.isfinite(initial_value)
+        assert np.all(np.isfinite(initial_grad))
+        assert np.linalg.norm(initial_grad, ord=np.inf) > 0.0
+
+        def scipy_value_and_grad(x):
+            return self._eval_traceable_value_and_grad_host(
+                fun_vg,
+                x,
+                dtype=dtype,
+            )
+
+        scipy_result = scipy_minimize(
+            scipy_value_and_grad,
+            x0_host,
+            jac=True,
+            method="L-BFGS-B",
+            options={
+                "maxiter": 2,
+                "maxcor": 200,
+                "maxls": 20,
+                "gtol": 1.0e-20,
+                "ftol": 0.0,
+            },
+        )
+
+        target_result = jax_minimize(
+            fun_vg,
+            x0,
+            method="lbfgs-ondevice",
+            value_and_grad=True,
+            maxiter=2,
+            tol=1.0e-20,
+            options={
+                "maxcor": 200,
+                "maxls": 20,
+                "ftol": 0.0,
+            },
+        )
+
+        scipy_x = np.asarray(scipy_result.x, dtype=np.dtype(dtype))
+        target_x = np.asarray(_host_metric_array(target_result.x), dtype=np.dtype(dtype))
+        scipy_fun, scipy_grad = self._eval_traceable_value_and_grad_host(
+            fun_vg,
+            scipy_x,
+            dtype=dtype,
+        )
+        target_fun, target_grad = self._eval_traceable_value_and_grad_host(
+            fun_vg,
+            target_x,
+            dtype=dtype,
+        )
+
+        assert scipy_result.nit > 0
+        assert target_result.nit > 0
+        assert scipy_result.nfev > 1
+        assert target_result.nfev > 1
+        np.testing.assert_allclose(
+            float(scipy_result.fun),
+            scipy_fun,
+            rtol=1.0e-10,
+            atol=1.0e-12,
+            err_msg="SciPy endpoint must re-evaluate through the shared evaluator.",
+        )
+        np.testing.assert_allclose(
+            np.asarray(scipy_result.jac, dtype=np.dtype(dtype)),
+            scipy_grad,
+            rtol=1.0e-10,
+            atol=1.0e-12,
+            err_msg=(
+                "SciPy endpoint gradient must re-evaluate through the shared "
+                "evaluator."
+            ),
+        )
+        np.testing.assert_allclose(
+            _host_metric_scalar(target_result.fun),
+            target_fun,
+            rtol=1.0e-10,
+            atol=1.0e-12,
+            err_msg=(
+                "Target L-BFGS endpoint must re-evaluate through the shared "
+                "evaluator."
+            ),
+        )
+        np.testing.assert_allclose(
+            np.asarray(_host_metric_array(target_result.jac), dtype=np.dtype(dtype)),
+            target_grad,
+            rtol=1.0e-10,
+            atol=1.0e-12,
+            err_msg=(
+                "Target L-BFGS endpoint gradient must re-evaluate through the "
+                "shared evaluator."
+            ),
+        )
+        assert np.isfinite(np.linalg.norm(target_x - scipy_x, ord=np.inf))
 
     def test_traceable_matches_fused_value_and_grad_path(self, boozer_setup):
         """Test 7: Traceable scalar and fused value/grad paths produce same J."""
