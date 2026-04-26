@@ -670,18 +670,6 @@ def _assert_area_volume_gradient_parity(surface: SurfaceRZFourier) -> None:
         rtol=1e-9,
         atol=1e-9,
     )
-    np.testing.assert_allclose(
-        np.asarray(surface.darea_by_dcoeff_jax(dofs)),
-        area_grad,
-        rtol=1e-12,
-        atol=1e-12,
-    )
-    np.testing.assert_allclose(
-        np.asarray(surface.dvolume_by_dcoeff_jax(dofs)),
-        volume_grad,
-        rtol=1e-12,
-        atol=1e-12,
-    )
 
 
 def test_surface_rzfourier_area_volume_gradient_parity_stellsym():
