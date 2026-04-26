@@ -341,15 +341,9 @@ def augmented_inequality_objective(
     positive_shift = np.maximum(0.0, multipliers + penalty_values * constraint_values)
 
     total_value = float(base_value)
+    augmented_terms = _augmented_terms(positive_shift, multipliers, penalty_values)
     if constraint_values.size > 0:
-        total_value += float(
-            np.sum(
-                0.5
-                * (positive_shift - multipliers)
-                * (positive_shift + multipliers)
-                / penalty_values
-            )
-        )
+        total_value += float(np.sum(augmented_terms))
 
     base_grad_array = np.asarray(base_grad, dtype=float)
     total_grad = base_grad_array.copy()
@@ -370,6 +364,8 @@ def augmented_inequality_objective(
         constraint_grads=constraint_grad_list,
         dual_update_values=constraint_values,
         feasibility_values=feasibility_values,
+        positive_shift_values=positive_shift,
+        augmented_term_by_constraint=augmented_terms,
     )
 
 
@@ -448,24 +444,78 @@ def _build_augmented_evaluation(
     constraint_grads: Sequence[np.ndarray],
     dual_update_values,
     feasibility_values,
+    positive_shift_values=None,
+    augmented_term_by_constraint=None,
 ):
     dual_update_array = np.asarray(dual_update_values, dtype=float)
     feasibility_array = np.asarray(feasibility_values, dtype=float)
     stationarity_norm = float(np.linalg.norm(np.asarray(total_grad, dtype=float)))
     max_feasibility_violation = _max_value(feasibility_array)
-    return {
+    result = {
         "total": float(total_value),
         "base_value": float(base_value),
         "base_grad": np.asarray(base_grad, dtype=float),
         "grad": np.asarray(total_grad, dtype=float),
         "constraint_values": np.asarray(constraint_values, dtype=float),
-        "constraint_grads": [np.asarray(constraint_grad, dtype=float) for constraint_grad in constraint_grads],
+        "constraint_grads": [
+            np.asarray(constraint_grad, dtype=float)
+            for constraint_grad in constraint_grads
+        ],
         "dual_update_values": dual_update_array,
         "feasibility_values": feasibility_array,
         "max_violation": max_feasibility_violation,
         "max_feasibility_violation": max_feasibility_violation,
         "stationarity_norm": stationarity_norm,
     }
+    if positive_shift_values is not None:
+        result["positive_shift_values"] = np.asarray(
+            positive_shift_values,
+            dtype=float,
+        )
+    if augmented_term_by_constraint is not None:
+        result["augmented_term_by_constraint"] = np.asarray(
+            augmented_term_by_constraint,
+            dtype=float,
+        )
+    return result
+
+
+def _augmented_terms(
+    positive_shift: np.ndarray,
+    multipliers: np.ndarray,
+    penalty_values: np.ndarray,
+) -> np.ndarray:
+    return (
+        0.5
+        * (positive_shift - multipliers)
+        * (positive_shift + multipliers)
+        / penalty_values
+    )
+
+
+def _positive_shift_and_augmented_terms(
+    evaluation: dict,
+    multiplier_array: np.ndarray,
+    penalty_values: np.ndarray,
+    solver_constraint_values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    positive_shift = evaluation.get("positive_shift_values")
+    augmented_terms = evaluation.get("augmented_term_by_constraint")
+    if positive_shift is not None and augmented_terms is not None:
+        return (
+            np.asarray(positive_shift, dtype=float),
+            np.asarray(augmented_terms, dtype=float),
+        )
+    positive_shift = np.maximum(
+        0.0,
+        multiplier_array
+        + penalty_values * np.asarray(solver_constraint_values, dtype=float),
+    )
+    return positive_shift, _augmented_terms(
+        positive_shift,
+        multiplier_array,
+        penalty_values,
+    )
 
 
 def _as_float_array(values) -> np.ndarray:
@@ -473,7 +523,7 @@ def _as_float_array(values) -> np.ndarray:
 
 
 def _as_float_list(values) -> list[float]:
-    return [float(value) for value in np.asarray(values, dtype=float)]
+    return np.asarray(values, dtype=float).reshape(-1).tolist()
 
 
 def _max_value(values: np.ndarray) -> float:
@@ -671,12 +721,12 @@ def _constraint_history_diagnostics(
 ) -> dict:
     multiplier_array = np.asarray(multipliers, dtype=float)
     penalty_values = _penalty_values(penalty, multiplier_array.size)
-    positive_shift = np.maximum(
-        0.0,
-        multiplier_array
-        + penalty_values * np.asarray(solver_constraint_values, dtype=float),
+    positive_shift, augmented_terms = _positive_shift_and_augmented_terms(
+        evaluation,
+        multiplier_array,
+        penalty_values,
+        solver_constraint_values,
     )
-    augmented_terms = (positive_shift**2 - multiplier_array**2) / (2.0 * penalty_values)
     active_pressure = positive_shift * np.asarray(solver_constraint_values, dtype=float)
     raw_hard_violation_values = _optional_float_list(
         evaluation,
@@ -765,16 +815,11 @@ def _alm_summary_diagnostics(
 ) -> dict:
     multiplier_array = np.asarray(multipliers, dtype=float)
     penalty_values = _penalty_values(penalty, multiplier_array.size)
-    positive_shift = np.maximum(
-        0.0,
-        multiplier_array
-        + penalty_values * np.asarray(solver_constraint_values, dtype=float),
-    )
-    augmented_terms = (
-        0.5
-        * (positive_shift - multiplier_array)
-        * (positive_shift + multiplier_array)
-        / penalty_values
+    positive_shift, augmented_terms = _positive_shift_and_augmented_terms(
+        evaluation,
+        multiplier_array,
+        penalty_values,
+        solver_constraint_values,
     )
     raw_hard_violation_values = _optional_float_list(
         evaluation,
@@ -818,6 +863,7 @@ def _alm_summary(
     multiplier_cap_binding: bool,
     penalty_cap_reached: bool,
     history: list[dict],
+    history_truncated_count: int,
 ) -> dict:
     diagnostics = _alm_summary_diagnostics(
         evaluation=evaluation,
@@ -859,6 +905,7 @@ def _alm_summary(
         ],
         "block_max_raw_hard_violation": diagnostics["block_max_raw_hard_violation"],
         "latest_history_action": None if not history else history[-1].get("action"),
+        "history_truncated_count": int(history_truncated_count),
         "inner_lbfgsb_projected_gradient_norm": (
             None
             if not history
@@ -2104,6 +2151,7 @@ def minimize_alm(
     final_multipliers = multipliers.copy()
     final_penalty = penalty
     last_outer_iteration = 0
+    history_truncated_count = 0
     cap_binding_detected = False
     cap_binding_indices: set[int] = set()
     penalty_cap_reached = False
@@ -2136,10 +2184,12 @@ def minimize_alm(
         return max(float(value) for value in block_penalty_state.scales_by_block.values())
 
     def _append_history_entry(entry: dict) -> None:
+        nonlocal history_truncated_count
         history.append(entry)
         if settings.history_max_entries is not None:
             excess_entries = len(history) - int(settings.history_max_entries)
             if excess_entries > 0:
+                history_truncated_count += excess_entries
                 del history[:excess_entries]
 
     def _emit_history_snapshot(latest_entry: dict) -> None:
@@ -2211,6 +2261,7 @@ def minimize_alm(
             multiplier_cap_binding=cap_binding_detected,
             penalty_cap_reached=penalty_cap_reached,
             history=history,
+            history_truncated_count=history_truncated_count,
         )
         return SimpleNamespace(
             alm_schema_version=ALM_SCHEMA_VERSION,

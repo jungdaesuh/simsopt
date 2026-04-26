@@ -634,6 +634,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn("accepted_callback=callback", source)
         self.assertNotIn("inner_callback=callback", source)
         self.assertIn("history_callback=history_callback", source)
+        self.assertIn('"smoothing_changed"', source)
         self.assertIn("single_stage_alm_constraint_names(", source)
         self.assertIn("constraint_blocks=alm_constraint_blocks", source)
         self.assertIn("hard_surrogate_diagnostics=ALM_HARD_GEOMETRY_DUAL_SIGNALS", source)

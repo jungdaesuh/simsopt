@@ -78,6 +78,11 @@ class ResidualHelperTests(unittest.TestCase):
         self.assertAlmostEqual(evaluation["max_violation"], 0.5)
         np.testing.assert_allclose(evaluation["dual_update_values"], np.array([-1.0, 0.5]))
         np.testing.assert_allclose(evaluation["feasibility_values"], np.array([0.0, 0.5]))
+        np.testing.assert_allclose(evaluation["positive_shift_values"], np.array([0.0, 2.0]))
+        np.testing.assert_allclose(
+            evaluation["augmented_term_by_constraint"],
+            np.array([-0.0625, 0.75]),
+        )
         np.testing.assert_allclose(
             evaluation["constraint_grads"],
             [np.array([2.0, 0.0]), np.array([0.0, 4.0])],
@@ -100,6 +105,11 @@ class ResidualHelperTests(unittest.TestCase):
         np.testing.assert_allclose(evaluation["grad"], np.array([1.0, 11.0]))
         np.testing.assert_allclose(evaluation["dual_update_values"], np.array([-1.0, 0.5]))
         np.testing.assert_allclose(evaluation["feasibility_values"], np.array([0.0, 0.5]))
+        np.testing.assert_allclose(evaluation["positive_shift_values"], np.array([0.0, 3.0]))
+        np.testing.assert_allclose(
+            evaluation["augmented_term_by_constraint"],
+            np.array([-0.0625, 1.0]),
+        )
 
     def test_augmented_inequality_objective_one_block_vector_matches_scalar(self):
         module = load_alm_utils_module()
@@ -529,6 +539,7 @@ class ResidualHelperTests(unittest.TestCase):
                 multiplier_cap_binding=False,
                 penalty_cap_reached=False,
                 history=[],
+                history_truncated_count=0,
             )
 
         self.assertEqual(summary["blocking_constraint_name"], "current")
@@ -1509,6 +1520,39 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(result.history[0]["action"], "infeasible_stall_penalty_increase")
         self.assertEqual(result.history[1]["action"], "infeasible_stall_penalty_increase")
         self.assertEqual(result.history[1]["outer_termination"], "max_outer")
+
+    def test_minimize_alm_reports_history_truncation_count(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=3,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-12,
+            stationarity_tol=1e-12,
+            history_max_entries=1,
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x, multipliers, penalty
+            return {
+                "total": 0.0,
+                "grad": np.zeros(1),
+                "constraint_values": np.array([2.0]),
+                "stationarity_norm": 0.0,
+            }
+
+        result = module.minimize_alm(
+            np.array([0.0]),
+            ["demo_constraint"],
+            evaluate_problem,
+            settings,
+            {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(len(result.history), 1)
+        self.assertEqual(result.alm_summary["history_truncated_count"], 2)
+        self.assertEqual(result.history[0]["outer_termination"], "max_outer")
 
     def test_minimize_alm_short_circuits_zero_step_infeasible_stall(self):
         module = load_alm_utils_module()

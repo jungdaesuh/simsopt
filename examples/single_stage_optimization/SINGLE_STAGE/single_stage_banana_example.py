@@ -13,6 +13,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import astuple, dataclass, fields, replace
 from pathlib import Path, PurePath
+from threading import RLock
 from types import SimpleNamespace
 import numpy as np
 from scipy.optimize import minimize
@@ -2080,11 +2081,18 @@ def surface_stack_search_gate_for_solver(search_gate, *, constraint_method, surf
 
 
 def current_alm_distance_smoothing():
-    return float(ALM_DISTANCE_SMOOTHING)
+    with _ALM_SMOOTHING_LOCK:
+        return float(ALM_DISTANCE_SMOOTHING)
 
 
 def current_alm_curvature_smoothing():
-    return float(ALM_CURVATURE_SMOOTHING)
+    with _ALM_SMOOTHING_LOCK:
+        return float(ALM_CURVATURE_SMOOTHING)
+
+
+def current_alm_smoothing():
+    with _ALM_SMOOTHING_LOCK:
+        return float(ALM_DISTANCE_SMOOTHING), float(ALM_CURVATURE_SMOOTHING)
 
 
 _ALM_DISTANCE_GAP_CONSTRAINT_NAMES = frozenset(
@@ -2155,21 +2163,25 @@ def adapt_alm_smoothing_from_history(
 
 def update_single_stage_alm_smoothing_from_history(history_entry):
     global ALM_DISTANCE_SMOOTHING, ALM_CURVATURE_SMOOTHING
-    previous_distance_smoothing = current_alm_distance_smoothing()
-    previous_curvature_smoothing = current_alm_curvature_smoothing()
-    adapted = adapt_alm_smoothing_from_history(
-        previous_distance_smoothing,
-        previous_curvature_smoothing,
-        history_entry,
-        distance_smoothing_min=ALM_DISTANCE_SMOOTHING_MIN,
-        curvature_smoothing_min=ALM_CURVATURE_SMOOTHING_MIN,
-    )
-    ALM_DISTANCE_SMOOTHING = adapted["distance_smoothing"]
-    ALM_CURVATURE_SMOOTHING = adapted["curvature_smoothing"]
-    if (
-        ALM_DISTANCE_SMOOTHING == previous_distance_smoothing
-        and ALM_CURVATURE_SMOOTHING == previous_curvature_smoothing
-    ):
+    with _ALM_SMOOTHING_LOCK:
+        previous_distance_smoothing = float(ALM_DISTANCE_SMOOTHING)
+        previous_curvature_smoothing = float(ALM_CURVATURE_SMOOTHING)
+        adapted = adapt_alm_smoothing_from_history(
+            previous_distance_smoothing,
+            previous_curvature_smoothing,
+            history_entry,
+            distance_smoothing_min=ALM_DISTANCE_SMOOTHING_MIN,
+            curvature_smoothing_min=ALM_CURVATURE_SMOOTHING_MIN,
+        )
+        distance_smoothing = float(adapted["distance_smoothing"])
+        curvature_smoothing = float(adapted["curvature_smoothing"])
+        history_entry["smoothing_changed"] = bool(
+            distance_smoothing != previous_distance_smoothing
+            or curvature_smoothing != previous_curvature_smoothing
+        )
+        ALM_DISTANCE_SMOOTHING = distance_smoothing
+        ALM_CURVATURE_SMOOTHING = curvature_smoothing
+    if not history_entry["smoothing_changed"]:
         return
     run_dict["alm_adaptive_smoothing_events"].append(
         {
@@ -2177,9 +2189,9 @@ def update_single_stage_alm_smoothing_from_history(history_entry):
             "distance_gap_count": int(adapted["gap_counts"]["distance"]),
             "curvature_gap_count": int(adapted["gap_counts"]["curvature"]),
             "previous_distance_smoothing": float(previous_distance_smoothing),
-            "distance_smoothing": float(ALM_DISTANCE_SMOOTHING),
+            "distance_smoothing": distance_smoothing,
             "previous_curvature_smoothing": float(previous_curvature_smoothing),
-            "curvature_smoothing": float(ALM_CURVATURE_SMOOTHING),
+            "curvature_smoothing": curvature_smoothing,
         }
     )
 
@@ -4226,6 +4238,7 @@ def evaluate_alm_objective(
     include_diagnostics=True,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
+    distance_smoothing, curvature_smoothing = current_alm_smoothing()
     return apply_frontier_scalarization_override(
         _evaluate_alm_objective_impl(
             surface_weights,
@@ -4250,8 +4263,8 @@ def evaluate_alm_objective(
             curve_surface_min_distance=CS_DIST,
             banana_curve=banana_curve,
             curvature_threshold=CURVATURE_THRESHOLD,
-            distance_smoothing=current_alm_distance_smoothing(),
-            curvature_smoothing=current_alm_curvature_smoothing(),
+            distance_smoothing=distance_smoothing,
+            curvature_smoothing=curvature_smoothing,
             constraint_names=single_stage_alm_constraint_names(
                 alm_formulation=args.alm_formulation,
                 include_surface_surface=JSurfSurf is not None,
@@ -4296,7 +4309,7 @@ def evaluate_alm_objective(
             banana_current_threshold=args.banana_current_max_A,
             JPoloidalExtent=JPoloidalExtent,
             poloidal_extent_threshold=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
-            poloidal_extent_smoothing=current_alm_curvature_smoothing(),
+            poloidal_extent_smoothing=curvature_smoothing,
             poloidal_extent_constraint_fn=_smooth_max_poloidal_extent_signed_constraint,
             JNonQSObjective=objective_terms["JNonQSObjective"],
             JBoozerObjective=objective_terms["JBoozerObjective"],
@@ -7849,6 +7862,7 @@ ALM_DISTANCE_SMOOTHING = 0.0
 ALM_CURVATURE_SMOOTHING = 0.0
 ALM_DISTANCE_SMOOTHING_MIN = 0.0
 ALM_CURVATURE_SMOOTHING_MIN = 0.0
+_ALM_SMOOTHING_LOCK = RLock()
 JVolume = None
 JnonQSRatioObjective = None
 JBoozerResidualObjective = None
@@ -8970,6 +8984,10 @@ if __name__ == "__main__":
         def history_callback(history, latest_history_entry, multipliers, penalty):
             alm_partial_state["history"] = history
             update_single_stage_alm_smoothing_from_history(latest_history_entry)
+            if history:
+                history[-1]["smoothing_changed"] = latest_history_entry[
+                    "smoothing_changed"
+                ]
             emit_alm_partial_state(
                 multipliers,
                 penalty,

@@ -40,6 +40,7 @@ from banana_opt.smooth_distance_selection import (
     point_tree,
     select_pairwise_near_min,
     surface_dgamma_by_dcoeff_derivative,
+    surface_points_tree_shape,
 )
 from banana_opt.stage2_single_stage_handoff import (
     BOOZER_FAILURE_POLICY_RESTORE_LAST_SUCCESS,
@@ -1426,6 +1427,7 @@ def smooth_min_distance_signed_constraint(
             curve_points[i],
             curve_points[j],
             selection_threshold,
+            left_tree=curve_trees[i],
             right_tree=curve_trees[j],
         )
         selected_distances.append(distances)
@@ -1475,10 +1477,11 @@ def smooth_min_curve_surface_signed_constraint(
             hard_signed_value,
         )
 
-    surface_gamma = np.asarray(surface.gamma(), dtype=float)
-    surface_points = surface_gamma.reshape((-1, 3))
-    surface_tree = point_tree(surface_points)
+    surface_points, surface_tree, surface_gamma_shape = surface_points_tree_shape(
+        surface
+    )
     curve_points = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
+    curve_trees = [None] * len(curve_points)
     curve_blocks = []
     hard_min = np.inf
     for curve_index, gamma in enumerate(curve_points):
@@ -1493,10 +1496,13 @@ def smooth_min_curve_surface_signed_constraint(
     for curve_index, block_min in curve_blocks:
         if block_min > selection_threshold:
             continue
+        if curve_trees[curve_index] is None:
+            curve_trees[curve_index] = point_tree(curve_points[curve_index])
         rows, cols, diffs, distances = select_pairwise_near_min(
             curve_points[curve_index],
             surface_points,
             selection_threshold,
+            left_tree=curve_trees[curve_index],
             right_tree=surface_tree,
         )
         selected_distances.append(distances)
@@ -1529,7 +1535,7 @@ def smooth_min_curve_surface_signed_constraint(
     if np.any(surface_gradient):
         derivative += surface_dgamma_by_dcoeff_derivative(
             surface,
-            surface_gradient.reshape(surface_gamma.shape),
+            surface_gradient.reshape(surface_gamma_shape),
         )
     grad = np.asarray(derivative(base_objective_optimizable), dtype=float)
     # grad = d(smooth_min)/dx, but signed_value = min_dist - smooth_min,

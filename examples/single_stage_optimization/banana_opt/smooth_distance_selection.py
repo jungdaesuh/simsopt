@@ -1,10 +1,42 @@
+from threading import RLock
+from weakref import WeakKeyDictionary
+
 import numpy as np
 from scipy.spatial import cKDTree
 from simsopt._core.derivative import Derivative
 
 
+_SURFACE_TREE_CACHE = WeakKeyDictionary()
+_SURFACE_TREE_CACHE_LOCK = RLock()
+
+
 def point_tree(points):
     return cKDTree(np.asarray(points, dtype=float))
+
+
+def _surface_dof_fingerprint(surface) -> tuple[tuple[int, ...], str, bytes]:
+    dofs = np.asarray(surface.x, dtype=float)
+    return dofs.shape, dofs.dtype.str, dofs.tobytes()
+
+
+def surface_points_tree_shape(surface):
+    fingerprint = _surface_dof_fingerprint(surface)
+    with _SURFACE_TREE_CACHE_LOCK:
+        cached = _SURFACE_TREE_CACHE.get(surface)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1], cached[2], cached[3]
+
+    gamma = np.asarray(surface.gamma(), dtype=float)
+    points = gamma.reshape((-1, 3))
+    tree = point_tree(points)
+    with _SURFACE_TREE_CACHE_LOCK:
+        _SURFACE_TREE_CACHE[surface] = (fingerprint, points, tree, gamma.shape)
+    return points, tree, gamma.shape
+
+
+def surface_points_and_tree(surface):
+    points, tree, _shape = surface_points_tree_shape(surface)
+    return points, tree
 
 
 def pairwise_block_min(left_points, right_points, *, right_tree=None):
@@ -16,24 +48,27 @@ def pairwise_block_min(left_points, right_points, *, right_tree=None):
     return float(np.min(distances))
 
 
-def select_pairwise_near_min(left_points, right_points, threshold, *, right_tree=None):
+def select_pairwise_near_min(
+    left_points,
+    right_points,
+    threshold,
+    *,
+    left_tree=None,
+    right_tree=None,
+):
     left = np.asarray(left_points, dtype=float)
     right = np.asarray(right_points, dtype=float)
+    source_tree = point_tree(left) if left_tree is None else left_tree
     tree = point_tree(right) if right_tree is None else right_tree
-    candidate_lists = tree.query_ball_point(left, r=float(threshold))
-    counts = np.fromiter(
-        (len(candidates) for candidates in candidate_lists),
-        dtype=np.intp,
-        count=len(candidate_lists),
+    sparse_distances = source_tree.sparse_distance_matrix(
+        tree,
+        float(threshold),
+        output_type="coo_matrix",
     )
-    rows = np.repeat(np.arange(counts.size, dtype=np.intp), counts)
-    cols = np.fromiter(
-        (col for candidates in candidate_lists for col in candidates),
-        dtype=np.intp,
-        count=int(counts.sum()),
-    )
+    rows = np.asarray(sparse_distances.row, dtype=np.intp)
+    cols = np.asarray(sparse_distances.col, dtype=np.intp)
     diffs = left[rows] - right[cols]
-    distances = np.linalg.norm(diffs, axis=1)
+    distances = np.asarray(sparse_distances.data, dtype=float)
     return rows, cols, diffs, distances
 
 

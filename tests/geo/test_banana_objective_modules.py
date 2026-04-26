@@ -223,6 +223,7 @@ class _FakeCurve:
 class _FakeSurfaceWithGradient:
     def __init__(self, gamma_points):
         self._gamma = np.asarray(gamma_points, dtype=float)
+        self.x = self._gamma.reshape(-1).copy()
 
     def gamma(self):
         return self._gamma.copy()
@@ -3625,6 +3626,81 @@ class SmoothDistanceSelectionModuleTests(_ModuleTestCase):
             np.linalg.norm(diffs, axis=1),
             distances,
         )
+
+    def test_kdtree_pairwise_selection_returns_empty_arrays_when_no_pairs_match(self):
+        left = np.array([[0.0, 0.0, 0.0]], dtype=float)
+        right = np.array([[2.0, 0.0, 0.0]], dtype=float)
+
+        rows, cols, diffs, distances = self.module.select_pairwise_near_min(
+            left,
+            right,
+            threshold=0.5,
+        )
+
+        self.assertEqual(rows.tolist(), [])
+        self.assertEqual(cols.tolist(), [])
+        self.assertEqual(diffs.shape, (0, 3))
+        self.assertEqual(distances.tolist(), [])
+
+    def test_kdtree_pairwise_selection_reuses_supplied_trees(self):
+        left = np.array([[0.0, 0.0, 0.0]], dtype=float)
+        right = np.array([[0.25, 0.0, 0.0]], dtype=float)
+        left_tree = self.module.point_tree(left)
+        right_tree = self.module.point_tree(right)
+
+        with mock.patch.object(
+            self.module,
+            "point_tree",
+            side_effect=AssertionError("selection should reuse supplied trees"),
+        ):
+            rows, cols, diffs, distances = self.module.select_pairwise_near_min(
+                left,
+                right,
+                threshold=0.5,
+                left_tree=left_tree,
+                right_tree=right_tree,
+            )
+
+        self.assertEqual(rows.tolist(), [0])
+        self.assertEqual(cols.tolist(), [0])
+        np.testing.assert_allclose(diffs, [[-0.25, 0.0, 0.0]])
+        np.testing.assert_allclose(distances, [0.25])
+
+    def test_surface_tree_cache_reuses_until_surface_dofs_change(self):
+        class Surface:
+            def __init__(self):
+                self.x = np.array([0.0], dtype=float)
+                self.gamma_calls = 0
+
+            def gamma(self):
+                self.gamma_calls += 1
+                offset = float(self.x[0])
+                return np.array(
+                    [[[offset, 0.0, 0.0], [offset + 1.0, 0.0, 0.0]]],
+                    dtype=float,
+                )
+
+        surface = Surface()
+        points, tree, shape = self.module.surface_points_tree_shape(surface)
+        same_points, same_tree, same_shape = self.module.surface_points_tree_shape(
+            surface
+        )
+
+        self.assertEqual(surface.gamma_calls, 1)
+        self.assertIs(same_points, points)
+        self.assertIs(same_tree, tree)
+        self.assertEqual(same_shape, shape)
+
+        surface.x = np.array([2.0], dtype=float)
+        updated_points, updated_tree, updated_shape = (
+            self.module.surface_points_tree_shape(surface)
+        )
+
+        self.assertEqual(surface.gamma_calls, 2)
+        self.assertIsNot(updated_points, points)
+        self.assertIsNot(updated_tree, tree)
+        self.assertEqual(updated_shape, shape)
+        np.testing.assert_allclose(updated_points[:, 0], [2.0, 3.0])
 
 
 class SingleStageConstraintModuleTests(_ModuleTestCase):

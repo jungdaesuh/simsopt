@@ -7,6 +7,7 @@ from banana_opt.smooth_distance_selection import (
     point_tree,
     select_pairwise_near_min,
     surface_dgamma_by_dcoeff_derivative,
+    surface_points_tree_shape,
 )
 
 
@@ -96,6 +97,7 @@ def smooth_min_curve_curve_signed_constraint(
             curve_points[i],
             curve_points[j],
             selection_threshold,
+            left_tree=curve_trees[i],
             right_tree=curve_trees[j],
         )
         selected_distances.append(distances)
@@ -155,10 +157,9 @@ def smooth_min_curve_surface_signed_constraint(
     *,
     include_hard_signal=False,
 ):
-    surface_gamma = np.asarray(surface.gamma(), dtype=float)
-    flat_surface = surface_gamma.reshape((-1, 3))
-    surface_tree = point_tree(flat_surface)
+    flat_surface, surface_tree, surface_gamma_shape = surface_points_tree_shape(surface)
     curve_points = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
+    curve_trees = [None] * len(curve_points)
     hard_min = np.inf
     curve_blocks = []
     for curve_index, curve_gamma in enumerate(curve_points):
@@ -173,10 +174,13 @@ def smooth_min_curve_surface_signed_constraint(
     for curve_index, block_min in curve_blocks:
         if block_min > selection_threshold:
             continue
+        if curve_trees[curve_index] is None:
+            curve_trees[curve_index] = point_tree(curve_points[curve_index])
         rows, cols, diffs, distances = select_pairwise_near_min(
             curve_points[curve_index],
             flat_surface,
             selection_threshold,
+            left_tree=curve_trees[curve_index],
             right_tree=surface_tree,
         )
         selected_distances.append(distances)
@@ -209,7 +213,7 @@ def smooth_min_curve_surface_signed_constraint(
     if np.any(surface_gradient):
         derivative += surface_dgamma_by_dcoeff_derivative(
             surface,
-            surface_gradient.reshape(surface_gamma.shape),
+            surface_gradient.reshape(surface_gamma_shape),
         )
     grad = np.asarray(derivative(objective_optimizable), dtype=float)
     signed_value = float(minimum_distance) - float(smooth_min)
@@ -246,11 +250,10 @@ def smooth_min_surface_surface_signed_constraint(
     *,
     include_hard_signal=False,
 ):
-    gamma_1 = np.asarray(surface_1.gamma(), dtype=float)
-    gamma_2 = np.asarray(surface_2.gamma(), dtype=float)
-    flat_gamma_1 = gamma_1.reshape((-1, 3))
-    flat_gamma_2 = gamma_2.reshape((-1, 3))
-    flat_gamma_2_tree = point_tree(flat_gamma_2)
+    flat_gamma_1, flat_gamma_1_tree, gamma_1_shape = surface_points_tree_shape(surface_1)
+    flat_gamma_2, flat_gamma_2_tree, gamma_2_shape = surface_points_tree_shape(
+        surface_2
+    )
     hard_min = pairwise_block_min(
         flat_gamma_1,
         flat_gamma_2,
@@ -261,6 +264,7 @@ def smooth_min_surface_surface_signed_constraint(
         flat_gamma_1,
         flat_gamma_2,
         hard_min + selection_window,
+        left_tree=flat_gamma_1_tree,
         right_tree=flat_gamma_2_tree,
     )
     smooth_min, weights = smoothmin_selected(
@@ -278,11 +282,11 @@ def smooth_min_surface_surface_signed_constraint(
     derivative = _new_derivative()
     derivative += surface_dgamma_by_dcoeff_derivative(
         surface_1,
-        gradient_1.reshape(gamma_1.shape),
+        gradient_1.reshape(gamma_1_shape),
     )
     derivative += surface_dgamma_by_dcoeff_derivative(
         surface_2,
-        gradient_2.reshape(gamma_2.shape),
+        gradient_2.reshape(gamma_2_shape),
     )
     grad = np.asarray(derivative(objective_optimizable), dtype=float)
     signed_value = float(minimum_distance) - float(smooth_min)
@@ -318,9 +322,10 @@ def smooth_min_surface_stack_signed_constraint(
     *,
     include_hard_signal=False,
 ):
-    surface_gammas = [np.asarray(surface.gamma(), dtype=float) for surface in surfaces]
-    flat_gammas = [gamma.reshape((-1, 3)) for gamma in surface_gammas]
-    flat_trees = [point_tree(gamma) for gamma in flat_gammas]
+    surface_entries = [surface_points_tree_shape(surface) for surface in surfaces]
+    flat_gammas = [points for points, _tree, _shape in surface_entries]
+    flat_trees = [tree for _points, tree, _shape in surface_entries]
+    surface_gamma_shapes = [shape for _points, _tree, shape in surface_entries]
     pair_blocks = []
     hard_min = np.inf
     for upper_index in range(1, len(flat_gammas)):
@@ -344,6 +349,7 @@ def smooth_min_surface_stack_signed_constraint(
             flat_gammas[lower_index],
             flat_gammas[upper_index],
             selection_threshold,
+            left_tree=flat_trees[lower_index],
             right_tree=flat_trees[upper_index],
         )
         selected_distances.append(distances)
@@ -375,15 +381,15 @@ def smooth_min_surface_stack_signed_constraint(
         )
 
     derivative = _new_derivative()
-    for surface, surface_gamma, point_gradient in zip(
+    for surface, surface_gamma_shape, point_gradient in zip(
         surfaces,
-        surface_gammas,
+        surface_gamma_shapes,
         point_gradients,
     ):
         if np.any(point_gradient):
             derivative += surface_dgamma_by_dcoeff_derivative(
                 surface,
-                point_gradient.reshape(surface_gamma.shape),
+                point_gradient.reshape(surface_gamma_shape),
             )
     grad = np.asarray(derivative(objective_optimizable), dtype=float)
     signed_value = float(minimum_distance) - float(smooth_min)

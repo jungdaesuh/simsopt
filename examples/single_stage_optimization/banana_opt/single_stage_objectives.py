@@ -20,7 +20,11 @@ from banana_opt.hardware_constraint_schema import (
 )
 from banana_opt.poloidal_extent import poloidal_extent_rad_from_objective
 from banana_opt.single_stage_constraints import single_stage_constraint_activity_tolerances
-from banana_opt.smooth_distance_selection import pairwise_block_min, point_tree
+from banana_opt.smooth_distance_selection import (
+    pairwise_block_min,
+    point_tree,
+    surface_points_and_tree,
+)
 
 
 ALM_HARD_GEOMETRY_DUAL_SIGNALS = True
@@ -162,7 +166,7 @@ def _banana_current_alm_metadata_name(name: str) -> str:
 
 
 def _flat_surface_points(surface) -> np.ndarray:
-    return np.asarray(surface.gamma(), dtype=float).reshape((-1, 3))
+    return surface_points_and_tree(surface)[0]
 
 
 def _hard_min_curve_curve_signed_constraint(curves, minimum_distance):
@@ -182,8 +186,7 @@ def _hard_min_curve_curve_signed_constraint(curves, minimum_distance):
 
 
 def _hard_min_curve_surface_signed_constraint(curves, surface, minimum_distance):
-    flat_surface = _flat_surface_points(surface)
-    surface_tree = point_tree(flat_surface)
+    flat_surface, surface_tree = surface_points_and_tree(surface)
     hard_min = min(
         pairwise_block_min(
             np.asarray(curve.gamma(), dtype=float),
@@ -201,19 +204,20 @@ def _hard_min_surface_surface_signed_constraint(
     surface_2,
     minimum_distance,
 ):
-    flat_surface_2 = _flat_surface_points(surface_2)
+    flat_surface_2, surface_2_tree = surface_points_and_tree(surface_2)
     hard_min = pairwise_block_min(
         _flat_surface_points(surface_1),
         flat_surface_2,
-        right_tree=point_tree(flat_surface_2),
+        right_tree=surface_2_tree,
     )
     signed_value = float(minimum_distance) - float(hard_min)
     return signed_value, _positive_violation(signed_value)
 
 
 def _hard_min_surface_stack_signed_constraint(surfaces, minimum_distance):
-    surface_points = [_flat_surface_points(surface) for surface in surfaces]
-    surface_trees = [point_tree(points) for points in surface_points]
+    surface_entries = [surface_points_and_tree(surface) for surface in surfaces]
+    surface_points = [points for points, _tree in surface_entries]
+    surface_trees = [tree for _points, tree in surface_entries]
     hard_min = min(
         pairwise_block_min(
             surface_points[index - 1],
