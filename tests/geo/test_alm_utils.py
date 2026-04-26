@@ -1541,18 +1541,28 @@ class MinimizeAlmTests(unittest.TestCase):
                 "stationarity_norm": 0.0,
             }
 
-        result = module.minimize_alm(
-            np.array([0.0]),
-            ["demo_constraint"],
-            evaluate_problem,
-            settings,
-            {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
-        )
+        with patch.object(
+            module,
+            "_constraint_history_diagnostics_from_source",
+            wraps=module._constraint_history_diagnostics_from_source,
+        ) as materialize_diagnostics:
+            result = module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+            )
 
         self.assertFalse(result.success)
         self.assertEqual(len(result.history), 1)
         self.assertEqual(result.alm_summary["history_truncated_count"], 2)
         self.assertEqual(result.history[0]["outer_termination"], "max_outer")
+        self.assertEqual(materialize_diagnostics.call_count, 1)
+        self.assertNotIn(
+            module._HISTORY_DIAGNOSTICS_SOURCE_KEY,
+            result.history[0],
+        )
 
     def test_minimize_alm_short_circuits_zero_step_infeasible_stall(self):
         module = load_alm_utils_module()

@@ -8,6 +8,7 @@ from scipy.optimize import minimize, nnls
 
 ALM_SCHEMA_VERSION = "alm_normalized_constraints_v1"
 _MappingValue = TypeVar("_MappingValue")
+_HISTORY_DIAGNOSTICS_SOURCE_KEY = "_constraint_history_diagnostics_source"
 
 
 def _read_only_mapping(mapping: Mapping[str, _MappingValue]) -> Mapping[str, _MappingValue]:
@@ -526,6 +527,10 @@ def _as_float_list(values) -> list[float]:
     return np.asarray(values, dtype=float).reshape(-1).tolist()
 
 
+def _optional_array_to_float_list(values) -> list[float] | None:
+    return None if values is None else _as_float_list(values)
+
+
 def _max_value(values: np.ndarray) -> float:
     return float(np.max(values)) if values.size > 0 else 0.0
 
@@ -537,6 +542,15 @@ def _optional_float_list(evaluation: dict, key: str, fallback) -> list[float] | 
     if values is None:
         return None
     return _as_float_list(values)
+
+
+def _optional_float_array(evaluation: dict, key: str, fallback) -> np.ndarray | None:
+    values = evaluation.get(key)
+    if values is None:
+        values = fallback
+    if values is None:
+        return None
+    return np.asarray(values, dtype=float).reshape(-1).copy()
 
 
 def _optional_string_list(evaluation: dict, key: str) -> list[str] | None:
@@ -709,7 +723,7 @@ def _multiplier_interpretation(evaluation: dict) -> str:
     return "differentiable_alm_multipliers"
 
 
-def _constraint_history_diagnostics(
+def _constraint_history_diagnostics_source(
     evaluation: dict,
     multipliers: np.ndarray,
     penalty,
@@ -719,66 +733,70 @@ def _constraint_history_diagnostics(
     routing_state: ALMConstraintRoutingState,
     feasibility_gate: float,
 ) -> dict:
-    multiplier_array = np.asarray(multipliers, dtype=float)
+    multiplier_array = np.asarray(multipliers, dtype=float).reshape(-1).copy()
     penalty_values = _penalty_values(penalty, multiplier_array.size)
+    solver_constraint_array = (
+        np.asarray(solver_constraint_values, dtype=float).reshape(-1).copy()
+    )
+    feasibility_array = np.asarray(feasibility_values, dtype=float).reshape(-1).copy()
     positive_shift, augmented_terms = _positive_shift_and_augmented_terms(
         evaluation,
         multiplier_array,
         penalty_values,
-        solver_constraint_values,
+        solver_constraint_array,
     )
-    active_pressure = positive_shift * np.asarray(solver_constraint_values, dtype=float)
-    raw_hard_violation_values = _optional_float_list(
+    raw_hard_violation_values = _optional_float_array(
         evaluation,
         "raw_hard_violation_values",
         routing_state.signal_state.hard_violation_values,
     )
-    raw_hard_max_violation = (
-        None
-        if raw_hard_violation_values is None
-        else _max_value(np.asarray(raw_hard_violation_values))
-    )
-    constraint_blocks = _optional_string_list(evaluation, "constraint_blocks")
-    block_diagnostics = _constraint_block_history_diagnostics(
-        constraint_names,
-        constraint_blocks,
-        feasibility_values,
-        raw_hard_violation_values,
-        positive_shift,
-        augmented_terms,
-    )
     return {
-        "raw_signed_constraint_values": _optional_float_list(
+        "constraint_names": [str(name) for name in constraint_names],
+        "feasibility_values": feasibility_array,
+        "raw_signed_constraint_values": _optional_float_array(
             evaluation,
             "raw_dual_update_values",
-            solver_constraint_values,
+            solver_constraint_array,
         ),
-        "normalized_signed_constraint_values": _optional_float_list(
+        "normalized_signed_constraint_values": _optional_float_array(
             evaluation,
             "normalized_signed_constraint_values",
-            solver_constraint_values,
+            solver_constraint_array,
         ),
         "raw_hard_violation_values": raw_hard_violation_values,
-        "normalized_feasibility_values": _optional_float_list(
+        "normalized_feasibility_values": _optional_float_array(
             evaluation,
             "normalized_feasibility_values",
-            feasibility_values,
+            feasibility_array,
         ),
-        "constraint_scales": _optional_float_list(
+        "constraint_scales": _optional_float_array(
             evaluation,
             "constraint_scales",
             None,
         ),
-        "constraint_blocks": constraint_blocks,
-        "normalized_multipliers": _as_float_list(multiplier_array),
+        "constraint_blocks": _optional_string_list(evaluation, "constraint_blocks"),
+        "normalized_multipliers": multiplier_array,
         "raw_dual_estimates": _raw_dual_estimates(multiplier_array, evaluation),
-        "penalty_values": _as_float_list(penalty_values),
-        "positive_shift_values": _as_float_list(positive_shift),
-        "augmented_term_by_constraint": _as_float_list(augmented_terms),
-        "active_pressure_by_constraint": _as_float_list(active_pressure),
-        "surrogate_minus_hard_normalized_gap": _as_float_list(
-            routing_state.signal_state.surrogate_signed_constraint_values
-            - routing_state.signal_state.hard_signed_constraint_values
+        "penalty_values": penalty_values,
+        "positive_shift_values": (
+            np.asarray(positive_shift, dtype=float).reshape(-1).copy()
+        ),
+        "augmented_term_by_constraint": (
+            np.asarray(augmented_terms, dtype=float).reshape(-1).copy()
+        ),
+        "active_pressure_by_constraint": (
+            np.asarray(positive_shift, dtype=float).reshape(-1)
+            * solver_constraint_array
+        ),
+        "surrogate_minus_hard_normalized_gap": (
+            np.asarray(
+                routing_state.signal_state.surrogate_signed_constraint_values,
+                dtype=float,
+            ).reshape(-1)
+            - np.asarray(
+                routing_state.signal_state.hard_signed_constraint_values,
+                dtype=float,
+            ).reshape(-1)
         ),
         "surrogate_hard_sign_mismatch_by_constraint": _surrogate_hard_sign_mismatch(
             routing_state.signal_state.surrogate_signed_constraint_values,
@@ -797,9 +815,97 @@ def _constraint_history_diagnostics(
             feasibility_gate,
         ),
         "multiplier_interpretation": _multiplier_interpretation(evaluation),
+    }
+
+
+def _constraint_history_diagnostics_from_source(source: dict) -> dict:
+    raw_hard_violation_values = _optional_array_to_float_list(
+        source["raw_hard_violation_values"]
+    )
+    raw_hard_max_violation = (
+        None
+        if raw_hard_violation_values is None
+        else _max_value(np.asarray(raw_hard_violation_values, dtype=float))
+    )
+    block_diagnostics = _constraint_block_history_diagnostics(
+        source["constraint_names"],
+        source["constraint_blocks"],
+        source["feasibility_values"],
+        raw_hard_violation_values,
+        source["positive_shift_values"],
+        source["augmented_term_by_constraint"],
+    )
+    return {
+        "raw_signed_constraint_values": _as_float_list(
+            source["raw_signed_constraint_values"]
+        ),
+        "normalized_signed_constraint_values": _as_float_list(
+            source["normalized_signed_constraint_values"]
+        ),
+        "raw_hard_violation_values": raw_hard_violation_values,
+        "normalized_feasibility_values": _as_float_list(
+            source["normalized_feasibility_values"]
+        ),
+        "constraint_scales": _optional_array_to_float_list(
+            source["constraint_scales"]
+        ),
+        "constraint_blocks": source["constraint_blocks"],
+        "normalized_multipliers": _as_float_list(source["normalized_multipliers"]),
+        "raw_dual_estimates": source["raw_dual_estimates"],
+        "penalty_values": _as_float_list(source["penalty_values"]),
+        "positive_shift_values": _as_float_list(source["positive_shift_values"]),
+        "augmented_term_by_constraint": _as_float_list(
+            source["augmented_term_by_constraint"]
+        ),
+        "active_pressure_by_constraint": _as_float_list(
+            source["active_pressure_by_constraint"]
+        ),
+        "surrogate_minus_hard_normalized_gap": _as_float_list(
+            source["surrogate_minus_hard_normalized_gap"]
+        ),
+        "surrogate_hard_sign_mismatch_by_constraint": source[
+            "surrogate_hard_sign_mismatch_by_constraint"
+        ],
+        "objective_to_augmented_term_ratio": source[
+            "objective_to_augmented_term_ratio"
+        ],
+        "augmented_gradient_norm": source["augmented_gradient_norm"],
+        "surrogate_kkt_stationarity_norm": source["surrogate_kkt_stationarity_norm"],
+        "multiplier_interpretation": source["multiplier_interpretation"],
         "max_raw_hard_violation": raw_hard_max_violation,
         **block_diagnostics,
     }
+
+
+def _constraint_history_diagnostics(
+    evaluation: dict,
+    multipliers: np.ndarray,
+    penalty,
+    constraint_names: Sequence[str],
+    solver_constraint_values: np.ndarray,
+    feasibility_values: np.ndarray,
+    routing_state: ALMConstraintRoutingState,
+    feasibility_gate: float,
+) -> dict:
+    return _constraint_history_diagnostics_from_source(
+        _constraint_history_diagnostics_source(
+            evaluation,
+            multipliers,
+            penalty,
+            constraint_names,
+            solver_constraint_values,
+            feasibility_values,
+            routing_state,
+            feasibility_gate,
+        )
+    )
+
+
+def _materialize_history_entry_diagnostics(entry: dict) -> dict:
+    source = entry.pop(_HISTORY_DIAGNOSTICS_SOURCE_KEY, None)
+    if source is not None:
+        entry.update(_constraint_history_diagnostics_from_source(source))
+    return entry
 
 
 def _alm_summary_diagnostics(
@@ -1058,6 +1164,7 @@ def _sanitize_nonfinite_inner_evaluation(
 
 
 def _snapshot_history_entry(entry: dict) -> dict:
+    _materialize_history_entry_diagnostics(entry)
     return {
         key: value.copy() if isinstance(value, list) else value
         for key, value in entry.items()
@@ -2160,6 +2267,7 @@ def minimize_alm(
     update_feasibility_tol = max(settings.feasibility_tol, 1.0 / penalty)
     update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
     best_feasible: ALMFeasibleIncumbent | None = None
+    defer_history_diagnostics = history_callback is None
 
     def _current_penalty_argument():
         if block_penalty_state is None:
@@ -2183,7 +2291,7 @@ def minimize_alm(
             return float(settings.penalty_scale)
         return max(float(value) for value in block_penalty_state.scales_by_block.values())
 
-    def _append_history_entry(entry: dict) -> None:
+    def _append_history_entry(entry: dict) -> dict:
         nonlocal history_truncated_count
         history.append(entry)
         if settings.history_max_entries is not None:
@@ -2191,6 +2299,32 @@ def minimize_alm(
             if excess_entries > 0:
                 history_truncated_count += excess_entries
                 del history[:excess_entries]
+        return history[-1]
+
+    def _attach_history_diagnostics(
+        entry: dict,
+        evaluation: dict,
+        multipliers_state: np.ndarray,
+        penalty_state,
+        solver_values: np.ndarray,
+        feasibility_state: np.ndarray,
+        routing_state: ALMConstraintRoutingState,
+        feasibility_gate: float,
+    ) -> None:
+        source = _constraint_history_diagnostics_source(
+            evaluation,
+            multipliers_state,
+            penalty_state,
+            constraint_names,
+            solver_values,
+            feasibility_state,
+            routing_state,
+            feasibility_gate,
+        )
+        if defer_history_diagnostics:
+            entry[_HISTORY_DIAGNOSTICS_SOURCE_KEY] = source
+        else:
+            entry.update(_constraint_history_diagnostics_from_source(source))
 
     def _emit_history_snapshot(latest_entry: dict) -> None:
         if history_callback is None:
@@ -2246,6 +2380,8 @@ def minimize_alm(
         if inner_result is not None:
             inner_optimizer_success = bool(getattr(inner_result, "success", False))
             inner_optimizer_message = str(getattr(inner_result, "message", ""))
+        for entry in history:
+            _materialize_history_entry_diagnostics(entry)
         conditioning = _conditioning_metrics(evaluation)
         alm_summary = _alm_summary(
             termination_reason=termination_reason,
@@ -2761,17 +2897,15 @@ def minimize_alm(
                     }
                 )
                 history[-1].update(current_conditioning)
-                history[-1].update(
-                    _constraint_history_diagnostics(
-                        current_eval,
-                        multipliers,
-                        penalty_argument,
-                        constraint_names,
-                        current_solver_constraint_values,
-                        current_feasibility_values,
-                        current_routing_state,
-                        effective_feasibility_tol,
-                    )
+                _attach_history_diagnostics(
+                    history[-1],
+                    current_eval,
+                    multipliers,
+                    penalty_argument,
+                    current_solver_constraint_values,
+                    current_feasibility_values,
+                    current_routing_state,
+                    effective_feasibility_tol,
                 )
                 _emit_history_snapshot(history[-1])
                 final_eval = current_eval
@@ -3155,20 +3289,18 @@ def minimize_alm(
                 "multiplier_cap_binding": False,
                 "multiplier_cap_binding_indices": [],
             }
+            history_entry = _append_history_entry(history_entry)
             history_entry.update(_conditioning_metrics(final_eval))
-            history_entry.update(
-                _constraint_history_diagnostics(
-                    final_eval,
-                    multipliers,
-                    penalty_argument,
-                    constraint_names,
-                    solver_constraint_values,
-                    feasibility_values,
-                    routing_state,
-                    update_feasibility_tol,
-                )
+            _attach_history_diagnostics(
+                history_entry,
+                final_eval,
+                multipliers,
+                penalty_argument,
+                solver_constraint_values,
+                feasibility_values,
+                routing_state,
+                update_feasibility_tol,
             )
-            _append_history_entry(history_entry)
             hard_feasible_strict = routing_state.hard_max_violation <= settings.feasibility_tol
             hard_feasible_for_update = (
                 routing_state.hard_max_violation <= effective_feasibility_tol
