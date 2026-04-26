@@ -102,6 +102,8 @@ fi
 export HF_HUB_DISABLE_TELEMETRY=1
 export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-${REPO_ROOT}/.artifacts/jax_compilation_cache/hf-production-proof}"
 export SIMSOPT_JAX_CUDA_LIBRARY_MODE="${SIMSOPT_JAX_CUDA_LIBRARY_MODE:-bundled}"
+# Keep JAX from reserving most VRAM before the proof kernels allocate.
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
 mkdir -p "${RESULTS_DIR}" "${JAX_COMPILATION_CACHE_DIR}"
 
 OVERALL_RC=0

@@ -334,6 +334,7 @@ jobs:
       XLA_FLAGS: --xla_gpu_deterministic_ops=true
       JAX_PLATFORMS: cuda
       JAX_ENABLE_X64: "1"
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
 
     steps:
       - uses: actions/checkout@v4
@@ -398,6 +399,7 @@ jobs:
       XLA_FLAGS: --xla_gpu_deterministic_ops=true
       JAX_PLATFORMS: cuda
       JAX_ENABLE_X64: "1"
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
 
     steps:
       - uses: actions/checkout@v4

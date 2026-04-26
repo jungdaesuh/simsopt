@@ -2776,6 +2776,17 @@ def _h200_production_proof_workflow_path() -> Path:
     return _workflow_path("jax_h200_production_proof.yml")
 
 
+def _workflow_job_section(
+    workflow_text: str,
+    job_name: str,
+    next_job_name: str | None = None,
+) -> str:
+    section = workflow_text.split(f"  {job_name}:", maxsplit=1)[1]
+    if next_job_name is None:
+        return section
+    return section.split(f"  {next_job_name}:", maxsplit=1)[0]
+
+
 def _assert_named_benchmark_env_bootstrap(
     workflow_text: str, *, verify_python: bool = False
 ) -> None:
@@ -3653,6 +3664,12 @@ def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
     assert 'XLA_FLAGS: --xla_gpu_deterministic_ops=true' in workflow_text
     assert 'JAX_ENABLE_X64: "1"' in workflow_text
+    gpu_e2e = _workflow_job_section(
+        workflow_text,
+        "jax-gpu-e2e",
+        "jax-gpu-strict-purity",
+    )
+    assert 'XLA_PYTHON_CLIENT_PREALLOCATE: "false"' in gpu_e2e
     assert "benchmarks/stage2_e2e_comparison.py" in workflow_text
     assert "benchmarks/single_stage_init_parity.py" in workflow_text
     assert "--platform cuda" in workflow_text
@@ -3673,6 +3690,8 @@ def test_smoke_workflow_adds_cuda_strict_transfer_guard_pytest_lane():
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
     assert 'XLA_FLAGS: --xla_gpu_deterministic_ops=true' in workflow_text
     assert 'JAX_ENABLE_X64: "1"' in workflow_text
+    strict_purity = _workflow_job_section(workflow_text, "jax-gpu-strict-purity")
+    assert 'XLA_PYTHON_CLIENT_PREALLOCATE: "false"' in strict_purity
     assert "tests/test_jax_import_smoke.py" in workflow_text
     assert "gpu_ondevice_loops_with_host_constants" in workflow_text
     assert "grouped_biot_savart_gpu_spec_eval" in workflow_text

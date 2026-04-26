@@ -482,6 +482,10 @@ def segment_segment_distance_pure(
     self-intersection checks and penalties. The branching stays entirely in JAX
     control flow so the result is differentiable with respect to the input
     segment endpoints.
+
+    Branch map: first-segment point case, second-segment point case, then
+    nondegenerate segment-pair handling. The nondegenerate path splits into
+    near-parallel endpoint projections or the standard closest-point clamp.
     """
     segment_start = _as_explicit_float64(segment_start)
     segment_end = _as_explicit_float64(segment_end, reference=segment_start)

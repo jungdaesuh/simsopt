@@ -41,6 +41,9 @@ def _append_call_record(
                     "jax_compilation_cache_dir": os.environ.get(
                         "JAX_COMPILATION_CACHE_DIR"
                     ),
+                    "xla_python_client_preallocate": os.environ.get(
+                        "XLA_PYTHON_CLIENT_PREALLOCATE"
+                    ),
                 }
             )
             + "\n"

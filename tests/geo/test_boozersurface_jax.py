@@ -6609,6 +6609,19 @@ class TestStellsymMaskCPUJAXParity:
             err_msg=f"Index mismatch for mpol={mpol} ntor={ntor} nfp={nfp}",
         )
 
+    def test_mask_rejects_invalid_stellsym_grid_with_typed_error(self):
+        from simsopt.geo._surface_stellsym import surface_stellsym_mask_for_grid
+
+        with pytest.raises(ValueError, match="specific set of quadrature points"):
+            surface_stellsym_mask_for_grid(
+                mpol=2,
+                ntor=2,
+                nfp=2,
+                stellsym=True,
+                quadpoints_phi=np.asarray([0.0, 0.07, 0.21]),
+                quadpoints_theta=np.asarray([0.0, 0.2, 0.4]),
+            )
+
 
 @_skip_no_simsoptpp
 class TestBuildBoozerSurfaceRuntimeState:

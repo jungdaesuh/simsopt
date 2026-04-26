@@ -211,6 +211,7 @@ The main remaining single-stage work after the GPU-port proof is donor/seed/sear
 - Official JAX docs:
   - Persistent compilation cache: <https://docs.jax.dev/en/latest/persistent_compilation_cache.html>
   - Config options (`jax_log_compiles`, `jax_explain_cache_misses`): <https://docs.jax.dev/en/latest/config_options.html>
+  - GPU memory allocation (`XLA_PYTHON_CLIENT_PREALLOCATE`): <https://docs.jax.dev/en/latest/gpu_memory_allocation.html>
   - Transfer guard: <https://docs.jax.dev/en/latest/transfer_guard.html>
   - Buffer donation: <https://docs.jax.dev/en/latest/buffer_donation.html>
   - Device memory profiling: <https://docs.jax.dev/en/latest/device_memory_profiling.html>
@@ -230,39 +231,39 @@ The main remaining single-stage work after the GPU-port proof is donor/seed/sear
 
 - [x] **50.** ~~Update `docs/using_jax_backend.md` with transfer-guard operational guidance.~~ **DONE** — `docs/using_jax_backend.md` documents `transfer_guard="log"` as default (lines 58, 67), strict mode comparison (lines 77-88), and three-tier validation pattern (lines 285-328).
 - [x] **51.** ~~Document the spec-caching contract in `CLAUDE.md`.~~ **DONE** — CLAUDE.md lines 161-163 document the traceable runtime bundle cache contract and JIT closure strategy.
-- [ ] **52.** Document `XLA_PYTHON_CLIENT_PREALLOCATE=false` requirement in deployment scripts (currently only mentioned in `docs/source/jax_gpu_setup.rst:301-304`).
+- [x] **52.** ~~Document `XLA_PYTHON_CLIENT_PREALLOCATE=false` requirement in deployment scripts (currently only mentioned in `docs/source/jax_gpu_setup.rst:301-304`).~~ **DONE** — the CUDA deployment launch surfaces now set or document the VRAM preallocation contract directly, matching the official JAX GPU memory-allocation docs: `.github/workflows/jax_smoke.yml` GPU e2e and strict-purity jobs export `XLA_PYTHON_CLIENT_PREALLOCATE=false`, `benchmarks/hf_jobs/run_production_gpu_proof.sh` and `benchmarks/hf_jobs/launch_production_gpu_proof.py` hard-export it for HF proofs, and `scripts/runpod_single_stage_continuation.py` carries the continuation-kernel shell comment next to the export. Guarded by workflow/script contract tests.
 - [x] **53.** ~~`optimizer_jax_private/*.py` — add inline algorithm references (e.g., "Nocedal & Wright, *Numerical Optimization*, Algorithm 7.4" for L-BFGS two-loop).~~ **DONE** — `_lbfgs.py` documents the Nocedal-Wright Algorithm 7.4 two-loop recursion contract, and `_line_search.py` documents the strong-Wolfe bracketing/zoom reference.
 - [x] **54.** ~~`biotsavart.py:468-470` — add explicit `in_axes=(0,)` to the outer `jax.vmap` (currently relies on default).~~ **DONE** — both per-point and tangent-basis `vmap` calls now spell out `in_axes=(0,)`.
 - [x] **55.** ~~`biotsavart.py:224-227, 282-283, 314` — document padding overhead budget and the `chunk_size` tuning trade-off (when is 2× overhead acceptable vs when should chunk_size be raised).~~ **DONE** — coil, quadrature, and point chunk-padding sites now document the bounded zero-padding budget and when `chunk_size` should be retuned.
 - [ ] **56.** `biotsavart.py:208-222`, `surface_rzfourier.py:260-279` — profile the two-chunk fast path special-case against the padded `fori_loop` path. If <5% improvement, delete for simplicity.
 - [x] **57.** ~~Document the `biot_savart_d2B_by_dXdX` Hessian kernel memory cost (3×N tensor per point) at `biotsavart.py:550-553`.~~ **DONE** — the public Hessian helper now documents the `(npoints, 3, 3, 3)` dense materialization cost and points callers to `biot_savart_B_and_dB` unless second point derivatives are required.
-- [ ] **58.** `curve_geometry.py:486-572` — `segment_segment_distance_pure` uses 5 levels of nested `lax.cond`. Correct but hard to review. Add a comment diagram or split.
-- [ ] **59.** Document the PLU ill-conditioning finding in a code comment near `_solve_boozer_adjoint` at `surfaceobjectives_jax.py:265-268` — explain why iterative refinement is on by default and why CPU/JAX direct parity is impossible on the exact path. **(PARTIAL — docstring at lines 266-272 explains iterative refinement rationale, but does NOT mention CPU/JAX parity impossibility on exact path)**
+- [x] **58.** ~~`curve_geometry.py:486-572` — `segment_segment_distance_pure` uses 5 levels of nested `lax.cond`. Correct but hard to review. Add a comment diagram or split.~~ **DONE** — `segment_segment_distance_pure` now includes a branch map in its docstring without changing the JAX control-flow kernel.
+- [x] **59.** ~~Document the PLU ill-conditioning finding in a code comment near `_solve_boozer_adjoint` at `surfaceobjectives_jax.py:265-268` — explain why iterative refinement is on by default and why CPU/JAX direct parity is impossible on the exact path.~~ **DONE** — `_solve_boozer_adjoint` now documents that the exact-adjoint runtime uses operator-backed callbacks with residual refinement by default, and that dense PLU CPU LAPACK vs JAX/XLA solves are not a direct adjoint-vector parity contract. `_traceable_solve_plu_linearization` also states the residual-quality success contract.
 - [ ] **60.** Track upstream PR status for the simsopt merge (gate 5 of the ship gates — "Upstream PRs to simsopt: NOT STARTED" per `project_gpu_ship_gates.md`).
 
 ---
 
 ## Progress tracking
 
-**Last audit:** 2026-04-13
+**Last audit:** 2026-04-27
 
-**Total:** 60 items — **39 done, 5 partial, 16 open**
+**Total:** 60 items — **50 done, 2 partial, 8 open**
 
 | Tier | Items | Done | Partial | Open |
 |------|-------|------|---------|------|
 | 0 — Ship blockers | 3 | **3** | 0 | 0 |
 | 1 — Correctness/defensive | 8 | **8** (4-11) | 0 | 0 |
 | 2 — Transfer-guard | 11 | **11** (12-22) | 0 | 0 |
-| 3 — Performance | 15 | **7** (23,30-34,36) | **3** (24,27,37) | **5** (25,26,28,29,35) |
-| 4 — Test coverage | 12 | **8** (38-43,47,48) | **1** (45) | **3** (44,46,49) |
-| 5 — Docs/cleanup | 11 | **2** (50,51) | **1** (59) | **8** (52-58,60) |
+| 3 — Performance | 15 | **8** (23,30-34,36,37) | **2** (24,27) | **5** (25,26,28,29,35) |
+| 4 — Test coverage | 12 | **11** (38-43,45-49) | 0 | **1** (44) |
+| 5 — Docs/cleanup | 11 | **9** (50-55,57-59) | 0 | **2** (56,60) |
 
 **Estimated remaining effort:**
 - Tier 0: **CLEARED**
 - Tier 1: **CLEARED**
-- Tier 2: **NEARLY CLEARED** (item 15 remains partial; SciPy oracle lane still crosses a host NumPy boundary)
-- Tier 3: ~2-3 weeks (quick wins in ~2 days, rest incremental)
-- Tier 4: ~1 week (GPU test infrastructure)
-- Tier 5: ~2-3 days
+- Tier 2: **CLEARED**
+- Tier 3: benchmark/hardware gated (#24-#29, #35)
+- Tier 4: multi-GPU gated (#44 depends on #35)
+- Tier 5: one benchmark cleanup (#56) plus upstream PR tracking (#60)
 
 **None of these items invalidate the port.** The validation concluded the JAX port is correctly built on JAX idioms and production-grade for Stage-2 outer optimization on single-GPU (L4 evidence: 254/255 tests, 238 MB VRAM, bitwise reproducible; V100: 33× speedup). This list represents the punchlist between "research-usable on L4" and "production-ready strict-cuda on A100 with `disallow` baseline".

@@ -638,6 +638,8 @@ def _build_job_command(args: argparse.Namespace, *, resolved_repo_sha: str) -> s
         "set -euxo pipefail",
         "export PYTHONUNBUFFERED=1",
         "export HF_HUB_DISABLE_TELEMETRY=1",
+        "# Keep JAX from reserving most VRAM before the proof kernels allocate.",
+        "export XLA_PYTHON_CLIENT_PREALLOCATE=false",
         'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_deterministic_ops=true"',
         f'export SIMSOPT_HF_JOB_EXPECTED_JAX_VERSION="{DEFAULT_EXPECTED_JAX_VERSION}"',
         f'export SIMSOPT_JAX_CUDA_LIBRARY_MODE="{DEFAULT_CUDA_LIBRARY_MODE}"',

@@ -512,6 +512,29 @@ def test_run_production_gpu_proof_uses_repo_artifact_compilation_cache_by_defaul
     assert expected_cache_dir.is_dir()
 
 
+def test_run_production_gpu_proof_enforces_xla_python_client_preallocate_false(
+    tmp_path,
+):
+    repo_root, call_log = _build_fake_proof_repo(tmp_path)
+    results_dir = tmp_path / "results"
+    stage2_seed = _write_stage2_seed(tmp_path)
+    env = _fake_runner_env(XLA_PYTHON_CLIENT_PREALLOCATE="true")
+
+    completed = _run_production_gpu_proof(
+        repo_root,
+        results_dir,
+        stage2_seed,
+        _single_stage_seed_args(tmp_path),
+        env=env,
+    )
+
+    assert completed.returncode == 0
+    call_records = _read_call_records(call_log)
+    assert {record["xla_python_client_preallocate"] for record in call_records} == {
+        "false"
+    }
+
+
 def test_build_stage2_hf_plan_keeps_smoke_jobs_geometry_report_only():
     plan = build_stage2_hf_plan(20, None)
 
@@ -759,6 +782,7 @@ def test_launch_production_gpu_proof_dry_run_omits_smoke_geometry_override(tmp_p
     assert "SIMSOPT_HF_JOB_BOOTSTRAP_MODE" not in completed.stdout
     assert "SIMSOPT_HF_JOB_JAX_GPU_WHEEL_SPEC" not in completed.stdout
     assert 'SIMSOPT_JAX_CUDA_LIBRARY_MODE="bundled"' in completed.stdout
+    assert "export XLA_PYTHON_CLIENT_PREALLOCATE=false" in completed.stdout
     assert (
         "--single-stage-warm-start-run-dir "
         "/tmp/hf-production-proof/repo/benchmarks/fixtures/single_stage_seed_iota15"

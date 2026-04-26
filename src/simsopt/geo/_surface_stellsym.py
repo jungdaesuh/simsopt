@@ -39,7 +39,7 @@ def surface_stellsym_mask_for_grid(
     if _same_grid(phis, half_phi) and _same_grid(thetas, full_theta):
         mask[0, mpol + 1 :] = False
         return mask
-    raise Exception(
+    raise ValueError(
         "Stellarator symmetric BoozerExact surfaces require a specific set of "
         "quadrature points on the surface. See the "
         "SurfaceXYZTensorFourier.get_stellsym_mask() docstring for more "

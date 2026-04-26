@@ -1016,7 +1016,7 @@ def _canonicalize_traceable_exact_quadrature(booz_jax):
 
     try:
         mask_indices = _mask_indices_for(quadpoints_phi, quadpoints_theta)
-    except Exception:
+    except ValueError:
         phi_max = float(np.max(quadpoints_phi)) if quadpoints_phi.size else 0.0
         half_period_upper = 0.5 / float(booz_jax.nfp)
         if phi_max <= half_period_upper + 1e-12:
@@ -1049,7 +1049,15 @@ def _canonicalize_traceable_exact_quadrature(booz_jax):
 
 
 def _solve_boozer_adjoint(adjoint_state, rhs):
-    """Solve the transposed inner linearization for one adjoint runtime state."""
+    """Solve the transposed inner linearization for one adjoint runtime state.
+
+    The exact-adjoint runtime uses the operator-backed solve callbacks, whose
+    square-system path performs a residual refinement pass by default. Dense PLU
+    linearizations can be ill-conditioned enough that CPU LAPACK and JAX/XLA
+    triangular solves are not a direct vector-parity contract; parity checks
+    should compare residual success and objective behavior, not byte-identical
+    CPU/JAX adjoint vectors.
+    """
     return _checked_boozer_linear_solve(adjoint_state, rhs, transpose=True)
 
 
@@ -2399,6 +2407,7 @@ def _traceable_solve_plu_linearization(
     linear_solve_tol,
     transpose,
 ):
+    """Solve a dense PLU snapshot with a residual-quality success contract."""
     P, L, U = linear_solve_factors
     if transpose:
         y = jsp_linalg.solve_triangular(U.T, rhs, lower=True)
