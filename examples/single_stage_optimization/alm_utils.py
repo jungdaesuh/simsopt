@@ -719,6 +719,57 @@ def _constraint_history_diagnostics(
     }
 
 
+def _alm_summary_diagnostics(
+    *,
+    evaluation: dict,
+    multipliers: np.ndarray,
+    penalty,
+    constraint_names: Sequence[str],
+    solver_constraint_values: np.ndarray,
+    feasibility_values: np.ndarray,
+    routing_state: ALMConstraintRoutingState,
+    feasibility_gate: float,
+) -> dict:
+    multiplier_array = np.asarray(multipliers, dtype=float)
+    penalty_values = _penalty_values(penalty, multiplier_array.size)
+    positive_shift = np.maximum(
+        0.0,
+        multiplier_array
+        + penalty_values * np.asarray(solver_constraint_values, dtype=float),
+    )
+    augmented_terms = (
+        0.5
+        * (positive_shift - multiplier_array)
+        * (positive_shift + multiplier_array)
+        / penalty_values
+    )
+    raw_hard_violation_values = _optional_float_list(
+        evaluation,
+        "raw_hard_violation_values",
+        routing_state.signal_state.hard_violation_values,
+    )
+    return {
+        "raw_hard_violation_values": raw_hard_violation_values,
+        "augmented_gradient_norm": float(
+            np.linalg.norm(np.asarray(evaluation["grad"], dtype=float))
+        ),
+        "surrogate_kkt_stationarity_norm": _surrogate_kkt_stationarity_norm(
+            evaluation,
+            routing_state,
+            feasibility_gate,
+        ),
+        "multiplier_interpretation": _multiplier_interpretation(evaluation),
+        **_constraint_block_history_diagnostics(
+            constraint_names,
+            _optional_string_list(evaluation, "constraint_blocks"),
+            feasibility_values,
+            raw_hard_violation_values,
+            positive_shift,
+            augmented_terms,
+        ),
+    }
+
+
 def _alm_summary(
     *,
     termination_reason: str,
@@ -735,15 +786,15 @@ def _alm_summary(
     penalty_cap_reached: bool,
     history: list[dict],
 ) -> dict:
-    diagnostics = _constraint_history_diagnostics(
-        evaluation,
-        multipliers,
-        penalty,
-        constraint_names,
-        solver_constraint_values,
-        feasibility_values,
-        routing_state,
-        final_feasibility_tolerance,
+    diagnostics = _alm_summary_diagnostics(
+        evaluation=evaluation,
+        multipliers=multipliers,
+        penalty=penalty,
+        constraint_names=constraint_names,
+        solver_constraint_values=solver_constraint_values,
+        feasibility_values=feasibility_values,
+        routing_state=routing_state,
+        feasibility_gate=final_feasibility_tolerance,
     )
     raw_hard_violations = diagnostics["raw_hard_violation_values"]
     penalty_values = _penalty_values(penalty, len(constraint_names))
@@ -1449,21 +1500,61 @@ def _next_block_penalty_state(
 ) -> tuple[ALMBlockPenaltyState, list[str], list[str], dict[str, float]]:
     _validate_block_penalty_control_settings(settings)
     improvement_fraction = float(settings.block_penalty_improvement_fraction)
-    penalties_by_block = dict(state.penalties_by_block)
-    cap_reached_by_block = dict(state.cap_reached_by_block)
-    requested_by_block = dict(state.requested_by_block)
-    stall_counts_by_block = dict(state.stall_counts_by_block)
-    previous_violations_by_block = dict(state.previous_violations_by_block)
+    penalties_by_block = state.penalties_by_block
+    cap_reached_by_block = state.cap_reached_by_block
+    requested_by_block = state.requested_by_block
+    stall_counts_by_block = state.stall_counts_by_block
+    previous_violations_by_block = state.previous_violations_by_block
     grown_blocks: list[str] = []
     cap_hit_blocks: list[str] = []
     requested_growth_by_block: dict[str, float] = {}
+
+    def _set_penalty(block: str, value: float) -> None:
+        nonlocal penalties_by_block
+        if penalties_by_block.get(block) == value:
+            return
+        if penalties_by_block is state.penalties_by_block:
+            penalties_by_block = dict(state.penalties_by_block)
+        penalties_by_block[block] = value
+
+    def _set_cap_reached(block: str, value: bool) -> None:
+        nonlocal cap_reached_by_block
+        if cap_reached_by_block.get(block) == value:
+            return
+        if cap_reached_by_block is state.cap_reached_by_block:
+            cap_reached_by_block = dict(state.cap_reached_by_block)
+        cap_reached_by_block[block] = value
+
+    def _set_requested(block: str, value: float | None) -> None:
+        nonlocal requested_by_block
+        if requested_by_block.get(block) == value:
+            return
+        if requested_by_block is state.requested_by_block:
+            requested_by_block = dict(state.requested_by_block)
+        requested_by_block[block] = value
+
+    def _set_stall_count(block: str, value: int) -> None:
+        nonlocal stall_counts_by_block
+        if stall_counts_by_block.get(block) == value:
+            return
+        if stall_counts_by_block is state.stall_counts_by_block:
+            stall_counts_by_block = dict(state.stall_counts_by_block)
+        stall_counts_by_block[block] = value
+
+    def _set_previous_violation(block: str, value: float) -> None:
+        nonlocal previous_violations_by_block
+        if previous_violations_by_block.get(block) == value:
+            return
+        if previous_violations_by_block is state.previous_violations_by_block:
+            previous_violations_by_block = dict(state.previous_violations_by_block)
+        previous_violations_by_block[block] = value
 
     for block in state.penalties_by_block:
         violation = float(block_violations.get(block, 0.0))
         previous_violation = previous_violations_by_block.get(block)
         if violation <= float(settings.feasibility_tol):
-            stall_counts_by_block[block] = 0
-            previous_violations_by_block[block] = violation
+            _set_stall_count(block, 0)
+            _set_previous_violation(block, violation)
             continue
 
         failed_to_improve = (
@@ -1475,11 +1566,11 @@ def _next_block_penalty_state(
             )
         )
         if failed_to_improve:
-            stall_counts_by_block[block] = stall_counts_by_block.get(block, 0) + 1
+            _set_stall_count(block, stall_counts_by_block.get(block, 0) + 1)
         else:
-            stall_counts_by_block[block] = 0
+            _set_stall_count(block, 0)
 
-        previous_violations_by_block[block] = violation
+        _set_previous_violation(block, violation)
         if stall_counts_by_block[block] < int(settings.block_penalty_patience):
             continue
 
@@ -1488,21 +1579,30 @@ def _next_block_penalty_state(
         )
         penalty_max = state.max_by_block[block]
         requested_growth_by_block[block] = requested_penalty
-        requested_by_block[block] = requested_penalty
+        _set_requested(block, requested_penalty)
         if _block_penalty_growth_hits_cap(requested_penalty, penalty_max):
-            cap_reached_by_block[block] = True
+            _set_cap_reached(block, True)
             cap_hit_blocks.append(block)
         else:
-            penalties_by_block[block] = requested_penalty
+            _set_penalty(block, requested_penalty)
             grown_blocks.append(block)
-        stall_counts_by_block[block] = 0
+        _set_stall_count(block, 0)
+
+    if (
+        penalties_by_block is state.penalties_by_block
+        and cap_reached_by_block is state.cap_reached_by_block
+        and requested_by_block is state.requested_by_block
+        and stall_counts_by_block is state.stall_counts_by_block
+        and previous_violations_by_block is state.previous_violations_by_block
+    ):
+        return state, grown_blocks, cap_hit_blocks, requested_growth_by_block
 
     return (
         ALMBlockPenaltyState(
             constraint_blocks=state.constraint_blocks,
             penalties_by_block=penalties_by_block,
-            scales_by_block=dict(state.scales_by_block),
-            max_by_block=dict(state.max_by_block),
+            scales_by_block=state.scales_by_block,
+            max_by_block=state.max_by_block,
             cap_reached_by_block=cap_reached_by_block,
             requested_by_block=requested_by_block,
             stall_counts_by_block=stall_counts_by_block,

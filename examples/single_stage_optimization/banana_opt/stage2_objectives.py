@@ -1408,7 +1408,12 @@ def smooth_min_distance_signed_constraint(
             pair_blocks.append((i, j, block_min))
 
     if not pair_blocks:
-        return float(minimum_distance), zero_gradient_like(base_objective_optimizable.x)
+        hard_signed_value = float(minimum_distance)
+        return (
+            hard_signed_value,
+            zero_gradient_like(base_objective_optimizable.x),
+            hard_signed_value,
+        )
 
     selection_window = 4.0 * float(temperature)
     selected_distances = []
@@ -1450,7 +1455,9 @@ def smooth_min_distance_signed_constraint(
     grad = np.asarray(derivative(base_objective_optimizable), dtype=float)
     # grad = d(smooth_min)/dx, but signed_value = min_dist - smooth_min,
     # so d(signed_value)/dx = -d(smooth_min)/dx = -grad.
-    return float(minimum_distance) - smooth_min, -grad
+    signed_value = float(minimum_distance) - smooth_min
+    hard_signed_value = float(minimum_distance) - float(hard_min)
+    return signed_value, -grad, hard_signed_value
 
 
 def smooth_min_curve_surface_signed_constraint(
@@ -1461,7 +1468,12 @@ def smooth_min_curve_surface_signed_constraint(
     base_objective_optimizable,
 ):
     if not curves:
-        return float(minimum_distance), zero_gradient_like(base_objective_optimizable.x)
+        hard_signed_value = float(minimum_distance)
+        return (
+            hard_signed_value,
+            zero_gradient_like(base_objective_optimizable.x),
+            hard_signed_value,
+        )
 
     surface_gamma = np.asarray(surface.gamma(), dtype=float)
     surface_points = surface_gamma.reshape((-1, 3))
@@ -1522,14 +1534,15 @@ def smooth_min_curve_surface_signed_constraint(
     grad = np.asarray(derivative(base_objective_optimizable), dtype=float)
     # grad = d(smooth_min)/dx, but signed_value = min_dist - smooth_min,
     # so d(signed_value)/dx = -d(smooth_min)/dx = -grad.
-    return float(minimum_distance) - smooth_min, -grad
+    signed_value = float(minimum_distance) - smooth_min
+    hard_signed_value = float(minimum_distance) - float(hard_min)
+    return signed_value, -grad, hard_signed_value
 
 
-def _stage2_distance_signal(distance_obj, signed_value, emit_diagnostics):
+def _stage2_distance_minimum(distance_obj, hard_signed_value, emit_diagnostics):
     if emit_diagnostics:
-        min_dist = float(distance_obj.shortest_distance())
-        return min_dist, distance_obj.minimum_distance - min_dist
-    return None, signed_value
+        return float(distance_obj.shortest_distance())
+    return float(distance_obj.minimum_distance) - float(hard_signed_value)
 
 
 def evaluate_stage2_alm_problem(
@@ -1571,15 +1584,19 @@ def evaluate_stage2_alm_problem(
         Jls.dJ(partials=True)(base_objective_optimizable), dtype=float
     )
 
-    curve_curve_signed_value, curve_curve_grad = smooth_min_distance_signed_constraint(
+    (
+        curve_curve_signed_value,
+        curve_curve_grad,
+        curve_curve_hard_signed_value,
+    ) = smooth_min_distance_signed_constraint(
         Jccdist.curves,
         Jccdist.minimum_distance,
         distance_smoothing,
         base_objective_optimizable,
     )
-    curve_curve_min_dist, curve_curve_hard_signed_value = _stage2_distance_signal(
+    curve_curve_min_dist = _stage2_distance_minimum(
         Jccdist,
-        curve_curve_signed_value,
+        curve_curve_hard_signed_value,
         emit_diagnostics,
     )
     curve_curve_violation = upper_bound_residual(
@@ -1590,7 +1607,11 @@ def evaluate_stage2_alm_problem(
         Jcsdist is not None and smooth_min_curve_surface_signed_constraint is not None
     )
     if include_coil_surface:
-        curve_surface_signed_value, curve_surface_grad = (
+        (
+            curve_surface_signed_value,
+            curve_surface_grad,
+            curve_surface_hard_signed_value,
+        ) = (
             smooth_min_curve_surface_signed_constraint(
                 Jcsdist.curves,
                 Jcsdist.surface,
@@ -1599,12 +1620,10 @@ def evaluate_stage2_alm_problem(
                 base_objective_optimizable,
             )
         )
-        curve_surface_min_dist, curve_surface_hard_signed_value = (
-            _stage2_distance_signal(
-                Jcsdist,
-                curve_surface_signed_value,
-                emit_diagnostics,
-            )
+        curve_surface_min_dist = _stage2_distance_minimum(
+            Jcsdist,
+            curve_surface_hard_signed_value,
+            emit_diagnostics,
         )
         curve_surface_violation = upper_bound_residual(
             curve_surface_hard_signed_value,

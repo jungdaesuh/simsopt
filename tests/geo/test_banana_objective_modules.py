@@ -909,6 +909,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 smooth_min_distance_signed_constraint=lambda *_args: (
                     -0.008,
                     np.array([0.6, 0.2]),
+                    -0.008,
                 ),
                 smooth_max_curvature_signed_constraint=lambda *_args: (
                     0.75,
@@ -1010,7 +1011,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         Jccdist = _UnexpectedCurveDistance(0.05, 0.04)
         Jc = _FakeCurvatureObjective(40.0, [41.0, 39.5], 7.5)
-        distance_constraint = _affine_signed_constraint(
+        distance_constraint_base = _affine_signed_constraint(
             base_objective,
             0.012,
             [0.004, -0.002],
@@ -1022,6 +1023,10 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             [0.05, 0.03],
             include_violation=False,
         )
+
+        def distance_constraint(*args):
+            signed_value, grad = distance_constraint_base(*args)
+            return signed_value, grad, signed_value
 
         def evaluate_problem(x, multipliers, penalty):
             return self.module.evaluate_stage2_alm_problem(
@@ -1099,6 +1104,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             smooth_min_distance_signed_constraint=lambda *_args: (
                 -0.008,
                 np.array([0.6, 0.2]),
+                0.01,
             ),
             smooth_max_curvature_signed_constraint=lambda *_args: (
                 0.75,
@@ -1118,11 +1124,11 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             ],
         )
         expected_alm_state = {
-            "hard_signed_constraint_values": [-0.16, 0.025, 0.1, -0.40625],
+            "hard_signed_constraint_values": [0.2, 0.025, 0.1, -0.40625],
             "surrogate_signed_constraint_values": [-0.16, 0.01875, 0.1, -0.40625],
-            "hard_violation_values": [0.0, 0.025, 0.1, 0.0],
+            "hard_violation_values": [0.2, 0.025, 0.1, 0.0],
             "constraint_activity_tolerances": [0.4, 0.002, 0.0005, 6.25e-8],
-            "max_feasibility_violation": 0.1,
+            "max_feasibility_violation": 0.2,
             "total": 3.5887760416666665,
             "grad": [1.4345625, -0.2010625],
             "stationarity_norm": 1.4485840311533535,
@@ -1197,6 +1203,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 smooth_min_distance_signed_constraint=lambda *_args: (
                     np.nan,
                     np.array([np.nan, np.nan]),
+                    np.nan,
                 ),
                 smooth_max_curvature_signed_constraint=lambda *_args: (
                     0.75,
@@ -1311,6 +1318,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             smooth_min_distance_signed_constraint=lambda *_args: (
                 -0.008,
                 np.array([0.6, 0.2]),
+                -0.008,
             ),
             smooth_max_curvature_signed_constraint=lambda *_args: (
                 0.75,
@@ -1361,6 +1369,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             smooth_min_distance_signed_constraint=lambda *_args: (
                 -0.008,
                 np.array([0.6, 0.2]),
+                -0.008,
             ),
             smooth_max_curvature_signed_constraint=lambda *_args: (
                 0.75,
@@ -1469,6 +1478,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 smooth_min_distance_signed_constraint=lambda *_args: (
                     -0.008,
                     np.array([0.6, 0.2]),
+                    -0.008,
                 ),
                 smooth_max_curvature_signed_constraint=lambda *_args: (
                     0.75,
@@ -1604,6 +1614,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 smooth_min_distance_signed_constraint=lambda *_args: (
                     -0.008,
                     np.array([0.6, 0.2]),
+                    -0.008,
                 ),
                 smooth_max_curvature_signed_constraint=lambda *_args: (
                     0.75,
@@ -2184,7 +2195,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         objective = SimpleNamespace(x=np.array([2.0, -3.0]))
         curve = _FakeCurve(gamma_points=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
 
-        signed_value, grad = self.module.smooth_min_distance_signed_constraint(
+        signed_value, grad, hard_signed_value = self.module.smooth_min_distance_signed_constraint(
             [curve],
             minimum_distance=0.05,
             temperature=0.01,
@@ -2192,6 +2203,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
 
         self.assertAlmostEqual(signed_value, 0.05)
+        self.assertAlmostEqual(hard_signed_value, 0.05)
         np.testing.assert_allclose(grad, [0.0, 0.0])
 
     def test_smooth_min_curve_surface_signed_constraint_includes_surface_vjp(self):
@@ -2218,15 +2230,18 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 ),
             ),
         ):
-            signed_value, grad = self.module.smooth_min_curve_surface_signed_constraint(
-                [curve],
-                surface,
-                minimum_distance=0.05,
-                temperature=0.01,
-                base_objective_optimizable=SimpleNamespace(),
+            signed_value, grad, hard_signed_value = (
+                self.module.smooth_min_curve_surface_signed_constraint(
+                    [curve],
+                    surface,
+                    minimum_distance=0.05,
+                    temperature=0.01,
+                    base_objective_optimizable=SimpleNamespace(),
+                )
             )
 
         self.assertAlmostEqual(signed_value, 0.05 - np.sqrt(0.02**2 + 0.04**2))
+        self.assertAlmostEqual(hard_signed_value, 0.05 - np.sqrt(0.02**2 + 0.04**2))
         np.testing.assert_allclose(grad, [0.0, -0.04 / np.sqrt(0.02**2 + 0.04**2)])
 
 

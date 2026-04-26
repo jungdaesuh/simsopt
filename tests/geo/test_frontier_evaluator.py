@@ -428,6 +428,12 @@ print(
                 first = evaluator.evaluate([0.2])
                 self.assertEqual(evaluate_uncached.call_count, 1)
                 self.assertEqual(evaluator.cache_misses, 1)
+                cache_path = (
+                    Path(tmpdir)
+                    / first.cache_key[:2]
+                    / f"{first.cache_key}.json"
+                )
+                self.assertTrue(cache_path.exists())
 
             with patch.object(
                 module,
@@ -447,6 +453,46 @@ print(
                 self.assertEqual(evaluator.cache_hits, 1)
 
             self.assertEqual(first.to_json_dict(), second.to_json_dict())
+
+    def test_frontier_evaluator_memory_cache_evicts_lru_entries(self):
+        module = load_frontier_evaluator_module()
+        spec = self._demo_spec(module)
+        runtime_stub = SimpleNamespace(spec=spec)
+
+        def make_evaluation(self, candidate, *, cache_key):
+            del self
+            return _demo_evaluation(
+                module,
+                spec,
+                candidate=candidate,
+                cache_key=cache_key,
+                termination_message="lru",
+                diagnostics_source="unit-test",
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            module,
+            "build_single_stage_frontier_runtime",
+            return_value=runtime_stub,
+        ), patch.object(
+            module.SingleStageFrontierEvaluator,
+            "_evaluate_uncached",
+            autospec=True,
+            side_effect=make_evaluation,
+        ):
+            evaluator = module.SingleStageFrontierEvaluator.from_spec(
+                spec,
+                cache_dir=tmpdir,
+                cache_max_entries=2,
+            )
+            first = evaluator.evaluate([0.1])
+            second = evaluator.evaluate([0.2])
+            evaluator.evaluate([0.1])
+            third = evaluator.evaluate([0.3])
+
+            self.assertEqual(set(evaluator._cache), {first.cache_key, third.cache_key})
+            self.assertNotIn(second.cache_key, evaluator._cache)
+            self.assertEqual(len(evaluator._cache), 2)
 
     def test_frontier_runtime_rejects_independent_banana_current_mode(self):
         module = load_frontier_evaluator_module()

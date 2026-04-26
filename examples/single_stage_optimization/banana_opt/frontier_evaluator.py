@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import re
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -39,6 +40,7 @@ from .single_stage_objectives import (
 FRONTIER_EVALUATOR_SPEC_SCHEMA_VERSION = "single_stage_frontier_evaluator_spec_v1"
 FRONTIER_EVALUATION_SCHEMA_VERSION = "single_stage_frontier_evaluation_v1"
 FRONTIER_EVALUATOR_CACHE_SCHEMA_VERSION = "single_stage_frontier_evaluator_cache_v1"
+FRONTIER_EVALUATOR_MEMORY_CACHE_MAX_ENTRIES = 1024
 FRONTIER_EVALUATOR_CV_BUCKETS = (
     "surface_solve_failed",
     "geometry_state_unrestorable",
@@ -280,13 +282,17 @@ class SingleStageFrontierEvaluator:
         spec: SingleStageFrontierEvaluatorSpec,
         *,
         cache_dir: str | Path | None = None,
+        cache_max_entries: int = FRONTIER_EVALUATOR_MEMORY_CACHE_MAX_ENTRIES,
     ) -> None:
         self.spec = spec
         self.cache_dir = None if cache_dir is None else Path(cache_dir)
         if self.cache_dir is not None:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
+        if cache_max_entries <= 0:
+            raise ValueError("cache_max_entries must be positive")
+        self.cache_max_entries = int(cache_max_entries)
         self.runtime = build_single_stage_frontier_runtime(spec)
-        self._cache: dict[str, SingleStageFrontierEvaluation] = {}
+        self._cache: OrderedDict[str, SingleStageFrontierEvaluation] = OrderedDict()
         self.cache_hits = 0
         self.cache_misses = 0
 
@@ -296,8 +302,9 @@ class SingleStageFrontierEvaluator:
         spec: SingleStageFrontierEvaluatorSpec,
         *,
         cache_dir: str | Path | None = None,
+        cache_max_entries: int = FRONTIER_EVALUATOR_MEMORY_CACHE_MAX_ENTRIES,
     ) -> SingleStageFrontierEvaluator:
-        return cls(spec, cache_dir=cache_dir)
+        return cls(spec, cache_dir=cache_dir, cache_max_entries=cache_max_entries)
 
     def evaluate(
         self,
@@ -371,7 +378,17 @@ class SingleStageFrontierEvaluator:
     def _cache_path(self, cache_key: str) -> Path | None:
         if self.cache_dir is None:
             return None
-        return self.cache_dir / f"{cache_key}.json"
+        return self.cache_dir / cache_key[:2] / f"{cache_key}.json"
+
+    def _remember_cached(
+        self,
+        cache_key: str,
+        evaluation: SingleStageFrontierEvaluation,
+    ) -> None:
+        self._cache[cache_key] = evaluation
+        self._cache.move_to_end(cache_key)
+        while len(self._cache) > self.cache_max_entries:
+            self._cache.popitem(last=False)
 
     def _load_cached(
         self,
@@ -379,6 +396,7 @@ class SingleStageFrontierEvaluator:
     ) -> SingleStageFrontierEvaluation | None:
         cached = self._cache.get(cache_key)
         if cached is not None:
+            self._cache.move_to_end(cache_key)
             return cached
         cache_path = self._cache_path(cache_key)
         if cache_path is None or not cache_path.exists():
@@ -389,7 +407,7 @@ class SingleStageFrontierEvaluator:
         evaluation = SingleStageFrontierEvaluation.from_json_dict(
             payload["evaluation"]
         )
-        self._cache[cache_key] = evaluation
+        self._remember_cached(cache_key, evaluation)
         return evaluation
 
     def _store_cached(
@@ -397,10 +415,11 @@ class SingleStageFrontierEvaluator:
         cache_key: str,
         evaluation: SingleStageFrontierEvaluation,
     ) -> None:
-        self._cache[cache_key] = evaluation
+        self._remember_cached(cache_key, evaluation)
         cache_path = self._cache_path(cache_key)
         if cache_path is None:
             return
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "cache_schema_version": FRONTIER_EVALUATOR_CACHE_SCHEMA_VERSION,
             "evaluation": evaluation.to_json_dict(),

@@ -479,9 +479,22 @@ class SnapshotParityTests(unittest.TestCase):
             vjp=lambda _value: (lambda _objective: np.array([0.7, -0.4])),
         )
 
-        def smooth_min_distance_signed_constraint(curves, minimum_distance, temperature, objective):
+        def current_smooth_min_distance_signed_constraint(
+            curves, minimum_distance, temperature, objective
+        ):
             del curves, minimum_distance, temperature, objective
-            return -0.008, np.array([0.6, 0.2])
+            return -0.008, np.array([0.6, 0.2]), 0.01
+
+        def snapshot_smooth_min_distance_signed_constraint(
+            curves, minimum_distance, temperature, objective
+        ):
+            signed_value, grad, _hard_signed_value = current_smooth_min_distance_signed_constraint(
+                curves,
+                minimum_distance,
+                temperature,
+                objective,
+            )
+            return signed_value, grad
 
         def smooth_max_curvature_signed_constraint(curve, threshold, temperature, objective):
             del curve, threshold, temperature, objective
@@ -498,7 +511,7 @@ class SnapshotParityTests(unittest.TestCase):
                 "lower_bound_residual": self.alm_utils.lower_bound_residual,
                 "upper_bound_residual": self.alm_utils.upper_bound_residual,
                 "stage2_constraint_activity_tolerances": stage2_constraint_activity_tolerances,
-                "smooth_min_distance_signed_constraint": smooth_min_distance_signed_constraint,
+                "smooth_min_distance_signed_constraint": snapshot_smooth_min_distance_signed_constraint,
                 "smooth_max_curvature_signed_constraint": smooth_max_curvature_signed_constraint,
             },
         )["evaluate_stage2_alm_problem"]
@@ -541,14 +554,14 @@ class SnapshotParityTests(unittest.TestCase):
                 **common_args,
                 **overrides,
                 stage2_constraint_activity_tolerances=stage2_constraint_activity_tolerances,
-                smooth_min_distance_signed_constraint=smooth_min_distance_signed_constraint,
+                smooth_min_distance_signed_constraint=current_smooth_min_distance_signed_constraint,
                 smooth_max_curvature_signed_constraint=smooth_max_curvature_signed_constraint,
             )
 
         actual = evaluate_current()
         expected_normalized_constraints = [-0.16, 0.01875, 0.028571428571428595, -0.40625]
         expected_normalized_hard_constraints = [
-            -0.16,
+            0.2,
             0.05,
             0.028571428571428595,
             -0.40625,
@@ -589,7 +602,7 @@ class SnapshotParityTests(unittest.TestCase):
         )
         np.testing.assert_allclose(
             actual["hard_violation_values"],
-            [0.0, 0.05, 0.028571428571428595, 0.0],
+            [0.2, 0.05, 0.028571428571428595, 0.0],
         )
         np.testing.assert_allclose(
             actual["surrogate_signed_constraint_values"],
@@ -599,12 +612,12 @@ class SnapshotParityTests(unittest.TestCase):
             actual["hard_dual_update_values"],
             expected_normalized_hard_constraints,
         )
-        np.testing.assert_allclose(actual["feasibility_values"][0], 0.0)
+        np.testing.assert_allclose(actual["feasibility_values"][0], 0.2)
         np.testing.assert_allclose(actual["feasibility_values"][1], 0.05)
         np.testing.assert_allclose(actual["feasibility_values"][2], 0.028571428571428595)
         np.testing.assert_allclose(actual["feasibility_values"][3], 0.0)
         self.assertAlmostEqual(actual["base_value"], expected["base_value"])
-        self.assertAlmostEqual(actual["max_feasibility_violation"], 0.05)
+        self.assertAlmostEqual(actual["max_feasibility_violation"], 0.2)
         actual_diagnostics = evaluate_current(emit_diagnostics=True)
         np.testing.assert_allclose(
             actual_diagnostics["hard_signed_constraint_values"],

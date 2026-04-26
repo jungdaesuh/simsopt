@@ -193,6 +193,40 @@ class ResidualHelperTests(unittest.TestCase):
         self.assertEqual(requested, {"geometry": 100.0})
         self.assertEqual(next_state.penalties_by_block["geometry"], 10.0)
         self.assertTrue(next_state.cap_reached_by_block["geometry"])
+
+    def test_block_penalty_state_reuses_state_when_values_do_not_change(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=0.1,
+            block_penalties_enabled=True,
+        )
+        state = module._initial_block_penalty_state(
+            settings,
+            ["geometry", "current"],
+            initial_penalty=1.0,
+        )
+        state, _grown_blocks, _cap_hit_blocks, _requested = (
+            module._next_block_penalty_state(
+                state,
+                {"geometry": 0.0, "current": 0.0},
+                settings,
+            )
+        )
+
+        next_state, grown_blocks, cap_hit_blocks, requested = (
+            module._next_block_penalty_state(
+                state,
+                {"geometry": 0.0, "current": 0.0},
+                settings,
+            )
+        )
+
+        self.assertIs(next_state, state)
+        self.assertEqual(grown_blocks, [])
+        self.assertEqual(cap_hit_blocks, [])
+        self.assertEqual(requested, {})
         self.assertFalse(next_state.cap_reached_by_block["current"])
 
     def test_block_penalty_init_rejects_cap_below_initial_penalty(self):
@@ -420,6 +454,64 @@ class ResidualHelperTests(unittest.TestCase):
         self.assertAlmostEqual(diagnostics["surrogate_kkt_stationarity_norm"], 0.0)
         self.assertEqual(
             diagnostics["multiplier_interpretation"],
+            "differentiable_alm_multipliers",
+        )
+
+    def test_alm_summary_uses_summary_diagnostics_without_full_history_payload(self):
+        module = load_alm_utils_module()
+        evaluation = {
+            "total": 0.0,
+            "grad": np.zeros(1),
+            "constraint_values": np.array([0.2, -0.1, 0.5]),
+            "feasibility_values": np.array([0.2, 0.0, 0.5]),
+            "dual_update_values": np.array([0.2, -0.1, 0.5]),
+            "constraint_grads": [np.zeros(1), np.zeros(1), np.zeros(1)],
+            "raw_hard_violation_values": np.array([2.0, 0.0, 1000.0]),
+            "constraint_blocks": ["geometry", "geometry", "current"],
+        }
+        multipliers = np.array([0.1, 0.2, 0.3])
+        penalty = 4.0
+        solver_constraint_values = np.array([0.2, -0.1, 0.5])
+        feasibility_values = np.array([0.2, 0.0, 0.5])
+        routing_state = module._constraint_routing_state(
+            evaluation,
+            multipliers,
+            penalty,
+            feasibility_gate=1.0,
+        )
+
+        with patch.object(
+            module,
+            "_constraint_history_diagnostics",
+            side_effect=AssertionError("full diagnostics should not run"),
+        ):
+            summary = module._alm_summary(
+                termination_reason="max_outer_iterations",
+                evaluation=evaluation,
+                multipliers=multipliers,
+                penalty=penalty,
+                constraint_names=["gap", "length", "current"],
+                routing_state=routing_state,
+                feasibility_values=feasibility_values,
+                solver_constraint_values=solver_constraint_values,
+                final_stationarity_norm=0.0,
+                final_feasibility_tolerance=1.0,
+                multiplier_cap_binding=False,
+                penalty_cap_reached=False,
+                history=[],
+            )
+
+        self.assertEqual(summary["blocking_constraint_name"], "current")
+        self.assertEqual(
+            summary["block_max_normalized_violation"],
+            {"geometry": 0.2, "current": 0.5},
+        )
+        self.assertEqual(
+            summary["max_raw_hard_violation_by_constraint"],
+            {"gap": 2.0, "length": 0.0, "current": 1000.0},
+        )
+        self.assertEqual(
+            summary["multiplier_interpretation"],
             "differentiable_alm_multipliers",
         )
 
