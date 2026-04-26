@@ -317,6 +317,11 @@ def main() -> int:
         for current_A in currents
     ]
     summary = {
+        "dry_run": bool(args.dry_run),
+        "output_contract": (
+            "dry_run_summary_only" if args.dry_run else "materialized_smoke_summary"
+        ),
+        "contains_solver_outputs": not bool(args.dry_run),
         "stage2_bs_path": str(stage2_bs_path),
         "stage2_results_path": str(stage2_results_path) if stage2_results_path is not None else None,
         "stage2_artifact_results": stage2_artifact_results,

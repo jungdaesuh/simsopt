@@ -17,7 +17,6 @@ from workflow_runner_common import (  # noqa: E402
     parse_csv,
     resolved_optional_path,
     resolved_path,
-    timeout_or_none,
     write_csv_rows,
     write_dry_run_marker,
     write_json,
@@ -221,9 +220,11 @@ def build_summary(
     summary = {
         "experiment_family": "single_stage_iota_target_sweep",
         "dry_run": bool(args.dry_run),
-        "output_materialization": (
+        "output_contract": (
             "dry_run_summary_only" if args.dry_run else "materialized_single_stage_results"
         ),
+        "contains_solver_outputs": not args.dry_run
+        and any("results_path" in payload for payload in case_payloads),
         "goal_mode": "target",
         "init_only": bool(args.init_only),
         "plasma_surf_filename": Path(args.plasma_surf_filename).name,

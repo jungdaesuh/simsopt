@@ -147,6 +147,9 @@ class IotaTargetSweepTests(unittest.TestCase):
             self.assertEqual(result, 0)
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             self.assertTrue(summary["dry_run"])
+            self.assertEqual(summary["output_contract"], "dry_run_summary_only")
+            self.assertFalse(summary["contains_solver_outputs"])
+            self.assertNotIn("output_materialization", summary)
             self.assertEqual(summary["iota_targets"], [0.15, 0.2])
             self.assertEqual(len(summary["cases"]), 2)
             self.assertEqual(summary["cases"][0]["status"], "dry_run")
@@ -154,6 +157,32 @@ class IotaTargetSweepTests(unittest.TestCase):
             csv_text = summary_csv_path.read_text(encoding="utf-8")
             self.assertIn("case_id", csv_text)
             self.assertIn("iota_0p15", csv_text)
+
+    def test_build_summary_dry_run_contract_overrides_case_payload_shape(self):
+        module = load_iota_sweep_module()
+        args = SimpleNamespace(
+            dry_run=True,
+            init_only=False,
+            plasma_surf_filename="demo.nc",
+        )
+
+        summary = module.build_summary(
+            args,
+            iota_targets=[0.15],
+            stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            stage2_results_path=None,
+            stage2_results=None,
+            case_payloads=[
+                {
+                    "case_id": "iota_0p15",
+                    "results_path": "/tmp/results.json",
+                }
+            ],
+            summary_csv_path=Path("/tmp/summary.csv"),
+        )
+
+        self.assertEqual(summary["output_contract"], "dry_run_summary_only")
+        self.assertFalse(summary["contains_solver_outputs"])
 
     def test_result_summary_keeps_missing_numeric_metrics_json_portable(self):
         module = load_iota_sweep_module()
@@ -477,6 +506,52 @@ class BananaCurrentScanTests(unittest.TestCase):
             self.assertEqual(case["single_stage_status"], "failed")
             self.assertEqual(case["poincare_status"], "failed")
             self.assertIn("poincare_fallback_setup_failed", case["error_message"])
+
+class BananaCurrentScanSummaryTests(unittest.TestCase):
+    def test_summary_uses_shared_dry_run_output_contract(self):
+        module = load_banana_scan_module()
+        args = SimpleNamespace(dry_run=True, plasma_surf_filename="demo.nc")
+
+        summary = module.build_summary(
+            args,
+            stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            stage2_results_path=Path("/tmp/stage2/results.json"),
+            stage2_results={"init_only": False, "BANANA_CURRENT_A": 12000.0},
+            banana_currents_a=[0.0],
+            case_payloads=[
+                {
+                    "case_id": "current_0p0",
+                    "results_path": "/tmp/results.json",
+                }
+            ],
+            summary_csv_path=Path("/tmp/summary.csv"),
+        )
+
+        self.assertEqual(summary["output_contract"], "dry_run_summary_only")
+        self.assertFalse(summary["contains_solver_outputs"])
+        self.assertNotIn("output_materialization", summary)
+
+    def test_summary_reports_solver_outputs_when_case_results_exist(self):
+        module = load_banana_scan_module()
+        args = SimpleNamespace(dry_run=False, plasma_surf_filename="demo.nc")
+
+        summary = module.build_summary(
+            args,
+            stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            stage2_results_path=Path("/tmp/stage2/results.json"),
+            stage2_results={"init_only": False, "BANANA_CURRENT_A": 12000.0},
+            banana_currents_a=[0.0],
+            case_payloads=[
+                {
+                    "case_id": "current_0p0",
+                    "results_path": "/tmp/results.json",
+                }
+            ],
+            summary_csv_path=Path("/tmp/summary.csv"),
+        )
+
+        self.assertEqual(summary["output_contract"], "materialized_scan_outputs")
+        self.assertTrue(summary["contains_solver_outputs"])
 
 
 class BananaCurrentChainScalingTests(unittest.TestCase):

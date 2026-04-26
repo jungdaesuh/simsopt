@@ -657,9 +657,11 @@ def build_summary(
     return {
         "experiment_family": "banana_current_scan",
         "dry_run": bool(args.dry_run),
-        "output_materialization": (
+        "output_contract": (
             "dry_run_summary_only" if args.dry_run else "materialized_scan_outputs"
         ),
+        "contains_solver_outputs": not args.dry_run
+        and any("results_path" in payload for payload in case_payloads),
         "plasma_surf_filename": Path(args.plasma_surf_filename).name,
         "stage2_bs_path": str(stage2_bs_path),
         "stage2_results_path": str(stage2_results_path),

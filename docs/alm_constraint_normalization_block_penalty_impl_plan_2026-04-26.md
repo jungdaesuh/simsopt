@@ -88,7 +88,7 @@ applies_to
 traversal_policy
 alm_scale
 alm_block
-alm_activity_tolerance
+alm_activity_tolerance_fraction
 ```
 
 `ALMConstraintMetadata` is the SSOT for scale, block, raw threshold, scale source, activity tolerance, and objective/gradient/dual-update/feasibility/certification value-source labels.
@@ -267,6 +267,12 @@ ALM_OBJECTIVE_SCALE_FLOOR = 1.0e-12
 ```
 
 Use `ALM_PHYSICAL_SCALE_FLOOR` only for unit-bearing hardware scales after threshold resolution. Use `ALM_OBJECTIVE_SCALE_FLOOR` for dimensionless or objective-like constraints such as iota penalty, Boozer residual, QS error, and length penalty. In `thresholded_physics`, missing QS, Boozer, iota, or length thresholds should fail fast; floors protect against zero or tiny explicit thresholds, not missing configuration.
+
+## Legacy Artifact Compatibility
+
+- [x] Stage 2 artifacts missing `STAGE2_BS_SHA256` are intentionally rejected by current readers. Older warning-mode reuse is no longer part of the ALM normalization contract because the reader cannot verify checksum binding.
+- [x] Stage 2 artifacts with absent or legacy `CONTRACT_SCHEMA_VERSION=0` are intentionally rejected by current readers. Replaying historical artifacts now requires regenerating or upgrading them to the current constraint-contract schema before ALM/baseline comparison.
+- [x] This is a documented compatibility break, not a runtime fallback path.
 
 ## Implementation Plan
 

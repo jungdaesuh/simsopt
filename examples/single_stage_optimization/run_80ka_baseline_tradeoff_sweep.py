@@ -398,6 +398,9 @@ def build_summary(
     non_dominated = select_non_dominated_records(records, nondominated_metrics)
     return {
         "experiment_family": EXPERIMENT_FAMILY,
+        "dry_run": False,
+        "output_contract": "materialized_sweep_summary",
+        "contains_solver_outputs": True,
         "plasma_current_locked_A": LOCKED_BASELINE_PLASMA_CURRENT_A,
         "tf_current_locked_A": LOCKED_BASELINE_TF_CURRENT_A,
         "stage2_bs_path": str(stage2_bs_path),
@@ -502,6 +505,9 @@ def main() -> int:
         if not args.dry_run
         else {
             "experiment_family": EXPERIMENT_FAMILY,
+            "dry_run": True,
+            "output_contract": "dry_run_summary_only",
+            "contains_solver_outputs": False,
             "plasma_current_locked_A": LOCKED_BASELINE_PLASMA_CURRENT_A,
             "tf_current_locked_A": LOCKED_BASELINE_TF_CURRENT_A,
             "stage2_bs_path": str(stage2_bs_path),

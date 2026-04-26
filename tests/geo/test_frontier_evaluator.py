@@ -529,7 +529,7 @@ print(
                 loaded = list(executor.map(evaluator._load_cached, cache_keys))
 
             self.assertLessEqual(len(evaluator._cache), 3)
-            self.assertTrue(all(entry is not None for entry in loaded))
+            self.assertEqual(loaded, evaluations)
             for cache_key in cache_keys:
                 self.assertTrue(
                     (Path(tmpdir) / cache_key[:2] / f"{cache_key}.json").exists()

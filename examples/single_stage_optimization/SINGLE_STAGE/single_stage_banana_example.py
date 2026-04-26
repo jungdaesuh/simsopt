@@ -56,6 +56,7 @@ from simsopt._core.derivative import Derivative
 from alm_utils import (
     ALMSettings,
     alm_result_diagnostics_fields,
+    alm_raw_dual_estimates,
     augmented_inequality_objective,  # noqa: F401 - legacy module-level export.
     minimize_alm,
     validate_alm_cli_args,
@@ -6137,6 +6138,78 @@ def build_alm_final_constraint_payload(alm_result):
     }
 
 
+def _first_present_alm_eval_value(evaluation, *keys):
+    for key in keys:
+        value = evaluation.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _alm_result_view_from_search_eval(search_eval, multipliers):
+    return SimpleNamespace(
+        constraint_names=search_eval.get("constraint_names"),
+        raw_dual_estimates=alm_raw_dual_estimates(multipliers, search_eval),
+        constraint_scales=search_eval.get("constraint_scales"),
+        constraint_blocks=search_eval.get("constraint_blocks"),
+        constraint_scale_sources=search_eval.get("constraint_scale_sources"),
+        raw_constraint_values=_first_present_alm_eval_value(
+            search_eval,
+            "raw_feasibility_values",
+            "feasibility_values",
+            "constraint_values",
+        ),
+        normalized_constraint_values=_first_present_alm_eval_value(
+            search_eval,
+            "normalized_feasibility_values",
+            "feasibility_values",
+            "constraint_values",
+        ),
+        raw_solver_constraint_values=_first_present_alm_eval_value(
+            search_eval,
+            "raw_dual_update_values",
+            "constraint_values",
+        ),
+        normalized_solver_constraint_values=search_eval.get("constraint_values"),
+        raw_hard_signed_constraint_values=_first_present_alm_eval_value(
+            search_eval,
+            "raw_hard_signed_constraint_values",
+            "hard_signed_constraint_values",
+        ),
+        hard_signed_constraint_values=search_eval.get("hard_signed_constraint_values"),
+        raw_hard_violation_values=_first_present_alm_eval_value(
+            search_eval,
+            "raw_hard_violation_values",
+            "hard_violation_values",
+        ),
+        hard_violation_values=search_eval.get("hard_violation_values"),
+        raw_surrogate_signed_constraint_values=_first_present_alm_eval_value(
+            search_eval,
+            "raw_surrogate_signed_constraint_values",
+            "surrogate_signed_constraint_values",
+        ),
+        surrogate_signed_constraint_values=search_eval.get("surrogate_signed_constraint_values"),
+        final_hard_max_violation=_first_present_alm_eval_value(
+            search_eval,
+            "final_hard_max_violation",
+            "hard_max_violation",
+        ),
+        final_surrogate_max_value=_first_present_alm_eval_value(
+            search_eval,
+            "final_surrogate_max_value",
+            "surrogate_max_value",
+        ),
+        hard_positive_shift_zero=search_eval.get("hard_positive_shift_zero"),
+        signal_mismatch_active=search_eval.get("signal_mismatch_active"),
+        final_penalty_gradient_norm=_first_present_alm_eval_value(
+            search_eval,
+            "final_penalty_gradient_norm",
+            "penalty_gradient_norm",
+        ),
+        trust_radius=search_eval.get("trust_radius"),
+    )
+
+
 def build_preserved_timeout_results_payload(
     *,
     replay_config: PreservedTimeoutReplayConfig,
@@ -6288,6 +6361,10 @@ def build_preserved_timeout_results_payload(
     if replay_config.constraint_method == "alm":
         if alm_runtime_state is None:
             raise ValueError("alm_runtime_state is required when constraint_method='alm'")
+        final_multipliers = np.asarray(
+            alm_runtime_state.multipliers,
+            dtype=float,
+        )
         payload.update(
             {
                 "ALM_OUTER_ITERATIONS": run_dict.get("alm_outer_iteration"),
@@ -6302,19 +6379,11 @@ def build_preserved_timeout_results_payload(
                 "ALM_FINAL_FEASIBILITY_TOL": run_dict.get("alm_feasibility_tolerance"),
                 "ALM_FINAL_STATIONARITY_TOL": run_dict.get("alm_stationarity_tolerance"),
                 "ALM_FINAL_PENALTY": float(alm_runtime_state.penalty),
-                "ALM_FINAL_MULTIPLIERS": np.asarray(
-                    alm_runtime_state.multipliers,
-                    dtype=float,
-                ).tolist(),
-                "ALM_FINAL_CONSTRAINT_VALUES": _jsonable_value(
-                    search_eval.get("raw_feasibility_values")
-                    if search_eval.get("raw_feasibility_values") is not None
-                    else search_eval.get("constraint_values")
-                ),
-                "ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES": _jsonable_value(
-                    search_eval.get("normalized_feasibility_values")
-                    if search_eval.get("normalized_feasibility_values") is not None
-                    else search_eval.get("constraint_values")
+                "ALM_FINAL_MULTIPLIERS": final_multipliers.tolist(),
+                **_jsonable_value(
+                    build_alm_final_constraint_payload(
+                        _alm_result_view_from_search_eval(search_eval, final_multipliers)
+                    )
                 ),
             }
         )

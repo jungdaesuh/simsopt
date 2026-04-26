@@ -1,5 +1,7 @@
-import importlib.util
+from contextlib import redirect_stdout
 import hashlib
+import importlib.util
+import io
 import json
 import math
 import subprocess
@@ -1272,6 +1274,9 @@ class BaselineSweepScriptTests(unittest.TestCase):
             summary = module.build_summary(stage2_bs_path, requested_config, records)
 
         self.assertEqual(summary["experiment_family"], "coil_only_baseline")
+        self.assertFalse(summary["dry_run"])
+        self.assertEqual(summary["output_contract"], "materialized_sweep_summary")
+        self.assertTrue(summary["contains_solver_outputs"])
         self.assertEqual(summary["plasma_current_locked_A"], 0.0)
         self.assertEqual(summary["tf_current_locked_A"], -8.0e4)
         self.assertEqual(summary["non_dominated_case_names"], ["better"])
@@ -1279,6 +1284,37 @@ class BaselineSweepScriptTests(unittest.TestCase):
         self.assertEqual(summary["stage2_artifact_results"]["TF_CURRENT_A"], -8.0e4)
         self.assertEqual(summary["stage2_results_path"], str(stage2_results_path))
         self.assertEqual(summary["stage2_bs_path"], str(stage2_bs_path))
+
+    def test_baseline_sweep_dry_run_reports_summary_only_contract(self):
+        module = load_baseline_sweep_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            stdout = io.StringIO()
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_80ka_baseline_tradeoff_sweep.py",
+                    "--dry-run",
+                    "--output-root",
+                    str(output_root),
+                    "--stage2-output-root",
+                    str(tmpdir_path / "stage2"),
+                    "--scan-weights",
+                    "res_weight",
+                    "--weight-multipliers",
+                    "1.0",
+                ],
+            ), redirect_stdout(stdout):
+                self.assertEqual(module.main(), 0)
+
+        summary = json.loads(stdout.getvalue())
+        self.assertTrue(summary["dry_run"])
+        self.assertEqual(summary["output_contract"], "dry_run_summary_only")
+        self.assertFalse(summary["contains_solver_outputs"])
 
 
 class WorkflowRunnerCommonArtifactTests(unittest.TestCase):
@@ -1442,6 +1478,35 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
         )
 
         self.assertEqual(command[command.index("--seed-order-upgrade") + 1], "4")
+
+    def test_finite_current_smoke_dry_run_reports_summary_only_contract(self):
+        module = load_finite_current_smoke_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            stdout = io.StringIO()
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_finite_current_smoke.py",
+                    "--dry-run",
+                    "--output-root",
+                    str(output_root),
+                    "--stage2-output-root",
+                    str(tmpdir_path / "stage2"),
+                    "--currents-A",
+                    "0.0",
+                ],
+            ), redirect_stdout(stdout):
+                self.assertEqual(module.main(), 0)
+
+        summary = json.loads(stdout.getvalue())
+        self.assertTrue(summary["dry_run"])
+        self.assertEqual(summary["output_contract"], "dry_run_summary_only")
+        self.assertFalse(summary["contains_solver_outputs"])
 
     def test_make_stage2_config_rejects_offspec_major_radius(self):
         module = load_finite_current_smoke_module()
@@ -2335,6 +2400,11 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         )
 
         self.assertFalse(summary["search_objective_values_comparable"])
+        self.assertEqual(
+            summary["output_contract"],
+            "materialized_goal_mode_results",
+        )
+        self.assertTrue(summary["contains_solver_outputs"])
         self.assertFalse(summary["stage2_artifact_init_only"])
         self.assertEqual(summary["stage2_banana_current_a"], 12000.0)
         self.assertEqual(summary["mode_runs"]["target"]["result_source"], "final")
@@ -2376,6 +2446,34 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         self.assertTrue(summary["comparison"]["both_final_feasibility_ok"])
         self.assertTrue(summary["comparison"]["both_hardware_feasible"])
         self.assertTrue(summary["comparison"]["both_optimizer_success"])
+
+    def test_build_summary_dry_run_contract_overrides_mode_payloads(self):
+        module = load_goal_mode_comparison_module()
+        args = self._make_args()
+        args.dry_run = True
+        args.output_root = "/tmp/comparison"
+        commands_by_mode = {
+            "target": ["python", "single_stage.py", "--single-stage-goal-mode", "target"],
+            "frontier": ["python", "single_stage.py", "--single-stage-goal-mode", "frontier"],
+        }
+        mode_payloads = {
+            goal_mode: {
+                "results_path": Path(f"/tmp/comparison/{goal_mode}/results.json"),
+                "result_source": "final",
+                "results": {"SINGLE_STAGE_GOAL_MODE": goal_mode},
+            }
+            for goal_mode in module.GOAL_MODES
+        }
+
+        summary = module.build_summary(
+            args,
+            commands_by_mode,
+            stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            mode_payloads=mode_payloads,
+        )
+
+        self.assertEqual(summary["output_contract"], "dry_run_summary_only")
+        self.assertFalse(summary["contains_solver_outputs"])
 
     def test_delta_returns_none_when_either_side_missing(self):
         module = load_goal_mode_comparison_module()
@@ -2646,6 +2744,8 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             self.assertEqual(summary["stage2_bs_path"], str(missing_stage2_bs_path.resolve()))
             self.assertTrue(summary["dry_run"])
+            self.assertEqual(summary["output_contract"], "dry_run_summary_only")
+            self.assertFalse(summary["contains_solver_outputs"])
             self.assertIn("target", summary["mode_runs"])
             self.assertIn("frontier", summary["mode_runs"])
             self.assertEqual(

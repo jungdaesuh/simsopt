@@ -83,6 +83,9 @@ Important branch-local behavior:
 - finite current is exposed to users via `--plasma-current-A`
 - raw `--boozer-I` still exists, but it is an expert/internal surrogate input
 - Stage 2 artifact metadata is validated more strictly than in older versions
+- Stage 2 artifacts missing `STAGE2_BS_SHA256` or carrying legacy
+  `CONTRACT_SCHEMA_VERSION=0` are rejected; regenerate or upgrade historical
+  artifacts before replaying them through current ALM/baseline wrappers
 - single-stage now supports explicit search-time hardware policies
 - single-stage includes optional two-surface mode, topology gating, confinement surrogate scoring, staged Boozer refinement, and basin-hopping controls
 - Stage 2 and single-stage both support `--constraint-method {penalty, alm}`
@@ -691,7 +694,9 @@ Interpretation:
 - ambiguous Stage 2 seed:
   pass `--stage2-bs-path` explicitly
 - Stage 2 artifact contract mismatch:
-  inspect the Stage 2 sibling `results.json`; single-stage now validates TF partition / provenance more strictly
+  inspect the Stage 2 sibling `results.json`; current readers require
+  `STAGE2_BS_SHA256` and current `CONTRACT_SCHEMA_VERSION`, and single-stage
+  validates TF partition / provenance more strictly
 - near-zero iota collapse in vacuum lanes:
   do not assume this is automatically a zero-current semantic issue; it is often just a bad basin
 - tolerance tuning:

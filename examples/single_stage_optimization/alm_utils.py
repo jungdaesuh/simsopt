@@ -1,3 +1,4 @@
+import copy
 from dataclasses import dataclass, field as dataclass_field
 from types import MappingProxyType, SimpleNamespace
 from typing import Callable, Mapping, Sequence, TypeVar
@@ -6,13 +7,28 @@ import numpy as np
 from scipy.optimize import minimize, nnls
 
 
-ALM_SCHEMA_VERSION = "alm_normalized_constraints_v1"
+ALM_SCHEMA_VERSION = "alm_normalized_constraints_v2"
 _MappingValue = TypeVar("_MappingValue")
 _HISTORY_DIAGNOSTICS_SOURCE_KEY = "_constraint_history_diagnostics_source"
 
 
 def _read_only_mapping(mapping: Mapping[str, _MappingValue]) -> Mapping[str, _MappingValue]:
     return MappingProxyType(dict(mapping))
+
+
+def _cow_mapping_set(
+    current: Mapping[str, _MappingValue],
+    key: str,
+    value: _MappingValue,
+) -> Mapping[str, _MappingValue]:
+    if current.get(key) == value:
+        return current
+    if isinstance(current, dict):
+        updated = current
+    else:
+        updated = dict(current)
+    updated[key] = value
+    return updated
 
 
 @dataclass(frozen=True)
@@ -560,7 +576,7 @@ def _optional_string_list(evaluation: dict, key: str) -> list[str] | None:
     return [str(value) for value in values]
 
 
-def _raw_dual_estimates(multipliers, evaluation: dict) -> list[float] | None:
+def alm_raw_dual_estimates(multipliers, evaluation: dict) -> list[float] | None:
     constraint_scales = evaluation.get("constraint_scales")
     if constraint_scales is None:
         return None
@@ -569,6 +585,10 @@ def _raw_dual_estimates(multipliers, evaluation: dict) -> list[float] | None:
     if scales.shape != multiplier_array.shape:
         raise ValueError("constraint_scales shape must match multipliers")
     return _as_float_list(multiplier_array / scales)
+
+
+def _raw_dual_estimates(multipliers, evaluation: dict) -> list[float] | None:
+    return alm_raw_dual_estimates(multipliers, evaluation)
 
 
 def _constraint_block_history_diagnostics(
@@ -589,33 +609,52 @@ def _constraint_block_history_diagnostics(
             "blocking_constraint_block": None,
         }
 
-    block_max_normalized_violation = {}
-    block_max_raw_hard_violation = {}
-    block_augmented_term = {}
-    block_shift_square_sum = {}
+    block_names = list(dict.fromkeys(constraint_blocks))
+    block_index_by_name = {
+        block_name: index for index, block_name in enumerate(block_names)
+    }
+    block_indices = np.fromiter(
+        (block_index_by_name[block] for block in constraint_blocks),
+        dtype=int,
+        count=len(constraint_blocks),
+    )
+
+    block_max_normalized_violation_array = np.zeros(len(block_names), dtype=float)
+    np.maximum.at(
+        block_max_normalized_violation_array,
+        block_indices,
+        np.asarray(feasibility_values, dtype=float),
+    )
+    block_augmented_term_array = np.zeros(len(block_names), dtype=float)
+    np.add.at(
+        block_augmented_term_array,
+        block_indices,
+        np.asarray(augmented_terms, dtype=float),
+    )
+    block_shift_square_sum_array = np.zeros(len(block_names), dtype=float)
+    np.add.at(
+        block_shift_square_sum_array,
+        block_indices,
+        np.asarray(positive_shift, dtype=float) ** 2,
+    )
     raw_hard_violation_array = (
         None
         if raw_hard_violation_values is None
         else np.asarray(raw_hard_violation_values, dtype=float)
     )
-    for index, block in enumerate(constraint_blocks):
-        normalized_violation = float(feasibility_values[index])
-        block_max_normalized_violation[block] = max(
-            normalized_violation,
-            block_max_normalized_violation.get(block, 0.0),
+    if raw_hard_violation_array is None:
+        block_max_raw_hard_violation = {}
+    else:
+        raw_hard_violation_by_block = np.zeros(len(block_names), dtype=float)
+        np.maximum.at(
+            raw_hard_violation_by_block,
+            block_indices,
+            raw_hard_violation_array,
         )
-        block_augmented_term[block] = (
-            block_augmented_term.get(block, 0.0) + float(augmented_terms[index])
-        )
-        block_shift_square_sum[block] = (
-            block_shift_square_sum.get(block, 0.0) + float(positive_shift[index]) ** 2
-        )
-        if raw_hard_violation_array is not None:
-            raw_violation = float(raw_hard_violation_array[index])
-            block_max_raw_hard_violation[block] = max(
-                raw_violation,
-                block_max_raw_hard_violation.get(block, 0.0),
-            )
+        block_max_raw_hard_violation = {
+            block: float(value)
+            for block, value in zip(block_names, raw_hard_violation_by_block)
+        }
 
     blocking_constraint_name = None
     blocking_constraint_block = None
@@ -626,24 +665,30 @@ def _constraint_block_history_diagnostics(
 
     return {
         "block_max_raw_hard_violation": block_max_raw_hard_violation,
-        "block_max_normalized_violation": block_max_normalized_violation,
-        "block_augmented_term": block_augmented_term,
+        "block_max_normalized_violation": {
+            block: float(value)
+            for block, value in zip(block_names, block_max_normalized_violation_array)
+        },
+        "block_augmented_term": {
+            block: float(value)
+            for block, value in zip(block_names, block_augmented_term_array)
+        },
         "block_positive_shift_norm": {
             block: float(np.sqrt(value))
-            for block, value in block_shift_square_sum.items()
+            for block, value in zip(block_names, block_shift_square_sum_array)
         },
         "blocking_constraint_name": blocking_constraint_name,
         "blocking_constraint_block": blocking_constraint_block,
     }
 
 
-def _base_objective_value(evaluation: dict) -> float:
-    return float(
-        evaluation.get(
-            "base_total",
-            evaluation.get("base_value", evaluation["total"]),
-        )
-    )
+def _base_objective_value(evaluation: dict) -> float | None:
+    base_objective = evaluation.get("base_total")
+    if base_objective is None:
+        base_objective = evaluation.get("base_value")
+    if base_objective is None:
+        return None
+    return float(base_objective)
 
 
 def _objective_to_augmented_term_ratio(
@@ -655,20 +700,19 @@ def _objective_to_augmented_term_ratio(
     augmented_term = float(np.sum(augmented_terms))
     if augmented_term == 0.0:
         return None
-    return abs(_base_objective_value(evaluation)) / abs(augmented_term)
+    base_objective = _base_objective_value(evaluation)
+    if base_objective is None:
+        return None
+    return abs(base_objective) / abs(augmented_term)
 
 
 def _surrogate_hard_sign_mismatch(
     surrogate_signed_values: np.ndarray,
     hard_signed_values: np.ndarray,
 ) -> list[bool]:
-    return [
-        bool(np.sign(surrogate_value) != np.sign(hard_value))
-        for surrogate_value, hard_value in zip(
-            np.asarray(surrogate_signed_values, dtype=float),
-            np.asarray(hard_signed_values, dtype=float),
-        )
-    ]
+    surrogate_signs = np.sign(np.asarray(surrogate_signed_values, dtype=float))
+    hard_signs = np.sign(np.asarray(hard_signed_values, dtype=float))
+    return (surrogate_signs != hard_signs).tolist()
 
 
 def _surrogate_kkt_stationarity_norm(
@@ -902,10 +946,12 @@ def _constraint_history_diagnostics(
 
 
 def _materialize_history_entry_diagnostics(entry: dict) -> dict:
-    source = entry.pop(_HISTORY_DIAGNOSTICS_SOURCE_KEY, None)
-    if source is not None:
-        entry.update(_constraint_history_diagnostics_from_source(source))
-    return entry
+    if _HISTORY_DIAGNOSTICS_SOURCE_KEY not in entry:
+        return dict(entry)
+    materialized = dict(entry)
+    source = materialized.pop(_HISTORY_DIAGNOSTICS_SOURCE_KEY)
+    materialized.update(_constraint_history_diagnostics_from_source(source))
+    return materialized
 
 
 def _alm_summary_diagnostics(
@@ -1164,11 +1210,7 @@ def _sanitize_nonfinite_inner_evaluation(
 
 
 def _snapshot_history_entry(entry: dict) -> dict:
-    _materialize_history_entry_diagnostics(entry)
-    return {
-        key: value.copy() if isinstance(value, list) else value
-        for key, value in entry.items()
-    }
+    return copy.deepcopy(_materialize_history_entry_diagnostics(entry))
 
 
 def _move_tolerance(reference_x) -> float:
@@ -1187,7 +1229,11 @@ def _conditioning_metrics(evaluation: dict) -> dict[str, float | None]:
     if not np.isfinite(base_objective):
         base_objective = total_value
     penalty_objective = total_value - base_objective
-    penalty_objective_ratio = abs(penalty_objective) / max(abs(base_objective), 1.0)
+    penalty_objective_ratio = (
+        None
+        if base_objective == 0.0
+        else abs(penalty_objective) / abs(base_objective)
+    )
 
     total_grad = np.asarray(evaluation["grad"], dtype=float).reshape(-1)
     total_grad_norm = float(np.linalg.norm(total_grad))
@@ -1206,7 +1252,9 @@ def _conditioning_metrics(evaluation: dict) -> dict[str, float | None]:
     return {
         "conditioning_base_objective": float(base_objective),
         "conditioning_penalty_objective": float(penalty_objective),
-        "conditioning_penalty_objective_ratio": float(penalty_objective_ratio),
+        "conditioning_penalty_objective_ratio": (
+            None if penalty_objective_ratio is None else float(penalty_objective_ratio)
+        ),
         "conditioning_total_grad_norm": float(total_grad_norm),
         "conditioning_base_grad_norm": (
             None if base_grad_norm is None else float(base_grad_norm)
@@ -1468,7 +1516,7 @@ def _project_nonnegative_multipliers_with_diagnostics(
     return (
         np.minimum(updated, cap),
         bool(np.any(cap_binding_mask)),
-        np.flatnonzero(cap_binding_mask).astype(int).tolist(),
+        np.flatnonzero(cap_binding_mask).tolist(),
     )
 
 
@@ -1490,6 +1538,17 @@ def _representative_penalty(penalty) -> float:
     if values.shape == ():
         return float(values)
     return _max_value(values)
+
+
+def _tolerance_schedule_penalty(penalty) -> float:
+    values = np.asarray(penalty, dtype=float)
+    if values.shape == ():
+        return float(values)
+    return float(np.min(values))
+
+
+def _penalty_schedule_tolerance(tolerance: float, penalty) -> float:
+    return max(float(tolerance), 1.0 / _tolerance_schedule_penalty(penalty))
 
 
 def _next_penalty(
@@ -1614,8 +1673,11 @@ def _initial_block_penalty_state(
         float(settings.penalty_scale),
         name="block_penalty_scale",
     )
-    if any(scale <= 1.0 for scale in scales_by_block.values()):
-        raise ValueError("block_penalty_scale values must be greater than 1")
+    for block, scale in scales_by_block.items():
+        if scale <= 1.0:
+            raise ValueError(
+                f"block_penalty_scale[{block!r}] must be greater than 1"
+            )
     max_by_block = _block_optional_float_map(
         settings.block_penalty_max,
         block_names,
@@ -1698,43 +1760,27 @@ def _next_block_penalty_state(
 
     def _set_penalty(block: str, value: float) -> None:
         nonlocal penalties_by_block
-        if penalties_by_block.get(block) == value:
-            return
-        if penalties_by_block is state.penalties_by_block:
-            penalties_by_block = dict(state.penalties_by_block)
-        penalties_by_block[block] = value
+        penalties_by_block = _cow_mapping_set(penalties_by_block, block, value)
 
     def _set_cap_reached(block: str, value: bool) -> None:
         nonlocal cap_reached_by_block
-        if cap_reached_by_block.get(block) == value:
-            return
-        if cap_reached_by_block is state.cap_reached_by_block:
-            cap_reached_by_block = dict(state.cap_reached_by_block)
-        cap_reached_by_block[block] = value
+        cap_reached_by_block = _cow_mapping_set(cap_reached_by_block, block, value)
 
     def _set_requested(block: str, value: float | None) -> None:
         nonlocal requested_by_block
-        if requested_by_block.get(block) == value:
-            return
-        if requested_by_block is state.requested_by_block:
-            requested_by_block = dict(state.requested_by_block)
-        requested_by_block[block] = value
+        requested_by_block = _cow_mapping_set(requested_by_block, block, value)
 
     def _set_stall_count(block: str, value: int) -> None:
         nonlocal stall_counts_by_block
-        if stall_counts_by_block.get(block) == value:
-            return
-        if stall_counts_by_block is state.stall_counts_by_block:
-            stall_counts_by_block = dict(state.stall_counts_by_block)
-        stall_counts_by_block[block] = value
+        stall_counts_by_block = _cow_mapping_set(stall_counts_by_block, block, value)
 
     def _set_previous_violation(block: str, value: float) -> None:
         nonlocal previous_violations_by_block
-        if previous_violations_by_block.get(block) == value:
-            return
-        if previous_violations_by_block is state.previous_violations_by_block:
-            previous_violations_by_block = dict(state.previous_violations_by_block)
-        previous_violations_by_block[block] = value
+        previous_violations_by_block = _cow_mapping_set(
+            previous_violations_by_block,
+            block,
+            value,
+        )
 
     for block in state.penalties_by_block:
         violation = float(block_violations.get(block, 0.0))
@@ -1872,53 +1918,57 @@ def _termination_reason_from_history(
     return "terminated"
 
 
-def run_directional_taylor_test(
-    evaluate_problem: Callable[[np.ndarray, np.ndarray, float], dict],
-    x0,
-    multipliers,
-    penalty: float,
+def _normalized_taylor_directions(
+    x: np.ndarray,
     *,
-    direction=None,
-    epsilons: Sequence[float] | None = None,
-    seed: int = 1,
-    ratio_threshold: float = 0.6,
-) -> dict:
-    x = np.asarray(x0, dtype=float).copy()
-    multiplier_array = np.asarray(multipliers, dtype=float).copy()
+    direction,
+    seed: int,
+    direction_count: int,
+) -> tuple[np.ndarray, ...]:
     if direction is None:
+        if int(direction_count) < 1:
+            raise ValueError("direction_count must be positive")
         rng = np.random.RandomState(seed)
-        direction_array = rng.standard_normal(size=x.shape)
+        direction_arrays = [
+            rng.standard_normal(size=x.shape) for _ in range(int(direction_count))
+        ]
     else:
-        direction_array = np.asarray(direction, dtype=float).copy()
-    if direction_array.shape != x.shape:
-        raise ValueError("direction must have the same shape as x0")
-    direction_norm = float(np.linalg.norm(direction_array))
-    if direction_norm <= np.finfo(float).eps:
-        raise ValueError("direction must be nonzero")
-    unit_direction = direction_array / direction_norm
+        direction_arrays = [np.asarray(direction, dtype=float).copy()]
 
-    taylor_epsilons = (
-        _DEFAULT_TAYLOR_EPSILONS
-        if epsilons is None
-        else tuple(float(epsilon) for epsilon in epsilons)
+    unit_directions = []
+    for direction_array in direction_arrays:
+        if direction_array.shape != x.shape:
+            raise ValueError("direction must have the same shape as x0")
+        direction_norm = float(np.linalg.norm(direction_array))
+        if direction_norm <= np.finfo(float).eps:
+            raise ValueError("direction must be nonzero")
+        unit_directions.append(direction_array / direction_norm)
+    return tuple(unit_directions)
+
+
+def _directional_taylor_result(
+    evaluate_problem: Callable[[np.ndarray, np.ndarray, float], dict],
+    x: np.ndarray,
+    multiplier_array: np.ndarray,
+    penalty: float,
+    base_grad: np.ndarray,
+    unit_direction: np.ndarray,
+    taylor_epsilons: Sequence[float],
+    ratio_threshold: float,
+) -> tuple[dict, bool]:
+    directional_derivative = float(
+        np.dot(base_grad.reshape(-1), unit_direction.reshape(-1))
     )
-    if len(taylor_epsilons) == 0:
-        raise ValueError("epsilons must be non-empty")
-
-    base_eval = evaluate_problem(x, multiplier_array, float(penalty))
-    base_total = float(base_eval["total"])
-    base_grad = np.asarray(base_eval["grad"], dtype=float)
-    directional_derivative = float(np.dot(base_grad.reshape(-1), unit_direction.reshape(-1)))
     error_floor = 1e-10 * max(1.0, abs(directional_derivative))
-
     errors = []
     central_estimates = []
     ratios = []
     passed = True
     previous_error = None
     for epsilon in taylor_epsilons:
-        plus_eval = evaluate_problem(x + float(epsilon) * unit_direction, multiplier_array, float(penalty))
-        minus_eval = evaluate_problem(x - float(epsilon) * unit_direction, multiplier_array, float(penalty))
+        step = float(epsilon) * unit_direction
+        plus_eval = evaluate_problem(x + step, multiplier_array, penalty)
+        minus_eval = evaluate_problem(x - step, multiplier_array, penalty)
         central_estimate = (
             float(plus_eval["total"]) - float(minus_eval["total"])
         ) / (2.0 * float(epsilon))
@@ -1935,16 +1985,82 @@ def run_directional_taylor_test(
         previous_error = error
 
     finite_ratios = [ratio for ratio in ratios if ratio is not None]
+    return (
+        {
+            "direction": unit_direction.tolist(),
+            "directional_derivative": directional_derivative,
+            "central_estimates": central_estimates,
+            "errors": errors,
+            "ratios": finite_ratios,
+            "max_ratio": max(finite_ratios) if finite_ratios else None,
+        },
+        passed,
+    )
+
+
+def run_directional_taylor_test(
+    evaluate_problem: Callable[[np.ndarray, np.ndarray, float], dict],
+    x0,
+    multipliers,
+    penalty: float,
+    *,
+    direction=None,
+    epsilons: Sequence[float] | None = None,
+    seed: int = 1,
+    ratio_threshold: float = 0.35,
+    direction_count: int = 4,
+) -> dict:
+    x = np.asarray(x0, dtype=float).copy()
+    multiplier_array = np.asarray(multipliers, dtype=float).copy()
+    unit_directions = _normalized_taylor_directions(
+        x,
+        direction=direction,
+        seed=seed,
+        direction_count=direction_count,
+    )
+
+    taylor_epsilons = (
+        _DEFAULT_TAYLOR_EPSILONS
+        if epsilons is None
+        else tuple(float(epsilon) for epsilon in epsilons)
+    )
+    if len(taylor_epsilons) == 0:
+        raise ValueError("epsilons must be non-empty")
+
+    base_eval = evaluate_problem(x, multiplier_array, float(penalty))
+    base_total = float(base_eval["total"])
+    base_grad = np.asarray(base_eval["grad"], dtype=float)
+    passed = True
+    direction_results = []
+    finite_ratios = []
+    for unit_direction in unit_directions:
+        direction_result, direction_passed = _directional_taylor_result(
+            evaluate_problem,
+            x,
+            multiplier_array,
+            float(penalty),
+            base_grad,
+            unit_direction,
+            taylor_epsilons,
+            float(ratio_threshold),
+        )
+        passed = passed and direction_passed
+        finite_ratios.extend(direction_result["ratios"])
+        direction_results.append(direction_result)
+    first_result = direction_results[0]
     return {
         "passed": bool(passed),
         "seed": int(seed),
         "penalty": float(penalty),
-        "direction": unit_direction.tolist(),
-        "directional_derivative": directional_derivative,
+        "direction": first_result["direction"],
+        "directions": [result["direction"] for result in direction_results],
+        "direction_count": len(direction_results),
+        "directional_derivative": first_result["directional_derivative"],
         "base_total": base_total,
         "epsilons": [float(epsilon) for epsilon in taylor_epsilons],
-        "central_estimates": central_estimates,
-        "errors": errors,
+        "central_estimates": first_result["central_estimates"],
+        "errors": first_result["errors"],
+        "direction_results": direction_results,
         "ratios": finite_ratios,
         "max_ratio": max(finite_ratios) if finite_ratios else None,
         "ratio_threshold": float(ratio_threshold),
@@ -2068,6 +2184,8 @@ def _constraint_routing_state(
         activity_tolerances,
         feasibility_gate,
     )
+    # Gate surrogate activity on hard-certified feasibility while using the
+    # surrogate signed value for the activity band.
     surrogate_activity_mask = _constraint_activity_mask(
         signal_state.surrogate_signed_constraint_values,
         signal_state.hard_violation_values,
@@ -2257,6 +2375,7 @@ def minimize_alm(
     last_result = None
     final_multipliers = multipliers.copy()
     final_penalty = penalty
+    final_block_penalty_state = block_penalty_state
     last_outer_iteration = 0
     history_truncated_count = 0
     cap_binding_detected = False
@@ -2264,10 +2383,15 @@ def minimize_alm(
     penalty_cap_reached = False
     penalty_cap_requested = None
     trust_radius = _normalize_trust_radius(settings.trust_radius_init)
-    update_feasibility_tol = max(settings.feasibility_tol, 1.0 / penalty)
-    update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
+    update_feasibility_tol = _penalty_schedule_tolerance(
+        settings.feasibility_tol,
+        active_penalty,
+    )
+    update_stationarity_tol = _penalty_schedule_tolerance(
+        settings.stationarity_tol,
+        active_penalty,
+    )
     best_feasible: ALMFeasibleIncumbent | None = None
-    defer_history_diagnostics = history_callback is None
 
     def _current_penalty_argument():
         if block_penalty_state is None:
@@ -2286,10 +2410,117 @@ def minimize_alm(
         nonlocal penalty
         penalty = _representative_penalty(_current_penalty_argument())
 
+    def _evaluate_current_penalty_state(feasibility_gate: float) -> SimpleNamespace:
+        penalty_argument = _current_penalty_argument()
+        evaluation = evaluate_problem(x, multipliers, penalty_argument)
+        _require_finite_evaluation(
+            evaluation,
+            context="ALM penalty update evaluation",
+        )
+        (
+            solver_values,
+            feasibility_state,
+            _dual_update_state,
+            max_violation,
+        ) = _extract_constraint_state(evaluation)
+        routing_state = _constraint_routing_state(
+            evaluation,
+            multipliers,
+            penalty_argument,
+            feasibility_gate,
+        )
+        (
+            raw_stationarity,
+            kkt_stationarity,
+            stationarity,
+            signal_mismatch,
+        ) = _stationarity_metrics(evaluation, routing_state, feasibility_gate)
+        return SimpleNamespace(
+            penalty_argument=penalty_argument,
+            evaluation=evaluation,
+            solver_values=solver_values,
+            feasibility_state=feasibility_state,
+            max_violation=max_violation,
+            routing_state=routing_state,
+            raw_stationarity=raw_stationarity,
+            kkt_stationarity=kkt_stationarity,
+            stationarity=stationarity,
+            signal_mismatch=signal_mismatch,
+        )
+
+    def _refresh_history_for_penalty_update(
+        entry: dict,
+        updated_state,
+        feasibility_gate: float,
+    ) -> None:
+        routing_state = updated_state.routing_state
+        signal_state = routing_state.signal_state
+        entry["penalty"] = float(penalty)
+        entry["penalty_values"] = _as_float_list(
+            _penalty_values(updated_state.penalty_argument, len(constraint_names))
+        )
+        entry["block_penalties"] = _block_penalty_summary(block_penalty_state)
+        entry["max_violation"] = float(updated_state.max_violation)
+        entry["stationarity_norm"] = float(updated_state.stationarity)
+        entry["raw_stationarity_norm"] = float(updated_state.raw_stationarity)
+        entry["kkt_stationarity_norm"] = (
+            None
+            if updated_state.kkt_stationarity is None
+            else float(updated_state.kkt_stationarity)
+        )
+        entry["constraint_values"] = [
+            float(value) for value in updated_state.feasibility_state
+        ]
+        entry["solver_constraint_values"] = [
+            float(value) for value in updated_state.solver_values
+        ]
+        entry["hard_signed_constraint_values"] = [
+            float(value) for value in signal_state.hard_signed_constraint_values
+        ]
+        entry["hard_violation_values"] = [
+            float(value) for value in signal_state.hard_violation_values
+        ]
+        entry["surrogate_signed_constraint_values"] = [
+            float(value) for value in signal_state.surrogate_signed_constraint_values
+        ]
+        entry["hard_max_violation"] = float(routing_state.hard_max_violation)
+        entry["surrogate_max_value"] = float(routing_state.surrogate_max_value)
+        entry["hard_positive_shift_zero"] = bool(routing_state.hard_positive_shift_zero)
+        entry["signal_mismatch_active"] = bool(updated_state.signal_mismatch)
+        entry["feasibility_tolerance"] = float(update_feasibility_tol)
+        entry["effective_feasibility_tolerance"] = float(
+            _effective_feasibility_gate(settings, update_feasibility_tol)
+        )
+        entry["stationarity_tolerance"] = float(update_stationarity_tol)
+        entry.update(_conditioning_metrics(updated_state.evaluation))
+        _attach_history_diagnostics(
+            entry,
+            updated_state.evaluation,
+            multipliers,
+            updated_state.penalty_argument,
+            updated_state.solver_values,
+            updated_state.feasibility_state,
+            routing_state,
+            feasibility_gate,
+        )
+
+    def _publish_current_penalty_state(
+        entry: dict,
+        feasibility_gate: float,
+    ) -> SimpleNamespace:
+        nonlocal final_eval, final_multipliers, final_penalty, final_block_penalty_state
+        updated_state = _evaluate_current_penalty_state(feasibility_gate)
+        _refresh_history_for_penalty_update(entry, updated_state, feasibility_gate)
+        final_eval = updated_state.evaluation
+        final_multipliers = multipliers.copy()
+        final_penalty = penalty
+        final_block_penalty_state = block_penalty_state
+        return updated_state
+
     def _current_penalty_scale() -> float:
         if block_penalty_state is None:
             return float(settings.penalty_scale)
-        return max(float(value) for value in block_penalty_state.scales_by_block.values())
+        return min(float(value) for value in block_penalty_state.scales_by_block.values())
 
     def _append_history_entry(entry: dict) -> dict:
         nonlocal history_truncated_count
@@ -2311,7 +2542,7 @@ def minimize_alm(
         routing_state: ALMConstraintRoutingState,
         feasibility_gate: float,
     ) -> None:
-        source = _constraint_history_diagnostics_source(
+        entry[_HISTORY_DIAGNOSTICS_SOURCE_KEY] = _constraint_history_diagnostics_source(
             evaluation,
             multipliers_state,
             penalty_state,
@@ -2321,10 +2552,6 @@ def minimize_alm(
             routing_state,
             feasibility_gate,
         )
-        if defer_history_diagnostics:
-            entry[_HISTORY_DIAGNOSTICS_SOURCE_KEY] = source
-        else:
-            entry.update(_constraint_history_diagnostics_from_source(source))
 
     def _emit_history_snapshot(latest_entry: dict) -> None:
         if history_callback is None:
@@ -2380,8 +2607,8 @@ def minimize_alm(
         if inner_result is not None:
             inner_optimizer_success = bool(getattr(inner_result, "success", False))
             inner_optimizer_message = str(getattr(inner_result, "message", ""))
-        for entry in history:
-            _materialize_history_entry_diagnostics(entry)
+        for history_index, entry in enumerate(history):
+            history[history_index] = _materialize_history_entry_diagnostics(entry)
         conditioning = _conditioning_metrics(evaluation)
         alm_summary = _alm_summary(
             termination_reason=termination_reason,
@@ -2479,7 +2706,7 @@ def minimize_alm(
             raw_dual_estimates=_raw_dual_estimates(multipliers_state, evaluation),
             multiplier_interpretation=_multiplier_interpretation(evaluation),
             multipliers=[float(value) for value in multipliers_state],
-            penalty=float(penalty_state),
+            penalty=_representative_penalty(penalty_argument),
             penalty_values=_as_float_list(
                 _penalty_values(penalty_argument, len(constraint_names))
             ),
@@ -2556,7 +2783,6 @@ def minimize_alm(
                 settings,
             )
             _sync_scalar_penalty_from_blocks()
-            history_entry["block_penalties"] = _block_penalty_summary(block_penalty_state)
             history_entry["block_penalty_growth_blocks"] = list(grown_blocks)
             history_entry["block_penalty_cap_reached"] = _block_penalty_cap_summary(
                 block_penalty_state,
@@ -2569,6 +2795,10 @@ def minimize_alm(
                 for block, value in requested_growth_by_block.items()
             }
             if cap_hit_blocks:
+                penalty_update_state = _publish_current_penalty_state(
+                    history_entry,
+                    update_feasibility_tol,
+                )
                 penalty_cap_reached = True
                 penalty_cap_requested = max(
                     requested_growth_by_block[block] for block in cap_hit_blocks
@@ -2584,23 +2814,34 @@ def minimize_alm(
                     ),
                     termination_reason="penalty_cap_reached",
                     outer_iterations=outer_iteration,
-                    evaluation=accepted_eval,
+                    evaluation=penalty_update_state.evaluation,
                     multipliers_state=multipliers,
                     penalty_state=penalty,
                     inner_result=result,
                     restored_best_feasible=False,
                     restored_best_feasible_reason=None,
-                    final_max_feasibility_violation=max_feasibility_violation,
-                    final_stationarity_norm=stationarity_norm,
-                    final_raw_stationarity_norm=raw_stationarity_norm,
-                    final_kkt_stationarity_norm=kkt_stationarity_norm,
+                    final_max_feasibility_violation=penalty_update_state.max_violation,
+                    final_stationarity_norm=penalty_update_state.stationarity,
+                    final_raw_stationarity_norm=penalty_update_state.raw_stationarity,
+                    final_kkt_stationarity_norm=penalty_update_state.kkt_stationarity,
                     final_feasibility_tolerance=settings.feasibility_tol,
                     final_stationarity_tolerance=settings.stationarity_tol,
                     block_penalty_state_for_result=block_penalty_state,
                 )
             feasible_stall_count = 0
-            update_feasibility_tol = max(settings.feasibility_tol, 1.0 / penalty)
-            update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
+            penalty_argument = _current_penalty_argument()
+            update_feasibility_tol = _penalty_schedule_tolerance(
+                settings.feasibility_tol,
+                penalty_argument,
+            )
+            update_stationarity_tol = _penalty_schedule_tolerance(
+                settings.stationarity_tol,
+                penalty_argument,
+            )
+            _publish_current_penalty_state(
+                history_entry,
+                update_feasibility_tol,
+            )
             return None
         next_p, cap_hit, requested_p = _next_penalty(
             penalty,
@@ -2637,8 +2878,14 @@ def minimize_alm(
             )
         penalty = next_p
         feasible_stall_count = 0
-        update_feasibility_tol = max(settings.feasibility_tol, 1.0 / penalty)
-        update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
+        update_feasibility_tol = _penalty_schedule_tolerance(
+            settings.feasibility_tol,
+            penalty,
+        )
+        update_stationarity_tol = _penalty_schedule_tolerance(
+            settings.stationarity_tol,
+            penalty,
+        )
         return None
 
     def _restore_best_feasible_on_failure(
@@ -2656,7 +2903,7 @@ def minimize_alm(
         restored_multipliers_state = np.asarray(multipliers_state, dtype=float).copy()
         restored_penalty_state = float(penalty_state)
         restored_inner_result = inner_result
-        restored_block_penalty_state = block_penalty_state
+        restored_block_penalty_state = final_block_penalty_state
 
         restore_reasons: list[str] = []
         if best_feasible is not None:
@@ -2911,6 +3158,7 @@ def minimize_alm(
                 final_eval = current_eval
                 final_multipliers = multipliers.copy()
                 final_penalty = penalty
+                final_block_penalty_state = block_penalty_state
                 message = (
                     "ALM converged: "
                     f"max_violation={current_max_feasibility_violation:.3e}, "
@@ -3179,6 +3427,7 @@ def minimize_alm(
             )
             final_multipliers = multipliers.copy()
             final_penalty = penalty
+            final_block_penalty_state = block_penalty_state
             made_inner_progress = _made_meaningful_inner_progress(
                 start_x,
                 x,

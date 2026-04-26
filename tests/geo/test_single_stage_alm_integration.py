@@ -734,6 +734,69 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(metadata.objective_value_kind, "hard")
         self.assertEqual(metadata.certification_value_kind, "hard")
 
+    def test_hardware_constraint_default_activity_tolerance_scales_with_active_threshold(
+        self,
+    ):
+        schema_module = load_hardware_constraint_schema_module()
+
+        metadata = schema_module.hardware_constraint_alm_metadata(
+            "banana_current_upper_bound",
+            threshold_overrides={"banana_current": 2.0e4},
+            objective_value_kind="hard",
+            gradient_value_kind="hard",
+            dual_update_value_kind="hard",
+            feasibility_value_kind="hard",
+        )
+
+        self.assertEqual(metadata.scale, 2.0e4)
+        self.assertEqual(metadata.activity_tolerance, 20.0)
+
+    def test_alm_metadata_rejects_block_incompatible_value_kinds(self):
+        schema_module = load_hardware_constraint_schema_module()
+
+        with self.assertRaisesRegex(ValueError, "incompatible with block 'current'"):
+            schema_module.hardware_constraint_alm_metadata(
+                "banana_current_upper_bound",
+                threshold_overrides={"banana_current": 1.6e4},
+                objective_value_kind="raw_physics",
+                gradient_value_kind="raw_physics",
+                dual_update_value_kind="hard",
+                feasibility_value_kind="hard",
+            )
+
+        with self.assertRaisesRegex(ValueError, "incompatible with block 'physics'"):
+            schema_module.ALMConstraintMetadata(
+                scale=1.0,
+                block="physics",
+                activity_tolerance=0.0,
+                raw_threshold=1.0,
+                source="threshold:physics_demo",
+                objective_value_kind="surrogate",
+                gradient_value_kind="surrogate",
+                dual_update_value_kind="hard",
+                feasibility_value_kind="hard",
+                certification_value_kind="hard",
+            )
+
+    def test_alm_metadata_accepts_physics_raw_value_kind_contract(self):
+        schema_module = load_hardware_constraint_schema_module()
+
+        metadata = schema_module.ALMConstraintMetadata(
+            scale=1.0,
+            block="physics",
+            activity_tolerance=0.0,
+            raw_threshold=1.0,
+            source="threshold:physics_demo",
+            objective_value_kind="raw_physics",
+            gradient_value_kind="raw_physics",
+            dual_update_value_kind="hard",
+            feasibility_value_kind="hard",
+            certification_value_kind="hard",
+        )
+
+        self.assertEqual(metadata.objective_value_kind, "raw_physics")
+        self.assertEqual(metadata.gradient_value_kind, "raw_physics")
+
     def test_alm_constraint_metadata_payload_preserves_ordered_sidecars(self):
         schema_module = load_hardware_constraint_schema_module()
         metadata_by_name = {

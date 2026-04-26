@@ -4230,9 +4230,35 @@ class HardwareConstraintTests(unittest.TestCase):
                 "base_total": 8.1e-4,
                 "max_feasibility_violation": 4.0e-3,
                 "metric_stationarity_norm": 7.5e-5,
-                "constraint_values": np.array([1.0e-3, -2.0e-4]),
+                "constraint_names": [
+                    "coil_length_upper_bound",
+                    "banana_current_upper_bound",
+                ],
+                "constraint_scales": np.array([2.0, 16000.0]),
+                "constraint_blocks": ["geometry", "current"],
+                "constraint_scale_sources": [
+                    "threshold:coil_length_upper_bound",
+                    "threshold:banana_current_upper_bound",
+                ],
+                "constraint_values": np.array([6.0e-4, -1.0e-4]),
                 "raw_feasibility_values": np.array([1.6e1, -3.2]),
                 "normalized_feasibility_values": np.array([1.0e-3, -2.0e-4]),
+                "raw_dual_update_values": np.array([9.6, -1.6]),
+                "dual_update_values": np.array([7.0e-4, -1.1e-4]),
+                "raw_hard_dual_update_values": np.array([13.5, -2.2]),
+                "hard_dual_update_values": np.array([8.5e-4, -1.4e-4]),
+                "raw_hard_signed_constraint_values": np.array([14.0, -2.5]),
+                "hard_signed_constraint_values": np.array([8.75e-4, -1.5625e-4]),
+                "raw_hard_violation_values": np.array([14.0, 0.0]),
+                "hard_violation_values": np.array([8.75e-4, 0.0]),
+                "raw_surrogate_signed_constraint_values": np.array([16.0, -3.2]),
+                "surrogate_signed_constraint_values": np.array([1.0e-3, -2.0e-4]),
+                "hard_max_violation": 8.75e-4,
+                "surrogate_max_value": 1.0e-3,
+                "hard_positive_shift_zero": False,
+                "signal_mismatch_active": True,
+                "penalty_gradient_norm": 3.3e-2,
+                "trust_radius": 0.25,
             },
             "J": 9.5e-4,
             "intersecting": False,
@@ -4243,41 +4269,93 @@ class HardwareConstraintTests(unittest.TestCase):
             "alm_feasibility_tolerance": 1.0e-4,
             "alm_stationarity_tolerance": 2.0e-4,
         }
-        payload = module.build_preserved_timeout_results_payload(
-            replay_config=replay_config,
-            preservation_kind="best_feasible",
-            incumbent_stage="final",
-            run_dict=run_dict,
-            objective_eval={"J_QS": 1.7e-4, "J_Boozer": 8.0e-7},
-            field_error=2.5e-4,
-            final_iota=0.151,
-            final_volume=0.101,
-            hardware_snapshot={
-                "search_hardware_status": {"success": True, "violations": []},
-                "artifact_hardware_status": {"success": True, "violations": []},
-                "max_curvature": 18.2,
-                "curve_curve_min_dist": 0.051,
-                "curve_surface_min_dist": 0.068,
-                "surface_vessel_min_dist": 0.084,
-            },
-            coil_length=2.85,
-            accepted_iteration=4,
-            alm_runtime_state=module.build_preserved_timeout_alm_state(
-                constraint_method="alm",
-                penalty=12.5,
-                multipliers=np.array([0.25, -0.75]),
-            ),
-        )
+        with patch.object(
+            module,
+            "build_alm_final_constraint_payload",
+            wraps=module.build_alm_final_constraint_payload,
+        ) as build_constraint_payload:
+            payload = module.build_preserved_timeout_results_payload(
+                replay_config=replay_config,
+                preservation_kind="best_feasible",
+                incumbent_stage="final",
+                run_dict=run_dict,
+                objective_eval={"J_QS": 1.7e-4, "J_Boozer": 8.0e-7},
+                field_error=2.5e-4,
+                final_iota=0.151,
+                final_volume=0.101,
+                hardware_snapshot={
+                    "search_hardware_status": {"success": True, "violations": []},
+                    "artifact_hardware_status": {"success": True, "violations": []},
+                    "max_curvature": 18.2,
+                    "curve_curve_min_dist": 0.051,
+                    "curve_surface_min_dist": 0.068,
+                    "surface_vessel_min_dist": 0.084,
+                },
+                coil_length=2.85,
+                accepted_iteration=4,
+                alm_runtime_state=module.build_preserved_timeout_alm_state(
+                    constraint_method="alm",
+                    penalty=12.5,
+                    multipliers=np.array([0.25, -0.75]),
+                ),
+            )
 
         self.assertEqual(payload["ALM_FORMULATION"], "weighted_sum")
+        self.assertEqual(build_constraint_payload.call_count, 1)
         self.assertEqual(payload["ALM_OUTER_ITERATIONS"], 3)
         self.assertEqual(payload["ALM_FINAL_PENALTY"], 12.5)
         self.assertEqual(payload["ALM_FINAL_MULTIPLIERS"], [0.25, -0.75])
+        np.testing.assert_allclose(
+            payload["ALM_FINAL_RAW_DUAL_ESTIMATES"],
+            [0.125, -4.6875e-5],
+        )
+        self.assertEqual(
+            payload["ALM_CONSTRAINT_NAMES"],
+            ["coil_length_upper_bound", "banana_current_upper_bound"],
+        )
+        self.assertEqual(payload["ALM_CONSTRAINT_SCALES"], [2.0, 16000.0])
+        self.assertEqual(payload["ALM_CONSTRAINT_BLOCKS"], ["geometry", "current"])
+        self.assertEqual(
+            payload["ALM_CONSTRAINT_SCALE_SOURCES"],
+            [
+                "threshold:coil_length_upper_bound",
+                "threshold:banana_current_upper_bound",
+            ],
+        )
         self.assertEqual(payload["ALM_FINAL_CONSTRAINT_VALUES"], [16.0, -3.2])
         self.assertEqual(
             payload["ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES"],
             [1.0e-3, -2.0e-4],
         )
+        self.assertEqual(payload["ALM_FINAL_SOLVER_CONSTRAINT_VALUES"], [9.6, -1.6])
+        self.assertEqual(
+            payload["ALM_FINAL_NORMALIZED_SOLVER_CONSTRAINT_VALUES"],
+            [6.0e-4, -1.0e-4],
+        )
+        self.assertEqual(payload["ALM_FINAL_HARD_SIGNED_CONSTRAINT_VALUES"], [14.0, -2.5])
+        self.assertEqual(
+            payload["ALM_FINAL_NORMALIZED_HARD_SIGNED_CONSTRAINT_VALUES"],
+            [8.75e-4, -1.5625e-4],
+        )
+        self.assertEqual(payload["ALM_FINAL_HARD_VIOLATION_VALUES"], [14.0, 0.0])
+        self.assertEqual(
+            payload["ALM_FINAL_NORMALIZED_HARD_VIOLATION_VALUES"],
+            [8.75e-4, 0.0],
+        )
+        self.assertEqual(
+            payload["ALM_FINAL_SURROGATE_SIGNED_CONSTRAINT_VALUES"],
+            [16.0, -3.2],
+        )
+        self.assertEqual(
+            payload["ALM_FINAL_NORMALIZED_SURROGATE_SIGNED_CONSTRAINT_VALUES"],
+            [1.0e-3, -2.0e-4],
+        )
+        self.assertEqual(payload["ALM_FINAL_HARD_MAX_VIOLATION"], 8.75e-4)
+        self.assertEqual(payload["ALM_FINAL_SURROGATE_MAX_VALUE"], 1.0e-3)
+        self.assertFalse(payload["ALM_FINAL_HARD_POSITIVE_SHIFT_ZERO"])
+        self.assertTrue(payload["ALM_FINAL_SIGNAL_MISMATCH_ACTIVE"])
+        self.assertEqual(payload["ALM_FINAL_PENALTY_GRADIENT_NORM"], 3.3e-2)
+        self.assertEqual(payload["ALM_FINAL_TRUST_RADIUS"], 0.25)
         self.assertEqual(payload["ALM_FINAL_FEASIBILITY_TOL"], 1.0e-4)
         self.assertEqual(payload["ALM_FINAL_STATIONARITY_TOL"], 2.0e-4)
         self.assertEqual(payload["ALM_FINAL_MAX_FEASIBILITY_VIOLATION"], 4.0e-3)
@@ -9538,6 +9616,88 @@ class CurrentBaselineContractTests(unittest.TestCase):
             scalarized["dJ_volume_metric"],
             [0.0, 0.0, 0.0, 1.0],
         )
+
+    def test_apply_frontier_scalarization_override_rebuilds_alm_once(self):
+        module = load_single_stage_example_module()
+
+        class _ScalarObjective:
+            def __init__(self, value, grad):
+                self._value = value
+                self._grad = np.asarray(grad, dtype=float)
+
+            def J(self):
+                return self._value
+
+            def dJ(self):
+                return self._grad
+
+        module.SINGLE_STAGE_GOAL_MODE = "frontier"
+        module.FRONTIER_GOAL_CONFIG = make_frontier_goal_config(module)
+        module.surface_iota_terms = [_ScalarObjective(0.13, [0.0, 0.0])]
+        module.surface_volume_term = _ScalarObjective(0.09, [0.0, 0.0])
+        module.EFFECTIVE_RES_WEIGHT = 1.25
+        module.EFFECTIVE_IOTAS_WEIGHT = 1.5
+        module.EFFECTIVE_VOLUME_WEIGHT = 0.75
+        module.LENGTH_WEIGHT = 2.0
+        module.CC_WEIGHT = 0.0
+        module.CS_WEIGHT = 0.0
+        module.CURVATURE_WEIGHT = 0.0
+        module.SURF_DIST_WEIGHT = 0.0
+        module.ALM_MULTIPLIERS = np.array([0.4])
+        module.ALM_PENALTY = 10.0
+
+        constraint_values = np.array([0.2])
+        constraint_grads = [np.array([2.0, -1.0])]
+        objective_eval = {
+            "total": 999.0,
+            "grad": np.array([99.0, 99.0]),
+            "J_QS": 1.5e-4,
+            "dJ_QS": np.array([0.1, 0.0]),
+            "J_QS_objective": 1.5,
+            "dJ_QS_objective": np.array([0.1, 0.0]),
+            "J_Boozer": 2.5e-6,
+            "dJ_Boozer": np.array([0.0, 0.2]),
+            "J_Boozer_objective": 2.5,
+            "dJ_Boozer_objective": np.array([0.0, 0.2]),
+            "J_iota": 0.7,
+            "dJ_iota": np.array([0.3, 0.0]),
+            "J_volume": 0.4,
+            "dJ_volume": np.array([0.0, 0.5]),
+            "J_len": 2.0,
+            "dJ_len": np.array([0.6, 0.7]),
+            "constraint_values": constraint_values,
+            "constraint_grads": constraint_grads,
+        }
+
+        scalarized = module.apply_frontier_scalarization_override(objective_eval)
+
+        expected_base_total = (
+            module.LENGTH_WEIGHT * objective_eval["J_len"]
+            + objective_eval["J_QS_objective"]
+            + module.EFFECTIVE_RES_WEIGHT * objective_eval["J_Boozer_objective"]
+            + module.EFFECTIVE_IOTAS_WEIGHT * objective_eval["J_iota"]
+            + module.EFFECTIVE_VOLUME_WEIGHT * objective_eval["J_volume"]
+        )
+        expected_base_grad = (
+            module.LENGTH_WEIGHT * objective_eval["dJ_len"]
+            + objective_eval["dJ_QS_objective"]
+            + module.EFFECTIVE_RES_WEIGHT * objective_eval["dJ_Boozer_objective"]
+            + module.EFFECTIVE_IOTAS_WEIGHT * objective_eval["dJ_iota"]
+            + module.EFFECTIVE_VOLUME_WEIGHT * objective_eval["dJ_volume"]
+        )
+        expected = module.augmented_inequality_objective(
+            expected_base_total,
+            expected_base_grad,
+            constraint_values,
+            constraint_grads,
+            module.ALM_MULTIPLIERS,
+            module.ALM_PENALTY,
+        )
+
+        self.assertAlmostEqual(scalarized["base_total"], expected_base_total)
+        self.assertNotEqual(scalarized["base_total"], objective_eval["total"])
+        self.assertAlmostEqual(scalarized["total"], expected["total"])
+        np.testing.assert_allclose(scalarized["grad"], expected["grad"])
 
     def test_evaluate_total_objective_matches_raw_impl_outside_frontier_mode(self):
         module = load_single_stage_example_module()

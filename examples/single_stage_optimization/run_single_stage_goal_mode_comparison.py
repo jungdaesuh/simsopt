@@ -832,6 +832,12 @@ def build_summary(
         "output_root": str(output_root),
         "goal_modes": list(GOAL_MODES),
         "dry_run": bool(args.dry_run),
+        "output_contract": (
+            "dry_run_summary_only"
+            if args.dry_run
+            else "materialized_goal_mode_results"
+        ),
+        "contains_solver_outputs": not args.dry_run and mode_payloads is not None,
         "search_objective_values_comparable": False,
         "mode_runs": {
             goal_mode: {

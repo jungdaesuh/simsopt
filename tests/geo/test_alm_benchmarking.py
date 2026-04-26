@@ -1,14 +1,17 @@
 import csv
 import json
+import os
 import sqlite3
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 EXAMPLES_ROOT = Path(__file__).resolve().parents[2] / "examples" / "single_stage_optimization"
 sys.path.insert(0, str(EXAMPLES_ROOT))
+from alm_utils import ALM_SCHEMA_VERSION  # noqa: E402
 from banana_opt import alm_benchmarking  # noqa: E402
 del sys.path[0]
 
@@ -162,6 +165,23 @@ class AlmBenchmarkingTests(unittest.TestCase):
             "params.constraint_method",
         )
 
+    def test_baseline_row_detects_nested_normalized_alm_fields(self):
+        row = alm_benchmarking.baseline_row(
+            source_kind="run_artifact",
+            source_path=Path("/tmp/results.json"),
+            payload={
+                "params": {"constraint_method": "alm"},
+                "results_payload": {
+                    "ALM_SCHEMA_VERSION": ALM_SCHEMA_VERSION,
+                    "ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES": [0.0],
+                },
+            },
+            relevance_reason="params.constraint_method",
+        )
+
+        self.assertTrue(row["normalized_fields_available"])
+        self.assertEqual(row["normalization_contract_version"], ALM_SCHEMA_VERSION)
+
     def test_build_baseline_summary_reads_registry_ledger_artifacts_and_seeds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             roots = _make_roots(tmpdir)
@@ -175,6 +195,8 @@ class AlmBenchmarkingTests(unittest.TestCase):
                         "elapsed": 3.0,
                     }
                 )
+                + "\n"
+                + '{"run_id": "bad", "params": '
                 + "\n",
                 encoding="utf-8",
             )
@@ -185,7 +207,7 @@ class AlmBenchmarkingTests(unittest.TestCase):
                     {
                         "run_id": "artifact-run",
                         "ALM_FINAL_MAX_NORMALIZED_VIOLATION": 0.0625,
-                        "ALM_SCHEMA_VERSION": "alm_normalized_v1",
+                        "ALM_SCHEMA_VERSION": ALM_SCHEMA_VERSION,
                     }
                 ),
                 encoding="utf-8",
@@ -213,17 +235,47 @@ class AlmBenchmarkingTests(unittest.TestCase):
         self.assertEqual(summary["counts"]["ledger_rows"], 1)
         self.assertEqual(summary["counts"]["run_artifact_rows"], 1)
         self.assertEqual(summary["counts"]["harvested_seed_fixtures"], 1)
-        self.assertEqual(summary["counts"]["skipped_artifacts"], 1)
+        self.assertEqual(summary["counts"]["skipped_artifacts"], 2)
         self.assertEqual(summary["counts"]["baseline_rows"], 3)
-        self.assertEqual(summary["skipped_artifacts"][0]["skip_reason"], "invalid_json")
+        self.assertEqual(
+            {entry["skip_reason"] for entry in summary["skipped_artifacts"]},
+            {"invalid_json", "invalid_jsonl"},
+        )
         artifact_row = next(
             row for row in summary["baseline_rows"] if row["run_id"] == "artifact-run"
         )
         self.assertTrue(artifact_row["normalized_fields_available"])
         self.assertEqual(
             artifact_row["normalization_contract_version"],
-            "alm_normalized_v1",
+            ALM_SCHEMA_VERSION,
         )
+
+    def test_autoresearch_root_requires_explicit_arg_or_env(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "--autoresearch-root"):
+                alm_benchmarking.autoresearch_root_from_arg(None)
+
+        with mock.patch.dict(
+            os.environ,
+            {alm_benchmarking.AUTORESEARCH_ROOT_ENV: "/tmp/autoresearch"},
+            clear=True,
+        ):
+            self.assertEqual(
+                alm_benchmarking.autoresearch_root_from_arg(None),
+                Path("/tmp/autoresearch"),
+            )
+
+        self.assertEqual(
+            alm_benchmarking.autoresearch_root_from_arg(Path("/tmp/explicit")),
+            Path("/tmp/explicit"),
+        )
+
+    def test_registry_rows_raise_on_missing_database(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry_db = Path(tmpdir) / "registry.db"
+
+            with self.assertRaises(FileNotFoundError):
+                alm_benchmarking._registry_rows(registry_db)
 
     def test_write_baseline_outputs_preserves_comparison_schema(self):
         summary = {
@@ -242,9 +294,15 @@ class AlmBenchmarkingTests(unittest.TestCase):
                     "source_kind": "ledger",
                     "source_path": "/tmp/results.jsonl",
                     "run_id": "case-a",
+                    "ledger_row_index": 12,
+                    "registry_database": None,
+                    "created_at": "2026-04-26T00:00:00+00:00",
+                    "normalization_contract_version": "pre_normalization",
                     "relevance_reason": "params.alm",
                     "normalized_fields_available": False,
                     "solver_commit": "abc",
+                    "artifact_export_path": None,
+                    "seed_artifact_path": "/tmp/seed",
                     "hard_feasible_success": True,
                     "best_feasible_base_objective": 0.25,
                     "max_raw_hard_violation": 0.0,
@@ -273,7 +331,16 @@ class AlmBenchmarkingTests(unittest.TestCase):
 
         self.assertEqual(len(baseline_lines), 1)
         self.assertEqual(json.loads(baseline_lines[0])["run_id"], "case-a")
-        self.assertEqual(comparison_rows[0]["case"], "ledger:case-a")
+        self.assertEqual(comparison_rows[0]["case"], "ledger:/tmp/results.jsonl:12")
+        self.assertEqual(comparison_rows[0]["before_run_id"], "case-a")
+        self.assertEqual(comparison_rows[0]["before_ledger_row_index"], "12")
+        self.assertEqual(comparison_rows[0]["before_solver_commit"], "abc")
+        self.assertEqual(
+            comparison_rows[0]["before_normalization_contract_version"],
+            "pre_normalization",
+        )
+        self.assertEqual(comparison_rows[0]["before_seed_artifact_path"], "/tmp/seed")
+        self.assertEqual(comparison_rows[0]["after_run_id"], "")
         self.assertEqual(comparison_rows[0]["before_success"], "True")
         self.assertEqual(comparison_rows[0]["after_success"], "")
         self.assertIn("fixture_manifest", paths)
@@ -356,6 +423,14 @@ class AlmBenchmarkingTests(unittest.TestCase):
             "source_kind": "registry",
             "source_path": "/tmp/registry.db",
             "run_id": "case-a",
+            "ledger_row_index": None,
+            "registry_database": "/tmp/registry.db",
+            "solver_commit": "before-sha",
+            "created_at": "2026-04-26T00:00:00+00:00",
+            "normalization_contract_version": "pre_normalization",
+            "normalized_fields_available": False,
+            "artifact_export_path": "/tmp/export-before",
+            "seed_artifact_path": "/tmp/seed-before",
             "hard_feasible_success": True,
             "best_feasible_base_objective": 0.25,
             "max_raw_hard_violation": 0.0,
@@ -369,8 +444,12 @@ class AlmBenchmarkingTests(unittest.TestCase):
         }
         after_row = {
             **baseline_row,
+            "solver_commit": "after-sha",
+            "created_at": "2026-04-26T01:00:00+00:00",
             "normalized_fields_available": True,
-            "normalization_contract_version": "alm_normalized_v1",
+            "normalization_contract_version": ALM_SCHEMA_VERSION,
+            "artifact_export_path": "/tmp/export-after",
+            "seed_artifact_path": "/tmp/seed-after",
             "max_normalized_violation": 0.0,
             "wall_time_s": 3.5,
         }
@@ -407,9 +486,22 @@ class AlmBenchmarkingTests(unittest.TestCase):
         self.assertEqual(len(after_lines), 1)
         self.assertEqual(json.loads(after_lines[0])["run_id"], "case-a")
         self.assertEqual(comparison_rows[0]["case"], "registry:case-a")
+        self.assertEqual(comparison_rows[0]["before_solver_commit"], "before-sha")
+        self.assertEqual(comparison_rows[0]["after_solver_commit"], "after-sha")
+        self.assertEqual(
+            comparison_rows[0]["after_normalization_contract_version"],
+            ALM_SCHEMA_VERSION,
+        )
+        self.assertEqual(
+            comparison_rows[0]["after_artifact_export_path"],
+            "/tmp/export-after",
+        )
+        self.assertEqual(comparison_rows[0]["after_seed_artifact_path"], "/tmp/seed-after")
         self.assertEqual(comparison_rows[0]["after_success"], "True")
         self.assertEqual(comparison_rows[0]["after_max_normalized_violation"], "0.0")
         self.assertIn("does not execute solver fixtures", comparison_markdown)
+        self.assertIn("solver_commit=before-sha", comparison_markdown)
+        self.assertIn(f"normalization_contract_version={ALM_SCHEMA_VERSION}", comparison_markdown)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,3 @@
-import importlib
 import sys
 import unittest
 from pathlib import Path
@@ -9,20 +8,27 @@ EXAMPLE_ROOT = (
     / "examples"
     / "single_stage_optimization"
 )
-if str(EXAMPLE_ROOT) not in sys.path:
-    sys.path.insert(0, str(EXAMPLE_ROOT))
+EXAMPLE_ROOT_STR = str(EXAMPLE_ROOT)
+EXAMPLE_ROOT_INSERTED = EXAMPLE_ROOT_STR not in sys.path
+if EXAMPLE_ROOT_INSERTED:
+    sys.path.insert(0, EXAMPLE_ROOT_STR)
+from banana_opt import artifact_contracts as _artifact_contracts  # noqa: E402
+from banana_opt import constraint_contract as _constraint_contract  # noqa: E402
+from banana_opt import hardware_contracts as _hardware_contracts  # noqa: E402
+if EXAMPLE_ROOT_INSERTED:
+    sys.path.remove(EXAMPLE_ROOT_STR)
 
 
 def load_constraint_contract_module():
-    return importlib.import_module("banana_opt.constraint_contract")
+    return _constraint_contract
 
 
 def load_hardware_contracts_module():
-    return importlib.import_module("banana_opt.hardware_contracts")
+    return _hardware_contracts
 
 
 def load_artifact_contracts_module():
-    return importlib.import_module("banana_opt.artifact_contracts")
+    return _artifact_contracts
 
 
 class ConstraintContractResolverTests(unittest.TestCase):

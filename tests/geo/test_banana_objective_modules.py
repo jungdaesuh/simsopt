@@ -31,6 +31,10 @@ SINGLE_STAGE_INCUMBENTS_PATH = EXAMPLES_ROOT / "banana_opt" / "incumbents.py"
 POLOIDAL_EXTENT_PATH = EXAMPLES_ROOT / "banana_opt" / "poloidal_extent.py"
 TAYLOR_TEST_EPSILONS = (1.0e-3, 5.0e-4, 2.5e-4, 1.25e-4)
 
+sys.path.insert(0, str(EXAMPLES_ROOT))
+from alm_utils import ALM_SCHEMA_VERSION  # noqa: E402
+del sys.path[0]
+
 
 def _load_module(module_path: Path, prefix: str):
     module_name = f"{prefix}_{uuid.uuid4().hex}"
@@ -1288,11 +1292,11 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             np.array([0.2, -0.3]),
             np.array([0.05, 0.1, 0.15, 0.2]),
             7.0,
-            direction=np.array([0.6, -0.4]),
             epsilons=TAYLOR_TEST_EPSILONS,
         )
 
         self.assertTrue(result["passed"], result)
+        self.assertGreaterEqual(result["direction_count"], 4)
 
     def test_evaluate_stage2_alm_problem_fast_path_skips_report_diagnostics(self):
         class _UnexpectedBiotSavart:
@@ -2288,7 +2292,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             constraint_blocks=["geometry", "current", "physics"],
             constraint_scale_sources=["one", "limit", "threshold"],
             raw_dual_estimates=[0.1, 0.002, 0.3],
-            alm_schema_version="alm_normalized_constraints_v1",
+            alm_schema_version=ALM_SCHEMA_VERSION,
             trust_radius=0.125,
             multiplier_cap_binding=True,
             multiplier_cap_binding_indices=[1],
@@ -2377,7 +2381,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["ALM_MAX_OUTER_ITERS"], 7)
         self.assertEqual(result["ALM_OUTER_ITERATIONS"], 4)
         self.assertEqual(result["ALM_FINAL_TRUST_RADIUS"], 0.125)
-        self.assertEqual(result["ALM_SCHEMA_VERSION"], "alm_normalized_constraints_v1")
+        self.assertEqual(result["ALM_SCHEMA_VERSION"], ALM_SCHEMA_VERSION)
         self.assertTrue(result["ALM_MULTIPLIER_CAP_BINDING"])
         self.assertEqual(result["ALM_MULTIPLIER_CAP_BINDING_INDICES"], [1])
         np.testing.assert_allclose(result["ALM_FINAL_CONSTRAINT_VALUES"], [0.0, 1.0, 0.0])
@@ -3178,11 +3182,11 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             np.array([0.15, -0.25]),
             np.array([0.03, 0.04, 0.05]),
             6.0,
-            direction=np.array([-0.5, 0.7]),
             epsilons=TAYLOR_TEST_EPSILONS,
         )
 
         self.assertTrue(result["passed"], result)
+        self.assertGreaterEqual(result["direction_count"], 4)
 
     def test_evaluate_alm_objective_supports_independent_banana_current_constraints(self):
         nonqs = [_FakeAlgebraicObjective(2.0, [0.2, 0.0])]
@@ -3268,7 +3272,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         np.testing.assert_allclose(result["dual_update_values"], [0.0625, 0.1875])
         np.testing.assert_allclose(
             result["constraint_activity_tolerances"],
-            [6.25e-8, 6.25e-8],
+            [1.0e-3, 1.0e-3],
         )
         self.assertEqual(result["objective_value_kinds"], ["hard", "hard"])
         self.assertEqual(result["dual_update_value_kinds"], ["hard", "hard"])
@@ -3317,6 +3321,8 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
 
         self.assertEqual(result["banana_current_upper_bound_threshold"], 20000.0)
         np.testing.assert_allclose(result["constraint_scales"], [20000.0])
+        np.testing.assert_allclose(result["constraint_activity_tolerances"], [1.0e-3])
+        np.testing.assert_allclose(result["raw_constraint_activity_tolerances"], [20.0])
 
     def test_evaluate_alm_objective_fast_path_keeps_constraint_payload_only(self):
         nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]

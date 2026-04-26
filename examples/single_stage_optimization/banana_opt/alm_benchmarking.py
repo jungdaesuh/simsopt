@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import platform
 import sqlite3
 import sys
@@ -15,7 +16,7 @@ from pathlib import Path
 SCHEMA_VERSION = "alm_autoresearch_benchmark_v1"
 PRE_NORMALIZATION_CONTRACT_VERSION = "pre_normalization"
 BENCHMARK_DIR_NAME = "alm_normalization_benchmarks"
-DEFAULT_AUTORESEARCH_ROOT = Path("/Users/suhjungdae/code/columbia/autoresearch")
+AUTORESEARCH_ROOT_ENV = "AUTORESEARCH_ROOT"
 
 _ALM_PARAM_KEYS = (
     "alm",
@@ -103,32 +104,6 @@ _METRIC_CANDIDATES: Mapping[str, tuple[str, ...]] = {
     ),
 }
 
-_SUMMARY_COLUMNS = (
-    "case",
-    "before_success",
-    "after_success",
-    "before_best_feasible_objective",
-    "after_best_feasible_objective",
-    "before_max_raw_hard_violation",
-    "after_max_raw_hard_violation",
-    "before_max_normalized_violation",
-    "after_max_normalized_violation",
-    "before_outer_iters",
-    "after_outer_iters",
-    "before_evals",
-    "after_evals",
-    "before_wall_s",
-    "after_wall_s",
-    "before_penalty_cap_hits",
-    "after_penalty_cap_hits",
-    "before_multiplier_cap_hits",
-    "after_multiplier_cap_hits",
-    "blocking_constraint_before",
-    "blocking_constraint_after",
-)
-
-_PATH_KEYED_SOURCE_KINDS = frozenset({"run_artifact", "harvested_seed"})
-
 _COMPARISON_METRICS = (
     ("success", "hard_feasible_success"),
     ("best_feasible_objective", "best_feasible_base_objective"),
@@ -139,6 +114,39 @@ _COMPARISON_METRICS = (
     ("wall_s", "wall_time_s"),
     ("penalty_cap_hits", "penalty_cap_hit_count"),
     ("multiplier_cap_hits", "multiplier_cap_hit_count"),
+)
+
+_COMPARISON_PROVENANCE_FIELDS = (
+    "run_id",
+    "ledger_row_index",
+    "registry_database",
+    "solver_commit",
+    "created_at",
+    "normalization_contract_version",
+    "normalized_fields_available",
+    "artifact_export_path",
+    "seed_artifact_path",
+)
+
+_SUMMARY_COLUMNS = (
+    "case",
+    *(f"before_{field}" for field in _COMPARISON_PROVENANCE_FIELDS),
+    *(f"after_{field}" for field in _COMPARISON_PROVENANCE_FIELDS),
+    *(f"before_{output_name}" for output_name, _metric_name in _COMPARISON_METRICS),
+    *(f"after_{output_name}" for output_name, _metric_name in _COMPARISON_METRICS),
+    "blocking_constraint_before",
+    "blocking_constraint_after",
+)
+
+_PATH_KEYED_SOURCE_KINDS = frozenset({"run_artifact", "harvested_seed"})
+_NORMALIZED_FIELD_MARKERS = (
+    "ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES",
+    "ALM_FINAL_MAX_NORMALIZED_VIOLATION",
+    "normalized_signed_constraint_values",
+    "normalized_feasibility_values",
+)
+_NORMALIZED_FIELD_MARKER_SUFFIXES = tuple(
+    f".{marker}" for marker in _NORMALIZED_FIELD_MARKERS
 )
 
 
@@ -163,6 +171,17 @@ class AutoresearchArtifactRoots:
 
 def benchmark_output_dir(roots: AutoresearchArtifactRoots) -> Path:
     return roots.artifact_exports_dir / BENCHMARK_DIR_NAME
+
+
+def autoresearch_root_from_arg(autoresearch_root: Path | None) -> Path:
+    if autoresearch_root is not None:
+        return autoresearch_root
+    env_value = os.environ.get(AUTORESEARCH_ROOT_ENV)
+    if env_value is None:
+        raise ValueError(
+            f"--autoresearch-root is required unless {AUTORESEARCH_ROOT_ENV} is set"
+        )
+    return Path(env_value)
 
 
 def utc_stamp() -> str:
@@ -191,12 +210,59 @@ def _read_json_mapping_or_skip(path: Path) -> tuple[Mapping[str, object] | None,
     return payload, None
 
 
-def _iter_jsonl(path: Path) -> Iterable[tuple[int, Mapping[str, object]]]:
+def _jsonl_skip_record(
+    path: Path,
+    row_index: int,
+    *,
+    reason: str,
+    error: object,
+) -> dict[str, object]:
+    return {
+        "source_path": str(path),
+        "row_index": row_index,
+        "skip_reason": reason,
+        "error": str(error),
+    }
+
+
+def _iter_jsonl(
+    path: Path,
+    skipped_artifacts: list[dict[str, object]] | None = None,
+) -> Iterable[tuple[int, Mapping[str, object]]]:
     with path.open(encoding="utf-8") as handle:
         for row_index, line in enumerate(handle):
             stripped = line.strip()
             if stripped:
-                yield row_index, json.loads(stripped)
+                try:
+                    payload = json.loads(stripped)
+                except json.JSONDecodeError as error:
+                    if skipped_artifacts is None:
+                        raise
+                    skipped_artifacts.append(
+                        _jsonl_skip_record(
+                            path,
+                            row_index,
+                            reason="invalid_jsonl",
+                            error=error,
+                        )
+                    )
+                    continue
+                if not isinstance(payload, Mapping):
+                    if skipped_artifacts is None:
+                        raise TypeError(
+                            f"{path}:{row_index} JSONL row is "
+                            f"{type(payload).__name__}, not object"
+                        )
+                    skipped_artifacts.append(
+                        _jsonl_skip_record(
+                            path,
+                            row_index,
+                            reason="jsonl_row_not_object",
+                            error=type(payload).__name__,
+                        )
+                    )
+                    continue
+                yield row_index, payload
 
 
 def _flatten_mapping(
@@ -217,7 +283,13 @@ def _first_present(
     payload: Mapping[str, object],
     keys: Sequence[str],
 ) -> object:
-    flattened = _flatten_mapping(payload)
+    return _first_present_flattened(_flatten_mapping(payload), keys)
+
+
+def _first_present_flattened(
+    flattened: Mapping[str, object],
+    keys: Sequence[str],
+) -> object:
     for key in keys:
         if key in flattened:
             return flattened[key]
@@ -240,7 +312,12 @@ def _truthy(value: object) -> bool:
 
 
 def alm_relevance_reason(payload: Mapping[str, object]) -> str | None:
-    flattened = _flatten_mapping(payload)
+    return _alm_relevance_reason_flattened(_flatten_mapping(payload))
+
+
+def _alm_relevance_reason_flattened(
+    flattened: Mapping[str, object],
+) -> str | None:
     for key in ("constraint_method", "params.constraint_method"):
         if str(flattened.get(key, "")).strip().lower() == "alm":
             return key
@@ -259,19 +336,29 @@ def alm_relevance_reason(payload: Mapping[str, object]) -> str | None:
 
 
 def _normalization_fields_available(payload: Mapping[str, object]) -> bool:
-    flattened = _flatten_mapping(payload)
-    normalized_markers = {
-        "ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES",
-        "ALM_FINAL_MAX_NORMALIZED_VIOLATION",
-        "normalized_signed_constraint_values",
-        "normalized_feasibility_values",
-    }
-    return bool(normalized_markers.intersection(flattened))
+    return _normalization_fields_available_flattened(_flatten_mapping(payload))
+
+
+def _normalization_fields_available_flattened(
+    flattened: Mapping[str, object],
+) -> bool:
+    if any(marker in flattened for marker in _NORMALIZED_FIELD_MARKERS):
+        return True
+    return any(
+        flat_key.endswith(_NORMALIZED_FIELD_MARKER_SUFFIXES)
+        for flat_key in flattened
+    )
 
 
 def _extract_metrics(payload: Mapping[str, object]) -> dict[str, object]:
+    return _extract_metrics_flattened(_flatten_mapping(payload))
+
+
+def _extract_metrics_flattened(
+    flattened: Mapping[str, object],
+) -> dict[str, object]:
     return {
-        metric_name: _first_present(payload, candidates)
+        metric_name: _first_present_flattened(flattened, candidates)
         for metric_name, candidates in _METRIC_CANDIDATES.items()
     }
 
@@ -290,12 +377,48 @@ def baseline_row(
     artifact_export_path: Path | None = None,
     seed_artifact_path: Path | None = None,
 ) -> dict[str, object]:
-    normalized_fields_available = _normalization_fields_available(payload)
-    metrics = _extract_metrics(payload)
+    return _baseline_row_from_flattened(
+        source_kind=source_kind,
+        source_path=source_path,
+        payload=payload,
+        flattened_payload=_flatten_mapping(payload),
+        relevance_reason=relevance_reason,
+        run_id=run_id,
+        ledger_file=ledger_file,
+        ledger_row_index=ledger_row_index,
+        registry_database=registry_database,
+        registry_table=registry_table,
+        artifact_export_path=artifact_export_path,
+        seed_artifact_path=seed_artifact_path,
+    )
+
+
+def _baseline_row_from_flattened(
+    *,
+    source_kind: str,
+    source_path: Path,
+    payload: Mapping[str, object],
+    flattened_payload: Mapping[str, object],
+    relevance_reason: str,
+    run_id: object = None,
+    ledger_file: Path | None = None,
+    ledger_row_index: int | None = None,
+    registry_database: Path | None = None,
+    registry_table: str | None = None,
+    artifact_export_path: Path | None = None,
+    seed_artifact_path: Path | None = None,
+) -> dict[str, object]:
+    normalized_fields_available = _normalization_fields_available_flattened(
+        flattened_payload
+    )
+    metrics = _extract_metrics_flattened(flattened_payload)
     return {
         "schema_version": SCHEMA_VERSION,
         "normalization_contract_version": (
-            _first_present(payload, ("ALM_SCHEMA_VERSION", "alm_schema_version"))
+            _first_present_flattened(
+                flattened_payload,
+                ("ALM_SCHEMA_VERSION", "alm_schema_version"),
+            )
             if normalized_fields_available
             else PRE_NORMALIZATION_CONTRACT_VERSION
         ),
@@ -303,7 +426,11 @@ def baseline_row(
         "source_kind": source_kind,
         "source_path": str(source_path),
         "relevance_reason": relevance_reason,
-        "run_id": run_id if run_id is not None else _first_present(payload, ("run_id",)),
+        "run_id": (
+            run_id
+            if run_id is not None
+            else _first_present_flattened(flattened_payload, ("run_id",))
+        ),
         "ledger_file": str(ledger_file) if ledger_file is not None else None,
         "ledger_row_index": ledger_row_index,
         "registry_database": str(registry_database) if registry_database is not None else None,
@@ -312,16 +439,25 @@ def baseline_row(
             str(artifact_export_path) if artifact_export_path is not None else None
         ),
         "seed_artifact_path": str(seed_artifact_path) if seed_artifact_path is not None else None,
-        "solver_checkout": _first_present(payload, ("solver_checkout", "solver_root")),
-        "solver_commit": _first_present(payload, ("solver_commit",)),
-        "created_at": _first_present(payload, ("created_at", "timestamp")),
+        "solver_checkout": _first_present_flattened(
+            flattened_payload,
+            ("solver_checkout", "solver_root"),
+        ),
+        "solver_commit": _first_present_flattened(
+            flattened_payload,
+            ("solver_commit",),
+        ),
+        "created_at": _first_present_flattened(
+            flattened_payload,
+            ("created_at", "timestamp"),
+        ),
         **metrics,
     }
 
 
 def _registry_rows(registry_db: Path) -> list[dict[str, object]]:
     if not registry_db.exists():
-        return []
+        raise FileNotFoundError(registry_db)
     connection = sqlite3.connect(registry_db)
     connection.row_factory = sqlite3.Row
     query = """
@@ -377,13 +513,15 @@ def collect_registry_baseline(roots: AutoresearchArtifactRoots) -> list[dict[str
     registry_db = roots.registry_dir / "registry.db"
     rows = []
     for payload in _registry_rows(registry_db):
-        reason = alm_relevance_reason(payload)
+        flattened_payload = _flatten_mapping(payload)
+        reason = _alm_relevance_reason_flattened(flattened_payload)
         if reason is not None:
             rows.append(
-                baseline_row(
+                _baseline_row_from_flattened(
                     source_kind="registry",
                     source_path=registry_db,
                     payload=payload,
+                    flattened_payload=flattened_payload,
                     relevance_reason=reason,
                     run_id=payload.get("run_id"),
                     registry_database=registry_db,
@@ -403,18 +541,23 @@ def collect_registry_baseline(roots: AutoresearchArtifactRoots) -> list[dict[str
     return rows
 
 
-def collect_ledger_baseline(roots: AutoresearchArtifactRoots) -> list[dict[str, object]]:
+def collect_ledger_baseline(
+    roots: AutoresearchArtifactRoots,
+    skipped_artifacts: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
     if not roots.ledger_path.exists():
         return []
     rows = []
-    for row_index, payload in _iter_jsonl(roots.ledger_path):
-        reason = alm_relevance_reason(payload)
+    for row_index, payload in _iter_jsonl(roots.ledger_path, skipped_artifacts):
+        flattened_payload = _flatten_mapping(payload)
+        reason = _alm_relevance_reason_flattened(flattened_payload)
         if reason is not None:
             rows.append(
-                baseline_row(
+                _baseline_row_from_flattened(
                     source_kind="ledger",
                     source_path=roots.ledger_path,
                     payload=payload,
+                    flattened_payload=flattened_payload,
                     relevance_reason=reason,
                     ledger_file=roots.ledger_path,
                     ledger_row_index=row_index,
@@ -446,13 +589,15 @@ def collect_run_artifact_baseline(
             if skipped_artifacts is not None:
                 skipped_artifacts.append(skipped)
             continue
-        reason = alm_relevance_reason(payload)
+        flattened_payload = _flatten_mapping(payload)
+        reason = _alm_relevance_reason_flattened(flattened_payload)
         if reason is not None:
             rows.append(
-                baseline_row(
+                _baseline_row_from_flattened(
                     source_kind="run_artifact",
                     source_path=path,
                     payload=payload,
+                    flattened_payload=flattened_payload,
                     relevance_reason=reason,
                     artifact_export_path=path.parent,
                 )
@@ -471,7 +616,8 @@ def collect_harvested_seed_manifest(
             if skipped_artifacts is not None:
                 skipped_artifacts.append(skipped)
             continue
-        reason = alm_relevance_reason(payload)
+        flattened_payload = _flatten_mapping(payload)
+        reason = _alm_relevance_reason_flattened(flattened_payload)
         if reason is not None:
             manifest.append(
                 {
@@ -479,11 +625,20 @@ def collect_harvested_seed_manifest(
                     "source_kind": "harvested_seed",
                     "source_path": str(path),
                     "seed_artifact_path": str(path.parent),
-                    "run_id": _first_present(payload, ("run_id",)),
+                    "run_id": _first_present_flattened(
+                        flattened_payload,
+                        ("run_id",),
+                    ),
                     "relevance_reason": reason,
-                    "solver_commit": _first_present(payload, ("solver_commit",)),
-                    "created_at": _first_present(payload, ("created_at", "timestamp")),
-                    **_extract_metrics(payload),
+                    "solver_commit": _first_present_flattened(
+                        flattened_payload,
+                        ("solver_commit",),
+                    ),
+                    "created_at": _first_present_flattened(
+                        flattened_payload,
+                        ("created_at", "timestamp"),
+                    ),
+                    **_extract_metrics_flattened(flattened_payload),
                 }
             )
     return manifest
@@ -497,7 +652,7 @@ def build_baseline_summary(
     created_at = created_at_utc or datetime.now(timezone.utc).isoformat()
     skipped_artifacts: list[dict[str, object]] = []
     registry_rows = collect_registry_baseline(roots)
-    ledger_rows = collect_ledger_baseline(roots)
+    ledger_rows = collect_ledger_baseline(roots, skipped_artifacts)
     artifact_rows = collect_run_artifact_baseline(roots, skipped_artifacts)
     fixture_manifest = collect_harvested_seed_manifest(roots, skipped_artifacts)
     rows = [*registry_rows, *ledger_rows, *artifact_rows]
@@ -557,6 +712,9 @@ def _comparison_row(
         "blocking_constraint_before": before.get("blocking_constraint_name"),
         "blocking_constraint_after": _optional_row_value(after, "blocking_constraint_name"),
     }
+    for field in _COMPARISON_PROVENANCE_FIELDS:
+        row[f"before_{field}"] = before.get(field)
+        row[f"after_{field}"] = _optional_row_value(after, field)
     for output_name, metric_name in _COMPARISON_METRICS:
         row[f"before_{output_name}"] = before.get(metric_name)
         row[f"after_{output_name}"] = _optional_row_value(after, metric_name)
@@ -607,6 +765,19 @@ def render_markdown_summary(summary: Mapping[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _markdown_value(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).replace("|", "\\|")
+
+
+def _comparison_provenance_cell(row: Mapping[str, object], prefix: str) -> str:
+    return "; ".join(
+        f"{field}={_markdown_value(row.get(f'{prefix}_{field}'))}"
+        for field in _COMPARISON_PROVENANCE_FIELDS
+    )
+
+
 def render_comparison_markdown(
     *,
     baseline_path: Path,
@@ -631,19 +802,21 @@ def render_comparison_markdown(
         "",
         "This file compares collected artifact rows. It does not execute solver fixtures.",
         "",
-        "| Case | Before success | After success | Before raw violation | After raw violation | Before normalized violation | After normalized violation |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Case | Before provenance | After provenance | Before success | After success | Before raw violation | After raw violation | Before normalized violation | After normalized violation |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in comparison[:50]:
         lines.append(
             "| "
             f"{row['case']} | "
-            f"{row['before_success']} | "
-            f"{row['after_success']} | "
-            f"{row['before_max_raw_hard_violation']} | "
-            f"{row['after_max_raw_hard_violation']} | "
-            f"{row['before_max_normalized_violation']} | "
-            f"{row['after_max_normalized_violation']} |"
+            f"{_comparison_provenance_cell(row, 'before')} | "
+            f"{_comparison_provenance_cell(row, 'after')} | "
+            f"{_markdown_value(row['before_success'])} | "
+            f"{_markdown_value(row['after_success'])} | "
+            f"{_markdown_value(row['before_max_raw_hard_violation'])} | "
+            f"{_markdown_value(row['after_max_raw_hard_violation'])} | "
+            f"{_markdown_value(row['before_max_normalized_violation'])} | "
+            f"{_markdown_value(row['after_max_normalized_violation'])} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -753,7 +926,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--autoresearch-root",
         type=Path,
-        default=DEFAULT_AUTORESEARCH_ROOT,
+        default=None,
     )
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--stamp", default=utc_stamp())
@@ -767,7 +940,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    roots = AutoresearchArtifactRoots.from_autoresearch_root(args.autoresearch_root)
+    autoresearch_root = autoresearch_root_from_arg(args.autoresearch_root)
+    roots = AutoresearchArtifactRoots.from_autoresearch_root(autoresearch_root)
     output_dir = args.output_dir or benchmark_output_dir(roots)
     summary = build_baseline_summary(roots)
     if args.baseline_jsonl is None:

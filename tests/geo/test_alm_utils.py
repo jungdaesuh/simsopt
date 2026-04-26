@@ -1,6 +1,5 @@
-import importlib.util
+import sys
 import unittest
-import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -8,23 +7,22 @@ from unittest.mock import patch
 import numpy as np
 
 
-ALM_UTILS_MODULE_PATH = (
+EXAMPLES_ROOT = (
     Path(__file__).resolve().parents[2]
     / "examples"
     / "single_stage_optimization"
-    / "alm_utils.py"
 )
+EXAMPLES_ROOT_STR = str(EXAMPLES_ROOT)
+EXAMPLES_ROOT_INSERTED = EXAMPLES_ROOT_STR not in sys.path
+if EXAMPLES_ROOT_INSERTED:
+    sys.path.insert(0, EXAMPLES_ROOT_STR)
+import alm_utils as _alm_utils  # noqa: E402
+if EXAMPLES_ROOT_INSERTED:
+    sys.path.remove(EXAMPLES_ROOT_STR)
 
 
 def load_alm_utils_module():
-    spec = importlib.util.spec_from_file_location(
-        f"alm_utils_{uuid.uuid4().hex}",
-        ALM_UTILS_MODULE_PATH,
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return _alm_utils
 
 
 class ResidualHelperTests(unittest.TestCase):
@@ -486,15 +484,29 @@ class ResidualHelperTests(unittest.TestCase):
             diagnostics["surrogate_hard_sign_mismatch_by_constraint"],
             [False, False, False],
         )
-        self.assertAlmostEqual(
-            diagnostics["objective_to_augmented_term_ratio"],
-            0.0,
-        )
+        self.assertIsNone(diagnostics["objective_to_augmented_term_ratio"])
         self.assertAlmostEqual(diagnostics["augmented_gradient_norm"], 0.0)
         self.assertAlmostEqual(diagnostics["surrogate_kkt_stationarity_norm"], 0.0)
         self.assertEqual(
             diagnostics["multiplier_interpretation"],
             "differentiable_alm_multipliers",
+        )
+
+    def test_objective_to_augmented_term_ratio_requires_explicit_base_objective(self):
+        module = load_alm_utils_module()
+
+        self.assertIsNone(
+            module._objective_to_augmented_term_ratio(
+                {"total": 3.0},
+                np.array([3.0]),
+            )
+        )
+        self.assertAlmostEqual(
+            module._objective_to_augmented_term_ratio(
+                {"total": 4.0, "base_total": 2.0},
+                np.array([1.0]),
+            ),
+            2.0,
         )
 
     def test_alm_summary_uses_summary_diagnostics_without_full_history_payload(self):
@@ -730,6 +742,17 @@ class MinimizeAlmTests(unittest.TestCase):
         }
 
     @staticmethod
+    def _quartic_taylor_evaluation(x):
+        x = np.asarray(x, dtype=float)
+        grad = 4.0 * x**3
+        return {
+            "total": float(np.sum(x**4)),
+            "grad": grad,
+            "constraint_values": np.zeros(1),
+            "stationarity_norm": float(np.linalg.norm(grad)),
+        }
+
+    @staticmethod
     def _stage2_signal_evaluation(**overrides):
         evaluation = {
             "total": 0.0,
@@ -928,6 +951,33 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["conditioning_penalty_grad_ratio"], 9.0)
         self.assertAlmostEqual(metrics["penalty_gradient_norm"], 9.0)
 
+    def test_conditioning_metrics_penalty_ratio_preserves_small_base_signal(self):
+        module = load_alm_utils_module()
+
+        metrics = module._conditioning_metrics(
+            {
+                "total": 0.101,
+                "base_total": 1.0e-3,
+                "grad": np.array([0.0]),
+            }
+        )
+
+        self.assertAlmostEqual(metrics["conditioning_penalty_objective"], 0.1)
+        self.assertAlmostEqual(metrics["conditioning_penalty_objective_ratio"], 100.0)
+
+    def test_conditioning_metrics_penalty_ratio_is_none_for_zero_base_objective(self):
+        module = load_alm_utils_module()
+
+        metrics = module._conditioning_metrics(
+            {
+                "total": 0.1,
+                "base_total": 0.0,
+                "grad": np.array([0.0]),
+            }
+        )
+
+        self.assertIsNone(metrics["conditioning_penalty_objective_ratio"])
+
     def test_minimize_alm_sanitizes_nonfinite_candidate_evaluations(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
@@ -1016,11 +1066,12 @@ class MinimizeAlmTests(unittest.TestCase):
 
         self.assertTrue(acceptable)
 
-    def test_directional_taylor_test_passes_for_consistent_quadratic_gradient(self):
+    def test_directional_taylor_test_passes_for_consistent_gradient(self):
         module = load_alm_utils_module()
 
         def evaluate_problem(x, multipliers, penalty):
-            return self._quadratic_taylor_evaluation(x, 1.0)
+            del multipliers, penalty
+            return self._quartic_taylor_evaluation(x)
 
         result = module.run_directional_taylor_test(
             evaluate_problem,
@@ -1031,7 +1082,9 @@ class MinimizeAlmTests(unittest.TestCase):
         )
 
         self.assertTrue(result["passed"])
-        self.assertTrue(result["max_ratio"] is None or result["max_ratio"] < 0.3)
+        self.assertEqual(result["direction_count"], 4)
+        self.assertIsNotNone(result["max_ratio"])
+        self.assertLess(result["max_ratio"], result["ratio_threshold"])
 
     def test_directional_taylor_test_flags_inconsistent_gradient(self):
         module = load_alm_utils_module()
@@ -1086,6 +1139,136 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertLessEqual(result.x[0], 1.0 + 1e-6)
         self.assertLessEqual(result.constraint_values[0], 1e-6)
         self.assertAlmostEqual(result.history[0]["kkt_stationarity_norm"], 0.0)
+
+    def test_scale_one_minimize_alm_matches_scalar_history_and_convergence(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=8,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+            relaxed_feasibility_gate_cap=1.0,
+            multiplier_max=1.0e6,
+            history_max_entries=None,
+        )
+        inner_options = {"maxiter": 80, "ftol": 1e-12, "gtol": 1e-10, "maxls": 20}
+
+        def raw_evaluate_problem(x, multipliers, penalty):
+            x = np.asarray(x, dtype=float)
+            signed_constraint_value = np.array([x[0] - 0.25])
+            return module.augmented_inequality_objective(
+                0.5 * (x[0] - 1.0) ** 2,
+                np.array([x[0] - 1.0]),
+                signed_constraint_value,
+                [np.array([1.0])],
+                multipliers,
+                penalty,
+            )
+
+        def scale_one_evaluate_problem(x, multipliers, penalty):
+            x = np.asarray(x, dtype=float)
+            scale = 1.0
+            signed_constraint_value = np.array([(x[0] - 0.25) / scale])
+            return module.augmented_inequality_objective(
+                0.5 * (x[0] - 1.0) ** 2,
+                np.array([x[0] - 1.0]),
+                signed_constraint_value,
+                [np.array([1.0 / scale])],
+                multipliers,
+                penalty,
+            )
+
+        raw_result = module.minimize_alm(
+            np.array([0.0]),
+            ["upper"],
+            raw_evaluate_problem,
+            settings,
+            inner_options,
+        )
+        scale_one_result = module.minimize_alm(
+            np.array([0.0]),
+            ["upper"],
+            scale_one_evaluate_problem,
+            settings,
+            inner_options,
+        )
+
+        self.assertTrue(raw_result.success)
+        self.assertEqual(raw_result.termination_reason, "converged")
+        self.assertEqual(raw_result.termination_reason, scale_one_result.termination_reason)
+        np.testing.assert_allclose(raw_result.x, scale_one_result.x)
+        np.testing.assert_allclose(raw_result.multipliers, scale_one_result.multipliers)
+        self.assertEqual(raw_result.penalty, scale_one_result.penalty)
+        self.assertEqual(raw_result.history, scale_one_result.history)
+
+    def test_block_penalties_disabled_ignores_block_inputs_and_matches_scalar_alm(self):
+        module = load_alm_utils_module()
+        scalar_settings = module.ALMSettings(
+            max_outer_iterations=8,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+            relaxed_feasibility_gate_cap=1.0,
+            multiplier_max=1.0e6,
+            history_max_entries=None,
+        )
+        disabled_block_settings = module.ALMSettings(
+            max_outer_iterations=8,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+            relaxed_feasibility_gate_cap=1.0,
+            multiplier_max=1.0e6,
+            block_penalties_enabled=False,
+            block_penalty_init={"current": 2.0},
+            block_penalty_scale={"current": 3.0},
+            history_max_entries=None,
+        )
+        inner_options = {"maxiter": 80, "ftol": 1e-12, "gtol": 1e-10, "maxls": 20}
+
+        def evaluate_problem(x, multipliers, penalty):
+            x = np.asarray(x, dtype=float)
+            return module.augmented_inequality_objective(
+                0.5 * (x[0] - 1.0) ** 2,
+                np.array([x[0] - 1.0]),
+                np.array([x[0] - 0.25]),
+                [np.array([1.0])],
+                multipliers,
+                penalty,
+            )
+
+        scalar_result = module.minimize_alm(
+            np.array([0.0]),
+            ["upper"],
+            evaluate_problem,
+            scalar_settings,
+            inner_options,
+        )
+        disabled_block_result = module.minimize_alm(
+            np.array([0.0]),
+            ["upper"],
+            evaluate_problem,
+            disabled_block_settings,
+            inner_options,
+            constraint_blocks=["current"],
+        )
+
+        self.assertTrue(scalar_result.success)
+        self.assertEqual(scalar_result.termination_reason, "converged")
+        self.assertEqual(
+            scalar_result.termination_reason,
+            disabled_block_result.termination_reason,
+        )
+        np.testing.assert_allclose(scalar_result.x, disabled_block_result.x)
+        np.testing.assert_allclose(
+            scalar_result.multipliers,
+            disabled_block_result.multipliers,
+        )
+        self.assertEqual(scalar_result.penalty, disabled_block_result.penalty)
+        self.assertEqual(scalar_result.history, disabled_block_result.history)
 
     def test_minimize_alm_requires_signed_constraint_activity_for_boundary_kkt_success(self):
         module = load_alm_utils_module()
@@ -1564,8 +1747,46 @@ class MinimizeAlmTests(unittest.TestCase):
             result.history[0],
         )
 
+    def test_history_diagnostic_materialization_is_pure_and_snapshots_are_owned(self):
+        module = load_alm_utils_module()
+        source_key = module._HISTORY_DIAGNOSTICS_SOURCE_KEY
+        diagnostic_array = np.array([3.0])
+        entry = {
+            "action": "subproblem_continue",
+            "constraint_values": [1.0],
+            "block_penalties": {"geometry": {"penalty": 2.0}},
+            source_key: {"source": "deferred"},
+        }
+
+        with patch.object(
+            module,
+            "_constraint_history_diagnostics_from_source",
+            return_value={
+                "constraint_blocks": ["geometry"],
+                "nested_diagnostic": {"values": [4.0]},
+                "diagnostic_array": diagnostic_array,
+            },
+        ):
+            materialized = module._materialize_history_entry_diagnostics(entry)
+            snapshot = module._snapshot_history_entry(entry)
+
+        self.assertIn(source_key, entry)
+        self.assertNotIn(source_key, materialized)
+        self.assertNotIn(source_key, snapshot)
+        self.assertEqual(materialized["constraint_blocks"], ["geometry"])
+
+        snapshot["constraint_values"][0] = 99.0
+        snapshot["block_penalties"]["geometry"]["penalty"] = 99.0
+        snapshot["nested_diagnostic"]["values"][0] = 99.0
+        snapshot["diagnostic_array"][0] = 99.0
+
+        self.assertEqual(entry["constraint_values"], [1.0])
+        self.assertEqual(entry["block_penalties"]["geometry"]["penalty"], 2.0)
+        self.assertEqual(diagnostic_array[0], 3.0)
+
     def test_minimize_alm_short_circuits_zero_step_infeasible_stall(self):
         module = load_alm_utils_module()
+        source_key = module._HISTORY_DIAGNOSTICS_SOURCE_KEY
         settings = module.ALMSettings(
             max_outer_iterations=1,
             max_subproblem_continuations=3,
@@ -1607,6 +1828,7 @@ class MinimizeAlmTests(unittest.TestCase):
                 {
                     "history": history,
                     "latest_entry": latest_entry,
+                    "history_had_deferred_source": source_key in history[-1],
                     "multipliers": multipliers.tolist(),
                     "penalty": float(penalty),
                 }
@@ -1631,6 +1853,12 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(result.history[0]["inner_attempts"], 1)
         self.assertIs(history_snapshots[-1]["history"], result.history)
         self.assertIsNot(history_snapshots[-1]["latest_entry"], result.history[0])
+        self.assertTrue(history_snapshots[-1]["history_had_deferred_source"])
+        self.assertNotIn(source_key, result.history[0])
+        self.assertNotIn(
+            source_key,
+            history_snapshots[-1]["latest_entry"],
+        )
         self.assertEqual(history_snapshots[-1]["latest_entry"]["action"], "infeasible_stall_penalty_increase")
         self.assertEqual(history_snapshots[-1]["latest_entry"]["outer_termination"], "max_outer")
         history_snapshots[-1]["latest_entry"]["action"] = "mutated_by_callback_owner"
@@ -1819,6 +2047,61 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(result.history[1]["multipliers"], [0.2])
         self.assertTrue(result.multiplier_cap_binding)
         self.assertEqual(result.multiplier_cap_binding_indices, [0])
+
+    def test_minimize_alm_applies_multiplier_cap_in_normalized_units(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=2,
+            penalty_init=4.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+            relaxed_feasibility_gate_cap=1.0,
+            multiplier_max=0.2,
+        )
+        scale = 8.0
+        raw_violation = 0.5
+        normalized_violation = raw_violation / scale
+
+        def evaluate_problem(x, multipliers, penalty):
+            del multipliers, penalty
+            x = np.asarray(x, dtype=float)
+            return {
+                "total": float(np.dot(x, x)),
+                "grad": 2.0 * x,
+                "constraint_values": np.array([normalized_violation]),
+                "normalized_signed_constraint_values": np.array([normalized_violation]),
+                "normalized_feasibility_values": np.array([normalized_violation]),
+                "raw_dual_update_values": np.array([raw_violation]),
+                "raw_hard_violation_values": np.array([raw_violation]),
+                "constraint_scales": np.array([scale]),
+                "stationarity_norm": float(np.linalg.norm(2.0 * x)),
+            }
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, jac, method, bounds, callback, options
+            return SimpleNamespace(
+                x=np.array([0.0]),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([0.1]),
+                ["normalized_current"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+            )
+
+        self.assertEqual(result.history[0]["post_update_multipliers"], [0.2])
+        self.assertTrue(result.history[0]["multiplier_cap_binding"])
+        self.assertEqual(result.history[0]["multiplier_cap_binding_indices"], [0])
+        np.testing.assert_allclose(result.multipliers, [0.2])
+        np.testing.assert_allclose(result.raw_dual_estimates, [0.2 / scale])
+        self.assertTrue(result.multiplier_cap_binding)
 
     def test_minimize_alm_history_entry_has_stable_schema(self):
         module = load_alm_utils_module()
@@ -2955,6 +3238,194 @@ class MinimizeAlmTests(unittest.TestCase):
             result.history[0]["block_penalty_cap_reached"],
             {"geometry": True, "current": False},
         )
+
+    def test_block_penalty_cap_branch_refreshes_simultaneous_growth_history(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=1,
+            max_subproblem_continuations=0,
+            penalty_init=1.0,
+            feasibility_tol=1.0e-8,
+            stationarity_tol=1.0e-8,
+            max_inner_attempts=1,
+            block_penalties_enabled=True,
+            block_penalty_init={"geometry": 1.0, "current": 1.0},
+            block_penalty_scale={"geometry": 10.0, "current": 100.0},
+            block_penalty_max={"geometry": 5.0, "current": 1.0e8},
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x
+            return module.augmented_inequality_objective(
+                base_value=0.0,
+                base_grad=np.zeros(1),
+                constraint_values=np.array([0.5, 0.5]),
+                constraint_grads=[np.ones(1), np.ones(1)],
+                multipliers=multipliers,
+                penalty=penalty,
+            )
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, jac, method, bounds, callback, options
+            return SimpleNamespace(
+                x=np.asarray(x, dtype=float).copy(),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.zeros(1),
+                ["gap", "current"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 1},
+                constraint_blocks=["geometry", "current"],
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.termination_reason, "penalty_cap_reached")
+        self.assertEqual(result.block_penalties, {"geometry": 1.0, "current": 100.0})
+        self.assertEqual(result.penalty, 100.0)
+        self.assertEqual(result.penalty_values, [1.0, 100.0])
+        self.assertAlmostEqual(result.final_objective, 12.625)
+        self.assertAlmostEqual(result.final_augmented_gradient_norm, 50.5)
+        self.assertEqual(result.history[0]["action"], "penalty_cap_reached")
+        self.assertEqual(result.history[0]["block_penalty_growth_blocks"], ["current"])
+        self.assertEqual(
+            result.history[0]["block_penalty_cap_reached"],
+            {"geometry": True, "current": False},
+        )
+        self.assertEqual(result.history[0]["block_penalties"], {"geometry": 1.0, "current": 100.0})
+        self.assertEqual(result.history[0]["penalty"], 100.0)
+        self.assertEqual(result.history[0]["penalty_values"], [1.0, 100.0])
+        self.assertEqual(result.history[0]["positive_shift_values"], [0.5, 50.0])
+        self.assertAlmostEqual(result.history[0]["augmented_gradient_norm"], 50.5)
+
+    def test_block_penalty_growth_refreshes_result_and_history_penalties(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=1,
+            max_subproblem_continuations=0,
+            penalty_init=1.0,
+            feasibility_tol=1.0e-8,
+            stationarity_tol=1.0e-8,
+            max_inner_attempts=1,
+            block_penalties_enabled=True,
+            block_penalty_init={"geometry": 1.0, "current": 1.0},
+            block_penalty_scale={"geometry": 10.0, "current": 2.0},
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x
+            return module.augmented_inequality_objective(
+                base_value=0.0,
+                base_grad=np.zeros(1),
+                constraint_values=np.array([0.5, 0.0]),
+                constraint_grads=[np.ones(1), np.zeros(1)],
+                multipliers=multipliers,
+                penalty=penalty,
+            )
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, jac, method, bounds, callback, options
+            return SimpleNamespace(
+                x=np.asarray(x, dtype=float).copy(),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.zeros(1),
+                ["gap", "current"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 1},
+                constraint_blocks=["geometry", "current"],
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.termination_reason, "max_outer_after_infeasible_stall")
+        self.assertEqual(result.block_penalties, {"geometry": 10.0, "current": 1.0})
+        self.assertEqual(result.penalty, 10.0)
+        self.assertEqual(result.penalty_values, [10.0, 1.0])
+        self.assertAlmostEqual(result.final_objective, 1.25)
+        self.assertAlmostEqual(result.final_augmented_gradient_norm, 5.0)
+        self.assertEqual(result.history[0]["action"], "infeasible_stall_penalty_increase")
+        self.assertEqual(result.history[0]["block_penalty_growth_blocks"], ["geometry"])
+        self.assertEqual(result.history[0]["block_penalties"], {"geometry": 10.0, "current": 1.0})
+        self.assertEqual(result.history[0]["penalty"], 10.0)
+        self.assertEqual(result.history[0]["penalty_values"], [10.0, 1.0])
+        self.assertEqual(result.history[0]["positive_shift_values"], [5.0, 0.0])
+        self.assertAlmostEqual(result.history[0]["augmented_gradient_norm"], 5.0)
+
+    def test_block_penalty_tolerance_schedule_tracks_slowest_block_penalty(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=2,
+            max_subproblem_continuations=0,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1.0e-8,
+            stationarity_tol=1.0e-8,
+            relaxed_feasibility_gate_cap=10.0,
+            max_inner_attempts=1,
+            block_penalties_enabled=True,
+            block_penalty_init={"geometry": 100.0, "current": 1.0},
+            block_penalty_scale={"geometry": 10.0, "current": 2.0},
+        )
+        penalty_arguments = []
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x
+            penalty_arguments.append(np.asarray(penalty, dtype=float).copy())
+            return module.augmented_inequality_objective(
+                base_value=0.0,
+                base_grad=np.zeros(1),
+                constraint_values=np.array([0.5, 0.0]),
+                constraint_grads=[np.zeros(1), np.zeros(1)],
+                multipliers=multipliers,
+                penalty=penalty,
+            )
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, jac, method, bounds, callback, options
+            return SimpleNamespace(
+                x=np.asarray(x, dtype=float).copy(),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.zeros(1),
+                ["gap", "current"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 1},
+                constraint_blocks=["geometry", "current"],
+            )
+
+        np.testing.assert_allclose(penalty_arguments[0], [100.0, 1.0])
+        self.assertEqual(result.penalty, 100.0)
+        self.assertEqual(result.history[0]["penalty"], 100.0)
+        self.assertEqual(result.history[0]["penalty_values"], [100.0, 1.0])
+        self.assertEqual(
+            result.history[0]["block_penalties"],
+            {"geometry": 100.0, "current": 1.0},
+        )
+        self.assertEqual(result.history[0]["action"], "dual_update")
+        self.assertAlmostEqual(result.history[0]["feasibility_tolerance"], 1.0)
+        self.assertAlmostEqual(result.history[0]["effective_feasibility_tolerance"], 1.0)
+        self.assertAlmostEqual(result.history[0]["stationarity_tolerance"], 1.0)
+        self.assertEqual(result.history[1]["action"], "dual_update")
+        self.assertAlmostEqual(result.history[1]["feasibility_tolerance"], 0.5)
+        self.assertAlmostEqual(result.history[1]["effective_feasibility_tolerance"], 0.5)
+        self.assertAlmostEqual(result.history[1]["stationarity_tolerance"], 0.5)
 
 
 if __name__ == "__main__":

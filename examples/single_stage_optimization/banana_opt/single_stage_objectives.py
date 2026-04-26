@@ -16,6 +16,7 @@ from banana_opt.hardware_constraint_schema import (
     alm_constraint_metadata_payload,
     build_threshold_overrides,
     get_hardware_constraint_spec,
+    hardware_constraint_alm_activity_tolerance,
     hardware_constraint_alm_metadata,
 )
 from banana_opt.poloidal_extent import (
@@ -166,6 +167,17 @@ def _banana_current_alm_metadata_name(name: str) -> str:
     if _is_independent_banana_current_alm_constraint_name(name):
         return "banana_current_upper_bound"
     return name
+
+
+def _hardware_alm_activity_tolerance(
+    name: str,
+    *,
+    threshold_overrides: dict[str, float],
+) -> float:
+    return hardware_constraint_alm_activity_tolerance(
+        _banana_current_alm_metadata_name(name),
+        threshold_overrides=threshold_overrides,
+    )
 
 
 def _flat_surface_points(surface) -> np.ndarray:
@@ -880,12 +892,14 @@ def _single_stage_alm_constraint_metadata(
         "poloidal_extent",
     }
     for constraint_name in constraint_names:
-        activity_tolerance = activity_tolerance_by_name.get(constraint_name, 0.0)
+        activity_tolerance = activity_tolerance_by_name.get(constraint_name)
         if constraint_name in physics_threshold_by_name:
             metadata_by_name[constraint_name] = _physics_alm_metadata(
                 constraint_name,
                 threshold=physics_threshold_by_name[constraint_name],
-                activity_tolerance=activity_tolerance,
+                activity_tolerance=(
+                    0.0 if activity_tolerance is None else activity_tolerance
+                ),
             )
             continue
         metadata_name = _banana_current_alm_metadata_name(constraint_name)
@@ -1307,6 +1321,16 @@ def evaluate_alm_objective(
             dual_update_values.append(signed_value)
             feasibility_values.append(violation)
 
+    threshold_overrides = _single_stage_hardware_threshold_overrides(
+        curve_curve_min_distance=curve_curve_min_distance,
+        curve_surface_min_distance=curve_surface_min_distance,
+        curvature_threshold=curvature_threshold,
+        surface_surface_min_distance=surface_surface_min_distance,
+        surface_stack_min_distance=surface_stack_min_distance,
+        coil_length_threshold=coil_length_threshold,
+        banana_current_threshold=banana_current_threshold,
+        poloidal_extent_threshold=poloidal_extent_threshold,
+    )
     geometry_tolerances = np.asarray(
         activity_tolerances_fn(
             distance_smoothing,
@@ -1327,14 +1351,19 @@ def evaluate_alm_objective(
         name: float(value)
         for name, value in zip(geometry_names, geometry_tolerances)
     }
-    for exact_constraint_name in ("coil_length_upper_bound", "banana_current_upper_bound"):
-        if exact_constraint_name in hardware_constraints:
-            constraint_tolerance_by_name[exact_constraint_name] = 1.0e-3
     for constraint_name in active_constraint_names:
-        if _is_independent_banana_current_alm_constraint_name(constraint_name):
-            constraint_tolerance_by_name[constraint_name] = 1.0e-3
-    if "poloidal_extent" in hardware_constraints:
-        constraint_tolerance_by_name["poloidal_extent"] = 1.0e-3
+        metadata_name = _banana_current_alm_metadata_name(constraint_name)
+        if metadata_name in {
+            "coil_length_upper_bound",
+            "banana_current_upper_bound",
+            "poloidal_extent",
+        }:
+            constraint_tolerance_by_name[constraint_name] = (
+                _hardware_alm_activity_tolerance(
+                    metadata_name,
+                    threshold_overrides=threshold_overrides,
+                )
+            )
     constraint_activity_tolerances = np.asarray(
         [
             constraint_tolerance_by_name.get(constraint_name, 0.0)
@@ -1343,16 +1372,6 @@ def evaluate_alm_objective(
         dtype=float,
     )
     base_eval["constraint_activity_tolerances"] = constraint_activity_tolerances
-    threshold_overrides = _single_stage_hardware_threshold_overrides(
-        curve_curve_min_distance=curve_curve_min_distance,
-        curve_surface_min_distance=curve_surface_min_distance,
-        curvature_threshold=curvature_threshold,
-        surface_surface_min_distance=surface_surface_min_distance,
-        surface_stack_min_distance=surface_stack_min_distance,
-        coil_length_threshold=coil_length_threshold,
-        banana_current_threshold=banana_current_threshold,
-        poloidal_extent_threshold=poloidal_extent_threshold,
-    )
     metadata_by_name = _single_stage_alm_constraint_metadata(
         active_constraint_names,
         threshold_overrides=threshold_overrides,

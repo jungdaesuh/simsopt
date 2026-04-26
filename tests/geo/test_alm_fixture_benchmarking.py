@@ -55,6 +55,16 @@ class AlmFixtureBenchmarkingTests(unittest.TestCase):
             payload["schema_version"],
             alm_fixture_benchmarking.SCHEMA_VERSION,
         )
+        self.assertEqual(
+            payload["settings"]["seed"],
+            alm_fixture_benchmarking.DEFAULT_FIXTURE_SEED,
+        )
+        self.assertEqual(
+            payload["solver_checkout"],
+            str(Path(__file__).resolve().parents[2]),
+        )
+        self.assertEqual(len(payload["solver_commit"]), 40)
+        int(payload["solver_commit"], 16)
         self.assertEqual(len(payload["fixture_rows"]), 2)
         self.assertEqual(len(payload["comparisons"]), 1)
         formulations = {row["formulation"] for row in payload["fixture_rows"]}
@@ -73,9 +83,19 @@ class AlmFixtureBenchmarkingTests(unittest.TestCase):
         payload = alm_fixture_benchmarking.run_fixture_benchmark(
             fixtures=(),
             inner_options={},
+            seed=123,
         )
 
         self.assertEqual(payload["inner_options"], {})
+        self.assertEqual(payload["settings"]["seed"], 123)
+
+    def test_cli_does_not_default_to_user_specific_autoresearch_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "fixture.json"
+            args = alm_fixture_benchmarking._parse_args(["--output", str(output_path)])
+
+        self.assertEqual(args.output, output_path)
+        self.assertIsNone(args.autoresearch_root)
 
     def test_evaluate_fixture_rejects_unknown_formulation(self):
         fixture = alm_fixture_benchmarking.default_fixtures()[0]

@@ -26,6 +26,7 @@ ALMValueKind = Literal["surrogate", "hard", "raw_physics"]
 TraversalPolicy = Literal["allowed", "forbidden"]
 ALM_PHYSICAL_SCALE_FLOOR = sys.float_info.epsilon
 ALM_OBJECTIVE_SCALE_FLOOR = 1.0e-12
+ALM_ACTIVITY_TOLERANCE_FRACTION = 1.0e-3
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,7 @@ class HardwareConstraintSpec:
     traversal_policy: TraversalPolicy
     alm_scale: float | None = None
     alm_block: ALMBlock | None = None
-    alm_activity_tolerance: float = 0.0
+    alm_activity_tolerance_fraction: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,46 @@ class ALMConstraintMetadata:
     dual_update_value_kind: Literal["surrogate", "hard"]
     feasibility_value_kind: Literal["surrogate", "hard"]
     certification_value_kind: Literal["hard"]
+
+    def __post_init__(self) -> None:
+        _validate_alm_metadata(self, name=self.source or "ALM metadata")
+
+
+_ALM_SURROGATE_VALUE_KIND_TUPLE = (
+    "surrogate",
+    "surrogate",
+    "surrogate",
+    "surrogate",
+    "hard",
+)
+_ALM_SURROGATE_WITH_HARD_SIGNALS_VALUE_KIND_TUPLE = (
+    "surrogate",
+    "surrogate",
+    "hard",
+    "hard",
+    "hard",
+)
+_ALM_HARD_VALUE_KIND_TUPLE = ("hard", "hard", "hard", "hard", "hard")
+_ALM_RAW_PHYSICS_VALUE_KIND_TUPLE = (
+    "raw_physics",
+    "raw_physics",
+    "hard",
+    "hard",
+    "hard",
+)
+_ALM_SURROGATE_BLOCK_VALUE_KIND_TUPLES = frozenset(
+    {
+        _ALM_SURROGATE_VALUE_KIND_TUPLE,
+        _ALM_SURROGATE_WITH_HARD_SIGNALS_VALUE_KIND_TUPLE,
+        _ALM_HARD_VALUE_KIND_TUPLE,
+    }
+)
+_ALM_ALLOWED_VALUE_KIND_TUPLES_BY_BLOCK: Mapping[ALMBlock, frozenset[tuple[str, ...]]] = {
+    "geometry": _ALM_SURROGATE_BLOCK_VALUE_KIND_TUPLES,
+    "surface": _ALM_SURROGATE_BLOCK_VALUE_KIND_TUPLES,
+    "current": frozenset({_ALM_HARD_VALUE_KIND_TUPLE}),
+    "physics": frozenset({_ALM_RAW_PHYSICS_VALUE_KIND_TUPLE}),
+}
 
 
 HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
@@ -95,6 +136,7 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         name="coil_length",
         kind="upper_bound",
         threshold=COIL_LENGTH_HARD_LIMIT_M,
+        alm_activity_tolerance_fraction=ALM_ACTIVITY_TOLERANCE_FRACTION,
         applies_to=frozenset({"alm", "artifact"}),
         traversal_policy="allowed",
     ),
@@ -102,6 +144,7 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         name="poloidal_extent",
         kind="upper_bound",
         threshold=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+        alm_activity_tolerance_fraction=ALM_ACTIVITY_TOLERANCE_FRACTION,
         applies_to=frozenset({"penalty", "alm", "artifact"}),
         traversal_policy="allowed",
     ),
@@ -109,6 +152,7 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         name="banana_current",
         kind="box_bound",
         threshold=BANANA_CURRENT_HARD_LIMIT_A,
+        alm_activity_tolerance_fraction=ALM_ACTIVITY_TOLERANCE_FRACTION,
         applies_to=frozenset({"penalty", "alm", "artifact"}),
         traversal_policy="forbidden",
     ),
@@ -206,6 +250,20 @@ def get_hardware_constraint_spec_for_alm_name(name: str) -> HardwareConstraintSp
     return get_hardware_constraint_spec(_schema_name_from_alm_or_schema_name(name))
 
 
+def _resolved_alm_scale(spec: HardwareConstraintSpec, raw_threshold: float) -> float:
+    return max(
+        raw_threshold if spec.alm_scale is None else float(spec.alm_scale),
+        ALM_PHYSICAL_SCALE_FLOOR,
+    )
+
+
+def _alm_activity_tolerance_from_scale(
+    spec: HardwareConstraintSpec,
+    scale: float,
+) -> float:
+    return float(scale) * float(spec.alm_activity_tolerance_fraction)
+
+
 def _validate_alm_metadata(metadata: ALMConstraintMetadata, *, name: str) -> None:
     if not math.isfinite(metadata.scale) or metadata.scale <= 0.0:
         raise ValueError(f"ALM scale for {name!r} must be finite and positive.")
@@ -218,6 +276,21 @@ def _validate_alm_metadata(metadata: ALMConstraintMetadata, *, name: str) -> Non
         )
     if metadata.source == "":
         raise ValueError(f"ALM scale source for {name!r} must be nonempty.")
+    value_kind_tuple = (
+        metadata.objective_value_kind,
+        metadata.gradient_value_kind,
+        metadata.dual_update_value_kind,
+        metadata.feasibility_value_kind,
+        metadata.certification_value_kind,
+    )
+    if metadata.block not in _ALM_ALLOWED_VALUE_KIND_TUPLES_BY_BLOCK:
+        raise ValueError(f"ALM block for {name!r} is unknown: {metadata.block!r}.")
+    allowed_value_kind_tuples = _ALM_ALLOWED_VALUE_KIND_TUPLES_BY_BLOCK[metadata.block]
+    if value_kind_tuple not in allowed_value_kind_tuples:
+        raise ValueError(
+            f"ALM value kinds for {name!r} are incompatible with block "
+            f"{metadata.block!r}: {value_kind_tuple}."
+        )
 
 
 def hardware_constraint_alm_metadata(
@@ -233,10 +306,7 @@ def hardware_constraint_alm_metadata(
     schema_name = _schema_name_from_alm_or_schema_name(name)
     spec = get_hardware_constraint_spec(schema_name)
     raw_threshold = _resolved_threshold(spec, threshold_overrides)
-    scale = max(
-        raw_threshold if spec.alm_scale is None else float(spec.alm_scale),
-        ALM_PHYSICAL_SCALE_FLOOR,
-    )
+    scale = _resolved_alm_scale(spec, raw_threshold)
     source = (
         f"threshold:{schema_name}"
         if spec.alm_scale is None
@@ -246,7 +316,7 @@ def hardware_constraint_alm_metadata(
         scale=scale,
         block=spec.alm_block or _DEFAULT_ALM_BLOCK_BY_NAME[schema_name],
         activity_tolerance=(
-            float(spec.alm_activity_tolerance)
+            _alm_activity_tolerance_from_scale(spec, scale)
             if activity_tolerance is None
             else float(activity_tolerance)
         ),
@@ -258,7 +328,6 @@ def hardware_constraint_alm_metadata(
         feasibility_value_kind=feasibility_value_kind,
         certification_value_kind="hard",
     )
-    _validate_alm_metadata(metadata, name=name)
     return metadata
 
 
@@ -267,10 +336,22 @@ def hardware_constraint_alm_scale(
     *,
     threshold_overrides: Mapping[str, float] | None = None,
 ) -> float:
-    return hardware_constraint_alm_metadata(
-        name,
-        threshold_overrides=threshold_overrides,
-    ).scale
+    schema_name = _schema_name_from_alm_or_schema_name(name)
+    spec = get_hardware_constraint_spec(schema_name)
+    raw_threshold = _resolved_threshold(spec, threshold_overrides)
+    return _resolved_alm_scale(spec, raw_threshold)
+
+
+def hardware_constraint_alm_activity_tolerance(
+    name: str,
+    *,
+    threshold_overrides: Mapping[str, float] | None = None,
+) -> float:
+    schema_name = _schema_name_from_alm_or_schema_name(name)
+    spec = get_hardware_constraint_spec(schema_name)
+    raw_threshold = _resolved_threshold(spec, threshold_overrides)
+    scale = _resolved_alm_scale(spec, raw_threshold)
+    return _alm_activity_tolerance_from_scale(spec, scale)
 
 
 def hardware_constraint_alm_block(name: str) -> ALMBlock:

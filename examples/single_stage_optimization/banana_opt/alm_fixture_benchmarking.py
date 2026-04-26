@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import subprocess
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -15,13 +16,15 @@ import numpy as np
 from alm_utils import ALMSettings, augmented_inequality_objective, minimize_alm
 from banana_opt.alm_benchmarking import (
     BENCHMARK_DIR_NAME,
-    DEFAULT_AUTORESEARCH_ROOT,
+    autoresearch_root_from_arg,
 )
 
 
 SCHEMA_VERSION = "alm_normalization_fixture_benchmark_v1"
 FORMULATION_RAW = "raw_units"
 FORMULATION_NORMALIZED = "normalized_units"
+DEFAULT_FIXTURE_SEED = 0
+SOLVER_CHECKOUT = Path(__file__).resolve().parents[3]
 DEFAULT_INNER_OPTIONS = {
     "maxiter": 120,
     "ftol": 1.0e-12,
@@ -111,6 +114,15 @@ def default_fixtures() -> tuple[ALMFixture, ...]:
 
 def benchmark_output_dir(autoresearch_root: Path) -> Path:
     return autoresearch_root / "artifact_exports" / BENCHMARK_DIR_NAME
+
+
+def solver_commit(checkout: Path = SOLVER_CHECKOUT) -> str:
+    return subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 def utc_stamp() -> str:
@@ -286,8 +298,10 @@ def run_fixture_benchmark(
     fixtures: Sequence[ALMFixture] | None = None,
     settings: ALMSettings | None = None,
     inner_options: Mapping[str, float | int] | None = None,
+    seed: int = DEFAULT_FIXTURE_SEED,
 ) -> dict[str, object]:
     active_fixtures = tuple(default_fixtures() if fixtures is None else fixtures)
+    run_solver_commit = solver_commit(SOLVER_CHECKOUT)
     alm_settings = (
         ALMSettings(
             max_outer_iterations=8,
@@ -329,7 +343,10 @@ def run_fixture_benchmark(
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "python_version": sys.version,
         "platform": platform.platform(),
+        "solver_checkout": str(SOLVER_CHECKOUT),
+        "solver_commit": run_solver_commit,
         "settings": {
+            "seed": int(seed),
             "max_outer_iterations": alm_settings.max_outer_iterations,
             "penalty_init": alm_settings.penalty_init,
             "penalty_scale": alm_settings.penalty_scale,
@@ -360,20 +377,25 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--autoresearch-root",
         type=Path,
-        default=DEFAULT_AUTORESEARCH_ROOT,
+        default=None,
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--seed", type=int, default=DEFAULT_FIXTURE_SEED)
     parser.add_argument("--stamp", default=utc_stamp())
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    payload = run_fixture_benchmark()
-    output_path = args.output or (
-        benchmark_output_dir(args.autoresearch_root)
-        / f"fixture_benchmark_{args.stamp}.json"
-    )
+    payload = run_fixture_benchmark(seed=args.seed)
+    if args.output is None:
+        autoresearch_root = autoresearch_root_from_arg(args.autoresearch_root)
+        output_path = (
+            benchmark_output_dir(autoresearch_root)
+            / f"fixture_benchmark_{args.stamp}.json"
+        )
+    else:
+        output_path = args.output
     path = write_fixture_benchmark(payload, output_path)
     print(
         json.dumps(
