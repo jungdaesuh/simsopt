@@ -410,6 +410,72 @@ def _raw_dual_estimates(multipliers, evaluation: dict) -> list[float] | None:
     return _as_float_list(multiplier_array / scales)
 
 
+def _constraint_block_history_diagnostics(
+    constraint_names: Sequence[str],
+    constraint_blocks: list[str] | None,
+    feasibility_values: np.ndarray,
+    raw_hard_violation_values: list[float] | None,
+    positive_shift: np.ndarray,
+    augmented_terms: np.ndarray,
+) -> dict:
+    if constraint_blocks is None:
+        return {
+            "block_max_raw_hard_violation": None,
+            "block_max_normalized_violation": None,
+            "block_augmented_term": None,
+            "block_positive_shift_norm": None,
+            "blocking_constraint_name": None,
+            "blocking_constraint_block": None,
+        }
+
+    block_max_normalized_violation = {}
+    block_max_raw_hard_violation = {}
+    block_augmented_term = {}
+    block_shift_square_sum = {}
+    raw_hard_violation_array = (
+        None
+        if raw_hard_violation_values is None
+        else np.asarray(raw_hard_violation_values, dtype=float)
+    )
+    for index, block in enumerate(constraint_blocks):
+        normalized_violation = float(feasibility_values[index])
+        block_max_normalized_violation[block] = max(
+            normalized_violation,
+            block_max_normalized_violation.get(block, 0.0),
+        )
+        block_augmented_term[block] = (
+            block_augmented_term.get(block, 0.0) + float(augmented_terms[index])
+        )
+        block_shift_square_sum[block] = (
+            block_shift_square_sum.get(block, 0.0) + float(positive_shift[index]) ** 2
+        )
+        if raw_hard_violation_array is not None:
+            raw_violation = float(raw_hard_violation_array[index])
+            block_max_raw_hard_violation[block] = max(
+                raw_violation,
+                block_max_raw_hard_violation.get(block, 0.0),
+            )
+
+    blocking_constraint_name = None
+    blocking_constraint_block = None
+    if feasibility_values.size > 0 and _max_value(feasibility_values) > 0.0:
+        blocking_index = int(np.argmax(feasibility_values))
+        blocking_constraint_name = str(constraint_names[blocking_index])
+        blocking_constraint_block = constraint_blocks[blocking_index]
+
+    return {
+        "block_max_raw_hard_violation": block_max_raw_hard_violation,
+        "block_max_normalized_violation": block_max_normalized_violation,
+        "block_augmented_term": block_augmented_term,
+        "block_positive_shift_norm": {
+            block: float(np.sqrt(value))
+            for block, value in block_shift_square_sum.items()
+        },
+        "blocking_constraint_name": blocking_constraint_name,
+        "blocking_constraint_block": blocking_constraint_block,
+    }
+
+
 def _constraint_history_diagnostics(
     evaluation: dict,
     multipliers: np.ndarray,
@@ -437,50 +503,14 @@ def _constraint_history_diagnostics(
         else _max_value(np.asarray(raw_hard_violation_values))
     )
     constraint_blocks = _optional_string_list(evaluation, "constraint_blocks")
-    block_max_normalized_violation = None
-    block_max_raw_hard_violation = None
-    block_augmented_term = None
-    block_positive_shift_norm = None
-    blocking_constraint_name = None
-    blocking_constraint_block = None
-    if constraint_blocks is not None:
-        block_max_normalized_violation = {}
-        block_max_raw_hard_violation = {}
-        block_augmented_term = {}
-        block_shift_square_sum = {}
-        raw_hard_violation_array = (
-            None
-            if raw_hard_violation_values is None
-            else np.asarray(raw_hard_violation_values, dtype=float)
-        )
-        for index, block in enumerate(constraint_blocks):
-            normalized_violation = float(feasibility_values[index])
-            block_max_normalized_violation[block] = max(
-                normalized_violation,
-                block_max_normalized_violation.get(block, 0.0),
-            )
-            block_augmented_term[block] = (
-                block_augmented_term.get(block, 0.0) + float(augmented_terms[index])
-            )
-            block_shift_square_sum[block] = (
-                block_shift_square_sum.get(block, 0.0) + float(positive_shift[index]) ** 2
-            )
-            if raw_hard_violation_array is not None:
-                raw_violation = float(raw_hard_violation_array[index])
-                block_max_raw_hard_violation[block] = max(
-                    raw_violation,
-                    block_max_raw_hard_violation.get(block, 0.0),
-                )
-        block_positive_shift_norm = {
-            block: float(np.sqrt(value))
-            for block, value in block_shift_square_sum.items()
-        }
-        blocking_index = None
-        if feasibility_values.size > 0 and _max_value(feasibility_values) > 0.0:
-            blocking_index = int(np.argmax(feasibility_values))
-        if blocking_index is not None:
-            blocking_constraint_name = str(constraint_names[blocking_index])
-            blocking_constraint_block = constraint_blocks[blocking_index]
+    block_diagnostics = _constraint_block_history_diagnostics(
+        constraint_names,
+        constraint_blocks,
+        feasibility_values,
+        raw_hard_violation_values,
+        positive_shift,
+        augmented_terms,
+    )
     return {
         "raw_signed_constraint_values": _optional_float_list(
             evaluation,
@@ -509,12 +539,7 @@ def _constraint_history_diagnostics(
         "positive_shift_values": _as_float_list(positive_shift),
         "augmented_term_by_constraint": _as_float_list(augmented_terms),
         "max_raw_hard_violation": raw_hard_max_violation,
-        "block_max_raw_hard_violation": block_max_raw_hard_violation,
-        "block_max_normalized_violation": block_max_normalized_violation,
-        "block_augmented_term": block_augmented_term,
-        "block_positive_shift_norm": block_positive_shift_norm,
-        "blocking_constraint_name": blocking_constraint_name,
-        "blocking_constraint_block": blocking_constraint_block,
+        **block_diagnostics,
     }
 
 
