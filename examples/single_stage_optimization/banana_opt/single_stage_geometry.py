@@ -276,6 +276,8 @@ def evaluate_single_stage_hardware_constraints(
     *,
     coil_length=None,
     length_target=None,
+    poloidal_extent_rad=None,
+    poloidal_extent_threshold_rad=None,
     tf_current_A=None,
     tf_current_limit_A=None,
     banana_current_A=None,
@@ -286,6 +288,7 @@ def evaluate_single_stage_hardware_constraints(
         ("coil_surface_spacing", cs_dist),
         ("surface_vessel_spacing", ss_dist),
         ("max_curvature", curvature_threshold),
+        ("poloidal_extent", poloidal_extent_threshold_rad),
         ("tf_current", tf_current_limit_A),
         ("banana_current", banana_current_max_A),
     )
@@ -301,6 +304,7 @@ def evaluate_single_stage_hardware_constraints(
         "surface_vessel_spacing": surface_vessel_min_dist,
         "max_curvature": max_curvature,
         "coil_length": coil_length,
+        "poloidal_extent": poloidal_extent_rad,
         "tf_current": tf_current_A,
         "banana_current": banana_current_A,
     }
@@ -330,6 +334,10 @@ def evaluate_single_stage_hardware_constraints(
         "curvature_threshold": float(curvature_threshold),
         "coil_length": _optional_float(coil_length),
         "length_target": _optional_float(length_target),
+        "poloidal_extent_rad": _optional_float(poloidal_extent_rad),
+        "poloidal_extent_threshold_rad": _optional_float(
+            poloidal_extent_threshold_rad
+        ),
         "tf_current_A": _optional_float(tf_current_A),
         "tf_current_limit_A": _optional_float(tf_current_limit_A),
         "banana_current_A": _optional_float(banana_current_A),
@@ -399,6 +407,8 @@ def evaluate_single_stage_search_hardware_snapshot(
     *,
     coil_length=None,
     length_target=None,
+    poloidal_extent_rad=None,
+    poloidal_extent_threshold_rad=None,
     tf_current_A=None,
     tf_current_limit_A=None,
     banana_current_A=None,
@@ -442,6 +452,13 @@ def evaluate_single_stage_search_hardware_snapshot(
                 banana_current_max_A,
                 banana_current_signed_value,
             )
+    if poloidal_extent_rad is None and poloidal_extent_threshold_rad is not None:
+        poloidal_extent_signed_value = signed_values.get("poloidal_extent")
+        if poloidal_extent_signed_value is not None:
+            poloidal_extent_rad = _upper_bound_measurement_from_signed(
+                poloidal_extent_threshold_rad,
+                poloidal_extent_signed_value,
+            )
 
     threshold_overrides = build_threshold_overrides(
         (
@@ -449,6 +466,7 @@ def evaluate_single_stage_search_hardware_snapshot(
             ("coil_surface_spacing", cs_dist),
             ("surface_vessel_spacing", ss_dist),
             ("max_curvature", curvature_threshold),
+            ("poloidal_extent", poloidal_extent_threshold_rad),
             ("banana_current", banana_current_max_A),
         )
     )
@@ -458,6 +476,7 @@ def evaluate_single_stage_search_hardware_snapshot(
         "surface_vessel_spacing": surface_vessel_min_dist,
         "max_curvature": max_curvature,
         "coil_length": coil_length,
+        "poloidal_extent": poloidal_extent_rad,
         "tf_current": tf_current_A,
         "banana_current": banana_current_A,
     }
@@ -478,6 +497,10 @@ def evaluate_single_stage_search_hardware_snapshot(
             "ss_dist": float(ss_dist),
             "max_curvature": max_curvature,
             "curvature_threshold": float(curvature_threshold),
+            "poloidal_extent_rad": _optional_float(poloidal_extent_rad),
+            "poloidal_extent_threshold_rad": _optional_float(
+                poloidal_extent_threshold_rad
+            ),
             "tf_current_A": _optional_float(tf_current_A),
             "tf_current_limit_A": _optional_float(tf_current_limit_A),
             "banana_current_A": _optional_float(banana_current_A),
@@ -500,6 +523,10 @@ def evaluate_single_stage_search_hardware_snapshot(
         "curvature_threshold": float(curvature_threshold),
         "coil_length": _optional_float(coil_length),
         "length_target": _optional_float(length_target),
+        "poloidal_extent_rad": _optional_float(poloidal_extent_rad),
+        "poloidal_extent_threshold_rad": _optional_float(
+            poloidal_extent_threshold_rad
+        ),
         "tf_current_A": _optional_float(tf_current_A),
         "tf_current_limit_A": _optional_float(tf_current_limit_A),
         "banana_current_A": _optional_float(banana_current_A),
@@ -550,6 +577,8 @@ def evaluate_single_stage_hardware_snapshot(
     vessel_surface=None,
     coil_length=None,
     length_target=None,
+    poloidal_extent_rad=None,
+    poloidal_extent_threshold_rad=None,
     tf_current_A=None,
     tf_current_limit_A=None,
     banana_current_A=None,
@@ -575,6 +604,8 @@ def evaluate_single_stage_hardware_snapshot(
         curvature_threshold,
         coil_length=coil_length,
         length_target=length_target,
+        poloidal_extent_rad=poloidal_extent_rad,
+        poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
         tf_current_A=tf_current_A,
         tf_current_limit_A=tf_current_limit_A,
         banana_current_A=banana_current_A,

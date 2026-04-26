@@ -938,7 +938,7 @@ class BaselineSweepScriptTests(unittest.TestCase):
     def _make_stage2_artifact_results(self, **overrides):
         results = {
             "PLASMA_SURF_FILENAME": "demo.nc",
-            "TF_CURRENT_A": 8.0e4,
+            "TF_CURRENT_A": -8.0e4,
             "TF_CURRENT_SUM_ABS_A": 1.6e6,
             "NUM_TF_COILS": 20,
             "MAJOR_RADIUS": 0.976,
@@ -964,7 +964,7 @@ class BaselineSweepScriptTests(unittest.TestCase):
             "plasma_surf_filename": "demo.nc",
             "output_root": output_root,
             "equilibria_dir": None,
-            "tf_current_A": 8.0e4,
+            "tf_current_A": -8.0e4,
             "major_radius": 0.976,
             "toroidal_flux": 0.24,
             "length_weight": 0.0005,
@@ -993,7 +993,7 @@ class BaselineSweepScriptTests(unittest.TestCase):
             python_executable="python",
             plasma_surf_filename="wout_nfp22ginsburg_000_014417_iota15.nc",
             equilibria_dir=None,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             major_radius=0.976,
             toroidal_flux=0.24,
             stage2_length_weight=0.0005,
@@ -1260,10 +1260,10 @@ class BaselineSweepScriptTests(unittest.TestCase):
 
         self.assertEqual(summary["experiment_family"], "coil_only_baseline")
         self.assertEqual(summary["plasma_current_locked_A"], 0.0)
-        self.assertEqual(summary["tf_current_locked_A"], 8.0e4)
+        self.assertEqual(summary["tf_current_locked_A"], -8.0e4)
         self.assertEqual(summary["non_dominated_case_names"], ["better"])
-        self.assertEqual(summary["stage2_requested_config"]["tf_current_A"], 8.0e4)
-        self.assertEqual(summary["stage2_artifact_results"]["TF_CURRENT_A"], 8.0e4)
+        self.assertEqual(summary["stage2_requested_config"]["tf_current_A"], -8.0e4)
+        self.assertEqual(summary["stage2_artifact_results"]["TF_CURRENT_A"], -8.0e4)
         self.assertEqual(summary["stage2_results_path"], str(stage2_results_path))
         self.assertEqual(summary["stage2_bs_path"], str(stage2_bs_path))
 

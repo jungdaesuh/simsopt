@@ -162,7 +162,7 @@ def hardware_default_contract() -> dict[str, float]:
         _KEY_BANANA_WINDING_SURFACE_MAJOR_RADIUS_M: float(
             _hc.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M
         ),
-        _KEY_TF_CURRENT_A: float(_hc.TF_CURRENT_HARD_LIMIT_A),
+        _KEY_TF_CURRENT_A: float(_hc.TF_CURRENT_CW_DEFAULT_A),
         _KEY_BANANA_CURRENT_MAX_A: float(_hc.BANANA_CURRENT_HARD_LIMIT_A),
         _KEY_COIL_LENGTH_TARGET_M: float(_hc.COIL_LENGTH_TARGET_M),
         _KEY_CC_THRESHOLD: float(_hc.COIL_COIL_MIN_DIST_M),

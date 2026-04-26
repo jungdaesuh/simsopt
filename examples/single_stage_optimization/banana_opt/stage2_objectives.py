@@ -26,6 +26,7 @@ from banana_opt.hardware_constraint_schema import (
     build_threshold_overrides,
     hardware_constraint_alm_names,
 )
+from banana_opt.poloidal_extent import poloidal_extent_rad_from_objective
 from banana_opt.single_stage_geometry import build_surface_configs
 from banana_opt.smoothing import smoothmax_selected, smoothmin_selected
 from banana_opt.smooth_distance_selection import (
@@ -550,6 +551,8 @@ def _build_stage2_artifact_hardware_snapshot(
     final_max_curvature,
     final_curve_surface_min_dist,
     plasma_vessel_min_dist,
+    final_poloidal_extent_rad,
+    poloidal_extent_threshold_rad,
     banana_current_A,
     banana_current_max_A,
     tf_current_A,
@@ -561,6 +564,8 @@ def _build_stage2_artifact_hardware_snapshot(
         "max_curvature": final_max_curvature,
         "curve_surface_min_dist": final_curve_surface_min_dist,
         "surface_vessel_min_dist": plasma_vessel_min_dist,
+        "poloidal_extent_rad": final_poloidal_extent_rad,
+        "poloidal_extent_threshold_rad": poloidal_extent_threshold_rad,
         "banana_current_A": banana_current_A,
         "banana_current_max_A": banana_current_max_A,
         "tf_current_A": tf_current_A,
@@ -572,6 +577,7 @@ def _build_stage2_artifact_hardware_snapshot(
 def _stage2_constraint_names(
     *,
     include_coil_surface: bool,
+    include_poloidal_extent: bool = False,
     include_iota_penalty: bool = False,
 ) -> tuple[str, ...]:
     requested_names = [
@@ -582,6 +588,8 @@ def _stage2_constraint_names(
     ]
     if include_coil_surface:
         requested_names.insert(2, "coil_surface_spacing")
+    if include_poloidal_extent:
+        requested_names.append("poloidal_extent")
     constraint_names = list(hardware_constraint_alm_names(names=tuple(requested_names)))
     if include_iota_penalty:
         constraint_names.append("iota_penalty")
@@ -591,6 +599,7 @@ def _stage2_constraint_names(
 def _legacy_stage2_constraint_names(
     *,
     include_coil_surface: bool,
+    include_poloidal_extent: bool = False,
     include_iota_penalty: bool = False,
 ) -> tuple[str, ...]:
     if include_coil_surface:
@@ -608,6 +617,8 @@ def _legacy_stage2_constraint_names(
             "max_curvature",
             "banana_current_upper_bound",
         ]
+    if include_poloidal_extent:
+        constraint_names.append("poloidal_extent")
     if include_iota_penalty:
         constraint_names.append("iota_penalty")
     return tuple(constraint_names)
@@ -690,6 +701,8 @@ def build_stage2_results(
     hardware_status,
     final_curve_surface_min_dist=None,
     plasma_vessel_min_dist=None,
+    final_poloidal_extent_rad=None,
+    poloidal_extent_threshold_rad=None,
 ):
     alm_enabled = constraint_method == "alm"
     hardware_snapshot = _build_stage2_artifact_hardware_snapshot(
@@ -700,6 +713,8 @@ def build_stage2_results(
         final_max_curvature=final_max_curvature,
         final_curve_surface_min_dist=final_curve_surface_min_dist,
         plasma_vessel_min_dist=plasma_vessel_min_dist,
+        final_poloidal_extent_rad=final_poloidal_extent_rad,
+        poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
         banana_current_A=banana_current_A,
         banana_current_max_A=float(args.banana_current_max_A),
         tf_current_A=tf_current_A,
@@ -744,6 +759,14 @@ def build_stage2_results(
         "CC_WEIGHT": cc_weight,
         "CURVATURE_WEIGHT": curvature_weight,
         "CURVATURE_THRESHOLD": curvature_threshold,
+        "POLOIDAL_EXTENT_RAD": (
+            None if final_poloidal_extent_rad is None else float(final_poloidal_extent_rad)
+        ),
+        "POLOIDAL_EXTENT_THRESHOLD_RAD": (
+            None
+            if poloidal_extent_threshold_rad is None
+            else float(poloidal_extent_threshold_rad)
+        ),
         "LENGTH_WEIGHT": length_weight,
         **fixed_stage2_clearance_contract(),
         "CONSTRAINT_METHOD": constraint_method,
@@ -998,6 +1021,8 @@ def evaluate_stage2_hardware_constraints(
     coil_surface_threshold=None,
     plasma_vessel_min_dist=None,
     plasma_vessel_threshold=None,
+    poloidal_extent_rad=None,
+    poloidal_extent_threshold_rad=None,
     banana_current_A=None,
     banana_current_threshold=None,
     tf_current_A=None,
@@ -1010,6 +1035,7 @@ def evaluate_stage2_hardware_constraints(
             ("max_curvature", curvature_threshold),
             ("coil_surface_spacing", coil_surface_threshold),
             ("surface_vessel_spacing", plasma_vessel_threshold),
+            ("poloidal_extent", poloidal_extent_threshold_rad),
             ("banana_current", banana_current_threshold),
             ("tf_current", tf_current_threshold),
         )
@@ -1020,6 +1046,7 @@ def evaluate_stage2_hardware_constraints(
         "max_curvature": max_curvature,
         "coil_surface_spacing": curve_surface_min_dist,
         "surface_vessel_spacing": plasma_vessel_min_dist,
+        "poloidal_extent": poloidal_extent_rad,
         "banana_current": banana_current_A,
         "tf_current": tf_current_A,
     }
@@ -1044,6 +1071,9 @@ def evaluate_stage2_hardware_constraints(
     if plasma_vessel_min_dist is not None and plasma_vessel_threshold is not None:
         status["plasma_vessel_min_dist"] = float(plasma_vessel_min_dist)
         status["plasma_vessel_threshold"] = float(plasma_vessel_threshold)
+    if poloidal_extent_rad is not None and poloidal_extent_threshold_rad is not None:
+        status["poloidal_extent_rad"] = float(poloidal_extent_rad)
+        status["poloidal_extent_threshold_rad"] = float(poloidal_extent_threshold_rad)
     if banana_current_A is not None and banana_current_threshold is not None:
         status["banana_current_A"] = float(banana_current_A)
         status["banana_current_threshold"] = float(banana_current_threshold)
@@ -1060,6 +1090,7 @@ def stage2_constraint_activity_tolerances(
     length_tolerance: float = 1e-3,
     banana_current_tolerance: float = 1e-3,
     include_coil_surface: bool = False,
+    include_poloidal_extent: bool = False,
     include_iota_penalty: bool = False,
     iota_tolerance: float = 0.0,
 ):
@@ -1077,6 +1108,8 @@ def stage2_constraint_activity_tolerances(
             tolerances[2],
             tolerances[3],
         ]
+    if include_poloidal_extent:
+        tolerances.append(max(float(curvature_smoothing), _SMOOTHING_EPS))
     if include_iota_penalty:
         tolerances.append(
             max(stage2_iota_penalty_threshold(iota_tolerance), _SMOOTHING_EPS)
@@ -1090,6 +1123,7 @@ def resolve_stage2_constraint_activity_tolerances(
     curvature_smoothing: float,
     *,
     include_coil_surface: bool,
+    include_poloidal_extent: bool = False,
     include_iota_penalty: bool = False,
     iota_tolerance: float | None = None,
 ):
@@ -1097,6 +1131,8 @@ def resolve_stage2_constraint_activity_tolerances(
     call_kwargs = {}
     if "include_coil_surface" in parameters:
         call_kwargs["include_coil_surface"] = include_coil_surface
+    if "include_poloidal_extent" in parameters:
+        call_kwargs["include_poloidal_extent"] = include_poloidal_extent
     if "include_iota_penalty" in parameters:
         call_kwargs["include_iota_penalty"] = include_iota_penalty
     if "iota_tolerance" in parameters and iota_tolerance is not None:
@@ -1109,6 +1145,7 @@ def resolve_stage2_constraint_activity_tolerances(
     tolerance_values = [float(value) for value in raw_tolerances]
     constraint_names = _legacy_stage2_constraint_names(
         include_coil_surface=include_coil_surface,
+        include_poloidal_extent=include_poloidal_extent,
         include_iota_penalty=include_iota_penalty,
     )
     if len(tolerance_values) != len(constraint_names):
@@ -1383,6 +1420,10 @@ def evaluate_stage2_alm_problem(
     smooth_max_curvature_signed_constraint,
     Jcsdist=None,
     smooth_min_curve_surface_signed_constraint=None,
+    Jpoloidal=None,
+    poloidal_extent_threshold_rad=None,
+    poloidal_extent_smoothing=None,
+    smooth_poloidal_extent_signed_constraint=None,
     stage2_iota_runtime: Stage2IotaRuntime | None = None,
     emit_diagnostics=False,
 ):
@@ -1445,6 +1486,30 @@ def evaluate_stage2_alm_problem(
         curvature_smoothing,
         base_objective_optimizable,
     )
+    include_poloidal_extent = (
+        Jpoloidal is not None
+        and poloidal_extent_threshold_rad is not None
+        and smooth_poloidal_extent_signed_constraint is not None
+    )
+    if include_poloidal_extent:
+        poloidal_extent_rad = poloidal_extent_rad_from_objective(Jpoloidal)
+        poloidal_extent_smoothing_value = (
+            curvature_smoothing
+            if poloidal_extent_smoothing is None
+            else poloidal_extent_smoothing
+        )
+        (
+            poloidal_extent_signed_value,
+            poloidal_extent_grad,
+            poloidal_extent_violation,
+        ) = smooth_poloidal_extent_signed_constraint(
+            Jpoloidal.curve,
+            Jpoloidal.R_winding,
+            poloidal_extent_threshold_rad,
+            poloidal_extent_smoothing_value,
+            base_objective_optimizable,
+            Z_winding=Jpoloidal.Z_winding,
+        )
 
     (
         banana_current_abs_A,
@@ -1484,6 +1549,7 @@ def evaluate_stage2_alm_problem(
 
     active_names = _stage2_constraint_names(
         include_coil_surface=include_coil_surface,
+        include_poloidal_extent=include_poloidal_extent,
         include_iota_penalty=include_iota_penalty,
     )
     hard_by_name = {
@@ -1510,6 +1576,13 @@ def evaluate_stage2_alm_problem(
         "max_curvature": curvature_violation,
         "banana_current_upper_bound": banana_current_violation,
     }
+    if include_poloidal_extent:
+        hard_by_name["poloidal_extent"] = (
+            poloidal_extent_rad - float(poloidal_extent_threshold_rad)
+        )
+        surrogate_by_name["poloidal_extent"] = poloidal_extent_signed_value
+        grad_by_name["poloidal_extent"] = poloidal_extent_grad
+        feasibility_by_name["poloidal_extent"] = poloidal_extent_violation
     if include_coil_surface:
         hard_by_name["coil_surface_spacing"] = curve_surface_hard_signed_value
         surrogate_by_name["coil_surface_spacing"] = curve_surface_signed_value
@@ -1571,6 +1644,7 @@ def evaluate_stage2_alm_problem(
         distance_smoothing,
         curvature_smoothing,
         include_coil_surface=include_coil_surface,
+        include_poloidal_extent=include_poloidal_extent,
         include_iota_penalty=include_iota_penalty,
         iota_tolerance=(
             None if stage2_iota_runtime is None else stage2_iota_runtime.tolerance
@@ -1644,6 +1718,12 @@ def evaluate_stage2_alm_problem(
             outstr += f", Iota={iota_state.iota:.4f}, Jiota={iota_state.penalty:.2e}"
         if include_iota_penalty:
             outstr += f", Iota+={iota_violation:.2e}, Iotag={iota_signed_value:.2e}"
+        if include_poloidal_extent:
+            outstr += (
+                f", Poloidal={poloidal_extent_rad:.3f}rad, "
+                f"Poloidal+={poloidal_extent_violation:.2e}, "
+                f"Poloidalg={poloidal_extent_signed_value:.2e}"
+            )
         outstr += f", ║∇L_A║={evaluation['stationarity_norm']:.1e}, μ={penalty:.1e}"
         print(outstr)
     return evaluation

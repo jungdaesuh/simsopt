@@ -38,7 +38,7 @@ from banana_opt.hardware_contracts import (  # noqa: E402
     BANANA_WINDING_MINOR_RADIUS_M,
     COIL_COIL_MIN_DIST_M,
     MAX_CURVATURE_INV_M,
-    TF_CURRENT_HARD_LIMIT_A,
+    TF_CURRENT_CW_DEFAULT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
 )
 from banana_opt.constraint_contract import (  # noqa: E402
@@ -99,7 +99,7 @@ def parse_args() -> argparse.Namespace:
             "'independent' gives each loaded banana coil its own current DOF."
         ),
     )
-    parser.add_argument("--tf-current-A", type=float, default=TF_CURRENT_HARD_LIMIT_A)
+    parser.add_argument("--tf-current-A", type=float, default=TF_CURRENT_CW_DEFAULT_A)
     parser.add_argument("--major-radius", type=float, default=VACUUM_VESSEL_MAJOR_RADIUS_M)
     parser.add_argument("--toroidal-flux", type=float, default=0.24)
     parser.add_argument("--stage2-length-weight", type=float, default=0.0005)

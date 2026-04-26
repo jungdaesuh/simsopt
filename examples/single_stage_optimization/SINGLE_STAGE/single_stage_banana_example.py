@@ -150,6 +150,9 @@ from banana_opt.hardware_contracts import (
     COIL_PLASMA_MIN_DIST_M,
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
+    POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+    POLOIDAL_EXTENT_WEIGHT,
+    TF_CURRENT_CW_DEFAULT_A,
     TF_CURRENT_HARD_LIMIT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
     env_flag,
@@ -166,6 +169,12 @@ from banana_opt.incumbents import (
 )
 from banana_opt.lbfgsb_defaults import DEFAULT_LBFGSB_MAXCOR
 from banana_opt.reference_surfaces import build_banana_reference_surfaces
+from banana_opt.poloidal_extent import (
+    PoloidalExtent,
+    max_poloidal_extent_rad,
+    poloidal_extent_rad_from_objective,
+    smooth_max_poloidal_extent_signed_constraint as _smooth_max_poloidal_extent_signed_constraint,
+)
 from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for test access via importlib
     DEFAULT_PHASE1_CONFIG,
     Phase1Config,
@@ -317,7 +326,7 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "curvature_weight": 0.0001,
         "curvature_threshold": MAX_CURVATURE_INV_M,
         "banana_surf_radius": BANANA_WINDING_MINOR_RADIUS_M,
-        "tf_current_A": TF_CURRENT_HARD_LIMIT_A,
+        "tf_current_A": TF_CURRENT_CW_DEFAULT_A,
         "order": 2,
         "banana_init_current_A": 1.0e4,
     },
@@ -330,7 +339,7 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "curvature_weight": 0.0001,
         "curvature_threshold": MAX_CURVATURE_INV_M,
         "banana_surf_radius": BANANA_WINDING_MINOR_RADIUS_M,
-        "tf_current_A": TF_CURRENT_HARD_LIMIT_A,
+        "tf_current_A": TF_CURRENT_CW_DEFAULT_A,
         "order": 2,
         "banana_init_current_A": 1.0e4,
     },
@@ -1910,6 +1919,8 @@ def evaluate_single_stage_hardware_constraints(
     *,
     coil_length=None,
     length_target=None,
+    poloidal_extent_rad=None,
+    poloidal_extent_threshold_rad=None,
     tf_current_A=None,
     tf_current_limit_A=None,
     banana_current_A=None,
@@ -1926,6 +1937,8 @@ def evaluate_single_stage_hardware_constraints(
         curvature_threshold,
         coil_length=coil_length,
         length_target=length_target,
+        poloidal_extent_rad=poloidal_extent_rad,
+        poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
         tf_current_A=tf_current_A,
         tf_current_limit_A=tf_current_limit_A,
         banana_current_A=banana_current_A,
@@ -1947,6 +1960,13 @@ def compute_single_stage_surface_vessel_min_dist(
     )
 
 
+def single_stage_banana_poloidal_extent_rad(banana_curve):
+    return max_poloidal_extent_rad(
+        banana_curve,
+        VACUUM_VESSEL_MAJOR_RADIUS_M,
+    )
+
+
 def current_single_stage_hardware_snapshot_kwargs(*, coil_length=None):
     curvelength_obj = globals().get("curvelength")
     resolved_coil_length = None
@@ -1956,6 +1976,12 @@ def current_single_stage_hardware_snapshot_kwargs(*, coil_length=None):
         resolved_coil_length = float(coil_length)
     resolved_length_target = globals().get("length_target")
     resolved_tf_current_A = globals().get("stage2_tf_current_A")
+    poloidal_extent_obj = globals().get("JPoloidalExtent")
+    resolved_poloidal_extent_rad = (
+        None
+        if poloidal_extent_obj is None
+        else poloidal_extent_rad_from_objective(poloidal_extent_obj)
+    )
     banana_current_state = globals().get("banana_current_state")
     resolved_banana_current_A = (
         None
@@ -1975,6 +2001,8 @@ def current_single_stage_hardware_snapshot_kwargs(*, coil_length=None):
     return {
         "coil_length": resolved_coil_length,
         "length_target": resolved_length_target,
+        "poloidal_extent_rad": resolved_poloidal_extent_rad,
+        "poloidal_extent_threshold_rad": POLOIDAL_EXTENT_HALF_WIDTH_RAD,
         "tf_current_A": resolved_tf_current_A,
         "tf_current_limit_A": (
             None if resolved_tf_current_A is None else TF_CURRENT_HARD_LIMIT_A
@@ -2812,6 +2840,7 @@ def single_stage_alm_constraint_names(*, alm_formulation, include_surface_surfac
         "coil_surface_spacing",
         "max_curvature",
         "coil_length",
+        "poloidal_extent",
         "banana_current",
     }
     if include_surface_surface:
@@ -3174,6 +3203,7 @@ def apply_frontier_scalarization_override(objective_eval, *, alm_formulation="we
         cs_weight=globals().get("CS_WEIGHT", 0.0),
         curvature_weight=globals().get("CURVATURE_WEIGHT", 0.0),
         surf_dist_weight=globals().get("SURF_DIST_WEIGHT", 0.0),
+        poloidal_extent_weight=POLOIDAL_EXTENT_WEIGHT,
         objective_optimizable=globals().get("JF"),
         alm_formulation=alm_formulation,
         alm_multipliers=globals().get("ALM_MULTIPLIERS"),
@@ -3383,6 +3413,8 @@ def build_best_feasible_results_summary(
             vessel_surface,
             coil_length=float(curvelength_obj.J()),
             length_target=length_target,
+            poloidal_extent_rad=single_stage_banana_poloidal_extent_rad(banana_curve),
+            poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
             tf_current_A=tf_current_A,
             tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
             banana_current_A=(
@@ -3525,6 +3557,11 @@ def build_single_stage_objective_bundle(
         else None
     )
     JCurvature = LpCurveCurvature(banana_curves[0], 2, CURVATURE_THRESHOLD)
+    JPoloidalExtent = PoloidalExtent(
+        banana_curves[0],
+        VACUUM_VESSEL_MAJOR_RADIUS_M,
+        POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+    )
     JF = build_total_objective(
         goal_objective_terms["JnonQSRatioObjective"],
         goal_objective_terms["effective_res_weight"],
@@ -3543,6 +3580,7 @@ def build_single_stage_objective_bundle(
         JCurvature,
         SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
         JSurfSurf=JSurfSurf,
+        JPoloidalExtent=JPoloidalExtent,
     )
     return {
         "surface_iota_terms": surface_iota_terms,
@@ -3569,6 +3607,7 @@ def build_single_stage_objective_bundle(
         "JCurveSurface": JCurveSurface,
         "JSurfSurf": JSurfSurf,
         "JCurvature": JCurvature,
+        "JPoloidalExtent": JPoloidalExtent,
         "JF": JF,
     }
 
@@ -3594,6 +3633,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JCurveSurface
     global JSurfSurf
     global JCurvature
+    global JPoloidalExtent
     global JF
 
     surface_iota_terms = objective_bundle["surface_iota_terms"]
@@ -3616,6 +3656,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JCurveSurface = objective_bundle["JCurveSurface"]
     JSurfSurf = objective_bundle["JSurfSurf"]
     JCurvature = objective_bundle["JCurvature"]
+    JPoloidalExtent = objective_bundle["JPoloidalExtent"]
     JF = objective_bundle["JF"]
 
 
@@ -3916,6 +3957,7 @@ def evaluate_total_objective(
     CURVATURE_WEIGHT,
     JSurfSurf=None,
     SURF_DIST_WEIGHT=0.0,
+    JPoloidalExtent=None,
     include_diagnostics=True,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
@@ -3943,6 +3985,8 @@ def evaluate_total_objective(
             VOLUME_WEIGHT=objective_terms["effective_volume_weight"],
             objective_optimizable=globals().get("JF"),
             include_diagnostics=include_diagnostics,
+            POLOIDAL_EXTENT_WEIGHT=POLOIDAL_EXTENT_WEIGHT,
+            JPoloidalExtent=JPoloidalExtent,
         ),
         alm_formulation="weighted_sum",
     )
@@ -3996,6 +4040,7 @@ def evaluate_alm_objective(
     multipliers,
     penalty,
     JSurfSurf=None,
+    JPoloidalExtent=None,
     include_diagnostics=True,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
@@ -4045,6 +4090,10 @@ def evaluate_alm_objective(
             coil_length_threshold=length_target,
             banana_current=current_single_stage_alm_banana_current(),
             banana_current_threshold=args.banana_current_max_A,
+            JPoloidalExtent=JPoloidalExtent,
+            poloidal_extent_threshold=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+            poloidal_extent_smoothing=args.alm_curvature_smoothing,
+            poloidal_extent_constraint_fn=_smooth_max_poloidal_extent_signed_constraint,
             JNonQSObjective=objective_terms["JNonQSObjective"],
             JBoozerObjective=objective_terms["JBoozerObjective"],
             include_diagnostics=include_diagnostics,
@@ -4073,6 +4122,7 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
                 ALM_MULTIPLIERS,
                 ALM_PENALTY,
                 JSurfSurf=JSurfSurf,
+                JPoloidalExtent=JPoloidalExtent,
                 include_diagnostics=include_diagnostics,
             )
         )
@@ -4094,6 +4144,7 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
             CURVATURE_WEIGHT,
             JSurfSurf=JSurfSurf,
             SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
+            JPoloidalExtent=JPoloidalExtent,
             include_diagnostics=include_diagnostics,
         )
     )
@@ -6239,6 +6290,7 @@ def build_total_objective(
     JCurvature,
     SURF_DIST_WEIGHT=0.0,
     JSurfSurf=None,
+    JPoloidalExtent=None,
 ):
     return _build_total_objective_impl(
         JnonQSRatio,
@@ -6258,6 +6310,8 @@ def build_total_objective(
         JCurvature,
         SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
         JSurfSurf=JSurfSurf,
+        POLOIDAL_EXTENT_WEIGHT=POLOIDAL_EXTENT_WEIGHT,
+        JPoloidalExtent=JPoloidalExtent,
     )
 
 
@@ -7483,6 +7537,7 @@ ALM_PENALTY = 1.0
 JVolume = None
 JnonQSRatioObjective = None
 JBoozerResidualObjective = None
+JPoloidalExtent = None
 EFFECTIVE_RES_WEIGHT = 0.0
 EFFECTIVE_IOTAS_WEIGHT = 0.0
 EFFECTIVE_VOLUME_WEIGHT = 0.0
@@ -8075,6 +8130,8 @@ if __name__ == "__main__":
         VV,
         coil_length=float(curvelength.J()),
         length_target=length_target,
+        poloidal_extent_rad=single_stage_banana_poloidal_extent_rad(banana_curve),
+        poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
         tf_current_A=stage2_tf_current_A,
         tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
         banana_current_A=banana_current_state.control_current_A(),
@@ -9040,6 +9097,8 @@ if __name__ == "__main__":
             VV,
             coil_length=float(curvelength.J()),
             length_target=length_target,
+            poloidal_extent_rad=single_stage_banana_poloidal_extent_rad(banana_curve),
+            poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
             tf_current_A=stage2_tf_current_A,
             tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
             banana_current_A=banana_current_state.control_current_A(),
@@ -9102,6 +9161,8 @@ if __name__ == "__main__":
             VV,
             coil_length=float(curvelength.J()),
             length_target=length_target,
+            poloidal_extent_rad=single_stage_banana_poloidal_extent_rad(banana_curve),
+            poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
             tf_current_A=stage2_tf_current_A,
             tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
             banana_current_A=banana_current_state.control_current_A(),

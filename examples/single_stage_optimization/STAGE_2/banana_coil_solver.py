@@ -77,12 +77,16 @@ from banana_opt.hardware_contracts import (
     ACCEPT_OFFSPEC_R0_SEED_HELP,
     BANANA_CURRENT_HARD_LIMIT_A,
     BANANA_WINDING_MINOR_RADIUS_M,
+    BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
     COIL_COIL_MIN_DIST_M,
     COIL_LENGTH_HARD_LIMIT_M,
     COIL_LENGTH_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
+    POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+    POLOIDAL_EXTENT_WEIGHT,
+    TF_CURRENT_CW_DEFAULT_A,
     TARGET_LCFS_MAX_MAJOR_RADIUS_M,
     TARGET_LCFS_MAX_MINOR_RADIUS_M,
     TF_CURRENT_HARD_LIMIT_A,
@@ -123,6 +127,11 @@ from banana_opt.stage2_objectives import (
     stage2_constraint_activity_tolerances,
     validate_stage2_coil_partition_counts,
 )
+from banana_opt.poloidal_extent import (
+    PoloidalExtent,
+    max_poloidal_extent_rad,
+    smooth_max_poloidal_extent_signed_constraint,
+)
 
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
@@ -156,6 +165,7 @@ class Stage2FiniteCurrentConfig:
 def stage2_alm_constraint_names(
     *,
     include_coil_surface: bool,
+    include_poloidal_extent: bool = False,
     include_iota_penalty: bool = False,
 ) -> tuple[str, ...]:
     available_names = {
@@ -166,6 +176,8 @@ def stage2_alm_constraint_names(
     }
     if include_coil_surface:
         available_names.add("coil_surface_spacing")
+    if include_poloidal_extent:
+        available_names.add("poloidal_extent")
     constraint_names = list(hardware_constraint_alm_names(names=available_names))
     if include_iota_penalty:
         constraint_names.append("iota_penalty")
@@ -333,8 +345,11 @@ def parse_args():
     parser.add_argument(
         "--tf-current-A",
         type=float,
-        default=float(os.environ.get("TF_CURRENT_A", str(TF_CURRENT_HARD_LIMIT_A))),
-        help="Per-TF-coil current in physical SI amperes (default 8e4 = 80 kA).",
+        default=float(os.environ.get("TF_CURRENT_A", str(TF_CURRENT_CW_DEFAULT_A))),
+        help=(
+            "Per-TF-coil current in physical SI amperes. Negative current is the "
+            "HBT clockwise toroidal-field convention (default -8e4 = -80 kA)."
+        ),
     )
     parser.add_argument(
         "--banana-init-current-A",
@@ -1125,6 +1140,8 @@ def evaluate_stage2_hardware_constraints(
     cc_threshold,
     max_curvature,
     curvature_threshold,
+    poloidal_extent_rad=None,
+    poloidal_extent_threshold_rad=None,
 ):
     return _evaluate_stage2_hardware_constraints(
         coil_length,
@@ -1133,6 +1150,15 @@ def evaluate_stage2_hardware_constraints(
         cc_threshold,
         max_curvature,
         curvature_threshold,
+        poloidal_extent_rad=poloidal_extent_rad,
+        poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
+    )
+
+
+def _stage2_poloidal_extent_rad(banana_curve):
+    return max_poloidal_extent_rad(
+        banana_curve,
+        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
     )
 
 
@@ -1154,6 +1180,7 @@ def _capture_stage2_artifact_state(
     coil_surface_threshold,
     plasma_vessel_min_dist,
     plasma_vessel_threshold,
+    poloidal_extent_threshold_rad,
     banana_current_max_A,
     stage2_iota_runtime=None,
 ):
@@ -1164,6 +1191,7 @@ def _capture_stage2_artifact_state(
     curve_curve_min_dist = float(Jccdist.shortest_distance())
     curve_surface_min_dist = float(Jcsdist.shortest_distance())
     max_curvature = float(np.max(new_banana_curve.kappa()))
+    poloidal_extent_rad = _stage2_poloidal_extent_rad(new_banana_curve)
     banana_current_A = float(new_banana_coils[0].current.get_value())
     tf_current_A = float(new_tf_coils[0].current.get_value())
     hardware_status = _evaluate_stage2_hardware_constraints(
@@ -1177,6 +1205,8 @@ def _capture_stage2_artifact_state(
         coil_surface_threshold=coil_surface_threshold,
         plasma_vessel_min_dist=plasma_vessel_min_dist,
         plasma_vessel_threshold=plasma_vessel_threshold,
+        poloidal_extent_rad=poloidal_extent_rad,
+        poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
         banana_current_A=banana_current_A,
         banana_current_threshold=banana_current_max_A,
         tf_current_A=tf_current_A,
@@ -1194,6 +1224,7 @@ def _capture_stage2_artifact_state(
         "curve_curve_min_dist": curve_curve_min_dist,
         "curve_surface_min_dist": curve_surface_min_dist,
         "max_curvature": max_curvature,
+        "poloidal_extent_rad": poloidal_extent_rad,
         "banana_current_A": banana_current_A,
         "tf_current_A": tf_current_A,
         "hardware_status": hardware_status,
@@ -1616,6 +1647,11 @@ def main(parsed_args=None):
 
     # Lp-norm curvature penalty (configurable via --curvature-p-norm)
     Jc = LpCurveCurvature(new_banana_curve, args.curvature_p_norm, CURVATURE_THRESHOLD)
+    Jpe = PoloidalExtent(
+        new_banana_curve,
+        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+    )
     print(f"Initial coil length: {Jls.J():.2f} [m]")
     stage2_iota_runtime = None
     if args.stage2_iota_mode in {"soft", "alm"}:
@@ -1654,7 +1690,8 @@ def main(parsed_args=None):
         + LENGTH_WEIGHT * QuadraticPenalty(Jls, LENGTH_TARGET, "max") \
         + CC_WEIGHT * Jccdist \
         + CC_WEIGHT * Jcsdist \
-        + CURVATURE_WEIGHT * Jc
+        + CURVATURE_WEIGHT * Jc \
+        + POLOIDAL_EXTENT_WEIGHT * Jpe
     BASE_OBJECTIVE = SQUARED_FLUX_WEIGHT * Jf
     if args.alm_taylor_test and CONSTRAINT_METHOD != "alm":
         raise ValueError("--alm-taylor-test requires --constraint-method=alm")
@@ -1762,6 +1799,7 @@ def main(parsed_args=None):
             coil_surface_threshold=CS_THRESHOLD,
             plasma_vessel_min_dist=plasma_vessel_min_dist,
             plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+            poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
             banana_current_max_A=float(args.banana_current_max_A),
             stage2_iota_runtime=stage2_iota_runtime,
         )
@@ -1794,6 +1832,7 @@ def main(parsed_args=None):
         alm_settings = build_stage2_alm_settings(args)
         alm_constraint_names = stage2_alm_constraint_names(
             include_coil_surface=Jcsdist is not None,
+            include_poloidal_extent=True,
             include_iota_penalty=args.stage2_iota_mode == "alm",
         )
 
@@ -1819,6 +1858,10 @@ def main(parsed_args=None):
                 smooth_max_curvature_signed_constraint,
                 Jcsdist=Jcsdist,
                 smooth_min_curve_surface_signed_constraint=smooth_min_curve_surface_signed_constraint,
+                Jpoloidal=Jpe,
+                poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+                poloidal_extent_smoothing=args.alm_curvature_smoothing,
+                smooth_poloidal_extent_signed_constraint=smooth_max_poloidal_extent_signed_constraint,
                 stage2_iota_runtime=(
                     stage2_iota_runtime if args.stage2_iota_mode == "alm" else None
                 ),
@@ -2047,6 +2090,7 @@ def main(parsed_args=None):
         final_curve_curve_min_dist = float(Jccdist.shortest_distance())
         final_curve_surface_min_dist = float(Jcsdist.shortest_distance())
         final_max_curvature = float(np.max(new_banana_curve.kappa()))
+        final_poloidal_extent_rad = _stage2_poloidal_extent_rad(new_banana_curve)
         final_banana_current_A = float(new_banana_coils[0].current.get_value())
         hardware_status = _evaluate_stage2_hardware_constraints(
             final_coil_length,
@@ -2059,6 +2103,8 @@ def main(parsed_args=None):
             coil_surface_threshold=CS_THRESHOLD,
             plasma_vessel_min_dist=plasma_vessel_min_dist,
             plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+            poloidal_extent_rad=final_poloidal_extent_rad,
+            poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
             banana_current_A=final_banana_current_A,
             banana_current_threshold=args.banana_current_max_A,
             tf_current_A=float(new_tf_coils[0].current.get_value()),
@@ -2069,6 +2115,7 @@ def main(parsed_args=None):
         final_curve_curve_min_dist = final_artifact_state["curve_curve_min_dist"]
         final_curve_surface_min_dist = final_artifact_state["curve_surface_min_dist"]
         final_max_curvature = final_artifact_state["max_curvature"]
+        final_poloidal_extent_rad = final_artifact_state["poloidal_extent_rad"]
         final_banana_current_A = final_artifact_state["banana_current_A"]
         hardware_status = final_artifact_state["hardware_status"]
     final_iota_feasible = (
@@ -2189,6 +2236,8 @@ def main(parsed_args=None):
         final_curve_curve_min_dist=final_curve_curve_min_dist,
         final_curve_surface_min_dist=final_curve_surface_min_dist,
         plasma_vessel_min_dist=plasma_vessel_min_dist,
+        final_poloidal_extent_rad=final_poloidal_extent_rad,
+        poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
         hardware_status=hardware_status,
     )
     constraint_metadata = build_stage2_constraint_artifact_metadata(

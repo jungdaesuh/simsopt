@@ -24,6 +24,7 @@ SINGLE_STAGE_SEARCH_POLICY_PATH = (
     EXAMPLES_ROOT / "banana_opt" / "single_stage_search_policy.py"
 )
 SINGLE_STAGE_INCUMBENTS_PATH = EXAMPLES_ROOT / "banana_opt" / "incumbents.py"
+POLOIDAL_EXTENT_PATH = EXAMPLES_ROOT / "banana_opt" / "poloidal_extent.py"
 
 
 def _load_module(module_path: Path, prefix: str):
@@ -324,6 +325,61 @@ class _ModuleTestCase(unittest.TestCase):
 
     def setUp(self):
         self.module = _load_module(self.MODULE_PATH, self.MODULE_PREFIX)
+
+
+class PoloidalExtentModuleTests(_ModuleTestCase):
+    MODULE_PATH = POLOIDAL_EXTENT_PATH
+    MODULE_PREFIX = "banana_poloidal_extent"
+
+    def test_inboard_poloidal_angles_use_inboard_midplane_zero(self):
+        angles = self.module.inboard_poloidal_angles(
+            np.array(
+                [
+                    [0.876, 0.0, 0.0],
+                    [0.976, 0.0, 0.1],
+                    [0.976, 0.0, -0.1],
+                    [1.076, 0.0, 0.0],
+                ],
+                dtype=float,
+            ),
+            R_winding=0.976,
+        )
+
+        np.testing.assert_allclose(
+            angles,
+            [0.0, np.pi / 2.0, -np.pi / 2.0, np.pi],
+            atol=1.0e-12,
+        )
+
+    def test_max_poloidal_extent_rad_uses_curve_gamma(self):
+        curve = _FakeCurve(
+            [
+                [0.876, 0.0, 0.0],
+                [0.976, 0.0, 0.1],
+            ]
+        )
+
+        self.assertAlmostEqual(
+            self.module.max_poloidal_extent_rad(curve, R_winding=0.976),
+            np.pi / 2.0,
+        )
+
+    def test_smooth_constraint_returns_signed_violation_and_curve_gradient(self):
+        curve = _FakeCurve([[0.976, 0.0, 0.2]])
+
+        signed_value, grad_value, violation = (
+            self.module.smooth_max_poloidal_extent_signed_constraint(
+                curve,
+                R_winding=0.976,
+                theta_threshold=np.pi / 4.0,
+                temperature=1.0e-3,
+                objective_optimizable=object(),
+            )
+        )
+
+        self.assertAlmostEqual(signed_value, np.pi / 4.0)
+        self.assertAlmostEqual(violation, np.pi / 4.0)
+        np.testing.assert_allclose(grad_value, [5.0, 0.0], atol=1.0e-12)
 
 
 class Stage2ObjectiveModuleTests(_ModuleTestCase):

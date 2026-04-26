@@ -47,7 +47,7 @@ from banana_opt.hardware_contracts import (  # noqa: E402
     VACUUM_VESSEL_MAJOR_RADIUS_M,
     fixed_stage2_artifact_hardware_contract,
     fixed_stage2_clearance_contract,
-    TF_CURRENT_HARD_LIMIT_A,
+    TF_CURRENT_CW_DEFAULT_A,
     validate_major_radius,
 )
 from banana_opt.constraint_contract import (  # noqa: E402
@@ -100,7 +100,7 @@ _BASE_STAGE2_PROFILE = {
     "init_only": False,
 }
 DEFAULT_STAGE2_PROFILES = {
-    "standard_80ka": {**_BASE_STAGE2_PROFILE, "tf_current_A": TF_CURRENT_HARD_LIMIT_A},
+    "standard_80ka": {**_BASE_STAGE2_PROFILE, "tf_current_A": TF_CURRENT_CW_DEFAULT_A},
 }
 STAGE2_SPEC_KEYS = (
     "major_radius",

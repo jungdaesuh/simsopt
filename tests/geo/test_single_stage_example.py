@@ -2610,6 +2610,10 @@ class HardwareConstraintTests(unittest.TestCase):
     def load_module(self):
         return load_single_stage_example_module()
 
+    @staticmethod
+    def inboard_midplane_curve():
+        return SimpleNamespace(gamma=lambda: np.array([[0.876, 0.0, 0.0]], dtype=float))
+
     def _run_fun_with_hardware_violation(
         self,
         *,
@@ -4591,6 +4595,8 @@ class HardwareConstraintTests(unittest.TestCase):
             "curve_curve_min_dist": 0.0501,
             "curve_surface_min_dist": 0.067,
             "surface_vessel_min_dist": 0.082,
+            "poloidal_extent_rad": 0.0,
+            "poloidal_extent_threshold_rad": module.POLOIDAL_EXTENT_HALF_WIDTH_RAD,
             "max_curvature": 19.8,
             "coil_length": 2.1,
             "length_target": 1.9,
@@ -4621,7 +4627,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 curve_curve_distance_obj=object(),
                 curve_surface_distance_obj=object(),
                 surface_surface_distance_obj=object(),
-                banana_curve=object(),
+                banana_curve=self.inboard_midplane_curve(),
                 curvelength_obj=SimpleNamespace(J=lambda: 2.1),
                 cc_dist=0.05,
                 cs_dist=0.015,
@@ -4640,6 +4646,11 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(summary["BEST_FEASIBLE_CURVE_CURVE_MIN_DIST"], 0.0501)
         self.assertEqual(summary["BEST_FEASIBLE_CURVE_SURFACE_MIN_DIST"], 0.067)
         self.assertEqual(summary["BEST_FEASIBLE_SURFACE_VESSEL_MIN_DIST"], 0.082)
+        self.assertEqual(summary["BEST_FEASIBLE_POLOIDAL_EXTENT_RAD"], 0.0)
+        self.assertEqual(
+            summary["BEST_FEASIBLE_POLOIDAL_EXTENT_THRESHOLD_RAD"],
+            module.POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+        )
         self.assertEqual(summary["BEST_FEASIBLE_MAX_CURVATURE"], 19.8)
         self.assertEqual(summary["BEST_FEASIBLE_COIL_LENGTH"], 2.1)
         self.assertEqual(summary["BEST_FEASIBLE_LENGTH_TARGET"], 1.9)
@@ -4700,6 +4711,8 @@ class HardwareConstraintTests(unittest.TestCase):
             "curve_curve_min_dist": 0.0501,
             "curve_surface_min_dist": 0.067,
             "surface_vessel_min_dist": 0.082,
+            "poloidal_extent_rad": 0.0,
+            "poloidal_extent_threshold_rad": module.POLOIDAL_EXTENT_HALF_WIDTH_RAD,
             "max_curvature": 19.8,
             "coil_length": 2.1,
             "length_target": 1.9,
@@ -4733,7 +4746,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 curve_curve_distance_obj=object(),
                 curve_surface_distance_obj=object(),
                 surface_surface_distance_obj=object(),
-                banana_curve=object(),
+                banana_curve=self.inboard_midplane_curve(),
                 curvelength_obj=SimpleNamespace(J=lambda: 2.1),
                 cc_dist=0.05,
                 cs_dist=0.015,
@@ -9792,7 +9805,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(args.stage2_seed_curvature_threshold, 100.0)
         self.assertEqual(args.stage2_seed_banana_surf_radius, 0.21)
-        self.assertEqual(args.stage2_seed_tf_current_A, 8.0e4)
+        self.assertEqual(args.stage2_seed_tf_current_A, -8.0e4)
         self.assertEqual(args.stage2_seed_cc_threshold, 0.05)
         self.assertEqual(args.stage2_seed_major_radius, 0.976)
         self.assertEqual(args.stage2_seed_toroidal_flux, 0.24)
@@ -10501,6 +10514,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 "curve_curve_min_dist": float(state["curve_curve_min_dist"]),
                 "curve_surface_min_dist": float(state["curve_surface_min_dist"]),
                 "max_curvature": float(state["max_curvature"]),
+                "poloidal_extent_rad": float(state["poloidal_extent_rad"]),
                 "banana_current_A": float(state["banana_current_A"]),
                 "tf_current_A": float(state["tf_current_A"]),
                 "hardware_status": {
@@ -10598,6 +10612,18 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                         module,
                         "LpCurveCurvature",
                         lambda *_args, **_kwargs: FakeCurvatureObjective(),
+                    ),
+                    patch.object(
+                        module,
+                        "PoloidalExtent",
+                        lambda *_args, **_kwargs: FakeStage2Objective(
+                            0.0, [0.0, 0.0]
+                        ),
+                    ),
+                    patch.object(
+                        module,
+                        "max_poloidal_extent_rad",
+                        lambda *_args, **_kwargs: 0.0,
                     ),
                     patch.object(
                         module,
@@ -10945,6 +10971,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 "curve_curve_min_dist": float(curve_curve_min_dist),
                 "curve_surface_min_dist": 0.02,
                 "max_curvature": float(max_curvature),
+                "poloidal_extent_rad": 0.0,
                 "banana_current_A": 9500.0,
                 "tf_current_A": 8.0e4,
                 "hardware_status": {

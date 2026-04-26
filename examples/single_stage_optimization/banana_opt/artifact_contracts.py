@@ -352,7 +352,7 @@ def expected_locked_baseline_stage2_artifact_metadata(
     return {
         "PLASMA_SURF_FILENAME": config.plasma_surf_filename,
         "TF_CURRENT_A": config.tf_current_A,
-        "TF_CURRENT_SUM_ABS_A": num_tf_coils * config.tf_current_A,
+        "TF_CURRENT_SUM_ABS_A": num_tf_coils * abs(config.tf_current_A),
         "NUM_TF_COILS": num_tf_coils,
         "BANANA_INIT_CURRENT_A": config.banana_init_current_A,
         "BANANA_CURRENT_MAX_A": config.banana_current_max_A,

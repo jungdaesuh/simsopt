@@ -7,6 +7,7 @@ from banana_opt.frontier_scalarization import (
     FRONTIER_REFERENCE_MODE_EPSILON,
 )
 from banana_opt.hardware_constraint_schema import get_hardware_constraint_spec
+from banana_opt.poloidal_extent import poloidal_extent_rad_from_objective
 from banana_opt.single_stage_constraints import single_stage_constraint_activity_tolerances
 
 
@@ -46,6 +47,8 @@ def build_total_objective(
     JCurvature,
     SURF_DIST_WEIGHT=0.0,
     JSurfSurf=None,
+    POLOIDAL_EXTENT_WEIGHT=0.0,
+    JPoloidalExtent=None,
 ):
     objective = (
         JnonQSRatio
@@ -60,6 +63,8 @@ def build_total_objective(
         objective = objective + VOLUME_WEIGHT * JVolume
     if JSurfSurf is not None:
         objective = objective + SURF_DIST_WEIGHT * JSurfSurf
+    if JPoloidalExtent is not None:
+        objective = objective + POLOIDAL_EXTENT_WEIGHT * JPoloidalExtent
     return objective
 
 
@@ -159,6 +164,7 @@ def apply_frontier_scalarization_override(
     cs_weight,
     curvature_weight,
     surf_dist_weight,
+    poloidal_extent_weight=0.0,
     objective_optimizable=None,
     alm_formulation="weighted_sum",
     alm_multipliers=None,
@@ -258,6 +264,7 @@ def apply_frontier_scalarization_override(
                 cs_weight=cs_weight,
                 curvature_weight=curvature_weight,
                 surf_dist_weight=surf_dist_weight,
+                poloidal_extent_weight=poloidal_extent_weight,
             )
             annotated["total"] = penalty_total + float(replacement_total)
             annotated["grad"] = penalty_grad + replacement_grad
@@ -297,6 +304,7 @@ def _frontier_penalty_geometry_total_grad(
     cs_weight,
     curvature_weight,
     surf_dist_weight,
+    poloidal_extent_weight=0.0,
 ):
     total = (
         float(length_weight) * float(objective_eval["J_len"])
@@ -313,6 +321,11 @@ def _frontier_penalty_geometry_total_grad(
         * np.asarray(objective_eval["dJ_curvature"], dtype=float)
         + float(surf_dist_weight)
         * np.asarray(objective_eval.get("dJ_surf", 0.0), dtype=float)
+        + float(poloidal_extent_weight)
+        * np.asarray(objective_eval.get("dJ_poloidal_extent", 0.0), dtype=float)
+    )
+    total += float(poloidal_extent_weight) * float(
+        objective_eval.get("J_poloidal_extent", 0.0)
     )
     return float(total), grad
 
@@ -490,6 +503,8 @@ def evaluate_total_objective(
     VOLUME_WEIGHT=0.0,
     objective_optimizable=None,
     include_diagnostics=True,
+    POLOIDAL_EXTENT_WEIGHT=0.0,
+    JPoloidalExtent=None,
 ):
     (
         raw_J_QS_obj,
@@ -521,6 +536,8 @@ def evaluate_total_objective(
         JCurvature,
         SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
         JSurfSurf=JSurfSurf,
+        POLOIDAL_EXTENT_WEIGHT=POLOIDAL_EXTENT_WEIGHT,
+        JPoloidalExtent=JPoloidalExtent,
     )
     total_grad = _objective_gradient(total_objective, objective_optimizable)
     constraint_names, constraint_values = _penalty_search_constraint_payload(
@@ -581,6 +598,14 @@ def evaluate_total_objective(
         ),
         "J_curvature": float(JCurvature.J()),
         "dJ_curvature": _objective_gradient(JCurvature, objective_optimizable),
+        "J_poloidal_extent": (
+            0.0 if JPoloidalExtent is None else float(JPoloidalExtent.J())
+        ),
+        "dJ_poloidal_extent": (
+            np.zeros_like(total_grad)
+            if JPoloidalExtent is None
+            else _objective_gradient(JPoloidalExtent, objective_optimizable)
+        ),
     })
     return annotate_search_evaluation_finiteness(evaluation)
 
@@ -708,6 +733,10 @@ def evaluate_alm_objective(
     coil_length_threshold=None,
     banana_current=None,
     banana_current_threshold=None,
+    JPoloidalExtent=None,
+    poloidal_extent_threshold=None,
+    poloidal_extent_smoothing=None,
+    poloidal_extent_constraint_fn=None,
     JNonQSObjective=None,
     JBoozerObjective=None,
     include_diagnostics=True,
@@ -801,6 +830,24 @@ def evaluate_alm_objective(
                 objective_optimizable,
             )
         )
+    if (
+        JPoloidalExtent is not None
+        and poloidal_extent_threshold is not None
+        and poloidal_extent_constraint_fn is not None
+    ):
+        poloidal_extent_smoothing_value = (
+            curvature_smoothing
+            if poloidal_extent_smoothing is None
+            else poloidal_extent_smoothing
+        )
+        hardware_constraints["poloidal_extent"] = poloidal_extent_constraint_fn(
+            JPoloidalExtent.curve,
+            JPoloidalExtent.R_winding,
+            poloidal_extent_threshold,
+            poloidal_extent_smoothing_value,
+            objective_optimizable,
+            Z_winding=JPoloidalExtent.Z_winding,
+        )
 
     physics_constraints: dict[str, tuple[float, np.ndarray, float]] = {}
     if alm_formulation == "thresholded_physics":
@@ -871,6 +918,8 @@ def evaluate_alm_objective(
     geometry_names = ["coil_coil_spacing", "coil_surface_spacing", "max_curvature"]
     if JSurfSurf is not None:
         geometry_names.append("surface_vessel_spacing")
+    if JPoloidalExtent is not None:
+        geometry_names.append("poloidal_extent")
     constraint_tolerance_by_name = {
         name: float(value)
         for name, value in zip(geometry_names, geometry_tolerances)
@@ -878,6 +927,8 @@ def evaluate_alm_objective(
     for exact_constraint_name in ("coil_length_upper_bound", "banana_current_upper_bound"):
         if exact_constraint_name in hardware_constraints:
             constraint_tolerance_by_name[exact_constraint_name] = 1.0e-3
+    if "poloidal_extent" in hardware_constraints:
+        constraint_tolerance_by_name["poloidal_extent"] = 1.0e-3
     constraint_activity_tolerances = np.asarray(
         [
             constraint_tolerance_by_name.get(constraint_name, 0.0)
@@ -912,6 +963,15 @@ def evaluate_alm_objective(
             base_eval["banana_current_upper_bound_threshold"] = min(
                 banana_current_spec.threshold,
                 float(banana_current_threshold),
+            )
+        if poloidal_extent_threshold is not None:
+            base_eval["poloidal_extent_rad"] = (
+                None
+                if JPoloidalExtent is None
+                else poloidal_extent_rad_from_objective(JPoloidalExtent)
+            )
+            base_eval["poloidal_extent_threshold_rad"] = float(
+                poloidal_extent_threshold
             )
     base_eval["alm_formulation"] = alm_formulation
     return annotate_search_evaluation_finiteness(base_eval)

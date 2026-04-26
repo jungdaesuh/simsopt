@@ -564,11 +564,17 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "surface_vessel_spacing",
                 "max_curvature",
                 "coil_length",
+                "poloidal_extent",
                 "banana_current",
                 "tf_current",
             },
         )
         self.assertEqual(specs["coil_length"].applies_to, frozenset({"alm", "artifact"}))
+        self.assertEqual(
+            specs["poloidal_extent"].applies_to,
+            frozenset({"penalty", "alm", "artifact"}),
+        )
+        self.assertEqual(specs["poloidal_extent"].kind, "upper_bound")
         self.assertEqual(
             specs["banana_current"].applies_to,
             frozenset({"penalty", "alm", "artifact"}),
@@ -623,6 +629,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "surface_vessel_spacing": 0.04,
                 "max_curvature": 40.0,
                 "coil_length": 2.1,
+                "poloidal_extent": 0.7,
                 "banana_current": 1.7e4,
                 "tf_current": 9.0e4,
             },
@@ -645,6 +652,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "surface_vessel_spacing",
                 "max_curvature",
                 "coil_length",
+                "poloidal_extent",
             ],
         )
         self.assertEqual(
@@ -719,6 +727,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "surface_vessel_spacing",
                 "max_curvature",
                 "coil_length_upper_bound",
+                "poloidal_extent",
                 "banana_current_upper_bound",
             ],
         )
@@ -962,7 +971,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
 
         self.assertEqual(resolved_spec_source, "profile:standard_80ka")
-        self.assertEqual(resolved_spec["tf_current_A"], 8.0e4)
+        self.assertEqual(resolved_spec["tf_current_A"], -8.0e4)
         self.assertEqual(resolved_spec["cc_threshold"], 0.05)
         self.assertEqual(resolved_spec["curvature_threshold"], 100.0)
         self.assertEqual(resolved_spec["banana_surf_radius"], 0.21)
@@ -973,7 +982,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         args = make_stage2_alm_wrapper_args(tf_current_A=8.5e4)
         resolved_spec, _ = module.resolve_stage2_spec_payload(args)
 
-        with self.assertRaisesRegex(ValueError, "TF coil current must be in the interval"):
+        with self.assertRaisesRegex(ValueError, "TF coil current magnitude must be"):
             module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
 
     def test_stage2_alm_wrapper_cli_overrides_banana_current_and_surface_radius(self):

@@ -44,7 +44,7 @@ class ConstraintContractResolverTests(unittest.TestCase):
             contract["BANANA_WINDING_SURFACE_MAJOR_RADIUS_M"],
             hc.BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
         )
-        self.assertEqual(contract["TF_CURRENT_A"], hc.TF_CURRENT_HARD_LIMIT_A)
+        self.assertEqual(contract["TF_CURRENT_A"], hc.TF_CURRENT_CW_DEFAULT_A)
         self.assertEqual(
             contract["BANANA_CURRENT_MAX_A"],
             hc.BANANA_CURRENT_HARD_LIMIT_A,
@@ -229,7 +229,7 @@ class ConstraintContractResolverTests(unittest.TestCase):
             ),
         )
 
-    def test_tf_current_limit_rejects_zero_and_negative(self):
+    def test_tf_current_limit_rejects_zero_and_over_limit_magnitude(self):
         module = load_constraint_contract_module()
 
         with self.assertRaisesRegex(ValueError, "TF coil current"):
@@ -238,7 +238,7 @@ class ConstraintContractResolverTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "TF coil current"):
             module.resolve_constraint_contract(
-                cli_overrides={"TF_CURRENT_A": -1.0},
+                cli_overrides={"TF_CURRENT_A": -8.1e4},
             )
 
     def test_unknown_field_in_any_layer_raises(self):

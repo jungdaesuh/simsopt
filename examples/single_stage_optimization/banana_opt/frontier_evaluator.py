@@ -1102,6 +1102,11 @@ def _evaluate_hardware_status(
         vessel_surface=runtime.vessel_surface,
         coil_length=float(bundle["curvelength"].J()),
         length_target=runtime.length_target,
+        poloidal_extent_rad=single_stage.max_poloidal_extent_rad(
+            banana_curve,
+            single_stage.VACUUM_VESSEL_MAJOR_RADIUS_M,
+        ),
+        poloidal_extent_threshold_rad=single_stage.POLOIDAL_EXTENT_HALF_WIDTH_RAD,
         tf_current_A=runtime.stage2_tf_current_A,
         tf_current_limit_A=single_stage.TF_CURRENT_HARD_LIMIT_A,
         banana_current_A=banana_current_A,

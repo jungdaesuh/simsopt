@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import math
 import os
 
 TF_CURRENT_HARD_LIMIT_A = 8.0e4
+# Jeff's HBT convention: clockwise toroidal field corresponds to negative
+# current in this coil parameterization.
+TF_CURRENT_CW_DEFAULT_A = -TF_CURRENT_HARD_LIMIT_A
 BANANA_CURRENT_HARD_LIMIT_A = 1.6e4
 
 # Preferred engineering target leaves buffer under the absolute hardware ceiling.
@@ -17,6 +21,8 @@ VACUUM_VESSEL_MAJOR_RADIUS_M = 0.976
 VACUUM_VESSEL_MINOR_RADIUS_M = 0.222
 BANANA_WINDING_SURFACE_MAJOR_RADIUS_M = VACUUM_VESSEL_MAJOR_RADIUS_M
 BANANA_WINDING_MINOR_RADIUS_M = 0.21
+POLOIDAL_EXTENT_HALF_WIDTH_RAD = 45.0 * math.pi / 180.0
+POLOIDAL_EXTENT_WEIGHT = 1.0
 LCFS_CLEARANCE_REFERENCE_MAJOR_RADIUS_M = VACUUM_VESSEL_MAJOR_RADIUS_M
 LCFS_CLEARANCE_REFERENCE_MINOR_RADIUS_M = (
     VACUUM_VESSEL_MINOR_RADIUS_M - PLASMA_VESSEL_MIN_DIST_M
@@ -42,9 +48,10 @@ def fixed_stage2_artifact_hardware_contract() -> dict[str, float]:
 
 def validate_tf_current_limit(tf_current_A: float) -> float:
     current = float(tf_current_A)
-    if not (0.0 < current <= TF_CURRENT_HARD_LIMIT_A):
+    if not (0.0 < abs(current) <= TF_CURRENT_HARD_LIMIT_A):
         raise ValueError(
-            f"TF coil current must be in the interval (0, {TF_CURRENT_HARD_LIMIT_A:.0f}] A."
+            "TF coil current magnitude must be in the interval "
+            f"(0, {TF_CURRENT_HARD_LIMIT_A:.0f}] A."
         )
     return current
 

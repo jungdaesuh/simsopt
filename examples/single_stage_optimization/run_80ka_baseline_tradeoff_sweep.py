@@ -37,7 +37,7 @@ from banana_opt.artifact_contracts import (  # noqa: E402
 from banana_opt.hardware_contracts import (  # noqa: E402
     BANANA_WINDING_MINOR_RADIUS_M,
     COIL_COIL_MIN_DIST_M,
-    TF_CURRENT_HARD_LIMIT_A,
+    TF_CURRENT_CW_DEFAULT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
 )
 from banana_opt.constraint_contract import (  # noqa: E402
@@ -50,7 +50,7 @@ from banana_opt.single_stage_banana_current_mode import (  # noqa: E402
 
 DEFAULT_PLASMA_SURF_FILENAME = "wout_nfp22ginsburg_000_014417_iota15.nc"
 DEFAULT_SWEEP_OUTPUT_ROOT = SCRIPT_DIR / "outputs_80ka_baseline_sweep"
-LOCKED_BASELINE_TF_CURRENT_A = TF_CURRENT_HARD_LIMIT_A
+LOCKED_BASELINE_TF_CURRENT_A = TF_CURRENT_CW_DEFAULT_A
 LOCKED_BASELINE_NUM_TF_COILS = 20
 LOCKED_BASELINE_PLASMA_CURRENT_A = 0.0
 LOCKED_BASELINE_MAJOR_RADIUS = VACUUM_VESSEL_MAJOR_RADIUS_M
@@ -115,7 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stage2-basin-stepsize", type=float, default=0.01)
     parser.add_argument("--stage2-basin-seed", type=int, default=-1)
     parser.add_argument("--stage2-timeout-seconds", type=float, default=0.0)
-    parser.add_argument("--tf-current-A", type=float, default=TF_CURRENT_HARD_LIMIT_A)
+    parser.add_argument("--tf-current-A", type=float, default=TF_CURRENT_CW_DEFAULT_A)
     parser.add_argument("--major-radius", type=float, default=VACUUM_VESSEL_MAJOR_RADIUS_M)
     parser.add_argument("--toroidal-flux", type=float, default=0.24)
     parser.add_argument("--stage2-length-weight", type=float, default=0.0005)

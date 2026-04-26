@@ -10,6 +10,7 @@ from banana_opt.hardware_contracts import (
     COIL_PLASMA_MIN_DIST_M,
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
+    POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     TF_CURRENT_HARD_LIMIT_A,
 )
 
@@ -67,6 +68,13 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         traversal_policy="allowed",
     ),
     HardwareConstraintSpec(
+        name="poloidal_extent",
+        kind="upper_bound",
+        threshold=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+        applies_to=frozenset({"penalty", "alm", "artifact"}),
+        traversal_policy="allowed",
+    ),
+    HardwareConstraintSpec(
         name="banana_current",
         kind="box_bound",
         threshold=BANANA_CURRENT_HARD_LIMIT_A,
@@ -89,11 +97,16 @@ _ARTIFACT_VALUE_FIELD_BY_NAME = {
     "surface_vessel_spacing": ("surface_vessel_min_dist", "SURFACE_VESSEL_MIN_DIST"),
     "max_curvature": ("max_curvature", "MAX_CURVATURE"),
     "coil_length": ("coil_length", "COIL_LENGTH"),
+    "poloidal_extent": ("poloidal_extent_rad", "POLOIDAL_EXTENT_RAD"),
     "banana_current": ("banana_current_A", "BANANA_CURRENT_A"),
     "tf_current": ("tf_current_A", "TF_CURRENT_A"),
 }
 _ARTIFACT_THRESHOLD_FIELD_BY_NAME = {
     "coil_length": ("length_target", "LENGTH_TARGET"),
+    "poloidal_extent": (
+        "poloidal_extent_threshold_rad",
+        "POLOIDAL_EXTENT_THRESHOLD_RAD",
+    ),
     "banana_current": ("banana_current_max_A", "BANANA_CURRENT_MAX_A"),
     "tf_current": ("tf_current_limit_A", "TF_CURRENT_LIMIT_A"),
 }
