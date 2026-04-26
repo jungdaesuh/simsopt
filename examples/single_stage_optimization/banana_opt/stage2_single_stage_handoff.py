@@ -452,11 +452,8 @@ def run_boozer_with_failure_policy(
     )
 
 
-def _surface_volume_or_none(surface) -> float | None:
-    try:
-        return float(surface.volume())
-    except Exception:
-        return None
+def _volume_label_value(volume_label) -> float:
+    return float(volume_label.J())
 
 
 def _surface_dofs(surface) -> np.ndarray:
@@ -637,7 +634,7 @@ def attempt_initialize_boozer_surface(
             success=False,
             solved_iota=solve_attempt.solved_iota,
             solved_G=solve_attempt.solved_G,
-            volume=_surface_volume_or_none(boozer_surface.surface),
+            volume=_volume_label_value(vol),
             error_type=solve_attempt.error_type,
             error_message=solve_attempt.error_message,
         )
@@ -654,7 +651,7 @@ def attempt_initialize_boozer_surface(
         success=solve_success and not self_intersecting,
         solved_iota=solve_attempt.solved_iota,
         solved_G=solve_attempt.solved_G,
-        volume=_surface_volume_or_none(boozer_surface.surface),
+        volume=_volume_label_value(vol),
     )
 
 

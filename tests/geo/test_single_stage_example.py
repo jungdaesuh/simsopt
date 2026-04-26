@@ -292,6 +292,9 @@ class FakeVolume:
     def __init__(self, surface):
         self.surface = surface
 
+    def J(self):
+        return self.surface.volume()
+
 
 class FakeBoozerSurface:
     def __init__(self, bs, surface, label, targetlabel, constraint_weight, options=None, I=0.0):

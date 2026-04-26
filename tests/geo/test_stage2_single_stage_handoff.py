@@ -350,6 +350,13 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertAlmostEqual(attempt.solved_G, 0.72)
         self.assertIsNone(attempt.error_type)
 
+    class _ConstantVolumeLabel:
+        def __init__(self, surface):
+            self.surface = surface
+
+        def J(self):
+            return 0.1
+
     def test_classify_bootability_result_rejects_iota_mismatch(self):
         module = load_handoff_module()
 
@@ -412,13 +419,6 @@ class HandoffModuleTests(unittest.TestCase):
             def is_self_intersecting(self):
                 return False
 
-            def volume(self):
-                return 0.1
-
-        class _FakeVolume:
-            def __init__(self, surface):
-                self.surface = surface
-
         class _FakeBoozerSurface:
             def __init__(
                 self,
@@ -456,7 +456,7 @@ class HandoffModuleTests(unittest.TestCase):
             boozer_I=0.0,
             nfp=5,
             surface_cls=_FakeSurface,
-            volume_cls=_FakeVolume,
+            volume_cls=self._ConstantVolumeLabel,
             boozer_surface_cls=_FakeBoozerSurface,
         )
 
@@ -512,13 +512,6 @@ class HandoffModuleTests(unittest.TestCase):
                 self.self_intersection_calls += 1
                 raise RuntimeError("ground missing")
 
-            def volume(self):
-                return 0.1
-
-        class _FakeVolume:
-            def __init__(self, surface):
-                self.surface = surface
-
         class _FakeBoozerSurface:
             def __init__(
                 self,
@@ -555,7 +548,7 @@ class HandoffModuleTests(unittest.TestCase):
                 boozer_I=0.0,
                 nfp=5,
                 surface_cls=_FakeSurface,
-                volume_cls=_FakeVolume,
+                volume_cls=self._ConstantVolumeLabel,
                 boozer_surface_cls=_FakeBoozerSurface,
             )
 
@@ -564,6 +557,86 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertIsNone(boozer_surface.res)
         self.assertTrue(boozer_surface.need_to_run_code)
         self.assertEqual(boozer_surface.surface.self_intersection_calls, 1)
+
+    def test_attempt_initialize_boozer_surface_propagates_volume_exception(self):
+        module = load_handoff_module()
+        surf_prev = SimpleNamespace(
+            quadpoints_theta=np.array([0.0, 0.5]),
+            quadpoints_phi=np.array([0.0, 0.2]),
+            gamma=lambda: np.zeros((2, 2, 3), dtype=float),
+        )
+
+        class _FakeSurface:
+            def __init__(
+                self,
+                *,
+                mpol,
+                ntor,
+                nfp,
+                stellsym,
+                quadpoints_theta,
+                quadpoints_phi,
+            ):
+                del mpol, ntor, nfp, stellsym
+                self.quadpoints_theta = quadpoints_theta
+                self.quadpoints_phi = quadpoints_phi
+                self.dofs = np.zeros(2, dtype=float)
+                self.x = np.zeros(2, dtype=float)
+                self._gamma = np.zeros((2, 2, 3), dtype=float)
+
+            def least_squares_fit(self, gamma):
+                self._gamma = np.asarray(gamma, dtype=float)
+
+            def gamma(self):
+                return self._gamma.copy()
+
+            def is_self_intersecting(self):
+                return False
+
+        class _FakeVolume:
+            def __init__(self, surface):
+                self.surface = surface
+
+            def J(self):
+                raise RuntimeError("volume broken")
+
+        class _FakeBoozerSurface:
+            def __init__(
+                self,
+                bs,
+                surf,
+                vol,
+                vol_target,
+                constraint_weight,
+                options,
+                I=0.0,
+            ):
+                del bs, vol, vol_target, constraint_weight, options, I
+                self.surface = surf
+                self.res = None
+                self.need_to_run_code = True
+
+            def run_code(self, iota, G):
+                self.res = {"iota": float(iota), "G": float(G), "success": True}
+                self.need_to_run_code = False
+                return {"success": True, "iota": float(iota), "G": float(G)}
+
+        with self.assertRaisesRegex(RuntimeError, "volume broken"):
+            module.attempt_initialize_boozer_surface(
+                surf_prev,
+                mpol=8,
+                ntor=6,
+                bs=object(),
+                vol_target=0.1,
+                constraint_weight=1.0,
+                iota=0.2,
+                G0=0.35,
+                boozer_I=0.0,
+                nfp=5,
+                surface_cls=_FakeSurface,
+                volume_cls=_FakeVolume,
+                boozer_surface_cls=_FakeBoozerSurface,
+            )
 
     def test_attempt_initialize_boozer_surface_assigns_seed_dofs_after_construction(self):
         module = load_handoff_module()
@@ -621,13 +694,6 @@ class HandoffModuleTests(unittest.TestCase):
             def is_self_intersecting(self):
                 return False
 
-            def volume(self):
-                return 0.1
-
-        class _FakeVolume:
-            def __init__(self, surface):
-                self.surface = surface
-
         class _FakeBoozerSurface:
             def __init__(
                 self,
@@ -662,7 +728,7 @@ class HandoffModuleTests(unittest.TestCase):
             initial_surface_guess=initial_surface_guess,
             nfp=5,
             surface_cls=_CtorRejectsRawArraySurface,
-            volume_cls=_FakeVolume,
+            volume_cls=self._ConstantVolumeLabel,
             boozer_surface_cls=_FakeBoozerSurface,
         )
 
