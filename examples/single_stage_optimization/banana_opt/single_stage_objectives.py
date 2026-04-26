@@ -6,7 +6,14 @@ from banana_opt.frontier_scalarization import (
     FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
     FRONTIER_REFERENCE_MODE_EPSILON,
 )
-from banana_opt.hardware_constraint_schema import get_hardware_constraint_spec
+from banana_opt.hardware_constraint_schema import (
+    ALMConstraintMetadata,
+    ALM_OBJECTIVE_SCALE_FLOOR,
+    alm_constraint_metadata_payload,
+    build_threshold_overrides,
+    get_hardware_constraint_spec,
+    hardware_constraint_alm_metadata,
+)
 from banana_opt.poloidal_extent import poloidal_extent_rad_from_objective
 from banana_opt.single_stage_constraints import single_stage_constraint_activity_tolerances
 
@@ -688,6 +695,90 @@ def evaluate_base_objective(
     return annotate_search_evaluation_finiteness(evaluation)
 
 
+def _single_stage_hardware_threshold_overrides(
+    *,
+    curve_curve_min_distance,
+    curve_surface_min_distance,
+    curvature_threshold,
+    surface_surface_min_distance=0.0,
+    coil_length_threshold=None,
+    banana_current_threshold=None,
+    poloidal_extent_threshold=None,
+) -> dict[str, float]:
+    return build_threshold_overrides(
+        (
+            ("coil_coil_spacing", curve_curve_min_distance),
+            ("coil_surface_spacing", curve_surface_min_distance),
+            ("max_curvature", curvature_threshold),
+            ("surface_vessel_spacing", surface_surface_min_distance),
+            ("coil_length", coil_length_threshold),
+            ("banana_current", banana_current_threshold),
+            ("poloidal_extent", poloidal_extent_threshold),
+        )
+    )
+
+
+def _physics_alm_metadata(
+    name: str,
+    *,
+    threshold: float,
+    activity_tolerance: float,
+) -> ALMConstraintMetadata:
+    raw_threshold = float(threshold)
+    return ALMConstraintMetadata(
+        scale=max(raw_threshold, ALM_OBJECTIVE_SCALE_FLOOR),
+        block="physics",
+        activity_tolerance=float(activity_tolerance),
+        raw_threshold=raw_threshold,
+        source=f"threshold:{name}",
+        objective_value_kind="raw_physics",
+        gradient_value_kind="raw_physics",
+        dual_update_value_kind="hard",
+        feasibility_value_kind="hard",
+        certification_value_kind="hard",
+    )
+
+
+def _single_stage_alm_constraint_metadata(
+    constraint_names: list[str],
+    *,
+    threshold_overrides: dict[str, float],
+    activity_tolerance_by_name: dict[str, float],
+    qs_threshold,
+    boozer_threshold,
+    iota_penalty_threshold,
+    length_penalty_threshold,
+) -> dict[str, ALMConstraintMetadata]:
+    metadata_by_name: dict[str, ALMConstraintMetadata] = {}
+    exact_hardware_names = {"coil_length_upper_bound", "banana_current_upper_bound"}
+    physics_threshold_by_name = {
+        "qs_error": qs_threshold,
+        "boozer_residual": boozer_threshold,
+        "iota_penalty": iota_penalty_threshold,
+        "length_penalty": length_penalty_threshold,
+    }
+    for constraint_name in constraint_names:
+        activity_tolerance = activity_tolerance_by_name.get(constraint_name, 0.0)
+        if constraint_name in physics_threshold_by_name:
+            metadata_by_name[constraint_name] = _physics_alm_metadata(
+                constraint_name,
+                threshold=physics_threshold_by_name[constraint_name],
+                activity_tolerance=activity_tolerance,
+            )
+            continue
+        uses_hard_value = constraint_name in exact_hardware_names
+        metadata_by_name[constraint_name] = hardware_constraint_alm_metadata(
+            constraint_name,
+            threshold_overrides=threshold_overrides,
+            activity_tolerance=activity_tolerance,
+            objective_value_kind="hard" if uses_hard_value else "surrogate",
+            gradient_value_kind="hard" if uses_hard_value else "surrogate",
+            dual_update_value_kind="hard" if uses_hard_value else "surrogate",
+            feasibility_value_kind="hard" if uses_hard_value else "surrogate",
+        )
+    return metadata_by_name
+
+
 def evaluate_alm_objective(
     surface_weights,
     nonQSs,
@@ -937,6 +1028,31 @@ def evaluate_alm_objective(
         dtype=float,
     )
     base_eval["constraint_activity_tolerances"] = constraint_activity_tolerances
+    threshold_overrides = _single_stage_hardware_threshold_overrides(
+        curve_curve_min_distance=curve_curve_min_distance,
+        curve_surface_min_distance=curve_surface_min_distance,
+        curvature_threshold=curvature_threshold,
+        surface_surface_min_distance=surface_surface_min_distance,
+        coil_length_threshold=coil_length_threshold,
+        banana_current_threshold=banana_current_threshold,
+        poloidal_extent_threshold=poloidal_extent_threshold,
+    )
+    metadata_by_name = _single_stage_alm_constraint_metadata(
+        active_constraint_names,
+        threshold_overrides=threshold_overrides,
+        activity_tolerance_by_name=constraint_tolerance_by_name,
+        qs_threshold=qs_threshold,
+        boozer_threshold=boozer_threshold,
+        iota_penalty_threshold=iota_penalty_threshold,
+        length_penalty_threshold=length_penalty_threshold,
+    )
+    base_eval.update(alm_constraint_metadata_payload(active_constraint_names, metadata_by_name))
+    base_eval["raw_dual_update_values"] = np.asarray(constraint_values, dtype=float)
+    base_eval["raw_feasibility_values"] = np.asarray(feasibility_values, dtype=float)
+    base_eval["raw_constraint_grads"] = [
+        np.asarray(grad, dtype=float) for grad in constraint_grads
+    ]
+    base_eval["raw_constraint_activity_tolerances"] = constraint_activity_tolerances
     if include_diagnostics:
         base_eval["diagnostics_included"] = True
         base_eval["J_cc"] = float(JCurveCurve.J())

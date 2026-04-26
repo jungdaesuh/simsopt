@@ -630,6 +630,52 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             ),
         )
 
+    def test_hardware_constraint_alm_metadata_uses_active_threshold_without_current_cap(self):
+        schema_module = load_hardware_constraint_schema_module()
+
+        metadata = schema_module.hardware_constraint_alm_metadata(
+            "banana_current_upper_bound",
+            threshold_overrides={"banana_current": 2.0e4},
+            activity_tolerance=1.0e-3,
+            objective_value_kind="hard",
+            gradient_value_kind="hard",
+            dual_update_value_kind="hard",
+            feasibility_value_kind="hard",
+        )
+
+        self.assertEqual(metadata.block, "current")
+        self.assertEqual(metadata.scale, 2.0e4)
+        self.assertEqual(metadata.raw_threshold, 2.0e4)
+        self.assertEqual(metadata.activity_tolerance, 1.0e-3)
+        self.assertEqual(metadata.objective_value_kind, "hard")
+        self.assertEqual(metadata.certification_value_kind, "hard")
+
+    def test_alm_constraint_metadata_payload_preserves_ordered_sidecars(self):
+        schema_module = load_hardware_constraint_schema_module()
+        metadata_by_name = {
+            "coil_coil_spacing": schema_module.hardware_constraint_alm_metadata(
+                "coil_coil_spacing",
+                threshold_overrides={"coil_coil_spacing": 0.05},
+            ),
+            "banana_current_upper_bound": schema_module.hardware_constraint_alm_metadata(
+                "banana_current_upper_bound",
+                threshold_overrides={"banana_current": 16000.0},
+                objective_value_kind="hard",
+                gradient_value_kind="hard",
+                dual_update_value_kind="hard",
+                feasibility_value_kind="hard",
+            ),
+        }
+
+        payload = schema_module.alm_constraint_metadata_payload(
+            ("banana_current_upper_bound", "coil_coil_spacing"),
+            metadata_by_name,
+        )
+
+        self.assertEqual(payload["constraint_blocks"], ["current", "geometry"])
+        self.assertEqual(payload["constraint_scales"], [16000.0, 0.05])
+        self.assertEqual(payload["objective_value_kinds"], ["hard", "surrogate"])
+
     def test_hardware_constraint_status_splits_allowed_and_forbidden_traversal(self):
         schema_module = load_hardware_constraint_schema_module()
 

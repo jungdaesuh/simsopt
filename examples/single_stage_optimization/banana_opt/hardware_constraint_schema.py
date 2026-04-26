@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import sys
 from dataclasses import dataclass
 from typing import Collection, Iterable, Literal, Mapping
 
@@ -16,10 +18,14 @@ from banana_opt.hardware_contracts import (
 
 ConstraintKind = Literal["lower_bound", "upper_bound", "box_bound"]
 ConstraintTarget = Literal["penalty", "alm", "artifact"]
+ALMBlock = Literal["geometry", "current", "physics", "surface"]
+ALMValueKind = Literal["surrogate", "hard", "raw_physics"]
 # Traversal policy is search-role metadata, not a universal mode dispatcher.
 # It buckets realized status reporting for every mode, while only the
 # penalty/box_bound/forbidden subset becomes a hard search-time bound.
 TraversalPolicy = Literal["allowed", "forbidden"]
+ALM_PHYSICAL_SCALE_FLOOR = sys.float_info.epsilon
+ALM_OBJECTIVE_SCALE_FLOOR = 1.0e-12
 
 
 @dataclass(frozen=True)
@@ -29,6 +35,23 @@ class HardwareConstraintSpec:
     threshold: float
     applies_to: frozenset[ConstraintTarget]
     traversal_policy: TraversalPolicy
+    alm_scale: float | None = None
+    alm_block: ALMBlock | None = None
+    alm_activity_tolerance: float = 0.0
+
+
+@dataclass(frozen=True)
+class ALMConstraintMetadata:
+    scale: float
+    block: ALMBlock
+    activity_tolerance: float
+    raw_threshold: float | None
+    source: str
+    objective_value_kind: ALMValueKind
+    gradient_value_kind: ALMValueKind
+    dual_update_value_kind: Literal["surrogate", "hard"]
+    feasibility_value_kind: Literal["surrogate", "hard"]
+    certification_value_kind: Literal["hard"]
 
 
 HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
@@ -91,6 +114,16 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
 )
 
 _SCHEMA_BY_NAME = {spec.name: spec for spec in HARDWARE_CONSTRAINT_SCHEMA}
+_DEFAULT_ALM_BLOCK_BY_NAME: Mapping[str, ALMBlock] = {
+    "coil_coil_spacing": "geometry",
+    "coil_surface_spacing": "geometry",
+    "surface_vessel_spacing": "surface",
+    "max_curvature": "geometry",
+    "coil_length": "geometry",
+    "poloidal_extent": "geometry",
+    "banana_current": "current",
+    "tf_current": "current",
+}
 _ARTIFACT_VALUE_FIELD_BY_NAME = {
     "coil_coil_spacing": ("curve_curve_min_dist", "CURVE_CURVE_MIN_DIST"),
     "coil_surface_spacing": ("curve_surface_min_dist", "CURVE_SURFACE_MIN_DIST"),
@@ -149,6 +182,118 @@ def get_hardware_constraint_spec(name: str) -> HardwareConstraintSpec:
         return _SCHEMA_BY_NAME[name]
     except KeyError as exc:
         raise KeyError(f"Unknown hardware constraint {name!r}.") from exc
+
+
+def _schema_name_from_alm_or_schema_name(name: str) -> str:
+    if name in _SCHEMA_BY_NAME:
+        return name
+    try:
+        return _SCHEMA_NAME_BY_ALM_NAME[name]
+    except KeyError as exc:
+        raise KeyError(f"Unknown ALM hardware constraint {name!r}.") from exc
+
+
+def get_hardware_constraint_spec_for_alm_name(name: str) -> HardwareConstraintSpec:
+    return get_hardware_constraint_spec(_schema_name_from_alm_or_schema_name(name))
+
+
+def _validate_alm_metadata(metadata: ALMConstraintMetadata, *, name: str) -> None:
+    if not math.isfinite(metadata.scale) or metadata.scale <= 0.0:
+        raise ValueError(f"ALM scale for {name!r} must be finite and positive.")
+    if (
+        not math.isfinite(metadata.activity_tolerance)
+        or metadata.activity_tolerance < 0.0
+    ):
+        raise ValueError(
+            f"ALM activity tolerance for {name!r} must be finite and nonnegative."
+        )
+    if metadata.source == "":
+        raise ValueError(f"ALM scale source for {name!r} must be nonempty.")
+
+
+def hardware_constraint_alm_metadata(
+    name: str,
+    *,
+    threshold_overrides: Mapping[str, float] | None = None,
+    activity_tolerance: float | None = None,
+    objective_value_kind: ALMValueKind = "surrogate",
+    gradient_value_kind: ALMValueKind = "surrogate",
+    dual_update_value_kind: Literal["surrogate", "hard"] = "surrogate",
+    feasibility_value_kind: Literal["surrogate", "hard"] = "surrogate",
+) -> ALMConstraintMetadata:
+    schema_name = _schema_name_from_alm_or_schema_name(name)
+    spec = get_hardware_constraint_spec(schema_name)
+    raw_threshold = _resolved_threshold(spec, threshold_overrides)
+    scale = max(
+        raw_threshold if spec.alm_scale is None else float(spec.alm_scale),
+        ALM_PHYSICAL_SCALE_FLOOR,
+    )
+    source = (
+        f"threshold:{schema_name}"
+        if spec.alm_scale is None
+        else f"schema:{schema_name}.alm_scale"
+    )
+    metadata = ALMConstraintMetadata(
+        scale=scale,
+        block=spec.alm_block or _DEFAULT_ALM_BLOCK_BY_NAME[schema_name],
+        activity_tolerance=(
+            float(spec.alm_activity_tolerance)
+            if activity_tolerance is None
+            else float(activity_tolerance)
+        ),
+        raw_threshold=raw_threshold,
+        source=source,
+        objective_value_kind=objective_value_kind,
+        gradient_value_kind=gradient_value_kind,
+        dual_update_value_kind=dual_update_value_kind,
+        feasibility_value_kind=feasibility_value_kind,
+        certification_value_kind="hard",
+    )
+    _validate_alm_metadata(metadata, name=name)
+    return metadata
+
+
+def hardware_constraint_alm_scale(
+    name: str,
+    *,
+    threshold_overrides: Mapping[str, float] | None = None,
+) -> float:
+    return hardware_constraint_alm_metadata(
+        name,
+        threshold_overrides=threshold_overrides,
+    ).scale
+
+
+def hardware_constraint_alm_block(name: str) -> ALMBlock:
+    return hardware_constraint_alm_metadata(name).block
+
+
+def alm_constraint_metadata_payload(
+    constraint_names: Iterable[str],
+    metadata_by_name: Mapping[str, ALMConstraintMetadata],
+) -> dict[str, object]:
+    ordered_metadata = [metadata_by_name[name] for name in constraint_names]
+    return {
+        "constraint_scales": [metadata.scale for metadata in ordered_metadata],
+        "constraint_blocks": [metadata.block for metadata in ordered_metadata],
+        "constraint_scale_sources": [metadata.source for metadata in ordered_metadata],
+        "objective_value_kinds": [
+            metadata.objective_value_kind for metadata in ordered_metadata
+        ],
+        "gradient_value_kinds": [
+            metadata.gradient_value_kind for metadata in ordered_metadata
+        ],
+        "dual_update_value_kinds": [
+            metadata.dual_update_value_kind for metadata in ordered_metadata
+        ],
+        "feasibility_value_kinds": [
+            metadata.feasibility_value_kind for metadata in ordered_metadata
+        ],
+        "certification_value_kinds": [
+            metadata.certification_value_kind for metadata in ordered_metadata
+        ],
+        "raw_thresholds": [metadata.raw_threshold for metadata in ordered_metadata],
+    }
 
 
 def hardware_constraint_specs(
@@ -318,6 +463,13 @@ def alm_constraint_name(spec: HardwareConstraintSpec) -> str:
     if spec.kind == "upper_bound":
         return spec.name
     raise ValueError(f"Unsupported hardware constraint kind {spec.kind!r}.")
+
+
+_SCHEMA_NAME_BY_ALM_NAME = {
+    alm_constraint_name(spec): spec.name
+    for spec in HARDWARE_CONSTRAINT_SCHEMA
+    if "alm" in spec.applies_to
+}
 
 
 def hardware_constraint_alm_names(

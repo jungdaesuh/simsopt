@@ -867,6 +867,34 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             result["constraint_activity_tolerances"],
             [0.02, 0.08, 1e-3, 1e-3],
         )
+        np.testing.assert_allclose(
+            result["constraint_scales"],
+            [0.05, 40.0, 2.0, 16000.0],
+        )
+        self.assertEqual(
+            result["constraint_blocks"],
+            ["geometry", "geometry", "geometry", "current"],
+        )
+        self.assertEqual(
+            result["objective_value_kinds"],
+            ["surrogate", "surrogate", "hard", "hard"],
+        )
+        self.assertEqual(
+            result["feasibility_value_kinds"],
+            ["hard", "hard", "hard", "hard"],
+        )
+        np.testing.assert_allclose(
+            result["raw_dual_update_values"],
+            [-0.008, 0.75, 0.2, -6500.0],
+        )
+        np.testing.assert_allclose(
+            result["raw_feasibility_values"],
+            [0.0, 1.0, 0.2, 0.0],
+        )
+        np.testing.assert_allclose(
+            result["raw_constraint_activity_tolerances"],
+            [0.02, 0.08, 1e-3, 1e-3],
+        )
         self.assertAlmostEqual(result["max_feasibility_violation"], 1.0)
         self.assertAlmostEqual(result["total"], 9.0)
         np.testing.assert_allclose(result["grad"], [7.0, -3.0])
@@ -2253,6 +2281,26 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         np.testing.assert_allclose(result["feasibility_values"], [0.0, 0.2, 0.3, 0.0])
         np.testing.assert_allclose(
             result["constraint_activity_tolerances"], [0.04, 0.04, 0.2, 0.04]
+        )
+        np.testing.assert_allclose(
+            result["constraint_scales"],
+            [0.05, 0.02, 40.0, 0.04],
+        )
+        self.assertEqual(
+            result["constraint_blocks"],
+            ["geometry", "geometry", "geometry", "surface"],
+        )
+        self.assertEqual(
+            result["objective_value_kinds"],
+            ["surrogate", "surrogate", "surrogate", "surrogate"],
+        )
+        np.testing.assert_allclose(
+            result["raw_dual_update_values"],
+            [-0.1, 0.2, 0.3, -0.4],
+        )
+        np.testing.assert_allclose(
+            result["raw_feasibility_values"],
+            [0.0, 0.2, 0.3, 0.0],
         )
         self.assertAlmostEqual(result["base_total"], 25.0)
         self.assertAlmostEqual(result["max_feasibility_violation"], 0.3)

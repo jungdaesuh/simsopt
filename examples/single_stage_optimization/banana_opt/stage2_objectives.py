@@ -1,5 +1,6 @@
 import inspect
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
@@ -21,9 +22,13 @@ from banana_opt.hardware_contracts import (
     is_major_radius_offspec,
 )
 from banana_opt.hardware_constraint_schema import (
+    ALMConstraintMetadata,
+    ALM_OBJECTIVE_SCALE_FLOOR,
+    alm_constraint_metadata_payload,
     build_hardware_constraint_artifact_payload_fields,
     build_hardware_constraint_status,
     build_threshold_overrides,
+    hardware_constraint_alm_metadata,
     hardware_constraint_alm_names,
 )
 from banana_opt.poloidal_extent import poloidal_extent_rad_from_objective
@@ -629,6 +634,76 @@ def _ordered_constraint_values(
     values_by_name: dict[str, object],
 ) -> list[object]:
     return [values_by_name[name] for name in constraint_names]
+
+
+def _stage2_hardware_threshold_overrides(
+    *,
+    length_target,
+    Jccdist,
+    Jc,
+    banana_current_max_A,
+    Jcsdist=None,
+    poloidal_extent_threshold_rad=None,
+) -> dict[str, float]:
+    return build_threshold_overrides(
+        (
+            ("coil_length", length_target),
+            ("coil_coil_spacing", Jccdist.minimum_distance),
+            (
+                "coil_surface_spacing",
+                None if Jcsdist is None else Jcsdist.minimum_distance,
+            ),
+            ("max_curvature", Jc.threshold),
+            ("banana_current", banana_current_max_A),
+            ("poloidal_extent", poloidal_extent_threshold_rad),
+        )
+    )
+
+
+def _stage2_alm_constraint_metadata(
+    constraint_names: tuple[str, ...],
+    *,
+    threshold_overrides: Mapping[str, float],
+    activity_tolerance_by_name: Mapping[str, float],
+    iota_penalty_threshold: float | None = None,
+) -> dict[str, ALMConstraintMetadata]:
+    metadata_by_name: dict[str, ALMConstraintMetadata] = {}
+    surrogate_hardware_names = {
+        "coil_coil_spacing",
+        "coil_surface_spacing",
+        "max_curvature",
+        "poloidal_extent",
+    }
+    for constraint_name in constraint_names:
+        activity_tolerance = float(activity_tolerance_by_name[constraint_name])
+        if constraint_name == "iota_penalty":
+            raw_threshold = (
+                None if iota_penalty_threshold is None else float(iota_penalty_threshold)
+            )
+            metadata_by_name[constraint_name] = ALMConstraintMetadata(
+                scale=max(raw_threshold or 0.0, ALM_OBJECTIVE_SCALE_FLOOR),
+                block="physics",
+                activity_tolerance=activity_tolerance,
+                raw_threshold=raw_threshold,
+                source="stage2_iota_penalty_threshold",
+                objective_value_kind="raw_physics",
+                gradient_value_kind="raw_physics",
+                dual_update_value_kind="hard",
+                feasibility_value_kind="hard",
+                certification_value_kind="hard",
+            )
+            continue
+        uses_surrogate = constraint_name in surrogate_hardware_names
+        metadata_by_name[constraint_name] = hardware_constraint_alm_metadata(
+            constraint_name,
+            threshold_overrides=threshold_overrides,
+            activity_tolerance=activity_tolerance,
+            objective_value_kind="surrogate" if uses_surrogate else "hard",
+            gradient_value_kind="surrogate" if uses_surrogate else "hard",
+            dual_update_value_kind="surrogate" if uses_surrogate else "hard",
+            feasibility_value_kind="hard",
+        )
+    return metadata_by_name
 
 
 def build_stage2_results(
@@ -1650,6 +1725,28 @@ def evaluate_stage2_alm_problem(
             None if stage2_iota_runtime is None else stage2_iota_runtime.tolerance
         ),
     )
+    raw_constraint_activity_tolerances = np.asarray(
+        _ordered_constraint_values(active_names, tolerance_by_name),
+        dtype=float,
+    )
+    threshold_overrides = _stage2_hardware_threshold_overrides(
+        length_target=length_target,
+        Jccdist=Jccdist,
+        Jc=Jc,
+        banana_current_max_A=banana_current_max_A,
+        Jcsdist=Jcsdist,
+        poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
+    )
+    metadata_by_name = _stage2_alm_constraint_metadata(
+        active_names,
+        threshold_overrides=threshold_overrides,
+        activity_tolerance_by_name=tolerance_by_name,
+        iota_penalty_threshold=(
+            None
+            if stage2_iota_runtime is None
+            else stage2_iota_runtime.penalty_threshold
+        ),
+    )
     invalid_fields = (
         sanitized_invalid_fields
         + invalid_hard_signed_fields
@@ -1661,18 +1758,20 @@ def evaluate_stage2_alm_problem(
             "constraint_names": list(active_names),
             "dual_update_values": sanitized_surrogate_signed_constraint_values,
             "constraint_grads": sanitized_constraint_grads,
-            "constraint_activity_tolerances": np.asarray(
-                _ordered_constraint_values(active_names, tolerance_by_name),
-                dtype=float,
-            ),
+            "constraint_activity_tolerances": raw_constraint_activity_tolerances,
             "feasibility_values": sanitized_hard_violation_values,
             "hard_signed_constraint_values": sanitized_hard_signed_constraint_values,
             "hard_violation_values": sanitized_hard_violation_values,
             "surrogate_signed_constraint_values": sanitized_surrogate_signed_constraint_values,
             "hard_dual_update_values": sanitized_hard_signed_constraint_values,
+            "raw_dual_update_values": sanitized_surrogate_signed_constraint_values,
+            "raw_feasibility_values": sanitized_hard_violation_values,
+            "raw_constraint_grads": sanitized_constraint_grads,
+            "raw_constraint_activity_tolerances": raw_constraint_activity_tolerances,
             "max_feasibility_violation": max(sanitized_hard_violation_values),
             "nonfinite_inputs_sanitized": bool(invalid_fields),
             "nonfinite_input_fields": invalid_fields,
+            **alm_constraint_metadata_payload(active_names, metadata_by_name),
         }
     )
     if invalid_fields:
