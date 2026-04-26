@@ -14,27 +14,21 @@ def pairwise_block_min(left_points, right_points):
 def select_pairwise_near_min(left_points, right_points, threshold):
     left = np.asarray(left_points, dtype=float)
     right = np.asarray(right_points, dtype=float)
-    right_tree = cKDTree(right)
-    candidate_cols_by_row = right_tree.query_ball_point(left, r=float(threshold))
-    pairs = np.asarray(
-        [
-            (row_index, col_index)
-            for row_index, candidate_cols in enumerate(candidate_cols_by_row)
-            for col_index in sorted(candidate_cols)
-        ],
-        dtype=int,
-    ).reshape((-1, 2))
-    rows = pairs[:, 0]
-    cols = pairs[:, 1]
+    candidate_lists = cKDTree(right).query_ball_point(left, r=float(threshold))
+    counts = np.fromiter(
+        (len(candidates) for candidates in candidate_lists),
+        dtype=np.intp,
+        count=len(candidate_lists),
+    )
+    rows = np.repeat(np.arange(counts.size, dtype=np.intp), counts)
+    cols = np.fromiter(
+        (col for candidates in candidate_lists for col in candidates),
+        dtype=np.intp,
+        count=int(counts.sum()),
+    )
     diffs = left[rows] - right[cols]
     distances = np.linalg.norm(diffs, axis=1)
-
-    return (
-        rows,
-        cols,
-        diffs,
-        distances,
-    )
+    return rows, cols, diffs, distances
 
 
 def surface_dgamma_by_dcoeff_derivative(surface, point_gradient):

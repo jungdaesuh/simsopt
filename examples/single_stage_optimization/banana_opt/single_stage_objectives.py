@@ -19,6 +19,9 @@ from banana_opt.single_stage_constraints import single_stage_constraint_activity
 from banana_opt.smooth_distance_selection import pairwise_block_min
 
 
+ALM_HARD_GEOMETRY_DUAL_SIGNALS = True
+
+
 def average_surface_objectives(objectives, weights=None):
     if len(objectives) == 0:
         raise ValueError("Need at least one surface objective to average")
@@ -1167,22 +1170,21 @@ def evaluate_alm_objective(
             distance_smoothing,
             curvature_smoothing,
             include_surface_surface=JSurfSurf is not None,
+            include_surface_stack=surface_stack_surfaces is not None,
         ),
         dtype=float,
     )
     geometry_names = ["coil_coil_spacing", "coil_surface_spacing", "max_curvature"]
     if JSurfSurf is not None:
         geometry_names.append("surface_vessel_spacing")
+    if surface_stack_surfaces is not None:
+        geometry_names.append("surface_surface_spacing")
     if JPoloidalExtent is not None:
         geometry_names.append("poloidal_extent")
     constraint_tolerance_by_name = {
         name: float(value)
         for name, value in zip(geometry_names, geometry_tolerances)
     }
-    if surface_stack_surfaces is not None:
-        constraint_tolerance_by_name["surface_surface_spacing"] = 4.0 * float(
-            distance_smoothing
-        )
     for exact_constraint_name in ("coil_length_upper_bound", "banana_current_upper_bound"):
         if exact_constraint_name in hardware_constraints:
             constraint_tolerance_by_name[exact_constraint_name] = 1.0e-3

@@ -30,6 +30,7 @@ from .single_stage_geometry import (
     topology_gate_deficit,
 )
 from .single_stage_objectives import (
+    ALM_HARD_GEOMETRY_DUAL_SIGNALS,
     apply_frontier_scalarization_override,
     evaluate_alm_objective,
     evaluate_total_objective,
@@ -997,7 +998,7 @@ def _evaluate_search_objective(
             surface_stack_surfaces=surface_stack_surfaces,
             surface_stack_min_distance=surface_stack_min_distance,
             surface_stack_constraint_fn=single_stage._smooth_min_surface_stack_signed_constraint,
-            hard_surrogate_diagnostics=True,
+            hard_surrogate_diagnostics=ALM_HARD_GEOMETRY_DUAL_SIGNALS,
             alm_formulation=runtime.args.alm_formulation,
             qs_threshold=runtime.args.alm_qs_threshold,
             boozer_threshold=runtime.args.alm_boozer_threshold,

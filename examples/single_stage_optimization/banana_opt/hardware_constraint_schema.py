@@ -79,7 +79,7 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
     HardwareConstraintSpec(
         name="surface_surface_spacing",
         kind="lower_bound",
-        threshold=COIL_PLASMA_MIN_DIST_M,
+        threshold=0.0,
         applies_to=frozenset({"alm"}),
         traversal_policy="allowed",
         alm_block="surface",
@@ -274,7 +274,9 @@ def hardware_constraint_alm_scale(
 
 
 def hardware_constraint_alm_block(name: str) -> ALMBlock:
-    return hardware_constraint_alm_metadata(name).block
+    schema_name = _schema_name_from_alm_or_schema_name(name)
+    spec = get_hardware_constraint_spec(schema_name)
+    return spec.alm_block or _DEFAULT_ALM_BLOCK_BY_NAME[schema_name]
 
 
 def alm_constraint_metadata_payload(
@@ -536,9 +538,14 @@ def _resolved_threshold(
     spec: HardwareConstraintSpec,
     threshold_overrides: Mapping[str, float] | None,
 ) -> float:
-    if threshold_overrides is None or spec.name not in threshold_overrides:
-        return float(spec.threshold)
-    return float(threshold_overrides[spec.name])
+    if threshold_overrides is not None and spec.name in threshold_overrides:
+        return float(threshold_overrides[spec.name])
+    if spec.threshold <= 0.0:
+        raise ValueError(
+            f"Constraint {spec.name!r} has no canonical hardware threshold; "
+            "supply an explicit positive threshold override."
+        )
+    return float(spec.threshold)
 
 
 def hardware_constraint_signed_value(

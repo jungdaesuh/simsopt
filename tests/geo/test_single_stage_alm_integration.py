@@ -565,6 +565,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "_ALM_CURVATURE_GAP_CONSTRAINT_NAMES": frozenset(
                     ("max_curvature", "poloidal_extent")
                 ),
+                "_ALM_GAP_SHRINK_RATE": 0.25,
             },
         )
         history_entry = {
@@ -635,7 +636,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn("history_callback=history_callback", source)
         self.assertIn("single_stage_alm_constraint_names(", source)
         self.assertIn("constraint_blocks=alm_constraint_blocks", source)
-        self.assertIn("hard_surrogate_diagnostics=True", source)
+        self.assertIn("hard_surrogate_diagnostics=ALM_HARD_GEOMETRY_DUAL_SIGNALS", source)
         self.assertIn("surface_stack_constraint_fn=_smooth_min_surface_stack_signed_constraint", source)
         self.assertIn("alm_formulation=args.alm_formulation", source)
 
@@ -844,7 +845,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             SINGLE_STAGE_MODULE_PATH,
             ["single_stage_alm_constraint_blocks", "single_stage_alm_constraint_names"],
             {
-                "hardware_constraint_alm_metadata": schema_module.hardware_constraint_alm_metadata,
+                "hardware_constraint_alm_block": schema_module.hardware_constraint_alm_block,
                 "hardware_constraint_alm_names": schema_module.hardware_constraint_alm_names,
                 "SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES": (
                     "qs_error",

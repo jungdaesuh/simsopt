@@ -2510,7 +2510,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 0.0,
             ),
             augmented_inequality_objective_fn=fake_augmented,
-            activity_tolerances_fn=lambda ds, cs, include_surface_surface: np.array(
+            activity_tolerances_fn=lambda ds, cs, include_surface_surface, include_surface_stack=False: np.array(
                 [ds * 4.0, ds * 4.0, cs * 4.0, ds * 4.0]
                 if include_surface_surface
                 else [ds * 4.0, ds * 4.0, cs * 4.0],
@@ -3106,7 +3106,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 0.3,
             ),
             augmented_inequality_objective_fn=fake_augmented,
-            activity_tolerances_fn=lambda ds, cs, include_surface_surface: np.array(
+            activity_tolerances_fn=lambda ds, cs, include_surface_surface, include_surface_stack=False: np.array(
                 [ds * 4.0, ds * 4.0, cs * 4.0],
                 dtype=float,
             ),
@@ -3198,7 +3198,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 0.3,
             ),
             augmented_inequality_objective_fn=fake_augmented,
-            activity_tolerances_fn=lambda ds, cs, include_surface_surface: np.array(
+            activity_tolerances_fn=lambda ds, cs, include_surface_surface, include_surface_stack=False: np.array(
                 [ds * 4.0, ds * 4.0, cs * 4.0],
                 dtype=float,
             ),

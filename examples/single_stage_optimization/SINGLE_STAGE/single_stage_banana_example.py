@@ -161,7 +161,7 @@ from banana_opt.hardware_contracts import (
 )
 from banana_opt.hardware_constraint_schema import (
     build_hardware_constraint_artifact_payload_fields,
-    hardware_constraint_alm_metadata,
+    hardware_constraint_alm_block,
     hardware_constraint_alm_names,
 )
 from banana_opt.incumbents import (
@@ -255,6 +255,7 @@ from banana_opt.single_stage_search_policy import (
     hardware_rejection_increment,
 )
 from banana_opt.single_stage_objectives import (
+    ALM_HARD_GEOMETRY_DUAL_SIGNALS,
     apply_frontier_scalarization_override as _apply_frontier_scalarization_override_impl,
     average_surface_objectives as _average_surface_objectives_impl,
     build_total_objective as _build_total_objective_impl,
@@ -2087,6 +2088,8 @@ _ALM_DISTANCE_GAP_CONSTRAINT_NAMES = frozenset(
     )
 )
 _ALM_CURVATURE_GAP_CONSTRAINT_NAMES = frozenset(("max_curvature", "poloidal_extent"))
+_ALM_GAP_SHRINK_RATE = 0.25
+_ALM_SMOOTHING_FLOOR_FRACTION = 1.0 / 8.0
 
 
 def normalized_hard_surrogate_gap_counts(history_entry):
@@ -2114,7 +2117,7 @@ def normalized_hard_surrogate_gap_counts(history_entry):
 
 
 def shrink_alm_smoothing_for_gap_count(smoothing, smoothing_min, gap_count):
-    factor = 1.0 / (1.0 + 0.25 * float(gap_count))
+    factor = 1.0 / (1.0 + _ALM_GAP_SHRINK_RATE * float(gap_count))
     return max(float(smoothing_min), float(smoothing) * factor)
 
 
@@ -2187,7 +2190,7 @@ def single_stage_alm_constraint_blocks(constraint_names):
             )
             else constraint_name
         )
-        blocks.append(hardware_constraint_alm_metadata(metadata_name).block)
+        blocks.append(hardware_constraint_alm_block(metadata_name))
     return tuple(blocks)
 
 
@@ -4260,7 +4263,7 @@ def evaluate_alm_objective(
             surface_stack_surfaces=current_single_stage_alm_surface_stack_surfaces(),
             surface_stack_min_distance=SURFACE_GAP_THRESHOLD,
             surface_stack_constraint_fn=_smooth_min_surface_stack_signed_constraint,
-            hard_surrogate_diagnostics=True,
+            hard_surrogate_diagnostics=ALM_HARD_GEOMETRY_DUAL_SIGNALS,
             alm_formulation=args.alm_formulation,
             qs_threshold=args.alm_qs_threshold,
             boozer_threshold=args.alm_boozer_threshold,
@@ -7896,8 +7899,8 @@ if __name__ == "__main__":
     ALM_PENALTY = args.alm_penalty_init
     ALM_DISTANCE_SMOOTHING = args.alm_distance_smoothing
     ALM_CURVATURE_SMOOTHING = args.alm_curvature_smoothing
-    ALM_DISTANCE_SMOOTHING_MIN = args.alm_distance_smoothing / 8.0
-    ALM_CURVATURE_SMOOTHING_MIN = args.alm_curvature_smoothing / 8.0
+    ALM_DISTANCE_SMOOTHING_MIN = args.alm_distance_smoothing * _ALM_SMOOTHING_FLOOR_FRACTION
+    ALM_CURVATURE_SMOOTHING_MIN = args.alm_curvature_smoothing * _ALM_SMOOTHING_FLOOR_FRACTION
     requested_finite_current_mode = getattr(
         args,
         "finite_current_mode",
