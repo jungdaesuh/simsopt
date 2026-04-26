@@ -355,10 +355,18 @@ def detect_stage_artifacts(
     run_dir: Path,
     *,
     required_filenames: tuple[str, ...],
+    jax_runtime_seed_spec_path: Path | None = None,
 ) -> dict[str, object]:
     artifact_paths = {
         filename: run_dir / filename for filename in required_filenames
     }
+    if (
+        _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME in artifact_paths
+        and jax_runtime_seed_spec_path is not None
+    ):
+        artifact_paths[_SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME] = (
+            jax_runtime_seed_spec_path
+        )
     return {
         "run_dir": str(run_dir),
         "files": {
@@ -832,7 +840,11 @@ def _nonfinal_stage_recorded_progress(metrics: dict[str, object]) -> bool:
     return False
 
 
-def collect_stage_run_snapshot(stage_output_root: Path) -> dict[str, object]:
+def collect_stage_run_snapshot(
+    stage_output_root: Path,
+    *,
+    jax_runtime_seed_spec_path: Path | None = None,
+) -> dict[str, object]:
     results_paths = sorted(stage_output_root.rglob("results.json"))
     snapshot: dict[str, object] = {
         "stage_output_root": str(stage_output_root),
@@ -847,9 +859,21 @@ def collect_stage_run_snapshot(stage_output_root: Path) -> dict[str, object]:
     snapshot["run_dir"] = str(run_dir)
     try:
         loaded_results = load_single_stage_results(run_dir)
+        required_artifacts = required_stage_artifact_filenames(loaded_results)
+        runtime_spec_path = jax_runtime_seed_spec_path
+        if (
+            _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME in required_artifacts
+            and runtime_spec_path is None
+        ):
+            runtime_spec_path = build_stage_jax_runtime_seed_spec_path(
+                stage_output_root
+            )
+        if runtime_spec_path is not None:
+            snapshot["jax_runtime_seed_spec_path"] = str(runtime_spec_path)
         snapshot["artifacts"] = detect_stage_artifacts(
             run_dir,
-            required_filenames=required_stage_artifact_filenames(loaded_results),
+            required_filenames=required_artifacts,
+            jax_runtime_seed_spec_path=runtime_spec_path,
         )
         snapshot["results"] = summarize_single_stage_results(loaded_results)
         snapshot["profiling"] = build_stage_profiling_summary(
@@ -1131,9 +1155,16 @@ def evaluate_continuation_stage(
     required_artifacts = required_stage_artifact_filenames(results)
     artifact_report: dict[str, object] | None = None
     if completed:
+        runtime_spec_value = stage_record.get("jax_runtime_seed_spec_path")
+        runtime_spec_path = (
+            Path(runtime_spec_value)
+            if isinstance(runtime_spec_value, str) and bool(runtime_spec_value)
+            else None
+        )
         artifact_report = detect_stage_artifacts(
             Path(run_dir_value),
             required_filenames=required_artifacts,
+            jax_runtime_seed_spec_path=runtime_spec_path,
         )
         missing_artifacts = [
             filename
@@ -2690,7 +2721,12 @@ def run_single_continuation_with_args(
             stage_failure_exit_code = 1
         finally:
             stage_record["completed_at_utc"] = _utc_now_iso()
-            stage_record.update(collect_stage_run_snapshot(stage_output_root))
+            stage_record.update(
+                collect_stage_run_snapshot(
+                    stage_output_root,
+                    jax_runtime_seed_spec_path=jax_runtime_seed_spec_path,
+                )
+            )
 
         if stage_record.get("status") == "completed" and not is_final_stage:
             stage_gate = evaluate_continuation_stage(

@@ -1,4 +1,9 @@
-"""Host-dispatched L-BFGS over cached JAX value-and-gradient kernels."""
+"""Host-dispatched L-BFGS over cached JAX value-and-gradient kernels.
+
+The two-loop recursion follows Nocedal & Wright, *Numerical Optimization*,
+Algorithm 7.4; the step selection is the shared strong-Wolfe line search in
+``_line_search.py``.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +20,10 @@ from ._common import (
     _as_jax_dtype,
     _bool_scalar,
     _cached_private_solver,
+    _host_cubicmin,
+    _host_quadmin,
     _int_scalar,
+    _line_search_sample_valid_host,
     _require_private_optimizer_runtime,
     _resolve_lbfgs_limits,
     _scalar_value_and_grad,
@@ -308,55 +316,6 @@ def _relative_objective_reduction_host(f_k, f_kp1, *, dtype):
     dtype = np.dtype(dtype)
     denominator = max(abs(float(f_k)), abs(float(f_kp1)), float(dtype.type(1.0)))
     return (float(f_k) - float(f_kp1)) / denominator
-
-
-def _host_cubicmin(a, fa, fpa, b, fb, c, fc):
-    dtype = np.result_type(a, fa, fpa, b, fb, c, fc)
-    a = dtype.type(a)
-    fa = dtype.type(fa)
-    fpa = dtype.type(fpa)
-    b = dtype.type(b)
-    fb = dtype.type(fb)
-    c = dtype.type(c)
-    fc = dtype.type(fc)
-    db = b - a
-    dc = c - a
-    denom = (db * dc) * (db * dc) * (db - dc)
-    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        d1 = np.asarray(
-            (
-                (dc * dc, -(db * db)),
-                (-(dc * dc * dc), db * db * db),
-            ),
-            dtype=dtype,
-        )
-        d2 = np.asarray((fb - fa - fpa * db, fc - fa - fpa * dc), dtype=dtype)
-        a_coeff, b_coeff = np.dot(d1, d2) / denom
-        radical = b_coeff * b_coeff - dtype.type(3.0) * a_coeff * fpa
-        xmin = a + (-b_coeff + np.sqrt(radical)) / (dtype.type(3.0) * a_coeff)
-    return xmin
-
-
-def _host_quadmin(a, fa, fpa, b, fb):
-    dtype = np.result_type(a, fa, fpa, b, fb)
-    a = dtype.type(a)
-    fa = dtype.type(fa)
-    fpa = dtype.type(fpa)
-    b = dtype.type(b)
-    fb = dtype.type(fb)
-    db = b - a
-    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        b_coeff = (fb - fa - fpa * db) / (db * db)
-        xmin = a - fpa / (dtype.type(2.0) * b_coeff)
-    return xmin
-
-
-def _line_search_sample_valid_host(phi, dphi, grad):
-    return (
-        np.isfinite(phi)
-        and np.isfinite(dphi)
-        and np.all(np.isfinite(np.asarray(grad)))
-    )
 
 
 def _cache_zoom_sample_host(state, *, alpha, phi, dphi, grad):

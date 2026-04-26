@@ -64,6 +64,91 @@ def _bool_scalar(value):
     return _as_jax_dtype(value, jnp.bool_)
 
 
+def _cubicmin(a, fa, fpa, b, fb, c, fc):
+    dtype = jnp.result_type(a, fa, fpa, b, fb, c, fc)
+    three = _as_jax_dtype(3.0, dtype)
+    C = fpa
+    db = b - a
+    dc = c - a
+    db2 = db * db
+    dc2 = dc * dc
+    denom = (db * dc) * (db * dc) * (db - dc)
+    d1 = jnp.stack(
+        (
+            jnp.stack((dc2, -db2)),
+            jnp.stack((-(dc2 * dc), db2 * db)),
+        )
+    ).astype(dtype)
+    d2 = jnp.stack((fb - fa - C * db, fc - fa - C * dc)).astype(dtype)
+    A, B = _dot(d1, d2) / denom
+
+    radical = B * B - three * A * C
+    return a + (-B + jnp.sqrt(radical)) / (three * A)
+
+
+def _quadmin(a, fa, fpa, b, fb):
+    dtype = jnp.result_type(a, fa, fpa, b, fb)
+    two = _as_jax_dtype(2.0, dtype)
+    D = fa
+    C = fpa
+    db = b - a
+    B = (fb - D - C * db) / (db * db)
+    return a - C / (two * B)
+
+
+def _line_search_sample_valid(phi, dphi, grad):
+    return jnp.isfinite(phi) & jnp.isfinite(dphi) & jnp.all(jnp.isfinite(grad))
+
+
+def _host_cubicmin(a, fa, fpa, b, fb, c, fc):
+    dtype = np.result_type(a, fa, fpa, b, fb, c, fc)
+    a = dtype.type(a)
+    fa = dtype.type(fa)
+    fpa = dtype.type(fpa)
+    b = dtype.type(b)
+    fb = dtype.type(fb)
+    c = dtype.type(c)
+    fc = dtype.type(fc)
+    db = b - a
+    dc = c - a
+    denom = (db * dc) * (db * dc) * (db - dc)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        d1 = np.asarray(
+            (
+                (dc * dc, -(db * db)),
+                (-(dc * dc * dc), db * db * db),
+            ),
+            dtype=dtype,
+        )
+        d2 = np.asarray((fb - fa - fpa * db, fc - fa - fpa * dc), dtype=dtype)
+        a_coeff, b_coeff = np.dot(d1, d2) / denom
+        radical = b_coeff * b_coeff - dtype.type(3.0) * a_coeff * fpa
+        xmin = a + (-b_coeff + np.sqrt(radical)) / (dtype.type(3.0) * a_coeff)
+    return xmin
+
+
+def _host_quadmin(a, fa, fpa, b, fb):
+    dtype = np.result_type(a, fa, fpa, b, fb)
+    a = dtype.type(a)
+    fa = dtype.type(fa)
+    fpa = dtype.type(fpa)
+    b = dtype.type(b)
+    fb = dtype.type(fb)
+    db = b - a
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        b_coeff = (fb - fa - fpa * db) / (db * db)
+        xmin = a - fpa / (dtype.type(2.0) * b_coeff)
+    return xmin
+
+
+def _line_search_sample_valid_host(phi, dphi, grad):
+    return (
+        np.isfinite(phi)
+        and np.isfinite(dphi)
+        and np.all(np.isfinite(np.asarray(grad)))
+    )
+
+
 def _emit_host_callback(callback, *args):
     """Dispatch private-optimizer callbacks without ordered-effect tokens.
 

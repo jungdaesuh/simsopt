@@ -2,6 +2,8 @@
 
 Derived from the JAX 0.9.2 strong-Wolfe flow, with repo-specific changes for
 the explicit old_fval/gfk contract and cached zoom-sample reuse.
+The bracketing/zoom contract follows Nocedal & Wright, *Numerical
+Optimization*, Section 3.5.
 """
 
 from __future__ import annotations
@@ -14,10 +16,13 @@ from jax import lax
 from ._common import (
     _as_jax_dtype,
     _bool_scalar,
+    _cubicmin,
     _dot,
     _emit_host_callback,
     _int_scalar,
+    _line_search_sample_valid,
     _promote_dtypes_inexact,
+    _quadmin,
     _scalar_value_and_grad,
 )
 from ._types import _LineSearchResults, _LineSearchState, _ZoomState
@@ -66,44 +71,6 @@ def _emit_line_search_runtime_debug(
         phi,
         dphi,
     )
-
-
-def _cubicmin(a, fa, fpa, b, fb, c, fc):
-    dtype = jnp.result_type(a, fa, fpa, b, fb, c, fc)
-    three = _as_jax_dtype(3.0, dtype)
-    C = fpa
-    db = b - a
-    dc = c - a
-    db2 = db * db
-    dc2 = dc * dc
-    denom = (db * dc) * (db * dc) * (db - dc)
-    d1 = jnp.stack(
-        (
-            jnp.stack((dc2, -db2)),
-            jnp.stack((-(dc2 * dc), db2 * db)),
-        )
-    ).astype(dtype)
-    d2 = jnp.stack((fb - fa - C * db, fc - fa - C * dc)).astype(dtype)
-    A, B = _dot(d1, d2) / denom
-
-    radical = B * B - three * A * C
-    xmin = a + (-B + jnp.sqrt(radical)) / (three * A)
-    return xmin
-
-
-def _quadmin(a, fa, fpa, b, fb):
-    dtype = jnp.result_type(a, fa, fpa, b, fb)
-    two = _as_jax_dtype(2.0, dtype)
-    D = fa
-    C = fpa
-    db = b - a
-    B = (fb - D - C * db) / (db * db)
-    xmin = a - C / (two * B)
-    return xmin
-
-
-def _line_search_sample_valid(phi, dphi, grad):
-    return jnp.isfinite(phi) & jnp.isfinite(dphi) & jnp.all(jnp.isfinite(grad))
 
 
 def _binary_replace(replace_bit, original_dict, new_dict, keys=None):

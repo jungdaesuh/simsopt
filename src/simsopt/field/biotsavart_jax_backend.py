@@ -46,6 +46,10 @@ from ..jax_core.field import (
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
 )
+from ..jax_core._math_utils import (
+    as_jax_float64 as _as_jax_float64,
+    iter_axis0_entries as _iter_axis0_entries,
+)
 from ..jax_core.specs import (
     CoilSetDofExtractionSpec,
     CoilSpec,
@@ -427,14 +431,6 @@ def _curve_dof_mode(curve):
     return getattr(curve, "_jax_curve_dof_mode", "local")
 
 
-def _as_jax_float64(value) -> jax.Array:
-    if isinstance(value, jax.Array):
-        return jnp.asarray(value, dtype=jnp.float64)
-    if isinstance(value, (np.ndarray, np.generic, list, tuple)) or np.isscalar(value):
-        return jax.device_put(np.asarray(value, dtype=np.float64))
-    return jnp.asarray(value, dtype=jnp.float64)
-
-
 def _curve_live_dofs(curve):
     if _curve_dof_mode(curve) == "full":
         return _as_jax_float64(curve.full_x)
@@ -470,12 +466,6 @@ def _full_curve_cotangent_to_derivative(curve, full_cotangent):
 
 def _slice_1d(array: jax.Array, start: int, end: int) -> jax.Array:
     return array[int(start) : int(end)]
-
-
-def _axis0_entries(array):
-    """Yield axis-0 slices without materializing the whole grouped object."""
-    for index in range(int(array.shape[0])):
-        yield array[index]
 
 
 def _update_1d(array: jax.Array, start: int, values: jax.Array) -> jax.Array:
@@ -588,9 +578,9 @@ def project_coil_cotangents_to_derivative(coils, d_coil_arrays, coil_indices):
     deriv_data = {}
     for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
         for dg_i, dgd_i, dc_i, global_i in zip(
-            _axis0_entries(d_g),
-            _axis0_entries(d_gd),
-            _axis0_entries(d_c),
+            _iter_axis0_entries(d_g),
+            _iter_axis0_entries(d_gd),
+            _iter_axis0_entries(d_c),
             indices,
         ):
             _merge_derivative_data(
@@ -1449,9 +1439,9 @@ class BiotSavartJAX(Optimizable):
         dofs_gradient = jnp.zeros_like(coil_dofs)
         for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
             for dg_i, dgd_i, dc_i, global_i in zip(
-                _axis0_entries(d_g),
-                _axis0_entries(d_gd),
-                _axis0_entries(d_c),
+                _iter_axis0_entries(d_g),
+                _iter_axis0_entries(d_gd),
+                _iter_axis0_entries(d_c),
                 indices,
             ):
                 dofs_gradient = self._add_single_coil_cotangent_to_dofs_gradient(
@@ -1541,9 +1531,9 @@ class BiotSavartJAX(Optimizable):
                 )
             )
             for dg_i, dgd_i, dc_i, info in zip(
-                _axis0_entries(dg_group),
-                _axis0_entries(dgd_group),
-                _axis0_entries(dc_group),
+                _iter_axis0_entries(dg_group),
+                _iter_axis0_entries(dgd_group),
+                _iter_axis0_entries(dc_group),
                 group["infos"],
             ):
                 coil_projection_s, _ = _time_call_result(

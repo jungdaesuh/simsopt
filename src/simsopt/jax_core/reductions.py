@@ -5,6 +5,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jax import lax
 
+from ._math_utils import pad_axis as _pad_axis
+
 VALID_REDUCTION_MODES = ("default", "strict_oracle")
 _VALID_SCALAR_BASELINES = ("pairwise", "vdot")
 
@@ -23,23 +25,10 @@ def _zero_like_array(array):
     return total - total
 
 
-def _zero_rows_like(array, row_count: int):
-    zero_row = jnp.sum(array, axis=0, keepdims=True, dtype=array.dtype)
-    zero_row = zero_row - zero_row
-    return jnp.broadcast_to(zero_row, (row_count,) + array.shape[1:])
-
-
 def _next_power_of_two(size: int) -> int:
     if size <= 1:
         return 1
     return 1 << (size - 1).bit_length()
-
-
-def _pad_axis0(array, padded_size: int):
-    pad_rows = padded_size - array.shape[0]
-    if pad_rows <= 0:
-        return array
-    return jnp.concatenate((array, _zero_rows_like(array, pad_rows)), axis=0)
 
 
 def validate_reduction_mode(reduction_mode: str) -> str:
@@ -68,7 +57,7 @@ def pairwise_sum_axis(array, *, axis: int):
         return jnp.sum(array, axis=axis_index)
 
     reduced = jnp.moveaxis(array, axis_index, 0)
-    reduced = _pad_axis0(reduced, _next_power_of_two(axis_size))
+    reduced = _pad_axis(reduced, axis=0, padded_size=_next_power_of_two(axis_size))
     return jnp.squeeze(_pairwise_reduce_axis0(reduced), axis=0)
 
 
@@ -79,7 +68,7 @@ def pairwise_sum_flat(array):
     if size == 0:
         return jnp.sum(reduced)
 
-    reduced = _pad_axis0(reduced[:, None], _next_power_of_two(size))
+    reduced = _pad_axis(reduced[:, None], axis=0, padded_size=_next_power_of_two(size))
     return _pairwise_reduce_axis0(reduced)[0, 0]
 
 

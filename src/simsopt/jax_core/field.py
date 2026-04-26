@@ -6,7 +6,6 @@ from functools import partial
 
 import jax
 from jax import lax
-import jax.numpy as jnp
 import numpy as np
 from jax.sharding import PartitionSpec as P
 
@@ -26,7 +25,10 @@ from .sharding import (
     collective_field_sharding_summary,
     maybe_shard_grouped_field_inputs,
 )
-from ._math_utils import as_runtime_float64 as _as_runtime_float64
+from ._math_utils import (
+    as_runtime_float64 as _as_runtime_float64,
+    pad_axis as _pad_axis,
+)
 from .curve_geometry import (
     curve_gamma_and_dash_from_spec,
     curve_spec_with_dofs,
@@ -86,31 +88,14 @@ def _pad_coil_axis_to_device_count(gammas, gammadashs, currents, device_count: i
     pad_count = (-coil_count) % device_count
     if pad_count == 0:
         return gammas, gammadashs, currents
+    padded_count = coil_count + pad_count
+    # Sharding requires axis sizes divisible by the device count. The padding
+    # cost is bounded by device_count - 1 entries; keep this simple unless a
+    # JAX device-memory profile shows material peak-memory pressure.
     return (
-        jnp.concatenate(
-            (
-                gammas,
-                jnp.zeros((pad_count,) + gammas.shape[1:], dtype=gammas.dtype),
-            ),
-            axis=0,
-        ),
-        jnp.concatenate(
-            (
-                gammadashs,
-                jnp.zeros(
-                    (pad_count,) + gammadashs.shape[1:],
-                    dtype=gammadashs.dtype,
-                ),
-            ),
-            axis=0,
-        ),
-        jnp.concatenate(
-            (
-                currents,
-                jnp.zeros((pad_count,), dtype=currents.dtype),
-            ),
-            axis=0,
-        ),
+        _pad_axis(gammas, axis=0, padded_size=padded_count),
+        _pad_axis(gammadashs, axis=0, padded_size=padded_count),
+        _pad_axis(currents, axis=0, padded_size=padded_count),
     )
 
 
@@ -119,13 +104,7 @@ def _pad_point_axis_to_device_count(points, device_count: int):
     pad_count = (-point_count) % device_count
     if pad_count == 0:
         return points
-    return jnp.concatenate(
-        (
-            points,
-            jnp.zeros((pad_count,) + points.shape[1:], dtype=points.dtype),
-        ),
-        axis=0,
-    )
+    return _pad_axis(points, axis=0, padded_size=point_count + pad_count)
 
 
 def _field_out_specs(kernel, config):

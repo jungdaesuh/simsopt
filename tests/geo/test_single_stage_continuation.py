@@ -1112,6 +1112,63 @@ class SingleStageContinuationTests(unittest.TestCase):
             report["stage_reports"][0]["artifacts"]["files"],
         )
 
+    def test_build_continuation_validation_report_accepts_stage_runtime_spec_path(
+        self,
+    ):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stage_root = root / "stage-01-final"
+            run_dir = stage_root / "mpol=10-ntor=10-test"
+            run_dir.mkdir(parents=True)
+            runtime_spec_filename = module._SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME
+            spec_path = stage_root / runtime_spec_filename
+            spec_path.write_text("{}", encoding="utf-8")
+            results_payload = {
+                "backend": "jax",
+                "optimizer_backend": "ondevice",
+                "FINAL_IOTA": 0.205,
+                "TARGET_IOTA": 0.21,
+                "FINAL_NON_QS": 0.03,
+                "FINAL_G": 4.5,
+                "FIELD_ERROR": 2.5e-4,
+                "OPTIMIZER_SUCCESS": True,
+                "HARDWARE_CONSTRAINTS_OK": True,
+                "TIMINGS": {"script_total_s": 22.0},
+            }
+            (run_dir / "results.json").write_text(
+                json.dumps(results_payload),
+                encoding="utf-8",
+            )
+            summary = {
+                "run_root": str(root),
+                "stages": [
+                    {
+                        "name": "final",
+                        "status": "completed",
+                        "stage_output_root": str(stage_root),
+                        "run_dir": str(run_dir),
+                        "jax_runtime_seed_spec_path": str(spec_path),
+                        "results": results_payload,
+                    }
+                ],
+            }
+
+            report = module.build_continuation_validation_report(
+                summary,
+                max_final_field_error=1e-3,
+                max_final_abs_iota_error=0.01,
+                max_final_non_qs=0.05,
+            )
+
+        artifact_file = report["stage_reports"][0]["artifacts"]["files"][
+            runtime_spec_filename
+        ]
+        self.assertTrue(report["passed"])
+        self.assertEqual(artifact_file["path"], str(spec_path))
+        self.assertFalse((run_dir / runtime_spec_filename).exists())
+
     def test_build_continuation_validation_report_rejects_missing_jax_runtime_spec(
         self,
     ):
@@ -1615,7 +1672,6 @@ class SingleStageContinuationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             run_root = Path(tmpdir) / "continuation-existing"
-            summary_path = run_root / "continuation_summary.json"
             self._write_existing_stage_output(
                 run_root,
                 "stage-01-coarse",
@@ -1661,7 +1717,6 @@ class SingleStageContinuationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             run_root = Path(tmpdir) / "continuation-existing"
-            summary_path = run_root / "continuation_summary.json"
             self._write_existing_stage_output(
                 run_root,
                 "stage-01-coarse",

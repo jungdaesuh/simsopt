@@ -5836,7 +5836,9 @@ class TestIotasJAXResolveFD:
         gradient = np.asarray(IotasJAX(booz_jax).dJ(), dtype=float)
         x0 = np.asarray(bs_jax.x, dtype=float).copy()
         directions = _real_resolve_fd_probe_directions(len(x0))[:3]
-        eps_candidates = (1.0e-5, 5.0e-6, 2.5e-6, 1.0e-6)
+        # This fixture validates the local implicit derivative; larger
+        # perturbations leave the LS convergence basin for canonical probes.
+        eps_candidates = (1.0e-6, 5.0e-7, 2.5e-7, 1.0e-7)
         validated_directions = 0
         rejected_directions = 0
         direction_failures = []

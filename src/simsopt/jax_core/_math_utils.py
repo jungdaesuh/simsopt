@@ -41,6 +41,19 @@ def as_jax_float64(value) -> jax.Array:
     return as_jax_array(value, dtype=jnp.float64)
 
 
+def iter_axis0_entries(array):
+    """Yield axis-0 slices from a shaped JAX array."""
+    for index in range(int(array.shape[0])):
+        yield array[index]
+
+
+def axis0_entries(array: object) -> tuple[jax.Array, ...]:
+    array_jax = as_jax_float64(array)
+    if array_jax.ndim == 0:
+        return (array_jax,)
+    return tuple(iter_axis0_entries(array_jax))
+
+
 def as_jax_int32(value) -> jax.Array:
     return as_jax_array(value, dtype=jnp.int32)
 
@@ -68,6 +81,30 @@ def scalar_at_axis0(array, index: int) -> jax.Array:
 
 def scalar_like(reference, value) -> jax.Array:
     return _explicit_device_array(value, dtype=reference.dtype)
+
+
+def zero_padding_like(array, *, axis: int, pad_width: int):
+    axis_index = int(axis) if axis >= 0 else array.ndim + int(axis)
+    zero_slice = jnp.sum(array, axis=axis_index, keepdims=True, dtype=array.dtype)
+    zero_slice = zero_slice - zero_slice
+    target_shape = (
+        array.shape[:axis_index] + (int(pad_width),) + array.shape[axis_index + 1 :]
+    )
+    return jnp.broadcast_to(zero_slice, target_shape)
+
+
+def pad_axis(array, *, axis: int, padded_size: int):
+    axis_index = int(axis) if axis >= 0 else array.ndim + int(axis)
+    pad_width = int(padded_size) - int(array.shape[axis_index])
+    if pad_width <= 0:
+        return array
+    return jnp.concatenate(
+        (
+            array,
+            zero_padding_like(array, axis=axis_index, pad_width=pad_width),
+        ),
+        axis=axis_index,
+    )
 
 
 def zeros(shape, dtype=jnp.float64) -> jax.Array:

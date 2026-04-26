@@ -24,12 +24,15 @@ from ..backend.runtime import register_backend_cache_clear
 from ._device_scalars import device_one as _device_one
 from ._math_utils import (
     as_jax_float64 as _as_jax_float64,
+    axis0_entries as _axis0_entries,
     explicit_inv as _explicit_inv,
     explicit_rsqrt as _explicit_rsqrt,
     eye as _eye,
+    pad_axis as _pad_axis,
     scalar_like as _scalar_like,
     zeros as _zeros,
 )
+from .reductions import pairwise_sum_axis as _pairwise_sum_axis
 
 __all__ = [
     "biot_savart_B",
@@ -101,18 +104,6 @@ def _index_range(size: int):
     return jnp.arange(size, dtype=jnp.int32)
 
 
-def _zero_padding_like(array, *, axis: int, pad_width: int):
-    if axis == 0:
-        zero_slice = jnp.sum(array, axis=0, keepdims=True, dtype=array.dtype)
-        zero_slice = zero_slice - zero_slice
-        target_shape = (pad_width,) + array.shape[1:]
-    else:
-        zero_slice = jnp.sum(array, axis=1, keepdims=True, dtype=array.dtype)
-        zero_slice = zero_slice - zero_slice
-        target_shape = array.shape[:1] + (pad_width,) + array.shape[2:]
-    return jnp.broadcast_to(zero_slice, target_shape)
-
-
 def _safe_radius_squared(diff):
     r2 = jnp.sum(diff * diff, axis=-1)
     # Floor must be large enough that 1/safe_r2^{1.5} stays within float64:
@@ -140,48 +131,6 @@ def _cross_product(left, right):
         ),
         axis=-1,
     )
-
-
-def _pad_axis0(array, padded_size: int):
-    pad_rows = padded_size - array.shape[0]
-    if pad_rows <= 0:
-        return array
-    return jnp.concatenate(
-        (array, _zero_padding_like(array, axis=0, pad_width=pad_rows)),
-        axis=0,
-    )
-
-
-def _pad_axis1(array, padded_size: int):
-    pad_cols = padded_size - array.shape[1]
-    if pad_cols <= 0:
-        return array
-    return jnp.concatenate(
-        (array, _zero_padding_like(array, axis=1, pad_width=pad_cols)),
-        axis=1,
-    )
-
-
-def _next_power_of_two(size: int) -> int:
-    if size <= 1:
-        return 1
-    return 1 << (size - 1).bit_length()
-
-
-def _pairwise_sum_axis(array, *, axis: int):
-    """Reduce ``array`` along ``axis`` using a fixed binary addition tree."""
-    axis_index = axis if axis >= 0 else array.ndim + axis
-    axis_size = array.shape[axis_index]
-    if axis_size == 0:
-        return jnp.sum(array, axis=axis_index)
-
-    reduced = jnp.moveaxis(array, axis_index, 0)
-    reduced = _pad_axis0(reduced, _next_power_of_two(axis_size))
-    while reduced.shape[0] > 1:
-        pair_shape = (reduced.shape[0] // 2, 2) + tuple(reduced.shape[1:])
-        paired = jnp.reshape(reduced, pair_shape)
-        reduced = jnp.sum(paired, axis=1)
-    return jnp.squeeze(reduced, axis=0)
 
 
 # ── Tree utilities ────────────────────────────────────────────────────
@@ -266,9 +215,16 @@ def _coil_chunk_reduce(
         )
 
     padded_coil_count = chunk_count * chunk_size
-    padded_gammas = _pad_axis0(gammas, padded_coil_count)
-    padded_gammadashs = _pad_axis0(gammadashs, padded_coil_count)
-    padded_currents = _pad_axis0(currents, padded_coil_count)
+    # Chunk padding is bounded by chunk_size - 1 coil rows. It keeps the loop
+    # statically shaped for JIT; raise chunk_size when production shapes show
+    # repeated near-2x padding overhead.
+    padded_gammas = _pad_axis(gammas, axis=0, padded_size=padded_coil_count)
+    padded_gammadashs = _pad_axis(
+        gammadashs,
+        axis=0,
+        padded_size=padded_coil_count,
+    )
+    padded_currents = _pad_axis(currents, axis=0, padded_size=padded_coil_count)
 
     # Keep the outer coil accumulation serial until parity data implicates it;
     # the quadrature-axis sum dominates the known reduction-order drift, while
@@ -326,8 +282,15 @@ def _quadrature_block_integral(
         )
 
     padded_quadrature_count = block_count * block_size
-    padded_gammas = _pad_axis1(gammas, padded_quadrature_count)
-    padded_gammadashs = _pad_axis1(gammadashs, padded_quadrature_count)
+    # Quadrature padding trades at most block_size - 1 zero samples for static
+    # block loops. Prefer larger blocks only when profiling shows padding, not
+    # register pressure, dominates the kernel cost.
+    padded_gammas = _pad_axis(gammas, axis=1, padded_size=padded_quadrature_count)
+    padded_gammadashs = _pad_axis(
+        gammadashs,
+        axis=1,
+        padded_size=padded_quadrature_count,
+    )
     zero = _zeros((gammas.shape[0], 3), dtype=jnp.float64)
 
     def body(block_index: int, acc):
@@ -358,7 +321,10 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
 
     chunk_count = (point_count + chunk_size - 1) // chunk_size
     padded_point_count = chunk_count * chunk_size
-    padded_points = _pad_axis0(points, padded_point_count)
+    # Point padding is trimmed before returning; the padded result tree is the
+    # price of a fixed-shape loop body. Tune chunk_size against peak memory and
+    # compile time instead of adding a second dynamic-shape path.
+    padded_points = _pad_axis(points, axis=0, padded_size=padded_point_count)
     first_chunk_points = _slice_point_chunk(padded_points, 0, chunk_size)
     first_result = chunk_kernel(first_chunk_points)
     padded_result = _tree_dynamic_update(
@@ -515,7 +481,7 @@ def _make_kernel(
             basis = _eye(3, dtype=jnp.float64)
             if point_vma_axis_name is not None:
                 basis = lax.pcast(basis, point_vma_axis_name, to="varying")
-            return primals, jax.vmap(tangents_fn)(basis)
+            return primals, jax.vmap(tangents_fn, in_axes=(0,))(basis)
 
     else:
         raise ValueError(f"Unknown diff_mode: {diff_mode!r}")
@@ -525,6 +491,7 @@ def _make_kernel(
         def chunk_fn(chunk_points):
             return jax.vmap(
                 lambda x: per_point(x, gammas, gammadashs, currents),
+                in_axes=(0,),
             )(chunk_points)
 
         return _point_chunk_reduce(points, chunk_fn, point_cs)
@@ -614,6 +581,12 @@ def biot_savart_dB_by_dX(points, gammas, gammadashs, currents):
 
 
 def biot_savart_d2B_by_dXdX(points, gammas, gammadashs, currents):
+    """Return the dense Hessian of ``B`` with shape ``(npoints, 3, 3, 3)``.
+
+    This is an opt-in diagnostics kernel: each point materializes three dense
+    derivative planes per field component, so callers should prefer
+    ``biot_savart_B_and_dB`` unless second point derivatives are required.
+    """
     return _get_kernel(_Integrand.B, _DiffMode.HESSIAN)(
         points, gammas, gammadashs, currents
     )
@@ -668,18 +641,6 @@ def biot_savart_B_vjp(points, v, gammas, gammadashs, currents):
 
 
 # ── Grouped coil utilities ───────────────────────────────────────────
-
-
-def _axis0_entries(array: object) -> tuple[jax.Array, ...]:
-    array_jax = _as_jax_float64(array)
-    if array_jax.ndim == 0:
-        return (array_jax,)
-    length = int(array_jax.shape[0])
-    if length == 0:
-        return ()
-    return tuple(
-        jnp.squeeze(chunk, axis=0) for chunk in jnp.split(array_jax, length, axis=0)
-    )
 
 
 def _coil_entry_sequence(values: object) -> tuple[object, ...]:
