@@ -178,9 +178,12 @@ class ResidualHelperTests(unittest.TestCase):
     def test_constraint_history_diagnostics_groups_values_by_block(self):
         module = load_alm_utils_module()
         evaluation = {
+            "total": 0.0,
+            "grad": np.zeros(1),
             "constraint_values": np.array([0.2, -0.1, 0.5]),
             "feasibility_values": np.array([0.2, 0.0, 0.5]),
             "dual_update_values": np.array([0.2, -0.1, 0.5]),
+            "constraint_grads": [np.zeros(1), np.zeros(1), np.zeros(1)],
             "raw_dual_update_values": np.array([2.0, -1.0, 1000.0]),
             "raw_hard_violation_values": np.array([2.0, 0.0, 1000.0]),
             "normalized_signed_constraint_values": np.array([0.2, -0.1, 0.5]),
@@ -205,6 +208,7 @@ class ResidualHelperTests(unittest.TestCase):
             np.array([0.2, -0.1, 0.5]),
             np.array([0.2, 0.0, 0.5]),
             routing_state,
+            1.0,
         )
 
         self.assertEqual(
@@ -221,6 +225,28 @@ class ResidualHelperTests(unittest.TestCase):
             diagnostics["raw_dual_estimates"],
             [0.01, 0.02, 0.00015],
         )
+        np.testing.assert_allclose(
+            diagnostics["active_pressure_by_constraint"],
+            [0.18, 0.0, 1.15],
+        )
+        np.testing.assert_allclose(
+            diagnostics["surrogate_minus_hard_normalized_gap"],
+            [0.0, 0.0, 0.0],
+        )
+        self.assertEqual(
+            diagnostics["surrogate_hard_sign_mismatch_by_constraint"],
+            [False, False, False],
+        )
+        self.assertAlmostEqual(
+            diagnostics["objective_to_augmented_term_ratio"],
+            0.0,
+        )
+        self.assertAlmostEqual(diagnostics["augmented_gradient_norm"], 0.0)
+        self.assertAlmostEqual(diagnostics["surrogate_kkt_stationarity_norm"], 0.0)
+        self.assertEqual(
+            diagnostics["multiplier_interpretation"],
+            "differentiable_alm_multipliers",
+        )
 
     def test_incumbent_objective_value_prefers_promoted_physics_total(self):
         module = load_alm_utils_module()
@@ -235,6 +261,69 @@ class ResidualHelperTests(unittest.TestCase):
                 }
             ),
             7.5,
+        )
+
+    def test_multiplier_interpretation_marks_mixed_value_sources_as_search_multipliers(self):
+        module = load_alm_utils_module()
+
+        self.assertEqual(
+            module._multiplier_interpretation(
+                {
+                    "gradient_value_kinds": ["surrogate", "surrogate"],
+                    "dual_update_value_kinds": ["surrogate", "hard"],
+                }
+            ),
+            "search_multipliers",
+        )
+        self.assertEqual(
+            module._multiplier_interpretation(
+                {
+                    "gradient_value_kinds": ["surrogate", "hard"],
+                    "dual_update_value_kinds": ["surrogate", "hard"],
+                }
+            ),
+            "differentiable_alm_multipliers",
+        )
+
+    def test_surrogate_kkt_stationarity_uses_surrogate_feasibility_gate(self):
+        module = load_alm_utils_module()
+        evaluation = {
+            "total": 0.0,
+            "grad": np.array([1.0]),
+            "constraint_values": np.array([0.0]),
+            "feasibility_values": np.array([2.0]),
+            "hard_signed_constraint_values": np.array([2.0]),
+            "hard_violation_values": np.array([2.0]),
+            "surrogate_signed_constraint_values": np.array([0.0]),
+            "constraint_grads": [np.array([-1.0])],
+            "constraint_activity_tolerances": np.array([0.0]),
+        }
+        routing_state = module._constraint_routing_state(
+            evaluation,
+            np.zeros(1),
+            1.0,
+            feasibility_gate=1.0,
+        )
+
+        self.assertAlmostEqual(
+            module._surrogate_kkt_stationarity_norm(
+                evaluation,
+                routing_state,
+                feasibility_gate=1.0,
+            ),
+            0.0,
+        )
+
+    def test_lbfgsb_projected_gradient_max_norm_uses_projected_infinity_norm(self):
+        module = load_alm_utils_module()
+
+        self.assertAlmostEqual(
+            module._lbfgsb_projected_gradient_max_norm(
+                np.array([5.0, -7.0, 3.0, -4.0]),
+                np.array([0.0, 1.0, 0.5, 2.0]),
+                [(0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (None, None)],
+            ),
+            4.0,
         )
 
     def test_augmented_objective_exposes_solver_constraint_metadata(self):
@@ -1446,6 +1535,13 @@ class MinimizeAlmTests(unittest.TestCase):
                 "raw_dual_estimates",
                 "positive_shift_values",
                 "augmented_term_by_constraint",
+                "active_pressure_by_constraint",
+                "surrogate_minus_hard_normalized_gap",
+                "surrogate_hard_sign_mismatch_by_constraint",
+                "objective_to_augmented_term_ratio",
+                "augmented_gradient_norm",
+                "surrogate_kkt_stationarity_norm",
+                "multiplier_interpretation",
                 "max_raw_hard_violation",
                 "block_max_raw_hard_violation",
                 "block_max_normalized_violation",
@@ -1467,6 +1563,7 @@ class MinimizeAlmTests(unittest.TestCase):
                 "inner_maxls",
                 "inner_maxfun",
                 "inner_profile",
+                "inner_lbfgsb_projected_gradient_norm",
                 "inner_attempts",
                 "accepted_move_norm",
                 "accepted_move_norm_scaled",
@@ -1498,6 +1595,20 @@ class MinimizeAlmTests(unittest.TestCase):
                 "outer_termination",
             },
         )
+        self.assertEqual(
+            result.alm_summary["termination_reason"],
+            result.termination_reason,
+        )
+        self.assertIn("max_normalized_violation", result.alm_summary)
+        self.assertIn("blocking_constraint_name", result.alm_summary)
+        result_fields = module.alm_result_diagnostics_fields(result)
+        self.assertIs(result_fields["ALM_SUMMARY"], result.alm_summary)
+        self.assertEqual(
+            result_fields["ALM_MULTIPLIER_INTERPRETATION"],
+            "differentiable_alm_multipliers",
+        )
+        self.assertIn("ALM_FINAL_AUGMENTED_GRADIENT_NORM", result_fields)
+        self.assertIn("ALM_FINAL_SURROGATE_KKT_STATIONARITY_NORM", result_fields)
 
     def test_minimize_alm_tracks_active_constraint_switching(self):
         module = load_alm_utils_module()

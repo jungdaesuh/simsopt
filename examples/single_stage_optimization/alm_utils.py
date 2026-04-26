@@ -476,6 +476,92 @@ def _constraint_block_history_diagnostics(
     }
 
 
+def _base_objective_value(evaluation: dict) -> float:
+    return float(
+        evaluation.get(
+            "base_total",
+            evaluation.get("base_value", evaluation["total"]),
+        )
+    )
+
+
+def _objective_to_augmented_term_ratio(
+    evaluation: dict,
+    augmented_terms: np.ndarray,
+) -> float | None:
+    if augmented_terms.size == 0:
+        return None
+    augmented_term = float(np.sum(augmented_terms))
+    if augmented_term == 0.0:
+        return None
+    return abs(_base_objective_value(evaluation)) / abs(augmented_term)
+
+
+def _surrogate_hard_sign_mismatch(
+    surrogate_signed_values: np.ndarray,
+    hard_signed_values: np.ndarray,
+) -> list[bool]:
+    return [
+        bool(np.sign(surrogate_value) != np.sign(hard_value))
+        for surrogate_value, hard_value in zip(
+            np.asarray(surrogate_signed_values, dtype=float),
+            np.asarray(hard_signed_values, dtype=float),
+        )
+    ]
+
+
+def _surrogate_kkt_stationarity_norm(
+    evaluation: dict,
+    routing_state: ALMConstraintRoutingState,
+    feasibility_gate: float,
+) -> float | None:
+    metric_grad = np.asarray(
+        evaluation.get("metric_grad", evaluation["grad"]),
+        dtype=float,
+    )
+    surrogate_values = routing_state.signal_state.surrogate_signed_constraint_values
+    return _kkt_stationarity_norm(
+        metric_grad,
+        evaluation.get("constraint_grads"),
+        surrogate_values,
+        np.maximum(surrogate_values, 0.0),
+        _constraint_activity_tolerances(evaluation, surrogate_values),
+        feasibility_gate,
+    )
+
+
+def _lbfgsb_projected_gradient_max_norm(
+    gradient,
+    x,
+    bounds,
+) -> float:
+    projected_gradient = np.asarray(gradient, dtype=float).reshape(-1).copy()
+    if bounds is not None:
+        x_array = np.asarray(x, dtype=float).reshape(-1)
+        for index, bound in enumerate(bounds):
+            lower_bound, upper_bound = bound
+            coordinate = float(x_array[index])
+            gradient_value = float(projected_gradient[index])
+            at_lower_bound = lower_bound is not None and coordinate <= float(lower_bound)
+            at_upper_bound = upper_bound is not None and coordinate >= float(upper_bound)
+            if (at_lower_bound and gradient_value > 0.0) or (
+                at_upper_bound and gradient_value < 0.0
+            ):
+                projected_gradient[index] = 0.0
+    return float(np.linalg.norm(projected_gradient, ord=np.inf))
+
+
+def _multiplier_interpretation(evaluation: dict) -> str:
+    gradient_kinds = evaluation.get("gradient_value_kinds")
+    dual_update_kinds = evaluation.get("dual_update_value_kinds")
+    if gradient_kinds is None or dual_update_kinds is None:
+        return "differentiable_alm_multipliers"
+    for gradient_kind, dual_update_kind in zip(gradient_kinds, dual_update_kinds):
+        if str(gradient_kind) != str(dual_update_kind):
+            return "search_multipliers"
+    return "differentiable_alm_multipliers"
+
+
 def _constraint_history_diagnostics(
     evaluation: dict,
     multipliers: np.ndarray,
@@ -484,6 +570,7 @@ def _constraint_history_diagnostics(
     solver_constraint_values: np.ndarray,
     feasibility_values: np.ndarray,
     routing_state: ALMConstraintRoutingState,
+    feasibility_gate: float,
 ) -> dict:
     multiplier_array = np.asarray(multipliers, dtype=float)
     positive_shift = np.maximum(
@@ -492,6 +579,7 @@ def _constraint_history_diagnostics(
         + float(penalty) * np.asarray(solver_constraint_values, dtype=float),
     )
     augmented_terms = (positive_shift**2 - multiplier_array**2) / (2.0 * float(penalty))
+    active_pressure = positive_shift * np.asarray(solver_constraint_values, dtype=float)
     raw_hard_violation_values = _optional_float_list(
         evaluation,
         "raw_hard_violation_values",
@@ -538,13 +626,114 @@ def _constraint_history_diagnostics(
         "raw_dual_estimates": _raw_dual_estimates(multiplier_array, evaluation),
         "positive_shift_values": _as_float_list(positive_shift),
         "augmented_term_by_constraint": _as_float_list(augmented_terms),
+        "active_pressure_by_constraint": _as_float_list(active_pressure),
+        "surrogate_minus_hard_normalized_gap": _as_float_list(
+            routing_state.signal_state.surrogate_signed_constraint_values
+            - routing_state.signal_state.hard_signed_constraint_values
+        ),
+        "surrogate_hard_sign_mismatch_by_constraint": _surrogate_hard_sign_mismatch(
+            routing_state.signal_state.surrogate_signed_constraint_values,
+            routing_state.signal_state.hard_signed_constraint_values,
+        ),
+        "objective_to_augmented_term_ratio": _objective_to_augmented_term_ratio(
+            evaluation,
+            augmented_terms,
+        ),
+        "augmented_gradient_norm": float(
+            np.linalg.norm(np.asarray(evaluation["grad"], dtype=float))
+        ),
+        "surrogate_kkt_stationarity_norm": _surrogate_kkt_stationarity_norm(
+            evaluation,
+            routing_state,
+            feasibility_gate,
+        ),
+        "multiplier_interpretation": _multiplier_interpretation(evaluation),
         "max_raw_hard_violation": raw_hard_max_violation,
         **block_diagnostics,
     }
 
 
+def _alm_summary(
+    *,
+    termination_reason: str,
+    evaluation: dict,
+    multipliers: np.ndarray,
+    penalty: float,
+    constraint_names: Sequence[str],
+    routing_state: ALMConstraintRoutingState,
+    feasibility_values: np.ndarray,
+    solver_constraint_values: np.ndarray,
+    final_stationarity_norm: float,
+    final_feasibility_tolerance: float,
+    multiplier_cap_binding: bool,
+    penalty_cap_reached: bool,
+    history: list[dict],
+) -> dict:
+    diagnostics = _constraint_history_diagnostics(
+        evaluation,
+        multipliers,
+        penalty,
+        constraint_names,
+        solver_constraint_values,
+        feasibility_values,
+        routing_state,
+        final_feasibility_tolerance,
+    )
+    raw_hard_violations = diagnostics["raw_hard_violation_values"]
+    return {
+        "termination_reason": str(termination_reason),
+        "max_normalized_violation": _max_value(feasibility_values),
+        "max_raw_hard_violation_by_constraint": (
+            None
+            if raw_hard_violations is None
+            else {
+                str(name): float(value)
+                for name, value in zip(constraint_names, raw_hard_violations)
+            }
+        ),
+        "stationarity_norm": float(final_stationarity_norm),
+        "augmented_gradient_norm": diagnostics["augmented_gradient_norm"],
+        "surrogate_kkt_stationarity_norm": diagnostics[
+            "surrogate_kkt_stationarity_norm"
+        ],
+        "penalty": float(penalty),
+        "penalty_cap_reached": bool(penalty_cap_reached),
+        "multiplier_cap_binding": bool(multiplier_cap_binding),
+        "signal_mismatch_active": bool(routing_state.signal_mismatch_active),
+        "blocking_constraint_name": diagnostics["blocking_constraint_name"],
+        "blocking_constraint_block": diagnostics["blocking_constraint_block"],
+        "block_max_normalized_violation": diagnostics[
+            "block_max_normalized_violation"
+        ],
+        "block_max_raw_hard_violation": diagnostics["block_max_raw_hard_violation"],
+        "latest_history_action": None if not history else history[-1].get("action"),
+        "inner_lbfgsb_projected_gradient_norm": (
+            None
+            if not history
+            else history[-1].get("inner_lbfgsb_projected_gradient_norm")
+        ),
+        "multiplier_interpretation": diagnostics["multiplier_interpretation"],
+    }
+
+
 def alm_result_diagnostics_fields(alm_result) -> dict:
     return {
+        "ALM_SUMMARY": getattr(alm_result, "alm_summary", None),
+        "ALM_MULTIPLIER_INTERPRETATION": getattr(
+            alm_result,
+            "multiplier_interpretation",
+            None,
+        ),
+        "ALM_FINAL_AUGMENTED_GRADIENT_NORM": getattr(
+            alm_result,
+            "final_augmented_gradient_norm",
+            None,
+        ),
+        "ALM_FINAL_SURROGATE_KKT_STATIONARITY_NORM": getattr(
+            alm_result,
+            "final_surrogate_kkt_stationarity_norm",
+            None,
+        ),
         "ALM_MULTIPLIER_CAP_BINDING": getattr(alm_result, "multiplier_cap_binding", None),
         "ALM_MULTIPLIER_CAP_BINDING_INDICES": getattr(
             alm_result,
@@ -1471,8 +1660,24 @@ def minimize_alm(
             inner_optimizer_success = bool(getattr(inner_result, "success", False))
             inner_optimizer_message = str(getattr(inner_result, "message", ""))
         conditioning = _conditioning_metrics(evaluation)
+        alm_summary = _alm_summary(
+            termination_reason=termination_reason,
+            evaluation=evaluation,
+            multipliers=multipliers_state,
+            penalty=penalty_state,
+            constraint_names=constraint_names,
+            routing_state=routing_state,
+            feasibility_values=feasibility_values,
+            solver_constraint_values=solver_constraint_values,
+            final_stationarity_norm=final_stationarity_norm,
+            final_feasibility_tolerance=final_feasibility_tolerance,
+            multiplier_cap_binding=cap_binding_detected,
+            penalty_cap_reached=penalty_cap_reached,
+            history=history,
+        )
         return SimpleNamespace(
             alm_schema_version=ALM_SCHEMA_VERSION,
+            alm_summary=alm_summary,
             x=x.copy(),
             success=bool(success),
             message=message,
@@ -1548,6 +1753,7 @@ def minimize_alm(
                 "constraint_scale_sources",
             ),
             raw_dual_estimates=_raw_dual_estimates(multipliers_state, evaluation),
+            multiplier_interpretation=_multiplier_interpretation(evaluation),
             multipliers=[float(value) for value in multipliers_state],
             penalty=float(penalty_state),
             trust_radius=trust_radius,
@@ -1566,6 +1772,10 @@ def minimize_alm(
                 if final_kkt_stationarity_norm is None
                 else float(final_kkt_stationarity_norm)
             ),
+            final_augmented_gradient_norm=alm_summary["augmented_gradient_norm"],
+            final_surrogate_kkt_stationarity_norm=alm_summary[
+                "surrogate_kkt_stationarity_norm"
+            ],
             final_feasibility_tolerance=float(final_feasibility_tolerance),
             final_stationarity_tolerance=float(final_stationarity_tolerance),
             final_objective=float(evaluation["total"]),
@@ -1854,6 +2064,7 @@ def minimize_alm(
                         "inner_maxls": None,
                         "inner_maxfun": None,
                         "inner_profile": None,
+                        "inner_lbfgsb_projected_gradient_norm": None,
                         "inner_attempts": 0,
                         "accepted_move_norm": 0.0,
                         "accepted_move_norm_scaled": 0.0,
@@ -1886,6 +2097,7 @@ def minimize_alm(
                         current_solver_constraint_values,
                         current_feasibility_values,
                         current_routing_state,
+                        effective_feasibility_tol,
                     )
                 )
                 _emit_history_snapshot(history[-1])
@@ -1969,6 +2181,7 @@ def minimize_alm(
             accepted_result = None
             accepted_eval = None
             accepted_x = None
+            accepted_bounds = None
             attempts = 0
             attempt_iterations = 0
             attempt_radius = trust_radius
@@ -1996,6 +2209,7 @@ def minimize_alm(
                     update_stationarity_tol,
                     profile=current_inner_profile,
                 )
+                attempt_bounds = _build_box_bounds(x, attempt_radius)
                 last_inner_options = dict(inner_attempt_options)
                 last_inner_profile = current_inner_profile.name
                 try:
@@ -2004,7 +2218,7 @@ def minimize_alm(
                         x,
                         jac=True,
                         method="L-BFGS-B",
-                        bounds=_build_box_bounds(x, attempt_radius),
+                        bounds=attempt_bounds,
                         callback=alm_inner_callback,
                         options=inner_attempt_options,
                     )
@@ -2055,6 +2269,7 @@ def minimize_alm(
                     accepted_result = result
                     accepted_eval = candidate_eval
                     accepted_x = candidate_x
+                    accepted_bounds = attempt_bounds
                     if attempt_radius is not None:
                         if moved_norm >= 0.5 * float(attempt_radius):
                             trust_radius = float(attempt_radius) * float(settings.trust_radius_grow)
@@ -2065,6 +2280,7 @@ def minimize_alm(
                     accepted_result = result
                     accepted_eval = current_eval
                     accepted_x = start_x
+                    accepted_bounds = attempt_bounds
                     forced_infeasible_penalty_cycle = True
                     forced_infeasible_penalty_reason = inner_stall_reason
                     forced_inner_false_success = bool(inner_false_success)
@@ -2075,6 +2291,7 @@ def minimize_alm(
                     accepted_result = result
                     accepted_eval = current_eval
                     accepted_x = start_x
+                    accepted_bounds = attempt_bounds
                     break
                 next_radius = max(
                     settings.trust_radius_min,
@@ -2085,6 +2302,7 @@ def minimize_alm(
                     accepted_result = result
                     accepted_eval = current_eval
                     accepted_x = start_x
+                    accepted_bounds = attempt_bounds
                     trust_radius = float(attempt_radius)
                     break
                 attempt_radius = float(next_radius)
@@ -2097,6 +2315,7 @@ def minimize_alm(
                 accepted_result = last_attempt_result
                 accepted_eval = current_eval
                 accepted_x = start_x
+                accepted_bounds = None
 
             result = accepted_result
             last_result = result
@@ -2228,6 +2447,11 @@ def minimize_alm(
                 if last_inner_options is None or "maxfun" not in last_inner_options
                 else int(last_inner_options["maxfun"]),
                 "inner_profile": last_inner_profile,
+                "inner_lbfgsb_projected_gradient_norm": _lbfgsb_projected_gradient_max_norm(
+                    final_eval["grad"],
+                    x,
+                    accepted_bounds,
+                ),
                 "inner_attempts": int(attempts),
                 "accepted_move_norm": accepted_move_norm,
                 "accepted_move_norm_scaled": accepted_move_norm / max(
@@ -2261,6 +2485,7 @@ def minimize_alm(
                     solver_constraint_values,
                     feasibility_values,
                     routing_state,
+                    update_feasibility_tol,
                 )
             )
             history.append(history_entry)

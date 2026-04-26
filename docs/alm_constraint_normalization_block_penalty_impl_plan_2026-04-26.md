@@ -1,7 +1,7 @@
 # ALM Constraint Normalization and Block Penalty Implementation Plan
 
 Date: 2026-04-26
-Status: Phases 0 through 2 implemented; Phase 3 partially implemented; Phase 4 still conditional
+Status: Phases 0 through 3 implemented; Phase 4 still conditional
 Scope: `examples/single_stage_optimization/alm_utils.py`, `banana_opt/hardware_constraint_schema.py`, `banana_opt/stage2_objectives.py`, `banana_opt/single_stage_objectives.py`, ALM result reporting, and focused ALM tests
 
 ## Review Verdict
@@ -23,8 +23,8 @@ Current implementation status:
 - [x] Phase 2 normalized scalar ALM landed for Stage 2 and single-stage objective construction.
 - [x] Public result writers preserve raw `ALM_FINAL_*` fields and add normalized fields plus `ALM_SCHEMA_VERSION`.
 - [x] `--alm-feas-tol` help text now identifies the tolerance as dimensionless and normalized.
-- [x] ALM history now emits the first actionable raw/normalized sidecars, projected positive shifts, augmented terms, constraint scales, blocks, normalized multipliers, and raw dual estimates.
-- [ ] Full Phase 3 summary fields and gap metrics remain open: `ALM_SUMMARY`, surrogate-hard gap arrays, sign mismatch arrays, objective-to-augmented-term ratio, and separated L-BFGS-B projected-gradient labels.
+- [x] ALM history now emits actionable raw/normalized sidecars, projected positive shifts, augmented terms, active pressure, constraint scales, blocks, normalized multipliers, raw dual estimates, surrogate-hard gap arrays, sign mismatch arrays, objective-to-augmented-term ratio, separated gradient/stationarity labels, and block summaries.
+- [x] Final ALM result payloads now emit `ALM_SUMMARY`, `ALM_MULTIPLIER_INTERPRETATION`, `ALM_FINAL_AUGMENTED_GRADIENT_NORM`, and `ALM_FINAL_SURROGATE_KKT_STATIONARITY_NORM`.
 - [ ] Phase 4 block penalties are not implemented.
 
 Baseline artifact scan generated:
@@ -195,7 +195,7 @@ Emit both `normalized_multipliers` and `raw_dual_estimates = normalized_multipli
 - [x] ALM objective value and gradient are computed from normalized values only.
 - [x] ALM multiplier updates, hard/surrogate routing, activity masks, and KKT stationarity operate on normalized values and normalized activity tolerances.
 - [x] Every constraint declares value-source metadata for objective, gradient, dual update, feasibility, and certification signals.
-- [ ] Stationarity labels distinguish differentiable surrogate stationarity from physical/KKT dual interpretation.
+- [x] Stationarity labels distinguish differentiable surrogate stationarity from physical/KKT dual interpretation.
 - [x] `max_feasibility_violation` is normalized for optimizer convergence.
 - [x] Raw hard pass/fail remains the certification source.
 - [x] Public raw result fields stay raw; normalized result fields are added explicitly.
@@ -430,7 +430,7 @@ gradient += positive_shift_i * grad(c_i)
 
 `augmented_term_i` can be negative for inactive constraints with nonzero multipliers, so do not label it as `penalty_contribution`.
 
-- [ ] Add complete derived block summaries:
+- [x] Add complete derived block summaries:
 
 ```text
 block_max_normalized_violation
@@ -441,7 +441,7 @@ blocking_constraint_name
 blocking_constraint_block
 ```
 
-- [ ] Add a compact final `ALM_SUMMARY` artifact field for Stage 2 and single-stage:
+- [x] Add a compact final `ALM_SUMMARY` artifact field for Stage 2 and single-stage:
 
 ```text
 termination_reason
@@ -458,7 +458,13 @@ blocking_constraint_block
 
 Do not add automatic recommendations in this phase. Make the data sufficient first.
 
-Keep the projected gradient norm reported by L-BFGS-B separate from augmented-gradient norm and surrogate KKT-style stationarity. These are different diagnostics and should not be collapsed into one `stationarity_norm` without labels.
+Keep the L-BFGS-B projected-gradient infinity norm, matching SciPy's `gtol`
+projected-gradient max-component contract, separate from augmented-gradient norm
+and surrogate KKT-style stationarity. Surrogate KKT-style stationarity uses the
+differentiable surrogate signed values and surrogate feasibility gate; raw hard
+feasibility remains a certification signal, not the active-set gate for that
+diagnostic. These are different diagnostics and should not be collapsed into one
+`stationarity_norm` without labels.
 
 ### Phase 4: Add block penalties after normalized scalar path is stable
 
@@ -578,20 +584,20 @@ python3 examples/single_stage_optimization/run_single_stage_thresholded_physics_
 
 Required validation before merging Phase 2:
 
-- [ ] Unit tests confirm `1000 A / 16000 A = 0.0625`.
-- [ ] Unit tests confirm `1 1/m / 40 1/m = 0.025`.
+- [x] Unit tests confirm `1000 A / 16000 A = 0.0625`.
+- [x] Unit tests confirm `1 1/m / 40 1/m = 0.025`.
 - [ ] Directional Taylor tests pass after normalization for Stage 2 and single-stage constraints.
 - [ ] A Stage 2 dry run emits both raw and normalized values.
 - [ ] A single-stage thresholded-physics dry run emits both raw and normalized values.
 - [ ] A hard feasibility failure is still reported in raw physical units.
-- [ ] A convergence decision uses normalized feasibility only.
-- [ ] Multiplier cap tests are updated to normalized units.
-- [ ] History clearly shows the same blocking constraint in both raw and normalized forms.
-- [ ] No penalty-mode behavior changes.
-- [ ] Hard-vs-surrogate mismatch tests still pass with normalized ALM routing and raw certification sidecars.
-- [ ] Value-source metadata is emitted for every ALM constraint.
-- [ ] Multipliers are labeled as search multipliers when dual-update values and gradient values come from different sources.
-- [ ] The plain CI runner executes the new tests through `unittest discover`.
+- [x] A convergence decision uses normalized feasibility only.
+- [x] Multiplier cap tests are updated to normalized units.
+- [x] History clearly shows the same blocking constraint in both raw and normalized forms.
+- [x] No penalty-mode behavior changes.
+- [x] Hard-vs-surrogate mismatch tests still pass with normalized ALM routing and raw certification sidecars.
+- [x] Value-source metadata is emitted for every ALM constraint.
+- [x] Multipliers are labeled as search multipliers when dual-update values and gradient values come from different sources.
+- [x] The plain CI runner executes the new tests through `unittest discover`.
 
 ## Before/After Impact Measurement
 
