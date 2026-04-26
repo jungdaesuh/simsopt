@@ -525,9 +525,7 @@ def _minimize_lbfgs_private_impl(
             | (~jnp.all(jnp.isfinite(x_kp1)))
             | (~jnp.all(jnp.isfinite(y_k)))
         )
-        rejected_step = (
-            nonfinite_step | stalled_step | ((~converged) & (~valid_curvature))
-        )
+        rejected_step = nonfinite_step | stalled_step
         _emit_lbfgs_runtime_debug(
             "post_line_search",
             iteration=next_k,

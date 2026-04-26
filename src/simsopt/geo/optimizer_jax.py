@@ -1525,7 +1525,7 @@ def levenberg_marquardt_traceable(
 
 def _materialize_dense_linear_operator(linear_operator_fn, x):
     eye = jnp.eye(x.shape[0], dtype=x.dtype)
-    cols = jax.vmap(lambda basis: linear_operator_fn(x, basis))(eye)
+    cols = lax.map(lambda basis: linear_operator_fn(x, basis), eye)
     return jnp.swapaxes(cols, 0, 1)
 
 

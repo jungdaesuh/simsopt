@@ -1008,23 +1008,35 @@ class TestOptimizerAdapterPrivate:
         )
 
     @PRIVATE_OPTIMIZER_RUNTIME
-    def test_minimize_lbfgs_private_rejects_degenerate_curvature_update(
+    def test_minimize_lbfgs_private_skips_degenerate_curvature_update(
         self,
         monkeypatch,
     ):
-        """A non-converged step with unusable y^T s must fail before history updates."""
+        """A finite step with unusable y^T s is accepted without updating history."""
         x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
         state, quad = _private_lbfgs_quadratic_state(
             monkeypatch,
             x0=x0,
             line_search_kwargs=dict(
-                a_k=jnp.array(1.0, dtype=jnp.float64),
+                a_k=jnp.array(0.5, dtype=jnp.float64),
                 f_k=jnp.array(1.0, dtype=jnp.float64),
                 g_k=jnp.array([3.0, -1.0], dtype=jnp.float64),
                 status=jnp.array(0),
             ),
+            maxiter=1,
         )
-        _assert_lbfgs_state_preserved(state, x0, quad)
+        assert bool(state.converged) is False
+        assert bool(state.failed) is True
+        assert int(state.status) == 1
+        expected_x = np.asarray([0.5, -1.0])
+        np.testing.assert_allclose(np.asarray(state.x_k), expected_x, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(state.f_k), np.asarray(quad(expected_x)))
+        np.testing.assert_allclose(np.asarray(state.g_k), expected_x)
+        np.testing.assert_array_equal(
+            np.asarray(state.rho_history),
+            np.zeros_like(np.asarray(state.rho_history)),
+        )
+        assert int(state.invalid_step_log.count) == 0
 
     @PRIVATE_OPTIMIZER_RUNTIME
     def test_minimize_lbfgs_private_rejects_stalled_nonconverged_step(
@@ -1957,9 +1969,9 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert res["type"] == "ls"
         assert np.isfinite(res["fun"])
         assert np.max(np.abs(np.asarray(res["jacobian"]))) < 1.0e-6
-        assert res["PLU"] is None
-        assert bool(np.asarray(res["hessian_materialized"])) is False
-        assert res["dense_linear_solve_factors_available"] is False
+        assert res["PLU"] is not None
+        assert bool(np.asarray(res["hessian_materialized"])) is True
+        assert res["dense_linear_solve_factors_available"] is True
         assert res["linear_solve_backend"] == "operator"
         assert callable(res["vjp"])
         assert res["optimizer_method"] == "lbfgs-ondevice"

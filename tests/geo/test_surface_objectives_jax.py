@@ -786,6 +786,101 @@ def test_traceable_hessian_solve_short_circuits_promoted_retries_under_jit(
     )
 
 
+def test_traceable_hessian_solve_uses_dense_plu_forward_and_transpose():
+    matrix = jnp.asarray(
+        [
+            [3.0, -0.25, 0.5],
+            [0.75, 2.5, -0.2],
+            [-0.1, 0.4, 1.75],
+        ],
+        dtype=jnp.float64,
+    )
+    rhs = jnp.asarray([0.2, -0.6, 0.9], dtype=jnp.float64)
+    linear_solve_factors = jax.scipy.linalg.lu(matrix)
+
+    forward_solution, forward_success = (
+        surfaceobjectives_jax_module._traceable_solve_linearization(
+            object(),
+            jnp.zeros_like(rhs),
+            rhs,
+            coil_set_spec=None,
+            objective_kwargs={},
+            linear_solve_factors=linear_solve_factors,
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            transpose=False,
+        )
+    )
+    transpose_solution, transpose_success = (
+        surfaceobjectives_jax_module._traceable_solve_linearization(
+            object(),
+            jnp.zeros_like(rhs),
+            rhs,
+            coil_set_spec=None,
+            objective_kwargs={},
+            linear_solve_factors=linear_solve_factors,
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            transpose=True,
+        )
+    )
+
+    assert bool(np.asarray(forward_success)) is True
+    assert bool(np.asarray(transpose_success)) is True
+    np.testing.assert_allclose(
+        np.asarray(forward_solution),
+        np.linalg.solve(np.asarray(matrix), np.asarray(rhs)),
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(transpose_solution),
+        np.linalg.solve(np.asarray(matrix.T), np.asarray(rhs)),
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+
+
+def test_traceable_hessian_plu_solve_is_jittable():
+    matrix = jnp.asarray(
+        [
+            [4.0, 0.1, -0.3],
+            [0.2, 3.5, 0.6],
+            [-0.1, 0.4, 2.25],
+        ],
+        dtype=jnp.float64,
+    )
+    rhs = jnp.asarray([1.2, -0.4, 0.7], dtype=jnp.float64)
+    linear_solve_factors = jax.scipy.linalg.lu(matrix)
+
+    compiled_solve = jax.jit(
+        lambda current_rhs: surfaceobjectives_jax_module._traceable_solve_linearization(
+            object(),
+            jnp.zeros_like(current_rhs),
+            current_rhs,
+            coil_set_spec=None,
+            objective_kwargs={},
+            linear_solve_factors=linear_solve_factors,
+            linearization_kind="hessian",
+            linear_solve_tol=1.0e-10,
+            linear_solve_stab=0.0,
+            transpose=True,
+        )
+    )
+
+    solution, success = compiled_solve(rhs)
+
+    assert bool(np.asarray(success)) is True
+    np.testing.assert_allclose(
+        np.asarray(solution),
+        np.linalg.solve(np.asarray(matrix.T), np.asarray(rhs)),
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+
+
 def test_traceable_exact_warmstart_failure_keeps_failed_operator_step(monkeypatch):
     baseline_x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
     baseline_coil_dofs = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
@@ -1725,9 +1820,10 @@ def test_public_dJ_projects_cached_native_gradient_without_recomputing(
     assert obj.dJ(partials=True) is projected
 
 
-def test_iotas_jax_exact_well_conditioned_gradient_matches_dense_projection(
+def test_iotas_jax_exact_wrapper_gradient_matches_dense_projection_unit(
     monkeypatch,
 ):
+    """Wrapper-only exact-adjoint check; real operator parity lives in Boozer tests."""
     exact_lane = parity_ladder_tolerances("exact-well-conditioned-adjoint")
     A_np = np.asarray(
         [

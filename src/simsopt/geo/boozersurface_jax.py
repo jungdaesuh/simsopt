@@ -1816,11 +1816,12 @@ def default_least_squares_algorithm_for_backend(optimizer_backend):
 
 
 def default_materialize_dense_linearization_for_backend(optimizer_backend):
-    return optimizer_backend != "ondevice"
+    del optimizer_backend
+    return True
 
 
 class _BoozerSolverOptions(dict):
-    """Mutable solver options with backend-derived dense-finalization defaults."""
+    """Mutable solver options with byte-capped dense-finalization defaults."""
 
     def __init__(
         self,

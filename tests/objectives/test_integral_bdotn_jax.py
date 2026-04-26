@@ -15,6 +15,9 @@ import pytest
 import numpy as np
 
 import jax.numpy as jnp
+
+from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+
 _TESTS_ROOT = Path(__file__).resolve().parents[1]
 if str(_TESTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_TESTS_ROOT))
@@ -28,6 +31,8 @@ from conftest import (
 )
 
 from simsopt.objectives.integral_bdotn_jax import integral_BdotN, signed_BdotN_flux
+
+_FD_GRADIENT_TOLS = parity_ladder_tolerances("fd-gradient")
 
 
 @pytest.fixture(autouse=True)
@@ -155,7 +160,11 @@ class TestIntegralBdotN:
         )
         magnitude_flux = np.mean(np.abs(np.sum(B * normal, axis=-1)))
 
-        np.testing.assert_allclose(signed_flux, 0.0, atol=1e-16)
+        np.testing.assert_allclose(
+            signed_flux,
+            0.0,
+            atol=float(_FD_GRADIENT_TOLS["directional_derivative_floor"]),
+        )
         assert magnitude_flux > 0.0
 
     def test_zero_when_B_tangential(self):

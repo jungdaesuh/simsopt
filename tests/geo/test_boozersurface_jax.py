@@ -1540,7 +1540,7 @@ class TestBoozerSurfaceJAXClass:
         ("optimizer_backend", "expected_materialize"),
         [
             ("scipy", True),
-            ("ondevice", False),
+            ("ondevice", True),
         ],
     )
     def test_instantiation_defaults_materialize_dense_linearization_from_backend(
@@ -1548,7 +1548,7 @@ class TestBoozerSurfaceJAXClass:
         optimizer_backend,
         expected_materialize,
     ):
-        """Ondevice keeps dense finalization off unless explicitly requested."""
+        """Dense finalization is enabled by default and capped by matrix bytes."""
         bs = _MockBiotSavart(_make_mock_coils())
         surf, label = _make_basic_mock_surface_and_label()
 
@@ -1564,7 +1564,7 @@ class TestBoozerSurfaceJAXClass:
         assert booz.options["materialize_dense_linearization"] is expected_materialize
 
     def test_backend_mutation_refreshes_implicit_dense_linearization_default(self):
-        """Backend mutation must not carry the SciPy dense default into ondevice."""
+        """Backend mutation keeps the implicit byte-capped dense default."""
         bs = _MockBiotSavart(_make_mock_coils())
         surf, label = _make_basic_mock_surface_and_label()
         booz = BoozerSurfaceJAX(
@@ -1580,7 +1580,7 @@ class TestBoozerSurfaceJAXClass:
 
         booz.options["optimizer_backend"] = "ondevice"
 
-        assert booz.options["materialize_dense_linearization"] is False
+        assert booz.options["materialize_dense_linearization"] is True
 
         booz.options["optimizer_backend"] = "scipy"
 
@@ -1861,7 +1861,7 @@ class TestBoozerSurfaceJAXClass:
     @pytest.mark.parametrize(
         ("explicit_materialize", "expected_materialize"),
         [
-            (None, False),
+            (None, True),
             (True, True),
         ],
     )
@@ -2704,11 +2704,11 @@ class TestBoozerSurfaceJAXClass:
         assert "iota" in res
         assert booz.need_to_run_code is False
 
-    def test_run_code_ondevice_default_keeps_dense_hessian_materialization_off(
+    def test_run_code_ondevice_default_requests_byte_capped_dense_hessian(
         self,
         monkeypatch,
     ):
-        """The target lane must pass materialize_hessian=False by default."""
+        """The target lane requests dense finalization; byte cap gates scale."""
         bs = _MockBiotSavart(_make_mock_coils())
         surf, label = _make_basic_mock_surface_and_label()
         booz = BoozerSurfaceJAX(
@@ -2770,7 +2770,7 @@ class TestBoozerSurfaceJAXClass:
 
         res = booz.run_code(iota=0.3, G=0.05)
 
-        assert captured["materialize_hessian"] is False
+        assert captured["materialize_hessian"] is True
         assert res["hessian"] is None
         assert res["PLU"] is None
         assert res["hessian_materialized"] is False
@@ -2794,7 +2794,7 @@ class TestBoozerSurfaceJAXClass:
     @pytest.mark.parametrize(
         ("explicit_materialize", "expected_materialize"),
         [
-            (None, False),
+            (None, True),
             (True, True),
         ],
     )
@@ -4848,7 +4848,7 @@ class TestBoozerSurfaceJAXExactPath:
     @pytest.mark.parametrize(
         ("explicit_materialize", "expected_materialize"),
         [
-            (None, False),
+            (None, True),
             (True, True),
         ],
     )

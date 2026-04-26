@@ -149,6 +149,13 @@ def _pairwise_distances(gamma1, gamma2):
     return jnp.sqrt(jnp.sum(jnp.square(delta), axis=2))
 
 
+def _masked_pairwise_distances(gamma1, gamma2, valid, fill_distance):
+    delta = gamma1[:, None, :] - gamma2[None, :, :]
+    squared = jnp.sum(jnp.square(delta), axis=2)
+    fill_squared = jnp.square(fill_distance)
+    return jnp.sqrt(jnp.where(valid, squared, fill_squared))
+
+
 def _resolve_pairwise_penalty_chunk_size(chunk_size=None) -> int:
     if chunk_size is None:
         return int(get_pairwise_penalty_chunk_size())
@@ -173,10 +180,46 @@ def _chunk_rows(array, chunk_size: int):
         padded = array
     chunk_shape = (chunk_count, chunk_size, *array.shape[1:])
     chunks = padded.reshape(chunk_shape)
-    valid = (jnp.arange(padded_row_count, dtype=jnp.int32) < _as_jax_int32(row_count)).reshape(
-        (chunk_count, chunk_size)
-    )
+    if pad_rows > 0:
+        valid = jnp.concatenate(
+            (
+                jnp.ones((row_count,), dtype=bool),
+                jnp.zeros((pad_rows,), dtype=bool),
+            )
+        )
+    else:
+        valid = jnp.ones((row_count,), dtype=bool)
+    valid = valid.reshape((chunk_count, chunk_size))
     return chunks, valid
+
+
+def _row_weight_values(array, value, zero):
+    if array.ndim == 1:
+        return array * zero + value
+    axes = tuple(range(1, array.ndim))
+    return jnp.sum(array * zero, axis=axes) + value
+
+
+def _chunk_rows_with_valid_weights(array, chunk_size: int, one, zero):
+    row_count = int(array.shape[0])
+    chunk_count = 0 if row_count == 0 else (row_count + chunk_size - 1) // chunk_size
+    padded_row_count = chunk_count * chunk_size
+    pad_rows = padded_row_count - row_count
+    if pad_rows > 0:
+        zero_rows = jnp.sum(array, axis=0, keepdims=True, dtype=array.dtype)
+        zero_rows = zero_rows - zero_rows
+        zero_rows = jnp.broadcast_to(zero_rows, (pad_rows, *array.shape[1:]))
+        padded = jnp.concatenate((array, zero_rows), axis=0)
+    else:
+        padded = array
+    chunk_shape = (chunk_count, chunk_size, *array.shape[1:])
+    chunks = padded.reshape(chunk_shape)
+
+    valid = _row_weight_values(array, one, zero)
+    if pad_rows > 0:
+        invalid = _row_weight_values(zero_rows, zero, zero)
+        valid = jnp.concatenate((valid, invalid), axis=0)
+    return chunks, valid.reshape((chunk_count, chunk_size))
 
 
 def _pairwise_rowwise_min_distance(points_a, points_b, *, chunk_size=None):
@@ -203,8 +246,8 @@ def _pairwise_rowwise_min_distance(points_a, points_b, *, chunk_size=None):
 
         def _scan_other_chunks(row_min, other_inputs):
             other_chunk, other_mask = other_inputs
-            dists = _pairwise_distances(point_chunk, other_chunk)
             valid = point_mask[:, None] & other_mask[None, :]
+            dists = _masked_pairwise_distances(point_chunk, other_chunk, valid, inf)
             block_row_min = jnp.min(jnp.where(valid, dists, inf), axis=1)
             return jnp.minimum(row_min, block_row_min), None
 
@@ -251,8 +294,8 @@ def _pairwise_rowwise_pnorm_distance(points_a, points_b, p, *, chunk_size=None):
 
         def _scan_other_chunks(row_sum, other_inputs):
             other_chunk, other_mask = other_inputs
-            dists = _pairwise_distances(point_chunk, other_chunk)
             valid = point_mask[:, None] & other_mask[None, :]
+            dists = _masked_pairwise_distances(point_chunk, other_chunk, valid, one)
             safe_dists = jnp.where(valid, dists, one)
             block_power_sum = jnp.sum(
                 jnp.where(valid, safe_dists**p_jax, zero),
@@ -583,11 +626,17 @@ def cc_distance_pure(gamma1, l1, gamma2, l2, minimum_distance):
 
         def _scan_gamma2_chunks(row_total, gamma2_inputs):
             gamma2_chunk, arc_length_2_chunk, gamma2_mask = gamma2_inputs
-            dists = _pairwise_distances(gamma1_chunk, gamma2_chunk)
             valid = gamma1_mask[:, None] & gamma2_mask[None, :]
+            dists = _masked_pairwise_distances(
+                gamma1_chunk,
+                gamma2_chunk,
+                valid,
+                minimum_distance_jax,
+            )
             alen = arc_length_1_chunk[:, None] * arc_length_2_chunk[None, :]
-            safe_dists = jnp.where(valid, dists, minimum_distance_jax + 1.0)
-            excess = jnp.maximum(minimum_distance_jax - safe_dists, zero)
+            safe_dists = jnp.where(valid, dists, minimum_distance_jax)
+            diff = minimum_distance_jax - safe_dists
+            excess = jnp.where(diff > zero, diff, zero)
             block_total = jnp.sum(jnp.where(valid, alen * jnp.square(excess), zero))
             return row_total + block_total, None
 
@@ -650,10 +699,15 @@ def cc_distance_barrier_pure(gamma1, l1, gamma2, l2, minimum_distance):
         def _scan_gamma2_chunks(inner_carry, gamma2_inputs):
             inner_total, inner_feasible = inner_carry
             gamma2_chunk, arc_length_2_chunk, gamma2_mask = gamma2_inputs
-            dists = _pairwise_distances(gamma1_chunk, gamma2_chunk)
             valid = gamma1_mask[:, None] & gamma2_mask[None, :]
+            dists = _masked_pairwise_distances(
+                gamma1_chunk,
+                gamma2_chunk,
+                valid,
+                minimum_distance_jax,
+            )
             feasible = jnp.logical_or(~valid, dists > minimum_distance_jax)
-            safe_dists = jnp.where(valid, dists, minimum_distance_jax + 1.0)
+            safe_dists = jnp.where(valid, dists, minimum_distance_jax)
             safe_ratio = jnp.where(
                 valid,
                 jnp.where(feasible, minimum_distance_jax / safe_dists, half),
@@ -929,13 +983,13 @@ def cs_distance_pure(gammac, lc, gammas, ns, minimum_distance):
     lc = _as_jax_float64(lc)
     gammas = _as_jax_float64(gammas)
     ns = _as_jax_float64(ns)
-    minimum_distance_jax = _scalar_like(gammac, minimum_distance)
-    zero = _scalar_like(gammac, 0.0)
+    minimum_distance_jax = jnp.asarray(minimum_distance, dtype=gammac.dtype)
+    zero = minimum_distance_jax - minimum_distance_jax
+    one = minimum_distance_jax / minimum_distance_jax
     row_count = int(gammac.shape[0])
     col_count = int(gammas.shape[0])
     if row_count == 0 or col_count == 0:
         return zero
-    normalization = _scalar_like(gammac, row_count * col_count)
 
     curve_weights = jnp.linalg.norm(lc, axis=1)
     surface_weights = jnp.linalg.norm(ns, axis=1)
@@ -943,39 +997,57 @@ def cs_distance_pure(gammac, lc, gammas, ns, minimum_distance):
     if _use_dense_pairwise_path(row_count, col_count, chunk_size):
         dists = _pairwise_distances(gammac, gammas)
         integralweight = curve_weights[:, None] * surface_weights[None, :]
-        excess = jnp.maximum(minimum_distance_jax - dists, zero)
+        diff = minimum_distance_jax - dists
+        excess = jnp.where(diff > zero, diff, zero)
+        normalization = jnp.sum(jnp.ones_like(dists))
         return jnp.sum(integralweight * jnp.square(excess)) / normalization
 
-    gammac_chunks, gammac_masks = _chunk_rows(gammac, chunk_size)
-    gammas_chunks, gammas_masks = _chunk_rows(gammas, chunk_size)
-    curve_weight_chunks, _ = _chunk_rows(curve_weights, chunk_size)
-    surface_weight_chunks, _ = _chunk_rows(surface_weights, chunk_size)
+    def _chunk_with_weights(array):
+        return _chunk_rows_with_valid_weights(array, chunk_size, one, zero)
 
-    def _scan_curve_chunks(total, curve_inputs):
+    gammac_chunks, gammac_masks = _chunk_with_weights(gammac)
+    gammas_chunks, gammas_masks = _chunk_with_weights(gammas)
+    curve_weight_chunks, _ = _chunk_with_weights(curve_weights)
+    surface_weight_chunks, _ = _chunk_with_weights(surface_weights)
+
+    def _scan_curve_chunks(carry, curve_inputs):
+        total, normalization = carry
         gammac_chunk, curve_weight_chunk, gammac_mask = curve_inputs
 
-        def _scan_surface_chunks(row_total, surface_inputs):
+        def _scan_surface_chunks(inner_carry, surface_inputs):
+            row_total, row_normalization = inner_carry
             gammas_chunk, surface_weight_chunk, gammas_mask = surface_inputs
-            dists = _pairwise_distances(gammac_chunk, gammas_chunk)
-            valid = gammac_mask[:, None] & gammas_mask[None, :]
+            valid_weight = gammac_mask[:, None] * gammas_mask[None, :]
+            valid = valid_weight > zero
+            dists = _masked_pairwise_distances(
+                gammac_chunk,
+                gammas_chunk,
+                valid,
+                minimum_distance_jax,
+            )
             integralweight = curve_weight_chunk[:, None] * surface_weight_chunk[None, :]
-            safe_dists = jnp.where(valid, dists, minimum_distance_jax + 1.0)
-            excess = jnp.maximum(minimum_distance_jax - safe_dists, zero)
+            safe_dists = jnp.where(valid, dists, minimum_distance_jax)
+            diff = minimum_distance_jax - safe_dists
+            excess = jnp.where(diff > zero, diff, zero)
             block_total = jnp.sum(
                 jnp.where(valid, integralweight * jnp.square(excess), zero)
             )
-            return row_total + block_total, None
+            block_normalization = jnp.sum(valid_weight)
+            return (
+                row_total + block_total,
+                row_normalization + block_normalization,
+            ), None
 
-        total, _ = lax.scan(
+        (total, normalization), _ = lax.scan(
             _scan_surface_chunks,
-            total,
+            (total, normalization),
             (gammas_chunks, surface_weight_chunks, gammas_masks),
         )
-        return total, None
+        return (total, normalization), None
 
-    total, _ = lax.scan(
+    (total, normalization), _ = lax.scan(
         _scan_curve_chunks,
-        zero,
+        (zero, zero),
         (gammac_chunks, curve_weight_chunks, gammac_masks),
     )
     return total / normalization

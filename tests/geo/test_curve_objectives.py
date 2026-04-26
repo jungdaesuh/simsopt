@@ -74,6 +74,42 @@ def _jit_cache_sizes(*functions):
     return tuple(fn._cache_size() for fn in functions)
 
 
+def _curve_surface_distance_inputs():
+    gamma_curve = np.asarray(
+        [
+            [0.00, 0.00, 0.00],
+            [0.12, 0.01, 0.00],
+            [0.24, 0.02, 0.01],
+            [0.36, 0.03, 0.02],
+        ],
+        dtype=np.float64,
+    )
+    gammadash_curve = np.asarray(
+        [
+            [0.10, 0.01, 0.00],
+            [0.10, 0.01, 0.01],
+            [0.10, 0.01, 0.01],
+            [0.10, 0.01, 0.02],
+        ],
+        dtype=np.float64,
+    )
+    gamma_surface = np.asarray(
+        [
+            [0.00, 0.20, 0.00],
+            [0.12, 0.21, 0.01],
+            [0.24, 0.22, 0.02],
+            [0.36, 0.23, 0.03],
+            [0.48, 0.24, 0.04],
+        ],
+        dtype=np.float64,
+    )
+    surface_normal = np.tile(
+        np.asarray([[0.0, 1.0, 0.0]], dtype=np.float64),
+        (gamma_surface.shape[0], 1),
+    )
+    return gamma_curve, gammadash_curve, gamma_surface, surface_normal
+
+
 def _sampled_curve_pair_minimum_distance(curves, *, downsample):
     return min(
         np.min(
@@ -247,6 +283,69 @@ def test_pairwise_penalty_chunking_matches_dense_paths(monkeypatch):
     assert chunked_cs == pytest.approx(dense_cs, rel=1e-12, abs=1e-12)
     assert chunked_max == pytest.approx(dense_max, rel=1e-12, abs=1e-12)
     assert chunked_min == pytest.approx(dense_min, rel=1e-12, abs=1e-12)
+
+
+def test_curve_surface_chunked_gradient_respects_strict_transfer_guard(monkeypatch):
+    gammac, lc, gammas, ns = tuple(
+        jax.device_put(array) for array in _curve_surface_distance_inputs()
+    )
+    minimum_distance = jax.device_put(np.asarray(0.05, dtype=np.float64))
+
+    monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", "2")
+    invalidate_backend_cache()
+    try:
+        seed = jax.device_put(np.asarray(1.0, dtype=np.float64))
+        with jax.transfer_guard("disallow"):
+            value, pullback = jax.vjp(
+                lambda current_gammac: cs_distance_pure(
+                    current_gammac,
+                    lc,
+                    gammas,
+                    ns,
+                    minimum_distance,
+                ),
+                gammac,
+            )
+            del value
+            grad_gammac = pullback(seed)[0]
+            assert np.all(np.isfinite(np.asarray(jax.device_get(grad_gammac))))
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+
+def test_curve_surface_chunked_path_does_not_materialize_dense_matrix(monkeypatch):
+    gamma_curve, gammadash_curve, gamma_surface, surface_normal = (
+        _curve_surface_distance_inputs()
+    )
+    observed_shapes = []
+    original_pairwise_distances = curveobjectives_module._pairwise_distances
+
+    def record_pairwise_distances(points_a, points_b):
+        observed_shapes.append((points_a.shape[0], points_b.shape[0]))
+        return original_pairwise_distances(points_a, points_b)
+
+    monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", "2")
+    monkeypatch.setattr(
+        curveobjectives_module,
+        "_pairwise_distances",
+        record_pairwise_distances,
+    )
+    invalidate_backend_cache()
+    try:
+        value = cs_distance_pure(
+            gamma_curve,
+            gammadash_curve,
+            gamma_surface,
+            surface_normal,
+            0.05,
+        )
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+    assert np.isfinite(float(value))
+    assert observed_shapes == []
 
 
 def test_pairwise_penalty_chunking_preserves_infeasible_barrier_inf(monkeypatch):

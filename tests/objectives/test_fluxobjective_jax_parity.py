@@ -10,6 +10,7 @@ from conftest import enable_strict_parity_backend, parity_default_device, parity
 
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from simsopt._core.optimizable import Optimizable
+from simsopt._core.util import ObjectiveFailure
 from simsopt.backend import invalidate_backend_cache
 from simsopt.field import BiotSavart, Current, coils_via_symmetries
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
@@ -49,7 +50,7 @@ class _NonNativeFakeField(Optimizable):
         self._points = np.asarray(field_eval_spec.points, dtype=np.float64)
 
 
-def _make_native_flux_parity_case():
+def _make_native_flux_parity_case(current_values=(1e5, 1e5)):
     ncoils = 2
     nfp = 1
     stellsym = False
@@ -62,7 +63,7 @@ def _make_native_flux_parity_case():
         R1=0.5,
         order=3,
     )
-    base_currents = [Current(1e5) for _ in range(ncoils)]
+    base_currents = [Current(value) for value in current_values]
     coils = coils_via_symmetries(base_curves, base_currents, nfp, stellsym)
 
     surface = SurfaceRZFourier(
@@ -408,6 +409,19 @@ def test_singular_zero_field_contract(definition):
 
     assert np.isinf(value)
     np.testing.assert_allclose(np.asarray(grad), np.zeros((1, 3)), atol=0.0)
+
+
+@pytest.mark.parametrize("definition", ("normalized", "local"))
+def test_squaredfluxjax_zero_current_gradient_raises_objective_failure(definition):
+    coils, surface = _make_native_flux_parity_case(current_values=(0.0, 0.0))
+    objective = SquaredFluxJAX(
+        surface,
+        BiotSavartJAX(coils),
+        definition=definition,
+    )
+
+    with pytest.raises(ObjectiveFailure, match="gradient is singular"):
+        objective.dJ()
 
 
 def test_squaredfluxjax_requires_native_field_contract():

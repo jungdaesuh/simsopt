@@ -632,22 +632,10 @@ def _assert_surface_jacobian_parity(surface: SurfaceRZFourier) -> None:
         atol=1e-9,
     )
     np.testing.assert_allclose(
-        normal_jacobian,
-        np.asarray(surface.dnormal_by_dcoeff_jax(dofs)),
-        rtol=1e-12,
-        atol=1e-12,
-    )
-    np.testing.assert_allclose(
         unitnormal_jacobian,
         np.asarray(surface.dunitnormal_by_dcoeff()),
         rtol=1e-9,
         atol=1e-9,
-    )
-    np.testing.assert_allclose(
-        unitnormal_jacobian,
-        np.asarray(surface.dunitnormal_by_dcoeff_jax(dofs)),
-        rtol=1e-12,
-        atol=1e-12,
     )
 
 

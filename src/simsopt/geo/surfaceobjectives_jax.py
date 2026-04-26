@@ -32,6 +32,7 @@ from typing import NamedTuple
 import numpy as np
 import jax
 import jax.numpy as jnp
+import jax.scipy.linalg as jsp_linalg
 from jax import lax
 
 from .._core.derivative import Derivative, derivative_dec
@@ -2354,7 +2355,14 @@ def _traceable_solve_hessian_linearization(
     linear_solve_stab,
     transpose,
 ):
-    del linear_solve_factors, transpose
+    if linear_solve_factors is not None:
+        return _traceable_solve_plu_linearization(
+            linear_solve_factors,
+            rhs,
+            linear_solve_tol=linear_solve_tol,
+            transpose=transpose,
+        )
+
     objective_fn = _make_boozer_penalty_objective_closure(
         coil_set_spec=coil_set_spec,
         **_traceable_inner_objective_kwargs(objective_kwargs),
@@ -2402,6 +2410,81 @@ def _traceable_solve_hessian_linearization(
         cond_fun,
         body_fun,
         (next_index, solution0, success0),
+    )
+    return solution, success
+
+
+def _traceable_plu_matvec(linear_solve_factors, vector, *, transpose):
+    P, L, U = linear_solve_factors
+    if transpose:
+        return U.T @ (L.T @ (P.T @ vector))
+    return P @ (L @ (U @ vector))
+
+
+def _traceable_plu_matrix(linear_solve_factors):
+    P, L, U = linear_solve_factors
+    return P @ (L @ U)
+
+
+def _traceable_plu_residual_tolerance(
+    linear_solve_factors,
+    solution,
+    rhs,
+    residual_tol,
+):
+    matrix = _traceable_plu_matrix(linear_solve_factors)
+    dtype = rhs.dtype
+    eps = _optimizer_jax._device_scalar(jnp.finfo(dtype).eps, dtype=dtype)
+    dimension = _optimizer_jax._device_scalar(matrix.shape[0], dtype=dtype)
+    safety = _optimizer_jax._device_scalar(100.0, dtype=dtype)
+    backward_error = (
+        safety
+        * dimension
+        * eps
+        * (
+            jnp.linalg.norm(matrix) * jnp.linalg.norm(solution)
+            + jnp.linalg.norm(rhs)
+        )
+    )
+    return jnp.maximum(residual_tol, backward_error)
+
+
+def _traceable_solve_plu_linearization(
+    linear_solve_factors,
+    rhs,
+    *,
+    linear_solve_tol,
+    transpose,
+):
+    P, L, U = linear_solve_factors
+    if transpose:
+        y = jsp_linalg.solve_triangular(U.T, rhs, lower=True)
+        z = jsp_linalg.solve_triangular(L.T, y, lower=False)
+        solution = P @ z
+    else:
+        y = jsp_linalg.solve_triangular(L, P.T @ rhs, lower=True)
+        solution = jsp_linalg.solve_triangular(U, y, lower=False)
+    residual = rhs - _traceable_plu_matvec(
+        linear_solve_factors,
+        solution,
+        transpose=transpose,
+    )
+    residual_norm = jnp.linalg.norm(residual)
+    residual_tol = _optimizer_jax._linear_solve_residual_tolerance(
+        rhs,
+        linear_solve_tol,
+    )
+    residual_tol = _traceable_plu_residual_tolerance(
+        linear_solve_factors,
+        solution,
+        rhs,
+        residual_tol,
+    )
+    success = (
+        jnp.all(jnp.isfinite(solution))
+        & jnp.all(jnp.isfinite(residual))
+        & jnp.isfinite(residual_norm)
+        & (residual_norm <= residual_tol)
     )
     return solution, success
 
@@ -3988,6 +4071,130 @@ def _summarize_traceable_gradient(gradient):
     }
 
 
+def _traceable_term_adjoint_solve_report(
+    booz_jax,
+    coil_set_spec_from_dofs,
+    *,
+    coil_dofs,
+    solved_x,
+    solved_linear_solve_factors,
+    linearization_kind,
+    linear_solve_tol,
+    linear_solve_stab,
+    objective_kwargs,
+    term_name,
+):
+    depends_on_x_inner, _ = _traceable_single_stage_effective_dependency_flags(
+        term_name,
+        objective_kwargs=objective_kwargs,
+    )
+    if not depends_on_x_inner:
+        return None
+
+    coil_set_spec = coil_set_spec_from_dofs(coil_dofs)
+
+    def objective_of_x(current_x):
+        return _evaluate_traceable_weighted_single_stage_outer_term(
+            term_name,
+            current_x,
+            coil_dofs,
+            coil_set_spec,
+            objective_kwargs,
+        )
+
+    rhs = _strict_scalar_grad(objective_of_x, solved_x)
+    adjoint, success = _traceable_solve_linearization(
+        booz_jax,
+        solved_x,
+        rhs,
+        coil_set_spec,
+        objective_kwargs,
+        linear_solve_factors=solved_linear_solve_factors,
+        linearization_kind=linearization_kind,
+        linear_solve_tol=linear_solve_tol,
+        linear_solve_stab=linear_solve_stab,
+        transpose=True,
+    )
+    report = {
+        "success": bool(np.asarray(jax.device_get(success))),
+        "rhs_norm": _summarize_traceable_scalar(jnp.linalg.norm(rhs)),
+        "solution_norm": _summarize_traceable_scalar(jnp.linalg.norm(adjoint)),
+        "solution": _summarize_traceable_gradient(adjoint),
+    }
+    if solved_linear_solve_factors is not None:
+        residual = rhs - _traceable_plu_matvec(
+            solved_linear_solve_factors,
+            adjoint,
+            transpose=True,
+        )
+        residual_norm = jnp.linalg.norm(residual)
+        base_residual_tol = _optimizer_jax._linear_solve_residual_tolerance(
+            rhs,
+            linear_solve_tol,
+        )
+        residual_tol = _traceable_plu_residual_tolerance(
+            solved_linear_solve_factors,
+            adjoint,
+            rhs,
+            base_residual_tol,
+        )
+        matrix = _traceable_plu_matrix(solved_linear_solve_factors)
+        report["plu"] = {
+            "matrix_norm": _summarize_traceable_scalar(jnp.linalg.norm(matrix)),
+            "base_residual_tolerance": _summarize_traceable_scalar(
+                base_residual_tol
+            ),
+            "residual_tolerance": _summarize_traceable_scalar(residual_tol),
+            "residual_norm": _summarize_traceable_scalar(residual_norm),
+            "relative_residual": _summarize_traceable_scalar(
+                residual_norm / jnp.linalg.norm(rhs)
+            ),
+        }
+    elif linearization_kind == "hessian":
+        objective_fn = _make_boozer_penalty_objective_closure(
+            coil_set_spec=coil_set_spec,
+            **_traceable_inner_objective_kwargs(objective_kwargs),
+        )
+        hvp_fn = _optimizer_jax._hessian_vector_product_fn(objective_fn)
+        attempts = []
+        for candidate_stab in booz_jax._adjoint_hessian_stabilization_schedule():
+            solution, attempt_success = (
+                _optimizer_jax._solve_hessian_system_with_status(
+                    objective_fn,
+                    solved_x,
+                    rhs,
+                    stab=float(candidate_stab),
+                    tol=linear_solve_tol,
+                )
+            )
+            residual_tol = _optimizer_jax._linear_solve_residual_tolerance(
+                rhs,
+                linear_solve_tol,
+            )
+            attempt = {
+                "stab": float(candidate_stab),
+                "success": bool(np.asarray(jax.device_get(attempt_success))),
+                "solution": _summarize_traceable_gradient(solution),
+                "solution_norm": _summarize_traceable_scalar(
+                    jnp.linalg.norm(solution)
+                ),
+                "residual_tolerance": _summarize_traceable_scalar(residual_tol),
+            }
+            if float(candidate_stab) == 0.0:
+                residual = rhs - hvp_fn(solved_x, solution)
+                residual_norm = jnp.linalg.norm(residual)
+                rhs_norm = jnp.linalg.norm(rhs)
+                attempt["residual_norm"] = _summarize_traceable_scalar(
+                    residual_norm
+                )
+                attempt["relative_residual"] = _summarize_traceable_scalar(
+                    residual_norm / rhs_norm
+                )
+            attempts.append(attempt)
+        report["hessian_operator"] = {"attempts": attempts}
+    return report
+
+
 def diagnose_traceable_objective_runtime(
     booz_jax,
     bs_jax,
@@ -4117,6 +4324,19 @@ def diagnose_traceable_objective_runtime(
             issues.append("implicit_grad")
         if not term_report["total_grad"]["all_finite"]:
             issues.append("total_grad")
+        if not term_report["linear_solve_success"]:
+            term_report["adjoint_solve"] = _traceable_term_adjoint_solve_report(
+                booz_jax,
+                coil_set_spec_from_dofs,
+                coil_dofs=baseline_coil_dofs,
+                solved_x=baseline_x,
+                solved_linear_solve_factors=baseline_linear_solve_factors,
+                linearization_kind=state["linearization_kind"],
+                linear_solve_tol=state["linear_solve_tol"],
+                linear_solve_stab=state["linear_solve_stab"],
+                objective_kwargs=objective_kwargs,
+                term_name=term_name,
+            )
         term_report["issues"] = issues
         report["terms"][term_name] = term_report
         if issues:

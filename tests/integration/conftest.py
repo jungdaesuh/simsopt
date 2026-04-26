@@ -67,4 +67,14 @@ def _patch_meta_path_finder():
 
 
 # Patch on conftest load (before any test imports).
-_patch_meta_path_finder()
+SCIKIT_BUILD_EDITABLE_FINDER_PATCHED = _patch_meta_path_finder()
+
+
+def pytest_report_header(config):
+    del config
+    if SCIKIT_BUILD_EDITABLE_FINDER_PATCHED:
+        return "simsopt-jax integration: patched scikit-build editable finder"
+    return (
+        "simsopt-jax integration: no scikit-build editable finder detected; "
+        "using normal import path and per-module simsoptpp gates"
+    )
