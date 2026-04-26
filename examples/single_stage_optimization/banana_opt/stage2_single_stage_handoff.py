@@ -110,6 +110,13 @@ class BoozerSolveAttempt:
 
 
 @dataclass(frozen=True)
+class _BoozerInitializationState:
+    surface_dofs: np.ndarray
+    res: dict[str, object] | None
+    need_to_run_code: bool
+
+
+@dataclass(frozen=True)
 class WarmStartBoozerSeed:
     surface: object
     iota: float | None
@@ -471,6 +478,40 @@ def _assign_surface_dofs(surface, dofs) -> None:
     surface.dofs = resolved_dofs
 
 
+def _snapshot_boozer_initialization_state(
+    boozer_surface,
+) -> _BoozerInitializationState:
+    res = boozer_surface.res
+    return _BoozerInitializationState(
+        surface_dofs=_surface_dofs(boozer_surface.surface).copy(),
+        res=None if res is None else dict(res),
+        need_to_run_code=bool(boozer_surface.need_to_run_code),
+    )
+
+
+def _restore_boozer_initialization_state(
+    boozer_surface,
+    snapshot: _BoozerInitializationState,
+) -> None:
+    _assign_surface_dofs(boozer_surface.surface, snapshot.surface_dofs)
+    boozer_surface.res = None if snapshot.res is None else dict(snapshot.res)
+    boozer_surface.need_to_run_code = snapshot.need_to_run_code
+
+
+def _check_self_intersection_after_initialization(
+    boozer_surface,
+    pre_solve_state: _BoozerInitializationState,
+) -> bool:
+    self_intersection_check_completed = False
+    try:
+        self_intersecting = bool(boozer_surface.surface.is_self_intersecting())
+        self_intersection_check_completed = True
+    finally:
+        if not self_intersection_check_completed:
+            _restore_boozer_initialization_state(boozer_surface, pre_solve_state)
+    return self_intersecting
+
+
 def resolve_warm_start_boozer_surface_path(
     warm_start_surface_stem: str | Path,
     *,
@@ -581,6 +622,7 @@ def attempt_initialize_boozer_surface(
             I=boozer_I,
         )
 
+    pre_solve_state = _snapshot_boozer_initialization_state(boozer_surface)
     solve_attempt = run_boozer_with_failure_policy(
         boozer_surface,
         iota,
@@ -601,10 +643,10 @@ def attempt_initialize_boozer_surface(
         )
 
     solve_success = solve_attempt.solve_success
-    try:
-        self_intersecting = bool(boozer_surface.surface.is_self_intersecting())
-    except Exception:
-        self_intersecting = True
+    self_intersecting = _check_self_intersection_after_initialization(
+        boozer_surface,
+        pre_solve_state,
+    )
     return BoozerInitializationResult(
         boozer_surface=boozer_surface,
         solve_success=solve_success,

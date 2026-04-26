@@ -64,27 +64,11 @@ _STAGE2_FAILURE_REASON_SELF_INTERSECTION = "self_intersecting"
 
 
 def _boozer_surface_is_self_intersecting(boozer_surface) -> bool:
-    """Return True when the Boozer surface is self-intersecting at the probe angle.
-
-    Fails closed: if the underlying check raises, the surface is treated as
-    self-intersecting so the caller rejects the iterate rather than trust a
-    geometry that cannot be validated. If the surface object does not expose
-    ``is_self_intersecting`` (e.g. minimal test doubles), returns ``False`` so
-    existing tests remain valid without having to stub the method.
-    """
-    surface = getattr(boozer_surface, "surface", None)
-    check = getattr(surface, "is_self_intersecting", None)
-    if not callable(check):
-        return False
-    try:
-        return bool(check(angle=_STAGE2_HOT_LOOP_SELF_INTERSECTION_ANGLE))
-    except TypeError:
-        try:
-            return bool(check())
-        except Exception:
-            return True
-    except Exception:
-        return True
+    return bool(
+        boozer_surface.surface.is_self_intersecting(
+            angle=_STAGE2_HOT_LOOP_SELF_INTERSECTION_ANGLE,
+        )
+    )
 
 
 def _new_derivative():
@@ -152,7 +136,19 @@ class Stage2GuardedBoozerEvaluator:
             self.last_solve_failed = True
             self.last_failure_reason = _STAGE2_FAILURE_REASON_SOLVE
             return {"success": False, "reason": self.last_failure_reason}
-        if _boozer_surface_is_self_intersecting(self.boozer_surface):
+        self_intersection_check_completed = False
+        try:
+            self_intersecting = _boozer_surface_is_self_intersecting(
+                self.boozer_surface,
+            )
+            self_intersection_check_completed = True
+        finally:
+            if not self_intersection_check_completed:
+                restore_boozer_solve_state(
+                    self.boozer_surface,
+                    self.last_successful_state,
+                )
+        if self_intersecting:
             restore_boozer_solve_state(
                 self.boozer_surface,
                 self.last_successful_state,

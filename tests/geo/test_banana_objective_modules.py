@@ -2115,7 +2115,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self._assert_restored_fake_boozer_state(fake_boozer_surface)
         self.assertEqual(fake_boozer_surface.surface.self_intersection_calls, 1)
 
-    def test_build_stage2_iota_runtime_treats_self_intersection_check_exception_as_failure(
+    def test_build_stage2_iota_runtime_propagates_self_intersection_check_exception(
         self,
     ):
         fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)
@@ -2131,14 +2131,10 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         fake_boozer_surface.need_to_run_code = True
 
-        state = self.module.evaluate_stage2_iota_state(runtime)
-
-        self.assertAlmostEqual(state.iota, 0.21)
-        self.assertTrue(state.solve_failed)
-        self.assertEqual(
-            runtime.guarded_boozer_evaluator.last_failure_reason,
-            "self_intersecting",
-        )
+        with self.assertRaisesRegex(RuntimeError, "ground missing"):
+            self.module.evaluate_stage2_iota_state(runtime)
+        self.assertIsNone(runtime.guarded_boozer_evaluator.last_failure_reason)
+        self.assertEqual(fake_boozer_surface.surface.self_intersection_calls, 1)
         self._assert_restored_fake_boozer_state(fake_boozer_surface)
 
     def test_build_stage2_iota_runtime_does_not_check_self_intersection_on_solve_failure(

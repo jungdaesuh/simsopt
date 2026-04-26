@@ -433,6 +433,7 @@ class HandoffModuleTests(unittest.TestCase):
                 del bs, vol, vol_target, constraint_weight, options, I
                 self.surface = surf
                 self.res = {"iota": 0.21, "G": 0.35, "success": True}
+                self.need_to_run_code = True
 
             def run_code(self, iota, G):
                 del iota, G
@@ -440,6 +441,7 @@ class HandoffModuleTests(unittest.TestCase):
                 self.res["iota"] = 0.41
                 self.res["G"] = 0.72
                 self.res["success"] = False
+                self.need_to_run_code = False
                 return {"success": False}
 
         result = module.attempt_initialize_boozer_surface(
@@ -464,6 +466,104 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertAlmostEqual(result.solved_G, 0.72)
         self.assertIsNone(result.error_type)
         np.testing.assert_allclose(result.boozer_surface.surface.x, [9.0, -4.0])
+
+    def test_attempt_initialize_boozer_surface_restores_state_when_self_intersection_check_raises(
+        self,
+    ):
+        module = load_handoff_module()
+        surf_prev = SimpleNamespace(
+            quadpoints_theta=np.array([0.0, 0.5]),
+            quadpoints_phi=np.array([0.0, 0.2]),
+            gamma=lambda: np.zeros((2, 2, 3), dtype=float),
+        )
+        created_boozer_surfaces = []
+
+        class _FakeSurface:
+            def __init__(
+                self,
+                *,
+                mpol,
+                ntor,
+                nfp,
+                stellsym,
+                quadpoints_theta,
+                quadpoints_phi,
+            ):
+                del mpol, ntor, nfp, stellsym
+                self.quadpoints_theta = quadpoints_theta
+                self.quadpoints_phi = quadpoints_phi
+                self.dofs = np.zeros(2, dtype=float)
+                self.x = np.zeros(2, dtype=float)
+                self._gamma = np.zeros((2, 2, 3), dtype=float)
+                self.self_intersection_calls = 0
+
+            def least_squares_fit(self, gamma):
+                self._gamma = np.asarray(gamma, dtype=float)
+
+            def gamma(self):
+                return self._gamma.copy()
+
+            def set_dofs(self, dofs):
+                resolved_dofs = np.asarray(dofs, dtype=float)
+                self.dofs = resolved_dofs
+                self.x = resolved_dofs.copy()
+
+            def is_self_intersecting(self):
+                self.self_intersection_calls += 1
+                raise RuntimeError("ground missing")
+
+            def volume(self):
+                return 0.1
+
+        class _FakeVolume:
+            def __init__(self, surface):
+                self.surface = surface
+
+        class _FakeBoozerSurface:
+            def __init__(
+                self,
+                bs,
+                surf,
+                vol,
+                vol_target,
+                constraint_weight,
+                options,
+                I=0.0,
+            ):
+                del bs, vol, vol_target, constraint_weight, options, I
+                self.surface = surf
+                self.res = None
+                self.need_to_run_code = True
+                created_boozer_surfaces.append(self)
+
+            def run_code(self, iota, G):
+                self.surface.x = np.array([9.0, -4.0], dtype=float)
+                self.res = {"iota": float(iota), "G": float(G), "success": True}
+                self.need_to_run_code = False
+                return {"success": True, "iota": float(iota), "G": float(G)}
+
+        with self.assertRaisesRegex(RuntimeError, "ground missing"):
+            module.attempt_initialize_boozer_surface(
+                surf_prev,
+                mpol=8,
+                ntor=6,
+                bs=object(),
+                vol_target=0.1,
+                constraint_weight=1.0,
+                iota=0.2,
+                G0=0.35,
+                boozer_I=0.0,
+                nfp=5,
+                surface_cls=_FakeSurface,
+                volume_cls=_FakeVolume,
+                boozer_surface_cls=_FakeBoozerSurface,
+            )
+
+        boozer_surface = created_boozer_surfaces[0]
+        np.testing.assert_allclose(boozer_surface.surface.x, [0.0, 0.0])
+        self.assertIsNone(boozer_surface.res)
+        self.assertTrue(boozer_surface.need_to_run_code)
+        self.assertEqual(boozer_surface.surface.self_intersection_calls, 1)
 
     def test_attempt_initialize_boozer_surface_assigns_seed_dofs_after_construction(self):
         module = load_handoff_module()
@@ -542,9 +642,11 @@ class HandoffModuleTests(unittest.TestCase):
                 del bs, vol, vol_target, constraint_weight, options, I
                 self.surface = surf
                 self.res = {"iota": 0.2, "G": 0.35, "success": True}
+                self.need_to_run_code = True
 
             def run_code(self, iota, G):
                 del iota, G
+                self.need_to_run_code = False
                 return {"success": True}
 
         result = module.attempt_initialize_boozer_surface(

@@ -303,8 +303,10 @@ class FakeBoozerSurface:
         self.options = options or {}
         self.I = I
         self.res = {"success": True, "iota": 0.15, "G": 1.0, "I": I}
+        self.need_to_run_code = True
 
     def run_code(self, iota, G):
+        self.need_to_run_code = False
         return self.res
 
 
