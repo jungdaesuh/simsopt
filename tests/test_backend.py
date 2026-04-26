@@ -1335,6 +1335,26 @@ def test_runtime_float64_helpers_keep_traced_references_on_device(
     }
 
 
+def test_explicit_rsqrt_uses_jax_primitive_value_jvp_and_grad():
+    jax_module = _require_jax()
+    jnp_module = importlib.import_module("jax.numpy")
+    math_utils = importlib.import_module("simsopt.jax_core._math_utils")
+    explicit_rsqrt = math_utils.explicit_rsqrt
+    primitive_rsqrt = jax_module.lax.rsqrt
+
+    x = jnp_module.asarray([0.25, 1.0, 2.5, 9.0], dtype=jnp_module.float64)
+    tangent = jnp_module.asarray([0.5, -1.0, 0.25, 2.0], dtype=jnp_module.float64)
+
+    value, tangent_out = jax_module.jvp(explicit_rsqrt, (x,), (tangent,))
+    expected_value, expected_tangent = jax_module.jvp(primitive_rsqrt, (x,), (tangent,))
+    grad_value = jax_module.grad(lambda y: jnp_module.sum(explicit_rsqrt(y)))(x)
+    expected_grad = jax_module.grad(lambda y: jnp_module.sum(primitive_rsqrt(y)))(x)
+
+    np.testing.assert_allclose(value, expected_value, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(tangent_out, expected_tangent, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(grad_value, expected_grad, rtol=0.0, atol=0.0)
+
+
 def test_explicit_current_mode_policy_preserves_strict_state(monkeypatch):
     _clear_backend_env(monkeypatch)
     backend = _fresh_backend()

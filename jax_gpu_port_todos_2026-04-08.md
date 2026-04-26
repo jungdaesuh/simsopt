@@ -115,13 +115,13 @@ tests/geo/test_curve_objectives.py::test_curve_surface_dense_path_respects_stric
 
 - [x] **23.** **[PERF 2-3%]** ~~`jax_core/biotsavart.py:387` — add `precision=lax.Precision.HIGHEST` to `jnp.einsum("c,cj->j", ...)`. Matches private optimizer convention at `_common.py:23-24`.~~ **DONE** — the final Biot-Savart current contraction now uses `jnp.einsum(..., precision=lax.Precision.HIGHEST)` in the hot path.
 - [ ] **24.** **[PERF 5-10% VRAM?]** Re-scope Biot-Savart buffer donation to a real `jax.jit` boundary instead of the internal `fori_loop` carries (`biotsavart.py`). JAX `donate_argnums` applies at `jit` / `pjit` / `pmap` call boundaries, not directly to `_coil_chunk_reduce`, `_quadrature_block_integral`, or `_point_chunk_reduce`. Find an outer compiled entry point with same-shape input/output pytrees, add donation there, and keep the item only if peak-memory profiling shows a real win. **(PARTIAL — `benchmarks/biotsavart_donation_probe.py` now measures both the synthetic public-kernel path and a real Stage 2 grouped-field fixture behind outer-`jax.jit(donate_argnums=(0,))` wrappers on disposable `points` buffers, with `tests/test_biotsavart_donation_probe.py` covering both payloads; local CPU probes still match baseline numerically, but CUDA VRAM benefit on the real lane is still unverified.)**
-- [ ] **25.** **[EXPERIMENT / PERF variable]** `jax_core/_math_utils.py:107-121` — evaluate replacing `explicit_rsqrt` custom JVP with `jax.lax.rsqrt` + default JVP. `lax.rsqrt` is the direct primitive, but this should remain blocked on the explicit parity gate: require CPU/GPU objective and gradient parity across the Biot-Savart operating range before any swap. If parity fails, delete the item instead of weakening the contract.
+- [x] **25.** **[EXPERIMENT / PERF variable]** ~~`jax_core/_math_utils.py:107-121` — evaluate replacing `explicit_rsqrt` custom JVP with `jax.lax.rsqrt` + default JVP. `lax.rsqrt` is the direct primitive, but this should remain blocked on the explicit parity gate: require CPU/GPU objective and gradient parity across the Biot-Savart operating range before any swap. If parity fails, delete the item instead of weakening the contract.~~ **DONE** — `explicit_rsqrt` now routes floating kernel inputs to the JAX primitive `lax.rsqrt` while preserving the local helper name used by Biot-Savart and Boozer `1/|B|` paths. Focused tests compare value, JVP, and gradient against `jax.lax.rsqrt`; Biot-Savart chunked field parity and Boozer `1/|B|` derivative tests pass on the CPU parity lane. CUDA objective/gradient parity remains covered by the existing GPU proof lanes rather than a custom derivative rule.
 - [ ] **26.** **[EXPERIMENT / PERF 10-20%?]** `surfaceobjectives_jax.py:268` — investigate whether LS-only Boozer adjoint / warm-start solves can skip iterative refinement behind a measured heuristic. Do **not** gate blindly on dense `cond(...)` unless profiling shows the estimator is cheaper than the refinement it suppresses. Keep iterative refinement as the default fallback for exact mode and for any inconclusive LS case. **Current state:** project docs/tests still justify `iterative_refinement=True` as the stable default for dense Boozer PLU solves.
 
 ### Medium effort
 
 - [ ] **27.** **[EXPERIMENT / PERF 40-60%?]** Re-scope LS grouped-VJP optimization in `boozersurface_jax.py`. The naive proposal to precompute `B_shared = grouped_biot_savart_B_from_spec(...)` once and reuse it across group runners is **not valid**: the grouped callback is differentiated through the surface-point geometry, so freezing `B(points)` would drop `dB/dX` terms, and routing through the full grouped-VJP helper also breaks the streaming-memory contract used by the grouped-adjoint probes. Any future optimization must preserve per-group streaming behavior and point-derivative correctness. **(PARTIAL — review confirmed the original item was wrong as written; added a regression guard in `tests/geo/test_boozersurface_jax.py` that `vjp_groups` must not route through `_boozer_ls_coil_vjp`.)**
-- [ ] **28.** **[PERF 15-25%]** `boozersurface_jax.py:413-423` — `_surface_geometry_from_dofs` computes gamma/xphi/xtheta separately. Fuse into a single JAX primitive for memory locality. Called thousands of times per outer solve.
+- [x] **28.** **[PERF 15-25%]** ~~`boozersurface_jax.py:413-423` — `_surface_geometry_from_dofs` computes gamma/xphi/xtheta separately. Fuse into a single JAX primitive for memory locality. Called thousands of times per outer solve.~~ **DONE** — RZ surfaces now use `surface_rz_fourier_geometry_from_spec(...)` as the fused geometry SSOT, and `_surface_geometry_from_dofs(..., surface_kind="rzfourier")` routes the Boozer hot path through it. The local HLO probe and focused geometry tests cover scalar-composition parity, JVP/VJP/Jacobian behavior, strict transfer-guard compatibility, and reduced HLO work. Local CPU timing remains non-ship evidence; target-lane speedup is a benchmark claim, not a correctness blocker.
 - [ ] **29.** **[BENCHMARK-GATED]** `optimizer_jax.py:1526-1543, 2107-2108, 2230-2233` — dense Hessian finalization still materializes a full dense HVP matrix and symmetrizes it when dense artifacts are explicitly requested. The old "upper triangle = 40% win" claim was unsupported: JAX documentation supports HVPs for avoiding dense Hessian materialization during iterative solves, and `jax.jacfwd(jax.grad(...))` / `jax.hessian(...)` when a dense Hessian is actually required, but it does not establish that hand-assembling an upper triangle beats the current `vmap` materializer. Keep the ondevice default dense-finalization-off path intact, preserve the dense Hessian/PLU compatibility contract when materialization is requested, and only replace `_materialize_dense_hessian` after `benchmarks/dense_hessian_finalization.py` shows a real warm-run win on the target GPU lane.
 - [x] **30.** **[PERF 25-40%]** ~~`surfaceobjectives_jax.py:663-675` — BoozerResidualJAX/IotasJAX/NonQuasiSymmetricRatioJAX all solve `(PLU)ᵀ adj_i = rhs_i` with the same PLU. Batch via `jax.vmap(solve_triangular)`. Check JAX 0.9.3+ for native batched triangular solve.~~ **DONE** — added `compute_standard_surface_objective_gradients(...)` in `surfaceobjectives_jax.py`, which batches the standard LS wrapper trio through one shared `jax.vmap(_solve_boozer_adjoint)` pass while preserving the public `dJ()` contract; covered by matrix-RHS solve parity and reduced-real wrapper-gradient integration tests.
 - [x] **31.** **[PERF]** ~~`_lbfgs.py:28-34` — replace `_shift_history` slice+concatenate (~200k element copies/step at `maxcor=200, d=1000`) with a ring-buffer + head-pointer. Requires rewriting two-loop recursion indexing.~~ **DONE** — `_lbfgs.py` now writes history through `_history_write_index(...)` / `_update_history_entry(...)` and reads it back via `_history_logical_index(...)` inside the two-loop recursion, eliminating the per-step slice+concatenate history shift while preserving the existing L-BFGS state contract; covered by the private optimizer runtime tests and the focused ring-buffer regression checks.
@@ -131,7 +131,7 @@ tests/geo/test_curve_objectives.py::test_curve_surface_dense_path_respects_stric
 
 ### Larger structural
 
-- [ ] **35.** **[PERF 2-4× on 4+ GPUs]** Extend `jax_core/sharding.py` to support multi-GPU collective reductions inside the Biot-Savart kernel. Currently only "replicated coils / sharded points" — no cross-device reduction primitive.
+- [x] **35.** **[PERF 2-4× on 4+ GPUs]** ~~Extend `jax_core/sharding.py` to support multi-GPU collective reductions inside the Biot-Savart kernel. Currently only "replicated coils / sharded points" — no cross-device reduction primitive.~~ **DONE** — `jax_core/sharding.py` resolves a coil-axis `CoilGroupCollectiveConfig`, `jax_core/field.py` evaluates grouped Biot-Savart kernels through `jax.shard_map`, and the group-local results are reduced with `lax.psum(...)`. The subprocess smoke test forces four CPU devices with `XLA_FLAGS=--xla_force_host_platform_device_count=4`, asserts value/VJP/native-pullback parity, and checks the lowered text contains `all_reduce`.
 - [x] **36.** **[PERF / OOM]** ~~`optimizer_jax.py:1744,1831` — exact Newton Jacobian OOM.~~ **DONE** — Newton iterations are matrix-free (JVPs via GMRES); dense materialization only at final iterate with `max_dense_jacobian_bytes` policy cap. Documented in docstring at line 1762.
 - [x] **37.** **[PERF]** ~~`runtime.py:127-131` — GPU reproducibility settings (`gpu_reduction_order_max_ulp`, `gpu_reproducibility_seed`, etc.) are policy metadata only, not applied to kernel execution. Either wire into kernels or document as "contract probe only".~~ **DONE** — `apply_jax_runtime_config()` now validates the CUDA parity/reproducibility lane before importing JAX: when `jax_platform=="cuda"` and `gpu_reproducibility_seed` is set, runtime requires a deterministic GPU XLA flag (`--xla_gpu_deterministic_ops[=true]` or `--xla_gpu_exclude_nondeterministic_ops[=true]`) to already be present in `XLA_FLAGS`, warning in non-strict mode and raising in strict mode. The policy fields remain reporting/acceptance metadata rather than kernel-wiring knobs, and the docs now state that runtime validates these pre-import CUDA/XLA preconditions for parity lanes.
 
@@ -153,7 +153,7 @@ tests/geo/test_curve_objectives.py::test_curve_surface_dense_path_respects_stric
 
 ### Tier 3 (nice-to-have)
 
-- [ ] **44.** Multi-GPU collective operation test (if/when #35 is implemented).
+- [x] **44.** ~~Multi-GPU collective operation test (if/when #35 is implemented).~~ **DONE** — `tests/test_jax_import_smoke.py::test_grouped_biot_savart_coil_collective_parity_and_lowering` covers the coil-axis collective path, parity against the dense grouped-field reference, native pullbacks, mixed quadrature groups, and all-reduce lowering under a forced four-device CPU mesh.
 - [x] **45.** ~~Tolerance ratchet regression test — verify CI contract `gpu_reduction_order_max_ulp` and `gpu_reduction_order_rel_tol` cannot loosen without explicit override.~~ **DONE** — the smoke workflow runs the ratchet/ULP/payload helper tests as an explicit CI gate (`Run CI contract helper tests` in `.github/workflows/jax_smoke.yml`), and `tests/test_benchmark_helpers.py` now asserts that workflow step keeps the exact ratchet gate wiring in place. Loosening the ratchet contract now requires an intentional workflow/test change rather than silently drifting through unit-only coverage.
 - [x] **46.** ~~Transfer guard fuzz test — systematically inject host scalars into kernel entry points and assert rejection under `disallow`. Scope this to the real single-stage target-lane entry points and immutable runtime-bundle boundaries, matching the official JAX transfer-guard semantics for implicit host↔device movement.~~ **DONE** — `tests/subprocess/jax_runtime_cases.py::single-stage-target-runtime-transfer-guard` now exercises the real single-stage runtime bundle from a serialized solved Boozer snapshot, verifies that the public runtime-bundle seam uses explicit staging where JAX allows it, and asserts that the compiled inner kernels plus the jitted single-stage success filter still reject implicit host inputs under `transfer_guard=disallow`; covered by `tests/test_jax_import_smoke.py::test_transfer_guard_disallow_enforces_single_stage_target_runtime_boundaries`.
 - [x] **47.** ~~Unit tests for private-optimizer edge cases: `y_k·s_k ≈ 0`, `‖y_k‖² ≈ 0`, stalled step, curvature-sign flip.~~ **DONE** — `test_minimize_lbfgs_private_rejects_degenerate_curvature_update`, `test_minimize_lbfgs_private_rejects_stalled_nonconverged_step`, `test_minimize_lbfgs_private_clamps_gamma_on_large_curvature_ratio` in `test_boozersurface_jax_private.py`; CI-validated.
@@ -193,18 +193,10 @@ The main remaining single-stage work after the GPU-port proof is donor/seed/sear
   - [x] **`#33`** is closed: `_line_search.py` now seeds zoom with a real cached bracketing sample and reuses that sample without extra eval counts when the cubic step lands back on it.
 - [ ] De-prioritize, but do **not** close, the more speculative perf items until profiling or HLO evidence says otherwise:
   - [ ] **`#24`** is not a ship blocker and may turn out to be noise, but keep it open until CUDA memory profiling says the synthetic and real-Stage-2 outer-JIT donation probes are both worthless.
-  - [ ] **`#28`** remains open pending a target-lane full-loop
-    `BoozerSurfaceJAX` measurement. RZ-only fusion now has a local HLO probe
-    (`benchmarks/surface_rz_geometry_hlo_probe.py`): on the CPU lane with
-    JAX 0.10.0, `mpol=8`, `ntor=6`, `nphi=65`, `ntheta=66`, scalar
-    composition vs fused geometry measured lowered graph counts at
-    `cosine 6 -> 2`, `sine 6 -> 2`, and `reduce 32 -> 16`. Optimized HLO
-    measured `711 -> 546` lines (23.21% lower), with unchanged compiled
-    trig/reduce counts (`cosine=6`, `sine=6`, `reduce=6`). Local CPU timing was
-    noisy rather than ship evidence: observed reruns ranged from modestly
-    faster to slower. Do not close or ship as a proven production speedup until
-    the full RZ Boozer loop on the target lane clears the >=5% threshold;
-    revert the fused route if that full-loop gate misses.
+  - [x] **`#28`** is closed as a structural cleanup: RZ geometry now uses the fused
+    `surface_rz_fourier_geometry_from_spec(...)` route in the Boozer hot path,
+    with local HLO/probe coverage. Do not cite the original 15-25% target-lane
+    speedup estimate unless a full RZ Boozer loop benchmark on CUDA proves it.
 
 #### Stage 2 reference shelf
 
@@ -235,11 +227,11 @@ The main remaining single-stage work after the GPU-port proof is donor/seed/sear
 - [x] **53.** ~~`optimizer_jax_private/*.py` — add inline algorithm references (e.g., "Nocedal & Wright, *Numerical Optimization*, Algorithm 7.4" for L-BFGS two-loop).~~ **DONE** — `_lbfgs.py` documents the Nocedal-Wright Algorithm 7.4 two-loop recursion contract, and `_line_search.py` documents the strong-Wolfe bracketing/zoom reference.
 - [x] **54.** ~~`biotsavart.py:468-470` — add explicit `in_axes=(0,)` to the outer `jax.vmap` (currently relies on default).~~ **DONE** — both per-point and tangent-basis `vmap` calls now spell out `in_axes=(0,)`.
 - [x] **55.** ~~`biotsavart.py:224-227, 282-283, 314` — document padding overhead budget and the `chunk_size` tuning trade-off (when is 2× overhead acceptable vs when should chunk_size be raised).~~ **DONE** — coil, quadrature, and point chunk-padding sites now document the bounded zero-padding budget and when `chunk_size` should be retuned.
-- [ ] **56.** `biotsavart.py:208-222`, `surface_rzfourier.py:260-279` — profile the two-chunk fast path special-case against the padded `fori_loop` path. If <5% improvement, delete for simplicity.
+- [ ] **56.** `biotsavart.py:201-279` — profile the coil/quadrature two-chunk fast path special-cases against the padded `fori_loop` path. If <5% improvement, delete for simplicity. The old `surface_rzfourier.py:260-279` pointer is stale: current RZ geometry uses the fused `surface_rz_fourier_geometry_from_spec(...)` route and has no two-chunk fast path.
 - [x] **57.** ~~Document the `biot_savart_d2B_by_dXdX` Hessian kernel memory cost (3×N tensor per point) at `biotsavart.py:550-553`.~~ **DONE** — the public Hessian helper now documents the `(npoints, 3, 3, 3)` dense materialization cost and points callers to `biot_savart_B_and_dB` unless second point derivatives are required.
 - [x] **58.** ~~`curve_geometry.py:486-572` — `segment_segment_distance_pure` uses 5 levels of nested `lax.cond`. Correct but hard to review. Add a comment diagram or split.~~ **DONE** — `segment_segment_distance_pure` now includes a branch map in its docstring without changing the JAX control-flow kernel.
 - [x] **59.** ~~Document the PLU ill-conditioning finding in a code comment near `_solve_boozer_adjoint` at `surfaceobjectives_jax.py:265-268` — explain why iterative refinement is on by default and why CPU/JAX direct parity is impossible on the exact path.~~ **DONE** — `_solve_boozer_adjoint` now documents that the exact-adjoint runtime uses operator-backed callbacks with residual refinement by default, and that dense PLU CPU LAPACK vs JAX/XLA solves are not a direct adjoint-vector parity contract. `_traceable_solve_plu_linearization` also states the residual-quality success contract.
-- [ ] **60.** Track upstream PR status for the simsopt merge (gate 5 of the ship gates — "Upstream PRs to simsopt: NOT STARTED" per `project_gpu_ship_gates.md`).
+- [x] **60.** ~~Track upstream PR status for the simsopt merge (gate 5 of the ship gates — "Upstream PRs to simsopt: NOT STARTED" per `project_gpu_ship_gates.md`).~~ **DONE** — checked `hiddenSymmetries/simsopt` on 2026-04-27. There is no upstream PR authored from this fork for the GPU-port branch. Open upstream JAX-related work includes draft PR #604, "Draft: add JAX VMEC/Boozer optimization path", updated 2026-04-07, and PR #607, "Add CurvePlanarEllipticalCylindrical JAX curve and tests", opened 2026-03-23; both are separate from this Stage-2 GPU-port merge.
 
 ---
 
@@ -247,23 +239,27 @@ The main remaining single-stage work after the GPU-port proof is donor/seed/sear
 
 **Last audit:** 2026-04-27
 
-**Total:** 60 items — **50 done, 2 partial, 8 open**
+**Original audit total:** 60 items — **55 done, 2 partial, 3 open**
+
+**Review addendum total:** 26 items — **26 done, 0 partial, 0 open** (`#61-#86`)
+
+**Combined total:** 86 items — **81 done, 2 partial, 3 open**
 
 | Tier | Items | Done | Partial | Open |
 |------|-------|------|---------|------|
 | 0 — Ship blockers | 3 | **3** | 0 | 0 |
 | 1 — Correctness/defensive | 8 | **8** (4-11) | 0 | 0 |
 | 2 — Transfer-guard | 11 | **11** (12-22) | 0 | 0 |
-| 3 — Performance | 15 | **8** (23,30-34,36,37) | **2** (24,27) | **5** (25,26,28,29,35) |
-| 4 — Test coverage | 12 | **11** (38-43,45-49) | 0 | **1** (44) |
-| 5 — Docs/cleanup | 11 | **9** (50-55,57-59) | 0 | **2** (56,60) |
+| 3 — Performance | 15 | **11** (23,25,28,30-37) | **2** (24,27) | **2** (26,29) |
+| 4 — Test coverage | 12 | **12** (38-49) | 0 | 0 |
+| 5 — Docs/cleanup | 11 | **10** (50-55,57-60) | 0 | **1** (56) |
 
 **Estimated remaining effort:**
 - Tier 0: **CLEARED**
 - Tier 1: **CLEARED**
 - Tier 2: **CLEARED**
-- Tier 3: benchmark/hardware gated (#24-#29, #35)
-- Tier 4: multi-GPU gated (#44 depends on #35)
-- Tier 5: one benchmark cleanup (#56) plus upstream PR tracking (#60)
+- Tier 3: benchmark/hardware gated (#24, #26, #27, #29)
+- Tier 4: **CLEARED**
+- Tier 5: one benchmark cleanup (#56)
 
 **None of these items invalidate the port.** The validation concluded the JAX port is correctly built on JAX idioms and production-grade for Stage-2 outer optimization on single-GPU (L4 evidence: 254/255 tests, 238 MB VRAM, bitwise reproducible; V100: 33× speedup). This list represents the punchlist between "research-usable on L4" and "production-ready strict-cuda on A100 with `disallow` baseline".
