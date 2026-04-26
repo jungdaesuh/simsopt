@@ -16,6 +16,7 @@ from banana_opt.hardware_constraint_schema import (
 )
 from banana_opt.poloidal_extent import poloidal_extent_rad_from_objective
 from banana_opt.single_stage_constraints import single_stage_constraint_activity_tolerances
+from banana_opt.smooth_distance_selection import pairwise_block_min
 
 
 def average_surface_objectives(objectives, weights=None):
@@ -107,6 +108,10 @@ def _objective_gradient(objective, objective_optimizable=None):
     return np.asarray(partial_gradient, dtype=float)
 
 
+def _positive_violation(signed_value):
+    return max(0.0, float(signed_value))
+
+
 def _objective_upper_bound_constraint(objective, threshold, objective_optimizable):
     if threshold is None:
         raise ValueError(
@@ -114,7 +119,7 @@ def _objective_upper_bound_constraint(objective, threshold, objective_optimizabl
         )
     signed_value = float(objective.J()) - float(threshold)
     grad = _objective_gradient(objective, objective_optimizable)
-    return signed_value, grad, max(0.0, signed_value)
+    return signed_value, grad, _positive_violation(signed_value)
 
 
 def _scalar_abs_upper_bound_constraint(optimizable, threshold, objective_optimizable):
@@ -126,7 +131,7 @@ def _scalar_abs_upper_bound_constraint(optimizable, threshold, objective_optimiz
         optimizable.vjp(cotangent)(objective_optimizable),
         dtype=float,
     )
-    return signed_value, grad, max(0.0, signed_value)
+    return signed_value, grad, _positive_violation(signed_value)
 
 
 def independent_banana_current_alm_constraint_name(index: int) -> str:
@@ -147,6 +152,61 @@ def _banana_current_alm_metadata_name(name: str) -> str:
     if _is_independent_banana_current_alm_constraint_name(name):
         return "banana_current_upper_bound"
     return name
+
+
+def _flat_surface_points(surface) -> np.ndarray:
+    return np.asarray(surface.gamma(), dtype=float).reshape((-1, 3))
+
+
+def _hard_min_curve_curve_signed_constraint(curves, minimum_distance):
+    curve_points = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
+    hard_min = min(
+        pairwise_block_min(gamma_i, curve_points[previous_index])
+        for index, gamma_i in enumerate(curve_points)
+        for previous_index in range(index)
+    )
+    signed_value = float(minimum_distance) - float(hard_min)
+    return signed_value, _positive_violation(signed_value)
+
+
+def _hard_min_curve_surface_signed_constraint(curves, surface, minimum_distance):
+    flat_surface = _flat_surface_points(surface)
+    hard_min = min(
+        pairwise_block_min(np.asarray(curve.gamma(), dtype=float), flat_surface)
+        for curve in curves
+    )
+    signed_value = float(minimum_distance) - float(hard_min)
+    return signed_value, _positive_violation(signed_value)
+
+
+def _hard_min_surface_surface_signed_constraint(
+    surface_1,
+    surface_2,
+    minimum_distance,
+):
+    hard_min = pairwise_block_min(
+        _flat_surface_points(surface_1),
+        _flat_surface_points(surface_2),
+    )
+    signed_value = float(minimum_distance) - float(hard_min)
+    return signed_value, _positive_violation(signed_value)
+
+
+def _hard_min_surface_stack_signed_constraint(surfaces, minimum_distance):
+    surface_points = [_flat_surface_points(surface) for surface in surfaces]
+    hard_min = min(
+        pairwise_block_min(surface_points[index - 1], surface_points[index])
+        for index in range(1, len(surface_points))
+    )
+    signed_value = float(minimum_distance) - float(hard_min)
+    return signed_value, _positive_violation(signed_value)
+
+
+def _hard_max_curvature_signed_constraint(curve, threshold):
+    signed_value = float(np.max(np.asarray(curve.kappa(), dtype=float))) - float(
+        threshold
+    )
+    return signed_value, _positive_violation(signed_value)
 
 
 def augment_frontier_metric_state(
@@ -721,6 +781,7 @@ def _single_stage_hardware_threshold_overrides(
     curve_surface_min_distance,
     curvature_threshold,
     surface_surface_min_distance=0.0,
+    surface_stack_min_distance=0.0,
     coil_length_threshold=None,
     banana_current_threshold=None,
     poloidal_extent_threshold=None,
@@ -731,6 +792,7 @@ def _single_stage_hardware_threshold_overrides(
             ("coil_surface_spacing", curve_surface_min_distance),
             ("max_curvature", curvature_threshold),
             ("surface_vessel_spacing", surface_surface_min_distance),
+            ("surface_surface_spacing", surface_stack_min_distance),
             ("coil_length", coil_length_threshold),
             ("banana_current", banana_current_threshold),
             ("poloidal_extent", poloidal_extent_threshold),
@@ -764,6 +826,7 @@ def _single_stage_alm_constraint_metadata(
     *,
     threshold_overrides: dict[str, float],
     activity_tolerance_by_name: dict[str, float],
+    use_hard_geometry_signals: bool,
     qs_threshold,
     boozer_threshold,
     iota_penalty_threshold,
@@ -776,6 +839,13 @@ def _single_stage_alm_constraint_metadata(
         "boozer_residual": boozer_threshold,
         "iota_penalty": iota_penalty_threshold,
         "length_penalty": length_penalty_threshold,
+    }
+    exact_geometry_names = {
+        "coil_coil_spacing",
+        "coil_surface_spacing",
+        "surface_vessel_spacing",
+        "surface_surface_spacing",
+        "max_curvature",
     }
     for constraint_name in constraint_names:
         activity_tolerance = activity_tolerance_by_name.get(constraint_name, 0.0)
@@ -791,14 +861,17 @@ def _single_stage_alm_constraint_metadata(
             constraint_name in exact_hardware_names
             or _is_independent_banana_current_alm_constraint_name(constraint_name)
         )
+        uses_hard_signal = uses_hard_value or (
+            use_hard_geometry_signals and constraint_name in exact_geometry_names
+        )
         metadata_by_name[constraint_name] = hardware_constraint_alm_metadata(
             metadata_name,
             threshold_overrides=threshold_overrides,
             activity_tolerance=activity_tolerance,
             objective_value_kind="hard" if uses_hard_value else "surrogate",
             gradient_value_kind="hard" if uses_hard_value else "surrogate",
-            dual_update_value_kind="hard" if uses_hard_value else "surrogate",
-            feasibility_value_kind="hard" if uses_hard_value else "surrogate",
+            dual_update_value_kind="hard" if uses_hard_signal else "surrogate",
+            feasibility_value_kind="hard" if uses_hard_signal else "surrogate",
         )
     return metadata_by_name
 
@@ -837,6 +910,10 @@ def evaluate_alm_objective(
     vessel_surface=None,
     surface_surface_min_distance=0.0,
     surface_surface_constraint_fn=None,
+    surface_stack_surfaces=None,
+    surface_stack_min_distance=0.0,
+    surface_stack_constraint_fn=None,
+    hard_surrogate_diagnostics=False,
     augmented_inequality_objective_fn=augmented_inequality_objective,
     activity_tolerances_fn=single_stage_constraint_activity_tolerances,
     alm_formulation="weighted_sum",
@@ -932,6 +1009,20 @@ def evaluate_alm_objective(
             surface_surface_grad,
             surface_surface_violation,
         )
+    if surface_stack_surfaces is not None:
+        surface_stack_signed_value, surface_stack_grad, surface_stack_violation = (
+            surface_stack_constraint_fn(
+                surface_stack_surfaces,
+                surface_stack_min_distance,
+                distance_smoothing,
+                objective_optimizable,
+            )
+        )
+        hardware_constraints["surface_surface_spacing"] = (
+            surface_stack_signed_value,
+            surface_stack_grad,
+            surface_stack_violation,
+        )
     if coil_length_objective is not None and coil_length_threshold is not None:
         hardware_constraints["coil_length_upper_bound"] = _objective_upper_bound_constraint(
             coil_length_objective,
@@ -974,6 +1065,44 @@ def evaluate_alm_objective(
             Z_winding=JPoloidalExtent.Z_winding,
         )
 
+    hard_signed_values_by_name: dict[str, float] = {
+        name: float(values[0]) for name, values in hardware_constraints.items()
+    }
+    hard_violation_values_by_name: dict[str, float] = {
+        name: float(values[2]) for name, values in hardware_constraints.items()
+    }
+    if hard_surrogate_diagnostics:
+        hard_signed_values_by_name["coil_coil_spacing"], hard_violation_values_by_name[
+            "coil_coil_spacing"
+        ] = _hard_min_curve_curve_signed_constraint(curves, curve_curve_min_distance)
+        hard_signed_values_by_name["coil_surface_spacing"], hard_violation_values_by_name[
+            "coil_surface_spacing"
+        ] = _hard_min_curve_surface_signed_constraint(
+            curves,
+            outer_surface,
+            curve_surface_min_distance,
+        )
+        hard_signed_values_by_name["max_curvature"], hard_violation_values_by_name[
+            "max_curvature"
+        ] = _hard_max_curvature_signed_constraint(banana_curve, curvature_threshold)
+        if JSurfSurf is not None:
+            (
+                hard_signed_values_by_name["surface_vessel_spacing"],
+                hard_violation_values_by_name["surface_vessel_spacing"],
+            ) = _hard_min_surface_surface_signed_constraint(
+                outer_surface,
+                vessel_surface,
+                surface_surface_min_distance,
+            )
+        if surface_stack_surfaces is not None:
+            (
+                hard_signed_values_by_name["surface_surface_spacing"],
+                hard_violation_values_by_name["surface_surface_spacing"],
+            ) = _hard_min_surface_stack_signed_constraint(
+                surface_stack_surfaces,
+                surface_stack_min_distance,
+            )
+
     physics_constraints: dict[str, tuple[float, np.ndarray, float]] = {}
     if alm_formulation == "thresholded_physics":
         physics_constraints = {
@@ -1002,18 +1131,36 @@ def evaluate_alm_objective(
     active_constraint_names: list[str] = []
     constraint_values: list[float] = []
     constraint_grads: list[np.ndarray] = []
+    surrogate_feasibility_values: list[float] = []
+    dual_update_values: list[float] = []
     feasibility_values: list[float] = []
+    hard_signed_values: list[float] = []
+    hard_violation_values: list[float] = []
+    surrogate_signed_values: list[float] = []
     for constraint_name in constraint_names:
         if constraint_name in hardware_constraints:
             signed_value, grad, violation = hardware_constraints[constraint_name]
+            hard_signed_value = hard_signed_values_by_name[constraint_name]
+            hard_violation_value = hard_violation_values_by_name[constraint_name]
         elif constraint_name in physics_constraints:
             signed_value, grad, violation = physics_constraints[constraint_name]
+            hard_signed_value = signed_value
+            hard_violation_value = violation
         else:
             raise ValueError(f"Unknown ALM constraint name {constraint_name!r}.")
         active_constraint_names.append(constraint_name)
         constraint_values.append(signed_value)
         constraint_grads.append(grad)
-        feasibility_values.append(violation)
+        surrogate_feasibility_values.append(violation)
+        hard_signed_values.append(hard_signed_value)
+        hard_violation_values.append(hard_violation_value)
+        surrogate_signed_values.append(signed_value)
+        if hard_surrogate_diagnostics and constraint_name in hardware_constraints:
+            dual_update_values.append(hard_signed_value)
+            feasibility_values.append(hard_violation_value)
+        else:
+            dual_update_values.append(signed_value)
+            feasibility_values.append(violation)
 
     geometry_tolerances = np.asarray(
         activity_tolerances_fn(
@@ -1032,6 +1179,10 @@ def evaluate_alm_objective(
         name: float(value)
         for name, value in zip(geometry_names, geometry_tolerances)
     }
+    if surface_stack_surfaces is not None:
+        constraint_tolerance_by_name["surface_surface_spacing"] = 4.0 * float(
+            distance_smoothing
+        )
     for exact_constraint_name in ("coil_length_upper_bound", "banana_current_upper_bound"):
         if exact_constraint_name in hardware_constraints:
             constraint_tolerance_by_name[exact_constraint_name] = 1.0e-3
@@ -1053,6 +1204,7 @@ def evaluate_alm_objective(
         curve_surface_min_distance=curve_surface_min_distance,
         curvature_threshold=curvature_threshold,
         surface_surface_min_distance=surface_surface_min_distance,
+        surface_stack_min_distance=surface_stack_min_distance,
         coil_length_threshold=coil_length_threshold,
         banana_current_threshold=banana_current_threshold,
         poloidal_extent_threshold=poloidal_extent_threshold,
@@ -1061,6 +1213,7 @@ def evaluate_alm_objective(
         active_constraint_names,
         threshold_overrides=threshold_overrides,
         activity_tolerance_by_name=constraint_tolerance_by_name,
+        use_hard_geometry_signals=hard_surrogate_diagnostics,
         qs_threshold=qs_threshold,
         boozer_threshold=boozer_threshold,
         iota_penalty_threshold=iota_penalty_threshold,
@@ -1074,13 +1227,35 @@ def evaluate_alm_objective(
     normalized_payload = normalize_alm_constraints(
         constraint_values,
         constraint_grads,
+        surrogate_feasibility_values,
+        constraint_activity_tolerances,
+        constraint_scales,
+    )
+    signal_payload = normalize_alm_constraints(
+        dual_update_values,
+        constraint_grads,
         feasibility_values,
+        constraint_activity_tolerances,
+        constraint_scales,
+    )
+    hard_signal_payload = normalize_alm_constraints(
+        hard_signed_values,
+        constraint_grads,
+        hard_violation_values,
+        constraint_activity_tolerances,
+        constraint_scales,
+    )
+    surrogate_signal_payload = normalize_alm_constraints(
+        surrogate_signed_values,
+        constraint_grads,
+        surrogate_feasibility_values,
         constraint_activity_tolerances,
         constraint_scales,
     )
     normalized_constraint_values = normalized_payload["normalized_signed_values"]
     normalized_constraint_grads = normalized_payload["normalized_constraint_grads"]
-    normalized_feasibility_values = normalized_payload["normalized_feasibility_values"]
+    normalized_dual_update_values = signal_payload["normalized_signed_values"]
+    normalized_feasibility_values = signal_payload["normalized_feasibility_values"]
     normalized_activity_tolerances = normalized_payload[
         "normalized_activity_tolerances"
     ]
@@ -1096,17 +1271,45 @@ def evaluate_alm_objective(
     base_eval.update(alm_eval)
     base_eval["base_total"] = base_total
     base_eval["constraint_names"] = active_constraint_names
-    base_eval["dual_update_values"] = normalized_constraint_values
+    base_eval["dual_update_values"] = normalized_dual_update_values
     base_eval["feasibility_values"] = normalized_feasibility_values
     base_eval["max_feasibility_violation"] = float(max(normalized_feasibility_values))
     base_eval["constraint_grads"] = normalized_constraint_grads
     base_eval["constraint_activity_tolerances"] = normalized_activity_tolerances
     base_eval["normalized_signed_constraint_values"] = normalized_constraint_values
     base_eval["normalized_feasibility_values"] = normalized_feasibility_values
+    base_eval["hard_signed_constraint_values"] = hard_signal_payload[
+        "normalized_signed_values"
+    ]
+    base_eval["hard_violation_values"] = hard_signal_payload[
+        "normalized_feasibility_values"
+    ]
+    base_eval["surrogate_signed_constraint_values"] = surrogate_signal_payload[
+        "normalized_signed_values"
+    ]
+    base_eval["hard_dual_update_values"] = hard_signal_payload[
+        "normalized_signed_values"
+    ]
     base_eval["search_hardware_constraint_payload_kind"] = "signed_residual"
     base_eval.update(metadata_payload)
-    base_eval["raw_dual_update_values"] = np.asarray(constraint_values, dtype=float)
+    base_eval["raw_dual_update_values"] = np.asarray(dual_update_values, dtype=float)
     base_eval["raw_feasibility_values"] = np.asarray(feasibility_values, dtype=float)
+    base_eval["raw_hard_signed_constraint_values"] = np.asarray(
+        hard_signed_values,
+        dtype=float,
+    )
+    base_eval["raw_hard_violation_values"] = np.asarray(
+        hard_violation_values,
+        dtype=float,
+    )
+    base_eval["raw_surrogate_signed_constraint_values"] = np.asarray(
+        surrogate_signed_values,
+        dtype=float,
+    )
+    base_eval["raw_hard_dual_update_values"] = np.asarray(
+        hard_signed_values,
+        dtype=float,
+    )
     base_eval["raw_constraint_grads"] = [
         np.asarray(grad, dtype=float) for grad in constraint_grads
     ]

@@ -77,6 +77,14 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         traversal_policy="allowed",
     ),
     HardwareConstraintSpec(
+        name="surface_surface_spacing",
+        kind="lower_bound",
+        threshold=COIL_PLASMA_MIN_DIST_M,
+        applies_to=frozenset({"alm"}),
+        traversal_policy="allowed",
+        alm_block="surface",
+    ),
+    HardwareConstraintSpec(
         name="max_curvature",
         kind="upper_bound",
         threshold=MAX_CURVATURE_INV_M,
@@ -118,6 +126,7 @@ _DEFAULT_ALM_BLOCK_BY_NAME: Mapping[str, ALMBlock] = {
     "coil_coil_spacing": "geometry",
     "coil_surface_spacing": "geometry",
     "surface_vessel_spacing": "surface",
+    "surface_surface_spacing": "surface",
     "max_curvature": "geometry",
     "coil_length": "geometry",
     "poloidal_extent": "geometry",

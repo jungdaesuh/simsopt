@@ -544,6 +544,82 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertIsNone(settings.trust_radius_init)
 
+    def test_single_stage_adaptive_smoothing_counts_normalized_hard_surrogate_gaps(self):
+        functions = extract_functions(
+            SINGLE_STAGE_MODULE_PATH,
+            [
+                "adapt_alm_smoothing_from_history",
+                "normalized_hard_surrogate_gap_counts",
+                "shrink_alm_smoothing_for_gap_count",
+            ],
+            {
+                "np": np,
+                "_ALM_DISTANCE_GAP_CONSTRAINT_NAMES": frozenset(
+                    (
+                        "coil_coil_spacing",
+                        "coil_surface_spacing",
+                        "surface_vessel_spacing",
+                        "surface_surface_spacing",
+                    )
+                ),
+                "_ALM_CURVATURE_GAP_CONSTRAINT_NAMES": frozenset(
+                    ("max_curvature", "poloidal_extent")
+                ),
+            },
+        )
+        history_entry = {
+            "constraint_names": [
+                "surface_surface_spacing",
+                "max_curvature",
+                "banana_current_upper_bound",
+            ],
+            "surrogate_minus_hard_normalized_gap": [2.0e-3, 4.0e-3, 1.0],
+            "surrogate_hard_sign_mismatch_by_constraint": [False, True, True],
+            "effective_feasibility_tolerance": 1.0e-3,
+        }
+
+        counts = functions["normalized_hard_surrogate_gap_counts"](history_entry)
+        self.assertEqual(counts, {"distance": 1, "curvature": 1})
+        adapted = functions["adapt_alm_smoothing_from_history"](
+            0.004,
+            0.04,
+            history_entry,
+            distance_smoothing_min=0.001,
+            curvature_smoothing_min=0.01,
+        )
+        self.assertEqual(adapted["gap_counts"], counts)
+        self.assertAlmostEqual(adapted["distance_smoothing"], 0.0032)
+        self.assertAlmostEqual(adapted["curvature_smoothing"], 0.032)
+
+    def test_single_stage_alm_surface_stack_gate_relaxes_spacing_only_for_solver(self):
+        functions = extract_functions(
+            SINGLE_STAGE_MODULE_PATH,
+            [
+                "single_stage_surface_stack_alm_enabled",
+                "surface_stack_search_gate_for_solver",
+            ],
+            {},
+        )
+        search_gate = {
+            "surface_gap_threshold": 0.02,
+            "vessel_gap_threshold": 0.04,
+            "enforce_nesting": True,
+        }
+
+        solver_gate = functions["surface_stack_search_gate_for_solver"](
+            search_gate,
+            constraint_method="alm",
+            surface_count=2,
+        )
+
+        self.assertTrue(
+            functions["single_stage_surface_stack_alm_enabled"](2, 0.02)
+        )
+        self.assertEqual(solver_gate["surface_gap_threshold"], 0.0)
+        self.assertEqual(solver_gate["vessel_gap_threshold"], 0.04)
+        self.assertTrue(solver_gate["enforce_nesting"])
+        self.assertEqual(search_gate["surface_gap_threshold"], 0.02)
+
     def test_single_stage_source_uses_projected_inequality_alm_and_outer_accept_callback(self):
         source = SINGLE_STAGE_MODULE_PATH.read_text()
         objectives_source = SINGLE_STAGE_OBJECTIVES_MODULE_PATH.read_text()
@@ -558,6 +634,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertNotIn("inner_callback=callback", source)
         self.assertIn("history_callback=history_callback", source)
         self.assertIn("single_stage_alm_constraint_names(", source)
+        self.assertIn("constraint_blocks=alm_constraint_blocks", source)
+        self.assertIn("hard_surrogate_diagnostics=True", source)
+        self.assertIn("surface_stack_constraint_fn=_smooth_min_surface_stack_signed_constraint", source)
         self.assertIn("alm_formulation=args.alm_formulation", source)
 
     def test_hardware_constraint_schema_declares_expected_targets(self):
@@ -573,6 +652,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "coil_coil_spacing",
                 "coil_surface_spacing",
                 "surface_vessel_spacing",
+                "surface_surface_spacing",
                 "max_curvature",
                 "coil_length",
                 "poloidal_extent",
@@ -585,6 +665,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             specs["poloidal_extent"].applies_to,
             frozenset({"penalty", "alm", "artifact"}),
         )
+        self.assertEqual(specs["surface_surface_spacing"].applies_to, frozenset({"alm"}))
+        self.assertEqual(specs["surface_surface_spacing"].alm_block, "surface")
         self.assertEqual(specs["poloidal_extent"].kind, "upper_bound")
         self.assertEqual(
             specs["banana_current"].applies_to,
@@ -760,8 +842,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         schema_module = load_hardware_constraint_schema_module()
         functions = extract_functions(
             SINGLE_STAGE_MODULE_PATH,
-            ["single_stage_alm_constraint_names"],
+            ["single_stage_alm_constraint_blocks", "single_stage_alm_constraint_names"],
             {
+                "hardware_constraint_alm_metadata": schema_module.hardware_constraint_alm_metadata,
                 "hardware_constraint_alm_names": schema_module.hardware_constraint_alm_names,
                 "SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES": (
                     "qs_error",
@@ -787,6 +870,22 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "poloidal_extent",
                 "banana_current_upper_bound",
             ],
+        )
+        stacked_constraint_names = functions["single_stage_alm_constraint_names"](
+            alm_formulation="thresholded_physics",
+            include_surface_surface=False,
+            include_surface_stack=True,
+        )
+        self.assertIn("surface_surface_spacing", stacked_constraint_names)
+        self.assertEqual(
+            functions["single_stage_alm_constraint_blocks"](
+                (
+                    "surface_surface_spacing",
+                    "banana_current_0_upper_bound",
+                    "qs_error",
+                )
+            ),
+            ("surface", "current", "physics"),
         )
 
     def test_stage2_alm_constraint_names_follow_shared_schema(self):

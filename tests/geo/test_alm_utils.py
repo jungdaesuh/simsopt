@@ -1687,6 +1687,7 @@ class MinimizeAlmTests(unittest.TestCase):
             {
                 "outer_iteration",
                 "continuation_iteration",
+                "constraint_names",
                 "inner_iterations",
                 "inner_success",
                 "inner_message",

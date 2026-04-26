@@ -236,7 +236,10 @@ def _resolve_mode_name(mode_or_contract: str | SurfaceModeContract) -> str:
 
 
 def surface_mode_supports_alm(mode_or_contract: str | SurfaceModeContract) -> bool:
-    return _resolve_mode_name(mode_or_contract) == SINGLE_SURFACE
+    return _resolve_mode_name(mode_or_contract) in {
+        SINGLE_SURFACE,
+        EXPERIMENTAL_MULTISURFACE,
+    }
 
 
 def surface_mode_supports_boozer_stage_refinement(

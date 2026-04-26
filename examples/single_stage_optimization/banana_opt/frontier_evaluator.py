@@ -943,15 +943,25 @@ def _evaluate_search_objective(
     alm_multipliers = None
     alm_penalty = None
     if runtime.constraint_method == "alm":
-        alm_multipliers = np.zeros(
-            len(
-                single_stage.single_stage_alm_constraint_names(
-                    alm_formulation=runtime.args.alm_formulation,
-                    include_surface_surface=bundle["JSurfSurf"] is not None,
-                )
-            ),
-            dtype=float,
+        surface_stack_min_distance = float(runtime.args.surface_gap_threshold)
+        include_surface_stack = single_stage.single_stage_surface_stack_alm_enabled(
+            len(runtime.surface_data),
+            surface_stack_min_distance,
         )
+        surface_stack_surfaces = (
+            tuple(
+                entry["boozer_surface"].surface
+                for entry in runtime.surface_data
+            )
+            if include_surface_stack
+            else None
+        )
+        alm_constraint_names = single_stage.single_stage_alm_constraint_names(
+            alm_formulation=runtime.args.alm_formulation,
+            include_surface_surface=bundle["JSurfSurf"] is not None,
+            include_surface_stack=include_surface_stack,
+        )
+        alm_multipliers = np.zeros(len(alm_constraint_names), dtype=float)
         alm_penalty = float(runtime.args.alm_penalty_init)
         raw_eval = evaluate_alm_objective(
             runtime.surface_weights,
@@ -976,10 +986,7 @@ def _evaluate_search_objective(
             curvature_threshold=runtime.curvature_threshold,
             distance_smoothing=runtime.args.alm_distance_smoothing,
             curvature_smoothing=runtime.args.alm_curvature_smoothing,
-            constraint_names=single_stage.single_stage_alm_constraint_names(
-                alm_formulation=runtime.args.alm_formulation,
-                include_surface_surface=bundle["JSurfSurf"] is not None,
-            ),
+            constraint_names=alm_constraint_names,
             curve_curve_constraint_fn=single_stage._smooth_min_curve_curve_signed_constraint,
             curve_surface_constraint_fn=single_stage._smooth_min_curve_surface_signed_constraint,
             curvature_constraint_fn=single_stage._smooth_max_curvature_signed_constraint,
@@ -987,6 +994,10 @@ def _evaluate_search_objective(
             vessel_surface=runtime.vessel_surface,
             surface_surface_min_distance=runtime.surface_vessel_distance_threshold,
             surface_surface_constraint_fn=single_stage._smooth_min_surface_surface_signed_constraint,
+            surface_stack_surfaces=surface_stack_surfaces,
+            surface_stack_min_distance=surface_stack_min_distance,
+            surface_stack_constraint_fn=single_stage._smooth_min_surface_stack_signed_constraint,
+            hard_surrogate_diagnostics=True,
             alm_formulation=runtime.args.alm_formulation,
             qs_threshold=runtime.args.alm_qs_threshold,
             boozer_threshold=runtime.args.alm_boozer_threshold,

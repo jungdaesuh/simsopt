@@ -1,18 +1,18 @@
 # ALM Constraint Normalization and Block Penalty Implementation Plan
 
 Date: 2026-04-26
-Status: Phases 0 through 4 implemented; Phase 5 independent banana-current ALM implemented; remaining Phase 5 items deferred
-Scope: `examples/single_stage_optimization/alm_utils.py`, `banana_opt/hardware_constraint_schema.py`, `banana_opt/stage2_objectives.py`, `banana_opt/single_stage_objectives.py`, ALM result reporting, and focused ALM tests
+Status: Phases 0 through 5 implemented
+Scope: `examples/single_stage_optimization/alm_utils.py`, `banana_opt/hardware_constraint_schema.py`, `banana_opt/stage2_objectives.py`, `banana_opt/single_stage_objectives.py`, `banana_opt/single_stage_constraints.py`, `banana_opt/smooth_distance_selection.py`, `banana_opt/frontier_evaluator.py`, ALM result reporting, and focused ALM tests
 
 ## Review Verdict
 
-Approve Phases 0 through 4 for implementation. Phase 4 is implemented as an internal block-penalty path with scalar ALM preserved as the default. Phase 5 feature expansion has started with independent banana-current ALM; multi-surface ALM, adaptive smoothing, and distance acceleration remain deferred.
+Approve Phases 0 through 5 for implementation. Phase 4 is implemented as an internal block-penalty path with scalar ALM preserved as the default. Phase 5 feature expansion is implemented for independent banana-current ALM, ALM-only multi-surface spacing, adaptive smoothing from normalized hard/surrogate gaps, and KD-tree distance candidate pruning.
 
 The current ALM engine is already a real projected inequality augmented Lagrangian, not a simple penalty wrapper. It has L-BFGS-B inner solves, boxed trust-radius subproblems, nonfinite candidate rejection, multiplier and penalty caps, hard-vs-surrogate routing, KKT-style stationarity handling, history callbacks, and best-feasible restore.
 
-The validated problem was scale control. Stage 2 and single-stage ALM now route normalized signed residuals through the ALM math while preserving raw sidecars for certification and reporting. The remaining production policy is conservative: scalar ALM stays the default, and block penalties are available internally for validated fixtures before any CLI exposure.
+The validated problem was scale control. Stage 2 and single-stage ALM now route normalized signed residuals through the ALM math while preserving raw sidecars for certification and reporting. The remaining production policy is conservative: scalar ALM stays the default, and block penalties remain internal while production paths can pass explicit block assignments.
 
-Do not start with solver replacement, multi-surface ALM, or independent-current ALM. The implemented path keeps the existing ALM contract unit-aware and diagnostic. The normalized-vs-raw field contract is explicit inside `minimize_alm`, because hard/surrogate fields are not just report fields; they affect multiplier updates, activity masks, stationarity, positive-shift logic, and signal-mismatch penalty decisions.
+The implemented path keeps the existing ALM contract unit-aware and diagnostic. The normalized-vs-raw field contract is explicit inside `minimize_alm`, because hard/surrogate fields are not just report fields; they affect multiplier updates, activity masks, stationarity, positive-shift logic, and signal-mismatch penalty decisions.
 
 ## Implementation Status
 
@@ -27,6 +27,9 @@ Current implementation status:
 - [x] Final ALM result payloads now emit `ALM_SUMMARY`, `ALM_MULTIPLIER_INTERPRETATION`, `ALM_FINAL_AUGMENTED_GRADIENT_NORM`, and `ALM_FINAL_SURROGATE_KKT_STATIONARITY_NORM`.
 - [x] Phase 4 block penalties are implemented as an internal, non-CLI path.
 - [x] Phase 5 independent banana-current ALM is implemented as one normalized current-block constraint per control current.
+- [x] Phase 5 multi-surface ALM is implemented as ALM-only adjacent surface-spacing constraints; topology remains a gate/certification signal.
+- [x] Phase 5 adaptive smoothing narrows soft distance/curvature temperatures from normalized hard/surrogate gap counts and records events in result payloads.
+- [x] Phase 5 distance acceleration is implemented with KD-tree candidate pruning for smooth distance surrogates while hard checks remain exact.
 
 Baseline artifact scan generated:
 
@@ -570,12 +573,12 @@ surface: surface-vessel spacing
 
 ### Phase 5: Revisit feature expansion
 
-Do not implement these until normalization and diagnostics are stable.
+Implemented after normalization and diagnostics landed.
 
 - [x] Independent banana-current ALM: one normalized `abs(I_i) - I_max <= 0` constraint per control current.
-- [ ] Multi-surface ALM: surface spacing constraints only at first; topology remains a gate/certification signal.
-- [ ] Adaptive smoothing: driven by normalized hard/surrogate gap counts.
-- [ ] Distance acceleration: KD-tree candidate pruning for ALM surrogate gradients, while keeping exact hard checks.
+- [x] Multi-surface ALM: surface spacing constraints only at first; topology remains a gate/certification signal.
+- [x] Adaptive smoothing: narrow soft distance/curvature temperatures when normalized hard/surrogate gap counts show surrogate drift.
+- [x] Distance acceleration: KD-tree candidate pruning for ALM surrogate gradients, while keeping exact hard checks.
 
 ## Test Matrix
 
@@ -871,8 +874,8 @@ The likely first payoff is reliability and diagnosis quality, not raw wall-clock
 ## Non-Goals
 
 - [ ] Do not replace ALM with `trust-constr`.
-- [ ] Do not add multi-surface ALM in the same patch.
-- [ ] Do not add independent banana-current ALM before normalized scalar ALM lands.
+- [x] Add multi-surface spacing only after normalized scalar ALM and diagnostics land.
+- [x] Add independent banana-current ALM only after normalized scalar ALM lands.
 - [ ] Do not change penalty-mode hardware traversal behavior.
 - [ ] Do not remove hard feasibility certification fields.
 - [ ] Do not make topology a differentiable ALM constraint.

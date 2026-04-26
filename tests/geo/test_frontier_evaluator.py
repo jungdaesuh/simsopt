@@ -641,6 +641,84 @@ print(
             inline_eval["dJ_volume_metric"],
         )
 
+    def test_frontier_alm_surface_stack_uses_configured_gap_not_ramped_gate(self):
+        evaluator_module = load_frontier_evaluator_module()
+        captured = {}
+        bundle = {
+            "nonQSs": [_FakeAlgebraicObjective(0.0, [0.0])],
+            "brs": [_FakeAlgebraicObjective(0.0, [0.0])],
+            "effective_res_weight": 1.0,
+            "effective_iotas_weight": 1.0,
+            "effective_volume_weight": 1.0,
+            "Jiota": _FakeAlgebraicObjective(0.0, [0.0]),
+            "JVolume": _FakeAlgebraicObjective(0.0, [0.0]),
+            "JCurveLength": _FakeAlgebraicObjective(0.0, [0.0]),
+            "JCurveCurve": _FakeAlgebraicObjective(0.0, [0.0]),
+            "JCurveSurface": _FakeAlgebraicObjective(0.0, [0.0]),
+            "JCurvature": _FakeAlgebraicObjective(0.0, [0.0]),
+            "JSurfSurf": None,
+            "curvelength": _FakeAlgebraicObjective(0.0, [0.0]),
+            "frontier_goal_config": None,
+            "surface_iota_terms": [_FakeAlgebraicObjective(0.0, [0.0])],
+            "surface_volume_term": _FakeAlgebraicObjective(0.0, [0.0]),
+            "JnonQSRatioObjective": _FakeAlgebraicObjective(0.0, [0.0]),
+            "JBoozerResidualObjective": _FakeAlgebraicObjective(0.0, [0.0]),
+        }
+        runtime = SimpleNamespace(
+            constraint_method="alm",
+            surface_weights=np.array([1.0, 1.0], dtype=float),
+            objective_bundle=bundle,
+            objective_optimizable=object(),
+            trust_threshold=None,
+            trust_penalty_scale=None,
+            curves=[object()],
+            surface_data=[
+                {"boozer_surface": SimpleNamespace(surface=object())},
+                {"boozer_surface": SimpleNamespace(surface=object())},
+            ],
+            search_gate={"surface_gap_threshold": 0.0},
+            args=SimpleNamespace(
+                alm_formulation="weighted_sum",
+                alm_penalty_init=1.0,
+                alm_distance_smoothing=0.005,
+                alm_curvature_smoothing=0.05,
+                alm_qs_threshold=None,
+                alm_boozer_threshold=None,
+                alm_iota_penalty_threshold=None,
+                alm_length_penalty_threshold=None,
+                surface_gap_threshold=0.02,
+                single_stage_goal_mode="target",
+                length_weight=1.0,
+                cc_weight=1.0,
+                cs_weight=1.0,
+                curvature_weight=1.0,
+                surf_dist_weight=0.0,
+            ),
+            curve_curve_distance_threshold=0.05,
+            curve_surface_distance_threshold=0.015,
+            curvature_threshold=100.0,
+            vessel_surface=None,
+            surface_vessel_distance_threshold=0.04,
+            banana_coils=[SimpleNamespace(curve=object(), current=object())],
+            banana_current_max_A=16000.0,
+            length_target=1.7,
+        )
+
+        def fake_evaluate_alm_objective(*_args, **kwargs):
+            captured.update(kwargs)
+            return {"total": 0.0, "grad": np.zeros(1)}
+
+        with patch.object(
+            evaluator_module,
+            "evaluate_alm_objective",
+            side_effect=fake_evaluate_alm_objective,
+        ):
+            evaluator_module._evaluate_search_objective(runtime)
+
+        self.assertIn("surface_surface_spacing", captured["constraint_names"])
+        self.assertEqual(captured["surface_stack_min_distance"], 0.02)
+        self.assertEqual(len(captured["surface_stack_surfaces"]), 2)
+
     def _demo_spec(self, module):
         return module.SingleStageFrontierEvaluatorSpec(
             schema_version=module.FRONTIER_EVALUATOR_SPEC_SCHEMA_VERSION,

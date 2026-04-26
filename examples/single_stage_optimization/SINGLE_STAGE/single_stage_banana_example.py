@@ -161,6 +161,7 @@ from banana_opt.hardware_contracts import (
 )
 from banana_opt.hardware_constraint_schema import (
     build_hardware_constraint_artifact_payload_fields,
+    hardware_constraint_alm_metadata,
     hardware_constraint_alm_names,
 )
 from banana_opt.incumbents import (
@@ -243,6 +244,7 @@ from banana_opt.single_stage_constraints import (
     smooth_max_curvature_signed_constraint as _smooth_max_curvature_signed_constraint,
     smooth_min_curve_curve_signed_constraint as _smooth_min_curve_curve_signed_constraint,
     smooth_min_curve_surface_signed_constraint as _smooth_min_curve_surface_signed_constraint,
+    smooth_min_surface_stack_signed_constraint as _smooth_min_surface_stack_signed_constraint,
     smooth_min_surface_surface_signed_constraint as _smooth_min_surface_surface_signed_constraint,
 )
 from banana_opt.single_stage_search_policy import (
@@ -2041,6 +2043,154 @@ def current_single_stage_alm_banana_currents():
     return None
 
 
+def single_stage_surface_stack_alm_enabled(surface_count, surface_gap_threshold):
+    return int(surface_count) > 1 and float(surface_gap_threshold) > 0.0
+
+
+def current_single_stage_alm_surface_stack_surfaces():
+    if not single_stage_surface_stack_alm_enabled(
+        len(surface_data),
+        SURFACE_GAP_THRESHOLD,
+    ):
+        return None
+    return tuple(
+        entry["boozer_surface"].surface
+        for entry in surface_data
+    )
+
+
+def surface_stack_search_gate_for_solver(search_gate, *, constraint_method, surface_count):
+    if single_stage_surface_stack_alm_enabled(
+        surface_count,
+        search_gate["surface_gap_threshold"],
+    ) and str(constraint_method) == "alm":
+        solver_gate = dict(search_gate)
+        solver_gate["surface_gap_threshold"] = 0.0
+        return solver_gate
+    return search_gate
+
+
+def current_alm_distance_smoothing():
+    return float(ALM_DISTANCE_SMOOTHING)
+
+
+def current_alm_curvature_smoothing():
+    return float(ALM_CURVATURE_SMOOTHING)
+
+
+_ALM_DISTANCE_GAP_CONSTRAINT_NAMES = frozenset(
+    (
+        "coil_coil_spacing",
+        "coil_surface_spacing",
+        "surface_vessel_spacing",
+        "surface_surface_spacing",
+    )
+)
+_ALM_CURVATURE_GAP_CONSTRAINT_NAMES = frozenset(("max_curvature", "poloidal_extent"))
+
+
+def normalized_hard_surrogate_gap_counts(history_entry):
+    constraint_names = [str(name) for name in history_entry["constraint_names"]]
+    gaps = np.asarray(
+        history_entry["surrogate_minus_hard_normalized_gap"],
+        dtype=float,
+    )
+    mismatches = [
+        bool(value)
+        for value in history_entry["surrogate_hard_sign_mismatch_by_constraint"]
+    ]
+    feasibility_tolerance = float(history_entry["effective_feasibility_tolerance"])
+    counts = {"distance": 0, "curvature": 0}
+    for index, constraint_name in enumerate(constraint_names):
+        mismatch = mismatches[index]
+        gap_exceeds_gate = abs(float(gaps[index])) > feasibility_tolerance
+        if not (mismatch or gap_exceeds_gate):
+            continue
+        if constraint_name in _ALM_DISTANCE_GAP_CONSTRAINT_NAMES:
+            counts["distance"] += 1
+        if constraint_name in _ALM_CURVATURE_GAP_CONSTRAINT_NAMES:
+            counts["curvature"] += 1
+    return counts
+
+
+def shrink_alm_smoothing_for_gap_count(smoothing, smoothing_min, gap_count):
+    factor = 1.0 / (1.0 + 0.25 * float(gap_count))
+    return max(float(smoothing_min), float(smoothing) * factor)
+
+
+def adapt_alm_smoothing_from_history(
+    distance_smoothing,
+    curvature_smoothing,
+    history_entry,
+    *,
+    distance_smoothing_min,
+    curvature_smoothing_min,
+):
+    counts = normalized_hard_surrogate_gap_counts(history_entry)
+    return {
+        "distance_smoothing": shrink_alm_smoothing_for_gap_count(
+            distance_smoothing,
+            distance_smoothing_min,
+            counts["distance"],
+        ),
+        "curvature_smoothing": shrink_alm_smoothing_for_gap_count(
+            curvature_smoothing,
+            curvature_smoothing_min,
+            counts["curvature"],
+        ),
+        "gap_counts": counts,
+    }
+
+
+def update_single_stage_alm_smoothing_from_history(history_entry):
+    global ALM_DISTANCE_SMOOTHING, ALM_CURVATURE_SMOOTHING
+    previous_distance_smoothing = current_alm_distance_smoothing()
+    previous_curvature_smoothing = current_alm_curvature_smoothing()
+    adapted = adapt_alm_smoothing_from_history(
+        previous_distance_smoothing,
+        previous_curvature_smoothing,
+        history_entry,
+        distance_smoothing_min=ALM_DISTANCE_SMOOTHING_MIN,
+        curvature_smoothing_min=ALM_CURVATURE_SMOOTHING_MIN,
+    )
+    ALM_DISTANCE_SMOOTHING = adapted["distance_smoothing"]
+    ALM_CURVATURE_SMOOTHING = adapted["curvature_smoothing"]
+    if (
+        ALM_DISTANCE_SMOOTHING == previous_distance_smoothing
+        and ALM_CURVATURE_SMOOTHING == previous_curvature_smoothing
+    ):
+        return
+    run_dict["alm_adaptive_smoothing_events"].append(
+        {
+            "outer_iteration": history_entry["outer_iteration"],
+            "distance_gap_count": int(adapted["gap_counts"]["distance"]),
+            "curvature_gap_count": int(adapted["gap_counts"]["curvature"]),
+            "previous_distance_smoothing": float(previous_distance_smoothing),
+            "distance_smoothing": float(ALM_DISTANCE_SMOOTHING),
+            "previous_curvature_smoothing": float(previous_curvature_smoothing),
+            "curvature_smoothing": float(ALM_CURVATURE_SMOOTHING),
+        }
+    )
+
+
+def single_stage_alm_constraint_blocks(constraint_names):
+    blocks = []
+    for constraint_name in constraint_names:
+        if constraint_name in SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES:
+            blocks.append("physics")
+            continue
+        metadata_name = (
+            "banana_current_upper_bound"
+            if (
+                constraint_name.startswith("banana_current_")
+                and constraint_name.endswith("_upper_bound")
+            )
+            else constraint_name
+        )
+        blocks.append(hardware_constraint_alm_metadata(metadata_name).block)
+    return tuple(blocks)
+
+
 def evaluate_topology_gate(surface, bfield, nfieldlines, tmax, tol, survival_threshold):
     return _evaluate_topology_gate_impl(
         surface,
@@ -2794,7 +2944,7 @@ def validate_surface_mode_constraint_args(
     ):
         raise ValueError(
             "--constraint-method=alm currently requires "
-            f"--surface-mode={SINGLE_SURFACE} (legacy --num-surfaces=1)"
+            f"--surface-mode={SINGLE_SURFACE} or --surface-mode={EXPERIMENTAL_MULTISURFACE}"
         )
 
 
@@ -2841,6 +2991,7 @@ def single_stage_alm_constraint_names(
     *,
     alm_formulation,
     include_surface_surface,
+    include_surface_stack=False,
     banana_current_state=None,
 ):
     available_names = {
@@ -2858,6 +3009,8 @@ def single_stage_alm_constraint_names(
         available_names.add("banana_current")
     if include_surface_surface:
         available_names.add("surface_vessel_spacing")
+    if include_surface_stack:
+        available_names.add("surface_surface_spacing")
     names = list(hardware_constraint_alm_names(names=available_names))
     if use_independent_banana_currents:
         names.extend(
@@ -4086,11 +4239,15 @@ def evaluate_alm_objective(
             curve_surface_min_distance=CS_DIST,
             banana_curve=banana_curve,
             curvature_threshold=CURVATURE_THRESHOLD,
-            distance_smoothing=args.alm_distance_smoothing,
-            curvature_smoothing=args.alm_curvature_smoothing,
+            distance_smoothing=current_alm_distance_smoothing(),
+            curvature_smoothing=current_alm_curvature_smoothing(),
             constraint_names=single_stage_alm_constraint_names(
                 alm_formulation=args.alm_formulation,
                 include_surface_surface=JSurfSurf is not None,
+                include_surface_stack=single_stage_surface_stack_alm_enabled(
+                    len(surface_data),
+                    SURFACE_GAP_THRESHOLD,
+                ),
                 banana_current_state=globals().get("banana_current_state"),
             ),
             curve_curve_constraint_fn=_smooth_min_curve_curve_signed_constraint,
@@ -4100,6 +4257,10 @@ def evaluate_alm_objective(
             vessel_surface=VV,
             surface_surface_min_distance=SS_DIST,
             surface_surface_constraint_fn=_smooth_min_surface_surface_signed_constraint,
+            surface_stack_surfaces=current_single_stage_alm_surface_stack_surfaces(),
+            surface_stack_min_distance=SURFACE_GAP_THRESHOLD,
+            surface_stack_constraint_fn=_smooth_min_surface_stack_signed_constraint,
+            hard_surrogate_diagnostics=True,
             alm_formulation=args.alm_formulation,
             qs_threshold=args.alm_qs_threshold,
             boozer_threshold=args.alm_boozer_threshold,
@@ -4112,7 +4273,7 @@ def evaluate_alm_objective(
             banana_current_threshold=args.banana_current_max_A,
             JPoloidalExtent=JPoloidalExtent,
             poloidal_extent_threshold=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
-            poloidal_extent_smoothing=args.alm_curvature_smoothing,
+            poloidal_extent_smoothing=current_alm_curvature_smoothing(),
             poloidal_extent_constraint_fn=_smooth_max_poloidal_extent_signed_constraint,
             JNonQSObjective=objective_terms["JNonQSObjective"],
             JBoozerObjective=objective_terms["JBoozerObjective"],
@@ -6809,6 +6970,11 @@ def evaluate_search_step(x):
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
         SS_DIST if len(surface_data) > 1 else 0.0,
     )
+    solver_search_gate = surface_stack_search_gate_for_solver(
+        search_gate,
+        constraint_method=CONSTRAINT_METHOD,
+        surface_count=len(surface_data),
+    )
 
     curvature_precheck_status = evaluate_curvature_traversal_precheck(x, metrics)
     if not curvature_precheck_status["allow_boozer_eval"]:
@@ -6825,9 +6991,9 @@ def evaluate_search_step(x):
         surface_data,
         run_dict['surface_state'],
         vessel_surface=VV if len(surface_data) > 1 else None,
-        surface_gap_threshold=search_gate['surface_gap_threshold'],
-        vessel_gap_threshold=search_gate['vessel_gap_threshold'],
-        enforce_nesting=search_gate['enforce_nesting'],
+        surface_gap_threshold=solver_search_gate['surface_gap_threshold'],
+        vessel_gap_threshold=solver_search_gate['vessel_gap_threshold'],
+        enforce_nesting=solver_search_gate['enforce_nesting'],
     )
     metrics["surface_solve_seconds"] += time.perf_counter() - surface_solve_start
     success = stack_status['success']
@@ -7656,6 +7822,10 @@ SINGLE_STAGE_GOAL_MODE = "target"
 ALM_FORMULATION = "weighted_sum"
 ALM_MULTIPLIERS = np.zeros(0, dtype=float)
 ALM_PENALTY = 1.0
+ALM_DISTANCE_SMOOTHING = 0.0
+ALM_CURVATURE_SMOOTHING = 0.0
+ALM_DISTANCE_SMOOTHING_MIN = 0.0
+ALM_CURVATURE_SMOOTHING_MIN = 0.0
 JVolume = None
 JnonQSRatioObjective = None
 JBoozerResidualObjective = None
@@ -7724,6 +7894,10 @@ if __name__ == "__main__":
     ALM_FORMULATION = args.alm_formulation
     ALM_MULTIPLIERS = np.zeros(0, dtype=float)
     ALM_PENALTY = args.alm_penalty_init
+    ALM_DISTANCE_SMOOTHING = args.alm_distance_smoothing
+    ALM_CURVATURE_SMOOTHING = args.alm_curvature_smoothing
+    ALM_DISTANCE_SMOOTHING_MIN = args.alm_distance_smoothing / 8.0
+    ALM_CURVATURE_SMOOTHING_MIN = args.alm_curvature_smoothing / 8.0
     requested_finite_current_mode = getattr(
         args,
         "finite_current_mode",
@@ -8184,6 +8358,10 @@ if __name__ == "__main__":
                 single_stage_alm_constraint_names(
                     alm_formulation=ALM_FORMULATION,
                     include_surface_surface=JSurfSurf is not None,
+                    include_surface_stack=single_stage_surface_stack_alm_enabled(
+                        len(surface_data),
+                        SURFACE_GAP_THRESHOLD,
+                    ),
                     banana_current_state=banana_current_state,
                 )
             ),
@@ -8284,6 +8462,7 @@ if __name__ == "__main__":
         'accepted_boozer_stage': stage,
         'alm_feasibility_tolerance': args.alm_feas_tol if CONSTRAINT_METHOD == "alm" else None,
         'alm_stationarity_tolerance': args.alm_stationarity_tol if CONSTRAINT_METHOD == "alm" else None,
+        'alm_adaptive_smoothing_events': [] if CONSTRAINT_METHOD == "alm" else None,
         'best_accepted_incumbent': None,
         'best_accepted_metric': None,
         'best_accepted_stage': None,
@@ -8684,8 +8863,13 @@ if __name__ == "__main__":
         alm_constraint_names = single_stage_alm_constraint_names(
             alm_formulation=ALM_FORMULATION,
             include_surface_surface=JSurfSurf is not None,
+            include_surface_stack=single_stage_surface_stack_alm_enabled(
+                len(surface_data),
+                SURFACE_GAP_THRESHOLD,
+            ),
             banana_current_state=banana_current_state,
         )
+        alm_constraint_blocks = single_stage_alm_constraint_blocks(alm_constraint_names)
         alm_partial_state = {"history": []}
         resume_alm_state = (
             None
@@ -8762,6 +8946,7 @@ if __name__ == "__main__":
 
         def history_callback(history, latest_history_entry, multipliers, penalty):
             alm_partial_state["history"] = history
+            update_single_stage_alm_smoothing_from_history(latest_history_entry)
             emit_alm_partial_state(
                 multipliers,
                 penalty,
@@ -8808,6 +8993,7 @@ if __name__ == "__main__":
             restore_incumbent_state_fn=restore_incumbent_state,
             initial_multipliers=initial_alm_multipliers,
             initial_penalty=initial_alm_penalty,
+            constraint_blocks=alm_constraint_blocks,
         )
         alm_result = res
         alm_partial_state["history"] = [
@@ -9469,6 +9655,9 @@ if __name__ == "__main__":
         "ALM_MAX_SUBPROBLEM_CONTINUATIONS": args.alm_max_subproblem_continuations if CONSTRAINT_METHOD == "alm" else None,
         "ALM_DISTANCE_SMOOTHING": args.alm_distance_smoothing if CONSTRAINT_METHOD == "alm" else None,
         "ALM_CURVATURE_SMOOTHING": args.alm_curvature_smoothing if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_EFFECTIVE_DISTANCE_SMOOTHING": current_alm_distance_smoothing() if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_EFFECTIVE_CURVATURE_SMOOTHING": current_alm_curvature_smoothing() if CONSTRAINT_METHOD == "alm" else None,
+        "ALM_ADAPTIVE_SMOOTHING_EVENTS": run_dict["alm_adaptive_smoothing_events"] if CONSTRAINT_METHOD == "alm" else None,
         "ALM_QS_THRESHOLD": args.alm_qs_threshold if CONSTRAINT_METHOD == "alm" else None,
         "ALM_BOOZER_THRESHOLD": args.alm_boozer_threshold if CONSTRAINT_METHOD == "alm" else None,
         "ALM_IOTA_PENALTY_THRESHOLD": (

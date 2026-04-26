@@ -40,7 +40,11 @@ def load_surface_mode_contracts_module():
 
 
 def load_single_stage_example_module():
-    return load_module(SINGLE_STAGE_ENTRYPOINT_PATH, "single_stage_banana_example")
+    return load_module(
+        SINGLE_STAGE_ENTRYPOINT_PATH,
+        "single_stage_banana_example",
+        register_in_sys_modules=True,
+    )
 
 
 def load_goal_mode_comparison_module():
@@ -125,6 +129,15 @@ class SurfaceModeContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not implemented yet"):
             module.validate_surface_mode_runtime_support(contract)
 
+    def test_alm_supports_single_and_experimental_surface_modes_only(self):
+        module = load_surface_mode_contracts_module()
+
+        self.assertTrue(module.surface_mode_supports_alm(module.SINGLE_SURFACE))
+        self.assertTrue(
+            module.surface_mode_supports_alm(module.EXPERIMENTAL_MULTISURFACE)
+        )
+        self.assertFalse(module.surface_mode_supports_alm(module.PUBLISHED_MULTISURFACE))
+
 
 class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
     def test_resolve_surface_mode_contract_suppresses_legacy_warning_for_default_single_surface(self):
@@ -202,6 +215,8 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
             topology_gate_penalty_scale=4.0,
             hardware_search_mode="hard",
             hardware_search_soft_iterations=0,
+            curvature_traversal_band=0.0,
+            curvature_traversal_eval_budget=0,
             topology_scorer_every=0,
             topology_scorer_nfieldlines=12,
             topology_scorer_tmax=50.0,
@@ -273,16 +288,29 @@ class SingleStageSurfaceModeIntegrationTests(unittest.TestCase):
                 surface_mode_contract=contract,
             )
 
-    def test_validate_surface_mode_constraint_args_rejects_explicit_multisurface_alm(self):
+    def test_validate_surface_mode_constraint_args_allows_experimental_multisurface_alm(self):
         module = load_single_stage_example_module()
         args, contract = resolve_explicit_multisurface_contract(
             module,
             constraint_method="alm",
         )
 
+        module.validate_surface_mode_constraint_args(
+            args,
+            surface_mode_contract=contract,
+        )
+
+    def test_validate_surface_mode_constraint_args_rejects_published_multisurface_alm(self):
+        module = load_single_stage_example_module()
+        args = make_surface_mode_args(
+            surface_mode=module.PUBLISHED_MULTISURFACE,
+            constraint_method="alm",
+        )
+        contract = module.resolve_surface_mode_contract(args, warn_on_legacy_mapping=False)
+
         with self.assertRaisesRegex(
             ValueError,
-            f"--surface-mode={module.SINGLE_SURFACE}",
+            module.EXPERIMENTAL_MULTISURFACE,
         ):
             module.validate_surface_mode_constraint_args(
                 args,

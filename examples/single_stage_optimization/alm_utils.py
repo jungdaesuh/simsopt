@@ -1309,14 +1309,6 @@ def _block_penalty_growth_hits_cap(
     return not np.isfinite(requested_penalty) or requested_penalty > float(penalty_max)
 
 
-def _initial_alm_penalty(
-    settings: ALMSettings,
-    initial_penalty: float | None,
-) -> float:
-    penalty = _initial_alm_penalty(settings, initial_penalty)
-    return penalty
-
-
 def _initial_block_penalty_state(
     settings: ALMSettings,
     constraint_blocks: Sequence[str],
@@ -2464,6 +2456,7 @@ def minimize_alm(
                     {
                         "outer_iteration": int(outer_iteration),
                         "continuation_iteration": int(continuation_iteration),
+                        "constraint_names": [str(name) for name in constraint_names],
                         "inner_iterations": 0,
                         "inner_success": True,
                         "inner_message": "ALM skipped inner solve; current iterate already satisfies the KKT stationarity gate.",
@@ -2852,6 +2845,7 @@ def minimize_alm(
             history_entry = {
                 "outer_iteration": int(outer_iteration),
                 "continuation_iteration": int(continuation_iteration),
+                "constraint_names": [str(name) for name in constraint_names],
                 "inner_iterations": int(attempt_iterations),
                 "inner_success": bool(getattr(result, "success", False)),
                 "inner_message": str(getattr(result, "message", "")),

@@ -18,6 +18,9 @@ SINGLE_STAGE_GEOMETRY_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_geomet
 SINGLE_STAGE_CONSTRAINTS_PATH = (
     EXAMPLES_ROOT / "banana_opt" / "single_stage_constraints.py"
 )
+SMOOTH_DISTANCE_SELECTION_PATH = (
+    EXAMPLES_ROOT / "banana_opt" / "smooth_distance_selection.py"
+)
 SINGLE_STAGE_OBJECTIVES_PATH = (
     EXAMPLES_ROOT / "banana_opt" / "single_stage_objectives.py"
 )
@@ -2557,6 +2560,112 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["J_curvature"], 0.8)
         np.testing.assert_allclose(result["grad"], [8.0, -3.0])
 
+    def test_evaluate_alm_objective_uses_hard_surface_stack_for_dual_signal(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        curves = (
+            _FakeCurve(gamma_points=[[0.0, 0.0, 0.0]]),
+            _FakeCurve(gamma_points=[[1.0, 0.0, 0.0]]),
+        )
+        outer_surface = _FakeSurfaceWithGradient(
+            gamma_points=[[[0.5, 0.0, 0.0]]]
+        )
+        surface_a = _FakeSurfaceWithGradient(
+            gamma_points=[[[0.0, 0.0, 0.0]]]
+        )
+        surface_b = _FakeSurfaceWithGradient(
+            gamma_points=[[[0.04, 0.0, 0.0]]]
+        )
+        banana_curve = _FakeCurve(
+            gamma_points=[[0.0, 0.0, 0.0]],
+            kappa_values=[5.0],
+        )
+
+        def fake_augmented(
+            base_value,
+            base_grad,
+            constraint_values,
+            constraint_grads,
+            multipliers,
+            penalty,
+        ):
+            self.assertAlmostEqual(base_value, 0.0)
+            np.testing.assert_allclose(base_grad, [0.0, 0.0])
+            np.testing.assert_allclose(constraint_values, [0.4])
+            np.testing.assert_allclose(constraint_grads[0], [8.0, 12.0])
+            np.testing.assert_allclose(multipliers, [0.2])
+            self.assertAlmostEqual(penalty, 3.0)
+            return {
+                "total": 1.0,
+                "grad": np.array([1.0, 2.0]),
+                "stationarity_norm": 0.1,
+            }
+
+        result = self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            JCurveSurface=zero,
+            JCurvature=zero,
+            multipliers=np.array([0.2]),
+            penalty=3.0,
+            objective_optimizable=SimpleNamespace(),
+            curves=curves,
+            curve_curve_min_distance=0.05,
+            outer_surface=outer_surface,
+            curve_surface_min_distance=0.02,
+            banana_curve=banana_curve,
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=("surface_surface_spacing",),
+            curve_curve_constraint_fn=lambda *_args: (
+                -0.1,
+                np.array([0.0, 0.0]),
+                0.0,
+            ),
+            curve_surface_constraint_fn=lambda *_args: (
+                -0.2,
+                np.array([0.0, 0.0]),
+                0.0,
+            ),
+            curvature_constraint_fn=lambda *_args: (
+                -0.3,
+                np.array([0.0, 0.0]),
+                0.0,
+            ),
+            surface_stack_surfaces=(surface_a, surface_b),
+            surface_stack_min_distance=0.05,
+            surface_stack_constraint_fn=lambda *_args: (
+                0.02,
+                np.array([0.4, 0.6]),
+                0.02,
+            ),
+            hard_surrogate_diagnostics=True,
+            augmented_inequality_objective_fn=fake_augmented,
+        )
+
+        self.assertEqual(result["constraint_blocks"], ["surface"])
+        self.assertEqual(result["dual_update_value_kinds"], ["hard"])
+        self.assertEqual(result["feasibility_value_kinds"], ["hard"])
+        np.testing.assert_allclose(result["dual_update_values"], [0.2])
+        np.testing.assert_allclose(result["feasibility_values"], [0.2])
+        np.testing.assert_allclose(result["hard_signed_constraint_values"], [0.2])
+        np.testing.assert_allclose(result["surrogate_signed_constraint_values"], [0.4])
+        np.testing.assert_allclose(result["raw_dual_update_values"], [0.01])
+        np.testing.assert_allclose(result["raw_hard_signed_constraint_values"], [0.01])
+        np.testing.assert_allclose(
+            result["raw_surrogate_signed_constraint_values"],
+            [0.02],
+        )
+
     def test_single_stage_normalized_alm_constraints_pass_directional_taylor_test(self):
         alm_utils = _load_module(ALM_UTILS_PATH, "banana_alm_utils")
         objective = SimpleNamespace(x=np.zeros(2, dtype=float))
@@ -3467,6 +3576,42 @@ class SingleStageIncumbentsModuleTests(_ModuleTestCase):
         self.assertNotIn("last_successful_eval_weights", run_dict)
 
 
+class SmoothDistanceSelectionModuleTests(_ModuleTestCase):
+    MODULE_PATH = SMOOTH_DISTANCE_SELECTION_PATH
+    MODULE_PREFIX = "banana_smooth_distance_selection"
+
+    def test_kdtree_pairwise_selection_matches_bruteforce_threshold(self):
+        left = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+            ],
+            dtype=float,
+        )
+        right = np.array(
+            [
+                [0.1, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [3.4, 0.0, 0.0],
+            ],
+            dtype=float,
+        )
+
+        self.assertAlmostEqual(self.module.pairwise_block_min(left, right), 0.1)
+        rows, cols, diffs, distances = self.module.select_pairwise_near_min(
+            left,
+            right,
+            threshold=0.45,
+        )
+
+        self.assertEqual(set(zip(rows.tolist(), cols.tolist())), {(0, 0), (2, 2)})
+        np.testing.assert_allclose(
+            np.linalg.norm(diffs, axis=1),
+            distances,
+        )
+
+
 class SingleStageConstraintModuleTests(_ModuleTestCase):
     MODULE_PATH = SINGLE_STAGE_CONSTRAINTS_PATH
     MODULE_PREFIX = "banana_single_stage_constraints"
@@ -3551,6 +3696,52 @@ class SingleStageConstraintModuleTests(_ModuleTestCase):
                 self.module.smooth_min_surface_surface_signed_constraint(
                     surface_1,
                     surface_2,
+                    minimum_distance=0.5,
+                    temperature=0.01,
+                    objective_optimizable=SimpleNamespace(),
+                )
+            )
+
+        self.assertGreater(violation, 0.0)
+        self.assertAlmostEqual(violation, signed_value)
+        self.assertEqual(grad.shape, (2,))
+
+    def test_smooth_min_surface_stack_signed_constraint_uses_adjacent_pairs(self):
+        surfaces = (
+            _FakeSurfaceWithArrayGradient(
+                gamma_points=[[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]]
+            ),
+            _FakeSurfaceWithArrayGradient(
+                gamma_points=[[[0.1, 0.0, 0.0], [1.1, 0.0, 0.0]]]
+            ),
+            _FakeSurfaceWithArrayGradient(
+                gamma_points=[[[0.7, 0.0, 0.0], [1.7, 0.0, 0.0]]]
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                self.module,
+                "_new_derivative",
+                side_effect=lambda: _FakeDerivative({}),
+            ),
+            mock.patch.object(
+                self.module,
+                "surface_dgamma_by_dcoeff_derivative",
+                side_effect=lambda _surface, point_gradient: _FakeDerivative(
+                    np.array(
+                        [
+                            np.sum(point_gradient.reshape((-1, 3)), axis=0)[0],
+                            np.sum(point_gradient.reshape((-1, 3)), axis=0)[2],
+                        ],
+                        dtype=float,
+                    )
+                ),
+            ),
+        ):
+            signed_value, grad, violation = (
+                self.module.smooth_min_surface_stack_signed_constraint(
+                    surfaces,
                     minimum_distance=0.5,
                     temperature=0.01,
                     objective_optimizable=SimpleNamespace(),

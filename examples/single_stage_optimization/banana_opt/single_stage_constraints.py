@@ -223,11 +223,87 @@ def smooth_min_surface_surface_signed_constraint(
     return signed_value, -grad, max(0.0, signed_value)
 
 
+def smooth_min_surface_stack_signed_constraint(
+    surfaces,
+    minimum_distance,
+    temperature,
+    objective_optimizable,
+):
+    surface_gammas = [np.asarray(surface.gamma(), dtype=float) for surface in surfaces]
+    flat_gammas = [gamma.reshape((-1, 3)) for gamma in surface_gammas]
+    pair_blocks = []
+    hard_min = np.inf
+    for upper_index in range(1, len(flat_gammas)):
+        lower_index = upper_index - 1
+        block_min = pairwise_block_min(
+            flat_gammas[lower_index],
+            flat_gammas[upper_index],
+        )
+        hard_min = min(hard_min, block_min)
+        pair_blocks.append((lower_index, upper_index, block_min))
+
+    selection_window = 4.0 * float(temperature)
+    selection_threshold = hard_min + selection_window
+    selected_distances = []
+    selected_entries = []
+    for lower_index, upper_index, block_min in pair_blocks:
+        if block_min > selection_threshold:
+            continue
+        rows, cols, diffs, distances = select_pairwise_near_min(
+            flat_gammas[lower_index],
+            flat_gammas[upper_index],
+            selection_threshold,
+        )
+        selected_distances.append(distances)
+        selected_entries.append((lower_index, upper_index, rows, cols, diffs, distances))
+
+    flat_distances = np.concatenate(selected_distances)
+    smooth_min, flat_weights = smoothmin_selected(
+        flat_distances,
+        temperature,
+        _SMOOTHING_EPS,
+    )
+
+    point_gradients = [np.zeros_like(gamma) for gamma in flat_gammas]
+    offset = 0
+    for lower_index, upper_index, rows, cols, diffs, distances in selected_entries:
+        count = len(distances)
+        local_weights = flat_weights[offset : offset + count]
+        offset += count
+        directions = diffs / np.maximum(distances[:, None], _SMOOTHING_EPS)
+        np.add.at(
+            point_gradients[lower_index],
+            rows,
+            local_weights[:, None] * directions,
+        )
+        np.add.at(
+            point_gradients[upper_index],
+            cols,
+            -local_weights[:, None] * directions,
+        )
+
+    derivative = _new_derivative()
+    for surface, surface_gamma, point_gradient in zip(
+        surfaces,
+        surface_gammas,
+        point_gradients,
+    ):
+        if np.any(point_gradient):
+            derivative += surface_dgamma_by_dcoeff_derivative(
+                surface,
+                point_gradient.reshape(surface_gamma.shape),
+            )
+    grad = np.asarray(derivative(objective_optimizable), dtype=float)
+    signed_value = float(minimum_distance) - float(smooth_min)
+    return signed_value, -grad, max(0.0, signed_value)
+
+
 def single_stage_constraint_activity_tolerances(
     distance_smoothing,
     curvature_smoothing,
     *,
     include_surface_surface,
+    include_surface_stack=False,
 ):
     tolerances = [
         4.0 * float(distance_smoothing),
@@ -235,5 +311,7 @@ def single_stage_constraint_activity_tolerances(
         4.0 * float(curvature_smoothing),
     ]
     if include_surface_surface:
+        tolerances.append(4.0 * float(distance_smoothing))
+    if include_surface_stack:
         tolerances.append(4.0 * float(distance_smoothing))
     return np.asarray([max(value, _SMOOTHING_EPS) for value in tolerances], dtype=float)
