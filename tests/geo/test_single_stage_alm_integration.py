@@ -58,6 +58,13 @@ STAGE2_OBJECTIVES_MODULE_PATH = (
     / "banana_opt"
     / "stage2_objectives.py"
 )
+SMOOTH_DISTANCE_SELECTION_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "banana_opt"
+    / "smooth_distance_selection.py"
+)
 HARDWARE_CONSTRAINT_SCHEMA_MODULE_PATH = (
     Path(__file__).resolve().parents[2]
     / "examples"
@@ -147,6 +154,14 @@ def extract_functions(module_path: Path, function_names: list[str], global_bindi
     namespace = dict(global_bindings)
     exec(compile(module, str(module_path), "exec"), namespace)
     return {name: namespace[name] for name in function_names}
+
+
+def extracted_softmin_selection_window():
+    return extract_functions(
+        SMOOTH_DISTANCE_SELECTION_MODULE_PATH,
+        ["softmin_selection_window"],
+        {"_SOFTMIN_SELECTION_WINDOW_TEMPERATURES": 4.0},
+    )["softmin_selection_window"]
 
 
 def find_assigned_dict(module_path: Path, variable_name: str) -> ast.Dict:
@@ -2276,7 +2291,10 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         functions = extract_functions(
             STAGE2_OBJECTIVES_MODULE_PATH,
             ["stage2_constraint_activity_tolerances"],
-            {"_SMOOTHING_EPS": np.finfo(float).eps},
+            {
+                "_SMOOTHING_EPS": np.finfo(float).eps,
+                "softmin_selection_window": extracted_softmin_selection_window(),
+            },
         )
         stage2_constraint_activity_tolerances = functions[
             "stage2_constraint_activity_tolerances"
@@ -2460,7 +2478,11 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         functions = extract_functions(
             SINGLE_STAGE_CONSTRAINTS_MODULE_PATH,
             ["single_stage_constraint_activity_tolerances"],
-            {"np": np, "_SMOOTHING_EPS": np.finfo(float).eps},
+            {
+                "np": np,
+                "_SMOOTHING_EPS": np.finfo(float).eps,
+                "softmin_selection_window": extracted_softmin_selection_window(),
+            },
         )
         single_stage_constraint_activity_tolerances = functions[
             "single_stage_constraint_activity_tolerances"

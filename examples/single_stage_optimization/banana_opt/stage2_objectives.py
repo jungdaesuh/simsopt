@@ -1231,9 +1231,13 @@ def stage2_constraint_activity_tolerances(
     include_iota_penalty: bool = False,
     iota_tolerance: float = 0.0,
 ):
+    distance_activity_tolerance = max(
+        softmin_selection_window(distance_smoothing),
+        _SMOOTHING_EPS,
+    )
     tolerances = [
         length_tolerance,
-        max(4.0 * float(distance_smoothing), _SMOOTHING_EPS),
+        distance_activity_tolerance,
         max(4.0 * float(curvature_smoothing), _SMOOTHING_EPS),
         banana_current_tolerance,
     ]
