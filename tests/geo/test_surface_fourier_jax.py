@@ -42,6 +42,7 @@ dgammadash2_by_dcoeff = _sf.dgammadash2_by_dcoeff
 surface_xyzfourier_gamma_from_dofs = _sf.surface_xyzfourier_gamma_from_dofs
 surface_xyzfourier_gammadash1_from_dofs = _sf.surface_xyzfourier_gammadash1_from_dofs
 surface_xyzfourier_gammadash2_from_dofs = _sf.surface_xyzfourier_gammadash2_from_dofs
+stellsym_scatter_indices = _sf.stellsym_scatter_indices
 _DERIVATIVE_HEAVY_TOLS = parity_ladder_tolerances("derivative-heavy")
 
 
@@ -294,7 +295,8 @@ class TestSurfaceFourierJaxCppParity:
             (dgammadash2_by_dcoeff, "dgammadash2_by_dcoeff"),
         ],
     )
-    def test_coefficient_derivatives_match_cpp(self, jax_fn, cpp_method):
+    @pytest.mark.parametrize("stellsym", [False, True])
+    def test_coefficient_derivatives_match_cpp(self, jax_fn, cpp_method, stellsym):
         from simsopt.geo import SurfaceXYZTensorFourier
 
         mpol, ntor, nfp = 2, 2, 2
@@ -302,7 +304,7 @@ class TestSurfaceFourierJaxCppParity:
             mpol=mpol,
             ntor=ntor,
             nfp=nfp,
-            stellsym=False,
+            stellsym=stellsym,
             quadpoints_phi=np.linspace(0, 1.0 / nfp, 7, endpoint=False),
             quadpoints_theta=np.linspace(0, 1.0, 6, endpoint=False),
         )
@@ -318,7 +320,8 @@ class TestSurfaceFourierJaxCppParity:
             mpol,
             ntor,
             nfp,
-            False,
+            stellsym,
+            jnp.asarray(stellsym_scatter_indices(mpol, ntor)) if stellsym else None,
         )
         derivative_cpp = getattr(surface, cpp_method)()
 

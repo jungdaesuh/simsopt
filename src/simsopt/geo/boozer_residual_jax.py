@@ -33,17 +33,15 @@ The scalar objective is
 where ``N = 3 · nphi · ntheta`` (matching the C++ normalization).
 """
 
-from functools import lru_cache
-
 import numpy as np
 import jax
 import jax.numpy as jnp
 
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
+    as_jax_int32 as _as_jax_int32,
     as_runtime_float64 as _as_runtime_float64,
     concat_jax_float64 as _concat_jax_float64,
-    explicit_inv as _explicit_inv,
     explicit_rsqrt as _explicit_rsqrt,
 )
 from ..jax_core.surface_rzfourier import (
@@ -68,43 +66,21 @@ __all__ = [
 ]
 
 
-@lru_cache(maxsize=None)
-def _decision_vector_selector_arrays(surface_size: int, optimize_G: bool):
-    total_size = surface_size + (2 if optimize_G else 1)
-    prefix_selector = np.eye(surface_size, total_size, dtype=np.float64)
-    iota_selector = np.zeros(total_size, dtype=np.float64)
-    iota_selector[surface_size] = 1.0
-    G_selector = None
-    if optimize_G:
-        G_selector = np.zeros(total_size, dtype=np.float64)
-        G_selector[surface_size + 1] = 1.0
-    return prefix_selector, iota_selector, G_selector
-
-
 def _split_decision_vector(x, *, optimize_G):
     x_jax = _as_jax_float64(x)
-    total_size = int(x_jax.shape[0])
     tail_size = 2 if optimize_G else 1
-    surface_size = total_size - tail_size
-    prefix_selector, iota_selector, G_selector = _decision_vector_selector_arrays(
-        surface_size,
-        optimize_G,
-    )
-    sdofs = _as_runtime_float64(prefix_selector, reference=x_jax) @ x_jax
-    iota = jnp.dot(_as_runtime_float64(iota_selector, reference=x_jax), x_jax)
+    surface_size = int(x_jax.shape[0]) - tail_size
+    sdofs = jnp.take(x_jax, _as_jax_int32(np.arange(surface_size)), axis=0)
+    iota = jnp.take(x_jax, _as_jax_int32(surface_size), axis=0)
     if optimize_G:
-        G = jnp.dot(_as_runtime_float64(G_selector, reference=x_jax), x_jax)
+        G = jnp.take(x_jax, _as_jax_int32(surface_size + 1), axis=0)
         return sdofs, iota, G
     return sdofs, iota, None
 
 
-def _safe_inverse_modB(B2):
-    """Return ``1 / |B|`` with a zero-field guard suitable for traced code."""
-    safe_B2 = B2 + _as_runtime_float64(
-        np.finfo(np.float64).tiny,
-        reference=B2,
-    )
-    return B2 * _explicit_rsqrt(safe_B2) * _explicit_inv(safe_B2)
+def _inverse_modB(B2):
+    """Return ``1 / |B|``; degenerate zero-field inputs surface as non-finite."""
+    return _explicit_rsqrt(B2)
 
 
 def _boozer_weighted_residual(G, iota, B, xphi, xtheta, weight_inv_modB):
@@ -113,7 +89,7 @@ def _boozer_weighted_residual(G, iota, B, xphi, xtheta, weight_inv_modB):
     residual = G * B - B2[..., None] * tang
 
     if weight_inv_modB:
-        residual = _safe_inverse_modB(B2)[..., None] * residual
+        residual = _inverse_modB(B2)[..., None] * residual
     return residual
 
 
@@ -618,11 +594,15 @@ def boozer_residual_coil_vjp(
     G,
     weight_inv_modB=False,
 ):
-    """VJP of Boozer residual w.r.t. coil parameters (outer path).
+    """VJP of Boozer residual w.r.t. coil parameters (public derivative helper).
 
     Given an adjoint vector (from the outer optimization), computes
     sensitivities of ``adjoint^T @ r`` w.r.t. coil geometry and currents
     via reverse-mode autodiff through Biot-Savart.
+
+    Production exact solves route through the operator-backed adjoint path;
+    this helper remains as the public/test derivative surface for direct coil
+    residual VJP checks.
 
     This replaces the CPU chain:
     ``boozer_surface_residual_dB()`` → ``B_vjp()`` →

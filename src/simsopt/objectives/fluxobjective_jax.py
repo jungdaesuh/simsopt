@@ -149,6 +149,8 @@ class SquaredFluxJAX(Optimizable):
 
         # Set evaluation points on the field adapter from the immutable spec.
         field.set_points_from_spec(field_eval_spec)
+        self._field_points_version = field._points_version
+        self._field_dof_layout_version = getattr(field, "_dof_layout_version", None)
 
         self._clear_cached_results()
         self._init_native_program(field)
@@ -235,7 +237,7 @@ class SquaredFluxJAX(Optimizable):
                 flux_spec.points,
                 jnp.stack(gammas),
                 jnp.stack(gammadashs),
-                jnp.array(currents),
+                jnp.array(currents, dtype=jnp.float64),
             )
             return fixed_surface_flux_integral_from_B(B, flux_spec)
 
@@ -274,7 +276,32 @@ class SquaredFluxJAX(Optimizable):
     def recompute_bell(self, parent=None):
         self._clear_cached_results()
 
+    def _raise_if_field_points_drifted(self):
+        if self.field._points_version == self._field_points_version:
+            return
+        raise RuntimeError(
+            "SquaredFluxJAX captures fixed field-evaluation points at "
+            "construction. Do not call field.set_points() after constructing "
+            "SquaredFluxJAX; rebuild the objective for a new point set."
+        )
+
+    def _raise_if_field_dof_layout_drifted(self):
+        layout_version = getattr(self.field, "_dof_layout_version", None)
+        if layout_version == self._field_dof_layout_version:
+            return
+        raise RuntimeError(
+            "SquaredFluxJAX captures the field free/fixed DOF layout at "
+            "construction. Do not change coil/current free or fixed status "
+            "after constructing SquaredFluxJAX; rebuild the objective for a "
+            "new DOF layout."
+        )
+
+    def _raise_if_field_contract_drifted(self):
+        self._raise_if_field_points_drifted()
+        self._raise_if_field_dof_layout_drifted()
+
     def J(self):
+        self._raise_if_field_contract_drifted()
         cache_valid = not self.new_x and self._cached_value is not None
         if cache_valid:
             return self._cached_value
@@ -292,6 +319,7 @@ class SquaredFluxJAX(Optimizable):
 
     @derivative_dec
     def dJ(self):
+        self._raise_if_field_contract_drifted()
         cache_valid = not self.new_x and self._cached_partials is not None
         if cache_valid:
             return self._cached_partials

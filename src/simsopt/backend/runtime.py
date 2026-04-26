@@ -22,6 +22,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import threading
 from typing import Callable
 import warnings
 
@@ -297,6 +298,7 @@ _DEFAULT_TRANSFER_GUARD_BY_MODE = {
     "jax_metal_smoke": "log",
 }
 _BackendCacheClearCallbackKey = tuple[str, str]
+_backend_runtime_lock = threading.RLock()
 _backend_cache_clear_callbacks: dict[
     _BackendCacheClearCallbackKey, Callable[[], None]
 ] = {}
@@ -1041,20 +1043,21 @@ _warned_jax_fallbacks: set[tuple[str, str, str]] = set()
 def get_backend_policy(mode: str | None = None) -> BackendPolicy:
     """Return the numerical-policy contract for a backend mode."""
     global _cached_backend_policy
-    if mode is None:
-        if _cached_backend_policy is not None:
-            return _cached_backend_policy
-        policy = _policy_from_config(get_backend_config())
-        _cached_backend_policy = policy
-        return policy
-    resolved_mode = _resolve_mode(mode)
-    current_config = get_backend_config()
-    config = (
-        current_config
-        if current_config.mode == resolved_mode
-        else _config_from_mode(resolved_mode, strict=False)
-    )
-    return _policy_from_config(config)
+    with _backend_runtime_lock:
+        if mode is None:
+            if _cached_backend_policy is not None:
+                return _cached_backend_policy
+            policy = _policy_from_config(get_backend_config())
+            _cached_backend_policy = policy
+            return policy
+        resolved_mode = _resolve_mode(mode)
+        current_config = get_backend_config()
+        config = (
+            current_config
+            if current_config.mode == resolved_mode
+            else _config_from_mode(resolved_mode, strict=False)
+        )
+        return _policy_from_config(config)
 
 
 def _resolve_legacy_value(
@@ -1104,28 +1107,29 @@ def get_backend_config() -> BackendConfig:
     ``invalidate_backend_cache()`` or ``set_backend()`` to clear.
     """
     global _cached_backend_config
-    if _cached_backend_config is not None:
-        return _cached_backend_config
+    with _backend_runtime_lock:
+        if _cached_backend_config is not None:
+            return _cached_backend_config
 
-    strict = _env_bool(_STRICT_ENV)
-    mode = os.environ.get(_MODE_ENV)
-    if mode is not None:
-        config = _config_from_mode(mode, strict=strict)
-    else:
-        backend = _resolve_legacy_value(
-            _BACKEND_ENV,
-            _BACKEND_LEGACY_ENV,
-            "cpu",
-            validator=_validate_backend,
-        )
-        platform = _resolve_legacy_platform(backend)
-        config = _config_from_mode(
-            _mode_from_legacy_env(backend, platform),
-            strict=strict,
-        )
+        strict = _env_bool(_STRICT_ENV)
+        mode = os.environ.get(_MODE_ENV)
+        if mode is not None:
+            config = _config_from_mode(mode, strict=strict)
+        else:
+            backend = _resolve_legacy_value(
+                _BACKEND_ENV,
+                _BACKEND_LEGACY_ENV,
+                "cpu",
+                validator=_validate_backend,
+            )
+            platform = _resolve_legacy_platform(backend)
+            config = _config_from_mode(
+                _mode_from_legacy_env(backend, platform),
+                strict=strict,
+            )
 
-    _cached_backend_config = config
-    return config
+        _cached_backend_config = config
+        return config
 
 
 def get_backend_mode() -> str:
@@ -1205,9 +1209,10 @@ def _jax_distributed_runtime_is_initialized() -> bool:
 
 def _invalidate_distributed_tuning_caches() -> None:
     global _cached_chunk_tuning, _cached_field_kernel_tuning, _cached_sharding_tuning
-    _cached_chunk_tuning = None
-    _cached_field_kernel_tuning = None
-    _cached_sharding_tuning = None
+    with _backend_runtime_lock:
+        _cached_chunk_tuning = None
+        _cached_field_kernel_tuning = None
+        _cached_sharding_tuning = None
 
 
 def _cache_distributed_initialized_config(
@@ -1215,9 +1220,10 @@ def _cache_distributed_initialized_config(
 ) -> DistributedRuntimeConfig:
     global _cached_distributed_runtime_config
     initialized_config = _with_distributed_initialized(config, initialized=True)
-    _cached_distributed_runtime_config = initialized_config
-    _invalidate_distributed_tuning_caches()
-    return initialized_config
+    with _backend_runtime_lock:
+        _cached_distributed_runtime_config = initialized_config
+        _invalidate_distributed_tuning_caches()
+        return initialized_config
 
 
 def _resolve_distributed_runtime_config(
@@ -1235,48 +1241,51 @@ def _resolve_distributed_runtime_config(
 def get_chunk_tuning(mode: str | None = None) -> ChunkTuning:
     """Return the resolved chunk sizes and autotuning metadata."""
     global _cached_chunk_tuning
-    if mode is None and _cached_chunk_tuning is not None:
-        return _cached_chunk_tuning
-    resolved_mode = _resolve_mode(mode)
-    tuning = _build_chunk_tuning(
-        resolved_mode,
-        get_backend_policy(resolved_mode),
-    )
-    if mode is None:
-        _cached_chunk_tuning = tuning
-    return tuning
+    with _backend_runtime_lock:
+        if mode is None and _cached_chunk_tuning is not None:
+            return _cached_chunk_tuning
+        resolved_mode = _resolve_mode(mode)
+        tuning = _build_chunk_tuning(
+            resolved_mode,
+            get_backend_policy(resolved_mode),
+        )
+        if mode is None:
+            _cached_chunk_tuning = tuning
+        return tuning
 
 
 def get_sharding_tuning(mode: str | None = None) -> ShardingTuning:
     """Return the resolved sharding strategy and mesh activation metadata."""
     global _cached_sharding_tuning
-    if mode is None and _cached_sharding_tuning is not None:
-        return _cached_sharding_tuning
-    resolved_mode = _resolve_mode(mode)
-    tuning = _build_sharding_tuning(
-        resolved_mode,
-        get_backend_policy(resolved_mode),
-    )
-    if mode is None:
-        _cached_sharding_tuning = tuning
-    return tuning
+    with _backend_runtime_lock:
+        if mode is None and _cached_sharding_tuning is not None:
+            return _cached_sharding_tuning
+        resolved_mode = _resolve_mode(mode)
+        tuning = _build_sharding_tuning(
+            resolved_mode,
+            get_backend_policy(resolved_mode),
+        )
+        if mode is None:
+            _cached_sharding_tuning = tuning
+        return tuning
 
 
 def get_field_kernel_tuning(mode: str | None = None) -> FieldKernelTuning:
     """Return the low-level field-kernel tuning contract for the resolved mode."""
     global _cached_field_kernel_tuning
-    if mode is None and _cached_field_kernel_tuning is not None:
-        return _cached_field_kernel_tuning
-    chunk_tuning = get_chunk_tuning(mode)
-    tuning = FieldKernelTuning(
-        mode=chunk_tuning.mode,
-        chunk_policy=chunk_tuning.chunk_policy,
-        coil_chunk_size=chunk_tuning.coil_chunk_size,
-        quadrature_block_size=chunk_tuning.quadrature_block_size,
-    )
-    if mode is None:
-        _cached_field_kernel_tuning = tuning
-    return tuning
+    with _backend_runtime_lock:
+        if mode is None and _cached_field_kernel_tuning is not None:
+            return _cached_field_kernel_tuning
+        chunk_tuning = get_chunk_tuning(mode)
+        tuning = FieldKernelTuning(
+            mode=chunk_tuning.mode,
+            chunk_policy=chunk_tuning.chunk_policy,
+            coil_chunk_size=chunk_tuning.coil_chunk_size,
+            quadrature_block_size=chunk_tuning.quadrature_block_size,
+        )
+        if mode is None:
+            _cached_field_kernel_tuning = tuning
+        return tuning
 
 
 def get_coil_chunk_size(mode: str | None = None) -> int:
@@ -1362,23 +1371,27 @@ def _backend_cache_clear_callback_key(
 
 def register_backend_cache_clear(callback: Callable[[], None]) -> None:
     """Register a callback that should run whenever backend caches are cleared."""
-    _backend_cache_clear_callbacks[_backend_cache_clear_callback_key(callback)] = (
-        callback
-    )
+    with _backend_runtime_lock:
+        _backend_cache_clear_callbacks[_backend_cache_clear_callback_key(callback)] = (
+            callback
+        )
 
 
 def _run_backend_cache_clear_callbacks() -> None:
-    for callback in _backend_cache_clear_callbacks.values():
+    with _backend_runtime_lock:
+        callbacks = tuple(_backend_cache_clear_callbacks.values())
+    for callback in callbacks:
         callback()
 
 
 def _reset_backend_runtime_caches() -> None:
     global _cached_backend_policy, _cached_distributed_runtime_config
-    _cached_backend_policy = None
-    _invalidate_distributed_tuning_caches()
-    _cached_distributed_runtime_config = None
+    with _backend_runtime_lock:
+        _cached_backend_policy = None
+        _invalidate_distributed_tuning_caches()
+        _cached_distributed_runtime_config = None
+        _warned_jax_fallbacks.clear()
     _run_backend_cache_clear_callbacks()
-    _warned_jax_fallbacks.clear()
 
 
 def _parse_local_device_ids(raw_value: str | None) -> tuple[int, ...] | None:
@@ -1454,12 +1467,13 @@ def _build_distributed_runtime_config() -> DistributedRuntimeConfig:
 def get_distributed_runtime_config() -> DistributedRuntimeConfig:
     """Return the configured distributed-JAX bootstrap contract."""
     global _cached_distributed_runtime_config
-    if _cached_distributed_runtime_config is None:
-        _cached_distributed_runtime_config = _build_distributed_runtime_config()
-    _cached_distributed_runtime_config = _resolve_distributed_runtime_config(
-        _cached_distributed_runtime_config
-    )
-    return _cached_distributed_runtime_config
+    with _backend_runtime_lock:
+        if _cached_distributed_runtime_config is None:
+            _cached_distributed_runtime_config = _build_distributed_runtime_config()
+        _cached_distributed_runtime_config = _resolve_distributed_runtime_config(
+            _cached_distributed_runtime_config
+        )
+        return _cached_distributed_runtime_config
 
 
 def maybe_initialize_distributed_jax() -> DistributedRuntimeConfig:
@@ -1502,8 +1516,9 @@ def invalidate_backend_cache() -> None:
     manipulate env vars via ``monkeypatch`` or context managers.
     """
     global _cached_backend_config
-    _cached_backend_config = None
-    _reset_backend_runtime_caches()
+    with _backend_runtime_lock:
+        _cached_backend_config = None
+        _reset_backend_runtime_caches()
 
 
 def raise_if_strict_jax_fallback(*, component: str, detail: str) -> None:
@@ -1525,9 +1540,10 @@ def warn_if_jax_fallback(*, component: str, detail: str) -> None:
         return
 
     cache_key = (config.mode, component, detail)
-    if cache_key in _warned_jax_fallbacks:
-        return
-    _warned_jax_fallbacks.add(cache_key)
+    with _backend_runtime_lock:
+        if cache_key in _warned_jax_fallbacks:
+            return
+        _warned_jax_fallbacks.add(cache_key)
     warnings.warn(
         f"{component} is using {detail} while simsopt backend mode "
         f"{config.mode!r} is active. This path should be treated as a legacy "
@@ -1557,10 +1573,7 @@ def _validate_initialized_jax_runtime(jax_module, config: BackendConfig) -> None
     default_backend = getattr(jax_module, "default_backend", None)
     if not callable(default_backend):
         return
-    try:
-        active_backend = str(default_backend())
-    except Exception:
-        return
+    active_backend = str(default_backend())
     expected_backends = _expected_runtime_backend_names(config.jax_platform)
     if active_backend in expected_backends:
         return
@@ -1570,7 +1583,7 @@ def _validate_initialized_jax_runtime(jax_module, config: BackendConfig) -> None
         f"{active_backend!r}. Set backend environment variables before "
         "importing or touching JAX devices."
     )
-    if config.strict:
+    if config.mode == "jax_gpu_parity" or config.strict:
         raise RuntimeError(message)
     warnings.warn(message, RuntimeWarning, stacklevel=2)
 
@@ -1593,7 +1606,7 @@ def _validate_cuda_parity_determinism_env(
         "devices, because changing XLA flags after JAX backend initialization has "
         "no effect."
     )
-    if config.strict:
+    if config.mode == "jax_gpu_parity" or config.strict:
         raise RuntimeError(message)
     warnings.warn(message, RuntimeWarning, stacklevel=2)
 
@@ -1643,16 +1656,17 @@ def set_backend(
         transfer_guard=transfer_guard,
         compilation_cache_dir=compilation_cache_dir,
     )
-    _cached_backend_config = config
-    _reset_backend_runtime_caches()
-    for env_name, attribute_name in _SYNCED_RUNTIME_ENV_VALUES:
-        config_attribute_name = (
-            "jax_platform" if attribute_name == "jax_platforms" else attribute_name
-        )
-        os.environ[env_name] = _runtime_env_value(
-            attribute_name,
-            getattr(config, config_attribute_name),
-        )
+    with _backend_runtime_lock:
+        _cached_backend_config = config
+        _reset_backend_runtime_caches()
+        for env_name, attribute_name in _SYNCED_RUNTIME_ENV_VALUES:
+            config_attribute_name = (
+                "jax_platform" if attribute_name == "jax_platforms" else attribute_name
+            )
+            os.environ[env_name] = _runtime_env_value(
+                attribute_name,
+                getattr(config, config_attribute_name),
+            )
     if configure_runtime:
         apply_jax_runtime_config()
     return config

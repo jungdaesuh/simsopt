@@ -15,29 +15,26 @@
 # vars before their first ``import jax`` so JAX initializes on the intended
 # runtime. Importing ``simsopt`` can eagerly validate an explicit selector, but
 # it cannot retroactively fix a backend that was already initialized too early.
-try:
-    import os as _os
-    import sys as _sys
+import os as _os
+import sys as _sys
 
-    from .backend import (
-        apply_jax_runtime_config as _apply_jax_runtime_config,
-        should_eagerly_configure_jax as _should_eagerly_configure_jax,
-    )
+from .backend import (
+    apply_jax_runtime_config as _apply_jax_runtime_config,
+    should_eagerly_configure_jax as _should_eagerly_configure_jax,
+)
 
-    if "jax" in _sys.modules:
-        import jax as _jax
+if "jax" in _sys.modules:
+    import jax as _jax
 
-        _jax.config.update("jax_enable_x64", True)
-        del _jax
-    else:
-        _os.environ.setdefault("JAX_ENABLE_X64", "True")
+    _jax.config.update("jax_enable_x64", True)
+    del _jax
+else:
+    _os.environ.setdefault("JAX_ENABLE_X64", "True")
 
-    if _should_eagerly_configure_jax():
-        _apply_jax_runtime_config()
+if _should_eagerly_configure_jax():
+    _apply_jax_runtime_config()
 
-    del _apply_jax_runtime_config, _should_eagerly_configure_jax, _os, _sys
-except ImportError:
-    pass
+del _apply_jax_runtime_config, _should_eagerly_configure_jax, _os, _sys
 
 # Two ways of achieving the above-mentioned objective
 # Use "from xyz import XYZ" style

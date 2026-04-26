@@ -93,12 +93,7 @@ def _numpy_boozer_residual_reference(G, iota, B, xphi, xtheta, *, weight_inv_mod
     residual = G * B - B2[..., None] * tang
     if weight_inv_modB:
         modB = np.sqrt(B2)
-        residual = np.divide(
-            residual,
-            modB[..., None],
-            out=np.zeros_like(residual),
-            where=modB[..., None] > 0.0,
-        )
+        residual = residual / modB[..., None]
     scalar = 0.5 * _numpy_pairwise_sum_flat(residual * residual) / residual.size
     return residual.reshape(-1), scalar
 
@@ -214,8 +209,8 @@ class TestBoozerResidualScalar:
         )
         np.testing.assert_allclose(J, 0.0, atol=1e-20)
 
-    def test_weighted_zero_field_is_finite(self):
-        """Zero-field points must not introduce NaN/Inf in the weighted path."""
+    def test_weighted_zero_field_is_nonfinite(self):
+        """Zero-field points are invalid in the 1/|B| weighted path."""
         nphi, ntheta = 4, 5
         B = jnp.zeros((nphi, ntheta, 3))
         xphi = jnp.ones((nphi, ntheta, 3))
@@ -238,10 +233,8 @@ class TestBoozerResidualScalar:
             weight_inv_modB=True,
         )
 
-        assert jnp.isfinite(scalar_value)
-        assert jnp.all(jnp.isfinite(residual_vector))
-        np.testing.assert_allclose(float(scalar_value), 0.0, atol=0.0)
-        np.testing.assert_allclose(host_array(residual_vector), 0.0, atol=0.0)
+        assert not bool(jnp.isfinite(scalar_value))
+        assert not bool(jnp.all(jnp.isfinite(residual_vector)))
 
     def test_strict_oracle_scalar_mode_matches_high_precision_reference(self):
         G, iota, B, xphi, xtheta = _make_scalar_dynamic_range_data()

@@ -689,13 +689,15 @@ class TestStellsymScatterIndices:
 
         xc, yc, zc = dofs_to_xyzc(dofs, indices, mpol, ntor)
 
-        # x/y: cs and sc quadrants should be zero
+        # x: cs and sc quadrants should be zero
         # cs: rows 0..mpol, cols ntor+1..2*ntor
         assert float(jnp.sum(jnp.abs(xc[: mpol + 1, ntor + 1 :]))) == 0.0
         # sc: rows mpol+1..2*mpol, cols 0..ntor
         assert float(jnp.sum(jnp.abs(xc[mpol + 1 :, : ntor + 1]))) == 0.0
 
-        # z: cc and ss quadrants should be zero
+        # y/z: cc and ss quadrants should be zero
+        assert float(jnp.sum(jnp.abs(yc[: mpol + 1, : ntor + 1]))) == 0.0
+        assert float(jnp.sum(jnp.abs(yc[mpol + 1 :, ntor + 1 :]))) == 0.0
         assert float(jnp.sum(jnp.abs(zc[: mpol + 1, : ntor + 1]))) == 0.0
         assert float(jnp.sum(jnp.abs(zc[mpol + 1 :, ntor + 1 :]))) == 0.0
 

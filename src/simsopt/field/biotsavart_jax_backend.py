@@ -55,6 +55,7 @@ from ..jax_core.specs import (
     GroupedCoilSetSpec,
     SingleStageRuntimeSpec,
     make_field_eval_spec,
+    make_grouped_coil_set_spec,
 )
 from ._coil_graph import _unwrap_coil_curve_and_current_objects
 
@@ -473,19 +474,8 @@ def _slice_1d(array: jax.Array, start: int, end: int) -> jax.Array:
 
 def _axis0_entries(array):
     """Yield axis-0 slices without materializing the whole grouped object."""
-    shape = getattr(array, "shape", None)
-    if shape is not None:
-        for index in range(int(shape[0])):
-            yield array[index]
-        return
-
-    index = 0
-    while True:
-        try:
-            yield array[index]
-        except IndexError:
-            return
-        index += 1
+    for index in range(int(array.shape[0])):
+        yield array[index]
 
 
 def _update_1d(array: jax.Array, start: int, values: jax.Array) -> jax.Array:
@@ -509,11 +499,12 @@ def _add_local_cotangent_to_dofs_gradient(
     opt,
     full_cotangent,
     dof_indices,
+    *,
+    free_positions,
 ):
     if opt.local_dof_size == 0:
         return dofs_gradient
     start, end = dof_indices[opt]
-    free_positions = np.flatnonzero(opt.local_dofs_free_status)
     free_cotangent = _as_jax_float64(full_cotangent)[free_positions]
     return dofs_gradient.at[int(start) : int(end)].add(free_cotangent)
 
@@ -523,6 +514,8 @@ def _add_full_curve_cotangent_to_dofs_gradient(
     curve,
     full_cotangent,
     dof_indices,
+    *,
+    free_positions_for_opt,
 ):
     full_cotangent = _as_jax_float64(full_cotangent)
     for opt, (start, end) in curve._full_dof_indices.items():
@@ -531,6 +524,7 @@ def _add_full_curve_cotangent_to_dofs_gradient(
             opt,
             _slice_1d(full_cotangent, start, end),
             dof_indices,
+            free_positions=free_positions_for_opt(opt),
         )
     return dofs_gradient
 
@@ -667,6 +661,9 @@ class BiotSavartJAX(Optimizable):
         self._coils = list(coils)
         self._points_jax = None
         self._points_version = 0
+        self._dof_layout_version = 0
+        self._free_dof_layout_ready = False
+        self._local_free_positions_by_opt = {}
         Optimizable.__init__(self, x0=np.asarray([]), depends_on=self._coils)
 
         # Uniform CurveXYZFourier fast-path metadata (populated by _introspect_coils)
@@ -678,7 +675,22 @@ class BiotSavartJAX(Optimizable):
         self._curve_dof_size = 0
         self._curve_quadpoints_jax = None
         self._introspect_coils()
+        self._free_dof_layout_ready = True
         self._coil_dof_extraction_spec = self._build_coil_dof_extraction_spec()
+
+    def update_free_dof_size_indices(self) -> None:
+        super().update_free_dof_size_indices()
+        self._local_free_positions_by_opt.clear()
+        if self._free_dof_layout_ready:
+            self._dof_layout_version += 1
+            self._coil_dof_extraction_spec = self._build_coil_dof_extraction_spec()
+
+    def _local_free_positions(self, opt):
+        cached = self._local_free_positions_by_opt.get(opt)
+        if cached is None:
+            cached = np.flatnonzero(opt.local_dofs_free_status)
+            self._local_free_positions_by_opt[opt] = cached
+        return cached
 
     def _introspect_coils(self):
         """Walk coil tree to identify unique base curves/currents.
@@ -820,7 +832,7 @@ class BiotSavartJAX(Optimizable):
             return full_x
 
         start, end = self.dof_indices[opt]
-        free_positions = np.flatnonzero(opt.local_dofs_free_status)
+        free_positions = self._local_free_positions(opt)
         coil_slice = _slice_1d(coil_dofs, start, end)
         return _scatter_free_values(full_x, free_positions, coil_slice)
 
@@ -831,7 +843,7 @@ class BiotSavartJAX(Optimizable):
             dep_full_x = _as_jax_float64(dep_opt.local_full_x)
             if dep_opt.local_dof_size > 0:
                 dep_start, dep_end = self.dof_indices[dep_opt]
-                free_positions = np.flatnonzero(dep_opt.local_dofs_free_status)
+                free_positions = self._local_free_positions(dep_opt)
                 dep_slice = _slice_1d(coil_dofs, dep_start, dep_end)
                 dep_full_x = _scatter_free_values(
                     dep_full_x,
@@ -875,7 +887,7 @@ class BiotSavartJAX(Optimizable):
                 int(target_position + 1),
             )
             for source_offset, target_position in enumerate(
-                np.flatnonzero(opt.local_dofs_free_status)
+                self._local_free_positions(opt)
             )
         )
         return self._full_input_dof_map_spec(template_full_dofs, owner_segments)
@@ -1056,13 +1068,6 @@ class BiotSavartJAX(Optimizable):
             geometry_cache[cache_key] = (base_gamma, base_gammadash)
         return base_gamma, base_gammadash, geometry_s
 
-    def _coil_geometry_inputs(self, coil, geometry_cache=None):
-        curve, rotmat, current, scale = _unwrap_coil_curve_and_current(coil)
-        gamma, gammadash = self._base_curve_geometry(curve, geometry_cache)
-        gamma, gammadash = _rotate_curve_geometry(gamma, gammadash, rotmat)
-        current_value = _as_jax_float64(current.get_value() * scale)
-        return curve, rotmat, current, scale, gamma, gammadash, current_value
-
     def _coil_has_free_dofs(self, coil):
         return coil.curve.dof_size > 0 or coil.current.dof_size > 0
 
@@ -1081,21 +1086,6 @@ class BiotSavartJAX(Optimizable):
             native_curve=_supports_native_curve_geometry(curve),
             timings=timings,
         )
-
-    def _collect_free_coil_vjp_infos(self, geometry_cache=None):
-        coil_infos = []
-        for coil_index, coil in enumerate(self._coils):
-            if not self._coil_has_free_dofs(coil):
-                continue
-            inputs = self._coil_geometry_inputs(coil, geometry_cache)
-            coil_infos.append(
-                self._build_coil_vjp_info(
-                    coil_index,
-                    coil,
-                    inputs,
-                )
-            )
-        return coil_infos
 
     def _group_coil_vjp_infos(self, coil_infos):
         grouped = {}
@@ -1144,6 +1134,30 @@ class BiotSavartJAX(Optimizable):
 
     def _coil_set_spec_from_explicit_state(self):
         return self._coil_set_spec_from_dofs_immutable_specs(_as_jax_float64(self.x))
+
+    def _free_coil_set_spec_from_explicit_state(self):
+        groups = []
+        for group in self._coil_set_spec_from_explicit_state().groups:
+            free_positions = tuple(
+                position
+                for position, coil_index in enumerate(group.coil_indices)
+                if self._coil_has_free_dofs(self._coils[coil_index])
+            )
+            if not free_positions:
+                continue
+            if len(free_positions) == len(group.coil_indices):
+                groups.append(group)
+                continue
+            indexer = jnp.asarray(free_positions, dtype=jnp.int32)
+            groups.append(
+                (
+                    group.gammas[indexer],
+                    group.gammadashs[indexer],
+                    group.currents[indexer],
+                    tuple(group.coil_indices[position] for position in free_positions),
+                )
+            )
+        return make_grouped_coil_set_spec(groups)
 
     def coil_set_spec(self):
         """Build the grouped coil spec for the current coil graph.
@@ -1237,24 +1251,20 @@ class BiotSavartJAX(Optimizable):
         """
         points = self._points_jax
         v_jax = _as_jax_float64(v)
-        geometry_cache = {}
-        d_coil_arrays = []
-        coil_indices = []
-        coil_infos = self._collect_free_coil_vjp_infos(geometry_cache)
-        for group in self._group_coil_vjp_infos(coil_infos):
-            d_coil_arrays.append(
-                biot_savart_B_vjp_maybe_collective(
-                    points,
-                    v_jax,
-                    group["gammas"],
-                    group["gammadashs"],
-                    group["currents"],
-                )
+        free_coil_set_spec = self._free_coil_set_spec_from_explicit_state()
+        d_coil_arrays = tuple(
+            biot_savart_B_vjp_maybe_collective(
+                points,
+                v_jax,
+                group.gammas,
+                group.gammadashs,
+                group.currents,
             )
-            coil_indices.append(tuple(info.coil_index for info in group["infos"]))
+            for group in free_coil_set_spec.groups
+        )
         return BiotSavartFieldPullback(
-            d_coil_arrays=tuple(d_coil_arrays),
-            coil_indices=tuple(coil_indices),
+            d_coil_arrays=d_coil_arrays,
+            coil_indices=free_coil_set_spec.coil_index_lists(),
         )
 
     B_cotangents = B_pullback_native
@@ -1289,18 +1299,10 @@ class BiotSavartJAX(Optimizable):
         grouped_forward,
         cotangent,
     ):
-        free_groups = self._group_coil_vjp_infos(
-            self._collect_free_coil_vjp_infos(geometry_cache={})
-        )
-        coil_arrays = tuple(
-            (group["gammas"], group["gammadashs"], group["currents"])
-            for group in free_groups
-        )
+        free_coil_set_spec = self._free_coil_set_spec_from_explicit_state()
+        coil_arrays = free_coil_set_spec.field_inputs()
         if not coil_arrays:
             return BiotSavartFieldPullback((), ())
-        coil_indices = tuple(
-            tuple(info.coil_index for info in group["infos"]) for group in free_groups
-        )
 
         _, pullback = jax.vjp(
             lambda grouped_inputs: grouped_forward(self._points_jax, grouped_inputs),
@@ -1309,7 +1311,7 @@ class BiotSavartJAX(Optimizable):
         d_coil_arrays = pullback(_as_jax_float64(cotangent))[0]
         return BiotSavartFieldPullback(
             d_coil_arrays=tuple(d_coil_arrays),
-            coil_indices=coil_indices,
+            coil_indices=free_coil_set_spec.coil_index_lists(),
         )
 
     def A_pullback_native(self, v):
@@ -1404,6 +1406,7 @@ class BiotSavartJAX(Optimizable):
                 curve,
                 coeff_cotangent,
                 self.dof_indices,
+                free_positions_for_opt=self._local_free_positions,
             )
         else:
             dofs_gradient = _add_local_cotangent_to_dofs_gradient(
@@ -1411,6 +1414,7 @@ class BiotSavartJAX(Optimizable):
                 curve,
                 coeff_cotangent,
                 self.dof_indices,
+                free_positions=self._local_free_positions(curve),
             )
             if surface_cotangent is not None and curve.surf in self.dof_indices:
                 dofs_gradient = _add_local_cotangent_to_dofs_gradient(
@@ -1418,6 +1422,7 @@ class BiotSavartJAX(Optimizable):
                     curve.surf,
                     surface_cotangent,
                     self.dof_indices,
+                    free_positions=self._local_free_positions(curve.surf),
                 )
 
         if current.dof_size > 0:
@@ -1426,6 +1431,7 @@ class BiotSavartJAX(Optimizable):
                 current,
                 jnp.atleast_1d(_as_jax_float64(scale) * _as_jax_float64(dc)),
                 self.dof_indices,
+                free_positions=self._local_free_positions(current),
             )
         return dofs_gradient
 

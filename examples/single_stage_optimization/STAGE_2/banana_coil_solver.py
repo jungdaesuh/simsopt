@@ -2800,12 +2800,15 @@ if __name__ == "__main__":
 
     # Define the individual terms objective function:
     new_bs_jax = None
+    diagnostic_bs_jax = None
     if args.backend == "jax":
         from simsopt.field import BiotSavartJAX
         from simsopt.objectives import SquaredFluxJAX
 
         all_coils = list(new_tf_coils) + list(new_banana_coils)
         new_bs_jax = BiotSavartJAX(all_coils)
+        # Field diagnostics call set_points(); keep that point state out of Jf.
+        diagnostic_bs_jax = BiotSavartJAX(all_coils)
         Jf = SquaredFluxJAX(new_surf, new_bs_jax)  # JAX forward + autodiff gradient
         print("Stage 2 backend: JAX")
     else:
@@ -2911,7 +2914,7 @@ if __name__ == "__main__":
             CC_WEIGHT,
             CC_THRESHOLD,
             CURVATURE_WEIGHT,
-            bs_jax=new_bs_jax,
+            bs_jax=diagnostic_bs_jax,
             trajectory_sink=trajectory,
             field_diagnostic_stride=field_diagnostic_stride,
         )
@@ -3016,7 +3019,6 @@ if __name__ == "__main__":
             Jls,
             Jccdist,
             Jc,
-            bs_jax=new_bs_jax,
             backend=args.backend,
             optimizer_backend=args.optimizer_backend,
             equilibrium_path=file_loc,
@@ -3034,6 +3036,7 @@ if __name__ == "__main__":
                 if args.optimizer_backend == "ondevice"
                 else None
             ),
+            bs_jax=diagnostic_bs_jax,
         )
         write_json_file(args.export_objective_json, probe_payload)
         print(f"Wrote Stage 2 objective snapshot to {args.export_objective_json}")
@@ -3052,7 +3055,7 @@ if __name__ == "__main__":
             CC_WEIGHT,
             CC_THRESHOLD,
             CURVATURE_WEIGHT,
-            bs_jax=new_bs_jax,
+            bs_jax=diagnostic_bs_jax,
         )
         profile_payload = profile_stage2_explicit_step(profile_context)
         write_json_file(args.profile_step_json, profile_payload)
@@ -3226,7 +3229,7 @@ if __name__ == "__main__":
                     CC_WEIGHT,
                     CC_THRESHOLD,
                     CURVATURE_WEIGHT,
-                    bs_jax=new_bs_jax,
+                    bs_jax=diagnostic_bs_jax,
                 )
             print(
                 "[ALM] restoring best exact hardware-pass incumbent "
@@ -3293,7 +3296,7 @@ if __name__ == "__main__":
                 CC_WEIGHT,
                 CC_THRESHOLD,
                 CURVATURE_WEIGHT,
-                bs_jax=new_bs_jax,
+                bs_jax=diagnostic_bs_jax,
             )
         target_value_and_grad = resolve_stage2_target_value_and_grad(
             target_objective_bundle
@@ -3338,7 +3341,7 @@ if __name__ == "__main__":
                 CC_WEIGHT,
                 CC_THRESHOLD,
                 CURVATURE_WEIGHT,
-                bs_jax=new_bs_jax,
+                bs_jax=diagnostic_bs_jax,
             )
             optimizer_timings = {
                 "cold_run_s": float(cold_elapsed_s),
@@ -3434,7 +3437,7 @@ if __name__ == "__main__":
                     CC_WEIGHT,
                     CC_THRESHOLD,
                     CURVATURE_WEIGHT,
-                    bs_jax=new_bs_jax,
+                    bs_jax=diagnostic_bs_jax,
                 )
         best_feasible_partial = accepted_state["best_feasible_partial"]
         accepted_iteration_count = int(accepted_state["count"])
@@ -3483,7 +3486,7 @@ if __name__ == "__main__":
             CC_WEIGHT,
             CC_THRESHOLD,
             CURVATURE_WEIGHT,
-            bs_jax=new_bs_jax,
+            bs_jax=diagnostic_bs_jax,
         )
         final_snapshot, _, _ = evaluate_stage2_objective(
             final_context,
@@ -3533,7 +3536,7 @@ if __name__ == "__main__":
             CC_WEIGHT,
             CC_THRESHOLD,
             CURVATURE_WEIGHT,
-            bs_jax=new_bs_jax,
+            bs_jax=diagnostic_bs_jax,
         )
         final_snapshot, _, _ = evaluate_stage2_objective(
             final_context,

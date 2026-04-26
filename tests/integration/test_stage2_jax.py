@@ -1662,6 +1662,28 @@ class TestBiotSavartJAXParity:
             atol=1e-14,
         )
 
+    def test_free_dof_layout_change_refreshes_cached_projection_maps(
+        self,
+        coil_surf_setup,
+    ):
+        """Free/fix changes invalidate cached free-position maps and specs."""
+        coils, _surf, base_curves, _base_currents = coil_surf_setup
+        bs_jax = BiotSavartJAX(coils)
+        curve = base_curves[0]
+
+        initial_positions = bs_jax._local_free_positions(curve).copy()
+        initial_spec = bs_jax.coil_dof_extraction_spec()
+
+        curve.fix(0)
+        try:
+            updated_positions = bs_jax._local_free_positions(curve)
+
+            assert len(updated_positions) == len(initial_positions) - 1
+            assert 0 not in updated_positions
+            assert bs_jax.coil_dof_extraction_spec() is not initial_spec
+        finally:
+            curve.unfix(0)
+
     def test_pullback_native_payload_is_jax_pytree(self, coil_surf_setup):
         """Native pullback payloads are pytrees with static coil index metadata."""
         coils, surf, _, _ = coil_surf_setup
@@ -2122,24 +2144,22 @@ class TestMixedQuadratureParity:
             err_msg=f"Gradient mismatch with mixed quadrature for {definition!r}",
         )
 
-    def test_j_ignores_mutated_field_points_after_construction(self, mixed_quad_setup):
-        """Fixed-surface SquaredFluxJAX is driven by its immutable surface spec."""
+    def test_j_rejects_mutated_field_points_after_construction(self, mixed_quad_setup):
+        """Fixed-surface SquaredFluxJAX rejects post-construction point drift."""
         coils, surf = mixed_quad_setup
 
         bs_jax = BiotSavartJAX(coils)
         jf_jax = SquaredFluxJAX(surf, bs_jax)
         _assert_jax_objective_native_active(jf_jax)
 
-        initial_value = jf_jax.J()
+        jf_jax.J()
         shifted_points = surf.gamma().reshape((-1, 3)) + np.array([0.05, 0.0, 0.0])
         bs_jax.set_points(shifted_points)
 
-        updated_value = jf_jax.J()
-        jf_jax.recompute_bell()
-        recomputed_value = jf_jax.J()
-
-        assert updated_value == pytest.approx(initial_value)
-        assert recomputed_value == pytest.approx(initial_value)
+        with pytest.raises(RuntimeError, match="captures fixed field-evaluation points"):
+            jf_jax.J()
+        with pytest.raises(RuntimeError, match="captures fixed field-evaluation points"):
+            jf_jax.dJ()
 
     def test_gradient_then_value_reuses_cached_squared_flux_value_on_mixed_quadrature(
         self,

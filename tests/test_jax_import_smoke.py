@@ -416,6 +416,24 @@ def test_import_package_root_native_cpu_does_not_require_jax_runtime():
     )
 
 
+def test_package_root_jax_selector_propagates_missing_jax():
+    """Explicit JAX backend selection must fail loudly when JAX cannot import."""
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=("case_package_root_jax_selector_propagates_missing_jax",),
+        failure_message="explicit JAX selector masked missing jax",
+    )
+
+
+def test_package_root_propagates_backend_import_error():
+    """Package-root import must not mask internal backend ImportErrors."""
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=("case_package_root_propagates_backend_import_error",),
+        failure_message="package root masked backend import failure",
+    )
+
+
 def test_entrypoint_runtime_helper_configures_cpu_before_import():
     _assert_python_script_passes(
         _IMPORT_SMOKE_CASES_PATH,
@@ -731,6 +749,15 @@ def test_transfer_guard_disallow_allows_boozer_residual_host_scalars():
         _IMPORT_SMOKE_CASES_PATH,
         args=("case_transfer_guard_disallow_allows_boozer_residual_host_scalars",),
         failure_message="boozer residual host-scalar transfer smoke failed",
+    )
+
+
+def test_transfer_guard_disallow_allows_boozer_decision_vector_split():
+    """Boozer decision-vector split must not create implicit index transfers."""
+    _assert_python_script_passes(
+        _IMPORT_SMOKE_CASES_PATH,
+        args=("case_transfer_guard_disallow_allows_boozer_decision_vector_split",),
+        failure_message="boozer decision-vector split transfer smoke failed",
     )
 
 

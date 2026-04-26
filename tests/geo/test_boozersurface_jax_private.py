@@ -1467,6 +1467,48 @@ class TestOptimizerAdapterPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_lbfgs_private_pytree_callback_stays_on_host(self):
+        """Structured L-BFGS callbacks should not device-stage accepted host state."""
+
+        def quad(state):
+            return 0.5 * (
+                jnp.dot(state["surface"], state["surface"])
+                + jnp.dot(state["current"], state["current"])
+            )
+
+        callback_states = []
+
+        def callback(state):
+            callback_states.append(
+                {
+                    "surface": np.asarray(state["surface"], dtype=float),
+                    "current": np.asarray(state["current"], dtype=float),
+                }
+            )
+
+        state = _opt._minimize_lbfgs_private(
+            quad,
+            _structured_optimizer_x0(),
+            maxiter=10,
+            gtol=1e-8,
+            callback=callback,
+        )
+
+        assert callback_states
+        np.testing.assert_allclose(
+            callback_states[-1]["surface"],
+            np.zeros(2),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            callback_states[-1]["current"],
+            np.zeros(1),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(np.asarray(state.g_k), np.zeros(3), atol=1e-12)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_bfgs_ondevice_respects_zero_iteration_budget(self):
         """bfgs-ondevice must not take a step when maxiter=0."""
 

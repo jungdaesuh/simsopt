@@ -1,5 +1,8 @@
 """Public backend home for runtime and mode-owned numerical policy helpers."""
 
+# Keep runtime.py as the SSOT. This package __init__ and simsopt/backend.py are
+# facade layers so existing ``simsopt.backend`` imports share one implementation.
+
 from .runtime import (
     VALID_BACKEND_MODES,
     BackendConfig,

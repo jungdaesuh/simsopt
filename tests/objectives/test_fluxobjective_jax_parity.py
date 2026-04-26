@@ -41,6 +41,7 @@ class _NonNativeFakeField(Optimizable):
     def __init__(self):
         self._uses_uniform_curve_xyz_fourier_fastpath = False
         self._points = None
+        self._points_version = 0
         super().__init__(x0=np.zeros(1, dtype=np.float64))
 
     def recompute_bell(self, parent=None):
@@ -48,6 +49,7 @@ class _NonNativeFakeField(Optimizable):
 
     def set_points_from_spec(self, field_eval_spec):
         self._points = np.asarray(field_eval_spec.points, dtype=np.float64)
+        self._points_version += 1
 
 
 def _make_native_flux_parity_case(current_values=(1e5, 1e5)):
@@ -422,6 +424,35 @@ def test_squaredfluxjax_zero_current_gradient_raises_objective_failure(definitio
 
     with pytest.raises(ObjectiveFailure, match="gradient is singular"):
         objective.dJ()
+
+
+def test_squaredfluxjax_rejects_field_point_mutation_after_construction():
+    _, objective = _make_native_flux_objectives("quadratic flux")
+    mutated_points = np.asarray(objective.surface.gamma().reshape((-1, 3)), dtype=np.float64)
+    mutated_points[:, 0] += 1.0e-3
+    objective.field.set_points(mutated_points)
+
+    with pytest.raises(RuntimeError, match="Do not call field.set_points"):
+        objective.J()
+    with pytest.raises(RuntimeError, match="Do not call field.set_points"):
+        objective.dJ()
+
+
+def test_squaredfluxjax_rejects_field_dof_layout_mutation_after_construction():
+    objective = _make_large_grouped_flux_objective()
+    assert not objective.field._uses_uniform_curve_xyz_fourier_fastpath
+    lineage_opt = next(
+        opt for opt in objective.field.unique_dof_lineage if opt.local_dof_size > 1
+    )
+
+    lineage_opt.fix(0)
+    try:
+        with pytest.raises(RuntimeError, match="free/fixed DOF layout"):
+            objective.J()
+        with pytest.raises(RuntimeError, match="free/fixed DOF layout"):
+            objective.dJ()
+    finally:
+        lineage_opt.unfix(0)
 
 
 def test_squaredfluxjax_requires_native_field_contract():

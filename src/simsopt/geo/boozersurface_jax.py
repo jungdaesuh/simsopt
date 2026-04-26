@@ -4148,7 +4148,12 @@ class BoozerSurfaceJAX(Optimizable):
         G=None,
         lm=(0.0, 0.0),
     ):
-        """Public exact-constraints Newton solver matching the CPU API."""
+        """CPU-parity exact-constraints Newton solver matching the CPU API.
+
+        Non-production path: this compatibility solver materializes dense
+        Jacobians and uses ``jnp.linalg.solve`` inside the loop. The production
+        exact runtime and adjoint path stays operator-backed and matrix-free.
+        """
         if not self.need_to_run_code:
             return self.res
 

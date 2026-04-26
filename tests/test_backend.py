@@ -1481,7 +1481,7 @@ def test_apply_jax_runtime_config_applies_metal_smoke_mode(monkeypatch):
     ) in calls
 
 
-def test_apply_jax_runtime_config_warns_without_cuda_determinism_flag(
+def test_apply_jax_runtime_config_raises_without_cuda_determinism_flag(
     monkeypatch,
 ):
     _clear_backend_env(monkeypatch)
@@ -1491,10 +1491,10 @@ def test_apply_jax_runtime_config_warns_without_cuda_determinism_flag(
     _install_fake_jax(monkeypatch, calls=calls)
 
     backend.set_backend("jax_gpu_parity", configure_runtime=False)
-    with pytest.warns(RuntimeWarning, match="XLA_FLAGS does not enable"):
+    with pytest.raises(RuntimeError, match="XLA_FLAGS does not enable"):
         backend.apply_jax_runtime_config()
 
-    assert ("jax_platforms", "cuda,cpu") in calls
+    assert calls == []
 
 
 @pytest.mark.parametrize(
@@ -1539,6 +1539,56 @@ def test_apply_jax_runtime_config_warns_on_initialized_backend_mismatch(monkeypa
 
     backend.set_backend("jax_gpu_fast", configure_runtime=False)
     with pytest.warns(RuntimeWarning, match="active JAX default backend is 'cpu'"):
+        backend.apply_jax_runtime_config()
+
+    assert ("jax_platforms", "cuda,cpu") in calls
+
+
+def test_apply_jax_runtime_config_raises_on_parity_backend_mismatch(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+    runtime_module = sys.modules["simsopt.backend.runtime"]
+    fake_home = Path("/tmp/simsopt-jax-cache-home")
+    monkeypatch.setattr(runtime_module.Path, "home", lambda: fake_home)
+    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_deterministic_ops=true")
+    calls: list[tuple[str, object]] = []
+    fake_jax = types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            update=lambda name, value: calls.append((name, value))
+        ),
+        default_backend=lambda: "cpu",
+    )
+    monkeypatch.setitem(sys.modules, "jax", fake_jax)
+
+    backend.set_backend("jax_gpu_parity", configure_runtime=False)
+    with pytest.raises(RuntimeError, match="active JAX default backend is 'cpu'"):
+        backend.apply_jax_runtime_config()
+
+    assert ("jax_platforms", "cuda,cpu") in calls
+
+
+def test_apply_jax_runtime_config_propagates_backend_initialization_error(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    backend = _fresh_backend()
+    runtime_module = sys.modules["simsopt.backend.runtime"]
+    fake_home = Path("/tmp/simsopt-jax-cache-home")
+    monkeypatch.setattr(runtime_module.Path, "home", lambda: fake_home)
+    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_deterministic_ops=true")
+    calls: list[tuple[str, object]] = []
+
+    def _raise_backend_error():
+        raise RuntimeError("backend initialization failed")
+
+    fake_jax = types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            update=lambda name, value: calls.append((name, value))
+        ),
+        default_backend=_raise_backend_error,
+    )
+    monkeypatch.setitem(sys.modules, "jax", fake_jax)
+
+    backend.set_backend("jax_gpu_parity", configure_runtime=False)
+    with pytest.raises(RuntimeError, match="backend initialization failed"):
         backend.apply_jax_runtime_config()
 
     assert ("jax_platforms", "cuda,cpu") in calls

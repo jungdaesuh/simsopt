@@ -3327,6 +3327,9 @@ def _traceable_runtime_cache_key(booz_jax, bs_jax, state, *, success_filter=None
     """
     objective_kwargs = state["objective_kwargs"]
     return (
+        # Object identity is part of the contract: callers must rebuild the
+        # wrapper instead of mutating booz_jax/bs_jax in place; solved-state
+        # freshness is represented separately by _solver_generation.
         id(booz_jax),
         id(bs_jax),
         getattr(booz_jax, "_solver_generation", None),

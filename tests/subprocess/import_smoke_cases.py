@@ -485,6 +485,38 @@ def case_import_package_root_native_cpu_does_not_require_jax_runtime() -> None:
     assert os.environ["JAX_ENABLE_X64"] == "True"
 
 
+def case_package_root_jax_selector_propagates_missing_jax() -> None:
+    import os
+
+    os.environ["SIMSOPT_BACKEND_MODE"] = "jax_cpu_parity"
+    block_jax_imports(message="blocked jax import for explicit jax selector")
+
+    try:
+        import simsopt  # noqa: F401
+    except ModuleNotFoundError as exc:
+        assert "blocked jax import for explicit jax selector" in str(exc)
+    else:
+        raise AssertionError("explicit JAX selector must not hide missing jax")
+
+
+def case_package_root_propagates_backend_import_error() -> None:
+    class _BlockBackendRuntime(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            del path, target
+            if fullname == "simsopt.backend.runtime":
+                raise ImportError("blocked backend runtime import")
+            return None
+
+    sys.meta_path.insert(0, _BlockBackendRuntime())
+
+    try:
+        import simsopt  # noqa: F401
+    except ImportError as exc:
+        assert "blocked backend runtime import" in str(exc)
+    else:
+        raise AssertionError("package root must not hide backend import failures")
+
+
 def case_entrypoint_runtime_helper_configures_cpu_before_import() -> None:
     import os
 
@@ -1142,6 +1174,26 @@ def case_transfer_guard_disallow_allows_boozer_residual_host_scalars() -> None:
     assert scalar_value.shape == ()
     assert vector_value.shape == (18,)
     assert jnp.all(jnp.isfinite(vector_value))
+
+
+def case_transfer_guard_disallow_allows_boozer_decision_vector_split() -> None:
+    import jax
+    import numpy as np
+    import simsopt.config as simsopt_config
+    from simsopt.geo.boozer_residual_jax import _split_decision_vector
+
+    simsopt_config.set_backend(
+        "jax_cpu_parity",
+        strict=True,
+        transfer_guard="disallow",
+    )
+
+    x = jax.device_put(np.arange(6, dtype=np.float64))
+    sdofs, iota, G = _split_decision_vector(x, optimize_G=True)
+
+    assert sdofs.shape == (4,)
+    assert iota.shape == ()
+    assert G.shape == ()
 
 
 def case_transfer_guard_disallow_allows_squaredfluxjax_construction() -> None:

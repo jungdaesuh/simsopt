@@ -155,7 +155,7 @@ def _coerce_dense_hess_inv(hess_inv, n, dtype):
         return jnp.eye(n, dtype=dtype)
     try:
         dense = _as_host_numpy(hess_inv)
-    except Exception:
+    except (TypeError, ValueError):
         warnings.warn(
             "Hybrid BFGS continuation could not densify hess_inv; falling back to "
             "identity warm start.",

@@ -1078,15 +1078,9 @@ def _emit_iteration_callbacks_host(
     next_k,
     f_kp1,
     g_kp1,
-    *,
-    adapter,
-    dtype,
 ):
     if callback is not None:
-        if adapter is None:
-            callback(np.asarray(x_kp1, dtype=float))
-        else:
-            callback(_as_device_array(x_kp1, dtype=dtype))
+        callback(np.asarray(x_kp1, dtype=float))
     if progress_callback is not None:
         progress_callback(
             int(next_k),
@@ -1396,8 +1390,6 @@ def _minimize_lbfgs_private_impl(
             next_k=next_k,
             f_kp1=f_kp1,
             g_kp1=g_kp1,
-            adapter=adapter,
-            dtype=dtype,
         )
 
         if update_curvature:
