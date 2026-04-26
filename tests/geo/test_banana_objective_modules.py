@@ -303,6 +303,36 @@ def _affine_signed_constraint(owner, offset, linear, *, include_violation):
     return constraint
 
 
+def _constant_constraint_result(signed_value, grad, violation):
+    grad = np.asarray(grad, dtype=float)
+
+    def constraint(*_args, **_kwargs):
+        return signed_value, grad.copy(), violation
+
+    return constraint
+
+
+def _constant_constraint_result_with_hard_signal(
+    signed_value,
+    grad,
+    violation,
+    hard_signed_value,
+    hard_violation,
+):
+    grad = np.asarray(grad, dtype=float)
+
+    def constraint(*_args, **_kwargs):
+        return (
+            signed_value,
+            grad.copy(),
+            violation,
+            hard_signed_value,
+            hard_violation,
+        )
+
+    return constraint
+
+
 class _FakeBiotSavart:
     def __init__(self, field_shape):
         self._field = np.zeros(field_shape, dtype=float)
@@ -416,6 +446,12 @@ class PoloidalExtentModuleTests(_ModuleTestCase):
     MODULE_PATH = POLOIDAL_EXTENT_PATH
     MODULE_PREFIX = "banana_poloidal_extent"
 
+    @staticmethod
+    def _inboard_poloidal_points(theta, count=1, radius=0.2, R_winding=0.976):
+        R = R_winding - radius * np.cos(theta)
+        Z = radius * np.sin(theta)
+        return np.tile(np.array([[R, 0.0, Z]], dtype=float), (count, 1))
+
     def test_inboard_poloidal_angles_use_inboard_midplane_zero(self):
         angles = self.module.inboard_poloidal_angles(
             np.array(
@@ -465,6 +501,45 @@ class PoloidalExtentModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(signed_value, np.pi / 4.0)
         self.assertAlmostEqual(violation, np.pi / 4.0)
         np.testing.assert_allclose(grad_value, [5.0, 0.0], atol=1.0e-12)
+
+    def test_hard_constraint_reports_true_poloidal_violation(self):
+        theta = 0.60
+        threshold = np.pi / 4.0
+        curve = _FakeCurve(self._inboard_poloidal_points(theta, count=256))
+
+        signed_value, violation = self.module.poloidal_extent_signed_constraint(
+            curve,
+            R_winding=0.976,
+            theta_threshold=threshold,
+        )
+
+        self.assertAlmostEqual(signed_value, theta - threshold)
+        self.assertEqual(violation, 0.0)
+
+    def test_smooth_constraint_can_return_separate_surrogate_and_hard_signals(self):
+        theta = 0.60
+        threshold = np.pi / 4.0
+        curve = _FakeCurve(self._inboard_poloidal_points(theta, count=256))
+
+        (
+            surrogate_signed_value,
+            _grad_value,
+            surrogate_violation,
+            hard_signed_value,
+            hard_violation,
+        ) = self.module.smooth_max_poloidal_extent_signed_constraint(
+            curve,
+            R_winding=0.976,
+            theta_threshold=threshold,
+            temperature=0.05,
+            objective_optimizable=object(),
+            include_hard_signal=True,
+        )
+
+        self.assertGreater(surrogate_signed_value, 0.0)
+        self.assertAlmostEqual(surrogate_violation, surrogate_signed_value)
+        self.assertAlmostEqual(hard_signed_value, theta - threshold)
+        self.assertEqual(hard_violation, 0.0)
 
 
 class Stage2ObjectiveModuleTests(_ModuleTestCase):
@@ -539,6 +614,38 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             iotas_cls=_FakeIotaTerm,
             quadratic_penalty_cls=_FakeQuadraticPenalty,
         )
+
+    def test_stage2_alm_constraint_metadata_requires_explicit_iota_threshold(self):
+        with self.assertRaisesRegex(ValueError, "iota_penalty.*explicit threshold"):
+            self.module._stage2_alm_constraint_metadata(
+                ("iota_penalty",),
+                threshold_overrides={},
+                activity_tolerance_by_name={"iota_penalty": 0.0},
+                iota_penalty_threshold=None,
+            )
+
+    def test_stage2_alm_constraint_metadata_floors_explicit_zero_iota_threshold(self):
+        metadata_by_name = self.module._stage2_alm_constraint_metadata(
+            ("iota_penalty",),
+            threshold_overrides={},
+            activity_tolerance_by_name={"iota_penalty": 0.0},
+            iota_penalty_threshold=0.0,
+        )
+
+        metadata = metadata_by_name["iota_penalty"]
+        self.assertEqual(metadata.raw_threshold, 0.0)
+        self.assertEqual(metadata.scale, self.module.ALM_OBJECTIVE_SCALE_FLOOR)
+
+    def test_stage2_alm_constraint_metadata_requires_explicit_length_threshold(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "coil_length_upper_bound.*explicit threshold",
+        ):
+            self.module._stage2_alm_constraint_metadata(
+                ("coil_length_upper_bound",),
+                threshold_overrides={},
+                activity_tolerance_by_name={"coil_length_upper_bound": 0.0},
+            )
 
     def test_make_stage2_fun_returns_value_grad_and_logs_metrics(self):
         class _JF:
@@ -991,6 +1098,126 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["max_feasibility_violation"], 0.1)
         self.assertAlmostEqual(result["total"], 9.0)
         np.testing.assert_allclose(result["grad"], [7.0, -3.0])
+
+    def test_evaluate_stage2_alm_problem_uses_hard_poloidal_feasibility(self):
+        base_objective = _FakeBaseObjective(3.5, [1.2, -0.5])
+        new_surf = _FakeSurfaceNormals((2, 2, 3))
+        new_bs = _FakeBiotSavart((4, 3))
+        Jf = _FakeScalarObjective(0.25)
+        Jls = _FakeLengthObjective(2.2, [0.3, 0.4])
+        Jccdist = _UnexpectedCurveDistance(0.05, 0.04)
+        Jc = _FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5)
+        banana_current = _FakeCurrentObjective(9500.0, [0.7, -0.4])
+        Jpoloidal = SimpleNamespace(
+            curve=_FakeCurve([[0.876, 0.0, 0.0]]),
+            R_winding=0.976,
+            Z_winding=0.0,
+        )
+
+        def fake_augmented(
+            base_value, base_grad, signed_values, grads, multipliers, penalty
+        ):
+            self.assertAlmostEqual(base_value, 3.5)
+            np.testing.assert_allclose(base_grad, [1.2, -0.5])
+            np.testing.assert_allclose(
+                signed_values,
+                [-0.16, 0.01875, 0.1, 0.2, -0.40625],
+            )
+            np.testing.assert_allclose(grads[3], [0.4, 0.6])
+            np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3, 0.4, 0.5])
+            self.assertAlmostEqual(penalty, 12.0)
+            return {
+                "total": 9.0,
+                "grad": np.array([7.0, -3.0]),
+                "stationarity_norm": 0.5,
+            }
+
+        def fake_poloidal_constraint(*_args, include_hard_signal=False, **_kwargs):
+            self.assertTrue(include_hard_signal)
+            return 0.2, np.array([0.4, 0.6]), 0.2, -0.1, 0.0
+
+        def fake_stage2_constraint_activity_tolerances(
+            distance_smoothing,
+            curvature_smoothing,
+            include_poloidal_extent=False,
+        ):
+            return [
+                1e-3,
+                distance_smoothing * 4.0,
+                curvature_smoothing * 4.0,
+                1e-3,
+                curvature_smoothing if include_poloidal_extent else 1e-3,
+            ]
+
+        with (
+            mock.patch.object(
+                self.module,
+                "augmented_inequality_objective",
+                side_effect=fake_augmented,
+            ),
+            mock.patch("builtins.print"),
+        ):
+            result = self.module.evaluate_stage2_alm_problem(
+                dofs=np.array([0.25, -0.4]),
+                base_objective=base_objective,
+                new_bs=new_bs,
+                new_surf=new_surf,
+                Jf=Jf,
+                Jls=Jls,
+                length_target=2.0,
+                Jccdist=Jccdist,
+                Jc=Jc,
+                banana_current=banana_current,
+                banana_current_max_A=16000.0,
+                distance_smoothing=0.005,
+                curvature_smoothing=0.02,
+                multipliers=np.array([0.1, 0.2, 0.3, 0.4, 0.5]),
+                penalty=12.0,
+                stage2_constraint_activity_tolerances=(
+                    fake_stage2_constraint_activity_tolerances
+                ),
+                smooth_min_distance_signed_constraint=lambda *_args: (
+                    -0.008,
+                    np.array([0.6, 0.2]),
+                    -0.008,
+                ),
+                smooth_max_curvature_signed_constraint=lambda *_args: (
+                    0.75,
+                    np.array([0.9, -0.1]),
+                ),
+                Jpoloidal=Jpoloidal,
+                poloidal_extent_threshold_rad=1.0,
+                poloidal_extent_smoothing=0.05,
+                smooth_poloidal_extent_signed_constraint=fake_poloidal_constraint,
+            )
+
+        self.assertEqual(
+            result["constraint_names"],
+            [
+                "coil_coil_spacing",
+                "max_curvature",
+                "coil_length_upper_bound",
+                "poloidal_extent",
+                "banana_current_upper_bound",
+            ],
+        )
+        np.testing.assert_allclose(
+            result["surrogate_signed_constraint_values"],
+            [-0.16, 0.01875, 0.1, 0.2, -0.40625],
+        )
+        np.testing.assert_allclose(
+            result["hard_signed_constraint_values"],
+            [-0.16, 0.025, 0.1, -0.1, -0.40625],
+        )
+        np.testing.assert_allclose(
+            result["hard_violation_values"],
+            [0.0, 0.025, 0.1, 0.0, 0.0],
+        )
+        np.testing.assert_allclose(result["raw_feasibility_values"][3], 0.0)
+        np.testing.assert_allclose(
+            result["raw_surrogate_signed_constraint_values"][3],
+            0.2,
+        )
 
     def test_stage2_normalized_alm_constraints_pass_directional_taylor_test(self):
         alm_utils = _load_module(ALM_UTILS_PATH, "banana_alm_utils")
@@ -1522,6 +1749,63 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             result["raw_constraint_activity_tolerances"],
             [0.02, 0.08, 1e-3, 1e-3, 0.5],
         )
+
+    def test_evaluate_stage2_alm_problem_rejects_missing_iota_threshold(self):
+        base_objective = _FakeBaseObjective(3.5, [1.2, -0.5])
+        new_surf = _FakeSurfaceNormals((2, 2, 3))
+        new_bs = _FakeBiotSavart((4, 3))
+        Jf = _FakeScalarObjective(0.25)
+        Jls = _FakeLengthObjective(2.2, [0.3, 0.4])
+        Jccdist = _FakeCurveDistance(0.05, 0.04)
+        Jc = _FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5)
+        banana_current = _FakeCurrentObjective(9500.0, [0.7, -0.4])
+        stage2_iota_runtime = SimpleNamespace(
+            mode="alm",
+            penalty_threshold=None,
+        )
+
+        with (
+            mock.patch.object(
+                self.module,
+                "evaluate_stage2_iota",
+                side_effect=AssertionError("iota evaluation should not run"),
+            ),
+            self.assertRaisesRegex(ValueError, "iota_penalty.*explicit threshold"),
+        ):
+            self.module.evaluate_stage2_alm_problem(
+                dofs=np.array([0.25, -0.4]),
+                base_objective=base_objective,
+                new_bs=new_bs,
+                new_surf=new_surf,
+                Jf=Jf,
+                Jls=Jls,
+                length_target=2.0,
+                Jccdist=Jccdist,
+                Jc=Jc,
+                banana_current=banana_current,
+                banana_current_max_A=16000.0,
+                distance_smoothing=0.005,
+                curvature_smoothing=0.02,
+                multipliers=np.array([0.1, 0.2, 0.3, 0.4, 0.5]),
+                penalty=12.0,
+                stage2_constraint_activity_tolerances=lambda ds, cs: [
+                    1e-3,
+                    ds * 4.0,
+                    cs * 4.0,
+                    1e-3,
+                    0.5,
+                ],
+                smooth_min_distance_signed_constraint=lambda *_args: (
+                    -0.008,
+                    np.array([0.6, 0.2]),
+                    -0.008,
+                ),
+                smooth_max_curvature_signed_constraint=lambda *_args: (
+                    0.75,
+                    np.array([0.9, -0.1]),
+                ),
+                stage2_iota_runtime=stage2_iota_runtime,
+            )
 
     def test_evaluate_stage2_alm_problem_rejects_failed_iota_solves_without_penalty_gradient(
         self,
@@ -2681,6 +2965,133 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             result["raw_surrogate_signed_constraint_values"],
             [0.02],
         )
+
+    def test_evaluate_alm_objective_uses_hard_poloidal_feasibility_signal(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        curve = _FakeCurve(
+            gamma_points=[[0.876, 0.0, 0.0]],
+            kappa_values=[5.0],
+        )
+        JPoloidalExtent = SimpleNamespace(
+            curve=curve,
+            R_winding=0.976,
+            Z_winding=0.0,
+        )
+
+        def fake_augmented(
+            base_value,
+            base_grad,
+            constraint_values,
+            constraint_grads,
+            multipliers,
+            penalty,
+        ):
+            self.assertAlmostEqual(base_value, 0.0)
+            np.testing.assert_allclose(base_grad, [0.0, 0.0])
+            np.testing.assert_allclose(constraint_values, [0.2])
+            np.testing.assert_allclose(constraint_grads[0], [0.4, 0.6])
+            np.testing.assert_allclose(multipliers, [0.0])
+            self.assertAlmostEqual(penalty, 1.0)
+            return {
+                "total": 0.2,
+                "grad": np.array([0.4, 0.6]),
+                "stationarity_norm": 0.0,
+            }
+
+        result = self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            JCurveSurface=zero,
+            JCurvature=zero,
+            multipliers=np.array([0.0]),
+            penalty=1.0,
+            objective_optimizable=SimpleNamespace(),
+            curves=(curve,),
+            curve_curve_min_distance=0.05,
+            outer_surface=_FakeSurfaceWithGradient(gamma_points=[[[0.0, 0.0, 0.0]]]),
+            curve_surface_min_distance=0.02,
+            banana_curve=curve,
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=("poloidal_extent",),
+            curve_curve_constraint_fn=_constant_constraint_result(
+                -0.1,
+                [0.0, 0.0],
+                0.0,
+            ),
+            curve_curve_constraint_with_hard_signal_fn=(
+                _constant_constraint_result_with_hard_signal(
+                    -0.1,
+                    [0.0, 0.0],
+                    0.0,
+                    -0.1,
+                    0.0,
+                )
+            ),
+            curve_surface_constraint_fn=_constant_constraint_result(
+                -0.2,
+                [0.0, 0.0],
+                0.0,
+            ),
+            curve_surface_constraint_with_hard_signal_fn=(
+                _constant_constraint_result_with_hard_signal(
+                    -0.2,
+                    [0.0, 0.0],
+                    0.0,
+                    -0.2,
+                    0.0,
+                )
+            ),
+            curvature_constraint_fn=_constant_constraint_result(
+                -0.3,
+                [0.0, 0.0],
+                0.0,
+            ),
+            hard_surrogate_diagnostics=True,
+            augmented_inequality_objective_fn=fake_augmented,
+            activity_tolerances_fn=lambda *_args, **_kwargs: (
+                1.0e-3,
+                1.0e-3,
+                1.0e-3,
+                1.0e-3,
+            ),
+            JPoloidalExtent=JPoloidalExtent,
+            poloidal_extent_threshold=1.0,
+            poloidal_extent_smoothing=0.05,
+            poloidal_extent_constraint_fn=_constant_constraint_result(
+                0.2,
+                [0.4, 0.6],
+                0.2,
+            ),
+            poloidal_extent_constraint_with_hard_signal_fn=(
+                _constant_constraint_result_with_hard_signal(
+                    0.2,
+                    [0.4, 0.6],
+                    0.2,
+                    -0.1,
+                    0.0,
+                )
+            ),
+        )
+
+        self.assertEqual(result["constraint_blocks"], ["geometry"])
+        self.assertEqual(result["dual_update_value_kinds"], ["hard"])
+        self.assertEqual(result["feasibility_value_kinds"], ["hard"])
+        np.testing.assert_allclose(result["surrogate_signed_constraint_values"], [0.2])
+        np.testing.assert_allclose(result["hard_signed_constraint_values"], [-0.1])
+        np.testing.assert_allclose(result["hard_violation_values"], [0.0])
+        np.testing.assert_allclose(result["dual_update_values"], [-0.1])
+        np.testing.assert_allclose(result["feasibility_values"], [0.0])
 
     def test_single_stage_normalized_alm_constraints_pass_directional_taylor_test(self):
         alm_utils = _load_module(ALM_UTILS_PATH, "banana_alm_utils")

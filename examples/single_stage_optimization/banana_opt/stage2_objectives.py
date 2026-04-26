@@ -663,6 +663,14 @@ def _stage2_hardware_threshold_overrides(
     )
 
 
+def _require_explicit_stage2_alm_threshold(name: str, value) -> float:
+    if value is None:
+        raise ValueError(
+            f"Stage 2 ALM constraint {name!r} requires an explicit threshold."
+        )
+    return float(value)
+
+
 def _stage2_alm_constraint_metadata(
     constraint_names: tuple[str, ...],
     *,
@@ -680,11 +688,12 @@ def _stage2_alm_constraint_metadata(
     for constraint_name in constraint_names:
         activity_tolerance = float(activity_tolerance_by_name[constraint_name])
         if constraint_name == "iota_penalty":
-            raw_threshold = (
-                None if iota_penalty_threshold is None else float(iota_penalty_threshold)
+            raw_threshold = _require_explicit_stage2_alm_threshold(
+                "iota_penalty",
+                iota_penalty_threshold,
             )
             metadata_by_name[constraint_name] = ALMConstraintMetadata(
-                scale=max(raw_threshold or 0.0, ALM_OBJECTIVE_SCALE_FLOOR),
+                scale=max(raw_threshold, ALM_OBJECTIVE_SCALE_FLOOR),
                 block="physics",
                 activity_tolerance=activity_tolerance,
                 raw_threshold=raw_threshold,
@@ -696,6 +705,11 @@ def _stage2_alm_constraint_metadata(
                 certification_value_kind="hard",
             )
             continue
+        if (
+            constraint_name == "coil_length_upper_bound"
+            and "coil_length" not in threshold_overrides
+        ):
+            _require_explicit_stage2_alm_threshold("coil_length_upper_bound", None)
         uses_surrogate = constraint_name in surrogate_hardware_names
         metadata_by_name[constraint_name] = hardware_constraint_alm_metadata(
             constraint_name,
@@ -1579,6 +1593,10 @@ def evaluate_stage2_alm_problem(
     stage2_iota_runtime: Stage2IotaRuntime | None = None,
     emit_diagnostics=False,
 ):
+    length_target = _require_explicit_stage2_alm_threshold(
+        "coil_length_upper_bound",
+        length_target,
+    )
     base_objective.x = dofs
     base_value = float(base_objective.J())
     base_grad = np.asarray(base_objective.dJ(), dtype=float)
@@ -1659,7 +1677,9 @@ def evaluate_stage2_alm_problem(
         (
             poloidal_extent_signed_value,
             poloidal_extent_grad,
-            poloidal_extent_violation,
+            _poloidal_extent_surrogate_violation,
+            poloidal_extent_hard_signed_value,
+            poloidal_extent_hard_violation,
         ) = smooth_poloidal_extent_signed_constraint(
             Jpoloidal.curve,
             Jpoloidal.R_winding,
@@ -1667,6 +1687,7 @@ def evaluate_stage2_alm_problem(
             poloidal_extent_smoothing_value,
             base_objective_optimizable,
             Z_winding=Jpoloidal.Z_winding,
+            include_hard_signal=True,
         )
 
     (
@@ -1685,12 +1706,17 @@ def evaluate_stage2_alm_problem(
     include_iota_penalty = (
         stage2_iota_runtime is not None and stage2_iota_runtime.mode == "alm"
     )
+    stage2_iota_penalty_threshold_value = None
     if stage2_iota_runtime is not None:
+        stage2_iota_penalty_threshold_value = _require_explicit_stage2_alm_threshold(
+            "iota_penalty",
+            stage2_iota_runtime.penalty_threshold,
+        )
         iota_evaluation = evaluate_stage2_iota(stage2_iota_runtime)
         iota_state = iota_evaluation.state
         if iota_state.solve_failed:
             iota_violation = max(
-                stage2_iota_runtime.penalty_threshold,
+                stage2_iota_penalty_threshold_value,
                 _STAGE2_SOLVE_FAILURE_REJECT_VIOLATION,
             )
             iota_signed_value = iota_violation
@@ -1698,10 +1724,10 @@ def evaluate_stage2_alm_problem(
         else:
             iota_violation = upper_bound_residual(
                 iota_state.penalty,
-                stage2_iota_runtime.penalty_threshold,
+                stage2_iota_penalty_threshold_value,
             )
             iota_signed_value = (
-                iota_state.penalty - stage2_iota_runtime.penalty_threshold
+                iota_state.penalty - stage2_iota_penalty_threshold_value
             )
             iota_grad = np.asarray(iota_evaluation.penalty_grad, dtype=float)
 
@@ -1735,12 +1761,10 @@ def evaluate_stage2_alm_problem(
         "banana_current_upper_bound": banana_current_violation,
     }
     if include_poloidal_extent:
-        hard_by_name["poloidal_extent"] = (
-            poloidal_extent_rad - float(poloidal_extent_threshold_rad)
-        )
+        hard_by_name["poloidal_extent"] = poloidal_extent_hard_signed_value
         surrogate_by_name["poloidal_extent"] = poloidal_extent_signed_value
         grad_by_name["poloidal_extent"] = poloidal_extent_grad
-        feasibility_by_name["poloidal_extent"] = poloidal_extent_violation
+        feasibility_by_name["poloidal_extent"] = poloidal_extent_hard_violation
     if include_coil_surface:
         hard_by_name["coil_surface_spacing"] = curve_surface_hard_signed_value
         surrogate_by_name["coil_surface_spacing"] = curve_surface_signed_value
@@ -1819,7 +1843,7 @@ def evaluate_stage2_alm_problem(
         iota_penalty_threshold=(
             None
             if stage2_iota_runtime is None
-            else stage2_iota_runtime.penalty_threshold
+            else stage2_iota_penalty_threshold_value
         ),
     )
     metadata_payload = alm_constraint_metadata_payload(active_names, metadata_by_name)
@@ -1932,7 +1956,7 @@ def evaluate_stage2_alm_problem(
         if include_poloidal_extent:
             outstr += (
                 f", Poloidal={poloidal_extent_rad:.3f}rad, "
-                f"Poloidal+={poloidal_extent_violation:.2e}, "
+                f"Poloidal+={poloidal_extent_hard_violation:.2e}, "
                 f"Poloidalg={poloidal_extent_signed_value:.2e}"
             )
         outstr += f", ║∇L_A║={evaluation['stationarity_norm']:.1e}, μ={penalty:.1e}"

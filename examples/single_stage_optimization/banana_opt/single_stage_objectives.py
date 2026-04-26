@@ -18,7 +18,10 @@ from banana_opt.hardware_constraint_schema import (
     get_hardware_constraint_spec,
     hardware_constraint_alm_metadata,
 )
-from banana_opt.poloidal_extent import poloidal_extent_rad_from_objective
+from banana_opt.poloidal_extent import (
+    poloidal_extent_rad_from_objective,
+    poloidal_extent_signed_constraint,
+)
 from banana_opt.single_stage_constraints import single_stage_constraint_activity_tolerances
 from banana_opt.smooth_distance_selection import (
     pairwise_block_min,
@@ -874,6 +877,7 @@ def _single_stage_alm_constraint_metadata(
         "surface_vessel_spacing",
         "surface_surface_spacing",
         "max_curvature",
+        "poloidal_extent",
     }
     for constraint_name in constraint_names:
         activity_tolerance = activity_tolerance_by_name.get(constraint_name, 0.0)
@@ -909,17 +913,24 @@ def _evaluate_constraint_with_optional_hard_signal(
     hard_signal_fn,
     use_hard_signal,
     *args,
+    **kwargs,
 ):
     if use_hard_signal and hard_signal_fn is not None:
-        return hard_signal_fn(*args)
-    signed_value, grad, violation = constraint_fn(*args)
+        return hard_signal_fn(*args, **kwargs)
+    signed_value, grad, violation = constraint_fn(*args, **kwargs)
     return signed_value, grad, violation, None, None
 
 
-def _resolve_hard_signal(cached_signed_value, cached_violation, hard_signal_fn, *args):
+def _resolve_hard_signal(
+    cached_signed_value,
+    cached_violation,
+    hard_signal_fn,
+    *args,
+    **kwargs,
+):
     if cached_signed_value is not None:
         return cached_signed_value, cached_violation
-    return hard_signal_fn(*args)
+    return hard_signal_fn(*args, **kwargs)
 
 
 def evaluate_alm_objective(
@@ -980,6 +991,7 @@ def evaluate_alm_objective(
     poloidal_extent_threshold=None,
     poloidal_extent_smoothing=None,
     poloidal_extent_constraint_fn=None,
+    poloidal_extent_constraint_with_hard_signal_fn=None,
     JNonQSObjective=None,
     JBoozerObjective=None,
     include_diagnostics=True,
@@ -1136,13 +1148,27 @@ def evaluate_alm_objective(
             if poloidal_extent_smoothing is None
             else poloidal_extent_smoothing
         )
-        hardware_constraints["poloidal_extent"] = poloidal_extent_constraint_fn(
+        (
+            poloidal_extent_signed_value,
+            poloidal_extent_grad,
+            poloidal_extent_violation,
+            poloidal_extent_hard_signed_value,
+            poloidal_extent_hard_violation,
+        ) = _evaluate_constraint_with_optional_hard_signal(
+            poloidal_extent_constraint_fn,
+            poloidal_extent_constraint_with_hard_signal_fn,
+            hard_surrogate_diagnostics,
             JPoloidalExtent.curve,
             JPoloidalExtent.R_winding,
             poloidal_extent_threshold,
             poloidal_extent_smoothing_value,
             objective_optimizable,
             Z_winding=JPoloidalExtent.Z_winding,
+        )
+        hardware_constraints["poloidal_extent"] = (
+            poloidal_extent_signed_value,
+            poloidal_extent_grad,
+            poloidal_extent_violation,
         )
 
     hard_signed_values_by_name: dict[str, float] = {
@@ -1205,6 +1231,22 @@ def evaluate_alm_objective(
                 hard_signed_values_by_name["surface_surface_spacing"],
                 hard_violation_values_by_name["surface_surface_spacing"],
             ) = (surface_stack_hard_signed_value, surface_stack_hard_violation)
+        if "poloidal_extent" in hardware_constraints:
+            poloidal_extent_hard_signed_value, poloidal_extent_hard_violation = (
+                _resolve_hard_signal(
+                    poloidal_extent_hard_signed_value,
+                    poloidal_extent_hard_violation,
+                    poloidal_extent_signed_constraint,
+                    JPoloidalExtent.curve,
+                    JPoloidalExtent.R_winding,
+                    poloidal_extent_threshold,
+                    Z_winding=JPoloidalExtent.Z_winding,
+                )
+            )
+            hard_signed_values_by_name["poloidal_extent"] = (
+                poloidal_extent_hard_signed_value
+            )
+            hard_violation_values_by_name["poloidal_extent"] = poloidal_extent_hard_violation
 
     physics_constraints: dict[str, tuple[float, np.ndarray, float]] = {}
     if alm_formulation == "thresholded_physics":

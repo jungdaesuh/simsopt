@@ -40,6 +40,20 @@ def max_poloidal_extent_rad(curve, R_winding, Z_winding=0.0) -> float:
     )
 
 
+def poloidal_extent_signed_constraint(
+    curve,
+    R_winding,
+    theta_threshold,
+    *,
+    Z_winding=0.0,
+):
+    theta_threshold_value = float(theta_threshold)
+    signed_value = (
+        max_poloidal_extent_rad(curve, R_winding, Z_winding) - theta_threshold_value
+    )
+    return signed_value, max(0.0, signed_value)
+
+
 def poloidal_extent_rad_from_objective(poloidal_extent_obj) -> float:
     return max_poloidal_extent_rad(
         poloidal_extent_obj.curve,
@@ -56,6 +70,7 @@ def smooth_max_poloidal_extent_signed_constraint(
     objective_optimizable,
     *,
     Z_winding=0.0,
+    include_hard_signal=False,
 ):
     gamma = np.asarray(curve.gamma(), dtype=float)
     theta = inboard_poloidal_angles(gamma, R_winding, Z_winding)
@@ -86,8 +101,40 @@ def smooth_max_poloidal_extent_signed_constraint(
         curve.dgamma_by_dcoeff_vjp(point_gradient)(objective_optimizable),
         dtype=float,
     )
-    signed_value = float(smooth_max - float(theta_threshold))
-    return signed_value, grad_value, max(0.0, signed_value)
+    theta_threshold_value = float(theta_threshold)
+    surrogate_signed_value = float(smooth_max - theta_threshold_value)
+    surrogate_violation = max(0.0, surrogate_signed_value)
+    if include_hard_signal:
+        hard_signed_value = hard_max - theta_threshold_value
+        hard_violation = max(0.0, hard_signed_value)
+        return (
+            surrogate_signed_value,
+            grad_value,
+            surrogate_violation,
+            hard_signed_value,
+            hard_violation,
+        )
+    return surrogate_signed_value, grad_value, surrogate_violation
+
+
+def smooth_max_poloidal_extent_signed_constraint_with_hard_signal(
+    curve,
+    R_winding,
+    theta_threshold,
+    temperature,
+    objective_optimizable,
+    *,
+    Z_winding=0.0,
+):
+    return smooth_max_poloidal_extent_signed_constraint(
+        curve,
+        R_winding,
+        theta_threshold,
+        temperature,
+        objective_optimizable,
+        Z_winding=Z_winding,
+        include_hard_signal=True,
+    )
 
 
 class PoloidalExtent(Optimizable):

@@ -176,6 +176,7 @@ from banana_opt.poloidal_extent import (
     max_poloidal_extent_rad,
     poloidal_extent_rad_from_objective,
     smooth_max_poloidal_extent_signed_constraint as _smooth_max_poloidal_extent_signed_constraint,
+    smooth_max_poloidal_extent_signed_constraint_with_hard_signal,
 )
 from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for test access via importlib
     DEFAULT_PHASE1_CONFIG,
@@ -4311,6 +4312,9 @@ def evaluate_alm_objective(
             poloidal_extent_threshold=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
             poloidal_extent_smoothing=curvature_smoothing,
             poloidal_extent_constraint_fn=_smooth_max_poloidal_extent_signed_constraint,
+            poloidal_extent_constraint_with_hard_signal_fn=(
+                smooth_max_poloidal_extent_signed_constraint_with_hard_signal
+            ),
             JNonQSObjective=objective_terms["JNonQSObjective"],
             JBoozerObjective=objective_terms["JBoozerObjective"],
             include_diagnostics=include_diagnostics,
