@@ -273,11 +273,110 @@ class AlmBenchmarkingTests(unittest.TestCase):
 
         self.assertEqual(len(baseline_lines), 1)
         self.assertEqual(json.loads(baseline_lines[0])["run_id"], "case-a")
-        self.assertEqual(comparison_rows[0]["case"], "case-a")
+        self.assertEqual(comparison_rows[0]["case"], "ledger:case-a")
         self.assertEqual(comparison_rows[0]["before_success"], "True")
         self.assertEqual(comparison_rows[0]["after_success"], "")
         self.assertIn("fixture_manifest", paths)
         self.assertIn("skipped_artifacts", paths)
+
+    def test_comparison_rows_join_ledger_rows_by_row_index(self):
+        source_path = "/tmp/results.jsonl"
+        before_rows = [
+            {
+                "source_kind": "ledger",
+                "source_path": source_path,
+                "ledger_row_index": 3,
+                "hard_feasible_success": False,
+                "max_raw_hard_violation": 0.001,
+                "max_normalized_violation": None,
+            },
+            {
+                "source_kind": "ledger",
+                "source_path": source_path,
+                "ledger_row_index": 4,
+                "hard_feasible_success": True,
+                "max_raw_hard_violation": 0.0,
+                "max_normalized_violation": None,
+            },
+        ]
+        after_rows = [
+            {
+                "source_kind": "ledger",
+                "source_path": source_path,
+                "ledger_row_index": 4,
+                "hard_feasible_success": True,
+                "max_raw_hard_violation": 0.0,
+                "max_normalized_violation": 0.0,
+            }
+        ]
+
+        rows = alm_benchmarking.comparison_rows(before_rows, after_rows)
+
+        self.assertEqual(rows[0]["case"], f"ledger:{source_path}:3")
+        self.assertEqual(rows[0]["after_success"], None)
+        self.assertEqual(rows[1]["case"], f"ledger:{source_path}:4")
+        self.assertEqual(rows[1]["after_success"], True)
+        self.assertEqual(rows[1]["after_max_normalized_violation"], 0.0)
+
+    def test_write_after_outputs_writes_after_rows_and_joined_comparison(self):
+        baseline_row = {
+            "source_kind": "registry",
+            "source_path": "/tmp/registry.db",
+            "run_id": "case-a",
+            "hard_feasible_success": True,
+            "best_feasible_base_objective": 0.25,
+            "max_raw_hard_violation": 0.0,
+            "max_normalized_violation": None,
+            "outer_iterations": 2,
+            "objective_eval_count": 10,
+            "wall_time_s": 4.0,
+            "penalty_cap_hit_count": 0,
+            "multiplier_cap_hit_count": 0,
+            "blocking_constraint_name": None,
+        }
+        after_row = {
+            **baseline_row,
+            "normalized_fields_available": True,
+            "normalization_contract_version": "alm_normalized_v1",
+            "max_normalized_violation": 0.0,
+            "wall_time_s": 3.5,
+        }
+        after_summary = {
+            "schema_version": alm_benchmarking.SCHEMA_VERSION,
+            "created_at_utc": "2026-04-26T00:00:00+00:00",
+            "counts": {
+                "registry_rows": 1,
+                "ledger_rows": 0,
+                "run_artifact_rows": 0,
+                "harvested_seed_fixtures": 0,
+                "skipped_artifacts": 0,
+                "baseline_rows": 1,
+            },
+            "baseline_rows": [after_row],
+            "skipped_artifacts": [],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            baseline_path = Path(tmpdir) / "baseline.jsonl"
+            baseline_path.write_text(json.dumps(baseline_row) + "\n", encoding="utf-8")
+            paths = alm_benchmarking.write_after_outputs(
+                after_summary,
+                Path(tmpdir),
+                stamp="20260426T010000Z",
+                baseline_path=baseline_path,
+                baseline_rows=alm_benchmarking.read_benchmark_rows(baseline_path),
+            )
+            after_lines = paths["after"].read_text(encoding="utf-8").splitlines()
+            with paths["comparison_csv"].open(encoding="utf-8", newline="") as handle:
+                comparison_rows = list(csv.DictReader(handle))
+            comparison_markdown = paths["comparison_markdown"].read_text(encoding="utf-8")
+
+        self.assertEqual(len(after_lines), 1)
+        self.assertEqual(json.loads(after_lines[0])["run_id"], "case-a")
+        self.assertEqual(comparison_rows[0]["case"], "registry:case-a")
+        self.assertEqual(comparison_rows[0]["after_success"], "True")
+        self.assertEqual(comparison_rows[0]["after_max_normalized_violation"], "0.0")
+        self.assertIn("does not execute solver fixtures", comparison_markdown)
 
 
 if __name__ == "__main__":

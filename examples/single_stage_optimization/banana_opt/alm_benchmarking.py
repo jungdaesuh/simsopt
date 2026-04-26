@@ -514,35 +514,71 @@ def build_baseline_summary(
 
 
 def empty_comparison_rows(baseline_rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    rows = []
-    for row in baseline_rows:
-        case = row.get("run_id") or row.get("source_path")
-        rows.append(
-            {
-                "case": case,
-                "before_success": row.get("hard_feasible_success"),
-                "after_success": None,
-                "before_best_feasible_objective": row.get("best_feasible_base_objective"),
-                "after_best_feasible_objective": None,
-                "before_max_raw_hard_violation": row.get("max_raw_hard_violation"),
-                "after_max_raw_hard_violation": None,
-                "before_max_normalized_violation": row.get("max_normalized_violation"),
-                "after_max_normalized_violation": None,
-                "before_outer_iters": row.get("outer_iterations"),
-                "after_outer_iters": None,
-                "before_evals": row.get("objective_eval_count"),
-                "after_evals": None,
-                "before_wall_s": row.get("wall_time_s"),
-                "after_wall_s": None,
-                "before_penalty_cap_hits": row.get("penalty_cap_hit_count"),
-                "after_penalty_cap_hits": None,
-                "before_multiplier_cap_hits": row.get("multiplier_cap_hit_count"),
-                "after_multiplier_cap_hits": None,
-                "blocking_constraint_before": row.get("blocking_constraint_name"),
-                "blocking_constraint_after": None,
-            }
-        )
-    return rows
+    return comparison_rows(baseline_rows, ())
+
+
+def benchmark_case_key(row: Mapping[str, object]) -> str:
+    source_kind = row["source_kind"]
+    if source_kind == "ledger" and row.get("ledger_row_index") is not None:
+        return f"{source_kind}:{row['source_path']}:{row['ledger_row_index']}"
+    case_id = row.get("run_id") or row["source_path"]
+    return f"{source_kind}:{case_id}"
+
+
+def _comparison_row(
+    before: Mapping[str, object],
+    after: Mapping[str, object] | None,
+) -> dict[str, object]:
+    return {
+        "case": benchmark_case_key(before),
+        "before_success": before.get("hard_feasible_success"),
+        "after_success": None if after is None else after.get("hard_feasible_success"),
+        "before_best_feasible_objective": before.get("best_feasible_base_objective"),
+        "after_best_feasible_objective": (
+            None if after is None else after.get("best_feasible_base_objective")
+        ),
+        "before_max_raw_hard_violation": before.get("max_raw_hard_violation"),
+        "after_max_raw_hard_violation": (
+            None if after is None else after.get("max_raw_hard_violation")
+        ),
+        "before_max_normalized_violation": before.get("max_normalized_violation"),
+        "after_max_normalized_violation": (
+            None if after is None else after.get("max_normalized_violation")
+        ),
+        "before_outer_iters": before.get("outer_iterations"),
+        "after_outer_iters": None if after is None else after.get("outer_iterations"),
+        "before_evals": before.get("objective_eval_count"),
+        "after_evals": None if after is None else after.get("objective_eval_count"),
+        "before_wall_s": before.get("wall_time_s"),
+        "after_wall_s": None if after is None else after.get("wall_time_s"),
+        "before_penalty_cap_hits": before.get("penalty_cap_hit_count"),
+        "after_penalty_cap_hits": (
+            None if after is None else after.get("penalty_cap_hit_count")
+        ),
+        "before_multiplier_cap_hits": before.get("multiplier_cap_hit_count"),
+        "after_multiplier_cap_hits": (
+            None if after is None else after.get("multiplier_cap_hit_count")
+        ),
+        "blocking_constraint_before": before.get("blocking_constraint_name"),
+        "blocking_constraint_after": (
+            None if after is None else after.get("blocking_constraint_name")
+        ),
+    }
+
+
+def comparison_rows(
+    baseline_rows: Sequence[Mapping[str, object]],
+    after_rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    after_by_case = {benchmark_case_key(row): row for row in after_rows}
+    return [
+        _comparison_row(before, after_by_case.get(benchmark_case_key(before)))
+        for before in baseline_rows
+    ]
+
+
+def read_benchmark_rows(path: Path) -> list[dict[str, object]]:
+    return [dict(row) for _, row in _iter_jsonl(path)]
 
 
 def render_markdown_summary(summary: Mapping[str, object]) -> str:
@@ -574,6 +610,63 @@ def render_markdown_summary(summary: Mapping[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_comparison_markdown(
+    *,
+    baseline_path: Path,
+    after_summary: Mapping[str, object],
+    comparison: Sequence[Mapping[str, object]],
+    matched_after_rows: int,
+) -> str:
+    counts = after_summary["counts"]
+    lines = [
+        "# ALM Normalization Artifact Comparison",
+        "",
+        f"- Schema: `{after_summary['schema_version']}`",
+        f"- Created UTC: `{after_summary['created_at_utc']}`",
+        f"- Baseline JSONL: `{baseline_path}`",
+        f"- After registry rows: `{counts['registry_rows']}`",
+        f"- After ledger rows: `{counts['ledger_rows']}`",
+        f"- After run artifact rows: `{counts['run_artifact_rows']}`",
+        f"- After harvested seed fixtures: `{counts['harvested_seed_fixtures']}`",
+        f"- After skipped artifacts: `{counts['skipped_artifacts']}`",
+        f"- Compared baseline rows: `{len(comparison)}`",
+        f"- Matched after rows: `{matched_after_rows}`",
+        "",
+        "This file compares collected artifact rows. It does not execute solver fixtures.",
+        "",
+        "| Case | Before success | After success | Before raw violation | After raw violation | Before normalized violation | After normalized violation |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in comparison[:50]:
+        lines.append(
+            "| "
+            f"{row['case']} | "
+            f"{row['before_success']} | "
+            f"{row['after_success']} | "
+            f"{row['before_max_raw_hard_violation']} | "
+            f"{row['after_max_raw_hard_violation']} | "
+            f"{row['before_max_normalized_violation']} | "
+            f"{row['after_max_normalized_violation']} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _write_jsonl(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def _write_comparison_csv(
+    path: Path,
+    rows: Sequence[Mapping[str, object]],
+) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_SUMMARY_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def write_baseline_outputs(
     summary: Mapping[str, object],
     output_dir: Path,
@@ -587,9 +680,7 @@ def write_baseline_outputs(
     comparison_csv_path = output_dir / f"comparison_{stamp}.csv"
     comparison_md_path = output_dir / f"comparison_{stamp}.md"
 
-    with baseline_path.open("w", encoding="utf-8") as handle:
-        for row in summary["baseline_rows"]:
-            handle.write(json.dumps(row, sort_keys=True) + "\n")
+    _write_jsonl(baseline_path, summary["baseline_rows"])
 
     fixture_manifest_path.write_text(
         json.dumps(summary["fixture_manifest"], indent=2, sort_keys=True) + "\n",
@@ -600,11 +691,8 @@ def write_baseline_outputs(
         encoding="utf-8",
     )
 
-    comparison_rows = empty_comparison_rows(summary["baseline_rows"])
-    with comparison_csv_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=_SUMMARY_COLUMNS)
-        writer.writeheader()
-        writer.writerows(comparison_rows)
+    comparison = empty_comparison_rows(summary["baseline_rows"])
+    _write_comparison_csv(comparison_csv_path, comparison)
 
     comparison_md_path.write_text(render_markdown_summary(summary), encoding="utf-8")
 
@@ -617,9 +705,53 @@ def write_baseline_outputs(
     }
 
 
+def write_after_outputs(
+    after_summary: Mapping[str, object],
+    output_dir: Path,
+    *,
+    stamp: str,
+    baseline_path: Path,
+    baseline_rows: Sequence[Mapping[str, object]],
+) -> dict[str, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    after_path = output_dir / f"after_{stamp}.jsonl"
+    skipped_artifacts_path = output_dir / f"after_skipped_artifacts_{stamp}.json"
+    comparison_csv_path = output_dir / f"comparison_{stamp}.csv"
+    comparison_md_path = output_dir / f"comparison_{stamp}.md"
+
+    after_rows = after_summary["baseline_rows"]
+    comparison = comparison_rows(baseline_rows, after_rows)
+    after_cases = {benchmark_case_key(row) for row in after_rows}
+    matched_after_rows = sum(
+        benchmark_case_key(row) in after_cases for row in baseline_rows
+    )
+    _write_jsonl(after_path, after_rows)
+    skipped_artifacts_path.write_text(
+        json.dumps(after_summary["skipped_artifacts"], indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _write_comparison_csv(comparison_csv_path, comparison)
+    comparison_md_path.write_text(
+        render_comparison_markdown(
+            baseline_path=baseline_path,
+            after_summary=after_summary,
+            comparison=comparison,
+            matched_after_rows=matched_after_rows,
+        ),
+        encoding="utf-8",
+    )
+
+    return {
+        "after": after_path,
+        "after_skipped_artifacts": skipped_artifacts_path,
+        "comparison_csv": comparison_csv_path,
+        "comparison_markdown": comparison_md_path,
+    }
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Capture read-only ALM baseline rows from autoresearch artifacts."
+        description="Capture read-only ALM benchmark rows from autoresearch artifacts."
     )
     parser.add_argument(
         "--autoresearch-root",
@@ -628,6 +760,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--stamp", default=utc_stamp())
+    parser.add_argument(
+        "--baseline-jsonl",
+        type=Path,
+        help="Frozen baseline rows to compare against the current artifact snapshot.",
+    )
     return parser.parse_args(argv)
 
 
@@ -636,7 +773,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     roots = AutoresearchArtifactRoots.from_autoresearch_root(args.autoresearch_root)
     output_dir = args.output_dir or benchmark_output_dir(roots)
     summary = build_baseline_summary(roots)
-    paths = write_baseline_outputs(summary, output_dir, stamp=args.stamp)
+    if args.baseline_jsonl is None:
+        paths = write_baseline_outputs(summary, output_dir, stamp=args.stamp)
+    else:
+        paths = write_after_outputs(
+            summary,
+            output_dir,
+            stamp=args.stamp,
+            baseline_path=args.baseline_jsonl,
+            baseline_rows=read_benchmark_rows(args.baseline_jsonl),
+        )
     print(
         json.dumps(
             {
