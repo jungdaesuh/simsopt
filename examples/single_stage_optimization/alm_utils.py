@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from types import SimpleNamespace
 from typing import Callable, Mapping, Sequence
 
@@ -34,6 +34,7 @@ class ALMSettings:
     block_penalty_max: Mapping[str, float | None] | None = None
     block_penalty_improvement_fraction: float = 0.9
     block_penalty_patience: int = 1
+    history_max_entries: int | None = 512
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,15 @@ class ALMBlockPenaltyState:
     requested_by_block: dict[str, float | None]
     stall_counts_by_block: dict[str, int]
     previous_violations_by_block: dict[str, float]
+    penalty_vector: np.ndarray = dataclass_field(init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        vector = np.asarray(
+            [self.penalties_by_block[block] for block in self.constraint_blocks],
+            dtype=float,
+        )
+        vector.setflags(write=False)
+        object.__setattr__(self, "penalty_vector", vector)
 
 
 _UNBOUNDED_INNER_PROFILE = ALMInnerSolveProfile(
@@ -292,9 +302,7 @@ def augmented_inequality_objective(
     penalty,
 ):
     constraint_values = np.asarray(constraint_values, dtype=float)
-    constraint_grad_list = [
-        np.asarray(constraint_grad, dtype=float) for constraint_grad in constraint_grads
-    ]
+    constraint_grad_list = _constraint_grad_list(constraint_grads)
     multipliers = np.asarray(multipliers, dtype=float)
     penalty_values = _penalty_values(penalty, constraint_values.size)
     positive_shift = np.maximum(0.0, multipliers + penalty_values * constraint_values)
@@ -302,12 +310,22 @@ def augmented_inequality_objective(
     total_value = float(base_value)
     if constraint_values.size > 0:
         total_value += float(
-            np.sum((positive_shift**2 - multipliers**2) / (2.0 * penalty_values))
+            np.sum(
+                0.5
+                * (positive_shift - multipliers)
+                * (positive_shift + multipliers)
+                / penalty_values
+            )
         )
 
-    total_grad = np.array(base_grad, copy=True)
-    for active_multiplier, constraint_grad in zip(positive_shift, constraint_grad_list):
-        total_grad = total_grad + float(active_multiplier) * constraint_grad
+    base_grad_array = np.asarray(base_grad, dtype=float)
+    total_grad = base_grad_array.copy()
+    if constraint_values.size > 0:
+        total_grad += np.tensordot(
+            positive_shift,
+            np.stack(constraint_grad_list, axis=0),
+            axes=(0, 0),
+        )
 
     feasibility_values = np.maximum(constraint_values, 0.0)
     return _build_augmented_evaluation(
@@ -329,6 +347,25 @@ def normalize_alm_constraints(
     activity_tolerances,
     scales,
 ):
+    payload = normalize_alm_constraint_signals(
+        signed_values,
+        feasibility_values,
+        activity_tolerances,
+        scales,
+    )
+    payload["normalized_constraint_grads"] = normalize_alm_constraint_grads(
+        constraint_grads,
+        scales,
+    )
+    return payload
+
+
+def normalize_alm_constraint_signals(
+    signed_values,
+    feasibility_values,
+    activity_tolerances,
+    scales,
+):
     scale_array = np.asarray(scales, dtype=float)
     if np.any(~np.isfinite(scale_array)) or np.any(scale_array <= 0.0):
         raise ValueError("ALM constraint scales must be finite and positive")
@@ -341,18 +378,27 @@ def normalize_alm_constraints(
         raise ValueError("feasibility_values shape must match scales")
     if activity_tolerance_array.shape != scale_array.shape:
         raise ValueError("activity_tolerances shape must match scales")
-    if len(constraint_grads) != scale_array.size:
-        raise ValueError("constraint_grads length must match scales")
-    normalized_grads = [
-        np.asarray(grad, dtype=float) / float(scale)
-        for grad, scale in zip(constraint_grads, scale_array)
-    ]
     return {
         "normalized_signed_values": signed_array / scale_array,
-        "normalized_constraint_grads": normalized_grads,
         "normalized_feasibility_values": feasibility_array / scale_array,
         "normalized_activity_tolerances": activity_tolerance_array / scale_array,
     }
+
+
+def normalize_alm_constraint_grads(constraint_grads, scales):
+    scale_array = np.asarray(scales, dtype=float)
+    if np.any(~np.isfinite(scale_array)) or np.any(scale_array <= 0.0):
+        raise ValueError("ALM constraint scales must be finite and positive")
+    if len(constraint_grads) != scale_array.size:
+        raise ValueError("constraint_grads length must match scales")
+    return [
+        np.asarray(grad, dtype=float) / float(scale)
+        for grad, scale in zip(constraint_grads, scale_array)
+    ]
+
+
+def _constraint_grad_list(constraint_grads) -> list[np.ndarray]:
+    return [np.asarray(constraint_grad, dtype=float) for constraint_grad in constraint_grads]
 
 
 def zero_gradient_like(reference_grad):
@@ -1357,10 +1403,7 @@ def _initial_block_penalty_state(
 
 
 def _block_penalty_vector(state: ALMBlockPenaltyState) -> np.ndarray:
-    return np.asarray(
-        [state.penalties_by_block[block] for block in state.constraint_blocks],
-        dtype=float,
-    )
+    return state.penalty_vector
 
 
 def _block_penalty_summary(state: ALMBlockPenaltyState | None) -> dict[str, float] | None:
@@ -1890,6 +1933,8 @@ def minimize_alm(
             raise ValueError("constraint_blocks must be provided when block penalties are enabled")
         if len(constraint_blocks) != len(constraint_names):
             raise ValueError("constraint_blocks length must match constraint_names")
+    if settings.history_max_entries is not None and settings.history_max_entries <= 0:
+        raise ValueError("settings.history_max_entries must be positive or None")
     x = np.asarray(x0, dtype=float).copy()
     multipliers = (
         np.asarray(initial_multipliers, dtype=float).copy()
@@ -1956,6 +2001,13 @@ def minimize_alm(
         if block_penalty_state is None:
             return float(settings.penalty_scale)
         return max(float(value) for value in block_penalty_state.scales_by_block.values())
+
+    def _append_history_entry(entry: dict) -> None:
+        history.append(entry)
+        if settings.history_max_entries is not None:
+            excess_entries = len(history) - int(settings.history_max_entries)
+            if excess_entries > 0:
+                del history[:excess_entries]
 
     def _emit_history_snapshot(latest_entry: dict) -> None:
         if history_callback is None:
@@ -2452,7 +2504,7 @@ def minimize_alm(
                 and not current_constraints_inactive_candidate
                 and not current_signal_mismatch_active
             ):
-                history.append(
+                _append_history_entry(
                     {
                         "outer_iteration": int(outer_iteration),
                         "continuation_iteration": int(continuation_iteration),
@@ -2932,7 +2984,7 @@ def minimize_alm(
                     update_feasibility_tol,
                 )
             )
-            history.append(history_entry)
+            _append_history_entry(history_entry)
             hard_feasible_strict = routing_state.hard_max_violation <= settings.feasibility_tol
             hard_feasible_for_update = (
                 routing_state.hard_max_violation <= effective_feasibility_tol

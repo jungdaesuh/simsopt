@@ -1,6 +1,10 @@
 import numpy as np
 
-from alm_utils import augmented_inequality_objective, normalize_alm_constraints
+from alm_utils import (
+    augmented_inequality_objective,
+    normalize_alm_constraint_grads,
+    normalize_alm_constraint_signals,
+)
 from banana_opt.frontier_constraints import annotate_search_evaluation_finiteness
 from banana_opt.frontier_scalarization import (
     FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
@@ -16,7 +20,7 @@ from banana_opt.hardware_constraint_schema import (
 )
 from banana_opt.poloidal_extent import poloidal_extent_rad_from_objective
 from banana_opt.single_stage_constraints import single_stage_constraint_activity_tolerances
-from banana_opt.smooth_distance_selection import pairwise_block_min
+from banana_opt.smooth_distance_selection import pairwise_block_min, point_tree
 
 
 ALM_HARD_GEOMETRY_DUAL_SIGNALS = True
@@ -163,8 +167,13 @@ def _flat_surface_points(surface) -> np.ndarray:
 
 def _hard_min_curve_curve_signed_constraint(curves, minimum_distance):
     curve_points = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
+    curve_trees = [point_tree(points) for points in curve_points]
     hard_min = min(
-        pairwise_block_min(gamma_i, curve_points[previous_index])
+        pairwise_block_min(
+            gamma_i,
+            curve_points[previous_index],
+            right_tree=curve_trees[previous_index],
+        )
         for index, gamma_i in enumerate(curve_points)
         for previous_index in range(index)
     )
@@ -174,8 +183,13 @@ def _hard_min_curve_curve_signed_constraint(curves, minimum_distance):
 
 def _hard_min_curve_surface_signed_constraint(curves, surface, minimum_distance):
     flat_surface = _flat_surface_points(surface)
+    surface_tree = point_tree(flat_surface)
     hard_min = min(
-        pairwise_block_min(np.asarray(curve.gamma(), dtype=float), flat_surface)
+        pairwise_block_min(
+            np.asarray(curve.gamma(), dtype=float),
+            flat_surface,
+            right_tree=surface_tree,
+        )
         for curve in curves
     )
     signed_value = float(minimum_distance) - float(hard_min)
@@ -187,9 +201,11 @@ def _hard_min_surface_surface_signed_constraint(
     surface_2,
     minimum_distance,
 ):
+    flat_surface_2 = _flat_surface_points(surface_2)
     hard_min = pairwise_block_min(
         _flat_surface_points(surface_1),
-        _flat_surface_points(surface_2),
+        flat_surface_2,
+        right_tree=point_tree(flat_surface_2),
     )
     signed_value = float(minimum_distance) - float(hard_min)
     return signed_value, _positive_violation(signed_value)
@@ -197,8 +213,13 @@ def _hard_min_surface_surface_signed_constraint(
 
 def _hard_min_surface_stack_signed_constraint(surfaces, minimum_distance):
     surface_points = [_flat_surface_points(surface) for surface in surfaces]
+    surface_trees = [point_tree(points) for points in surface_points]
     hard_min = min(
-        pairwise_block_min(surface_points[index - 1], surface_points[index])
+        pairwise_block_min(
+            surface_points[index - 1],
+            surface_points[index],
+            right_tree=surface_trees[index],
+        )
         for index in range(1, len(surface_points))
     )
     signed_value = float(minimum_distance) - float(hard_min)
@@ -879,6 +900,24 @@ def _single_stage_alm_constraint_metadata(
     return metadata_by_name
 
 
+def _evaluate_constraint_with_optional_hard_signal(
+    constraint_fn,
+    hard_signal_fn,
+    use_hard_signal,
+    *args,
+):
+    if use_hard_signal and hard_signal_fn is not None:
+        return hard_signal_fn(*args)
+    signed_value, grad, violation = constraint_fn(*args)
+    return signed_value, grad, violation, None, None
+
+
+def _resolve_hard_signal(cached_signed_value, cached_violation, hard_signal_fn, *args):
+    if cached_signed_value is not None:
+        return cached_signed_value, cached_violation
+    return hard_signal_fn(*args)
+
+
 def evaluate_alm_objective(
     surface_weights,
     nonQSs,
@@ -909,13 +948,17 @@ def evaluate_alm_objective(
     curve_curve_constraint_fn,
     curve_surface_constraint_fn,
     curvature_constraint_fn,
+    curve_curve_constraint_with_hard_signal_fn=None,
+    curve_surface_constraint_with_hard_signal_fn=None,
     JSurfSurf=None,
     vessel_surface=None,
     surface_surface_min_distance=0.0,
     surface_surface_constraint_fn=None,
+    surface_surface_constraint_with_hard_signal_fn=None,
     surface_stack_surfaces=None,
     surface_stack_min_distance=0.0,
     surface_stack_constraint_fn=None,
+    surface_stack_constraint_with_hard_signal_fn=None,
     hard_surrogate_diagnostics=False,
     augmented_inequality_objective_fn=augmented_inequality_objective,
     activity_tolerances_fn=single_stage_constraint_activity_tolerances,
@@ -958,20 +1001,36 @@ def evaluate_alm_objective(
         include_diagnostics=include_diagnostics,
     )
 
-    curve_curve_signed_value, curve_curve_grad, curve_curve_violation = curve_curve_constraint_fn(
+    (
+        curve_curve_signed_value,
+        curve_curve_grad,
+        curve_curve_violation,
+        curve_curve_hard_signed_value,
+        curve_curve_hard_violation,
+    ) = _evaluate_constraint_with_optional_hard_signal(
+        curve_curve_constraint_fn,
+        curve_curve_constraint_with_hard_signal_fn,
+        hard_surrogate_diagnostics,
         curves,
         curve_curve_min_distance,
         distance_smoothing,
         objective_optimizable,
     )
-    curve_surface_signed_value, curve_surface_grad, curve_surface_violation = (
-        curve_surface_constraint_fn(
-            curves,
-            outer_surface,
-            curve_surface_min_distance,
-            distance_smoothing,
-            objective_optimizable,
-        )
+    (
+        curve_surface_signed_value,
+        curve_surface_grad,
+        curve_surface_violation,
+        curve_surface_hard_signed_value,
+        curve_surface_hard_violation,
+    ) = _evaluate_constraint_with_optional_hard_signal(
+        curve_surface_constraint_fn,
+        curve_surface_constraint_with_hard_signal_fn,
+        hard_surrogate_diagnostics,
+        curves,
+        outer_surface,
+        curve_surface_min_distance,
+        distance_smoothing,
+        objective_optimizable,
     )
     curvature_signed_value, curvature_grad, curvature_violation = curvature_constraint_fn(
         banana_curve,
@@ -998,14 +1057,21 @@ def evaluate_alm_objective(
         ),
     }
     if JSurfSurf is not None:
-        surface_surface_signed_value, surface_surface_grad, surface_surface_violation = (
-            surface_surface_constraint_fn(
-                outer_surface,
-                vessel_surface,
-                surface_surface_min_distance,
-                distance_smoothing,
-                objective_optimizable,
-            )
+        (
+            surface_surface_signed_value,
+            surface_surface_grad,
+            surface_surface_violation,
+            surface_surface_hard_signed_value,
+            surface_surface_hard_violation,
+        ) = _evaluate_constraint_with_optional_hard_signal(
+            surface_surface_constraint_fn,
+            surface_surface_constraint_with_hard_signal_fn,
+            hard_surrogate_diagnostics,
+            outer_surface,
+            vessel_surface,
+            surface_surface_min_distance,
+            distance_smoothing,
+            objective_optimizable,
         )
         hardware_constraints["surface_vessel_spacing"] = (
             surface_surface_signed_value,
@@ -1013,13 +1079,20 @@ def evaluate_alm_objective(
             surface_surface_violation,
         )
     if surface_stack_surfaces is not None:
-        surface_stack_signed_value, surface_stack_grad, surface_stack_violation = (
-            surface_stack_constraint_fn(
-                surface_stack_surfaces,
-                surface_stack_min_distance,
-                distance_smoothing,
-                objective_optimizable,
-            )
+        (
+            surface_stack_signed_value,
+            surface_stack_grad,
+            surface_stack_violation,
+            surface_stack_hard_signed_value,
+            surface_stack_hard_violation,
+        ) = _evaluate_constraint_with_optional_hard_signal(
+            surface_stack_constraint_fn,
+            surface_stack_constraint_with_hard_signal_fn,
+            hard_surrogate_diagnostics,
+            surface_stack_surfaces,
+            surface_stack_min_distance,
+            distance_smoothing,
+            objective_optimizable,
         )
         hardware_constraints["surface_surface_spacing"] = (
             surface_stack_signed_value,
@@ -1075,36 +1148,59 @@ def evaluate_alm_objective(
         name: float(values[2]) for name, values in hardware_constraints.items()
     }
     if hard_surrogate_diagnostics:
-        hard_signed_values_by_name["coil_coil_spacing"], hard_violation_values_by_name[
-            "coil_coil_spacing"
-        ] = _hard_min_curve_curve_signed_constraint(curves, curve_curve_min_distance)
-        hard_signed_values_by_name["coil_surface_spacing"], hard_violation_values_by_name[
-            "coil_surface_spacing"
-        ] = _hard_min_curve_surface_signed_constraint(
+        curve_curve_hard_signed_value, curve_curve_hard_violation = _resolve_hard_signal(
+            curve_curve_hard_signed_value,
+            curve_curve_hard_violation,
+            _hard_min_curve_curve_signed_constraint,
             curves,
-            outer_surface,
-            curve_surface_min_distance,
+            curve_curve_min_distance,
         )
+        curve_surface_hard_signed_value, curve_surface_hard_violation = (
+            _resolve_hard_signal(
+                curve_surface_hard_signed_value,
+                curve_surface_hard_violation,
+                _hard_min_curve_surface_signed_constraint,
+                curves,
+                outer_surface,
+                curve_surface_min_distance,
+            )
+        )
+        hard_signed_values_by_name["coil_coil_spacing"] = curve_curve_hard_signed_value
+        hard_violation_values_by_name["coil_coil_spacing"] = curve_curve_hard_violation
+        hard_signed_values_by_name["coil_surface_spacing"] = curve_surface_hard_signed_value
+        hard_violation_values_by_name["coil_surface_spacing"] = curve_surface_hard_violation
         hard_signed_values_by_name["max_curvature"], hard_violation_values_by_name[
             "max_curvature"
         ] = _hard_max_curvature_signed_constraint(banana_curve, curvature_threshold)
         if JSurfSurf is not None:
+            surface_surface_hard_signed_value, surface_surface_hard_violation = (
+                _resolve_hard_signal(
+                    surface_surface_hard_signed_value,
+                    surface_surface_hard_violation,
+                    _hard_min_surface_surface_signed_constraint,
+                    outer_surface,
+                    vessel_surface,
+                    surface_surface_min_distance,
+                )
+            )
             (
                 hard_signed_values_by_name["surface_vessel_spacing"],
                 hard_violation_values_by_name["surface_vessel_spacing"],
-            ) = _hard_min_surface_surface_signed_constraint(
-                outer_surface,
-                vessel_surface,
-                surface_surface_min_distance,
-            )
+            ) = (surface_surface_hard_signed_value, surface_surface_hard_violation)
         if surface_stack_surfaces is not None:
+            surface_stack_hard_signed_value, surface_stack_hard_violation = (
+                _resolve_hard_signal(
+                    surface_stack_hard_signed_value,
+                    surface_stack_hard_violation,
+                    _hard_min_surface_stack_signed_constraint,
+                    surface_stack_surfaces,
+                    surface_stack_min_distance,
+                )
+            )
             (
                 hard_signed_values_by_name["surface_surface_spacing"],
                 hard_violation_values_by_name["surface_surface_spacing"],
-            ) = _hard_min_surface_stack_signed_constraint(
-                surface_stack_surfaces,
-                surface_stack_min_distance,
-            )
+            ) = (surface_stack_hard_signed_value, surface_stack_hard_violation)
 
     physics_constraints: dict[str, tuple[float, np.ndarray, float]] = {}
     if alm_formulation == "thresholded_physics":
@@ -1226,36 +1322,35 @@ def evaluate_alm_objective(
         metadata_by_name,
     )
     constraint_scales = np.asarray(metadata_payload["constraint_scales"], dtype=float)
-    normalized_payload = normalize_alm_constraints(
-        constraint_values,
+    normalized_constraint_grads = normalize_alm_constraint_grads(
         constraint_grads,
+        constraint_scales,
+    )
+    normalized_payload = normalize_alm_constraint_signals(
+        constraint_values,
         surrogate_feasibility_values,
         constraint_activity_tolerances,
         constraint_scales,
     )
-    signal_payload = normalize_alm_constraints(
+    signal_payload = normalize_alm_constraint_signals(
         dual_update_values,
-        constraint_grads,
         feasibility_values,
         constraint_activity_tolerances,
         constraint_scales,
     )
-    hard_signal_payload = normalize_alm_constraints(
+    hard_signal_payload = normalize_alm_constraint_signals(
         hard_signed_values,
-        constraint_grads,
         hard_violation_values,
         constraint_activity_tolerances,
         constraint_scales,
     )
-    surrogate_signal_payload = normalize_alm_constraints(
+    surrogate_signal_payload = normalize_alm_constraint_signals(
         surrogate_signed_values,
-        constraint_grads,
         surrogate_feasibility_values,
         constraint_activity_tolerances,
         constraint_scales,
     )
     normalized_constraint_values = normalized_payload["normalized_signed_values"]
-    normalized_constraint_grads = normalized_payload["normalized_constraint_grads"]
     normalized_dual_update_values = signal_payload["normalized_signed_values"]
     normalized_feasibility_values = signal_payload["normalized_feasibility_values"]
     normalized_activity_tolerances = normalized_payload[

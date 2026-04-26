@@ -243,9 +243,17 @@ from banana_opt.single_stage_geometry import (  # noqa: F401 - re-exported for i
 from banana_opt.single_stage_constraints import (
     smooth_max_curvature_signed_constraint as _smooth_max_curvature_signed_constraint,
     smooth_min_curve_curve_signed_constraint as _smooth_min_curve_curve_signed_constraint,
+    smooth_min_curve_curve_signed_constraint_with_hard_signal
+    as _smooth_min_curve_curve_signed_constraint_with_hard_signal,
     smooth_min_curve_surface_signed_constraint as _smooth_min_curve_surface_signed_constraint,
+    smooth_min_curve_surface_signed_constraint_with_hard_signal
+    as _smooth_min_curve_surface_signed_constraint_with_hard_signal,
     smooth_min_surface_stack_signed_constraint as _smooth_min_surface_stack_signed_constraint,
+    smooth_min_surface_stack_signed_constraint_with_hard_signal
+    as _smooth_min_surface_stack_signed_constraint_with_hard_signal,
     smooth_min_surface_surface_signed_constraint as _smooth_min_surface_surface_signed_constraint,
+    smooth_min_surface_surface_signed_constraint_with_hard_signal
+    as _smooth_min_surface_surface_signed_constraint_with_hard_signal,
 )
 from banana_opt.single_stage_search_policy import (
     CurvatureTraversalPolicy,
@@ -4256,13 +4264,25 @@ def evaluate_alm_objective(
             curve_curve_constraint_fn=_smooth_min_curve_curve_signed_constraint,
             curve_surface_constraint_fn=_smooth_min_curve_surface_signed_constraint,
             curvature_constraint_fn=_smooth_max_curvature_signed_constraint,
+            curve_curve_constraint_with_hard_signal_fn=(
+                _smooth_min_curve_curve_signed_constraint_with_hard_signal
+            ),
+            curve_surface_constraint_with_hard_signal_fn=(
+                _smooth_min_curve_surface_signed_constraint_with_hard_signal
+            ),
             JSurfSurf=JSurfSurf,
             vessel_surface=VV,
             surface_surface_min_distance=SS_DIST,
             surface_surface_constraint_fn=_smooth_min_surface_surface_signed_constraint,
+            surface_surface_constraint_with_hard_signal_fn=(
+                _smooth_min_surface_surface_signed_constraint_with_hard_signal
+            ),
             surface_stack_surfaces=current_single_stage_alm_surface_stack_surfaces(),
             surface_stack_min_distance=SURFACE_GAP_THRESHOLD,
             surface_stack_constraint_fn=_smooth_min_surface_stack_signed_constraint,
+            surface_stack_constraint_with_hard_signal_fn=(
+                _smooth_min_surface_stack_signed_constraint_with_hard_signal
+            ),
             hard_surrogate_diagnostics=ALM_HARD_GEOMETRY_DUAL_SIGNALS,
             alm_formulation=args.alm_formulation,
             qs_threshold=args.alm_qs_threshold,

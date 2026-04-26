@@ -991,13 +991,25 @@ def _evaluate_search_objective(
             curve_curve_constraint_fn=single_stage._smooth_min_curve_curve_signed_constraint,
             curve_surface_constraint_fn=single_stage._smooth_min_curve_surface_signed_constraint,
             curvature_constraint_fn=single_stage._smooth_max_curvature_signed_constraint,
+            curve_curve_constraint_with_hard_signal_fn=(
+                single_stage._smooth_min_curve_curve_signed_constraint_with_hard_signal
+            ),
+            curve_surface_constraint_with_hard_signal_fn=(
+                single_stage._smooth_min_curve_surface_signed_constraint_with_hard_signal
+            ),
             JSurfSurf=bundle["JSurfSurf"],
             vessel_surface=runtime.vessel_surface,
             surface_surface_min_distance=runtime.surface_vessel_distance_threshold,
             surface_surface_constraint_fn=single_stage._smooth_min_surface_surface_signed_constraint,
+            surface_surface_constraint_with_hard_signal_fn=(
+                single_stage._smooth_min_surface_surface_signed_constraint_with_hard_signal
+            ),
             surface_stack_surfaces=surface_stack_surfaces,
             surface_stack_min_distance=surface_stack_min_distance,
             surface_stack_constraint_fn=single_stage._smooth_min_surface_stack_signed_constraint,
+            surface_stack_constraint_with_hard_signal_fn=(
+                single_stage._smooth_min_surface_stack_signed_constraint_with_hard_signal
+            ),
             hard_surrogate_diagnostics=ALM_HARD_GEOMETRY_DUAL_SIGNALS,
             alm_formulation=runtime.args.alm_formulation,
             qs_threshold=runtime.args.alm_qs_threshold,

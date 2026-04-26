@@ -37,6 +37,7 @@ from banana_opt.single_stage_geometry import build_surface_configs
 from banana_opt.smoothing import smoothmax_selected, smoothmin_selected
 from banana_opt.smooth_distance_selection import (
     pairwise_block_min,
+    point_tree,
     select_pairwise_near_min,
     surface_dgamma_by_dcoeff_derivative,
 )
@@ -1393,11 +1394,16 @@ def smooth_min_distance_signed_constraint(
     base_objective_optimizable,
 ):
     curve_points = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
+    curve_trees = [point_tree(points) for points in curve_points]
     pair_blocks = []
     hard_min = np.inf
     for i, gamma_i in enumerate(curve_points):
         for j in range(i):
-            block_min = pairwise_block_min(gamma_i, curve_points[j])
+            block_min = pairwise_block_min(
+                gamma_i,
+                curve_points[j],
+                right_tree=curve_trees[j],
+            )
             hard_min = min(hard_min, block_min)
             pair_blocks.append((i, j, block_min))
 
@@ -1415,6 +1421,7 @@ def smooth_min_distance_signed_constraint(
             curve_points[i],
             curve_points[j],
             selection_threshold,
+            right_tree=curve_trees[j],
         )
         selected_distances.append(distances)
         selected_entries.append((i, j, rows, cols, diffs, distances))
@@ -1458,11 +1465,12 @@ def smooth_min_curve_surface_signed_constraint(
 
     surface_gamma = np.asarray(surface.gamma(), dtype=float)
     surface_points = surface_gamma.reshape((-1, 3))
+    surface_tree = point_tree(surface_points)
     curve_points = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
     curve_blocks = []
     hard_min = np.inf
     for curve_index, gamma in enumerate(curve_points):
-        block_min = pairwise_block_min(gamma, surface_points)
+        block_min = pairwise_block_min(gamma, surface_points, right_tree=surface_tree)
         hard_min = min(hard_min, block_min)
         curve_blocks.append((curve_index, block_min))
 
@@ -1477,6 +1485,7 @@ def smooth_min_curve_surface_signed_constraint(
             curve_points[curve_index],
             surface_points,
             selection_threshold,
+            right_tree=surface_tree,
         )
         selected_distances.append(distances)
         selected_entries.append((curve_index, rows, cols, diffs, distances))
