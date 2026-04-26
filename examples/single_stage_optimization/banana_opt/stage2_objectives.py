@@ -701,7 +701,7 @@ def _stage2_alm_constraint_metadata(
             activity_tolerance=activity_tolerance,
             objective_value_kind="surrogate" if uses_surrogate else "hard",
             gradient_value_kind="surrogate" if uses_surrogate else "hard",
-            dual_update_value_kind="surrogate" if uses_surrogate else "hard",
+            dual_update_value_kind="hard",
             feasibility_value_kind="hard",
         )
     return metadata_by_name

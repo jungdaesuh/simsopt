@@ -883,6 +883,10 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             ["surrogate", "surrogate", "hard", "hard"],
         )
         self.assertEqual(
+            result["dual_update_value_kinds"],
+            ["hard", "hard", "hard", "hard"],
+        )
+        self.assertEqual(
             result["feasibility_value_kinds"],
             ["hard", "hard", "hard", "hard"],
         )

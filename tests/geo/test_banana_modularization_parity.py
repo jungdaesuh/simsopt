@@ -556,60 +556,56 @@ class SnapshotParityTests(unittest.TestCase):
                 "banana_current_upper_bound",
             ],
         )
-        np.testing.assert_allclose(actual["constraint_activity_tolerances"], [0.02, 0.08, 1e-3, 1e-3])
-        np.testing.assert_allclose(actual["grad"], [9.7524, -1.0592])
-        np.testing.assert_allclose(actual["constraint_grads"][0], expected["constraint_grads"][1])
-        np.testing.assert_allclose(actual["constraint_grads"][1], expected["constraint_grads"][2])
-        np.testing.assert_allclose(actual["constraint_grads"][2], expected["constraint_grads"][0])
-        np.testing.assert_allclose(actual["constraint_grads"][3], [0.7, -0.4])
-        np.testing.assert_allclose(actual["dual_update_values"][0], expected["dual_update_values"][1])
-        np.testing.assert_allclose(actual["dual_update_values"][1], expected["dual_update_values"][2])
-        np.testing.assert_allclose(actual["dual_update_values"][2], expected["dual_update_values"][0])
-        np.testing.assert_allclose(actual["dual_update_values"][3], -6500.0)
+        np.testing.assert_allclose(
+            actual["constraint_activity_tolerances"],
+            [0.4, 0.002, 1e-3 / 1.75, 1e-3 / 16000.0],
+        )
+        np.testing.assert_allclose(actual["grad"], [1.319766581632653, -0.3541237244897958])
+        np.testing.assert_allclose(actual["constraint_grads"][0], [12.0, 4.0])
+        np.testing.assert_allclose(actual["constraint_grads"][1], [0.0225, -0.0025])
+        np.testing.assert_allclose(actual["constraint_grads"][2], [0.17142857142857143, 0.2285714285714286])
+        np.testing.assert_allclose(actual["constraint_grads"][3], [4.375e-5, -2.5e-5])
+        np.testing.assert_allclose(
+            actual["dual_update_values"],
+            [-0.16, 0.01875, 0.028571428571428595, -0.40625],
+        )
         np.testing.assert_allclose(
             actual["hard_signed_constraint_values"],
-            [-0.008, 2.0, 0.05, -6500.0],
+            [-0.16, 0.05, 0.028571428571428595, -0.40625],
         )
         np.testing.assert_allclose(
             actual["hard_violation_values"],
-            [0.0, 2.0, 0.05, 0.0],
+            [0.0, 0.05, 0.028571428571428595, 0.0],
         )
         np.testing.assert_allclose(
-            actual["surrogate_signed_constraint_values"][0],
-            expected["dual_update_values"][1],
-        )
-        np.testing.assert_allclose(
-            actual["surrogate_signed_constraint_values"][1],
-            expected["dual_update_values"][2],
-        )
-        np.testing.assert_allclose(
-            actual["surrogate_signed_constraint_values"][2],
-            expected["dual_update_values"][0],
-        )
-        np.testing.assert_allclose(
-            actual["surrogate_signed_constraint_values"][3],
-            -6500.0,
+            actual["surrogate_signed_constraint_values"],
+            [-0.16, 0.01875, 0.028571428571428595, -0.40625],
         )
         np.testing.assert_allclose(
             actual["hard_dual_update_values"],
-            [-0.008, 2.0, 0.05, -6500.0],
+            [-0.16, 0.05, 0.028571428571428595, -0.40625],
         )
         np.testing.assert_allclose(actual["feasibility_values"][0], 0.0)
-        np.testing.assert_allclose(actual["feasibility_values"][1], expected["feasibility_values"][2])
-        np.testing.assert_allclose(actual["feasibility_values"][2], expected["feasibility_values"][0])
+        np.testing.assert_allclose(actual["feasibility_values"][1], 0.05)
+        np.testing.assert_allclose(actual["feasibility_values"][2], 0.028571428571428595)
         np.testing.assert_allclose(actual["feasibility_values"][3], 0.0)
         self.assertAlmostEqual(actual["base_value"], expected["base_value"])
-        self.assertAlmostEqual(
-            actual["max_feasibility_violation"],
-            expected["max_feasibility_violation"],
-        )
+        self.assertAlmostEqual(actual["max_feasibility_violation"], 0.05)
         actual_diagnostics = evaluate_current(emit_diagnostics=True)
         np.testing.assert_allclose(
             actual_diagnostics["hard_signed_constraint_values"],
-            [0.01, 2.0, 0.05, -6500.0],
+            [0.2, 0.05, 0.028571428571428595, -0.40625],
         )
         np.testing.assert_allclose(
             actual_diagnostics["hard_violation_values"],
+            [0.2, 0.05, 0.028571428571428595, 0.0],
+        )
+        np.testing.assert_allclose(
+            actual_diagnostics["raw_hard_signed_constraint_values"],
+            [0.01, 2.0, 0.05, -6500.0],
+        )
+        np.testing.assert_allclose(
+            actual_diagnostics["raw_hard_violation_values"],
             [0.01, 2.0, 0.05, 0.0],
         )
 

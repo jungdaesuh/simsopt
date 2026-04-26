@@ -175,6 +175,53 @@ class ResidualHelperTests(unittest.TestCase):
                 scales=[1.0, 2.0],
             )
 
+    def test_constraint_history_diagnostics_groups_values_by_block(self):
+        module = load_alm_utils_module()
+        evaluation = {
+            "constraint_values": np.array([0.2, -0.1, 0.5]),
+            "feasibility_values": np.array([0.2, 0.0, 0.5]),
+            "dual_update_values": np.array([0.2, -0.1, 0.5]),
+            "raw_dual_update_values": np.array([2.0, -1.0, 1000.0]),
+            "raw_hard_violation_values": np.array([2.0, 0.0, 1000.0]),
+            "normalized_signed_constraint_values": np.array([0.2, -0.1, 0.5]),
+            "normalized_feasibility_values": np.array([0.2, 0.0, 0.5]),
+            "constraint_scales": [10.0, 10.0, 2000.0],
+            "constraint_blocks": ["geometry", "geometry", "current"],
+        }
+        multipliers = np.array([0.1, 0.2, 0.3])
+        penalty = 4.0
+        routing_state = module._constraint_routing_state(
+            evaluation,
+            multipliers,
+            penalty,
+            feasibility_gate=1.0,
+        )
+
+        diagnostics = module._constraint_history_diagnostics(
+            evaluation,
+            multipliers,
+            penalty,
+            ["gap", "length", "current"],
+            np.array([0.2, -0.1, 0.5]),
+            np.array([0.2, 0.0, 0.5]),
+            routing_state,
+        )
+
+        self.assertEqual(
+            diagnostics["block_max_normalized_violation"],
+            {"geometry": 0.2, "current": 0.5},
+        )
+        self.assertEqual(
+            diagnostics["block_max_raw_hard_violation"],
+            {"geometry": 2.0, "current": 1000.0},
+        )
+        self.assertEqual(diagnostics["blocking_constraint_name"], "current")
+        self.assertEqual(diagnostics["blocking_constraint_block"], "current")
+        np.testing.assert_allclose(
+            diagnostics["raw_dual_estimates"],
+            [0.01, 0.02, 0.00015],
+        )
+
     def test_incumbent_objective_value_prefers_promoted_physics_total(self):
         module = load_alm_utils_module()
 
@@ -1399,8 +1446,13 @@ class MinimizeAlmTests(unittest.TestCase):
                 "raw_dual_estimates",
                 "positive_shift_values",
                 "augmented_term_by_constraint",
+                "max_raw_hard_violation",
                 "block_max_raw_hard_violation",
                 "block_max_normalized_violation",
+                "block_augmented_term",
+                "block_positive_shift_norm",
+                "blocking_constraint_name",
+                "blocking_constraint_block",
                 "hard_max_violation",
                 "surrogate_max_value",
                 "hard_positive_shift_zero",
