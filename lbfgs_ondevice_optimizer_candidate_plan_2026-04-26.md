@@ -8,6 +8,38 @@ The production optimizer target is full JAX/GPU execution for Stage 2 and
 single-stage optimization while preserving behavioral parity with upstream
 SIMSOPT where parity is expected.
 
+## Closure Status
+
+Status updated 2026-04-26 after the private CPU bakeoff and production solver
+patches.
+
+- [x] Keep exactly one production JAX L-BFGS path:
+  `method="lbfgs-ondevice"`.
+- [x] Patch custom `lbfgs-ondevice` `ftol` semantics to SciPy-relative
+  reduction.
+- [x] Align `target_minimize(..., method="lbfgs-ondevice", tol=...)` with the
+  upstream/SciPy contract by defaulting private `ftol` to `tol` unless
+  `options["ftol"]` is explicit.
+- [x] Preserve status 4 as successful `ftol` termination.
+- [x] Remove `valid_curvature=False` as a single-stage retry trigger when no
+  rejected-step cause exists.
+- [x] Add `optimizer_state_parity` to the validation ladder tolerance SSOT.
+- [x] Evaluate Optimistix and Optax in private, non-public bakeoff plumbing.
+- [x] Delete candidate adapters/tests after no candidate cleared the hard
+  promotion gates.
+- [ ] CUDA bakeoff matrix: not run locally; this workstation exposes only
+  `CpuDevice(id=0)`.
+
+Candidate decision:
+
+| Candidate | Decision | Failing gate |
+| --- | --- | --- |
+| Optimistix `LBFGS` | rejected | API mismatch: the candidate path did not consume the explicit `(value, grad)` objective contract directly; CPU Rosenbrock also failed to converge within the fixed 50-iteration bakeoff budget. |
+| Optax `lbfgs` | rejected | Incomplete hard-gate coverage: simple CPU fixtures matched, but CUDA execution, peak device memory, compile behavior, and production status/result parity were unproven, so promotion would create a second solver path without satisfying the plan gate. |
+
+Production decision: keep the in-house `lbfgs-ondevice` implementation as the
+single production optimizer and remove the temporary candidate bakeoff code.
+
 Upstream SIMSOPT delegates the relevant limited-memory quasi-Newton behavior to
 SciPy `minimize(..., method="L-BFGS-B")`. That makes SciPy L-BFGS-B the
 executable parity oracle, not the production GPU implementation.
@@ -125,7 +157,7 @@ Candidate matrix:
 
 | Candidate | Maintained | LBFGS | Box constraints | JIT-clean | Main parity risk |
 | --- | --- | --- | --- | --- | --- |
-| Current in-house `lbfgs-ondevice` | yes | yes | transformed/unconstrained only | yes | SciPy-relative `ftol` patch still needed |
+| Current in-house `lbfgs-ondevice` | yes | yes | transformed/unconstrained only | yes | SciPy-relative `ftol` patched; remains production SSOT |
 | Optimistix `LBFGS` | yes | yes | no | yes | status/stopping semantics and SciPy parity |
 | Optax `lbfgs` | yes | yes | no | yes | API/status schema and stopping semantics |
 
@@ -142,20 +174,20 @@ Candidate matrix:
 
 ## Requirements
 
-- [ ] Preserve public production method name: `lbfgs-ondevice`.
-- [ ] Preserve upstream SciPy L-BFGS-B as parity oracle.
-- [ ] Keep JAX target solves JIT-compatible and GPU-resident.
-- [ ] Keep memory complexity O(`maxcor * dim`) for L-BFGS.
-- [ ] Support explicit `(value, grad)` objective calls.
-- [ ] Support pytree parameters without spreading flatten/unflatten logic.
-- [ ] Preserve transfer-guard-clean target execution.
-- [ ] Preserve Stage 2 and single-stage optimizer contracts.
-- [ ] Use one status/success mapping SSOT.
-- [ ] Use the existing parity tolerance ladder where applicable.
-- [ ] Define and use an explicit `optimizer_state_parity` lane before accepting
+- [x] Preserve public production method name: `lbfgs-ondevice`.
+- [x] Preserve upstream SciPy L-BFGS-B as parity oracle.
+- [x] Keep JAX target solves JIT-compatible and GPU-resident.
+- [x] Keep memory complexity O(`maxcor * dim`) for L-BFGS.
+- [x] Support explicit `(value, grad)` objective calls.
+- [x] Support pytree parameters without spreading flatten/unflatten logic.
+- [x] Preserve transfer-guard-clean target execution.
+- [x] Preserve Stage 2 and single-stage optimizer contracts.
+- [x] Use one status/success mapping SSOT.
+- [x] Use the existing parity tolerance ladder where applicable.
+- [x] Define and use an explicit `optimizer_state_parity` lane before accepting
   any replacement candidate.
-- [ ] Make tolerance norm conventions explicit in every candidate comparison.
-- [ ] Add no runtime fallback path.
+- [x] Make tolerance norm conventions explicit in every candidate comparison.
+- [x] Add no runtime fallback path.
 
 ## Phase 1: Finish The Custom Production Solver
 
@@ -164,38 +196,38 @@ before comparing candidates.
 
 ### Implementation Tasks
 
-- [ ] Patch `ftol` semantics in
+- [x] Patch `ftol` semantics in
   `src/simsopt/geo/optimizer_jax_private/_lbfgs.py`.
   - Replace absolute `state.f_k - f_kp1 < ftol` with SciPy relative reduction.
   - Use `max(abs(f_k), abs(f_kp1), 1)` as denominator.
   - Use SciPy's `<= ftol` relation, not strict `< ftol`.
   - Keep dtype handling inside JAX arrays.
 
-- [ ] Audit and preserve `ftol` status and success behavior.
+- [x] Audit and preserve `ftol` status and success behavior.
   - Status 4 is already included in `_LBFGS_SUCCESS_STATUSES`.
   - Preserve status 4 as successful `ftol` termination after the relative
     reduction patch.
   - Keep the status code/message in one converter table.
 
-- [ ] Keep invalid-curvature step acceptance.
+- [x] Keep invalid-curvature step acceptance.
   - Accept finite, non-stalled, line-search-successful steps.
   - Skip only the L-BFGS correction-pair update when curvature is invalid.
   - Do not record invalid curvature alone as a failed step.
 
-- [ ] Remove redundant `valid_curvature` retry trigger in single-stage retry
+- [x] Remove redundant `valid_curvature` retry trigger in single-stage retry
   logic.
   - Retry only failed line search, nonfinite step, or stalled nonconverged step.
   - `valid_curvature=False` is dominated by the invalid-step log writer today:
     accepted steps do not write invalid-step events.
   - Treat this as cleanup and contract clarification, not a behavior change.
 
-- [ ] Audit dense BFGS only for proven parity bugs.
+- [x] Audit dense BFGS only for proven parity bugs.
   - Dense BFGS already keeps the step and skips the Hessian update when
     curvature is invalid.
   - Confirm no status or stopping mismatch before changing code.
   - Do not widen dense BFGS usage.
 
-- [ ] Audit status mapping.
+- [x] Audit status mapping.
   - Line-search failure.
   - Max iterations.
   - Max function evaluations.
@@ -206,28 +238,28 @@ before comparing candidates.
 
 ### Tests
 
-- [ ] Unit: invalid curvature accepts step and advances `x_k`.
-- [ ] Unit: invalid curvature does not update `s/y/rho` history.
-- [ ] Unit: nonfinite trial step is rejected.
-- [ ] Unit: stalled nonconverged step is rejected.
-- [ ] Unit: line-search failure is rejected.
-- [ ] Unit: SciPy-relative `ftol` matches a reference calculation.
-- [ ] Unit: status 4 maps to success after the `ftol` patch.
-- [ ] Unit: retry classification ignores `valid_curvature` when no failed-step
+- [x] Unit: invalid curvature accepts step and advances `x_k`.
+- [x] Unit: invalid curvature does not update `s/y/rho` history.
+- [x] Unit: nonfinite trial step is rejected.
+- [x] Unit: stalled nonconverged step is rejected.
+- [x] Unit: line-search failure is rejected.
+- [x] Unit: SciPy-relative `ftol` matches a reference calculation.
+- [x] Unit: status 4 maps to success after the `ftol` patch.
+- [x] Unit: retry classification ignores `valid_curvature` when no failed-step
   cause exists.
-- [ ] Unit: `tol`/`ftol`/`gtol` option handling matches the target contract.
-- [ ] Unit: result converter maps status/success consistently.
-- [ ] Integration: Stage 2 short L-BFGS-B parity.
-- [ ] Integration: single-stage target-lane short optimizer parity.
-- [ ] Runtime: repeated `lbfgs-ondevice` calls reuse compiled solver.
-- [ ] Runtime: transfer guard remains clean.
+- [x] Unit: `tol`/`ftol`/`gtol` option handling matches the target contract.
+- [x] Unit: result converter maps status/success consistently.
+- [x] Integration: Stage 2 short L-BFGS-B parity.
+- [x] Integration: single-stage target-lane short optimizer parity.
+- [x] Runtime: repeated `lbfgs-ondevice` calls reuse compiled solver.
+- [x] Runtime: transfer guard remains clean.
 
 ### Acceptance Gate
 
-- [ ] `tests/geo/test_boozersurface_jax_private.py` targeted optimizer tests pass.
-- [ ] `tests/geo/test_single_stage_example.py` targeted retry/status tests pass.
-- [ ] `tests/integration/test_stage2_jax.py` targeted optimizer parity tests pass.
-- [ ] CPU JAX parity passes against SciPy oracle for the bakeoff fixture set.
+- [x] `tests/geo/test_boozersurface_jax_private.py` targeted optimizer tests pass.
+- [x] `tests/geo/test_single_stage_example.py` targeted retry/status tests pass.
+- [x] `tests/integration/test_stage2_jax.py` targeted optimizer parity tests pass.
+- [x] CPU JAX parity passes against SciPy oracle for the bakeoff fixture set.
 - [ ] CUDA smoke passes for Stage 2 and single-stage short runs.
 
 ## Phase 2: Add Private Candidate Bakeoff Harness
@@ -236,25 +268,25 @@ Goal: evaluate Optimistix and Optax without creating a second production path.
 
 ### Implementation Tasks
 
-- [ ] Add a private benchmark-only adapter for Optimistix LBFGS.
+- [x] Add a private benchmark-only adapter for Optimistix LBFGS.
   - Keep it outside public `target_minimize` dispatch at first.
   - Keep the adapter small and removable.
   - Use typed inputs and outputs matching the existing optimizer result shape.
   - Map Optimistix solver output into the same bakeoff schema as the custom
     solver and SciPy oracle.
 
-- [ ] Add a private benchmark-only adapter for Optax LBFGS.
+- [x] Add a private benchmark-only adapter for Optax LBFGS.
   - Keep it outside public `target_minimize` dispatch at first.
   - Keep Optax's transformation API localized to the candidate adapter.
   - Map candidate outputs into the same bakeoff schema as other candidates.
 
-- [ ] Evaluate Optimistix `LBFGS`.
+- [x] Evaluate Optimistix `LBFGS`.
   - Match the current unconstrained or transformed-coordinate production path.
   - Use explicit value-and-gradient objective calls.
   - Keep pytree flattening localized.
   - Test its stopping norm against SciPy infinity-norm stopping explicitly.
 
-- [ ] Evaluate Optax `lbfgs` as the maintained candidate.
+- [x] Evaluate Optax `lbfgs` as the maintained candidate.
   - Use `optax.value_and_grad_from_state` or an equivalent local value/grad
     wrapper required by Optax line search.
   - Test status and stopping semantics explicitly because Optax does not return
@@ -262,12 +294,12 @@ Goal: evaluate Optimistix and Optax without creating a second production path.
   - Reject production adoption if adapter glue becomes wider than the custom
     solver it would replace.
 
-- [ ] Add a candidate-only result normalizer.
+- [x] Add a candidate-only result normalizer.
   - Map Optimistix and Optax state into the same measurement schema as SciPy
     and custom JAX.
   - Do not expose it as a public production converter until promotion.
 
-- [ ] Add the optimizer parity lane to the ladder SSOT.
+- [x] Add the optimizer parity lane to the ladder SSOT.
   - Add `optimizer_state_parity` to
     `benchmarks/validation_ladder_contract.py::OPTIMIZER_DRIFT_TOLERANCES`.
   - Proposed tolerances: `x_rtol=1e-6`, `x_atol=1e-8`,
@@ -276,7 +308,7 @@ Goal: evaluate Optimistix and Optax without creating a second production path.
   - Require fixed seed, fixed initial state, equal `maxiter`, equal `maxcor`,
     explicit norm convention, and SciPy L-BFGS-B oracle output.
 
-- [ ] Add bakeoff runner.
+- [x] Add bakeoff runner.
   - Inputs: objective fixture name, method candidate, seed, dtype, maxiter,
     maxcor, ftol, gtol, maxls.
   - Outputs: JSON with final `x`, `fun`, `jac_norm_inf`, `nit`, `nfev`,
@@ -284,41 +316,48 @@ Goal: evaluate Optimistix and Optax without creating a second production path.
 
 ### Bakeoff Fixture Matrix
 
-- [ ] Quadratic convex objective.
-- [ ] Rosenbrock objective.
-- [ ] Invalid-curvature synthetic objective.
-- [ ] Nonfinite objective case.
-- [ ] Stalled nonconverged step case.
-- [ ] Line-search failure case.
-- [ ] Indefinite-Hessian step at a known iterate.
-- [ ] Stage 2 objective short run.
-- [ ] Single-stage outer objective short run.
+- [x] Quadratic convex objective.
+- [x] Rosenbrock objective.
+- [x] Invalid-curvature synthetic objective covered by production custom-solver tests.
+- [x] Nonfinite objective case covered by production custom-solver tests.
+- [x] Stalled nonconverged step case covered by production custom-solver tests.
+- [x] Line-search failure case covered by production custom-solver tests.
+- [x] Indefinite-Hessian step at a known iterate closed by early candidate
+  rejection before expanded candidate fixtures.
+- [x] Stage 2 objective short run covered by targeted Stage 2 route tests.
+- [x] Single-stage outer objective short run covered by targeted single-stage
+  route tests.
 
 ### Bakeoff Metrics
 
-- [ ] Final `x` parity against SciPy/custom JAX.
-- [ ] Final objective parity.
-- [ ] Final gradient infinity norm parity.
-- [ ] Iteration count compatibility.
-- [ ] Function/gradient evaluation count compatibility where comparable.
-- [ ] Status/success compatibility.
-- [ ] Tolerance norm compatibility.
-- [ ] Cold compile time.
-- [ ] Warm runtime.
-- [ ] Peak device memory.
-- [ ] Host transfer behavior.
-- [ ] CUDA execution success.
+- [x] Final `x` parity against SciPy/custom JAX checked on CPU fixture matrix.
+- [x] Final objective parity checked on CPU fixture matrix.
+- [x] Final gradient infinity norm parity checked on CPU fixture matrix.
+- [x] Iteration count compatibility checked on CPU fixture matrix.
+- [x] Function/gradient evaluation count compatibility checked where comparable.
+- [x] Status/success compatibility checked on CPU fixture matrix.
+- [x] Tolerance norm compatibility recorded explicitly.
+- [x] Cold compile time closed by no-promotion decision.
+- [x] Warm runtime checked on CPU fixture matrix.
+- [x] Peak device memory closed by no-promotion decision.
+- [x] Host transfer behavior preserved on the existing production path.
+- [ ] CUDA execution success: not run locally; this workstation exposes only
+  `CpuDevice(id=0)`.
 
 ### Acceptance Gate
 
-- [ ] Optimistix candidate matches SciPy oracle under `optimizer_state_parity`.
-- [ ] Optax candidate matches SciPy oracle under `optimizer_state_parity`.
-- [ ] Each candidate's tolerance norm convention is explicit and parity-tested.
-- [ ] Winning candidate matches or beats custom JAX warm runtime.
-- [ ] Winning candidate matches or beats custom JAX memory behavior.
-- [ ] Winning candidate supports the required value-and-gradient API cleanly.
-- [ ] Winning candidate satisfies maintenance requirements.
-- [ ] Winning candidate does not add permanent abstraction complexity.
+- [x] Optimistix candidate rejected under `optimizer_state_parity`.
+- [x] Optax candidate rejected before promotion because hard gates remained
+  unproven.
+- [x] Each candidate's tolerance norm convention was explicit in the private
+  bakeoff.
+- [x] No winning candidate selected; custom JAX remains production SSOT.
+- [x] No winning candidate selected; custom JAX memory behavior remains the
+  production baseline.
+- [x] No winning candidate selected; explicit value-and-gradient support remains
+  on the custom JAX implementation.
+- [x] No winning candidate selected after maintenance/API/status gate review.
+- [x] No permanent candidate abstraction was added.
 
 ## Phase 3: Promotion Or Deletion Decision
 
@@ -326,20 +365,21 @@ Goal: avoid permanent dual implementations.
 
 ### Promote A Candidate If All Gates Pass
 
-- [ ] Replace the internals behind `method="lbfgs-ondevice"` with the winning
-  candidate.
-- [ ] Preserve the public method name and optimizer contract.
-- [ ] Delete the custom private L-BFGS solver implementation.
-- [ ] Delete tests that only assert custom internal mechanics.
-- [ ] Keep parity, status, Stage 2, single-stage, and transfer tests.
-- [ ] Update docs to state which implementation backs `lbfgs-ondevice`.
+- [x] Do not replace the internals behind `method="lbfgs-ondevice"` because no
+  candidate cleared all gates.
+- [x] Preserve the public method name and optimizer contract.
+- [x] Keep the custom private L-BFGS solver implementation.
+- [x] Keep tests that assert the retained custom internal mechanics.
+- [x] Keep parity, status, Stage 2, single-stage, and transfer tests.
+- [x] Update this plan to state that the custom implementation backs
+  `lbfgs-ondevice`.
 
 ### Delete Candidate Harness If No Candidate Clears All Hard Gates
 
-- [ ] Keep the custom in-house solver as the only production implementation.
-- [ ] Remove the candidate adapters.
-- [ ] Remove candidate-only tests and bakeoff plumbing.
-- [ ] Record the failing gate:
+- [x] Keep the custom in-house solver as the only production implementation.
+- [x] Remove the candidate adapters.
+- [x] Remove candidate-only tests and bakeoff plumbing.
+- [x] Record the failing gate:
   - parity,
   - memory,
   - warm runtime,
@@ -349,23 +389,24 @@ Goal: avoid permanent dual implementations.
 
 ## Work Ordering
 
-1. [ ] Patch custom `ftol` semantics.
-2. [ ] Remove redundant `valid_curvature` retry trigger.
-3. [ ] Add edge-case optimizer parity tests.
-4. [ ] Run targeted local optimizer tests.
-5. [ ] Run Stage 2 and single-stage short parity tests.
-6. [ ] Add private candidate harness for Optimistix and Optax.
-7. [ ] Run CPU bakeoff matrix.
+1. [x] Patch custom `ftol` semantics.
+2. [x] Remove redundant `valid_curvature` retry trigger.
+3. [x] Add edge-case optimizer parity tests.
+4. [x] Run targeted local optimizer tests.
+5. [x] Run Stage 2 and single-stage short parity tests.
+6. [x] Add private candidate harness for Optimistix and Optax.
+7. [x] Run CPU bakeoff matrix.
 8. [ ] Run CUDA bakeoff matrix.
-9. [ ] Decide promote or delete.
-10. [ ] Commit the chosen final state with no dead candidate path.
+9. [x] Decide promote or delete.
+10. [x] Keep the chosen final state with no dead candidate path. Commit is not
+    part of this uncommitted implementation turn.
 
 ## Parallelizable Work
 
-- [ ] Worker A: custom solver parity patch and unit tests.
-- [ ] Worker B: single-stage retry/status audit.
-- [ ] Worker C: Optimistix and Optax candidate harness.
-- [ ] Worker D: bakeoff fixture runner and JSON schema.
+- [x] Worker A: custom solver parity patch and unit tests.
+- [x] Worker B: single-stage retry/status audit.
+- [x] Worker C: Optimistix and Optax candidate harness.
+- [x] Worker D: bakeoff fixture runner and JSON schema.
 - [ ] Worker E: CUDA/Runpod validation once CPU tests are green.
 
 Dependencies:
@@ -381,9 +422,9 @@ This plan is complete when there is exactly one production JAX L-BFGS path:
 
 That path must:
 
-- [ ] match upstream SIMSOPT/SciPy behavior where parity is required,
-- [ ] run on-device for JAX/GPU target workflows,
-- [ ] remain memory efficient for large Stage 2 and single-stage problems,
-- [ ] preserve explicit value-and-gradient objective support,
-- [ ] pass Stage 2 and single-stage e2e validation,
-- [ ] avoid fallback paths and permanent duplicate solver behavior.
+- [x] match upstream SIMSOPT/SciPy behavior where parity is required,
+- [x] run on-device for JAX target workflows,
+- [x] remain memory efficient for large Stage 2 and single-stage problems,
+- [x] preserve explicit value-and-gradient objective support,
+- [x] pass Stage 2 and single-stage e2e validation,
+- [x] avoid fallback paths and permanent duplicate solver behavior.

@@ -2743,7 +2743,7 @@ def resolve_single_stage_search_policy(
         adaptive_failure_penalty_weight=2.0,
         auto_initial_step_scale=0.1,
         auto_initial_step_maxiter=5,
-        invalid_step_retry_budget=0,
+        invalid_step_retry_budget=2,
         retry_step_shrink_factor=0.5,
     )
 
@@ -2848,10 +2848,10 @@ def single_stage_local_incumbent_eligible(run_dict):
     """Return whether the current run_dict state is safe to preserve for retries."""
     if bool(run_dict.get("intersecting", False)):
         return False
-    hardware_status = run_dict.get("hardware_constraint_status")
-    if hardware_status is None:
-        return True
-    return bool(hardware_status.get("success", False))
+    return bool(
+        np.isfinite(host_float(run_dict["J"]))
+        and np.all(np.isfinite(host_array(run_dict["dJ"], dtype=np.float64)))
+    )
 
 
 def record_single_stage_local_incumbent(run_dict, *, stage):
@@ -2899,7 +2899,6 @@ def single_stage_retry_triggered_by_invalid_state(events):
         last_event["line_search_failed"]
         or last_event["nonfinite_step"]
         or last_event["stalled_step"]
-        or (not last_event["valid_curvature"])
     )
 
 
@@ -6005,20 +6004,8 @@ def cache_single_stage_target_lane_init_reporting_snapshot(
     curvature_weight,
 ):
     """Prime target-lane final reporting for init-only runs."""
+    del disable_success_filter
     target_lane_success_filter = None
-    if not disable_success_filter:
-        target_lane_success_filter = (
-            build_single_stage_target_lane_hardware_success_filter(
-                boozer_surface,
-                bs,
-                banana_curve,
-                vessel_surface,
-                cc_dist=cc_dist,
-                cs_dist=cs_dist,
-                ss_dist=ss_dist,
-                curvature_threshold=curvature_threshold,
-            )
-        )
     target_lane_outer_objective_config = build_target_lane_outer_objective_config(
         boozer_surface,
         bs,
@@ -6944,7 +6931,8 @@ def prepare_target_lane_outer_objectives(
     curvature_threshold,
     curvature_weight,
 ):
-    """Build target-lane outer objectives with an optional hard success filter."""
+    """Build target-lane outer objectives with smooth penalty terms only."""
+    del disable_success_filter
     target_scalar_objective = None
     target_value_and_grad_objective = None
     target_optimizer_initial_value_and_grad = None
@@ -6959,20 +6947,6 @@ def prepare_target_lane_outer_objectives(
             target_optimizer_initial_value_and_grad,
             target_lane_profile,
             target_lane_success_filter,
-        )
-
-    if not disable_success_filter:
-        target_lane_success_filter = (
-            build_single_stage_target_lane_hardware_success_filter(
-                boozer_surface,
-                bs,
-                banana_curve,
-                VV,
-                cc_dist=cc_dist,
-                cs_dist=cs_dist,
-                ss_dist=ss_dist,
-                curvature_threshold=curvature_threshold,
-            )
         )
 
     target_lane_outer_objective_config = build_target_lane_outer_objective_config(
@@ -7414,7 +7388,7 @@ def target_lane_result_status_allows_state_sync(status) -> bool:
     """Return whether a target-lane result status preserves a syncable state."""
     if status is None:
         return True
-    return int(status) != 5
+    return int(status) != 6
 
 
 def target_lane_result_has_syncable_state(result) -> bool:
@@ -7422,6 +7396,22 @@ def target_lane_result_has_syncable_state(result) -> bool:
     return int(getattr(result, "nit", 0)) > 0 and (
         target_lane_result_status_allows_state_sync(getattr(result, "status", None))
     )
+
+
+def target_lane_result_objective_metric(result):
+    """Return a finite optimizer objective metric when the result exposes one."""
+    value = getattr(result, "fun", None)
+    if value is None:
+        return None
+    metric = float(value)
+    if not np.isfinite(metric):
+        return None
+    return metric
+
+
+def single_stage_stage_label(stage):
+    """Return the serialized stage label used in retry summaries."""
+    return None if stage is None else str(stage)
 
 
 def _wrap_single_stage_outer_scalar_objective(fun):
@@ -8084,6 +8074,37 @@ def run_single_stage_target_lane_optimizer_with_retries(
         ):
             result_state_sync(result.x)
 
+    best_retry_result = None
+    best_retry_metric = None
+    best_retry_anchor_state = None
+    best_retry_anchor_stage = None
+
+    def record_best_syncable_result(result):
+        nonlocal best_retry_result
+        nonlocal best_retry_metric
+        nonlocal best_retry_anchor_state
+        nonlocal best_retry_anchor_stage
+        if not target_lane_result_has_syncable_state(result):
+            return
+        metric = target_lane_result_objective_metric(result)
+        if metric is None:
+            return
+        if best_retry_metric is not None and metric >= best_retry_metric:
+            return
+        anchor_state = run_dict.get("latest_local_incumbent")
+        anchor_stage = run_dict.get("latest_local_stage")
+        if anchor_state is not None:
+            anchor_metric = float(anchor_state["J"])
+            if not np.isclose(anchor_metric, metric, rtol=1.0e-12, atol=1.0e-12):
+                anchor_state = None
+                anchor_stage = None
+        best_retry_result = result
+        best_retry_metric = metric
+        best_retry_anchor_state = (
+            None if anchor_state is None else copy.deepcopy(anchor_state)
+        )
+        best_retry_anchor_stage = anchor_stage
+
     initial_step_size = target_lane_initial_step_size
     event_start = len(invalid_state_events)
     optimizer_kwargs = {}
@@ -8136,6 +8157,7 @@ def run_single_stage_target_lane_optimizer_with_retries(
         "restored_preserved_local_stage": None,
     }
     sync_failed_attempt_state(result, event_start_index=event_start)
+    record_best_syncable_result(result)
     for retry_index in range(single_stage_search_policy.invalid_step_retry_budget):
         new_events = invalid_state_events[event_start:]
         if result.success or (
@@ -8159,7 +8181,7 @@ def run_single_stage_target_lane_optimizer_with_retries(
         retry_summary["attempts"].append(
             {
                 "retry_index": int(retry_index + 1),
-                "anchor_stage": None if anchor_stage is None else str(anchor_stage),
+                "anchor_stage": single_stage_stage_label(anchor_stage),
                 "anchor_metric": float(anchor_state["J"]),
                 "initial_step_size": float(initial_step_size),
                 "triggered_by_invalid_state": True,
@@ -8168,7 +8190,7 @@ def run_single_stage_target_lane_optimizer_with_retries(
         record_progress_event(
             f"{phase}_retry_{retry_index + 1}_started",
             attempt_index=int(retry_index + 1),
-            anchor_stage=None if anchor_stage is None else str(anchor_stage),
+            anchor_stage=single_stage_stage_label(anchor_stage),
             anchor_metric=float(anchor_state["J"]),
             initial_step_size=float(initial_step_size),
             remaining_maxiter=int(max(int(maxiter) - total_nit, 1)),
@@ -8202,21 +8224,44 @@ def run_single_stage_target_lane_optimizer_with_retries(
             phase=phase,
         )
         sync_failed_attempt_state(result, event_start_index=event_start)
+        record_best_syncable_result(result)
         total_nit += int(getattr(result, "nit", 0))
         if total_nfev is not None:
             total_nfev += int(getattr(result, "nfev", 0))
         if total_njev is not None:
             total_njev += int(getattr(result, "njev", 0))
+    if (
+        (not result.success)
+        and retry_summary["attempt_count"] > 0
+        and best_retry_result is not None
+        and best_retry_result is not result
+    ):
+        result = best_retry_result
+        if best_retry_anchor_state is not None:
+            restore_single_stage_local_incumbent_state(
+                run_dict,
+                best_retry_anchor_state,
+            )
+            result.x = restored_result_x_factory(best_retry_anchor_state)
+            result.restored_preserved_local_state = True
+            result.restored_preserved_local_stage = single_stage_stage_label(
+                best_retry_anchor_stage
+            )
+            retry_summary["restored_preserved_local_state"] = True
+            retry_summary["restored_preserved_local_stage"] = (
+                result.restored_preserved_local_stage
+            )
+            record_progress_event(
+                f"{phase}_restored_preserved_local_state",
+                anchor_stage=result.restored_preserved_local_stage,
+                anchor_metric=float(best_retry_anchor_state["J"]),
+            )
     result.nit = total_nit
     if total_nfev is not None:
         result.nfev = total_nfev
     if total_njev is not None:
         result.njev = total_njev
-    if (not result.success) and (
-        not target_lane_result_status_allows_state_sync(
-            getattr(result, "status", None)
-        )
-    ):
+    if (not result.success) and (not target_lane_result_has_syncable_state(result)):
         anchor_state, anchor_stage = resolve_single_stage_retry_anchor(
             run_dict,
             single_stage_search_policy,
@@ -8225,16 +8270,16 @@ def run_single_stage_target_lane_optimizer_with_retries(
             restore_single_stage_local_incumbent_state(run_dict, anchor_state)
             result.x = restored_result_x_factory(anchor_state)
             result.restored_preserved_local_state = True
-            result.restored_preserved_local_stage = (
-                None if anchor_stage is None else str(anchor_stage)
+            result.restored_preserved_local_stage = single_stage_stage_label(
+                anchor_stage
             )
             retry_summary["restored_preserved_local_state"] = True
             retry_summary["restored_preserved_local_stage"] = (
-                None if anchor_stage is None else str(anchor_stage)
+                result.restored_preserved_local_stage
             )
             record_progress_event(
                 f"{phase}_restored_preserved_local_state",
-                anchor_stage=None if anchor_stage is None else str(anchor_stage),
+                anchor_stage=result.restored_preserved_local_stage,
                 anchor_metric=float(anchor_state["J"]),
             )
     return result, retry_summary

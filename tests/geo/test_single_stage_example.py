@@ -2889,6 +2889,20 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(policy.invalid_step_retry_budget, 2)
         self.assertEqual(policy.retry_step_shrink_factor, 0.5)
 
+    def test_resolve_single_stage_search_policy_retries_projected_supported_surface(
+        self,
+    ):
+        module = self.load_module()
+        policy = module.resolve_single_stage_search_policy(
+            {"surface": object()},
+            explicit_surface_warm_start=True,
+        )
+
+        self.assertEqual(policy.donor_class, "projected_supported_surface")
+        self.assertEqual(policy.search_policy, "global_search")
+        self.assertEqual(policy.invalid_step_retry_budget, 2)
+        self.assertEqual(policy.retry_step_shrink_factor, 0.5)
+
     def test_resolve_single_stage_policy_initial_phase_settings_only_auto_enables_defaults(
         self,
     ):
@@ -3003,6 +3017,25 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(
             run_dict["latest_local_incumbent"]["coil_dofs"],
             np.array([9.0, 8.0, 7.0, 6.0, 5.0]),
+        )
+
+        run_dict["hardware_constraint_status"] = {
+            "success": False,
+            "violations": ["still_repairing"],
+        }
+        run_dict["x_prev"] = np.array([5.0, 6.0, 7.0, 8.0, 9.0])
+        run_dict["J"] = 0.5
+        updated = module.record_single_stage_local_incumbent(
+            run_dict,
+            stage="repairing",
+        )
+
+        self.assertTrue(updated)
+        self.assertEqual(run_dict["latest_local_stage"], "repairing")
+        self.assertEqual(run_dict["best_local_stage"], "repairing")
+        np.testing.assert_allclose(
+            run_dict["latest_local_incumbent"]["coil_dofs"],
+            np.array([5.0, 6.0, 7.0, 8.0, 9.0]),
         )
 
     def test_resolve_single_stage_retry_anchor_respects_policy(self):
@@ -4148,6 +4181,39 @@ class SingleStageExampleTests(unittest.TestCase):
             ],
         )
 
+    def test_single_stage_retry_trigger_ignores_invalid_curvature_without_rejection_cause(
+        self,
+    ):
+        module = self.load_module()
+        events = [
+            {
+                "line_search_failed": False,
+                "nonfinite_step": False,
+                "stalled_step": False,
+                "valid_curvature": False,
+                "step_scale": {"value": 0.25},
+            }
+        ]
+
+        self.assertFalse(module.single_stage_retry_triggered_by_invalid_state(events))
+
+    def test_single_stage_retry_trigger_keeps_rejected_step_causes(
+        self,
+    ):
+        module = self.load_module()
+
+        for cause in ("line_search_failed", "nonfinite_step", "stalled_step"):
+            event = {
+                "line_search_failed": False,
+                "nonfinite_step": False,
+                "stalled_step": False,
+                "valid_curvature": True,
+                "step_scale": {"value": 0.25},
+            }
+            event[cause] = True
+
+            self.assertTrue(module.single_stage_retry_triggered_by_invalid_state([event]))
+
     def test_resolve_single_stage_outer_maxls_rejects_nonpositive_budget(self):
         module = self.load_module()
 
@@ -4618,7 +4684,9 @@ class SingleStageExampleTests(unittest.TestCase):
         with patch.object(
             module,
             "build_single_stage_target_lane_hardware_success_filter",
-            return_value="success-filter",
+            side_effect=AssertionError(
+                "penalty target-lane reporting does not use a hard success filter"
+            ),
         ) as success_filter_builder, patch.object(
             module,
             "build_target_lane_outer_objective_config",
@@ -4653,14 +4721,14 @@ class SingleStageExampleTests(unittest.TestCase):
                 curvature_weight=0.1,
             )
 
-        success_filter_builder.assert_called_once()
+        success_filter_builder.assert_not_called()
         config_builder.assert_called_once()
         sync_builder.assert_called_once_with(
             "boozer",
             "field",
             0.21,
             outer_objective_config="objective-config",
-            success_filter="success-filter",
+            success_filter=None,
         )
         self.assertEqual(summary["reporting_metrics"]["banana_current_A"], 123.0)
         self.assertEqual(calls[0][0], run_dict)
@@ -5532,11 +5600,10 @@ class SingleStageExampleTests(unittest.TestCase):
             success_filter=None,
         )
 
-    def test_prepare_target_lane_outer_objectives_threads_enabled_success_filter(
+    def test_prepare_target_lane_outer_objectives_uses_smooth_penalties_without_hard_filter(
         self,
     ):
         module = self.load_module()
-        success_filter_marker = object()
         recorded_states = []
 
         def value_and_grad_marker(state):
@@ -5546,7 +5613,10 @@ class SingleStageExampleTests(unittest.TestCase):
         with patch.object(
             module,
             "build_single_stage_target_lane_hardware_success_filter",
-            return_value=success_filter_marker,
+            side_effect=AssertionError(
+                "penalty target lane must stay differentiable through "
+                "hardware-constraint penalty regions"
+            ),
         ) as build_success_filter, patch.object(
             module,
             "build_target_lane_outer_objective_config",
@@ -5601,10 +5671,10 @@ class SingleStageExampleTests(unittest.TestCase):
             ("seed-value", "seed-grad"),
         )
         self.assertIsNone(target_lane_profile)
-        self.assertIs(success_filter, success_filter_marker)
+        self.assertIsNone(success_filter)
         self.assertEqual(scalar_fun("trial-state"), "objective-value")
         self.assertEqual(recorded_states, ["trial-state"])
-        build_success_filter.assert_called_once()
+        build_success_filter.assert_not_called()
         build_objective_config.assert_called_once()
         build_objectives.assert_called_once_with(
             unittest.mock.ANY,
@@ -5614,7 +5684,7 @@ class SingleStageExampleTests(unittest.TestCase):
             profile_target_lane=False,
             profile_batch_size=1,
             outer_objective_config="config-marker",
-            success_filter=success_filter_marker,
+            success_filter=None,
         )
 
     def test_build_target_lane_gradient_diagnosis_threads_config_and_filter(self):
@@ -6426,11 +6496,20 @@ class SingleStageExampleTests(unittest.TestCase):
                 trial_boozer_override_active=True,
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             module.should_force_strict_target_lane_final_sync(
                 use_target_lane=True,
                 res_nit=2,
                 optimizer_status=5,
+                accepted_step_callback=None,
+                trial_boozer_override_active=False,
+            )
+        )
+        self.assertFalse(
+            module.should_force_strict_target_lane_final_sync(
+                use_target_lane=True,
+                res_nit=2,
+                optimizer_status=6,
                 accepted_step_callback=None,
                 trial_boozer_override_active=False,
             )
@@ -6469,7 +6548,8 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertTrue(module.target_lane_result_status_allows_state_sync(None))
         self.assertTrue(module.target_lane_result_status_allows_state_sync(0))
         self.assertTrue(module.target_lane_result_status_allows_state_sync(1))
-        self.assertFalse(module.target_lane_result_status_allows_state_sync(5))
+        self.assertTrue(module.target_lane_result_status_allows_state_sync(5))
+        self.assertFalse(module.target_lane_result_status_allows_state_sync(6))
 
         self.assertFalse(
             module.target_lane_result_has_syncable_state(
@@ -6481,9 +6561,14 @@ class SingleStageExampleTests(unittest.TestCase):
                 types.SimpleNamespace(nit=1, status=1)
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             module.target_lane_result_has_syncable_state(
                 types.SimpleNamespace(nit=1, status=5)
+            )
+        )
+        self.assertFalse(
+            module.target_lane_result_has_syncable_state(
+                types.SimpleNamespace(nit=1, status=6)
             )
         )
 
@@ -6896,6 +6981,39 @@ class SingleStageExampleTests(unittest.TestCase):
         if njev is not None:
             result.njev = int(njev)
         return result
+
+    def _build_best_syncable_retry_results(self):
+        result_specs = [
+            (np.array([9.0, 9.0]), 2, 4, 4, 0.2, 0.9),
+            (np.array([4.0, 5.0]), 3, 6, 6, 0.1, 0.4),
+            (np.array([1.0, 2.0]), 0, 5, 5, 0.05, 2.0),
+        ]
+        results = []
+        for x, nit, nfev, njev, step_scale, metric in result_specs:
+            result = self._build_target_lane_retry_result(
+                x=x,
+                nit=nit,
+                nfev=nfev,
+                njev=njev,
+                success=False,
+                message="failed",
+                status=5,
+                step_scale=step_scale,
+            )
+            result.fun = metric
+            result.jac = np.full(2, metric)
+            results.append(result)
+        return results
+
+    @staticmethod
+    def _retry_policy(module):
+        return module.SingleStageSearchPolicy(
+            donor_class="stage2_seed_only",
+            search_policy="repair_first",
+            adaptive_failure_penalty_weight=1.5,
+            invalid_step_retry_budget=2,
+            retry_step_shrink_factor=0.5,
+        )
 
     def test_run_single_stage_target_lane_optimizer_with_retries_retries_from_anchor(
         self,
@@ -7634,6 +7752,124 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(result.nit, 5)
         self.assertEqual(result.nfev, 10)
         self.assertEqual(result.njev, 10)
+
+    def test_run_single_stage_target_lane_optimizer_with_retries_preserves_best_syncable_retry(
+        self,
+    ):
+        module = self.load_module()
+        contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        run_dict["hardware_constraint_status"] = {"success": True, "violations": []}
+        invalid_state_events = []
+        sync_metrics = [0.9, 0.4]
+
+        def sync_accepted_state(x):
+            metric = sync_metrics.pop(0)
+            run_dict["x_prev"] = np.asarray(x, dtype=float)
+            run_dict["sdofs"] = np.asarray([3.0, 4.0], dtype=float)
+            run_dict["iota"] = TEST_IOTA
+            run_dict["G"] = TEST_G0
+            run_dict["J"] = metric
+            run_dict["dJ"] = np.full(5, metric)
+            module.record_single_stage_local_incumbent(
+                run_dict,
+                stage=f"sync_{metric}",
+            )
+
+        results = self._build_best_syncable_retry_results()
+        policy = self._retry_policy(module)
+
+        with patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=results,
+        ):
+            result, retry_summary = (
+                module.run_single_stage_target_lane_optimizer_with_retries(
+                    lambda x: x,
+                    np.array([0.0, 0.0]),
+                    phase="phase2",
+                    callback=None,
+                    retry_callback=None,
+                    result_state_sync=sync_accepted_state,
+                    contract=contract,
+                    maxiter=10,
+                    ftol=0.0,
+                    gtol=1.0e-6,
+                    maxcor=5,
+                    outer_maxls=6,
+                    scalar_fun=None,
+                    target_lane_initial_step_size=None,
+                    failure_callback=None,
+                    invalid_state_events=invalid_state_events,
+                    run_dict=run_dict,
+                    single_stage_search_policy=policy,
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.fun, 0.4)
+        self.assertEqual(result.nit, 5)
+        self.assertEqual(result.nfev, 15)
+        self.assertEqual(result.njev, 15)
+        self.assertTrue(retry_summary["restored_preserved_local_state"])
+        self.assertEqual(
+            retry_summary["restored_preserved_local_stage"],
+            "sync_0.4",
+        )
+        np.testing.assert_allclose(result.x, np.array([4.0, 5.0]))
+        np.testing.assert_allclose(run_dict["x_prev"], np.array([4.0, 5.0]))
+        self.assertEqual(run_dict["J"], 0.4)
+
+    def test_run_single_stage_target_lane_optimizer_with_retries_selects_best_result_without_state_anchor(
+        self,
+    ):
+        module = self.load_module()
+        contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        run_dict["latest_local_incumbent"] = (
+            module.snapshot_single_stage_local_incumbent_state(run_dict)
+        )
+        run_dict["latest_local_stage"] = "initial"
+        invalid_state_events = []
+
+        results = self._build_best_syncable_retry_results()
+        policy = self._retry_policy(module)
+
+        with patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=results,
+        ):
+            result, retry_summary = (
+                module.run_single_stage_target_lane_optimizer_with_retries(
+                    lambda x: x,
+                    np.array([0.0, 0.0]),
+                    phase="phase2",
+                    callback=None,
+                    retry_callback=None,
+                    result_state_sync=None,
+                    contract=contract,
+                    maxiter=10,
+                    ftol=0.0,
+                    gtol=1.0e-6,
+                    maxcor=5,
+                    outer_maxls=6,
+                    scalar_fun=None,
+                    target_lane_initial_step_size=None,
+                    failure_callback=None,
+                    invalid_state_events=invalid_state_events,
+                    run_dict=run_dict,
+                    single_stage_search_policy=policy,
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.fun, 0.4)
+        self.assertEqual(result.nit, 5)
+        self.assertFalse(retry_summary["restored_preserved_local_state"])
+        np.testing.assert_allclose(result.x, np.array([4.0, 5.0]))
+        np.testing.assert_allclose(run_dict["x_prev"], np.zeros(5))
 
     def test_run_single_stage_target_lane_optimizer_with_retries_rebuilds_events_from_result_without_callback(
         self,
@@ -11655,6 +11891,43 @@ class CrossSectionNormalizationTests(unittest.TestCase):
         source = self.PLOTTING_UTILS_PATH.read_text()
         self.assertIn("phi_slice / (2 * np.pi)", source)
         self.assertNotIn("phi_slice * 2 * np.pi", source)
+
+    def test_norm_field_summary_keeps_jax_field_on_host_reporting_boundary(self):
+        spec = importlib.util.spec_from_file_location(
+            f"plotting_utils_{uuid.uuid4().hex}",
+            self.PLOTTING_UTILS_PATH,
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+
+        class Surface:
+            quadpoints_phi = np.array([0.0, 0.5])
+            quadpoints_theta = np.array([0.0, 0.5])
+
+            def normal(self):
+                normal = np.zeros((2, 2, 3), dtype=np.float64)
+                normal[:, :, 2] = 1.0
+                return normal
+
+            def gamma(self):
+                return np.zeros((2, 2, 3), dtype=np.float64)
+
+        class Field:
+            def __init__(self):
+                self.points = None
+                self.field = jax.device_put(np.ones((4, 3), dtype=np.float64))
+
+            def set_points(self, points):
+                self.points = points
+
+            def B(self):
+                return self.field
+
+        with jax.transfer_guard("disallow"):
+            field_error, *_ = module.norm_field_summary(Surface(), Field())
+
+        self.assertTrue(np.isfinite(field_error))
 
 
 class FtolGtolDefaultTests(unittest.TestCase):

@@ -2753,6 +2753,8 @@ def target_minimize(
 
     # All remaining methods require the private optimizer package.
     _require_private_package(method)
+    if method == "lbfgs-ondevice":
+        lbfgs_ftol = float(options.get("ftol", tol))
 
     if value_and_grad:
         if method != "lbfgs-ondevice":
@@ -2766,7 +2768,7 @@ def target_minimize(
             maxiter=maxiter,
             gtol=tol,
             maxcor=int(options.get("maxcor", 200)),
-            ftol=float(options.get("ftol", 0.0)),
+            ftol=lbfgs_ftol,
             maxfun=options.get("maxfun"),
             maxgrad=options.get("maxgrad"),
             maxls=int(options.get("maxls", 20)),
@@ -2797,7 +2799,7 @@ def target_minimize(
             maxiter=maxiter,
             gtol=tol,
             maxcor=int(options.get("maxcor", 200)),
-            ftol=float(options.get("ftol", 0.0)),
+            ftol=lbfgs_ftol,
             maxfun=options.get("maxfun"),
             maxgrad=options.get("maxgrad"),
             maxls=int(options.get("maxls", 20)),

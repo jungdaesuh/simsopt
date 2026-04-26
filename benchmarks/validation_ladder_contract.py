@@ -39,6 +39,14 @@ OPTIMIZER_DRIFT_TOLERANCES = {
         "full_resolve_fd_rel_tol": 1e-2,
         "full_resolve_fd_abs_tol": 1e-8,
     },
+    "optimizer_state_parity": {
+        "x_rtol": 1e-6,
+        "x_atol": 1e-8,
+        "objective_rel_tol": 1e-6,
+        "gradient_rtol": 1e-6,
+        "gradient_atol": 1e-8,
+        "jac_norm_inf_abs_tol": 1e-8,
+    },
 }
 
 PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {

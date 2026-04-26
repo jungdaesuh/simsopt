@@ -204,6 +204,14 @@ def _record_invalid_step_log(
     )
 
 
+def _relative_objective_reduction(f_k, f_kp1):
+    denominator = jnp.maximum(
+        jnp.maximum(jnp.abs(f_k), jnp.abs(f_kp1)),
+        _as_jax_dtype(1.0, f_k.dtype),
+    )
+    return (f_k - f_kp1) / denominator
+
+
 def _history_write_index(history, step_count):
     history_size = _int_scalar(history.shape[0])
     return jnp.mod(_as_jax_dtype(step_count, history_size.dtype), history_size)
@@ -423,6 +431,7 @@ def _minimize_lbfgs_private_impl(
         return (
             (~state.converged)
             & (~state.failed)
+            & (state.status == _int_scalar(0))
             & jnp.isfinite(state.f_k)
             & jnp.all(jnp.isfinite(state.g_k))
         )
@@ -601,7 +610,11 @@ def _minimize_lbfgs_private_impl(
 
         def accepted_step(_):
             status = _int_scalar(0)
-            status = jnp.where(state.f_k - f_kp1 < ftol_jax, _int_scalar(4), status)
+            status = jnp.where(
+                _relative_objective_reduction(state.f_k, f_kp1) <= ftol_jax,
+                _int_scalar(4),
+                status,
+            )
             status = jnp.where(next_ngev >= maxgrad_limit, _int_scalar(3), status)
             status = jnp.where(next_nfev >= maxfun_limit, _int_scalar(2), status)
             status = jnp.where(next_k >= maxiter_limit, _int_scalar(1), status)
@@ -610,7 +623,9 @@ def _minimize_lbfgs_private_impl(
             )
             return state._replace(
                 converged=converged,
-                failed=(status > _int_scalar(0)) & (~converged),
+                failed=(status > _int_scalar(0))
+                & (status != _int_scalar(4))
+                & (~converged),
                 k=next_k,
                 nfev=next_nfev,
                 ngev=next_ngev,

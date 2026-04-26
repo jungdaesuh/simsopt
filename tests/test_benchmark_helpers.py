@@ -1107,6 +1107,19 @@ def test_optimizer_drift_tolerances_tier2_geometry_gate_tracks_iteration_budget(
     assert "geometry_rel_tol_default" not in tol_20
 
 
+def test_optimizer_drift_tolerances_include_optimizer_state_parity_lane():
+    tolerances = optimizer_drift_tolerances("optimizer_state_parity")
+
+    assert tolerances == {
+        "x_rtol": pytest.approx(1e-6),
+        "x_atol": pytest.approx(1e-8),
+        "objective_rel_tol": pytest.approx(1e-6),
+        "gradient_rtol": pytest.approx(1e-6),
+        "gradient_atol": pytest.approx(1e-8),
+        "jac_norm_inf_abs_tol": pytest.approx(1e-8),
+    }
+
+
 def test_parity_ladder_tolerances_capture_precision_lanes():
     expected_lanes = {
         "direct_kernel",

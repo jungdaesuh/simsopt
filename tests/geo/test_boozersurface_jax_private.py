@@ -74,6 +74,21 @@ def _record_progress(points):
     return callback
 
 
+def _successful_optimize_result_for_x(x):
+    from scipy.optimize import OptimizeResult
+
+    return OptimizeResult(
+        x=x,
+        fun=0.0,
+        jac=jnp.zeros_like(x),
+        nit=0,
+        nfev=0,
+        njev=0,
+        status=0,
+        success=True,
+    )
+
+
 def test_traceable_plu_or_dummy_accepts_python_and_traced_predicates():
     matrix = jnp.asarray([[3.0, 1.0], [2.0, 4.0]], dtype=jnp.float64)
     expected = tuple(np.asarray(part) for part in jax.scipy.linalg.lu(matrix))
@@ -383,6 +398,7 @@ def _private_lbfgs_quadratic_state(
     line_search_kwargs,
     maxiter=5,
     gtol=1e-8,
+    ftol=0.0,
     maxcor=4,
 ):
     from simsopt.geo.optimizer_jax_private import _LineSearchResults
@@ -411,6 +427,7 @@ def _private_lbfgs_quadratic_state(
         x0,
         maxiter=maxiter,
         gtol=gtol,
+        ftol=ftol,
         maxcor=maxcor,
     )
     return state, quad
@@ -1038,6 +1055,41 @@ class TestOptimizerAdapterPrivate:
         )
         assert int(state.invalid_step_log.count) == 0
 
+    def test_lbfgs_relative_objective_reduction_matches_scipy_formula(self):
+        from simsopt.geo.optimizer_jax_private import _lbfgs as _lbfgs_module
+
+        f_k = jnp.asarray(1000.0, dtype=jnp.float64)
+        f_kp1 = jnp.asarray(999.5, dtype=jnp.float64)
+
+        reduction = _lbfgs_module._relative_objective_reduction(f_k, f_kp1)
+
+        assert float(reduction) == pytest.approx(5.0e-4)
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_lbfgs_private_ftol_uses_relative_reduction(
+        self,
+        monkeypatch,
+    ):
+        x0 = jnp.array([np.sqrt(2000.0), 0.0], dtype=jnp.float64)
+        state, _ = _private_lbfgs_quadratic_state(
+            monkeypatch,
+            x0=x0,
+            line_search_kwargs=dict(
+                a_k=jnp.array(0.25, dtype=jnp.float64),
+                f_k=jnp.array(999.5, dtype=jnp.float64),
+                g_k=jnp.array([3.0, -1.0], dtype=jnp.float64),
+                status=jnp.array(0),
+            ),
+            ftol=1.0e-3,
+            maxiter=5,
+            gtol=1e-12,
+        )
+
+        assert int(state.status) == 4
+        assert bool(state.failed) is False
+        assert bool(state.converged) is False
+        assert int(state.invalid_step_log.count) == 0
+
     @PRIVATE_OPTIMIZER_RUNTIME
     def test_minimize_lbfgs_private_rejects_stalled_nonconverged_step(
         self,
@@ -1210,6 +1262,62 @@ class TestOptimizerAdapterPrivate:
         _assert_structured_zero_optimizer_result(result)
         assert callback_calls
         assert isinstance(callback_calls[0], dict)
+
+    def test_target_minimize_lbfgs_defaults_ftol_to_tol(self, monkeypatch):
+        """The target L-BFGS route should mirror SciPy's tol -> ftol contract."""
+        captured = {}
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+
+        def fake_minimize(_fun, _x0, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+        monkeypatch.setattr(_opt, "_minimize_lbfgs_private", fake_minimize)
+        monkeypatch.setattr(
+            _opt,
+            "_private_lbfgs_result_to_optimize_result",
+            lambda _state: _successful_optimize_result_for_x(x0),
+        )
+
+        _opt.target_minimize(
+            lambda x: 0.5 * jnp.dot(x, x),
+            x0,
+            method="lbfgs-ondevice",
+            tol=1.0e-4,
+            maxiter=3,
+        )
+
+        assert captured["gtol"] == pytest.approx(1.0e-4)
+        assert captured["ftol"] == pytest.approx(1.0e-4)
+
+    def test_target_minimize_lbfgs_explicit_ftol_overrides_tol(self, monkeypatch):
+        """An explicit L-BFGS ftol option should remain independent from gtol."""
+        captured = {}
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+
+        def fake_minimize(_fun, _x0, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+        monkeypatch.setattr(_opt, "_minimize_lbfgs_private_value_and_grad", fake_minimize)
+        monkeypatch.setattr(
+            _opt,
+            "_private_lbfgs_result_to_optimize_result",
+            lambda _state: _successful_optimize_result_for_x(x0),
+        )
+
+        _opt.target_minimize(
+            lambda x: (0.5 * jnp.dot(x, x), x),
+            x0,
+            method="lbfgs-ondevice",
+            value_and_grad=True,
+            tol=1.0e-4,
+            maxiter=3,
+            options={"ftol": 1.0e-7},
+        )
+
+        assert captured["gtol"] == pytest.approx(1.0e-4)
+        assert captured["ftol"] == pytest.approx(1.0e-7)
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
@@ -1962,6 +2070,7 @@ class TestBoozerSurfaceJAXClassPrivate:
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["limited_memory"] = True
+        booz.options["ftol"] = 0.0
 
         res = booz.run_code(iota=0.3, G=0.05)
 
