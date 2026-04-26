@@ -127,6 +127,20 @@ _SUMMARY_COLUMNS = (
     "blocking_constraint_after",
 )
 
+_PATH_KEYED_SOURCE_KINDS = frozenset({"run_artifact", "harvested_seed"})
+
+_COMPARISON_METRICS = (
+    ("success", "hard_feasible_success"),
+    ("best_feasible_objective", "best_feasible_base_objective"),
+    ("max_raw_hard_violation", "max_raw_hard_violation"),
+    ("max_normalized_violation", "max_normalized_violation"),
+    ("outer_iters", "outer_iterations"),
+    ("evals", "objective_eval_count"),
+    ("wall_s", "wall_time_s"),
+    ("penalty_cap_hits", "penalty_cap_hit_count"),
+    ("multiplier_cap_hits", "multiplier_cap_hit_count"),
+)
+
 
 @dataclass(frozen=True)
 class AutoresearchArtifactRoots:
@@ -521,51 +535,32 @@ def benchmark_case_key(row: Mapping[str, object]) -> str:
     source_kind = row["source_kind"]
     if source_kind == "ledger" and row.get("ledger_row_index") is not None:
         return f"{source_kind}:{row['source_path']}:{row['ledger_row_index']}"
-    if source_kind in {"run_artifact", "harvested_seed"}:
+    if source_kind in _PATH_KEYED_SOURCE_KINDS:
         return f"{source_kind}:{row['source_path']}"
     case_id = row.get("run_id") or row["source_path"]
     return f"{source_kind}:{case_id}"
+
+
+def _optional_row_value(
+    row: Mapping[str, object] | None,
+    key: str,
+) -> object:
+    return None if row is None else row.get(key)
 
 
 def _comparison_row(
     before: Mapping[str, object],
     after: Mapping[str, object] | None,
 ) -> dict[str, object]:
-    return {
+    row = {
         "case": benchmark_case_key(before),
-        "before_success": before.get("hard_feasible_success"),
-        "after_success": None if after is None else after.get("hard_feasible_success"),
-        "before_best_feasible_objective": before.get("best_feasible_base_objective"),
-        "after_best_feasible_objective": (
-            None if after is None else after.get("best_feasible_base_objective")
-        ),
-        "before_max_raw_hard_violation": before.get("max_raw_hard_violation"),
-        "after_max_raw_hard_violation": (
-            None if after is None else after.get("max_raw_hard_violation")
-        ),
-        "before_max_normalized_violation": before.get("max_normalized_violation"),
-        "after_max_normalized_violation": (
-            None if after is None else after.get("max_normalized_violation")
-        ),
-        "before_outer_iters": before.get("outer_iterations"),
-        "after_outer_iters": None if after is None else after.get("outer_iterations"),
-        "before_evals": before.get("objective_eval_count"),
-        "after_evals": None if after is None else after.get("objective_eval_count"),
-        "before_wall_s": before.get("wall_time_s"),
-        "after_wall_s": None if after is None else after.get("wall_time_s"),
-        "before_penalty_cap_hits": before.get("penalty_cap_hit_count"),
-        "after_penalty_cap_hits": (
-            None if after is None else after.get("penalty_cap_hit_count")
-        ),
-        "before_multiplier_cap_hits": before.get("multiplier_cap_hit_count"),
-        "after_multiplier_cap_hits": (
-            None if after is None else after.get("multiplier_cap_hit_count")
-        ),
         "blocking_constraint_before": before.get("blocking_constraint_name"),
-        "blocking_constraint_after": (
-            None if after is None else after.get("blocking_constraint_name")
-        ),
+        "blocking_constraint_after": _optional_row_value(after, "blocking_constraint_name"),
     }
+    for output_name, metric_name in _COMPARISON_METRICS:
+        row[f"before_{output_name}"] = before.get(metric_name)
+        row[f"after_{output_name}"] = _optional_row_value(after, metric_name)
+    return row
 
 
 def comparison_rows(
