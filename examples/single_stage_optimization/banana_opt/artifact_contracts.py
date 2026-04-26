@@ -18,7 +18,6 @@ from .hardware_constraint_schema import build_bootability_recovery_payload_field
 from .constraint_contract import CONSTRAINT_SCHEMA_VERSION
 from workflow_helpers import canonical_stage2_iota_constraint_weight
 
-import warnings
 
 DEFAULT_LEGACY_BANANA_INIT_CURRENT_A = 1.0e4
 _BOOZER_CURRENT_CONVENTION_INFERENCE_ABS_TOL = 1.0e-12
@@ -404,11 +403,8 @@ def validate_constraint_contract_schema_version(
 ) -> None:
     """Enforce forward compatibility of the persisted constraint contract.
 
-    * Absent / legacy schema (``CONTRACT_SCHEMA_VERSION=0``) emits a
-      :class:`RuntimeWarning` but is accepted, matching the legacy policy
-      already used for ``STAGE2_BS_SHA256`` (workflow_runner_common). This
-      keeps pre-contract artifacts usable for resume/reuse while flagging
-      provenance gaps loudly.
+    * Absent / legacy schema (``CONTRACT_SCHEMA_VERSION=0``) is rejected
+      because the artifact cannot be bound to the current constraint contract.
     * The current schema version is accepted silently.
     * Any other value — typically a future version produced by newer
       code — is rejected so we never silently misread an artifact whose
@@ -422,17 +418,11 @@ def validate_constraint_contract_schema_version(
     if recorded_version == CURRENT_CONSTRAINT_CONTRACT_SCHEMA_VERSION:
         return
     if recorded_version == LEGACY_CONSTRAINT_CONTRACT_SCHEMA_VERSION:
-        warnings.warn(
-            (
-                f"{owner_label}: {stage2_results_path} uses legacy constraint "
-                f"contract schema v{LEGACY_CONSTRAINT_CONTRACT_SCHEMA_VERSION} "
-                "(no CONTRACT_HASH); allowing legacy artifact without "
-                "constraint-contract binding."
-            ),
-            RuntimeWarning,
-            stacklevel=2,
+        raise ValueError(
+            f"{owner_label}: {stage2_results_path} uses legacy constraint "
+            f"contract schema v{LEGACY_CONSTRAINT_CONTRACT_SCHEMA_VERSION} "
+            "(no CONTRACT_HASH); cannot verify constraint-contract binding."
         )
-        return
     raise ValueError(
         f"{owner_label}: {stage2_results_path} reports CONTRACT_SCHEMA_VERSION="
         f"{recorded_version!r}, which is incompatible with the current schema "

@@ -1,5 +1,6 @@
 import importlib
 import importlib.util
+import hashlib
 import json
 import sys
 import tempfile
@@ -65,6 +66,13 @@ def load_workflow_runner_common_module():
 
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(payload)
+    stage2_bs_path = path.with_name("biot_savart_opt.json")
+    if path.name == "results.json" and stage2_bs_path.is_file():
+        payload.setdefault(
+            "STAGE2_BS_SHA256",
+            hashlib.sha256(stage2_bs_path.read_bytes()).hexdigest(),
+        )
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -117,7 +125,7 @@ def _build_round_trip_seed(
                 radius=0.18,
                 normal="z",
             ),
-            Current(8.0e4),
+            Current(-8.0e4),
         )
         for index in range(20)
     ]
@@ -171,6 +179,7 @@ def _build_round_trip_seed(
         "FINITE_CURRENT_MODE": (
             "wataru_proxy_field" if include_proxy_vf else "boozer_surrogate"
         ),
+        "SURFACE_VESSEL_MIN_DIST": 0.04,
     }
     _write_json(stage2_bs_path.with_name("results.json"), stage2_results)
     return stage2_bs_path, stage2_results, points, expected_field
@@ -297,7 +306,7 @@ class HandoffModuleTests(unittest.TestCase):
         return SimpleNamespace(current=self._fixed_current(current_A))
 
     def _bootability_smoke_inputs(self, *, include_proxy_vf: bool):
-        tf_coils = [self._fixed_current_coil(8.0e4) for _ in range(20)]
+        tf_coils = [self._fixed_current_coil(-8.0e4) for _ in range(20)]
         banana_coils = [
             self._fixed_current_coil(1.1e4),
             self._fixed_current_coil(-1.1e4),
@@ -307,11 +316,12 @@ class HandoffModuleTests(unittest.TestCase):
         fake_bs = SimpleNamespace(coils=[*tf_coils, *banana_coils, *proxy_coils, *vf_coils])
         stage2_artifact_results = {
             "PLASMA_SURF_FILENAME": "demo.nc",
-            "TF_CURRENT_A": 8.0e4,
+            "TF_CURRENT_A": -8.0e4,
             "MAJOR_RADIUS": 0.976,
             "TOROIDAL_FLUX": 0.24,
             "banana_surf_radius": 0.21,
             "CURVATURE_THRESHOLD": 100.0,
+            "SURFACE_VESSEL_MIN_DIST": 0.04,
         }
         if include_proxy_vf:
             stage2_artifact_results.update(
@@ -1337,6 +1347,10 @@ class UnifiedRunnerTests(unittest.TestCase):
             {
                 "PLASMA_SURF_FILENAME": "demo.nc",
                 "init_only": False,
+                "TF_CURRENT_A": -8.0e4,
+                "NUM_TF_COILS": 20,
+                "TF_CURRENT_SUM_ABS_A": 1.6e6,
+                "SURFACE_VESSEL_MIN_DIST": 0.04,
             },
         )
         return stage2_bs_path, stage2_results_path
@@ -1444,7 +1458,7 @@ class UnifiedRunnerTests(unittest.TestCase):
                     "--stage2-bs-path",
                     str(stage2_bs_path),
                     "--stage2-seed-tf-current-A",
-                    "12345.0",
+                    "-12345.0",
                     "--num-tf-coils",
                     "18",
                 ]
@@ -1455,7 +1469,7 @@ class UnifiedRunnerTests(unittest.TestCase):
                 stage2_bs_path=stage2_bs_path,
             )
 
-            self.assertEqual(stage2_results["TF_CURRENT_A"], 12345.0)
+            self.assertEqual(stage2_results["TF_CURRENT_A"], -12345.0)
             self.assertEqual(stage2_results["NUM_TF_COILS"], 18)
             self.assertEqual(stage2_results["TF_CURRENT_SUM_ABS_A"], 222210.0)
 
@@ -1905,7 +1919,7 @@ class UnifiedRunnerTests(unittest.TestCase):
 
             original_stage2_results = {
                 "PLASMA_SURF_FILENAME": "demo.nc",
-                "TF_CURRENT_A": 8.0e4,
+                "TF_CURRENT_A": -8.0e4,
                 "NUM_TF_COILS": 20,
                 "MAJOR_RADIUS": 0.976,
                 "TOROIDAL_FLUX": 0.24,
@@ -1922,7 +1936,7 @@ class UnifiedRunnerTests(unittest.TestCase):
                     "iterations": 7,
                     # Single-stage schema: uses STAGE2_* prefix, does not surface
                     # TF_CURRENT_A / NUM_TF_COILS / FINITE_CURRENT_MODE directly.
-                    "STAGE2_TF_CURRENT_A": 8.0e4,
+                    "STAGE2_TF_CURRENT_A": -8.0e4,
                     "STAGE2_FINITE_CURRENT_MODE": "boozer_surrogate",
                     "MAJOR_RADIUS": 0.976,
                     "TOROIDAL_FLUX": 0.24,
@@ -2016,7 +2030,7 @@ class UnifiedRunnerTests(unittest.TestCase):
             # can be validated. The recovery single-stage results.json does not
             # surface these keys directly, so passing it would silently fail.
             self.assertIs(probe_call["stage2_results"], original_stage2_results)
-            self.assertEqual(probe_call["stage2_results"]["TF_CURRENT_A"], 8.0e4)
+            self.assertEqual(probe_call["stage2_results"]["TF_CURRENT_A"], -8.0e4)
             self.assertEqual(probe_call["stage2_results"]["NUM_TF_COILS"], 20)
             self.assertEqual(
                 probe_call["stage2_results"]["FINITE_CURRENT_MODE"],
@@ -2035,7 +2049,7 @@ class UnifiedRunnerTests(unittest.TestCase):
 
             original_stage2_results = {
                 "PLASMA_SURF_FILENAME": "demo.nc",
-                "TF_CURRENT_A": 8.0e4,
+                "TF_CURRENT_A": -8.0e4,
                 "NUM_TF_COILS": 20,
                 "MAJOR_RADIUS": 0.976,
                 "TOROIDAL_FLUX": 0.24,

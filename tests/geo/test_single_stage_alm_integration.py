@@ -1,4 +1,5 @@
 import ast
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -77,6 +78,16 @@ SINGLE_STAGE_THRESHOLDED_PHYSICS_RERUN_MODULE_PATH = (
     / "run_single_stage_thresholded_physics_alm.py"
 )
 DEFAULT_ALM_WRAPPER_SURFACE = "wout_nfp10ginsburg_desc_s024match_iota20.nc"
+
+
+def write_stage2_results_with_digest(stage2_bs_path: Path, stage2_results: dict) -> Path:
+    results_path = stage2_bs_path.with_name("results.json")
+    payload = dict(stage2_results)
+    payload["STAGE2_BS_SHA256"] = hashlib.sha256(
+        stage2_bs_path.read_bytes()
+    ).hexdigest()
+    results_path.write_text(json.dumps(payload), encoding="utf-8")
+    return results_path
 
 
 def load_alm_utils_module():
@@ -240,7 +251,7 @@ def make_complete_stage2_spec_payload(**overrides):
         "curvature_weight": 0.0002,
         "curvature_threshold": 45.0,
         "banana_surf_radius": 0.21,
-        "tf_current_A": 8.0e4,
+        "tf_current_A": -8.0e4,
         "order": 3,
         "banana_init_current_A": 1.2e4,
         "banana_current_max_A": 1.5e4,
@@ -896,7 +907,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         module = load_stage2_alm_wrapper_module()
         args = make_stage2_alm_wrapper_args(
             equilibria_dir="eqdir",
-            tf_current_A=7.5e4,
+            tf_current_A=-7.5e4,
             toroidal_flux=0.37,
             cc_threshold=0.07,
         )
@@ -906,7 +917,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertEqual(resolved_spec_source, "profile:standard_80ka")
         self.assertEqual(config.constraint_method, "alm")
-        self.assertEqual(config.tf_current_A, 7.5e4)
+        self.assertEqual(config.tf_current_A, -7.5e4)
         self.assertEqual(config.toroidal_flux, 0.37)
         self.assertEqual(config.cc_threshold, 0.07)
         self.assertEqual(config.output_root, Path("outputs").resolve())
@@ -979,10 +990,10 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
     def test_stage2_alm_wrapper_rejects_tf_current_above_hard_limit(self):
         module = load_stage2_alm_wrapper_module()
-        args = make_stage2_alm_wrapper_args(tf_current_A=8.5e4)
+        args = make_stage2_alm_wrapper_args(tf_current_A=-8.5e4)
         resolved_spec, _ = module.resolve_stage2_spec_payload(args)
 
-        with self.assertRaisesRegex(ValueError, "TF coil current magnitude must be"):
+        with self.assertRaisesRegex(ValueError, "TF coil current must be negative"):
             module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
 
     def test_stage2_alm_wrapper_cli_overrides_banana_current_and_surface_radius(self):
@@ -1091,7 +1102,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         complete_spec = make_complete_stage2_spec_payload(
             major_radius=1.0,
             banana_surf_radius=0.25,
-            tf_current_A=9.0e4,
+            tf_current_A=-7.5e4,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1106,7 +1117,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertTrue(source_label.startswith("json:"))
         self.assertEqual(resolved_spec["major_radius"], 1.0)
-        self.assertEqual(resolved_spec["tf_current_A"], 9.0e4)
+        self.assertEqual(resolved_spec["tf_current_A"], -7.5e4)
         self.assertEqual(resolved_spec["order"], 3)
         self.assertEqual(resolved_spec["banana_current_max_A"], 1.5e4)
 
@@ -1277,7 +1288,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                         "curvature_weight": 1.0e-4,
                         "curvature_threshold": 40.0,
                         "banana_surf_radius": 0.22,
-                        "tf_current_A": 8.0e4,
+                        "tf_current_A": -8.0e4,
                         "order": 2,
                         "banana_init_current_A": 1.0e4,
                         "banana_current_max_A": 1.6e4,
@@ -1313,7 +1324,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(metadata["PLASMA_VESSEL_MIN_DIST_M"], 0.04)
         self.assertEqual(metadata["LENGTH_TARGET"], 1.9)
 
-    def test_stage2_alm_wrapper_load_validated_artifact_backfills_clearance_metadata(self):
+    def test_stage2_alm_wrapper_load_validated_artifact_rejects_legacy_contract_metadata(self):
         module = load_stage2_alm_wrapper_module()
         args = make_stage2_alm_wrapper_args()
         resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
@@ -1326,7 +1337,6 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             artifact_path = Path(tmpdir) / "biot_savart_opt.json"
-            results_path = artifact_path.with_name("results.json")
             artifact_path.write_text("{}", encoding="utf-8")
 
             legacy_results = module._expected_stage2_artifact_metadata(config)
@@ -1335,20 +1345,14 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             legacy_results.pop("LENGTH_TARGET")
             legacy_results.pop("ALM_DISTANCE_SMOOTHING")
             legacy_results.pop("ALM_CURVATURE_SMOOTHING")
-            results_path.write_text(json.dumps(legacy_results), encoding="utf-8")
+            write_stage2_results_with_digest(artifact_path, legacy_results)
 
             with patch.object(module, "resolve_stage2_artifact_path", return_value=artifact_path):
-                loaded_results_path, loaded_results = module.load_validated_stage2_artifact(
-                    config,
-                    constraint_metadata=constraint_metadata,
-                )
-
-        self.assertEqual(loaded_results_path, results_path)
-        self.assertEqual(loaded_results["COIL_PLASMA_MIN_DIST_M"], 0.015)
-        self.assertEqual(loaded_results["PLASMA_VESSEL_MIN_DIST_M"], 0.04)
-        self.assertEqual(loaded_results["LENGTH_TARGET"], 1.9)
-        self.assertEqual(loaded_results["ALM_DISTANCE_SMOOTHING"], 0.005)
-        self.assertEqual(loaded_results["ALM_CURVATURE_SMOOTHING"], 0.25)
+                with self.assertRaisesRegex(ValueError, "legacy constraint contract schema"):
+                    module.load_validated_stage2_artifact(
+                        config,
+                        constraint_metadata=constraint_metadata,
+                    )
 
     def test_stage2_alm_wrapper_load_validated_artifact_rejects_mismatched_constraint_metadata(self):
         module = load_stage2_alm_wrapper_module()
@@ -1363,12 +1367,11 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             artifact_path = Path(tmpdir) / "biot_savart_opt.json"
-            results_path = artifact_path.with_name("results.json")
             artifact_path.write_text("{}", encoding="utf-8")
             stage2_results = module._expected_stage2_artifact_metadata(config)
             stage2_results.update(constraint_metadata)
             stage2_results["CONTRACT_HASH"] = "mismatched"
-            results_path.write_text(json.dumps(stage2_results), encoding="utf-8")
+            write_stage2_results_with_digest(artifact_path, stage2_results)
 
             with patch.object(module, "resolve_stage2_artifact_path", return_value=artifact_path):
                 with self.assertRaisesRegex(ValueError, "CONTRACT_HASH"):
@@ -1418,7 +1421,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             artifact_path.write_text("{}", encoding="utf-8")
             stage2_results = module._expected_stage2_artifact_metadata(config)
             stage2_results.update(constraint_metadata_a)
-            results_path.write_text(json.dumps(stage2_results), encoding="utf-8")
+            write_stage2_results_with_digest(artifact_path, stage2_results)
 
             with patch.object(module, "resolve_stage2_artifact_path", return_value=artifact_path):
                 loaded_results_path, loaded_results = module.load_validated_stage2_artifact(
@@ -1457,7 +1460,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             artifact_path.write_text("{}", encoding="utf-8")
             stage2_results = module._expected_stage2_artifact_metadata(config)
             stage2_results.update(constraint_metadata_default)
-            results_path.write_text(json.dumps(stage2_results), encoding="utf-8")
+            write_stage2_results_with_digest(artifact_path, stage2_results)
 
             with patch.object(module, "resolve_stage2_artifact_path", return_value=artifact_path):
                 loaded_results_path, loaded_results = module.load_validated_stage2_artifact(
@@ -1484,7 +1487,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                         "curvature_weight": 1.0e-4,
                         "curvature_threshold": 40.0,
                         "banana_surf_radius": 0.22,
-                        "tf_current_A": 8.0e4,
+                        "tf_current_A": -8.0e4,
                         "order": 2,
                         "banana_init_current_A": 1.0e4,
                         "banana_current_max_A": 1.6e4,
@@ -1565,7 +1568,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
         loaded_constraint_metadata = {
             "CONSTRAINT_PROFILE": "artifact:reused",
-            "EFFECTIVE_VALUES": {"TF_CURRENT_A": 81000.0},
+            "EFFECTIVE_VALUES": {"TF_CURRENT_A": -75000.0},
             "OVERRIDE_REASON": "artifact:reused",
             "CONTRACT_HASH": "artifact-hash",
             "CONTRACT_SCHEMA_VERSION": 1,
@@ -1591,7 +1594,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(summary["OVERRIDE_REASON"], "artifact:reused")
         self.assertEqual(summary["CONTRACT_HASH"], "artifact-hash")
         self.assertEqual(summary["CONTRACT_SCHEMA_VERSION"], 1)
-        self.assertEqual(summary["EFFECTIVE_VALUES"], {"TF_CURRENT_A": 81000.0})
+        self.assertEqual(summary["EFFECTIVE_VALUES"], {"TF_CURRENT_A": -75000.0})
 
     def test_stage2_alm_wrapper_summary_clears_wrapper_hash_for_legacy_constraint_metadata(self):
         module = load_stage2_alm_wrapper_module()
@@ -1646,7 +1649,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                         "curvature_weight": 1.0e-4,
                         "curvature_threshold": 40.0,
                         "banana_surf_radius": 0.22,
-                        "tf_current_A": 8.0e4,
+                        "tf_current_A": -8.0e4,
                         "order": 2,
                         "banana_init_current_A": 1.0e4,
                         "banana_current_max_A": 1.6e4,
@@ -1686,7 +1689,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                         "curvature_weight": 1.0e-4,
                         "curvature_threshold": 40.0,
                         "banana_surf_radius": 0.22,
-                        "tf_current_A": 8.0e4,
+                        "tf_current_A": -8.0e4,
                         "order": 2,
                         "banana_init_current_A": 1.0e4,
                         "banana_current_max_A": 1.6e4,
@@ -1947,9 +1950,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             tmpdir_path = Path(tmpdir)
             stage2_bs_path = tmpdir_path / "biot_savart_opt.json"
             stage2_bs_path.write_text("{}", encoding="utf-8")
-            (tmpdir_path / "results.json").write_text(
-                json.dumps({"PLASMA_SURF_FILENAME": "other_surface.nc"}),
-                encoding="utf-8",
+            write_stage2_results_with_digest(
+                stage2_bs_path,
+                {"PLASMA_SURF_FILENAME": "other_surface.nc"},
             )
             args = make_single_stage_thresholded_physics_rerun_args(
                 plasma_surf_filename=DEFAULT_ALM_WRAPPER_SURFACE,
@@ -1966,14 +1969,12 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             tmpdir_path = Path(tmpdir)
             stage2_bs_path = tmpdir_path / "biot_savart_opt.json"
             stage2_bs_path.write_text("{}", encoding="utf-8")
-            (tmpdir_path / "results.json").write_text(
-                json.dumps(
-                    {
-                        "PLASMA_SURF_FILENAME": DEFAULT_ALM_WRAPPER_SURFACE,
-                        "init_only": True,
-                    }
-                ),
-                encoding="utf-8",
+            write_stage2_results_with_digest(
+                stage2_bs_path,
+                {
+                    "PLASMA_SURF_FILENAME": DEFAULT_ALM_WRAPPER_SURFACE,
+                    "init_only": True,
+                },
             )
             args = make_single_stage_thresholded_physics_rerun_args(
                 plasma_surf_filename=DEFAULT_ALM_WRAPPER_SURFACE,
@@ -1989,16 +1990,13 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
             stage2_bs_path = tmpdir_path / "biot_savart_opt.json"
-            results_path = tmpdir_path / "results.json"
             stage2_bs_path.write_text("{}", encoding="utf-8")
-            results_path.write_text(
-                json.dumps(
-                    {
-                        "PLASMA_SURF_FILENAME": DEFAULT_ALM_WRAPPER_SURFACE,
-                        "init_only": True,
-                    }
-                ),
-                encoding="utf-8",
+            results_path = write_stage2_results_with_digest(
+                stage2_bs_path,
+                {
+                    "PLASMA_SURF_FILENAME": DEFAULT_ALM_WRAPPER_SURFACE,
+                    "init_only": True,
+                },
             )
             args = make_single_stage_thresholded_physics_rerun_args(
                 plasma_surf_filename=DEFAULT_ALM_WRAPPER_SURFACE,

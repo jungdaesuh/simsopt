@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 import math
 import subprocess
@@ -31,6 +32,15 @@ EXPECTED_LOCAL_SIMSOPT_INIT = (
     Path(__file__).resolve().parents[2] / "src" / "simsopt" / "__init__.py"
 )
 EXPECTED_FINITE_CURRENT_MODE = "wataru_proxy_field"
+
+
+def stage2_results_with_digest(stage2_bs_path: Path, payload: dict) -> dict:
+    results = dict(payload)
+    results.setdefault(
+        "STAGE2_BS_SHA256",
+        hashlib.sha256(stage2_bs_path.read_bytes()).hexdigest(),
+    )
+    return results
 
 
 def load_module(path: Path, stem: str):
@@ -117,7 +127,7 @@ class WorkflowHelpersTests(unittest.TestCase):
                 curvature_weight=0.0001,
                 curvature_threshold=40.0,
                 banana_surf_radius=0.22,
-                tf_current_A=8.0e4,
+                tf_current_A=-8.0e4,
                 order=2,
             )
 
@@ -154,7 +164,7 @@ class WorkflowHelpersTests(unittest.TestCase):
             curvature_weight=0.0001,
             curvature_threshold=40.0,
             banana_surf_radius=0.22,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             order=2,
         )
 
@@ -171,7 +181,7 @@ class WorkflowHelpersTests(unittest.TestCase):
             basin_seed=7,
         )
 
-        self.assertIn("TFC=80000", run_dir)
+        self.assertIn("TFC=-80000", run_dir)
         self.assertIn("INITC=10000", run_dir)
         self.assertIn("-CM=penalty", run_dir)
         self.assertIn("-BH=3-BS=0.01-BSeed=7-BT=2.5-BNS=8", run_dir)
@@ -188,7 +198,7 @@ class WorkflowHelpersTests(unittest.TestCase):
             curvature_weight=0.0001,
             curvature_threshold=40.0,
             banana_surf_radius=0.22,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             order=2,
         )
 
@@ -207,7 +217,7 @@ class WorkflowHelpersTests(unittest.TestCase):
         self.assertEqual(
             str(artifact_path),
             "/tmp/stage2-root/outputs-demo.nc/"
-            "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty/"
+            "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=-80000-Order=2-CM=penalty/"
             "biot_savart_opt.json",
         )
 
@@ -223,7 +233,7 @@ class WorkflowHelpersTests(unittest.TestCase):
             curvature_weight=0.0001,
             curvature_threshold=40.0,
             banana_surf_radius=0.22,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             order=2,
             length_target=1.6,
         )
@@ -254,7 +264,7 @@ class WorkflowHelpersTests(unittest.TestCase):
             curvature_weight=0.0001,
             curvature_threshold=40.0,
             banana_surf_radius=0.22,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             order=2,
             target_lcfs_max_major_radius_m=0.91,
             target_lcfs_max_minor_radius_m=0.14,
@@ -286,7 +296,7 @@ class WorkflowHelpersTests(unittest.TestCase):
             curvature_weight=0.0001,
             curvature_threshold=40.0,
             banana_surf_radius=0.22,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             order=2,
         )
 
@@ -330,7 +340,7 @@ class WorkflowHelpersTests(unittest.TestCase):
             curvature_weight=0.0001,
             curvature_threshold=40.0,
             banana_surf_radius=0.22,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             order=2,
         )
 
@@ -359,7 +369,7 @@ class WorkflowHelpersTests(unittest.TestCase):
             curvature_weight=0.0001,
             curvature_threshold=40.0,
             banana_surf_radius=0.22,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             order=2,
         )
 
@@ -379,7 +389,7 @@ class WorkflowHelpersTests(unittest.TestCase):
             alm_max_inner_attempts=5,
             alm_max_subproblem_continuations=9,
             alm_distance_smoothing=0.01,
-            alm_curvature_smoothing=0.05,
+            alm_curvature_smoothing=0.5,
             basin_hops=0,
             basin_stepsize=0.01,
         )
@@ -390,7 +400,7 @@ class WorkflowHelpersTests(unittest.TestCase):
         self.assertIn("-ALMTR=0.15", run_dir)
         self.assertIn("-ALMInner=5", run_dir)
         self.assertIn("-ALMDist=0.01", run_dir)
-        self.assertIn("-ALMCurv=0.05", run_dir)
+        self.assertIn("-ALMCurv=0.5", run_dir)
 
     def test_format_local_stage2_run_dir_includes_wataru_field_suffix(self):
         module = load_workflow_helpers_module()
@@ -404,7 +414,7 @@ class WorkflowHelpersTests(unittest.TestCase):
             curvature_weight=0.0001,
             curvature_threshold=40.0,
             banana_surf_radius=0.22,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             order=2,
             finite_current_mode="wataru_proxy_field",
             proxy_plasma_current_A=9000.0,
@@ -448,7 +458,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
                 plasma_surf_filename="demo.nc",
                 output_root=Path("/tmp/stage2"),
                 equilibria_dir=None,
-                tf_current_A=8.0e4,
+                tf_current_A=-8.0e4,
                 major_radius=0.976,
                 toroidal_flux=-0.01,
                 length_weight=0.0005,
@@ -511,7 +521,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             plasma_surf_filename="demo.nc",
             output_root=Path("/tmp/stage2"),
             equilibria_dir="/tmp/equilibria",
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
@@ -549,7 +559,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             plasma_surf_filename="demo.nc",
             output_root=Path("/tmp/stage2"),
             equilibria_dir=None,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
@@ -580,7 +590,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             plasma_surf_filename="demo.nc",
             output_root=Path("/tmp/stage2"),
             equilibria_dir=None,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
@@ -616,7 +626,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             plasma_surf_filename="demo.nc",
             output_root=Path("/tmp/stage2"),
             equilibria_dir=None,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
@@ -670,7 +680,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             plasma_surf_filename="demo.nc",
             output_root=Path("/tmp/stage2"),
             equilibria_dir="/tmp/equilibria",
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
@@ -718,7 +728,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             plasma_surf_filename="demo.nc",
             output_root=Path("/tmp/stage2"),
             equilibria_dir="/tmp/equilibria",
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
@@ -758,7 +768,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             plasma_surf_filename="demo.nc",
             output_root=Path("/tmp/stage2"),
             equilibria_dir="/tmp/equilibria",
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
@@ -802,7 +812,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             plasma_surf_filename="demo.nc",
             output_root=Path("/tmp/stage2"),
             equilibria_dir=None,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
@@ -839,7 +849,7 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
             plasma_surf_filename="demo.nc",
             output_root=Path("/tmp/stage2"),
             equilibria_dir=None,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
@@ -951,6 +961,7 @@ class BaselineSweepScriptTests(unittest.TestCase):
             "banana_surf_radius": 0.21,
             "order": 2,
             "CONSTRAINT_METHOD": "penalty",
+            "CONTRACT_SCHEMA_VERSION": 1,
             "basin_hops": 0,
             "basin_stepsize": None,
             "basin_seed": None,
@@ -958,6 +969,16 @@ class BaselineSweepScriptTests(unittest.TestCase):
         }
         results.update(overrides)
         return results
+
+    def _write_stage2_artifact_results(
+        self,
+        stage2_bs_path: Path,
+        stage2_results: dict,
+    ) -> Path:
+        stage2_results_path = stage2_bs_path.with_name("results.json")
+        payload = stage2_results_with_digest(stage2_bs_path, stage2_results)
+        stage2_results_path.write_text(json.dumps(payload), encoding="utf-8")
+        return stage2_results_path
 
     def _make_expected_stage2_config(self, common, output_root: Path, **overrides):
         config = {
@@ -1129,14 +1150,12 @@ class BaselineSweepScriptTests(unittest.TestCase):
             stage2_dir = Path(tmpdir)
             stage2_bs_path = stage2_dir / "biot_savart_opt.json"
             stage2_bs_path.write_text("{}", encoding="utf-8")
-            (stage2_dir / "results.json").write_text(
-                json.dumps(
-                    self._make_stage2_artifact_results(
-                        TF_CURRENT_A=1.0e5,
-                        TF_CURRENT_SUM_ABS_A=2.0e6,
-                    )
+            self._write_stage2_artifact_results(
+                stage2_bs_path,
+                self._make_stage2_artifact_results(
+                    TF_CURRENT_A=1.0e5,
+                    TF_CURRENT_SUM_ABS_A=2.0e6,
                 ),
-                encoding="utf-8",
             )
             expected_config = self._make_expected_stage2_config(common, stage2_dir)
 
@@ -1154,11 +1173,9 @@ class BaselineSweepScriptTests(unittest.TestCase):
             stage2_dir = Path(tmpdir)
             stage2_bs_path = stage2_dir / "biot_savart_opt.json"
             stage2_bs_path.write_text("{}", encoding="utf-8")
-            (stage2_dir / "results.json").write_text(
-                json.dumps(
-                    self._make_stage2_artifact_results(MAJOR_RADIUS=1.23)
-                ),
-                encoding="utf-8",
+            self._write_stage2_artifact_results(
+                stage2_bs_path,
+                self._make_stage2_artifact_results(MAJOR_RADIUS=1.23),
             )
             expected_config = self._make_expected_stage2_config(common, stage2_dir)
 
@@ -1176,14 +1193,12 @@ class BaselineSweepScriptTests(unittest.TestCase):
             stage2_dir = Path(tmpdir)
             stage2_bs_path = stage2_dir / "biot_savart_opt.json"
             stage2_bs_path.write_text("{}", encoding="utf-8")
-            (stage2_dir / "results.json").write_text(
-                json.dumps(
-                    self._make_stage2_artifact_results(
-                        TF_CURRENT_SUM_ABS_A=8.0e5,
-                        NUM_TF_COILS=10,
-                    )
+            self._write_stage2_artifact_results(
+                stage2_bs_path,
+                self._make_stage2_artifact_results(
+                    TF_CURRENT_SUM_ABS_A=8.0e5,
+                    NUM_TF_COILS=10,
                 ),
-                encoding="utf-8",
             )
             expected_config = self._make_expected_stage2_config(common, stage2_dir)
 
@@ -1204,10 +1219,9 @@ class BaselineSweepScriptTests(unittest.TestCase):
             legacy_results = self._make_stage2_artifact_results()
             legacy_results.pop("TF_CURRENT_SUM_ABS_A")
             legacy_results.pop("NUM_TF_COILS")
-            stage2_results_path = stage2_dir / "results.json"
-            stage2_results_path.write_text(
-                json.dumps(legacy_results),
-                encoding="utf-8",
+            stage2_results_path = self._write_stage2_artifact_results(
+                stage2_bs_path,
+                legacy_results,
             )
             expected_config = self._make_expected_stage2_config(common, stage2_dir)
 
@@ -1249,10 +1263,9 @@ class BaselineSweepScriptTests(unittest.TestCase):
             stage2_dir = Path(tmpdir)
             stage2_bs_path = stage2_dir / "biot_savart_opt.json"
             stage2_bs_path.write_text("{}", encoding="utf-8")
-            stage2_results_path = stage2_dir / "results.json"
-            stage2_results_path.write_text(
-                json.dumps(self._make_stage2_artifact_results()),
-                encoding="utf-8",
+            stage2_results_path = self._write_stage2_artifact_results(
+                stage2_bs_path,
+                self._make_stage2_artifact_results(),
             )
             requested_config = self._make_expected_stage2_config(common, stage2_dir)
 
@@ -1274,12 +1287,16 @@ class WorkflowRunnerCommonArtifactTests(unittest.TestCase):
         root: Path,
         *,
         stage2_results: dict,
+        include_digest: bool = True,
     ) -> tuple[Path, Path]:
         stage2_bs_path = root / "biot_savart_opt.json"
         stage2_bs_path.write_text('{"coils": []}', encoding="utf-8")
         stage2_results_path = root / "results.json"
+        payload = dict(stage2_results)
+        if include_digest:
+            payload = stage2_results_with_digest(stage2_bs_path, payload)
         stage2_results_path.write_text(
-            json.dumps(stage2_results),
+            json.dumps(payload),
             encoding="utf-8",
         )
         return stage2_bs_path, stage2_results_path
@@ -1306,23 +1323,19 @@ class WorkflowRunnerCommonArtifactTests(unittest.TestCase):
         self.assertEqual(loaded_results_path, stage2_results_path)
         self.assertEqual(loaded_results["STAGE2_BS_SHA256"], expected_digest)
 
-    def test_load_stage2_artifact_results_warns_for_legacy_missing_checksum(self):
+    def test_load_stage2_artifact_results_rejects_missing_checksum(self):
         module = load_workflow_common_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             stage2_dir = Path(tmpdir)
-            stage2_bs_path, stage2_results_path = self._write_stage2_artifact_pair(
+            stage2_bs_path, _ = self._write_stage2_artifact_pair(
                 stage2_dir,
                 stage2_results={},
+                include_digest=False,
             )
 
-            with self.assertWarnsRegex(RuntimeWarning, "missing STAGE2_BS_SHA256"):
-                loaded_results_path, loaded_results = module.load_stage2_artifact_results(
-                    stage2_bs_path
-                )
-
-        self.assertEqual(loaded_results_path, stage2_results_path)
-        self.assertEqual(loaded_results, {})
+            with self.assertRaisesRegex(ValueError, "missing STAGE2_BS_SHA256"):
+                module.load_stage2_artifact_results(stage2_bs_path)
 
     def test_load_stage2_artifact_results_rejects_checksum_mismatch(self):
         module = load_workflow_common_module()
@@ -1365,7 +1378,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
             "PLASMA_CURRENT_INPUT_SOURCE": "physical_A",
             "BOOZER_I": 0.0,
             "EFFECTIVE_CURRENT_MODE": "vacuum",
-            "STAGE2_TF_CURRENT_A": 8.0e4,
+            "STAGE2_TF_CURRENT_A": -8.0e4,
             "STAGE2_TF_CURRENT_SUM_ABS_A": 1.6e6,
             "FINITE_CURRENT_MODE": EXPECTED_FINITE_CURRENT_MODE,
             "BOOZER_CURRENT_CONVENTION": "mu0",
@@ -1379,7 +1392,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
             plasma_surf_filename="demo.nc",
             equilibria_dir=None,
             stage2_output_root="/tmp/stage2",
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             major_radius=0.976,
             toroidal_flux=0.24,
             stage2_length_weight=0.0005,
@@ -1449,7 +1462,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
         validation = module.validate_smoke_results(
             results,
             requested_current_A=-35200.0,
-            expected_stage2_tf_current_A=8.0e4,
+            expected_stage2_tf_current_A=-8.0e4,
             expected_stage2_tf_current_sum_abs_A=1.6e6,
         )
 
@@ -1459,15 +1472,15 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
     def test_validate_smoke_results_uses_actual_artifact_tf_current(self):
         module = load_finite_current_smoke_module()
         results = self._make_smoke_results(
-            STAGE2_TF_CURRENT_A=1.0e5,
-            STAGE2_TF_CURRENT_SUM_ABS_A=2.0e6,
+            STAGE2_TF_CURRENT_A=-7.0e4,
+            STAGE2_TF_CURRENT_SUM_ABS_A=1.4e6,
         )
 
         validation = module.validate_smoke_results(
             results,
             requested_current_A=0.0,
-            expected_stage2_tf_current_A=1.0e5,
-            expected_stage2_tf_current_sum_abs_A=2.0e6,
+            expected_stage2_tf_current_A=-7.0e4,
+            expected_stage2_tf_current_sum_abs_A=1.4e6,
         )
 
         self.assertTrue(validation["passed"])
@@ -1479,7 +1492,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
         validation = module.validate_smoke_results(
             results,
             requested_current_A=0.0,
-            expected_stage2_tf_current_A=8.0e4,
+            expected_stage2_tf_current_A=-8.0e4,
             expected_stage2_tf_current_sum_abs_A=1.6e6,
         )
 
@@ -1500,7 +1513,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
     def test_legacy_smoke_artifact_upgrades_total_tf_current_when_num_coils_present(self):
         module = load_finite_current_smoke_module()
         legacy_results = {
-            "TF_CURRENT_A": 8.0e4,
+            "TF_CURRENT_A": -8.0e4,
             "NUM_TF_COILS": 20,
         }
 
@@ -1516,10 +1529,10 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
 
         upgraded_results = module.upgrade_legacy_stage2_artifact_results(
             legacy_results,
-            known_tf_current_A=8.0e4,
+            known_tf_current_A=-8.0e4,
         )
 
-        self.assertEqual(upgraded_results["TF_CURRENT_A"], 8.0e4)
+        self.assertEqual(upgraded_results["TF_CURRENT_A"], -8.0e4)
         self.assertEqual(upgraded_results["TF_CURRENT_SUM_ABS_A"], 1.6e6)
         self.assertEqual(upgraded_results["FINITE_CURRENT_MODE"], EXPECTED_FINITE_CURRENT_MODE)
         self.assertEqual(upgraded_results["BOOZER_CURRENT_CONVENTION"], "mu0")
@@ -1556,7 +1569,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
     def test_legacy_smoke_artifact_still_fails_when_total_tf_current_is_ambiguous(self):
         module = load_finite_current_smoke_module()
         legacy_results = {
-            "TF_CURRENT_A": 8.0e4,
+            "TF_CURRENT_A": -8.0e4,
         }
 
         upgraded_results = module.upgrade_legacy_stage2_artifact_results(legacy_results)
@@ -2106,7 +2119,12 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             stage2_bs_path = tmpdir_path / "biot_savart_opt.json"
             stage2_bs_path.write_text("{}", encoding="utf-8")
             (tmpdir_path / "results.json").write_text(
-                json.dumps({"PLASMA_SURF_FILENAME": "other_surface.nc"}),
+                json.dumps(
+                    stage2_results_with_digest(
+                        stage2_bs_path,
+                        {"PLASMA_SURF_FILENAME": "other_surface.nc"},
+                    )
+                ),
                 encoding="utf-8",
             )
             args = self._make_args()
@@ -2125,10 +2143,13 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             stage2_bs_path.write_text("{}", encoding="utf-8")
             (tmpdir_path / "results.json").write_text(
                 json.dumps(
-                    {
+                    stage2_results_with_digest(
+                        stage2_bs_path,
+                        {
                         "PLASMA_SURF_FILENAME": "demo.nc",
                         "init_only": True,
-                    }
+                        },
+                    )
                 ),
                 encoding="utf-8",
             )
@@ -2149,10 +2170,13 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             stage2_bs_path.write_text("{}", encoding="utf-8")
             results_path.write_text(
                 json.dumps(
-                    {
+                    stage2_results_with_digest(
+                        stage2_bs_path,
+                        {
                         "PLASMA_SURF_FILENAME": "demo.nc",
                         "init_only": True,
-                    }
+                        },
+                    )
                 ),
                 encoding="utf-8",
             )
@@ -2368,7 +2392,12 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             stage2_results_path = tmpdir_path / "results.json"
             stage2_bs_path.write_text("{}", encoding="utf-8")
             stage2_results_path.write_text(
-                json.dumps({"PLASMA_SURF_FILENAME": "demo.nc"}),
+                json.dumps(
+                    stage2_results_with_digest(
+                        stage2_bs_path,
+                        {"PLASMA_SURF_FILENAME": "demo.nc"},
+                    )
+                ),
                 encoding="utf-8",
             )
             args = self._make_args()
@@ -2790,6 +2819,10 @@ class FrontierCampaignScriptTests(unittest.TestCase):
         stage2_results = {
             "PLASMA_SURF_FILENAME": "demo.nc",
             "init_only": False,
+            "TF_CURRENT_A": -8.0e4,
+            "NUM_TF_COILS": 20,
+            "TF_CURRENT_SUM_ABS_A": 1.6e6,
+            "SURFACE_VESSEL_MIN_DIST": 0.04,
         }
         if overrides is not None:
             stage2_results.update(overrides)
@@ -2797,10 +2830,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
         stage2_results_path = tmpdir_path / "stage2" / "results.json"
         stage2_bs_path.parent.mkdir(parents=True, exist_ok=True)
         stage2_bs_path.write_text("{}", encoding="utf-8")
-        stage2_results_path.write_text(
-            json.dumps(stage2_results),
-            encoding="utf-8",
-        )
+        payload = stage2_results_with_digest(stage2_bs_path, stage2_results)
+        stage2_results_path.write_text(json.dumps(payload), encoding="utf-8")
         return stage2_bs_path, stage2_results_path, stage2_results
 
     def test_frontier_campaign_dry_run_writes_manifest_and_summary(self):
@@ -3922,11 +3953,21 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             original_stage2_bs_path.write_text("{}", encoding="utf-8")
             new_stage2_bs_path.write_text("{}", encoding="utf-8")
             original_stage2_results_path.write_text(
-                json.dumps({"PLASMA_SURF_FILENAME": "demo.nc", "init_only": False}),
+                json.dumps(
+                    stage2_results_with_digest(
+                        original_stage2_bs_path,
+                        {"PLASMA_SURF_FILENAME": "demo.nc", "init_only": False},
+                    )
+                ),
                 encoding="utf-8",
             )
             new_stage2_results_path.write_text(
-                json.dumps({"PLASMA_SURF_FILENAME": "demo.nc", "init_only": False}),
+                json.dumps(
+                    stage2_results_with_digest(
+                        new_stage2_bs_path,
+                        {"PLASMA_SURF_FILENAME": "demo.nc", "init_only": False},
+                    )
+                ),
                 encoding="utf-8",
             )
 

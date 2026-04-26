@@ -48,10 +48,10 @@ def fixed_stage2_artifact_hardware_contract() -> dict[str, float]:
 
 def validate_tf_current_limit(tf_current_A: float) -> float:
     current = float(tf_current_A)
-    if not (0.0 < abs(current) <= TF_CURRENT_HARD_LIMIT_A):
+    if not (-TF_CURRENT_HARD_LIMIT_A <= current < 0.0):
         raise ValueError(
-            "TF coil current magnitude must be in the interval "
-            f"(0, {TF_CURRENT_HARD_LIMIT_A:.0f}] A."
+            "TF coil current must be negative for the CW toroidal-field "
+            f"convention and no smaller than {-TF_CURRENT_HARD_LIMIT_A:.0f} A."
         )
     return current
 

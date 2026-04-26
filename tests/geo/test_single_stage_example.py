@@ -1477,7 +1477,7 @@ class SingleStageExampleTests(unittest.TestCase):
             parent.mkdir(parents=True)
             matched = (
                 parent
-                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty-BH=3"
+                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=-80000-Order=2-CM=penalty-BH=3"
                 / "biot_savart_opt.json"
             )
             matched.parent.mkdir(parents=True)
@@ -1494,7 +1494,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 stage2_seed_curvature_weight=0.0001,
                 stage2_seed_curvature_threshold=40.0,
                 stage2_seed_banana_surf_radius=0.22,
-                stage2_seed_tf_current_A=8.0e4,
+                stage2_seed_tf_current_A=-8.0e4,
                 stage2_seed_order=2,
                 stage2_seed_banana_init_current_A=1.0e4,
                 stage2_source="local",
@@ -1516,7 +1516,7 @@ class SingleStageExampleTests(unittest.TestCase):
                     parent
                     / (
                         "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-"
-                        f"SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2{suffix}"
+                        f"SR=0.220-INITC=10000-MAXC=16000-TFC=-80000-Order=2{suffix}"
                     )
                     / "biot_savart_opt.json"
                 )
@@ -1534,7 +1534,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 stage2_seed_curvature_weight=0.0001,
                 stage2_seed_curvature_threshold=40.0,
                 stage2_seed_banana_surf_radius=0.22,
-                stage2_seed_tf_current_A=8.0e4,
+                stage2_seed_tf_current_A=-8.0e4,
                 stage2_seed_order=2,
                 stage2_seed_banana_init_current_A=1.0e4,
                 stage2_source="local",
@@ -3873,7 +3873,7 @@ class HardwareConstraintTests(unittest.TestCase):
             "artifact_hardware_status": {"success": True, "violations": []},
             "max_curvature": 19.8,
             "length_target": 1.7,
-            "tf_current_A": 8.0e4,
+            "tf_current_A": -8.0e4,
             "tf_current_limit_A": 8.0e4,
             "banana_current_A": 1.4e4,
             "banana_current_max_A": 1.6e4,
@@ -4096,7 +4096,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 },
                 "max_curvature": 19.8,
                 "length_target": 1.7,
-                "tf_current_A": 8.0e4,
+                "tf_current_A": -8.0e4,
                 "tf_current_limit_A": 8.0e4,
                 "banana_current_A": 1.4e4,
                 "banana_current_max_A": 1.6e4,
@@ -4132,7 +4132,7 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["MAX_CURVATURE"], 19.8)
         self.assertEqual(payload["COIL_LENGTH"], 2.91)
         self.assertEqual(payload["LENGTH_TARGET"], 1.7)
-        self.assertEqual(payload["TF_CURRENT_A"], 8.0e4)
+        self.assertEqual(payload["TF_CURRENT_A"], -8.0e4)
         self.assertEqual(payload["TF_CURRENT_LIMIT_A"], 8.0e4)
         self.assertEqual(payload["BANANA_CURRENT_A"], 1.4e4)
         self.assertEqual(payload["BANANA_CURRENT_MAX_A"], 1.6e4)
@@ -4600,7 +4600,7 @@ class HardwareConstraintTests(unittest.TestCase):
             "max_curvature": 19.8,
             "coil_length": 2.1,
             "length_target": 1.9,
-            "tf_current_A": 8.0e4,
+            "tf_current_A": -8.0e4,
             "tf_current_limit_A": 8.0e4,
             "banana_current_A": 1.4e4,
             "banana_current_max_A": 1.6e4,
@@ -4634,7 +4634,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 ss_dist=0.04,
                 curvature_threshold=100.0,
                 length_target=1.7,
-                tf_current_A=8.0e4,
+                tf_current_A=-8.0e4,
                 banana_coils=[SimpleNamespace(current=SimpleNamespace(get_value=lambda: 1.4e4))],
                 banana_current_max_A=1.6e4,
                 outer_surface=object(),
@@ -4654,7 +4654,7 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(summary["BEST_FEASIBLE_MAX_CURVATURE"], 19.8)
         self.assertEqual(summary["BEST_FEASIBLE_COIL_LENGTH"], 2.1)
         self.assertEqual(summary["BEST_FEASIBLE_LENGTH_TARGET"], 1.9)
-        self.assertEqual(summary["BEST_FEASIBLE_TF_CURRENT_A"], 8.0e4)
+        self.assertEqual(summary["BEST_FEASIBLE_TF_CURRENT_A"], -8.0e4)
         self.assertEqual(summary["BEST_FEASIBLE_TF_CURRENT_LIMIT_A"], 8.0e4)
         self.assertEqual(summary["BEST_FEASIBLE_BANANA_CURRENT_A"], 1.4e4)
         self.assertEqual(summary["BEST_FEASIBLE_BANANA_CURRENT_MAX_A"], 1.6e4)
@@ -4716,7 +4716,7 @@ class HardwareConstraintTests(unittest.TestCase):
             "max_curvature": 19.8,
             "coil_length": 2.1,
             "length_target": 1.9,
-            "tf_current_A": 8.0e4,
+            "tf_current_A": -8.0e4,
             "tf_current_limit_A": 8.0e4,
             "banana_current_A": 1.4e4,
             "banana_current_max_A": 1.6e4,
@@ -4753,7 +4753,7 @@ class HardwareConstraintTests(unittest.TestCase):
                 ss_dist=0.04,
                 curvature_threshold=100.0,
                 length_target=1.7,
-                tf_current_A=8.0e4,
+                tf_current_A=-8.0e4,
                 banana_coils=[SimpleNamespace(current=SimpleNamespace(get_value=lambda: 1.4e4))],
                 banana_current_max_A=1.6e4,
                 outer_surface=object(),
@@ -8694,11 +8694,12 @@ class CurrentBaselineContractTests(unittest.TestCase):
         stage2_results = {
             "banana_surf_radius": 0.22,
             "CURVATURE_THRESHOLD": module.MAX_CURVATURE_INV_M,
+            "SURFACE_VESSEL_MIN_DIST": module.PLASMA_VESSEL_MIN_DIST_M,
         }
         stage2_results.update(overrides)
         return module.upgrade_legacy_stage2_artifact_results(
             stage2_results,
-            known_tf_current_A=8.0e4,
+            known_tf_current_A=-8.0e4,
         )
 
     def test_stage2_seed_dir_formats_include_tf_current_segment(self):
@@ -8713,14 +8714,14 @@ class CurrentBaselineContractTests(unittest.TestCase):
             curvature_weight=0.0001,
             curvature_threshold=40.0,
             banana_surf_radius=0.22,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             order=2,
         )
         local_dir = module.format_local_stage2_seed_dir(seed_spec)
         database_dir = module.format_database_stage2_seed_dir(seed_spec)
 
-        self.assertIn("TFC=80000", local_dir)
-        self.assertIn("TFC=80000", database_dir)
+        self.assertIn("TFC=-80000", local_dir)
+        self.assertIn("TFC=-80000", database_dir)
         self.assertIn("INITC=10000", local_dir)
         self.assertIn("INITC=10000", database_dir)
 
@@ -8728,24 +8729,24 @@ class CurrentBaselineContractTests(unittest.TestCase):
         module = load_single_stage_example_module()
 
         tf_coils = [
-            SimpleNamespace(current=SimpleNamespace(get_value=lambda: 1.0e5)),
-            SimpleNamespace(current=SimpleNamespace(get_value=lambda: 1.0e5)),
+            SimpleNamespace(current=SimpleNamespace(get_value=lambda: -7.0e4)),
+            SimpleNamespace(current=SimpleNamespace(get_value=lambda: -7.0e4)),
         ]
 
         with self.assertRaisesRegex(ValueError, "does not match the artifact metadata TF_CURRENT_A"):
-            module.resolve_stage2_tf_current_A({"TF_CURRENT_A": 8.0e4}, tf_coils)
+            module.resolve_stage2_tf_current_A({"TF_CURRENT_A": -8.0e4}, tf_coils)
 
     def test_resolve_stage2_tf_current_accepts_matching_loaded_seed_value(self):
         module = load_single_stage_example_module()
 
         tf_coils = [
-            SimpleNamespace(current=SimpleNamespace(get_value=lambda: 8.0e4)),
-            SimpleNamespace(current=SimpleNamespace(get_value=lambda: 8.0e4)),
+            SimpleNamespace(current=SimpleNamespace(get_value=lambda: -8.0e4)),
+            SimpleNamespace(current=SimpleNamespace(get_value=lambda: -8.0e4)),
         ]
 
         self.assertEqual(
-            module.resolve_stage2_tf_current_A({"TF_CURRENT_A": 8.0e4}, tf_coils),
-            8.0e4,
+            module.resolve_stage2_tf_current_A({"TF_CURRENT_A": -8.0e4}, tf_coils),
+            -8.0e4,
         )
 
     def test_infer_uniform_tf_current_returns_none_when_coils_are_missing(self):
@@ -8796,21 +8797,13 @@ class CurrentBaselineContractTests(unittest.TestCase):
         ):
             module.validate_stage2_seed_contract(stage2_results)
 
-    def test_validate_stage2_seed_contract_warns_on_missing_surface_vessel_clearance(self):
-        import warnings
-
+    def test_validate_stage2_seed_contract_rejects_missing_surface_vessel_clearance(self):
         module = load_single_stage_example_module()
         stage2_results = self._upgrade_stage2_seed_results(module)
         stage2_results.pop("SURFACE_VESSEL_MIN_DIST", None)
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
+        with self.assertRaisesRegex(ValueError, "missing SURFACE_VESSEL_MIN_DIST"):
             module.validate_stage2_seed_contract(stage2_results)
-
-        clearance_warnings = [
-            w for w in caught if "plasma-vessel clearance gate" in str(w.message)
-        ]
-        self.assertEqual(len(clearance_warnings), 1)
 
     def test_validate_stage2_seed_contract_accepts_clearance_override_via_env(self):
         module = load_single_stage_example_module()
@@ -8888,7 +8881,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             outputs_dir = Path(tmpdir) / "outputs-demo.nc"
             current_dir = (
                 outputs_dir
-                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty"
+                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=-80000-Order=2-CM=penalty"
             )
             current_dir.mkdir(parents=True)
             expected_path = current_dir / "biot_savart_opt.json"
@@ -8908,7 +8901,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 stage2_seed_curvature_weight=0.0001,
                 stage2_seed_curvature_threshold=40.0,
                 stage2_seed_banana_surf_radius=0.22,
-                stage2_seed_tf_current_A=8.0e4,
+                stage2_seed_tf_current_A=-8.0e4,
                 stage2_seed_order=2,
                 stage2_seed_banana_init_current_A=1.0e4,
             )
@@ -8942,7 +8935,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 stage2_seed_curvature_weight=0.0001,
                 stage2_seed_curvature_threshold=40.0,
                 stage2_seed_banana_surf_radius=0.22,
-                stage2_seed_tf_current_A=8.0e4,
+                stage2_seed_tf_current_A=-8.0e4,
                 stage2_seed_order=2,
                 stage2_seed_banana_init_current_A=1.0e4,
             )
@@ -8956,7 +8949,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             outputs_dir = Path(tmpdir) / "outputs-demo.nc"
             legacy_dir = (
                 outputs_dir
-                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-CM=penalty"
+                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.220-INITC=10000-MAXC=16000-TFC=-80000-Order=2-CM=penalty"
             )
             legacy_dir.mkdir(parents=True)
             expected_path = legacy_dir / "biot_savart_opt.json"
@@ -8976,7 +8969,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 stage2_seed_curvature_weight=0.0001,
                 stage2_seed_curvature_threshold=100.0,
                 stage2_seed_banana_surf_radius=module.BANANA_WINDING_MINOR_RADIUS_M,
-                stage2_seed_tf_current_A=8.0e4,
+                stage2_seed_tf_current_A=-8.0e4,
                 stage2_seed_order=2,
                 stage2_seed_banana_init_current_A=1.0e4,
             )
@@ -8988,7 +8981,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             outputs_dir = Path(tmpdir) / "outputs-demo.nc"
-            legacy_dir = outputs_dir / "MR=0.976-TF=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.22-INITC=10000-TFC=80000-Order=2"
+            legacy_dir = outputs_dir / "MR=0.976-TF=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.22-INITC=10000-TFC=-80000-Order=2"
             legacy_dir.mkdir(parents=True)
             expected_path = legacy_dir / "biot_savart_opt.json"
             expected_path.write_text("{}", encoding="utf-8")
@@ -9007,7 +9000,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 stage2_seed_curvature_weight=0.0001,
                 stage2_seed_curvature_threshold=100.0,
                 stage2_seed_banana_surf_radius=module.BANANA_WINDING_MINOR_RADIUS_M,
-                stage2_seed_tf_current_A=8.0e4,
+                stage2_seed_tf_current_A=-8.0e4,
                 stage2_seed_order=2,
                 stage2_seed_banana_init_current_A=1.0e4,
             )
@@ -9021,7 +9014,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             outputs_dir = Path(tmpdir) / "outputs-demo.nc"
             wataru_dir = (
                 outputs_dir
-                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=80000-Order=2-FCM=wataru_proxy_field-PPC=9000-VFC=500-VFT=wataru_vf_template-CM=penalty"
+                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=-80000-Order=2-FCM=wataru_proxy_field-PPC=9000-VFC=500-VFT=wataru_vf_template-CM=penalty"
             )
             wataru_dir.mkdir(parents=True)
             expected_path = wataru_dir / "biot_savart_opt.json"
@@ -9041,7 +9034,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 stage2_seed_curvature_weight=0.0001,
                 stage2_seed_curvature_threshold=40.0,
                 stage2_seed_banana_surf_radius=0.22,
-                stage2_seed_tf_current_A=8.0e4,
+                stage2_seed_tf_current_A=-8.0e4,
                 stage2_seed_order=2,
                 stage2_seed_banana_init_current_A=1.0e4,
             )
@@ -9639,10 +9632,10 @@ class CurrentBaselineContractTests(unittest.TestCase):
     def test_stage2_parse_args_accepts_tf_current_A(self):
         module = load_stage2_module()
 
-        with patch.object(sys, "argv", ["banana_coil_solver.py", "--tf-current-A", "80000"]):
+        with patch.object(sys, "argv", ["banana_coil_solver.py", "--tf-current-A", "-80000"]):
             args = module.parse_args()
 
-        self.assertEqual(args.tf_current_A, 80000.0)
+        self.assertEqual(args.tf_current_A, -80000.0)
 
     def test_stage2_parse_args_uses_measured_lbfgsb_maxcor_default(self):
         module = load_stage2_module()
@@ -9823,7 +9816,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             stage2_seed_cc_threshold=0.06,
             stage2_seed_curvature_threshold=80.0,
             stage2_seed_banana_surf_radius=None,
-            stage2_seed_tf_current_A=75000.0,
+            stage2_seed_tf_current_A=-75000.0,
             stage2_seed_order=None,
             stage2_seed_banana_init_current_A=None,
             accept_offspec_r0_seed=False,
@@ -9833,7 +9826,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertEqual(args.stage2_seed_cc_threshold, 0.06)
         self.assertEqual(args.stage2_seed_curvature_threshold, 80.0)
-        self.assertEqual(args.stage2_seed_tf_current_A, 75000.0)
+        self.assertEqual(args.stage2_seed_tf_current_A, -75000.0)
 
     def test_apply_default_stage2_seed_args_rejects_offspec_major_radius(self):
         module = load_single_stage_example_module()
@@ -9881,7 +9874,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
         args = SimpleNamespace(
             banana_init_current_A=18000.0,
             banana_current_max_A=20000.0,
-            tf_current_A=80000.0,
+            tf_current_A=-80000.0,
             allow_offspec_engineering_constraints=True,
         )
 
@@ -9930,7 +9923,7 @@ class Stage2ArtifactWriterTests(unittest.TestCase):
     def _fake_constraint_metadata(self):
         return {
             "CONSTRAINT_PROFILE": "unit-test",
-            "EFFECTIVE_VALUES": {"TF_CURRENT_A": 80000.0},
+            "EFFECTIVE_VALUES": {"TF_CURRENT_A": -80000.0},
             "OVERRIDE_REASON": None,
             "CONTRACT_HASH": "deadbeef",
             "CONTRACT_SCHEMA_VERSION": 1,
@@ -10059,7 +10052,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
     }
 
     @staticmethod
-    def _make_fake_tf_coils(curve_cls, current_cls, *, count=20, current_A=8.0e4):
+    def _make_fake_tf_coils(curve_cls, current_cls, *, count=20, current_A=-8.0e4):
         return [
             SimpleNamespace(curve=curve_cls(), current=current_cls(current_A))
             for _ in range(count)
@@ -10076,7 +10069,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "ntheta": 8,
             "init_only": True,
             "banana_surf_radius": 0.21,
-            "tf_current_A": 8.0e4,
+            "tf_current_A": -8.0e4,
             "banana_init_current_A": 1.0e4,
             "banana_current_max_A": 1.6e4,
             "major_radius": 0.976,
@@ -10827,7 +10820,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             arg_overrides={"finite_current_mode": "wataru_proxy_field"},
             seed_stage2_results={
                 "PLASMA_SURF_FILENAME": "demo.nc",
-                "TF_CURRENT_A": 8.0e4,
+                "TF_CURRENT_A": -8.0e4,
                 "NUM_TF_COILS": 20,
                 "NUM_BANANA_COILS": 1,
                 "NUM_PROXY_COILS": 1,
@@ -10863,7 +10856,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             arg_overrides={"finite_current_mode": "wataru_proxy_field"},
             seed_stage2_results={
                 "PLASMA_SURF_FILENAME": "demo.nc",
-                "TF_CURRENT_A": 8.0e4,
+                "TF_CURRENT_A": -8.0e4,
                 "NUM_TF_COILS": 20,
                 "NUM_BANANA_COILS": 1,
                 "NUM_PROXY_COILS": 1,
@@ -10973,7 +10966,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 "max_curvature": float(max_curvature),
                 "poloidal_extent_rad": 0.0,
                 "banana_current_A": 9500.0,
-                "tf_current_A": 8.0e4,
+                "tf_current_A": -8.0e4,
                 "hardware_status": {
                     "success": bool(success),
                     "violations": violations,

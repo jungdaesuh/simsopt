@@ -229,12 +229,16 @@ class ConstraintContractResolverTests(unittest.TestCase):
             ),
         )
 
-    def test_tf_current_limit_rejects_zero_and_over_limit_magnitude(self):
+    def test_tf_current_limit_rejects_zero_positive_and_over_limit_current(self):
         module = load_constraint_contract_module()
 
         with self.assertRaisesRegex(ValueError, "TF coil current"):
             module.resolve_constraint_contract(
                 cli_overrides={"TF_CURRENT_A": 0.0},
+            )
+        with self.assertRaisesRegex(ValueError, "TF coil current"):
+            module.resolve_constraint_contract(
+                cli_overrides={"TF_CURRENT_A": 1.0},
             )
         with self.assertRaisesRegex(ValueError, "TF coil current"):
             module.resolve_constraint_contract(
@@ -288,7 +292,7 @@ class ConstraintContractHashTests(unittest.TestCase):
 
     def test_hash_refuses_partial_contract(self):
         module = load_constraint_contract_module()
-        partial = {"TF_CURRENT_A": 80000.0}
+        partial = {"TF_CURRENT_A": -80000.0}
 
         with self.assertRaisesRegex(ValueError, "partial constraint contract"):
             module.compute_constraint_contract_hash(partial)
@@ -346,14 +350,14 @@ class ConstraintContractWireNamesTests(unittest.TestCase):
         module = load_constraint_contract_module()
 
         contract_lower, _ = module.resolve_constraint_contract_from_wire_names(
-            cli_overrides={"tf_current_A": 70000.0},
+            cli_overrides={"tf_current_A": -70000.0},
         )
         contract_upper, _ = module.resolve_constraint_contract_from_wire_names(
-            cli_overrides={"TF_CURRENT_A": 70000.0},
+            cli_overrides={"TF_CURRENT_A": -70000.0},
         )
 
-        self.assertEqual(contract_lower["TF_CURRENT_A"], 70000.0)
-        self.assertEqual(contract_upper["TF_CURRENT_A"], 70000.0)
+        self.assertEqual(contract_lower["TF_CURRENT_A"], -70000.0)
+        self.assertEqual(contract_upper["TF_CURRENT_A"], -70000.0)
 
     def test_wire_name_resolver_silently_drops_fixed_geometry_aliases(self):
         module = load_constraint_contract_module()
@@ -362,7 +366,7 @@ class ConstraintContractWireNamesTests(unittest.TestCase):
         contract, _ = module.resolve_constraint_contract_from_wire_names(
             profile={
                 "major_radius": hc.VACUUM_VESSEL_MAJOR_RADIUS_M,
-                "tf_current_A": 70000.0,
+                "tf_current_A": -70000.0,
             },
         )
 
@@ -370,7 +374,7 @@ class ConstraintContractWireNamesTests(unittest.TestCase):
             contract["VACUUM_VESSEL_MAJOR_RADIUS_M"],
             hc.VACUUM_VESSEL_MAJOR_RADIUS_M,
         )
-        self.assertEqual(contract["TF_CURRENT_A"], 70000.0)
+        self.assertEqual(contract["TF_CURRENT_A"], -70000.0)
 
     def test_wire_name_resolver_rejects_canonical_fixed_geometry_override_keys(self):
         module = load_constraint_contract_module()
@@ -407,12 +411,10 @@ class ArtifactContractsSchemaVersionTests(unittest.TestCase):
                 owner_label="unit-test",
             )
 
-    def test_legacy_schema_version_warns_but_accepts(self):
-        import warnings
+    def test_legacy_schema_version_rejected(self):
         module = load_artifact_contracts_module()
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
+        with self.assertRaisesRegex(ValueError, "legacy constraint contract schema"):
             module.validate_constraint_contract_schema_version(
                 Path("/tmp/fake_results.json"),
                 {
@@ -423,29 +425,15 @@ class ArtifactContractsSchemaVersionTests(unittest.TestCase):
                 owner_label="unit-test",
             )
 
-        warnings_matched = [
-            w for w in caught
-            if issubclass(w.category, RuntimeWarning)
-            and "legacy constraint contract schema" in str(w.message)
-        ]
-        self.assertEqual(len(warnings_matched), 1)
-
-    def test_missing_schema_version_treated_as_legacy(self):
-        import warnings
+    def test_missing_schema_version_rejected(self):
         module = load_artifact_contracts_module()
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
+        with self.assertRaisesRegex(ValueError, "legacy constraint contract schema"):
             module.validate_constraint_contract_schema_version(
                 Path("/tmp/fake_results.json"),
                 {},
                 owner_label="unit-test",
             )
-
-        warnings_matched = [
-            w for w in caught if issubclass(w.category, RuntimeWarning)
-        ]
-        self.assertEqual(len(warnings_matched), 1)
 
     def test_future_schema_version_rejected(self):
         module = load_artifact_contracts_module()
@@ -493,7 +481,7 @@ class ArtifactContractsLegacyUpgradeTests(unittest.TestCase):
             "CONTRACT_SCHEMA_VERSION": 1,
             "CONTRACT_HASH": "abc123",
             "CONSTRAINT_PROFILE": "standard_80ka",
-            "EFFECTIVE_VALUES": {"TF_CURRENT_A": 80000.0},
+            "EFFECTIVE_VALUES": {"TF_CURRENT_A": -80000.0},
             "OVERRIDE_REASON": None,
         })
 
@@ -502,7 +490,7 @@ class ArtifactContractsLegacyUpgradeTests(unittest.TestCase):
         self.assertEqual(upgraded["CONSTRAINT_PROFILE"], "standard_80ka")
         self.assertEqual(
             upgraded["EFFECTIVE_VALUES"],
-            {"TF_CURRENT_A": 80000.0},
+            {"TF_CURRENT_A": -80000.0},
         )
         self.assertIsNone(upgraded["OVERRIDE_REASON"])
 

@@ -33,7 +33,7 @@ def _build_stage2_seed_fixture(
     banana_currents_a: tuple[float, float] | None = None,
 ):
     handoff_module = load_handoff_module()
-    tf_coil = Coil(CurveXYZFourier(10, 1), Current(8.0e4))
+    tf_coil = Coil(CurveXYZFourier(10, 1), Current(-8.0e4))
     if banana_currents_a is None:
         assert shared_current_A is not None
         shared_current = Current(shared_current_A)

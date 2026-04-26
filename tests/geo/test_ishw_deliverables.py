@@ -1,6 +1,7 @@
 import importlib
 import importlib.util
 import json
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -66,6 +67,16 @@ def load_workflow_common_module():
 
 def load_stage2_module():
     return load_module(STAGE2_ENTRYPOINT_PATH, "banana_coil_solver")
+
+
+def write_stage2_results_with_digest(stage2_bs_path: Path, stage2_results: dict) -> Path:
+    results_path = stage2_bs_path.with_name("results.json")
+    payload = dict(stage2_results)
+    payload["STAGE2_BS_SHA256"] = hashlib.sha256(
+        stage2_bs_path.read_bytes()
+    ).hexdigest()
+    results_path.write_text(json.dumps(payload), encoding="utf-8")
+    return results_path
 
 
 class IotaTargetSweepTests(unittest.TestCase):
@@ -510,13 +521,14 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
             tf_curve.set_dofs(
                 [0.9 + 0.01 * coil_index, 0.18, 0.0, 0.0, 0.18, 0.0, 0.0, 0.0, 0.0]
             )
-            tf_coils.append(Coil(tf_curve, Current(8.0e4)))
+            tf_coils.append(Coil(tf_curve, Current(-8.0e4)))
         bs = BiotSavart([*tf_coils, *banana_coils])
         stage2_results = {
             "NUM_TF_COILS": num_tf_coils,
             "NUM_BANANA_COILS": 10,
             "NUM_PROXY_COILS": 0,
             "NUM_VF_COILS": 0,
+            "SURFACE_VESSEL_MIN_DIST": 0.04,
         }
         return bs, stage2_results, handoff, load_optimizable
 
@@ -651,7 +663,7 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
             return_value=SimpleNamespace(
                 tf_coils=[
                     SimpleNamespace(
-                        current=SimpleNamespace(get_value=lambda: 8.0e4)
+                        current=SimpleNamespace(get_value=lambda: -8.0e4)
                     )
                 ],
                 banana_coils=[object()],
@@ -682,6 +694,42 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
         )
         self.assertEqual(variant_results["BANANA_CURRENT_A"], 5500.0)
         self.assertEqual(variant_results["STAGE2_BS_PATH"], str(seed_bs_path))
+        self.assertEqual(variant_results["TF_CURRENT_A"], -8.0e4)
+
+    def test_materialize_stage2_seed_variant_rejects_nonuniform_signed_tf_current(self):
+        module = load_banana_scan_module()
+
+        class _FakeBS:
+            coils = [object()]
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            module,
+            "load",
+            return_value=_FakeBS(),
+        ), patch.object(
+            module,
+            "partition_loaded_stage2_coils",
+            return_value=SimpleNamespace(
+                tf_coils=[
+                    SimpleNamespace(current=SimpleNamespace(get_value=lambda: -8.0e4)),
+                    SimpleNamespace(current=SimpleNamespace(get_value=lambda: 8.0e4)),
+                ],
+                banana_coils=[object()],
+            ),
+        ):
+            tmpdir_path = Path(tmpdir)
+            seed_bs_path = tmpdir_path / "seed" / "biot_savart_opt.json"
+            seed_bs_path.parent.mkdir(parents=True, exist_ok=True)
+            seed_bs_path.write_text('{"seed": true}', encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "signed current"):
+                module._materialize_stage2_seed_variant(
+                    stage2_bs_path=seed_bs_path,
+                    stage2_results={},
+                    variant_root=tmpdir_path / "variant",
+                    banana_current_a=5500.0,
+                    requested_num_tf_coils=20,
+                )
 
     def test_materialize_stage2_seed_variant_from_currents_round_trips_vector(self):
         module = load_banana_scan_module()
@@ -762,7 +810,7 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
             variant_results["BANANA_CURRENT_A"],
             max(abs(value) for value in target_banana_currents),
         )
-        self.assertEqual(variant_results["TF_CURRENT_A"], 8.0e4)
+        self.assertEqual(variant_results["TF_CURRENT_A"], -8.0e4)
         self.assertEqual(variant_results["TF_CURRENT_SUM_ABS_A"], 1.6e6)
         self.assertEqual(
             variant_results["DONOR_BANANA_CURRENTS_A"],
@@ -814,10 +862,9 @@ class PerturbedBananaSeedTests(unittest.TestCase):
             seed_bs_path = tmpdir_path / "seed" / "biot_savart_opt.json"
             seed_bs_path.parent.mkdir(parents=True, exist_ok=True)
             bs.save(str(seed_bs_path))
-            seed_results_path = seed_bs_path.with_name("results.json")
-            seed_results_path.write_text(
-                json.dumps(stage2_results),
-                encoding="utf-8",
+            seed_results_path = write_stage2_results_with_digest(
+                seed_bs_path,
+                stage2_results,
             )
             output_root = tmpdir_path / "variant"
             target_banana_currents = [
@@ -888,7 +935,7 @@ class PerturbedBananaSeedTests(unittest.TestCase):
             [11000.0 if index % 2 == 0 else -11000.0 for index in range(10)],
         )
         self.assertEqual(variant_results["DONOR_BANANA_CURRENT_A"], 11000.0)
-        self.assertEqual(variant_results["TF_CURRENT_A"], 8.0e4)
+        self.assertEqual(variant_results["TF_CURRENT_A"], -8.0e4)
         self.assertEqual(variant_results["TF_CURRENT_SUM_ABS_A"], 1.6e6)
         self.assertEqual(
             variant_results["BANANA_CURRENT_A"],
@@ -909,10 +956,7 @@ class PerturbedBananaSeedTests(unittest.TestCase):
             seed_bs_path = tmpdir_path / "seed" / "biot_savart_opt.json"
             seed_bs_path.parent.mkdir(parents=True, exist_ok=True)
             bs.save(str(seed_bs_path))
-            seed_bs_path.with_name("results.json").write_text(
-                json.dumps(stage2_results),
-                encoding="utf-8",
-            )
+            write_stage2_results_with_digest(seed_bs_path, stage2_results)
             output_root = tmpdir_path / "variant"
 
             result = module.main(
@@ -974,10 +1018,7 @@ class PerturbedBananaSeedTests(unittest.TestCase):
             seed_bs_path = tmpdir_path / "seed" / "biot_savart_opt.json"
             seed_bs_path.parent.mkdir(parents=True, exist_ok=True)
             bs.save(str(seed_bs_path))
-            seed_bs_path.with_name("results.json").write_text(
-                json.dumps(stage2_results),
-                encoding="utf-8",
-            )
+            write_stage2_results_with_digest(seed_bs_path, stage2_results)
 
             with self.assertRaisesRegex(
                 ValueError,
@@ -1009,10 +1050,7 @@ class PerturbedBananaSeedTests(unittest.TestCase):
             seed_bs_path = tmpdir_path / "seed" / "biot_savart_opt.json"
             seed_bs_path.parent.mkdir(parents=True, exist_ok=True)
             bs.save(str(seed_bs_path))
-            seed_bs_path.with_name("results.json").write_text(
-                json.dumps(stage2_results),
-                encoding="utf-8",
-            )
+            write_stage2_results_with_digest(seed_bs_path, stage2_results)
             output_root = tmpdir_path / "variant"
 
             result = module.main(
@@ -1156,7 +1194,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
             plasma_surf_filename="demo.nc",
             output_root=Path("/tmp/stage2"),
             equilibria_dir=None,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
@@ -1223,7 +1261,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 plasma_surf_filename="demo.nc",
                 output_root=Path("/tmp/stage2"),
                 equilibria_dir=None,
-                tf_current_A=8.0e4,
+                tf_current_A=-8.0e4,
                 major_radius=0.976,
                 toroidal_flux=0.24,
                 length_weight=0.0005,
@@ -1254,7 +1292,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 plasma_surf_filename="demo.nc",
                 output_root=Path("/tmp/stage2"),
                 equilibria_dir=None,
-                tf_current_A=8.0e4,
+                tf_current_A=-8.0e4,
                 major_radius=0.976,
                 toroidal_flux=0.24,
                 length_weight=0.0005,
@@ -1281,7 +1319,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
             plasma_surf_filename="demo.nc",
             output_root=Path("/tmp/stage2"),
             equilibria_dir=None,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             major_radius=0.976,
             toroidal_flux=0.24,
             length_weight=0.0005,
@@ -1569,7 +1607,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
                     "curve_surface_min_dist": 0.05,
                     "hardware_status": {"success": True, "violations": []},
                 },
-                tf_current_A=80000.0,
+                tf_current_A=-80000.0,
                 new_banana_curve=SimpleNamespace(),
                 new_surf=SimpleNamespace(volume=lambda: 0.11),
                 termination_message="solver_done",

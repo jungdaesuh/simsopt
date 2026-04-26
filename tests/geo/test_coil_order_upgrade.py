@@ -112,7 +112,7 @@ def _build_cws_seed(seed_dir: Path):
                 radius=0.12,
                 normal="z",
             ),
-            Current(8.0e4),
+            Current(-8.0e4),
         )
         for index in range(2)
     ]

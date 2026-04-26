@@ -308,16 +308,16 @@ def _repaired_stage2_results_with_loaded_tf_metadata(
         return repaired_results
     tf_current_sum_abs_A = float(sum(abs(current_A) for current_A in tf_currents_a))
     if repaired_results.get("TF_CURRENT_A") is None:
-        tf_current_abs_A = abs(tf_currents_a[0])
+        tf_current_A = tf_currents_a[0]
         if not all(
-            np.isclose(abs(current_A), tf_current_abs_A, rtol=0.0, atol=1.0e-9)
+            np.isclose(current_A, tf_current_A, rtol=0.0, atol=1.0e-9)
             for current_A in tf_currents_a[1:]
         ):
             raise ValueError(
                 "Cannot infer scalar TF_CURRENT_A from the loaded donor because "
-                "the TF coil currents do not share one magnitude."
+                "the TF coil currents do not share one signed current."
             )
-        repaired_results["TF_CURRENT_A"] = float(tf_current_abs_A)
+        repaired_results["TF_CURRENT_A"] = float(tf_current_A)
     if repaired_results.get("TF_CURRENT_SUM_ABS_A") is None:
         repaired_results["TF_CURRENT_SUM_ABS_A"] = tf_current_sum_abs_A
     return repaired_results

@@ -58,7 +58,7 @@ class Stage2SeedSpecVfTemplateResolutionTests(unittest.TestCase):
             curvature_weight=1.0,
             curvature_threshold=100.0,
             banana_surf_radius=0.21,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             order=2,
         )
         kwargs.update(overrides)
@@ -95,7 +95,7 @@ class FormatStage2FiniteCurrentSuffixTests(unittest.TestCase):
             curvature_weight=1.0,
             curvature_threshold=100.0,
             banana_surf_radius=0.21,
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             order=2,
             proxy_plasma_current_A=proxy_plasma_current_A,
             vf_current_A=vf_current_A,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -8,7 +7,6 @@ from typing import Mapping
 import numpy as np
 
 from simsopt._core.optimizable import load
-from simsopt.field import BiotSavart
 from simsopt.geo import BoozerSurface, SurfaceXYZTensorFourier
 from simsopt.geo.surfaceobjectives import Volume
 
@@ -307,13 +305,10 @@ def validate_stage2_seed_contract(stage2_results):
         stage2_results.get("PLASMA_VESSEL_MIN_DIST"),
     )
     if surface_vessel_min_dist is None:
-        warnings.warn(
-            "Stage 2 seed artifact predates the plasma-vessel clearance gate "
-            "(missing SURFACE_VESSEL_MIN_DIST). Re-run stage-2 to verify the "
-            "LCFS clearance against the HBT-EP vacuum vessel.",
-            stacklevel=2,
+        raise ValueError(
+            "Stage 2 seed artifact is missing SURFACE_VESSEL_MIN_DIST; cannot "
+            "verify LCFS clearance against the HBT-EP vacuum vessel."
         )
-        return
     validate_plasma_vessel_clearance(
         surface_vessel_min_dist,
         accept_offspec=env_flag(ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV),

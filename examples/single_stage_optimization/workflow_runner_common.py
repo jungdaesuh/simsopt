@@ -6,7 +6,6 @@ import math
 import os
 import subprocess
 import sys
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence, TypeVar
@@ -432,13 +431,10 @@ def load_stage2_artifact_results(stage2_bs_path: str | Path) -> tuple[Path, dict
     stage2_results = load_json(stage2_results_path)
     recorded_digest = stage2_results.get(STAGE2_BS_SHA256_KEY)
     if recorded_digest in {None, ""}:
-        warnings.warn(
+        raise ValueError(
             "Stage 2 artifact results.json is missing STAGE2_BS_SHA256; "
-            "allowing legacy artifact without checksum binding.",
-            RuntimeWarning,
-            stacklevel=2,
+            "cannot verify checksum binding."
         )
-        return stage2_results_path, stage2_results
     actual_digest = compute_stage2_bs_sha256(stage2_bs_path)
     if str(recorded_digest) != actual_digest:
         raise ValueError(

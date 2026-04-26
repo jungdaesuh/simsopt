@@ -625,7 +625,7 @@ class SnapshotParityTests(unittest.TestCase):
             stage2_seed_curvature_weight=0.0001,
             stage2_seed_curvature_threshold=40.0,
             stage2_seed_banana_surf_radius=0.22,
-            stage2_seed_tf_current_A=8.0e4,
+            stage2_seed_tf_current_A=-8.0e4,
             stage2_seed_order=2,
             stage2_seed_banana_init_current_A=1.0e4,
         )
@@ -642,7 +642,7 @@ class SnapshotParityTests(unittest.TestCase):
                 curvature_weight=0.0001,
                 curvature_threshold=40.0,
                 banana_surf_radius=0.22,
-                tf_current_A=8.0e4,
+                tf_current_A=-8.0e4,
                 order=2,
                 banana_init_current_A=1.0e4,
             )

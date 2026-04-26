@@ -1768,7 +1768,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             plasma_surf_filename="demo.nc",
             file_loc="/tmp/demo.nc",
             stage2_bs_path="/tmp/seed.json",
-            tf_current_A=8.0e4,
+            tf_current_A=-8.0e4,
             tf_current_sum_abs_A=1.6e5,
             num_tf_coils=2,
             num_banana_coils=4,

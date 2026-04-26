@@ -30,7 +30,7 @@ There are two supported wrapper entrypoints for most day-to-day work:
 
 1. `run_80ka_baseline_tradeoff_sweep.py`
    This is the locked coil-only baseline lane.
-   It enforces `TF_CURRENT_A = 80000`, `PLASMA_CURRENT_A = 0`, validates any reused Stage 2 artifact against that baseline identity, and sweeps single-stage weights.
+   It enforces `TF_CURRENT_A = -80000`, `PLASMA_CURRENT_A = 0`, validates any reused Stage 2 artifact against that baseline identity, and sweeps single-stage weights.
 
 2. `run_finite_current_smoke.py`
    This is a finite-current surrogate smoke harness.
@@ -140,7 +140,7 @@ If you are working inside the repo's normal development environment, prefer that
 
 Use this for the current coil-only baseline lane:
 
-- `TF_CURRENT_A = 80000`
+- `TF_CURRENT_A = -80000`
 - `PLASMA_CURRENT_A = 0`
 - frozen baseline Stage 2 contract
 - weight sweep over single-stage objectives
@@ -194,7 +194,7 @@ Useful notes:
 
 - output root defaults to `examples/single_stage_optimization/outputs_stage2_alm`
 - the built-in `standard_80ka` profile now matches the canonical hardware baseline:
-  `tf_current_A=8.0e4`, `banana_surf_radius=0.21`, `cc_threshold=0.05`, `curvature_threshold=100`
+  `tf_current_A=-8.0e4`, `banana_surf_radius=0.21`, `cc_threshold=0.05`, `curvature_threshold=100`
 - the wrapper also exposes the fixed Stage 2 solver-owned clearance contract in its summary/artifact validation:
   `coil-plasma >= 0.015 m`, `plasma-vessel >= 0.04 m`, `coil_length <= 2.0 m`
 - `--stage2-spec-json` is the fully explicit path for non-profile Stage 2 contracts
@@ -485,7 +485,7 @@ For the common nfp22 example equilibria, defaults are filled automatically when 
 Important caveat:
 
 - the built-in nfp22 single-stage seed defaults now match the current HBT hardware baseline
-- in particular, the default nfp22 seed set uses `stage2_seed_tf_current_A = 8.0e4`, `stage2_seed_banana_surf_radius = 0.21`, and `stage2_seed_curvature_threshold = 100`
+- in particular, the default nfp22 seed set uses `stage2_seed_tf_current_A = -8.0e4`, `stage2_seed_banana_surf_radius = 0.21`, and `stage2_seed_curvature_threshold = 100`
 - if you need a non-baseline seed family, pass the Stage 2 seed / artifact explicitly instead of relying on implicit defaults
 
 ## Manual Single-Stage
