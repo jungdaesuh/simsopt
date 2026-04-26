@@ -163,7 +163,6 @@ from banana_opt.hardware_contracts import (
 )
 from banana_opt.hardware_constraint_schema import (
     build_hardware_constraint_artifact_payload_fields,
-    hardware_constraint_alm_block,
     hardware_constraint_alm_names,
 )
 from banana_opt.incumbents import (
@@ -2196,24 +2195,6 @@ def update_single_stage_alm_smoothing_from_history(history_entry):
             "curvature_smoothing": curvature_smoothing,
         }
     )
-
-
-def single_stage_alm_constraint_blocks(constraint_names):
-    blocks = []
-    for constraint_name in constraint_names:
-        if constraint_name in SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES:
-            blocks.append("physics")
-            continue
-        metadata_name = (
-            "banana_current_upper_bound"
-            if (
-                constraint_name.startswith("banana_current_")
-                and constraint_name.endswith("_upper_bound")
-            )
-            else constraint_name
-        )
-        blocks.append(hardware_constraint_alm_block(metadata_name))
-    return tuple(blocks)
 
 
 def evaluate_topology_gate(surface, bfield, nfieldlines, tmax, tol, survival_threshold):
@@ -8979,7 +8960,6 @@ if __name__ == "__main__":
             ),
             banana_current_state=banana_current_state,
         )
-        alm_constraint_blocks = single_stage_alm_constraint_blocks(alm_constraint_names)
         alm_partial_state = {"history": []}
         resume_alm_state = (
             None
@@ -9107,7 +9087,6 @@ if __name__ == "__main__":
             restore_incumbent_state_fn=restore_incumbent_state,
             initial_multipliers=initial_alm_multipliers,
             initial_penalty=initial_alm_penalty,
-            constraint_blocks=alm_constraint_blocks,
         )
         alm_result = res
         alm_partial_state["history"] = [

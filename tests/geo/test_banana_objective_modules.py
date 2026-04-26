@@ -4128,6 +4128,9 @@ class SingleStageConstraintModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(tolerances, [0.02, 0.02, 0.2, 0.02])
 
+    def test_softmin_selection_window_uses_shared_truncation_factor(self):
+        self.assertAlmostEqual(self.module.softmin_selection_window(0.25), 1.0)
+
     def test_smooth_max_curvature_signed_constraint_uses_active_window(self):
         curve = _FakeCurve(
             gamma_points=[[0.0, 0.0, 0.0]],

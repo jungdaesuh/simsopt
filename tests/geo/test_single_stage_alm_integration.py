@@ -636,7 +636,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn("history_callback=history_callback", source)
         self.assertIn('"smoothing_changed"', source)
         self.assertIn("single_stage_alm_constraint_names(", source)
-        self.assertIn("constraint_blocks=alm_constraint_blocks", source)
+        self.assertNotIn("single_stage_alm_constraint_blocks", source)
+        self.assertNotIn("constraint_blocks=alm_constraint_blocks", source)
         self.assertIn("hard_surrogate_diagnostics=ALM_HARD_GEOMETRY_DUAL_SIGNALS", source)
         self.assertIn("surface_stack_constraint_fn=_smooth_min_surface_stack_signed_constraint", source)
         self.assertIn("alm_formulation=args.alm_formulation", source)
@@ -907,9 +908,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         schema_module = load_hardware_constraint_schema_module()
         functions = extract_functions(
             SINGLE_STAGE_MODULE_PATH,
-            ["single_stage_alm_constraint_blocks", "single_stage_alm_constraint_names"],
+            ["single_stage_alm_constraint_names"],
             {
-                "hardware_constraint_alm_block": schema_module.hardware_constraint_alm_block,
                 "hardware_constraint_alm_names": schema_module.hardware_constraint_alm_names,
                 "SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES": (
                     "qs_error",
@@ -942,16 +942,6 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             include_surface_stack=True,
         )
         self.assertIn("surface_surface_spacing", stacked_constraint_names)
-        self.assertEqual(
-            functions["single_stage_alm_constraint_blocks"](
-                (
-                    "surface_surface_spacing",
-                    "banana_current_0_upper_bound",
-                    "qs_error",
-                )
-            ),
-            ("surface", "current", "physics"),
-        )
 
     def test_stage2_alm_constraint_names_follow_shared_schema(self):
         schema_module = load_hardware_constraint_schema_module()

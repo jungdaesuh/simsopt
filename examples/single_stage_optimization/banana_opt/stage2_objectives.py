@@ -39,6 +39,7 @@ from banana_opt.smooth_distance_selection import (
     pairwise_block_min,
     point_tree,
     select_pairwise_near_min,
+    softmin_selection_window,
     surface_dgamma_by_dcoeff_derivative,
     surface_points_tree_shape,
 )
@@ -1426,7 +1427,7 @@ def smooth_min_distance_signed_constraint(
             hard_signed_value,
         )
 
-    selection_window = 4.0 * float(temperature)
+    selection_window = softmin_selection_window(temperature)
     selected_distances = []
     selected_entries = []
     selection_threshold = hard_min + selection_window
@@ -1499,7 +1500,7 @@ def smooth_min_curve_surface_signed_constraint(
         hard_min = min(hard_min, block_min)
         curve_blocks.append((curve_index, block_min))
 
-    selection_window = 4.0 * float(temperature)
+    selection_window = softmin_selection_window(temperature)
     selected_distances = []
     selected_entries = []
     selection_threshold = hard_min + selection_window

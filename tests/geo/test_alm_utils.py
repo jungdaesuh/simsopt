@@ -818,6 +818,36 @@ class MinimizeAlmTests(unittest.TestCase):
                 snapshot_accepted_state_fn=lambda: {"x": 0.0},
             )
 
+    def test_minimize_alm_reports_constraint_blocks_from_evaluation_metadata(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(max_outer_iterations=1)
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x, multipliers, penalty
+            return {
+                "total": 0.0,
+                "grad": np.zeros(1),
+                "constraint_values": np.zeros(2),
+                "constraint_grads": [np.zeros(1), np.zeros(1)],
+                "stationarity_norm": 0.0,
+                "constraint_blocks": ["geometry", "current"],
+            }
+
+        result = module.minimize_alm(
+            np.array([0.0]),
+            ["coil_surface_spacing", "banana_current_upper_bound"],
+            evaluate_problem,
+            settings,
+            {"maxiter": 1},
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.constraint_blocks, ["geometry", "current"])
+        self.assertEqual(
+            result.history[0]["constraint_blocks"],
+            ["geometry", "current"],
+        )
+
     def test_minimize_alm_keeps_positional_snapshot_hook_compatibility(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(max_outer_iterations=1)

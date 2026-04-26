@@ -8,6 +8,16 @@ from simsopt._core.derivative import Derivative
 
 _SURFACE_TREE_CACHE = WeakKeyDictionary()
 _SURFACE_TREE_CACHE_LOCK = RLock()
+_SOFTMIN_SELECTION_WINDOW_TEMPERATURES = 4.0
+
+
+def softmin_selection_window(temperature):
+    """Return the truncated soft-min support window.
+
+    Distances outside hard_min + 4T have Boltzmann weights below exp(-4)
+    relative to the hard-min pair; hard certification remains exhaustive.
+    """
+    return _SOFTMIN_SELECTION_WINDOW_TEMPERATURES * float(temperature)
 
 
 def point_tree(points):
