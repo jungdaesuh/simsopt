@@ -12,6 +12,7 @@ from simsopt.field.coil import Current, ScaledCurrent
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES_ROOT = REPO_ROOT / "examples" / "single_stage_optimization"
+ALM_UTILS_PATH = EXAMPLES_ROOT / "alm_utils.py"
 STAGE2_OBJECTIVES_PATH = EXAMPLES_ROOT / "banana_opt" / "stage2_objectives.py"
 SINGLE_STAGE_GEOMETRY_PATH = EXAMPLES_ROOT / "banana_opt" / "single_stage_geometry.py"
 SINGLE_STAGE_CONSTRAINTS_PATH = (
@@ -25,6 +26,7 @@ SINGLE_STAGE_SEARCH_POLICY_PATH = (
 )
 SINGLE_STAGE_INCUMBENTS_PATH = EXAMPLES_ROOT / "banana_opt" / "incumbents.py"
 POLOIDAL_EXTENT_PATH = EXAMPLES_ROOT / "banana_opt" / "poloidal_extent.py"
+TAYLOR_TEST_EPSILONS = (1.0e-3, 5.0e-4, 2.5e-4, 1.25e-4)
 
 
 def _load_module(module_path: Path, prefix: str):
@@ -74,6 +76,58 @@ class _FakeBaseObjective:
 
     def dJ(self):
         return self._grad.copy()
+
+
+class _XAwareQuadraticObjective:
+    def __init__(self, owner, constant, linear, quadratic=0.0):
+        self.owner = owner
+        self.constant = float(constant)
+        self.linear = np.asarray(linear, dtype=float)
+        self.quadratic = float(quadratic)
+        self.x = np.zeros_like(self.linear)
+
+    def _x(self):
+        source = self if self.owner is None else self.owner
+        return np.asarray(source.x, dtype=float)
+
+    def J(self):
+        x = self._x()
+        return float(
+            self.constant
+            + np.dot(self.linear, x)
+            + 0.5 * self.quadratic * np.dot(x, x)
+        )
+
+    def gradient(self):
+        return self.linear + self.quadratic * self._x()
+
+    def dJ(self, partials=False):
+        if partials:
+            return lambda _objective=None: self.gradient()
+        return self.gradient()
+
+    def __add__(self, other):
+        if other == 0:
+            return self
+        return _XAwareQuadraticObjective(
+            self.owner,
+            self.constant + other.constant,
+            self.linear + other.linear,
+            self.quadratic + other.quadratic,
+        )
+
+    __radd__ = __add__
+
+    def __mul__(self, scalar):
+        scalar = float(scalar)
+        return _XAwareQuadraticObjective(
+            self.owner,
+            scalar * self.constant,
+            scalar * self.linear,
+            scalar * self.quadratic,
+        )
+
+    __rmul__ = __mul__
 
 
 class _FakeAlgebraicObjective:
@@ -216,6 +270,33 @@ class _FakeCurrentObjective:
     def vjp(self, value):
         cotangent = float(np.asarray(value, dtype=float).reshape(-1)[0])
         return _FakeDerivative(cotangent * self._grad)
+
+
+class _XAwareCurrentObjective:
+    def __init__(self, owner, constant, linear):
+        self.owner = owner
+        self.constant = float(constant)
+        self.linear = np.asarray(linear, dtype=float)
+
+    def get_value(self):
+        x = np.asarray(self.owner.x, dtype=float)
+        return float(self.constant + np.dot(self.linear, x))
+
+    def vjp(self, value):
+        cotangent = float(np.asarray(value, dtype=float).reshape(-1)[0])
+        return _FakeDerivative(cotangent * self.linear)
+
+
+def _affine_signed_constraint(owner, offset, linear, *, include_violation):
+    linear = np.asarray(linear, dtype=float)
+
+    def constraint(*_args):
+        signed_value = float(offset + np.dot(linear, owner.x))
+        if include_violation:
+            return signed_value, linear.copy(), max(0.0, signed_value)
+        return signed_value, linear.copy()
+
+    return constraint
 
 
 class _FakeBiotSavart:
@@ -905,6 +986,77 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["max_feasibility_violation"], 0.1)
         self.assertAlmostEqual(result["total"], 9.0)
         np.testing.assert_allclose(result["grad"], [7.0, -3.0])
+
+    def test_stage2_normalized_alm_constraints_pass_directional_taylor_test(self):
+        alm_utils = _load_module(ALM_UTILS_PATH, "banana_alm_utils")
+        base_objective = _XAwareQuadraticObjective(
+            None,
+            constant=1.5,
+            linear=[0.4, -0.2],
+            quadratic=0.3,
+        )
+        Jls = _XAwareQuadraticObjective(
+            base_objective,
+            constant=2.15,
+            linear=[0.2, -0.1],
+        )
+        banana_current = _XAwareCurrentObjective(
+            base_objective,
+            constant=16500.0,
+            linear=[120.0, -80.0],
+        )
+        Jccdist = _UnexpectedCurveDistance(0.05, 0.04)
+        Jc = _FakeCurvatureObjective(40.0, [41.0, 39.5], 7.5)
+        distance_constraint = _affine_signed_constraint(
+            base_objective,
+            0.012,
+            [0.004, -0.002],
+            include_violation=False,
+        )
+        curvature_constraint = _affine_signed_constraint(
+            base_objective,
+            0.8,
+            [0.05, 0.03],
+            include_violation=False,
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            return self.module.evaluate_stage2_alm_problem(
+                dofs=np.asarray(x, dtype=float),
+                base_objective=base_objective,
+                new_bs=_FakeBiotSavart((4, 3)),
+                new_surf=_FakeSurfaceNormals((2, 2, 3)),
+                Jf=_FakeScalarObjective(0.0),
+                Jls=Jls,
+                length_target=2.0,
+                Jccdist=Jccdist,
+                Jc=Jc,
+                banana_current=banana_current,
+                banana_current_max_A=16000.0,
+                distance_smoothing=0.005,
+                curvature_smoothing=0.02,
+                multipliers=multipliers,
+                penalty=penalty,
+                stage2_constraint_activity_tolerances=lambda ds, cs: [
+                    1.0e-3,
+                    ds * 4.0,
+                    cs * 4.0,
+                    1.0e-3,
+                ],
+                smooth_min_distance_signed_constraint=distance_constraint,
+                smooth_max_curvature_signed_constraint=curvature_constraint,
+            )
+
+        result = alm_utils.run_directional_taylor_test(
+            evaluate_problem,
+            np.array([0.2, -0.3]),
+            np.array([0.05, 0.1, 0.15, 0.2]),
+            7.0,
+            direction=np.array([0.6, -0.4]),
+            epsilons=TAYLOR_TEST_EPSILONS,
+        )
+
+        self.assertTrue(result["passed"], result)
 
     def test_evaluate_stage2_alm_problem_fast_path_skips_report_diagnostics(self):
         class _UnexpectedBiotSavart:
@@ -2404,6 +2556,97 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["J_surf"], 0.9)
         self.assertAlmostEqual(result["J_curvature"], 0.8)
         np.testing.assert_allclose(result["grad"], [8.0, -3.0])
+
+    def test_single_stage_normalized_alm_constraints_pass_directional_taylor_test(self):
+        alm_utils = _load_module(ALM_UTILS_PATH, "banana_alm_utils")
+        objective = SimpleNamespace(x=np.zeros(2, dtype=float))
+        nonqs = [
+            _XAwareQuadraticObjective(
+                objective,
+                constant=1.0,
+                linear=[0.3, -0.1],
+                quadratic=0.2,
+            )
+        ]
+        brs = [
+            _XAwareQuadraticObjective(
+                objective,
+                constant=0.5,
+                linear=[-0.2, 0.4],
+                quadratic=0.1,
+            )
+        ]
+        jiota = _XAwareQuadraticObjective(objective, 0.2, [0.05, -0.03])
+        jlength = _XAwareQuadraticObjective(objective, 0.4, [0.02, 0.01])
+        jcc = _XAwareQuadraticObjective(objective, 0.0, [0.0, 0.0])
+        jcs = _XAwareQuadraticObjective(objective, 0.0, [0.0, 0.0])
+        jcurv = _XAwareQuadraticObjective(objective, 0.0, [0.0, 0.0])
+        curve_curve_constraint = _affine_signed_constraint(
+            objective,
+            0.02,
+            [0.003, -0.001],
+            include_violation=True,
+        )
+        curve_surface_constraint = _affine_signed_constraint(
+            objective,
+            0.01,
+            [-0.002, 0.004],
+            include_violation=True,
+        )
+        curvature_constraint = _affine_signed_constraint(
+            objective,
+            0.8,
+            [0.05, 0.03],
+            include_violation=True,
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            objective.x = np.asarray(x, dtype=float)
+            return self.module.evaluate_alm_objective(
+                np.array([1.0]),
+                nonqs,
+                brs,
+                RES_WEIGHT=1.5,
+                Jiota=jiota,
+                IOTAS_WEIGHT=0.7,
+                JVolume=None,
+                VOLUME_WEIGHT=0.0,
+                JCurveLength=jlength,
+                LENGTH_WEIGHT=0.9,
+                JCurveCurve=jcc,
+                JCurveSurface=jcs,
+                JCurvature=jcurv,
+                multipliers=multipliers,
+                penalty=penalty,
+                objective_optimizable=objective,
+                curves=["curve_a"],
+                curve_curve_min_distance=0.05,
+                outer_surface="outer",
+                curve_surface_min_distance=0.02,
+                banana_curve="banana",
+                curvature_threshold=40.0,
+                distance_smoothing=0.01,
+                curvature_smoothing=0.05,
+                constraint_names=(
+                    "coil_coil_spacing",
+                    "coil_surface_spacing",
+                    "max_curvature",
+                ),
+                curve_curve_constraint_fn=curve_curve_constraint,
+                curve_surface_constraint_fn=curve_surface_constraint,
+                curvature_constraint_fn=curvature_constraint,
+            )
+
+        result = alm_utils.run_directional_taylor_test(
+            evaluate_problem,
+            np.array([0.15, -0.25]),
+            np.array([0.03, 0.04, 0.05]),
+            6.0,
+            direction=np.array([-0.5, 0.7]),
+            epsilons=TAYLOR_TEST_EPSILONS,
+        )
+
+        self.assertTrue(result["passed"], result)
 
     def test_evaluate_alm_objective_fast_path_keeps_constraint_payload_only(self):
         nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]

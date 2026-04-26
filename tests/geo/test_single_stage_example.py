@@ -4231,6 +4231,8 @@ class HardwareConstraintTests(unittest.TestCase):
                 "max_feasibility_violation": 4.0e-3,
                 "metric_stationarity_norm": 7.5e-5,
                 "constraint_values": np.array([1.0e-3, -2.0e-4]),
+                "raw_feasibility_values": np.array([1.6e1, -3.2]),
+                "normalized_feasibility_values": np.array([1.0e-3, -2.0e-4]),
             },
             "J": 9.5e-4,
             "intersecting": False,
@@ -4271,7 +4273,11 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["ALM_OUTER_ITERATIONS"], 3)
         self.assertEqual(payload["ALM_FINAL_PENALTY"], 12.5)
         self.assertEqual(payload["ALM_FINAL_MULTIPLIERS"], [0.25, -0.75])
-        self.assertEqual(payload["ALM_FINAL_CONSTRAINT_VALUES"], [1.0e-3, -2.0e-4])
+        self.assertEqual(payload["ALM_FINAL_CONSTRAINT_VALUES"], [16.0, -3.2])
+        self.assertEqual(
+            payload["ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES"],
+            [1.0e-3, -2.0e-4],
+        )
         self.assertEqual(payload["ALM_FINAL_FEASIBILITY_TOL"], 1.0e-4)
         self.assertEqual(payload["ALM_FINAL_STATIONARITY_TOL"], 2.0e-4)
         self.assertEqual(payload["ALM_FINAL_MAX_FEASIBILITY_VIOLATION"], 4.0e-3)

@@ -393,7 +393,7 @@ Acceptance tests:
 - [x] Multiplier cap tests still pass in normalized units.
 - [x] Convergence decisions use normalized feasibility only.
 - [x] Hard feasibility failures are still reported in raw physical units.
-- [ ] Directional Taylor tests pass after normalization for Stage 2 and single-stage constraints.
+- [x] Directional Taylor tests pass after normalization for Stage 2 and single-stage constraints.
 - [x] Empty constraint sets, scalar constraints, vector constraints, gradient shape mismatches, nonfinite scales, and `scale=1` behavior are covered.
 
 ### Phase 3: Make ALM history actionable
@@ -582,14 +582,20 @@ python3 examples/single_stage_optimization/run_stage2_alm.py --dry-run
 python3 examples/single_stage_optimization/run_single_stage_thresholded_physics_alm.py --dry-run
 ```
 
+Wrapper dry runs validate command construction and marker/summary contracts only.
+They intentionally report `output_contract=dry_run_summary_only` and
+`contains_solver_outputs=false`, so final raw/normalized ALM payload fields are
+validated through materialized result paths, production payload assembly, and
+focused result-builder tests.
+
 Required validation before merging Phase 2:
 
 - [x] Unit tests confirm `1000 A / 16000 A = 0.0625`.
 - [x] Unit tests confirm `1 1/m / 40 1/m = 0.025`.
-- [ ] Directional Taylor tests pass after normalization for Stage 2 and single-stage constraints.
-- [ ] A Stage 2 dry run emits both raw and normalized values.
-- [ ] A single-stage thresholded-physics dry run emits both raw and normalized values.
-- [ ] A hard feasibility failure is still reported in raw physical units.
+- [x] Directional Taylor tests pass after normalization for Stage 2 and single-stage constraints.
+- [x] Stage 2 result payloads emit both raw and normalized values.
+- [x] Single-stage result payloads emit both raw and normalized values.
+- [x] A hard feasibility failure is still reported in raw physical units.
 - [x] A convergence decision uses normalized feasibility only.
 - [x] Multiplier cap tests are updated to normalized units.
 - [x] History clearly shows the same blocking constraint in both raw and normalized forms.
