@@ -563,6 +563,70 @@ Required validation before merging Phase 2:
 
 Measure the implementation as an optimizer-contract change. The first success criterion is not a lower final objective; it is that normalized ALM routing improves stability and diagnostics while preserving raw hardware certification.
 
+### Artifact source contract
+
+Executing this plan must record both the baseline and after-implementation impact. The benchmark collector should not rely only on fresh local runs; it should first snapshot the existing autoresearch artifacts and use them as the baseline source of truth where applicable.
+
+Baseline artifact roots:
+
+```text
+/Users/suhjungdae/code/columbia/autoresearch/registry
+/Users/suhjungdae/code/columbia/autoresearch/runs
+/Users/suhjungdae/code/columbia/autoresearch/results_surrogate_legacy_vmec.jsonl
+/Users/suhjungdae/code/columbia/autoresearch/artifact_exports
+/Users/suhjungdae/code/columbia/autoresearch/harvested_seeds
+```
+
+Required collector behavior:
+
+```text
+1. Read existing run metadata from the autoresearch registry and ledgers.
+2. Identify ALM-relevant baseline runs by explicit run fields first, then artifact contents.
+3. Link each baseline row to its source run directory, ledger row, registry row, and exported artifacts when present.
+4. Derive benchmark fixtures from harvested seeds and prior successful or near-miss runs.
+5. Save a frozen baseline summary before changing ALM behavior.
+6. Run the after-implementation fixtures with the same seed/config contracts.
+7. Save the after summary with the same schema as the baseline summary.
+8. Emit a joined before/after comparison table.
+```
+
+Recommended output location:
+
+```text
+/Users/suhjungdae/code/columbia/autoresearch/artifact_exports/alm_normalization_benchmarks/
+    baseline_YYYYMMDD.jsonl
+    after_YYYYMMDD.jsonl
+    comparison_YYYYMMDD.csv
+    comparison_YYYYMMDD.md
+    fixture_manifest_YYYYMMDD.json
+```
+
+Baseline rows should preserve provenance fields:
+
+```text
+source_kind                  registry | ledger | run_artifact | harvested_seed
+source_path
+run_id
+ledger_file
+ledger_row_index
+registry_database
+registry_table
+artifact_export_path
+seed_artifact_path
+solver_checkout
+solver_commit
+created_at
+```
+
+If an older artifact does not contain normalized ALM fields, set normalized fields to null and mark:
+
+```text
+normalization_contract_version = "pre_normalization"
+normalized_fields_available = false
+```
+
+Do not mutate the existing registry, ledger, run directories, artifact exports, or harvested seeds during baseline capture. The collector should create new benchmark summaries only.
+
 ### Benchmark cases
 
 Use fixed seeds/configs and identical CLI arguments for baseline and implementation runs.

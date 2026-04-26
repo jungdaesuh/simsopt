@@ -133,6 +133,55 @@ class ResidualHelperTests(unittest.TestCase):
 
         np.testing.assert_allclose(projected, np.array([1.0, 0.0]))
 
+    def test_scaled_inequality_fixture_preserves_raw_feasibility_and_dual_conversion(self):
+        module = load_alm_utils_module()
+
+        raw_violation = 1000.0
+        scale = 16000.0
+        normalized_violation = raw_violation / scale
+        lambda_raw = 0.25
+        lambda_norm = lambda_raw * scale
+
+        evaluation = module.augmented_inequality_objective(
+            base_value=0.0,
+            base_grad=np.array([0.0]),
+            constraint_values=np.array([normalized_violation]),
+            constraint_grads=[np.array([1.0 / scale])],
+            multipliers=np.array([lambda_norm]),
+            penalty=2.0,
+        )
+
+        self.assertAlmostEqual(raw_violation, 1000.0)
+        self.assertAlmostEqual(evaluation["max_feasibility_violation"], 0.0625)
+        self.assertAlmostEqual(lambda_raw, lambda_norm / scale)
+
+    def test_scale_one_fixture_matches_existing_scalar_alm_behavior(self):
+        module = load_alm_utils_module()
+
+        raw_evaluation = module.augmented_inequality_objective(
+            base_value=3.0,
+            base_grad=np.array([1.0]),
+            constraint_values=np.array([0.5]),
+            constraint_grads=[np.array([2.0])],
+            multipliers=np.array([0.25]),
+            penalty=4.0,
+        )
+        scale_one_evaluation = module.augmented_inequality_objective(
+            base_value=3.0,
+            base_grad=np.array([1.0]),
+            constraint_values=np.array([0.5 / 1.0]),
+            constraint_grads=[np.array([2.0 / 1.0])],
+            multipliers=np.array([0.25 * 1.0]),
+            penalty=4.0,
+        )
+
+        self.assertEqual(raw_evaluation["total"], scale_one_evaluation["total"])
+        np.testing.assert_allclose(raw_evaluation["grad"], scale_one_evaluation["grad"])
+        np.testing.assert_allclose(
+            raw_evaluation["dual_update_values"],
+            scale_one_evaluation["dual_update_values"],
+        )
+
 
 class MinimizeAlmTests(unittest.TestCase):
     @staticmethod
