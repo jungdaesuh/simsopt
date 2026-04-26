@@ -318,6 +318,39 @@ class AlmBenchmarkingTests(unittest.TestCase):
         self.assertEqual(rows[1]["after_success"], True)
         self.assertEqual(rows[1]["after_max_normalized_violation"], 0.0)
 
+    def test_comparison_rows_join_run_artifacts_by_source_path(self):
+        before_rows = [
+            {
+                "source_kind": "run_artifact",
+                "source_path": "/tmp/run-a/results.json",
+                "run_id": "shared-run",
+                "hard_feasible_success": False,
+            },
+            {
+                "source_kind": "run_artifact",
+                "source_path": "/tmp/run-b/results.json",
+                "run_id": "shared-run",
+                "hard_feasible_success": True,
+            },
+        ]
+        after_rows = [
+            {
+                "source_kind": "run_artifact",
+                "source_path": "/tmp/run-b/results.json",
+                "run_id": "shared-run",
+                "hard_feasible_success": True,
+                "max_normalized_violation": 0.0,
+            }
+        ]
+
+        rows = alm_benchmarking.comparison_rows(before_rows, after_rows)
+
+        self.assertEqual(rows[0]["case"], "run_artifact:/tmp/run-a/results.json")
+        self.assertEqual(rows[0]["after_success"], None)
+        self.assertEqual(rows[1]["case"], "run_artifact:/tmp/run-b/results.json")
+        self.assertEqual(rows[1]["after_success"], True)
+        self.assertEqual(rows[1]["after_max_normalized_violation"], 0.0)
+
     def test_write_after_outputs_writes_after_rows_and_joined_comparison(self):
         baseline_row = {
             "source_kind": "registry",

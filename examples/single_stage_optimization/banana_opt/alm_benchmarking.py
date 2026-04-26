@@ -521,6 +521,8 @@ def benchmark_case_key(row: Mapping[str, object]) -> str:
     source_kind = row["source_kind"]
     if source_kind == "ledger" and row.get("ledger_row_index") is not None:
         return f"{source_kind}:{row['source_path']}:{row['ledger_row_index']}"
+    if source_kind in {"run_artifact", "harvested_seed"}:
+        return f"{source_kind}:{row['source_path']}"
     case_id = row.get("run_id") or row["source_path"]
     return f"{source_kind}:{case_id}"
 
