@@ -3303,6 +3303,63 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(result.history[0]["positive_shift_values"], [0.5, 50.0])
         self.assertAlmostEqual(result.history[0]["augmented_gradient_norm"], 50.5)
 
+    def test_block_penalty_cap_branch_refreshes_growth_tolerance_schedule(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=1,
+            max_subproblem_continuations=0,
+            penalty_init=1.0,
+            feasibility_tol=1.0e-8,
+            stationarity_tol=1.0e-8,
+            relaxed_feasibility_gate_cap=10.0,
+            max_inner_attempts=1,
+            block_penalties_enabled=True,
+            block_penalty_init={"geometry": 100.0, "current": 1.0},
+            block_penalty_scale={"geometry": 10.0, "current": 2.0},
+            block_penalty_max={"geometry": 500.0, "current": 1.0e8},
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x
+            return module.augmented_inequality_objective(
+                base_value=0.0,
+                base_grad=np.zeros(1),
+                constraint_values=np.array([2.0, 2.0]),
+                constraint_grads=[np.ones(1), np.ones(1)],
+                multipliers=multipliers,
+                penalty=penalty,
+            )
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, jac, method, bounds, callback, options
+            return SimpleNamespace(
+                x=np.asarray(x, dtype=float).copy(),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.zeros(1),
+                ["gap", "current"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 1},
+                constraint_blocks=["geometry", "current"],
+            )
+
+        self.assertEqual(result.termination_reason, "penalty_cap_reached")
+        self.assertEqual(result.block_penalties, {"geometry": 100.0, "current": 2.0})
+        self.assertEqual(result.history[0]["block_penalty_growth_blocks"], ["current"])
+        self.assertEqual(
+            result.history[0]["block_penalty_cap_reached"],
+            {"geometry": True, "current": False},
+        )
+        self.assertAlmostEqual(result.history[0]["feasibility_tolerance"], 0.5)
+        self.assertAlmostEqual(result.history[0]["effective_feasibility_tolerance"], 0.5)
+        self.assertAlmostEqual(result.history[0]["stationarity_tolerance"], 0.5)
+
     def test_block_penalty_growth_refreshes_result_and_history_penalties(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(

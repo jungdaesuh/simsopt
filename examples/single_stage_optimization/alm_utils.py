@@ -2794,6 +2794,15 @@ def minimize_alm(
                 block: float(value)
                 for block, value in requested_growth_by_block.items()
             }
+            penalty_argument = _current_penalty_argument()
+            update_feasibility_tol = _penalty_schedule_tolerance(
+                settings.feasibility_tol,
+                penalty_argument,
+            )
+            update_stationarity_tol = _penalty_schedule_tolerance(
+                settings.stationarity_tol,
+                penalty_argument,
+            )
             if cap_hit_blocks:
                 penalty_update_state = _publish_current_penalty_state(
                     history_entry,
@@ -2829,15 +2838,6 @@ def minimize_alm(
                     block_penalty_state_for_result=block_penalty_state,
                 )
             feasible_stall_count = 0
-            penalty_argument = _current_penalty_argument()
-            update_feasibility_tol = _penalty_schedule_tolerance(
-                settings.feasibility_tol,
-                penalty_argument,
-            )
-            update_stationarity_tol = _penalty_schedule_tolerance(
-                settings.stationarity_tol,
-                penalty_argument,
-            )
             _publish_current_penalty_state(
                 history_entry,
                 update_feasibility_tol,
