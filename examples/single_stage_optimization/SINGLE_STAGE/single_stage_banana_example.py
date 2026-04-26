@@ -259,6 +259,7 @@ from banana_opt.single_stage_objectives import (
     evaluate_base_objective as _evaluate_base_objective_impl,
     evaluate_total_objective as _evaluate_total_objective_impl,
     evaluate_alm_objective as _evaluate_alm_objective_impl,
+    independent_banana_current_alm_constraint_name,
 )
 from banana_opt.single_stage_banana_current_mode import (
     BANANA_CURRENT_COORDINATE_SCALING_NONE,
@@ -2022,16 +2023,21 @@ def current_single_stage_hardware_snapshot_kwargs(*, coil_length=None):
 def current_single_stage_alm_banana_current():
     banana_current_state = globals().get("banana_current_state")
     if banana_current_state is not None:
-        representative_current_A = banana_current_state.representative_current_A()
-        if representative_current_A is None:
-            raise ValueError(
-                "single-stage ALM banana-current constraints require "
-                "--single-stage-banana-current-mode=shared"
-            )
+        if banana_current_state.representative_current_A() is None:
+            return None
         return banana_current_state.currents[0]
     banana_coils_value = globals().get("banana_coils")
     if banana_coils_value:
         return banana_coils_value[0].current
+    return None
+
+
+def current_single_stage_alm_banana_currents():
+    banana_current_state = globals().get("banana_current_state")
+    if banana_current_state is None:
+        return None
+    if banana_current_state.mode == BANANA_CURRENT_MODE_INDEPENDENT:
+        return tuple(banana_current_state.currents)
     return None
 
 
@@ -2134,7 +2140,6 @@ def validate_single_stage_current_args(args):
         "single_stage_banana_current_mode",
         BANANA_CURRENT_MODE_SHARED,
     )
-    constraint_method = getattr(args, "constraint_method", "penalty")
     allow_offspec_engineering_constraints = bool(
         getattr(args, "allow_offspec_engineering_constraints", False)
     )
@@ -2144,11 +2149,6 @@ def validate_single_stage_current_args(args):
     }:
         raise ValueError(
             "--single-stage-banana-current-mode must be one of {shared, independent}"
-        )
-    if banana_current_mode == BANANA_CURRENT_MODE_INDEPENDENT and constraint_method == "alm":
-        raise ValueError(
-            "--single-stage-banana-current-mode=independent is not supported with "
-            "--constraint-method=alm"
         )
     if banana_current_max_A <= 0.0:
         raise ValueError("--banana-current-max-A must be positive.")
@@ -2837,18 +2837,33 @@ def validate_single_stage_alm_formulation_args(args):
         )
 
 
-def single_stage_alm_constraint_names(*, alm_formulation, include_surface_surface):
+def single_stage_alm_constraint_names(
+    *,
+    alm_formulation,
+    include_surface_surface,
+    banana_current_state=None,
+):
     available_names = {
         "coil_coil_spacing",
         "coil_surface_spacing",
         "max_curvature",
         "coil_length",
         "poloidal_extent",
-        "banana_current",
     }
+    use_independent_banana_currents = (
+        banana_current_state is not None
+        and banana_current_state.mode == BANANA_CURRENT_MODE_INDEPENDENT
+    )
+    if not use_independent_banana_currents:
+        available_names.add("banana_current")
     if include_surface_surface:
         available_names.add("surface_vessel_spacing")
     names = list(hardware_constraint_alm_names(names=available_names))
+    if use_independent_banana_currents:
+        names.extend(
+            independent_banana_current_alm_constraint_name(index)
+            for index in range(banana_current_state.num_control_currents())
+        )
     if alm_formulation == "thresholded_physics":
         names.extend(SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES)
     return names
@@ -4076,6 +4091,7 @@ def evaluate_alm_objective(
             constraint_names=single_stage_alm_constraint_names(
                 alm_formulation=args.alm_formulation,
                 include_surface_surface=JSurfSurf is not None,
+                banana_current_state=globals().get("banana_current_state"),
             ),
             curve_curve_constraint_fn=_smooth_min_curve_curve_signed_constraint,
             curve_surface_constraint_fn=_smooth_min_curve_surface_signed_constraint,
@@ -4092,6 +4108,7 @@ def evaluate_alm_objective(
             coil_length_objective=curvelength,
             coil_length_threshold=length_target,
             banana_current=current_single_stage_alm_banana_current(),
+            banana_currents=current_single_stage_alm_banana_currents(),
             banana_current_threshold=args.banana_current_max_A,
             JPoloidalExtent=JPoloidalExtent,
             poloidal_extent_threshold=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
@@ -8167,6 +8184,7 @@ if __name__ == "__main__":
                 single_stage_alm_constraint_names(
                     alm_formulation=ALM_FORMULATION,
                     include_surface_surface=JSurfSurf is not None,
+                    banana_current_state=banana_current_state,
                 )
             ),
             dtype=float,
@@ -8666,6 +8684,7 @@ if __name__ == "__main__":
         alm_constraint_names = single_stage_alm_constraint_names(
             alm_formulation=ALM_FORMULATION,
             include_surface_surface=JSurfSurf is not None,
+            banana_current_state=banana_current_state,
         )
         alm_partial_state = {"history": []}
         resume_alm_state = (

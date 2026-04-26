@@ -129,6 +129,26 @@ def _scalar_abs_upper_bound_constraint(optimizable, threshold, objective_optimiz
     return signed_value, grad, max(0.0, signed_value)
 
 
+def independent_banana_current_alm_constraint_name(index: int) -> str:
+    return f"banana_current_{int(index)}_upper_bound"
+
+
+def _is_independent_banana_current_alm_constraint_name(name: str) -> bool:
+    prefix = "banana_current_"
+    suffix = "_upper_bound"
+    return (
+        name.startswith(prefix)
+        and name.endswith(suffix)
+        and name[len(prefix) : -len(suffix)].isdigit()
+    )
+
+
+def _banana_current_alm_metadata_name(name: str) -> str:
+    if _is_independent_banana_current_alm_constraint_name(name):
+        return "banana_current_upper_bound"
+    return name
+
+
 def augment_frontier_metric_state(
     objective_eval,
     *,
@@ -766,9 +786,13 @@ def _single_stage_alm_constraint_metadata(
                 activity_tolerance=activity_tolerance,
             )
             continue
-        uses_hard_value = constraint_name in exact_hardware_names
+        metadata_name = _banana_current_alm_metadata_name(constraint_name)
+        uses_hard_value = (
+            constraint_name in exact_hardware_names
+            or _is_independent_banana_current_alm_constraint_name(constraint_name)
+        )
         metadata_by_name[constraint_name] = hardware_constraint_alm_metadata(
-            constraint_name,
+            metadata_name,
             threshold_overrides=threshold_overrides,
             activity_tolerance=activity_tolerance,
             objective_value_kind="hard" if uses_hard_value else "surrogate",
@@ -823,6 +847,7 @@ def evaluate_alm_objective(
     coil_length_objective=None,
     coil_length_threshold=None,
     banana_current=None,
+    banana_currents=None,
     banana_current_threshold=None,
     JPoloidalExtent=None,
     poloidal_extent_threshold=None,
@@ -921,6 +946,15 @@ def evaluate_alm_objective(
                 objective_optimizable,
             )
         )
+    if banana_currents is not None and banana_current_threshold is not None:
+        for index, current in enumerate(banana_currents):
+            hardware_constraints[independent_banana_current_alm_constraint_name(index)] = (
+                _scalar_abs_upper_bound_constraint(
+                    current,
+                    banana_current_threshold,
+                    objective_optimizable,
+                )
+            )
     if (
         JPoloidalExtent is not None
         and poloidal_extent_threshold is not None
@@ -1001,6 +1035,9 @@ def evaluate_alm_objective(
     for exact_constraint_name in ("coil_length_upper_bound", "banana_current_upper_bound"):
         if exact_constraint_name in hardware_constraints:
             constraint_tolerance_by_name[exact_constraint_name] = 1.0e-3
+    for constraint_name in active_constraint_names:
+        if _is_independent_banana_current_alm_constraint_name(constraint_name):
+            constraint_tolerance_by_name[constraint_name] = 1.0e-3
     if "poloidal_extent" in hardware_constraints:
         constraint_tolerance_by_name["poloidal_extent"] = 1.0e-3
     constraint_activity_tolerances = np.asarray(
@@ -1096,10 +1133,8 @@ def evaluate_alm_objective(
                 else float(coil_length_threshold)
             )
         if banana_current_threshold is not None:
-            banana_current_spec = get_hardware_constraint_spec("banana_current")
-            base_eval["banana_current_upper_bound_threshold"] = min(
-                banana_current_spec.threshold,
-                float(banana_current_threshold),
+            base_eval["banana_current_upper_bound_threshold"] = float(
+                banana_current_threshold
             )
         if poloidal_extent_threshold is not None:
             base_eval["poloidal_extent_rad"] = (

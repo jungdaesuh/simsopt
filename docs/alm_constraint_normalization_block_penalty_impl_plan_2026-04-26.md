@@ -1,12 +1,12 @@
 # ALM Constraint Normalization and Block Penalty Implementation Plan
 
 Date: 2026-04-26
-Status: Phases 0 through 4 implemented; Phase 5 deferred
+Status: Phases 0 through 4 implemented; Phase 5 independent banana-current ALM implemented; remaining Phase 5 items deferred
 Scope: `examples/single_stage_optimization/alm_utils.py`, `banana_opt/hardware_constraint_schema.py`, `banana_opt/stage2_objectives.py`, `banana_opt/single_stage_objectives.py`, ALM result reporting, and focused ALM tests
 
 ## Review Verdict
 
-Approve Phases 0 through 4 for implementation. Phase 4 is implemented as an internal block-penalty path with scalar ALM preserved as the default. Phase 5 feature expansion remains deferred.
+Approve Phases 0 through 4 for implementation. Phase 4 is implemented as an internal block-penalty path with scalar ALM preserved as the default. Phase 5 feature expansion has started with independent banana-current ALM; multi-surface ALM, adaptive smoothing, and distance acceleration remain deferred.
 
 The current ALM engine is already a real projected inequality augmented Lagrangian, not a simple penalty wrapper. It has L-BFGS-B inner solves, boxed trust-radius subproblems, nonfinite candidate rejection, multiplier and penalty caps, hard-vs-surrogate routing, KKT-style stationarity handling, history callbacks, and best-feasible restore.
 
@@ -26,6 +26,7 @@ Current implementation status:
 - [x] ALM history now emits actionable raw/normalized sidecars, projected positive shifts, augmented terms, active pressure, constraint scales, blocks, normalized multipliers, raw dual estimates, surrogate-hard gap arrays, sign mismatch arrays, objective-to-augmented-term ratio, separated gradient/stationarity labels, and block summaries.
 - [x] Final ALM result payloads now emit `ALM_SUMMARY`, `ALM_MULTIPLIER_INTERPRETATION`, `ALM_FINAL_AUGMENTED_GRADIENT_NORM`, and `ALM_FINAL_SURROGATE_KKT_STATIONARITY_NORM`.
 - [x] Phase 4 block penalties are implemented as an internal, non-CLI path.
+- [x] Phase 5 independent banana-current ALM is implemented as one normalized current-block constraint per control current.
 
 Baseline artifact scan generated:
 
@@ -571,7 +572,7 @@ surface: surface-vessel spacing
 
 Do not implement these until normalization and diagnostics are stable.
 
-- [ ] Independent banana-current ALM: one normalized `abs(I_i) - I_max <= 0` constraint per control current.
+- [x] Independent banana-current ALM: one normalized `abs(I_i) - I_max <= 0` constraint per control current.
 - [ ] Multi-surface ALM: surface spacing constraints only at first; topology remains a gate/certification signal.
 - [ ] Adaptive smoothing: driven by normalized hard/surrogate gap counts.
 - [ ] Distance acceleration: KD-tree candidate pruning for ALM surrogate gradients, while keeping exact hard checks.

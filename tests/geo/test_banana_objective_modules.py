@@ -2648,6 +2648,140 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
 
         self.assertTrue(result["passed"], result)
 
+    def test_evaluate_alm_objective_supports_independent_banana_current_constraints(self):
+        nonqs = [_FakeAlgebraicObjective(2.0, [0.2, 0.0])]
+        brs = [_FakeAlgebraicObjective(3.0, [0.0, 0.3])]
+        jiota = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        jlength = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        current_a = _FakeCurrentObjective(17000.0, [2.0, -1.0])
+        current_b = _FakeCurrentObjective(-19000.0, [0.5, 1.5])
+
+        def fake_augmented(
+            base_value,
+            base_grad,
+            constraint_values,
+            constraint_grads,
+            multipliers,
+            penalty,
+        ):
+            self.assertAlmostEqual(base_value, 5.0)
+            np.testing.assert_allclose(base_grad, [0.2, 0.3])
+            np.testing.assert_allclose(constraint_values, [0.0625, 0.1875])
+            np.testing.assert_allclose(
+                constraint_grads,
+                [
+                    [0.000125, -0.0000625],
+                    [-0.00003125, -0.00009375],
+                ],
+            )
+            np.testing.assert_allclose(multipliers, [0.1, 0.2])
+            self.assertAlmostEqual(penalty, 8.0)
+            return {
+                "total": 5.5,
+                "grad": np.array([0.4, 0.6]),
+                "stationarity_norm": 0.25,
+            }
+
+        result = self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            nonqs,
+            brs,
+            RES_WEIGHT=1.0,
+            Jiota=jiota,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=jlength,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            JCurveSurface=zero,
+            JCurvature=zero,
+            multipliers=np.array([0.1, 0.2]),
+            penalty=8.0,
+            objective_optimizable=SimpleNamespace(),
+            curves=["curve_a"],
+            curve_curve_min_distance=0.05,
+            outer_surface="outer",
+            curve_surface_min_distance=0.02,
+            banana_curve="banana",
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=(
+                self.module.independent_banana_current_alm_constraint_name(0),
+                self.module.independent_banana_current_alm_constraint_name(1),
+            ),
+            curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
+            curve_surface_constraint_fn=lambda *_args: (-0.2, np.array([0.0, 0.0]), 0.0),
+            curvature_constraint_fn=lambda *_args: (-0.3, np.array([0.0, 0.0]), 0.0),
+            banana_currents=(current_a, current_b),
+            banana_current_threshold=16000.0,
+            augmented_inequality_objective_fn=fake_augmented,
+            include_diagnostics=False,
+        )
+
+        self.assertEqual(
+            result["constraint_names"],
+            ["banana_current_0_upper_bound", "banana_current_1_upper_bound"],
+        )
+        self.assertEqual(result["constraint_blocks"], ["current", "current"])
+        np.testing.assert_allclose(result["constraint_scales"], [16000.0, 16000.0])
+        np.testing.assert_allclose(result["raw_dual_update_values"], [1000.0, 3000.0])
+        np.testing.assert_allclose(result["raw_feasibility_values"], [1000.0, 3000.0])
+        np.testing.assert_allclose(result["dual_update_values"], [0.0625, 0.1875])
+        np.testing.assert_allclose(
+            result["constraint_activity_tolerances"],
+            [6.25e-8, 6.25e-8],
+        )
+        self.assertEqual(result["objective_value_kinds"], ["hard", "hard"])
+        self.assertEqual(result["dual_update_value_kinds"], ["hard", "hard"])
+
+    def test_evaluate_alm_objective_reports_active_banana_current_threshold(self):
+        nonqs = [_FakeAlgebraicObjective(2.0, [0.2, 0.0])]
+        brs = [_FakeAlgebraicObjective(3.0, [0.0, 0.3])]
+        jiota = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        jlength = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        banana_current = _FakeCurrentObjective(17000.0, [2.0, -1.0])
+
+        result = self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            nonqs,
+            brs,
+            RES_WEIGHT=1.0,
+            Jiota=jiota,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=jlength,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            JCurveSurface=zero,
+            JCurvature=zero,
+            multipliers=np.array([0.1]),
+            penalty=8.0,
+            objective_optimizable=SimpleNamespace(),
+            curves=["curve_a"],
+            curve_curve_min_distance=0.05,
+            outer_surface="outer",
+            curve_surface_min_distance=0.02,
+            banana_curve="banana",
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=("banana_current_upper_bound",),
+            curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
+            curve_surface_constraint_fn=lambda *_args: (-0.2, np.array([0.0, 0.0]), 0.0),
+            curvature_constraint_fn=lambda *_args: (-0.3, np.array([0.0, 0.0]), 0.0),
+            banana_current=banana_current,
+            banana_current_threshold=20000.0,
+            include_diagnostics=True,
+        )
+
+        self.assertEqual(result["banana_current_upper_bound_threshold"], 20000.0)
+        np.testing.assert_allclose(result["constraint_scales"], [20000.0])
+
     def test_evaluate_alm_objective_fast_path_keeps_constraint_payload_only(self):
         nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]
         brs = [_FakeAlgebraicObjective(3.0, [0.5, 0.5])]

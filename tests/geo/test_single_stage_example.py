@@ -9796,7 +9796,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         module.validate_single_stage_current_args(args)
 
-    def test_validate_single_stage_current_args_rejects_independent_alm(self):
+    def test_validate_single_stage_current_args_allows_independent_alm(self):
         module = load_single_stage_example_module()
 
         args = SimpleNamespace(
@@ -9806,12 +9806,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             allow_offspec_engineering_constraints=False,
         )
 
-        with self.assertRaisesRegex(
-            ValueError,
-            "--single-stage-banana-current-mode=independent is not supported with "
-            "--constraint-method=alm",
-        ):
-            module.validate_single_stage_current_args(args)
+        module.validate_single_stage_current_args(args)
 
     def test_validate_single_stage_current_args_rejects_invalid_mode(self):
         module = load_single_stage_example_module()
@@ -9829,22 +9824,39 @@ class CurrentBaselineContractTests(unittest.TestCase):
         ):
             module.validate_single_stage_current_args(args)
 
-    def test_current_single_stage_alm_banana_current_rejects_independent_mode(self):
+    def test_current_single_stage_alm_banana_currents_returns_independent_controls(self):
         module = load_single_stage_example_module()
         original_state = getattr(module, "banana_current_state", None)
         had_state = hasattr(module, "banana_current_state")
+        current_a = Current(1.2e4)
+        current_b = Current(-1.2e4)
         module.banana_current_state = module.SingleStageBananaCurrentState(
             mode="independent",
-            currents=(Current(1.2e4), Current(-1.2e4)),
+            currents=(current_a, current_b),
             seed_currents_A=(1.0e4, -1.0e4),
         )
         try:
-            with self.assertRaisesRegex(
-                ValueError,
-                "single-stage ALM banana-current constraints require "
-                "--single-stage-banana-current-mode=shared",
-            ):
-                module.current_single_stage_alm_banana_current()
+            self.assertIsNone(module.current_single_stage_alm_banana_current())
+            self.assertEqual(
+                module.current_single_stage_alm_banana_currents(),
+                (current_a, current_b),
+            )
+            self.assertEqual(
+                module.single_stage_alm_constraint_names(
+                    alm_formulation="weighted_sum",
+                    include_surface_surface=False,
+                    banana_current_state=module.banana_current_state,
+                ),
+                [
+                    "coil_coil_spacing",
+                    "coil_surface_spacing",
+                    "max_curvature",
+                    "coil_length_upper_bound",
+                    "poloidal_extent",
+                    "banana_current_0_upper_bound",
+                    "banana_current_1_upper_bound",
+                ],
+            )
         finally:
             if had_state:
                 module.banana_current_state = original_state
