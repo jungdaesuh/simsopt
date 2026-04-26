@@ -999,7 +999,7 @@ def cs_distance_pure(gammac, lc, gammas, ns, minimum_distance):
         integralweight = curve_weights[:, None] * surface_weights[None, :]
         diff = minimum_distance_jax - dists
         excess = jnp.where(diff > zero, diff, zero)
-        normalization = jnp.sum(jnp.ones_like(dists))
+        normalization = jnp.sum(jnp.broadcast_to(one, dists.shape))
         return jnp.sum(integralweight * jnp.square(excess)) / normalization
 
     def _chunk_with_weights(array):

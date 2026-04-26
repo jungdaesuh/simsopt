@@ -314,6 +314,35 @@ def test_curve_surface_chunked_gradient_respects_strict_transfer_guard(monkeypat
         invalidate_backend_cache()
 
 
+def test_curve_surface_dense_path_respects_strict_transfer_guard(monkeypatch):
+    gammac, lc, gammas, ns = tuple(
+        jax.device_put(array) for array in _curve_surface_distance_inputs()
+    )
+    minimum_distance = jax.device_put(np.asarray(0.05, dtype=np.float64))
+
+    monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", "0")
+    invalidate_backend_cache()
+    try:
+        seed = jax.device_put(np.asarray(1.0, dtype=np.float64))
+        with jax.transfer_guard("disallow"):
+            value, pullback = jax.vjp(
+                lambda current_gammac: cs_distance_pure(
+                    current_gammac,
+                    lc,
+                    gammas,
+                    ns,
+                    minimum_distance,
+                ),
+                gammac,
+            )
+            grad_gammac = pullback(seed)[0]
+        assert np.isfinite(float(jax.device_get(value)))
+        assert np.all(np.isfinite(np.asarray(jax.device_get(grad_gammac))))
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+
 def test_curve_surface_chunked_path_does_not_materialize_dense_matrix(monkeypatch):
     gamma_curve, gammadash_curve, gamma_surface, surface_normal = (
         _curve_surface_distance_inputs()

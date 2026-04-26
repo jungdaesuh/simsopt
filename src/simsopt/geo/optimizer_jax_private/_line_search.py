@@ -102,6 +102,10 @@ def _quadmin(a, fa, fpa, b, fb):
     return xmin
 
 
+def _line_search_sample_valid(phi, dphi, grad):
+    return jnp.isfinite(phi) & jnp.isfinite(dphi) & jnp.all(jnp.isfinite(grad))
+
+
 def _binary_replace(replace_bit, original_dict, new_dict, keys=None):
     if keys is None:
         keys = new_dict.keys()
@@ -148,7 +152,9 @@ def _zoom(
     delta1 = _as_jax_dtype(0.2, dtype)
     delta2 = _as_jax_dtype(0.1, dtype)
     max_zoom_iter = maxiter
-    lo_is_better = phi_lo <= phi_hi
+    lo_valid = _line_search_sample_valid(phi_lo, dphi_lo, g_lo)
+    hi_valid = _line_search_sample_valid(phi_hi, dphi_hi, g_hi)
+    lo_is_better = lo_valid & ((~hi_valid) | (phi_lo <= phi_hi))
     state = _ZoomState(
         done=_bool_scalar(False),
         failed=pass_through,
@@ -243,7 +249,8 @@ def _zoom(
             nfev=state.nfev + sample_eval_count,
             ngev=state.ngev + sample_eval_count,
         )
-        improves_best = jnp.isfinite(phi_j) & (phi_j < state.best_phi)
+        sample_valid = _line_search_sample_valid(phi_j, dphi_j, g_j)
+        improves_best = sample_valid & (phi_j < state.best_phi)
         state = state._replace(
             best_a=jnp.where(improves_best, a_j, state.best_a),
             best_phi=jnp.where(improves_best, phi_j, state.best_phi),
@@ -251,12 +258,15 @@ def _zoom(
             best_g=jnp.where(improves_best, g_j, state.best_g),
         )
 
-        hi_to_j = wolfe_one(a_j, phi_j) | (phi_j >= state.phi_lo)
-        star_to_j = wolfe_two(dphi_j) & (~hi_to_j)
+        hi_to_j = (~sample_valid) | wolfe_one(a_j, phi_j) | (phi_j >= state.phi_lo)
+        star_to_j = sample_valid & wolfe_two(dphi_j) & (~hi_to_j)
         hi_to_lo = (
-            (dphi_j * (state.a_hi - state.a_lo) >= zero) & (~hi_to_j) & (~star_to_j)
+            sample_valid
+            & (dphi_j * (state.a_hi - state.a_lo) >= zero)
+            & (~hi_to_j)
+            & (~star_to_j)
         )
-        lo_to_j = (~hi_to_j) & (~star_to_j)
+        lo_to_j = sample_valid & (~hi_to_j) & (~star_to_j)
         previous_a_lo = state.a_lo
         previous_phi_lo = state.phi_lo
         previous_dphi_lo = state.dphi_lo
@@ -351,7 +361,7 @@ def _zoom(
         state,
     )
     best_is_acceptable = (
-        jnp.isfinite(state.best_phi)
+        _line_search_sample_valid(state.best_phi, state.best_dphi, state.best_g)
         & (~wolfe_one(state.best_a, state.best_phi))
         & (state.best_phi < phi_0)
     )
@@ -388,7 +398,7 @@ def _apply_zoom_branch_result(
         ngev=state.ngev + zoom.ngev,
     )
     improves_best = (
-        jnp.isfinite(zoom.best_phi)
+        _line_search_sample_valid(zoom.best_phi, zoom.best_dphi, zoom.best_g)
         & (~wolfe_one(zoom.best_a, zoom.best_phi))
         & (zoom.best_phi < state.best_phi)
     )
@@ -504,8 +514,9 @@ def _line_search_from_restricted_func_and_grad(
             nfev=state.nfev + _int_scalar(1),
             ngev=state.ngev + _int_scalar(1),
         )
-        improves_best_i = (
-            jnp.isfinite(phi_i) & (~wolfe_one(a_i, phi_i)) & (phi_i < state.best_phi)
+        sample_valid = _line_search_sample_valid(phi_i, dphi_i, g_i)
+        improves_best_i = sample_valid & (~wolfe_one(a_i, phi_i)) & (
+            phi_i < state.best_phi
         )
         state = state._replace(
             best_a=jnp.where(improves_best_i, a_i, state.best_a),
@@ -514,11 +525,13 @@ def _line_search_from_restricted_func_and_grad(
             best_g=jnp.where(improves_best_i, g_i, state.best_g),
         )
 
-        star_to_zoom1 = wolfe_one(a_i, phi_i) | (
+        star_to_zoom1 = (~sample_valid) | wolfe_one(a_i, phi_i) | (
             (phi_i >= state.phi_i1) & (state.i > _int_scalar(1))
         )
-        star_to_i = wolfe_two(dphi_i) & (~star_to_zoom1)
-        star_to_zoom2 = (dphi_i >= zero) & (~star_to_zoom1) & (~star_to_i)
+        star_to_i = sample_valid & wolfe_two(dphi_i) & (~star_to_zoom1)
+        star_to_zoom2 = (
+            sample_valid & (dphi_i >= zero) & (~star_to_zoom1) & (~star_to_i)
+        )
         remaining_zoom_budget = jnp.maximum(
             _int_scalar(0),
             maxiter_jax - state.nfev,
@@ -611,7 +624,10 @@ def _line_search_from_restricted_func_and_grad(
         body,
         state,
     )
-    best_is_acceptable = jnp.isfinite(state.best_phi) & (state.best_phi < phi_0)
+    best_is_acceptable = (
+        _line_search_sample_valid(state.best_phi, state.best_dphi, state.best_g)
+        & (state.best_phi < phi_0)
+    )
     state = state._replace(
         failed=jnp.where(
             (state.failed | (~state.done)) & best_is_acceptable,

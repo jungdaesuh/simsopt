@@ -177,20 +177,28 @@ def _configure_transfer_guard_cpu_parity_backend() -> None:
 
 
 class _CompileCounter(logging.Handler):
-    def __init__(self) -> None:
+    def __init__(self, fragments: tuple[str, ...] = ("_run_solver)",)) -> None:
         super().__init__()
+        self.fragments = fragments
         self.count = 0
 
     def emit(self, record: logging.LogRecord) -> None:
         message = record.getMessage()
-        if "Compiling jit(" in message and "_run_solver)" in message:
+        if "Compiling jit(" in message and any(
+            fragment in message for fragment in self.fragments
+        ):
             self.count += 1
 
 
-def _assert_run_solver_compiles_once(run_once) -> int:
+def _assert_solver_compile_count(
+    run_once,
+    *,
+    fragments: tuple[str, ...],
+    expected_compile_count: int,
+) -> int:
     logger = logging.getLogger("jax")
     old_level = logger.level
-    handler = _CompileCounter()
+    handler = _CompileCounter(fragments)
     logger.addHandler(handler)
     logger.setLevel(logging.WARNING)
     try:
@@ -198,11 +206,31 @@ def _assert_run_solver_compiles_once(run_once) -> int:
         with jax.log_compiles(True):
             for _ in range(3):
                 run_once()
-        assert handler.count == 1, handler.count
+        assert handler.count == expected_compile_count, handler.count
         return handler.count
     finally:
         logger.removeHandler(handler)
         logger.setLevel(old_level)
+
+
+def _assert_run_solver_compiles_once(run_once) -> int:
+    return _assert_solver_compile_count(
+        run_once,
+        fragments=("_run_solver)",),
+        expected_compile_count=1,
+    )
+
+
+def _assert_lbfgs_private_solver_does_not_compile(run_once) -> int:
+    return _assert_solver_compile_count(
+        run_once,
+        fragments=(
+            "_run_solver)",
+            "lbfgs_private_step_solver)",
+            "lbfgs_private_finalize_solver)",
+        ),
+        expected_compile_count=0,
+    )
 
 
 def _run_compile_count_case(method: OptimizerMethod) -> None:
@@ -222,7 +250,10 @@ def _run_compile_count_case(method: OptimizerMethod) -> None:
         result = jax_minimize(cacheable_quad, x0, method=method, maxiter=5)
         assert result.success is True
 
-    compile_count = _assert_run_solver_compiles_once(run_once)
+    if method == "lbfgs-ondevice":
+        compile_count = _assert_lbfgs_private_solver_does_not_compile(run_once)
+    else:
+        compile_count = _assert_run_solver_compiles_once(run_once)
     print(
         json.dumps(
             {
@@ -284,7 +315,7 @@ def _run_target_compile_count_case() -> None:
         )
         assert result.success is True
 
-    compile_count = _assert_run_solver_compiles_once(run_once)
+    compile_count = _assert_lbfgs_private_solver_does_not_compile(run_once)
     print(
         json.dumps(
             {
@@ -345,7 +376,7 @@ def _run_stage2_target_compile_count_case() -> None:
         assert final_dofs.shape == initial_dofs.shape
         assert np.all(np.isfinite(np.asarray(final_dofs, dtype=np.float64)))
 
-    compile_count = _assert_run_solver_compiles_once(run_once)
+    compile_count = _assert_lbfgs_private_solver_does_not_compile(run_once)
     print(
         json.dumps(
             {

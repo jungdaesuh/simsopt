@@ -5,6 +5,7 @@ to eliminate code duplication (Issue #23).
 """
 import numpy as np
 import matplotlib.pyplot as plt
+import jax
 
 
 def norm_field_summary(surf, bs):
@@ -21,7 +22,7 @@ def norm_field_summary(surf, bs):
     sqrt_area = np.sqrt(absn.reshape((-1, 1)) / float(absn.size))
     surf_area = sqrt_area**2
     bs.set_points(surf.gamma().reshape((-1, 3)))
-    Bfinal = bs.B().reshape(n.shape)
+    Bfinal = np.asarray(jax.device_get(bs.B())).reshape(n.shape)
     Bfinal_norm = np.sum(Bfinal * unitn, axis=2)[:, :, None]
     modBfinal = np.sqrt(np.sum(Bfinal**2, axis=2))[:, :, None]
     relBfinal_norm = Bfinal_norm / modBfinal

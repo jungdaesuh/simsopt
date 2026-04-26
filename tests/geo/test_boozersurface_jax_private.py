@@ -252,6 +252,54 @@ def test_line_search_value_and_grad_skips_zero_step_reevaluation_with_explicit_s
     assert float(result.f_k) == pytest.approx(0.5 * 0.875**2)
 
 
+def test_line_search_value_and_grad_shrinks_past_nonfinite_trial_gradient():
+    def objective_with_invalid_gradient_region(x):
+        a = x[0]
+        value = -a + a * a
+        grad = jnp.where(a >= 0.1, jnp.nan, -1.0 + 2.0 * a)
+        return value, jnp.asarray([grad], dtype=x.dtype)
+
+    result = _opt._line_search_value_and_grad(
+        objective_with_invalid_gradient_region,
+        jnp.asarray([0.0], dtype=jnp.float64),
+        jnp.asarray([1.0], dtype=jnp.float64),
+        old_fval=jnp.asarray(0.0, dtype=jnp.float64),
+        gfk=jnp.asarray([-1.0], dtype=jnp.float64),
+        initial_step_size=0.2,
+        maxiter=12,
+    )
+
+    assert bool(result.failed) is False
+    assert float(result.a_k) < 0.1
+    assert np.isfinite(float(result.f_k))
+    assert np.all(np.isfinite(np.asarray(result.g_k)))
+
+
+def test_host_line_search_value_and_grad_shrinks_past_nonfinite_trial_gradient():
+    from simsopt.geo.optimizer_jax_private import _lbfgs as _lbfgs_module
+
+    def objective_with_invalid_gradient_region(x):
+        a = np.asarray(x, dtype=np.float64)[0]
+        value = -a + a * a
+        grad = np.nan if a >= 0.1 else -1.0 + 2.0 * a
+        return value, np.asarray([grad], dtype=np.float64)
+
+    result = _lbfgs_module._line_search_value_and_grad_host(
+        objective_with_invalid_gradient_region,
+        np.asarray([0.0], dtype=np.float64),
+        np.asarray([1.0], dtype=np.float64),
+        old_fval=np.float64(0.0),
+        gfk=np.asarray([-1.0], dtype=np.float64),
+        initial_step_size=0.2,
+        maxiter=12,
+    )
+
+    assert result.failed is False
+    assert result.a_k < 0.1
+    assert np.isfinite(result.f_k)
+    assert np.all(np.isfinite(result.g_k))
+
+
 def test_zoom_reuses_cached_bracketing_sample_without_extra_eval(monkeypatch):
     # Access the submodule for monkeypatching, then restore the function
     # reference that __init__.py exports so _opt._line_search stays callable
@@ -419,7 +467,7 @@ def _private_lbfgs_quadratic_state(
 
     monkeypatch.setattr(
         _lbfgs_module,
-        "_line_search_value_and_grad",
+        "_line_search_value_and_grad_host",
         fake_line_search,
     )
     state = _lbfgs_module._minimize_lbfgs_private(
@@ -449,98 +497,113 @@ def _assert_lbfgs_state_preserved(state, x0, quad, *, ls_status=None):
     assert float(state.gamma) == pytest.approx(1.0)
 
 
-def test_lbfgs_history_updates_wrap_without_shifting():
+def test_two_loop_recursion_uses_history_count_not_iteration_count():
     from simsopt.geo.optimizer_jax_private import _lbfgs as _lbfgs_module
 
-    history = jnp.zeros((3, 2), dtype=jnp.float64)
-    updates = (
-        (0, [1.0, 10.0]),
-        (1, [2.0, 20.0]),
-        (2, [3.0, 30.0]),
-        (3, [4.0, 40.0]),
+    g_k = np.asarray([3.0, -1.0], dtype=np.float64)
+    gamma = 0.75
+    s_history = np.asarray(
+        [
+            [1.0, 0.0],
+            [0.0, 2.0],
+            [100.0, 100.0],
+        ],
+        dtype=np.float64,
     )
-    for step_count, update in updates:
-        history = _lbfgs_module._update_history_vectors(
-            history,
-            jnp.asarray(update, dtype=jnp.float64),
-            step_count=jnp.asarray(step_count, dtype=jnp.int32),
-        )
+    y_history = np.asarray(
+        [
+            [2.0, 0.0],
+            [0.0, 4.0],
+            [100.0, 100.0],
+        ],
+        dtype=np.float64,
+    )
+    rho_history = np.asarray([0.5, 0.25, 1.0e6], dtype=np.float64)
 
-    np.testing.assert_allclose(
-        np.asarray(history),
-        np.asarray(
-            [
-                [4.0, 40.0],
-                [2.0, 20.0],
-                [3.0, 30.0],
-            ],
-            dtype=np.float64,
-        ),
+    direction = _lbfgs_module._two_loop_recursion_host(
+        g_k,
+        gamma,
+        s_history,
+        y_history,
+        rho_history,
+        history_count=2,
     )
+    expected = _lbfgs_module._two_loop_recursion_host(
+        g_k,
+        gamma,
+        s_history[:2],
+        y_history[:2],
+        rho_history[:2],
+        history_count=2,
+    )
+
+    np.testing.assert_allclose(direction, expected, rtol=1e-12, atol=1e-12)
 
 
 def test_two_loop_recursion_matches_materialized_history_after_wrap():
     from simsopt.geo.optimizer_jax_private import _lbfgs as _lbfgs_module
 
-    s_oldest_to_newest = jnp.asarray(
+    g_k = np.asarray([3.0, -1.0], dtype=np.float64)
+    gamma = 0.75
+    s_oldest_to_newest = np.asarray(
         [
             [1.0, 0.0],
             [0.0, 2.0],
             [1.5, 0.5],
             [0.5, 1.5],
         ],
-        dtype=jnp.float64,
+        dtype=np.float64,
     )
-    y_oldest_to_newest = jnp.asarray(
+    y_oldest_to_newest = np.asarray(
         [
             [2.0, 0.0],
             [0.0, 4.0],
             [3.0, 1.0],
             [1.0, 3.0],
         ],
-        dtype=jnp.float64,
+        dtype=np.float64,
     )
-    rho_oldest_to_newest = jnp.asarray([0.5, 0.25, 0.2, 0.2], dtype=jnp.float64)
+    rho_oldest_to_newest = np.asarray([0.5, 0.25, 0.2, 0.2], dtype=np.float64)
+    s_ring = np.asarray(
+        [
+            [1.5, 0.5],
+            [0.5, 1.5],
+            [1.0, 0.0],
+            [0.0, 2.0],
+        ],
+        dtype=np.float64,
+    )
+    y_ring = np.asarray(
+        [
+            [3.0, 1.0],
+            [1.0, 3.0],
+            [2.0, 0.0],
+            [0.0, 4.0],
+        ],
+        dtype=np.float64,
+    )
+    rho_ring = np.asarray([0.2, 0.2, 0.5, 0.25], dtype=np.float64)
 
-    ring_state = types.SimpleNamespace(
-        k=jnp.asarray(6, dtype=jnp.int32),
-        g_k=jnp.asarray([3.0, -1.0], dtype=jnp.float64),
-        gamma=jnp.asarray(0.75, dtype=jnp.float64),
-        s_history=jnp.asarray(
-            [
-                [1.5, 0.5],
-                [0.5, 1.5],
-                [1.0, 0.0],
-                [0.0, 2.0],
-            ],
-            dtype=jnp.float64,
-        ),
-        y_history=jnp.asarray(
-            [
-                [3.0, 1.0],
-                [1.0, 3.0],
-                [2.0, 0.0],
-                [0.0, 4.0],
-            ],
-            dtype=jnp.float64,
-        ),
-        rho_history=jnp.asarray([0.2, 0.2, 0.5, 0.25], dtype=jnp.float64),
+    ring_direction = _lbfgs_module._two_loop_recursion_host(
+        g_k,
+        gamma,
+        s_ring,
+        y_ring,
+        rho_ring,
+        history_count=6,
     )
-    materialized_state = types.SimpleNamespace(
-        k=jnp.asarray(4, dtype=jnp.int32),
-        g_k=jnp.asarray([3.0, -1.0], dtype=jnp.float64),
-        gamma=jnp.asarray(0.75, dtype=jnp.float64),
-        s_history=s_oldest_to_newest,
-        y_history=y_oldest_to_newest,
-        rho_history=rho_oldest_to_newest,
+    materialized_direction = _lbfgs_module._two_loop_recursion_host(
+        g_k,
+        gamma,
+        s_oldest_to_newest,
+        y_oldest_to_newest,
+        rho_oldest_to_newest,
+        history_count=4,
     )
-
-    ring_direction = _lbfgs_module._two_loop_recursion(ring_state)
-    materialized_direction = _lbfgs_module._two_loop_recursion(materialized_state)
 
     np.testing.assert_allclose(
-        np.asarray(ring_direction),
-        np.asarray(materialized_direction),
+        ring_direction,
+        materialized_direction,
         rtol=1e-12,
         atol=1e-12,
     )
@@ -573,7 +636,7 @@ def test_minimize_lbfgs_private_threads_initial_step_size_to_first_line_search(
 
     monkeypatch.setattr(
         _lbfgs_module,
-        "_line_search_value_and_grad",
+        "_line_search_value_and_grad_host",
         fake_line_search,
     )
 
@@ -586,7 +649,58 @@ def test_minimize_lbfgs_private_threads_initial_step_size_to_first_line_search(
 
     assert len(captured) == 1
     assert captured[0] is not None
-    assert getattr(captured[0], "dtype", None) == jnp.dtype(jnp.float64)
+    assert np.asarray(captured[0]).dtype == np.dtype(np.float64)
+
+
+def test_minimize_lbfgs_private_threads_previous_objective_to_later_line_search(
+    monkeypatch,
+):
+    from simsopt.geo.optimizer_jax_private import _LineSearchResults
+    from simsopt.geo.optimizer_jax_private import _lbfgs as _lbfgs_module
+
+    captured = []
+
+    def quad(x):
+        return 0.5 * jnp.dot(x, x)
+
+    def fake_line_search(*_args, **kwargs):
+        captured.append(
+            (
+                kwargs.get("old_old_fval"),
+                kwargs.get("initial_step_size"),
+            )
+        )
+        failed = len(captured) == 2
+        return _LineSearchResults(
+            failed=jnp.asarray(failed),
+            nit=jnp.asarray(1),
+            nfev=jnp.asarray(1),
+            ngev=jnp.asarray(1),
+            k=jnp.asarray(1),
+            a_k=jnp.asarray(1.0e-4, dtype=jnp.float64),
+            f_k=jnp.asarray(0.49 if not failed else 0.48, dtype=jnp.float64),
+            g_k=jnp.asarray([0.99 if not failed else 0.98], dtype=jnp.float64),
+            status=jnp.asarray(1 if failed else 0, dtype=jnp.int32),
+        )
+
+    monkeypatch.setattr(
+        _lbfgs_module,
+        "_line_search_value_and_grad_host",
+        fake_line_search,
+    )
+
+    _lbfgs_module._minimize_lbfgs_private(
+        quad,
+        jnp.asarray([1.0], dtype=jnp.float64),
+        maxiter=3,
+        initial_step_size=1.0e-4,
+    )
+
+    assert len(captured) == 2
+    np.testing.assert_allclose(captured[0][0], 1.0, rtol=0.0, atol=1e-15)
+    np.testing.assert_allclose(captured[1][0], 0.5, rtol=0.0, atol=1e-15)
+    assert captured[0][1] is not None
+    assert float(captured[1][1]) == 0.0
 
 
 @pytest.mark.parametrize("backend_mode", _ALL_JAX_BACKEND_MODES)
@@ -953,20 +1067,20 @@ class TestOptimizerAdapterPrivate:
 
         def fake_line_search(*_args, **_kwargs):
             return _LineSearchResults(
-                failed=jnp.array(False),
-                nit=jnp.array(1),
-                nfev=jnp.array(1),
-                ngev=jnp.array(1),
-                k=jnp.array(1),
-                a_k=jnp.array(1.0, dtype=jnp.float64),
-                f_k=jnp.array(np.nan, dtype=jnp.float64),
-                g_k=jnp.array([np.nan, np.nan], dtype=jnp.float64),
-                status=jnp.array(0),
+                failed=False,
+                nit=1,
+                nfev=1,
+                ngev=1,
+                k=1,
+                a_k=np.float64(1.0),
+                f_k=np.float64(np.nan),
+                g_k=np.array([np.nan, np.nan], dtype=np.float64),
+                status=0,
             )
 
         monkeypatch.setattr(
             _lbfgs_module,
-            "_line_search_value_and_grad",
+            "_line_search_value_and_grad_host",
             fake_line_search,
         )
 
@@ -1058,12 +1172,16 @@ class TestOptimizerAdapterPrivate:
     def test_lbfgs_relative_objective_reduction_matches_scipy_formula(self):
         from simsopt.geo.optimizer_jax_private import _lbfgs as _lbfgs_module
 
-        f_k = jnp.asarray(1000.0, dtype=jnp.float64)
-        f_kp1 = jnp.asarray(999.5, dtype=jnp.float64)
+        f_k = np.float64(1000.0)
+        f_kp1 = np.float64(999.5)
 
-        reduction = _lbfgs_module._relative_objective_reduction(f_k, f_kp1)
+        reduction = _lbfgs_module._relative_objective_reduction_host(
+            f_k,
+            f_kp1,
+            dtype=np.float64,
+        )
 
-        assert float(reduction) == pytest.approx(5.0e-4)
+        assert reduction == pytest.approx(5.0e-4)
 
     @PRIVATE_OPTIMIZER_RUNTIME
     def test_minimize_lbfgs_private_ftol_uses_relative_reduction(
@@ -1398,7 +1516,7 @@ class TestOptimizerAdapterPrivate:
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
     def test_bfgs_ondevice_nan_objective_terminates(self):
-        """A NaN objective encountered mid-loop must fail from the last finite iterate."""
+        """A NaN trial must shrink/fail without poisoning the last finite iterate."""
 
         def nan_after_first_step(x):
             return jax.lax.cond(
@@ -1421,7 +1539,8 @@ class TestOptimizerAdapterPrivate:
         assert float(result.fun) == pytest.approx(float(0.5 * jnp.dot(x0, x0)))
         assert np.all(np.isfinite(np.asarray(result.x)))
         assert np.all(np.isfinite(np.asarray(result.jac)))
-        assert "non-finite objective or gradient" in result.message
+        assert result.status == 2
+        assert result.message == "Insufficient progress."
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
@@ -2015,7 +2134,7 @@ class TestBoozerSurfaceJAXClassPrivate:
     def test_run_code_ondevice_limited_memory_emits_sparse_progress_updates(
         self, monkeypatch
     ):
-        """On-device L-BFGS progress should surface the same sparse stage updates."""
+        """Host-dispatched L-BFGS progress should surface sparse stage updates."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["limited_memory"] = True
@@ -2066,7 +2185,7 @@ class TestBoozerSurfaceJAXClassPrivate:
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LIMITED_MEMORY_RUNTIME
     def test_run_code_ondevice_limited_memory_runs_without_monkeypatch(self):
-        """limited_memory=True must run the real on-device L-BFGS lane."""
+        """limited_memory=True must run the real lbfgs-ondevice lane."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["limited_memory"] = True

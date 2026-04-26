@@ -96,10 +96,24 @@ _OVERRIDDEN_VALUE_FLAGS = frozenset(
         "--maxiter",
         "--initial-step-scale",
         "--initial-step-maxiter",
+        "--jax-runtime-seed-spec",
     }
 )
+_WARM_START_CONTRACT_FLAGS = (
+    ("TARGET_VOLUME", "--vol-target"),
+    ("TARGET_IOTA", "--iota-target"),
+    ("CURVATURE_THRESHOLD", "--curvature-threshold"),
+    ("CC_DIST", "--cc-dist"),
+    ("CS_DIST", "--cs-dist"),
+    ("SS_DIST", "--ss-dist"),
+    ("BANANA_CURRENT_MAX_A", "--banana-current-max-A"),
+    ("LENGTH_TARGET", "--length-target"),
+)
+_SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME = "single_stage_jax_runtime_spec.json"
 
 _STAGE_RESULT_SUMMARY_KEYS = (
+    "backend",
+    "optimizer_backend",
     "TARGET_IOTA",
     "FINAL_IOTA",
     "FINAL_NON_QS",
@@ -139,10 +153,14 @@ _STAGE_RESULT_SUMMARY_KEYS = (
     "INITIAL_MAX_CURVATURE",
     "TIMINGS",
 )
-_REQUIRED_STAGE_ARTIFACT_FILENAMES = (
+_REQUIRED_LEGACY_STAGE_ARTIFACT_FILENAMES = (
     "results.json",
     "biot_savart_opt.json",
     "surf_opt.json",
+)
+_REQUIRED_JAX_STAGE_ARTIFACT_FILENAMES = (
+    "results.json",
+    _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME,
 )
 _REQUIRED_NONFINAL_PROMOTION_FINITE_KEYS = ("FINAL_IOTA", "FINAL_G", "FIELD_ERROR")
 _REQUIRED_FINAL_FINITE_KEYS = ("FINAL_IOTA", "FINAL_G", "FIELD_ERROR")
@@ -172,6 +190,41 @@ _TARGET_LANE_PROFILE_COMPONENT_KEYS = (
     "solved_total_gradient",
     "value_and_grad_pipeline",
 )
+
+
+RunResolution = tuple[int, int, int, int]
+
+
+def stage_resolution(stage: ContinuationStage) -> RunResolution:
+    return (stage.mpol, stage.ntor, stage.nphi, stage.ntheta)
+
+
+def read_single_stage_run_resolution(run_dir: Path) -> RunResolution:
+    run_results = load_json(run_dir / "results.json")
+    return (
+        int(run_results["mpol"]),
+        int(run_results["ntor"]),
+        int(run_results["nphi"]),
+        int(run_results["ntheta"]),
+    )
+
+
+def select_continuation_stages_for_initial_resolution(
+    stages: list[ContinuationStage],
+    initial_resolution: RunResolution | None,
+) -> list[ContinuationStage]:
+    if initial_resolution is None:
+        return stages
+    for index, stage in enumerate(stages):
+        resolution = stage_resolution(stage)
+        if resolution == initial_resolution:
+            return stages[index:] if index == len(stages) - 1 else stages[index + 1 :]
+        if all(
+            stage_value >= initial_value
+            for stage_value, initial_value in zip(resolution, initial_resolution)
+        ):
+            return stages[index:]
+    return [stages[-1]]
 
 
 def build_default_continuation_stages(
@@ -287,9 +340,24 @@ def summarize_single_stage_results(results: dict[str, object]) -> dict[str, obje
     return {key: results.get(key) for key in _STAGE_RESULT_SUMMARY_KEYS}
 
 
-def detect_stage_artifacts(run_dir: Path) -> dict[str, object]:
+def required_stage_artifact_filenames(
+    results: dict[str, object],
+) -> tuple[str, ...]:
+    if (
+        results.get("backend") == "jax"
+        and results.get("optimizer_backend") == "ondevice"
+    ):
+        return _REQUIRED_JAX_STAGE_ARTIFACT_FILENAMES
+    return _REQUIRED_LEGACY_STAGE_ARTIFACT_FILENAMES
+
+
+def detect_stage_artifacts(
+    run_dir: Path,
+    *,
+    required_filenames: tuple[str, ...],
+) -> dict[str, object]:
     artifact_paths = {
-        filename: run_dir / filename for filename in _REQUIRED_STAGE_ARTIFACT_FILENAMES
+        filename: run_dir / filename for filename in required_filenames
     }
     return {
         "run_dir": str(run_dir),
@@ -777,9 +845,12 @@ def collect_stage_run_snapshot(stage_output_root: Path) -> dict[str, object]:
 
     run_dir = results_paths[0].parent
     snapshot["run_dir"] = str(run_dir)
-    snapshot["artifacts"] = detect_stage_artifacts(run_dir)
     try:
         loaded_results = load_single_stage_results(run_dir)
+        snapshot["artifacts"] = detect_stage_artifacts(
+            run_dir,
+            required_filenames=required_stage_artifact_filenames(loaded_results),
+        )
         snapshot["results"] = summarize_single_stage_results(loaded_results)
         snapshot["profiling"] = build_stage_profiling_summary(
             loaded_results,
@@ -847,12 +918,40 @@ def build_stage_jax_profile_dir(
     return jax_profile_root / f"stage-{stage_index:02d}-{stage.name}"
 
 
+def build_stage_jax_runtime_seed_spec_path(stage_output_root: Path) -> Path:
+    return stage_output_root / _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME
+
+
+def existing_stage_jax_runtime_seed_spec_path(
+    warm_start_run_dir: Path,
+    stage: ContinuationStage,
+) -> Path | None:
+    path = warm_start_run_dir / _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME
+    if not path.exists():
+        return None
+    with open(path, "r", encoding="utf-8") as infile:
+        payload = json.load(infile)
+    surface = payload["surface"]
+    quadrature = payload["quadrature"]
+    shape = (
+        int(surface["mpol"]),
+        int(surface["ntor"]),
+        int(quadrature["nphi"]),
+        int(quadrature["ntheta"]),
+    )
+    if shape != (stage.mpol, stage.ntor, stage.nphi, stage.ntheta):
+        return None
+    return path
+
+
 def build_stage_record(
     *,
     stage: ContinuationStage,
     stage_output_root: Path,
     stage2_seed_path: Path | None,
     warm_start_run_dir: Path | None,
+    jax_runtime_seed_spec_path: Path | None,
+    jax_runtime_seed_spec_command: list[str] | None,
     jax_profile_dir: Path | None,
     command: list[str],
 ) -> dict[str, object]:
@@ -879,6 +978,10 @@ def build_stage_record(
         "warm_start_run_dir": None
         if warm_start_run_dir is None
         else str(warm_start_run_dir),
+        "jax_runtime_seed_spec_path": None
+        if jax_runtime_seed_spec_path is None
+        else str(jax_runtime_seed_spec_path),
+        "jax_runtime_seed_spec_command": jax_runtime_seed_spec_command,
         "jax_profile_dir": None
         if jax_profile_dir is None
         else str(jax_profile_dir),
@@ -1023,9 +1126,15 @@ def evaluate_continuation_stage(
     failures: list[str] = []
     warnings: list[str] = []
     completed = execution_status == "completed" and isinstance(run_dir_value, str) and bool(run_dir_value)
+    if not isinstance(results, dict):
+        results = {}
+    required_artifacts = required_stage_artifact_filenames(results)
     artifact_report: dict[str, object] | None = None
     if completed:
-        artifact_report = detect_stage_artifacts(Path(run_dir_value))
+        artifact_report = detect_stage_artifacts(
+            Path(run_dir_value),
+            required_filenames=required_artifacts,
+        )
         missing_artifacts = [
             filename
             for filename, payload in artifact_report["files"].items()
@@ -1040,9 +1149,8 @@ def evaluate_continuation_stage(
         if isinstance(run_dir_value, str) and bool(run_dir_value):
             warnings.append("stage produced a run_dir but did not finish cleanly")
 
-    if not isinstance(results, dict):
+    if not isinstance(stage_record.get("results"), dict):
         failures.append("stage did not record a results snapshot")
-        results = {}
     results_load_error = stage_record.get("results_load_error")
     if isinstance(results_load_error, str):
         failures.append(f"stage results could not be loaded: {results_load_error}")
@@ -1234,7 +1342,10 @@ def build_continuation_validation_report(
             "max_final_field_error": max_final_field_error,
             "max_final_abs_iota_error": max_final_abs_iota_error,
             "max_final_non_qs": max_final_non_qs,
-            "required_stage_artifacts": list(_REQUIRED_STAGE_ARTIFACT_FILENAMES),
+            "required_stage_artifacts": {
+                "legacy": list(_REQUIRED_LEGACY_STAGE_ARTIFACT_FILENAMES),
+                "jax_ondevice": list(_REQUIRED_JAX_STAGE_ARTIFACT_FILENAMES),
+            },
             "required_nonfinal_promotion_finite_keys": list(
                 _REQUIRED_NONFINAL_PROMOTION_FINITE_KEYS
             ),
@@ -1299,7 +1410,7 @@ def _require_campaign_donor_run_dir(path_value: str) -> Path:
         raise SystemExit(f"Campaign donor run directory does not exist: {run_dir}")
     missing = [
         filename
-        for filename in _REQUIRED_STAGE_ARTIFACT_FILENAMES
+        for filename in _REQUIRED_LEGACY_STAGE_ARTIFACT_FILENAMES
         if not (run_dir / filename).exists()
     ]
     if missing:
@@ -1504,6 +1615,25 @@ def append_optional_value_flag(
     command.extend([flag, str(value)])
 
 
+def load_warm_start_contract_overrides(
+    warm_start_run_dir: Path | None,
+) -> dict[str, float]:
+    if warm_start_run_dir is None:
+        return {}
+    results_path = warm_start_run_dir / "results.json"
+    with open(results_path, "r", encoding="utf-8") as infile:
+        results = json.load(infile)
+    contract_overrides: dict[str, float] = {}
+    for results_key, flag in _WARM_START_CONTRACT_FLAGS:
+        value = float(results[results_key])
+        if not math.isfinite(value):
+            raise ValueError(
+                f"warm-start contract {results_key} must be finite in {results_path}"
+            )
+        contract_overrides[flag] = value
+    return contract_overrides
+
+
 def resolve_initial_stage_inputs(
     *,
     initial_stage2_bs_path: str | None,
@@ -1517,10 +1647,43 @@ def resolve_initial_stage_inputs(
     if initial_stage2_bs_path is not None:
         stage2_seed_path = Path(initial_stage2_bs_path).expanduser().resolve()
     elif warm_start_run_dir is not None:
-        stage2_seed_path = resolve_stage_seed_path(warm_start_run_dir)
+        seed_path = warm_start_run_dir / "biot_savart_opt.json"
+        runtime_spec_path = warm_start_run_dir / _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME
+        stage2_seed_path = seed_path if seed_path.exists() else None
+        if stage2_seed_path is None and not runtime_spec_path.exists():
+            stage2_seed_path = resolve_stage_seed_path(warm_start_run_dir)
     else:
         stage2_seed_path = None
     return stage2_seed_path, warm_start_run_dir
+
+
+def build_stage_jax_runtime_seed_spec_command(
+    *,
+    python_executable: str,
+    passthrough_args: list[str],
+    stage: ContinuationStage,
+    warm_start_run_dir: Path,
+    jax_runtime_seed_spec_path: Path,
+) -> list[str]:
+    command = [
+        python_executable,
+        str(SINGLE_STAGE_SCRIPT),
+        "--warm-start-run-dir",
+        str(warm_start_run_dir),
+        "--jax-runtime-seed-spec",
+        str(jax_runtime_seed_spec_path),
+        "--compile-jax-runtime-seed-spec",
+        "--mpol",
+        str(stage.mpol),
+        "--ntor",
+        str(stage.ntor),
+        "--nphi",
+        str(stage.nphi),
+        "--ntheta",
+        str(stage.ntheta),
+    ]
+    command.extend(passthrough_args)
+    return command
 
 
 def build_stage_command(
@@ -1531,8 +1694,10 @@ def build_stage_command(
     stage_output_root: Path,
     stage2_seed_path: Path | None,
     warm_start_run_dir: Path | None,
+    jax_runtime_seed_spec_path: Path | None,
     jax_profile_dir: Path | None,
     use_target_lane_fast_trials: bool,
+    warm_start_target_overrides: dict[str, float] | None = None,
 ) -> list[str]:
     command = [
         python_executable,
@@ -1565,9 +1730,22 @@ def build_stage_command(
     append_optional_value_flag(
         command,
         passthrough_args,
+        flag="--jax-runtime-seed-spec",
+        value=jax_runtime_seed_spec_path,
+    )
+    append_optional_value_flag(
+        command,
+        passthrough_args,
         flag="--jax-profile-dir",
         value=jax_profile_dir,
     )
+    for flag, value in (warm_start_target_overrides or {}).items():
+        append_optional_value_flag(
+            command,
+            passthrough_args,
+            flag=flag,
+            value=value,
+        )
     if stage.minimal_artifacts and not passthrough_has_flag(
         passthrough_args, "--minimal-artifacts"
     ):
@@ -2271,17 +2449,6 @@ def run_single_continuation_with_args(
     use_target_lane_fast_trials = continuation_uses_target_lane_fast_trials(
         passthrough_args
     )
-    stages = build_default_continuation_stages(
-        final_mpol=args.mpol,
-        final_ntor=args.ntor,
-        final_nphi=args.nphi,
-        final_ntheta=args.ntheta,
-        final_maxiter=args.maxiter,
-        coarse_maxiter=args.coarse_maxiter,
-        medium_maxiter=args.medium_maxiter,
-        prefinal_maxiter=args.prefinal_maxiter,
-        trial_policy=args.trial_policy,
-    )
     initial_stage2_seed_path, initial_warm_start_run_dir = (
         resolve_initial_stage_inputs(
             initial_stage2_bs_path=args.initial_stage2_bs_path,
@@ -2292,6 +2459,25 @@ def run_single_continuation_with_args(
         initial_stage2_seed_path = forced_initial_stage2_seed_path.resolve()
     if forced_initial_warm_start_run_dir is not None:
         initial_warm_start_run_dir = forced_initial_warm_start_run_dir.resolve()
+    initial_warm_start_resolution = (
+        None
+        if initial_warm_start_run_dir is None
+        else read_single_stage_run_resolution(initial_warm_start_run_dir)
+    )
+    stages = select_continuation_stages_for_initial_resolution(
+        build_default_continuation_stages(
+            final_mpol=args.mpol,
+            final_ntor=args.ntor,
+            final_nphi=args.nphi,
+            final_ntheta=args.ntheta,
+            final_maxiter=args.maxiter,
+            coarse_maxiter=args.coarse_maxiter,
+            medium_maxiter=args.medium_maxiter,
+            prefinal_maxiter=args.prefinal_maxiter,
+            trial_policy=args.trial_policy,
+        ),
+        initial_resolution=initial_warm_start_resolution,
+    )
     jax_profile_root = (
         forced_jax_profile_root.resolve()
         if forced_jax_profile_root is not None
@@ -2327,6 +2513,7 @@ def run_single_continuation_with_args(
         "initial_warm_start_run_dir": None
         if initial_warm_start_run_dir is None
         else str(initial_warm_start_run_dir),
+        "initial_warm_start_resolution": initial_warm_start_resolution,
         "summarize_run_root": None
         if args.summarize_run_root is None
         else str(Path(args.summarize_run_root).expanduser().resolve()),
@@ -2363,6 +2550,28 @@ def run_single_continuation_with_args(
         else:
             stage2_seed_path = resolve_stage_seed_path(previous_run_dir)
             warm_start_run_dir = previous_run_dir
+        existing_jax_runtime_seed_spec_path = (
+            None
+            if warm_start_run_dir is None
+            else existing_stage_jax_runtime_seed_spec_path(warm_start_run_dir, stage)
+        )
+        jax_runtime_seed_spec_path = existing_jax_runtime_seed_spec_path
+        if warm_start_run_dir is not None and jax_runtime_seed_spec_path is None:
+            jax_runtime_seed_spec_path = build_stage_jax_runtime_seed_spec_path(
+                stage_output_root
+            )
+        jax_runtime_seed_spec_command = (
+            None
+            if warm_start_run_dir is None
+            or existing_jax_runtime_seed_spec_path is not None
+            else build_stage_jax_runtime_seed_spec_command(
+                python_executable=sys.executable,
+                passthrough_args=passthrough_args,
+                stage=stage,
+                warm_start_run_dir=warm_start_run_dir,
+                jax_runtime_seed_spec_path=jax_runtime_seed_spec_path,
+            )
+        )
         command = build_stage_command(
             python_executable=sys.executable,
             passthrough_args=passthrough_args,
@@ -2370,7 +2579,11 @@ def run_single_continuation_with_args(
             stage_output_root=stage_output_root,
             stage2_seed_path=stage2_seed_path,
             warm_start_run_dir=warm_start_run_dir,
+            jax_runtime_seed_spec_path=jax_runtime_seed_spec_path,
             jax_profile_dir=stage_jax_profile_dir,
+            warm_start_target_overrides=load_warm_start_contract_overrides(
+                warm_start_run_dir
+            ),
             use_target_lane_fast_trials=use_target_lane_fast_trials,
         )
         stage_record = build_stage_record(
@@ -2378,6 +2591,8 @@ def run_single_continuation_with_args(
             stage_output_root=stage_output_root,
             stage2_seed_path=stage2_seed_path,
             warm_start_run_dir=warm_start_run_dir,
+            jax_runtime_seed_spec_path=jax_runtime_seed_spec_path,
+            jax_runtime_seed_spec_command=jax_runtime_seed_spec_command,
             jax_profile_dir=stage_jax_profile_dir,
             command=command,
         )
@@ -2452,6 +2667,12 @@ def run_single_continuation_with_args(
         stage_record["status"] = "running"
         persist_continuation_summary(summary, summary_path=summary_path)
         try:
+            if jax_runtime_seed_spec_command is not None:
+                stage_record["jax_runtime_seed_spec_status"] = "running"
+                persist_continuation_summary(summary, summary_path=summary_path)
+                subprocess.run(jax_runtime_seed_spec_command, check=True)
+                stage_record["jax_runtime_seed_spec_status"] = "completed"
+                persist_continuation_summary(summary, summary_path=summary_path)
             subprocess.run(command, check=True)
             stage_record["status"] = "completed"
             stage_record["subprocess_returncode"] = 0

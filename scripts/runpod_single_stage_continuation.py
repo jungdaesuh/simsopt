@@ -54,6 +54,7 @@ _REQUIRED_DONOR_FILENAMES = (
     "biot_savart_opt.json",
     "surf_opt.json",
 )
+_JAX_RUNTIME_SPEC_FILENAME = "single_stage_jax_runtime_spec.json"
 _TAR_EXCLUDES = (
     ".git",
     ".DS_Store",
@@ -220,11 +221,19 @@ def _derive_pretend_version(local_repo_root: Path) -> str:
 
 def _require_donor_artifacts(run_dir: Path) -> Path:
     resolved = _require_existing_path(run_dir, description="donor run directory")
-    missing = [
-        filename
-        for filename in _REQUIRED_DONOR_FILENAMES
-        if not (resolved / filename).exists()
-    ]
+    has_legacy_seed = all(
+        (resolved / filename).exists()
+        for filename in ("biot_savart_opt.json", "surf_opt.json")
+    )
+    has_jax_runtime_seed = (resolved / _JAX_RUNTIME_SPEC_FILENAME).exists()
+    missing = ["results.json"] if not (resolved / "results.json").exists() else []
+    if not has_legacy_seed and not has_jax_runtime_seed:
+        missing.extend(
+            filename
+            for filename in _REQUIRED_DONOR_FILENAMES[1:]
+            if not (resolved / filename).exists()
+        )
+        missing.append(_JAX_RUNTIME_SPEC_FILENAME)
     if missing:
         raise SystemExit(
             "donor run directory is missing required artifacts: "
@@ -416,6 +425,15 @@ def build_remote_repo_extract_command(
     ]
 
 
+def remote_repo_archive_path(plan: LaunchPlan) -> PurePosixPath:
+    repo_relative_path = _relative_to_root(
+        plan.local_repo_root,
+        plan.local_columbia_root,
+        description="local repo root",
+    )
+    return PurePosixPath("/tmp") / f"{repo_relative_path.name}-{plan.run_id}.tar.gz"
+
+
 def build_remote_prepare_script(plan: LaunchPlan) -> str:
     lines = [
         "set -euxo pipefail",
@@ -560,7 +578,21 @@ def build_remote_execution_script(plan: LaunchPlan) -> str:
         'cd "${REPO_ROOT}"',
         'export SIMSOPT_JAX_CUDA_LIBRARY_MODE="bundled"',
         'python -m pip install --upgrade pip setuptools wheel',
-        f'python -m pip install --upgrade --force-reinstall {shlex.quote(EXACT_JAX_GPU_WHEEL_SPEC)}',
+        "if python - <<'PY'",
+        "import importlib.metadata as metadata",
+        'expected = "0.9.2"',
+        "raise SystemExit(",
+        "    0",
+        "    if metadata.version('jax') == expected",
+        "    and metadata.version('jaxlib') == expected",
+        "    else 1",
+        ")",
+        "PY",
+        "then",
+        '  echo "jax/jaxlib 0.9.2 already installed; skipping force reinstall."',
+        "else",
+        f'  python -m pip install --upgrade --force-reinstall {shlex.quote(EXACT_JAX_GPU_WHEEL_SPEC)}',
+        "fi",
         'python -m pip install -e ".[JAX_GPU,dev]"',
         "python - <<'PY'",
         "import jax",
@@ -580,7 +612,7 @@ def build_remote_execution_script(plan: LaunchPlan) -> str:
         "export JAX_PLATFORMS=cuda",
         "export SIMSOPT_JAX_PLATFORM=cuda",
         "export XLA_PYTHON_CLIENT_PREALLOCATE=false",
-        'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_cuda_data_dir=/usr/local/cuda --xla_gpu_enable_llvm_module_compilation_parallelism=false"',
+        'export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_deterministic_ops=true --xla_gpu_cuda_data_dir=/usr/local/cuda --xla_gpu_enable_llvm_module_compilation_parallelism=false"',
         f"export JAX_COMPILATION_CACHE_DIR={shlex.quote(plan.remote_cache_dir)}",
         "export JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0",
         "export JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES=-1",
@@ -689,9 +721,7 @@ def stream_repo_archive(
         plan.local_columbia_root,
         description="local repo root",
     )
-    remote_archive_path = PurePosixPath("/tmp") / (
-        f"{repo_relative_path.name}-{plan.run_id}.tar.gz"
-    )
+    remote_archive_path = remote_repo_archive_path(plan)
     with tempfile.TemporaryDirectory(prefix="runpod-repo-archive-") as tmpdir:
         local_archive_path = Path(tmpdir) / f"{repo_relative_path.name}.tar.gz"
         tar_command = build_repo_tar_command(
@@ -936,7 +966,7 @@ def print_dry_run(plan: LaunchPlan, ssh_info: SshInfo) -> None:
     )
     repo_sync = (
         f"{_shell_join(build_repo_tar_command(local_columbia_root=plan.local_columbia_root, repo_relative_path=repo_relative_path))} "
-        f"| {_shell_join(build_remote_repo_extract_command(plan, ssh_info))}"
+        f"| {_shell_join(build_remote_repo_extract_command(plan, ssh_info, remote_archive_path=remote_repo_archive_path(plan)))}"
     )
     equilibrium_copy = _shell_join(
         [

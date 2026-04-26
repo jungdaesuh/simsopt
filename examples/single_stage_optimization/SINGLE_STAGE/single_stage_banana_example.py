@@ -61,6 +61,7 @@ from banana_opt.hardware_contracts import (
     COIL_LENGTH_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
     COIL_VESSEL_MIN_DIST_M,
+    MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
     TF_CURRENT_HARD_LIMIT_A,
     validate_banana_winding_surface_radius,
@@ -156,7 +157,7 @@ DEFAULT_DATABASE_STAGE2_ROOT = os.path.join(
 )
 DEFAULT_SINGLE_STAGE_OUTPUT_ROOT = os.path.join(SCRIPT_DIR, "outputs")
 CURVATURE_THRESHOLD_FLOOR = 20.0
-CURVATURE_THRESHOLD_CEILING = 40.0
+CURVATURE_THRESHOLD_CEILING = MAX_CURVATURE_INV_M
 TARGET_LANE_ACCEPTED_STEP_SYNC_CHOICES = ("per-accept", "final-only")
 TARGET_LANE_ACCEPTED_STEP_SYNC_DEFAULT = "final-only"
 _REFERENCE_OUTER_MAXLS_DEFAULT = 20
@@ -407,6 +408,7 @@ def summarize_optimizer_result_for_progress(result):
     if result is None:
         return None
     termination_message = str(getattr(result, "message", ""))
+    invalid_step_log = getattr(result, "invalid_step_log", None)
     return {
         "success": bool(getattr(result, "success", False)),
         "iterations": int(getattr(result, "nit", 0)),
@@ -417,6 +419,7 @@ def summarize_optimizer_result_for_progress(result):
         "rejected_step_count": _optional_int(
             getattr(result, "rejected_step_count", None)
         ),
+        "invalid_step_log": [] if not invalid_step_log else list(invalid_step_log),
         "message": termination_message,
         "diagnostics": extract_optimizer_diagnostics(
             result,
@@ -912,6 +915,7 @@ def build_single_stage_problem_contract(
             "max_iterations": int(MAXITER),
             "maxcor": int(args.maxcor),
             "outer_maxls": int(args.outer_maxls),
+            "outer_ftol": args.outer_ftol,
             "target_lane_outer_initial_step_size": args.target_lane_outer_initial_step_size,
             "initial_step_scale": float(
                 effective_initial_phase_settings["initial_step_scale"]
@@ -944,6 +948,9 @@ def build_single_stage_problem_contract(
             "profile_target_lane_batch_size": int(args.profile_target_lane_batch_size),
             "diagnose_target_lane_gradient": bool(
                 getattr(args, "diagnose_target_lane_gradient", False)
+            ),
+            "diagnose_target_lane_first_line_search": bool(
+                getattr(args, "diagnose_target_lane_first_line_search", False)
             ),
             "diagnose_target_lane_scaled_phase1": bool(
                 getattr(args, "diagnose_target_lane_scaled_phase1", False)
@@ -1115,6 +1122,9 @@ def build_single_stage_results_envelope(
     if getattr(args, "diagnose_target_lane_gradient", False):
         required_files.append("target_lane_gradient_diagnosis.json")
         planned_files.append("target_lane_gradient_diagnosis.json")
+    if getattr(args, "diagnose_target_lane_first_line_search", False):
+        required_files.append("target_lane_first_line_search_diagnosis.json")
+        planned_files.append("target_lane_first_line_search_diagnosis.json")
     if getattr(args, "diagnose_target_lane_scaled_phase1", False):
         required_files.append("target_lane_scaled_phase1_diagnosis.json")
         planned_files.append("target_lane_scaled_phase1_diagnosis.json")
@@ -2349,6 +2359,13 @@ def make_single_stage_half_period_quadpoints(*, nphi, ntheta, nfp):
     )
 
 
+def resolve_single_stage_runtime_seed_G(warm_start_G, tf_coils):
+    if warm_start_G is not None:
+        return float(warm_start_G)
+    current_sum = sum(abs(coil.current.get_value()) for coil in tf_coils)
+    return float(2.0 * np.pi * current_sum * (4 * np.pi * 10 ** (-7) / (2 * np.pi)))
+
+
 def compile_single_stage_jax_runtime_seed_spec(
     run_dir,
     *,
@@ -2397,7 +2414,7 @@ def compile_single_stage_jax_runtime_seed_spec(
         runtime_spec_destination,
         surface=warm_start_state["surface"],
         iota=warm_start_state["iota"],
-        G=warm_start_state["G"],
+        G=resolve_single_stage_runtime_seed_G(warm_start_state["G"], tf_coils),
         mpol=mpol,
         ntor=ntor,
         quadpoints_phi=quadpoints_phi,
@@ -3991,6 +4008,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--outer-ftol",
+        type=float,
+        default=float(os.environ["OUTER_FTOL"]) if "OUTER_FTOL" in os.environ else None,
+        help=(
+            "Optional outer L-BFGS relative objective tolerance. Defaults to the "
+            "mpol-specific production table."
+        ),
+    )
+    parser.add_argument(
         "--target-lane-outer-initial-step-size",
         type=float,
         default=float(os.environ["TARGET_LANE_OUTER_INITIAL_STEP_SIZE"])
@@ -4269,6 +4295,16 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--diagnose-target-lane-first-line-search",
+        action="store_true",
+        help=(
+            "Build the JAX/ondevice target-lane runtime bundle, run the first "
+            "host-dispatched L-BFGS Wolfe search from the seeded -grad direction, "
+            "and write the actual trial alpha/value/derivative trace instead of "
+            "running the full outer optimizer."
+        ),
+    )
+    parser.add_argument(
         "--diagnose-target-lane-scaled-phase1",
         action="store_true",
         help=(
@@ -4401,6 +4437,7 @@ def parse_args():
         args.profile_target_lane
         or args.profile_target_lane_only
         or args.diagnose_target_lane_gradient
+        or args.diagnose_target_lane_first_line_search
         or args.diagnose_target_lane_scaled_phase1
     ):
         raise ValueError(
@@ -6657,6 +6694,166 @@ def build_target_lane_gradient_diagnosis(
         outer_objective_config=outer_objective_config,
         success_filter=success_filter,
     )
+
+
+def build_target_lane_first_line_search_diagnosis(
+    value_and_grad,
+    dofs,
+    *,
+    initial_value_and_grad=None,
+    initial_step_size=None,
+    maxls,
+    gtol,
+):
+    """Trace the exact first target-lane L-BFGS line search from the seed state."""
+    from simsopt.geo.optimizer_jax_private._lbfgs import (
+        _line_search_value_and_grad_host,
+    )
+
+    x0 = np.asarray(host_array(dofs), dtype=np.float64).reshape(-1)
+
+    def eval_target_value_and_grad(x):
+        return _hostify_traceable_value_and_grad(value_and_grad, x)
+
+    if initial_value_and_grad is None:
+        f0, g0 = eval_target_value_and_grad(x0)
+    else:
+        f0 = host_float(initial_value_and_grad[0])
+        g0 = np.asarray(host_array(initial_value_and_grad[1]), dtype=np.float64)
+        g0 = g0.reshape(x0.shape)
+
+    p0 = -g0
+    dphi0 = float(np.dot(g0, p0))
+    p0_norm_sq = float(np.dot(p0, p0))
+    c1 = 1.0e-4
+    c2 = 0.9
+    trial_records = []
+
+    def eval_trial(x):
+        trial_x = np.asarray(host_array(x), dtype=np.float64).reshape(x0.shape)
+        if p0_norm_sq == 0.0:
+            alpha = 0.0
+        else:
+            alpha = float(np.dot(trial_x - x0, p0) / p0_norm_sq)
+        value, grad = eval_target_value_and_grad(trial_x)
+        dphi = float(np.dot(grad, p0))
+        armijo_rhs = float(f0 + c1 * alpha * dphi0)
+        trial_records.append(
+            {
+                "trial_index": int(len(trial_records)),
+                "alpha": _summarize_host_scalar(alpha),
+                "value": _summarize_host_scalar(value),
+                "objective_delta": _summarize_host_scalar(float(value - f0)),
+                "linearized_objective_delta": _summarize_host_scalar(
+                    float(alpha * dphi0)
+                ),
+                "directional_derivative": _summarize_host_scalar(dphi),
+                "armijo_rhs": _summarize_host_scalar(armijo_rhs),
+                "armijo_satisfied": bool(value <= armijo_rhs),
+                "curvature_satisfied": bool(abs(dphi) <= -c2 * dphi0),
+                "grad": _summarize_host_gradient(grad),
+            }
+        )
+        return value, grad
+
+    line_search_result = _line_search_value_and_grad_host(
+        eval_trial,
+        x0,
+        p0,
+        f0,
+        g0,
+        initial_step_size=initial_step_size,
+        maxiter=maxls,
+    )
+    alpha_star = float(line_search_result.a_k)
+    f_star = float(line_search_result.f_k)
+    g_star = np.asarray(line_search_result.g_k, dtype=np.float64).reshape(x0.shape)
+    step = alpha_star * p0
+    y = g_star - g0
+    step_norm = float(np.linalg.norm(step))
+    y_norm = float(np.linalg.norm(y))
+    yts = float(np.dot(y, step))
+    yty = float(np.dot(y, y))
+    step_eps = float(np.sqrt(np.finfo(np.float64).eps))
+    step_tol = step_eps * max(1.0, float(np.linalg.norm(x0)))
+    function_change = abs(float(f0 - f_star))
+    objective_tol = step_eps * max(abs(float(f0)), abs(float(f_star)))
+    gradient_change = y_norm
+    gradient_tol = step_eps * max(
+        float(np.linalg.norm(g0)),
+        float(np.linalg.norm(g_star)),
+    )
+    converged = bool(np.max(np.abs(g_star)) < float(gtol))
+    stalled_step = bool(
+        (not converged)
+        and step_norm <= step_tol
+        and function_change <= objective_tol
+        and gradient_change <= gradient_tol
+    )
+    nonfinite_step = bool(
+        (not np.isfinite(f_star))
+        or (not np.all(np.isfinite(g_star)))
+        or (not np.all(np.isfinite(step)))
+        or (not np.all(np.isfinite(x0 + step)))
+        or (not np.all(np.isfinite(y)))
+    )
+    curvature_tol = step_eps * step_norm * y_norm
+    valid_curvature = bool(
+        np.isfinite(yts)
+        and np.isfinite(yty)
+        and yts > curvature_tol
+        and yty > 0.0
+    )
+    rejected_step = bool(line_search_result.failed or nonfinite_step or stalled_step)
+    return {
+        "initial": {
+            "dofs": _summarize_host_vector(x0),
+            "value": _summarize_host_scalar(f0),
+            "grad": _summarize_host_gradient(g0),
+            "search_direction": _summarize_host_vector(p0),
+            "directional_derivative": _summarize_host_scalar(dphi0),
+        },
+        "line_search": {
+            "initial_step_size": (
+                None if initial_step_size is None else float(initial_step_size)
+            ),
+            "maxls": int(maxls),
+            "failed": bool(line_search_result.failed),
+            "status": int(line_search_result.status),
+            "nit": int(line_search_result.nit),
+            "nfev": int(line_search_result.nfev),
+            "ngev": int(line_search_result.ngev),
+            "alpha": _summarize_host_scalar(alpha_star),
+            "value": _summarize_host_scalar(f_star),
+            "directional_derivative": _summarize_host_scalar(
+                float(np.dot(g_star, p0))
+            ),
+            "trace": trial_records,
+        },
+        "optimizer_step": {
+            "would_accept": bool(not rejected_step),
+            "would_reject": rejected_step,
+            "line_search_failed": bool(line_search_result.failed),
+            "nonfinite_step": nonfinite_step,
+            "stalled_step": stalled_step,
+            "valid_curvature": valid_curvature,
+            "converged": converged,
+            "step": _summarize_host_vector(step),
+            "step_norm": _summarize_host_scalar(step_norm),
+            "step_tolerance": _summarize_host_scalar(step_tol),
+            "function_change": _summarize_host_scalar(function_change),
+            "objective_tolerance": _summarize_host_scalar(objective_tol),
+            "gradient_change": _summarize_host_scalar(gradient_change),
+            "gradient_tolerance": _summarize_host_scalar(gradient_tol),
+            "y_dot_s": _summarize_host_scalar(yts),
+            "y_dot_y": _summarize_host_scalar(yty),
+        },
+        "all_finite": bool(
+            np.isfinite(f0)
+            and np.all(np.isfinite(g0))
+            and all(record["value"]["finite"] for record in trial_records)
+        ),
+    }
 
 
 def build_target_lane_scaled_phase1_diagnosis(
@@ -10102,6 +10299,7 @@ if __name__ == "__main__":
         str(args.banana_current_max_A),
         str(args.maxcor),
         str(args.outer_maxls),
+        str(args.outer_ftol),
         str(args.target_lane_outer_initial_step_size),
         str(effective_initial_phase_settings["initial_step_scale"]),
         str(effective_initial_phase_settings["initial_step_maxiter"]),
@@ -10124,6 +10322,7 @@ if __name__ == "__main__":
         str(args.profile_target_lane),
         str(args.profile_target_lane_only),
         str(args.diagnose_target_lane_gradient),
+        str(getattr(args, "diagnose_target_lane_first_line_search", False)),
         str(args.minimal_artifacts),
         str(args.backend),
         str(optimizer_backend_record),
@@ -10514,13 +10713,18 @@ if __name__ == "__main__":
     # RUN OPTIMIZATION
     # ==============================================================================
     # Get convergence tolerances for current mpol
-    ftol = ftol_by_mpol.get(mpol, 1e-5 if mpol < 8 else 1e-10)
+    ftol = (
+        float(args.outer_ftol)
+        if args.outer_ftol is not None
+        else ftol_by_mpol.get(mpol, 1e-5 if mpol < 8 else 1e-10)
+    )
     gtol = gtol_by_mpol.get(mpol, 1e-2 if mpol < 8 else 1e-7)
     phase1_iterations = None
     phase1_termination_message = None
     phase1_success = None
     main_phase_iterations = None
     target_lane_gradient_diagnosis = None
+    target_lane_first_line_search_diagnosis = None
     target_lane_scaled_phase1_diagnosis = None
     target_lane_invalid_state_events = []
     target_lane_invalid_state_diagnostic_events = []
@@ -10620,6 +10824,7 @@ if __name__ == "__main__":
             and (
                 args.profile_target_lane_only
                 or args.diagnose_target_lane_gradient
+                or args.diagnose_target_lane_first_line_search
                 or args.diagnose_target_lane_scaled_phase1
             )
         )
@@ -11312,6 +11517,54 @@ if __name__ == "__main__":
                             "--diagnose-target-lane-gradient was provided; "
                             f"first non-finite term is {first_nonfinite_term}."
                         )
+                elif args.diagnose_target_lane_first_line_search:
+                    if not use_target_lane:
+                        raise RuntimeError(
+                            "--diagnose-target-lane-first-line-search requires the "
+                            "JAX ondevice single-stage target lane."
+                        )
+                    if target_value_and_grad_objective is None:
+                        raise RuntimeError(
+                            "--diagnose-target-lane-first-line-search requires the "
+                            "target-lane value-and-gradient objective."
+                        )
+                    target_lane_first_line_search_diagnosis = (
+                        build_target_lane_first_line_search_diagnosis(
+                            target_value_and_grad_objective,
+                            dofs,
+                            initial_value_and_grad=(
+                                target_lane_optimizer_initial_value_and_grad
+                            ),
+                            initial_step_size=(
+                                args.target_lane_outer_initial_step_size
+                            ),
+                            maxls=args.outer_maxls,
+                            gtol=gtol,
+                        )
+                    )
+                    outer_optimizer_end_s = _perf_counter_s()
+                    _record_timing(
+                        timings,
+                        "target_lane_first_line_search_diagnosis_s",
+                        outer_optimizer_start_s,
+                        outer_optimizer_end_s,
+                    )
+                    res_nit = 0
+                    optimizer_success = bool(
+                        target_lane_first_line_search_diagnosis["optimizer_step"][
+                            "would_accept"
+                        ]
+                    )
+                    termination_message = "diagnose_target_lane_first_line_search"
+                    final_volume = initial_volume
+                    final_iota = initial_iota
+                    final_max_curvature = initial_max_curvature
+                    fieldError = initial_field_error
+                    print(
+                        "Skipping single-stage optimizer because "
+                        "--diagnose-target-lane-first-line-search was provided; "
+                        "wrote first L-BFGS line-search trace."
+                    )
                 elif args.profile_target_lane_only:
                     if not use_target_lane:
                         raise RuntimeError(
@@ -12194,6 +12447,9 @@ if __name__ == "__main__":
         "profile_target_lane_only": bool(args.profile_target_lane_only),
         "profile_target_lane_batch_size": int(args.profile_target_lane_batch_size),
         "diagnose_target_lane_gradient": bool(args.diagnose_target_lane_gradient),
+        "diagnose_target_lane_first_line_search": bool(
+            getattr(args, "diagnose_target_lane_first_line_search", False)
+        ),
         "diagnose_target_lane_scaled_phase1": bool(
             args.diagnose_target_lane_scaled_phase1
         ),
@@ -12208,6 +12464,7 @@ if __name__ == "__main__":
         "max_iterations": MAXITER,
         "maxcor": args.maxcor,
         "outer_maxls": args.outer_maxls,
+        "outer_ftol": args.outer_ftol,
         "target_lane_outer_initial_step_size": args.target_lane_outer_initial_step_size,
         "initial_phase_retry_attempts": int(phase1_retry_summary["attempt_count"]),
         "initial_phase_retry_attempt_details": phase1_retry_summary["attempts"],
@@ -12440,6 +12697,10 @@ if __name__ == "__main__":
         results["JAX_COMPILE_DIAGNOSTICS"] = jax_compile_diagnostics
     if target_lane_gradient_diagnosis is not None:
         results["TARGET_LANE_GRADIENT_DIAGNOSIS"] = target_lane_gradient_diagnosis
+    if target_lane_first_line_search_diagnosis is not None:
+        results["TARGET_LANE_FIRST_LINE_SEARCH_DIAGNOSIS"] = (
+            target_lane_first_line_search_diagnosis
+        )
     if target_lane_scaled_phase1_diagnosis is not None:
         results["TARGET_LANE_SCALED_PHASE1_DIAGNOSIS"] = (
             target_lane_scaled_phase1_diagnosis
@@ -12452,6 +12713,11 @@ if __name__ == "__main__":
         write_json_file(
             os.path.join(OUT_DIR_ITER, "target_lane_gradient_diagnosis.json"),
             target_lane_gradient_diagnosis,
+        )
+    if target_lane_first_line_search_diagnosis is not None:
+        write_json_file(
+            os.path.join(OUT_DIR_ITER, "target_lane_first_line_search_diagnosis.json"),
+            target_lane_first_line_search_diagnosis,
         )
     if target_lane_scaled_phase1_diagnosis is not None:
         write_json_file(

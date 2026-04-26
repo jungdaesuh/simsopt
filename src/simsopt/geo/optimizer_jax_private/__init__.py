@@ -1,7 +1,7 @@
 """Private optimizer internals for the JAX Boozer inner solve.
 
-This package contains the on-device BFGS/L-BFGS implementations that
-use public JAX APIs with a minimum supported JAX floor of 0.9.2.
+This package contains the private BFGS and L-BFGS implementations that use
+public JAX APIs with a minimum supported JAX floor of 0.9.2.
 
 The public API is in ``simsopt.geo.optimizer_jax``.
 """
@@ -29,9 +29,6 @@ from ._bfgs import (
 from ._lbfgs import (
     _minimize_lbfgs_private,
     _minimize_lbfgs_private_value_and_grad,
-    _two_loop_recursion,
-    _update_history_scalars,
-    _update_history_vectors,
 )
 from ._result_converters import (
     _coerce_dense_hess_inv,

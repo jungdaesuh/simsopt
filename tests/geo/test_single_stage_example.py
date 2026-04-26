@@ -2391,6 +2391,29 @@ class SingleStageExampleTests(unittest.TestCase):
                 banana_surf_radius=0.22,
             )
 
+    def test_resolve_single_stage_runtime_seed_g_uses_current_derived_value(self):
+        module = self.load_module()
+
+        class Current:
+            def __init__(self, value):
+                self.value = value
+
+            def get_value(self):
+                return self.value
+
+        class Coil:
+            def __init__(self, value):
+                self.current = Current(value)
+
+        self.assertEqual(
+            module.resolve_single_stage_runtime_seed_G(4.5, [Coil(1.0)]),
+            4.5,
+        )
+        self.assertAlmostEqual(
+            module.resolve_single_stage_runtime_seed_G(None, [Coil(2.0), Coil(-3.0)]),
+            4.0 * np.pi * 1e-7 * 5.0,
+        )
+
     def test_load_single_stage_jax_warm_start_state_uses_spec_not_surface_json(self):
         module = self.load_module()
         surface = module.SurfaceXYZTensorFourier(
@@ -3880,6 +3903,24 @@ class SingleStageExampleTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertTrue(args.diagnose_target_lane_gradient)
+        self.assertFalse(args.profile_target_lane_only)
+
+    def test_parse_args_accepts_diagnose_target_lane_first_line_search(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--diagnose-target-lane-first-line-search",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.diagnose_target_lane_first_line_search)
         self.assertFalse(args.profile_target_lane_only)
 
     def test_parse_args_accepts_diagnose_target_lane_scaled_phase1(self):
@@ -5743,6 +5784,36 @@ class SingleStageExampleTests(unittest.TestCase):
             diagnostic_builder_calls,
             [("config-marker", success_filter_marker)],
         )
+
+    def test_build_target_lane_first_line_search_diagnosis_traces_first_trial(self):
+        module = self.load_module()
+
+        def value_and_grad(x):
+            return 0.5 * jnp.dot(x, x), x
+
+        diagnosis = module.build_target_lane_first_line_search_diagnosis(
+            value_and_grad,
+            np.asarray([1.0], dtype=np.float64),
+            initial_value_and_grad=(
+                jnp.asarray(0.5, dtype=jnp.float64),
+                jnp.asarray([1.0], dtype=jnp.float64),
+            ),
+            initial_step_size=0.125,
+            maxls=4,
+            gtol=1.0e-12,
+        )
+
+        self.assertEqual(diagnosis["initial"]["directional_derivative"]["value"], -1.0)
+        self.assertTrue(diagnosis["optimizer_step"]["would_accept"])
+        self.assertFalse(diagnosis["optimizer_step"]["would_reject"])
+        self.assertEqual(diagnosis["line_search"]["nfev"], 1)
+        self.assertEqual(len(diagnosis["line_search"]["trace"]), 1)
+        self.assertEqual(
+            diagnosis["line_search"]["trace"][0]["alpha"]["value"],
+            0.125,
+        )
+        self.assertTrue(diagnosis["line_search"]["trace"][0]["armijo_satisfied"])
+        self.assertTrue(diagnosis["line_search"]["trace"][0]["curvature_satisfied"])
 
     def test_build_target_lane_scaled_phase1_diagnosis_threads_runtime_and_optimizer(
         self,
@@ -11267,7 +11338,8 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(single_stage_module.resolve_curvature_threshold(10.0), 20.0)
         self.assertEqual(single_stage_module.resolve_curvature_threshold(20.0), 20.0)
         self.assertEqual(single_stage_module.resolve_curvature_threshold(39.0), 39.0)
-        self.assertEqual(single_stage_module.resolve_curvature_threshold(41.0), 40.0)
+        self.assertEqual(single_stage_module.resolve_curvature_threshold(80.0), 80.0)
+        self.assertEqual(single_stage_module.resolve_curvature_threshold(120.0), 100.0)
 
     def test_stage2_hardware_constraints_pass_at_boundaries(self):
         module = load_stage2_module()
@@ -11955,6 +12027,14 @@ class FtolGtolDefaultTests(unittest.TestCase):
         self.assertEqual(ftol_by_mpol.get(19, 1e-5 if 19 < 8 else 1e-10), 1e-10)
         self.assertEqual(gtol_by_mpol.get(7, 1e-2 if 7 < 8 else 1e-7), 1e-2)
         self.assertEqual(gtol_by_mpol.get(19, 1e-2 if 19 < 8 else 1e-7), 1e-7)
+
+    def test_parse_args_accepts_outer_ftol_override(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(sys, "argv", ["single_stage_banana_example.py", "--outer-ftol", "0.0"]):
+            args = module.parse_args()
+
+        self.assertEqual(args.outer_ftol, 0.0)
 
     def test_source_uses_default_argument(self):
         """The deployed .get() calls must include a default, not bare .get(mpol)."""

@@ -588,13 +588,13 @@ def _assert_ondevice_optimizer_reuses_compiled_solver(method: str) -> None:
     assert payload == {
         "case": "compile-count",
         "method": method,
-        "compile_count": 1,
+        "compile_count": 0 if method == "lbfgs-ondevice" else 1,
         "run_count": 3,
     }
 
 
 def test_lbfgs_ondevice_reuses_compiled_solver_across_identical_calls():
-    """Repeated identical lbfgs-ondevice calls must not recompile run_solver."""
+    """Repeated lbfgs-ondevice calls must not compile solver control kernels."""
     _assert_ondevice_optimizer_reuses_compiled_solver("lbfgs-ondevice")
 
 
@@ -604,7 +604,7 @@ def test_bfgs_ondevice_reuses_compiled_solver_across_identical_calls():
 
 
 def test_target_lbfgs_ondevice_reuses_compiled_solver_across_identical_value_and_grad_calls():
-    """Target-lane lbfgs-ondevice value/grad calls must reuse the compiled solver."""
+    """Target-lane lbfgs-ondevice must not compile solver control kernels."""
     payload = _run_python_script_json_payload(
         _JAX_SUBPROCESS_CASES_PATH,
         args=("target-compile-count",),
@@ -616,14 +616,14 @@ def test_target_lbfgs_ondevice_reuses_compiled_solver_across_identical_value_and
     assert payload == {
         "case": "target-compile-count",
         "method": "lbfgs-ondevice",
-        "compile_count": 1,
+        "compile_count": 0,
         "run_count": 3,
         "value_and_grad": True,
     }
 
 
 def test_stage2_target_outer_loop_reuses_compiled_solver_across_identical_calls():
-    """Real Stage 2 target-lane outer-loop calls must reuse the compiled solver."""
+    """Real Stage 2 target-lane outer-loop must keep solver control on host."""
     payload = _run_python_script_json_payload(
         _JAX_SUBPROCESS_CASES_PATH,
         args=("stage2-target-compile-count",),
@@ -637,7 +637,7 @@ def test_stage2_target_outer_loop_reuses_compiled_solver_across_identical_calls(
     assert payload == {
         "case": "stage2-target-compile-count",
         "method": "lbfgs-ondevice",
-        "compile_count": 1,
+        "compile_count": 0,
         "run_count": 3,
         "value_and_grad": True,
     }

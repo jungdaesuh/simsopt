@@ -241,10 +241,11 @@ _EXACT_SOLVER_RESIDUAL_INF_MAX = 1e-12
 # -----------------------------------------------------------------------
 
 
-def test_single_stage_curvature_threshold_policy_caps_at_40():
+def test_single_stage_curvature_threshold_policy_caps_at_100():
     assert single_stage_example.resolve_curvature_threshold(10.0) == pytest.approx(20.0)
     assert single_stage_example.resolve_curvature_threshold(30.0) == pytest.approx(30.0)
-    assert single_stage_example.resolve_curvature_threshold(80.0) == pytest.approx(40.0)
+    assert single_stage_example.resolve_curvature_threshold(80.0) == pytest.approx(80.0)
+    assert single_stage_example.resolve_curvature_threshold(120.0) == pytest.approx(100.0)
 
 
 def _iota_unit_rhs_from_decision_size(n, *, optimize_G):
@@ -6039,13 +6040,13 @@ class TestBoozerResidualAdjointFD:
 # These tests define the contract for the traceable target-objective path
 # inside the single-stage workflow so the outer optimizer can route through
 # _minimize_lbfgs_private / _minimize_lbfgs_private_value_and_grad
-# (lax.while_loop) on the supported path.
+# on the supported private lbfgs-ondevice path.
 #
 # Dependency order:
 #   Test 1 (pure objective value)
 #     -> Test 2 (jax.grad differentiable)
 #       -> Test 4 (jaxpr traces without error)
-#         -> Test 6 (routes through lax.while_loop)
+#         -> Test 6 (routes through the private L-BFGS path)
 #           -> Test 7 (parity with fused value/grad path)
 #   Test 5 (no run_dict/Optimizable dependency) is independent
 #
@@ -7826,12 +7827,12 @@ class TestTraceableObjective:
             "traceable objective leaked Optimizable children across evaluations"
         )
 
-    def test_traceable_scalar_routes_through_lax_while_loop(
+    def test_traceable_scalar_routes_through_private_lbfgs_path(
         self,
         boozer_setup,
         monkeypatch,
     ):
-        """Test 6: scalar lbfgs-ondevice stays on the private ondevice path."""
+        """Test 6: scalar lbfgs-ondevice stays on the private L-BFGS path."""
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
         f, x0, _, _, _ = self._make_traceable(bs_jax, booz_jax)
 
@@ -7862,7 +7863,7 @@ class TestTraceableObjective:
         boozer_setup,
         monkeypatch,
     ):
-        """Test 6b: explicit value/grad lbfgs-ondevice uses the private fused path."""
+        """Test 6b: explicit value/grad lbfgs-ondevice uses the private target path."""
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
         fun_vg, x0, _, _, _ = self._make_traceable_value_and_grad(bs_jax, booz_jax)
 

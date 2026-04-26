@@ -34,6 +34,14 @@ class SingleStageContinuationTests(unittest.TestCase):
     def load_module(self):
         return load_continuation_module()
 
+    def _handle_compile_seed_spec_command(self, command: list[str]) -> bool:
+        if "--compile-jax-runtime-seed-spec" not in command:
+            return False
+        spec_path = Path(command[command.index("--jax-runtime-seed-spec") + 1])
+        spec_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_path.write_text("{}", encoding="utf-8")
+        return True
+
     def test_build_default_continuation_stages_for_default_final_shape(self):
         module = self.load_module()
 
@@ -93,6 +101,55 @@ class SingleStageContinuationTests(unittest.TestCase):
         self.assertEqual(stages[0].name, "final")
         self.assertEqual(stages[0].maxiter, 7)
         self.assertFalse(stages[0].minimal_artifacts)
+
+    def test_full_resolution_warm_start_runs_final_stage_only(self):
+        module = self.load_module()
+
+        stages = [
+            module.ContinuationStage("coarse", 2, 2, 31, 16, 1),
+            module.ContinuationStage("medium", 4, 4, 63, 32, 2),
+            module.ContinuationStage("final", 10, 10, 255, 64, 3),
+        ]
+
+        selected = module.select_continuation_stages_for_initial_resolution(
+            stages,
+            initial_resolution=(10, 10, 255, 64),
+        )
+
+        self.assertEqual(selected, [stages[-1]])
+
+    def test_lower_resolution_warm_start_skips_completed_stage(self):
+        module = self.load_module()
+
+        stages = [
+            module.ContinuationStage("coarse", 2, 2, 31, 16, 1),
+            module.ContinuationStage("medium", 4, 4, 63, 32, 2),
+            module.ContinuationStage("final", 10, 10, 255, 64, 3),
+        ]
+
+        selected = module.select_continuation_stages_for_initial_resolution(
+            stages,
+            initial_resolution=(2, 2, 31, 16),
+        )
+
+        self.assertEqual(selected, stages[1:])
+
+    def test_high_resolution_warm_start_runs_next_dominating_stage(self):
+        module = self.load_module()
+
+        stages = [
+            module.ContinuationStage("coarse", 2, 2, 31, 16, 1),
+            module.ContinuationStage("medium", 4, 4, 63, 32, 2),
+            module.ContinuationStage("prefinal", 6, 6, 127, 48, 2),
+            module.ContinuationStage("final", 10, 10, 255, 64, 3),
+        ]
+
+        selected = module.select_continuation_stages_for_initial_resolution(
+            stages,
+            initial_resolution=(8, 6, 127, 32),
+        )
+
+        self.assertEqual(selected, [stages[-1]])
 
     def test_strip_overridden_passthrough_args(self):
         module = self.load_module()
@@ -171,6 +228,7 @@ class SingleStageContinuationTests(unittest.TestCase):
                 stage_output_root=Path(tmpdir) / "stage",
                 stage2_seed_path=stage2_seed_path,
                 warm_start_run_dir=warm_start_run_dir,
+                jax_runtime_seed_spec_path=Path(tmpdir) / "stage-seed.json",
                 jax_profile_dir=None,
                 use_target_lane_fast_trials=True,
             )
@@ -179,7 +237,102 @@ class SingleStageContinuationTests(unittest.TestCase):
         self.assertIn(str(stage2_seed_path), command)
         self.assertIn("--warm-start-run-dir", command)
         self.assertIn(str(warm_start_run_dir), command)
+        self.assertIn("--jax-runtime-seed-spec", command)
+        self.assertIn(str(Path(tmpdir) / "stage-seed.json"), command)
         self.assertEqual(command[-2:], ["--backend", "jax"])
+
+    def test_load_warm_start_contract_overrides_reads_results_contract(self):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            warm_start_run_dir = Path(tmpdir) / "prev"
+            warm_start_run_dir.mkdir()
+            (warm_start_run_dir / "results.json").write_text(
+                json.dumps(
+                    {
+                        "TARGET_VOLUME": 0.04,
+                        "TARGET_IOTA": 0.25,
+                        "CURVATURE_THRESHOLD": 100.0,
+                        "CC_DIST": 0.05,
+                        "CS_DIST": 0.015,
+                        "SS_DIST": 0.04,
+                        "BANANA_CURRENT_MAX_A": 16000.0,
+                        "LENGTH_TARGET": 1.7,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            overrides = module.load_warm_start_contract_overrides(warm_start_run_dir)
+
+        self.assertEqual(
+            overrides,
+            {
+                "--vol-target": 0.04,
+                "--iota-target": 0.25,
+                "--curvature-threshold": 100.0,
+                "--cc-dist": 0.05,
+                "--cs-dist": 0.015,
+                "--ss-dist": 0.04,
+                "--banana-current-max-A": 16000.0,
+                "--length-target": 1.7,
+            },
+        )
+
+    def test_build_stage_command_threads_warm_start_target_contract(self):
+        module = self.load_module()
+
+        command = module.build_stage_command(
+            python_executable="/usr/bin/python3",
+            passthrough_args=["--backend", "jax"],
+            stage=module.ContinuationStage("final", 8, 6, 255, 64, 3),
+            stage_output_root=Path("/tmp/stage"),
+            stage2_seed_path=None,
+            warm_start_run_dir=Path("/tmp/prev"),
+            jax_runtime_seed_spec_path=Path("/tmp/stage-seed.json"),
+            jax_profile_dir=None,
+            use_target_lane_fast_trials=True,
+            warm_start_target_overrides={
+                "--vol-target": 0.04,
+                "--iota-target": 0.25,
+                "--curvature-threshold": 100.0,
+            },
+        )
+
+        self.assertEqual(command[command.index("--vol-target") + 1], "0.04")
+        self.assertEqual(command[command.index("--iota-target") + 1], "0.25")
+        self.assertEqual(
+            command[command.index("--curvature-threshold") + 1],
+            "100.0",
+        )
+
+    def test_build_stage_command_respects_explicit_target_passthrough(self):
+        module = self.load_module()
+
+        command = module.build_stage_command(
+            python_executable="/usr/bin/python3",
+            passthrough_args=[
+                "--backend",
+                "jax",
+                "--vol-target",
+                "0.06",
+                "--iota-target=0.18",
+            ],
+            stage=module.ContinuationStage("final", 8, 6, 255, 64, 3),
+            stage_output_root=Path("/tmp/stage"),
+            stage2_seed_path=None,
+            warm_start_run_dir=Path("/tmp/prev"),
+            jax_runtime_seed_spec_path=Path("/tmp/stage-seed.json"),
+            jax_profile_dir=None,
+            use_target_lane_fast_trials=True,
+            warm_start_target_overrides={"--vol-target": 0.04, "--iota-target": 0.25},
+        )
+
+        self.assertEqual(command.count("--vol-target"), 1)
+        self.assertNotIn("0.04", command)
+        self.assertIn("0.06", command)
+        self.assertIn("--iota-target=0.18", command)
+        self.assertNotIn("0.25", command)
 
     def test_build_stage_command_threads_stage_specific_jax_profile_dir(self):
         module = self.load_module()
@@ -191,12 +344,80 @@ class SingleStageContinuationTests(unittest.TestCase):
             stage_output_root=Path("/tmp/stage"),
             stage2_seed_path=None,
             warm_start_run_dir=None,
+            jax_runtime_seed_spec_path=None,
             jax_profile_dir=Path("/tmp/xprof/stage-01-coarse"),
             use_target_lane_fast_trials=True,
         )
 
         self.assertIn("--jax-profile-dir", command)
         self.assertIn("/tmp/xprof/stage-01-coarse", command)
+
+    def test_build_stage_jax_runtime_seed_spec_command_uses_stage_resolution(self):
+        module = self.load_module()
+
+        command = module.build_stage_jax_runtime_seed_spec_command(
+            python_executable="/usr/bin/python3",
+            passthrough_args=["--backend", "jax", "--optimizer-backend", "ondevice"],
+            stage=module.ContinuationStage("coarse", 2, 2, 31, 16, 1),
+            warm_start_run_dir=Path("/tmp/donor-final-resolution"),
+            jax_runtime_seed_spec_path=Path("/tmp/stage/single_stage_jax_runtime_spec.json"),
+        )
+
+        self.assertIn("--compile-jax-runtime-seed-spec", command)
+        self.assertEqual(command[command.index("--mpol") + 1], "2")
+        self.assertEqual(command[command.index("--ntor") + 1], "2")
+        self.assertEqual(command[command.index("--nphi") + 1], "31")
+        self.assertEqual(command[command.index("--ntheta") + 1], "16")
+        self.assertEqual(
+            command[command.index("--jax-runtime-seed-spec") + 1],
+            "/tmp/stage/single_stage_jax_runtime_spec.json",
+        )
+
+    def test_existing_stage_jax_runtime_seed_spec_path_reuses_matching_shape(self):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            donor_dir = Path(tmpdir)
+            runtime_spec_path = donor_dir / "single_stage_jax_runtime_spec.json"
+            runtime_spec_path.write_text(
+                json.dumps(
+                    {
+                        "surface": {"mpol": 10, "ntor": 10},
+                        "quadrature": {"nphi": 255, "ntheta": 64},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            resolved = module.existing_stage_jax_runtime_seed_spec_path(
+                donor_dir,
+                module.ContinuationStage("final", 10, 10, 255, 64, 3),
+            )
+
+        self.assertEqual(resolved, runtime_spec_path)
+
+    def test_existing_stage_jax_runtime_seed_spec_path_rejects_other_shape(self):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            donor_dir = Path(tmpdir)
+            runtime_spec_path = donor_dir / "single_stage_jax_runtime_spec.json"
+            runtime_spec_path.write_text(
+                json.dumps(
+                    {
+                        "surface": {"mpol": 8, "ntor": 6},
+                        "quadrature": {"nphi": 255, "ntheta": 64},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            resolved = module.existing_stage_jax_runtime_seed_spec_path(
+                donor_dir,
+                module.ContinuationStage("final", 10, 10, 255, 64, 3),
+            )
+
+        self.assertIsNone(resolved)
 
     def test_build_stage_command_injects_target_lane_fast_trial_budgets(self):
         module = self.load_module()
@@ -222,6 +443,7 @@ class SingleStageContinuationTests(unittest.TestCase):
             stage_output_root=Path("/tmp/stage"),
             stage2_seed_path=None,
             warm_start_run_dir=None,
+            jax_runtime_seed_spec_path=None,
             jax_profile_dir=None,
             use_target_lane_fast_trials=True,
         )
@@ -250,6 +472,7 @@ class SingleStageContinuationTests(unittest.TestCase):
             stage_output_root=Path("/tmp/stage"),
             stage2_seed_path=None,
             warm_start_run_dir=None,
+            jax_runtime_seed_spec_path=None,
             jax_profile_dir=None,
             use_target_lane_fast_trials=True,
         )
@@ -286,6 +509,7 @@ class SingleStageContinuationTests(unittest.TestCase):
             stage_output_root=Path("/tmp/stage"),
             stage2_seed_path=None,
             warm_start_run_dir=None,
+            jax_runtime_seed_spec_path=None,
             jax_profile_dir=None,
             use_target_lane_fast_trials=True,
         )
@@ -718,6 +942,38 @@ class SingleStageContinuationTests(unittest.TestCase):
             "results": results_payload,
         }
 
+    def _write_jax_stage_run(
+        self,
+        root: Path,
+        stage_name: str,
+        results_payload: dict[str, object],
+        *,
+        include_runtime_spec: bool = True,
+        status: str = "completed",
+    ) -> dict[str, object]:
+        run_dir = root / stage_name
+        run_dir.mkdir(parents=True)
+        payload = {
+            "backend": "jax",
+            "optimizer_backend": "ondevice",
+            **results_payload,
+        }
+        (run_dir / "results.json").write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
+        if include_runtime_spec:
+            (run_dir / "single_stage_jax_runtime_spec.json").write_text(
+                "{}",
+                encoding="utf-8",
+            )
+        return {
+            "name": stage_name,
+            "status": status,
+            "run_dir": str(run_dir),
+            "results": payload,
+        }
+
     def _write_existing_stage_output(
         self,
         run_root: Path,
@@ -730,6 +986,17 @@ class SingleStageContinuationTests(unittest.TestCase):
         stage_output_root = run_root / stage_dir_name
         run_dir = stage_output_root / run_dir_name
         run_dir.mkdir(parents=True)
+        results_payload = {
+            "TARGET_VOLUME": 0.1,
+            "TARGET_IOTA": 0.21,
+            "CURVATURE_THRESHOLD": 100.0,
+            "CC_DIST": 0.05,
+            "CS_DIST": 0.015,
+            "SS_DIST": 0.04,
+            "BANANA_CURRENT_MAX_A": 16000.0,
+            "LENGTH_TARGET": 1.7,
+            **results_payload,
+        }
         (run_dir / "results.json").write_text(
             json.dumps(results_payload),
             encoding="utf-8",
@@ -800,6 +1067,92 @@ class SingleStageContinuationTests(unittest.TestCase):
             2.5e-4,
         )
         self.assertAlmostEqual(report["aggregate"]["total_stage_script_time_s"], 34.5)
+
+    def test_build_continuation_validation_report_accepts_jax_runtime_spec_artifact(
+        self,
+    ):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            summary = {
+                "run_root": str(root),
+                "stages": [
+                    self._write_jax_stage_run(
+                        root,
+                        "final",
+                        {
+                            "FINAL_IOTA": 0.205,
+                            "TARGET_IOTA": 0.21,
+                            "FINAL_NON_QS": 0.03,
+                            "FINAL_G": 4.5,
+                            "FIELD_ERROR": 2.5e-4,
+                            "OPTIMIZER_SUCCESS": True,
+                            "HARDWARE_CONSTRAINTS_OK": True,
+                            "TIMINGS": {"script_total_s": 22.0},
+                        },
+                    )
+                ],
+            }
+
+            report = module.build_continuation_validation_report(
+                summary,
+                max_final_field_error=1e-3,
+                max_final_abs_iota_error=0.01,
+                max_final_non_qs=0.05,
+            )
+
+        self.assertTrue(report["passed"])
+        self.assertIn(
+            "single_stage_jax_runtime_spec.json",
+            report["stage_reports"][0]["artifacts"]["files"],
+        )
+        self.assertNotIn(
+            "biot_savart_opt.json",
+            report["stage_reports"][0]["artifacts"]["files"],
+        )
+
+    def test_build_continuation_validation_report_rejects_missing_jax_runtime_spec(
+        self,
+    ):
+        module = self.load_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            summary = {
+                "run_root": str(root),
+                "stages": [
+                    self._write_jax_stage_run(
+                        root,
+                        "final",
+                        {
+                            "FINAL_IOTA": 0.205,
+                            "TARGET_IOTA": 0.21,
+                            "FINAL_NON_QS": 0.03,
+                            "FINAL_G": 4.5,
+                            "FIELD_ERROR": 2.5e-4,
+                            "OPTIMIZER_SUCCESS": True,
+                            "HARDWARE_CONSTRAINTS_OK": True,
+                        },
+                        include_runtime_spec=False,
+                    )
+                ],
+            }
+
+            report = module.build_continuation_validation_report(
+                summary,
+                max_final_field_error=None,
+                max_final_abs_iota_error=None,
+                max_final_non_qs=None,
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertTrue(
+            any(
+                "single_stage_jax_runtime_spec.json" in failure
+                for failure in report["failures"]
+            )
+        )
 
     def test_build_continuation_validation_report_includes_compact_profiling_summary(
         self,
@@ -1330,6 +1683,8 @@ class SingleStageContinuationTests(unittest.TestCase):
 
             def fake_run(command, check):
                 self.assertTrue(check)
+                if self._handle_compile_seed_spec_command(command):
+                    return subprocess.CompletedProcess(command, 0)
                 seen_commands.append(command)
                 stage_output_root = Path(command[command.index("--output-root") + 1])
                 run_dir = stage_output_root / "final-run"
@@ -1446,6 +1801,8 @@ class SingleStageContinuationTests(unittest.TestCase):
 
             def fake_run(command, check):
                 self.assertTrue(check)
+                if self._handle_compile_seed_spec_command(command):
+                    return subprocess.CompletedProcess(command, 0)
                 seen_commands.append(command)
                 stage_output_root = Path(command[command.index("--output-root") + 1])
                 run_dir = stage_output_root / "run"
@@ -1454,6 +1811,13 @@ class SingleStageContinuationTests(unittest.TestCase):
                 results_payload = {
                     "FINAL_IOTA": 0.205 if is_final_stage else 0.19,
                     "TARGET_IOTA": 0.21,
+                    "TARGET_VOLUME": 0.1,
+                    "CURVATURE_THRESHOLD": 100.0,
+                    "CC_DIST": 0.05,
+                    "CS_DIST": 0.015,
+                    "SS_DIST": 0.04,
+                    "BANANA_CURRENT_MAX_A": 16000.0,
+                    "LENGTH_TARGET": 1.7,
                     "FINAL_NON_QS": 0.03 if is_final_stage else 0.07,
                     "FINAL_G": 4.5 if is_final_stage else 4.1,
                     "FIELD_ERROR": 2.5e-4 if is_final_stage else 4.5e-4,
@@ -1550,6 +1914,8 @@ class SingleStageContinuationTests(unittest.TestCase):
 
             def fake_run(command, check):
                 self.assertTrue(check)
+                if self._handle_compile_seed_spec_command(command):
+                    return subprocess.CompletedProcess(command, 0)
                 seen_commands.append(command)
                 stage_output_root = Path(command[command.index("--output-root") + 1])
                 live_summaries.append(
@@ -1561,6 +1927,13 @@ class SingleStageContinuationTests(unittest.TestCase):
                 results_payload = {
                     "FINAL_IOTA": 0.205 if stage_name.endswith("final") else 0.19,
                     "TARGET_IOTA": 0.21,
+                    "TARGET_VOLUME": 0.1,
+                    "CURVATURE_THRESHOLD": 100.0,
+                    "CC_DIST": 0.05,
+                    "CS_DIST": 0.015,
+                    "SS_DIST": 0.04,
+                    "BANANA_CURRENT_MAX_A": 16000.0,
+                    "LENGTH_TARGET": 1.7,
                     "FINAL_NON_QS": 0.03 if stage_name.endswith("final") else 0.07,
                     "FINAL_G": 4.5 if stage_name.endswith("final") else 4.1,
                     "FIELD_ERROR": 2.5e-4 if stage_name.endswith("final") else 4.5e-4,
@@ -1674,6 +2047,8 @@ class SingleStageContinuationTests(unittest.TestCase):
 
             def fake_run(command, check):
                 self.assertTrue(check)
+                if self._handle_compile_seed_spec_command(command):
+                    return subprocess.CompletedProcess(command, 0)
                 live_summary = json.loads(summary_path.read_text(encoding="utf-8"))
                 self.assertNotIn("stale_marker", live_summary)
                 self.assertEqual(live_summary["run_mode"], "resume")
@@ -1743,6 +2118,8 @@ class SingleStageContinuationTests(unittest.TestCase):
 
             def fake_run(command, check):
                 self.assertTrue(check)
+                if self._handle_compile_seed_spec_command(command):
+                    return subprocess.CompletedProcess(command, 0)
                 seen_commands.append(command)
                 stage_output_root = Path(command[command.index("--output-root") + 1])
                 run_dir = stage_output_root / "coarse-run"
