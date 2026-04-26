@@ -3,9 +3,67 @@
 **Audit date:** 2026-04-08
 **Branch:** `gpu-purity-stage2-20260405`
 **Source:** Deep-dive validation via 7 parallel audit agents (JIT/vmap/lax, device residency, autodiff/IFT, GPU/sharding, private optimizer, test coverage, docs) + direct verification.
-**Scope:** 60 actionable items — 3 ship blockers · 8 correctness/defensive · 11 transfer-guard · 15 performance · 12 test coverage · 11 docs/cleanup.
+**Original scope:** 60 actionable items — 3 ship blockers · 8 correctness/defensive · 11 transfer-guard · 15 performance · 12 test coverage · 11 docs/cleanup.
+**Current scope:** original 60-item audit plus the 2026-04-27 review addendum items `#61-#86`.
 
 > Note: Agent 1's "HIGH severity Python-loop recompilation" finding was **rebutted** by [jax-ml/jax#16611](https://github.com/jax-ml/jax/issues/16611) — JAX maintainer Jake VanderPlas confirmed unrolled Python for-loops are ~16× faster than `lax.scan` for small trip counts because XLA fuses across iterations. The existing `_grouped_field` and `_accumulate_grouped_field` designs are correct and are **not** on this list.
+
+---
+
+## Review addendum — `ab256af49` + local diff validation (2026-04-27)
+
+**Branch / HEAD:** `gpu-purity-stage2-20260405` @ `ab256af49`
+**Validation sources:** current repo source, local diff, upstream SIMSOPT
+`hiddenSymmetries/simsopt@1b0cc3a96063197cdbdd01559e04c25456fbe6ff`,
+and official JAX docs:
+[config options](https://docs.jax.dev/en/latest/config_options.html),
+[transfer guard](https://docs.jax.dev/en/latest/config_options.html#transfer-guard),
+[concurrency](https://docs.jax.dev/en/latest/concurrency.html),
+[closed-over constants](https://docs.jax.dev/en/latest/internals/constants.html),
+and [`jax.scipy.sparse.linalg.gmres`](https://docs.jax.dev/en/latest/_autosummary/jax.scipy.sparse.linalg.gmres.html).
+**Targeted local validation:** `pytest
+tests/geo/test_boozersurface_jax_private.py::test_two_loop_recursion_uses_history_count_not_iteration_count
+tests/geo/test_boozersurface_jax_private.py::TestBoozerSurfaceJAXClassPrivate::test_gmres_iteration_limits_bound_hvp_work
+tests/geo/test_curve_objectives.py::test_curve_surface_dense_path_respects_strict_transfer_guard
+-q` passed (`3 passed`). Full suite not rerun.
+
+### New high-priority issue
+
+- [ ] **61. [HIGH / correctness]** `src/simsopt/objectives/fluxobjective_jax.py:127-315` and `src/simsopt/field/biotsavart_jax_backend.py:1004-1024` — `SquaredFluxJAX` captures fixed `flux_spec.points` in its JIT closures, while `BiotSavartJAX.set_points()` mutates the field's active points and increments `_points_version`. `J()` / `dJ()` do not check the version, so calling `field.set_points(...)` after constructing `SquaredFluxJAX` can silently make the field and objective evaluate different point sets. `CLAUDE.md` documents the contract, but it is not enforced. **Fix:** capture the field `_points_version` at construction, fail fast in `J()` / `dJ()` on drift, and add a regression test in `tests/objectives/test_fluxobjective_jax_parity.py` that mutates points post-construction and expects the error.
+
+### New medium issues
+
+- [ ] **62. [MED / import contract]** `src/simsopt/__init__.py:18-40` — the package-root eager runtime config catches `ImportError` around both backend import and `apply_jax_runtime_config()`. This can hide bootstrap/runtime ImportErrors when an explicit JAX backend is requested. **Fix:** preserve CPU-only import tolerance, but re-raise runtime/config ImportErrors under explicit JAX backend selection instead of swallowing them.
+- [ ] **63. [MED / runtime contract]** `src/simsopt/backend/runtime.py:1556-1620` — CUDA parity platform validation warns unless `strict=True`, even when JAX was already initialized with the wrong platform or deterministic CUDA XLA flags are missing. Official JAX config docs and the local runtime comment both require platform/config flags to be set before JAX device initialization. **Fix:** hard-fail for CUDA parity lanes when the active initialized backend or required deterministic XLA preconditions violate the parity contract.
+- [ ] **64. [MED / thread-safety]** `src/simsopt/backend/runtime.py:1037-1658` — backend/runtime module caches are read and written without a lock (`_cached_backend_policy`, `_cached_backend_config`, tuning caches, distributed config, warning set, cache-clear callbacks). Concurrent first-touch or `set_backend()` from worker threads can race. **Fix:** either wrap cache reads/writes in a single module lock or document and enforce a main-thread-before-workers initialization contract.
+- [ ] **65. [MED / native VJP SSOT + perf]** `src/simsopt/field/biotsavart_jax_backend.py:1063,1231-1313` — native pullback paths still build live-graph VJP payloads and call `current.get_value()` on the gradient path instead of consuming the immutable spec lane used by forward field evaluation. The pasted review overstated this as "only `B_pullback_native` differs"; `_field_pullback_native` also uses the live-graph grouping path. **Fix:** route all native pullbacks through one immutable-spec grouping helper and remove repeated host current reads from VJP assembly.
+- [ ] **66. [MED / gradient hot-path perf]** `src/simsopt/field/biotsavart_jax_backend.py:507-518,810-840` — `np.flatnonzero(opt.local_dofs_free_status)` is recomputed in DOF scatter/projection helpers used by field pullbacks and coil cotangent projection. **Fix:** cache free DOF positions in the immutable DOF/spec construction layer and invalidate only when free/fix status changes.
+- [ ] **67. [MED / maintainability]** `src/simsopt/geo/optimizer_jax_private/_line_search.py` and `_lbfgs.py` — host and JAX line-search helpers duplicate algebraic kernels (`cubicmin`, `quadmin`, sample validity, zoom branch handling). **Fix:** extract shared scalar algebra/validity helpers to `_common.py`; keep the control-flow-specific JAX/host loops separate.
+- [ ] **68. [MED / fail-loud contract]** `src/simsopt/geo/optimizer_jax_private/_result_converters.py:147-174` — `_coerce_dense_hess_inv()` catches broad `Exception` and silently falls back to an identity Hessian inverse warm start with a warning. **Fix:** narrow to expected densification/coercion errors (`TypeError`, `ValueError`) and re-raise programmer/runtime failures.
+
+### New low issues and coverage gaps
+
+- [ ] **69. [LOW / defensive code]** `src/simsopt/field/biotsavart_jax_backend.py:474-488` — `_axis0_entries()` uses a defensive `try` / `except IndexError` fallback. Replace with a direct shape-rank contract or a shared helper.
+- [ ] **70. [LOW / DRY]** `src/simsopt/jax_core/biotsavart.py`, `src/simsopt/jax_core/_math_utils.py`, `src/simsopt/jax_core/reductions.py`, and `src/simsopt/field/biotsavart_jax_backend.py` duplicate small helpers such as float64 coercion, axis padding, pairwise reduction, and axis-entry extraction. Consolidate where it does not blur layer boundaries.
+- [ ] **71. [LOW / fail-loud contract]** `src/simsopt/geo/boozer_residual_jax.py:101-107` — `_safe_inverse_modB()` floors `|B|` with `np.finfo(...).tiny`, masking degenerate-field input instead of surfacing the invalid state. Remove the "safe" floor if no caller has a legitimate degenerate-field contract.
+- [ ] **72. [LOW / API cleanup]** `src/simsopt/geo/boozer_residual_jax.py:610-665` — `boozer_residual_coil_vjp()` has no production caller, but tests import and exercise it (`tests/geo/test_boozer_derivatives_jax.py`). Do not delete blindly; either document it as a test/public derivative helper or remove the test/API surface together.
+- [ ] **73. [LOW / algorithmic cleanup]** `src/simsopt/geo/boozer_residual_jax.py:84-98` — `_split_decision_vector()` uses selector-matrix multiplication where slicing would be linear and clearer.
+- [ ] **74. [LOW / host-device boundary]** `src/simsopt/geo/optimizer_jax_private/_lbfgs.py:1074-1095` — `_emit_iteration_callbacks_host()` stages callback state through `_as_device_array(...)`, adding an avoidable host-device-host round trip per accepted iteration.
+- [ ] **75. [LOW / API consistency]** `src/simsopt/geo/optimizer_jax_private/_common.py:208` and `_lbfgs.py:1074` — BFGS and L-BFGS callback emitters have divergent signatures. Align the host/JAX callback adapter seam.
+- [ ] **76. [LOW / test coverage]** `tests/geo/test_surface_fourier_jax.py:289-330` — `test_coefficient_derivatives_match_cpp` only covers `stellsym=False`. Add `stellsym=True`.
+- [ ] **77. [LOW / test coverage]** `tests/geo/test_boozersurface_jax.py:683-700` — `test_stellsym_zeros_correct_quadrants` checks x and z zero quadrants but not y. Add the y quadrant assertions.
+- [ ] **78. [LOW / boilerplate]** `src/simsopt/geo/surfaceobjectives_jax.py:1568-1880` — `BoozerResidualJAX`, `IotasJAX`, and `NonQuasiSymmetricRatioJAX` duplicate Optimizable wrapper boilerplate. Extract a small shared base only if it removes real duplication without hiding the distinct objective contracts.
+- [ ] **79. [LOW / cache contract docs]** `src/simsopt/geo/surfaceobjectives_jax.py:3319-3338` — `_traceable_runtime_cache_key()` uses object identities for `booz_jax` / `bs_jax` and relies on the documented no-mutation contract plus solver-generation invalidation. Add an inline comment tying the identity key to that contract.
+- [ ] **80. [LOW / dtype explicitness]** `src/simsopt/objectives/fluxobjective_jax.py:238` — `jnp.array(currents)` relies on global x64 config. Set `dtype=jnp.float64` explicitly.
+- [ ] **81. [LOW / memory cost]** `src/simsopt/jax_core/field.py:84-128` — coil/point sharding helpers pad arrays with full-size zeros to device-count multiples. Keep as accepted cost unless CUDA profiling shows this is material for production shapes.
+- [ ] **82. [LOW / facade docs]** `src/simsopt/backend.py` and `src/simsopt/backend/__init__.py` duplicate facade exports. Add a short comment in the package `__init__` pointing to `backend/runtime.py` as the SSOT.
+- [ ] **83. [LOW / non-production banner]** `src/simsopt/geo/boozersurface_jax.py:4143-4194` — `minimize_boozer_exact_constraints_newton()` uses dense `jnp.linalg.solve` inside the public CPU-parity-style path. Add a docstring banner clarifying that the production exact runtime/adjoint path remains operator-backed.
+
+### Current `ab256af49` / local-diff verdict
+
+- [x] **84. [REGRESSION REVIEW]** `ab256af49` L-BFGS host migration: approve. The history-count ring-buffer semantics, sample-valid line-search gating, and old-old-fval threading are covered by focused tests; no blocker found in the commit review.
+- [x] **85. [REGRESSION REVIEW]** `src/simsopt/geo/curveobjectives.py` `jnp.ones_like(dists)` to `jnp.broadcast_to(one, dists.shape)` remains load-bearing for strict transfer-guard coverage.
+- [x] **86. [LOCAL DIFF REVIEW]** `src/simsopt/geo/optimizer_jax.py:1763-1766` local GMRES restart cap change `20 -> 64` is accepted as a cost/convergence tradeoff. JAX documents `restart` as Krylov subspace size; larger values increase iteration cost but may be necessary for convergence. Focused regression test now checks `(39, 10)` and `(663 -> 64, 10)`.
 
 ---
 
