@@ -1,18 +1,18 @@
 # ALM Constraint Normalization and Block Penalty Implementation Plan
 
 Date: 2026-04-26
-Status: Phases 0 through 3 implemented; Phase 4 still conditional
+Status: Phases 0 through 4 implemented; Phase 5 deferred
 Scope: `examples/single_stage_optimization/alm_utils.py`, `banana_opt/hardware_constraint_schema.py`, `banana_opt/stage2_objectives.py`, `banana_opt/single_stage_objectives.py`, ALM result reporting, and focused ALM tests
 
 ## Review Verdict
 
-Approve Phases 0 through 3 for implementation. Treat Phase 4 as conditional until the normalized scalar ALM path has tests and at least dry-run evidence.
+Approve Phases 0 through 4 for implementation. Phase 4 is implemented as an internal block-penalty path with scalar ALM preserved as the default. Phase 5 feature expansion remains deferred.
 
 The current ALM engine is already a real projected inequality augmented Lagrangian, not a simple penalty wrapper. It has L-BFGS-B inner solves, boxed trust-radius subproblems, nonfinite candidate rejection, multiplier and penalty caps, hard-vs-surrogate routing, KKT-style stationarity handling, history callbacks, and best-feasible restore.
 
-The validated remaining problem is scale control. Stage 2 and single-stage ALM still pass raw signed residuals into the same scalar penalty/multiplier update path. Those residuals mix meters, inverse meters, amperes, and physics objective units. That makes one penalty parameter do too many jobs and makes multiplier magnitudes difficult to compare across constraint families.
+The validated problem was scale control. Stage 2 and single-stage ALM now route normalized signed residuals through the ALM math while preserving raw sidecars for certification and reporting. The remaining production policy is conservative: scalar ALM stays the default, and block penalties are available internally for validated fixtures before any CLI exposure.
 
-Do not start with solver replacement, multi-surface ALM, or independent-current ALM. First make the existing ALM contract unit-aware and diagnostic. The key required edit before coding is to make the normalized-vs-raw field contract explicit inside `minimize_alm`, because current hard/surrogate fields are not just report fields; they affect multiplier updates, activity masks, stationarity, positive-shift logic, and signal-mismatch penalty decisions.
+Do not start with solver replacement, multi-surface ALM, or independent-current ALM. The implemented path keeps the existing ALM contract unit-aware and diagnostic. The normalized-vs-raw field contract is explicit inside `minimize_alm`, because hard/surrogate fields are not just report fields; they affect multiplier updates, activity masks, stationarity, positive-shift logic, and signal-mismatch penalty decisions.
 
 ## Implementation Status
 
@@ -25,7 +25,7 @@ Current implementation status:
 - [x] `--alm-feas-tol` help text now identifies the tolerance as dimensionless and normalized.
 - [x] ALM history now emits actionable raw/normalized sidecars, projected positive shifts, augmented terms, active pressure, constraint scales, blocks, normalized multipliers, raw dual estimates, surrogate-hard gap arrays, sign mismatch arrays, objective-to-augmented-term ratio, separated gradient/stationarity labels, and block summaries.
 - [x] Final ALM result payloads now emit `ALM_SUMMARY`, `ALM_MULTIPLIER_INTERPRETATION`, `ALM_FINAL_AUGMENTED_GRADIENT_NORM`, and `ALM_FINAL_SURROGATE_KKT_STATIONARITY_NORM`.
-- [ ] Phase 4 block penalties are not implemented.
+- [x] Phase 4 block penalties are implemented as an internal, non-CLI path.
 
 Baseline artifact scan generated:
 
@@ -50,27 +50,31 @@ skipped_artifacts: 2
 
 ## Current Code Evidence
 
-### Raw ALM constraint vectors
+### Normalized ALM constraint vectors
 
-Stage 2 builds hard and surrogate signed values, then calls `augmented_inequality_objective(...)` with the surrogate signed values directly. The payload also stores raw hard values and raw hard violations for feasibility routing.
+Stage 2 now builds raw hard and surrogate signed values, resolves ALM metadata, normalizes the ALM-consumed arrays at the evaluation boundary, and calls `augmented_inequality_objective(...)` with normalized surrogate signed values and normalized gradients.
 
 Relevant code:
 
 - `examples/single_stage_optimization/banana_opt/stage2_objectives.py`
+- `_stage2_alm_constraint_metadata(...)`
 - `evaluate_stage2_alm_problem(...)`
-- raw fields: `hard_signed_constraint_values`, `surrogate_signed_constraint_values`, `hard_violation_values`, `dual_update_values`
+- normalized fields: `constraint_values`, `dual_update_values`, `feasibility_values`, `hard_signed_constraint_values`, `hard_violation_values`, `surrogate_signed_constraint_values`, `hard_dual_update_values`, `constraint_grads`, `constraint_activity_tolerances`
+- raw sidecars: `raw_dual_update_values`, `raw_feasibility_values`, `raw_hard_signed_constraint_values`, `raw_hard_violation_values`, `raw_surrogate_signed_constraint_values`, `raw_hard_dual_update_values`, `raw_constraint_grads`, `raw_constraint_activity_tolerances`
 
-Single-stage ALM similarly builds hardware and physics constraint tuples and passes raw `constraint_values` and gradients into `augmented_inequality_objective(...)`.
+Single-stage ALM now applies the same normalized contract for hardware and thresholded-physics constraints before calling `augmented_inequality_objective(...)`.
 
 Relevant code:
 
 - `examples/single_stage_optimization/banana_opt/single_stage_objectives.py`
+- `_single_stage_alm_constraint_metadata(...)`
 - `evaluate_alm_objective(...)`
-- raw fields: `dual_update_values`, `feasibility_values`, `constraint_grads`
+- normalized fields: `constraint_values`, `dual_update_values`, `feasibility_values`, `constraint_grads`, `constraint_activity_tolerances`
+- raw sidecars: `raw_dual_update_values`, `raw_feasibility_values`, `raw_constraint_grads`, `raw_constraint_activity_tolerances`
 
-### Schema has thresholds but no ALM scale contract
+### Schema owns ALM scale metadata
 
-`HardwareConstraintSpec` currently owns:
+`HardwareConstraintSpec` now owns the ALM metadata needed for unit-aware routing:
 
 ```text
 name
@@ -78,11 +82,20 @@ kind
 threshold
 applies_to
 traversal_policy
+alm_scale
+alm_block
+alm_activity_tolerance
 ```
 
-It does not own an ALM scale, block label, or ALM activity tolerance. Thresholds are enough for pass/fail and signed-value construction, but not enough to normalize residuals consistently.
+`ALMConstraintMetadata` is the SSOT for scale, block, raw threshold, scale source, activity tolerance, and objective/gradient/dual-update/feasibility/certification value-source labels.
 
-### ALM has scalar penalty state
+Relevant code:
+
+- `examples/single_stage_optimization/banana_opt/hardware_constraint_schema.py`
+- `hardware_constraint_alm_metadata(...)`
+- `alm_constraint_metadata_payload(...)`
+
+### ALM scalar penalty remains the default
 
 `ALMSettings` owns one penalty:
 
@@ -98,11 +111,29 @@ Multiplier projection uses:
 lambda_i <- max(0, lambda_i + penalty * constraint_i)
 ```
 
-There is no per-constraint or per-block penalty state.
+Block penalties are available only through internal `ALMSettings` fields. No
+CLI flags expose the path yet, and the normalized scalar path remains the
+default production path.
 
-### Hard-vs-surrogate support already exists
+Relevant code:
 
-The code already detects hard/surrogate disagreement and exposes it in history/result payloads. Preserve this. The missing part is scale-aware gap reporting and automatic tuning policy, not the basic signal split.
+- `examples/single_stage_optimization/alm_utils.py`
+- `ALMBlockPenaltyState`
+- `_initial_block_penalty_state(...)`
+- `_block_penalty_vector(...)`
+- `_next_block_penalty_state(...)`
+- `minimize_alm(..., constraint_blocks=...)`
+
+### Hard-vs-surrogate support is first-class telemetry
+
+The code detects hard/surrogate disagreement, emits normalized hard/surrogate gaps, sign-mismatch arrays, positive-shift diagnostics, raw dual estimates, separated stationarity labels, block summaries, and a final `ALM_SUMMARY`.
+
+Relevant code:
+
+- `examples/single_stage_optimization/alm_utils.py`
+- `_constraint_history_diagnostics(...)`
+- `_alm_summary(...)`
+- `alm_result_diagnostics_fields(...)`
 
 ## Target Contract
 
@@ -468,9 +499,9 @@ diagnostic. These are different diagnostics and should not be collapsed into one
 
 ### Phase 4: Add block penalties after normalized scalar path is stable
 
-Only start this phase after Phase 2 and Phase 3 tests pass.
+This phase is implemented after Phase 2 and Phase 3 tests passed.
 
-- [ ] Add `ALMBlockPenaltyState` or equivalent internal state:
+- [x] Add `ALMBlockPenaltyState` or equivalent internal state:
 
 ```text
 block -> penalty
@@ -478,18 +509,20 @@ block -> penalty_cap_reached
 block -> requested_penalty
 ```
 
-- [ ] Extend `ALMSettings` with optional block penalty controls while preserving scalar defaults:
+- [x] Extend `ALMSettings` with optional block penalty controls while preserving scalar defaults:
 
 ```text
 block_penalties_enabled: bool = False
 block_penalty_init: dict[str, float] | None = None
 block_penalty_scale: dict[str, float] | None = None
-block_penalty_max: dict[str, float] | None = None
+block_penalty_max: dict[str, float | None] | None = None
+block_penalty_improvement_fraction: float = 0.9
+block_penalty_patience: int = 1
 ```
 
-- [ ] Refactor multiplier update to use the penalty for each constraint's block.
-- [ ] Refactor augmented inequality objective to accept a vector penalty or block penalty vector.
-- [ ] Use the explicit vector-penalty formula:
+- [x] Refactor multiplier update to use the penalty for each constraint's block.
+- [x] Refactor augmented inequality objective to accept a vector penalty or block penalty vector.
+- [x] Use the explicit vector-penalty formula:
 
 ```text
 rho_i = penalty for constraint i's block
@@ -499,8 +532,8 @@ gradient += s_i * grad(c_i)
 lambda_i <- max(0, lambda_i + rho_i * c_dual_update_i)
 ```
 
-- [ ] Penalty growth should apply only to blocks whose normalized violation fails to improve.
-- [ ] Add hysteresis to prevent block penalty growth from tiny numerical fluctuations:
+- [x] Penalty growth should apply only to blocks whose normalized violation fails to improve.
+- [x] Add hysteresis to prevent block penalty growth from tiny numerical fluctuations:
 
 ```text
 improvement_fraction = 0.9
@@ -514,9 +547,9 @@ else:
 
 Use the patience counter so a single tiny oscillation does not trigger penalty growth.
 
-- [ ] Preserve scalar penalty behavior as the default path until explicit block-penalty tests and real-run fixtures pass.
-- [ ] Do not expose block penalty CLI flags immediately. Keep controls internal until real-run validation proves defaults are stable.
-- [ ] Before enabling this path, prove:
+- [x] Preserve scalar penalty behavior as the default path while block penalties remain internal and fixture-tested.
+- [x] Do not expose block penalty CLI flags immediately. Keep controls internal until real-run validation proves defaults are stable.
+- [x] Implementation tests prove:
 
 ```text
 block_penalties_enabled = False gives the same behavior as scalar ALM

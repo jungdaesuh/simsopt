@@ -84,6 +84,181 @@ class ResidualHelperTests(unittest.TestCase):
         )
         self.assertAlmostEqual(evaluation["max_feasibility_violation"], 0.5)
 
+    def test_augmented_inequality_objective_accepts_vector_penalty(self):
+        module = load_alm_utils_module()
+
+        evaluation = module.augmented_inequality_objective(
+            base_value=3.0,
+            base_grad=np.array([1.0, -1.0]),
+            constraint_values=np.array([-1.0, 0.5]),
+            constraint_grads=[np.array([2.0, 0.0]), np.array([0.0, 4.0])],
+            multipliers=np.array([0.5, 1.0]),
+            penalty=np.array([2.0, 4.0]),
+        )
+
+        self.assertAlmostEqual(evaluation["total"], 3.9375)
+        np.testing.assert_allclose(evaluation["grad"], np.array([1.0, 11.0]))
+        np.testing.assert_allclose(evaluation["dual_update_values"], np.array([-1.0, 0.5]))
+        np.testing.assert_allclose(evaluation["feasibility_values"], np.array([0.0, 0.5]))
+
+    def test_augmented_inequality_objective_one_block_vector_matches_scalar(self):
+        module = load_alm_utils_module()
+
+        scalar = module.augmented_inequality_objective(
+            base_value=3.0,
+            base_grad=np.array([1.0, -1.0]),
+            constraint_values=np.array([-1.0, 0.5]),
+            constraint_grads=[np.array([2.0, 0.0]), np.array([0.0, 4.0])],
+            multipliers=np.array([0.5, 1.0]),
+            penalty=4.0,
+        )
+        vector = module.augmented_inequality_objective(
+            base_value=3.0,
+            base_grad=np.array([1.0, -1.0]),
+            constraint_values=np.array([-1.0, 0.5]),
+            constraint_grads=[np.array([2.0, 0.0]), np.array([0.0, 4.0])],
+            multipliers=np.array([0.5, 1.0]),
+            penalty=np.array([4.0, 4.0]),
+        )
+
+        self.assertAlmostEqual(vector["total"], scalar["total"])
+        np.testing.assert_allclose(vector["grad"], scalar["grad"])
+
+    def test_project_nonnegative_multipliers_uses_vector_penalty(self):
+        module = load_alm_utils_module()
+
+        updated, cap_binding, cap_indices = (
+            module._project_nonnegative_multipliers_with_diagnostics(
+                multipliers=np.array([1.0, 2.0]),
+                dual_update_values=np.array([0.5, -1.0]),
+                penalty=np.array([4.0, 10.0]),
+                multiplier_max=2.5,
+            )
+        )
+
+        np.testing.assert_allclose(updated, np.array([2.5, 0.0]))
+        self.assertTrue(cap_binding)
+        self.assertEqual(cap_indices, [0])
+
+    def test_block_penalty_growth_targets_only_stalled_violated_blocks(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=0.1,
+            block_penalties_enabled=True,
+        )
+        state = module._initial_block_penalty_state(
+            settings,
+            ["geometry", "current"],
+            initial_penalty=1.0,
+        )
+
+        next_state, grown_blocks, cap_hit_blocks, requested = module._next_block_penalty_state(
+            state,
+            {"geometry": 0.5, "current": 0.05},
+            settings,
+        )
+
+        self.assertEqual(grown_blocks, ["geometry"])
+        self.assertEqual(cap_hit_blocks, [])
+        self.assertEqual(requested, {"geometry": 10.0})
+        self.assertEqual(next_state.penalties_by_block["geometry"], 10.0)
+        self.assertEqual(next_state.penalties_by_block["current"], 1.0)
+
+    def test_block_penalty_growth_reports_caps_per_block(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            penalty_init=10.0,
+            penalty_scale=10.0,
+            penalty_max=1.0e8,
+            feasibility_tol=0.1,
+            block_penalties_enabled=True,
+            block_penalty_max={"geometry": 50.0, "current": 1.0e8},
+        )
+        state = module._initial_block_penalty_state(
+            settings,
+            ["geometry", "current"],
+            initial_penalty=10.0,
+        )
+
+        next_state, grown_blocks, cap_hit_blocks, requested = module._next_block_penalty_state(
+            state,
+            {"geometry": 0.5, "current": 0.0},
+            settings,
+        )
+
+        self.assertEqual(grown_blocks, [])
+        self.assertEqual(cap_hit_blocks, ["geometry"])
+        self.assertEqual(requested, {"geometry": 100.0})
+        self.assertEqual(next_state.penalties_by_block["geometry"], 10.0)
+        self.assertTrue(next_state.cap_reached_by_block["geometry"])
+        self.assertFalse(next_state.cap_reached_by_block["current"])
+
+    def test_block_penalty_init_rejects_cap_below_initial_penalty(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            penalty_init=10.0,
+            block_penalties_enabled=True,
+            block_penalty_max={"geometry": 5.0},
+        )
+
+        with self.assertRaisesRegex(ValueError, "block_penalty_max\\['geometry'\\]"):
+            module._initial_block_penalty_state(
+                settings,
+                ["geometry"],
+                initial_penalty=10.0,
+            )
+
+    def test_block_penalty_init_rejects_invalid_hysteresis_settings(self):
+        module = load_alm_utils_module()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "block_penalty_improvement_fraction",
+        ):
+            module._initial_block_penalty_state(
+                module.ALMSettings(
+                    block_penalties_enabled=True,
+                    block_penalty_improvement_fraction=1.0,
+                ),
+                ["geometry"],
+                initial_penalty=1.0,
+            )
+
+        with self.assertRaisesRegex(ValueError, "block_penalty_patience"):
+            module._initial_block_penalty_state(
+                module.ALMSettings(
+                    block_penalties_enabled=True,
+                    block_penalty_patience=0,
+                ),
+                ["geometry"],
+                initial_penalty=1.0,
+            )
+
+    def test_minimize_alm_requires_blocks_when_block_penalties_are_enabled(self):
+        module = load_alm_utils_module()
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x, multipliers, penalty
+            return module.augmented_inequality_objective(
+                base_value=0.0,
+                base_grad=np.zeros(1),
+                constraint_values=np.array([1.0]),
+                constraint_grads=[np.zeros(1)],
+                multipliers=np.zeros(1),
+                penalty=1.0,
+            )
+
+        with self.assertRaisesRegex(ValueError, "constraint_blocks"):
+            module.minimize_alm(
+                np.zeros(1),
+                ["gap"],
+                evaluate_problem,
+                module.ALMSettings(block_penalties_enabled=True),
+                {"maxiter": 1},
+            )
+
     def test_normalize_alm_constraints_scales_values_grads_and_tolerances(self):
         module = load_alm_utils_module()
 
@@ -1516,6 +1691,8 @@ class MinimizeAlmTests(unittest.TestCase):
                 "inner_success",
                 "inner_message",
                 "penalty",
+                "penalty_values",
+                "block_penalties",
                 "max_violation",
                 "stationarity_norm",
                 "raw_stationarity_norm",
@@ -2511,6 +2688,96 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(result.penalty_cap_requested, 1.0e9)
         self.assertEqual(result.history[0]["action"], "penalty_cap_reached")
         self.assertIn("configured penalty cap", result.message)
+
+    def test_minimize_alm_rejects_initial_penalty_above_cap(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            penalty_init=1.0,
+            penalty_max=5.0,
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x, multipliers, penalty
+            raise AssertionError("initial penalty validation should run before evaluation")
+
+        with self.assertRaisesRegex(ValueError, "initial ALM penalty"):
+            module.minimize_alm(
+                np.zeros(1),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 1},
+                initial_penalty=10.0,
+            )
+
+    def test_minimize_alm_reports_block_penalty_caps_per_block(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=1,
+            max_subproblem_continuations=0,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            penalty_max=1.0e8,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+            max_inner_attempts=1,
+            block_penalties_enabled=True,
+            block_penalty_max={"geometry": 5.0, "current": 1.0e8},
+        )
+        penalty_arguments = []
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x
+            penalty_arguments.append(np.asarray(penalty, dtype=float).copy())
+            return module.augmented_inequality_objective(
+                base_value=0.0,
+                base_grad=np.zeros(1),
+                constraint_values=np.array([0.5, 0.0]),
+                constraint_grads=[np.zeros(1), np.zeros(1)],
+                multipliers=multipliers,
+                penalty=penalty,
+            )
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, jac, method, bounds, callback, options
+            return SimpleNamespace(
+                x=np.asarray(x, dtype=float).copy(),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.zeros(1),
+                ["gap", "current"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 1},
+                constraint_blocks=["geometry", "current"],
+            )
+
+        np.testing.assert_allclose(penalty_arguments[0], [1.0, 1.0])
+        self.assertEqual(result.termination_reason, "penalty_cap_reached")
+        self.assertTrue(result.penalty_cap_reached)
+        self.assertEqual(result.block_penalties, {"geometry": 1.0, "current": 1.0})
+        self.assertEqual(result.penalty_values, [1.0, 1.0])
+        self.assertEqual(
+            result.block_penalty_cap_reached,
+            {"geometry": True, "current": False},
+        )
+        self.assertEqual(
+            result.block_penalty_cap_requested,
+            {"geometry": 10.0, "current": None},
+        )
+        self.assertEqual(
+            result.history[0]["block_penalty_growth_blocks"],
+            [],
+        )
+        self.assertEqual(
+            result.history[0]["block_penalty_cap_reached"],
+            {"geometry": True, "current": False},
+        )
 
 
 if __name__ == "__main__":

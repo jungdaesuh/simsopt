@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 import numpy as np
 from scipy.optimize import minimize, nnls
@@ -28,6 +28,12 @@ class ALMSettings:
     max_inner_attempts: int = 4
     relaxed_feasibility_gate_cap: float = 1e-2
     multiplier_max: float | None = 1.0e6
+    block_penalties_enabled: bool = False
+    block_penalty_init: Mapping[str, float] | None = None
+    block_penalty_scale: Mapping[str, float] | None = None
+    block_penalty_max: Mapping[str, float | None] | None = None
+    block_penalty_improvement_fraction: float = 0.9
+    block_penalty_patience: int = 1
 
 
 @dataclass(frozen=True)
@@ -47,6 +53,7 @@ class ALMFeasibleIncumbent:
     penalty: float
     inner_result: object
     incumbent_state: object | None = None
+    block_penalty_state: object | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +77,18 @@ class ALMConstraintRoutingState:
     surrogate_positive_shift_zero: bool
     hard_max_violation: float
     surrogate_max_value: float
+
+
+@dataclass(frozen=True)
+class ALMBlockPenaltyState:
+    constraint_blocks: tuple[str, ...]
+    penalties_by_block: dict[str, float]
+    scales_by_block: dict[str, float]
+    max_by_block: dict[str, float | None]
+    cap_reached_by_block: dict[str, bool]
+    requested_by_block: dict[str, float | None]
+    stall_counts_by_block: dict[str, int]
+    previous_violations_by_block: dict[str, float]
 
 
 _UNBOUNDED_INNER_PROFILE = ALMInnerSolveProfile(
@@ -270,21 +289,20 @@ def augmented_inequality_objective(
     constraint_values,
     constraint_grads,
     multipliers,
-    penalty: float,
+    penalty,
 ):
-    if penalty <= 0.0:
-        raise ValueError("penalty must be positive")
     constraint_values = np.asarray(constraint_values, dtype=float)
     constraint_grad_list = [
         np.asarray(constraint_grad, dtype=float) for constraint_grad in constraint_grads
     ]
     multipliers = np.asarray(multipliers, dtype=float)
-    positive_shift = np.maximum(0.0, multipliers + float(penalty) * constraint_values)
+    penalty_values = _penalty_values(penalty, constraint_values.size)
+    positive_shift = np.maximum(0.0, multipliers + penalty_values * constraint_values)
 
     total_value = float(base_value)
     if constraint_values.size > 0:
-        total_value += 0.5 / float(penalty) * float(
-            np.dot(positive_shift, positive_shift) - np.dot(multipliers, multipliers)
+        total_value += float(
+            np.sum((positive_shift**2 - multipliers**2) / (2.0 * penalty_values))
         )
 
     total_grad = np.array(base_grad, copy=True)
@@ -565,7 +583,7 @@ def _multiplier_interpretation(evaluation: dict) -> str:
 def _constraint_history_diagnostics(
     evaluation: dict,
     multipliers: np.ndarray,
-    penalty: float,
+    penalty,
     constraint_names: Sequence[str],
     solver_constraint_values: np.ndarray,
     feasibility_values: np.ndarray,
@@ -573,12 +591,13 @@ def _constraint_history_diagnostics(
     feasibility_gate: float,
 ) -> dict:
     multiplier_array = np.asarray(multipliers, dtype=float)
+    penalty_values = _penalty_values(penalty, multiplier_array.size)
     positive_shift = np.maximum(
         0.0,
         multiplier_array
-        + float(penalty) * np.asarray(solver_constraint_values, dtype=float),
+        + penalty_values * np.asarray(solver_constraint_values, dtype=float),
     )
-    augmented_terms = (positive_shift**2 - multiplier_array**2) / (2.0 * float(penalty))
+    augmented_terms = (positive_shift**2 - multiplier_array**2) / (2.0 * penalty_values)
     active_pressure = positive_shift * np.asarray(solver_constraint_values, dtype=float)
     raw_hard_violation_values = _optional_float_list(
         evaluation,
@@ -624,6 +643,7 @@ def _constraint_history_diagnostics(
         "constraint_blocks": constraint_blocks,
         "normalized_multipliers": _as_float_list(multiplier_array),
         "raw_dual_estimates": _raw_dual_estimates(multiplier_array, evaluation),
+        "penalty_values": _as_float_list(penalty_values),
         "positive_shift_values": _as_float_list(positive_shift),
         "augmented_term_by_constraint": _as_float_list(augmented_terms),
         "active_pressure_by_constraint": _as_float_list(active_pressure),
@@ -658,7 +678,7 @@ def _alm_summary(
     termination_reason: str,
     evaluation: dict,
     multipliers: np.ndarray,
-    penalty: float,
+    penalty,
     constraint_names: Sequence[str],
     routing_state: ALMConstraintRoutingState,
     feasibility_values: np.ndarray,
@@ -680,6 +700,7 @@ def _alm_summary(
         final_feasibility_tolerance,
     )
     raw_hard_violations = diagnostics["raw_hard_violation_values"]
+    penalty_values = _penalty_values(penalty, len(constraint_names))
     return {
         "termination_reason": str(termination_reason),
         "max_normalized_violation": _max_value(feasibility_values),
@@ -696,7 +717,8 @@ def _alm_summary(
         "surrogate_kkt_stationarity_norm": diagnostics[
             "surrogate_kkt_stationarity_norm"
         ],
-        "penalty": float(penalty),
+        "penalty": _representative_penalty(penalty_values),
+        "penalty_values": _as_float_list(penalty_values),
         "penalty_cap_reached": bool(penalty_cap_reached),
         "multiplier_cap_binding": bool(multiplier_cap_binding),
         "signal_mismatch_active": bool(routing_state.signal_mismatch_active),
@@ -763,6 +785,18 @@ def alm_result_diagnostics_fields(alm_result) -> dict:
         "ALM_PENALTY_CAP_REQUESTED": getattr(
             alm_result,
             "penalty_cap_requested",
+            None,
+        ),
+        "ALM_FINAL_PENALTY_VALUES": getattr(alm_result, "penalty_values", None),
+        "ALM_BLOCK_PENALTIES": getattr(alm_result, "block_penalties", None),
+        "ALM_BLOCK_PENALTY_CAP_REACHED": getattr(
+            alm_result,
+            "block_penalty_cap_reached",
+            None,
+        ),
+        "ALM_BLOCK_PENALTY_CAP_REQUESTED": getattr(
+            alm_result,
+            "block_penalty_cap_requested",
             None,
         ),
     }
@@ -1107,7 +1141,7 @@ def _incumbent_objective_value(evaluation: dict) -> float:
 def _project_nonnegative_multipliers(
     multipliers: np.ndarray,
     dual_update_values: np.ndarray,
-    penalty: float,
+    penalty,
     multiplier_max: float | None,
 ) -> np.ndarray:
     projected, _cap_binding, _cap_binding_indices = _project_nonnegative_multipliers_with_diagnostics(
@@ -1122,18 +1156,20 @@ def _project_nonnegative_multipliers(
 def _updated_nonnegative_multipliers(
     multipliers: np.ndarray,
     dual_update_values: np.ndarray,
-    penalty: float,
+    penalty,
 ) -> np.ndarray:
+    dual_update_array = np.asarray(dual_update_values, dtype=float)
+    penalty_values = _penalty_values(penalty, dual_update_array.size)
     return np.maximum(
         0.0,
-        np.asarray(multipliers, dtype=float) + float(penalty) * np.asarray(dual_update_values, dtype=float),
+        np.asarray(multipliers, dtype=float) + penalty_values * dual_update_array,
     )
 
 
 def _project_nonnegative_multipliers_with_diagnostics(
     multipliers: np.ndarray,
     dual_update_values: np.ndarray,
-    penalty: float,
+    penalty,
     multiplier_max: float | None,
 ) -> tuple[np.ndarray, bool, list[int]]:
     updated = _updated_nonnegative_multipliers(
@@ -1150,6 +1186,26 @@ def _project_nonnegative_multipliers_with_diagnostics(
         bool(np.any(cap_binding_mask)),
         np.flatnonzero(cap_binding_mask).astype(int).tolist(),
     )
+
+
+def _penalty_values(penalty, size: int) -> np.ndarray:
+    penalty_array = np.asarray(penalty, dtype=float)
+    if penalty_array.shape == ():
+        values = np.full(int(size), float(penalty_array), dtype=float)
+    elif penalty_array.shape == (int(size),):
+        values = penalty_array.astype(float, copy=False)
+    else:
+        raise ValueError("penalty shape must be scalar or match constraint count")
+    if np.any(~np.isfinite(values)) or np.any(values <= 0.0):
+        raise ValueError("ALM penalty values must be finite and positive")
+    return values
+
+
+def _representative_penalty(penalty) -> float:
+    values = np.asarray(penalty, dtype=float)
+    if values.shape == ():
+        return float(values)
+    return _max_value(values)
 
 
 def _next_penalty(
@@ -1169,6 +1225,258 @@ def _next_penalty(
     if not np.isfinite(requested_penalty) or requested_penalty > penalty_max:
         return penalty_max, True, requested_penalty
     return requested_penalty, False, requested_penalty
+
+
+def _ordered_blocks(constraint_blocks: Sequence[str]) -> tuple[str, ...]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for block in constraint_blocks:
+        block_name = str(block)
+        if not block_name:
+            raise ValueError("ALM constraint block names must be non-empty")
+        if block_name not in seen:
+            ordered.append(block_name)
+            seen.add(block_name)
+    return tuple(ordered)
+
+
+def _block_float_map(
+    mapping: Mapping[str, float] | None,
+    blocks: Sequence[str],
+    default: float,
+    *,
+    name: str,
+) -> dict[str, float]:
+    block_names = _ordered_blocks(blocks)
+    values = {block: float(default) for block in block_names}
+    if mapping is not None:
+        unknown_blocks = set(mapping) - set(block_names)
+        if unknown_blocks:
+            raise ValueError(
+                f"{name} contains unknown ALM blocks: {sorted(unknown_blocks)}"
+            )
+        values.update({str(block): float(value) for block, value in mapping.items()})
+    for block, value in values.items():
+        if not np.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name}[{block!r}] must be finite and positive")
+    return values
+
+
+def _block_optional_float_map(
+    mapping: Mapping[str, float | None] | None,
+    blocks: Sequence[str],
+    default: float | None,
+    *,
+    name: str,
+) -> dict[str, float | None]:
+    block_names = _ordered_blocks(blocks)
+    values = {
+        block: (None if default is None else float(default))
+        for block in block_names
+    }
+    if mapping is not None:
+        unknown_blocks = set(mapping) - set(block_names)
+        if unknown_blocks:
+            raise ValueError(
+                f"{name} contains unknown ALM blocks: {sorted(unknown_blocks)}"
+            )
+        values.update(
+            {
+                str(block): (None if value is None else float(value))
+                for block, value in mapping.items()
+            }
+        )
+    for block, value in values.items():
+        if value is not None and (not np.isfinite(value) or value <= 0.0):
+            raise ValueError(f"{name}[{block!r}] must be finite and positive or None")
+    return values
+
+
+def _validate_block_penalty_control_settings(settings: ALMSettings) -> None:
+    improvement_fraction = float(settings.block_penalty_improvement_fraction)
+    if not (0.0 < improvement_fraction < 1.0):
+        raise ValueError("block_penalty_improvement_fraction must be between 0 and 1")
+    if settings.block_penalty_patience <= 0:
+        raise ValueError("block_penalty_patience must be positive")
+
+
+def _block_penalty_growth_hits_cap(
+    requested_penalty: float,
+    penalty_max: float | None,
+) -> bool:
+    if penalty_max is None:
+        return not np.isfinite(requested_penalty)
+    return not np.isfinite(requested_penalty) or requested_penalty > float(penalty_max)
+
+
+def _initial_alm_penalty(
+    settings: ALMSettings,
+    initial_penalty: float | None,
+) -> float:
+    penalty = _initial_alm_penalty(settings, initial_penalty)
+    return penalty
+
+
+def _initial_block_penalty_state(
+    settings: ALMSettings,
+    constraint_blocks: Sequence[str],
+    initial_penalty: float,
+) -> ALMBlockPenaltyState:
+    if len(constraint_blocks) == 0:
+        raise ValueError("block penalties require at least one constraint block")
+    _validate_block_penalty_control_settings(settings)
+    block_names = _ordered_blocks(constraint_blocks)
+    penalties_by_block = _block_float_map(
+        settings.block_penalty_init,
+        block_names,
+        float(initial_penalty),
+        name="block_penalty_init",
+    )
+    scales_by_block = _block_float_map(
+        settings.block_penalty_scale,
+        block_names,
+        float(settings.penalty_scale),
+        name="block_penalty_scale",
+    )
+    if any(scale <= 1.0 for scale in scales_by_block.values()):
+        raise ValueError("block_penalty_scale values must be greater than 1")
+    max_by_block = _block_optional_float_map(
+        settings.block_penalty_max,
+        block_names,
+        settings.penalty_max,
+        name="block_penalty_max",
+    )
+    for block, penalty_max in max_by_block.items():
+        if penalty_max is not None and penalties_by_block[block] > penalty_max:
+            raise ValueError(
+                f"block_penalty_max[{block!r}] ({penalty_max}) must be >= "
+                f"block_penalty_init[{block!r}] ({penalties_by_block[block]})"
+            )
+    return ALMBlockPenaltyState(
+        constraint_blocks=tuple(str(block) for block in constraint_blocks),
+        penalties_by_block=penalties_by_block,
+        scales_by_block=scales_by_block,
+        max_by_block=max_by_block,
+        cap_reached_by_block={block: False for block in block_names},
+        requested_by_block={block: None for block in block_names},
+        stall_counts_by_block={block: 0 for block in block_names},
+        previous_violations_by_block={},
+    )
+
+
+def _block_penalty_vector(state: ALMBlockPenaltyState) -> np.ndarray:
+    return np.asarray(
+        [state.penalties_by_block[block] for block in state.constraint_blocks],
+        dtype=float,
+    )
+
+
+def _block_penalty_summary(state: ALMBlockPenaltyState | None) -> dict[str, float] | None:
+    if state is None:
+        return None
+    return {block: float(value) for block, value in state.penalties_by_block.items()}
+
+
+def _block_penalty_cap_summary(
+    state: ALMBlockPenaltyState | None,
+) -> dict[str, bool] | None:
+    if state is None:
+        return None
+    return {block: bool(value) for block, value in state.cap_reached_by_block.items()}
+
+
+def _block_penalty_requested_summary(
+    state: ALMBlockPenaltyState | None,
+) -> dict[str, float | None] | None:
+    if state is None:
+        return None
+    return {
+        block: (None if value is None else float(value))
+        for block, value in state.requested_by_block.items()
+    }
+
+
+def _block_max_violations(
+    constraint_blocks: Sequence[str],
+    feasibility_values: np.ndarray,
+) -> dict[str, float]:
+    block_values: dict[str, float] = {}
+    for block, value in zip(constraint_blocks, np.asarray(feasibility_values, dtype=float)):
+        block_name = str(block)
+        block_values[block_name] = max(block_values.get(block_name, 0.0), float(value))
+    return block_values
+
+
+def _next_block_penalty_state(
+    state: ALMBlockPenaltyState,
+    block_violations: Mapping[str, float],
+    settings: ALMSettings,
+) -> tuple[ALMBlockPenaltyState, list[str], list[str], dict[str, float]]:
+    _validate_block_penalty_control_settings(settings)
+    improvement_fraction = float(settings.block_penalty_improvement_fraction)
+    penalties_by_block = dict(state.penalties_by_block)
+    cap_reached_by_block = dict(state.cap_reached_by_block)
+    requested_by_block = dict(state.requested_by_block)
+    stall_counts_by_block = dict(state.stall_counts_by_block)
+    previous_violations_by_block = dict(state.previous_violations_by_block)
+    grown_blocks: list[str] = []
+    cap_hit_blocks: list[str] = []
+    requested_growth_by_block: dict[str, float] = {}
+
+    for block in state.penalties_by_block:
+        violation = float(block_violations.get(block, 0.0))
+        previous_violation = previous_violations_by_block.get(block)
+        if violation <= float(settings.feasibility_tol):
+            stall_counts_by_block[block] = 0
+            previous_violations_by_block[block] = violation
+            continue
+
+        failed_to_improve = (
+            previous_violation is None
+            or violation
+            > max(
+                float(settings.feasibility_tol),
+                float(previous_violation) * improvement_fraction,
+            )
+        )
+        if failed_to_improve:
+            stall_counts_by_block[block] = stall_counts_by_block.get(block, 0) + 1
+        else:
+            stall_counts_by_block[block] = 0
+
+        previous_violations_by_block[block] = violation
+        if stall_counts_by_block[block] < int(settings.block_penalty_patience):
+            continue
+
+        requested_penalty = (
+            float(penalties_by_block[block]) * float(state.scales_by_block[block])
+        )
+        penalty_max = state.max_by_block[block]
+        requested_growth_by_block[block] = requested_penalty
+        requested_by_block[block] = requested_penalty
+        if _block_penalty_growth_hits_cap(requested_penalty, penalty_max):
+            cap_reached_by_block[block] = True
+            cap_hit_blocks.append(block)
+        else:
+            penalties_by_block[block] = requested_penalty
+            grown_blocks.append(block)
+        stall_counts_by_block[block] = 0
+
+    return (
+        ALMBlockPenaltyState(
+            constraint_blocks=state.constraint_blocks,
+            penalties_by_block=penalties_by_block,
+            scales_by_block=dict(state.scales_by_block),
+            max_by_block=dict(state.max_by_block),
+            cap_reached_by_block=cap_reached_by_block,
+            requested_by_block=requested_by_block,
+            stall_counts_by_block=stall_counts_by_block,
+            previous_violations_by_block=previous_violations_by_block,
+        ),
+        grown_blocks,
+        cap_hit_blocks,
+        requested_growth_by_block,
+    )
 
 
 def _build_inner_options(
@@ -1410,13 +1718,14 @@ def _constraint_activity_mask(
 
 def _positive_shift(
     multipliers: np.ndarray,
-    penalty: float,
+    penalty,
     constraint_values: np.ndarray,
 ) -> np.ndarray:
+    constraint_array = np.asarray(constraint_values, dtype=float)
     return np.maximum(
         0.0,
         np.asarray(multipliers, dtype=float)
-        + float(penalty) * np.asarray(constraint_values, dtype=float),
+        + _penalty_values(penalty, constraint_array.size) * constraint_array,
     )
 
 
@@ -1560,7 +1869,7 @@ def _stationarity_metrics(
 def minimize_alm(
     x0,
     constraint_names: Sequence[str],
-    evaluate_problem: Callable[[np.ndarray, np.ndarray, float], dict],
+    evaluate_problem: Callable[[np.ndarray, np.ndarray, object], dict],
     settings: ALMSettings,
     inner_options: dict,
     inner_callback: Callable[[np.ndarray], None] | None = None,
@@ -1571,6 +1880,7 @@ def minimize_alm(
     history_callback: Callable[[list[dict], dict, np.ndarray, float], None] | None = None,
     initial_multipliers: np.ndarray | None = None,
     initial_penalty: float | None = None,
+    constraint_blocks: Sequence[str] | None = None,
 ):
     if (snapshot_accepted_state_fn is None) != (restore_incumbent_state_fn is None):
         raise ValueError(
@@ -1583,6 +1893,11 @@ def minimize_alm(
             f"settings.penalty_max ({settings.penalty_max}) must be >= "
             f"settings.penalty_init ({settings.penalty_init})"
         )
+    if settings.block_penalties_enabled:
+        if constraint_blocks is None:
+            raise ValueError("constraint_blocks must be provided when block penalties are enabled")
+        if len(constraint_blocks) != len(constraint_names):
+            raise ValueError("constraint_blocks length must match constraint_names")
     x = np.asarray(x0, dtype=float).copy()
     multipliers = (
         np.asarray(initial_multipliers, dtype=float).copy()
@@ -1594,6 +1909,24 @@ def minimize_alm(
         if initial_penalty is not None
         else float(settings.penalty_init)
     )
+    if not np.isfinite(penalty) or penalty <= 0.0:
+        raise ValueError("initial ALM penalty must be finite and positive")
+    if settings.penalty_max is not None and penalty > float(settings.penalty_max):
+        raise ValueError(
+            f"initial ALM penalty ({penalty}) must be <= "
+            f"settings.penalty_max ({settings.penalty_max})"
+        )
+    block_penalty_state = (
+        _initial_block_penalty_state(settings, constraint_blocks, penalty)
+        if settings.block_penalties_enabled
+        else None
+    )
+    active_penalty = (
+        _block_penalty_vector(block_penalty_state)
+        if block_penalty_state is not None
+        else float(penalty)
+    )
+    penalty = _representative_penalty(active_penalty)
     total_inner_iterations = 0
     history = []
     final_eval = None
@@ -1609,6 +1942,28 @@ def minimize_alm(
     update_feasibility_tol = max(settings.feasibility_tol, 1.0 / penalty)
     update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
     best_feasible: ALMFeasibleIncumbent | None = None
+
+    def _current_penalty_argument():
+        if block_penalty_state is None:
+            return float(penalty)
+        return _block_penalty_vector(block_penalty_state)
+
+    def _penalty_argument_for_state(
+        penalty_state: float,
+        state: ALMBlockPenaltyState | None,
+    ):
+        if state is None:
+            return float(penalty_state)
+        return _block_penalty_vector(state)
+
+    def _sync_scalar_penalty_from_blocks() -> None:
+        nonlocal penalty
+        penalty = _representative_penalty(_current_penalty_argument())
+
+    def _current_penalty_scale() -> float:
+        if block_penalty_state is None:
+            return float(settings.penalty_scale)
+        return max(float(value) for value in block_penalty_state.scales_by_block.values())
 
     def _emit_history_snapshot(latest_entry: dict) -> None:
         if history_callback is None:
@@ -1641,7 +1996,12 @@ def minimize_alm(
         final_kkt_stationarity_norm: float | None,
         final_feasibility_tolerance: float,
         final_stationarity_tolerance: float,
+        block_penalty_state_for_result: ALMBlockPenaltyState | None = None,
     ):
+        penalty_argument = _penalty_argument_for_state(
+            penalty_state,
+            block_penalty_state_for_result,
+        )
         (
             solver_constraint_values,
             feasibility_values,
@@ -1651,7 +2011,7 @@ def minimize_alm(
         routing_state = _constraint_routing_state(
             evaluation,
             multipliers_state,
-            penalty_state,
+            penalty_argument,
             final_feasibility_tolerance,
         )
         inner_optimizer_success = None
@@ -1664,7 +2024,7 @@ def minimize_alm(
             termination_reason=termination_reason,
             evaluation=evaluation,
             multipliers=multipliers_state,
-            penalty=penalty_state,
+            penalty=penalty_argument,
             constraint_names=constraint_names,
             routing_state=routing_state,
             feasibility_values=feasibility_values,
@@ -1756,6 +2116,16 @@ def minimize_alm(
             multiplier_interpretation=_multiplier_interpretation(evaluation),
             multipliers=[float(value) for value in multipliers_state],
             penalty=float(penalty_state),
+            penalty_values=_as_float_list(
+                _penalty_values(penalty_argument, len(constraint_names))
+            ),
+            block_penalties=_block_penalty_summary(block_penalty_state_for_result),
+            block_penalty_cap_reached=_block_penalty_cap_summary(
+                block_penalty_state_for_result,
+            ),
+            block_penalty_cap_requested=_block_penalty_requested_summary(
+                block_penalty_state_for_result,
+            ),
             trust_radius=trust_radius,
             history=history,
             inner_result=inner_result,
@@ -1804,8 +2174,70 @@ def minimize_alm(
 
     def _try_penalty_increase() -> SimpleNamespace | None:
         """Apply penalty scaling and return a cap-reached result if the cap fires."""
-        nonlocal penalty, penalty_cap_reached, penalty_cap_requested
+        nonlocal penalty, penalty_cap_reached, penalty_cap_requested, block_penalty_state
         nonlocal feasible_stall_count, update_feasibility_tol, update_stationarity_tol
+        if block_penalty_state is not None:
+            block_violations = _block_max_violations(
+                block_penalty_state.constraint_blocks,
+                _extract_constraint_state(accepted_eval)[1],
+            )
+            (
+                block_penalty_state,
+                grown_blocks,
+                cap_hit_blocks,
+                requested_growth_by_block,
+            ) = _next_block_penalty_state(
+                block_penalty_state,
+                block_violations,
+                settings,
+            )
+            _sync_scalar_penalty_from_blocks()
+            history_entry["block_penalties"] = _block_penalty_summary(block_penalty_state)
+            history_entry["block_penalty_growth_blocks"] = list(grown_blocks)
+            history_entry["block_penalty_cap_reached"] = _block_penalty_cap_summary(
+                block_penalty_state,
+            )
+            history_entry["block_penalty_cap_requested"] = _block_penalty_requested_summary(
+                block_penalty_state,
+            )
+            history_entry["block_penalty_requested_growth"] = {
+                block: float(value)
+                for block, value in requested_growth_by_block.items()
+            }
+            if cap_hit_blocks:
+                penalty_cap_reached = True
+                penalty_cap_requested = max(
+                    requested_growth_by_block[block] for block in cap_hit_blocks
+                )
+                history_entry["action"] = "penalty_cap_reached"
+                history_entry["trust_radius"] = trust_radius
+                _emit_history_snapshot(history_entry)
+                return _build_result(
+                    success=False,
+                    message=(
+                        "ALM stopped after block penalty growth exceeded configured "
+                        f"caps for blocks {cap_hit_blocks}."
+                    ),
+                    termination_reason="penalty_cap_reached",
+                    outer_iterations=outer_iteration,
+                    evaluation=accepted_eval,
+                    multipliers_state=multipliers,
+                    penalty_state=penalty,
+                    inner_result=result,
+                    restored_best_feasible=False,
+                    restored_best_feasible_reason=None,
+                    final_max_feasibility_violation=max_feasibility_violation,
+                    final_stationarity_norm=stationarity_norm,
+                    final_raw_stationarity_norm=raw_stationarity_norm,
+                    final_kkt_stationarity_norm=kkt_stationarity_norm,
+                    final_feasibility_tolerance=settings.feasibility_tol,
+                    final_stationarity_tolerance=settings.stationarity_tol,
+                    block_penalty_state_for_result=block_penalty_state,
+                )
+            feasible_stall_count = 0
+            update_feasibility_tol = max(settings.feasibility_tol, 1.0 / penalty)
+            update_stationarity_tol = max(settings.stationarity_tol, 1.0 / penalty)
+            return None
         next_p, cap_hit, requested_p = _next_penalty(
             penalty,
             penalty_scale=settings.penalty_scale,
@@ -1860,6 +2292,7 @@ def minimize_alm(
         restored_multipliers_state = np.asarray(multipliers_state, dtype=float).copy()
         restored_penalty_state = float(penalty_state)
         restored_inner_result = inner_result
+        restored_block_penalty_state = block_penalty_state
 
         restore_reasons: list[str] = []
         if best_feasible is not None:
@@ -1879,6 +2312,7 @@ def minimize_alm(
             restored_multipliers_state = best_feasible.multipliers.copy()
             restored_penalty_state = best_feasible.penalty
             restored_inner_result = best_feasible.inner_result
+            restored_block_penalty_state = best_feasible.block_penalty_state
             if (
                 restore_incumbent_state_fn is not None
                 and best_feasible.incumbent_state is not None
@@ -1891,6 +2325,7 @@ def minimize_alm(
             multipliers_state=restored_multipliers_state,
             penalty_state=restored_penalty_state,
             inner_result=restored_inner_result,
+            block_penalty_state=restored_block_penalty_state,
             restored_best_feasible=bool(restored_best_feasible),
             restored_best_feasible_reason=restored_best_feasible_reason,
         )
@@ -1918,7 +2353,10 @@ def minimize_alm(
         restored_routing_state = _constraint_routing_state(
             restored_state.evaluation,
             restored_state.multipliers_state,
-            restored_state.penalty_state,
+            _penalty_argument_for_state(
+                restored_state.penalty_state,
+                restored_state.block_penalty_state,
+            ),
             settings.feasibility_tol,
         )
         (
@@ -1963,6 +2401,7 @@ def minimize_alm(
             final_kkt_stationarity_norm=restored_kkt_stationarity_norm,
             final_feasibility_tolerance=settings.feasibility_tol,
             final_stationarity_tolerance=settings.stationarity_tol,
+            block_penalty_state_for_result=restored_state.block_penalty_state,
         )
 
     for outer_iteration in range(1, settings.max_outer_iterations + 1):
@@ -1974,7 +2413,8 @@ def minimize_alm(
         is_final_outer = outer_iteration == settings.max_outer_iterations
         for continuation_iteration in range(settings.max_subproblem_continuations + 1):
             start_x = x.copy()
-            current_eval = evaluate_problem(x, multipliers, penalty)
+            penalty_argument = _current_penalty_argument()
+            current_eval = evaluate_problem(x, multipliers, penalty_argument)
             _require_finite_evaluation(
                 current_eval,
                 context="ALM outer iterate evaluation",
@@ -1992,7 +2432,7 @@ def minimize_alm(
             current_routing_state = _constraint_routing_state(
                 current_eval,
                 multipliers,
-                penalty,
+                penalty_argument,
                 effective_feasibility_tol,
             )
             (
@@ -2028,6 +2468,10 @@ def minimize_alm(
                         "inner_success": True,
                         "inner_message": "ALM skipped inner solve; current iterate already satisfies the KKT stationarity gate.",
                         "penalty": float(penalty),
+                        "penalty_values": _as_float_list(
+                            _penalty_values(penalty_argument, len(constraint_names))
+                        ),
+                        "block_penalties": _block_penalty_summary(block_penalty_state),
                         "max_violation": current_max_feasibility_violation,
                         "stationarity_norm": current_stationarity_norm,
                         "raw_stationarity_norm": current_raw_stationarity_norm,
@@ -2092,7 +2536,7 @@ def minimize_alm(
                     _constraint_history_diagnostics(
                         current_eval,
                         multipliers,
-                        penalty,
+                        penalty_argument,
                         constraint_names,
                         current_solver_constraint_values,
                         current_feasibility_values,
@@ -2126,13 +2570,14 @@ def minimize_alm(
                     final_kkt_stationarity_norm=current_kkt_stationarity_norm,
                     final_feasibility_tolerance=settings.feasibility_tol,
                     final_stationarity_tolerance=settings.stationarity_tol,
+                    block_penalty_state_for_result=block_penalty_state,
                 )
 
             _cached_eval = SimpleNamespace(x=None, evaluation=None)
 
             def inner_fun(inner_x):
                 evaluation = _sanitize_nonfinite_inner_evaluation(
-                    evaluate_problem(inner_x, multipliers, penalty),
+                    evaluate_problem(inner_x, multipliers, penalty_argument),
                     fallback_evaluation=current_eval,
                 )
                 _cached_eval.x = np.asarray(inner_x, dtype=float).copy()
@@ -2147,7 +2592,7 @@ def minimize_alm(
                     evaluation = _cached_eval.evaluation
                 else:
                     evaluation = _sanitize_nonfinite_inner_evaluation(
-                        evaluate_problem(inner_x_arr, multipliers, penalty),
+                        evaluate_problem(inner_x_arr, multipliers, penalty_argument),
                         fallback_evaluation=current_eval,
                     )
                 (
@@ -2159,7 +2604,7 @@ def minimize_alm(
                 callback_routing_state = _constraint_routing_state(
                     evaluation,
                     multipliers,
-                    penalty,
+                    penalty_argument,
                     effective_feasibility_tol,
                 )
                 (
@@ -2227,7 +2672,7 @@ def minimize_alm(
                         candidate_eval = _cached_eval.evaluation
                     else:
                         candidate_eval = _sanitize_nonfinite_inner_evaluation(
-                            evaluate_problem(candidate_x, multipliers, penalty),
+                            evaluate_problem(candidate_x, multipliers, penalty_argument),
                             fallback_evaluation=current_eval,
                         )
                 except _EarlyStopInnerSolve as early_stop:
@@ -2334,7 +2779,7 @@ def minimize_alm(
             routing_state = _constraint_routing_state(
                 final_eval,
                 multipliers,
-                penalty,
+                penalty_argument,
                 update_feasibility_tol,
             )
             (
@@ -2401,6 +2846,7 @@ def minimize_alm(
                         penalty=penalty,
                         inner_result=result,
                         incumbent_state=incumbent_state,
+                        block_penalty_state=block_penalty_state,
                     )
 
             history_entry = {
@@ -2410,6 +2856,10 @@ def minimize_alm(
                 "inner_success": bool(getattr(result, "success", False)),
                 "inner_message": str(getattr(result, "message", "")),
                 "penalty": float(penalty),
+                "penalty_values": _as_float_list(
+                    _penalty_values(penalty_argument, len(constraint_names))
+                ),
+                "block_penalties": _block_penalty_summary(block_penalty_state),
                 "max_violation": max_feasibility_violation,
                 "stationarity_norm": stationarity_norm,
                 "raw_stationarity_norm": raw_stationarity_norm,
@@ -2480,7 +2930,7 @@ def minimize_alm(
                 _constraint_history_diagnostics(
                     final_eval,
                     multipliers,
-                    penalty,
+                    penalty_argument,
                     constraint_names,
                     solver_constraint_values,
                     feasibility_values,
@@ -2531,6 +2981,7 @@ def minimize_alm(
                     final_kkt_stationarity_norm=kkt_stationarity_norm,
                     final_feasibility_tolerance=settings.feasibility_tol,
                     final_stationarity_tolerance=settings.stationarity_tol,
+                    block_penalty_state_for_result=block_penalty_state,
                 )
 
             if forced_infeasible_penalty_cycle:
@@ -2571,6 +3022,7 @@ def minimize_alm(
                         final_kkt_stationarity_norm=kkt_stationarity_norm,
                         final_feasibility_tolerance=settings.feasibility_tol,
                         final_stationarity_tolerance=settings.stationarity_tol,
+                        block_penalty_state_for_result=block_penalty_state,
                     )
                 if not made_inner_progress and continuation_iteration > 0:
                     history_entry["action"] = "constraints_inactive_stall"
@@ -2639,7 +3091,7 @@ def minimize_alm(
                 ) = _project_nonnegative_multipliers_with_diagnostics(
                     multipliers,
                     routing_state.signal_state.preferred_dual_update_values,
-                    penalty,
+                    penalty_argument,
                     settings.multiplier_max,
                 )
                 history_entry["post_update_multipliers"] = [float(value) for value in multipliers]
@@ -2648,12 +3100,13 @@ def minimize_alm(
                 if multiplier_cap_binding:
                     cap_binding_detected = True
                     cap_binding_indices.update(multiplier_cap_binding_indices)
+                penalty_tolerance_scale = _current_penalty_scale()
                 update_feasibility_tol = max(
-                    update_feasibility_tol / float(settings.penalty_scale),
+                    update_feasibility_tol / penalty_tolerance_scale,
                     settings.feasibility_tol,
                 )
                 update_stationarity_tol = max(
-                    update_stationarity_tol / float(settings.penalty_scale),
+                    update_stationarity_tol / penalty_tolerance_scale,
                     settings.stationarity_tol,
                 )
                 history_entry["action"] = "dual_update"

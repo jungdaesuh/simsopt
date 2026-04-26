@@ -4283,6 +4283,75 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["ALM_FINAL_MAX_FEASIBILITY_VIOLATION"], 4.0e-3)
         self.assertEqual(payload["ALM_FINAL_STATIONARITY_NORM"], 7.5e-5)
 
+    def test_build_alm_final_constraint_payload_emits_hard_surrogate_sidecars(self):
+        module = load_single_stage_example_module()
+        payload = module.build_alm_final_constraint_payload(
+            SimpleNamespace(
+                constraint_names=["coil_surface_spacing"],
+                raw_dual_estimates=[0.002],
+                constraint_scales=[0.02],
+                constraint_blocks=["geometry"],
+                constraint_scale_sources=["threshold:coil_surface_spacing"],
+                raw_constraint_values=[0.01],
+                normalized_constraint_values=[0.5],
+                raw_solver_constraint_values=[0.2],
+                normalized_solver_constraint_values=[10.0],
+                raw_hard_signed_constraint_values=[0.01],
+                hard_signed_constraint_values=[0.5],
+                raw_hard_violation_values=[0.01],
+                hard_violation_values=[0.5],
+                raw_surrogate_signed_constraint_values=[0.2],
+                surrogate_signed_constraint_values=[10.0],
+                final_hard_max_violation=0.01,
+                final_surrogate_max_value=10.0,
+                hard_positive_shift_zero=False,
+                signal_mismatch_active=True,
+                final_penalty_gradient_norm=0.4,
+                trust_radius=0.25,
+            )
+        )
+
+        self.assertEqual(payload["ALM_CONSTRAINT_NAMES"], ["coil_surface_spacing"])
+        self.assertEqual(payload["ALM_FINAL_RAW_DUAL_ESTIMATES"], [0.002])
+        self.assertEqual(payload["ALM_CONSTRAINT_SCALES"], [0.02])
+        self.assertEqual(payload["ALM_CONSTRAINT_BLOCKS"], ["geometry"])
+        self.assertEqual(
+            payload["ALM_CONSTRAINT_SCALE_SOURCES"],
+            ["threshold:coil_surface_spacing"],
+        )
+        self.assertEqual(payload["ALM_FINAL_CONSTRAINT_VALUES"], [0.01])
+        self.assertEqual(payload["ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES"], [0.5])
+        self.assertEqual(payload["ALM_FINAL_SOLVER_CONSTRAINT_VALUES"], [0.2])
+        self.assertEqual(
+            payload["ALM_FINAL_NORMALIZED_SOLVER_CONSTRAINT_VALUES"],
+            [10.0],
+        )
+        self.assertEqual(payload["ALM_FINAL_HARD_SIGNED_CONSTRAINT_VALUES"], [0.01])
+        self.assertEqual(
+            payload["ALM_FINAL_NORMALIZED_HARD_SIGNED_CONSTRAINT_VALUES"],
+            [0.5],
+        )
+        self.assertEqual(payload["ALM_FINAL_HARD_VIOLATION_VALUES"], [0.01])
+        self.assertEqual(
+            payload["ALM_FINAL_RAW_HARD_VIOLATION_BY_CONSTRAINT"],
+            [0.01],
+        )
+        self.assertEqual(payload["ALM_FINAL_NORMALIZED_HARD_VIOLATION_VALUES"], [0.5])
+        self.assertEqual(
+            payload["ALM_FINAL_SURROGATE_SIGNED_CONSTRAINT_VALUES"],
+            [0.2],
+        )
+        self.assertEqual(
+            payload["ALM_FINAL_NORMALIZED_SURROGATE_SIGNED_CONSTRAINT_VALUES"],
+            [10.0],
+        )
+        self.assertEqual(payload["ALM_FINAL_HARD_MAX_VIOLATION"], 0.01)
+        self.assertEqual(payload["ALM_FINAL_SURROGATE_MAX_VALUE"], 10.0)
+        self.assertFalse(payload["ALM_FINAL_HARD_POSITIVE_SHIFT_ZERO"])
+        self.assertTrue(payload["ALM_FINAL_SIGNAL_MISMATCH_ACTIVE"])
+        self.assertEqual(payload["ALM_FINAL_PENALTY_GRADIENT_NORM"], 0.4)
+        self.assertEqual(payload["ALM_FINAL_TRUST_RADIUS"], 0.25)
+
     def test_build_preserved_timeout_results_payload_uses_artifact_hardware_status_for_final_feasibility(self):
         module = load_single_stage_example_module()
         replay_config = module.PreservedTimeoutReplayConfig(

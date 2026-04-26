@@ -5824,6 +5824,101 @@ def compute_surface_field_metrics(surf, bs):
     return field_error, mean_abs_bdotn
 
 
+def build_alm_final_constraint_payload(alm_result):
+    return {
+        "ALM_CONSTRAINT_NAMES": getattr(alm_result, "constraint_names", None),
+        "ALM_FINAL_RAW_DUAL_ESTIMATES": getattr(alm_result, "raw_dual_estimates", None),
+        "ALM_CONSTRAINT_SCALES": getattr(alm_result, "constraint_scales", None),
+        "ALM_CONSTRAINT_BLOCKS": getattr(alm_result, "constraint_blocks", None),
+        "ALM_CONSTRAINT_SCALE_SOURCES": getattr(
+            alm_result,
+            "constraint_scale_sources",
+            None,
+        ),
+        "ALM_FINAL_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "raw_constraint_values",
+            getattr(alm_result, "constraint_values", None),
+        ),
+        "ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "normalized_constraint_values",
+            getattr(alm_result, "constraint_values", None),
+        ),
+        "ALM_FINAL_SOLVER_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "raw_solver_constraint_values",
+            getattr(alm_result, "solver_constraint_values", None),
+        ),
+        "ALM_FINAL_NORMALIZED_SOLVER_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "normalized_solver_constraint_values",
+            getattr(alm_result, "solver_constraint_values", None),
+        ),
+        "ALM_FINAL_HARD_SIGNED_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "raw_hard_signed_constraint_values",
+            getattr(alm_result, "hard_signed_constraint_values", None),
+        ),
+        "ALM_FINAL_NORMALIZED_HARD_SIGNED_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "hard_signed_constraint_values",
+            None,
+        ),
+        "ALM_FINAL_HARD_VIOLATION_VALUES": getattr(
+            alm_result,
+            "raw_hard_violation_values",
+            getattr(alm_result, "hard_violation_values", None),
+        ),
+        "ALM_FINAL_RAW_HARD_VIOLATION_BY_CONSTRAINT": getattr(
+            alm_result,
+            "raw_hard_violation_values",
+            getattr(alm_result, "hard_violation_values", None),
+        ),
+        "ALM_FINAL_NORMALIZED_HARD_VIOLATION_VALUES": getattr(
+            alm_result,
+            "hard_violation_values",
+            None,
+        ),
+        "ALM_FINAL_SURROGATE_SIGNED_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "raw_surrogate_signed_constraint_values",
+            getattr(alm_result, "surrogate_signed_constraint_values", None),
+        ),
+        "ALM_FINAL_NORMALIZED_SURROGATE_SIGNED_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "surrogate_signed_constraint_values",
+            None,
+        ),
+        "ALM_FINAL_HARD_MAX_VIOLATION": getattr(
+            alm_result,
+            "final_hard_max_violation",
+            None,
+        ),
+        "ALM_FINAL_SURROGATE_MAX_VALUE": getattr(
+            alm_result,
+            "final_surrogate_max_value",
+            None,
+        ),
+        "ALM_FINAL_HARD_POSITIVE_SHIFT_ZERO": getattr(
+            alm_result,
+            "hard_positive_shift_zero",
+            None,
+        ),
+        "ALM_FINAL_SIGNAL_MISMATCH_ACTIVE": getattr(
+            alm_result,
+            "signal_mismatch_active",
+            None,
+        ),
+        "ALM_FINAL_PENALTY_GRADIENT_NORM": getattr(
+            alm_result,
+            "final_penalty_gradient_norm",
+            None,
+        ),
+        "ALM_FINAL_TRUST_RADIUS": getattr(alm_result, "trust_radius", None),
+    }
+
+
 def build_preserved_timeout_results_payload(
     *,
     replay_config: PreservedTimeoutReplayConfig,
@@ -9408,36 +9503,7 @@ if __name__ == "__main__":
         ),
         "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
         "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),
-        "ALM_CONSTRAINT_NAMES": getattr(alm_result, "constraint_names", None),
-        "ALM_FINAL_RAW_DUAL_ESTIMATES": getattr(alm_result, "raw_dual_estimates", None),
-        "ALM_CONSTRAINT_SCALES": getattr(alm_result, "constraint_scales", None),
-        "ALM_CONSTRAINT_BLOCKS": getattr(alm_result, "constraint_blocks", None),
-        "ALM_CONSTRAINT_SCALE_SOURCES": getattr(
-            alm_result,
-            "constraint_scale_sources",
-            None,
-        ),
-        "ALM_FINAL_CONSTRAINT_VALUES": getattr(
-            alm_result,
-            "raw_constraint_values",
-            getattr(alm_result, "constraint_values", None),
-        ),
-        "ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES": getattr(
-            alm_result,
-            "normalized_constraint_values",
-            getattr(alm_result, "constraint_values", None),
-        ),
-        "ALM_FINAL_SOLVER_CONSTRAINT_VALUES": getattr(
-            alm_result,
-            "raw_solver_constraint_values",
-            getattr(alm_result, "solver_constraint_values", None),
-        ),
-        "ALM_FINAL_NORMALIZED_SOLVER_CONSTRAINT_VALUES": getattr(
-            alm_result,
-            "normalized_solver_constraint_values",
-            getattr(alm_result, "solver_constraint_values", None),
-        ),
-        "ALM_FINAL_TRUST_RADIUS": getattr(alm_result, "trust_radius", None),
+        **build_alm_final_constraint_payload(alm_result),
         **alm_result_diagnostics_fields(alm_result),
         "ALM_HISTORY": getattr(alm_result, "history", None),
         "TERMINATION_MESSAGE": termination_message,
