@@ -229,6 +229,36 @@ class ResidualHelperTests(unittest.TestCase):
         self.assertEqual(requested, {})
         self.assertFalse(next_state.cap_reached_by_block["current"])
 
+    def test_block_penalty_state_exposes_read_only_maps(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=0.1,
+            block_penalties_enabled=True,
+        )
+        state = module._initial_block_penalty_state(
+            settings,
+            ["geometry"],
+            initial_penalty=1.0,
+        )
+
+        with self.assertRaises(TypeError):
+            state.penalties_by_block["geometry"] = 2.0
+
+        next_state, _grown_blocks, _cap_hit_blocks, _requested = (
+            module._next_block_penalty_state(
+                state,
+                {"geometry": 0.5},
+                settings,
+            )
+        )
+
+        self.assertEqual(next_state.penalties_by_block["geometry"], 10.0)
+        self.assertEqual(state.penalties_by_block["geometry"], 1.0)
+        with self.assertRaises(TypeError):
+            next_state.stall_counts_by_block["geometry"] = 4
+
     def test_block_penalty_init_rejects_cap_below_initial_penalty(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(

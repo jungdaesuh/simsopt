@@ -7,6 +7,7 @@ import re
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -293,6 +294,7 @@ class SingleStageFrontierEvaluator:
         self.cache_max_entries = int(cache_max_entries)
         self.runtime = build_single_stage_frontier_runtime(spec)
         self._cache: OrderedDict[str, SingleStageFrontierEvaluation] = OrderedDict()
+        self._cache_lock = RLock()
         self.cache_hits = 0
         self.cache_misses = 0
 
@@ -313,9 +315,9 @@ class SingleStageFrontierEvaluator:
         candidate, cache_key = self._prepare_candidate(x)
         cached = self._load_cached(cache_key)
         if cached is not None:
-            self.cache_hits += 1
+            self._record_cache_hit()
             return cached
-        self.cache_misses += 1
+        self._record_cache_miss()
         evaluation = self._evaluate_uncached(candidate, cache_key=cache_key)
         self._store_cached(cache_key, evaluation)
         return evaluation
@@ -331,7 +333,7 @@ class SingleStageFrontierEvaluator:
             candidate, cache_key = self._prepare_candidate(x)
             cached = self._load_cached(cache_key)
             if cached is not None:
-                self.cache_hits += 1
+                self._record_cache_hit()
                 evaluations[index] = cached
                 continue
             pending = pending_by_cache_key.get(cache_key)
@@ -341,7 +343,7 @@ class SingleStageFrontierEvaluator:
             pending[1].append(index)
 
         for cache_key, (candidate, positions) in pending_by_cache_key.items():
-            self.cache_misses += 1
+            self._record_cache_miss()
             evaluation = self._evaluate_uncached(candidate, cache_key=cache_key)
             self._store_cached(cache_key, evaluation)
             for index in positions:
@@ -390,41 +392,54 @@ class SingleStageFrontierEvaluator:
         while len(self._cache) > self.cache_max_entries:
             self._cache.popitem(last=False)
 
+    def _record_cache_hit(self) -> None:
+        with self._cache_lock:
+            self.cache_hits += 1
+
+    def _record_cache_miss(self) -> None:
+        with self._cache_lock:
+            self.cache_misses += 1
+
     def _load_cached(
         self,
         cache_key: str,
     ) -> SingleStageFrontierEvaluation | None:
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            self._cache.move_to_end(cache_key)
-            return cached
-        cache_path = self._cache_path(cache_key)
-        if cache_path is None or not cache_path.exists():
-            return None
-        payload = json.loads(cache_path.read_text(encoding="utf-8"))
-        if payload.get("cache_schema_version") != FRONTIER_EVALUATOR_CACHE_SCHEMA_VERSION:
-            return None
-        evaluation = SingleStageFrontierEvaluation.from_json_dict(
-            payload["evaluation"]
-        )
-        self._remember_cached(cache_key, evaluation)
-        return evaluation
+        with self._cache_lock:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                self._cache.move_to_end(cache_key)
+                return cached
+            cache_path = self._cache_path(cache_key)
+            if cache_path is None or not cache_path.exists():
+                return None
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            if (
+                payload.get("cache_schema_version")
+                != FRONTIER_EVALUATOR_CACHE_SCHEMA_VERSION
+            ):
+                return None
+            evaluation = SingleStageFrontierEvaluation.from_json_dict(
+                payload["evaluation"]
+            )
+            self._remember_cached(cache_key, evaluation)
+            return evaluation
 
     def _store_cached(
         self,
         cache_key: str,
         evaluation: SingleStageFrontierEvaluation,
     ) -> None:
-        self._remember_cached(cache_key, evaluation)
-        cache_path = self._cache_path(cache_key)
-        if cache_path is None:
-            return
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "cache_schema_version": FRONTIER_EVALUATOR_CACHE_SCHEMA_VERSION,
-            "evaluation": evaluation.to_json_dict(),
-        }
-        cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        with self._cache_lock:
+            self._remember_cached(cache_key, evaluation)
+            cache_path = self._cache_path(cache_key)
+            if cache_path is None:
+                return
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "cache_schema_version": FRONTIER_EVALUATOR_CACHE_SCHEMA_VERSION,
+                "evaluation": evaluation.to_json_dict(),
+            }
+            cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _evaluate_uncached(
         self,

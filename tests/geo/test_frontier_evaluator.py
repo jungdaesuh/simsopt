@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -493,6 +494,46 @@ print(
             self.assertEqual(set(evaluator._cache), {first.cache_key, third.cache_key})
             self.assertNotIn(second.cache_key, evaluator._cache)
             self.assertEqual(len(evaluator._cache), 2)
+
+    def test_frontier_evaluator_cache_state_supports_parallel_access(self):
+        module = load_frontier_evaluator_module()
+        spec = self._demo_spec(module)
+        runtime_stub = SimpleNamespace(spec=spec)
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            module,
+            "build_single_stage_frontier_runtime",
+            return_value=runtime_stub,
+        ):
+            evaluator = module.SingleStageFrontierEvaluator.from_spec(
+                spec,
+                cache_dir=tmpdir,
+                cache_max_entries=3,
+            )
+            candidates = [np.array([0.1 + 0.01 * index]) for index in range(8)]
+            cache_keys = [evaluator._cache_key(candidate) for candidate in candidates]
+            evaluations = [
+                _demo_evaluation(
+                    module,
+                    spec,
+                    candidate=candidate,
+                    cache_key=cache_key,
+                    termination_message="parallel-cache",
+                    diagnostics_source="unit-test",
+                )
+                for candidate, cache_key in zip(candidates, cache_keys)
+            ]
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                list(executor.map(evaluator._store_cached, cache_keys, evaluations))
+                loaded = list(executor.map(evaluator._load_cached, cache_keys))
+
+            self.assertLessEqual(len(evaluator._cache), 3)
+            self.assertTrue(all(entry is not None for entry in loaded))
+            for cache_key in cache_keys:
+                self.assertTrue(
+                    (Path(tmpdir) / cache_key[:2] / f"{cache_key}.json").exists()
+                )
 
     def test_frontier_runtime_rejects_independent_banana_current_mode(self):
         module = load_frontier_evaluator_module()

@@ -1,12 +1,17 @@
 from dataclasses import dataclass, field as dataclass_field
-from types import SimpleNamespace
-from typing import Callable, Mapping, Sequence
+from types import MappingProxyType, SimpleNamespace
+from typing import Callable, Mapping, Sequence, TypeVar
 
 import numpy as np
 from scipy.optimize import minimize, nnls
 
 
 ALM_SCHEMA_VERSION = "alm_normalized_constraints_v1"
+_MappingValue = TypeVar("_MappingValue")
+
+
+def _read_only_mapping(mapping: Mapping[str, _MappingValue]) -> Mapping[str, _MappingValue]:
+    return MappingProxyType(dict(mapping))
 
 
 @dataclass(frozen=True)
@@ -83,18 +88,46 @@ class ALMConstraintRoutingState:
 @dataclass(frozen=True)
 class ALMBlockPenaltyState:
     constraint_blocks: tuple[str, ...]
-    penalties_by_block: dict[str, float]
-    scales_by_block: dict[str, float]
-    max_by_block: dict[str, float | None]
-    cap_reached_by_block: dict[str, bool]
-    requested_by_block: dict[str, float | None]
-    stall_counts_by_block: dict[str, int]
-    previous_violations_by_block: dict[str, float]
+    penalties_by_block: Mapping[str, float]
+    scales_by_block: Mapping[str, float]
+    max_by_block: Mapping[str, float | None]
+    cap_reached_by_block: Mapping[str, bool]
+    requested_by_block: Mapping[str, float | None]
+    stall_counts_by_block: Mapping[str, int]
+    previous_violations_by_block: Mapping[str, float]
     penalty_vector: np.ndarray = dataclass_field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
+        penalties_by_block = _read_only_mapping(self.penalties_by_block)
+        object.__setattr__(self, "penalties_by_block", penalties_by_block)
+        object.__setattr__(
+            self,
+            "scales_by_block",
+            _read_only_mapping(self.scales_by_block),
+        )
+        object.__setattr__(self, "max_by_block", _read_only_mapping(self.max_by_block))
+        object.__setattr__(
+            self,
+            "cap_reached_by_block",
+            _read_only_mapping(self.cap_reached_by_block),
+        )
+        object.__setattr__(
+            self,
+            "requested_by_block",
+            _read_only_mapping(self.requested_by_block),
+        )
+        object.__setattr__(
+            self,
+            "stall_counts_by_block",
+            _read_only_mapping(self.stall_counts_by_block),
+        )
+        object.__setattr__(
+            self,
+            "previous_violations_by_block",
+            _read_only_mapping(self.previous_violations_by_block),
+        )
         vector = np.asarray(
-            [self.penalties_by_block[block] for block in self.constraint_blocks],
+            [penalties_by_block[block] for block in self.constraint_blocks],
             dtype=float,
         )
         vector.setflags(write=False)
