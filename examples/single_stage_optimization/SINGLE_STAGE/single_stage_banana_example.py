@@ -1295,7 +1295,10 @@ def parse_args():
         "--alm-feas-tol",
         type=float,
         default=float(os.environ.get("ALM_FEAS_TOL", "1e-6")),
-        help="ALM max-violation stopping tolerance (default 1e-6).",
+        help=(
+            "Dimensionless normalized ALM max-violation stopping tolerance "
+            "(default 1e-6)."
+        ),
     )
     parser.add_argument(
         "--alm-stationarity-tol",
@@ -5991,7 +5994,14 @@ def build_preserved_timeout_results_payload(
                     dtype=float,
                 ).tolist(),
                 "ALM_FINAL_CONSTRAINT_VALUES": _jsonable_value(
-                    search_eval.get("constraint_values")
+                    search_eval.get("raw_feasibility_values")
+                    if search_eval.get("raw_feasibility_values") is not None
+                    else search_eval.get("constraint_values")
+                ),
+                "ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES": _jsonable_value(
+                    search_eval.get("normalized_feasibility_values")
+                    if search_eval.get("normalized_feasibility_values") is not None
+                    else search_eval.get("constraint_values")
                 ),
             }
         )
@@ -9364,7 +9374,13 @@ if __name__ == "__main__":
         ),
         "ALM_INNER_OPTIMIZER_SUCCESS": getattr(alm_result, "optimizer_success", None),
         "ALM_INNER_OPTIMIZER_MESSAGE": getattr(alm_result, "optimizer_message", None),
+        "ALM_SCHEMA_VERSION": getattr(alm_result, "alm_schema_version", None),
         "ALM_FINAL_MAX_FEASIBILITY_VIOLATION": getattr(
+            alm_result,
+            "final_max_feasibility_violation",
+            None,
+        ),
+        "ALM_FINAL_MAX_NORMALIZED_VIOLATION": getattr(
             alm_result,
             "final_max_feasibility_violation",
             None,
@@ -9393,11 +9409,33 @@ if __name__ == "__main__":
         "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
         "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),
         "ALM_CONSTRAINT_NAMES": getattr(alm_result, "constraint_names", None),
-        "ALM_FINAL_CONSTRAINT_VALUES": getattr(alm_result, "constraint_values", None),
+        "ALM_FINAL_RAW_DUAL_ESTIMATES": getattr(alm_result, "raw_dual_estimates", None),
+        "ALM_CONSTRAINT_SCALES": getattr(alm_result, "constraint_scales", None),
+        "ALM_CONSTRAINT_BLOCKS": getattr(alm_result, "constraint_blocks", None),
+        "ALM_CONSTRAINT_SCALE_SOURCES": getattr(
+            alm_result,
+            "constraint_scale_sources",
+            None,
+        ),
+        "ALM_FINAL_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "raw_constraint_values",
+            getattr(alm_result, "constraint_values", None),
+        ),
+        "ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "normalized_constraint_values",
+            getattr(alm_result, "constraint_values", None),
+        ),
         "ALM_FINAL_SOLVER_CONSTRAINT_VALUES": getattr(
             alm_result,
-            "solver_constraint_values",
-            None,
+            "raw_solver_constraint_values",
+            getattr(alm_result, "solver_constraint_values", None),
+        ),
+        "ALM_FINAL_NORMALIZED_SOLVER_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "normalized_solver_constraint_values",
+            getattr(alm_result, "solver_constraint_values", None),
         ),
         "ALM_FINAL_TRUST_RADIUS": getattr(alm_result, "trust_radius", None),
         **alm_result_diagnostics_fields(alm_result),

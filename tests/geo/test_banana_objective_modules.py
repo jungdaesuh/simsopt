@@ -776,11 +776,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         ):
             self.assertAlmostEqual(base_value, 3.5)
             np.testing.assert_allclose(base_grad, [1.2, -0.5])
-            np.testing.assert_allclose(signed_values, [-0.008, 0.75, 0.2, -6500.0])
-            np.testing.assert_allclose(grads[0], [0.6, 0.2])
-            np.testing.assert_allclose(grads[1], [0.9, -0.1])
-            np.testing.assert_allclose(grads[2], [0.3, 0.4])
-            np.testing.assert_allclose(grads[3], [0.7, -0.4])
+            np.testing.assert_allclose(
+                signed_values,
+                [-0.16, 0.01875, 0.1, -0.40625],
+            )
+            np.testing.assert_allclose(grads[0], [12.0, 4.0])
+            np.testing.assert_allclose(grads[1], [0.0225, -0.0025])
+            np.testing.assert_allclose(grads[2], [0.15, 0.2])
+            np.testing.assert_allclose(grads[3], [4.375e-5, -2.5e-5])
             np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3, 0.4])
             self.assertAlmostEqual(penalty, 12.0)
             return {
@@ -841,31 +844,31 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(
             result["dual_update_values"],
-            [-0.008, 0.75, 0.2, -6500.0],
+            [-0.16, 0.01875, 0.1, -0.40625],
         )
         np.testing.assert_allclose(
             result["hard_signed_constraint_values"],
-            [-0.008, 1.0, 0.2, -6500.0],
+            [-0.16, 0.025, 0.1, -0.40625],
         )
         np.testing.assert_allclose(
             result["hard_violation_values"],
-            [0.0, 1.0, 0.2, 0.0],
+            [0.0, 0.025, 0.1, 0.0],
         )
         np.testing.assert_allclose(
             result["surrogate_signed_constraint_values"],
-            [-0.008, 0.75, 0.2, -6500.0],
+            [-0.16, 0.01875, 0.1, -0.40625],
         )
         np.testing.assert_allclose(
             result["hard_dual_update_values"],
-            [-0.008, 1.0, 0.2, -6500.0],
+            [-0.16, 0.025, 0.1, -0.40625],
         )
         np.testing.assert_allclose(
             result["feasibility_values"],
-            [0.0, 1.0, 0.2, 0.0],
+            [0.0, 0.025, 0.1, 0.0],
         )
         np.testing.assert_allclose(
             result["constraint_activity_tolerances"],
-            [0.02, 0.08, 1e-3, 1e-3],
+            [0.4, 0.002, 5.0e-4, 6.25e-8],
         )
         np.testing.assert_allclose(
             result["constraint_scales"],
@@ -895,7 +898,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             result["raw_constraint_activity_tolerances"],
             [0.02, 0.08, 1e-3, 1e-3],
         )
-        self.assertAlmostEqual(result["max_feasibility_violation"], 1.0)
+        self.assertAlmostEqual(result["max_feasibility_violation"], 0.1)
         self.assertAlmostEqual(result["total"], 9.0)
         np.testing.assert_allclose(result["grad"], [7.0, -3.0])
 
@@ -956,14 +959,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             ],
         )
         expected_alm_state = {
-            "hard_signed_constraint_values": [-0.008, 1.0, 0.2, -6500.0],
-            "surrogate_signed_constraint_values": [-0.008, 0.75, 0.2, -6500.0],
-            "hard_violation_values": [0.0, 1.0, 0.2, 0.0],
-            "constraint_activity_tolerances": [0.02, 0.08, 0.001, 0.001],
-            "max_feasibility_violation": 1.0,
-            "total": 7.317917333333333,
-            "grad": [10.2924, -0.3392],
-            "stationarity_norm": 10.297987881134837,
+            "hard_signed_constraint_values": [-0.16, 0.025, 0.1, -0.40625],
+            "surrogate_signed_constraint_values": [-0.16, 0.01875, 0.1, -0.40625],
+            "hard_violation_values": [0.0, 0.025, 0.1, 0.0],
+            "constraint_activity_tolerances": [0.4, 0.002, 0.0005, 6.25e-8],
+            "max_feasibility_violation": 0.1,
+            "total": 3.5887760416666665,
+            "grad": [1.4345625, -0.2010625],
+            "stationarity_norm": 1.4485840311533535,
         }
         for key, expected in expected_alm_state.items():
             np.testing.assert_allclose(
@@ -988,11 +991,11 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         ):
             self.assertAlmostEqual(base_value, 1.0)
             np.testing.assert_allclose(base_grad, [0.0, 0.0])
-            np.testing.assert_allclose(signed_values, [1.0, 0.75, 0.2, -6500.0])
+            np.testing.assert_allclose(signed_values, [20.0, 0.01875, 0.1, -0.40625])
             np.testing.assert_allclose(grads[0], [0.0, 0.0])
-            np.testing.assert_allclose(grads[1], [0.9, -0.1])
-            np.testing.assert_allclose(grads[2], [0.3, 0.4])
-            np.testing.assert_allclose(grads[3], [0.7, -0.4])
+            np.testing.assert_allclose(grads[1], [0.0225, -0.0025])
+            np.testing.assert_allclose(grads[2], [0.15, 0.2])
+            np.testing.assert_allclose(grads[3], [4.375e-5, -2.5e-5])
             np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3, 0.4])
             self.assertAlmostEqual(penalty, 12.0)
             return {
@@ -1068,18 +1071,33 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         self.assertTrue(np.isnan(result["total"]))
         np.testing.assert_allclose(
-            result["dual_update_values"], [1.0, 0.75, 0.2, -6500.0]
+            result["dual_update_values"], [20.0, 0.01875, 0.1, -0.40625]
+        )
+        np.testing.assert_allclose(
+            result["raw_dual_update_values"], [1.0, 0.75, 0.2, -6500.0]
         )
         np.testing.assert_allclose(
             result["hard_signed_constraint_values"],
+            [20.0, 0.025, 0.1, -0.40625],
+        )
+        np.testing.assert_allclose(
+            result["raw_hard_signed_constraint_values"],
             [1.0, 1.0, 0.2, -6500.0],
         )
         np.testing.assert_allclose(
             result["hard_violation_values"],
+            [20.0, 0.025, 0.1, 0.0],
+        )
+        np.testing.assert_allclose(
+            result["raw_hard_violation_values"],
             [1.0, 1.0, 0.2, 0.0],
         )
         np.testing.assert_allclose(
             result["surrogate_signed_constraint_values"],
+            [20.0, 0.01875, 0.1, -0.40625],
+        )
+        np.testing.assert_allclose(
+            result["raw_surrogate_signed_constraint_values"],
             [1.0, 0.75, 0.2, -6500.0],
         )
         np.testing.assert_allclose(result["constraint_grads"][0], [0.0, 0.0])
@@ -1142,9 +1160,10 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
 
         self.assertEqual(result["constraint_names"][3], "banana_current_upper_bound")
-        self.assertAlmostEqual(result["dual_update_values"][3], 1000.0)
-        self.assertAlmostEqual(result["feasibility_values"][3], 1000.0)
-        np.testing.assert_allclose(result["constraint_grads"][3], [-0.7, 0.4])
+        self.assertAlmostEqual(result["dual_update_values"][3], 0.0625)
+        self.assertAlmostEqual(result["feasibility_values"][3], 0.0625)
+        self.assertAlmostEqual(result["raw_dual_update_values"][3], 1000.0)
+        np.testing.assert_allclose(result["constraint_grads"][3], [-4.375e-5, 2.5e-5])
 
     def test_evaluate_stage2_alm_problem_uses_activity_tolerance_helper(self):
         base_objective = _FakeAlgebraicObjective(
@@ -1192,6 +1211,10 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
 
         np.testing.assert_allclose(
             result["constraint_activity_tolerances"],
+            [0.5, 0.003, 1.0e-3, 4.375e-7],
+        )
+        np.testing.assert_allclose(
+            result["raw_constraint_activity_tolerances"],
             [0.025, 0.12, 2e-3, 7e-3],
         )
 
@@ -1237,9 +1260,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             np.testing.assert_allclose(base_grad, [1.2, -0.5])
             np.testing.assert_allclose(
                 signed_values,
-                [-0.008, 0.75, 0.2, -6500.0, 0.1],
+                [-0.16, 0.01875, 0.1, -0.40625, 0.2],
             )
-            np.testing.assert_allclose(grads[4], [0.2, 0.1])
+            np.testing.assert_allclose(grads[4], [0.4, 0.2])
             np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3, 0.4, 0.5])
             self.assertAlmostEqual(penalty, 12.0)
             return {
@@ -1307,14 +1330,26 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(
             result["dual_update_values"],
+            [-0.16, 0.01875, 0.1, -0.40625, 0.2],
+        )
+        np.testing.assert_allclose(
+            result["raw_dual_update_values"],
             [-0.008, 0.75, 0.2, -6500.0, 0.1],
         )
         np.testing.assert_allclose(
             result["hard_violation_values"],
+            [0.0, 0.025, 0.1, 0.0, 0.2],
+        )
+        np.testing.assert_allclose(
+            result["raw_hard_violation_values"],
             [0.0, 1.0, 0.2, 0.0, 0.1],
         )
         np.testing.assert_allclose(
             result["constraint_activity_tolerances"],
+            [0.4, 0.002, 0.0005, 6.25e-8, 1.0],
+        )
+        np.testing.assert_allclose(
+            result["raw_constraint_activity_tolerances"],
             [0.02, 0.08, 1e-3, 1e-3, 0.5],
         )
 
@@ -1349,7 +1384,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             np.testing.assert_allclose(base_grad, [1.2, -0.5])
             np.testing.assert_allclose(
                 signed_values,
-                [-0.008, 0.75, 0.2, -6500.0, 1.0],
+                [-0.16, 0.01875, 0.1, -0.40625, 2.0],
             )
             np.testing.assert_allclose(grads[4], [0.0, 0.0])
             np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3, 0.4, 0.5])
@@ -1424,10 +1459,18 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(
             result["dual_update_values"],
+            [-0.16, 0.01875, 0.1, -0.40625, 2.0],
+        )
+        np.testing.assert_allclose(
+            result["raw_dual_update_values"],
             [-0.008, 0.75, 0.2, -6500.0, 1.0],
         )
         np.testing.assert_allclose(
             result["hard_violation_values"],
+            [0.0, 0.025, 0.1, 0.0, 2.0],
+        )
+        np.testing.assert_allclose(
+            result["raw_hard_violation_values"],
             [0.0, 1.0, 0.2, 0.0, 1.0],
         )
 
@@ -1775,10 +1818,22 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             penalty=8.0,
             multipliers=np.array([0.1, 0.2, 0.3]),
             constraint_values=np.array([0.0, 0.01, 0.0]),
+            normalized_constraint_values=np.array([0.0, 0.01, 0.0]),
+            raw_constraint_values=np.array([0.0, 1.0, 0.0]),
             solver_constraint_values=np.array([0.0, 0.2, 0.0]),
+            normalized_solver_constraint_values=np.array([0.0, 0.2, 0.0]),
+            raw_solver_constraint_values=np.array([0.0, 8.0, 0.0]),
             hard_signed_constraint_values=np.array([0.0, 0.02, 0.0]),
+            raw_hard_signed_constraint_values=np.array([0.0, 2.0, 0.0]),
             hard_violation_values=np.array([0.0, 0.01, 0.0]),
+            raw_hard_violation_values=np.array([0.0, 1.0, 0.0]),
             surrogate_signed_constraint_values=np.array([0.0, 0.2, 0.0]),
+            raw_surrogate_signed_constraint_values=np.array([0.0, 8.0, 0.0]),
+            constraint_scales=[1.0, 100.0, 1.0],
+            constraint_blocks=["geometry", "current", "physics"],
+            constraint_scale_sources=["one", "limit", "threshold"],
+            raw_dual_estimates=[0.1, 0.002, 0.3],
+            alm_schema_version="alm_normalized_constraints_v1",
             trust_radius=0.125,
             multiplier_cap_binding=True,
             multiplier_cap_binding_indices=[1],
@@ -1867,20 +1922,56 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["ALM_MAX_OUTER_ITERS"], 7)
         self.assertEqual(result["ALM_OUTER_ITERATIONS"], 4)
         self.assertEqual(result["ALM_FINAL_TRUST_RADIUS"], 0.125)
+        self.assertEqual(result["ALM_SCHEMA_VERSION"], "alm_normalized_constraints_v1")
         self.assertTrue(result["ALM_MULTIPLIER_CAP_BINDING"])
         self.assertEqual(result["ALM_MULTIPLIER_CAP_BINDING_INDICES"], [1])
+        np.testing.assert_allclose(result["ALM_FINAL_CONSTRAINT_VALUES"], [0.0, 1.0, 0.0])
+        np.testing.assert_allclose(
+            result["ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES"],
+            [0.0, 0.01, 0.0],
+        )
+        np.testing.assert_allclose(
+            result["ALM_FINAL_SOLVER_CONSTRAINT_VALUES"],
+            [0.0, 8.0, 0.0],
+        )
+        np.testing.assert_allclose(
+            result["ALM_FINAL_NORMALIZED_SOLVER_CONSTRAINT_VALUES"],
+            [0.0, 0.2, 0.0],
+        )
         np.testing.assert_allclose(
             result["ALM_FINAL_HARD_SIGNED_CONSTRAINT_VALUES"],
+            [0.0, 2.0, 0.0],
+        )
+        np.testing.assert_allclose(
+            result["ALM_FINAL_NORMALIZED_HARD_SIGNED_CONSTRAINT_VALUES"],
             [0.0, 0.02, 0.0],
         )
         np.testing.assert_allclose(
             result["ALM_FINAL_HARD_VIOLATION_VALUES"],
+            [0.0, 1.0, 0.0],
+        )
+        np.testing.assert_allclose(
+            result["ALM_FINAL_NORMALIZED_HARD_VIOLATION_VALUES"],
             [0.0, 0.01, 0.0],
         )
         np.testing.assert_allclose(
             result["ALM_FINAL_SURROGATE_SIGNED_CONSTRAINT_VALUES"],
+            [0.0, 8.0, 0.0],
+        )
+        np.testing.assert_allclose(
+            result["ALM_FINAL_NORMALIZED_SURROGATE_SIGNED_CONSTRAINT_VALUES"],
             [0.0, 0.2, 0.0],
         )
+        np.testing.assert_allclose(result["ALM_CONSTRAINT_SCALES"], [1.0, 100.0, 1.0])
+        self.assertEqual(
+            result["ALM_CONSTRAINT_BLOCKS"],
+            ["geometry", "current", "physics"],
+        )
+        self.assertEqual(
+            result["ALM_CONSTRAINT_SCALE_SOURCES"],
+            ["one", "limit", "threshold"],
+        )
+        np.testing.assert_allclose(result["ALM_FINAL_RAW_DUAL_ESTIMATES"], [0.1, 0.002, 0.3])
         self.assertEqual(result["ALM_FINAL_HARD_MAX_VIOLATION"], 0.01)
         self.assertEqual(result["ALM_FINAL_SURROGATE_MAX_VALUE"], 0.2)
         self.assertTrue(result["ALM_FINAL_HARD_POSITIVE_SHIFT_ZERO"])
@@ -2204,11 +2295,11 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         ):
             self.assertAlmostEqual(base_value, 25.0)
             np.testing.assert_allclose(base_grad, [4.6, 2.8])
-            np.testing.assert_allclose(constraint_values, [-0.1, 0.2, 0.3, -0.4])
-            np.testing.assert_allclose(constraint_grads[0], [1.0, 0.0])
-            np.testing.assert_allclose(constraint_grads[1], [0.0, 1.0])
-            np.testing.assert_allclose(constraint_grads[2], [1.0, -1.0])
-            np.testing.assert_allclose(constraint_grads[3], [0.5, 0.5])
+            np.testing.assert_allclose(constraint_values, [-2.0, 10.0, 0.0075, -10.0])
+            np.testing.assert_allclose(constraint_grads[0], [20.0, 0.0])
+            np.testing.assert_allclose(constraint_grads[1], [0.0, 50.0])
+            np.testing.assert_allclose(constraint_grads[2], [0.025, -0.025])
+            np.testing.assert_allclose(constraint_grads[3], [12.5, 12.5])
             np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3, 0.4])
             self.assertAlmostEqual(penalty, 9.0)
             return {
@@ -2277,10 +2368,10 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 "surface_vessel_spacing",
             ],
         )
-        np.testing.assert_allclose(result["dual_update_values"], [-0.1, 0.2, 0.3, -0.4])
-        np.testing.assert_allclose(result["feasibility_values"], [0.0, 0.2, 0.3, 0.0])
+        np.testing.assert_allclose(result["dual_update_values"], [-2.0, 10.0, 0.0075, -10.0])
+        np.testing.assert_allclose(result["feasibility_values"], [0.0, 10.0, 0.0075, 0.0])
         np.testing.assert_allclose(
-            result["constraint_activity_tolerances"], [0.04, 0.04, 0.2, 0.04]
+            result["constraint_activity_tolerances"], [0.8, 2.0, 0.005, 1.0]
         )
         np.testing.assert_allclose(
             result["constraint_scales"],
@@ -2303,7 +2394,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             [0.0, 0.2, 0.3, 0.0],
         )
         self.assertAlmostEqual(result["base_total"], 25.0)
-        self.assertAlmostEqual(result["max_feasibility_violation"], 0.3)
+        self.assertAlmostEqual(result["max_feasibility_violation"], 10.0)
         self.assertAlmostEqual(result["J_cc"], 0.6)
         self.assertAlmostEqual(result["J_cs"], 0.7)
         self.assertAlmostEqual(result["J_surf"], 0.9)
@@ -2385,8 +2476,9 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             result["constraint_names"],
             ["coil_coil_spacing", "coil_surface_spacing", "max_curvature"],
         )
-        np.testing.assert_allclose(result["dual_update_values"], [-0.1, 0.2, 0.3])
-        self.assertAlmostEqual(result["max_feasibility_violation"], 0.3)
+        np.testing.assert_allclose(result["dual_update_values"], [-2.0, 10.0, 0.0075])
+        np.testing.assert_allclose(result["raw_dual_update_values"], [-0.1, 0.2, 0.3])
+        self.assertAlmostEqual(result["max_feasibility_violation"], 10.0)
 
     def test_evaluate_base_objective_projects_total_gradient_when_requested(self):
         objective, nonqs, brs, jiota, jlength = self._make_projected_base_terms()
@@ -2463,10 +2555,13 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         ):
             self.assertAlmostEqual(base_value, 25.0)
             np.testing.assert_allclose(base_grad, [4.6, 2.8, 0.0, 0.0])
-            np.testing.assert_allclose(constraint_values, [-0.1, 0.2, 0.3])
-            np.testing.assert_allclose(constraint_grads[0], [1.0, 0.0, 0.0, 0.0])
-            np.testing.assert_allclose(constraint_grads[1], [0.0, 1.0, 0.0, 0.0])
-            np.testing.assert_allclose(constraint_grads[2], [1.0, -1.0, 0.0, 0.0])
+            np.testing.assert_allclose(constraint_values, [-2.0, 10.0, 0.0075])
+            np.testing.assert_allclose(constraint_grads[0], [20.0, 0.0, 0.0, 0.0])
+            np.testing.assert_allclose(constraint_grads[1], [0.0, 50.0, 0.0, 0.0])
+            np.testing.assert_allclose(
+                constraint_grads[2],
+                [0.025, -0.025, 0.0, 0.0],
+            )
             np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3])
             self.assertAlmostEqual(penalty, 9.0)
             return {
@@ -2546,12 +2641,15 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             np.testing.assert_allclose(base_grad, [0.0, 0.0, 0.0, 0.0])
             np.testing.assert_allclose(
                 constraint_values,
-                [-0.1, 0.2, 0.3, 1.0, 2.0, 3.5, 5.0],
+                [-2.0, 10.0, 0.0075, 1.0, 2.0, 7.0, 5.0e12],
             )
             np.testing.assert_allclose(constraint_grads[3], [2.0, 0.0, 0.0, 0.0])
             np.testing.assert_allclose(constraint_grads[4], [0.5, 0.5, 0.0, 0.0])
-            np.testing.assert_allclose(constraint_grads[5], [0.2, 0.1, 0.0, 0.0])
-            np.testing.assert_allclose(constraint_grads[6], [1.0, 1.5, 0.0, 0.0])
+            np.testing.assert_allclose(constraint_grads[5], [0.4, 0.2, 0.0, 0.0])
+            np.testing.assert_allclose(
+                constraint_grads[6],
+                [1.0e12, 1.5e12, 0.0, 0.0],
+            )
             np.testing.assert_allclose(multipliers, np.arange(7, dtype=float))
             self.assertAlmostEqual(penalty, 4.0)
             return {
@@ -2637,6 +2735,10 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["base_total"], 25.0)
         np.testing.assert_allclose(
             result["constraint_activity_tolerances"],
+            [0.8, 2.0, 0.005, 0.0, 0.0, 0.0, 0.0],
+        )
+        np.testing.assert_allclose(
+            result["raw_constraint_activity_tolerances"],
             [0.04, 0.04, 0.2, 0.0, 0.0, 0.0, 0.0],
         )
         np.testing.assert_allclose(result["grad"], [7.0, -4.0, 0.0, 0.0])

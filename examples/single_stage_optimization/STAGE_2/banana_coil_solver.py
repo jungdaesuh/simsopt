@@ -487,7 +487,10 @@ def parse_args():
         "--alm-feas-tol",
         type=float,
         default=float(os.environ.get("ALM_FEAS_TOL", "1e-6")),
-        help="ALM max-violation stopping tolerance (default 1e-6).",
+        help=(
+            "Dimensionless normalized ALM max-violation stopping tolerance "
+            "(default 1e-6)."
+        ),
     )
     parser.add_argument(
         "--alm-stationarity-tol",

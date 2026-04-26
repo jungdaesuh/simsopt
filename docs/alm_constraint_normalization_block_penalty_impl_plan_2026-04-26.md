@@ -1,7 +1,7 @@
 # ALM Constraint Normalization and Block Penalty Implementation Plan
 
 Date: 2026-04-26
-Status: proposal, revised after external review, validated against current tree at `1f78c5b71`
+Status: Phases 0 through 2 implemented; Phase 3 partially implemented; Phase 4 still conditional
 Scope: `examples/single_stage_optimization/alm_utils.py`, `banana_opt/hardware_constraint_schema.py`, `banana_opt/stage2_objectives.py`, `banana_opt/single_stage_objectives.py`, ALM result reporting, and focused ALM tests
 
 ## Review Verdict
@@ -13,6 +13,40 @@ The current ALM engine is already a real projected inequality augmented Lagrangi
 The validated remaining problem is scale control. Stage 2 and single-stage ALM still pass raw signed residuals into the same scalar penalty/multiplier update path. Those residuals mix meters, inverse meters, amperes, and physics objective units. That makes one penalty parameter do too many jobs and makes multiplier magnitudes difficult to compare across constraint families.
 
 Do not start with solver replacement, multi-surface ALM, or independent-current ALM. First make the existing ALM contract unit-aware and diagnostic. The key required edit before coding is to make the normalized-vs-raw field contract explicit inside `minimize_alm`, because current hard/surrogate fields are not just report fields; they affect multiplier updates, activity masks, stationarity, positive-shift logic, and signal-mismatch penalty decisions.
+
+## Implementation Status
+
+Current implementation status:
+
+- [x] Phase 0 baseline artifact scan and scale-invariance tests landed.
+- [x] Phase 1 metadata sidecars landed for Stage 2 and single-stage ALM constraints.
+- [x] Phase 2 normalized scalar ALM landed for Stage 2 and single-stage objective construction.
+- [x] Public result writers preserve raw `ALM_FINAL_*` fields and add normalized fields plus `ALM_SCHEMA_VERSION`.
+- [x] `--alm-feas-tol` help text now identifies the tolerance as dimensionless and normalized.
+- [x] ALM history now emits the first actionable raw/normalized sidecars, projected positive shifts, augmented terms, constraint scales, blocks, normalized multipliers, and raw dual estimates.
+- [ ] Full Phase 3 summary fields and gap metrics remain open: `ALM_SUMMARY`, surrogate-hard gap arrays, sign mismatch arrays, objective-to-augmented-term ratio, and separated L-BFGS-B projected-gradient labels.
+- [ ] Phase 4 block penalties are not implemented.
+
+Baseline artifact scan generated:
+
+```text
+/Users/suhjungdae/code/columbia/autoresearch/artifact_exports/alm_normalization_benchmarks/baseline_20260426T042650Z.jsonl
+/Users/suhjungdae/code/columbia/autoresearch/artifact_exports/alm_normalization_benchmarks/comparison_20260426T042650Z.csv
+/Users/suhjungdae/code/columbia/autoresearch/artifact_exports/alm_normalization_benchmarks/comparison_20260426T042650Z.md
+/Users/suhjungdae/code/columbia/autoresearch/artifact_exports/alm_normalization_benchmarks/fixture_manifest_20260426T042650Z.json
+/Users/suhjungdae/code/columbia/autoresearch/artifact_exports/alm_normalization_benchmarks/skipped_artifacts_20260426T042650Z.json
+```
+
+Baseline scan counts:
+
+```text
+baseline_rows: 1412
+harvested_seed_fixtures: 52
+ledger_rows: 72
+registry_rows: 43
+run_artifact_rows: 1297
+skipped_artifacts: 2
+```
 
 ## Current Code Evidence
 
@@ -157,19 +191,19 @@ Emit both `normalized_multipliers` and `raw_dual_estimates = normalized_multipli
 
 ## Design Invariants
 
-- [ ] Raw hard and surrogate values remain available in history and final artifacts.
-- [ ] ALM objective value and gradient are computed from normalized values only.
-- [ ] ALM multiplier updates, hard/surrogate routing, activity masks, and KKT stationarity operate on normalized values and normalized activity tolerances.
-- [ ] Every constraint declares value-source metadata for objective, gradient, dual update, feasibility, and certification signals.
+- [x] Raw hard and surrogate values remain available in history and final artifacts.
+- [x] ALM objective value and gradient are computed from normalized values only.
+- [x] ALM multiplier updates, hard/surrogate routing, activity masks, and KKT stationarity operate on normalized values and normalized activity tolerances.
+- [x] Every constraint declares value-source metadata for objective, gradient, dual update, feasibility, and certification signals.
 - [ ] Stationarity labels distinguish differentiable surrogate stationarity from physical/KKT dual interpretation.
-- [ ] `max_feasibility_violation` is normalized for optimizer convergence.
-- [ ] Raw hard pass/fail remains the certification source.
-- [ ] Public raw result fields stay raw; normalized result fields are added explicitly.
-- [ ] Constraint names stay stable for artifact consumers.
-- [ ] Existing penalty-mode behavior is unchanged.
-- [ ] Stage 2 and single-stage use the same scale source for shared hardware constraints.
-- [ ] No fallback remapping from unknown constraints; unknown names fail fast.
-- [ ] No dynamic imports or broad defensive wrappers are introduced.
+- [x] `max_feasibility_violation` is normalized for optimizer convergence.
+- [x] Raw hard pass/fail remains the certification source.
+- [x] Public raw result fields stay raw; normalized result fields are added explicitly.
+- [x] Constraint names stay stable for artifact consumers.
+- [x] Existing penalty-mode behavior is unchanged.
+- [x] Stage 2 and single-stage use the same scale source for shared hardware constraints.
+- [x] No fallback remapping from unknown constraints; unknown names fail fast.
+- [x] No dynamic imports or broad defensive wrappers are introduced.
 
 ## Scale Defaults
 
@@ -203,8 +237,8 @@ Use `ALM_PHYSICAL_SCALE_FLOOR` only for unit-bearing hardware scales after thres
 
 ### Phase 0: Lock current behavior and add scale fixtures
 
-- [ ] Add a before/after benchmark collector that reads ALM history/result artifacts and emits a stable summary table.
-- [ ] Add a scale-invariance toy fixture:
+- [x] Add a before/after benchmark collector that reads ALM history/result artifacts and emits a stable summary table.
+- [x] Add a scale-invariance toy fixture:
 
 ```text
 Given c_raw(x) <= 0 and c_norm(x) = c_raw(x) / scale, verify:
@@ -214,11 +248,11 @@ Given c_raw(x) <= 0 and c_norm(x) = c_raw(x) / scale, verify:
     scale = 1 preserves existing scalar ALM behavior
 ```
 
-- [ ] Add characterization tests that prove Stage 2 currently passes raw values into the ALM objective. Mark these as pre-normalization tests to update in Phase 2.
-- [ ] Add characterization tests that prove single-stage currently passes raw values into the ALM objective. Mark these as pre-normalization tests to update in Phase 2.
-- [ ] Add characterization tests that current hard/surrogate routing uses raw `hard_violation_values`, raw surrogate values, and raw activity tolerances.
-- [ ] Add schema tests for scale lookup on hardware constraints.
-- [ ] Add tests for physics threshold scales in `thresholded_physics` mode.
+- [x] Replace raw Stage 2 characterization expectations with normalized Phase 2 assertions.
+- [x] Replace raw single-stage characterization expectations with normalized Phase 2 assertions.
+- [x] Update hard/surrogate routing tests to assert normalized ALM routing plus raw sidecars.
+- [x] Add schema tests for scale lookup on hardware constraints.
+- [x] Add tests for physics threshold scales in `thresholded_physics` mode.
 
 Expected files:
 
@@ -229,8 +263,8 @@ Expected files:
 
 ### Phase 1: Add ALM scale metadata without changing solver math
 
-- [ ] Extend `HardwareConstraintSpec` with `alm_scale: float | None`, `alm_block: ALMBlock | None`, and schema-owned ALM activity tolerance metadata where applicable.
-- [ ] Add helper:
+- [x] Extend `HardwareConstraintSpec` with `alm_scale: float | None`, `alm_block: ALMBlock | None`, and schema-owned ALM activity tolerance metadata where applicable.
+- [x] Add helper:
 
 ```python
 ALMBlock = Literal["geometry", "current", "physics", "surface"]
@@ -259,7 +293,7 @@ def hardware_constraint_alm_metadata(
     ...
 ```
 
-- [ ] Keep small compatibility helpers if useful, implemented from the metadata SSOT:
+- [x] Keep small compatibility helpers if useful, implemented from the metadata SSOT:
 
 ```python
 def hardware_constraint_alm_scale(name: str, *, threshold_overrides: Mapping[str, float] | None = None) -> float:
@@ -270,7 +304,7 @@ def hardware_constraint_alm_block(name: str) -> str:
     ...
 ```
 
-- [ ] Emit ALM metadata and raw sidecars in Stage 2 and single-stage evaluations:
+- [x] Emit ALM metadata and raw sidecars in Stage 2 and single-stage evaluations:
 
 ```text
 constraint_scales
@@ -287,7 +321,7 @@ raw_constraint_grads
 raw_constraint_activity_tolerances
 ```
 
-- [ ] Validate metadata at construction/lookup time:
+- [x] Validate metadata at construction/lookup time:
 
 ```text
 scale is finite and positive
@@ -302,7 +336,7 @@ At the end of Phase 1, optimizer behavior should be unchanged. Only payloads and
 
 ### Phase 2: Normalize ALM objective inputs
 
-- [ ] Add a small pure helper in `alm_utils.py`:
+- [x] Add a small pure helper in `alm_utils.py`:
 
 ```python
 def normalize_alm_constraints(
@@ -324,22 +358,22 @@ normalized_feasibility_values
 normalized_activity_tolerances
 ```
 
-- [ ] Add or prefer a payload-level helper so all ALM-consumed arrays are normalized at one boundary:
+- [x] Normalize all ALM-consumed arrays at the Stage 2 and single-stage evaluation boundaries:
 
 ```python
 def normalize_alm_payload(payload, scales):
     ...
 ```
 
-- [ ] Stage 2 should call `augmented_inequality_objective(...)` with normalized signed values and normalized gradients.
-- [ ] Single-stage should call `augmented_inequality_objective(...)` with normalized signed values and normalized gradients.
-- [ ] `dual_update_values`, `feasibility_values`, `hard_dual_update_values`, `hard_violation_values`, and hard/surrogate signed values consumed by ALM routing should become normalized values for ALM math.
-- [ ] `_constraint_activity_tolerances(...)`, `_constraint_activity_mask(...)`, and `_kkt_stationarity_norm(...)` should operate on normalized values and normalized tolerances.
-- [ ] Preserve raw values under explicit raw field names.
-- [ ] Keep public raw result fields raw where artifact consumers expect physical units. Add normalized fields explicitly.
-- [ ] Route public serialization through one result-building function so raw/normalized field decisions are not scattered through call sites.
-- [ ] Add an ALM schema/contract version to result payloads.
-- [ ] Update CLI/help text for `--alm-feas-tol`: after Phase 2 it is a dimensionless normalized ALM tolerance, not meters, amperes, inverse meters, or objective units.
+- [x] Stage 2 should call `augmented_inequality_objective(...)` with normalized signed values and normalized gradients.
+- [x] Single-stage should call `augmented_inequality_objective(...)` with normalized signed values and normalized gradients.
+- [x] `dual_update_values`, `feasibility_values`, `hard_dual_update_values`, `hard_violation_values`, and hard/surrogate signed values consumed by ALM routing should become normalized values for ALM math.
+- [x] `_constraint_activity_tolerances(...)`, `_constraint_activity_mask(...)`, and `_kkt_stationarity_norm(...)` should operate on normalized values and normalized tolerances.
+- [x] Preserve raw values under explicit raw field names.
+- [x] Keep public raw result fields raw where artifact consumers expect physical units. Add normalized fields explicitly.
+- [x] Route public serialization through one result-building function so raw/normalized field decisions are not scattered through call sites.
+- [x] Add an ALM schema/contract version to result payloads.
+- [x] Update CLI/help text for `--alm-feas-tol`: after Phase 2 it is a dimensionless normalized ALM tolerance, not meters, amperes, inverse meters, or objective units.
 
 Compatibility fields:
 
@@ -353,18 +387,18 @@ ALM_SCHEMA_VERSION                              new
 
 Acceptance tests:
 
-- [ ] A banana-current violation of `1000 A` with scale `16000 A` contributes as `0.0625`.
-- [ ] A curvature violation of `1 1/m` with scale `40 1/m` contributes as `0.025`.
-- [ ] Hard feasibility in raw units still fails/passes exactly as before.
-- [ ] Multiplier cap tests still pass in normalized units.
-- [ ] Convergence decisions use normalized feasibility only.
-- [ ] Hard feasibility failures are still reported in raw physical units.
+- [x] A banana-current violation of `1000 A` with scale `16000 A` contributes as `0.0625`.
+- [x] A curvature violation of `1 1/m` with scale `40 1/m` contributes as `0.025`.
+- [x] Hard feasibility in raw units still fails/passes exactly as before.
+- [x] Multiplier cap tests still pass in normalized units.
+- [x] Convergence decisions use normalized feasibility only.
+- [x] Hard feasibility failures are still reported in raw physical units.
 - [ ] Directional Taylor tests pass after normalization for Stage 2 and single-stage constraints.
-- [ ] Empty constraint sets, scalar constraints, vector constraints, gradient shape mismatches, nonfinite scales, and `scale=1` behavior are covered.
+- [x] Empty constraint sets, scalar constraints, vector constraints, gradient shape mismatches, nonfinite scales, and `scale=1` behavior are covered.
 
 ### Phase 3: Make ALM history actionable
 
-- [ ] Add per-constraint history fields:
+- [x] Add initial per-constraint history fields:
 
 ```text
 raw_signed_constraint_values
@@ -396,7 +430,7 @@ gradient += positive_shift_i * grad(c_i)
 
 `augmented_term_i` can be negative for inactive constraints with nonzero multipliers, so do not label it as `penalty_contribution`.
 
-- [ ] Add derived block summaries:
+- [ ] Add complete derived block summaries:
 
 ```text
 block_max_normalized_violation

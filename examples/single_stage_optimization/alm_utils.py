@@ -6,6 +6,9 @@ import numpy as np
 from scipy.optimize import minimize, nnls
 
 
+ALM_SCHEMA_VERSION = "alm_normalized_constraints_v1"
+
+
 @dataclass(frozen=True)
 class ALMSettings:
     max_outer_iterations: int = 10
@@ -301,6 +304,39 @@ def augmented_inequality_objective(
     )
 
 
+def normalize_alm_constraints(
+    signed_values,
+    constraint_grads,
+    feasibility_values,
+    activity_tolerances,
+    scales,
+):
+    scale_array = np.asarray(scales, dtype=float)
+    if np.any(~np.isfinite(scale_array)) or np.any(scale_array <= 0.0):
+        raise ValueError("ALM constraint scales must be finite and positive")
+    signed_array = np.asarray(signed_values, dtype=float)
+    feasibility_array = np.asarray(feasibility_values, dtype=float)
+    activity_tolerance_array = np.asarray(activity_tolerances, dtype=float)
+    if signed_array.shape != scale_array.shape:
+        raise ValueError("signed_values shape must match scales")
+    if feasibility_array.shape != scale_array.shape:
+        raise ValueError("feasibility_values shape must match scales")
+    if activity_tolerance_array.shape != scale_array.shape:
+        raise ValueError("activity_tolerances shape must match scales")
+    if len(constraint_grads) != scale_array.size:
+        raise ValueError("constraint_grads length must match scales")
+    normalized_grads = [
+        np.asarray(grad, dtype=float) / float(scale)
+        for grad, scale in zip(constraint_grads, scale_array)
+    ]
+    return {
+        "normalized_signed_values": signed_array / scale_array,
+        "normalized_constraint_grads": normalized_grads,
+        "normalized_feasibility_values": feasibility_array / scale_array,
+        "normalized_activity_tolerances": activity_tolerance_array / scale_array,
+    }
+
+
 def zero_gradient_like(reference_grad):
     return np.zeros_like(np.asarray(reference_grad))
 
@@ -339,8 +375,96 @@ def _as_float_array(values) -> np.ndarray:
     return np.asarray(values, dtype=float)
 
 
+def _as_float_list(values) -> list[float]:
+    return [float(value) for value in np.asarray(values, dtype=float)]
+
+
 def _max_value(values: np.ndarray) -> float:
     return float(np.max(values)) if values.size > 0 else 0.0
+
+
+def _optional_float_list(evaluation: dict, key: str, fallback) -> list[float] | None:
+    values = evaluation.get(key)
+    if values is None:
+        values = fallback
+    if values is None:
+        return None
+    return _as_float_list(values)
+
+
+def _optional_string_list(evaluation: dict, key: str) -> list[str] | None:
+    values = evaluation.get(key)
+    if values is None:
+        return None
+    return [str(value) for value in values]
+
+
+def _raw_dual_estimates(multipliers, evaluation: dict) -> list[float] | None:
+    constraint_scales = evaluation.get("constraint_scales")
+    if constraint_scales is None:
+        return None
+    scales = np.asarray(constraint_scales, dtype=float)
+    multiplier_array = np.asarray(multipliers, dtype=float)
+    if scales.shape != multiplier_array.shape:
+        raise ValueError("constraint_scales shape must match multipliers")
+    return _as_float_list(multiplier_array / scales)
+
+
+def _constraint_history_diagnostics(
+    evaluation: dict,
+    multipliers: np.ndarray,
+    penalty: float,
+    solver_constraint_values: np.ndarray,
+    feasibility_values: np.ndarray,
+    routing_state: ALMConstraintRoutingState,
+) -> dict:
+    multiplier_array = np.asarray(multipliers, dtype=float)
+    positive_shift = np.maximum(
+        0.0,
+        multiplier_array
+        + float(penalty) * np.asarray(solver_constraint_values, dtype=float),
+    )
+    augmented_terms = (positive_shift**2 - multiplier_array**2) / (2.0 * float(penalty))
+    raw_hard_violation_values = _optional_float_list(
+        evaluation,
+        "raw_hard_violation_values",
+        routing_state.signal_state.hard_violation_values,
+    )
+    raw_hard_max_violation = (
+        None
+        if raw_hard_violation_values is None
+        else _max_value(np.asarray(raw_hard_violation_values))
+    )
+    return {
+        "raw_signed_constraint_values": _optional_float_list(
+            evaluation,
+            "raw_dual_update_values",
+            solver_constraint_values,
+        ),
+        "normalized_signed_constraint_values": _optional_float_list(
+            evaluation,
+            "normalized_signed_constraint_values",
+            solver_constraint_values,
+        ),
+        "raw_hard_violation_values": raw_hard_violation_values,
+        "normalized_feasibility_values": _optional_float_list(
+            evaluation,
+            "normalized_feasibility_values",
+            feasibility_values,
+        ),
+        "constraint_scales": _optional_float_list(
+            evaluation,
+            "constraint_scales",
+            None,
+        ),
+        "constraint_blocks": _optional_string_list(evaluation, "constraint_blocks"),
+        "normalized_multipliers": _as_float_list(multiplier_array),
+        "raw_dual_estimates": _raw_dual_estimates(multiplier_array, evaluation),
+        "positive_shift_values": _as_float_list(positive_shift),
+        "augmented_term_by_constraint": _as_float_list(augmented_terms),
+        "block_max_raw_hard_violation": raw_hard_max_violation,
+        "block_max_normalized_violation": _max_value(feasibility_values),
+    }
 
 
 def alm_result_diagnostics_fields(alm_result) -> dict:
@@ -1272,6 +1396,7 @@ def minimize_alm(
             inner_optimizer_message = str(getattr(inner_result, "message", ""))
         conditioning = _conditioning_metrics(evaluation)
         return SimpleNamespace(
+            alm_schema_version=ALM_SCHEMA_VERSION,
             x=x.copy(),
             success=bool(success),
             message=message,
@@ -1281,6 +1406,28 @@ def minimize_alm(
             constraint_names=list(constraint_names),
             constraint_values=[float(value) for value in feasibility_values],
             solver_constraint_values=[float(value) for value in solver_constraint_values],
+            normalized_constraint_values=_as_float_list(feasibility_values),
+            normalized_solver_constraint_values=_as_float_list(solver_constraint_values),
+            normalized_signed_constraint_values=_optional_float_list(
+                evaluation,
+                "normalized_signed_constraint_values",
+                solver_constraint_values,
+            ),
+            normalized_feasibility_values=_optional_float_list(
+                evaluation,
+                "normalized_feasibility_values",
+                feasibility_values,
+            ),
+            raw_constraint_values=_optional_float_list(
+                evaluation,
+                "raw_feasibility_values",
+                feasibility_values,
+            ),
+            raw_solver_constraint_values=_optional_float_list(
+                evaluation,
+                "raw_dual_update_values",
+                solver_constraint_values,
+            ),
             hard_signed_constraint_values=[
                 float(value)
                 for value in routing_state.signal_state.hard_signed_constraint_values
@@ -1293,6 +1440,38 @@ def minimize_alm(
                 float(value)
                 for value in routing_state.signal_state.surrogate_signed_constraint_values
             ],
+            raw_hard_signed_constraint_values=_optional_float_list(
+                evaluation,
+                "raw_hard_signed_constraint_values",
+                routing_state.signal_state.hard_signed_constraint_values,
+            ),
+            raw_hard_violation_values=_optional_float_list(
+                evaluation,
+                "raw_hard_violation_values",
+                routing_state.signal_state.hard_violation_values,
+            ),
+            raw_surrogate_signed_constraint_values=_optional_float_list(
+                evaluation,
+                "raw_surrogate_signed_constraint_values",
+                routing_state.signal_state.surrogate_signed_constraint_values,
+            ),
+            raw_dual_update_values=_optional_float_list(
+                evaluation,
+                "raw_dual_update_values",
+                solver_constraint_values,
+            ),
+            raw_hard_dual_update_values=_optional_float_list(
+                evaluation,
+                "raw_hard_dual_update_values",
+                routing_state.signal_state.hard_signed_constraint_values,
+            ),
+            constraint_scales=_optional_float_list(evaluation, "constraint_scales", None),
+            constraint_blocks=_optional_string_list(evaluation, "constraint_blocks"),
+            constraint_scale_sources=_optional_string_list(
+                evaluation,
+                "constraint_scale_sources",
+            ),
+            raw_dual_estimates=_raw_dual_estimates(multipliers_state, evaluation),
             multipliers=[float(value) for value in multipliers_state],
             penalty=float(penalty_state),
             trust_radius=trust_radius,
@@ -1622,6 +1801,16 @@ def minimize_alm(
                     }
                 )
                 history[-1].update(current_conditioning)
+                history[-1].update(
+                    _constraint_history_diagnostics(
+                        current_eval,
+                        multipliers,
+                        penalty,
+                        current_solver_constraint_values,
+                        current_feasibility_values,
+                        current_routing_state,
+                    )
+                )
                 _emit_history_snapshot(history[-1])
                 final_eval = current_eval
                 final_multipliers = multipliers.copy()
@@ -1986,6 +2175,16 @@ def minimize_alm(
                 "multiplier_cap_binding_indices": [],
             }
             history_entry.update(_conditioning_metrics(final_eval))
+            history_entry.update(
+                _constraint_history_diagnostics(
+                    final_eval,
+                    multipliers,
+                    penalty,
+                    solver_constraint_values,
+                    feasibility_values,
+                    routing_state,
+                )
+            )
             history.append(history_entry)
             hard_feasible_strict = routing_state.hard_max_violation <= settings.feasibility_tol
             hard_feasible_for_update = (

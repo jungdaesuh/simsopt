@@ -1,6 +1,6 @@
 import numpy as np
 
-from alm_utils import augmented_inequality_objective
+from alm_utils import augmented_inequality_objective, normalize_alm_constraints
 from banana_opt.frontier_constraints import annotate_search_evaluation_finiteness
 from banana_opt.frontier_scalarization import (
     FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
@@ -981,23 +981,6 @@ def evaluate_alm_objective(
         constraint_grads.append(grad)
         feasibility_values.append(violation)
 
-    alm_eval = augmented_inequality_objective_fn(
-        base_eval["total"],
-        base_eval["grad"],
-        constraint_values,
-        constraint_grads,
-        multipliers,
-        penalty,
-    )
-    base_total = float(base_eval["physics_total"])
-    base_eval.update(alm_eval)
-    base_eval["base_total"] = base_total
-    base_eval["constraint_names"] = active_constraint_names
-    base_eval["dual_update_values"] = np.asarray(constraint_values, dtype=float)
-    base_eval["feasibility_values"] = np.asarray(feasibility_values, dtype=float)
-    base_eval["max_feasibility_violation"] = float(max(feasibility_values))
-    base_eval["constraint_grads"] = [np.asarray(grad, dtype=float) for grad in constraint_grads]
-    base_eval["search_hardware_constraint_payload_kind"] = "signed_residual"
     geometry_tolerances = np.asarray(
         activity_tolerances_fn(
             distance_smoothing,
@@ -1046,7 +1029,45 @@ def evaluate_alm_objective(
         iota_penalty_threshold=iota_penalty_threshold,
         length_penalty_threshold=length_penalty_threshold,
     )
-    base_eval.update(alm_constraint_metadata_payload(active_constraint_names, metadata_by_name))
+    metadata_payload = alm_constraint_metadata_payload(
+        active_constraint_names,
+        metadata_by_name,
+    )
+    constraint_scales = np.asarray(metadata_payload["constraint_scales"], dtype=float)
+    normalized_payload = normalize_alm_constraints(
+        constraint_values,
+        constraint_grads,
+        feasibility_values,
+        constraint_activity_tolerances,
+        constraint_scales,
+    )
+    normalized_constraint_values = normalized_payload["normalized_signed_values"]
+    normalized_constraint_grads = normalized_payload["normalized_constraint_grads"]
+    normalized_feasibility_values = normalized_payload["normalized_feasibility_values"]
+    normalized_activity_tolerances = normalized_payload[
+        "normalized_activity_tolerances"
+    ]
+    alm_eval = augmented_inequality_objective_fn(
+        base_eval["total"],
+        base_eval["grad"],
+        normalized_constraint_values,
+        normalized_constraint_grads,
+        multipliers,
+        penalty,
+    )
+    base_total = float(base_eval["physics_total"])
+    base_eval.update(alm_eval)
+    base_eval["base_total"] = base_total
+    base_eval["constraint_names"] = active_constraint_names
+    base_eval["dual_update_values"] = normalized_constraint_values
+    base_eval["feasibility_values"] = normalized_feasibility_values
+    base_eval["max_feasibility_violation"] = float(max(normalized_feasibility_values))
+    base_eval["constraint_grads"] = normalized_constraint_grads
+    base_eval["constraint_activity_tolerances"] = normalized_activity_tolerances
+    base_eval["normalized_signed_constraint_values"] = normalized_constraint_values
+    base_eval["normalized_feasibility_values"] = normalized_feasibility_values
+    base_eval["search_hardware_constraint_payload_kind"] = "signed_residual"
+    base_eval.update(metadata_payload)
     base_eval["raw_dual_update_values"] = np.asarray(constraint_values, dtype=float)
     base_eval["raw_feasibility_values"] = np.asarray(feasibility_values, dtype=float)
     base_eval["raw_constraint_grads"] = [

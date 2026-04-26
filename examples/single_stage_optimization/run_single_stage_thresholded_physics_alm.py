@@ -170,7 +170,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alm-penalty-init", type=float, default=1.0)
     parser.add_argument("--alm-penalty-scale", type=float, default=10.0)
     parser.add_argument("--alm-penalty-max", type=float, default=1.0e8)
-    parser.add_argument("--alm-feas-tol", type=float, default=1e-4)
+    parser.add_argument(
+        "--alm-feas-tol",
+        type=float,
+        default=1e-4,
+        help=(
+            "Dimensionless normalized ALM max-violation stopping tolerance "
+            "(default 1e-4)."
+        ),
+    )
     parser.add_argument("--alm-stationarity-tol", type=float, default=1e-4)
     parser.add_argument("--alm-trust-radius-init", type=float, default=0.05)
     parser.add_argument("--alm-trust-radius-min", type=float, default=1e-4)

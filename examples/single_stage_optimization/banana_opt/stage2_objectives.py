@@ -9,6 +9,7 @@ from alm_utils import (
     ALMSettings,
     alm_result_diagnostics_fields,
     augmented_inequality_objective,
+    normalize_alm_constraints,
     upper_bound_residual,
     zero_gradient_like,
 )
@@ -921,7 +922,13 @@ def build_stage2_results(
         ),
         "ALM_INNER_OPTIMIZER_SUCCESS": getattr(alm_result, "optimizer_success", None),
         "ALM_INNER_OPTIMIZER_MESSAGE": getattr(alm_result, "optimizer_message", None),
+        "ALM_SCHEMA_VERSION": getattr(alm_result, "alm_schema_version", None),
         "ALM_FINAL_MAX_FEASIBILITY_VIOLATION": getattr(
+            alm_result,
+            "final_max_feasibility_violation",
+            None,
+        ),
+        "ALM_FINAL_MAX_NORMALIZED_VIOLATION": getattr(
             alm_result,
             "final_max_feasibility_violation",
             None,
@@ -951,23 +958,65 @@ def build_stage2_results(
         ),
         "ALM_FINAL_PENALTY": getattr(alm_result, "penalty", None),
         "ALM_FINAL_MULTIPLIERS": getattr(alm_result, "multipliers", None),
-        "ALM_FINAL_CONSTRAINT_VALUES": getattr(alm_result, "constraint_values", None),
-        "ALM_FINAL_SOLVER_CONSTRAINT_VALUES": getattr(
+        "ALM_FINAL_RAW_DUAL_ESTIMATES": getattr(alm_result, "raw_dual_estimates", None),
+        "ALM_CONSTRAINT_SCALES": getattr(alm_result, "constraint_scales", None),
+        "ALM_CONSTRAINT_BLOCKS": getattr(alm_result, "constraint_blocks", None),
+        "ALM_CONSTRAINT_SCALE_SOURCES": getattr(
             alm_result,
-            "solver_constraint_values",
+            "constraint_scale_sources",
             None,
         ),
+        "ALM_FINAL_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "raw_constraint_values",
+            getattr(alm_result, "constraint_values", None),
+        ),
+        "ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "normalized_constraint_values",
+            getattr(alm_result, "constraint_values", None),
+        ),
+        "ALM_FINAL_SOLVER_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "raw_solver_constraint_values",
+            getattr(alm_result, "solver_constraint_values", None),
+        ),
+        "ALM_FINAL_NORMALIZED_SOLVER_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "normalized_solver_constraint_values",
+            getattr(alm_result, "solver_constraint_values", None),
+        ),
         "ALM_FINAL_HARD_SIGNED_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "raw_hard_signed_constraint_values",
+            getattr(alm_result, "hard_signed_constraint_values", None),
+        ),
+        "ALM_FINAL_NORMALIZED_HARD_SIGNED_CONSTRAINT_VALUES": getattr(
             alm_result,
             "hard_signed_constraint_values",
             None,
         ),
         "ALM_FINAL_HARD_VIOLATION_VALUES": getattr(
             alm_result,
+            "raw_hard_violation_values",
+            getattr(alm_result, "hard_violation_values", None),
+        ),
+        "ALM_FINAL_RAW_HARD_VIOLATION_BY_CONSTRAINT": getattr(
+            alm_result,
+            "raw_hard_violation_values",
+            getattr(alm_result, "hard_violation_values", None),
+        ),
+        "ALM_FINAL_NORMALIZED_HARD_VIOLATION_VALUES": getattr(
+            alm_result,
             "hard_violation_values",
             None,
         ),
         "ALM_FINAL_SURROGATE_SIGNED_CONSTRAINT_VALUES": getattr(
+            alm_result,
+            "raw_surrogate_signed_constraint_values",
+            getattr(alm_result, "surrogate_signed_constraint_values", None),
+        ),
+        "ALM_FINAL_NORMALIZED_SURROGATE_SIGNED_CONSTRAINT_VALUES": getattr(
             alm_result,
             "surrogate_signed_constraint_values",
             None,
@@ -1706,14 +1755,6 @@ def evaluate_stage2_alm_problem(
         )
     )
 
-    evaluation = augmented_inequality_objective(
-        sanitized_base_value,
-        sanitized_base_grad,
-        sanitized_surrogate_signed_constraint_values,
-        sanitized_constraint_grads,
-        multipliers,
-        penalty,
-    )
     tolerance_by_name = resolve_stage2_constraint_activity_tolerances(
         stage2_constraint_activity_tolerances,
         distance_smoothing,
@@ -1747,31 +1788,68 @@ def evaluate_stage2_alm_problem(
             else stage2_iota_runtime.penalty_threshold
         ),
     )
+    metadata_payload = alm_constraint_metadata_payload(active_names, metadata_by_name)
+    constraint_scales = np.asarray(metadata_payload["constraint_scales"], dtype=float)
+    normalized_payload = normalize_alm_constraints(
+        sanitized_surrogate_signed_constraint_values,
+        sanitized_constraint_grads,
+        sanitized_hard_violation_values,
+        raw_constraint_activity_tolerances,
+        constraint_scales,
+    )
+    normalized_surrogate_signed_constraint_values = normalized_payload[
+        "normalized_signed_values"
+    ]
+    normalized_constraint_grads = normalized_payload["normalized_constraint_grads"]
+    normalized_hard_violation_values = normalized_payload[
+        "normalized_feasibility_values"
+    ]
+    normalized_constraint_activity_tolerances = normalized_payload[
+        "normalized_activity_tolerances"
+    ]
+    normalized_hard_signed_constraint_values = (
+        np.asarray(sanitized_hard_signed_constraint_values, dtype=float)
+        / constraint_scales
+    )
     invalid_fields = (
         sanitized_invalid_fields
         + invalid_hard_signed_fields
         + invalid_hard_violation_fields
     )
+    evaluation = augmented_inequality_objective(
+        sanitized_base_value,
+        sanitized_base_grad,
+        normalized_surrogate_signed_constraint_values,
+        normalized_constraint_grads,
+        multipliers,
+        penalty,
+    )
     evaluation.update(
         {
             "base_value": sanitized_base_value,
             "constraint_names": list(active_names),
-            "dual_update_values": sanitized_surrogate_signed_constraint_values,
-            "constraint_grads": sanitized_constraint_grads,
-            "constraint_activity_tolerances": raw_constraint_activity_tolerances,
-            "feasibility_values": sanitized_hard_violation_values,
-            "hard_signed_constraint_values": sanitized_hard_signed_constraint_values,
-            "hard_violation_values": sanitized_hard_violation_values,
-            "surrogate_signed_constraint_values": sanitized_surrogate_signed_constraint_values,
-            "hard_dual_update_values": sanitized_hard_signed_constraint_values,
+            "dual_update_values": normalized_surrogate_signed_constraint_values,
+            "constraint_grads": normalized_constraint_grads,
+            "constraint_activity_tolerances": normalized_constraint_activity_tolerances,
+            "feasibility_values": normalized_hard_violation_values,
+            "hard_signed_constraint_values": normalized_hard_signed_constraint_values,
+            "hard_violation_values": normalized_hard_violation_values,
+            "surrogate_signed_constraint_values": normalized_surrogate_signed_constraint_values,
+            "hard_dual_update_values": normalized_hard_signed_constraint_values,
+            "normalized_signed_constraint_values": normalized_surrogate_signed_constraint_values,
+            "normalized_feasibility_values": normalized_hard_violation_values,
             "raw_dual_update_values": sanitized_surrogate_signed_constraint_values,
             "raw_feasibility_values": sanitized_hard_violation_values,
+            "raw_hard_signed_constraint_values": sanitized_hard_signed_constraint_values,
+            "raw_hard_violation_values": sanitized_hard_violation_values,
+            "raw_surrogate_signed_constraint_values": sanitized_surrogate_signed_constraint_values,
+            "raw_hard_dual_update_values": sanitized_hard_signed_constraint_values,
             "raw_constraint_grads": sanitized_constraint_grads,
             "raw_constraint_activity_tolerances": raw_constraint_activity_tolerances,
-            "max_feasibility_violation": max(sanitized_hard_violation_values),
+            "max_feasibility_violation": max(normalized_hard_violation_values),
             "nonfinite_inputs_sanitized": bool(invalid_fields),
             "nonfinite_input_fields": invalid_fields,
-            **alm_constraint_metadata_payload(active_names, metadata_by_name),
+            **metadata_payload,
         }
     )
     if invalid_fields:

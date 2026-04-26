@@ -84,6 +84,97 @@ class ResidualHelperTests(unittest.TestCase):
         )
         self.assertAlmostEqual(evaluation["max_feasibility_violation"], 0.5)
 
+    def test_normalize_alm_constraints_scales_values_grads_and_tolerances(self):
+        module = load_alm_utils_module()
+
+        payload = module.normalize_alm_constraints(
+            signed_values=np.array([1000.0, 1.0]),
+            constraint_grads=[np.array([16.0, -8.0]), np.array([2.0, 4.0])],
+            feasibility_values=np.array([500.0, 0.5]),
+            activity_tolerances=np.array([16.0, 0.04]),
+            scales=np.array([16000.0, 40.0]),
+        )
+
+        np.testing.assert_allclose(
+            payload["normalized_signed_values"],
+            [0.0625, 0.025],
+        )
+        np.testing.assert_allclose(
+            payload["normalized_constraint_grads"],
+            [np.array([0.001, -0.0005]), np.array([0.05, 0.1])],
+        )
+        np.testing.assert_allclose(
+            payload["normalized_feasibility_values"],
+            [0.03125, 0.0125],
+        )
+        np.testing.assert_allclose(
+            payload["normalized_activity_tolerances"],
+            [0.001, 0.001],
+        )
+
+    def test_normalize_alm_constraints_accepts_empty_constraint_set(self):
+        module = load_alm_utils_module()
+
+        payload = module.normalize_alm_constraints([], [], [], [], [])
+
+        self.assertEqual(payload["normalized_signed_values"].shape, (0,))
+        self.assertEqual(payload["normalized_constraint_grads"], [])
+        self.assertEqual(payload["normalized_feasibility_values"].shape, (0,))
+        self.assertEqual(payload["normalized_activity_tolerances"].shape, (0,))
+
+    def test_normalize_alm_constraints_rejects_nonfinite_or_nonpositive_scales(self):
+        module = load_alm_utils_module()
+
+        for scales in ([1.0, np.nan], [1.0, 0.0], [1.0, -2.0]):
+            with self.subTest(scales=scales):
+                with self.assertRaisesRegex(ValueError, "finite and positive"):
+                    module.normalize_alm_constraints(
+                        signed_values=[1.0, 2.0],
+                        constraint_grads=[np.array([1.0]), np.array([2.0])],
+                        feasibility_values=[1.0, 2.0],
+                        activity_tolerances=[0.1, 0.2],
+                        scales=scales,
+                    )
+
+    def test_normalize_alm_constraints_rejects_shape_mismatch(self):
+        module = load_alm_utils_module()
+
+        with self.assertRaisesRegex(ValueError, "signed_values shape"):
+            module.normalize_alm_constraints(
+                signed_values=[1.0],
+                constraint_grads=[np.array([1.0]), np.array([2.0])],
+                feasibility_values=[1.0, 2.0],
+                activity_tolerances=[0.1, 0.2],
+                scales=[1.0, 2.0],
+            )
+
+        with self.assertRaisesRegex(ValueError, "feasibility_values shape"):
+            module.normalize_alm_constraints(
+                signed_values=[1.0, 2.0],
+                constraint_grads=[np.array([1.0]), np.array([2.0])],
+                feasibility_values=[1.0],
+                activity_tolerances=[0.1, 0.2],
+                scales=[1.0, 2.0],
+            )
+
+        with self.assertRaisesRegex(ValueError, "activity_tolerances shape"):
+            module.normalize_alm_constraints(
+                signed_values=[1.0, 2.0],
+                constraint_grads=[np.array([1.0]), np.array([2.0])],
+                feasibility_values=[1.0, 2.0],
+                activity_tolerances=[0.1],
+                scales=[1.0, 2.0],
+            )
+
+        with self.assertRaisesRegex(ValueError, "constraint_grads length"):
+            module.normalize_alm_constraints(
+                signed_values=[1.0, 2.0],
+                constraint_grads=[np.array([1.0])],
+                feasibility_values=[1.0, 2.0],
+                activity_tolerances=[0.1, 0.2],
+                scales=[1.0, 2.0],
+            )
+
     def test_incumbent_objective_value_prefers_promoted_physics_total(self):
         module = load_alm_utils_module()
 
@@ -1298,6 +1389,18 @@ class MinimizeAlmTests(unittest.TestCase):
                 "hard_signed_constraint_values",
                 "hard_violation_values",
                 "surrogate_signed_constraint_values",
+                "raw_signed_constraint_values",
+                "normalized_signed_constraint_values",
+                "raw_hard_violation_values",
+                "normalized_feasibility_values",
+                "constraint_scales",
+                "constraint_blocks",
+                "normalized_multipliers",
+                "raw_dual_estimates",
+                "positive_shift_values",
+                "augmented_term_by_constraint",
+                "block_max_raw_hard_violation",
+                "block_max_normalized_violation",
                 "hard_max_violation",
                 "surrogate_max_value",
                 "hard_positive_shift_zero",
