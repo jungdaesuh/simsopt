@@ -278,6 +278,22 @@ def _surface_distance_value_and_grad(gamma1, gamma2, minimum_distance):
     )(gamma1, gamma2)
 
 
+def _dense_selected_smoothmin(values, temperature):
+    values = values.reshape((-1,))
+    bounded_temperature = jnp.maximum(
+        temperature,
+        jnp.asarray(np.finfo(np.float64).eps, dtype=values.dtype),
+    )
+    hard_min = jnp.min(values)
+    logits = -(values - hard_min) / bounded_temperature
+    selected = (
+        values <= hard_min + jnp.asarray(4.0, dtype=values.dtype) * bounded_temperature
+    )
+    return hard_min - bounded_temperature * jax.nn.logsumexp(
+        jnp.where(selected, logits, -jnp.inf)
+    )
+
+
 def _with_pairwise_chunk_size(monkeypatch, chunk_size):
     monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", str(chunk_size))
     invalidate_backend_cache()
@@ -707,7 +723,7 @@ def test_alm_smoothmin_chunked_vjps_respect_strict_transfer_guard(monkeypatch):
     assert np.all(np.isfinite(np.asarray(jax.device_get(surface_surface_grad))))
 
 
-def test_pairwise_selected_smoothmin_temperature_floor_matches_traceable_contract():
+def test_pairwise_selected_smoothmin_temperature_floor_matches_dense_contract():
     points_a = jnp.asarray(
         [[0.0, 0.0, 0.0], [0.2, 0.0, 0.0]],
         dtype=jnp.float64,
@@ -717,14 +733,12 @@ def test_pairwise_selected_smoothmin_temperature_floor_matches_traceable_contrac
         dtype=jnp.float64,
     )
     dists = jnp.linalg.norm(points_a[:, None, :] - points_b[None, :, :], axis=2)
+    temperature = jnp.asarray(1e-14, dtype=jnp.float64)
 
-    expected = surfaceobjectives_jax_module._traceable_smoothmin_selected(
-        dists.reshape((-1,)),
-        temperature=1e-14,
-    )
+    expected = _dense_selected_smoothmin(dists, temperature)
     actual = pairwise_selected_smoothmin_distance_pure(
         ((points_a, points_b),),
-        temperature=1e-14,
+        temperature=temperature,
         chunk_size=0,
     )
 

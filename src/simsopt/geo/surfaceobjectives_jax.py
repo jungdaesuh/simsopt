@@ -525,23 +525,6 @@ def _traceable_weighted_single_stage_outer_term_values(
     return weighted_terms
 
 
-def _traceable_smoothmin_selected(values, temperature):
-    values = _as_jax_float64(values).reshape((-1,))
-    if int(values.shape[0]) == 0:
-        return _runtime_float64_scalar(np.inf, reference=values)
-    bounded_temperature = jnp.maximum(
-        _runtime_float64_scalar(temperature, reference=values),
-        _runtime_float64_scalar(np.finfo(np.float64).eps, reference=values),
-    )
-    hard_min = jnp.min(values)
-    logits = -(values - hard_min) / bounded_temperature
-    selection_mask = values <= (
-        hard_min + _runtime_float64_scalar(4.0, reference=values) * bounded_temperature
-    )
-    masked_logits = jnp.where(selection_mask, logits, -jnp.inf)
-    return hard_min - bounded_temperature * jax.nn.logsumexp(masked_logits)
-
-
 def _traceable_smoothmax_selected(values, temperature):
     values = _as_jax_float64(values).reshape((-1,))
     if int(values.shape[0]) == 0:
