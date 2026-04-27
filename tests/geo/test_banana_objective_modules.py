@@ -550,6 +550,50 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
     MODULE_PATH = STAGE2_OBJECTIVES_PATH
     MODULE_PREFIX = "banana_stage2_objectives"
 
+    def _assert_stage2_alm_signal_contract(self, result):
+        for index, dual_kind in enumerate(result["dual_update_value_kinds"]):
+            hard_dual_signal = dual_kind == "hard"
+            normalized_dual_key = (
+                "hard_dual_update_values"
+                if hard_dual_signal
+                else "surrogate_signed_constraint_values"
+            )
+            raw_dual_key = (
+                "raw_hard_dual_update_values"
+                if hard_dual_signal
+                else "raw_surrogate_signed_constraint_values"
+            )
+            self.assertAlmostEqual(
+                result["dual_update_values"][index],
+                result[normalized_dual_key][index],
+            )
+            self.assertAlmostEqual(
+                result["raw_dual_update_values"][index],
+                result[raw_dual_key][index],
+            )
+
+        for index, feasibility_kind in enumerate(result["feasibility_value_kinds"]):
+            if feasibility_kind == "hard":
+                expected_feasibility = result["hard_violation_values"][index]
+                expected_raw_feasibility = result["raw_hard_violation_values"][index]
+            else:
+                expected_feasibility = max(
+                    result["surrogate_signed_constraint_values"][index],
+                    0.0,
+                )
+                expected_raw_feasibility = max(
+                    result["raw_surrogate_signed_constraint_values"][index],
+                    0.0,
+                )
+            self.assertAlmostEqual(
+                result["feasibility_values"][index],
+                expected_feasibility,
+            )
+            self.assertAlmostEqual(
+                result["raw_feasibility_values"][index],
+                expected_raw_feasibility,
+            )
+
     def _assert_restored_fake_boozer_state(self, fake_boozer_surface):
         np.testing.assert_allclose(fake_boozer_surface.surface.x, [0.0, 0.0])
         self.assertAlmostEqual(fake_boozer_surface.res["iota"], 0.21)
@@ -1041,7 +1085,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(
             result["dual_update_values"],
-            [-0.16, 0.01875, 0.1, -0.40625],
+            [-0.16, 0.025, 0.1, -0.40625],
         )
         np.testing.assert_allclose(
             result["hard_signed_constraint_values"],
@@ -1089,7 +1133,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(
             result["raw_dual_update_values"],
-            [-0.008, 0.75, 0.2, -6500.0],
+            [-0.008, 1.0, 0.2, -6500.0],
         )
         np.testing.assert_allclose(
             result["raw_feasibility_values"],
@@ -1102,6 +1146,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["max_feasibility_violation"], 0.1)
         self.assertAlmostEqual(result["total"], 9.0)
         np.testing.assert_allclose(result["grad"], [7.0, -3.0])
+        self._assert_stage2_alm_signal_contract(result)
 
     def test_evaluate_stage2_alm_problem_uses_hard_poloidal_feasibility(self):
         base_objective = _FakeBaseObjective(3.5, [1.2, -0.5])
@@ -1356,9 +1401,11 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             ],
         )
         expected_alm_state = {
+            "dual_update_values": [0.2, 0.025, 0.1, -0.40625],
             "hard_signed_constraint_values": [0.2, 0.025, 0.1, -0.40625],
             "surrogate_signed_constraint_values": [-0.16, 0.01875, 0.1, -0.40625],
             "hard_violation_values": [0.2, 0.025, 0.1, 0.0],
+            "feasibility_values": [0.2, 0.025, 0.1, 0.0],
             "constraint_activity_tolerances": [0.4, 0.002, 0.0005, 6.25e-8],
             "max_feasibility_violation": 0.2,
             "total": 3.5887760416666665,
@@ -1372,6 +1419,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 rtol=1e-12,
                 atol=0.0,
             )
+        self._assert_stage2_alm_signal_contract(result)
 
     def test_evaluate_stage2_alm_problem_sanitizes_nonfinite_inputs(self):
         base_objective = _FakeBaseObjective(np.nan, [np.inf, np.nan])
@@ -1469,15 +1517,16 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         self.assertTrue(np.isnan(result["total"]))
         np.testing.assert_allclose(
-            result["dual_update_values"], [20.0, 0.01875, 0.1, -0.40625]
+            result["dual_update_values"], [20.0, 0.025, 0.1, -0.40625]
         )
         np.testing.assert_allclose(
-            result["raw_dual_update_values"], [1.0, 0.75, 0.2, -6500.0]
+            result["raw_dual_update_values"], [1.0, 1.0, 0.2, -6500.0]
         )
         np.testing.assert_allclose(
             result["hard_signed_constraint_values"],
             [20.0, 0.025, 0.1, -0.40625],
         )
+        self._assert_stage2_alm_signal_contract(result)
         np.testing.assert_allclose(
             result["raw_hard_signed_constraint_values"],
             [1.0, 1.0, 0.2, -6500.0],
@@ -1731,16 +1780,17 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(
             result["dual_update_values"],
-            [-0.16, 0.01875, 0.1, -0.40625, 0.2],
+            [-0.16, 0.025, 0.1, -0.40625, 0.2],
         )
         np.testing.assert_allclose(
             result["raw_dual_update_values"],
-            [-0.008, 0.75, 0.2, -6500.0, 0.1],
+            [-0.008, 1.0, 0.2, -6500.0, 0.1],
         )
         np.testing.assert_allclose(
             result["hard_violation_values"],
             [0.0, 0.025, 0.1, 0.0, 0.2],
         )
+        self._assert_stage2_alm_signal_contract(result)
         np.testing.assert_allclose(
             result["raw_hard_violation_values"],
             [0.0, 1.0, 0.2, 0.0, 0.1],
@@ -1918,11 +1968,11 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         np.testing.assert_allclose(
             result["dual_update_values"],
-            [-0.16, 0.01875, 0.1, -0.40625, 2.0],
+            [-0.16, 0.025, 0.1, -0.40625, 2.0],
         )
         np.testing.assert_allclose(
             result["raw_dual_update_values"],
-            [-0.008, 0.75, 0.2, -6500.0, 1.0],
+            [-0.008, 1.0, 0.2, -6500.0, 1.0],
         )
         np.testing.assert_allclose(
             result["hard_violation_values"],
@@ -1932,6 +1982,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             result["raw_hard_violation_values"],
             [0.0, 1.0, 0.2, 0.0, 1.0],
         )
+        self._assert_stage2_alm_signal_contract(result)
 
     def test_build_stage2_iota_runtime_instruments_boozer_hot_loop(self):
         fake_boozer_surface = _FakeBoozerSurface([0.0, 0.0], 0.21, 0.35)

@@ -10,6 +10,7 @@ from alm_utils import (
     alm_result_diagnostics_fields,
     augmented_inequality_objective,
     normalize_alm_constraints,
+    normalize_alm_constraint_signals,
     upper_bound_residual,
     zero_gradient_like,
 )
@@ -634,6 +635,32 @@ def _ordered_constraint_values(
     values_by_name: dict[str, object],
 ) -> list[object]:
     return [values_by_name[name] for name in constraint_names]
+
+
+def _stage2_alm_signal_values(
+    constraint_names: tuple[str, ...],
+    metadata_by_name: Mapping[str, ALMConstraintMetadata],
+    *,
+    hard_signed_values: np.ndarray,
+    hard_violation_values: np.ndarray,
+    surrogate_signed_values: np.ndarray,
+    surrogate_violation_values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    dual_update_values = np.empty(len(constraint_names), dtype=float)
+    feasibility_values = np.empty(len(constraint_names), dtype=float)
+    for index, constraint_name in enumerate(constraint_names):
+        metadata = metadata_by_name[constraint_name]
+        dual_update_values[index] = (
+            hard_signed_values[index]
+            if metadata.dual_update_value_kind == "hard"
+            else surrogate_signed_values[index]
+        )
+        feasibility_values[index] = (
+            hard_violation_values[index]
+            if metadata.feasibility_value_kind == "hard"
+            else surrogate_violation_values[index]
+        )
+    return dual_update_values, feasibility_values
 
 
 def _stage2_hardware_threshold_overrides(
@@ -1870,6 +1897,30 @@ def evaluate_stage2_alm_problem(
         np.asarray(sanitized_hard_signed_constraint_values, dtype=float)
         / constraint_scales
     )
+    raw_surrogate_feasibility_values = np.maximum(
+        sanitized_surrogate_signed_constraint_values,
+        0.0,
+    )
+    raw_dual_update_values, raw_feasibility_values = _stage2_alm_signal_values(
+        active_names,
+        metadata_by_name,
+        hard_signed_values=sanitized_hard_signed_constraint_values,
+        hard_violation_values=sanitized_hard_violation_values,
+        surrogate_signed_values=sanitized_surrogate_signed_constraint_values,
+        surrogate_violation_values=raw_surrogate_feasibility_values,
+    )
+    normalized_signal_payload = normalize_alm_constraint_signals(
+        raw_dual_update_values,
+        raw_feasibility_values,
+        raw_constraint_activity_tolerances,
+        constraint_scales,
+    )
+    normalized_dual_update_values = normalized_signal_payload[
+        "normalized_signed_values"
+    ]
+    normalized_feasibility_values = normalized_signal_payload[
+        "normalized_feasibility_values"
+    ]
     invalid_fields = (
         sanitized_invalid_fields
         + invalid_hard_signed_fields
@@ -1887,25 +1938,25 @@ def evaluate_stage2_alm_problem(
         {
             "base_value": sanitized_base_value,
             "constraint_names": list(active_names),
-            "dual_update_values": normalized_surrogate_signed_constraint_values,
+            "dual_update_values": normalized_dual_update_values,
             "constraint_grads": normalized_constraint_grads,
             "constraint_activity_tolerances": normalized_constraint_activity_tolerances,
-            "feasibility_values": normalized_hard_violation_values,
+            "feasibility_values": normalized_feasibility_values,
             "hard_signed_constraint_values": normalized_hard_signed_constraint_values,
             "hard_violation_values": normalized_hard_violation_values,
             "surrogate_signed_constraint_values": normalized_surrogate_signed_constraint_values,
             "hard_dual_update_values": normalized_hard_signed_constraint_values,
             "normalized_signed_constraint_values": normalized_surrogate_signed_constraint_values,
-            "normalized_feasibility_values": normalized_hard_violation_values,
-            "raw_dual_update_values": sanitized_surrogate_signed_constraint_values,
-            "raw_feasibility_values": sanitized_hard_violation_values,
+            "normalized_feasibility_values": normalized_feasibility_values,
+            "raw_dual_update_values": raw_dual_update_values,
+            "raw_feasibility_values": raw_feasibility_values,
             "raw_hard_signed_constraint_values": sanitized_hard_signed_constraint_values,
             "raw_hard_violation_values": sanitized_hard_violation_values,
             "raw_surrogate_signed_constraint_values": sanitized_surrogate_signed_constraint_values,
             "raw_hard_dual_update_values": sanitized_hard_signed_constraint_values,
             "raw_constraint_grads": sanitized_constraint_grads,
             "raw_constraint_activity_tolerances": raw_constraint_activity_tolerances,
-            "max_feasibility_violation": max(normalized_hard_violation_values),
+            "max_feasibility_violation": max(normalized_feasibility_values),
             "nonfinite_inputs_sanitized": bool(invalid_fields),
             "nonfinite_input_fields": invalid_fields,
             **metadata_payload,
