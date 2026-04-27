@@ -60,6 +60,7 @@ def _make_lbfgs_state(
     ngev=14,
     converged=True,
     invalid_step_entries=(),
+    optimizer_state_trace=(),
 ):
     entry_count = max(len(invalid_step_entries), 1)
     if invalid_step_entries:
@@ -84,6 +85,7 @@ def _make_lbfgs_state(
         converged=jnp.asarray(converged),
         ls_status=jnp.asarray(0, dtype=jnp.int32),
         invalid_step_log=invalid_step_log,
+        optimizer_state_trace=tuple(optimizer_state_trace),
     )
 
 
@@ -257,6 +259,21 @@ def test_private_lbfgs_result_materializes_invalid_step_log():
             "ls_status": 7,
         }
     ]
+
+
+def test_private_lbfgs_result_preserves_optimizer_state_trace():
+    trace = (
+        {
+            "iteration": 1,
+            "step_scale": 0.25,
+            "trial_fun": 0.5,
+        },
+    )
+    result = converters._private_lbfgs_result_to_optimize_result(
+        _make_lbfgs_state(optimizer_state_trace=trace)
+    )
+
+    assert result.optimizer_state_trace == trace
 
 
 def _make_invalid_step_entry(**overrides):

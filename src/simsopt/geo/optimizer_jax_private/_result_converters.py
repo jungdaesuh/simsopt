@@ -126,6 +126,7 @@ def _private_lbfgs_result_to_optimize_result(state):
     status = _host_int(state.status)
     ls_status = _host_int(state.ls_status)
     invalid_step_log = _private_lbfgs_invalid_step_log_to_host(state.invalid_step_log)
+    optimizer_state_trace = tuple(state.optimizer_state_trace)
     return OptimizeResult(
         x=_as_host_numpy(state.x_k),
         fun=_host_float(state.f_k),
@@ -141,6 +142,7 @@ def _private_lbfgs_result_to_optimize_result(state):
         maxiter_hit=status == 1,
         rejected_step_count=len(invalid_step_log),
         invalid_step_log=invalid_step_log,
+        optimizer_state_trace=optimizer_state_trace,
     )
 
 

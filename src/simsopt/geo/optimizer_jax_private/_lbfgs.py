@@ -942,7 +942,13 @@ def _invalid_step_log_from_events(events, *, capacity, dtype):
     )
 
 
-def _host_state_to_lbfgs_results(state, *, invalid_log_capacity, dtype):
+def _host_state_to_lbfgs_results(
+    state,
+    *,
+    invalid_log_capacity,
+    dtype,
+    optimizer_state_trace=(),
+):
     return _LBFGSResults(
         converged=_bool_scalar(state.converged),
         failed=_bool_scalar(state.failed),
@@ -963,7 +969,50 @@ def _host_state_to_lbfgs_results(state, *, invalid_log_capacity, dtype):
             capacity=invalid_log_capacity,
             dtype=dtype,
         ),
+        optimizer_state_trace=tuple(optimizer_state_trace),
     )
+
+
+def _lbfgs_optimizer_state_trace_entry(
+    *,
+    iteration,
+    x,
+    f,
+    g,
+    search_direction,
+    step_scale,
+    step,
+    trial_x,
+    trial_f,
+    trial_g,
+    nfev,
+    njev,
+    line_search_status,
+    valid_curvature,
+    converged,
+):
+    """Return the first-step optimizer state needed for trajectory parity."""
+    return {
+        "iteration": int(iteration),
+        "x": np.asarray(x, dtype=np.float64),
+        "fun": float(f),
+        "jac": np.asarray(g, dtype=np.float64),
+        "jac_inf_norm": float(_host_norm(g, ord=np.inf)),
+        "search_direction": np.asarray(search_direction, dtype=np.float64),
+        "search_direction_dot_grad": float(np.dot(g, search_direction)),
+        "step_scale": float(step_scale),
+        "step": np.asarray(step, dtype=np.float64),
+        "trial_x": np.asarray(trial_x, dtype=np.float64),
+        "trial_fun": float(trial_f),
+        "trial_jac": np.asarray(trial_g, dtype=np.float64),
+        "trial_jac_inf_norm": float(_host_norm(trial_g, ord=np.inf)),
+        "nfev": int(nfev),
+        "njev": int(njev),
+        "line_search_status": int(line_search_status),
+        "valid_curvature": bool(valid_curvature),
+        "accepted": True,
+        "converged": bool(converged),
+    }
 
 
 def _cached_lbfgs_value_and_grad_kernel(
@@ -1157,6 +1206,7 @@ def _minimize_lbfgs_private_impl(
         invalid_step_events=(),
     )
     _emit_lbfgs_state_dump(state)
+    optimizer_state_trace = ()
 
     for _ in range(
         _host_iteration_budget(
@@ -1325,6 +1375,27 @@ def _minimize_lbfgs_private_impl(
             )
             break
 
+        if not optimizer_state_trace:
+            optimizer_state_trace = (
+                _lbfgs_optimizer_state_trace_entry(
+                    iteration=next_k,
+                    x=state.x_k,
+                    f=state.f_k,
+                    g=state.g_k,
+                    search_direction=p_k,
+                    step_scale=ls_results.a_k,
+                    step=s_k,
+                    trial_x=x_kp1,
+                    trial_f=f_kp1,
+                    trial_g=g_kp1,
+                    nfev=next_nfev,
+                    njev=next_ngev,
+                    line_search_status=ls_status,
+                    valid_curvature=valid_curvature,
+                    converged=converged,
+                ),
+            )
+
         status = 0
         if (
             _relative_objective_reduction_host(state.f_k, f_kp1, dtype=dtype)
@@ -1446,6 +1517,7 @@ def _minimize_lbfgs_private_impl(
         state,
         invalid_log_capacity=invalid_log_capacity,
         dtype=dtype,
+        optimizer_state_trace=optimizer_state_trace,
     )
 
 

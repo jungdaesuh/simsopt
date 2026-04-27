@@ -1169,6 +1169,46 @@ class TestOptimizerAdapterPrivate:
         )
         assert int(state.invalid_step_log.count) == 0
 
+    @PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_lbfgs_private_records_first_accepted_step_trace(
+        self,
+        monkeypatch,
+    ):
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        state, _ = _private_lbfgs_quadratic_state(
+            monkeypatch,
+            x0=x0,
+            line_search_kwargs=dict(
+                a_k=jnp.array(0.5, dtype=jnp.float64),
+                f_k=jnp.array(1.0, dtype=jnp.float64),
+                g_k=jnp.array([3.0, -1.0], dtype=jnp.float64),
+                status=jnp.array(0),
+            ),
+            maxiter=1,
+        )
+
+        assert len(state.optimizer_state_trace) == 1
+        trace = state.optimizer_state_trace[0]
+        assert trace["iteration"] == 1
+        np.testing.assert_allclose(trace["x"], np.array([1.0, -2.0]))
+        assert trace["fun"] == pytest.approx(2.5)
+        np.testing.assert_allclose(trace["jac"], np.array([1.0, -2.0]))
+        np.testing.assert_allclose(
+            trace["search_direction"],
+            np.array([-1.0, 2.0]),
+        )
+        assert trace["search_direction_dot_grad"] == pytest.approx(-5.0)
+        assert trace["step_scale"] == pytest.approx(0.5)
+        np.testing.assert_allclose(trace["step"], np.array([-0.5, 1.0]))
+        np.testing.assert_allclose(trace["trial_x"], np.array([0.5, -1.0]))
+        assert trace["trial_fun"] == pytest.approx(1.0)
+        np.testing.assert_allclose(trace["trial_jac"], np.array([3.0, -1.0]))
+        assert trace["nfev"] == 2
+        assert trace["njev"] == 2
+        assert trace["line_search_status"] == 0
+        assert trace["valid_curvature"] is False
+        assert trace["accepted"] is True
+
     def test_lbfgs_relative_objective_reduction_matches_scipy_formula(self):
         from simsopt.geo.optimizer_jax_private import _lbfgs as _lbfgs_module
 

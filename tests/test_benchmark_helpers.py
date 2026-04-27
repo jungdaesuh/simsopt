@@ -47,6 +47,7 @@ from benchmarks.grouped_adjoint_memory_probe import (
     evaluate_grouped_adjoint_memory_probe,
 )
 import benchmarks.single_stage_init_parity as single_stage_init_parity_module
+import benchmarks.single_stage_parity_matrix as single_stage_parity_matrix
 import benchmarks.single_stage_outer_loop_probe as single_stage_outer_loop_probe
 from benchmarks.single_stage_outer_loop_probe import (
     TARGET_OUTER_OPTIMIZER_METHOD,
@@ -1118,6 +1119,166 @@ def test_optimizer_drift_tolerances_include_optimizer_state_parity_lane():
         "gradient_atol": pytest.approx(1e-8),
         "jac_norm_inf_abs_tol": pytest.approx(1e-8),
     }
+
+
+def _single_stage_parity_report(*, termination_message="ok"):
+    return {
+        "jax_cpu_vs_h100_value_grad": {
+            "jax_cpu_objective": 1.0,
+            "h100_gpu_objective": 1.0 + 1.0e-15,
+            "objective_abs_delta": 1.0e-15,
+            "objective_rel_delta": 1.0e-15,
+            "jax_cpu_grad_inf_norm": 0.5,
+            "h100_gpu_grad_inf_norm": 0.5,
+            "grad_inf_norm_abs_delta": 0.0,
+            "grad_max_abs_delta": 1.0e-12,
+            "grad_max_abs_delta_index": 0,
+            "grad_max_abs_delta_jax_cpu_component": 0.5,
+            "grad_max_abs_delta_h100_gpu_component": 0.5 + 1.0e-12,
+            "grad_allclose_rtol_1e-10_atol_1e-12": True,
+        },
+        "same_seed_no_optimizer_metrics": {
+            "INITIAL_VOLUME": {
+                "values": {
+                    "cpu_scipy": 1.0,
+                    "jax_cpu": 1.0,
+                    "h100_gpu": 1.0,
+                }
+            },
+            "TERMINATION_MESSAGE": {
+                "values": {
+                    "cpu_scipy": termination_message,
+                    "jax_cpu": termination_message,
+                    "h100_gpu": termination_message,
+                }
+            },
+        },
+    }
+
+
+def _optimizer_trace_entry():
+    vector = lambda values: {"values": list(values)}
+    scalar = lambda value: {"value": float(value)}
+    return {
+        "iteration": 1,
+        "x": vector([1.0, 2.0]),
+        "fun": scalar(1.0),
+        "jac": vector([0.5, -0.25]),
+        "jac_inf_norm": scalar(0.5),
+        "search_direction": vector([-0.5, 0.25]),
+        "search_direction_dot_grad": scalar(-0.3125),
+        "step_scale": scalar(0.25),
+        "step": vector([-0.125, 0.0625]),
+        "trial_x": vector([0.875, 2.0625]),
+        "trial_fun": scalar(0.5),
+        "trial_jac": vector([0.1, -0.2]),
+        "trial_jac_inf_norm": scalar(0.2),
+        "nfev": 3,
+        "njev": 3,
+        "line_search_status": 0,
+        "valid_curvature": True,
+        "accepted": True,
+        "converged": False,
+    }
+
+
+def _write_optimizer_trace_progress(path: Path, entry=None):
+    if entry is None:
+        entry = _optimizer_trace_entry()
+    path.write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "label": "phase2_returned",
+                        "result": {
+                            "optimizer_state_trace": [entry]
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_single_stage_parity_matrix_blocks_unmatched_trajectory_artifacts():
+    report = _single_stage_parity_report()
+    report["same_seed_no_optimizer_metrics"]["TERMINATION_MESSAGE"]["values"][
+        "h100_gpu"
+    ] = "optimized"
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(report)
+
+    assert matrix["comparisons"]["jax_cpu_vs_h100_same_state_value_grad"][
+        "status"
+    ] == "pass"
+    assert matrix["comparisons"]["full_trajectory_parity"]["status"] == "blocked"
+    assert matrix["passed"] is False
+
+
+def test_single_stage_parity_matrix_reports_absolute_deltas():
+    report = _single_stage_parity_report()
+    report["jax_cpu_vs_h100_value_grad"]["objective_abs_delta"] = -1.0e-15
+    report["jax_cpu_vs_h100_value_grad"]["objective_rel_delta"] = -1.0e-15
+    report["jax_cpu_vs_h100_value_grad"]["grad_max_abs_delta"] = -1.0e-12
+    report["same_seed_no_optimizer_metrics"]["INITIAL_VOLUME"]["values"][
+        "jax_cpu"
+    ] = 0.999999999999
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(report)
+
+    same_state = matrix["comparisons"]["jax_cpu_vs_h100_same_state_value_grad"]
+    metric = matrix["comparisons"]["cpu_scipy_vs_jax_cpu_same_seed_metrics"][
+        "metrics"
+    ]["INITIAL_VOLUME"]
+    assert same_state["objective_abs_delta"] >= 0.0
+    assert same_state["objective_rel_delta"] >= 0.0
+    assert same_state["grad_max_abs_delta"] >= 0.0
+    assert metric["abs_delta"] >= 0.0
+
+
+def test_single_stage_parity_matrix_accepts_matched_optimizer_state_traces(tmp_path):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_cpu_progress = tmp_path / "jax_cpu_progress.json"
+    gpu_progress = tmp_path / "gpu_progress.json"
+    for path in (cpu_progress, jax_cpu_progress, gpu_progress):
+        _write_optimizer_trace_progress(path)
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        _single_stage_parity_report(),
+        cpu_progress_json=str(cpu_progress),
+        jax_cpu_progress_json=str(jax_cpu_progress),
+        gpu_progress_json=str(gpu_progress),
+    )
+
+    assert matrix["comparisons"]["optimizer_state_trace_pairs"]["status"] == "pass"
+    assert matrix["comparisons"]["full_trajectory_parity"]["status"] == "pass"
+    assert matrix["passed"] is True
+
+
+def test_single_stage_parity_matrix_blocks_mixed_missing_and_drifted_traces(tmp_path):
+    jax_cpu_progress = tmp_path / "jax_cpu_progress.json"
+    gpu_progress = tmp_path / "gpu_progress.json"
+    drifted_gpu_entry = _optimizer_trace_entry()
+    drifted_gpu_entry["trial_x"] = {"values": [0.5, 2.0625]}
+    _write_optimizer_trace_progress(jax_cpu_progress)
+    _write_optimizer_trace_progress(gpu_progress, drifted_gpu_entry)
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        _single_stage_parity_report(),
+        jax_cpu_progress_json=str(jax_cpu_progress),
+        gpu_progress_json=str(gpu_progress),
+    )
+
+    assert matrix["comparisons"]["optimizer_state_trace_pairs"]["status"] == "blocked"
+    assert matrix["comparisons"]["full_trajectory_parity"]["status"] == "blocked"
+    assert (
+        matrix["comparisons"]["optimizer_state_trace_pairs"]["pairs"][
+            "jax_cpu_vs_h100_gpu"
+        ]["status"]
+        == "drift"
+    )
 
 
 def test_parity_ladder_tolerances_capture_precision_lanes():

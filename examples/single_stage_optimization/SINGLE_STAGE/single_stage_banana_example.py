@@ -409,6 +409,7 @@ def summarize_optimizer_result_for_progress(result):
         return None
     termination_message = str(getattr(result, "message", ""))
     invalid_step_log = getattr(result, "invalid_step_log", None)
+    optimizer_state_trace = getattr(result, "optimizer_state_trace", ())
     return {
         "success": bool(getattr(result, "success", False)),
         "iterations": int(getattr(result, "nit", 0)),
@@ -420,6 +421,9 @@ def summarize_optimizer_result_for_progress(result):
             getattr(result, "rejected_step_count", None)
         ),
         "invalid_step_log": [] if not invalid_step_log else list(invalid_step_log),
+        "optimizer_state_trace": _summarize_optimizer_state_trace(
+            optimizer_state_trace
+        ),
         "message": termination_message,
         "diagnostics": extract_optimizer_diagnostics(
             result,
@@ -503,6 +507,37 @@ def _summarize_host_vector(vector):
         "nonfinite_count": int(array.size - int(np.count_nonzero(finite_mask))),
         "first_nonfinite_index": first_nonfinite_index,
         "first_nonfinite_classification": first_nonfinite_classification,
+    }
+
+
+def _summarize_optimizer_state_trace(trace):
+    """Return JSON-safe optimizer-state entries for parity artifacts."""
+    return [_summarize_optimizer_state_trace_entry(entry) for entry in trace]
+
+
+def _summarize_optimizer_state_trace_entry(entry):
+    return {
+        "iteration": int(entry["iteration"]),
+        "x": _summarize_host_vector(entry["x"]),
+        "fun": _summarize_host_scalar(entry["fun"]),
+        "jac": _summarize_host_vector(entry["jac"]),
+        "jac_inf_norm": _summarize_host_scalar(entry["jac_inf_norm"]),
+        "search_direction": _summarize_host_vector(entry["search_direction"]),
+        "search_direction_dot_grad": _summarize_host_scalar(
+            entry["search_direction_dot_grad"]
+        ),
+        "step_scale": _summarize_host_scalar(entry["step_scale"]),
+        "step": _summarize_host_vector(entry["step"]),
+        "trial_x": _summarize_host_vector(entry["trial_x"]),
+        "trial_fun": _summarize_host_scalar(entry["trial_fun"]),
+        "trial_jac": _summarize_host_vector(entry["trial_jac"]),
+        "trial_jac_inf_norm": _summarize_host_scalar(entry["trial_jac_inf_norm"]),
+        "nfev": int(entry["nfev"]),
+        "njev": int(entry["njev"]),
+        "line_search_status": int(entry["line_search_status"]),
+        "valid_curvature": bool(entry["valid_curvature"]),
+        "accepted": bool(entry["accepted"]),
+        "converged": bool(entry["converged"]),
     }
 
 

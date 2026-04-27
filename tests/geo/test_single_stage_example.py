@@ -4078,6 +4078,55 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertTrue(summary["diagnostics"]["x_finite"])
         self.assertFalse(summary["diagnostics"]["invalid_state"])
 
+    def test_summarize_optimizer_result_for_progress_includes_state_trace(self):
+        module = self.load_module()
+        result = types.SimpleNamespace(
+            success=True,
+            nit=1,
+            status=4,
+            nfev=3,
+            njev=3,
+            ls_status=0,
+            message="ok",
+            fun=0.5,
+            jac=np.array([0.1, -0.2], dtype=np.float64),
+            x=np.array([1.0, 2.0], dtype=np.float64),
+            optimizer_state_trace=(
+                {
+                    "iteration": 1,
+                    "x": np.array([1.0, 2.0], dtype=np.float64),
+                    "fun": 1.0,
+                    "jac": np.array([0.5, -0.25], dtype=np.float64),
+                    "jac_inf_norm": 0.5,
+                    "search_direction": np.array([-0.5, 0.25], dtype=np.float64),
+                    "search_direction_dot_grad": -0.3125,
+                    "step_scale": 0.25,
+                    "step": np.array([-0.125, 0.0625], dtype=np.float64),
+                    "trial_x": np.array([0.875, 2.0625], dtype=np.float64),
+                    "trial_fun": 0.5,
+                    "trial_jac": np.array([0.1, -0.2], dtype=np.float64),
+                    "trial_jac_inf_norm": 0.2,
+                    "nfev": 3,
+                    "njev": 3,
+                    "line_search_status": 0,
+                    "valid_curvature": True,
+                    "accepted": True,
+                    "converged": False,
+                },
+            ),
+        )
+
+        summary = module.summarize_optimizer_result_for_progress(result)
+
+        trace = summary["optimizer_state_trace"]
+        self.assertEqual(len(trace), 1)
+        self.assertEqual(trace[0]["iteration"], 1)
+        self.assertEqual(trace[0]["x"]["values"], [1.0, 2.0])
+        self.assertEqual(trace[0]["trial_x"]["values"], [0.875, 2.0625])
+        self.assertEqual(trace[0]["step_scale"]["value"], 0.25)
+        self.assertEqual(trace[0]["line_search_status"], 0)
+        self.assertTrue(trace[0]["accepted"])
+
     def test_build_target_lane_invalid_state_failure_callback_records_payload(self):
         module = self.load_module()
         events = []

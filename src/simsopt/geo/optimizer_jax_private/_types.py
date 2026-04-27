@@ -112,6 +112,7 @@ class _LBFGSResults(NamedTuple):
     status: int | jax.Array
     ls_status: int | jax.Array
     invalid_step_log: "_LBFGSInvalidStepLog"
+    optimizer_state_trace: tuple[dict[str, object], ...] = ()
 
 
 class _LBFGSInvalidStepLog(NamedTuple):
