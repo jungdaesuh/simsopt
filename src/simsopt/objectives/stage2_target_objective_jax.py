@@ -43,6 +43,7 @@ from ..geo.curveobjectives import (
     cc_distance_pure,
     curve_length_pure,
 )
+from ..geo._pairwise_reductions import pairwise_selected_smoothmin_distance_pure
 from ..geo.optimizer_jax import (
     _mark_cacheable_jit_value_and_grad,
     _mark_structured_private_solver_cacheable,
@@ -128,23 +129,6 @@ def _runtime_float64_array(value, *, reference) -> jax.Array:
 
 def _runtime_float64_scalar(value, *, reference) -> jax.Array:
     return _as_runtime_float64(value, reference=reference)
-
-
-def _selected_smoothmin(values, temperature):
-    values = _as_jax_float64(values).reshape((-1,))
-    if int(values.shape[0]) == 0:
-        return _runtime_float64_scalar(np.inf, reference=values)
-    bounded_temperature = jnp.maximum(
-        _runtime_float64_scalar(temperature, reference=values),
-        _runtime_float64_scalar(np.finfo(np.float64).eps, reference=values),
-    )
-    hard_min = jnp.min(values)
-    logits = -(values - hard_min) / bounded_temperature
-    selection_mask = values <= (
-        hard_min + _runtime_float64_scalar(4.0, reference=values) * bounded_temperature
-    )
-    masked_logits = jnp.where(selection_mask, logits, -jnp.inf)
-    return hard_min - bounded_temperature * jax.nn.logsumexp(masked_logits)
 
 
 def _selected_smoothmax(values, temperature):
@@ -489,15 +473,7 @@ def build_stage2_target_objective(
         tf_curve_groups = ()
         fixed_curve_penalty = 0.0
 
-    fixed_curve_curve_distance_blocks = []
-    fixed_curve_surface_distance_blocks = []
-    for tf_gammas, _tf_gammadashs in tf_curve_groups:
-        fixed_curve_surface_distance_blocks.append(
-            np.linalg.norm(
-                tf_gammas[:, :, None, :] - surface_gamma[None, None, :, :],
-                axis=3,
-            ).reshape((-1,))
-        )
+    fixed_curve_curve_point_pairs = []
     for left_group_index, (left_group_gammas, _left_gammadashs) in enumerate(
         tf_curve_groups
     ):
@@ -515,12 +491,7 @@ def build_stage2_target_objective(
                 )
                 for right_curve_index in range(right_limit):
                     right_gamma = right_group_gammas[right_curve_index]
-                    fixed_curve_curve_distance_blocks.append(
-                        np.linalg.norm(
-                            left_gamma[:, None, :] - right_gamma[None, :, :],
-                            axis=2,
-                        ).reshape((-1,))
-                    )
+                    fixed_curve_curve_point_pairs.append((left_gamma, right_gamma))
 
     banana_rotmats, banana_current_scales = _banana_symmetry_runtime_inputs_from_coils(
         banana_coils
@@ -529,11 +500,8 @@ def build_stage2_target_objective(
     tf_curve_groups_runtime = _runtimeify_tree(tf_curve_groups)
     flux_spec_runtime = _runtimeify_tree(flux_spec)
     surface_gamma_runtime = _runtimeify_tree(surface_gamma)
-    fixed_curve_curve_distance_blocks_runtime = _runtimeify_tree(
-        tuple(fixed_curve_curve_distance_blocks)
-    )
-    fixed_curve_surface_distance_blocks_runtime = _runtimeify_tree(
-        tuple(fixed_curve_surface_distance_blocks)
+    fixed_curve_curve_point_pairs_runtime = _runtimeify_tree(
+        tuple(fixed_curve_curve_point_pairs)
     )
 
     def _dynamic_curve_runtime_state(dofs):
@@ -728,57 +696,61 @@ def build_stage2_target_objective(
         include_coil_surface = curve_surface_threshold is not None
 
         def _curve_curve_signed_constraint(dynamic_gammas, *, reference):
-            pairwise_blocks = []
-            for fixed_block in fixed_curve_curve_distance_blocks_runtime:
-                pairwise_blocks.append(
-                    _runtime_float64_array(fixed_block, reference=reference)
+            point_pairs = []
+            for left_gamma, right_gamma in fixed_curve_curve_point_pairs_runtime:
+                point_pairs.append(
+                    (
+                        _runtime_float64_array(left_gamma, reference=reference),
+                        _runtime_float64_array(right_gamma, reference=reference),
+                    )
                 )
             for dynamic_index in range(int(dynamic_gammas.shape[0])):
                 gamma_i = dynamic_gammas[dynamic_index]
                 for tf_gammas, _tf_gammadashs in tf_curve_groups_runtime:
-                    dists = jnp.linalg.norm(
-                        gamma_i[:, None, None, :] - tf_gammas[None, :, :, :],
-                        axis=3,
+                    point_pairs.append(
+                        (
+                            gamma_i,
+                            _runtime_float64_array(tf_gammas, reference=reference),
+                        )
                     )
-                    pairwise_blocks.append(dists.reshape((-1,)))
                 for previous_index in range(dynamic_index):
                     gamma_j = dynamic_gammas[previous_index]
-                    dists = jnp.linalg.norm(
-                        gamma_i[:, None, :] - gamma_j[None, :, :],
-                        axis=2,
-                    )
-                    pairwise_blocks.append(dists.reshape((-1,)))
-            if not pairwise_blocks:
+                    point_pairs.append((gamma_i, gamma_j))
+            if not point_pairs:
                 return _runtime_float64_scalar(cc_threshold, reference=reference)
-            smooth_min = _selected_smoothmin(
-                jnp.concatenate(pairwise_blocks),
+            smooth_min = pairwise_selected_smoothmin_distance_pure(
+                tuple(point_pairs),
                 temperature=distance_smoothing,
             )
             return _runtime_float64_scalar(cc_threshold, reference=smooth_min) - smooth_min
 
         def _curve_surface_signed_constraint(dynamic_gammas, *, reference):
-            pairwise_blocks = []
             flat_surface = _runtime_float64_array(
                 surface_gamma_runtime,
                 reference=reference,
             ).reshape((-1, 3))
-            for fixed_block in fixed_curve_surface_distance_blocks_runtime:
-                pairwise_blocks.append(
-                    _runtime_float64_array(fixed_block, reference=reference)
+            point_pairs = []
+            for tf_gammas, _tf_gammadashs in tf_curve_groups_runtime:
+                point_pairs.append(
+                    (
+                        _runtime_float64_array(tf_gammas, reference=reference),
+                        flat_surface,
+                    )
                 )
             for dynamic_index in range(int(dynamic_gammas.shape[0])):
-                dists = jnp.linalg.norm(
-                    dynamic_gammas[dynamic_index][:, None, :] - flat_surface[None, :, :],
-                    axis=2,
+                point_pairs.append(
+                    (
+                        dynamic_gammas[dynamic_index],
+                        flat_surface,
+                    )
                 )
-                pairwise_blocks.append(dists.reshape((-1,)))
-            if not pairwise_blocks:
+            if not point_pairs:
                 return _runtime_float64_scalar(
                     curve_surface_threshold,
                     reference=reference,
                 )
-            smooth_min = _selected_smoothmin(
-                jnp.concatenate(pairwise_blocks),
+            smooth_min = pairwise_selected_smoothmin_distance_pure(
+                tuple(point_pairs),
                 temperature=distance_smoothing,
             )
             return (

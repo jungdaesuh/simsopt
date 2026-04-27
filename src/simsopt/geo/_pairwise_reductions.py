@@ -471,7 +471,6 @@ def pairwise_selected_smoothmin_distance_pure(
         hard_min = jnp.minimum(hard_min, pair_min)
 
     hard_min = lax.stop_gradient(hard_min)
-    temperature_jax = lax.stop_gradient(temperature_jax)
     cutoff = hard_min + _scalar_like(reference, 4.0) * temperature_jax
     cutoff = lax.stop_gradient(cutoff)
 
