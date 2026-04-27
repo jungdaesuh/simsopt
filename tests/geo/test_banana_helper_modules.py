@@ -85,7 +85,7 @@ class Stage2GeometryHelperTests(unittest.TestCase):
     def setUp(self):
         self.module = _load_module(STAGE2_GEOMETRY_PATH, "banana_stage2_geometry")
 
-    def test_load_plasma_geometry_scales_working_and_lcfs_surfaces_from_same_factor(self):
+    def test_load_plasma_geometry_scales_lcfs_to_target_and_working_with_same_factor(self):
         class FakeSurface:
             def __init__(self, major_radius, minor_radius):
                 self._major_radius = float(major_radius)
@@ -122,18 +122,25 @@ class Stage2GeometryHelperTests(unittest.TestCase):
             side_effect=fake_from_wout,
         ):
             geometry = self.module.load_plasma_geometry(
-                R0=0.96,
+                target_lcfs_major_radius_m=0.92,
                 s_working=0.24,
                 file_loc="/tmp/demo.nc",
                 nphi=8,
                 ntheta=8,
             )
 
-        self.assertAlmostEqual(geometry.scale_factor, 0.8)
-        self.assertAlmostEqual(geometry.working_surface.major_radius(), 0.96)
-        self.assertAlmostEqual(geometry.working_surface.minor_radius(), 0.08)
-        self.assertAlmostEqual(geometry.lcfs_major_radius_m, 1.16)
-        self.assertAlmostEqual(geometry.lcfs_minor_radius_m, 0.152)
+        expected_scale = 0.92 / 1.45
+        self.assertAlmostEqual(geometry.scale_factor, expected_scale)
+        self.assertAlmostEqual(
+            geometry.working_surface.major_radius(),
+            1.20 * expected_scale,
+        )
+        self.assertAlmostEqual(
+            geometry.working_surface.minor_radius(),
+            0.10 * expected_scale,
+        )
+        self.assertAlmostEqual(geometry.lcfs_major_radius_m, 0.92)
+        self.assertAlmostEqual(geometry.lcfs_minor_radius_m, 0.19 * expected_scale)
 
     def test_load_plasma_geometry_real_wout_uses_scaled_lcfs_boundary(self):
         equilibrium_path = (
@@ -144,16 +151,16 @@ class Stage2GeometryHelperTests(unittest.TestCase):
         nphi = 91
         ntheta = 32
         working_label = 0.24
-        target_major_radius = 0.976
-        working_surface = self.module.SurfaceRZFourier.from_wout(
+        target_lcfs_major_radius = 0.92
+        lcfs_surface = self.module.SurfaceRZFourier.from_wout(
             str(equilibrium_path),
             range="full torus",
             nphi=nphi,
             ntheta=ntheta,
-            s=working_label,
+            s=1.0,
         )
         expected_scale = (
-            target_major_radius / float(working_surface.major_radius())
+            target_lcfs_major_radius / float(lcfs_surface.major_radius())
         )
         expected_lcfs_surface = self.module.SurfaceRZFourier.from_wout(
             str(equilibrium_path),
@@ -167,7 +174,7 @@ class Stage2GeometryHelperTests(unittest.TestCase):
         )
 
         geometry = self.module.load_plasma_geometry(
-            R0=target_major_radius,
+            target_lcfs_major_radius_m=target_lcfs_major_radius,
             s_working=working_label,
             file_loc=str(equilibrium_path),
             nphi=nphi,
@@ -175,18 +182,15 @@ class Stage2GeometryHelperTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(
-            geometry.working_surface.major_radius(),
-            target_major_radius,
+            geometry.lcfs_major_radius_m,
+            target_lcfs_major_radius,
             places=12,
         )
         self.assertAlmostEqual(geometry.scale_factor, expected_scale, places=12)
-        self.assertGreater(
-            geometry.lcfs_major_radius_m,
-            geometry.working_surface.major_radius(),
-        )
-        self.assertGreater(
+        self.assertAlmostEqual(
             geometry.lcfs_minor_radius_m,
-            geometry.working_surface.minor_radius(),
+            expected_lcfs_surface.minor_radius(),
+            places=12,
         )
         self.assertAlmostEqual(
             geometry.lcfs_major_radius_m,
@@ -198,6 +202,118 @@ class Stage2GeometryHelperTests(unittest.TestCase):
             expected_lcfs_surface.minor_radius(),
             places=12,
         )
+
+    def test_geometry_preflight_prefers_requested_candidate_when_it_fits(self):
+        class FakeSurface:
+            def __init__(self, major_radius, minor_radius, gamma_value):
+                self._major_radius = float(major_radius)
+                self._minor_radius = float(minor_radius)
+                self._gamma_value = float(gamma_value)
+
+            def major_radius(self):
+                return self._major_radius
+
+            def minor_radius(self):
+                return self._minor_radius
+
+            def gamma(self):
+                return np.ones((2, 2, 3), dtype=float) * self._gamma_value
+
+        result = self.module.select_plasma_geometry_preflight_candidate(
+            lcfs_surface=FakeSurface(1.84, 0.28, 0.30),
+            requested_s=0.24,
+            target_lcfs_major_radius_m=0.92,
+            target_lcfs_minor_radius_m=0.15,
+            vessel_surface=FakeSurface(0.0, 0.0, 0.10),
+            min_plasma_vessel_distance_m=0.04,
+            s_candidates=(0.24, 0.50),
+            target_lcfs_major_radius_candidates_m=(0.92, 0.90),
+        )
+
+        self.assertTrue(result.selected.success)
+        self.assertEqual(result.selected.s_working, 0.24)
+        self.assertEqual(result.selected.target_lcfs_major_radius_m, 0.92)
+        self.assertAlmostEqual(result.selected.lcfs_minor_radius_m, 0.14)
+        self.assertEqual(len(result.candidates), 4)
+
+    def test_geometry_preflight_selects_smaller_plasma_when_max_target_collides(self):
+        class FakeSurface:
+            def __init__(self, major_radius, minor_radius):
+                self._major_radius = float(major_radius)
+                self._minor_radius = float(minor_radius)
+
+            def major_radius(self):
+                return self._major_radius
+
+            def minor_radius(self):
+                return self._minor_radius
+
+        def fake_distance(_surface, scale_factor, _vessel):
+            return 0.039 if scale_factor > 0.95 else 0.045
+
+        result = self.module.select_plasma_geometry_preflight_candidate(
+            lcfs_surface=FakeSurface(0.92, 0.14),
+            requested_s=0.24,
+            target_lcfs_major_radius_m=0.92,
+            target_lcfs_minor_radius_m=0.15,
+            vessel_surface=object(),
+            min_plasma_vessel_distance_m=0.04,
+            s_candidates=(0.24,),
+            target_lcfs_major_radius_candidates_m=(0.92, 0.87),
+            distance_fn=fake_distance,
+        )
+
+        self.assertEqual(result.selected.s_working, 0.24)
+        self.assertEqual(result.selected.target_lcfs_major_radius_m, 0.87)
+        self.assertEqual(result.selected.violations, ())
+        self.assertEqual(
+            result.candidates[0].violations,
+            ("plasma_vessel_min_dist<0.040000",),
+        )
+
+    def test_geometry_preflight_includes_requested_target_below_scan_floor(self):
+        class FakeSurface:
+            def major_radius(self):
+                return 1.0
+
+            def minor_radius(self):
+                return 0.12
+
+        result = self.module.select_plasma_geometry_preflight_candidate(
+            lcfs_surface=FakeSurface(),
+            requested_s=0.24,
+            target_lcfs_major_radius_m=0.79,
+            target_lcfs_minor_radius_m=0.15,
+            vessel_surface=object(),
+            min_plasma_vessel_distance_m=0.04,
+            s_candidates=(0.24,),
+            distance_fn=lambda *_args: 0.05,
+        )
+
+        self.assertEqual(result.selected.target_lcfs_major_radius_m, 0.79)
+        self.assertEqual(len(result.candidates), 1)
+        self.assertEqual(result.selected.violations, ())
+
+    def test_geometry_preflight_rejects_when_no_candidate_fits(self):
+        class FakeSurface:
+            def major_radius(self):
+                return 1.0
+
+            def minor_radius(self):
+                return 0.30
+
+        with self.assertRaisesRegex(ValueError, "No Stage 2 plasma geometry"):
+            self.module.select_plasma_geometry_preflight_candidate(
+                lcfs_surface=FakeSurface(),
+                requested_s=0.24,
+                target_lcfs_major_radius_m=0.92,
+                target_lcfs_minor_radius_m=0.15,
+                vessel_surface=object(),
+                min_plasma_vessel_distance_m=0.04,
+                s_candidates=(0.24,),
+                target_lcfs_major_radius_candidates_m=(0.92,),
+                distance_fn=lambda *_args: 0.03,
+            )
 
     def test_build_proxy_plasma_current_coils_rescales_vmec_axis(self):
         class FakeNetcdfFile:
@@ -266,7 +382,7 @@ class Stage2GeometryHelperTests(unittest.TestCase):
         ):
             coils = self.module.build_proxy_plasma_current_coils(
                 equilibrium_file="/tmp/demo.nc",
-                target_major_radius=1.0,
+                surface_scale_factor=2.0,
                 nphi=91,
                 ntheta=32,
                 toroidal_flux=0.24,
@@ -275,9 +391,9 @@ class Stage2GeometryHelperTests(unittest.TestCase):
 
         self.assertEqual(len(coils), 1)
         proxy_coil = coils[0]
-        self.assertEqual(proxy_coil.curve.assignments["xc(1)"], 1.0)
-        self.assertEqual(proxy_coil.curve.assignments["ys(1)"], 1.0)
-        self.assertEqual(proxy_coil.curve.assignments["zc(0)"], 0.15)
+        self.assertEqual(proxy_coil.curve.assignments["xc(1)"], 4.0)
+        self.assertEqual(proxy_coil.curve.assignments["ys(1)"], 4.0)
+        self.assertEqual(proxy_coil.curve.assignments["zc(0)"], 0.6)
         self.assertTrue(proxy_coil.curve.fixed)
         self.assertEqual(proxy_coil.current.value, 9000.0)
         self.assertTrue(proxy_coil.current.fixed)

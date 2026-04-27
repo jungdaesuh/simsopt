@@ -27,18 +27,45 @@ from simsopt.geo import (
 
 from plotting_utils import magnitude_field_plot, norm_field_plot
 from workflow_helpers import validate_normalized_toroidal_flux
+from banana_opt.hardware_contracts import (
+    validate_target_lcfs_major_radius,
+    validate_target_lcfs_minor_radius,
+)
 
 
 @dataclass(frozen=True)
 class PlasmaGeometry:
     working_surface: SurfaceRZFourier
     lcfs_surface: SurfaceRZFourier
+    working_major_radius_m: float
+    working_minor_radius_m: float
     lcfs_major_radius_m: float
     lcfs_minor_radius_m: float
     scale_factor: float
 
 
-def _load_vmec_surface(file_loc, s, nphi, ntheta):
+@dataclass(frozen=True)
+class PlasmaGeometryPreflightCandidate:
+    s_working: float
+    target_lcfs_major_radius_m: float
+    scale_factor: float
+    lcfs_major_radius_m: float
+    lcfs_minor_radius_m: float
+    plasma_vessel_min_dist_m: float
+    violations: tuple[str, ...]
+
+    @property
+    def success(self) -> bool:
+        return not self.violations
+
+
+@dataclass(frozen=True)
+class PlasmaGeometryPreflightResult:
+    selected: PlasmaGeometryPreflightCandidate
+    candidates: tuple[PlasmaGeometryPreflightCandidate, ...]
+
+
+def load_vmec_surface(file_loc, s, nphi, ntheta):
     surface_label = validate_normalized_toroidal_flux(
         s,
         field_name="Stage 2 VMEC surface label s",
@@ -52,21 +79,192 @@ def _load_vmec_surface(file_loc, s, nphi, ntheta):
     )
 
 
+_load_vmec_surface = load_vmec_surface
+
+
 def _scale_surface(surface, scale_factor):
-    surf = surface
-    surf.set_dofs(surf.get_dofs() * float(scale_factor))
-    return surf
+    surface.set_dofs(surface.get_dofs() * float(scale_factor))
+    return surface
 
 
-def load_plasma_geometry(R0, s_working, file_loc, nphi, ntheta):
-    working_surface = _load_vmec_surface(file_loc, s_working, nphi, ntheta)
-    scale_factor = float(R0) / float(working_surface.major_radius())
-    working_surface = _scale_surface(working_surface, scale_factor)
+def _unique_float_candidates(values):
+    candidates = []
+    for value in values:
+        candidate = float(value)
+        if not any(abs(candidate - existing) < 1.0e-12 for existing in candidates):
+            candidates.append(candidate)
+    return tuple(candidates)
+
+
+def default_geometry_preflight_s_candidates(s_working):
+    requested_s = validate_normalized_toroidal_flux(
+        s_working,
+        field_name="Stage 2 requested VMEC surface label s",
+    )
+    return _unique_float_candidates(
+        (
+            requested_s,
+            0.50,
+            0.45,
+            0.40,
+            0.35,
+            0.30,
+            0.25,
+            0.24,
+            0.20,
+        )
+    )
+
+
+def default_geometry_preflight_target_lcfs_major_radius_candidates(
+    target_lcfs_major_radius_m,
+):
+    target = validate_target_lcfs_major_radius(target_lcfs_major_radius_m)
+    values = [target]
+    radius = target - 0.01
+    while radius >= 0.80 - 1.0e-12:
+        values.append(round(radius, 12))
+        radius -= 0.01
+    return _unique_float_candidates(values)
+
+
+def scaled_surface_surface_min_distance(surface_a, scale_factor, surface_b):
+    return float(
+        np.min(
+            np.linalg.norm(
+                surface_a.gamma().reshape((-1, 1, 3)) * float(scale_factor)
+                - surface_b.gamma().reshape((1, -1, 3)),
+                axis=2,
+            )
+        )
+    )
+
+
+def select_plasma_geometry_preflight_candidate(
+    *,
+    lcfs_surface,
+    requested_s,
+    target_lcfs_major_radius_m,
+    target_lcfs_minor_radius_m,
+    vessel_surface,
+    min_plasma_vessel_distance_m,
+    s_candidates=None,
+    target_lcfs_major_radius_candidates_m=None,
+    distance_fn=scaled_surface_surface_min_distance,
+):
+    requested_surface_label = validate_normalized_toroidal_flux(
+        requested_s,
+        field_name="Stage 2 requested VMEC surface label s",
+    )
+    max_target_major = validate_target_lcfs_major_radius(
+        target_lcfs_major_radius_m
+    )
+    max_target_minor = validate_target_lcfs_minor_radius(target_lcfs_minor_radius_m)
+    min_vessel_gap = float(min_plasma_vessel_distance_m)
+    resolved_s_candidates = (
+        default_geometry_preflight_s_candidates(requested_surface_label)
+        if s_candidates is None
+        else _unique_float_candidates(
+            validate_normalized_toroidal_flux(
+                candidate,
+                field_name="Stage 2 geometry preflight s candidate",
+            )
+            for candidate in s_candidates
+        )
+    )
+    resolved_target_candidates = (
+        default_geometry_preflight_target_lcfs_major_radius_candidates(
+            max_target_major
+        )
+        if target_lcfs_major_radius_candidates_m is None
+        else _unique_float_candidates(
+            validate_target_lcfs_major_radius(candidate)
+            for candidate in target_lcfs_major_radius_candidates_m
+        )
+    )
+
+    base_lcfs_major_radius = float(lcfs_surface.major_radius())
+    base_lcfs_minor_radius = float(lcfs_surface.minor_radius())
+    candidates = []
+    for s_candidate in resolved_s_candidates:
+        for target_candidate in resolved_target_candidates:
+            scale_factor = float(target_candidate) / base_lcfs_major_radius
+            lcfs_minor_radius = base_lcfs_minor_radius * scale_factor
+            vessel_gap = float(
+                distance_fn(lcfs_surface, scale_factor, vessel_surface)
+            )
+            violations = []
+            if target_candidate > max_target_major + 1.0e-12:
+                violations.append(
+                    f"lcfs_major_radius>{max_target_major:.6f}"
+                )
+            if lcfs_minor_radius > max_target_minor + 1.0e-12:
+                violations.append(
+                    f"lcfs_minor_radius>{max_target_minor:.6f}"
+                )
+            if vessel_gap < min_vessel_gap - 1.0e-12:
+                violations.append(
+                    f"plasma_vessel_min_dist<{min_vessel_gap:.6f}"
+                )
+            candidates.append(
+                PlasmaGeometryPreflightCandidate(
+                    s_working=float(s_candidate),
+                    target_lcfs_major_radius_m=float(target_candidate),
+                    scale_factor=float(scale_factor),
+                    lcfs_major_radius_m=float(target_candidate),
+                    lcfs_minor_radius_m=float(lcfs_minor_radius),
+                    plasma_vessel_min_dist_m=float(vessel_gap),
+                    violations=tuple(violations),
+                )
+            )
+
+    successful = [candidate for candidate in candidates if candidate.success]
+    if not successful:
+        best = max(
+            candidates,
+            key=lambda candidate: (
+                candidate.plasma_vessel_min_dist_m,
+                -candidate.lcfs_minor_radius_m,
+                candidate.target_lcfs_major_radius_m,
+            ),
+        )
+        raise ValueError(
+            "No Stage 2 plasma geometry preflight candidate fits the HBT-EP "
+            "shell. Best candidate was "
+            f"s={best.s_working:.6f}, "
+            f"target_lcfs_major_radius_m={best.target_lcfs_major_radius_m:.6f}, "
+            f"lcfs_minor_radius_m={best.lcfs_minor_radius_m:.6f}, "
+            f"plasma_vessel_min_dist_m={best.plasma_vessel_min_dist_m:.6f}, "
+            f"violations={list(best.violations)}."
+        )
+
+    selected = min(
+        successful,
+        key=lambda candidate: (
+            -candidate.target_lcfs_major_radius_m,
+            abs(candidate.s_working - requested_surface_label),
+            candidate.s_working,
+        ),
+    )
+    return PlasmaGeometryPreflightResult(
+        selected=selected,
+        candidates=tuple(candidates),
+    )
+
+
+def load_plasma_geometry(target_lcfs_major_radius_m, s_working, file_loc, nphi, ntheta):
+    working_surface = load_vmec_surface(file_loc, s_working, nphi, ntheta)
+    lcfs_surface = load_vmec_surface(file_loc, 1.0, nphi, ntheta)
+    target_lcfs_major_radius = validate_target_lcfs_major_radius(
+        target_lcfs_major_radius_m
+    )
+    scale_factor = target_lcfs_major_radius / float(lcfs_surface.major_radius())
     lcfs_surface = _scale_surface(
-        _load_vmec_surface(file_loc, 1.0, nphi, ntheta),
+        lcfs_surface,
         scale_factor,
     )
-    print("Working surface major radius target: ", R0)
+    working_surface = _scale_surface(working_surface, scale_factor)
+    print("LCFS major radius target: ", target_lcfs_major_radius)
     print("Working surface major radius actual: ", working_surface.major_radius())
     print("Working surface minor radius: ", working_surface.minor_radius())
     print("LCFS major radius: ", lcfs_surface.major_radius())
@@ -74,14 +272,22 @@ def load_plasma_geometry(R0, s_working, file_loc, nphi, ntheta):
     return PlasmaGeometry(
         working_surface=working_surface,
         lcfs_surface=lcfs_surface,
+        working_major_radius_m=float(working_surface.major_radius()),
+        working_minor_radius_m=float(working_surface.minor_radius()),
         lcfs_major_radius_m=float(lcfs_surface.major_radius()),
         lcfs_minor_radius_m=float(lcfs_surface.minor_radius()),
         scale_factor=float(scale_factor),
     )
 
 
-def init_surface(R0, s, file_loc, nphi, ntheta):
-    return load_plasma_geometry(R0, s, file_loc, nphi, ntheta).working_surface
+def init_surface(target_lcfs_major_radius_m, s, file_loc, nphi, ntheta):
+    return load_plasma_geometry(
+        target_lcfs_major_radius_m,
+        s,
+        file_loc,
+        nphi,
+        ntheta,
+    ).working_surface
 
 
 def surface_surface_min_distance(surface_a, surface_b):
@@ -99,7 +305,7 @@ def surface_surface_min_distance(surface_a, surface_b):
 def build_proxy_plasma_current_coils(
     *,
     equilibrium_file: str,
-    target_major_radius: float,
+    surface_scale_factor: float,
     nphi: int,
     ntheta: int,
     toroidal_flux: float,
@@ -108,14 +314,11 @@ def build_proxy_plasma_current_coils(
     with netcdf_file(equilibrium_file, mmap=False) as equilibrium_netcdf:
         raxis_cc = equilibrium_netcdf.variables["raxis_cc"][:].copy()
         zaxis_cs = equilibrium_netcdf.variables["zaxis_cs"][:].copy()
-    proxy_surface = SurfaceRZFourier.from_wout(
-        equilibrium_file,
-        range="full torus",
-        nphi=nphi,
-        ntheta=ntheta,
-        s=toroidal_flux,
+    validate_normalized_toroidal_flux(
+        toroidal_flux,
+        field_name="proxy plasma-current toroidal_flux",
     )
-    axis_scale = float(target_major_radius) / float(proxy_surface.major_radius())
+    axis_scale = float(surface_scale_factor)
     proxy_curve = CurveXYZFourier(128, 1)
     proxy_curve.set("xc(1)", float(raxis_cc[0]) * axis_scale)
     proxy_curve.set("ys(1)", float(raxis_cc[0]) * axis_scale)
@@ -168,7 +371,7 @@ def initialize_coils(
     out_dir,
     *,
     equilibrium_file,
-    target_major_radius,
+    surface_scale_factor,
     toroidal_flux,
     nphi,
     ntheta,
@@ -199,7 +402,7 @@ def initialize_coils(
     # bs.coils layout regardless of current magnitude.
     proxy_coils = build_proxy_plasma_current_coils(
         equilibrium_file=equilibrium_file,
-        target_major_radius=float(target_major_radius),
+        surface_scale_factor=float(surface_scale_factor),
         nphi=int(nphi),
         ntheta=int(ntheta),
         toroidal_flux=float(toroidal_flux),

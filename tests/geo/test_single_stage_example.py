@@ -10420,6 +10420,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "curve_surface_curves": None,
             "curve_surface_surface_label": None,
             "surface_surface_min_distance_labels": None,
+            "plasma_geometry_args": None,
             "results": None,
         }
 
@@ -10561,8 +10562,11 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         fake_plasma_geometry = SimpleNamespace(
             working_surface=fake_working_surface,
             lcfs_surface=fake_lcfs_surface,
+            working_major_radius_m=fake_working_surface.major_radius(),
+            working_minor_radius_m=fake_working_surface.minor_radius(),
             lcfs_major_radius_m=fake_lcfs_surface.major_radius(),
             lcfs_minor_radius_m=fake_lcfs_surface.minor_radius(),
+            scale_factor=0.75,
         )
         fake_vv = SimpleNamespace(
             label="vv",
@@ -10789,6 +10793,10 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 self._EXPECTED_BASIN_TELEMETRY.copy(),
             )
 
+        def fake_load_plasma_geometry(*args, **_kwargs):
+            runtime["plasma_geometry_args"] = args
+            return fake_plasma_geometry
+
         with tempfile.TemporaryDirectory() as tmpdir:
             stage2_bs_path = str(Path(tmpdir) / "seed.json") if use_seed else None
             args = self._make_stage2_args(
@@ -10820,8 +10828,13 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     ),
                     patch.object(
                         module,
+                        "_load_stage2_vmec_surface",
+                        lambda *_args, **_kwargs: fake_lcfs_surface,
+                    ),
+                    patch.object(
+                        module,
                         "_load_plasma_geometry",
-                        lambda *_args, **_kwargs: fake_plasma_geometry,
+                        fake_load_plasma_geometry,
                     ),
                     patch.object(
                         module,
@@ -10990,6 +11003,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             runtime["surface_surface_min_distance_labels"],
             ("lcfs", "vv"),
         )
+        self.assertEqual(runtime["plasma_geometry_args"][0], 0.92)
         self.assertEqual(runtime["results"]["FINAL_LCFS_MAJOR_RADIUS_M"], 0.91)
         self.assertEqual(runtime["results"]["FINAL_LCFS_MINOR_RADIUS_M"], 0.14)
         self.assertNotEqual(runtime["results"]["FINAL_LCFS_MAJOR_RADIUS_M"], 0.88)
@@ -11063,6 +11077,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             runtime["initialize_extra_kwargs"]["vf_template_path"],
             workflow_helpers.default_wataru_vf_template_path(),
         )
+        self.assertEqual(runtime["initialize_extra_kwargs"]["surface_scale_factor"], 0.75)
 
     def test_stage2_main_init_only_wataru_seed_restart_uses_banana_only_penalties(self):
         runtime = self._run_stage2_main(

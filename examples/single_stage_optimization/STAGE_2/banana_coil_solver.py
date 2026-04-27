@@ -67,8 +67,10 @@ from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basi
 from banana_opt.stage2_geometry import (
     initialize_coils as _initialize_coils,
     is_self_intersecting,
+    load_vmec_surface as _load_stage2_vmec_surface,
     load_plasma_geometry as _load_plasma_geometry,
     magnetic_field_plots as _magnetic_field_plots,
+    select_plasma_geometry_preflight_candidate,
     surface_surface_min_distance as _surface_surface_min_distance,
 )
 from banana_opt.hardware_contracts import (
@@ -94,6 +96,8 @@ from banana_opt.hardware_contracts import (
     env_flag,
     validate_major_radius,
     validate_plasma_vessel_clearance,
+    validate_target_lcfs_major_radius,
+    validate_target_lcfs_minor_radius,
     validate_tf_current_limit,
 )
 from banana_opt.hardware_constraint_schema import (
@@ -1421,14 +1425,14 @@ def _build_initialize_coils_kwargs(
     *,
     finite_current_config: Stage2FiniteCurrentConfig,
     equilibrium_file,
-    target_major_radius,
+    surface_scale_factor,
     toroidal_flux,
     nphi,
     ntheta,
 ):
     return {
         "equilibrium_file": equilibrium_file,
-        "target_major_radius": target_major_radius,
+        "surface_scale_factor": surface_scale_factor,
         "toroidal_flux": toroidal_flux,
         "nphi": nphi,
         "ntheta": ntheta,
@@ -1511,25 +1515,72 @@ def main(parsed_args=None):
         args.toroidal_flux,
         field_name="--toroidal-flux",
     ) # VMEC flux-surface label
-
-    # Keep the optimization target on the requested working surface while
-    # routing hardware reporting and clearance checks through the true LCFS.
-    plasma_geometry = _load_plasma_geometry(R0, s, file_loc, nphi, ntheta)
-    new_surf = plasma_geometry.working_surface
-    lcfs_surf = plasma_geometry.lcfs_surface
-    banana_surf_nfp = new_surf.nfp
-
+    target_lcfs_major_radius_m = validate_target_lcfs_major_radius(
+        args.target_lcfs_max_major_radius_m
+    )
+    target_lcfs_minor_radius_m = validate_target_lcfs_minor_radius(
+        args.target_lcfs_max_minor_radius_m
+    )
     banana_surf_radius = args.banana_surf_radius
     if abs(banana_surf_radius - BANANA_WINDING_MINOR_RADIUS_M) > 1.0e-12:
         raise ValueError(
             "Stage 2 banana winding surface must remain concentric with the vessel at "
             f"minor radius {BANANA_WINDING_MINOR_RADIUS_M:.6f} m."
         )
+
+    # Scale the plasma family from the LCFS target.  The vessel/winding R0 stays
+    # at the hardware contract value and is not reused as a plasma radius.
+    lcfs_probe = _load_stage2_vmec_surface(file_loc, 1.0, nphi, ntheta)
     (
         lcfs_clearance_reference,
         surf_coils,
         VV,
-    ) = build_hbt_reference_surfaces(banana_surf_nfp, banana_surf_radius)
+    ) = build_hbt_reference_surfaces(lcfs_probe.nfp, banana_surf_radius)
+    geometry_preflight = select_plasma_geometry_preflight_candidate(
+        lcfs_surface=lcfs_probe,
+        requested_s=s,
+        target_lcfs_major_radius_m=target_lcfs_major_radius_m,
+        target_lcfs_minor_radius_m=target_lcfs_minor_radius_m,
+        vessel_surface=VV,
+        min_plasma_vessel_distance_m=PLASMA_VESSEL_MIN_DIST_M,
+    )
+    selected_geometry = geometry_preflight.selected
+    if (
+        abs(selected_geometry.s_working - s) > 1.0e-12
+        or abs(
+            selected_geometry.target_lcfs_major_radius_m
+            - target_lcfs_major_radius_m
+        )
+        > 1.0e-12
+    ):
+        print(
+            "Stage 2 geometry preflight selected "
+            f"s={selected_geometry.s_working:.6f}, "
+            "target_lcfs_major_radius_m="
+            f"{selected_geometry.target_lcfs_major_radius_m:.6f} "
+            f"from {len(geometry_preflight.candidates)} candidates."
+        )
+    s = selected_geometry.s_working
+    target_lcfs_major_radius_m = selected_geometry.target_lcfs_major_radius_m
+    plasma_geometry = _load_plasma_geometry(
+        target_lcfs_major_radius_m,
+        s,
+        file_loc,
+        nphi,
+        ntheta,
+    )
+    new_surf = plasma_geometry.working_surface
+    lcfs_surf = plasma_geometry.lcfs_surface
+    banana_surf_nfp = new_surf.nfp
+    if plasma_geometry.lcfs_minor_radius_m > target_lcfs_minor_radius_m:
+        raise ValueError(
+            "Scaled LCFS minor radius violates the HBT-EP plasma target "
+            f"({plasma_geometry.lcfs_minor_radius_m:.6f} m > "
+            f"{target_lcfs_minor_radius_m:.6f} m). Choose a smaller plasma "
+            "target or a VMEC surface family whose LCFS fits the shell."
+        )
+    if banana_surf_nfp != lcfs_probe.nfp:
+        raise ValueError("Stage 2 geometry preflight selected inconsistent NFP.")
     plasma_vessel_min_dist = _surface_surface_min_distance(lcfs_surf, VV)
     validate_plasma_vessel_clearance(
         plasma_vessel_min_dist,
@@ -1579,7 +1630,7 @@ def main(parsed_args=None):
             **_build_initialize_coils_kwargs(
                 finite_current_config=finite_current_config,
                 equilibrium_file=file_loc,
-                target_major_radius=R0,
+                surface_scale_factor=plasma_geometry.scale_factor,
                 toroidal_flux=s,
                 nphi=nphi,
                 ntheta=ntheta,
@@ -1662,7 +1713,7 @@ def main(parsed_args=None):
             equilibrium_file=file_loc,
             bs=new_bs,
             tf_coils=new_tf_coils,
-            major_radius=R0,
+            major_radius=float(new_surf.major_radius()),
             toroidal_flux=s,
             nphi=args.stage2_iota_nphi,
             ntheta=args.stage2_iota_ntheta,
