@@ -60,6 +60,7 @@ _TAR_EXCLUDES = (
     ".DS_Store",
     "._*",
     ".venv-simsopt-jax",
+    ".venv-local",
     ".conda",
     ".miniforge",
     ".tmp",
@@ -69,6 +70,7 @@ _TAR_EXCLUDES = (
     ".ruff_cache",
     ".mypy_cache",
     "__pycache__",
+    "consolidated_code.txt",
 )
 
 

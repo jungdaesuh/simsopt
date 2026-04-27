@@ -283,6 +283,79 @@ blind default increase, but not an apples-to-apples replacement for a future
 current-code chunk sweep. Keep point 256 as the current default for this CPU
 m10/n10 lane.
 
+### H100 Git-Clone Production Revalidation
+
+Validation date: 2026-04-27 UTC.
+
+Source checkout:
+
+- Repository: `https://github.com/jungdaesuh/simsopt.git`
+- Branch: `gpu-purity-stage2-20260405`
+- Commit: `7e3f2eb5e5462c7d3cc989ce8bf1fe010a04f3a2`
+- Remote git status before launch: clean
+- Hardware: 1x H100 80GB HBM3
+- Primary run ID: `20260428-h100-gitclone-e2e1`
+- Artifact: `.artifacts/runpod_single_stage_continuation/20260428-h100-gitclone-e2e1/continuation-20260428-h100-gitclone-e2e1`
+
+Primary E2E result:
+
+| Metric | Value |
+| --- | ---: |
+| Return code | 0 |
+| Wall time | 462.010 s |
+| GPU memory high-water | 14353 MiB |
+| Optimizer success | true |
+| Optimizer status | 4 |
+| Optimizer evaluations | 17 value / 17 gradient |
+| Final objective | 0.0008324085304084091 |
+| Field error | 0.0003787698258266065 |
+| Final iota | 0.24993804793782737 |
+| Final volume | 0.03996462582481037 |
+| Max curvature | 94.08851557341214 |
+| Hardware constraints OK | true |
+
+The primary run terminates with `Optimization terminated successfully (ftol)`.
+Its final physics metrics match the previous accepted H100 artifact
+`.artifacts/runpod_single_stage_continuation/20260427-h100-m10n10-order4A-contract3/continuation-20260427-h100-m10n10-order4A-contract3/stage-01-final/mpol=10-ntor=10-84b185bd/results.json`
+to roundoff:
+
+| Metric | Absolute delta |
+| --- | ---: |
+| Final objective | 1.0842021724855044e-19 |
+| Field error | 3.2526065174565133e-18 |
+| Final iota | 2.7755575615628914e-17 |
+| Final volume | 1.3877787807814457e-17 |
+| Max curvature | 1.4210854715202004e-14 |
+
+Separate current-code memory diagnostic:
+
+- Run ID: `20260428-h100-gitclone-memory1`
+- Artifact: `.artifacts/runpod_single_stage_continuation/20260428-h100-gitclone-memory1/continuation-20260428-h100-gitclone-memory1`
+- Point chunk size: default
+- Return code: 0
+- Wall time: 621.945 s
+- GPU memory high-water: 14907 MiB
+- Termination message: `profile_target_lane_only`
+
+XLA `memory_analysis()` temporary-buffer results from the diagnostic:
+
+| Closure | Temp memory |
+| --- | ---: |
+| `optimizer_value_and_grad` | 4551.75 MiB |
+| `value_and_grad_pipeline` | 4551.74 MiB |
+| `forward_result` | 4548.51 MiB |
+| `forward_value` | 4551.62 MiB |
+| `inner_solve` | 4548.44 MiB |
+| `solved_total_gradient` | 2445.78 MiB |
+| `warmstart_predict` | 1942.04 MiB |
+| `solved_total_objective` | 165.22 MiB |
+| `field_eval` | 163.54 MiB |
+| `surface_geometry` | 1.02 MiB |
+
+This confirms the GitHub branch checkout is production-E2E clean on H100 with
+the shipped default point chunking, and the current-code target-lane executable
+is no longer near the previous 56-76 GiB failure envelope.
+
 ## Separate Limited-Memory Contract
 
 `--boozer-limited-memory` is a separate pre-existing target-lane incompatibility.
