@@ -11004,8 +11004,13 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             ("lcfs", "vv"),
         )
         self.assertEqual(runtime["plasma_geometry_args"][0], 0.92)
+        self.assertEqual(runtime["results"]["MAJOR_RADIUS"], 0.976)
         self.assertEqual(runtime["results"]["FINAL_LCFS_MAJOR_RADIUS_M"], 0.91)
         self.assertEqual(runtime["results"]["FINAL_LCFS_MINOR_RADIUS_M"], 0.14)
+        self.assertNotEqual(
+            runtime["results"]["MAJOR_RADIUS"],
+            runtime["results"]["FINAL_LCFS_MAJOR_RADIUS_M"],
+        )
         self.assertNotEqual(runtime["results"]["FINAL_LCFS_MAJOR_RADIUS_M"], 0.88)
         self.assertNotEqual(runtime["results"]["FINAL_LCFS_MINOR_RADIUS_M"], 0.12)
         self.assertEqual(runtime["results"]["SURFACE_VESSEL_MIN_DIST"], 0.045)

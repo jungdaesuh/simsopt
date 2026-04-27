@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -31,6 +32,9 @@ from banana_opt.hardware_contracts import (
     validate_target_lcfs_major_radius,
     validate_target_lcfs_minor_radius,
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -264,11 +268,11 @@ def load_plasma_geometry(target_lcfs_major_radius_m, s_working, file_loc, nphi, 
         scale_factor,
     )
     working_surface = _scale_surface(working_surface, scale_factor)
-    print("LCFS major radius target: ", target_lcfs_major_radius)
-    print("Working surface major radius actual: ", working_surface.major_radius())
-    print("Working surface minor radius: ", working_surface.minor_radius())
-    print("LCFS major radius: ", lcfs_surface.major_radius())
-    print("LCFS minor radius: ", lcfs_surface.minor_radius())
+    LOGGER.info("LCFS major radius target: %s", target_lcfs_major_radius)
+    LOGGER.info("Working surface major radius actual: %s", working_surface.major_radius())
+    LOGGER.info("Working surface minor radius: %s", working_surface.minor_radius())
+    LOGGER.info("LCFS major radius: %s", lcfs_surface.major_radius())
+    LOGGER.info("LCFS minor radius: %s", lcfs_surface.minor_radius())
     return PlasmaGeometry(
         working_surface=working_surface,
         lcfs_surface=lcfs_surface,
