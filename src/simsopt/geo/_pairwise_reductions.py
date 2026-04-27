@@ -45,27 +45,16 @@ def _padded_row_chunks(array, chunk_size: int):
     chunk_count = 0 if row_count == 0 else (row_count + chunk_size - 1) // chunk_size
     padded_row_count = chunk_count * chunk_size
     pad_rows = padded_row_count - row_count
-    zero_rows = None
     if pad_rows > 0:
         zero_rows = jnp.sum(array, axis=0, keepdims=True, dtype=array.dtype)
         zero_rows = zero_rows - zero_rows
         zero_rows = jnp.broadcast_to(zero_rows, (pad_rows, *array.shape[1:]))
         padded = jnp.concatenate((array, zero_rows), axis=0)
     else:
+        zero_rows = None
         padded = array
     chunk_shape = (chunk_count, chunk_size, *array.shape[1:])
     return padded.reshape(chunk_shape), zero_rows
-
-
-def _chunk_rows(array, chunk_size: int):
-    chunks, zero_rows = _padded_row_chunks(array, chunk_size)
-    chunk_count = int(chunks.shape[0])
-    valid = _row_true_values(array)
-    if zero_rows is not None:
-        invalid = _row_false_values(zero_rows)
-        valid = jnp.concatenate((valid, invalid), axis=0)
-    valid = valid.reshape((chunk_count, chunk_size))
-    return chunks, valid
 
 
 def _row_zero_values(array):
@@ -91,6 +80,17 @@ def _row_weight_values(array, value, zero):
         return array * zero + value
     axes = tuple(range(1, array.ndim))
     return jnp.sum(array * zero, axis=axes) + value
+
+
+def _chunk_rows(array, chunk_size: int):
+    chunks, zero_rows = _padded_row_chunks(array, chunk_size)
+    chunk_count = int(chunks.shape[0])
+    valid = _row_true_values(array)
+    if zero_rows is not None:
+        invalid = _row_false_values(zero_rows)
+        valid = jnp.concatenate((valid, invalid), axis=0)
+    valid = valid.reshape((chunk_count, chunk_size))
+    return chunks, valid
 
 
 def _chunk_rows_with_valid_weights(array, chunk_size: int, one, zero):
