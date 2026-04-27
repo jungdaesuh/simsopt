@@ -59,12 +59,15 @@ from ..jax_core.field import (
 )
 from ..jax_core.sharding import inspect_array_sharding_summary
 from .curve import incremental_arclength_pure, kappa_pure
+from ._pairwise_reductions import (
+    pairwise_min_distance_pure,
+    pairwise_selected_smoothmin_distance_pure,
+)
 from .curveobjectives import (
     Lp_curvature_pure,
     cc_distance_pure,
     cs_distance_pure,
     curve_length_pure,
-    pairwise_min_distance_pure,
 )
 from .boozer_residual_jax import (
     boozer_residual_scalar,
@@ -605,15 +608,12 @@ def _traceable_single_stage_curve_curve_signed_constraint(
 ):
     if len(coil_gammas) < 2:
         return _runtime_float64_scalar(minimum_distance, reference=minimum_distance)
-    hard_min = _runtime_float64_scalar(np.inf, reference=coil_gammas[0])
-    pairwise_blocks = []
+    point_pairs = []
     for curve_index, gamma_i in enumerate(coil_gammas):
         for gamma_j in coil_gammas[:curve_index]:
-            dists = jnp.linalg.norm(gamma_i[:, None, :] - gamma_j[None, :, :], axis=2)
-            pairwise_blocks.append(dists.reshape((-1,)))
-            hard_min = jnp.minimum(hard_min, jnp.min(dists))
-    smooth_min = _traceable_smoothmin_selected(
-        jnp.concatenate(pairwise_blocks),
+            point_pairs.append((gamma_i, gamma_j))
+    smooth_min = pairwise_selected_smoothmin_distance_pure(
+        tuple(point_pairs),
         temperature=distance_smoothing,
     )
     return _runtime_float64_scalar(minimum_distance, reference=smooth_min) - smooth_min
@@ -629,14 +629,9 @@ def _traceable_single_stage_curve_surface_signed_constraint(
     if len(coil_gammas) == 0:
         return _runtime_float64_scalar(minimum_distance, reference=surface_gamma)
     flat_surface = surface_gamma.reshape((-1, 3))
-    hard_min = _runtime_float64_scalar(np.inf, reference=surface_gamma)
-    pairwise_blocks = []
-    for gamma in coil_gammas:
-        dists = jnp.linalg.norm(gamma[:, None, :] - flat_surface[None, :, :], axis=2)
-        pairwise_blocks.append(dists.reshape((-1,)))
-        hard_min = jnp.minimum(hard_min, jnp.min(dists))
-    smooth_min = _traceable_smoothmin_selected(
-        jnp.concatenate(pairwise_blocks),
+    point_pairs = tuple((gamma, flat_surface) for gamma in coil_gammas)
+    smooth_min = pairwise_selected_smoothmin_distance_pure(
+        point_pairs,
         temperature=distance_smoothing,
     )
     return _runtime_float64_scalar(minimum_distance, reference=smooth_min) - smooth_min
@@ -653,12 +648,8 @@ def _traceable_single_stage_surface_surface_signed_constraint(
     flat_vessel = _runtime_float64_array(vessel_gamma, reference=surface_gamma).reshape(
         (-1, 3)
     )
-    dists = jnp.linalg.norm(
-        flat_surface[:, None, :] - flat_vessel[None, :, :],
-        axis=2,
-    )
-    smooth_min = _traceable_smoothmin_selected(
-        dists.reshape((-1,)),
+    smooth_min = pairwise_selected_smoothmin_distance_pure(
+        ((flat_surface, flat_vessel),),
         temperature=distance_smoothing,
     )
     return _runtime_float64_scalar(minimum_distance, reference=smooth_min) - smooth_min

@@ -10,7 +10,6 @@ from ._simsoptpp_boozer_compat import (
     KEY_BOOZER_DRESIDUAL_DC,
     _call_with_abi_fallback,
 )
-from ..objectives.utilities import forward_backward
 
 try:
     import jax
@@ -19,6 +18,10 @@ try:
     from ..jax_core._math_utils import as_jax_float64 as _runtime_as_jax_float64
     from ..jax_core._math_utils import (
         as_runtime_float64 as _runtime_as_runtime_float64,
+    )
+    from ._pairwise_reductions import (
+        pairwise_min_distance_pure,
+        pairwise_thresholded_mean_square_distance_pure,
     )
     from .jit import jit
 
@@ -1227,10 +1230,9 @@ if _HAS_JAX:
         gamma1 = _as_jax_float64(gamma1)
         gamma2 = _as_jax_float64(gamma2)
         mdist = _scalar_like(gamma1, mdist)
-        zero = _scalar_like(gamma1, 0.0)
-        dists = surface_to_surface_pairwise_distances(gamma1, gamma2)
-        normalization = _scalar_like(dists, dists.shape[0] * dists.shape[1])
-        return jnp.sum(jnp.square(jnp.maximum(mdist - dists, zero))) / normalization
+        gamma1 = gamma1.reshape((-1, 3))
+        gamma2 = gamma2.reshape((-1, 3))
+        return pairwise_thresholded_mean_square_distance_pure(gamma1, gamma2, mdist)
 
     def surface_to_surface_pairwise_distances(gamma1, gamma2):
         gamma1 = gamma1.reshape((-1, 3))
@@ -1241,7 +1243,9 @@ if _HAS_JAX:
         return jnp.sqrt(jnp.sum(jnp.square(delta), axis=2))
 
     def surface_to_surface_shortest_distance_pure(gamma1, gamma2):
-        return jnp.min(surface_to_surface_pairwise_distances(gamma1, gamma2))
+        gamma1 = _as_jax_float64(gamma1).reshape((-1, 3))
+        gamma2 = _as_jax_float64(gamma2).reshape((-1, 3))
+        return pairwise_min_distance_pure(gamma1, gamma2)
 
     class SurfaceSurfaceDistance(Optimizable):
         def __init__(self, surf1, surf2, minimum_distance):

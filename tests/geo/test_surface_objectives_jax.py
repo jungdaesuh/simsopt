@@ -7,6 +7,7 @@ These tests exercise the pure JAX label/objective ingredients directly:
 3. Upstream-shaped ToroidalFlux CPU/JAX parity under tolerance-based checks.
 """
 
+import os
 from pathlib import Path
 import sys
 import types
@@ -40,6 +41,8 @@ from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.geo import optimizer_jax as optimizer_jax_module
 from simsopt.geo import surfaceobjectives as surfaceobjectives_module
 from simsopt.geo import surfaceobjectives_jax as surfaceobjectives_jax_module
+from simsopt.backend import invalidate_backend_cache
+from simsopt.geo._pairwise_reductions import pairwise_selected_smoothmin_distance_pure
 from simsopt.geo.surfaceobjectives import ToroidalFlux
 from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 from simsopt.geo.label_constraints_jax import toroidal_flux_jax
@@ -234,6 +237,548 @@ def test_surface_to_surface_pairwise_distances_uses_square_primitive():
 
     assert "square" in primitive_names
     assert "integer_pow" not in primitive_names
+
+
+def _surface_pairwise_reduction_inputs():
+    gamma1 = jnp.asarray(
+        [
+            [0.00, 0.10, 0.03],
+            [0.13, 0.17, 0.08],
+            [0.24, 0.25, 0.11],
+            [0.39, 0.31, 0.16],
+            [0.48, 0.42, 0.21],
+        ],
+        dtype=jnp.float64,
+    )
+    gamma2 = jnp.asarray(
+        [
+            [0.04, 0.01, 0.19],
+            [0.18, 0.07, 0.23],
+            [0.29, 0.16, 0.27],
+            [0.44, 0.22, 0.34],
+            [0.57, 0.35, 0.38],
+            [0.71, 0.41, 0.43],
+            [0.83, 0.53, 0.49],
+        ],
+        dtype=jnp.float64,
+    )
+    return gamma1.reshape((5, 1, 3)), gamma2.reshape((7, 1, 3))
+
+
+def _surface_distance_value_and_grad(gamma1, gamma2, minimum_distance):
+    return jax.value_and_grad(
+        lambda current_gamma1, current_gamma2: (
+            surfaceobjectives_module.surface_to_surface_distance_pure(
+                current_gamma1,
+                current_gamma2,
+                minimum_distance,
+            )
+        ),
+        argnums=(0, 1),
+    )(gamma1, gamma2)
+
+
+def _with_pairwise_chunk_size(monkeypatch, chunk_size):
+    monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", str(chunk_size))
+    invalidate_backend_cache()
+
+
+def test_surface_to_surface_distance_chunking_matches_dense_value_and_grad(
+    monkeypatch,
+):
+    gamma1, gamma2 = _surface_pairwise_reduction_inputs()
+    minimum_distance = jnp.asarray(0.43, dtype=jnp.float64)
+
+    _with_pairwise_chunk_size(monkeypatch, 0)
+    try:
+        dense_value, dense_grad = _surface_distance_value_and_grad(
+            gamma1,
+            gamma2,
+            minimum_distance,
+        )
+
+        _with_pairwise_chunk_size(monkeypatch, 2)
+        chunked_value, chunked_grad = _surface_distance_value_and_grad(
+            gamma1,
+            gamma2,
+            minimum_distance,
+        )
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+    np.testing.assert_allclose(
+        np.asarray(chunked_value),
+        np.asarray(dense_value),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(chunked_grad[0]),
+        np.asarray(dense_grad[0]),
+        rtol=1e-10,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(chunked_grad[1]),
+        np.asarray(dense_grad[1]),
+        rtol=1e-10,
+        atol=1e-12,
+    )
+
+
+def test_surface_to_surface_chunked_path_does_not_call_dense_matrix_api(
+    monkeypatch,
+):
+    gamma1, gamma2 = _surface_pairwise_reduction_inputs()
+
+    def fail_pairwise_distances(current_gamma1, current_gamma2):
+        raise AssertionError("chunked scalar reducer must not materialize dense matrix")
+
+    _with_pairwise_chunk_size(monkeypatch, 2)
+    monkeypatch.setattr(
+        surfaceobjectives_module,
+        "surface_to_surface_pairwise_distances",
+        fail_pairwise_distances,
+    )
+    try:
+        value = surfaceobjectives_module.surface_to_surface_distance_pure(
+            gamma1,
+            gamma2,
+            0.43,
+        )
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+    assert np.isfinite(float(value))
+
+
+def test_surface_to_surface_shortest_distance_chunking_matches_dense(
+    monkeypatch,
+):
+    gamma1, gamma2 = _surface_pairwise_reduction_inputs()
+
+    _with_pairwise_chunk_size(monkeypatch, 2)
+    try:
+        chunked_min = (
+            surfaceobjectives_module.surface_to_surface_shortest_distance_pure(
+                gamma1,
+                gamma2,
+            )
+        )
+    finally:
+        monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", "0")
+        invalidate_backend_cache()
+
+    dense_min = surfaceobjectives_module.surface_to_surface_shortest_distance_pure(
+        gamma1,
+        gamma2,
+    )
+    direct_min = np.min(
+        np.linalg.norm(
+            np.asarray(gamma1).reshape((-1, 3))[:, None, :]
+            - np.asarray(gamma2).reshape((-1, 3))[None, :, :],
+            axis=2,
+        )
+    )
+
+    monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+    invalidate_backend_cache()
+
+    assert float(chunked_min) == pytest.approx(float(dense_min), rel=1e-12, abs=1e-12)
+    assert float(chunked_min) == pytest.approx(float(direct_min), rel=1e-12, abs=1e-12)
+
+
+def test_surface_to_surface_chunked_gradient_respects_strict_transfer_guard(
+    monkeypatch,
+):
+    gamma1, gamma2 = tuple(
+        jax.device_put(array) for array in _surface_pairwise_reduction_inputs()
+    )
+    minimum_distance = jax.device_put(np.asarray(0.43, dtype=np.float64))
+    seed = jax.device_put(np.asarray(1.0, dtype=np.float64))
+
+    _with_pairwise_chunk_size(monkeypatch, 2)
+    try:
+        with jax.transfer_guard("disallow"):
+            value, pullback = jax.vjp(
+                lambda current_gamma1: (
+                    surfaceobjectives_module.surface_to_surface_distance_pure(
+                        current_gamma1,
+                        gamma2,
+                        minimum_distance,
+                    )
+                ),
+                gamma1,
+            )
+            grad_gamma1 = pullback(seed)[0]
+        assert np.isfinite(float(jax.device_get(value)))
+        assert np.all(np.isfinite(np.asarray(jax.device_get(grad_gamma1))))
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+
+def test_surface_to_surface_zero_penalty_has_finite_zero_gradient(monkeypatch):
+    gamma1 = jnp.asarray(
+        [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.2, 0.0, 0.0]],
+        dtype=jnp.float64,
+    ).reshape((3, 1, 3))
+    gamma2 = jnp.asarray(
+        [[4.0, 0.0, 0.0], [4.1, 0.0, 0.0], [4.2, 0.0, 0.0]],
+        dtype=jnp.float64,
+    ).reshape((3, 1, 3))
+
+    _with_pairwise_chunk_size(monkeypatch, 2)
+    try:
+        value, grad_gamma1 = jax.value_and_grad(
+            lambda current_gamma1: (
+                surfaceobjectives_module.surface_to_surface_distance_pure(
+                    current_gamma1,
+                    gamma2,
+                    0.2,
+                )
+            )
+        )(gamma1)
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+    assert float(value) == pytest.approx(0.0, abs=0.0)
+    np.testing.assert_allclose(np.asarray(grad_gamma1), 0.0, atol=0.0)
+    assert np.all(np.isfinite(np.asarray(grad_gamma1)))
+
+
+def test_surface_to_surface_chunking_preserves_nan_semantics(monkeypatch):
+    gamma1 = jnp.asarray(
+        [[0.0, 0.0, 0.0], [jnp.nan, 0.0, 0.0]],
+        dtype=jnp.float64,
+    ).reshape((2, 1, 3))
+    gamma2 = jnp.asarray(
+        [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+        dtype=jnp.float64,
+    ).reshape((2, 1, 3))
+
+    _with_pairwise_chunk_size(monkeypatch, 0)
+    try:
+        dense_value = surfaceobjectives_module.surface_to_surface_distance_pure(
+            gamma1,
+            gamma2,
+            2.0,
+        )
+
+        _with_pairwise_chunk_size(monkeypatch, 1)
+        chunked_value = surfaceobjectives_module.surface_to_surface_distance_pure(
+            gamma1,
+            gamma2,
+            2.0,
+        )
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+    assert np.isnan(float(dense_value))
+    assert np.isnan(float(chunked_value))
+
+
+def test_curve_curve_signed_constraint_chunking_matches_dense_value_and_grad(
+    monkeypatch,
+):
+    coil_gamma = jnp.asarray(
+        [
+            [0.00, 0.00, 0.00],
+            [0.20, 0.05, 0.04],
+            [0.41, 0.12, 0.09],
+        ],
+        dtype=jnp.float64,
+    )
+    other_coil_gamma = jnp.asarray(
+        [
+            [0.06, 0.18, 0.03],
+            [0.24, 0.26, 0.08],
+            [0.47, 0.35, 0.14],
+        ],
+        dtype=jnp.float64,
+    )
+
+    def value_and_grad(current_coil_gamma):
+        return jax.value_and_grad(
+            lambda current_gamma: (
+                surfaceobjectives_jax_module._traceable_single_stage_curve_curve_signed_constraint(
+                    (current_gamma, other_coil_gamma),
+                    minimum_distance=0.32,
+                    distance_smoothing=0.05,
+                )
+            )
+        )(current_coil_gamma)
+
+    _with_pairwise_chunk_size(monkeypatch, 0)
+    try:
+        dense_value, dense_grad = value_and_grad(coil_gamma)
+
+        _with_pairwise_chunk_size(monkeypatch, 2)
+        chunked_value, chunked_grad = value_and_grad(coil_gamma)
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+    np.testing.assert_allclose(
+        np.asarray(chunked_value),
+        np.asarray(dense_value),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(chunked_grad),
+        np.asarray(dense_grad),
+        rtol=1e-10,
+        atol=1e-12,
+    )
+
+
+def test_curve_surface_signed_constraint_chunking_matches_dense_value_and_grad(
+    monkeypatch,
+):
+    coil_gamma = jnp.asarray(
+        [
+            [0.00, 0.00, 0.00],
+            [0.20, 0.05, 0.04],
+            [0.41, 0.12, 0.09],
+        ],
+        dtype=jnp.float64,
+    )
+    surface_gamma, _vessel_gamma = _surface_pairwise_reduction_inputs()
+
+    def value_and_grad(current_surface_gamma):
+        return jax.value_and_grad(
+            lambda current_gamma: (
+                surfaceobjectives_jax_module._traceable_single_stage_curve_surface_signed_constraint(
+                    (coil_gamma,),
+                    current_gamma,
+                    minimum_distance=0.32,
+                    distance_smoothing=0.05,
+                )
+            )
+        )(current_surface_gamma)
+
+    _with_pairwise_chunk_size(monkeypatch, 0)
+    try:
+        dense_value, dense_grad = value_and_grad(surface_gamma)
+
+        _with_pairwise_chunk_size(monkeypatch, 2)
+        chunked_value, chunked_grad = value_and_grad(surface_gamma)
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+    np.testing.assert_allclose(
+        np.asarray(chunked_value),
+        np.asarray(dense_value),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(chunked_grad),
+        np.asarray(dense_grad),
+        rtol=1e-10,
+        atol=1e-12,
+    )
+
+
+def test_surface_surface_signed_constraint_chunking_matches_dense_value_and_grad(
+    monkeypatch,
+):
+    surface_gamma, vessel_gamma = _surface_pairwise_reduction_inputs()
+
+    def value_and_grad(current_surface_gamma):
+        return jax.value_and_grad(
+            lambda current_gamma: (
+                surfaceobjectives_jax_module._traceable_single_stage_surface_surface_signed_constraint(
+                    current_gamma,
+                    vessel_gamma,
+                    minimum_distance=0.32,
+                    distance_smoothing=0.05,
+                )
+            )
+        )(current_surface_gamma)
+
+    _with_pairwise_chunk_size(monkeypatch, 0)
+    try:
+        dense_value, dense_grad = value_and_grad(surface_gamma)
+
+        _with_pairwise_chunk_size(monkeypatch, 2)
+        chunked_value, chunked_grad = value_and_grad(surface_gamma)
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+    np.testing.assert_allclose(
+        np.asarray(chunked_value),
+        np.asarray(dense_value),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(chunked_grad),
+        np.asarray(dense_grad),
+        rtol=1e-10,
+        atol=1e-12,
+    )
+
+
+def test_alm_smoothmin_chunked_vjps_respect_strict_transfer_guard(monkeypatch):
+    coil_gamma = jax.device_put(
+        jnp.asarray(
+            [
+                [0.00, 0.00, 0.00],
+                [0.20, 0.05, 0.04],
+                [0.41, 0.12, 0.09],
+            ],
+            dtype=jnp.float64,
+        )
+    )
+    other_coil_gamma = jax.device_put(
+        jnp.asarray(
+            [
+                [0.06, 0.18, 0.03],
+                [0.24, 0.26, 0.08],
+                [0.47, 0.35, 0.14],
+            ],
+            dtype=jnp.float64,
+        )
+    )
+    surface_gamma, vessel_gamma = tuple(
+        jax.device_put(array) for array in _surface_pairwise_reduction_inputs()
+    )
+    minimum_distance = jax.device_put(np.asarray(0.32, dtype=np.float64))
+    distance_smoothing = jax.device_put(np.asarray(0.05, dtype=np.float64))
+    seed = jax.device_put(np.asarray(1.0, dtype=np.float64))
+
+    _with_pairwise_chunk_size(monkeypatch, 2)
+    try:
+        with jax.transfer_guard("disallow"):
+            curve_curve_value, curve_curve_pullback = jax.vjp(
+                lambda current_gamma: (
+                    surfaceobjectives_jax_module._traceable_single_stage_curve_curve_signed_constraint(
+                        (current_gamma, other_coil_gamma),
+                        minimum_distance=minimum_distance,
+                        distance_smoothing=distance_smoothing,
+                    )
+                ),
+                coil_gamma,
+            )
+            curve_curve_grad = curve_curve_pullback(seed)[0]
+
+            curve_surface_value, curve_surface_pullback = jax.vjp(
+                lambda current_surface_gamma: (
+                    surfaceobjectives_jax_module._traceable_single_stage_curve_surface_signed_constraint(
+                        (coil_gamma,),
+                        current_surface_gamma,
+                        minimum_distance=minimum_distance,
+                        distance_smoothing=distance_smoothing,
+                    )
+                ),
+                surface_gamma,
+            )
+            curve_surface_grad = curve_surface_pullback(seed)[0]
+
+            surface_surface_value, surface_surface_pullback = jax.vjp(
+                lambda current_surface_gamma: (
+                    surfaceobjectives_jax_module._traceable_single_stage_surface_surface_signed_constraint(
+                        current_surface_gamma,
+                        vessel_gamma,
+                        minimum_distance=minimum_distance,
+                        distance_smoothing=distance_smoothing,
+                    )
+                ),
+                surface_gamma,
+            )
+            surface_surface_grad = surface_surface_pullback(seed)[0]
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+    assert np.isfinite(float(jax.device_get(curve_curve_value)))
+    assert np.isfinite(float(jax.device_get(curve_surface_value)))
+    assert np.isfinite(float(jax.device_get(surface_surface_value)))
+    assert np.all(np.isfinite(np.asarray(jax.device_get(curve_curve_grad))))
+    assert np.all(np.isfinite(np.asarray(jax.device_get(curve_surface_grad))))
+    assert np.all(np.isfinite(np.asarray(jax.device_get(surface_surface_grad))))
+
+
+def test_pairwise_selected_smoothmin_temperature_floor_matches_traceable_contract():
+    points_a = jnp.asarray(
+        [[0.0, 0.0, 0.0], [0.2, 0.0, 0.0]],
+        dtype=jnp.float64,
+    )
+    points_b = jnp.asarray(
+        [[0.11, 0.0, 0.0], [0.41, 0.0, 0.0]],
+        dtype=jnp.float64,
+    )
+    dists = jnp.linalg.norm(points_a[:, None, :] - points_b[None, :, :], axis=2)
+
+    expected = surfaceobjectives_jax_module._traceable_smoothmin_selected(
+        dists.reshape((-1,)),
+        temperature=1e-14,
+    )
+    actual = pairwise_selected_smoothmin_distance_pure(
+        ((points_a, points_b),),
+        temperature=1e-14,
+        chunk_size=0,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(actual),
+        np.asarray(expected),
+        rtol=1e-14,
+        atol=1e-14,
+    )
+
+
+@pytest.mark.skipif(
+    os.environ.get("SIMSOPT_RUN_PRODUCTION_PAIRWISE_PARITY") != "1",
+    reason="production-shape dense pairwise parity is an opt-in memory gate",
+)
+def test_surface_to_surface_distance_production_shape_dense_parity(monkeypatch):
+    phi = jnp.linspace(0.0, 1.0, 255, endpoint=False, dtype=jnp.float64)
+    theta = jnp.linspace(0.0, 1.0, 64, endpoint=False, dtype=jnp.float64)
+    grid_phi, grid_theta = jnp.meshgrid(phi, theta, indexing="ij")
+    surface_gamma = jnp.stack(
+        (
+            0.7 * jnp.cos(2.0 * jnp.pi * grid_phi),
+            0.7 * jnp.sin(2.0 * jnp.pi * grid_phi),
+            0.1 * jnp.sin(2.0 * jnp.pi * grid_theta),
+        ),
+        axis=2,
+    )
+    vessel_gamma = 1.4 * surface_gamma + jnp.asarray([0.05, -0.03, 0.02])
+    minimum_distance = jnp.asarray(0.25, dtype=jnp.float64)
+
+    _with_pairwise_chunk_size(monkeypatch, 0)
+    try:
+        dense_value = surfaceobjectives_module.surface_to_surface_distance_pure(
+            surface_gamma,
+            vessel_gamma,
+            minimum_distance,
+        )
+
+        _with_pairwise_chunk_size(monkeypatch, 256)
+        chunked_value = surfaceobjectives_module.surface_to_surface_distance_pure(
+            surface_gamma,
+            vessel_gamma,
+            minimum_distance,
+        )
+    finally:
+        monkeypatch.delenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", raising=False)
+        invalidate_backend_cache()
+
+    np.testing.assert_allclose(
+        np.asarray(chunked_value),
+        np.asarray(dense_value),
+        rtol=1e-12,
+        atol=1e-12,
+    )
 
 
 def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
