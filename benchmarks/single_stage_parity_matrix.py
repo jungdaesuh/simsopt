@@ -376,15 +376,18 @@ def build_single_stage_parity_matrix(
     jax_cpu_trace = _load_optimizer_state_trace(jax_cpu_progress_json)
     gpu_trace = _load_optimizer_state_trace(gpu_progress_json)
     optimizer_trace_pairs = {
-        "cpu_scipy_vs_jax_cpu": _compare_optimizer_state_trace_pair(
-            cpu_trace,
-            jax_cpu_trace,
-        ),
         "jax_cpu_vs_h100_gpu": _compare_optimizer_state_trace_pair(
             jax_cpu_trace,
             gpu_trace,
         ),
     }
+    if cpu_progress_json is not None:
+        optimizer_trace_pairs["cpu_scipy_vs_jax_cpu"] = (
+            _compare_optimizer_state_trace_pair(
+                cpu_trace,
+                jax_cpu_trace,
+            )
+        )
     pair_statuses = [pair["status"] for pair in optimizer_trace_pairs.values()]
     optimizer_trace_status = _aggregate_status(pair_statuses)
     full_trajectory_status = _aggregate_status(pair_statuses)
@@ -392,9 +395,14 @@ def build_single_stage_parity_matrix(
     for pair_name, pair in optimizer_trace_pairs.items():
         if pair["status"] != "pass":
             full_trajectory_reasons.append(f"{pair_name}: {pair['status']}")
-    if len(set(terminations.values())) > 1:
+    target_lane_terminations = [
+        terminations[lane]
+        for lane in (LANE_JAX_CPU, LANE_H100_GPU)
+        if lane in terminations
+    ]
+    if len(set(target_lane_terminations)) > 1:
         full_trajectory_status = "blocked"
-        full_trajectory_reasons.append("termination modes differ across lanes")
+        full_trajectory_reasons.append("target-lane termination modes differ")
     comparisons = {
         "jax_cpu_vs_h100_same_state_value_grad": _same_state_value_grad_summary(report),
         "cpu_scipy_vs_jax_cpu_same_seed_metrics": cpu_jax_metrics,

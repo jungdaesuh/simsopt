@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import jax
-from jax import lax
 import jax.numpy as jnp
 import numpy as np
 
@@ -139,5 +138,18 @@ def _explicit_inv_jvp(primals, tangents):
     return primal_out, tangent_out
 
 
+def _explicit_rsqrt_impl(x):
+    return jnp.divide(scalar_like(x, 1.0), jnp.sqrt(x))
+
+
+@jax.custom_jvp
 def explicit_rsqrt(x):
-    return lax.rsqrt(x)
+    return _explicit_rsqrt_impl(x)
+
+
+@explicit_rsqrt.defjvp
+def _explicit_rsqrt_jvp(primals, tangents):
+    (x,), (x_dot,) = primals, tangents
+    primal_out = _explicit_rsqrt_impl(x)
+    tangent_out = x_dot * scalar_like(x, -0.5) / (x * jnp.sqrt(x))
+    return primal_out, tangent_out

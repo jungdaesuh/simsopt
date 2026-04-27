@@ -1239,11 +1239,32 @@ def test_single_stage_parity_matrix_reports_absolute_deltas():
 
 
 def test_single_stage_parity_matrix_accepts_matched_optimizer_state_traces(tmp_path):
+    jax_cpu_progress = tmp_path / "jax_cpu_progress.json"
+    gpu_progress = tmp_path / "gpu_progress.json"
+    for path in (jax_cpu_progress, gpu_progress):
+        _write_optimizer_trace_progress(path)
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        _single_stage_parity_report(),
+        jax_cpu_progress_json=str(jax_cpu_progress),
+        gpu_progress_json=str(gpu_progress),
+    )
+
+    comparisons = matrix["comparisons"]
+    assert comparisons["optimizer_state_trace_pairs"]["status"] == "pass"
+    assert comparisons["full_trajectory_parity"]["status"] == "pass"
+    assert matrix["passed"] is True
+
+
+def test_single_stage_parity_matrix_reports_drifted_optimizer_state_traces(tmp_path):
     cpu_progress = tmp_path / "cpu_progress.json"
     jax_cpu_progress = tmp_path / "jax_cpu_progress.json"
     gpu_progress = tmp_path / "gpu_progress.json"
-    for path in (cpu_progress, jax_cpu_progress, gpu_progress):
-        _write_optimizer_trace_progress(path)
+    drifted_gpu_entry = _optimizer_trace_entry()
+    drifted_gpu_entry["trial_x"] = {"values": [0.5, 2.0625]}
+    _write_optimizer_trace_progress(cpu_progress)
+    _write_optimizer_trace_progress(jax_cpu_progress)
+    _write_optimizer_trace_progress(gpu_progress, drifted_gpu_entry)
 
     matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
         _single_stage_parity_report(),
@@ -1252,32 +1273,12 @@ def test_single_stage_parity_matrix_accepts_matched_optimizer_state_traces(tmp_p
         gpu_progress_json=str(gpu_progress),
     )
 
-    assert matrix["comparisons"]["optimizer_state_trace_pairs"]["status"] == "pass"
-    assert matrix["comparisons"]["full_trajectory_parity"]["status"] == "pass"
-    assert matrix["passed"] is True
-
-
-def test_single_stage_parity_matrix_blocks_mixed_missing_and_drifted_traces(tmp_path):
-    jax_cpu_progress = tmp_path / "jax_cpu_progress.json"
-    gpu_progress = tmp_path / "gpu_progress.json"
-    drifted_gpu_entry = _optimizer_trace_entry()
-    drifted_gpu_entry["trial_x"] = {"values": [0.5, 2.0625]}
-    _write_optimizer_trace_progress(jax_cpu_progress)
-    _write_optimizer_trace_progress(gpu_progress, drifted_gpu_entry)
-
-    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
-        _single_stage_parity_report(),
-        jax_cpu_progress_json=str(jax_cpu_progress),
-        gpu_progress_json=str(gpu_progress),
-    )
-
-    assert matrix["comparisons"]["optimizer_state_trace_pairs"]["status"] == "blocked"
-    assert matrix["comparisons"]["full_trajectory_parity"]["status"] == "blocked"
+    comparisons = matrix["comparisons"]
+    trace_pairs = comparisons["optimizer_state_trace_pairs"]
+    assert trace_pairs["status"] == "drift"
+    assert comparisons["full_trajectory_parity"]["status"] == "drift"
     assert (
-        matrix["comparisons"]["optimizer_state_trace_pairs"]["pairs"][
-            "jax_cpu_vs_h100_gpu"
-        ]["status"]
-        == "drift"
+        trace_pairs["pairs"]["jax_cpu_vs_h100_gpu"]["status"] == "drift"
     )
 
 

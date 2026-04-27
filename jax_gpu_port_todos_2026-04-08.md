@@ -27,6 +27,28 @@ tests/geo/test_boozersurface_jax_private.py::TestBoozerSurfaceJAXClassPrivate::t
 tests/geo/test_curve_objectives.py::test_curve_surface_dense_path_respects_strict_transfer_guard
 -q` passed (`3 passed`). Full suite not rerun.
 
+### Same-resolution production timing evidence (2026-04-27)
+
+- [x] **JAX CPU vs H100 production lane:** same shape and controls
+  (`mpol=10`, `ntor=10`, `nphi=255`, `ntheta=64`, `maxiter=20`) completed
+  successfully on both JAX CPU and JAX H100.
+- [x] **H100 artifact:** `.artifacts/runpod_single_stage_continuation/20260427-h100-m10n10-trace-parity2/continuation-20260427-h100-m10n10-trace-parity2/stage-01-final/mpol=10-ntor=10-f58cda0e/results.json`.
+  Result: `OPTIMIZER_SUCCESS=True`, `OPTIMIZER_STATUS=4`,
+  `TERMINATION_MESSAGE="Optimization terminated successfully (ftol)."`,
+  `script_total_s=764.7313863569871`, `outer_optimizer_main_s=358.274587970227`.
+- [x] **JAX CPU artifact:** `.artifacts/parity/20260427-fresh3-jax-cpu-m20/mpol=10-ntor=10-b53e6701/results.json`.
+  Result: `OPTIMIZER_SUCCESS=True`, `OPTIMIZER_STATUS=4`,
+  `TERMINATION_MESSAGE="Optimization terminated successfully (ftol)."`,
+  `script_total_s=11676.611503541993`,
+  `outer_optimizer_main_s=10268.474330375`.
+- [x] **Measured speedup:** H100 was `15.3x` faster end-to-end and `28.7x`
+  faster for the phase-2 optimizer main section on this JAX-vs-JAX production
+  lane.
+- [x] **Scope note:** this is a same-resolution JAX CPU vs JAX H100
+  performance proof. It is not an apples-to-apples proof against the upstream
+  C++/SciPy CPU lane, which remains a separate backend path and requires its
+  own timing/parity artifact.
+
 ### New high-priority issue
 
 - [x] **61. [HIGH / correctness]** ~~`src/simsopt/objectives/fluxobjective_jax.py:127-315` and `src/simsopt/field/biotsavart_jax_backend.py:1004-1024` — `SquaredFluxJAX` captures fixed `flux_spec.points` in its JIT closures, while `BiotSavartJAX.set_points()` mutates the field's active points and increments `_points_version`. `J()` / `dJ()` do not check the version, so calling `field.set_points(...)` after constructing `SquaredFluxJAX` can silently make the field and objective evaluate different point sets. `CLAUDE.md` documents the contract, but it is not enforced.~~ **DONE** — `SquaredFluxJAX` captures the field `_points_version` at construction, `J()` / `dJ()` fail fast on drift before returning cached values, and `tests/objectives/test_fluxobjective_jax_parity.py` covers post-construction `set_points(...)` mutation.
@@ -115,7 +137,7 @@ tests/geo/test_curve_objectives.py::test_curve_surface_dense_path_respects_stric
 
 - [x] **23.** **[PERF 2-3%]** ~~`jax_core/biotsavart.py:387` — add `precision=lax.Precision.HIGHEST` to `jnp.einsum("c,cj->j", ...)`. Matches private optimizer convention at `_common.py:23-24`.~~ **DONE** — the final Biot-Savart current contraction now uses `jnp.einsum(..., precision=lax.Precision.HIGHEST)` in the hot path.
 - [ ] **24.** **[PERF 5-10% VRAM?]** Re-scope Biot-Savart buffer donation to a real `jax.jit` boundary instead of the internal `fori_loop` carries (`biotsavart.py`). JAX `donate_argnums` applies at `jit` / `pjit` / `pmap` call boundaries, not directly to `_coil_chunk_reduce`, `_quadrature_block_integral`, or `_point_chunk_reduce`. Find an outer compiled entry point with same-shape input/output pytrees, add donation there, and keep the item only if peak-memory profiling shows a real win. **(PARTIAL — `benchmarks/biotsavart_donation_probe.py` now measures both the synthetic public-kernel path and a real Stage 2 grouped-field fixture behind outer-`jax.jit(donate_argnums=(0,))` wrappers on disposable `points` buffers, with `tests/test_biotsavart_donation_probe.py` covering both payloads; local CPU probes still match baseline numerically, but CUDA VRAM benefit on the real lane is still unverified.)**
-- [x] **25.** **[EXPERIMENT / PERF variable]** ~~`jax_core/_math_utils.py:107-121` — evaluate replacing `explicit_rsqrt` custom JVP with `jax.lax.rsqrt` + default JVP. `lax.rsqrt` is the direct primitive, but this should remain blocked on the explicit parity gate: require CPU/GPU objective and gradient parity across the Biot-Savart operating range before any swap. If parity fails, delete the item instead of weakening the contract.~~ **DONE** — `explicit_rsqrt` now routes floating kernel inputs to the JAX primitive `lax.rsqrt` while preserving the local helper name used by Biot-Savart and Boozer `1/|B|` paths. Focused tests compare value, JVP, and gradient against `jax.lax.rsqrt`; Biot-Savart chunked field parity and Boozer `1/|B|` derivative tests pass on the CPU parity lane. CUDA objective/gradient parity remains covered by the existing GPU proof lanes rather than a custom derivative rule.
+- [x] **25.** **[EXPERIMENT / PERF variable]** ~~`jax_core/_math_utils.py:107-121` — evaluate replacing `explicit_rsqrt` custom JVP with `jax.lax.rsqrt` + default JVP. `lax.rsqrt` is the direct primitive, but this should remain blocked on the explicit parity gate: require CPU/GPU objective and gradient parity across the Biot-Savart operating range before any swap. If parity fails, delete the item instead of weakening the contract.~~ **DONE / REJECTED FOR CUDA STRICT TRANSFER** — the direct `jax.lax.rsqrt` swap matched CPU value/JVP/gradient tests, but JAX 0.9.2 CUDA `transfer_guard=disallow` rejects the default VJP path with an implicit scalar host-to-device transfer. `explicit_rsqrt` therefore keeps the custom JVP with explicitly staged scalar constants while preserving value/JVP/gradient parity against `jax.lax.rsqrt`.
 - [ ] **26.** **[EXPERIMENT / PERF 10-20%?]** `surfaceobjectives_jax.py:268` — investigate whether LS-only Boozer adjoint / warm-start solves can skip iterative refinement behind a measured heuristic. Do **not** gate blindly on dense `cond(...)` unless profiling shows the estimator is cheaper than the refinement it suppresses. Keep iterative refinement as the default fallback for exact mode and for any inconclusive LS case. **Current state:** project docs/tests still justify `iterative_refinement=True` as the stable default for dense Boozer PLU solves.
 
 ### Medium effort

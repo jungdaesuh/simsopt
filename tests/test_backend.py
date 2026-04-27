@@ -1335,7 +1335,7 @@ def test_runtime_float64_helpers_keep_traced_references_on_device(
     }
 
 
-def test_explicit_rsqrt_uses_jax_primitive_value_jvp_and_grad():
+def test_explicit_rsqrt_matches_jax_primitive_value_jvp_and_grad():
     jax_module = _require_jax()
     jnp_module = importlib.import_module("jax.numpy")
     math_utils = importlib.import_module("simsopt.jax_core._math_utils")
