@@ -41,6 +41,7 @@ _TRANSFER_GUARD_ENV = "SIMSOPT_JAX_TRANSFER_GUARD"
 _COMPILATION_CACHE_DIR_ENV = "SIMSOPT_JAX_COMPILATION_CACHE_DIR"
 _COIL_CHUNK_SIZE_ENV = "SIMSOPT_JAX_COIL_CHUNK_SIZE"
 _QUADRATURE_BLOCK_SIZE_ENV = "SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE"
+_POINT_CHUNK_SIZE_ENV = "SIMSOPT_JAX_POINT_CHUNK_SIZE"
 _PAIRWISE_PENALTY_CHUNK_SIZE_ENV = "SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE"
 _CHUNK_AUTOTUNE_ENV = "SIMSOPT_JAX_CHUNK_AUTOTUNE"
 _GPU_MEMORY_TOTAL_MB_ENV = "SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB"
@@ -289,6 +290,7 @@ _AUTOTUNED_CHUNK_SIZES_BY_POLICY = {
 _FIELD_KERNEL_ENV_BY_KEY = {
     "coil_chunk_size": _COIL_CHUNK_SIZE_ENV,
     "quadrature_block_size": _QUADRATURE_BLOCK_SIZE_ENV,
+    "point_chunk_size": _POINT_CHUNK_SIZE_ENV,
 }
 _DEFAULT_TRANSFER_GUARD_BY_MODE = {
     "native_cpu": None,
@@ -382,6 +384,7 @@ class FieldKernelTuning:
     chunk_policy: str
     coil_chunk_size: int
     quadrature_block_size: int
+    point_chunk_size: int
 
 
 @dataclass(frozen=True)
@@ -1282,6 +1285,7 @@ def get_field_kernel_tuning(mode: str | None = None) -> FieldKernelTuning:
             chunk_policy=chunk_tuning.chunk_policy,
             coil_chunk_size=chunk_tuning.coil_chunk_size,
             quadrature_block_size=chunk_tuning.quadrature_block_size,
+            point_chunk_size=chunk_tuning.point_chunk_size,
         )
         if mode is None:
             _cached_field_kernel_tuning = tuning

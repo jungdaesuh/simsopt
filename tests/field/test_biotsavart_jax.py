@@ -67,6 +67,7 @@ def _kernel_tuning_env(
     *,
     coil_chunk_size: int | None = None,
     quadrature_block_size: int | None = None,
+    point_chunk_size: int | None = None,
 ):
     previous = {name: os.environ.get(name) for name in _KERNEL_TUNING_ENV_VARS}
     os.environ["SIMSOPT_BACKEND_MODE"] = mode
@@ -78,6 +79,10 @@ def _kernel_tuning_env(
         os.environ.pop("SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE", None)
     else:
         os.environ["SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE"] = str(quadrature_block_size)
+    if point_chunk_size is None:
+        os.environ.pop("SIMSOPT_JAX_POINT_CHUNK_SIZE", None)
+    else:
+        os.environ["SIMSOPT_JAX_POINT_CHUNK_SIZE"] = str(point_chunk_size)
     invalidate_backend_cache()
     try:
         yield
@@ -103,6 +108,7 @@ _KERNEL_TUNING_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",
     "SIMSOPT_JAX_COIL_CHUNK_SIZE",
     "SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE",
+    "SIMSOPT_JAX_POINT_CHUNK_SIZE",
 )
 _BIOTSAVART_CHUNKED_DENSE_PARITY_MODES = parity_acceptance_modes(
     "biotsavart_chunked_dense",

@@ -981,6 +981,9 @@ def build_single_stage_problem_contract(
             "init_only": bool(args.init_only),
             "profile_target_lane_only": bool(args.profile_target_lane_only),
             "profile_target_lane_batch_size": int(args.profile_target_lane_batch_size),
+            "profile_target_lane_memory_analysis": bool(
+                args.profile_target_lane_memory_analysis
+            ),
             "diagnose_target_lane_gradient": bool(
                 getattr(args, "diagnose_target_lane_gradient", False)
             ),
@@ -4312,6 +4315,14 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--profile-target-lane-memory-analysis",
+        action="store_true",
+        help=(
+            "When profiling the JAX/ondevice target lane, compile the profiled "
+            "closures and record XLA memory_analysis() byte counts."
+        ),
+    )
+    parser.add_argument(
         "--record-jax-compile-diagnostics",
         action="store_true",
         help=(
@@ -4456,7 +4467,7 @@ def parse_args():
         args.optimizer_backend,
         args.target_lane_boozer_newton_maxiter,
     )
-    if args.profile_target_lane_only:
+    if args.profile_target_lane_only or args.profile_target_lane_memory_analysis:
         args.profile_target_lane = True
     if args.profile_target_lane_batch_size < 1:
         raise ValueError("--profile-target-lane-batch-size must be at least 1")
@@ -6497,6 +6508,7 @@ def build_target_lane_outer_objectives(
     *,
     use_value_and_grad: bool,
     profile_target_lane: bool,
+    profile_target_lane_memory_analysis: bool = False,
     profile_batch_size: int = 1,
     outer_objective_config=None,
     success_filter=None,
@@ -6535,11 +6547,23 @@ def build_target_lane_outer_objectives(
         )
 
     if profile_target_lane:
+        profile_coil_dofs = build_target_lane_profile_coil_dofs(bs.x.copy())
         target_lane_profile = profile_traceable_target_lane_objective(
             runtime_bundle["profile_suite"],
-            build_target_lane_profile_coil_dofs(bs.x.copy()),
+            profile_coil_dofs,
+            include_memory_analysis=profile_target_lane_memory_analysis,
         )
         target_lane_profile["profile_point_kind"] = "baseline_perturbed"
+        if (
+            profile_target_lane_memory_analysis
+            and target_value_and_grad_objective is not None
+        ):
+            target_lane_profile["optimizer_value_and_grad_memory_analysis"] = (
+                _compiled_memory_analysis_stats(
+                    target_value_and_grad_objective,
+                    profile_coil_dofs,
+                )
+            )
         if profile_batch_size > 1:
             target_lane_profile["batched_seed_profile"] = (
                 profile_traceable_target_lane_seed_batch(
@@ -7147,6 +7171,7 @@ def prepare_target_lane_outer_objectives(
     use_target_lane: bool,
     use_value_and_grad: bool,
     profile_target_lane: bool,
+    profile_target_lane_memory_analysis: bool = False,
     profile_batch_size: int,
     disable_success_filter: bool,
     non_qs_weight,
@@ -7212,6 +7237,7 @@ def prepare_target_lane_outer_objectives(
         iota_target,
         use_value_and_grad=use_value_and_grad,
         profile_target_lane=profile_target_lane,
+        profile_target_lane_memory_analysis=profile_target_lane_memory_analysis,
         profile_batch_size=profile_batch_size,
         outer_objective_config=target_lane_outer_objective_config,
         success_filter=target_lane_success_filter,
@@ -7304,6 +7330,12 @@ def resolve_single_stage_boozer_limited_memory(
     if effective_boozer_backend != "ondevice":
         return False
     if boozer_limited_memory is not None:
+        if boozer_limited_memory:
+            raise ValueError(
+                "boozer_limited_memory=True is not supported for the JAX/ondevice "
+                "single-stage target lane; the private L-BFGS Boozer solve is "
+                "host-dispatched and cannot be traced."
+            )
         return bool(boozer_limited_memory)
     return False
 
@@ -7862,6 +7894,58 @@ def _profile_tree_callable_pair(fn, *args):
     }
 
 
+def _compiled_memory_analysis_stats(fn, *args):
+    """Compile one profiled callable and return XLA memory_analysis() stats."""
+    lowerable_fn = fn if hasattr(fn, "lower") else jax.jit(fn)
+    compile_start_s = _perf_counter_s()
+    compiled = lowerable_fn.lower(*args).compile()
+    compile_s = _elapsed_s(compile_start_s, _perf_counter_s())
+    stats = compiled.memory_analysis()
+    total_size_in_bytes = (
+        stats.temp_size_in_bytes
+        + stats.argument_size_in_bytes
+        + stats.output_size_in_bytes
+        - stats.alias_size_in_bytes
+    )
+    return {
+        "compile_s": float(compile_s),
+        "temp_size_in_bytes": int(stats.temp_size_in_bytes),
+        "argument_size_in_bytes": int(stats.argument_size_in_bytes),
+        "output_size_in_bytes": int(stats.output_size_in_bytes),
+        "alias_size_in_bytes": int(stats.alias_size_in_bytes),
+        "total_size_in_bytes": int(total_size_in_bytes),
+        "temp_size_in_mib": float(stats.temp_size_in_bytes) / float(1024**2),
+        "total_size_in_mib": float(total_size_in_bytes) / float(1024**2),
+    }
+
+
+def profile_traceable_target_lane_memory_analysis(
+    profile_suite,
+    coil_dofs,
+    solved_x,
+    solved_linear_solve_factors,
+):
+    """Compile target-lane profile callables and report XLA memory footprints."""
+    memory_analysis_specs = (
+        ("forward_result", (coil_dofs,)),
+        ("forward_value", (coil_dofs,)),
+        ("warmstart_predict", (coil_dofs,)),
+        ("inner_solve", (coil_dofs,)),
+        ("surface_geometry", (solved_x,)),
+        ("field_eval", (coil_dofs, solved_x)),
+        ("solved_total_objective", (coil_dofs, solved_x)),
+        (
+            "solved_total_gradient",
+            (coil_dofs, solved_x, solved_linear_solve_factors),
+        ),
+        ("value_and_grad_pipeline", (coil_dofs,)),
+    )
+    return {
+        name: _compiled_memory_analysis_stats(profile_suite[name], *args)
+        for name, args in memory_analysis_specs
+    }
+
+
 def _increment_diagnostic_counter(counts, key):
     counts[key] = counts.get(key, 0) + 1
 
@@ -7977,7 +8061,12 @@ def maybe_record_jax_compile_diagnostics(enabled):
             logger.setLevel(previous_level)
 
 
-def profile_traceable_target_lane_objective(profile_suite, coil_dofs):
+def profile_traceable_target_lane_objective(
+    profile_suite,
+    coil_dofs,
+    *,
+    include_memory_analysis=False,
+):
     """Profile the traceable target-lane closures at one representative DOF point."""
     profiled = {}
     forward_result, profiled["forward_result"] = _profile_tree_callable_pair(
@@ -8022,6 +8111,13 @@ def profile_traceable_target_lane_objective(profile_suite, coil_dofs):
         profile_suite["value_and_grad_pipeline"],
         coil_dofs,
     )
+    if include_memory_analysis:
+        profiled["memory_analysis"] = profile_traceable_target_lane_memory_analysis(
+            profile_suite,
+            coil_dofs,
+            solved_x,
+            solved_linear_solve_factors,
+        )
     profiled["solve_success"] = host_bool(solve_result["success"])
     return profiled
 
@@ -10356,6 +10452,7 @@ if __name__ == "__main__":
         str(args.disable_target_lane_success_filter),
         str(args.profile_target_lane),
         str(args.profile_target_lane_only),
+        str(args.profile_target_lane_memory_analysis),
         str(args.diagnose_target_lane_gradient),
         str(getattr(args, "diagnose_target_lane_first_line_search", False)),
         str(args.minimal_artifacts),
@@ -11227,6 +11324,9 @@ if __name__ == "__main__":
                 maxiter=int(MAXITER),
                 use_value_and_grad=bool(use_target_lane_vg),
                 profile_target_lane=bool(args.profile_target_lane),
+                profile_target_lane_memory_analysis=bool(
+                    args.profile_target_lane_memory_analysis
+                ),
                 success_filter_disabled=bool(args.disable_target_lane_success_filter),
                 trial_boozer_overrides={
                     key: None if value is None else float(value)
@@ -11258,6 +11358,9 @@ if __name__ == "__main__":
                         use_target_lane=use_target_lane,
                         use_value_and_grad=use_target_lane_vg,
                         profile_target_lane=args.profile_target_lane,
+                        profile_target_lane_memory_analysis=(
+                            args.profile_target_lane_memory_analysis
+                        ),
                         profile_batch_size=args.profile_target_lane_batch_size,
                         disable_success_filter=args.disable_target_lane_success_filter,
                         non_qs_weight=1.0,
@@ -12481,6 +12584,9 @@ if __name__ == "__main__":
         "profile_target_lane": bool(args.profile_target_lane),
         "profile_target_lane_only": bool(args.profile_target_lane_only),
         "profile_target_lane_batch_size": int(args.profile_target_lane_batch_size),
+        "profile_target_lane_memory_analysis": bool(
+            args.profile_target_lane_memory_analysis
+        ),
         "diagnose_target_lane_gradient": bool(args.diagnose_target_lane_gradient),
         "diagnose_target_lane_first_line_search": bool(
             getattr(args, "diagnose_target_lane_first_line_search", False)

@@ -1604,14 +1604,16 @@ class SingleStageExampleTests(unittest.TestCase):
                 False,
             )
         )
-        self.assertTrue(
+        with self.assertRaisesRegex(
+            ValueError,
+            "boozer_limited_memory=True is not supported",
+        ):
             module.resolve_single_stage_boozer_limited_memory(
                 "jax",
                 "ondevice",
                 None,
                 True,
             )
-        )
 
     def test_parse_args_does_not_treat_optimizer_env_as_explicit_boozer_override(self):
         module = self.load_module()
@@ -1710,6 +1712,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(args.target_lane_accepted_step_sync, "final-only")
         self.assertFalse(args.profile_target_lane)
+        self.assertFalse(args.profile_target_lane_memory_analysis)
         self.assertFalse(args.experimental_target_lane_value_and_grad)
         self.assertFalse(args.disable_target_lane_success_filter)
 
@@ -3887,6 +3890,24 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertTrue(args.profile_target_lane_only)
         self.assertTrue(args.profile_target_lane)
 
+    def test_profile_target_lane_memory_analysis_forces_profile_collection(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--profile-target-lane-memory-analysis",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.profile_target_lane_memory_analysis)
+        self.assertTrue(args.profile_target_lane)
+
     def test_parse_args_accepts_diagnose_target_lane_gradient(self):
         module = self.load_module()
 
@@ -5466,7 +5487,8 @@ class SingleStageExampleTests(unittest.TestCase):
                 "profile_suite": "profile-suite-marker",
             }
 
-        def _profile(profile_suite, coil_dofs):
+        def _profile(profile_suite, coil_dofs, *, include_memory_analysis=False):
+            self.assertFalse(include_memory_analysis)
             profiled_calls.append((profile_suite, coil_dofs))
             return {"ok": True}
 
@@ -5545,6 +5567,73 @@ class SingleStageExampleTests(unittest.TestCase):
             any(not np.array_equal(row, np.array([0.0, -2.0])) for row in host_batch)
         )
 
+    def test_profile_traceable_target_lane_objective_records_memory_analysis(self):
+        module = self.load_module()
+        coil_dofs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+
+        profile_suite = {
+            "forward_result": jax.jit(
+                lambda x: {
+                    "value": jnp.sum(x**2),
+                    "x": 2.0 * x,
+                    "linear_solve_factors": x + 1.0,
+                    "success": jnp.asarray(True),
+                }
+            ),
+            "forward_value": jax.jit(lambda x: jnp.sum(x**2)),
+            "warmstart_predict": jax.jit(
+                lambda x: {
+                    "x": x + 0.5,
+                    "success": jnp.asarray(True),
+                }
+            ),
+            "inner_solve": jax.jit(
+                lambda x: {
+                    "x": 2.0 * x,
+                    "linear_solve_factors": x + 1.0,
+                    "success": jnp.asarray(True),
+                }
+            ),
+            "surface_geometry": jax.jit(lambda x: x + 1.0),
+            "field_eval": jax.jit(lambda x, solved_x: x + solved_x),
+            "solved_total_objective": jax.jit(
+                lambda x, solved_x: jnp.sum(x * solved_x)
+            ),
+            "solved_total_gradient": jax.jit(
+                lambda x, solved_x, factors: x + solved_x + factors
+            ),
+            "value_and_grad_pipeline": jax.jit(
+                lambda x: (jnp.sum(x**2), 2.0 * x)
+            ),
+        }
+
+        profile = module.profile_traceable_target_lane_objective(
+            profile_suite,
+            coil_dofs,
+            include_memory_analysis=True,
+        )
+
+        memory_analysis = profile["memory_analysis"]
+        self.assertEqual(
+            set(memory_analysis),
+            {
+                "forward_result",
+                "forward_value",
+                "warmstart_predict",
+                "inner_solve",
+                "surface_geometry",
+                "field_eval",
+                "solved_total_objective",
+                "solved_total_gradient",
+                "value_and_grad_pipeline",
+            },
+        )
+        self.assertGreaterEqual(
+            memory_analysis["value_and_grad_pipeline"]["total_size_in_bytes"],
+            0,
+        )
+        self.assertEqual(profile["solve_success"], True)
+
     def test_build_target_lane_outer_objectives_profiles_seed_batch_when_requested(
         self,
     ):
@@ -5566,7 +5655,8 @@ class SingleStageExampleTests(unittest.TestCase):
                 "profile_suite": "profile-suite-marker",
             }
 
-        def _profile(_profile_suite, _coil_dofs):
+        def _profile(_profile_suite, _coil_dofs, *, include_memory_analysis=False):
+            self.assertFalse(include_memory_analysis)
             return {"ok": True}
 
         def _profile_batch(profile_suite, coil_dofs_batch):
@@ -5685,6 +5775,7 @@ class SingleStageExampleTests(unittest.TestCase):
             unittest.mock.ANY,
             use_value_and_grad=False,
             profile_target_lane=True,
+            profile_target_lane_memory_analysis=False,
             profile_batch_size=3,
             outer_objective_config="config-marker",
             success_filter=None,
@@ -5772,6 +5863,7 @@ class SingleStageExampleTests(unittest.TestCase):
             unittest.mock.ANY,
             use_value_and_grad=True,
             profile_target_lane=False,
+            profile_target_lane_memory_analysis=False,
             profile_batch_size=1,
             outer_objective_config="config-marker",
             success_filter=None,

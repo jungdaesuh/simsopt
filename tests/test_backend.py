@@ -486,6 +486,7 @@ def test_field_kernel_tuning_defaults_follow_mode(monkeypatch):
     assert tuning.chunk_policy == "performance_tuned"
     assert tuning.coil_chunk_size == 64
     assert tuning.quadrature_block_size == 64
+    assert tuning.point_chunk_size == 1024
     assert backend.get_coil_chunk_size("jax_cpu_parity") == 16
     assert backend.get_quadrature_block_size("jax_cpu_parity") == 0
 
@@ -494,12 +495,22 @@ def test_field_kernel_tuning_allows_explicit_env_overrides(monkeypatch):
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("SIMSOPT_JAX_COIL_CHUNK_SIZE", "23")
     monkeypatch.setenv("SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE", "11")
+    monkeypatch.setenv("SIMSOPT_JAX_POINT_CHUNK_SIZE", "13")
     backend = _fresh_backend()
 
     tuning = backend.get_field_kernel_tuning("jax_gpu_fast")
 
     assert tuning.coil_chunk_size == 23
     assert tuning.quadrature_block_size == 11
+    assert tuning.point_chunk_size == 13
+
+
+def test_point_chunk_size_allows_explicit_env_override(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_JAX_POINT_CHUNK_SIZE", "13")
+    backend = _fresh_backend()
+
+    assert backend.get_point_chunk_size("jax_gpu_fast") == 13
 
 
 def test_pairwise_penalty_chunk_size_allows_explicit_env_override(monkeypatch):
@@ -513,6 +524,7 @@ def test_pairwise_penalty_chunk_size_allows_explicit_env_override(monkeypatch):
 def test_transfer_guard_disallow_forces_dense_audit_field_tuning(monkeypatch):
     _clear_backend_env(monkeypatch)
     _disable_chunk_autotune(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_JAX_POINT_CHUNK_SIZE", "13")
     backend = _fresh_backend()
 
     backend.set_backend(
@@ -527,6 +539,7 @@ def test_transfer_guard_disallow_forces_dense_audit_field_tuning(monkeypatch):
     assert tuning.chunk_policy == "stable_default_dense_audit"
     assert tuning.coil_chunk_size == 0
     assert tuning.quadrature_block_size == 0
+    assert tuning.point_chunk_size == 0
     assert backend.get_pairwise_penalty_chunk_size("jax_cpu_parity") == 256
 
 
@@ -548,6 +561,7 @@ def test_chunk_tuning_autotunes_gpu_fast_from_memory_budget_env(monkeypatch):
     assert tuning.point_chunk_size == 2048
     assert tuning.pairwise_penalty_chunk_size == 2048
     assert backend.get_field_kernel_tuning().coil_chunk_size == 128
+    assert backend.get_field_kernel_tuning().point_chunk_size == 2048
     assert backend.get_point_chunk_size() == 2048
     assert backend.get_pairwise_penalty_chunk_size() == 2048
 
@@ -558,6 +572,7 @@ def test_chunk_tuning_autotune_respects_explicit_env_overrides(monkeypatch):
     monkeypatch.setenv("SIMSOPT_JAX_GPU_MEMORY_TOTAL_MB", "24576")
     monkeypatch.setenv("SIMSOPT_JAX_COIL_CHUNK_SIZE", "19")
     monkeypatch.setenv("SIMSOPT_JAX_QUADRATURE_BLOCK_SIZE", "7")
+    monkeypatch.setenv("SIMSOPT_JAX_POINT_CHUNK_SIZE", "13")
     monkeypatch.setenv("SIMSOPT_JAX_PENALTY_POINT_CHUNK_SIZE", "11")
     backend = _fresh_backend()
 
@@ -566,7 +581,7 @@ def test_chunk_tuning_autotune_respects_explicit_env_overrides(monkeypatch):
     assert tuning.autotuned is True
     assert tuning.coil_chunk_size == 19
     assert tuning.quadrature_block_size == 7
-    assert tuning.point_chunk_size == 2048
+    assert tuning.point_chunk_size == 13
     assert tuning.pairwise_penalty_chunk_size == 11
 
 

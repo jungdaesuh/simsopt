@@ -18,7 +18,6 @@ import numpy as np
 
 from ..backend import (
     get_field_kernel_tuning,
-    get_point_chunk_size,
 )
 from ..backend.runtime import register_backend_cache_clear
 from ._device_scalars import device_one as _device_one
@@ -66,7 +65,7 @@ def _read_tuning_config() -> tuple:
     Resolves the backend config once to avoid repeated mode/policy lookups.
     """
     fkt = get_field_kernel_tuning()
-    return fkt.coil_chunk_size, fkt.quadrature_block_size, get_point_chunk_size()
+    return fkt.coil_chunk_size, fkt.quadrature_block_size, fkt.point_chunk_size
 
 
 # ── Array slicing primitives ──────────────────────────────────────────
@@ -327,8 +326,9 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
     # price of a fixed-shape loop body. Tune chunk_size against peak memory and
     # compile time instead of adding a second dynamic-shape path.
     padded_points = _pad_axis(points, axis=0, padded_size=padded_point_count)
+    remat_chunk_kernel = jax.checkpoint(chunk_kernel)
     first_chunk_points = _slice_point_chunk(padded_points, 0, chunk_size)
-    first_result = chunk_kernel(first_chunk_points)
+    first_result = remat_chunk_kernel(first_chunk_points)
     padded_result = _tree_dynamic_update(
         _tree_zeros_like_prefix(first_result, padded_point_count),
         first_result,
@@ -338,7 +338,7 @@ def _point_chunk_reduce(points, chunk_kernel, chunk_size):
     def body(chunk_index: int, acc):
         start = chunk_index * chunk_size
         chunk_points = _slice_point_chunk(padded_points, start, chunk_size)
-        chunk_result = chunk_kernel(chunk_points)
+        chunk_result = remat_chunk_kernel(chunk_points)
         return _tree_dynamic_update(acc, chunk_result, start)
 
     padded_result = lax.fori_loop(1, chunk_count, body, padded_result)
