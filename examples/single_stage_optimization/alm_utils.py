@@ -569,6 +569,17 @@ def _optional_float_array(evaluation: dict, key: str, fallback) -> np.ndarray | 
     return np.asarray(values, dtype=float).reshape(-1).copy()
 
 
+def _raw_signed_constraint_values(evaluation: dict, fallback) -> np.ndarray | None:
+    raw_constraint_values = _optional_float_array(evaluation, "raw_constraint_values", None)
+    if raw_constraint_values is not None:
+        return raw_constraint_values
+    return _optional_float_array(
+        evaluation,
+        "raw_surrogate_signed_constraint_values",
+        fallback,
+    )
+
+
 def _optional_string_list(evaluation: dict, key: str) -> list[str] | None:
     values = evaluation.get(key)
     if values is None:
@@ -797,9 +808,8 @@ def _constraint_history_diagnostics_source(
     return {
         "constraint_names": [str(name) for name in constraint_names],
         "feasibility_values": feasibility_array,
-        "raw_signed_constraint_values": _optional_float_array(
+        "raw_signed_constraint_values": _raw_signed_constraint_values(
             evaluation,
-            "raw_dual_update_values",
             solver_constraint_array,
         ),
         "normalized_signed_constraint_values": _optional_float_array(
@@ -2602,6 +2612,29 @@ def minimize_alm(
             penalty_argument,
             final_feasibility_tolerance,
         )
+        raw_constraint_values = _raw_signed_constraint_values(
+            evaluation,
+            solver_constraint_values,
+        )
+        raw_solver_constraint_values = _optional_float_array(
+            evaluation,
+            "raw_solver_constraint_values",
+            raw_constraint_values,
+        )
+        normalized_signed_constraint_values = _optional_float_list(
+            evaluation,
+            "normalized_signed_constraint_values",
+            solver_constraint_values,
+        )
+        normalized_feasibility_values = _optional_float_list(
+            evaluation,
+            "normalized_feasibility_values",
+            feasibility_values,
+        )
+        raw_constraint_values_list = _optional_array_to_float_list(raw_constraint_values)
+        raw_solver_constraint_values_list = _optional_array_to_float_list(
+            raw_solver_constraint_values
+        )
         inner_optimizer_success = None
         inner_optimizer_message = None
         if inner_result is not None:
@@ -2638,28 +2671,12 @@ def minimize_alm(
             constraint_names=list(constraint_names),
             constraint_values=[float(value) for value in feasibility_values],
             solver_constraint_values=[float(value) for value in solver_constraint_values],
-            normalized_constraint_values=_as_float_list(feasibility_values),
+            normalized_constraint_values=normalized_signed_constraint_values,
             normalized_solver_constraint_values=_as_float_list(solver_constraint_values),
-            normalized_signed_constraint_values=_optional_float_list(
-                evaluation,
-                "normalized_signed_constraint_values",
-                solver_constraint_values,
-            ),
-            normalized_feasibility_values=_optional_float_list(
-                evaluation,
-                "normalized_feasibility_values",
-                feasibility_values,
-            ),
-            raw_constraint_values=_optional_float_list(
-                evaluation,
-                "raw_feasibility_values",
-                feasibility_values,
-            ),
-            raw_solver_constraint_values=_optional_float_list(
-                evaluation,
-                "raw_dual_update_values",
-                solver_constraint_values,
-            ),
+            normalized_signed_constraint_values=normalized_signed_constraint_values,
+            normalized_feasibility_values=normalized_feasibility_values,
+            raw_constraint_values=raw_constraint_values_list,
+            raw_solver_constraint_values=raw_solver_constraint_values_list,
             hard_signed_constraint_values=[
                 float(value)
                 for value in routing_state.signal_state.hard_signed_constraint_values

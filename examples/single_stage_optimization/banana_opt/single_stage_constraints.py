@@ -76,14 +76,15 @@ def smooth_min_curve_curve_signed_constraint(
             pair_blocks.append((i, j, block_min))
 
     if not pair_blocks:
+        signed_value = -float(minimum_distance)
         result = (
-            float(minimum_distance),
+            signed_value,
             zero_gradient_like(objective_optimizable.x),
             0.0,
         )
         return _with_optional_hard_signal(
             result,
-            float(minimum_distance),
+            signed_value,
             include_hard_signal,
         )
 

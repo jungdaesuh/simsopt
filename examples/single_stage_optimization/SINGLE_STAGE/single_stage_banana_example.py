@@ -6128,29 +6128,35 @@ def _first_present_alm_eval_value(evaluation, *keys):
 
 
 def _alm_result_view_from_search_eval(search_eval, multipliers):
+    raw_constraint_values = _first_present_alm_eval_value(
+        search_eval,
+        "raw_constraint_values",
+        "raw_surrogate_signed_constraint_values",
+        "raw_dual_update_values",
+        "constraint_values",
+    )
+    normalized_constraint_values = _first_present_alm_eval_value(
+        search_eval,
+        "normalized_signed_constraint_values",
+        "surrogate_signed_constraint_values",
+        "constraint_values",
+    )
+    raw_solver_constraint_values = _first_present_alm_eval_value(
+        search_eval,
+        "raw_solver_constraint_values",
+    )
+    if raw_solver_constraint_values is None:
+        raw_solver_constraint_values = raw_constraint_values
+
     return SimpleNamespace(
         constraint_names=search_eval.get("constraint_names"),
         raw_dual_estimates=alm_raw_dual_estimates(multipliers, search_eval),
         constraint_scales=search_eval.get("constraint_scales"),
         constraint_blocks=search_eval.get("constraint_blocks"),
         constraint_scale_sources=search_eval.get("constraint_scale_sources"),
-        raw_constraint_values=_first_present_alm_eval_value(
-            search_eval,
-            "raw_feasibility_values",
-            "feasibility_values",
-            "constraint_values",
-        ),
-        normalized_constraint_values=_first_present_alm_eval_value(
-            search_eval,
-            "normalized_feasibility_values",
-            "feasibility_values",
-            "constraint_values",
-        ),
-        raw_solver_constraint_values=_first_present_alm_eval_value(
-            search_eval,
-            "raw_dual_update_values",
-            "constraint_values",
-        ),
+        raw_constraint_values=raw_constraint_values,
+        normalized_constraint_values=normalized_constraint_values,
+        raw_solver_constraint_values=raw_solver_constraint_values,
         normalized_solver_constraint_values=search_eval.get("constraint_values"),
         raw_hard_signed_constraint_values=_first_present_alm_eval_value(
             search_eval,

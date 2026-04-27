@@ -1948,6 +1948,8 @@ def evaluate_stage2_alm_problem(
             "hard_dual_update_values": normalized_hard_signed_constraint_values,
             "normalized_signed_constraint_values": normalized_surrogate_signed_constraint_values,
             "normalized_feasibility_values": normalized_feasibility_values,
+            "raw_constraint_values": sanitized_surrogate_signed_constraint_values,
+            "raw_solver_constraint_values": sanitized_surrogate_signed_constraint_values,
             "raw_dual_update_values": raw_dual_update_values,
             "raw_feasibility_values": raw_feasibility_values,
             "raw_hard_signed_constraint_values": sanitized_hard_signed_constraint_values,

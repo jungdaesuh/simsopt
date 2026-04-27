@@ -4245,9 +4245,9 @@ class HardwareConstraintTests(unittest.TestCase):
                     "threshold:coil_length_upper_bound",
                     "threshold:banana_current_upper_bound",
                 ],
-                "constraint_values": np.array([6.0e-4, -1.0e-4]),
-                "raw_feasibility_values": np.array([1.6e1, -3.2]),
-                "normalized_feasibility_values": np.array([1.0e-3, -2.0e-4]),
+                "constraint_values": np.array([1.0e-3, -2.0e-4]),
+                "raw_feasibility_values": np.array([1.6e1, 0.0]),
+                "normalized_feasibility_values": np.array([1.0e-3, 0.0]),
                 "raw_dual_update_values": np.array([9.6, -1.6]),
                 "dual_update_values": np.array([7.0e-4, -1.1e-4]),
                 "raw_hard_dual_update_values": np.array([13.5, -2.2]),
@@ -4332,10 +4332,10 @@ class HardwareConstraintTests(unittest.TestCase):
             payload["ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES"],
             [1.0e-3, -2.0e-4],
         )
-        self.assertEqual(payload["ALM_FINAL_SOLVER_CONSTRAINT_VALUES"], [9.6, -1.6])
+        self.assertEqual(payload["ALM_FINAL_SOLVER_CONSTRAINT_VALUES"], [16.0, -3.2])
         self.assertEqual(
             payload["ALM_FINAL_NORMALIZED_SOLVER_CONSTRAINT_VALUES"],
-            [6.0e-4, -1.0e-4],
+            [1.0e-3, -2.0e-4],
         )
         self.assertEqual(payload["ALM_FINAL_HARD_SIGNED_CONSTRAINT_VALUES"], [14.0, -2.5])
         self.assertEqual(

@@ -593,6 +593,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 result["raw_feasibility_values"][index],
                 expected_raw_feasibility,
             )
+        np.testing.assert_allclose(
+            result["raw_constraint_values"],
+            result["raw_surrogate_signed_constraint_values"],
+        )
+        np.testing.assert_allclose(
+            result["raw_solver_constraint_values"],
+            result["raw_surrogate_signed_constraint_values"],
+        )
 
     def _assert_restored_fake_boozer_state(self, fake_boozer_surface):
         np.testing.assert_allclose(fake_boozer_surface.surface.x, [0.0, 0.0])
@@ -3010,6 +3018,8 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         np.testing.assert_allclose(result["feasibility_values"], [0.2])
         np.testing.assert_allclose(result["hard_signed_constraint_values"], [0.2])
         np.testing.assert_allclose(result["surrogate_signed_constraint_values"], [0.4])
+        np.testing.assert_allclose(result["raw_constraint_values"], [0.02])
+        np.testing.assert_allclose(result["raw_solver_constraint_values"], [0.02])
         np.testing.assert_allclose(result["raw_dual_update_values"], [0.01])
         np.testing.assert_allclose(result["raw_hard_signed_constraint_values"], [0.01])
         np.testing.assert_allclose(
@@ -4207,17 +4217,20 @@ class SingleStageConstraintModuleTests(_ModuleTestCase):
         objective = SimpleNamespace(x=np.array([2.0, -3.0]))
         curve = _FakeCurve(gamma_points=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
 
-        signed_value, grad, violation = (
+        signed_value, grad, violation, hard_signed_value, hard_violation = (
             self.module.smooth_min_curve_curve_signed_constraint(
                 [curve],
                 minimum_distance=0.05,
                 temperature=0.01,
                 objective_optimizable=objective,
+                include_hard_signal=True,
             )
         )
 
-        self.assertAlmostEqual(signed_value, 0.05)
+        self.assertAlmostEqual(signed_value, -0.05)
         self.assertEqual(violation, 0.0)
+        self.assertAlmostEqual(hard_signed_value, -0.05)
+        self.assertEqual(hard_violation, 0.0)
         np.testing.assert_allclose(grad, [0.0, 0.0])
 
     def test_smooth_min_surface_surface_signed_constraint_reports_positive_violation(

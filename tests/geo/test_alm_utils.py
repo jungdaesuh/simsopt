@@ -2133,6 +2133,50 @@ class MinimizeAlmTests(unittest.TestCase):
         np.testing.assert_allclose(result.raw_dual_estimates, [0.2 / scale])
         self.assertTrue(result.multiplier_cap_binding)
 
+    def test_minimize_alm_result_preserves_raw_signed_constraint_values(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(max_outer_iterations=1)
+        raw_signed = -2.0
+        raw_dual_update = -1.25
+        scale = 5.0
+        normalized_signed = raw_signed / scale
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x, multipliers, penalty
+            return {
+                "total": 0.0,
+                "grad": np.zeros(1),
+                "constraint_values": np.array([normalized_signed]),
+                "dual_update_values": np.array([raw_dual_update / scale]),
+                "feasibility_values": np.array([0.0]),
+                "constraint_grads": [np.zeros(1)],
+                "normalized_signed_constraint_values": np.array([normalized_signed]),
+                "normalized_feasibility_values": np.array([0.0]),
+                "raw_constraint_values": np.array([raw_signed]),
+                "raw_dual_update_values": np.array([raw_dual_update]),
+                "raw_feasibility_values": np.array([0.0]),
+                "raw_surrogate_signed_constraint_values": np.array([raw_signed]),
+                "constraint_scales": np.array([scale]),
+                "stationarity_norm": 0.0,
+            }
+
+        result = module.minimize_alm(
+            np.zeros(1),
+            ["signed_gap"],
+            evaluate_problem,
+            settings,
+            {"maxiter": 1},
+        )
+
+        np.testing.assert_allclose(result.raw_constraint_values, [raw_signed])
+        np.testing.assert_allclose(result.raw_solver_constraint_values, [raw_signed])
+        np.testing.assert_allclose(result.raw_dual_update_values, [raw_dual_update])
+        np.testing.assert_allclose(
+            result.normalized_constraint_values,
+            [normalized_signed],
+        )
+        np.testing.assert_allclose(result.normalized_feasibility_values, [0.0])
+
     def test_minimize_alm_history_entry_has_stable_schema(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(

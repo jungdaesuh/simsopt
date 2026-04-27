@@ -1454,6 +1454,8 @@ def evaluate_alm_objective(
     ]
     base_eval["search_hardware_constraint_payload_kind"] = "signed_residual"
     base_eval.update(metadata_payload)
+    base_eval["raw_constraint_values"] = np.asarray(constraint_values, dtype=float)
+    base_eval["raw_solver_constraint_values"] = np.asarray(constraint_values, dtype=float)
     base_eval["raw_dual_update_values"] = np.asarray(dual_update_values, dtype=float)
     base_eval["raw_feasibility_values"] = np.asarray(feasibility_values, dtype=float)
     base_eval["raw_hard_signed_constraint_values"] = np.asarray(
