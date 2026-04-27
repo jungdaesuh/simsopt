@@ -227,7 +227,7 @@ The main remaining single-stage work after the GPU-port proof is donor/seed/sear
 - [x] **53.** ~~`optimizer_jax_private/*.py` — add inline algorithm references (e.g., "Nocedal & Wright, *Numerical Optimization*, Algorithm 7.4" for L-BFGS two-loop).~~ **DONE** — `_lbfgs.py` documents the Nocedal-Wright Algorithm 7.4 two-loop recursion contract, and `_line_search.py` documents the strong-Wolfe bracketing/zoom reference.
 - [x] **54.** ~~`biotsavart.py:468-470` — add explicit `in_axes=(0,)` to the outer `jax.vmap` (currently relies on default).~~ **DONE** — both per-point and tangent-basis `vmap` calls now spell out `in_axes=(0,)`.
 - [x] **55.** ~~`biotsavart.py:224-227, 282-283, 314` — document padding overhead budget and the `chunk_size` tuning trade-off (when is 2× overhead acceptable vs when should chunk_size be raised).~~ **DONE** — coil, quadrature, and point chunk-padding sites now document the bounded zero-padding budget and when `chunk_size` should be retuned.
-- [ ] **56.** `biotsavart.py:201-279` — profile the coil/quadrature two-chunk fast path special-cases against the padded `fori_loop` path. If <5% improvement, delete for simplicity. The old `surface_rzfourier.py:260-279` pointer is stale: current RZ geometry uses the fused `surface_rz_fourier_geometry_from_spec(...)` route and has no two-chunk fast path.
+- [x] **56.** ~~`biotsavart.py:201-279` — profile the coil/quadrature two-chunk fast path special-cases against the padded `fori_loop` path. If <5% improvement, delete for simplicity. The old `surface_rzfourier.py:260-279` pointer is stale: current RZ geometry uses the fused `surface_rz_fourier_geometry_from_spec(...)` route and has no two-chunk fast path.~~ **DONE** — a local CPU benchmark compared the current special branches with a monkeypatched generic padded-`fori_loop` implementation. For exact two coil chunks plus two quadrature blocks, `B` measured 44.72% faster median warm runtime and `B_and_dB` measured 58.74% faster; `A` was effectively neutral at -2.10%. The branches stay because the field/gradient hot paths earn the complexity.
 - [x] **57.** ~~Document the `biot_savart_d2B_by_dXdX` Hessian kernel memory cost (3×N tensor per point) at `biotsavart.py:550-553`.~~ **DONE** — the public Hessian helper now documents the `(npoints, 3, 3, 3)` dense materialization cost and points callers to `biot_savart_B_and_dB` unless second point derivatives are required.
 - [x] **58.** ~~`curve_geometry.py:486-572` — `segment_segment_distance_pure` uses 5 levels of nested `lax.cond`. Correct but hard to review. Add a comment diagram or split.~~ **DONE** — `segment_segment_distance_pure` now includes a branch map in its docstring without changing the JAX control-flow kernel.
 - [x] **59.** ~~Document the PLU ill-conditioning finding in a code comment near `_solve_boozer_adjoint` at `surfaceobjectives_jax.py:265-268` — explain why iterative refinement is on by default and why CPU/JAX direct parity is impossible on the exact path.~~ **DONE** — `_solve_boozer_adjoint` now documents that the exact-adjoint runtime uses operator-backed callbacks with residual refinement by default, and that dense PLU CPU LAPACK vs JAX/XLA solves are not a direct adjoint-vector parity contract. `_traceable_solve_plu_linearization` also states the residual-quality success contract.
@@ -239,11 +239,11 @@ The main remaining single-stage work after the GPU-port proof is donor/seed/sear
 
 **Last audit:** 2026-04-27
 
-**Original audit total:** 60 items — **55 done, 2 partial, 3 open**
+**Original audit total:** 60 items — **56 done, 2 partial, 2 open**
 
 **Review addendum total:** 26 items — **26 done, 0 partial, 0 open** (`#61-#86`)
 
-**Combined total:** 86 items — **81 done, 2 partial, 3 open**
+**Combined total:** 86 items — **82 done, 2 partial, 2 open**
 
 | Tier | Items | Done | Partial | Open |
 |------|-------|------|---------|------|
@@ -252,7 +252,7 @@ The main remaining single-stage work after the GPU-port proof is donor/seed/sear
 | 2 — Transfer-guard | 11 | **11** (12-22) | 0 | 0 |
 | 3 — Performance | 15 | **11** (23,25,28,30-37) | **2** (24,27) | **2** (26,29) |
 | 4 — Test coverage | 12 | **12** (38-49) | 0 | 0 |
-| 5 — Docs/cleanup | 11 | **10** (50-55,57-60) | 0 | **1** (56) |
+| 5 — Docs/cleanup | 11 | **11** (50-60) | 0 | 0 |
 
 **Estimated remaining effort:**
 - Tier 0: **CLEARED**
@@ -260,6 +260,6 @@ The main remaining single-stage work after the GPU-port proof is donor/seed/sear
 - Tier 2: **CLEARED**
 - Tier 3: benchmark/hardware gated (#24, #26, #27, #29)
 - Tier 4: **CLEARED**
-- Tier 5: one benchmark cleanup (#56)
+- Tier 5: **CLEARED**
 
 **None of these items invalidate the port.** The validation concluded the JAX port is correctly built on JAX idioms and production-grade for Stage-2 outer optimization on single-GPU (L4 evidence: 254/255 tests, 238 MB VRAM, bitwise reproducible; V100: 33× speedup). This list represents the punchlist between "research-usable on L4" and "production-ready strict-cuda on A100 with `disallow` baseline".

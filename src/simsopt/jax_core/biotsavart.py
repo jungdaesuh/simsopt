@@ -199,6 +199,7 @@ def _coil_chunk_reduce(
 
     chunk_count = (coil_count + chunk_size - 1) // chunk_size
     if chunk_count == 2:
+        # Exact two-chunk shapes avoid padded loop overhead in B/B+dB hot paths.
         second_chunk_size = coil_count - chunk_size
         return _two_chunk_sum(
             (
@@ -261,6 +262,7 @@ def _quadrature_block_integral(
 
     block_count = (quadrature_count + block_size - 1) // block_size
     if block_count == 2:
+        # Exact two-block shapes avoid padded loop overhead in B/B+dB hot paths.
         second_block_size = quadrature_count - block_size
         return (
             _two_chunk_sum(
