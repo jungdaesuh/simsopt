@@ -110,7 +110,12 @@ def main() -> None:
         memory_analysis_for_chunk_size(args, points_a, points_b, chunk_size)
         for chunk_size in args.chunk_sizes
     ]
-    payload = {"measurements": results}
+    payload = {
+        "backend": jax.default_backend(),
+        "jax_version": jax.__version__,
+        "measurements": results,
+        "platform": args.platform,
+    }
     text = json.dumps(payload, indent=2, sort_keys=True)
     print(text)
     if args.output_json is not None:
