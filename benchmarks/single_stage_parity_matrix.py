@@ -231,19 +231,49 @@ def _same_state_value_grad_summary(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _load_optimizer_state_trace(progress_json: str | None) -> list[dict[str, Any]]:
+def _load_optimizer_result(progress_json: str | None) -> dict[str, Any] | None:
     if progress_json is None:
-        return []
+        return None
     payload = load_json(progress_json)
     events = payload["events"]
     for event in reversed(events):
         result = event.get("result")
         if not result:
             continue
-        trace = result.get("optimizer_state_trace", [])
-        if trace:
-            return list(trace)
+        return dict(result)
+    return None
+
+
+def _load_optimizer_state_trace(progress_json: str | None) -> list[dict[str, Any]]:
+    result = _load_optimizer_result(progress_json)
+    if result is None:
+        return []
+    trace = result.get("optimizer_state_trace", [])
+    if trace:
+        return list(trace)
     return []
+
+
+def _progress_termination_values(
+    report_terminations: dict[str, str],
+    *,
+    cpu_progress_json: str | None,
+    jax_cpu_progress_json: str | None,
+    gpu_progress_json: str | None,
+) -> dict[str, str]:
+    terminations = dict(report_terminations)
+    for lane, progress_json in (
+        (LANE_CPU_SCIPY, cpu_progress_json),
+        (LANE_JAX_CPU, jax_cpu_progress_json),
+        (LANE_H100_GPU, gpu_progress_json),
+    ):
+        result = _load_optimizer_result(progress_json)
+        if result is None:
+            continue
+        message = result.get("message")
+        if message is not None:
+            terminations[lane] = str(message)
+    return terminations
 
 
 def _summary_vector_values(entry: dict[str, Any], key: str) -> np.ndarray:
@@ -355,7 +385,12 @@ def build_single_stage_parity_matrix(
     gpu_progress_json: str | None = None,
 ) -> dict[str, Any]:
     metrics = report["same_seed_no_optimizer_metrics"]
-    terminations = _termination_values(metrics)
+    terminations = _progress_termination_values(
+        _termination_values(metrics),
+        cpu_progress_json=cpu_progress_json,
+        jax_cpu_progress_json=jax_cpu_progress_json,
+        gpu_progress_json=gpu_progress_json,
+    )
     cpu_jax_metrics = _comparison_summary(
         _merged_metric_comparisons(
             metrics,

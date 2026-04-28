@@ -1182,7 +1182,7 @@ def _optimizer_trace_entry():
     }
 
 
-def _write_optimizer_trace_progress(path: Path, entry=None):
+def _write_optimizer_trace_progress(path: Path, entry=None, *, message="ok"):
     if entry is None:
         entry = _optimizer_trace_entry()
     path.write_text(
@@ -1192,7 +1192,8 @@ def _write_optimizer_trace_progress(path: Path, entry=None):
                     {
                         "label": "phase2_returned",
                         "result": {
-                            "optimizer_state_trace": [entry]
+                            "message": message,
+                            "optimizer_state_trace": [entry],
                         },
                     }
                 ]
@@ -1254,6 +1255,28 @@ def test_single_stage_parity_matrix_accepts_matched_optimizer_state_traces(tmp_p
     assert comparisons["optimizer_state_trace_pairs"]["status"] == "pass"
     assert comparisons["full_trajectory_parity"]["status"] == "pass"
     assert matrix["passed"] is True
+
+
+def test_single_stage_parity_matrix_uses_progress_terminations(tmp_path):
+    jax_cpu_progress = tmp_path / "jax_cpu_progress.json"
+    gpu_progress = tmp_path / "gpu_progress.json"
+    _write_optimizer_trace_progress(jax_cpu_progress, message="matched")
+    _write_optimizer_trace_progress(gpu_progress, message="matched")
+    report = _single_stage_parity_report()
+    report["same_seed_no_optimizer_metrics"]["TERMINATION_MESSAGE"]["values"][
+        "h100_gpu"
+    ] = "stale"
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        report,
+        jax_cpu_progress_json=str(jax_cpu_progress),
+        gpu_progress_json=str(gpu_progress),
+    )
+
+    full_trajectory = matrix["comparisons"]["full_trajectory_parity"]
+    assert full_trajectory["status"] == "pass"
+    assert full_trajectory["termination_messages"]["jax_cpu"] == "matched"
+    assert full_trajectory["termination_messages"]["h100_gpu"] == "matched"
 
 
 def test_single_stage_parity_matrix_reports_drifted_optimizer_state_traces(tmp_path):

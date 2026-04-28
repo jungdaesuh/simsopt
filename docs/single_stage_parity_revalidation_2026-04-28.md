@@ -2,14 +2,17 @@
 
 ## Status
 
-The H100 production target-lane run is end-to-end successful and fast. The
-strongest parity result is same-state JAX CPU vs H100 value-and-gradient parity:
-the objective and gradient agree to floating-point roundoff.
+The H100 production target-lane run is end-to-end successful and fast. With the
+same runtime seed spec and the same equilibrium file pinned, JAX CPU vs H100
+full optimizer trajectory parity now passes: the initial objective/gradient,
+first L-BFGS/Wolfe step trace, termination mode, and final metrics agree to
+floating-point roundoff.
 
-Full optimizer final-state parity is close but not identical. That is expected
-until all lanes record and compare the same optimizer trajectory. Optimizers are
-path-sensitive: a tiny difference in one value, gradient, or Wolfe line-search
-decision can send later accepted steps to a slightly different valid point.
+The earlier JAX CPU vs H100 final-state delta was a mismatched-input result, not
+a backend parity result. The old local JAX CPU artifact used a different
+runtime seed spec and `wout_nfp5ginsburg_000_014417_iota15.nc`, while the H100
+production artifact used the H100-generated runtime seed spec and
+`wout_nfp5ginsburg_desc_iota21.nc`.
 
 CPU/C++ full-trajectory parity is not yet proven because the current CPU/C++
 artifact is an initialization/reference artifact, not a matching full optimizer
@@ -36,6 +39,14 @@ Current parity matrix inputs:
 - Parity matrix: `.artifacts/parity/20260427-single-stage-parity-matrix.json`
 - Native CPU/C++ reference init: `.artifacts/parity/20260427-fresh2-cpu-reference-init/mpol=10-ntor=10-e78dcc9e/results.json`
 - JAX CPU full optimizer artifact: `.artifacts/parity/20260427-fresh3-jax-cpu-m20/mpol=10-ntor=10-b53e6701/results.json`
+
+Matched JAX CPU vs H100 trajectory revalidation:
+
+- JAX CPU artifact: `.artifacts/parity/20260428-jax-cpu-h100spec-m20/mpol=10-ntor=10-f5fde9e8`
+- H100 artifact: `.artifacts/runpod_single_stage_continuation/20260428-h100-gitclone-e2e1/continuation-20260428-h100-gitclone-e2e1/stage-01-final/mpol=10-ntor=10-856215fc`
+- Matrix: `.artifacts/parity/20260428-jaxcpu-h100-matched-trajectory-matrix.json`
+- Runtime seed spec: `.artifacts/runpod_single_stage_continuation/20260428-h100-gitclone-e2e1/continuation-20260428-h100-gitclone-e2e1/stage-01-final/single_stage_jax_runtime_spec.json`
+- Equilibrium file: `wout_nfp5ginsburg_desc_iota21.nc`
 
 ## Lay Interpretation
 
@@ -85,16 +96,18 @@ compilation, a separate memory diagnostic, artifact transfer, and pod shutdown.
 | Lane | Artifact type | Script time | Optimizer time | Boozer solve time |
 | --- | --- | ---: | ---: | ---: |
 | Native CPU/C++ | init/reference only | 558.476 s | n/a | 329.263 s |
-| JAX CPU | full `maxiter=20` optimizer | 11676.612 s | 10309.253 s | 300.386 s |
+| JAX CPU | matched H100-spec full `maxiter=20` optimizer | 12151.064 s | 10738.886 s | 349.401 s |
 | H100 GPU | full `maxiter=20` optimizer | 452.657 s | 336.827 s | 25.620 s |
 
 Derived speedups for the comparable JAX CPU full optimizer artifact:
 
 | Metric | H100 speedup |
 | --- | ---: |
-| Total script time | 25.8x |
-| Outer optimizer time | 30.6x |
-| Boozer solve time | 11.7x |
+| Total script time | 26.8x |
+| Outer optimizer time | 31.9x |
+| Outer optimizer main time | 34.3x |
+| Boozer solve time | 13.6x |
+| Final sync time | 19.3x |
 
 ## Current Memory Result
 
@@ -127,21 +140,35 @@ This is the strongest result and currently passes.
 Interpretation: the JAX CPU and H100 physics objective agree to roundoff when
 evaluating the same state.
 
-### JAX CPU vs H100 Full Optimizer Final State
+### JAX CPU vs H100 Matched Full Optimizer Trajectory
 
-Both lanes succeed, but they land at slightly different valid final points.
+This now passes when the exact H100 runtime seed spec and equilibrium file are
+used for the local JAX CPU run.
 
 | Metric | H100 | JAX CPU | Absolute delta |
 | --- | ---: | ---: | ---: |
-| Final objective | 0.0008324085304084091 | 0.0008323486959847253 | 5.983442368385616e-08 |
-| Field error | 0.0003787698258266065 | 0.0003786184210519463 | 1.514047746602339e-07 |
-| Final iota | 0.24993804793782737 | 0.2499444945641246 | 6.446626297229585e-06 |
-| Final volume | 0.03996462582481037 | 0.039964503699568193 | 1.2212524217597442e-07 |
-| Max curvature | 94.08851557341214 | 94.09060749137089 | 0.002091917958750855 |
+| Initial objective | 0.000832581303274389 | 0.0008325813032743884 | 6.505213034913027e-19 |
+| Initial gradient inf norm | 0.09551401638962072 | 0.09551401638962628 | 5.564992910933897e-15 |
+| Wolfe step scale | 1.1156996276848725e-05 | 1.1156996276867145e-05 | 1.8419888171169152e-17 |
+| Trial objective | 0.0008324085304084091 | 0.0008324085304084086 | 5.421010862427522e-19 |
+| Trial gradient inf norm | 0.0911515659841868 | 0.09115156598433846 | 1.5165646516379638e-13 |
+| Final objective | 0.0008324085304084091 | 0.0008324085304084086 | 5.421010862427522e-19 |
+| Field error | 0.0003787698258266065 | 0.0003787698258266135 | 6.993104012531504e-18 |
+| Final iota | 0.24993804793782737 | 0.24993804793782742 | 5.551115123125783e-17 |
+| Final volume | 0.03996462582481037 | 0.03996462582481035 | 2.0816681711721685e-17 |
+| Max curvature | 94.08851557341214 | 94.08851557341211 | 2.842170943040401e-14 |
 
-Interpretation: this is close scientific parity, but not trajectory parity.
-The parity matrix marks full trajectory parity blocked because matched
-`optimizer_state_trace` entries are missing.
+The trace-pair comparison in
+`.artifacts/parity/20260428-jaxcpu-h100-matched-trajectory-matrix.json` reports:
+
+- `optimizer_state_trace_pairs.status = pass`
+- `full_trajectory_parity.status = pass`
+- `line_search_statuses = [0, 0]`
+- termination messages match: `Optimization terminated successfully (ftol).`
+
+The matrix process still exits nonzero because the older merged report includes
+the open CPU/C++ vs JAX CPU same-seed metric drift. That is a separate
+reference-lane issue, not a JAX CPU vs H100 GPU trajectory issue.
 
 ### CPU/C++ vs JAX CPU Same-Seed Metrics
 
@@ -203,7 +230,9 @@ python benchmarks/single_stage_parity_matrix.py \
   --output-json .artifacts/parity/<new-matched-trajectory-matrix>.json
 ```
 
-Today this is blocked because matched progress traces are missing.
+This is now complete for JAX CPU vs H100. It remains blocked for CPU/C++ vs JAX
+CPU because the native CPU/C++ reference lane does not emit a comparable
+`optimizer_state_trace`.
 
 ### 3. Make JAX CPU and H100 run the exact same trajectory contract
 
@@ -297,19 +326,24 @@ What is proven:
 - H100 is much faster than JAX CPU for the comparable full optimizer artifact.
 - H100 memory use is under control.
 - JAX CPU and H100 same-state value/gradient parity is excellent.
+- JAX CPU and H100 full optimizer trajectory parity passes when the exact same
+  runtime seed spec and equilibrium file are used.
 - H100 reproduces the previous accepted H100 run to roundoff.
 
 What is not yet proven:
 
 - CPU/C++ full optimizer trajectory parity.
-- JAX CPU vs H100 full optimizer trace parity, because matched trace artifacts
-  have not yet been generated and compared.
+- CPU/C++ vs JAX CPU Boozer/operator parity at the term-by-term residual,
+  JVP, transpose-solve, and objective-component boundary.
 
 Next concrete work:
 
-1. Generate matched full-run progress traces for JAX CPU and H100.
-2. Generate a native CPU/C++ full-run progress trace if that lane supports the
+1. Generate a native CPU/C++ full-run progress trace if that lane supports the
    same optimizer contract.
+2. If the CPU/C++ lane cannot expose SciPy line-search internals, either add a
+   separate fixed-state CPU/C++ physics parity ladder or implement a
+   trace-capable reference optimizer instead of treating SciPy callback data as
+   equivalent to the target-lane trace.
 3. Run `benchmarks/single_stage_parity_matrix.py` with all progress files.
 4. If the first divergence is CPU/C++ vs JAX CPU, debug the Boozer
    residual/adjoint/operator boundary term-by-term.
