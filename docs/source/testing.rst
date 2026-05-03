@@ -27,6 +27,15 @@ you can run
 
 from the ``tests`` directory.
 
+The ``run_tests`` and ``run_tests_mpi`` scripts rebuild the editable
+``simsopt`` package before running tests, so the native ``simsoptpp`` extension
+matches the Python source in the checkout. If you run ``pytest`` or
+``unittest`` directly, first run this command from the repository root:
+
+.. code-block::
+
+    python -m pip install --force-reinstall --no-deps -e .
+
 For some of the tests involving MPI, it is useful to execute the tests
 for various numbers of processes to make sure the tests pass in each
 case. For this purpose, it is not necessary to run the entire test

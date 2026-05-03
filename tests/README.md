@@ -12,6 +12,14 @@ The layout of the subfolders within **tests** nearly mimics that of the simsopt 
 
 To run the tests, you must first install simsopt with `pip install .` from the main simsopt directory.
 Then, change to the `tests` directory, and run `python -m unittest` to run all tests.
+The repository-level `./run_tests` and `./run_tests_mpi` scripts rebuild the
+editable package before testing, so the native `simsoptpp` extension matches
+the Python source in the checkout. Before direct `pytest` or `unittest` runs,
+use:
+
+```bash
+python -m pip install --force-reinstall --no-deps -e .
+```
 
 Tests that instantiate `simsopt.mhd.Spec` require the full SPEC
 runtime, not just `py_spec`. In those environments,
