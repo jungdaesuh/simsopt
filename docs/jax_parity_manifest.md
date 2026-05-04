@@ -18,6 +18,11 @@ acceptance envelope, but iterate-by-iterate identity is not required.
 This matrix is the SSOT for the mirrored parity surface requested by
 `jax_parity_reduction_todos_2026-04-10.md`.
 
+Current Boozer closure work is tracked in
+[`boozer_full_parity_plan_2026-05-04.md`](boozer_full_parity_plan_2026-05-04.md),
+including the explicit mutable-identity exclusions and the current pass/fail
+watermark.
+
 | Upstream test | JAX test | Status | Notes |
 | --- | --- | --- | --- |
 | `tests/field/test_biotsavart.py` | `tests/field/test_biotsavart_jax_parity.py` | exact | Pure-kernel mirror for `A/B`, spatial derivatives, Hessians, and VJP identities. |
