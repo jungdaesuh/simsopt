@@ -942,6 +942,137 @@ class TestOptimizerAdapter:
         np.testing.assert_allclose(result.x, np.asarray(x0))
         np.testing.assert_allclose(result.jac, np.asarray([-2.0, 2.0]))
 
+    @pytest.mark.parametrize(
+        "method",
+        ["lbfgs-scipy-jax", "lbfgs-scipy-jax-fullgraph"],
+    )
+    def test_target_scipy_jax_uses_scipy_control_with_jax_value_grad(
+        self, monkeypatch, method
+    ):
+        """The parity target lane keeps SciPy control and JAX value/grad evals."""
+        captured = {}
+
+        def fake_scipy_minimize(fun, x0, jac, method, options, callback=None):
+            captured["x0_type"] = type(x0)
+            captured["method"] = method
+            captured["options"] = dict(options)
+            captured["callback"] = callback
+            value, grad = fun(x0)
+            captured["value_type"] = type(value)
+            captured["grad_type"] = type(grad)
+            captured["grad_dtype"] = grad.dtype
+            return types.SimpleNamespace(
+                x=np.asarray(x0),
+                jac=np.asarray(grad),
+                fun=float(value),
+                nit=0,
+                nfev=1,
+                njev=1,
+                success=True,
+                status=0,
+            )
+
+        objective_inputs = []
+
+        def value_and_grad(x):
+            objective_inputs.append(type(x))
+            return jnp.sum((x - 1.0) ** 2), 2.0 * (x - 1.0)
+
+        monkeypatch.setattr(_opt, "_x64_enabled", lambda: True)
+        monkeypatch.setattr(_opt_ref, "scipy_minimize", fake_scipy_minimize)
+        x0 = jnp.array([0.0, 2.0], dtype=jnp.float64)
+
+        result = _opt.target_minimize(
+            value_and_grad,
+            x0,
+            method=method,
+            tol=1e-8,
+            maxiter=3,
+            options={"maxcor": 7, "ftol": 1e-12, "maxls": 9},
+            value_and_grad=True,
+        )
+
+        assert captured["x0_type"] is np.ndarray
+        assert captured["method"] == "L-BFGS-B"
+        assert captured["options"] == {
+            "maxiter": 3,
+            "gtol": 1e-8,
+            "maxcor": 7,
+            "ftol": 1e-12,
+            "maxls": 9,
+        }
+        assert captured["callback"] is None
+        assert captured["value_type"] is float
+        assert captured["grad_type"] is np.ndarray
+        assert captured["grad_dtype"] == np.dtype(jnp.float64)
+        assert objective_inputs
+        assert all(issubclass(input_type, jax.Array) for input_type in objective_inputs)
+        np.testing.assert_allclose(result.x, np.asarray(x0))
+        np.testing.assert_allclose(result.jac, np.asarray([-2.0, 2.0]))
+
+    @pytest.mark.parametrize(
+        "method",
+        ["lbfgs-scipy-jax", "lbfgs-scipy-jax-fullgraph"],
+    )
+    def test_target_scipy_jax_requires_explicit_value_grad(
+        self, monkeypatch, method
+    ):
+        monkeypatch.setattr(_opt, "_x64_enabled", lambda: True)
+        with pytest.raises(RuntimeError, match="requires value_and_grad=True"):
+            _opt.target_minimize(
+                lambda x: jnp.sum(x**2),
+                jnp.array([1.0], dtype=jnp.float64),
+                method=method,
+            )
+
+    def test_target_scipy_jax_fullstate_method_is_unsupported(self):
+        with pytest.raises(ValueError, match="only supports target-lane methods"):
+            _opt.target_minimize(
+                lambda x: (jnp.sum(x**2), 2.0 * x),
+                jnp.array([1.0], dtype=jnp.float64),
+                method="lbfgs-scipy-jax-fullstate",
+                value_and_grad=True,
+            )
+
+    def test_reference_lbfgs_trace_uses_host_core_without_scipy(self, monkeypatch):
+        """CPU/C++ trace lane must use the shared host L-BFGS core, not SciPy."""
+
+        def forbidden_scipy_minimize(*_args, **_kwargs):
+            raise AssertionError("lbfgs-trace must not enter scipy_minimize().")
+
+        monkeypatch.setattr(_opt_ref, "scipy_minimize", forbidden_scipy_minimize)
+        observed_argument_types = []
+
+        def explicit_quad(x):
+            observed_argument_types.append(type(x))
+            x = np.asarray(x, dtype=np.float64)
+            return float(0.5 * np.dot(x, x)), np.asarray(x, dtype=np.float64)
+
+        x0 = jnp.array([1.0, -2.0], dtype=jnp.float64)
+        result = _opt.reference_minimize(
+            explicit_quad,
+            x0,
+            method="lbfgs-trace",
+            tol=1e-10,
+            maxiter=3,
+            options={"ftol": 0.0, "initial_step_size": 1.0},
+            value_and_grad=True,
+            initial_value_and_grad=explicit_quad(np.asarray(x0)),
+        )
+
+        assert result.success is True
+        assert int(result.status) == 0
+        np.testing.assert_allclose(np.asarray(result.x), np.zeros(2), atol=1e-12)
+        np.testing.assert_allclose(np.asarray(result.jac), np.zeros(2), atol=1e-12)
+        assert observed_argument_types
+        assert all(arg_type is np.ndarray for arg_type in observed_argument_types)
+        assert len(result.optimizer_state_trace) == 1
+        trace = result.optimizer_state_trace[0]
+        assert trace["iteration"] == 1
+        assert trace["line_search_status"] == 0
+        assert trace["accepted"] is True
+        assert trace["wolfe_satisfied"] is True
+
     def test_scipy_minimize_does_not_cache_unmarked_objective(self, monkeypatch):
         """Generic optimizer callables should keep the historical fresh-jit semantics."""
         state = _patch_counting_scipy_minimize(monkeypatch)
@@ -2428,6 +2559,8 @@ class TestBoozerSurfaceJAXClass:
             ("scipy", True, "lbfgs"),
             ("ondevice", False, "bfgs-ondevice"),
             ("ondevice", True, "lbfgs-ondevice"),
+            ("scipy-jax", False, "lbfgs-scipy-jax"),
+            ("scipy-jax", True, "lbfgs-scipy-jax"),
         ],
     )
     def test_resolve_ls_optimizer_method_contract(
@@ -2459,6 +2592,7 @@ class TestBoozerSurfaceJAXClass:
             ("scipy", True, "quasi-newton", "lbfgs"),
             ("ondevice", False, "quasi-newton", "bfgs-ondevice"),
             ("ondevice", False, "lm", "lm-ondevice"),
+            ("scipy-jax", False, "quasi-newton", "lbfgs-scipy-jax"),
             ("scipy", False, "lm", "lm"),
         ],
     )
@@ -2500,7 +2634,7 @@ class TestBoozerSurfaceJAXClass:
                 least_squares_algorithm="lm",
             )
 
-    @pytest.mark.parametrize("optimizer_backend", ["ondevice"])
+    @pytest.mark.parametrize("optimizer_backend", ["ondevice", "scipy-jax"])
     def test_require_target_backend_x64_rejects_disabled_float64(
         self, monkeypatch, optimizer_backend
     ):

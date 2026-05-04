@@ -16,6 +16,12 @@ Target private methods (minimum supported JAX floor 0.9.2):
   - ``method="bfgs-ondevice"``: JAX on-device BFGS.
   - ``method="lbfgs-ondevice"``: JAX on-device L-BFGS.
 
+Target SciPy-control method:
+  - ``method="lbfgs-scipy-jax"``: host SciPy L-BFGS-B control with JAX
+    target-lane value/grad evaluations.
+  - ``method="lbfgs-scipy-jax-fullgraph"``: host SciPy L-BFGS-B control with
+    JAX value/grad evaluations over a caller-owned full Optimizable graph.
+
 Target public stochastic method:
   - ``method="adam-ondevice"``: trace-safe Adam for noisy/stochastic scalar
     objectives on the target lane.
@@ -66,6 +72,7 @@ __all__ = [
     "private_optimizer_runtime_is_supported",
     "VALID_LEAST_SQUARES_ALGORITHMS",
     "VALID_OPTIMIZER_BACKENDS",
+    "VALID_OUTER_OPTIMIZER_BACKENDS",
     "TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS",
     "jax_least_squares",
     "jax_minimize",
@@ -95,26 +102,42 @@ __all__ = [
 
 PRIVATE_OPTIMIZER_JAX_VERSION = "0.9.2"
 VALID_OPTIMIZER_BACKENDS = frozenset({"scipy", "ondevice"})
+VALID_OUTER_OPTIMIZER_BACKENDS = frozenset(
+    {"scipy", "ondevice", "scipy-jax", "scipy-jax-fullgraph"}
+)
 OPTIMIZER_BACKEND_ROLE = {
     "scipy": "reference",
     "ondevice": "target",
+    "scipy-jax": "target-scipy-control",
+    "scipy-jax-fullgraph": "target-scipy-control-fullgraph",
 }
-TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS = frozenset({"ondevice"})
+TARGET_X64_REQUIRED_OPTIMIZER_BACKENDS = frozenset(
+    {"ondevice", "scipy-jax", "scipy-jax-fullgraph"}
+)
 VALID_LEAST_SQUARES_ALGORITHMS = frozenset({"quasi-newton", "lm"})
 _SUPPORTED_METHODS = {
     "adam",
     "adam-ondevice",
     "bfgs",
     "lbfgs",
+    "lbfgs-scipy-jax",
+    "lbfgs-scipy-jax-fullgraph",
+    "lbfgs-trace",
     "bfgs-ondevice",
     "lbfgs-ondevice",
 }
 _SUPPORTED_LEAST_SQUARES_METHODS = frozenset({"lm", "lm-ondevice"})
 _REFERENCE_METHODS = frozenset({"bfgs", "lbfgs"})
+_REFERENCE_TRACE_METHODS = frozenset({"lbfgs-trace"})
 _REFERENCE_JAX_METHODS = frozenset({"adam"})
 _TARGET_PRIVATE_METHODS = frozenset({"bfgs-ondevice", "lbfgs-ondevice"})
+_TARGET_SCIPY_CONTROL_METHODS = frozenset(
+    {"lbfgs-scipy-jax", "lbfgs-scipy-jax-fullgraph"}
+)
 _TARGET_PUBLIC_METHODS = frozenset({"adam-ondevice"})
-_TARGET_METHODS = _TARGET_PRIVATE_METHODS | _TARGET_PUBLIC_METHODS
+_TARGET_METHODS = (
+    _TARGET_PRIVATE_METHODS | _TARGET_PUBLIC_METHODS | _TARGET_SCIPY_CONTROL_METHODS
+)
 _STRICT_REFERENCE_OPTIMIZER_DETAIL = "the host-side SciPy reference optimizer lane"
 _STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL = "the host-side JAX reference optimizer lane"
 _STRICT_REFERENCE_LEAST_SQUARES_DETAIL = (
@@ -251,6 +274,22 @@ def _require_native_cpu_reference_backend_for_scipy_adapter(
         return
     raise RuntimeError(
         f"{component} cannot use the host SciPy adapter for method={method!r} "
+        f"while simsopt backend mode {backend_config.mode!r} requires an "
+        "ondevice optimizer method. Select an ondevice optimizer method or "
+        "switch to the native_cpu reference backend."
+    )
+
+
+def _require_native_cpu_reference_backend_for_trace_adapter(
+    *,
+    component: str,
+    method: str,
+) -> None:
+    backend_config = get_backend_config()
+    if backend_config.backend != "jax":
+        return
+    raise RuntimeError(
+        f"{component} cannot use the CPU/C++ trace adapter for method={method!r} "
         f"while simsopt backend mode {backend_config.mode!r} requires an "
         "ondevice optimizer method. Select an ondevice optimizer method or "
         "switch to the native_cpu reference backend."
@@ -453,10 +492,17 @@ def __getattr__(name):
 
 def resolve_optimizer_backend_method(optimizer_backend, *, limited_memory):
     """Map the public backend contract to the concrete optimizer method."""
-    if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
-        raise ValueError("optimizer_backend must be one of: scipy, ondevice.")
+    if optimizer_backend not in VALID_OUTER_OPTIMIZER_BACKENDS:
+        raise ValueError(
+            "optimizer_backend must be one of: scipy, ondevice, scipy-jax, "
+            "scipy-jax-fullgraph."
+        )
     if optimizer_backend == "scipy":
         return resolve_reference_optimizer_method(limited_memory=limited_memory)
+    if optimizer_backend == "scipy-jax":
+        return "lbfgs-scipy-jax"
+    if optimizer_backend == "scipy-jax-fullgraph":
+        return "lbfgs-scipy-jax-fullgraph"
     return resolve_target_optimizer_method(limited_memory=limited_memory)
 
 
@@ -555,13 +601,17 @@ def resolve_reference_optimizer_contract(
     component_label,
 ):
     """Resolve the explicit CPU/reference optimizer contract."""
-    if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
-        raise ValueError("optimizer_backend must be one of: scipy, ondevice.")
+    if optimizer_backend not in VALID_OUTER_OPTIMIZER_BACKENDS:
+        raise ValueError(
+            "optimizer_backend must be one of: scipy, ondevice, scipy-jax, "
+            "scipy-jax-fullgraph."
+        )
     if field_backend == "jax":
         raise ValueError(
             f"{component_label} with backend='jax' requires "
-            "optimizer_backend='ondevice'. The SciPy/reference optimizer lane "
-            "is CPU/reference-only."
+            "optimizer_backend='ondevice', optimizer_backend='scipy-jax', or "
+            "optimizer_backend='scipy-jax-fullgraph'. "
+            "The SciPy/reference optimizer lane is CPU/reference-only."
         )
     if field_backend != "jax" and optimizer_backend != "scipy":
         raise ValueError(
@@ -584,15 +634,37 @@ def resolve_target_optimizer_contract(
     least_squares_algorithm="quasi-newton",
 ):
     """Resolve the explicit JAX target optimizer contract."""
-    if optimizer_backend not in VALID_OPTIMIZER_BACKENDS:
-        raise ValueError("optimizer_backend must be one of: scipy, ondevice.")
-    if field_backend != "jax" or optimizer_backend != "ondevice":
+    if optimizer_backend not in VALID_OUTER_OPTIMIZER_BACKENDS:
+        raise ValueError(
+            "optimizer_backend must be one of: scipy, ondevice, scipy-jax, "
+            "scipy-jax-fullgraph."
+        )
+    if field_backend != "jax" or optimizer_backend not in {
+        "ondevice",
+        "scipy-jax",
+        "scipy-jax-fullgraph",
+    }:
         raise ValueError(
             f"{component_label} with backend='jax' requires "
-            "optimizer_backend='ondevice'. The SciPy/reference optimizer lane "
-            "is CPU/reference-only."
+            "optimizer_backend='ondevice', optimizer_backend='scipy-jax', or "
+            "optimizer_backend='scipy-jax-fullgraph'. "
+            "The SciPy/reference optimizer lane is CPU/reference-only."
         )
     require_target_backend_x64(optimizer_backend)
+    if optimizer_backend in {"scipy-jax", "scipy-jax-fullgraph"}:
+        if least_squares_algorithm != "quasi-newton":
+            raise ValueError(
+                f"optimizer_backend={optimizer_backend!r} only supports "
+                "least_squares_algorithm='quasi-newton'."
+            )
+        method = resolve_optimizer_backend_method(
+            optimizer_backend,
+            limited_memory=limited_memory,
+        )
+        return TargetOptimizerContract(
+            method=method,
+            use_least_squares_objective=False,
+        )
     method = resolve_target_least_squares_optimizer_method(
         limited_memory=limited_memory,
         least_squares_algorithm=least_squares_algorithm,
@@ -2651,8 +2723,23 @@ def reference_minimize(
     value_and_grad=False,
     callback=None,
     progress_callback=None,
+    failure_callback=None,
+    initial_value_and_grad=None,
 ):
     """Explicit CPU/reference scalar optimizer entrypoint."""
+    if failure_callback is not None and method not in _REFERENCE_TRACE_METHODS:
+        raise ValueError(
+            "reference_minimize() only supports failure_callback for "
+            "method='lbfgs-trace'."
+        )
+    if (
+        initial_value_and_grad is not None
+        and (method not in _REFERENCE_TRACE_METHODS or not value_and_grad)
+    ):
+        raise ValueError(
+            "reference_minimize() only supports initial_value_and_grad for "
+            "explicit value-and-gradient objectives with method='lbfgs-trace'."
+        )
     if method in _REFERENCE_JAX_METHODS:
         _raise_if_target_lane_required(
             component="optimizer_jax.reference_minimize",
@@ -2685,6 +2772,8 @@ def reference_minimize(
         value_and_grad=value_and_grad,
         callback=callback,
         progress_callback=progress_callback,
+        failure_callback=failure_callback,
+        initial_value_and_grad=initial_value_and_grad,
     )
 
 
@@ -2716,6 +2805,39 @@ def target_minimize(
             "target_minimize() only supports initial_value_and_grad for "
             "explicit value-and-gradient objectives with method='lbfgs-ondevice'."
         )
+    if method in _TARGET_SCIPY_CONTROL_METHODS:
+        if not value_and_grad:
+            raise RuntimeError(
+                "target_minimize() requires value_and_grad=True for "
+                f"method={method!r}."
+            )
+        fun, x0, callback, pytree_adapter = _prepare_optimizer_callable_inputs(
+            fun,
+            x0,
+            value_and_grad=True,
+            callback=callback,
+        )
+        options = dict(options or {})
+        if callback is not None:
+            options["callback"] = callback
+        if progress_callback is not None:
+            options["progress_callback"] = progress_callback
+        required_backend = (
+            "scipy-jax-fullgraph"
+            if method == "lbfgs-scipy-jax-fullgraph"
+            else "scipy-jax"
+        )
+        require_target_backend_x64(required_backend)
+        reference_optimizer = _load_reference_optimizer_module()
+        result = reference_optimizer.target_scipy_minimize_value_and_grad(
+            fun,
+            x0,
+            method="lbfgs",
+            tol=tol,
+            maxiter=maxiter,
+            options=options,
+        )
+        return _finalize_optimizer_result(result, pytree_adapter)
     if method in _TARGET_PUBLIC_METHODS:
         require_target_backend_x64("ondevice")
         result = adam_optimize_traceable(
@@ -2830,7 +2952,7 @@ def jax_minimize(
             f"Unknown method {method!r}. Supported: {sorted(_SUPPORTED_METHODS)}."
         )
 
-    if method in _REFERENCE_METHODS | _REFERENCE_JAX_METHODS:
+    if method in _REFERENCE_METHODS | _REFERENCE_TRACE_METHODS | _REFERENCE_JAX_METHODS:
         detail = (
             _STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL
             if method in _REFERENCE_JAX_METHODS

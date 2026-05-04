@@ -114,7 +114,6 @@ def _zoom(
 ):
     dtype = a_lo.dtype
     zero = _as_jax_dtype(0.0, dtype)
-    one = _as_jax_dtype(1.0, dtype)
     half = _as_jax_dtype(0.5, dtype)
     delta1 = _as_jax_dtype(0.2, dtype)
     delta2 = _as_jax_dtype(0.1, dtype)
@@ -139,7 +138,7 @@ def _zoom(
         phi_rec=phi_rec,
         dphi_rec=dphi_rec,
         g_rec=g_rec,
-        a_star=one,
+        a_star=zero,
         phi_star=phi_lo,
         dphi_star=dphi_lo,
         g_star=g_lo,
@@ -189,6 +188,20 @@ def _zoom(
         a_j = jnp.where(use_cubic, a_j_cubic, state.a_rec)
         a_j = jnp.where(use_quad, a_j_quad, a_j)
         a_j = jnp.where((~use_cubic) & (~use_quad), a_j_bisection, a_j)
+
+        lo_valid = _line_search_sample_valid(state.phi_lo, state.dphi_lo, state.g_lo)
+        hi_valid = _line_search_sample_valid(state.phi_hi, state.dphi_hi, state.g_hi)
+        nonfinite_shrink = _as_jax_dtype(1.0e-2, dtype)
+        a_j = jnp.where(
+            lo_valid & (~hi_valid),
+            state.a_lo + nonfinite_shrink * (state.a_hi - state.a_lo),
+            a_j,
+        )
+        a_j = jnp.where(
+            hi_valid & (~lo_valid),
+            state.a_hi + nonfinite_shrink * (state.a_lo - state.a_hi),
+            a_j,
+        )
 
         reuse_rec_sample = state.has_rec & (a_j == state.a_rec)
         phi_j, dphi_j, g_j, sample_eval_count = lax.cond(
@@ -366,7 +379,6 @@ def _apply_zoom_branch_result(
     )
     improves_best = (
         _line_search_sample_valid(zoom.best_phi, zoom.best_dphi, zoom.best_g)
-        & (~wolfe_one(zoom.best_a, zoom.best_phi))
         & (zoom.best_phi < state.best_phi)
     )
     return state._replace(
@@ -482,9 +494,7 @@ def _line_search_from_restricted_func_and_grad(
             ngev=state.ngev + _int_scalar(1),
         )
         sample_valid = _line_search_sample_valid(phi_i, dphi_i, g_i)
-        improves_best_i = sample_valid & (~wolfe_one(a_i, phi_i)) & (
-            phi_i < state.best_phi
-        )
+        improves_best_i = sample_valid & (phi_i < state.best_phi)
         state = state._replace(
             best_a=jnp.where(improves_best_i, a_i, state.best_a),
             best_phi=jnp.where(improves_best_i, phi_i, state.best_phi),
@@ -636,9 +646,13 @@ def _line_search_from_restricted_func_and_grad(
     )
 
     status = jnp.where(
-        state.failed,
-        _int_scalar(1),
-        jnp.where(state.i > maxiter_jax, _int_scalar(3), _int_scalar(0)),
+        state.done & (~state.failed),
+        _int_scalar(0),
+        jnp.where(
+            state.failed,
+            _int_scalar(1),
+            jnp.where(state.i > maxiter_jax, _int_scalar(3), _int_scalar(0)),
+        ),
     )
     alpha_k = jnp.asarray(state.a_star)
     if jnp.finfo(alpha_k.dtype).bits != 64:

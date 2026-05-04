@@ -126,3 +126,10 @@ class _LBFGSInvalidStepLog(NamedTuple):
     valid_curvature: jax.Array
     trial_converged: jax.Array
     ls_status: jax.Array
+    requested_initial_step: jax.Array
+    first_tested_alpha: jax.Array
+    best_finite_alpha: jax.Array
+    returned_alpha: jax.Array
+    failure_reason: jax.Array
+    armijo_margin: jax.Array
+    curvature_margin: jax.Array

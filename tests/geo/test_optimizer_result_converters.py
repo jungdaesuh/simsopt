@@ -33,6 +33,13 @@ _INVALID_STEP_LOG_FIELDS = (
     ("valid_curvature", jnp.bool_, True),
     ("trial_converged", jnp.bool_, False),
     ("ls_status", jnp.int32, 0),
+    ("requested_initial_step", jnp.float64, 0.0),
+    ("first_tested_alpha", jnp.float64, 0.0),
+    ("best_finite_alpha", jnp.float64, 0.0),
+    ("returned_alpha", jnp.float64, 0.0),
+    ("failure_reason", jnp.int32, 0),
+    ("armijo_margin", jnp.float64, np.nan),
+    ("curvature_margin", jnp.float64, np.nan),
 )
 
 
@@ -239,6 +246,13 @@ def test_private_lbfgs_result_materializes_invalid_step_log():
                     "valid_curvature": True,
                     "trial_converged": False,
                     "ls_status": 7,
+                    "requested_initial_step": 0.25,
+                    "first_tested_alpha": 0.25,
+                    "best_finite_alpha": 0.125,
+                    "returned_alpha": 0.0,
+                    "failure_reason": 2,
+                    "armijo_margin": 1.0e-7,
+                    "curvature_margin": -1.0e-4,
                 },
             ),
         )
@@ -257,6 +271,13 @@ def test_private_lbfgs_result_materializes_invalid_step_log():
             "valid_curvature": True,
             "trial_converged": False,
             "ls_status": 7,
+            "requested_initial_step": 0.25,
+            "first_tested_alpha": 0.25,
+            "best_finite_alpha": 0.125,
+            "returned_alpha": 0.0,
+            "failure_reason": "line_search_failed",
+            "armijo_margin": 1.0e-7,
+            "curvature_margin": -1.0e-4,
         }
     ]
 

@@ -252,11 +252,32 @@ def test_line_search_value_and_grad_skips_zero_step_reevaluation_with_explicit_s
     assert float(result.f_k) == pytest.approx(0.5 * 0.875**2)
 
 
+def test_line_search_value_and_grad_accepts_finite_decrease_when_armijo_misses():
+    def armijo_miss_objective(x):
+        return jnp.asarray(0.99999, dtype=x.dtype), jnp.asarray([-0.5], dtype=x.dtype)
+
+    result = _opt._line_search_value_and_grad(
+        armijo_miss_objective,
+        jnp.asarray([0.0], dtype=jnp.float64),
+        jnp.asarray([1.0], dtype=jnp.float64),
+        old_fval=jnp.asarray(1.0, dtype=jnp.float64),
+        gfk=jnp.asarray([-1.0], dtype=jnp.float64),
+        initial_step_size=0.25,
+        maxiter=1,
+    )
+
+    assert bool(result.failed) is False
+    assert int(result.status) == 0
+    assert float(result.a_k) == pytest.approx(0.25)
+    assert float(result.f_k) == pytest.approx(0.99999)
+    np.testing.assert_allclose(np.asarray(result.g_k), np.asarray([-0.5]))
+
+
 def test_line_search_value_and_grad_shrinks_past_nonfinite_trial_gradient():
     def objective_with_invalid_gradient_region(x):
         a = x[0]
         value = -a + a * a
-        grad = jnp.where(a >= 0.1, jnp.nan, -1.0 + 2.0 * a)
+        grad = jnp.where(a >= 1.0e-6, jnp.nan, -1.0 + 2.0 * a)
         return value, jnp.asarray([grad], dtype=x.dtype)
 
     result = _opt._line_search_value_and_grad(
@@ -266,11 +287,11 @@ def test_line_search_value_and_grad_shrinks_past_nonfinite_trial_gradient():
         old_fval=jnp.asarray(0.0, dtype=jnp.float64),
         gfk=jnp.asarray([-1.0], dtype=jnp.float64),
         initial_step_size=0.2,
-        maxiter=12,
+        maxiter=6,
     )
 
     assert bool(result.failed) is False
-    assert float(result.a_k) < 0.1
+    assert float(result.a_k) < 1.0e-6
     assert np.isfinite(float(result.f_k))
     assert np.all(np.isfinite(np.asarray(result.g_k)))
 
@@ -281,7 +302,7 @@ def test_host_line_search_value_and_grad_shrinks_past_nonfinite_trial_gradient()
     def objective_with_invalid_gradient_region(x):
         a = np.asarray(x, dtype=np.float64)[0]
         value = -a + a * a
-        grad = np.nan if a >= 0.1 else -1.0 + 2.0 * a
+        grad = np.nan if a >= 1.0e-6 else -1.0 + 2.0 * a
         return value, np.asarray([grad], dtype=np.float64)
 
     result = _lbfgs_module._line_search_value_and_grad_host(
@@ -291,13 +312,121 @@ def test_host_line_search_value_and_grad_shrinks_past_nonfinite_trial_gradient()
         old_fval=np.float64(0.0),
         gfk=np.asarray([-1.0], dtype=np.float64),
         initial_step_size=0.2,
-        maxiter=12,
+        maxiter=6,
     )
 
     assert result.failed is False
-    assert result.a_k < 0.1
+    assert result.a_k < 1.0e-6
     assert np.isfinite(result.f_k)
     assert np.all(np.isfinite(result.g_k))
+
+
+def test_host_line_search_accepts_finite_decrease_when_armijo_misses():
+    import simsopt.geo.optimizer_host_lbfgs as host_lbfgs
+
+    def restricted_func_and_grad(alpha):
+        assert alpha == pytest.approx(0.25)
+        return 0.99999, -0.5, np.asarray([0.5], dtype=np.float64)
+
+    result = host_lbfgs._line_search_from_restricted_func_and_grad(
+        restricted_func_and_grad,
+        pk=np.asarray([-1.0], dtype=np.float64),
+        old_fval=1.0,
+        gfk=np.asarray([1.0], dtype=np.float64),
+        initial_step_size=0.25,
+        maxiter=1,
+    )
+
+    assert result.failed is False
+    assert result.a_k == pytest.approx(0.25)
+    assert result.f_k == pytest.approx(0.99999)
+    np.testing.assert_allclose(result.g_k, np.asarray([0.5], dtype=np.float64))
+    assert result.status == 0
+    assert result.requested_initial_step == pytest.approx(0.25)
+    assert result.first_tested_alpha == pytest.approx(0.25)
+    assert result.best_finite_alpha == pytest.approx(0.25)
+    assert result.returned_alpha == pytest.approx(0.25)
+    assert result.failure_reason == "accepted"
+    assert result.armijo_margin == pytest.approx(1.5e-5)
+    assert result.curvature_margin == pytest.approx(-0.4)
+
+
+def test_host_line_search_failure_reports_trial_alpha_without_accepting_step():
+    import simsopt.geo.optimizer_host_lbfgs as host_lbfgs
+
+    def restricted_func_and_grad(alpha):
+        assert alpha == pytest.approx(0.25)
+        return 1.00001, -0.5, np.asarray([0.5], dtype=np.float64)
+
+    result = host_lbfgs._line_search_from_restricted_func_and_grad(
+        restricted_func_and_grad,
+        pk=np.asarray([-1.0], dtype=np.float64),
+        old_fval=1.0,
+        gfk=np.asarray([1.0], dtype=np.float64),
+        initial_step_size=0.25,
+        maxiter=1,
+    )
+
+    assert result.failed is True
+    assert result.a_k == pytest.approx(0.0)
+    assert result.f_k == pytest.approx(1.0)
+    np.testing.assert_allclose(result.g_k, np.asarray([1.0], dtype=np.float64))
+    assert result.requested_initial_step == pytest.approx(0.25)
+    assert result.first_tested_alpha == pytest.approx(0.25)
+    assert result.best_finite_alpha == pytest.approx(0.0)
+    assert result.returned_alpha == pytest.approx(0.0)
+    assert result.failure_reason == "line_search_failed"
+    assert np.isnan(result.armijo_margin)
+    assert np.isnan(result.curvature_margin)
+
+
+def test_minimize_lbfgs_host_core_rejected_step_log_separates_requested_alpha():
+    import simsopt.geo.optimizer_host_lbfgs as host_lbfgs
+
+    def quad(x):
+        x = np.asarray(x, dtype=np.float64)
+        return float(0.5 * np.dot(x, x)), x
+
+    def failing_line_search(**_kwargs):
+        return host_lbfgs.HostLineSearchResults(
+            failed=True,
+            nit=1,
+            nfev=1,
+            ngev=1,
+            k=2,
+            a_k=1.0,
+            f_k=0.5,
+            g_k=np.asarray([1.0], dtype=np.float64),
+            status=1,
+            requested_initial_step=0.5,
+            first_tested_alpha=0.5,
+            best_finite_alpha=0.25,
+            returned_alpha=1.0,
+            failure_reason="line_search_failed",
+            armijo_margin=1.0e-6,
+            curvature_margin=-1.0e-3,
+        )
+
+    result = host_lbfgs.minimize_lbfgs_host_core(
+        quad,
+        np.asarray([1.0], dtype=np.float64),
+        maxiter=2,
+        initial_step_size=0.5,
+        line_search_value_and_grad=failing_line_search,
+    )
+
+    assert result.failed is True
+    np.testing.assert_allclose(result.x_k, np.asarray([1.0], dtype=np.float64))
+    assert len(result.invalid_step_events) == 1
+    event = result.invalid_step_events[0]
+    assert event.step_scale == pytest.approx(0.0)
+    assert event.requested_initial_step == pytest.approx(0.5)
+    assert event.first_tested_alpha == pytest.approx(0.5)
+    assert event.best_finite_alpha == pytest.approx(0.25)
+    assert event.returned_alpha == pytest.approx(1.0)
+    assert event.failure_reason == "line_search_failed"
+    assert event.armijo_margin == pytest.approx(1.0e-6)
+    assert event.curvature_margin == pytest.approx(-1.0e-3)
 
 
 def test_zoom_reuses_cached_bracketing_sample_without_extra_eval(monkeypatch):
@@ -1208,6 +1337,72 @@ class TestOptimizerAdapterPrivate:
         assert trace["line_search_status"] == 0
         assert trace["valid_curvature"] is False
         assert trace["accepted"] is True
+
+    @PRIVATE_OPTIMIZER_RUNTIME
+    def test_minimize_lbfgs_private_records_every_accepted_step_trace(
+        self,
+        monkeypatch,
+    ):
+        from simsopt.geo.optimizer_jax_private import _LineSearchResults
+        from simsopt.geo.optimizer_jax_private import _lbfgs as _lbfgs_module
+
+        calls = []
+
+        def quad(x):
+            return 0.5 * jnp.dot(x, x)
+
+        def fake_line_search(*, xk, pk, **_kwargs):
+            step_scale = np.float64(0.25)
+            trial_x = np.asarray(xk, dtype=np.float64) + step_scale * np.asarray(
+                pk,
+                dtype=np.float64,
+            )
+            calls.append(trial_x.copy())
+            return _LineSearchResults(
+                failed=False,
+                nit=1,
+                nfev=1,
+                ngev=1,
+                k=1,
+                a_k=step_scale,
+                f_k=np.float64(0.5 * np.dot(trial_x, trial_x)),
+                g_k=trial_x,
+                status=0,
+            )
+
+        monkeypatch.setattr(
+            _lbfgs_module,
+            "_line_search_value_and_grad_host",
+            fake_line_search,
+        )
+
+        state = _lbfgs_module._minimize_lbfgs_private(
+            quad,
+            jnp.array([2.0, 0.0], dtype=jnp.float64),
+            maxiter=2,
+            gtol=0.0,
+            ftol=-np.inf,
+            maxcor=4,
+        )
+
+        assert int(state.status) == 1
+        assert len(calls) == 2
+        assert len(state.optimizer_state_trace) == 2
+        assert [entry["iteration"] for entry in state.optimizer_state_trace] == [1, 2]
+        np.testing.assert_allclose(
+            state.optimizer_state_trace[0]["trial_x"],
+            calls[0],
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            state.optimizer_state_trace[1]["trial_x"],
+            calls[1],
+            atol=1e-12,
+        )
+        assert state.optimizer_state_trace[0]["history_count_before"] == 0
+        assert state.optimizer_state_trace[0]["history_count_after"] == 1
+        assert state.optimizer_state_trace[1]["history_count_before"] == 1
+        assert state.optimizer_state_trace[1]["history_count_after"] == 2
 
     def test_lbfgs_relative_objective_reduction_matches_scipy_formula(self):
         from simsopt.geo.optimizer_jax_private import _lbfgs as _lbfgs_module

@@ -15,6 +15,7 @@ from ..._core.jax_host_boundary import (
     host_float as _host_float,
     host_int as _host_int,
 )
+from ..optimizer_host_lbfgs import line_search_failure_reason_from_code
 from ._types import LBFGS_STATUS_NONFINITE
 
 
@@ -82,6 +83,15 @@ def _private_lbfgs_invalid_step_log_to_host(invalid_step_log):
     valid_curvature = _as_host_numpy(invalid_step_log.valid_curvature)
     trial_converged = _as_host_numpy(invalid_step_log.trial_converged)
     line_search_statuses = _as_host_numpy(invalid_step_log.ls_status)
+    requested_initial_steps = _as_host_numpy(
+        invalid_step_log.requested_initial_step
+    )
+    first_tested_alphas = _as_host_numpy(invalid_step_log.first_tested_alpha)
+    best_finite_alphas = _as_host_numpy(invalid_step_log.best_finite_alpha)
+    returned_alphas = _as_host_numpy(invalid_step_log.returned_alpha)
+    failure_reasons = _as_host_numpy(invalid_step_log.failure_reason)
+    armijo_margins = _as_host_numpy(invalid_step_log.armijo_margin)
+    curvature_margins = _as_host_numpy(invalid_step_log.curvature_margin)
     events = []
     for offset in range(count):
         index = (start_index + offset) % capacity
@@ -95,6 +105,15 @@ def _private_lbfgs_invalid_step_log_to_host(invalid_step_log):
                 "valid_curvature": bool(valid_curvature[index]),
                 "trial_converged": bool(trial_converged[index]),
                 "ls_status": int(line_search_statuses[index]),
+                "requested_initial_step": float(requested_initial_steps[index]),
+                "first_tested_alpha": float(first_tested_alphas[index]),
+                "best_finite_alpha": float(best_finite_alphas[index]),
+                "returned_alpha": float(returned_alphas[index]),
+                "failure_reason": line_search_failure_reason_from_code(
+                    failure_reasons[index]
+                ),
+                "armijo_margin": float(armijo_margins[index]),
+                "curvature_margin": float(curvature_margins[index]),
             }
         )
     return events
