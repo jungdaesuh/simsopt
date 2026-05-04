@@ -43,6 +43,15 @@ from benchmarks.validation_ladder_common import (
     single_stage_proof_contract,
     write_json,
 )
+from benchmarks.single_stage_parity_matrix import (
+    LANE_CPU_SCIPY,
+    LANE_JAX_CPU,
+    LANE_JAX_GPU,
+    _compare_optimizer_state_trace_pair,
+    _file_sha256,
+    _json_hash,
+    _objective_config_hash_from_results,
+)
 from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_EQUILIBRIA_DIR,
     DEFAULT_IOTA_TARGET,
@@ -86,6 +95,7 @@ FIELD_ERROR_REL_TOL = _TIER3_TOLERANCES["field_error_rel_tol"]
 SURFACE_GEOMETRY_REL_TOL = _TIER3_TOLERANCES["surface_geometry_rel_tol"]
 TARGET_OPTIMIZER_BACKEND = DEFAULT_OPTIMIZER_BACKEND
 DEFAULT_OUTER_MAXITER = 0
+TRACE_PARITY_OUTER_MAXLS = 8
 _TARGET_LANE_FINAL_ONLY_SYNC = "final-only"
 _TARGET_LANE_PER_ACCEPT_SYNC = "per-accept"
 _OUTER_LOOP_PROOF_CONTRACT = single_stage_proof_contract(
@@ -216,6 +226,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--reference-optimizer-method",
+        choices=("lbfgs", "lbfgs-trace"),
+        default="lbfgs",
+        help=(
+            "CPU/reference outer optimizer method. The default lbfgs is the "
+            "SciPy CPU/C++ parity lane; lbfgs-trace is a non-SciPy host-core "
+            "diagnostic."
+        ),
+    )
+    parser.add_argument(
         "--boozer-optimizer-backend",
         choices=(TARGET_OPTIMIZER_BACKEND,),
         default=None,
@@ -231,6 +251,35 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Single-stage outer-loop iteration budget. "
             "Use 0 to keep the historical init-only Tier 3 probe shape."
+        ),
+    )
+    parser.add_argument(
+        "--initial-step-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Initial scaled outer-phase step size passed through to the "
+            "single-stage runner. This wrapper defaults it explicitly to 1.0 "
+            "so CPU/C++ and JAX CPU outer runs use the same phase-2 contract."
+        ),
+    )
+    parser.add_argument(
+        "--initial-step-maxiter",
+        type=int,
+        default=0,
+        help=(
+            "Initial scaled outer-phase iteration budget passed through to the "
+            "single-stage runner. This wrapper defaults it explicitly to 0 so "
+            "CPU/C++ and JAX CPU compare the shared phase-2 run shape."
+        ),
+    )
+    parser.add_argument(
+        "--outer-maxls",
+        type=int,
+        default=TRACE_PARITY_OUTER_MAXLS,
+        help=(
+            "Strong-Wolfe line-search budget passed to both parity lanes. "
+            "The default matches the current target-lane production budget."
         ),
     )
     parser.add_argument(
@@ -298,6 +347,115 @@ def _extract_phase_timings(results: dict[str, Any]) -> dict[str, float]:
 
 def _prefix_phase_timings(prefix: str, timings: dict[str, float]) -> dict[str, float]:
     return {f"{prefix}_{key}": float(value) for key, value in timings.items()}
+
+
+def _target_lane_label(args: argparse.Namespace, case: dict[str, Any]) -> str:
+    provenance = dict(case["results"]).get("provenance", {})
+    backend = str(provenance.get("backend", args.platform)).lower()
+    return LANE_JAX_GPU if backend in {"cuda", "gpu"} else LANE_JAX_CPU
+
+
+def _reference_lane_label(reference_backend: str) -> str:
+    return LANE_JAX_CPU if reference_backend == "jax" else LANE_CPU_SCIPY
+
+
+def _single_stage_full_run_family_id(
+    args: argparse.Namespace,
+    *,
+    runtime_seed_spec_hash: str | None,
+    objective_configuration_hash: str | None,
+) -> str:
+    return _json_hash(
+        {
+            "runtime_seed_spec_hash": runtime_seed_spec_hash,
+            "objective_configuration_hash": objective_configuration_hash,
+            "plasma_surf_filename": args.plasma_surf_filename,
+            "stage2_bs_path": _display_path(Path(args.stage2_bs_path)),
+            "nphi": int(args.nphi),
+            "ntheta": int(args.ntheta),
+            "mpol": int(args.mpol),
+            "ntor": int(args.ntor),
+            "vol_target": float(args.vol_target),
+            "iota_target": float(args.iota_target),
+            "num_tf_coils": int(getattr(args, "num_tf_coils", 20)),
+            "optimizer_backend": args.optimizer_backend,
+            "reference_optimizer_method": args.reference_optimizer_method,
+            "initial_step_scale": float(args.initial_step_scale),
+            "initial_step_maxiter": int(args.initial_step_maxiter),
+            "outer_maxls": int(args.outer_maxls),
+            "maxiter": int(args.maxiter),
+        }
+    )
+
+
+def _single_stage_full_run_lane_contract(
+    case: dict[str, Any],
+    *,
+    runtime_seed_spec_hash: str | None,
+    run_family_id: str,
+) -> dict[str, Any]:
+    results = dict(case["results"])
+    objective_hash, missing_objective_keys = _objective_config_hash_from_results(
+        results
+    )
+    run_dir = Path(str(case["run_dir"]))
+    provenance = results.get("provenance", {})
+    return {
+        "run_dir": str(run_dir),
+        "results_json": str(run_dir / "results.json"),
+        "progress_json": str(case["outer_optimizer_progress_json"]),
+        "runtime_seed_spec_hash": runtime_seed_spec_hash,
+        "objective_configuration_hash": objective_hash,
+        "missing_objective_config_keys": missing_objective_keys,
+        "run_family_id": run_family_id,
+        "init_only": results.get("init_only"),
+        "generated_at_utc": provenance.get("generated_at_utc"),
+        "repo_sha": provenance.get("repo_sha"),
+    }
+
+
+def build_single_stage_full_run_artifact_contract(
+    args: argparse.Namespace,
+    *,
+    reference_backend: str,
+    cpu_case: dict[str, Any],
+    jax_case: dict[str, Any],
+    jax_seed_spec: Path,
+) -> dict[str, Any]:
+    runtime_seed_spec_hash = _file_sha256(jax_seed_spec)
+    reference_objective_hash, _ = _objective_config_hash_from_results(
+        dict(cpu_case["results"])
+    )
+    target_objective_hash, _ = _objective_config_hash_from_results(
+        dict(jax_case["results"])
+    )
+    run_family_id = _single_stage_full_run_family_id(
+        args,
+        runtime_seed_spec_hash=runtime_seed_spec_hash,
+        objective_configuration_hash=reference_objective_hash
+        if reference_objective_hash is not None
+        else target_objective_hash,
+    )
+    return {
+        "schema_version": 1,
+        "runtime_seed_spec": str(jax_seed_spec),
+        "runtime_seed_spec_hash": runtime_seed_spec_hash,
+        "run_family_id": run_family_id,
+        "lanes": {
+            _reference_lane_label(reference_backend): (
+                _single_stage_full_run_lane_contract(
+                    cpu_case,
+                    runtime_seed_spec_hash=runtime_seed_spec_hash,
+                    run_family_id=run_family_id,
+                )
+            ),
+            _target_lane_label(args, jax_case): _single_stage_full_run_lane_contract(
+                jax_case,
+                runtime_seed_spec_hash=runtime_seed_spec_hash,
+                run_family_id=run_family_id,
+            ),
+        },
+    }
 
 
 def _append_optional_single_stage_flags(
@@ -459,6 +617,12 @@ def _run_single_stage_case(
             str(args.iota_target),
             "--num-tf-coils",
             str(getattr(args, "num_tf_coils", 20)),
+            "--initial-step-scale",
+            str(getattr(args, "initial_step_scale", 1.0)),
+            "--initial-step-maxiter",
+            str(getattr(args, "initial_step_maxiter", 0)),
+            "--outer-maxls",
+            str(getattr(args, "outer_maxls", TRACE_PARITY_OUTER_MAXLS)),
         ]
         warm_start_run_dir = getattr(args, "warm_start_run_dir", None)
         if warm_start_run_dir is not None:
@@ -481,6 +645,19 @@ def _run_single_stage_case(
                     [
                         "--boozer-optimizer-backend",
                         args.boozer_optimizer_backend,
+                    ]
+                )
+        else:
+            reference_optimizer_method = getattr(
+                args,
+                "reference_optimizer_method",
+                "lbfgs",
+            )
+            if reference_optimizer_method != "lbfgs":
+                command.extend(
+                    [
+                        "--reference-optimizer-method",
+                        str(reference_optimizer_method),
                     ]
                 )
         _append_optional_single_stage_flags(
@@ -551,6 +728,9 @@ def _run_single_stage_case(
             "elapsed_s": float(elapsed_s),
             "phase_timings": _extract_phase_timings(results),
             "run_dir": str(results_json.parent),
+            "outer_optimizer_progress_json": str(
+                results_json.parent / "outer_optimizer_progress.json"
+            ),
         }
         if load_surface_gamma:
             surf_json = find_single_file(resolved_root, "surf_init.json")
@@ -598,6 +778,27 @@ def _reference_case_benchmark_mode(
     return bool(requested_benchmark_mode and _reference_case_backend(args) == "jax")
 
 
+def _should_compare_surface_geometry(
+    args: argparse.Namespace,
+    *,
+    benchmark_mode: bool,
+) -> bool:
+    return bool(not benchmark_mode and int(args.maxiter) <= 0)
+
+
+def _needs_shared_init_seed(args: argparse.Namespace, *, reference_backend: str) -> bool:
+    return bool(reference_backend == "cpu" and int(args.maxiter) > 0)
+
+
+def _namespace_with_overrides(
+    args: argparse.Namespace,
+    **overrides: Any,
+) -> argparse.Namespace:
+    values = vars(args).copy()
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
 def _run_single_stage_case_pair(
     args: argparse.Namespace,
     *,
@@ -605,7 +806,12 @@ def _run_single_stage_case_pair(
     reference_backend: str,
     reference_benchmark_mode: bool,
     case_root: Path,
-) -> tuple[dict[str, Any], dict[str, Any], Path]:
+) -> tuple[dict[str, Any], dict[str, Any], Path, dict[str, Any] | None]:
+    compare_surface_geometry = _should_compare_surface_geometry(
+        args,
+        benchmark_mode=benchmark_mode,
+    )
+    seed_case = None
     if reference_backend == "jax":
         jax_seed_spec = (
             Path(args.jax_runtime_seed_spec)
@@ -621,34 +827,56 @@ def _run_single_stage_case_pair(
             "jax",
             platform="cpu",
             benchmark_mode=reference_benchmark_mode,
-            load_surface_gamma=not benchmark_mode,
+            load_surface_gamma=compare_surface_geometry,
             output_root=case_root / "reference_outputs",
             jax_runtime_seed_spec=jax_seed_spec,
         )
     else:
+        if _needs_shared_init_seed(args, reference_backend=reference_backend):
+            seed_args = _namespace_with_overrides(args, maxiter=0)
+            seed_case = _run_single_stage_case(
+                seed_args,
+                "cpu",
+                platform="cpu",
+                benchmark_mode=False,
+                load_surface_gamma=False,
+                output_root=case_root / "seed_outputs",
+            )
+            jax_seed_spec = _compile_jax_runtime_seed_spec_from_run_dir(
+                Path(seed_case["run_dir"]),
+                case_root / "single_stage_jax_runtime_seed_spec.json",
+                args,
+            )
+            reference_args = _namespace_with_overrides(
+                args,
+                warm_start_run_dir=seed_case["run_dir"],
+            )
+        else:
+            reference_args = args
         cpu_case = _run_single_stage_case(
-            args,
+            reference_args,
             "cpu",
             platform="cpu",
             benchmark_mode=reference_benchmark_mode,
-            load_surface_gamma=not benchmark_mode,
+            load_surface_gamma=compare_surface_geometry,
             output_root=case_root / "cpu_outputs",
         )
-        jax_seed_spec = _compile_jax_runtime_seed_spec_from_run_dir(
-            Path(cpu_case["run_dir"]),
-            case_root / "single_stage_jax_runtime_seed_spec.json",
-            args,
-        )
+        if seed_case is None:
+            jax_seed_spec = _compile_jax_runtime_seed_spec_from_run_dir(
+                Path(cpu_case["run_dir"]),
+                case_root / "single_stage_jax_runtime_seed_spec.json",
+                args,
+            )
     jax_case = _run_single_stage_case(
         args,
         "jax",
         platform=args.platform,
         benchmark_mode=benchmark_mode,
-        load_surface_gamma=not benchmark_mode,
+        load_surface_gamma=compare_surface_geometry,
         output_root=case_root / "target_outputs",
         jax_runtime_seed_spec=jax_seed_spec,
     )
-    return cpu_case, jax_case, jax_seed_spec
+    return cpu_case, jax_case, jax_seed_spec, seed_case
 
 
 def _load_surface_gamma_artifact(surface_json_path: str) -> np.ndarray:
@@ -669,9 +897,9 @@ def _resolve_surface_geometry_drift(
     cpu_case: dict[str, Any],
     jax_case: dict[str, Any],
     *,
-    benchmark_mode: bool,
+    compare_surface_geometry: bool,
 ) -> tuple[float, float]:
-    if benchmark_mode:
+    if not compare_surface_geometry:
         return 0.0, 0.0
     return max_pointwise_geometry_drift(
         jax_case["surface_gamma"],
@@ -684,6 +912,31 @@ def _finite_required_result_keys(results: dict[str, Any]) -> dict[str, bool]:
         key: bool(np.isfinite(float(results.get(key, np.nan))))
         for key in _OUTER_LOOP_REQUIRED_RESULT_KEYS
     }
+
+
+def _load_optimizer_state_trace_from_case(case: dict[str, Any]) -> list[dict[str, Any]]:
+    progress_path = Path(case["outer_optimizer_progress_json"])
+    if not progress_path.exists():
+        return []
+    payload = load_json(progress_path)
+    for event in reversed(payload.get("events", [])):
+        result = event.get("result")
+        if not result:
+            continue
+        trace = result.get("optimizer_state_trace")
+        if trace:
+            return list(trace)
+    return []
+
+
+def _compare_case_optimizer_state_traces(
+    cpu_case: dict[str, Any],
+    jax_case: dict[str, Any],
+) -> dict[str, Any]:
+    return _compare_optimizer_state_trace_pair(
+        _load_optimizer_state_trace_from_case(cpu_case),
+        _load_optimizer_state_trace_from_case(jax_case),
+    )
 
 
 def _append_nonfinite_outer_loop_failures(
@@ -801,6 +1054,10 @@ def main() -> None:
     benchmark_mode = bool(args.benchmark_mode)
     reference_backend = _reference_case_backend(args)
     reference_benchmark_mode = _reference_case_benchmark_mode(args, benchmark_mode)
+    compare_surface_geometry = _should_compare_surface_geometry(
+        args,
+        benchmark_mode=benchmark_mode,
+    )
     stage2_bs_path = Path(args.stage2_bs_path)
     if not stage2_bs_path.exists():
         raise RuntimeError(f"Stage 2 seed fixture does not exist: {stage2_bs_path}")
@@ -821,6 +1078,7 @@ def main() -> None:
             "plasma_surf_filename": args.plasma_surf_filename,
             "stage2_seed_path": _display_path(stage2_bs_path),
             "optimizer_backend": args.optimizer_backend,
+            "reference_optimizer_method": args.reference_optimizer_method,
             "boozer_optimizer_backend": args.boozer_optimizer_backend,
             "outer_maxiter": int(args.maxiter),
             "benchmark_mode": benchmark_mode,
@@ -829,6 +1087,9 @@ def main() -> None:
             "target_backend": "jax",
             "target_platform": args.platform,
             "reference_benchmark_mode": reference_benchmark_mode,
+            "initial_step_scale": float(args.initial_step_scale),
+            "initial_step_maxiter": int(args.initial_step_maxiter),
+            "outer_maxls": int(args.outer_maxls),
             "nphi": int(args.nphi),
             "ntheta": int(args.ntheta),
             "mpol": int(args.mpol),
@@ -860,7 +1121,12 @@ def main() -> None:
             prefix="single-stage-init-reference-"
         ) as reference_temp_dir:
             case_root = Path(reference_temp_dir)
-            cpu_case, jax_case, jax_seed_spec = _run_single_stage_case_pair(
+            (
+                cpu_case,
+                jax_case,
+                jax_seed_spec,
+                seed_case,
+            ) = _run_single_stage_case_pair(
                 args,
                 benchmark_mode=benchmark_mode,
                 reference_backend=reference_backend,
@@ -870,7 +1136,12 @@ def main() -> None:
             case_artifacts = None
     else:
         case_artifacts_dir.mkdir(parents=True, exist_ok=True)
-        cpu_case, jax_case, jax_seed_spec = _run_single_stage_case_pair(
+        (
+            cpu_case,
+            jax_case,
+            jax_seed_spec,
+            seed_case,
+        ) = _run_single_stage_case_pair(
             args,
             benchmark_mode=benchmark_mode,
             reference_backend=reference_backend,
@@ -881,15 +1152,30 @@ def main() -> None:
             "case_artifacts_dir": str(case_artifacts_dir),
             "reference_run_dir": str(cpu_case["run_dir"]),
             "target_run_dir": str(jax_case["run_dir"]),
+            "reference_outer_optimizer_progress_json": cpu_case[
+                "outer_optimizer_progress_json"
+            ],
+            "target_outer_optimizer_progress_json": jax_case[
+                "outer_optimizer_progress_json"
+            ],
             "jax_runtime_seed_spec": str(jax_seed_spec),
         }
+        if seed_case is not None:
+            case_artifacts["shared_seed_run_dir"] = str(seed_case["run_dir"])
 
+    full_run_artifact_contract = build_single_stage_full_run_artifact_contract(
+        args,
+        reference_backend=reference_backend,
+        cpu_case=cpu_case,
+        jax_case=jax_case,
+        jax_seed_spec=jax_seed_spec,
+    )
     cpu_results = cpu_case["results"]
     jax_results = jax_case["results"]
     max_geom_abs, max_geom_rel = _resolve_surface_geometry_drift(
         cpu_case,
         jax_case,
-        benchmark_mode=benchmark_mode,
+        compare_surface_geometry=compare_surface_geometry,
     )
     comparison, failures = evaluate_single_stage_init_parity(
         cpu_results,
@@ -898,6 +1184,18 @@ def main() -> None:
         max_surface_geometry_rel=max_geom_rel,
         maxiter=int(args.maxiter),
     )
+    optimizer_state_trace_parity = None
+    if int(args.maxiter) > 0 and args.reference_optimizer_method == "lbfgs-trace":
+        optimizer_state_trace_parity = _compare_case_optimizer_state_traces(
+            cpu_case,
+            jax_case,
+        )
+        if optimizer_state_trace_parity["status"] != "pass":
+            failures.append(
+                "CPU/C++ lbfgs-trace diagnostic vs JAX CPU optimizer_state_trace "
+                "comparison "
+                f"failed: {optimizer_state_trace_parity['status']}."
+            )
     proof_parity = {
         **gpu_proof_parity_contract("single_stage"),
         "cpu_oracle_value": float(cpu_results["FIELD_ERROR"]),
@@ -927,6 +1225,12 @@ def main() -> None:
             "Surface geometry drift comparison was skipped because --benchmark-mode "
             "suppresses the surf_init.json artifact."
         )
+    elif not compare_surface_geometry:
+        warnings.append(
+            "Surface geometry drift comparison was skipped because outer-loop "
+            "parity compares optimizer progress and final metrics; the JAX "
+            "target lane does not emit surf_init.json in this run shape."
+        )
 
     print(
         "CPU vs JAX: "
@@ -945,6 +1249,11 @@ def main() -> None:
         "jax_results": jax_results,
         "comparison": comparison,
         "proof_parity": proof_parity,
+        "full_run_artifact_contract": full_run_artifact_contract,
+        "lanes": {
+            lane: contract["run_dir"]
+            for lane, contract in full_run_artifact_contract["lanes"].items()
+        },
         "timings": {
             "cpu_elapsed_s": float(cpu_case["elapsed_s"]),
             "jax_elapsed_s": float(jax_case["elapsed_s"]),
@@ -955,6 +1264,8 @@ def main() -> None:
         "failures": failures,
         "passed": not failures,
     }
+    if optimizer_state_trace_parity is not None:
+        payload["optimizer_state_trace_parity"] = optimizer_state_trace_parity
     if case_artifacts is not None:
         payload["artifacts"] = case_artifacts
     write_json(args.output_json, payload)

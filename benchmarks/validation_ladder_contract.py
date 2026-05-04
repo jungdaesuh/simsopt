@@ -386,12 +386,14 @@ def evaluate_tier5_performance_budget(
 
 def resolve_probe_lane(*, optimizer_backend: str | None = None) -> str:
     """Map benchmark/probe options to the intended lane label."""
-    if optimizer_backend not in {None, "scipy", "ondevice"}:
+    if optimizer_backend not in {None, "scipy", "ondevice", "scipy-jax"}:
         raise ValueError(
-            "optimizer_backend must be one of: scipy, ondevice."
+            "optimizer_backend must be one of: scipy, ondevice, scipy-jax."
         )
     if optimizer_backend == "ondevice":
         return "private-optimizer"
+    if optimizer_backend == "scipy-jax":
+        return "target-scipy-control"
     return "trusted-public-reference"
 
 

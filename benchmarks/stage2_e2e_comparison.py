@@ -86,13 +86,14 @@ STAGE2_CURVATURE_TERM_NAME = "curvature_penalty"
 _CPU_ONDEVICE_ENDPOINT_LANE = ("jax", "cpu", "cpu-ondevice")
 _CPU_REFERENCE_ENDPOINT_LANE = ("cpu", "auto", "cpu-reference")
 TARGET_OPTIMIZER_BACKEND = "ondevice"
+TARGET_OPTIMIZER_BACKENDS = ("ondevice", "scipy-jax")
 
 
 def _resolve_stage2_endpoint_cpu_lane(
     optimizer_backend: str,
 ) -> tuple[str, str, str]:
     """Return the CPU-side endpoint lane for the requested Stage 2 comparison."""
-    if optimizer_backend == "ondevice":
+    if optimizer_backend in TARGET_OPTIMIZER_BACKENDS:
         return _CPU_ONDEVICE_ENDPOINT_LANE
     return _CPU_REFERENCE_ENDPOINT_LANE
 
@@ -288,7 +289,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--optimizer-backend",
-        choices=(TARGET_OPTIMIZER_BACKEND,),
+        choices=TARGET_OPTIMIZER_BACKENDS,
         default=TARGET_OPTIMIZER_BACKEND,
         help="Stage 2 optimizer backend for the JAX target lane.",
     )

@@ -34,6 +34,7 @@ DEFAULT_EQUILIBRIA_REL = "examples/single_stage_optimization/equilibria"
 DEFAULT_PLASMA = DEFAULT_PLASMA_SURF_FILENAME
 DEFAULT_IMAGE = os.environ.get("SIMSOPT_HF_GPU_IMAGE") or None
 DEFAULT_TARGET_OPTIMIZER_BACKEND = "ondevice"
+TARGET_OPTIMIZER_BACKENDS = ("ondevice", "scipy-jax")
 DEFAULT_EXPECTED_JAX_VERSION = "0.9.2"
 DEFAULT_CUDA_LIBRARY_MODE = "bundled"
 _SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME = "single_stage_jax_runtime_spec.json"
@@ -700,7 +701,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", default="8h", help="HF Jobs timeout.")
     parser.add_argument(
         "--stage2-optimizer-backend",
-        choices=(DEFAULT_TARGET_OPTIMIZER_BACKEND,),
+        choices=TARGET_OPTIMIZER_BACKENDS,
         default=DEFAULT_TARGET_OPTIMIZER_BACKEND,
     )
     parser.add_argument("--stage2-nphi", type=int, default=255)
@@ -709,7 +710,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--geometry-rel-tol", type=float, default=None)
     parser.add_argument(
         "--single-stage-optimizer-backend",
-        choices=(DEFAULT_TARGET_OPTIMIZER_BACKEND,),
+        choices=TARGET_OPTIMIZER_BACKENDS,
         default=DEFAULT_TARGET_OPTIMIZER_BACKEND,
     )
     parser.add_argument(

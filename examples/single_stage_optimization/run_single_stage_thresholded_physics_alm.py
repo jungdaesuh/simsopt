@@ -217,7 +217,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backend", choices=["cpu", "jax"], default="jax")
     parser.add_argument(
         "--optimizer-backend",
-        choices=["scipy", "ondevice"],
+        choices=["scipy", "ondevice", "scipy-jax"],
         default=None,
     )
     parser.add_argument(

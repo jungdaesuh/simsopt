@@ -929,6 +929,13 @@ def _build_fake_lbfgs_result(x0, value, grad):
             valid_curvature=np.zeros((1,), dtype=bool),
             trial_converged=np.zeros((1,), dtype=bool),
             ls_status=np.zeros((1,), dtype=np.int32),
+            requested_initial_step=np.zeros((1,), dtype=np.float64),
+            first_tested_alpha=np.zeros((1,), dtype=np.float64),
+            best_finite_alpha=np.zeros((1,), dtype=np.float64),
+            returned_alpha=np.zeros((1,), dtype=np.float64),
+            failure_reason=np.zeros((1,), dtype=np.int32),
+            armijo_margin=np.full((1,), np.nan, dtype=np.float64),
+            curvature_margin=np.full((1,), np.nan, dtype=np.float64),
         ),
     )
 
@@ -3233,6 +3240,7 @@ class TestStage2OptimizerContract:
             ("cpu", "scipy", "quasi-newton", "lbfgs"),
             ("jax", "ondevice", "quasi-newton", "lbfgs-ondevice"),
             ("jax", "ondevice", "lm", "lm-ondevice"),
+            ("jax", "scipy-jax", "quasi-newton", "lbfgs-scipy-jax"),
         ],
     )
     def test_resolve_stage2_optimizer_method_contract(
@@ -3260,7 +3268,7 @@ class TestStage2OptimizerContract:
         with pytest.raises(
             ValueError,
             match="the Stage 2 outer loop with backend='jax' requires "
-            "optimizer_backend='ondevice'",
+            "optimizer_backend='ondevice' or optimizer_backend='scipy-jax'",
         ):
             stage2_script.resolve_stage2_optimizer_method("jax", optimizer_backend)
 
@@ -3268,7 +3276,7 @@ class TestStage2OptimizerContract:
         stage2_script = _load_stage2_script_module()
         with pytest.raises(
             ValueError,
-            match="optimizer_backend must be one of: scipy, ondevice.",
+            match="optimizer_backend must be one of: scipy, ondevice, scipy-jax.",
         ):
             stage2_script.resolve_stage2_optimizer_method("jax", "bogus")
 
@@ -3277,7 +3285,7 @@ class TestStage2OptimizerContract:
         with pytest.raises(
             ValueError,
             match="the Stage 2 outer loop with backend='jax' requires "
-            "optimizer_backend='ondevice'",
+            "optimizer_backend='ondevice' or optimizer_backend='scipy-jax'",
         ):
             stage2_script.resolve_stage2_optimizer_method(
                 "jax",
@@ -3300,10 +3308,16 @@ class TestStage2OptimizerContract:
         )
         assert isinstance(target_contract, TargetOptimizerContract)
         assert target_contract.method == "lbfgs-ondevice"
+        scipy_jax_contract = stage2_script.resolve_stage2_alm_inner_optimizer_contract(
+            "jax",
+            "scipy-jax",
+        )
+        assert isinstance(scipy_jax_contract, TargetOptimizerContract)
+        assert scipy_jax_contract.method == "lbfgs-scipy-jax"
         with pytest.raises(
             ValueError,
             match="the Stage 2 outer loop with backend='jax' requires "
-            "optimizer_backend='ondevice'",
+            "optimizer_backend='ondevice' or optimizer_backend='scipy-jax'",
         ):
             stage2_script.resolve_stage2_alm_inner_optimizer_contract("jax", "scipy")
 
@@ -3313,6 +3327,7 @@ class TestStage2OptimizerContract:
             ("cpu", "scipy", "quasi-newton", False),
             ("jax", "ondevice", "quasi-newton", True),
             ("jax", "ondevice", "lm", True),
+            ("jax", "scipy-jax", "quasi-newton", True),
         ],
     )
     def test_target_objective_bundle_is_built_only_for_target_lane(
@@ -3340,7 +3355,7 @@ class TestStage2OptimizerContract:
         with pytest.raises(
             ValueError,
             match="the Stage 2 outer loop with backend='jax' requires "
-            "optimizer_backend='ondevice'",
+            "optimizer_backend='ondevice' or optimizer_backend='scipy-jax'",
         ):
             stage2_script.should_build_stage2_target_objective(
                 "jax",
@@ -3352,7 +3367,7 @@ class TestStage2OptimizerContract:
         stage2_script = _load_stage2_script_module()
         with pytest.raises(
             ValueError,
-            match="optimizer_backend must be one of: scipy, ondevice.",
+            match="optimizer_backend must be one of: scipy, ondevice, scipy-jax.",
         ):
             stage2_script.should_build_stage2_target_objective(
                 "jax",
@@ -3418,6 +3433,17 @@ class TestStage2OptimizerContract:
                 False,
             ),
             (
+                "jax",
+                "scipy-jax",
+                "quasi-newton",
+                False,
+                "probe.json",
+                True,
+                True,
+                True,
+                False,
+            ),
+            (
                 "cpu",
                 "ondevice",
                 "quasi-newton",
@@ -3469,10 +3495,10 @@ class TestStage2OptimizerContract:
     ):
         stage2_script = _load_stage2_script_module()
         expected = (
-            "optimizer_backend must be one of: scipy, ondevice."
+            "optimizer_backend must be one of: scipy, ondevice, scipy-jax."
             if optimizer_backend == "bogus"
             else "the Stage 2 outer loop with backend='jax' requires "
-            "optimizer_backend='ondevice'"
+            "optimizer_backend='ondevice' or optimizer_backend='scipy-jax'"
         )
         with pytest.raises(ValueError, match=expected):
             stage2_script.resolve_stage2_target_lane_requirements(
@@ -5139,6 +5165,7 @@ class TestStage2OptimizerContract:
         ("field_backend", "optimizer_backend", "export_objective_json"),
         [
             ("jax", "ondevice", None),
+            ("jax", "scipy-jax", None),
             ("cpu", "ondevice", "dummy.json"),
         ],
     )
@@ -5605,6 +5632,7 @@ class TestStage2OptimizerContract:
         [
             ("scipy", "explicit-composite"),
             ("ondevice", "target-objective"),
+            ("scipy-jax", "target-objective"),
         ],
     )
     def test_stage2_probe_payload_uses_lane_ssot_objective_source(
@@ -5725,7 +5753,9 @@ class TestStage2OptimizerContract:
             curvature_weight=1e-4,
             self_intersection_summary=expected_self_intersection,
             target_objective_bundle=(
-                target_objective_bundle if optimizer_backend == "ondevice" else None
+                target_objective_bundle
+                if optimizer_backend in {"ondevice", "scipy-jax"}
+                else None
             ),
         )
 
@@ -5750,7 +5780,7 @@ class TestStage2OptimizerContract:
         assert payload["curvature_within_threshold"] is True
         assert payload["curvature_margin"] == pytest.approx(22.0)
         assert payload["self_intersection"] == expected_self_intersection
-        if optimizer_backend == "ondevice":
+        if optimizer_backend in {"ondevice", "scipy-jax"}:
             assert payload["composite"]["J"] == pytest.approx(float(expected_value))
             np.testing.assert_allclose(
                 np.asarray(payload["composite"]["dJ"], dtype=float),

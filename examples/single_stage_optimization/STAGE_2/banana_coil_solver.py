@@ -656,15 +656,17 @@ def parse_args():
     )
     parser.add_argument(
         "--optimizer-backend",
-        choices=["scipy", "ondevice"],
+        choices=["scipy", "ondevice", "scipy-jax"],
         default=os.environ.get("STAGE2_OPTIMIZER_BACKEND")
         or os.environ.get("OPTIMIZER_BACKEND"),
         help=(
             "Stage 2 optimizer backend. "
             "'scipy' is the trusted reference lane; "
-            "'ondevice' is the JAX target optimizer lane. Defaults to 'ondevice' on "
-            "the JAX backend and 'scipy' on the CPU/reference backend when no "
-            "explicit override is provided."
+            "'ondevice' is the JAX target optimizer lane; "
+            "'scipy-jax' keeps SciPy L-BFGS-B control with JAX value/grad "
+            "evaluations. Defaults to 'ondevice' on the JAX backend and "
+            "'scipy' on the CPU/reference backend when no explicit override "
+            "is provided."
         ),
     )
     parser.add_argument(
@@ -1856,7 +1858,8 @@ def resolve_stage2_target_lane_requirements(
 ):
     """Resolve target-lane requirements before building explicit objectives."""
     needs_target_probe_payload = (
-        export_objective_json is not None and optimizer_backend == "ondevice"
+        export_objective_json is not None
+        and optimizer_backend in {"ondevice", "scipy-jax"}
     )
     probe_only_target_payload = (
         probe_only and needs_target_probe_payload and field_backend != "jax"
@@ -2032,21 +2035,21 @@ def run_stage2_optimizer(
         objective_fun = (
             value_and_grad_fun if use_explicit_value_and_grad else scalar_fun
         )
-        return target_minimize(
-            objective_fun,
-            dofs,
-            method=contract.method,
-            tol=gtol,
-            maxiter=maxiter,
-            options={
+        target_minimize_kwargs = {
+            "method": contract.method,
+            "tol": gtol,
+            "maxiter": maxiter,
+            "options": {
                 "maxcor": int(maxcor),
                 "ftol": float(ftol),
             },
-            value_and_grad=use_explicit_value_and_grad,
-            callback=callback,
-            progress_callback=progress_callback,
-            failure_callback=failure_callback,
-        )
+            "value_and_grad": use_explicit_value_and_grad,
+            "callback": callback,
+            "progress_callback": progress_callback,
+        }
+        if failure_callback is not None and contract.method == "lbfgs-ondevice":
+            target_minimize_kwargs["failure_callback"] = failure_callback
+        return target_minimize(objective_fun, dofs, **target_minimize_kwargs)
     if not isinstance(contract, ReferenceOptimizerContract):
         raise RuntimeError(
             f"Unsupported Stage 2 optimizer contract {type(contract)!r}."
@@ -3033,7 +3036,7 @@ if __name__ == "__main__":
             self_intersection_summary=initial_self_intersection_summary,
             target_objective_bundle=(
                 target_objective_bundle
-                if args.optimizer_backend == "ondevice"
+                if args.optimizer_backend in {"ondevice", "scipy-jax"}
                 else None
             ),
             bs_jax=diagnostic_bs_jax,

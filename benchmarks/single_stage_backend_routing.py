@@ -7,11 +7,14 @@ def resolve_boozer_optimizer_backend(
     optimizer_backend: str,
     boozer_optimizer_backend: str | None,
 ) -> str:
-    effective_backend = (
-        optimizer_backend
-        if boozer_optimizer_backend is None
-        else boozer_optimizer_backend
-    )
+    if boozer_optimizer_backend is None:
+        effective_backend = (
+            "ondevice"
+            if optimizer_backend in {"ondevice", "scipy-jax"}
+            else optimizer_backend
+        )
+    else:
+        effective_backend = boozer_optimizer_backend
     if effective_backend != "ondevice":
         raise ValueError(
             "Single-stage JAX benchmark probes require "

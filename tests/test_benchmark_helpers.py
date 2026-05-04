@@ -562,6 +562,65 @@ def test_single_stage_init_defaults_to_reduced_grid_smoke_fixture(monkeypatch):
     )
     assert args.boozer_optimizer_backend is None
     assert args.maxiter == DEFAULT_OUTER_MAXITER
+    assert args.reference_optimizer_method == "lbfgs"
+    assert args.initial_step_scale == pytest.approx(1.0)
+    assert args.initial_step_maxiter == 0
+    assert args.outer_maxls == single_stage_init_parity_module.TRACE_PARITY_OUTER_MAXLS
+
+
+def test_single_stage_init_accepts_reference_trace_optimizer(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_init_parity.py",
+            "--output-json",
+            "/tmp/out.json",
+            "--reference-optimizer-method",
+            "lbfgs-trace",
+        ],
+    )
+
+    args = single_stage_init_parity_module.parse_args()
+
+    assert args.reference_optimizer_method == "lbfgs-trace"
+
+
+def test_single_stage_init_surface_geometry_gate_is_init_only(tmp_path):
+    args = _single_stage_case_args(tmp_path)
+    args.maxiter = 0
+
+    assert single_stage_init_parity_module._should_compare_surface_geometry(
+        args,
+        benchmark_mode=False,
+    )
+
+    args.maxiter = 1
+    assert not single_stage_init_parity_module._should_compare_surface_geometry(
+        args,
+        benchmark_mode=False,
+    )
+    assert not single_stage_init_parity_module._should_compare_surface_geometry(
+        args,
+        benchmark_mode=True,
+    )
+
+
+def test_single_stage_init_cpu_parity_requests_shared_seed_for_outer_runs(tmp_path):
+    args = _single_stage_case_args(tmp_path)
+    args.maxiter = 1
+    args.reference_optimizer_method = "lbfgs-trace"
+
+    assert single_stage_init_parity_module._needs_shared_init_seed(
+        args,
+        reference_backend="cpu",
+    )
+
+    args.reference_optimizer_method = "lbfgs"
+    assert single_stage_init_parity_module._needs_shared_init_seed(
+        args,
+        reference_backend="cpu",
+    )
 
 
 def test_single_stage_fixture_optimizer_backend_defaults_by_backend():
@@ -1156,11 +1215,197 @@ def _single_stage_parity_report(*, termination_message="ok"):
     }
 
 
-def _optimizer_trace_entry():
+def _release_gate_parity_report(*, termination_message="ok"):
+    lanes = ("cpu_scipy", "jax_cpu", "jax_gpu")
+    metrics = {
+        metric_name: {"values": {lane: 1.0 for lane in lanes}}
+        for metric_name in (
+            "INITIAL_VOLUME",
+            "INITIAL_IOTA",
+            "INITIAL_FIELD_ERROR",
+            "INITIAL_MAX_CURVATURE",
+            "FINAL_VOLUME",
+            "FINAL_IOTA",
+            "FIELD_ERROR",
+            "MAX_CURVATURE",
+            "CURVE_CURVE_MIN_DIST",
+            "CURVE_SURFACE_MIN_DIST",
+            "SURFACE_VESSEL_MIN_DIST",
+        )
+    }
+    metrics["TERMINATION_MESSAGE"] = {
+        "values": {lane: termination_message for lane in lanes}
+    }
+    return {
+        "jax_cpu_vs_jax_gpu_value_grad": {
+            "objective_abs_delta": 1.0e-15,
+            "objective_rel_delta": 1.0e-15,
+            "jax_cpu_grad_inf_norm": 0.5,
+            "grad_max_abs_delta": 1.0e-12,
+            "grad_allclose_rtol_1e-10_atol_1e-12": True,
+        },
+        "same_seed_no_optimizer_metrics": metrics,
+        "full_run_artifact_contract": {
+            "run_family_id": "same-run-family",
+            "lanes": {
+                lane: {
+                    "runtime_seed_spec_hash": "same-runtime-seed",
+                    "objective_configuration_hash": "same-objective",
+                    "run_family_id": "same-run-family",
+                    "init_only": False,
+                }
+                for lane in lanes
+            },
+        },
+    }
+
+
+def _release_gate_hashes(value="same-hash"):
+    return {
+        "equilibrium_hash": value,
+        "runtime_seed_spec_hash": value,
+        "biot_savart_json_hash": value,
+        "objective_configuration_hash": value,
+        "active_dof_mask_hash": value,
+        "fixed_dof_mask_hash": value,
+        "frozen_dof_mask_hash": value,
+    }
+
+
+def _release_gate_assembled_outputs():
+    return {
+        "total_objective": 1.0,
+        "objective_components": {"field": 1.0},
+        "full_optimizer_basis_gradient": [0.0],
+        "gradient_inf_norm": 0.0,
+        "gradient_l2_norm": 0.0,
+        "field_error": 0.0,
+        "iota": 0.1,
+        "volume": 0.1,
+        "max_curvature": 1.0,
+        "coil_coil_min_distance": 0.1,
+        "coil_plasma_min_distance": 0.1,
+        "plasma_vessel_min_distance": 0.1,
+        "self_intersection": {
+            "available": True,
+            "self_intersecting": False,
+        },
+        "hardware_constraints": {"status": "pass"},
+    }
+
+
+def _release_gate_operator_outputs():
+    return {
+        "biot_savart_B": [0.0],
+        "surface_gamma": [[0.0, 0.0, 0.0]],
+        "integral_BdotN": 0.0,
+        "boozer_residual_vector": [0.0],
+        "boozer_residual_norm": 0.0,
+        "boozer_residual_max_norm": 0.0,
+        "first_derivative_kernel_samples": {"status": "pass"},
+        "boozer_residual_jacobian_metadata": {"status": "pass"},
+        "boozer_jvp": [0.0],
+        "boozer_vjp": [0.0],
+        "boozer_adjoint_solve": {"status": "pass", "residual": 0.0},
+    }
+
+
+def _release_gate_lane(*, backend, gpu_memory_mb=None, include_gpu_facts=True):
+    provenance = {
+        "repo_sha": "abc123",
+        "jax": "0.0.0",
+        "jaxlib": "0.0.0",
+        "backend": backend,
+        "devices": [backend],
+        "x64_enabled": True,
+        "peak_rss_mb": 128.0,
+        "xla_flags": "--xla_gpu_deterministic_ops=true",
+        "compilation_cache_policy": "disabled",
+    }
+    if gpu_memory_mb is not None:
+        provenance["gpu_memory_mb"] = gpu_memory_mb
+    if include_gpu_facts:
+        provenance["nvidia_smi_gpus"] = [
+            {
+                "name": "H100",
+                "driver_version": "0.0",
+                "memory_total_mb": 81920.0,
+            }
+        ]
+    return {
+        "hashes": _release_gate_hashes(),
+        "assembled_outputs": _release_gate_assembled_outputs(),
+        "operator_outputs": _release_gate_operator_outputs(),
+        "provenance": provenance,
+        "timings": {"compile_time_s": 1.0, "run_time_s": 2.0},
+    }
+
+
+def _release_gate_fixed_state_artifact(*, comparison_status="pass", gpu_memory_mb=1024.0):
+    return {
+        "schema_version": 1,
+        "lanes": {
+            "cpp_cpu": _release_gate_lane(backend="cpu", include_gpu_facts=False),
+            "jax_cpu": _release_gate_lane(backend="cpu", include_gpu_facts=False),
+            "jax_gpu": _release_gate_lane(
+                backend="cuda",
+                gpu_memory_mb=gpu_memory_mb,
+            ),
+        },
+        "comparisons": {
+            "cpp_cpu_vs_jax_cpu": {"status": comparison_status},
+            "cpp_cpu_vs_jax_gpu": {"status": "pass"},
+            "jax_cpu_vs_jax_gpu": {"status": "pass"},
+        },
+        "performance_summary_by_name": {
+            "tier2_stage2_e2e": {
+                "outer_speedup_vs_cpu": 2.0,
+                "warm_speedup_vs_cpu": 2.0,
+                "lane_compile_overhead_s": 1.0,
+            }
+        },
+        "passed": comparison_status == "pass",
+        "failures": [] if comparison_status == "pass" else ["cpp_cpu_vs_jax_cpu drift"],
+    }
+
+
+def _release_gate_parity_report_with_timings():
+    report = _release_gate_parity_report()
+    report["timings"] = {
+        "cpu_scipy": {
+            "script_total_s": 500.0,
+        },
+        "jax_gpu": {
+            "outer_optimizer_s": 250.0,
+            "outer_optimizer_main_s": 210.0,
+            "script_total_s": 300.0,
+        },
+    }
+    return report
+
+
+def _release_gate_coordinate_mapping_artifact():
+    return {
+        "schema_version": 1,
+        "status": "pass",
+        "inputs": {},
+        "mapping": {"status": "pass"},
+        "active_indices": [0],
+        "frozen_indices": [1],
+        "state_reconstruction": {"status": "pass"},
+        "gradient_projection": {"status": "pass"},
+        "finite_difference_checks": [{"status": "pass"}],
+        "failures": [],
+    }
+
+
+def _optimizer_trace_entry(*, iteration=1, trial_x=None):
     vector = lambda values: {"values": list(values)}
     scalar = lambda value: {"value": float(value)}
+    if trial_x is None:
+        trial_x = [0.875, 2.0625]
     return {
-        "iteration": 1,
+        "iteration": iteration,
         "x": vector([1.0, 2.0]),
         "fun": scalar(1.0),
         "jac": vector([0.5, -0.25]),
@@ -1169,7 +1414,7 @@ def _optimizer_trace_entry():
         "search_direction_dot_grad": scalar(-0.3125),
         "step_scale": scalar(0.25),
         "step": vector([-0.125, 0.0625]),
-        "trial_x": vector([0.875, 2.0625]),
+        "trial_x": vector(trial_x),
         "trial_fun": scalar(0.5),
         "trial_jac": vector([0.1, -0.2]),
         "trial_jac_inf_norm": scalar(0.2),
@@ -1182,9 +1427,11 @@ def _optimizer_trace_entry():
     }
 
 
-def _write_optimizer_trace_progress(path: Path, entry=None, *, message="ok"):
-    if entry is None:
-        entry = _optimizer_trace_entry()
+def _write_optimizer_trace_progress(path: Path, entries=None, *, message="ok"):
+    if entries is None:
+        entries = [_optimizer_trace_entry()]
+    if isinstance(entries, dict):
+        entries = [entries]
     path.write_text(
         json.dumps(
             {
@@ -1193,7 +1440,7 @@ def _write_optimizer_trace_progress(path: Path, entry=None, *, message="ok"):
                         "label": "phase2_returned",
                         "result": {
                             "message": message,
-                            "optimizer_state_trace": [entry],
+                            "optimizer_state_trace": list(entries),
                         },
                     }
                 ]
@@ -1201,6 +1448,33 @@ def _write_optimizer_trace_progress(path: Path, entry=None, *, message="ok"):
         ),
         encoding="utf-8",
     )
+
+
+def test_single_stage_init_compares_case_optimizer_state_traces(tmp_path):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    _write_optimizer_trace_progress(cpu_progress)
+    _write_optimizer_trace_progress(jax_progress)
+
+    result = single_stage_init_parity_module._compare_case_optimizer_state_traces(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+    )
+
+    assert result["status"] == "pass"
+    assert result["entry_count"] == 1
+
+
+def test_single_stage_init_blocks_missing_case_optimizer_state_trace(tmp_path):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    cpu_progress.write_text(json.dumps({"events": []}), encoding="utf-8")
+
+    result = single_stage_init_parity_module._compare_case_optimizer_state_traces(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(tmp_path / "missing.json")},
+    )
+
+    assert result["status"] == "blocked"
 
 
 def test_single_stage_parity_matrix_blocks_unmatched_trajectory_artifacts():
@@ -1279,6 +1553,35 @@ def test_single_stage_parity_matrix_uses_progress_terminations(tmp_path):
     assert full_trajectory["termination_messages"]["h100_gpu"] == "matched"
 
 
+def test_single_stage_parity_matrix_accepts_cpu_scipy_progress_without_trace(tmp_path):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_cpu_progress = tmp_path / "jax_cpu_progress.json"
+    gpu_progress = tmp_path / "gpu_progress.json"
+    cpu_progress.write_text(
+        json.dumps({"events": [{"result": {"message": "matched"}}]}),
+        encoding="utf-8",
+    )
+    _write_optimizer_trace_progress(jax_cpu_progress, message="matched")
+    _write_optimizer_trace_progress(gpu_progress, message="matched")
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        _single_stage_parity_report(),
+        cpu_progress_json=str(cpu_progress),
+        jax_cpu_progress_json=str(jax_cpu_progress),
+        gpu_progress_json=str(gpu_progress),
+    )
+
+    trace_pairs = matrix["comparisons"]["optimizer_state_trace_pairs"]["pairs"]
+    assert "cpu_cpp_trace_vs_jax_cpu" not in trace_pairs
+    assert (
+        matrix["comparisons"]["full_trajectory_parity"]["termination_messages"][
+            "cpu_scipy"
+        ]
+        == "matched"
+    )
+    assert matrix["comparisons"]["full_trajectory_parity"]["status"] == "pass"
+
+
 def test_single_stage_parity_matrix_reports_drifted_optimizer_state_traces(tmp_path):
     cpu_progress = tmp_path / "cpu_progress.json"
     jax_cpu_progress = tmp_path / "jax_cpu_progress.json"
@@ -1303,6 +1606,247 @@ def test_single_stage_parity_matrix_reports_drifted_optimizer_state_traces(tmp_p
     assert (
         trace_pairs["pairs"]["jax_cpu_vs_h100_gpu"]["status"] == "drift"
     )
+
+
+def test_single_stage_parity_matrix_compares_later_trace_entries(tmp_path):
+    jax_cpu_progress = tmp_path / "jax_cpu_progress.json"
+    gpu_progress = tmp_path / "gpu_progress.json"
+    jax_entries = [
+        _optimizer_trace_entry(iteration=1),
+        _optimizer_trace_entry(iteration=2),
+    ]
+    gpu_entries = [
+        _optimizer_trace_entry(iteration=1),
+        _optimizer_trace_entry(iteration=2, trial_x=[0.5, 2.0625]),
+    ]
+    _write_optimizer_trace_progress(jax_cpu_progress, jax_entries)
+    _write_optimizer_trace_progress(gpu_progress, gpu_entries)
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        _single_stage_parity_report(),
+        jax_cpu_progress_json=str(jax_cpu_progress),
+        gpu_progress_json=str(gpu_progress),
+    )
+
+    pair = matrix["comparisons"]["optimizer_state_trace_pairs"]["pairs"][
+        "jax_cpu_vs_h100_gpu"
+    ]
+    assert pair["status"] == "drift"
+    assert pair["entry_count"] == 2
+    assert pair["first_mismatch"]["iteration_index"] == 1
+    assert matrix["passed"] is False
+
+
+def test_release_gate_requires_direct_cpp_fixed_state_comparisons(tmp_path):
+    jax_cpu_progress = tmp_path / "jax_cpu_progress.json"
+    gpu_progress = tmp_path / "gpu_progress.json"
+    _write_optimizer_trace_progress(jax_cpu_progress)
+    _write_optimizer_trace_progress(gpu_progress)
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        _release_gate_parity_report(),
+        jax_cpu_progress_json=str(jax_cpu_progress),
+        gpu_progress_json=str(gpu_progress),
+        fixed_state_artifact=_release_gate_fixed_state_artifact(
+            comparison_status="drift"
+        ),
+        coordinate_mapping_artifact=_release_gate_coordinate_mapping_artifact(),
+    )
+
+    fixed_state = matrix["buckets"]["fixed_state_physics_parity"]
+    assert fixed_state["status"] == "drift"
+    assert (
+        fixed_state["comparisons"]["cpp_cpu_vs_jax_cpu_fixed_state"]["status"]
+        == "drift"
+    )
+    assert matrix["release_gate_passed"] is False
+    assert "fixed_state_physics_parity" in matrix["blocking_buckets"]
+
+
+def test_release_gate_blocks_mixed_full_run_objective_contract(tmp_path):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_cpu_progress = tmp_path / "jax_cpu_progress.json"
+    gpu_progress = tmp_path / "gpu_progress.json"
+    _write_optimizer_trace_progress(cpu_progress)
+    _write_optimizer_trace_progress(jax_cpu_progress)
+    _write_optimizer_trace_progress(gpu_progress)
+    report = _release_gate_parity_report()
+    report["full_run_artifact_contract"]["lanes"]["jax_gpu"][
+        "objective_configuration_hash"
+    ] = "different-objective"
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        report,
+        cpu_progress_json=str(cpu_progress),
+        jax_cpu_progress_json=str(jax_cpu_progress),
+        gpu_progress_json=str(gpu_progress),
+        fixed_state_artifact=_release_gate_fixed_state_artifact(),
+        coordinate_mapping_artifact=_release_gate_coordinate_mapping_artifact(),
+    )
+
+    bucket = matrix["buckets"]["full_run_artifact_contract"]
+    assert bucket["status"] == "blocked"
+    assert "full_run_artifact_contract" in matrix["blocking_buckets"]
+    assert any("objective_configuration_hash" in failure for failure in bucket["failures"])
+    assert matrix["comparisons"]["cpu_scipy_vs_jax_cpu_same_seed_metrics"][
+        "status"
+    ] == "blocked"
+    assert matrix["first_divergence"]["stage"] == "run_contract"
+    assert matrix["release_gate_passed"] is False
+
+
+def test_release_gate_missing_cpp_cpu_blocks_fixed_state_bucket():
+    fixed_state = _release_gate_fixed_state_artifact()
+    fixed_state["lanes"].pop("cpp_cpu")
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        _release_gate_parity_report(),
+        fixed_state_artifact=fixed_state,
+        coordinate_mapping_artifact=_release_gate_coordinate_mapping_artifact(),
+    )
+
+    bucket = matrix["buckets"]["fixed_state_physics_parity"]
+    assert bucket["status"] == "blocked"
+    assert "cpp_cpu" in bucket["missing_lanes"]
+    assert matrix["release_gate_passed"] is False
+
+
+def test_release_gate_coordinate_mapping_artifact_is_required():
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        _release_gate_parity_report(),
+        fixed_state_artifact=_release_gate_fixed_state_artifact(),
+    )
+
+    bucket = matrix["buckets"]["coordinate_mapping_parity"]
+    assert bucket["status"] == "blocked"
+    assert "coordinate_mapping_parity" in matrix["blocking_buckets"]
+    assert matrix["release_gate_passed"] is False
+
+
+def test_release_gate_rejects_legacy_h100_keys():
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        _single_stage_parity_report(),
+        fixed_state_artifact=_release_gate_fixed_state_artifact(),
+        coordinate_mapping_artifact=_release_gate_coordinate_mapping_artifact(),
+    )
+
+    same_state = matrix["comparisons"]["jax_cpu_vs_jax_gpu_same_state_value_grad"]
+    assert same_state["status"] == "blocked"
+    assert same_state["legacy_keys"]
+    assert matrix["passed"] is False
+
+
+def test_release_gate_blocks_missing_cuda_provenance():
+    fixed_state = _release_gate_fixed_state_artifact()
+    fixed_state["lanes"]["jax_gpu"]["provenance"].pop("nvidia_smi_gpus")
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        _release_gate_parity_report(),
+        fixed_state_artifact=fixed_state,
+        coordinate_mapping_artifact=_release_gate_coordinate_mapping_artifact(),
+    )
+
+    bucket = matrix["buckets"]["performance_memory_report"]
+    assert bucket["status"] == "blocked"
+    assert any("NVIDIA GPU facts are missing" in failure for failure in bucket["failures"])
+
+
+def test_release_gate_fails_when_gpu_memory_exceeds_checked_in_budget():
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        _release_gate_parity_report(),
+        fixed_state_artifact=_release_gate_fixed_state_artifact(
+            gpu_memory_mb=13000.0,
+        ),
+        coordinate_mapping_artifact=_release_gate_coordinate_mapping_artifact(),
+    )
+
+    bucket = matrix["buckets"]["performance_memory_report"]
+    assert bucket["status"] == "drift"
+    assert any("peak GPU memory" in failure for failure in bucket["failures"])
+    assert matrix["release_gate_passed"] is False
+
+
+def test_release_gate_derives_performance_budget_from_report_timings():
+    fixed_state = _release_gate_fixed_state_artifact()
+    fixed_state.pop("performance_summary_by_name")
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        _release_gate_parity_report_with_timings(),
+        fixed_state_artifact=fixed_state,
+        coordinate_mapping_artifact=_release_gate_coordinate_mapping_artifact(),
+    )
+
+    bucket = matrix["buckets"]["performance_memory_report"]
+    summary = bucket["performance_summary_by_name"]["tier2_stage2_e2e"]
+    assert bucket["status"] == "drift"
+    assert bucket["performance_summary_source"] == "parity_report.timings"
+    assert summary["outer_speedup_vs_cpu"] == pytest.approx(2.0)
+    assert summary["lane_compile_overhead_s"] == pytest.approx(40.0)
+    assert "performance summary is missing" not in bucket["failures"]
+    assert any("warm steady-state speedup" in failure for failure in bucket["failures"])
+
+
+def test_release_gate_final_metric_drift_has_structured_first_divergence(tmp_path):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_cpu_progress = tmp_path / "jax_cpu_progress.json"
+    gpu_progress = tmp_path / "gpu_progress.json"
+    _write_optimizer_trace_progress(cpu_progress)
+    _write_optimizer_trace_progress(jax_cpu_progress)
+    _write_optimizer_trace_progress(gpu_progress)
+    report = _release_gate_parity_report()
+    report["same_seed_no_optimizer_metrics"]["FINAL_VOLUME"]["values"][
+        "jax_gpu"
+    ] = 1.5
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        report,
+        cpu_progress_json=str(cpu_progress),
+        jax_cpu_progress_json=str(jax_cpu_progress),
+        gpu_progress_json=str(gpu_progress),
+        fixed_state_artifact=_release_gate_fixed_state_artifact(),
+        coordinate_mapping_artifact=_release_gate_coordinate_mapping_artifact(),
+    )
+
+    divergence = matrix["first_divergence"]
+    assert divergence["stage"] == "final_sync"
+    assert divergence["stage"] in single_stage_parity_matrix.FIRST_DIVERGENCE_STAGES
+    assert any(
+        "cpu_scipy_vs_jax_gpu_final_metrics" in failure
+        for failure in matrix["buckets"]["final_metric_envelope"]["failures"]
+    )
+    assert matrix["release_gate_passed"] is False
+
+
+def test_release_gate_markdown_report_includes_required_summary_tables():
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        _release_gate_parity_report(),
+        fixed_state_artifact=_release_gate_fixed_state_artifact(
+            comparison_status="drift"
+        ),
+        coordinate_mapping_artifact=_release_gate_coordinate_mapping_artifact(),
+    )
+    matrix["fixed_state_artifact"] = _release_gate_fixed_state_artifact(
+        comparison_status="drift"
+    )
+    matrix["artifact_paths"] = {
+        "fixed_state_parity_json": ".artifacts/parity/fixed-state.json",
+        "coordinate_mapping_json": ".artifacts/parity/coordinate.json",
+    }
+
+    markdown = single_stage_parity_matrix.build_release_gate_markdown_report(matrix)
+
+    assert "# Single-Stage Release Gate: FAIL" in markdown
+    assert "fixed_state_physics_parity failed because" in markdown
+    assert "## Bucket Status" in markdown
+    assert "## Fixed-State Deltas" in markdown
+    assert "## Full-Run Public Behavior Deltas" in markdown
+    assert "## Memory Table" in markdown
+    assert "## Memory And Performance Budgets" in markdown
+    assert "## Device And Version Table" in markdown
+    assert "## Git Status" in markdown
+    assert "cpp_cpu_vs_jax_cpu_fixed_state" in markdown
+    assert "## Runtime Table" in markdown
+    assert ".artifacts/parity/fixed-state.json" in markdown
 
 
 def test_parity_ladder_tolerances_capture_precision_lanes():
@@ -1411,6 +1955,7 @@ def test_resolve_probe_lane_tracks_private_optimizer_backends():
     assert resolve_probe_lane() == "trusted-public-reference"
     assert resolve_probe_lane(optimizer_backend="scipy") == "trusted-public-reference"
     assert resolve_probe_lane(optimizer_backend="ondevice") == "private-optimizer"
+    assert resolve_probe_lane(optimizer_backend="scipy-jax") == "target-scipy-control"
     with pytest.raises(ValueError, match="optimizer_backend must be one of"):
         resolve_probe_lane(optimizer_backend="hybrid")
 
@@ -1989,6 +2534,10 @@ def _single_stage_case_args(tmp_path: Path) -> argparse.Namespace:
         equilibria_dir=str(tmp_path / "equilibria"),
         jax_profile_dir=None,
         profile_target_lane_batch_size=1,
+        reference_optimizer_method="lbfgs",
+        initial_step_scale=1.0,
+        initial_step_maxiter=0,
+        outer_maxls=single_stage_init_parity_module.TRACE_PARITY_OUTER_MAXLS,
     )
 
 
@@ -2097,6 +2646,154 @@ def test_prefix_phase_timings_adds_lane_prefix():
         "jax_boozer_total_s": pytest.approx(2.5),
         "jax_outer_optimizer_s": pytest.approx(1.0),
     }
+
+
+def _single_stage_contract_results(**overrides):
+    results = {
+        "CONSTRAINT_METHOD": "penalty",
+        "CONSTRAINT_WEIGHT": 1.0,
+        "ALM_FORMULATION": None,
+        "TARGET_VOLUME": 0.1,
+        "TARGET_IOTA": 0.15,
+        "NON_QS_WEIGHT": 1.0,
+        "RES_WEIGHT": 1.0,
+        "IOTAS_WEIGHT": 1.0,
+        "LENGTH_WEIGHT": 1.0,
+        "LENGTH_TARGET": 1.0,
+        "CC_DIST": 0.1,
+        "CC_WEIGHT": 1.0,
+        "CS_DIST": 0.1,
+        "CS_WEIGHT": 1.0,
+        "SS_DIST": 0.1,
+        "SURF_DIST_WEIGHT": 1.0,
+        "CURVATURE_THRESHOLD": 100.0,
+        "CURVATURE_WEIGHT": 1.0,
+        "BANANA_CURRENT_MAX_A": 80000.0,
+        "STAGE2_TF_CURRENT_A": 80000.0,
+        "STAGE2_TF_CURRENT_LIMIT_ENFORCED": True,
+        "TF_CURRENT_LIMIT_A": 80000.0,
+        "COIL_VESSEL_MIN_DIST_M": 0.01,
+        "init_only": False,
+        "provenance": {
+            "generated_at_utc": "2026-05-02T00:00:00Z",
+            "repo_sha": "abc123",
+        },
+    }
+    results.update(overrides)
+    return results
+
+
+def _single_stage_contract_case(tmp_path: Path, lane_name: str, results):
+    run_dir = tmp_path / lane_name
+    run_dir.mkdir()
+    (run_dir / "results.json").write_text(json.dumps(results), encoding="utf-8")
+    progress_json = run_dir / "outer_optimizer_progress.json"
+    _write_optimizer_trace_progress(progress_json)
+    return {
+        "results": results,
+        "run_dir": str(run_dir),
+        "outer_optimizer_progress_json": str(progress_json),
+    }
+
+
+def test_single_stage_init_full_run_contract_records_reportable_lane_state(
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.platform = "cpu"
+    seed_spec = tmp_path / "single_stage_jax_runtime_seed_spec.json"
+    seed_spec.write_text('{"seed": 7}', encoding="utf-8")
+    cpu_case = _single_stage_contract_case(
+        tmp_path,
+        "cpu",
+        _single_stage_contract_results(),
+    )
+    jax_case = _single_stage_contract_case(
+        tmp_path,
+        "jax",
+        _single_stage_contract_results(),
+    )
+
+    contract = (
+        single_stage_init_parity_module.build_single_stage_full_run_artifact_contract(
+            args,
+            reference_backend="cpu",
+            cpu_case=cpu_case,
+            jax_case=jax_case,
+            jax_seed_spec=seed_spec,
+        )
+    )
+
+    lanes = contract["lanes"]
+    assert set(lanes) == {"cpu_scipy", "jax_cpu"}
+    assert contract["runtime_seed_spec_hash"] == single_stage_parity_matrix._file_sha256(
+        seed_spec
+    )
+    assert lanes["cpu_scipy"]["runtime_seed_spec_hash"] == contract[
+        "runtime_seed_spec_hash"
+    ]
+    assert lanes["jax_cpu"]["runtime_seed_spec_hash"] == contract[
+        "runtime_seed_spec_hash"
+    ]
+    assert lanes["cpu_scipy"]["objective_configuration_hash"] == lanes["jax_cpu"][
+        "objective_configuration_hash"
+    ]
+    assert lanes["cpu_scipy"]["missing_objective_config_keys"] == []
+    assert lanes["cpu_scipy"]["run_family_id"] == contract["run_family_id"]
+    assert lanes["jax_cpu"]["run_family_id"] == contract["run_family_id"]
+    assert lanes["cpu_scipy"]["init_only"] is False
+    assert lanes["cpu_scipy"]["results_json"] == str(
+        Path(cpu_case["run_dir"]) / "results.json"
+    )
+    assert lanes["jax_cpu"]["progress_json"] == jax_case[
+        "outer_optimizer_progress_json"
+    ]
+
+
+def test_single_stage_init_full_run_contract_preserves_objective_mismatch(
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.platform = "auto"
+    seed_spec = tmp_path / "single_stage_jax_runtime_seed_spec.json"
+    seed_spec.write_text('{"seed": 7}', encoding="utf-8")
+    cpu_case = _single_stage_contract_case(
+        tmp_path,
+        "cpu",
+        _single_stage_contract_results(CURVATURE_THRESHOLD=100.0),
+    )
+    jax_case = _single_stage_contract_case(
+        tmp_path,
+        "jax",
+        _single_stage_contract_results(
+            CURVATURE_THRESHOLD=40.0,
+            provenance={
+                "backend": "gpu",
+                "generated_at_utc": "2026-05-02T00:00:00Z",
+                "repo_sha": "abc123",
+            },
+        ),
+    )
+
+    contract = (
+        single_stage_init_parity_module.build_single_stage_full_run_artifact_contract(
+            args,
+            reference_backend="cpu",
+            cpu_case=cpu_case,
+            jax_case=jax_case,
+            jax_seed_spec=seed_spec,
+        )
+    )
+
+    lanes = contract["lanes"]
+    assert set(lanes) == {"cpu_scipy", "jax_gpu"}
+    assert lanes["cpu_scipy"]["run_family_id"] == lanes["jax_gpu"]["run_family_id"]
+    assert (
+        lanes["cpu_scipy"]["objective_configuration_hash"]
+        != lanes["jax_gpu"]["objective_configuration_hash"]
+    )
+    assert lanes["cpu_scipy"]["missing_objective_config_keys"] == []
+    assert lanes["jax_gpu"]["missing_objective_config_keys"] == []
 
 
 def test_single_stage_init_case_benchmark_mode_skips_surface_gamma_artifact(
@@ -4071,6 +4768,7 @@ def test_single_stage_outer_loop_probe_rejects_non_ondevice_boozer_backend():
     with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
         resolve_boozer_optimizer_backend("ondevice", "scipy")
     assert resolve_boozer_optimizer_backend("ondevice", None) == "ondevice"
+    assert resolve_boozer_optimizer_backend("scipy-jax", None) == "ondevice"
 
 
 def test_single_stage_outer_loop_contract_matches_probe_defaults():
@@ -5103,6 +5801,57 @@ def test_timed_probe_disables_compilation_cache_for_cpu_children(monkeypatch, tm
     assert _JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR not in env
     assert env[_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR] == "1"
     assert env[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] == "disabled"
+
+
+def test_single_stage_init_case_threads_reference_trace_optimizer_to_cpu_lane(
+    monkeypatch,
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.reference_optimizer_method = "lbfgs-trace"
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+
+    def fake_find_single_file(root: str | Path, pattern: str) -> Path:
+        path = Path(root) / pattern
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module, "find_single_file", fake_find_single_file
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+            "TIMINGS": {"boozer_total_s": 2.0},
+        },
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "cpu",
+        platform="cpu",
+        benchmark_mode=True,
+        load_surface_gamma=False,
+    )
+
+    assert len(observed_invocations) == 1
+    command, _env = observed_invocations[0]
+    reference_method_flag_index = command.index("--reference-optimizer-method")
+    assert command[reference_method_flag_index + 1] == "lbfgs-trace"
+    initial_step_scale_flag_index = command.index("--initial-step-scale")
+    assert command[initial_step_scale_flag_index + 1] == "1.0"
+    initial_step_maxiter_flag_index = command.index("--initial-step-maxiter")
+    assert command[initial_step_maxiter_flag_index + 1] == "0"
+    outer_maxls_flag_index = command.index("--outer-maxls")
+    assert command[outer_maxls_flag_index + 1] == "8"
+    assert "--optimizer-backend" not in command
 
 
 def test_tier5_provenance_extra_uses_real_single_stage_fixture():
