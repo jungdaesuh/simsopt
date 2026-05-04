@@ -56,12 +56,16 @@ TEST_IOTA = 0.15
 TEST_G0 = 1.0
 _SINGLE_STAGE_JAX_ONLY_ONDEVICE = (
     "the single-stage outer loop with backend='jax' requires "
-    "optimizer_backend='ondevice'"
+    "optimizer_backend='ondevice', optimizer_backend='scipy-jax', or "
+    "optimizer_backend='scipy-jax-fullgraph'"
 )
 _SINGLE_STAGE_CPU_ONLY_SCIPY = (
     "single-stage outer loop CPU/reference lane only supports optimizer_backend='scipy'"
 )
-_OPTIMIZER_BACKEND_INVALID = "optimizer_backend must be one of: scipy, ondevice."
+_OPTIMIZER_BACKEND_INVALID = (
+    "optimizer_backend must be one of: scipy, ondevice, scipy-jax, "
+    "scipy-jax-fullgraph."
+)
 
 
 def load_single_stage_example_module():
@@ -513,7 +517,12 @@ class SingleStageExampleTests(unittest.TestCase):
             component_label,
         ):
             del component_label
-            if optimizer_backend not in {"scipy", "ondevice"}:
+            if optimizer_backend not in {
+                "scipy",
+                "ondevice",
+                "scipy-jax",
+                "scipy-jax-fullgraph",
+            }:
                 raise ValueError(_OPTIMIZER_BACKEND_INVALID)
             if field_backend == "jax":
                 raise ValueError(f"the {_SINGLE_STAGE_JAX_ONLY_ONDEVICE}.")
@@ -529,12 +538,26 @@ class SingleStageExampleTests(unittest.TestCase):
             least_squares_algorithm="quasi-newton",
         ):
             del component_label, least_squares_algorithm
-            if optimizer_backend not in {"scipy", "ondevice"}:
+            if optimizer_backend not in {
+                "scipy",
+                "ondevice",
+                "scipy-jax",
+                "scipy-jax-fullgraph",
+            }:
                 raise ValueError(_OPTIMIZER_BACKEND_INVALID)
-            if field_backend != "jax" or optimizer_backend != "ondevice":
+            if field_backend != "jax" or optimizer_backend not in {
+                "ondevice",
+                "scipy-jax",
+                "scipy-jax-fullgraph",
+            }:
                 raise ValueError(f"the {_SINGLE_STAGE_JAX_ONLY_ONDEVICE}.")
             require_target_backend_x64(optimizer_backend)
-            return TargetOptimizerContract("lbfgs-ondevice")
+            method = "lbfgs-ondevice"
+            if optimizer_backend == "scipy-jax":
+                method = "lbfgs-scipy-jax"
+            if optimizer_backend == "scipy-jax-fullgraph":
+                method = "lbfgs-scipy-jax-fullgraph"
+            return TargetOptimizerContract(method)
 
         fake_optimizer_module = types.ModuleType("simsopt.geo.optimizer_jax")
         fake_optimizer_module.ReferenceOptimizerContract = ReferenceOptimizerContract
@@ -1535,10 +1558,24 @@ class SingleStageExampleTests(unittest.TestCase):
             module.resolve_boozer_optimizer_backend("jax", "ondevice", None),
             "ondevice",
         )
+        self.assertEqual(
+            module.resolve_boozer_optimizer_backend("jax", "scipy-jax", None),
+            "ondevice",
+        )
+        self.assertEqual(
+            module.resolve_boozer_optimizer_backend(
+                "jax", "scipy-jax", "ondevice"
+            ),
+            "ondevice",
+        )
         with self.assertRaisesRegex(
             ValueError, "requires boozer_optimizer_backend='ondevice'"
         ):
             module.resolve_boozer_optimizer_backend("jax", "ondevice", "scipy")
+        with self.assertRaisesRegex(
+            ValueError, "requires boozer_optimizer_backend='ondevice'"
+        ):
+            module.resolve_boozer_optimizer_backend("jax", "scipy-jax", "scipy")
         with self.assertRaisesRegex(
             ValueError, "requires boozer_optimizer_backend='ondevice'"
         ):
@@ -1559,6 +1596,13 @@ class SingleStageExampleTests(unittest.TestCase):
             module.resolve_single_stage_default_boozer_least_squares_algorithm(
                 "jax",
                 "ondevice",
+            ),
+            "quasi-newton",
+        )
+        self.assertEqual(
+            module.resolve_single_stage_default_boozer_least_squares_algorithm(
+                "jax",
+                "scipy-jax",
             ),
             "quasi-newton",
         )
@@ -1644,6 +1688,67 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(args.boozer_least_squares_algorithm, "quasi-newton")
         self.assertFalse(args.boozer_least_squares_algorithm_explicit)
         self.assertIsNone(args.boozer_limited_memory)
+
+    def test_parse_args_scipy_jax_outer_defaults_boozer_to_ondevice(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--optimizer-backend",
+                "scipy-jax",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.optimizer_backend, "scipy-jax")
+        self.assertIsNone(args.boozer_optimizer_backend)
+        self.assertEqual(args.boozer_least_squares_algorithm, "quasi-newton")
+        self.assertFalse(args.boozer_least_squares_algorithm_explicit)
+        self.assertIsNone(args.boozer_limited_memory)
+
+    def test_parse_args_scipy_jax_fullgraph_outer_defaults_boozer_to_ondevice(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--optimizer-backend",
+                "scipy-jax-fullgraph",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.optimizer_backend, "scipy-jax-fullgraph")
+        self.assertIsNone(args.boozer_optimizer_backend)
+        self.assertEqual(args.boozer_least_squares_algorithm, "quasi-newton")
+        self.assertFalse(args.boozer_least_squares_algorithm_explicit)
+        self.assertIsNone(args.boozer_limited_memory)
+
+    def test_parse_args_rejects_scipy_jax_fullstate_outer_backend(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--optimizer-backend",
+                "scipy-jax-fullstate",
+            ],
+        ):
+            with self.assertRaises(SystemExit):
+                module.parse_args()
 
     def test_parse_args_preserves_cpu_default_reference_lane(self):
         module = self.load_module()
@@ -2381,6 +2486,130 @@ class SingleStageExampleTests(unittest.TestCase):
             use_jax=True,
             use_target_lane=True,
         )
+        module.require_single_stage_jax_target_lane(
+            use_jax=True,
+            use_target_lane=False,
+            optimizer_method=module._JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD,
+        )
+
+    def test_scipy_jax_contract_uses_target_scipy_control_lane(self):
+        module = self.load_module()
+        from simsopt.geo.optimizer_jax import (
+            ReferenceOptimizerContract,
+            TargetOptimizerContract,
+        )
+
+        self.assertTrue(
+            module.single_stage_optimizer_contract_uses_array_native_target_lane(
+                TargetOptimizerContract(method="lbfgs-ondevice"),
+                constraint_method="penalty",
+            )
+        )
+        self.assertTrue(
+            module.single_stage_optimizer_contract_uses_array_native_target_lane(
+                TargetOptimizerContract(method="lbfgs-scipy-jax"),
+                constraint_method="penalty",
+            )
+        )
+        self.assertFalse(
+            module.single_stage_optimizer_contract_uses_array_native_target_lane(
+                TargetOptimizerContract(
+                    method=module._JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD,
+                ),
+                constraint_method="penalty",
+            )
+        )
+        self.assertTrue(
+            module.single_stage_optimizer_contract_uses_full_graph_jax_scipy(
+                TargetOptimizerContract(
+                    method=module._JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_METHOD,
+                )
+            )
+        )
+        self.assertFalse(
+            module.single_stage_optimizer_contract_uses_array_native_target_lane(
+                ReferenceOptimizerContract(method="lbfgs"),
+                constraint_method="penalty",
+            )
+        )
+
+    def test_full_graph_jax_dof_map_reorders_native_surface_tail_to_cpu_order(self):
+        module = self.load_module()
+
+        class FakeLineage:
+            def __init__(self, local_dof_size):
+                self.local_dof_size = local_dof_size
+
+        coil_block = FakeLineage(2)
+        plasma_surface = FakeLineage(3)
+        vessel_surface = FakeLineage(1)
+        jf = types.SimpleNamespace(
+            unique_dof_lineage=(coil_block, plasma_surface, vessel_surface),
+        )
+        boozer_surface = types.SimpleNamespace(surface=plasma_surface)
+
+        dof_map = module.build_single_stage_full_graph_jax_cpu_order_dof_map(
+            jf,
+            boozer_surface,
+            vessel_surface,
+        )
+
+        np.testing.assert_array_equal(
+            dof_map.optimizer_to_native_indices,
+            np.array([0, 1, 5, 2, 3, 4], dtype=np.int64),
+        )
+        native_dofs = np.array([10.0, 11.0, 20.0, 21.0, 22.0, 30.0])
+        optimizer_dofs = np.array([10.0, 11.0, 30.0, 20.0, 21.0, 22.0])
+        np.testing.assert_array_equal(
+            dof_map.optimizer_from_native_dofs(native_dofs),
+            optimizer_dofs,
+        )
+        np.testing.assert_array_equal(
+            dof_map.native_from_optimizer_dofs(optimizer_dofs),
+            native_dofs,
+        )
+        np.testing.assert_array_equal(
+            dof_map.optimizer_from_native_gradient(native_dofs),
+            optimizer_dofs,
+        )
+
+    def test_full_graph_jax_adapter_maps_native_full_gradient_once(self):
+        module = self.load_module()
+        applied = {}
+        run_dict = {}
+        adapter = module.SingleStageAdapter(
+            run_dict=run_dict,
+            boozer_surface=object(),
+            JF=object(),
+            bs=object(),
+            objectives={},
+            diagnostics={},
+            log_path="unused.log",
+            apply_coil_dofs=lambda x: applied.setdefault("x", np.asarray(x)),
+            optimizer_gradient_transform=lambda grad: grad[[0, 2, 1]],
+        )
+
+        with patch.object(
+            module,
+            "evaluate_candidate",
+            return_value=(1.5, np.array([10.0, 20.0, 30.0])),
+        ):
+            value, gradient = adapter(np.array([1.0, 2.0, 3.0]))
+
+        self.assertEqual(value, 1.5)
+        np.testing.assert_array_equal(applied["x"], np.array([1.0, 2.0, 3.0]))
+        np.testing.assert_array_equal(gradient, np.array([10.0, 30.0, 20.0]))
+
+        run_dict["last_candidate_failure"] = {"reason": "nonfinite"}
+        with patch.object(
+            module,
+            "evaluate_candidate",
+            return_value=(2.5, np.array([40.0, 50.0, 60.0])),
+        ):
+            value, gradient = adapter(np.array([4.0, 5.0, 6.0]))
+
+        self.assertEqual(value, 2.5)
+        np.testing.assert_array_equal(gradient, np.array([40.0, 50.0, 60.0]))
 
     def test_single_stage_runtime_stage2_seed_payload_requires_order(self):
         module = self.load_module()
@@ -3113,12 +3342,45 @@ class SingleStageExampleTests(unittest.TestCase):
 
         retry_step_size = module.resolve_single_stage_retry_initial_step_size(
             None,
-            [{"step_scale": {"value": 0.2}}],
+            [
+                {
+                    "step_scale": {"value": 0.0, "finite": True},
+                    "requested_initial_step": {"value": 0.2, "finite": True},
+                }
+            ],
             single_stage_search_policy=policy,
             retry_index=0,
         )
 
         self.assertEqual(retry_step_size, 0.1)
+
+    def test_resolve_single_stage_retry_initial_step_size_prefers_requested_step(
+        self,
+    ):
+        module = self.load_module()
+        policy = module.SingleStageSearchPolicy(
+            donor_class="stage2_seed_only",
+            search_policy="repair_first",
+            adaptive_failure_penalty_weight=1.5,
+            invalid_step_retry_budget=2,
+            retry_step_shrink_factor=0.5,
+        )
+
+        retry_step_size = module.resolve_single_stage_retry_initial_step_size(
+            None,
+            [
+                {
+                    "step_scale": {"value": 0.0, "finite": True},
+                    "requested_initial_step": {"value": 0.5, "finite": True},
+                    "first_tested_alpha": {"value": 0.5, "finite": True},
+                    "best_finite_alpha": {"value": 0.25, "finite": True},
+                }
+            ],
+            single_stage_search_policy=policy,
+            retry_index=0,
+        )
+
+        self.assertEqual(retry_step_size, 0.25)
 
     def test_build_single_stage_scaled_phase_retry_state_anchors_zero_step(self):
         module = self.load_module()
@@ -4030,6 +4292,18 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertFalse(
             module.should_record_single_stage_outer_optimizer_progress(False)
         )
+        self.assertTrue(
+            module.should_record_single_stage_outer_optimizer_progress(
+                False,
+                optimizer_method="lbfgs",
+            )
+        )
+        self.assertTrue(
+            module.should_record_single_stage_outer_optimizer_progress(
+                False,
+                optimizer_method="lbfgs-trace",
+            )
+        )
 
     def test_extract_optimizer_diagnostics_flags_nonfinite_state(self):
         module = self.load_module()
@@ -4261,6 +4535,13 @@ class SingleStageExampleTests(unittest.TestCase):
                     "valid_curvature": False,
                     "trial_converged": False,
                     "ls_status": 2,
+                    "requested_initial_step": 0.125,
+                    "first_tested_alpha": 0.125,
+                    "best_finite_alpha": 0.0625,
+                    "returned_alpha": 0.0,
+                    "failure_reason": "nonfinite",
+                    "armijo_margin": 1.25,
+                    "curvature_margin": 2.5,
                 }
             ]
         )
@@ -4288,6 +4569,37 @@ class SingleStageExampleTests(unittest.TestCase):
                     "valid_curvature": False,
                     "trial_converged": False,
                     "ls_status": 2,
+                    "requested_initial_step": {
+                        "value": 0.125,
+                        "finite": True,
+                        "classification": None,
+                    },
+                    "first_tested_alpha": {
+                        "value": 0.125,
+                        "finite": True,
+                        "classification": None,
+                    },
+                    "best_finite_alpha": {
+                        "value": 0.0625,
+                        "finite": True,
+                        "classification": None,
+                    },
+                    "returned_alpha": {
+                        "value": 0.0,
+                        "finite": True,
+                        "classification": None,
+                    },
+                    "armijo_margin": {
+                        "value": 1.25,
+                        "finite": True,
+                        "classification": None,
+                    },
+                    "curvature_margin": {
+                        "value": 2.5,
+                        "finite": True,
+                        "classification": None,
+                    },
+                    "failure_reason": "nonfinite",
                 }
             ],
         )
@@ -4484,7 +4796,7 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(args.boozer_least_squares_algorithm, "lm")
         self.assertTrue(args.boozer_least_squares_algorithm_explicit)
 
-    def test_use_experimental_target_lane_value_and_grad_only_on_jax_ondevice(self):
+    def test_use_experimental_target_lane_value_and_grad_only_on_jax_targets(self):
         module = self.load_module()
 
         self.assertFalse(
@@ -4513,6 +4825,19 @@ class SingleStageExampleTests(unittest.TestCase):
                 backend="jax",
                 optimizer_backend="ondevice",
                 enabled=True,
+            )
+        )
+        self.assertTrue(
+            module.use_experimental_target_lane_value_and_grad(
+                backend="jax",
+                optimizer_backend="scipy-jax",
+                enabled=True,
+            )
+        )
+        self.assertTrue(
+            module.use_target_lane_value_and_grad(
+                backend="jax",
+                optimizer_backend="scipy-jax",
             )
         )
 
@@ -4699,6 +5024,7 @@ class SingleStageExampleTests(unittest.TestCase):
                     cs_dist=0.02,
                     ss_dist=0.04,
                     curvature_threshold=40.0,
+                    run_dict={},
                     init_only=False,
                     termination_message="ok",
                     optimizer_success=True,
@@ -4778,6 +5104,179 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(metrics, cached_metrics)
         self.assertEqual(init_only_metrics, cached_metrics)
+
+    def test_restore_single_stage_local_incumbent_preserves_target_lane_reporting_cache(
+        self,
+    ):
+        module = self.load_module()
+        cached_metrics = self._make_reporting_runtime_summary(
+            include_distance_metrics=True
+        )
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        run_dict.update(
+            {
+                "target_lane_reporting_metrics": copy.deepcopy(cached_metrics),
+                "target_lane_reporting_coil_dofs": np.array(
+                    [0.0, 0.0, 0.0, 0.0, 0.0],
+                    dtype=np.float64,
+                ),
+                "target_lane_reporting_include_distance_metrics": True,
+            }
+        )
+
+        incumbent_state = module.snapshot_single_stage_local_incumbent_state(run_dict)
+        run_dict["target_lane_reporting_metrics"]["final_G"] = -1.0
+        run_dict["target_lane_reporting_coil_dofs"] = np.ones(5, dtype=np.float64)
+        run_dict["target_lane_reporting_include_distance_metrics"] = False
+
+        module.restore_single_stage_local_incumbent_state(run_dict, incumbent_state)
+
+        self.assertEqual(run_dict["target_lane_reporting_metrics"], cached_metrics)
+        np.testing.assert_allclose(
+            run_dict["target_lane_reporting_coil_dofs"],
+            np.zeros(5, dtype=np.float64),
+        )
+        self.assertTrue(run_dict["target_lane_reporting_include_distance_metrics"])
+
+    def test_snapshot_single_stage_local_incumbent_rejects_partial_target_lane_reporting_cache(
+        self,
+    ):
+        module = self.load_module()
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        run_dict["target_lane_reporting_metrics"] = {
+            "final_non_qs": 0.11,
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "partially populated"):
+            module.snapshot_single_stage_local_incumbent_state(run_dict)
+
+    def test_zero_accepted_step_target_lane_failure_keeps_reportable_anchor(self):
+        module = self.load_module()
+        contract = module.resolve_single_stage_optimizer_contract("jax", "ondevice")
+        cached_metrics = self._make_reporting_runtime_summary(
+            include_distance_metrics=True
+        )
+        run_dict = self._make_candidate_run_dict([1.0, 2.0])
+        run_dict.update(
+            {
+                "target_lane_reporting_metrics": copy.deepcopy(cached_metrics),
+                "target_lane_reporting_coil_dofs": np.zeros(5, dtype=np.float64),
+                "target_lane_reporting_include_distance_metrics": True,
+            }
+        )
+        module.record_single_stage_local_incumbent(run_dict, stage="initial")
+        invalid_state_events = []
+
+        def fake_run_single_stage_optimizer(
+            fun,
+            dofs,
+            *,
+            callback,
+            contract,
+            maxiter,
+            ftol,
+            gtol,
+            maxcor,
+            outer_maxls,
+            scalar_fun,
+            progress_callback=None,
+            target_lane_initial_step_size,
+            failure_callback,
+        ):
+            del (
+                fun,
+                dofs,
+                callback,
+                contract,
+                maxiter,
+                ftol,
+                gtol,
+                maxcor,
+                outer_maxls,
+                scalar_fun,
+                progress_callback,
+                target_lane_initial_step_size,
+                failure_callback,
+            )
+            return self._build_target_lane_retry_result(
+                x=np.ones(5, dtype=np.float64),
+                nit=0,
+                nfev=2,
+                njev=2,
+                success=False,
+                message="line search failed",
+                status=5,
+                step_scale=0.0,
+                line_search_failed=True,
+                ls_status=1,
+            )
+
+        policy = module.SingleStageSearchPolicy(
+            donor_class="stage2_seed_only",
+            search_policy="repair_first",
+            adaptive_failure_penalty_weight=1.5,
+            invalid_step_retry_budget=1,
+            retry_step_shrink_factor=0.5,
+        )
+
+        with patch.object(
+            module,
+            "run_single_stage_optimizer",
+            side_effect=fake_run_single_stage_optimizer,
+        ):
+            result, retry_summary = (
+                module.run_single_stage_target_lane_optimizer_with_retries(
+                    lambda x: x,
+                    np.array([0.0, 0.0, 0.0, 0.0, 0.0]),
+                    phase="phase1",
+                    callback=None,
+                    retry_callback=None,
+                    result_state_sync=None,
+                    contract=contract,
+                    maxiter=5,
+                    ftol=0.0,
+                    gtol=1.0e-6,
+                    maxcor=5,
+                    outer_maxls=6,
+                    scalar_fun=None,
+                    target_lane_initial_step_size=None,
+                    failure_callback=None,
+                    invalid_state_events=invalid_state_events,
+                    run_dict=run_dict,
+                    single_stage_search_policy=policy,
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertTrue(retry_summary["restored_preserved_local_state"])
+        np.testing.assert_allclose(result.x, np.zeros(5, dtype=np.float64))
+        metrics = module.resolve_single_stage_final_penalty_metrics(
+            use_target_lane=True,
+            benchmark_mode=False,
+            skip_outer_optimizer=False,
+            boozer_surface=object(),
+            bs=object(),
+            iota_target=0.21,
+            coil_dofs=result.x,
+            outer_objective_config="config-marker",
+            success_filter="success-filter-marker",
+            curvelength=object(),
+            j_non_qs=object(),
+            j_boozer_residual=object(),
+            j_iota=object(),
+            j_curve_length=object(),
+            j_curve_curve=object(),
+            j_curve_surface=object(),
+            j_surface_surface=object(),
+            j_curvature=object(),
+            cc_dist=0.05,
+            cs_dist=0.02,
+            ss_dist=0.04,
+            curvature_threshold=40.0,
+            run_dict=run_dict,
+        )
+
+        self.assertEqual(metrics, cached_metrics)
 
     def test_cache_single_stage_target_lane_init_reporting_snapshot_uses_runtime_sync(
         self,
@@ -5948,13 +6447,83 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertTrue(diagnosis["optimizer_step"]["would_accept"])
         self.assertFalse(diagnosis["optimizer_step"]["would_reject"])
         self.assertEqual(diagnosis["line_search"]["nfev"], 1)
+        self.assertEqual(
+            diagnosis["line_search"]["requested_initial_step"]["value"],
+            0.125,
+        )
+        self.assertEqual(
+            diagnosis["line_search"]["first_tested_alpha"]["value"],
+            0.125,
+        )
+        self.assertEqual(
+            diagnosis["line_search"]["best_finite_alpha"]["value"],
+            0.125,
+        )
+        self.assertEqual(
+            diagnosis["line_search"]["returned_alpha"]["value"],
+            0.125,
+        )
+        self.assertEqual(diagnosis["line_search"]["failure_reason"], "accepted")
+        self.assertLessEqual(
+            diagnosis["line_search"]["armijo_margin"]["value"],
+            0.0,
+        )
+        self.assertLessEqual(
+            diagnosis["line_search"]["curvature_margin"]["value"],
+            0.0,
+        )
         self.assertEqual(len(diagnosis["line_search"]["trace"]), 1)
         self.assertEqual(
             diagnosis["line_search"]["trace"][0]["alpha"]["value"],
             0.125,
         )
+        self.assertLessEqual(
+            diagnosis["line_search"]["trace"][0]["armijo_margin"]["value"],
+            0.0,
+        )
+        self.assertLessEqual(
+            diagnosis["line_search"]["trace"][0]["curvature_margin"]["value"],
+            0.0,
+        )
         self.assertTrue(diagnosis["line_search"]["trace"][0]["armijo_satisfied"])
         self.assertTrue(diagnosis["line_search"]["trace"][0]["curvature_satisfied"])
+
+    def test_build_target_lane_first_line_search_diagnosis_uses_lbfgs_seed_step(self):
+        module = self.load_module()
+
+        def value_and_grad(x):
+            return 0.5 * jnp.dot(x, x), x
+
+        diagnosis = module.build_target_lane_first_line_search_diagnosis(
+            value_and_grad,
+            np.asarray([100.0], dtype=np.float64),
+            initial_value_and_grad=(
+                jnp.asarray(5000.0, dtype=jnp.float64),
+                jnp.asarray([100.0], dtype=jnp.float64),
+            ),
+            initial_step_size=None,
+            maxls=4,
+            gtol=1.0e-12,
+        )
+
+        expected_old_old_fval = 5050.0
+        expected_alpha = 0.0101
+        self.assertAlmostEqual(
+            diagnosis["initial"]["old_old_fval"]["value"],
+            expected_old_old_fval,
+        )
+        self.assertAlmostEqual(
+            diagnosis["line_search"]["requested_initial_step"]["value"],
+            expected_alpha,
+        )
+        self.assertAlmostEqual(
+            diagnosis["line_search"]["first_tested_alpha"]["value"],
+            expected_alpha,
+        )
+        self.assertAlmostEqual(
+            diagnosis["line_search"]["trace"][0]["alpha"]["value"],
+            diagnosis["line_search"]["first_tested_alpha"]["value"],
+        )
 
     def test_build_target_lane_scaled_phase1_diagnosis_threads_runtime_and_optimizer(
         self,
@@ -6540,6 +7109,15 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(
             module.resolve_target_lane_accepted_step_sync_record(
                 backend="jax",
+                optimizer_backend="scipy-jax",
+                maxiter=3,
+                sync_policy="final-only",
+            ),
+            "final-only",
+        )
+        self.assertEqual(
+            module.resolve_target_lane_accepted_step_sync_record(
+                backend="jax",
                 optimizer_backend="ondevice",
                 maxiter=3,
                 sync_policy=self.resolve_benchmark_target_lane_sync(module),
@@ -6921,6 +7499,134 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIs(captured["failure_callback"], failure_callback)
         self.assertEqual(result.message, "ok")
 
+    def test_run_single_stage_optimizer_scipy_jax_omits_private_diagnostics(self):
+        module = self.load_module()
+        captured = {}
+        explicit_fun = lambda x: (
+            jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
+            jnp.asarray(2.0 * x, dtype=jnp.float64),
+        )
+
+        def fake_require_target_backend_x64(optimizer_backend):
+            captured["x64_backend"] = optimizer_backend
+
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+            callback,
+            progress_callback=None,
+            failure_callback=None,
+            initial_value_and_grad=None,
+        ):
+            del (
+                fun,
+                x0,
+                tol,
+                maxiter,
+                options,
+                value_and_grad,
+                callback,
+                progress_callback,
+            )
+            captured["method"] = method
+            captured["failure_callback"] = failure_callback
+            captured["initial_value_and_grad"] = initial_value_and_grad
+            return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
+
+        with self.patch_optimizer_jax_module(
+            require_target_backend_x64=fake_require_target_backend_x64,
+            jax_minimize=fake_jax_minimize,
+        ):
+            failure_callback = object()
+            optimizer_seed = object()
+            contract = module.resolve_single_stage_optimizer_contract(
+                "jax", "scipy-jax"
+            )
+            result = module.run_single_stage_optimizer(
+                explicit_fun,
+                np.array([0.0, 0.0]),
+                contract=contract,
+                maxiter=1,
+                ftol=0.0,
+                gtol=1e-6,
+                maxcor=5,
+                outer_maxls=6,
+                callback=None,
+                scalar_fun=None,
+                failure_callback=failure_callback,
+                optimizer_initial_value_and_grad=optimizer_seed,
+            )
+
+        self.assertEqual(captured["x64_backend"], "scipy-jax")
+        self.assertEqual(captured["method"], "lbfgs-scipy-jax")
+        self.assertIsNone(captured["failure_callback"])
+        self.assertIsNone(captured["initial_value_and_grad"])
+        self.assertEqual(result.message, "ok")
+
+    def test_run_single_stage_optimizer_fullgraph_uses_full_optimizer_vector(self):
+        module = self.load_module()
+        captured = {}
+        explicit_fun = lambda x: (
+            jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
+            jnp.asarray(2.0 * x, dtype=jnp.float64),
+        )
+
+        def fake_require_target_backend_x64(optimizer_backend):
+            captured["x64_backend"] = optimizer_backend
+
+        def fake_jax_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+            callback,
+            progress_callback=None,
+            failure_callback=None,
+            initial_value_and_grad=None,
+        ):
+            del fun, tol, maxiter, options, value_and_grad, callback
+            del progress_callback, failure_callback, initial_value_and_grad
+            captured["method"] = method
+            captured["x0"] = np.asarray(x0)
+            return types.SimpleNamespace(x=np.asarray(x0), nit=0, message="ok")
+
+        dofs = np.arange(6, dtype=np.float64)
+        with self.patch_optimizer_jax_module(
+            require_target_backend_x64=fake_require_target_backend_x64,
+            jax_minimize=fake_jax_minimize,
+        ):
+            contract = module.resolve_single_stage_optimizer_contract(
+                "jax",
+                "scipy-jax-fullgraph",
+            )
+            result = module.run_single_stage_optimizer(
+                explicit_fun,
+                dofs,
+                contract=contract,
+                maxiter=1,
+                ftol=0.0,
+                gtol=1e-6,
+                maxcor=5,
+                outer_maxls=6,
+                callback=None,
+                scalar_fun=None,
+            )
+
+        self.assertEqual(captured["x64_backend"], "scipy-jax-fullgraph")
+        self.assertEqual(captured["method"], "lbfgs-scipy-jax-fullgraph")
+        np.testing.assert_array_equal(captured["x0"], dofs)
+        np.testing.assert_array_equal(result.x, dofs)
+
     def test_run_single_stage_optimizer_threads_target_lane_progress_callback(self):
         module = self.load_module()
         captured = {}
@@ -6997,7 +7703,7 @@ class SingleStageExampleTests(unittest.TestCase):
             contract = module.resolve_single_stage_optimizer_contract("cpu", "scipy")
             with self.assertRaisesRegex(
                 ValueError,
-                "reference-lane optimization does not support failure_callback",
+                "only supports failure_callback for method='lbfgs-trace'",
             ):
                 module.run_single_stage_optimizer(
                     lambda x: (
@@ -7015,6 +7721,82 @@ class SingleStageExampleTests(unittest.TestCase):
                     scalar_fun=None,
                     failure_callback=lambda *args: None,
                 )
+
+    def test_run_single_stage_optimizer_threads_reference_trace_contract(self):
+        module = self.load_module()
+        captured = {}
+        failure_callback = object()
+        progress_callback = object()
+        initial_value_and_grad = (1.0, np.array([1.0, -1.0], dtype=np.float64))
+
+        def fake_reference_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad,
+            callback,
+            progress_callback=None,
+            failure_callback=None,
+            initial_value_and_grad=None,
+        ):
+            captured.update(
+                {
+                    "fun": fun,
+                    "x0": np.asarray(x0),
+                    "method": method,
+                    "tol": tol,
+                    "maxiter": maxiter,
+                    "options": dict(options),
+                    "value_and_grad": value_and_grad,
+                    "callback": callback,
+                    "progress_callback": progress_callback,
+                    "failure_callback": failure_callback,
+                    "initial_value_and_grad": initial_value_and_grad,
+                }
+            )
+            return types.SimpleNamespace(x=np.zeros(2), nit=0, message="ok")
+
+        with self.patch_optimizer_jax_module(
+            require_target_backend_x64=lambda _optimizer_backend: None,
+            jax_minimize=fake_reference_minimize,
+        ):
+            contract = module.resolve_single_stage_optimizer_contract(
+                "cpu",
+                "scipy",
+                "lbfgs-trace",
+            )
+            result = module.run_single_stage_optimizer(
+                lambda x: (
+                    jnp.asarray(jnp.dot(x, x), dtype=jnp.float64),
+                    jnp.asarray(2.0 * x, dtype=jnp.float64),
+                ),
+                np.array([0.0, 0.0]),
+                contract=contract,
+                maxiter=7,
+                ftol=0.0,
+                gtol=1e-6,
+                maxcor=5,
+                outer_maxls=6,
+                callback=None,
+                progress_callback=progress_callback,
+                scalar_fun=None,
+                failure_callback=failure_callback,
+                optimizer_initial_value_and_grad=initial_value_and_grad,
+            )
+
+        self.assertEqual(captured["method"], "lbfgs-trace")
+        self.assertEqual(captured["tol"], 1e-6)
+        self.assertEqual(captured["maxiter"], 7)
+        self.assertEqual(captured["options"], {"maxcor": 5, "ftol": 0.0, "maxls": 6})
+        self.assertTrue(captured["value_and_grad"])
+        self.assertIs(captured["progress_callback"], progress_callback)
+        self.assertIs(captured["failure_callback"], failure_callback)
+        self.assertIs(captured["initial_value_and_grad"], initial_value_and_grad)
+        self.assertEqual(result.message, "ok")
 
     def test_run_single_stage_optimizer_threads_target_lane_initial_step_size(self):
         module = self.load_module()
@@ -7186,6 +7968,13 @@ class SingleStageExampleTests(unittest.TestCase):
                     "valid_curvature": bool(valid_curvature),
                     "trial_converged": bool(trial_converged),
                     "ls_status": int(ls_status),
+                    "requested_initial_step": float(step_scale),
+                    "first_tested_alpha": float(step_scale),
+                    "best_finite_alpha": float(step_scale),
+                    "returned_alpha": float(step_scale),
+                    "failure_reason": "test-invalid-step",
+                    "armijo_margin": 0.0,
+                    "curvature_margin": 0.0,
                 }
             ]
         if nfev is not None:
@@ -10596,6 +11385,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 _JF(),
                 _BS(),
                 use_target_lane=False,
+                use_coil_optimizer_dofs=False,
             ),
             np.array([1.0, 2.0, 3.0]),
         )
@@ -10603,11 +11393,25 @@ class SingleStageExampleTests(unittest.TestCase):
             _JF(),
             _BS(),
             use_target_lane=True,
+            use_coil_optimizer_dofs=True,
         )
         self.assertIsInstance(target_lane_dofs, jax.Array)
         np.testing.assert_allclose(
             module._single_stage_optimizer_dofs_array(target_lane_dofs),
             np.array([9.0, 8.0]),
+        )
+
+        bs = _BS()
+        set_dofs = module.resolve_single_stage_outer_dof_setter(
+            _JF(),
+            bs,
+            use_target_lane=True,
+            use_coil_optimizer_dofs=True,
+        )
+        set_dofs(np.array([7.0, 6.0]))
+        np.testing.assert_allclose(
+            bs.x,
+            np.array([7.0, 6.0]),
         )
 
     def test_single_stage_optimizer_dofs_array_hostifies_target_lane_state_explicitly(
@@ -12385,9 +13189,11 @@ class ResultsEnvelopeTests(unittest.TestCase):
             disable_target_lane_success_filter=False,
             maxcor=16,
             outer_maxls=8,
+            outer_ftol=0.0,
             target_lane_outer_initial_step_size=None,
             initial_step_scale=1.0,
             initial_step_maxiter=0,
+            profile_target_lane_memory_analysis=False,
         )
         stage2_results = {"banana_surf_radius": 0.22}
 
@@ -12504,9 +13310,11 @@ class ResultsEnvelopeTests(unittest.TestCase):
             disable_target_lane_success_filter=False,
             maxcor=16,
             outer_maxls=8,
+            outer_ftol=0.0,
             target_lane_outer_initial_step_size=None,
             initial_step_scale=0.25,
             initial_step_maxiter=4,
+            profile_target_lane_memory_analysis=False,
         )
         stage2_results = {"banana_surf_radius": 0.22}
 
@@ -12594,9 +13402,11 @@ class ResultsEnvelopeTests(unittest.TestCase):
             disable_target_lane_success_filter=False,
             maxcor=16,
             outer_maxls=8,
+            outer_ftol=0.0,
             target_lane_outer_initial_step_size=None,
             initial_step_scale=1.0,
             initial_step_maxiter=0,
+            profile_target_lane_memory_analysis=False,
         )
         stage2_results = {"banana_surf_radius": 0.22}
 
