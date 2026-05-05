@@ -142,7 +142,8 @@ All bindings live in `src/simsoptpp/python.cpp` (and the per-module `python_*.cp
 | `SurfaceXYZTensorFourier` (`src/simsopt/geo/surfacexyztensorfourier.py`) | `surfacexyzfourier.cpp`, `surfacexyztensorfourier.h`, `surface.cpp` | `sopp.SurfaceXYZTensorFourier` | single-stage Boozer surface |
 | `CurveXYZFourier`, `CurveRZFourier`, `CurvePlanarFourier` | `curvexyzfourier.cpp`, `curverzfourier.cpp`, `curveplanarfourier.cpp`, `curve.cpp/.h` | `sopp.CurveXYZFourier`, `sopp.CurveRZFourier`, `sopp.CurvePlanarFourier` (`python_curves.cpp`) | both entrypoints (TF + banana coils) |
 | `Curve.gamma`, `gammadash`, `kappa`, `incremental_arclength`, `dgamma_by_dcoeff_vjp`, `dkappa_by_dcoeff_vjp` | `curve.cpp` | inherited from `sopp.Curve*` classes | curve objectives, Boozer residual, distance objectives |
-| `Surface.area`, `Surface.volume`, `Surface.normal`, `Surface.gamma`, `gamma1`, `gamma2`, `is_self_intersecting` | `surface.cpp` | inherited from `sopp.Surface*` classes | both entrypoints |
+| `Surface.area`, `Surface.volume`, `Surface.normal`, `Surface.gamma`, `gammadash1`, `gammadash2` | `surface.cpp` | inherited from `sopp.Surface*` classes (`gammadash1` / `gammadash2` registered at `python_surfaces.cpp:209-212`) | both entrypoints |
+| `Surface.is_self_intersecting()` (`src/simsopt/geo/surface.py:445`) | pure Python host validation using cross-section geometry plus `ground+bentley_ottmann` or `shapely` | not a `simsoptpp` inherited method | single-stage self-intersection gate |
 
 ### Boozer residual
 
@@ -163,7 +164,7 @@ All bindings live in `src/simsoptpp/python.cpp` (and the per-module `python_*.cp
 | Python wrapper | C++ source | `sopp.<binding>` | Used by |
 |---|---|---|---|
 | `CurveCurveDistance.compute_candidates()` (`src/simsopt/geo/curveobjectives.py`) — point-cloud culling | `python_distance.cpp` | `sopp.get_pointclouds_closer_than_threshold_within_collection`, `..._between_two_collections` | both entrypoints |
-| `CurveCurveDistance`, `CurveSurfaceDistance`, `SurfaceSurfaceDistance` final J/dJ | host Python on top of culled point clouds; sums of pairwise smoothed distance penalties | (uses C++ outputs above) | both entrypoints |
+| `CurveCurveDistance`, `CurveSurfaceDistance`, `SurfaceSurfaceDistance` final J/dJ | host Python plus JAX pure pairwise kernels over C++ geometry outputs; `Curve*Distance` consumes the C++ candidate cullers above, while `SurfaceSurfaceDistance` uses full surface-surface pairwise reductions | curve/surface `gamma()` and, for curve distances, `python_distance.cpp` culler outputs | both entrypoints |
 
 Note: the `Curve*Distance` and `Surface*Distance` `J`/`dJ` value/gradient code is host Python (with optional `@jit`-decorated pure kernels that compile to CPU when JAX platform is `cpu`); only the candidate-pruning step is a pybind11 call. This is the same on both lanes.
 
@@ -221,10 +222,10 @@ Modules that are imported (sometimes unconditionally, since the JAX runtime is i
 - `src/simsopt/geo/boozer_residual_jax.py`, `src/simsopt/geo/label_constraints_jax.py`, `src/simsopt/geo/surface_fourier_jax.py`
 - `src/simsopt/geo/surfaceobjectives_jax.py` — `BoozerResidualJAX`, `IotasJAX`, `NonQuasiSymmetricRatioJAX`
 - `src/simsopt/geo/optimizer_jax.py` and `src/simsopt/geo/optimizer_jax_private/*` — `target_minimize`, ondevice BFGS / L-BFGS, line searches
-- `src/simsopt/jax_core/*` — pure-JAX kernel layer (`biotsavart.py`, `curve_geometry.py`, `surface_rzfourier.py`, `field.py`, `specs.py`)
+- target-lane `src/simsopt/jax_core/{biotsavart.py,curve_geometry.py,surface_rzfourier.py,field.py,specs.py}` field/spec kernels
 - `src/simsopt/backend/runtime.py` JAX-platform configuration paths beyond initialization
 
-The JAX runtime is initialized regardless (because `repo_bootstrap.py` calls `configure_entrypoint_jax_runtime(...)` early), but no `jax.jit`-traced functions are executed on the CPU compute path beyond a few `@jit`-decorated pure helpers in `curveobjectives.py` that compile to the CPU JAX platform. The C++ kernels do not depend on JAX in any way.
+The JAX runtime is initialized regardless (because `repo_bootstrap.py` calls `configure_entrypoint_jax_runtime(...)` early). The CPU lane is still the C++/`Optimizable` lane for field, surface geometry, Boozer, and optimizer control, but it is not completely free of JAX helper code: single-stage constructs `SurfaceSurfaceDistance` at `single_stage_banana_example.py:11244`; that class creates `jax.jit` pairwise-distance functions at `src/simsopt/geo/surfaceobjectives.py:1256-1261`, and the shared pairwise helper imports `src/simsopt/jax_core/_math_utils.py` / `sharding.py` through `src/simsopt/geo/_pairwise_reductions.py:8-10`. Those helpers compile to the CPU JAX platform and do not route through the JAX target-lane field/spec stack. The C++ kernels do not depend on JAX in any way.
 
 ## Routing summary
 
@@ -233,7 +234,7 @@ The JAX runtime is initialized regardless (because `repo_bootstrap.py` calls `co
 | Stage 2 field | `BiotSavart` (`src/simsopt/field/biotsavart.py:10`) | `BiotSavartJAX` | `banana_coil_solver.py:2830` |
 | Stage 2 flux objective | `SquaredFlux` (`src/simsopt/objectives/fluxobjective.py`) | `SquaredFluxJAX` | `banana_coil_solver.py:2830-2847` |
 | Stage 2 outer optimizer | `scipy.optimize.minimize` / `scipy.optimize.least_squares` | `target_minimize` (ondevice) | `banana_coil_solver.py:726-732` |
-| Single-stage field | `BiotSavart` | `SingleStageRuntimeSpecBiotSavartJAX` | `single_stage_banana_example.py:11206` |
+| Single-stage field | `BiotSavart` | `SingleStageRuntimeSpecBiotSavartJAX` | JAX construction at `single_stage_banana_example.py:10676-10684`; CPU objective-use construction at `single_stage_banana_example.py:11203-11206` |
 | Single-stage Boozer | `BoozerSurface` (`src/simsopt/geo/boozersurface.py`) | `BoozerSurfaceJAX` | `single_stage_banana_example.py:4951-4959` |
 | Single-stage outer objectives | `BoozerResidual`, `Iotas`, `NonQuasiSymmetricRatio` (`src/simsopt/geo/surfaceobjectives.py`) | `BoozerResidualJAX`, `IotasJAX`, `NonQuasiSymmetricRatioJAX` | `single_stage_banana_example.py:7486, 10687, 11215-11217` |
 | Single-stage ALM outer loop | `minimize_alm` (`alm_utils.py`) using `scipy.optimize.minimize` inside | same `minimize_alm` driver, JAX-backed inner step | `single_stage_banana_example.py:11776` (lane-agnostic) |
@@ -281,6 +282,6 @@ The banana lane actively exercises only: `python.cpp`, `python_curves.cpp`, `pyt
 - JAX-lane correction as of 2026-05-05: the CPU/C++ VJP rows above do not imply a live `CurveCWSFourierCPP` port blocker. The current JAX path supports CWS forward and VJP natively through the `curve.surf` + `surface_spec()` branch in `_supports_native_curve_geometry` (`src/simsopt/field/biotsavart_jax_backend.py:629`) and `curve_spec_from_curve` (`src/simsopt/jax_core/curve_geometry.py:99`). No `CurveCWSFourierCPP.to_spec()` shim is required for the banana target lane.
 - Some `Curve*Distance` and `Surface*Distance` objectives mix C++ candidate culling with host-Python distance accumulation. The same code path runs on both lanes; only the gradient back-propagation differs (CPU lane uses curve VJP methods on the C++ curve class; JAX lane uses autodiff through pure kernels).
 - The ALM outer loop in `alm_utils.py` is shared between lanes. It only differs in the inner-step optimizer it invokes — `scipy.optimize.minimize` on CPU vs. JAX-traced inner steps on the JAX lane.
-- The single-stage `SurfaceSurfaceDistance(boozer_surface.surface, VV, SS_DIST)` term builds on the same C++ surface kernels as the Stage 2 surface evaluation; the vessel surface `VV` is a `SurfaceRZFourier` instance.
+- The single-stage `SurfaceSurfaceDistance(boozer_surface.surface, VV, SS_DIST)` term gets surface point clouds from the same C++ surface `gamma()` kernels as the Stage 2 surface evaluation, then evaluates the pairwise penalty through the shared JAX helper path described above; the vessel surface `VV` is a `SurfaceRZFourier` instance.
 - Stage 2 imports fieldline/Poincaré symbols from `src/simsopt/field/tracing.py` but does not call them in the optimizer path; they are present as future-use scaffolding.
 - `BoozerResidualExact` (`single_stage_banana_example.py:4621`) is a separate residual class used by the JAX-Exact lane; on the default single-stage CPU lane the dispatch returns the legacy `BoozerResidual` (`single_stage_banana_example.py:7486`). Its dependencies (`boozer_surface_residual`, `boozer_surface_residual_dB` from `src/simsopt/geo/surfaceobjectives.py`; `forward_backward` from `src/simsopt/objectives/utilities.py`) are imported at lines 120, 121, and 124 respectively and are wired correctly — `BoozerResidualExact` is functional, not stubbed.
