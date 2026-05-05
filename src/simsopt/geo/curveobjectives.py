@@ -9,6 +9,7 @@ from .jit import jit
 from .._core.optimizable import Optimizable
 from .._core.derivative import derivative_dec, Derivative
 from .._core.jax_host_boundary import host_array as _host_array
+from ..backend.runtime import is_jax_backend, raise_if_target_lane_bypass
 from ..jax_core._math_utils import as_jax_float64 as _runtime_as_jax_float64
 from ..jax_core._math_utils import as_jax_int32 as _runtime_as_jax_int32
 from ..jax_core._math_utils import as_runtime_float64 as _runtime_as_runtime_float64
@@ -698,12 +699,27 @@ class CurveCurveDistance(Optimizable):
         self.candidates = None
 
     def compute_candidates(self):
+        raise_if_target_lane_bypass("CurveCurveDistance.compute_candidates")
         if self.candidates is None:
-            candidates = sopp.get_pointclouds_closer_than_threshold_within_collection(
-                [_curve_position_samples(c, self.downsample) for c in self.curves],
-                self.minimum_distance,
-                self.num_basecurves,
-            )
+            point_clouds = [
+                _curve_position_samples(c, self.downsample) for c in self.curves
+            ]
+            if is_jax_backend():
+                from ._distance_jax import get_close_candidates_within_collection
+
+                candidates = get_close_candidates_within_collection(
+                    point_clouds,
+                    self.minimum_distance,
+                    self.num_basecurves,
+                )
+            else:
+                candidates = (
+                    sopp.get_pointclouds_closer_than_threshold_within_collection(
+                        point_clouds,
+                        self.minimum_distance,
+                        self.num_basecurves,
+                    )
+                )
             self.candidates = candidates
 
     def shortest_distance_among_candidates(self):
@@ -733,6 +749,7 @@ class CurveCurveDistance(Optimizable):
         """
         This returns the value of the quantity.
         """
+        raise_if_target_lane_bypass("CurveCurveDistance.J")
         self.compute_candidates()
         res = _as_jax_float64(0.0)
         for i, j in self.candidates:
@@ -748,6 +765,7 @@ class CurveCurveDistance(Optimizable):
         """
         This returns the derivative of the quantity with respect to the curve dofs.
         """
+        raise_if_target_lane_bypass("CurveCurveDistance.dJ")
         self.compute_candidates()
         dgamma_by_dcoeff_vjp_vecs, dgammadash_by_dcoeff_vjp_vecs = _curve_vjp_buffers(
             self.curves
@@ -918,18 +936,28 @@ class CurveSurfaceDistance(Optimizable):
         self.candidates = None
 
     def compute_candidates(self, curve_positions=None, surface_gamma=None):
+        raise_if_target_lane_bypass("CurveSurfaceDistance.compute_candidates")
         if self.candidates is None:
             if curve_positions is None or surface_gamma is None:
                 curve_positions, _, surface_gamma, _ = _curve_surface_geometry_snapshot(
                     self.curves, self.surface
                 )
-            candidates = (
-                sopp.get_pointclouds_closer_than_threshold_between_two_collections(
+            if is_jax_backend():
+                from ._distance_jax import get_close_candidates_between_collections
+
+                candidates = get_close_candidates_between_collections(
                     curve_positions,
                     [surface_gamma],
                     self.minimum_distance,
                 )
-            )
+            else:
+                candidates = (
+                    sopp.get_pointclouds_closer_than_threshold_between_two_collections(
+                        curve_positions,
+                        [surface_gamma],
+                        self.minimum_distance,
+                    )
+                )
             self.candidates = candidates
 
     def _evaluation_geometry(self):
@@ -977,6 +1005,7 @@ class CurveSurfaceDistance(Optimizable):
         """
         This returns the value of the quantity.
         """
+        raise_if_target_lane_bypass("CurveSurfaceDistance.J")
         curve_positions, curve_tangents, gammas, normals = self._evaluation_geometry()
         res = _as_jax_float64(0.0)
         minimum_distance = _as_jax_float64(self.minimum_distance)
@@ -991,6 +1020,7 @@ class CurveSurfaceDistance(Optimizable):
         """
         This returns the derivative of the quantity with respect to the curve dofs.
         """
+        raise_if_target_lane_bypass("CurveSurfaceDistance.dJ")
         curve_positions, curve_tangents, gammas, normals = self._evaluation_geometry()
         dgamma_by_dcoeff_vjp_vecs, dgammadash_by_dcoeff_vjp_vecs = _curve_vjp_buffers(
             self.curves

@@ -16,6 +16,7 @@ The mode API is the SSOT. The older ``SIMSOPT_BACKEND`` /
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -36,6 +37,7 @@ _PLATFORM_ENV = "SIMSOPT_JAX_PLATFORM"
 _PLATFORM_LEGACY_ENV = "SIMSOPT_JAX_BACKEND"
 _MODE_ENV = "SIMSOPT_BACKEND_MODE"
 _STRICT_ENV = "SIMSOPT_BACKEND_STRICT"
+_TARGET_LANE_STRICT_ENV = "SIMSOPT_TARGET_LANE_STRICT"
 _DEBUG_NANS_ENV = "SIMSOPT_JAX_DEBUG_NANS"
 _TRANSFER_GUARD_ENV = "SIMSOPT_JAX_TRANSFER_GUARD"
 _COMPILATION_CACHE_DIR_ENV = "SIMSOPT_JAX_COMPILATION_CACHE_DIR"
@@ -301,6 +303,7 @@ _DEFAULT_TRANSFER_GUARD_BY_MODE = {
 }
 _BackendCacheClearCallbackKey = tuple[str, str]
 _backend_runtime_lock = threading.RLock()
+_target_lane_purity_depth = ContextVar("simsopt_target_lane_purity_depth", default=0)
 _backend_cache_clear_callbacks: dict[
     _BackendCacheClearCallbackKey, Callable[[], None]
 ] = {}
@@ -450,6 +453,39 @@ def _with_distributed_initialized(
 def _env_bool(name: str) -> bool:
     raw = os.environ.get(name, "")
     return raw.strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def target_lane_purity_requested() -> bool:
+    """Return whether strict target-lane purity checks are requested."""
+    return _env_bool(_TARGET_LANE_STRICT_ENV)
+
+
+def target_lane_purity_active() -> bool:
+    """Return whether the current stack is inside the target-lane guard."""
+    return _target_lane_purity_depth.get() > 0
+
+
+class _StrictTargetLanePurity:
+    def __enter__(self):
+        self._token = _target_lane_purity_depth.set(
+            _target_lane_purity_depth.get() + 1
+        )
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        _target_lane_purity_depth.reset(self._token)
+        return False
+
+
+def strict_target_lane_purity():
+    """Activate strict legacy-entry blocking for the current context stack."""
+    return _StrictTargetLanePurity()
+
+
+def raise_if_target_lane_bypass(entry: str) -> None:
+    """Raise when a guarded target-lane value/grad re-enters legacy code."""
+    if target_lane_purity_requested() and target_lane_purity_active():
+        raise RuntimeError(f"target-lane bypass: {entry}")
 
 
 def _validate_backend(value: str, *, source: str) -> str:

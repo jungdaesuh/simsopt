@@ -40,7 +40,7 @@ well; both paths use public JAX APIs.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, wraps
 import importlib
 import re
 from threading import Lock
@@ -58,6 +58,8 @@ from scipy.optimize import OptimizeResult
 from ..backend import (
     get_backend_config,
     raise_if_strict_jax_fallback,
+    strict_target_lane_purity,
+    target_lane_purity_requested,
 )
 from .._core.jax_host_boundary import host_bool as _host_bool
 from .._core.jax_host_boundary import host_scalar as _host_scalar
@@ -95,6 +97,7 @@ __all__ = [
     "resolve_optimizer_backend_method",
     "resolve_reference_outer_loop_optimizer_contract",
     "resolve_target_outer_loop_optimizer_contract",
+    "wrap_strict_target_lane_value_and_grad",
     "target_least_squares",
     "target_minimize",
 ]
@@ -399,6 +402,19 @@ def _mark_structured_private_solver_cacheable(fun, *, cache_token):
     except (AttributeError, TypeError):
         pass
     return fun
+
+
+def wrap_strict_target_lane_value_and_grad(fun):
+    """Wrap target-lane value/grad calls in the stack-scoped purity guard."""
+    if not target_lane_purity_requested():
+        return fun
+
+    @wraps(fun)
+    def wrapped(*args, **kwargs):
+        with strict_target_lane_purity():
+            return fun(*args, **kwargs)
+
+    return wrapped
 
 
 def _cached_jit_value_and_grad(fun):
@@ -2847,6 +2863,7 @@ def target_minimize(
                 "target_minimize() requires value_and_grad=True for "
                 f"method={method!r}."
             )
+        fun = wrap_strict_target_lane_value_and_grad(fun)
         fun, x0, callback, pytree_adapter = _prepare_optimizer_callable_inputs(
             fun,
             x0,
@@ -2920,6 +2937,7 @@ def target_minimize(
                 "Explicit value-and-gradient objectives are only supported on the "
                 "trusted SciPy reference methods and lbfgs-ondevice today."
             )
+        fun = wrap_strict_target_lane_value_and_grad(fun)
         state = _minimize_lbfgs_private_value_and_grad(
             fun,
             x0,

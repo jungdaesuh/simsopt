@@ -14,9 +14,12 @@ import os
 import pathlib
 import types
 from collections import defaultdict
+from dataclasses import fields, is_dataclass
 from enum import Enum
 from importlib import import_module
 from inspect import getfullargspec
+from math import cos, sin
+from typing import NamedTuple
 from uuid import UUID
 
 import numpy as np
@@ -47,6 +50,21 @@ except ImportError:
     orjson = None  # type: ignore
 
 __version__ = "3.0.0"
+
+
+_SIMSON_MODULE = "simsopt._core.json"
+_SIMSON_CLASS = "SIMSON"
+_SPEC_MODULE = "simsopt.jax_core.specs"
+
+
+class _CurvePayload(NamedTuple):
+    curve: object
+    rotmat: object
+
+
+class _CurrentPayload(NamedTuple):
+    current: object
+    scale: float
 
 
 def _load_redirect(redirect_file):
@@ -525,6 +543,17 @@ class GSONDecoder(json.JSONDecoder):
                             if "@name" in d:
                                 recon_objs[d["@name"]] = obj
                             return obj
+                        if _is_jax_core_spec_dataclass(cls_):
+                            obj = _decode_jax_core_spec_dataclass(
+                                cls_,
+                                data,
+                                self,
+                                serial_objs_dict,
+                                recon_objs,
+                            )
+                            if "@name" in d:
+                                recon_objs[d["@name"]] = obj
+                            return obj
                 elif np is not None and modname == "numpy" and classname == "array":
                     if d["dtype"].startswith("complex"):
                         return np.array(
@@ -566,6 +595,419 @@ class GSONDecoder(json.JSONDecoder):
         else:
             d = json.loads(s)
         return self.process_decoded(d)
+
+
+def _is_jax_core_spec_dataclass(cls_) -> bool:
+    return cls_.__module__ == _SPEC_MODULE and is_dataclass(cls_)
+
+
+def _coerce_decoded_spec_field(classname: str, key: str, value: object) -> object:
+    if classname == "CoilGroupSpec" and key == "coil_indices":
+        return tuple(int(index) for index in value)
+    if classname in {"GroupedCoilSetSpec", "CoilSetDofExtractionSpec"} and key in {
+        "groups",
+        "coils",
+    }:
+        return tuple(value)
+    if classname == "OptimizableDofMapSpec" and key == "owner_segments":
+        return tuple(tuple(int(item) for item in segment) for segment in value)
+    if classname == "SingleStageSeedSpec" and key == "target_labels":
+        return tuple(str(label) for label in value)
+    if classname == "SingleStageSeedSpec" and key == "hardware_constants":
+        return tuple((str(label), float(val)) for label, val in value)
+    return value
+
+
+def _decode_jax_core_spec_dataclass(
+    cls_,
+    data: dict,
+    decoder: GSONDecoder,
+    serial_objs_dict: dict | None,
+    recon_objs: dict | None,
+):
+    decoded = {}
+    for field in fields(cls_):
+        value = decoder.process_decoded(
+            data[field.name],
+            serial_objs_dict=serial_objs_dict,
+            recon_objs=recon_objs,
+        )
+        decoded[field.name] = _coerce_decoded_spec_field(
+            cls_.__name__,
+            field.name,
+            value,
+        )
+    return cls_(**decoded)
+
+
+def _json_array_dict(value: object) -> dict:
+    arr = np.asarray(value)
+    if arr.dtype.kind == "c":
+        data = [arr.real.tolist(), arr.imag.tolist()]
+    else:
+        data = arr.tolist()
+    return {
+        "@module": "numpy",
+        "@class": "array",
+        "dtype": str(arr.dtype),
+        "data": data,
+    }
+
+
+def _is_array_like_for_spec_json(value: object) -> bool:
+    if isinstance(value, np.ndarray):
+        return True
+    return jax is not None and isinstance(value, jax.Array)
+
+
+def _spec_to_json_value(value: object) -> object:
+    if is_dataclass(value):
+        return {
+            "@module": value.__class__.__module__,
+            "@class": value.__class__.__name__,
+            **{
+                field.name: _spec_to_json_value(getattr(value, field.name))
+                for field in fields(value)
+            },
+        }
+    if _is_array_like_for_spec_json(value):
+        return _json_array_dict(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, tuple):
+        return [_spec_to_json_value(item) for item in value]
+    if isinstance(value, list):
+        return [_spec_to_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _spec_to_json_value(val) for key, val in value.items()}
+    return value
+
+
+def _spec_simson_dict(graph_name: str, spec: object) -> dict:
+    return {
+        "@module": _SIMSON_MODULE,
+        "@class": _SIMSON_CLASS,
+        "@version": None,
+        "graph": {"$type": "ref", "value": graph_name},
+        "simsopt_objs": {
+            graph_name: _spec_to_json_value(spec),
+        },
+    }
+
+
+def _write_spec_simson(path: str | pathlib.Path, graph_name: str, spec: object) -> None:
+    with open(path, "w") as fp:
+        json.dump(_spec_simson_dict(graph_name, spec), fp, indent=2)
+
+
+def save_biot_savart_spec(path: str | pathlib.Path, coil_set_spec: object) -> None:
+    """Write a SIMSON-wrapped immutable grouped-coil spec JSON payload."""
+    _write_spec_simson(path, "GroupedCoilSetSpec1", coil_set_spec)
+
+
+def save_surface_rz_fourier_spec(path: str | pathlib.Path, surface_spec: object) -> None:
+    """Write a SIMSON-wrapped immutable ``SurfaceRZFourierSpec`` JSON payload."""
+    _write_spec_simson(path, "SurfaceRZFourierSpec1", surface_spec)
+
+
+def save_surface_xyz_fourier_spec(path: str | pathlib.Path, surface_spec: object) -> None:
+    """Write a SIMSON-wrapped immutable ``SurfaceXYZFourierSpec`` JSON payload."""
+    _write_spec_simson(path, "SurfaceXYZFourierSpec1", surface_spec)
+
+
+def save_surface_xyz_tensor_fourier_spec(
+    path: str | pathlib.Path,
+    surface_spec: object,
+) -> None:
+    """Write a SIMSON-wrapped immutable ``SurfaceXYZTensorFourierSpec`` JSON payload."""
+    _write_spec_simson(path, "SurfaceXYZTensorFourierSpec1", surface_spec)
+
+
+def _rotated_curve_matrix(phi: float, flip: bool) -> np.ndarray:
+    rotmat = np.asarray(
+        [[cos(phi), -sin(phi), 0.0], [sin(phi), cos(phi), 0.0], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    ).T
+    if flip:
+        rotmat = rotmat @ np.asarray(
+            [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
+            dtype=np.float64,
+        )
+    return rotmat
+
+
+class _SpecGraphReader:
+    def __init__(self, data: dict):
+        if data["@module"] != _SIMSON_MODULE or data["@class"] != _SIMSON_CLASS:
+            raise ValueError("expected GSON SIMSON wrapper")
+        self._data = data
+        self._objects = data["simsopt_objs"]
+        self._cache: dict[str, object] = {}
+
+    def build(self) -> dict[str, object]:
+        graph = self._decode_value(self._data["graph"])
+        result: dict[str, object] = {"graph": graph}
+        self._add_graph_aliases(result, graph)
+        result["objects"] = {
+            key: value
+            for key, value in self._cache.items()
+            if not isinstance(value, (_CurvePayload, _CurrentPayload))
+        }
+        return result
+
+    def _add_graph_aliases(self, result: dict[str, object], graph: object) -> None:
+        from ..jax_core.specs import (
+            GroupedCoilSetSpec,
+            SurfaceRZFourierSpec,
+            SurfaceXYZFourierSpec,
+            SurfaceXYZTensorFourierSpec,
+        )
+
+        if isinstance(graph, GroupedCoilSetSpec):
+            result["coil_set_spec"] = graph
+        if isinstance(
+            graph,
+            (
+                SurfaceRZFourierSpec,
+                SurfaceXYZFourierSpec,
+                SurfaceXYZTensorFourierSpec,
+            ),
+        ):
+            result["surface_spec"] = graph
+
+    def _decode_value(self, value: object) -> object:
+        if isinstance(value, dict):
+            if "$type" in value:
+                if value["$type"] == "ref":
+                    return self._resolve_ref(str(value["value"]))
+                raise NotImplementedError(
+                    f"Unsupported GSON value type: {value['$type']}"
+                )
+            if "@module" in value:
+                module = value["@module"]
+                classname = value["@class"]
+                if module == "numpy" and classname == "array":
+                    return GSONDecoder().process_decoded(value, {}, {})
+                if module == _SPEC_MODULE:
+                    return self._read_spec_node(value)
+                raise NotImplementedError(
+                    f"{module}.{classname}"
+                )
+            if "@class" in value:
+                raise NotImplementedError(f"{value['@class']}")
+            return {key: self._decode_value(val) for key, val in value.items()}
+        if isinstance(value, list):
+            return [self._decode_value(item) for item in value]
+        return value
+
+    def _resolve_ref(self, name: str) -> object:
+        if name not in self._cache:
+            self._cache[name] = self._read_object(self._objects[name])
+        return self._cache[name]
+
+    def _read_object(self, node: dict) -> object:
+        module = node["@module"]
+        classname = node["@class"]
+        if module == _SPEC_MODULE:
+            return self._read_spec_node(node)
+        readers = {
+            ("simsopt._core.optimizable", "DOFs"): self._read_dofs,
+            ("simsopt.field.coil", "Current"): self._read_current,
+            ("simsopt.field.coil", "ScaledCurrent"): self._read_scaled_current,
+            ("simsopt.geo.curvexyzfourier", "CurveXYZFourier"): (
+                self._read_curve_xyz_fourier
+            ),
+            ("simsopt.geo.curvecwsfourier", "CurveCWSFourierCPP"): (
+                self._read_curve_cws_fourier_rz
+            ),
+            ("simsopt.geo.curve", "RotatedCurve"): self._read_rotated_curve,
+            ("simsopt.geo.surfacerzfourier", "SurfaceRZFourier"): (
+                self._read_surface_rz_fourier
+            ),
+            ("simsopt.geo.surfacexyzfourier", "SurfaceXYZFourier"): (
+                self._read_surface_xyz_fourier
+            ),
+            ("simsopt.geo.surfacexyztensorfourier", "SurfaceXYZTensorFourier"): (
+                self._read_surface_xyz_tensor_fourier
+            ),
+            ("simsopt.field.coil", "Coil"): self._read_coil,
+            ("simsopt.field.biotsavart", "BiotSavart"): self._read_biot_savart,
+        }
+        key = (module, classname)
+        if key not in readers:
+            raise NotImplementedError(f"{module}.{classname}")
+        return readers[key](node)
+
+    def _read_dofs(self, node: dict) -> np.ndarray:
+        return np.asarray(self._decode_value(node["x"]), dtype=np.float64)
+
+    def _read_current(self, node: dict) -> _CurrentPayload:
+        from ..jax_core import make_current_value_spec
+
+        dofs = self._decode_value(node["dofs"])
+        value = np.asarray(dofs, dtype=np.float64)[0]
+        return _CurrentPayload(make_current_value_spec(value), 1.0)
+
+    def _read_scaled_current(self, node: dict) -> _CurrentPayload:
+        base = self._decode_value(node["current_to_scale"])
+        return _CurrentPayload(base.current, base.scale * float(node["scale"]))
+
+    def _read_curve_xyz_fourier(self, node: dict) -> object:
+        from ..jax_core import make_curve_xyzfourier_spec
+
+        return make_curve_xyzfourier_spec(
+            dofs=self._decode_value(node["dofs"]),
+            quadpoints=self._decode_value(node["quadpoints"]),
+            order=int(node["order"]),
+        )
+
+    def _read_curve_cws_fourier_rz(self, node: dict) -> object:
+        from ..jax_core import make_curve_cwsfourier_rz_spec
+
+        surface = self._decode_value(node["surf"])
+        return make_curve_cwsfourier_rz_spec(
+            dofs=self._decode_value(node["dofs"]),
+            quadpoints=self._decode_value(node["quadpoints"]),
+            surface=surface,
+            order=int(node["order"]),
+            G=float(node["G"]),
+            H=float(node["H"]),
+        )
+
+    def _read_rotated_curve(self, node: dict) -> _CurvePayload:
+        base = self._decode_value(node["curve"])
+        rotmat = _rotated_curve_matrix(float(node["phi"]), bool(node["flip"]))
+        if isinstance(base, _CurvePayload):
+            rotmat = np.asarray(base.rotmat, dtype=np.float64) @ rotmat
+            return _CurvePayload(base.curve, rotmat)
+        return _CurvePayload(base, rotmat)
+
+    def _read_surface_rz_fourier(self, node: dict) -> object:
+        from ..jax_core.surface_rzfourier import surface_rz_fourier_spec_from_dofs
+
+        return surface_rz_fourier_spec_from_dofs(
+            self._decode_value(node["dofs"]),
+            quadpoints_phi=self._decode_value(node["quadpoints_phi"]),
+            quadpoints_theta=self._decode_value(node["quadpoints_theta"]),
+            mpol=int(node["mpol"]),
+            ntor=int(node["ntor"]),
+            nfp=int(node["nfp"]),
+            stellsym=bool(node["stellsym"]),
+        )
+
+    def _read_surface_xyz_fourier(self, node: dict) -> object:
+        from ..jax_core import make_surface_xyz_fourier_spec
+
+        return make_surface_xyz_fourier_spec(
+            dofs=self._decode_value(node["dofs"]),
+            quadpoints_phi=self._decode_value(node["quadpoints_phi"]),
+            quadpoints_theta=self._decode_value(node["quadpoints_theta"]),
+            mpol=int(node["mpol"]),
+            ntor=int(node["ntor"]),
+            nfp=int(node["nfp"]),
+            stellsym=bool(node["stellsym"]),
+        )
+
+    def _read_surface_xyz_tensor_fourier(self, node: dict) -> object:
+        from ..jax_core import make_surface_xyz_tensor_fourier_spec
+
+        return make_surface_xyz_tensor_fourier_spec(
+            dofs=self._decode_value(node["dofs"]),
+            quadpoints_phi=self._decode_value(node["quadpoints_phi"]),
+            quadpoints_theta=self._decode_value(node["quadpoints_theta"]),
+            mpol=int(node["mpol"]),
+            ntor=int(node["ntor"]),
+            nfp=int(node["nfp"]),
+            stellsym=bool(node["stellsym"]),
+        )
+
+    def _read_coil(self, node: dict) -> object:
+        from ..jax_core import make_coil_spec
+
+        curve = self._decode_value(node["curve"])
+        current = self._decode_value(node["current"])
+        rotmat = None
+        curve_spec = curve
+        if isinstance(curve, _CurvePayload):
+            curve_spec = curve.curve
+            rotmat = curve.rotmat
+        return make_coil_spec(
+            curve=curve_spec,
+            current=current.current,
+            rotmat=rotmat,
+            scale=current.scale,
+        )
+
+    def _read_biot_savart(self, node: dict) -> object:
+        from ..jax_core.field import grouped_coil_set_spec_from_coil_specs
+
+        return grouped_coil_set_spec_from_coil_specs(
+            tuple(self._decode_value(coil_ref) for coil_ref in node["coils"])
+        )
+
+    def _read_spec_node(self, node: dict) -> object:
+        from ..jax_core import (
+            make_coil_group_spec,
+            make_grouped_coil_set_spec,
+            make_surface_rzfourier_spec,
+            make_surface_xyz_fourier_spec,
+            make_surface_xyz_tensor_fourier_spec,
+        )
+
+        classname = str(node["@class"])
+        data = {
+            key: self._decode_value(value)
+            for key, value in node.items()
+            if not key.startswith("@")
+        }
+        if classname == "CoilGroupSpec":
+            return make_coil_group_spec(
+                data["gammas"],
+                data["gammadashs"],
+                data["currents"],
+                data["coil_indices"],
+            )
+        if classname == "GroupedCoilSetSpec":
+            return make_grouped_coil_set_spec(tuple(data["groups"]))
+        if classname == "SurfaceRZFourierSpec":
+            return make_surface_rzfourier_spec(
+                rc=data["rc"],
+                zs=data["zs"],
+                rs=data["rs"],
+                zc=data["zc"],
+                quadpoints_phi=data["quadpoints_phi"],
+                quadpoints_theta=data["quadpoints_theta"],
+                nfp=int(data["nfp"]),
+                stellsym=bool(data["stellsym"]),
+            )
+        if classname == "SurfaceXYZFourierSpec":
+            return make_surface_xyz_fourier_spec(
+                dofs=data["dofs"],
+                quadpoints_phi=data["quadpoints_phi"],
+                quadpoints_theta=data["quadpoints_theta"],
+                nfp=int(data["nfp"]),
+                stellsym=bool(data["stellsym"]),
+                mpol=int(data["mpol"]),
+                ntor=int(data["ntor"]),
+            )
+        if classname == "SurfaceXYZTensorFourierSpec":
+            return make_surface_xyz_tensor_fourier_spec(
+                dofs=data["dofs"],
+                quadpoints_phi=data["quadpoints_phi"],
+                quadpoints_theta=data["quadpoints_theta"],
+                nfp=int(data["nfp"]),
+                stellsym=bool(data["stellsym"]),
+                mpol=int(data["mpol"]),
+                ntor=int(data["ntor"]),
+            )
+        raise NotImplementedError(f"{_SPEC_MODULE}.{classname}")
+
+
+def load_specs(path: str | pathlib.Path) -> dict[str, object]:
+    """Load immutable JAX specs directly from a SIMSON JSON graph."""
+    with open(path) as fp:
+        data = json.load(fp)
+    return _SpecGraphReader(data).build()
 
 
 class GSONError(Exception):

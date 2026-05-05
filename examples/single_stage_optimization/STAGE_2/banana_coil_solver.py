@@ -83,6 +83,7 @@ from simsopt.jax_core import (
     curve_gamma_and_dash_from_spec,
     curve_spec_from_curve,
     curve_spec_with_quadpoints,
+    surface_spec_kind,
 )
 
 maybe_initialize_distributed_jax()
@@ -656,7 +657,7 @@ def parse_args():
     )
     parser.add_argument(
         "--optimizer-backend",
-        choices=["scipy", "ondevice", "scipy-jax"],
+        choices=["scipy", "ondevice", "scipy-jax", "scipy-jax-fullgraph"],
         default=os.environ.get("STAGE2_OPTIMIZER_BACKEND")
         or os.environ.get("OPTIMIZER_BACKEND"),
         help=(
@@ -664,9 +665,10 @@ def parse_args():
             "'scipy' is the trusted reference lane; "
             "'ondevice' is the JAX target optimizer lane; "
             "'scipy-jax' keeps SciPy L-BFGS-B control with JAX value/grad "
-            "evaluations. Defaults to 'ondevice' on the JAX backend and "
-            "'scipy' on the CPU/reference backend when no explicit override "
-            "is provided."
+            "evaluations; 'scipy-jax-fullgraph' keeps SciPy control over the "
+            "full JAX target objective graph. Defaults to 'ondevice' on the "
+            "JAX backend and 'scipy' on the CPU/reference backend when no "
+            "explicit override is provided."
         ),
     )
     parser.add_argument(
@@ -1773,6 +1775,11 @@ def evaluate_stage2_alm_problem(
 
 
 _STAGE2_COMPONENT_LABEL = "the Stage 2 outer loop"
+_STAGE2_TARGET_OPTIMIZER_BACKENDS = {
+    "ondevice",
+    "scipy-jax",
+    "scipy-jax-fullgraph",
+}
 
 
 def resolve_stage2_optimizer_contract(
@@ -1859,7 +1866,7 @@ def resolve_stage2_target_lane_requirements(
     """Resolve target-lane requirements before building explicit objectives."""
     needs_target_probe_payload = (
         export_objective_json is not None
-        and optimizer_backend in {"ondevice", "scipy-jax"}
+        and optimizer_backend in _STAGE2_TARGET_OPTIMIZER_BACKENDS
     )
     probe_only_target_payload = (
         probe_only and needs_target_probe_payload and field_backend != "jax"
@@ -1894,11 +1901,16 @@ def validate_stage2_target_objective_dof_layout(
 
 
 def resolve_stage2_target_value_and_grad(target_objective_bundle):
+    from simsopt.geo.optimizer_jax import wrap_strict_target_lane_value_and_grad
+
     if target_objective_bundle is None:
         return None
-    if target_objective_bundle.value_and_grad is not None:
-        return target_objective_bundle.value_and_grad
-    return jax.jit(jax.value_and_grad(target_objective_bundle.objective))
+    target_value_and_grad = target_objective_bundle.value_and_grad
+    if target_value_and_grad is None:
+        target_value_and_grad = jax.jit(
+            jax.value_and_grad(target_objective_bundle.objective)
+        )
+    return wrap_strict_target_lane_value_and_grad(target_value_and_grad)
 
 
 def resolve_stage2_target_least_squares_residual(target_objective_bundle):
@@ -2004,6 +2016,7 @@ def run_stage2_optimizer(
         reference_minimize,
         target_least_squares,
         target_minimize,
+        wrap_strict_target_lane_value_and_grad,
     )
 
     use_explicit_value_and_grad = value_and_grad_fun is not None
@@ -2035,6 +2048,8 @@ def run_stage2_optimizer(
         objective_fun = (
             value_and_grad_fun if use_explicit_value_and_grad else scalar_fun
         )
+        if use_explicit_value_and_grad:
+            objective_fun = wrap_strict_target_lane_value_and_grad(objective_fun)
         target_minimize_kwargs = {
             "method": contract.method,
             "tol": gtol,
@@ -3036,7 +3051,7 @@ if __name__ == "__main__":
             self_intersection_summary=initial_self_intersection_summary,
             target_objective_bundle=(
                 target_objective_bundle
-                if args.optimizer_backend in {"ondevice", "scipy-jax"}
+                if args.optimizer_backend in _STAGE2_TARGET_OPTIMIZER_BACKENDS
                 else None
             ),
             bs_jax=diagnostic_bs_jax,
@@ -3496,8 +3511,34 @@ if __name__ == "__main__":
         )
     stage2_bs_output_path = os.path.join(OUT_DIR_ITER, "biot_savart_opt.json")
     stage2_surface_output_path = os.path.join(OUT_DIR_ITER, "surf_opt.json")
-    new_bs.save(stage2_bs_output_path)
-    new_surf.save(stage2_surface_output_path)
+    if args.backend == "jax":
+        from simsopt._core.json import (
+            save_biot_savart_spec,
+            save_surface_rz_fourier_spec,
+            save_surface_xyz_fourier_spec,
+            save_surface_xyz_tensor_fourier_spec,
+        )
+
+        final_specs = target_objective_bundle.final_specs_from_dofs(selected_result_x)
+        save_biot_savart_spec(stage2_bs_output_path, final_specs.coil_set_spec)
+        final_surface_spec = final_specs.surface_spec
+        final_surface_kind = surface_spec_kind(final_surface_spec)
+        if final_surface_kind == "rz_fourier":
+            save_surface_rz_fourier_spec(stage2_surface_output_path, final_surface_spec)
+        elif final_surface_kind == "xyz_fourier":
+            save_surface_xyz_fourier_spec(stage2_surface_output_path, final_surface_spec)
+        elif final_surface_kind == "xyz_tensor_fourier":
+            save_surface_xyz_tensor_fourier_spec(
+                stage2_surface_output_path,
+                final_surface_spec,
+            )
+        else:
+            raise NotImplementedError(
+                f"Unsupported Stage 2 final surface spec kind: {final_surface_kind}"
+            )
+    else:
+        new_bs.save(stage2_bs_output_path)
+        new_surf.save(stage2_surface_output_path)
     fieldError = compute_mean_abs_relbn(new_surf, new_bs)
     if args.skip_postprocess:
         print(

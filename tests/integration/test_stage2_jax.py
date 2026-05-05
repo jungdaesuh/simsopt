@@ -53,6 +53,15 @@ _EQUILIBRIA_PATHS_MODULE = (
     REPO_ROOT / "examples" / "single_stage_optimization" / "equilibria_paths.py"
 )
 _STAGE2_EQUILIBRIUM_FILENAME = "wout_nfp22ginsburg_000_014417_iota15.nc"
+_TARGET_BACKEND_REQUIREMENT = (
+    "the Stage 2 outer loop with backend='jax' requires "
+    "optimizer_backend='ondevice', optimizer_backend='scipy-jax', or "
+    "optimizer_backend='scipy-jax-fullgraph'"
+)
+_OPTIMIZER_BACKEND_CHOICES = (
+    "optimizer_backend must be one of: scipy, ondevice, scipy-jax, "
+    "scipy-jax-fullgraph."
+)
 
 
 @lru_cache(maxsize=1)
@@ -119,7 +128,9 @@ from simsopt.jax_core import (
     make_coil_symmetry_spec,
     grouped_biot_savart_B_from_inputs,
     grouped_biot_savart_B_from_spec,
+    surface_rz_fourier_dofs_from_spec,
 )
+from simsopt.jax_core.specs import GroupedCoilSetSpec, SurfaceRZFourierSpec
 from simsopt.geo.optimizer_jax import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     jax_minimize,
@@ -1058,9 +1069,7 @@ class TestObjectiveValueParity:
 
         cpu_j = float(jf_cpu.J())
         jax_j = float(jf_jax.J())
-        assert np.isnan(cpu_j), (
-            f"CPU zero-current J should preserve legacy nan, got {cpu_j}"
-        )
+        assert np.isposinf(cpu_j), f"CPU zero-current J should be +inf, got {cpu_j}"
         assert np.isposinf(jax_j), (
             f"JAX zero-current J should be +inf, got {jax_j}"
         )
@@ -2973,6 +2982,20 @@ class TestStage2BananaBoundary:
         assert payload["optimizer_backend"] == "ondevice"
         assert payload["composite"]["objective_source"] == "target-objective"
 
+    def test_stage2_probe_only_fullgraph_exports_target_objective_source(self):
+        result, payload = _run_stage2_probe_and_load_payload(
+            *REDUCED_STAGE2_ARGS,
+            "--optimizer-backend",
+            "scipy-jax-fullgraph",
+            "--skip-postprocess",
+        )
+
+        probe_output = f"{result.stdout}\n{result.stderr}"
+        assert result.returncode == 0, probe_output
+        assert payload["backend"] == "jax"
+        assert payload["optimizer_backend"] == "scipy-jax-fullgraph"
+        assert payload["composite"]["objective_source"] == "target-objective"
+
     def test_stage2_probe_override_dofs_evaluates_requested_state(self):
         with tempfile.TemporaryDirectory(prefix="stage2-override-dofs-") as temp_dir:
             output_root = Path(temp_dir) / "outputs"
@@ -3241,6 +3264,12 @@ class TestStage2OptimizerContract:
             ("jax", "ondevice", "quasi-newton", "lbfgs-ondevice"),
             ("jax", "ondevice", "lm", "lm-ondevice"),
             ("jax", "scipy-jax", "quasi-newton", "lbfgs-scipy-jax"),
+            (
+                "jax",
+                "scipy-jax-fullgraph",
+                "quasi-newton",
+                "lbfgs-scipy-jax-fullgraph",
+            ),
         ],
     )
     def test_resolve_stage2_optimizer_method_contract(
@@ -3267,8 +3296,7 @@ class TestStage2OptimizerContract:
         stage2_script = _load_stage2_script_module()
         with pytest.raises(
             ValueError,
-            match="the Stage 2 outer loop with backend='jax' requires "
-            "optimizer_backend='ondevice' or optimizer_backend='scipy-jax'",
+            match=_TARGET_BACKEND_REQUIREMENT,
         ):
             stage2_script.resolve_stage2_optimizer_method("jax", optimizer_backend)
 
@@ -3276,7 +3304,7 @@ class TestStage2OptimizerContract:
         stage2_script = _load_stage2_script_module()
         with pytest.raises(
             ValueError,
-            match="optimizer_backend must be one of: scipy, ondevice, scipy-jax.",
+            match=_OPTIMIZER_BACKEND_CHOICES,
         ):
             stage2_script.resolve_stage2_optimizer_method("jax", "bogus")
 
@@ -3284,8 +3312,7 @@ class TestStage2OptimizerContract:
         stage2_script = _load_stage2_script_module()
         with pytest.raises(
             ValueError,
-            match="the Stage 2 outer loop with backend='jax' requires "
-            "optimizer_backend='ondevice' or optimizer_backend='scipy-jax'",
+            match=_TARGET_BACKEND_REQUIREMENT,
         ):
             stage2_script.resolve_stage2_optimizer_method(
                 "jax",
@@ -3314,10 +3341,15 @@ class TestStage2OptimizerContract:
         )
         assert isinstance(scipy_jax_contract, TargetOptimizerContract)
         assert scipy_jax_contract.method == "lbfgs-scipy-jax"
+        fullgraph_contract = stage2_script.resolve_stage2_alm_inner_optimizer_contract(
+            "jax",
+            "scipy-jax-fullgraph",
+        )
+        assert isinstance(fullgraph_contract, TargetOptimizerContract)
+        assert fullgraph_contract.method == "lbfgs-scipy-jax-fullgraph"
         with pytest.raises(
             ValueError,
-            match="the Stage 2 outer loop with backend='jax' requires "
-            "optimizer_backend='ondevice' or optimizer_backend='scipy-jax'",
+            match=_TARGET_BACKEND_REQUIREMENT,
         ):
             stage2_script.resolve_stage2_alm_inner_optimizer_contract("jax", "scipy")
 
@@ -3328,6 +3360,7 @@ class TestStage2OptimizerContract:
             ("jax", "ondevice", "quasi-newton", True),
             ("jax", "ondevice", "lm", True),
             ("jax", "scipy-jax", "quasi-newton", True),
+            ("jax", "scipy-jax-fullgraph", "quasi-newton", True),
         ],
     )
     def test_target_objective_bundle_is_built_only_for_target_lane(
@@ -3354,8 +3387,7 @@ class TestStage2OptimizerContract:
         stage2_script = _load_stage2_script_module()
         with pytest.raises(
             ValueError,
-            match="the Stage 2 outer loop with backend='jax' requires "
-            "optimizer_backend='ondevice' or optimizer_backend='scipy-jax'",
+            match=_TARGET_BACKEND_REQUIREMENT,
         ):
             stage2_script.should_build_stage2_target_objective(
                 "jax",
@@ -3367,7 +3399,7 @@ class TestStage2OptimizerContract:
         stage2_script = _load_stage2_script_module()
         with pytest.raises(
             ValueError,
-            match="optimizer_backend must be one of: scipy, ondevice, scipy-jax.",
+            match=_OPTIMIZER_BACKEND_CHOICES,
         ):
             stage2_script.should_build_stage2_target_objective(
                 "jax",
@@ -3444,6 +3476,17 @@ class TestStage2OptimizerContract:
                 False,
             ),
             (
+                "jax",
+                "scipy-jax-fullgraph",
+                "quasi-newton",
+                False,
+                "probe.json",
+                True,
+                True,
+                True,
+                False,
+            ),
+            (
                 "cpu",
                 "ondevice",
                 "quasi-newton",
@@ -3495,10 +3538,9 @@ class TestStage2OptimizerContract:
     ):
         stage2_script = _load_stage2_script_module()
         expected = (
-            "optimizer_backend must be one of: scipy, ondevice, scipy-jax."
+            _OPTIMIZER_BACKEND_CHOICES
             if optimizer_backend == "bogus"
-            else "the Stage 2 outer loop with backend='jax' requires "
-            "optimizer_backend='ondevice' or optimizer_backend='scipy-jax'"
+            else _TARGET_BACKEND_REQUIREMENT
         )
         with pytest.raises(ValueError, match=expected):
             stage2_script.resolve_stage2_target_lane_requirements(
@@ -4583,6 +4625,32 @@ class TestStage2OptimizerContract:
             atol=1e-15,
         )
 
+    def test_target_scalar_objective_exposes_final_specs_from_dofs(self):
+        objective, target_bundle, context = _build_stage2_target_objective_contract_case(
+            return_context=True,
+        )
+        dofs = np.asarray(objective.x, dtype=np.float64)
+
+        assert target_bundle.final_specs_from_dofs is not None
+        final_specs = target_bundle.final_specs_from_dofs(dofs)
+
+        assert isinstance(final_specs.coil_set_spec, GroupedCoilSetSpec)
+        assert isinstance(final_specs.surface_spec, SurfaceRZFourierSpec)
+        bs_jax = BiotSavartJAX(context["tf_coils"] + context["banana_coils"])
+        points = context["eval_surf"].gamma().reshape((-1, 3))
+        np.testing.assert_allclose(
+            np.asarray(
+                grouped_biot_savart_B_from_spec(points, final_specs.coil_set_spec)
+            ),
+            np.asarray(grouped_biot_savart_B_from_spec(points, bs_jax.coil_set_spec())),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        np.testing.assert_array_equal(
+            np.asarray(surface_rz_fourier_dofs_from_spec(final_specs.surface_spec)),
+            np.asarray(context["eval_surf"].get_dofs()),
+        )
+
     def test_target_scalar_objective_build_materializes_immutable_state_via_explicit_host_boundary(
         self,
         monkeypatch,
@@ -5166,6 +5234,7 @@ class TestStage2OptimizerContract:
         [
             ("jax", "ondevice", None),
             ("jax", "scipy-jax", None),
+            ("jax", "scipy-jax-fullgraph", None),
             ("cpu", "ondevice", "dummy.json"),
         ],
     )

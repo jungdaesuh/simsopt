@@ -29,6 +29,7 @@ from .util import ImmutableId, OptimizableMeta, WeakKeyDefaultDict, \
     DofLengthMismatchError
 from .derivative import derivative_dec
 from .json import GSONable, SIMSON, GSONDecoder, GSONEncoder
+from simsopt.backend.runtime import raise_if_target_lane_bypass
 
 try:
     import networkx as nx
@@ -1855,10 +1856,12 @@ class ScaledOptimizable(Optimizable):
         super().__init__(depends_on=[opt])
 
     def J(self):
+        raise_if_target_lane_bypass(f"{type(self).__name__}.J")
         return _runtime_scalar_mul(self.factor, self.opt.J())
 
     @derivative_dec
     def dJ(self):
+        raise_if_target_lane_bypass(f"{type(self).__name__}.dJ")
         # Next line uses __rmul__ function for the Derivative class
         return float(self.factor) * self.opt.dJ(partials=True)
 
@@ -1881,9 +1884,11 @@ class OptimizableSum(Optimizable):
         super().__init__(depends_on=opts)
 
     def J(self):
+        raise_if_target_lane_bypass(f"{type(self).__name__}.J")
         return _runtime_sum(opt.J() for opt in self.opts)
 
     @derivative_dec
     def dJ(self):
+        raise_if_target_lane_bypass(f"{type(self).__name__}.dJ")
         # Next line uses __add__ function for the Derivative class
         return sum(opt.dJ(partials=True) for opt in self.opts)

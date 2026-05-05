@@ -23,6 +23,7 @@ from ..jax_core.field import (
     grouped_field_sharding_summary,
     grouped_biot_savart_B_from_spec,
     grouped_coil_set_spec_from_coil_specs,
+    grouped_coil_set_spec_from_grouped_data,
     grouped_coil_set_spec_from_lists,
 )
 from ..jax_core import (
@@ -50,6 +51,7 @@ from ..geo.optimizer_jax import (
 )
 
 __all__ = [
+    "FinalSpecBundle",
     "Stage2PenaltyConfig",
     "Stage2TargetObjectiveBundle",
     "Stage2TargetOptimizerState",
@@ -67,6 +69,11 @@ Stage2ALMValueAndGradFn = Callable[
     tuple[jnp.ndarray, jnp.ndarray],
 ]
 Stage2ALMValueAndGradBuilder = Callable[..., Stage2ALMValueAndGradFn]
+
+
+class FinalSpecBundle(NamedTuple):
+    coil_set_spec: object
+    surface_spec: object
 
 
 class Stage2TargetObjectiveTerm(NamedTuple):
@@ -104,6 +111,7 @@ jax.tree_util.register_dataclass(
 class Stage2TargetObjectiveBundle(NamedTuple):
     objective: Stage2ObjectiveFn
     expected_dof_count: int
+    final_specs_from_dofs: Callable[[jnp.ndarray], FinalSpecBundle]
     value_and_grad: Stage2ValueAndGradFn | None = None
     terms: tuple[Stage2TargetObjectiveTerm, ...] = ()
     raw_terms: Stage2ObjectiveFn | None = None
@@ -444,6 +452,7 @@ def build_stage2_target_objective(
         surface,
         definition=penalty_config.squared_flux_definition,
     )
+    surface_spec = surface.surface_spec()
     del field_eval_spec
     points = _host_float64_array(flux_spec.points)
     banana_curve_spec = curve_spec_from_curve(banana_curve)
@@ -456,6 +465,7 @@ def build_stage2_target_objective(
     zero = 0.0
     surface_gamma = _host_float64_array(surface.gamma()).reshape((-1, 3))
 
+    tf_coil_spec = None
     if tf_coils:
         tf_coil_spec = grouped_coil_set_spec_from_coil_specs(
             tuple(coil.to_spec() for coil in tf_coils)
@@ -542,6 +552,41 @@ def build_stage2_target_objective(
             dynamic_gammas,
             dynamic_gammadashs,
             dynamic_current_array,
+        )
+
+    def _final_specs_from_dofs(dofs):
+        (
+            _flat_dofs,
+            _base_gamma,
+            _base_gammadash,
+            _base_gammadashdash,
+            dynamic_gammas,
+            dynamic_gammadashs,
+            dynamic_current_array,
+        ) = _dynamic_curve_runtime_state(dofs)
+        dynamic_coil_spec = grouped_coil_set_spec_from_lists(
+            dynamic_gammas,
+            dynamic_gammadashs,
+            dynamic_current_array,
+        )
+        group_data = []
+        coil_offset = 0
+        if tf_coil_spec is not None:
+            group_data.extend(tf_coil_spec.as_grouped_data())
+            coil_offset = sum(len(group.coil_indices) for group in tf_coil_spec.groups)
+        for group in dynamic_coil_spec.groups:
+            gammas, gammadashs, currents, coil_indices = group.as_grouped_data()
+            group_data.append(
+                (
+                    gammas,
+                    gammadashs,
+                    currents,
+                    [coil_offset + index for index in coil_indices],
+                )
+            )
+        return FinalSpecBundle(
+            coil_set_spec=grouped_coil_set_spec_from_grouped_data(tuple(group_data)),
+            surface_spec=surface_spec,
         )
 
     def _evaluate_dynamic_stage2_state(dofs):
@@ -968,4 +1013,5 @@ def build_stage2_target_objective(
         alm_value_and_grad_builder=build_alm_value_and_grad,
         field_sharding_summary=field_sharding_summary,
         pairwise_penalty_sharding_summary=pairwise_penalty_sharding_summary,
+        final_specs_from_dofs=_final_specs_from_dofs,
     )

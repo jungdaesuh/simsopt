@@ -44,10 +44,14 @@ from .runtime import (
     should_shard_points,
     should_shard_pairwise_rows,
     raise_if_strict_jax_fallback,
+    raise_if_target_lane_bypass,
     requires_x64,
     set_backend,
     should_eagerly_configure_jax,
     warn_if_jax_fallback,
+    strict_target_lane_purity,
+    target_lane_purity_active,
+    target_lane_purity_requested,
 )
 
 __all__ = [
@@ -91,8 +95,12 @@ __all__ = [
     "should_shard_points",
     "should_shard_pairwise_rows",
     "raise_if_strict_jax_fallback",
+    "raise_if_target_lane_bypass",
     "requires_x64",
     "set_backend",
     "should_eagerly_configure_jax",
     "warn_if_jax_fallback",
+    "strict_target_lane_purity",
+    "target_lane_purity_active",
+    "target_lane_purity_requested",
 ]
