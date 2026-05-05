@@ -328,9 +328,15 @@ Do not inline new tolerances.
 
 ### Adjoint Lanes
 
-- [ ] `exact_well_conditioned_adjoint`: operator-vs-dense vector parity.
-- [ ] `exact_ill_conditioned_adjoint`: residual/failure behavior only.
-- [ ] Confirm dense PLU metadata never replaces operator-backed runtime solves.
+Status note, 2026-05-05: Boozer adjoint closure tracking moved to
+`docs/boozer_full_parity_plan_2026-05-04.md`. That newer plan supersedes this
+April checklist for Boozer-specific exact-adjoint lane status.
+
+- [x] `exact_well_conditioned_adjoint`: operator-vs-dense vector parity.
+- [ ] `exact_ill_conditioned_adjoint`: true rank-deficient fixture remains
+  future residual/failure-only coverage; current mixed-RHS operator-status
+  coverage exercises the residual/failure branch.
+- [x] Confirm dense PLU metadata never replaces operator-backed runtime solves.
 
 ### Multi-Device Lowering
 
