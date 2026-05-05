@@ -127,6 +127,236 @@ __all__ = ["BoozerSurfaceJAX", "build_boozer_surface_runtime_state"]
 
 
 @dataclass(frozen=True)
+class _BoozerResultSchema:
+    required_keys: frozenset
+    forbidden_keys: frozenset = field(default_factory=frozenset)
+
+
+_BOOZER_SOLVER_RESULT_CORE_KEYS = frozenset(
+    {"success", "G", "s", "iota", "weight_inv_modB", "type"}
+)
+_BOOZER_RUNTIME_RESULT_KEYS = frozenset(
+    {"sdofs", "primal_success", "adjoint_linear_solve_available"}
+)
+_BOOZER_LINEARIZED_RESULT_KEYS = frozenset(
+    {
+        "linearization_kind",
+        "linear_solve_backend",
+        "dense_linear_solve_factors_available",
+    }
+)
+_BOOZER_HESSIAN_REPORTING_RESULT_KEYS = frozenset(
+    {
+        "hessian_materialized",
+        "dense_hessian_shape",
+        "dense_hessian_bytes",
+        "max_dense_hessian_bytes",
+        "failure_category",
+        "failure_stage",
+        "message",
+    }
+)
+_BOOZER_EXACT_REPORTING_RESULT_KEYS = frozenset(
+    {
+        "jacobian_materialized",
+        "dense_jacobian_shape",
+        "dense_jacobian_bytes",
+        "max_dense_jacobian_bytes",
+        "failure_category",
+        "failure_stage",
+        "message",
+    }
+)
+_BOOZER_TRACEABLE_RESULT_KEYS = frozenset(
+    {
+        "x",
+        "sdofs",
+        "iota",
+        "G",
+        "fun",
+        "plu",
+        "nit",
+        "success",
+        "primal_success",
+        "adjoint_linear_solve_available",
+        "linearization_kind",
+        "linear_solve_backend",
+        "dense_linear_solve_factors_available",
+        "type",
+        "weight_inv_modB",
+    }
+)
+_BOOZER_TRACEABLE_FORBIDDEN_RESULT_KEYS = frozenset(
+    {
+        "PLU",
+        "s",
+        "info",
+        "vjp",
+        "vjp_groups",
+        "solve_generation",
+        "mask",
+        "lm",
+    }
+)
+
+_BOOZER_RESULT_SCHEMAS = {
+    "lbfgs": _BoozerResultSchema(
+        required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
+        | _BOOZER_RUNTIME_RESULT_KEYS
+        | frozenset(
+            {
+                "fun",
+                "gradient",
+                "iter",
+                "info",
+                "optimizer_method",
+            }
+        ),
+        forbidden_keys=frozenset(
+            {
+                "residual",
+                "jacobian",
+                "hessian",
+                "PLU",
+                "plu",
+                "vjp",
+                "vjp_groups",
+                "linearization_kind",
+                "linear_solve_backend",
+                "dense_linear_solve_factors_available",
+                "mask",
+                "lm",
+            }
+        ),
+    ),
+    "ls_manual": _BoozerResultSchema(
+        required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
+        | _BOOZER_RUNTIME_RESULT_KEYS
+        | frozenset({"residual", "gradient", "jacobian", "optimizer_method"}),
+        forbidden_keys=frozenset(
+            {
+                "info",
+                "fun",
+                "hessian",
+                "PLU",
+                "plu",
+                "vjp",
+                "vjp_groups",
+                "linearization_kind",
+                "linear_solve_backend",
+                "dense_linear_solve_factors_available",
+                "mask",
+                "lm",
+            }
+        ),
+    ),
+    "ls_lm": _BoozerResultSchema(
+        required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
+        | _BOOZER_RUNTIME_RESULT_KEYS
+        | frozenset({"info", "residual", "gradient", "jacobian", "optimizer_method"}),
+        forbidden_keys=frozenset(
+            {
+                "fun",
+                "hessian",
+                "PLU",
+                "plu",
+                "vjp",
+                "vjp_groups",
+                "linearization_kind",
+                "linear_solve_backend",
+                "dense_linear_solve_factors_available",
+                "mask",
+                "lm",
+            }
+        ),
+    ),
+    "newton": _BoozerResultSchema(
+        required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
+        | _BOOZER_RUNTIME_RESULT_KEYS
+        | _BOOZER_LINEARIZED_RESULT_KEYS
+        | _BOOZER_HESSIAN_REPORTING_RESULT_KEYS
+        | frozenset(
+            {
+                "residual",
+                "jacobian",
+                "hessian",
+                "iter",
+                "PLU",
+                "vjp",
+                "vjp_groups",
+                "optimizer_method",
+                "solve_generation",
+                "fun",
+            }
+        ),
+        forbidden_keys=frozenset({"plu", "mask", "lm", "info"}),
+    ),
+    "exact": _BoozerResultSchema(
+        required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
+        | _BOOZER_RUNTIME_RESULT_KEYS
+        | _BOOZER_LINEARIZED_RESULT_KEYS
+        | _BOOZER_EXACT_REPORTING_RESULT_KEYS
+        | frozenset(
+            {
+                "residual",
+                "fun",
+                "jacobian",
+                "iter",
+                "PLU",
+                "mask",
+                "vjp",
+                "vjp_groups",
+                "solve_generation",
+            }
+        ),
+        forbidden_keys=frozenset(
+            {"plu", "hessian", "gradient", "optimizer_method", "lm", "info"}
+        ),
+    ),
+    "exact_constraints": _BoozerResultSchema(
+        required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
+        | _BOOZER_RUNTIME_RESULT_KEYS
+        | frozenset({"residual", "jacobian", "iter", "lm"}),
+        forbidden_keys=frozenset(
+            {
+                "fun",
+                "gradient",
+                "hessian",
+                "PLU",
+                "plu",
+                "vjp",
+                "vjp_groups",
+                "linearization_kind",
+                "linear_solve_backend",
+                "dense_linear_solve_factors_available",
+                "mask",
+                "optimizer_method",
+                "info",
+            }
+        ),
+    ),
+    "traceable": _BoozerResultSchema(
+        required_keys=_BOOZER_TRACEABLE_RESULT_KEYS,
+        forbidden_keys=_BOOZER_TRACEABLE_FORBIDDEN_RESULT_KEYS,
+    ),
+    "traceable_exact": _BoozerResultSchema(
+        required_keys=_BOOZER_TRACEABLE_RESULT_KEYS
+        | _BOOZER_EXACT_REPORTING_RESULT_KEYS
+        | frozenset({"residual", "jacobian"}),
+        forbidden_keys=_BOOZER_TRACEABLE_FORBIDDEN_RESULT_KEYS
+        | frozenset({"grad", "hessian", "optimizer_method"}),
+    ),
+    "traceable_ls": _BoozerResultSchema(
+        required_keys=_BOOZER_TRACEABLE_RESULT_KEYS
+        | _BOOZER_HESSIAN_REPORTING_RESULT_KEYS
+        | frozenset({"grad", "hessian", "optimizer_method"}),
+        forbidden_keys=_BOOZER_TRACEABLE_FORBIDDEN_RESULT_KEYS
+        | frozenset({"residual", "jacobian"}),
+    ),
+}
+
+
+@dataclass(frozen=True)
 class _BoozerPenaltyOptimizerState:
     surface_dofs: jax.Array
     iota: jax.Array
@@ -3847,6 +4077,9 @@ class BoozerSurfaceJAX(Optimizable):
             "iter": int(_host_scalar(result.nit)),
             "info": result,
             "success": bool(_host_scalar(result.success)),
+            "primal_success": bool(_host_scalar(result.success)),
+            "adjoint_linear_solve_available": False,
+            "sdofs": _as_jax_float64(sdofs_final),
             "G": G_out,
             "s": s,
             "iota": iota_out,
@@ -3944,6 +4177,13 @@ class BoozerSurfaceJAX(Optimizable):
                 "linearization_kind": "hessian",
                 "linear_solve_backend": "operator",
                 "dense_linear_solve_factors_available": False,
+                "hessian_materialized": result.get("hessian_materialized"),
+                "dense_hessian_shape": result.get("dense_hessian_shape"),
+                "dense_hessian_bytes": result.get("dense_hessian_bytes"),
+                "max_dense_hessian_bytes": result.get("max_dense_hessian_bytes"),
+                "failure_category": result.get("failure_category"),
+                "failure_stage": result.get("failure_stage"),
+                "message": result.get("message"),
             }
             self.res = res
             self.need_to_run_code = False
@@ -4084,6 +4324,9 @@ class BoozerSurfaceJAX(Optimizable):
                 "gradient": result["gradient"],
                 "jacobian": result["jacobian"],
                 "success": result["success"],
+                "primal_success": result["success"],
+                "adjoint_linear_solve_available": False,
+                "sdofs": _as_jax_float64(sdofs_final),
                 "G": G_out,
                 "s": s,
                 "iota": iota_out,
@@ -4135,6 +4378,9 @@ class BoozerSurfaceJAX(Optimizable):
             "gradient": result.jac,
             "jacobian": result.residual_jacobian,
             "success": bool(_host_scalar(result.success)),
+            "primal_success": bool(_host_scalar(result.success)),
+            "adjoint_linear_solve_available": False,
+            "sdofs": _as_jax_float64(sdofs_final),
             "G": G_out,
             "s": s,
             "iota": iota_out,
@@ -4304,9 +4550,13 @@ class BoozerSurfaceJAX(Optimizable):
         jacobian_available = jacobian is not None
         exact_reporting = _exact_newton_reporting_fields(result)
         materialization_message = exact_reporting["message"]
+        primal_success = (
+            bool(_host_scalar(result["success"]))
+            and exact_reporting["failure_category"] is None
+        )
 
         if (
-            not bool(_host_scalar(result["success"]))
+            not primal_success
             or not _host_all_finite(x_final)
             or not _host_all_finite(exact_residual)
             or (jacobian_available and not _host_all_finite(jacobian))
@@ -4407,9 +4657,9 @@ class BoozerSurfaceJAX(Optimizable):
             "fun": float(0.5 * np.mean(np.square(_host_numpy(exact_residual)))),
             "jacobian": J,
             "iter": int(_host_scalar(result["nit"], dtype=np.int64)),
-            "success": bool(_host_scalar(result["success"])),
-            "primal_success": bool(_host_scalar(result["success"])),
-            "adjoint_linear_solve_available": bool(_host_scalar(result["success"])),
+            "success": primal_success,
+            "primal_success": primal_success,
+            "adjoint_linear_solve_available": primal_success,
             "sdofs": _as_jax_float64(sdofs_final),
             "G": G_final,
             "s": s,
@@ -4532,11 +4782,15 @@ class BoozerSurfaceJAX(Optimizable):
             if self.stellsym
             else _host_numpy(xl[-2:])
         )
+        success = bool(float(_host_scalar(norm)) <= tol)
         res = {
             "residual": residual,
             "jacobian": jacobian,
             "iter": nit,
-            "success": bool(float(_host_scalar(norm)) <= tol),
+            "success": success,
+            "primal_success": success,
+            "adjoint_linear_solve_available": False,
+            "sdofs": _as_jax_float64(sdofs_final),
             "lm": lm_out,
             "G": G_out,
             "s": s,

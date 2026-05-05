@@ -101,98 +101,16 @@ _STOKES_FLUX_ATOL = 5e-7
 _STOKES_DISK_NR = 96
 _STOKES_DISK_NTHETA = 192
 
-_PUBLIC_SOLVER_RESULT_KEYS = frozenset(
-    {"success", "G", "s", "iota", "weight_inv_modB", "type"}
-)
-_LINEARIZED_RESULT_KEYS = frozenset(
-    {
-        "primal_success",
-        "adjoint_linear_solve_available",
-        "linearization_kind",
-        "linear_solve_backend",
-        "dense_linear_solve_factors_available",
-    }
-)
-_PUBLIC_LBFGS_RESULT_KEYS = _PUBLIC_SOLVER_RESULT_KEYS | {
-    "fun",
-    "gradient",
-    "iter",
-    "info",
-    "optimizer_method",
-}
-_PUBLIC_LS_RESULT_KEYS = _PUBLIC_SOLVER_RESULT_KEYS | {
-    "residual",
-    "gradient",
-    "jacobian",
-    "optimizer_method",
-}
-_PUBLIC_NEWTON_RESULT_KEYS = (
-    _PUBLIC_SOLVER_RESULT_KEYS
-    | _LINEARIZED_RESULT_KEYS
-    | {
-        "residual",
-        "jacobian",
-        "hessian",
-        "iter",
-        "sdofs",
-        "PLU",
-        "vjp",
-        "vjp_groups",
-        "optimizer_method",
-        "solve_generation",
-        "fun",
-    }
-)
-_PUBLIC_EXACT_RESULT_KEYS = (
-    _PUBLIC_SOLVER_RESULT_KEYS
-    | _LINEARIZED_RESULT_KEYS
-    | {
-        "residual",
-        "fun",
-        "jacobian",
-        "iter",
-        "PLU",
-        "mask",
-        "vjp",
-        "vjp_groups",
-        "solve_generation",
-        "jacobian_materialized",
-    }
-)
-_PUBLIC_EXACT_CONSTRAINTS_RESULT_KEYS = _PUBLIC_SOLVER_RESULT_KEYS | {
-    "residual",
-    "jacobian",
-    "iter",
-    "lm",
-}
-_TRACEABLE_RESULT_KEYS = frozenset(
-    {
-        "x",
-        "sdofs",
-        "iota",
-        "G",
-        "fun",
-        "plu",
-        "nit",
-        "success",
-        "primal_success",
-        "adjoint_linear_solve_available",
-        "linearization_kind",
-        "linear_solve_backend",
-        "dense_linear_solve_factors_available",
-        "type",
-        "weight_inv_modB",
-    }
-)
-_TRACEABLE_EXACT_RESULT_KEYS = _TRACEABLE_RESULT_KEYS | {
-    "residual",
-    "jacobian",
-}
-_TRACEABLE_LS_RESULT_KEYS = _TRACEABLE_RESULT_KEYS | {
-    "grad",
-    "hessian",
-    "optimizer_method",
-}
+_PUBLIC_LBFGS_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["lbfgs"]
+_PUBLIC_LS_MANUAL_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["ls_manual"]
+_PUBLIC_LS_LM_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["ls_lm"]
+_PUBLIC_NEWTON_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["newton"]
+_PUBLIC_EXACT_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["exact"]
+_PUBLIC_EXACT_CONSTRAINTS_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS[
+    "exact_constraints"
+]
+_TRACEABLE_EXACT_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["traceable_exact"]
+_TRACEABLE_LS_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["traceable_ls"]
 _SOLVED_RUNTIME_STATE_FIELDS = frozenset(
     {"sdofs", "iota", "G", "weight_inv_modB"}
 )
@@ -216,8 +134,43 @@ _ADJOINT_RUNTIME_STATE_FIELDS = frozenset(
 )
 
 
-def _assert_result_schema(result, required_keys):
-    assert required_keys <= set(result.keys())
+def _assert_result_schema(result, schema):
+    keys = set(result.keys())
+    assert schema.required_keys <= keys
+    assert not schema.forbidden_keys & keys
+
+
+def _runtime_sdofs_for(booz):
+    return jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+
+
+def test_public_solver_result_schema_registry_is_mode_aware():
+    entrypoint_cases = {
+        "lbfgs": "minimize_boozer_penalty_constraints_LBFGS",
+        "ls_manual": "minimize_boozer_penalty_constraints_ls",
+        "ls_lm": "minimize_boozer_penalty_constraints_ls",
+        "newton": "minimize_boozer_penalty_constraints_newton",
+        "exact": "solve_residual_equation_exactly_newton",
+        "exact_constraints": "minimize_boozer_exact_constraints_newton",
+        "traceable": "run_code_traceable",
+    }
+    schemas = _bsj._BOOZER_RESULT_SCHEMAS
+
+    assert entrypoint_cases.keys() <= schemas.keys()
+    for schema_name, entrypoint_name in entrypoint_cases.items():
+        assert hasattr(BoozerSurfaceJAX, entrypoint_name)
+        schema = schemas[schema_name]
+        assert schema.required_keys
+        assert not schema.required_keys & schema.forbidden_keys
+
+    assert "info" in schemas["ls_lm"].required_keys
+    assert "info" in schemas["ls_manual"].forbidden_keys
+    assert "PLU" in schemas["exact"].required_keys
+    assert "PLU" in schemas["traceable"].forbidden_keys
+    assert "plu" in schemas["traceable"].required_keys
+    assert "plu" in schemas["exact"].forbidden_keys
+    assert "linearization_kind" in schemas["newton"].required_keys
+    assert "linearization_kind" in schemas["lbfgs"].forbidden_keys
 
 
 def _assert_runtime_state_schema(runtime_state, required_fields):
@@ -291,6 +244,7 @@ def _build_exact_well_conditioned_operator_fixture(monkeypatch, *, device):
             "success": True,
             "primal_success": True,
             "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
             "iota": jnp.asarray(0.3, dtype=jnp.float64),
             "G": jnp.asarray(0.05, dtype=jnp.float64),
             "weight_inv_modB": True,
@@ -2186,7 +2140,7 @@ class TestBoozerSurfaceJAXClass:
             verbose=False,
         )
 
-        _assert_result_schema(res, _PUBLIC_LBFGS_RESULT_KEYS)
+        _assert_result_schema(res, _PUBLIC_LBFGS_RESULT_SCHEMA)
         assert captured_methods == ["bfgs"]
         assert res["optimizer_method"] == "bfgs"
 
@@ -2198,7 +2152,7 @@ class TestBoozerSurfaceJAXClass:
             limited_memory=True,
         )
 
-        _assert_result_schema(res, _PUBLIC_LBFGS_RESULT_KEYS)
+        _assert_result_schema(res, _PUBLIC_LBFGS_RESULT_SCHEMA)
         assert captured_methods == ["bfgs", "lbfgs"]
         assert res["optimizer_method"] == "lbfgs"
 
@@ -2264,7 +2218,7 @@ class TestBoozerSurfaceJAXClass:
             method="lm",
         )
 
-        _assert_result_schema(res, _PUBLIC_LS_RESULT_KEYS)
+        _assert_result_schema(res, _PUBLIC_LS_LM_RESULT_SCHEMA)
         assert captured["method"] == "lm-ondevice"
         assert (
             captured["options"]["materialize_dense_linearization"]
@@ -2408,7 +2362,7 @@ class TestBoozerSurfaceJAXClass:
             tol=1e-8,
         )
 
-        _assert_result_schema(res_manual, _PUBLIC_LS_RESULT_KEYS)
+        _assert_result_schema(res_manual, _PUBLIC_LS_MANUAL_RESULT_SCHEMA)
         assert res_manual["optimizer_method"] == "manual"
         assert res_manual["success"] is True
         np.testing.assert_allclose(
@@ -2544,7 +2498,7 @@ class TestBoozerSurfaceJAXClass:
             tol=1e-10,
         )
 
-        _assert_result_schema(res, _PUBLIC_EXACT_CONSTRAINTS_RESULT_KEYS)
+        _assert_result_schema(res, _PUBLIC_EXACT_CONSTRAINTS_RESULT_SCHEMA)
         assert res["success"] is True
         assert "jacobian" in res
         assert "residual" in res
@@ -2684,7 +2638,7 @@ class TestBoozerSurfaceJAXClass:
             verbose=False,
         )
 
-        _assert_result_schema(res, _PUBLIC_NEWTON_RESULT_KEYS)
+        _assert_result_schema(res, _PUBLIC_NEWTON_RESULT_SCHEMA)
         assert captured["method"] == "bfgs"
         assert res["success"] is True
 
@@ -3039,7 +2993,7 @@ class TestBoozerSurfaceJAXClass:
         booz = _make_mock_boozer_surface()
         res = booz.run_code(iota=0.3, G=0.05)
         assert res is not None
-        _assert_result_schema(res, _PUBLIC_NEWTON_RESULT_KEYS)
+        _assert_result_schema(res, _PUBLIC_NEWTON_RESULT_SCHEMA)
         assert res["type"] == "ls"
         assert "residual" in res
         assert "jacobian" in res
@@ -4045,6 +3999,7 @@ class TestBoozerSurfaceJAXClass:
             "success": True,
             "primal_success": True,
             "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
             "iota": jnp.asarray(0.3, dtype=jnp.float64),
             "G": jnp.asarray(0.05, dtype=jnp.float64),
             "weight_inv_modB": True,
@@ -4092,6 +4047,7 @@ class TestBoozerSurfaceJAXClass:
             "success": True,
             "primal_success": True,
             "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
             "iota": jnp.asarray(0.3, dtype=jnp.float64),
             "G": jnp.asarray(0.05, dtype=jnp.float64),
             "weight_inv_modB": True,
@@ -4116,6 +4072,7 @@ class TestBoozerSurfaceJAXClass:
             "success": True,
             "primal_success": True,
             "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
             "iota": jnp.asarray(0.3, dtype=jnp.float64),
             "G": jnp.asarray(0.05, dtype=jnp.float64),
             "weight_inv_modB": True,
@@ -4176,6 +4133,7 @@ class TestBoozerSurfaceJAXClass:
             "success": True,
             "primal_success": True,
             "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
             "iota": jnp.asarray(0.3, dtype=jnp.float64),
             "G": jnp.asarray(0.05, dtype=jnp.float64),
             "weight_inv_modB": True,
@@ -4217,6 +4175,7 @@ class TestBoozerSurfaceJAXClass:
             "success": True,
             "primal_success": True,
             "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
             "iota": jnp.asarray(0.3, dtype=jnp.float64),
             "G": jnp.asarray(0.05, dtype=jnp.float64),
             "weight_inv_modB": True,
@@ -4281,6 +4240,7 @@ class TestBoozerSurfaceJAXClass:
             "success": True,
             "primal_success": True,
             "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
             "iota": jnp.asarray(0.3, dtype=jnp.float64),
             "G": jnp.asarray(0.05, dtype=jnp.float64),
             "weight_inv_modB": True,
@@ -4350,6 +4310,7 @@ class TestBoozerSurfaceJAXClass:
             "success": True,
             "primal_success": True,
             "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
             "iota": jnp.asarray(0.3, dtype=jnp.float64),
             "G": jnp.asarray(0.05, dtype=jnp.float64),
             "weight_inv_modB": True,
@@ -4497,6 +4458,7 @@ class TestBoozerSurfaceJAXClass:
             "success": True,
             "primal_success": True,
             "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
             "iota": jnp.asarray(0.3, dtype=jnp.float64),
             "G": jnp.asarray(0.05, dtype=jnp.float64),
             "weight_inv_modB": True,
@@ -4929,7 +4891,7 @@ class TestBoozerSurfaceJAXExactPath:
         booz = _make_mock_boozer_surface_exact()
         res = _run_mock_exact_boozer_success(booz)
         assert res is not None
-        _assert_result_schema(res, _PUBLIC_EXACT_RESULT_KEYS)
+        _assert_result_schema(res, _PUBLIC_EXACT_RESULT_SCHEMA)
         assert res["type"] == "exact"
         assert booz.need_to_run_code is False
 
@@ -4955,7 +4917,7 @@ class TestBoozerSurfaceJAXExactPath:
             "dense_linear_solve_factors_available",
         }
         assert expected_keys <= set(res.keys())
-        _assert_result_schema(res, _PUBLIC_EXACT_RESULT_KEYS)
+        _assert_result_schema(res, _PUBLIC_EXACT_RESULT_SCHEMA)
         assert res["jacobian_materialized"] is True
         assert isinstance(res["PLU"], tuple)
         assert len(res["PLU"]) == 3
@@ -5033,7 +4995,7 @@ class TestBoozerSurfaceJAXExactPath:
         )
         assert res["max_dense_jacobian_bytes"] == _bsj._DEFAULT_MAX_DENSE_JACOBIAN_BYTES
 
-    def test_run_code_exact_keeps_matrix_free_runtime_when_dense_jacobian_is_skipped(
+    def test_run_code_exact_reports_scaling_limit_failure_without_fake_success(
         self, monkeypatch
     ):
         booz = _make_mock_boozer_surface_exact(options={"max_dense_jacobian_bytes": 77})
@@ -5059,20 +5021,19 @@ class TestBoozerSurfaceJAXExactPath:
         assert captured["max_dense_jacobian_bytes"] == 77
         assert res["jacobian"] is None
         assert res["PLU"] is None
-        assert res["success"] is True
-        assert res["primal_success"] is True
-        assert res["adjoint_linear_solve_available"] is True
+        assert res["success"] is False
+        assert res["primal_success"] is False
+        assert res["adjoint_linear_solve_available"] is False
         assert res["failure_category"] == "scaling_limit"
         assert res["failure_stage"] == "dense_jacobian_finalization"
         assert res["jacobian_materialized"] is False
+        assert res["dense_jacobian_shape"] is not None
+        assert res["dense_jacobian_bytes"] is not None
         assert res["max_dense_jacobian_bytes"] == 77
         assert res["message"] == "dense Jacobian skipped"
-        adjoint_state = booz.get_adjoint_runtime_state()
-        assert adjoint_state.plu is None
-        assert adjoint_state.linear_solve_backend == "operator"
-        assert adjoint_state.dense_linear_solve_factors_available is False
-        assert callable(adjoint_state.solve_forward)
-        assert callable(adjoint_state.solve_transpose)
+        _assert_result_schema(res, _PUBLIC_EXACT_RESULT_SCHEMA)
+        with pytest.raises(RuntimeError, match="no successful solve state"):
+            booz.get_adjoint_runtime_state()
 
     def test_run_code_exact_reports_dense_jacobian_ceiling_when_verbose(
         self, monkeypatch, capsys
@@ -5182,7 +5143,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
-        _assert_result_schema(result, _TRACEABLE_EXACT_RESULT_KEYS)
+        _assert_result_schema(result, _TRACEABLE_EXACT_RESULT_SCHEMA)
         assert captured["called"] is True
         assert result["jacobian"] is None
         assert result["plu"] is None
@@ -5514,7 +5475,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
-        _assert_result_schema(result, _TRACEABLE_LS_RESULT_KEYS)
+        _assert_result_schema(result, _TRACEABLE_LS_RESULT_SCHEMA)
         assert result["optimizer_method"] == "lm-ondevice"
         assert bool(result["success"])
         assert captured["materialize_dense_linearization"] is expected_materialize
@@ -5861,6 +5822,13 @@ class TestBoozerSurfaceJAXExactPath:
             "optimizer_method": "lbfgs-ondevice",
             "type": "ls",
             "weight_inv_modB": booz.options["weight_inv_modB"],
+            "hessian_materialized": None,
+            "dense_hessian_shape": None,
+            "dense_hessian_bytes": None,
+            "max_dense_hessian_bytes": None,
+            "failure_category": None,
+            "failure_stage": None,
+            "message": None,
         }
 
         def fake_run_code_traceable(coil_source, sdofs_arg, iota_arg, G_arg):
@@ -5883,7 +5851,7 @@ class TestBoozerSurfaceJAXExactPath:
         result = booz.run_code_functional(coil_arrays, sdofs, iota, G)
 
         assert result is expected
-        _assert_result_schema(result, _TRACEABLE_LS_RESULT_KEYS)
+        _assert_result_schema(result, _TRACEABLE_LS_RESULT_SCHEMA)
         assert "PLU" not in result
         assert result["plu"] is not None
         np.testing.assert_allclose(np.asarray(result["sdofs"]), np.asarray(sdofs))
@@ -6552,6 +6520,7 @@ class TestEnsureSolvedGuard:
                 "success": True,
                 "primal_success": True,
                 "adjoint_linear_solve_available": True,
+                "sdofs": _runtime_sdofs_for(booz),
                 "weight_inv_modB": True,
                 "linearization_kind": "hessian",
                 "dense_linear_solve_factors_available": True,
@@ -6600,6 +6569,7 @@ class TestEnsureSolvedGuard:
             "success": True,
             "primal_success": True,
             "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
             "weight_inv_modB": True,
             "linearization_kind": "hessian",
             "dense_linear_solve_factors_available": True,
@@ -6631,6 +6601,7 @@ class TestEnsureSolvedGuard:
             "success": True,
             "primal_success": True,
             "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
             "weight_inv_modB": True,
             "linearization_kind": "exact_jacobian",
             "dense_linear_solve_factors_available": True,
