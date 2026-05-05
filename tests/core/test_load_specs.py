@@ -27,7 +27,7 @@ from simsopt.jax_core.surface_rzfourier import (  # noqa: E402
 def _write_legacy_outputs(root: Path) -> tuple[Path, Path]:
     pytest.importorskip("simsoptpp")
     from simsopt.field.biotsavart import BiotSavart
-    from simsopt.field.coil import Coil, Current, ScaledCurrent
+    from simsopt.field.coil import Current, coils_via_symmetries
     from simsopt.geo.curvexyzfourier import CurveXYZFourier
     from simsopt.geo.surfacerzfourier import SurfaceRZFourier
 
@@ -36,7 +36,8 @@ def _write_legacy_outputs(root: Path) -> tuple[Path, Path]:
     coeffs[1][0] = 1.0
     coeffs[2][1] = 1.0
     curve.set_dofs(np.concatenate(coeffs))
-    biot_savart = BiotSavart([Coil(curve, ScaledCurrent(Current(1.0), 1e4))])
+    coils = coils_via_symmetries([curve], [Current(1.0)], nfp=2, stellsym=True)
+    biot_savart = BiotSavart(coils)
     biot_savart.set_points(np.asarray([[0.2, 0.1, 0.3], [0.3, 0.2, 0.4]]))
 
     surface = SurfaceRZFourier(
@@ -68,6 +69,9 @@ def test_load_specs_reads_legacy_json_without_losing_geometry_state(tmp_path):
     assert isinstance(surface_spec, SurfaceRZFourierSpec)
 
     legacy_bs = load(biot_savart_path)
+    assert len(legacy_bs.coils) == 4
+    assert any(type(coil.curve).__name__ == "RotatedCurve" for coil in legacy_bs.coils)
+    assert any(type(coil.current).__name__ == "ScaledCurrent" for coil in legacy_bs.coils)
     points = legacy_bs.get_points_cart()
     np.testing.assert_allclose(
         np.asarray(grouped_biot_savart_B_from_spec(points, coil_set_spec)),
