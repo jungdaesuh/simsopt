@@ -400,8 +400,10 @@ def _evaluate_upstream_boozer_penalty_hessian_case(case):
     def hvp_single(v):
         return jax.jvp(grad_fn, (x,), (v,))[1]
 
-    # Standard basis for column-complete oracle parity. ``lax.map`` stacks
-    # H @ e_i along axis 0, so transpose once to match dense Hessian layout.
+    # Standard basis for column-complete oracle parity; do not replace with
+    # _seeded_hessian_direction_pair, which covers one random projection.
+    # ``lax.map`` stacks H @ e_i along axis 0, so transpose once to match
+    # dense Hessian layout.
     hessian_columns = jax.lax.map(hvp_single, basis)
     return {
         "cpu_hessian": np.asarray(cpu_hessian, dtype=np.float64),
