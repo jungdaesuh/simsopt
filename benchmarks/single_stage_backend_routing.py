@@ -74,8 +74,6 @@ def resolve_boozer_least_squares_algorithm(
             "Single-stage JAX benchmark probes require "
             "boozer_optimizer_backend='ondevice' or 'scipy'."
         )
-    if boozer_optimizer_backend == "scipy":
-        return "quasi-newton" if least_squares_algorithm is None else least_squares_algorithm
     if least_squares_algorithm is not None:
         return least_squares_algorithm
     return "quasi-newton"

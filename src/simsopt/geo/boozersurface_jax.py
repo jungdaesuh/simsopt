@@ -2083,8 +2083,7 @@ _ALLOWED_OPTIONS_EXACT = frozenset(_DEFAULT_OPTIONS_EXACT) | {
 
 
 def default_least_squares_algorithm_for_backend(optimizer_backend):
-    if optimizer_backend == "ondevice":
-        return "quasi-newton"
+    del optimizer_backend
     return "quasi-newton"
 
 
