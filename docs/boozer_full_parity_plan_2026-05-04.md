@@ -554,6 +554,18 @@ Acceptance:
 - [x] JAX-native APIs have explicit immutable state tests.
 - [x] There are no silent fallbacks to legacy mutable host behavior.
 
+## Optimizer Decision Memo
+
+Release parity is a final-physics contract, not an optimizer-trajectory
+contract. The product gate is CPU/JAX agreement on solver success/failure,
+residual norms, public result schemas, final objective values, and final
+physics quantities such as `iota`, `G`, label value/error, and anchored axis-z.
+
+SciPy step-by-step trajectory parity remains diagnostic only. Iteration counts,
+Wolfe line-search internals, and individual trial-step sequences can differ
+between CPU/SciPy and JAX lanes as long as the accepted final state satisfies
+the same public result and final-physics acceptance envelope.
+
 ## Final Validation Ladder
 
 ### Current Pass/Fail Watermark
@@ -610,6 +622,17 @@ integration failures are closed by the fixed same-state derivative tolerance
 contract and the branch-stable re-solve FD contract. The backend-selection test
 double was also corrected to preserve the real `SurfaceXYZTensorFourier` class
 contract instead of replacing the class with a `MagicMock`.
+
+Result-contract cleanup rerun captured on 2026-05-05 with
+`JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu`:
+
+- `pytest -q tests/geo/test_boozersurface.py tests/geo/test_boozersurface_jax.py
+  tests/geo/test_boozersurface_jax_private.py
+  tests/geo/test_boozer_residual_jax.py
+  tests/geo/test_boozer_derivatives_jax.py
+  tests/geo/test_surface_objectives_jax.py
+  tests/integration/test_single_stage_jax_cpu_reference.py -k "not gpu"`:
+  758 passed, 1 skipped, 65 deselected, 56 subtests passed in 1554.75 s.
 
 CPU closure commands:
 
