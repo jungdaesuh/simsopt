@@ -2611,6 +2611,48 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(value, 2.5)
         np.testing.assert_array_equal(gradient, np.array([40.0, 50.0, 60.0]))
 
+    def test_single_stage_adapter_benchmark_sync_uses_cached_objective(self):
+        module = self.load_module()
+        run_dict = {
+            "it": 7,
+            "J": 9.0,
+            "dJ": np.array([-1.0, -2.0]),
+            "lscount": 3,
+        }
+        boozer_surface = types.SimpleNamespace(
+            surface=types.SimpleNamespace(x=np.array([0.1, 0.2])),
+            res={"success": True, "iota": 0.0034, "G": 2.0},
+        )
+        adapter = module.SingleStageAdapter(
+            run_dict=run_dict,
+            boozer_surface=boozer_surface,
+            JF=object(),
+            bs=object(),
+            objectives={},
+            diagnostics={},
+            log_path="unused.log",
+            apply_coil_dofs=lambda _x: None,
+            benchmark_mode=True,
+        )
+
+        accepted_x = np.array([1.0, 2.0])
+        with patch.object(
+            module,
+            "evaluate_candidate",
+            return_value=(1.25, np.array([10.0, 20.0])),
+        ):
+            adapter(accepted_x)
+
+        adapter.sync_accepted_step(accepted_x)
+
+        self.assertEqual(run_dict["J"], 1.25)
+        np.testing.assert_array_equal(run_dict["dJ"], np.array([10.0, 20.0]))
+        np.testing.assert_array_equal(run_dict["sdofs"], np.array([0.1, 0.2]))
+        self.assertEqual(run_dict["iota"], 0.0034)
+        self.assertEqual(run_dict["G"], 2.0)
+        self.assertEqual(run_dict["lscount"], 0)
+        self.assertEqual(run_dict["it"], 8)
+
     def test_single_stage_runtime_stage2_seed_payload_requires_order(self):
         module = self.load_module()
 
@@ -9849,7 +9891,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 self._x = np.asarray(value)
 
         jf = _JF()
-        run_dict = {"x_prev": np.zeros(2), "lscount": 4}
+        run_dict = {"x_prev": np.zeros(2), "lscount": 4, "it": 0}
         captured = {}
 
         def fake_snapshot(
@@ -9919,7 +9961,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 self._x = np.asarray(value)
 
         jf = _JF()
-        run_dict = {"x_prev": np.zeros(2), "lscount": 2}
+        run_dict = {"x_prev": np.zeros(2), "lscount": 2, "it": 0}
         captured = {}
         objective_value = 3.5
         objective_grad = np.array([1.0, -1.0])
@@ -10017,6 +10059,7 @@ class SingleStageExampleTests(unittest.TestCase):
             "lscount": 3,
             "J": 7.0,
             "dJ": np.array([1.0, 2.0]),
+            "it": 0,
         }
         captured = {}
 

@@ -9712,6 +9712,9 @@ class SingleStageAdapter:
         self.optimizer_gradient_size = optimizer_gradient_size
         self.optimizer_to_coil_dofs = optimizer_to_coil_dofs
         self.optimizer_gradient_transform = optimizer_gradient_transform
+        self._last_objective_evaluation_x = None
+        self._last_objective_evaluation_value = None
+        self._last_objective_evaluation_gradient = None
         self.apply_coil_dofs = (
             apply_coil_dofs
             if apply_coil_dofs is not None
@@ -9727,6 +9730,29 @@ class SingleStageAdapter:
         if self.optimizer_gradient_size is None:
             return gradient_array
         return gradient_array[: int(self.optimizer_gradient_size)]
+
+    def _cache_objective_evaluation(self, x, objective_value, objective_grad):
+        self._last_objective_evaluation_x = _single_stage_optimizer_dofs_array(x).copy()
+        self._last_objective_evaluation_value = host_float(objective_value)
+        self._last_objective_evaluation_gradient = _single_stage_optimizer_dofs_array(
+            objective_grad
+        ).copy()
+
+    def _cached_objective_evaluation_for_accepted_step(self, x):
+        x_array = _single_stage_optimizer_dofs_array(x)
+        if self._last_objective_evaluation_x is None:
+            raise RuntimeError(
+                "Accepted-step sync requires a cached objective evaluation."
+            )
+        if not np.array_equal(x_array, self._last_objective_evaluation_x):
+            raise RuntimeError(
+                "Accepted-step sync received a state different from the last "
+                "objective evaluation."
+            )
+        return (
+            self._last_objective_evaluation_value,
+            self._last_objective_evaluation_gradient.copy(),
+        )
 
     def _reevaluate_accepted_step(self, x):
         """Refresh accepted-step state on the mutable graph for diagnostics.
@@ -9822,6 +9848,10 @@ class SingleStageAdapter:
                 not self._refresh_accepted_step_runtime_state(x)
             ):
                 objective_value, objective_grad = self._reevaluate_accepted_step(x)
+            elif self._last_objective_evaluation_x is not None:
+                objective_value, objective_grad = (
+                    self._cached_objective_evaluation_for_accepted_step(x)
+                )
             snapshot_accepted_step_state(
                 self.run_dict,
                 self.boozer_surface,
@@ -9830,6 +9860,7 @@ class SingleStageAdapter:
                 objective_grad=objective_grad,
                 store_objective_grad=objective_value is not None,
             )
+            self.run_dict["it"] += 1
             return
         if self.reevaluate_before_accept:
             objective_value, objective_grad = self._reevaluate_accepted_step(x)
@@ -9867,6 +9898,7 @@ class SingleStageAdapter:
             self.objectives,
             self.diagnostics,
         )
+        self._cache_objective_evaluation(x_array, objective_value, objective_grad)
         native_gradient = "last_candidate_failure" not in self.run_dict
         return objective_value, self._optimizer_gradient(
             objective_grad,
