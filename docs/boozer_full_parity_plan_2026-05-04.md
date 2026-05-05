@@ -2,6 +2,11 @@
 
 Status: CPU implementation closure as of 2026-05-05.
 
+Implementation note: closure landed in `73d85b88e` and the follow-up stale
+Boozer backend-policy cleanup landed in `5011b56bf`. This remains a CPU
+closure: no CUDA Boozer parity claim is made until the optional CUDA validation
+ladder below is run on hardware.
+
 Current tree initially inspected at `bee115caedfb`. The working tree was dirty
 when this plan was written; this document is intentionally additive and does
 not judge uncommitted implementation changes outside the Boozer parity surface.
@@ -477,9 +482,12 @@ Tasks:
 - [x] Add batched RHS adjoint parity for matrix cotangents.
   - exact operator adjoint now solves column-batched RHS matrices through the
     same operator GMRES path and compares against dense JAX and PLU references
-- [x] Keep exact ill-conditioned adjoints in
+- [x] Keep true exact ill-conditioned adjoints, when present, in
   `exact_ill_conditioned_adjoint`: residual/failure-class shape only,
   `residual_rel_tol=1e-10`, and no vector parity requirement.
+- [x] Keep the current exact operator-status fixture explicit as mixed-RHS
+  coverage: Iotas satisfies the residual-success contract, while NQS exercises
+  the residual/failure-only branch.
 - [x] Keep exact well-conditioned adjoints in
   `exact_well_conditioned_adjoint`: vector parity required with
   `adjoint_rtol=1e-6`, `adjoint_atol=1e-8`, `gradient_rtol=1e-6`, and

@@ -49,9 +49,11 @@ lane evidence.
 - Full directional FD checks use the ``fd-gradient`` lane
   (``rtol=1e-5``, ``atol=1e-7``) on branch-stable fixtures.
 - Exact adjoints are split: ``exact-well-conditioned-adjoint`` permits vector
-  parity at ``rtol=1e-6``, ``atol=1e-8`` plus residual ``<=1e-10``;
-  ``exact-ill-conditioned-adjoint`` is residual/failure-only and must not
-  assert vector parity.
+  parity at ``rtol=1e-6``, ``atol=1e-8`` plus residual ``<=1e-10``. Current
+  exact operator-status coverage is mixed-RHS: Iotas satisfies the residual
+  success contract, while NQS exercises the residual/failure-only branch.
+  True ``exact-ill-conditioned-adjoint`` fixtures, when present, are
+  residual/failure-only and must not assert vector parity.
 
   *Status:* The original ~10x FD discrepancy was caused by the Boozer
   inner solve finding different local minima during FD perturbation on
