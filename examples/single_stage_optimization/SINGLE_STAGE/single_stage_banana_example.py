@@ -1547,16 +1547,6 @@ def _evaluate_single_stage_hardware_status(objectives, diagnostics):
     )
 
 
-_SINGLE_STAGE_WEIGHTED_REPORTING_FIELDS = (
-    "final_non_qs",
-    "final_boozer_residual",
-    "final_iota_penalty",
-    "final_length_penalty",
-    "final_curve_curve_penalty",
-    "final_curve_surface_penalty",
-    "final_surface_vessel_penalty",
-    "final_curvature_penalty",
-)
 _TRACEABLE_REPORTING_FLOAT_FIELDS = (
     "final_non_qs",
     "final_boozer_residual",
@@ -1578,16 +1568,6 @@ _TRACEABLE_REPORTING_DISTANCE_FIELDS = (
     "curve_surface_min_dist",
     "surface_vessel_min_dist",
 )
-
-
-def total_single_stage_objective_from_reporting_metrics(metrics):
-    """Reconstruct the weighted single-stage objective from reporting terms."""
-    return float(
-        sum(
-            float(metrics[field_name])
-            for field_name in _SINGLE_STAGE_WEIGHTED_REPORTING_FIELDS
-        )
-    )
 
 
 def _hostify_traceable_reporting_metrics(
@@ -1628,19 +1608,6 @@ def _hostify_traceable_value_and_grad(value_and_grad, x):
     return (
         host_float(value),
         np.asarray(host_array(grad), dtype=np.float64).reshape(-1),
-    )
-
-
-def total_single_stage_objective_from_traceable_reporting_metrics(metrics):
-    """Reconstruct the weighted single-stage objective on the runtime lane."""
-    return jnp.sum(
-        jnp.asarray(
-            [
-                metrics[field_name]
-                for field_name in _SINGLE_STAGE_WEIGHTED_REPORTING_FIELDS
-            ],
-            dtype=jnp.float64,
-        )
     )
 
 
@@ -5249,6 +5216,12 @@ def _require_cached_target_lane_reporting_metrics(
     benchmark_mode,
 ):
     """Return cached accepted-step reporting metrics when they match the final state."""
+    if run_dict is None:
+        raise RuntimeError(
+            "Missing cached target-lane final reporting metrics for results.json. "
+            "The JAX final result path must use the accepted-step reporting snapshot "
+            "instead of rebuilding host objective wrappers."
+        )
     if not _target_lane_reporting_cache_is_complete(run_dict):
         raise RuntimeError(
             "Missing cached target-lane final reporting metrics for results.json. "
@@ -6069,6 +6042,7 @@ def build_single_stage_target_lane_accepted_step_sync(
         success_filter=success_filter,
     )
     reporting_metrics_fn = runtime_bundle["reporting_metrics"]
+    objective = runtime_bundle["objective"]
     value_and_grad = runtime_bundle["value_and_grad"]
     forward_result_fn = runtime_bundle.get("forward_result")
 
@@ -6136,11 +6110,7 @@ def build_single_stage_target_lane_accepted_step_sync(
             objective_value = host_float(objective_value)
             objective_grad = host_array(objective_grad, dtype=np.float64)
         else:
-            objective_value = host_float(
-                total_single_stage_objective_from_traceable_reporting_metrics(
-                    traceable_reporting_metrics
-                )
-            )
+            objective_value = host_float(objective(coil_dofs))
             objective_grad = None
         accepted_step_summary = {
             "objective_value": objective_value,
@@ -6156,16 +6126,19 @@ def build_single_stage_target_lane_accepted_step_sync(
                 objective_grad=objective_grad,
                 store_objective_grad=True,
             )
-            run_dict["hardware_constraint_status"] = hardware_status
-            record_single_stage_local_incumbent(
-                run_dict,
-                stage=f"iter_{run_dict.get('it', 0)}",
-            )
         _cache_target_lane_reporting_summary(
             run_dict,
             coil_dofs,
             accepted_step_summary,
             benchmark_mode=benchmark_mode,
+        )
+        if not update_run_state:
+            return accepted_step_summary
+
+        run_dict["hardware_constraint_status"] = hardware_status
+        record_single_stage_local_incumbent(
+            run_dict,
+            stage=f"iter_{run_dict.get('it', 0)}",
         )
         return accepted_step_summary
 

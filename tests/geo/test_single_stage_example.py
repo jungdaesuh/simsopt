@@ -289,7 +289,13 @@ class SingleStageExampleTests(unittest.TestCase):
                     jnp.asarray(resolved_grad, dtype=jnp.float64),
                 )
 
+            def _objective(coil_dofs):
+                del coil_dofs
+                captured["objective_called"] = True
+                return jnp.asarray(objective_value, dtype=jnp.float64)
+
             runtime_bundle = {
+                "objective": _objective,
                 "reporting_metrics": _reporting_metrics,
                 "value_and_grad": _value_and_grad,
             }
@@ -6135,6 +6141,20 @@ class SingleStageExampleTests(unittest.TestCase):
             summary["reporting_metrics"],
         )
         self.assertTrue(run_dict["target_lane_reporting_include_distance_metrics"])
+        incumbent = run_dict["latest_local_incumbent"]
+        for key in module._TARGET_LANE_REPORTING_CACHE_KEYS:
+            self.assertIn(key, incumbent)
+        self.assertEqual(
+            incumbent["target_lane_reporting_metrics"],
+            summary["reporting_metrics"],
+        )
+        np.testing.assert_allclose(
+            incumbent["target_lane_reporting_coil_dofs"],
+            np.array([1.0, -2.0], dtype=np.float64),
+        )
+        self.assertTrue(
+            incumbent["target_lane_reporting_include_distance_metrics"]
+        )
 
     def test_build_single_stage_target_lane_accepted_step_sync_can_skip_state_commit(
         self,
