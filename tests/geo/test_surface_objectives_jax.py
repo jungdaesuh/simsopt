@@ -1551,7 +1551,7 @@ def test_traceable_exact_warmstart_failure_surfaces_unsuccessful_forward_result(
     assert bool(result["success"]) is False
     assert bool(result["primal_success"]) is False
     assert bool(result["adjoint_linear_solve_available"]) is False
-    np.testing.assert_allclose(np.asarray(result["value"]), np.asarray(1.0))
+    np.testing.assert_allclose(np.asarray(result["value"]), np.asarray(2.0))
     np.testing.assert_allclose(
         np.asarray(result["x"]),
         np.asarray(baseline_x + failed_dx),
@@ -1767,6 +1767,39 @@ def test_traceable_runtime_cache_key_uses_structural_success_filter_signature():
     assert key_a == key_b
 
 
+def test_traceable_runtime_cache_key_tracks_biotsavart_dof_generation():
+    booz = types.SimpleNamespace(
+        _solver_generation=7,
+        options={},
+        _collect_optimizer_options=lambda: {},
+    )
+    bs_jax = types.SimpleNamespace(_coil_dofs_generation=11)
+    state = {
+        "objective_kwargs": {
+            "iota_target": 0.23,
+            "outer_objective_config": None,
+        },
+        "optimize_G": False,
+        "predictor_kind": "ls",
+    }
+
+    key_before = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        booz,
+        bs_jax,
+        state,
+        success_filter=None,
+    )
+    bs_jax._coil_dofs_generation = 12
+    key_after = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        booz,
+        bs_jax,
+        state,
+        success_filter=None,
+    )
+
+    assert key_before != key_after
+
+
 def test_traceable_runtime_cache_key_does_not_hostify_jax_array_contract_leaves(
     monkeypatch,
 ):
@@ -1822,6 +1855,100 @@ def test_traceable_runtime_hostify_tree_explicitly_materializes_jax_array_leaves
     assert not any(isinstance(leaf, jax.Array) for leaf in leaves)
     assert isinstance(hostified["vector"], np.ndarray)
     assert isinstance(hostified["nested"][0], np.ndarray)
+
+
+def test_boozer_residual_inner_evaluates_label_on_label_geometry(monkeypatch):
+    seen = {}
+
+    def fake_geometry_from_dofs(
+        _sdofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        _mpol,
+        _ntor,
+        _nfp,
+        _stellsym,
+        _scatter_indices,
+        *,
+        surface_kind,
+    ):
+        nphi = int(np.asarray(quadpoints_phi).shape[0])
+        ntheta = int(np.asarray(quadpoints_theta).shape[0])
+        marker = 10.0 if surface_kind == "label-kind" else 1.0
+        gamma = jnp.full((nphi, ntheta, 3), marker, dtype=jnp.float64)
+        xphi = jnp.ones_like(gamma)
+        xtheta = jnp.full_like(gamma, 2.0)
+        return gamma, xphi, xtheta
+
+    def fake_compute_label(
+        _label_type,
+        geometry,
+        _phi_idx,
+        points,
+        *,
+        coil_set_spec,
+    ):
+        seen["gamma"] = geometry.gamma
+        seen["points_shape"] = points.shape
+        seen["coil_set_spec"] = coil_set_spec
+        return jnp.asarray(2.0, dtype=jnp.float64)
+
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_surface_geometry_from_dofs",
+        fake_geometry_from_dofs,
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "grouped_biot_savart_B_from_spec",
+        lambda points, _coil_set_spec: jnp.zeros(
+            (points.shape[0], 3),
+            dtype=jnp.float64,
+        ),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "boozer_residual_scalar",
+        lambda *_args, **_kwargs: jnp.asarray(0.0, dtype=jnp.float64),
+    )
+    monkeypatch.setattr(
+        surfaceobjectives_jax_module,
+        "_compute_label",
+        fake_compute_label,
+    )
+
+    coil_set_spec = object()
+    value = surfaceobjectives_jax_module._boozer_residual_J_of_x_inner(
+        jnp.asarray([0.1, 0.2, 0.3], dtype=jnp.float64),
+        coil_set_spec=coil_set_spec,
+        quadpoints_phi=jnp.asarray([0.0, 0.5], dtype=jnp.float64),
+        quadpoints_theta=jnp.asarray([0.0, 0.5], dtype=jnp.float64),
+        mpol=1,
+        ntor=1,
+        nfp=1,
+        stellsym=True,
+        scatter_indices=jnp.asarray([0, 1], dtype=jnp.int32),
+        surface_kind="solve-kind",
+        label_quadpoints_phi=jnp.asarray([0.0, 0.25, 0.5], dtype=jnp.float64),
+        label_quadpoints_theta=jnp.asarray([0.0, 0.5], dtype=jnp.float64),
+        label_mpol=1,
+        label_ntor=1,
+        label_nfp=1,
+        label_stellsym=True,
+        label_scatter_indices=jnp.asarray([0, 1, 2], dtype=jnp.int32),
+        label_surface_kind="label-kind",
+        optimize_G=True,
+        weight_inv_modB=False,
+        constraint_weight=4.0,
+        targetlabel=1.0,
+        label_type="volume",
+        phi_idx=0,
+    )
+
+    assert seen["coil_set_spec"] is coil_set_spec
+    assert seen["points_shape"] == (6, 3)
+    np.testing.assert_allclose(np.asarray(seen["gamma"]), 10.0)
+    np.testing.assert_allclose(np.asarray(value), 2.0)
 
 
 def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch):
@@ -1881,6 +2008,14 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         stellsym = True
         scatter_indices = np.asarray([0, 1], dtype=np.int32)
         _surface_geometry_kind = "surface-geometry-marker"
+        label_quadpoints_phi = np.asarray([0.0, 0.25], dtype=np.float64)
+        label_quadpoints_theta = np.asarray([0.0, 0.5], dtype=np.float64)
+        label_mpol = 1
+        label_ntor = 1
+        label_nfp = 1
+        label_stellsym = True
+        label_scatter_indices = np.asarray([0, 1], dtype=np.int32)
+        _label_surface_geometry_kind = "label-geometry-marker"
         options = {"weight_inv_modB": False}
         constraint_weight = 1.0
         targetlabel = 0.0
@@ -1945,6 +2080,8 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         for leaf in jax.tree_util.tree_leaves(runtime_constants)
     )
     assert isinstance(state["objective_kwargs"]["iota_target"], np.ndarray)
+    assert isinstance(state["objective_kwargs"]["label_quadpoints_phi"], np.ndarray)
+    assert state["objective_kwargs"]["label_surface_kind"] == "label-geometry-marker"
     assert isinstance(
         state["objective_kwargs"]["outer_objective_config"]["vessel_gamma"],
         np.ndarray,
@@ -2000,6 +2137,14 @@ def test_build_traceable_objective_state_exact_carries_no_factors(monkeypatch):
         stellsym = True
         scatter_indices = np.asarray([0, 1], dtype=np.int32)
         _surface_geometry_kind = "surface-geometry-marker"
+        label_quadpoints_phi = np.asarray([0.0, 0.25], dtype=np.float64)
+        label_quadpoints_theta = np.asarray([0.0, 0.5], dtype=np.float64)
+        label_mpol = 1
+        label_ntor = 1
+        label_nfp = 1
+        label_stellsym = True
+        label_scatter_indices = np.asarray([0, 1], dtype=np.int32)
+        _label_surface_geometry_kind = "label-geometry-marker"
         options = {"weight_inv_modB": False}
         constraint_weight = 1.0
         targetlabel = 0.0
@@ -3865,6 +4010,7 @@ def test_traceable_custom_vjp_surfaces_adjoint_solve_failure_as_nan_gradient():
             "x": jnp.asarray([0.0, 1.0], dtype=jnp.float64),
             "linear_solve_factors": None,
             "success": jnp.asarray(True, dtype=bool),
+            "primal_success": jnp.asarray(True, dtype=bool),
         }
 
     compiled_bundle = {

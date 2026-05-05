@@ -268,6 +268,14 @@ def _traceable_adjoint_fail_gradient_like(gradient):
     return jnp.full_like(gradient, _TRACEABLE_ADJOINT_FAIL_GRAD_SENTINEL)
 
 
+def _traceable_rejected_objective_value(value):
+    penalty = jnp.maximum(
+        jnp.abs(lax.stop_gradient(value)),
+        _runtime_float64_scalar(1.0, reference=value),
+    )
+    return value + penalty
+
+
 def _runtime_float64_array(value, *, reference):
     return _as_runtime_float64(value, reference=reference)
 
@@ -385,6 +393,14 @@ def _traceable_single_stage_outer_term_values(
     stellsym,
     scatter_indices,
     surface_kind,
+    label_quadpoints_phi,
+    label_quadpoints_theta,
+    label_mpol,
+    label_ntor,
+    label_nfp,
+    label_stellsym,
+    label_scatter_indices,
+    label_surface_kind,
     optimize_G,
     weight_inv_modB,
     constraint_weight,
@@ -409,6 +425,14 @@ def _traceable_single_stage_outer_term_values(
         stellsym=stellsym,
         scatter_indices=scatter_indices,
         surface_kind=surface_kind,
+        label_quadpoints_phi=label_quadpoints_phi,
+        label_quadpoints_theta=label_quadpoints_theta,
+        label_mpol=label_mpol,
+        label_ntor=label_ntor,
+        label_nfp=label_nfp,
+        label_stellsym=label_stellsym,
+        label_scatter_indices=label_scatter_indices,
+        label_surface_kind=label_surface_kind,
         optimize_G=optimize_G,
         weight_inv_modB=weight_inv_modB,
         constraint_weight=constraint_weight,
@@ -919,6 +943,14 @@ def _traceable_full_single_stage_outer_objective(
     stellsym,
     scatter_indices,
     surface_kind,
+    label_quadpoints_phi,
+    label_quadpoints_theta,
+    label_mpol,
+    label_ntor,
+    label_nfp,
+    label_stellsym,
+    label_scatter_indices,
+    label_surface_kind,
     optimize_G,
     weight_inv_modB,
     constraint_weight,
@@ -943,6 +975,14 @@ def _traceable_full_single_stage_outer_objective(
         stellsym=stellsym,
         scatter_indices=scatter_indices,
         surface_kind=surface_kind,
+        label_quadpoints_phi=label_quadpoints_phi,
+        label_quadpoints_theta=label_quadpoints_theta,
+        label_mpol=label_mpol,
+        label_ntor=label_ntor,
+        label_nfp=label_nfp,
+        label_stellsym=label_stellsym,
+        label_scatter_indices=label_scatter_indices,
+        label_surface_kind=label_surface_kind,
         optimize_G=optimize_G,
         weight_inv_modB=weight_inv_modB,
         constraint_weight=constraint_weight,
@@ -1098,7 +1138,7 @@ def _iter_adjoint_coil_cotangents(stream_group_vjps, adjoint):
 def _adjoint_coil_dofs_gradient(stream_group_vjps, adjoint, biotsavart, coil_dofs):
     """Project streamed adjoint cotangents to flat BiotSavart free-DOF order."""
     coil_dofs = _as_jax_float64(coil_dofs)
-    total_gradient = jnp.zeros_like(coil_dofs)
+    total_gradient = coil_dofs - coil_dofs
     for d_coil_array, coil_group_indices in _iter_adjoint_coil_cotangents(
         stream_group_vjps, adjoint
     ):
@@ -1477,6 +1517,14 @@ def _boozer_residual_J_of_x_inner(
     stellsym,
     scatter_indices,
     surface_kind,
+    label_quadpoints_phi,
+    label_quadpoints_theta,
+    label_mpol,
+    label_ntor,
+    label_nfp,
+    label_stellsym,
+    label_scatter_indices,
+    label_surface_kind,
     optimize_G,
     weight_inv_modB,
     constraint_weight,
@@ -1525,11 +1573,27 @@ def _boozer_residual_J_of_x_inner(
         weight_inv_modB,
     )
 
+    label_gamma, label_xphi, label_xtheta = _surface_geometry_from_dofs(
+        sdofs,
+        label_quadpoints_phi,
+        label_quadpoints_theta,
+        label_mpol,
+        label_ntor,
+        label_nfp,
+        label_stellsym,
+        label_scatter_indices,
+        surface_kind=label_surface_kind,
+    )
+    label_points = label_gamma.reshape(-1, 3)
     label_val = _compute_label(
         label_type,
-        _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta),
+        _BoozerPenaltyGeometry(
+            gamma=label_gamma,
+            xphi=label_xphi,
+            xtheta=label_xtheta,
+        ),
         phi_idx,
-        points,
+        label_points,
         coil_set_spec=coil_set_spec,
     )
     targetlabel_jax = _runtime_float64_scalar(targetlabel, reference=label_val)
@@ -1737,6 +1801,14 @@ class BoozerResidualJAX(_BoozerObjectiveBase):
             stellsym=booz_surf.stellsym,
             scatter_indices=booz_surf.scatter_indices,
             surface_kind=booz_surf._surface_geometry_kind,
+            label_quadpoints_phi=booz_surf.label_quadpoints_phi,
+            label_quadpoints_theta=booz_surf.label_quadpoints_theta,
+            label_mpol=booz_surf.label_mpol,
+            label_ntor=booz_surf.label_ntor,
+            label_nfp=booz_surf.label_nfp,
+            label_stellsym=booz_surf.label_stellsym,
+            label_scatter_indices=booz_surf.label_scatter_indices,
+            label_surface_kind=booz_surf._label_surface_geometry_kind,
             optimize_G=optimize_G,
             weight_inv_modB=weight_inv_modB,
             targetlabel=booz_surf.targetlabel,
@@ -2039,7 +2111,7 @@ def _traceable_iota_target_penalty(x_inner, *, optimize_G, iota_target):
     return half * (delta * delta)
 
 
-_TRACEABLE_INNER_OBJECTIVE_KEYS = (
+_TRACEABLE_SURFACE_GEOMETRY_KEYS = (
     "quadpoints_phi",
     "quadpoints_theta",
     "mpol",
@@ -2048,29 +2120,36 @@ _TRACEABLE_INNER_OBJECTIVE_KEYS = (
     "stellsym",
     "scatter_indices",
     "surface_kind",
+)
+
+_TRACEABLE_LABEL_GEOMETRY_KEYS = (
+    "label_quadpoints_phi",
+    "label_quadpoints_theta",
+    "label_mpol",
+    "label_ntor",
+    "label_nfp",
+    "label_stellsym",
+    "label_scatter_indices",
+    "label_surface_kind",
+)
+
+_TRACEABLE_LABEL_OBJECTIVE_KEYS = (
     "targetlabel",
     "constraint_weight",
     "label_type",
     "phi_idx",
+)
+
+_TRACEABLE_INNER_OBJECTIVE_KEYS = (
+    *_TRACEABLE_SURFACE_GEOMETRY_KEYS,
+    *_TRACEABLE_LABEL_GEOMETRY_KEYS,
+    *_TRACEABLE_LABEL_OBJECTIVE_KEYS,
     "optimize_G",
     "weight_inv_modB",
 )
 
 _TRACEABLE_TOTAL_OBJECTIVE_KEYS = (
-    "quadpoints_phi",
-    "quadpoints_theta",
-    "mpol",
-    "ntor",
-    "nfp",
-    "stellsym",
-    "scatter_indices",
-    "surface_kind",
-    "optimize_G",
-    "weight_inv_modB",
-    "constraint_weight",
-    "targetlabel",
-    "label_type",
-    "phi_idx",
+    *_TRACEABLE_INNER_OBJECTIVE_KEYS,
     "iota_target",
     "surface_quadpoints_phi",
     "surface_quadpoints_theta",
@@ -2087,6 +2166,7 @@ _TRACEABLE_EXACT_RESIDUAL_KEYS = (
     "stellsym",
     "scatter_indices",
     "surface_kind",
+    *_TRACEABLE_LABEL_GEOMETRY_KEYS,
     "targetlabel",
     "label_type",
     "phi_idx",
@@ -2129,6 +2209,14 @@ def _traceable_total_objective(
     stellsym,
     scatter_indices,
     surface_kind,
+    label_quadpoints_phi,
+    label_quadpoints_theta,
+    label_mpol,
+    label_ntor,
+    label_nfp,
+    label_stellsym,
+    label_scatter_indices,
+    label_surface_kind,
     optimize_G,
     weight_inv_modB,
     constraint_weight,
@@ -2155,6 +2243,14 @@ def _traceable_total_objective(
             stellsym=stellsym,
             scatter_indices=scatter_indices,
             surface_kind=surface_kind,
+            label_quadpoints_phi=label_quadpoints_phi,
+            label_quadpoints_theta=label_quadpoints_theta,
+            label_mpol=label_mpol,
+            label_ntor=label_ntor,
+            label_nfp=label_nfp,
+            label_stellsym=label_stellsym,
+            label_scatter_indices=label_scatter_indices,
+            label_surface_kind=label_surface_kind,
             optimize_G=optimize_G,
             weight_inv_modB=weight_inv_modB,
             constraint_weight=constraint_weight,
@@ -2178,6 +2274,14 @@ def _traceable_total_objective(
         stellsym=stellsym,
         scatter_indices=scatter_indices,
         surface_kind=surface_kind,
+        label_quadpoints_phi=label_quadpoints_phi,
+        label_quadpoints_theta=label_quadpoints_theta,
+        label_mpol=label_mpol,
+        label_ntor=label_ntor,
+        label_nfp=label_nfp,
+        label_stellsym=label_stellsym,
+        label_scatter_indices=label_scatter_indices,
+        label_surface_kind=label_surface_kind,
         optimize_G=optimize_G,
         weight_inv_modB=weight_inv_modB,
         constraint_weight=constraint_weight,
@@ -2563,8 +2667,14 @@ def _traceable_general_forward_result(
             coil_set_spec,
             objective_kwargs,
         )
+        filtered_objective_value = jax.lax.cond(
+            success,
+            lambda _: objective_value,
+            lambda _: _traceable_rejected_objective_value(objective_value),
+            operand=None,
+        )
         return _pack_traceable_forward_result(
-            value=objective_value,
+            value=filtered_objective_value,
             x=solve_result["x"],
             sdofs=solved_sdofs,
             iota=solved_iota,
@@ -2593,9 +2703,10 @@ def _traceable_general_forward_result(
             coil_set_spec,
             objective_kwargs,
         )
+        filtered_failure_value = _traceable_rejected_objective_value(failure_value)
         failure = _runtime_bool(False)
         return _pack_traceable_forward_result(
-            value=failure_value,
+            value=filtered_failure_value,
             x=warmstart_x,
             sdofs=warmstart_sdofs,
             iota=warmstart_iota,
@@ -2971,6 +3082,12 @@ def _build_traceable_objective_state(
     solve_quadpoints_theta = _as_jax_float64(
         np.asarray(booz_jax.quadpoints_theta, dtype=float)
     )
+    label_quadpoints_phi = _as_jax_float64(
+        np.asarray(booz_jax.label_quadpoints_phi, dtype=float)
+    )
+    label_quadpoints_theta = _as_jax_float64(
+        np.asarray(booz_jax.label_quadpoints_theta, dtype=float)
+    )
     exact_quadpoints_phi, exact_quadpoints_theta, mask_indices = (
         _canonicalize_traceable_exact_quadrature(booz_jax)
     )
@@ -2983,6 +3100,14 @@ def _build_traceable_objective_state(
         "stellsym": booz_jax.stellsym,
         "scatter_indices": booz_jax.scatter_indices,
         "surface_kind": booz_jax._surface_geometry_kind,
+        "label_quadpoints_phi": label_quadpoints_phi,
+        "label_quadpoints_theta": label_quadpoints_theta,
+        "label_mpol": booz_jax.label_mpol,
+        "label_ntor": booz_jax.label_ntor,
+        "label_nfp": booz_jax.label_nfp,
+        "label_stellsym": booz_jax.label_stellsym,
+        "label_scatter_indices": booz_jax.label_scatter_indices,
+        "label_surface_kind": booz_jax._label_surface_geometry_kind,
         "optimize_G": optimize_G,
         "weight_inv_modB": solved_state.weight_inv_modB,
         "constraint_weight": booz_jax.constraint_weight,
@@ -3143,7 +3268,7 @@ def _build_traceable_objective_compiled_bundle_from_state(
             )
 
         grad, linear_solve_success = jax.lax.cond(
-            result["success"],
+            result["primal_success"],
             _success,
             lambda _: (
                 _traceable_adjoint_fail_gradient_like(coil_dofs),
@@ -3209,10 +3334,12 @@ def _traceable_runtime_cache_key(booz_jax, bs_jax, state, *, success_filter=None
     return (
         # Object identity is part of the contract: callers must rebuild the
         # wrapper instead of mutating booz_jax/bs_jax in place; solved-state
-        # freshness is represented separately by _solver_generation.
+        # freshness is represented by the Boozer solve generation and the
+        # Biot-Savart DOF generation.
         id(booz_jax),
         id(bs_jax),
         getattr(booz_jax, "_solver_generation", None),
+        getattr(bs_jax, "_coil_dofs_generation", None),
         state["optimize_G"],
         state["predictor_kind"],
         _traceable_contract_tree_signature(objective_kwargs),
@@ -3511,11 +3638,11 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
             coil_dofs,
             result["x"],
             result["linear_solve_factors"],
-            result["success"],
+            result["primal_success"],
         )
 
     def f_bwd(saved_state, cotangent):
-        coil_dofs, solved_x, solved_linear_solve_factors, success = saved_state
+        coil_dofs, solved_x, solved_linear_solve_factors, primal_success = saved_state
 
         def _success(_):
             grad, linear_solve_success = compiled_total_gradient_for(
@@ -3528,7 +3655,7 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
         def _failure(_):
             return _traceable_adjoint_fail_gradient_like(coil_dofs)
 
-        grad = jax.lax.cond(success, _success, _failure, operand=None)
+        grad = jax.lax.cond(primal_success, _success, _failure, operand=None)
         return (_as_runtime_float64(cotangent, reference=grad) * grad,)
 
     f.defvjp(f_fwd, f_bwd)
@@ -3691,10 +3818,6 @@ def _traceable_reporting_metrics_from_solution(
         coil_set_spec,
         **_traceable_total_objective_kwargs(objective_kwargs),
     )
-    weighted_terms = _traceable_weighted_single_stage_outer_term_values(
-        raw_terms,
-        outer_objective_config=outer_objective_config,
-    )
     sdofs, iota, G = _split_x_inner_runtime(solved_x, optimize_G)
     surface_gamma, xphi, xtheta = _surface_geometry_from_dofs(
         sdofs,
@@ -3770,14 +3893,14 @@ def _traceable_reporting_metrics_from_solution(
         "solver_success": solver_success,
         "has_G": jnp.asarray(optimize_G, dtype=bool),
         "final_G": G if G is not None else _runtime_float64_scalar(0.0, reference=iota),
-        "final_non_qs": weighted_terms["non_qs"],
-        "final_boozer_residual": weighted_terms["residual"],
-        "final_iota_penalty": weighted_terms["iota"],
-        "final_length_penalty": weighted_terms["length"],
-        "final_curve_curve_penalty": weighted_terms["curve_curve"],
-        "final_curve_surface_penalty": weighted_terms["curve_surface"],
-        "final_surface_vessel_penalty": weighted_terms["surface_vessel"],
-        "final_curvature_penalty": weighted_terms["curvature"],
+        "final_non_qs": raw_terms["non_qs"],
+        "final_boozer_residual": raw_terms["residual"],
+        "final_iota_penalty": raw_terms["iota"],
+        "final_length_penalty": raw_terms["length"],
+        "final_curve_curve_penalty": raw_terms["curve_curve"],
+        "final_curve_surface_penalty": raw_terms["curve_surface"],
+        "final_surface_vessel_penalty": raw_terms["surface_vessel"],
+        "final_curvature_penalty": raw_terms["curvature"],
         "coil_length": coil_length,
         "max_curvature": max_curvature,
         "banana_current_A": banana_current,

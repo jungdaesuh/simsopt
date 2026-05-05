@@ -7580,8 +7580,8 @@ class TestBuildBoozerSurfaceRuntimeState:
         assert booz.targetlabel == pytest.approx(2.0 * np.pi**2 * 1.0 * 0.1**2)
         self._assert_coil_set_specs_match(coil_round_trip, coil_set_spec)
 
-    def test_get_solved_runtime_state_uses_cached_dofs(self):
-        """Solved runtime summary must report cached solved DOFs, not reread the surface."""
+    def test_get_solved_runtime_state_uses_result_dofs(self):
+        """Solved runtime summary must report solver-result DOFs, not live surface state."""
         s = self._make_real_surface(mpol=3, ntor=3, nfp=2)
         coils = _make_mock_coils()
         bs = _MockBiotSavart(coils)
@@ -7597,6 +7597,7 @@ class TestBuildBoozerSurfaceRuntimeState:
         booz.res = {
             "success": True,
             "primal_success": True,
+            "sdofs": jnp.asarray([1.25, -0.5, 0.75], dtype=jnp.float64),
             "iota": jnp.asarray(0.23, dtype=jnp.float64),
             "G": jnp.asarray(1.7, dtype=jnp.float64),
             "weight_inv_modB": False,
@@ -7612,7 +7613,7 @@ class TestBuildBoozerSurfaceRuntimeState:
         _assert_runtime_state_schema(solved_state, _SOLVED_RUNTIME_STATE_FIELDS)
         np.testing.assert_allclose(
             np.asarray(solved_state.sdofs),
-            np.asarray(booz._surface_dofs),
+            np.asarray(booz.res["sdofs"]),
         )
         np.testing.assert_allclose(np.asarray(solved_state.iota), 0.23)
         np.testing.assert_allclose(np.asarray(solved_state.G), 1.7)
@@ -7652,6 +7653,7 @@ class TestBuildBoozerSurfaceRuntimeState:
         booz.res = {
             "success": True,
             "primal_success": True,
+            "sdofs": jnp.asarray([], dtype=jnp.float64),
             "iota": jnp.asarray(0.23, dtype=jnp.float64),
             "G": jnp.asarray(1.7, dtype=jnp.float64),
             "weight_inv_modB": True,

@@ -385,6 +385,7 @@ def _guard_solver_callback_freshness(
 def _advance_solver_generation(booz_surf) -> int:
     solve_generation = booz_surf._solver_generation + 1
     booz_surf._solver_generation = solve_generation
+    booz_surf._traceable_runtime_entry_cache = None
     return solve_generation
 
 
@@ -1786,12 +1787,12 @@ def _penalty_params_tangent_from_decision_tangent(
     if isinstance(tangent_state, _BoozerPenaltyOptimizerStateWithG):
         G_dot = tangent_state.G
     else:
-        G_dot = jnp.zeros_like(params.G)
+        G_dot = params.G - params.G
     return _BoozerPenaltyParams(
         iota=tangent_state.iota,
         G=G_dot,
-        targetlabel=jnp.zeros_like(params.targetlabel),
-        constraint_weight=jnp.zeros_like(params.constraint_weight),
+        targetlabel=params.targetlabel - params.targetlabel,
+        constraint_weight=params.constraint_weight - params.constraint_weight,
         label_type=params.label_type,
         phi_idx=params.phi_idx,
         weight_inv_modB=params.weight_inv_modB,
@@ -2266,6 +2267,7 @@ class BoozerSurfaceJAX(Optimizable):
         self.need_to_run_code = True
         self.res = None
         self._solver_generation = 0
+        self._traceable_runtime_entry_cache = None
 
         # Determine solver type
         self.boozer_type = "ls" if constraint_weight is not None else "exact"
@@ -2381,7 +2383,7 @@ class BoozerSurfaceJAX(Optimizable):
         G = self.res["G"]
         solved_G = None if G is None else _as_jax_float64(G)
         return _BoozerSolvedRuntimeState(
-            sdofs=self._get_cached_surface_dofs(),
+            sdofs=_as_jax_float64(self.res["sdofs"]),
             iota=_as_jax_float64(self.res["iota"]),
             G=solved_G,
             weight_inv_modB=bool(self.res["weight_inv_modB"]),
@@ -4317,6 +4319,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "iter": int(_host_scalar(result["nit"], dtype=np.int64)),
                 "success": False,
                 "G": G_final,
+                "sdofs": _as_jax_float64(sdofs_final),
                 "s": s,
                 "iota": iota_final,
                 "PLU": None,
@@ -4407,6 +4410,7 @@ class BoozerSurfaceJAX(Optimizable):
             "success": bool(_host_scalar(result["success"])),
             "primal_success": bool(_host_scalar(result["success"])),
             "adjoint_linear_solve_available": bool(_host_scalar(result["success"])),
+            "sdofs": _as_jax_float64(sdofs_final),
             "G": G_final,
             "s": s,
             "iota": iota_final,
