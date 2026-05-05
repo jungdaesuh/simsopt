@@ -5696,7 +5696,7 @@ class TestExactSolveCPUJAXParity:
             atol=nqs_abs_tol,
         )
 
-    def test_gradient_wrappers_operator_status_on_exact_state(self):
+    def test_operator_adjoint_signoff_gate_on_exact_state(self):
         """Exact adjoints use checked operator solves, not dense PLU fallbacks.
 
         The exact Newton Jacobian can be rank deficient.  Each wrapper status is

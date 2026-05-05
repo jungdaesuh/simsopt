@@ -835,7 +835,7 @@ def test_traceable_objective_bundle_marks_value_and_grad_cacheable(monkeypatch):
 
 
 @pytest.mark.parametrize("linearization_kind", ["exact_jacobian", "hessian"])
-def test_traceable_value_and_grad_surfaces_adjoint_solve_failure_as_nan_gradient(
+def test_operator_adjoint_signoff_gate_failed_solve_returns_nan_gradient(
     monkeypatch,
     linearization_kind,
 ):
@@ -1798,6 +1798,90 @@ def test_traceable_runtime_cache_key_tracks_biotsavart_dof_generation():
     )
 
     assert key_before != key_after
+
+
+def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
+    def make_booz(*, solver_generation=7, bfgs_maxiter=5):
+        return types.SimpleNamespace(
+            _solver_generation=solver_generation,
+            options={"bfgs_maxiter": bfgs_maxiter},
+            _collect_optimizer_options=lambda: {"maxls": 20},
+        )
+
+    def make_state(*, iota_target=0.23):
+        return {
+            "objective_kwargs": {
+                "iota_target": iota_target,
+                "outer_objective_config": None,
+            },
+            "optimize_G": False,
+            "predictor_kind": "ls",
+        }
+
+    def success_filter_a(_coil_dofs, _solved_x):
+        return jnp.asarray(True, dtype=bool)
+
+    def success_filter_b(_coil_dofs, _solved_x):
+        return jnp.asarray(True, dtype=bool)
+
+    success_filter_a._traceable_runtime_cache_signature = ("filter", "a")
+    success_filter_b._traceable_runtime_cache_signature = ("filter", "b")
+
+    booz = make_booz()
+    bs_jax = types.SimpleNamespace(_coil_dofs_generation=11)
+    state = make_state()
+    base_key = surfaceobjectives_jax_module._traceable_runtime_cache_key(
+        booz,
+        bs_jax,
+        state,
+        success_filter=success_filter_a,
+    )
+
+    assert (
+        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+            make_booz(solver_generation=8),
+            bs_jax,
+            state,
+            success_filter=success_filter_a,
+        )
+        != base_key
+    )
+    assert (
+        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+            booz,
+            bs_jax,
+            make_state(iota_target=0.24),
+            success_filter=success_filter_a,
+        )
+        != base_key
+    )
+    assert (
+        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+            booz,
+            bs_jax,
+            state,
+            success_filter=success_filter_b,
+        )
+        != base_key
+    )
+    assert (
+        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+            booz,
+            types.SimpleNamespace(_coil_dofs_generation=12),
+            state,
+            success_filter=success_filter_a,
+        )
+        != base_key
+    )
+    assert (
+        surfaceobjectives_jax_module._traceable_runtime_cache_key(
+            make_booz(bfgs_maxiter=6),
+            bs_jax,
+            state,
+            success_filter=success_filter_a,
+        )
+        != base_key
+    )
 
 
 def test_traceable_runtime_cache_key_does_not_hostify_jax_array_contract_leaves(
