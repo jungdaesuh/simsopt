@@ -9,16 +9,20 @@ def resolve_boozer_optimizer_backend(
 ) -> str:
     if boozer_optimizer_backend is None:
         effective_backend = (
-            "ondevice"
-            if optimizer_backend in {"ondevice", "scipy-jax"}
-            else optimizer_backend
+            "scipy"
+            if optimizer_backend == "scipy-jax-fullgraph"
+            else (
+                "ondevice"
+                if optimizer_backend in {"ondevice", "scipy-jax"}
+                else optimizer_backend
+            )
         )
     else:
         effective_backend = boozer_optimizer_backend
-    if effective_backend != "ondevice":
+    if effective_backend not in {"ondevice", "scipy"}:
         raise ValueError(
             "Single-stage JAX benchmark probes require "
-            "boozer_optimizer_backend='ondevice'."
+            "boozer_optimizer_backend='ondevice' or 'scipy'."
         )
     return effective_backend
 
@@ -40,11 +44,13 @@ def resolve_boozer_optimizer_method(
     limited_memory: bool = False,
     least_squares_algorithm: str | None = None,
 ) -> str:
-    if boozer_optimizer_backend != "ondevice":
+    if boozer_optimizer_backend not in {"ondevice", "scipy"}:
         raise ValueError(
             "Single-stage JAX benchmark probes require "
-            "boozer_optimizer_backend='ondevice'."
+            "boozer_optimizer_backend='ondevice' or 'scipy'."
         )
+    if boozer_optimizer_backend == "scipy":
+        return "scipy"
     if least_squares_algorithm is None:
         least_squares_algorithm = resolve_boozer_least_squares_algorithm(
             boozer_optimizer_backend
@@ -63,11 +69,13 @@ def resolve_boozer_least_squares_algorithm(
     boozer_optimizer_backend: str,
     least_squares_algorithm: str | None = None,
 ) -> str:
-    if boozer_optimizer_backend != "ondevice":
+    if boozer_optimizer_backend not in {"ondevice", "scipy"}:
         raise ValueError(
             "Single-stage JAX benchmark probes require "
-            "boozer_optimizer_backend='ondevice'."
+            "boozer_optimizer_backend='ondevice' or 'scipy'."
         )
+    if boozer_optimizer_backend == "scipy":
+        return "quasi-newton" if least_squares_algorithm is None else least_squares_algorithm
     if least_squares_algorithm is not None:
         return least_squares_algorithm
     return "quasi-newton"

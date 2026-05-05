@@ -1904,7 +1904,7 @@ def _linear_solve_residual_tolerance(rhs, tol):
     )
 
 
-def _solve_square_array_system_operator_only(matvec, rhs, *, tol):
+def _solve_square_vector_system_operator_only(matvec, rhs, *, tol):
     """Solve one square linear system with operator-only GMRES refinement."""
     solution, residual = _gmres_solve_array_system(matvec, rhs, tol=tol)
     residual_norm = jnp.linalg.norm(residual)
@@ -1944,6 +1944,30 @@ def _solve_square_array_system_operator_only(matvec, rhs, *, tol):
     return solution, success
 
 
+def _apply_column_batched_operator(matvec, rhs):
+    rhs = jnp.asarray(rhs)
+    if rhs.ndim == 1:
+        return matvec(rhs)
+    return jax.vmap(matvec, in_axes=1, out_axes=1)(rhs)
+
+
+def _solve_square_array_system_operator_only(matvec, rhs, *, tol):
+    """Solve vector or column-batched square systems with operator-only GMRES."""
+    rhs = jnp.asarray(rhs)
+    if rhs.ndim == 1:
+        return _solve_square_vector_system_operator_only(matvec, rhs, tol=tol)
+
+    def solve_column(column):
+        return _solve_square_vector_system_operator_only(matvec, column, tol=tol)
+
+    solutions, successes = jax.vmap(
+        solve_column,
+        in_axes=1,
+        out_axes=(1, 0),
+    )(rhs)
+    return solutions, jnp.all(successes)
+
+
 def _least_squares_normal_operator(residual_fn, x):
     flat_residual_fn = jax.jit(_flattened_residual_output(residual_fn))
     _, pullback = jax.vjp(flat_residual_fn, x)
@@ -1957,8 +1981,11 @@ def _least_squares_normal_operator(residual_fn, x):
         for leaf in jax.tree_util.tree_leaves(x)
     )
 
-    def matvec(v):
+    def matvec_column(v):
         return _least_squares_matvec(flat_residual_fn, x, pullback, v)
+
+    def matvec(v):
+        return _apply_column_batched_operator(matvec_column, v)
 
     return {
         "kind": "least_squares_normal",
@@ -2011,8 +2038,11 @@ def _hessian_linear_operator(objective_fn, x, *, stab=0.0):
     decision_size = int(np.asarray(jnp.asarray(x).size))
     stab_value = _optimizer_scalar(stab, dtype=dtype)
 
-    def matvec(v):
+    def matvec_column(v):
         return hvp_fn(x, v) + stab_value * v
+
+    def matvec(v):
+        return _apply_column_batched_operator(matvec_column, v)
 
     return {
         "kind": "hessian",
@@ -2063,11 +2093,17 @@ def _jacobian_linear_operator(residual_fn, x):
     decision_size = int(np.asarray(jnp.asarray(x).size))
     dtype = jnp.asarray(x).dtype
 
-    def matvec(v):
+    def matvec_column(v):
         return jvp_fn(x, v)
 
-    def transpose_matvec(v):
+    def transpose_matvec_column(v):
         return pullback(v)[0]
+
+    def matvec(v):
+        return _apply_column_batched_operator(matvec_column, v)
+
+    def transpose_matvec(v):
+        return _apply_column_batched_operator(transpose_matvec_column, v)
 
     return {
         "kind": "jacobian",

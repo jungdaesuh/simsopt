@@ -1564,22 +1564,26 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         self.assertEqual(
             module.resolve_boozer_optimizer_backend(
+                "jax",
+                "scipy-jax-fullgraph",
+                None,
+            ),
+            "scipy",
+        )
+        self.assertEqual(
+            module.resolve_boozer_optimizer_backend(
                 "jax", "scipy-jax", "ondevice"
             ),
             "ondevice",
         )
+        self.assertEqual(
+            module.resolve_boozer_optimizer_backend("jax", "ondevice", "scipy"),
+            "scipy",
+        )
         with self.assertRaisesRegex(
-            ValueError, "requires boozer_optimizer_backend='ondevice'"
+            ValueError, "requires boozer_optimizer_backend to be"
         ):
-            module.resolve_boozer_optimizer_backend("jax", "ondevice", "scipy")
-        with self.assertRaisesRegex(
-            ValueError, "requires boozer_optimizer_backend='ondevice'"
-        ):
-            module.resolve_boozer_optimizer_backend("jax", "scipy-jax", "scipy")
-        with self.assertRaisesRegex(
-            ValueError, "requires boozer_optimizer_backend='ondevice'"
-        ):
-            module.resolve_boozer_optimizer_backend("jax", "scipy", None)
+            module.resolve_boozer_optimizer_backend("jax", "hybrid", None)
 
     def test_resolve_boozer_least_squares_algorithm_defaults_follow_effective_backend(
         self,
@@ -1606,20 +1610,19 @@ class SingleStageExampleTests(unittest.TestCase):
             ),
             "quasi-newton",
         )
+        self.assertEqual(
+            module.resolve_single_stage_default_boozer_least_squares_algorithm(
+                "jax",
+                "scipy-jax-fullgraph",
+            ),
+            "quasi-newton",
+        )
         with self.assertRaisesRegex(
-            ValueError, "requires boozer_optimizer_backend='ondevice'"
+            ValueError, "requires boozer_optimizer_backend to be"
         ):
             module.resolve_single_stage_default_boozer_least_squares_algorithm(
                 "jax",
-                "ondevice",
-                "scipy",
-            )
-        with self.assertRaisesRegex(
-            ValueError, "requires boozer_optimizer_backend='ondevice'"
-        ):
-            module.resolve_single_stage_default_boozer_least_squares_algorithm(
-                "jax",
-                "scipy",
+                "hybrid",
             )
         self.assertEqual(
             module.resolve_single_stage_default_boozer_least_squares_algorithm(
@@ -2653,6 +2656,95 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(run_dict["lscount"], 0)
         self.assertEqual(run_dict["it"], 8)
 
+    def test_single_stage_adapter_records_objective_evaluation_trace(self):
+        module = self.load_module()
+        events = []
+        run_dict = {
+            "it": 5,
+            "lscount": 12,
+            "accepted_iterations": 4,
+            "hardware_constraint_status": {
+                "success": True,
+                "max_curvature": 38.8,
+            },
+        }
+        boozer_surface = types.SimpleNamespace(
+            surface=types.SimpleNamespace(x=np.array([0.1, 0.2])),
+            res={"success": True, "iota": 0.0034, "G": 2.0},
+        )
+        adapter = module.SingleStageAdapter(
+            run_dict=run_dict,
+            boozer_surface=boozer_surface,
+            JF=object(),
+            bs=object(),
+            objectives={},
+            diagnostics={},
+            log_path="unused.log",
+            apply_coil_dofs=lambda _x: None,
+            optimizer_gradient_transform=lambda grad: grad[[0, 2, 1]],
+            objective_evaluation_trace_callback=events.append,
+        )
+
+        with patch.object(
+            module,
+            "evaluate_candidate",
+            return_value=(1.25, np.array([10.0, 20.0, 30.0])),
+        ):
+            value, gradient = adapter(np.array([1.0, 2.0, 3.0]))
+
+        self.assertEqual(value, 1.25)
+        np.testing.assert_array_equal(gradient, np.array([10.0, 30.0, 20.0]))
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event["accepted_iteration_target"], 5)
+        self.assertEqual(event["line_search_evaluation"], 12)
+        self.assertEqual(event["accepted_iterations"], 4)
+        self.assertEqual(event["candidate_optimizer_dofs"]["values"], [1.0, 2.0, 3.0])
+        self.assertEqual(event["objective"]["value"], 1.25)
+        self.assertEqual(event["native_gradient"]["inf_norm"], 30.0)
+        self.assertEqual(event["optimizer_gradient"]["inf_norm"], 30.0)
+        self.assertTrue(event["native_gradient_used"])
+        self.assertTrue(event["solver_success"])
+        self.assertEqual(event["boozer_iota"]["value"], 0.0034)
+        self.assertEqual(event["boozer_surface_dofs"]["values"], [0.1, 0.2])
+        self.assertTrue(event["hardware_status"]["success"])
+        self.assertIsNone(event["candidate_failure"])
+
+    def test_single_stage_objective_trace_records_unsolved_boozer_state(self):
+        module = self.load_module()
+        events = []
+        run_dict = {
+            "it": 3,
+            "lscount": 9,
+            "accepted_iterations": 0,
+            "hardware_constraint_status": None,
+        }
+        boozer_surface = types.SimpleNamespace(
+            res={"success": False, "iota": 0.005, "G": 2.0},
+        )
+        adapter = module.SingleStageAdapter(
+            run_dict=run_dict,
+            boozer_surface=boozer_surface,
+            JF=object(),
+            bs=object(),
+            objectives={},
+            diagnostics={},
+            log_path="unused.log",
+            apply_coil_dofs=lambda _x: None,
+            objective_evaluation_trace_callback=events.append,
+        )
+
+        with patch.object(
+            module,
+            "evaluate_candidate",
+            return_value=(2.5, np.array([10.0, 20.0])),
+        ):
+            adapter(np.array([1.0, 2.0]))
+
+        self.assertEqual(len(events), 1)
+        self.assertFalse(events[0]["solver_success"])
+        self.assertIsNone(events[0]["boozer_surface_dofs"])
+
     def test_single_stage_runtime_stage2_seed_payload_requires_order(self):
         module = self.load_module()
 
@@ -2688,7 +2780,9 @@ class SingleStageExampleTests(unittest.TestCase):
             4.0 * np.pi * 1e-7 * 5.0,
         )
 
-    def test_load_single_stage_jax_warm_start_state_uses_spec_not_surface_json(self):
+    def test_load_single_stage_jax_warm_start_state_preserves_donor_surface_contract(
+        self,
+    ):
         module = self.load_module()
         surface = module.SurfaceXYZTensorFourier(
             mpol=2,
@@ -2712,20 +2806,17 @@ class SingleStageExampleTests(unittest.TestCase):
                 quadpoints_theta=surface.quadpoints_theta,
                 **self._jax_runtime_seed_spec_field_kwargs(module),
             )
-            (Path(tmpdir) / "biot_savart_opt.json").write_text("{}", encoding="utf-8")
+            surface.save(str(Path(tmpdir) / "surf_opt.json"))
+            (Path(tmpdir) / "results.json").write_text("{}", encoding="utf-8")
             with patch.object(
-                module,
-                "load_serialized_surface_state",
-                side_effect=AssertionError("JAX warm start must not load surf_opt.json"),
-            ), patch.object(
                 module,
                 "load",
                 side_effect=AssertionError("JAX warm start must not load live objects"),
             ):
                 warm_start = module.load_single_stage_jax_warm_start_state(tmpdir)
 
-        self.assertIsNone(warm_start["surface"])
-        self.assertIsNone(warm_start["surface_path"])
+        self.assertIsInstance(warm_start["surface"], module.SerializedSurfaceState)
+        self.assertTrue(warm_start["surface_path"].endswith("surf_opt.json"))
         self.assertEqual(warm_start["jax_runtime_spec_path"], spec_path)
         self.assertIsNone(warm_start["biot_savart_path"])
 
@@ -2757,13 +2848,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 quadpoints_theta=surface.quadpoints_theta,
                 **self._jax_runtime_seed_spec_field_kwargs(module),
             )
-            (donor_dir / "biot_savart_opt.json").write_text("{}", encoding="utf-8")
+            surface.save(str(donor_dir / "surf_opt.json"))
             (donor_dir / "results.json").write_text("{}", encoding="utf-8")
             with patch.object(
-                module,
-                "load_serialized_surface_state",
-                side_effect=AssertionError("JAX warm start must not load surf_opt.json"),
-            ), patch.object(
                 module,
                 "load",
                 side_effect=AssertionError("JAX warm start must not load live objects"),
@@ -2774,6 +2861,8 @@ class SingleStageExampleTests(unittest.TestCase):
                 )
 
         self.assertEqual(warm_start["jax_runtime_spec_path"], spec_path)
+        self.assertIsInstance(warm_start["surface"], module.SerializedSurfaceState)
+        self.assertEqual(warm_start["surface_path"], str(donor_dir / "surf_opt.json"))
         self.assertIsNone(warm_start["biot_savart_path"])
 
     def test_compile_requested_single_stage_jax_runtime_seed_spec_uses_explicit_command_contract(
@@ -2947,6 +3036,7 @@ class SingleStageExampleTests(unittest.TestCase):
         child = Optimizable(x0=np.asarray([], dtype=np.float64), depends_on=[bs])
 
         self.assertIsInstance(bs, Optimizable)
+        self.assertEqual(bs.local_dof_size, initial_coil_dofs.size)
         self.assertIn(bs, child.parents)
         self.assertIn(child, [child_ref() for child_ref in bs._children])
 
@@ -2960,9 +3050,11 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         self.assertEqual(bs.coils[0].current.get_value(), updated_coil_dofs[-1])
         self.assertFalse(np.allclose(bs.coils[0].curve.gamma(), initial_gamma))
+        np.testing.assert_allclose(bs.local_x, updated_coil_dofs)
+        self.assertIs(captured_curves[0], bs.coils[0].curve)
         np.testing.assert_allclose(
             module.host_array(captured_curves[0].get_dofs()),
-            initial_coil_dofs[:9],
+            updated_coil_dofs[:9],
         )
 
         captured = {}
@@ -3049,6 +3141,173 @@ class SingleStageExampleTests(unittest.TestCase):
         np.testing.assert_allclose(
             captured["cross_section_banana_dofs"],
             updated_coil_dofs[:9],
+        )
+
+    def test_runtime_spec_biotsavart_projects_cotangents_to_owner_dofs(self):
+        module = self.load_module()
+        owner_dofs = np.linspace(0.1, 1.0, 10, dtype=np.float64)
+
+        def make_map(template_full_dofs, owner_segments):
+            return module.jax_specs.make_optimizable_dof_map_spec(
+                template_full_dofs=template_full_dofs,
+                owner_segments=owner_segments,
+                input_mode="full",
+                input_start=0,
+                input_end=len(template_full_dofs),
+            )
+
+        quadpoints = np.linspace(0.0, 1.0, 4, endpoint=False, dtype=np.float64)
+        curve_template = module.jax_specs.make_curve_xyzfourier_spec(
+            dofs=np.zeros(9, dtype=np.float64),
+            quadpoints=quadpoints,
+            order=1,
+        )
+        extraction_spec = module.jax_specs.make_coil_set_dof_extraction_spec(
+            (
+                module.jax_specs.make_coil_dof_extraction_spec(
+                    curve=curve_template,
+                    curve_map=make_map(
+                        np.zeros(9, dtype=np.float64),
+                        ((0, 9, 0, 9),),
+                    ),
+                    current_map=make_map(
+                        np.zeros(1, dtype=np.float64),
+                        ((9, 10, 0, 1),),
+                    ),
+                ),
+            )
+        )
+        surface_spec = module.make_surface_xyz_tensor_fourier_spec(
+            dofs=np.array([1.0, 0.1, 0.0, 0.1], dtype=np.float64),
+            quadpoints_phi=np.linspace(0.0, 1.0, 4, endpoint=False, dtype=np.float64),
+            quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False, dtype=np.float64),
+            nfp=1,
+            stellsym=True,
+            mpol=1,
+            ntor=0,
+        )
+        runtime_spec = module.make_single_stage_runtime_spec(
+            seed=module.make_single_stage_seed_spec(
+                surface=surface_spec,
+                coil_set=module.coil_set_spec_from_dof_extraction_spec(
+                    extraction_spec,
+                    owner_dofs,
+                ),
+                coil_dof_extraction=extraction_spec,
+                coil_dofs=owner_dofs,
+                boozer_iota=0.1,
+                boozer_G=1.2,
+                target_labels=(),
+                hardware_constants=(),
+                self_intersection_mode=module._SINGLE_STAGE_JAX_SELF_INTERSECTION_MODE,
+                schema_version=module._SINGLE_STAGE_JAX_RUNTIME_SPEC_VERSION,
+                num_tf_coils=0,
+                banana_curve_index=0,
+                tf_current_A=0.0,
+                banana_current_A=float(owner_dofs[-1]),
+            ),
+            mpol=1,
+            ntor=0,
+            nfp=1,
+            nphi=4,
+            ntheta=5,
+        )
+        bs = SingleStageRuntimeSpecBiotSavartJAX(runtime_spec)
+        d_gamma = jnp.reshape(
+            jnp.linspace(0.2, 1.3, 12, dtype=jnp.float64),
+            (4, 3),
+        )
+        d_gammadash = jnp.reshape(
+            jnp.linspace(-0.7, 0.4, 12, dtype=jnp.float64),
+            (4, 3),
+        )
+        d_current = jnp.asarray([0.25], dtype=jnp.float64)
+
+        actual = bs.coil_cotangents_to_dofs_gradient(
+            ((d_gamma[None, ...], d_gammadash[None, ...], d_current),),
+            ((0,),),
+            coil_dofs=owner_dofs,
+        )
+
+        def scalar(owner):
+            group = bs.coil_set_spec_from_dofs(owner).groups[0]
+            return (
+                jnp.vdot(group.gammas[0], d_gamma)
+                + jnp.vdot(group.gammadashs[0], d_gammadash)
+                + group.currents[0] * d_current[0]
+            )
+
+        expected = jax.grad(scalar)(jnp.asarray(owner_dofs, dtype=jnp.float64))
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+        curve = bs.coils[0].curve
+        self.assertIn(bs, curve.parents)
+
+        def gamma_scalar(owner):
+            group = bs.coil_set_spec_from_dofs(owner).groups[0]
+            return jnp.vdot(group.gammas[0], d_gamma)
+
+        expected_gamma = jax.grad(gamma_scalar)(
+            jnp.asarray(owner_dofs, dtype=jnp.float64)
+        )
+        actual_gamma = curve.dgamma_by_dcoeff_vjp(d_gamma)(curve)
+        np.testing.assert_allclose(
+            actual_gamma,
+            expected_gamma,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+        length_weights = jnp.linspace(0.1, 0.4, 4, dtype=jnp.float64)
+
+        def length_scalar(owner):
+            group = bs.coil_set_spec_from_dofs(owner).groups[0]
+            return jnp.vdot(
+                jnp.linalg.norm(group.gammadashs[0], axis=1),
+                length_weights,
+            )
+
+        expected_length = jax.grad(length_scalar)(
+            jnp.asarray(owner_dofs, dtype=jnp.float64)
+        )
+        actual_length = curve.dincremental_arclength_by_dcoeff_vjp(length_weights)(
+            curve
+        )
+        np.testing.assert_allclose(
+            actual_length,
+            expected_length,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+        from simsopt.jax_core import (
+            coil_specs_from_dof_extraction_spec,
+            curve_geometry_from_spec,
+        )
+
+        kappa_weights = jnp.linspace(-0.2, 0.3, 4, dtype=jnp.float64)
+
+        def kappa_scalar(owner):
+            coil_spec = coil_specs_from_dof_extraction_spec(extraction_spec, owner)[0]
+            _gamma, gammadash, gammadashdash = curve_geometry_from_spec(
+                coil_spec.curve
+            )
+            kappa = jnp.linalg.norm(
+                jnp.cross(gammadash, gammadashdash),
+                axis=1,
+            ) / (jnp.linalg.norm(gammadash, axis=1) ** 3)
+            return jnp.vdot(kappa, kappa_weights)
+
+        expected_kappa = jax.grad(kappa_scalar)(
+            jnp.asarray(owner_dofs, dtype=jnp.float64)
+        )
+        actual_kappa = curve.dkappa_by_dcoeff_vjp(kappa_weights)(curve)
+        np.testing.assert_allclose(
+            actual_kappa,
+            expected_kappa,
+            rtol=1e-12,
+            atol=1e-12,
         )
 
     def test_jax_warm_start_surface_dofs_require_seed_spec_artifact(self):
@@ -5540,6 +5799,14 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertFalse(
             module.single_stage_host_artifact_export_required(
                 use_target_lane=True,
+                write_restart_artifacts=True,
+                write_full_artifacts=False,
+            )
+        )
+        self.assertFalse(
+            module.single_stage_host_artifact_export_required(
+                use_target_lane=False,
+                runtime_seed_restart_artifacts=True,
                 write_restart_artifacts=True,
                 write_full_artifacts=False,
             )

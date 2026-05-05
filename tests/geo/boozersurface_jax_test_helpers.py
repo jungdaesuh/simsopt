@@ -97,11 +97,31 @@ class UpstreamBoozerPenaltyCase:
 
 
 @dataclass(frozen=True)
+class UpstreamBoozerImmutableInputs:
+    coil_set_spec: object
+    sdofs: np.ndarray
+    iota: float
+    G: float | None
+    options_snapshot: tuple[tuple[str, object], ...]
+
+
+@dataclass(frozen=True)
 class UpstreamExactSurfaceCase:
     surfacetype: str
+    cpu_boozer: object
     jax_boozer: BoozerSurfaceJAX
     initial_iota: float
     initial_G: float
+
+
+@dataclass(frozen=True)
+class UpstreamBoozerExactConstraintsCase:
+    surfacetype: str
+    stellsym: bool
+    optimize_G: bool
+    cpu_boozer: object
+    jax_boozer: BoozerSurfaceJAX
+    xl: np.ndarray
 
 
 def _upstream_initial_G(current_values, nfp):
@@ -122,11 +142,66 @@ def _build_upstream_penalty_decision_vector(
     return np.concatenate([x, [_upstream_initial_G(current_values, nfp)]])
 
 
-def _make_toroidal_flux_label(surface, coils):
+def _make_toroidal_flux_label(surface, coils, *, nphi=None, ntheta=None):
     from simsopt.field import BiotSavart
     from simsopt.geo import ToroidalFlux
 
-    return ToroidalFlux(surface, BiotSavart(coils), nphi=51, ntheta=51)
+    return ToroidalFlux(surface, BiotSavart(coils), nphi=nphi, ntheta=ntheta)
+
+
+def _clone_upstream_surface(surface):
+    from simsopt.geo import SurfaceRZFourier, SurfaceXYZFourier, SurfaceXYZTensorFourier
+
+    quadpoints_phi = np.asarray(surface.quadpoints_phi, dtype=np.float64).copy()
+    quadpoints_theta = np.asarray(surface.quadpoints_theta, dtype=np.float64).copy()
+    if isinstance(surface, SurfaceRZFourier):
+        cloned = SurfaceRZFourier(
+            mpol=surface.mpol,
+            ntor=surface.ntor,
+            nfp=surface.nfp,
+            stellsym=surface.stellsym,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+    elif isinstance(surface, SurfaceXYZFourier):
+        cloned = SurfaceXYZFourier(
+            mpol=surface.mpol,
+            ntor=surface.ntor,
+            nfp=surface.nfp,
+            stellsym=surface.stellsym,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+    elif isinstance(surface, SurfaceXYZTensorFourier):
+        cloned = SurfaceXYZTensorFourier(
+            mpol=surface.mpol,
+            ntor=surface.ntor,
+            nfp=surface.nfp,
+            stellsym=surface.stellsym,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+        )
+    else:
+        raise TypeError(f"Unsupported upstream surface fixture {type(surface)!r}.")
+    cloned.set_dofs(np.asarray(surface.get_dofs(), dtype=np.float64).copy())
+    return cloned
+
+
+def _clone_upstream_label(label, surface, bs):
+    from simsopt.geo import Area, ToroidalFlux, Volume
+
+    if isinstance(label, ToroidalFlux):
+        return _make_toroidal_flux_label(
+            surface,
+            bs.coils,
+            nphi=label.nphi,
+            ntheta=label.ntheta,
+        )
+    if isinstance(label, Volume):
+        return Volume(surface, nphi=label.nphi, ntheta=label.ntheta)
+    if isinstance(label, Area):
+        return Area(surface, nphi=label.nphi, ntheta=label.ntheta)
+    raise TypeError(f"Unsupported upstream label fixture {type(label)!r}.")
 
 
 def _build_upstream_jax_boozer(surface, bs, label, target, *, constraint_weight=None):
@@ -142,12 +217,22 @@ def _build_upstream_jax_boozer(surface, bs, label, target, *, constraint_weight=
 def _build_upstream_boozer_pair(bs, surface, label, target, *, constraint_weight=None):
     from simsopt.geo import BoozerSurface
 
+    cpu_surface = _clone_upstream_surface(surface)
+    jax_surface = _clone_upstream_surface(surface)
+    cpu_label = _clone_upstream_label(label, cpu_surface, bs)
+    jax_label = _clone_upstream_label(label, jax_surface, bs)
     return (
-        BoozerSurface(bs, surface, label, target),
-        _build_upstream_jax_boozer(
-            surface,
+        BoozerSurface(
             bs,
-            label,
+            cpu_surface,
+            cpu_label,
+            target,
+            constraint_weight=constraint_weight,
+        ),
+        _build_upstream_jax_boozer(
+            jax_surface,
+            bs,
+            jax_label,
             target,
             constraint_weight=constraint_weight,
         ),
@@ -167,7 +252,12 @@ def _build_upstream_ncsx_surface_context(surfacetype, stellsym):
         "nfp": nfp,
         "bs": bs,
         "surface": surface,
-        "label": _make_toroidal_flux_label(surface, bs.coils),
+        "label": _make_toroidal_flux_label(
+            surface,
+            bs.coils,
+            nphi=51,
+            ntheta=51,
+        ),
     }
 
 
@@ -180,7 +270,7 @@ def _build_upstream_exact_surface_case(surfacetype):
     current_values = _current_values(base_currents)
     surface = get_exact_surface(surface_type=surfacetype)
     label = _make_toroidal_flux_label(surface, bs.coils)
-    _, jax_boozer = _build_upstream_boozer_pair(
+    cpu_boozer, jax_boozer = _build_upstream_boozer_pair(
         bs,
         surface,
         label,
@@ -188,6 +278,7 @@ def _build_upstream_exact_surface_case(surfacetype):
     )
     return UpstreamExactSurfaceCase(
         surfacetype=surfacetype,
+        cpu_boozer=cpu_boozer,
         jax_boozer=jax_boozer,
         initial_iota=_UPSTREAM_EXACT_IOTA0,
         initial_G=_upstream_initial_G(current_values, nfp),
@@ -228,6 +319,47 @@ def _build_upstream_boozer_penalty_case(surfacetype, stellsym, optimize_G):
     )
 
 
+def _build_upstream_boozer_exact_constraints_case(
+    surfacetype,
+    stellsym,
+    optimize_G,
+):
+    from simsopt.configs.zoo import get_data
+
+    from .surface_test_helpers import get_surface
+
+    _, base_currents, magnetic_axis, nfp, bs = get_data("ncsx")
+    surface = get_surface(
+        surfacetype,
+        stellsym,
+        mpol=1,
+        ntor=1,
+        nphi=3,
+        ntheta=3,
+    )
+    surface.fit_to_curve(magnetic_axis, 0.1)
+    label = _make_toroidal_flux_label(surface, bs.coils, nphi=5, ntheta=5)
+    cpu_boozer, jax_boozer = _build_upstream_boozer_pair(
+        bs,
+        surface,
+        label,
+        _UPSTREAM_BOOZER_TF_TARGET,
+    )
+    x = np.concatenate((surface.get_dofs(), [_UPSTREAM_BOOZER_IOTA0]))
+    if optimize_G:
+        current_values = _current_values(base_currents)
+        x = np.concatenate((x, [_upstream_initial_G(current_values, nfp)]))
+    xl = np.concatenate((x, np.zeros(2)))
+    return UpstreamBoozerExactConstraintsCase(
+        surfacetype=surfacetype,
+        stellsym=stellsym,
+        optimize_G=optimize_G,
+        cpu_boozer=cpu_boozer,
+        jax_boozer=jax_boozer,
+        xl=xl,
+    )
+
+
 def _evaluate_upstream_boozer_penalty_case(case):
     cpu_value, cpu_gradient = case.cpu_boozer.boozer_penalty_constraints_vectorized(
         case.x,
@@ -246,6 +378,97 @@ def _evaluate_upstream_boozer_penalty_case(case):
         "cpu_gradient": np.asarray(cpu_gradient),
         "jax_value": float(jax_value),
         "jax_gradient": np.asarray(jax_gradient),
+    }
+
+
+def _evaluate_upstream_boozer_exact_constraints_case(case):
+    cpu_residual, cpu_jacobian = case.cpu_boozer.boozer_exact_constraints(
+        case.xl,
+        derivatives=1,
+        optimize_G=case.optimize_G,
+    )
+    residual_fn = case.jax_boozer._make_exact_constraints_residual_with(
+        case.optimize_G,
+        case.jax_boozer.options["weight_inv_modB"],
+    )
+    xl = jnp.asarray(case.xl, dtype=jnp.float64)
+    rng = np.random.default_rng(1729)
+    direction = rng.uniform(-0.5, 0.5, size=case.xl.shape)
+    jax_residual, jax_jvp = jax.jvp(
+        residual_fn,
+        (xl,),
+        (jnp.asarray(direction, dtype=jnp.float64),),
+    )
+    jax_jacobian = jax.jacfwd(residual_fn)(xl)
+    return {
+        "cpu_residual": np.asarray(cpu_residual),
+        "jax_residual": np.asarray(jax_residual),
+        "cpu_jacobian": np.asarray(cpu_jacobian),
+        "jax_jacobian": np.asarray(jax_jacobian),
+        "cpu_jvp": np.asarray(cpu_jacobian @ direction),
+        "jax_jvp": np.asarray(jax_jvp),
+    }
+
+
+def _build_upstream_boozer_immutable_inputs(case):
+    sdofs, iota, G = case.jax_boozer._unpack_decision_vector(
+        jnp.asarray(case.x),
+        optimize_G=case.optimize_G,
+    )
+    return UpstreamBoozerImmutableInputs(
+        coil_set_spec=case.jax_boozer.coil_set_spec,
+        sdofs=np.asarray(sdofs),
+        iota=float(iota),
+        G=None if G is None else float(G),
+        options_snapshot=(
+            ("constraint_weight", case.constraint_weight),
+            ("optimize_G", case.optimize_G),
+            ("weight_inv_modB", bool(case.jax_boozer.options["weight_inv_modB"])),
+        ),
+    )
+
+
+def _extract_upstream_jax_penalty_inputs(surface, bs, *, optimize_G):
+    """Extract raw JAX arrays from CPU objects for the coil_arrays parity path."""
+    mpol, ntor, nfp = surface.mpol, surface.ntor, surface.nfp
+    qphi = jnp.asarray(surface.quadpoints_phi, dtype=jnp.float64)
+    qtheta = jnp.asarray(surface.quadpoints_theta, dtype=jnp.float64)
+    sdofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+
+    if surface.stellsym:
+        scatter = jnp.asarray(stellsym_scatter_indices(mpol, ntor), dtype=jnp.int32)
+    else:
+        scatter = None
+
+    gammas_list, dashs_list, currs_list = [], [], []
+    for coil in bs.coils:
+        gammas_list.append(coil.curve.gamma())
+        dashs_list.append(coil.curve.gammadash())
+        currs_list.append(coil.current.get_value())
+    gammas = jnp.asarray(np.stack(gammas_list))
+    gammadashs = jnp.asarray(np.stack(dashs_list))
+    currents = jnp.asarray(np.array(currs_list))
+    coil_arrays = [(gammas, gammadashs, currents)]
+
+    G = _upstream_initial_G(currs_list, nfp)
+    iota = _UPSTREAM_BOOZER_IOTA0
+
+    if optimize_G:
+        x = jnp.concatenate([sdofs, jnp.array([iota, G])])
+    else:
+        x = jnp.concatenate([sdofs, jnp.array([iota])])
+
+    return {
+        "x": x,
+        "coil_arrays": coil_arrays,
+        "qphi": qphi,
+        "qtheta": qtheta,
+        "mpol": mpol,
+        "ntor": ntor,
+        "nfp": nfp,
+        "stellsym": surface.stellsym,
+        "scatter_indices": scatter,
+        "optimize_G": optimize_G,
     }
 
 
@@ -407,6 +630,14 @@ def _build_penalty_problem(
             stellsym=stellsym,
             scatter_indices=scatter,
             surface_kind="generic",
+            label_quadpoints_phi=qphi,
+            label_quadpoints_theta=qtheta,
+            label_mpol=mpol,
+            label_ntor=ntor,
+            label_nfp=nfp,
+            label_stellsym=stellsym,
+            label_scatter_indices=scatter,
+            label_surface_kind="generic",
             targetlabel=targetlabel,
             constraint_weight=constraint_weight,
             label_type=label_type,
@@ -567,9 +798,15 @@ class _MockBiotSavart(_bsj.Optimizable):
     def coil_set_spec(self):
         return self._coil_spec
 
+    @property
+    def coils(self):
+        return self._coils
+
 
 class _MockSurface:
     """Minimal mock for SurfaceXYZTensorFourier."""
+
+    jax_surface_kind = "generic"
 
     def __init__(self, dofs, mpol, ntor, nfp, stellsym, qphi, qtheta):
         self._dofs = np.array(dofs, dtype=np.float64)
@@ -594,6 +831,9 @@ class _MockSurface:
 
 class _PlumbingVolumeLabel:
     """Minimal plumbing-only label marker for BoozerSurfaceJAX tests."""
+
+    def __init__(self, surface):
+        self.surface = surface
 
 
 def _make_mock_coils(nquad=64):
@@ -647,7 +887,7 @@ def _make_mock_boozer_surface(
 
     biot_savart = _MockBiotSavart(_make_mock_coils())
     surface = _MockSurface(sdofs, mpol, ntor, nfp, stellsym, qphi, qtheta)
-    label = _PlumbingVolumeLabel()
+    label = _PlumbingVolumeLabel(surface)
     target = 2.0 * np.pi**2 * R0 * r**2
 
     return BoozerSurfaceJAX(

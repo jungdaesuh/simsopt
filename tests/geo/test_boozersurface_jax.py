@@ -35,6 +35,7 @@ from conftest import (
     parity_device,
 )
 from simsopt.field.coil import Coil, Current
+from simsopt.geo.boozersurface import BoozerSurface as LegacyBoozerSurface
 from simsopt.geo._boozersurface_current_guard import (
     guard_none_G_coil_gradient_callback,
 )
@@ -56,10 +57,14 @@ from .boozersurface_jax_test_helpers import (
     _boozer_exact_coil_vjp,
     _bsj,
     _build_penalty_problem,
+    _build_upstream_boozer_exact_constraints_case,
     _ensure_solved_jax,
+    _build_upstream_boozer_immutable_inputs,
     _build_upstream_boozer_penalty_case,
+    _evaluate_upstream_boozer_exact_constraints_case,
     _evaluate_upstream_boozer_penalty_case,
     _build_upstream_exact_surface_case,
+    _extract_upstream_jax_penalty_inputs,
     _make_circular_coil,
     _make_mixed_quad_mock_coils,
     _make_mock_boozer_surface,
@@ -95,6 +100,128 @@ _STOKES_FLUX_RTOL = 1e-5
 _STOKES_FLUX_ATOL = 5e-7
 _STOKES_DISK_NR = 96
 _STOKES_DISK_NTHETA = 192
+
+_PUBLIC_SOLVER_RESULT_KEYS = frozenset(
+    {"success", "G", "s", "iota", "weight_inv_modB", "type"}
+)
+_LINEARIZED_RESULT_KEYS = frozenset(
+    {
+        "primal_success",
+        "adjoint_linear_solve_available",
+        "linearization_kind",
+        "linear_solve_backend",
+        "dense_linear_solve_factors_available",
+    }
+)
+_PUBLIC_LBFGS_RESULT_KEYS = _PUBLIC_SOLVER_RESULT_KEYS | {
+    "fun",
+    "gradient",
+    "iter",
+    "info",
+    "optimizer_method",
+}
+_PUBLIC_LS_RESULT_KEYS = _PUBLIC_SOLVER_RESULT_KEYS | {
+    "residual",
+    "gradient",
+    "jacobian",
+    "optimizer_method",
+}
+_PUBLIC_NEWTON_RESULT_KEYS = (
+    _PUBLIC_SOLVER_RESULT_KEYS
+    | _LINEARIZED_RESULT_KEYS
+    | {
+        "residual",
+        "jacobian",
+        "hessian",
+        "iter",
+        "sdofs",
+        "PLU",
+        "vjp",
+        "vjp_groups",
+        "optimizer_method",
+        "solve_generation",
+        "fun",
+    }
+)
+_PUBLIC_EXACT_RESULT_KEYS = (
+    _PUBLIC_SOLVER_RESULT_KEYS
+    | _LINEARIZED_RESULT_KEYS
+    | {
+        "residual",
+        "fun",
+        "jacobian",
+        "iter",
+        "PLU",
+        "mask",
+        "vjp",
+        "vjp_groups",
+        "solve_generation",
+        "jacobian_materialized",
+    }
+)
+_PUBLIC_EXACT_CONSTRAINTS_RESULT_KEYS = _PUBLIC_SOLVER_RESULT_KEYS | {
+    "residual",
+    "jacobian",
+    "iter",
+    "lm",
+}
+_TRACEABLE_RESULT_KEYS = frozenset(
+    {
+        "x",
+        "sdofs",
+        "iota",
+        "G",
+        "fun",
+        "plu",
+        "nit",
+        "success",
+        "primal_success",
+        "adjoint_linear_solve_available",
+        "linearization_kind",
+        "linear_solve_backend",
+        "dense_linear_solve_factors_available",
+        "type",
+        "weight_inv_modB",
+    }
+)
+_TRACEABLE_EXACT_RESULT_KEYS = _TRACEABLE_RESULT_KEYS | {
+    "residual",
+    "jacobian",
+}
+_TRACEABLE_LS_RESULT_KEYS = _TRACEABLE_RESULT_KEYS | {
+    "grad",
+    "hessian",
+    "optimizer_method",
+}
+_SOLVED_RUNTIME_STATE_FIELDS = frozenset(
+    {"sdofs", "iota", "G", "weight_inv_modB"}
+)
+_ADJOINT_RUNTIME_STATE_FIELDS = frozenset(
+    {
+        "solved_state",
+        "linearization_kind",
+        "decision_size",
+        "dtype",
+        "apply_forward",
+        "apply_transpose",
+        "solve_forward",
+        "solve_transpose",
+        "solve_forward_with_status",
+        "solve_transpose_with_status",
+        "stream_group_vjps",
+        "linear_solve_backend",
+        "dense_linear_solve_factors_available",
+        "linear_solve_factors",
+    }
+)
+
+
+def _assert_result_schema(result, required_keys):
+    assert required_keys <= set(result.keys())
+
+
+def _assert_runtime_state_schema(runtime_state, required_fields):
+    assert required_fields <= set(runtime_state.__dataclass_fields__)
 
 
 def _assert_operator_adjoint_state(adjoint_state, *, dense_factors_available):
@@ -142,7 +269,15 @@ def _build_exact_well_conditioned_operator_fixture(monkeypatch, *, device):
         A_np += 0.005 * np.triu(np.ones((n, n)), k=1)
         A = jnp.asarray(A_np, dtype=jnp.float64)
         rhs_np = np.linspace(-0.4, 0.6, n)
+        matrix_rhs_np = np.column_stack(
+            (
+                rhs_np,
+                np.sin(np.linspace(0.0, np.pi, n)),
+                np.cos(np.linspace(0.0, np.pi, n)),
+            )
+        )
         rhs = jnp.asarray(rhs_np, dtype=jnp.float64)
+        matrix_rhs = jnp.asarray(matrix_rhs_np, dtype=jnp.float64)
         P_lu, L_lu, U_lu = scipy.linalg.lu(A_np)
         gradient_projection = np.vstack(
             (
@@ -191,6 +326,8 @@ def _build_exact_well_conditioned_operator_fixture(monkeypatch, *, device):
         "device": device,
         "gradient_projection": gradient_projection,
         "metadata": metadata,
+        "matrix_rhs": matrix_rhs,
+        "matrix_rhs_np": matrix_rhs_np,
         "rhs": rhs,
         "rhs_np": rhs_np,
     }
@@ -204,12 +341,30 @@ def _solve_exact_well_conditioned_operator_case(monkeypatch, *, device):
     with jax.default_device(device):
         adjoint_state = case["booz"].get_adjoint_runtime_state()
         operator_adj, success = adjoint_state.solve_transpose_with_status(case["rhs"])
+        matrix_operator_adj, matrix_success = (
+            adjoint_state.solve_transpose_with_status(case["matrix_rhs"])
+        )
+        matrix_applied = adjoint_state.apply_transpose(matrix_operator_adj)
         jax_dense_adj = jnp.linalg.solve(case["A"].T, case["rhs"])
+        matrix_jax_dense_adj = jnp.linalg.solve(case["A"].T, case["matrix_rhs"])
         operator_adj_np = np.asarray(jax.device_get(operator_adj), dtype=float)
+        matrix_operator_adj_np = np.asarray(
+            jax.device_get(matrix_operator_adj),
+            dtype=float,
+        )
         jax_dense_adj_np = np.asarray(jax.device_get(jax_dense_adj), dtype=float)
+        matrix_jax_dense_adj_np = np.asarray(
+            jax.device_get(matrix_jax_dense_adj),
+            dtype=float,
+        )
+        matrix_applied_np = np.asarray(jax.device_get(matrix_applied), dtype=float)
         assert_array_on_device(case["rhs"], device)
+        assert_array_on_device(case["matrix_rhs"], device)
         assert_array_on_device(operator_adj, device)
+        assert_array_on_device(matrix_operator_adj, device)
+        assert_array_on_device(matrix_applied, device)
         assert_array_on_device(jax_dense_adj, device)
+        assert_array_on_device(matrix_jax_dense_adj, device)
 
     plu_adj_np = forward_backward(
         case["P_lu"],
@@ -217,9 +372,21 @@ def _solve_exact_well_conditioned_operator_case(monkeypatch, *, device):
         case["U_lu"],
         case["rhs_np"],
     )
+    matrix_plu_adj_np = forward_backward(
+        case["P_lu"],
+        case["L_lu"],
+        case["U_lu"],
+        case["matrix_rhs_np"],
+    )
     residual_rel = np.linalg.norm(case["A_np"].T @ operator_adj_np - case["rhs_np"]) / (
         1.0 + np.linalg.norm(case["rhs_np"])
     )
+    matrix_residual_rel = np.linalg.norm(
+        case["A_np"].T @ matrix_operator_adj_np - case["matrix_rhs_np"]
+    ) / (1.0 + np.linalg.norm(case["matrix_rhs_np"]))
+    matrix_apply_residual_rel = np.linalg.norm(
+        matrix_applied_np - case["matrix_rhs_np"]
+    ) / (1.0 + np.linalg.norm(case["matrix_rhs_np"]))
     operator_gradient = case["gradient_projection"] @ operator_adj_np
     dense_gradient = case["gradient_projection"] @ jax_dense_adj_np
     plu_gradient = case["gradient_projection"] @ plu_adj_np
@@ -228,6 +395,12 @@ def _solve_exact_well_conditioned_operator_case(monkeypatch, *, device):
         "adjoint_state": adjoint_state,
         "dense_gradient": dense_gradient,
         "jax_dense_adj_np": jax_dense_adj_np,
+        "matrix_jax_dense_adj_np": matrix_jax_dense_adj_np,
+        "matrix_apply_residual_rel": matrix_apply_residual_rel,
+        "matrix_operator_adj_np": matrix_operator_adj_np,
+        "matrix_plu_adj_np": matrix_plu_adj_np,
+        "matrix_residual_rel": matrix_residual_rel,
+        "matrix_success": bool(np.asarray(matrix_success)),
         "operator_adj_np": operator_adj_np,
         "operator_gradient": operator_gradient,
         "plu_adj_np": plu_adj_np,
@@ -244,6 +417,7 @@ def _assert_exact_well_conditioned_operator_case(case, exact_lane):
         dense_factors_available=True,
     )
     assert case["success"] is True
+    assert case["matrix_success"] is True
     np.testing.assert_allclose(
         case["operator_adj_np"],
         case["jax_dense_adj_np"],
@@ -256,7 +430,21 @@ def _assert_exact_well_conditioned_operator_case(case, exact_lane):
         rtol=exact_lane["adjoint_rtol"],
         atol=exact_lane["adjoint_atol"],
     )
+    np.testing.assert_allclose(
+        case["matrix_operator_adj_np"],
+        case["matrix_jax_dense_adj_np"],
+        rtol=exact_lane["adjoint_rtol"],
+        atol=exact_lane["adjoint_atol"],
+    )
+    np.testing.assert_allclose(
+        case["matrix_operator_adj_np"],
+        case["matrix_plu_adj_np"],
+        rtol=exact_lane["adjoint_rtol"],
+        atol=exact_lane["adjoint_atol"],
+    )
     assert case["residual_rel"] <= exact_lane["residual_rel_tol"]
+    assert case["matrix_residual_rel"] <= exact_lane["residual_rel_tol"]
+    assert case["matrix_apply_residual_rel"] <= exact_lane["residual_rel_tol"]
     np.testing.assert_allclose(
         case["operator_gradient"],
         case["dense_gradient"],
@@ -632,8 +820,8 @@ def _make_mock_boozer_surface_with_free_currents():
             return False
 
     booz = _make_mock_boozer_surface()
-    booz.biotsavart._coils[0].current = _MutableCurrent(
-        booz.biotsavart._coils[0].current.get_value()
+    booz.biotsavart.coils[0].current = _MutableCurrent(
+        booz.biotsavart.coils[0].current.get_value()
     )
     return booz
 
@@ -1516,13 +1704,16 @@ def _make_mock_boozer_surface_mixed_quad(nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1
 
     bs = _MockBiotSavart(_make_mixed_quad_mock_coils())
     surf = _MockSurface(sdofs, mpol, ntor, nfp, False, qphi, qtheta)
-    label = _PlumbingVolumeLabel()
+    label = _PlumbingVolumeLabel(surf)
     target = 2.0 * np.pi**2 * R0 * r**2
 
     return BoozerSurfaceJAX(bs, surf, label, target, constraint_weight=1.0)
 
 
 class _MockToroidalFluxLabel:
+    def __init__(self, surface):
+        self.surface = surface
+
     def J(self):
         return 0.0
 
@@ -1541,7 +1732,7 @@ def _make_mock_toroidal_flux_boozer_surface(
     return BoozerSurfaceJAX(
         bs,
         surf,
-        _MockToroidalFluxLabel(),
+        _MockToroidalFluxLabel(surf),
         0.0,
         constraint_weight=1.0,
     )
@@ -1593,7 +1784,7 @@ def _make_basic_mock_surface_and_label():
         np.linspace(0.0, 1.0, 3, endpoint=False),
         np.linspace(0.0, 1.0, 3, endpoint=False),
     )
-    return surface, _PlumbingVolumeLabel()
+    return surface, _PlumbingVolumeLabel(surface)
 
 
 class TestBoozerSurfaceJAXClass:
@@ -1819,6 +2010,58 @@ class TestBoozerSurfaceJAXClass:
                 constraint_weight=1.0,
             )
 
+    def test_constructor_rejects_spoof_surface_names(self):
+        spoof_surface = type(
+            "SurfaceXYZFourier",
+            (),
+            {
+                "mpol": 1,
+                "ntor": 1,
+                "nfp": 1,
+                "stellsym": False,
+                "quadpoints_phi": np.linspace(0.0, 1.0, 3, endpoint=False),
+                "quadpoints_theta": np.linspace(0.0, 1.0, 3, endpoint=False),
+            },
+        )()
+        bs = _MockBiotSavart(_make_mock_coils())
+
+        with pytest.raises(TypeError, match="Unsupported BoozerSurfaceJAX surface type"):
+            BoozerSurfaceJAX(
+                bs,
+                spoof_surface,
+                _PlumbingVolumeLabel(spoof_surface),
+                1.0,
+                constraint_weight=1.0,
+            )
+
+    def test_constructor_rejects_unknown_explicit_surface_kind(self):
+        surf, label = _make_basic_mock_surface_and_label()
+        surf.jax_surface_kind = "tensor"
+        bs = _MockBiotSavart(_make_mock_coils())
+
+        with pytest.raises(ValueError, match="Unsupported BoozerSurfaceJAX"):
+            BoozerSurfaceJAX(
+                bs,
+                surf,
+                label,
+                1.0,
+                constraint_weight=1.0,
+            )
+
+    def test_surface_geometry_rejects_unknown_surface_kind(self):
+        with pytest.raises(ValueError, match="Unsupported Boozer JAX surface_kind"):
+            _bsj._surface_geometry_from_dofs(
+                jnp.zeros(27, dtype=jnp.float64),
+                jnp.linspace(0.0, 1.0, 3, endpoint=False),
+                jnp.linspace(0.0, 1.0, 3, endpoint=False),
+                1,
+                1,
+                1,
+                False,
+                None,
+                surface_kind="tensor",
+            )
+
     def test_spec_only_biotsavart_supports_G_none_ls_path(self):
         """Spec-driven grouped-field state should work without a legacy ``_coils`` list."""
         coils = _make_mixed_quad_mock_coils()
@@ -1832,7 +2075,7 @@ class TestBoozerSurfaceJAXClass:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _PlumbingVolumeLabel()
+        label = _PlumbingVolumeLabel(surf)
         booz = BoozerSurfaceJAX(
             bs,
             surf,
@@ -1846,20 +2089,20 @@ class TestBoozerSurfaceJAXClass:
         assert result is not None
         assert result["type"] == "ls"
 
-    def test_run_code_rejects_G_none_with_free_legacy_currents(self):
+    def test_run_code_rejects_G_none_with_free_currents(self):
         booz = _make_mock_boozer_surface_with_free_currents()
 
         with pytest.raises(ValueError, match="fixed coil currents when G=None"):
             booz.run_code(iota=0.2, G=None)
 
-    def test_none_G_coil_gradient_callback_rejects_free_legacy_currents(self):
+    def test_none_G_coil_gradient_callback_rejects_free_currents(self):
         callback = lambda *_args, **_kwargs: None
         booz = _make_mock_boozer_surface_with_free_currents()
         guarded = guard_none_G_coil_gradient_callback(
             callback,
             biotsavart=booz.biotsavart,
             component="BoozerSurfaceJAX",
-            coil_attrs=("_coils",),
+            coil_attrs=("coils",),
             G_provided=False,
         )
 
@@ -1873,7 +2116,7 @@ class TestBoozerSurfaceJAXClass:
             callback,
             biotsavart=booz.biotsavart,
             component="BoozerSurfaceJAX",
-            coil_attrs=("_coils",),
+            coil_attrs=("coils",),
             G_provided=True,
         )
 
@@ -1943,6 +2186,7 @@ class TestBoozerSurfaceJAXClass:
             verbose=False,
         )
 
+        _assert_result_schema(res, _PUBLIC_LBFGS_RESULT_KEYS)
         assert captured_methods == ["bfgs"]
         assert res["optimizer_method"] == "bfgs"
 
@@ -1954,42 +2198,20 @@ class TestBoozerSurfaceJAXClass:
             limited_memory=True,
         )
 
+        _assert_result_schema(res, _PUBLIC_LBFGS_RESULT_KEYS)
         assert captured_methods == ["bfgs", "lbfgs"]
         assert res["optimizer_method"] == "lbfgs"
 
-    def test_lbfgs_public_api_accepts_legacy_vectorize_kwarg(
-        self,
-        monkeypatch,
-    ):
-        booz = _make_mock_boozer_surface()
-        booz.options["optimizer_backend"] = "scipy"
-        captured_methods = []
-
-        def fake_reference_minimize(
-            fun,
-            x0,
-            *,
-            method,
-            tol,
-            maxiter,
-            options,
-            progress_callback=None,
+    def test_public_solver_signatures_do_not_expose_vectorize(self):
+        for method_name in (
+            "minimize_boozer_penalty_constraints_LBFGS",
+            "minimize_boozer_penalty_constraints_newton",
+            "minimize_boozer_exact_constraints_newton",
         ):
-            del fun, tol, maxiter, options, progress_callback
-            captured_methods.append(method)
-            return _successful_minimize_result(x0)
-
-        monkeypatch.setattr(_bsj, "reference_minimize", fake_reference_minimize)
-
-        res = booz.minimize_boozer_penalty_constraints_LBFGS(
-            iota=0.3,
-            G=0.05,
-            verbose=False,
-            vectorize=False,
-        )
-
-        assert captured_methods == ["bfgs"]
-        assert res["optimizer_method"] == "bfgs"
+            params = inspect.signature(
+                getattr(BoozerSurfaceJAX, method_name)
+            ).parameters
+            assert "vectorize" not in params
 
     @pytest.mark.parametrize(
         ("explicit_materialize", "expected_materialize"),
@@ -2042,6 +2264,7 @@ class TestBoozerSurfaceJAXClass:
             method="lm",
         )
 
+        _assert_result_schema(res, _PUBLIC_LS_RESULT_KEYS)
         assert captured["method"] == "lm-ondevice"
         assert (
             captured["options"]["materialize_dense_linearization"]
@@ -2185,6 +2408,7 @@ class TestBoozerSurfaceJAXClass:
             tol=1e-8,
         )
 
+        _assert_result_schema(res_manual, _PUBLIC_LS_RESULT_KEYS)
         assert res_manual["optimizer_method"] == "manual"
         assert res_manual["success"] is True
         np.testing.assert_allclose(
@@ -2206,6 +2430,88 @@ class TestBoozerSurfaceJAXClass:
         assert result["success"] is True
         assert result["nit"] > 1
         assert abs(abs(float(np.asarray(result["x"])[0])) - 1.0) < 1e-6
+
+    def test_public_manual_ls_api_matches_legacy_manual_linear_contract(self):
+        """JAX manual LS must match the legacy damped Gauss-Newton linear contract."""
+
+        class _ManualSurface:
+            def __init__(self):
+                self._dofs = np.asarray([0.35, -0.25], dtype=float)
+
+            def get_dofs(self):
+                return self._dofs.copy()
+
+            def set_dofs(self, dofs):
+                self._dofs = np.asarray(dofs, dtype=float).copy()
+
+        surface = _ManualSurface()
+        cpu_booz = LegacyBoozerSurface.__new__(LegacyBoozerSurface)
+        cpu_booz.need_to_run_code = True
+        cpu_booz.surface = surface
+        x0 = np.concatenate([surface.get_dofs(), np.asarray([0.3, 0.05])])
+        matrix = np.asarray(
+            [
+                [1.8, 0.2, -0.1, 0.05],
+                [0.1, 1.6, 0.25, -0.2],
+                [-0.05, 0.15, 1.7, 0.1],
+                [0.2, -0.1, 0.05, 1.5],
+            ],
+            dtype=float,
+        )
+        target = np.asarray([0.1, -0.2, 0.3, 0.05], dtype=float)
+        rhs = matrix @ target
+
+        def residual_and_jacobian(x, constraint_weight, optimize_G, weight_inv_modB):
+            del constraint_weight, weight_inv_modB
+            assert optimize_G is True
+            return matrix @ np.asarray(x, dtype=float) - rhs, matrix
+
+        cpu_booz._get_residual_vector_and_jacobian = residual_and_jacobian
+        cpu_result = LegacyBoozerSurface.minimize_boozer_penalty_constraints_ls(
+            cpu_booz,
+            tol=1e-12,
+            maxiter=80,
+            constraint_weight=1.0,
+            iota=0.3,
+            G=0.05,
+            method="manual",
+        )
+
+        jax_booz = _make_mock_boozer_surface()
+        matrix_jax = jnp.asarray(matrix, dtype=jnp.float64)
+        rhs_jax = jnp.asarray(rhs, dtype=jnp.float64)
+        jax_result = jax_booz._run_manual_penalty_least_squares(
+            lambda x: matrix_jax @ x - rhs_jax,
+            jnp.asarray(x0, dtype=jnp.float64),
+            tol=1e-12,
+            maxiter=80,
+        )
+
+        assert bool(cpu_result["success"]) is True
+        assert jax_result["success"] is True
+        np.testing.assert_allclose(
+            np.asarray(jax_result["x"]),
+            np.concatenate(
+                [
+                    np.asarray(cpu_result["s"].get_dofs(), dtype=float),
+                    np.asarray([cpu_result["iota"], cpu_result["G"]], dtype=float),
+                ]
+            ),
+            rtol=1e-10,
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax_result["residual"]),
+            np.asarray(cpu_result["residual"], dtype=float),
+            rtol=1e-10,
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax_result["gradient"]),
+            np.asarray(cpu_result["gradient"], dtype=float),
+            rtol=1e-10,
+            atol=1e-10,
+        )
 
     @pytest.mark.parametrize("stellsym", [True, False])
     @pytest.mark.parametrize("optimize_G", [True, False])
@@ -2238,6 +2544,7 @@ class TestBoozerSurfaceJAXClass:
             tol=1e-10,
         )
 
+        _assert_result_schema(res, _PUBLIC_EXACT_CONSTRAINTS_RESULT_KEYS)
         assert res["success"] is True
         assert "jacobian" in res
         assert "residual" in res
@@ -2323,7 +2630,7 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(np.asarray(res["residual"]), 0.0, atol=1e-12)
         assert solve_calls == [((xl0.size, xl0.size), (xl0.size,))]
 
-    def test_public_newton_api_accepts_legacy_vectorize_kwarg(self, monkeypatch):
+    def test_public_newton_api_routes_without_legacy_vectorize_kwarg(self, monkeypatch):
         booz = _make_mock_boozer_surface()
         target = booz._pack_decision_vector(0.3, 0.05) - 0.01
         captured = {}
@@ -2375,9 +2682,9 @@ class TestBoozerSurfaceJAXClass:
             iota=0.3,
             G=0.05,
             verbose=False,
-            vectorize=False,
         )
 
+        _assert_result_schema(res, _PUBLIC_NEWTON_RESULT_KEYS)
         assert captured["method"] == "bfgs"
         assert res["success"] is True
 
@@ -2393,7 +2700,7 @@ class TestBoozerSurfaceJAXClass:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _PlumbingVolumeLabel()
+        label = _PlumbingVolumeLabel(surf)
         with pytest.raises(ValueError, match="bfgs_method.*removed"):
             BoozerSurfaceJAX(
                 bs,
@@ -2416,7 +2723,7 @@ class TestBoozerSurfaceJAXClass:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _PlumbingVolumeLabel()
+        label = _PlumbingVolumeLabel(surf)
         with pytest.raises(ValueError, match="Unknown BoozerSurfaceJAX option"):
             BoozerSurfaceJAX(
                 bs,
@@ -2445,7 +2752,7 @@ class TestBoozerSurfaceJAXClass:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _PlumbingVolumeLabel()
+        label = _PlumbingVolumeLabel(surf)
         with pytest.raises(ValueError, match="require optimizer_backend"):
             BoozerSurfaceJAX(
                 bs,
@@ -2468,7 +2775,7 @@ class TestBoozerSurfaceJAXClass:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _PlumbingVolumeLabel()
+        label = _PlumbingVolumeLabel(surf)
         booz = BoozerSurfaceJAX(
             bs,
             surf,
@@ -2502,7 +2809,7 @@ class TestBoozerSurfaceJAXClass:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _PlumbingVolumeLabel()
+        label = _PlumbingVolumeLabel(surf)
         with pytest.raises(ValueError, match="optimizer_backend must be one of"):
             BoozerSurfaceJAX(
                 bs,
@@ -2527,7 +2834,7 @@ class TestBoozerSurfaceJAXClass:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _PlumbingVolumeLabel()
+        label = _PlumbingVolumeLabel(surf)
         booz = BoozerSurfaceJAX(
             bs,
             surf,
@@ -2732,6 +3039,7 @@ class TestBoozerSurfaceJAXClass:
         booz = _make_mock_boozer_surface()
         res = booz.run_code(iota=0.3, G=0.05)
         assert res is not None
+        _assert_result_schema(res, _PUBLIC_NEWTON_RESULT_KEYS)
         assert res["type"] == "ls"
         assert "residual" in res
         assert "jacobian" in res
@@ -3529,6 +3837,32 @@ class TestBoozerSurfaceJAXClass:
         booz.run_code(iota=0.3, G=0.05)
         assert booz.run_code(iota=0.3, G=0.05) is None
 
+    def test_same_input_same_result_without_res_identity(self):
+        """Same explicit runtime inputs reproduce values without sharing res identity."""
+        left = _make_mock_boozer_surface()
+        right = _make_mock_boozer_surface()
+
+        left_res = left.run_code(iota=0.3, G=0.05)
+        right_res = right.run_code(iota=0.3, G=0.05)
+
+        assert left_res is not right_res
+        assert left_res["type"] == right_res["type"] == "ls"
+        assert left_res["success"] is right_res["success"] is True
+        assert left_res["weight_inv_modB"] == right_res["weight_inv_modB"]
+        np.testing.assert_allclose(left_res["iota"], right_res["iota"], atol=1e-14)
+        np.testing.assert_allclose(left_res["G"], right_res["G"], atol=1e-14)
+        np.testing.assert_allclose(left_res["fun"], right_res["fun"], atol=1e-14)
+        np.testing.assert_allclose(
+            np.asarray(left_res["residual"]),
+            np.asarray(right_res["residual"]),
+            atol=1e-14,
+        )
+        np.testing.assert_allclose(
+            left.surface.get_dofs(),
+            right.surface.get_dofs(),
+            atol=1e-14,
+        )
+
     def test_run_code_sdofs_matches_implicit_path(self):
         """run_code(sdofs=surface_dofs) must produce the same result as run_code()."""
         booz_ref = _make_mock_boozer_surface()
@@ -3716,6 +4050,7 @@ class TestBoozerSurfaceJAXClass:
             "weight_inv_modB": True,
             "linearization_kind": "hessian",
             "PLU": tuple(jnp.eye(booz.x.size, dtype=jnp.float64) for _ in range(3)),
+            "dense_linear_solve_factors_available": True,
             "vjp_groups": lambda *_args, **_kwargs: iter(()),
         }
 
@@ -3762,19 +4097,20 @@ class TestBoozerSurfaceJAXClass:
             "weight_inv_modB": True,
             "linearization_kind": "unknown_kind_forcing_unsupported_branch",
             "PLU": (identity, identity, identity),
+            "dense_linear_solve_factors_available": True,
             "vjp_groups": lambda *_args, **_kwargs: iter(()),
         }
 
         with pytest.raises(RuntimeError, match="Unsupported BoozerSurfaceJAX"):
             booz.get_adjoint_runtime_state()
 
-    def test_get_adjoint_runtime_state_promotes_hessian_stabilization_on_retry(
+    def test_get_adjoint_runtime_state_hessian_uses_configured_stab_once(
         self, monkeypatch
     ):
-        """Failed operator solves should retry with a stabilized Hessian runtime."""
+        """Hessian runtime solves must not mutate into a hidden retry ridge."""
         booz = _make_mock_boozer_surface()
         booz.need_to_run_code = False
-        booz.options["newton_stab"] = 0.0
+        booz.options["newton_stab"] = 1.0e-4
         booz.options["newton_tol"] = 1e-8
         booz.res = {
             "success": True,
@@ -3785,6 +4121,7 @@ class TestBoozerSurfaceJAXClass:
             "weight_inv_modB": True,
             "linearization_kind": "hessian",
             "PLU": None,
+            "dense_linear_solve_factors_available": False,
             "vjp_groups": lambda *_args, **_kwargs: iter(()),
         }
 
@@ -3807,8 +4144,6 @@ class TestBoozerSurfaceJAXClass:
             del tol
             stab_value = float(np.asarray(stab))
             recorded_stabs.append(stab_value)
-            if stab_value < 1.0e-4:
-                return rhs, False
             return rhs / (1.0 + stab_value), True
 
         monkeypatch.setattr(
@@ -3822,7 +4157,7 @@ class TestBoozerSurfaceJAXClass:
         solved, success = adjoint_state.solve_transpose_with_status(rhs)
 
         assert bool(np.asarray(success)) is True
-        np.testing.assert_allclose(recorded_stabs, np.asarray([0.0, 1.0e-4]))
+        np.testing.assert_allclose(recorded_stabs, np.asarray([1.0e-4]))
         np.testing.assert_allclose(
             np.asarray(adjoint_state.apply_transpose(solved)),
             np.asarray(rhs),
@@ -3830,10 +4165,50 @@ class TestBoozerSurfaceJAXClass:
             atol=1e-12,
         )
 
-    def test_get_adjoint_runtime_state_retry_uses_explicit_host_bool_boundary(
+    def test_get_adjoint_runtime_state_hessian_apply_uses_column_batched_rhs(
         self, monkeypatch
     ):
-        """Retry promotion must not coerce device bools through module np.asarray."""
+        """Hessian runtime application must match matrix-RHS solve semantics."""
+        booz = _make_mock_boozer_surface()
+        booz.need_to_run_code = False
+        booz.options["newton_stab"] = 0.25
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "hessian",
+            "PLU": None,
+            "dense_linear_solve_factors_available": False,
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+
+        def vector_only_hvp(_x, vec):
+            assert vec.ndim == 1
+            return jnp.asarray([2.0, -3.0], dtype=vec.dtype) * vec
+
+        monkeypatch.setattr(
+            _bsj._optimizer_jax,
+            "_hessian_vector_product_fn",
+            lambda _objective_fn: vector_only_hvp,
+        )
+
+        adjoint_state = booz.get_adjoint_runtime_state()
+        rhs = jnp.asarray([[1.0, 2.0], [-1.0, 0.5]], dtype=jnp.float64)
+
+        np.testing.assert_allclose(
+            np.asarray(adjoint_state.apply_transpose(rhs)),
+            np.asarray([[2.25, 4.5], [2.75, -1.375]]),
+            rtol=0.0,
+            atol=1e-12,
+        )
+
+    def test_get_adjoint_runtime_state_status_uses_explicit_host_bool_boundary(
+        self, monkeypatch
+    ):
+        """Status conversion must not coerce device bools through module np.asarray."""
         booz = _make_mock_boozer_surface()
         booz.need_to_run_code = False
         booz.options["newton_stab"] = 0.0
@@ -3847,6 +4222,7 @@ class TestBoozerSurfaceJAXClass:
             "weight_inv_modB": True,
             "linearization_kind": "hessian",
             "PLU": None,
+            "dense_linear_solve_factors_available": False,
             "vjp_groups": lambda *_args, **_kwargs: iter(()),
         }
 
@@ -3864,11 +4240,8 @@ class TestBoozerSurfaceJAXClass:
             stab,
             tol,
         ):
-            del tol
-            stab_value = float(np.asarray(stab))
-            if stab_value < 1.0e-4:
-                return rhs, jnp.asarray(False)
-            return rhs / (1.0 + stab_value), jnp.asarray(True)
+            del stab, tol
+            return rhs, jnp.asarray(True)
 
         monkeypatch.setattr(
             _bsj._optimizer_jax,
@@ -3913,6 +4286,7 @@ class TestBoozerSurfaceJAXClass:
             "weight_inv_modB": True,
             "linearization_kind": "least_squares_normal",
             "PLU": tuple(jnp.eye(booz.x.size, dtype=jnp.float64) for _ in range(3)),
+            "dense_linear_solve_factors_available": True,
             "vjp_groups": lambda *_args, **_kwargs: iter(()),
         }
 
@@ -3981,6 +4355,7 @@ class TestBoozerSurfaceJAXClass:
             "weight_inv_modB": True,
             "linearization_kind": "exact_jacobian",
             "PLU": tuple(jnp.eye(booz.x.size, dtype=jnp.float64) for _ in range(3)),
+            "dense_linear_solve_factors_available": True,
             "vjp_groups": lambda *_args, **_kwargs: iter(()),
         }
 
@@ -4369,7 +4744,12 @@ class TestBoozerSurfaceJAXClass:
 
 
 def _make_mock_boozer_surface_exact(
-    mpol=1, ntor=1, nfp=1, stellsym=False, options=None
+    mpol=1,
+    ntor=1,
+    nfp=1,
+    stellsym=False,
+    options=None,
+    constraint_weight=None,
 ):
     """Build a BoozerSurfaceJAX in exact (Newton) mode -- constraint_weight=None.
 
@@ -4395,7 +4775,8 @@ def _make_mock_boozer_surface_exact(
 
     bs = _MockBiotSavart(_make_mock_coils())
     surf = _MockSurface(sdofs, mpol, ntor, nfp, stellsym, qphi, qtheta)
-    label = _PlumbingVolumeLabel()
+    surf.jax_surface_kind = "xyztensorfourier"
+    label = _PlumbingVolumeLabel(surf)
     target = 2.0 * np.pi**2 * R0 * r**2
 
     return BoozerSurfaceJAX(
@@ -4403,7 +4784,7 @@ def _make_mock_boozer_surface_exact(
         surf,
         label,
         target,
-        constraint_weight=None,
+        constraint_weight=constraint_weight,
         options=options,
     )
 
@@ -4548,6 +4929,7 @@ class TestBoozerSurfaceJAXExactPath:
         booz = _make_mock_boozer_surface_exact()
         res = _run_mock_exact_boozer_success(booz)
         assert res is not None
+        _assert_result_schema(res, _PUBLIC_EXACT_RESULT_KEYS)
         assert res["type"] == "exact"
         assert booz.need_to_run_code is False
 
@@ -4573,6 +4955,7 @@ class TestBoozerSurfaceJAXExactPath:
             "dense_linear_solve_factors_available",
         }
         assert expected_keys <= set(res.keys())
+        _assert_result_schema(res, _PUBLIC_EXACT_RESULT_KEYS)
         assert res["jacobian_materialized"] is True
         assert isinstance(res["PLU"], tuple)
         assert len(res["PLU"]) == 3
@@ -4582,14 +4965,32 @@ class TestBoozerSurfaceJAXExactPath:
         assert res["vjp"] is _boozer_exact_coil_vjp
         assert callable(res["vjp"])
 
-    def test_resolved_coil_set_spec_falls_back_to_default_for_coil_arrays(self):
-        """coil_arrays-only overrides must not erase the default grouped spec."""
+    def test_resolved_coil_set_spec_uses_explicit_coil_arrays(self):
+        """coil_arrays-only calls must build an explicit grouped spec."""
         booz = _make_mock_boozer_surface_exact()
+        override_coil_arrays = tuple(
+            (
+                gammas,
+                gammadashs,
+                currents + 0.25,
+            )
+            for gammas, gammadashs, currents in booz._coil_arrays
+        )
         resolved = _bsj._resolved_coil_set_spec(
             booz.coil_set_spec,
-            coil_arrays=booz._coil_arrays,
+            coil_arrays=override_coil_arrays,
         )
-        assert resolved is booz.coil_set_spec
+        assert resolved is not booz.coil_set_spec
+        resolved_groups = grouped_field_data_from_spec(resolved)
+        for resolved_group, override_group in zip(
+            resolved_groups,
+            override_coil_arrays,
+            strict=True,
+        ):
+            np.testing.assert_allclose(
+                np.asarray(resolved_group[2]),
+                np.asarray(override_group[2]),
+            )
 
     def test_exact_fun_tracks_exact_system_residual(self):
         """Exact-path fun must reflect the actual Newton system residual."""
@@ -4605,7 +5006,7 @@ class TestBoozerSurfaceJAXExactPath:
         self, monkeypatch
     ):
         """LS-constructed surfaces must still provide the exact-solve memory cap."""
-        booz = _make_mock_boozer_surface()
+        booz = _make_mock_boozer_surface_exact(constraint_weight=1.0)
         captured = {}
         original_newton_exact = _bsj.newton_exact
 
@@ -4781,6 +5182,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
+        _assert_result_schema(result, _TRACEABLE_EXACT_RESULT_KEYS)
         assert captured["called"] is True
         assert result["jacobian"] is None
         assert result["plu"] is None
@@ -4804,6 +5206,8 @@ class TestBoozerSurfaceJAXExactPath:
         iota = jnp.asarray(0.3, dtype=jnp.float64)
         G = jnp.asarray(0.05, dtype=jnp.float64)
         captured_ids = []
+        res_before = booz.res
+        need_to_run_before = booz.need_to_run_code
 
         def fake_newton_exact_traceable(
             residual_fn,
@@ -4832,8 +5236,16 @@ class TestBoozerSurfaceJAXExactPath:
 
         assert bool(first["success"])
         assert bool(second["success"])
+        assert first is not second
         assert len(captured_ids) == 2
         assert captured_ids[0] == captured_ids[1]
+        for key in ("x", "sdofs", "iota", "G", "fun", "residual"):
+            np.testing.assert_allclose(np.asarray(first[key]), np.asarray(second[key]))
+        assert first["nit"] == second["nit"]
+        assert first["type"] == second["type"] == "exact"
+        assert first["weight_inv_modB"] == second["weight_inv_modB"]
+        assert booz.res is res_before
+        assert booz.need_to_run_code is need_to_run_before
 
     def test_run_code_traceable_exact_rebuilds_residual_callable_after_target_change(
         self, monkeypatch
@@ -4877,6 +5289,47 @@ class TestBoozerSurfaceJAXExactPath:
         assert bool(second["success"])
         assert residual_ids[0] != residual_ids[1]
         assert not np.allclose(residuals[0], residuals[1])
+
+    def test_run_code_traceable_exact_rebuilds_residual_callable_after_option_change(
+        self, monkeypatch
+    ):
+        booz = _make_mock_boozer_surface_exact()
+        coil_set_spec = booz.coil_set_spec
+        sdofs = jnp.asarray(booz.surface.get_dofs(), dtype=jnp.float64)
+        iota = jnp.asarray(0.3, dtype=jnp.float64)
+        G = jnp.asarray(0.05, dtype=jnp.float64)
+        residual_ids = []
+
+        def fake_newton_exact_traceable(
+            residual_fn,
+            x0,
+            *,
+            maxiter,
+            tol,
+            args=(),
+        ):
+            del maxiter, tol
+            residual_ids.append(id(residual_fn))
+            residual = residual_fn(x0, *args)
+            return {
+                "x": x0,
+                "residual": residual,
+                "jacobian": None,
+                "nit": 0,
+                "success": True,
+                "message": None,
+            }
+
+        monkeypatch.setattr(_bsj, "newton_exact_traceable", fake_newton_exact_traceable)
+
+        first = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+        booz.options["weight_inv_modB"] = not booz.options["weight_inv_modB"]
+        second = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
+
+        assert bool(first["success"])
+        assert bool(second["success"])
+        assert residual_ids[0] != residual_ids[1]
+        assert first["weight_inv_modB"] is not second["weight_inv_modB"]
 
     def test_run_code_traceable_exact_executes_inner_solve_on_gpu(
         self,
@@ -5061,6 +5514,7 @@ class TestBoozerSurfaceJAXExactPath:
 
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
+        _assert_result_schema(result, _TRACEABLE_LS_RESULT_KEYS)
         assert result["optimizer_method"] == "lm-ondevice"
         assert bool(result["success"])
         assert captured["materialize_dense_linearization"] is expected_materialize
@@ -5166,6 +5620,8 @@ class TestBoozerSurfaceJAXExactPath:
         G = jnp.asarray(0.05, dtype=jnp.float64)
         residual_ids = []
         objective_ids = []
+        res_before = booz.res
+        need_to_run_before = booz.need_to_run_code
 
         def fake_lm(
             residual_fn,
@@ -5227,8 +5683,17 @@ class TestBoozerSurfaceJAXExactPath:
 
         assert bool(first["success"])
         assert bool(second["success"])
+        assert first is not second
         assert residual_ids == [residual_ids[0], residual_ids[0]]
         assert objective_ids == [objective_ids[0], objective_ids[0]]
+        for key in ("x", "sdofs", "iota", "G", "fun", "grad", "hessian"):
+            np.testing.assert_allclose(np.asarray(first[key]), np.asarray(second[key]))
+        assert first["nit"] == second["nit"]
+        assert first["optimizer_method"] == second["optimizer_method"] == "lm-ondevice"
+        assert first["type"] == second["type"] == "ls"
+        assert first["weight_inv_modB"] == second["weight_inv_modB"]
+        assert booz.res is res_before
+        assert booz.need_to_run_code is need_to_run_before
 
     def test_run_code_traceable_lm_rebuilds_callables_after_target_change(
         self, monkeypatch
@@ -5388,6 +5853,11 @@ class TestBoozerSurfaceJAXExactPath:
             "plu": tuple(jnp.eye(sdofs.size + 2, dtype=jnp.float64) for _ in range(3)),
             "nit": jnp.asarray(3, dtype=jnp.int32),
             "success": jnp.asarray(True),
+            "primal_success": jnp.asarray(True),
+            "adjoint_linear_solve_available": jnp.asarray(True),
+            "linearization_kind": "hessian",
+            "linear_solve_backend": "operator",
+            "dense_linear_solve_factors_available": True,
             "optimizer_method": "lbfgs-ondevice",
             "type": "ls",
             "weight_inv_modB": booz.options["weight_inv_modB"],
@@ -5413,6 +5883,7 @@ class TestBoozerSurfaceJAXExactPath:
         result = booz.run_code_functional(coil_arrays, sdofs, iota, G)
 
         assert result is expected
+        _assert_result_schema(result, _TRACEABLE_LS_RESULT_KEYS)
         assert "PLU" not in result
         assert result["plu"] is not None
         np.testing.assert_allclose(np.asarray(result["sdofs"]), np.asarray(sdofs))
@@ -5475,7 +5946,7 @@ class TestBoozerSurfaceJAXExactPath:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _PlumbingVolumeLabel()
+        label = _PlumbingVolumeLabel(surf)
         booz = BoozerSurfaceJAX(
             bs,
             surf,
@@ -5500,7 +5971,7 @@ class TestBoozerSurfaceJAXExactPath:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _PlumbingVolumeLabel()
+        label = _PlumbingVolumeLabel(surf)
 
         def stage_callback(_label, **_payload):
             return None
@@ -5529,7 +6000,7 @@ class TestBoozerSurfaceJAXExactPath:
             np.linspace(0.0, 1.0, 3, endpoint=False),
             np.linspace(0.0, 1.0, 3, endpoint=False),
         )
-        label = _PlumbingVolumeLabel()
+        label = _PlumbingVolumeLabel(surf)
         with pytest.raises(ValueError, match="optimizer_backend must be one of"):
             BoozerSurfaceJAX(
                 bs,
@@ -6079,6 +6550,11 @@ class TestEnsureSolvedGuard:
                 "iota": iota,
                 "G": G,
                 "success": True,
+                "primal_success": True,
+                "adjoint_linear_solve_available": True,
+                "weight_inv_modB": True,
+                "linearization_kind": "hessian",
+                "dense_linear_solve_factors_available": True,
                 "PLU": (np.eye(1), np.eye(1), np.eye(1)),
                 "vjp": lambda *_args, **_kwargs: None,
                 "vjp_groups": lambda *_args, **_kwargs: None,
@@ -6101,6 +6577,11 @@ class TestEnsureSolvedGuard:
             "iota": 0.3,
             "G": 0.05,
             "success": False,
+            "primal_success": False,
+            "adjoint_linear_solve_available": False,
+            "weight_inv_modB": True,
+            "linearization_kind": "hessian",
+            "dense_linear_solve_factors_available": True,
             "PLU": (np.eye(1), np.eye(1), np.eye(1)),
             "vjp": lambda *_args, **_kwargs: None,
             "vjp_groups": lambda *_args, **_kwargs: None,
@@ -6117,6 +6598,11 @@ class TestEnsureSolvedGuard:
             "iota": 0.3,
             "G": 0.05,
             "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "weight_inv_modB": True,
+            "linearization_kind": "hessian",
+            "dense_linear_solve_factors_available": True,
             "type": "ls",
             "gradient": np.asarray([3.0, -4.0]),
             "residual": np.asarray([1.5, -2.5]),
@@ -6143,6 +6629,11 @@ class TestEnsureSolvedGuard:
             "iota": 0.3,
             "G": 0.05,
             "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "weight_inv_modB": True,
+            "linearization_kind": "exact_jacobian",
+            "dense_linear_solve_factors_available": True,
             "type": "exact",
             "jacobian": np.asarray([[3.0, -4.0], [1.0, 2.0]]),
             "residual": np.asarray([0.1, -0.2]),
@@ -6283,10 +6774,6 @@ class TestBoozerExactConstraintsJacobianTaylor:
 
 _STELLSYM_LIST = [True, False]
 _OPTIMIZE_G_LIST = [True, False]
-_UPSTREAM_PENALTY_VALUE_PARITY_RTOL = 1e-5
-_UPSTREAM_PENALTY_VALUE_PARITY_ATOL = 5e-6
-_UPSTREAM_PENALTY_GRADIENT_MAX_ABS_TOL = 1e-2
-_UPSTREAM_PENALTY_GRADIENT_REL_NORM_TOL = 2e-3
 
 
 def _assert_gradient_taylor_convergence(obj, x, *, label="", ratio_bound=0.55):
@@ -6311,37 +6798,28 @@ def _assert_gradient_taylor_convergence(obj, x, *, label="", ratio_bound=0.55):
 
 
 def _assert_upstream_penalty_parity(parity):
-    """Assert the calibrated CPU/JAX tensor penalty parity contract.
+    """Assert the documented LS-wrapper same-state CPU/JAX parity contract."""
 
-    We intentionally keep the gradient gate as:
-    1. a hard per-component max-abs cap, and
-    2. a global relative-norm cap.
-
-    A plain ``assert_allclose(rtol, atol)`` would weaken the hard max-abs
-    bound on larger-magnitude components via ``atol + rtol * |reference|``.
-    """
-
+    tolerances = parity_ladder_tolerances("ls-wrapper-gradient")
     np.testing.assert_allclose(
         parity["jax_value"],
         parity["cpu_value"],
-        rtol=_UPSTREAM_PENALTY_VALUE_PARITY_RTOL,
-        atol=_UPSTREAM_PENALTY_VALUE_PARITY_ATOL,
+        rtol=tolerances["rtol"],
+        atol=tolerances["atol"],
         err_msg="CPU/JAX penalty value mismatch",
     )
-    gradient_diff = np.abs(parity["jax_gradient"] - parity["cpu_gradient"])
-    gradient_max_abs = float(np.max(gradient_diff))
-    assert gradient_max_abs < _UPSTREAM_PENALTY_GRADIENT_MAX_ABS_TOL, (
-        "CPU/JAX gradient max-abs "
-        f"{gradient_max_abs:.3e} >= {_UPSTREAM_PENALTY_GRADIENT_MAX_ABS_TOL:.0e}"
+    np.testing.assert_allclose(
+        parity["jax_gradient"],
+        parity["cpu_gradient"],
+        rtol=tolerances["rtol"],
+        atol=tolerances["atol"],
+        err_msg="CPU/JAX penalty gradient mismatch",
     )
-    cpu_gradient_norm = float(np.linalg.norm(parity["cpu_gradient"]))
-    gradient_rel_norm = float(
-        np.linalg.norm(gradient_diff) / max(cpu_gradient_norm, 1e-30)
-    )
-    assert gradient_rel_norm < _UPSTREAM_PENALTY_GRADIENT_REL_NORM_TOL, (
-        "CPU/JAX gradient rel-norm "
-        f"{gradient_rel_norm:.3e} >= {_UPSTREAM_PENALTY_GRADIENT_REL_NORM_TOL:.0e}"
-    )
+
+
+def _seeded_hessian_direction_pair(size: int):
+    rng = np.random.default_rng(17)
+    return rng.normal(size=size), rng.normal(size=size)
 
 
 class TestParametrizedPenaltyGradientTaylor:
@@ -6385,60 +6863,6 @@ class TestParametrizedBFGSConvergence:
 # ---------------------------------------------------------------------------
 
 
-def _extract_jax_penalty_inputs(surface, bs, *, optimize_G):
-    """Extract raw JAX arrays from CPU objects for the coil_arrays path.
-
-    This bypasses the BoozerSurfaceJAX adapter and GroupedCoilSetSpec,
-    exercising the ``coil_arrays``-based dispatch inside
-    ``_boozer_penalty_objective`` (grouped_*_from_inputs functions).
-    """
-    from .boozersurface_jax_test_helpers import (
-        _UPSTREAM_BOOZER_IOTA0,
-        _upstream_initial_G,
-    )
-
-    mpol, ntor, nfp = surface.mpol, surface.ntor, surface.nfp
-    qphi = jnp.asarray(surface.quadpoints_phi, dtype=jnp.float64)
-    qtheta = jnp.asarray(surface.quadpoints_theta, dtype=jnp.float64)
-    sdofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
-
-    if surface.stellsym:
-        scatter = jnp.asarray(stellsym_scatter_indices(mpol, ntor), dtype=jnp.int32)
-    else:
-        scatter = None
-
-    gammas_list, dashs_list, currs_list = [], [], []
-    for coil in bs.coils:
-        gammas_list.append(coil.curve.gamma())
-        dashs_list.append(coil.curve.gammadash())
-        currs_list.append(coil.current.get_value())
-    gammas = jnp.asarray(np.stack(gammas_list))
-    gammadashs = jnp.asarray(np.stack(dashs_list))
-    currents = jnp.asarray(np.array(currs_list))
-    coil_arrays = [(gammas, gammadashs, currents)]
-
-    G = _upstream_initial_G(currs_list, nfp)
-    iota = _UPSTREAM_BOOZER_IOTA0
-
-    if optimize_G:
-        x = jnp.concatenate([sdofs, jnp.array([iota, G])])
-    else:
-        x = jnp.concatenate([sdofs, jnp.array([iota])])
-
-    return {
-        "x": x,
-        "coil_arrays": coil_arrays,
-        "qphi": qphi,
-        "qtheta": qtheta,
-        "mpol": mpol,
-        "ntor": ntor,
-        "nfp": nfp,
-        "stellsym": surface.stellsym,
-        "scatter_indices": scatter,
-        "optimize_G": optimize_G,
-    }
-
-
 class TestUpstreamSurfaceFactoryParity:
     """Validate the coil_arrays dispatch path of ``_boozer_penalty_objective``.
 
@@ -6458,11 +6882,15 @@ class TestUpstreamSurfaceFactoryParity:
         )
         from .surface_test_helpers import get_surface
 
-        base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
+        _, _, ma, nfp, bs = get_data("ncsx")
         s = get_surface("SurfaceXYZTensorFourier", stellsym, nfp=nfp)
         s.fit_to_curve(ma, 0.1)
 
-        inputs = _extract_jax_penalty_inputs(s, bs, optimize_G=optimize_G)
+        inputs = _extract_upstream_jax_penalty_inputs(
+            s,
+            bs,
+            optimize_G=optimize_G,
+        )
 
         def objective(xx):
             return _boozer_penalty_objective(
@@ -6476,6 +6904,14 @@ class TestUpstreamSurfaceFactoryParity:
                 stellsym=inputs["stellsym"],
                 scatter_indices=inputs["scatter_indices"],
                 surface_kind="generic",
+                label_quadpoints_phi=inputs["qphi"],
+                label_quadpoints_theta=inputs["qtheta"],
+                label_mpol=inputs["mpol"],
+                label_ntor=inputs["ntor"],
+                label_nfp=inputs["nfp"],
+                label_stellsym=inputs["stellsym"],
+                label_scatter_indices=inputs["scatter_indices"],
+                label_surface_kind="generic",
                 targetlabel=_UPSTREAM_BOOZER_TF_TARGET,
                 constraint_weight=_UPSTREAM_BOOZER_CONSTRAINT_WEIGHT,
                 label_type="volume",
@@ -6518,6 +6954,62 @@ class TestUpstreamFactoryBoozerMatrix:
     @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", UPSTREAM_BOOZER_STELLSYM)
     @pytest.mark.parametrize("optimize_G", UPSTREAM_BOOZER_OPTIMIZE_G)
+    def test_penalty_case_uses_copied_matching_cpu_jax_fixtures(
+        self,
+        surfacetype,
+        stellsym,
+        optimize_G,
+    ):
+        """CPU/JAX parity fixtures must match by value, not mutable identity."""
+        case = _build_upstream_boozer_penalty_case(
+            surfacetype,
+            stellsym,
+            optimize_G,
+        )
+
+        cpu_surface = case.cpu_boozer.surface
+        jax_surface = case.jax_boozer.surface
+        cpu_label_surface = case.cpu_boozer.label.surface
+        jax_label_surface = case.jax_boozer.label.surface
+        assert cpu_surface is not jax_surface
+        assert cpu_label_surface is not jax_label_surface
+        np.testing.assert_allclose(cpu_surface.get_dofs(), jax_surface.get_dofs())
+        np.testing.assert_allclose(
+            cpu_surface.quadpoints_phi,
+            jax_surface.quadpoints_phi,
+        )
+        np.testing.assert_allclose(
+            cpu_surface.quadpoints_theta,
+            jax_surface.quadpoints_theta,
+        )
+        assert cpu_surface.mpol == jax_surface.mpol
+        assert cpu_surface.ntor == jax_surface.ntor
+        assert cpu_surface.nfp == jax_surface.nfp
+        assert cpu_surface.stellsym == jax_surface.stellsym
+        np.testing.assert_allclose(
+            cpu_label_surface.get_dofs(),
+            jax_label_surface.get_dofs(),
+        )
+        np.testing.assert_allclose(
+            cpu_label_surface.quadpoints_phi,
+            jax_label_surface.quadpoints_phi,
+        )
+        np.testing.assert_allclose(
+            cpu_label_surface.quadpoints_theta,
+            jax_label_surface.quadpoints_theta,
+        )
+        assert case.cpu_boozer.targetlabel == case.jax_boozer.targetlabel
+        assert case.cpu_boozer.label.nphi == case.jax_boozer.label.nphi
+        assert case.cpu_boozer.label.ntheta == case.jax_boozer.label.ntheta
+        assert case.jax_boozer.constraint_weight == case.constraint_weight
+        assert (
+            case.cpu_boozer.options["weight_inv_modB"]
+            == case.jax_boozer.options["weight_inv_modB"]
+        )
+
+    @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", UPSTREAM_BOOZER_STELLSYM)
+    @pytest.mark.parametrize("optimize_G", UPSTREAM_BOOZER_OPTIMIZE_G)
     def test_penalty_gradient_taylor_matrix(
         self,
         surfacetype,
@@ -6538,21 +7030,108 @@ class TestUpstreamFactoryBoozerMatrix:
         x = jnp.asarray(case.x, dtype=jnp.float64)
         _assert_gradient_taylor_convergence(objective, x)
 
+    @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", UPSTREAM_BOOZER_STELLSYM)
     @pytest.mark.parametrize("optimize_G", UPSTREAM_BOOZER_OPTIMIZE_G)
-    def test_penalty_value_and_gradient_cpu_parity_tensor_matrix(
+    def test_penalty_value_and_gradient_cpu_parity_matrix(
         self,
+        surfacetype,
         stellsym,
         optimize_G,
     ):
-        """Tensor-surface factory cases must preserve the direct CPU/JAX parity contract."""
+        """Factory cases must preserve the direct CPU/JAX LS-wrapper parity contract."""
         case = _build_upstream_boozer_penalty_case(
-            "SurfaceXYZTensorFourier",
+            surfacetype,
             stellsym,
             optimize_G,
         )
         parity = _evaluate_upstream_boozer_penalty_case(case)
         _assert_upstream_penalty_parity(parity)
+
+    @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", UPSTREAM_BOOZER_STELLSYM)
+    @pytest.mark.parametrize("optimize_G", UPSTREAM_BOOZER_OPTIMIZE_G)
+    def test_penalty_hessian_directional_cpu_parity_matrix(
+        self,
+        surfacetype,
+        stellsym,
+        optimize_G,
+    ):
+        """Hessian coverage uses same-state CPU Hessian vs JAX HVP directions."""
+        case = _build_upstream_boozer_penalty_case(
+            surfacetype,
+            stellsym,
+            optimize_G,
+        )
+        _, _, cpu_hessian = case.cpu_boozer.boozer_penalty_constraints_vectorized(
+            case.x,
+            derivatives=2,
+            constraint_weight=case.constraint_weight,
+            optimize_G=case.optimize_G,
+        )
+        h1, h2 = _seeded_hessian_direction_pair(case.x.shape[0])
+        cpu_directional = float(h1 @ cpu_hessian @ h2)
+
+        objective = case.jax_boozer._make_penalty_objective_with(
+            case.optimize_G,
+            case.jax_boozer.options["weight_inv_modB"],
+            case.constraint_weight,
+        )
+        _, jax_hvp = jax.jvp(
+            jax.grad(objective),
+            (jnp.asarray(case.x, dtype=jnp.float64),),
+            (jnp.asarray(h2, dtype=jnp.float64),),
+        )
+        jax_directional = float(jnp.dot(jnp.asarray(h1, dtype=jnp.float64), jax_hvp))
+        tolerances = parity_ladder_tolerances("fd-gradient")
+
+        np.testing.assert_allclose(
+            jax_directional,
+            cpu_directional,
+            rtol=tolerances["directional_fd_rtol"],
+            atol=tolerances["directional_fd_atol"],
+            err_msg="CPU/JAX penalty Hessian directional mismatch",
+        )
+
+    @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", UPSTREAM_BOOZER_STELLSYM)
+    @pytest.mark.parametrize("optimize_G", UPSTREAM_BOOZER_OPTIMIZE_G)
+    def test_exact_constraints_residual_and_jvp_cpu_parity_matrix(
+        self,
+        surfacetype,
+        stellsym,
+        optimize_G,
+    ):
+        """Exact KKT coverage uses real CPU residual/Jacobian vs JAX residual/JVP."""
+        case = _build_upstream_boozer_exact_constraints_case(
+            surfacetype,
+            stellsym,
+            optimize_G,
+        )
+        parity = _evaluate_upstream_boozer_exact_constraints_case(case)
+        tolerances = parity_ladder_tolerances("derivative-heavy")
+
+        np.testing.assert_allclose(
+            parity["jax_residual"],
+            parity["cpu_residual"],
+            rtol=tolerances["first_derivative_rtol"],
+            atol=tolerances["first_derivative_atol"],
+            err_msg="CPU/JAX exact-constraints residual mismatch",
+        )
+        np.testing.assert_allclose(
+            parity["jax_jvp"],
+            parity["cpu_jvp"],
+            rtol=tolerances["first_derivative_rtol"],
+            atol=tolerances["first_derivative_atol"],
+            err_msg="CPU/JAX exact-constraints Jacobian-vector mismatch",
+        )
+        np.testing.assert_allclose(
+            parity["jax_jacobian"],
+            parity["cpu_jacobian"],
+            rtol=tolerances["first_derivative_rtol"],
+            atol=tolerances["first_derivative_atol"],
+            err_msg="CPU/JAX exact-constraints dense Jacobian mismatch",
+        )
 
     @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", UPSTREAM_BOOZER_STELLSYM)
@@ -6573,6 +7152,60 @@ class TestUpstreamFactoryBoozerMatrix:
         np.testing.assert_allclose(case_with_G.x[:-1], case_without_G.x)
         assert np.isfinite(case_with_G.x[-1])
 
+    @pytest.mark.parametrize(
+        ("surfacetype", "expected_kind"),
+        [
+            ("SurfaceRZFourier", "rzfourier"),
+            ("SurfaceXYZFourier", "xyzfourier"),
+            ("SurfaceXYZTensorFourier", "xyztensorfourier"),
+        ],
+    )
+    def test_runtime_state_accepts_supported_surface_family_matrix(
+        self,
+        surfacetype,
+        expected_kind,
+    ):
+        from .surface_test_helpers import get_surface
+
+        surface = get_surface(surfacetype, stellsym=True)
+        runtime_state = _bsj.build_boozer_surface_runtime_state(surface)
+
+        assert runtime_state.surface_kind == expected_kind
+        assert runtime_state.scatter_indices is not None
+        assert runtime_state.mpol == surface.mpol
+        assert runtime_state.ntor == surface.ntor
+
+    @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", UPSTREAM_BOOZER_STELLSYM)
+    @pytest.mark.parametrize("optimize_G", UPSTREAM_BOOZER_OPTIMIZE_G)
+    def test_penalty_case_immutable_inputs_match_pair_state(
+        self,
+        surfacetype,
+        stellsym,
+        optimize_G,
+    ):
+        """The shared fixture exposes one immutable target-lane input snapshot."""
+        case = _build_upstream_boozer_penalty_case(
+            surfacetype,
+            stellsym,
+            optimize_G,
+        )
+        inputs = _build_upstream_boozer_immutable_inputs(case)
+        sdofs, iota, G = case.jax_boozer._unpack_decision_vector(
+            jnp.asarray(case.x),
+            optimize_G=optimize_G,
+        )
+
+        assert inputs.coil_set_spec is case.jax_boozer.coil_set_spec
+        np.testing.assert_allclose(inputs.sdofs, np.asarray(sdofs))
+        assert inputs.iota == pytest.approx(float(iota))
+        assert inputs.G == (None if G is None else pytest.approx(float(G)))
+        assert inputs.options_snapshot == (
+            ("constraint_weight", case.constraint_weight),
+            ("optimize_G", optimize_G),
+            ("weight_inv_modB", bool(case.jax_boozer.options["weight_inv_modB"])),
+        )
+
     def test_exact_surface_factory_rejects_surface_xyzfourier(self):
         """The exact path is hard-gated to SurfaceXYZTensorFourier."""
         case = _build_upstream_exact_surface_case("SurfaceXYZFourier")
@@ -6587,10 +7220,9 @@ class TestUpstreamFactoryBoozerMatrix:
                 maxiter=1,
             )
 
-    def test_run_code_exact_accepts_deferred_xyztensor_contract(self):
-        """The JAX-native deferred tensor surface is part of the exact contract."""
+    def test_run_code_exact_accepts_explicit_xyztensor_surface_contract(self):
+        """The exact path is keyed by the explicit tensor surface contract."""
         booz = _make_mock_boozer_surface_exact()
-        booz.surface.deferred_surface_class = "SurfaceXYZTensorFourier"
 
         with _patched_exact_newton_result(success=True):
             res = booz.run_code(iota=0.3, G=0.05)
@@ -6609,6 +7241,26 @@ class TestUpstreamFactoryBoozerMatrix:
         assert residual.ndim == 1
         assert residual.size > 0
         assert np.all(np.isfinite(np.asarray(residual)))
+
+    def test_exact_surface_scalar_residual_matches_legacy_cpu_state(self):
+        """Mirror legacy test_residual with the exact NCSX surface state."""
+        case = _build_upstream_exact_surface_case("SurfaceXYZTensorFourier")
+        x = np.concatenate((case.jax_boozer.surface.get_dofs(), [case.initial_iota]))
+        cpu_value = case.cpu_boozer.boozer_penalty_constraints_vectorized(
+            x,
+            derivatives=0,
+            constraint_weight=1.0,
+            optimize_G=False,
+        )
+        jax_objective = case.jax_boozer._make_penalty_objective_with(
+            False,
+            True,
+            1.0,
+        )
+        jax_value = float(jax_objective(jnp.asarray(x)))
+
+        assert cpu_value < 1e-6
+        np.testing.assert_allclose(jax_value, cpu_value, rtol=1e-10, atol=1e-12)
 
 
 # ---------------------------------------------------------------------------
@@ -6773,6 +7425,28 @@ class TestBuildBoozerSurfaceRuntimeState:
             quadpoints_theta=thetas,
         )
 
+    @staticmethod
+    def _round_trip_pytree(value):
+        leaves, treedef = jax.tree_util.tree_flatten(value)
+        return jax.tree_util.tree_unflatten(treedef, leaves)
+
+    @staticmethod
+    def _assert_coil_set_specs_match(left, right):
+        assert left.coil_index_lists() == right.coil_index_lists()
+        for left_group, right_group in zip(left.groups, right.groups, strict=True):
+            np.testing.assert_allclose(
+                np.asarray(left_group.gammas),
+                np.asarray(right_group.gammas),
+            )
+            np.testing.assert_allclose(
+                np.asarray(left_group.gammadashs),
+                np.asarray(right_group.gammadashs),
+            )
+            np.testing.assert_allclose(
+                np.asarray(left_group.currents),
+                np.asarray(right_group.currents),
+            )
+
     def test_runtime_state_fields_match_surface(self):
         """build_boozer_surface_runtime_state captures correct surface metadata."""
         from simsopt.geo.boozersurface_jax import build_boozer_surface_runtime_state
@@ -6808,7 +7482,7 @@ class TestBuildBoozerSurfaceRuntimeState:
         # Build minimal mock biotsavart and label for the constructor
         coils = _make_mock_coils()
         bs = _MockBiotSavart(coils)
-        label = _PlumbingVolumeLabel()
+        label = _PlumbingVolumeLabel(s)
 
         booz = BoozerSurfaceJAX(
             bs,
@@ -6831,12 +7505,87 @@ class TestBuildBoozerSurfaceRuntimeState:
             np.asarray(booz.quadpoints_theta), np.asarray(rs.quadpoints_theta)
         )
 
+    def test_constructor_does_not_require_label_surface_identity(self):
+        """Label geometry may come from a distinct structured surface object."""
+        mpol, ntor, nfp = 1, 1, 1
+        qphi = np.linspace(0.0, 1.0 / nfp, 8, endpoint=False)
+        qtheta = np.linspace(0.0, 1.0, 8, endpoint=False)
+        xc, yc, zc = _make_simple_torus_coeffs(mpol=mpol, ntor=ntor, nfp=nfp)
+        sdofs = np.concatenate([xc.ravel(), yc.ravel(), zc.ravel()])
+        surface = _MockSurface(sdofs, mpol, ntor, nfp, False, qphi, qtheta)
+        label_surface = _MockSurface(sdofs.copy(), mpol, ntor, nfp, False, qphi, qtheta)
+
+        booz = BoozerSurfaceJAX(
+            _MockBiotSavart(_make_mock_coils()),
+            surface,
+            _PlumbingVolumeLabel(label_surface),
+            targetlabel=2.0 * np.pi**2 * 1.0 * 0.1**2,
+            constraint_weight=1.0,
+        )
+
+        assert booz.surface is surface
+        assert booz.label.surface is label_surface
+        assert booz.label.surface is not booz.surface
+        assert booz.label_mpol == label_surface.mpol
+        assert booz.label_ntor == label_surface.ntor
+        assert booz._label_surface_geometry_kind == "generic"
+
+    def test_runtime_state_round_trip_compares_values_not_identity(self):
+        """Immutable runtime state replaces legacy object-identity serialization."""
+        booz = _make_mock_boozer_surface(stellsym=True)
+        res = booz.run_code(iota=0.3, G=0.05)
+        assert res["success"] is True
+
+        surface_state = booz.surface_runtime_state
+        solved_state = booz.get_solved_runtime_state()
+        coil_set_spec = booz.coil_set_spec
+
+        surface_round_trip = self._round_trip_pytree(surface_state)
+        solved_round_trip = self._round_trip_pytree(solved_state)
+        coil_round_trip = self._round_trip_pytree(coil_set_spec)
+
+        np.testing.assert_allclose(
+            np.asarray(surface_round_trip.quadpoints_phi),
+            np.asarray(surface_state.quadpoints_phi),
+        )
+        np.testing.assert_allclose(
+            np.asarray(surface_round_trip.quadpoints_theta),
+            np.asarray(surface_state.quadpoints_theta),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(surface_round_trip.scatter_indices),
+            np.asarray(surface_state.scatter_indices),
+        )
+        assert surface_round_trip.mpol == surface_state.mpol
+        assert surface_round_trip.ntor == surface_state.ntor
+        assert surface_round_trip.nfp == surface_state.nfp
+        assert surface_round_trip.stellsym == surface_state.stellsym
+        assert surface_round_trip.surface_kind == surface_state.surface_kind
+
+        np.testing.assert_allclose(
+            np.asarray(solved_round_trip.sdofs),
+            np.asarray(solved_state.sdofs),
+        )
+        np.testing.assert_allclose(
+            np.asarray(solved_round_trip.iota),
+            np.asarray(solved_state.iota),
+        )
+        np.testing.assert_allclose(
+            np.asarray(solved_round_trip.G),
+            np.asarray(solved_state.G),
+        )
+        assert solved_round_trip.weight_inv_modB == solved_state.weight_inv_modB
+
+        assert booz.label_type == "volume"
+        assert booz.targetlabel == pytest.approx(2.0 * np.pi**2 * 1.0 * 0.1**2)
+        self._assert_coil_set_specs_match(coil_round_trip, coil_set_spec)
+
     def test_get_solved_runtime_state_uses_cached_dofs(self):
         """Solved runtime summary must report cached solved DOFs, not reread the surface."""
         s = self._make_real_surface(mpol=3, ntor=3, nfp=2)
         coils = _make_mock_coils()
         bs = _MockBiotSavart(coils)
-        label = _PlumbingVolumeLabel()
+        label = _PlumbingVolumeLabel(s)
 
         booz = BoozerSurfaceJAX(
             bs,
@@ -6847,6 +7596,7 @@ class TestBuildBoozerSurfaceRuntimeState:
         )
         booz.res = {
             "success": True,
+            "primal_success": True,
             "iota": jnp.asarray(0.23, dtype=jnp.float64),
             "G": jnp.asarray(1.7, dtype=jnp.float64),
             "weight_inv_modB": False,
@@ -6859,6 +7609,7 @@ class TestBuildBoozerSurfaceRuntimeState:
 
         solved_state = booz.get_solved_runtime_state()
 
+        _assert_runtime_state_schema(solved_state, _SOLVED_RUNTIME_STATE_FIELDS)
         np.testing.assert_allclose(
             np.asarray(solved_state.sdofs),
             np.asarray(booz._surface_dofs),
@@ -6875,7 +7626,7 @@ class TestBuildBoozerSurfaceRuntimeState:
         s = self._make_real_surface(mpol=3, ntor=3, nfp=2)
         coils = _make_mock_coils()
         bs = _MockBiotSavart(coils)
-        label = _PlumbingVolumeLabel()
+        label = _PlumbingVolumeLabel(s)
 
         booz = BoozerSurfaceJAX(
             bs,
@@ -6900,10 +7651,13 @@ class TestBuildBoozerSurfaceRuntimeState:
 
         booz.res = {
             "success": True,
+            "primal_success": True,
             "iota": jnp.asarray(0.23, dtype=jnp.float64),
             "G": jnp.asarray(1.7, dtype=jnp.float64),
             "weight_inv_modB": True,
             "linearization_kind": "exact_jacobian",
+            "adjoint_linear_solve_available": True,
+            "dense_linear_solve_factors_available": True,
             "PLU": expected_plu,
             "vjp_groups": fake_vjp_groups,
         }
@@ -6950,6 +7704,14 @@ class TestBuildBoozerSurfaceRuntimeState:
             adjoint_state.stream_group_vjps(jnp.asarray([5.0, -1.0], dtype=jnp.float64))
         )
 
+        _assert_runtime_state_schema(
+            adjoint_state,
+            _ADJOINT_RUNTIME_STATE_FIELDS,
+        )
+        _assert_runtime_state_schema(
+            adjoint_state.solved_state,
+            _SOLVED_RUNTIME_STATE_FIELDS,
+        )
         np.testing.assert_allclose(np.asarray(solved), np.asarray([2.0, -4.0]))
         np.testing.assert_allclose(
             np.asarray(solved_with_status),

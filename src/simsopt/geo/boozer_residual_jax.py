@@ -373,6 +373,9 @@ def _surface_geometry_from_dofs(
         )
         return sgf(*args), sg1f(*args), sg2f(*args)
 
+    if surface_kind not in {"generic", "xyztensorfourier"}:
+        raise ValueError(f"Unsupported Boozer JAX surface_kind {surface_kind!r}.")
+
     sgf, sg1f, sg2f = _get_surface_fns()
     args = (
         sdofs,

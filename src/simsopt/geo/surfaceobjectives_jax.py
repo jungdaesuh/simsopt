@@ -74,6 +74,7 @@ from .boozer_residual_jax import (
     _surface_geometry_from_dofs,
 )
 from .boozersurface_jax import (
+    _BoozerPenaltyGeometry,
     _boozer_exact_residual,
     _compute_label,
     _make_boozer_penalty_objective_closure,
@@ -1385,10 +1386,7 @@ def _ensure_solved_value_state(booz_surf):
             )
         booz_surf.run_code(booz_surf.res["iota"], G=booz_surf.res["G"])
     _log_boozer_solve_state(booz_surf)
-    if booz_surf.res is None or not booz_surf.res.get(
-        "primal_success",
-        booz_surf.res.get("success"),
-    ):
+    if booz_surf.res is None or not booz_surf.res["primal_success"]:
         raise RuntimeError(
             "BoozerSurfaceJAX has not been solved yet or the last solve failed "
             "to produce a valid solved state."
@@ -1529,9 +1527,7 @@ def _boozer_residual_J_of_x_inner(
 
     label_val = _compute_label(
         label_type,
-        gamma,
-        xphi,
-        xtheta,
+        _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta),
         phi_idx,
         points,
         coil_set_spec=coil_set_spec,
@@ -2292,51 +2288,13 @@ def _traceable_solve_hessian_linearization(
         coil_set_spec=coil_set_spec,
         **_traceable_inner_objective_kwargs(objective_kwargs),
     )
-    candidate_stabs = tuple(
-        float(candidate)
-        for candidate in booz_jax._adjoint_hessian_stabilization_schedule()
-    ) or (float(linear_solve_stab),)
-
-    def _solve_for_stab(candidate_stab):
-        return _optimizer_jax._solve_hessian_system_with_status(
-            objective_fn,
-            solved_x,
-            rhs,
-            stab=candidate_stab,
-            tol=linear_solve_tol,
-        )
-
-    if not isinstance(rhs, jax.core.Tracer):
-        solution, success = _solve_for_stab(candidate_stabs[0])
-        for candidate_stab in candidate_stabs[1:]:
-            if _host_bool(success):
-                break
-            solution, success = _solve_for_stab(candidate_stab)
-        return solution, success
-
-    candidate_stabs_array = jnp.asarray(candidate_stabs, dtype=jnp.asarray(rhs).dtype)
-    next_index = jnp.asarray(1, dtype=jnp.int32)
-    candidate_count = jnp.asarray(candidate_stabs_array.shape[0], dtype=jnp.int32)
-    solution0, success0 = _solve_for_stab(candidate_stabs_array[0])
-
-    def cond_fun(state):
-        index, _solution, success = state
-        return jnp.logical_and(
-            jnp.logical_not(success),
-            index < candidate_count,
-        )
-
-    def body_fun(state):
-        index, _solution, _success = state
-        solution, success = _solve_for_stab(candidate_stabs_array[index])
-        return index + next_index, solution, success
-
-    _, solution, success = lax.while_loop(
-        cond_fun,
-        body_fun,
-        (next_index, solution0, success0),
+    return _optimizer_jax._solve_hessian_system_with_status(
+        objective_fn,
+        solved_x,
+        rhs,
+        stab=float(linear_solve_stab),
+        tol=linear_solve_tol,
     )
-    return solution, success
 
 
 def _traceable_plu_matvec(linear_solve_factors, vector, *, transpose):
@@ -2528,7 +2486,7 @@ def _resolve_traceable_solved_state(
         return (
             solve_result["sdofs"],
             solve_result["iota"],
-            solve_result.get("G"),
+            solve_result["G"],
         )
     return booz_jax._unpack_decision_vector_jax(
         solve_result["x"],
@@ -2587,11 +2545,10 @@ def _traceable_general_forward_result(
             optimize_G=optimize_G,
             coil_set_spec=coil_set_spec,
         )
-        primal_success = solve_result.get("primal_success", solve_result["success"])
-        adjoint_linear_solve_available = solve_result.get(
-            "adjoint_linear_solve_available",
-            solve_result["success"],
-        )
+        primal_success = solve_result["primal_success"]
+        adjoint_linear_solve_available = solve_result[
+            "adjoint_linear_solve_available"
+        ]
         success = primal_success
         if success_filter is not None:
             success = success & jax.lax.cond(
@@ -3046,10 +3003,7 @@ def _build_traceable_objective_state(
         "mask_indices": mask_indices,
         "stellsym_surface": booz_jax.stellsym,
     }
-    linearization_kind = booz_jax.res.get(
-        "linearization_kind",
-        "exact_jacobian" if booz_jax.boozer_type == "exact" else "hessian",
-    )
+    linearization_kind = booz_jax.res["linearization_kind"]
     baseline_linear_solve_factors = (
         None if linearization_kind == "exact_jacobian" else booz_jax.res["PLU"]
     )
@@ -4085,42 +4039,38 @@ def _traceable_term_adjoint_solve_report(
             **_traceable_inner_objective_kwargs(objective_kwargs),
         )
         hvp_fn = _optimizer_jax._hessian_vector_product_fn(objective_fn)
-        attempts = []
-        for candidate_stab in booz_jax._adjoint_hessian_stabilization_schedule():
-            solution, attempt_success = (
-                _optimizer_jax._solve_hessian_system_with_status(
-                    objective_fn,
-                    solved_x,
-                    rhs,
-                    stab=float(candidate_stab),
-                    tol=linear_solve_tol,
-                )
-            )
-            residual_tol = _optimizer_jax._linear_solve_residual_tolerance(
-                rhs,
-                linear_solve_tol,
-            )
-            attempt = {
-                "stab": float(candidate_stab),
-                "success": bool(np.asarray(jax.device_get(attempt_success))),
-                "solution": _summarize_traceable_gradient(solution),
-                "solution_norm": _summarize_traceable_scalar(
-                    jnp.linalg.norm(solution)
-                ),
-                "residual_tolerance": _summarize_traceable_scalar(residual_tol),
-            }
-            if float(candidate_stab) == 0.0:
-                residual = rhs - hvp_fn(solved_x, solution)
-                residual_norm = jnp.linalg.norm(residual)
-                rhs_norm = jnp.linalg.norm(rhs)
-                attempt["residual_norm"] = _summarize_traceable_scalar(
-                    residual_norm
-                )
-                attempt["relative_residual"] = _summarize_traceable_scalar(
-                    residual_norm / rhs_norm
-                )
-            attempts.append(attempt)
-        report["hessian_operator"] = {"attempts": attempts}
+        candidate_stab = float(linear_solve_stab)
+        solution, attempt_success = _optimizer_jax._solve_hessian_system_with_status(
+            objective_fn,
+            solved_x,
+            rhs,
+            stab=candidate_stab,
+            tol=linear_solve_tol,
+        )
+        residual_tol = _optimizer_jax._linear_solve_residual_tolerance(
+            rhs,
+            linear_solve_tol,
+        )
+        residual = rhs - (hvp_fn(solved_x, solution) + candidate_stab * solution)
+        residual_norm = jnp.linalg.norm(residual)
+        rhs_norm = jnp.linalg.norm(rhs)
+        report["hessian_operator"] = {
+            "attempts": [
+                {
+                    "stab": candidate_stab,
+                    "success": bool(np.asarray(jax.device_get(attempt_success))),
+                    "solution": _summarize_traceable_gradient(solution),
+                    "solution_norm": _summarize_traceable_scalar(
+                        jnp.linalg.norm(solution)
+                    ),
+                    "residual_tolerance": _summarize_traceable_scalar(residual_tol),
+                    "residual_norm": _summarize_traceable_scalar(residual_norm),
+                    "relative_residual": _summarize_traceable_scalar(
+                        residual_norm / rhs_norm
+                    ),
+                }
+            ]
+        }
     return report
 
 

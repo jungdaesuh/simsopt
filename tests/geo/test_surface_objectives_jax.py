@@ -116,15 +116,8 @@ _TOROIDAL_FLUX_SURFACE_HESS_RTOL = 1e-8
 _TOROIDAL_FLUX_SURFACE_HESS_ATOL = 1e-10
 _TOROIDAL_FLUX_COIL_GRAD_RTOL = 1e-9
 _TOROIDAL_FLUX_COIL_GRAD_ATOL = 1e-7
-_TEST_HESSIAN_STABILIZATION_SCHEDULE = (0.0, 1.0e-4, 1.0e-3)
-
-
 def _make_test_hessian_booz():
-    return types.SimpleNamespace(
-        _adjoint_hessian_stabilization_schedule=(
-            lambda: _TEST_HESSIAN_STABILIZATION_SCHEDULE
-        )
-    )
+    return types.SimpleNamespace()
 
 
 def _patch_traceable_hessian_solve(monkeypatch, solve_hessian_system_with_status):
@@ -1247,7 +1240,7 @@ def test_traceable_exact_warmstart_success_matches_reference_operator_linearizat
     assert not np.allclose(np.asarray(predicted), baseline_x_np)
 
 
-def test_traceable_hessian_solve_retries_promoted_stabilization(monkeypatch):
+def test_traceable_hessian_solve_uses_configured_stabilization_once(monkeypatch):
     solved_x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
     rhs = jnp.asarray([0.25, -0.5], dtype=jnp.float64)
     calls = []
@@ -1264,8 +1257,7 @@ def test_traceable_hessian_solve_retries_promoted_stabilization(monkeypatch):
         calls.append(stab)
         np.testing.assert_allclose(np.asarray(current_x), np.asarray(solved_x))
         np.testing.assert_allclose(np.asarray(current_rhs), np.asarray(rhs))
-        if stab < 1.0e-4:
-            return current_rhs, jnp.asarray(False, dtype=bool)
+        assert stab == pytest.approx(1.0e-4)
         return 2.0 * current_rhs, jnp.asarray(True, dtype=bool)
 
     _patch_traceable_hessian_solve(
@@ -1282,16 +1274,16 @@ def test_traceable_hessian_solve_retries_promoted_stabilization(monkeypatch):
         linear_solve_factors=None,
         linearization_kind="hessian",
         linear_solve_tol=1.0e-10,
-        linear_solve_stab=0.0,
+        linear_solve_stab=1.0e-4,
         transpose=True,
     )
 
-    assert calls == [0.0, 1.0e-4]
+    assert calls == [1.0e-4]
     assert bool(np.asarray(success)) is True
     np.testing.assert_allclose(np.asarray(solution), np.asarray(2.0 * rhs))
 
 
-def test_traceable_hessian_solve_short_circuits_promoted_retries_under_jit(
+def test_traceable_hessian_solve_uses_configured_stabilization_under_jit(
     monkeypatch,
 ):
     solved_x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
@@ -1312,9 +1304,8 @@ def test_traceable_hessian_solve_short_circuits_promoted_retries_under_jit(
         del objective_fn, current_x, tol
         stab_value = jnp.asarray(stab, dtype=current_rhs.dtype)
         jax.debug.callback(_record_stab, stab_value, ordered=True)
-        success = stab_value >= jnp.asarray(1.0e-4, dtype=current_rhs.dtype)
-        solution = jnp.where(success, 2.0 * current_rhs, current_rhs)
-        return solution, success
+        success = stab_value == jnp.asarray(1.0e-4, dtype=current_rhs.dtype)
+        return 2.0 * current_rhs, success
 
     _patch_traceable_hessian_solve(
         monkeypatch,
@@ -1331,7 +1322,7 @@ def test_traceable_hessian_solve_short_circuits_promoted_retries_under_jit(
             linear_solve_factors=None,
             linearization_kind="hessian",
             linear_solve_tol=1.0e-10,
-            linear_solve_stab=0.0,
+            linear_solve_stab=1.0e-4,
             transpose=True,
         )
     )
@@ -1341,7 +1332,7 @@ def test_traceable_hessian_solve_short_circuits_promoted_retries_under_jit(
     assert bool(np.asarray(success)) is True
     np.testing.assert_allclose(
         np.asarray(recorded_stabs),
-        np.asarray([0.0, 1.0e-4]),
+        np.asarray([1.0e-4]),
     )
 
 
@@ -1868,6 +1859,11 @@ def test_build_traceable_objective_state_hostifies_runtime_constants(monkeypatch
         surface = _FakeSurface()
         res = {
             "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "weight_inv_modB": False,
+            "linearization_kind": "hessian",
+            "dense_linear_solve_factors_available": True,
             "iota": jnp.asarray(0.23, dtype=jnp.float64),
             "G": jnp.asarray(1.7, dtype=jnp.float64),
             "PLU": (
@@ -1983,6 +1979,10 @@ def test_build_traceable_objective_state_exact_carries_no_factors(monkeypatch):
         surface = _FakeSurface()
         res = {
             "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "weight_inv_modB": False,
+            "dense_linear_solve_factors_available": True,
             "iota": jnp.asarray(0.23, dtype=jnp.float64),
             "G": jnp.asarray(1.7, dtype=jnp.float64),
             "PLU": (
@@ -2052,6 +2052,7 @@ def test_iotas_jax_value_path_reads_solved_runtime_state(monkeypatch):
     fake_booz = types.SimpleNamespace(
         res={
             "success": True,
+            "primal_success": True,
         },
         need_to_run_code=False,
         get_solved_runtime_state=lambda: types.SimpleNamespace(
@@ -2108,7 +2109,7 @@ def test_iotas_jax_gradient_path_reads_adjoint_runtime_state(monkeypatch):
     )
 
     fake_booz = types.SimpleNamespace(
-        res={"success": True},
+        res={"success": True, "primal_success": True},
         need_to_run_code=False,
         get_solved_runtime_state=lambda: types.SimpleNamespace(
             sdofs=jnp.asarray([0.0, 1.0], dtype=jnp.float64),
@@ -2243,7 +2244,7 @@ def test_iotas_jax_native_gradient_stays_flat_until_public_boundary(monkeypatch)
     _patch_reject_coil_dofs_gradient_to_derivative(monkeypatch)
 
     fake_booz = types.SimpleNamespace(
-        res={"success": True},
+        res={"success": True, "primal_success": True},
         need_to_run_code=False,
         get_solved_runtime_state=lambda: types.SimpleNamespace(
             sdofs=jnp.asarray([0.0, 1.0], dtype=jnp.float64),
@@ -2436,7 +2437,7 @@ def test_iotas_jax_exact_wrapper_gradient_matches_dense_projection_unit(
         lambda _biotsavart, gradient: np.asarray(gradient, dtype=float),
     )
     fake_booz = types.SimpleNamespace(
-        res={"success": True},
+        res={"success": True, "primal_success": True},
         need_to_run_code=False,
         get_solved_runtime_state=lambda: types.SimpleNamespace(
             sdofs=jnp.asarray([0.0], dtype=jnp.float64),

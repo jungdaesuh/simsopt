@@ -57,6 +57,8 @@ from ..jax_core._math_utils import (
     concat_jax_float64 as _concat_jax_float64,
 )
 from .._core.optimizable import Optimizable
+from .surfacerzfourier import SurfaceRZFourier
+from .surfacexyzfourier import SurfaceXYZFourier
 from .surfacexyztensorfourier import SurfaceXYZTensorFourier
 
 
@@ -81,6 +83,7 @@ from ..jax_core.field import (
     grouped_coil_currents_from_inputs,
     grouped_coil_currents_from_spec,
     grouped_coil_index_lists_from_spec,
+    grouped_coil_set_spec_from_inputs,
     grouped_coil_set_spec_from_source,
     grouped_field_data_from_spec,
     grouped_field_inputs_from_spec,
@@ -239,6 +242,7 @@ class _BoozerLSGroupedVJPSnapshot:
     field_terms: _BoozerLocalFieldTerms | _BoozerToroidalFluxFieldTerms
     coil_set_spec: GroupedCoilSetSpec
     geometry: _BoozerPenaltyGeometry
+    label_geometry: _BoozerPenaltyGeometry
     mpol: int = field(metadata={"static": True})
     ntor: int = field(metadata={"static": True})
     nfp: int = field(metadata={"static": True})
@@ -246,6 +250,14 @@ class _BoozerLSGroupedVJPSnapshot:
     label_type: str = field(metadata={"static": True})
     phi_idx: int = field(metadata={"static": True})
     surface_kind: str = field(metadata={"static": True})
+    label_mpol: int = field(metadata={"static": True})
+    label_ntor: int = field(metadata={"static": True})
+    label_nfp: int = field(metadata={"static": True})
+    label_stellsym: bool = field(metadata={"static": True})
+    label_surface_kind: str = field(metadata={"static": True})
+    label_quadpoints_phi: jax.Array
+    label_quadpoints_theta: jax.Array
+    label_scatter_indices: jax.Array | None
     constraint_weight: float = field(metadata={"static": True})
     targetlabel: float = field(metadata={"static": True})
     optimize_G: bool = field(metadata={"static": True})
@@ -280,24 +292,30 @@ class _BoozerAdjointRuntimeState:
 
 
 def _surface_geometry_kind(surface) -> str:
-    deferred_surface_class = getattr(surface, "deferred_surface_class", None)
-    if deferred_surface_class == "SurfaceRZFourier":
+    if isinstance(surface, SurfaceRZFourier):
         return "rzfourier"
-    if deferred_surface_class == "SurfaceXYZFourier":
+    if isinstance(surface, SurfaceXYZFourier):
         return "xyzfourier"
-    surface_type_name = type(surface).__name__
-    if surface_type_name == "SurfaceRZFourier":
-        return "rzfourier"
-    if surface_type_name == "SurfaceXYZFourier":
-        return "xyzfourier"
-    return "generic"
+    if isinstance(surface, SurfaceXYZTensorFourier):
+        return "xyztensorfourier"
 
+    explicit_kind = getattr(surface, "jax_surface_kind", None)
+    if explicit_kind in {"generic", "rzfourier", "xyzfourier", "xyztensorfourier"}:
+        return explicit_kind
+    if explicit_kind is not None:
+        raise ValueError(
+            f"Unsupported BoozerSurfaceJAX jax_surface_kind {explicit_kind!r}."
+        )
 
-def _is_exact_surface_xyz_tensor_fourier(surface) -> bool:
-    return (
-        isinstance(surface, SurfaceXYZTensorFourier)
-        or getattr(surface, "deferred_surface_class", None) == "SurfaceXYZTensorFourier"
+    raise TypeError(
+        f"Unsupported BoozerSurfaceJAX surface type {type(surface).__name__!r}. "
+        "Supported surfaces must be real SurfaceRZFourier, SurfaceXYZFourier, "
+        "SurfaceXYZTensorFourier, or expose an explicit jax_surface_kind."
     )
+
+
+def _is_exact_surface_xyz_tensor_fourier(surface_kind: str) -> bool:
+    return surface_kind == "xyztensorfourier"
 
 
 def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
@@ -305,7 +323,7 @@ def build_boozer_surface_runtime_state(surface) -> _BoozerSurfaceRuntimeState:
     scatter_indices = None
     if surface.stellsym:
         geometry_kind = _surface_geometry_kind(surface)
-        if geometry_kind == "generic":
+        if geometry_kind in {"generic", "xyztensorfourier"}:
             scatter_indices = _generic_surface_scatter_operator(
                 surface.mpol,
                 surface.ntor,
@@ -383,7 +401,7 @@ def _prepare_result_callback(
         callback,
         biotsavart=booz_surf.biotsavart,
         component="BoozerSurfaceJAX",
-        coil_attrs=("_coils",),
+        coil_attrs=("coils",),
         G_provided=G_provided,
     )
     callback = _require_boozer_vjp_callback_signature(
@@ -556,7 +574,11 @@ def _grouped_coil_currents(*, coil_arrays=None, coil_set_spec=None):
 
 
 def _resolved_coil_set_spec(default_spec, *, coil_arrays=None, coil_set_spec=None):
-    return default_spec if coil_set_spec is None else coil_set_spec
+    if coil_set_spec is not None:
+        return coil_set_spec
+    if coil_arrays is not None:
+        return grouped_coil_set_spec_from_inputs(coil_arrays)
+    return default_spec
 
 
 def _grouped_biot_savart_B_points(points, *, coil_arrays=None, coil_set_spec=None):
@@ -585,8 +607,34 @@ def _geometry_from_x(
     optimize_G,
 ):
     optimizer_state = _as_boozer_penalty_optimizer_state(x, optimize_G=optimize_G)
-    gamma, xphi, xtheta = _surface_geometry_from_dofs(
+    geometry = _geometry_from_surface_dofs(
         optimizer_state.surface_dofs,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
+        surface_kind=surface_kind,
+    )
+    return geometry, optimizer_state
+
+
+def _geometry_from_surface_dofs(
+    surface_dofs,
+    *,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    surface_kind,
+):
+    gamma, xphi, xtheta = _surface_geometry_from_dofs(
+        surface_dofs,
         quadpoints_phi,
         quadpoints_theta,
         mpol,
@@ -596,7 +644,7 @@ def _geometry_from_x(
         scatter_indices,
         surface_kind=surface_kind,
     )
-    return _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta), optimizer_state
+    return _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta)
 
 
 def _penalty_params(
@@ -640,9 +688,12 @@ def _forward_field_terms_for_local_label(
     points,
     field_shape,
     *,
+    label_points,
+    label_field_shape,
     coil_arrays=None,
     coil_set_spec=None,
 ):
+    del label_points, label_field_shape
     return _BoozerForwardLocalFieldTerms(
         B=_reshape_vector_field(
             _grouped_biot_savart_B_points(
@@ -659,6 +710,8 @@ def _forward_field_terms_for_toroidal_flux(
     points,
     field_shape,
     *,
+    label_points,
+    label_field_shape,
     coil_arrays=None,
     coil_set_spec=None,
 ):
@@ -673,16 +726,25 @@ def _forward_field_terms_for_toroidal_flux(
         ),
         A=_reshape_vector_field(
             _grouped_biot_savart_A_points(
-                points,
+                label_points,
                 coil_arrays=coil_arrays,
                 coil_set_spec=coil_set_spec,
             ),
-            field_shape,
+            label_field_shape,
         ),
     )
 
 
-def _field_terms_for_local_label(points, field_shape, *, coil_set_spec=None, group=None):
+def _field_terms_for_local_label(
+    points,
+    field_shape,
+    *,
+    label_points,
+    label_field_shape,
+    coil_set_spec=None,
+    group=None,
+):
+    del label_points, label_field_shape
     if group is None:
         B, dB_dX = grouped_biot_savart_B_and_dB_from_spec(points, coil_set_spec)
     else:
@@ -701,30 +763,38 @@ def _field_terms_for_toroidal_flux(
     points,
     field_shape,
     *,
+    label_points,
+    label_field_shape,
     coil_set_spec=None,
     group=None,
 ):
     local_terms = _field_terms_for_local_label(
         points,
         field_shape,
+        label_points=label_points,
+        label_field_shape=label_field_shape,
         coil_set_spec=coil_set_spec,
         group=group,
     )
     if group is None:
-        A = grouped_biot_savart_A_from_spec(points, coil_set_spec)
-        dA_dX = grouped_biot_savart_dA_by_dX_from_spec(points, coil_set_spec)
+        A = grouped_biot_savart_A_from_spec(label_points, coil_set_spec)
+        dA_dX = grouped_biot_savart_dA_by_dX_from_spec(label_points, coil_set_spec)
     else:
-        A, _config = _evaluate_grouped_field_group(points, *group, biot_savart_A)
+        A, _config = _evaluate_grouped_field_group(
+            label_points,
+            *group,
+            biot_savart_A,
+        )
         dA_dX, _config = _evaluate_grouped_field_group(
-            points,
+            label_points,
             *group,
             biot_savart_dA_by_dX,
         )
     return _BoozerToroidalFluxFieldTerms(
         B=local_terms.B,
         dB_dX=local_terms.dB_dX,
-        A=_reshape_vector_field(A, field_shape),
-        dA_dX=_reshape_field_jacobian(dA_dX, field_shape),
+        A=_reshape_vector_field(A, label_field_shape),
+        dA_dX=_reshape_field_jacobian(dA_dX, label_field_shape),
     )
 
 
@@ -741,25 +811,26 @@ def _select_structured_field_terms_builder(label_type):
 
 
 def _label_from_geometry_and_field_terms(
-    geometry: _BoozerPenaltyGeometry,
+    label_geometry: _BoozerPenaltyGeometry,
     field_terms,
     params: _BoozerPenaltyParams,
 ):
-    normal = _cross_product(geometry.xphi, geometry.xtheta)
+    normal = _cross_product(label_geometry.xphi, label_geometry.xtheta)
     if params.label_type == "volume":
-        return volume_jax(geometry.gamma, normal)
+        return volume_jax(label_geometry.gamma, normal)
     if params.label_type == "area":
         return area_jax(normal)
-    ntheta = geometry.gamma.shape[1]
+    ntheta = label_geometry.gamma.shape[1]
     return toroidal_flux_jax(
         _select_axis0(field_terms.A, params.phi_idx),
-        _select_axis0(geometry.xtheta, params.phi_idx),
+        _select_axis0(label_geometry.xtheta, params.phi_idx),
         ntheta,
     )
 
 
 def _penalty_from_geometry_and_field_terms(
     geometry: _BoozerPenaltyGeometry,
+    label_geometry: _BoozerPenaltyGeometry,
     field_terms,
     params: _BoozerPenaltyParams,
 ):
@@ -771,7 +842,11 @@ def _penalty_from_geometry_and_field_terms(
         geometry.xtheta,
         params.weight_inv_modB,
     )
-    label_val = _label_from_geometry_and_field_terms(geometry, field_terms, params)
+    label_val = _label_from_geometry_and_field_terms(
+        label_geometry,
+        field_terms,
+        params,
+    )
     gamma_axis_z = _surface_sample_z(geometry.gamma)
     half = _as_jax_float64(0.5)
     label_delta = label_val - params.targetlabel
@@ -782,11 +857,9 @@ def _penalty_from_geometry_and_field_terms(
 
 def _compute_label(
     label_type,
-    gamma,
-    xphi,
-    xtheta,
+    label_geometry: _BoozerPenaltyGeometry,
     phi_idx,
-    points,
+    label_points,
     coil_arrays=None,
     coil_set_spec=None,
 ):
@@ -794,31 +867,30 @@ def _compute_label(
 
     Shared by penalty objective, exact residual, and residual vector.
     """
-    normal = _cross_product(xphi, xtheta)
+    normal = _cross_product(label_geometry.xphi, label_geometry.xtheta)
     if label_type == "volume":
-        return volume_jax(gamma, normal)
+        return volume_jax(label_geometry.gamma, normal)
     if label_type == "area":
         return area_jax(normal)
-    ntheta = gamma.shape[1]
+    ntheta = label_geometry.gamma.shape[1]
     A = _grouped_biot_savart_A_points(
-        points,
+        label_points,
         coil_arrays=coil_arrays,
         coil_set_spec=coil_set_spec,
     )
-    A = A.reshape(gamma.shape)
+    A = A.reshape(label_geometry.gamma.shape)
     return toroidal_flux_jax(
         _select_axis0(A, phi_idx),
-        _select_axis0(xtheta, phi_idx),
+        _select_axis0(label_geometry.xtheta, phi_idx),
         ntheta,
     )
 
 
 def _compute_label_and_axis_z(
     *,
-    gamma,
-    xphi,
-    xtheta,
-    points,
+    geometry: _BoozerPenaltyGeometry,
+    label_geometry: _BoozerPenaltyGeometry,
+    label_points,
     label_type,
     phi_idx,
     coil_arrays=None,
@@ -826,15 +898,13 @@ def _compute_label_and_axis_z(
 ):
     label_value = _compute_label(
         label_type,
-        gamma,
-        xphi,
-        xtheta,
+        label_geometry,
         phi_idx,
-        points,
+        label_points,
         coil_arrays=coil_arrays,
         coil_set_spec=coil_set_spec,
     )
-    return label_value, _surface_sample_z(gamma)
+    return label_value, _surface_sample_z(geometry.gamma)
 
 
 def _boozer_penalty_objective(
@@ -850,6 +920,14 @@ def _boozer_penalty_objective(
     stellsym,
     scatter_indices,
     surface_kind,
+    label_quadpoints_phi,
+    label_quadpoints_theta,
+    label_mpol,
+    label_ntor,
+    label_nfp,
+    label_stellsym,
+    label_scatter_indices,
+    label_surface_kind,
     targetlabel,
     constraint_weight,
     label_type,
@@ -880,6 +958,17 @@ def _boozer_penalty_objective(
         surface_kind=surface_kind,
         optimize_G=optimize_G,
     )
+    label_geometry = _geometry_from_surface_dofs(
+        optimizer_state.surface_dofs,
+        quadpoints_phi=label_quadpoints_phi,
+        quadpoints_theta=label_quadpoints_theta,
+        mpol=label_mpol,
+        ntor=label_ntor,
+        nfp=label_nfp,
+        stellsym=label_stellsym,
+        scatter_indices=label_scatter_indices,
+        surface_kind=label_surface_kind,
+    )
     if optimize_G:
         G = optimizer_state.G
     else:
@@ -899,13 +988,21 @@ def _boozer_penalty_objective(
         weight_inv_modB=weight_inv_modB,
     )
     points = _field_points_from_geometry(geometry)
+    label_points = _field_points_from_geometry(label_geometry)
     field_terms = _select_forward_field_terms_builder(label_type)(
         points,
         _field_shape_from_geometry(geometry),
+        label_points=label_points,
+        label_field_shape=_field_shape_from_geometry(label_geometry),
         coil_arrays=coil_arrays,
         coil_set_spec=coil_set_spec,
     )
-    return _penalty_from_geometry_and_field_terms(geometry, field_terms, params)
+    return _penalty_from_geometry_and_field_terms(
+        geometry,
+        label_geometry,
+        field_terms,
+        params,
+    )
 
 
 def _boozer_penalty_residual_vector(
@@ -921,6 +1018,14 @@ def _boozer_penalty_residual_vector(
     stellsym,
     scatter_indices,
     surface_kind,
+    label_quadpoints_phi,
+    label_quadpoints_theta,
+    label_mpol,
+    label_ntor,
+    label_nfp,
+    label_stellsym,
+    label_scatter_indices,
+    label_surface_kind,
     targetlabel,
     constraint_weight,
     label_type,
@@ -947,6 +1052,17 @@ def _boozer_penalty_residual_vector(
         scatter_indices,
         surface_kind=surface_kind,
     )
+    label_geometry = _geometry_from_surface_dofs(
+        optimizer_state.surface_dofs,
+        quadpoints_phi=label_quadpoints_phi,
+        quadpoints_theta=label_quadpoints_theta,
+        mpol=label_mpol,
+        ntor=label_ntor,
+        nfp=label_nfp,
+        stellsym=label_stellsym,
+        scatter_indices=label_scatter_indices,
+        surface_kind=label_surface_kind,
+    )
     nphi, ntheta = int(gamma.shape[0]), int(gamma.shape[1])
     points = gamma.reshape(-1, 3)
     B = _grouped_biot_savart_B_points(
@@ -969,10 +1085,9 @@ def _boozer_penalty_residual_vector(
     constraint_weight = constraint_weight if constraint_weight is not None else 1.0
     constraint_weight = _as_jax_float64(constraint_weight)
     label_value, gamma_axis_z = _compute_label_and_axis_z(
-        gamma=gamma,
-        xphi=xphi,
-        xtheta=xtheta,
-        points=points,
+        geometry=_BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta),
+        label_geometry=label_geometry,
+        label_points=_field_points_from_geometry(label_geometry),
         label_type=label_type,
         phi_idx=phi_idx,
         coil_arrays=coil_arrays,
@@ -998,6 +1113,14 @@ def _boozer_exact_residual(
     stellsym,
     scatter_indices,
     surface_kind,
+    label_quadpoints_phi,
+    label_quadpoints_theta,
+    label_mpol,
+    label_ntor,
+    label_nfp,
+    label_stellsym,
+    label_scatter_indices,
+    label_surface_kind,
     targetlabel,
     label_type,
     phi_idx,
@@ -1025,6 +1148,14 @@ def _boozer_exact_residual(
         stellsym=stellsym,
         scatter_indices=scatter_indices,
         surface_kind=surface_kind,
+        label_quadpoints_phi=label_quadpoints_phi,
+        label_quadpoints_theta=label_quadpoints_theta,
+        label_mpol=label_mpol,
+        label_ntor=label_ntor,
+        label_nfp=label_nfp,
+        label_stellsym=label_stellsym,
+        label_scatter_indices=label_scatter_indices,
+        label_surface_kind=label_surface_kind,
         targetlabel=targetlabel,
         label_type=label_type,
         phi_idx=phi_idx,
@@ -1058,6 +1189,14 @@ def _boozer_exact_residual_impl(
     stellsym,
     scatter_indices,
     surface_kind,
+    label_quadpoints_phi,
+    label_quadpoints_theta,
+    label_mpol,
+    label_ntor,
+    label_nfp,
+    label_stellsym,
+    label_scatter_indices,
+    label_surface_kind,
     targetlabel,
     label_type,
     phi_idx,
@@ -1086,6 +1225,17 @@ def _boozer_exact_residual_impl(
         scatter_indices,
         surface_kind=surface_kind,
     )
+    label_geometry = _geometry_from_surface_dofs(
+        sdofs,
+        quadpoints_phi=label_quadpoints_phi,
+        quadpoints_theta=label_quadpoints_theta,
+        mpol=label_mpol,
+        ntor=label_ntor,
+        nfp=label_nfp,
+        stellsym=label_stellsym,
+        scatter_indices=label_scatter_indices,
+        surface_kind=label_surface_kind,
+    )
     nphi, ntheta = gamma.shape[:2]
 
     points = gamma.reshape(-1, 3)
@@ -1100,10 +1250,9 @@ def _boozer_exact_residual_impl(
     r_masked = r_flat[mask_indices]
 
     label_val, gamma_axis_z = _compute_label_and_axis_z(
-        gamma=gamma,
-        xphi=xphi,
-        xtheta=xtheta,
-        points=points,
+        geometry=_BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta),
+        label_geometry=label_geometry,
+        label_points=_field_points_from_geometry(label_geometry),
         label_type=label_type,
         phi_idx=phi_idx,
         coil_arrays=coil_arrays,
@@ -1131,6 +1280,14 @@ def _boozer_exact_residual_stellsym(
     stellsym,
     scatter_indices,
     surface_kind,
+    label_quadpoints_phi,
+    label_quadpoints_theta,
+    label_mpol,
+    label_ntor,
+    label_nfp,
+    label_stellsym,
+    label_scatter_indices,
+    label_surface_kind,
     targetlabel,
     label_type,
     phi_idx,
@@ -1149,6 +1306,14 @@ def _boozer_exact_residual_stellsym(
         stellsym=stellsym,
         scatter_indices=scatter_indices,
         surface_kind=surface_kind,
+        label_quadpoints_phi=label_quadpoints_phi,
+        label_quadpoints_theta=label_quadpoints_theta,
+        label_mpol=label_mpol,
+        label_ntor=label_ntor,
+        label_nfp=label_nfp,
+        label_stellsym=label_stellsym,
+        label_scatter_indices=label_scatter_indices,
+        label_surface_kind=label_surface_kind,
         targetlabel=targetlabel,
         label_type=label_type,
         phi_idx=phi_idx,
@@ -1171,6 +1336,14 @@ def _boozer_exact_residual_nonstellsym(
     stellsym,
     scatter_indices,
     surface_kind,
+    label_quadpoints_phi,
+    label_quadpoints_theta,
+    label_mpol,
+    label_ntor,
+    label_nfp,
+    label_stellsym,
+    label_scatter_indices,
+    label_surface_kind,
     targetlabel,
     label_type,
     phi_idx,
@@ -1189,6 +1362,14 @@ def _boozer_exact_residual_nonstellsym(
         stellsym=stellsym,
         scatter_indices=scatter_indices,
         surface_kind=surface_kind,
+        label_quadpoints_phi=label_quadpoints_phi,
+        label_quadpoints_theta=label_quadpoints_theta,
+        label_mpol=label_mpol,
+        label_ntor=label_ntor,
+        label_nfp=label_nfp,
+        label_stellsym=label_stellsym,
+        label_scatter_indices=label_scatter_indices,
+        label_surface_kind=label_surface_kind,
         targetlabel=targetlabel,
         label_type=label_type,
         phi_idx=phi_idx,
@@ -1239,6 +1420,14 @@ def _boozer_exact_coil_vjp(lm, booz_surf, iota, G):
             stellsym=booz_surf.stellsym,
             scatter_indices=booz_surf.scatter_indices,
             surface_kind=booz_surf._surface_geometry_kind,
+            label_quadpoints_phi=booz_surf.label_quadpoints_phi,
+            label_quadpoints_theta=booz_surf.label_quadpoints_theta,
+            label_mpol=booz_surf.label_mpol,
+            label_ntor=booz_surf.label_ntor,
+            label_nfp=booz_surf.label_nfp,
+            label_stellsym=booz_surf.label_stellsym,
+            label_scatter_indices=booz_surf.label_scatter_indices,
+            label_surface_kind=booz_surf._label_surface_geometry_kind,
             targetlabel=booz_surf.targetlabel,
             label_type=booz_surf.label_type,
             phi_idx=booz_surf.phi_idx,
@@ -1306,6 +1495,14 @@ def _make_exact_group_runner(x, coil_arrays, booz_surf, mask_indices, group_inde
             stellsym=booz_surf.stellsym,
             scatter_indices=booz_surf.scatter_indices,
             surface_kind=booz_surf._surface_geometry_kind,
+            label_quadpoints_phi=booz_surf.label_quadpoints_phi,
+            label_quadpoints_theta=booz_surf.label_quadpoints_theta,
+            label_mpol=booz_surf.label_mpol,
+            label_ntor=booz_surf.label_ntor,
+            label_nfp=booz_surf.label_nfp,
+            label_stellsym=booz_surf.label_stellsym,
+            label_scatter_indices=booz_surf.label_scatter_indices,
+            label_surface_kind=booz_surf._label_surface_geometry_kind,
             targetlabel=booz_surf.targetlabel,
             label_type=booz_surf.label_type,
             phi_idx=booz_surf.phi_idx,
@@ -1401,10 +1598,18 @@ def _build_ls_group_vjp_callback(
         field_terms_builder = _select_structured_field_terms_builder(snapshot.label_type)
         points = _field_points_from_geometry(snapshot.geometry)
         field_shape = _field_shape_from_geometry(snapshot.geometry)
+        label_points = _field_points_from_geometry(snapshot.label_geometry)
+        label_field_shape = _field_shape_from_geometry(snapshot.label_geometry)
         for group_array, group_index_tuple in zip(coil_arrays, snapshot.coil_indices):
 
             def field_terms_of_group(group):
-                return field_terms_builder(points, field_shape, group=group)
+                return field_terms_builder(
+                    points,
+                    field_shape,
+                    label_points=label_points,
+                    label_field_shape=label_field_shape,
+                    group=group,
+                )
 
             _, pullback = jax.vjp(field_terms_of_group, group_array)
             d_group = pullback(bar_field_terms)[0]
@@ -1444,9 +1649,22 @@ def _build_ls_grouped_vjp_snapshot(
     )
     coil_currents = _grouped_coil_currents(coil_set_spec=coil_set_spec)
     G_value = optimizer_state.G if optimize_G else compute_G_from_currents(coil_currents)
+    label_geometry = _geometry_from_surface_dofs(
+        optimizer_state.surface_dofs,
+        quadpoints_phi=booz_surf.label_quadpoints_phi,
+        quadpoints_theta=booz_surf.label_quadpoints_theta,
+        mpol=booz_surf.label_mpol,
+        ntor=booz_surf.label_ntor,
+        nfp=booz_surf.label_nfp,
+        stellsym=booz_surf.label_stellsym,
+        scatter_indices=booz_surf.label_scatter_indices,
+        surface_kind=booz_surf._label_surface_geometry_kind,
+    )
     field_terms = _select_structured_field_terms_builder(booz_surf.label_type)(
         _field_points_from_geometry(geometry),
         _field_shape_from_geometry(geometry),
+        label_points=_field_points_from_geometry(label_geometry),
+        label_field_shape=_field_shape_from_geometry(label_geometry),
         coil_set_spec=coil_set_spec,
     )
     return _BoozerLSGroupedVJPSnapshot(
@@ -1460,6 +1678,7 @@ def _build_ls_grouped_vjp_snapshot(
         field_terms=field_terms,
         coil_set_spec=coil_set_spec,
         geometry=geometry,
+        label_geometry=label_geometry,
         mpol=booz_surf.mpol,
         ntor=booz_surf.ntor,
         nfp=booz_surf.nfp,
@@ -1467,6 +1686,14 @@ def _build_ls_grouped_vjp_snapshot(
         label_type=booz_surf.label_type,
         phi_idx=booz_surf.phi_idx,
         surface_kind=booz_surf._surface_geometry_kind,
+        label_mpol=booz_surf.label_mpol,
+        label_ntor=booz_surf.label_ntor,
+        label_nfp=booz_surf.label_nfp,
+        label_stellsym=booz_surf.label_stellsym,
+        label_surface_kind=booz_surf._label_surface_geometry_kind,
+        label_quadpoints_phi=booz_surf.label_quadpoints_phi,
+        label_quadpoints_theta=booz_surf.label_quadpoints_theta,
+        label_scatter_indices=booz_surf.label_scatter_indices,
         constraint_weight=booz_surf.constraint_weight,
         targetlabel=booz_surf.targetlabel,
         optimize_G=optimize_G,
@@ -1502,6 +1729,32 @@ def _geometry_tangent_from_decision_tangent(
     return geometry_tangent
 
 
+def _label_geometry_tangent_from_decision_tangent(
+    snapshot: _BoozerLSGroupedVJPSnapshot,
+    tangent_state,
+):
+    def geometry_of_surface_dofs(surface_dofs):
+        gamma, xphi, xtheta = _surface_geometry_from_dofs(
+            surface_dofs,
+            snapshot.label_quadpoints_phi,
+            snapshot.label_quadpoints_theta,
+            snapshot.label_mpol,
+            snapshot.label_ntor,
+            snapshot.label_nfp,
+            snapshot.label_stellsym,
+            snapshot.label_scatter_indices,
+            surface_kind=snapshot.label_surface_kind,
+        )
+        return _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta)
+
+    _, geometry_tangent = jax.jvp(
+        geometry_of_surface_dofs,
+        (snapshot.surface_dofs,),
+        (tangent_state.surface_dofs,),
+    )
+    return geometry_tangent
+
+
 def _spatial_field_dot(field_jacobian, geometry_tangent: _BoozerPenaltyGeometry):
     return jnp.einsum("...j,...jl->...l", geometry_tangent.gamma, field_jacobian)
 
@@ -1515,12 +1768,13 @@ def _forward_field_values_from_structured_terms(field_terms):
 def _forward_field_tangent_from_structured_terms(
     field_terms,
     geometry_tangent: _BoozerPenaltyGeometry,
+    label_geometry_tangent: _BoozerPenaltyGeometry,
 ):
     B_dot = _spatial_field_dot(field_terms.dB_dX, geometry_tangent)
     if isinstance(field_terms, _BoozerToroidalFluxFieldTerms):
         return _BoozerForwardToroidalFluxFieldTerms(
             B=B_dot,
-            A=_spatial_field_dot(field_terms.dA_dX, geometry_tangent),
+            A=_spatial_field_dot(field_terms.dA_dX, label_geometry_tangent),
         )
     return _BoozerForwardLocalFieldTerms(B=B_dot)
 
@@ -1566,27 +1820,38 @@ def _ls_directional_from_field_terms(
         weight_inv_modB=snapshot.weight_inv_modB,
     )
     geometry_tangent = _geometry_tangent_from_decision_tangent(snapshot, tangent_state)
+    label_geometry_tangent = _label_geometry_tangent_from_decision_tangent(
+        snapshot,
+        tangent_state,
+    )
     field_values = _forward_field_values_from_structured_terms(field_terms)
     field_tangent = _forward_field_tangent_from_structured_terms(
         field_terms,
         geometry_tangent,
+        label_geometry_tangent,
     )
     params_tangent = _penalty_params_tangent_from_decision_tangent(
         params,
         tangent_state,
     )
 
-    def reduced(geometry, values, reduced_params):
+    def reduced(geometry, label_geometry, values, reduced_params):
         return _penalty_from_geometry_and_field_terms(
             geometry,
+            label_geometry,
             values,
             reduced_params,
         )
 
     _, directional = jax.jvp(
         reduced,
-        (snapshot.geometry, field_values, params),
-        (geometry_tangent, field_tangent, params_tangent),
+        (snapshot.geometry, snapshot.label_geometry, field_values, params),
+        (
+            geometry_tangent,
+            label_geometry_tangent,
+            field_tangent,
+            params_tangent,
+        ),
     )
     return directional
 
@@ -1672,6 +1937,14 @@ def _make_ls_penalty_objective(
         stellsym=booz_surf.stellsym,
         scatter_indices=booz_surf.scatter_indices,
         surface_kind=booz_surf._surface_geometry_kind,
+        label_quadpoints_phi=booz_surf.label_quadpoints_phi,
+        label_quadpoints_theta=booz_surf.label_quadpoints_theta,
+        label_mpol=booz_surf.label_mpol,
+        label_ntor=booz_surf.label_ntor,
+        label_nfp=booz_surf.label_nfp,
+        label_stellsym=booz_surf.label_stellsym,
+        label_scatter_indices=booz_surf.label_scatter_indices,
+        label_surface_kind=booz_surf._label_surface_geometry_kind,
         targetlabel=booz_surf.targetlabel,
         constraint_weight=booz_surf.constraint_weight,
         label_type=booz_surf.label_type,
@@ -2042,9 +2315,16 @@ class BoozerSurfaceJAX(Optimizable):
             if surface_runtime_state is not None
             else build_boozer_surface_runtime_state(surface)
         )
+        label_surface = label.surface
+        label_runtime_state = (
+            runtime_state
+            if label_surface is surface
+            else build_boozer_surface_runtime_state(label_surface)
+        )
 
         # --- Extract immutable surface metadata once; keep DOFs cached locally ---
         self._surface_runtime_state = runtime_state
+        self._label_surface_runtime_state = label_runtime_state
         self._surface_dofs = _as_jax_float64(surface.get_dofs())
         self._exact_mask_indices = None
         self.mpol = runtime_state.mpol
@@ -2055,6 +2335,14 @@ class BoozerSurfaceJAX(Optimizable):
         self.quadpoints_theta = runtime_state.quadpoints_theta
         self._surface_geometry_kind = runtime_state.surface_kind
         self.scatter_indices = runtime_state.scatter_indices
+        self.label_mpol = label_runtime_state.mpol
+        self.label_ntor = label_runtime_state.ntor
+        self.label_nfp = label_runtime_state.nfp
+        self.label_stellsym = label_runtime_state.stellsym
+        self.label_quadpoints_phi = label_runtime_state.quadpoints_phi
+        self.label_quadpoints_theta = label_runtime_state.quadpoints_theta
+        self._label_surface_geometry_kind = label_runtime_state.surface_kind
+        self.label_scatter_indices = label_runtime_state.scatter_indices
 
         # Toroidal flux phi index (first phi point by default)
         self.phi_idx = 0
@@ -2085,9 +2373,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "BoozerSurfaceJAX solve state is stale. Re-run "
                 "boozer_surface.run_code(...) before requesting a runtime summary."
             )
-        if self.res is None or not bool(
-            self.res.get("primal_success", self.res.get("success"))
-        ):
+        if self.res is None or not bool(self.res["primal_success"]):
             raise RuntimeError(
                 "BoozerSurfaceJAX has no successful solve state. "
                 "Call boozer_surface.run_code(...) before requesting a solved "
@@ -2099,9 +2385,7 @@ class BoozerSurfaceJAX(Optimizable):
             sdofs=self._get_cached_surface_dofs(),
             iota=_as_jax_float64(self.res["iota"]),
             G=solved_G,
-            weight_inv_modB=bool(
-                self.res.get("weight_inv_modB", self.options["weight_inv_modB"])
-            ),
+            weight_inv_modB=bool(self.res["weight_inv_modB"]),
         )
 
     def _linear_solve_tolerance(self):
@@ -2119,42 +2403,10 @@ class BoozerSurfaceJAX(Optimizable):
             ),
         )
 
-    def _adjoint_hessian_stabilization_schedule(self):
-        """Return escalating ridge values for nearly singular LS adjoint Hessians.
-
-        The ondevice quasi-Newton lane can converge to a point whose Hessian is
-        numerically singular in directions that do not affect the primal accept
-        step but do matter when wrapper gradients solve the adjoint system. Use
-        a tolerance-scaled ridge schedule on the runtime-only adjoint path so
-        the matrix-free solve can recover without forcing dense artifacts.
-        """
-        base_stab = max(float(self.options["newton_stab"]), 0.0)
-        tol_floor = float(
-            np.sqrt(max(float(self.options["newton_tol"]), np.finfo(np.float64).eps))
-        )
-        max_promoted_stab = max(base_stab, 1.0e-2)
-        candidate_stabs = []
-        for candidate in (
-            base_stab,
-            min(max(base_stab, tol_floor), max_promoted_stab),
-            min(max(base_stab, tol_floor * 10.0), max_promoted_stab),
-            min(max(base_stab, tol_floor * 100.0), max_promoted_stab),
-            min(max(base_stab, tol_floor * 1000.0), max_promoted_stab),
-        ):
-            candidate = float(candidate)
-            if not candidate_stabs or candidate > candidate_stabs[-1]:
-                candidate_stabs.append(candidate)
-        return tuple(candidate_stabs)
-
     def _resolved_linearization_kind(self):
         if self.boozer_type == "exact":
             return "exact_jacobian"
-        if self.res is not None and self.res.get("linearization_kind") is not None:
-            return self.res["linearization_kind"]
-        optimizer_method = self.res.get("optimizer_method")
-        if optimizer_method in {"lm", "lm-ondevice"}:
-            return "least_squares_normal"
-        return "hessian"
+        return self.res["linearization_kind"]
 
     def _build_runtime_linear_solve_callbacks(self, solved_state):
         linearization_kind = self._resolved_linearization_kind()
@@ -2248,47 +2500,37 @@ class BoozerSurfaceJAX(Optimizable):
                 hostify_inputs=False,
             )
             hvp_fn = _optimizer_jax._hessian_vector_product_fn(objective_fn)
-            # solve_state["stab"] is promoted by solve_forward_with_status when
-            # the base ridge cannot invert the Hessian. apply_forward and the
-            # plain solve_forward read the latest promoted value so that any
-            # subsequent linearization call stays algebraically consistent with
-            # the solve it paired with. Call sites must therefore remain eager
-            # (host-resident) — do NOT jit apply_forward or the mutation will
-            # be invisible to the cached trace.
-            solve_state = {"stab": float(self.options["newton_stab"])}
+            stab = float(self.options["newton_stab"])
 
             def apply_forward(rhs):
                 rhs = jnp.asarray(rhs)
-                stab_value = jnp.asarray(solve_state["stab"], dtype=rhs.dtype)
-                return hvp_fn(x, rhs) + stab_value * rhs
+                stab_value = jnp.asarray(stab, dtype=rhs.dtype)
+
+                def apply_column(column):
+                    return hvp_fn(x, column) + stab_value * column
+
+                return _optimizer_jax._apply_column_batched_operator(
+                    apply_column,
+                    rhs,
+                )
 
             def solve_forward(rhs):
                 return _optimizer_jax._solve_hessian_system(
                     objective_fn,
                     x,
                     rhs,
-                    stab=solve_state["stab"],
+                    stab=stab,
                     tol=tol_host,
                 )
 
             def solve_forward_with_status(rhs):
-                last_solution = None
-                last_success = False
-                for candidate_stab in self._adjoint_hessian_stabilization_schedule():
-                    candidate_stab_value = float(candidate_stab)
-                    solution, success = _optimizer_jax._solve_hessian_system_with_status(
-                        objective_fn,
-                        x,
-                        rhs,
-                        stab=candidate_stab_value,
-                        tol=tol_host,
-                    )
-                    last_solution = solution
-                    last_success = success
-                    if _host_bool(success):
-                        solve_state["stab"] = candidate_stab_value
-                        break
-                return last_solution, last_success
+                return _optimizer_jax._solve_hessian_system_with_status(
+                    objective_fn,
+                    x,
+                    rhs,
+                    stab=stab,
+                    tol=tol_host,
+                )
 
             return pack_callbacks(
                 apply_forward,
@@ -2349,8 +2591,7 @@ class BoozerSurfaceJAX(Optimizable):
         """Return the last successful adjoint-state summary for wrapper gradients."""
         solved_state = self.get_solved_runtime_state()
         if (
-            not bool(self.res.get("adjoint_linear_solve_available", True))
-            or "vjp_groups" not in self.res
+            not bool(self.res["adjoint_linear_solve_available"])
             or self.res["vjp_groups"] is None
         ):
             raise RuntimeError(
@@ -2390,10 +2631,7 @@ class BoozerSurfaceJAX(Optimizable):
             stream_group_vjps=stream_group_vjps,
             linear_solve_backend=linear_solve_backend,
             dense_linear_solve_factors_available=bool(
-                self.res.get(
-                    "dense_linear_solve_factors_available",
-                    self.res.get("PLU") is not None,
-                )
+                self.res["dense_linear_solve_factors_available"]
             ),
             linear_solve_factors=None,
         )
@@ -2413,7 +2651,7 @@ class BoozerSurfaceJAX(Optimizable):
         _require_fixed_currents_for_none_G(
             self.biotsavart,
             component="BoozerSurfaceJAX",
-            coil_attrs=("_coils",),
+            coil_attrs=("coils",),
         )
 
     def _refresh_coil_data(self):
@@ -2612,6 +2850,14 @@ class BoozerSurfaceJAX(Optimizable):
                     stellsym=self.stellsym,
                     scatter_indices=_hostify_tree(self.scatter_indices),
                     surface_kind=self._surface_geometry_kind,
+                    label_quadpoints_phi=_hostify_tree(self.label_quadpoints_phi),
+                    label_quadpoints_theta=_hostify_tree(self.label_quadpoints_theta),
+                    label_mpol=self.label_mpol,
+                    label_ntor=self.label_ntor,
+                    label_nfp=self.label_nfp,
+                    label_stellsym=self.label_stellsym,
+                    label_scatter_indices=_hostify_tree(self.label_scatter_indices),
+                    label_surface_kind=self._label_surface_geometry_kind,
                     targetlabel=self.targetlabel,
                     constraint_weight=resolved_constraint_weight,
                     label_type=self.label_type,
@@ -2635,6 +2881,14 @@ class BoozerSurfaceJAX(Optimizable):
             stellsym=self.stellsym,
             scatter_indices=self.scatter_indices,
             surface_kind=self._surface_geometry_kind,
+            label_quadpoints_phi=self.label_quadpoints_phi,
+            label_quadpoints_theta=self.label_quadpoints_theta,
+            label_mpol=self.label_mpol,
+            label_ntor=self.label_ntor,
+            label_nfp=self.label_nfp,
+            label_stellsym=self.label_stellsym,
+            label_scatter_indices=self.label_scatter_indices,
+            label_surface_kind=self._label_surface_geometry_kind,
             targetlabel=self.targetlabel,
             constraint_weight=resolved_constraint_weight,
             label_type=self.label_type,
@@ -2691,6 +2945,14 @@ class BoozerSurfaceJAX(Optimizable):
             stellsym=self.stellsym,
             scatter_indices=self.scatter_indices,
             surface_kind=self._surface_geometry_kind,
+            label_quadpoints_phi=self.label_quadpoints_phi,
+            label_quadpoints_theta=self.label_quadpoints_theta,
+            label_mpol=self.label_mpol,
+            label_ntor=self.label_ntor,
+            label_nfp=self.label_nfp,
+            label_stellsym=self.label_stellsym,
+            label_scatter_indices=self.label_scatter_indices,
+            label_surface_kind=self._label_surface_geometry_kind,
             targetlabel=self.targetlabel,
             constraint_weight=resolved_constraint_weight,
             label_type=self.label_type,
@@ -2771,30 +3033,46 @@ class BoozerSurfaceJAX(Optimizable):
         quadpoints_phi = self.quadpoints_phi
         quadpoints_theta = self.quadpoints_theta
         scatter_indices = self.scatter_indices
+        label_quadpoints_phi = self.label_quadpoints_phi
+        label_quadpoints_theta = self.label_quadpoints_theta
+        label_scatter_indices = self.label_scatter_indices
         if hostify_inputs:
             resolved_coil_set_spec = _hostify_tree(resolved_coil_set_spec)
             quadpoints_phi = _hostify_tree(quadpoints_phi)
             quadpoints_theta = _hostify_tree(quadpoints_theta)
             scatter_indices = _hostify_tree(scatter_indices)
+            label_quadpoints_phi = _hostify_tree(label_quadpoints_phi)
+            label_quadpoints_theta = _hostify_tree(label_quadpoints_theta)
+            label_scatter_indices = _hostify_tree(label_scatter_indices)
 
         def constraint_fn(x):
             sdofs, _iota, _G = _split_decision_vector_jax(x, optimize_G=optimize_G)
-            gamma, xphi, xtheta = _surface_geometry_from_dofs(
+            geometry = _geometry_from_surface_dofs(
                 sdofs,
-                quadpoints_phi,
-                quadpoints_theta,
-                self.mpol,
-                self.ntor,
-                self.nfp,
-                self.stellsym,
-                scatter_indices,
+                quadpoints_phi=quadpoints_phi,
+                quadpoints_theta=quadpoints_theta,
+                mpol=self.mpol,
+                ntor=self.ntor,
+                nfp=self.nfp,
+                stellsym=self.stellsym,
+                scatter_indices=scatter_indices,
                 surface_kind=self._surface_geometry_kind,
             )
+            label_geometry = _geometry_from_surface_dofs(
+                sdofs,
+                quadpoints_phi=label_quadpoints_phi,
+                quadpoints_theta=label_quadpoints_theta,
+                mpol=self.label_mpol,
+                ntor=self.label_ntor,
+                nfp=self.label_nfp,
+                stellsym=self.label_stellsym,
+                scatter_indices=label_scatter_indices,
+                surface_kind=self._label_surface_geometry_kind,
+            )
             label_value, gamma_axis_z = _compute_label_and_axis_z(
-                gamma=gamma,
-                xphi=xphi,
-                xtheta=xtheta,
-                points=gamma.reshape(-1, 3),
+                geometry=geometry,
+                label_geometry=label_geometry,
+                label_points=_field_points_from_geometry(label_geometry),
                 label_type=self.label_type,
                 phi_idx=self.phi_idx,
                 coil_arrays=coil_arrays,
@@ -2918,12 +3196,20 @@ class BoozerSurfaceJAX(Optimizable):
             int(self.nfp),
             bool(self.stellsym),
             str(self._surface_geometry_kind),
+            int(self.label_mpol),
+            int(self.label_ntor),
+            int(self.label_nfp),
+            bool(self.label_stellsym),
+            str(self._label_surface_geometry_kind),
             float(self.targetlabel),
             str(self.label_type),
             int(self.phi_idx),
             _traceable_array_signature(self.quadpoints_phi),
             _traceable_array_signature(self.quadpoints_theta),
             _traceable_array_signature(self.scatter_indices),
+            _traceable_array_signature(self.label_quadpoints_phi),
+            _traceable_array_signature(self.label_quadpoints_theta),
+            _traceable_array_signature(self.label_scatter_indices),
         )
 
     def _traceable_surface_runtime_args(self):
@@ -2936,6 +3222,14 @@ class BoozerSurfaceJAX(Optimizable):
             "stellsym": self.stellsym,
             "scatter_indices": _hostify_tree(self.scatter_indices),
             "surface_kind": self._surface_geometry_kind,
+            "label_quadpoints_phi": _hostify_tree(self.label_quadpoints_phi),
+            "label_quadpoints_theta": _hostify_tree(self.label_quadpoints_theta),
+            "label_mpol": self.label_mpol,
+            "label_ntor": self.label_ntor,
+            "label_nfp": self.label_nfp,
+            "label_stellsym": self.label_stellsym,
+            "label_scatter_indices": _hostify_tree(self.label_scatter_indices),
+            "label_surface_kind": self._label_surface_geometry_kind,
             "targetlabel": self.targetlabel,
             "label_type": self.label_type,
             "phi_idx": self.phi_idx,
@@ -3277,16 +3571,28 @@ class BoozerSurfaceJAX(Optimizable):
             coil_arrays=coil_arrays,
             coil_set_spec=coil_set_spec,
         )
-        gamma, xphi, xtheta = _surface_geometry_from_dofs(
+        geometry = _geometry_from_surface_dofs(
             sdofs,
-            self.quadpoints_phi,
-            self.quadpoints_theta,
-            self.mpol,
-            self.ntor,
-            self.nfp,
-            self.stellsym,
-            self.scatter_indices,
+            quadpoints_phi=self.quadpoints_phi,
+            quadpoints_theta=self.quadpoints_theta,
+            mpol=self.mpol,
+            ntor=self.ntor,
+            nfp=self.nfp,
+            stellsym=self.stellsym,
+            scatter_indices=self.scatter_indices,
             surface_kind=self._surface_geometry_kind,
+        )
+        gamma, xphi, xtheta = geometry.gamma, geometry.xphi, geometry.xtheta
+        label_geometry = _geometry_from_surface_dofs(
+            sdofs,
+            quadpoints_phi=self.label_quadpoints_phi,
+            quadpoints_theta=self.label_quadpoints_theta,
+            mpol=self.label_mpol,
+            ntor=self.label_ntor,
+            nfp=self.label_nfp,
+            stellsym=self.label_stellsym,
+            scatter_indices=self.label_scatter_indices,
+            surface_kind=self._label_surface_geometry_kind,
         )
         nphi, ntheta = int(gamma.shape[0]), int(gamma.shape[1])
         points = gamma.reshape(-1, 3)
@@ -3306,10 +3612,9 @@ class BoozerSurfaceJAX(Optimizable):
         constraint_weight = constraint_weight if constraint_weight is not None else 1.0
         constraint_weight = _as_jax_float64(constraint_weight)
         label_value, gamma_axis_z = _compute_label_and_axis_z(
-            gamma=gamma,
-            xphi=xphi,
-            xtheta=xtheta,
-            points=points,
+            geometry=geometry,
+            label_geometry=label_geometry,
+            label_points=_field_points_from_geometry(label_geometry),
             label_type=self.label_type,
             phi_idx=self.phi_idx,
             coil_arrays=coil_arrays,
@@ -3455,7 +3760,6 @@ class BoozerSurfaceJAX(Optimizable):
         tol=None,
         maxiter=None,
         verbose=None,
-        vectorize=True,
         limited_memory=None,
         weight_inv_modB=None,
     ):
@@ -3463,11 +3767,7 @@ class BoozerSurfaceJAX(Optimizable):
 
         Accepts the CPU public argument shape, but when ``limited_memory`` is
         omitted it preserves the configured BoozerSurfaceJAX options default.
-        The legacy ``vectorize`` kwarg is accepted for call-site compatibility
-        and ignored because the JAX path always assembles the residuals in its
-        vectorized form.
         """
-        _ = vectorize  # Public CPU API compatibility; JAX assembly is always vectorized.
         if not self.need_to_run_code:
             return self.res
         tol = tol if tol is not None else self.options["bfgs_tol"]
@@ -3575,16 +3875,9 @@ class BoozerSurfaceJAX(Optimizable):
         maxiter=None,
         stab=0.0,
         verbose=None,
-        vectorize=True,
         weight_inv_modB=None,
     ):
-        """Newton polish stage of the LS solve.
-
-        The legacy ``vectorize`` kwarg is accepted for call-site compatibility
-        and ignored because the JAX path always assembles the residuals in its
-        vectorized form.
-        """
-        _ = vectorize  # Public CPU API compatibility; JAX assembly is always vectorized.
+        """Newton polish stage of the LS solve."""
         if not self.need_to_run_code:
             return self.res
         tol = tol if tol is not None else self.options["newton_tol"]
@@ -3893,6 +4186,26 @@ class BoozerSurfaceJAX(Optimizable):
                 else self.scatter_indices
             ),
             surface_kind=self._surface_geometry_kind,
+            label_quadpoints_phi=(
+                _hostify_tree(self.label_quadpoints_phi)
+                if hostify_inputs
+                else self.label_quadpoints_phi
+            ),
+            label_quadpoints_theta=(
+                _hostify_tree(self.label_quadpoints_theta)
+                if hostify_inputs
+                else self.label_quadpoints_theta
+            ),
+            label_mpol=self.label_mpol,
+            label_ntor=self.label_ntor,
+            label_nfp=self.label_nfp,
+            label_stellsym=self.label_stellsym,
+            label_scatter_indices=(
+                _hostify_tree(self.label_scatter_indices)
+                if hostify_inputs
+                else self.label_scatter_indices
+            ),
+            label_surface_kind=self._label_surface_geometry_kind,
             targetlabel=self.targetlabel,
             label_type=self.label_type,
             phi_idx=self.phi_idx,
@@ -3951,7 +4264,7 @@ class BoozerSurfaceJAX(Optimizable):
 
         s = self.surface
         G_provided = G is not None
-        if not _is_exact_surface_xyz_tensor_fourier(s):
+        if not _is_exact_surface_xyz_tensor_fourier(self._surface_geometry_kind):
             raise RuntimeError(
                 "Exact solution of Boozer Surfaces only supported for "
                 "SurfaceXYZTensorFourier"

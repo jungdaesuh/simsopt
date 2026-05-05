@@ -204,7 +204,7 @@ def test_boozer_residual_inner_objective_uses_runtime_scalar_constants(
         nfp=1,
         stellsym=True,
         scatter_indices=jnp.asarray([0], dtype=jnp.int32),
-        surface_kind="tensor",
+        surface_kind="xyztensorfourier",
         optimize_G=True,
         weight_inv_modB=True,
         constraint_weight=3.0,

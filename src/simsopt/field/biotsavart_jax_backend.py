@@ -27,6 +27,7 @@ from ..jax_core import (
     curve_geometry_from_spec,
     curve_pullback_from_dofs,
     curve_spec_from_curve,
+    curve_spec_with_dofs,
     make_coil_dof_extraction_spec,
     make_coil_set_dof_extraction_spec,
     make_optimizable_dof_map_spec,
@@ -52,6 +53,7 @@ from ..jax_core._math_utils import (
 )
 from ..jax_core.specs import (
     CoilSetDofExtractionSpec,
+    CoilDofExtractionSpec,
     CoilSpec,
     CoilSymmetrySpec,
     CurveSpec,
@@ -217,15 +219,27 @@ BiotSavartBPullback = BiotSavartFieldPullback
 
 
 class SpecBackedCurrent:
-    """Minimal current view reconstructed from a serialized JAX seed spec."""
+    """Minimal current view reconstructed from the runtime seed owner state."""
 
-    def __init__(self, value: float) -> None:
-        self._value = float(value)
+    def __init__(
+        self,
+        *,
+        owner,
+        coil_index: int,
+    ) -> None:
+        self._owner = owner
+        self._coil_index = int(coil_index)
         self.local_lower_bounds = np.asarray([-np.inf], dtype=np.float64)
         self.local_upper_bounds = np.asarray([np.inf], dtype=np.float64)
 
     def get_value(self) -> float:
-        return self._value
+        coil_spec = coil_specs_from_dof_extraction_spec(
+            self._owner.coil_dof_extraction_spec(),
+            self._owner.x,
+        )[self._coil_index]
+        return host_float(coil_spec.current.value[0]) * float(
+            coil_spec.symmetry.scale
+        )
 
 
 class SpecBackedCurve(Optimizable):
@@ -237,17 +251,33 @@ class SpecBackedCurve(Optimizable):
         self,
         curve_spec: CurveSpec,
         symmetry: CoilSymmetrySpec,
+        *,
+        owner,
+        coil_index: int,
+        extraction_spec: CoilDofExtractionSpec,
     ) -> None:
-        self._curve_spec = curve_spec
         self._symmetry = symmetry
+        self._owner = owner
+        self._coil_index = int(coil_index)
+        self._extraction_spec = extraction_spec
         self.quadpoints = host_array(curve_spec.quadpoints, dtype=np.float64)
-        Optimizable.__init__(self, x0=np.asarray([], dtype=np.float64))
+        Optimizable.__init__(
+            self,
+            x0=np.asarray([], dtype=np.float64),
+            depends_on=[owner],
+        )
+
+    def _current_curve_spec(self) -> CurveSpec:
+        return coil_specs_from_dof_extraction_spec(
+            self._owner.coil_dof_extraction_spec(),
+            self._owner.x,
+        )[self._coil_index].curve
 
     def to_spec(self) -> CurveSpec:
-        return self._curve_spec
+        return self._current_curve_spec()
 
     def get_dofs(self) -> jax.Array:
-        return self._curve_spec.dofs
+        return self._current_curve_spec().dofs
 
     def _apply_symmetry(
         self,
@@ -260,14 +290,16 @@ class SpecBackedCurve(Optimizable):
         return (gamma @ rotmat, *(derivative @ rotmat for derivative in derivatives))
 
     def _geometry(self) -> tuple[jax.Array, ...]:
-        return self._apply_symmetry(*curve_geometry_from_spec(self._curve_spec))
+        return self._apply_symmetry(*curve_geometry_from_spec(self._current_curve_spec()))
 
     def gamma(self) -> np.ndarray:
-        gamma, _gammadash = curve_gamma_and_dash_from_spec(self._curve_spec)
+        gamma, _gammadash = curve_gamma_and_dash_from_spec(
+            self._current_curve_spec()
+        )
         return host_array(self._apply_symmetry(gamma)[0], dtype=np.float64)
 
     def gammadash(self) -> np.ndarray:
-        gamma, gammadash = curve_gamma_and_dash_from_spec(self._curve_spec)
+        gamma, gammadash = curve_gamma_and_dash_from_spec(self._current_curve_spec())
         return host_array(self._apply_symmetry(gamma, gammadash)[1], dtype=np.float64)
 
     def gammadashdash(self) -> np.ndarray:
@@ -284,27 +316,82 @@ class SpecBackedCurve(Optimizable):
         denominator = np.linalg.norm(gammadash, axis=1) ** 3
         return numerator / denominator
 
-    def dgamma_by_dcoeff_vjp(self, _v: object) -> Derivative:
-        return Derivative({})
+    def _owner_derivative_from_curve_cotangent(
+        self,
+        coeff_cotangent: object,
+    ) -> Derivative:
+        owner_gradient = _dof_map_cotangent_to_owner_gradient(
+            self._extraction_spec.curve_map,
+            coeff_cotangent,
+            self._owner.x,
+        )
+        return Derivative({self._owner: host_array(owner_gradient, dtype=np.float64)})
 
-    def dgammadash_by_dcoeff_vjp(self, _v: object) -> Derivative:
-        return Derivative({})
+    def _curve_pullback_derivative(self, dg: object, dgd: object) -> Derivative:
+        if self._symmetry.has_rotation:
+            rotmat_t = _as_jax_float64(self._symmetry.rotmat).T
+            dg = _as_jax_float64(dg) @ rotmat_t
+            dgd = _as_jax_float64(dgd) @ rotmat_t
+        curve_spec = self._current_curve_spec()
+        coeff_cotangent, _surface_cotangent = curve_pullback_from_dofs(
+            curve_spec,
+            curve_spec.dofs,
+            dg,
+            dgd,
+        )
+        return self._owner_derivative_from_curve_cotangent(coeff_cotangent)
 
-    def dincremental_arclength_by_dcoeff_vjp(self, _v: object) -> Derivative:
-        return Derivative({})
+    def dgamma_by_dcoeff_vjp(self, v: object) -> Derivative:
+        return self._curve_pullback_derivative(
+            v,
+            jnp.zeros_like(_as_jax_float64(self.gammadash())),
+        )
 
-    def dkappa_by_dcoeff_vjp(self, _v: object) -> Derivative:
-        return Derivative({})
+    def dgammadash_by_dcoeff_vjp(self, v: object) -> Derivative:
+        return self._curve_pullback_derivative(
+            jnp.zeros_like(_as_jax_float64(self.gamma())),
+            v,
+        )
+
+    def dincremental_arclength_by_dcoeff_vjp(self, v: object) -> Derivative:
+        gammadash = _as_jax_float64(self.gammadash())
+        incremental_arclength = jnp.linalg.norm(gammadash, axis=1)
+        dgd = _as_jax_float64(v)[:, None] * gammadash / incremental_arclength[:, None]
+        return self.dgammadash_by_dcoeff_vjp(dgd)
+
+    def dkappa_by_dcoeff_vjp(self, v: object) -> Derivative:
+        def kappa_from_dofs(curve_dofs):
+            spec = curve_spec_with_dofs(self._current_curve_spec(), curve_dofs)
+            _gamma, gammadash, gammadashdash = curve_geometry_from_spec(spec)
+            numerator = jnp.linalg.norm(jnp.cross(gammadash, gammadashdash), axis=1)
+            denominator = jnp.linalg.norm(gammadash, axis=1) ** 3
+            return numerator / denominator
+
+        curve_spec = self._current_curve_spec()
+        _kappa, pullback = jax.vjp(kappa_from_dofs, curve_spec.dofs)
+        (coeff_cotangent,) = pullback(_as_jax_float64(v))
+        return self._owner_derivative_from_curve_cotangent(coeff_cotangent)
 
 
 class SpecBackedCoil:
     """Read-only coil view reconstructed from a serialized JAX seed spec."""
 
-    def __init__(self, coil_spec: CoilSpec) -> None:
-        self.curve = SpecBackedCurve(coil_spec.curve, coil_spec.symmetry)
-        self.current = SpecBackedCurrent(
-            host_float(coil_spec.current.value[0]) * float(coil_spec.symmetry.scale)
+    def __init__(
+        self,
+        coil_spec: CoilSpec,
+        *,
+        owner,
+        coil_index: int,
+        extraction_spec: CoilDofExtractionSpec,
+    ) -> None:
+        self.curve = SpecBackedCurve(
+            coil_spec.curve,
+            coil_spec.symmetry,
+            owner=owner,
+            coil_index=coil_index,
+            extraction_spec=extraction_spec,
         )
+        self.current = SpecBackedCurrent(owner=owner, coil_index=coil_index)
 
 
 class SingleStageRuntimeSpecBiotSavartJAX(Optimizable):
@@ -318,18 +405,30 @@ class SingleStageRuntimeSpecBiotSavartJAX(Optimizable):
         self._x = _as_jax_float64(runtime_spec.seed.coil_dofs)
         self._points_jax: jax.Array | None = None
         self._points_version = 0
+        Optimizable.__init__(self, x0=host_array(self._x, dtype=np.float64))
         self._coils = self._coils_from_dofs(self._x)
-        Optimizable.__init__(self, x0=np.asarray([], dtype=np.float64))
 
     def _coils_from_dofs(
         self,
         coil_dofs: object,
     ) -> tuple[SpecBackedCoil, ...]:
+        coil_specs = coil_specs_from_dof_extraction_spec(
+            self._coil_dof_extraction_spec,
+            coil_dofs,
+        )
         return tuple(
-            SpecBackedCoil(coil_spec)
-            for coil_spec in coil_specs_from_dof_extraction_spec(
-                self._coil_dof_extraction_spec,
-                coil_dofs,
+            SpecBackedCoil(
+                coil_spec,
+                owner=self,
+                coil_index=coil_index,
+                extraction_spec=extraction_spec,
+            )
+            for coil_index, (extraction_spec, coil_spec) in enumerate(
+                zip(
+                    self._coil_dof_extraction_spec.coils,
+                    coil_specs,
+                    strict=True,
+                )
             )
         )
 
@@ -337,10 +436,32 @@ class SingleStageRuntimeSpecBiotSavartJAX(Optimizable):
     def x(self) -> jax.Array:
         return self._x
 
+    def _set_coil_dofs(self, coil_dofs: object) -> None:
+        self._x = _as_jax_float64(coil_dofs)
+
     @x.setter
     def x(self, coil_dofs: object) -> None:
-        self._x = _as_jax_float64(coil_dofs)
-        self._coils = self._coils_from_dofs(self._x)
+        self._set_coil_dofs(coil_dofs)
+        if hasattr(self, "_dofs"):
+            self._dofs.full_x = host_array(self._x, dtype=np.float64)
+
+    @property
+    def local_x(self) -> np.ndarray:
+        return host_array(self._x, dtype=np.float64)
+
+    @local_x.setter
+    def local_x(self, coil_dofs: object) -> None:
+        self._set_coil_dofs(coil_dofs)
+        self._dofs.free_x = host_array(self._x, dtype=np.float64)
+
+    @property
+    def local_full_x(self) -> np.ndarray:
+        return host_array(self._x, dtype=np.float64)
+
+    @local_full_x.setter
+    def local_full_x(self, coil_dofs: object) -> None:
+        self._set_coil_dofs(coil_dofs)
+        self._dofs.full_x = host_array(self._x, dtype=np.float64)
 
     @property
     def coils(self) -> tuple[SpecBackedCoil, ...]:
@@ -410,6 +531,76 @@ class SingleStageRuntimeSpecBiotSavartJAX(Optimizable):
             self._points_jax,
             self.coil_set_spec(),
         )
+
+    def _add_single_coil_cotangent_to_dofs_gradient(
+        self,
+        dofs_gradient,
+        extraction_spec,
+        coil_spec,
+        dg,
+        dgd,
+        dc,
+        coil_dofs,
+    ):
+        if extraction_spec.symmetry.has_rotation:
+            rotmat_t = _as_jax_float64(extraction_spec.symmetry.rotmat).T
+            dg = _as_jax_float64(dg) @ rotmat_t
+            dgd = _as_jax_float64(dgd) @ rotmat_t
+
+        coeff_cotangent, _surface_cotangent = curve_pullback_from_dofs(
+            coil_spec.curve,
+            coil_spec.curve.dofs,
+            dg,
+            dgd,
+        )
+        current_cotangent = jnp.atleast_1d(
+            _as_jax_float64(extraction_spec.symmetry.scale) * _as_jax_float64(dc)
+        )
+        dofs_gradient = dofs_gradient + _dof_map_cotangent_to_owner_gradient(
+            extraction_spec.curve_map,
+            coeff_cotangent,
+            coil_dofs,
+        )
+        return dofs_gradient + _dof_map_cotangent_to_owner_gradient(
+            extraction_spec.current_map,
+            current_cotangent,
+            coil_dofs,
+        )
+
+    def coil_cotangents_to_dofs_gradient(
+        self,
+        d_coil_arrays,
+        coil_indices,
+        *,
+        coil_dofs=None,
+    ):
+        """Project grouped coil cotangents to the runtime-spec flat DOF order."""
+        if coil_dofs is None:
+            coil_dofs = self.x
+        coil_dofs = _as_jax_float64(coil_dofs)
+        dofs_gradient = jnp.zeros_like(coil_dofs)
+        coil_specs = coil_specs_from_dof_extraction_spec(
+            self._coil_dof_extraction_spec,
+            coil_dofs,
+        )
+        extraction_specs = self._coil_dof_extraction_spec.coils
+        for (d_g, d_gd, d_c), indices in zip(d_coil_arrays, coil_indices):
+            for dg_i, dgd_i, dc_i, global_i in zip(
+                _iter_axis0_entries(d_g),
+                _iter_axis0_entries(d_gd),
+                _iter_axis0_entries(d_c),
+                indices,
+            ):
+                dofs_gradient = self._add_single_coil_cotangent_to_dofs_gradient(
+                    dofs_gradient,
+                    extraction_specs[global_i],
+                    coil_specs[global_i],
+                    dg_i,
+                    dgd_i,
+                    dc_i,
+                    coil_dofs,
+                )
+        return dofs_gradient
 
     def save(self, _path: object) -> None:
         raise RuntimeError("JAX runtime seed specs split runtime from host export.")
@@ -482,6 +673,25 @@ def _ones_like_float64(array: jax.Array) -> jax.Array:
 def _scatter_free_values(template: jax.Array, free_positions, free_values: jax.Array):
     free_positions = np.asarray(free_positions, dtype=np.int64)
     return template.at[free_positions].set(free_values)
+
+
+def _dof_map_cotangent_to_owner_gradient(map_spec, input_cotangent, owner_dofs):
+    owner_dofs = _as_jax_float64(owner_dofs)
+    input_cotangent = _as_jax_float64(input_cotangent)
+    if map_spec.input_mode == "full":
+        full_cotangent = input_cotangent
+    else:
+        full_cotangent = jnp.zeros_like(map_spec.template_full_dofs)
+        full_cotangent = full_cotangent.at[
+            int(map_spec.input_start) : int(map_spec.input_end)
+        ].add(input_cotangent)
+
+    owner_gradient = jnp.zeros_like(owner_dofs)
+    for owner_start, owner_end, target_start, target_end in map_spec.owner_segments:
+        owner_gradient = owner_gradient.at[int(owner_start) : int(owner_end)].add(
+            full_cotangent[int(target_start) : int(target_end)]
+        )
+    return owner_gradient
 
 
 def _add_local_cotangent_to_dofs_gradient(

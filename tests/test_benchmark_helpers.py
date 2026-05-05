@@ -586,6 +586,41 @@ def test_single_stage_init_accepts_reference_trace_optimizer(monkeypatch):
     assert args.reference_optimizer_method == "lbfgs-trace"
 
 
+def test_single_stage_init_accepts_fullgraph_scipy_control_optimizer(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_init_parity.py",
+            "--output-json",
+            "/tmp/out.json",
+            "--optimizer-backend",
+            "scipy-jax-fullgraph",
+        ],
+    )
+
+    args = single_stage_init_parity_module.parse_args()
+
+    assert args.optimizer_backend == "scipy-jax-fullgraph"
+
+
+def test_single_stage_init_accepts_objective_evaluation_trace(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "single_stage_init_parity.py",
+            "--output-json",
+            "/tmp/out.json",
+            "--record-objective-evaluation-trace",
+        ],
+    )
+
+    args = single_stage_init_parity_module.parse_args()
+
+    assert args.record_objective_evaluation_trace
+
+
 def test_single_stage_init_surface_geometry_gate_is_init_only(tmp_path):
     args = _single_stage_case_args(tmp_path)
     args.maxiter = 0
@@ -1956,6 +1991,10 @@ def test_resolve_probe_lane_tracks_private_optimizer_backends():
     assert resolve_probe_lane(optimizer_backend="scipy") == "trusted-public-reference"
     assert resolve_probe_lane(optimizer_backend="ondevice") == "private-optimizer"
     assert resolve_probe_lane(optimizer_backend="scipy-jax") == "target-scipy-control"
+    assert (
+        resolve_probe_lane(optimizer_backend="scipy-jax-fullgraph")
+        == "target-scipy-fullgraph-control"
+    )
     with pytest.raises(ValueError, match="optimizer_backend must be one of"):
         resolve_probe_lane(optimizer_backend="hybrid")
 
@@ -2443,6 +2482,47 @@ def test_single_stage_init_case_threads_optimizer_backend_to_jax_lane(
     assert env[_SIMSOPT_COMPILATION_CACHE_POLICY_ENV_VAR] == "disabled"
 
 
+def test_single_stage_init_case_threads_fullgraph_optimizer_backend_to_jax_lane(
+    monkeypatch, tmp_path
+):
+    args = _single_stage_case_args(tmp_path)
+    args.optimizer_backend = "scipy-jax-fullgraph"
+    args.record_objective_evaluation_trace = True
+    observed_invocations = _observe_single_stage_case_invocations(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "find_single_file",
+        lambda root, pattern: Path(root) / pattern,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "load_json",
+        lambda _path: {
+            "FINAL_IOTA": 0.15,
+            "FINAL_VOLUME": 0.1,
+            "FIELD_ERROR": 0.003,
+            "MAX_CURVATURE": 10.0,
+            "SELF_INTERSECTING": False,
+        },
+    )
+
+    single_stage_init_parity_module._run_single_stage_case(
+        args,
+        "jax",
+        platform="cpu",
+        load_surface_gamma=False,
+    )
+
+    assert len(observed_invocations) == 1
+    command, _env = observed_invocations[0]
+    optimizer_flag_index = command.index("--optimizer-backend")
+    assert command[optimizer_flag_index + 1] == "scipy-jax-fullgraph"
+    assert "--boozer-optimizer-backend" not in command
+    assert "--record-objective-evaluation-trace" in command
+    target_lane_sync_flag_index = command.index("--target-lane-accepted-step-sync")
+    assert command[target_lane_sync_flag_index + 1] == "per-accept"
+
+
 def test_single_stage_init_case_threads_profile_target_lane_only_flag(
     monkeypatch, tmp_path
 ):
@@ -2557,6 +2637,80 @@ def _observe_single_stage_case_invocations(monkeypatch, tmp_path: Path):
         or argparse.Namespace(stdout="", stderr=""),
     )
     return observed_invocations
+
+
+def test_single_stage_init_case_pair_threads_shared_seed_to_jax_fullgraph_lane(
+    monkeypatch,
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.optimizer_backend = "scipy-jax-fullgraph"
+    args.maxiter = 3
+    args.platform = "cpu"
+    args.jax_runtime_seed_spec = None
+    args.warm_start_run_dir = None
+    calls = []
+
+    def fake_run_single_stage_case(
+        case_args,
+        backend,
+        *,
+        platform,
+        benchmark_mode,
+        load_surface_gamma,
+        output_root,
+        jax_runtime_seed_spec=None,
+    ):
+        del platform, benchmark_mode, load_surface_gamma, jax_runtime_seed_spec
+        run_dir = tmp_path / f"{len(calls)}_{backend}"
+        run_dir.mkdir()
+        calls.append(
+            {
+                "backend": backend,
+                "warm_start_run_dir": getattr(case_args, "warm_start_run_dir", None),
+                "output_root": Path(output_root),
+            }
+        )
+        progress_json = run_dir / "outer_optimizer_progress.json"
+        progress_json.write_text("[]", encoding="utf-8")
+        return {
+            "run_dir": str(run_dir),
+            "results": _single_stage_contract_results(),
+            "outer_optimizer_progress_json": str(progress_json),
+        }
+
+    def fake_compile_seed_spec(run_dir, output_path, _args):
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text('{"seed": true}', encoding="utf-8")
+        return Path(output_path)
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_run_single_stage_case",
+        fake_run_single_stage_case,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_compile_jax_runtime_seed_spec_from_run_dir",
+        fake_compile_seed_spec,
+    )
+
+    single_stage_init_parity_module._run_single_stage_case_pair(
+        args,
+        benchmark_mode=False,
+        reference_backend="cpu",
+        reference_benchmark_mode=False,
+        case_root=tmp_path / "case",
+    )
+
+    seed_run_dir = calls[0]["warm_start_run_dir"]
+    assert calls[0]["backend"] == "cpu"
+    assert seed_run_dir is None
+    shared_seed_run_dir = str(tmp_path / "0_cpu")
+    assert calls[1]["backend"] == "cpu"
+    assert calls[1]["warm_start_run_dir"] == shared_seed_run_dir
+    assert calls[2]["backend"] == "jax"
+    assert calls[2]["warm_start_run_dir"] == shared_seed_run_dir
 
 
 def test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env(
@@ -3349,6 +3503,24 @@ def test_single_stage_init_parity_requires_accepted_step_on_outer_loop_probe():
     )
 
     assert any("did not accept an optimizer step" in failure for failure in failures)
+
+
+def test_single_stage_init_parity_accepts_fullgraph_target_optimizer_method():
+    cpu_results = _single_stage_probe_results()
+    jax_results = _single_stage_probe_results(
+        outer_optimizer_method="lbfgs-scipy-jax-fullgraph",
+    )
+
+    _, failures = evaluate_single_stage_init_parity(
+        cpu_results,
+        jax_results,
+        max_surface_geometry_abs=0.0,
+        max_surface_geometry_rel=0.0,
+        maxiter=1,
+        expected_jax_outer_optimizer_method="lbfgs-scipy-jax-fullgraph",
+    )
+
+    assert failures == []
 
 
 def test_single_stage_init_parity_rejects_non_finite_outer_loop_results():
@@ -4725,18 +4897,15 @@ def test_legacy_gpu_benchmark_wrapper_applies_grouped_probe_env_override(
 
 
 def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():
-    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
-        resolve_boozer_least_squares_algorithm("scipy")
-    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
+    assert resolve_boozer_least_squares_algorithm("scipy") == "quasi-newton"
+    with pytest.raises(ValueError, match="require boozer_optimizer_backend"):
         resolve_boozer_least_squares_algorithm("hybrid")
     assert resolve_boozer_least_squares_algorithm("ondevice") == "quasi-newton"
-    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
-        resolve_boozer_optimizer_method("scipy")
-    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
-        resolve_boozer_optimizer_method("scipy", limited_memory=True)
-    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
+    assert resolve_boozer_optimizer_method("scipy") == "scipy"
+    assert resolve_boozer_optimizer_method("scipy", limited_memory=True) == "scipy"
+    with pytest.raises(ValueError, match="require boozer_optimizer_backend"):
         resolve_boozer_optimizer_method("hybrid")
-    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
+    with pytest.raises(ValueError, match="require boozer_optimizer_backend"):
         resolve_boozer_optimizer_method("hybrid", limited_memory=True)
     assert resolve_boozer_optimizer_method("ondevice") == "bfgs-ondevice"
     assert (
@@ -4762,13 +4931,13 @@ def test_single_stage_outer_loop_probe_resolves_expected_boozer_method():
         )
 
 
-def test_single_stage_outer_loop_probe_rejects_non_ondevice_boozer_backend():
-    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
-        resolve_boozer_optimizer_backend("scipy", None)
-    with pytest.raises(ValueError, match="require boozer_optimizer_backend='ondevice'"):
-        resolve_boozer_optimizer_backend("ondevice", "scipy")
+def test_single_stage_outer_loop_probe_resolves_boozer_backend():
     assert resolve_boozer_optimizer_backend("ondevice", None) == "ondevice"
     assert resolve_boozer_optimizer_backend("scipy-jax", None) == "ondevice"
+    assert resolve_boozer_optimizer_backend("scipy-jax-fullgraph", None) == "scipy"
+    assert resolve_boozer_optimizer_backend("ondevice", "scipy") == "scipy"
+    with pytest.raises(ValueError, match="require boozer_optimizer_backend"):
+        resolve_boozer_optimizer_backend("hybrid", None)
 
 
 def test_single_stage_outer_loop_contract_matches_probe_defaults():

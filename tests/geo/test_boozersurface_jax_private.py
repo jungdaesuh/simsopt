@@ -74,6 +74,56 @@ def _record_progress(points):
     return callback
 
 
+def test_matrix_rhs_linear_operators_apply_columns():
+    x = jnp.asarray([0.2, -0.1, 0.3], dtype=jnp.float64)
+    rhs = jnp.asarray(
+        [[1.0, -2.0], [0.5, 1.5], [-1.0, 0.25]],
+        dtype=jnp.float64,
+    )
+    A = jnp.asarray(
+        [[2.0, 0.1, -0.2], [0.3, 1.5, 0.4], [-0.1, 0.2, 1.8]],
+        dtype=jnp.float64,
+    )
+    H = A.T @ A + jnp.diag(jnp.asarray([0.4, 0.5, 0.6], dtype=jnp.float64))
+
+    jacobian_operator = _opt._jacobian_linear_operator(lambda y: A @ y, x)
+    np.testing.assert_allclose(
+        np.asarray(jacobian_operator["matvec"](rhs)),
+        np.asarray(A @ rhs),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(jacobian_operator["transpose_matvec"](rhs)),
+        np.asarray(A.T @ rhs),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+    least_squares_operator = _opt._least_squares_normal_operator(
+        lambda y: A @ y - jnp.asarray([0.1, -0.2, 0.3], dtype=jnp.float64),
+        x,
+    )
+    np.testing.assert_allclose(
+        np.asarray(least_squares_operator["matvec"](rhs)),
+        np.asarray(A.T @ (A @ rhs)),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+    hessian_operator = _opt._hessian_linear_operator(
+        lambda y: 0.5 * jnp.dot(y, H @ y),
+        x,
+        stab=0.25,
+    )
+    np.testing.assert_allclose(
+        np.asarray(hessian_operator["matvec"](rhs)),
+        np.asarray((H + 0.25 * jnp.eye(x.size, dtype=x.dtype)) @ rhs),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
 def _successful_optimize_result_for_x(x):
     from scipy.optimize import OptimizeResult
 

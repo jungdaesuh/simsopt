@@ -94,6 +94,13 @@ VOLUME_REL_TOL = _TIER3_TOLERANCES["final_volume_rel_tol"]
 FIELD_ERROR_REL_TOL = _TIER3_TOLERANCES["field_error_rel_tol"]
 SURFACE_GEOMETRY_REL_TOL = _TIER3_TOLERANCES["surface_geometry_rel_tol"]
 TARGET_OPTIMIZER_BACKEND = DEFAULT_OPTIMIZER_BACKEND
+SCIPY_JAX_OPTIMIZER_BACKEND = "scipy-jax"
+SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND = "scipy-jax-fullgraph"
+TARGET_OPTIMIZER_BACKENDS = (
+    TARGET_OPTIMIZER_BACKEND,
+    SCIPY_JAX_OPTIMIZER_BACKEND,
+    SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND,
+)
 DEFAULT_OUTER_MAXITER = 0
 TRACE_PARITY_OUTER_MAXLS = 8
 _TARGET_LANE_FINAL_ONLY_SYNC = "final-only"
@@ -107,6 +114,11 @@ _OUTER_LOOP_REQUIRED_RESULT_KEYS = tuple(
 _TARGET_OUTER_OPTIMIZER_METHOD = str(
     _OUTER_LOOP_PROOF_CONTRACT["required_outer_optimizer_method"]
 )
+_TARGET_OPTIMIZER_METHOD_BY_BACKEND = {
+    TARGET_OPTIMIZER_BACKEND: _TARGET_OUTER_OPTIMIZER_METHOD,
+    SCIPY_JAX_OPTIMIZER_BACKEND: "lbfgs-scipy-jax",
+    SCIPY_JAX_FULLGRAPH_OPTIMIZER_BACKEND: "lbfgs-scipy-jax-fullgraph",
+}
 _TARGET_LANE_COMPILE_DIAGNOSTICS_HOST_CALLBACK_REASON = (
     "compile diagnostics are disabled when Phase 1 host-callback diagnostics "
     "are enabled because that mode does not provide normal cache-reuse evidence"
@@ -218,11 +230,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--optimizer-backend",
-        choices=(TARGET_OPTIMIZER_BACKEND,),
+        choices=TARGET_OPTIMIZER_BACKENDS,
         default=TARGET_OPTIMIZER_BACKEND,
         help=(
-            "JAX Boozer optimizer backend for the init probe. "
-            "Single-stage JAX init parity now uses the ondevice lane only."
+            "JAX outer optimizer backend for the init probe. Use "
+            "scipy-jax-fullgraph for CPU/SciPy-compatible host control over "
+            "the full JAX value/grad graph."
         ),
     )
     parser.add_argument(
@@ -301,6 +314,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--record-objective-evaluation-trace",
+        action="store_true",
+        help=(
+            "Thread through detailed per-objective-evaluation trace recording "
+            "for CPU/JAX fullgraph parity debugging."
+        ),
+    )
+    parser.add_argument(
         "--jax-profile-dir",
         default=None,
         help=(
@@ -332,6 +353,10 @@ def _resolve_target_lane_sync_policy(
     if int(args.maxiter) <= 0:
         return _TARGET_LANE_PER_ACCEPT_SYNC
     return _TARGET_LANE_FINAL_ONLY_SYNC
+
+
+def _expected_target_outer_optimizer_method(optimizer_backend: str) -> str:
+    return _TARGET_OPTIMIZER_METHOD_BY_BACKEND[optimizer_backend]
 
 
 def _extract_phase_timings(results: dict[str, Any]) -> dict[str, float]:
@@ -471,6 +496,7 @@ def _append_optional_single_stage_flags(
     jax_profile_dir: str | None,
     experimental_target_lane_value_and_grad: bool,
     disable_target_lane_success_filter: bool,
+    record_objective_evaluation_trace: bool,
     target_lane_boozer_bfgs_tol: float | None = None,
     target_lane_boozer_bfgs_maxiter: int | None = None,
     target_lane_boozer_newton_tol: float | None = None,
@@ -509,6 +535,8 @@ def _append_optional_single_stage_flags(
         command.append("--experimental-target-lane-value-and-grad")
     if disable_target_lane_success_filter:
         command.append("--disable-target-lane-success-filter")
+    if record_objective_evaluation_trace:
+        command.append("--record-objective-evaluation-trace")
     if target_lane_boozer_bfgs_tol is not None:
         command.extend(
             [
@@ -680,6 +708,9 @@ def _run_single_stage_case(
             disable_target_lane_success_filter=bool(
                 getattr(args, "disable_target_lane_success_filter", False)
             ),
+            record_objective_evaluation_trace=bool(
+                getattr(args, "record_objective_evaluation_trace", False)
+            ),
             target_lane_boozer_bfgs_tol=getattr(
                 args, "target_lane_boozer_bfgs_tol", None
             ),
@@ -812,6 +843,7 @@ def _run_single_stage_case_pair(
         benchmark_mode=benchmark_mode,
     )
     seed_case = None
+    target_args = args
     if reference_backend == "jax":
         jax_seed_spec = (
             Path(args.jax_runtime_seed_spec)
@@ -851,6 +883,7 @@ def _run_single_stage_case_pair(
                 args,
                 warm_start_run_dir=seed_case["run_dir"],
             )
+            target_args = reference_args
         else:
             reference_args = args
         cpu_case = _run_single_stage_case(
@@ -868,7 +901,7 @@ def _run_single_stage_case_pair(
                 args,
             )
     jax_case = _run_single_stage_case(
-        args,
+        target_args,
         "jax",
         platform=args.platform,
         benchmark_mode=benchmark_mode,
@@ -959,6 +992,7 @@ def evaluate_single_stage_init_parity(
     max_surface_geometry_abs: float,
     max_surface_geometry_rel: float,
     maxiter: int = DEFAULT_OUTER_MAXITER,
+    expected_jax_outer_optimizer_method: str = _TARGET_OUTER_OPTIMIZER_METHOD,
 ) -> tuple[dict[str, Any], list[str]]:
     comparison = {
         "final_iota_abs_diff": abs(
@@ -1031,10 +1065,13 @@ def evaluate_single_stage_init_parity(
             failures.append(
                 "JAX single-stage outer-loop probe did not accept an optimizer step."
             )
-        if comparison["jax_outer_optimizer_method"] != _TARGET_OUTER_OPTIMIZER_METHOD:
+        if (
+            comparison["jax_outer_optimizer_method"]
+            != expected_jax_outer_optimizer_method
+        ):
             failures.append(
                 "JAX target-lane outer-loop probe did not use "
-                f"{_TARGET_OUTER_OPTIMIZER_METHOD}."
+                f"{expected_jax_outer_optimizer_method}."
             )
         _append_nonfinite_outer_loop_failures(
             failures,
@@ -1183,6 +1220,9 @@ def main() -> None:
         max_surface_geometry_abs=max_geom_abs,
         max_surface_geometry_rel=max_geom_rel,
         maxiter=int(args.maxiter),
+        expected_jax_outer_optimizer_method=_expected_target_outer_optimizer_method(
+            args.optimizer_backend
+        ),
     )
     optimizer_state_trace_parity = None
     if int(args.maxiter) > 0 and args.reference_optimizer_method == "lbfgs-trace":
