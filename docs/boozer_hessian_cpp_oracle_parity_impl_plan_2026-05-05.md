@@ -39,7 +39,7 @@ In scope:
 - Add column-complete CPU/C++ oracle parity for the scalar Boozer penalty
   Hessian.
 - Keep the existing directional HVP test.
-- Use the existing `derivative_heavy` second-derivative tolerance lane.
+- Use the `direct_hessian_oracle` second-derivative tolerance lane.
 - Update docs after the test passes.
 
 Out of scope:
@@ -55,9 +55,9 @@ Use the SSOT tolerance lane from
 `benchmarks/validation_ladder_contract.py::PARITY_LADDER_TOLERANCES`:
 
 ```text
-lane: derivative_heavy
-second_derivative_rtol = 1e-6
-second_derivative_atol = 1e-8
+lane: direct_hessian_oracle
+second_derivative_rtol = 1e-8
+second_derivative_atol = 1e-10
 ```
 
 Same-state inputs must match across CPU and JAX:
@@ -153,7 +153,7 @@ Use the existing upstream parameter matrix:
 Assertions:
 
 ```python
-tolerances = parity_ladder_tolerances("derivative-heavy")
+tolerances = parity_ladder_tolerances("direct-hessian-oracle")
 rtol = tolerances["second_derivative_rtol"]
 atol = tolerances["second_derivative_atol"]
 
@@ -223,13 +223,13 @@ Update:
     ```text
     second-derivative/Hessian direct C++ parity is covered by
     TestUpstreamFactoryBoozerMatrix::test_penalty_hessian_column_complete_cpu_parity_matrix
-    using column-complete CPU/C++ Hessian basis-sweep parity at rtol=1e-6,
-    atol=1e-8; the seeded directional HVP test is retained as operator-path
-    coverage.
+    using column-complete CPU/C++ Hessian basis-sweep parity in the
+    direct-hessian-oracle lane at rtol=1e-8, atol=1e-10; the seeded
+    directional HVP test is retained as operator-path coverage.
     ```
 
 - `docs/jax_parity_manifest.md`
-  - Extend the existing `derivative_heavy` evidence row to include:
+  - Add a `direct_hessian_oracle` evidence row for:
 
     ```text
     tests/geo/test_boozersurface_jax.py::TestUpstreamFactoryBoozerMatrix::test_penalty_hessian_column_complete_cpu_parity_matrix
@@ -287,7 +287,7 @@ Doc-drift guard:
 ## Acceptance Criteria
 
 - The new column-complete Hessian parity test passes over the upstream matrix.
-- The test uses `derivative_heavy` `second_derivative_*` tolerances.
+- The test uses `direct_hessian_oracle` `second_derivative_*` tolerances.
 - The existing directional HVP Hessian test remains.
 - Docs accurately distinguish direct column-complete Hessian parity from
   directional HVP coverage.

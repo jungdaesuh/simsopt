@@ -7087,7 +7087,7 @@ class TestUpstreamFactoryBoozerMatrix:
         parity = _evaluate_upstream_boozer_penalty_hessian_case(case)
         cpu_hessian = parity["cpu_hessian"]
         jax_hessian = parity["jax_hessian"]
-        tolerances = parity_ladder_tolerances("derivative-heavy")
+        tolerances = parity_ladder_tolerances("direct-hessian-oracle")
         second_derivative_rtol = tolerances["second_derivative_rtol"]
         second_derivative_atol = tolerances["second_derivative_atol"]
 

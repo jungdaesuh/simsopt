@@ -87,6 +87,7 @@ exact keys:
 - `direct_kernel`
 - `ls_wrapper_gradient`
 - `derivative_heavy`
+- `direct_hessian_oracle`
 - `exact_well_conditioned_adjoint`
 - `exact_ill_conditioned_adjoint`
 - `branch_stable_resolve`
@@ -333,8 +334,8 @@ Tasks:
 - [x] Add Hessian parity:
   - column-complete CPU/C++ Hessian oracle parity via
     `test_penalty_hessian_column_complete_cpu_parity_matrix` using
-    `derivative_heavy` with `second_derivative_rtol=1e-6` and
-    `second_derivative_atol=1e-8`
+    `direct_hessian_oracle` with `second_derivative_rtol=1e-8` and
+    `second_derivative_atol=1e-10`
   - retain same-state CPU Hessian vs JAX Hessian-vector product directional
     parity over the full surface/stellsym/`optimize_G` matrix as seeded
     operator-path coverage
@@ -490,9 +491,9 @@ Tasks:
   `exact_well_conditioned_adjoint`: vector parity required with
   `adjoint_rtol=1e-6`, `adjoint_atol=1e-8`, `gradient_rtol=1e-6`, and
   `gradient_atol=1e-8`.
-- [x] Use `derivative_heavy` for direct CPU/JAX derivative matrices, including
-  column-complete Boozer Hessian parity, and `fd_gradient` for directional
-  FD/Taylor evidence.
+- [x] Use `derivative_heavy` for direct CPU/JAX derivative matrices,
+  `direct_hessian_oracle` for column-complete Boozer Hessian parity, and
+  `fd_gradient` for directional FD/Taylor evidence.
 - [x] For every derivative test, state whether the proof is:
   - direct CPU/JAX value/gradient parity
   - CPU finite difference vs JAX analytic

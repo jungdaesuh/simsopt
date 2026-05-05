@@ -73,6 +73,13 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         "requires_direct_cpp_oracle": True,
         "fd_validation_secondary": True,
     },
+    "direct_hessian_oracle": {
+        "second_derivative_rtol": 1e-8,
+        "second_derivative_atol": 1e-10,
+        "requires_same_state": True,
+        "requires_direct_cpp_oracle": True,
+        "full_matrix_required": True,
+    },
     "exact_well_conditioned_adjoint": {
         "adjoint_rtol": 1e-6,
         "adjoint_atol": 1e-8,

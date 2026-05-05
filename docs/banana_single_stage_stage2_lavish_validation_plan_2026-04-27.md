@@ -135,15 +135,19 @@ forensics:
 
 ### P1: Contract Hygiene
 
-- [ ] Split `derivative_heavy` in `benchmarks/validation_ladder_contract.py`
-  into narrower lanes:
-  - `first_derivative_cpp_parity`
-  - `vjp_cpp_parity`
-  - `composed_jacobian_cpp_parity`
-  - `second_derivative_fd_taylor_validation`
-- [ ] Update tests and benchmarks to request the narrower lane names.
-- [ ] Document that second derivatives are not direct C++ parity unless a new
-  oracle lands.
+- [ ] Finish splitting `derivative_heavy` in
+  `benchmarks/validation_ladder_contract.py` into narrower lanes:
+  - [x] `direct_hessian_oracle` for column-complete same-state Boozer
+    Hessian oracle parity (`second_derivative_rtol=1e-8`,
+    `second_derivative_atol=1e-10`)
+  - [ ] `first_derivative_cpp_parity`
+  - [ ] `vjp_cpp_parity`
+  - [ ] `composed_jacobian_cpp_parity`
+  - [ ] `second_derivative_fd_taylor_validation`
+- [ ] Update remaining tests and benchmarks to request the narrower lane names.
+- [x] Document that column-complete Boozer Hessian parity is direct C++ oracle
+  coverage in `direct_hessian_oracle`; other second derivatives are not direct
+  C++ parity unless their own oracle lands.
 - [ ] Add a manifest assertion that every tolerance lane used by the banana
   manifest exists in `validation_ladder_contract.py`.
 - [ ] Add a manifest assertion that every known carve-out is explicit, not
@@ -310,7 +314,8 @@ Start with P0 and P1 only:
 
 - [ ] Add the manifest.
 - [ ] Add the manifest integrity test.
-- [ ] Split the derivative-heavy contract.
+- [ ] Finish the derivative-heavy split beyond the completed
+  `direct_hessian_oracle` lane.
 - [ ] Update the broad JAX parity doc to point to the banana-specific matrix.
 
 That gives the largest immediate gain: the codebase will stop relying on manual

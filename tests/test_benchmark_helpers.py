@@ -1953,6 +1953,7 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
         "direct_kernel",
         "ls_wrapper_gradient",
         "derivative_heavy",
+        "direct_hessian_oracle",
         "exact_well_conditioned_adjoint",
         "exact_ill_conditioned_adjoint",
         "branch_stable_resolve",
@@ -1977,6 +1978,13 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
     assert derivative["first_derivative_atol"] == pytest.approx(1e-10)
     assert derivative["second_derivative_rtol"] == pytest.approx(1e-6)
     assert derivative["second_derivative_atol"] == pytest.approx(1e-8)
+
+    direct_hessian = parity_ladder_tolerances("direct-hessian-oracle")
+    assert direct_hessian["second_derivative_rtol"] == pytest.approx(1e-8)
+    assert direct_hessian["second_derivative_atol"] == pytest.approx(1e-10)
+    assert direct_hessian["requires_same_state"] is True
+    assert direct_hessian["requires_direct_cpp_oracle"] is True
+    assert direct_hessian["full_matrix_required"] is True
 
     exact_well_conditioned = parity_ladder_tolerances(
         "exact-well-conditioned-adjoint"

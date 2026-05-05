@@ -52,7 +52,8 @@ Hessian/derivative slices: 16 `penalty_hessian` cases, and 45 combined
 | --- | --- | --- |
 | `direct_kernel` | complete | `tests/geo/test_boozer_residual_jax.py`, `tests/geo/test_boozersurface_jax.py`, and label/residual kernel parity in `docs/boozer_full_parity_plan_2026-05-04.md`. |
 | `ls_wrapper_gradient` | complete | `tests/integration/test_single_stage_jax_cpu_reference.py::test_real_fixture_ondevice_parity_and_wrapper_gradients` and wrapper-gradient slices for `IotasJAX`, `NonQuasiSymmetricRatioJAX`, and `BoozerResidualJAX`. |
-| `derivative_heavy` | complete | `tests/geo/test_boozer_derivatives_jax.py`, direct Boozer derivative matrix checks, `tests/geo/test_boozersurface_jax.py::TestUpstreamFactoryBoozerMatrix::test_penalty_hessian_column_complete_cpu_parity_matrix`, and batched adjoint RHS checks. |
+| `derivative_heavy` | complete | `tests/geo/test_boozer_derivatives_jax.py`, direct Boozer derivative matrix checks, and batched adjoint RHS checks. |
+| `direct_hessian_oracle` | complete | `tests/geo/test_boozersurface_jax.py::TestUpstreamFactoryBoozerMatrix::test_penalty_hessian_column_complete_cpu_parity_matrix`; same-state CPU/C++ Hessian oracle vs JAX HVP basis sweep at `rtol=1e-8`, `atol=1e-10`. |
 | `exact_well_conditioned_adjoint` | complete | `tests/geo/test_boozersurface_jax.py::test_exact_well_conditioned_operator_adjoint_matches_dense_reference_and_plu`; operator callbacks are the runtime path and dense PLU is metadata only. |
 | `exact_ill_conditioned_adjoint` | residual/failure-only | `tests/integration/test_single_stage_jax_cpu_reference.py::test_operator_adjoint_signoff_gate_on_exact_state`; mixed RHS fixture keeps residual-success and residual-failure behavior explicit without vector-parity claims. |
 | `branch_stable_resolve` | complete | Branch-stable re-solve FD and exact/LS branch tests in `tests/integration/test_single_stage_jax_cpu_reference.py` and `tests/geo/test_boozersurface_jax.py`. |
