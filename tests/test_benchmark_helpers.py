@@ -49,6 +49,7 @@ from benchmarks.grouped_adjoint_memory_probe import (
 import benchmarks.single_stage_init_parity as single_stage_init_parity_module
 import benchmarks.single_stage_parity_matrix as single_stage_parity_matrix
 import benchmarks.single_stage_outer_loop_probe as single_stage_outer_loop_probe
+import benchmarks.validation_ladder_common as validation_ladder_common
 from benchmarks.single_stage_outer_loop_probe import (
     TARGET_OUTER_OPTIMIZER_METHOD,
     evaluate_single_stage_outer_loop_probe,
@@ -1345,7 +1346,13 @@ def _release_gate_operator_outputs():
     }
 
 
+_FAKE_CUDA_RUNTIME_VERSION = "12.4"
+_FAKE_CUDA_DRIVER_VERSION = "550.54.14"
+_FAKE_NVCC_VERSION = "12.4"
+
+
 def _release_gate_lane(*, backend, gpu_memory_mb=None, include_gpu_facts=True):
+    is_gpu_backend = backend in {"cuda", "gpu"}
     provenance = {
         "repo_sha": "abc123",
         "jax": "0.0.0",
@@ -1353,17 +1360,25 @@ def _release_gate_lane(*, backend, gpu_memory_mb=None, include_gpu_facts=True):
         "backend": backend,
         "devices": [backend],
         "x64_enabled": True,
+        "matmul_precision": "None",
+        "cuda_runtime_version": (
+            _FAKE_CUDA_RUNTIME_VERSION if is_gpu_backend else None
+        ),
+        "cuda_driver_version": _FAKE_CUDA_DRIVER_VERSION if is_gpu_backend else None,
+        "nvcc_version": _FAKE_NVCC_VERSION if is_gpu_backend else None,
         "peak_rss_mb": 128.0,
         "xla_flags": "--xla_gpu_deterministic_ops=true",
         "compilation_cache_policy": "disabled",
     }
+    if is_gpu_backend:
+        provenance["cuda_visible_devices"] = "0"
     if gpu_memory_mb is not None:
         provenance["gpu_memory_mb"] = gpu_memory_mb
     if include_gpu_facts:
         provenance["nvidia_smi_gpus"] = [
             {
                 "name": "H100",
-                "driver_version": "0.0",
+                "driver_version": _FAKE_CUDA_DRIVER_VERSION,
                 "memory_total_mb": 81920.0,
             }
         ]
@@ -1786,6 +1801,55 @@ def test_release_gate_blocks_missing_cuda_provenance():
     assert any("NVIDIA GPU facts are missing" in failure for failure in bucket["failures"])
 
 
+def test_release_gate_blocks_missing_cuda_version_provenance():
+    fixed_state = _release_gate_fixed_state_artifact()
+    provenance = fixed_state["lanes"]["jax_gpu"]["provenance"]
+    for key in (
+        "cuda_visible_devices",
+        *single_stage_parity_matrix.CUDA_REQUIRED_PROVENANCE_KEYS,
+    ):
+        provenance.pop(key)
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        _release_gate_parity_report(),
+        fixed_state_artifact=fixed_state,
+        coordinate_mapping_artifact=_release_gate_coordinate_mapping_artifact(),
+    )
+
+    bucket = matrix["buckets"]["performance_memory_report"]
+    assert bucket["status"] == "blocked"
+    cuda_keys = ", ".join(single_stage_parity_matrix.CUDA_REQUIRED_PROVENANCE_KEYS)
+    assert any(
+        f"missing CUDA provenance keys {cuda_keys}" in failure
+        for failure in bucket["failures"]
+    )
+    assert any(
+        "CUDA_VISIBLE_DEVICES provenance is missing" in failure
+        for failure in bucket["failures"]
+    )
+
+
+def test_release_gate_allows_cpu_lanes_without_cuda_version_provenance():
+    fixed_state = _release_gate_fixed_state_artifact()
+    for lane_name in ("cpp_cpu", "jax_cpu"):
+        provenance = fixed_state["lanes"][lane_name]["provenance"]
+        for key in single_stage_parity_matrix.CUDA_REQUIRED_PROVENANCE_KEYS:
+            provenance.pop(key)
+
+    matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
+        _release_gate_parity_report(),
+        fixed_state_artifact=fixed_state,
+        coordinate_mapping_artifact=_release_gate_coordinate_mapping_artifact(),
+    )
+
+    failures = matrix["buckets"]["performance_memory_report"]["failures"]
+    assert not any(
+        lane_name in failure and "CUDA provenance" in failure
+        for lane_name in ("cpp_cpu", "jax_cpu")
+        for failure in failures
+    )
+
+
 def test_release_gate_fails_when_gpu_memory_exceeds_checked_in_budget():
     matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
         _release_gate_parity_report(),
@@ -2061,7 +2125,15 @@ def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
     )
     monkeypatch.setattr(
         "benchmarks.validation_ladder_common.query_nvidia_smi_facts",
-        lambda: {"nvidia_smi_gpus": [{"name": "test-gpu"}]},
+        lambda: {
+            "nvidia_smi_gpus": [{"name": "test-gpu"}],
+            "cuda_runtime_version": _FAKE_CUDA_RUNTIME_VERSION,
+            "cuda_driver_version": _FAKE_CUDA_DRIVER_VERSION,
+        },
+    )
+    monkeypatch.setattr(
+        "benchmarks.validation_ladder_common.query_nvcc_version",
+        lambda: _FAKE_NVCC_VERSION,
     )
     monkeypatch.setattr(
         "benchmarks.validation_ladder_common._current_sharding_metadata",
@@ -2081,10 +2153,20 @@ def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
             "distributed_local_device_ids": [0, 1],
         },
     )
+
+    class FakeDevice:
+        client = types.SimpleNamespace(
+            platform_version=f"CUDA {_FAKE_CUDA_RUNTIME_VERSION}"
+        )
+
+        def __str__(self):
+            return "cuda:0"
+
     fake_jax = types.SimpleNamespace(
         __version__=run_code_benchmark_common.EXPECTED_BENCHMARK_JAX_VERSION,
-        default_backend=lambda: "cpu",
-        devices=lambda: ["cpu:0"],
+        default_backend=lambda: "cuda",
+        devices=lambda: [FakeDevice()],
+        config=types.SimpleNamespace(jax_default_matmul_precision="highest"),
         numpy=types.SimpleNamespace(
             zeros=lambda n: np.zeros(n, dtype=np.float64),
             float64=np.float64,
@@ -2113,13 +2195,89 @@ def test_build_provenance_includes_compilation_cache_metadata(monkeypatch):
         "CUDA_FORCE_PTX_JIT": "1",
         "CUDA_DISABLE_PTX_JIT": "0",
     }
+    assert provenance["devices"] == ["cuda:0"]
+    assert provenance["jax_platform_versions"] == [f"CUDA {_FAKE_CUDA_RUNTIME_VERSION}"]
+    assert provenance["matmul_precision"] == "'highest'"
     assert provenance["nvidia_smi_gpus"] == [{"name": "test-gpu"}]
+    assert provenance["cuda_runtime_version"] == _FAKE_CUDA_RUNTIME_VERSION
+    assert provenance["cuda_driver_version"] == _FAKE_CUDA_DRIVER_VERSION
+    assert provenance["nvcc_version"] == _FAKE_NVCC_VERSION
     assert provenance["compilation_cache_enabled"] is True
     assert provenance["compilation_cache_dir"] == "/tmp/probe-cache"
     assert provenance["sharding_strategy"] == "hybrid"
     assert provenance["sharding_active"] is True
     assert provenance["sharding_min_pairwise_rows_to_shard"] == 8
     assert provenance["distributed_initialized"] is True
+
+
+def test_query_nvidia_smi_facts_records_cuda_versions(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2")
+    observed_commands = []
+
+    def fake_run(command, *, check, capture_output, text):
+        observed_commands.append(command)
+        assert check is True
+        assert capture_output is True
+        assert text is True
+        if command[:3] == [
+            "nvidia-smi",
+            "--query-gpu=name,driver_version,memory.total",
+            "--format=csv,noheader,nounits",
+        ]:
+            assert command[-2:] == ["-i", "2"]
+            return types.SimpleNamespace(
+                stdout=f"H100, {_FAKE_CUDA_DRIVER_VERSION}, 81920\n"
+            )
+        assert command == ["nvidia-smi"]
+        return types.SimpleNamespace(
+            stdout=(
+                f"| NVIDIA-SMI {_FAKE_CUDA_DRIVER_VERSION}    "
+                f"Driver Version: {_FAKE_CUDA_DRIVER_VERSION}    "
+                f"CUDA Version: {_FAKE_CUDA_RUNTIME_VERSION} |\n"
+            )
+        )
+
+    monkeypatch.setattr(validation_ladder_common.subprocess, "run", fake_run)
+
+    assert validation_ladder_common.query_nvidia_smi_facts() == {
+        "nvidia_smi_gpus": [
+            {
+                "name": "H100",
+                "driver_version": _FAKE_CUDA_DRIVER_VERSION,
+                "memory_total_mb": 81920.0,
+            }
+        ],
+        "cuda_driver_version": _FAKE_CUDA_DRIVER_VERSION,
+        "cuda_runtime_version": _FAKE_CUDA_RUNTIME_VERSION,
+    }
+    assert observed_commands == [
+        [
+            "nvidia-smi",
+            "--query-gpu=name,driver_version,memory.total",
+            "--format=csv,noheader,nounits",
+            "-i",
+            "2",
+        ],
+        ["nvidia-smi"],
+    ]
+
+
+def test_query_nvcc_version_records_release(monkeypatch):
+    def fake_run(command, *, check, capture_output, text):
+        assert command == ["nvcc", "--version"]
+        assert check is True
+        assert capture_output is True
+        assert text is True
+        return types.SimpleNamespace(
+            stdout=(
+                f"Cuda compilation tools, release {_FAKE_NVCC_VERSION}, "
+                "V12.4.131\n"
+            )
+        )
+
+    monkeypatch.setattr(validation_ladder_common.subprocess, "run", fake_run)
+
+    assert validation_ladder_common.query_nvcc_version() == _FAKE_NVCC_VERSION
 
 
 def _fake_jax_runtime(*, backend: str, devices: list[str]) -> types.SimpleNamespace:

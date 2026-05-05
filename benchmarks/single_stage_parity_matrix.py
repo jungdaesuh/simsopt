@@ -147,6 +147,12 @@ COORDINATE_MAPPING_REQUIRED_SECTIONS = (
     "gradient_projection",
     "finite_difference_checks",
 )
+CUDA_REQUIRED_PROVENANCE_KEYS = (
+    "cuda_runtime_version",
+    "cuda_driver_version",
+    "nvcc_version",
+    "matmul_precision",
+)
 PERFORMANCE_REQUIRED_PROVENANCE_KEYS = (
     "repo_sha",
     "jax",
@@ -1217,8 +1223,18 @@ def _performance_memory_bucket(
             backend = str(provenance.get("backend", "")).lower()
             if backend not in {"cuda", "gpu"}:
                 blocked.append(f"{lane}: CUDA lane did not prove CUDA backend execution")
+            if not str(provenance.get("cuda_visible_devices") or "").strip():
+                blocked.append(f"{lane}: CUDA_VISIBLE_DEVICES provenance is missing")
             if not provenance.get("nvidia_smi_gpus"):
                 blocked.append(f"{lane}: NVIDIA GPU facts are missing")
+            missing_cuda_provenance = [
+                key for key in CUDA_REQUIRED_PROVENANCE_KEYS if not provenance.get(key)
+            ]
+            if missing_cuda_provenance:
+                blocked.append(
+                    f"{lane}: missing CUDA provenance keys "
+                    f"{', '.join(missing_cuda_provenance)}"
+                )
             xla_flags = str(provenance.get("xla_flags") or "")
             if "--xla_gpu_deterministic_ops=true" not in xla_flags.split():
                 blocked.append(f"{lane}: deterministic GPU XLA flag is missing")
@@ -1561,8 +1577,12 @@ def _device_version_rows(matrix: dict[str, Any]) -> list[tuple[Any, ...]]:
                 provenance.get("backend"),
                 provenance.get("devices"),
                 provenance.get("x64_enabled"),
+                provenance.get("matmul_precision"),
                 provenance.get("jax"),
                 provenance.get("jaxlib"),
+                provenance.get("cuda_runtime_version"),
+                provenance.get("cuda_driver_version"),
+                provenance.get("nvcc_version"),
                 provenance.get("xla_flags"),
                 provenance.get("cuda_visible_devices"),
                 provenance.get("nvidia_smi_gpus"),
@@ -1759,8 +1779,12 @@ def build_release_gate_markdown_report(matrix: dict[str, Any]) -> str:
                         "backend",
                         "devices",
                         "x64",
+                        "matmul_precision",
                         "jax",
                         "jaxlib",
+                        "cuda_runtime",
+                        "cuda_driver",
+                        "nvcc",
                         "xla_flags",
                         "cuda_visible_devices",
                         "nvidia_smi_gpus",

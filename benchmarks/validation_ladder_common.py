@@ -57,6 +57,8 @@ _CUDA_PROOF_ENV_VARS = (
     "CUDA_CACHE_PATH",
     "CUDA_VISIBLE_DEVICES",
 )
+_NVIDIA_SMI_CUDA_VERSION_RE = re.compile(r"CUDA Version:\s*([0-9.]+)")
+_NVCC_RELEASE_RE = re.compile(r"release\s+([^,\s]+)")
 _BENCHMARK_COMPILATION_CACHE_ENV_DEFAULTS = {
     _JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_ENV_VAR: "0",
     _JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_ENV_VAR: "-1",
@@ -393,7 +395,55 @@ def query_nvidia_smi_facts() -> dict[str, Any] | None:
         )
     if not gpus:
         return None
-    return {"nvidia_smi_gpus": gpus}
+    banner = subprocess.run(
+        ["nvidia-smi"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    facts: dict[str, Any] = {
+        "nvidia_smi_gpus": gpus,
+        "cuda_driver_version": gpus[0]["driver_version"],
+    }
+    cuda_version = _NVIDIA_SMI_CUDA_VERSION_RE.search(banner.stdout)
+    if cuda_version is not None:
+        facts["cuda_runtime_version"] = cuda_version.group(1)
+    return facts
+
+
+def query_nvcc_version() -> str | None:
+    """Return the CUDA compiler release from nvcc when it is installed."""
+    try:
+        result = subprocess.run(
+            ["nvcc", "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+    match = _NVCC_RELEASE_RE.search(result.stdout)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _jax_matmul_precision(jax_module) -> str:
+    config = getattr(jax_module, "config", None)
+    return repr(getattr(config, "jax_default_matmul_precision", None))
+
+
+def _jax_platform_versions(devices) -> list[str]:
+    versions = []
+    for device in devices:
+        platform_version = getattr(
+            getattr(device, "client", None),
+            "platform_version",
+            None,
+        )
+        if platform_version:
+            versions.append(str(platform_version))
+    return sorted(set(versions))
 
 
 def describe_compile_behavior(
@@ -534,14 +584,20 @@ def build_provenance(
     """Collect shared provenance fields for ladder outputs."""
     compilation_cache = current_compilation_cache_metadata()
     backend_guardrails = current_backend_guardrail_metadata()
+    devices = jax_module.devices()
     provenance = {
         "title": title,
         "repo_sha": get_git_sha(),
         "jax": jax_module.__version__,
         "jaxlib": jaxlib_module.__version__,
         "backend": jax_module.default_backend(),
-        "devices": [str(device) for device in jax_module.devices()],
+        "devices": [str(device) for device in devices],
+        "jax_platform_versions": _jax_platform_versions(devices),
         "x64_enabled": _x64_enabled(jax_module),
+        "matmul_precision": _jax_matmul_precision(jax_module),
+        "cuda_runtime_version": None,
+        "cuda_driver_version": None,
+        "nvcc_version": query_nvcc_version(),
         "peak_rss_mb": peak_rss_mb(),
         **backend_guardrails,
         **current_xla_cuda_metadata(),
