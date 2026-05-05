@@ -44,8 +44,10 @@ lane evidence.
 - Derivative-heavy direct C++ oracle tests use the ``derivative-heavy`` lane:
   representative first derivatives (``dB/dX``, Biot-Savart VJPs, surface
   coefficient Jacobians, composed Boozer residual Jacobians) at
-  ``rtol=1e-8``, ``atol=1e-10``. Second derivatives/Hessians remain TODOs at
-  ``rtol=1e-6``, ``atol=1e-8``.
+  ``rtol=1e-8``, ``atol=1e-10``. Column-complete Boozer penalty Hessian
+  parity compares the CPU/C++ Hessian oracle against one JAX HVP per decision
+  variable at ``rtol=1e-6``, ``atol=1e-8``. Other second-derivative families
+  remain in this lane until they have their own direct oracle closures.
 - Full directional FD checks use the ``fd-gradient`` lane
   (``rtol=1e-5``, ``atol=1e-7``) on branch-stable fixtures.
 - Exact adjoints are split: ``exact-well-conditioned-adjoint`` permits vector

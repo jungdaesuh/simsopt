@@ -63,6 +63,7 @@ from .boozersurface_jax_test_helpers import (
     _build_upstream_boozer_penalty_case,
     _evaluate_upstream_boozer_exact_constraints_case,
     _evaluate_upstream_boozer_penalty_case,
+    _evaluate_upstream_boozer_penalty_hessian_case,
     _build_upstream_exact_surface_case,
     _extract_upstream_jax_penalty_inputs,
     _make_circular_coil,
@@ -7062,6 +7063,57 @@ class TestUpstreamFactoryBoozerMatrix:
             rtol=tolerances["directional_fd_rtol"],
             atol=tolerances["directional_fd_atol"],
             err_msg="CPU/JAX penalty Hessian directional mismatch",
+        )
+
+    @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", UPSTREAM_BOOZER_STELLSYM)
+    @pytest.mark.parametrize("optimize_G", UPSTREAM_BOOZER_OPTIMIZE_G)
+    def test_penalty_hessian_column_complete_cpu_parity_matrix(
+        self,
+        surfacetype,
+        stellsym,
+        optimize_G,
+    ):
+        """Column-complete CPU/JAX Hessian parity runs one HVP per decision variable.
+
+        The basis sweep covers the upstream matrix and is expected to live on the
+        auto-marked slow Boozer lane.
+        """
+        case = _build_upstream_boozer_penalty_case(
+            surfacetype,
+            stellsym,
+            optimize_G,
+        )
+        parity = _evaluate_upstream_boozer_penalty_hessian_case(case)
+        cpu_hessian = parity["cpu_hessian"]
+        jax_hessian = parity["jax_hessian"]
+        tolerances = parity_ladder_tolerances("derivative-heavy")
+        second_derivative_rtol = tolerances["second_derivative_rtol"]
+        second_derivative_atol = tolerances["second_derivative_atol"]
+
+        assert cpu_hessian.shape == jax_hessian.shape
+        assert np.all(np.isfinite(cpu_hessian))
+        assert np.all(np.isfinite(jax_hessian))
+        np.testing.assert_allclose(
+            cpu_hessian,
+            cpu_hessian.T,
+            rtol=1e-12,
+            atol=1e-12,
+            err_msg="CPU Hessian asymmetric; check CPU/C++ oracle regression",
+        )
+        np.testing.assert_allclose(
+            jax_hessian,
+            jax_hessian.T,
+            rtol=second_derivative_rtol,
+            atol=second_derivative_atol,
+            err_msg="JAX Hessian asymmetric; check HVP column assembly",
+        )
+        np.testing.assert_allclose(
+            jax_hessian,
+            cpu_hessian,
+            rtol=second_derivative_rtol,
+            atol=second_derivative_atol,
+            err_msg="CPU/JAX penalty Hessian column-complete mismatch",
         )
 
     @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)

@@ -115,7 +115,7 @@ contract has a strict JAX proof or a deliberate unsupported-JAX proof.
 | `test_none_G_coil_gradient_callback_allows_explicit_G` | guard/derivative | Add strict JAX adjoint callback allow-path parity. |
 | `test_residual` | math | Add same NCSX exact-surface JAX scalar residual proof. |
 | `test_boozer_penalty_constraints_gradient` | derivative | Expand CPU/JAX parity matrix over surface type, stellsym, and optimize_G. |
-| `test_boozer_penalty_constraints_hessian` | derivative | Add full matrix parity or documented FD/Taylor equivalence lane. |
+| `test_boozer_penalty_constraints_hessian` | derivative | Column-complete CPU/C++ Hessian oracle parity via `test_penalty_hessian_column_complete_cpu_parity_matrix`; retain seeded directional HVP coverage. |
 | `test_boozer_constrained_jacobian` | derivative | Add exact constrained residual/Jacobian CPU/JAX parity matrix. |
 | `test_boozer_surface_optimisation_convergence` | solver result | Add solver-result parity over the supported LS/exact combinations. |
 | `test_boozer_serialization` | mutable identity | Exclude pointer identity; add immutable runtime-state round-trip replacement. |
@@ -330,16 +330,14 @@ Tasks:
   - fixed root cause: label terms now evaluate on explicit `label.surface`
     runtime metadata, matching upstream CPU label quadrature instead of
     silently reusing the Boozer residual surface grid
-- [x] Add Hessian parity or an explicitly named Hessian-equivalence lane:
-  - direct CPU Hessian vs JAX Hessian where both are available:
+- [x] Add Hessian parity:
+  - column-complete CPU/C++ Hessian oracle parity via
+    `test_penalty_hessian_column_complete_cpu_parity_matrix` using
     `derivative_heavy` with `second_derivative_rtol=1e-6` and
     `second_derivative_atol=1e-8`
-  - otherwise CPU/JAX directional second derivative with the same `h1`, `h2`:
-    `fd_gradient` with `directional_fd_rtol=1e-5` and
-    `directional_fd_atol=1e-7`
-  - no claim of direct Hessian parity if only FD/Taylor evidence exists
-  - implemented as same-state CPU Hessian vs JAX Hessian-vector product
-    directional parity over the full surface/stellsym/`optimize_G` matrix
+  - retain same-state CPU Hessian vs JAX Hessian-vector product directional
+    parity over the full surface/stellsym/`optimize_G` matrix as seeded
+    operator-path coverage
 - [x] Add exact constrained residual/Jacobian parity over the same matrix:
   - compare residual vector
   - compare Jacobian-vector product for seeded direction `h`
@@ -492,8 +490,9 @@ Tasks:
   `exact_well_conditioned_adjoint`: vector parity required with
   `adjoint_rtol=1e-6`, `adjoint_atol=1e-8`, `gradient_rtol=1e-6`, and
   `gradient_atol=1e-8`.
-- [x] Use `derivative_heavy` for direct CPU/JAX derivative matrices and
-  `fd_gradient` for directional FD/Taylor evidence.
+- [x] Use `derivative_heavy` for direct CPU/JAX derivative matrices, including
+  column-complete Boozer Hessian parity, and `fd_gradient` for directional
+  FD/Taylor evidence.
 - [x] For every derivative test, state whether the proof is:
   - direct CPU/JAX value/gradient parity
   - CPU finite difference vs JAX analytic
@@ -617,6 +616,15 @@ CPU closure evidence captured on 2026-05-05 with
 - `pytest -q tests/integration/test_single_stage_jax_cpu_reference.py -k
   "boozer or Boozer"`: 21 passed, 157 deselected in 393.43 s.
 
+Boozer Hessian oracle addendum captured on 2026-05-05 with
+`JAX_ENABLE_X64=True JAX_PLATFORMS=cpu`:
+
+- `pytest -q tests/geo/test_boozersurface_jax.py -k "penalty_hessian"`:
+  16 passed, 343 deselected in 135.72 s.
+- `pytest -q tests/geo/test_boozersurface_jax.py
+  tests/geo/test_boozer_derivatives_jax.py -k "hessian or derivative"`:
+  45 passed, 336 deselected in 158.43 s.
+
 Current CPU Boozer validation has no unexplained failures. The two baseline
 integration failures are closed by the fixed same-state derivative tolerance
 contract and the branch-stable re-solve FD contract. The backend-selection test
@@ -637,19 +645,19 @@ Result-contract cleanup rerun captured on 2026-05-05 with
 CPU closure commands:
 
 ```bash
-JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu pytest -q tests/geo/test_boozersurface.py
-JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu pytest -q tests/geo/test_boozersurface_jax.py
-JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu pytest -q tests/geo/test_boozersurface_jax_private.py
-JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu pytest -q tests/geo/test_boozer_residual_jax.py
-JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu pytest -q tests/geo/test_boozer_derivatives_jax.py
-JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu pytest -q tests/integration/test_single_stage_jax_cpu_reference.py -k "boozer or Boozer"
+JAX_ENABLE_X64=True JAX_PLATFORMS=cpu pytest -q tests/geo/test_boozersurface.py
+JAX_ENABLE_X64=True JAX_PLATFORMS=cpu pytest -q tests/geo/test_boozersurface_jax.py
+JAX_ENABLE_X64=True JAX_PLATFORMS=cpu pytest -q tests/geo/test_boozersurface_jax_private.py
+JAX_ENABLE_X64=True JAX_PLATFORMS=cpu pytest -q tests/geo/test_boozer_residual_jax.py
+JAX_ENABLE_X64=True JAX_PLATFORMS=cpu pytest -q tests/geo/test_boozer_derivatives_jax.py
+JAX_ENABLE_X64=True JAX_PLATFORMS=cpu pytest -q tests/integration/test_single_stage_jax_cpu_reference.py -k "boozer or Boozer"
 ```
 
 Optional CUDA proof after CPU closure:
 
 ```bash
-SIMSOPT_JAX_PLATFORM=cuda JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cuda pytest -q tests/geo/test_boozersurface_jax.py -k "gpu or parity"
-SIMSOPT_JAX_PLATFORM=cuda JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cuda pytest -q tests/integration/test_single_stage_jax_cpu_reference.py -k "boozer and gpu"
+SIMSOPT_JAX_PLATFORM=cuda JAX_ENABLE_X64=True JAX_PLATFORMS=cuda pytest -q tests/geo/test_boozersurface_jax.py -k "gpu or parity"
+SIMSOPT_JAX_PLATFORM=cuda JAX_ENABLE_X64=True JAX_PLATFORMS=cuda pytest -q tests/integration/test_single_stage_jax_cpu_reference.py -k "boozer and gpu"
 ```
 
 ## Definition Of Done
@@ -680,5 +688,6 @@ SIMSOPT_JAX_PLATFORM=cuda JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cuda pytest -q t
 - [x] Do not add defensive fallback paths.
 - [x] Do not add hidden host-wrapper re-entry to satisfy target-lane tests.
 - [x] Do not claim full solver trajectory parity from final metric closeness.
-- [x] Do not claim direct Hessian or adjoint vector parity from FD-only evidence.
+- [x] Do not claim adjoint vector parity from FD-only evidence; Boozer Hessian
+  direct parity is now column-complete CPU/C++ oracle coverage.
 - [x] Do not use mutable object identity as the JAX parity oracle.

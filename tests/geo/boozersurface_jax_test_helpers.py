@@ -381,6 +381,37 @@ def _evaluate_upstream_boozer_penalty_case(case):
     }
 
 
+def _evaluate_upstream_boozer_penalty_hessian_case(case):
+    _, _, cpu_hessian = case.cpu_boozer.boozer_penalty_constraints_vectorized(
+        case.x,
+        derivatives=2,
+        constraint_weight=case.constraint_weight,
+        optimize_G=case.optimize_G,
+    )
+    objective = case.jax_boozer._make_penalty_objective_with(
+        case.optimize_G,
+        case.jax_boozer.options["weight_inv_modB"],
+        case.constraint_weight,
+    )
+    x = jnp.asarray(case.x, dtype=jnp.float64)
+    grad_fn = jax.grad(objective)
+    basis = jnp.eye(x.size, dtype=jnp.float64)
+
+    def hvp_single(v):
+        return jax.jvp(grad_fn, (x,), (v,))[1]
+
+    # Standard basis for column-complete oracle parity. ``lax.map`` stacks
+    # H @ e_i along axis 0, so transpose once to match dense Hessian layout.
+    hessian_columns = jax.lax.map(hvp_single, basis)
+    return {
+        "cpu_hessian": np.asarray(cpu_hessian, dtype=np.float64),
+        "jax_hessian": np.asarray(
+            jax.device_get(hessian_columns),
+            dtype=np.float64,
+        ).T,
+    }
+
+
 def _evaluate_upstream_boozer_exact_constraints_case(case):
     cpu_residual, cpu_jacobian = case.cpu_boozer.boozer_exact_constraints(
         case.xl,
