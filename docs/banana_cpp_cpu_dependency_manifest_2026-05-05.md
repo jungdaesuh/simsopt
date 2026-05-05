@@ -11,7 +11,7 @@ It is the inverse of the JAX/GPU dependency trace at `docs/single_stage_banana_j
 
 Companion docs:
 - `docs/banana_single_stage_stage2_lavish_validation_plan_2026-04-27.md` — product-surface inventory and validation lanes
-- `analysis/jax_gpu_port_dependency_graph_2026-04-17.md` — JAX-port-centric module graph that lists each C++ replacement target
+- `/Users/suhjungdae/code/columbia/analysis/jax_gpu_port_dependency_graph_2026-04-17.md` — JAX-port-centric module graph that lives in the sibling `columbia/analysis` repo and lists each C++ replacement target
 
 ## Surrounding source files
 
@@ -27,10 +27,10 @@ The CPU/C++ lane is active when `args.backend != "jax"`, which is the default if
 
 Stage 2 routing branch:
 
-- `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py:720-730` — `resolve_stage2_default_optimizer_backend()` returns `"scipy"` when field backend is not JAX
-- `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py:728` — `if field_backend == "jax":` (optimizer-backend resolver)
-- `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py:1798` — second `if field_backend == "jax":` guard
-- `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py:2807-2820` — primary objective lane branch; CPU `else` branch constructs `Jf = SquaredFlux(new_surf, new_bs)` and prints `Stage 2 backend: CPU (simsoptpp)`
+- `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py:726-732` — `resolve_stage2_default_optimizer_backend()` returns `"scipy"` when field backend is not JAX
+- `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py:730` — `if field_backend == "jax":` (optimizer-backend resolver)
+- `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py:1812` — second `if field_backend == "jax":` guard inside `resolve_optimizer_contract_for_stage2_outer_loop`
+- `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py:2830-2847` — primary objective lane branch; CPU `else` branch constructs `Jf = SquaredFlux(new_surf, new_bs)` (line 2846) and prints `Stage 2 backend: CPU (simsoptpp)` (line 2847)
 
 Single-stage routing branches:
 
@@ -63,7 +63,7 @@ Runtime spine on the CPU/C++ lane:
 2. **Field backend wrap**
    - `bs = BiotSavart(coils)` then `bs.set_points(surf.gamma().reshape((-1, 3)))`
    - implementation: `src/simsopt/field/biotsavart.py:10` — `class BiotSavart(sopp.BiotSavart, MagneticField):`
-3. **Objective assembly** at `banana_coil_solver.py:2820`
+3. **Objective assembly** at `banana_coil_solver.py:2846` (CPU else-branch)
    - `Jf = SquaredFlux(new_surf, new_bs)` from `src/simsopt/objectives/fluxobjective.py`
    - `Jls = CurveLength(new_banana_curve)` from `src/simsopt/geo/curveobjectives.py`
    - `Jccdist = CurveCurveDistance(new_curves, CC_THRESHOLD)`
@@ -71,7 +71,7 @@ Runtime spine on the CPU/C++ lane:
    - `Jc = LpCurveCurvature(new_banana_curve, args.curvature_p_norm, CURVATURE_THRESHOLD)`
    - `JF = SQUARED_FLUX_WEIGHT * Jf + LENGTH_WEIGHT * Jls_penalty + CC_WEIGHT * Jccdist + CC_WEIGHT * Jcsdist + CURVATURE_WEIGHT * Jc` — composition via `_core/optimizable.py` operator overloads
 4. **Outer optimizer**
-   - `resolve_stage2_default_optimizer_backend(field_backend, ...)` returns `"scipy"` for the CPU lane (`banana_coil_solver.py:724-730`)
+   - `resolve_stage2_default_optimizer_backend(field_backend, ...)` returns `"scipy"` for the CPU lane (`banana_coil_solver.py:726-732`)
    - the timed driver `run_stage2_optimizer_timed(...)` ultimately calls `scipy.optimize.minimize` (L-BFGS-B by default) or `scipy.optimize.least_squares` for the LS variant
 
 ## Single-stage — CPU/C++ dependency spine
@@ -104,7 +104,7 @@ Runtime spine on the CPU/C++ lane:
    - residual kernels are dispatched to C++ via wrappers: `_call_boozer_residual`, `_call_boozer_residual_ds`, `_call_boozer_residual_ds2`
 4. **Outer objective assembly** at `single_stage_banana_example.py:11214-11259`
    - `nonQSs = [NonQuasiSymmetricRatio(boozer_surface, bs_obj)]` (line 11217)
-   - `brs = [build_boozer_residual_objective(boozer_surface, bs_obj, BoozerResidual)]` (line 11218 + the CPU branch at 7486)
+   - `brs = [build_boozer_residual_objective(boozer_surface, bs_obj, boozer_residual_cls)]` (line 11218); `boozer_residual_cls` resolves to `BoozerResidual` on the CPU lane via the dispatch at line 7486
    - `iota = build_iota_objective(boozer_surface, Iotas)` and `Jiota = QuadraticPenalty(iota, iota_target)`
    - `JCurveLength = QuadraticPenalty(CurveLength(banana_curves[0]), length_target, "max")`
    - `JCurveCurve = CurveCurveDistance(curves, CC_DIST)`
@@ -230,9 +230,9 @@ The JAX runtime is initialized regardless (because `repo_bootstrap.py` calls `co
 
 | Stage | CPU/C++ class / entry | JAX class / entry | Routing site |
 |---|---|---|---|
-| Stage 2 field | `BiotSavart` (`src/simsopt/field/biotsavart.py:10`) | `BiotSavartJAX` | `banana_coil_solver.py:2807` |
-| Stage 2 flux objective | `SquaredFlux` (`src/simsopt/objectives/fluxobjective.py`) | `SquaredFluxJAX` | `banana_coil_solver.py:2807-2820` |
-| Stage 2 outer optimizer | `scipy.optimize.minimize` / `scipy.optimize.least_squares` | `target_minimize` (ondevice) | `banana_coil_solver.py:724-730` |
+| Stage 2 field | `BiotSavart` (`src/simsopt/field/biotsavart.py:10`) | `BiotSavartJAX` | `banana_coil_solver.py:2830` |
+| Stage 2 flux objective | `SquaredFlux` (`src/simsopt/objectives/fluxobjective.py`) | `SquaredFluxJAX` | `banana_coil_solver.py:2830-2847` |
+| Stage 2 outer optimizer | `scipy.optimize.minimize` / `scipy.optimize.least_squares` | `target_minimize` (ondevice) | `banana_coil_solver.py:726-732` |
 | Single-stage field | `BiotSavart` | `SingleStageRuntimeSpecBiotSavartJAX` | `single_stage_banana_example.py:11206` |
 | Single-stage Boozer | `BoozerSurface` (`src/simsopt/geo/boozersurface.py`) | `BoozerSurfaceJAX` | `single_stage_banana_example.py:4951-4959` |
 | Single-stage outer objectives | `BoozerResidual`, `Iotas`, `NonQuasiSymmetricRatio` (`src/simsopt/geo/surfaceobjectives.py`) | `BoozerResidualJAX`, `IotasJAX`, `NonQuasiSymmetricRatioJAX` | `single_stage_banana_example.py:7486, 10687, 11215-11217` |
@@ -278,9 +278,9 @@ The banana lane actively exercises only: `python.cpp`, `python_curves.cpp`, `pyt
 ## Caveats
 
 - This trace was written against `gpu-purity-stage2-20260405` HEAD as of 2026-05-05. Line citations are valid for that commit; binding line numbers in `src/simsoptpp/python.cpp` (57, 58, 60, 91, 106, 136, 137, 138) are stable but worth re-confirming if `python.cpp` is reordered.
-- JAX-lane correction as of 2026-05-05: the CPU/C++ VJP rows above do not imply a live `CurveCWSFourierCPP` port blocker. The current JAX path supports CWS forward and VJP natively through the `curve.surf` + `surface_spec()` branch in `_supports_native_curve_geometry` (`src/simsopt/field/biotsavart_jax_backend.py:603`) and `curve_spec_from_curve` (`src/simsopt/jax_core/curve_geometry.py:99`). No `CurveCWSFourierCPP.to_spec()` shim is required for the banana target lane.
+- JAX-lane correction as of 2026-05-05: the CPU/C++ VJP rows above do not imply a live `CurveCWSFourierCPP` port blocker. The current JAX path supports CWS forward and VJP natively through the `curve.surf` + `surface_spec()` branch in `_supports_native_curve_geometry` (`src/simsopt/field/biotsavart_jax_backend.py:629`) and `curve_spec_from_curve` (`src/simsopt/jax_core/curve_geometry.py:99`). No `CurveCWSFourierCPP.to_spec()` shim is required for the banana target lane.
 - Some `Curve*Distance` and `Surface*Distance` objectives mix C++ candidate culling with host-Python distance accumulation. The same code path runs on both lanes; only the gradient back-propagation differs (CPU lane uses curve VJP methods on the C++ curve class; JAX lane uses autodiff through pure kernels).
 - The ALM outer loop in `alm_utils.py` is shared between lanes. It only differs in the inner-step optimizer it invokes — `scipy.optimize.minimize` on CPU vs. JAX-traced inner steps on the JAX lane.
 - The single-stage `SurfaceSurfaceDistance(boozer_surface.surface, VV, SS_DIST)` term builds on the same C++ surface kernels as the Stage 2 surface evaluation; the vessel surface `VV` is a `SurfaceRZFourier` instance.
 - Stage 2 imports fieldline/Poincaré symbols from `src/simsopt/field/tracing.py` but does not call them in the optimizer path; they are present as future-use scaffolding.
-- `BoozerResidualExact` (`single_stage_banana_example.py:4621`) is a separate residual class used by the JAX-Exact lane; on the default single-stage CPU lane the dispatch returns the legacy `BoozerResidual` (`single_stage_banana_example.py:7486`). Its dependencies (`boozer_surface_residual`, `boozer_surface_residual_dB` from `src/simsopt/geo/surfaceobjectives.py`; `forward_backward` from `src/simsopt/objectives/utilities.py`) are imported at lines 119, 120, and 124 respectively and are wired correctly — `BoozerResidualExact` is functional, not stubbed.
+- `BoozerResidualExact` (`single_stage_banana_example.py:4621`) is a separate residual class used by the JAX-Exact lane; on the default single-stage CPU lane the dispatch returns the legacy `BoozerResidual` (`single_stage_banana_example.py:7486`). Its dependencies (`boozer_surface_residual`, `boozer_surface_residual_dB` from `src/simsopt/geo/surfaceobjectives.py`; `forward_backward` from `src/simsopt/objectives/utilities.py`) are imported at lines 120, 121, and 124 respectively and are wired correctly — `BoozerResidualExact` is functional, not stubbed.

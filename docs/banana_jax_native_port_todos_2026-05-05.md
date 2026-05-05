@@ -9,7 +9,7 @@ Companion docs:
 
 ## Scope and current-state baseline
 
-Stage 2 banana and single-stage banana both run on the JAX target lane today. The core compute path (`BiotSavartJAX`, `SquaredFluxJAX`, `BoozerSurfaceJAX`, `surfaceobjectives_jax.py`, `optimizer_jax.py::target_minimize`) is JAX-native. Forward AND VJP for `CurveCWSFourierCPP` are already supported via the `curve.surf` + `surface_spec` native branch in `_supports_native_curve_geometry` (`src/simsopt/field/biotsavart_jax_backend.py:603`) and `curve_spec_from_curve` (`src/simsopt/jax_core/curve_geometry.py:99`). The Stage 2 target bundle bypasses the C++ candidate culler entirely via fixed-shape JAX scans (`src/simsopt/objectives/stage2_target_objective_jax.py:296, 370`). Single-stage surface self-intersection has a JAX implementation for `SurfaceXYZTensorFourier` and `SurfaceRZFourier` (`single_stage_banana_example.py:5631, 5808`).
+Stage 2 banana and single-stage banana both run on the JAX target lane today. The core compute path (`BiotSavartJAX`, `SquaredFluxJAX`, `BoozerSurfaceJAX`, `surfaceobjectives_jax.py`, `optimizer_jax.py::target_minimize`) is JAX-native. Forward AND VJP for `CurveCWSFourierCPP` are already supported via the `curve.surf` + `surface_spec` native branch in `_supports_native_curve_geometry` (`src/simsopt/field/biotsavart_jax_backend.py:629`) and `curve_spec_from_curve` (`src/simsopt/jax_core/curve_geometry.py:99`). The Stage 2 target bundle bypasses the C++ candidate culler entirely via fixed-shape JAX scans (`src/simsopt/objectives/stage2_target_objective_jax.py:296, 370`). Single-stage surface self-intersection has a JAX implementation for `SurfaceXYZTensorFourier` and `SurfaceRZFourier` (`single_stage_banana_example.py:5631, 5808`).
 
 What remains is split into three categories:
 
@@ -69,7 +69,7 @@ The corrected port analysis concludes items 1 and 2 (distance culling, CWS VJP) 
    - Guard scoping: `SIMSOPT_TARGET_LANE_STRICT=1` only raises inside `strict_target_lane_purity()`, so snapshot/callback code outside the value/grad context remains unchanged.
    - Negative guard tests: legacy `OptimizableSum.J()` and `CurveCurveDistance.compute_candidates()` raise inside the strict context.
    - Optimizer wiring: `optimizer_jax.target_minimize(...)` and `banana_coil_solver.py::run_stage2_optimizer(...)` wrap explicit value-and-grad calls before dispatch.
-   - Target-bundle coverage: `tests/integration/test_stage2_jax.py::TestStage2TargetObjectiveContract::test_strict_mode_allows_target_scalar_objective_evaluation` evaluates the scalar objective and value/grad under strict mode with no `pure_callback` in the traced value/grad path.
+   - Target-bundle coverage: `tests/integration/test_stage2_jax.py::TestStage2OptimizerContract::test_strict_mode_allows_target_scalar_objective_evaluation` evaluates the scalar objective and value/grad under strict mode with no `pure_callback` in the traced value/grad path.
 
 ### Optional follow-up (out of scope for TODO 1; tracked here)
 
@@ -298,7 +298,7 @@ Stage 2's `new_bs.save(...)` and `new_surf.save(...)` at finalization both call 
 ### Validation
 
 - `tests/integration/test_stage2_jax.py::TestStage2OptimizerContract::test_stage2_script_skip_postprocess_still_writes_restart_artifacts` asserts the reduced JAX Stage 2 run writes spec artifacts, both `load_specs(path)` and `load(path)` read them as specs, and a second Stage 2 run restarts from the emitted `biot_savart_opt.json`.
-- `tests/integration/test_stage2_jax.py::TestStage2TargetObjectiveContract::test_target_scalar_objective_exposes_final_specs_from_dofs` verifies final specs materialized from optimizer DOFs match the live input field and surface state.
+- `tests/integration/test_stage2_jax.py::TestStage2OptimizerContract::test_target_scalar_objective_exposes_final_specs_from_dofs` verifies final specs materialized from optimizer DOFs match the live input field and surface state.
 - Single-stage target-lane cache enforcement remains out of this Stage 2 emitter change; no new host wrapper path was added.
 
 ### Dependencies
@@ -325,7 +325,7 @@ The manifest currently parrots an analysis-graph note about CWS VJP fallback. Fi
 
 ### Plan
 
-1. Edit the relevant caveat in `docs/banana_cpp_cpu_dependency_manifest_2026-05-05.md` to note: CWS forward AND VJP are both JAX-native via the `curve.surf` + `surface_spec` native branch (`biotsavart_jax_backend.py:603`, `jax_core/curve_geometry.py:99`); no `.to_spec()` shim is needed for `CurveCWSFourierCPP`.
+1. Edit the relevant caveat in `docs/banana_cpp_cpu_dependency_manifest_2026-05-05.md` to note: CWS forward AND VJP are both JAX-native via the `curve.surf` + `surface_spec` native branch (`biotsavart_jax_backend.py:629`, `jax_core/curve_geometry.py:99`); no `.to_spec()` shim is needed for `CurveCWSFourierCPP`.
 2. Cross-check the JAX-port dependency graph at `/Users/suhjungdae/code/columbia/analysis/jax_gpu_port_dependency_graph_2026-04-17.md` (lives in the sibling `columbia/analysis` repo, **not** under `simsopt-jax/`) — §2.2 and §3.6. If those sections still say `Coil.vjp()` falls back to `sopp.biot_savart_vjp_graph` for non-`CurveXYZFourier` curves, append an "as of 2026-05-05" correction noting the second branch of `_supports_native_curve_geometry`.
 
 ### Validation
