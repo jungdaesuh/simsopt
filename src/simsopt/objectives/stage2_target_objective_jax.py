@@ -13,22 +13,25 @@ from .._core.jax_host_boundary import (
     host_array as _shared_host_array,
     host_tree as _shared_host_tree,
 )
-from ..field.biotsavart_jax_backend import _unwrap_coil_curve_and_current
 from ..geo.curve import incremental_arclength_pure, kappa_pure
 from ..jax_core._math_utils import (
     as_jax_float64 as _math_as_jax_float64,
     as_runtime_float64 as _as_runtime_float64,
 )
 from ..jax_core.field import (
+    coil_set_spec_from_dof_extraction_spec,
     grouped_field_sharding_summary,
     grouped_biot_savart_B_from_spec,
     grouped_coil_set_spec_from_coil_specs,
-    grouped_coil_set_spec_from_grouped_data,
     grouped_coil_set_spec_from_lists,
 )
 from ..jax_core import (
     curve_geometry_from_dofs,
     curve_spec_from_curve,
+    make_biot_savart_spec,
+    make_coil_dof_extraction_spec,
+    make_coil_set_dof_extraction_spec,
+    make_optimizable_dof_map_spec,
 )
 from ..jax_core.objectives_flux import (
     fixed_surface_flux_integral_from_B,
@@ -72,6 +75,7 @@ Stage2ALMValueAndGradBuilder = Callable[..., Stage2ALMValueAndGradFn]
 
 
 class FinalSpecBundle(NamedTuple):
+    biot_savart_spec: object
     coil_set_spec: object
     surface_spec: object
 
@@ -258,6 +262,51 @@ def _host_float64_scalar(value) -> float:
     return float(_host_float64_array(value).reshape(()))
 
 
+def _fixed_dof_map_spec(dofs):
+    dofs = _host_float64_array(dofs).reshape((-1,))
+    return make_optimizable_dof_map_spec(
+        template_full_dofs=dofs,
+        owner_segments=(),
+        input_mode="full",
+        input_start=0,
+        input_end=int(dofs.shape[0]),
+    )
+
+
+def _stage2_owner_dof_map_spec(dofs, *, owner_start: int):
+    dofs = _host_float64_array(dofs).reshape((-1,))
+    size = int(dofs.shape[0])
+    return make_optimizable_dof_map_spec(
+        template_full_dofs=dofs,
+        owner_segments=((int(owner_start), int(owner_start) + size, 0, size),),
+        input_mode="full",
+        input_start=0,
+        input_end=size,
+    )
+
+
+def _symmetry_rotmat_arg(symmetry):
+    return symmetry.rotmat if symmetry.has_rotation else None
+
+
+def _coil_dof_extraction_spec_from_maps(coil_spec, curve_map, current_map):
+    return make_coil_dof_extraction_spec(
+        curve=coil_spec.curve,
+        curve_map=curve_map,
+        current_map=current_map,
+        rotmat=_symmetry_rotmat_arg(coil_spec.symmetry),
+        scale=coil_spec.symmetry.scale,
+    )
+
+
+def _fixed_coil_dof_extraction_spec(coil_spec):
+    return _coil_dof_extraction_spec_from_maps(
+        coil_spec,
+        _fixed_dof_map_spec(coil_spec.curve.dofs),
+        _fixed_dof_map_spec(coil_spec.current.value),
+    )
+
+
 def _curve_groups_from_grouped_coil_set_spec(coil_set_spec):
     curve_groups = []
     for group in coil_set_spec.groups:
@@ -268,13 +317,13 @@ def _curve_groups_from_grouped_coil_set_spec(coil_set_spec):
 def _banana_symmetry_runtime_inputs_from_coils(banana_coils):
     banana_rotmats = []
     banana_current_scales = []
-    for _, rotmat, _, scale in (
-        _unwrap_coil_curve_and_current(coil) for coil in banana_coils
-    ):
-        if rotmat is None:
-            rotmat = np.eye(3, dtype=np.float64)
+    for coil in banana_coils:
+        symmetry = coil.to_spec().symmetry
+        rotmat = (
+            symmetry.rotmat if symmetry.has_rotation else np.eye(3, dtype=np.float64)
+        )
         banana_rotmats.append(_host_float64_array(rotmat))
-        banana_current_scales.append(_host_float64_scalar(scale))
+        banana_current_scales.append(_host_float64_scalar(symmetry.scale))
     return (
         np.asarray(banana_rotmats, dtype=np.float64),
         np.asarray(banana_current_scales, dtype=np.float64),
@@ -465,10 +514,35 @@ def build_stage2_target_objective(
     zero = 0.0
     surface_gamma = _host_float64_array(surface.gamma()).reshape((-1, 3))
 
+    tf_coil_specs = tuple(coil.to_spec() for coil in tf_coils)
+    banana_coil_specs = tuple(coil.to_spec() for coil in banana_coils)
+    fixed_coil_dof_specs = tuple(
+        _fixed_coil_dof_extraction_spec(coil_spec) for coil_spec in tf_coil_specs
+    )
+    banana_curve_map = _stage2_owner_dof_map_spec(
+        banana_curve_spec.dofs,
+        owner_start=1,
+    )
+    banana_current_map = _stage2_owner_dof_map_spec(
+        banana_coil_specs[0].current.value,
+        owner_start=0,
+    )
+    banana_coil_dof_specs = tuple(
+        _coil_dof_extraction_spec_from_maps(
+            coil_spec,
+            banana_curve_map,
+            banana_current_map,
+        )
+        for coil_spec in banana_coil_specs
+    )
+    biot_savart_dof_spec = make_coil_set_dof_extraction_spec(
+        (*fixed_coil_dof_specs, *banana_coil_dof_specs)
+    )
+
     tf_coil_spec = None
     if tf_coils:
         tf_coil_spec = grouped_coil_set_spec_from_coil_specs(
-            tuple(coil.to_spec() for coil in tf_coils)
+            tf_coil_specs
         )
         fixed_field = _host_float64_array(
             grouped_biot_savart_B_from_spec(_as_jax_float64(points), tf_coil_spec)
@@ -555,37 +629,21 @@ def build_stage2_target_objective(
         )
 
     def _final_specs_from_dofs(dofs):
-        (
-            _flat_dofs,
-            _base_gamma,
-            _base_gammadash,
-            _base_gammadashdash,
-            dynamic_gammas,
-            dynamic_gammadashs,
-            dynamic_current_array,
-        ) = _dynamic_curve_runtime_state(dofs)
-        dynamic_coil_spec = grouped_coil_set_spec_from_lists(
-            dynamic_gammas,
-            dynamic_gammadashs,
-            dynamic_current_array,
+        state = stage2_target_optimizer_state_from_dofs(
+            dofs,
+            curve_dof_count=curve_dof_count,
         )
-        group_data = []
-        coil_offset = 0
-        if tf_coil_spec is not None:
-            group_data.extend(tf_coil_spec.as_grouped_data())
-            coil_offset = sum(len(group.coil_indices) for group in tf_coil_spec.groups)
-        for group in dynamic_coil_spec.groups:
-            gammas, gammadashs, currents, coil_indices = group.as_grouped_data()
-            group_data.append(
-                (
-                    gammas,
-                    gammadashs,
-                    currents,
-                    [coil_offset + index for index in coil_indices],
-                )
-            )
+        flat_dofs = stage2_target_optimizer_state_to_dofs(state)
+        biot_savart_spec = make_biot_savart_spec(
+            coil_dof_extraction=biot_savart_dof_spec,
+            coil_dofs=flat_dofs,
+        )
         return FinalSpecBundle(
-            coil_set_spec=grouped_coil_set_spec_from_grouped_data(tuple(group_data)),
+            biot_savart_spec=biot_savart_spec,
+            coil_set_spec=coil_set_spec_from_dof_extraction_spec(
+                biot_savart_spec.coil_dof_extraction,
+                biot_savart_spec.coil_dofs,
+            ),
             surface_spec=surface_spec,
         )
 

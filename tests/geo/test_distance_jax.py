@@ -7,6 +7,9 @@ import pytest
 
 import simsopt.geo.curveobjectives as curveobjectives_module
 from simsopt.geo._distance_jax import (
+    _between_collections_candidate_mask,
+    _stack_point_clouds,
+    _within_collection_candidate_mask,
     get_close_candidates_between_collections,
     get_close_candidates_within_collection,
 )
@@ -44,6 +47,16 @@ def test_jax_within_collection_candidates_match_cpp_lower_triangle():
     assert all(j < i and j < num_base_curves for i, j in jax_candidates)
 
 
+def test_jax_within_collection_candidate_mask_has_static_pair_shape():
+    point_clouds = _random_point_clouds(seed=1729, count=5)
+    points, valid = _stack_point_clouds(point_clouds)
+
+    mask = _within_collection_candidate_mask(points, valid, 0.75, num_base_curves=3)
+
+    assert mask.shape == (5, 5)
+    assert mask.dtype == np.dtype(bool)
+
+
 def test_jax_between_collection_candidates_match_cpp_rectangular_pairs():
     left_point_clouds = _random_point_clouds(seed=1730, count=4)
     right_point_clouds = _random_point_clouds(seed=1731, count=3)
@@ -61,6 +74,24 @@ def test_jax_between_collection_candidates_match_cpp_rectangular_pairs():
     )
 
     assert set(jax_candidates) == set(cpp_candidates)
+
+
+def test_jax_between_collection_candidate_mask_has_static_pair_shape():
+    left_point_clouds = _random_point_clouds(seed=1730, count=4)
+    right_point_clouds = _random_point_clouds(seed=1731, count=3)
+    left_points, left_valid = _stack_point_clouds(left_point_clouds)
+    right_points, right_valid = _stack_point_clouds(right_point_clouds)
+
+    mask = _between_collections_candidate_mask(
+        left_points,
+        left_valid,
+        right_points,
+        right_valid,
+        0.65,
+    )
+
+    assert mask.shape == (4, 3)
+    assert mask.dtype == np.dtype(bool)
 
 
 def test_curve_curve_distance_uses_jax_candidate_culler(monkeypatch):

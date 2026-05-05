@@ -700,9 +700,16 @@ def _write_spec_simson(path: str | pathlib.Path, graph_name: str, spec: object) 
         json.dump(_spec_simson_dict(graph_name, spec), fp, indent=2)
 
 
-def save_biot_savart_spec(path: str | pathlib.Path, coil_set_spec: object) -> None:
-    """Write a SIMSON-wrapped immutable grouped-coil spec JSON payload."""
-    _write_spec_simson(path, "GroupedCoilSetSpec1", coil_set_spec)
+def save_biot_savart_spec(path: str | pathlib.Path, spec: object) -> None:
+    """Write a SIMSON-wrapped immutable Biot-Savart spec JSON payload."""
+    from ..jax_core.specs import BiotSavartSpec
+
+    graph_name = (
+        "BiotSavartSpec1"
+        if isinstance(spec, BiotSavartSpec)
+        else "GroupedCoilSetSpec1"
+    )
+    _write_spec_simson(path, graph_name, spec)
 
 
 def save_surface_rz_fourier_spec(path: str | pathlib.Path, surface_spec: object) -> None:
@@ -756,13 +763,23 @@ class _SpecGraphReader:
         return result
 
     def _add_graph_aliases(self, result: dict[str, object], graph: object) -> None:
+        from ..jax_core.field import coil_set_spec_from_dof_extraction_spec
         from ..jax_core.specs import (
+            BiotSavartSpec,
             GroupedCoilSetSpec,
             SurfaceRZFourierSpec,
             SurfaceXYZFourierSpec,
             SurfaceXYZTensorFourierSpec,
         )
 
+        if isinstance(graph, BiotSavartSpec):
+            result["biot_savart_spec"] = graph
+            result["coil_dof_extraction_spec"] = graph.coil_dof_extraction
+            result["coil_dofs"] = graph.coil_dofs
+            result["coil_set_spec"] = coil_set_spec_from_dof_extraction_spec(
+                graph.coil_dof_extraction,
+                graph.coil_dofs,
+            )
         if isinstance(graph, GroupedCoilSetSpec):
             result["coil_set_spec"] = graph
         if isinstance(
@@ -946,6 +963,7 @@ class _SpecGraphReader:
         )
 
     def _read_spec_node(self, node: dict) -> object:
+        from ..jax_core import specs as jax_specs
         from ..jax_core import (
             make_coil_group_spec,
             make_grouped_coil_set_spec,
@@ -999,6 +1017,18 @@ class _SpecGraphReader:
                 stellsym=bool(data["stellsym"]),
                 mpol=int(data["mpol"]),
                 ntor=int(data["ntor"]),
+            )
+        spec_cls = getattr(jax_specs, classname, None)
+        if spec_cls is not None and _is_jax_core_spec_dataclass(spec_cls):
+            return spec_cls(
+                **{
+                    field.name: _coerce_decoded_spec_field(
+                        classname,
+                        field.name,
+                        data[field.name],
+                    )
+                    for field in fields(spec_cls)
+                }
             )
         raise NotImplementedError(f"{_SPEC_MODULE}.{classname}")
 

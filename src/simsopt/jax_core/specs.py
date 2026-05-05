@@ -281,6 +281,21 @@ jax.tree_util.register_dataclass(
 
 
 @dataclass(frozen=True)
+class BiotSavartSpec:
+    """Immutable Biot-Savart restart payload with owner DOF reconstruction."""
+
+    coil_dof_extraction: CoilSetDofExtractionSpec
+    coil_dofs: jax.Array
+
+
+jax.tree_util.register_dataclass(
+    BiotSavartSpec,
+    data_fields=["coil_dof_extraction", "coil_dofs"],
+    meta_fields=[],
+)
+
+
+@dataclass(frozen=True)
 class FixedSurfaceFluxSpec:
     """Immutable Stage 2 fixed-surface flux contract."""
 
@@ -874,6 +889,17 @@ def make_grouped_coil_set_spec(groups: object) -> GroupedCoilSetSpec:
             )
         )
     return GroupedCoilSetSpec(groups=tuple(group_specs))
+
+
+def make_biot_savart_spec(
+    *,
+    coil_dof_extraction: CoilSetDofExtractionSpec,
+    coil_dofs: object,
+) -> BiotSavartSpec:
+    return BiotSavartSpec(
+        coil_dof_extraction=coil_dof_extraction,
+        coil_dofs=_as_float64_array(coil_dofs),
+    )
 
 
 def make_single_stage_seed_spec(

@@ -278,6 +278,7 @@ The banana lane actively exercises only: `python.cpp`, `python_curves.cpp`, `pyt
 ## Caveats
 
 - This trace was written against `gpu-purity-stage2-20260405` HEAD as of 2026-05-05. Line citations are valid for that commit; binding line numbers in `src/simsoptpp/python.cpp` (57, 58, 60, 91, 106, 136, 137, 138) are stable but worth re-confirming if `python.cpp` is reordered.
+- JAX-lane correction as of 2026-05-05: the CPU/C++ VJP rows above do not imply a live `CurveCWSFourierCPP` port blocker. The current JAX path supports CWS forward and VJP natively through the `curve.surf` + `surface_spec()` branch in `_supports_native_curve_geometry` (`src/simsopt/field/biotsavart_jax_backend.py:603`) and `curve_spec_from_curve` (`src/simsopt/jax_core/curve_geometry.py:99`). No `CurveCWSFourierCPP.to_spec()` shim is required for the banana target lane.
 - Some `Curve*Distance` and `Surface*Distance` objectives mix C++ candidate culling with host-Python distance accumulation. The same code path runs on both lanes; only the gradient back-propagation differs (CPU lane uses curve VJP methods on the C++ curve class; JAX lane uses autodiff through pure kernels).
 - The ALM outer loop in `alm_utils.py` is shared between lanes. It only differs in the inner-step optimizer it invokes — `scipy.optimize.minimize` on CPU vs. JAX-traced inner steps on the JAX lane.
 - The single-stage `SurfaceSurfaceDistance(boozer_surface.surface, VV, SS_DIST)` term builds on the same C++ surface kernels as the Stage 2 surface evaluation; the vessel surface `VV` is a `SurfaceRZFourier` instance.

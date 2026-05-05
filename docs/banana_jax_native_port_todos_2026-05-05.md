@@ -26,7 +26,7 @@ Items explicitly **NOT** in this plan, with rationale:
 
 ## TODO 1 — Stage 2 target-lane purity proof (highest leverage)
 
-**Status:** not started
+**Status:** implemented 2026-05-05
 **Owner:** TBD
 **Estimated effort:** ~2-3 days (revised; was 2 days before scope correction)
 **Risk:** low-medium
@@ -90,7 +90,7 @@ None. This work is independent and unblocks confidence on items 2 and 4.
 
 ## TODO 2 — JAX-native distance objectives for the legacy public API
 
-**Status:** not started
+**Status:** implemented 2026-05-05
 **Owner:** TBD
 **Estimated effort:** ~1-1.5 days
 **Risk:** low
@@ -143,7 +143,7 @@ The C++ kernel emits **strictly lower-triangle pairs** (`j < i`) and gates on `j
 
 ## TODO 3 — Direct Stage 2 JSON → runtime-spec converter
 
-**Status:** not started
+**Status:** implemented 2026-05-05
 **Owner:** TBD
 **Estimated effort:** ~3-4 days (revised; was 2-3 days before schema correction)
 **Risk:** medium (SIMSOPT GSON graph schema is more involved than originally scoped)
@@ -151,6 +151,8 @@ The C++ kernel emits **strictly lower-triangle pairs** (`j < i`) and gates on `j
 ### Scope (REVISED 2026-05-05 after staged-state review)
 
 Add a sibling reader to `_core/json.py::load` that emits immutable JAX specs (`CoilSetSpec`, `CurveCWSFourierRZSpec`, `SurfaceRZFourierSpec`, `SurfaceXYZTensorFourierSpec`, …) directly from a checkpoint JSON, without instantiating any `simsoptpp` Python objects.
+
+Implementation note (2026-05-05): `src/simsopt/_core/json.py::load_specs` now reads legacy SIMSON Stage 2 JSON into immutable JAX specs and also reads SIMSON-wrapped spec JSON written by the new spec emitters. The return value includes `graph` plus typed aliases such as `biot_savart_spec`, `coil_set_spec`, and `surface_spec`; JAX restart artifacts carry a `BiotSavartSpec` with the coil DOF extraction contract and flat Stage 2 DOF vector.
 
 **Important reframing:** the original draft framed this as "the JAX-lane startup boundary." That was wrong — `single_stage_banana_example.py:10674-10688` shows the JAX branch already builds `bs = SingleStageRuntimeSpecBiotSavartJAX(warm_start_runtime_spec_state["runtime_spec"])`; `load(stage2_bs_path)` runs only on the CPU else-branch. The current single-stage JAX startup does not call the legacy `load()` for the field. So this TODO is really: *"give Stage 2 (and any other consumer of the saved JSON) a direct path from disk JSON to a runtime spec, without round-tripping through `Optimizable` objects"* — useful both for Stage 2 internal restarts and for hydrating runtime specs from offline JSON without the live graph.
 
@@ -230,7 +232,7 @@ Stage 2's internal restart and any tool that wants to hydrate a runtime spec fro
 
 ## TODO 4 — Stage 2 final-results emitter: consume specs instead of live `Optimizable`
 
-**Status:** not started
+**Status:** implemented 2026-05-05
 **Owner:** TBD
 **Estimated effort:** ~2 days (revised to include the spec-materializer prerequisite; was 1-2 days)
 **Risk:** low
@@ -238,6 +240,8 @@ Stage 2's internal restart and any tool that wants to hydrate a runtime spec fro
 ### Scope (REVISED 2026-05-05 after staged-state review)
 
 Decouple **Stage 2's** final-results JSON emission from live `Optimizable` graphs. Stage 2 currently calls `new_bs.save(stage2_bs_output_path)` and `new_surf.save(stage2_surface_output_path)` at `banana_coil_solver.py:3499-3500` — unconditionally, before the `--skip-postprocess` gate (which gates only VTK at `:3502+`).
+
+Implementation note (2026-05-05): JAX Stage 2 finalization now routes through `Stage2TargetObjectiveBundle.final_specs_from_dofs` and writes SIMSON-wrapped immutable spec payloads. `load_specs(path)` returns the typed spec aliases, normal `load(path)` reconstructs `BiotSavartSpec` / surface spec dataclasses rather than live `Optimizable` objects on this JAX artifact path, and the JAX `--stage2-bs-path` restart loader hydrates `SpecBackedBiotSavartJAX` directly from the saved `BiotSavartSpec`.
 
 **Important scope correction:** the original draft included single-stage final-results in this TODO. That was wrong. Single-stage's target lane already enforces the spec-only contract: `_require_cached_target_lane_reporting_metrics` at `single_stage_banana_example.py:5212` is the final-metrics resolver, and it raises if the cached accepted-step summary is missing. The dispatch at `single_stage_banana_example.py:5298-5302` routes target-lane runs through that cache-only path:
 
@@ -309,7 +313,7 @@ Stage 2's `new_bs.save(...)` and `new_surf.save(...)` at finalization both call 
 
 ## TODO 5 — Documentation correction
 
-**Status:** not started
+**Status:** implemented 2026-05-05
 **Owner:** TBD
 **Estimated effort:** <1 hour
 **Risk:** none

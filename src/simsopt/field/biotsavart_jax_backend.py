@@ -29,6 +29,7 @@ from ..jax_core import (
     curve_spec_from_curve,
     curve_spec_with_dofs,
     make_coil_dof_extraction_spec,
+    make_biot_savart_spec,
     make_coil_set_dof_extraction_spec,
     make_optimizable_dof_map_spec,
 )
@@ -49,6 +50,7 @@ from ..jax_core.field import (
 )
 from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
 from ..jax_core.specs import (
+    BiotSavartSpec,
     CoilSetDofExtractionSpec,
     CoilDofExtractionSpec,
     CoilSpec,
@@ -67,6 +69,7 @@ __all__ = [
     "BiotSavartBPullback",
     "BiotSavartFieldPullback",
     "SingleStageRuntimeSpecBiotSavartJAX",
+    "SpecBackedBiotSavartJAX",
     "SpecBackedCoil",
     "SpecBackedCurve",
     "SpecBackedCurrent",
@@ -381,6 +384,8 @@ class SpecBackedCoil:
         coil_index: int,
         extraction_spec: CoilDofExtractionSpec,
     ) -> None:
+        self._owner = owner
+        self._coil_index = int(coil_index)
         self.curve = SpecBackedCurve(
             coil_spec.curve,
             coil_spec.symmetry,
@@ -390,19 +395,27 @@ class SpecBackedCoil:
         )
         self.current = SpecBackedCurrent(owner=owner, coil_index=coil_index)
 
+    def to_spec(self) -> CoilSpec:
+        return coil_specs_from_dof_extraction_spec(
+            self._owner.coil_dof_extraction_spec(),
+            self._owner.x,
+        )[self._coil_index]
 
-class SingleStageRuntimeSpecBiotSavartJAX(Optimizable):
-    """Biot-Savart adapter whose source of truth is a runtime seed spec."""
+
+class SpecBackedBiotSavartJAX(Optimizable):
+    """Biot-Savart adapter whose source of truth is an immutable spec."""
 
     return_fn_map = {}
 
-    def __init__(self, runtime_spec: SingleStageRuntimeSpec) -> None:
-        self.runtime_spec = runtime_spec
-        self._coil_dof_extraction_spec = runtime_spec.seed.coil_dof_extraction
-        self._x = _as_jax_float64(runtime_spec.seed.coil_dofs)
+    def __init__(self, biot_savart_spec: BiotSavartSpec) -> None:
+        self.biot_savart_spec = biot_savart_spec
+        self._coil_dof_extraction_spec = biot_savart_spec.coil_dof_extraction
+        self._x = _as_jax_float64(biot_savart_spec.coil_dofs)
         self._coil_dofs_generation = 0
         self._points_jax: jax.Array | None = None
         self._points_version = 0
+        self._dof_layout_version = 0
+        self._uses_uniform_curve_xyz_fourier_fastpath = False
         Optimizable.__init__(self, x0=host_array(self._x, dtype=np.float64))
         self._coils = self._coils_from_dofs(self._x)
 
@@ -598,6 +611,19 @@ class SingleStageRuntimeSpecBiotSavartJAX(Optimizable):
 
     def save(self, _path: object) -> None:
         raise RuntimeError("JAX runtime seed specs split runtime from host export.")
+
+
+class SingleStageRuntimeSpecBiotSavartJAX(SpecBackedBiotSavartJAX):
+    """Biot-Savart adapter whose source of truth is a runtime seed spec."""
+
+    def __init__(self, runtime_spec: SingleStageRuntimeSpec) -> None:
+        self.runtime_spec = runtime_spec
+        super().__init__(
+            make_biot_savart_spec(
+                coil_dof_extraction=runtime_spec.seed.coil_dof_extraction,
+                coil_dofs=runtime_spec.seed.coil_dofs,
+            )
+        )
 
 
 def _supports_native_curve_geometry(curve):

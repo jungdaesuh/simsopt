@@ -2,28 +2,65 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 
-@jax.jit
-def _min_pairwise_distance_squared(left, right):
-    diff = left[:, None, :] - right[None, :, :]
-    return jnp.min(jnp.sum(jnp.square(diff), axis=-1))
-
-
-def _point_cloud_array(point_cloud):
-    return jnp.asarray(
-        np.asarray(point_cloud, dtype=np.float64),
-        dtype=jnp.float64,
+def _stack_point_clouds(point_clouds):
+    arrays = tuple(
+        np.asarray(point_cloud, dtype=np.float64) for point_cloud in point_clouds
     )
+    max_points = max(point_cloud.shape[0] for point_cloud in arrays)
+    points = np.zeros((len(arrays), max_points, 3), dtype=np.float64)
+    valid = np.zeros((len(arrays), max_points), dtype=bool)
+    for index, point_cloud in enumerate(arrays):
+        count = point_cloud.shape[0]
+        points[index, :count, :] = point_cloud
+        valid[index, :count] = True
+    return jnp.asarray(points, dtype=jnp.float64), jnp.asarray(valid)
 
 
-def _too_close(left, right, threshold: float) -> bool:
-    threshold_squared = float(threshold) * float(threshold)
-    distance_squared = _min_pairwise_distance_squared(left, right)
-    return bool(np.asarray(jax.device_get(distance_squared)) < threshold_squared)
+def _min_dist2_matrix(left_points, left_valid, right_points, right_valid):
+    diff = left_points[:, None, :, None, :] - right_points[None, :, None, :, :]
+    dist2 = jnp.sum(jnp.square(diff), axis=-1)
+    valid_pairs = left_valid[:, None, :, None] & right_valid[None, :, None, :]
+    return jnp.min(jnp.where(valid_pairs, dist2, jnp.inf), axis=(-1, -2))
+
+
+def _candidate_pairs_from_mask(mask) -> list[tuple[int, int]]:
+    rows, cols = np.nonzero(np.asarray(mask))
+    return list(zip(rows.tolist(), cols.tolist(), strict=True))
+
+
+@partial(jax.jit, static_argnames=("num_base_curves",))
+def _within_collection_candidate_mask(
+    points,
+    valid,
+    threshold: float,
+    num_base_curves: int,
+):
+    dist2 = _min_dist2_matrix(points, valid, points, valid)
+    indices = jnp.arange(points.shape[0])
+    lower_triangle = indices[:, None] > indices[None, :]
+    base_curve_mask = indices[None, :] < num_base_curves
+    threshold_jax = jnp.asarray(threshold, dtype=points.dtype)
+    return (dist2 < jnp.square(threshold_jax)) & lower_triangle & base_curve_mask
+
+
+@jax.jit
+def _between_collections_candidate_mask(
+    left_points,
+    left_valid,
+    right_points,
+    right_valid,
+    threshold: float,
+):
+    dist2 = _min_dist2_matrix(left_points, left_valid, right_points, right_valid)
+    threshold_jax = jnp.asarray(threshold, dtype=left_points.dtype)
+    return dist2 < jnp.square(threshold_jax)
 
 
 def get_close_candidates_within_collection(
@@ -32,14 +69,14 @@ def get_close_candidates_within_collection(
     num_base_curves: int,
 ) -> list[tuple[int, int]]:
     """Return C++-compatible lower-triangle close point-cloud pairs."""
-    point_clouds = tuple(_point_cloud_array(point_cloud) for point_cloud in point_clouds)
-    base_count = int(num_base_curves)
-    candidates: list[tuple[int, int]] = []
-    for i, left in enumerate(point_clouds):
-        for j in range(min(i, base_count)):
-            if _too_close(left, point_clouds[j], threshold):
-                candidates.append((i, j))
-    return candidates
+    points, valid = _stack_point_clouds(point_clouds)
+    mask = _within_collection_candidate_mask(
+        points,
+        valid,
+        threshold,
+        num_base_curves,
+    )
+    return _candidate_pairs_from_mask(mask)
 
 
 def get_close_candidates_between_collections(
@@ -48,15 +85,13 @@ def get_close_candidates_between_collections(
     threshold: float,
 ) -> list[tuple[int, int]]:
     """Return C++-compatible close pairs across two point-cloud collections."""
-    left_point_clouds = tuple(
-        _point_cloud_array(point_cloud) for point_cloud in left_point_clouds
+    left_points, left_valid = _stack_point_clouds(left_point_clouds)
+    right_points, right_valid = _stack_point_clouds(right_point_clouds)
+    mask = _between_collections_candidate_mask(
+        left_points,
+        left_valid,
+        right_points,
+        right_valid,
+        threshold,
     )
-    right_point_clouds = tuple(
-        _point_cloud_array(point_cloud) for point_cloud in right_point_clouds
-    )
-    candidates: list[tuple[int, int]] = []
-    for i, left in enumerate(left_point_clouds):
-        for j, right in enumerate(right_point_clouds):
-            if _too_close(left, right, threshold):
-                candidates.append((i, j))
-    return candidates
+    return _candidate_pairs_from_mask(mask)

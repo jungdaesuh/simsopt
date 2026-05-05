@@ -15,6 +15,7 @@ from simsopt._core.json import (  # noqa: E402
 from simsopt._core.optimizable import load  # noqa: E402
 from simsopt.jax_core.field import grouped_biot_savart_B_from_spec  # noqa: E402
 from simsopt.jax_core.specs import (  # noqa: E402
+    BiotSavartSpec,
     GroupedCoilSetSpec,
     SurfaceRZFourierSpec,
 )
@@ -96,6 +97,39 @@ def test_spec_writers_round_trip_through_load_and_load_specs(tmp_path):
     assert isinstance(load(surface_output), SurfaceRZFourierSpec)
     assert isinstance(load_specs(coil_output)["coil_set_spec"], GroupedCoilSetSpec)
     assert isinstance(load_specs(surface_output)["surface_spec"], SurfaceRZFourierSpec)
+
+
+def test_biot_savart_restart_spec_round_trips_with_dof_extraction(tmp_path):
+    from simsopt.field.biotsavart_jax_backend import (  # noqa: E402
+        BiotSavartJAX,
+        SpecBackedBiotSavartJAX,
+    )
+    from simsopt.jax_core import make_biot_savart_spec  # noqa: E402
+
+    biot_savart_path, _surface_path = _write_legacy_outputs(tmp_path)
+    legacy_bs = load(biot_savart_path)
+    legacy_bs_jax = BiotSavartJAX(legacy_bs.coils)
+    legacy_points = np.asarray(legacy_bs.get_points_cart(), dtype=np.float64)
+    restart_spec = make_biot_savart_spec(
+        coil_dof_extraction=legacy_bs_jax.coil_dof_extraction_spec(),
+        coil_dofs=legacy_bs_jax.x,
+    )
+    restart_output = tmp_path / "biot_savart_restart_spec.json"
+
+    save_biot_savart_spec(restart_output, restart_spec)
+    loaded = load_specs(restart_output)
+    spec_backed_bs = SpecBackedBiotSavartJAX(loaded["biot_savart_spec"])
+    spec_backed_bs.set_points(legacy_points)
+
+    assert isinstance(load(restart_output), BiotSavartSpec)
+    assert isinstance(loaded["biot_savart_spec"], BiotSavartSpec)
+    assert isinstance(loaded["coil_set_spec"], GroupedCoilSetSpec)
+    np.testing.assert_allclose(
+        np.asarray(spec_backed_bs.B()),
+        np.asarray(legacy_bs.B()),
+        rtol=1e-12,
+        atol=1e-12,
+    )
 
 
 def test_load_specs_rejects_non_simson_wrapper_module(tmp_path):

@@ -119,6 +119,8 @@ from simsopt.geo import (  # noqa: E402
 )
 from simsopt.objectives import SquaredFlux, QuadraticPenalty  # noqa: E402
 
+from simsopt._core import load  # noqa: E402
+from simsopt._core.json import load_specs  # noqa: E402
 from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
 import simsopt.field.biotsavart_jax_backend as biotsavart_jax_backend_module
 from simsopt.jax_core import (
@@ -130,7 +132,11 @@ from simsopt.jax_core import (
     grouped_biot_savart_B_from_spec,
     surface_rz_fourier_dofs_from_spec,
 )
-from simsopt.jax_core.specs import GroupedCoilSetSpec, SurfaceRZFourierSpec
+from simsopt.jax_core.specs import (
+    BiotSavartSpec,
+    GroupedCoilSetSpec,
+    SurfaceRZFourierSpec,
+)
 from simsopt.geo.optimizer_jax import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     jax_minimize,
@@ -4474,8 +4480,40 @@ class TestStage2OptimizerContract:
             seed_paths = sorted(output_root.glob("**/biot_savart_opt.json"))
             surface_paths = sorted(output_root.glob("**/surf_opt.json"))
 
-        assert len(seed_paths) == 1
-        assert len(surface_paths) == 1
+            assert len(seed_paths) == 1
+            assert len(surface_paths) == 1
+            seed_specs = load_specs(seed_paths[0])
+            surface_specs = load_specs(surface_paths[0])
+            assert isinstance(
+                seed_specs["coil_set_spec"],
+                GroupedCoilSetSpec,
+            )
+            assert isinstance(
+                seed_specs["biot_savart_spec"],
+                BiotSavartSpec,
+            )
+            assert isinstance(
+                surface_specs["surface_spec"],
+                SurfaceRZFourierSpec,
+            )
+            assert isinstance(load(seed_paths[0]), BiotSavartSpec)
+            assert isinstance(load(surface_paths[0]), SurfaceRZFourierSpec)
+
+            restart_output_root = Path(temp_dir) / "restart-outputs"
+            restart_result = _run_stage2_script(
+                *REDUCED_STAGE2_ARGS,
+                "--optimizer-backend",
+                "ondevice",
+                "--skip-postprocess",
+                "--maxiter",
+                "0",
+                "--stage2-bs-path",
+                str(seed_paths[0]),
+                "--output-root",
+                str(restart_output_root),
+            )
+
+            _assert_target_backend_success(restart_result)
 
     def test_stage2_script_rejects_warm_timing_on_reference_lane(self):
         with tempfile.TemporaryDirectory(

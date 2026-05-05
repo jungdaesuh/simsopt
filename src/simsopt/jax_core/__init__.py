@@ -98,6 +98,7 @@ from .surface_fourier import (
     surface_xyz_tensor_fourier_normal_from_spec,
 )
 from .specs import (
+    BiotSavartSpec,
     CoilDofExtractionSpec,
     CoilSetDofExtractionSpec,
     CoilSpec,
@@ -131,6 +132,7 @@ from .specs import (
     curve_spec_kind,
     surface_spec_kind,
     make_coil_dof_extraction_spec,
+    make_biot_savart_spec,
     make_coil_spec,
     make_coil_symmetry_spec,
     make_coil_group_spec,
@@ -157,6 +159,7 @@ from .specs import (
 )
 
 __all__ = [
+    "BiotSavartSpec",
     "CoilSpec",
     "CoilGroupSpec",
     "CoilDofExtractionSpec",
@@ -245,6 +248,7 @@ __all__ = [
     "grouped_coil_set_spec_from_source",
     "grouped_field_data_from_spec",
     "grouped_field_inputs_from_spec",
+    "make_biot_savart_spec",
     "make_coil_spec",
     "make_coil_dof_extraction_spec",
     "make_coil_symmetry_spec",

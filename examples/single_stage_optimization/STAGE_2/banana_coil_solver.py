@@ -763,16 +763,23 @@ def build_equilibrium_path(args):
     )
 
 
-def load_stage2_seed_configuration(seed_bs_path, surf, num_tf_coils, out_dir):
-    bs = load(seed_bs_path)
+def load_stage2_seed_configuration(seed_bs_path, surf, num_tf_coils, out_dir, *, backend):
+    if backend == "jax":
+        from simsopt._core.json import load_specs
+        from simsopt.field.biotsavart_jax_backend import SpecBackedBiotSavartJAX
+
+        bs = SpecBackedBiotSavartJAX(load_specs(seed_bs_path)["biot_savart_spec"])
+    else:
+        bs = load(seed_bs_path)
     bs.set_points(surf.gamma().reshape((-1, 3)))
 
     coils = bs.coils
     curves = [coil.curve for coil in coils]
     curves_to_vtk(curves, out_dir + "curves_init", close=True)
     unitn = surf.unitnormal()
+    normal_field = host_array(bs.B().reshape(unitn.shape), dtype=np.float64)
     point_data = {
-        "B_N": np.sum(bs.B().reshape(unitn.shape) * unitn, axis=2)[:, :, None]
+        "B_N": np.sum(normal_field * unitn, axis=2)[:, :, None]
     }
     surf.to_vtk(out_dir + "surf_init", extra_data=point_data)
 
@@ -2718,6 +2725,7 @@ if __name__ == "__main__":
             new_surf,
             len(tf_coils),
             OUT_DIR,
+            backend=args.backend,
         )
         new_bs = init_coil_array[0]
         new_curves = init_coil_array[1]
@@ -2821,12 +2829,17 @@ if __name__ == "__main__":
     diagnostic_bs_jax = None
     if args.backend == "jax":
         from simsopt.field import BiotSavartJAX
+        from simsopt.field.biotsavart_jax_backend import SpecBackedBiotSavartJAX
         from simsopt.objectives import SquaredFluxJAX
 
-        all_coils = list(new_tf_coils) + list(new_banana_coils)
-        new_bs_jax = BiotSavartJAX(all_coils)
-        # Field diagnostics call set_points(); keep that point state out of Jf.
-        diagnostic_bs_jax = BiotSavartJAX(all_coils)
+        if args.stage2_bs_path:
+            new_bs_jax = new_bs
+            diagnostic_bs_jax = SpecBackedBiotSavartJAX(new_bs.biot_savart_spec)
+        else:
+            all_coils = list(new_tf_coils) + list(new_banana_coils)
+            new_bs_jax = BiotSavartJAX(all_coils)
+            # Field diagnostics call set_points(); keep that point state out of Jf.
+            diagnostic_bs_jax = BiotSavartJAX(all_coils)
         Jf = SquaredFluxJAX(new_surf, new_bs_jax)  # JAX forward + autodiff gradient
         print("Stage 2 backend: JAX")
     else:
@@ -3520,7 +3533,7 @@ if __name__ == "__main__":
         )
 
         final_specs = target_objective_bundle.final_specs_from_dofs(selected_result_x)
-        save_biot_savart_spec(stage2_bs_output_path, final_specs.coil_set_spec)
+        save_biot_savart_spec(stage2_bs_output_path, final_specs.biot_savart_spec)
         final_surface_spec = final_specs.surface_spec
         final_surface_kind = surface_spec_kind(final_surface_spec)
         if final_surface_kind == "rz_fourier":
