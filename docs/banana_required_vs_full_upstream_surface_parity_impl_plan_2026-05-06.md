@@ -1,6 +1,6 @@
 # Banana-Required vs Full-Upstream Surface Parity Implementation Plan
 
-Status: local non-CUDA implementation and validation evidence committed; M7 image publication and real-image preflight are complete through validation tag `banana-surface-parity-m7-image-r1`, but real CUDA evidence remains open because the H200 launch is blocked by external GPU account credits.
+Status: local non-CUDA implementation and validation evidence committed; M7 image publication and real-image preflight are complete for current runtime validation tag `banana-surface-parity-m7-unitnormal-r1`, but real CUDA evidence remains open because the H200 launch is blocked by external GPU account credits.
 Date: 2026-05-06.
 Base commit: `0bb26bb0a`.
 Validation basis: committed implementation slice on 2026-05-06. Repo-local interpreter `.conda/jax-0.9.2/bin/python` reports JAX `0.10.0`, CPU backend only, with `JAX_ENABLE_X64=True` and `JAX_PLATFORMS=cpu` for local gates. Unrelated untracked artifact files were left unchanged.
@@ -55,7 +55,8 @@ M7 CUDA launch preflight status in this local continuation:
 - Audit refresh commit: `49c733fa4eef058cddda265228567ce3fc2120bc`.
 - Validation-tag preflight refresh commit: `2861936d45fecf8a52aa8d87202281bc`.
 - HF CUDA image workflow commit: `c90fac6a3c9e7c866f8e1806f8db5cde1f7c689c`.
-- Pushed validation tag `banana-surface-parity-m7-image-r1` resolves to `c90fac6a3c9e7c866f8e1806f8db5cde1f7c689c` on `jungdaesuh/simsopt`.
+- Runtime validation commit after the RZ unitnormal parity fix: `0b6293b075342acc5cf996160ecf4bd87f709610`.
+- Pushed validation tag `banana-surface-parity-m7-unitnormal-r1` resolves to `0b6293b075342acc5cf996160ecf4bd87f709610` on `jungdaesuh/simsopt`.
 - GHCR image: `ghcr.io/jungdaesuh/simsopt-jax-hf-production-proof:banana-surface-parity-m7-image-r1`.
 - GHCR manifest digest: `sha256:eac2e1887eaf08628af62b28e5d7d7141b84afdfdcbfd00179823b1eb8f3df39`.
 - Fork branch `jungdaesuh/simsopt:gpu-purity-stage2-20260405` still resolves to `7e3f2eb5e5462c7d3cc989ce8bf1fe010a04f3a2`; it was not moved because the local branch is ahead and the scoped validation tag is sufficient for launcher preflight.
@@ -65,12 +66,12 @@ M7 CUDA launch preflight status in this local continuation:
 - Runpod H200 stock is available, but `runpodctl user` reports a negative client balance and `runpodctl pod list` returns `[]`; no current-SHA Runpod CUDA proof can be launched without account credit.
 - The current launcher has no patch/worktree upload path: it clones the configured repo/ref, checks out the resolved SHA, and validates the repo-relative seed paths at that SHA before launching.
 - The old ad hoc bootstrap fallback path is intentionally unavailable: `--bootstrap-mode` is rejected, and `bootstrap_runtime.sh` requires a prebuilt `/opt/venv/bin/python` runtime with a GPU JAX backend.
-- HF launcher dry-run preflight with the real GHCR image, `--repo-sha c90fac6a3c9e7c866f8e1806f8db5cde1f7c689c`, and `--repo-ref banana-surface-parity-m7-image-r1` passes remote SHA/ref and repo-relative seed-path checks, then prints the H200 command.
-- The real H200 launch with the same image, ref, SHA, and seed spec fails before a job is created because Hugging Face Jobs returns HTTP 402 Payment Required: pre-paid credit balance is insufficient.
+- HF launcher dry-run preflight with the real GHCR image, `--repo-sha 0b6293b075342acc5cf996160ecf4bd87f709610`, and `--repo-ref banana-surface-parity-m7-unitnormal-r1` passes remote SHA/ref and repo-relative seed-path checks, then prints the H200 command.
+- The real H200 launch with the same image, ref, SHA, and seed spec reaches Hugging Face when the local HF CLI shim is first on `PATH`, then fails before a job is created because Hugging Face Jobs returns HTTP 402 Payment Required: pre-paid credit balance is insufficient.
 
 M7 unblock checklist:
 
-- Use a pushed branch or tag that contains the exact commit to be validated. `banana-surface-parity-m7-image-r1` already satisfies this for `c90fac6a3c9e7c866f8e1806f8db5cde1f7c689c`; create a new validation tag if later code or audit commits must be included in the CUDA proof.
+- Use a pushed branch or tag that contains the exact runtime commit to be validated. `banana-surface-parity-m7-unitnormal-r1` already satisfies this for `0b6293b075342acc5cf996160ecf4bd87f709610`; create a new validation tag if later runtime code commits must be included in the CUDA proof.
 - Use the published CUDA image from `benchmarks/hf_jobs/production_gpu_proof.Dockerfile`: `ghcr.io/jungdaesuh/simsopt-jax-hf-production-proof:banana-surface-parity-m7-image-r1`.
 - Keep the launcher dry-run green; it must print a preflight report whose `repo_sha` equals the pushed validation commit and whose `image` is the published CUDA image.
 - Add HF Jobs credits or Runpod credits/capacity, then run the H200/CUDA no-detach proof and attach the resulting artifact metadata here or in the manifest-linked proof doc. The manual GitHub Actions path through `.github/workflows/jax_h200_production_proof.yml` is only dispatchable after that workflow file exists on the repository default branch; the fork currently exposes only the HF image workflow on its default branch.
@@ -189,7 +190,7 @@ current-SHA CUDA evidence if CUDA closure is being claimed.
 | Set B conditional I/O/label/higher paired-point rows | VTK/file-output, `aspect_ratio` Boozer label, and higher `*_lin` APIs are explicitly conditional in B4/B5/B7. | not claimed; not a blocker for implemented rows |
 | Manifest/doc update | `docs/jax_parity_manifest.md` has a documentary non-CUDA surface/objective section and banana inventory rows with CUDA still open where required. | complete for docs; manifest guard passed |
 | Guardrails | `git diff --check` is clean; touched source/test diff grep found no dynamic imports, `typing.cast`, `Any`, or new `try`/`except`. | complete |
-| M7 current-SHA CUDA artifact gate | Validation tag `banana-surface-parity-m7-image-r1` makes `c90fac6a3c9e7c866f8e1806f8db5cde1f7c689c` reachable; the GHCR image `ghcr.io/jungdaesuh/simsopt-jax-hf-production-proof:banana-surface-parity-m7-image-r1` is pullable with digest `sha256:eac2e1887eaf08628af62b28e5d7d7141b84afdfdcbfd00179823b1eb8f3df39`; real-image dry-run preflight passes remote SHA/ref plus seed-path checks. The real HF H200 launch fails before job creation with HTTP 402 Payment Required, and Runpod has no active pods with a negative client balance. | incomplete and blocked on external GPU credits plus real H200 run |
+| M7 current-SHA CUDA artifact gate | Validation tag `banana-surface-parity-m7-unitnormal-r1` makes `0b6293b075342acc5cf996160ecf4bd87f709610` reachable; the GHCR image `ghcr.io/jungdaesuh/simsopt-jax-hf-production-proof:banana-surface-parity-m7-image-r1` is pullable with digest `sha256:eac2e1887eaf08628af62b28e5d7d7141b84afdfdcbfd00179823b1eb8f3df39`; real-image dry-run preflight passes remote SHA/ref plus seed-path checks. The real HF H200 launch reaches Hugging Face with the local CLI shim and then fails before job creation with HTTP 402 Payment Required, and Runpod has no active pods with a negative client balance. | incomplete and blocked on external GPU credits plus real H200 run |
 
 Audit verdict: not complete for CUDA/P5 closure. The local non-CUDA
 implementation and documentation work is complete, but the objective cannot be
