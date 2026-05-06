@@ -102,7 +102,7 @@ def _parse_hf_job_id_line(line: str) -> str | None:
 
 def _inspect_hf_job_stage(hf_cli: str, job_id: str) -> str:
     completed = subprocess.run(
-        [hf_cli, "jobs", "inspect", job_id],
+        [hf_cli, "jobs", "inspect", "--format", "json", job_id],
         check=True,
         capture_output=True,
         text=True,

@@ -909,6 +909,32 @@ def test_run_hf_job_foreground_rejects_missing_job_id(monkeypatch):
         launcher._run_hf_job_foreground("hf", ["hf", "jobs", "run"])
 
 
+def test_inspect_hf_job_stage_requests_json_format(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        assert check is True
+        assert capture_output is True
+        assert text is True
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=json.dumps([{"status": {"stage": "COMPLETED"}}]),
+        )
+
+    monkeypatch.setattr(launcher.subprocess, "run", fake_run)
+
+    assert launcher._inspect_hf_job_stage("hf", "job-123") == "COMPLETED"
+    assert calls == [["hf", "jobs", "inspect", "--format", "json", "job-123"]]
+
+
 def test_wait_for_successful_hf_job_rejects_remote_failure(monkeypatch):
     monkeypatch.setattr(launcher, "_inspect_hf_job_stage", lambda _hf_cli, _job_id: "ERROR")
 
