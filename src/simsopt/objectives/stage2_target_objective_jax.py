@@ -26,8 +26,10 @@ from ..jax_core.field import (
     grouped_coil_set_spec_from_lists,
 )
 from ..jax_core import (
+    closed_curve_self_intersection_summary,
     curve_geometry_from_dofs,
     curve_spec_from_curve,
+    curve_spec_with_quadpoints,
     make_biot_savart_spec,
     make_coil_dof_extraction_spec,
     make_coil_set_dof_extraction_spec,
@@ -47,7 +49,10 @@ from ..geo.curveobjectives import (
     cc_distance_pure,
     curve_length_pure,
 )
-from ..geo._pairwise_reductions import pairwise_selected_smoothmin_distance_pure
+from ..geo._pairwise_reductions import (
+    pairwise_min_distance_pure,
+    pairwise_selected_smoothmin_distance_pure,
+)
 from ..geo.optimizer_jax import (
     _mark_cacheable_jit_value_and_grad,
     _mark_structured_private_solver_cacheable,
@@ -57,6 +62,7 @@ __all__ = [
     "FinalSpecBundle",
     "Stage2PenaltyConfig",
     "Stage2TargetObjectiveBundle",
+    "Stage2TargetReportingSummary",
     "Stage2TargetOptimizerState",
     "Stage2TargetObjectiveTerm",
     "build_stage2_target_objective",
@@ -67,6 +73,7 @@ __all__ = [
 Stage2ObjectiveFn = Callable[[jnp.ndarray], jnp.ndarray]
 Stage2ValueAndGradFn = Callable[[jnp.ndarray], tuple[jnp.ndarray, jnp.ndarray]]
 Stage2ResidualFn = Callable[[jnp.ndarray], jnp.ndarray]
+Stage2ReportingFn = Callable[[jnp.ndarray], "Stage2TargetReportingSummary"]
 Stage2ALMValueAndGradFn = Callable[
     [jnp.ndarray, jnp.ndarray, jnp.ndarray],
     tuple[jnp.ndarray, jnp.ndarray],
@@ -83,6 +90,20 @@ class FinalSpecBundle(NamedTuple):
 class Stage2TargetObjectiveTerm(NamedTuple):
     name: str
     weight: float
+
+
+class Stage2TargetReportingSummary(NamedTuple):
+    J: jax.Array
+    Jf: jax.Array
+    mean_abs_relBfinal_norm: jax.Array
+    curve_length: jax.Array
+    coil_coil_distance: jax.Array
+    curve_surface_min_dist: jax.Array
+    curvature: jax.Array
+    banana_current_A: jax.Array
+    distance_constraint_violated: jax.Array
+    self_intersecting: jax.Array
+    raw_terms: jax.Array
 
 
 class Stage2PenaltyConfig(NamedTuple):
@@ -125,6 +146,7 @@ class Stage2TargetObjectiveBundle(NamedTuple):
     pairwise_penalty_sharding_summary: (
         Callable[[jnp.ndarray], dict[str, object]] | None
     ) = None
+    reporting_summary: Stage2ReportingFn | None = None
 
 
 def _as_jax_float64(value) -> jax.Array:
@@ -450,6 +472,61 @@ def _dynamic_curve_distance_penalty(
     )
 
 
+def _dynamic_curve_curve_min_distance(
+    dynamic_gammas,
+    tf_curve_groups,
+    initial_min_distance,
+):
+    min_distance = _runtime_float64_scalar(
+        initial_min_distance,
+        reference=dynamic_gammas,
+    )
+    dynamic_points = dynamic_gammas.reshape((-1, 3))
+    for tf_gammas, _tf_gammadashs in tf_curve_groups:
+        min_distance = jnp.minimum(
+            min_distance,
+            pairwise_min_distance_pure(
+                dynamic_points,
+                _runtime_float64_array(tf_gammas, reference=dynamic_gammas).reshape(
+                    (-1, 3)
+                ),
+            ),
+        )
+    for curve_index in range(int(dynamic_gammas.shape[0])):
+        gamma_i = dynamic_gammas[curve_index]
+        for previous_index in range(curve_index):
+            min_distance = jnp.minimum(
+                min_distance,
+                pairwise_min_distance_pure(gamma_i, dynamic_gammas[previous_index]),
+            )
+    return min_distance
+
+
+def _dynamic_curve_surface_min_distance(
+    dynamic_gammas,
+    tf_curve_groups,
+    surface_gamma,
+):
+    surface_points = surface_gamma.reshape((-1, 3))
+    min_distance = _runtime_float64_scalar(np.inf, reference=dynamic_gammas)
+    for tf_gammas, _tf_gammadashs in tf_curve_groups:
+        min_distance = jnp.minimum(
+            min_distance,
+            pairwise_min_distance_pure(
+                _runtime_float64_array(tf_gammas, reference=dynamic_gammas).reshape(
+                    (-1, 3)
+                ),
+                surface_points,
+            ),
+        )
+    for curve_index in range(int(dynamic_gammas.shape[0])):
+        min_distance = jnp.minimum(
+            min_distance,
+            pairwise_min_distance_pure(dynamic_gammas[curve_index], surface_points),
+        )
+    return min_distance
+
+
 def _summarize_pairwise_row_triplet_sharding(
     left_triplet,
     right_triplet,
@@ -576,11 +653,24 @@ def build_stage2_target_objective(
                 for right_curve_index in range(right_limit):
                     right_gamma = right_group_gammas[right_curve_index]
                     fixed_curve_curve_point_pairs.append((left_gamma, right_gamma))
+    fixed_curve_curve_min_distance = np.inf
+    for left_gamma, right_gamma in fixed_curve_curve_point_pairs:
+        fixed_curve_curve_min_distance = min(
+            fixed_curve_curve_min_distance,
+            _host_float64_scalar(pairwise_min_distance_pure(left_gamma, right_gamma)),
+        )
 
     banana_rotmats, banana_current_scales = _banana_symmetry_runtime_inputs_from_coils(
         banana_coils
     )
+    self_intersection_curve_spec = curve_spec_with_quadpoints(
+        banana_curve_spec,
+        np.linspace(0.0, 1.0, 2000, endpoint=False, dtype=np.float64),
+    )
     banana_curve_spec_runtime = _runtimeify_tree(banana_curve_spec)
+    self_intersection_curve_spec_runtime = _runtimeify_tree(
+        self_intersection_curve_spec
+    )
     tf_curve_groups_runtime = _runtimeify_tree(tf_curve_groups)
     flux_spec_runtime = _runtimeify_tree(flux_spec)
     surface_gamma_runtime = _runtimeify_tree(surface_gamma)
@@ -650,7 +740,7 @@ def build_stage2_target_objective(
     def _evaluate_dynamic_stage2_state(dofs):
         (
             flat_dofs,
-            _base_gamma,
+            base_gamma,
             base_gammadash,
             base_gammadashdash,
             dynamic_gammas,
@@ -684,6 +774,7 @@ def build_stage2_target_objective(
 
         incremental_arclength = incremental_arclength_pure(base_gammadash)
         curve_length = curve_length_pure(incremental_arclength)
+        max_curvature = jnp.max(kappa_pure(base_gammadash, base_gammadashdash))
         length_excess = jnp.maximum(curve_length - length_target_jax, zero_jax)
         curvature_penalty = Lp_curvature_pure(
             kappa_pure(base_gammadash, base_gammadashdash),
@@ -708,6 +799,14 @@ def build_stage2_target_objective(
             coil_distance_penalty,
             half_jax,
             zero_jax,
+            base_gamma,
+            base_gammadash,
+            base_gammadashdash,
+            dynamic_gammas,
+            dynamic_gammadashs,
+            dynamic_current_array,
+            curve_length,
+            max_curvature,
         )
 
     def _raw_terms(dofs):
@@ -719,6 +818,7 @@ def build_stage2_target_objective(
             coil_distance_penalty,
             half_jax,
             _zero_jax,
+            *_reporting_fields,
         ) = _evaluate_dynamic_stage2_state(dofs)
         flux = fixed_surface_flux_integral_from_B(total_field, flux_spec_runtime)
         length_penalty = half_jax * (length_excess * length_excess)
@@ -741,6 +841,7 @@ def build_stage2_target_objective(
             coil_distance_penalty,
             _half_jax,
             zero_jax,
+            *_reporting_fields,
         ) = _evaluate_dynamic_stage2_state(dofs)
         two_jax = _runtime_float64_scalar(2.0, reference=flat_dofs)
         squared_flux_weight_jax = _runtime_float64_scalar(
@@ -779,6 +880,120 @@ def build_stage2_target_objective(
             )
         )
 
+    def _field_error_from_total_field(total_field):
+        surface_B = total_field.reshape(
+            (flux_spec_runtime.nphi, flux_spec_runtime.ntheta, 3)
+        )
+        surface_normal = _runtime_float64_array(
+            flux_spec_runtime.normal,
+            reference=total_field,
+        )
+        surface_normal_norm = jnp.sqrt(
+            jnp.sum(surface_normal * surface_normal, axis=-1)
+        )
+        surface_unit_normal = surface_normal / surface_normal_norm[:, :, None]
+        surface_B_normal = jnp.sum(surface_B * surface_unit_normal, axis=-1)
+        surface_B_norm = jnp.sqrt(jnp.sum(surface_B * surface_B, axis=-1))
+        surface_area = surface_normal_norm / surface_normal_norm.size
+        return (
+            jnp.sum(jnp.abs(surface_B_normal / surface_B_norm) * surface_area)
+            / jnp.sum(surface_area)
+        )
+
+    def _reporting_summary(dofs):
+        (
+            flat_dofs,
+            total_field,
+            length_excess,
+            curvature_penalty,
+            coil_distance_penalty,
+            half_jax,
+            _zero_jax,
+            _base_gamma,
+            _base_gammadash,
+            _base_gammadashdash,
+            dynamic_gammas,
+            _dynamic_gammadashs,
+            dynamic_current_array,
+            curve_length,
+            max_curvature,
+        ) = _evaluate_dynamic_stage2_state(dofs)
+        flux = fixed_surface_flux_integral_from_B(total_field, flux_spec_runtime)
+        length_penalty = half_jax * (length_excess * length_excess)
+        raw_terms_value = jnp.stack(
+            (
+                flux,
+                length_penalty,
+                coil_distance_penalty,
+                curvature_penalty,
+            )
+        )
+        squared_flux_weight_jax = _runtime_float64_scalar(
+            squared_flux_weight,
+            reference=raw_terms_value,
+        )
+        length_weight_jax = _runtime_float64_scalar(
+            length_weight,
+            reference=raw_terms_value,
+        )
+        cc_weight_jax = _runtime_float64_scalar(
+            cc_weight,
+            reference=raw_terms_value,
+        )
+        curvature_weight_jax = _runtime_float64_scalar(
+            curvature_weight,
+            reference=raw_terms_value,
+        )
+        coil_coil_distance = _dynamic_curve_curve_min_distance(
+            dynamic_gammas,
+            tf_curve_groups_runtime,
+            fixed_curve_curve_min_distance,
+        )
+        surface_gamma_jax = _runtime_float64_array(
+            surface_gamma_runtime,
+            reference=flat_dofs,
+        )
+        curve_surface_min_dist = _dynamic_curve_surface_min_distance(
+            dynamic_gammas,
+            tf_curve_groups_runtime,
+            surface_gamma_jax,
+        )
+        self_gamma, _self_gammadash, _self_gammadashdash = curve_geometry_from_dofs(
+            self_intersection_curve_spec_runtime,
+            stage2_target_optimizer_state_from_dofs(
+                dofs,
+                curve_dof_count=curve_dof_count,
+            ).curve_dofs,
+        )
+        _self_min_distance, _self_tolerance, _self_penalty, self_intersecting = (
+            closed_curve_self_intersection_summary(
+                self_gamma,
+                tolerance_factor=0.1,
+                neighbor_skip=3,
+            )
+        )
+        return Stage2TargetReportingSummary(
+            J=(
+                squared_flux_weight_jax * raw_terms_value[0]
+                + length_weight_jax * raw_terms_value[1]
+                + cc_weight_jax * raw_terms_value[2]
+                + curvature_weight_jax * raw_terms_value[3]
+            ),
+            Jf=flux,
+            mean_abs_relBfinal_norm=_field_error_from_total_field(total_field),
+            curve_length=curve_length,
+            coil_coil_distance=coil_coil_distance,
+            curve_surface_min_dist=curve_surface_min_dist,
+            curvature=max_curvature,
+            banana_current_A=jnp.max(jnp.abs(dynamic_current_array)),
+            distance_constraint_violated=(
+                (coil_coil_distance <= _runtime_float64_scalar(cc_threshold, reference=flat_dofs))
+                | ~jnp.isfinite(coil_distance_penalty)
+            ),
+            self_intersecting=self_intersecting,
+            raw_terms=raw_terms_value,
+        )
+
     terms = (
         Stage2TargetObjectiveTerm("squared_flux", float(squared_flux_weight)),
         Stage2TargetObjectiveTerm("length_penalty", float(length_weight)),
@@ -788,6 +1003,7 @@ def build_stage2_target_objective(
 
     raw_terms_fun = jax.jit(_raw_terms)
     least_squares_residual = jax.jit(_least_squares_residual)
+    reporting_summary = jax.jit(_reporting_summary)
 
     def build_alm_value_and_grad(
         *,
@@ -1071,5 +1287,6 @@ def build_stage2_target_objective(
         alm_value_and_grad_builder=build_alm_value_and_grad,
         field_sharding_summary=field_sharding_summary,
         pairwise_penalty_sharding_summary=pairwise_penalty_sharding_summary,
+        reporting_summary=reporting_summary,
         final_specs_from_dofs=_final_specs_from_dofs,
     )

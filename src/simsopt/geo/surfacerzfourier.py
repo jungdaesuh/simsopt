@@ -45,16 +45,56 @@ def _require_jax(feature_name):
 def _surface_rzfourier_jax_tools():
     from ..jax_core import (
         make_surface_rzfourier_spec,
+        surface_rz_fourier_aspect_ratio_from_dofs,
+        surface_rz_fourier_aspect_ratio_from_spec,
         surface_rz_fourier_area_from_dofs,
         surface_rz_fourier_area_from_spec,
+        surface_rz_fourier_d2area_from_dofs,
+        surface_rz_fourier_d2aspect_ratio_from_dofs,
+        surface_rz_fourier_d2major_radius_from_dofs,
+        surface_rz_fourier_d2minor_radius_from_dofs,
+        surface_rz_fourier_d2volume_from_dofs,
+        surface_rz_fourier_darea_from_dofs,
+        surface_rz_fourier_daspect_ratio_from_dofs,
+        surface_rz_fourier_dfirst_fund_form_from_dofs,
+        surface_rz_fourier_dgammadash1dash1_from_dofs,
+        surface_rz_fourier_dgammadash1dash2_from_dofs,
+        surface_rz_fourier_dgammadash2dash2_from_dofs,
+        surface_rz_fourier_dmajor_radius_from_dofs,
+        surface_rz_fourier_dmean_cross_sectional_area_from_dofs,
+        surface_rz_fourier_dminor_radius_from_dofs,
+        surface_rz_fourier_dsecond_fund_form_from_dofs,
+        surface_rz_fourier_dsurface_curvatures_from_dofs,
+        surface_rz_fourier_dvolume_from_dofs,
+        surface_rz_fourier_first_fund_form_from_dofs,
+        surface_rz_fourier_first_fund_form_from_spec,
         surface_rz_fourier_gamma_from_dofs,
         surface_rz_fourier_gamma_from_spec,
+        surface_rz_fourier_gammadash1dash1_from_dofs,
+        surface_rz_fourier_gammadash1dash1_from_spec,
+        surface_rz_fourier_gammadash1dash1_vjp_from_dofs,
+        surface_rz_fourier_gammadash1dash2_from_dofs,
+        surface_rz_fourier_gammadash1dash2_from_spec,
+        surface_rz_fourier_gammadash1dash2_vjp_from_dofs,
         surface_rz_fourier_gammadash1_from_dofs,
         surface_rz_fourier_gammadash1_from_spec,
+        surface_rz_fourier_gammadash2dash2_from_dofs,
+        surface_rz_fourier_gammadash2dash2_from_spec,
+        surface_rz_fourier_gammadash2dash2_vjp_from_dofs,
         surface_rz_fourier_gammadash2_from_dofs,
         surface_rz_fourier_gammadash2_from_spec,
+        surface_rz_fourier_major_radius_from_dofs,
+        surface_rz_fourier_major_radius_from_spec,
+        surface_rz_fourier_mean_cross_sectional_area_from_dofs,
+        surface_rz_fourier_mean_cross_sectional_area_from_spec,
+        surface_rz_fourier_minor_radius_from_dofs,
+        surface_rz_fourier_minor_radius_from_spec,
         surface_rz_fourier_normal_from_dofs,
         surface_rz_fourier_normal_from_spec,
+        surface_rz_fourier_second_fund_form_from_dofs,
+        surface_rz_fourier_second_fund_form_from_spec,
+        surface_rz_fourier_surface_curvatures_from_dofs,
+        surface_rz_fourier_surface_curvatures_from_spec,
         surface_rz_fourier_unitnormal_from_spec,
         surface_rz_fourier_unitnormal_from_dofs,
         surface_rz_fourier_dnormal_from_dofs,
@@ -65,12 +105,38 @@ def _surface_rzfourier_jax_tools():
 
     return {
         "make_spec": make_surface_rzfourier_spec,
+        "aspect_ratio_from_dofs": surface_rz_fourier_aspect_ratio_from_dofs,
+        "aspect_ratio": surface_rz_fourier_aspect_ratio_from_spec,
         "gamma_from_dofs": surface_rz_fourier_gamma_from_dofs,
         "gamma": surface_rz_fourier_gamma_from_spec,
         "gammadash1_from_dofs": surface_rz_fourier_gammadash1_from_dofs,
         "gammadash1": surface_rz_fourier_gammadash1_from_spec,
         "gammadash2_from_dofs": surface_rz_fourier_gammadash2_from_dofs,
         "gammadash2": surface_rz_fourier_gammadash2_from_spec,
+        "gammadash1dash1_from_dofs": surface_rz_fourier_gammadash1dash1_from_dofs,
+        "gammadash1dash1": surface_rz_fourier_gammadash1dash1_from_spec,
+        "gammadash1dash2_from_dofs": surface_rz_fourier_gammadash1dash2_from_dofs,
+        "gammadash1dash2": surface_rz_fourier_gammadash1dash2_from_spec,
+        "gammadash2dash2_from_dofs": surface_rz_fourier_gammadash2dash2_from_dofs,
+        "gammadash2dash2": surface_rz_fourier_gammadash2dash2_from_spec,
+        "dgammadash1dash1_from_dofs": (
+            surface_rz_fourier_dgammadash1dash1_from_dofs
+        ),
+        "dgammadash1dash2_from_dofs": (
+            surface_rz_fourier_dgammadash1dash2_from_dofs
+        ),
+        "dgammadash2dash2_from_dofs": (
+            surface_rz_fourier_dgammadash2dash2_from_dofs
+        ),
+        "gammadash1dash1_vjp_from_dofs": (
+            surface_rz_fourier_gammadash1dash1_vjp_from_dofs
+        ),
+        "gammadash1dash2_vjp_from_dofs": (
+            surface_rz_fourier_gammadash1dash2_vjp_from_dofs
+        ),
+        "gammadash2dash2_vjp_from_dofs": (
+            surface_rz_fourier_gammadash2dash2_vjp_from_dofs
+        ),
         "normal_from_dofs": surface_rz_fourier_normal_from_dofs,
         "normal": surface_rz_fourier_normal_from_spec,
         "unitnormal": surface_rz_fourier_unitnormal_from_spec,
@@ -79,8 +145,42 @@ def _surface_rzfourier_jax_tools():
         "dunitnormal_from_dofs": surface_rz_fourier_dunitnormal_from_dofs,
         "area_from_dofs": surface_rz_fourier_area_from_dofs,
         "area": surface_rz_fourier_area_from_spec,
+        "darea_from_dofs": surface_rz_fourier_darea_from_dofs,
+        "d2area_from_dofs": surface_rz_fourier_d2area_from_dofs,
+        "first_fund_form_from_dofs": surface_rz_fourier_first_fund_form_from_dofs,
+        "first_fund_form": surface_rz_fourier_first_fund_form_from_spec,
+        "second_fund_form_from_dofs": surface_rz_fourier_second_fund_form_from_dofs,
+        "second_fund_form": surface_rz_fourier_second_fund_form_from_spec,
+        "surface_curvatures_from_dofs": surface_rz_fourier_surface_curvatures_from_dofs,
+        "surface_curvatures": surface_rz_fourier_surface_curvatures_from_spec,
+        "dfirst_fund_form_from_dofs": surface_rz_fourier_dfirst_fund_form_from_dofs,
+        "dsecond_fund_form_from_dofs": surface_rz_fourier_dsecond_fund_form_from_dofs,
+        "dsurface_curvatures_from_dofs": (
+            surface_rz_fourier_dsurface_curvatures_from_dofs
+        ),
+        "major_radius_from_dofs": surface_rz_fourier_major_radius_from_dofs,
+        "major_radius": surface_rz_fourier_major_radius_from_spec,
+        "mean_cross_sectional_area_from_dofs": (
+            surface_rz_fourier_mean_cross_sectional_area_from_dofs
+        ),
+        "mean_cross_sectional_area": (
+            surface_rz_fourier_mean_cross_sectional_area_from_spec
+        ),
+        "minor_radius_from_dofs": surface_rz_fourier_minor_radius_from_dofs,
+        "minor_radius": surface_rz_fourier_minor_radius_from_spec,
+        "dmean_cross_sectional_area_from_dofs": (
+            surface_rz_fourier_dmean_cross_sectional_area_from_dofs
+        ),
+        "dminor_radius_from_dofs": surface_rz_fourier_dminor_radius_from_dofs,
+        "dmajor_radius_from_dofs": surface_rz_fourier_dmajor_radius_from_dofs,
+        "daspect_ratio_from_dofs": surface_rz_fourier_daspect_ratio_from_dofs,
+        "d2minor_radius_from_dofs": surface_rz_fourier_d2minor_radius_from_dofs,
+        "d2major_radius_from_dofs": surface_rz_fourier_d2major_radius_from_dofs,
+        "d2aspect_ratio_from_dofs": surface_rz_fourier_d2aspect_ratio_from_dofs,
         "volume_from_dofs": surface_rz_fourier_volume_from_dofs,
         "volume": surface_rz_fourier_volume_from_spec,
+        "dvolume_from_dofs": surface_rz_fourier_dvolume_from_dofs,
+        "d2volume_from_dofs": surface_rz_fourier_d2volume_from_dofs,
     }
 
 
@@ -332,12 +432,6 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
     def _surface_dofs_jax(self, dofs):
         return jnp.asarray(self.get_dofs() if dofs is None else dofs, dtype=jnp.float64)
 
-    def _surface_scalar_grad_jax(self, tool_name, dofs, feature_name):
-        dofs_jax = self._surface_dofs_jax(dofs)
-        return jax.grad(
-            lambda x: self._evaluate_surface_jax_from_dofs(tool_name, x, feature_name)
-        )(dofs_jax)
-
     def surface_spec(self):
         """Build an immutable JAX geometry spec from the current surface state."""
         return _surface_rzfourier_jax_tool(
@@ -382,6 +476,42 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
             "SurfaceRZFourier.gammadash2_jax",
         )
 
+    def gammadash1dash1_jax(self, dofs=None):
+        """Pure JAX second toroidal derivative for the current surface state."""
+        if dofs is None:
+            return self._evaluate_surface_jax(
+                "gammadash1dash1", "SurfaceRZFourier.gammadash1dash1_jax"
+            )
+        return self._evaluate_surface_jax_from_dofs(
+            "gammadash1dash1_from_dofs",
+            dofs,
+            "SurfaceRZFourier.gammadash1dash1_jax",
+        )
+
+    def gammadash1dash2_jax(self, dofs=None):
+        """Pure JAX mixed toroidal-poloidal derivative for the current surface state."""
+        if dofs is None:
+            return self._evaluate_surface_jax(
+                "gammadash1dash2", "SurfaceRZFourier.gammadash1dash2_jax"
+            )
+        return self._evaluate_surface_jax_from_dofs(
+            "gammadash1dash2_from_dofs",
+            dofs,
+            "SurfaceRZFourier.gammadash1dash2_jax",
+        )
+
+    def gammadash2dash2_jax(self, dofs=None):
+        """Pure JAX second poloidal derivative for the current surface state."""
+        if dofs is None:
+            return self._evaluate_surface_jax(
+                "gammadash2dash2", "SurfaceRZFourier.gammadash2dash2_jax"
+            )
+        return self._evaluate_surface_jax_from_dofs(
+            "gammadash2dash2_from_dofs",
+            dofs,
+            "SurfaceRZFourier.gammadash2dash2_jax",
+        )
+
     def normal_jax(self, dofs=None):
         """Pure JAX unnormalized normal evaluation for the current surface state."""
         if dofs is None:
@@ -424,21 +554,178 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
             "SurfaceRZFourier.volume_jax",
         )
 
+    def mean_cross_sectional_area_jax(self, dofs=None):
+        """Pure JAX mean cross-sectional area evaluation."""
+        if dofs is None:
+            return self._evaluate_surface_jax(
+                "mean_cross_sectional_area",
+                "SurfaceRZFourier.mean_cross_sectional_area_jax",
+            )
+        return self._evaluate_surface_jax_from_dofs(
+            "mean_cross_sectional_area_from_dofs",
+            dofs,
+            "SurfaceRZFourier.mean_cross_sectional_area_jax",
+        )
+
+    def minor_radius_jax(self, dofs=None):
+        """Pure JAX minor-radius evaluation."""
+        if dofs is None:
+            return self._evaluate_surface_jax(
+                "minor_radius", "SurfaceRZFourier.minor_radius_jax"
+            )
+        return self._evaluate_surface_jax_from_dofs(
+            "minor_radius_from_dofs",
+            dofs,
+            "SurfaceRZFourier.minor_radius_jax",
+        )
+
+    def major_radius_jax(self, dofs=None):
+        """Pure JAX major-radius evaluation."""
+        if dofs is None:
+            return self._evaluate_surface_jax(
+                "major_radius", "SurfaceRZFourier.major_radius_jax"
+            )
+        return self._evaluate_surface_jax_from_dofs(
+            "major_radius_from_dofs",
+            dofs,
+            "SurfaceRZFourier.major_radius_jax",
+        )
+
+    def aspect_ratio_jax(self, dofs=None):
+        """Pure JAX aspect-ratio evaluation."""
+        if dofs is None:
+            return self._evaluate_surface_jax(
+                "aspect_ratio", "SurfaceRZFourier.aspect_ratio_jax"
+            )
+        return self._evaluate_surface_jax_from_dofs(
+            "aspect_ratio_from_dofs",
+            dofs,
+            "SurfaceRZFourier.aspect_ratio_jax",
+        )
+
+    def first_fund_form_jax(self, dofs=None):
+        """Pure JAX first fundamental form evaluation."""
+        if dofs is None:
+            return self._evaluate_surface_jax(
+                "first_fund_form", "SurfaceRZFourier.first_fund_form_jax"
+            )
+        return self._evaluate_surface_jax_from_dofs(
+            "first_fund_form_from_dofs",
+            dofs,
+            "SurfaceRZFourier.first_fund_form_jax",
+        )
+
+    def second_fund_form_jax(self, dofs=None):
+        """Pure JAX second fundamental form evaluation."""
+        if dofs is None:
+            return self._evaluate_surface_jax(
+                "second_fund_form", "SurfaceRZFourier.second_fund_form_jax"
+            )
+        return self._evaluate_surface_jax_from_dofs(
+            "second_fund_form_from_dofs",
+            dofs,
+            "SurfaceRZFourier.second_fund_form_jax",
+        )
+
+    def surface_curvatures_jax(self, dofs=None):
+        """Pure JAX surface curvatures with legacy ordering [H, K, k1, k2]."""
+        if dofs is None:
+            return self._evaluate_surface_jax(
+                "surface_curvatures", "SurfaceRZFourier.surface_curvatures_jax"
+            )
+        return self._evaluate_surface_jax_from_dofs(
+            "surface_curvatures_from_dofs",
+            dofs,
+            "SurfaceRZFourier.surface_curvatures_jax",
+        )
+
     def darea_by_dcoeff_jax(self, dofs=None):
         """Pure JAX area gradient with respect to surface DOFs."""
-        return self._surface_scalar_grad_jax(
-            "area_from_dofs",
-            dofs,
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "darea_from_dofs",
             "SurfaceRZFourier.darea_by_dcoeff_jax",
-        )
+        )(self.surface_spec(), dofs_jax)
 
     def dvolume_by_dcoeff_jax(self, dofs=None):
         """Pure JAX volume gradient with respect to surface DOFs."""
-        return self._surface_scalar_grad_jax(
-            "volume_from_dofs",
-            dofs,
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "dvolume_from_dofs",
             "SurfaceRZFourier.dvolume_by_dcoeff_jax",
-        )
+        )(self.surface_spec(), dofs_jax)
+
+    def dmean_cross_sectional_area_by_dcoeff_jax(self, dofs=None):
+        """Pure JAX mean cross-sectional area gradient with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "dmean_cross_sectional_area_from_dofs",
+            "SurfaceRZFourier.dmean_cross_sectional_area_by_dcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
+
+    def dminor_radius_by_dcoeff_jax(self, dofs=None):
+        """Pure JAX minor-radius gradient with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "dminor_radius_from_dofs",
+            "SurfaceRZFourier.dminor_radius_by_dcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
+
+    def dmajor_radius_by_dcoeff_jax(self, dofs=None):
+        """Pure JAX major-radius gradient with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "dmajor_radius_from_dofs",
+            "SurfaceRZFourier.dmajor_radius_by_dcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
+
+    def daspect_ratio_by_dcoeff_jax(self, dofs=None):
+        """Pure JAX aspect-ratio gradient with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "daspect_ratio_from_dofs",
+            "SurfaceRZFourier.daspect_ratio_by_dcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
+
+    def d2area_by_dcoeffdcoeff_jax(self, dofs=None):
+        """Pure JAX explicit area Hessian with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "d2area_from_dofs",
+            "SurfaceRZFourier.d2area_by_dcoeffdcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
+
+    def d2volume_by_dcoeffdcoeff_jax(self, dofs=None):
+        """Pure JAX explicit volume Hessian with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "d2volume_from_dofs",
+            "SurfaceRZFourier.d2volume_by_dcoeffdcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
+
+    def d2minor_radius_by_dcoeff_dcoeff_jax(self, dofs=None):
+        """Pure JAX explicit minor-radius Hessian with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "d2minor_radius_from_dofs",
+            "SurfaceRZFourier.d2minor_radius_by_dcoeff_dcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
+
+    def d2major_radius_by_dcoeff_dcoeff_jax(self, dofs=None):
+        """Pure JAX explicit major-radius Hessian with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "d2major_radius_from_dofs",
+            "SurfaceRZFourier.d2major_radius_by_dcoeff_dcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
+
+    def d2aspect_ratio_by_dcoeff_dcoeff_jax(self, dofs=None):
+        """Pure JAX explicit aspect-ratio Hessian with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "d2aspect_ratio_from_dofs",
+            "SurfaceRZFourier.d2aspect_ratio_by_dcoeff_dcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
 
     def dnormal_by_dcoeff_jax(self, dofs=None):
         """Pure JAX normal Jacobian with respect to surface DOFs."""
@@ -455,6 +742,81 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
             "dunitnormal_from_dofs",
             "SurfaceRZFourier.dunitnormal_by_dcoeff_jax",
         )(self.surface_spec(), dofs_jax)
+
+    def dfirst_fund_form_by_dcoeff_jax(self, dofs=None):
+        """Pure JAX first fundamental form Jacobian with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "dfirst_fund_form_from_dofs",
+            "SurfaceRZFourier.dfirst_fund_form_by_dcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
+
+    def dsecond_fund_form_by_dcoeff_jax(self, dofs=None):
+        """Pure JAX second fundamental form Jacobian with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "dsecond_fund_form_from_dofs",
+            "SurfaceRZFourier.dsecond_fund_form_by_dcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
+
+    def dsurface_curvatures_by_dcoeff_jax(self, dofs=None):
+        """Pure JAX surface-curvature Jacobian with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "dsurface_curvatures_from_dofs",
+            "SurfaceRZFourier.dsurface_curvatures_by_dcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
+
+    def dgammadash1dash1_by_dcoeff_jax(self, dofs=None):
+        """Pure JAX second toroidal derivative Jacobian with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "dgammadash1dash1_from_dofs",
+            "SurfaceRZFourier.dgammadash1dash1_by_dcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
+
+    def dgammadash1dash2_by_dcoeff_jax(self, dofs=None):
+        """Pure JAX mixed second derivative Jacobian with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "dgammadash1dash2_from_dofs",
+            "SurfaceRZFourier.dgammadash1dash2_by_dcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
+
+    def dgammadash2dash2_by_dcoeff_jax(self, dofs=None):
+        """Pure JAX second poloidal derivative Jacobian with respect to surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        return _surface_rzfourier_jax_tool(
+            "dgammadash2dash2_from_dofs",
+            "SurfaceRZFourier.dgammadash2dash2_by_dcoeff_jax",
+        )(self.surface_spec(), dofs_jax)
+
+    def dgammadash1dash1_by_dcoeff_vjp_jax(self, cotangent, dofs=None):
+        """Pure JAX VJP for second toroidal derivative surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        cotangent_jax = jnp.asarray(cotangent, dtype=jnp.float64)
+        return _surface_rzfourier_jax_tool(
+            "gammadash1dash1_vjp_from_dofs",
+            "SurfaceRZFourier.dgammadash1dash1_by_dcoeff_vjp_jax",
+        )(self.surface_spec(), dofs_jax, cotangent_jax)
+
+    def dgammadash1dash2_by_dcoeff_vjp_jax(self, cotangent, dofs=None):
+        """Pure JAX VJP for mixed second derivative surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        cotangent_jax = jnp.asarray(cotangent, dtype=jnp.float64)
+        return _surface_rzfourier_jax_tool(
+            "gammadash1dash2_vjp_from_dofs",
+            "SurfaceRZFourier.dgammadash1dash2_by_dcoeff_vjp_jax",
+        )(self.surface_spec(), dofs_jax, cotangent_jax)
+
+    def dgammadash2dash2_by_dcoeff_vjp_jax(self, cotangent, dofs=None):
+        """Pure JAX VJP for second poloidal derivative surface DOFs."""
+        dofs_jax = self._surface_dofs_jax(dofs)
+        cotangent_jax = jnp.asarray(cotangent, dtype=jnp.float64)
+        return _surface_rzfourier_jax_tool(
+            "gammadash2dash2_vjp_from_dofs",
+            "SurfaceRZFourier.dgammadash2dash2_by_dcoeff_vjp_jax",
+        )(self.surface_spec(), dofs_jax, cotangent_jax)
 
     def _make_names(self):
         """
@@ -943,13 +1305,13 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
         # recalculated to the specified size)
         if quadpoints_theta is None and quadpoints_phi is None:
             if (
-                ntheta is not otherntheta
-                or nphi is not othernphi
+                ntheta != otherntheta
+                or nphi != othernphi
                 or grid_range is not None
             ):
                 kwargs["quadpoints_phi"], kwargs["quadpoints_theta"] = (
                     Surface.get_quadpoints(
-                        ntheta=ntheta, nphi=nphi, nfp=self.nfp, range=grid_range
+                        ntheta=ntheta, nphi=nphi, nfp=nfp, range=grid_range
                     )
                 )
             else:
@@ -957,14 +1319,14 @@ class SurfaceRZFourier(sopp.SurfaceRZFourier, Surface):
                 kwargs["quadpoints_theta"] = self.quadpoints_theta
         else:
             if quadpoints_theta is None:
-                if ntheta is not otherntheta or grid_range is not None:
+                if ntheta != otherntheta or grid_range is not None:
                     kwargs["quadpoints_theta"] = Surface.get_theta_quadpoints(ntheta)
                 else:
                     kwargs["quadpoints_theta"] = self.quadpoints_theta
             else:
                 kwargs["quadpoints_theta"] = quadpoints_theta
             if quadpoints_phi is None:
-                if nphi is not othernphi or grid_range is not None:
+                if nphi != othernphi or grid_range is not None:
                     kwargs["quadpoints_phi"] = Surface.get_phi_quadpoints(
                         nphi, range=grid_range, nfp=nfp
                     )

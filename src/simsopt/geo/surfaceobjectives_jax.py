@@ -28,6 +28,7 @@ Architecture (implicit differentiation):
 import hashlib
 import logging
 import os
+from dataclasses import replace
 from typing import NamedTuple
 import numpy as np
 import jax
@@ -57,6 +58,32 @@ from ..jax_core.field import (
     coil_specs_from_dof_extraction_spec,
     grouped_coil_currents_from_spec,
 )
+from ..jax_core.specs import surface_spec_kind
+from ..jax_core.surface_fourier import (
+    surface_xyz_fourier_gamma_from_spec,
+    surface_xyz_fourier_gammadash1_from_spec,
+    surface_xyz_fourier_gammadash1dash1_from_spec,
+    surface_xyz_fourier_gammadash1dash2_from_spec,
+    surface_xyz_fourier_gammadash2_from_spec,
+    surface_xyz_fourier_gammadash2dash2_from_spec,
+    surface_xyz_fourier_volume_from_spec,
+    surface_xyz_tensor_fourier_gamma_from_spec,
+    surface_xyz_tensor_fourier_gammadash1_from_spec,
+    surface_xyz_tensor_fourier_gammadash1dash1_from_spec,
+    surface_xyz_tensor_fourier_gammadash1dash2_from_spec,
+    surface_xyz_tensor_fourier_gammadash2_from_spec,
+    surface_xyz_tensor_fourier_gammadash2dash2_from_spec,
+    surface_xyz_tensor_fourier_volume_from_spec,
+)
+from ..jax_core.surface_rzfourier import (
+    surface_rz_fourier_gamma_from_dofs,
+    surface_rz_fourier_gammadash1_from_dofs,
+    surface_rz_fourier_gammadash1dash1_from_dofs,
+    surface_rz_fourier_gammadash1dash2_from_dofs,
+    surface_rz_fourier_gammadash2_from_dofs,
+    surface_rz_fourier_gammadash2dash2_from_dofs,
+    surface_rz_fourier_volume_from_dofs,
+)
 from ..jax_core.sharding import inspect_array_sharding_summary
 from .curve import incremental_arclength_pure, kappa_pure
 from ._pairwise_reductions import (
@@ -84,6 +111,7 @@ from .label_constraints_jax import compute_G_from_currents
 from ._surface_stellsym import (
     compute_stellsym_mask_indices_for_grid as _compute_stellsym_mask_indices_for_grid,
 )
+from .surface import Surface
 from .surface_fourier_jax import surface_volume
 from .surfaceobjectives import (
     surface_to_surface_distance_pure,
@@ -91,9 +119,13 @@ from .surfaceobjectives import (
 )
 
 __all__ = [
+    "AspectRatioJAX",
     "BoozerResidualJAX",
     "IotasJAX",
+    "MajorRadiusJAX",
     "NonQuasiSymmetricRatioJAX",
+    "PrincipalCurvatureJAX",
+    "QfmResidualJAX",
     "compute_standard_surface_objective_gradients",
     "make_traceable_single_stage_alm_runtime_bundle",
     "make_traceable_objective",
@@ -101,6 +133,22 @@ __all__ = [
     "make_traceable_objective_seeded_value_and_grad",
     "make_traceable_objective_value_and_grad",
     "make_traceable_objective_profile_suite",
+    "surface_aspect_ratio_jax_from_dofs",
+    "surface_curvatures_jax_from_dofs",
+    "surface_d2aspect_ratio_jax_from_dofs",
+    "surface_d2major_radius_jax_from_dofs",
+    "surface_d2mean_cross_sectional_area_jax_from_dofs",
+    "surface_d2minor_radius_jax_from_dofs",
+    "surface_daspect_ratio_jax_from_dofs",
+    "surface_dmajor_radius_jax_from_dofs",
+    "surface_dmean_cross_sectional_area_jax_from_dofs",
+    "surface_dminor_radius_jax_from_dofs",
+    "surface_dsurface_curvatures_jax_from_dofs",
+    "surface_major_radius_jax_from_dofs",
+    "surface_mean_cross_sectional_area_jax_from_dofs",
+    "surface_minor_radius_jax_from_dofs",
+    "surface_principal_curvature_jax_from_dofs",
+    "surface_qfm_residual_jax_from_dofs",
 ]
 
 _MISSING_STREAMING_GROUP_VJP_ERROR = (
@@ -223,6 +271,468 @@ def _strict_scalar_value_and_grad(fun, arg, *args):
     value, pullback = jax.vjp(_objective, arg)
     (gradient,) = pullback(_explicit_scalar_pullback_seed(value))
     return value, gradient
+
+
+def _surface_spec_with_dofs(spec, dofs):
+    return replace(spec, dofs=_as_jax_float64(dofs))
+
+
+def _surface_gamma_tangents_volume_from_dofs(spec, dofs):
+    dofs = _as_jax_float64(dofs)
+    kind = surface_spec_kind(spec)
+    if kind == "rz_fourier":
+        return (
+            surface_rz_fourier_gamma_from_dofs(spec, dofs),
+            surface_rz_fourier_gammadash1_from_dofs(spec, dofs),
+            surface_rz_fourier_gammadash2_from_dofs(spec, dofs),
+            surface_rz_fourier_volume_from_dofs(spec, dofs),
+        )
+    if kind == "xyz_fourier":
+        spec_with_dofs = _surface_spec_with_dofs(spec, dofs)
+        return (
+            surface_xyz_fourier_gamma_from_spec(spec_with_dofs),
+            surface_xyz_fourier_gammadash1_from_spec(spec_with_dofs),
+            surface_xyz_fourier_gammadash2_from_spec(spec_with_dofs),
+            surface_xyz_fourier_volume_from_spec(spec_with_dofs),
+        )
+    if kind == "xyz_tensor_fourier":
+        spec_with_dofs = _surface_spec_with_dofs(spec, dofs)
+        return (
+            surface_xyz_tensor_fourier_gamma_from_spec(spec_with_dofs),
+            surface_xyz_tensor_fourier_gammadash1_from_spec(spec_with_dofs),
+            surface_xyz_tensor_fourier_gammadash2_from_spec(spec_with_dofs),
+            surface_xyz_tensor_fourier_volume_from_spec(spec_with_dofs),
+        )
+    raise TypeError(f"Unsupported surface spec kind {kind!r}.")
+
+
+def _surface_geometry_second_derivatives_from_dofs(spec, dofs):
+    dofs = _as_jax_float64(dofs)
+    kind = surface_spec_kind(spec)
+    if kind == "rz_fourier":
+        return (
+            surface_rz_fourier_gamma_from_dofs(spec, dofs),
+            surface_rz_fourier_gammadash1_from_dofs(spec, dofs),
+            surface_rz_fourier_gammadash2_from_dofs(spec, dofs),
+            surface_rz_fourier_gammadash1dash1_from_dofs(spec, dofs),
+            surface_rz_fourier_gammadash1dash2_from_dofs(spec, dofs),
+            surface_rz_fourier_gammadash2dash2_from_dofs(spec, dofs),
+        )
+    if kind == "xyz_fourier":
+        spec_with_dofs = _surface_spec_with_dofs(spec, dofs)
+        return (
+            surface_xyz_fourier_gamma_from_spec(spec_with_dofs),
+            surface_xyz_fourier_gammadash1_from_spec(spec_with_dofs),
+            surface_xyz_fourier_gammadash2_from_spec(spec_with_dofs),
+            surface_xyz_fourier_gammadash1dash1_from_spec(spec_with_dofs),
+            surface_xyz_fourier_gammadash1dash2_from_spec(spec_with_dofs),
+            surface_xyz_fourier_gammadash2dash2_from_spec(spec_with_dofs),
+        )
+    if kind == "xyz_tensor_fourier":
+        spec_with_dofs = _surface_spec_with_dofs(spec, dofs)
+        return (
+            surface_xyz_tensor_fourier_gamma_from_spec(spec_with_dofs),
+            surface_xyz_tensor_fourier_gammadash1_from_spec(spec_with_dofs),
+            surface_xyz_tensor_fourier_gammadash2_from_spec(spec_with_dofs),
+            surface_xyz_tensor_fourier_gammadash1dash1_from_spec(spec_with_dofs),
+            surface_xyz_tensor_fourier_gammadash1dash2_from_spec(spec_with_dofs),
+            surface_xyz_tensor_fourier_gammadash2dash2_from_spec(spec_with_dofs),
+        )
+    raise TypeError(f"Unsupported surface spec kind {kind!r}.")
+
+
+def _surface_normal_from_tangents(gammadash1, gammadash2):
+    return jnp.cross(gammadash1, gammadash2)
+
+
+def _surface_norm(normal):
+    return jnp.sqrt(jnp.sum(normal * normal, axis=-1))
+
+
+def _surface_curvatures_from_derivatives(
+    gammadash1,
+    gammadash2,
+    gammadash1dash1,
+    gammadash1dash2,
+    gammadash2dash2,
+):
+    normal = _surface_normal_from_tangents(gammadash1, gammadash2)
+    unitnormal = normal / _surface_norm(normal)[:, :, None]
+    e = jnp.sum(gammadash1 * gammadash1, axis=-1)
+    f = jnp.sum(gammadash1 * gammadash2, axis=-1)
+    g = jnp.sum(gammadash2 * gammadash2, axis=-1)
+    ell = jnp.sum(unitnormal * gammadash1dash1, axis=-1)
+    m = jnp.sum(unitnormal * gammadash1dash2, axis=-1)
+    n = jnp.sum(unitnormal * gammadash2dash2, axis=-1)
+    denom = e * g - f * f
+    mean_curvature = (ell * g - 2.0 * f * m + n * e) / (2.0 * denom)
+    gaussian_curvature = (ell * n - m * m) / denom
+    principal_offset = jnp.sqrt(mean_curvature * mean_curvature - gaussian_curvature)
+    return jnp.stack(
+        [
+            mean_curvature,
+            gaussian_curvature,
+            mean_curvature + principal_offset,
+            mean_curvature - principal_offset,
+        ],
+        axis=-1,
+    )
+
+
+def _surface_normal_norm_and_curvatures_jax_from_dofs(spec, dofs):
+    (
+        _gamma,
+        gammadash1,
+        gammadash2,
+        gammadash1dash1,
+        gammadash1dash2,
+        gammadash2dash2,
+    ) = _surface_geometry_second_derivatives_from_dofs(spec, dofs)
+    normal = _surface_normal_from_tangents(gammadash1, gammadash2)
+    return _surface_norm(normal), _surface_curvatures_from_derivatives(
+        gammadash1,
+        gammadash2,
+        gammadash1dash1,
+        gammadash1dash2,
+        gammadash2dash2,
+    )
+
+
+def _surface_normal_norm_jax_from_dofs(spec, dofs):
+    norm_normal, _curvature = _surface_normal_norm_and_curvatures_jax_from_dofs(
+        spec,
+        dofs,
+    )
+    return norm_normal
+
+
+def surface_curvatures_jax_from_dofs(spec, dofs):
+    _norm_normal, curvature = _surface_normal_norm_and_curvatures_jax_from_dofs(
+        spec,
+        dofs,
+    )
+    return curvature
+
+
+def surface_dsurface_curvatures_jax_from_dofs(spec, dofs):
+    return jax.jacobian(lambda x: surface_curvatures_jax_from_dofs(spec, x))(
+        _as_jax_float64(dofs)
+    )
+
+
+def _surface_dnormal_norm_jax_from_dofs(spec, dofs):
+    return jax.jacobian(lambda x: _surface_normal_norm_jax_from_dofs(spec, x))(
+        _as_jax_float64(dofs)
+    )
+
+
+def surface_mean_cross_sectional_area_jax_from_dofs(spec, dofs):
+    gamma, gammadash1, gammadash2, _volume = _surface_gamma_tangents_volume_from_dofs(
+        spec,
+        dofs,
+    )
+    x = gamma[:, :, 0]
+    y = gamma[:, :, 1]
+    radius_squared = x * x + y * y
+    jacobian_00 = (
+        x * gammadash1[:, :, 1] - y * gammadash1[:, :, 0]
+    ) / radius_squared
+    jacobian_01 = (
+        x * gammadash2[:, :, 1] - y * gammadash2[:, :, 0]
+    ) / radius_squared
+    dz_dtheta = gammadash2[:, :, 2] - (
+        gammadash1[:, :, 2] * jacobian_01 / jacobian_00
+    )
+    signed_area = (
+        jnp.mean(jnp.sqrt(radius_squared) * dz_dtheta * jacobian_00)
+        / (2.0 * jnp.pi)
+    )
+    return jnp.abs(signed_area)
+
+
+def surface_minor_radius_jax_from_dofs(spec, dofs):
+    mean_area = surface_mean_cross_sectional_area_jax_from_dofs(spec, dofs)
+    return jnp.sqrt(mean_area / jnp.pi)
+
+
+def surface_major_radius_jax_from_dofs(spec, dofs):
+    _gamma, _gammadash1, _gammadash2, volume = (
+        _surface_gamma_tangents_volume_from_dofs(spec, dofs)
+    )
+    minor_radius = surface_minor_radius_jax_from_dofs(spec, dofs)
+    return jnp.abs(volume) / (2.0 * jnp.pi * jnp.pi * minor_radius * minor_radius)
+
+
+def surface_aspect_ratio_jax_from_dofs(spec, dofs):
+    return (
+        surface_major_radius_jax_from_dofs(spec, dofs)
+        / surface_minor_radius_jax_from_dofs(spec, dofs)
+    )
+
+
+def surface_dmean_cross_sectional_area_jax_from_dofs(spec, dofs):
+    return jax.grad(lambda x: surface_mean_cross_sectional_area_jax_from_dofs(spec, x))(
+        _as_jax_float64(dofs)
+    )
+
+
+def surface_dminor_radius_jax_from_dofs(spec, dofs):
+    return jax.grad(lambda x: surface_minor_radius_jax_from_dofs(spec, x))(
+        _as_jax_float64(dofs)
+    )
+
+
+def surface_dmajor_radius_jax_from_dofs(spec, dofs):
+    return jax.grad(lambda x: surface_major_radius_jax_from_dofs(spec, x))(
+        _as_jax_float64(dofs)
+    )
+
+
+def surface_daspect_ratio_jax_from_dofs(spec, dofs):
+    return jax.grad(lambda x: surface_aspect_ratio_jax_from_dofs(spec, x))(
+        _as_jax_float64(dofs)
+    )
+
+
+def surface_d2mean_cross_sectional_area_jax_from_dofs(spec, dofs):
+    return jax.hessian(
+        lambda x: surface_mean_cross_sectional_area_jax_from_dofs(spec, x)
+    )(_as_jax_float64(dofs))
+
+
+def surface_d2minor_radius_jax_from_dofs(spec, dofs):
+    return jax.hessian(lambda x: surface_minor_radius_jax_from_dofs(spec, x))(
+        _as_jax_float64(dofs)
+    )
+
+
+def surface_d2major_radius_jax_from_dofs(spec, dofs):
+    return jax.hessian(lambda x: surface_major_radius_jax_from_dofs(spec, x))(
+        _as_jax_float64(dofs)
+    )
+
+
+def surface_d2aspect_ratio_jax_from_dofs(spec, dofs):
+    return jax.hessian(lambda x: surface_aspect_ratio_jax_from_dofs(spec, x))(
+        _as_jax_float64(dofs)
+    )
+
+
+_surface_dmajor_radius_jax_from_dofs = surface_dmajor_radius_jax_from_dofs
+_surface_daspect_ratio_jax_from_dofs = surface_daspect_ratio_jax_from_dofs
+_surface_d2aspect_ratio_jax_from_dofs = surface_d2aspect_ratio_jax_from_dofs
+
+
+def surface_principal_curvature_jax_from_dofs(
+    spec,
+    dofs,
+    *,
+    kappamax1=1,
+    kappamax2=1,
+    weight1=0.05,
+    weight2=0.05,
+):
+    norm_normal, curvature = _surface_normal_norm_and_curvatures_jax_from_dofs(
+        spec,
+        dofs,
+    )
+    k1 = curvature[:, :, 2]
+    k2 = curvature[:, :, 3]
+    return jnp.sum(
+        norm_normal * jnp.exp(-(k1 - kappamax1) / weight1)
+    ) + jnp.sum(norm_normal * jnp.exp(-(-k2 - kappamax2) / weight2))
+
+
+def _surface_dprincipal_curvature_jax_from_dofs(
+    spec,
+    dofs,
+    *,
+    kappamax1,
+    kappamax2,
+    weight1,
+    weight2,
+):
+    dofs = _as_jax_float64(dofs)
+    norm_normal = _surface_normal_norm_jax_from_dofs(spec, dofs)
+    curvature = surface_curvatures_jax_from_dofs(spec, dofs)
+    dnorm_normal = _surface_dnormal_norm_jax_from_dofs(spec, dofs)
+    dcurvature = surface_dsurface_curvatures_jax_from_dofs(spec, dofs)
+    exp1 = jnp.exp(-(curvature[:, :, 2] - kappamax1) / weight1)
+    exp2 = jnp.exp((curvature[:, :, 3] + kappamax2) / weight2)
+    dterm1 = (
+        exp1[:, :, None] * dnorm_normal
+        - (norm_normal * exp1 / weight1)[:, :, None] * dcurvature[:, :, 2, :]
+    )
+    dterm2 = (
+        exp2[:, :, None] * dnorm_normal
+        + (norm_normal * exp2 / weight2)[:, :, None] * dcurvature[:, :, 3, :]
+    )
+    return jnp.sum(dterm1 + dterm2, axis=(0, 1))
+
+
+def surface_qfm_residual_jax_from_dofs(spec, dofs, coil_set_spec):
+    gamma, gammadash1, gammadash2, _volume = _surface_gamma_tangents_volume_from_dofs(
+        spec,
+        dofs,
+    )
+    normal = _surface_normal_from_tangents(gammadash1, gammadash2)
+    norm_normal = _surface_norm(normal)
+    unitnormal = normal / norm_normal[:, :, None]
+    nphi, ntheta = gamma.shape[:2]
+    B = grouped_biot_savart_B_from_spec(
+        gamma.reshape(-1, 3),
+        coil_set_spec,
+    ).reshape(nphi, ntheta, 3)
+    B_normal = jnp.sum(B * unitnormal, axis=2)
+    B_norm_squared = jnp.sum(B * B, axis=2)
+    return jnp.sum(B_normal * B_normal * norm_normal) / jnp.sum(
+        B_norm_squared * norm_normal
+    )
+
+
+def _surface_dqfm_residual_jax_from_dofs(spec, dofs, coil_set_spec):
+    return jax.grad(
+        lambda x: surface_qfm_residual_jax_from_dofs(spec, x, coil_set_spec)
+    )(_as_jax_float64(dofs))
+
+
+def _surface_objective_surface_view(surface, *, range, nphi, ntheta):
+    if range is None and nphi is None and ntheta is None:
+        return surface
+    resolved_range = range
+    if resolved_range is None:
+        if surface.stellsym:
+            resolved_range = Surface.RANGE_HALF_PERIOD
+        else:
+            resolved_range = Surface.RANGE_FIELD_PERIOD
+    if nphi is None:
+        nphi = len(surface.quadpoints_phi)
+    if ntheta is None:
+        ntheta = len(surface.quadpoints_theta)
+    return surface.copy(nphi=nphi, ntheta=ntheta, range=resolved_range)
+
+
+class AspectRatioJAX(Optimizable):
+    """JAX-backed wrapper class for surface aspect ratio."""
+
+    def __init__(self, surface, range=None, nphi=None, ntheta=None):
+        self.surface = _surface_objective_surface_view(
+            surface,
+            range=range,
+            nphi=nphi,
+            ntheta=ntheta,
+        )
+        self.range = range
+        self.nphi = nphi
+        self.ntheta = ntheta
+        super().__init__(depends_on=[self.surface])
+
+    def _surface_spec_and_dofs(self):
+        return self.surface.surface_spec(), _as_jax_float64(self.surface.get_dofs())
+
+    def J(self):
+        spec, dofs = self._surface_spec_and_dofs()
+        return _host_scalar(surface_aspect_ratio_jax_from_dofs(spec, dofs))
+
+    @derivative_dec
+    def dJ(self):
+        return Derivative({self.surface: self.dJ_by_dsurfacecoefficients()})
+
+    def dJ_by_dsurfacecoefficients(self):
+        spec, dofs = self._surface_spec_and_dofs()
+        return _host_array(_surface_daspect_ratio_jax_from_dofs(spec, dofs))
+
+    def d2J_by_dsurfacecoefficientsdsurfacecoefficients(self):
+        spec, dofs = self._surface_spec_and_dofs()
+        return _host_array(_surface_d2aspect_ratio_jax_from_dofs(spec, dofs))
+
+
+class PrincipalCurvatureJAX(Optimizable):
+    """JAX-backed wrapper for the upstream principal-curvature penalty."""
+
+    def __init__(self, surface, kappamax1=1, kappamax2=1, weight1=0.05, weight2=0.05):
+        self.surface = surface
+        self.kappamax1 = kappamax1
+        self.kappamax2 = kappamax2
+        self.weight1 = weight1
+        self.weight2 = weight2
+        super().__init__(depends_on=[surface])
+
+    def _surface_spec_and_dofs(self):
+        return self.surface.surface_spec(), _as_jax_float64(self.surface.get_dofs())
+
+    def _objective_kwargs(self):
+        return dict(
+            kappamax1=self.kappamax1,
+            kappamax2=self.kappamax2,
+            weight1=self.weight1,
+            weight2=self.weight2,
+        )
+
+    def J(self):
+        spec, dofs = self._surface_spec_and_dofs()
+        return _host_scalar(
+            surface_principal_curvature_jax_from_dofs(
+                spec,
+                dofs,
+                **self._objective_kwargs(),
+            )
+        )
+
+    @derivative_dec
+    def dJ(self):
+        return Derivative({self.surface: self.dJ_by_dsurfacecoefficients()})
+
+    def dJ_by_dsurfacecoefficients(self):
+        spec, dofs = self._surface_spec_and_dofs()
+        return _host_array(
+            _surface_dprincipal_curvature_jax_from_dofs(
+                spec,
+                dofs,
+                **self._objective_kwargs(),
+            )
+        )
+
+
+class QfmResidualJAX(Optimizable):
+    """JAX-backed wrapper for fixed-surface QFM residuals."""
+
+    def __init__(self, surface, biotsavart):
+        self.surface = surface
+        self.biotsavart = biotsavart
+        self.biotsavart.append_parent(self.surface)
+        super().__init__(depends_on=[surface, biotsavart])
+
+    def recompute_bell(self, parent=None):
+        self.invalidate_cache()
+
+    def invalidate_cache(self):
+        gamma = self.surface.gamma()
+        self.biotsavart.set_points(gamma.reshape((-1, 3)))
+
+    def _surface_spec_dofs_and_coil_spec(self):
+        _current_coil_dofs, coil_set_spec = _current_coil_dofs_and_spec(self.biotsavart)
+        return (
+            self.surface.surface_spec(),
+            _as_jax_float64(self.surface.get_dofs()),
+            coil_set_spec,
+        )
+
+    def J(self):
+        spec, dofs, coil_set_spec = self._surface_spec_dofs_and_coil_spec()
+        return _host_scalar(
+            surface_qfm_residual_jax_from_dofs(
+                spec,
+                dofs,
+                coil_set_spec,
+            )
+        )
+
+    def dJ_by_dsurfacecoefficients(self):
+        spec, dofs, coil_set_spec = self._surface_spec_dofs_and_coil_spec()
+        return _host_array(
+            _surface_dqfm_residual_jax_from_dofs(spec, dofs, coil_set_spec)
+        )
 
 
 def _explicit_index_array(indices):
@@ -1854,6 +2364,67 @@ class IotasJAX(_BoozerObjectiveBase):
 
     def _compute_value_from_solved_state(self, solved_state):
         return solved_state.iota
+
+    def _value_and_dJ_by_dcoil_dofs_from_solved_state(self, solved_state):
+        current_coil_dofs = _current_coil_dofs(self.biotsavart)
+        return self._value_and_dJ_by_dcoil_dofs(
+            solved_state,
+            current_coil_dofs,
+        )
+
+
+class MajorRadiusJAX(_BoozerObjectiveBase):
+    """JAX equivalent of ``MajorRadius`` for solved Boozer surfaces."""
+
+    def __init__(self, boozer_surface):
+        self._init_boozer_objective(
+            boozer_surface,
+            boozer_surface.biotsavart,
+            x0=np.asarray([]),
+        )
+
+    def _surface_spec(self):
+        return self.surface.surface_spec()
+
+    def _compute_value(self, sdofs):
+        return _host_scalar(
+            surface_major_radius_jax_from_dofs(self._surface_spec(), sdofs)
+        )
+
+    def _compute_dJ_ds(self, sdofs, decision_size, dtype):
+        dJ_ds_surface = _surface_dmajor_radius_jax_from_dofs(
+            self._surface_spec(),
+            sdofs,
+        )
+        return jnp.concatenate(
+            (
+                dJ_ds_surface,
+                _zeros(
+                    decision_size - dJ_ds_surface.size,
+                    dtype=dtype,
+                ),
+            )
+        )
+
+    def _value_and_dJ_by_dcoil_dofs(self, solved_state, current_coil_dofs):
+        value = self._compute_value(solved_state.sdofs)
+        adjoint_state = _resolved_boozer_adjoint_runtime_state(self.boozer_surface)
+        dJ_ds = self._compute_dJ_ds(
+            solved_state.sdofs,
+            _adjoint_state_decision_size(adjoint_state),
+            _adjoint_state_dtype(adjoint_state),
+        )
+        adjoint = _solve_boozer_adjoint(adjoint_state, dJ_ds)
+        adjoint_gradient = _adjoint_coil_dofs_gradient(
+            adjoint_state.stream_group_vjps,
+            adjoint,
+            self.biotsavart,
+            current_coil_dofs,
+        )
+        return value, -adjoint_gradient
+
+    def _compute_value_from_solved_state(self, solved_state):
+        return self._compute_value(solved_state.sdofs)
 
     def _value_and_dJ_by_dcoil_dofs_from_solved_state(self, solved_state):
         current_coil_dofs = _current_coil_dofs(self.biotsavart)

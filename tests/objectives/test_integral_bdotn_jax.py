@@ -328,6 +328,63 @@ class TestIntegralBdotNCppParity:
 
         np.testing.assert_allclose(J_jax, J_cpp, rtol=1e-13)
 
+    @pytest.mark.parametrize(
+        ("definition", "B", "target", "normal", "expected"),
+        [
+            (
+                "quadratic flux",
+                np.zeros((2, 3, 3), dtype=np.float64),
+                np.ones((2, 3), dtype=np.float64),
+                np.zeros((2, 3, 3), dtype=np.float64),
+                0.0,
+            ),
+            (
+                "normalized",
+                np.zeros((2, 3, 3), dtype=np.float64),
+                np.zeros((2, 3), dtype=np.float64),
+                np.ones((2, 3, 3), dtype=np.float64),
+                np.inf,
+            ),
+            (
+                "local",
+                np.zeros((2, 3, 3), dtype=np.float64),
+                np.ones((2, 3), dtype=np.float64),
+                np.ones((2, 3, 3), dtype=np.float64),
+                np.inf,
+            ),
+            (
+                "local",
+                np.zeros((2, 3, 3), dtype=np.float64),
+                np.ones((2, 3), dtype=np.float64),
+                np.zeros((2, 3, 3), dtype=np.float64),
+                0.0,
+            ),
+        ],
+    )
+    def test_cpp_boundary_contract_matches_jax(self, definition, B, target, normal, expected):
+        import simsoptpp as sopp
+
+        B = np.ascontiguousarray(B)
+        target = np.ascontiguousarray(target)
+        normal = np.ascontiguousarray(normal)
+
+        J_cpp = sopp.integral_BdotN(B, target, normal, definition)
+        J_jax = host_scalar(
+            integral_BdotN(
+                jnp.asarray(B),
+                jnp.asarray(target),
+                jnp.asarray(normal),
+                definition,
+            )
+        )
+
+        if np.isinf(expected):
+            assert np.isinf(J_cpp)
+            assert np.isinf(J_jax)
+        else:
+            np.testing.assert_allclose(J_cpp, expected, atol=0.0)
+            np.testing.assert_allclose(J_jax, expected, atol=0.0)
+
 
 class TestIntegralBdotNBoundaryContracts:
     """Boundary behavior that is defined by the JAX implementation."""

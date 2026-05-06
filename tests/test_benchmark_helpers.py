@@ -72,7 +72,10 @@ from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_PLASMA_SURF_FILENAME,
     default_optimizer_backend_for_backend,
 )
-from benchmarks.single_stage_smoke_defaults import DEFAULT_STAGE2_RESULTS_PATH
+from benchmarks.single_stage_smoke_defaults import (
+    DEFAULT_STAGE2_RESULTS_PATH,
+    DEFAULT_STAGE2_SEED_DIR,
+)
 from benchmarks.single_stage_init_parity import (
     DEFAULT_OUTER_MAXITER,
     DEFAULT_STAGE2_BS_PATH,
@@ -511,8 +514,103 @@ def test_jax_ci_contract_payload_tracks_ratchet_and_pass_state(monkeypatch):
 
 
 def test_single_stage_init_fixture_files_are_vendored():
+    assert DEFAULT_STAGE2_BS_PATH.parent == DEFAULT_STAGE2_SEED_DIR
     assert DEFAULT_STAGE2_BS_PATH.is_file()
     assert DEFAULT_STAGE2_BS_PATH.with_name("results.json").is_file()
+    assert DEFAULT_STAGE2_BS_PATH.with_name("single_stage_jax_runtime_spec.json").is_file()
+
+
+def test_single_stage_init_fixture_runtime_seed_spec_loads():
+    from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
+        load_single_stage_jax_runtime_seed_spec,
+    )
+
+    state = load_single_stage_jax_runtime_seed_spec(
+        DEFAULT_STAGE2_BS_PATH.parent,
+        mpol=10,
+        ntor=10,
+        nphi=255,
+        ntheta=64,
+    )
+
+    assert state["path"] == str(
+        DEFAULT_STAGE2_BS_PATH.with_name("single_stage_jax_runtime_spec.json").resolve()
+    )
+    assert state["surface_spec"].mpol == 10
+    assert state["surface_spec"].ntor == 10
+
+
+def test_single_stage_init_fixture_tensor_spec_matches_cpu_geometry_on_banana_grid():
+    pytest.importorskip("simsoptpp")
+    from examples.single_stage_optimization.SINGLE_STAGE.single_stage_banana_example import (
+        load_single_stage_jax_runtime_seed_spec,
+    )
+    from simsopt.geo import SurfaceXYZTensorFourier
+    from simsopt.jax_core import (
+        surface_xyz_tensor_fourier_area_from_spec,
+        surface_xyz_tensor_fourier_gamma_from_spec,
+        surface_xyz_tensor_fourier_normal_from_spec,
+        surface_xyz_tensor_fourier_volume_from_spec,
+    )
+
+    state = load_single_stage_jax_runtime_seed_spec(
+        DEFAULT_STAGE2_BS_PATH.parent,
+        mpol=10,
+        ntor=10,
+        nphi=255,
+        ntheta=64,
+    )
+    spec = state["surface_spec"]
+    surface = SurfaceXYZTensorFourier(
+        mpol=spec.mpol,
+        ntor=spec.ntor,
+        nfp=spec.nfp,
+        stellsym=spec.stellsym,
+        quadpoints_phi=np.asarray(spec.quadpoints_phi),
+        quadpoints_theta=np.asarray(spec.quadpoints_theta),
+    )
+    surface.set_dofs(np.asarray(spec.dofs))
+
+    np.testing.assert_allclose(
+        np.asarray(
+            single_stage_init_parity_module.jax.jit(
+                surface_xyz_tensor_fourier_gamma_from_spec
+            )(spec)
+        ),
+        surface.gamma(),
+        rtol=SURFACE_GEOMETRY_REL_TOL,
+        atol=FIELD_ERROR_REL_TOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(
+            single_stage_init_parity_module.jax.jit(
+                surface_xyz_tensor_fourier_normal_from_spec
+            )(spec)
+        ),
+        surface.normal(),
+        rtol=SURFACE_GEOMETRY_REL_TOL,
+        atol=FIELD_ERROR_REL_TOL,
+    )
+    np.testing.assert_allclose(
+        float(
+            single_stage_init_parity_module.jax.jit(
+                surface_xyz_tensor_fourier_area_from_spec
+            )(spec)
+        ),
+        surface.area(),
+        rtol=SURFACE_GEOMETRY_REL_TOL,
+        atol=FIELD_ERROR_REL_TOL,
+    )
+    np.testing.assert_allclose(
+        float(
+            single_stage_init_parity_module.jax.jit(
+                surface_xyz_tensor_fourier_volume_from_spec
+            )(spec)
+        ),
+        surface.volume(),
+        rtol=VOLUME_REL_TOL,
+        atol=FIELD_ERROR_REL_TOL,
+    )
 
 
 def test_single_stage_init_fixture_results_include_required_seed_metadata():

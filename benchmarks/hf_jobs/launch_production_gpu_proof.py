@@ -335,6 +335,13 @@ def _remote_single_stage_seed_contract_paths(
     return paths
 
 
+def _remote_proof_seed_contract_paths(args: argparse.Namespace) -> list[tuple[str, str]]:
+    return [
+        ("--stage2-bs-path", DEFAULT_STAGE2_SEED_REL),
+        *_remote_single_stage_seed_contract_paths(args),
+    ]
+
+
 def _remote_object_type(temp_dir: str, resolved_sha: str, relative_path: str) -> str:
     object_type = subprocess.run(
         [
@@ -354,6 +361,24 @@ def _remote_object_type(temp_dir: str, resolved_sha: str, relative_path: str) ->
             f"path is not present at repo SHA {resolved_sha}: {relative_path}"
         )
     return object_type.stdout.strip()
+
+
+def _verify_remote_blob_path(
+    temp_dir: str,
+    resolved_sha: str,
+    *,
+    option_name: str,
+    relative_path: str,
+) -> None:
+    try:
+        object_type = _remote_object_type(temp_dir, resolved_sha, relative_path)
+    except SystemExit as exc:
+        raise SystemExit(f"{option_name}: {exc}") from exc
+    if object_type != "blob":
+        raise SystemExit(
+            f"{option_name} must point to a file at repo SHA {resolved_sha}: "
+            f"{relative_path}"
+        )
 
 
 def _verify_remote_runtime_seed_spec_path(
@@ -506,7 +531,7 @@ def _verify_remote_sha_ref_contract(args: argparse.Namespace) -> tuple[str, str]
                 f"repo SHA {resolved_sha} is not reachable from repo ref {args.repo_ref} "
                 f"on {args.repo_url}; HF clone --single-branch would fail."
             )
-        for option_name, relative_path in _remote_single_stage_seed_contract_paths(args):
+        for option_name, relative_path in _remote_proof_seed_contract_paths(args):
             if option_name == "--single-stage-jax-runtime-seed-spec":
                 _verify_remote_runtime_seed_spec_path(
                     temp_dir,
@@ -514,7 +539,12 @@ def _verify_remote_sha_ref_contract(args: argparse.Namespace) -> tuple[str, str]
                     relative_path,
                 )
             else:
-                _remote_object_type(temp_dir, resolved_sha, relative_path)
+                _verify_remote_blob_path(
+                    temp_dir,
+                    resolved_sha,
+                    option_name=option_name,
+                    relative_path=relative_path,
+                )
     return resolved_sha, resolved_ref_commit
 
 
@@ -694,7 +724,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--platform",
-        choices=("cpu", "cuda"),
+        choices=("cuda",),
         default="cuda",
         help="JAX platform to request inside the proof jobs.",
     )

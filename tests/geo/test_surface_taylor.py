@@ -693,7 +693,18 @@ class SurfaceTaylorTests(unittest.TestCase):
                     self.subtest_surface_thetaphi_derivative(surfacetype, stellsym)
 
     def subtest_surface_conversion(self, surfacetype, stellsym):
-        s = get_surface(surfacetype, stellsym)
+        surface_cls = {
+            "SurfaceXYZFourier": SurfaceXYZFourier,
+            "SurfaceXYZTensorFourier": SurfaceXYZTensorFourier,
+        }[surfacetype]
+        s = surface_cls(
+            nfp=1,
+            stellsym=stellsym,
+            mpol=1,
+            ntor=0,
+            quadpoints_phi=np.linspace(0, 1, 31, endpoint=False),
+            quadpoints_theta=np.linspace(0, 1, 31, endpoint=False),
+        )
         newsurf = s.to_RZFourier()
         assert np.mean((s.gamma() - newsurf.gamma())**2) < 1e-5
 
@@ -701,10 +712,10 @@ class SurfaceTaylorTests(unittest.TestCase):
         """
         Test to verify that the toRZFourier surface conversion
         """
-        for surfacetype in ["SurfaceXYZFourier"]:
+        for surfacetype in ["SurfaceXYZFourier", "SurfaceXYZTensorFourier"]:
             for stellsym in [True, False]:
                 with self.subTest(surfacetype=surfacetype, stellsym=stellsym):
-                    self.subtest_surface_theta_derivative(surfacetype, stellsym)
+                    self.subtest_surface_conversion(surfacetype, stellsym)
 
 
 if __name__ == "__main__":

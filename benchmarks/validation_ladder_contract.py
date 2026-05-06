@@ -65,6 +65,8 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         "vector_parity_required": True,
     },
     "derivative_heavy": {
+        "scalar_value_rtol": 1e-10,
+        "scalar_value_atol": 1e-12,
         "first_derivative_rtol": 1e-8,
         "first_derivative_atol": 1e-10,
         "second_derivative_rtol": 1e-6,
@@ -72,6 +74,14 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         "requires_same_input": True,
         "requires_direct_cpp_oracle": True,
         "fd_validation_secondary": True,
+    },
+    "reporting_contract": {
+        "scalar_value_rtol": 1e-10,
+        "scalar_value_atol": 1e-12,
+        "distance_rtol": 1e-10,
+        "distance_atol": 1e-12,
+        "requires_same_state": True,
+        "host_materialization_allowed": True,
     },
     "direct_hessian_oracle": {
         "second_derivative_rtol": 1e-8,

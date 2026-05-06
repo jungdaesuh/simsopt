@@ -236,6 +236,15 @@ _TARGET_OBJECTIVE_GRAD_ATOL = 5e-12
 _TARGET_OBJECTIVE_COMPOSITE_GRAD_ATOL = 1.5e-11
 _TARGET_OBJECTIVE_FD_EPS = 1e-6
 _TARGET_OBJECTIVE_FD_ATOL = 2e-5
+_REPORTING_CONTRACT_TOLERANCES = parity_ladder_tolerances("reporting_contract")
+_REPORTING_CONTRACT_VALUE_RTOL = _REPORTING_CONTRACT_TOLERANCES[
+    "scalar_value_rtol"
+]
+_REPORTING_CONTRACT_VALUE_ATOL = _REPORTING_CONTRACT_TOLERANCES[
+    "scalar_value_atol"
+]
+_REPORTING_CONTRACT_DISTANCE_RTOL = _REPORTING_CONTRACT_TOLERANCES["distance_rtol"]
+_REPORTING_CONTRACT_DISTANCE_ATOL = _REPORTING_CONTRACT_TOLERANCES["distance_atol"]
 _BACKEND_RUNTIME_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",
     "SIMSOPT_BACKEND_STRICT",
@@ -640,6 +649,10 @@ def _build_stage2_target_objective_contract_case(
                 "banana_coils": banana_coils,
                 "banana_curve": banana_curve,
                 "banana_current": banana_current,
+                "jf": jf,
+                "jls": jls,
+                "jccdist": jccdist,
+                "jc": jc,
             },
         )
     return objective, target_bundle
@@ -4688,6 +4701,147 @@ class TestStage2OptimizerContract:
             np.asarray(surface_rz_fourier_dofs_from_spec(final_specs.surface_spec)),
             np.asarray(context["eval_surf"].get_dofs()),
         )
+
+    def test_target_reporting_summary_matches_stage2_composite_contract(self):
+        stage2_script = _load_stage2_script_module()
+        objective, target_bundle, context = (
+            _build_stage2_target_objective_contract_case(return_context=True)
+        )
+        dofs = np.asarray(objective.x, dtype=np.float64)
+        summary = target_bundle.reporting_summary(dofs)
+        all_coils = context["tf_coils"] + context["banana_coils"]
+        bs_jax = BiotSavartJAX(all_coils)
+        field_error_ref = stage2_script.compute_mean_abs_relbn(
+            context["eval_surf"],
+            bs_jax,
+        )
+
+        np.testing.assert_allclose(
+            float(summary.J),
+            float(objective.J()),
+            rtol=_REPORTING_CONTRACT_VALUE_RTOL,
+            atol=_REPORTING_CONTRACT_VALUE_ATOL,
+        )
+        np.testing.assert_allclose(
+            float(summary.Jf),
+            float(context["jf"].J()),
+            rtol=_REPORTING_CONTRACT_VALUE_RTOL,
+            atol=_REPORTING_CONTRACT_VALUE_ATOL,
+        )
+        np.testing.assert_allclose(
+            float(summary.mean_abs_relBfinal_norm),
+            field_error_ref,
+            rtol=_REPORTING_CONTRACT_VALUE_RTOL,
+            atol=_REPORTING_CONTRACT_VALUE_ATOL,
+        )
+        np.testing.assert_allclose(
+            float(summary.curve_length),
+            float(context["jls"].J()),
+            rtol=_REPORTING_CONTRACT_VALUE_RTOL,
+            atol=_REPORTING_CONTRACT_VALUE_ATOL,
+        )
+        np.testing.assert_allclose(
+            float(summary.coil_coil_distance),
+            float(context["jccdist"].shortest_distance()),
+            rtol=_REPORTING_CONTRACT_DISTANCE_RTOL,
+            atol=_REPORTING_CONTRACT_DISTANCE_ATOL,
+        )
+        np.testing.assert_allclose(
+            float(summary.curvature),
+            stage2_script.compute_stage2_max_curvature_value(context["jc"]),
+            rtol=_REPORTING_CONTRACT_VALUE_RTOL,
+            atol=_REPORTING_CONTRACT_VALUE_ATOL,
+        )
+        assert bool(summary.distance_constraint_violated) is (
+            float(summary.coil_coil_distance) <= 0.05
+            or not np.isfinite(float(summary.raw_terms[2]))
+        )
+
+    def test_capture_stage2_trajectory_snapshot_uses_target_reporting_without_legacy_graph(
+        self,
+    ):
+        stage2_script = _load_stage2_script_module()
+        objective, target_bundle = _build_stage2_target_objective_contract_case()
+        dofs = np.asarray(objective.x, dtype=np.float64)
+
+        class _RejectLegacyObjective:
+            threshold = 40.0
+
+            def J(self):
+                raise AssertionError("legacy objective J should not be called")
+
+            def dJ(self, *_args, **_kwargs):
+                raise AssertionError("legacy objective dJ should not be called")
+
+            def shortest_distance(self):
+                raise AssertionError("legacy distance culler should not be called")
+
+        trajectory = []
+        snapshot = stage2_script.capture_stage2_trajectory_snapshot(
+            trajectory,
+            types.SimpleNamespace(x=dofs),
+            object(),
+            object(),
+            _RejectLegacyObjective(),
+            _RejectLegacyObjective(),
+            _RejectLegacyObjective(),
+            _RejectLegacyObjective(),
+            1.0,
+            0.0005,
+            1.75,
+            100.0,
+            0.05,
+            0.0001,
+            target_objective_bundle=target_bundle,
+            dofs=dofs,
+        )
+
+        assert len(trajectory) == 1
+        assert trajectory[0]["J"] == pytest.approx(snapshot["J"])
+        assert np.isfinite(snapshot["J"])
+        assert np.isfinite(snapshot["coil_coil_distance"])
+
+    def test_target_feasible_partial_candidate_skips_cpp_distance_culler(
+        self,
+        monkeypatch,
+    ):
+        stage2_script = _load_stage2_script_module()
+        objective, target_bundle = _build_stage2_target_objective_contract_case()
+        dofs = np.asarray(objective.x, dtype=np.float64)
+        captured_hardware_args = {}
+
+        def fake_hardware_status(*args, **kwargs):
+            captured_hardware_args["args"] = args
+            captured_hardware_args["kwargs"] = kwargs
+            return {"success": True, "violations": [], "self_intersecting": False}
+
+        monkeypatch.setattr(
+            stage2_script,
+            "evaluate_stage2_hardware_constraints",
+            fake_hardware_status,
+        )
+
+        candidate, hardware_status = (
+            stage2_script.capture_stage2_target_feasible_partial_candidate(
+                target_bundle,
+                dofs,
+                length_target=100.0,
+                cc_threshold=0.0,
+                curvature_threshold=1.0e9,
+                coil_surface_threshold=None,
+                plasma_vessel_min_dist=None,
+                plasma_vessel_threshold=None,
+                banana_current_max_A=1.0e9,
+                tf_current_A=80000.0,
+                accepted_index=3,
+            )
+        )
+
+        assert hardware_status["success"] is True
+        assert candidate is not None
+        np.testing.assert_allclose(candidate.dofs, dofs)
+        assert candidate.accepted_index == 3
+        assert np.isfinite(captured_hardware_args["kwargs"]["banana_current_A"])
 
     def test_target_scalar_objective_build_materializes_immutable_state_via_explicit_host_boundary(
         self,

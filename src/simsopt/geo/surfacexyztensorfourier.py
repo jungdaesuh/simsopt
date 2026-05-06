@@ -3,8 +3,51 @@ import numpy as np
 import simsoptpp as sopp
 from .surface import Surface
 from .surfacerzfourier import SurfaceRZFourier
+from .surfacexyzfourier import _surface_copy_quadpoints_kwargs
 
 __all__ = ['SurfaceXYZTensorFourier']
+
+
+def _tensor_basis_labels(order):
+    return (
+        [("constant", 0)]
+        + [("cos", mode) for mode in range(1, order + 1)]
+        + [("sin", mode) for mode in range(1, order + 1)]
+    )
+
+
+def _copy_xyz_tensor_fourier_coefficients(source, target):
+    source_theta_by_label = {
+        label: index for index, label in enumerate(_tensor_basis_labels(source.mpol))
+    }
+    source_phi_by_label = {
+        label: index for index, label in enumerate(_tensor_basis_labels(source.ntor))
+    }
+    target_theta_labels = _tensor_basis_labels(target.mpol)
+    target_phi_labels = _tensor_basis_labels(target.ntor)
+
+    for coordinate, coefficient_name in (
+        ("x", "xcs"),
+        ("y", "ycs"),
+        ("z", "zcs"),
+    ):
+        source_coefficients = getattr(source, coefficient_name)
+        target_coefficients = getattr(target, coefficient_name)
+        for target_i, theta_label in enumerate(target_theta_labels):
+            source_i = source_theta_by_label.get(theta_label)
+            if source_i is None:
+                continue
+            for target_j, phi_label in enumerate(target_phi_labels):
+                source_j = source_phi_by_label.get(phi_label)
+                if source_j is None:
+                    continue
+                if target.skip(coordinate, target_i, target_j):
+                    continue
+                if source.skip(coordinate, source_i, source_j):
+                    continue
+                target_coefficients[target_i, target_j] = (
+                    source_coefficients[source_i, source_j]
+                )
 
 
 class SurfaceXYZTensorFourier(sopp.SurfaceXYZTensorFourier, Surface):
@@ -164,6 +207,39 @@ class SurfaceXYZTensorFourier(sopp.SurfaceXYZTensorFourier, Surface):
 
     def recompute_bell(self, parent=None):
         self.invalidate_cache()
+
+    def copy(self, **kwargs):
+        """
+        Return a copy of the ``SurfaceXYZTensorFourier`` object, but with the
+        specified attributes changed.
+        """
+        mpol = kwargs.pop("mpol", self.mpol)
+        ntor = kwargs.pop("ntor", self.ntor)
+        nfp = kwargs.pop("nfp", self.nfp)
+        stellsym = kwargs.pop("stellsym", self.stellsym)
+        clamped_dims = kwargs.pop("clamped_dims", list(self.clamped_dims))
+        kwargs = _surface_copy_quadpoints_kwargs(self, kwargs)
+
+        surf = SurfaceXYZTensorFourier(
+            mpol=mpol,
+            ntor=ntor,
+            nfp=nfp,
+            stellsym=stellsym,
+            clamped_dims=clamped_dims,
+            **kwargs,
+        )
+        surf.x[:] = 0
+        _copy_xyz_tensor_fourier_coefficients(self, surf)
+        surf.local_full_x = surf.get_dofs()
+        return surf
+
+    def __copy__(self):
+        return self.copy()
+
+    def __deepcopy__(self, memo):
+        copied = self.copy()
+        memo[id(self)] = copied
+        return copied
 
     def to_RZFourier(self):
         """

@@ -17,6 +17,9 @@ tracked in
 [`banana_required_vs_full_upstream_surface_parity_impl_plan_2026-05-06.md`](banana_required_vs_full_upstream_surface_parity_impl_plan_2026-05-06.md).
 Use that Set A / Set B split when deciding whether a partial surface-family row
 is a banana blocker or a full-upstream parity backlog item.
+Local non-CUDA surface/objective implementation evidence from 2026-05-06 is
+summarized in the linked plan and in the documentary section below. That
+evidence closes CPU/JAX rows only; it does not close any CUDA status.
 
 Exact parity means the mirrored JAX test runs with:
 
@@ -45,10 +48,21 @@ watermark.
 | `tests/objectives/test_fluxobjective.py` | `tests/objectives/test_fluxobjective_jax_parity.py` | contract-complete | Dedicated mirrored wrapper coverage for definitions, derivatives, target handling, degenerate normals, singular zero-field behavior, native-contract rejection, non-RZ surface cases, and mutation/layout guards. Value/gradient parity is exact where the upstream wrapper contract is defined. The bounded CPU-`nan` reproducer search found no finite-input reproducer against the repo-local simsoptpp build, and direct C++/JAX boundary tests now pin the documented degenerate contracts (`0.0` for zero-normal quadratic flux, `inf` for normalized/local zero-field singularities). |
 | `tests/objectives/test_fluxobjective.py` | `tests/integration/test_stage2_jax.py` | partial | Integration coverage for mixed quadrature and native-spec rejection behavior complements the dedicated object-level parity file. This row intentionally remains partial after the flux/kernel reconciliation because it tracks Stage 2 integration scope, not low-level `integral_BdotN` boundary behavior. The target bundle now has fixed-state reporting parity, target-lane snapshot/accepted-partial reporting avoids the legacy distance culler, spec restart rehydration is covered, and the reduced `SIMSOPT_TARGET_LANE_STRICT=1` CPU/JAX run passes. CUDA evidence remains open under the hardware gate. |
 | `tests/objectives/test_integral_bdotn_jax.py` | `tests/objectives/test_integral_bdotn_jax.py` | contract-complete | Exact on regular inputs, including direct `simsoptpp.integral_BdotN` parity. Documented degenerate contracts are covered for zero-normal quadratic flux (`0.0`) and normalized/local zero-field singularities (`inf`), and direct C++/JAX boundary tests pin those cases. The bounded CPU-`nan` reproducer search found no finite-input reproducer against the repo-local simsoptpp build. |
-| `tests/geo/test_surface_rzfourier.py` | `tests/geo/test_surface_rzfourier_jax.py` | partial | Strict tolerance-based CPU/JAX parity for the RZ geometry/object API surface (`surface_spec`/`to_spec`, `*_jax`, DOF round-trips, gradients, loaders, and `copy`). Non-RZ `SurfaceXYZFourier` / `SurfaceXYZTensorFourier` geometry/spec parity exists separately, but broad XYZ object/I/O utility mirroring remains outside the banana contract unless the scope expands to full legacy surface parity. |
+| `tests/geo/test_surface_rzfourier.py` | `tests/geo/test_surface_rzfourier_jax.py` | partial | Strict tolerance-based CPU/JAX parity for the RZ geometry/object API surface (`surface_spec`/`to_spec`, `*_jax`, DOF round-trips, gradients, loaders, and `copy`). Non-RZ geometry/object API and added surface-objective wrappers now have local non-CUDA evidence in the section below. Conditional VTK, label, and higher paired-point rows remain outside the banana contract unless the scope expands to claim them. |
 | `tests/geo/test_surface_objectives.py::ToroidalFlux*` | `tests/geo/test_surface_objectives_jax.py` | complete | Upstream `ToroidalFlux` value, first-derivative, Hessian, coil-derivative, constant-in-index, and Taylor checks are mirrored across the surface-type and `stellsym` sweep with tolerance-based CPU/JAX parity. Scalar value tolerances are owned by the `derivative_heavy` ladder lane; this is tolerance-based parity, not exact arithmetic parity. |
 | `tests/geo/test_boozersurface.py` | `tests/geo/test_boozersurface_jax.py` | cpu-contract-complete | Boozer CPU parity closure is complete for math kernels, solver results, guard behavior, derivatives/adjoints, and supported public APIs. Parity remains contract-based: solved-state quality and public result semantics are the oracle, not mutable object identity or iterate-by-iterate solver trajectory. |
 | `tests/integration/test_single_stage_example.py` and single-stage Boozer integration slices | `tests/integration/test_single_stage_jax_cpu_reference.py` | cpu-contract-complete | Dedicated CPU/JAX Boozer integration tests compare convergence success, residual norms, final solver objective, and final physics quantities (`iota`, `G`, label value/error, anchored axis-z). CUDA Boozer parity is not claimed by this CPU closure and still requires the optional hardware validation gate in the Boozer plan. |
+
+## Surface And Objective Non-CUDA Evidence
+
+This section is documentary. The machine-checked banana product inventory is the
+next section.
+
+| Scope | Evidence | CPU/JAX status | CUDA status | Remaining carve-out |
+| --- | --- | --- | --- | --- |
+| RZ and non-RZ surface geometry, derivatives, scalar metrics, forms, curvatures, and explicit heavy Hessian APIs | `tests/geo/test_surface_rzfourier_jax.py`<br>`tests/geo/test_surface_fourier_jax.py`<br>`tests/geo/test_surface_taylor.py` | local non-CUDA covered for implemented Set B rows | not claimed | Conditional VTK/file-output rows and higher paired-point APIs remain unclaimed unless full legacy I/O scope explicitly requires them. |
+| Non-RZ object API breadth for `SurfaceXYZFourier` and `SurfaceXYZTensorFourier` | `tests/geo/test_surface_fourier_jax.py`<br>`tests/geo/test_surface_xyzfourier.py` | local non-CUDA covered for copy, JSON/GSON, conversion, fitting, scaling, and normal-extension paths | not claimed | VTK smoke coverage remains conditional on an I/O parity claim. |
+| Added surface objective wrappers and helper APIs | `tests/geo/test_surface_objectives_jax.py`<br>`tests/geo/test_surface_objectives.py` | local non-CUDA covered for `AspectRatioJAX`, `MajorRadiusJAX`, `QfmResidualJAX`, and `PrincipalCurvatureJAX` | not claimed | `aspect_ratio` Boozer label support remains conditional on full label-test parity scope. |
 
 ## Banana Coverage Inventory
 
@@ -56,16 +70,16 @@ This table is the machine-checked banana parity inventory. Keep unsupported
 families as explicit carve-outs rather than folding them into a complete row.
 For the banana optimization product surface, all required non-CUDA C++ /
 `simsoptpp` lanes in this table are covered by the listed CPU/JAX parity
-contracts. Remaining non-P5 `partial` status is limited to Python surface
-object/API breadth that is outside banana scope, not to an uncovered required
-C++ lane.
+contracts. Any remaining non-P5 `partial` status is limited to Python surface
+object/API breadth outside banana scope, not to an uncovered required C++ lane.
 
 | Coverage row | Upstream Python test file | Upstream C++ implementation file | JAX implementation file | JAX parity test file | Tolerance lane | CPU/JAX status | CUDA status | Known carve-out |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Biot-Savart field kernels | `tests/field/test_biotsavart.py` | `src/simsoptpp/biot_savart_impl.h` | `src/simsopt/jax_core/biotsavart.py` | `tests/field/test_biotsavart_jax_parity.py` | `direct_kernel` | exact | open under P5 | none |
 | Flux objective and integral_BdotN | `tests/objectives/test_fluxobjective.py` | `src/simsoptpp/integral_BdotN.cpp` | `src/simsopt/objectives/fluxobjective_jax.py`<br>`src/simsopt/objectives/integral_bdotn_jax.py` | `tests/objectives/test_fluxobjective_jax_parity.py`<br>`tests/objectives/test_integral_bdotn_jax.py` | `direct_kernel` | contract-complete | open under P5 | none |
 | Stage 2 target reporting and strict reduced run | `tests/objectives/test_fluxobjective.py` | `src/simsoptpp/integral_BdotN.cpp`<br>`src/simsoptpp/biot_savart_impl.h` | `src/simsopt/objectives/stage2_target_objective_jax.py`<br>`examples/single_stage_optimization/STAGE_2/banana_coil_solver.py` | `tests/integration/test_stage2_jax.py`<br>`tests/integration/test_stage2_target_lane_purity.py` | `reporting_contract` | reduced-strict-complete | open under P5 | none |
-| Surface RZ Fourier banana geometry | `tests/geo/test_surface_rzfourier.py` | N/A: not a required banana C++ oracle lane | `src/simsopt/jax_core/surface_rzfourier.py` | `tests/geo/test_surface_rzfourier_jax.py` | `direct_kernel` | partial | open under P5 | Broad non-RZ surface object/I/O utility mirroring remains outside banana scope. |
+| Surface RZ Fourier banana geometry | `tests/geo/test_surface_rzfourier.py` | N/A: not a required banana C++ oracle lane | `src/simsopt/jax_core/surface_rzfourier.py` | `tests/geo/test_surface_rzfourier_jax.py` | `direct_kernel` | contract-complete | open under P5 | none |
+| SurfaceXYZTensorFourier single-stage seed geometry | `tests/geo/test_surface_xyzfourier.py` | `src/simsoptpp/surfacexyztensorfourier.h` | `src/simsopt/jax_core/surface_fourier.py`<br>`src/simsopt/geo/surface_fourier_jax.py` | `tests/geo/test_surface_fourier_jax.py`<br>`tests/test_benchmark_helpers.py` | `direct_kernel` | contract-complete | not claimed | none |
 | ToroidalFlux surface objective | `tests/geo/test_surface_objectives.py` | N/A: Python surface objective contract, not a required banana C++ oracle lane | `src/simsopt/geo/surfaceobjectives_jax.py` | `tests/geo/test_surface_objectives_jax.py` | `derivative_heavy` | complete | not claimed | none |
 | Boozer CPU contract for banana integration | `tests/geo/test_boozersurface.py` | `src/simsoptpp/boozerresidual_impl.h` | `src/simsopt/geo/boozersurface_jax.py` | `tests/geo/test_boozersurface_jax.py` | `exact_well_conditioned_adjoint` | cpu-contract-complete | open under P5 | none |
 

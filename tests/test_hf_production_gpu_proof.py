@@ -86,6 +86,10 @@ def _build_fake_proof_repo(
         FAKE_PROOF_SCRIPT,
         benchmarks_dir / "single_stage_init_parity.py",
     )
+    _copy_executable(
+        FAKE_PROOF_SCRIPT,
+        hf_jobs_dir / "cuda_pytest_probe.py",
+    )
     return repo_root, call_log
 
 
@@ -269,7 +273,26 @@ def test_run_production_gpu_proof_omits_boozer_override_by_default(tmp_path):
     assert "--boozer-optimizer-backend" not in single_stage_calls[0]["argv"]
 
 
-def test_run_production_gpu_proof_rejects_fake_runner_without_test_mode(tmp_path):
+def test_run_production_gpu_proof_rejects_cpu_runtime_without_fake_gpu(tmp_path):
+    repo_root, _ = _build_fake_proof_repo(tmp_path)
+    results_dir = tmp_path / "results"
+    stage2_seed = _write_stage2_seed(tmp_path)
+    env = _fake_runner_env()
+    env.pop("SIMSOPT_FAKE_GPU", None)
+
+    completed = _run_production_gpu_proof(
+        repo_root,
+        results_dir,
+        stage2_seed,
+        _single_stage_seed_args(tmp_path),
+        env=env,
+    )
+
+    assert completed.returncode == 1
+    assert "CUDA canary ptx expected GPU backend" in completed.stderr
+
+
+def test_run_production_gpu_proof_rejects_non_cuda_platform_without_fake_gpu(tmp_path):
     repo_root, _ = _build_fake_proof_repo(tmp_path)
     results_dir = tmp_path / "results"
     stage2_seed = _write_stage2_seed(tmp_path)
@@ -282,16 +305,19 @@ def test_run_production_gpu_proof_rejects_fake_runner_without_test_mode(tmp_path
         stage2_seed,
         [
             "--stage2-platform",
-            "auto",
+            "cpu",
             "--single-stage-platform",
-            "auto",
+            "cuda",
             *_single_stage_seed_args(tmp_path),
         ],
         env=env,
     )
 
     assert completed.returncode == 1
-    assert "fake proof runner payload requires SIMSOPT_FAKE_GPU=1" in completed.stdout
+    assert (
+        "Production GPU proof requires --stage2-platform cuda and "
+        "--single-stage-platform cuda"
+    ) in completed.stderr
 
 
 def test_run_production_gpu_proof_preserves_explicit_proof_parity_schema(tmp_path):
@@ -319,6 +345,18 @@ def test_run_production_gpu_proof_preserves_explicit_proof_parity_schema(tmp_pat
         "value_lane",
         "gradient_lane",
     } <= set(proof_parity)
+    boozer_parity = json.loads(
+        (results_dir / "boozer_well_conditioned_adjoint.json").read_text(
+            encoding="utf-8"
+        )
+    )["proof_parity"]
+    reduction_parity = json.loads(
+        (results_dir / "reduction_cancellation_stress.json").read_text(
+            encoding="utf-8"
+        )
+    )["proof_parity"]
+    assert boozer_parity["lane"] == "exact_well_conditioned_adjoint"
+    assert reduction_parity["lane"] == "reduction_cpu_gpu"
 
 
 def test_run_production_gpu_proof_rejects_proof_rtol_above_ladder(tmp_path):
@@ -615,6 +653,8 @@ def _build_remote_validation_repo(tmp_path: Path) -> tuple[str, str, str]:
 def _build_remote_validation_repo_with_seed(
     tmp_path: Path,
     *,
+    include_stage2_seed: bool = True,
+    include_runtime_seed_spec: bool = False,
     runtime_spec_tree: bool = False,
 ) -> tuple[str, str, str]:
     remote_repo = tmp_path / "remote.git"
@@ -638,7 +678,13 @@ def _build_remote_validation_repo_with_seed(
     (work_repo / "proof.txt").write_text("main\n", encoding="utf-8")
     (single_stage_seed / "surf_opt.json").write_text("{}", encoding="utf-8")
     (single_stage_seed / "results.json").write_text("{}", encoding="utf-8")
-    (single_stage_seed / "biot_savart_opt.json").write_text("{}", encoding="utf-8")
+    if include_stage2_seed:
+        (single_stage_seed / "biot_savart_opt.json").write_text("{}", encoding="utf-8")
+    if include_runtime_seed_spec:
+        (single_stage_seed / "single_stage_jax_runtime_spec.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
     if runtime_spec_tree:
         runtime_spec_tree_path = single_stage_seed / "single_stage_jax_runtime_spec.json"
         runtime_spec_tree_path.mkdir()
@@ -1117,6 +1163,50 @@ def test_launch_production_gpu_proof_accepts_matching_remote_repo_ref_and_sha(tm
     assert f'"repo_sha": "{main_sha}"' in completed.stdout
 
 
+def test_launch_production_gpu_proof_accepts_repo_runtime_seed_spec(tmp_path):
+    env = _launcher_env(tmp_path)
+    repo_url, main_sha, _ = _build_remote_validation_repo_with_seed(
+        tmp_path,
+        include_runtime_seed_spec=True,
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER_SCRIPT),
+            "--dry-run",
+            "--repo-url",
+            repo_url,
+            "--repo-ref",
+            "main",
+            "--repo-sha",
+            main_sha,
+            "--hardware",
+            "a100-large",
+            "--single-stage-mpol",
+            "10",
+            "--single-stage-ntor",
+            "10",
+            "--single-stage-jax-runtime-seed-spec",
+            "benchmarks/fixtures/single_stage_seed_iota15",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    assert completed.returncode == 0
+    assert (
+        '"single_stage_jax_runtime_seed_spec": '
+        '"benchmarks/fixtures/single_stage_seed_iota15"'
+    ) in completed.stdout
+    assert (
+        "--single-stage-jax-runtime-seed-spec "
+        "/tmp/hf-production-proof/repo/benchmarks/fixtures/single_stage_seed_iota15"
+    ) in completed.stdout
+
+
 def test_launch_production_gpu_proof_rejects_host_absolute_seed_path(tmp_path):
     env = _launcher_env(tmp_path)
     repo_url, main_sha, _ = _build_remote_validation_repo(tmp_path)
@@ -1176,6 +1266,43 @@ def test_launch_production_gpu_proof_rejects_seed_path_missing_from_target_sha(
     )
 
     assert completed.returncode != 0
+    assert "path is not present at repo SHA" in completed.stderr
+
+
+def test_launch_production_gpu_proof_rejects_stage2_seed_missing_from_target_sha(
+    tmp_path,
+):
+    env = _launcher_env(tmp_path)
+    repo_url, main_sha, _ = _build_remote_validation_repo_with_seed(
+        tmp_path,
+        include_stage2_seed=False,
+        include_runtime_seed_spec=True,
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(LAUNCHER_SCRIPT),
+            "--dry-run",
+            "--repo-url",
+            repo_url,
+            "--repo-ref",
+            "main",
+            "--repo-sha",
+            main_sha,
+            "--hardware",
+            "a100-large",
+            "--single-stage-jax-runtime-seed-spec",
+            "benchmarks/fixtures/single_stage_seed_iota15",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
+
+    assert completed.returncode != 0
+    assert "--stage2-bs-path" in completed.stderr
     assert "path is not present at repo SHA" in completed.stderr
 
 

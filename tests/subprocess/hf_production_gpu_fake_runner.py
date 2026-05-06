@@ -8,9 +8,18 @@ import sys
 from typing import Sequence
 
 
+PYTEST_PROBE_LANES = {
+    "boozer_well_conditioned_adjoint": "exact_well_conditioned_adjoint",
+    "reduction_cancellation_stress": "reduction_cpu_gpu",
+}
+
+
 def _load_config(script_path: Path) -> dict[str, object]:
-    config_path = script_path.resolve().parents[1] / "fake_proof_config.json"
-    return json.loads(config_path.read_text(encoding="utf-8"))
+    for parent in script_path.resolve().parents:
+        config_path = parent / "fake_proof_config.json"
+        if config_path.is_file():
+            return json.loads(config_path.read_text(encoding="utf-8"))
+    raise SystemExit("missing fake_proof_config.json")
 
 
 def _output_json_path(argv: Sequence[str]) -> Path:
@@ -18,6 +27,13 @@ def _output_json_path(argv: Sequence[str]) -> Path:
         if token == "--output-json":
             return Path(argv[index + 1])
     raise SystemExit("missing --output-json")
+
+
+def _arg_value(argv: Sequence[str], option: str) -> str | None:
+    for index, token in enumerate(argv):
+        if token == option:
+            return argv[index + 1]
+    return None
 
 
 def _append_call_record(
@@ -50,13 +66,32 @@ def _append_call_record(
         )
 
 
-def _proof_parity(script_path: Path, *, is_stage2: bool) -> dict[str, object]:
-    repo_root = script_path.resolve().parents[1]
+def _proof_parity(
+    script_path: Path,
+    argv: Sequence[str],
+    *,
+    is_stage2: bool,
+) -> dict[str, object]:
+    repo_root = next(
+        parent
+        for parent in script_path.resolve().parents
+        if (parent / "fake_proof_config.json").is_file()
+    )
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
-    from benchmarks.validation_ladder_contract import gpu_proof_parity_contract
+    from benchmarks.validation_ladder_contract import (
+        gpu_proof_parity_contract,
+        parity_ladder_tolerances,
+    )
 
+    probe_name = _arg_value(argv, "--name")
+    if probe_name in PYTEST_PROBE_LANES:
+        lane = PYTEST_PROBE_LANES[str(probe_name)]
+        return {
+            "lane": lane,
+            **parity_ladder_tolerances(lane),
+        }
     contract = gpu_proof_parity_contract("stage2" if is_stage2 else "single_stage")
     return {
         **contract,
@@ -72,12 +107,13 @@ def _write_payload(
     *,
     elapsed_s: float,
     script_path: Path,
+    argv: Sequence[str],
     is_stage2: bool,
     invalid_proof_rtol: bool,
     invalid_value_rel_diff: bool,
     invalid_gradient_rel_diff: bool,
 ) -> None:
-    proof_parity = _proof_parity(script_path, is_stage2=is_stage2)
+    proof_parity = _proof_parity(script_path, argv, is_stage2=is_stage2)
     if invalid_proof_rtol:
         proof_parity["value_rtol"] = 1.0
     if invalid_value_rel_diff:
@@ -137,6 +173,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_json,
         elapsed_s=1.0 if is_stage2 else 2.0,
         script_path=script_path,
+        argv=args,
         is_stage2=is_stage2,
         invalid_proof_rtol=_is_invalid_stage2_cold_mode(
             is_stage2=is_stage2,

@@ -8,6 +8,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ..jax_core._math_utils import as_runtime_float64
+
 
 def _stack_point_clouds(point_clouds):
     arrays = tuple(
@@ -20,7 +22,7 @@ def _stack_point_clouds(point_clouds):
         count = point_cloud.shape[0]
         points[index, :count, :] = point_cloud
         valid[index, :count] = True
-    return jnp.asarray(points, dtype=jnp.float64), jnp.asarray(valid)
+    return jax.device_put(points), jax.device_put(valid)
 
 
 def _min_dist2_matrix(left_points, left_valid, right_points, right_valid):
@@ -70,10 +72,11 @@ def get_close_candidates_within_collection(
 ) -> list[tuple[int, int]]:
     """Return C++-compatible lower-triangle close point-cloud pairs."""
     points, valid = _stack_point_clouds(point_clouds)
+    threshold_jax = as_runtime_float64(threshold, reference=points)
     mask = _within_collection_candidate_mask(
         points,
         valid,
-        threshold,
+        threshold_jax,
         num_base_curves,
     )
     return _candidate_pairs_from_mask(mask)
@@ -87,11 +90,12 @@ def get_close_candidates_between_collections(
     """Return C++-compatible close pairs across two point-cloud collections."""
     left_points, left_valid = _stack_point_clouds(left_point_clouds)
     right_points, right_valid = _stack_point_clouds(right_point_clouds)
+    threshold_jax = as_runtime_float64(threshold, reference=left_points)
     mask = _between_collections_candidate_mask(
         left_points,
         left_valid,
         right_points,
         right_valid,
-        threshold,
+        threshold_jax,
     )
     return _candidate_pairs_from_mask(mask)

@@ -952,6 +952,7 @@ def main() -> None:
             "nphi": int(args.nphi),
             "ntheta": int(args.ntheta),
             "maxiter": int(args.maxiter),
+            "command_argv": [sys.executable, *sys.argv],
             "geometry_rel_tol": geometry_rel_tol,
             "final_objective_rel_tol": final_objective_rel_tol,
             "compile_behavior": describe_compile_behavior(uses_subprocesses=True),

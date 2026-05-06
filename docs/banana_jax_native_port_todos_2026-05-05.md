@@ -31,17 +31,31 @@ Items explicitly **NOT** in this plan, with rationale:
 **Estimated effort:** ~2-3 days (revised; was 2 days before scope correction)
 **Risk:** low-medium
 
-### Scope (REVISED 2026-05-05 after staged-state review)
+### Scope (REVISED 2026-05-06 after reporting reroute)
 
 Add a runtime guard plus a parity test that prove the Stage 2 target-lane optimizer's **`target_objective_bundle.value_and_grad`** path stays inside the target bundle and never re-enters the legacy `JF.J()` / `JF.dJ()` graph or the legacy `CurveCurveDistance.compute_candidates()` C++ culler.
 
-**Important scope correction:** the strict guard CANNOT cover a full `banana_coil_solver.py --backend jax` run end-to-end as originally written. Stage 2 currently re-enters the legacy graph at known non-gradient-path call sites:
+**Important scope correction:** the 2026-05-05 strict guard covered only the
+value-and-grad path. The 2026-05-06 reporting reroute removes the known
+snapshot and accepted-step C++ distance-culler re-entries for the JAX target
+lane:
 
-- `accepted_callback(...)` at `banana_coil_solver.py:3248` sets `JF.x = ...` and calls `capture_stage2_feasible_partial_candidate(JF, Jls, Jccdist, ...)`, which evaluates `Jccdist.J()` / `Jccdist.shortest_distance()` and therefore the C++ culler.
-- `capture_stage2_trajectory_snapshot(trajectory, JF, new_bs, new_surf, Jf, Jls, Jccdist, Jc, ...)` at `banana_coil_solver.py:3289+` and at the post-optimizer call site does the same (`banana_coil_solver.py:1114-1128` shows the snapshot evaluator pulling `Jccdist.J()` host floats).
-- Many `Jccdist.shortest_distance()` callers exist throughout: lines 290, 292, 962, 1128, 1221, 1323, 1326, 1458, 1685.
+- `Stage2TargetObjectiveBundle.reporting_summary` now exposes target-lane
+  objective, field-error, length, sampled curve-curve/curve-surface distance,
+  curvature, current, distance-gate, and self-intersection status without
+  calling `Jf.J()`, `Jls.J()`, `Jccdist.J()`, `Jccdist.shortest_distance()`, or
+  `Jc.J()`.
+- `capture_stage2_trajectory_snapshot(...)` has a target reporting path, so
+  target-lane trajectory snapshots no longer need the legacy objective graph.
+- Target-lane `accepted_callback(...)` now captures feasible partials from the
+  target reporting summary instead of mutating `JF.x` and calling
+  `capture_stage2_feasible_partial_candidate(...)`.
 
-A naïve full-run strict mode would fail on these legitimate (non-gradient) snapshot/callback re-entries. The proof must scope strictly to the value-and-grad path.
+The reduced full-run strict-purity proof is now closed for the CPU/JAX target
+lane: `SIMSOPT_TARGET_LANE_STRICT=1` passed with `--backend jax`,
+`--optimizer-backend ondevice`, `--skip-postprocess`, `--nphi 31`, `--ntheta 16`,
+and `--maxiter 2` against the default banana equilibrium. CUDA hardware proof
+remains a separate gate.
 
 ### Motivation
 
@@ -71,9 +85,14 @@ The corrected port analysis concludes items 1 and 2 (distance culling, CWS VJP) 
    - Optimizer wiring: `optimizer_jax.target_minimize(...)` and `banana_coil_solver.py::run_stage2_optimizer(...)` wrap explicit value-and-grad calls before dispatch.
    - Target-bundle coverage: `tests/integration/test_stage2_jax.py::TestStage2OptimizerContract::test_strict_mode_allows_target_scalar_objective_evaluation` evaluates the scalar objective and value/grad under strict mode with no `pure_callback` in the traced value/grad path.
 
-### Optional follow-up (out of scope for TODO 1; tracked here)
+### Follow-up status
 
-If the goal becomes "no legacy graph anywhere on the JAX lane" (not just on the gradient hot path), the prerequisite is rerouting `capture_stage2_trajectory_snapshot` and `capture_stage2_feasible_partial_candidate` through target-bundle reporting metrics. That is a separate, larger refactor — explicitly NOT covered by this TODO.
+The prerequisite reporting surface for "no legacy graph anywhere on the JAX
+target lane" is implemented for snapshots and accepted-step feasible-partial
+capture. The reduced strict full-run proof and restart-artifact spec
+rehydration checks are tracked in
+`docs/banana_jax_full_test_parity_coverage_impl_plan_2026-05-06.md`; CUDA proof
+remains separate.
 
 ### Validation
 
@@ -347,13 +366,19 @@ None.
 
 After all five land, banana single-stage and Stage 2 should both run with **zero C++ in the gradient hot path** on the JAX lane, with the warm-start `lstsq` host pin remaining as the single documented exception.
 
-**The stronger guarantee — "zero re-entry into the legacy `Optimizable` graph anywhere on the JAX lane" — is NOT delivered by this plan.** TODO 1's strict guard explicitly excludes Stage 2 snapshot/callback paths. Live re-entries remain at:
+**The stronger guarantee — "zero re-entry into the legacy `Optimizable` graph anywhere on the JAX lane" — is still not fully proven.** The earlier snapshot/callback blockers have been narrowed:
 
-- `banana_coil_solver.py:1114` (`_build_stage2_explicit_term_payload`) — calls `host_float(context.Jf.J())`, `host_float(context.Jls.J())`, `host_float(context.Jccdist.J())`, `host_float(context.Jc.J())` for snapshot diagnostics
-- `banana_coil_solver.py:2477` (`capture_stage2_trajectory_snapshot`) — accepts the legacy `JF, Jf, Jls, Jccdist, Jc` and routes them to the explicit-term payload above
-- `banana_coil_solver.py:3248` (`accepted_callback`) — sets `JF.x = ...` and calls `capture_stage2_feasible_partial_candidate(JF, Jls, Jccdist, ...)` per accepted optimizer step
+- `_build_stage2_explicit_term_payload` remains the CPU/reference reporting
+  path and still calls legacy objective terms there.
+- `capture_stage2_trajectory_snapshot` uses target-bundle reporting when a
+  target bundle is supplied; CPU/reference lanes still route through the
+  explicit-term payload.
+- Target-lane accepted callbacks use `capture_stage2_target_feasible_partial_candidate`
+  and no longer call the C++ distance culler.
 
-Removing these requires a Stage 2 reporting refactor that reads the same diagnostics from the target-bundle's accepted-step summary instead. That refactor is recorded as an out-of-scope follow-up below; folding it into this plan would significantly expand TODO 4's scope.
+Remaining closure work is CUDA evidence, not another local CPU/JAX diagnosis:
+keep the reduced strict run and restart-artifact spec rehydration tests green,
+then collect the real CUDA artifacts in the hardware gate.
 
 ## Out-of-scope follow-ups
 
@@ -363,4 +388,6 @@ These are deliberately not included; record here so they don't get lost:
 - VTK / matplotlib export decoupling — opt-in already; further refactor is cosmetic
 - Self-intersection JAX coverage for surface types beyond `XYZTensorFourier` / `RZFourier` — banana doesn't use those types
 - ALM outer-loop trace / device residency — `alm_utils.py` is shared; the inner step is already JAX-native, so outer-loop arithmetic on host is acceptable
-- **Stage 2 snapshot / callback / accepted-step diagnostics rerouting** — required to deliver "zero re-entry into the legacy `Optimizable` graph anywhere on the JAX lane". Touch sites: `banana_coil_solver.py:1114, 2477, 3248`. Replace `host_float(Jf.J())` / `host_float(Jccdist.J())` / `Jccdist.shortest_distance()` reads with equivalent accessors on `target_objective_bundle.terms` and on a new accepted-step summary surface (see TODO 4 subtask 2 for the spec materializer that this would also depend on). Larger-than-TODO-4 refactor; deferred until the lighter-weight TODOs land and surface any architectural constraints.
+- **CUDA target-lane full-run proof** — local CPU/JAX reduced strict proof is
+  covered; the remaining follow-up is real CUDA artifact collection under the
+  hardware gate.

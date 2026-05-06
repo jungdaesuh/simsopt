@@ -1183,6 +1183,133 @@ def _build_stage2_target_term_payload(target_objective_bundle, dofs):
     return _serialize_stage2_term_payload(entries)
 
 
+def build_stage2_target_reporting_snapshot(target_objective_bundle, dofs):
+    reporting_summary = getattr(target_objective_bundle, "reporting_summary", None)
+    if reporting_summary is None:
+        raise RuntimeError(
+            "Stage 2 target objective bundle does not expose reporting_summary."
+        )
+    dofs64 = flatten_stage2_target_optimizer_state(dofs)
+    dofs_jax = jax.device_put(dofs64)
+    summary = reporting_summary(dofs_jax)
+    target_value_and_grad = resolve_stage2_target_value_and_grad(
+        target_objective_bundle
+    )
+    assert target_value_and_grad is not None
+    value, grad = target_value_and_grad(dofs_jax)
+    terms = _build_stage2_target_term_payload(target_objective_bundle, dofs64)
+    snapshot = {
+        "J": host_float(value),
+        "Jf": host_float(summary.Jf),
+        "mean_abs_relBfinal_norm": host_float(summary.mean_abs_relBfinal_norm),
+        "curve_length": host_float(summary.curve_length),
+        "coil_coil_distance": host_float(summary.coil_coil_distance),
+        "curve_surface_min_dist": host_float(summary.curve_surface_min_dist),
+        "curvature": host_float(summary.curvature),
+        "banana_current_A": host_float(summary.banana_current_A),
+        "grad_norm": float(np.linalg.norm(host_array(grad))),
+        "distance_constraint_violated": host_bool(
+            summary.distance_constraint_violated
+        ),
+        "self_intersecting": host_bool(summary.self_intersecting),
+    }
+    if terms is not None:
+        snapshot["terms"] = terms
+    return snapshot
+
+
+def build_stage2_target_artifact_state(
+    target_objective_bundle,
+    dofs,
+    *,
+    length_target,
+    cc_threshold,
+    curvature_threshold,
+    coil_surface_threshold,
+    plasma_vessel_min_dist,
+    plasma_vessel_threshold,
+    banana_current_max_A,
+    tf_current_A,
+):
+    candidate_x = flatten_stage2_target_optimizer_state(dofs).copy()
+    snapshot = build_stage2_target_reporting_snapshot(
+        target_objective_bundle,
+        candidate_x,
+    )
+    hardware_status = evaluate_stage2_hardware_constraints(
+        snapshot["curve_length"],
+        length_target,
+        snapshot["coil_coil_distance"],
+        cc_threshold,
+        snapshot["curvature"],
+        curvature_threshold,
+        curve_surface_min_dist=snapshot["curve_surface_min_dist"],
+        coil_surface_threshold=coil_surface_threshold,
+        plasma_vessel_min_dist=plasma_vessel_min_dist,
+        plasma_vessel_threshold=plasma_vessel_threshold,
+        banana_current_A=snapshot["banana_current_A"],
+        banana_current_threshold=banana_current_max_A,
+        tf_current_A=tf_current_A,
+        tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
+        self_intersecting=snapshot["self_intersecting"],
+    )
+    return {
+        "x": candidate_x,
+        "field_objective": snapshot["Jf"],
+        "coil_length": snapshot["curve_length"],
+        "curve_curve_min_dist": snapshot["coil_coil_distance"],
+        "curve_surface_min_dist": snapshot["curve_surface_min_dist"],
+        "max_curvature": snapshot["curvature"],
+        "banana_current_A": snapshot["banana_current_A"],
+        "tf_current_A": host_float(tf_current_A),
+        "hardware_status": hardware_status,
+        "snapshot": snapshot,
+    }
+
+
+def capture_stage2_target_feasible_partial_candidate(
+    target_objective_bundle,
+    dofs,
+    *,
+    length_target,
+    cc_threshold,
+    curvature_threshold,
+    coil_surface_threshold,
+    plasma_vessel_min_dist,
+    plasma_vessel_threshold,
+    banana_current_max_A,
+    tf_current_A,
+    accepted_index,
+):
+    artifact_state = build_stage2_target_artifact_state(
+        target_objective_bundle,
+        dofs,
+        length_target=length_target,
+        cc_threshold=cc_threshold,
+        curvature_threshold=curvature_threshold,
+        coil_surface_threshold=coil_surface_threshold,
+        plasma_vessel_min_dist=plasma_vessel_min_dist,
+        plasma_vessel_threshold=plasma_vessel_threshold,
+        banana_current_max_A=banana_current_max_A,
+        tf_current_A=tf_current_A,
+    )
+    hardware_status = artifact_state["hardware_status"]
+    if not hardware_status["success"]:
+        return None, hardware_status
+    snapshot = artifact_state["snapshot"]
+    return (
+        Stage2FeasiblePartial(
+            dofs=np.asarray(artifact_state["x"], dtype=float),
+            objective=float(snapshot["J"]),
+            curve_length=float(snapshot["curve_length"]),
+            coil_coil_distance=float(snapshot["coil_coil_distance"]),
+            max_curvature=float(snapshot["curvature"]),
+            accepted_index=int(accepted_index),
+        ),
+        hardware_status,
+    )
+
+
 def _build_stage2_target_sharding_payload(target_objective_bundle, dofs):
     field_summary_fn = getattr(target_objective_bundle, "field_sharding_summary", None)
     pairwise_summary_fn = getattr(
@@ -2178,6 +2305,28 @@ def _build_stage2_probe_composite_payload(
     target_objective_bundle=None,
 ):
     """Return the probe composite snapshot/gradient using the active optimizer SSOT."""
+    if (
+        target_objective_bundle is not None
+        and getattr(target_objective_bundle, "reporting_summary", None) is not None
+    ):
+        target_snapshot = build_stage2_target_reporting_snapshot(
+            target_objective_bundle,
+            context.JF.x,
+        )
+        composite_terms = target_snapshot.pop("terms", None)
+        target_value_and_grad = resolve_stage2_target_value_and_grad(
+            target_objective_bundle
+        )
+        assert target_value_and_grad is not None
+        _value, composite_grad = target_value_and_grad(jax.device_put(context.JF.x))
+        return (
+            {
+                **target_snapshot,
+                "objective_source": "target-objective",
+            },
+            host_array(composite_grad),
+            composite_terms,
+        )
     explicit_snapshot, explicit_grad, _ = evaluate_stage2_objective(
         context,
     )
@@ -2513,8 +2662,17 @@ def capture_stage2_trajectory_snapshot(
     curvature_weight,
     *,
     bs_jax=None,
+    target_objective_bundle=None,
+    dofs=None,
 ):
     """Evaluate and append a Stage 2 diagnostic snapshot when requested."""
+    if target_objective_bundle is not None:
+        snapshot = build_stage2_target_reporting_snapshot(
+            target_objective_bundle,
+            JF.x if dofs is None else dofs,
+        )
+        append_stage2_trajectory_snapshot(trajectory_sink, snapshot)
+        return snapshot
     context = make_stage2_objective_context(
         JF,
         new_bs,
@@ -2951,6 +3109,20 @@ if __name__ == "__main__":
         )
 
     def capture_artifact_state(candidate_x):
+        if use_target_objective_lane:
+            assert target_objective_bundle is not None
+            return build_stage2_target_artifact_state(
+                target_objective_bundle,
+                candidate_x,
+                length_target=LENGTH_TARGET,
+                cc_threshold=CC_THRESHOLD,
+                curvature_threshold=CURVATURE_THRESHOLD,
+                coil_surface_threshold=CS_THRESHOLD,
+                plasma_vessel_min_dist=plasma_vessel_min_dist,
+                plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+                banana_current_max_A=float(args.banana_current_max_A),
+                tf_current_A=tf_current_A,
+            )
         return _capture_stage2_artifact_state(
             dofs=candidate_x,
             JF=JF,
@@ -3143,26 +3315,42 @@ if __name__ == "__main__":
         def accepted_callback(current_dofs):
             flat_dofs = flatten_stage2_target_optimizer_state(current_dofs)
             accepted_state["count"] += 1
-            JF.x = np.asarray(flat_dofs, dtype=float)
-            BASE_OBJECTIVE.x = np.asarray(flat_dofs, dtype=float)
-            candidate, _ = capture_stage2_feasible_partial_candidate(
-                JF,
-                Jls,
-                Jccdist,
-                new_banana_curve,
-                LENGTH_TARGET,
-                CC_THRESHOLD,
-                CURVATURE_THRESHOLD,
-                Jcsdist=Jcsdist,
-                coil_surface_threshold=CS_THRESHOLD,
-                plasma_vessel_min_dist=plasma_vessel_min_dist,
-                plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
-                banana_current_A=float(new_banana_coils[0].current.get_value()),
-                banana_current_threshold=args.banana_current_max_A,
-                tf_current_A=tf_current_A,
-                tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
-                accepted_index=accepted_state["count"],
-            )
+            if use_target_objective_lane:
+                assert target_objective_bundle is not None
+                candidate, _ = capture_stage2_target_feasible_partial_candidate(
+                    target_objective_bundle,
+                    flat_dofs,
+                    length_target=LENGTH_TARGET,
+                    cc_threshold=CC_THRESHOLD,
+                    curvature_threshold=CURVATURE_THRESHOLD,
+                    coil_surface_threshold=CS_THRESHOLD,
+                    plasma_vessel_min_dist=plasma_vessel_min_dist,
+                    plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+                    banana_current_max_A=float(args.banana_current_max_A),
+                    tf_current_A=tf_current_A,
+                    accepted_index=accepted_state["count"],
+                )
+            else:
+                JF.x = np.asarray(flat_dofs, dtype=float)
+                BASE_OBJECTIVE.x = np.asarray(flat_dofs, dtype=float)
+                candidate, _ = capture_stage2_feasible_partial_candidate(
+                    JF,
+                    Jls,
+                    Jccdist,
+                    new_banana_curve,
+                    LENGTH_TARGET,
+                    CC_THRESHOLD,
+                    CURVATURE_THRESHOLD,
+                    Jcsdist=Jcsdist,
+                    coil_surface_threshold=CS_THRESHOLD,
+                    plasma_vessel_min_dist=plasma_vessel_min_dist,
+                    plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+                    banana_current_A=float(new_banana_coils[0].current.get_value()),
+                    banana_current_threshold=args.banana_current_max_A,
+                    tf_current_A=tf_current_A,
+                    tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
+                    accepted_index=accepted_state["count"],
+                )
             if candidate is not None:
                 accepted_state["best_feasible_partial"] = (
                     select_better_stage2_feasible_partial(
@@ -3261,6 +3449,10 @@ if __name__ == "__main__":
                     CC_THRESHOLD,
                     CURVATURE_WEIGHT,
                     bs_jax=diagnostic_bs_jax,
+                    target_objective_bundle=(
+                        target_objective_bundle if use_target_objective_lane else None
+                    ),
+                    dofs=selected_result_x,
                 )
             print(
                 "[ALM] restoring best exact hardware-pass incumbent "
@@ -3277,25 +3469,41 @@ if __name__ == "__main__":
         def accepted_callback(current_dofs):
             flat_dofs = flatten_stage2_target_optimizer_state(current_dofs)
             accepted_state["count"] += 1
-            JF.x = np.asarray(flat_dofs, dtype=float)
-            candidate, _ = capture_stage2_feasible_partial_candidate(
-                JF,
-                Jls,
-                Jccdist,
-                new_banana_curve,
-                LENGTH_TARGET,
-                CC_THRESHOLD,
-                CURVATURE_THRESHOLD,
-                Jcsdist=Jcsdist,
-                coil_surface_threshold=CS_THRESHOLD,
-                plasma_vessel_min_dist=plasma_vessel_min_dist,
-                plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
-                banana_current_A=float(new_banana_coils[0].current.get_value()),
-                banana_current_threshold=args.banana_current_max_A,
-                tf_current_A=tf_current_A,
-                tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
-                accepted_index=accepted_state["count"],
-            )
+            if use_target_objective_lane:
+                assert target_objective_bundle is not None
+                candidate, _ = capture_stage2_target_feasible_partial_candidate(
+                    target_objective_bundle,
+                    flat_dofs,
+                    length_target=LENGTH_TARGET,
+                    cc_threshold=CC_THRESHOLD,
+                    curvature_threshold=CURVATURE_THRESHOLD,
+                    coil_surface_threshold=CS_THRESHOLD,
+                    plasma_vessel_min_dist=plasma_vessel_min_dist,
+                    plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+                    banana_current_max_A=float(args.banana_current_max_A),
+                    tf_current_A=tf_current_A,
+                    accepted_index=accepted_state["count"],
+                )
+            else:
+                JF.x = np.asarray(flat_dofs, dtype=float)
+                candidate, _ = capture_stage2_feasible_partial_candidate(
+                    JF,
+                    Jls,
+                    Jccdist,
+                    new_banana_curve,
+                    LENGTH_TARGET,
+                    CC_THRESHOLD,
+                    CURVATURE_THRESHOLD,
+                    Jcsdist=Jcsdist,
+                    coil_surface_threshold=CS_THRESHOLD,
+                    plasma_vessel_min_dist=plasma_vessel_min_dist,
+                    plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+                    banana_current_A=float(new_banana_coils[0].current.get_value()),
+                    banana_current_threshold=args.banana_current_max_A,
+                    tf_current_A=tf_current_A,
+                    tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
+                    accepted_index=accepted_state["count"],
+                )
             if candidate is not None:
                 accepted_state["best_feasible_partial"] = (
                     select_better_stage2_feasible_partial(
@@ -3328,6 +3536,8 @@ if __name__ == "__main__":
                 CC_THRESHOLD,
                 CURVATURE_WEIGHT,
                 bs_jax=diagnostic_bs_jax,
+                target_objective_bundle=target_objective_bundle,
+                dofs=optimizer_dofs,
             )
         target_value_and_grad = resolve_stage2_target_value_and_grad(
             target_objective_bundle
@@ -3373,6 +3583,8 @@ if __name__ == "__main__":
                 CC_THRESHOLD,
                 CURVATURE_WEIGHT,
                 bs_jax=diagnostic_bs_jax,
+                target_objective_bundle=target_objective_bundle,
+                dofs=res.x,
             )
             optimizer_timings = {
                 "cold_run_s": float(cold_elapsed_s),
@@ -3416,24 +3628,42 @@ if __name__ == "__main__":
                 )
                 JF.x = flatten_stage2_target_optimizer_state(res.x)
         print(res.message)
-        final_feasible_partial, _ = capture_stage2_feasible_partial_candidate(
-            JF,
-            Jls,
-            Jccdist,
-            new_banana_curve,
-            LENGTH_TARGET,
-            CC_THRESHOLD,
-            CURVATURE_THRESHOLD,
-            Jcsdist=Jcsdist,
-            coil_surface_threshold=CS_THRESHOLD,
-            plasma_vessel_min_dist=plasma_vessel_min_dist,
-            plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
-            banana_current_A=float(new_banana_coils[0].current.get_value()),
-            banana_current_threshold=args.banana_current_max_A,
-            tf_current_A=tf_current_A,
-            tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
-            accepted_index=accepted_state["count"],
-        )
+        if use_target_objective_lane:
+            assert target_objective_bundle is not None
+            final_feasible_partial, _ = (
+                capture_stage2_target_feasible_partial_candidate(
+                    target_objective_bundle,
+                    res.x,
+                    length_target=LENGTH_TARGET,
+                    cc_threshold=CC_THRESHOLD,
+                    curvature_threshold=CURVATURE_THRESHOLD,
+                    coil_surface_threshold=CS_THRESHOLD,
+                    plasma_vessel_min_dist=plasma_vessel_min_dist,
+                    plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+                    banana_current_max_A=float(args.banana_current_max_A),
+                    tf_current_A=tf_current_A,
+                    accepted_index=accepted_state["count"],
+                )
+            )
+        else:
+            final_feasible_partial, _ = capture_stage2_feasible_partial_candidate(
+                JF,
+                Jls,
+                Jccdist,
+                new_banana_curve,
+                LENGTH_TARGET,
+                CC_THRESHOLD,
+                CURVATURE_THRESHOLD,
+                Jcsdist=Jcsdist,
+                coil_surface_threshold=CS_THRESHOLD,
+                plasma_vessel_min_dist=plasma_vessel_min_dist,
+                plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
+                banana_current_A=float(new_banana_coils[0].current.get_value()),
+                banana_current_threshold=args.banana_current_max_A,
+                tf_current_A=tf_current_A,
+                tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
+                accepted_index=accepted_state["count"],
+            )
         restored_best_feasible_partial = should_restore_stage2_feasible_partial(
             accepted_state["best_feasible_partial"],
             final_feasible_partial,
@@ -3469,6 +3699,10 @@ if __name__ == "__main__":
                     CC_THRESHOLD,
                     CURVATURE_WEIGHT,
                     bs_jax=diagnostic_bs_jax,
+                    target_objective_bundle=(
+                        target_objective_bundle if use_target_objective_lane else None
+                    ),
+                    dofs=JF.x,
                 )
         best_feasible_partial = accepted_state["best_feasible_partial"]
         accepted_iteration_count = int(accepted_state["count"])
@@ -3495,33 +3729,33 @@ if __name__ == "__main__":
     if intersecting:
         print("BANANA COIL IS SELF-INTERSECTING!")
 
-    new_bs.set_points(new_surf.gamma().reshape((-1, 3)))
-    unitn = new_surf.unitnormal()
-    B_field = new_bs.B().reshape(unitn.shape)
-    pointData = {
-        "B_N/B": np.sum(B_field * unitn, axis=2)[:, :, None]
-        / np.sqrt(np.sum(B_field**2, axis=2))[:, :, None]
-    }
     if args.skip_postprocess and final_snapshot is None:
-        final_context = make_stage2_objective_context(
-            JF,
-            new_bs,
-            new_surf,
-            Jf,
-            Jls,
-            Jccdist,
-            Jc,
-            SQUARED_FLUX_WEIGHT,
-            LENGTH_WEIGHT,
-            LENGTH_TARGET,
-            CC_WEIGHT,
-            CC_THRESHOLD,
-            CURVATURE_WEIGHT,
-            bs_jax=diagnostic_bs_jax,
-        )
-        final_snapshot, _, _ = evaluate_stage2_objective(
-            final_context,
-        )
+        if use_target_objective_lane:
+            assert target_objective_bundle is not None
+            final_snapshot = build_stage2_target_reporting_snapshot(
+                target_objective_bundle,
+                selected_result_x if selected_result_x is not None else JF.x,
+            )
+        else:
+            final_context = make_stage2_objective_context(
+                JF,
+                new_bs,
+                new_surf,
+                Jf,
+                Jls,
+                Jccdist,
+                Jc,
+                SQUARED_FLUX_WEIGHT,
+                LENGTH_WEIGHT,
+                LENGTH_TARGET,
+                CC_WEIGHT,
+                CC_THRESHOLD,
+                CURVATURE_WEIGHT,
+                bs_jax=diagnostic_bs_jax,
+            )
+            final_snapshot, _, _ = evaluate_stage2_objective(
+                final_context,
+            )
     stage2_bs_output_path = os.path.join(OUT_DIR_ITER, "biot_savart_opt.json")
     stage2_surface_output_path = os.path.join(OUT_DIR_ITER, "surf_opt.json")
     if args.backend == "jax":
@@ -3552,12 +3786,23 @@ if __name__ == "__main__":
     else:
         new_bs.save(stage2_bs_output_path)
         new_surf.save(stage2_surface_output_path)
-    fieldError = compute_mean_abs_relbn(new_surf, new_bs)
+    fieldError = (
+        float(final_snapshot["mean_abs_relBfinal_norm"])
+        if use_target_objective_lane and final_snapshot is not None
+        else compute_mean_abs_relbn(new_surf, new_bs)
+    )
     if args.skip_postprocess:
         print(
             "Skipping Stage 2 post-processing artifacts because --skip-postprocess was provided."
         )
     else:
+        new_bs.set_points(new_surf.gamma().reshape((-1, 3)))
+        unitn = new_surf.unitnormal()
+        B_field = new_bs.B().reshape(unitn.shape)
+        pointData = {
+            "B_N/B": np.sum(B_field * unitn, axis=2)[:, :, None]
+            / np.sqrt(np.sum(B_field**2, axis=2))[:, :, None]
+        }
         curves_to_vtk(new_curves, OUT_DIR_ITER + "curves_opt", close=True)
         new_surf.to_vtk(OUT_DIR_ITER + "surf_opt", extra_data=pointData)
         VV.to_vtk(OUT_DIR_ITER + "VV")
@@ -3573,31 +3818,43 @@ if __name__ == "__main__":
         )
         # Create field error plot
         fieldError = magneticFieldPlots(new_surf, new_bs, OUT_DIR_ITER)
+    print_banana_current_A = (
+        float(final_snapshot["banana_current_A"])
+        if use_target_objective_lane and final_snapshot is not None
+        else float(new_banana_coils[0].current.get_value())
+    )
     print(
-        f"Banana Coil Current / TF Current = {new_banana_coils[0].current.get_value() / new_tf_coils[0].current.get_value():.3f}\n"
+        f"Banana Coil Current / TF Current = {print_banana_current_A / tf_current_A:.3f}\n"
     )
 
     # Save the results of optimization to a separate file
     if final_snapshot is None:
-        final_context = make_stage2_objective_context(
-            JF,
-            new_bs,
-            new_surf,
-            Jf,
-            Jls,
-            Jccdist,
-            Jc,
-            SQUARED_FLUX_WEIGHT,
-            LENGTH_WEIGHT,
-            LENGTH_TARGET,
-            CC_WEIGHT,
-            CC_THRESHOLD,
-            CURVATURE_WEIGHT,
-            bs_jax=diagnostic_bs_jax,
-        )
-        final_snapshot, _, _ = evaluate_stage2_objective(
-            final_context,
-        )
+        if use_target_objective_lane:
+            assert target_objective_bundle is not None
+            final_snapshot = build_stage2_target_reporting_snapshot(
+                target_objective_bundle,
+                selected_result_x if selected_result_x is not None else JF.x,
+            )
+        else:
+            final_context = make_stage2_objective_context(
+                JF,
+                new_bs,
+                new_surf,
+                Jf,
+                Jls,
+                Jccdist,
+                Jc,
+                SQUARED_FLUX_WEIGHT,
+                LENGTH_WEIGHT,
+                LENGTH_TARGET,
+                CC_WEIGHT,
+                CC_THRESHOLD,
+                CURVATURE_WEIGHT,
+                bs_jax=diagnostic_bs_jax,
+            )
+            final_snapshot, _, _ = evaluate_stage2_objective(
+                final_context,
+            )
     final_curve_surface_min_dist = (
         float(final_artifact_state["curve_surface_min_dist"])
         if final_artifact_state is not None

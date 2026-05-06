@@ -485,6 +485,16 @@ def get_git_sha() -> str:
     ).stdout.strip()
 
 
+def get_git_status_short() -> str:
+    """Return the short worktree status for provenance."""
+    return subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "status", "--short", "--untracked-files=no"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def relative_error(actual: float, reference: float) -> float:
     """Stable scalar relative error helper."""
     return float(abs(actual - reference) / (abs(reference) + 1e-30))
@@ -588,6 +598,7 @@ def build_provenance(
     provenance = {
         "title": title,
         "repo_sha": get_git_sha(),
+        "git_status_short": get_git_status_short(),
         "jax": jax_module.__version__,
         "jaxlib": jaxlib_module.__version__,
         "backend": jax_module.default_backend(),
@@ -604,6 +615,7 @@ def build_provenance(
         **compilation_cache,
         **_current_sharding_metadata(),
     }
+    provenance["worktree_dirty"] = bool(provenance["git_status_short"])
     gpu_memory_mb = query_gpu_memory_mb()
     if gpu_memory_mb is not None:
         provenance["gpu_memory_mb"] = gpu_memory_mb

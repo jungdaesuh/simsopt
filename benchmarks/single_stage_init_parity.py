@@ -1118,6 +1118,7 @@ def main() -> None:
             "reference_optimizer_method": args.reference_optimizer_method,
             "boozer_optimizer_backend": args.boozer_optimizer_backend,
             "outer_maxiter": int(args.maxiter),
+            "command_argv": [sys.executable, *sys.argv],
             "benchmark_mode": benchmark_mode,
             "reference_backend": reference_backend,
             "reference_platform": "cpu",

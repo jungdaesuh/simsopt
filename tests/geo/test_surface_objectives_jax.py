@@ -108,14 +108,73 @@ def _patch_reject_coil_dofs_gradient_to_derivative(monkeypatch):
 
 
 _STELLSYM_OPTIONS = (True, False)
-_TOROIDAL_FLUX_VALUE_RTOL = 1e-10
-_TOROIDAL_FLUX_VALUE_ATOL = 1e-12
+_TOROIDAL_FLUX_DERIVATIVE_HEAVY_TOLERANCES = parity_ladder_tolerances(
+    "derivative_heavy"
+)
+_TOROIDAL_FLUX_VALUE_RTOL = _TOROIDAL_FLUX_DERIVATIVE_HEAVY_TOLERANCES[
+    "scalar_value_rtol"
+]
+_TOROIDAL_FLUX_VALUE_ATOL = _TOROIDAL_FLUX_DERIVATIVE_HEAVY_TOLERANCES[
+    "scalar_value_atol"
+]
 _TOROIDAL_FLUX_SURFACE_GRAD_RTOL = 1e-9
 _TOROIDAL_FLUX_SURFACE_GRAD_ATOL = 1e-11
 _TOROIDAL_FLUX_SURFACE_HESS_RTOL = 1e-8
 _TOROIDAL_FLUX_SURFACE_HESS_ATOL = 1e-10
 _TOROIDAL_FLUX_COIL_GRAD_RTOL = 1e-9
 _TOROIDAL_FLUX_COIL_GRAD_ATOL = 1e-7
+_ASPECT_RATIO_VALUE_RTOL = 1e-12
+_ASPECT_RATIO_VALUE_ATOL = 1e-12
+_ASPECT_RATIO_GRAD_RTOL = 1e-10
+_ASPECT_RATIO_GRAD_ATOL = 1e-11
+_ASPECT_RATIO_HESS_RTOL = 1e-9
+_ASPECT_RATIO_HESS_ATOL = 1e-10
+_PRINCIPAL_CURVATURE_VALUE_RTOL = 1e-12
+_PRINCIPAL_CURVATURE_VALUE_ATOL = 1e-10
+_PRINCIPAL_CURVATURE_GRAD_RTOL = 1e-10
+_PRINCIPAL_CURVATURE_GRAD_ATOL = 1e-9
+_QFM_VALUE_RTOL = 1e-12
+_QFM_VALUE_ATOL = 1e-12
+_QFM_GRAD_RTOL = 1e-10
+_QFM_GRAD_ATOL = 1e-10
+_PRINCIPAL_CURVATURE_KWARGS = {
+    "kappamax1": 1.0,
+    "kappamax2": 2.2,
+    "weight1": 1.0,
+    "weight2": 2.0,
+}
+_SCALAR_METRIC_CASES = (
+    (
+        "mean_cross_sectional_area",
+        "surface_dmean_cross_sectional_area_jax_from_dofs",
+        "surface_d2mean_cross_sectional_area_jax_from_dofs",
+        "dmean_cross_sectional_area_by_dcoeff",
+        "d2mean_cross_sectional_area_by_dcoeff_dcoeff",
+    ),
+    (
+        "minor_radius",
+        "surface_dminor_radius_jax_from_dofs",
+        "surface_d2minor_radius_jax_from_dofs",
+        "dminor_radius_by_dcoeff",
+        "d2minor_radius_by_dcoeff_dcoeff",
+    ),
+    (
+        "major_radius",
+        "surface_dmajor_radius_jax_from_dofs",
+        "surface_d2major_radius_jax_from_dofs",
+        "dmajor_radius_by_dcoeff",
+        "d2major_radius_by_dcoeff_dcoeff",
+    ),
+    (
+        "aspect_ratio",
+        "surface_daspect_ratio_jax_from_dofs",
+        "surface_d2aspect_ratio_jax_from_dofs",
+        "daspect_ratio_by_dcoeff",
+        "d2aspect_ratio_by_dcoeff_dcoeff",
+    ),
+)
+
+
 def _make_test_hessian_booz():
     return types.SimpleNamespace()
 
@@ -4997,6 +5056,75 @@ def _make_toroidal_flux_pair(surfacetype, stellsym, *, idx=0):
     )
 
 
+def _make_aspect_ratio_surface(surfacetype, stellsym):
+    return get_surface(
+        surfacetype,
+        stellsym,
+        mpol=2,
+        ntor=1,
+        nfp=2,
+        nphi=7,
+        ntheta=8,
+        full=True,
+    )
+
+
+def _make_aspect_ratio_pair(surfacetype, stellsym, **kwargs):
+    surface = _make_aspect_ratio_surface(surfacetype, stellsym)
+    return (
+        surfaceobjectives_module.AspectRatio(surface, **kwargs),
+        surfaceobjectives_jax_module.AspectRatioJAX(surface, **kwargs),
+    )
+
+
+def _make_principal_curvature_pair(surfacetype, stellsym):
+    surface = _make_aspect_ratio_surface(surfacetype, stellsym)
+    return (
+        surfaceobjectives_module.PrincipalCurvature(
+            surface,
+            **_PRINCIPAL_CURVATURE_KWARGS,
+        ),
+        surfaceobjectives_jax_module.PrincipalCurvatureJAX(
+            surface,
+            **_PRINCIPAL_CURVATURE_KWARGS,
+        ),
+        surface,
+    )
+
+
+def _make_qfm_biotsavart_pair():
+    base_curves = create_equally_spaced_curves(
+        2,
+        1,
+        stellsym=False,
+        R0=1.0,
+        R1=0.5,
+        order=3,
+    )
+    base_currents = [Current(1e5) for _ in range(2)]
+    coils = coils_via_symmetries(base_curves, base_currents, 1, False)
+    return BiotSavart(coils), BiotSavartJAX(coils)
+
+
+def _make_qfm_pair(surfacetype, stellsym):
+    surface = get_surface(
+        surfacetype,
+        stellsym,
+        mpol=1,
+        ntor=1,
+        nfp=1,
+        nphi=7,
+        ntheta=8,
+        full=True,
+    )
+    bs_cpu, bs_jax = _make_qfm_biotsavart_pair()
+    return (
+        surfaceobjectives_module.QfmResidual(surface, bs_cpu),
+        surfaceobjectives_jax_module.QfmResidualJAX(surface, bs_jax),
+        surface,
+    )
+
+
 def _surface_gradient_value(tf, _):
     return tf.dJ_by_dsurfacecoefficients()
 
@@ -5007,6 +5135,10 @@ def _surface_hessian_value(tf, _):
 
 def _coil_gradient_value(tf, bs):
     return tf.dJ_by_dcoils()(bs)
+
+
+def _toroidal_flux_value(tf, _):
+    return tf.J()
 
 
 def _assert_toroidal_flux_value_parity(actual, reference):
@@ -5136,6 +5268,654 @@ class TestToroidalFluxJAXTaylor:
         )
 
 
+class TestAspectRatioJAXObjectParity:
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_aspect_ratio_value_parity_matrix(self, surfacetype, stellsym):
+        aspect_cpu, aspect_jax = _make_aspect_ratio_pair(surfacetype, stellsym)
+
+        np.testing.assert_allclose(
+            aspect_jax.J(),
+            aspect_cpu.J(),
+            rtol=_ASPECT_RATIO_VALUE_RTOL,
+            atol=_ASPECT_RATIO_VALUE_ATOL,
+        )
+
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_aspect_ratio_first_derivative_parity_matrix(
+        self,
+        surfacetype,
+        stellsym,
+    ):
+        aspect_cpu, aspect_jax = _make_aspect_ratio_pair(surfacetype, stellsym)
+
+        np.testing.assert_allclose(
+            aspect_jax.dJ_by_dsurfacecoefficients(),
+            aspect_cpu.dJ_by_dsurfacecoefficients(),
+            rtol=_ASPECT_RATIO_GRAD_RTOL,
+            atol=_ASPECT_RATIO_GRAD_ATOL,
+        )
+        np.testing.assert_allclose(
+            aspect_jax.dJ(partials=True)(aspect_jax.surface),
+            aspect_cpu.dJ(partials=True)(aspect_cpu.surface),
+            rtol=_ASPECT_RATIO_GRAD_RTOL,
+            atol=_ASPECT_RATIO_GRAD_ATOL,
+        )
+
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_aspect_ratio_second_derivative_parity_matrix(
+        self,
+        surfacetype,
+        stellsym,
+    ):
+        aspect_cpu, aspect_jax = _make_aspect_ratio_pair(surfacetype, stellsym)
+
+        np.testing.assert_allclose(
+            aspect_jax.d2J_by_dsurfacecoefficientsdsurfacecoefficients(),
+            aspect_cpu.d2J_by_dsurfacecoefficientsdsurfacecoefficients(),
+            rtol=_ASPECT_RATIO_HESS_RTOL,
+            atol=_ASPECT_RATIO_HESS_ATOL,
+        )
+
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_aspect_ratio_regridded_wrapper_parity(self, surfacetype, stellsym):
+        aspect_cpu, aspect_jax = _make_aspect_ratio_pair(
+            surfacetype,
+            stellsym,
+            nphi=9,
+            ntheta=10,
+        )
+
+        np.testing.assert_allclose(
+            aspect_jax.J(),
+            aspect_cpu.J(),
+            rtol=_ASPECT_RATIO_VALUE_RTOL,
+            atol=_ASPECT_RATIO_VALUE_ATOL,
+        )
+        np.testing.assert_allclose(
+            aspect_jax.dJ_by_dsurfacecoefficients(),
+            aspect_cpu.dJ_by_dsurfacecoefficients(),
+            rtol=_ASPECT_RATIO_GRAD_RTOL,
+            atol=_ASPECT_RATIO_GRAD_ATOL,
+        )
+
+    def test_aspect_ratio_regridded_tensor_clamped_dims_remains_unsupported(self):
+        from simsopt.geo import SurfaceXYZTensorFourier
+
+        surface = SurfaceXYZTensorFourier(
+            mpol=1,
+            ntor=1,
+            nfp=1,
+            stellsym=False,
+            clamped_dims=[True, False, False],
+        )
+        aspect_jax = surfaceobjectives_jax_module.AspectRatioJAX(
+            surface,
+            nphi=9,
+            ntheta=10,
+        )
+
+        assert aspect_jax.surface.clamped_dims == [True, False, False]
+        with pytest.raises(NotImplementedError, match="clamped_dims"):
+            aspect_jax.J()
+
+    def test_aspect_ratio_lazy_package_export(self):
+        from simsopt.geo import AspectRatioJAX
+
+        assert AspectRatioJAX is surfaceobjectives_jax_module.AspectRatioJAX
+
+    def test_aspect_ratio_first_order_taylor(self):
+        surface = _make_aspect_ratio_surface("SurfaceRZFourier", stellsym=False)
+        spec = surface.surface_spec()
+        dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+
+        def aspect_ratio(inner_dofs):
+            return surfaceobjectives_jax_module.surface_aspect_ratio_jax_from_dofs(
+                spec,
+                inner_dofs,
+            )
+
+        _taylor_test_first_order(
+            aspect_ratio,
+            jax.grad(aspect_ratio),
+            dofs,
+            epsilons=np.power(2.0, -np.arange(8, 16, dtype=float)),
+            atol=1e-11,
+        )
+
+    def test_aspect_ratio_second_order_taylor(self):
+        surface = _make_aspect_ratio_surface("SurfaceRZFourier", stellsym=False)
+        spec = surface.surface_spec()
+        dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+
+        def aspect_ratio(inner_dofs):
+            return surfaceobjectives_jax_module.surface_aspect_ratio_jax_from_dofs(
+                spec,
+                inner_dofs,
+            )
+
+        _taylor_test_second_order(
+            aspect_ratio,
+            jax.grad(aspect_ratio),
+            jax.hessian(aspect_ratio),
+            dofs,
+            epsilons=np.power(2.0, -np.arange(11, 19, dtype=float)),
+        )
+
+
+class TestSurfaceScalarMetricJAXHelpers:
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize(
+        (
+            "metric_name",
+            "jax_grad_name",
+            "jax_hess_name",
+            "cpu_grad_name",
+            "cpu_hess_name",
+        ),
+        _SCALAR_METRIC_CASES,
+    )
+    def test_surface_scalar_metric_gradient_and_hessian_parity(
+        self,
+        surfacetype,
+        metric_name,
+        jax_grad_name,
+        jax_hess_name,
+        cpu_grad_name,
+        cpu_hess_name,
+    ):
+        surface = _make_aspect_ratio_surface(surfacetype, stellsym=False)
+        spec = surface.surface_spec()
+        dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+        jax_grad_fn = getattr(surfaceobjectives_jax_module, jax_grad_name)
+        jax_hess_fn = getattr(surfaceobjectives_jax_module, jax_hess_name)
+        cpu_grad_fn = getattr(surface, cpu_grad_name)
+        cpu_hess_fn = getattr(surface, cpu_hess_name)
+
+        np.testing.assert_allclose(
+            jax_grad_fn(spec, dofs),
+            cpu_grad_fn(),
+            rtol=_ASPECT_RATIO_GRAD_RTOL,
+            atol=_ASPECT_RATIO_GRAD_ATOL,
+            err_msg=metric_name,
+        )
+        np.testing.assert_allclose(
+            jax_hess_fn(spec, dofs),
+            cpu_hess_fn(),
+            rtol=_ASPECT_RATIO_HESS_RTOL,
+            atol=_ASPECT_RATIO_HESS_ATOL,
+            err_msg=metric_name,
+        )
+
+    @pytest.mark.parametrize(
+        "export_name",
+        (
+            "surface_dmean_cross_sectional_area_jax_from_dofs",
+            "surface_dminor_radius_jax_from_dofs",
+            "surface_dmajor_radius_jax_from_dofs",
+            "surface_daspect_ratio_jax_from_dofs",
+            "surface_d2mean_cross_sectional_area_jax_from_dofs",
+            "surface_d2minor_radius_jax_from_dofs",
+            "surface_d2major_radius_jax_from_dofs",
+            "surface_d2aspect_ratio_jax_from_dofs",
+        ),
+    )
+    def test_surface_scalar_metric_helper_lazy_exports(self, export_name):
+        import simsopt.geo as geo_module
+
+        assert getattr(geo_module, export_name) is getattr(
+            surfaceobjectives_jax_module,
+            export_name,
+        )
+
+
+class TestPrincipalCurvatureJAXObjectParity:
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_surface_curvature_helper_value_parity_matrix(self, surfacetype, stellsym):
+        surface = _make_aspect_ratio_surface(surfacetype, stellsym)
+        spec = surface.surface_spec()
+        dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+
+        np.testing.assert_allclose(
+            surfaceobjectives_jax_module.surface_curvatures_jax_from_dofs(
+                spec,
+                dofs,
+            ),
+            surface.surface_curvatures(),
+            rtol=_PRINCIPAL_CURVATURE_VALUE_RTOL,
+            atol=_PRINCIPAL_CURVATURE_VALUE_ATOL,
+        )
+
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_surface_curvature_helper_gradient_parity_matrix(
+        self,
+        surfacetype,
+        stellsym,
+    ):
+        surface = _make_aspect_ratio_surface(surfacetype, stellsym)
+        spec = surface.surface_spec()
+        dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+
+        np.testing.assert_allclose(
+            surfaceobjectives_jax_module.surface_dsurface_curvatures_jax_from_dofs(
+                spec,
+                dofs,
+            ),
+            surface.dsurface_curvatures_by_dcoeff(),
+            rtol=_PRINCIPAL_CURVATURE_GRAD_RTOL,
+            atol=_PRINCIPAL_CURVATURE_GRAD_ATOL,
+        )
+
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_principal_curvature_value_parity_matrix(self, surfacetype, stellsym):
+        pc_cpu, pc_jax, _surface = _make_principal_curvature_pair(
+            surfacetype,
+            stellsym,
+        )
+
+        np.testing.assert_allclose(
+            pc_jax.J(),
+            pc_cpu.J(),
+            rtol=_PRINCIPAL_CURVATURE_VALUE_RTOL,
+            atol=_PRINCIPAL_CURVATURE_VALUE_ATOL,
+        )
+
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_principal_curvature_gradient_parity_matrix(self, surfacetype, stellsym):
+        pc_cpu, pc_jax, surface = _make_principal_curvature_pair(
+            surfacetype,
+            stellsym,
+        )
+
+        np.testing.assert_allclose(
+            pc_jax.dJ_by_dsurfacecoefficients(),
+            pc_cpu.dJ(partials=True)(surface),
+            rtol=_PRINCIPAL_CURVATURE_GRAD_RTOL,
+            atol=_PRINCIPAL_CURVATURE_GRAD_ATOL,
+        )
+
+    def test_principal_curvature_lazy_package_export(self):
+        from simsopt.geo import PrincipalCurvatureJAX
+
+        assert (
+            PrincipalCurvatureJAX
+            is surfaceobjectives_jax_module.PrincipalCurvatureJAX
+        )
+
+    @pytest.mark.parametrize(
+        "export_name",
+        (
+            "surface_curvatures_jax_from_dofs",
+            "surface_dsurface_curvatures_jax_from_dofs",
+        ),
+    )
+    def test_surface_curvature_helper_lazy_exports(self, export_name):
+        import simsopt.geo as geo_module
+
+        assert getattr(geo_module, export_name) is getattr(
+            surfaceobjectives_jax_module,
+            export_name,
+        )
+
+    def test_principal_curvature_first_order_taylor(self):
+        surface = _make_aspect_ratio_surface("SurfaceRZFourier", stellsym=False)
+        spec = surface.surface_spec()
+        dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+
+        def principal_curvature(inner_dofs):
+            return surfaceobjectives_jax_module.surface_principal_curvature_jax_from_dofs(
+                spec,
+                inner_dofs,
+                **_PRINCIPAL_CURVATURE_KWARGS,
+            )
+
+        _taylor_test_first_order(
+            principal_curvature,
+            jax.grad(principal_curvature),
+            dofs,
+            epsilons=np.power(2.0, -np.arange(8, 16, dtype=float)),
+            atol=1e-9,
+        )
+
+
+class TestQfmResidualJAXObjectParity:
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_qfm_residual_value_parity_matrix(self, surfacetype, stellsym):
+        qfm_cpu, qfm_jax, _surface = _make_qfm_pair(surfacetype, stellsym)
+
+        np.testing.assert_allclose(
+            qfm_jax.J(),
+            qfm_cpu.J(),
+            rtol=_QFM_VALUE_RTOL,
+            atol=_QFM_VALUE_ATOL,
+        )
+
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_qfm_residual_gradient_parity_matrix(self, surfacetype, stellsym):
+        qfm_cpu, qfm_jax, _surface = _make_qfm_pair(surfacetype, stellsym)
+
+        np.testing.assert_allclose(
+            qfm_jax.dJ_by_dsurfacecoefficients(),
+            qfm_cpu.dJ_by_dsurfacecoefficients(),
+            rtol=_QFM_GRAD_RTOL,
+            atol=_QFM_GRAD_ATOL,
+        )
+
+    def test_qfm_residual_lazy_package_export(self):
+        from simsopt.geo import QfmResidualJAX
+
+        assert QfmResidualJAX is surfaceobjectives_jax_module.QfmResidualJAX
+
+    def test_qfm_residual_first_order_taylor(self):
+        _qfm_cpu, qfm_jax, surface = _make_qfm_pair(
+            "SurfaceRZFourier",
+            stellsym=False,
+        )
+        spec = surface.surface_spec()
+        dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+        coil_set_spec = qfm_jax.biotsavart.coil_set_spec_from_dofs(
+            jnp.asarray(qfm_jax.biotsavart.x, dtype=jnp.float64)
+        )
+
+        def qfm_residual(inner_dofs):
+            return surfaceobjectives_jax_module.surface_qfm_residual_jax_from_dofs(
+                spec,
+                inner_dofs,
+                coil_set_spec,
+            )
+
+        _taylor_test_first_order(
+            qfm_residual,
+            jax.grad(qfm_residual),
+            dofs,
+            epsilons=np.power(2.0, -np.arange(8, 16, dtype=float)),
+            atol=1e-10,
+        )
+
+    def test_qfm_residual_surface_update_cache_parity(self):
+        qfm_cpu, qfm_jax, surface = _make_qfm_pair(
+            "SurfaceRZFourier",
+            stellsym=False,
+        )
+        initial_value = qfm_jax.J()
+        dofs = surface.get_dofs()
+        direction = np.zeros_like(dofs)
+        direction[3] = 0.02
+        direction[-5] = -0.01
+        surface.set_dofs(dofs + direction)
+
+        qfm_cpu.invalidate_cache()
+        qfm_jax.invalidate_cache()
+
+        np.testing.assert_allclose(
+            qfm_jax.J(),
+            qfm_cpu.J(),
+            rtol=_QFM_VALUE_RTOL,
+            atol=_QFM_VALUE_ATOL,
+        )
+        np.testing.assert_allclose(
+            qfm_jax.dJ_by_dsurfacecoefficients(),
+            qfm_cpu.dJ_by_dsurfacecoefficients(),
+            rtol=_QFM_GRAD_RTOL,
+            atol=_QFM_GRAD_ATOL,
+        )
+        assert abs(qfm_jax.J() - initial_value) > 1e-14
+
+
+def test_major_radius_jax_value_and_native_adjoint_gradient():
+    surface = _make_aspect_ratio_surface("SurfaceRZFourier", stellsym=False)
+    sdofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+    expected_surface_gradient = (
+        surfaceobjectives_jax_module._surface_dmajor_radius_jax_from_dofs(
+            surface.surface_spec(),
+            sdofs,
+        )
+    )
+    captured = {}
+
+    class _FakeDofOptimizable:
+        local_full_dof_size = 2
+        local_dofs_free_status = np.asarray([True, True])
+
+    dep_opt = _FakeDofOptimizable()
+    lineage_opt = types.SimpleNamespace(
+        local_dof_size=2,
+        local_full_dof_size=2,
+        local_dofs_free_status=np.asarray([True, True]),
+        dofs=types.SimpleNamespace(dep_opts=lambda: (dep_opt,)),
+    )
+
+    class _FakeBiotSavart:
+        x = np.asarray([1.0, -2.0], dtype=np.float64)
+        unique_dof_lineage = (lineage_opt,)
+
+        def coil_cotangents_to_dofs_gradient(
+            self,
+            coil_arrays,
+            coil_group_indices,
+            *,
+            coil_dofs,
+        ):
+            captured["coil_arrays"] = coil_arrays
+            captured["coil_group_indices"] = coil_group_indices
+            captured["coil_dofs"] = coil_dofs
+            total = jnp.sum(coil_arrays[0])
+            return jnp.asarray([total, -total], dtype=jnp.float64)
+
+    solved_state = types.SimpleNamespace(
+        sdofs=sdofs,
+        iota=jnp.asarray(0.3, dtype=jnp.float64),
+        G=jnp.asarray(1.0, dtype=jnp.float64),
+        weight_inv_modB=False,
+    )
+    expected_rhs = jnp.concatenate(
+        (
+            expected_surface_gradient,
+            jnp.zeros(2, dtype=jnp.float64),
+        )
+    )
+    expected_adjoint = 2.0 * expected_rhs
+    adjoint_state = types.SimpleNamespace(
+        decision_size=expected_rhs.size,
+        dtype=jnp.float64,
+        linearization_kind="hessian",
+        solve_transpose_with_status=lambda rhs: (
+            2.0 * rhs,
+            jnp.asarray(True),
+        ),
+        project_coil_adjoint_derivative=lambda _adjoint: (
+            surfaceobjectives_module.Derivative(
+                {dep_opt: np.asarray([expected_total, -expected_total])}
+            )
+        ),
+        stream_group_vjps=lambda adjoint: iter(((adjoint, (0,)),)),
+    )
+    fake_booz = types.SimpleNamespace(
+        need_to_run_code=False,
+        res={"primal_success": True, "success": True},
+        surface=surface,
+        biotsavart=_FakeBiotSavart(),
+        get_solved_runtime_state=lambda: solved_state,
+        get_adjoint_runtime_state=lambda: adjoint_state,
+    )
+    obj = object.__new__(surfaceobjectives_jax_module.MajorRadiusJAX)
+    obj.boozer_surface = fake_booz
+    obj.surface = surface
+    obj.biotsavart = fake_booz.biotsavart
+    obj._J = None
+    obj._dJ = None
+    obj._dJ_by_dcoil_dofs = None
+
+    np.testing.assert_allclose(
+        obj.J(),
+        surface.major_radius(),
+        rtol=_ASPECT_RATIO_VALUE_RTOL,
+        atol=_ASPECT_RATIO_VALUE_ATOL,
+    )
+    expected_total = float(jnp.sum(expected_adjoint))
+    cpu_obj = object.__new__(surfaceobjectives_module.MajorRadius)
+    cpu_obj.boozer_surface = fake_booz
+    cpu_obj.surface = surface
+    cpu_obj._J = None
+    cpu_obj._dJ = None
+    cpu_obj.compute(compute_gradient=True)
+
+    np.testing.assert_allclose(
+        obj.J(),
+        cpu_obj.J(),
+        rtol=_ASPECT_RATIO_VALUE_RTOL,
+        atol=_ASPECT_RATIO_VALUE_ATOL,
+    )
+    np.testing.assert_allclose(
+        cpu_obj.dJ(partials=True).data[dep_opt],
+        np.asarray([-expected_total, expected_total], dtype=np.float64),
+        rtol=_ASPECT_RATIO_GRAD_RTOL,
+        atol=_ASPECT_RATIO_GRAD_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(obj.dJ_by_dcoil_dofs(), dtype=np.float64),
+        np.asarray([-expected_total, expected_total], dtype=np.float64),
+        rtol=_ASPECT_RATIO_GRAD_RTOL,
+        atol=_ASPECT_RATIO_GRAD_ATOL,
+    )
+    projected_derivative = obj.dJ(partials=True)
+    np.testing.assert_allclose(
+        projected_derivative.data[dep_opt],
+        np.asarray([-expected_total, expected_total], dtype=np.float64),
+        rtol=_ASPECT_RATIO_GRAD_RTOL,
+        atol=_ASPECT_RATIO_GRAD_ATOL,
+    )
+    np.testing.assert_allclose(
+        np.asarray(captured["coil_arrays"][0], dtype=np.float64),
+        np.asarray(expected_adjoint, dtype=np.float64),
+    )
+    assert captured["coil_group_indices"] == [(0,)]
+
+
+@pytest.mark.parametrize(
+    ("surfacetype", "linearization_kind"),
+    [
+        pytest.param("SurfaceRZFourier", "hessian", id="ls-rzfourier"),
+        pytest.param(
+            "SurfaceXYZTensorFourier",
+            "exact_jacobian",
+            id="exact-xyztensorfourier",
+        ),
+    ],
+)
+def test_major_radius_jax_re_solve_directional_finite_difference(
+    surfacetype,
+    linearization_kind,
+):
+    surface = _make_aspect_ratio_surface(surfacetype, stellsym=False)
+    base_sdofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+    surface_dof_map = np.zeros((base_sdofs.size, 2), dtype=np.float64)
+    surface_dof_map[3, 0] = 0.015
+    surface_dof_map[-5, 1] = -0.02
+    surface_dof_map_jax = jnp.asarray(surface_dof_map, dtype=jnp.float64)
+
+    class _FakeBiotSavart:
+        x = np.asarray([0.4, -0.2], dtype=np.float64)
+
+        def coil_cotangents_to_dofs_gradient(
+            self,
+            coil_arrays,
+            coil_group_indices,
+            *,
+            coil_dofs,
+        ):
+            adjoint = jnp.asarray(coil_arrays[0], dtype=jnp.float64)
+            return -(surface_dof_map_jax.T @ adjoint[: base_sdofs.size])
+
+    class _FakeBoozerSurface:
+        def __init__(self, biotsavart):
+            self.surface = surface
+            self.biotsavart = biotsavart
+            self.res = {
+                "success": True,
+                "primal_success": True,
+                "iota": jnp.asarray(0.3, dtype=jnp.float64),
+                "G": jnp.asarray(1.0, dtype=jnp.float64),
+            }
+            self.solved_state = None
+
+        @property
+        def need_to_run_code(self):
+            return True
+
+        def run_code(self, iota, G=None):
+            coil_dofs = jnp.asarray(self.biotsavart.x, dtype=jnp.float64)
+            sdofs = base_sdofs + surface_dof_map_jax @ coil_dofs
+            self.solved_state = types.SimpleNamespace(
+                sdofs=sdofs,
+                iota=jnp.asarray(iota, dtype=jnp.float64),
+                G=jnp.asarray(G, dtype=jnp.float64),
+                weight_inv_modB=False,
+            )
+            return self.res
+
+        def get_solved_runtime_state(self):
+            return self.solved_state
+
+        def get_adjoint_runtime_state(self):
+            return types.SimpleNamespace(
+                decision_size=base_sdofs.size + 2,
+                dtype=jnp.float64,
+                linearization_kind=linearization_kind,
+                solve_transpose_with_status=lambda rhs: (
+                    rhs,
+                    jnp.asarray(True),
+                ),
+                stream_group_vjps=lambda adjoint: iter(((adjoint, (0,)),)),
+            )
+
+    fake_biotsavart = _FakeBiotSavart()
+    fake_booz = _FakeBoozerSurface(fake_biotsavart)
+    obj = object.__new__(surfaceobjectives_jax_module.MajorRadiusJAX)
+    obj.boozer_surface = fake_booz
+    obj.surface = surface
+    obj.biotsavart = fake_biotsavart
+    obj._J = None
+    obj._dJ = None
+    obj._dJ_by_dcoil_dofs = None
+
+    base_coil_dofs = fake_biotsavart.x.copy()
+    gradient = np.asarray(obj.dJ_by_dcoil_dofs(), dtype=np.float64)
+    direction = np.asarray([0.6, -0.4], dtype=np.float64)
+
+    def value_at(coil_dofs):
+        fake_biotsavart.x = np.asarray(coil_dofs, dtype=np.float64)
+        obj._J = None
+        return obj.J()
+
+    eps = 1.0e-5
+    fd_directional = (
+        value_at(base_coil_dofs + eps * direction)
+        - value_at(base_coil_dofs - eps * direction)
+    ) / (2.0 * eps)
+    np.testing.assert_allclose(
+        np.dot(gradient, direction),
+        fd_directional,
+        rtol=1e-7,
+        atol=1e-10,
+    )
+
+
+def test_major_radius_jax_lazy_package_export():
+    from simsopt.geo import MajorRadiusJAX
+
+    assert MajorRadiusJAX is surfaceobjectives_jax_module.MajorRadiusJAX
+
+
 class TestToroidalFluxObjectParity:
     @pytest.fixture(autouse=True)
     def _strict_parity_lane(self, monkeypatch, request, parity_lane):
@@ -5169,6 +5949,17 @@ class TestToroidalFluxObjectParity:
         mean_tf = np.mean(tf_jax_values)
         max_err = np.max(np.abs(mean_tf - tf_jax_values)) / abs(mean_tf)
         assert max_err < 1e-2
+
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_toroidal_flux_value_parity_matrix(self, surfacetype, stellsym):
+        _assert_toroidal_flux_pair_parity(
+            surfacetype,
+            stellsym,
+            value_getter=_toroidal_flux_value,
+            rtol=_TOROIDAL_FLUX_VALUE_RTOL,
+            atol=_TOROIDAL_FLUX_VALUE_ATOL,
+        )
 
     @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)

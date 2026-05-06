@@ -67,6 +67,10 @@ if [[ -z "${SINGLE_STAGE_WARM_START_RUN_DIR}" && -z "${SINGLE_STAGE_JAX_RUNTIME_
   echo "Production single-stage GPU proof requires --single-stage-warm-start-run-dir or --single-stage-jax-runtime-seed-spec" >&2
   exit 1
 fi
+if [[ "${SIMSOPT_FAKE_GPU:-}" != "1" && ( "${STAGE2_PLATFORM}" != "cuda" || "${SINGLE_STAGE_PLATFORM}" != "cuda" ) ]]; then
+  echo "Production GPU proof requires --stage2-platform cuda and --single-stage-platform cuda" >&2
+  exit 1
+fi
 if [[ "${STAGE2_PLATFORM}" == "cuda" || "${SINGLE_STAGE_PLATFORM}" == "cuda" ]]; then
   export XLA_FLAGS="${XLA_FLAGS:-} ${GPU_DETERMINISM_XLA_FLAG}"
 fi
@@ -107,7 +111,13 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 mkdir -p "${RESULTS_DIR}" "${JAX_COMPILATION_CACHE_DIR}"
 
 OVERALL_RC=0
-declare -a EXPECTED_PROBES=("${STAGE2_RUNG_NAMES[@]}" "single_stage_cold" "single_stage_warm")
+declare -a EXPECTED_PROBES=(
+  "${STAGE2_RUNG_NAMES[@]}"
+  "single_stage_cold"
+  "single_stage_warm"
+  "boozer_well_conditioned_adjoint"
+  "reduction_cancellation_stress"
+)
 
 emit_payload_summary() {
   local name="$1"
@@ -131,6 +141,62 @@ print({"passed": payload.get("passed"), "failures": payload.get("failures")})
 PY
 }
 
+sample_gpu_peak() {
+  local output_file="$1"
+  local stop_file="$2"
+  local peak_mb=0
+  local used_mb=""
+  while [[ ! -f "${stop_file}" ]]; do
+    used_mb="$(
+      nvidia-smi \
+        --query-gpu=memory.used \
+        --format=csv,noheader,nounits 2>/dev/null \
+        | head -n 1 \
+        | tr -d '[:space:]'
+    )"
+    if [[ "${used_mb}" =~ ^[0-9]+$ ]] && (( used_mb > peak_mb )); then
+      peak_mb="${used_mb}"
+    fi
+    sleep 1
+  done
+  if (( peak_mb > 0 )); then
+    printf '%s\n' "${peak_mb}" > "${output_file}"
+  fi
+}
+
+annotate_probe_payload() {
+  local output_json="$1"
+  local peak_file="$2"
+  shift 2
+  if [[ ! -f "${output_json}" ]]; then
+    return
+  fi
+  python - "${output_json}" "${peak_file}" "$@" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload_path = Path(sys.argv[1])
+peak_path = Path(sys.argv[2])
+command_argv = sys.argv[3:]
+payload = json.loads(payload_path.read_text(encoding="utf-8"))
+provenance = payload.get("provenance")
+if isinstance(provenance, dict):
+    provenance.setdefault("command_argv", command_argv)
+    if peak_path.exists():
+        raw_peak = peak_path.read_text(encoding="utf-8").strip()
+        if raw_peak:
+            sampled_peak_mb = float(raw_peak)
+            current_peak = provenance.get("peak_gpu_memory_mb")
+            provenance["peak_gpu_memory_mb"] = (
+                sampled_peak_mb
+                if current_peak is None
+                else max(float(current_peak), sampled_peak_mb)
+            )
+payload_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
 run_probe() {
   local name="$1"
   local output_json="$2"
@@ -139,6 +205,14 @@ run_probe() {
   echo "=== ${name} ==="
   local start_ts
   start_ts="$(date +%s)"
+  local peak_file="${output_json}.peak_gpu_memory_mb"
+  local stop_file="${output_json}.gpu_sampler_stop"
+  local sampler_pid=""
+  rm -f "${peak_file}" "${stop_file}"
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    sample_gpu_peak "${peak_file}" "${stop_file}" &
+    sampler_pid="$!"
+  fi
   "$@" &
   local pid=$!
   while kill -0 "${pid}" 2>/dev/null; do
@@ -151,10 +225,15 @@ run_probe() {
   else
     rc=$?
   fi
+  if [[ -n "${sampler_pid}" ]]; then
+    touch "${stop_file}"
+    wait "${sampler_pid}" || true
+  fi
   local end_ts
   end_ts="$(date +%s)"
   echo "[result] ${name} rc=${rc} wall_s=$((end_ts-start_ts))"
   if [[ -f "${output_json}" ]]; then
+    annotate_probe_payload "${output_json}" "${peak_file}" "$@"
     cat "${output_json}"
     if ! emit_payload_summary "${name}" "${output_json}"; then
       rc=1
@@ -330,6 +409,26 @@ run_probe single_stage_warm "${RESULTS_DIR}/single_stage_warm.json" \
     --case-artifacts-dir "${RESULTS_DIR}/artifacts/single_stage_warm" \
     --output-json "${RESULTS_DIR}/single_stage_warm.json" || OVERALL_RC=1
 
+run_probe boozer_well_conditioned_adjoint \
+  "${RESULTS_DIR}/boozer_well_conditioned_adjoint.json" \
+  python "${REPO_ROOT}/benchmarks/hf_jobs/cuda_pytest_probe.py" \
+    --name boozer_well_conditioned_adjoint \
+    --platform "${SINGLE_STAGE_PLATFORM}" \
+    --output-json "${RESULTS_DIR}/boozer_well_conditioned_adjoint.json" \
+    -- \
+    -q \
+    tests/geo/test_boozersurface_jax.py::TestBoozerSurfaceJAXClass::test_exact_well_conditioned_operator_adjoint_cpu_gpu_same_state_parity || OVERALL_RC=1
+
+run_probe reduction_cancellation_stress \
+  "${RESULTS_DIR}/reduction_cancellation_stress.json" \
+  python "${REPO_ROOT}/benchmarks/hf_jobs/cuda_pytest_probe.py" \
+    --name reduction_cancellation_stress \
+    --platform "${SINGLE_STAGE_PLATFORM}" \
+    --output-json "${RESULTS_DIR}/reduction_cancellation_stress.json" \
+    -- \
+    -q \
+    tests/core/test_reductions.py::test_pairwise_and_compensated_reductions_match_cpu_gpu_on_cancellation_stress || OVERALL_RC=1
+
 python - "${RESULTS_DIR}" "${STAGE2_PLATFORM}" "${SINGLE_STAGE_PLATFORM}" "${REPO_ROOT}" "${EXPECTED_PROBES[@]}" <<'PY'
 import json
 import math
@@ -343,17 +442,26 @@ single_stage_platform = sys.argv[3]
 repo_root = Path(sys.argv[4])
 sys.path.insert(0, str(repo_root))
 
-from benchmarks.validation_ladder_contract import gpu_proof_parity_contract
+from benchmarks.validation_ladder_contract import (
+    gpu_proof_parity_contract,
+    parity_ladder_tolerances,
+)
 
 expected = sys.argv[5:]
 fake_mode = os.environ.get("SIMSOPT_FAKE_GPU") == "1"
 summary = {}
+PYTEST_PROBE_LANES = {
+    "boozer_well_conditioned_adjoint": "exact_well_conditioned_adjoint",
+    "reduction_cancellation_stress": "reduction_cpu_gpu",
+}
 
 
 def _requested_platform_for_probe(probe_name):
     if probe_name.startswith("stage2_"):
         return stage2_platform
     if probe_name.startswith("single_stage_"):
+        return single_stage_platform
+    if probe_name in PYTEST_PROBE_LANES:
         return single_stage_platform
     return "auto"
 
@@ -368,6 +476,28 @@ def _probe_kind(probe_name):
     if probe_name.startswith("single_stage_"):
         return "single_stage"
     return probe_name
+
+
+def _validate_pytest_probe_parity(probe_name, payload):
+    validation_failures = []
+    proof_parity = payload.get("proof_parity")
+    if not isinstance(proof_parity, dict):
+        validation_failures.append("missing proof_parity object")
+        return validation_failures
+    lane = PYTEST_PROBE_LANES[probe_name]
+    if proof_parity.get("lane") != lane:
+        validation_failures.append(
+            f"proof_parity.lane={proof_parity.get('lane')!r} "
+            f"does not match expected lane {lane!r}"
+        )
+    contract = parity_ladder_tolerances(lane)
+    for key, expected_value in contract.items():
+        if proof_parity.get(key) != expected_value:
+            validation_failures.append(
+                f"proof_parity.{key}={proof_parity.get(key)!r} "
+                f"does not match ladder contract {expected_value!r}"
+            )
+    return validation_failures
 
 
 def _relative_error(actual, reference):
@@ -391,6 +521,9 @@ def _numeric_field(mapping, key, validation_failures):
 
 
 def _validate_proof_parity(probe_name, payload):
+    if probe_name in PYTEST_PROBE_LANES:
+        return _validate_pytest_probe_parity(probe_name, payload)
+
     validation_failures = []
     bundle_provenance = payload.get("bundle_provenance")
     if not isinstance(bundle_provenance, dict):
@@ -511,6 +644,12 @@ def _validate_payload(probe_name, payload):
     for key in ("cuda_force_ptx_jit", "cuda_disable_ptx_jit", "xla_flags"):
         if key not in provenance:
             validation_failures.append(f"missing provenance.{key}")
+    for key in ("repo_sha", "git_status_short", "worktree_dirty", "command_argv"):
+        if key not in provenance:
+            validation_failures.append(f"missing provenance.{key}")
+    for key in ("peak_rss_mb", "peak_gpu_memory_mb"):
+        if key not in provenance:
+            validation_failures.append(f"missing provenance.{key}")
 
     requested_platform = _requested_platform_for_probe(probe_name)
     if requested_platform == "cuda" and not _backend_is_cuda(provenance.get("backend")):
@@ -518,6 +657,12 @@ def _validate_payload(probe_name, payload):
             "requested CUDA proof initialized backend "
             f"{provenance.get('backend')!r}"
         )
+    if requested_platform == "cuda":
+        for key in ("cuda_runtime_version", "cuda_driver_version", "nvidia_smi_gpus"):
+            if not provenance.get(key):
+                validation_failures.append(f"missing provenance.{key}")
+        if provenance.get("x64_enabled") is not True:
+            validation_failures.append("missing provenance.x64_enabled=True")
     return validation_failures
 
 

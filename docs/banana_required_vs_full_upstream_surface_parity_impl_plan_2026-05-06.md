@@ -1,9 +1,9 @@
 # Banana-Required vs Full-Upstream Surface Parity Implementation Plan
 
-Status: implementation plan only.
+Status: local non-CUDA implementation and validation evidence updated; M7 CUDA evidence remains open.
 Date: 2026-05-06.
 Base commit: `0bb26bb0a`.
-Validation basis: current working tree on 2026-05-06. This plan file is untracked, and unrelated dirty files were left unchanged.
+Validation basis: current working tree on 2026-05-06. Repo-local interpreter `.conda/jax-0.9.2/bin/python` reports JAX `0.10.0`, CPU backend only, with `JAX_ENABLE_X64=True` and `JAX_PLATFORMS=cpu` for local gates. Unrelated dirty files were left unchanged.
 
 ## Verdict
 
@@ -24,6 +24,174 @@ The larger "partial" labels mostly come from upstream surface API breadth: secon
 - Full legacy/upstream parity is judged by Requirement Set B.
 - Do not mark manifest rows complete until the named tests and artifact evidence exist.
 
+## Local Validation Evidence
+
+CPU-only evidence from the 2026-05-06 working tree:
+
+- Repo-local interpreter: `.conda/jax-0.9.2/bin/python`, JAX `0.10.0`, backend `cpu`, devices `[CpuDevice(id=0)]`.
+- Manifest/harness gate: `52 passed`.
+- Backend/smoke/native-path gate: `223 passed, 1 skipped`.
+- Banana CPU/JAX parity gate: `589 passed, 134 skipped`.
+- Boozer focused wrapper gate: `377 passed, 4 skipped`.
+- Single-stage CPU reference closure gate: `173 passed, 5 skipped`.
+- Full RZ/non-RZ surface parity gate: `247 passed, 51 skipped, 164 subtests passed`.
+- Full non-RZ JAX surface file: `tests/geo/test_surface_fourier_jax.py -q` passed `123 passed`.
+- Explicit heavy non-RZ normal Hessian gate: `tests/geo/test_surface_fourier_jax.py -q -k "SecondNormalDerivativeParity"` passed `4 passed, 119 deselected`.
+- Full surface Taylor file: `tests/geo/test_surface_taylor.py -q` passed `19 passed, 142 subtests passed`.
+- Surface conversion focused gate: `tests/geo/test_surface_taylor.py -q -k "surface_conversion"` passed `1 passed, 18 deselected, 4 subtests passed`.
+- Full JAX surface-objective file: `tests/geo/test_surface_objectives_jax.py -q` passed `216 passed, 27 skipped`.
+- Non-RZ object API focused gate: `tests/geo/test_surface_fourier_jax.py -q -k "ObjectApiParity and (copy_module_protocol or copy_object_api_variants or fit_to_curve or scale_object_api)"` passed `20 passed, 99 deselected`.
+- Surface objective wrapper gate: `92 passed, 26 skipped, 40 subtests passed`.
+- PrincipalCurvature helper dependency focused gate: `tests/geo/test_surface_objectives_jax.py -q -k "PrincipalCurvature"` passed `28 passed, 215 deselected`.
+- Release-gate unit/schema checks: `28 passed`.
+- HF launcher contract focused gate: `tests/test_hf_production_gpu_proof.py -q -k "requires_explicit_image_or_env or rejects_bootstrap_mode_override or rejects_remote_sha_not_on_repo_ref or accepts_matching_remote_repo_ref_and_sha"` passed `4 passed, 44 deselected`.
+- Runtime seed fixture gate: `tests/test_benchmark_helpers.py::test_single_stage_init_fixture_runtime_seed_spec_loads` plus the HF runtime-seed accept/reject slices passed `3 passed`.
+- `.artifacts/parity/coordinate-mapping-proof.json`: `status=pass`.
+- `.artifacts/parity/fixed-state-cpu.json`: generated CPU artifact with `cpp_cpu_vs_jax_cpu` passing; overall `passed=false` because CUDA lanes were not evaluated on this CPU-only machine.
+
+M7 CUDA launch preflight is still blocked in this local continuation:
+
+- Local `HEAD`: `1951de0666e34fb58488734a818f85ff88d1e028` on `gpu-purity-stage2-20260405`.
+- Fork branch `jungdaesuh/simsopt:gpu-purity-stage2-20260405` currently resolves to `7e3f2eb5e5462c7d3cc989ce8bf1fe010a04f3a2`; `1951de0666e34fb58488734a818f85ff88d1e028` is not reachable from the checked fork remote.
+- `SIMSOPT_HF_GPU_IMAGE` is unset, so `benchmarks/hf_jobs/launch_production_gpu_proof.py` has no image tag for the CUDA job.
+- Local JAX devices are CPU-only: `[CpuDevice(id=0)]`.
+- Docker CLI is not available on this host (`command -v docker` produced no path), so the CUDA image cannot be built locally from this checkout.
+- Local `hf auth whoami` fails before auth resolution with `TypeError: type 'Choice' is not subscriptable`; the Hugging Face MCP session is authenticated as `CreativeEngineer`.
+- `RUNPOD_API_KEY` is present, but no current-SHA CUDA artifact was launched from this working tree because the pushed-ref and image preconditions are not satisfied.
+- The current launcher has no patch/worktree upload path: it clones the configured repo/ref, checks out the resolved SHA, and validates the repo-relative seed paths at that SHA before launching.
+- The old ad hoc bootstrap fallback path is intentionally unavailable: `--bootstrap-mode` is rejected, and `bootstrap_runtime.sh` requires a prebuilt `/opt/venv/bin/python` runtime with a GPU JAX backend.
+- HF launcher dry-run preflight with `SIMSOPT_HF_GPU_IMAGE=dummy-image`, `--repo-sha 1951de0666e34fb58488734a818f85ff88d1e028`, and `--repo-ref gpu-purity-stage2-20260405` fails before launch: `repo SHA 1951de0666e34fb58488734a818f85ff88d1e028 is not present on https://github.com/jungdaesuh/simsopt.git under refs/heads/gpu-purity-stage2-20260405; HF checkout would fail.`
+
+M7 unblock checklist:
+
+- Commit the intended dirty working-tree slice before CUDA validation; the current local `HEAD` does not include the uncommitted implementation/doc updates.
+- Push a branch or tag that contains the exact commit to be validated. The launcher rejects detached or unreachable local-only SHAs by design.
+- Build and publish the CUDA image from `benchmarks/hf_jobs/production_gpu_proof.Dockerfile` on a machine with Docker or equivalent container tooling, then pass it through `SIMSOPT_HF_GPU_IMAGE` or `--image`.
+- Re-run the launcher dry-run first; it must print a preflight report whose `repo_sha` equals the pushed validation commit and whose `image` is the published CUDA image.
+- Only after that preflight passes, run the H200/CUDA no-detach proof or `.github/workflows/jax_h200_production_proof.yml` and attach the resulting artifact metadata here or in the manifest-linked proof doc.
+
+Candidate validation-SHA scope, not staged here:
+
+Surface/objective parity slice required for this plan's non-CUDA claims:
+
+- `benchmarks/validation_ladder_contract.py`
+- `docs/banana_required_vs_full_upstream_surface_parity_impl_plan_2026-05-06.md`
+- `docs/jax_parity_manifest.md`
+- `src/simsopt/geo/surface_fourier_jax.py`
+- `src/simsopt/geo/surfaceobjectives_jax.py`
+- `src/simsopt/geo/surfacerzfourier.py`
+- `src/simsopt/geo/surfacexyzfourier.py`
+- `src/simsopt/geo/surfacexyztensorfourier.py`
+- `src/simsopt/jax_core/__init__.py`
+- `src/simsopt/jax_core/surface_fourier.py`
+- `src/simsopt/jax_core/surface_rzfourier.py`
+- `tests/geo/test_surface_fourier_jax.py`
+- `tests/geo/test_surface_objectives_jax.py`
+- `tests/geo/test_surface_rzfourier_jax.py`
+- `tests/geo/test_surface_taylor.py`
+
+M7/HF proof support slice to include only if it is not already present in the
+pushed target commit used for CUDA proof:
+
+- `benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json` (currently untracked; required when the runtime seed is passed as the directory `benchmarks/fixtures/single_stage_seed_iota15`)
+- `benchmarks/hf_jobs/cuda_pytest_probe.py` (currently untracked; required by `run_production_gpu_proof.sh` for the CUDA pytest proof payloads)
+- `benchmarks/hf_jobs/launch_production_gpu_proof.py`
+- `benchmarks/hf_jobs/run_production_gpu_proof.sh`
+- `benchmarks/single_stage_init_parity.py`
+- `benchmarks/stage2_e2e_comparison.py`
+- `benchmarks/validation_ladder_common.py`
+- `tests/subprocess/hf_production_gpu_fake_runner.py`
+- `tests/test_benchmark_helpers.py`
+- `tests/test_hf_production_gpu_proof.py`
+
+Stage 2 / target-reporting dependency slice:
+
+- `docs/banana_jax_full_test_parity_coverage_impl_plan_2026-05-06.md`
+- `docs/banana_jax_native_port_todos_2026-05-05.md`
+- `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py`
+- `src/simsopt/geo/_distance_jax.py`
+- `src/simsopt/geo/curveobjectives.py`
+- `src/simsopt/objectives/stage2_target_objective_jax.py`
+- `tests/integration/test_stage2_jax.py`
+- `tests/objectives/test_integral_bdotn_jax.py`
+
+This slice was not classified as pure surface/objective parity, but it affects
+the banana CPU/JAX and Stage 2 reporting gates listed above. If it is excluded
+from the validation SHA, rerun those gates against the committed SHA before
+using the local pass counts as evidence.
+
+Do not include unrelated `.artifacts/`, local `.conda/`, generated plots, or
+older runpod output trees in the validation SHA.
+
+Non-destructive scope audit command:
+
+```bash
+git status --short -- \
+  benchmarks/validation_ladder_contract.py \
+  docs/banana_required_vs_full_upstream_surface_parity_impl_plan_2026-05-06.md \
+  docs/jax_parity_manifest.md \
+  src/simsopt/geo/surface_fourier_jax.py \
+  src/simsopt/geo/surfaceobjectives_jax.py \
+  src/simsopt/geo/surfacerzfourier.py \
+  src/simsopt/geo/surfacexyzfourier.py \
+  src/simsopt/geo/surfacexyztensorfourier.py \
+  src/simsopt/jax_core/__init__.py \
+  src/simsopt/jax_core/surface_fourier.py \
+  src/simsopt/jax_core/surface_rzfourier.py \
+  tests/geo/test_surface_fourier_jax.py \
+  tests/geo/test_surface_objectives_jax.py \
+  tests/geo/test_surface_rzfourier_jax.py \
+  tests/geo/test_surface_taylor.py \
+  benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json \
+  benchmarks/hf_jobs/cuda_pytest_probe.py \
+  benchmarks/hf_jobs/launch_production_gpu_proof.py \
+  benchmarks/hf_jobs/run_production_gpu_proof.sh \
+  benchmarks/single_stage_init_parity.py \
+  benchmarks/stage2_e2e_comparison.py \
+  benchmarks/validation_ladder_common.py \
+  tests/subprocess/hf_production_gpu_fake_runner.py \
+  tests/test_benchmark_helpers.py \
+  tests/test_hf_production_gpu_proof.py \
+  docs/banana_jax_full_test_parity_coverage_impl_plan_2026-05-06.md \
+  docs/banana_jax_native_port_todos_2026-05-05.md \
+  examples/single_stage_optimization/STAGE_2/banana_coil_solver.py \
+  src/simsopt/geo/_distance_jax.py \
+  src/simsopt/geo/curveobjectives.py \
+  src/simsopt/objectives/stage2_target_objective_jax.py \
+  tests/integration/test_stage2_jax.py \
+  tests/objectives/test_integral_bdotn_jax.py
+```
+
+If the validation-SHA scope is explicitly approved, stage only the same path
+list and then verify with `git diff --cached --name-status` before committing.
+
+## Completion Audit
+
+Audit date: 2026-05-06.
+
+Objective: execute and implement this plan file. Completion requires the
+local Set A banana-required rows, the implemented Set B full-upstream
+surface/objective rows, the manifest/doc status update, and the required M7
+current-SHA CUDA evidence if CUDA closure is being claimed.
+
+| Deliverable / gate | Concrete artifact evidence | Audit status |
+| --- | --- | --- |
+| Set A scope split and manifest reflection | `docs/jax_parity_manifest.md` links this plan, separates CPU/JAX from CUDA, and the manifest guard passes. | complete for non-CUDA scope; CUDA rows remain open |
+| Field/flux banana lanes | `tests/objectives/test_fluxobjective_jax_parity.py` and `tests/objectives/test_integral_bdotn_jax.py` are part of the passing banana CPU/JAX gate. | complete for local CPU/JAX |
+| RZ banana geometry/spec path | `src/simsopt/jax_core/surface_rzfourier.py`, `src/simsopt/geo/surfacerzfourier.py`, and `tests/geo/test_surface_rzfourier_jax.py`; full RZ/non-RZ surface parity gate passed. | complete for local CPU/JAX |
+| `SurfaceXYZTensorFourier` single-stage seed geometry | `src/simsopt/jax_core/surface_fourier.py`, `src/simsopt/geo/surface_fourier_jax.py`, `tests/geo/test_surface_fourier_jax.py`, and benchmark fixture tests; full non-RZ file passed `123 passed`. | complete for local CPU/JAX |
+| Surface objective wrappers and helpers | `src/simsopt/geo/surfaceobjectives_jax.py` and `tests/geo/test_surface_objectives_jax.py`; full JAX objective file passed `216 passed, 27 skipped`. | complete for local CPU/JAX |
+| Set B RZ/non-RZ geometry, metric, curvature, Hessian, and object API breadth | RZ/non-RZ source and tests listed in the File Ownership Map; focused d2normal gate passed `4 passed, 119 deselected`, surface Taylor passed `19 passed, 142 subtests passed`. | complete for implemented non-CUDA rows |
+| Set B conditional I/O/label/higher paired-point rows | VTK/file-output, `aspect_ratio` Boozer label, and higher `*_lin` APIs are explicitly conditional in B4/B5/B7. | not claimed; not a blocker for implemented rows |
+| Manifest/doc update | `docs/jax_parity_manifest.md` has a documentary non-CUDA surface/objective section and banana inventory rows with CUDA still open where required. | complete for docs; manifest guard passed |
+| Guardrails | `git diff --check` is clean; touched source/test diff grep found no dynamic imports, `typing.cast`, `Any`, or new `try`/`except`. | complete |
+| M7 current-SHA CUDA artifact gate | Local SHA `1951de0666e34fb58488734a818f85ff88d1e028` is not reachable from `jungdaesuh/simsopt:gpu-purity-stage2-20260405`; `SIMSOPT_HF_GPU_IMAGE` is unset; Docker CLI is unavailable; local JAX devices are CPU-only; the working tree is dirty, so a future CUDA proof must validate a new committed SHA containing this implementation. Focused launcher tests confirm a prebuilt image is required, `--bootstrap-mode` is rejected, and SHA/ref mismatch fails closed. | incomplete and blocked |
+
+Audit verdict: not complete for CUDA/P5 closure. The local non-CUDA
+implementation and documentation work is complete, but the objective cannot be
+marked achieved until the M7 current-SHA CUDA artifacts are produced or the
+scope is explicitly changed to non-CUDA only.
+
 ## Requirement Set A: Banana-Required Closure
 
 ### A0 Scope Lock
@@ -34,8 +202,8 @@ The larger "partial" labels mostly come from upstream surface API breadth: secon
 - [x] Keep JAX-vs-JAX agreement insufficient by itself.
 - [x] Keep `BiotSavartJAX`, fixed-surface flux, Stage 2 target bundle, Boozer/single-stage objectives, and consumed surface specs as the banana product surface.
 - [x] Link this Set A/Set B scope split from the `docs/jax_parity_manifest.md` preamble.
-- [ ] Keep this scope decision reflected in `docs/jax_parity_manifest.md` after every closure PR.
-- [ ] Leave full-upstream surface/API parity as backlog unless the banana product path starts loading those APIs directly.
+- [x] Keep this scope decision reflected in `docs/jax_parity_manifest.md` after every closure PR.
+- [x] Keep conditional full-upstream surface/API rows out of banana blockers unless the banana product path starts loading those APIs directly.
 
 ### A1 Field And Flux Lanes
 
@@ -52,13 +220,13 @@ Required state:
 - [x] Keep `BiotSavartJAX`, `SpecBackedBiotSavartJAX`, and `SingleStageRuntimeSpecBiotSavartJAX` contract-complete for required field paths.
 - [x] Keep `SquaredFluxJAX` and fixed-surface flux kernels contract-complete for Stage 2.
 - [x] Keep CPU/C++ precision checks separate from optimizer trace diagnostics.
-- [ ] Preserve existing tolerances from the validation ladder; do not loosen tolerances to hide drift.
-- [ ] Treat JSON/getter breadth and raw-kernel Taylor polish as full-repo parity polish unless the banana manifest promotes them.
+- [x] Preserve existing tolerances from the validation ladder; do not loosen tolerances to hide drift.
+- [x] Treat JSON/getter breadth and raw-kernel Taylor polish as full-repo parity polish unless the banana manifest promotes them.
 
 Acceptance:
 
-- [ ] `tests/objectives/test_fluxobjective_jax_parity.py`
-- [ ] `tests/objectives/test_integral_bdotn_jax.py`
+- [x] `tests/objectives/test_fluxobjective_jax_parity.py`
+- [x] `tests/objectives/test_integral_bdotn_jax.py`
 - [ ] Stage 2 fixed-state value and gradient artifacts when claiming P5 CUDA closure.
 
 ### A2 SurfaceRZFourier Banana Geometry/Spec Path
@@ -87,15 +255,15 @@ Banana-required functions:
 
 Required maintenance tasks:
 
-- [ ] Preserve CPU/C++ DOF order exactly.
-- [ ] Keep RZ mutable-wrapper methods thin: snapshot state into a spec and call kernel functions.
-- [ ] Keep new math in `src/simsopt/jax_core/surface_rzfourier.py`, not in objective wrappers.
-- [ ] Keep `SurfaceRZFourierSpec` immutable and pytree-compatible in `src/simsopt/jax_core/specs.py`.
+- [x] Preserve CPU/C++ DOF order exactly.
+- [x] Keep RZ mutable-wrapper methods thin: snapshot state into a spec and call kernel functions.
+- [x] Keep new math in `src/simsopt/jax_core/surface_rzfourier.py`, not in objective wrappers.
+- [x] Keep `SurfaceRZFourierSpec` immutable and pytree-compatible in `src/simsopt/jax_core/specs.py`.
 - [ ] Add a banana-focused regression test if a Stage 2 or single-stage artifact loader starts consuming any new RZ host utility.
 
 Acceptance:
 
-- [ ] `tests/geo/test_surface_rzfourier_jax.py`
+- [x] `tests/geo/test_surface_rzfourier_jax.py`
 - [ ] Any banana Stage 2/single-stage artifact loader tests that consume RZ specs.
 
 ### A3 SurfaceXYZTensorFourier Support Consumed By Single-Stage
@@ -114,26 +282,26 @@ Banana-required state:
 - [x] Single-stage JAX runtime seed payloads use the canonical `"SurfaceXYZTensorFourier"` surface class.
 - [x] Single-stage JAX runtime seed loading rejects non-`SurfaceXYZTensorFourier` surface classes.
 - [x] JAX spec wrappers cover `gamma`, `gammadash1`, `gammadash2`, and `normal` for `SurfaceXYZTensorFourierSpec`.
-- [ ] Add explicit acceptance coverage that tensor `clamped_dims=True` remains rejected for JAX specs.
-- [ ] Strengthen banana-required spec parity for `SurfaceXYZTensorFourierSpec` across:
-  - [ ] `gamma`
-  - [ ] `gammadash1`
-  - [ ] `gammadash2`
-  - [ ] `normal`
-  - [ ] stellsym true/false where applicable
-  - [ ] `nfp > 1`
-  - [ ] nontrivial `mpol` and `ntor`
-  - [ ] nondefault quadrature point ranges
-- [ ] Add `SurfaceXYZTensorFourierSpec` area/volume parity against CPU for banana diagnostics/output.
-- [ ] Add artifact/load-spec acceptance: a legacy or JAX-emitted single-stage tensor surface artifact loads into immutable specs and evaluates `gamma`/`normal` without compiled target code calling host `surface.gamma()`.
-- [ ] Add single-stage surface-distance/self-intersection acceptance that the JAX tensor point cloud equals CPU geometry on the exact banana workflow grid.
-- [ ] Keep `SurfaceXYZFourierSpec` in generic dispatch/full-upstream backlog unless a real banana artifact starts using it.
+- [x] Add explicit acceptance coverage that tensor `clamped_dims=True` remains rejected for JAX specs.
+- [x] Strengthen banana-required spec parity for `SurfaceXYZTensorFourierSpec` across:
+  - [x] `gamma`
+  - [x] `gammadash1`
+  - [x] `gammadash2`
+  - [x] `normal`
+  - [x] stellsym true/false where applicable
+  - [x] `nfp > 1`
+  - [x] nontrivial `mpol` and `ntor`
+  - [x] nondefault quadrature point ranges
+- [x] Add `SurfaceXYZTensorFourierSpec` area/volume parity against CPU for banana diagnostics/output.
+- [x] Add artifact/load-spec acceptance: a legacy or JAX-emitted single-stage tensor surface artifact loads into immutable specs and evaluates `gamma`/`normal` without compiled target code calling host `surface.gamma()`.
+- [x] Add single-stage surface-distance/self-intersection acceptance that the JAX tensor point cloud equals CPU geometry on the exact banana workflow grid.
+- [x] Keep `SurfaceXYZFourierSpec` outside banana-required acceptance; full-upstream coverage is tracked in B5.
 
 Acceptance:
 
-- [ ] `tests/geo/test_surface_fourier_jax.py`
-- [ ] Single-stage artifact/spec loader tests.
-- [ ] Single-stage surface-distance/self-intersection parity tests if those checks are claimed in the product path.
+- [x] `tests/geo/test_surface_fourier_jax.py`
+- [x] Single-stage artifact/spec loader tests.
+- [x] Single-stage surface-distance/self-intersection parity tests if those checks are claimed in the product path.
 
 ### A4 Single-Stage Objective Wrappers Used By Banana
 
@@ -153,25 +321,25 @@ Banana-required wrappers:
 
 Required maintenance tasks:
 
-- [ ] Route objective geometry through the existing `surface_kind` dispatch.
-- [ ] Preserve exact Boozer solve support scope; do not expand `SurfaceXYZTensorFourier` exact-solve support as a side effect of surface parity work.
-- [ ] Keep host materialization only in named host wrappers.
-- [ ] Do not add `jax.pure_callback` bridges to compiled objective paths.
-- [ ] Keep Stage 2 target-lane reporting pure through `Stage2TargetObjectiveBundle.reporting_summary`.
+- [x] Route objective geometry through the existing `surface_kind` dispatch.
+- [x] Preserve exact Boozer solve support scope; do not expand `SurfaceXYZTensorFourier` exact-solve support as a side effect of surface parity work.
+- [x] Keep host materialization only in named host wrappers.
+- [x] Do not add `jax.pure_callback` bridges to compiled objective paths.
+- [x] Keep Stage 2 target-lane reporting pure through `Stage2TargetObjectiveBundle.reporting_summary`.
 
 Not banana blockers today:
 
-- [ ] `MajorRadiusJAX`
-- [ ] `PrincipalCurvatureJAX`
-- [ ] `QfmResidualJAX`
-- [ ] `AspectRatioJAX`
+- [x] `MajorRadiusJAX`
+- [x] `PrincipalCurvatureJAX`
+- [x] `QfmResidualJAX`
+- [x] `AspectRatioJAX`
 
 Acceptance:
 
-- [ ] `tests/geo/test_surface_objectives_jax.py`
-- [ ] `tests/geo/test_boozersurface_jax.py`
-- [ ] `tests/geo/test_boozer_derivatives_jax.py`
-- [ ] `tests/integration/test_single_stage_jax_cpu_reference.py`
+- [x] `tests/geo/test_surface_objectives_jax.py`
+- [x] `tests/geo/test_boozersurface_jax.py`
+- [x] `tests/geo/test_boozer_derivatives_jax.py`
+- [x] `tests/integration/test_single_stage_jax_cpu_reference.py`
 
 ### A5 Current-SHA CUDA Artifact Gate
 
@@ -183,7 +351,7 @@ This is required for banana P5 CUDA closure, but it is not the same thing as ful
 - [ ] Record Python, JAX, CUDA, driver, device, x64, and XLA metadata.
 - [ ] Record host RSS and GPU memory telemetry where available.
 - [ ] Preserve pass/fail reason and artifact path in the manifest.
-- [ ] Keep CPU-only local proof labeled as CPU evidence only.
+- [x] Keep CPU-only local proof labeled as CPU evidence only.
 
 Required CUDA rows if still open in the manifest:
 
@@ -202,18 +370,18 @@ Set B is the real requirement list if the goal is to remove the "partial" label 
 
 These items are PR review checks unless a later implementation adds an explicit lint, grep, or CI owner for them.
 
-- [ ] Keep all pure surface math in `src/simsopt/jax_core/*` or the existing JAX surface modules.
-- [ ] Keep mutable Python object wrappers thin.
-- [ ] Preserve CPU/reference behavior unchanged.
-- [ ] Preserve immutable spec constructors as the SSOT for JAX surface state.
-- [ ] Preserve DOF ordering, stellsym skipped modes, and coefficient layout exactly.
-- [ ] Do not introduce dynamic imports.
-- [ ] Do not introduce `Any` casts or `typing.cast`.
-- [ ] Do not add defensive try/except fallbacks.
-- [ ] Do not auto-convert host inputs inside JIT/runtime boundaries.
-- [ ] Do not introduce callback bridges in compiled paths.
-- [ ] Avoid naive production Hessians that allocate avoidable `O(ndofs^2)` intermediates outside tests or explicit Hessian APIs.
-- [ ] Keep singular scalar-metric tests away from zero-area/zero-volume cases unless the CPU oracle explicitly defines those limits.
+- [x] Keep all pure surface math in `src/simsopt/jax_core/*` or the existing JAX surface modules.
+- [x] Keep mutable Python object wrappers thin.
+- [x] Preserve CPU/reference behavior unchanged.
+- [x] Preserve immutable spec constructors as the SSOT for JAX surface state.
+- [x] Preserve DOF ordering, stellsym skipped modes, and coefficient layout exactly.
+- [x] Do not introduce dynamic imports.
+- [x] Do not introduce `Any` casts or `typing.cast`.
+- [x] Do not add defensive try/except fallbacks.
+- [x] Do not auto-convert host inputs inside JIT/runtime boundaries.
+- [x] Do not introduce callback bridges in compiled paths.
+- [x] Avoid naive production Hessians that allocate avoidable `O(ndofs^2)` intermediates outside tests or explicit Hessian APIs.
+- [x] Keep singular scalar-metric tests away from zero-area/zero-volume cases unless the CPU oracle explicitly defines those limits.
 
 ### B1 RZ Second-Order Geometry Core
 
@@ -226,28 +394,28 @@ Files:
 
 Implementation:
 
-- [ ] Add direct JAX spec/from-dofs function for `gammadash1dash1`.
-- [ ] Add direct JAX spec/from-dofs function for `gammadash1dash2`.
-- [ ] Add direct JAX spec/from-dofs function for `gammadash2dash2`.
-- [ ] Include Cartesian frame derivative terms, not only Fourier `R/Z` mode derivatives.
-- [ ] Add optional fused second-geometry output only if it removes real duplicated work.
-- [ ] Add coefficient Jacobians/VJPs for `gammadash1dash1`.
-- [ ] Add coefficient Jacobians/VJPs for `gammadash1dash2`.
-- [ ] Add coefficient Jacobians/VJPs for `gammadash2dash2`.
-- [ ] Add thin public `_jax` wrappers in `src/simsopt/geo/surfacerzfourier.py` only after kernel tests pass.
-- [ ] Export new functions from `src/simsopt/jax_core/__init__.py` if existing export conventions require it.
+- [x] Add direct JAX spec/from-dofs function for `gammadash1dash1`.
+- [x] Add direct JAX spec/from-dofs function for `gammadash1dash2`.
+- [x] Add direct JAX spec/from-dofs function for `gammadash2dash2`.
+- [x] Include Cartesian frame derivative terms, not only Fourier `R/Z` mode derivatives.
+- [x] Add optional fused second-geometry output only if it removes real duplicated work. No fused output was added because the scalar APIs avoid product-path duplication.
+- [x] Add coefficient Jacobians/VJPs for `gammadash1dash1`.
+- [x] Add coefficient Jacobians/VJPs for `gammadash1dash2`.
+- [x] Add coefficient Jacobians/VJPs for `gammadash2dash2`.
+- [x] Add thin public `_jax` wrappers in `src/simsopt/geo/surfacerzfourier.py` only after kernel tests pass.
+- [x] Export new functions from `src/simsopt/jax_core/__init__.py` if existing export conventions require it.
 
 Tests:
 
-- [ ] Value parity against legacy `SurfaceRZFourier.gammadash1dash1()`.
-- [ ] Value parity against legacy `SurfaceRZFourier.gammadash1dash2()`.
-- [ ] Value parity against legacy `SurfaceRZFourier.gammadash2dash2()`.
-- [ ] Coefficient-derivative parity against legacy `dgammadash*_by_dcoeff()` methods.
-- [ ] Taylor tests mirroring `tests/geo/test_surface_taylor.py`.
-- [ ] stellsym true coverage.
-- [ ] stellsym false coverage.
-- [ ] `nfp > 1` coverage.
-- [ ] Nondefault quadrature point coverage.
+- [x] Value parity against legacy `SurfaceRZFourier.gammadash1dash1()`.
+- [x] Value parity against legacy `SurfaceRZFourier.gammadash1dash2()`.
+- [x] Value parity against legacy `SurfaceRZFourier.gammadash2dash2()`.
+- [x] Coefficient-derivative parity against legacy `dgammadash*_by_dcoeff()` methods.
+- [x] Taylor tests mirroring `tests/geo/test_surface_taylor.py`.
+- [x] stellsym true coverage.
+- [x] stellsym false coverage.
+- [x] `nfp > 1` coverage.
+- [x] Nondefault quadrature point coverage.
 - [ ] HLO/transfer-guard smoke if a fused kernel is added.
 
 ### B2 RZ Forms And Curvatures
@@ -265,25 +433,25 @@ Files:
 
 Implementation:
 
-- [ ] Add `first_fund_form` with legacy ordering `[E, F, G]`.
-- [ ] Add `second_fund_form` with legacy ordering `[L, M, N]`.
-- [ ] Add `surface_curvatures` with legacy ordering `[H, K, kappa1, kappa2]`.
-- [ ] Add `dfirst_fund_form_by_dcoeff` if parity claim includes form derivatives.
-- [ ] Add `dsecond_fund_form_by_dcoeff` if parity claim includes form derivatives.
-- [ ] Add `dsurface_curvatures_by_dcoeff`.
-- [ ] Preserve normal orientation from `gammadash1 x gammadash2`.
-- [ ] Document the sign convention in comments only where the formula is otherwise ambiguous.
+- [x] Add `first_fund_form` with legacy ordering `[E, F, G]`.
+- [x] Add `second_fund_form` with legacy ordering `[L, M, N]`.
+- [x] Add `surface_curvatures` with legacy ordering `[H, K, kappa1, kappa2]`.
+- [x] Add `dfirst_fund_form_by_dcoeff` if parity claim includes form derivatives.
+- [x] Add `dsecond_fund_form_by_dcoeff` if parity claim includes form derivatives.
+- [x] Add `dsurface_curvatures_by_dcoeff`.
+- [x] Preserve normal orientation from `gammadash1 x gammadash2`.
+- [x] Document the sign convention in comments only where the formula is otherwise ambiguous.
 
 Tests:
 
-- [ ] Value parity for first fundamental form.
-- [ ] Value parity for second fundamental form.
-- [ ] Value parity for surface curvatures.
-- [ ] Derivative parity for form derivatives if implemented.
-- [ ] Derivative parity for `dsurface_curvatures_by_dcoeff`.
-- [ ] Taylor finite-difference checks.
-- [ ] Gauss-Bonnet style coverage against upstream `tests/geo/test_surface.py`.
-- [ ] Curvature sign regression on at least one nontrivial non-stellsym surface.
+- [x] Value parity for first fundamental form.
+- [x] Value parity for second fundamental form.
+- [x] Value parity for surface curvatures.
+- [x] Derivative parity for form derivatives if implemented.
+- [x] Derivative parity for `dsurface_curvatures_by_dcoeff`.
+- [x] Taylor finite-difference checks.
+- [x] Gauss-Bonnet style coverage against upstream `tests/geo/test_surface.py`.
+- [x] Curvature sign regression on at least one nontrivial non-stellsym surface.
 
 ### B3 RZ Scalar Metric Hessians
 
@@ -300,29 +468,29 @@ Files:
 
 Implementation:
 
-- [ ] Add `mean_cross_sectional_area` JAX scalar helper.
-- [ ] Add `minor_radius` JAX scalar helper.
-- [ ] Add `major_radius` JAX scalar helper.
-- [ ] Add `aspect_ratio` JAX scalar helper.
-- [ ] Add JAX `d2area_by_dcoeffdcoeff` mirroring the C++/pybind CPU oracle.
-- [ ] Add JAX `d2volume_by_dcoeffdcoeff` mirroring the C++/pybind CPU oracle.
-- [ ] Add `d2minor_radius_by_dcoeff_dcoeff`.
-- [ ] Add `d2major_radius_by_dcoeff_dcoeff`.
-- [ ] Add `d2aspect_ratio_by_dcoeff_dcoeff`.
-- [ ] Keep Hessian APIs explicit so production paths do not allocate Hessians accidentally.
+- [x] Add `mean_cross_sectional_area` JAX scalar helper.
+- [x] Add `minor_radius` JAX scalar helper.
+- [x] Add `major_radius` JAX scalar helper.
+- [x] Add `aspect_ratio` JAX scalar helper.
+- [x] Add JAX `d2area_by_dcoeffdcoeff` mirroring the C++/pybind CPU oracle.
+- [x] Add JAX `d2volume_by_dcoeffdcoeff` mirroring the C++/pybind CPU oracle.
+- [x] Add `d2minor_radius_by_dcoeff_dcoeff`.
+- [x] Add `d2major_radius_by_dcoeff_dcoeff`.
+- [x] Add `d2aspect_ratio_by_dcoeff_dcoeff`.
+- [x] Keep Hessian APIs explicit so production paths do not allocate Hessians accidentally.
 
 Tests:
 
-- [ ] CPU/JAX value parity for `mean_cross_sectional_area`.
-- [ ] CPU/JAX value parity for `minor_radius`.
-- [ ] CPU/JAX value parity for `major_radius`.
-- [ ] CPU/JAX value parity for `aspect_ratio`.
-- [ ] Gradient parity for each scalar metric.
-- [ ] Hessian parity for each scalar metric with upstream tolerances.
-- [ ] Second-order Taylor tests.
-- [ ] Area Hessian parity against the C++/pybind CPU oracle.
-- [ ] Volume Hessian parity against the C++/pybind CPU oracle.
-- [ ] Tests avoid near-zero singular cases unless explicitly testing CPU-defined behavior.
+- [x] CPU/JAX value parity for `mean_cross_sectional_area`.
+- [x] CPU/JAX value parity for `minor_radius`.
+- [x] CPU/JAX value parity for `major_radius`.
+- [x] CPU/JAX value parity for `aspect_ratio`.
+- [x] Gradient parity for each scalar metric.
+- [x] Hessian parity for each scalar metric with upstream tolerances.
+- [x] Second-order Taylor tests.
+- [x] Area Hessian parity against the C++/pybind CPU oracle.
+- [x] Volume Hessian parity against the C++/pybind CPU oracle.
+- [x] Tests avoid near-zero singular cases unless explicitly testing CPU-defined behavior.
 
 ### B4 Broader SurfaceRZFourier Host API Behavior
 
@@ -335,21 +503,21 @@ Files:
 
 Implementation and coverage:
 
-- [ ] Verify `from_focus` output can produce a JAX spec and match CPU geometry.
-- [ ] Verify `from_pyQSC` output can produce a JAX spec and match CPU geometry.
-- [ ] Verify `make_rotating_ellipse` output can produce a JAX spec and match CPU geometry.
-- [ ] Verify `change_resolution` preserves JAX spec roundtrip.
-- [ ] Verify `condense_spectrum` preserves JAX spec roundtrip.
-- [ ] Verify `extend_via_normal` preserves JAX spec roundtrip.
-- [ ] Verify `copy` and object-independence semantics for JAX spec snapshots.
+- [x] Verify `from_focus` output can produce a JAX spec and match CPU geometry.
+- [x] Verify `from_pyQSC` output can produce a JAX spec and match CPU geometry.
+- [x] Verify `make_rotating_ellipse` output can produce a JAX spec and match CPU geometry.
+- [x] Verify `change_resolution` preserves JAX spec roundtrip.
+- [x] Verify `condense_spectrum` preserves JAX spec roundtrip.
+- [x] Verify `extend_via_normal` preserves JAX spec roundtrip.
+- [x] Verify `copy` and object-independence semantics for JAX spec snapshots.
 - [ ] Add serialization/GSON roundtrip tests if I/O parity is claimed.
 - [ ] Add `to_vtk` smoke/file-exists coverage only if I/O parity is claimed.
-- [ ] Treat optional dependency tests as skipped when the upstream CPU tests skip for missing optional dependencies.
+- [x] Treat optional dependency tests as skipped when the upstream CPU tests skip for missing optional dependencies.
 
 Acceptance:
 
-- [ ] Existing CPU host tests still pass unchanged.
-- [ ] JAX spec tests prove the resulting surfaces evaluate the same `gamma`, tangents, normals, area, and volume as CPU.
+- [x] Existing CPU host tests still pass unchanged.
+- [x] JAX spec tests prove the resulting surfaces evaluate the same `gamma`, tangents, normals, area, and volume as CPU.
 
 ### B5 Non-RZ Geometry And Derivative Parity
 
@@ -364,37 +532,37 @@ Files:
 
 Implementation:
 
-- [ ] Add `SurfaceXYZFourier` coefficient derivative parity for `dgamma_by_dcoeff`.
-- [ ] Add `SurfaceXYZFourier` coefficient derivative parity for `dgammadash1_by_dcoeff`.
-- [ ] Add `SurfaceXYZFourier` coefficient derivative parity for `dgammadash2_by_dcoeff`.
-- [ ] Add `gammadash1dash1` for `SurfaceXYZFourierSpec`.
-- [ ] Add `gammadash1dash2` for `SurfaceXYZFourierSpec`.
-- [ ] Add `gammadash2dash2` for `SurfaceXYZFourierSpec`.
-- [ ] Add `gammadash1dash1` for `SurfaceXYZTensorFourierSpec`.
-- [ ] Add `gammadash1dash2` for `SurfaceXYZTensorFourierSpec`.
-- [ ] Add `gammadash2dash2` for `SurfaceXYZTensorFourierSpec`.
-- [ ] Add coefficient derivatives for second coordinate derivatives where upstream exposes them.
-- [ ] Add CPU parity tests for existing `gamma_lin` / `surface_gamma_lin_from_dofs` if paired-point APIs are in full-upstream scope.
-- [ ] Add `gammadash1_lin`.
-- [ ] Add `gammadash2_lin`.
+- [x] Add `SurfaceXYZFourier` coefficient derivative parity for `dgamma_by_dcoeff`.
+- [x] Add `SurfaceXYZFourier` coefficient derivative parity for `dgammadash1_by_dcoeff`.
+- [x] Add `SurfaceXYZFourier` coefficient derivative parity for `dgammadash2_by_dcoeff`.
+- [x] Add `gammadash1dash1` for `SurfaceXYZFourierSpec`.
+- [x] Add `gammadash1dash2` for `SurfaceXYZFourierSpec`.
+- [x] Add `gammadash2dash2` for `SurfaceXYZFourierSpec`.
+- [x] Add `gammadash1dash1` for `SurfaceXYZTensorFourierSpec`.
+- [x] Add `gammadash1dash2` for `SurfaceXYZTensorFourierSpec`.
+- [x] Add `gammadash2dash2` for `SurfaceXYZTensorFourierSpec`.
+- [x] Add coefficient derivatives for second coordinate derivatives where upstream exposes them.
+- [x] Add CPU parity tests for existing `gamma_lin` / `surface_gamma_lin_from_dofs` if paired-point APIs are in full-upstream scope.
+- [x] Add `gammadash1_lin`.
+- [x] Add `gammadash2_lin`.
 - [ ] Add higher `*_lin` paired-point APIs only if full legacy parity explicitly includes them.
-- [ ] Add `unitnormal`.
-- [ ] Add `dnormal_by_dcoeff`.
-- [ ] Add `d2normal_by_dcoeffdcoeff` only as an explicit heavy API.
-- [ ] Add `dunitnormal_by_dcoeff`.
-- [ ] Add full-upstream non-RZ area/volume value APIs for surface families not owned by A3 tensor diagnostics.
-- [ ] Add `darea`, `d2area`, `dvolume`, and `d2volume` parity for full-upstream non-RZ scope.
+- [x] Add `unitnormal`.
+- [x] Add `dnormal_by_dcoeff`.
+- [x] Add `d2normal_by_dcoeffdcoeff` only as an explicit heavy API.
+- [x] Add `dunitnormal_by_dcoeff`.
+- [x] Add full-upstream non-RZ area/volume value APIs for surface families not owned by A3 tensor diagnostics.
+- [x] Add `darea`, `d2area`, `dvolume`, and `d2volume` parity for full-upstream non-RZ scope.
 
 Tests:
 
-- [ ] CPU/JAX parity for all new non-RZ coordinate derivatives.
-- [ ] CPU/JAX parity for coefficient derivatives.
-- [ ] First- and second-order Taylor tests.
-- [ ] stellsym true/false coverage where supported.
-- [ ] `nfp > 1` coverage.
-- [ ] nondefault quadrature coverage.
-- [ ] Tensor unclamped coverage.
-- [ ] Explicit rejection coverage for tensor `clamped_dims` unless full upstream scope decides to support it.
+- [x] CPU/JAX parity for all new non-RZ coordinate derivatives.
+- [x] CPU/JAX parity for coefficient derivatives.
+- [x] First- and second-order Taylor tests.
+- [x] stellsym true/false coverage where supported.
+- [x] `nfp > 1` coverage.
+- [x] nondefault quadrature coverage.
+- [x] Tensor unclamped coverage.
+- [x] Explicit rejection coverage for tensor `clamped_dims` unless full upstream scope decides to support it.
 
 ### B6 Non-RZ Object API Breadth
 
@@ -409,26 +577,27 @@ Files:
 
 Implementation and coverage:
 
-- [ ] Add copy/deepcopy/object-independence tests for `SurfaceXYZFourier`.
-- [ ] Add copy/deepcopy/object-independence tests for `SurfaceXYZTensorFourier`.
-- [ ] Add direct JSON/GSON roundtrip tests for `SurfaceXYZFourier`.
-- [ ] Add direct JSON/GSON roundtrip tests for `SurfaceXYZTensorFourier`.
+- [x] Add copy/object-independence tests for `SurfaceXYZFourier`.
+- [x] Add copy/object-independence tests for `SurfaceXYZTensorFourier`.
+- [x] Add Python `copy`/`deepcopy` coverage if that object protocol is claimed.
+- [x] Add direct JSON/GSON roundtrip tests for `SurfaceXYZFourier`.
+- [x] Add direct JSON/GSON roundtrip tests for `SurfaceXYZTensorFourier`.
 - [ ] Add VTK smoke/file-exists coverage for tensor surfaces if I/O parity is claimed.
-- [ ] Add object API tests for `to_RZFourier`.
-- [ ] Add object API tests for `cross_section`.
-- [ ] Add object API tests for `least_squares_fit`.
-- [ ] Add object API tests for `fit_to_curve`.
-- [ ] Add object API tests for `scale`.
-- [ ] Add object API tests for `extend_via_normal`.
-- [ ] Add object API tests for `extend_via_projected_normal`.
-- [ ] Fix or add the intended `test_surface_conversion` coverage if the current test body is exercising the wrong helper.
+- [x] Add object API tests for `to_RZFourier`.
+- [x] Add object API tests for `cross_section`.
+- [x] Add object API tests for `least_squares_fit`.
+- [x] Add object API tests for `fit_to_curve`.
+- [x] Add object API tests for `scale`.
+- [x] Add object API tests for `extend_via_normal`.
+- [x] Add object API tests for `extend_via_projected_normal`.
+- [x] Fix or add the intended `test_surface_conversion` coverage if the current test body is exercising the wrong helper.
 
 Acceptance:
 
-- [ ] `tests/geo/test_surface_fourier_jax.py`
-- [ ] `tests/geo/test_surface_xyzfourier.py`
-- [ ] `tests/geo/test_surface.py`
-- [ ] `tests/geo/test_surface_taylor.py`
+- [x] `tests/geo/test_surface_fourier_jax.py`
+- [x] `tests/geo/test_surface_xyzfourier.py`
+- [x] `tests/geo/test_surface.py`
+- [x] `tests/geo/test_surface_taylor.py`
 
 ### B7 Missing Surface Objective Wrappers
 
@@ -447,99 +616,99 @@ Related dependencies:
 
 Implementation order:
 
-- [ ] Add shared pure-JAX scalar helpers first:
-  - [ ] `mean_cross_sectional_area`
-  - [ ] `minor_radius`
-  - [ ] `major_radius`
-  - [ ] `aspect_ratio`
-  - [ ] gradients for all four
-  - [ ] Hessians where upstream exposes them
-- [ ] Implement `AspectRatioJAX`.
-- [ ] Implement `MajorRadiusJAX`.
-- [ ] Implement `QfmResidualJAX`.
-- [ ] Implement `PrincipalCurvatureJAX` last, after curvature kernels exist.
-- [ ] Export new wrappers through `surfaceobjectives_jax.__all__`.
-- [ ] Add import/lazy-access smoke coverage through `simsopt.geo` if existing conventions require it.
+- [x] Add shared pure-JAX scalar helpers first:
+  - [x] `mean_cross_sectional_area`
+  - [x] `minor_radius`
+  - [x] `major_radius`
+  - [x] `aspect_ratio`
+  - [x] gradients for all four
+  - [x] Hessians where upstream exposes them
+- [x] Implement `AspectRatioJAX`.
+- [x] Implement `MajorRadiusJAX`.
+- [x] Implement `QfmResidualJAX`.
+- [x] Implement `PrincipalCurvatureJAX` last, after curvature kernels exist.
+- [x] Export new wrappers through `surfaceobjectives_jax.__all__`.
+- [x] Add import/lazy-access smoke coverage through `simsopt.geo` if existing conventions require it.
 - [ ] Add `aspect_ratio` label support to `BoozerSurfaceJAX` only if full label-test parity is in scope.
 
 `AspectRatioJAX` requirements:
 
-- [ ] Mirror upstream value behavior.
-- [ ] Mirror `dJ`.
-- [ ] Mirror `dJ_by_dsurfacecoefficients`.
-- [ ] Mirror `d2J_by_dsurfacecoefficientsdsurfacecoefficients`.
-- [ ] Test CPU/JAX value parity.
-- [ ] Test surface-gradient parity.
-- [ ] Test Hessian parity.
-- [ ] Test first-order Taylor.
-- [ ] Test second-order Taylor.
-- [ ] Cover `SurfaceRZFourier`.
-- [ ] Cover `SurfaceXYZFourier`.
-- [ ] Cover `SurfaceXYZTensorFourier`.
-- [ ] Cover stellsym true/false where supported.
+- [x] Mirror upstream value behavior.
+- [x] Mirror `dJ`.
+- [x] Mirror `dJ_by_dsurfacecoefficients`.
+- [x] Mirror `d2J_by_dsurfacecoefficientsdsurfacecoefficients`.
+- [x] Test CPU/JAX value parity.
+- [x] Test surface-gradient parity.
+- [x] Test Hessian parity.
+- [x] Test first-order Taylor.
+- [x] Test second-order Taylor.
+- [x] Cover `SurfaceRZFourier`.
+- [x] Cover `SurfaceXYZFourier`.
+- [x] Cover `SurfaceXYZTensorFourier`.
+- [x] Cover stellsym true/false where supported.
 
 `MajorRadiusJAX` requirements:
 
-- [ ] Reuse the existing Boozer objective base if it fits the derivative contract.
-- [ ] Value is solved-surface major radius.
-- [ ] Direct coil gradient is zero.
-- [ ] Adjoint RHS is the major-radius surface gradient padded into `[surface_dofs, iota, G]`.
-- [ ] Test value parity vs CPU `MajorRadius`.
-- [ ] Test public `Derivative` projection parity.
-- [ ] Test re-solve directional Taylor/finite difference with respect to coil DOFs for LS where supported.
-- [ ] Test exact solve only where `BoozerSurfaceJAX` supports the surface family.
+- [x] Reuse the existing Boozer objective base if it fits the derivative contract.
+- [x] Value is solved-surface major radius.
+- [x] Direct coil gradient is zero.
+- [x] Adjoint RHS is the major-radius surface gradient padded into `[surface_dofs, iota, G]`.
+- [x] Test value parity vs CPU `MajorRadius`.
+- [x] Test public `Derivative` projection parity.
+- [x] Test re-solve directional Taylor/finite difference with respect to coil DOFs for LS where supported.
+- [x] Test exact solve only where `BoozerSurfaceJAX` supports the surface family.
 
 `QfmResidualJAX` requirements:
 
-- [ ] Implement pure scalar `qfm_residual` from surface DOFs, coil-set spec, and surface metadata.
-- [ ] Use `jax.grad` with respect to surface DOFs for the surface derivative.
-- [ ] Use existing `BiotSavartJAX` field and pullback APIs.
-- [ ] Test value parity vs CPU `QfmResidual`.
-- [ ] Test surface-gradient parity.
-- [ ] Test first-order Taylor with respect to surface DOFs.
-- [ ] Test cache/update behavior when surface DOFs change.
+- [x] Implement pure scalar `qfm_residual` from surface DOFs, coil-set spec, and surface metadata.
+- [x] Use `jax.grad` with respect to surface DOFs for the surface derivative.
+- [x] Use existing `BiotSavartJAX` field and pullback APIs.
+- [x] Test value parity vs CPU `QfmResidual`.
+- [x] Test surface-gradient parity.
+- [x] Test first-order Taylor with respect to surface DOFs.
+- [x] Test cache/update behavior when surface DOFs change.
 
 `PrincipalCurvatureJAX` requirements:
 
-- [ ] Depend on `surface_curvatures`.
-- [ ] Depend on `dsurface_curvatures_by_dcoeff`.
-- [ ] Test value parity vs CPU `PrincipalCurvature`.
-- [ ] Test surface-gradient parity.
-- [ ] Test first-order Taylor.
-- [ ] Do not add Hessian tests unless upstream exposes a Hessian contract.
+- [x] Depend on `surface_curvatures`.
+- [x] Depend on `dsurface_curvatures_by_dcoeff`.
+- [x] Test value parity vs CPU `PrincipalCurvature`.
+- [x] Test surface-gradient parity.
+- [x] Test first-order Taylor.
+- [x] Do not add Hessian tests unless upstream exposes a Hessian contract.
 
 Banana classification:
 
-- [ ] Keep `MajorRadiusJAX` classified as banana-adjacent but not a current banana blocker.
-- [ ] Keep `AspectRatioJAX` classified as upstream parity backlog unless it becomes a JAX Boozer label or QFM constraint in the product path.
-- [ ] Keep `QfmResidualJAX` classified as upstream/QFM workflow backlog unless product scope changes.
-- [ ] Keep `PrincipalCurvatureJAX` classified as upstream parity backlog; banana currently uses curve curvature, not surface principal curvature.
+- [x] Keep `MajorRadiusJAX` classified as banana-adjacent but not a current banana blocker.
+- [x] Keep `AspectRatioJAX` classified as upstream parity backlog unless it becomes a JAX Boozer label or QFM constraint in the product path.
+- [x] Keep `QfmResidualJAX` classified as upstream/QFM workflow backlog unless product scope changes.
+- [x] Keep `PrincipalCurvatureJAX` classified as upstream parity backlog; banana currently uses curve curvature, not surface principal curvature.
 
 ## File Ownership Map
 
 Production files:
 
-- [ ] `src/simsopt/jax_core/surface_rzfourier.py`: RZ pure JAX kernels, derivative kernels, forms, curvatures, scalar metrics, explicit Hessians.
-- [ ] `src/simsopt/geo/surfacerzfourier.py`: thin RZ object wrappers and spec snapshot access only.
-- [ ] `src/simsopt/geo/surface.py`: CPU/reference base API remains unchanged unless a pure wrapper needs a documented parity hook.
-- [ ] `src/simsoptpp/surface.h`, `src/simsoptpp/surface.cpp`, `src/simsoptpp/python_surfaces.cpp`: C++/pybind CPU oracle for forms, curvatures, area/volume Hessians, and derivative-heavy surface parity.
-- [ ] `src/simsopt/geo/surface_fourier_jax.py`: non-RZ pure JAX geometry and derivative primitives.
-- [ ] `src/simsopt/jax_core/surface_fourier.py`: immutable non-RZ spec wrappers.
-- [ ] `src/simsopt/jax_core/specs.py`: immutable specs only when new state is actually required.
-- [ ] `src/simsopt/jax_core/__init__.py`: exports only after kernel APIs are stable.
-- [ ] `src/simsopt/geo/surfaceobjectives_jax.py`: missing objective wrappers and objective-specific plumbing only.
-- [ ] `src/simsopt/geo/boozersurface_jax.py`: label support only if full label parity is in scope.
+- [x] `src/simsopt/jax_core/surface_rzfourier.py`: RZ pure JAX kernels, derivative kernels, forms, curvatures, scalar metrics, explicit Hessians.
+- [x] `src/simsopt/geo/surfacerzfourier.py`: thin RZ object wrappers and spec snapshot access only.
+- [x] `src/simsopt/geo/surface.py`: CPU/reference base API remains unchanged unless a pure wrapper needs a documented parity hook.
+- [x] `src/simsoptpp/surface.h`, `src/simsoptpp/surface.cpp`, `src/simsoptpp/python_surfaces.cpp`: C++/pybind CPU oracle for forms, curvatures, area/volume Hessians, and derivative-heavy surface parity.
+- [x] `src/simsopt/geo/surface_fourier_jax.py`: non-RZ pure JAX geometry and derivative primitives.
+- [x] `src/simsopt/jax_core/surface_fourier.py`: immutable non-RZ spec wrappers.
+- [x] `src/simsopt/jax_core/specs.py`: immutable specs only when new state is actually required.
+- [x] `src/simsopt/jax_core/__init__.py`: exports only after kernel APIs are stable.
+- [x] `src/simsopt/geo/surfaceobjectives_jax.py`: missing objective wrappers and objective-specific plumbing only.
+- [x] `src/simsopt/geo/boozersurface_jax.py`: label support only if full label parity is in scope.
 
 Test files:
 
-- [ ] `tests/geo/test_surface_rzfourier_jax.py`: RZ JAX parity, transfer guards, spec tests.
-- [ ] `tests/geo/test_surface_fourier_jax.py`: non-RZ JAX parity, spec tests.
-- [ ] `tests/geo/test_surface_objectives_jax.py`: JAX objective wrappers.
-- [ ] `tests/geo/test_surface_taylor.py`: CPU oracle/Taylor reference stays authoritative.
-- [ ] `tests/geo/test_surface_rzfourier.py`: CPU host/API oracle stays authoritative.
-- [ ] `tests/geo/test_surface.py`: base surface oracle and Gauss-Bonnet/form coverage.
-- [ ] `tests/geo/test_surface_objectives.py`: CPU objective oracle stays authoritative.
-- [ ] `tests/docs/test_banana_parity_coverage_manifest.py`: manifest status validation after evidence exists.
+- [x] `tests/geo/test_surface_rzfourier_jax.py`: RZ JAX parity, transfer guards, spec tests.
+- [x] `tests/geo/test_surface_fourier_jax.py`: non-RZ JAX parity, spec tests.
+- [x] `tests/geo/test_surface_objectives_jax.py`: JAX objective wrappers.
+- [x] `tests/geo/test_surface_taylor.py`: CPU oracle/Taylor reference stays authoritative.
+- [x] `tests/geo/test_surface_rzfourier.py`: CPU host/API oracle stays authoritative.
+- [x] `tests/geo/test_surface.py`: base surface oracle and Gauss-Bonnet/form coverage.
+- [x] `tests/geo/test_surface_objectives.py`: CPU objective oracle stays authoritative.
+- [x] `tests/docs/test_banana_parity_coverage_manifest.py`: manifest status validation after evidence exists.
 
 ## Milestone Order
 
@@ -547,69 +716,72 @@ The sequence below is safe for one engineer. For parallel implementation, M4 and
 
 ### M0 Scope And Baseline
 
-- [ ] Freeze the Set A vs Set B scope split in this file.
-- [ ] Confirm `docs/jax_parity_manifest.md` still reflects banana rows accurately.
-- [ ] Confirm local interpreter and x64 settings before running parity tests.
-- [ ] Confirm no source edits are needed for banana Set A unless current tests fail.
+- [x] Freeze the Set A vs Set B scope split in this file.
+- [x] Confirm `docs/jax_parity_manifest.md` still reflects banana rows accurately.
+- [x] Confirm local interpreter and x64 settings before running parity tests.
+- [x] Confirm no source edits are needed for banana Set A unless current tests fail.
 
 ### M1 Banana Non-CUDA Acceptance Tightening
 
-- [ ] Add tensor `clamped_dims` rejection test.
-- [ ] Strengthen `SurfaceXYZTensorFourierSpec` parity across banana-relevant grids.
-- [ ] Add tensor area/volume spec-level parity if banana diagnostics depend on it.
-- [ ] Add artifact/load-spec acceptance for single-stage tensor surfaces.
-- [ ] Add self-intersection/surface-distance point-cloud equality if claimed in the product path.
-- [ ] Run banana CPU/JAX gates.
-- [ ] Update manifest only for evidence-backed rows.
+- [x] Add tensor `clamped_dims` rejection test.
+- [x] Strengthen `SurfaceXYZTensorFourierSpec` parity across banana-relevant grids.
+- [x] Add tensor area/volume spec-level parity if banana diagnostics depend on it.
+- [x] Add artifact/load-spec acceptance for single-stage tensor surfaces.
+- [x] Add self-intersection/surface-distance point-cloud equality if claimed in the product path.
+- [x] Run banana CPU/JAX gates.
+- [x] Update manifest only for evidence-backed rows.
 
 ### M2 RZ Full Legacy Geometry
 
-- [ ] Implement RZ second-order coordinate derivatives.
-- [ ] Implement RZ coefficient derivatives/VJPs for second-order geometry.
-- [ ] Add RZ Taylor and CPU parity tests.
-- [ ] Run RZ JAX and CPU oracle tests.
+- [x] Implement RZ second-order coordinate derivatives.
+- [x] Implement RZ coefficient derivatives/VJPs for second-order geometry.
+- [x] Add RZ Taylor and CPU parity tests.
+- [x] Run RZ JAX and CPU oracle tests.
 
 ### M3 RZ Forms, Curvatures, Metrics
 
-- [ ] Implement fundamental forms.
-- [ ] Implement surface curvatures.
-- [ ] Implement curvature derivatives.
-- [ ] Implement scalar metric helpers.
-- [ ] Implement explicit scalar metric Hessians.
-- [ ] Add parity, derivative, Taylor, and Gauss-Bonnet tests.
+- [x] Implement fundamental forms.
+- [x] Implement surface curvatures.
+- [x] Implement curvature derivatives.
+- [x] Implement scalar metric helpers.
+- [x] Implement explicit scalar metric Hessians.
+- [x] Add parity, derivative, Taylor, and Gauss-Bonnet tests.
 
 ### M4 Non-RZ Full Geometry
 
-- [ ] Implement non-RZ second coordinate derivatives.
-- [ ] Implement non-RZ coefficient derivatives.
-- [ ] Implement non-RZ normal/unitnormal derivative APIs.
-- [ ] Implement non-RZ area/volume derivative APIs.
-- [ ] Add parity and Taylor tests.
+- [x] Implement non-RZ second coordinate derivatives.
+- [x] Implement non-RZ second-coordinate coefficient derivatives.
+- [x] Implement remaining non-RZ coordinate coefficient derivatives.
+- [x] Implement non-RZ normal/unitnormal derivative APIs.
+- [x] Implement non-RZ area/volume derivative APIs.
+- [x] Add parity tests.
+- [x] Add Taylor tests.
 
 ### M5 Host/Object API Breadth
 
-- [ ] Add RZ host utility/spec roundtrip coverage.
-- [ ] Add non-RZ copy/I/O/object API breadth coverage.
-- [ ] Keep optional dependency skips aligned with CPU tests.
-- [ ] Keep CPU behavior unchanged.
+- [x] Add RZ host utility/spec roundtrip coverage.
+- [x] Add non-RZ copy/I/O/object API breadth coverage for `copy`, `copy.deepcopy`, JSON/GSON, `to_RZFourier`, `cross_section`, `least_squares_fit`, `fit_to_curve`, `scale`, and normal-extension APIs.
+- [x] Keep VTK as an explicit unclosed backlog row unless claimed.
+- [x] Keep optional dependency skips aligned with CPU tests.
+- [x] Keep CPU behavior unchanged.
 
 ### M6 Missing Objective Wrappers
 
-- [ ] Implement shared scalar helpers.
-- [ ] Implement `AspectRatioJAX`.
-- [ ] Implement `MajorRadiusJAX`.
-- [ ] Implement `QfmResidualJAX`.
-- [ ] Implement `PrincipalCurvatureJAX`.
-- [ ] Add CPU/JAX value, derivative, and Taylor tests.
-- [ ] Update exports/import smoke tests.
+- [x] Implement shared scalar helpers.
+- [x] Implement `AspectRatioJAX`.
+- [x] Implement `MajorRadiusJAX`.
+- [x] Implement `QfmResidualJAX`.
+- [x] Implement `PrincipalCurvatureJAX`.
+- [x] Add CPU/JAX value, derivative, and Taylor tests (`AspectRatioJAX`, `QfmResidualJAX`, `PrincipalCurvatureJAX`, and `MajorRadiusJAX` are covered; `MajorRadiusJAX` includes native adjoint, public projection, LS re-solve, and exact tensor-runtime finite-difference coverage).
+- [x] Update exports/import smoke tests.
 
 ### M7 CUDA And Documentation Evidence
 
 - [ ] Run current-sha CUDA artifacts for banana P5 rows if banana CUDA closure is the goal.
 - [ ] Attach artifact metadata to the manifest or linked proof doc.
-- [ ] Update `docs/jax_parity_manifest.md`.
-- [ ] Update the existing banana coverage plan if rows have moved.
-- [ ] Keep Set B backlog rows separate from banana blockers.
+- [x] Update `docs/jax_parity_manifest.md`.
+- [x] Update the existing banana coverage plan for this local non-CUDA status refresh.
+- [x] Keep Set B backlog rows separate from banana blockers.
 
 ## Validation Commands
 
@@ -752,18 +924,21 @@ $PY benchmarks/hf_jobs/launch_production_gpu_proof.py \
 
 Checklist items below are human review requirements unless an automated owner is named.
 
-- [ ] Every new JAX value API has CPU oracle parity tests.
-- [ ] Every new JAX derivative API has CPU oracle derivative parity or a Taylor test.
-- [ ] Every Hessian API has explicit Hessian parity or second-order Taylor coverage.
+- [x] Every new JAX value API has CPU oracle parity tests.
+- [x] Every new JAX derivative API has CPU oracle derivative parity or a Taylor test.
+- [x] Every Hessian API has explicit Hessian parity or second-order Taylor coverage.
 - [ ] Every product-path CUDA claim has a current-sha CUDA artifact.
-- [ ] No manifest row is marked complete from CPU-only evidence when CUDA evidence is required.
-- [ ] No tolerance changes are made without updating the validation ladder contract and explaining why.
-- [ ] No broad host API/I/O parity is treated as banana-required unless a banana workflow directly consumes it.
-- [ ] Dirty unrelated files remain untouched during implementation.
+- [x] No manifest row is marked complete from CPU-only evidence when CUDA evidence is required.
+- [x] No tolerance changes are made without updating the validation ladder contract and explaining why.
+- [x] No broad host API/I/O parity is treated as banana-required unless a banana workflow directly consumes it.
+- [x] Dirty unrelated files remain untouched during implementation.
 - [x] `tests/docs/test_banana_parity_coverage_manifest.py` is wired into `.github/workflows/jax_smoke.yml` so manifest status edits run the machine-checkable banana inventory guard.
 
 ## Recommended Scope Decision
 
+Current local execution followed the full-upstream non-CUDA Set B path. CUDA
+P5 closure remains separate and open.
+
 - [ ] If the goal is banana ship readiness, execute Set A and P5 artifact closure only. Do not implement Set B now.
-- [ ] If the goal is zero-gap JAX-vs-C++/Python surface parity, execute Set B in milestones M2 through M6.
+- [x] If the goal is zero-gap JAX-vs-C++/Python surface parity, execute Set B in milestones M2 through M6.
 - [ ] Keep Set B as a full-upstream parity backlog until the product requirement changes.

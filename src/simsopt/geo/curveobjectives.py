@@ -822,9 +822,9 @@ def cs_distance_pure(gammac, lc, gammas, ns, minimum_distance):
     lc = _as_jax_float64(lc)
     gammas = _as_jax_float64(gammas)
     ns = _as_jax_float64(ns)
-    minimum_distance_jax = jnp.asarray(minimum_distance, dtype=gammac.dtype)
+    minimum_distance_jax = _scalar_like(gammac, minimum_distance)
     zero = minimum_distance_jax - minimum_distance_jax
-    one = minimum_distance_jax / minimum_distance_jax
+    one = _scalar_like(gammac, 1.0)
     row_count = int(gammac.shape[0])
     col_count = int(gammas.shape[0])
     if row_count == 0 or col_count == 0:
