@@ -585,7 +585,11 @@ The same H200-only acceptance path can be triggered through
 exactly one repo-relative single-stage seed input. That workflow runs
 `benchmarks/hf_jobs/launch_production_gpu_proof.py` with `--hardware h200`,
 `--platform cuda`, and `--repo-sha ${{ github.sha }}` so the workflow status
-tracks the remote proof result.
+tracks the remote proof result. Per the GitHub Actions `workflow_dispatch`
+contract, this manual workflow can only be dispatched once the workflow file is
+present on the repository default branch; on the current fork default branch,
+`gh workflow list --repo jungdaesuh/simsopt --all` exposes the HF image workflow
+but not `jax_h200_production_proof.yml`.
 
 ## P6: Closeout Coverage Inventory
 

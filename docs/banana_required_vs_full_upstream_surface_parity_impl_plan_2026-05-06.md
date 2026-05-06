@@ -73,7 +73,7 @@ M7 unblock checklist:
 - Use a pushed branch or tag that contains the exact commit to be validated. `banana-surface-parity-m7-image-r1` already satisfies this for `c90fac6a3c9e7c866f8e1806f8db5cde1f7c689c`; create a new validation tag if later code or audit commits must be included in the CUDA proof.
 - Use the published CUDA image from `benchmarks/hf_jobs/production_gpu_proof.Dockerfile`: `ghcr.io/jungdaesuh/simsopt-jax-hf-production-proof:banana-surface-parity-m7-image-r1`.
 - Keep the launcher dry-run green; it must print a preflight report whose `repo_sha` equals the pushed validation commit and whose `image` is the published CUDA image.
-- Add HF Jobs credits or Runpod credits/capacity, then run the H200/CUDA no-detach proof or `.github/workflows/jax_h200_production_proof.yml` and attach the resulting artifact metadata here or in the manifest-linked proof doc.
+- Add HF Jobs credits or Runpod credits/capacity, then run the H200/CUDA no-detach proof and attach the resulting artifact metadata here or in the manifest-linked proof doc. The manual GitHub Actions path through `.github/workflows/jax_h200_production_proof.yml` is only dispatchable after that workflow file exists on the repository default branch; the fork currently exposes only the HF image workflow on its default branch.
 
 Committed validation-SHA implementation scope from `a514fa24c5a9adb849f963a4366cf07b74b37b47`:
 
