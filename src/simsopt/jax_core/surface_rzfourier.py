@@ -680,8 +680,7 @@ def surface_rz_fourier_normal_from_spec(spec: SurfaceRZFourierSpec):
 def surface_rz_fourier_unitnormal_from_spec(spec: SurfaceRZFourierSpec):
     normal = surface_rz_fourier_normal_from_spec(spec)
     norm = jnp.linalg.norm(normal, axis=-1, keepdims=True)
-    safe_norm = jnp.where(norm > 0, norm, jnp.ones_like(norm))
-    return normal / safe_norm
+    return normal / norm
 
 
 def surface_rz_fourier_unitnormal_from_dofs(

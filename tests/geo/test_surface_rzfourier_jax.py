@@ -1039,18 +1039,24 @@ def test_surface_rzfourier_geometry_avoids_jnp_arange(monkeypatch):
     assert normal.shape == (4, 5, 3)
 
 
-def test_surface_rzfourier_unitnormal_degenerate_surface_stays_finite():
-    spec = make_surface_rzfourier_spec(
-        rc=np.zeros((2, 1), dtype=np.float64),
-        zs=np.zeros((2, 1), dtype=np.float64),
-        quadpoints_phi=np.linspace(0.0, 0.5, 4, endpoint=False),
-        quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+def test_surface_rzfourier_unitnormal_degenerate_surface_matches_cpu_singularity():
+    surface = SurfaceRZFourier.from_nphi_ntheta(
         nfp=2,
         stellsym=True,
+        mpol=1,
+        ntor=0,
+        nphi=4,
+        ntheta=5,
+        range="field period",
     )
-    unitnormal = host_array(surface_rz_fourier_unitnormal_from_spec(spec))
-    assert np.all(np.isfinite(unitnormal))
-    np.testing.assert_array_equal(unitnormal, np.zeros_like(unitnormal))
+    surface.rc[:, :] = 0.0
+    surface.zs[:, :] = 0.0
+    surface.local_full_x = surface.get_dofs()
+
+    spec = surface.surface_spec()
+    cpu_unitnormal = np.asarray(surface.unitnormal())
+    jax_unitnormal = host_array(surface_rz_fourier_unitnormal_from_spec(spec))
+    np.testing.assert_array_equal(np.isnan(jax_unitnormal), np.isnan(cpu_unitnormal))
 
 
 def test_surface_rzfourier_geometry_from_dofs_matches_boozer_hot_path():
