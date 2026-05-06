@@ -562,6 +562,8 @@ def _build_stage2_artifact_hardware_snapshot(
     banana_current_A,
     banana_current_max_A,
     tf_current_A,
+    final_plasma_major_radius_m,
+    final_plasma_minor_radius_m,
 ):
     return {
         "coil_length": final_coil_length,
@@ -576,6 +578,8 @@ def _build_stage2_artifact_hardware_snapshot(
         "banana_current_max_A": banana_current_max_A,
         "tf_current_A": tf_current_A,
         "tf_current_limit_A": TF_CURRENT_HARD_LIMIT_A,
+        "lcfs_major_radius_m": final_plasma_major_radius_m,
+        "lcfs_minor_radius_m": final_plasma_minor_radius_m,
         "artifact_hardware_status": hardware_status,
     }
 
@@ -834,6 +838,8 @@ def build_stage2_results(
         banana_current_A=banana_current_A,
         banana_current_max_A=float(args.banana_current_max_A),
         tf_current_A=tf_current_A,
+        final_plasma_major_radius_m=final_plasma_major_radius_m,
+        final_plasma_minor_radius_m=final_plasma_minor_radius_m,
     )
     validate_stage2_coil_partition_counts(
         total_coils=total_coils,
@@ -1191,6 +1197,8 @@ def evaluate_stage2_hardware_constraints(
     banana_current_threshold=None,
     tf_current_A=None,
     tf_current_threshold=None,
+    final_plasma_major_radius_m=None,
+    final_plasma_minor_radius_m=None,
 ):
     artifact_threshold_overrides = build_threshold_overrides(
         (
@@ -1213,6 +1221,8 @@ def evaluate_stage2_hardware_constraints(
         "poloidal_extent": poloidal_extent_rad,
         "banana_current": banana_current_A,
         "tf_current": tf_current_A,
+        "lcfs_major_radius": final_plasma_major_radius_m,
+        "lcfs_minor_radius": final_plasma_minor_radius_m,
     }
     status = build_hardware_constraint_status(
         measured_values,
@@ -1244,6 +1254,10 @@ def evaluate_stage2_hardware_constraints(
     if tf_current_A is not None and tf_current_threshold is not None:
         status["tf_current_A"] = float(tf_current_A)
         status["tf_current_threshold"] = float(tf_current_threshold)
+    if final_plasma_major_radius_m is not None:
+        status["lcfs_major_radius_m"] = float(final_plasma_major_radius_m)
+    if final_plasma_minor_radius_m is not None:
+        status["lcfs_minor_radius_m"] = float(final_plasma_minor_radius_m)
     return status
 
 

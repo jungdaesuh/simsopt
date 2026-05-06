@@ -21,13 +21,17 @@ from .coil_groups import (
 )
 from .current_contracts import resolve_finite_current_mode, resolve_loaded_tf_current_A
 from .hardware_contracts import (
-    ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV,
-    BANANA_WINDING_MINOR_RADIUS_M,
     MAX_CURVATURE_INV_M,
-    env_flag,
+    POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     validate_banana_winding_surface_radius,
+    validate_major_radius,
     validate_plasma_vessel_clearance,
     validate_tf_current_limit,
+)
+from .hardware_constraint_schema import (
+    build_hardware_constraint_status,
+    hardware_constraint_artifact_field_names,
+    hardware_constraint_artifact_value_field_names,
 )
 from .single_stage_geometry import build_surface_configs
 
@@ -62,6 +66,7 @@ __all__ = [
     "build_equilibrium_path",
     "classify_bootability_result",
     "compute_tf_G0",
+    "evaluate_stage2_seed_hardware_contract",
     "initialize_boozer_surface",
     "load_warm_start_boozer_seed",
     "partition_loaded_stage2_coils",
@@ -77,6 +82,44 @@ __all__ = [
     "validate_loaded_stage2_coils_partition",
     "validate_stage2_seed_contract",
 ]
+
+
+def _first_stage2_result_value(
+    stage2_results: Mapping[str, object],
+    field_names: tuple[str, ...],
+) -> object | None:
+    for field_name in field_names:
+        value = stage2_results.get(field_name)
+        if value is not None:
+            return value
+    return None
+
+
+def _stage2_seed_measured_values(
+    stage2_results: Mapping[str, object],
+) -> dict[str, float | None]:
+    measured_values: dict[str, float | None] = {}
+    for constraint_name in hardware_constraint_artifact_field_names():
+        value = _first_stage2_result_value(
+            stage2_results,
+            hardware_constraint_artifact_value_field_names(constraint_name),
+        )
+        measured_values[constraint_name] = None if value is None else float(value)
+    return measured_values
+
+
+def _required_stage2_result_value(
+    stage2_results: Mapping[str, object],
+    field_name: str,
+    contract_name: str,
+) -> object:
+    value = stage2_results.get(field_name)
+    if value is None:
+        raise ValueError(
+            f"Stage 2 seed artifact is missing {field_name}; cannot verify "
+            f"{contract_name}."
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -287,6 +330,17 @@ def build_equilibrium_path(
     return str(candidate_paths[0])
 
 
+def evaluate_stage2_seed_hardware_contract(
+    stage2_results: Mapping[str, object],
+) -> dict[str, object]:
+    measured_values = _stage2_seed_measured_values(stage2_results)
+    return build_hardware_constraint_status(
+        measured_values,
+        applies_to="artifact",
+        require_values=True,
+    )
+
+
 def validate_stage2_seed_contract(stage2_results):
     tf_current_A = stage2_results.get("TF_CURRENT_A")
     if tf_current_A is None:
@@ -294,32 +348,52 @@ def validate_stage2_seed_contract(stage2_results):
             "Stage 2 seed artifact is missing TF_CURRENT_A even after legacy-contract "
             "upgrade. Pass --stage2-seed-tf-current-A explicitly or use a newer "
             "artifact with TF-current metadata."
-        )
-    validate_tf_current_limit(tf_current_A)
-    validate_banana_winding_surface_radius(
-        stage2_results.get("banana_surf_radius", BANANA_WINDING_MINOR_RADIUS_M)
     )
-    if (
-        float(stage2_results.get("CURVATURE_THRESHOLD", MAX_CURVATURE_INV_M))
-        > MAX_CURVATURE_INV_M
-    ):
+    validate_tf_current_limit(tf_current_A)
+    major_radius = _required_stage2_result_value(
+        stage2_results,
+        "MAJOR_RADIUS",
+        "the vacuum-vessel major-radius contract",
+    )
+    validate_major_radius(major_radius)
+    banana_surf_radius = _required_stage2_result_value(
+        stage2_results,
+        "banana_surf_radius",
+        "the banana winding-surface hardware contract",
+    )
+    validate_banana_winding_surface_radius(banana_surf_radius)
+    curvature_threshold = _required_stage2_result_value(
+        stage2_results,
+        "CURVATURE_THRESHOLD",
+        "the curvature hardware contract",
+    )
+    if float(curvature_threshold) > MAX_CURVATURE_INV_M:
         raise ValueError(
             "Stage 2 seed curvature threshold exceeds the hardware ceiling of "
             f"{MAX_CURVATURE_INV_M:.1f} m^-1."
         )
-    surface_vessel_min_dist = stage2_results.get(
-        "SURFACE_VESSEL_MIN_DIST",
-        stage2_results.get("PLASMA_VESSEL_MIN_DIST"),
+    poloidal_extent_threshold_rad = _required_stage2_result_value(
+        stage2_results,
+        "POLOIDAL_EXTENT_THRESHOLD_RAD",
+        "the poloidal-extent hardware contract",
     )
-    if surface_vessel_min_dist is None:
+    if float(poloidal_extent_threshold_rad) > POLOIDAL_EXTENT_HALF_WIDTH_RAD:
         raise ValueError(
-            "Stage 2 seed artifact is missing SURFACE_VESSEL_MIN_DIST; cannot "
-            "verify LCFS clearance against the HBT-EP vacuum vessel."
+            "Stage 2 seed poloidal-extent threshold exceeds the HBT-EP half-width "
+            f"ceiling of {POLOIDAL_EXTENT_HALF_WIDTH_RAD:.6f} rad."
         )
-    validate_plasma_vessel_clearance(
-        surface_vessel_min_dist,
-        accept_offspec=env_flag(ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV),
+    surface_vessel_min_dist = _required_stage2_result_value(
+        stage2_results,
+        "SURFACE_VESSEL_MIN_DIST",
+        "LCFS clearance against the HBT-EP vacuum vessel",
     )
+    validate_plasma_vessel_clearance(surface_vessel_min_dist)
+    hardware_status = evaluate_stage2_seed_hardware_contract(stage2_results)
+    if not hardware_status["success"]:
+        raise ValueError(
+            "Stage 2 seed artifact violates the full HBT-EP hardware contract: "
+            + "; ".join(hardware_status["violations"])
+        )
 
 
 def compute_tf_G0(tf_coils) -> float:

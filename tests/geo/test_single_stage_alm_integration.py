@@ -676,6 +676,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "poloidal_extent",
                 "banana_current",
                 "tf_current",
+                "lcfs_major_radius",
+                "lcfs_minor_radius",
             },
         )
         self.assertEqual(specs["coil_length"].applies_to, frozenset({"alm", "artifact"}))
@@ -692,6 +694,12 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(specs["banana_current"].traversal_policy, "forbidden")
         self.assertEqual(specs["tf_current"].applies_to, frozenset({"artifact"}))
+        self.assertEqual(
+            schema_module.hardware_constraint_artifact_value_field_names(
+                "banana_current"
+            ),
+            ("banana_current_A", "BANANA_CURRENT_A"),
+        )
 
     def test_penalty_box_bound_names_follow_forbidden_traversal_policy(self):
         schema_module = load_hardware_constraint_schema_module()

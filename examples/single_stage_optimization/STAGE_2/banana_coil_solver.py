@@ -1149,6 +1149,8 @@ def evaluate_stage2_hardware_constraints(
     curvature_threshold,
     poloidal_extent_rad=None,
     poloidal_extent_threshold_rad=None,
+    final_plasma_major_radius_m=None,
+    final_plasma_minor_radius_m=None,
 ):
     return _evaluate_stage2_hardware_constraints(
         coil_length,
@@ -1159,6 +1161,8 @@ def evaluate_stage2_hardware_constraints(
         curvature_threshold,
         poloidal_extent_rad=poloidal_extent_rad,
         poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
+        final_plasma_major_radius_m=final_plasma_major_radius_m,
+        final_plasma_minor_radius_m=final_plasma_minor_radius_m,
     )
 
 
@@ -1189,6 +1193,8 @@ def _capture_stage2_artifact_state(
     plasma_vessel_threshold,
     poloidal_extent_threshold_rad,
     banana_current_max_A,
+    final_plasma_major_radius_m,
+    final_plasma_minor_radius_m,
     stage2_iota_runtime=None,
 ):
     candidate_x = np.asarray(dofs, dtype=float).copy()
@@ -1218,6 +1224,8 @@ def _capture_stage2_artifact_state(
         banana_current_threshold=banana_current_max_A,
         tf_current_A=tf_current_A,
         tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
+        final_plasma_major_radius_m=final_plasma_major_radius_m,
+        final_plasma_minor_radius_m=final_plasma_minor_radius_m,
     )
     iota_state = (
         None
@@ -1855,6 +1863,8 @@ def main(parsed_args=None):
             plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
             poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
             banana_current_max_A=float(args.banana_current_max_A),
+            final_plasma_major_radius_m=plasma_geometry.lcfs_major_radius_m,
+            final_plasma_minor_radius_m=plasma_geometry.lcfs_minor_radius_m,
             stage2_iota_runtime=stage2_iota_runtime,
         )
 
@@ -2163,6 +2173,8 @@ def main(parsed_args=None):
             banana_current_threshold=args.banana_current_max_A,
             tf_current_A=float(new_tf_coils[0].current.get_value()),
             tf_current_threshold=TF_CURRENT_HARD_LIMIT_A,
+            final_plasma_major_radius_m=plasma_geometry.lcfs_major_radius_m,
+            final_plasma_minor_radius_m=plasma_geometry.lcfs_minor_radius_m,
         )
     else:
         final_coil_length = final_artifact_state["coil_length"]

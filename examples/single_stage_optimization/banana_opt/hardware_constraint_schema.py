@@ -13,6 +13,8 @@ from banana_opt.hardware_contracts import (
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+    TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+    TARGET_LCFS_MAX_MINOR_RADIUS_M,
     TF_CURRENT_HARD_LIMIT_A,
 )
 
@@ -163,6 +165,20 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         applies_to=frozenset({"artifact"}),
         traversal_policy="forbidden",
     ),
+    HardwareConstraintSpec(
+        name="lcfs_major_radius",
+        kind="upper_bound",
+        threshold=TARGET_LCFS_MAX_MAJOR_RADIUS_M,
+        applies_to=frozenset({"artifact"}),
+        traversal_policy="allowed",
+    ),
+    HardwareConstraintSpec(
+        name="lcfs_minor_radius",
+        kind="upper_bound",
+        threshold=TARGET_LCFS_MAX_MINOR_RADIUS_M,
+        applies_to=frozenset({"artifact"}),
+        traversal_policy="allowed",
+    ),
 )
 
 _SCHEMA_BY_NAME = {spec.name: spec for spec in HARDWARE_CONSTRAINT_SCHEMA}
@@ -176,6 +192,8 @@ _DEFAULT_ALM_BLOCK_BY_NAME: Mapping[str, ALMBlock] = {
     "poloidal_extent": "geometry",
     "banana_current": "current",
     "tf_current": "current",
+    "lcfs_major_radius": "surface",
+    "lcfs_minor_radius": "surface",
 }
 _ARTIFACT_VALUE_FIELD_BY_NAME = {
     "coil_coil_spacing": ("curve_curve_min_dist", "CURVE_CURVE_MIN_DIST"),
@@ -186,6 +204,8 @@ _ARTIFACT_VALUE_FIELD_BY_NAME = {
     "poloidal_extent": ("poloidal_extent_rad", "POLOIDAL_EXTENT_RAD"),
     "banana_current": ("banana_current_A", "BANANA_CURRENT_A"),
     "tf_current": ("tf_current_A", "TF_CURRENT_A"),
+    "lcfs_major_radius": ("lcfs_major_radius_m", "FINAL_LCFS_MAJOR_RADIUS_M"),
+    "lcfs_minor_radius": ("lcfs_minor_radius_m", "FINAL_LCFS_MINOR_RADIUS_M"),
 }
 _ARTIFACT_THRESHOLD_FIELD_BY_NAME = {
     "coil_length": ("length_target", "LENGTH_TARGET"),
@@ -414,6 +434,10 @@ def hardware_constraint_artifact_field_names(
     return tuple(
         spec.name for spec in hardware_constraint_specs(applies_to="artifact", names=names)
     )
+
+
+def hardware_constraint_artifact_value_field_names(name: str) -> tuple[str, ...]:
+    return _ARTIFACT_VALUE_FIELD_BY_NAME[name]
 
 
 def hardware_constraint_artifact_payload_field_names(
@@ -715,6 +739,7 @@ def build_hardware_constraint_status(
     applies_to: ConstraintTarget,
     names: Collection[str] | None = None,
     threshold_overrides: Mapping[str, float] | None = None,
+    require_values: bool = False,
 ) -> dict[str, object]:
     constraints: dict[str, dict[str, object]] = {}
     violations: list[str] = []
@@ -728,6 +753,14 @@ def build_hardware_constraint_status(
     for spec in hardware_constraint_specs(applies_to=applies_to, names=names):
         value = measured_values.get(spec.name)
         if value is None:
+            if require_values:
+                violation_message = (
+                    f"missing required hardware constraint metric {spec.name}"
+                )
+                violations.append(violation_message)
+                traversal_status = traversal_statuses[spec.traversal_policy]
+                traversal_status["success"] = False
+                traversal_status["violations"].append(violation_message)
             continue
         threshold = _resolved_threshold(spec, threshold_overrides)
         signed_value = hardware_constraint_signed_value(

@@ -76,6 +76,25 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _valid_stage2_contract_fields() -> dict[str, object]:
+    return {
+        "MAJOR_RADIUS": 0.976,
+        "TOROIDAL_FLUX": 0.24,
+        "banana_surf_radius": 0.21,
+        "COIL_LENGTH": 2.0,
+        "CURVE_CURVE_MIN_DIST": 0.05,
+        "CURVE_SURFACE_MIN_DIST": 0.015,
+        "SURFACE_VESSEL_MIN_DIST": 0.04,
+        "MAX_CURVATURE": 100.0,
+        "CURVATURE_THRESHOLD": 100.0,
+        "POLOIDAL_EXTENT_RAD": 45.0 * np.pi / 180.0,
+        "POLOIDAL_EXTENT_THRESHOLD_RAD": 45.0 * np.pi / 180.0,
+        "BANANA_CURRENT_A": 1.1e4,
+        "FINAL_LCFS_MAJOR_RADIUS_M": 0.92,
+        "FINAL_LCFS_MINOR_RADIUS_M": 0.15,
+    }
+
+
 def _make_circle_curve(*, center, radius, normal):
     curve = CurveXYZFourier(96, 1)
     center_x, center_y, center_z = center
@@ -171,6 +190,7 @@ def _build_round_trip_seed(
     stage2_bs_path = seed_dir / "biot_savart_opt.json"
     bs.save(str(stage2_bs_path))
     stage2_results = {
+        **_valid_stage2_contract_fields(),
         "PLASMA_SURF_FILENAME": "demo.nc",
         "NUM_TF_COILS": len(tf_coils),
         "NUM_BANANA_COILS": len(banana_coils),
@@ -179,7 +199,6 @@ def _build_round_trip_seed(
         "FINITE_CURRENT_MODE": (
             "wataru_proxy_field" if include_proxy_vf else "boozer_surrogate"
         ),
-        "SURFACE_VESSEL_MIN_DIST": 0.04,
     }
     _write_json(stage2_bs_path.with_name("results.json"), stage2_results)
     return stage2_bs_path, stage2_results, points, expected_field
@@ -315,13 +334,9 @@ class HandoffModuleTests(unittest.TestCase):
         vf_coils = [self._fixed_current_coil(-5.0e2)] if include_proxy_vf else []
         fake_bs = SimpleNamespace(coils=[*tf_coils, *banana_coils, *proxy_coils, *vf_coils])
         stage2_artifact_results = {
+            **_valid_stage2_contract_fields(),
             "PLASMA_SURF_FILENAME": "demo.nc",
             "TF_CURRENT_A": -8.0e4,
-            "MAJOR_RADIUS": 0.976,
-            "TOROIDAL_FLUX": 0.24,
-            "banana_surf_radius": 0.21,
-            "CURVATURE_THRESHOLD": 100.0,
-            "SURFACE_VESSEL_MIN_DIST": 0.04,
         }
         if include_proxy_vf:
             stage2_artifact_results.update(
@@ -1513,12 +1528,12 @@ class UnifiedRunnerTests(unittest.TestCase):
         _write_json(
             stage2_results_path,
             {
+                **_valid_stage2_contract_fields(),
                 "PLASMA_SURF_FILENAME": "demo.nc",
                 "init_only": False,
                 "TF_CURRENT_A": -8.0e4,
                 "NUM_TF_COILS": 20,
                 "TF_CURRENT_SUM_ABS_A": 1.6e6,
-                "SURFACE_VESSEL_MIN_DIST": 0.04,
             },
         )
         return stage2_bs_path, stage2_results_path
@@ -2086,14 +2101,11 @@ class UnifiedRunnerTests(unittest.TestCase):
             recovery_case_dir = recovery_output_root / "mpol=8-ntor=6-test"
 
             original_stage2_results = {
+                **_valid_stage2_contract_fields(),
                 "PLASMA_SURF_FILENAME": "demo.nc",
                 "TF_CURRENT_A": -8.0e4,
                 "NUM_TF_COILS": 20,
-                "MAJOR_RADIUS": 0.976,
-                "TOROIDAL_FLUX": 0.24,
-                "banana_surf_radius": 0.21,
                 "FINITE_CURRENT_MODE": "boozer_surrogate",
-                "CURVATURE_THRESHOLD": 100.0,
             }
 
             def fake_recovery_run(command, *, output_root, timeout_seconds):
@@ -2216,14 +2228,11 @@ class UnifiedRunnerTests(unittest.TestCase):
             recovery_case_dir = recovery_output_root / "mpol=8-ntor=6-test"
 
             original_stage2_results = {
+                **_valid_stage2_contract_fields(),
                 "PLASMA_SURF_FILENAME": "demo.nc",
                 "TF_CURRENT_A": -8.0e4,
                 "NUM_TF_COILS": 20,
-                "MAJOR_RADIUS": 0.976,
-                "TOROIDAL_FLUX": 0.24,
-                "banana_surf_radius": 0.21,
                 "FINITE_CURRENT_MODE": "boozer_surrogate",
-                "CURVATURE_THRESHOLD": 100.0,
             }
 
             def fake_recovery_run(command, *, output_root, timeout_seconds):

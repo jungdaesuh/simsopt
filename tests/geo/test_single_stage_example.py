@@ -57,6 +57,13 @@ ALM_UTILS_MODULE_PATH = (
     / "single_stage_optimization"
     / "alm_utils.py"
 )
+HARDWARE_CONTRACTS_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "single_stage_optimization"
+    / "banana_opt"
+    / "hardware_contracts.py"
+)
 WORKFLOW_HELPERS_MODULE_PATH = (
     Path(__file__).resolve().parents[2]
     / "examples"
@@ -115,6 +122,13 @@ def load_alm_utils_module():
     return _load_module_from_path(
         ALM_UTILS_MODULE_PATH,
         "alm_utils",
+    )
+
+
+def load_hardware_contracts_module():
+    return _load_module_from_path(
+        HARDWARE_CONTRACTS_MODULE_PATH,
+        "hardware_contracts",
     )
 
 
@@ -8849,10 +8863,26 @@ class RunIdentityTests(unittest.TestCase):
 class CurrentBaselineContractTests(unittest.TestCase):
     @staticmethod
     def _upgrade_stage2_seed_results(module, **overrides):
+        hardware_contracts = load_hardware_contracts_module()
         stage2_results = {
+            "MAJOR_RADIUS": module.VACUUM_VESSEL_MAJOR_RADIUS_M,
+            "TOROIDAL_FLUX": 0.24,
             "banana_surf_radius": 0.22,
+            "COIL_LENGTH": module.COIL_LENGTH_HARD_LIMIT_M,
+            "CURVE_CURVE_MIN_DIST": module.COIL_COIL_MIN_DIST_M,
+            "CURVE_SURFACE_MIN_DIST": module.COIL_PLASMA_MIN_DIST_M,
             "CURVATURE_THRESHOLD": module.MAX_CURVATURE_INV_M,
+            "MAX_CURVATURE": module.MAX_CURVATURE_INV_M,
+            "POLOIDAL_EXTENT_RAD": module.POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+            "POLOIDAL_EXTENT_THRESHOLD_RAD": module.POLOIDAL_EXTENT_HALF_WIDTH_RAD,
             "SURFACE_VESSEL_MIN_DIST": module.PLASMA_VESSEL_MIN_DIST_M,
+            "BANANA_CURRENT_A": module.BANANA_CURRENT_HARD_LIMIT_A,
+            "FINAL_LCFS_MAJOR_RADIUS_M": (
+                hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M
+            ),
+            "FINAL_LCFS_MINOR_RADIUS_M": (
+                hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M
+            ),
         }
         stage2_results.update(overrides)
         return module.upgrade_legacy_stage2_artifact_results(
@@ -8963,17 +8993,72 @@ class CurrentBaselineContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing SURFACE_VESSEL_MIN_DIST"):
             module.validate_stage2_seed_contract(stage2_results)
 
-    def test_validate_stage2_seed_contract_accepts_clearance_override_via_env(self):
+    def test_validate_stage2_seed_contract_rejects_missing_banana_winding_radius(self):
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(module)
+        stage2_results.pop("banana_surf_radius", None)
+
+        with self.assertRaisesRegex(ValueError, "missing banana_surf_radius"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_missing_curvature_threshold(self):
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(module)
+        stage2_results.pop("CURVATURE_THRESHOLD", None)
+
+        with self.assertRaisesRegex(ValueError, "missing CURVATURE_THRESHOLD"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_missing_poloidal_extent_threshold(self):
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(module)
+        stage2_results.pop("POLOIDAL_EXTENT_THRESHOLD_RAD", None)
+
+        with self.assertRaisesRegex(ValueError, "missing POLOIDAL_EXTENT_THRESHOLD_RAD"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_missing_full_contract_metric(self):
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(module)
+        stage2_results.pop("COIL_LENGTH", None)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "missing required hardware constraint metric coil_length",
+        ):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_lcfs_major_radius_above_limit(self):
+        module = load_single_stage_example_module()
+        hardware_contracts = load_hardware_contracts_module()
+        stage2_results = self._upgrade_stage2_seed_results(
+            module,
+            FINAL_LCFS_MAJOR_RADIUS_M=(
+                hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M + 1.0e-3
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "lcfs_major_radius"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_banana_current_above_limit(self):
         module = load_single_stage_example_module()
         stage2_results = self._upgrade_stage2_seed_results(
             module,
-            SURFACE_VESSEL_MIN_DIST=module.PLASMA_VESSEL_MIN_DIST_M - 1.0e-3,
+            BANANA_CURRENT_A=module.BANANA_CURRENT_HARD_LIMIT_A + 1.0,
         )
-        with patch.dict(
-            os.environ,
-            {"ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE": "1"},
-            clear=False,
-        ):
+
+        with self.assertRaisesRegex(ValueError, "banana_current"):
+            module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_contract_rejects_poloidal_extent_threshold_above_limit(self):
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(
+            module,
+            POLOIDAL_EXTENT_THRESHOLD_RAD=module.POLOIDAL_EXTENT_HALF_WIDTH_RAD + 1.0e-3,
+        )
+
+        with self.assertRaisesRegex(ValueError, "poloidal-extent threshold exceeds"):
             module.validate_stage2_seed_contract(stage2_results)
 
     def test_resolve_single_stage_banana_surf_radius_defaults_to_loaded_artifact(self):

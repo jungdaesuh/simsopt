@@ -2,6 +2,7 @@ import importlib
 import importlib.util
 import json
 import hashlib
+import math
 import subprocess
 import sys
 import tempfile
@@ -603,7 +604,20 @@ class BananaCurrentChainScalingTests(unittest.TestCase):
             "NUM_BANANA_COILS": 10,
             "NUM_PROXY_COILS": 0,
             "NUM_VF_COILS": 0,
+            "MAJOR_RADIUS": 0.976,
+            "TOROIDAL_FLUX": 0.24,
+            "banana_surf_radius": 0.21,
+            "COIL_LENGTH": 2.0,
+            "CURVE_CURVE_MIN_DIST": 0.05,
+            "CURVE_SURFACE_MIN_DIST": 0.015,
             "SURFACE_VESSEL_MIN_DIST": 0.04,
+            "MAX_CURVATURE": 100.0,
+            "CURVATURE_THRESHOLD": 100.0,
+            "POLOIDAL_EXTENT_RAD": math.pi / 4.0,
+            "POLOIDAL_EXTENT_THRESHOLD_RAD": math.pi / 4.0,
+            "BANANA_CURRENT_A": abs(float(banana_init_current_A)),
+            "FINAL_LCFS_MAJOR_RADIUS_M": 0.92,
+            "FINAL_LCFS_MINOR_RADIUS_M": 0.15,
         }
         return bs, stage2_results, handoff, load_optimizable
 
