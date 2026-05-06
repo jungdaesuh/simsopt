@@ -20,6 +20,9 @@ is a banana blocker or a full-upstream parity backlog item.
 Local non-CUDA surface/objective implementation evidence from 2026-05-06 is
 summarized in the linked plan and in the documentary section below. That
 evidence closes CPU/JAX rows only; it does not close any CUDA status.
+M7 image publication and real-image H200 dry-run preflight are complete through
+validation tag `banana-surface-parity-m7-image-r1`, but the real CUDA rows
+remain open because the H200 launch is blocked by external GPU account credits.
 
 Exact parity means the mirrored JAX test runs with:
 

@@ -1,7 +1,8 @@
 # Banana JAX Parity Coverage Closure Plan
 
-Status: implementation in progress as of 2026-05-06; this is not a full
-parity completion record.
+Status: repo-local implementation and non-CUDA validation are closed as of
+2026-05-06; this is not a full parity completion record because the P5 real
+CUDA artifact gate remains blocked by external GPU account credits.
 
 Initial tree inspected at `f59a85ab4`. The working tree contained many
 untracked artifacts when this plan was written. This document is additive and
@@ -478,6 +479,15 @@ Harness status:
 - [x] The HF launcher preflight validates both repo-owned seed inputs at the
   target SHA: the Stage 2 `biot_savart_opt.json` seed and the single-stage
   runtime seed spec.
+- [x] The HF CUDA proof image is built and published from
+  `benchmarks/hf_jobs/production_gpu_proof.Dockerfile` as
+  `ghcr.io/jungdaesuh/simsopt-jax-hf-production-proof:banana-surface-parity-m7-image-r1`.
+- [x] The GHCR image tag is pullable and resolves to digest
+  `sha256:eac2e1887eaf08628af62b28e5d7d7141b84afdfdcbfd00179823b1eb8f3df39`.
+- [x] Real-image H200 launcher dry-run passes against pushed validation tag
+  `banana-surface-parity-m7-image-r1`, repo SHA
+  `c90fac6a3c9e7c866f8e1806f8db5cde1f7c689c`, and runtime seed fixture
+  `benchmarks/fixtures/single_stage_seed_iota15`.
 - [ ] Real CUDA artifacts from the current repo state have been captured for all
   required lanes below.
 
@@ -513,34 +523,40 @@ Acceptance:
 
 Current blocker audit, 2026-05-06:
 
-- Local `.conda/jax-0.9.2/bin/python` reports JAX 0.10.0 on `cpu:0`
-  only, with `jax_enable_x64=False`; this cannot satisfy a CUDA gate.
+- Local `.conda/jax-0.9.2/bin/python` reports JAX 0.10.0 on CPU only;
+  this cannot satisfy a CUDA gate.
 - `nvidia-smi` is not available on the local host.
 - `runpodctl pod list` returns no active pods.
-- `SIMSOPT_HF_GPU_IMAGE` is unset, so the Hugging Face Jobs launch handoff is
-  not runnable from the current environment.
-- `docker` is not available on the local host, so the reusable HF GPU proof
-  image cannot be built locally from `benchmarks/hf_jobs/production_gpu_proof.Dockerfile`.
-- Hugging Face Jobs reports no running jobs for this account, so there is no
-  in-flight remote proof to wait on.
+- `runpodctl gpu list` reports H200 stock is available, but `runpodctl user`
+  reports a negative client balance; no Runpod H200 proof can be launched
+  without account credit.
+- `SIMSOPT_HF_GPU_IMAGE` is configured for the dry-run as
+  `ghcr.io/jungdaesuh/simsopt-jax-hf-production-proof:banana-surface-parity-m7-image-r1`.
+- `docker` is not available on the local host; the reusable HF GPU proof image
+  was built by `.github/workflows/jax_hf_cuda_image.yml`.
+- The published image tag is pullable from GHCR and resolves to digest
+  `sha256:eac2e1887eaf08628af62b28e5d7d7141b84afdfdcbfd00179823b1eb8f3df39`.
 - Remote `fork/gpu-purity-stage2-20260405` resolves to
-  `7e3f2eb5e5462c7d3cc989ce8bf1fe010a04f3a2`, not current local SHA
-  `0bb26bb0ad9f7492f7df67f1d203c8159b1816dc`; the official P5 launcher cannot
-  prove the current dirty tree until the intended implementation slice is
-  committed and pushed.
-- The repo-owned P5 runtime seed fixture is present locally at
+  `7e3f2eb5e5462c7d3cc989ce8bf1fe010a04f3a2`, not validation SHA
+  `c90fac6a3c9e7c866f8e1806f8db5cde1f7c689c`; the scoped validation tag is
+  the current pushed proof ref.
+- The repo-owned P5 runtime seed fixture is present at the pushed validation
+  tag:
   `benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json`,
-  but like the rest of this implementation slice it is not visible to remote
-  preflight until committed and pushed.
+  and the launcher preflight validates it at that SHA.
+- The H200 launcher command with the real image, validation tag, validation
+  SHA, and runtime seed fixture passes dry-run preflight.
+- The real Hugging Face Jobs H200 launch fails before a job is created with
+  HTTP 402 Payment Required: pre-paid credit balance is insufficient.
 - No searched P5 artifact under `.artifacts/runpod_prod_signoff`,
-  `.artifacts/parity`, or `.artifacts/pytest` contains current git SHA
-  `0bb26bb0ad9f7492f7df67f1d203c8159b1816dc`.
+  `.artifacts/parity`, or `.artifacts/pytest` contains validation git SHA
+  `c90fac6a3c9e7c866f8e1806f8db5cde1f7c689c`.
 
 P5 launch handoff:
 
-Run this only after the current work is available at a pushed `--repo-sha` and a
-CUDA-capable Hugging Face Jobs image is configured. Build and publish the image
-from the repo-owned Dockerfile:
+The current work is available at pushed validation tag
+`banana-surface-parity-m7-image-r1`, and a CUDA-capable Hugging Face Jobs image
+is configured. Rebuild only if the validation SHA changes:
 
 ```bash
 docker build -f benchmarks/hf_jobs/production_gpu_proof.Dockerfile \
@@ -554,13 +570,12 @@ present at that SHA, run the production proof bundle, and fail if the remote job
 does not complete successfully.
 
 ```bash
-SIMSOPT_HF_GPU_IMAGE=<registry>/simsopt-jax:cuda12-jax092 \
+SIMSOPT_HF_GPU_IMAGE=ghcr.io/jungdaesuh/simsopt-jax-hf-production-proof:banana-surface-parity-m7-image-r1 \
 .conda/jax-0.9.2/bin/python benchmarks/hf_jobs/launch_production_gpu_proof.py \
   --repo-url https://github.com/jungdaesuh/simsopt.git \
-  --repo-ref gpu-purity-stage2-20260405 \
-  --repo-sha <pushed-current-sha> \
-  --single-stage-mpol 10 \
-  --single-stage-ntor 10 \
+  --repo-ref banana-surface-parity-m7-image-r1 \
+  --repo-sha c90fac6a3c9e7c866f8e1806f8db5cde1f7c689c \
+  --hardware h200 \
   --single-stage-jax-runtime-seed-spec benchmarks/fixtures/single_stage_seed_iota15 \
   --no-detach
 ```
@@ -726,6 +741,7 @@ Prompt-to-artifact checklist:
   without treating optimizer traces as fixed-state parity evidence.
 - [x] P5 proof harness is implemented for the additional Boozer adjoint and
   CPU/GPU reduction stress lanes, with provenance and fail-closed metadata.
+- [x] P5 image publication and real-image launcher preflight are complete.
 - [ ] P5 real CUDA artifacts from the current repo state exist for every
   `open under P5` manifest row.
 - [x] P6 closeout inventory and local CPU/JAX audit outputs are recorded.
@@ -733,44 +749,47 @@ Prompt-to-artifact checklist:
 Completion verdict: not complete. All repo-local non-CUDA implementation,
 documentation, and verifier work is closed; the remaining missing requirement is
 P5 real CUDA proof from a pushed current SHA on a configured CUDA image/host.
+The H200 proof cannot be launched until Hugging Face Jobs or Runpod account
+credit is available.
 
 Continuation audit, 2026-05-06:
 
 ```text
 git rev-parse HEAD
-0bb26bb0ad9f7492f7df67f1d203c8159b1816dc
+c90fac6a3c9e7c866f8e1806f8db5cde1f7c689c
 
-.conda/jax-0.9.2/bin/python -m pytest -q \
-  tests/docs/test_banana_parity_coverage_manifest.py \
-  tests/test_hf_production_gpu_proof.py \
-  tests/test_benchmark_helpers.py::test_single_stage_init_fixture_files_are_vendored \
-  tests/test_benchmark_helpers.py::test_single_stage_init_fixture_runtime_seed_spec_loads
-52 passed in 21.64s
+git ls-remote https://github.com/jungdaesuh/simsopt.git refs/tags/banana-surface-parity-m7-image-r1
+c90fac6a3c9e7c866f8e1806f8db5cde1f7c689c refs/tags/banana-surface-parity-m7-image-r1
 
-.conda/jax-0.9.2/bin/python -m pytest -q \
-  tests/test_hf_production_gpu_proof.py::test_launch_production_gpu_proof_accepts_repo_runtime_seed_spec \
-  tests/test_hf_production_gpu_proof.py::test_launch_production_gpu_proof_accepts_matching_remote_repo_ref_and_sha \
-  tests/test_hf_production_gpu_proof.py::test_launch_production_gpu_proof_rejects_stage2_seed_missing_from_target_sha \
-  tests/test_hf_production_gpu_proof.py::test_launch_production_gpu_proof_rejects_runtime_seed_directory_without_spec \
-  tests/test_hf_production_gpu_proof.py::test_launch_production_gpu_proof_rejects_runtime_seed_spec_tree
-5 passed in 2.18s
+GHCR pull-token manifest probe
+token_status 200
+digest sha256:eac2e1887eaf08628af62b28e5d7d7141b84afdfdcbfd00179823b1eb8f3df39
 
-.conda/jax-0.9.2/bin/python -m ruff check \
-  benchmarks/hf_jobs/cuda_pytest_probe.py \
-  benchmarks/hf_jobs/launch_production_gpu_proof.py \
-  benchmarks/validation_ladder_common.py \
-  benchmarks/stage2_e2e_comparison.py \
-  benchmarks/single_stage_init_parity.py \
-  tests/subprocess/hf_production_gpu_fake_runner.py \
-  tests/test_hf_production_gpu_proof.py \
-  tests/docs/test_banana_parity_coverage_manifest.py \
-  tests/test_benchmark_helpers.py
-All checks passed!
+HF real-image dry-run
+preflight.repo_sha c90fac6a3c9e7c866f8e1806f8db5cde1f7c689c
+preflight.repo_ref banana-surface-parity-m7-image-r1
+preflight.image ghcr.io/jungdaesuh/simsopt-jax-hf-production-proof:banana-surface-parity-m7-image-r1
+preflight.hardware ["h200"]
+preflight.single_stage_jax_runtime_seed_spec benchmarks/fixtures/single_stage_seed_iota15
 
-bash -n benchmarks/hf_jobs/run_production_gpu_proof.sh
-passed
+HF real H200 launch
+HTTP 402 Payment Required
+Pre-paid credit balance is insufficient - add more credits to your account to use Jobs.
 
-git diff --check -- <implementation/docs/test slice>
+runpodctl gpu list
+H200 SXM available, gpuId NVIDIA H200, memoryInGb 141, stockStatus Low
+
+runpodctl user
+negative clientBalance
+
+runpodctl pod list
+[]
+
+PYTHONPATH=src .conda/jax-0.9.2/bin/python -m pytest -q \
+  tests/docs/test_banana_parity_coverage_manifest.py
+2 passed in 0.02s
+
+git diff --check
 passed
 
 .conda/jax-0.9.2/bin/python -c '<jax runtime probe>'
@@ -782,19 +801,10 @@ unavailable
 docker / podman / nerdctl
 unavailable
 
-SIMSOPT_HF_GPU_IMAGE
-unset
-
-runpodctl pod list
-[]
-
-HF Jobs MCP
-No running jobs found.
-
 git ls-remote fork gpu-purity-stage2-20260405
 7e3f2eb5e5462c7d3cc989ce8bf1fe010a04f3a2 refs/heads/gpu-purity-stage2-20260405
 
-rg -l 0bb26bb0ad9f7492f7df67f1d203c8159b1816dc \
+rg -l c90fac6a3c9e7c866f8e1806f8db5cde1f7c689c \
   .artifacts/runpod_prod_signoff .artifacts/parity .artifacts/pytest
 no matching P5 artifacts
 ```
