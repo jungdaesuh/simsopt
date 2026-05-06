@@ -1,9 +1,9 @@
 # Banana-Required vs Full-Upstream Surface Parity Implementation Plan
 
-Status: local non-CUDA implementation and validation evidence updated; M7 CUDA evidence remains open.
+Status: local non-CUDA implementation and validation evidence committed in `a514fa24c5a9adb849f963a4366cf07b74b37b47`; M7 CUDA evidence remains open.
 Date: 2026-05-06.
 Base commit: `0bb26bb0a`.
-Validation basis: current working tree on 2026-05-06. Repo-local interpreter `.conda/jax-0.9.2/bin/python` reports JAX `0.10.0`, CPU backend only, with `JAX_ENABLE_X64=True` and `JAX_PLATFORMS=cpu` for local gates. Unrelated dirty files were left unchanged.
+Validation basis: committed implementation slice on 2026-05-06. Repo-local interpreter `.conda/jax-0.9.2/bin/python` reports JAX `0.10.0`, CPU backend only, with `JAX_ENABLE_X64=True` and `JAX_PLATFORMS=cpu` for local gates. Unrelated untracked artifact files were left unchanged.
 
 ## Verdict
 
@@ -26,7 +26,7 @@ The larger "partial" labels mostly come from upstream surface API breadth: secon
 
 ## Local Validation Evidence
 
-CPU-only evidence from the 2026-05-06 working tree:
+CPU-only evidence from the 2026-05-06 committed implementation slice:
 
 - Repo-local interpreter: `.conda/jax-0.9.2/bin/python`, JAX `0.10.0`, backend `cpu`, devices `[CpuDevice(id=0)]`.
 - Manifest/harness gate: `52 passed`.
@@ -51,26 +51,25 @@ CPU-only evidence from the 2026-05-06 working tree:
 
 M7 CUDA launch preflight is still blocked in this local continuation:
 
-- Local `HEAD`: `1951de0666e34fb58488734a818f85ff88d1e028` on `gpu-purity-stage2-20260405`.
-- Fork branch `jungdaesuh/simsopt:gpu-purity-stage2-20260405` currently resolves to `7e3f2eb5e5462c7d3cc989ce8bf1fe010a04f3a2`; `1951de0666e34fb58488734a818f85ff88d1e028` is not reachable from the checked fork remote.
+- Committed implementation slice: `a514fa24c5a9adb849f963a4366cf07b74b37b47` on `gpu-purity-stage2-20260405`.
+- Fork branch `jungdaesuh/simsopt:gpu-purity-stage2-20260405` currently resolves to `7e3f2eb5e5462c7d3cc989ce8bf1fe010a04f3a2`; `a514fa24c5a9adb849f963a4366cf07b74b37b47` is not reachable from the checked fork remote.
 - `SIMSOPT_HF_GPU_IMAGE` is unset, so `benchmarks/hf_jobs/launch_production_gpu_proof.py` has no image tag for the CUDA job.
-- Local JAX devices are CPU-only: `[CpuDevice(id=0)]`.
+- Local JAX devices are CPU-only: `[CpuDevice(id=0)]`; the unaffiliated default shell has `jax_enable_x64=False` unless the validation gate sets `JAX_ENABLE_X64=1`.
 - Docker CLI is not available on this host (`command -v docker` produced no path), so the CUDA image cannot be built locally from this checkout.
 - Local `hf auth whoami` fails before auth resolution with `TypeError: type 'Choice' is not subscriptable`; the Hugging Face MCP session is authenticated as `CreativeEngineer`.
 - `RUNPOD_API_KEY` is present, but no current-SHA CUDA artifact was launched from this working tree because the pushed-ref and image preconditions are not satisfied.
 - The current launcher has no patch/worktree upload path: it clones the configured repo/ref, checks out the resolved SHA, and validates the repo-relative seed paths at that SHA before launching.
 - The old ad hoc bootstrap fallback path is intentionally unavailable: `--bootstrap-mode` is rejected, and `bootstrap_runtime.sh` requires a prebuilt `/opt/venv/bin/python` runtime with a GPU JAX backend.
-- HF launcher dry-run preflight with `SIMSOPT_HF_GPU_IMAGE=dummy-image`, `--repo-sha 1951de0666e34fb58488734a818f85ff88d1e028`, and `--repo-ref gpu-purity-stage2-20260405` fails before launch: `repo SHA 1951de0666e34fb58488734a818f85ff88d1e028 is not present on https://github.com/jungdaesuh/simsopt.git under refs/heads/gpu-purity-stage2-20260405; HF checkout would fail.`
+- HF launcher dry-run preflight with `SIMSOPT_HF_GPU_IMAGE=dummy-image`, `--repo-sha a514fa24c5a9adb849f963a4366cf07b74b37b47`, and `--repo-ref gpu-purity-stage2-20260405` fails before launch: `repo SHA a514fa24c5a9adb849f963a4366cf07b74b37b47 is not present on https://github.com/jungdaesuh/simsopt.git under refs/heads/gpu-purity-stage2-20260405; HF checkout would fail.`
 
 M7 unblock checklist:
 
-- Commit the intended dirty working-tree slice before CUDA validation; the current local `HEAD` does not include the uncommitted implementation/doc updates.
-- Push a branch or tag that contains the exact commit to be validated. The launcher rejects detached or unreachable local-only SHAs by design.
+- Push a branch or tag that contains the exact commit to be validated, including `a514fa24c5a9adb849f963a4366cf07b74b37b47` and any later audit-only doc commit. The launcher rejects detached or unreachable local-only SHAs by design.
 - Build and publish the CUDA image from `benchmarks/hf_jobs/production_gpu_proof.Dockerfile` on a machine with Docker or equivalent container tooling, then pass it through `SIMSOPT_HF_GPU_IMAGE` or `--image`.
 - Re-run the launcher dry-run first; it must print a preflight report whose `repo_sha` equals the pushed validation commit and whose `image` is the published CUDA image.
 - Only after that preflight passes, run the H200/CUDA no-detach proof or `.github/workflows/jax_h200_production_proof.yml` and attach the resulting artifact metadata here or in the manifest-linked proof doc.
 
-Candidate validation-SHA scope, not staged here:
+Committed validation-SHA implementation scope from `a514fa24c5a9adb849f963a4366cf07b74b37b47`:
 
 Surface/objective parity slice required for this plan's non-CUDA claims:
 
@@ -90,11 +89,10 @@ Surface/objective parity slice required for this plan's non-CUDA claims:
 - `tests/geo/test_surface_rzfourier_jax.py`
 - `tests/geo/test_surface_taylor.py`
 
-M7/HF proof support slice to include only if it is not already present in the
-pushed target commit used for CUDA proof:
+M7/HF proof support slice included in `a514fa24c5a9adb849f963a4366cf07b74b37b47` and therefore required in the pushed target commit used for CUDA proof:
 
-- `benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json` (currently untracked; required when the runtime seed is passed as the directory `benchmarks/fixtures/single_stage_seed_iota15`)
-- `benchmarks/hf_jobs/cuda_pytest_probe.py` (currently untracked; required by `run_production_gpu_proof.sh` for the CUDA pytest proof payloads)
+- `benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json` (required when the runtime seed is passed as the directory `benchmarks/fixtures/single_stage_seed_iota15`)
+- `benchmarks/hf_jobs/cuda_pytest_probe.py` (required by `run_production_gpu_proof.sh` for the CUDA pytest proof payloads)
 - `benchmarks/hf_jobs/launch_production_gpu_proof.py`
 - `benchmarks/hf_jobs/run_production_gpu_proof.sh`
 - `benchmarks/single_stage_init_parity.py`
@@ -185,7 +183,7 @@ current-SHA CUDA evidence if CUDA closure is being claimed.
 | Set B conditional I/O/label/higher paired-point rows | VTK/file-output, `aspect_ratio` Boozer label, and higher `*_lin` APIs are explicitly conditional in B4/B5/B7. | not claimed; not a blocker for implemented rows |
 | Manifest/doc update | `docs/jax_parity_manifest.md` has a documentary non-CUDA surface/objective section and banana inventory rows with CUDA still open where required. | complete for docs; manifest guard passed |
 | Guardrails | `git diff --check` is clean; touched source/test diff grep found no dynamic imports, `typing.cast`, `Any`, or new `try`/`except`. | complete |
-| M7 current-SHA CUDA artifact gate | Local SHA `1951de0666e34fb58488734a818f85ff88d1e028` is not reachable from `jungdaesuh/simsopt:gpu-purity-stage2-20260405`; `SIMSOPT_HF_GPU_IMAGE` is unset; Docker CLI is unavailable; local JAX devices are CPU-only; the working tree is dirty, so a future CUDA proof must validate a new committed SHA containing this implementation. Focused launcher tests confirm a prebuilt image is required, `--bootstrap-mode` is rejected, and SHA/ref mismatch fails closed. | incomplete and blocked |
+| M7 current-SHA CUDA artifact gate | Committed implementation SHA `a514fa24c5a9adb849f963a4366cf07b74b37b47` is not reachable from `jungdaesuh/simsopt:gpu-purity-stage2-20260405`; `SIMSOPT_HF_GPU_IMAGE` is unset; Docker CLI is unavailable; local JAX devices are CPU-only. Focused launcher tests confirm a prebuilt image is required, `--bootstrap-mode` is rejected, and SHA/ref mismatch fails closed. | incomplete and blocked |
 
 Audit verdict: not complete for CUDA/P5 closure. The local non-CUDA
 implementation and documentation work is complete, but the objective cannot be
