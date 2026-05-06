@@ -122,7 +122,6 @@ def is_plasma_vessel_clearance_offspec(
 def validate_plasma_vessel_clearance(
     plasma_vessel_min_dist_m: float,
     *,
-    accept_offspec: bool = False,
     threshold: float = PLASMA_VESSEL_MIN_DIST_M,
 ) -> float:
     clearance = float(plasma_vessel_min_dist_m)
@@ -132,15 +131,11 @@ def validate_plasma_vessel_clearance(
         threshold=clearance_threshold,
     ):
         return clearance
-    if accept_offspec:
-        return clearance
     raise ValueError(
         "LCFS-to-vessel clearance violates the HBT-EP hardware contract "
         f"({clearance:.6f} m < {clearance_threshold:.6f} m). "
         "Use the direct LCFS-to-vessel spacing metric for fit validation, not "
-        "a proxy envelope. Set "
-        f"{ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV} to reproduce historical "
-        "artifacts on off-spec plasma geometry."
+        "a proxy envelope."
     )
 
 
@@ -149,15 +144,6 @@ ACCEPT_OFFSPEC_R0_SEED_HELP = (
     "Allow --major-radius to deviate from the vacuum-vessel contract. "
     "Use only to reproduce historical artifacts; produces coils that do "
     "not fit HBT-EP."
-)
-
-ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV = (
-    "ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE"
-)
-ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV_HELP = (
-    "Allow the LCFS-to-vessel clearance to fall below the fixed HBT-EP "
-    f"threshold of {PLASMA_VESSEL_MIN_DIST_M:.3f} m. Use only to reproduce "
-    "historical artifacts on off-spec plasma geometry."
 )
 
 

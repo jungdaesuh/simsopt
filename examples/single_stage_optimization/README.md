@@ -419,8 +419,7 @@ python banana_coil_solver.py \
 
 The bundled `014417` donor is historically useful but off-spec under the direct
 LCFS-to-vessel clearance check. Fresh Stage 2 runs now measure the true LCFS and
-reject this donor unless you explicitly set
-`ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE=1` to reproduce historical artifacts.
+reject this donor.
 For truthful handoff/fit validation, repair or replace the donor first.
 
 Key Stage 2 controls:

@@ -559,13 +559,6 @@ class HardwareContractsPlasmaVesselClearanceTests(unittest.TestCase):
         ):
             self.module.validate_plasma_vessel_clearance(self.threshold - 1e-6)
 
-    def test_accept_offspec_bypasses_raise(self):
-        clearance = self.module.validate_plasma_vessel_clearance(
-            self.threshold - 0.02,
-            accept_offspec=True,
-        )
-        self.assertAlmostEqual(clearance, self.threshold - 0.02)
-
     def test_is_plasma_vessel_clearance_offspec_detects_violation(self):
         self.assertFalse(
             self.module.is_plasma_vessel_clearance_offspec(self.threshold)
@@ -574,8 +567,13 @@ class HardwareContractsPlasmaVesselClearanceTests(unittest.TestCase):
             self.module.is_plasma_vessel_clearance_offspec(self.threshold - 1e-6)
         )
 
+
+class HardwareContractsEnvFlagTests(unittest.TestCase):
+    def setUp(self):
+        self.module = _load_module(HARDWARE_CONTRACTS_PATH, "banana_hardware_contracts")
+
     def test_env_flag_recognizes_truthy_values(self):
-        flag_name = self.module.ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV
+        flag_name = self.module.ACCEPT_OFFSPEC_R0_SEED_ENV
         original = os.environ.get(flag_name)
         try:
             for truthy in ("1", "true", "TRUE", "yes"):

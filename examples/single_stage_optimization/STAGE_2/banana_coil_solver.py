@@ -74,7 +74,6 @@ from banana_opt.stage2_geometry import (
     surface_surface_min_distance as _surface_surface_min_distance,
 )
 from banana_opt.hardware_contracts import (
-    ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV,
     ACCEPT_OFFSPEC_R0_SEED_ENV,
     ACCEPT_OFFSPEC_R0_SEED_HELP,
     BANANA_CURRENT_HARD_LIMIT_A,
@@ -1590,10 +1589,7 @@ def main(parsed_args=None):
     if banana_surf_nfp != lcfs_probe.nfp:
         raise ValueError("Stage 2 geometry preflight selected inconsistent NFP.")
     plasma_vessel_min_dist = _surface_surface_min_distance(lcfs_surf, VV)
-    validate_plasma_vessel_clearance(
-        plasma_vessel_min_dist,
-        accept_offspec=env_flag(ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE_ENV),
-    )
+    validate_plasma_vessel_clearance(plasma_vessel_min_dist)
 
     if args.stage2_bs_path:
         print(f"Loading Stage 2 seed from {args.stage2_bs_path}")

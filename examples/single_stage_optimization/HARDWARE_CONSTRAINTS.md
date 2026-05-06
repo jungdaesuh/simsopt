@@ -28,8 +28,7 @@ All constraint thresholds are clamped in the solver code to match the current HB
 Stage 2 also enforces the fixed LCFS-to-vessel clearance contract directly on the
 loaded plasma boundary. This is not a CLI-tunable floor because the plasma
 geometry is inherited from the donor equilibrium, not optimized by Stage 2.
-Historical off-spec reproduction can bypass the check only via
-`ACCEPT_OFFSPEC_PLASMA_VESSEL_CLEARANCE=1`.
+No historical off-spec bypass exists for this clearance gate.
 
 ### Single-Stage (`single_stage_banana_example.py`)
 

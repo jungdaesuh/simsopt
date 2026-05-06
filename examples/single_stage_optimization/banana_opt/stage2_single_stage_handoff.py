@@ -348,7 +348,7 @@ def validate_stage2_seed_contract(stage2_results):
             "Stage 2 seed artifact is missing TF_CURRENT_A even after legacy-contract "
             "upgrade. Pass --stage2-seed-tf-current-A explicitly or use a newer "
             "artifact with TF-current metadata."
-    )
+        )
     validate_tf_current_limit(tf_current_A)
     major_radius = _required_stage2_result_value(
         stage2_results,
