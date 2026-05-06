@@ -6,6 +6,8 @@ on:
     paths:
       - '.github/workflows/jax_smoke.yml'
       - 'CMakeLists.txt'
+      - 'docs/jax_parity_manifest.md'
+      - 'docs/banana_required_vs_full_upstream_surface_parity_impl_plan_2026-05-06.md'
       - 'pyproject.toml'
       - 'src/simsopt/__init__.py'
       - 'src/simsopt/_core/**'
@@ -37,6 +39,7 @@ on:
       - 'tests/integration/test_single_stage_jax_cpu_reference.py'
       - 'tests/integration/test_single_stage_physics_parity.py'
       - 'tests/geo/test_single_stage_example.py'
+      - 'tests/docs/test_banana_parity_coverage_manifest.py'
       - 'tests/test_run_code_benchmark_common.py'
       - 'tests/test_backend.py'
       - 'tests/test_benchmark_helpers.py'
@@ -71,6 +74,8 @@ on:
     paths:
       - '.github/workflows/jax_smoke.yml'
       - 'CMakeLists.txt'
+      - 'docs/jax_parity_manifest.md'
+      - 'docs/banana_required_vs_full_upstream_surface_parity_impl_plan_2026-05-06.md'
       - 'pyproject.toml'
       - 'src/simsopt/__init__.py'
       - 'src/simsopt/_core/**'
@@ -102,6 +107,7 @@ on:
       - 'tests/integration/test_single_stage_jax_cpu_reference.py'
       - 'tests/integration/test_single_stage_physics_parity.py'
       - 'tests/geo/test_single_stage_example.py'
+      - 'tests/docs/test_banana_parity_coverage_manifest.py'
       - 'tests/test_run_code_benchmark_common.py'
       - 'tests/test_backend.py'
       - 'tests/test_benchmark_helpers.py'
@@ -195,6 +201,9 @@ jobs:
           python -m pytest tests/test_benchmark_helpers.py \
             -k "jax_ci_contract_ratchet_rel_tol_tightens_without_loosening or jax_ci_contract_reduction_order_probe_tracks_ulp_distance or jax_ci_contract_same_device_probe_requires_bitwise_identity or jax_ci_contract_payload_tracks_ratchet_and_pass_state" \
             -v --tb=short
+
+      - name: Run banana parity manifest guard
+        run: python -m pytest tests/docs/test_banana_parity_coverage_manifest.py -v --tb=short
 
       - name: Run proof and benchmark guard tests
         run: |
