@@ -21,10 +21,12 @@ Local non-CUDA surface/objective implementation evidence from 2026-05-06 is
 summarized in the linked plan and in the documentary section below. That
 evidence closes CPU/JAX rows only; it does not close any CUDA status.
 M7 image publication and real-image H200 dry-run preflight are complete for the
-current runtime validation tag `banana-surface-parity-m7-unitnormal-r1`
+last pushed runtime validation tag `banana-surface-parity-m7-unitnormal-r1`
 (`0b6293b075342acc5cf996160ecf4bd87f709610`) using the published image
 `banana-surface-parity-m7-image-r1`, but the real CUDA rows remain open because
-the H200 launch is blocked by external GPU account credits.
+the H200 launch is blocked by external GPU account credits. The latest local
+launcher fix pins `hf jobs inspect --format json` for no-detach status checks;
+include that fix in the next validation tag before retrying real H200.
 
 Exact parity means the mirrored JAX test runs with:
 
