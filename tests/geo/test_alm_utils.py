@@ -897,7 +897,7 @@ class AlmStructuralDebtTests(unittest.TestCase):
         self.assertTrue(hasattr(module, "ALMInnerAttemptRequest"))
         self.assertTrue(hasattr(module, "ALMInnerAttemptResult"))
 
-    def test_minimize_alm_impl_baseline_metrics_are_pinned(self):
+    def test_minimize_alm_impl_orchestrator_is_small_and_closure_free(self):
         node = self._top_level_node("_minimize_alm_impl")
         nested_functions = [
             child
@@ -905,8 +905,26 @@ class AlmStructuralDebtTests(unittest.TestCase):
             if isinstance(child, ast.FunctionDef) and child is not node
         ]
 
-        self.assertEqual(node.end_lineno - node.lineno + 1, 910)
+        self.assertLessEqual(node.end_lineno - node.lineno + 1, 500)
         self.assertEqual(nested_functions, [])
+
+    def test_minimize_alm_impl_phase4_helpers_exist_and_closure_free(self):
+        for name in (
+            "_run_alm_continuation_step",
+            "_run_alm_outer_iteration",
+            "_ALMContinuationDecision",
+            "_ALMOuterDecision",
+            "_ALMContinuationStepResult",
+            "_ALMOuterIterationResult",
+        ):
+            node = self._top_level_node(name)
+            if isinstance(node, ast.FunctionDef):
+                nested = [
+                    child
+                    for child in ast.walk(node)
+                    if isinstance(child, ast.FunctionDef) and child is not node
+                ]
+                self.assertEqual(nested, [], f"{name} must be closure-free")
 
 
 _HISTORY_ENTRY_SHARED_KEYS = frozenset({
@@ -3936,6 +3954,315 @@ class MinimizeAlmTests(unittest.TestCase):
                 {"maxiter": 1},
                 initial_penalty=10.0,
             )
+
+class AlmContinuationStepTests(unittest.TestCase):
+    @staticmethod
+    def _settings(module, **overrides):
+        defaults = dict(
+            max_outer_iterations=2,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+        )
+        defaults.update(overrides)
+        return module.ALMSettings(**defaults)
+
+    @staticmethod
+    def _run_state(module, x):
+        return module.ALMRunState(
+            x=np.asarray(x, dtype=float).copy(),
+            total_inner_iterations=0,
+            trust_radius=None,
+            history=[],
+            history_truncated_count=0,
+            cap_binding_detected=False,
+            cap_binding_indices=set(),
+            penalty_cap_reached=False,
+            penalty_cap_requested=None,
+        )
+
+    @staticmethod
+    def _kwargs(module, run_state, evaluate_problem, **overrides):
+        kwargs = dict(
+            settings=overrides.pop("settings"),
+            run_state=run_state,
+            multipliers=overrides.pop("multipliers", np.array([0.0])),
+            penalty=overrides.pop("penalty", 1.0),
+            update_feasibility_tol=overrides.pop("update_feasibility_tol", 1e-2),
+            update_stationarity_tol=overrides.pop("update_stationarity_tol", 1e-2),
+            feasible_stall_count=overrides.pop("feasible_stall_count", 0),
+            last_result=overrides.pop("last_result", None),
+            final_eval=overrides.pop("final_eval", None),
+            final_multipliers=overrides.pop("final_multipliers", np.array([0.0])),
+            final_penalty=overrides.pop("final_penalty", 1.0),
+            best_feasible=overrides.pop("best_feasible", None),
+            inner_options=overrides.pop("inner_options", {"maxiter": 50}),
+            outer_iteration=overrides.pop("outer_iteration", 1),
+            continuation_iteration=overrides.pop("continuation_iteration", 0),
+            is_final_outer=overrides.pop("is_final_outer", False),
+            last_outer_iteration=overrides.pop("last_outer_iteration", 1),
+            evaluate_problem=evaluate_problem,
+            inner_callback=overrides.pop("inner_callback", None),
+            accepted_callback=overrides.pop("accepted_callback", None),
+            history_callback=overrides.pop("history_callback", None),
+            snapshot_accepted_state_fn=overrides.pop("snapshot_accepted_state_fn", None),
+            restore_incumbent_state_fn=overrides.pop("restore_incumbent_state_fn", None),
+            constraint_names=overrides.pop("constraint_names", ["upper"]),
+            constraint_names_tuple=overrides.pop("constraint_names_tuple", ("upper",)),
+            constraint_blocks_tuple=overrides.pop("constraint_blocks_tuple", None),
+        )
+        if overrides:
+            raise TypeError(f"unexpected kwargs: {sorted(overrides)}")
+        return kwargs
+
+    def test_continuation_step_short_circuits_when_iterate_is_already_converged(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module)
+
+        def evaluate_problem(x, multipliers, penalty):
+            value = 0.5 * (x[0] - 2.0) ** 2
+            grad = np.array([x[0] - 2.0])
+            signed = np.array([x[0] - 1.0])
+            return module.augmented_inequality_objective(
+                value, grad, signed, [np.array([1.0])], multipliers, penalty
+            )
+
+        run_state = self._run_state(module, np.array([1.0]))
+        result = module._run_alm_continuation_step(
+            **self._kwargs(
+                module,
+                run_state,
+                evaluate_problem,
+                settings=settings,
+                multipliers=np.array([1.0]),
+                final_multipliers=np.array([1.0]),
+                update_feasibility_tol=settings.feasibility_tol,
+                update_stationarity_tol=settings.stationarity_tol,
+            )
+        )
+
+        self.assertEqual(result.decision, module._ALMContinuationDecision.RETURN)
+        self.assertIsNotNone(result.result)
+        self.assertEqual(result.result.termination_reason, "converged")
+        self.assertTrue(result.result.success)
+        self.assertEqual(len(run_state.history), 1)
+        self.assertEqual(run_state.history[0]["action"], "converged")
+
+    def test_continuation_step_break_outer_when_penalty_increase_fallback_runs(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module)
+
+        def evaluate_problem(x, multipliers, penalty):
+            value = 0.5 * (x[0] - 2.0) ** 2
+            grad = np.array([x[0] - 2.0])
+            signed = np.array([x[0] - 1.0])
+            return module.augmented_inequality_objective(
+                value, grad, signed, [np.array([1.0])], multipliers, penalty
+            )
+
+        run_state = self._run_state(module, np.array([2.0]))
+        with patch.object(module, "minimize", _make_fake_minimize()):
+            result = module._run_alm_continuation_step(
+                **self._kwargs(
+                    module,
+                    run_state,
+                    evaluate_problem,
+                    settings=settings,
+                    inner_options={"maxiter": 1, "ftol": 1e-12, "gtol": 1e-12},
+                )
+            )
+
+        self.assertIn(
+            result.decision,
+            {
+                module._ALMContinuationDecision.BREAK_OUTER,
+                module._ALMContinuationDecision.RETURN,
+            },
+        )
+        self.assertGreater(len(run_state.history), 0)
+        self.assertGreaterEqual(run_state.total_inner_iterations, 1)
+
+
+class AlmOuterIterationTests(unittest.TestCase):
+    @staticmethod
+    def _settings(module, **overrides):
+        defaults = dict(
+            max_outer_iterations=2,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+            max_subproblem_continuations=3,
+        )
+        defaults.update(overrides)
+        return module.ALMSettings(**defaults)
+
+    @staticmethod
+    def _run_state(module):
+        return module.ALMRunState(
+            x=np.zeros(1),
+            total_inner_iterations=0,
+            trust_radius=None,
+            history=[],
+            history_truncated_count=0,
+            cap_binding_detected=False,
+            cap_binding_indices=set(),
+            penalty_cap_reached=False,
+            penalty_cap_requested=None,
+        )
+
+    @staticmethod
+    def _outer_kwargs(module, run_state, **overrides):
+        return dict(
+            settings=overrides.pop("settings"),
+            run_state=run_state,
+            multipliers=overrides.pop("multipliers", np.zeros(1)),
+            penalty=overrides.pop("penalty", 1.0),
+            update_feasibility_tol=overrides.pop("update_feasibility_tol", 1e-2),
+            update_stationarity_tol=overrides.pop("update_stationarity_tol", 1e-2),
+            last_result=overrides.pop("last_result", None),
+            final_eval=overrides.pop("final_eval", None),
+            final_multipliers=overrides.pop("final_multipliers", np.zeros(1)),
+            final_penalty=overrides.pop("final_penalty", 1.0),
+            best_feasible=overrides.pop("best_feasible", None),
+            inner_options=overrides.pop("inner_options", {"maxiter": 1}),
+            outer_iteration=overrides.pop("outer_iteration", 1),
+            is_final_outer=overrides.pop("is_final_outer", False),
+            evaluate_problem=overrides.pop(
+                "evaluate_problem", lambda x, m, p: {"total": 0.0, "grad": np.zeros(1)}
+            ),
+            inner_callback=overrides.pop("inner_callback", None),
+            accepted_callback=overrides.pop("accepted_callback", None),
+            outer_state_callback=overrides.pop("outer_state_callback", None),
+            history_callback=overrides.pop("history_callback", None),
+            snapshot_accepted_state_fn=overrides.pop("snapshot_accepted_state_fn", None),
+            restore_incumbent_state_fn=overrides.pop("restore_incumbent_state_fn", None),
+            constraint_names=overrides.pop("constraint_names", ["c0"]),
+            constraint_names_tuple=overrides.pop("constraint_names_tuple", ("c0",)),
+            constraint_blocks_tuple=overrides.pop("constraint_blocks_tuple", None),
+        )
+
+    def _make_step_result(self, module, decision, result_payload=None, **overrides):
+        return module._ALMContinuationStepResult(
+            decision=decision,
+            result=result_payload,
+            multipliers=overrides.get("multipliers", np.zeros(1)),
+            penalty=overrides.get("penalty", 1.0),
+            update_feasibility_tol=overrides.get("update_feasibility_tol", 1e-2),
+            update_stationarity_tol=overrides.get("update_stationarity_tol", 1e-2),
+            feasible_stall_count=overrides.get("feasible_stall_count", 0),
+            last_result=overrides.get("last_result", None),
+            final_eval=overrides.get("final_eval", None),
+            final_multipliers=overrides.get("final_multipliers", np.zeros(1)),
+            final_penalty=overrides.get("final_penalty", 1.0),
+            best_feasible=overrides.get("best_feasible", None),
+            inner_options=overrides.get("inner_options", {"maxiter": 1}),
+        )
+
+    def test_outer_iteration_propagates_return_decision_from_continuation_step(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module)
+        run_state = self._run_state(module)
+        sentinel_payload = SimpleNamespace(termination_reason="converged")
+        step_result = self._make_step_result(
+            module,
+            module._ALMContinuationDecision.RETURN,
+            result_payload=sentinel_payload,
+        )
+
+        with patch.object(module, "_run_alm_continuation_step", return_value=step_result) as mocked:
+            outcome = module._run_alm_outer_iteration(
+                **self._outer_kwargs(module, run_state, settings=settings)
+            )
+
+        self.assertEqual(outcome.decision, module._ALMOuterDecision.RETURN)
+        self.assertIs(outcome.result, sentinel_payload)
+        self.assertEqual(mocked.call_count, 1)
+
+    def test_outer_iteration_signals_exhaust_when_final_outer_and_no_return(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module)
+        run_state = self._run_state(module)
+        step_result = self._make_step_result(
+            module, module._ALMContinuationDecision.BREAK_OUTER
+        )
+
+        with patch.object(module, "_run_alm_continuation_step", return_value=step_result):
+            outcome = module._run_alm_outer_iteration(
+                **self._outer_kwargs(module, run_state, settings=settings, is_final_outer=True)
+            )
+
+        self.assertEqual(outcome.decision, module._ALMOuterDecision.EXHAUST)
+        self.assertIsNone(outcome.result)
+
+    def test_outer_iteration_signals_next_outer_when_not_final_and_no_return(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module)
+        run_state = self._run_state(module)
+        step_result = self._make_step_result(
+            module, module._ALMContinuationDecision.BREAK_OUTER
+        )
+
+        with patch.object(module, "_run_alm_continuation_step", return_value=step_result):
+            outcome = module._run_alm_outer_iteration(
+                **self._outer_kwargs(module, run_state, settings=settings, is_final_outer=False)
+            )
+
+        self.assertEqual(outcome.decision, module._ALMOuterDecision.NEXT_OUTER)
+
+    def test_outer_iteration_emits_outer_state_callback_exactly_once_before_continuation(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module)
+        run_state = self._run_state(module)
+        events = []
+
+        def outer_state_callback(iteration, multipliers, penalty):
+            events.append(("outer_state", iteration))
+
+        def fake_step(**kwargs):
+            events.append(("continuation", kwargs["continuation_iteration"]))
+            return self._make_step_result(
+                module, module._ALMContinuationDecision.BREAK_OUTER
+            )
+
+        with patch.object(module, "_run_alm_continuation_step", side_effect=fake_step):
+            module._run_alm_outer_iteration(
+                **self._outer_kwargs(
+                    module,
+                    run_state,
+                    settings=settings,
+                    outer_state_callback=outer_state_callback,
+                )
+            )
+
+        self.assertEqual(events[0], ("outer_state", 1))
+        self.assertEqual(
+            sum(1 for tag, _ in events if tag == "outer_state"),
+            1,
+            f"outer_state_callback must fire exactly once: {events}",
+        )
+
+    def test_outer_iteration_dispatches_until_continuation_budget_exhausted(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module, max_subproblem_continuations=2)
+        run_state = self._run_state(module)
+
+        def fake_step(**kwargs):
+            return self._make_step_result(
+                module, module._ALMContinuationDecision.CONTINUE_CONTINUATION
+            )
+
+        with patch.object(
+            module, "_run_alm_continuation_step", side_effect=fake_step
+        ) as mocked:
+            outcome = module._run_alm_outer_iteration(
+                **self._outer_kwargs(module, run_state, settings=settings)
+            )
+
+        self.assertEqual(outcome.decision, module._ALMOuterDecision.NEXT_OUTER)
+        self.assertEqual(mocked.call_count, settings.max_subproblem_continuations + 1)
+
 
 if __name__ == "__main__":
     unittest.main()
