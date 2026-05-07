@@ -86,7 +86,6 @@ from banana_opt.boozer_residuals import (  # noqa: F401 - re-exported for import
     RefinedBoozerResidual,
 )
 from banana_opt.constraint_contract import (
-    apply_offspec_engineering_override_reason,
     build_constraint_metadata,
     resolve_constraint_contract_from_wire_names as _resolve_constraint_contract_from_wire_names_impl,
 )
@@ -143,8 +142,6 @@ from banana_opt.current_contracts import (
 )
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
-    ACCEPT_OFFSPEC_R0_SEED_ENV,
-    ACCEPT_OFFSPEC_R0_SEED_HELP,
     BANANA_WINDING_MINOR_RADIUS_M,
     COIL_COIL_MIN_DIST_M,
     COIL_LENGTH_HARD_LIMIT_M,
@@ -794,6 +791,7 @@ def resolve_plasma_current_settings(
         num_surfaces=num_surfaces,
         requested_finite_current_mode=getattr(args, "finite_current_mode", None),
     )
+
     return {
         "boozer_I": settings.boozer_I,
         "plasma_current_A": settings.plasma_current_A,
@@ -891,6 +889,9 @@ def apply_default_stage2_seed_args(args):
     current. Fixed vessel/winding geometry is routed automatically and is not
     subject to CLI override.
     """
+    if args.stage2_seed_major_radius is not None:
+        validate_major_radius(args.stage2_seed_major_radius)
+
     plasma_profile = DEFAULT_STAGE2_SEEDS_BY_PLASMA.get(
         args.plasma_surf_filename,
         {},
@@ -909,10 +910,6 @@ def apply_default_stage2_seed_args(args):
     contract, _trace = _resolve_constraint_contract_from_wire_names_impl(
         profile=constraint_profile,
         cli_overrides=cli_seed_layer,
-        accept_offspec_major_radius=bool(
-            getattr(args, "accept_offspec_r0_seed", False)
-        ),
-        offspec_major_radius_m=args.stage2_seed_major_radius,
     )
     if args.stage2_seed_major_radius is None:
         args.stage2_seed_major_radius = contract["VACUUM_VESSEL_MAJOR_RADIUS_M"]
@@ -1593,8 +1590,8 @@ def parse_args():
             "Curve length quadratic penalty target in meters (applies to banana_curves[0] via "
             f"QuadraticPenalty(..., 'max')). Defaults to the preferred hardware target of "
             f"{COIL_LENGTH_TARGET_M:.1f} m, with a hard ceiling at "
-            f"{COIL_LENGTH_HARD_LIMIT_M:.1f} m. Passing a larger value is clamped back to "
-            "the hardware ceiling; passing a smaller value makes the run stricter."
+            f"{COIL_LENGTH_HARD_LIMIT_M:.1f} m. Passing a larger value is rejected; "
+            "passing a smaller value makes the run stricter."
         ),
     )
     parser.add_argument("--res-weight", type=float, default=float(os.environ.get("RES_WEIGHT", "1000")),
@@ -1662,11 +1659,6 @@ def parse_args():
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--allow-offspec-engineering-constraints",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--seed-regime",
         choices=[
             _SINGLE_STAGE_SEED_REGIME_AUTO,
@@ -1697,12 +1689,6 @@ def parse_args():
         "--stage2-seed-major-radius",
         type=float,
         default=float(os.environ["STAGE2_SEED_MAJOR_RADIUS"]) if "STAGE2_SEED_MAJOR_RADIUS" in os.environ else None,
-    )
-    parser.add_argument(
-        "--accept-offspec-r0-seed",
-        action="store_true",
-        default=env_flag(ACCEPT_OFFSPEC_R0_SEED_ENV),
-        help=ACCEPT_OFFSPEC_R0_SEED_HELP,
     )
     parser.add_argument(
         "--stage2-seed-toroidal-flux",
@@ -2296,9 +2282,6 @@ def validate_single_stage_current_args(args):
         "single_stage_banana_current_mode",
         BANANA_CURRENT_MODE_SHARED,
     )
-    allow_offspec_engineering_constraints = bool(
-        getattr(args, "allow_offspec_engineering_constraints", False)
-    )
     if banana_current_mode not in {
         BANANA_CURRENT_MODE_SHARED,
         BANANA_CURRENT_MODE_INDEPENDENT,
@@ -2308,14 +2291,10 @@ def validate_single_stage_current_args(args):
         )
     if banana_current_max_A <= 0.0:
         raise ValueError("--banana-current-max-A must be positive.")
-    if (
-        banana_current_max_A > BANANA_CURRENT_HARD_LIMIT_A
-        and not allow_offspec_engineering_constraints
-    ):
+    if banana_current_max_A > BANANA_CURRENT_HARD_LIMIT_A:
         raise ValueError(
             f"--banana-current-max-A must be in the interval "
-            f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}] unless "
-            "--allow-offspec-engineering-constraints is set."
+            f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
         )
 
 
@@ -4353,10 +4332,39 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
     )
 
 
-def set_alm_runtime_state(multipliers, penalty):
-    global ALM_MULTIPLIERS, ALM_PENALTY
+def set_alm_runtime_state(multipliers, penalty, constraint_names=None):
+    global ALM_MULTIPLIERS, ALM_PENALTY, ALM_CONSTRAINT_NAMES
     ALM_MULTIPLIERS = np.asarray(multipliers, dtype=float).copy()
     ALM_PENALTY = float(penalty)
+    if constraint_names is not None:
+        ALM_CONSTRAINT_NAMES = [str(name) for name in constraint_names]
+
+
+def validate_resume_alm_state(resume_alm_state, constraint_names):
+    missing_fields = [
+        field
+        for field in ("constraint_names", "multipliers", "penalty")
+        if field not in resume_alm_state
+    ]
+    if missing_fields:
+        raise ValueError(
+            "ALM resume state missing required fields: "
+            + ", ".join(missing_fields)
+        )
+    current_constraint_names = [str(name) for name in constraint_names]
+    saved_constraint_names = [str(name) for name in resume_alm_state["constraint_names"]]
+    if saved_constraint_names != current_constraint_names:
+        raise ValueError(
+            "ALM resume constraint_names mismatch: "
+            f"saved={saved_constraint_names}, current={current_constraint_names}"
+        )
+    multipliers = np.asarray(resume_alm_state["multipliers"], dtype=float)
+    if multipliers.shape != (len(current_constraint_names),):
+        raise ValueError(
+            "ALM resume multiplier length mismatch: "
+            f"saved={multipliers.shape[0]}, current={len(current_constraint_names)}"
+        )
+    return multipliers.copy(), float(resume_alm_state["penalty"])
 
 
 def build_single_stage_alm_settings(args):
@@ -6024,7 +6032,28 @@ def compute_surface_field_metrics(surf, bs):
     return field_error, mean_abs_bdotn
 
 
+def _first_present_alm_result_attr(alm_result, *attrs):
+    for attr in attrs:
+        value = getattr(alm_result, attr, None)
+        if value is not None:
+            return value
+    return None
+
+
 def build_alm_final_constraint_payload(alm_result):
+    raw_constraint_values = _first_present_alm_result_attr(
+        alm_result,
+        "raw_constraint_values",
+        "raw_surrogate_signed_constraint_values",
+    )
+    raw_solver_constraint_values = _first_present_alm_result_attr(
+        alm_result,
+        "raw_solver_constraint_values",
+        "raw_constraint_values",
+        "raw_surrogate_signed_constraint_values",
+    )
+    raw_hard_violation_values = getattr(alm_result, "raw_hard_violation_values", None)
+
     return {
         "ALM_CONSTRAINT_NAMES": getattr(alm_result, "constraint_names", None),
         "ALM_FINAL_RAW_DUAL_ESTIMATES": getattr(alm_result, "raw_dual_estimates", None),
@@ -6035,46 +6064,30 @@ def build_alm_final_constraint_payload(alm_result):
             "constraint_scale_sources",
             None,
         ),
-        "ALM_FINAL_CONSTRAINT_VALUES": getattr(
-            alm_result,
-            "raw_constraint_values",
-            getattr(alm_result, "constraint_values", None),
-        ),
+        "ALM_FINAL_CONSTRAINT_VALUES": raw_constraint_values,
         "ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES": getattr(
             alm_result,
             "normalized_constraint_values",
-            getattr(alm_result, "constraint_values", None),
+            None,
         ),
-        "ALM_FINAL_SOLVER_CONSTRAINT_VALUES": getattr(
-            alm_result,
-            "raw_solver_constraint_values",
-            getattr(alm_result, "solver_constraint_values", None),
-        ),
+        "ALM_FINAL_SOLVER_CONSTRAINT_VALUES": raw_solver_constraint_values,
         "ALM_FINAL_NORMALIZED_SOLVER_CONSTRAINT_VALUES": getattr(
             alm_result,
             "normalized_solver_constraint_values",
-            getattr(alm_result, "solver_constraint_values", None),
+            None,
         ),
         "ALM_FINAL_HARD_SIGNED_CONSTRAINT_VALUES": getattr(
             alm_result,
             "raw_hard_signed_constraint_values",
-            getattr(alm_result, "hard_signed_constraint_values", None),
+            None,
         ),
         "ALM_FINAL_NORMALIZED_HARD_SIGNED_CONSTRAINT_VALUES": getattr(
             alm_result,
             "hard_signed_constraint_values",
             None,
         ),
-        "ALM_FINAL_HARD_VIOLATION_VALUES": getattr(
-            alm_result,
-            "raw_hard_violation_values",
-            getattr(alm_result, "hard_violation_values", None),
-        ),
-        "ALM_FINAL_RAW_HARD_VIOLATION_BY_CONSTRAINT": getattr(
-            alm_result,
-            "raw_hard_violation_values",
-            getattr(alm_result, "hard_violation_values", None),
-        ),
+        "ALM_FINAL_HARD_VIOLATION_VALUES": raw_hard_violation_values,
+        "ALM_FINAL_RAW_HARD_VIOLATION_BY_CONSTRAINT": raw_hard_violation_values,
         "ALM_FINAL_NORMALIZED_HARD_VIOLATION_VALUES": getattr(
             alm_result,
             "hard_violation_values",
@@ -6083,7 +6096,7 @@ def build_alm_final_constraint_payload(alm_result):
         "ALM_FINAL_SURROGATE_SIGNED_CONSTRAINT_VALUES": getattr(
             alm_result,
             "raw_surrogate_signed_constraint_values",
-            getattr(alm_result, "surrogate_signed_constraint_values", None),
+            None,
         ),
         "ALM_FINAL_NORMALIZED_SURROGATE_SIGNED_CONSTRAINT_VALUES": getattr(
             alm_result,
@@ -6132,21 +6145,18 @@ def _alm_result_view_from_search_eval(search_eval, multipliers):
         search_eval,
         "raw_constraint_values",
         "raw_surrogate_signed_constraint_values",
-        "raw_dual_update_values",
-        "constraint_values",
     )
     normalized_constraint_values = _first_present_alm_eval_value(
         search_eval,
         "normalized_signed_constraint_values",
         "surrogate_signed_constraint_values",
-        "constraint_values",
     )
     raw_solver_constraint_values = _first_present_alm_eval_value(
         search_eval,
         "raw_solver_constraint_values",
+        "raw_constraint_values",
+        "raw_surrogate_signed_constraint_values",
     )
-    if raw_solver_constraint_values is None:
-        raw_solver_constraint_values = raw_constraint_values
 
     return SimpleNamespace(
         constraint_names=search_eval.get("constraint_names"),
@@ -6161,19 +6171,16 @@ def _alm_result_view_from_search_eval(search_eval, multipliers):
         raw_hard_signed_constraint_values=_first_present_alm_eval_value(
             search_eval,
             "raw_hard_signed_constraint_values",
-            "hard_signed_constraint_values",
         ),
         hard_signed_constraint_values=search_eval.get("hard_signed_constraint_values"),
         raw_hard_violation_values=_first_present_alm_eval_value(
             search_eval,
             "raw_hard_violation_values",
-            "hard_violation_values",
         ),
         hard_violation_values=search_eval.get("hard_violation_values"),
         raw_surrogate_signed_constraint_values=_first_present_alm_eval_value(
             search_eval,
             "raw_surrogate_signed_constraint_values",
-            "surrogate_signed_constraint_values",
         ),
         surrogate_signed_constraint_values=search_eval.get("surrogate_signed_constraint_values"),
         final_hard_max_violation=_first_present_alm_eval_value(
@@ -6646,6 +6653,7 @@ def current_solver_checkpoint_alm_state():
     if alm_state is None:
         return None
     return {
+        "constraint_names": list(ALM_CONSTRAINT_NAMES),
         "penalty": float(alm_state.penalty),
         "multipliers": np.asarray(alm_state.multipliers, dtype=float).copy(),
     }
@@ -7394,6 +7402,8 @@ def evaluate_search_step(x):
         if metric_eval is None or "constraint_values" not in metric_eval:
             metric_eval = run_dict.get("last_successful_eval", run_dict.get("search_eval"))
         if metric_eval is not None and "constraint_values" in metric_eval:
+            feasibility_values = np.asarray(metric_eval["feasibility_values"], dtype=float)
+            dual_update_values = np.asarray(metric_eval["dual_update_values"], dtype=float)
             evaluation.update(
                 {
                     "constraint_values": np.asarray(metric_eval["constraint_values"], dtype=float),
@@ -7413,18 +7423,12 @@ def evaluate_search_step(x):
                         metric_eval.get("constraint_activity_tolerances", []),
                         dtype=float,
                     ),
-                    "feasibility_values": np.asarray(
-                        metric_eval.get("feasibility_values", metric_eval["constraint_values"]),
-                        dtype=float,
-                    ),
-                    "dual_update_values": np.asarray(
-                        metric_eval.get("dual_update_values", metric_eval["constraint_values"]),
-                        dtype=float,
-                    ),
+                    "feasibility_values": feasibility_values,
+                    "dual_update_values": dual_update_values,
                     "max_feasibility_violation": float(
                         metric_eval.get(
                             "max_feasibility_violation",
-                            metric_eval["max_violation"],
+                            np.max(feasibility_values) if feasibility_values.size > 0 else 0.0,
                         )
                     ),
                     "base_total": float(
@@ -7916,6 +7920,7 @@ TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.0
 CONSTRAINT_METHOD = "penalty"
 SINGLE_STAGE_GOAL_MODE = "target"
 ALM_FORMULATION = "weighted_sum"
+ALM_CONSTRAINT_NAMES = []
 ALM_MULTIPLIERS = np.zeros(0, dtype=float)
 ALM_PENALTY = 1.0
 ALM_DISTANCE_SMOOTHING = 0.0
@@ -7967,10 +7972,7 @@ if __name__ == "__main__":
         known_tf_current_A=args.stage2_seed_tf_current_A,
     )
     validate_stage2_seed_contract(stage2_results)
-    R0 = validate_major_radius(
-        float(stage2_results["MAJOR_RADIUS"]),
-        accept_offspec=args.accept_offspec_r0_seed,
-    )
+    R0 = validate_major_radius(float(stage2_results["MAJOR_RADIUS"]))
     s = float(stage2_results["TOROIDAL_FLUX"])
     order = int(stage2_results.get("order", args.stage2_seed_order))
 
@@ -8327,60 +8329,44 @@ if __name__ == "__main__":
     # DEFINE OBJECTIVE FUNCTION COMPONENTS
     # ==============================================================================
     # Objective function weights and parameters (all configurable via CLI)
-    # Baseline default floors enforced via max() — weights are free, thresholds are clamped.
+    # Hardware floors/ceilings are strict; weights remain freely configurable.
     LENGTH_WEIGHT = args.length_weight
     RES_WEIGHT = args.res_weight
     IOTAS_WEIGHT = args.iotas_weight
     CC_WEIGHT = args.cc_weight
-    CC_DIST = max(args.cc_dist, COIL_COIL_MIN_DIST_M)
     if args.cc_dist < COIL_COIL_MIN_DIST_M:
-        print(
-            f"WARNING: --cc-dist {args.cc_dist} below hardware floor, "
-            f"clamped to {COIL_COIL_MIN_DIST_M}"
+        raise ValueError(
+            f"--cc-dist must be >= {COIL_COIL_MIN_DIST_M:.3f} m."
         )
+    CC_DIST = float(args.cc_dist)
     CS_WEIGHT = args.cs_weight
-    CS_DIST = max(args.cs_dist, COIL_PLASMA_MIN_DIST_M)
     if args.cs_dist < COIL_PLASMA_MIN_DIST_M:
-        print(
-            f"WARNING: --cs-dist {args.cs_dist} below hardware floor, "
-            f"clamped to {COIL_PLASMA_MIN_DIST_M}"
+        raise ValueError(
+            f"--cs-dist must be >= {COIL_PLASMA_MIN_DIST_M:.3f} m."
         )
+    CS_DIST = float(args.cs_dist)
     SURF_DIST_WEIGHT = args.surf_dist_weight
-    SS_DIST = max(args.ss_dist, PLASMA_VESSEL_MIN_DIST_M)
     if args.ss_dist < PLASMA_VESSEL_MIN_DIST_M:
-        print(
-            f"WARNING: --ss-dist {args.ss_dist} below hardware floor, "
-            f"clamped to {PLASMA_VESSEL_MIN_DIST_M}"
+        raise ValueError(
+            f"--ss-dist must be >= {PLASMA_VESSEL_MIN_DIST_M:.3f} m."
         )
-    allow_offspec_engineering_constraints = bool(
-        args.allow_offspec_engineering_constraints
-    )
+    SS_DIST = float(args.ss_dist)
     CURVATURE_WEIGHT = args.curvature_weight
     CURVATURE_THRESHOLD = float(args.curvature_threshold)
-    if (
-        not allow_offspec_engineering_constraints
-        and args.curvature_threshold > MAX_CURVATURE_INV_M
-    ):
-        CURVATURE_THRESHOLD = MAX_CURVATURE_INV_M
-        print(
-            f"WARNING: --curvature-threshold {args.curvature_threshold} above hardware ceiling, "
-            f"clamped to {MAX_CURVATURE_INV_M}"
+    if args.curvature_threshold > MAX_CURVATURE_INV_M:
+        raise ValueError(
+            f"--curvature-threshold must be <= {MAX_CURVATURE_INV_M:.1f} m^-1."
         )
     SURFACE_GAP_THRESHOLD = max(args.surface_gap_threshold, 0.0)
     if len(surface_data) > 1 and SURF_DIST_WEIGHT != 0:
         print("WARNING: SURF_DIST_WEIGHT is diagnostic-only in multi-surface mode; outer-vessel spacing is enforced as a rejection gate.")
 
     requested_length_target = float(args.length_target)
-    length_target = requested_length_target
-    if (
-        not allow_offspec_engineering_constraints
-        and requested_length_target > COIL_LENGTH_HARD_LIMIT_M
-    ):
-        length_target = COIL_LENGTH_HARD_LIMIT_M
-        print(
-            f"WARNING: --length-target {requested_length_target} above hardware ceiling, "
-            f"clamped to {COIL_LENGTH_HARD_LIMIT_M}"
+    if requested_length_target > COIL_LENGTH_HARD_LIMIT_M:
+        raise ValueError(
+            f"--length-target must be <= {COIL_LENGTH_HARD_LIMIT_M:.3f} m."
         )
+    length_target = requested_length_target
     frontier_goal_config = None
     if args.single_stage_goal_mode == "frontier":
         frontier_goal_config = build_frontier_goal_config(
@@ -8447,23 +8433,22 @@ if __name__ == "__main__":
     EFFECTIVE_SEED_REGIME = REQUESTED_SEED_REGIME
     PRESERVED_TIMEOUT_REPLAY_CONFIG = current_preserved_timeout_replay_config()
 
+    def current_single_stage_alm_constraint_names():
+        return single_stage_alm_constraint_names(
+            alm_formulation=ALM_FORMULATION,
+            include_surface_surface=JSurfSurf is not None,
+            include_surface_stack=single_stage_surface_stack_alm_enabled(
+                len(surface_data),
+                SURFACE_GAP_THRESHOLD,
+            ),
+            banana_current_state=banana_current_state,
+        )
+
     # Extract degrees of freedom
     dofs = JF.x
     if CONSTRAINT_METHOD == "alm":
-        ALM_MULTIPLIERS = np.zeros(
-            len(
-                single_stage_alm_constraint_names(
-                    alm_formulation=ALM_FORMULATION,
-                    include_surface_surface=JSurfSurf is not None,
-                    include_surface_stack=single_stage_surface_stack_alm_enabled(
-                        len(surface_data),
-                        SURFACE_GAP_THRESHOLD,
-                    ),
-                    banana_current_state=banana_current_state,
-                )
-            ),
-            dtype=float,
-        )
+        ALM_CONSTRAINT_NAMES = current_single_stage_alm_constraint_names()
+        ALM_MULTIPLIERS = np.zeros(len(ALM_CONSTRAINT_NAMES), dtype=float)
         ALM_PENALTY = args.alm_penalty_init
 
     # ==============================================================================
@@ -8673,12 +8658,10 @@ if __name__ == "__main__":
         dofs = np.asarray(run_dict["accepted_x"], dtype=float).copy()
         resume_alm_state = resume_solver_checkpoint_payload.get("alm_state")
         if CONSTRAINT_METHOD == "alm" and isinstance(resume_alm_state, dict):
-            ALM_MULTIPLIERS = np.asarray(
-                resume_alm_state.get("multipliers", ALM_MULTIPLIERS),
-                dtype=float,
-            )
-            ALM_PENALTY = float(
-                resume_alm_state.get("penalty", ALM_PENALTY)
+            ALM_CONSTRAINT_NAMES = current_single_stage_alm_constraint_names()
+            ALM_MULTIPLIERS, ALM_PENALTY = validate_resume_alm_state(
+                resume_alm_state,
+                ALM_CONSTRAINT_NAMES,
             )
         initial_best_accepted_updated = False
         initial_best_feasible_updated = False
@@ -8957,15 +8940,8 @@ if __name__ == "__main__":
         if args.basin_hops > 0:
             raise ValueError("--basin-hops is not supported with --constraint-method=alm")
         alm_settings = build_single_stage_alm_settings(args)
-        alm_constraint_names = single_stage_alm_constraint_names(
-            alm_formulation=ALM_FORMULATION,
-            include_surface_surface=JSurfSurf is not None,
-            include_surface_stack=single_stage_surface_stack_alm_enabled(
-                len(surface_data),
-                SURFACE_GAP_THRESHOLD,
-            ),
-            banana_current_state=banana_current_state,
-        )
+        alm_constraint_names = current_single_stage_alm_constraint_names()
+        ALM_CONSTRAINT_NAMES = list(alm_constraint_names)
         alm_partial_state = {"history": []}
         resume_alm_state = (
             None
@@ -8973,12 +8949,9 @@ if __name__ == "__main__":
             else resume_solver_checkpoint_payload.get("alm_state")
         )
         if CONSTRAINT_METHOD == "alm" and isinstance(resume_alm_state, dict):
-            initial_alm_multipliers = np.asarray(
-                resume_alm_state.get("multipliers", np.zeros(len(alm_constraint_names))),
-                dtype=float,
-            )
-            initial_alm_penalty = float(
-                resume_alm_state.get("penalty", args.alm_penalty_init)
+            initial_alm_multipliers, initial_alm_penalty = validate_resume_alm_state(
+                resume_alm_state,
+                alm_constraint_names,
             )
         else:
             initial_alm_multipliers = np.zeros(len(alm_constraint_names), dtype=float)
@@ -9023,11 +8996,11 @@ if __name__ == "__main__":
             write_single_stage_alm_partial_state(OUT_DIR_ITER, payload)
 
         def evaluate_problem(inner_x, multipliers, penalty):
-            set_alm_runtime_state(multipliers, penalty)
+            set_alm_runtime_state(multipliers, penalty, alm_constraint_names)
             return evaluate_search_step(inner_x)
 
         def outer_state_callback(outer_iteration, multipliers, penalty):
-            set_alm_runtime_state(multipliers, penalty)
+            set_alm_runtime_state(multipliers, penalty, alm_constraint_names)
             run_dict["alm_outer_iteration"] = int(outer_iteration)
             print(
                 f"[ALM] outer_iteration={outer_iteration}, "
@@ -9069,6 +9042,7 @@ if __name__ == "__main__":
         set_alm_runtime_state(
             initial_alm_multipliers,
             initial_alm_penalty,
+            alm_constraint_names,
         )
         emit_alm_partial_state(
             initial_alm_multipliers,
@@ -9448,7 +9422,11 @@ if __name__ == "__main__":
                 res = refinement_status_result
 
     if alm_result is not None:
-        set_alm_runtime_state(alm_result.multipliers, alm_result.penalty)
+        set_alm_runtime_state(
+            alm_result.multipliers,
+            alm_result.penalty,
+            alm_result.constraint_names,
+        )
 
     # ==============================================================================
     # SAVE OPTIMIZED STATE
@@ -9629,14 +9607,9 @@ if __name__ == "__main__":
     single_stage_constraint_contract, single_stage_constraint_trace = (
         _resolve_constraint_contract_from_wire_names_impl(
             cli_overrides=constraint_cli_layer,
-            allow_offspec_engineering=allow_offspec_engineering_constraints,
         )
     )
-    constraint_override_reason = apply_offspec_engineering_override_reason(
-        args.constraint_override_reason,
-        layer=constraint_cli_layer,
-        allow_offspec_engineering=allow_offspec_engineering_constraints,
-    )
+    constraint_override_reason = args.constraint_override_reason
     constraint_profile_label = (
         "single_stage_solver"
         if args.constraint_profile_label in {None, ""}

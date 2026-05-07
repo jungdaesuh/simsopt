@@ -4449,6 +4449,69 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["ALM_FINAL_PENALTY_GRADIENT_NORM"], 0.4)
         self.assertEqual(payload["ALM_FINAL_TRUST_RADIUS"], 0.25)
 
+    def test_build_alm_final_constraint_payload_does_not_label_normalized_values_as_raw(self):
+        module = load_single_stage_example_module()
+        payload = module.build_alm_final_constraint_payload(
+            SimpleNamespace(
+                constraint_names=["coil_surface_spacing"],
+                raw_dual_estimates=None,
+                constraint_scales=[0.02],
+                constraint_blocks=["geometry"],
+                constraint_scale_sources=["threshold:coil_surface_spacing"],
+                normalized_constraint_values=[0.5],
+                normalized_solver_constraint_values=[10.0],
+                hard_signed_constraint_values=[0.5],
+                hard_violation_values=[0.5],
+                surrogate_signed_constraint_values=[10.0],
+                final_hard_max_violation=0.5,
+                final_surrogate_max_value=10.0,
+                hard_positive_shift_zero=False,
+                signal_mismatch_active=True,
+                final_penalty_gradient_norm=0.4,
+                trust_radius=0.25,
+            )
+        )
+
+        self.assertIsNone(payload["ALM_FINAL_CONSTRAINT_VALUES"])
+        self.assertEqual(payload["ALM_FINAL_NORMALIZED_CONSTRAINT_VALUES"], [0.5])
+        self.assertIsNone(payload["ALM_FINAL_SOLVER_CONSTRAINT_VALUES"])
+        self.assertEqual(payload["ALM_FINAL_NORMALIZED_SOLVER_CONSTRAINT_VALUES"], [10.0])
+        self.assertIsNone(payload["ALM_FINAL_HARD_SIGNED_CONSTRAINT_VALUES"])
+        self.assertEqual(payload["ALM_FINAL_NORMALIZED_HARD_SIGNED_CONSTRAINT_VALUES"], [0.5])
+        self.assertIsNone(payload["ALM_FINAL_HARD_VIOLATION_VALUES"])
+        self.assertEqual(payload["ALM_FINAL_NORMALIZED_HARD_VIOLATION_VALUES"], [0.5])
+        self.assertIsNone(payload["ALM_FINAL_SURROGATE_SIGNED_CONSTRAINT_VALUES"])
+        self.assertEqual(
+            payload["ALM_FINAL_NORMALIZED_SURROGATE_SIGNED_CONSTRAINT_VALUES"],
+            [10.0],
+        )
+
+    def test_alm_result_view_from_search_eval_uses_only_explicit_raw_sidecars(self):
+        module = load_single_stage_example_module()
+        result_view = module._alm_result_view_from_search_eval(
+            {
+                "constraint_names": ["coil_surface_spacing"],
+                "constraint_scales": np.array([0.02]),
+                "constraint_values": np.array([10.0]),
+                "normalized_signed_constraint_values": np.array([0.5]),
+                "hard_signed_constraint_values": np.array([0.5]),
+                "hard_violation_values": np.array([0.5]),
+                "surrogate_signed_constraint_values": np.array([10.0]),
+            },
+            np.array([0.25]),
+        )
+
+        self.assertIsNone(result_view.raw_constraint_values)
+        self.assertEqual(result_view.normalized_constraint_values.tolist(), [0.5])
+        self.assertIsNone(result_view.raw_solver_constraint_values)
+        self.assertEqual(result_view.normalized_solver_constraint_values.tolist(), [10.0])
+        self.assertIsNone(result_view.raw_hard_signed_constraint_values)
+        self.assertEqual(result_view.hard_signed_constraint_values.tolist(), [0.5])
+        self.assertIsNone(result_view.raw_hard_violation_values)
+        self.assertEqual(result_view.hard_violation_values.tolist(), [0.5])
+        self.assertIsNone(result_view.raw_surrogate_signed_constraint_values)
+        self.assertEqual(result_view.surrogate_signed_constraint_values.tolist(), [10.0])
+
     def test_build_preserved_timeout_results_payload_uses_artifact_hardware_status_for_final_feasibility(self):
         module = load_single_stage_example_module()
         replay_config = module.PreservedTimeoutReplayConfig(
@@ -5546,6 +5609,8 @@ class HardwareConstraintTests(unittest.TestCase):
             "dJ": np.array([3.0, -1.0]),
             "search_eval": {
                 "constraint_values": np.array([0.4, 0.1, 0.0]),
+                "feasibility_values": np.array([0.4, 0.1, 0.0]),
+                "dual_update_values": np.array([0.4, 0.1, 0.0]),
                 "max_violation": 0.4,
                 "stationarity_norm": 2.5,
                 "constraint_names": ["coil_coil_spacing", "coil_surface_spacing", "max_curvature"],
@@ -10021,30 +10086,15 @@ class CurrentBaselineContractTests(unittest.TestCase):
             "seed-relative",
         )
 
-    def test_single_stage_parse_args_accepts_hidden_offspec_engineering_flag(self):
-        module = load_single_stage_example_module()
-
-        with patch.object(
-            sys,
-            "argv",
-            [
-                "single_stage_banana_example.py",
-                "--allow-offspec-engineering-constraints",
-            ],
-        ):
-            args = module.parse_args()
-
-        self.assertTrue(args.allow_offspec_engineering_constraints)
-
-    def test_validate_single_stage_current_args_allows_offspec_with_flag(self):
+    def test_validate_single_stage_current_args_rejects_above_hardware_limit(self):
         module = load_single_stage_example_module()
 
         args = SimpleNamespace(
             banana_current_max_A=20000.0,
-            allow_offspec_engineering_constraints=True,
         )
 
-        module.validate_single_stage_current_args(args)
+        with self.assertRaisesRegex(ValueError, "banana-current-max-A"):
+            module.validate_single_stage_current_args(args)
 
     def test_validate_single_stage_current_args_allows_independent_alm(self):
         module = load_single_stage_example_module()
@@ -10053,7 +10103,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
             banana_current_max_A=16000.0,
             single_stage_banana_current_mode="independent",
             constraint_method="alm",
-            allow_offspec_engineering_constraints=False,
         )
 
         module.validate_single_stage_current_args(args)
@@ -10065,7 +10114,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
             banana_current_max_A=16000.0,
             single_stage_banana_current_mode="bogus",
             constraint_method="penalty",
-            allow_offspec_engineering_constraints=False,
         )
 
         with self.assertRaisesRegex(
@@ -10128,7 +10176,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
             stage2_seed_tf_current_A=None,
             stage2_seed_order=None,
             stage2_seed_banana_init_current_A=None,
-            accept_offspec_r0_seed=False,
         )
 
         module.apply_default_stage2_seed_args(args)
@@ -10156,7 +10203,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
             stage2_seed_tf_current_A=-75000.0,
             stage2_seed_order=None,
             stage2_seed_banana_init_current_A=None,
-            accept_offspec_r0_seed=False,
         )
 
         module.apply_default_stage2_seed_args(args)
@@ -10180,7 +10226,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
             stage2_seed_tf_current_A=None,
             stage2_seed_order=None,
             stage2_seed_banana_init_current_A=None,
-            accept_offspec_r0_seed=False,
         )
 
         with self.assertRaisesRegex(ValueError, "vacuum-vessel major radius"):
@@ -10205,17 +10250,17 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.banana_init_current_A, 12000.0)
         self.assertEqual(args.banana_current_max_A, 16000.0)
 
-    def test_stage2_validate_banana_current_cli_args_allows_offspec_with_flag(self):
+    def test_stage2_validate_banana_current_cli_args_rejects_above_hardware_limit(self):
         module = load_stage2_module()
 
         args = SimpleNamespace(
             banana_init_current_A=18000.0,
             banana_current_max_A=20000.0,
             tf_current_A=-80000.0,
-            allow_offspec_engineering_constraints=True,
         )
 
-        module.validate_banana_current_cli_args(args)
+        with self.assertRaisesRegex(ValueError, "banana-init-current-A"):
+            module.validate_banana_current_cli_args(args)
 
     def test_penalty_traversal_helper_applies_symmetric_box_bound(self):
         module = load_stage2_module()
@@ -10410,7 +10455,6 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "banana_init_current_A": 1.0e4,
             "banana_current_max_A": 1.6e4,
             "major_radius": 0.976,
-            "accept_offspec_r0_seed": False,
             "toroidal_flux": 0.24,
             "order": 2,
             "maxiter": 30,
@@ -10447,7 +10491,6 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "stage2_iota_ntor": 6,
             "length_weight": 5e-4,
             "length_target": 1.9,
-            "allow_offspec_engineering_constraints": False,
             "target_lcfs_max_major_radius_m": 0.92,
             "target_lcfs_max_minor_radius_m": 0.15,
             "cc_threshold": 0.05,
@@ -10810,9 +10853,16 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 multipliers=np.array([0.1, 0.2, 0.3, 0.4, 0.5], dtype=float),
                 constraint_values=np.array([0.0, 0.01, 0.0, 0.0, 0.0], dtype=float),
                 solver_constraint_values=np.array([0.0, 0.2, 0.0, 0.0, 0.0], dtype=float),
+                normalized_constraint_values=np.array([0.0, 0.01, 0.0, 0.0, 0.0], dtype=float),
+                normalized_solver_constraint_values=np.array([0.0, 0.2, 0.0, 0.0, 0.0], dtype=float),
+                raw_constraint_values=np.array([0.0, 0.2, 0.0, 0.0, 0.0], dtype=float),
+                raw_solver_constraint_values=np.array([0.0, 0.2, 0.0, 0.0, 0.0], dtype=float),
                 hard_signed_constraint_values=np.array([0.0, 0.02, 0.0, 0.0, 0.0], dtype=float),
                 hard_violation_values=np.array([0.0, 0.01, 0.0, 0.0, 0.0], dtype=float),
                 surrogate_signed_constraint_values=np.array([0.0, 0.2, 0.0, 0.0, 0.0], dtype=float),
+                raw_hard_signed_constraint_values=np.array([0.0, 0.02, 0.0, 0.0, 0.0], dtype=float),
+                raw_hard_violation_values=np.array([0.0, 0.01, 0.0, 0.0, 0.0], dtype=float),
+                raw_surrogate_signed_constraint_values=np.array([0.0, 0.2, 0.0, 0.0, 0.0], dtype=float),
                 trust_radius=0.1,
                 multiplier_cap_binding=True,
                 multiplier_cap_binding_indices=[1],
@@ -11100,20 +11150,6 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         self.assertNotEqual(runtime["results"]["FINAL_LCFS_MINOR_RADIUS_M"], 0.12)
         self.assertEqual(runtime["results"]["SURFACE_VESSEL_MIN_DIST"], 0.045)
         self.assertEqual(runtime["curve_surface_surface_label"], "lcfs")
-
-    def test_stage2_main_injected_args_without_accept_offspec_flag_use_parser_default(self):
-        runtime = self._run_stage2_main(
-            init_only=True,
-            constraint_method="penalty",
-            use_seed=True,
-            missing_attr_names=("accept_offspec_r0_seed",),
-        )
-
-        self._assert_init_only_runtime_counts(
-            runtime,
-            seed_loads=1,
-            initialize_calls=0,
-        )
 
     def test_stage2_main_rejects_wataru_seed_without_results_sidecar(self):
         workflow_runner_common = load_workflow_runner_common_module()
@@ -11455,16 +11491,76 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
 
 
 class AlmUtilsTests(unittest.TestCase):
+    def test_validate_resume_alm_state_requires_matching_constraint_names(self):
+        module = load_single_stage_example_module()
+        resume_state = {
+            "constraint_names": ["coil_surface_spacing"],
+            "multipliers": [2.0],
+            "penalty": 3.0,
+        }
+
+        multipliers, penalty = module.validate_resume_alm_state(
+            resume_state,
+            ["coil_surface_spacing"],
+        )
+
+        np.testing.assert_allclose(multipliers, [2.0])
+        self.assertEqual(penalty, 3.0)
+        with self.assertRaisesRegex(ValueError, "constraint_names mismatch"):
+            module.validate_resume_alm_state(
+                resume_state,
+                ["coil_coil_spacing"],
+            )
+
+    def test_validate_resume_alm_state_rejects_multiplier_length_mismatch(self):
+        module = load_single_stage_example_module()
+
+        with self.assertRaisesRegex(ValueError, "multiplier length mismatch"):
+            module.validate_resume_alm_state(
+                {
+                    "constraint_names": ["coil_surface_spacing", "max_curvature"],
+                    "multipliers": [2.0],
+                    "penalty": 3.0,
+                },
+                ["coil_surface_spacing", "max_curvature"],
+            )
+
+    def test_validate_resume_alm_state_rejects_legacy_state_without_names(self):
+        module = load_single_stage_example_module()
+
+        with self.assertRaisesRegex(ValueError, "constraint_names"):
+            module.validate_resume_alm_state(
+                {
+                    "multipliers": [2.0],
+                    "penalty": 3.0,
+                },
+                ["coil_surface_spacing"],
+            )
+
+    def test_current_solver_checkpoint_alm_state_includes_constraint_names(self):
+        module = load_single_stage_example_module()
+        module.PRESERVED_TIMEOUT_REPLAY_CONFIG = module.replace(
+            module.PRESERVED_TIMEOUT_REPLAY_CONFIG,
+            constraint_method="alm",
+        )
+
+        module.set_alm_runtime_state([1.0, 2.0], 3.0, ["gap", "current"])
+        alm_state = module.current_solver_checkpoint_alm_state()
+
+        self.assertEqual(alm_state["constraint_names"], ["gap", "current"])
+        np.testing.assert_allclose(alm_state["multipliers"], [1.0, 2.0])
+        self.assertEqual(alm_state["penalty"], 3.0)
+
     def test_upper_bound_residual_clamps_negative_values(self):
         module = load_alm_utils_module()
 
         self.assertEqual(module.upper_bound_residual(1.0, 2.0), 0.0)
         self.assertEqual(module.upper_bound_residual(2.5, 2.0), 0.5)
 
-    def test_augmented_objective_combines_base_and_constraints(self):
+    def test_augmented_inequality_objective_combines_base_and_constraints(self):
         module = load_alm_utils_module()
 
-        evaluation = module.augmented_objective(
+        evaluation = module.augmented_inequality_objective(
             base_value=3.0,
             base_grad=np.array([1.0, -1.0]),
             constraint_values=[0.5, 0.0],
@@ -11509,9 +11605,11 @@ class AlmUtilsTests(unittest.TestCase):
             {"maxiter": 50, "maxcor": 20, "ftol": 1e-12, "gtol": 1e-12},
         )
 
-        self.assertTrue(result.success)
+        self.assertFalse(result.success)
         self.assertLessEqual(result.x[0], 1.0 + 1e-6)
         self.assertLessEqual(result.constraint_values[0], 1e-6)
+        self.assertAlmostEqual(result.final_raw_stationarity_norm, 1.0)
+        self.assertAlmostEqual(result.final_kkt_stationarity_norm, 0.0)
 
     def test_minimize_alm_failure_reports_last_solved_subproblem_state(self):
         module = load_alm_utils_module()
@@ -11528,7 +11626,7 @@ class AlmUtilsTests(unittest.TestCase):
             grad = np.array([x[0] - 2.0])
             constraint_value = module.upper_bound_residual(x[0], 1.0)
             constraint_grad = np.array([1.0]) if constraint_value > 0.0 else np.array([0.0])
-            return module.augmented_objective(
+            return module.augmented_inequality_objective(
                 value,
                 grad,
                 [constraint_value],

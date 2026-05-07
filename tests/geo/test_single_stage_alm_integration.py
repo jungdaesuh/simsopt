@@ -409,8 +409,6 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "BANANA_CURRENT_COORDINATE_SCALING_SEED_RELATIVE": "seed-relative",
             "MAX_CURVATURE_INV_M": 100.0,
             "PLASMA_VESSEL_MIN_DIST_M": 0.04,
-            "ACCEPT_OFFSPEC_R0_SEED_ENV": "ACCEPT_OFFSPEC_R0_SEED",
-            "ACCEPT_OFFSPEC_R0_SEED_HELP": "test-fixture-offspec-help",
             "env_flag": lambda name: False,
             "_DEFAULT_SINGLE_STAGE_SEED_REGIME": "auto",
             "_SINGLE_STAGE_SEED_REGIME_AUTO": "auto",
@@ -1258,41 +1256,27 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "0.22",
         )
 
-    def test_stage2_alm_wrapper_command_adds_offspec_engineering_flag(self):
+    def test_stage2_alm_wrapper_rejects_length_above_hardware_ceiling(self):
         module = load_stage2_alm_wrapper_module()
         args = make_stage2_alm_wrapper_args()
-        args.allow_offspec_engineering_constraints = True
         resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
-        config = module.build_stage2_alm_config(
-            args,
-            resolved_spec={**resolved_spec, "length_target": 3.0},
-        )
-        metadata = module.build_stage2_constraint_artifacts(
-            args=args,
-            config=config,
-            source_label=resolved_spec_source,
-        )
-        command = module.build_stage2_command(
-            config,
-            python_executable=args.python_executable,
-        )
 
-        self.assertIn("--allow-offspec-engineering-constraints", command)
-        self.assertEqual(config.length_target, 3.0)
-        self.assertEqual(metadata["EFFECTIVE_VALUES"]["COIL_LENGTH_TARGET_M"], 3.0)
-        self.assertEqual(
-            metadata["OVERRIDE_REASON"],
-            "allow_offspec_engineering_constraints",
-        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "COIL_LENGTH_TARGET_M exceeds the hardware limit",
+        ):
+            module.build_stage2_alm_config(
+                args,
+                resolved_spec={**resolved_spec, "length_target": 3.0},
+            )
 
-    def test_stage2_alm_wrapper_metadata_keeps_cli_override_and_offspec_tag(self):
+    def test_stage2_alm_wrapper_metadata_keeps_cli_override_reason(self):
         module = load_stage2_alm_wrapper_module()
         args = make_stage2_alm_wrapper_args(cc_threshold=0.06)
-        args.allow_offspec_engineering_constraints = True
         resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
         config = module.build_stage2_alm_config(
             args,
-            resolved_spec={**resolved_spec, "length_target": 3.0},
+            resolved_spec=resolved_spec,
         )
 
         metadata = module.build_stage2_constraint_artifacts(
@@ -1303,7 +1287,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertEqual(
             metadata["OVERRIDE_REASON"],
-            "cli:cc_threshold;allow_offspec_engineering_constraints",
+            "cli:cc_threshold",
         )
 
     def test_stage2_alm_wrapper_spec_json_must_be_complete(self):
@@ -1438,27 +1422,16 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(summary["output_contract"], "materialized_stage2_artifact")
         self.assertFalse(summary["contains_solver_outputs"])
 
-    def test_stage2_alm_wrapper_constraint_metadata_uses_effective_clamped_values(self):
+    def test_stage2_alm_wrapper_rejects_cc_threshold_below_hardware_floor(self):
         module = load_stage2_alm_wrapper_module()
         args = make_stage2_alm_wrapper_args(
             cc_threshold=0.01,
             curvature_threshold=50.0,
         )
-        resolved_spec, resolved_spec_source = module.resolve_stage2_spec_payload(args)
-        config = module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
+        resolved_spec, _resolved_spec_source = module.resolve_stage2_spec_payload(args)
 
-        metadata = module.build_stage2_constraint_artifacts(
-            args=args,
-            config=config,
-            source_label=resolved_spec_source,
-        )
-
-        self.assertEqual(metadata["EFFECTIVE_VALUES"]["CC_THRESHOLD"], 0.05)
-        self.assertEqual(metadata["EFFECTIVE_VALUES"]["CURVATURE_THRESHOLD"], 50.0)
-        self.assertEqual(
-            metadata["EFFECTIVE_VALUES"]["VACUUM_VESSEL_MAJOR_RADIUS_M"],
-            0.976,
-        )
+        with self.assertRaisesRegex(ValueError, "CC_THRESHOLD is below the hardware floor"):
+            module.build_stage2_alm_config(args, resolved_spec=resolved_spec)
 
     def test_stage2_alm_wrapper_dry_run_writes_explicit_marker(self):
         module = load_stage2_alm_wrapper_module()
@@ -2115,15 +2088,17 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "shared",
         )
 
-    def test_single_stage_thresholded_physics_rerun_wrapper_adds_offspec_flag(self):
+    def test_single_stage_thresholded_physics_rerun_wrapper_rejects_offcontract_curvature(self):
         module = load_single_stage_thresholded_physics_rerun_module()
         args = make_single_stage_thresholded_physics_rerun_args(
             curvature_threshold=150.0,
         )
 
-        command = module.build_single_stage_thresholded_physics_command(args)
-
-        self.assertIn("--allow-offspec-engineering-constraints", command)
+        with self.assertRaisesRegex(
+            ValueError,
+            "CURVATURE_THRESHOLD exceeds the hardware limit",
+        ):
+            module.build_single_stage_thresholded_physics_command(args)
 
     def test_single_stage_thresholded_physics_rerun_wrapper_parse_args_rejects_adaptive_mode(self):
         module = load_single_stage_thresholded_physics_rerun_module()
