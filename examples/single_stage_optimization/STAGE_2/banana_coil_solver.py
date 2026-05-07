@@ -55,7 +55,6 @@ from banana_opt.artifact_contracts import (
     upgrade_legacy_stage2_artifact_results,
 )
 from banana_opt.constraint_contract import (
-    apply_offspec_engineering_override_reason,
     build_constraint_metadata,
     resolve_constraint_contract_from_wire_names,
 )
@@ -74,8 +73,6 @@ from banana_opt.stage2_geometry import (
     surface_surface_min_distance as _surface_surface_min_distance,
 )
 from banana_opt.hardware_contracts import (
-    ACCEPT_OFFSPEC_R0_SEED_ENV,
-    ACCEPT_OFFSPEC_R0_SEED_HELP,
     BANANA_CURRENT_HARD_LIMIT_A,
     BANANA_WINDING_MINOR_RADIUS_M,
     BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
@@ -92,7 +89,6 @@ from banana_opt.hardware_contracts import (
     TARGET_LCFS_MAX_MINOR_RADIUS_M,
     TF_CURRENT_HARD_LIMIT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
-    env_flag,
     validate_major_radius,
     validate_plasma_vessel_clearance,
     validate_target_lcfs_major_radius,
@@ -202,30 +198,19 @@ def _print_taylor_test_summary(name: str, result: dict) -> None:
 def validate_banana_current_cli_args(args) -> None:
     banana_init_current_A = float(args.banana_init_current_A)
     banana_current_max_A = float(args.banana_current_max_A)
-    allow_offspec_engineering_constraints = bool(
-        getattr(args, "allow_offspec_engineering_constraints", False)
-    )
     if banana_init_current_A <= 0.0:
         raise ValueError("--banana-init-current-A must be positive.")
-    if (
-        banana_init_current_A > BANANA_CURRENT_HARD_LIMIT_A
-        and not allow_offspec_engineering_constraints
-    ):
+    if banana_init_current_A > BANANA_CURRENT_HARD_LIMIT_A:
         raise ValueError(
             f"--banana-init-current-A must be in the interval "
-            f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}] unless "
-            "--allow-offspec-engineering-constraints is set."
+            f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
         )
     if banana_current_max_A <= 0.0:
         raise ValueError("--banana-current-max-A must be positive.")
-    if (
-        banana_current_max_A > BANANA_CURRENT_HARD_LIMIT_A
-        and not allow_offspec_engineering_constraints
-    ):
+    if banana_current_max_A > BANANA_CURRENT_HARD_LIMIT_A:
         raise ValueError(
             f"--banana-current-max-A must be in the interval "
-            f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}] unless "
-            "--allow-offspec-engineering-constraints is set."
+            f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
         )
     if banana_init_current_A > banana_current_max_A:
         raise ValueError(
@@ -316,11 +301,6 @@ def parse_args():
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--allow-offspec-engineering-constraints",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--target-lcfs-max-major-radius-m",
         type=float,
         default=TARGET_LCFS_MAX_MAJOR_RADIUS_M,
@@ -407,15 +387,8 @@ def parse_args():
         ),
         help=(
             "Vacuum-vessel major radius (fixed contract, "
-            f"= {VACUUM_VESSEL_MAJOR_RADIUS_M:.3f} m). "
-            "Off-spec values require --accept-offspec-r0-seed."
+            f"= {VACUUM_VESSEL_MAJOR_RADIUS_M:.3f} m)."
         ),
-    )
-    parser.add_argument(
-        "--accept-offspec-r0-seed",
-        action="store_true",
-        default=env_flag(ACCEPT_OFFSPEC_R0_SEED_ENV),
-        help=ACCEPT_OFFSPEC_R0_SEED_HELP,
     )
     parser.add_argument(
         "--toroidal-flux",
@@ -1094,15 +1067,10 @@ def build_stage2_constraint_artifact_metadata(
     cc_threshold,
     curvature_threshold,
     banana_surf_radius,
-    major_radius,
-    accept_offspec_r0_seed,
     profile_name=None,
     override_reason=None,
 ):
-    """Route clamped/validated Stage 2 solver values through the shared contract."""
-    allow_offspec_engineering_constraints = bool(
-        getattr(args, "allow_offspec_engineering_constraints", False)
-    )
+    """Route validated Stage 2 solver values through the shared contract."""
     cli_overrides = {
         "tf_current_A": float(tf_current_A),
         "banana_current_max_A": float(banana_current_max_A),
@@ -1113,23 +1081,10 @@ def build_stage2_constraint_artifact_metadata(
         "curvature_threshold": float(curvature_threshold),
         "banana_surf_radius": float(banana_surf_radius),
     }
-    offspec_major_radius_m = None
-    if accept_offspec_r0_seed:
-        offspec_major_radius_m = float(major_radius)
     contract, _trace = resolve_constraint_contract_from_wire_names(
         cli_overrides=cli_overrides,
-        accept_offspec_major_radius=accept_offspec_r0_seed,
-        offspec_major_radius_m=offspec_major_radius_m,
-        allow_offspec_engineering=allow_offspec_engineering_constraints,
     )
     resolved_override_reason = override_reason
-    if resolved_override_reason is None and accept_offspec_r0_seed:
-        resolved_override_reason = "accept_offspec_r0_seed"
-    resolved_override_reason = apply_offspec_engineering_override_reason(
-        resolved_override_reason,
-        layer=cli_overrides,
-        allow_offspec_engineering=allow_offspec_engineering_constraints,
-    )
     return build_constraint_metadata(
         contract,
         profile_name=(
@@ -1509,15 +1464,7 @@ def main(parsed_args=None):
     num_quadpoints = args.num_quadpoints # number of quadature points for coils
     order = args.order # number of Fourier modes for coils
 
-    accept_offspec_r0_seed = getattr(
-        args,
-        "accept_offspec_r0_seed",
-        env_flag(ACCEPT_OFFSPEC_R0_SEED_ENV),
-    )
-    R0 = validate_major_radius(
-        args.major_radius,
-        accept_offspec=accept_offspec_r0_seed,
-    ) # major radius (vacuum-vessel contract)
+    R0 = validate_major_radius(args.major_radius) # major radius (vacuum-vessel contract)
     s = validate_normalized_toroidal_flux(
         args.toroidal_flux,
         field_name="--toroidal-flux",
@@ -1659,42 +1606,28 @@ def main(parsed_args=None):
     # Weight on the curve lengths in the objective function
     # We'll penalize the coil if it becomes longer than the hardware contract target.
     LENGTH_WEIGHT = args.length_weight
-    allow_offspec_engineering_constraints = bool(
-        args.allow_offspec_engineering_constraints
-    )
     requested_length_target = float(args.length_target)
-    LENGTH_TARGET = requested_length_target
-    if (
-        not allow_offspec_engineering_constraints
-        and requested_length_target > COIL_LENGTH_HARD_LIMIT_M
-    ):
-        LENGTH_TARGET = COIL_LENGTH_HARD_LIMIT_M
-        print(
-            f"WARNING: --length-target {requested_length_target} above hardware ceiling, "
-            f"clamped to {COIL_LENGTH_HARD_LIMIT_M}"
+    if requested_length_target > COIL_LENGTH_HARD_LIMIT_M:
+        raise ValueError(
+            f"--length-target must be <= {COIL_LENGTH_HARD_LIMIT_M:.3f} m."
         )
+    LENGTH_TARGET = requested_length_target
 
     # Threshold and weight for the coil-to-coil distance penalty
-    CC_THRESHOLD = max(args.cc_threshold, COIL_COIL_MIN_DIST_M)
     if args.cc_threshold < COIL_COIL_MIN_DIST_M:
-        print(
-            f"WARNING: --cc-threshold {args.cc_threshold} below hardware floor, "
-            f"clamped to {COIL_COIL_MIN_DIST_M}"
+        raise ValueError(
+            f"--cc-threshold must be >= {COIL_COIL_MIN_DIST_M:.3f} m."
         )
+    CC_THRESHOLD = float(args.cc_threshold)
     CC_WEIGHT = args.cc_weight
     CS_THRESHOLD = COIL_PLASMA_MIN_DIST_M
 
     # Threshold and weight for the coil curvature penalty
     CURVATURE_WEIGHT = args.curvature_weight
     CURVATURE_THRESHOLD = float(args.curvature_threshold)
-    if (
-        not allow_offspec_engineering_constraints
-        and args.curvature_threshold > MAX_CURVATURE_INV_M
-    ):
-        CURVATURE_THRESHOLD = MAX_CURVATURE_INV_M
-        print(
-            f"WARNING: --curvature-threshold {args.curvature_threshold} above hardware ceiling, "
-            f"clamped to {MAX_CURVATURE_INV_M}"
+    if args.curvature_threshold > MAX_CURVATURE_INV_M:
+        raise ValueError(
+            f"--curvature-threshold must be <= {MAX_CURVATURE_INV_M:.1f} m^-1."
         )
 
     # Define the individual terms objective function:
@@ -2312,8 +2245,6 @@ def main(parsed_args=None):
         cc_threshold=CC_THRESHOLD,
         curvature_threshold=CURVATURE_THRESHOLD,
         banana_surf_radius=banana_surf_radius,
-        major_radius=R0,
-        accept_offspec_r0_seed=accept_offspec_r0_seed,
         profile_name=getattr(args, "constraint_profile_label", None),
         override_reason=getattr(args, "constraint_override_reason", None),
     )

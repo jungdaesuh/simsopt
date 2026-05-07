@@ -14,7 +14,6 @@ if str(SCRIPT_DIR) not in sys.path:
 from workflow_runner_common import (  # noqa: E402
     SINGLE_STAGE_SCRIPT_PATH,
     add_seed_order_upgrade_argument,
-    append_allow_offspec_engineering_flag,
     add_stage2_warm_start_seed_arguments,
     append_bool_flag,
     append_optional_flag,
@@ -28,6 +27,7 @@ from workflow_runner_common import (  # noqa: E402
     run_command,
     snapshot_single_results_paths,
     timeout_or_none,
+    validate_constraint_cli_overrides,
 )
 from banana_opt.single_stage_banana_current_mode import (  # noqa: E402
     BANANA_CURRENT_MODE_INDEPENDENT,
@@ -440,6 +440,12 @@ def build_single_stage_goal_mode_command(
     stage2_bs_path: Path,
     case_output_root: Path,
 ) -> list[str]:
+    validate_constraint_cli_overrides(
+        {
+            "length_target": args.length_target,
+            "curvature_threshold": args.curvature_threshold,
+        }
+    )
     equilibria_dir = resolved_optional_path(args.equilibria_dir)
     command = [
         args.python_executable,
@@ -574,11 +580,6 @@ def build_single_stage_goal_mode_command(
         command.extend(["--equilibria-dir", str(equilibria_dir)])
     append_single_stage_handoff_flags(command, args)
     append_optional_flag(command, "--length-target", args.length_target)
-    append_allow_offspec_engineering_flag(
-        command,
-        length_target=args.length_target,
-        curvature_threshold=args.curvature_threshold,
-    )
     append_optional_flag(command, "--frontier-volume-weight", args.frontier_volume_weight)
     append_optional_flag(
         command,

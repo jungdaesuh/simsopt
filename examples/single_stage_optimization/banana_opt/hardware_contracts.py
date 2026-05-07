@@ -94,18 +94,14 @@ def is_major_radius_offspec(major_radius: float) -> bool:
     return abs(float(major_radius) - VACUUM_VESSEL_MAJOR_RADIUS_M) > _MAJOR_RADIUS_TOL_M
 
 
-def validate_major_radius(major_radius: float, *, accept_offspec: bool = False) -> float:
+def validate_major_radius(major_radius: float) -> float:
     radius = float(major_radius)
     if not is_major_radius_offspec(radius):
-        return radius
-    if accept_offspec:
         return radius
     raise ValueError(
         f"--major-radius must match the vacuum-vessel major radius "
         f"{VACUUM_VESSEL_MAJOR_RADIUS_M:.3f} m (got {radius:.6f}). "
-        "Off-spec R0 was accepted historically but produces coils that do not fit "
-        "the HBT-EP vacuum vessel. Pass --accept-offspec-r0-seed to reproduce "
-        "historical artifacts on off-spec geometry."
+        "Off-spec R0 produces coils that do not fit the HBT-EP vacuum vessel."
     )
 
 
@@ -137,14 +133,6 @@ def validate_plasma_vessel_clearance(
         "Use the direct LCFS-to-vessel spacing metric for fit validation, not "
         "a proxy envelope."
     )
-
-
-ACCEPT_OFFSPEC_R0_SEED_ENV = "ACCEPT_OFFSPEC_R0_SEED"
-ACCEPT_OFFSPEC_R0_SEED_HELP = (
-    "Allow --major-radius to deviate from the vacuum-vessel contract. "
-    "Use only to reproduce historical artifacts; produces coils that do "
-    "not fit HBT-EP."
-)
 
 
 def env_flag(name: str) -> bool:

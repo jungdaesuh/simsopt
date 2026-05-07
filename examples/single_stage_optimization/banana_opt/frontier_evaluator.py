@@ -638,10 +638,7 @@ def build_single_stage_frontier_runtime(
 
     try:
         single_stage.validate_stage2_seed_contract(stage2_results)
-        R0 = single_stage.validate_major_radius(
-            float(stage2_results["MAJOR_RADIUS"]),
-            accept_offspec=bool(args.accept_offspec_r0_seed),
-        )
+        R0 = single_stage.validate_major_radius(float(stage2_results["MAJOR_RADIUS"]))
         surface_mode_contract = single_stage.resolve_surface_mode_contract(args)
         single_stage.validate_surface_mode_runtime_support(surface_mode_contract)
         effective_num_surfaces = surface_mode_contract.num_surfaces
@@ -736,23 +733,16 @@ def build_single_stage_frontier_runtime(
                 coils,
             )
         )
-        allow_offspec = bool(args.allow_offspec_engineering_constraints)
-        length_target = (
-            float(args.length_target)
-            if allow_offspec
-            else min(
-                float(args.length_target),
-                float(single_stage.COIL_LENGTH_HARD_LIMIT_M),
+        length_target = float(args.length_target)
+        if length_target > float(single_stage.COIL_LENGTH_HARD_LIMIT_M):
+            raise FrontierEvaluatorInitializationError(
+                "--length-target exceeds the HBT-EP coil-length hard limit."
             )
-        )
-        curvature_threshold = (
-            float(args.curvature_threshold)
-            if allow_offspec
-            else min(
-                float(args.curvature_threshold),
-                float(single_stage.MAX_CURVATURE_INV_M),
+        curvature_threshold = float(args.curvature_threshold)
+        if curvature_threshold > float(single_stage.MAX_CURVATURE_INV_M):
+            raise FrontierEvaluatorInitializationError(
+                "--curvature-threshold exceeds the HBT-EP curvature limit."
             )
-        )
         frontier_goal_config = None
         if args.single_stage_goal_mode == "frontier":
             frontier_goal_config = single_stage.build_frontier_goal_config(

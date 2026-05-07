@@ -6,8 +6,7 @@ redeclared. Three classes of field exist:
 
 * Fixed geometry (vessel major/minor radius and the banana winding-surface major
   radius) always come from :mod:`banana_opt.hardware_contracts` and are not
-  routed through the profile/spec/cli override ladder. A separate off-spec
-  escape hatch exists for historical reproduction of R0 != 0.976 m seeds.
+  routed through the profile/spec/cli override ladder.
 * Default engineering values (TF current, banana-coil current ceiling, length
   target, coil-coil spacing threshold, coil-plasma and plasma-vessel clearances,
   curvature ceiling, and the banana winding surface minor radius) ship with
@@ -89,18 +88,11 @@ CONSTRAINT_SOURCE_HARDWARE = "hardware_contract"
 CONSTRAINT_SOURCE_PROFILE = "profile"
 CONSTRAINT_SOURCE_SPEC_JSON = "spec_json"
 CONSTRAINT_SOURCE_CLI = "cli"
-CONSTRAINT_SOURCE_OFFSPEC_MAJOR_RADIUS = "offspec_major_radius_override"
-
-OFFSPEC_ENGINEERING_KEYS: frozenset[str] = frozenset({
-    _KEY_BANANA_CURRENT_MAX_A,
-    _KEY_COIL_LENGTH_TARGET_M,
-    _KEY_CURVATURE_THRESHOLD,
-})
-
 WIRE_NAME_ALIASES: Mapping[str, str] = MappingProxyType({
     _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M: _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M,
     _KEY_VACUUM_VESSEL_MINOR_RADIUS_M: _KEY_VACUUM_VESSEL_MINOR_RADIUS_M,
     _KEY_BANANA_WINDING_SURFACE_MAJOR_RADIUS_M: _KEY_BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+    "major_radius": _KEY_VACUUM_VESSEL_MAJOR_RADIUS_M,
     "tf_current_A": _KEY_TF_CURRENT_A,
     "TF_CURRENT_A": _KEY_TF_CURRENT_A,
     "banana_current_max_A": _KEY_BANANA_CURRENT_MAX_A,
@@ -123,10 +115,6 @@ WIRE_NAME_ALIASES: Mapping[str, str] = MappingProxyType({
     "TARGET_LCFS_MAX_MINOR_RADIUS_M": _KEY_TARGET_LCFS_MAX_MINOR_RADIUS_M,
 })
 
-_LEGACY_FIXED_GEOMETRY_WIRE_NAMES: frozenset[str] = frozenset({
-    "major_radius",
-})
-
 
 def _translate_layer(layer: Mapping[str, Any] | None) -> dict[str, Any]:
     if layer is None:
@@ -134,8 +122,6 @@ def _translate_layer(layer: Mapping[str, Any] | None) -> dict[str, Any]:
     translated: dict[str, Any] = {}
     unknown: set[str] = set()
     for key, value in layer.items():
-        if key in _LEGACY_FIXED_GEOMETRY_WIRE_NAMES:
-            continue
         canonical = WIRE_NAME_ALIASES.get(key)
         if canonical is None:
             unknown.add(str(key))
@@ -204,8 +190,7 @@ def _apply_layer(
         if key in FIXED_GEOMETRY_KEYS:
             raise ValueError(
                 f"Fixed-geometry field {key!r} cannot be overridden via "
-                f"{source_label}; use the off-spec major-radius escape hatch for "
-                "historical reproduction only."
+                f"{source_label}."
             )
         contract[key] = _coerce(key, raw_value)
         trace[key] = source_label
@@ -223,70 +208,27 @@ def _validate_engineering_values(contract: dict[str, float]) -> None:
         raise ValueError("COIL_LENGTH_TARGET_M must be positive.")
     if contract[_KEY_CC_THRESHOLD] <= 0.0:
         raise ValueError("CC_THRESHOLD must be positive.")
+    if contract[_KEY_CC_THRESHOLD] < _hc.COIL_COIL_MIN_DIST_M:
+        raise ValueError(
+            "CC_THRESHOLD is below the hardware floor "
+            f"{_hc.COIL_COIL_MIN_DIST_M:.3f} m."
+        )
     if contract[_KEY_COIL_PLASMA_MIN_DIST_M] <= 0.0:
         raise ValueError("COIL_PLASMA_MIN_DIST_M must be positive.")
+    if contract[_KEY_COIL_PLASMA_MIN_DIST_M] < _hc.COIL_PLASMA_MIN_DIST_M:
+        raise ValueError(
+            "COIL_PLASMA_MIN_DIST_M is below the hardware floor "
+            f"{_hc.COIL_PLASMA_MIN_DIST_M:.3f} m."
+        )
     if contract[_KEY_PLASMA_VESSEL_MIN_DIST_M] <= 0.0:
         raise ValueError("PLASMA_VESSEL_MIN_DIST_M must be positive.")
+    if contract[_KEY_PLASMA_VESSEL_MIN_DIST_M] < _hc.PLASMA_VESSEL_MIN_DIST_M:
+        raise ValueError(
+            "PLASMA_VESSEL_MIN_DIST_M is below the hardware floor "
+            f"{_hc.PLASMA_VESSEL_MIN_DIST_M:.3f} m."
+        )
     if contract[_KEY_CURVATURE_THRESHOLD] <= 0.0:
         raise ValueError("CURVATURE_THRESHOLD must be positive.")
-
-
-def engineering_offspec_fields(
-    layer: Mapping[str, Any] | None,
-) -> tuple[str, ...]:
-    translated = _translate_layer(layer)
-    offspec: list[str] = []
-    banana_current_max_A = translated.get(_KEY_BANANA_CURRENT_MAX_A)
-    if (
-        banana_current_max_A is not None
-        and float(banana_current_max_A) > _hc.BANANA_CURRENT_HARD_LIMIT_A
-    ):
-        offspec.append(_KEY_BANANA_CURRENT_MAX_A)
-    coil_length_target_m = translated.get(_KEY_COIL_LENGTH_TARGET_M)
-    if (
-        coil_length_target_m is not None
-        and float(coil_length_target_m) > _hc.COIL_LENGTH_HARD_LIMIT_M
-    ):
-        offspec.append(_KEY_COIL_LENGTH_TARGET_M)
-    curvature_threshold = translated.get(_KEY_CURVATURE_THRESHOLD)
-    if (
-        curvature_threshold is not None
-        and float(curvature_threshold) > _hc.MAX_CURVATURE_INV_M
-    ):
-        offspec.append(_KEY_CURVATURE_THRESHOLD)
-    return tuple(offspec)
-
-
-def merge_override_reason(
-    primary_reason: str | None,
-    extra_reason: str | None,
-) -> str | None:
-    primary = None if primary_reason in {None, ""} else str(primary_reason)
-    extra = None if extra_reason in {None, ""} else str(extra_reason)
-    if primary is None:
-        return extra
-    if extra is None:
-        return primary
-    primary_parts = [part.strip() for part in primary.split(";") if part.strip()]
-    if extra in primary_parts:
-        return primary
-    return ";".join([*primary_parts, extra])
-
-
-def apply_offspec_engineering_override_reason(
-    override_reason: str | None,
-    *,
-    layer: Mapping[str, Any] | None,
-    allow_offspec_engineering: bool,
-) -> str | None:
-    if not allow_offspec_engineering:
-        return override_reason
-    if not engineering_offspec_fields(layer):
-        return override_reason
-    return merge_override_reason(
-        override_reason,
-        "allow_offspec_engineering_constraints",
-    )
 
 
 def _validate_target_plasma_ceiling(contract: dict[str, float]) -> None:
@@ -299,9 +241,6 @@ def resolve_constraint_contract(
     profile: Mapping[str, Any] | None = None,
     spec_json: Mapping[str, Any] | None = None,
     cli_overrides: Mapping[str, Any] | None = None,
-    accept_offspec_major_radius: bool = False,
-    offspec_major_radius_m: float | None = None,
-    allow_offspec_engineering: bool = False,
 ) -> tuple[Mapping[str, float], Mapping[str, str]]:
     """Resolve the full constraint contract from layered inputs.
 
@@ -311,18 +250,6 @@ def resolve_constraint_contract(
         Partial mappings with engineering-default or target-plasma-ceiling
         field overrides. ``None`` values inside a layer are ignored. Fixed
         geometry keys are rejected at every layer.
-    accept_offspec_major_radius
-        When ``True`` AND ``offspec_major_radius_m`` is not ``None``, both
-        ``VACUUM_VESSEL_MAJOR_RADIUS_M`` and
-        ``BANANA_WINDING_SURFACE_MAJOR_RADIUS_M`` are replaced by the off-spec
-        value. Provenance is tagged as ``offspec_major_radius_override``.
-    offspec_major_radius_m
-        Replacement vessel major radius for historical reproduction.
-    allow_offspec_engineering
-        When ``True``, explicit off-spec sensitivity runs may raise the banana
-        current ceiling, coil-length target, and curvature threshold above the
-        hardware defaults.
-
     Returns
     -------
     contract, trace
@@ -345,37 +272,22 @@ def resolve_constraint_contract(
             layer=layer,
         )
 
-    if offspec_major_radius_m is not None:
-        if not accept_offspec_major_radius:
-            _hc.validate_major_radius(offspec_major_radius_m, accept_offspec=False)
-        else:
-            offspec_value = float(offspec_major_radius_m)
-            contract[_KEY_VACUUM_VESSEL_MAJOR_RADIUS_M] = offspec_value
-            contract[_KEY_BANANA_WINDING_SURFACE_MAJOR_RADIUS_M] = offspec_value
-            trace[_KEY_VACUUM_VESSEL_MAJOR_RADIUS_M] = (
-                CONSTRAINT_SOURCE_OFFSPEC_MAJOR_RADIUS
-            )
-            trace[_KEY_BANANA_WINDING_SURFACE_MAJOR_RADIUS_M] = (
-                CONSTRAINT_SOURCE_OFFSPEC_MAJOR_RADIUS
-            )
-
     _validate_engineering_values(contract)
-    if not allow_offspec_engineering:
-        if contract[_KEY_BANANA_CURRENT_MAX_A] > _hc.BANANA_CURRENT_HARD_LIMIT_A:
-            raise ValueError(
-                "BANANA_CURRENT_MAX_A exceeds the hardware limit "
-                f"{_hc.BANANA_CURRENT_HARD_LIMIT_A:.0f} A."
-            )
-        if contract[_KEY_COIL_LENGTH_TARGET_M] > _hc.COIL_LENGTH_HARD_LIMIT_M:
-            raise ValueError(
-                "COIL_LENGTH_TARGET_M exceeds the hardware limit "
-                f"{_hc.COIL_LENGTH_HARD_LIMIT_M:.3f} m."
-            )
-        if contract[_KEY_CURVATURE_THRESHOLD] > _hc.MAX_CURVATURE_INV_M:
-            raise ValueError(
-                "CURVATURE_THRESHOLD exceeds the hardware limit "
-                f"{_hc.MAX_CURVATURE_INV_M:.0f} m^-1."
-            )
+    if contract[_KEY_BANANA_CURRENT_MAX_A] > _hc.BANANA_CURRENT_HARD_LIMIT_A:
+        raise ValueError(
+            "BANANA_CURRENT_MAX_A exceeds the hardware limit "
+            f"{_hc.BANANA_CURRENT_HARD_LIMIT_A:.0f} A."
+        )
+    if contract[_KEY_COIL_LENGTH_TARGET_M] > _hc.COIL_LENGTH_HARD_LIMIT_M:
+        raise ValueError(
+            "COIL_LENGTH_TARGET_M exceeds the hardware limit "
+            f"{_hc.COIL_LENGTH_HARD_LIMIT_M:.3f} m."
+        )
+    if contract[_KEY_CURVATURE_THRESHOLD] > _hc.MAX_CURVATURE_INV_M:
+        raise ValueError(
+            "CURVATURE_THRESHOLD exceeds the hardware limit "
+            f"{_hc.MAX_CURVATURE_INV_M:.0f} m^-1."
+        )
     _validate_target_plasma_ceiling(contract)
 
     return MappingProxyType(contract), MappingProxyType(trace)
@@ -386,26 +298,17 @@ def resolve_constraint_contract_from_wire_names(
     profile: Mapping[str, Any] | None = None,
     spec_json: Mapping[str, Any] | None = None,
     cli_overrides: Mapping[str, Any] | None = None,
-    accept_offspec_major_radius: bool = False,
-    offspec_major_radius_m: float | None = None,
-    allow_offspec_engineering: bool = False,
 ) -> tuple[Mapping[str, float], Mapping[str, str]]:
     """Like :func:`resolve_constraint_contract` but accepts legacy wire names.
 
-    The historical ``major_radius`` mirror key is silently dropped so the
-    resolver's overriding-is-illegal rule is not tripped by legacy profile
-    dictionaries that copied the fixed vessel radius into the wire-name layer.
-    Canonical fixed-geometry contract keys are still passed through so the
-    shared resolver can reject them explicitly, and all other unknown
-    wire-name keys still raise.
+    The historical ``major_radius`` mirror key maps to the fixed vacuum-vessel
+    major-radius field, so the shared resolver rejects it like every other
+    fixed-geometry override. All unknown wire-name keys also raise.
     """
     return resolve_constraint_contract(
         profile=_translate_layer(profile),
         spec_json=_translate_layer(spec_json),
         cli_overrides=_translate_layer(cli_overrides),
-        accept_offspec_major_radius=accept_offspec_major_radius,
-        offspec_major_radius_m=offspec_major_radius_m,
-        allow_offspec_engineering=allow_offspec_engineering,
     )
 
 
@@ -456,21 +359,16 @@ __all__ = [
     "CONSTRAINT_SCHEMA_VERSION",
     "CONSTRAINT_SOURCE_CLI",
     "CONSTRAINT_SOURCE_HARDWARE",
-    "CONSTRAINT_SOURCE_OFFSPEC_MAJOR_RADIUS",
     "CONSTRAINT_SOURCE_PROFILE",
     "CONSTRAINT_SOURCE_SPEC_JSON",
     "ENGINEERING_DEFAULT_KEYS",
     "FIXED_GEOMETRY_KEYS",
-    "OFFSPEC_ENGINEERING_KEYS",
     "TARGET_PLASMA_CEILING_KEYS",
     "WIRE_NAME_ALIASES",
-    "apply_offspec_engineering_override_reason",
     "build_constraint_metadata",
     "compute_constraint_contract_hash",
     "contract_is_all_hardware_defaults",
-    "engineering_offspec_fields",
     "hardware_default_contract",
-    "merge_override_reason",
     "resolve_constraint_contract",
     "resolve_constraint_contract_from_wire_names",
 ]

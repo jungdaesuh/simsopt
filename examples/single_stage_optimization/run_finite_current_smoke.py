@@ -40,6 +40,7 @@ from banana_opt.hardware_contracts import (  # noqa: E402
     MAX_CURVATURE_INV_M,
     TF_CURRENT_CW_DEFAULT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
+    validate_major_radius,
 )
 from banana_opt.constraint_contract import (  # noqa: E402
     resolve_constraint_contract_from_wire_names,
@@ -117,6 +118,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _resolve_smoke_constraint_contract(args: argparse.Namespace) -> dict[str, float]:
+    validate_major_radius(args.major_radius)
     contract, _trace = resolve_constraint_contract_from_wire_names(
         cli_overrides={
             "tf_current_A": args.tf_current_A,
@@ -124,8 +126,6 @@ def _resolve_smoke_constraint_contract(args: argparse.Namespace) -> dict[str, fl
             "curvature_threshold": args.stage2_curvature_threshold,
             "banana_surf_radius": args.banana_surf_radius,
         },
-        offspec_major_radius_m=args.major_radius,
-        accept_offspec_major_radius=False,
     )
     return dict(contract)
 

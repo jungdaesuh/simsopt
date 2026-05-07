@@ -2,9 +2,58 @@
 
 Date: 2026-05-06
 
-Status: draft implementation plan after live-code review
+Status: implemented in working tree on 2026-05-07; finite-current smoke blocked by missing local VMEC input
 
-Validated against: `simsopt-surrogate` HEAD `d116040a6`
+Validated against: `simsopt-surrogate` HEAD `fd18380c6`
+
+## Implementation Note
+
+Implementation status:
+
+- [x] Scalar ALM penalty control only; block-penalty state/settings/helpers deleted.
+- [x] `constraint_blocks` retained as diagnostic labels only.
+- [x] Legacy `block_penalties` / `ALM_BLOCK_PENALTIES` fields retained as nullable `None`.
+- [x] Equality-style `augmented_objective` helper removed; tests now use the inequality ALM helper.
+- [x] KKT stationarity remains diagnostic and no longer reduces solver-decision stationarity.
+- [x] ALM signal extraction now requires explicit normalized `feasibility_values` and `dual_update_values`; stage-2 signal mode also requires explicit hard/surrogate/hard-dual arrays.
+- [x] Raw ALM result/preserved-timeout payloads now use explicit raw sidecars only and no longer label normalized values as raw.
+- [x] Nonfinite fallback evaluation copies all ALM-owned array fields and constraint-gradient lists.
+- [x] ALM checkpoint state serializes `constraint_names`, `penalty`, and `multipliers`.
+- [x] ALM resume validates exact constraint-name order and multiplier length.
+- [x] `workflow_runner_common.run_command` strips inherited `ALM_*` environment variables unless a caller opts in.
+- [x] `run_80ka_baseline_tradeoff_sweep.py` emits explicit single-stage `--alm-*` flags for ALM runs.
+- [x] The historical off-spec engineering escape hatch was intentionally deleted in the same hardening slice: `ACCEPT_OFFSPEC_*`, `accept_offspec_r0_seed`, `allow_offspec_engineering_constraints`, and related CLI/env bypass paths are no longer supported.
+
+Inventory and migration result:
+
+- Current production `minimize_alm` call sites do not pass active block-penalty control.
+- Repo search found no current JSON/JSONL checkpoint artifacts containing serialized `alm_state`, so there is no in-tree offline migration batch. Older external checkpoints without `constraint_names` are intentionally not trusted for multiplier reuse.
+- The final `block_penalt` grep is limited to accepted legacy nullable schema fields/tests and historical documentation; no block-penalty control branch remains.
+- The off-spec policy deletion is bundled intentionally with this hardening work because those bypasses conflicted with the strict evaluator/checkpoint contract: current runs must satisfy the tracked HBT hardware contract or fail before solver launch.
+
+Validation completed:
+
+```bash
+.venv/bin/python -m pytest -q tests/geo/test_alm_utils.py
+.venv/bin/python -m pytest -q tests/geo/test_single_stage_alm_integration.py
+.venv/bin/python -m pytest -q tests/geo/test_banana_objective_modules.py
+.venv/bin/python -m pytest -q tests/geo/test_frontier_evaluator.py
+.venv/bin/python -m pytest -q tests/geo/test_alm_fixture_benchmarking.py tests/geo/test_alm_benchmarking.py
+.venv/bin/python -m pytest -q tests/geo/test_single_stage_workflow_helpers.py
+.venv/bin/python -m pytest -q tests/geo/test_single_stage_example.py::AlmUtilsTests
+.venv/bin/python -m pytest -q tests/geo/test_single_stage_example.py -k "build_alm_final_constraint_payload or alm_result_view_from_search_eval or stage2_main_alm_path_uses_minimize_alm or validate_resume_alm_state or current_solver_checkpoint_alm_state"
+.venv/bin/python -m pytest -q tests/geo/test_constraint_contract.py tests/geo/test_banana_helper_modules.py
+git diff --check
+git grep -n "block_penalt" examples/single_stage_optimization tests/geo
+```
+
+Finite-current smoke attempted:
+
+```bash
+.venv/bin/python examples/single_stage_optimization/run_finite_current_smoke.py --output-root /tmp/simsopt_surrogate_finite_current_smoke_20260507 --stage2-output-root /tmp/simsopt_surrogate_stage2_smoke_20260507 --summary-json /tmp/simsopt_surrogate_finite_current_smoke_20260507/smoke_summary.json --currents-A 0 --nphi 5 --ntheta 4 --mpol 2 --ntor 2 --stage2-timeout-seconds 120 --single-stage-timeout-seconds 120
+```
+
+Smoke result: blocked before ALM/single-stage execution by missing local VMEC input `/Users/suhjungdae/code/columbia/DATABASE/EQUILIBRIA/wout_nfp22ginsburg_000_014417_iota15.nc`.
 
 ## Scope
 
@@ -27,7 +76,7 @@ Accepted review points:
 Rejected or downgraded review points:
 
 - H2 is stale as a live bug in the current tree. `frontier_evaluator.py` rejects `--single-stage-banana-current-mode=independent` before the runtime path that omits `banana_current_state` can run. Keep the regression guard, but do not schedule a live fix unless independent-mode frontier support is intentionally restored.
-- `banana_opt/alm_fixture_benchmarking.py` currently uses `constraint_blocks` as metadata labels. It does not use active block-penalty internals. It still needs signal-contract updates before fallback removal.
+- `banana_opt/alm_fixture_benchmarking.py` uses `constraint_blocks` as metadata labels only. It does not use active block-penalty internals, and the strict ALM signal contract now has focused fixture/benchmark coverage.
 
 ## Contract Decisions
 
@@ -38,6 +87,7 @@ Rejected or downgraded review points:
 5. Resume from ALM state is fail-fast when saved constraint names do not exactly match current constraint names.
 6. No reset-on-mismatch fallback is introduced.
 7. Evaluators must provide the normalized fields ALM consumes. Missing ALM signal fields are contract errors after migration.
+8. Historical off-spec hardware bypass flags are removed; the tracked hardware contract is the only operator-facing contract page.
 
 ## Audit Coverage Matrix
 
@@ -299,6 +349,7 @@ Recommended implementation commits:
 8. `refactor: collapse ALM scalar penalty path`
 9. `refactor: remove block penalty tests and equality helper`
 10. `docs: clarify ALM block diagnostics`
+11. `refactor: remove off-spec engineering escape hatch`
 
 If review load is more important than commit count, commits 7 to 9 can be combined only after Phases 2 to 6 are green.
 

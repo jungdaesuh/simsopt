@@ -117,30 +117,6 @@ class ConstraintContractResolverTests(unittest.TestCase):
                 cli_overrides={"BANANA_WINDING_SURFACE_MAJOR_RADIUS_M": 1.0},
             )
 
-    def test_offspec_major_radius_requires_explicit_acceptance(self):
-        module = load_constraint_contract_module()
-
-        with self.assertRaisesRegex(ValueError, "vacuum-vessel major radius"):
-            module.resolve_constraint_contract(
-                offspec_major_radius_m=0.5,
-                accept_offspec_major_radius=False,
-            )
-
-    def test_offspec_major_radius_is_accepted_with_flag(self):
-        module = load_constraint_contract_module()
-
-        contract, trace = module.resolve_constraint_contract(
-            offspec_major_radius_m=0.85,
-            accept_offspec_major_radius=True,
-        )
-
-        self.assertEqual(contract["VACUUM_VESSEL_MAJOR_RADIUS_M"], 0.85)
-        self.assertEqual(contract["BANANA_WINDING_SURFACE_MAJOR_RADIUS_M"], 0.85)
-        self.assertEqual(
-            trace["VACUUM_VESSEL_MAJOR_RADIUS_M"],
-            module.CONSTRAINT_SOURCE_OFFSPEC_MAJOR_RADIUS,
-        )
-
     def test_target_lcfs_ceiling_rejects_oversize_major_radius(self):
         module = load_constraint_contract_module()
 
@@ -188,23 +164,18 @@ class ConstraintContractResolverTests(unittest.TestCase):
                 cli_overrides={"COIL_LENGTH_TARGET_M": 2.0001},
             )
 
-    def test_allow_offspec_engineering_accepts_raised_length_and_banana_limits(self):
+    def test_banana_current_limit_rejects_values_above_hardware_limit(self):
         module = load_constraint_contract_module()
 
-        contract, _trace = module.resolve_constraint_contract(
-            cli_overrides={
-                "COIL_LENGTH_TARGET_M": 3.0,
-                "BANANA_CURRENT_MAX_A": 20000.0,
-                "CURVATURE_THRESHOLD": 150.0,
-            },
-            allow_offspec_engineering=True,
-        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "BANANA_CURRENT_MAX_A exceeds the hardware limit",
+        ):
+            module.resolve_constraint_contract(
+                cli_overrides={"BANANA_CURRENT_MAX_A": 20000.0},
+            )
 
-        self.assertEqual(contract["COIL_LENGTH_TARGET_M"], 3.0)
-        self.assertEqual(contract["BANANA_CURRENT_MAX_A"], 20000.0)
-        self.assertEqual(contract["CURVATURE_THRESHOLD"], 150.0)
-
-    def test_curvature_threshold_above_hardware_limit_requires_offspec_flag(self):
+    def test_curvature_threshold_above_hardware_limit_is_rejected(self):
         module = load_constraint_contract_module()
 
         with self.assertRaisesRegex(
@@ -215,25 +186,19 @@ class ConstraintContractResolverTests(unittest.TestCase):
                 cli_overrides={"CURVATURE_THRESHOLD": 150.0},
             )
 
-    def test_engineering_offspec_fields_reports_current_length_and_curvature(self):
+    def test_clearance_thresholds_below_hardware_floors_are_rejected(self):
         module = load_constraint_contract_module()
 
-        offspec = module.engineering_offspec_fields(
-            {
-                "banana_current_max_A": 20000.0,
-                "length_target": 3.0,
-                "curvature_threshold": 150.0,
-            }
-        )
-
-        self.assertEqual(
-            offspec,
-            (
-                "BANANA_CURRENT_MAX_A",
-                "COIL_LENGTH_TARGET_M",
-                "CURVATURE_THRESHOLD",
-            ),
-        )
+        for key, message in (
+            ("CC_THRESHOLD", "CC_THRESHOLD is below the hardware floor"),
+            ("COIL_PLASMA_MIN_DIST_M", "COIL_PLASMA_MIN_DIST_M is below"),
+            ("PLASMA_VESSEL_MIN_DIST_M", "PLASMA_VESSEL_MIN_DIST_M is below"),
+        ):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, message):
+                    module.resolve_constraint_contract(
+                        cli_overrides={key: 1.0e-6},
+                    )
 
     def test_tf_current_limit_rejects_zero_positive_and_over_limit_current(self):
         module = load_constraint_contract_module()
@@ -332,25 +297,6 @@ class ConstraintContractMetadataTests(unittest.TestCase):
         )
         self.assertIn("CONSTRAINT_PROVENANCE", metadata)
 
-    def test_merge_override_reason_deduplicates_and_uses_semicolon_separator(self):
-        module = load_constraint_contract_module()
-
-        self.assertEqual(
-            module.merge_override_reason(
-                "cli:cc_threshold",
-                "allow_offspec_engineering_constraints",
-            ),
-            "cli:cc_threshold;allow_offspec_engineering_constraints",
-        )
-        self.assertEqual(
-            module.merge_override_reason(
-                "cli:cc_threshold;allow_offspec_engineering_constraints",
-                "allow_offspec_engineering_constraints",
-            ),
-            "cli:cc_threshold;allow_offspec_engineering_constraints",
-        )
-
-
 class ConstraintContractWireNamesTests(unittest.TestCase):
     def test_wire_name_resolver_accepts_lowercase_and_uppercase(self):
         module = load_constraint_contract_module()
@@ -365,22 +311,17 @@ class ConstraintContractWireNamesTests(unittest.TestCase):
         self.assertEqual(contract_lower["TF_CURRENT_A"], -70000.0)
         self.assertEqual(contract_upper["TF_CURRENT_A"], -70000.0)
 
-    def test_wire_name_resolver_silently_drops_fixed_geometry_aliases(self):
+    def test_wire_name_resolver_rejects_legacy_fixed_geometry_aliases(self):
         module = load_constraint_contract_module()
         hc = load_hardware_contracts_module()
 
-        contract, _ = module.resolve_constraint_contract_from_wire_names(
-            profile={
-                "major_radius": hc.VACUUM_VESSEL_MAJOR_RADIUS_M,
-                "tf_current_A": -70000.0,
-            },
-        )
-
-        self.assertEqual(
-            contract["VACUUM_VESSEL_MAJOR_RADIUS_M"],
-            hc.VACUUM_VESSEL_MAJOR_RADIUS_M,
-        )
-        self.assertEqual(contract["TF_CURRENT_A"], -70000.0)
+        with self.assertRaisesRegex(ValueError, "Fixed-geometry field"):
+            module.resolve_constraint_contract_from_wire_names(
+                profile={
+                    "major_radius": hc.VACUUM_VESSEL_MAJOR_RADIUS_M,
+                    "tf_current_A": -70000.0,
+                },
+            )
 
     def test_wire_name_resolver_rejects_canonical_fixed_geometry_override_keys(self):
         module = load_constraint_contract_module()

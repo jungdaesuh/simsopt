@@ -573,7 +573,7 @@ class HardwareContractsEnvFlagTests(unittest.TestCase):
         self.module = _load_module(HARDWARE_CONTRACTS_PATH, "banana_hardware_contracts")
 
     def test_env_flag_recognizes_truthy_values(self):
-        flag_name = self.module.ACCEPT_OFFSPEC_R0_SEED_ENV
+        flag_name = "BANANA_OPT_TEST_FLAG"
         original = os.environ.get(flag_name)
         try:
             for truthy in ("1", "true", "TRUE", "yes"):

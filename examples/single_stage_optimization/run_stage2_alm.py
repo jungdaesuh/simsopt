@@ -51,7 +51,6 @@ from banana_opt.hardware_contracts import (  # noqa: E402
     validate_major_radius,
 )
 from banana_opt.constraint_contract import (  # noqa: E402
-    apply_offspec_engineering_override_reason,
     build_constraint_metadata,
     resolve_constraint_contract_from_wire_names,
 )
@@ -219,11 +218,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--summary-json",
         default=None,
         help=f"Optional summary path. Defaults to <output-root>/{DEFAULT_SUMMARY_JSON}.",
-    )
-    parser.add_argument(
-        "--allow-offspec-engineering-constraints",
-        action="store_true",
-        help=argparse.SUPPRESS,
     )
     parser.add_argument("--stage2-timeout-seconds", type=float, default=0.0)
     parser.add_argument(
@@ -442,13 +436,9 @@ def _resolve_stage2_constraint_contract(
     resolved_spec: dict,
 ) -> dict[str, float]:
     validate_major_radius(resolved_spec["major_radius"])
-    allow_offspec_engineering_constraints = bool(
-        getattr(args, "allow_offspec_engineering_constraints", False)
-    )
     contract, _ = resolve_constraint_contract_from_wire_names(
         profile=_stage2_spec_constraint_layer(resolved_spec),
         cli_overrides=_stage2_arg_overrides(args, _STAGE2_CONTRACT_OVERRIDE_KEYS),
-        allow_offspec_engineering=allow_offspec_engineering_constraints,
     )
     return dict(contract)
 
@@ -479,22 +469,13 @@ def build_stage2_constraint_artifacts(
     built against the effective values that actually drive
     :class:`Stage2ArtifactConfig`.
     """
-    allow_offspec_engineering_constraints = bool(
-        getattr(args, "allow_offspec_engineering_constraints", False)
-    )
     constraint_layer = _stage2_config_constraint_layer(config)
     contract, _ = resolve_constraint_contract_from_wire_names(
         cli_overrides=constraint_layer,
-        allow_offspec_engineering=allow_offspec_engineering_constraints,
     )
     override_reason = _stage2_override_reason(
         args,
         _STAGE2_CONTRACT_OVERRIDE_KEYS,
-    )
-    override_reason = apply_offspec_engineering_override_reason(
-        override_reason,
-        layer=constraint_layer,
-        allow_offspec_engineering=allow_offspec_engineering_constraints,
     )
     return build_constraint_metadata(
         contract,
@@ -547,12 +528,11 @@ def build_stage2_alm_config(
         ),
     )
     raw_cc = float(constraint_contract["CC_THRESHOLD"])
-    cc_threshold = max(raw_cc, STAGE2_CC_THRESHOLD_FLOOR)
     if raw_cc < STAGE2_CC_THRESHOLD_FLOOR:
-        print(
-            f"WARNING: cc_threshold {raw_cc} below Stage 2 "
-            f"solver floor, clamped to {STAGE2_CC_THRESHOLD_FLOOR}"
+        raise ValueError(
+            f"cc_threshold must be >= {STAGE2_CC_THRESHOLD_FLOOR:.3f} m."
         )
+    cc_threshold = raw_cc
     curvature_threshold = float(constraint_contract["CURVATURE_THRESHOLD"])
     tf_current_A = float(constraint_contract["TF_CURRENT_A"])
     stage2_iota_mode = getattr(args, "stage2_iota_mode", "off")

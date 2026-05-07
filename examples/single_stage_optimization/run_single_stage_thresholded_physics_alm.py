@@ -14,7 +14,6 @@ from workflow_runner_common import (  # noqa: E402
     SINGLE_STAGE_SCRIPT_PATH,
     add_seed_order_upgrade_argument,
     add_stage2_warm_start_seed_arguments,
-    append_allow_offspec_engineering_flag,
     append_single_stage_handoff_flags,
     clear_dry_run_marker,
     discover_single_results_path,
@@ -25,6 +24,7 @@ from workflow_runner_common import (  # noqa: E402
     resolved_path,
     resolved_optional_path,
     timeout_or_none,
+    validate_constraint_cli_overrides,
     run_command,
     snapshot_single_results_paths,
     write_dry_run_marker,
@@ -230,6 +230,9 @@ def maybe_load_validated_stage2_seed_metadata(
 def build_single_stage_thresholded_physics_command(
     args: argparse.Namespace,
 ) -> list[str]:
+    validate_constraint_cli_overrides(
+        {"curvature_threshold": args.curvature_threshold}
+    )
     stage2_bs_path = resolved_path(args.stage2_bs_path)
     output_root = resolved_path(args.output_root)
     equilibria_dir = resolved_optional_path(args.equilibria_dir)
@@ -313,10 +316,6 @@ def build_single_stage_thresholded_physics_command(
     if equilibria_dir is not None:
         command.extend(["--equilibria-dir", str(equilibria_dir)])
     append_single_stage_handoff_flags(command, args)
-    append_allow_offspec_engineering_flag(
-        command,
-        curvature_threshold=args.curvature_threshold,
-    )
     return command
 
 
