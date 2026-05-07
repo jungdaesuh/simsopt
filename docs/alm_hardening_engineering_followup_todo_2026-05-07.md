@@ -4,9 +4,23 @@ Date: 2026-05-07
 
 Validated against: `simsopt-surrogate` HEAD `fd18380c6` (uncommitted working tree)
 
-Status: open
+Status: implemented and committed in the 2026-05-07 ALM hardening closeout slice.
 
-Relationship: extends `docs/alm_hardening_closeout_todo_plan_2026-05-07.md` with engineering-review findings raised after that tracker's implementation checklist was closed. **While this followup is open, the commit-grouping section below supersedes the tracker's commit-grouping section** (because it adds Commit 6 for the perf fix). When this followup closes, fold the final six-commit list back into the tracker as the historical SSOT.
+Relationship: extends `docs/alm_hardening_closeout_todo_plan_2026-05-07.md` with engineering-review findings raised after that tracker's implementation checklist was closed. The final six-commit list has been folded back into the closeout tracker as the historical SSOT.
+
+## Implementation Result
+
+- TODO 1/2 closed with Option A: `SINGLE_STAGE_ALM_CLI_FIELDS` names the single-stage / baseline-sweep defaults, while Stage 2 keeps its intentional `alm_curvature_smoothing = 0.25` default.
+- TODO 3 closed with `_build_constraint_metadata_tuples(...)`, precomputed immutable metadata tuples, and no metadata attachment in the L-BFGS-B inner objective/callback hot path.
+- TODO 4 validation:
+  - `.venv/bin/python -m pytest -q tests/geo/test_alm_utils.py` -> `91 passed, 3 subtests passed`
+  - `.venv/bin/python -m pytest -q tests/geo/test_single_stage_workflow_helpers.py` -> `120 passed`
+  - `.venv/bin/python -m pytest -q tests/geo/test_single_stage_alm_integration.py` -> `73 passed`
+  - `.venv/bin/python -m pytest -q tests/geo/test_single_stage_example.py -k "AlmUtilsTests or build_alm_final_constraint_payload or alm_result_view_from_search_eval or stage2_main_alm_path_uses_minimize_alm or validate_resume_alm_state or current_solver_checkpoint_alm_state"` -> `12 passed, 278 deselected`
+  - `.venv/bin/python -m pytest -q tests/geo/test_constraint_contract.py tests/geo/test_banana_helper_modules.py` -> `50 passed, 3 subtests passed`
+  - `git diff --check` -> pass
+  - The two CLI tuple deletion gates returned zero hits.
+- Final commit-only-work layout is folded into `docs/alm_hardening_closeout_todo_plan_2026-05-07.md`.
 
 ## Goal
 
@@ -35,15 +49,15 @@ The split is **intentional** — `banana_coil_solver.py:520-525` documents that 
 
 **Tasks.**
 
-- [ ] Rename the tuple to `SINGLE_STAGE_ALM_CLI_FIELDS` in `workflow_runner_common.py:42`.
-- [ ] Update `alm_flag()` and `single_stage_alm_flag()` definitions if any callsite assumes the old name.
-- [ ] Update `append_alm_cli_flags()` body at `workflow_runner_common.py:78` to iterate the renamed tuple.
-- [ ] Decide on Stage 2 default surface (pick one):
+- [x] Rename the tuple to `SINGLE_STAGE_ALM_CLI_FIELDS` in `workflow_runner_common.py:42`.
+- [x] Update `alm_flag()` and `single_stage_alm_flag()` definitions if any callsite assumes the old name.
+- [x] Update `append_alm_cli_flags()` body at `workflow_runner_common.py:78` to iterate the renamed tuple.
+- [x] Decide on Stage 2 default surface (pick one):
   - **Option A** — keep `Stage2ArtifactConfig.alm_curvature_smoothing = 0.25` as-is; the rename alone resolves the SSOT misnomer. No derivation. Smallest diff.
   - **Option B1** — introduce `STAGE2_ALM_CLI_FIELDS` as a **full** sibling tuple (all 14 fields, with Stage 2 defaults: `curvature_smoothing=0.25`, others matching single-stage). Derive `Stage2ArtifactConfig` ALM defaults from this tuple via a factory or class-decorator. Symmetric with `SINGLE_STAGE_ALM_CLI_FIELDS`; full SSOT for both regimes.
   - **Option B2** — keep one base `ALM_CLI_FIELDS_BASE` tuple plus a `STAGE2_ALM_OVERRIDES = {"curvature_smoothing": 0.25}` mapping. Derive both per-regime tuples by overlaying. Smaller surface; explicit about what differs.
-- [ ] If Option B1 or B2 is chosen, also rewrite `Stage2ArtifactConfig` ALM defaults to derive from the chosen source so the `0.25` literal at `workflow_runner_common.py:115` disappears. (A diff-only tuple alone cannot derive the full Stage 2 ALM surface — Option B must cover all 14 fields, either directly or via a base+override merge.)
-- [ ] Add a docstring or short comment near the renamed tuple noting it covers single-stage / baseline-sweep defaults only and that Stage 2 has its own distinct curvature-smoothing default.
+- [x] If Option B1 or B2 is chosen, also rewrite `Stage2ArtifactConfig` ALM defaults to derive from the chosen source so the `0.25` literal at `workflow_runner_common.py:115` disappears. (A diff-only tuple alone cannot derive the full Stage 2 ALM surface — Option B must cover all 14 fields, either directly or via a base+override merge.)
+- [x] Add a docstring or short comment near the renamed tuple noting it covers single-stage / baseline-sweep defaults only and that Stage 2 has its own distinct curvature-smoothing default.
 
 **Acceptance.**
 
@@ -61,16 +75,16 @@ The split is **intentional** — `banana_coil_solver.py:520-525` documents that 
 
 **Tasks.**
 
-- [ ] `examples/single_stage_optimization/run_80ka_baseline_tradeoff_sweep.py:19` — import statement.
-- [ ] `examples/single_stage_optimization/run_80ka_baseline_tradeoff_sweep.py:140` — iteration in `parse_args()`.
-- [ ] `examples/single_stage_optimization/workflow_runner_common.py:78` — iteration in `append_alm_cli_flags()`.
-- [ ] `tests/geo/test_single_stage_workflow_helpers.py:1131` — schema-parity test reference.
-- [ ] `tests/geo/test_single_stage_workflow_helpers.py:1136` — schema-parity test reference.
-- [ ] `tests/geo/test_single_stage_workflow_helpers.py:1141` — schema-parity test length assertion.
-- [ ] `tests/geo/test_single_stage_workflow_helpers.py:1154` — round-trip parity test reference.
-- [ ] `docs/alm_hardening_closeout_todo_plan_2026-05-07.md:50` — illustrative code block in P1 SSOT section.
-- [ ] `docs/alm_hardening_closeout_todo_plan_2026-05-07.md:76` — Acceptance bullet text.
-- [ ] `docs/alm_hardening_closeout_todo_plan_2026-05-07.md:80` — Acceptance bullet text.
+- [x] `examples/single_stage_optimization/run_80ka_baseline_tradeoff_sweep.py:19` — import statement.
+- [x] `examples/single_stage_optimization/run_80ka_baseline_tradeoff_sweep.py:140` — iteration in `parse_args()`.
+- [x] `examples/single_stage_optimization/workflow_runner_common.py:78` — iteration in `append_alm_cli_flags()`.
+- [x] `tests/geo/test_single_stage_workflow_helpers.py:1131` — schema-parity test reference.
+- [x] `tests/geo/test_single_stage_workflow_helpers.py:1136` — schema-parity test reference.
+- [x] `tests/geo/test_single_stage_workflow_helpers.py:1141` — schema-parity test length assertion.
+- [x] `tests/geo/test_single_stage_workflow_helpers.py:1154` — round-trip parity test reference.
+- [x] `docs/alm_hardening_closeout_todo_plan_2026-05-07.md:50` — illustrative code block in P1 SSOT section.
+- [x] `docs/alm_hardening_closeout_todo_plan_2026-05-07.md:76` — Acceptance bullet text.
+- [x] `docs/alm_hardening_closeout_todo_plan_2026-05-07.md:80` — Acceptance bullet text.
 
 **Acceptance.**
 
@@ -110,7 +124,7 @@ The metadata is consumed at history-snapshot time on the accepted candidate via 
 
 **Tasks.**
 
-- [ ] Extract a module-level pure helper `_build_constraint_metadata_tuples(constraint_names, constraint_blocks) -> (names_tuple, blocks_tuple)` in `alm_utils.py`. Pure function, no closure capture, directly unit-testable. **Preserve the existing length-mismatch ValueError** (today at `alm_utils.py:2027-2028`, covered by the regression test `tests/geo/test_alm_utils.py::test_minimize_alm_rejects_mismatched_constraint_block_metadata` at `:280` which asserts `assertRaisesRegex(ValueError, "constraint_blocks length")`):
+- [x] Extract a module-level pure helper `_build_constraint_metadata_tuples(constraint_names, constraint_blocks) -> (names_tuple, blocks_tuple)` in `alm_utils.py`. Pure function, no closure capture, directly unit-testable. **Preserve the existing length-mismatch ValueError** (today at `alm_utils.py:2027-2028`, covered by the regression test `tests/geo/test_alm_utils.py::test_minimize_alm_rejects_mismatched_constraint_block_metadata` at `:280` which asserts `assertRaisesRegex(ValueError, "constraint_blocks length")`):
   ```python
   def _build_constraint_metadata_tuples(
       constraint_names: Sequence[str],
@@ -125,16 +139,16 @@ The metadata is consumed at history-snapshot time on the accepted candidate via 
       return names_tuple, blocks_tuple
   ```
   This centralizes both the conversion and the validation (SRP) and gives the regression tests something testable that does not depend on `minimize_alm`'s closure structure. The error message is held to the existing literal so the existing regression test continues to pass without modification.
-- [ ] Replace the existing argument-validation block in `minimize_alm` (`alm_utils.py:2025-2029`, including the `len(constraint_blocks) != len(constraint_names)` check) with a single call into the new helper:
+- [x] Replace the existing argument-validation block in `minimize_alm` (`alm_utils.py:2025-2029`, including the `len(constraint_blocks) != len(constraint_names)` check) with a single call into the new helper:
   ```python
   _constraint_names_tuple, _constraint_blocks_tuple = _build_constraint_metadata_tuples(
       constraint_names, constraint_blocks
   )
   ```
   Use tuples rather than lists — tuples are genuinely immutable in Python, so accidental mutation by a downstream consumer would raise. After this change, the `ValueError` for mismatched block/name lengths is raised from inside the helper, not from `minimize_alm` directly; the existing regression test still passes because it only asserts the message text and the call surface.
-- [ ] Confirm `tests/geo/test_alm_utils.py::test_minimize_alm_rejects_mismatched_constraint_block_metadata` (at `:280`) is still green after the helper extraction, with no test modification required. If the test ever needs adjustment because the error origin changed, leave it alone — it asserts behavior, not stack frame.
-- [ ] Verify that no current consumer of `evaluation["constraint_names"]` or `evaluation["constraint_blocks"]` mutates the value (calls `.append()`, item assignment, etc.) before switching to tuples. If mutation is found, fix the consumer or keep lists but route through the helper so the precompute-once invariant still holds.
-- [ ] Rewrite `_attach_constraint_metadata` to attach the precomputed tuples rather than rebuild per call:
+- [x] Confirm `tests/geo/test_alm_utils.py::test_minimize_alm_rejects_mismatched_constraint_block_metadata` (at `:280`) is still green after the helper extraction, with no test modification required. If the test ever needs adjustment because the error origin changed, leave it alone — it asserts behavior, not stack frame.
+- [x] Verify that no current consumer of `evaluation["constraint_names"]` or `evaluation["constraint_blocks"]` mutates the value (calls `.append()`, item assignment, etc.) before switching to tuples. If mutation is found, fix the consumer or keep lists but route through the helper so the precompute-once invariant still holds.
+- [x] Rewrite `_attach_constraint_metadata` to attach the precomputed tuples rather than rebuild per call:
   ```python
   def _attach_constraint_metadata(evaluation: dict) -> dict:
       if _constraint_blocks_tuple is None:
@@ -144,8 +158,8 @@ The metadata is consumed at history-snapshot time on the accepted candidate via 
       annotated["constraint_blocks"] = _constraint_blocks_tuple
       return annotated
   ```
-- [ ] **Stronger fix (preferred if read-site audit allows):** skip `_attach_constraint_metadata` inside `inner_fun` and `alm_inner_callback` entirely; only attach when promoting an evaluation to `current_eval` / `accepted_eval` / history. This eliminates the `dict(evaluation)` shallow copy on every inner call as well. Requires confirming no inner-loop read expects `constraint_names` / `constraint_blocks` on the evaluation dict. The grep at `alm_utils.py:2797-2847` (inner_fun + callback) and at the routing/extract helpers shows none of them read those keys today — but lock that with a follow-up audit before deleting the closure-internal call.
-- [ ] **Test 1 — direct helper unit test.** Cover the helper with instrumented sentinels. This is the precompute correctness gate.
+- [x] **Stronger fix (preferred if read-site audit allows):** skip `_attach_constraint_metadata` inside `inner_fun` and `alm_inner_callback` entirely; only attach when promoting an evaluation to `current_eval` / `accepted_eval` / history. This eliminates the `dict(evaluation)` shallow copy on every inner call as well. Requires confirming no inner-loop read expects `constraint_names` / `constraint_blocks` on the evaluation dict. The grep at `alm_utils.py:2797-2847` (inner_fun + callback) and at the routing/extract helpers shows none of them read those keys today — but lock that with a follow-up audit before deleting the closure-internal call.
+- [x] **Test 1 — direct helper unit test.** Cover the helper with instrumented sentinels. This is the precompute correctness gate.
   ```python
   class _CountingName:
       def __init__(self, name: str) -> None:
@@ -177,7 +191,7 @@ The metadata is consumed at history-snapshot time on the accepted candidate via 
           assert counter.str_calls == 1
   ```
   The helper is a pure function, so exact `== 1` is the right assertion here. There is no closure or non-hot-path consumer to inflate the count.
-- [ ] **Shared test fixture — force inner-evaluation count via fake `minimize`.** The naive `maxiter=5` vs `maxiter=100` comparison can false-pass if both inner solves converge early to the same iteration count. Force the L-BFGS-B inner loop to use the full budget by patching `alm_utils.minimize` with a stub that calls `inner_fun` exactly `options["maxiter"]` times before returning a non-converged result:
+- [x] **Shared test fixture — force inner-evaluation count via fake `minimize`.** The naive `maxiter=5` vs `maxiter=100` comparison can false-pass if both inner solves converge early to the same iteration count. Force the L-BFGS-B inner loop to use the full budget by patching `alm_utils.minimize` with a stub that calls `inner_fun` exactly `options["maxiter"]` times before returning a non-converged result:
   ```python
   def _make_fake_minimize():
       def fake_minimize(fun, x, jac, method, bounds, callback, options):
@@ -194,7 +208,7 @@ The metadata is consumed at history-snapshot time on the accepted candidate via 
       return fake_minimize
   ```
   Both Test 2 and Test 3 below depend on this fixture so the scaling assertion observes a real inner-evaluation difference.
-- [ ] **Test 2 — end-to-end names scaling test.** Cover the names hot-path through observable behavior. Do **not** assert exact `str_calls == 1` because non-hot-path consumers (history diagnostics at `alm_utils.py:722`, result construction, history entry serialization) also stringify `constraint_names` per outer iteration. Assert instead that the per-name conversion count **does not scale with the inner-iteration budget**:
+- [x] **Test 2 — end-to-end names scaling test.** Cover the names hot-path through observable behavior. Do **not** assert exact `str_calls == 1` because non-hot-path consumers (history diagnostics at `alm_utils.py:722`, result construction, history entry serialization) also stringify `constraint_names` per outer iteration. Assert instead that the per-name conversion count **does not scale with the inner-iteration budget**:
   ```python
   def _run_with_maxiter(maxiter: int) -> int:
       names = [_CountingName(f"c_{i}") for i in range(3)]
@@ -219,7 +233,7 @@ The metadata is consumed at history-snapshot time on the accepted candidate via 
           f"short(maxiter=5)={short}, long(maxiter=100)={long}"
       )
   ```
-- [ ] **Test 3 — end-to-end blocks scaling test (closure-path regression gate).** A future regression like `annotated["constraint_blocks"] = list(_constraint_blocks_tuple)` would pass both Test 1 (helper still produces the right tuple) and Test 2 (names attachment unchanged), but reintroduce per-call block allocation. Catch it by monkeypatching `_build_constraint_metadata_tuples` to return a counting block container, then assert iteration on that container does not scale with the inner-iteration budget:
+- [x] **Test 3 — end-to-end blocks scaling test (closure-path regression gate).** A future regression like `annotated["constraint_blocks"] = list(_constraint_blocks_tuple)` would pass both Test 1 (helper still produces the right tuple) and Test 2 (names attachment unchanged), but reintroduce per-call block allocation. Catch it by monkeypatching `_build_constraint_metadata_tuples` to return a counting block container, then assert iteration on that container does not scale with the inner-iteration budget:
   ```python
   class _CountingBlockContainer:
       def __init__(self, items: Sequence[str]) -> None:
@@ -289,30 +303,30 @@ The metadata is consumed at history-snapshot time on the accepted candidate via 
 
 **Tasks.**
 
-- [ ] `.venv/bin/python -m pytest -q tests/geo/test_alm_utils.py`
-- [ ] `.venv/bin/python -m pytest -q tests/geo/test_single_stage_workflow_helpers.py`
-- [ ] `.venv/bin/python -m pytest -q tests/geo/test_single_stage_alm_integration.py`
-- [ ] `.venv/bin/python -m pytest -q tests/geo/test_single_stage_example.py -k "AlmUtilsTests or build_alm_final_constraint_payload or alm_result_view_from_search_eval or stage2_main_alm_path_uses_minimize_alm or validate_resume_alm_state or current_solver_checkpoint_alm_state"`
-- [ ] `.venv/bin/python -m pytest -q tests/geo/test_constraint_contract.py tests/geo/test_banana_helper_modules.py`
-- [ ] `git diff --check`
-- [ ] CLI tuple deletion gate (live code): `git grep -nE "\bALM_CLI_FIELDS\b" examples/ tests/` returns zero hits.
-- [ ] CLI tuple deletion gate (closeout tracker): `git grep -nE "\bALM_CLI_FIELDS\b" docs/alm_hardening_closeout_todo_plan_2026-05-07.md` returns zero hits.
+- [x] `.venv/bin/python -m pytest -q tests/geo/test_alm_utils.py`
+- [x] `.venv/bin/python -m pytest -q tests/geo/test_single_stage_workflow_helpers.py`
+- [x] `.venv/bin/python -m pytest -q tests/geo/test_single_stage_alm_integration.py`
+- [x] `.venv/bin/python -m pytest -q tests/geo/test_single_stage_example.py -k "AlmUtilsTests or build_alm_final_constraint_payload or alm_result_view_from_search_eval or stage2_main_alm_path_uses_minimize_alm or validate_resume_alm_state or current_solver_checkpoint_alm_state"`
+- [x] `.venv/bin/python -m pytest -q tests/geo/test_constraint_contract.py tests/geo/test_banana_helper_modules.py`
+- [x] `git diff --check`
+- [x] CLI tuple deletion gate (live code): `git grep -nE "\bALM_CLI_FIELDS\b" examples/ tests/` returns zero hits.
+- [x] CLI tuple deletion gate (closeout tracker): `git grep -nE "\bALM_CLI_FIELDS\b" docs/alm_hardening_closeout_todo_plan_2026-05-07.md` returns zero hits.
 
 **Acceptance.**
 
 - All pytest invocations green; counts match or exceed the prior closeout totals (`88+120+73+12+50` baseline before TODO 3 perf test added).
 - Both grep gates return zero hits. (This followup doc is intentionally exempt — it discusses the rename in prose.)
 
-## Open Process Todos In The Tracker
+## Completed Process Todos In The Tracker
 
-The implementation checklist in `docs/alm_hardening_closeout_todo_plan_2026-05-07.md` is fully checked off (35 boxes). The Commit Grouping section at `docs/alm_hardening_closeout_todo_plan_2026-05-07.md:182-186` retains five unchecked tasks. Execute via `commit-only-work` pass after TODOs 1-4 above.
+The implementation checklist in `docs/alm_hardening_closeout_todo_plan_2026-05-07.md` is fully checked off, and its Commit Grouping section now records the final six committed slices.
 
-- [ ] **Commit 1**: off-spec deletion/deprecation scope and memory/doc alignment.
-- [ ] **Commit 2**: ALM CLI SSOT refactor plus schema and round-trip parity tests. (Folds in TODOs 1 and 2 above.)
-- [ ] **Commit 3**: missing ALM regression tests, tolerance monotonicity, and runner env tests.
-- [ ] **Commit 4**: ALM contract documentation and smoke-gate note.
-- [ ] **Commit 5**: RTOL boundary coverage and rationale comment.
-- [ ] **Commit 6 (new)**: `perf: share ALM constraint metadata across inner evaluations`. Folds in TODO 3 above. Insert after Commit 3 if perf-test fixture lives there; otherwise after Commit 5.
+- [x] **Commit 1**: `refactor: remove ALM off-spec escape hatches`.
+- [x] **Commit 2**: `refactor: share single-stage ALM CLI fields`.
+- [x] **Commit 3**: `perf: share ALM metadata and harden solver signals`.
+- [x] **Commit 4**: `docs: document ALM constraint contract`.
+- [x] **Commit 5**: `docs: update ALM closeout commit layout`.
+- [x] **Commit 6**: `docs: close ALM engineering followup`.
 
 ## Backlog (Non-Blocking)
 
@@ -321,11 +335,11 @@ Items below are advisory cleanups or pre-existing structural debt. They surfaced
 ### Backlog 1: Reduce Stage 2 ALM config duplication
 
 **Context.** Three sites repeat the 14-field ALM list:
-- `ALM_CLI_FIELDS` at `workflow_runner_common.py:42`.
+- `SINGLE_STAGE_ALM_CLI_FIELDS` at `workflow_runner_common.py:42`.
 - `Stage2ArtifactConfig.alm_*` fields at `workflow_runner_common.py:100-115`.
 - `resolve_stage2_artifact_path` keyword arguments at `workflow_runner_common.py:222-237`.
 
-A new ALM field today must be added to all three sites. **No existing test catches divergence between `ALM_CLI_FIELDS` and `Stage2ArtifactConfig`.** The schema-parity test at `tests/geo/test_single_stage_workflow_helpers.py:1123` only compares the baseline-sweep parser suffix set to `common.ALM_CLI_FIELDS` — it never inspects `Stage2ArtifactConfig`'s `alm_*` field set or `resolve_stage2_artifact_path`'s keyword arguments. So a Stage 2 ALM field added to `ALM_CLI_FIELDS` (or vice versa) silently goes unverified.
+A new ALM field today must be added to all three sites. **No existing test catches divergence between `SINGLE_STAGE_ALM_CLI_FIELDS` and `Stage2ArtifactConfig`.** The schema-parity test at `tests/geo/test_single_stage_workflow_helpers.py:1123` only compares the baseline-sweep parser suffix set to `common.SINGLE_STAGE_ALM_CLI_FIELDS` — it never inspects `Stage2ArtifactConfig`'s `alm_*` field set or `resolve_stage2_artifact_path`'s keyword arguments. So a Stage 2 ALM field added to the single-stage tuple (or vice versa) silently goes unverified.
 
 **Tasks.**
 
@@ -405,17 +419,17 @@ Both grep invocations must return zero hits after TODO 1 + TODO 2. This followup
 
 ## Final Acceptance
 
-- [ ] TODO 1: `ALM_CLI_FIELDS` renamed; Stage 2 default split resolved via Option A, B1, or B2.
-- [ ] TODO 2: All 10 dependent references updated atomically with TODO 1.
-- [ ] TODO 3: `_build_constraint_metadata_tuples` helper extracted (length-mismatch ValueError preserved with the original message); `_attach_constraint_metadata` consumes precomputed tuples; three regression tests added and green — Test 1 (helper unit test, exact `str_calls == 1`), Test 2 (names scaling, no growth with `maxiter`), Test 3 (blocks scaling via monkeypatched helper, no growth with `maxiter`). Tests 2 and 3 use the `_make_fake_minimize` fixture to force inner-evaluation counts; Test 1 calls the helper directly and does not need it. The pre-existing length-mismatch regression test `tests/geo/test_alm_utils.py::test_minimize_alm_rejects_mismatched_constraint_block_metadata` continues to pass without modification.
-- [ ] TODO 4: Validation runner returns green; both CLI tuple deletion gates (live code + closeout tracker) return zero hits.
-- [ ] Six-commit grouping (Commits 1-6 above) executed via a `commit-only-work` pass on the working tree.
-- [ ] Original tracker `docs/alm_hardening_closeout_todo_plan_2026-05-07.md` updated post-merge so its commit-grouping section reflects the final six-commit layout (this doc supersedes it only while the followup is open).
-- [ ] Backlog items are tracked in a separate ticket or memory note; not bundled with the hardening commits.
+- [x] TODO 1: `ALM_CLI_FIELDS` renamed; Stage 2 default split resolved via Option A.
+- [x] TODO 2: All 10 dependent references updated atomically with TODO 1.
+- [x] TODO 3: `_build_constraint_metadata_tuples` helper extracted (length-mismatch ValueError preserved with the original message); `_attach_constraint_metadata` consumes precomputed tuples; three regression tests added and green — Test 1 (helper unit test, exact `str_calls == 1`), Test 2 (names scaling, no growth with `maxiter`), Test 3 (blocks scaling via monkeypatched helper, no growth with `maxiter`). Tests 2 and 3 use the `_make_fake_minimize` fixture to force inner-evaluation counts; Test 1 calls the helper directly and does not need it. The pre-existing length-mismatch regression test `tests/geo/test_alm_utils.py::test_minimize_alm_rejects_mismatched_constraint_block_metadata` continues to pass without modification.
+- [x] TODO 4: Validation runner returns green; both CLI tuple deletion gates (live code + closeout tracker) return zero hits.
+- [x] Six-commit grouping (Commits 1-6 above) executed via a `commit-only-work` pass on the working tree.
+- [x] Original tracker `docs/alm_hardening_closeout_todo_plan_2026-05-07.md` updated post-merge so its commit-grouping section reflects the final six-commit layout.
+- [x] Backlog items remain below as non-blocking debt and were not bundled as new implementation scope.
 
 ## Notes
 
-- This document is the engineering-review followup; the original plan (`docs/alm_scalar_hardening_block_penalty_removal_plan_2026-05-06.md`) and tracker (`docs/alm_hardening_closeout_todo_plan_2026-05-07.md`) remain authoritative for the implementation phase history. While this followup is open, its commit-grouping section above is the active sequencing source; merge back into the tracker on close.
+- This document is the engineering-review followup; the original plan (`docs/alm_scalar_hardening_block_penalty_removal_plan_2026-05-06.md`) and tracker (`docs/alm_hardening_closeout_todo_plan_2026-05-07.md`) remain authoritative for the implementation phase history. The final commit grouping has been merged back into the closeout tracker.
 - Pre-commit work scope is small: rename + 10 reference updates + ~5 lines for the hot-path fix + extraction of the `_build_constraint_metadata_tuples` helper (preserving the existing length-mismatch ValueError) + three new regression tests (helper unit, names scaling, blocks scaling).
 - After TODO 3 lands, the three-test gate (Test 1 helper unit test, Test 2 names scaling, Test 3 blocks scaling) covers the full bug class. Test 1 catches direct precompute regressions; Test 2 catches closure-level names regressions including helper bypass; Test 3 catches closure-level blocks regressions such as `annotated["constraint_blocks"] = list(_constraint_blocks_tuple)` that would silently pass Tests 1 and 2. The scaling assertions (no growth with inner-iteration budget) are robust to non-hot-path consumers that legitimately stringify `constraint_names` per outer iteration (history diagnostics at `alm_utils.py:722`, result construction). Tests 2 and 3 force the inner-evaluation count via a stub `minimize` so they cannot false-pass on early convergence.
 - Grep-gate scope: `examples/` and `tests/` for live code; `docs/alm_hardening_closeout_todo_plan_2026-05-07.md` for the closeout tracker. This followup doc is exempt because it discusses the rename in prose.
