@@ -335,47 +335,49 @@ Items below are advisory cleanups or pre-existing structural debt. They surfaced
 ### Backlog 1: Reduce Stage 2 ALM config duplication
 
 **Context.** Three sites repeat the 14-field ALM list:
-- `SINGLE_STAGE_ALM_CLI_FIELDS` at `workflow_runner_common.py:42`.
-- `Stage2ArtifactConfig.alm_*` fields at `workflow_runner_common.py:100-115`.
-- `resolve_stage2_artifact_path` keyword arguments at `workflow_runner_common.py:222-237`.
+- `SINGLE_STAGE_ALM_CLI_FIELDS` in `workflow_runner_common.py`.
+- `Stage2ArtifactConfig.alm_*` fields in `workflow_runner_common.py`.
+- `resolve_stage2_artifact_path` keyword arguments in `workflow_runner_common.py`.
 
-A new ALM field today must be added to all three sites. **No existing test catches divergence between `SINGLE_STAGE_ALM_CLI_FIELDS` and `Stage2ArtifactConfig`.** The schema-parity test at `tests/geo/test_single_stage_workflow_helpers.py:1123` only compares the baseline-sweep parser suffix set to `common.SINGLE_STAGE_ALM_CLI_FIELDS` — it never inspects `Stage2ArtifactConfig`'s `alm_*` field set or `resolve_stage2_artifact_path`'s keyword arguments. So a Stage 2 ALM field added to the single-stage tuple (or vice versa) silently goes unverified.
+A new ALM field previously had to be added to all three sites. **No existing test caught divergence between `SINGLE_STAGE_ALM_CLI_FIELDS` and `Stage2ArtifactConfig`.** The older schema-parity test only compared the baseline-sweep parser suffix set to `common.SINGLE_STAGE_ALM_CLI_FIELDS` — it never inspected `Stage2ArtifactConfig`'s `alm_*` field set or `resolve_stage2_artifact_path`'s keyword arguments. So a Stage 2 ALM field added to the single-stage tuple (or vice versa) silently went unverified.
+
+**Resolution.** Closed in the follow-up patch. Stage 2 now has `STAGE2_ALM_CLI_FIELDS`, derived from the single-stage tuple plus the explicit `curvature_smoothing=0.25` override. `Stage2ArtifactConfig` default values, Stage 2 ALM command emission, and artifact-path kwargs use that Stage 2 metadata, and the test suite checks Stage 2 tuple/dataclass/path-signature/path-kwarg parity.
 
 **Tasks.**
 
-- [ ] Decide whether `Stage2ArtifactConfig` derives its ALM field set from a per-regime tuple (Option B from TODO 1) or stays declarative.
-- [ ] If derivation is chosen, generate `Stage2ArtifactConfig` ALM fields via a class-decorator or factory that consumes the regime tuple.
-- [ ] Replace the explicit `local_stage2_bs_path` keyword argument list in `resolve_stage2_artifact_path` with a `**asdict(config)` projection or similar.
-- [ ] Preserve the intentional Stage 2 `curvature_smoothing=0.25` vs single-stage `0.05` split.
+- [x] Decide whether `Stage2ArtifactConfig` derives its ALM field set from a per-regime tuple (Option B from TODO 1) or stays declarative.
+- [x] Keep `Stage2ArtifactConfig` declarative, but derive its ALM defaults and artifact-path kwarg projection from Stage 2 ALM metadata.
+- [x] Replace the explicit `local_stage2_bs_path` keyword argument list in `resolve_stage2_artifact_path` with a shared projection helper.
+- [x] Preserve the intentional Stage 2 `curvature_smoothing=0.25` vs single-stage `0.05` split.
 
-**Acceptance.** Adding a new ALM field touches one source location and propagates to parser, emitter, dataclass, and artifact-path resolver automatically.
+**Acceptance.** Stage 2 ALM tuple, dataclass field set, command flags, and artifact-path projection are checked together by regression tests; the artifact-path resolver no longer owns a duplicated ALM kwarg list.
 
 ### Backlog 2: Document `run_command(env=..., inherit_alm_env=...)` overlay semantics
 
-**Context.** `workflow_runner_common.py:377-401`. The merge order `os.environ → strip ALM_ → caller env overlay` is enforced by code but not documented. A caller passing `env={"ALM_PENALTY_INIT": "5"}` while `inherit_alm_env=False` gets the explicit `ALM_PENALTY_INIT` despite the strip. Test at `test_single_stage_workflow_helpers.py:1505` documents the behavior empirically.
+**Context.** The merge order `os.environ → strip ALM_ → caller env overlay` is enforced by code but was not documented. A caller passing `env={"ALM_PENALTY_INIT": "5"}` while `inherit_alm_env=False` gets the explicit `ALM_PENALTY_INIT` despite the strip. Tests in `test_single_stage_workflow_helpers.py` document the behavior empirically.
 
 **Tasks.**
 
-- [ ] Add a docstring to `run_command` describing the merge order in three lines.
-- [ ] Optionally rename `env` parameter to `env_overrides` to make the overlay semantics explicit at the call site.
+- [x] Add a docstring to `run_command` describing the merge order in three lines.
+- [x] Preserve the public `env` parameter name and document that it is an explicit override layer.
 
 **Acceptance.** Reader of the function signature understands without consulting the test what `inherit_alm_env=False, env={"ALM_X": ...}` does.
 
 ### Backlog 3: Share env-building between `run_command` and `run_poincare_artifact`
 
-**Context.** `run_poincare_artifact` at `workflow_runner_common.py:785-804` uses `env = os.environ.copy()` directly without the ALM_ strip that `run_command` applies. Today this is harmless (POINCARE doesn't read `ALM_*`), but two divergent env-build patterns is one too many for a single file.
+**Context.** `run_poincare_artifact` used `env = os.environ.copy()` directly without the ALM_ strip that `run_command` applies. Today this is harmless (POINCARE doesn't read `ALM_*`), but two divergent env-build patterns is one too many for a single file.
 
 **Tasks.**
 
-- [ ] Extract `_build_subprocess_env(env_overrides=..., inherit_alm=...) -> dict[str, str]` as a private helper.
-- [ ] Route both `run_command` and `run_poincare_artifact` through the helper.
-- [ ] Confirm POINCARE smoke still works with ALM-stripped env (it should — POINCARE has no ALM dependency).
+- [x] Extract `_build_subprocess_env(env_overrides=..., inherit_alm=...) -> dict[str, str]` as a private helper.
+- [x] Route both `run_command` and `run_poincare_artifact` through the helper.
+- [x] Add a POINCARE subprocess-env regression test proving `ALM_*` inheritance is stripped while `POINCARE_OUT_DIR` is explicitly injected.
 
 **Acceptance.** One env-build path; both subprocess launchers share semantics.
 
 ### Backlog 4: Avoid recomputing max feasibility violation in failure-result path
 
-**Context.** `examples/single_stage_optimization/alm_utils.py:2557`:
+**Context.** The penalty-cap failure path previously recomputed the feasibility maximum:
 
 ```python
 final_max_feasibility_violation=_extract_constraint_state(evaluation)[3],
@@ -385,8 +387,8 @@ The caller `_try_penalty_increase` at `alm_utils.py:2454` already has `penalty_u
 
 **Tasks.**
 
-- [ ] Thread `max_feasibility_violation` through the `_build_failure_result_with_optional_restore` signature.
-- [ ] Remove the redundant `_extract_constraint_state(evaluation)[3]` call.
+- [x] Thread `max_feasibility_violation` through the `_build_failure_result_with_optional_restore` signature.
+- [x] Remove the redundant `_extract_constraint_state(evaluation)[3]` call on the penalty-cap failure path.
 
 **Acceptance.** No behavior change; one fewer redundant array materialization on the penalty-cap failure path.
 
@@ -427,7 +429,7 @@ Both grep invocations must return zero hits after TODO 1 + TODO 2. This followup
 - [x] TODO 4: Validation runner returns green; both CLI tuple deletion gates (live code + closeout tracker) return zero hits.
 - [x] Six-commit grouping (Commits 1-6 above) executed via a `commit-only-work` pass on the working tree.
 - [x] Original tracker `docs/alm_hardening_closeout_todo_plan_2026-05-07.md` updated post-merge so its commit-grouping section reflects the final six-commit layout.
-- [x] Backlog items remain below as non-blocking debt and were not bundled as new implementation scope.
+- [x] Backlog 1-4 concrete follow-ups are closed in the follow-up patch; Backlog 5 remains separate structural debt and was not bundled into this scope.
 
 ## Notes
 
