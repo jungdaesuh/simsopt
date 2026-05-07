@@ -394,10 +394,12 @@ The caller `_try_penalty_increase` at `alm_utils.py:2454` already has `penalty_u
 
 **Context.** Surfaced during review but predates this hardening work. Listed for completeness; do not bundle with the closeout commits.
 
-- [ ] `minimize_alm` at `alm_utils.py:1996+` is a 1000+ line function with 9 nested closures, each mutating a different `nonlocal` slice of state. SRP / SoC violation. Hard to test closures in isolation; refactor would be invasive.
-- [ ] `Stage2ArtifactConfig` at `workflow_runner_common.py:84-184` carries 40+ fields spanning Stage 2 geometry, ALM controls, basin hopping, iota mode, and target plasma ceiling. Could split into per-concern dataclasses with composition.
+- [ ] `minimize_alm` at `alm_utils.py:2009-3437` is a 1,429 line function with 15 local functions, mixing ALM orchestration, result/history construction, penalty-state transitions, best-feasible restore, and the SciPy inner-solve call boundary.
+- [ ] `Stage2ArtifactConfig` at `workflow_runner_common.py:119-219` carries 54 annotated fields spanning Stage 2 geometry, hardware/current controls, objective weights, ALM controls, basin hopping, finite-current wiring, iota mode, and target LCFS ceilings.
 
-**Acceptance.** Tracked in a separate refactor backlog ticket; out of scope for the ALM hardening cycle.
+**Plan.** See `docs/alm_backlog5_structural_debt_plan_2026-05-07.md`.
+
+**Acceptance.** Tracked in the separate Backlog 5 refactor plan; out of scope for the ALM hardening cycle.
 
 ## Validation Runner
 
