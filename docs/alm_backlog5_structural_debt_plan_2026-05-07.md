@@ -247,8 +247,13 @@ Structural metrics after the refactor:
 - `examples/single_stage_optimization/alm_utils.py::minimize_alm`: 32 lines,
   0 local functions.
 - `examples/single_stage_optimization/alm_utils.py::_minimize_alm_impl`:
-  1,040 lines, 0 local functions. The public entrypoint now delegates to
-  explicit helpers/state carriers instead of owning ALM policy closures.
+  at Backlog 5 closeout, 1,040 lines and 0 local functions. The public
+  entrypoint delegated to explicit helpers/state carriers instead of owning
+  ALM policy closures.
+  The later `_minimize_alm_impl` decomposition plan reduced this private
+  driver further to 127 lines by extracting `_run_alm_continuation_step` and
+  `_run_alm_outer_iteration`; this Backlog 5 result is the pre-decomposition
+  closeout snapshot.
 - `examples/single_stage_optimization/workflow_runner_common.py::Stage2ArtifactConfig`:
   9 internal storage fields, one per frozen concern object. The 54-field public
   flat surface is exposed through read-only properties and

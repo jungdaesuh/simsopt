@@ -403,6 +403,9 @@ Closed by the separate Backlog 5 structural refactor.
   append/diagnostic emission, penalty transitions, best-feasible restore, and
   the SciPy inner-solve attempt boundary are top-level helpers with explicit
   state carriers.
+  A later `_minimize_alm_impl` decomposition pass extracted
+  `_run_alm_continuation_step` and `_run_alm_outer_iteration`, reducing the
+  private driver to 127 lines while preserving the public entrypoint boundary.
 - [x] `Stage2ArtifactConfig` now stores 9 frozen concern objects instead of 54
   flat dataclass fields. The existing 54-field public surface remains available
   through read-only properties and explicit flat projection helpers.

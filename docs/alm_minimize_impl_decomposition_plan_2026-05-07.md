@@ -2,10 +2,10 @@
 
 Date: 2026-05-07
 
-Status: in progress. Phases 1a-3 are implemented in the current
-worktree; Phases 4-5 remain pending. The baseline facts below describe
-the pre-implementation starting point unless explicitly labeled
-current.
+Status: in progress. Phases 1a-5 are implemented in the current
+worktree; Phase Final closeout remains partially pending. The baseline
+facts below describe the pre-implementation starting point unless
+explicitly labeled current.
 
 ## Current Implementation Status
 
@@ -14,13 +14,17 @@ current.
 - [x] Phase 2 extracted `_handle_alm_penalty_cap_termination`.
 - [x] Phase 3 extracted `_handle_alm_dual_update_transition`; the
   direct helper test now asserts the exact projected multiplier values.
-- [ ] Phase 4 continuation-step and outer-iteration extraction is not
-  started.
-- [ ] Phase 5 driver collapse, final tracker updates, and final
-  `_minimize_alm_impl` <= 500 LOC verification are not started.
+- [x] Phase 4 extracted `_run_alm_continuation_step` and
+  `_run_alm_outer_iteration`.
+- [x] Phase 5 collapsed `_minimize_alm_impl` to the normalized driver
+  and verified the <= 500 LOC / closure-free structural gate.
+- [ ] Phase Final simplification pass remains open.
 
-Current structural metric after Phases 1a-3:
-`_minimize_alm_impl` is 910 LOC with zero nested function definitions.
+Current structural metric after Phase 5:
+`_minimize_alm_impl` is 127 LOC with zero nested function definitions;
+`_run_alm_outer_iteration` is 105 LOC with zero nested function
+definitions; `_run_alm_continuation_step` is 1,036 LOC with zero nested
+function definitions.
 
 Scope source: pre-existing structural debt under
 `docs/alm_hardening_engineering_followup_todo_2026-05-07.md` Backlog 5
@@ -160,10 +164,12 @@ loop body extracted into one helper, and the terminal failure return.
   - infeasible-penalty-increase, plateau-limit, or generic
     penalty-increase.
   Each outcome maps to one explicit branch tag in a frozen result
-  dataclass. Tags must be a closed set: prefer a private
-  `enum.StrEnum` (`_ALMContinuationDecision`) over inline `Literal`
-  unions for the discriminator field, so the set is grep-able and
-  exhaustively dispatchable; ad-hoc free-form strings are forbidden.
+  dataclass. Tags must be a closed set: use a private string-valued
+  `Enum` (`class _ALMContinuationDecision(str, Enum): ...`) over inline
+  `Literal` unions for the discriminator field, so the set is
+  grep-able and exhaustively dispatchable while staying compatible with
+  the repo's Python >= 3.9 contract; ad-hoc free-form strings are
+  forbidden.
 - No nested closures and no dynamic imports.
 
 ### Performance And Safety Requirements
@@ -304,53 +310,46 @@ Fields: `x: np.ndarray`, `multipliers: np.ndarray`, `penalty: float`,
 #### `_ALMOuterIterationResult`
 
 Fields:
-- `decision: _ALMOuterDecision` (private `enum.StrEnum` with values
-  `RETURN`, `NEXT_OUTER`, `EXHAUST`; not a free-form string).
-- `result: dict | None` (set when `decision == "return"`; carries the
+- `decision: _ALMOuterDecision` (private string-valued `Enum` with
+  values `RETURN`, `NEXT_OUTER`, `EXHAUST`; not a free-form string).
+- `result: object | None` (set when `decision == "return"`; carries the
   pre-built `_build_alm_result` or
   `_build_alm_failure_result_with_optional_restore` payload).
 - `multipliers: np.ndarray`.
 - `penalty: float`.
-- `trust_radius: float | None`.
 - `update_feasibility_tol: float`.
 - `update_stationarity_tol: float`.
 - `final_eval: dict | None`.
 - `final_multipliers: np.ndarray`.
 - `final_penalty: float`.
 - `last_result: object | None`.
-- `total_inner_iterations: int`.
-- `cap_binding_detected: bool`.
-- `cap_binding_indices: set[int]`.
-- `penalty_cap_reached: bool`.
-- `penalty_cap_requested: float | None`.
 - `best_feasible: ALMFeasibleIncumbent | None`.
-- `history_truncated_count: int`.
+- `inner_options: dict | None`.
 
 #### `_ALMContinuationStepResult`
 
 Fields:
-- `decision: _ALMContinuationDecision` (private `enum.StrEnum` with
+- `decision: _ALMContinuationDecision` (private string-valued `Enum` with
   values `RETURN`, `BREAK_OUTER`, `CONTINUE_CONTINUATION`; not a
   free-form string).
-- `result: dict | None`.
+- `result: object | None`.
 - All run-state scalars carried forward to the next continuation pass:
-  `multipliers`, `penalty`, `trust_radius`,
+  `multipliers`, `penalty`,
   `update_feasibility_tol`, `update_stationarity_tol`,
   `feasible_stall_count`, `final_eval`, `final_multipliers`,
-  `final_penalty`, `last_result`, `total_inner_iterations`,
-  `cap_binding_detected`, `cap_binding_indices`,
-  `penalty_cap_reached`, `penalty_cap_requested`, `best_feasible`,
-  `history_truncated_count`.
+  `final_penalty`, `last_result`, `best_feasible`, and
+  `inner_options`.
 
 #### `_ALMDualUpdateResult`
 
 Fields: `multipliers: np.ndarray`, `update_feasibility_tol: float`,
-`update_stationarity_tol: float`, `cap_binding_detected: bool`,
-`cap_binding_indices: set[int]`.
+`update_stationarity_tol: float`, `multiplier_cap_binding: bool`,
+`multiplier_cap_binding_indices: list[int]`.
 
-The driver replaces the post-loop construction of the return arguments
-with a one-shot snapshot from a populated `_ALMOuterIterationResult`
-chain. No new mutable structures are introduced; all carriers are
+The driver now carries scalar continuation state through result
+dataclasses while `ALMRunState` remains the per-call mutable accumulator
+for `x`, history, trust radius, and cap-binding bookkeeping. No new
+module-level mutable structures are introduced; the result carriers are
 frozen.
 
 ## Execution Plan
@@ -584,8 +583,8 @@ multiplier-cap tracking is unchanged in the
 
 ### Phase 4: Extract `_run_alm_continuation_step` And `_run_alm_outer_iteration`
 
-- [ ] Add `_ALMContinuationStepResult` and `_ALMOuterIterationResult`.
-- [ ] Add `_run_alm_continuation_step`. Move the body of the
+- [x] Add `_ALMContinuationStepResult` and `_ALMOuterIterationResult`.
+- [x] Add `_run_alm_continuation_step`. Move the body of the
   continuation loop currently spanning
   `alm_utils.py:3052-3966`. Within the helper:
   - Reuse `_attach_alm_constraint_metadata` and
@@ -606,26 +605,26 @@ multiplier-cap tracking is unchanged in the
   - The penalty-increase branches at the bottom return
     `decision=_ALMContinuationDecision.BREAK_OUTER` plus the optional penalty-cap
     short-circuit return.
-- [ ] Add `_run_alm_outer_iteration` owning the single-iteration
+- [x] Add `_run_alm_outer_iteration` owning the single-iteration
   driver: the `outer_state_callback` invocation, the continuation
   `for` loop dispatching into `_run_alm_continuation_step`, and the
   decision propagation that maps a step result into one of three
   outer-level decisions: `next_outer`, `return`, or stay-in-loop
   (handled internally by the continuation `for`).
-- [ ] Replace the outer `for outer_iteration in range(...)` body in
+- [x] Replace the outer `for outer_iteration in range(...)` body in
   `_minimize_alm_impl` with a call to
   `_run_alm_outer_iteration` per iteration plus the existing
   `is_final_outer` exit check at `alm_utils.py:3968-3969`.
-- [ ] Flip the
+- [x] Flip the
   `test_minimize_alm_impl_state_carriers_exist` test from Phase 0
   to a green assertion.
-- [ ] Direct-helper unit tests for the continuation-step helper
-  cover one observable arm each, replicating the Phase 0 stubs but
-  driving the helper directly with constructed
-  `ALMRunState` / `ALMSettings` / evaluator. The Phase 0 arm tests
-  remain in place as integration coverage; the Phase 4 helper tests
-  add direct-call coverage and assert the
-  `_ALMContinuationStepResult.decision` value.
+- [x] Direct-helper unit tests cover the committed helper contracts:
+  converged-on-entry and infeasible-stall penalty increase for the
+  continuation-step helper; return / next-outer / exhaust signaling,
+  callback ordering, and continuation-budget exhaustion for the
+  outer-iteration helper. The Phase 0 arm tests remain in place as
+  integration coverage; the Phase 4 helper tests add direct-call
+  coverage and assert the explicit decision values.
 
 Acceptance: all Phase 0 arm tests stay green;
 `_minimize_alm_impl` now reads as `validation -> normalize -> outer
@@ -633,7 +632,7 @@ loop -> failure-tail`.
 
 ### Phase 5: Driver Collapse And Span Verification
 
-- [ ] Reduce `_minimize_alm_impl` body to:
+- [x] Reduce `_minimize_alm_impl` body to:
   - one call to `_normalize_alm_run_inputs`.
   - per-call mutable state init for `history`,
     `total_inner_iterations`, `final_eval`, `last_result`,
@@ -647,10 +646,10 @@ loop -> failure-tail`.
   - the `_termination_reason_from_history` plus
     `_build_alm_failure_result_with_optional_restore` tail at
     `alm_utils.py:3974-4009`.
-- [ ] Verify with
+- [x] Verify with
   `python -c "import ast; tree = ast.parse(open('examples/single_stage_optimization/alm_utils.py').read()); n = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_minimize_alm_impl'); print(n.end_lineno - n.lineno + 1)"`
   prints `<= 500`.
-- [ ] Confirm 0 nested function definitions in
+- [x] Confirm 0 nested function definitions in
   `_minimize_alm_impl` via the same AST script.
 
 Acceptance: `tests/geo/test_alm_utils.py::AlmStructuralDebtTests::test_minimize_alm_impl_orchestrator_is_small_and_closure_free`
@@ -661,18 +660,19 @@ is green.
 - [ ] Run `code-simplifier` on touched files only:
   `examples/single_stage_optimization/alm_utils.py` and any test
   module that gained helpers in Phase 0-4. No semantic changes.
-- [ ] Update this plan with completed checkboxes, the final
+- [x] Update this plan with completed checkboxes, the final
   `_minimize_alm_impl` line span, the helper count, and the
   validation evidence block.
-- [ ] Update Backlog 5 / engineering-followup tracker entries that
+- [x] Update Backlog 5 / engineering-followup tracker entries that
   still reference the 1,040-line `_minimize_alm_impl`. Specifically,
   edit `docs/alm_backlog5_structural_debt_plan_2026-05-07.md`
   Implementation Result section and
   `docs/alm_hardening_engineering_followup_todo_2026-05-07.md`
   Backlog 5 status block.
 
-Acceptance: the trackers no longer carry stale line counts and this
-plan's checkboxes are all green.
+Acceptance: the trackers no longer carry stale line counts and the
+remaining open checkbox is the optional behavior-preserving
+simplification pass.
 
 ## Test Strategy
 
