@@ -394,14 +394,23 @@ The caller `_try_penalty_increase` at `alm_utils.py:2454` already has `penalty_u
 
 ### Backlog 5: Pre-existing structural debt
 
-**Context.** Surfaced during review but predates this hardening work. Listed for completeness; do not bundle with the closeout commits.
+**Context.** Surfaced during review but predates the original hardening work.
+Closed by the separate Backlog 5 structural refactor.
 
-- [ ] `minimize_alm` at `alm_utils.py:2009-3437` is a 1,429 line function with 15 local functions, mixing ALM orchestration, result/history construction, penalty-state transitions, best-feasible restore, and the SciPy inner-solve call boundary.
-- [ ] `Stage2ArtifactConfig` at `workflow_runner_common.py:119-219` carries 54 annotated fields spanning Stage 2 geometry, hardware/current controls, objective weights, ALM controls, basin hopping, finite-current wiring, iota mode, and target LCFS ceilings.
+- [x] `minimize_alm` is now a 32-line public entrypoint with 0 local
+  functions. The private `_minimize_alm_impl` retains the outer-loop
+  orchestration but has 0 local functions; ALM result construction, history
+  append/diagnostic emission, penalty transitions, best-feasible restore, and
+  the SciPy inner-solve attempt boundary are top-level helpers with explicit
+  state carriers.
+- [x] `Stage2ArtifactConfig` now stores 9 frozen concern objects instead of 54
+  flat dataclass fields. The existing 54-field public surface remains available
+  through read-only properties and explicit flat projection helpers.
 
 **Plan.** See `docs/alm_backlog5_structural_debt_plan_2026-05-07.md`.
 
-**Acceptance.** Tracked in the separate Backlog 5 refactor plan; out of scope for the ALM hardening cycle.
+**Acceptance.** Closed in the separate Backlog 5 refactor plan. Validation
+evidence is recorded in `docs/alm_backlog5_structural_debt_plan_2026-05-07.md`.
 
 ## Validation Runner
 

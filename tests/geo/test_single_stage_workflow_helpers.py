@@ -1,5 +1,6 @@
 from contextlib import redirect_stdout
 import hashlib
+import inspect
 import importlib.util
 import io
 import json
@@ -1445,6 +1446,127 @@ class BaselineSweepScriptTests(unittest.TestCase):
 
 
 class WorkflowRunnerCommonArtifactTests(unittest.TestCase):
+    def _make_stage2_config(self, module, output_root: Path):
+        return module.Stage2ArtifactConfig(
+            plasma_surf_filename="demo.nc",
+            output_root=output_root,
+            equilibria_dir=None,
+            tf_current_A=-8.0e4,
+            major_radius=0.976,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=100.0,
+            banana_surf_radius=0.21,
+            order=2,
+            constraint_method="alm",
+            alm_max_outer_iters=10,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            basin_hops=0,
+            basin_stepsize=0.01,
+            basin_seed=None,
+            init_only=False,
+        )
+
+    def test_stage2_alm_schema_matches_stage2_artifact_config_fields(self):
+        module = load_workflow_common_module()
+
+        stage2_suffixes = {
+            suffix for suffix, _value_type, _default in module.STAGE2_ALM_CLI_FIELDS
+        }
+        config_suffixes = {
+            field_name.removeprefix("alm_")
+            for field_name in module.stage2_artifact_config_flat_field_names()
+            if field_name.startswith("alm_")
+        }
+
+        self.assertEqual(stage2_suffixes, config_suffixes)
+        self.assertEqual(module.stage2_alm_default("curvature_smoothing"), 0.25)
+        self.assertEqual(
+            dict(
+                (suffix, default)
+                for suffix, _value_type, default in module.SINGLE_STAGE_ALM_CLI_FIELDS
+            )["curvature_smoothing"],
+            0.05,
+        )
+
+    def test_stage2_artifact_config_flat_projection_preserves_payload_shape(self):
+        module = load_workflow_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_stage2_config(module, Path(tmpdir) / "stage2")
+            flat_config = module.stage2_artifact_config_flat_dict(config)
+
+        self.assertEqual(
+            tuple(flat_config),
+            module.stage2_artifact_config_flat_field_names(),
+        )
+        self.assertEqual(len(flat_config), 54)
+        self.assertEqual(
+            module.Stage2ArtifactConfig.__slots__,
+            (
+                "_io",
+                "_geometry",
+                "_hardware",
+                "_objective_weights",
+                "_constraint_policy",
+                "_alm",
+                "_basin",
+                "_finite_current",
+                "_iota",
+            ),
+        )
+        self.assertFalse(hasattr(config, "__dict__"))
+        for field_name, value in flat_config.items():
+            self.assertEqual(value, getattr(config, field_name))
+
+    def test_stage2_artifact_path_kwargs_cover_artifact_identity_fields(self):
+        module = load_workflow_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_stage2_config(module, Path(tmpdir) / "stage2")
+            kwargs = module._stage2_artifact_path_kwargs(config)
+
+        self.assertEqual(set(kwargs), set(module.STAGE2_ARTIFACT_PATH_FIELD_NAMES))
+        for field_name in module.STAGE2_ARTIFACT_PATH_FIELD_NAMES:
+            self.assertEqual(kwargs[field_name], getattr(config, field_name))
+
+    def test_stage2_artifact_path_fields_match_local_stage2_path_signature(self):
+        module = load_workflow_common_module()
+
+        keyword_only_names = tuple(
+            name
+            for name, parameter in inspect.signature(
+                module.local_stage2_bs_path
+            ).parameters.items()
+            if parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        )
+
+        self.assertEqual(keyword_only_names, module.STAGE2_ARTIFACT_PATH_FIELD_NAMES)
+
+    def test_stage2_command_uses_stage2_alm_cli_field_metadata(self):
+        module = load_workflow_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_stage2_config(module, Path(tmpdir) / "stage2")
+            command = module.build_stage2_command(config)
+
+        expected_flags = [
+            module.alm_flag(suffix)
+            for suffix, _value_type, _default in module.STAGE2_ALM_CLI_FIELDS
+        ]
+        actual_flags = [item for item in command if item.startswith("--alm-")]
+        self.assertEqual(actual_flags, expected_flags)
+        for suffix, _value_type, _default in module.STAGE2_ALM_CLI_FIELDS:
+            flag = module.alm_flag(suffix)
+            self.assertEqual(
+                command[command.index(flag) + 1],
+                str(getattr(config, f"alm_{suffix}")),
+            )
+
     def _write_stage2_artifact_pair(
         self,
         root: Path,
@@ -1517,6 +1639,48 @@ class WorkflowRunnerCommonArtifactTests(unittest.TestCase):
 
         passed_env = run_mock.call_args.kwargs["env"]
         self.assertEqual(passed_env["ALM_PENALTY_INIT"], "999.0")
+
+    def test_run_poincare_artifact_uses_shared_subprocess_environment(self):
+        module = load_workflow_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            os.environ,
+            {"ALM_PENALTY_INIT": "999.0", "NON_ALM_MARKER": "kept"},
+            clear=False,
+        ), patch.object(module.subprocess, "run") as run_mock:
+            command = module.run_poincare_artifact(output_dir=tmpdir)
+
+        passed_env = run_mock.call_args.kwargs["env"]
+        self.assertNotIn("ALM_PENALTY_INIT", passed_env)
+        self.assertEqual(passed_env["NON_ALM_MARKER"], "kept")
+        self.assertEqual(passed_env["POINCARE_OUT_DIR"], str(Path(tmpdir).resolve()))
+        self.assertEqual(command[1], str(module.POINCARE_SCRIPT_PATH))
+
+    def test_ensure_stage2_artifact_result_reports_created_and_reused(self):
+        module = load_workflow_common_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_stage2_config(module, Path(tmpdir) / "stage2")
+            artifact_path = module.resolve_stage2_artifact_path(config)
+
+            def write_artifact(command, **kwargs):
+                del command, kwargs
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                artifact_path.write_text("{}", encoding="utf-8")
+
+            with patch.object(module, "run_command", side_effect=write_artifact) as run_mock:
+                created = module.ensure_stage2_artifact_result(config)
+
+            self.assertEqual(created.artifact_path, artifact_path)
+            self.assertFalse(created.artifact_reused)
+            run_mock.assert_called_once()
+
+            with patch.object(module, "run_command") as run_mock:
+                reused = module.ensure_stage2_artifact_result(config)
+
+            self.assertEqual(reused.artifact_path, artifact_path)
+            self.assertTrue(reused.artifact_reused)
+            run_mock.assert_not_called()
 
     def test_load_stage2_artifact_results_accepts_matching_checksum(self):
         module = load_workflow_common_module()

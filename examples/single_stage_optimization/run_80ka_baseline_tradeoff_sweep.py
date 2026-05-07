@@ -4,7 +4,6 @@ import argparse
 import json
 import math
 import sys
-from dataclasses import asdict
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -30,6 +29,7 @@ from workflow_runner_common import (  # noqa: E402
     run_command,
     single_stage_alm_flag,
     snapshot_single_results_paths,
+    stage2_artifact_config_flat_dict,
     timeout_or_none,
 )
 from banana_opt.artifact_contracts import (  # noqa: E402
@@ -386,7 +386,7 @@ def build_case_record(case_name: str, case_output_root: Path, results: dict) -> 
 def _stage2_requested_config_payload(config: Stage2ArtifactConfig) -> dict:
     return {
         key: str(value) if isinstance(value, Path) else value
-        for key, value in asdict(config).items()
+        for key, value in stage2_artifact_config_flat_dict(config).items()
     }
 
 

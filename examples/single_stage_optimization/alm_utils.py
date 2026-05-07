@@ -75,6 +75,183 @@ class ALMConstraintRoutingState:
     surrogate_max_value: float
 
 
+@dataclass
+class ALMRunState:
+    x: np.ndarray
+    total_inner_iterations: int
+    trust_radius: float | None
+    history: list[dict]
+    history_truncated_count: int
+    cap_binding_detected: bool
+    cap_binding_indices: set[int]
+    penalty_cap_reached: bool
+    penalty_cap_requested: float | None
+
+
+def _snapshot_alm_run_state(
+    *,
+    x: np.ndarray,
+    total_inner_iterations: int,
+    trust_radius: float | None,
+    history: list[dict],
+    history_truncated_count: int,
+    cap_binding_detected: bool,
+    cap_binding_indices: set[int],
+    penalty_cap_reached: bool,
+    penalty_cap_requested: float | None,
+) -> ALMRunState:
+    return ALMRunState(
+        x=x,
+        total_inner_iterations=total_inner_iterations,
+        trust_radius=trust_radius,
+        history=history,
+        history_truncated_count=history_truncated_count,
+        cap_binding_detected=cap_binding_detected,
+        cap_binding_indices=cap_binding_indices,
+        penalty_cap_reached=penalty_cap_reached,
+        penalty_cap_requested=penalty_cap_requested,
+    )
+
+
+@dataclass(frozen=True)
+class ALMFinalState:
+    success: bool
+    message: str
+    termination_reason: str
+    outer_iterations: int
+    evaluation: dict
+    multipliers: np.ndarray
+    penalty: float
+    inner_result: object
+    restored_best_feasible: bool
+    restored_best_feasible_reason: str | None
+    max_feasibility_violation: float
+    stationarity_norm: float
+    raw_stationarity_norm: float
+    kkt_stationarity_norm: float | None
+    feasibility_tolerance: float
+    stationarity_tolerance: float
+
+
+@dataclass(frozen=True)
+class ALMHistoryEntry:
+    payload: dict
+
+
+@dataclass(frozen=True)
+class ALMPenaltyIncreaseResult:
+    penalty: float
+    penalty_cap_reached: bool
+    penalty_cap_requested: float | None
+    feasible_stall_count: int
+    update_feasibility_tol: float
+    update_stationarity_tol: float
+    penalty_update_state: SimpleNamespace
+    cap_hit: bool
+    requested_penalty: float | None
+
+
+@dataclass(frozen=True)
+class ALMInnerAttemptRequest:
+    x: np.ndarray
+    current_eval: dict
+    multipliers: np.ndarray
+    penalty_argument: float
+    evaluate_problem: Callable[[np.ndarray, np.ndarray, object], dict]
+    inner_options: dict
+    settings: ALMSettings
+    continuation_iteration: int
+    trust_radius: float | None
+    current_max_feasibility_violation: float
+    update_feasibility_tol: float
+    update_stationarity_tol: float
+    effective_feasibility_tol: float
+    inner_callback: Callable[[np.ndarray], None] | None
+    constraint_names_tuple: tuple[str, ...]
+    constraint_blocks_tuple: tuple[str, ...] | None
+
+
+@dataclass(frozen=True)
+class ALMInnerAttemptResult:
+    optimizer_result: object
+    evaluation: dict
+    x: np.ndarray
+    bounds: object
+    attempts: int
+    iterations: int
+    trust_radius: float | None
+    last_inner_options: dict | None
+    last_inner_profile: str | None
+    forced_infeasible_penalty_cycle: bool
+    forced_infeasible_penalty_reason: str | None
+    forced_inner_false_success: bool
+    nonfinite_candidate_evaluation: bool
+    nonfinite_candidate_fields: list[str] | None
+
+
+@dataclass
+class _ALMInnerAttemptEvaluator:
+    request: ALMInnerAttemptRequest
+    cached_x: np.ndarray | None = None
+    cached_evaluation: dict | None = None
+
+    def fun(self, inner_x):
+        evaluation = _sanitize_nonfinite_inner_evaluation(
+            self.request.evaluate_problem(
+                inner_x,
+                self.request.multipliers,
+                self.request.penalty_argument,
+            ),
+            fallback_evaluation=self.request.current_eval,
+        )
+        self.cached_x = np.asarray(inner_x, dtype=float).copy()
+        self.cached_evaluation = evaluation
+        return float(evaluation["total"]), np.asarray(evaluation["grad"], dtype=float)
+
+    def callback(self, inner_x):
+        if self.request.inner_callback is not None:
+            self.request.inner_callback(inner_x)
+        inner_x_arr = np.asarray(inner_x, dtype=float)
+        if self.cached_x is not None and np.array_equal(inner_x_arr, self.cached_x):
+            evaluation = self.cached_evaluation
+        else:
+            evaluation = _sanitize_nonfinite_inner_evaluation(
+                self.request.evaluate_problem(
+                    inner_x_arr,
+                    self.request.multipliers,
+                    self.request.penalty_argument,
+                ),
+                fallback_evaluation=self.request.current_eval,
+            )
+        (
+            _solver_constraint_values,
+            _callback_feasibility_values,
+            _callback_dual_update_values,
+            callback_max_feasibility_violation,
+        ) = _extract_constraint_state(evaluation)
+        callback_routing_state = _constraint_routing_state(
+            evaluation,
+            self.request.multipliers,
+            self.request.penalty_argument,
+            self.request.effective_feasibility_tol,
+        )
+        (
+            _callback_raw_stationarity_norm,
+            _callback_kkt_stationarity_norm,
+            callback_stationarity_norm,
+            _callback_signal_mismatch_active,
+        ) = _stationarity_metrics(
+            evaluation,
+            callback_routing_state,
+            self.request.effective_feasibility_tol,
+        )
+        if (
+            callback_max_feasibility_violation <= self.request.effective_feasibility_tol
+            and callback_stationarity_norm <= self.request.update_stationarity_tol
+        ):
+            raise _EarlyStopInnerSolve(inner_x, evaluation)
+
+
 _UNBOUNDED_INNER_PROFILE = ALMInnerSolveProfile(
     name="unbounded",
     maxiter_cap=None,
@@ -2006,7 +2183,792 @@ def _build_constraint_metadata_tuples(
     return names_tuple, blocks_tuple
 
 
-def minimize_alm(
+def _attach_alm_constraint_metadata(
+    evaluation: dict,
+    constraint_names_tuple: tuple[str, ...],
+    constraint_blocks_tuple: tuple[str, ...] | None,
+) -> dict:
+    if constraint_blocks_tuple is None:
+        return evaluation
+    annotated = dict(evaluation)
+    annotated["constraint_names"] = constraint_names_tuple
+    annotated["constraint_blocks"] = constraint_blocks_tuple
+    return annotated
+
+
+def _append_alm_history_entry(
+    history: list[dict],
+    entry: ALMHistoryEntry,
+    history_max_entries: int | None,
+    history_truncated_count: int,
+) -> tuple[dict, int]:
+    history.append(entry.payload)
+    if history_max_entries is not None:
+        excess_entries = len(history) - int(history_max_entries)
+        if excess_entries > 0:
+            history_truncated_count += excess_entries
+            del history[:excess_entries]
+    return history[-1], history_truncated_count
+
+
+def _attach_alm_history_diagnostics(
+    entry: dict,
+    evaluation: dict,
+    multipliers_state: np.ndarray,
+    penalty_state,
+    constraint_names: Sequence[str],
+    solver_values: np.ndarray,
+    feasibility_state: np.ndarray,
+    routing_state: ALMConstraintRoutingState,
+    feasibility_gate: float,
+) -> None:
+    entry[_HISTORY_DIAGNOSTICS_SOURCE_KEY] = _constraint_history_diagnostics_source(
+        evaluation,
+        multipliers_state,
+        penalty_state,
+        constraint_names,
+        solver_values,
+        feasibility_state,
+        routing_state,
+        feasibility_gate,
+    )
+
+
+def _emit_alm_history_snapshot(
+    history_callback: Callable[[list[dict], dict, np.ndarray, float], None] | None,
+    history: list[dict],
+    latest_entry: dict,
+    multipliers: np.ndarray,
+    penalty: float,
+) -> None:
+    if history_callback is None:
+        return
+    # Callback contract: history is borrowed/read-only ALM state. The latest
+    # entry and multipliers are owned snapshots for checkpoint writers that
+    # persist the current iteration.
+    history_callback(
+        history,
+        _snapshot_history_entry(latest_entry),
+        multipliers.copy(),
+        float(penalty),
+    )
+
+
+def _evaluate_alm_penalty_state(
+    *,
+    evaluate_problem: Callable[[np.ndarray, np.ndarray, object], dict],
+    x: np.ndarray,
+    multipliers: np.ndarray,
+    penalty: float,
+    feasibility_gate: float,
+    constraint_names_tuple: tuple[str, ...],
+    constraint_blocks_tuple: tuple[str, ...] | None,
+) -> SimpleNamespace:
+    penalty_argument = float(penalty)
+    evaluation = _attach_alm_constraint_metadata(
+        evaluate_problem(x, multipliers, penalty_argument),
+        constraint_names_tuple,
+        constraint_blocks_tuple,
+    )
+    _require_finite_evaluation(
+        evaluation,
+        context="ALM penalty update evaluation",
+    )
+    (
+        solver_values,
+        feasibility_state,
+        _dual_update_state,
+        max_violation,
+    ) = _extract_constraint_state(evaluation)
+    routing_state = _constraint_routing_state(
+        evaluation,
+        multipliers,
+        penalty_argument,
+        feasibility_gate,
+    )
+    (
+        raw_stationarity,
+        kkt_stationarity,
+        stationarity,
+        signal_mismatch,
+    ) = _stationarity_metrics(evaluation, routing_state, feasibility_gate)
+    return SimpleNamespace(
+        penalty_argument=penalty_argument,
+        evaluation=evaluation,
+        solver_values=solver_values,
+        feasibility_state=feasibility_state,
+        max_violation=max_violation,
+        routing_state=routing_state,
+        raw_stationarity=raw_stationarity,
+        kkt_stationarity=kkt_stationarity,
+        stationarity=stationarity,
+        signal_mismatch=signal_mismatch,
+    )
+
+
+def _refresh_alm_history_for_penalty_update(
+    entry: dict,
+    updated_state,
+    *,
+    feasibility_gate: float,
+    penalty: float,
+    constraint_names: Sequence[str],
+    settings: ALMSettings,
+    update_feasibility_tol: float,
+    update_stationarity_tol: float,
+    multipliers: np.ndarray,
+) -> None:
+    routing_state = updated_state.routing_state
+    signal_state = routing_state.signal_state
+    entry["penalty"] = float(penalty)
+    entry["penalty_values"] = _as_float_list(
+        _penalty_values(updated_state.penalty_argument, len(constraint_names))
+    )
+    entry["block_penalties"] = None
+    entry["max_violation"] = float(updated_state.max_violation)
+    entry["stationarity_norm"] = float(updated_state.stationarity)
+    entry["raw_stationarity_norm"] = float(updated_state.raw_stationarity)
+    entry["kkt_stationarity_norm"] = (
+        None
+        if updated_state.kkt_stationarity is None
+        else float(updated_state.kkt_stationarity)
+    )
+    entry["constraint_values"] = [
+        float(value) for value in updated_state.feasibility_state
+    ]
+    entry["solver_constraint_values"] = [
+        float(value) for value in updated_state.solver_values
+    ]
+    entry["hard_signed_constraint_values"] = [
+        float(value) for value in signal_state.hard_signed_constraint_values
+    ]
+    entry["hard_violation_values"] = [
+        float(value) for value in signal_state.hard_violation_values
+    ]
+    entry["surrogate_signed_constraint_values"] = [
+        float(value) for value in signal_state.surrogate_signed_constraint_values
+    ]
+    entry["hard_max_violation"] = float(routing_state.hard_max_violation)
+    entry["surrogate_max_value"] = float(routing_state.surrogate_max_value)
+    entry["hard_positive_shift_zero"] = bool(routing_state.hard_positive_shift_zero)
+    entry["signal_mismatch_active"] = bool(updated_state.signal_mismatch)
+    entry["feasibility_tolerance"] = float(update_feasibility_tol)
+    entry["effective_feasibility_tolerance"] = float(
+        _effective_feasibility_gate(settings, update_feasibility_tol)
+    )
+    entry["stationarity_tolerance"] = float(update_stationarity_tol)
+    entry.update(_conditioning_metrics(updated_state.evaluation))
+    _attach_alm_history_diagnostics(
+        entry,
+        updated_state.evaluation,
+        multipliers,
+        updated_state.penalty_argument,
+        constraint_names,
+        updated_state.solver_values,
+        updated_state.feasibility_state,
+        routing_state,
+        feasibility_gate,
+    )
+
+
+def _apply_alm_penalty_increase(
+    *,
+    settings: ALMSettings,
+    evaluate_problem: Callable[[np.ndarray, np.ndarray, object], dict],
+    x: np.ndarray,
+    multipliers: np.ndarray,
+    penalty: float,
+    history_entry: dict,
+    trust_radius: float | None,
+    update_feasibility_tol: float,
+    update_stationarity_tol: float,
+    constraint_names: Sequence[str],
+    constraint_names_tuple: tuple[str, ...],
+    constraint_blocks_tuple: tuple[str, ...] | None,
+    history_callback: Callable[[list[dict], dict, np.ndarray, float], None] | None,
+    history: list[dict],
+) -> ALMPenaltyIncreaseResult:
+    next_penalty, cap_hit, requested_penalty = _next_penalty(
+        penalty,
+        penalty_scale=settings.penalty_scale,
+        penalty_max=settings.penalty_max,
+    )
+    if cap_hit:
+        history_entry["action"] = "penalty_cap_reached"
+        history_entry["trust_radius"] = trust_radius
+    next_feasibility_tol = min(
+        update_feasibility_tol,
+        _penalty_schedule_tolerance(settings.feasibility_tol, next_penalty),
+    )
+    next_stationarity_tol = min(
+        update_stationarity_tol,
+        _penalty_schedule_tolerance(settings.stationarity_tol, next_penalty),
+    )
+    penalty_update_state = _evaluate_alm_penalty_state(
+        evaluate_problem=evaluate_problem,
+        x=x,
+        multipliers=multipliers,
+        penalty=next_penalty,
+        feasibility_gate=next_feasibility_tol,
+        constraint_names_tuple=constraint_names_tuple,
+        constraint_blocks_tuple=constraint_blocks_tuple,
+    )
+    _refresh_alm_history_for_penalty_update(
+        history_entry,
+        penalty_update_state,
+        feasibility_gate=next_feasibility_tol,
+        penalty=next_penalty,
+        constraint_names=constraint_names,
+        settings=settings,
+        update_feasibility_tol=next_feasibility_tol,
+        update_stationarity_tol=next_stationarity_tol,
+        multipliers=multipliers,
+    )
+    if cap_hit:
+        _emit_alm_history_snapshot(
+            history_callback,
+            history,
+            history_entry,
+            multipliers,
+            next_penalty,
+        )
+    return ALMPenaltyIncreaseResult(
+        penalty=next_penalty,
+        penalty_cap_reached=bool(cap_hit),
+        penalty_cap_requested=requested_penalty if cap_hit else None,
+        feasible_stall_count=0,
+        update_feasibility_tol=next_feasibility_tol,
+        update_stationarity_tol=next_stationarity_tol,
+        penalty_update_state=penalty_update_state,
+        cap_hit=bool(cap_hit),
+        requested_penalty=requested_penalty,
+    )
+
+
+def _build_alm_result(
+    *,
+    settings: ALMSettings,
+    constraint_names: Sequence[str],
+    run_state: ALMRunState,
+    final_state: ALMFinalState,
+):
+    penalty_argument = float(final_state.penalty)
+    (
+        solver_constraint_values,
+        feasibility_values,
+        _dual_update_values,
+        _max_feasibility_violation,
+    ) = _extract_constraint_state(final_state.evaluation)
+    routing_state = _constraint_routing_state(
+        final_state.evaluation,
+        final_state.multipliers,
+        penalty_argument,
+        final_state.feasibility_tolerance,
+    )
+    raw_constraint_values = _explicit_raw_signed_constraint_values(
+        final_state.evaluation
+    )
+    raw_solver_constraint_values = _optional_float_array(
+        final_state.evaluation,
+        "raw_solver_constraint_values",
+        raw_constraint_values,
+    )
+    normalized_signed_constraint_values = _optional_float_list(
+        final_state.evaluation,
+        "normalized_signed_constraint_values",
+        solver_constraint_values,
+    )
+    normalized_feasibility_values = _optional_float_list(
+        final_state.evaluation,
+        "normalized_feasibility_values",
+        feasibility_values,
+    )
+    raw_constraint_values_list = _optional_array_to_float_list(raw_constraint_values)
+    raw_solver_constraint_values_list = _optional_array_to_float_list(
+        raw_solver_constraint_values
+    )
+    inner_optimizer_success = None
+    inner_optimizer_message = None
+    if final_state.inner_result is not None:
+        inner_optimizer_success = bool(
+            getattr(final_state.inner_result, "success", False)
+        )
+        inner_optimizer_message = str(getattr(final_state.inner_result, "message", ""))
+    for history_index, entry in enumerate(run_state.history):
+        run_state.history[history_index] = _materialize_history_entry_diagnostics(entry)
+    conditioning = _conditioning_metrics(final_state.evaluation)
+    alm_summary = _alm_summary(
+        termination_reason=final_state.termination_reason,
+        evaluation=final_state.evaluation,
+        multipliers=final_state.multipliers,
+        penalty=penalty_argument,
+        constraint_names=constraint_names,
+        routing_state=routing_state,
+        feasibility_values=feasibility_values,
+        solver_constraint_values=solver_constraint_values,
+        final_stationarity_norm=final_state.stationarity_norm,
+        final_feasibility_tolerance=final_state.feasibility_tolerance,
+        multiplier_cap_binding=run_state.cap_binding_detected,
+        penalty_cap_reached=run_state.penalty_cap_reached,
+        history=run_state.history,
+        history_truncated_count=run_state.history_truncated_count,
+    )
+    return SimpleNamespace(
+        alm_schema_version=ALM_SCHEMA_VERSION,
+        alm_summary=alm_summary,
+        x=run_state.x.copy(),
+        success=bool(final_state.success),
+        message=final_state.message,
+        termination_reason=str(final_state.termination_reason),
+        nit=run_state.total_inner_iterations,
+        outer_iterations=int(final_state.outer_iterations),
+        constraint_names=list(constraint_names),
+        constraint_values=[float(value) for value in feasibility_values],
+        solver_constraint_values=[float(value) for value in solver_constraint_values],
+        normalized_constraint_values=normalized_signed_constraint_values,
+        normalized_solver_constraint_values=_as_float_list(solver_constraint_values),
+        normalized_signed_constraint_values=normalized_signed_constraint_values,
+        normalized_feasibility_values=normalized_feasibility_values,
+        raw_constraint_values=raw_constraint_values_list,
+        raw_solver_constraint_values=raw_solver_constraint_values_list,
+        hard_signed_constraint_values=[
+            float(value)
+            for value in routing_state.signal_state.hard_signed_constraint_values
+        ],
+        hard_violation_values=[
+            float(value) for value in routing_state.signal_state.hard_violation_values
+        ],
+        surrogate_signed_constraint_values=[
+            float(value)
+            for value in routing_state.signal_state.surrogate_signed_constraint_values
+        ],
+        raw_hard_signed_constraint_values=_optional_float_list(
+            final_state.evaluation,
+            "raw_hard_signed_constraint_values",
+            None,
+        ),
+        raw_hard_violation_values=_optional_float_list(
+            final_state.evaluation,
+            "raw_hard_violation_values",
+            None,
+        ),
+        raw_surrogate_signed_constraint_values=_optional_float_list(
+            final_state.evaluation,
+            "raw_surrogate_signed_constraint_values",
+            None,
+        ),
+        raw_dual_update_values=_optional_float_list(
+            final_state.evaluation,
+            "raw_dual_update_values",
+            None,
+        ),
+        raw_hard_dual_update_values=_optional_float_list(
+            final_state.evaluation,
+            "raw_hard_dual_update_values",
+            None,
+        ),
+        constraint_scales=_optional_float_list(
+            final_state.evaluation,
+            "constraint_scales",
+            None,
+        ),
+        constraint_blocks=_optional_string_list(
+            final_state.evaluation,
+            "constraint_blocks",
+        ),
+        constraint_scale_sources=_optional_string_list(
+            final_state.evaluation,
+            "constraint_scale_sources",
+        ),
+        raw_dual_estimates=_raw_dual_estimates(
+            final_state.multipliers,
+            final_state.evaluation,
+        ),
+        multiplier_interpretation=_multiplier_interpretation(final_state.evaluation),
+        multipliers=[float(value) for value in final_state.multipliers],
+        penalty=_representative_penalty(penalty_argument),
+        penalty_values=_as_float_list(
+            _penalty_values(penalty_argument, len(constraint_names))
+        ),
+        block_penalties=None,
+        block_penalty_cap_reached=None,
+        block_penalty_cap_requested=None,
+        trust_radius=run_state.trust_radius,
+        history=run_state.history,
+        inner_result=final_state.inner_result,
+        optimizer_success=inner_optimizer_success,
+        optimizer_message=inner_optimizer_message,
+        converged_to_tolerances=bool(final_state.success),
+        restored_best_feasible=bool(final_state.restored_best_feasible),
+        restored_best_feasible_reason=final_state.restored_best_feasible_reason,
+        final_max_feasibility_violation=float(final_state.max_feasibility_violation),
+        final_stationarity_norm=float(final_state.stationarity_norm),
+        final_raw_stationarity_norm=float(final_state.raw_stationarity_norm),
+        final_kkt_stationarity_norm=(
+            None
+            if final_state.kkt_stationarity_norm is None
+            else float(final_state.kkt_stationarity_norm)
+        ),
+        final_augmented_gradient_norm=alm_summary["augmented_gradient_norm"],
+        final_surrogate_kkt_stationarity_norm=alm_summary[
+            "surrogate_kkt_stationarity_norm"
+        ],
+        final_feasibility_tolerance=float(final_state.feasibility_tolerance),
+        final_stationarity_tolerance=float(final_state.stationarity_tolerance),
+        final_objective=float(final_state.evaluation["total"]),
+        final_base_objective=conditioning["conditioning_base_objective"],
+        final_penalty_objective=conditioning["conditioning_penalty_objective"],
+        final_penalty_objective_ratio=conditioning[
+            "conditioning_penalty_objective_ratio"
+        ],
+        final_total_grad_norm=conditioning["conditioning_total_grad_norm"],
+        final_base_grad_norm=conditioning["conditioning_base_grad_norm"],
+        final_penalty_grad_norm=conditioning["conditioning_penalty_grad_norm"],
+        final_penalty_gradient_norm=conditioning["penalty_gradient_norm"],
+        final_penalty_grad_ratio=conditioning["conditioning_penalty_grad_ratio"],
+        final_hard_max_violation=float(routing_state.hard_max_violation),
+        final_surrogate_max_value=float(routing_state.surrogate_max_value),
+        hard_positive_shift_zero=bool(routing_state.hard_positive_shift_zero),
+        signal_mismatch_active=bool(routing_state.signal_mismatch_active),
+        multiplier_cap_binding=bool(run_state.cap_binding_detected),
+        multiplier_cap_binding_indices=sorted(run_state.cap_binding_indices),
+        penalty_cap_reached=bool(run_state.penalty_cap_reached),
+        penalty_max=None if settings.penalty_max is None else float(settings.penalty_max),
+        penalty_cap_requested=(
+            None
+            if run_state.penalty_cap_requested is None
+            else float(run_state.penalty_cap_requested)
+        ),
+    )
+
+
+def _restore_alm_best_feasible_on_failure(
+    *,
+    current_x: np.ndarray,
+    best_feasible: ALMFeasibleIncumbent | None,
+    settings: ALMSettings,
+    restore_incumbent_state_fn: Callable[[object], None] | None,
+    evaluation: dict,
+    multipliers_state: np.ndarray,
+    penalty_state: float,
+    inner_result,
+    final_max_feasibility_violation: float,
+) -> SimpleNamespace:
+    restored_best_feasible = False
+    restored_best_feasible_reason = None
+    restored_evaluation = evaluation
+    restored_x = current_x.copy()
+    restored_multipliers_state = np.asarray(multipliers_state, dtype=float).copy()
+    restored_penalty_state = float(penalty_state)
+    restored_inner_result = inner_result
+
+    restore_reasons: list[str] = []
+    if best_feasible is not None:
+        if final_max_feasibility_violation > settings.feasibility_tol:
+            restore_reasons.append("final_iterate_infeasible")
+        if (
+            _incumbent_objective_value(restored_evaluation)
+            > _incumbent_objective_value(best_feasible.evaluation)
+        ):
+            restore_reasons.append("final_iterate_worse_than_best_feasible")
+
+    if restore_reasons:
+        restored_best_feasible = True
+        restored_best_feasible_reason = ",".join(restore_reasons)
+        restored_x = best_feasible.x.copy()
+        restored_evaluation = best_feasible.evaluation
+        restored_multipliers_state = best_feasible.multipliers.copy()
+        restored_penalty_state = best_feasible.penalty
+        restored_inner_result = best_feasible.inner_result
+        if (
+            restore_incumbent_state_fn is not None
+            and best_feasible.incumbent_state is not None
+        ):
+            restore_incumbent_state_fn(best_feasible.incumbent_state)
+
+    return SimpleNamespace(
+        x=restored_x,
+        evaluation=restored_evaluation,
+        multipliers_state=restored_multipliers_state,
+        penalty_state=restored_penalty_state,
+        inner_result=restored_inner_result,
+        restored_best_feasible=bool(restored_best_feasible),
+        restored_best_feasible_reason=restored_best_feasible_reason,
+    )
+
+
+def _build_alm_failure_result_with_optional_restore(
+    *,
+    settings: ALMSettings,
+    constraint_names: Sequence[str],
+    run_state: ALMRunState,
+    last_outer_iteration: int,
+    best_feasible: ALMFeasibleIncumbent | None,
+    restore_incumbent_state_fn: Callable[[object], None] | None,
+    termination_reason: str,
+    message_prefix: str,
+    evaluation: dict,
+    multipliers_state: np.ndarray,
+    penalty_state: float,
+    inner_result,
+    final_max_feasibility_violation: float,
+    restored_message_prefix: str | None = None,
+    restored_termination_reason: str | None = None,
+) -> SimpleNamespace:
+    restored_state = _restore_alm_best_feasible_on_failure(
+        current_x=run_state.x,
+        best_feasible=best_feasible,
+        settings=settings,
+        restore_incumbent_state_fn=restore_incumbent_state_fn,
+        evaluation=evaluation,
+        multipliers_state=multipliers_state,
+        penalty_state=penalty_state,
+        inner_result=inner_result,
+        final_max_feasibility_violation=final_max_feasibility_violation,
+    )
+    restored_routing_state = _constraint_routing_state(
+        restored_state.evaluation,
+        restored_state.multipliers_state,
+        restored_state.penalty_state,
+        settings.feasibility_tol,
+    )
+    (
+        restored_raw_stationarity_norm,
+        restored_kkt_stationarity_norm,
+        restored_stationarity_norm,
+        _restored_signal_mismatch_active,
+    ) = _stationarity_metrics(
+        restored_state.evaluation,
+        restored_routing_state,
+        settings.feasibility_tol,
+    )
+    restored_max_feasibility_violation = _extract_constraint_state(
+        restored_state.evaluation
+    )[3]
+    effective_message_prefix = message_prefix
+    effective_termination_reason = termination_reason
+    if restored_state.restored_best_feasible:
+        if restored_message_prefix is not None:
+            effective_message_prefix = restored_message_prefix
+        if restored_termination_reason is not None:
+            effective_termination_reason = restored_termination_reason
+    message = (
+        f"{effective_message_prefix}: "
+        f"max_violation={restored_max_feasibility_violation:.3e}, "
+        f"stationarity={restored_stationarity_norm:.3e}"
+    )
+    restored_run_state = ALMRunState(
+        x=restored_state.x,
+        total_inner_iterations=run_state.total_inner_iterations,
+        trust_radius=run_state.trust_radius,
+        history=run_state.history,
+        history_truncated_count=run_state.history_truncated_count,
+        cap_binding_detected=run_state.cap_binding_detected,
+        cap_binding_indices=run_state.cap_binding_indices,
+        penalty_cap_reached=run_state.penalty_cap_reached,
+        penalty_cap_requested=run_state.penalty_cap_requested,
+    )
+    return _build_alm_result(
+        settings=settings,
+        constraint_names=constraint_names,
+        run_state=restored_run_state,
+        final_state=ALMFinalState(
+            success=False,
+            message=message,
+            termination_reason=effective_termination_reason,
+            outer_iterations=last_outer_iteration,
+            evaluation=restored_state.evaluation,
+            multipliers=restored_state.multipliers_state,
+            penalty=restored_state.penalty_state,
+            inner_result=restored_state.inner_result,
+            restored_best_feasible=restored_state.restored_best_feasible,
+            restored_best_feasible_reason=restored_state.restored_best_feasible_reason,
+            max_feasibility_violation=restored_max_feasibility_violation,
+            stationarity_norm=restored_stationarity_norm,
+            raw_stationarity_norm=restored_raw_stationarity_norm,
+            kkt_stationarity_norm=restored_kkt_stationarity_norm,
+            feasibility_tolerance=settings.feasibility_tol,
+            stationarity_tolerance=settings.stationarity_tol,
+        ),
+    )
+
+
+def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptResult:
+    evaluator = _ALMInnerAttemptEvaluator(request)
+    accepted_result = None
+    accepted_eval = None
+    accepted_x = None
+    accepted_bounds = None
+    attempts = 0
+    attempt_iterations = 0
+    attempt_radius = request.trust_radius
+    last_attempt_result = None
+    current_feasible_enough = (
+        request.current_max_feasibility_violation <= request.effective_feasibility_tol
+    )
+    last_inner_options = None
+    last_inner_profile = None
+    forced_infeasible_penalty_cycle = False
+    forced_infeasible_penalty_reason = None
+    forced_inner_false_success = False
+    nonfinite_candidate_evaluation = False
+    nonfinite_candidate_fields: list[str] | None = None
+    trust_radius = request.trust_radius
+
+    for attempt_index in range(1, request.settings.max_inner_attempts + 1):
+        attempts = attempt_index
+        current_inner_profile = _select_inner_solve_profile(
+            trust_radius=attempt_radius,
+            continuation_iteration=request.continuation_iteration,
+            feasible_enough=current_feasible_enough,
+        )
+        inner_attempt_options = _build_inner_options(
+            request.inner_options,
+            request.update_stationarity_tol,
+            profile=current_inner_profile,
+        )
+        attempt_bounds = _build_box_bounds(request.x, attempt_radius)
+        last_inner_options = dict(inner_attempt_options)
+        last_inner_profile = current_inner_profile.name
+        try:
+            result = minimize(
+                evaluator.fun,
+                request.x,
+                jac=True,
+                method="L-BFGS-B",
+                bounds=attempt_bounds,
+                callback=evaluator.callback,
+                options=inner_attempt_options,
+            )
+            candidate_x = np.asarray(result.x, dtype=float).copy()
+            if evaluator.cached_x is not None and np.array_equal(
+                candidate_x,
+                evaluator.cached_x,
+            ):
+                candidate_eval = evaluator.cached_evaluation
+            else:
+                candidate_eval = _sanitize_nonfinite_inner_evaluation(
+                    request.evaluate_problem(
+                        candidate_x,
+                        request.multipliers,
+                        request.penalty_argument,
+                    ),
+                    fallback_evaluation=request.current_eval,
+                )
+        except _EarlyStopInnerSolve as early_stop:
+            result = SimpleNamespace(
+                x=early_stop.x,
+                nit=1,
+                success=True,
+                message=str(early_stop),
+            )
+            candidate_x = early_stop.x
+            candidate_eval = early_stop.evaluation
+        last_attempt_result = result
+        attempt_iterations += int(getattr(result, "nit", 0))
+        moved_norm = float(np.linalg.norm(candidate_x - request.x))
+        move_tolerance = _move_tolerance(request.x)
+        if candidate_eval.get("nonfinite_evaluation"):
+            nonfinite_candidate_evaluation = True
+            nonfinite_candidate_fields = list(candidate_eval.get("nonfinite_fields", []))
+        acceptable = _candidate_is_acceptable(
+            request.current_eval,
+            candidate_eval,
+            result,
+            moved_norm,
+            request.update_feasibility_tol,
+        )
+        (
+            infeasible_inner_stall,
+            inner_false_success,
+            inner_stall_reason,
+        ) = _classify_infeasible_inner_stall(
+            request.current_eval,
+            candidate_eval,
+            result,
+            moved_norm,
+            move_tolerance,
+            request.effective_feasibility_tol,
+        )
+        if acceptable and not infeasible_inner_stall:
+            accepted_result = result
+            accepted_eval = _attach_alm_constraint_metadata(
+                candidate_eval,
+                request.constraint_names_tuple,
+                request.constraint_blocks_tuple,
+            )
+            accepted_x = candidate_x
+            accepted_bounds = attempt_bounds
+            if attempt_radius is not None:
+                if moved_norm >= 0.5 * float(attempt_radius):
+                    trust_radius = float(attempt_radius) * float(
+                        request.settings.trust_radius_grow
+                    )
+                else:
+                    trust_radius = float(attempt_radius)
+            break
+        if infeasible_inner_stall:
+            accepted_result = result
+            accepted_eval = request.current_eval
+            accepted_x = request.x.copy()
+            accepted_bounds = attempt_bounds
+            forced_infeasible_penalty_cycle = True
+            forced_infeasible_penalty_reason = inner_stall_reason
+            forced_inner_false_success = bool(inner_false_success)
+            if attempt_radius is not None:
+                trust_radius = float(attempt_radius)
+            break
+        if attempt_radius is None:
+            accepted_result = result
+            accepted_eval = request.current_eval
+            accepted_x = request.x.copy()
+            accepted_bounds = attempt_bounds
+            break
+        next_radius = max(
+            request.settings.trust_radius_min,
+            float(attempt_radius) * float(request.settings.trust_radius_shrink),
+        )
+        exhausted_attempts = attempt_index == request.settings.max_inner_attempts
+        if attempt_radius <= request.settings.trust_radius_min or exhausted_attempts:
+            accepted_result = result
+            accepted_eval = request.current_eval
+            accepted_x = request.x.copy()
+            accepted_bounds = attempt_bounds
+            trust_radius = float(attempt_radius)
+            break
+        attempt_radius = float(next_radius)
+        trust_radius = float(attempt_radius)
+        continue
+
+    if accepted_result is None or accepted_eval is None or accepted_x is None:
+        if last_attempt_result is None:
+            raise RuntimeError(
+                "ALM failed before any inner optimization result was produced."
+            )
+        accepted_result = last_attempt_result
+        accepted_eval = request.current_eval
+        accepted_x = request.x.copy()
+        accepted_bounds = None
+
+    return ALMInnerAttemptResult(
+        optimizer_result=accepted_result,
+        evaluation=accepted_eval,
+        x=accepted_x,
+        bounds=accepted_bounds,
+        attempts=attempts,
+        iterations=attempt_iterations,
+        trust_radius=trust_radius,
+        last_inner_options=last_inner_options,
+        last_inner_profile=last_inner_profile,
+        forced_infeasible_penalty_cycle=forced_infeasible_penalty_cycle,
+        forced_infeasible_penalty_reason=forced_infeasible_penalty_reason,
+        forced_inner_false_success=forced_inner_false_success,
+        nonfinite_candidate_evaluation=nonfinite_candidate_evaluation,
+        nonfinite_candidate_fields=nonfinite_candidate_fields,
+    )
+
+
+def _minimize_alm_impl(
     x0,
     constraint_names: Sequence[str],
     evaluate_problem: Callable[[np.ndarray, np.ndarray, object], dict],
@@ -2080,547 +3042,6 @@ def minimize_alm(
     )
     best_feasible: ALMFeasibleIncumbent | None = None
 
-    def _current_penalty_argument() -> float:
-        return float(penalty)
-
-    def _attach_constraint_metadata(evaluation: dict) -> dict:
-        if _constraint_blocks_tuple is None:
-            return evaluation
-        annotated = dict(evaluation)
-        annotated["constraint_names"] = _constraint_names_tuple
-        annotated["constraint_blocks"] = _constraint_blocks_tuple
-        return annotated
-
-    def _evaluate_current_penalty_state(feasibility_gate: float) -> SimpleNamespace:
-        penalty_argument = _current_penalty_argument()
-        evaluation = _attach_constraint_metadata(
-            evaluate_problem(x, multipliers, penalty_argument)
-        )
-        _require_finite_evaluation(
-            evaluation,
-            context="ALM penalty update evaluation",
-        )
-        (
-            solver_values,
-            feasibility_state,
-            _dual_update_state,
-            max_violation,
-        ) = _extract_constraint_state(evaluation)
-        routing_state = _constraint_routing_state(
-            evaluation,
-            multipliers,
-            penalty_argument,
-            feasibility_gate,
-        )
-        (
-            raw_stationarity,
-            kkt_stationarity,
-            stationarity,
-            signal_mismatch,
-        ) = _stationarity_metrics(evaluation, routing_state, feasibility_gate)
-        return SimpleNamespace(
-            penalty_argument=penalty_argument,
-            evaluation=evaluation,
-            solver_values=solver_values,
-            feasibility_state=feasibility_state,
-            max_violation=max_violation,
-            routing_state=routing_state,
-            raw_stationarity=raw_stationarity,
-            kkt_stationarity=kkt_stationarity,
-            stationarity=stationarity,
-            signal_mismatch=signal_mismatch,
-        )
-
-    def _refresh_history_for_penalty_update(
-        entry: dict,
-        updated_state,
-        feasibility_gate: float,
-    ) -> None:
-        routing_state = updated_state.routing_state
-        signal_state = routing_state.signal_state
-        entry["penalty"] = float(penalty)
-        entry["penalty_values"] = _as_float_list(
-            _penalty_values(updated_state.penalty_argument, len(constraint_names))
-        )
-        entry["block_penalties"] = None
-        entry["max_violation"] = float(updated_state.max_violation)
-        entry["stationarity_norm"] = float(updated_state.stationarity)
-        entry["raw_stationarity_norm"] = float(updated_state.raw_stationarity)
-        entry["kkt_stationarity_norm"] = (
-            None
-            if updated_state.kkt_stationarity is None
-            else float(updated_state.kkt_stationarity)
-        )
-        entry["constraint_values"] = [
-            float(value) for value in updated_state.feasibility_state
-        ]
-        entry["solver_constraint_values"] = [
-            float(value) for value in updated_state.solver_values
-        ]
-        entry["hard_signed_constraint_values"] = [
-            float(value) for value in signal_state.hard_signed_constraint_values
-        ]
-        entry["hard_violation_values"] = [
-            float(value) for value in signal_state.hard_violation_values
-        ]
-        entry["surrogate_signed_constraint_values"] = [
-            float(value) for value in signal_state.surrogate_signed_constraint_values
-        ]
-        entry["hard_max_violation"] = float(routing_state.hard_max_violation)
-        entry["surrogate_max_value"] = float(routing_state.surrogate_max_value)
-        entry["hard_positive_shift_zero"] = bool(routing_state.hard_positive_shift_zero)
-        entry["signal_mismatch_active"] = bool(updated_state.signal_mismatch)
-        entry["feasibility_tolerance"] = float(update_feasibility_tol)
-        entry["effective_feasibility_tolerance"] = float(
-            _effective_feasibility_gate(settings, update_feasibility_tol)
-        )
-        entry["stationarity_tolerance"] = float(update_stationarity_tol)
-        entry.update(_conditioning_metrics(updated_state.evaluation))
-        _attach_history_diagnostics(
-            entry,
-            updated_state.evaluation,
-            multipliers,
-            updated_state.penalty_argument,
-            updated_state.solver_values,
-            updated_state.feasibility_state,
-            routing_state,
-            feasibility_gate,
-        )
-
-    def _publish_current_penalty_state(
-        entry: dict,
-        feasibility_gate: float,
-    ) -> SimpleNamespace:
-        nonlocal final_eval, final_multipliers, final_penalty
-        updated_state = _evaluate_current_penalty_state(feasibility_gate)
-        _refresh_history_for_penalty_update(entry, updated_state, feasibility_gate)
-        final_eval = updated_state.evaluation
-        final_multipliers = multipliers.copy()
-        final_penalty = penalty
-        return updated_state
-
-    def _current_penalty_scale() -> float:
-        return float(settings.penalty_scale)
-
-    def _append_history_entry(entry: dict) -> dict:
-        nonlocal history_truncated_count
-        history.append(entry)
-        if settings.history_max_entries is not None:
-            excess_entries = len(history) - int(settings.history_max_entries)
-            if excess_entries > 0:
-                history_truncated_count += excess_entries
-                del history[:excess_entries]
-        return history[-1]
-
-    def _attach_history_diagnostics(
-        entry: dict,
-        evaluation: dict,
-        multipliers_state: np.ndarray,
-        penalty_state,
-        solver_values: np.ndarray,
-        feasibility_state: np.ndarray,
-        routing_state: ALMConstraintRoutingState,
-        feasibility_gate: float,
-    ) -> None:
-        entry[_HISTORY_DIAGNOSTICS_SOURCE_KEY] = _constraint_history_diagnostics_source(
-            evaluation,
-            multipliers_state,
-            penalty_state,
-            constraint_names,
-            solver_values,
-            feasibility_state,
-            routing_state,
-            feasibility_gate,
-        )
-
-    def _emit_history_snapshot(latest_entry: dict) -> None:
-        if history_callback is None:
-            return
-        # Callback contract: history is borrowed/read-only ALM state. The
-        # latest entry and multipliers are owned snapshots for checkpoint
-        # writers that persist the current iteration.
-        history_callback(
-            history,
-            _snapshot_history_entry(latest_entry),
-            multipliers.copy(),
-            float(penalty),
-        )
-
-    def _build_result(
-        *,
-        success: bool,
-        message: str,
-        termination_reason: str,
-        outer_iterations: int,
-        evaluation: dict,
-        multipliers_state: np.ndarray,
-        penalty_state: float,
-        inner_result,
-        restored_best_feasible: bool,
-        restored_best_feasible_reason: str | None,
-        final_max_feasibility_violation: float,
-        final_stationarity_norm: float,
-        final_raw_stationarity_norm: float,
-        final_kkt_stationarity_norm: float | None,
-        final_feasibility_tolerance: float,
-        final_stationarity_tolerance: float,
-    ):
-        penalty_argument = float(penalty_state)
-        (
-            solver_constraint_values,
-            feasibility_values,
-            _dual_update_values,
-            _max_feasibility_violation,
-        ) = _extract_constraint_state(evaluation)
-        routing_state = _constraint_routing_state(
-            evaluation,
-            multipliers_state,
-            penalty_argument,
-            final_feasibility_tolerance,
-        )
-        raw_constraint_values = _explicit_raw_signed_constraint_values(evaluation)
-        raw_solver_constraint_values = _optional_float_array(
-            evaluation,
-            "raw_solver_constraint_values",
-            raw_constraint_values,
-        )
-        normalized_signed_constraint_values = _optional_float_list(
-            evaluation,
-            "normalized_signed_constraint_values",
-            solver_constraint_values,
-        )
-        normalized_feasibility_values = _optional_float_list(
-            evaluation,
-            "normalized_feasibility_values",
-            feasibility_values,
-        )
-        raw_constraint_values_list = _optional_array_to_float_list(raw_constraint_values)
-        raw_solver_constraint_values_list = _optional_array_to_float_list(
-            raw_solver_constraint_values
-        )
-        inner_optimizer_success = None
-        inner_optimizer_message = None
-        if inner_result is not None:
-            inner_optimizer_success = bool(getattr(inner_result, "success", False))
-            inner_optimizer_message = str(getattr(inner_result, "message", ""))
-        for history_index, entry in enumerate(history):
-            history[history_index] = _materialize_history_entry_diagnostics(entry)
-        conditioning = _conditioning_metrics(evaluation)
-        alm_summary = _alm_summary(
-            termination_reason=termination_reason,
-            evaluation=evaluation,
-            multipliers=multipliers_state,
-            penalty=penalty_argument,
-            constraint_names=constraint_names,
-            routing_state=routing_state,
-            feasibility_values=feasibility_values,
-            solver_constraint_values=solver_constraint_values,
-            final_stationarity_norm=final_stationarity_norm,
-            final_feasibility_tolerance=final_feasibility_tolerance,
-            multiplier_cap_binding=cap_binding_detected,
-            penalty_cap_reached=penalty_cap_reached,
-            history=history,
-            history_truncated_count=history_truncated_count,
-        )
-        return SimpleNamespace(
-            alm_schema_version=ALM_SCHEMA_VERSION,
-            alm_summary=alm_summary,
-            x=x.copy(),
-            success=bool(success),
-            message=message,
-            termination_reason=str(termination_reason),
-            nit=total_inner_iterations,
-            outer_iterations=int(outer_iterations),
-            constraint_names=list(constraint_names),
-            constraint_values=[float(value) for value in feasibility_values],
-            solver_constraint_values=[float(value) for value in solver_constraint_values],
-            normalized_constraint_values=normalized_signed_constraint_values,
-            normalized_solver_constraint_values=_as_float_list(solver_constraint_values),
-            normalized_signed_constraint_values=normalized_signed_constraint_values,
-            normalized_feasibility_values=normalized_feasibility_values,
-            raw_constraint_values=raw_constraint_values_list,
-            raw_solver_constraint_values=raw_solver_constraint_values_list,
-            hard_signed_constraint_values=[
-                float(value)
-                for value in routing_state.signal_state.hard_signed_constraint_values
-            ],
-            hard_violation_values=[
-                float(value)
-                for value in routing_state.signal_state.hard_violation_values
-            ],
-            surrogate_signed_constraint_values=[
-                float(value)
-                for value in routing_state.signal_state.surrogate_signed_constraint_values
-            ],
-            raw_hard_signed_constraint_values=_optional_float_list(
-                evaluation,
-                "raw_hard_signed_constraint_values",
-                None,
-            ),
-            raw_hard_violation_values=_optional_float_list(
-                evaluation,
-                "raw_hard_violation_values",
-                None,
-            ),
-            raw_surrogate_signed_constraint_values=_optional_float_list(
-                evaluation,
-                "raw_surrogate_signed_constraint_values",
-                None,
-            ),
-            raw_dual_update_values=_optional_float_list(
-                evaluation,
-                "raw_dual_update_values",
-                None,
-            ),
-            raw_hard_dual_update_values=_optional_float_list(
-                evaluation,
-                "raw_hard_dual_update_values",
-                None,
-            ),
-            constraint_scales=_optional_float_list(evaluation, "constraint_scales", None),
-            constraint_blocks=_optional_string_list(evaluation, "constraint_blocks"),
-            constraint_scale_sources=_optional_string_list(
-                evaluation,
-                "constraint_scale_sources",
-            ),
-            raw_dual_estimates=_raw_dual_estimates(multipliers_state, evaluation),
-            multiplier_interpretation=_multiplier_interpretation(evaluation),
-            multipliers=[float(value) for value in multipliers_state],
-            penalty=_representative_penalty(penalty_argument),
-            penalty_values=_as_float_list(
-                _penalty_values(penalty_argument, len(constraint_names))
-            ),
-            block_penalties=None,
-            block_penalty_cap_reached=None,
-            block_penalty_cap_requested=None,
-            trust_radius=trust_radius,
-            history=history,
-            inner_result=inner_result,
-            optimizer_success=inner_optimizer_success,
-            optimizer_message=inner_optimizer_message,
-            converged_to_tolerances=bool(success),
-            restored_best_feasible=bool(restored_best_feasible),
-            restored_best_feasible_reason=restored_best_feasible_reason,
-            final_max_feasibility_violation=float(final_max_feasibility_violation),
-            final_stationarity_norm=float(final_stationarity_norm),
-            final_raw_stationarity_norm=float(final_raw_stationarity_norm),
-            final_kkt_stationarity_norm=(
-                None
-                if final_kkt_stationarity_norm is None
-                else float(final_kkt_stationarity_norm)
-            ),
-            final_augmented_gradient_norm=alm_summary["augmented_gradient_norm"],
-            final_surrogate_kkt_stationarity_norm=alm_summary[
-                "surrogate_kkt_stationarity_norm"
-            ],
-            final_feasibility_tolerance=float(final_feasibility_tolerance),
-            final_stationarity_tolerance=float(final_stationarity_tolerance),
-            final_objective=float(evaluation["total"]),
-            final_base_objective=conditioning["conditioning_base_objective"],
-            final_penalty_objective=conditioning["conditioning_penalty_objective"],
-            final_penalty_objective_ratio=conditioning["conditioning_penalty_objective_ratio"],
-            final_total_grad_norm=conditioning["conditioning_total_grad_norm"],
-            final_base_grad_norm=conditioning["conditioning_base_grad_norm"],
-            final_penalty_grad_norm=conditioning["conditioning_penalty_grad_norm"],
-            final_penalty_gradient_norm=conditioning["penalty_gradient_norm"],
-            final_penalty_grad_ratio=conditioning["conditioning_penalty_grad_ratio"],
-            final_hard_max_violation=float(routing_state.hard_max_violation),
-            final_surrogate_max_value=float(routing_state.surrogate_max_value),
-            hard_positive_shift_zero=bool(routing_state.hard_positive_shift_zero),
-            signal_mismatch_active=bool(routing_state.signal_mismatch_active),
-            multiplier_cap_binding=bool(cap_binding_detected),
-            multiplier_cap_binding_indices=sorted(cap_binding_indices),
-            penalty_cap_reached=bool(penalty_cap_reached),
-            penalty_max=(
-                None if settings.penalty_max is None else float(settings.penalty_max)
-            ),
-            penalty_cap_requested=(
-                None if penalty_cap_requested is None else float(penalty_cap_requested)
-            ),
-        )
-
-    def _try_penalty_increase() -> SimpleNamespace | None:
-        """Apply penalty scaling and return a cap-reached result if the cap fires."""
-        nonlocal penalty, penalty_cap_reached, penalty_cap_requested
-        nonlocal feasible_stall_count, update_feasibility_tol, update_stationarity_tol
-        next_p, cap_hit, requested_p = _next_penalty(
-            penalty,
-            penalty_scale=settings.penalty_scale,
-            penalty_max=settings.penalty_max,
-        )
-        penalty = next_p
-        if cap_hit:
-            penalty_cap_reached = True
-            penalty_cap_requested = requested_p
-            history_entry["action"] = "penalty_cap_reached"
-            history_entry["trust_radius"] = trust_radius
-            update_feasibility_tol = min(
-                update_feasibility_tol,
-                _penalty_schedule_tolerance(settings.feasibility_tol, penalty),
-            )
-            update_stationarity_tol = min(
-                update_stationarity_tol,
-                _penalty_schedule_tolerance(settings.stationarity_tol, penalty),
-            )
-            penalty_update_state = _publish_current_penalty_state(
-                history_entry,
-                update_feasibility_tol,
-            )
-            _emit_history_snapshot(history_entry)
-            return _build_failure_result_with_optional_restore(
-                termination_reason="penalty_cap_reached",
-                message_prefix=(
-                    "ALM stopped after the requested penalty update "
-                    f"{requested_p:.3e} exceeded the configured "
-                    f"penalty cap {next_p:.3e}."
-                ),
-                restored_message_prefix=(
-                    "ALM stopped at the penalty cap after restoring best feasible iterate"
-                ),
-                restored_termination_reason="penalty_cap_reached_restored_best_feasible",
-                evaluation=penalty_update_state.evaluation,
-                multipliers_state=multipliers,
-                penalty_state=penalty,
-                inner_result=result,
-            )
-        feasible_stall_count = 0
-        update_feasibility_tol = min(
-            update_feasibility_tol,
-            _penalty_schedule_tolerance(settings.feasibility_tol, penalty),
-        )
-        update_stationarity_tol = min(
-            update_stationarity_tol,
-            _penalty_schedule_tolerance(settings.stationarity_tol, penalty),
-        )
-        _publish_current_penalty_state(
-            history_entry,
-            update_feasibility_tol,
-        )
-        return None
-
-    def _restore_best_feasible_on_failure(
-        *,
-        evaluation: dict,
-        multipliers_state: np.ndarray,
-        penalty_state: float,
-        inner_result,
-        final_max_feasibility_violation: float,
-    ) -> SimpleNamespace:
-        restored_best_feasible = False
-        restored_best_feasible_reason = None
-        restored_evaluation = evaluation
-        restored_x = x.copy()
-        restored_multipliers_state = np.asarray(multipliers_state, dtype=float).copy()
-        restored_penalty_state = float(penalty_state)
-        restored_inner_result = inner_result
-
-        restore_reasons: list[str] = []
-        if best_feasible is not None:
-            if final_max_feasibility_violation > settings.feasibility_tol:
-                restore_reasons.append("final_iterate_infeasible")
-            if (
-                _incumbent_objective_value(restored_evaluation)
-                > _incumbent_objective_value(best_feasible.evaluation)
-            ):
-                restore_reasons.append("final_iterate_worse_than_best_feasible")
-
-        if restore_reasons:
-            restored_best_feasible = True
-            restored_best_feasible_reason = ",".join(restore_reasons)
-            restored_x = best_feasible.x.copy()
-            restored_evaluation = best_feasible.evaluation
-            restored_multipliers_state = best_feasible.multipliers.copy()
-            restored_penalty_state = best_feasible.penalty
-            restored_inner_result = best_feasible.inner_result
-            if (
-                restore_incumbent_state_fn is not None
-                and best_feasible.incumbent_state is not None
-            ):
-                restore_incumbent_state_fn(best_feasible.incumbent_state)
-
-        return SimpleNamespace(
-            x=restored_x,
-            evaluation=restored_evaluation,
-            multipliers_state=restored_multipliers_state,
-            penalty_state=restored_penalty_state,
-            inner_result=restored_inner_result,
-            restored_best_feasible=bool(restored_best_feasible),
-            restored_best_feasible_reason=restored_best_feasible_reason,
-        )
-
-    def _build_failure_result_with_optional_restore(
-        *,
-        termination_reason: str,
-        message_prefix: str,
-        evaluation: dict,
-        multipliers_state: np.ndarray,
-        penalty_state: float,
-        inner_result,
-        restored_message_prefix: str | None = None,
-        restored_termination_reason: str | None = None,
-    ) -> SimpleNamespace:
-        nonlocal x, final_eval, final_multipliers, final_penalty
-        restored_state = _restore_best_feasible_on_failure(
-            evaluation=evaluation,
-            multipliers_state=multipliers_state,
-            penalty_state=penalty_state,
-            inner_result=inner_result,
-            final_max_feasibility_violation=_extract_constraint_state(evaluation)[3],
-        )
-        x = restored_state.x
-        restored_routing_state = _constraint_routing_state(
-            restored_state.evaluation,
-            restored_state.multipliers_state,
-            restored_state.penalty_state,
-            settings.feasibility_tol,
-        )
-        (
-            restored_raw_stationarity_norm,
-            restored_kkt_stationarity_norm,
-            restored_stationarity_norm,
-            _restored_signal_mismatch_active,
-        ) = _stationarity_metrics(
-            restored_state.evaluation,
-            restored_routing_state,
-            settings.feasibility_tol,
-        )
-        restored_max_feasibility_violation = _extract_constraint_state(
-            restored_state.evaluation
-        )[3]
-        effective_message_prefix = message_prefix
-        effective_termination_reason = termination_reason
-        if restored_state.restored_best_feasible:
-            if restored_message_prefix is not None:
-                effective_message_prefix = restored_message_prefix
-            if restored_termination_reason is not None:
-                effective_termination_reason = restored_termination_reason
-        message = (
-            f"{effective_message_prefix}: "
-            f"max_violation={restored_max_feasibility_violation:.3e}, "
-            f"stationarity={restored_stationarity_norm:.3e}"
-        )
-        final_eval = restored_state.evaluation
-        final_multipliers = restored_state.multipliers_state.copy()
-        final_penalty = float(restored_state.penalty_state)
-        return _build_result(
-            success=False,
-            message=message,
-            termination_reason=effective_termination_reason,
-            outer_iterations=last_outer_iteration,
-            evaluation=restored_state.evaluation,
-            multipliers_state=restored_state.multipliers_state,
-            penalty_state=restored_state.penalty_state,
-            inner_result=restored_state.inner_result,
-            restored_best_feasible=restored_state.restored_best_feasible,
-            restored_best_feasible_reason=restored_state.restored_best_feasible_reason,
-            final_max_feasibility_violation=restored_max_feasibility_violation,
-            final_stationarity_norm=restored_stationarity_norm,
-            final_raw_stationarity_norm=restored_raw_stationarity_norm,
-            final_kkt_stationarity_norm=restored_kkt_stationarity_norm,
-            final_feasibility_tolerance=settings.feasibility_tol,
-            final_stationarity_tolerance=settings.stationarity_tol,
-        )
-
     for outer_iteration in range(1, settings.max_outer_iterations + 1):
         last_outer_iteration = outer_iteration
         if outer_state_callback is not None:
@@ -2630,9 +3051,11 @@ def minimize_alm(
         is_final_outer = outer_iteration == settings.max_outer_iterations
         for continuation_iteration in range(settings.max_subproblem_continuations + 1):
             start_x = x.copy()
-            penalty_argument = _current_penalty_argument()
-            current_eval = _attach_constraint_metadata(
-                evaluate_problem(x, multipliers, penalty_argument)
+            penalty_argument = float(penalty)
+            current_eval = _attach_alm_constraint_metadata(
+                evaluate_problem(x, multipliers, penalty_argument),
+                _constraint_names_tuple,
+                _constraint_blocks_tuple,
             )
             _require_finite_evaluation(
                 current_eval,
@@ -2679,8 +3102,9 @@ def minimize_alm(
                 and not current_constraints_inactive_candidate
                 and not current_signal_mismatch_active
             ):
-                _append_history_entry(
-                    {
+                history_entry, history_truncated_count = _append_alm_history_entry(
+                    history,
+                    ALMHistoryEntry({
                         "outer_iteration": int(outer_iteration),
                         "continuation_iteration": int(continuation_iteration),
                         "constraint_names": [str(name) for name in constraint_names],
@@ -2749,20 +3173,29 @@ def minimize_alm(
                         "multiplier_cap_binding": False,
                         "multiplier_cap_binding_indices": [],
                         "action": "converged",
-                    }
+                    }),
+                    settings.history_max_entries,
+                    history_truncated_count,
                 )
-                history[-1].update(current_conditioning)
-                _attach_history_diagnostics(
-                    history[-1],
+                history_entry.update(current_conditioning)
+                _attach_alm_history_diagnostics(
+                    history_entry,
                     current_eval,
                     multipliers,
                     penalty_argument,
+                    constraint_names,
                     current_solver_constraint_values,
                     current_feasibility_values,
                     current_routing_state,
                     effective_feasibility_tol,
                 )
-                _emit_history_snapshot(history[-1])
+                _emit_alm_history_snapshot(
+                    history_callback,
+                    history,
+                    history_entry,
+                    multipliers,
+                    penalty,
+                )
                 final_eval = current_eval
                 final_multipliers = multipliers.copy()
                 final_penalty = penalty
@@ -2784,220 +3217,68 @@ def minimize_alm(
                     f"max_violation={current_max_feasibility_violation:.3e}, "
                     f"stationarity={current_stationarity_norm:.3e}"
                 )
-                return _build_result(
-                    success=True,
-                    message=message,
-                    termination_reason="converged",
-                    outer_iterations=outer_iteration,
-                    evaluation=current_eval,
-                    multipliers_state=multipliers,
-                    penalty_state=penalty,
-                    inner_result=last_result,
-                    restored_best_feasible=False,
-                    restored_best_feasible_reason=None,
-                    final_max_feasibility_violation=current_max_feasibility_violation,
-                    final_stationarity_norm=current_stationarity_norm,
-                    final_raw_stationarity_norm=current_raw_stationarity_norm,
-                    final_kkt_stationarity_norm=current_kkt_stationarity_norm,
-                    final_feasibility_tolerance=settings.feasibility_tol,
-                    final_stationarity_tolerance=settings.stationarity_tol,
-                )
-
-            _cached_eval = SimpleNamespace(x=None, evaluation=None)
-
-            def inner_fun(inner_x):
-                evaluation = _sanitize_nonfinite_inner_evaluation(
-                    evaluate_problem(inner_x, multipliers, penalty_argument),
-                    fallback_evaluation=current_eval,
-                )
-                _cached_eval.x = np.asarray(inner_x, dtype=float).copy()
-                _cached_eval.evaluation = evaluation
-                return float(evaluation["total"]), np.asarray(evaluation["grad"], dtype=float)
-
-            def alm_inner_callback(inner_x):
-                if inner_callback is not None:
-                    inner_callback(inner_x)
-                inner_x_arr = np.asarray(inner_x, dtype=float)
-                if _cached_eval.x is not None and np.array_equal(inner_x_arr, _cached_eval.x):
-                    evaluation = _cached_eval.evaluation
-                else:
-                    evaluation = _sanitize_nonfinite_inner_evaluation(
-                        evaluate_problem(inner_x_arr, multipliers, penalty_argument),
-                        fallback_evaluation=current_eval,
-                    )
-                (
-                    _solver_constraint_values,
-                    callback_feasibility_values,
-                    callback_dual_update_values,
-                    callback_max_feasibility_violation,
-                ) = _extract_constraint_state(evaluation)
-                callback_routing_state = _constraint_routing_state(
-                    evaluation,
-                    multipliers,
-                    penalty_argument,
-                    effective_feasibility_tol,
-                )
-                (
-                    _callback_raw_stationarity_norm,
-                    _callback_kkt_stationarity_norm,
-                    callback_stationarity_norm,
-                    _callback_signal_mismatch_active,
-                ) = _stationarity_metrics(
-                    evaluation,
-                    callback_routing_state,
-                    effective_feasibility_tol,
-                )
-                if (
-                    callback_max_feasibility_violation <= effective_feasibility_tol
-                    and callback_stationarity_norm <= update_stationarity_tol
-                ):
-                    raise _EarlyStopInnerSolve(inner_x, evaluation)
-
-            accepted_result = None
-            accepted_eval = None
-            accepted_x = None
-            accepted_bounds = None
-            attempts = 0
-            attempt_iterations = 0
-            attempt_radius = trust_radius
-            last_attempt_result = None
-            current_feasible_enough = (
-                current_max_feasibility_violation <= effective_feasibility_tol
-            )
-            last_inner_options = None
-            last_inner_profile = None
-            forced_infeasible_penalty_cycle = False
-            forced_infeasible_penalty_reason = None
-            forced_inner_false_success = False
-            nonfinite_candidate_evaluation = False
-            nonfinite_candidate_fields: list[str] | None = None
-
-            for attempt_index in range(1, settings.max_inner_attempts + 1):
-                attempts = attempt_index
-                current_inner_profile = _select_inner_solve_profile(
-                    trust_radius=attempt_radius,
-                    continuation_iteration=continuation_iteration,
-                    feasible_enough=current_feasible_enough,
-                )
-                inner_attempt_options = _build_inner_options(
-                    inner_options,
-                    update_stationarity_tol,
-                    profile=current_inner_profile,
-                )
-                attempt_bounds = _build_box_bounds(x, attempt_radius)
-                last_inner_options = dict(inner_attempt_options)
-                last_inner_profile = current_inner_profile.name
-                try:
-                    result = minimize(
-                        inner_fun,
-                        x,
-                        jac=True,
-                        method="L-BFGS-B",
-                        bounds=attempt_bounds,
-                        callback=alm_inner_callback,
-                        options=inner_attempt_options,
-                    )
-                    candidate_x = np.asarray(result.x, dtype=float).copy()
-                    if _cached_eval.x is not None and np.array_equal(candidate_x, _cached_eval.x):
-                        candidate_eval = _cached_eval.evaluation
-                    else:
-                        candidate_eval = _sanitize_nonfinite_inner_evaluation(
-                            evaluate_problem(candidate_x, multipliers, penalty_argument),
-                            fallback_evaluation=current_eval,
-                        )
-                except _EarlyStopInnerSolve as early_stop:
-                    result = SimpleNamespace(
-                        x=early_stop.x,
-                        nit=1,
+                return _build_alm_result(
+                    settings=settings,
+                    constraint_names=constraint_names,
+                    run_state=_snapshot_alm_run_state(
+                        x=x,
+                        total_inner_iterations=total_inner_iterations,
+                        trust_radius=trust_radius,
+                        history=history,
+                        history_truncated_count=history_truncated_count,
+                        cap_binding_detected=cap_binding_detected,
+                        cap_binding_indices=cap_binding_indices,
+                        penalty_cap_reached=penalty_cap_reached,
+                        penalty_cap_requested=penalty_cap_requested,
+                    ),
+                    final_state=ALMFinalState(
                         success=True,
-                        message=str(early_stop),
-                    )
-                    candidate_x = early_stop.x
-                    candidate_eval = early_stop.evaluation
-                last_attempt_result = result
-                attempt_iterations += int(getattr(result, "nit", 0))
-                moved_norm = float(np.linalg.norm(candidate_x - x))
-                move_tolerance = _move_tolerance(x)
-                if candidate_eval.get("nonfinite_evaluation"):
-                    nonfinite_candidate_evaluation = True
-                    nonfinite_candidate_fields = list(candidate_eval.get("nonfinite_fields", []))
-                acceptable = _candidate_is_acceptable(
-                    current_eval,
-                    candidate_eval,
-                    result,
-                    moved_norm,
-                    update_feasibility_tol,
+                        message=message,
+                        termination_reason="converged",
+                        outer_iterations=outer_iteration,
+                        evaluation=current_eval,
+                        multipliers=multipliers,
+                        penalty=penalty,
+                        inner_result=last_result,
+                        restored_best_feasible=False,
+                        restored_best_feasible_reason=None,
+                        max_feasibility_violation=current_max_feasibility_violation,
+                        stationarity_norm=current_stationarity_norm,
+                        raw_stationarity_norm=current_raw_stationarity_norm,
+                        kkt_stationarity_norm=current_kkt_stationarity_norm,
+                        feasibility_tolerance=settings.feasibility_tol,
+                        stationarity_tolerance=settings.stationarity_tol,
+                    ),
                 )
-                (
-                    infeasible_inner_stall,
-                    inner_false_success,
-                    inner_stall_reason,
-                ) = _classify_infeasible_inner_stall(
-                    current_eval,
-                    candidate_eval,
-                    result,
-                    moved_norm,
-                    move_tolerance,
-                    effective_feasibility_tol,
-                )
-                if acceptable and not infeasible_inner_stall:
-                    accepted_result = result
-                    accepted_eval = _attach_constraint_metadata(candidate_eval)
-                    accepted_x = candidate_x
-                    accepted_bounds = attempt_bounds
-                    if attempt_radius is not None:
-                        if moved_norm >= 0.5 * float(attempt_radius):
-                            trust_radius = float(attempt_radius) * float(settings.trust_radius_grow)
-                        else:
-                            trust_radius = float(attempt_radius)
-                    break
-                if infeasible_inner_stall:
-                    accepted_result = result
-                    accepted_eval = current_eval
-                    accepted_x = start_x
-                    accepted_bounds = attempt_bounds
-                    forced_infeasible_penalty_cycle = True
-                    forced_infeasible_penalty_reason = inner_stall_reason
-                    forced_inner_false_success = bool(inner_false_success)
-                    if attempt_radius is not None:
-                        trust_radius = float(attempt_radius)
-                    break
-                if attempt_radius is None:
-                    accepted_result = result
-                    accepted_eval = current_eval
-                    accepted_x = start_x
-                    accepted_bounds = attempt_bounds
-                    break
-                next_radius = max(
-                    settings.trust_radius_min,
-                    float(attempt_radius) * float(settings.trust_radius_shrink),
-                )
-                exhausted_attempts = attempt_index == settings.max_inner_attempts
-                if attempt_radius <= settings.trust_radius_min or exhausted_attempts:
-                    accepted_result = result
-                    accepted_eval = current_eval
-                    accepted_x = start_x
-                    accepted_bounds = attempt_bounds
-                    trust_radius = float(attempt_radius)
-                    break
-                attempt_radius = float(next_radius)
-                trust_radius = float(attempt_radius)
-                continue
 
-            if accepted_result is None or accepted_eval is None or accepted_x is None:
-                if last_attempt_result is None:
-                    raise RuntimeError("ALM failed before any inner optimization result was produced.")
-                accepted_result = last_attempt_result
-                accepted_eval = current_eval
-                accepted_x = start_x
-                accepted_bounds = None
+            inner_attempt = _run_alm_inner_attempts(
+                ALMInnerAttemptRequest(
+                    x=x,
+                    current_eval=current_eval,
+                    multipliers=multipliers,
+                    penalty_argument=penalty_argument,
+                    evaluate_problem=evaluate_problem,
+                    inner_options=inner_options,
+                    settings=settings,
+                    continuation_iteration=continuation_iteration,
+                    trust_radius=trust_radius,
+                    current_max_feasibility_violation=current_max_feasibility_violation,
+                    update_feasibility_tol=update_feasibility_tol,
+                    update_stationarity_tol=update_stationarity_tol,
+                    effective_feasibility_tol=effective_feasibility_tol,
+                    inner_callback=inner_callback,
+                    constraint_names_tuple=_constraint_names_tuple,
+                    constraint_blocks_tuple=_constraint_blocks_tuple,
+                )
+            )
 
-            result = accepted_result
+            result = inner_attempt.optimizer_result
             last_result = result
-            total_inner_iterations += attempt_iterations
-            x = accepted_x
-            final_eval = accepted_eval
-            if accepted_eval is not current_eval and accepted_callback is not None:
+            total_inner_iterations += inner_attempt.iterations
+            x = inner_attempt.x
+            trust_radius = inner_attempt.trust_radius
+            final_eval = inner_attempt.evaluation
+            if inner_attempt.evaluation is not current_eval and accepted_callback is not None:
                 accepted_callback(x.copy())
             accepted_move_norm = float(np.linalg.norm(x - start_x))
             (
@@ -3082,7 +3363,7 @@ def minimize_alm(
                 "outer_iteration": int(outer_iteration),
                 "continuation_iteration": int(continuation_iteration),
                 "constraint_names": [str(name) for name in constraint_names],
-                "inner_iterations": int(attempt_iterations),
+                "inner_iterations": int(inner_attempt.iterations),
                 "inner_success": bool(getattr(result, "success", False)),
                 "inner_message": str(getattr(result, "message", "")),
                 "penalty": float(penalty),
@@ -3118,21 +3399,24 @@ def minimize_alm(
                 "stationarity_tolerance": float(update_stationarity_tol),
                 "trust_radius": trust_radius,
                 "inner_maxiter": None
-                if last_inner_options is None or "maxiter" not in last_inner_options
-                else int(last_inner_options["maxiter"]),
+                if inner_attempt.last_inner_options is None
+                or "maxiter" not in inner_attempt.last_inner_options
+                else int(inner_attempt.last_inner_options["maxiter"]),
                 "inner_maxls": None
-                if last_inner_options is None or "maxls" not in last_inner_options
-                else int(last_inner_options["maxls"]),
+                if inner_attempt.last_inner_options is None
+                or "maxls" not in inner_attempt.last_inner_options
+                else int(inner_attempt.last_inner_options["maxls"]),
                 "inner_maxfun": None
-                if last_inner_options is None or "maxfun" not in last_inner_options
-                else int(last_inner_options["maxfun"]),
-                "inner_profile": last_inner_profile,
+                if inner_attempt.last_inner_options is None
+                or "maxfun" not in inner_attempt.last_inner_options
+                else int(inner_attempt.last_inner_options["maxfun"]),
+                "inner_profile": inner_attempt.last_inner_profile,
                 "inner_lbfgsb_projected_gradient_norm": _lbfgsb_projected_gradient_max_norm(
                     final_eval["grad"],
                     x,
-                    accepted_bounds,
+                    inner_attempt.bounds,
                 ),
-                "inner_attempts": int(attempts),
+                "inner_attempts": int(inner_attempt.attempts),
                 "accepted_move_norm": accepted_move_norm,
                 "accepted_move_norm_scaled": accepted_move_norm / max(
                     1.0,
@@ -3145,23 +3429,31 @@ def minimize_alm(
                 "stationarity_delta": float(current_stationarity_norm) - float(stationarity_norm),
                 "meaningful_progress": bool(made_inner_progress),
                 "feasible_stall_count": int(feasible_stall_count),
-                "infeasible_stall": bool(forced_infeasible_penalty_cycle),
-                "inner_false_success": bool(forced_inner_false_success),
-                "inner_stall_reason": forced_infeasible_penalty_reason,
+                "infeasible_stall": bool(inner_attempt.forced_infeasible_penalty_cycle),
+                "inner_false_success": bool(inner_attempt.forced_inner_false_success),
+                "inner_stall_reason": inner_attempt.forced_infeasible_penalty_reason,
                 "active_violation_index": active_violation_index,
                 "active_constraint_name": active_constraint_name,
-                "nonfinite_candidate_evaluation": bool(nonfinite_candidate_evaluation),
-                "nonfinite_candidate_fields": nonfinite_candidate_fields,
+                "nonfinite_candidate_evaluation": bool(
+                    inner_attempt.nonfinite_candidate_evaluation
+                ),
+                "nonfinite_candidate_fields": inner_attempt.nonfinite_candidate_fields,
                 "multiplier_cap_binding": False,
                 "multiplier_cap_binding_indices": [],
             }
-            history_entry = _append_history_entry(history_entry)
+            history_entry, history_truncated_count = _append_alm_history_entry(
+                history,
+                ALMHistoryEntry(history_entry),
+                settings.history_max_entries,
+                history_truncated_count,
+            )
             history_entry.update(_conditioning_metrics(final_eval))
-            _attach_history_diagnostics(
+            _attach_alm_history_diagnostics(
                 history_entry,
                 final_eval,
                 multipliers,
                 penalty_argument,
+                constraint_names,
                 solver_constraint_values,
                 feasibility_values,
                 routing_state,
@@ -3186,75 +3478,182 @@ def minimize_alm(
                 and not signal_mismatch_active
             ):
                 history_entry["action"] = "converged"
-                _emit_history_snapshot(history_entry)
+                _emit_alm_history_snapshot(history_callback, history, history_entry, multipliers, penalty)
                 message = (
                     "ALM converged: "
                     f"max_violation={max_feasibility_violation:.3e}, "
                     f"stationarity={stationarity_norm:.3e}"
                 )
-                return _build_result(
-                    success=True,
-                    message=message,
-                    termination_reason="converged",
-                    outer_iterations=outer_iteration,
-                    evaluation=final_eval,
-                    multipliers_state=multipliers,
-                    penalty_state=penalty,
-                    inner_result=result,
-                    restored_best_feasible=False,
-                    restored_best_feasible_reason=None,
-                    final_max_feasibility_violation=max_feasibility_violation,
-                    final_stationarity_norm=stationarity_norm,
-                    final_raw_stationarity_norm=raw_stationarity_norm,
-                    final_kkt_stationarity_norm=kkt_stationarity_norm,
-                    final_feasibility_tolerance=settings.feasibility_tol,
-                    final_stationarity_tolerance=settings.stationarity_tol,
+                return _build_alm_result(
+                    settings=settings,
+                    constraint_names=constraint_names,
+                    run_state=_snapshot_alm_run_state(
+                        x=x,
+                        total_inner_iterations=total_inner_iterations,
+                        trust_radius=trust_radius,
+                        history=history,
+                        history_truncated_count=history_truncated_count,
+                        cap_binding_detected=cap_binding_detected,
+                        cap_binding_indices=cap_binding_indices,
+                        penalty_cap_reached=penalty_cap_reached,
+                        penalty_cap_requested=penalty_cap_requested,
+                    ),
+                    final_state=ALMFinalState(
+                        success=True,
+                        message=message,
+                        termination_reason="converged",
+                        outer_iterations=outer_iteration,
+                        evaluation=final_eval,
+                        multipliers=multipliers,
+                        penalty=penalty,
+                        inner_result=result,
+                        restored_best_feasible=False,
+                        restored_best_feasible_reason=None,
+                        max_feasibility_violation=max_feasibility_violation,
+                        stationarity_norm=stationarity_norm,
+                        raw_stationarity_norm=raw_stationarity_norm,
+                        kkt_stationarity_norm=kkt_stationarity_norm,
+                        feasibility_tolerance=settings.feasibility_tol,
+                        stationarity_tolerance=settings.stationarity_tol,
+                    ),
                 )
 
-            if forced_infeasible_penalty_cycle:
-                cap_result = _try_penalty_increase()
-                if cap_result is not None:
-                    return cap_result
+            if inner_attempt.forced_infeasible_penalty_cycle:
+                penalty_transition = _apply_alm_penalty_increase(
+                    settings=settings,
+                    evaluate_problem=evaluate_problem,
+                    x=x,
+                    multipliers=multipliers,
+                    penalty=penalty,
+                    history_entry=history_entry,
+                    trust_radius=trust_radius,
+                    update_feasibility_tol=update_feasibility_tol,
+                    update_stationarity_tol=update_stationarity_tol,
+                    constraint_names=constraint_names,
+                    constraint_names_tuple=_constraint_names_tuple,
+                    constraint_blocks_tuple=_constraint_blocks_tuple,
+                    history_callback=history_callback,
+                    history=history,
+                )
+                penalty = penalty_transition.penalty
+                penalty_cap_reached = penalty_transition.penalty_cap_reached
+                penalty_cap_requested = penalty_transition.penalty_cap_requested
+                feasible_stall_count = penalty_transition.feasible_stall_count
+                update_feasibility_tol = penalty_transition.update_feasibility_tol
+                update_stationarity_tol = penalty_transition.update_stationarity_tol
+                final_eval = penalty_transition.penalty_update_state.evaluation
+                final_multipliers = multipliers.copy()
+                final_penalty = penalty
+                if penalty_transition.cap_hit:
+                    return _build_alm_failure_result_with_optional_restore(
+                        settings=settings,
+                        constraint_names=constraint_names,
+                        run_state=_snapshot_alm_run_state(
+                            x=x,
+                            total_inner_iterations=total_inner_iterations,
+                            trust_radius=trust_radius,
+                            history=history,
+                            history_truncated_count=history_truncated_count,
+                            cap_binding_detected=cap_binding_detected,
+                            cap_binding_indices=cap_binding_indices,
+                            penalty_cap_reached=penalty_cap_reached,
+                            penalty_cap_requested=penalty_cap_requested,
+                        ),
+                        last_outer_iteration=last_outer_iteration,
+                        best_feasible=best_feasible,
+                        restore_incumbent_state_fn=restore_incumbent_state_fn,
+                        termination_reason="penalty_cap_reached",
+                        message_prefix=(
+                            "ALM stopped after the requested penalty update "
+                            f"{penalty_transition.requested_penalty:.3e} exceeded "
+                            f"the configured penalty cap {penalty:.3e}."
+                        ),
+                        restored_message_prefix=(
+                            "ALM stopped at the penalty cap after restoring best "
+                            "feasible iterate"
+                        ),
+                        restored_termination_reason=(
+                            "penalty_cap_reached_restored_best_feasible"
+                        ),
+                        evaluation=penalty_transition.penalty_update_state.evaluation,
+                        multipliers_state=multipliers,
+                        penalty_state=penalty,
+                        inner_result=result,
+                        final_max_feasibility_violation=(
+                            penalty_transition.penalty_update_state.max_violation
+                        ),
+                    )
                 history_entry["action"] = "infeasible_stall_penalty_increase"
                 history_entry["trust_radius"] = trust_radius
                 if is_final_outer:
                     history_entry["outer_termination"] = "max_outer"
-                _emit_history_snapshot(history_entry)
+                _emit_alm_history_snapshot(history_callback, history, history_entry, multipliers, penalty)
                 break
 
             if constraints_inactive_candidate:
                 if stationarity_norm <= settings.stationarity_tol:
                     history_entry["action"] = "constraints_inactive_converged"
                     history_entry["trust_radius"] = trust_radius
-                    _emit_history_snapshot(history_entry)
+                    _emit_alm_history_snapshot(history_callback, history, history_entry, multipliers, penalty)
                     message = (
                         "ALM converged with inactive hard constraints: "
                         f"max_violation={routing_state.hard_max_violation:.3e}, "
                         f"stationarity={stationarity_norm:.3e}"
                     )
-                    return _build_result(
-                        success=True,
-                        message=message,
-                        termination_reason="constraints_inactive_converged",
-                        outer_iterations=outer_iteration,
-                        evaluation=final_eval,
-                        multipliers_state=multipliers,
-                        penalty_state=penalty,
-                        inner_result=result,
-                        restored_best_feasible=False,
-                        restored_best_feasible_reason=None,
-                        final_max_feasibility_violation=max_feasibility_violation,
-                        final_stationarity_norm=stationarity_norm,
-                        final_raw_stationarity_norm=raw_stationarity_norm,
-                        final_kkt_stationarity_norm=kkt_stationarity_norm,
-                        final_feasibility_tolerance=settings.feasibility_tol,
-                        final_stationarity_tolerance=settings.stationarity_tol,
+                    return _build_alm_result(
+                        settings=settings,
+                        constraint_names=constraint_names,
+                        run_state=_snapshot_alm_run_state(
+                            x=x,
+                            total_inner_iterations=total_inner_iterations,
+                            trust_radius=trust_radius,
+                            history=history,
+                            history_truncated_count=history_truncated_count,
+                            cap_binding_detected=cap_binding_detected,
+                            cap_binding_indices=cap_binding_indices,
+                            penalty_cap_reached=penalty_cap_reached,
+                            penalty_cap_requested=penalty_cap_requested,
+                        ),
+                        final_state=ALMFinalState(
+                            success=True,
+                            message=message,
+                            termination_reason="constraints_inactive_converged",
+                            outer_iterations=outer_iteration,
+                            evaluation=final_eval,
+                            multipliers=multipliers,
+                            penalty=penalty,
+                            inner_result=result,
+                            restored_best_feasible=False,
+                            restored_best_feasible_reason=None,
+                            max_feasibility_violation=max_feasibility_violation,
+                            stationarity_norm=stationarity_norm,
+                            raw_stationarity_norm=raw_stationarity_norm,
+                            kkt_stationarity_norm=kkt_stationarity_norm,
+                            feasibility_tolerance=settings.feasibility_tol,
+                            stationarity_tolerance=settings.stationarity_tol,
+                        ),
                     )
                 if not made_inner_progress and continuation_iteration > 0:
                     history_entry["action"] = "constraints_inactive_stall"
                     history_entry["trust_radius"] = trust_radius
-                    _emit_history_snapshot(history_entry)
-                    return _build_failure_result_with_optional_restore(
+                    _emit_alm_history_snapshot(history_callback, history, history_entry, multipliers, penalty)
+                    return _build_alm_failure_result_with_optional_restore(
+                        settings=settings,
+                        constraint_names=constraint_names,
+                        run_state=_snapshot_alm_run_state(
+                            x=x,
+                            total_inner_iterations=total_inner_iterations,
+                            trust_radius=trust_radius,
+                            history=history,
+                            history_truncated_count=history_truncated_count,
+                            cap_binding_detected=cap_binding_detected,
+                            cap_binding_indices=cap_binding_indices,
+                            penalty_cap_reached=penalty_cap_reached,
+                            penalty_cap_requested=penalty_cap_requested,
+                        ),
+                        last_outer_iteration=last_outer_iteration,
+                        best_feasible=best_feasible,
+                        restore_incumbent_state_fn=restore_incumbent_state_fn,
                         termination_reason="constraints_inactive_stall",
                         message_prefix=(
                             "ALM stopped after hard constraints became inactive without "
@@ -3264,6 +3663,7 @@ def minimize_alm(
                         multipliers_state=multipliers,
                         penalty_state=penalty,
                         inner_result=result,
+                        final_max_feasibility_violation=max_feasibility_violation,
                     )
 
             if signal_mismatch_active and hard_feasible_strict:
@@ -3271,8 +3671,24 @@ def minimize_alm(
                     if routing_state.surrogate_positive_shift_zero:
                         history_entry["action"] = "signal_mismatch_stall"
                         history_entry["trust_radius"] = trust_radius
-                        _emit_history_snapshot(history_entry)
-                        return _build_failure_result_with_optional_restore(
+                        _emit_alm_history_snapshot(history_callback, history, history_entry, multipliers, penalty)
+                        return _build_alm_failure_result_with_optional_restore(
+                            settings=settings,
+                            constraint_names=constraint_names,
+                            run_state=_snapshot_alm_run_state(
+                                x=x,
+                                total_inner_iterations=total_inner_iterations,
+                                trust_radius=trust_radius,
+                                history=history,
+                                history_truncated_count=history_truncated_count,
+                                cap_binding_detected=cap_binding_detected,
+                                cap_binding_indices=cap_binding_indices,
+                                penalty_cap_reached=penalty_cap_reached,
+                                penalty_cap_requested=penalty_cap_requested,
+                            ),
+                            last_outer_iteration=last_outer_iteration,
+                            best_feasible=best_feasible,
+                            restore_incumbent_state_fn=restore_incumbent_state_fn,
                             termination_reason="signal_mismatch_stall",
                             message_prefix=(
                                 "ALM stopped after hard-feasible and surrogate-active "
@@ -3282,15 +3698,82 @@ def minimize_alm(
                             multipliers_state=multipliers,
                             penalty_state=penalty,
                             inner_result=result,
+                            final_max_feasibility_violation=max_feasibility_violation,
                         )
-                    cap_result = _try_penalty_increase()
-                    if cap_result is not None:
-                        return cap_result
+                    penalty_transition = _apply_alm_penalty_increase(
+                        settings=settings,
+                        evaluate_problem=evaluate_problem,
+                        x=x,
+                        multipliers=multipliers,
+                        penalty=penalty,
+                        history_entry=history_entry,
+                        trust_radius=trust_radius,
+                        update_feasibility_tol=update_feasibility_tol,
+                        update_stationarity_tol=update_stationarity_tol,
+                        constraint_names=constraint_names,
+                        constraint_names_tuple=_constraint_names_tuple,
+                        constraint_blocks_tuple=_constraint_blocks_tuple,
+                        history_callback=history_callback,
+                        history=history,
+                    )
+                    penalty = penalty_transition.penalty
+                    penalty_cap_reached = penalty_transition.penalty_cap_reached
+                    penalty_cap_requested = penalty_transition.penalty_cap_requested
+                    feasible_stall_count = penalty_transition.feasible_stall_count
+                    update_feasibility_tol = penalty_transition.update_feasibility_tol
+                    update_stationarity_tol = (
+                        penalty_transition.update_stationarity_tol
+                    )
+                    final_eval = penalty_transition.penalty_update_state.evaluation
+                    final_multipliers = multipliers.copy()
+                    final_penalty = penalty
+                    if penalty_transition.cap_hit:
+                        return _build_alm_failure_result_with_optional_restore(
+                            settings=settings,
+                            constraint_names=constraint_names,
+                            run_state=_snapshot_alm_run_state(
+                                x=x,
+                                total_inner_iterations=total_inner_iterations,
+                                trust_radius=trust_radius,
+                                history=history,
+                                history_truncated_count=history_truncated_count,
+                                cap_binding_detected=cap_binding_detected,
+                                cap_binding_indices=cap_binding_indices,
+                                penalty_cap_reached=penalty_cap_reached,
+                                penalty_cap_requested=penalty_cap_requested,
+                            ),
+                            last_outer_iteration=last_outer_iteration,
+                            best_feasible=best_feasible,
+                            restore_incumbent_state_fn=restore_incumbent_state_fn,
+                            termination_reason="penalty_cap_reached",
+                            message_prefix=(
+                                "ALM stopped after the requested penalty update "
+                                f"{penalty_transition.requested_penalty:.3e} "
+                                "exceeded the configured penalty cap "
+                                f"{penalty:.3e}."
+                            ),
+                            restored_message_prefix=(
+                                "ALM stopped at the penalty cap after restoring best "
+                                "feasible iterate"
+                            ),
+                            restored_termination_reason=(
+                                "penalty_cap_reached_restored_best_feasible"
+                            ),
+                            evaluation=(
+                                penalty_transition.penalty_update_state.evaluation
+                            ),
+                            multipliers_state=multipliers,
+                            penalty_state=penalty,
+                            inner_result=result,
+                            final_max_feasibility_violation=(
+                                penalty_transition.penalty_update_state.max_violation
+                            ),
+                        )
                     history_entry["action"] = "signal_mismatch_penalty_increase"
                     history_entry["trust_radius"] = trust_radius
                     if is_final_outer:
                         history_entry["outer_termination"] = "max_outer"
-                    _emit_history_snapshot(history_entry)
+                    _emit_alm_history_snapshot(history_callback, history, history_entry, multipliers, penalty)
                     break
                 feasible_stall_count = 0
                 if trust_radius is not None:
@@ -3305,7 +3788,7 @@ def minimize_alm(
                 history_entry["action"] = "subproblem_continue"
                 history_entry["trust_radius"] = trust_radius
                 history_entry["feasible_stall_count"] = int(feasible_stall_count)
-                _emit_history_snapshot(history_entry)
+                _emit_alm_history_snapshot(history_callback, history, history_entry, multipliers, penalty)
                 continue
 
             if hard_feasible_for_update and stationarity_norm <= update_stationarity_tol:
@@ -3326,7 +3809,7 @@ def minimize_alm(
                 if multiplier_cap_binding:
                     cap_binding_detected = True
                     cap_binding_indices.update(multiplier_cap_binding_indices)
-                penalty_tolerance_scale = _current_penalty_scale()
+                penalty_tolerance_scale = float(settings.penalty_scale)
                 update_feasibility_tol = max(
                     update_feasibility_tol / penalty_tolerance_scale,
                     settings.feasibility_tol,
@@ -3339,7 +3822,7 @@ def minimize_alm(
                 history_entry["trust_radius"] = trust_radius
                 if is_final_outer:
                     history_entry["outer_termination"] = "max_outer"
-                _emit_history_snapshot(history_entry)
+                _emit_alm_history_snapshot(history_callback, history, history_entry, multipliers, penalty)
                 break
 
             if hard_feasible_for_update:
@@ -3359,9 +3842,25 @@ def minimize_alm(
                     history_entry["action"] = "subproblem_limit"
                     if is_final_outer:
                         history_entry["outer_termination"] = "max_outer"
-                    _emit_history_snapshot(history_entry)
+                    _emit_alm_history_snapshot(history_callback, history, history_entry, multipliers, penalty)
                     if feasible_stall_count >= _PLATEAU_STALL_LIMIT:
-                        return _build_failure_result_with_optional_restore(
+                        return _build_alm_failure_result_with_optional_restore(
+                            settings=settings,
+                            constraint_names=constraint_names,
+                            run_state=_snapshot_alm_run_state(
+                                x=x,
+                                total_inner_iterations=total_inner_iterations,
+                                trust_radius=trust_radius,
+                                history=history,
+                                history_truncated_count=history_truncated_count,
+                                cap_binding_detected=cap_binding_detected,
+                                cap_binding_indices=cap_binding_indices,
+                                penalty_cap_reached=penalty_cap_reached,
+                                penalty_cap_requested=penalty_cap_requested,
+                            ),
+                            last_outer_iteration=last_outer_iteration,
+                            best_feasible=best_feasible,
+                            restore_incumbent_state_fn=restore_incumbent_state_fn,
                             termination_reason="plateau_stall",
                             message_prefix=(
                                 "ALM stopped after repeated feasible stationarity "
@@ -3371,6 +3870,7 @@ def minimize_alm(
                             multipliers_state=multipliers,
                             penalty_state=penalty,
                             inner_result=result,
+                            final_max_feasibility_violation=max_feasibility_violation,
                         )
                     break
                 if trust_radius is not None:
@@ -3390,17 +3890,79 @@ def minimize_alm(
                 history_entry["action"] = "subproblem_continue"
                 history_entry["trust_radius"] = trust_radius
                 history_entry["feasible_stall_count"] = int(feasible_stall_count)
-                _emit_history_snapshot(history_entry)
+                _emit_alm_history_snapshot(history_callback, history, history_entry, multipliers, penalty)
                 continue
 
-            cap_result = _try_penalty_increase()
-            if cap_result is not None:
-                return cap_result
+            penalty_transition = _apply_alm_penalty_increase(
+                settings=settings,
+                evaluate_problem=evaluate_problem,
+                x=x,
+                multipliers=multipliers,
+                penalty=penalty,
+                history_entry=history_entry,
+                trust_radius=trust_radius,
+                update_feasibility_tol=update_feasibility_tol,
+                update_stationarity_tol=update_stationarity_tol,
+                constraint_names=constraint_names,
+                constraint_names_tuple=_constraint_names_tuple,
+                constraint_blocks_tuple=_constraint_blocks_tuple,
+                history_callback=history_callback,
+                history=history,
+            )
+            penalty = penalty_transition.penalty
+            penalty_cap_reached = penalty_transition.penalty_cap_reached
+            penalty_cap_requested = penalty_transition.penalty_cap_requested
+            feasible_stall_count = penalty_transition.feasible_stall_count
+            update_feasibility_tol = penalty_transition.update_feasibility_tol
+            update_stationarity_tol = penalty_transition.update_stationarity_tol
+            final_eval = penalty_transition.penalty_update_state.evaluation
+            final_multipliers = multipliers.copy()
+            final_penalty = penalty
+            if penalty_transition.cap_hit:
+                return _build_alm_failure_result_with_optional_restore(
+                    settings=settings,
+                    constraint_names=constraint_names,
+                    run_state=_snapshot_alm_run_state(
+                        x=x,
+                        total_inner_iterations=total_inner_iterations,
+                        trust_radius=trust_radius,
+                        history=history,
+                        history_truncated_count=history_truncated_count,
+                        cap_binding_detected=cap_binding_detected,
+                        cap_binding_indices=cap_binding_indices,
+                        penalty_cap_reached=penalty_cap_reached,
+                        penalty_cap_requested=penalty_cap_requested,
+                    ),
+                    last_outer_iteration=last_outer_iteration,
+                    best_feasible=best_feasible,
+                    restore_incumbent_state_fn=restore_incumbent_state_fn,
+
+                    termination_reason="penalty_cap_reached",
+                    message_prefix=(
+                        "ALM stopped after the requested penalty update "
+                        f"{penalty_transition.requested_penalty:.3e} exceeded "
+                        f"the configured penalty cap {penalty:.3e}."
+                    ),
+                    restored_message_prefix=(
+                        "ALM stopped at the penalty cap after restoring best "
+                        "feasible iterate"
+                    ),
+                    restored_termination_reason=(
+                        "penalty_cap_reached_restored_best_feasible"
+                    ),
+                    evaluation=penalty_transition.penalty_update_state.evaluation,
+                    multipliers_state=multipliers,
+                    penalty_state=penalty,
+                    inner_result=result,
+                    final_max_feasibility_violation=(
+                        penalty_transition.penalty_update_state.max_violation
+                    ),
+                )
             history_entry["action"] = "penalty_increase"
             history_entry["trust_radius"] = trust_radius
             if is_final_outer:
                 history_entry["outer_termination"] = "max_outer"
-            _emit_history_snapshot(history_entry)
+            _emit_alm_history_snapshot(history_callback, history, history_entry, multipliers, penalty)
             break
 
         if is_final_outer:
@@ -3414,7 +3976,23 @@ def minimize_alm(
         success=False,
         restored_best_feasible=False,
     )
-    return _build_failure_result_with_optional_restore(
+    return _build_alm_failure_result_with_optional_restore(
+        settings=settings,
+        constraint_names=constraint_names,
+        run_state=_snapshot_alm_run_state(
+            x=x,
+            total_inner_iterations=total_inner_iterations,
+            trust_radius=trust_radius,
+            history=history,
+            history_truncated_count=history_truncated_count,
+            cap_binding_detected=cap_binding_detected,
+            cap_binding_indices=cap_binding_indices,
+            penalty_cap_reached=penalty_cap_reached,
+            penalty_cap_requested=penalty_cap_requested,
+        ),
+        last_outer_iteration=last_outer_iteration,
+        best_feasible=best_feasible,
+        restore_incumbent_state_fn=restore_incumbent_state_fn,
         termination_reason=termination_reason,
         evaluation=final_eval,
         multipliers_state=final_multipliers,
@@ -3428,4 +4006,39 @@ def minimize_alm(
             "(max outer iterations reached)"
         ),
         restored_termination_reason="max_outer_restored_best_feasible",
+        final_max_feasibility_violation=_extract_constraint_state(final_eval)[3],
+    )
+
+
+def minimize_alm(
+    x0,
+    constraint_names: Sequence[str],
+    evaluate_problem: Callable[[np.ndarray, np.ndarray, object], dict],
+    settings: ALMSettings,
+    inner_options: dict,
+    inner_callback: Callable[[np.ndarray], None] | None = None,
+    accepted_callback: Callable[[np.ndarray], None] | None = None,
+    outer_state_callback: Callable[[int, np.ndarray, float], None] | None = None,
+    snapshot_accepted_state_fn: Callable[[], object] | None = None,
+    restore_incumbent_state_fn: Callable[[object], None] | None = None,
+    history_callback: Callable[[list[dict], dict, np.ndarray, float], None] | None = None,
+    initial_multipliers: np.ndarray | None = None,
+    initial_penalty: float | None = None,
+    constraint_blocks: Sequence[str] | None = None,
+):
+    return _minimize_alm_impl(
+        x0=x0,
+        constraint_names=constraint_names,
+        evaluate_problem=evaluate_problem,
+        settings=settings,
+        inner_options=inner_options,
+        inner_callback=inner_callback,
+        accepted_callback=accepted_callback,
+        outer_state_callback=outer_state_callback,
+        snapshot_accepted_state_fn=snapshot_accepted_state_fn,
+        restore_incumbent_state_fn=restore_incumbent_state_fn,
+        history_callback=history_callback,
+        initial_multipliers=initial_multipliers,
+        initial_penalty=initial_penalty,
+        constraint_blocks=constraint_blocks,
     )

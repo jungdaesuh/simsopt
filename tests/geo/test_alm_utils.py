@@ -1,3 +1,4 @@
+import ast
 import sys
 import unittest
 from pathlib import Path
@@ -865,6 +866,36 @@ class ResidualHelperTests(unittest.TestCase):
             raw_evaluation["dual_update_values"],
             scale_one_evaluation["dual_update_values"],
         )
+
+
+class AlmStructuralDebtTests(unittest.TestCase):
+    def _top_level_node(self, name: str):
+        source_path = EXAMPLES_ROOT / "alm_utils.py"
+        tree = ast.parse(source_path.read_text())
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name == name:
+                return node
+        self.fail(f"{name} not found in alm_utils.py")
+
+    def test_minimize_alm_public_entrypoint_is_small_and_closure_free(self):
+        node = self._top_level_node("minimize_alm")
+        nested_functions = [
+            child
+            for child in ast.walk(node)
+            if isinstance(child, ast.FunctionDef) and child is not node
+        ]
+
+        self.assertLessEqual(node.end_lineno - node.lineno + 1, 500)
+        self.assertEqual(nested_functions, [])
+
+    def test_extracted_alm_state_carriers_exist(self):
+        module = load_alm_utils_module()
+
+        self.assertTrue(hasattr(module, "ALMRunState"))
+        self.assertTrue(hasattr(module, "ALMFinalState"))
+        self.assertTrue(hasattr(module, "ALMHistoryEntry"))
+        self.assertTrue(hasattr(module, "ALMInnerAttemptRequest"))
+        self.assertTrue(hasattr(module, "ALMInnerAttemptResult"))
 
 
 class MinimizeAlmTests(unittest.TestCase):

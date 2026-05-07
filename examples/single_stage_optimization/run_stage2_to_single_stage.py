@@ -28,7 +28,7 @@ from banana_opt.stage2_single_stage_handoff import (  # noqa: E402
     resolve_stage2_finite_current_mode,
 )
 from workflow_runner_common import (  # noqa: E402
-    ensure_stage2_artifact,
+    ensure_stage2_artifact_result,
     load_json,
     load_validated_stage2_seed_results,
     resolved_optional_path,
@@ -299,6 +299,18 @@ def build_stage2_generation_args(
         order=args.stage2_order,
         tf_current_A=args.stage2_tf_current_A,
         toroidal_flux=args.stage2_toroidal_flux,
+        constraint_method="alm",
+        stage2_iota_mode="off",
+        stage2_iota_target=None,
+        stage2_iota_tolerance=5.0e-3,
+        stage2_iota_weight=1.0,
+        stage2_iota_vol_target=0.10,
+        stage2_iota_constraint_weight=1.0,
+        stage2_iota_num_tf_coils=20,
+        stage2_iota_nphi=91,
+        stage2_iota_ntheta=32,
+        stage2_iota_mpol=8,
+        stage2_iota_ntor=6,
     )
 
 
@@ -335,19 +347,30 @@ def resolve_stage2_input(
         stage2_args,
         resolved_spec=resolved_spec,
     )
+    constraint_metadata = stage2_alm_runner.build_stage2_constraint_artifacts(
+        args=stage2_args,
+        config=config,
+        source_label=config_source,
+    )
     artifact_path = stage2_alm_runner.resolve_stage2_artifact_path(config)
     stage2_command = stage2_alm_runner.build_stage2_command(
         config,
+        constraint_override_reason=constraint_metadata["OVERRIDE_REASON"],
+        constraint_profile_label=constraint_metadata["CONSTRAINT_PROFILE"],
         python_executable=args.python_executable,
     )
     artifact_reused = artifact_path.exists()
     if not args.dry_run:
-        ensure_stage2_artifact(
+        ensured_artifact = ensure_stage2_artifact_result(
             config,
+            constraint_override_reason=constraint_metadata["OVERRIDE_REASON"],
+            constraint_profile_label=constraint_metadata["CONSTRAINT_PROFILE"],
             python_executable=args.python_executable,
             timeout_seconds=timeout_or_none(args.stage2_timeout_seconds),
             dry_run=False,
         )
+        artifact_path = ensured_artifact.artifact_path
+        artifact_reused = ensured_artifact.artifact_reused
     if args.dry_run and not artifact_path.exists():
         return {
             "source": "generated_artifact",
@@ -359,7 +382,8 @@ def resolve_stage2_input(
             "config_source": config_source,
         }
     stage2_results_path, stage2_results = stage2_alm_runner.load_validated_stage2_artifact(
-        config
+        config,
+        constraint_metadata=constraint_metadata,
     )
     return {
         "source": "generated_artifact",

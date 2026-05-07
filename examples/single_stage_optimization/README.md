@@ -274,6 +274,7 @@ Useful notes:
 
 - default benchmark modes are `report,soft,alm`
 - `--baseline-mode report` compares the hot-loop modes against the probe-only Stage 2 baseline
+- `soft` is the Stage 2 penalty-path Jiota benchmark; `alm` is the hard ALM iota-constraint benchmark
 - the summary CSV is designed for direct spreadsheet / slide-table use when discussing runtime multipliers and iota improvement
 
 ### Single-Stage Thresholded-Physics ALM Rerun

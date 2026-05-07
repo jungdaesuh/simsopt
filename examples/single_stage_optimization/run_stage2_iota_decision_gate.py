@@ -190,6 +190,10 @@ def validate_args(args: argparse.Namespace) -> list[str]:
     return modes
 
 
+def _constraint_method_for_mode(mode: str) -> str:
+    return "penalty" if mode == "soft" else "alm"
+
+
 def build_stage2_mode_args(
     args: argparse.Namespace,
     *,
@@ -211,6 +215,7 @@ def build_stage2_mode_args(
         order=args.order,
         tf_current_A=args.tf_current_A,
         toroidal_flux=args.toroidal_flux,
+        constraint_method=_constraint_method_for_mode(mode),
         stage2_iota_mode=mode,
         stage2_iota_target=None if mode == "off" else args.stage2_iota_target,
         stage2_iota_tolerance=args.stage2_iota_tolerance,
@@ -301,17 +306,23 @@ def run_mode_case(
         mode_args,
         resolved_spec=resolved_spec,
     )
+    constraint_metadata = stage2_alm_runner.build_stage2_constraint_artifacts(
+        args=mode_args,
+        config=config,
+        source_label=resolved_spec_source,
+    )
     artifact_path = stage2_alm_runner.resolve_stage2_artifact_path(config)
-    artifact_reused = artifact_path.exists()
     command = stage2_alm_runner.build_stage2_command(
         config,
+        constraint_override_reason=constraint_metadata["OVERRIDE_REASON"],
+        constraint_profile_label=constraint_metadata["CONSTRAINT_PROFILE"],
         python_executable=args.python_executable,
     )
     payload: dict[str, object] = {
         "mode": mode,
         "status": "dry_run" if args.dry_run else "completed",
         "artifact_path": str(artifact_path),
-        "artifact_reused": artifact_reused,
+        "artifact_reused": artifact_path.exists(),
         "command": command,
         "resolved_spec_source": resolved_spec_source,
         "resolved_stage2_config": stage2_alm_runner._jsonable_stage2_config(config),
@@ -320,15 +331,20 @@ def run_mode_case(
         return payload
 
     run_start = time.perf_counter()
-    stage2_alm_runner.ensure_stage2_artifact(
+    ensured_artifact = stage2_alm_runner.ensure_stage2_artifact_result(
         config,
+        constraint_override_reason=constraint_metadata["OVERRIDE_REASON"],
+        constraint_profile_label=constraint_metadata["CONSTRAINT_PROFILE"],
         python_executable=args.python_executable,
         timeout_seconds=timeout_or_none(args.stage2_timeout_seconds),
         dry_run=False,
     )
     payload["run_wallclock_seconds"] = time.perf_counter() - run_start
+    payload["artifact_path"] = str(ensured_artifact.artifact_path)
+    payload["artifact_reused"] = ensured_artifact.artifact_reused
     stage2_results_path, stage2_results = stage2_alm_runner.load_validated_stage2_artifact(
-        config
+        config,
+        constraint_metadata=constraint_metadata,
     )
     payload["stage2_results_path"] = str(stage2_results_path)
     payload.update(_mode_metrics(stage2_results))

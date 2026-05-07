@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import sys
-from dataclasses import asdict
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -17,11 +16,13 @@ from workflow_runner_common import (  # noqa: E402
     clear_dry_run_marker,
     dry_run_marker_path,
     ensure_stage2_artifact,
+    ensure_stage2_artifact_result,
     load_stage2_artifact_results,
     resolve_stage2_artifact_path,
     resolved_path,
     resolved_optional_path,
     timeout_or_none,
+    stage2_artifact_config_flat_dict,
     write_dry_run_marker,
 )
 from workflow_helpers import (  # noqa: E402
@@ -181,7 +182,7 @@ OPTIONAL_STAGE2_SPEC_KEYS = (
 def _jsonable_stage2_config(config: Stage2ArtifactConfig) -> dict:
     return {
         key: str(value) if isinstance(value, Path) else value
-        for key, value in asdict(config).items()
+        for key, value in stage2_artifact_config_flat_dict(config).items()
     }
 
 
@@ -349,6 +350,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=6,
         help="Boozer-surface ntor used by the Stage 2 Boozer/iota solve.",
+    )
+    parser.set_defaults(
+        constraint_method="alm",
+        stage2_iota_weight=1.0,
     )
     return parser.parse_args(argv)
 
@@ -535,20 +540,6 @@ def build_stage2_alm_config(
     cc_threshold = raw_cc
     curvature_threshold = float(constraint_contract["CURVATURE_THRESHOLD"])
     tf_current_A = float(constraint_contract["TF_CURRENT_A"])
-    stage2_iota_mode = getattr(args, "stage2_iota_mode", "off")
-    stage2_iota_target = getattr(args, "stage2_iota_target", None)
-    stage2_iota_tolerance = getattr(args, "stage2_iota_tolerance", 5.0e-3)
-    stage2_iota_vol_target = getattr(args, "stage2_iota_vol_target", 0.10)
-    stage2_iota_constraint_weight = getattr(
-        args,
-        "stage2_iota_constraint_weight",
-        1.0,
-    )
-    stage2_iota_num_tf_coils = getattr(args, "stage2_iota_num_tf_coils", 20)
-    stage2_iota_nphi = getattr(args, "stage2_iota_nphi", 91)
-    stage2_iota_ntheta = getattr(args, "stage2_iota_ntheta", 32)
-    stage2_iota_mpol = getattr(args, "stage2_iota_mpol", 8)
-    stage2_iota_ntor = getattr(args, "stage2_iota_ntor", 6)
     return Stage2ArtifactConfig(
         plasma_surf_filename=Path(args.plasma_surf_filename).name,
         output_root=output_root,
@@ -563,7 +554,7 @@ def build_stage2_alm_config(
         curvature_threshold=curvature_threshold,
         banana_surf_radius=float(constraint_contract["banana_surf_radius"]),
         order=int(resolved_spec["order"]),
-        constraint_method="alm",
+        constraint_method=args.constraint_method,
         alm_max_outer_iters=int(resolved_spec["alm_max_outer_iters"]),
         alm_penalty_init=float(resolved_spec["alm_penalty_init"]),
         alm_penalty_scale=float(resolved_spec["alm_penalty_scale"]),
@@ -603,22 +594,22 @@ def build_stage2_alm_config(
         target_lcfs_max_minor_radius_m=float(
             constraint_contract["TARGET_LCFS_MAX_MINOR_RADIUS_M"]
         ),
-        stage2_iota_mode=stage2_iota_mode,
-        stage2_iota_target=stage2_iota_target,
-        stage2_iota_tolerance=stage2_iota_tolerance,
-        stage2_iota_weight=1.0,
-        stage2_iota_vol_target=stage2_iota_vol_target,
-        stage2_iota_constraint_weight=stage2_iota_constraint_weight,
-        stage2_iota_num_tf_coils=stage2_iota_num_tf_coils,
-        stage2_iota_nphi=stage2_iota_nphi,
-        stage2_iota_ntheta=stage2_iota_ntheta,
-        stage2_iota_mpol=stage2_iota_mpol,
-        stage2_iota_ntor=stage2_iota_ntor,
+        stage2_iota_mode=args.stage2_iota_mode,
+        stage2_iota_target=args.stage2_iota_target,
+        stage2_iota_tolerance=args.stage2_iota_tolerance,
+        stage2_iota_weight=args.stage2_iota_weight,
+        stage2_iota_vol_target=args.stage2_iota_vol_target,
+        stage2_iota_constraint_weight=args.stage2_iota_constraint_weight,
+        stage2_iota_num_tf_coils=args.stage2_iota_num_tf_coils,
+        stage2_iota_nphi=args.stage2_iota_nphi,
+        stage2_iota_ntheta=args.stage2_iota_ntheta,
+        stage2_iota_mpol=args.stage2_iota_mpol,
+        stage2_iota_ntor=args.stage2_iota_ntor,
     )
 
 
 def _expected_stage2_alm_solver_metadata(config: Stage2ArtifactConfig) -> dict:
-    return {
+    metadata = {
         "ALM_PENALTY_INIT": config.alm_penalty_init,
         "ALM_PENALTY_SCALE": config.alm_penalty_scale,
         "ALM_PENALTY_MAX": config.alm_penalty_max,
@@ -634,6 +625,9 @@ def _expected_stage2_alm_solver_metadata(config: Stage2ArtifactConfig) -> dict:
         "ALM_DISTANCE_SMOOTHING": config.alm_distance_smoothing,
         "ALM_CURVATURE_SMOOTHING": config.alm_curvature_smoothing,
     }
+    if config.constraint_method == "alm":
+        return metadata
+    return {key: None for key in metadata}
 
 
 def _expected_stage2_artifact_metadata(config: Stage2ArtifactConfig) -> dict:
@@ -807,8 +801,8 @@ def main(argv: list[str] | None = None) -> int:
         stage2_iota_ntheta=args.stage2_iota_ntheta,
         stage2_iota_mpol=args.stage2_iota_mpol,
         stage2_iota_ntor=args.stage2_iota_ntor,
-        stage2_iota_weight=1.0,
-        constraint_method="alm",
+        stage2_iota_weight=args.stage2_iota_weight,
+        constraint_method=args.constraint_method,
     )
     resolved_spec, resolved_spec_source = resolve_stage2_spec_payload(args)
     config = build_stage2_alm_config(args, resolved_spec=resolved_spec)
@@ -818,7 +812,6 @@ def main(argv: list[str] | None = None) -> int:
         source_label=resolved_spec_source,
     )
     artifact_path = resolve_stage2_artifact_path(config)
-    artifact_reused = artifact_path.exists()
     output_root = config.output_root
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -840,7 +833,7 @@ def main(argv: list[str] | None = None) -> int:
             resolved_spec_source=resolved_spec_source,
             command=command,
             artifact_path=artifact_path,
-            artifact_reused=artifact_reused,
+            artifact_reused=artifact_path.exists(),
             constraint_metadata=constraint_metadata,
         )
         write_dry_run_marker(
@@ -850,13 +843,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         clear_dry_run_marker(output_root)
-        # NOTE: artifact_reused was computed before ensure_stage2_artifact.
-        # Under concurrent workflows, a concurrent process could create the
-        # artifact between the pre-check and the ensure call, causing
-        # artifact_reused=False while ensure_stage2_artifact actually reused it.
-        # The proper fix requires ensure_stage2_artifact to return a created/reused
-        # flag; for now the pre-check is authoritative for the common case.
-        artifact_path = ensure_stage2_artifact(
+        ensured_artifact = ensure_stage2_artifact_result(
             config,
             constraint_override_reason=constraint_metadata["OVERRIDE_REASON"],
             constraint_profile_label=constraint_metadata["CONSTRAINT_PROFILE"],
@@ -864,6 +851,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout_seconds=timeout_or_none(args.stage2_timeout_seconds),
             dry_run=False,
         )
+        artifact_path = ensured_artifact.artifact_path
         stage2_results_path, stage2_results = load_validated_stage2_artifact(
             config,
             constraint_metadata=constraint_metadata,
@@ -874,7 +862,7 @@ def main(argv: list[str] | None = None) -> int:
             resolved_spec_source=resolved_spec_source,
             command=command,
             artifact_path=artifact_path,
-            artifact_reused=artifact_reused,
+            artifact_reused=ensured_artifact.artifact_reused,
             stage2_results_path=stage2_results_path,
             stage2_results=stage2_results,
             constraint_metadata=constraint_metadata,

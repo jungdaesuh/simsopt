@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import fcntl
+import inspect
 import json
 import math
 import os
@@ -57,6 +59,29 @@ SINGLE_STAGE_ALM_CLI_FIELDS = (
     ("distance_smoothing", float, 0.005),
     ("curvature_smoothing", float, 0.05),
 )
+STAGE2_ALM_DEFAULT_OVERRIDES = {
+    "curvature_smoothing": 0.25,
+}
+STAGE2_ALM_CLI_FIELDS = tuple(
+    (
+        suffix,
+        value_type,
+        STAGE2_ALM_DEFAULT_OVERRIDES.get(suffix, default),
+    )
+    for suffix, value_type, default in SINGLE_STAGE_ALM_CLI_FIELDS
+)
+STAGE2_ALM_DEFAULTS = {
+    suffix: default for suffix, _value_type, default in STAGE2_ALM_CLI_FIELDS
+}
+STAGE2_ARTIFACT_PATH_FIELD_NAMES = tuple(
+    name
+    for name, parameter in inspect.signature(local_stage2_bs_path).parameters.items()
+    if parameter.kind is inspect.Parameter.KEYWORD_ONLY
+)
+
+
+def stage2_alm_default(suffix: str) -> int | float:
+    return STAGE2_ALM_DEFAULTS[suffix]
 
 
 def alm_flag(suffix: str) -> str:
@@ -76,58 +101,161 @@ def append_alm_cli_flags(
     source: object,
     *,
     attr_prefix: str = "alm_",
+    cli_fields: Sequence[tuple[str, type, int | float]] = SINGLE_STAGE_ALM_CLI_FIELDS,
 ) -> None:
-    for suffix, _value_type, _default in SINGLE_STAGE_ALM_CLI_FIELDS:
+    for suffix, _value_type, _default in cli_fields:
         command.extend(
             [alm_flag(suffix), str(getattr(source, f"{attr_prefix}{suffix}"))]
         )
 
 
 @dataclass(frozen=True)
-class Stage2ArtifactConfig:
+class Stage2ArtifactEnsureResult:
+    artifact_path: Path
+    artifact_reused: bool
+
+
+_STAGE2_ALM_FIELD_NAMES = tuple(
+    f"alm_{suffix}" for suffix, _value_type, _default in STAGE2_ALM_CLI_FIELDS
+)
+STAGE2_ARTIFACT_CONFIG_FLAT_FIELD_NAMES = (
+    "plasma_surf_filename",
+    "output_root",
+    "equilibria_dir",
+    "tf_current_A",
+    "major_radius",
+    "toroidal_flux",
+    "length_weight",
+    "cc_weight",
+    "cc_threshold",
+    "curvature_weight",
+    "curvature_threshold",
+    "banana_surf_radius",
+    "order",
+    "constraint_method",
+    "alm_max_outer_iters",
+    "alm_penalty_init",
+    "alm_penalty_scale",
+    "basin_hops",
+    "basin_stepsize",
+    *_STAGE2_ALM_FIELD_NAMES[3:],
+    "basin_temperature",
+    "basin_niter_success",
+    "basin_seed",
+    "init_only",
+    "banana_init_current_A",
+    "banana_current_max_A",
+    "length_target",
+    "finite_current_mode",
+    "proxy_plasma_current_A",
+    "vf_current_A",
+    "vf_template_path",
+    "target_lcfs_max_major_radius_m",
+    "target_lcfs_max_minor_radius_m",
+    "stage2_iota_mode",
+    "stage2_iota_target",
+    "stage2_iota_tolerance",
+    "stage2_iota_weight",
+    "stage2_iota_vol_target",
+    "stage2_iota_constraint_weight",
+    "stage2_iota_num_tf_coils",
+    "stage2_iota_nphi",
+    "stage2_iota_ntheta",
+    "stage2_iota_mpol",
+    "stage2_iota_ntor",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class Stage2ArtifactIOConfig:
     plasma_surf_filename: str
     output_root: Path
     equilibria_dir: str | None
-    tf_current_A: float
+
+
+@dataclass(frozen=True, slots=True)
+class Stage2GeometryConfig:
     major_radius: float
     toroidal_flux: float
-    length_weight: float
-    cc_weight: float
-    cc_threshold: float
-    curvature_weight: float
-    curvature_threshold: float
     banana_surf_radius: float
     order: int
+
+    def __post_init__(self) -> None:
+        validate_major_radius(self.major_radius)
+        validate_normalized_toroidal_flux(
+            self.toroidal_flux,
+            field_name="Stage2ArtifactConfig.toroidal_flux",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Stage2HardwareConfig:
+    tf_current_A: float
+    banana_init_current_A: float = 1.0e4
+    banana_current_max_A: float = 1.6e4
+
+
+@dataclass(frozen=True, slots=True)
+class Stage2ObjectiveWeights:
+    length_weight: float
+    cc_weight: float
+    curvature_weight: float
+
+
+@dataclass(frozen=True, slots=True)
+class Stage2ConstraintPolicy:
     constraint_method: str
+    cc_threshold: float
+    curvature_threshold: float
+    length_target: float = DEFAULT_STAGE2_LENGTH_TARGET
+    target_lcfs_max_major_radius_m: float = 0.92
+    target_lcfs_max_minor_radius_m: float = 0.15
+
+
+@dataclass(frozen=True, slots=True)
+class Stage2AlmControls:
     alm_max_outer_iters: int
     alm_penalty_init: float
     alm_penalty_scale: float
+    alm_penalty_max: float = stage2_alm_default("penalty_max")
+    alm_feas_tol: float = stage2_alm_default("feas_tol")
+    alm_stationarity_tol: float = stage2_alm_default("stationarity_tol")
+    alm_trust_radius_init: float = stage2_alm_default("trust_radius_init")
+    alm_trust_radius_min: float = stage2_alm_default("trust_radius_min")
+    alm_trust_radius_shrink: float = stage2_alm_default("trust_radius_shrink")
+    alm_trust_radius_grow: float = stage2_alm_default("trust_radius_grow")
+    alm_max_inner_attempts: int = stage2_alm_default("max_inner_attempts")
+    alm_max_subproblem_continuations: int = stage2_alm_default(
+        "max_subproblem_continuations"
+    )
+    alm_distance_smoothing: float = stage2_alm_default("distance_smoothing")
+    alm_curvature_smoothing: float = stage2_alm_default("curvature_smoothing")
+
+
+@dataclass(frozen=True, slots=True)
+class Stage2BasinControls:
     basin_hops: int
     basin_stepsize: float
-    alm_penalty_max: float = 1.0e8
-    alm_feas_tol: float = 1e-6
-    alm_stationarity_tol: float = 1e-6
-    alm_trust_radius_init: float = 0.05
-    alm_trust_radius_min: float = 1e-4
-    alm_trust_radius_shrink: float = 0.5
-    alm_trust_radius_grow: float = 1.5
-    alm_max_inner_attempts: int = 4
-    alm_max_subproblem_continuations: int = 20
-    alm_distance_smoothing: float = 0.005
-    alm_curvature_smoothing: float = 0.25
     basin_temperature: float = 1.0
     basin_niter_success: int = 0
     basin_seed: int | None = None
     init_only: bool = False
-    banana_init_current_A: float = 1.0e4
-    banana_current_max_A: float = 1.6e4
-    length_target: float = DEFAULT_STAGE2_LENGTH_TARGET
+
+
+@dataclass(frozen=True, slots=True)
+class Stage2FiniteCurrentConfig:
     finite_current_mode: str = "wataru_proxy_field"
     proxy_plasma_current_A: float = 0.0
     vf_current_A: float = 0.0
     vf_template_path: str | None = None
-    target_lcfs_max_major_radius_m: float = 0.92
-    target_lcfs_max_minor_radius_m: float = 0.15
+
+    @property
+    def effective_vf_template_path(self) -> str | None:
+        return resolve_wataru_vf_template_path(self.vf_template_path)
+
+
+@dataclass(frozen=True, slots=True)
+class Stage2IotaConfig:
     stage2_iota_mode: str = "off"
     stage2_iota_target: float | None = None
     stage2_iota_tolerance: float = 5.0e-3
@@ -140,8 +268,186 @@ class Stage2ArtifactConfig:
     stage2_iota_mpol: int = 8
     stage2_iota_ntor: int = 6
 
-    def __post_init__(self) -> None:
-        validate_major_radius(self.major_radius)
+
+@dataclass(frozen=True, slots=True, init=False)
+class Stage2ArtifactConfig:
+    _io: Stage2ArtifactIOConfig
+    _geometry: Stage2GeometryConfig
+    _hardware: Stage2HardwareConfig
+    _objective_weights: Stage2ObjectiveWeights
+    _constraint_policy: Stage2ConstraintPolicy
+    _alm: Stage2AlmControls
+    _basin: Stage2BasinControls
+    _finite_current: Stage2FiniteCurrentConfig
+    _iota: Stage2IotaConfig
+
+    def __init__(
+        self,
+        plasma_surf_filename: str,
+        output_root: Path,
+        equilibria_dir: str | None,
+        tf_current_A: float,
+        major_radius: float,
+        toroidal_flux: float,
+        length_weight: float,
+        cc_weight: float,
+        cc_threshold: float,
+        curvature_weight: float,
+        curvature_threshold: float,
+        banana_surf_radius: float,
+        order: int,
+        constraint_method: str,
+        alm_max_outer_iters: int,
+        alm_penalty_init: float,
+        alm_penalty_scale: float,
+        basin_hops: int,
+        basin_stepsize: float,
+        alm_penalty_max: float = stage2_alm_default("penalty_max"),
+        alm_feas_tol: float = stage2_alm_default("feas_tol"),
+        alm_stationarity_tol: float = stage2_alm_default("stationarity_tol"),
+        alm_trust_radius_init: float = stage2_alm_default("trust_radius_init"),
+        alm_trust_radius_min: float = stage2_alm_default("trust_radius_min"),
+        alm_trust_radius_shrink: float = stage2_alm_default("trust_radius_shrink"),
+        alm_trust_radius_grow: float = stage2_alm_default("trust_radius_grow"),
+        alm_max_inner_attempts: int = stage2_alm_default("max_inner_attempts"),
+        alm_max_subproblem_continuations: int = stage2_alm_default(
+            "max_subproblem_continuations"
+        ),
+        alm_distance_smoothing: float = stage2_alm_default("distance_smoothing"),
+        alm_curvature_smoothing: float = stage2_alm_default("curvature_smoothing"),
+        basin_temperature: float = 1.0,
+        basin_niter_success: int = 0,
+        basin_seed: int | None = None,
+        init_only: bool = False,
+        banana_init_current_A: float = 1.0e4,
+        banana_current_max_A: float = 1.6e4,
+        length_target: float = DEFAULT_STAGE2_LENGTH_TARGET,
+        finite_current_mode: str = "wataru_proxy_field",
+        proxy_plasma_current_A: float = 0.0,
+        vf_current_A: float = 0.0,
+        vf_template_path: str | None = None,
+        target_lcfs_max_major_radius_m: float = 0.92,
+        target_lcfs_max_minor_radius_m: float = 0.15,
+        stage2_iota_mode: str = "off",
+        stage2_iota_target: float | None = None,
+        stage2_iota_tolerance: float = 5.0e-3,
+        stage2_iota_weight: float = 1.0,
+        stage2_iota_vol_target: float = 0.10,
+        stage2_iota_constraint_weight: float = 1.0,
+        stage2_iota_num_tf_coils: int = 20,
+        stage2_iota_nphi: int = 91,
+        stage2_iota_ntheta: int = 32,
+        stage2_iota_mpol: int = 8,
+        stage2_iota_ntor: int = 6,
+    ) -> None:
+        object.__setattr__(
+            self,
+            "_io",
+            Stage2ArtifactIOConfig(
+                plasma_surf_filename=plasma_surf_filename,
+                output_root=output_root,
+                equilibria_dir=equilibria_dir,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_geometry",
+            Stage2GeometryConfig(
+                major_radius=major_radius,
+                toroidal_flux=toroidal_flux,
+                banana_surf_radius=banana_surf_radius,
+                order=order,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_hardware",
+            Stage2HardwareConfig(
+                tf_current_A=tf_current_A,
+                banana_init_current_A=banana_init_current_A,
+                banana_current_max_A=banana_current_max_A,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_objective_weights",
+            Stage2ObjectiveWeights(
+                length_weight=length_weight,
+                cc_weight=cc_weight,
+                curvature_weight=curvature_weight,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_constraint_policy",
+            Stage2ConstraintPolicy(
+                constraint_method=constraint_method,
+                length_target=length_target,
+                cc_threshold=cc_threshold,
+                curvature_threshold=curvature_threshold,
+                target_lcfs_max_major_radius_m=target_lcfs_max_major_radius_m,
+                target_lcfs_max_minor_radius_m=target_lcfs_max_minor_radius_m,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_alm",
+            Stage2AlmControls(
+                alm_max_outer_iters=alm_max_outer_iters,
+                alm_penalty_init=alm_penalty_init,
+                alm_penalty_scale=alm_penalty_scale,
+                alm_penalty_max=alm_penalty_max,
+                alm_feas_tol=alm_feas_tol,
+                alm_stationarity_tol=alm_stationarity_tol,
+                alm_trust_radius_init=alm_trust_radius_init,
+                alm_trust_radius_min=alm_trust_radius_min,
+                alm_trust_radius_shrink=alm_trust_radius_shrink,
+                alm_trust_radius_grow=alm_trust_radius_grow,
+                alm_max_inner_attempts=alm_max_inner_attempts,
+                alm_max_subproblem_continuations=alm_max_subproblem_continuations,
+                alm_distance_smoothing=alm_distance_smoothing,
+                alm_curvature_smoothing=alm_curvature_smoothing,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_basin",
+            Stage2BasinControls(
+                basin_hops=basin_hops,
+                basin_stepsize=basin_stepsize,
+                basin_temperature=basin_temperature,
+                basin_niter_success=basin_niter_success,
+                basin_seed=basin_seed,
+                init_only=init_only,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_finite_current",
+            Stage2FiniteCurrentConfig(
+                finite_current_mode=finite_current_mode,
+                proxy_plasma_current_A=proxy_plasma_current_A,
+                vf_current_A=vf_current_A,
+                vf_template_path=vf_template_path,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_iota",
+            Stage2IotaConfig(
+                stage2_iota_mode=stage2_iota_mode,
+                stage2_iota_target=stage2_iota_target,
+                stage2_iota_tolerance=stage2_iota_tolerance,
+                stage2_iota_weight=stage2_iota_weight,
+                stage2_iota_vol_target=stage2_iota_vol_target,
+                stage2_iota_constraint_weight=stage2_iota_constraint_weight,
+                stage2_iota_num_tf_coils=stage2_iota_num_tf_coils,
+                stage2_iota_nphi=stage2_iota_nphi,
+                stage2_iota_ntheta=stage2_iota_ntheta,
+                stage2_iota_mpol=stage2_iota_mpol,
+                stage2_iota_ntor=stage2_iota_ntor,
+            ),
+        )
         validate_constraint_cli_overrides(
             {
                 "tf_current_A": self.tf_current_A,
@@ -153,10 +459,6 @@ class Stage2ArtifactConfig:
                 "target_lcfs_max_major_radius_m": self.target_lcfs_max_major_radius_m,
                 "target_lcfs_max_minor_radius_m": self.target_lcfs_max_minor_radius_m,
             }
-        )
-        validate_normalized_toroidal_flux(
-            self.toroidal_flux,
-            field_name="Stage2ArtifactConfig.toroidal_flux",
         )
         if self.stage2_iota_mode != "off" and self.stage2_iota_target is None:
             raise ValueError(
@@ -179,10 +481,239 @@ class Stage2ArtifactConfig:
             )
 
     @property
+    def plasma_surf_filename(self) -> str:
+        return self._io.plasma_surf_filename
+
+    @property
+    def output_root(self) -> Path:
+        return self._io.output_root
+
+    @property
+    def equilibria_dir(self) -> str | None:
+        return self._io.equilibria_dir
+
+    @property
+    def tf_current_A(self) -> float:
+        return self._hardware.tf_current_A
+
+    @property
+    def major_radius(self) -> float:
+        return self._geometry.major_radius
+
+    @property
+    def toroidal_flux(self) -> float:
+        return self._geometry.toroidal_flux
+
+    @property
+    def length_weight(self) -> float:
+        return self._objective_weights.length_weight
+
+    @property
+    def cc_weight(self) -> float:
+        return self._objective_weights.cc_weight
+
+    @property
+    def cc_threshold(self) -> float:
+        return self._constraint_policy.cc_threshold
+
+    @property
+    def curvature_weight(self) -> float:
+        return self._objective_weights.curvature_weight
+
+    @property
+    def curvature_threshold(self) -> float:
+        return self._constraint_policy.curvature_threshold
+
+    @property
+    def banana_surf_radius(self) -> float:
+        return self._geometry.banana_surf_radius
+
+    @property
+    def order(self) -> int:
+        return self._geometry.order
+
+    @property
+    def constraint_method(self) -> str:
+        return self._constraint_policy.constraint_method
+
+    @property
+    def alm_max_outer_iters(self) -> int:
+        return self._alm.alm_max_outer_iters
+
+    @property
+    def alm_penalty_init(self) -> float:
+        return self._alm.alm_penalty_init
+
+    @property
+    def alm_penalty_scale(self) -> float:
+        return self._alm.alm_penalty_scale
+
+    @property
+    def basin_hops(self) -> int:
+        return self._basin.basin_hops
+
+    @property
+    def basin_stepsize(self) -> float:
+        return self._basin.basin_stepsize
+
+    @property
+    def alm_penalty_max(self) -> float:
+        return self._alm.alm_penalty_max
+
+    @property
+    def alm_feas_tol(self) -> float:
+        return self._alm.alm_feas_tol
+
+    @property
+    def alm_stationarity_tol(self) -> float:
+        return self._alm.alm_stationarity_tol
+
+    @property
+    def alm_trust_radius_init(self) -> float:
+        return self._alm.alm_trust_radius_init
+
+    @property
+    def alm_trust_radius_min(self) -> float:
+        return self._alm.alm_trust_radius_min
+
+    @property
+    def alm_trust_radius_shrink(self) -> float:
+        return self._alm.alm_trust_radius_shrink
+
+    @property
+    def alm_trust_radius_grow(self) -> float:
+        return self._alm.alm_trust_radius_grow
+
+    @property
+    def alm_max_inner_attempts(self) -> int:
+        return self._alm.alm_max_inner_attempts
+
+    @property
+    def alm_max_subproblem_continuations(self) -> int:
+        return self._alm.alm_max_subproblem_continuations
+
+    @property
+    def alm_distance_smoothing(self) -> float:
+        return self._alm.alm_distance_smoothing
+
+    @property
+    def alm_curvature_smoothing(self) -> float:
+        return self._alm.alm_curvature_smoothing
+
+    @property
+    def basin_temperature(self) -> float:
+        return self._basin.basin_temperature
+
+    @property
+    def basin_niter_success(self) -> int:
+        return self._basin.basin_niter_success
+
+    @property
+    def basin_seed(self) -> int | None:
+        return self._basin.basin_seed
+
+    @property
+    def init_only(self) -> bool:
+        return self._basin.init_only
+
+    @property
+    def banana_init_current_A(self) -> float:
+        return self._hardware.banana_init_current_A
+
+    @property
+    def banana_current_max_A(self) -> float:
+        return self._hardware.banana_current_max_A
+
+    @property
+    def length_target(self) -> float:
+        return self._constraint_policy.length_target
+
+    @property
+    def finite_current_mode(self) -> str:
+        return self._finite_current.finite_current_mode
+
+    @property
+    def proxy_plasma_current_A(self) -> float:
+        return self._finite_current.proxy_plasma_current_A
+
+    @property
+    def vf_current_A(self) -> float:
+        return self._finite_current.vf_current_A
+
+    @property
+    def vf_template_path(self) -> str | None:
+        return self._finite_current.vf_template_path
+
+    @property
+    def target_lcfs_max_major_radius_m(self) -> float:
+        return self._constraint_policy.target_lcfs_max_major_radius_m
+
+    @property
+    def target_lcfs_max_minor_radius_m(self) -> float:
+        return self._constraint_policy.target_lcfs_max_minor_radius_m
+
+    @property
+    def stage2_iota_mode(self) -> str:
+        return self._iota.stage2_iota_mode
+
+    @property
+    def stage2_iota_target(self) -> float | None:
+        return self._iota.stage2_iota_target
+
+    @property
+    def stage2_iota_tolerance(self) -> float:
+        return self._iota.stage2_iota_tolerance
+
+    @property
+    def stage2_iota_weight(self) -> float:
+        return self._iota.stage2_iota_weight
+
+    @property
+    def stage2_iota_vol_target(self) -> float:
+        return self._iota.stage2_iota_vol_target
+
+    @property
+    def stage2_iota_constraint_weight(self) -> float:
+        return self._iota.stage2_iota_constraint_weight
+
+    @property
+    def stage2_iota_num_tf_coils(self) -> int:
+        return self._iota.stage2_iota_num_tf_coils
+
+    @property
+    def stage2_iota_nphi(self) -> int:
+        return self._iota.stage2_iota_nphi
+
+    @property
+    def stage2_iota_ntheta(self) -> int:
+        return self._iota.stage2_iota_ntheta
+
+    @property
+    def stage2_iota_mpol(self) -> int:
+        return self._iota.stage2_iota_mpol
+
+    @property
+    def stage2_iota_ntor(self) -> int:
+        return self._iota.stage2_iota_ntor
+
+    @property
     def effective_vf_template_path(self) -> str | None:
         # Fresh Stage 2 wrappers materialize the repo-default VF template only
         # when building command/identity artifacts; keep the stored field raw.
-        return resolve_wataru_vf_template_path(self.vf_template_path)
+        return self._finite_current.effective_vf_template_path
+
+
+def stage2_artifact_config_flat_field_names() -> tuple[str, ...]:
+    return STAGE2_ARTIFACT_CONFIG_FLAT_FIELD_NAMES
+
+
+def stage2_artifact_config_flat_dict(
+    config: Stage2ArtifactConfig,
+) -> dict[str, object]:
+    return {
+        field_name: getattr(config, field_name)
+        for field_name in STAGE2_ARTIFACT_CONFIG_FLAT_FIELD_NAMES
+    }
 
 
 def parse_csv(raw: str, cast: Callable[[str], T]) -> list[T]:
@@ -217,41 +748,19 @@ def build_stage2_seed_spec(config: Stage2ArtifactConfig) -> Stage2SeedSpec:
     )
 
 
+def _stage2_artifact_path_kwargs(config: Stage2ArtifactConfig) -> dict[str, object]:
+    flat_config = stage2_artifact_config_flat_dict(config)
+    return {
+        field_name: flat_config[field_name]
+        for field_name in STAGE2_ARTIFACT_PATH_FIELD_NAMES
+    }
+
+
 def resolve_stage2_artifact_path(config: Stage2ArtifactConfig) -> Path:
     return local_stage2_bs_path(
         config.output_root,
         build_stage2_seed_spec(config),
-        constraint_method=config.constraint_method,
-        alm_max_outer_iters=config.alm_max_outer_iters,
-        alm_penalty_init=config.alm_penalty_init,
-        alm_penalty_scale=config.alm_penalty_scale,
-        alm_penalty_max=config.alm_penalty_max,
-        alm_max_subproblem_continuations=config.alm_max_subproblem_continuations,
-        alm_feas_tol=config.alm_feas_tol,
-        alm_stationarity_tol=config.alm_stationarity_tol,
-        alm_trust_radius_init=config.alm_trust_radius_init,
-        alm_trust_radius_min=config.alm_trust_radius_min,
-        alm_trust_radius_shrink=config.alm_trust_radius_shrink,
-        alm_trust_radius_grow=config.alm_trust_radius_grow,
-        alm_max_inner_attempts=config.alm_max_inner_attempts,
-        alm_distance_smoothing=config.alm_distance_smoothing,
-        alm_curvature_smoothing=config.alm_curvature_smoothing,
-        basin_hops=config.basin_hops,
-        basin_stepsize=config.basin_stepsize,
-        basin_temperature=config.basin_temperature,
-        basin_niter_success=config.basin_niter_success,
-        basin_seed=config.basin_seed,
-        stage2_iota_mode=config.stage2_iota_mode,
-        stage2_iota_target=config.stage2_iota_target,
-        stage2_iota_tolerance=config.stage2_iota_tolerance,
-        stage2_iota_weight=config.stage2_iota_weight,
-        stage2_iota_vol_target=config.stage2_iota_vol_target,
-        stage2_iota_constraint_weight=config.stage2_iota_constraint_weight,
-        stage2_iota_num_tf_coils=config.stage2_iota_num_tf_coils,
-        stage2_iota_nphi=config.stage2_iota_nphi,
-        stage2_iota_ntheta=config.stage2_iota_ntheta,
-        stage2_iota_mpol=config.stage2_iota_mpol,
-        stage2_iota_ntor=config.stage2_iota_ntor,
+        **_stage2_artifact_path_kwargs(config),
     )
 
 
@@ -323,7 +832,7 @@ def build_stage2_command(
     if constraint_override_reason not in {None, ""}:
         command.extend(["--constraint-override-reason", constraint_override_reason])
     if config.constraint_method == "alm":
-        append_alm_cli_flags(command, config)
+        append_alm_cli_flags(command, config, cli_fields=STAGE2_ALM_CLI_FIELDS)
     if config.basin_hops > 0:
         command.extend(
             [
@@ -376,6 +885,21 @@ def build_stage2_command(
     return command
 
 
+def _build_subprocess_env(
+    *,
+    env_overrides: Mapping[str, str] | None = None,
+    inherit_alm: bool = False,
+) -> dict[str, str]:
+    subprocess_env = {
+        key: value
+        for key, value in os.environ.items()
+        if inherit_alm or not key.startswith("ALM_")
+    }
+    if env_overrides is not None:
+        subprocess_env.update(env_overrides)
+    return subprocess_env
+
+
 def run_command(
     command: Sequence[str],
     *,
@@ -385,21 +909,23 @@ def run_command(
     env: Mapping[str, str] | None = None,
     inherit_alm_env: bool = False,
 ) -> None:
+    """Run a subprocess with repo-standard ALM environment isolation.
+
+    The child environment starts from ``os.environ`` with inherited ``ALM_*``
+    keys stripped unless ``inherit_alm_env`` is true. Explicit ``env`` entries
+    are applied last, so caller-supplied ``ALM_*`` overrides are preserved.
+    """
     if dry_run:
         return
-    subprocess_env = {
-        key: value
-        for key, value in os.environ.items()
-        if inherit_alm_env or not key.startswith("ALM_")
-    }
-    if env is not None:
-        subprocess_env.update(env)
     subprocess.run(
         list(command),
         cwd=str(cwd),
         check=True,
         timeout=timeout_seconds,
-        env=subprocess_env,
+        env=_build_subprocess_env(
+            env_overrides=env,
+            inherit_alm=inherit_alm_env,
+        ),
     )
 
 
@@ -412,24 +938,57 @@ def ensure_stage2_artifact(
     timeout_seconds: float | None = None,
     dry_run: bool = False,
 ) -> Path:
-    artifact_path = resolve_stage2_artifact_path(config)
-    if artifact_path.exists() or dry_run:
-        return artifact_path
-    run_command(
-        build_stage2_command(
-            config,
-            constraint_override_reason=constraint_override_reason,
-            constraint_profile_label=constraint_profile_label,
-            python_executable=python_executable,
-        ),
+    return ensure_stage2_artifact_result(
+        config,
+        constraint_override_reason=constraint_override_reason,
+        constraint_profile_label=constraint_profile_label,
+        python_executable=python_executable,
         timeout_seconds=timeout_seconds,
         dry_run=dry_run,
-    )
-    if not artifact_path.exists():
-        raise FileNotFoundError(
-            f"Expected Stage 2 artifact was not created: {artifact_path}"
+    ).artifact_path
+
+
+def ensure_stage2_artifact_result(
+    config: Stage2ArtifactConfig,
+    *,
+    constraint_override_reason: str | None = None,
+    constraint_profile_label: str | None = None,
+    python_executable: str = sys.executable,
+    timeout_seconds: float | None = None,
+    dry_run: bool = False,
+) -> Stage2ArtifactEnsureResult:
+    artifact_path = resolve_stage2_artifact_path(config)
+    if dry_run:
+        return Stage2ArtifactEnsureResult(
+            artifact_path=artifact_path,
+            artifact_reused=artifact_path.exists(),
         )
-    return artifact_path
+
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = artifact_path.with_name(f".{artifact_path.name}.lock")
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        artifact_reused = artifact_path.exists()
+        if not artifact_reused:
+            run_command(
+                build_stage2_command(
+                    config,
+                    constraint_override_reason=constraint_override_reason,
+                    constraint_profile_label=constraint_profile_label,
+                    python_executable=python_executable,
+                ),
+                timeout_seconds=timeout_seconds,
+                dry_run=False,
+            )
+            if not artifact_path.exists():
+                raise FileNotFoundError(
+                    f"Expected Stage 2 artifact was not created: {artifact_path}"
+                )
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    return Stage2ArtifactEnsureResult(
+        artifact_path=artifact_path,
+        artifact_reused=artifact_reused,
+    )
 
 
 def load_stage2_artifact_results(stage2_bs_path: str | Path) -> tuple[Path, dict]:
@@ -794,14 +1353,14 @@ def run_poincare_artifact(
     command = [python_executable, str(POINCARE_SCRIPT_PATH)]
     if dry_run:
         return command
-    env = os.environ.copy()
-    env["POINCARE_OUT_DIR"] = str(resolved_path(output_dir))
     subprocess.run(
         command,
         cwd=str(SCRIPT_DIR),
         check=True,
         timeout=timeout_seconds,
-        env=env,
+        env=_build_subprocess_env(
+            env_overrides={"POINCARE_OUT_DIR": str(resolved_path(output_dir))},
+        ),
     )
     return command
 

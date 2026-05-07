@@ -251,6 +251,18 @@ def make_stage2_alm_wrapper_args(**overrides):
         "target_lcfs_max_major_radius_m": None,
         "target_lcfs_max_minor_radius_m": None,
         "banana_surf_radius": None,
+        "constraint_method": "alm",
+        "stage2_iota_mode": "off",
+        "stage2_iota_target": None,
+        "stage2_iota_tolerance": 5.0e-3,
+        "stage2_iota_weight": 1.0,
+        "stage2_iota_vol_target": 0.10,
+        "stage2_iota_constraint_weight": 1.0,
+        "stage2_iota_num_tf_coils": 20,
+        "stage2_iota_nphi": 91,
+        "stage2_iota_ntheta": 32,
+        "stage2_iota_mpol": 8,
+        "stage2_iota_ntor": 6,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)

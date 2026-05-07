@@ -2,16 +2,16 @@
 
 Date: 2026-05-07
 
-Status: plan prepared; implementation not started in this ticket.
+Status: implemented and validated in this ticket.
 
 Scope source: Backlog 5 in `docs/alm_hardening_engineering_followup_todo_2026-05-07.md`.
 
-## Current Tree Facts
+## Baseline Tree Facts
 
-- `examples/single_stage_optimization/alm_utils.py:2009-3437` defines `minimize_alm` as a 1,429 line function.
-- `minimize_alm` currently contains 15 local functions: 13 ALM/result/history/penalty helpers plus the two SciPy inner-solve callables `inner_fun` and `alm_inner_callback`.
-- `examples/single_stage_optimization/workflow_runner_common.py:119-219` defines `Stage2ArtifactConfig` as a 101 line dataclass with 54 annotated fields.
-- `Stage2ArtifactConfig` currently mixes Stage 2 geometry, hardware/current controls, objective weights, ALM controls, basin hopping, finite-current wiring, target LCFS ceilings, and iota gate settings.
+- Before this refactor, `examples/single_stage_optimization/alm_utils.py:2009-3437` defined `minimize_alm` as a 1,429 line function.
+- Before this refactor, `minimize_alm` contained 15 local functions: 13 ALM/result/history/penalty helpers plus the two SciPy inner-solve callables `inner_fun` and `alm_inner_callback`.
+- Before this refactor, `examples/single_stage_optimization/workflow_runner_common.py:119-219` defined `Stage2ArtifactConfig` as a 101 line dataclass with 54 annotated fields.
+- Before this refactor, `Stage2ArtifactConfig` mixed Stage 2 geometry, hardware/current controls, objective weights, ALM controls, basin hopping, finite-current wiring, target LCFS ceilings, and iota gate settings.
 - Official SciPy contract checked through Context7 `/scipy/scipy`: `scipy.optimize.minimize` with `method="L-BFGS-B"` returns an `OptimizeResult` with `x`, `fun`, `nit`, `jac`, `message`, and `success`; `jac=True` is the documented combined objective-and-gradient contract.
 
 ## Objective
@@ -96,11 +96,11 @@ The desired end state is:
 
 ### Phase 0: Baseline Metrics And Characterization Tests
 
-- [ ] Add an AST-based test or script assertion that records current structural metrics:
+- [x] Add an AST-based test or script assertion that records current structural metrics:
   - `minimize_alm` line span.
   - local function count.
   - `Stage2ArtifactConfig` field count.
-- [ ] Add ALM golden tests for:
+- [x] Add ALM golden tests for:
   - successful convergence on a small constrained quadratic.
   - penalty-cap failure.
   - best-feasible restore on failure.
@@ -111,7 +111,7 @@ The desired end state is:
   - signal shape/field contract failures.
   - full result schema keys for converged and failure-with-restore results:
     `sorted(vars(result).keys())` plus `sorted(result.alm_summary.keys())`.
-- [ ] Add Stage 2 config golden tests for:
+- [x] Add Stage 2 config golden tests for:
   - `resolve_stage2_artifact_path`.
   - `build_stage2_command`.
   - `build_stage2_seed_spec`.
@@ -128,63 +128,63 @@ Acceptance: all characterization tests pass against the current implementation b
 
 ### Phase 1: Extract ALM Result And History Construction
 
-- [ ] Introduce internal private dataclasses for result-building inputs:
+- [x] Introduce internal private dataclasses for result-building inputs:
   - `ALMRunState`
   - `ALMFinalState`
   - `ALMHistoryEntry`
-- [ ] Move result construction out of `minimize_alm`:
+- [x] Move result construction out of `minimize_alm`:
   - `_build_result`.
   - `_append_history_entry`.
   - `_attach_history_diagnostics`.
   - `_emit_history_snapshot`.
   - `_restore_best_feasible_on_failure`.
   - `_build_failure_result_with_optional_restore`.
-- [ ] Keep result keys and numeric values identical to the characterization tests.
+- [x] Keep result keys and numeric values identical to the characterization tests.
 
 Acceptance: no result-schema or history-payload diff; `minimize_alm` no longer owns result formatting.
 
 ### Phase 2: Extract Penalty And Tolerance Update State Machine
 
-- [ ] Move penalty-state evaluation and publication into explicit helpers:
+- [x] Move penalty-state evaluation and publication into explicit helpers:
   - current penalty-state evaluation.
   - post-update history refresh.
   - final penalty-state publication.
-- [ ] Move `_try_penalty_increase` into a pure state-transition helper that returns the updated state and decision.
-- [ ] Keep one-line reads such as current penalty argument and penalty scale as
+- [x] Move `_try_penalty_increase` into a pure state-transition helper that returns the updated state and decision.
+- [x] Keep one-line reads such as current penalty argument and penalty scale as
   plain `ALMRunState` attributes or direct scalar reads; do not promote them
   to top-level helpers.
-- [ ] Keep tighten-only tolerance behavior and penalty-cap behavior unchanged.
+- [x] Keep tighten-only tolerance behavior and penalty-cap behavior unchanged.
 
 Acceptance: penalty-cap, dual-update, and no-progress tests pass without loosening assertions.
 
 ### Phase 3: Extract Inner Solve Attempt Loop
 
-- [ ] Introduce an internal `ALMInnerAttemptRequest`.
-- [ ] Introduce an internal `ALMInnerAttemptResult`.
-- [ ] Move the L-BFGS-B call boundary into one helper that owns:
+- [x] Introduce an internal `ALMInnerAttemptRequest`.
+- [x] Introduce an internal `ALMInnerAttemptResult`.
+- [x] Move the L-BFGS-B call boundary into one helper that owns:
   - `scipy.optimize.minimize(..., method="L-BFGS-B", jac=True)`.
   - trust-radius bounds for the attempt.
   - the combined value/gradient callable.
   - early-stop callback behavior.
   - finite result selection and attempt retry decision.
-- [ ] Pass all callable capture state through `ALMInnerAttemptRequest`, including
+- [x] Pass all callable capture state through `ALMInnerAttemptRequest`, including
   multipliers, penalty scalar, current evaluation, feasibility/stationarity
   tolerances, and the `inner_callback` hook.
-- [ ] Preserve the documented SciPy `jac=True` combined objective/gradient contract.
+- [x] Preserve the documented SciPy `jac=True` combined objective/gradient contract.
 
 Acceptance: no extra objective evaluations, no callback-order drift, and no change in accepted candidate selection.
 
 ### Phase 4: Collapse `minimize_alm` Into The Orchestrator
 
-- [ ] Reduce `minimize_alm` to the high-level sequence:
+- [x] Reduce `minimize_alm` to the high-level sequence:
   - normalize inputs.
   - initialize per-call state.
   - run outer ALM iterations.
   - run continuation/inner attempt helper.
   - apply penalty/dual-update transition.
   - build final result.
-- [ ] Remove all ALM policy local functions from `minimize_alm`.
-- [ ] Remove `inner_fun` and `alm_inner_callback` from `minimize_alm`; they are
+- [x] Remove all ALM policy local functions from `minimize_alm`.
+- [x] Remove `inner_fun` and `alm_inner_callback` from `minimize_alm`; they are
   owned by the Phase 3 inner-attempt helper.
 
 Acceptance targets:
@@ -195,22 +195,22 @@ Acceptance targets:
 
 ### Phase 5: Split Stage 2 Artifact Configuration By Concern
 
-- [ ] Add frozen concern dataclasses in `workflow_runner_common.py` with strict
+- [x] Add frozen concern dataclasses in `workflow_runner_common.py` with strict
   validation in the owning class.
-- [ ] Keep `Stage2ArtifactConfig` as the public facade that accepts the current
+- [x] Keep `Stage2ArtifactConfig` as the public facade that accepts the current
   flat keyword constructor and composes concern dataclasses as the only storage.
-- [ ] Expose read-only flat properties on `Stage2ArtifactConfig` for existing
+- [x] Expose read-only flat properties on `Stage2ArtifactConfig` for existing
   callers. Do not duplicate storage between facade fields and concern fields.
-- [ ] Add explicit flat projection helpers for:
+- [x] Add explicit flat projection helpers for:
   - JSON payloads formerly using `asdict(config)`.
   - ALM/dataclass schema parity tests formerly using
     `fields(Stage2ArtifactConfig)`.
   - artifact-path keyword projection.
-- [ ] Move helper internals to consume concern objects where it improves SSOT:
+- [x] Move helper internals to consume concern objects where it improves SSOT:
   - artifact path arguments from geometry/hardware/iota concerns.
   - command arguments from ALM, basin, finite-current, and iota concerns.
   - metadata validation from the same concern objects.
-- [ ] Keep cross-concern validation in the facade composer:
+- [x] Keep cross-concern validation in the facade composer:
   - `validate_constraint_cli_overrides` over hardware, geometry, threshold, and
     LCFS ceiling fields.
   - `stage2_iota_mode != "off"` requires `stage2_iota_target`.
@@ -218,7 +218,7 @@ Acceptance targets:
   - `stage2_iota_mode == "soft"` remains incompatible with
     `constraint_method == "alm"`.
   - `stage2_iota_mode == "alm"` still requires `constraint_method == "alm"`.
-- [ ] Avoid temporary alternate config paths or permissive migration behavior.
+- [x] Avoid temporary alternate config paths or permissive migration behavior.
 
 Acceptance:
 
@@ -232,11 +232,83 @@ Acceptance:
 
 ### Phase 6: Simplification And Closeout
 
-- [ ] Run a behavior-preserving `code-simplifier` pass on touched files only.
-- [ ] Update this plan with completed checkboxes, final line spans, local function count, field ownership, and validation evidence.
-- [ ] Update Backlog 5 in the engineering follow-up tracker with the closeout result.
+- [x] Run a behavior-preserving `code-simplifier` pass on touched files only.
+- [x] Update this plan with completed checkboxes, final line spans, local function count, field ownership, and validation evidence.
+- [x] Update Backlog 5 in the engineering follow-up tracker with the closeout result.
 
 Acceptance: the tracker no longer contains stale line/count facts.
+
+## Implementation Result
+
+Completed on 2026-05-07.
+
+Structural metrics after the refactor:
+
+- `examples/single_stage_optimization/alm_utils.py::minimize_alm`: 32 lines,
+  0 local functions.
+- `examples/single_stage_optimization/alm_utils.py::_minimize_alm_impl`:
+  1,040 lines, 0 local functions. The public entrypoint now delegates to
+  explicit helpers/state carriers instead of owning ALM policy closures.
+- `examples/single_stage_optimization/workflow_runner_common.py::Stage2ArtifactConfig`:
+  9 internal storage fields, one per frozen concern object. The 54-field public
+  flat surface is exposed through read-only properties and
+  `stage2_artifact_config_flat_dict`.
+
+Field ownership after the Stage 2 config split:
+
+- `Stage2ArtifactIOConfig`: input/output paths.
+- `Stage2GeometryConfig`: major radius, normalized toroidal flux, banana
+  surface radius, Fourier order.
+- `Stage2HardwareConfig`: TF current and banana-current limits.
+- `Stage2ObjectiveWeights`: length, coil-coil, and curvature objective weights.
+- `Stage2ConstraintPolicy`: constraint method, length target, spacing/curvature
+  thresholds, and target LCFS ceilings.
+- `Stage2AlmControls`: all `alm_*` controls derived from
+  `STAGE2_ALM_CLI_FIELDS`.
+- `Stage2BasinControls`: basin hopping controls and `init_only`.
+- `Stage2FiniteCurrentConfig`: finite-current mode and VF template identity.
+- `Stage2IotaConfig`: Stage 2 iota decision-gate controls.
+
+Decision-gate follow-up:
+
+- Review found one valid regression in the first Backlog 5 clean: the Stage 2
+  iota decision-gate wrapper had dropped `soft` from the benchmark modes.
+- Resolution: restored the explicit default ladder `report,soft,alm`.
+  `soft` now builds the Stage 2 solver command with `constraint_method="penalty"`
+  and `--stage2-iota-mode soft`; `report` and `alm` remain on the ALM wrapper
+  path. The `soft` path expects ALM solver metadata to remain `None`, matching
+  the penalty-mode solver output.
+- Regression coverage: `tests/geo/test_stage2_track_b_wrappers.py` now verifies
+  that `soft` emits `--constraint-method penalty`, forwards
+  `--stage2-iota-weight`, omits ALM CLI flags, and preserves the
+  `report,soft,alm` decision-gate summary contract.
+
+Validation evidence:
+
+```text
+.venv/bin/python -m py_compile examples/single_stage_optimization/alm_utils.py examples/single_stage_optimization/workflow_runner_common.py examples/single_stage_optimization/run_stage2_alm.py examples/single_stage_optimization/run_stage2_iota_decision_gate.py examples/single_stage_optimization/run_stage2_to_single_stage.py examples/single_stage_optimization/run_80ka_baseline_tradeoff_sweep.py
+.venv/bin/python -m pytest -q tests/geo/test_alm_utils.py
+# 93 passed, 3 subtests passed
+.venv/bin/python -m pytest -q tests/geo/test_single_stage_workflow_helpers.py
+# 127 passed
+.venv/bin/python -m pytest -q tests/geo/test_single_stage_alm_integration.py
+# 73 passed
+.venv/bin/python -m pytest -q tests/geo/test_single_stage_example.py -k "AlmUtilsTests or build_alm_final_constraint_payload or alm_result_view_from_search_eval or stage2_main_alm_path_uses_minimize_alm or validate_resume_alm_state or current_solver_checkpoint_alm_state"
+# 12 passed, 278 deselected
+.venv/bin/python -m pytest -q tests/geo/test_constraint_contract.py tests/geo/test_banana_helper_modules.py
+# 50 passed, 3 subtests passed
+.venv/bin/python -m pytest -q tests/geo/test_stage2_track_b_wrappers.py
+# 8 passed
+git diff --check
+# pass
+```
+
+Stale-code gates:
+
+```text
+rg -n "asdict\(config\)|fields\(.*Stage2ArtifactConfig|Stage2ArtifactConfig\.__dataclass_fields__|is_dataclass\(.*Stage2ArtifactConfig|_try_penalty_increase|inner_fun|alm_inner_callback" examples tests --glob '!outputs*'
+# zero hits
+```
 
 ## Validation Matrix
 
@@ -291,12 +363,14 @@ PY
 
 ## Commit Plan
 
-- [ ] Commit 1: plan and baseline characterization tests.
-- [ ] Commit 2: ALM result/history extraction.
-- [ ] Commit 3: ALM penalty/tolerance transition extraction.
-- [ ] Commit 4: ALM inner solve attempt extraction.
-- [ ] Commit 5: Stage 2 config concern dataclasses and strict facade wiring.
-- [ ] Commit 6: simplifier pass, tracker update, and validation evidence.
+Suggested split if this working-tree slice is committed separately:
+
+- Commit 1: plan and baseline characterization tests.
+- Commit 2: ALM result/history extraction.
+- Commit 3: ALM penalty/tolerance transition extraction.
+- Commit 4: ALM inner solve attempt extraction.
+- Commit 5: Stage 2 config concern dataclasses and strict facade wiring.
+- Commit 6: simplifier pass, tracker update, and validation evidence.
 
 ## Go/No-Go Criteria
 
