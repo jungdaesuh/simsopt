@@ -32,6 +32,7 @@ from benchmarks.validation_ladder_common import (
     max_pointwise_geometry_drift,
     maybe_initialize_distributed_runtime,
     optimizer_drift_tolerances,
+    parity_ladder_tolerances,
     preparse_platform,
     print_provenance,
     require_requested_platform_runtime,
@@ -122,6 +123,137 @@ _TARGET_OPTIMIZER_METHOD_BY_BACKEND = {
 _TARGET_LANE_COMPILE_DIAGNOSTICS_HOST_CALLBACK_REASON = (
     "compile diagnostics are disabled when Phase 1 host-callback diagnostics "
     "are enabled because that mode does not provide normal cache-reuse evidence"
+)
+_SAME_CANDIDATE_X_ATOL = 1e-8
+_OPTIMIZER_PATH_CANDIDATE_SPLIT_ATOL = 1e-12
+_SAME_CANDIDATE_SCALAR_RTOL = 1e-10
+_SAME_CANDIDATE_SCALAR_ATOL = 1e-12
+_SAME_CANDIDATE_GRADIENT_TOLERANCES = parity_ladder_tolerances(
+    "ls-wrapper-gradient"
+)
+_SAME_CANDIDATE_GRADIENT_RTOL = _SAME_CANDIDATE_GRADIENT_TOLERANCES["rtol"]
+_SAME_CANDIDATE_GRADIENT_ATOL = _SAME_CANDIDATE_GRADIENT_TOLERANCES["atol"]
+_IOTA_DECOMPOSITION_DIAGNOSTIC_ATOL = 1e-13
+_IOTA_DECOMPOSITION_DIAGNOSTIC_RTOL = 1e-12
+_SAME_CANDIDATE_HARDWARE_KEYS = (
+    "curve_curve_min_dist",
+    "curve_surface_min_dist",
+    "surface_vessel_min_dist",
+    "max_curvature",
+)
+_SAME_CANDIDATE_HARDWARE_MARGIN_KEYS = (
+    "curve_curve_min_dist",
+    "curve_surface_min_dist",
+    "surface_vessel_min_dist",
+    "max_curvature",
+)
+_SAME_CANDIDATE_FAILURE_SCALAR_KEYS = (
+    "hardware_score",
+    "solver_score",
+    "penalty_multiplier",
+    "penalty",
+)
+_SAME_CANDIDATE_FAILURE_EXACT_KEYS = (
+    "reject_class",
+    "intersecting",
+    "solver_success",
+    "failure_count",
+    "search_policy",
+    "donor_class",
+)
+_SAME_CANDIDATE_BOOZER_METADATA_EXACT_KEYS = (
+    "boozer_type",
+    "boozer_optimizer_backend",
+    "boozer_least_squares_algorithm",
+    "linearization_kind",
+    "linear_solve_backend",
+    "dense_newton_steps_materialized",
+    "dense_linear_solve_factors_available",
+    "dense_refinement_ran",
+    "final_step_dense_refinement_ran",
+)
+_SAME_CANDIDATE_BOOZER_METADATA_SHAPE_KEYS = (
+    "dense_hessian_shape",
+)
+_SAME_CANDIDATE_BOOZER_METADATA_NUMERIC_KEYS = (
+    "newton_tol",
+    "newton_maxiter",
+    "newton_iter",
+    "final_gradient_norm",
+    "final_gradient_inf_norm",
+    "dense_hessian_bytes",
+)
+_IOTA_DECOMPOSITION_LAYER_FIELDS = (
+    (
+        "solved_state",
+        (
+            ("scalar", ("solved_iota",)),
+            ("scalar", ("solved_G",)),
+            ("vector", ("solved_surface_dofs",)),
+        ),
+    ),
+    (
+        "linear_solve_factors",
+        (
+            ("vector", ("linear_solve_factors", "P")),
+            ("vector", ("linear_solve_factors", "L")),
+            ("vector", ("linear_solve_factors", "U")),
+        ),
+    ),
+    ("dJ_ds", (("vector", ("dJ_ds",)),)),
+    ("adjoint", (("vector", ("adjoint",)),)),
+    (
+        "optimizer_projection_gradient",
+        (("vector", ("optimizer_projection_gradient",)),),
+    ),
+    ("penalty_scale", (("scalar", ("penalty_scale",)),)),
+    (
+        "penalty_optimizer_gradient",
+        (("vector", ("penalty_optimizer_gradient",)),),
+    ),
+    (
+        "weighted_penalty_optimizer_gradient",
+        (("vector", ("weighted_penalty_optimizer_gradient",)),),
+    ),
+)
+_BOOZER_SOLVE_DECOMPOSITION_LAYER_FIELDS = (
+    (
+        "pre_newton_state",
+        (
+            ("scalar", ("pre_newton", "iota")),
+            ("scalar", ("pre_newton", "G")),
+            ("vector", ("pre_newton", "surface_dofs")),
+            ("vector", ("pre_newton", "decision_vector")),
+        ),
+    ),
+    (
+        "pre_newton_objective_gradient",
+        (
+            ("scalar", ("pre_newton", "fun")),
+            ("vector", ("pre_newton", "gradient")),
+        ),
+    ),
+    (
+        "final_solved_state",
+        (
+            ("scalar", ("final_iota",)),
+            ("scalar", ("final_G",)),
+            ("vector", ("final_surface_dofs",)),
+            ("vector", ("final_decision_vector",)),
+        ),
+    ),
+    ("final_objective", (("scalar", ("final_fun",)),)),
+    ("final_residual", (("vector", ("final_residual",)),)),
+    ("final_gradient", (("vector", ("final_gradient",)),)),
+    ("final_hessian", (("vector", ("final_hessian",)),)),
+    (
+        "linear_solve_factors",
+        (
+            ("vector", ("linear_solve_factors", "P")),
+            ("vector", ("linear_solve_factors", "L")),
+            ("vector", ("linear_solve_factors", "U")),
+        ),
+    ),
 )
 
 
@@ -501,6 +633,7 @@ def _append_optional_single_stage_flags(
     target_lane_boozer_bfgs_maxiter: int | None = None,
     target_lane_boozer_newton_tol: float | None = None,
     target_lane_boozer_newton_maxiter: int | None = None,
+    replay_objective_evaluation_trace: Path | None = None,
 ) -> None:
     if benchmark_mode:
         command.append("--benchmark-mode")
@@ -537,6 +670,13 @@ def _append_optional_single_stage_flags(
         command.append("--disable-target-lane-success-filter")
     if record_objective_evaluation_trace:
         command.append("--record-objective-evaluation-trace")
+    if replay_objective_evaluation_trace is not None:
+        command.extend(
+            [
+                "--replay-objective-evaluation-trace",
+                str(replay_objective_evaluation_trace),
+            ]
+        )
     if target_lane_boozer_bfgs_tol is not None:
         command.extend(
             [
@@ -616,6 +756,7 @@ def _run_single_stage_case(
     deterministic_gpu_reductions: bool = False,
     output_root: Path | None = None,
     jax_runtime_seed_spec: Path | None = None,
+    replay_objective_evaluation_trace: Path | None = None,
 ) -> dict[str, Any]:
     script_path = _single_stage_script_path()
     effective_platform = platform if backend == "jax" else "cpu"
@@ -723,6 +864,7 @@ def _run_single_stage_case(
             target_lane_boozer_newton_maxiter=getattr(
                 args, "target_lane_boozer_newton_maxiter", None
             ),
+            replay_objective_evaluation_trace=replay_objective_evaluation_trace,
         )
         command.extend(
             [
@@ -837,12 +979,19 @@ def _run_single_stage_case_pair(
     reference_backend: str,
     reference_benchmark_mode: bool,
     case_root: Path,
-) -> tuple[dict[str, Any], dict[str, Any], Path, dict[str, Any] | None]:
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    Path,
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+]:
     compare_surface_geometry = _should_compare_surface_geometry(
         args,
         benchmark_mode=benchmark_mode,
     )
     seed_case = None
+    same_candidate_replay_case = None
     target_args = args
     if reference_backend == "jax":
         jax_seed_spec = (
@@ -900,6 +1049,21 @@ def _run_single_stage_case_pair(
                 case_root / "single_stage_jax_runtime_seed_spec.json",
                 args,
             )
+    if bool(getattr(args, "record_objective_evaluation_trace", False)) and int(
+        args.maxiter
+    ) > 0:
+        same_candidate_replay_case = _run_single_stage_case(
+            target_args,
+            "jax",
+            platform=args.platform,
+            benchmark_mode=benchmark_mode,
+            load_surface_gamma=compare_surface_geometry,
+            output_root=case_root / "target_same_candidate_replay_outputs",
+            jax_runtime_seed_spec=jax_seed_spec,
+            replay_objective_evaluation_trace=Path(
+                cpu_case["outer_optimizer_progress_json"]
+            ),
+        )
     jax_case = _run_single_stage_case(
         target_args,
         "jax",
@@ -909,7 +1073,7 @@ def _run_single_stage_case_pair(
         output_root=case_root / "target_outputs",
         jax_runtime_seed_spec=jax_seed_spec,
     )
-    return cpu_case, jax_case, jax_seed_spec, seed_case
+    return cpu_case, jax_case, jax_seed_spec, seed_case, same_candidate_replay_case
 
 
 def _load_surface_gamma_artifact(surface_json_path: str) -> np.ndarray:
@@ -960,6 +1124,1415 @@ def _load_optimizer_state_trace_from_case(case: dict[str, Any]) -> list[dict[str
         if trace:
             return list(trace)
     return []
+
+
+def _load_objective_evaluation_events_from_case(case: dict[str, Any]) -> list[dict[str, Any]]:
+    progress_path = Path(case["outer_optimizer_progress_json"])
+    if not progress_path.exists():
+        return []
+    payload = load_json(progress_path)
+    return [
+        dict(event)
+        for event in payload.get("events", [])
+        if event.get("label") == "objective_evaluation"
+    ]
+
+
+def _summary_scalar(summary: dict[str, Any] | None) -> float | None:
+    if summary is None or not bool(summary.get("finite", False)):
+        return None
+    value = summary.get("value")
+    return None if value is None else float(value)
+
+
+def _summary_vector(summary: dict[str, Any] | None) -> np.ndarray | None:
+    if summary is None or not bool(summary.get("all_finite", False)):
+        return None
+    values = summary.get("values")
+    if values is None:
+        return None
+    return np.asarray(values, dtype=float).reshape(-1)
+
+
+def _max_abs_diff(left: np.ndarray, right: np.ndarray) -> float:
+    if left.shape != right.shape:
+        return float("inf")
+    if left.size == 0:
+        return 0.0
+    return float(np.max(np.abs(left - right)))
+
+
+def _scalar_close(left: float, right: float, *, rtol: float, atol: float) -> bool:
+    return bool(abs(left - right) <= (atol + rtol * abs(right)))
+
+
+def _compare_same_candidate_scalar(
+    failures: list[str],
+    *,
+    field: str,
+    cpu_value: float | None,
+    jax_value: float | None,
+    rtol: float = _SAME_CANDIDATE_SCALAR_RTOL,
+    atol: float = _SAME_CANDIDATE_SCALAR_ATOL,
+) -> float:
+    if cpu_value is None or jax_value is None:
+        failures.append(f"{field} missing finite CPU/JAX values.")
+        return float("inf")
+    diff = abs(float(jax_value) - float(cpu_value))
+    if not _scalar_close(float(jax_value), float(cpu_value), rtol=rtol, atol=atol):
+        failures.append(
+            f"{field} mismatch: cpu={float(cpu_value):.16e}, "
+            f"jax={float(jax_value):.16e}, abs_diff={diff:.3e}."
+        )
+    return diff
+
+
+def _compare_same_candidate_vector(
+    failures: list[str],
+    *,
+    field: str,
+    cpu_vector: np.ndarray | None,
+    jax_vector: np.ndarray | None,
+    rtol: float = _SAME_CANDIDATE_GRADIENT_RTOL,
+    atol: float = _SAME_CANDIDATE_GRADIENT_ATOL,
+) -> float:
+    if cpu_vector is None or jax_vector is None:
+        failures.append(f"{field} missing finite CPU/JAX vectors.")
+        return float("inf")
+    diff = _max_abs_diff(jax_vector, cpu_vector)
+    reference = 0.0 if cpu_vector.size == 0 else float(np.max(np.abs(cpu_vector)))
+    if diff > (atol + rtol * reference):
+        failures.append(
+            f"{field} mismatch: max_abs_diff={diff:.3e}, reference={reference:.3e}."
+        )
+    return diff
+
+
+def _compare_same_candidate_hardware(
+    failures: list[str],
+    *,
+    cpu_status: dict[str, Any] | None,
+    jax_status: dict[str, Any] | None,
+) -> float:
+    if cpu_status is None or jax_status is None:
+        if cpu_status is not jax_status:
+            failures.append("hardware_status presence mismatch.")
+        return 0.0
+    if bool(cpu_status.get("success")) != bool(jax_status.get("success")):
+        failures.append(
+            "hardware_status success mismatch: "
+            f"cpu={cpu_status.get('success')}, jax={jax_status.get('success')}."
+        )
+    if list(cpu_status.get("violation_keys", [])) != list(
+        jax_status.get("violation_keys", [])
+    ):
+        failures.append(
+            "hardware_status violation_keys mismatch: "
+            f"cpu={cpu_status.get('violation_keys')}, "
+            f"jax={jax_status.get('violation_keys')}."
+        )
+    max_diff = 0.0
+    for key in _SAME_CANDIDATE_HARDWARE_KEYS:
+        if key not in cpu_status or key not in jax_status:
+            continue
+        diff = _compare_same_candidate_scalar(
+            failures,
+            field=f"hardware_status.{key}",
+            cpu_value=float(cpu_status[key]),
+            jax_value=float(jax_status[key]),
+            rtol=1e-8,
+            atol=1e-10,
+        )
+        max_diff = max(max_diff, diff)
+    cpu_margins = cpu_status.get("threshold_margins", {})
+    jax_margins = jax_status.get("threshold_margins", {})
+    for key in _SAME_CANDIDATE_HARDWARE_MARGIN_KEYS:
+        if key not in cpu_margins and key not in jax_margins:
+            continue
+        diff = _compare_same_candidate_scalar(
+            failures,
+            field=f"hardware_status.threshold_margins.{key}",
+            cpu_value=cpu_margins.get(key),
+            jax_value=jax_margins.get(key),
+            rtol=1e-8,
+            atol=1e-10,
+        )
+        max_diff = max(max_diff, diff)
+    return max_diff
+
+
+def _compare_same_candidate_failure(
+    failures: list[str],
+    *,
+    cpu_failure: dict[str, Any] | None,
+    jax_failure: dict[str, Any] | None,
+) -> float:
+    if cpu_failure is None or jax_failure is None:
+        if cpu_failure is not jax_failure:
+            failures.append("candidate_failure presence mismatch.")
+        return 0.0
+    for key in _SAME_CANDIDATE_FAILURE_EXACT_KEYS:
+        if cpu_failure.get(key) != jax_failure.get(key):
+            failures.append(
+                f"candidate_failure.{key} mismatch: "
+                f"cpu={cpu_failure.get(key)!r}, jax={jax_failure.get(key)!r}."
+            )
+    max_diff = 0.0
+    for key in _SAME_CANDIDATE_FAILURE_SCALAR_KEYS:
+        diff = _compare_same_candidate_scalar(
+            failures,
+            field=f"candidate_failure.{key}",
+            cpu_value=float(cpu_failure[key]),
+            jax_value=float(jax_failure[key]),
+        )
+        max_diff = max(max_diff, diff)
+    if (
+        cpu_failure.get("reject_class") == "solver"
+        and jax_failure.get("reject_class") == "solver"
+    ):
+        max_diff = max(
+            max_diff,
+            _compare_same_candidate_scalar(
+                failures,
+                field="candidate_failure.residual_inf",
+                cpu_value=float(cpu_failure["residual_inf"]),
+                jax_value=float(jax_failure["residual_inf"]),
+            ),
+        )
+    return max_diff
+
+
+def _compare_same_candidate_exact_event_field(
+    failures: list[str],
+    *,
+    field: str,
+    cpu_event: dict[str, Any],
+    jax_event: dict[str, Any],
+) -> None:
+    if cpu_event.get(field) != jax_event.get(field):
+        failures.append(
+            f"{field} mismatch: "
+            f"cpu={cpu_event.get(field)!r}, jax={jax_event.get(field)!r}."
+        )
+
+
+def _first_boozer_solver_summary(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for event in events:
+        metadata = event.get("boozer_solver_metadata")
+        if metadata is not None:
+            return dict(metadata)
+    return None
+
+
+def _compare_same_candidate_boozer_solver_metadata(
+    failures: list[str],
+    *,
+    cpu_metadata: dict[str, Any] | None,
+    jax_metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if cpu_metadata is None or jax_metadata is None:
+        if cpu_metadata is not jax_metadata:
+            failures.append("boozer_solver_metadata presence mismatch.")
+        return {
+            "max_abs_diff": 0.0,
+            "scipy_callback_trace_max_abs_diff": 0.0,
+            "first_scipy_callback_split": None,
+        }
+
+    for key in _SAME_CANDIDATE_BOOZER_METADATA_EXACT_KEYS:
+        if cpu_metadata.get(key) != jax_metadata.get(key):
+            failures.append(
+                f"boozer_solver_metadata.{key} mismatch: "
+                f"cpu={cpu_metadata.get(key)!r}, jax={jax_metadata.get(key)!r}."
+            )
+    _compare_same_candidate_scipy_call_contract(
+        failures,
+        field="boozer_solver_metadata.pre_newton_scipy_call_contract",
+        cpu_contract=cpu_metadata.get("pre_newton_scipy_call_contract"),
+        jax_contract=jax_metadata.get("pre_newton_scipy_call_contract"),
+    )
+    max_diff = _compare_same_candidate_scipy_initial_call(
+        failures,
+        field="boozer_solver_metadata.pre_newton_scipy_initial_call",
+        cpu_initial_call=cpu_metadata.get("pre_newton_scipy_initial_call"),
+        jax_initial_call=jax_metadata.get("pre_newton_scipy_initial_call"),
+    )
+    callback_trace_summary = _compare_same_candidate_scipy_callback_trace(
+        failures,
+        field="boozer_solver_metadata.pre_newton_scipy_callback_trace",
+        cpu_trace=cpu_metadata.get("pre_newton_scipy_callback_trace"),
+        jax_trace=jax_metadata.get("pre_newton_scipy_callback_trace"),
+    )
+    max_diff = max(max_diff, callback_trace_summary["max_abs_diff"])
+    for key in _SAME_CANDIDATE_BOOZER_METADATA_SHAPE_KEYS:
+        cpu_shape = cpu_metadata.get(key)
+        jax_shape = jax_metadata.get(key)
+        if cpu_shape is None and jax_shape is None:
+            continue
+        if list(cpu_shape or []) != list(jax_shape or []):
+            failures.append(
+                f"boozer_solver_metadata.{key} mismatch: "
+                f"cpu={cpu_shape!r}, jax={jax_shape!r}."
+            )
+
+    for key in _SAME_CANDIDATE_BOOZER_METADATA_NUMERIC_KEYS:
+        cpu_value = cpu_metadata.get(key)
+        jax_value = jax_metadata.get(key)
+        if cpu_value is None and jax_value is None:
+            continue
+        diff = _compare_same_candidate_scalar(
+            failures,
+            field=f"boozer_solver_metadata.{key}",
+            cpu_value=None if cpu_value is None else float(cpu_value),
+            jax_value=None if jax_value is None else float(jax_value),
+            rtol=1e-8,
+            atol=1e-12,
+        )
+        max_diff = max(max_diff, diff)
+    return {
+        "max_abs_diff": max_diff,
+        "scipy_callback_trace_max_abs_diff": callback_trace_summary["max_abs_diff"],
+        "first_scipy_callback_split": callback_trace_summary["first_split"],
+    }
+
+
+def _compare_same_candidate_scipy_call_contract(
+    failures: list[str],
+    *,
+    field: str,
+    cpu_contract: dict[str, Any] | None,
+    jax_contract: dict[str, Any] | None,
+) -> None:
+    if cpu_contract is None and jax_contract is None:
+        return
+    if cpu_contract is None or jax_contract is None:
+        failures.append(f"{field} presence mismatch.")
+        return
+    exact_keys = (
+        "semantic_method",
+        "scipy_method",
+        "scipy_options",
+        "callback",
+        "success",
+        "status",
+        "message",
+        "nit",
+        "nfev",
+        "njev",
+    )
+    for key in exact_keys:
+        if cpu_contract.get(key) != jax_contract.get(key):
+            failures.append(
+                f"{field}.{key} mismatch: "
+                f"cpu={cpu_contract.get(key)!r}, "
+                f"jax={jax_contract.get(key)!r}."
+            )
+
+
+def _compare_same_candidate_scipy_initial_call(
+    failures: list[str],
+    *,
+    field: str,
+    cpu_initial_call: dict[str, Any] | None,
+    jax_initial_call: dict[str, Any] | None,
+) -> float:
+    if cpu_initial_call is None and jax_initial_call is None:
+        return 0.0
+    if cpu_initial_call is None or jax_initial_call is None:
+        failures.append(f"{field} presence mismatch.")
+        return float("inf")
+    max_diff = _compare_same_candidate_vector(
+        failures,
+        field=f"{field}.decision_vector",
+        cpu_vector=_summary_vector(cpu_initial_call.get("decision_vector")),
+        jax_vector=_summary_vector(jax_initial_call.get("decision_vector")),
+        rtol=0.0,
+        atol=0.0,
+    )
+    max_diff = max(
+        max_diff,
+        _compare_same_candidate_scalar(
+            failures,
+            field=f"{field}.fun",
+            cpu_value=_summary_scalar(cpu_initial_call.get("fun")),
+            jax_value=_summary_scalar(jax_initial_call.get("fun")),
+        ),
+    )
+    max_diff = max(
+        max_diff,
+        _compare_same_candidate_vector(
+            failures,
+            field=f"{field}.gradient",
+            cpu_vector=_summary_vector(cpu_initial_call.get("gradient")),
+            jax_vector=_summary_vector(jax_initial_call.get("gradient")),
+        ),
+    )
+    return max_diff
+
+
+def _same_candidate_scipy_callback_split(
+    *,
+    field: str,
+    callback_index: int,
+    cpu_entry: dict[str, Any],
+    jax_entry: dict[str, Any],
+    max_abs_diff: float,
+) -> dict[str, Any]:
+    return {
+        "field": field,
+        "callback_index": callback_index,
+        "cpu_evaluation_index": cpu_entry.get("evaluation_index"),
+        "jax_evaluation_index": jax_entry.get("evaluation_index"),
+        "max_abs_diff": max_abs_diff,
+    }
+
+
+def _compare_same_candidate_scipy_callback_trace(
+    failures: list[str],
+    *,
+    field: str,
+    cpu_trace: list[dict[str, Any]] | None,
+    jax_trace: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if cpu_trace is None and jax_trace is None:
+        return {"max_abs_diff": 0.0, "first_split": None}
+    if cpu_trace is None or jax_trace is None:
+        failures.append(f"{field} presence mismatch.")
+        return {
+            "max_abs_diff": float("inf"),
+            "first_split": {"field": field, "reason": "presence mismatch"},
+        }
+
+    max_diff = 0.0
+    first_split = None
+    if len(cpu_trace) != len(jax_trace):
+        failures.append(
+            f"{field} length mismatch: cpu={len(cpu_trace)}, jax={len(jax_trace)}."
+        )
+    for index, (cpu_entry, jax_entry) in enumerate(
+        zip(cpu_trace, jax_trace),
+        start=1,
+    ):
+        entry_field = f"{field}[{index}]"
+        if cpu_entry.get("evaluation_index") != jax_entry.get("evaluation_index"):
+            failures.append(
+                f"{entry_field}.evaluation_index mismatch: "
+                f"cpu={cpu_entry.get('evaluation_index')!r}, "
+                f"jax={jax_entry.get('evaluation_index')!r}."
+            )
+            if first_split is None:
+                first_split = _same_candidate_scipy_callback_split(
+                    field="evaluation_index",
+                    callback_index=index,
+                    cpu_entry=cpu_entry,
+                    jax_entry=jax_entry,
+                    max_abs_diff=0.0,
+                )
+        cpu_x = _summary_vector(cpu_entry.get("decision_vector"))
+        jax_x = _summary_vector(jax_entry.get("decision_vector"))
+        decision_diff = _compare_same_candidate_vector(
+            failures,
+            field=f"{entry_field}.decision_vector",
+            cpu_vector=cpu_x,
+            jax_vector=jax_x,
+            rtol=0.0,
+            atol=0.0,
+        )
+        max_diff = max(max_diff, decision_diff)
+        if first_split is None and decision_diff > 0.0:
+            first_split = _same_candidate_scipy_callback_split(
+                field="decision_vector",
+                callback_index=index,
+                cpu_entry=cpu_entry,
+                jax_entry=jax_entry,
+                max_abs_diff=decision_diff,
+            )
+
+        cpu_fun = _summary_scalar(cpu_entry.get("fun"))
+        jax_fun = _summary_scalar(jax_entry.get("fun"))
+        fun_diff = _compare_same_candidate_scalar(
+            failures,
+            field=f"{entry_field}.fun",
+            cpu_value=cpu_fun,
+            jax_value=jax_fun,
+        )
+        max_diff = max(max_diff, fun_diff)
+        if (
+            first_split is None
+            and cpu_fun is not None
+            and jax_fun is not None
+            and not _scalar_close(
+                jax_fun,
+                cpu_fun,
+                rtol=_SAME_CANDIDATE_SCALAR_RTOL,
+                atol=_SAME_CANDIDATE_SCALAR_ATOL,
+            )
+        ):
+            first_split = _same_candidate_scipy_callback_split(
+                field="fun",
+                callback_index=index,
+                cpu_entry=cpu_entry,
+                jax_entry=jax_entry,
+                max_abs_diff=fun_diff,
+            )
+
+        cpu_gradient = _summary_vector(cpu_entry.get("gradient"))
+        jax_gradient = _summary_vector(jax_entry.get("gradient"))
+        gradient_diff = _compare_same_candidate_vector(
+            failures,
+            field=f"{entry_field}.gradient",
+            cpu_vector=cpu_gradient,
+            jax_vector=jax_gradient,
+        )
+        max_diff = max(max_diff, gradient_diff)
+        gradient_reference = (
+            None
+            if cpu_gradient is None
+            else (0.0 if cpu_gradient.size == 0 else float(np.max(np.abs(cpu_gradient))))
+        )
+        if (
+            first_split is None
+            and gradient_reference is not None
+            and gradient_diff
+            > (
+                _SAME_CANDIDATE_GRADIENT_ATOL
+                + _SAME_CANDIDATE_GRADIENT_RTOL * gradient_reference
+            )
+        ):
+            first_split = _same_candidate_scipy_callback_split(
+                field="gradient",
+                callback_index=index,
+                cpu_entry=cpu_entry,
+                jax_entry=jax_entry,
+                max_abs_diff=gradient_diff,
+            )
+    if first_split is None and len(cpu_trace) != len(jax_trace):
+        first_split = {
+            "field": field,
+            "reason": "length mismatch",
+            "cpu_length": len(cpu_trace),
+            "jax_length": len(jax_trace),
+        }
+    return {"max_abs_diff": max_diff, "first_split": first_split}
+
+
+def _compare_same_candidate_objective_components(
+    failures: list[str],
+    *,
+    cpu_components: dict[str, Any] | None,
+    jax_components: dict[str, Any] | None,
+    pair_index: int,
+    line_search_evaluation: Any,
+) -> dict[str, Any]:
+    if cpu_components is None or jax_components is None:
+        if cpu_components is not jax_components:
+            failures.append("objective_components presence mismatch.")
+        return {
+            "max_slice_objective_abs_diff": 0.0,
+            "max_slice_gradient_abs_diff": 0.0,
+            "max_slice_objective_owner": None,
+            "max_slice_gradient_owner": None,
+        }
+    cpu_names = set(cpu_components)
+    jax_names = set(jax_components)
+    if cpu_names != jax_names:
+        failures.append(
+            "objective_components key mismatch: "
+            f"cpu={sorted(cpu_names)}, jax={sorted(jax_names)}."
+        )
+
+    max_objective = 0.0
+    max_gradient = 0.0
+    objective_owner = None
+    gradient_owner = None
+    for name in sorted(cpu_names & jax_names):
+        cpu_component = cpu_components[name]
+        jax_component = jax_components[name]
+        objective_diff = _compare_same_candidate_scalar(
+            failures,
+            field=f"objective_components.{name}.weighted_objective",
+            cpu_value=_summary_scalar(cpu_component.get("weighted_objective")),
+            jax_value=_summary_scalar(jax_component.get("weighted_objective")),
+        )
+        gradient_diff = _compare_same_candidate_vector(
+            failures,
+            field=f"objective_components.{name}.weighted_gradient",
+            cpu_vector=_summary_vector(cpu_component.get("weighted_gradient")),
+            jax_vector=_summary_vector(jax_component.get("weighted_gradient")),
+        )
+        if objective_diff > max_objective:
+            max_objective = objective_diff
+            objective_owner = name
+        if gradient_diff > max_gradient:
+            max_gradient = gradient_diff
+            gradient_owner = name
+    return {
+        "max_slice_objective_abs_diff": max_objective,
+        "max_slice_gradient_abs_diff": max_gradient,
+        "max_slice_objective_owner": objective_owner,
+        "max_slice_gradient_owner": gradient_owner,
+        "max_slice_pair_index": pair_index if objective_owner or gradient_owner else None,
+        "max_slice_line_search_evaluation": line_search_evaluation
+        if objective_owner or gradient_owner
+        else None,
+    }
+
+
+def _nested_payload_value(payload: dict[str, Any], path: tuple[str, ...]) -> Any:
+    value: Any = payload
+    for key in path:
+        if value is None:
+            return None
+        value = value.get(key)
+    return value
+
+
+def _diagnostic_scalar_abs_diff(
+    cpu_summary: dict[str, Any] | None,
+    jax_summary: dict[str, Any] | None,
+) -> float:
+    if cpu_summary is None and jax_summary is None:
+        return 0.0
+    return _path_scalar_abs_diff(cpu_summary, jax_summary)
+
+
+def _diagnostic_vector_abs_diff(
+    cpu_summary: dict[str, Any] | None,
+    jax_summary: dict[str, Any] | None,
+) -> float:
+    if cpu_summary is None and jax_summary is None:
+        return 0.0
+    return _path_vector_abs_diff(cpu_summary, jax_summary)
+
+
+def _iota_decomposition_layer_diverged(layer_diff: float, layer_reference: float) -> bool:
+    return bool(
+        layer_diff
+        > (
+            _IOTA_DECOMPOSITION_DIAGNOSTIC_ATOL
+            + _IOTA_DECOMPOSITION_DIAGNOSTIC_RTOL * layer_reference
+        )
+    )
+
+
+def _summary_reference_abs(summary: dict[str, Any] | None) -> float:
+    vector = _summary_vector(summary)
+    if vector is not None:
+        return 0.0 if vector.size == 0 else float(np.max(np.abs(vector)))
+    scalar = _summary_scalar(summary)
+    return 0.0 if scalar is None else abs(float(scalar))
+
+
+def _layer_decomposition_summary(
+    *,
+    recorded: bool,
+    max_abs_diff: float = 0.0,
+    max_layer: str | None = None,
+    first_divergent_layer: str | None = None,
+    pair_index: int | None = None,
+    line_search_evaluation: Any = None,
+    layer_diffs: dict[str, float] | None = None,
+    layer_references: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    return {
+        "recorded": recorded,
+        "max_abs_diff": max_abs_diff,
+        "max_layer": max_layer,
+        "first_divergent_layer": first_divergent_layer,
+        "pair_index": pair_index,
+        "line_search_evaluation": line_search_evaluation,
+        "layer_diffs": {} if layer_diffs is None else layer_diffs,
+        "layer_references": {} if layer_references is None else layer_references,
+    }
+
+
+def _compare_same_candidate_layer_decomposition(
+    failures: list[str],
+    *,
+    field_name: str,
+    layer_fields: tuple[tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], ...],
+    cpu_decomposition: dict[str, Any] | None,
+    jax_decomposition: dict[str, Any] | None,
+    pair_index: int,
+    line_search_evaluation: Any,
+) -> dict[str, Any]:
+    if cpu_decomposition is None and jax_decomposition is None:
+        return _layer_decomposition_summary(recorded=False)
+    if cpu_decomposition is None or jax_decomposition is None:
+        failures.append(f"{field_name} presence mismatch.")
+        return _layer_decomposition_summary(
+            recorded=False,
+            max_abs_diff=float("inf"),
+            max_layer="presence",
+            first_divergent_layer="presence",
+            pair_index=pair_index,
+            line_search_evaluation=line_search_evaluation,
+            layer_diffs={"presence": float("inf")},
+            layer_references={"presence": 0.0},
+        )
+
+    layer_diffs = {}
+    layer_references = {}
+    max_abs_diff = 0.0
+    max_layer = None
+    first_divergent_layer = None
+    for layer, fields in layer_fields:
+        layer_diff = 0.0
+        layer_reference = 0.0
+        for kind, path in fields:
+            cpu_summary = _nested_payload_value(cpu_decomposition, path)
+            jax_summary = _nested_payload_value(jax_decomposition, path)
+            if kind == "scalar":
+                field_diff = _diagnostic_scalar_abs_diff(cpu_summary, jax_summary)
+            else:
+                field_diff = _diagnostic_vector_abs_diff(cpu_summary, jax_summary)
+            layer_diff = max(layer_diff, field_diff)
+            layer_reference = max(layer_reference, _summary_reference_abs(cpu_summary))
+        layer_diffs[layer] = layer_diff
+        layer_references[layer] = layer_reference
+        if layer_diff > max_abs_diff:
+            max_abs_diff = layer_diff
+            max_layer = layer
+        if first_divergent_layer is None and _iota_decomposition_layer_diverged(
+            layer_diff,
+            layer_reference,
+        ):
+            first_divergent_layer = layer
+
+    return _layer_decomposition_summary(
+        recorded=True,
+        max_abs_diff=max_abs_diff,
+        max_layer=max_layer,
+        first_divergent_layer=first_divergent_layer,
+        pair_index=pair_index if max_layer is not None else None,
+        line_search_evaluation=line_search_evaluation
+        if max_layer is not None
+        else None,
+        layer_diffs=layer_diffs,
+        layer_references=layer_references,
+    )
+
+
+def _compare_same_candidate_iota_decomposition(
+    failures: list[str],
+    *,
+    cpu_decomposition: dict[str, Any] | None,
+    jax_decomposition: dict[str, Any] | None,
+    pair_index: int,
+    line_search_evaluation: Any,
+) -> dict[str, Any]:
+    return _compare_same_candidate_layer_decomposition(
+        failures,
+        field_name="iota_penalty_decomposition",
+        layer_fields=_IOTA_DECOMPOSITION_LAYER_FIELDS,
+        cpu_decomposition=cpu_decomposition,
+        jax_decomposition=jax_decomposition,
+        pair_index=pair_index,
+        line_search_evaluation=line_search_evaluation,
+    )
+
+
+def _compare_same_candidate_boozer_solve_decomposition(
+    failures: list[str],
+    *,
+    cpu_decomposition: dict[str, Any] | None,
+    jax_decomposition: dict[str, Any] | None,
+    pair_index: int,
+    line_search_evaluation: Any,
+) -> dict[str, Any]:
+    return _compare_same_candidate_layer_decomposition(
+        failures,
+        field_name="boozer_solve_decomposition",
+        layer_fields=_BOOZER_SOLVE_DECOMPOSITION_LAYER_FIELDS,
+        cpu_decomposition=cpu_decomposition,
+        jax_decomposition=jax_decomposition,
+        pair_index=pair_index,
+        line_search_evaluation=line_search_evaluation,
+    )
+
+
+def _update_parity_bug_census(
+    census: dict[str, dict[str, Any]],
+    *,
+    family: str,
+    summary: dict[str, Any],
+) -> None:
+    pair_index = summary["pair_index"]
+    line_search_evaluation = summary["line_search_evaluation"]
+    for layer, diff in summary["layer_diffs"].items():
+        layer_key = f"{family}.{layer}"
+        reference = summary["layer_references"].get(layer, 0.0)
+        previous = census.get(layer_key)
+        if previous is None or float(diff) > float(previous["max_abs_diff"]):
+            census[layer_key] = {
+                "family": family,
+                "layer": layer,
+                "max_abs_diff": diff,
+                "reference_abs": reference,
+                "pair_index": pair_index,
+                "line_search_evaluation": line_search_evaluation,
+                "diverged": _iota_decomposition_layer_diverged(diff, reference),
+            }
+
+
+def _finalize_parity_bug_census(
+    census: dict[str, dict[str, Any]],
+    *,
+    first_divergence: dict[str, Any] | None,
+) -> dict[str, Any]:
+    layers = list(census.values())
+    divergent_layers = [
+        dict(entry)
+        for entry in sorted(
+            layers,
+            key=lambda item: float(item["max_abs_diff"]),
+            reverse=True,
+        )
+        if bool(entry["diverged"])
+    ]
+    return {
+        "status": "recorded" if layers else "not-recorded",
+        "first_divergence": first_divergence,
+        "divergent_layer_count": len(divergent_layers),
+        "divergent_layers": divergent_layers,
+        "max_layer_diffs": {
+            f"{entry['family']}.{entry['layer']}": entry["max_abs_diff"]
+            for entry in layers
+        },
+    }
+
+
+def _pre_newton_census_gate_failures(
+    parity_bug_census: dict[str, Any] | None,
+) -> list[str]:
+    """Return hard-gate failures for Boozer pre-Newton diagnostic divergence."""
+    if not parity_bug_census:
+        return []
+    failures = []
+    for entry in parity_bug_census.get("divergent_layers", []):
+        family = entry.get("family")
+        layer = str(entry.get("layer", ""))
+        if family != "boozer_solve" or not layer.startswith("pre_newton"):
+            continue
+        failures.append(
+            "Parity bug census reported divergent "
+            f"{family}.{layer}: max_abs_diff={entry.get('max_abs_diff')} "
+            f"at pair {entry.get('pair_index')} "
+            f"(line-search eval {entry.get('line_search_evaluation')})."
+        )
+    return failures
+
+
+def _same_candidate_replay_gate_failures(
+    same_candidate_replay: dict[str, Any],
+) -> list[str]:
+    failures = []
+    if same_candidate_replay["status"] != "pass":
+        first_failure = same_candidate_replay.get("first_failure_event")
+        if first_failure is None:
+            failures.append(
+                "Same-candidate objective replay comparison did not pass: "
+                f"status={same_candidate_replay['status']}."
+            )
+        else:
+            failures.append(
+                "Same-candidate objective replay comparison failed at "
+                f"pair {first_failure['pair_index']} "
+                f"(iteration {first_failure['accepted_iteration_target']}, "
+                f"line-search eval {first_failure['line_search_evaluation']})."
+            )
+    parity_bug_census = same_candidate_replay.get("parity_bug_census")
+    if not parity_bug_census or parity_bug_census.get("status") != "recorded":
+        failures.append(
+            "Same-candidate objective replay did not record a parity bug census."
+        )
+    failures.extend(_pre_newton_census_gate_failures(parity_bug_census))
+    return failures
+
+
+def compare_same_candidate_objective_replay(
+    cpu_case: dict[str, Any],
+    jax_case: dict[str, Any],
+    *,
+    require_exact_candidates: bool = False,
+    strict_solver_contract: bool = False,
+) -> dict[str, Any]:
+    """Compare paired CPU/JAX objective-evaluation trace events at identical x."""
+    cpu_events = _load_objective_evaluation_events_from_case(cpu_case)
+    jax_events = _load_objective_evaluation_events_from_case(jax_case)
+    if not cpu_events or not jax_events:
+        return {
+            "status": "not-recorded",
+            "cpu_event_count": len(cpu_events),
+            "jax_event_count": len(jax_events),
+            "same_candidate_event_count": 0,
+            "require_exact_candidates": bool(require_exact_candidates),
+            "strict_solver_contract": bool(strict_solver_contract),
+            "solver_contract_diagnostics": [],
+            "failures": [],
+        }
+    failures: list[str] = []
+    max_candidate_abs_diff = 0.0
+    max_objective_abs_diff = 0.0
+    max_gradient_abs_diff = 0.0
+    max_hardware_abs_diff = 0.0
+    max_failure_abs_diff = 0.0
+    max_boozer_metadata_abs_diff = 0.0
+    max_slice_objective_abs_diff = 0.0
+    max_slice_gradient_abs_diff = 0.0
+    max_slice_objective_owner = None
+    max_slice_gradient_owner = None
+    max_slice_pair_index = None
+    max_slice_line_search_evaluation = None
+    max_iota_decomposition_abs_diff = 0.0
+    max_iota_decomposition_layer = None
+    max_iota_decomposition_pair_index = None
+    max_iota_decomposition_line_search_evaluation = None
+    first_iota_decomposition_divergence = None
+    max_iota_decomposition_layer_diffs = {}
+    max_boozer_solve_decomposition_abs_diff = 0.0
+    max_boozer_solve_decomposition_layer = None
+    max_boozer_solve_decomposition_pair_index = None
+    max_boozer_solve_decomposition_line_search_evaluation = None
+    first_boozer_solve_decomposition_divergence = None
+    max_boozer_solve_decomposition_layer_diffs = {}
+    max_boozer_scipy_callback_abs_diff = 0.0
+    first_boozer_scipy_callback_split = None
+    parity_bug_census_layers: dict[str, dict[str, Any]] = {}
+    first_parity_bug_census_divergence = None
+    solver_contract_diagnostics: list[str] = []
+    same_candidate_event_count = 0
+    first_failure_event = None
+    candidate_x_abs_tol = 0.0 if require_exact_candidates else _SAME_CANDIDATE_X_ATOL
+    if require_exact_candidates and len(cpu_events) != len(jax_events):
+        failures.append(
+            "Exact objective replay event-count mismatch: "
+            f"cpu={len(cpu_events)}, jax={len(jax_events)}."
+        )
+    for pair_index, (cpu_event, jax_event) in enumerate(
+        zip(cpu_events, jax_events),
+        start=1,
+    ):
+        cpu_x = _summary_vector(cpu_event.get("candidate_optimizer_dofs"))
+        jax_x = _summary_vector(jax_event.get("candidate_optimizer_dofs"))
+        if cpu_x is None or jax_x is None:
+            continue
+        candidate_abs_diff = _max_abs_diff(jax_x, cpu_x)
+        max_candidate_abs_diff = max(max_candidate_abs_diff, candidate_abs_diff)
+        if candidate_abs_diff > candidate_x_abs_tol:
+            if require_exact_candidates:
+                event_failures = [
+                    "candidate_optimizer_dofs mismatch under exact replay: "
+                    f"max_abs_diff={candidate_abs_diff:.3e}."
+                ]
+                if first_failure_event is None:
+                    first_failure_event = {
+                        "pair_index": pair_index,
+                        "cpu_event_index": cpu_event.get("event_index"),
+                        "jax_event_index": jax_event.get("event_index"),
+                        "accepted_iteration_target": cpu_event.get(
+                            "accepted_iteration_target"
+                        ),
+                        "line_search_evaluation": cpu_event.get(
+                            "line_search_evaluation"
+                        ),
+                        "candidate_abs_diff": candidate_abs_diff,
+                        "failures": list(event_failures),
+                    }
+                failures.extend(
+                    f"pair {pair_index}: {failure}" for failure in event_failures
+                )
+            continue
+        same_candidate_event_count += 1
+        event_failures: list[str] = []
+        _compare_same_candidate_exact_event_field(
+            event_failures,
+            field="native_gradient_used",
+            cpu_event=cpu_event,
+            jax_event=jax_event,
+        )
+        _compare_same_candidate_exact_event_field(
+            event_failures,
+            field="solver_success",
+            cpu_event=cpu_event,
+            jax_event=jax_event,
+        )
+        solver_contract_failures: list[str] = []
+        boozer_metadata_summary = _compare_same_candidate_boozer_solver_metadata(
+            solver_contract_failures,
+            cpu_metadata=cpu_event.get("boozer_solver_metadata"),
+            jax_metadata=jax_event.get("boozer_solver_metadata"),
+        )
+        if strict_solver_contract:
+            event_failures.extend(solver_contract_failures)
+        else:
+            solver_contract_diagnostics.extend(
+                f"pair {pair_index}: {failure}"
+                for failure in solver_contract_failures
+            )
+        max_boozer_metadata_abs_diff = max(
+            max_boozer_metadata_abs_diff,
+            boozer_metadata_summary["max_abs_diff"],
+        )
+        max_boozer_scipy_callback_abs_diff = max(
+            max_boozer_scipy_callback_abs_diff,
+            boozer_metadata_summary["scipy_callback_trace_max_abs_diff"],
+        )
+        if (
+            first_boozer_scipy_callback_split is None
+            and boozer_metadata_summary["first_scipy_callback_split"] is not None
+        ):
+            first_boozer_scipy_callback_split = {
+                "pair_index": pair_index,
+                "cpu_event_index": cpu_event.get("event_index"),
+                "jax_event_index": jax_event.get("event_index"),
+                "accepted_iteration_target": cpu_event.get(
+                    "accepted_iteration_target"
+                ),
+                "line_search_evaluation": cpu_event.get("line_search_evaluation"),
+                **boozer_metadata_summary["first_scipy_callback_split"],
+            }
+        compare_native_gradient_layers = bool(
+            cpu_event.get("native_gradient_used")
+        ) and bool(jax_event.get("native_gradient_used"))
+        cpu_boozer_solve_decomposition = (
+            cpu_event.get("boozer_solve_decomposition")
+            if compare_native_gradient_layers
+            else None
+        )
+        jax_boozer_solve_decomposition = (
+            jax_event.get("boozer_solve_decomposition")
+            if compare_native_gradient_layers
+            else None
+        )
+        boozer_solve_decomposition_summary = (
+            _compare_same_candidate_boozer_solve_decomposition(
+                event_failures,
+                cpu_decomposition=cpu_boozer_solve_decomposition,
+                jax_decomposition=jax_boozer_solve_decomposition,
+                pair_index=pair_index,
+                line_search_evaluation=cpu_event.get("line_search_evaluation"),
+            )
+        )
+        _update_parity_bug_census(
+            parity_bug_census_layers,
+            family="boozer_solve",
+            summary=boozer_solve_decomposition_summary,
+        )
+        if (
+            boozer_solve_decomposition_summary["max_abs_diff"]
+            > max_boozer_solve_decomposition_abs_diff
+        ):
+            max_boozer_solve_decomposition_abs_diff = (
+                boozer_solve_decomposition_summary["max_abs_diff"]
+            )
+            max_boozer_solve_decomposition_layer = (
+                boozer_solve_decomposition_summary["max_layer"]
+            )
+            max_boozer_solve_decomposition_pair_index = (
+                boozer_solve_decomposition_summary["pair_index"]
+            )
+            max_boozer_solve_decomposition_line_search_evaluation = (
+                boozer_solve_decomposition_summary["line_search_evaluation"]
+            )
+            max_boozer_solve_decomposition_layer_diffs = dict(
+                boozer_solve_decomposition_summary["layer_diffs"]
+            )
+        if (
+            first_boozer_solve_decomposition_divergence is None
+            and boozer_solve_decomposition_summary["first_divergent_layer"] is not None
+        ):
+            first_boozer_solve_decomposition_divergence = {
+                "pair_index": boozer_solve_decomposition_summary["pair_index"],
+                "line_search_evaluation": boozer_solve_decomposition_summary[
+                    "line_search_evaluation"
+                ],
+                "layer": boozer_solve_decomposition_summary["first_divergent_layer"],
+                "layer_diffs": dict(boozer_solve_decomposition_summary["layer_diffs"]),
+            }
+        if (
+            first_parity_bug_census_divergence is None
+            and boozer_solve_decomposition_summary["first_divergent_layer"] is not None
+        ):
+            first_parity_bug_census_divergence = {
+                "family": "boozer_solve",
+                "pair_index": boozer_solve_decomposition_summary["pair_index"],
+                "line_search_evaluation": boozer_solve_decomposition_summary[
+                    "line_search_evaluation"
+                ],
+                "layer": boozer_solve_decomposition_summary["first_divergent_layer"],
+                "layer_diffs": dict(boozer_solve_decomposition_summary["layer_diffs"]),
+            }
+        max_objective_abs_diff = max(
+            max_objective_abs_diff,
+            _compare_same_candidate_scalar(
+                event_failures,
+                field="objective.value",
+                cpu_value=_summary_scalar(cpu_event.get("objective")),
+                jax_value=_summary_scalar(jax_event.get("objective")),
+            ),
+        )
+        max_gradient_abs_diff = max(
+            max_gradient_abs_diff,
+            _compare_same_candidate_vector(
+                event_failures,
+                field="optimizer_gradient",
+                cpu_vector=_summary_vector(cpu_event.get("optimizer_gradient")),
+                jax_vector=_summary_vector(jax_event.get("optimizer_gradient")),
+            ),
+        )
+        slice_summary = _compare_same_candidate_objective_components(
+            event_failures,
+            cpu_components=cpu_event.get("objective_components"),
+            jax_components=jax_event.get("objective_components"),
+            pair_index=pair_index,
+            line_search_evaluation=cpu_event.get("line_search_evaluation"),
+        )
+        if (
+            slice_summary["max_slice_objective_abs_diff"]
+            > max_slice_objective_abs_diff
+        ):
+            max_slice_objective_abs_diff = slice_summary[
+                "max_slice_objective_abs_diff"
+            ]
+            max_slice_objective_owner = slice_summary["max_slice_objective_owner"]
+            max_slice_pair_index = slice_summary["max_slice_pair_index"]
+            max_slice_line_search_evaluation = slice_summary[
+                "max_slice_line_search_evaluation"
+            ]
+        if slice_summary["max_slice_gradient_abs_diff"] > max_slice_gradient_abs_diff:
+            max_slice_gradient_abs_diff = slice_summary[
+                "max_slice_gradient_abs_diff"
+            ]
+            max_slice_gradient_owner = slice_summary["max_slice_gradient_owner"]
+            max_slice_pair_index = slice_summary["max_slice_pair_index"]
+            max_slice_line_search_evaluation = slice_summary[
+                "max_slice_line_search_evaluation"
+            ]
+        iota_decomposition_summary = _compare_same_candidate_iota_decomposition(
+            event_failures,
+            cpu_decomposition=cpu_event.get("iota_penalty_decomposition"),
+            jax_decomposition=jax_event.get("iota_penalty_decomposition"),
+            pair_index=pair_index,
+            line_search_evaluation=cpu_event.get("line_search_evaluation"),
+        )
+        _update_parity_bug_census(
+            parity_bug_census_layers,
+            family="iota_penalty",
+            summary=iota_decomposition_summary,
+        )
+        if (
+            iota_decomposition_summary["max_abs_diff"]
+            > max_iota_decomposition_abs_diff
+        ):
+            max_iota_decomposition_abs_diff = iota_decomposition_summary[
+                "max_abs_diff"
+            ]
+            max_iota_decomposition_layer = iota_decomposition_summary["max_layer"]
+            max_iota_decomposition_pair_index = iota_decomposition_summary[
+                "pair_index"
+            ]
+            max_iota_decomposition_line_search_evaluation = (
+                iota_decomposition_summary["line_search_evaluation"]
+            )
+            max_iota_decomposition_layer_diffs = dict(
+                iota_decomposition_summary["layer_diffs"]
+            )
+        if (
+            first_iota_decomposition_divergence is None
+            and iota_decomposition_summary["first_divergent_layer"] is not None
+        ):
+            first_iota_decomposition_divergence = {
+                "pair_index": iota_decomposition_summary["pair_index"],
+                "line_search_evaluation": iota_decomposition_summary[
+                    "line_search_evaluation"
+                ],
+                "layer": iota_decomposition_summary["first_divergent_layer"],
+                "layer_diffs": dict(iota_decomposition_summary["layer_diffs"]),
+            }
+        if (
+            first_parity_bug_census_divergence is None
+            and iota_decomposition_summary["first_divergent_layer"] is not None
+        ):
+            first_parity_bug_census_divergence = {
+                "family": "iota_penalty",
+                "pair_index": iota_decomposition_summary["pair_index"],
+                "line_search_evaluation": iota_decomposition_summary[
+                    "line_search_evaluation"
+                ],
+                "layer": iota_decomposition_summary["first_divergent_layer"],
+                "layer_diffs": dict(iota_decomposition_summary["layer_diffs"]),
+            }
+        if bool(cpu_event.get("native_gradient_used")) and bool(
+            jax_event.get("native_gradient_used")
+        ):
+            max_hardware_abs_diff = max(
+                max_hardware_abs_diff,
+                _compare_same_candidate_vector(
+                    event_failures,
+                    field="boozer_surface_dofs",
+                    cpu_vector=_summary_vector(cpu_event.get("boozer_surface_dofs")),
+                    jax_vector=_summary_vector(jax_event.get("boozer_surface_dofs")),
+                    rtol=1e-8,
+                    atol=1e-10,
+                ),
+            )
+            _compare_same_candidate_scalar(
+                event_failures,
+                field="boozer_iota",
+                cpu_value=_summary_scalar(cpu_event.get("boozer_iota")),
+                jax_value=_summary_scalar(jax_event.get("boozer_iota")),
+                rtol=1e-8,
+                atol=1e-10,
+            )
+            _compare_same_candidate_scalar(
+                event_failures,
+                field="boozer_G",
+                cpu_value=_summary_scalar(cpu_event.get("boozer_G")),
+                jax_value=_summary_scalar(jax_event.get("boozer_G")),
+                rtol=1e-8,
+                atol=1e-10,
+            )
+        max_hardware_abs_diff = max(
+            max_hardware_abs_diff,
+            _compare_same_candidate_hardware(
+                event_failures,
+                cpu_status=cpu_event.get("hardware_status"),
+                jax_status=jax_event.get("hardware_status"),
+            ),
+        )
+        max_failure_abs_diff = max(
+            max_failure_abs_diff,
+            _compare_same_candidate_failure(
+                event_failures,
+                cpu_failure=cpu_event.get("candidate_failure"),
+                jax_failure=jax_event.get("candidate_failure"),
+            ),
+        )
+        if event_failures:
+            if first_failure_event is None:
+                first_failure_event = {
+                    "pair_index": pair_index,
+                    "cpu_event_index": cpu_event.get("event_index"),
+                    "jax_event_index": jax_event.get("event_index"),
+                    "accepted_iteration_target": cpu_event.get(
+                        "accepted_iteration_target"
+                    ),
+                    "line_search_evaluation": cpu_event.get("line_search_evaluation"),
+                    "candidate_abs_diff": candidate_abs_diff,
+                    "failures": list(event_failures),
+                }
+            failures.extend(
+                f"pair {pair_index}: {failure}" for failure in event_failures
+            )
+    if same_candidate_event_count == 0:
+        failures.append("No paired objective-evaluation events shared the same candidate.")
+    return {
+        "status": "pass" if not failures else "fail",
+        "cpu_event_count": len(cpu_events),
+        "jax_event_count": len(jax_events),
+        "same_candidate_event_count": same_candidate_event_count,
+        "require_exact_candidates": bool(require_exact_candidates),
+        "strict_solver_contract": bool(strict_solver_contract),
+        "candidate_x_abs_tol": candidate_x_abs_tol,
+        "max_candidate_abs_diff": max_candidate_abs_diff,
+        "max_objective_abs_diff": max_objective_abs_diff,
+        "max_optimizer_gradient_abs_diff": max_gradient_abs_diff,
+        "max_boozer_metadata_numeric_abs_diff": max_boozer_metadata_abs_diff,
+        "max_boozer_scipy_callback_abs_diff": max_boozer_scipy_callback_abs_diff,
+        "first_boozer_scipy_callback_split": first_boozer_scipy_callback_split,
+        "max_slice_objective_abs_diff": max_slice_objective_abs_diff,
+        "max_slice_gradient_abs_diff": max_slice_gradient_abs_diff,
+        "max_slice_objective_owner": max_slice_objective_owner,
+        "max_slice_gradient_owner": max_slice_gradient_owner,
+        "max_slice_pair_index": max_slice_pair_index,
+        "max_slice_line_search_evaluation": max_slice_line_search_evaluation,
+        "max_iota_decomposition_abs_diff": max_iota_decomposition_abs_diff,
+        "max_iota_decomposition_layer": max_iota_decomposition_layer,
+        "max_iota_decomposition_pair_index": max_iota_decomposition_pair_index,
+        "max_iota_decomposition_line_search_evaluation": (
+            max_iota_decomposition_line_search_evaluation
+        ),
+        "max_iota_decomposition_layer_diffs": max_iota_decomposition_layer_diffs,
+        "first_iota_decomposition_divergence": first_iota_decomposition_divergence,
+        "max_boozer_solve_decomposition_abs_diff": (
+            max_boozer_solve_decomposition_abs_diff
+        ),
+        "max_boozer_solve_decomposition_layer": max_boozer_solve_decomposition_layer,
+        "max_boozer_solve_decomposition_pair_index": (
+            max_boozer_solve_decomposition_pair_index
+        ),
+        "max_boozer_solve_decomposition_line_search_evaluation": (
+            max_boozer_solve_decomposition_line_search_evaluation
+        ),
+        "max_boozer_solve_decomposition_layer_diffs": (
+            max_boozer_solve_decomposition_layer_diffs
+        ),
+        "first_boozer_solve_decomposition_divergence": (
+            first_boozer_solve_decomposition_divergence
+        ),
+        "parity_bug_census": _finalize_parity_bug_census(
+            parity_bug_census_layers,
+            first_divergence=first_parity_bug_census_divergence,
+        ),
+        "max_hardware_metric_abs_diff": max_hardware_abs_diff,
+        "max_failure_scalar_abs_diff": max_failure_abs_diff,
+        "cpu_boozer_solver_summary": _first_boozer_solver_summary(cpu_events),
+        "jax_boozer_solver_summary": _first_boozer_solver_summary(jax_events),
+        "solver_contract_diagnostics": solver_contract_diagnostics,
+        "first_failure_event": first_failure_event,
+        "failures": failures,
+    }
+
+
+def _path_scalar_abs_diff(
+    cpu_summary: dict[str, Any] | None,
+    jax_summary: dict[str, Any] | None,
+) -> float:
+    cpu_value = _summary_scalar(cpu_summary)
+    jax_value = _summary_scalar(jax_summary)
+    if cpu_value is None or jax_value is None:
+        return float("inf")
+    return abs(float(jax_value) - float(cpu_value))
+
+
+def _path_vector_abs_diff(
+    cpu_summary: dict[str, Any] | None,
+    jax_summary: dict[str, Any] | None,
+) -> float:
+    cpu_vector = _summary_vector(cpu_summary)
+    jax_vector = _summary_vector(jax_summary)
+    if cpu_vector is None or jax_vector is None:
+        return float("inf")
+    return _max_abs_diff(jax_vector, cpu_vector)
+
+
+def _optimizer_path_event_diff(
+    *,
+    pair_index: int,
+    cpu_event: dict[str, Any],
+    jax_event: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "pair_index": int(pair_index),
+        "cpu_event_index": cpu_event.get("event_index"),
+        "jax_event_index": jax_event.get("event_index"),
+        "cpu_accepted_iteration_target": cpu_event.get("accepted_iteration_target"),
+        "jax_accepted_iteration_target": jax_event.get("accepted_iteration_target"),
+        "cpu_line_search_evaluation": cpu_event.get("line_search_evaluation"),
+        "jax_line_search_evaluation": jax_event.get("line_search_evaluation"),
+        "candidate_abs_diff": _path_vector_abs_diff(
+            cpu_event.get("candidate_optimizer_dofs"),
+            jax_event.get("candidate_optimizer_dofs"),
+        ),
+        "objective_abs_diff": _path_scalar_abs_diff(
+            cpu_event.get("objective"),
+            jax_event.get("objective"),
+        ),
+        "optimizer_gradient_abs_diff": _path_vector_abs_diff(
+            cpu_event.get("optimizer_gradient"),
+            jax_event.get("optimizer_gradient"),
+        ),
+        "boozer_iota_abs_diff": _path_scalar_abs_diff(
+            cpu_event.get("boozer_iota"),
+            jax_event.get("boozer_iota"),
+        ),
+    }
+
+
+def _max_path_event(
+    current: dict[str, Any] | None,
+    candidate: dict[str, Any],
+    *,
+    diff_key: str,
+) -> dict[str, Any]:
+    if current is None or float(candidate[diff_key]) > float(current[diff_key]):
+        return dict(candidate)
+    return current
+
+
+def compare_optimizer_path_objective_evaluations(
+    cpu_case: dict[str, Any],
+    jax_case: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare free-running CPU/JAX objective-evaluation paths.
+
+    This is intentionally diagnostic. Same-candidate replay decides whether the
+    objective contract matches at identical x; this reports where independent
+    optimizer control first starts evaluating different candidates.
+    """
+    cpu_events = _load_objective_evaluation_events_from_case(cpu_case)
+    jax_events = _load_objective_evaluation_events_from_case(jax_case)
+    if not cpu_events or not jax_events:
+        return {
+            "status": "not-recorded",
+            "cpu_event_count": len(cpu_events),
+            "jax_event_count": len(jax_events),
+            "paired_event_count": 0,
+            "candidate_split_abs_tol": _OPTIMIZER_PATH_CANDIDATE_SPLIT_ATOL,
+        }
+
+    paired_event_count = min(len(cpu_events), len(jax_events))
+    first_candidate_split_event = None
+    max_candidate_event = None
+    max_objective_event = None
+    max_gradient_event = None
+    max_iota_event = None
+    for pair_index, (cpu_event, jax_event) in enumerate(
+        zip(cpu_events, jax_events),
+        start=1,
+    ):
+        event_diff = _optimizer_path_event_diff(
+            pair_index=pair_index,
+            cpu_event=cpu_event,
+            jax_event=jax_event,
+        )
+        if (
+            first_candidate_split_event is None
+            and float(event_diff["candidate_abs_diff"])
+            > _OPTIMIZER_PATH_CANDIDATE_SPLIT_ATOL
+        ):
+            first_candidate_split_event = dict(event_diff)
+        max_candidate_event = _max_path_event(
+            max_candidate_event,
+            event_diff,
+            diff_key="candidate_abs_diff",
+        )
+        max_objective_event = _max_path_event(
+            max_objective_event,
+            event_diff,
+            diff_key="objective_abs_diff",
+        )
+        max_gradient_event = _max_path_event(
+            max_gradient_event,
+            event_diff,
+            diff_key="optimizer_gradient_abs_diff",
+        )
+        max_iota_event = _max_path_event(
+            max_iota_event,
+            event_diff,
+            diff_key="boozer_iota_abs_diff",
+        )
+
+    event_count_match = len(cpu_events) == len(jax_events)
+    status = (
+        "same-path"
+        if event_count_match and first_candidate_split_event is None
+        else "split"
+    )
+    return {
+        "status": status,
+        "cpu_event_count": len(cpu_events),
+        "jax_event_count": len(jax_events),
+        "paired_event_count": paired_event_count,
+        "event_count_match": event_count_match,
+        "candidate_split_abs_tol": _OPTIMIZER_PATH_CANDIDATE_SPLIT_ATOL,
+        "first_candidate_split_event": first_candidate_split_event,
+        "max_candidate_event": max_candidate_event,
+        "max_objective_event": max_objective_event,
+        "max_optimizer_gradient_event": max_gradient_event,
+        "max_boozer_iota_event": max_iota_event,
+    }
 
 
 def _compare_case_optimizer_state_traces(
@@ -1164,6 +2737,7 @@ def main() -> None:
                 jax_case,
                 jax_seed_spec,
                 seed_case,
+                same_candidate_replay_case,
             ) = _run_single_stage_case_pair(
                 args,
                 benchmark_mode=benchmark_mode,
@@ -1176,12 +2750,13 @@ def main() -> None:
         case_artifacts_dir.mkdir(parents=True, exist_ok=True)
         (
             cpu_case,
-            jax_case,
-            jax_seed_spec,
-            seed_case,
-        ) = _run_single_stage_case_pair(
-            args,
-            benchmark_mode=benchmark_mode,
+                jax_case,
+                jax_seed_spec,
+                seed_case,
+                same_candidate_replay_case,
+            ) = _run_single_stage_case_pair(
+                args,
+                benchmark_mode=benchmark_mode,
             reference_backend=reference_backend,
             reference_benchmark_mode=reference_benchmark_mode,
             case_root=case_artifacts_dir,
@@ -1198,6 +2773,13 @@ def main() -> None:
             ],
             "jax_runtime_seed_spec": str(jax_seed_spec),
         }
+        if same_candidate_replay_case is not None:
+            case_artifacts["target_same_candidate_replay_run_dir"] = str(
+                same_candidate_replay_case["run_dir"]
+            )
+            case_artifacts["target_same_candidate_replay_progress_json"] = (
+                same_candidate_replay_case["outer_optimizer_progress_json"]
+            )
         if seed_case is not None:
             case_artifacts["shared_seed_run_dir"] = str(seed_case["run_dir"])
 
@@ -1226,6 +2808,30 @@ def main() -> None:
         ),
     )
     optimizer_state_trace_parity = None
+    same_candidate_replay = None
+    optimizer_path_objective_evaluations = None
+    if bool(args.record_objective_evaluation_trace):
+        same_candidate_target_case = (
+            jax_case
+            if same_candidate_replay_case is None
+            else same_candidate_replay_case
+        )
+        same_candidate_replay = compare_same_candidate_objective_replay(
+            cpu_case,
+            same_candidate_target_case,
+            require_exact_candidates=same_candidate_replay_case is not None,
+        )
+        failures.extend(_same_candidate_replay_gate_failures(same_candidate_replay))
+        optimizer_path_objective_evaluations = (
+            compare_optimizer_path_objective_evaluations(cpu_case, jax_case)
+        )
+        if (
+            same_candidate_replay["status"] == "pass"
+            and optimizer_path_objective_evaluations["status"] == "split"
+        ):
+            comparison["optimizer_path_split_kind"] = (
+                "optimizer_acceptance_split_after_same_candidate_parity"
+            )
     if int(args.maxiter) > 0 and args.reference_optimizer_method == "lbfgs-trace":
         optimizer_state_trace_parity = _compare_case_optimizer_state_traces(
             cpu_case,
@@ -1282,6 +2888,21 @@ def main() -> None:
     )
     for warning in warnings:
         print(f"NOTE: {warning}")
+    if (
+        optimizer_path_objective_evaluations is not None
+        and optimizer_path_objective_evaluations["status"] == "split"
+    ):
+        first_split = optimizer_path_objective_evaluations.get(
+            "first_candidate_split_event"
+        )
+        if first_split is not None:
+            print(
+                "Optimizer path split: "
+                f"pair={first_split['pair_index']}, "
+                f"cpu_iter={first_split['cpu_accepted_iteration_target']}, "
+                f"cpu_ls={first_split['cpu_line_search_evaluation']}, "
+                f"candidate_abs_diff={first_split['candidate_abs_diff']:.2e}"
+            )
 
     payload = {
         "provenance": provenance,
@@ -1307,6 +2928,12 @@ def main() -> None:
     }
     if optimizer_state_trace_parity is not None:
         payload["optimizer_state_trace_parity"] = optimizer_state_trace_parity
+    if same_candidate_replay is not None:
+        payload["same_candidate_replay"] = same_candidate_replay
+    if optimizer_path_objective_evaluations is not None:
+        payload["optimizer_path_objective_evaluations"] = (
+            optimizer_path_objective_evaluations
+        )
     if case_artifacts is not None:
         payload["artifacts"] = case_artifacts
     write_json(args.output_json, payload)

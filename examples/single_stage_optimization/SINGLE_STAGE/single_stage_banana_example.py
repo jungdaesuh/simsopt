@@ -120,6 +120,7 @@ from simsopt.geo.surfaceobjectives import (
     boozer_surface_residual,
     boozer_surface_residual_dB,
 )
+from simsopt.geo.surfaceobjectives_jax import _coil_dofs_gradient_to_derivative
 from simsopt.objectives import QuadraticPenalty
 from simsopt.objectives.utilities import forward_backward
 from simsopt.field.biotsavart_jax_backend import SingleStageRuntimeSpecBiotSavartJAX
@@ -194,6 +195,9 @@ SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES = (
 _SINGLE_STAGE_SEARCH_POLICY_PRESERVE_FIRST = "preserve_first"
 _SINGLE_STAGE_SEARCH_POLICY_REPAIR_FIRST = "repair_first"
 _SINGLE_STAGE_SEARCH_POLICY_GLOBAL_SEARCH = "global_search"
+_STANDARD_JAX_SURFACE_OBJECTIVES_DIAGNOSTIC_KEY = (
+    "standard_jax_surface_objectives"
+)
 _TIMED_STAGE_LABELS = frozenset(
     {
         "after_boozer_surface_fit",
@@ -457,6 +461,18 @@ def _summarize_host_scalar(value):
     }
 
 
+def _summarize_optional_host_scalar(value):
+    return None if value is None else _summarize_host_scalar(value)
+
+
+def _summarize_optional_host_vector(vector):
+    return None if vector is None else _summarize_host_vector(vector)
+
+
+def _summarize_optional_host_array(array):
+    return None if array is None else _summarize_host_array(array)
+
+
 def _single_stage_host_vector_array(value):
     return np.asarray(
         _single_stage_optimizer_dofs_array(value), dtype=np.float64
@@ -479,6 +495,7 @@ def _summarize_host_gradient(gradient):
             float(array[first_nonfinite_index])
         )
     return {
+        "values": array.tolist(),
         "all_finite": all_finite,
         "inf_norm": None
         if (not all_finite or array.size == 0)
@@ -512,6 +529,13 @@ def _summarize_host_vector(vector):
         "first_nonfinite_index": first_nonfinite_index,
         "first_nonfinite_classification": first_nonfinite_classification,
     }
+
+
+def _summarize_host_array(array):
+    host = np.asarray(host_array(array, dtype=np.float64))
+    summary = _summarize_host_vector(host.reshape(-1))
+    summary["shape"] = [int(size) for size in host.shape]
+    return summary
 
 
 def _summarize_optimizer_state_trace(trace):
@@ -1429,6 +1453,20 @@ def _hostify_single_stage_hardware_constraints(status):
         "max_curvature": host_float(status["max_curvature"]),
         "curvature_threshold": host_float(status["curvature_threshold"]),
     }
+    host_status["threshold_margins"] = {
+        "curve_curve_min_dist": (
+            host_status["curve_curve_min_dist"] - host_status["cc_dist"]
+        ),
+        "curve_surface_min_dist": (
+            host_status["curve_surface_min_dist"] - host_status["cs_dist"]
+        ),
+        "surface_vessel_min_dist": (
+            host_status["surface_vessel_min_dist"] - host_status["ss_dist"]
+        ),
+        "max_curvature": (
+            host_status["curvature_threshold"] - host_status["max_curvature"]
+        ),
+    }
     finite_flags = {
         metric_name: host_bool(metric_ok)
         for metric_name, metric_ok in status["finite_flags"].items()
@@ -1437,6 +1475,7 @@ def _hostify_single_stage_hardware_constraints(status):
         metric_name: host_bool(metric_ok)
         for metric_name, metric_ok in status["threshold_flags"].items()
     }
+    violation_keys = []
     violations = []
     for metric_name, label in (
         ("curve_curve_min_dist", "coil_coil_min_dist"),
@@ -1449,12 +1488,14 @@ def _hostify_single_stage_hardware_constraints(status):
         ("curvature_threshold", "curvature_threshold"),
     ):
         if not finite_flags[metric_name]:
+            violation_keys.append(metric_name)
             violations.append(f"{label} {host_status[metric_name]} is not finite")
     if (
         finite_flags["curve_curve_min_dist"]
         and finite_flags["cc_dist"]
         and (not threshold_flags["curve_curve_min_dist"])
     ):
+        violation_keys.append("curve_curve_min_dist")
         violations.append(
             "coil_coil_min_dist "
             f"{host_status['curve_curve_min_dist']:.6f} below threshold "
@@ -1465,6 +1506,7 @@ def _hostify_single_stage_hardware_constraints(status):
         and finite_flags["cs_dist"]
         and (not threshold_flags["curve_surface_min_dist"])
     ):
+        violation_keys.append("curve_surface_min_dist")
         violations.append(
             "coil_surface_min_dist "
             f"{host_status['curve_surface_min_dist']:.6f} below threshold "
@@ -1475,6 +1517,7 @@ def _hostify_single_stage_hardware_constraints(status):
         and finite_flags["ss_dist"]
         and (not threshold_flags["surface_vessel_min_dist"])
     ):
+        violation_keys.append("surface_vessel_min_dist")
         violations.append(
             "surface_vessel_min_dist "
             f"{host_status['surface_vessel_min_dist']:.6f} below threshold "
@@ -1485,11 +1528,13 @@ def _hostify_single_stage_hardware_constraints(status):
         and finite_flags["curvature_threshold"]
         and (not threshold_flags["max_curvature"])
     ):
+        violation_keys.append("max_curvature")
         violations.append(
             "max_curvature "
             f"{host_status['max_curvature']:.6f} exceeds threshold "
             f"{host_status['curvature_threshold']:.6f}"
         )
+    host_status["violation_keys"] = violation_keys
     host_status["violations"] = violations
     return host_status
 
@@ -4493,6 +4538,15 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--replay-objective-evaluation-trace",
+        default=None,
+        help=(
+            "Evaluate the objective at each candidate optimizer vector recorded in "
+            "an outer_optimizer_progress.json objective-evaluation trace, syncing "
+            "accepted state after each recorded iteration group."
+        ),
+    )
+    parser.add_argument(
         "--record-target-lane-invalid-state-events",
         action="store_true",
         help=(
@@ -4824,6 +4878,7 @@ def initialize_boozer_surface(
     surface_dofs_override=None,
     iota_override=None,
     G_override=None,
+    record_scipy_callback_trace=False,
     on_stage=None,
     timings_out=None,
 ):
@@ -4854,6 +4909,8 @@ def initialize_boozer_surface(
         initial Boozer state instead of the fitted Stage 2 seed surface
     iota_override: optional solved iota warm start for the Boozer replay
     G_override: optional solved G warm start for the Boozer replay
+    record_scipy_callback_trace: record every SciPy adapter objective
+        evaluation for explicit parity trace runs
     """
 
     timings = {} if timings_out is None else timings_out
@@ -4964,6 +5021,8 @@ def initialize_boozer_surface(
         print(f"Generating {solver_name}Boozer least squares surface...")
         vol = build_volume_label(surf)
         options = {"verbose": True}
+        if record_scipy_callback_trace:
+            options["record_scipy_callback_trace"] = True
         if backend == "jax":
             resolved_optimizer_backend = resolve_boozer_optimizer_backend(
                 backend,
@@ -5292,6 +5351,7 @@ def resolve_single_stage_final_penalty_metrics(
     del init_only, termination_message, optimizer_success
     benchmark_hardware_status = {
         "success": None,
+        "violation_keys": ["skipped_in_benchmark_mode"],
         "violations": ["skipped_in_benchmark_mode"],
     }
 
@@ -5959,6 +6019,21 @@ def get_jax_surface_objective_classes():
     return BoozerResidualJAX, IotasJAX, NonQuasiSymmetricRatioJAX
 
 
+def get_standard_jax_surface_objective_gradient_batcher():
+    """Load the shared standard-wrapper gradient batcher on demand."""
+    from simsopt.geo.surfaceobjectives_jax import (
+        compute_standard_surface_objective_gradients,
+    )
+
+    return compute_standard_surface_objective_gradients
+
+
+def populate_standard_jax_surface_objective_gradients(diagnostics):
+    wrappers = diagnostics.get(_STANDARD_JAX_SURFACE_OBJECTIVES_DIAGNOSTIC_KEY)
+    if wrappers is not None:
+        get_standard_jax_surface_objective_gradient_batcher()(*wrappers)
+
+
 def get_traceable_single_stage_objective_builder():
     """Load the pure single-stage JAX target objective on demand."""
     from simsopt.geo.surfaceobjectives_jax import make_traceable_objective
@@ -6089,6 +6164,7 @@ def build_single_stage_target_lane_accepted_step_sync(
         if benchmark_mode:
             hardware_status = {
                 "success": None,
+                "violation_keys": ["skipped_in_benchmark_mode"],
                 "violations": ["skipped_in_benchmark_mode"],
             }
         else:
@@ -9225,21 +9301,22 @@ def _single_stage_failure_residual_inf(boozer_surface):
 def _single_stage_hardware_violation_score(hardware_status):
     if hardware_status is None or hardware_status["success"]:
         return 0.0
-    score = 0.25 * float(len(hardware_status["violations"]))
-    for distance_name, threshold_name in (
-        ("curve_curve_min_dist", "cc_dist"),
-        ("curve_surface_min_dist", "cs_dist"),
-        ("surface_vessel_min_dist", "ss_dist"),
-    ):
-        distance = float(hardware_status.get(distance_name, 0.0))
-        threshold = float(hardware_status.get(threshold_name, 0.0))
-        if threshold > 0.0:
-            score += max(threshold - distance, 0.0) / threshold
-    curvature_threshold = float(hardware_status.get("curvature_threshold", 0.0))
-    max_curvature = float(hardware_status.get("max_curvature", 0.0))
-    if curvature_threshold > 0.0:
-        score += max(max_curvature - curvature_threshold, 0.0) / curvature_threshold
-    return score
+    return 0.25 * float(len(hardware_status["violation_keys"]))
+
+
+def _single_stage_failure_reject_class(
+    *,
+    success_solve,
+    is_intersecting,
+    hardware_score,
+):
+    if is_intersecting:
+        return "self_intersection"
+    if hardware_score > 0.0:
+        return "hardware"
+    if not success_solve:
+        return "solver"
+    return "unknown"
 
 
 def compute_single_stage_failure_penalty(
@@ -9262,20 +9339,33 @@ def compute_single_stage_failure_penalty(
     residual_inf = (
         0.0 if success_solve else _single_stage_failure_residual_inf(boozer_surface)
     )
-    hardware_score = _single_stage_hardware_violation_score(hardware_status)
+    raw_hardware_score = _single_stage_hardware_violation_score(hardware_status)
+    reject_class = _single_stage_failure_reject_class(
+        success_solve=success_solve,
+        is_intersecting=is_intersecting,
+        hardware_score=raw_hardware_score,
+    )
+    solver_score = (
+        min(residual_inf, 4.0) if reject_class == "solver" else 0.0
+    )
+    hardware_score = raw_hardware_score if reject_class == "hardware" else 0.0
+    self_intersection_score = 0.5 if reject_class == "self_intersection" else 0.0
     failure_count = int(run_dict.get("failure_count", 0))
     multiplier = failure_weight
     multiplier += min(step_ratio, 4.0)
-    multiplier += min(residual_inf, 4.0)
+    multiplier += solver_score
     multiplier += hardware_score
-    multiplier += 0.5 if is_intersecting else 0.0
+    multiplier += self_intersection_score
     multiplier += 0.25 * float(failure_count)
     penalty = penalty_base * multiplier
     return penalty, {
         "step_norm": step_norm,
         "step_ratio": step_ratio,
         "residual_inf": residual_inf,
+        "solver_score": solver_score,
         "hardware_score": hardware_score,
+        "self_intersection_score": self_intersection_score,
+        "reject_class": reject_class,
         "failure_count": failure_count,
         "intersecting": bool(is_intersecting),
         "solver_success": bool(success_solve),
@@ -9351,6 +9441,8 @@ def _evaluate_candidate_impl(
     if success:
         run_dict["failure_count"] = 0
         run_dict.pop("last_candidate_failure", None)
+        if diagnostics is not None:
+            populate_standard_jax_surface_objective_gradients(diagnostics)
         J = JF.J()
         dJ = JF.dJ()
         logger.info("Volume: %s", host_float(boozer_surface.surface.volume()))
@@ -9459,6 +9551,8 @@ def build_single_stage_objective_evaluation_trace_event(
     objective_value,
     native_gradient,
     optimizer_gradient,
+    objective_components,
+    iota_penalty_decomposition,
     native_gradient_used,
     run_dict,
     boozer_surface,
@@ -9483,16 +9577,392 @@ def build_single_stage_objective_evaluation_trace_event(
         "objective": _summarize_host_scalar(objective_value),
         "native_gradient": _summarize_host_gradient(native_gradient),
         "optimizer_gradient": _summarize_host_gradient(optimizer_gradient),
+        "objective_components": _jsonable_value(objective_components),
+        "boozer_solve_decomposition": _jsonable_value(
+            summarize_single_stage_boozer_solve_decomposition(boozer_surface)
+            if solver_success and native_gradient_used
+            else None
+        ),
+        "iota_penalty_decomposition": _jsonable_value(iota_penalty_decomposition),
         "native_gradient_used": bool(native_gradient_used),
         "solver_success": solver_success,
+        "boozer_solver_metadata": summarize_boozer_solver_trace_metadata(
+            boozer_surface
+        ),
         "boozer_iota": _summarize_host_scalar(res["iota"]),
-        "boozer_G": _summarize_host_scalar(res["G"]),
+        "boozer_G": _summarize_optional_host_scalar(res["G"]),
         "boozer_surface_dofs": None
         if solved_state is None
         else _summarize_host_vector(solved_state.sdofs),
         "hardware_status": _jsonable_value(hardware_status),
         "candidate_failure": _jsonable_value(candidate_failure),
     }
+
+
+def _single_stage_boozer_decision_vector(surface_dofs, iota, G):
+    pieces = [np.asarray(host_array(surface_dofs, dtype=np.float64)).reshape(-1)]
+    pieces.append(np.asarray([host_float(iota)], dtype=np.float64))
+    if G is not None:
+        pieces.append(np.asarray([host_float(G)], dtype=np.float64))
+    return np.concatenate(pieces)
+
+
+def _summarize_single_stage_scipy_initial_call(initial_call):
+    if initial_call is None:
+        return None
+    return {
+        "decision_vector": _summarize_optional_host_vector(
+            initial_call.get("decision_vector")
+        ),
+        "fun": _summarize_optional_host_scalar(initial_call.get("fun")),
+        "gradient": _summarize_optional_host_vector(initial_call.get("gradient")),
+    }
+
+
+def _summarize_single_stage_scipy_callback_trace(trace):
+    if not trace:
+        return None
+    return [
+        {
+            "evaluation_index": int(entry.get("evaluation_index", index)),
+            "decision_vector": _summarize_optional_host_vector(
+                entry.get("decision_vector")
+            ),
+            "fun": _summarize_optional_host_scalar(entry.get("fun")),
+            "gradient": _summarize_optional_host_vector(entry.get("gradient")),
+        }
+        for index, entry in enumerate(trace, start=1)
+    ]
+
+
+def _summarize_single_stage_pre_newton_state(pre_newton):
+    if pre_newton is None:
+        return None
+    summary = {
+        "optimizer_method": pre_newton.get("optimizer_method"),
+        "success": bool(pre_newton.get("success")),
+        "iter": _summarize_optional_host_scalar(pre_newton.get("iter")),
+        "fun": _summarize_optional_host_scalar(pre_newton.get("fun")),
+        "iota": _summarize_optional_host_scalar(pre_newton.get("iota")),
+        "G": _summarize_optional_host_scalar(pre_newton.get("G")),
+        "surface_dofs": _summarize_optional_host_vector(pre_newton.get("surface_dofs")),
+        "decision_vector": _summarize_optional_host_vector(
+            pre_newton.get("decision_vector")
+        ),
+        "gradient": _summarize_optional_host_vector(pre_newton.get("gradient")),
+        "scipy_call_contract": _jsonable_value(
+            pre_newton.get("scipy_call_contract")
+        ),
+        "scipy_initial_call": _summarize_single_stage_scipy_initial_call(
+            pre_newton.get("scipy_initial_call")
+        ),
+    }
+    callback_trace = _summarize_single_stage_scipy_callback_trace(
+        pre_newton.get("scipy_callback_trace")
+    )
+    if callback_trace is not None:
+        summary["scipy_callback_trace"] = callback_trace
+    return summary
+
+
+def summarize_single_stage_boozer_solve_decomposition(boozer_surface):
+    """Return fixed-state Boozer solve layers for parity bug census output."""
+    res = boozer_surface.res
+    solved_state = _resolved_single_stage_boozer_solved_state(boozer_surface)
+    decision_vector = _single_stage_boozer_decision_vector(
+        solved_state.sdofs,
+        solved_state.iota,
+        solved_state.G,
+    )
+    return {
+        "pre_newton": _summarize_single_stage_pre_newton_state(
+            res.get("pre_newton")
+        ),
+        "final_iota": _summarize_host_scalar(solved_state.iota),
+        "final_G": _summarize_optional_host_scalar(solved_state.G),
+        "final_surface_dofs": _summarize_host_vector(solved_state.sdofs),
+        "final_decision_vector": _summarize_host_vector(decision_vector),
+        "final_fun": _summarize_optional_host_scalar(res.get("fun")),
+        "final_residual": _summarize_optional_host_vector(res.get("residual")),
+        "final_gradient": _summarize_optional_host_vector(
+            res.get("jacobian", res.get("gradient"))
+        ),
+        "final_hessian": _summarize_optional_host_array(res.get("hessian")),
+        "linear_solve_factors": _summarize_single_stage_linear_solve_factors(
+            res.get("PLU")
+        ),
+    }
+
+
+def summarize_boozer_solver_trace_metadata(boozer_surface):
+    """Return solver-route metadata needed to interpret parity replay."""
+    res = getattr(boozer_surface, "res", {})
+    options = getattr(boozer_surface, "options", {})
+    boozer_type = getattr(boozer_surface, "boozer_type", res.get("type"))
+    least_squares_algorithm = options.get("least_squares_algorithm")
+    if least_squares_algorithm is None and boozer_type == "ls":
+        least_squares_algorithm = "quasi-newton"
+    metadata = {
+        "boozer_type": boozer_type,
+        "boozer_optimizer_backend": options.get("optimizer_backend", "scipy"),
+        "boozer_least_squares_algorithm": least_squares_algorithm,
+        "boozer_optimizer_method": res.get("optimizer_method"),
+        "newton_tol": options.get("newton_tol"),
+        "newton_maxiter": options.get("newton_maxiter"),
+        "linearization_kind": res.get("linearization_kind"),
+        "linear_solve_backend": res.get("linear_solve_backend"),
+        "dense_linear_solve_factors_available": res.get(
+            "dense_linear_solve_factors_available"
+        ),
+        "dense_newton_steps_materialized": res.get(
+            "dense_newton_steps_materialized"
+        ),
+        "hessian_materialized": res.get("hessian_materialized"),
+        "dense_hessian_shape": res.get("dense_hessian_shape"),
+        "dense_hessian_bytes": res.get("dense_hessian_bytes"),
+        "max_dense_hessian_bytes": res.get("max_dense_hessian_bytes"),
+        "newton_iter": res.get("newton_iter", res.get("iter")),
+        "final_gradient_norm": res.get("final_gradient_norm"),
+        "final_gradient_inf_norm": res.get("final_gradient_inf_norm"),
+        "iterative_refinement_ran": res.get("iterative_refinement_ran"),
+        "final_step_iterative_refinement_ran": res.get(
+            "final_step_iterative_refinement_ran"
+        ),
+        "dense_refinement_ran": res.get("dense_refinement_ran"),
+        "final_step_dense_refinement_ran": res.get(
+            "final_step_dense_refinement_ran"
+        ),
+    }
+    pre_newton = res.get("pre_newton") if isinstance(res, dict) else None
+    if isinstance(pre_newton, dict):
+        metadata["pre_newton_scipy_call_contract"] = pre_newton.get(
+            "scipy_call_contract"
+        )
+        metadata["pre_newton_scipy_initial_call"] = (
+            _summarize_single_stage_scipy_initial_call(
+                pre_newton.get("scipy_initial_call")
+            )
+        )
+        callback_trace = _summarize_single_stage_scipy_callback_trace(
+            pre_newton.get("scipy_callback_trace")
+        )
+        if callback_trace is not None:
+            metadata["pre_newton_scipy_callback_trace"] = callback_trace
+    return _jsonable_value(metadata)
+
+
+def summarize_single_stage_objective_trace_components(
+    objectives,
+    objective_weights,
+    native_gradient_for_objective,
+    optimizer_gradient,
+):
+    """Return per-component objective and optimizer-gradient trace summaries."""
+    summaries = {}
+    for name, obj in objectives.items():
+        weight = float(objective_weights[name])
+        raw_value = host_float(obj.J())
+        optimizer_gradient_values = optimizer_gradient(
+            native_gradient_for_objective(obj)
+        )
+        summaries[name] = {
+            "weight": weight,
+            "gradient_basis": "optimizer",
+            "objective": _summarize_host_scalar(raw_value),
+            "weighted_objective": _summarize_host_scalar(weight * raw_value),
+            "gradient": _summarize_host_gradient(optimizer_gradient_values),
+            "weighted_gradient": _summarize_host_gradient(
+                weight * optimizer_gradient_values
+            ),
+        }
+    return summaries
+
+
+def _single_stage_iota_penalty_gradient_scale(iota_penalty):
+    diff = host_float(iota_penalty.obj.J()) - host_float(iota_penalty.cons)
+    if iota_penalty.f == "identity":
+        return diff
+    if iota_penalty.f == "max":
+        return max(diff, 0.0)
+    if iota_penalty.f == "min":
+        return min(diff, 0.0)
+    raise ValueError(f"Unsupported QuadraticPenalty wrapping function {iota_penalty.f!r}.")
+
+
+def _single_stage_iota_adjoint_rhs(adjoint_state, G):
+    dJ_ds = np.zeros(int(adjoint_state.decision_size), dtype=np.float64)
+    if G is not None:
+        dJ_ds[-2] = 1.0
+    else:
+        dJ_ds[-1] = 1.0
+    return dJ_ds
+
+
+def _single_stage_solve_iota_adjoint(adjoint_state, dJ_ds):
+    solve_with_status = getattr(adjoint_state, "solve_transpose_with_status", None)
+    if callable(solve_with_status):
+        adjoint, success = solve_with_status(jnp.asarray(dJ_ds, dtype=jnp.float64))
+        if not host_bool(success):
+            raise RuntimeError(
+                "iota_penalty decomposition requires a successful adjoint solve."
+            )
+        return adjoint
+    return adjoint_state.solve_transpose(dJ_ds)
+
+
+def _single_stage_streamed_raw_iota_gradient(raw_iota, adjoint_state, adjoint):
+    coil_dofs = _as_jax_float64(raw_iota.biotsavart.x)
+    adjoint_gradient = coil_dofs - coil_dofs
+    for d_coil_array, coil_group_indices in adjoint_state.stream_group_vjps(adjoint):
+        adjoint_gradient = (
+            adjoint_gradient
+            + raw_iota.biotsavart.coil_cotangents_to_dofs_gradient(
+                [d_coil_array],
+                [coil_group_indices],
+                coil_dofs=coil_dofs,
+            )
+        )
+    return -adjoint_gradient
+
+
+def _single_stage_iota_projection_decomposition(raw_iota, adjoint_state, adjoint):
+    projector = getattr(adjoint_state, "project_coil_adjoint_derivative", None)
+    if callable(projector):
+        raw_derivative = -1.0 * projector(adjoint)
+        return "legacy_derivative", None, raw_derivative
+
+    raw_flat_gradient = _single_stage_streamed_raw_iota_gradient(
+        raw_iota,
+        adjoint_state,
+        adjoint,
+    )
+    raw_derivative = _coil_dofs_gradient_to_derivative(
+        raw_iota.biotsavart,
+        raw_flat_gradient,
+    )
+    return "streamed_flat", raw_flat_gradient, raw_derivative
+
+
+def _summarize_single_stage_linear_solve_factors(factors):
+    if factors is None:
+        return {"available": False}
+    P, L, U = factors
+    return {
+        "available": True,
+        "P": _summarize_host_array(P),
+        "L": _summarize_host_array(L),
+        "U": _summarize_host_array(U),
+    }
+
+
+def summarize_single_stage_iota_penalty_decomposition(
+    iota_penalty,
+    *,
+    weight,
+    JF,
+    optimizer_gradient,
+):
+    """Return the fixed-state adjoint-gradient layers for ``iota_penalty``."""
+    raw_iota = iota_penalty.obj
+    boozer_surface = raw_iota.boozer_surface
+    solved_state = _resolved_single_stage_boozer_solved_state(boozer_surface)
+    adjoint_state = boozer_surface.get_adjoint_runtime_state()
+    dJ_ds = _single_stage_iota_adjoint_rhs(adjoint_state, solved_state.G)
+    adjoint = _single_stage_solve_iota_adjoint(adjoint_state, dJ_ds)
+    projection_route, raw_flat_gradient, raw_derivative = (
+        _single_stage_iota_projection_decomposition(
+            raw_iota,
+            adjoint_state,
+            adjoint,
+        )
+    )
+    native_projection_gradient = raw_derivative(JF)
+    optimizer_projection_gradient = optimizer_gradient(native_projection_gradient)
+    penalty_scale = _single_stage_iota_penalty_gradient_scale(iota_penalty)
+    penalty_optimizer_gradient = penalty_scale * optimizer_projection_gradient
+    return {
+        "projection_route": projection_route,
+        "linearization_kind": getattr(adjoint_state, "linearization_kind", None),
+        "linear_solve_backend": getattr(adjoint_state, "linear_solve_backend", None),
+        "solved_iota": _summarize_host_scalar(solved_state.iota),
+        "solved_G": _summarize_optional_host_scalar(solved_state.G),
+        "solved_surface_dofs": _summarize_host_vector(solved_state.sdofs),
+        "linear_solve_factors": _summarize_single_stage_linear_solve_factors(
+            getattr(
+                adjoint_state,
+                "linear_solve_factors",
+                boozer_surface.res.get("PLU"),
+            )
+        ),
+        "dJ_ds": _summarize_host_vector(dJ_ds),
+        "adjoint": _summarize_host_vector(adjoint),
+        "streamed_flat_raw_iota_gradient": None
+        if raw_flat_gradient is None
+        else _summarize_host_vector(raw_flat_gradient),
+        "native_projection_gradient": _summarize_host_gradient(
+            native_projection_gradient
+        ),
+        "optimizer_projection_gradient": _summarize_host_gradient(
+            optimizer_projection_gradient
+        ),
+        "penalty_scale": _summarize_host_scalar(penalty_scale),
+        "penalty_optimizer_gradient": _summarize_host_gradient(
+            penalty_optimizer_gradient
+        ),
+        "weighted_penalty_optimizer_gradient": _summarize_host_gradient(
+            float(weight) * penalty_optimizer_gradient
+        ),
+    }
+
+
+def load_single_stage_objective_evaluation_replay_events(progress_json_path):
+    """Load the objective-evaluation events used by the same-candidate replay gate."""
+    with open(progress_json_path) as f:
+        payload = json.load(f)
+    return [
+        event
+        for event in payload["events"]
+        if event["label"] == "objective_evaluation"
+    ]
+
+
+def run_single_stage_objective_evaluation_trace_replay(adapter, replay_events):
+    """Replay recorded optimizer candidates through one lane's objective contract."""
+    final_x = None
+    current_iteration = None
+    accepted_iteration_count = 0
+    last_group_x = None
+    for event in replay_events:
+        iteration_target = int(event["accepted_iteration_target"])
+        if current_iteration is None:
+            current_iteration = iteration_target
+        elif iteration_target != current_iteration:
+            adapter.sync_accepted_step(last_group_x)
+            accepted_iteration_count += 1
+            current_iteration = iteration_target
+        candidate_x = _single_stage_optimizer_dofs_array(
+            event["candidate_optimizer_dofs"]["values"]
+        )
+        adapter(candidate_x)
+        final_x = candidate_x.copy()
+        last_group_x = candidate_x
+    if last_group_x is not None:
+        adapter.sync_accepted_step(last_group_x)
+        accepted_iteration_count += 1
+    if final_x is None:
+        raise RuntimeError(
+            "Objective-evaluation replay requires at least one recorded event."
+        )
+    return types.SimpleNamespace(
+        x=final_x,
+        nit=accepted_iteration_count,
+        success=True,
+        message="objective_evaluation_trace_replay",
+        status=0,
+        nfev=len(replay_events),
+        njev=len(replay_events),
+        ls_status=0,
+    )
 
 
 def snapshot_accepted_step_state_from_values(
@@ -9720,6 +10190,7 @@ class SingleStageAdapter:
         objectives,
         diagnostics,
         log_path,
+        objective_weights=None,
         reevaluate_before_accept=False,
         apply_coil_dofs=None,
         benchmark_mode=False,
@@ -9734,6 +10205,11 @@ class SingleStageAdapter:
         self.JF = JF
         self.bs = bs
         self.objectives = objectives
+        self.objective_weights = (
+            {name: 1.0 for name in objectives}
+            if objective_weights is None
+            else objective_weights
+        )
         self.diagnostics = diagnostics
         self.log_path = log_path
         self.reevaluate_before_accept = bool(reevaluate_before_accept)
@@ -9936,12 +10412,40 @@ class SingleStageAdapter:
             native_gradient=native_gradient,
         )
         if self.objective_evaluation_trace_callback is not None:
+            iota_penalty_decomposition = None
+            objective_components = (
+                summarize_single_stage_objective_trace_components(
+                    self.objectives,
+                    self.objective_weights,
+                    lambda obj: obj.dJ(partials=True)(self.JF),
+                    lambda gradient: self._optimizer_gradient(
+                        gradient,
+                        native_gradient=True,
+                    ),
+                )
+                if native_gradient
+                else None
+            )
+            if native_gradient and "iota_penalty" in self.objectives:
+                iota_penalty_decomposition = (
+                    summarize_single_stage_iota_penalty_decomposition(
+                        self.objectives["iota_penalty"],
+                        weight=self.objective_weights["iota_penalty"],
+                        JF=self.JF,
+                        optimizer_gradient=lambda gradient: self._optimizer_gradient(
+                            gradient,
+                            native_gradient=True,
+                        ),
+                    )
+                )
             self.objective_evaluation_trace_callback(
                 build_single_stage_objective_evaluation_trace_event(
                     candidate_optimizer_dofs=x_array,
                     objective_value=objective_value,
                     native_gradient=objective_grad,
                     optimizer_gradient=optimizer_gradient,
+                    objective_components=objective_components,
+                    iota_penalty_decomposition=iota_penalty_decomposition,
                     native_gradient_used=native_gradient,
                     run_dict=self.run_dict,
                     boozer_surface=self.boozer_surface,
@@ -10846,12 +11350,20 @@ if __name__ == "__main__":
     )
     target_lane_boozer_newton_tol_record = (
         args.target_lane_boozer_newton_tol
-        if args.backend == "jax" and boozer_optimizer_backend_record == "ondevice"
+        if args.backend == "jax"
+        and (
+            boozer_optimizer_backend_record == "ondevice"
+            or args.optimizer_backend == _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_BACKEND
+        )
         else None
     )
     target_lane_boozer_newton_maxiter_record = (
         args.target_lane_boozer_newton_maxiter
-        if args.backend == "jax" and boozer_optimizer_backend_record == "ondevice"
+        if args.backend == "jax"
+        and (
+            boozer_optimizer_backend_record == "ondevice"
+            or args.optimizer_backend == _JAX_FULL_GRAPH_SCIPY_OUTER_OPTIMIZER_BACKEND
+        )
         else None
     )
     boozer_optimizer_backend_hash_record = (
@@ -11116,6 +11628,7 @@ if __name__ == "__main__":
             G_override=jax_seed_G_override
             if use_jax
             else (None if warm_start_state is None else warm_start_state["G"]),
+            record_scipy_callback_trace=bool(args.record_objective_evaluation_trace),
             on_stage=boozer_init_progress,
             timings_out=timings,
         )
@@ -11352,11 +11865,27 @@ if __name__ == "__main__":
         "surf": JSurfSurf,
         "curvature": JCurvature,
     }
+    objective_weights = {
+        "qs": 1.0,
+        "boozer": RES_WEIGHT,
+        "iota_penalty": IOTAS_WEIGHT,
+        "length": LENGTH_WEIGHT,
+        "cc": CC_WEIGHT,
+        "cs": CS_WEIGHT,
+        "surf": SURF_DIST_WEIGHT,
+        "curvature": CURVATURE_WEIGHT,
+    }
     diagnostics_refs = {
         "iota": iota,
         "banana_curve": banana_curve,
         "curvelength": curvelength,
     }
+    if use_jax:
+        diagnostics_refs[_STANDARD_JAX_SURFACE_OBJECTIVES_DIAGNOSTIC_KEY] = (
+            brs[0],
+            iota,
+            nonQSs[0],
+        )
     initial_hardware_start_s = _perf_counter_s()
     record_outer_optimizer_event("initial_hardware_status_started")
     run_dict["hardware_constraint_status"] = _evaluate_single_stage_hardware_status(
@@ -11385,6 +11914,7 @@ if __name__ == "__main__":
         JF=JF,
         bs=bs,
         objectives=objectives,
+        objective_weights=objective_weights,
         diagnostics=diagnostics_refs,
         log_path=OUT_DIR_ITER + "/log.txt",
         reevaluate_before_accept=False,
@@ -12034,7 +12564,58 @@ if __name__ == "__main__":
                                 initial_target_grad
                             ),
                         )
-                if args.diagnose_target_lane_scaled_phase1:
+                if args.replay_objective_evaluation_trace is not None:
+                    if use_target_lane:
+                        raise RuntimeError(
+                            "--replay-objective-evaluation-trace requires the "
+                            "host-dispatched adapter objective path."
+                        )
+                    replay_events = load_single_stage_objective_evaluation_replay_events(
+                        args.replay_objective_evaluation_trace
+                    )
+                    replay_start_s = _perf_counter_s()
+                    record_outer_optimizer_event(
+                        "objective_evaluation_trace_replay_started",
+                        source_progress_json=os.path.abspath(
+                            args.replay_objective_evaluation_trace
+                        ),
+                        event_count=len(replay_events),
+                    )
+                    with maybe_trace_single_stage_phase(
+                        "single_stage.objective_evaluation_trace_replay",
+                        enabled=jax_profile_enabled,
+                    ):
+                        res = run_single_stage_objective_evaluation_trace_replay(
+                            adapter,
+                            replay_events,
+                        )
+                    outer_optimizer_end_s = _perf_counter_s()
+                    _record_timing(
+                        timings,
+                        "objective_evaluation_trace_replay_s",
+                        replay_start_s,
+                        outer_optimizer_end_s,
+                    )
+                    _record_timing(
+                        timings,
+                        "outer_optimizer_s",
+                        outer_optimizer_run_start_s,
+                        outer_optimizer_end_s,
+                    )
+                    res_nit = int(res.nit)
+                    main_phase_iterations = int(res.nit)
+                    optimizer_success = bool(res.success)
+                    termination_message = str(res.message)
+                    record_outer_optimizer_event(
+                        "objective_evaluation_trace_replay_returned",
+                        elapsed_s=timings.get("objective_evaluation_trace_replay_s"),
+                        result=summarize_optimizer_result_for_progress(res),
+                    )
+                    print(
+                        "Skipping L-BFGS-B trajectory execution because "
+                        "--replay-objective-evaluation-trace was provided."
+                    )
+                elif args.diagnose_target_lane_scaled_phase1:
                     if not use_target_lane:
                         raise RuntimeError(
                             "--diagnose-target-lane-scaled-phase1 requires the JAX "

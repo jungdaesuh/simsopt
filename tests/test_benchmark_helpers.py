@@ -720,6 +720,901 @@ def test_single_stage_init_accepts_objective_evaluation_trace(monkeypatch):
     assert args.record_objective_evaluation_trace
 
 
+def _single_stage_objective_trace_event(
+    *,
+    x,
+    objective,
+    gradient,
+    event_index=1,
+    accepted_iteration_target=5,
+    line_search_evaluation=1,
+    boozer_iota=0.0035,
+    hardware_status=None,
+    candidate_failure=None,
+    solver_success=True,
+    boozer_solver_metadata=None,
+    boozer_solve_decomposition=None,
+    objective_components=None,
+    iota_penalty_decomposition=None,
+):
+    return {
+        "label": "objective_evaluation",
+        "event_index": int(event_index),
+        "accepted_iteration_target": int(accepted_iteration_target),
+        "line_search_evaluation": int(line_search_evaluation),
+        "candidate_optimizer_dofs": {
+            "values": list(x),
+            "all_finite": True,
+            "size": len(x),
+        },
+        "objective": _single_stage_trace_scalar(objective),
+        "optimizer_gradient": _single_stage_trace_vector(gradient),
+        "objective_components": objective_components,
+        "iota_penalty_decomposition": iota_penalty_decomposition,
+        "native_gradient_used": candidate_failure is None,
+        "solver_success": bool(solver_success),
+        "boozer_solver_metadata": boozer_solver_metadata,
+        "boozer_solve_decomposition": boozer_solve_decomposition,
+        "boozer_iota": _single_stage_trace_scalar(boozer_iota),
+        "boozer_G": _single_stage_trace_scalar(2.0),
+        "boozer_surface_dofs": {
+            "values": [0.1, 0.2],
+            "all_finite": True,
+            "size": 2,
+        },
+        "hardware_status": hardware_status,
+        "candidate_failure": candidate_failure,
+    }
+
+
+def _single_stage_trace_scalar(value):
+    return {"value": float(value), "finite": True, "classification": None}
+
+
+def _single_stage_trace_vector(values):
+    return {
+        "values": list(values),
+        "all_finite": True,
+        "inf_norm": float(np.max(np.abs(values))),
+        "size": len(values),
+    }
+
+
+def test_single_stage_init_same_candidate_replay_compares_trace_payloads(tmp_path):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    hardware_status = {
+        "success": False,
+        "violation_keys": ["max_curvature"],
+        "violations": ["max_curvature 41.000000 exceeds threshold 40.000000"],
+        "curve_curve_min_dist": 0.1,
+        "curve_surface_min_dist": 0.2,
+        "surface_vessel_min_dist": 0.3,
+        "max_curvature": 41.0,
+    }
+    failure = {
+        "hardware_score": 0.25,
+        "residual_inf": 0.0,
+        "solver_score": 0.0,
+        "reject_class": "hardware",
+        "penalty_multiplier": 1.25,
+        "penalty": 2.5,
+        "intersecting": False,
+        "solver_success": True,
+        "failure_count": 0,
+        "search_policy": "preserve_first",
+        "donor_class": "serialized_surface_state",
+    }
+    event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        hardware_status=hardware_status,
+        candidate_failure=failure,
+    )
+    cpu_progress.write_text(json.dumps({"events": [event]}))
+    jax_progress.write_text(json.dumps({"events": [event]}))
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+    )
+
+    assert replay["status"] == "pass"
+    assert replay["same_candidate_event_count"] == 1
+    assert replay["max_objective_abs_diff"] == 0.0
+    assert replay["max_optimizer_gradient_abs_diff"] == 0.0
+
+
+def test_single_stage_init_same_candidate_replay_reports_first_mismatch(tmp_path):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+    )
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.1,
+        gradient=[0.5, -0.25],
+    )
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}))
+    jax_progress.write_text(json.dumps({"events": [jax_event]}))
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+    )
+
+    assert replay["status"] == "fail"
+    assert replay["same_candidate_event_count"] == 1
+    assert replay["first_failure_event"]["pair_index"] == 1
+    assert "objective.value mismatch" in replay["failures"][0]
+
+
+def test_single_stage_init_same_candidate_replay_requires_matching_solver_status(
+    tmp_path,
+):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        solver_success=True,
+    )
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        solver_success=False,
+    )
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}))
+    jax_progress.write_text(json.dumps({"events": [jax_event]}))
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+        strict_solver_contract=True,
+    )
+
+    assert replay["status"] == "fail"
+    assert replay["same_candidate_event_count"] == 1
+    assert "solver_success mismatch" in replay["failures"][0]
+
+
+def test_single_stage_init_same_candidate_replay_compares_boozer_metadata(tmp_path):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    metadata = {
+        "boozer_type": "ls",
+        "boozer_optimizer_backend": "scipy",
+        "boozer_least_squares_algorithm": "quasi-newton",
+        "linearization_kind": "hessian",
+        "linear_solve_backend": "dense-plu",
+        "dense_newton_steps_materialized": True,
+        "dense_linear_solve_factors_available": True,
+        "newton_iter": 2,
+        "final_gradient_norm": 1e-13,
+    }
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        boozer_solver_metadata=metadata,
+    )
+    jax_metadata = dict(metadata)
+    jax_metadata["linear_solve_backend"] = "operator"
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        boozer_solver_metadata=jax_metadata,
+    )
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}))
+    jax_progress.write_text(json.dumps({"events": [jax_event]}))
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+        strict_solver_contract=True,
+    )
+
+    assert replay["status"] == "fail"
+    assert (
+        "boozer_solver_metadata.linear_solve_backend mismatch"
+        in replay["failures"][0]
+    )
+
+
+def test_single_stage_init_same_candidate_replay_keeps_boozer_metadata_diagnostic(
+    tmp_path,
+):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    metadata = {
+        "boozer_type": "ls",
+        "boozer_optimizer_backend": "scipy",
+        "boozer_least_squares_algorithm": "quasi-newton",
+        "linearization_kind": "hessian",
+        "linear_solve_backend": "dense-plu",
+        "dense_newton_steps_materialized": True,
+        "dense_linear_solve_factors_available": True,
+    }
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        boozer_solver_metadata=metadata,
+    )
+    jax_metadata = dict(metadata)
+    jax_metadata["linear_solve_backend"] = "operator"
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        boozer_solver_metadata=jax_metadata,
+    )
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}))
+    jax_progress.write_text(json.dumps({"events": [jax_event]}))
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+    )
+
+    assert replay["status"] == "pass"
+    assert replay["strict_solver_contract"] is False
+    assert (
+        "boozer_solver_metadata.linear_solve_backend mismatch"
+        in replay["solver_contract_diagnostics"][0]
+    )
+
+
+def test_single_stage_init_same_candidate_replay_compares_boozer_scipy_contract(
+    tmp_path,
+):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    contract = {
+        "semantic_method": "bfgs",
+        "scipy_method": "BFGS",
+        "scipy_options": {"maxiter": 150, "gtol": 1e-6},
+        "callback": None,
+        "success": True,
+        "status": 0,
+        "message": "Optimization terminated successfully.",
+        "nit": 97,
+        "nfev": 101,
+        "njev": 101,
+    }
+    metadata = {
+        "boozer_type": "ls",
+        "boozer_optimizer_backend": "scipy",
+        "boozer_least_squares_algorithm": "quasi-newton",
+        "linearization_kind": "hessian",
+        "linear_solve_backend": "dense-plu",
+        "dense_newton_steps_materialized": True,
+        "dense_linear_solve_factors_available": True,
+        "pre_newton_scipy_call_contract": contract,
+    }
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        boozer_solver_metadata=metadata,
+    )
+    jax_contract = dict(contract)
+    jax_contract["nit"] = 98
+    jax_metadata = dict(metadata)
+    jax_metadata["pre_newton_scipy_call_contract"] = jax_contract
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        boozer_solver_metadata=jax_metadata,
+    )
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}))
+    jax_progress.write_text(json.dumps({"events": [jax_event]}))
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+        strict_solver_contract=True,
+    )
+
+    assert replay["status"] == "fail"
+    assert (
+        "boozer_solver_metadata.pre_newton_scipy_call_contract.nit mismatch"
+        in replay["failures"][0]
+    )
+
+
+def test_single_stage_init_same_candidate_replay_compares_boozer_scipy_initial_call(
+    tmp_path,
+):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+
+    metadata = {
+        "boozer_type": "ls",
+        "boozer_optimizer_backend": "scipy",
+        "boozer_least_squares_algorithm": "quasi-newton",
+        "linearization_kind": "hessian",
+        "linear_solve_backend": "dense-plu",
+        "dense_newton_steps_materialized": True,
+        "dense_linear_solve_factors_available": True,
+        "pre_newton_scipy_initial_call": {
+            "decision_vector": _single_stage_trace_vector([1.0, 2.0]),
+            "fun": _single_stage_trace_scalar(3.0),
+            "gradient": _single_stage_trace_vector([0.5, -0.25]),
+        },
+    }
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        boozer_solver_metadata=metadata,
+    )
+    jax_metadata = json.loads(json.dumps(metadata))
+    jax_metadata["pre_newton_scipy_initial_call"]["gradient"] = (
+        _single_stage_trace_vector([0.5, -0.1])
+    )
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        boozer_solver_metadata=jax_metadata,
+    )
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}))
+    jax_progress.write_text(json.dumps({"events": [jax_event]}))
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+        strict_solver_contract=True,
+    )
+
+    assert replay["status"] == "fail"
+    assert (
+        "boozer_solver_metadata.pre_newton_scipy_initial_call.gradient mismatch"
+        in replay["failures"][0]
+    )
+
+
+def test_single_stage_init_same_candidate_replay_compares_boozer_scipy_callback_trace(
+    tmp_path,
+):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+
+    metadata = {
+        "boozer_type": "ls",
+        "boozer_optimizer_backend": "scipy",
+        "boozer_least_squares_algorithm": "quasi-newton",
+        "linearization_kind": "hessian",
+        "linear_solve_backend": "dense-plu",
+        "dense_newton_steps_materialized": True,
+        "dense_linear_solve_factors_available": True,
+        "pre_newton_scipy_callback_trace": [
+            {
+                "evaluation_index": 1,
+                "decision_vector": _single_stage_trace_vector([1.0, 2.0]),
+                "fun": _single_stage_trace_scalar(3.0),
+                "gradient": _single_stage_trace_vector([0.5, -0.25]),
+            },
+            {
+                "evaluation_index": 2,
+                "decision_vector": _single_stage_trace_vector([1.1, 2.0]),
+                "fun": _single_stage_trace_scalar(2.5),
+                "gradient": _single_stage_trace_vector([0.4, -0.2]),
+            },
+        ],
+    }
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        boozer_solver_metadata=metadata,
+    )
+    jax_metadata = json.loads(json.dumps(metadata))
+    jax_metadata["pre_newton_scipy_callback_trace"][1]["gradient"] = (
+        _single_stage_trace_vector([0.4, -0.1])
+    )
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        boozer_solver_metadata=jax_metadata,
+    )
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}))
+    jax_progress.write_text(json.dumps({"events": [jax_event]}))
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+        strict_solver_contract=True,
+    )
+
+    assert replay["status"] == "fail"
+    assert (
+        "boozer_solver_metadata.pre_newton_scipy_callback_trace[2].gradient mismatch"
+        in replay["failures"][0]
+    )
+    split = replay["first_boozer_scipy_callback_split"]
+    assert {
+        key: value
+        for key, value in split.items()
+        if key != "max_abs_diff"
+    } == {
+        "pair_index": 1,
+        "cpu_event_index": 1,
+        "jax_event_index": 1,
+        "accepted_iteration_target": 5,
+        "line_search_evaluation": 1,
+        "field": "gradient",
+        "callback_index": 2,
+        "cpu_evaluation_index": 2,
+        "jax_evaluation_index": 2,
+    }
+    assert split["max_abs_diff"] == pytest.approx(0.1)
+    assert replay["max_boozer_scipy_callback_abs_diff"] == pytest.approx(0.1)
+
+
+def test_single_stage_init_same_candidate_replay_reports_boozer_scipy_callback_trace_length(
+    tmp_path,
+):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+
+    entry = {
+        "evaluation_index": 1,
+        "decision_vector": _single_stage_trace_vector([1.0, 2.0]),
+        "fun": _single_stage_trace_scalar(3.0),
+        "gradient": _single_stage_trace_vector([0.5, -0.25]),
+    }
+    metadata = {
+        "boozer_type": "ls",
+        "boozer_optimizer_backend": "scipy",
+        "boozer_least_squares_algorithm": "quasi-newton",
+        "linearization_kind": "hessian",
+        "linear_solve_backend": "dense-plu",
+        "dense_newton_steps_materialized": True,
+        "dense_linear_solve_factors_available": True,
+        "pre_newton_scipy_callback_trace": [entry, dict(entry, evaluation_index=2)],
+    }
+    jax_metadata = json.loads(json.dumps(metadata))
+    jax_metadata["pre_newton_scipy_callback_trace"] = [entry]
+    cpu_progress.write_text(
+        json.dumps(
+            {
+                "events": [
+                    _single_stage_objective_trace_event(
+                        x=[1.0, 2.0],
+                        objective=3.0,
+                        gradient=[0.5, -0.25],
+                        boozer_solver_metadata=metadata,
+                    )
+                ]
+            }
+        )
+    )
+    jax_progress.write_text(
+        json.dumps(
+            {
+                "events": [
+                    _single_stage_objective_trace_event(
+                        x=[1.0, 2.0],
+                        objective=3.0,
+                        gradient=[0.5, -0.25],
+                        boozer_solver_metadata=jax_metadata,
+                    )
+                ]
+            }
+        )
+    )
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+        strict_solver_contract=True,
+    )
+
+    assert replay["status"] == "fail"
+    assert (
+        "boozer_solver_metadata.pre_newton_scipy_callback_trace length mismatch"
+        in replay["failures"][0]
+    )
+    assert replay["first_boozer_scipy_callback_split"]["reason"] == (
+        "length mismatch"
+    )
+
+
+def test_single_stage_init_same_candidate_replay_reports_component_owner(tmp_path):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    cpu_components = {
+        "boozer": {
+            "weighted_objective": {"value": 1.0, "finite": True},
+            "weighted_gradient": {
+                "values": [1.0, 2.0],
+                "all_finite": True,
+            },
+        },
+        "iota_penalty": {
+            "weighted_objective": {"value": 0.5, "finite": True},
+            "weighted_gradient": {
+                "values": [0.1, 0.2],
+                "all_finite": True,
+            },
+        },
+    }
+    jax_components = json.loads(json.dumps(cpu_components))
+    jax_components["iota_penalty"]["weighted_gradient"]["values"] = [0.1, 0.4]
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        objective_components=cpu_components,
+    )
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        objective_components=jax_components,
+    )
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}))
+    jax_progress.write_text(json.dumps({"events": [jax_event]}))
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+    )
+
+    assert replay["status"] == "fail"
+    assert replay["max_slice_gradient_owner"] == "iota_penalty"
+    assert replay["max_slice_pair_index"] == 1
+
+
+def test_single_stage_init_same_candidate_replay_reports_iota_decomposition_layer(
+    tmp_path,
+):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+
+    decomposition = {
+        "solved_iota": _single_stage_trace_scalar(0.15),
+        "solved_G": _single_stage_trace_scalar(1.0),
+        "solved_surface_dofs": _single_stage_trace_vector([0.1, 0.2]),
+        "linear_solve_factors": {
+            "available": True,
+            "P": _single_stage_trace_vector([1.0, 0.0, 0.0, 1.0]),
+            "L": _single_stage_trace_vector([1.0, 0.0, 0.25, 1.0]),
+            "U": _single_stage_trace_vector([2.0, 0.5, 0.0, 1.5]),
+        },
+        "dJ_ds": _single_stage_trace_vector([0.0, 1.0]),
+        "adjoint": _single_stage_trace_vector([0.25, 0.5]),
+        "streamed_flat_raw_iota_gradient": None,
+        "native_projection_gradient": _single_stage_trace_vector([0.1, 0.2]),
+        "optimizer_projection_gradient": _single_stage_trace_vector([0.1, 0.2]),
+        "penalty_scale": _single_stage_trace_scalar(0.05),
+        "penalty_optimizer_gradient": _single_stage_trace_vector([0.005, 0.01]),
+        "weighted_penalty_optimizer_gradient": _single_stage_trace_vector([0.5, 1.0]),
+    }
+    jax_decomposition = json.loads(json.dumps(decomposition))
+    jax_decomposition["optimizer_projection_gradient"]["values"] = [0.1, 0.2001]
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        iota_penalty_decomposition=decomposition,
+    )
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        iota_penalty_decomposition=jax_decomposition,
+    )
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}))
+    jax_progress.write_text(json.dumps({"events": [jax_event]}))
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+    )
+
+    assert replay["first_iota_decomposition_divergence"]["layer"] == (
+        "optimizer_projection_gradient"
+    )
+    assert replay["max_iota_decomposition_layer"] == "optimizer_projection_gradient"
+    assert replay["max_iota_decomposition_pair_index"] == 1
+
+
+def test_single_stage_init_same_candidate_replay_reports_parity_bug_census(
+    tmp_path,
+):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+
+    boozer_decomposition = {
+        "pre_newton": None,
+        "final_iota": _single_stage_trace_scalar(0.15),
+        "final_G": _single_stage_trace_scalar(1.0),
+        "final_surface_dofs": _single_stage_trace_vector([0.1, 0.2]),
+        "final_decision_vector": _single_stage_trace_vector([0.1, 0.2, 0.15, 1.0]),
+        "final_fun": _single_stage_trace_scalar(0.01),
+        "final_residual": _single_stage_trace_vector([0.001, 0.002]),
+        "final_gradient": _single_stage_trace_vector([0.0001, 0.0002]),
+        "final_hessian": _single_stage_trace_vector([1.0, 0.1, 0.1, 2.0]),
+        "linear_solve_factors": {
+            "available": True,
+            "P": _single_stage_trace_vector([1.0, 0.0, 0.0, 1.0]),
+            "L": _single_stage_trace_vector([1.0, 0.0, 0.25, 1.0]),
+            "U": _single_stage_trace_vector([2.0, 0.5, 0.0, 1.5]),
+        },
+    }
+    jax_boozer_decomposition = json.loads(json.dumps(boozer_decomposition))
+    jax_boozer_decomposition["final_gradient"]["values"] = [0.0003, 0.0002]
+    jax_boozer_decomposition["final_hessian"]["values"] = [1.0, 0.1005, 0.1, 2.0]
+
+    iota_decomposition = {
+        "solved_iota": _single_stage_trace_scalar(0.15),
+        "solved_G": _single_stage_trace_scalar(1.0),
+        "solved_surface_dofs": _single_stage_trace_vector([0.1, 0.2]),
+        "linear_solve_factors": boozer_decomposition["linear_solve_factors"],
+        "dJ_ds": _single_stage_trace_vector([0.0, 1.0]),
+        "adjoint": _single_stage_trace_vector([0.25, 0.5]),
+        "optimizer_projection_gradient": _single_stage_trace_vector([0.1, 0.2]),
+        "penalty_scale": _single_stage_trace_scalar(0.05),
+        "penalty_optimizer_gradient": _single_stage_trace_vector([0.005, 0.01]),
+        "weighted_penalty_optimizer_gradient": _single_stage_trace_vector([0.5, 1.0]),
+    }
+    jax_iota_decomposition = json.loads(json.dumps(iota_decomposition))
+    jax_iota_decomposition["weighted_penalty_optimizer_gradient"]["values"] = [
+        0.5,
+        1.25,
+    ]
+
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        boozer_solve_decomposition=boozer_decomposition,
+        iota_penalty_decomposition=iota_decomposition,
+    )
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+        boozer_solve_decomposition=jax_boozer_decomposition,
+        iota_penalty_decomposition=jax_iota_decomposition,
+    )
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}))
+    jax_progress.write_text(json.dumps({"events": [jax_event]}))
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+    )
+
+    census = replay["parity_bug_census"]
+    divergent_layers = {
+        f"{entry['family']}.{entry['layer']}"
+        for entry in census["divergent_layers"]
+    }
+    assert census["status"] == "recorded"
+    assert census["divergent_layer_count"] >= 3
+    assert census["first_divergence"]["family"] == "boozer_solve"
+    assert census["first_divergence"]["layer"] == "final_gradient"
+    assert "boozer_solve.final_gradient" in divergent_layers
+    assert "boozer_solve.final_hessian" in divergent_layers
+    assert "iota_penalty.weighted_penalty_optimizer_gradient" in divergent_layers
+
+
+def test_single_stage_init_pre_newton_census_divergence_is_gate_failure():
+    census = {
+        "status": "recorded",
+        "divergent_layers": [
+            {
+                "family": "boozer_solve",
+                "layer": "pre_newton_state",
+                "max_abs_diff": 4.5e-9,
+                "pair_index": 4,
+                "line_search_evaluation": 4,
+                "diverged": True,
+            },
+            {
+                "family": "boozer_solve",
+                "layer": "final_gradient",
+                "max_abs_diff": 2e-10,
+                "pair_index": 4,
+                "line_search_evaluation": 4,
+                "diverged": True,
+            },
+            {
+                "family": "iota_penalty",
+                "layer": "adjoint",
+                "max_abs_diff": 1e-10,
+                "pair_index": 4,
+                "line_search_evaluation": 4,
+                "diverged": True,
+            },
+        ],
+    }
+
+    failures = single_stage_init_parity_module._pre_newton_census_gate_failures(
+        census
+    )
+
+    assert failures == [
+        "Parity bug census reported divergent "
+        "boozer_solve.pre_newton_state: max_abs_diff=4.5e-09 "
+        "at pair 4 (line-search eval 4)."
+    ]
+
+
+def test_single_stage_init_same_candidate_gate_fails_missing_replay_trace():
+    failures = single_stage_init_parity_module._same_candidate_replay_gate_failures(
+        {
+            "status": "not-recorded",
+            "cpu_event_count": 0,
+            "jax_event_count": 0,
+            "same_candidate_event_count": 0,
+            "failures": [],
+        }
+    )
+
+    assert failures == [
+        "Same-candidate objective replay comparison did not pass: "
+        "status=not-recorded.",
+        "Same-candidate objective replay did not record a parity bug census.",
+    ]
+
+
+def test_single_stage_init_same_candidate_gate_requires_census_recording():
+    failures = single_stage_init_parity_module._same_candidate_replay_gate_failures(
+        {
+            "status": "pass",
+            "parity_bug_census": {
+                "status": "not-recorded",
+                "divergent_layers": [],
+            },
+        }
+    )
+
+    assert failures == [
+        "Same-candidate objective replay did not record a parity bug census."
+    ]
+
+
+def test_single_stage_init_optimizer_path_reports_first_candidate_split(tmp_path):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    cpu_events = [
+        _single_stage_objective_trace_event(
+            event_index=10,
+            accepted_iteration_target=1,
+            line_search_evaluation=1,
+            x=[1.0, 2.0],
+            objective=3.0,
+            gradient=[0.5, -0.25],
+            boozer_iota=0.1,
+        ),
+        _single_stage_objective_trace_event(
+            event_index=11,
+            accepted_iteration_target=2,
+            line_search_evaluation=3,
+            x=[1.0, 2.0],
+            objective=3.0,
+            gradient=[0.5, -0.25],
+            boozer_iota=0.1,
+        ),
+    ]
+    jax_events = [
+        _single_stage_objective_trace_event(
+            event_index=20,
+            accepted_iteration_target=1,
+            line_search_evaluation=1,
+            x=[1.0 + 5e-13, 2.0],
+            objective=3.0 + 1e-13,
+            gradient=[0.5, -0.25],
+            boozer_iota=0.1,
+        ),
+        _single_stage_objective_trace_event(
+            event_index=21,
+            accepted_iteration_target=2,
+            line_search_evaluation=3,
+            x=[1.0 + 2e-12, 2.0],
+            objective=3.0 + 4e-12,
+            gradient=[0.5, -0.25 + 7e-12],
+            boozer_iota=0.1 + 3e-12,
+        ),
+    ]
+    cpu_progress.write_text(json.dumps({"events": cpu_events}))
+    jax_progress.write_text(json.dumps({"events": jax_events}))
+
+    comparison = (
+        single_stage_init_parity_module.compare_optimizer_path_objective_evaluations(
+            {"outer_optimizer_progress_json": str(cpu_progress)},
+            {"outer_optimizer_progress_json": str(jax_progress)},
+        )
+    )
+
+    assert comparison["status"] == "split"
+    assert comparison["paired_event_count"] == 2
+    assert comparison["first_candidate_split_event"]["pair_index"] == 2
+    assert comparison["first_candidate_split_event"][
+        "cpu_accepted_iteration_target"
+    ] == 2
+    assert comparison["first_candidate_split_event"][
+        "cpu_line_search_evaluation"
+    ] == 3
+    assert comparison["max_candidate_event"]["candidate_abs_diff"] == pytest.approx(
+        2e-12
+    )
+    assert comparison["max_objective_event"]["objective_abs_diff"] == pytest.approx(
+        4e-12
+    )
+    assert comparison["max_optimizer_gradient_event"][
+        "optimizer_gradient_abs_diff"
+    ] == pytest.approx(7e-12)
+    assert comparison["max_boozer_iota_event"]["boozer_iota_abs_diff"] == pytest.approx(
+        3e-12
+    )
+
+
+def test_single_stage_init_optimizer_path_reports_same_path(tmp_path):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+    )
+    cpu_progress.write_text(json.dumps({"events": [event]}))
+    jax_progress.write_text(json.dumps({"events": [event]}))
+
+    comparison = (
+        single_stage_init_parity_module.compare_optimizer_path_objective_evaluations(
+            {"outer_optimizer_progress_json": str(cpu_progress)},
+            {"outer_optimizer_progress_json": str(jax_progress)},
+        )
+    )
+
+    assert comparison["status"] == "same-path"
+    assert comparison["first_candidate_split_event"] is None
+    assert comparison["max_candidate_event"]["candidate_abs_diff"] == 0.0
+
+
+def test_single_stage_init_exact_replay_requires_identical_candidates(tmp_path):
+    cpu_progress = tmp_path / "cpu_progress.json"
+    jax_progress = tmp_path / "jax_progress.json"
+    cpu_event = _single_stage_objective_trace_event(
+        x=[1.0, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+    )
+    jax_event = _single_stage_objective_trace_event(
+        x=[1.0 + 1e-12, 2.0],
+        objective=3.0,
+        gradient=[0.5, -0.25],
+    )
+    cpu_progress.write_text(json.dumps({"events": [cpu_event]}))
+    jax_progress.write_text(json.dumps({"events": [jax_event]}))
+
+    replay = single_stage_init_parity_module.compare_same_candidate_objective_replay(
+        {"outer_optimizer_progress_json": str(cpu_progress)},
+        {"outer_optimizer_progress_json": str(jax_progress)},
+        require_exact_candidates=True,
+    )
+
+    assert replay["status"] == "fail"
+    assert replay["require_exact_candidates"]
+    assert replay["same_candidate_event_count"] == 0
+    assert "candidate_optimizer_dofs mismatch under exact replay" in replay["failures"][0]
+
+
 def test_single_stage_init_surface_geometry_gate_is_init_only(tmp_path):
     args = _single_stage_case_args(tmp_path)
     args.maxiter = 0
@@ -2058,6 +2953,7 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
         "fd_gradient",
         "gpu_runtime",
         "reduction_cpu_gpu",
+        "reporting_contract",
     }
     assert set(PARITY_LADDER_TOLERANCES) == expected_lanes
 
@@ -2975,6 +3871,80 @@ def test_single_stage_init_case_pair_threads_shared_seed_to_jax_fullgraph_lane(
     assert calls[1]["warm_start_run_dir"] == shared_seed_run_dir
     assert calls[2]["backend"] == "jax"
     assert calls[2]["warm_start_run_dir"] == shared_seed_run_dir
+
+
+def test_single_stage_init_case_pair_replays_reference_trace_before_jax_fullgraph(
+    monkeypatch,
+    tmp_path,
+):
+    args = _single_stage_case_args(tmp_path)
+    args.optimizer_backend = "scipy-jax-fullgraph"
+    args.maxiter = 3
+    args.platform = "cpu"
+    args.record_objective_evaluation_trace = True
+    calls = []
+
+    def fake_run_single_stage_case(
+        case_args,
+        backend,
+        *,
+        platform,
+        benchmark_mode,
+        load_surface_gamma,
+        output_root,
+        jax_runtime_seed_spec=None,
+        replay_objective_evaluation_trace=None,
+    ):
+        del platform, benchmark_mode, load_surface_gamma, jax_runtime_seed_spec
+        run_dir = tmp_path / f"{len(calls)}_{backend}"
+        run_dir.mkdir()
+        progress_json = run_dir / "outer_optimizer_progress.json"
+        progress_json.write_text(json.dumps({"events": []}), encoding="utf-8")
+        calls.append(
+            {
+                "backend": backend,
+                "warm_start_run_dir": getattr(case_args, "warm_start_run_dir", None),
+                "output_root": Path(output_root),
+                "progress_json": progress_json,
+                "replay": replay_objective_evaluation_trace,
+            }
+        )
+        return {
+            "run_dir": str(run_dir),
+            "results": _single_stage_contract_results(),
+            "outer_optimizer_progress_json": str(progress_json),
+        }
+
+    def fake_compile_seed_spec(run_dir, output_path, _args):
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text('{"seed": true}', encoding="utf-8")
+        return Path(output_path)
+
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_run_single_stage_case",
+        fake_run_single_stage_case,
+    )
+    monkeypatch.setattr(
+        single_stage_init_parity_module,
+        "_compile_jax_runtime_seed_spec_from_run_dir",
+        fake_compile_seed_spec,
+    )
+
+    (*_, replay_case) = single_stage_init_parity_module._run_single_stage_case_pair(
+        args,
+        benchmark_mode=False,
+        reference_backend="cpu",
+        reference_benchmark_mode=False,
+        case_root=tmp_path / "case",
+    )
+
+    assert calls[1]["backend"] == "cpu"
+    assert calls[2]["backend"] == "jax"
+    assert calls[2]["replay"] == calls[1]["progress_json"]
+    assert calls[3]["backend"] == "jax"
+    assert calls[3]["replay"] is None
+    assert replay_case["run_dir"] == str(tmp_path / "2_jax")
 
 
 def test_single_stage_init_case_threads_phase1_diagnostic_flags_and_env(

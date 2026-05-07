@@ -7,6 +7,83 @@ parity for the inner Boozer LS quasi-Newton/pre-Newton solve.
 Current tree inspected with a dirty worktree. This document is additive and
 does not classify unrelated modified or untracked files.
 
+## Execution Update - 2026-05-07
+
+Current status: partially implemented, acceptance gate still open.
+
+- [x] Added durable SciPy pre-Newton call-contract capture:
+      `method`, stripped options, callback contract, success/status/message,
+      `nit`, `nfev`, `njev`, initial objective/gradient evaluation, and
+      optional SciPy-adapter objective-evaluation trace.
+- [x] Threaded explicit SciPy-adapter objective-evaluation tracing through the
+      CPU BoozerLS path, JAX BoozerLS host-SciPy path, single-stage runtime
+      metadata, and `benchmarks/single_stage_init_parity.py`.
+- [x] Added same-candidate replay comparison for
+      `pre_newton_scipy_callback_trace`, including first split reporting before
+      trace-length mismatch hides the numeric source. The artifact key is a
+      legacy name; entries are recorded in the SciPy adapter objective/gradient
+      function, while the actual SciPy `callback` hook remains `None`.
+- [x] Added a CPU-ordered Boozer residual scalar and made the JAX host-SciPy
+      Boozer quasi-Newton lane use the CPU-ordered analytic value/gradient route
+      by method semantics; SciPy-adapter tracing only controls recording.
+- [x] Added fixed-state tests proving the raw CPU/JAX inner penalty scalar and
+      gradient match within the existing parity-ladder tolerances.
+- [x] Made divergent `boozer_solve.pre_newton_*` entries in
+      `parity_bug_census` a hard benchmark failure so the acceptance gate cannot
+      pass while recording the pre-Newton drift as a diagnostic side channel.
+- [x] Kept solver-route metadata, SciPy result counters/messages, and adapter
+      trace length/order as diagnostics by default in CPU-vs-target
+      same-candidate replay. Exact route/counter comparison remains available
+      through explicit strict replay mode for same-backend adapter tests.
+- [x] Enforced the official scalar objective contract at the SciPy adapter
+      boundary: objective values must be scalar shape `()`, not shape `(1,)`.
+- [x] Restored the Newton-polish non-worsening guard
+      (`candidate_norm <= current_norm`) on host and traceable Newton paths.
+- [x] Added validation artifacts:
+  - `.artifacts/parity/20260507-bfgs-prenewton-callback-trace-m5/result.json`
+  - `.artifacts/parity/20260507-bfgs-prenewton-callback-trace-m5/VALIDATION_NOTE.md`
+  - `.artifacts/parity/20260507-bfgs-prenewton-cpuordered-vg-m1/result.json`
+  - `.artifacts/parity/20260507-bfgs-prenewton-cpuordered-vg-m1/VALIDATION_NOTE.md`
+  - `.artifacts/parity/20260507-bfgs-prenewton-postfix-m1/result.json`
+- [x] Same-candidate objective replay is now separated from solver-route
+      diagnostics. The current maxiter-1 replay status is `pass`.
+- [ ] The current maxiter-1 acceptance gate still fails because the hard
+      `parity_bug_census` gate reports Boozer pre-Newton drift.
+- [ ] The maxiter-5 acceptance census was not rerun after the CPU-ordered
+      value/gradient route because the cheaper maxiter-1 replay gate is still
+      red.
+
+Latest maxiter-1 result
+(`.artifacts/parity/20260507-bfgs-prenewton-postfix-m1/result.json`):
+
+- `passed`: `false`
+- final physics drift after the CPU-ordered value/gradient route:
+  - `final_iota_abs_diff`: `4.575333167888829e-16`
+  - `final_volume_rel_diff`: `1.3892094770373822e-15`
+  - `field_error_rel_diff`: `5.964756209488326e-15`
+- same-candidate replay:
+  - `status`: `pass`
+  - `max_candidate_abs_diff`: `0.0`
+  - `max_objective_abs_diff`: `2.220446049250313e-16`
+  - `max_optimizer_gradient_abs_diff`: `8.3322237998118e-13`
+  - diagnostic first adapter-evaluation split: evaluation index `2`,
+    decision-vector max abs diff `1.6063539387545234e-15`
+- deeper census still localizes the first material drift to:
+  - `boozer_solve.pre_newton_state`: `4.519706948979962e-09`
+  - `boozer_solve.pre_newton_objective_gradient`: `1.5830200208379184e-10`
+  - `iota_penalty.adjoint`: `2.318643055332359e-10`
+
+Current interpretation: the implemented CPU-ordered route closed the larger
+final physics drift, and same-candidate objective replay now passes. The
+remaining acceptance failure is the hard pre-Newton census drift. SciPy BFGS
+remains bit-sensitive to sub-ULP differences at the adapter objective-evaluation
+boundary; the first material drift is most likely below the residual
+scalar/gradient contraction, in non-bit-identical surface and field derivative
+inputs from CPU C++/pybind evaluation versus JAX `jacfwd`/`linearize`
+evaluation. Closing the acceptance gate from here likely requires a separate
+derivative-bit-identity slice or an explicit contract decision; do not hide it by
+loosening tolerances.
+
 ## Problem Statement
 
 The May 7 parity bug census moved the remaining failure from a vague
@@ -168,10 +245,11 @@ Important distinction:
   - [ ] exact SciPy options dictionary after internal keys are stripped
   - [ ] SciPy callback kwarg
   - [ ] success, status, message, nit, nfev, and njev from the SciPy result
-- [ ] Do not rely on the current census alone for method/options/status/message
-      parity: the numeric decomposition comparator checks state/value/gradient
-      layers, but it does not currently prove SciPy options or result
-      status/message equality.
+- [x] Do not rely on the current census alone for method/options/status/message
+      parity. Same-backend adapter tests use strict replay mode for exact
+      method/options/status/message checks; CPU-vs-target benchmark replay keeps
+      route/counter differences diagnostic so expected solver-route differences
+      cannot masquerade as objective-math failures.
 - [ ] Confirm the fixed-candidate trace includes native-gradient events only for
       this census.
 
@@ -334,13 +412,13 @@ Files:
 
 Tasks:
 
-- [ ] After raw kernel parity passes, compare the raw CPU objective callback
-      output with the JAX host-adapted callback at the same inner decision
+- [ ] After raw kernel parity passes, compare the raw CPU objective-callable
+      output with the JAX host-adapted objective callable at the same inner decision
       vector.
-- [ ] Verify scalar dtype, gradient dtype, shape, and flattening order.
+- [x] Verify scalar dtype, gradient dtype, shape, and flattening order.
 - [ ] Patch only the first mismatching adapter layer:
   - gradient conversion
-  - scalar conversion
+  - [x] scalar conversion
   - host materialization to `np.float64`
   - decision-vector packing/unpacking
   - iota and optional `G` slice positions
@@ -350,8 +428,8 @@ Tasks:
 
 Acceptance gate:
 
-- [ ] CPU and JAX first-stage callbacks match before SciPy sees them within the
-      existing parity-ladder tolerances for this lane.
+- [ ] CPU and JAX first-stage objective-callable outputs match before SciPy
+      sees them within the existing parity-ladder tolerances for this lane.
 - [ ] Fixed-state pre-Newton state/value/gradient and
       method/options/status/message contracts match. "Improves" is not
       sufficient for this parity lane.

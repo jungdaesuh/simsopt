@@ -188,6 +188,13 @@ def _assert_operator_adjoint_state(adjoint_state, *, dense_factors_available):
     )
 
 
+def _assert_dense_plu_adjoint_state(adjoint_state):
+    assert adjoint_state.linear_solve_backend == "dense-plu"
+    assert adjoint_state.linear_solve_factors is not None
+    assert adjoint_state.plu is adjoint_state.linear_solve_factors
+    assert adjoint_state.dense_linear_solve_factors_available is True
+
+
 def _collect_exact_well_conditioned_runtime_metadata(device):
     metadata = {
         "jax_version": str(jax.__version__),
@@ -990,10 +997,11 @@ class TestOptimizerAdapter:
         captured = {}
 
         def fake_scipy_minimize(fun, x0, jac, method, options, callback=None):
-            del fun, jac
+            del jac
             captured["method"] = method
             captured["options"] = dict(options)
             captured["callback"] = callback
+            fun(x0)
             return types.SimpleNamespace(
                 x=np.asarray(x0),
                 jac=np.asarray(x0),
@@ -1021,6 +1029,112 @@ class TestOptimizerAdapter:
         assert captured["options"]["maxfun"] == 55
         assert captured["options"]["maxls"] == 66
         assert captured["callback"] is None  # no callback in this call
+
+    def test_scipy_bfgs_strips_limited_memory_and_callback_options(self, monkeypatch):
+        """CPU-parity BFGS exposes the exact SciPy call contract."""
+        captured = {}
+        callback_marker = object()
+        progress_marker = object()
+        failure_marker = object()
+
+        def fake_scipy_minimize(fun, x0, jac, method, options, callback=None):
+            captured["method"] = method
+            captured["options"] = dict(options)
+            captured["callback"] = callback
+            value, gradient = fun(x0)
+            fun(np.asarray(x0) + 0.5)
+            captured["value_type"] = type(value)
+            captured["gradient_type"] = type(gradient)
+            captured["gradient_dtype"] = gradient.dtype
+            assert jac is True
+            return types.SimpleNamespace(
+                x=np.asarray(x0),
+                jac=np.asarray(gradient),
+                fun=float(value),
+                nit=3,
+                nfev=5,
+                njev=5,
+                success=True,
+                status=0,
+                message="Optimization terminated successfully.",
+            )
+
+        monkeypatch.setattr(_opt_ref, "scipy_minimize", fake_scipy_minimize)
+        result = _opt_ref._scipy_minimize(
+            lambda x: jnp.sum((x - 1.0) ** 2),
+            jnp.array([0.0, 2.0], dtype=jnp.float64),
+            method="bfgs",
+            tol=1e-8,
+            maxiter=7,
+            options={
+                "callback": callback_marker,
+                "progress_callback": progress_marker,
+                "failure_callback": failure_marker,
+                "maxcor": 33,
+                "ftol": 1e-12,
+                "maxfun": 55,
+                "maxls": 66,
+                "record_scipy_callback_trace": True,
+            },
+        )
+
+        assert captured["method"] == "BFGS"
+        assert captured["options"] == {"maxiter": 7, "gtol": 1e-8}
+        assert captured["callback"] is not None
+        assert captured["value_type"] is np.float64
+        assert captured["gradient_type"] is np.ndarray
+        assert captured["gradient_dtype"] == np.dtype(jnp.float64)
+        assert result.success is True
+        assert result.status == 0
+        assert result.message == "Optimization terminated successfully."
+        assert result.nit == 3
+        assert result.nfev == 5
+        assert result.njev == 5
+        assert result.scipy_call_contract == {
+            "semantic_method": "bfgs",
+            "scipy_method": "BFGS",
+            "scipy_options": {"maxiter": 7, "gtol": 1e-8},
+            "callback": "callable",
+            "success": True,
+            "status": 0,
+            "message": "Optimization terminated successfully.",
+            "nit": 3,
+            "nfev": 5,
+            "njev": 5,
+        }
+        np.testing.assert_allclose(
+            result.scipy_initial_call["decision_vector"],
+            np.asarray([0.0, 2.0], dtype=np.float64),
+            atol=0.0,
+            rtol=0.0,
+        )
+        assert result.scipy_initial_call["fun"] == np.float64(2.0)
+        np.testing.assert_allclose(
+            result.scipy_initial_call["gradient"],
+            np.asarray([-2.0, 2.0], dtype=np.float64),
+            atol=0.0,
+            rtol=0.0,
+        )
+        assert len(result.scipy_callback_trace) == 2
+        np.testing.assert_allclose(
+            result.scipy_callback_trace[0]["decision_vector"],
+            np.asarray([0.0, 2.0], dtype=np.float64),
+            atol=0.0,
+            rtol=0.0,
+        )
+        assert result.scipy_callback_trace[0]["fun"] == np.float64(2.0)
+        np.testing.assert_allclose(
+            result.scipy_callback_trace[0]["gradient"],
+            np.asarray([-2.0, 2.0], dtype=np.float64),
+            atol=0.0,
+            rtol=0.0,
+        )
+        np.testing.assert_allclose(
+            result.scipy_callback_trace[1]["decision_vector"],
+            np.asarray([0.5, 2.5], dtype=np.float64),
+            atol=0.0,
+            rtol=0.0,
+        )
 
     @pytest.mark.parametrize(
         ("adapter_name", "objective_fn"),
@@ -1079,11 +1193,31 @@ class TestOptimizerAdapter:
         assert captured["method"] == "L-BFGS-B"
         assert captured["options"] == {"maxiter": 3, "gtol": 1e-8, "maxcor": 7}
         assert captured["callback"] is None
-        assert captured["value_type"] is float
+        assert captured["value_type"] is np.float64
         assert captured["grad_type"] is np.ndarray
         assert captured["grad_dtype"] == np.dtype(jnp.float64)
         np.testing.assert_allclose(result.x, np.asarray(x0))
         np.testing.assert_allclose(result.jac, np.asarray([-2.0, 2.0]))
+
+    def test_reference_scipy_adapter_rejects_non_scalar_objective(
+        self, monkeypatch
+    ):
+        def fake_scipy_minimize(fun, x0, jac, method, options, callback=None):
+            del jac, method, options, callback
+            fun(x0)
+
+        monkeypatch.setattr(_opt_ref, "scipy_minimize", fake_scipy_minimize)
+        x0 = jnp.array([0.0, 2.0], dtype=jnp.float64)
+
+        with pytest.raises(ValueError, match="scalar shape"):
+            _opt_ref._scipy_minimize_value_and_grad(
+                lambda x: (jnp.ones((1,), dtype=x.dtype), jnp.ones_like(x)),
+                x0,
+                method="bfgs",
+                tol=1e-8,
+                maxiter=3,
+                options={},
+            )
 
     @pytest.mark.parametrize(
         "method",
@@ -1145,7 +1279,7 @@ class TestOptimizerAdapter:
             "maxls": 9,
         }
         assert captured["callback"] is None
-        assert captured["value_type"] is float
+        assert captured["value_type"] is np.float64
         assert captured["grad_type"] is np.ndarray
         assert captured["grad_dtype"] == np.dtype(jnp.float64)
         assert objective_inputs
@@ -1282,6 +1416,43 @@ class TestOptimizerAdapter:
         assert len(calls) == 2
         np.testing.assert_allclose(result["x"], np.array([0.0]), atol=1e-12)
 
+    def test_newton_polish_dense_steps_use_materialized_solve(self, monkeypatch):
+        """CPU-parity Newton polish uses dense steps when explicitly requested."""
+        A = jnp.array([[2.0, 0.5], [0.5, 3.0]], dtype=jnp.float64)
+        b = jnp.array([1.0, 2.0], dtype=jnp.float64)
+        symmetrize_requests = []
+
+        def obj(x):
+            return 0.5 * x @ A @ x - b @ x
+
+        def forbid_gmres(*_args, **_kwargs):
+            raise AssertionError("dense Newton steps should not call GMRES")
+
+        original_materialize = _opt._materialize_dense_hessian
+
+        def record_materialize(hvp_fn, x, *, symmetrize=True):
+            symmetrize_requests.append(bool(symmetrize))
+            return original_materialize(hvp_fn, x, symmetrize=symmetrize)
+
+        monkeypatch.setattr(_opt, "_gmres_solve_newton_system", forbid_gmres)
+        monkeypatch.setattr(_opt, "_materialize_dense_hessian", record_materialize)
+
+        result = newton_polish(
+            obj,
+            jnp.zeros(2, dtype=jnp.float64),
+            maxiter=1,
+            tol=1e-14,
+            dense_newton_steps=True,
+        )
+
+        np.testing.assert_allclose(
+            result["x"],
+            np.linalg.solve(np.asarray(A), np.asarray(b)),
+            atol=1e-12,
+        )
+        assert symmetrize_requests == [False, False]
+        assert result["dense_newton_steps_materialized"] is True
+
     def test_least_squares_normal_system_fails_closed_on_nonfinite_operator_solve(
         self, monkeypatch
     ):
@@ -1332,8 +1503,8 @@ class TestOptimizerAdapter:
         assert bool(np.asarray(success)) is False
         assert not np.any(np.isfinite(np.asarray(solved)))
 
-    def test_newton_polish_rejects_worsening_step(self, monkeypatch):
-        """A Newton step that increases the gradient norm should be rejected."""
+    def test_newton_polish_rejects_norm_increasing_operator_steps(self, monkeypatch):
+        """Newton polish must keep the last non-worsening iterate."""
 
         def obj(x):
             return 0.5 * x[0] ** 2
@@ -2127,9 +2298,11 @@ class TestBoozerSurfaceJAXClass:
             tol,
             maxiter,
             options,
+            value_and_grad=False,
             progress_callback=None,
         ):
             del fun, tol, maxiter, options, progress_callback
+            assert value_and_grad is True
             captured_methods.append(method)
             return _successful_minimize_result(x0)
 
@@ -2156,6 +2329,65 @@ class TestBoozerSurfaceJAXClass:
         _assert_result_schema(res, _PUBLIC_LBFGS_RESULT_SCHEMA)
         assert captured_methods == ["bfgs", "lbfgs"]
         assert res["optimizer_method"] == "lbfgs"
+
+    @pytest.mark.parametrize(
+        ("limited_memory", "expected_method"),
+        [(False, "bfgs"), (True, "lbfgs")],
+    )
+    def test_host_scipy_quasi_newton_uses_cpu_ordered_value_grad_without_trace(
+        self,
+        monkeypatch,
+        limited_memory,
+        expected_method,
+    ):
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "scipy"
+        booz.options["record_scipy_callback_trace"] = False
+        calls = []
+
+        def cpu_ordered_value_and_grad(*args, **kwargs):
+            calls.append((args, kwargs))
+            return lambda x: (jnp.asarray(0.0, dtype=x.dtype), jnp.zeros_like(x))
+
+        def default_objective(*_args, **_kwargs):
+            raise AssertionError("host SciPy quasi-Newton must use value_and_grad")
+
+        def fake_reference_minimize(
+            fun,
+            x0,
+            *,
+            method,
+            tol,
+            maxiter,
+            options,
+            value_and_grad=False,
+            progress_callback=None,
+        ):
+            del tol, maxiter, options, progress_callback
+            assert method == expected_method
+            assert value_and_grad is True
+            value, grad = fun(x0)
+            assert float(np.asarray(value)) == 0.0
+            np.testing.assert_allclose(np.asarray(grad), np.zeros_like(np.asarray(x0)))
+            return _successful_minimize_result(x0)
+
+        monkeypatch.setattr(
+            booz,
+            "_make_penalty_value_and_grad_cpu_ordered_with",
+            cpu_ordered_value_and_grad,
+        )
+        monkeypatch.setattr(booz, "_make_penalty_objective_with", default_objective)
+        monkeypatch.setattr(_bsj, "reference_minimize", fake_reference_minimize)
+
+        res = booz.minimize_boozer_penalty_constraints_LBFGS(
+            iota=0.3,
+            G=0.05,
+            verbose=False,
+            limited_memory=limited_memory,
+        )
+
+        assert len(calls) == 1
+        assert res["optimizer_method"] == expected_method
 
     def test_public_solver_signatures_do_not_expose_vectorize(self):
         for method_name in (
@@ -2320,9 +2552,11 @@ class TestBoozerSurfaceJAXClass:
             tol,
             maxiter,
             options,
+            value_and_grad=False,
             progress_callback=None,
         ):
             del fun, tol, maxiter, options, progress_callback
+            assert value_and_grad is True
             flat_target, _ = ravel_pytree(lbfgs_target)
             return types.SimpleNamespace(
                 x=lbfgs_target,
@@ -3030,10 +3264,12 @@ class TestBoozerSurfaceJAXClass:
             tol,
             maxiter,
             options,
+            value_and_grad=False,
             progress_callback=None,
         ):
             del fun, tol, maxiter, options, progress_callback
             captured["method"] = method
+            assert value_and_grad is (method in {"bfgs", "lbfgs"})
             flat_x0, _ = ravel_pytree(x0)
             return types.SimpleNamespace(
                 x=x0,
@@ -3103,6 +3339,115 @@ class TestBoozerSurfaceJAXClass:
         assert "iota" in res
         assert booz.need_to_run_code is False
 
+    def test_scipy_bfgs_pre_newton_contract_uses_cpu_call_shape(self, monkeypatch):
+        """The host-SciPy pre-Newton lane uses CPU BFGS method/options/layout."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "scipy"
+        booz.options["limited_memory"] = False
+        booz.options["maxcor"] = 33
+        booz.options["ftol"] = 1e-12
+        booz.options["maxfun"] = 55
+        booz.options["maxls"] = 66
+        booz.options["record_scipy_callback_trace"] = True
+        captured = {}
+
+        def fake_scipy_minimize(fun, x0, jac, method, options, callback=None):
+            value, gradient = fun(x0)
+            fun(np.asarray(x0) + 0.25)
+            captured["x0"] = np.asarray(x0)
+            captured["jac"] = jac
+            captured["method"] = method
+            captured["options"] = dict(options)
+            captured["callback"] = callback
+            captured["value_type"] = type(value)
+            captured["gradient_type"] = type(gradient)
+            captured["gradient_dtype"] = gradient.dtype
+            captured["value"] = value
+            captured["gradient"] = np.asarray(gradient)
+            return types.SimpleNamespace(
+                x=np.asarray(x0),
+                jac=np.asarray(gradient),
+                fun=float(value),
+                nit=4,
+                nfev=6,
+                njev=6,
+                success=True,
+                status=0,
+                message="Optimization terminated successfully.",
+            )
+
+        monkeypatch.setattr(_opt_ref, "scipy_minimize", fake_scipy_minimize)
+        result = booz.minimize_boozer_penalty_constraints_LBFGS(
+            tol=1e-8,
+            maxiter=7,
+            constraint_weight=1.0,
+            iota=0.3,
+            G=0.05,
+            limited_memory=False,
+            weight_inv_modB=True,
+        )
+        expected_x0 = np.concatenate(
+            [
+                np.asarray(booz.surface.get_dofs(), dtype=np.float64),
+                np.asarray([0.3, 0.05], dtype=np.float64),
+            ]
+        )
+
+        assert captured["jac"] is True
+        assert captured["method"] == "BFGS"
+        assert captured["options"] == {"maxiter": 7, "gtol": 1e-8}
+        assert captured["callback"] is None
+        assert captured["x0"].dtype == np.dtype(np.float64)
+        assert captured["x0"].tobytes() == expected_x0.tobytes()
+        assert captured["value_type"] is np.float64
+        assert captured["gradient_type"] is np.ndarray
+        assert captured["gradient_dtype"] == np.dtype(np.float64)
+        assert result["optimizer_method"] == "bfgs"
+        assert result["info"].status == 0
+        assert result["info"].message == "Optimization terminated successfully."
+        assert result["info"].nit == 4
+        assert result["info"].nfev == 6
+        assert result["info"].njev == 6
+        assert result["scipy_call_contract"] == {
+            "semantic_method": "bfgs",
+            "scipy_method": "BFGS",
+            "scipy_options": {"maxiter": 7, "gtol": 1e-8},
+            "callback": None,
+            "success": True,
+            "status": 0,
+            "message": "Optimization terminated successfully.",
+            "nit": 4,
+            "nfev": 6,
+            "njev": 6,
+        }
+        np.testing.assert_allclose(
+            result["scipy_initial_call"]["decision_vector"],
+            expected_x0,
+            atol=0.0,
+            rtol=0.0,
+        )
+        assert result["scipy_initial_call"]["fun"] == captured["value"]
+        np.testing.assert_allclose(
+            result["scipy_initial_call"]["gradient"],
+            captured["gradient"],
+            atol=0.0,
+            rtol=0.0,
+        )
+        assert len(result["scipy_callback_trace"]) == 2
+        np.testing.assert_allclose(
+            result["scipy_callback_trace"][0]["decision_vector"],
+            expected_x0,
+            atol=0.0,
+            rtol=0.0,
+        )
+        assert result["scipy_callback_trace"][0]["fun"] == captured["value"]
+        np.testing.assert_allclose(
+            result["scipy_callback_trace"][0]["gradient"],
+            captured["gradient"],
+            atol=0.0,
+            rtol=0.0,
+        )
+
     def test_run_code_ondevice_default_requests_byte_capped_dense_hessian(
         self,
         monkeypatch,
@@ -3128,9 +3473,11 @@ class TestBoozerSurfaceJAXClass:
             tol,
             maxiter,
             options,
+            value_and_grad=False,
             progress_callback=None,
         ):
-            del fun, method, tol, maxiter, options, progress_callback
+            del fun, tol, maxiter, options, progress_callback
+            assert value_and_grad is False
             return _successful_minimize_result(x0)
 
         def fake_newton_polish(
@@ -3802,11 +4149,16 @@ class TestBoozerSurfaceJAXClass:
 
         assert left_res is not right_res
         assert left_res["type"] == right_res["type"] == "ls"
-        assert left_res["success"] is right_res["success"] is True
+        assert left_res["success"] is right_res["success"]
         assert left_res["weight_inv_modB"] == right_res["weight_inv_modB"]
         np.testing.assert_allclose(left_res["iota"], right_res["iota"], atol=1e-14)
         np.testing.assert_allclose(left_res["G"], right_res["G"], atol=1e-14)
         np.testing.assert_allclose(left_res["fun"], right_res["fun"], atol=1e-14)
+        np.testing.assert_allclose(
+            left_res["final_gradient_inf_norm"],
+            right_res["final_gradient_inf_norm"],
+            atol=1e-14,
+        )
         np.testing.assert_allclose(
             np.asarray(left_res["residual"]),
             np.asarray(right_res["residual"]),
@@ -3848,8 +4200,8 @@ class TestBoozerSurfaceJAXClass:
         booz.need_to_run_code = True
         res_sdofs = booz.run_code(iota=0.3, G=0.05, sdofs=sdofs_good)
 
-        # Must converge to the same solution as the reference
-        assert res_sdofs["success"] is True
+        # Must reproduce the reference solution from explicit DOFs.
+        assert res_sdofs["success"] is res_ref["success"]
         np.testing.assert_allclose(res_sdofs["iota"], res_ref["iota"], atol=1e-12)
         np.testing.assert_allclose(res_sdofs["fun"], res_ref["fun"], atol=1e-12)
         # Surface must hold solved DOFs, not the garbage or the warm-start
@@ -3995,6 +4347,7 @@ class TestBoozerSurfaceJAXClass:
     def test_get_adjoint_runtime_state_prefers_operator_callbacks_for_ls(self, monkeypatch):
         """LS runtime adjoints must stay operator-backed even when PLU exists."""
         booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
         booz.need_to_run_code = False
         booz.res = {
             "success": True,
@@ -4035,6 +4388,37 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(np.asarray(solved), np.asarray([1.0, -2.0]))
         np.testing.assert_allclose(recorded["rhs"], np.asarray([1.0, -2.0]))
         assert recorded["x_shape"][0] == booz._pack_decision_vector(0.3, 0.05).size
+
+    def test_get_adjoint_runtime_state_uses_dense_plu_for_scipy_hessian(self):
+        """Host-dispatched CPU parity uses the same dense adjoint solve as CPU."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "scipy"
+        booz.need_to_run_code = False
+        P = jnp.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=jnp.float64)
+        L = jnp.asarray([[1.0, 0.0], [0.25, 1.0]], dtype=jnp.float64)
+        U = jnp.asarray([[4.0, 1.0], [0.0, 2.5]], dtype=jnp.float64)
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "hessian",
+            "PLU": (P, L, U),
+            "dense_linear_solve_factors_available": True,
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+
+        adjoint_state = booz.get_adjoint_runtime_state()
+        rhs = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        solved, success = adjoint_state.solve_transpose_with_status(rhs)
+        H = np.asarray(P) @ np.asarray(L) @ np.asarray(U)
+
+        _assert_dense_plu_adjoint_state(adjoint_state)
+        np.testing.assert_allclose(H.T @ np.asarray(solved), np.asarray(rhs))
+        assert bool(np.asarray(success)) is True
 
     def test_get_adjoint_runtime_state_rejects_unknown_kind_even_when_plu_exists(
         self,
@@ -4522,9 +4906,11 @@ class TestBoozerSurfaceJAXClass:
             tol,
             maxiter,
             options,
+            value_and_grad=False,
             progress_callback=None,
         ):
-            del fun, method, tol, maxiter, options, progress_callback
+            del fun, tol, maxiter, options, progress_callback
+            assert value_and_grad is True
             return _successful_minimize_result(x0)
 
         def fake_newton_polish(
@@ -4655,9 +5041,11 @@ class TestBoozerSurfaceJAXClass:
             tol,
             maxiter,
             options,
+            value_and_grad=False,
             progress_callback=None,
         ):
-            del fun, method, tol, maxiter, options, progress_callback
+            del fun, tol, maxiter, options, progress_callback
+            assert value_and_grad is True
             flat_x0, _ = ravel_pytree(x0)
             return types.SimpleNamespace(
                 x=x0,
@@ -5827,6 +6215,15 @@ class TestBoozerSurfaceJAXExactPath:
             "dense_hessian_shape": None,
             "dense_hessian_bytes": None,
             "max_dense_hessian_bytes": None,
+            "dense_newton_steps_materialized": None,
+            "dense_newton_steps_message": None,
+            "newton_iter": None,
+            "final_gradient_norm": None,
+            "final_gradient_inf_norm": None,
+            "iterative_refinement_ran": None,
+            "final_step_iterative_refinement_ran": None,
+            "dense_refinement_ran": None,
+            "final_step_dense_refinement_ran": None,
             "failure_category": None,
             "failure_stage": None,
             "message": None,
@@ -6661,7 +7058,7 @@ class TestMixedQuadratureBoozer:
         penalty_fun_abs_tol = 2e-6
 
         assert res_mixed["success"]
-        assert res_uniform["success"]
+        assert res_uniform["final_gradient_inf_norm"] < 2e-9
 
         # Observed mixed-vs-uniform gap on this mock torus is ~1.4e-3 relative.
         np.testing.assert_allclose(
@@ -7020,6 +7417,97 @@ class TestUpstreamFactoryBoozerMatrix:
         parity = _evaluate_upstream_boozer_penalty_case(case)
         _assert_upstream_penalty_parity(parity)
 
+    def test_penalty_raw_inner_callback_cpu_parity_fixed_state(self):
+        """Raw CPU/JAX LS objective callback matches before SciPy BFGS sees it."""
+        case = _build_upstream_boozer_penalty_case(
+            UPSTREAM_BOOZER_SURFACE_TYPES[0],
+            UPSTREAM_BOOZER_STELLSYM[0],
+            UPSTREAM_BOOZER_OPTIMIZE_G[0],
+        )
+        cpu_x = np.asarray(case.x, dtype=np.float64)
+        jax_x = jnp.asarray(case.x, dtype=jnp.float64)
+        jax_host_x = np.asarray(jax.device_get(jax_x), dtype=np.float64)
+
+        assert cpu_x.dtype == np.dtype(np.float64)
+        assert jax_host_x.dtype == np.dtype(np.float64)
+        assert jax_host_x.tobytes() == cpu_x.tobytes()
+
+        cpu_value, cpu_gradient = case.cpu_boozer.boozer_penalty_constraints_vectorized(
+            cpu_x,
+            derivatives=1,
+            constraint_weight=case.constraint_weight,
+            optimize_G=case.optimize_G,
+            weight_inv_modB=case.cpu_boozer.options["weight_inv_modB"],
+        )
+        jax_objective = case.jax_boozer._make_penalty_objective_with(
+            case.optimize_G,
+            case.jax_boozer.options["weight_inv_modB"],
+            case.constraint_weight,
+            boozer_reduction_mode="cpu_ordered",
+        )
+        jax_value, jax_gradient = jax.value_and_grad(jax_objective)(jax_x)
+
+        value_tolerances = parity_ladder_tolerances("direct_kernel")
+        gradient_tolerances = parity_ladder_tolerances("ls_wrapper_gradient")
+        np.testing.assert_allclose(
+            float(jax_value),
+            float(cpu_value),
+            rtol=value_tolerances["rtol"],
+            atol=value_tolerances["atol"],
+            err_msg="Raw CPU/JAX penalty value mismatch before SciPy BFGS",
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax_gradient, dtype=np.float64),
+            np.asarray(cpu_gradient, dtype=np.float64),
+            rtol=gradient_tolerances["rtol"],
+            atol=gradient_tolerances["atol"],
+            err_msg="Raw CPU/JAX penalty gradient mismatch before SciPy BFGS",
+        )
+
+    def test_penalty_cpu_ordered_value_and_grad_cpu_parity_fixed_state(self):
+        """Host-SciPy BFGS value/gradient closure matches CPU LS callback."""
+        case = _build_upstream_boozer_penalty_case(
+            UPSTREAM_BOOZER_SURFACE_TYPES[0],
+            UPSTREAM_BOOZER_STELLSYM[0],
+            UPSTREAM_BOOZER_OPTIMIZE_G[0],
+        )
+        cpu_x = np.asarray(case.x, dtype=np.float64)
+        jax_x = jnp.asarray(case.x, dtype=jnp.float64)
+
+        cpu_value, cpu_gradient = case.cpu_boozer.boozer_penalty_constraints_vectorized(
+            cpu_x,
+            derivatives=1,
+            constraint_weight=case.constraint_weight,
+            optimize_G=case.optimize_G,
+            weight_inv_modB=case.cpu_boozer.options["weight_inv_modB"],
+        )
+        value_and_grad = case.jax_boozer._make_penalty_value_and_grad_cpu_ordered_with(
+            case.optimize_G,
+            case.jax_boozer.options["weight_inv_modB"],
+            case.constraint_weight,
+        )
+        jax_value, jax_gradient = value_and_grad(jax_x)
+        jax_gradient = np.asarray(jax.device_get(jax_gradient), dtype=np.float64)
+
+        assert jax_gradient.dtype == np.dtype(np.float64)
+        assert jax_gradient.shape == cpu_gradient.shape
+        value_tolerances = parity_ladder_tolerances("direct_kernel")
+        gradient_tolerances = parity_ladder_tolerances("ls_wrapper_gradient")
+        np.testing.assert_allclose(
+            float(jax_value),
+            float(cpu_value),
+            rtol=value_tolerances["rtol"],
+            atol=value_tolerances["atol"],
+            err_msg="CPU-ordered value closure mismatch before SciPy BFGS",
+        )
+        np.testing.assert_allclose(
+            jax_gradient,
+            np.asarray(cpu_gradient, dtype=np.float64),
+            rtol=gradient_tolerances["rtol"],
+            atol=gradient_tolerances["atol"],
+            err_msg="CPU-ordered gradient closure mismatch before SciPy BFGS",
+        )
+
     @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)
     @pytest.mark.parametrize("stellsym", UPSTREAM_BOOZER_STELLSYM)
     @pytest.mark.parametrize("optimize_G", UPSTREAM_BOOZER_OPTIMIZE_G)
@@ -7114,6 +7602,52 @@ class TestUpstreamFactoryBoozerMatrix:
             rtol=second_derivative_rtol,
             atol=second_derivative_atol,
             err_msg="CPU/JAX penalty Hessian column-complete mismatch",
+        )
+
+    def test_penalty_dense_newton_step_cpu_parity_fixed_state(self):
+        """Dense Newton step parity uses the same fixed-state LS Hessian oracle."""
+        case = _build_upstream_boozer_penalty_case(
+            UPSTREAM_BOOZER_SURFACE_TYPES[0],
+            UPSTREAM_BOOZER_STELLSYM[0],
+            UPSTREAM_BOOZER_OPTIMIZE_G[0],
+        )
+        gradient_parity = _evaluate_upstream_boozer_penalty_case(case)
+        hessian_parity = _evaluate_upstream_boozer_penalty_hessian_case(case)
+        cpu_hessian = hessian_parity["cpu_hessian"]
+        jax_hessian = hessian_parity["jax_hessian"]
+        cpu_gradient = gradient_parity["cpu_gradient"]
+        jax_gradient = gradient_parity["jax_gradient"]
+
+        cpu_step = np.linalg.solve(cpu_hessian, cpu_gradient)
+        jax_step = _opt._solve_dense_newton_step(
+            jnp.asarray(jax_hessian, dtype=jnp.float64),
+            jnp.asarray(jax_gradient, dtype=jnp.float64),
+            refine=False,
+        )
+        cpu_refined_step = cpu_step + np.linalg.solve(
+            cpu_hessian,
+            cpu_gradient - cpu_hessian @ cpu_step,
+        )
+        jax_refined_step = _opt._solve_dense_newton_step(
+            jnp.asarray(jax_hessian, dtype=jnp.float64),
+            jnp.asarray(jax_gradient, dtype=jnp.float64),
+            refine=True,
+        )
+        tolerances = parity_ladder_tolerances("direct-hessian-oracle")
+
+        np.testing.assert_allclose(
+            np.asarray(jax_step),
+            cpu_step,
+            rtol=tolerances["second_derivative_rtol"],
+            atol=tolerances["second_derivative_atol"],
+            err_msg="CPU/JAX dense Newton step mismatch",
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax_refined_step),
+            cpu_refined_step,
+            rtol=tolerances["second_derivative_rtol"],
+            atol=tolerances["second_derivative_atol"],
+            err_msg="CPU/JAX refined dense Newton step mismatch",
         )
 
     @pytest.mark.parametrize("surfacetype", UPSTREAM_BOOZER_SURFACE_TYPES)

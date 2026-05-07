@@ -3625,6 +3625,7 @@ def _build_traceable_objective_state(
     closures stay pure in the hot path without capturing device-backed arrays
     that would trip strict transfer-guard lowering.
     """
+    objective_method = None
     if booz_jax.boozer_type == "ls":
         objective_method = booz_jax._resolve_optimizer_method()
         if objective_method not in {"bfgs-ondevice", "lbfgs-ondevice", "lm-ondevice"}:
@@ -3730,6 +3731,7 @@ def _build_traceable_objective_state(
         "coil_set_spec_from_dofs": coil_set_spec_from_dofs,
         "optimize_G": optimize_G,
         "predictor_kind": predictor_kind,
+        "objective_method": objective_method,
         "linearization_kind": linearization_kind,
         "linear_solve_tol": linear_solve_tol,
         "linear_solve_stab": linear_solve_stab,
@@ -3872,12 +3874,17 @@ def _build_traceable_objective_compiled_bundle_from_state(
     }
 
 
-def _traceable_runtime_option_signature(booz_jax):
+def _traceable_runtime_option_signature(booz_jax, state):
     """Capture the solver options that affect traceable runtime compilation."""
     option_state = {
         key: booz_jax.options.get(key) for key in _TRACEABLE_RUNTIME_OPTION_KEYS
     }
-    option_state["optimizer_options"] = booz_jax._collect_optimizer_options()
+    if state["predictor_kind"] == "ls":
+        option_state["optimizer_options"] = booz_jax._collect_optimizer_options(
+            method=state["objective_method"]
+        )
+    else:
+        option_state["optimizer_options"] = {}
     return _traceable_cache_tree_signature(option_state)
 
 
@@ -3914,7 +3921,7 @@ def _traceable_runtime_cache_key(booz_jax, bs_jax, state, *, success_filter=None
         state["optimize_G"],
         state["predictor_kind"],
         _traceable_contract_tree_signature(objective_kwargs),
-        _traceable_runtime_option_signature(booz_jax),
+        _traceable_runtime_option_signature(booz_jax, state),
         _traceable_success_filter_signature(success_filter),
     )
 

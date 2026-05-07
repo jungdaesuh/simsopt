@@ -35,6 +35,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
+import scipy.linalg
 
 from ..backend import (
     get_backend_config,
@@ -96,6 +97,7 @@ from ..jax_core.biotsavart import (
 from ..jax_core.specs import GroupedCoilSetSpec
 from .boozer_residual_jax import (
     _split_decision_vector as _split_boozer_decision_vector,
+    boozer_residual_scalar_and_grad_cpu_ordered,
     boozer_residual_scalar,
     boozer_residual_vector,
     _surface_geometry_from_dofs,
@@ -151,6 +153,15 @@ _BOOZER_HESSIAN_REPORTING_RESULT_KEYS = frozenset(
         "dense_hessian_shape",
         "dense_hessian_bytes",
         "max_dense_hessian_bytes",
+        "dense_newton_steps_materialized",
+        "dense_newton_steps_message",
+        "newton_iter",
+        "final_gradient_norm",
+        "final_gradient_inf_norm",
+        "iterative_refinement_ran",
+        "final_step_iterative_refinement_ran",
+        "dense_refinement_ran",
+        "final_step_dense_refinement_ran",
         "failure_category",
         "failure_stage",
         "message",
@@ -1029,6 +1040,39 @@ def _field_terms_for_toroidal_flux(
     )
 
 
+def _surface_geometry_and_derivatives_from_dofs(
+    surface_dofs,
+    *,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    surface_kind,
+):
+    def geometry_arrays(sdofs):
+        return _surface_geometry_from_dofs(
+            sdofs,
+            quadpoints_phi,
+            quadpoints_theta,
+            mpol,
+            ntor,
+            nfp,
+            stellsym,
+            scatter_indices,
+            surface_kind=surface_kind,
+        )
+
+    gamma, xphi, xtheta = geometry_arrays(surface_dofs)
+    dgamma, dxphi, dxtheta = jax.jacfwd(geometry_arrays)(surface_dofs)
+    return (
+        _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta),
+        _BoozerPenaltyGeometry(gamma=dgamma, xphi=dxphi, xtheta=dxtheta),
+    )
+
+
 def _select_forward_field_terms_builder(label_type):
     if label_type == "toroidal_flux":
         return _forward_field_terms_for_toroidal_flux
@@ -1059,11 +1103,152 @@ def _label_from_geometry_and_field_terms(
     )
 
 
+def _label_value_from_surface_dofs(
+    surface_dofs,
+    *,
+    coil_arrays=None,
+    coil_set_spec=None,
+    label_quadpoints_phi,
+    label_quadpoints_theta,
+    label_mpol,
+    label_ntor,
+    label_nfp,
+    label_stellsym,
+    label_scatter_indices,
+    label_surface_kind,
+    label_type,
+    phi_idx,
+):
+    label_geometry = _geometry_from_surface_dofs(
+        surface_dofs,
+        quadpoints_phi=label_quadpoints_phi,
+        quadpoints_theta=label_quadpoints_theta,
+        mpol=label_mpol,
+        ntor=label_ntor,
+        nfp=label_nfp,
+        stellsym=label_stellsym,
+        scatter_indices=label_scatter_indices,
+        surface_kind=label_surface_kind,
+    )
+    return _compute_label(
+        label_type,
+        label_geometry,
+        phi_idx,
+        _field_points_from_geometry(label_geometry),
+        coil_arrays=coil_arrays,
+        coil_set_spec=coil_set_spec,
+    )
+
+
+def _boozer_penalty_value_and_grad_cpu_ordered(
+    x,
+    *,
+    coil_arrays=None,
+    coil_set_spec=None,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    surface_kind,
+    label_quadpoints_phi,
+    label_quadpoints_theta,
+    label_mpol,
+    label_ntor,
+    label_nfp,
+    label_stellsym,
+    label_scatter_indices,
+    label_surface_kind,
+    targetlabel,
+    constraint_weight,
+    label_type,
+    phi_idx,
+    optimize_G,
+    weight_inv_modB,
+):
+    optimizer_state = _as_boozer_penalty_optimizer_state(x, optimize_G=optimize_G)
+    geometry, geometry_derivative = _surface_geometry_and_derivatives_from_dofs(
+        optimizer_state.surface_dofs,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
+        surface_kind=surface_kind,
+    )
+    G_value = (
+        optimizer_state.G
+        if optimize_G
+        else compute_G_from_currents(
+            _grouped_coil_currents(coil_arrays=coil_arrays, coil_set_spec=coil_set_spec)
+        )
+    )
+    field_terms = _field_terms_for_local_label(
+        _field_points_from_geometry(geometry),
+        _field_shape_from_geometry(geometry),
+        label_points=None,
+        label_field_shape=None,
+        coil_set_spec=coil_set_spec,
+    )
+    value, gradient = boozer_residual_scalar_and_grad_cpu_ordered(
+        G_value,
+        optimizer_state.iota,
+        field_terms.B,
+        field_terms.dB_dX,
+        geometry.xphi,
+        geometry.xtheta,
+        geometry_derivative.gamma,
+        geometry_derivative.xphi,
+        geometry_derivative.xtheta,
+        optimize_G=optimize_G,
+        weight_inv_modB=weight_inv_modB,
+    )
+
+    label_value, label_gradient = jax.value_and_grad(_label_value_from_surface_dofs)(
+        optimizer_state.surface_dofs,
+        coil_arrays=coil_arrays,
+        coil_set_spec=coil_set_spec,
+        label_quadpoints_phi=label_quadpoints_phi,
+        label_quadpoints_theta=label_quadpoints_theta,
+        label_mpol=label_mpol,
+        label_ntor=label_ntor,
+        label_nfp=label_nfp,
+        label_stellsym=label_stellsym,
+        label_scatter_indices=label_scatter_indices,
+        label_surface_kind=label_surface_kind,
+        label_type=label_type,
+        phi_idx=phi_idx,
+    )
+    constraint_weight = _as_jax_float64(constraint_weight)
+    weight_sqrt = jnp.sqrt(constraint_weight)
+    rl = weight_sqrt * (label_value - _as_jax_float64(targetlabel))
+    rz = weight_sqrt * _surface_sample_z(geometry.gamma)
+    value = (
+        value
+        + _as_jax_float64(0.5) * rl * rl
+        + _as_jax_float64(0.5) * rz * rz
+    )
+
+    surface_size = optimizer_state.surface_dofs.shape[0]
+    surface_gradient = (
+        gradient[:surface_size]
+        + rl * weight_sqrt * label_gradient
+        + rz * weight_sqrt * geometry_derivative.gamma[0, 0, 2, :]
+    )
+    return value, _concat_jax_float64(surface_gradient, gradient[surface_size:])
+
+
 def _penalty_from_geometry_and_field_terms(
     geometry: _BoozerPenaltyGeometry,
     label_geometry: _BoozerPenaltyGeometry,
     field_terms,
     params: _BoozerPenaltyParams,
+    *,
+    boozer_reduction_mode="default",
 ):
     J_boozer = boozer_residual_scalar(
         params.G,
@@ -1072,6 +1257,7 @@ def _penalty_from_geometry_and_field_terms(
         geometry.xphi,
         geometry.xtheta,
         params.weight_inv_modB,
+        reduction_mode=boozer_reduction_mode,
     )
     label_val = _label_from_geometry_and_field_terms(
         label_geometry,
@@ -1165,6 +1351,7 @@ def _boozer_penalty_objective(
     phi_idx,
     optimize_G,
     weight_inv_modB,
+    boozer_reduction_mode="default",
 ):
     """Scalarized penalty objective for the BoozerLS inner solve.
 
@@ -1233,6 +1420,7 @@ def _boozer_penalty_objective(
         label_geometry,
         field_terms,
         params,
+        boozer_reduction_mode=boozer_reduction_mode,
     )
 
 
@@ -2269,6 +2457,7 @@ _DEFAULT_OPTIONS_LS = {
     "materialize_dense_linearization": None,
     "max_dense_linearization_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES,
     "max_dense_jacobian_bytes": _DEFAULT_MAX_DENSE_JACOBIAN_BYTES,
+    "record_scipy_callback_trace": False,
 }
 
 _DEFAULT_OPTIONS_EXACT = {
@@ -2290,6 +2479,7 @@ _PRIVATE_OPTIMIZER_OPTIONS = frozenset(
 
 # Options shared by the public SciPy L-BFGS lane and the private L-BFGS lanes.
 _LBFGS_TUNING_OPTIONS = frozenset({"maxcor", "ftol", "maxfun", "maxls"})
+_SCIPY_TRACE_OPTIONS = frozenset({"record_scipy_callback_trace"})
 
 # Callback options accepted by all backends.
 _CALLBACK_OPTIONS = frozenset({"stage_callback", "progress_callback"})
@@ -2305,6 +2495,7 @@ _ALLOWED_OPTIONS_LS = (
     | _LS_DYNAMIC_OPTION_KEYS
     | _PRIVATE_OPTIMIZER_OPTIONS
     | _LBFGS_TUNING_OPTIONS
+    | _SCIPY_TRACE_OPTIONS
     | _CALLBACK_OPTIONS
 )
 _ALLOWED_OPTIONS_EXACT = frozenset(_DEFAULT_OPTIONS_EXACT) | {
@@ -2466,6 +2657,8 @@ class BoozerSurfaceJAX(Optimizable):
             ``"ondevice"`` on JAX backend modes. ``optimizer_backend="scipy"``
             remains the trusted CPU/reference lane and
             ``"ondevice"`` is the target on-device lane.
+            ``record_scipy_callback_trace=True`` records every SciPy adapter
+            objective evaluation on the SciPy reference lane only.
             ``least_squares_algorithm="quasi-newton"``
             preserves the historical BFGS/L-BFGS route; ``"lm"`` enables the
             residual-vector Levenberg-Marquardt route on supported backends.
@@ -2582,6 +2775,7 @@ class BoozerSurfaceJAX(Optimizable):
         self._traceable_penalty_residual_cache = {}
         self._traceable_exact_residual_cache = {}
         self._reference_penalty_objective_cache = {}
+        self._reference_penalty_value_and_grad_cache = {}
         self._reference_penalty_residual_cache = {}
 
         # Coil data (extracted once, updated via _refresh_coil_data)
@@ -2658,6 +2852,7 @@ class BoozerSurfaceJAX(Optimizable):
             solve_forward_with_status=None,
             solve_transpose_with_status=None,
             linear_solve_backend="operator",
+            linear_solve_factors=None,
         ):
             def _with_host_status(solver):
                 def wrapped(rhs):
@@ -2685,6 +2880,64 @@ class BoozerSurfaceJAX(Optimizable):
                 solve_forward_with_status,
                 solve_transpose_with_status,
                 linear_solve_backend,
+                linear_solve_factors,
+            )
+
+        if (
+            linearization_kind == "hessian"
+            and self.options["optimizer_backend"] == "scipy"
+            and self.res.get("PLU") is not None
+        ):
+            P_host, L_host, U_host = (
+                np.asarray(factor, dtype=np.float64) for factor in self.res["PLU"]
+            )
+            H_host = P_host @ L_host @ U_host
+
+            def apply_forward(rhs):
+                return jnp.asarray(H_host @ np.asarray(rhs, dtype=np.float64), dtype=x.dtype)
+
+            def apply_transpose(rhs):
+                return jnp.asarray(
+                    H_host.T @ np.asarray(rhs, dtype=np.float64),
+                    dtype=x.dtype,
+                )
+
+            def solve_forward(rhs):
+                rhs_host = np.asarray(rhs, dtype=np.float64)
+                y = scipy.linalg.solve_triangular(
+                    L_host,
+                    P_host.T @ rhs_host,
+                    lower=True,
+                )
+                solved = scipy.linalg.solve_triangular(U_host, y, lower=False)
+                return jnp.asarray(solved, dtype=x.dtype)
+
+            def solve_transpose(rhs):
+                rhs_host = np.asarray(rhs, dtype=np.float64)
+                y = scipy.linalg.solve_triangular(U_host.T, rhs_host, lower=True)
+                z = scipy.linalg.solve_triangular(L_host.T, y, lower=False)
+                solved = P_host @ z
+                return jnp.asarray(solved, dtype=x.dtype)
+
+            def solve_forward_with_status(rhs):
+                solved = solve_forward(rhs)
+                return solved, jnp.all(jnp.isfinite(solved))
+
+            def solve_transpose_with_status(rhs):
+                solved = solve_transpose(rhs)
+                return solved, jnp.all(jnp.isfinite(solved))
+
+            return pack_callbacks(
+                apply_forward,
+                apply_transpose,
+                solve_forward,
+                solve_transpose,
+                solve_forward_with_status=solve_forward_with_status,
+                solve_transpose_with_status=solve_transpose_with_status,
+                linear_solve_backend="dense-plu",
+                linear_solve_factors=tuple(
+                    jnp.asarray(factor, dtype=x.dtype) for factor in self.res["PLU"]
+                ),
             )
 
         # On the supported JAX/CUDA LS lane, runtime adjoints stay
@@ -2846,6 +3099,7 @@ class BoozerSurfaceJAX(Optimizable):
             solve_forward_with_status,
             solve_transpose_with_status,
             linear_solve_backend,
+            linear_solve_factors,
         ) = self._build_runtime_linear_solve_callbacks(solved_state)
 
         return _BoozerAdjointRuntimeState(
@@ -2864,7 +3118,7 @@ class BoozerSurfaceJAX(Optimizable):
             dense_linear_solve_factors_available=bool(
                 self.res["dense_linear_solve_factors_available"]
             ),
-            linear_solve_factors=None,
+            linear_solve_factors=linear_solve_factors,
         )
 
     @property
@@ -2896,6 +3150,7 @@ class BoozerSurfaceJAX(Optimizable):
         self.coil_groups = list(grouped_field_data_from_spec(self.coil_set_spec))
         self.coil_currents = grouped_coil_currents_from_spec(self.coil_set_spec)
         self._reference_penalty_objective_cache.clear()
+        self._reference_penalty_value_and_grad_cache.clear()
         self._reference_penalty_residual_cache.clear()
 
     def _emit_stage_callback(
@@ -3052,6 +3307,7 @@ class BoozerSurfaceJAX(Optimizable):
         coil_arrays=None,
         *,
         hostify_inputs=True,
+        boozer_reduction_mode="default",
     ):
         """Build penalty objective with explicit overrides."""
         resolved_coil_set_spec = _resolved_coil_set_spec(
@@ -3067,6 +3323,7 @@ class BoozerSurfaceJAX(Optimizable):
                 weight_inv_modB,
                 resolved_constraint_weight,
                 resolved_coil_set_spec,
+                boozer_reduction_mode=boozer_reduction_mode,
             )
             objective_fn = self._reference_penalty_objective_cache.get(key)
             if objective_fn is None:
@@ -3095,6 +3352,7 @@ class BoozerSurfaceJAX(Optimizable):
                     phi_idx=self.phi_idx,
                     optimize_G=optimize_G,
                     weight_inv_modB=weight_inv_modB,
+                    boozer_reduction_mode=boozer_reduction_mode,
                 )
                 objective_fn = _optimizer_jax._mark_cacheable_jit_value_and_grad(
                     objective_fn
@@ -3126,7 +3384,65 @@ class BoozerSurfaceJAX(Optimizable):
             phi_idx=self.phi_idx,
             optimize_G=optimize_G,
             weight_inv_modB=weight_inv_modB,
+            boozer_reduction_mode=boozer_reduction_mode,
         )
+
+    def _make_penalty_value_and_grad_cpu_ordered_with(
+        self,
+        optimize_G,
+        weight_inv_modB,
+        constraint_weight=None,
+        coil_set_spec=None,
+        coil_arrays=None,
+    ):
+        """Build the host-SciPy Boozer LS value/gradient parity closure."""
+        resolved_coil_set_spec = _hostify_tree(
+            _resolved_coil_set_spec(
+                self.coil_set_spec,
+                coil_arrays=coil_arrays,
+                coil_set_spec=coil_set_spec,
+            )
+        )
+        resolved_constraint_weight = self._resolve_constraint_weight(constraint_weight)
+        key = self._reference_penalty_cache_key(
+            optimize_G,
+            weight_inv_modB,
+            resolved_constraint_weight,
+            resolved_coil_set_spec,
+            boozer_reduction_mode="cpu_ordered_value_and_grad",
+        )
+        objective_fn = self._reference_penalty_value_and_grad_cache.get(key)
+        if objective_fn is None:
+            objective_fn = _make_boozer_penalty_closure(
+                _boozer_penalty_value_and_grad_cpu_ordered,
+                coil_arrays=coil_arrays,
+                coil_set_spec=resolved_coil_set_spec,
+                quadpoints_phi=_hostify_tree(self.quadpoints_phi),
+                quadpoints_theta=_hostify_tree(self.quadpoints_theta),
+                mpol=self.mpol,
+                ntor=self.ntor,
+                nfp=self.nfp,
+                stellsym=self.stellsym,
+                scatter_indices=_hostify_tree(self.scatter_indices),
+                surface_kind=self._surface_geometry_kind,
+                label_quadpoints_phi=_hostify_tree(self.label_quadpoints_phi),
+                label_quadpoints_theta=_hostify_tree(self.label_quadpoints_theta),
+                label_mpol=self.label_mpol,
+                label_ntor=self.label_ntor,
+                label_nfp=self.label_nfp,
+                label_stellsym=self.label_stellsym,
+                label_scatter_indices=_hostify_tree(self.label_scatter_indices),
+                label_surface_kind=self._label_surface_geometry_kind,
+                targetlabel=self.targetlabel,
+                constraint_weight=resolved_constraint_weight,
+                label_type=self.label_type,
+                phi_idx=self.phi_idx,
+                optimize_G=optimize_G,
+                weight_inv_modB=weight_inv_modB,
+            )
+            objective_fn = jax.jit(objective_fn)
+            self._reference_penalty_value_and_grad_cache[key] = objective_fn
+        return objective_fn
 
     def _make_penalty_residual_with(
         self,
@@ -3477,11 +3793,14 @@ class BoozerSurfaceJAX(Optimizable):
         weight_inv_modB,
         constraint_weight,
         coil_set_spec,
+        *,
+        boozer_reduction_mode="default",
     ):
         return (
             bool(optimize_G),
             bool(weight_inv_modB),
             float(constraint_weight),
+            boozer_reduction_mode,
             self._traceable_surface_signature(),
             _runtime_cache_tree_signature(coil_set_spec),
         )
@@ -3686,7 +4005,7 @@ class BoozerSurfaceJAX(Optimizable):
                 coil_set_spec=coil_set_spec,
                 hostify_inputs=False,
             )
-            optimizer_options = self._collect_optimizer_options()
+            optimizer_options = self._collect_optimizer_options(method=method)
 
             if method == "bfgs-ondevice":
                 ls_state = _optimizer_jax._minimize_bfgs_private(
@@ -3773,6 +4092,25 @@ class BoozerSurfaceJAX(Optimizable):
             "dense_hessian_bytes": newton_result.get("dense_hessian_bytes"),
             "max_dense_hessian_bytes": newton_result.get(
                 "max_dense_hessian_bytes"
+            ),
+            "dense_newton_steps_materialized": newton_result.get(
+                "dense_newton_steps_materialized"
+            ),
+            "dense_newton_steps_message": newton_result.get(
+                "dense_newton_steps_message"
+            ),
+            "newton_iter": newton_result.get("newton_iter"),
+            "final_gradient_norm": newton_result.get("final_gradient_norm"),
+            "final_gradient_inf_norm": newton_result.get("final_gradient_inf_norm"),
+            "iterative_refinement_ran": newton_result.get(
+                "iterative_refinement_ran"
+            ),
+            "final_step_iterative_refinement_ran": newton_result.get(
+                "final_step_iterative_refinement_ran"
+            ),
+            "dense_refinement_ran": newton_result.get("dense_refinement_ran"),
+            "final_step_dense_refinement_ran": newton_result.get(
+                "final_step_dense_refinement_ran"
             ),
             "failure_category": newton_result.get("failure_category"),
             "failure_stage": newton_result.get("failure_stage"),
@@ -3915,9 +4253,9 @@ class BoozerSurfaceJAX(Optimizable):
             least_squares_algorithm=least_squares_algorithm,
         )
 
-    def _collect_optimizer_options(self):
+    def _collect_optimizer_options(self, *, method):
         """Gather optimizer-specific options from self.options."""
-        return {
+        optimizer_options = {
             k: self.options[k]
             for k in (
                 "line_search_maxiter",
@@ -3929,6 +4267,15 @@ class BoozerSurfaceJAX(Optimizable):
             )
             if k in self.options
         }
+        if method not in _ONDEVICE_OPTIMIZER_METHODS:
+            optimizer_options.update(
+                {
+                    k: self.options[k]
+                    for k in _SCIPY_TRACE_OPTIONS
+                    if k in self.options
+                }
+            )
+        return optimizer_options
 
     def _collect_least_squares_linearization_options(self):
         """Gather target LM dense-linearization policy from self.options."""
@@ -3980,6 +4327,7 @@ class BoozerSurfaceJAX(Optimizable):
             stab=stab,
             materialize_hessian=materialize_hessian,
             max_dense_hessian_bytes=max_dense_hessian_bytes,
+            dense_newton_steps=materialize_hessian,
             progress_callback=progress_callback,
         )
 
@@ -4041,23 +4389,43 @@ class BoozerSurfaceJAX(Optimizable):
                 progress_callback=progress_callback,
             )
         else:
-            obj_fn = self._make_penalty_objective_with(
-                optimize_G,
-                weight_inv_modB,
-                constraint_weight,
-            )
-            minimize_runner = (
-                target_minimize if method.endswith("-ondevice") else reference_minimize
-            )
-            result = minimize_runner(
-                obj_fn,
-                x0,
-                method=method,
-                tol=tol,
-                maxiter=maxiter,
-                options=self._collect_optimizer_options(),
-                progress_callback=progress_callback,
-            )
+            optimizer_options = self._collect_optimizer_options(method=method)
+            if method in {"bfgs", "lbfgs"}:
+                obj_fn = self._make_penalty_value_and_grad_cpu_ordered_with(
+                    optimize_G,
+                    weight_inv_modB,
+                    constraint_weight,
+                )
+                result = reference_minimize(
+                    obj_fn,
+                    x0,
+                    method=method,
+                    tol=tol,
+                    maxiter=maxiter,
+                    options=optimizer_options,
+                    value_and_grad=True,
+                    progress_callback=progress_callback,
+                )
+            else:
+                obj_fn = self._make_penalty_objective_with(
+                    optimize_G,
+                    weight_inv_modB,
+                    constraint_weight,
+                )
+                minimize_runner = (
+                    target_minimize
+                    if method.endswith("-ondevice")
+                    else reference_minimize
+                )
+                result = minimize_runner(
+                    obj_fn,
+                    x0,
+                    method=method,
+                    tol=tol,
+                    maxiter=maxiter,
+                    options=optimizer_options,
+                    progress_callback=progress_callback,
+                )
 
         sdofs_final, iota_out, G_out = self._unpack_penalty_optimizer_state(
             result.x, optimize_G
@@ -4084,6 +4452,9 @@ class BoozerSurfaceJAX(Optimizable):
             "s": s,
             "iota": iota_out,
             "optimizer_method": method,
+            "scipy_call_contract": getattr(result, "scipy_call_contract", None),
+            "scipy_initial_call": getattr(result, "scipy_initial_call", None),
+            "scipy_callback_trace": getattr(result, "scipy_callback_trace", None),
             "weight_inv_modB": weight_inv_modB,
             "type": "ls",
         }
@@ -4181,6 +4552,23 @@ class BoozerSurfaceJAX(Optimizable):
                 "dense_hessian_shape": result.get("dense_hessian_shape"),
                 "dense_hessian_bytes": result.get("dense_hessian_bytes"),
                 "max_dense_hessian_bytes": result.get("max_dense_hessian_bytes"),
+                "dense_newton_steps_materialized": result.get(
+                    "dense_newton_steps_materialized"
+                ),
+                "dense_newton_steps_message": result.get(
+                    "dense_newton_steps_message"
+                ),
+                "newton_iter": result.get("newton_iter"),
+                "final_gradient_norm": result.get("final_gradient_norm"),
+                "final_gradient_inf_norm": result.get("final_gradient_inf_norm"),
+                "iterative_refinement_ran": result.get("iterative_refinement_ran"),
+                "final_step_iterative_refinement_ran": result.get(
+                    "final_step_iterative_refinement_ran"
+                ),
+                "dense_refinement_ran": result.get("dense_refinement_ran"),
+                "final_step_dense_refinement_ran": result.get(
+                    "final_step_dense_refinement_ran"
+                ),
                 "failure_category": result.get("failure_category"),
                 "failure_stage": result.get("failure_stage"),
                 "message": result.get("message"),
@@ -4192,8 +4580,12 @@ class BoozerSurfaceJAX(Optimizable):
         self._set_surface_dofs(sdofs_final)
         H = result["hessian"]
         if H is not None:
-            P, L, U = jax.scipy.linalg.lu(H)
-            plu = (P, L, U)
+            if self.options["optimizer_backend"] == "scipy":
+                P, L, U = scipy.linalg.lu(np.asarray(H, dtype=np.float64))
+                plu = tuple(jnp.asarray(factor, dtype=H.dtype) for factor in (P, L, U))
+            else:
+                P, L, U = jax.scipy.linalg.lu(H)
+                plu = (P, L, U)
         else:
             plu = None
 
@@ -4250,7 +4642,9 @@ class BoozerSurfaceJAX(Optimizable):
             "type": "ls",
             "optimizer_method": method,
             "linearization_kind": "hessian",
-            "linear_solve_backend": "operator",
+            "linear_solve_backend": "dense-plu"
+            if self.options["optimizer_backend"] == "scipy" and plu is not None
+            else "operator",
             "dense_linear_solve_factors_available": plu is not None,
             "solve_generation": solve_generation,
             "weight_inv_modB": weight_inv_modB,
@@ -4259,6 +4653,23 @@ class BoozerSurfaceJAX(Optimizable):
             "dense_hessian_shape": result.get("dense_hessian_shape"),
             "dense_hessian_bytes": result.get("dense_hessian_bytes"),
             "max_dense_hessian_bytes": result.get("max_dense_hessian_bytes"),
+            "dense_newton_steps_materialized": result.get(
+                "dense_newton_steps_materialized"
+            ),
+            "dense_newton_steps_message": result.get(
+                "dense_newton_steps_message"
+            ),
+            "newton_iter": result.get("newton_iter"),
+            "final_gradient_norm": result.get("final_gradient_norm"),
+            "final_gradient_inf_norm": result.get("final_gradient_inf_norm"),
+            "iterative_refinement_ran": result.get("iterative_refinement_ran"),
+            "final_step_iterative_refinement_ran": result.get(
+                "final_step_iterative_refinement_ran"
+            ),
+            "dense_refinement_ran": result.get("dense_refinement_ran"),
+            "final_step_dense_refinement_ran": result.get(
+                "final_step_dense_refinement_ran"
+            ),
             "failure_category": result.get("failure_category"),
             "failure_stage": result.get("failure_stage"),
             "message": result.get("message"),
@@ -4874,6 +5285,29 @@ class BoozerSurfaceJAX(Optimizable):
             ),
         )
         iota_out, G_out = ls_res["iota"], ls_res["G"]
+        pre_newton_surface_dofs = _host_numpy(ls_res["sdofs"]).copy()
+        pre_newton_decision_pieces = [
+            pre_newton_surface_dofs,
+            np.asarray([float(_host_scalar(iota_out))], dtype=float),
+        ]
+        if G_out is not None:
+            pre_newton_decision_pieces.append(
+                np.asarray([float(_host_scalar(G_out))], dtype=float)
+            )
+        pre_newton = {
+            "optimizer_method": ls_res["optimizer_method"],
+            "success": bool(ls_res["success"]),
+            "iter": int(ls_res["iter"]),
+            "fun": float(ls_res["fun"]),
+            "iota": float(_host_scalar(iota_out)),
+            "G": None if G_out is None else float(_host_scalar(G_out)),
+            "surface_dofs": pre_newton_surface_dofs,
+            "decision_vector": np.concatenate(pre_newton_decision_pieces),
+            "gradient": _host_numpy(ls_res["gradient"]).copy(),
+            "scipy_call_contract": ls_res.get("scipy_call_contract"),
+            "scipy_initial_call": ls_res.get("scipy_initial_call"),
+            "scipy_callback_trace": ls_res.get("scipy_callback_trace"),
+        }
 
         # Polish with Newton
         self.need_to_run_code = True
@@ -4893,6 +5327,7 @@ class BoozerSurfaceJAX(Optimizable):
             weight_inv_modB=self.options["weight_inv_modB"],
         )
         res["optimizer_method"] = ls_res["optimizer_method"]
+        res["pre_newton"] = pre_newton
         self._emit_stage_callback(
             "after_boozer_newton",
             solve_success=("true" if bool(res["success"]) else "false"),

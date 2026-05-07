@@ -1665,6 +1665,7 @@ def test_traceable_profile_suite_inner_solve_surfaces_exact_failure_state(
 
 def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypatch):
     seen_trees = []
+    optimizer_option_methods = []
     original_tree_signature = (
         surfaceobjectives_jax_module._traceable_cache_tree_signature
     )
@@ -1679,10 +1680,14 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
         recording_tree_signature,
     )
 
+    def collect_optimizer_options(*, method):
+        optimizer_option_methods.append(method)
+        return {}
+
     booz = types.SimpleNamespace(
         _solver_generation=7,
         options={},
-        _collect_optimizer_options=lambda: {},
+        _collect_optimizer_options=collect_optimizer_options,
     )
     state = {
         "objective_kwargs": {
@@ -1694,6 +1699,7 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
         },
         "optimize_G": False,
         "predictor_kind": "ls",
+        "objective_method": "bfgs-ondevice",
         "coil_dof_extraction_spec": {"unused": True},
         "baseline_x": jnp.arange(5, dtype=jnp.float64),
         "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
@@ -1720,6 +1726,7 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
     assert not any(tree is state["baseline_value"] for tree in seen_trees)
     assert not any(tree is state["baseline_linear_solve_factors"] for tree in seen_trees)
     assert not any(tree is state["baseline_coil_dofs"] for tree in seen_trees)
+    assert optimizer_option_methods == ["bfgs-ondevice"]
 
 
 def test_traceable_forward_result_keeps_primal_success_separate_from_adjoint_status(
@@ -1789,7 +1796,7 @@ def test_traceable_runtime_cache_key_uses_structural_success_filter_signature():
     booz = types.SimpleNamespace(
         _solver_generation=7,
         options={},
-        _collect_optimizer_options=lambda: {},
+        _collect_optimizer_options=lambda *, method: {},
     )
     state = {
         "objective_kwargs": {
@@ -1798,6 +1805,7 @@ def test_traceable_runtime_cache_key_uses_structural_success_filter_signature():
         },
         "optimize_G": False,
         "predictor_kind": "ls",
+        "objective_method": "bfgs-ondevice",
     }
 
     def success_filter_a(_coil_dofs, _solved_x):
@@ -1830,7 +1838,7 @@ def test_traceable_runtime_cache_key_tracks_biotsavart_dof_generation():
     booz = types.SimpleNamespace(
         _solver_generation=7,
         options={},
-        _collect_optimizer_options=lambda: {},
+        _collect_optimizer_options=lambda *, method: {},
     )
     bs_jax = types.SimpleNamespace(_coil_dofs_generation=11)
     state = {
@@ -1840,6 +1848,7 @@ def test_traceable_runtime_cache_key_tracks_biotsavart_dof_generation():
         },
         "optimize_G": False,
         "predictor_kind": "ls",
+        "objective_method": "bfgs-ondevice",
     }
 
     key_before = surfaceobjectives_jax_module._traceable_runtime_cache_key(
@@ -1864,7 +1873,7 @@ def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
         return types.SimpleNamespace(
             _solver_generation=solver_generation,
             options={"bfgs_maxiter": bfgs_maxiter},
-            _collect_optimizer_options=lambda: {"maxls": 20},
+            _collect_optimizer_options=lambda *, method: {"maxls": 20},
         )
 
     def make_state(*, iota_target=0.23):
@@ -1875,6 +1884,7 @@ def test_traceable_cache_signoff_gate_covers_runtime_contract_inputs():
             },
             "optimize_G": False,
             "predictor_kind": "ls",
+            "objective_method": "bfgs-ondevice",
         }
 
     def success_filter_a(_coil_dofs, _solved_x):
@@ -1958,7 +1968,7 @@ def test_traceable_runtime_cache_key_does_not_hostify_jax_array_contract_leaves(
     booz = types.SimpleNamespace(
         _solver_generation=7,
         options={},
-        _collect_optimizer_options=lambda: {},
+        _collect_optimizer_options=lambda *, method: {},
     )
     state = {
         "objective_kwargs": {
@@ -1970,6 +1980,7 @@ def test_traceable_runtime_cache_key_does_not_hostify_jax_array_contract_leaves(
         },
         "optimize_G": False,
         "predictor_kind": "ls",
+        "objective_method": "bfgs-ondevice",
     }
 
     key = surfaceobjectives_jax_module._traceable_runtime_cache_key(
@@ -2882,7 +2893,7 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solver_genera
         _solver_generation=11,
         _traceable_runtime_entry_cache=None,
         options={},
-        _collect_optimizer_options=lambda: {},
+        _collect_optimizer_options=lambda *, method: {},
     )
     bs = object()
 
@@ -2900,6 +2911,7 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_same_solver_genera
             },
             "optimize_G": False,
             "predictor_kind": "ls",
+            "objective_method": "bfgs-ondevice",
             "coil_dof_extraction_spec": {"spec": "marker"},
             "baseline_x": jnp.arange(4, dtype=jnp.float64),
             "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
@@ -2991,7 +3003,7 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
         _solver_generation=11,
         _traceable_runtime_entry_cache=None,
         options={},
-        _collect_optimizer_options=lambda: {},
+        _collect_optimizer_options=lambda *, method: {},
     )
     bs = object()
 
@@ -3004,6 +3016,7 @@ def test_get_cached_traceable_runtime_entry_reuses_bundle_for_equivalent_success
             },
             "optimize_G": False,
             "predictor_kind": "ls",
+            "objective_method": "bfgs-ondevice",
             "coil_dof_extraction_spec": {"spec": "marker"},
             "baseline_x": jnp.arange(4, dtype=jnp.float64),
             "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
@@ -3104,7 +3117,7 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_solver_generation_cha
         _solver_generation=3,
         _traceable_runtime_entry_cache=None,
         options={},
-        _collect_optimizer_options=lambda: {},
+        _collect_optimizer_options=lambda *, method: {},
     )
     bs = object()
 
@@ -3117,6 +3130,7 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_solver_generation_cha
             },
             "optimize_G": False,
             "predictor_kind": "ls",
+            "objective_method": "bfgs-ondevice",
             "coil_dof_extraction_spec": {"spec": "marker"},
             "baseline_x": jnp.arange(2, dtype=jnp.float64),
             "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
@@ -3202,7 +3216,7 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
         _solver_generation=5,
         _traceable_runtime_entry_cache=None,
         options={},
-        _collect_optimizer_options=lambda: {},
+        _collect_optimizer_options=lambda *, method: {},
     )
     bs = object()
 
@@ -3215,6 +3229,7 @@ def test_get_cached_traceable_runtime_entry_invalidates_on_target_change(
             },
             "optimize_G": False,
             "predictor_kind": "ls",
+            "objective_method": "bfgs-ondevice",
             "coil_dof_extraction_spec": {"spec": "marker"},
             "baseline_x": jnp.arange(2, dtype=jnp.float64),
             "baseline_value": jnp.asarray(1.0, dtype=jnp.float64),
