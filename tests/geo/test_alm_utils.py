@@ -1,4 +1,5 @@
 import ast
+import dataclasses
 import sys
 import unittest
 from pathlib import Path
@@ -925,6 +926,23 @@ class AlmStructuralDebtTests(unittest.TestCase):
                     if isinstance(child, ast.FunctionDef) and child is not node
                 ]
                 self.assertEqual(nested, [], f"{name} must be closure-free")
+
+    def test_phase4_result_carriers_are_frozen_dataclasses_without_mutable_defaults(self):
+        module = load_alm_utils_module()
+        for name in (
+            "_ALMContinuationStepResult",
+            "_ALMOuterIterationResult",
+        ):
+            carrier = getattr(module, name)
+            self.assertTrue(dataclasses.is_dataclass(carrier), name)
+            self.assertTrue(carrier.__dataclass_params__.frozen, name)
+            for field in dataclasses.fields(carrier):
+                if field.default is not dataclasses.MISSING:
+                    self.assertNotIsInstance(
+                        field.default,
+                        (dict, list, set),
+                        f"{name}.{field.name} has a mutable default",
+                    )
 
 
 _HISTORY_ENTRY_SHARED_KEYS = frozenset({
@@ -4049,7 +4067,7 @@ class AlmContinuationStepTests(unittest.TestCase):
         self.assertEqual(len(run_state.history), 1)
         self.assertEqual(run_state.history[0]["action"], "converged")
 
-    def test_continuation_step_break_outer_when_penalty_increase_fallback_runs(self):
+    def test_continuation_step_breaks_outer_after_infeasible_stall_penalty_increase(self):
         module = load_alm_utils_module()
         settings = self._settings(module)
 
@@ -4073,14 +4091,14 @@ class AlmContinuationStepTests(unittest.TestCase):
                 )
             )
 
-        self.assertIn(
-            result.decision,
-            {
-                module._ALMContinuationDecision.BREAK_OUTER,
-                module._ALMContinuationDecision.RETURN,
-            },
-        )
+        self.assertEqual(result.decision, module._ALMContinuationDecision.BREAK_OUTER)
+        self.assertIsNone(result.result)
+        self.assertEqual(result.penalty, settings.penalty_init * settings.penalty_scale)
         self.assertGreater(len(run_state.history), 0)
+        self.assertEqual(
+            run_state.history[0]["action"],
+            "infeasible_stall_penalty_increase",
+        )
         self.assertGreaterEqual(run_state.total_inner_iterations, 1)
 
 
@@ -4114,7 +4132,7 @@ class AlmOuterIterationTests(unittest.TestCase):
 
     @staticmethod
     def _outer_kwargs(module, run_state, **overrides):
-        return dict(
+        kwargs = dict(
             settings=overrides.pop("settings"),
             run_state=run_state,
             multipliers=overrides.pop("multipliers", np.zeros(1)),
@@ -4142,6 +4160,9 @@ class AlmOuterIterationTests(unittest.TestCase):
             constraint_names_tuple=overrides.pop("constraint_names_tuple", ("c0",)),
             constraint_blocks_tuple=overrides.pop("constraint_blocks_tuple", None),
         )
+        if overrides:
+            raise TypeError(f"unexpected kwargs: {sorted(overrides)}")
+        return kwargs
 
     def _make_step_result(self, module, decision, result_payload=None, **overrides):
         return module._ALMContinuationStepResult(
