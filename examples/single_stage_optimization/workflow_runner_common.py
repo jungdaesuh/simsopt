@@ -26,7 +26,8 @@ from banana_opt.artifact_contracts import (
     compute_stage2_bs_sha256,
     upgrade_legacy_stage2_artifact_results,
 )
-from banana_opt.constraint_contract import engineering_offspec_fields
+from banana_opt.constraint_contract import resolve_constraint_contract_from_wire_names
+from banana_opt.hardware_contracts import validate_major_radius
 
 STAGE2_SCRIPT_PATH = SCRIPT_DIR / "STAGE_2" / "banana_coil_solver.py"
 SINGLE_STAGE_SCRIPT_PATH = SCRIPT_DIR / "SINGLE_STAGE" / "single_stage_banana_example.py"
@@ -38,26 +39,48 @@ STAGE2_SIDECAR_REQUIRED_ERROR = (
 )
 
 T = TypeVar("T")
+# Single-stage and baseline-sweep ALM defaults. Stage 2 intentionally keeps a
+# wider curvature smoothing default on Stage2ArtifactConfig.
+SINGLE_STAGE_ALM_CLI_FIELDS = (
+    ("max_outer_iters", int, 10),
+    ("penalty_init", float, 1.0),
+    ("penalty_scale", float, 10.0),
+    ("penalty_max", float, 1.0e8),
+    ("feas_tol", float, 1.0e-6),
+    ("stationarity_tol", float, 1.0e-6),
+    ("trust_radius_init", float, 0.05),
+    ("trust_radius_min", float, 1.0e-4),
+    ("trust_radius_shrink", float, 0.5),
+    ("trust_radius_grow", float, 1.5),
+    ("max_inner_attempts", int, 4),
+    ("max_subproblem_continuations", int, 20),
+    ("distance_smoothing", float, 0.005),
+    ("curvature_smoothing", float, 0.05),
+)
 
 
-def append_allow_offspec_engineering_flag(
+def alm_flag(suffix: str) -> str:
+    return f"--alm-{suffix.replace('_', '-')}"
+
+
+def single_stage_alm_flag(suffix: str) -> str:
+    return f"--single-stage-alm-{suffix.replace('_', '-')}"
+
+
+def validate_constraint_cli_overrides(overrides: Mapping[str, float | None]) -> None:
+    resolve_constraint_contract_from_wire_names(cli_overrides=overrides)
+
+
+def append_alm_cli_flags(
     command: list[str],
+    source: object,
     *,
-    banana_current_max_A: float | None = None,
-    length_target: float | None = None,
-    curvature_threshold: float | None = None,
+    attr_prefix: str = "alm_",
 ) -> None:
-    override_layer: dict[str, float] = {}
-    if banana_current_max_A is not None:
-        override_layer["banana_current_max_A"] = float(banana_current_max_A)
-    if length_target is not None:
-        override_layer["length_target"] = float(length_target)
-    if curvature_threshold is not None:
-        override_layer["curvature_threshold"] = float(curvature_threshold)
-    if not override_layer:
-        return
-    if engineering_offspec_fields(override_layer):
-        command.append("--allow-offspec-engineering-constraints")
+    for suffix, _value_type, _default in SINGLE_STAGE_ALM_CLI_FIELDS:
+        command.extend(
+            [alm_flag(suffix), str(getattr(source, f"{attr_prefix}{suffix}"))]
+        )
 
 
 @dataclass(frozen=True)
@@ -118,6 +141,19 @@ class Stage2ArtifactConfig:
     stage2_iota_ntor: int = 6
 
     def __post_init__(self) -> None:
+        validate_major_radius(self.major_radius)
+        validate_constraint_cli_overrides(
+            {
+                "tf_current_A": self.tf_current_A,
+                "banana_current_max_A": self.banana_current_max_A,
+                "length_target": self.length_target,
+                "cc_threshold": self.cc_threshold,
+                "curvature_threshold": self.curvature_threshold,
+                "banana_surf_radius": self.banana_surf_radius,
+                "target_lcfs_max_major_radius_m": self.target_lcfs_max_major_radius_m,
+                "target_lcfs_max_minor_radius_m": self.target_lcfs_max_minor_radius_m,
+            }
+        )
         validate_normalized_toroidal_flux(
             self.toroidal_flux,
             field_name="Stage2ArtifactConfig.toroidal_flux",
@@ -286,45 +322,8 @@ def build_stage2_command(
         command.extend(["--constraint-profile-label", constraint_profile_label])
     if constraint_override_reason not in {None, ""}:
         command.extend(["--constraint-override-reason", constraint_override_reason])
-    append_allow_offspec_engineering_flag(
-        command,
-        banana_current_max_A=config.banana_current_max_A,
-        length_target=config.length_target,
-        curvature_threshold=config.curvature_threshold,
-    )
     if config.constraint_method == "alm":
-        command.extend(
-            [
-                "--alm-max-outer-iters",
-                str(config.alm_max_outer_iters),
-                "--alm-penalty-init",
-                str(config.alm_penalty_init),
-                "--alm-penalty-scale",
-                str(config.alm_penalty_scale),
-                "--alm-penalty-max",
-                str(config.alm_penalty_max),
-                "--alm-feas-tol",
-                str(config.alm_feas_tol),
-                "--alm-stationarity-tol",
-                str(config.alm_stationarity_tol),
-                "--alm-trust-radius-init",
-                str(config.alm_trust_radius_init),
-                "--alm-trust-radius-min",
-                str(config.alm_trust_radius_min),
-                "--alm-trust-radius-shrink",
-                str(config.alm_trust_radius_shrink),
-                "--alm-trust-radius-grow",
-                str(config.alm_trust_radius_grow),
-                "--alm-max-inner-attempts",
-                str(config.alm_max_inner_attempts),
-                "--alm-max-subproblem-continuations",
-                str(config.alm_max_subproblem_continuations),
-                "--alm-distance-smoothing",
-                str(config.alm_distance_smoothing),
-                "--alm-curvature-smoothing",
-                str(config.alm_curvature_smoothing),
-            ]
-        )
+        append_alm_cli_flags(command, config)
     if config.basin_hops > 0:
         command.extend(
             [
@@ -383,14 +382,24 @@ def run_command(
     cwd: Path = SCRIPT_DIR,
     timeout_seconds: float | None = None,
     dry_run: bool = False,
+    env: Mapping[str, str] | None = None,
+    inherit_alm_env: bool = False,
 ) -> None:
     if dry_run:
         return
+    subprocess_env = {
+        key: value
+        for key, value in os.environ.items()
+        if inherit_alm_env or not key.startswith("ALM_")
+    }
+    if env is not None:
+        subprocess_env.update(env)
     subprocess.run(
         list(command),
         cwd=str(cwd),
         check=True,
         timeout=timeout_seconds,
+        env=subprocess_env,
     )
 
 

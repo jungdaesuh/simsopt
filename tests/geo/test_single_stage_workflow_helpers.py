@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import math
+import os
 import subprocess
 import sys
 import tempfile
@@ -555,36 +556,37 @@ class WorkflowRunnerCommonTests(unittest.TestCase):
         self.assertIn("--output-root", command)
         self.assertIn("--init-only", command)
 
-    def test_build_stage2_command_adds_offspec_engineering_flag(self):
+    def test_stage2_artifact_config_rejects_offcontract_engineering_values(self):
         module = load_workflow_common_module()
-        config = module.Stage2ArtifactConfig(
-            plasma_surf_filename="demo.nc",
-            output_root=Path("/tmp/stage2"),
-            equilibria_dir=None,
-            tf_current_A=-8.0e4,
-            major_radius=0.976,
-            toroidal_flux=0.24,
-            length_weight=0.0005,
-            cc_weight=100.0,
-            cc_threshold=0.05,
-            curvature_weight=0.0001,
-            curvature_threshold=150.0,
-            banana_surf_radius=0.22,
-            order=2,
-            constraint_method="penalty",
-            alm_max_outer_iters=10,
-            alm_penalty_init=1.0,
-            alm_penalty_scale=10.0,
-            basin_hops=0,
-            basin_stepsize=0.01,
-            basin_seed=None,
-            init_only=False,
-            length_target=3.0,
-        )
 
-        command = module.build_stage2_command(config, python_executable="python")
-
-        self.assertIn("--allow-offspec-engineering-constraints", command)
+        with self.assertRaisesRegex(
+            ValueError,
+            "COIL_LENGTH_TARGET_M exceeds the hardware limit",
+        ):
+            module.Stage2ArtifactConfig(
+                plasma_surf_filename="demo.nc",
+                output_root=Path("/tmp/stage2"),
+                equilibria_dir=None,
+                tf_current_A=-8.0e4,
+                major_radius=0.976,
+                toroidal_flux=0.24,
+                length_weight=0.0005,
+                cc_weight=100.0,
+                cc_threshold=0.05,
+                curvature_weight=0.0001,
+                curvature_threshold=150.0,
+                banana_surf_radius=0.22,
+                order=2,
+                constraint_method="penalty",
+                alm_max_outer_iters=10,
+                alm_penalty_init=1.0,
+                alm_penalty_scale=10.0,
+                basin_hops=0,
+                basin_stepsize=0.01,
+                basin_seed=None,
+                init_only=False,
+                length_target=3.0,
+            )
 
     def test_build_stage2_command_threads_extended_basin_controls(self):
         module = load_workflow_common_module()
@@ -1036,6 +1038,20 @@ class BaselineSweepScriptTests(unittest.TestCase):
             single_stage_constraint_method="penalty",
             single_stage_maxiter=25,
             single_stage_init_only=True,
+            single_stage_alm_max_outer_iters=10,
+            single_stage_alm_penalty_init=1.0,
+            single_stage_alm_penalty_scale=10.0,
+            single_stage_alm_penalty_max=1.0e8,
+            single_stage_alm_feas_tol=1.0e-6,
+            single_stage_alm_stationarity_tol=1.0e-6,
+            single_stage_alm_trust_radius_init=0.05,
+            single_stage_alm_trust_radius_min=1.0e-4,
+            single_stage_alm_trust_radius_shrink=0.5,
+            single_stage_alm_trust_radius_grow=1.5,
+            single_stage_alm_max_inner_attempts=4,
+            single_stage_alm_max_subproblem_continuations=20,
+            single_stage_alm_distance_smoothing=0.005,
+            single_stage_alm_curvature_smoothing=0.05,
             single_stage_banana_current_mode="shared",
             plasma_current_A=0.0,
             res_weight=1000.0,
@@ -1103,6 +1119,117 @@ class BaselineSweepScriptTests(unittest.TestCase):
         )
 
         self.assertEqual(command[command.index("--seed-order-upgrade") + 1], "4")
+
+    def test_baseline_sweep_alm_cli_schema_matches_emitter_schema(self):
+        module = load_baseline_sweep_module()
+        common = load_workflow_common_module()
+
+        with patch.object(sys, "argv", ["prog"]):
+            parsed = module.parse_args()
+        parser_suffixes = {
+            suffix
+            for suffix, _value_type, _default in module.SINGLE_STAGE_ALM_CLI_FIELDS
+            if hasattr(parsed, f"single_stage_alm_{suffix}")
+        }
+        emitter_suffixes = {
+            suffix
+            for suffix, _value_type, _default in common.SINGLE_STAGE_ALM_CLI_FIELDS
+            if common.alm_flag(suffix).startswith("--alm-")
+        }
+
+        self.assertEqual(parser_suffixes, emitter_suffixes)
+        self.assertEqual(len(parser_suffixes), len(common.SINGLE_STAGE_ALM_CLI_FIELDS))
+
+    def test_baseline_sweep_single_stage_alm_flags_round_trip_to_command(self):
+        module = load_baseline_sweep_module()
+        common = load_workflow_common_module()
+        helpers = load_workflow_helpers_module()
+        expected_values = {}
+        argv = [
+            "prog",
+            "--single-stage-constraint-method",
+            "alm",
+        ]
+        for index, (suffix, value_type, _default) in enumerate(
+            common.SINGLE_STAGE_ALM_CLI_FIELDS,
+            start=1,
+        ):
+            raw_value = str(30 + index) if value_type is int else str(index / 1000.0)
+            expected_values[suffix] = raw_value
+            argv.extend([common.single_stage_alm_flag(suffix), raw_value])
+
+        with patch.object(sys, "argv", argv):
+            args = module.parse_args()
+
+        case = helpers.SingleStageWeightCase(
+            name="baseline",
+            res_weight=1000.0,
+            iotas_weight=100.0,
+            cc_weight=100.0,
+            curvature_weight=0.1,
+            length_weight=1.0,
+            cs_weight=1.0,
+            surf_dist_weight=1000.0,
+        )
+        command = module.build_single_stage_command(
+            args,
+            case=case,
+            stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            case_output_root=Path("/tmp/sweep/baseline"),
+        )
+
+        command_alm_flags = {
+            flag for flag in command if flag.startswith("--alm-")
+        }
+        self.assertEqual(
+            command_alm_flags,
+            {common.alm_flag(suffix) for suffix in expected_values},
+        )
+        for suffix, raw_value in expected_values.items():
+            flag = common.alm_flag(suffix)
+            self.assertEqual(command[command.index(flag) + 1], raw_value)
+
+    def test_build_single_stage_command_forwards_explicit_alm_controls(self):
+        module = load_baseline_sweep_module()
+        helpers = load_workflow_helpers_module()
+        args = self._make_args()
+        args.single_stage_constraint_method = "alm"
+        args.single_stage_alm_max_outer_iters = 7
+        args.single_stage_alm_penalty_init = 2.0
+        args.single_stage_alm_penalty_scale = 3.0
+        args.single_stage_alm_penalty_max = 40.0
+        args.single_stage_alm_feas_tol = 5.0e-5
+        args.single_stage_alm_stationarity_tol = 6.0e-5
+        args.single_stage_alm_max_subproblem_continuations = 9
+        case = helpers.SingleStageWeightCase(
+            name="baseline",
+            res_weight=1000.0,
+            iotas_weight=100.0,
+            cc_weight=100.0,
+            curvature_weight=0.1,
+            length_weight=1.0,
+            cs_weight=1.0,
+            surf_dist_weight=1000.0,
+        )
+
+        command = module.build_single_stage_command(
+            args,
+            case=case,
+            stage2_bs_path=Path("/tmp/stage2/biot_savart_opt.json"),
+            case_output_root=Path("/tmp/sweep/baseline"),
+        )
+
+        for flag, expected in (
+            ("--alm-max-outer-iters", "7"),
+            ("--alm-penalty-init", "2.0"),
+            ("--alm-penalty-scale", "3.0"),
+            ("--alm-penalty-max", "40.0"),
+            ("--alm-feas-tol", "5e-05"),
+            ("--alm-stationarity-tol", "6e-05"),
+            ("--alm-max-subproblem-continuations", "9"),
+        ):
+            self.assertIn(flag, command)
+            self.assertEqual(command[command.index(flag) + 1], expected)
 
     def test_validate_locked_baseline_args_rejects_nonzero_plasma_current(self):
         module = load_baseline_sweep_module()
@@ -1336,6 +1463,60 @@ class WorkflowRunnerCommonArtifactTests(unittest.TestCase):
             encoding="utf-8",
         )
         return stage2_bs_path, stage2_results_path
+
+    def test_run_command_strips_inherited_alm_environment(self):
+        module = load_workflow_common_module()
+
+        with patch.dict(
+            os.environ,
+            {"ALM_PENALTY_INIT": "999.0", "NON_ALM_MARKER": "kept"},
+            clear=False,
+        ), patch.object(module.subprocess, "run") as run_mock:
+            module.run_command(
+                ["python", "--version"],
+                env={"EXPLICIT_MARKER": "present"},
+            )
+
+        passed_env = run_mock.call_args.kwargs["env"]
+        self.assertNotIn("ALM_PENALTY_INIT", passed_env)
+        self.assertEqual(passed_env["NON_ALM_MARKER"], "kept")
+        self.assertEqual(passed_env["EXPLICIT_MARKER"], "present")
+
+    def test_run_command_preserves_inherited_physics_environment(self):
+        module = load_workflow_common_module()
+
+        inherited_env = {
+            "ALM_PENALTY_INIT": "999.0",
+            "BOOZER_I": "0.010053096491487338",
+            "PLASMA_CURRENT_A": "8000.0",
+            "PROXY_PLASMA_CURRENT_A": "1200.0",
+        }
+        with patch.dict(os.environ, inherited_env, clear=False), patch.object(
+            module.subprocess,
+            "run",
+        ) as run_mock:
+            module.run_command(["python", "--version"])
+
+        passed_env = run_mock.call_args.kwargs["env"]
+        self.assertNotIn("ALM_PENALTY_INIT", passed_env)
+        for key in ("BOOZER_I", "PLASMA_CURRENT_A", "PROXY_PLASMA_CURRENT_A"):
+            self.assertEqual(passed_env[key], inherited_env[key])
+
+    def test_run_command_can_inherit_alm_environment_explicitly(self):
+        module = load_workflow_common_module()
+
+        with patch.dict(
+            os.environ,
+            {"ALM_PENALTY_INIT": "999.0"},
+            clear=False,
+        ), patch.object(module.subprocess, "run") as run_mock:
+            module.run_command(
+                ["python", "--version"],
+                inherit_alm_env=True,
+            )
+
+        passed_env = run_mock.call_args.kwargs["env"]
+        self.assertEqual(passed_env["ALM_PENALTY_INIT"], "999.0")
 
     def test_load_stage2_artifact_results_accepts_matching_checksum(self):
         module = load_workflow_common_module()
@@ -2103,20 +2284,22 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             "12345.0",
         )
 
-    def test_build_single_stage_goal_mode_command_adds_offspec_flag(self):
+    def test_build_single_stage_goal_mode_command_rejects_offcontract_values(self):
         module = load_goal_mode_comparison_module()
         args = self._make_args()
         args.length_target = 3.0
         args.curvature_threshold = 150.0
 
-        command = module.build_single_stage_goal_mode_command(
-            args,
-            goal_mode="target",
-            stage2_bs_path=Path("relative/seed.json").resolve(),
-            case_output_root=Path("outputs/target").resolve(),
-        )
-
-        self.assertIn("--allow-offspec-engineering-constraints", command)
+        with self.assertRaisesRegex(
+            ValueError,
+            "COIL_LENGTH_TARGET_M exceeds the hardware limit",
+        ):
+            module.build_single_stage_goal_mode_command(
+                args,
+                goal_mode="target",
+                stage2_bs_path=Path("relative/seed.json").resolve(),
+                case_output_root=Path("outputs/target").resolve(),
+            )
 
     def test_build_single_stage_goal_mode_command_forwards_chebyshev_flags(self):
         module = load_goal_mode_comparison_module()

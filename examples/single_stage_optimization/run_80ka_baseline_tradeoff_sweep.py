@@ -16,8 +16,10 @@ from workflow_helpers import (  # noqa: E402
     select_non_dominated_records,
 )
 from workflow_runner_common import (  # noqa: E402
+    SINGLE_STAGE_ALM_CLI_FIELDS,
     SINGLE_STAGE_SCRIPT_PATH,
     Stage2ArtifactConfig,
+    append_alm_cli_flags,
     add_seed_order_upgrade_argument,
     build_stage2_command,
     discover_single_results_path,
@@ -26,6 +28,7 @@ from workflow_runner_common import (  # noqa: E402
     load_stage2_artifact_results,
     parse_csv,
     run_command,
+    single_stage_alm_flag,
     snapshot_single_results_paths,
     timeout_or_none,
 )
@@ -39,6 +42,7 @@ from banana_opt.hardware_contracts import (  # noqa: E402
     COIL_COIL_MIN_DIST_M,
     TF_CURRENT_CW_DEFAULT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
+    validate_major_radius,
 )
 from banana_opt.constraint_contract import (  # noqa: E402
     resolve_constraint_contract_from_wire_names,
@@ -133,6 +137,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--single-stage-maxiter", type=int, default=300)
     parser.add_argument("--single-stage-timeout-seconds", type=float, default=0.0)
     parser.add_argument("--single-stage-init-only", action="store_true")
+    for suffix, value_type, default in SINGLE_STAGE_ALM_CLI_FIELDS:
+        parser.add_argument(
+            single_stage_alm_flag(suffix),
+            type=value_type,
+            default=default,
+        )
     parser.add_argument(
         "--single-stage-banana-current-mode",
         choices=[BANANA_CURRENT_MODE_SHARED, BANANA_CURRENT_MODE_INDEPENDENT],
@@ -269,6 +279,7 @@ def load_locked_baseline_stage2_artifact(
 def _resolve_locked_baseline_constraint_contract(
     args: argparse.Namespace,
 ) -> dict[str, float]:
+    validate_major_radius(args.major_radius)
     contract, _trace = resolve_constraint_contract_from_wire_names(
         cli_overrides={
             "tf_current_A": args.tf_current_A,
@@ -276,8 +287,6 @@ def _resolve_locked_baseline_constraint_contract(
             "curvature_threshold": args.stage2_curvature_threshold,
             "banana_surf_radius": args.banana_surf_radius,
         },
-        offspec_major_radius_m=args.major_radius,
-        accept_offspec_major_radius=False,
     )
     return dict(contract)
 
@@ -356,6 +365,8 @@ def build_single_stage_command(
         command.extend(["--seed-order-upgrade", str(args.seed_order_upgrade)])
     if args.equilibria_dir is not None:
         command.extend(["--equilibria-dir", args.equilibria_dir])
+    if args.single_stage_constraint_method == "alm":
+        append_alm_cli_flags(command, args, attr_prefix="single_stage_alm_")
     if args.single_stage_init_only:
         command.append("--init-only")
     return command
