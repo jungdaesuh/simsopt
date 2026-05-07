@@ -897,6 +897,403 @@ class AlmStructuralDebtTests(unittest.TestCase):
         self.assertTrue(hasattr(module, "ALMInnerAttemptRequest"))
         self.assertTrue(hasattr(module, "ALMInnerAttemptResult"))
 
+    def test_minimize_alm_impl_baseline_metrics_are_pinned(self):
+        node = self._top_level_node("_minimize_alm_impl")
+        nested_functions = [
+            child
+            for child in ast.walk(node)
+            if isinstance(child, ast.FunctionDef) and child is not node
+        ]
+
+        self.assertEqual(node.end_lineno - node.lineno + 1, 910)
+        self.assertEqual(nested_functions, [])
+
+
+_HISTORY_ENTRY_SHARED_KEYS = frozenset({
+    "outer_iteration", "continuation_iteration", "constraint_names",
+    "inner_iterations", "inner_success", "inner_message",
+    "penalty", "penalty_values", "block_penalties",
+    "max_violation", "stationarity_norm", "raw_stationarity_norm",
+    "kkt_stationarity_norm", "constraint_values", "solver_constraint_values",
+    "hard_signed_constraint_values", "hard_violation_values",
+    "surrogate_signed_constraint_values", "hard_max_violation",
+    "surrogate_max_value", "hard_positive_shift_zero", "signal_mismatch_active",
+    "multipliers", "post_update_multipliers", "feasibility_tolerance",
+    "effective_feasibility_tolerance", "stationarity_tolerance", "trust_radius",
+    "inner_maxiter", "inner_maxls", "inner_maxfun", "inner_profile",
+    "inner_lbfgsb_projected_gradient_norm", "inner_attempts",
+    "accepted_move_norm", "accepted_move_norm_scaled",
+    "infeasible_stall_move_tolerance", "objective_delta", "feasibility_delta",
+    "feasibility_delta_tolerance", "stationarity_delta", "meaningful_progress",
+    "feasible_stall_count", "infeasible_stall", "inner_false_success",
+    "inner_stall_reason", "active_violation_index", "active_constraint_name",
+    "nonfinite_candidate_evaluation", "nonfinite_candidate_fields",
+    "multiplier_cap_binding", "multiplier_cap_binding_indices",
+})
+
+
+class AlmDualUpdateTransitionTests(unittest.TestCase):
+    @staticmethod
+    def _routing_state_with_preferred(module, preferred_dual_update_values):
+        signal_state = module.ALMConstraintSignalState(
+            explicit_stage2_signals=False,
+            hard_signed_constraint_values=preferred_dual_update_values,
+            hard_violation_values=np.zeros_like(preferred_dual_update_values),
+            surrogate_signed_constraint_values=preferred_dual_update_values,
+            preferred_dual_update_values=preferred_dual_update_values,
+        )
+        return module.ALMConstraintRoutingState(
+            signal_state=signal_state,
+            hard_activity_mask=np.zeros_like(preferred_dual_update_values, dtype=bool),
+            surrogate_activity_mask=np.zeros_like(preferred_dual_update_values, dtype=bool),
+            signal_mismatch_active=False,
+            hard_positive_shift=np.zeros_like(preferred_dual_update_values),
+            surrogate_positive_shift=np.zeros_like(preferred_dual_update_values),
+            hard_positive_shift_zero=False,
+            surrogate_positive_shift_zero=False,
+            hard_max_violation=0.0,
+            surrogate_max_value=0.0,
+        )
+
+    def test_dual_update_projects_multipliers_and_tightens_tolerances(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            penalty_max=1.0e6,
+            feasibility_tol=1.0e-8,
+            stationarity_tol=1.0e-8,
+            multiplier_max=10.0,
+        )
+        multipliers = np.array([0.1, 0.2])
+        routing_state = self._routing_state_with_preferred(module, np.array([0.05, 0.05]))
+
+        result = module._handle_alm_dual_update_transition(
+            multipliers=multipliers,
+            routing_state=routing_state,
+            penalty_argument=2.0,
+            settings=settings,
+            update_feasibility_tol=1.0e-2,
+            update_stationarity_tol=1.0e-2,
+        )
+
+        # Tolerances must shrink by penalty_scale, floored at the absolute settings tol.
+        self.assertAlmostEqual(result.update_feasibility_tol, 1.0e-3)
+        self.assertAlmostEqual(result.update_stationarity_tol, 1.0e-3)
+        # Multipliers must be projected non-negative; original positive values move
+        # by penalty * preferred_dual_update_values consistent with the underlying
+        # _project_nonnegative_multipliers_with_diagnostics contract.
+        self.assertEqual(result.multipliers.shape, multipliers.shape)
+        np.testing.assert_allclose(result.multipliers, np.array([0.2, 0.3]))
+        self.assertTrue(np.all(result.multipliers >= 0.0))
+        self.assertIsInstance(result.multiplier_cap_binding, bool)
+        self.assertIsInstance(result.multiplier_cap_binding_indices, list)
+
+    def test_dual_update_floors_tolerance_at_settings_value(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1.0e-2,
+            stationarity_tol=1.0e-2,
+        )
+        routing_state = self._routing_state_with_preferred(module, np.array([0.0]))
+
+        result = module._handle_alm_dual_update_transition(
+            multipliers=np.array([0.0]),
+            routing_state=routing_state,
+            penalty_argument=1.0,
+            settings=settings,
+            update_feasibility_tol=1.0e-3,
+            update_stationarity_tol=1.0e-3,
+        )
+
+        # update_feasibility_tol/penalty_scale = 1e-4 < 1e-2 floor, so floor wins.
+        self.assertEqual(result.update_feasibility_tol, 1.0e-2)
+        self.assertEqual(result.update_stationarity_tol, 1.0e-2)
+
+
+class AlmPenaltyCapTerminationTests(unittest.TestCase):
+    def test_handle_alm_penalty_cap_termination_forwards_all_keyword_arguments(self):
+        module = load_alm_utils_module()
+        captured = {}
+
+        def fake_failure(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(termination_reason=kwargs["termination_reason"])
+
+        penalty_update_state = SimpleNamespace(
+            evaluation={"total": 1.0},
+            max_violation=0.5,
+        )
+        penalty_transition = SimpleNamespace(
+            requested_penalty=1.0e9,
+            penalty_update_state=penalty_update_state,
+        )
+        multipliers_in = np.array([0.1])
+
+        with patch.object(
+            module, "_build_alm_failure_result_with_optional_restore", fake_failure
+        ):
+            module._handle_alm_penalty_cap_termination(
+                settings="SETTINGS",
+                constraint_names=["c0"],
+                run_state="RUNSTATE",
+                last_outer_iteration=4,
+                best_feasible="BEST_FEASIBLE_SENTINEL",
+                restore_incumbent_state_fn="RESTORE_FN_SENTINEL",
+                penalty_transition=penalty_transition,
+                multipliers=multipliers_in,
+                penalty=1.0e3,
+                result="INNER_RESULT",
+            )
+
+        # Hardcoded contract values
+        self.assertEqual(captured["termination_reason"], "penalty_cap_reached")
+        self.assertEqual(
+            captured["restored_termination_reason"],
+            "penalty_cap_reached_restored_best_feasible",
+        )
+        self.assertIs(captured["evaluation"], penalty_update_state.evaluation)
+        self.assertEqual(
+            captured["final_max_feasibility_violation"],
+            penalty_update_state.max_violation,
+        )
+        # Message-prefix substring guards (catches accidental string drift)
+        self.assertIn("ALM stopped after the requested penalty update", captured["message_prefix"])
+        self.assertIn("1.000e+09", captured["message_prefix"])
+        self.assertIn("1.000e+03", captured["message_prefix"])
+        self.assertIn(
+            "ALM stopped at the penalty cap after restoring best",
+            captured["restored_message_prefix"],
+        )
+        # All other forwarded kwargs (catches a kwarg rename like result→inner_result)
+        self.assertEqual(captured["settings"], "SETTINGS")
+        self.assertEqual(captured["constraint_names"], ["c0"])
+        self.assertEqual(captured["run_state"], "RUNSTATE")
+        self.assertEqual(captured["last_outer_iteration"], 4)
+        self.assertEqual(captured["best_feasible"], "BEST_FEASIBLE_SENTINEL")
+        self.assertEqual(captured["restore_incumbent_state_fn"], "RESTORE_FN_SENTINEL")
+        np.testing.assert_array_equal(captured["multipliers_state"], multipliers_in)
+        self.assertEqual(captured["penalty_state"], 1.0e3)
+        self.assertEqual(captured["inner_result"], "INNER_RESULT")
+
+
+class AlmNormalizeRunInputsValidationTests(unittest.TestCase):
+    @staticmethod
+    def _settings(module, **overrides):
+        defaults = dict(
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            penalty_max=1.0e6,
+            feasibility_tol=1.0e-6,
+            stationarity_tol=1.0e-6,
+        )
+        defaults.update(overrides)
+        return module.ALMSettings(**defaults)
+
+    def _normalize(self, module, settings, **overrides):
+        kwargs = dict(
+            x0=np.zeros(1),
+            constraint_names=["c0"],
+            settings=settings,
+            initial_multipliers=None,
+            initial_penalty=None,
+            constraint_blocks=None,
+            snapshot_accepted_state_fn=None,
+            restore_incumbent_state_fn=None,
+        )
+        kwargs.update(overrides)
+        return module._normalize_alm_run_inputs(**kwargs)
+
+    def test_normalize_rejects_unpaired_snapshot_and_restore(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "snapshot_accepted_state_fn and restore_incumbent_state_fn must be provided together",
+        ):
+            self._normalize(
+                module,
+                settings,
+                snapshot_accepted_state_fn=lambda: None,
+                restore_incumbent_state_fn=None,
+            )
+
+    def test_normalize_rejects_nonpositive_penalty_max(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module, penalty_max=0.0)
+
+        with self.assertRaisesRegex(
+            ValueError, r"settings\.penalty_max must be positive when provided"
+        ):
+            self._normalize(module, settings)
+
+    def test_normalize_rejects_penalty_max_below_init(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module, penalty_init=10.0, penalty_max=5.0)
+
+        with self.assertRaisesRegex(
+            ValueError, r"settings\.penalty_max \(5\.0\) must be >= settings\.penalty_init \(10\.0\)"
+        ):
+            self._normalize(module, settings)
+
+    def test_normalize_rejects_nonpositive_history_max_entries(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module, history_max_entries=0)
+
+        with self.assertRaisesRegex(
+            ValueError, r"settings\.history_max_entries must be positive or None"
+        ):
+            self._normalize(module, settings)
+
+    def test_normalize_rejects_nonfinite_initial_penalty(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module)
+
+        with self.assertRaisesRegex(
+            ValueError, r"initial ALM penalty must be finite and positive"
+        ):
+            self._normalize(module, settings, initial_penalty=float("inf"))
+
+        with self.assertRaisesRegex(
+            ValueError, r"initial ALM penalty must be finite and positive"
+        ):
+            self._normalize(module, settings, initial_penalty=0.0)
+
+    def test_normalize_rejects_initial_penalty_above_cap(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module, penalty_max=5.0)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"initial ALM penalty \(10\.0\) must be <= settings\.penalty_max \(5\.0\)",
+        ):
+            self._normalize(module, settings, initial_penalty=10.0)
+
+
+class AlmHistoryEntryBuilderTests(unittest.TestCase):
+    @staticmethod
+    def _make_routing_state(module):
+        signal_state = module.ALMConstraintSignalState(
+            explicit_stage2_signals=False,
+            hard_signed_constraint_values=np.zeros(2),
+            hard_violation_values=np.zeros(2),
+            surrogate_signed_constraint_values=np.zeros(2),
+            preferred_dual_update_values=np.zeros(2),
+        )
+        return module.ALMConstraintRoutingState(
+            signal_state=signal_state,
+            hard_activity_mask=np.zeros(2, dtype=bool),
+            surrogate_activity_mask=np.zeros(2, dtype=bool),
+            signal_mismatch_active=False,
+            hard_positive_shift=np.zeros(2),
+            surrogate_positive_shift=np.zeros(2),
+            hard_positive_shift_zero=False,
+            surrogate_positive_shift_zero=False,
+            hard_max_violation=0.1,
+            surrogate_max_value=0.2,
+        )
+
+    def _common_kwargs(self, module):
+        return dict(
+            outer_iteration=2,
+            continuation_iteration=1,
+            constraint_names=["c0", "c1"],
+            penalty=4.0,
+            penalty_argument=4.0,
+            multipliers=np.array([0.1, 0.2]),
+            post_update_multipliers=np.array([0.15, 0.25]),
+            routing_state=self._make_routing_state(module),
+            feasibility_values=np.array([0.01, 0.02]),
+            solver_constraint_values=np.array([-1.0, 1.0]),
+            max_feasibility_violation=0.02,
+            stationarity_norm=0.5,
+            raw_stationarity_norm=0.6,
+            kkt_stationarity_norm=0.4,
+            signal_mismatch_active=False,
+            update_feasibility_tol=1e-3,
+            effective_feasibility_tol=1e-2,
+            update_stationarity_tol=1e-4,
+            trust_radius=0.05,
+            start_x=np.array([1.0, 2.0]),
+        )
+
+    def test_build_alm_history_entry_returns_all_52_shared_keys(self):
+        module = load_alm_utils_module()
+        kwargs = self._common_kwargs(module)
+        kwargs.update(
+            inner_iterations=0,
+            inner_success=True,
+            inner_message="ok",
+            inner_maxiter=None,
+            inner_maxls=None,
+            inner_maxfun=None,
+            inner_profile=None,
+            inner_lbfgsb_projected_gradient_norm=None,
+            inner_attempts=0,
+            accepted_move_norm=0.0,
+            objective_delta=0.0,
+            feasibility_delta=0.0,
+            feasibility_delta_tolerance=0.0,
+            stationarity_delta=0.0,
+            meaningful_progress=False,
+            feasible_stall_count=0,
+            infeasible_stall=False,
+            inner_false_success=False,
+            inner_stall_reason=None,
+            active_violation_index=None,
+            active_constraint_name=None,
+            nonfinite_candidate_evaluation=False,
+            nonfinite_candidate_fields=None,
+        )
+
+        entry = module._build_alm_history_entry(**kwargs)
+
+        self.assertEqual(set(entry.keys()), set(_HISTORY_ENTRY_SHARED_KEYS))
+        self.assertNotIn("action", entry)
+
+    def test_build_alm_history_entry_skipped_inner_payload_matches_post_inner_shape(self):
+        module = load_alm_utils_module()
+
+        skipped_kwargs = self._common_kwargs(module) | dict(
+            inner_iterations=0, inner_success=True, inner_message="skipped",
+            inner_maxiter=None, inner_maxls=None, inner_maxfun=None,
+            inner_profile=None, inner_lbfgsb_projected_gradient_norm=None,
+            inner_attempts=0, accepted_move_norm=0.0, objective_delta=0.0,
+            feasibility_delta=0.0, feasibility_delta_tolerance=0.0,
+            stationarity_delta=0.0, meaningful_progress=False,
+            feasible_stall_count=0, infeasible_stall=False,
+            inner_false_success=False, inner_stall_reason=None,
+            active_violation_index=None, active_constraint_name=None,
+            nonfinite_candidate_evaluation=False,
+            nonfinite_candidate_fields=None,
+        )
+        post_kwargs = self._common_kwargs(module) | dict(
+            inner_iterations=7, inner_success=False, inner_message="MAXITER",
+            inner_maxiter=10, inner_maxls=20, inner_maxfun=50,
+            inner_profile="boxed", inner_lbfgsb_projected_gradient_norm=0.3,
+            inner_attempts=2, accepted_move_norm=0.04, objective_delta=0.01,
+            feasibility_delta=0.001, feasibility_delta_tolerance=1e-6,
+            stationarity_delta=0.05, meaningful_progress=True,
+            feasible_stall_count=1, infeasible_stall=False,
+            inner_false_success=False, inner_stall_reason=None,
+            active_violation_index=0, active_constraint_name="c0",
+            nonfinite_candidate_evaluation=False,
+            nonfinite_candidate_fields=None,
+        )
+
+        skipped = module._build_alm_history_entry(**skipped_kwargs)
+        post = module._build_alm_history_entry(**post_kwargs)
+
+        self.assertEqual(set(skipped.keys()), set(post.keys()))
+        skipped_with_action = skipped | {"action": "converged"}
+        self.assertEqual(
+            set(skipped_with_action.keys()),
+            set(_HISTORY_ENTRY_SHARED_KEYS) | {"action"},
+        )
+
 
 class MinimizeAlmTests(unittest.TestCase):
     @staticmethod
