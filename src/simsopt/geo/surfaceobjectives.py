@@ -1222,13 +1222,14 @@ class BoozerResidual(Optimizable):
         Return the partial derivative of the objective with respect to the magnetic field
         """
 
+        res = self.boozer_surface.run_code_from_last_solution()
+        self.surface.set_dofs(self.in_surface.get_dofs())
         surface = self.surface
-        res = self.boozer_surface.res
         nphi = self.surface.quadpoints_phi.size
         ntheta = self.surface.quadpoints_theta.size
         num_points = 3 * nphi * ntheta
         I = _resolve_boozer_current_I(self.boozer_surface)
-        r, r_dB = boozer_surface_residual_dB(surface, self.boozer_surface.res['iota'], self.boozer_surface.res['G'], self.biotsavart, derivatives=0, weight_inv_modB=res['weight_inv_modB'], I=I)
+        r, r_dB = boozer_surface_residual_dB(surface, res['iota'], res['G'], self.biotsavart, derivatives=0, weight_inv_modB=res['weight_inv_modB'], I=I)
 
         return _boozer_residual_dJ_by_dB(r, r_dB, np.sqrt(num_points))
 

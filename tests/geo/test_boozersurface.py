@@ -10,6 +10,10 @@ from simsopt.field.biotsavart import BiotSavart
 from simsopt.geo import SurfaceXYZTensorFourier, SurfaceRZFourier
 from simsopt.geo.surfaceobjectives import (
     Area,
+    BoozerResidual,
+    Iotas,
+    MajorRadius,
+    NonQuasiSymmetricRatio,
     ToroidalFlux,
     boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
     boozer_surface_dlsqgrad_dcoils_vjp,
@@ -199,6 +203,39 @@ class BoozerSurfaceTests(unittest.TestCase):
             err = np.abs(dfdx_fd - directional_derivative)
             self.assertLess(err, err_old * 0.31)
             err_old = err
+
+    def test_unsolved_boozer_surface_objectives_require_initial_run_code(self):
+        mpol = 3
+        ntor = 3
+        phis = np.linspace(0, 1/3, 2*ntor+1, endpoint=False)
+        thetas = np.linspace(0, 1, 2*mpol+1, endpoint=False)
+        bs, _, boozer_surface = self._make_area_boozer_surface(
+            current_I=0.0,
+            mpol=mpol,
+            ntor=ntor,
+            phis=phis,
+            thetas=thetas,
+            constraint_weight=100.,
+            options={"weight_inv_modB": False},
+        )
+        error = "BoozerSurface has no solved state"
+
+        with self.assertRaisesRegex(RuntimeError, error):
+            boozer_surface.run_code_from_last_solution()
+
+        objectives = [
+            MajorRadius(boozer_surface),
+            NonQuasiSymmetricRatio(boozer_surface, BiotSavart(bs.coils)),
+            Iotas(boozer_surface),
+            BoozerResidual(boozer_surface, BiotSavart(bs.coils)),
+        ]
+        for objective in objectives:
+            with self.subTest(objective=type(objective).__name__):
+                with self.assertRaisesRegex(RuntimeError, error):
+                    objective.J()
+
+        with self.assertRaisesRegex(RuntimeError, error):
+            objectives[-1].dJ_by_dB()
 
     def _assert_penalty_constraints_cpp_python_match(self, boozer_surface, x, *, optimize_G, weight_inv_modB):
         w = 0.

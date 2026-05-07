@@ -126,7 +126,7 @@ class FluxObjectiveTests(unittest.TestCase):
         base_currents = [Current(1e5) for _ in base_curves]
         coils = coils_via_symmetries(base_curves, base_currents, s.nfp, s.stellsym)
         bs = BiotSavart(coils)
-        SquaredFlux(s, bs, definition="quadratic flux")
+        Jf = SquaredFlux(s, bs, definition="quadratic flux")
 
         initial_points = bs.get_points_cart().copy()
         dofs = s.get_dofs()
@@ -137,5 +137,6 @@ class FluxObjectiveTests(unittest.TestCase):
         SquaredFlux(s, fresh_bs, definition="quadratic flux")
 
         self.assertFalse(np.allclose(initial_points, moved_points))
+        self.assertGreater(Jf.J(), 0.0)
         np.testing.assert_allclose(bs.get_points_cart(), moved_points)
         np.testing.assert_allclose(bs.get_points_cart(), fresh_bs.get_points_cart())
