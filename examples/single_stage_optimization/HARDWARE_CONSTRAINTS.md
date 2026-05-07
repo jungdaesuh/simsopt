@@ -2,7 +2,7 @@
 
 ## Background
 
-The baseline solver code (`baseline-original`) hardcoded all constraint thresholds as constants. The `candidate-fixed` branch exposed them as CLI arguments to enable automated search. Lower-bound floors are clamped via `max()`, while upper-bound ceilings are clamped via `min()`, to match the HBT hardware contract.
+The baseline solver code (`baseline-original`) hardcoded all constraint thresholds as constants. The `candidate-fixed` branch exposed them as CLI arguments to enable automated search. Current HBT contract fields are still configurable where that is useful for searches, but off-contract values fail before solver launch.
 
 Updated HBT constraint SSOT:
 - TF coil current is fixed at `80 kA`
@@ -15,15 +15,15 @@ Updated HBT constraint SSOT:
 
 ## Enforced Baseline Limits
 
-All constraint thresholds are clamped in the solver code to match the current HBT hardware baseline. CLI arguments below a floor are raised with a printed warning, while values above a ceiling are lowered with a printed warning. Optimization weights remain freely adjustable.
+All hardware threshold CLI arguments are validated against the current HBT hardware baseline. Values below a floor or above a ceiling raise an error; the solver does not silently clamp them. Optimization weights remain freely adjustable.
 
 ### Stage 2 (`banana_coil_solver.py`)
 
 | Constraint | CLI Flag | Baseline Limit | Enforcement |
 |-----------|----------|---------------|-------------|
-| Coil-coil distance | `--cc-threshold` | 0.05m (5cm) | `max(args.cc_threshold, 0.05)` |
-| Curvature limit | `--curvature-threshold` | 100 | `min(args.curvature_threshold, 100)` |
-| Coil length target | `--length-target` | 1.9m target, 2.0m hard ceiling | `min(args.length_target, 2.0)` |
+| Coil-coil distance | `--cc-threshold` | 0.05m (5cm) | reject below 0.05m |
+| Curvature limit | `--curvature-threshold` | 100 | reject above 100m^-1 |
+| Coil length target | `--length-target` | 1.9m target, 2.0m hard ceiling | reject above 2.0m |
 
 Stage 2 also enforces the fixed LCFS-to-vessel clearance contract directly on the
 loaded plasma boundary. This is not a CLI-tunable floor because the plasma
@@ -34,11 +34,11 @@ No historical off-spec bypass exists for this clearance gate.
 
 | Constraint | CLI Flag | Baseline Limit | Enforcement |
 |-----------|----------|---------------|-------------|
-| Coil-coil distance | `--cc-dist` | 0.05m (5cm) | `max(args.cc_dist, 0.05)` |
-| Curvature limit | `--curvature-threshold` | 100 | `min(args.curvature_threshold, 100)` |
-| Coil length target | `--length-target` | 1.9m target, 2.0m hard ceiling | `min(args.length_target, 2.0)` |
-| Coil-surface clearance | `--cs-dist` | 0.015m (1.5cm) | `max(args.cs_dist, 0.015)` |
-| Surface-vessel clearance | `--ss-dist` | 0.04m (4cm) | `max(args.ss_dist, 0.04)` |
+| Coil-coil distance | `--cc-dist` | 0.05m (5cm) | reject below 0.05m |
+| Curvature limit | `--curvature-threshold` | 100 | reject above 100m^-1 |
+| Coil length target | `--length-target` | 1.9m target, 2.0m hard ceiling | reject above 2.0m |
+| Coil-surface clearance | `--cs-dist` | 0.015m (1.5cm) | reject below 0.015m |
+| Surface-vessel clearance | `--ss-dist` | 0.04m (4cm) | reject below 0.04m |
 
 **Note:** The current HBT lane fixes the TF current baseline at `80 kA` and uses the tighter coil-plasma clearance plus `100 m^-1` curvature limit as the default hardware contract.
 
@@ -55,4 +55,25 @@ Optimization weights control how strongly the solver penalizes constraint violat
 - `--iotas-weight` (iota tracking weight)
 - `--squared-flux-weight` (field error weight, Stage 2 only)
 
-Setting a weight to zero effectively disables the penalty, but the threshold floor still applies to the constraint calculation.
+Setting a weight to zero disables that soft penalty term, but hardware gates and final artifact checks still enforce the contract.
+
+## ALM Contract
+
+ALM uses one scalar penalty schedule for all constraints. `constraint_blocks`
+are diagnostic labels for summaries, history, and benchmark grouping; they do
+not define solver-update groups or independent penalty schedules.
+
+Legacy result schemas may still contain `alm_block_penalties=None`. That value
+is intentional compatibility metadata for readers that know the historical
+field; it is not a missing calculation.
+
+Every ALM evaluator must emit the normalized arrays consumed by the solver:
+`constraint_values`, `feasibility_values`, and `dual_update_values`. Stage-2
+signal routing also requires the explicit hard, surrogate, and hard-dual arrays
+at the call sites that consume those signals. All ALM signal arrays must match
+`constraint_values.shape`; a shape mismatch is a contract error.
+
+ALM checkpoint resume is strict. Checkpoints must carry `constraint_names` in
+the exact current order, along with `penalty` and `multipliers`. Older
+checkpoints without `constraint_names` are unsafe for multiplier reuse and must
+not be resumed as if they matched the current constraint schema.
