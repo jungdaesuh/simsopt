@@ -4256,5 +4256,192 @@ class AlmOuterIterationTests(unittest.TestCase):
         self.assertEqual(mocked.call_count, settings.max_subproblem_continuations + 1)
 
 
+class ClassifyInfeasibleInnerStallTests(unittest.TestCase):
+    """Direct-helper tests for `_classify_infeasible_inner_stall`.
+
+    The integration regression at
+    `MinimizeAlmTests.test_minimize_alm_classifies_relative_reduction_false_success_as_infeasible_stall`
+    exercises this through the full ALM stack. These tests pin the helper's
+    SciPy-message-text contract directly so the four classification arms stay
+    locked even if a future refactor decouples them from the outer driver.
+    The repo only pins `scipy>=1.5.4`, so the message-text match is the only
+    cross-version contract we have for the false-success arm.
+    """
+
+    @staticmethod
+    def _evals(current_total: float, candidate_total: float, current_violation: float, candidate_violation: float):
+        current_eval = _complete_alm_evaluation({
+            "total": float(current_total),
+            "constraint_values": np.array([float(current_violation)]),
+        })
+        candidate_eval = _complete_alm_evaluation({
+            "total": float(candidate_total),
+            "constraint_values": np.array([float(candidate_violation)]),
+        })
+        return current_eval, candidate_eval
+
+    def test_relative_reduction_of_f_with_no_feasibility_gain_is_false_success(self):
+        module = load_alm_utils_module()
+        current_eval, candidate_eval = self._evals(1.0, 1.0 - 1.0e-12, 2.0e-2, 2.0e-2)
+        result = SimpleNamespace(
+            success=True,
+            message="CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH",
+            nit=12,
+        )
+
+        infeasible_stall, false_success, reason = module._classify_infeasible_inner_stall(
+            current_eval,
+            candidate_eval,
+            result,
+            0.0,
+            1.0e-6,
+            1.0e-3,
+        )
+
+        self.assertTrue(infeasible_stall)
+        self.assertTrue(false_success)
+        self.assertEqual(reason, "relative_objective_termination_without_feasibility_gain")
+
+    def test_other_success_message_is_generic_false_success(self):
+        module = load_alm_utils_module()
+        current_eval, candidate_eval = self._evals(1.0, 1.0 - 1.0e-12, 2.0e-2, 2.0e-2)
+        result = SimpleNamespace(
+            success=True,
+            message="CONVERGENCE: NORM OF PROJECTED GRADIENT <= PGTOL",
+            nit=12,
+        )
+
+        infeasible_stall, false_success, reason = module._classify_infeasible_inner_stall(
+            current_eval,
+            candidate_eval,
+            result,
+            0.0,
+            1.0e-6,
+            1.0e-3,
+        )
+
+        self.assertTrue(infeasible_stall)
+        self.assertTrue(false_success)
+        self.assertEqual(reason, "successful_inner_solve_without_feasibility_gain")
+
+    def test_failed_inner_without_feasibility_gain_is_failed_stall(self):
+        module = load_alm_utils_module()
+        current_eval, candidate_eval = self._evals(1.0, 1.0 - 1.0e-12, 2.0e-2, 2.0e-2)
+        result = SimpleNamespace(success=False, message="ABNORMAL TERMINATION", nit=5)
+
+        infeasible_stall, false_success, reason = module._classify_infeasible_inner_stall(
+            current_eval,
+            candidate_eval,
+            result,
+            0.0,
+            1.0e-6,
+            1.0e-3,
+        )
+
+        self.assertTrue(infeasible_stall)
+        self.assertFalse(false_success)
+        self.assertEqual(reason, "failed_inner_solve_without_feasibility_gain")
+
+    def test_movement_above_tolerance_is_not_stall(self):
+        module = load_alm_utils_module()
+        current_eval, candidate_eval = self._evals(1.0, 0.9, 2.0e-2, 2.0e-2)
+        result = SimpleNamespace(success=True, message="CONVERGENCE", nit=12)
+
+        infeasible_stall, false_success, reason = module._classify_infeasible_inner_stall(
+            current_eval,
+            candidate_eval,
+            result,
+            1.0e-3,
+            1.0e-6,
+            1.0e-3,
+        )
+
+        self.assertFalse(infeasible_stall)
+        self.assertFalse(false_success)
+        self.assertIsNone(reason)
+
+    def test_candidate_within_feasibility_gate_is_not_stall(self):
+        module = load_alm_utils_module()
+        current_eval, candidate_eval = self._evals(1.0, 1.0 - 1.0e-12, 2.0e-2, 1.0e-4)
+        result = SimpleNamespace(
+            success=True,
+            message="CONVERGENCE: RELATIVE REDUCTION OF F <= FACTR*EPSMCH",
+            nit=12,
+        )
+
+        infeasible_stall, false_success, reason = module._classify_infeasible_inner_stall(
+            current_eval,
+            candidate_eval,
+            result,
+            0.0,
+            1.0e-6,
+            1.0e-3,
+        )
+
+        self.assertFalse(infeasible_stall)
+        self.assertFalse(false_success)
+        self.assertIsNone(reason)
+
+
+class SkippedInnerShortcutTests(unittest.TestCase):
+    """Pin the non-Stage-2 skipped-inner-solve fast path at `alm_utils.py:3846`.
+
+    When an evaluator without explicit Stage-2 signal fields returns an iterate
+    that already meets the user feasibility/stationarity tolerances, the ALM
+    driver must skip the L-BFGS-B inner solve and emit a single ``converged``
+    history entry. Existing tests cover the history schema; this test pins the
+    short-circuit behavior itself by asserting that SciPy's `minimize` is never
+    invoked.
+    """
+
+    def test_minimize_alm_skips_inner_solve_when_already_converged(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=1,
+            max_subproblem_continuations=0,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1.0e-6,
+            stationarity_tol=1.0e-6,
+            history_max_entries=None,
+        )
+
+        evaluator_calls = []
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x, multipliers
+            evaluator_calls.append(float(penalty))
+            return _complete_alm_evaluation({
+                "total": 0.0,
+                "grad": np.zeros(1),
+                "constraint_values": np.array([-1.0]),
+                "stationarity_norm": 0.0,
+            })
+
+        def fail_minimize(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError(
+                "inner L-BFGS-B must not be invoked when the iterate already"
+                " satisfies the user feasibility/stationarity tolerances"
+            )
+
+        with patch.object(module, "minimize", side_effect=fail_minimize):
+            result = module.minimize_alm(
+                np.zeros(1),
+                ["c0"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 10},
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.termination_reason, "converged")
+        self.assertEqual(len(result.history), 1)
+        self.assertEqual(result.history[0]["action"], "converged")
+        self.assertEqual(result.history[0]["inner_iterations"], 0)
+        self.assertEqual(result.history[0]["inner_attempts"], 0)
+        self.assertEqual(len(evaluator_calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
