@@ -212,9 +212,8 @@ class _ALMInnerAttemptEvaluator:
             self.request.effective_feasibility_tol,
         )
         (
-            _callback_raw_stationarity_norm,
-            _callback_kkt_stationarity_norm,
             callback_stationarity_norm,
+            _callback_kkt_stationarity_norm,
             _callback_signal_mismatch_active,
         ) = _stationarity_metrics(
             evaluation,
@@ -2115,12 +2114,21 @@ def _stationarity_metrics(
     evaluation: dict,
     routing_state: ALMConstraintRoutingState,
     feasibility_gate: float,
-) -> tuple[float, float | None, float, bool]:
+) -> tuple[float, float | None, bool]:
+    """Return ``(stationarity_norm, kkt_stationarity_norm, signal_mismatch_active)``.
+
+    ``stationarity_norm`` is the raw augmented-Lagrangian gradient norm used as
+    the inner-solve convergence trigger; callers that need the same value under
+    the ``raw_stationarity_norm`` history-schema key alias it locally.
+    ``kkt_stationarity_norm`` is the active-set KKT residual diagnostic and is
+    ``None`` when ``signal_mismatch_active`` flips the routing state into the
+    surrogate-vs-hard mismatch arm.
+    """
     metric_grad = np.asarray(
         evaluation.get("metric_grad", evaluation["grad"]),
         dtype=float,
     )
-    raw_stationarity_norm = float(
+    stationarity_norm = float(
         evaluation.get(
             "stationarity_norm",
             np.linalg.norm(evaluation["grad"]),
@@ -2139,9 +2147,8 @@ def _stationarity_metrics(
             feasibility_gate,
         )
     return (
-        raw_stationarity_norm,
+        stationarity_norm,
         kkt_stationarity_norm,
-        raw_stationarity_norm,
         bool(routing_state.signal_mismatch_active),
     )
 
@@ -2164,7 +2171,6 @@ class _ALMNormalizedRunInputs:
     x: np.ndarray
     multipliers: np.ndarray
     penalty: float
-    active_penalty: float
     constraint_names_tuple: tuple[str, ...]
     constraint_blocks_tuple: tuple[str, ...] | None
     trust_radius: float | None
@@ -2216,20 +2222,18 @@ def _normalize_alm_run_inputs(
             f"initial ALM penalty ({penalty}) must be <= "
             f"settings.penalty_max ({settings.penalty_max})"
         )
-    active_penalty = float(penalty)
     return _ALMNormalizedRunInputs(
         x=x,
         multipliers=multipliers,
         penalty=penalty,
-        active_penalty=active_penalty,
         constraint_names_tuple=constraint_names_tuple,
         constraint_blocks_tuple=constraint_blocks_tuple,
         trust_radius=_normalize_trust_radius(settings.trust_radius_init),
         update_feasibility_tol=_penalty_schedule_tolerance(
-            settings.feasibility_tol, active_penalty
+            settings.feasibility_tol, penalty
         ),
         update_stationarity_tol=_penalty_schedule_tolerance(
-            settings.stationarity_tol, active_penalty
+            settings.stationarity_tol, penalty
         ),
     )
 
@@ -2453,9 +2457,8 @@ def _evaluate_alm_penalty_state(
         feasibility_gate,
     )
     (
-        raw_stationarity,
-        kkt_stationarity,
         stationarity,
+        kkt_stationarity,
         signal_mismatch,
     ) = _stationarity_metrics(evaluation, routing_state, feasibility_gate)
     return SimpleNamespace(
@@ -2465,7 +2468,7 @@ def _evaluate_alm_penalty_state(
         feasibility_state=feasibility_state,
         max_violation=max_violation,
         routing_state=routing_state,
-        raw_stationarity=raw_stationarity,
+        raw_stationarity=stationarity,
         kkt_stationarity=kkt_stationarity,
         stationarity=stationarity,
         signal_mismatch=signal_mismatch,
@@ -2899,15 +2902,15 @@ def _build_alm_failure_result_with_optional_restore(
         settings.feasibility_tol,
     )
     (
-        restored_raw_stationarity_norm,
-        restored_kkt_stationarity_norm,
         restored_stationarity_norm,
+        restored_kkt_stationarity_norm,
         _restored_signal_mismatch_active,
     ) = _stationarity_metrics(
         restored_state.evaluation,
         restored_routing_state,
         settings.feasibility_tol,
     )
+    restored_raw_stationarity_norm = restored_stationarity_norm
     restored_max_feasibility_violation = _extract_constraint_state(
         restored_state.evaluation
     )[3]
@@ -3479,12 +3482,12 @@ def _grow_continuation_trust_radius(
     """
     if run_state.trust_radius is None:
         return
+    # CLI validation enforces trust_radius_grow > 1, so current * grow >= current
+    # whenever current > 0; the trust-radius-min floor handles the corner case
+    # where current * grow falls below the floor.
     run_state.trust_radius = max(
-        run_state.trust_radius,
-        max(
-            settings.trust_radius_min,
-            float(run_state.trust_radius) * float(settings.trust_radius_grow),
-        ),
+        settings.trust_radius_min,
+        float(run_state.trust_radius) * float(settings.trust_radius_grow),
     )
 
 
@@ -3776,7 +3779,6 @@ def _run_alm_continuation_step(
     outer_iteration: int,
     continuation_iteration: int,
     is_final_outer: bool,
-    last_outer_iteration: int,
     evaluate_problem: Callable[[np.ndarray, np.ndarray, object], dict],
     inner_callback: Callable[[np.ndarray], None] | None,
     accepted_callback: Callable[[np.ndarray], None] | None,
@@ -3824,15 +3826,15 @@ def _run_alm_continuation_step(
         effective_feasibility_tol,
     )
     (
-        current_raw_stationarity_norm,
-        current_kkt_stationarity_norm,
         current_stationarity_norm,
+        current_kkt_stationarity_norm,
         current_signal_mismatch_active,
     ) = _stationarity_metrics(
         current_eval,
         current_routing_state,
         effective_feasibility_tol,
     )
+    current_raw_stationarity_norm = current_stationarity_norm
     current_constraints_inactive_candidate = (
         current_routing_state.signal_state.explicit_stage2_signals
         and current_routing_state.hard_max_violation <= settings.feasibility_tol
@@ -3975,15 +3977,15 @@ def _run_alm_continuation_step(
         state.update_feasibility_tol,
     )
     (
-        raw_stationarity_norm,
-        kkt_stationarity_norm,
         stationarity_norm,
+        kkt_stationarity_norm,
         signal_mismatch_active,
     ) = _stationarity_metrics(
         state.final_eval,
         routing_state,
         state.update_feasibility_tol,
     )
+    raw_stationarity_norm = stationarity_norm
     feasibility_delta, feasibility_delta_tol = _feasibility_improvement_metrics(
         current_max_feasibility_violation,
         max_feasibility_violation,
@@ -4163,7 +4165,7 @@ def _run_alm_continuation_step(
             constraint_names=constraint_names,
             constraint_names_tuple=constraint_names_tuple,
             constraint_blocks_tuple=constraint_blocks_tuple,
-            last_outer_iteration=last_outer_iteration,
+            last_outer_iteration=outer_iteration,
             restore_incumbent_state_fn=restore_incumbent_state_fn,
             inner_result=result,
             is_final_outer=is_final_outer,
@@ -4200,7 +4202,7 @@ def _run_alm_continuation_step(
                 settings=settings,
                 constraint_names=constraint_names,
                 run_state=run_state,
-                last_outer_iteration=last_outer_iteration,
+                last_outer_iteration=outer_iteration,
                 restore_incumbent_state_fn=restore_incumbent_state_fn,
                 history_entry=history_entry,
                 history_callback=history_callback,
@@ -4222,7 +4224,7 @@ def _run_alm_continuation_step(
                     settings=settings,
                     constraint_names=constraint_names,
                     run_state=run_state,
-                    last_outer_iteration=last_outer_iteration,
+                    last_outer_iteration=outer_iteration,
                     restore_incumbent_state_fn=restore_incumbent_state_fn,
                     history_entry=history_entry,
                     history_callback=history_callback,
@@ -4245,7 +4247,7 @@ def _run_alm_continuation_step(
                 constraint_names=constraint_names,
                 constraint_names_tuple=constraint_names_tuple,
                 constraint_blocks_tuple=constraint_blocks_tuple,
-                last_outer_iteration=last_outer_iteration,
+                last_outer_iteration=outer_iteration,
                 restore_incumbent_state_fn=restore_incumbent_state_fn,
                 inner_result=result,
                 is_final_outer=is_final_outer,
@@ -4333,7 +4335,7 @@ def _run_alm_continuation_step(
                         settings=settings,
                         constraint_names=constraint_names,
                         run_state=run_state,
-                        last_outer_iteration=last_outer_iteration,
+                        last_outer_iteration=outer_iteration,
                         best_feasible=state.best_feasible,
                         restore_incumbent_state_fn=restore_incumbent_state_fn,
                         termination_reason="plateau_stall",
@@ -4374,7 +4376,7 @@ def _run_alm_continuation_step(
         constraint_names=constraint_names,
         constraint_names_tuple=constraint_names_tuple,
         constraint_blocks_tuple=constraint_blocks_tuple,
-        last_outer_iteration=last_outer_iteration,
+        last_outer_iteration=outer_iteration,
         restore_incumbent_state_fn=restore_incumbent_state_fn,
         inner_result=result,
         is_final_outer=is_final_outer,
@@ -4455,7 +4457,6 @@ def _run_alm_outer_iteration(
             outer_iteration=outer_iteration,
             continuation_iteration=continuation_iteration,
             is_final_outer=is_final_outer,
-            last_outer_iteration=outer_iteration,
             evaluate_problem=evaluate_problem,
             inner_callback=inner_callback,
             accepted_callback=accepted_callback,

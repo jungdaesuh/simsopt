@@ -2030,18 +2030,15 @@ class MinimizeAlmTests(unittest.TestCase):
             1.0,
             1.0e-8,
         )
-        raw_stationarity_norm, kkt_stationarity_norm, effective_stationarity_norm, mismatch = (
-            module._stationarity_metrics(
-                evaluation,
-                routing_state,
-                1.0e-8,
-            )
+        stationarity_norm, kkt_stationarity_norm, mismatch = module._stationarity_metrics(
+            evaluation,
+            routing_state,
+            1.0e-8,
         )
 
         self.assertTrue(mismatch)
         self.assertIsNone(kkt_stationarity_norm)
-        self.assertAlmostEqual(raw_stationarity_norm, 1.0)
-        self.assertAlmostEqual(effective_stationarity_norm, 1.0)
+        self.assertAlmostEqual(stationarity_norm, 1.0)
 
     def test_constraint_routing_state_flags_boundary_mismatch_when_surrogate_shift_is_live(self):
         module = load_alm_utils_module()
@@ -4019,7 +4016,6 @@ class AlmContinuationStepTests(unittest.TestCase):
             outer_iteration=overrides.pop("outer_iteration", 1),
             continuation_iteration=overrides.pop("continuation_iteration", 0),
             is_final_outer=overrides.pop("is_final_outer", False),
-            last_outer_iteration=overrides.pop("last_outer_iteration", 1),
             evaluate_problem=evaluate_problem,
             inner_callback=overrides.pop("inner_callback", None),
             accepted_callback=overrides.pop("accepted_callback", None),
