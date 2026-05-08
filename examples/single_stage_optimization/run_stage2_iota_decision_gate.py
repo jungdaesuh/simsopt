@@ -126,7 +126,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Shared iota target used for report/soft/alm benchmark modes.",
     )
-    parser.add_argument("--stage2-iota-tolerance", type=float, default=5.0e-3)
+    parser.add_argument(
+        "--stage2-iota-tolerance",
+        type=float,
+        default=5.0e-3,
+        help=(
+            "Iota deviation tolerance (|iota - iota_target| <= tolerance), "
+            "dimensionless. Distinct from --alm-iota-penalty-threshold, which "
+            "is in squared-penalty units. See the 'Iota threshold units' section "
+            "of examples/single_stage_optimization/README.md."
+        ),
+    )
     parser.add_argument("--stage2-iota-weight", type=float, default=1.0)
     parser.add_argument("--stage2-iota-vol-target", type=float, default=0.10)
     parser.add_argument("--stage2-iota-constraint-weight", type=float, default=1.0)

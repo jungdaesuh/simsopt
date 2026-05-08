@@ -304,7 +304,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stage2-iota-tolerance",
         type=float,
         default=5.0e-3,
-        help="Absolute iota tolerance used when --stage2-iota-mode is enabled.",
+        help=(
+            "Iota deviation tolerance used when --stage2-iota-mode is enabled. "
+            "Units: dimensionless iota deviation (|iota - iota_target| <= tolerance). "
+            "This is intentionally different from --alm-iota-penalty-threshold, "
+            "which is in squared-penalty units. See the 'Iota threshold units' "
+            "section of examples/single_stage_optimization/README.md."
+        ),
     )
     parser.add_argument(
         "--stage2-iota-vol-target",
