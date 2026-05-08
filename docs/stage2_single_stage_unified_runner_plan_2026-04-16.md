@@ -275,7 +275,7 @@ Distinguish existing fields from newly proposed fields — two fields that earli
 
 **Already emitted (reuse, do not redefine):**
 
-- `STAGE2_BS_PATH` — written into Stage 2 `results.json` at `banana_opt/stage2_objectives.py:194`. Consumed by single-stage via the `--stage2-bs-path` CLI argparse seam at `SINGLE_STAGE/single_stage_banana_example.py:1167` (env-var default `STAGE2_BS_PATH`) and resolved into a path at `SINGLE_STAGE/single_stage_banana_example.py:5350` (`build_stage2_bs_path(args)`). Also re-emitted into single-stage's own payloads at `SINGLE_STAGE/single_stage_banana_example.py:4091` and `:6734` as provenance.
+- `STAGE2_BS_PATH` — written into Stage 2 `results.json` at `examples/single_stage_optimization/banana_opt/stage2_objectives.py:194`. Consumed by single-stage via the `--stage2-bs-path` CLI argparse seam at `SINGLE_STAGE/single_stage_banana_example.py:1167` (env-var default `STAGE2_BS_PATH`) and resolved into a path at `SINGLE_STAGE/single_stage_banana_example.py:5350` (`build_stage2_bs_path(args)`). Also re-emitted into single-stage's own payloads at `SINGLE_STAGE/single_stage_banana_example.py:4091` and `:6734` as provenance.
 - `STAGE2_RESULTS_PATH` — written into single-stage payloads at `SINGLE_STAGE/single_stage_banana_example.py:4092` and `:6735`; the value itself is derived by `workflow_runner_common.load_stage2_artifact_results(...)` (invoked at `single_stage_banana_example.py:5351`).
 
 **Genuinely new (add via the SSOT payload helper):**
@@ -359,7 +359,7 @@ Only revisit a full Stage 2 + single-stage objective merge if all are true:
 Anchors this plan depends on, cross-checked against the working tree:
 
 - Stage 2 objective at `STAGE_2/banana_coil_solver.py` (1157 lines); objective terms verified; no `BoozerSurface`/`Iotas` in Stage 2 today.
-- Stage 2 ALM evaluation at `banana_opt/stage2_objectives.py` (977 lines); already emits `STAGE2_BS_PATH` at line 194.
+- Stage 2 ALM evaluation at `examples/single_stage_optimization/banana_opt/stage2_objectives.py` (977 lines); already emits `STAGE2_BS_PATH` at line 194.
 - Single-stage at `SINGLE_STAGE/single_stage_banana_example.py` (7110 lines); `initialize_boozer_surface` at line 1411; `--iota-target` at line 1064; `STAGE2_BS_PATH`/`STAGE2_RESULTS_PATH` emitted at lines 4091–4092 and 6734–6735.
 - Single-stage objective builder at `banana_opt/single_stage_objectives.py` (530 lines) wraps `Jiota`, `raw_J_QS_obj`, `raw_J_Boozer_obj` as `iota_penalty`, `qs_error`, `boozer_residual` via `_objective_upper_bound_constraint(...)` for the `thresholded_physics` ALM formulation (lines 422–444).
 - `Iotas.compute()` at `src/simsopt/geo/surfaceobjectives.py:954` calls `BoozerSurface.run_code(...)` when `boozer_surface.need_to_run_code` is True; flag set by `BoozerSurface.recompute_bell(...)` at `src/simsopt/geo/boozersurface.py:253` via the Optimizable dependency chain.

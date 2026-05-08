@@ -409,7 +409,7 @@ schema-level.
 - [x] Decide whether the Stage 2 feature should target:
   - raw `iota`
   - `Jiota`
-  - or a thresholded `iota_penalty` → **`Jiota` in `soft` mode, thresholded `iota_penalty` in `alm` mode** (see `evaluate_stage2_alm_problem(...)` at `banana_opt/stage2_objectives.py:957`).
+  - or a thresholded `iota_penalty` → **`Jiota` in `soft` mode, thresholded `iota_penalty` in `alm` mode** (see `evaluate_stage2_alm_problem(...)` at `examples/single_stage_optimization/banana_opt/stage2_objectives.py:957`).
 - [x] Decide on initial acceptance tolerances. → `--stage2-iota-tolerance` default `5.0e-3`; CLI-overridable.
 
 Open questions that remain scientific (not schema-level):
@@ -554,7 +554,7 @@ Decision inputs:
 
 Implementation:
 
-- [x] add `iota` or `iota_penalty` to the Stage 2 ALM constraint-name set → `constraint_names.append("iota_penalty")` at `banana_opt/stage2_objectives.py:287,312`.
+- [x] add `iota` or `iota_penalty` to the Stage 2 ALM constraint-name set → `constraint_names.append("iota_penalty")` at `examples/single_stage_optimization/banana_opt/stage2_objectives.py:287,312`.
 - [x] extend `evaluate_stage2_alm_problem(...)` to compute:
   - hard signed value → `iota_signed_value` in the `include_iota_penalty` branch (`stage2_objectives.py:1093-1097`).
   - surrogate value if needed → same branch reuses `iota_signed_value` for the surrogate when smoothing is unnecessary.

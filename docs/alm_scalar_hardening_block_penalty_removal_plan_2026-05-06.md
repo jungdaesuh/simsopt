@@ -121,7 +121,7 @@ Tasks:
 - Record `git status --short` and HEAD before implementation.
 - Inventory every caller of `_extract_constraint_state` and `_extract_stage2_constraint_signal_state`.
 - For each evaluator, verify it provides `constraint_values`, `feasibility_values`, `dual_update_values`, `hard_signed_constraint_values`, and `hard_dual_update_values` where ALM consumes them.
-- Include `banana_opt/stage2_objectives.py`, `banana_opt/single_stage_objectives.py`, `banana_opt/alm_fixture_benchmarking.py`, single-stage callback metric construction, and minimal test fixtures.
+- Include `examples/single_stage_optimization/banana_opt/stage2_objectives.py`, `examples/single_stage_optimization/banana_opt/single_stage_objectives.py`, `examples/single_stage_optimization/banana_opt/alm_fixture_benchmarking.py`, single-stage callback metric construction, and minimal test fixtures.
 - Produce a concrete list of evaluators and test fixtures that must be updated before Phase 5 fallback removal.
 - Scan existing checkpoint/result JSONL files for ALM states that lack `constraint_names` or have multiplier lengths that would mismatch the current constraint builder.
 - If more than 10 production-relevant checkpoints would fail the new resume contract, add a Phase 6.5 offline migration helper that strips/rebuilds ALM multiplier state. The solver still remains fail-fast; this is not a runtime fallback.

@@ -22,8 +22,8 @@ pre-implementation starting point unless explicitly labeled current.
 
 Current structural metric after Phase Final:
 `_minimize_alm_impl` is 127 LOC with zero nested function definitions;
-`_run_alm_outer_iteration` is 93 LOC with zero nested function
-definitions; `_run_alm_continuation_step` is 622 LOC with zero nested
+`_run_alm_outer_iteration` is 92 LOC with zero nested function
+definitions; `_run_alm_continuation_step` is 621 LOC with zero nested
 function definitions.
 
 Scope source: pre-existing structural debt under
