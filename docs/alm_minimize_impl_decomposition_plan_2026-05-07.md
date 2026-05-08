@@ -357,6 +357,25 @@ frozen.
 
 ### Phase 0: Baseline Metrics And Characterization Tests
 
+Status: superseded. The Phase 0 strategy below proposed dedicated
+characterization-test classes (`ContinuationArmCharacterizationTests`,
+`CallbackOrderingCharacterizationTests`, `ResultSchemaLockTests`) and a
+1040-LOC baseline-metrics pin. The implementation chose a different but
+semantically equivalent path: arm coverage went into existing
+`MinimizeAlmTests` (e.g.,
+`test_minimize_alm_returns_constraints_inactive_converged_for_stage2_zero_shift`,
+`test_minimize_alm_short_circuits_zero_step_infeasible_stall`,
+`test_minimize_alm_stops_when_penalty_cap_blocks_further_growth`,
+`test_minimize_alm_dual_updates_*`); callback-ordering coverage went
+into `test_minimize_alm_reports_inner_and_accepted_callbacks_separately`
+and `test_outer_iteration_emits_outer_state_callback_exactly_once_before_continuation`;
+schema locking went into `test_minimize_alm_history_entry_has_stable_schema`
+and `test_alm_summary_uses_summary_diagnostics_without_full_history_payload`;
+and the 1040-LOC baseline pin was retired in favor of
+`test_minimize_alm_impl_orchestrator_is_small_and_closure_free`'s ≤500
+bound. The boxes below are left unchecked to record the original strategy
+verbatim.
+
 - [ ] Add `tests/geo/test_alm_utils.py::AlmStructuralDebtTests::test_minimize_alm_impl_baseline_metrics_are_pinned`,
   asserting `_minimize_alm_impl`'s AST node has the **current**
   metrics: `end_lineno - lineno + 1 == 1040` and zero nested
@@ -451,24 +470,24 @@ regressions on existing tests.
 
 ### Phase 1a: Extract `_build_alm_history_entry` (high-ROI micro-refactor)
 
-- [ ] AST-comparison evidence: the two history-entry literals at
+- [x] AST-comparison evidence: the two history-entry literals at
   `alm_utils.py:3105-3179` (skipped-inner branch) and
   `alm_utils.py:3362-3461` (post-inner branch) share **52 keys**, with
   the skipped-inner branch carrying one additional key (`action`).
   This is not strictly line-for-line identical but is structurally
   identical save the documented one-key delta.
-- [ ] Add `_build_alm_history_entry(...)` returning a fresh dict with
+- [x] Add `_build_alm_history_entry(...)` returning a fresh dict with
   the 52 shared keys populated from explicit arguments. The skipped-
   inner branch wraps the call as
   `_build_alm_history_entry(...) | {"action": ...}` (or assigns the
   extra key after the call) to preserve the existing key set exactly.
-- [ ] Replace both call sites with the helper. Preserve insertion
+- [x] Replace both call sites with the helper. Preserve insertion
   order at both sites; assert order in the test below.
-- [ ] Add `tests/geo/test_alm_utils.py::AlmHistoryEntryBuilderTests::test_build_alm_history_entry_payload_identity`
+- [x] Add `tests/geo/test_alm_utils.py::AlmHistoryEntryBuilderTests::test_build_alm_history_entry_payload_identity`
   that constructs both call-site argument bundles and asserts the
   resulting dicts have identical keys (modulo the documented `action`
   delta) and identical values for shared keys.
-- [ ] Add a key-preservation assertion: `set(history_entry.keys())`
+- [x] Add a key-preservation assertion: `set(history_entry.keys())`
   must equal a frozen reference set captured by the Phase 0 schema
   characterization, not a derived computation, so a future drop or
   rename fails the test loudly.
@@ -479,19 +498,19 @@ pre-refactor literals; the new payload-identity test is green.
 
 ### Phase 1: Extract `_normalize_alm_run_inputs`
 
-- [ ] Add the `_ALMNormalizedRunInputs` dataclass next to `ALMRunState`
+- [x] Add the `_ALMNormalizedRunInputs` dataclass next to `ALMRunState`
   at `alm_utils.py:79`.
-- [ ] Add `_normalize_alm_run_inputs` consuming the existing helpers
+- [x] Add `_normalize_alm_run_inputs` consuming the existing helpers
   `_build_constraint_metadata_tuples` (`alm_utils.py:2173`),
   `_penalty_schedule_tolerance` (`alm_utils.py:1667`), and
   `_normalize_trust_radius` (`alm_utils.py:1530`) without changing
   their bodies.
-- [ ] Replace `alm_utils.py:2987-3043` in `_minimize_alm_impl` with
+- [x] Replace `alm_utils.py:2987-3043` in `_minimize_alm_impl` with
   the helper call. The rest of the per-call state
   (`history`, `final_eval`, `last_result`, `total_inner_iterations`,
   the cap-binding accumulators, `best_feasible`) stays as local
   assignments because those values mutate during the outer loop.
-- [ ] Preserve every validation message verbatim. Hold the helper to
+- [x] Preserve every validation message verbatim. Hold the helper to
   the existing strings:
   - `"snapshot_accepted_state_fn and restore_incumbent_state_fn must be provided together"`.
   - `"settings.penalty_max must be positive when provided"`.
@@ -499,7 +518,7 @@ pre-refactor literals; the new payload-identity test is green.
     `"initial ALM penalty ({...}) must be <= settings.penalty_max ({...})"` strings.
   - `"settings.history_max_entries must be positive or None"`.
   - `"initial ALM penalty must be finite and positive"`.
-- [ ] Add direct-helper unit tests:
+- [x] Add direct-helper unit tests:
   - `test_normalize_alm_run_inputs_rejects_asymmetric_incumbent_hooks`
     -- verifies the existing test
     `tests/geo/test_alm_utils.py::test_minimize_alm_rejects_asymmetric_incumbent_hooks`
@@ -519,22 +538,22 @@ public characterization tests in
 
 ### Phase 2: Extract `_handle_alm_penalty_cap_termination`
 
-- [ ] Add the helper as a thin keyword-forward into
+- [x] Add the helper as a thin keyword-forward into
   `_build_alm_failure_result_with_optional_restore` at
   `alm_utils.py:2700`. No body changes inside the existing helper.
-- [ ] Replace the three penalty-cap return blocks at
+- [x] Replace the three penalty-cap return blocks at
   `alm_utils.py:3548-3585`, `alm_utils.py:3731-3771`,
   `alm_utils.py:3922-3960` with the new helper call. Carry over the
   full keyword set (`message_prefix`, `restored_message_prefix`,
   `restored_termination_reason`, `evaluation`, `multipliers_state`,
   `penalty_state`, `inner_result`, `final_max_feasibility_violation`)
   unchanged.
-- [ ] Add direct-helper unit test
+- [x] Add direct-helper unit test
   `test_handle_alm_penalty_cap_termination_forwards_all_keyword_arguments`
   that uses `unittest.mock.patch` on
   `_build_alm_failure_result_with_optional_restore` and asserts the
   exact call arguments.
-- [ ] No new dataclass fields. The
+- [x] No new dataclass fields. The
   `penalty_transition.penalty_update_state.evaluation` and
   `penalty_transition.penalty_update_state.max_violation` reads are
   identical to today.
@@ -549,21 +568,21 @@ in `_minimize_alm_impl` is ~70-85 lines, not the gross 118. Treat the
 
 ### Phase 3: Extract `_handle_alm_dual_update_transition`
 
-- [ ] Add `_ALMDualUpdateResult` next to the other private carriers.
-- [ ] Add `_handle_alm_dual_update_transition` owning lines
+- [x] Add `_ALMDualUpdateResult` next to the other private carriers.
+- [x] Add `_handle_alm_dual_update_transition` owning lines
   `alm_utils.py:3794-3826` except for the
   `_emit_alm_history_snapshot(...)` invocation and the `break`
   statement (those stay in the driver to keep callback ordering
   visible).
-- [ ] Within the helper, reuse
+- [x] Within the helper, reuse
   `_project_nonnegative_multipliers_with_diagnostics`
   (`alm_utils.py:1618`) and the existing `settings.penalty_scale`
   schedule unchanged.
-- [ ] Driver updates: read fields from the returned
+- [x] Driver updates: read fields from the returned
   `_ALMDualUpdateResult`, mutate `history_entry`, then call
   `_emit_alm_history_snapshot` and `break` -- preserving the existing
   callback ordering.
-- [ ] Add direct-helper unit tests:
+- [x] Add direct-helper unit tests:
   - `test_handle_alm_dual_update_transition_advances_multipliers_once`
     asserts that `_project_nonnegative_multipliers_with_diagnostics`
     is invoked exactly once with the supplied multipliers and the
