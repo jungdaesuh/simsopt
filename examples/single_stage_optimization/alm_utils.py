@@ -1,4 +1,5 @@
 import copy
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType, SimpleNamespace
@@ -32,6 +33,48 @@ class ALMSettings:
     relaxed_feasibility_gate_cap: float = 1e-2
     multiplier_max: float | None = 1.0e6
     history_max_entries: int | None = 512
+
+    def __post_init__(self) -> None:
+        # Mirrors `validate_alm_cli_args` so direct programmatic construction
+        # cannot bypass the CLI-level guards (L5: programmatic
+        # `ALMSettings(trust_radius_grow=0.5)` previously silently shrank).
+        if self.max_outer_iterations <= 0:
+            raise ValueError("ALMSettings.max_outer_iterations must be positive")
+        if self.max_subproblem_continuations < 0:
+            # Zero is valid: the inner-loop range is
+            # ``range(max_subproblem_continuations + 1)``, so 0 means
+            # "one attempt, no retries" — a legitimate no-continuation
+            # mode used by hardware-constraint test fixtures.
+            raise ValueError("ALMSettings.max_subproblem_continuations must be nonnegative")
+        if self.penalty_init <= 0.0:
+            raise ValueError("ALMSettings.penalty_init must be positive")
+        if self.penalty_scale <= 1.0:
+            raise ValueError("ALMSettings.penalty_scale must be greater than 1")
+        if self.penalty_max is not None and self.penalty_max <= 0.0:
+            raise ValueError("ALMSettings.penalty_max must be positive when provided")
+        if self.penalty_max is not None and self.penalty_max < self.penalty_init:
+            raise ValueError(
+                f"ALMSettings.penalty_max ({self.penalty_max}) must be >= "
+                f"penalty_init ({self.penalty_init})"
+            )
+        if self.feasibility_tol <= 0.0:
+            raise ValueError("ALMSettings.feasibility_tol must be positive")
+        if self.stationarity_tol <= 0.0:
+            raise ValueError("ALMSettings.stationarity_tol must be positive")
+        if self.trust_radius_init is not None and self.trust_radius_init < 0.0:
+            raise ValueError("ALMSettings.trust_radius_init must be nonnegative")
+        if self.trust_radius_min <= 0.0:
+            raise ValueError("ALMSettings.trust_radius_min must be positive")
+        if not (0.0 < self.trust_radius_shrink < 1.0):
+            raise ValueError("ALMSettings.trust_radius_shrink must be in (0, 1)")
+        if self.trust_radius_grow <= 1.0:
+            raise ValueError("ALMSettings.trust_radius_grow must be greater than 1")
+        if self.max_inner_attempts <= 0:
+            raise ValueError("ALMSettings.max_inner_attempts must be positive")
+        if self.multiplier_max is not None and self.multiplier_max <= 0.0:
+            raise ValueError("ALMSettings.multiplier_max must be positive when provided")
+        if self.history_max_entries is not None and self.history_max_entries <= 0:
+            raise ValueError("ALMSettings.history_max_entries must be positive when provided")
 
 
 @dataclass(frozen=True)
@@ -87,6 +130,14 @@ class ALMRunState:
     cap_binding_indices: set[int]
     penalty_cap_reached: bool
     penalty_cap_requested: float | None
+    # M4: non-sticky predicate carrying the most recent dual update's
+    # ``multiplier_cap_binding``. Resets to False on each non-binding dual
+    # update; sticks True until the next dual update that isn't capped.
+    # Used to gate both ``converged`` and ``constraints_inactive_converged``
+    # so a result that satisfies KKT-on-paper but holds at the multiplier
+    # cap (broken Lagrangian interpretation) does not get labeled converged.
+    # The historical sticky ``cap_binding_detected`` remains as a diagnostic.
+    last_cap_binding_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -181,7 +232,11 @@ class _ALMInnerAttemptEvaluator:
             fallback_evaluation=self.request.current_eval,
         )
         self.cached_x = np.asarray(inner_x, dtype=float).copy()
-        self.cached_evaluation = evaluation
+        # L3: cache an owned snapshot. `evaluate_problem` and the sanitize
+        # path may return arrays that alias caller buffers; cloning here
+        # guarantees the candidate-reuse path can't expose the optimizer to
+        # later caller-side mutation.
+        self.cached_evaluation = _clone_evaluation_dict(evaluation)
         return float(evaluation["total"]), np.asarray(evaluation["grad"], dtype=float)
 
     def callback(self, inner_x):
@@ -315,12 +370,30 @@ class _EarlyStopInnerSolve(RuntimeError):
         self.evaluation = evaluation
 
 
+def require_positive_alm_threshold(name: str, value) -> float:
+    """Validate that an ALM threshold is finite and strictly positive.
+
+    Caller pre-handles the disabled-constraint case (``value is None``).
+    Zero, negative, NaN, and infinity are all rejected. Used at the shared
+    threshold-input boundary so the downstream ``max(raw, FLOOR)`` floor in
+    metadata constructors becomes defense-in-depth, not silent recovery.
+    """
+    value_f = float(value)
+    if not np.isfinite(value_f) or value_f <= 0.0:
+        raise ValueError(
+            f"ALM threshold {name!r} must be a finite positive value; got {value!r}"
+        )
+    return value_f
+
+
 def validate_alm_cli_args(args) -> None:
     if args.alm_max_outer_iters <= 0:
         raise ValueError("--alm-max-outer-iters must be positive")
     max_subproblem_continuations = getattr(args, "alm_max_subproblem_continuations", None)
-    if max_subproblem_continuations is not None and max_subproblem_continuations <= 0:
-        raise ValueError("--alm-max-subproblem-continuations must be positive")
+    if max_subproblem_continuations is not None and max_subproblem_continuations < 0:
+        # Zero is valid (single-attempt mode); the loop is
+        # ``range(max_subproblem_continuations + 1)``.
+        raise ValueError("--alm-max-subproblem-continuations must be nonnegative")
     if args.alm_penalty_init <= 0.0:
         raise ValueError("--alm-penalty-init must be positive")
     if args.alm_penalty_scale <= 1.0:
@@ -496,32 +569,37 @@ def _build_augmented_evaluation(
     feasibility_array = np.asarray(feasibility_values, dtype=float)
     stationarity_norm = float(np.linalg.norm(np.asarray(total_grad, dtype=float)))
     max_feasibility_violation = _max_value(feasibility_array)
+    # L4: every stored np.ndarray is `.copy()`-ed so the returned dict cannot
+    # alias caller-owned mutable buffers. `np.asarray(...)` alone preserves
+    # the alias when the caller already passes a compatible dtype-array.
     result = {
         "total": float(total_value),
         "base_value": float(base_value),
-        "base_grad": np.asarray(base_grad, dtype=float),
-        "grad": np.asarray(total_grad, dtype=float),
-        "constraint_values": np.asarray(constraint_values, dtype=float),
+        "base_grad": np.asarray(base_grad, dtype=float).copy(),
+        "grad": np.asarray(total_grad, dtype=float).copy(),
+        "constraint_values": np.asarray(constraint_values, dtype=float).copy(),
         "constraint_grads": [
-            np.asarray(constraint_grad, dtype=float)
+            np.asarray(constraint_grad, dtype=float).copy()
             for constraint_grad in constraint_grads
         ],
-        "dual_update_values": dual_update_array,
-        "feasibility_values": feasibility_array,
+        "dual_update_values": dual_update_array.copy(),
+        "feasibility_values": feasibility_array.copy(),
         "max_violation": max_feasibility_violation,
         "max_feasibility_violation": max_feasibility_violation,
         "stationarity_norm": stationarity_norm,
     }
     if positive_shift_values is not None:
+        # L4: copy to avoid aliasing caller-owned mutable buffers, matching
+        # the ownership contract of the principal evaluation arrays above.
         result["positive_shift_values"] = np.asarray(
             positive_shift_values,
             dtype=float,
-        )
+        ).copy()
     if augmented_term_by_constraint is not None:
         result["augmented_term_by_constraint"] = np.asarray(
             augmented_term_by_constraint,
             dtype=float,
-        )
+        ).copy()
     return result
 
 
@@ -1225,6 +1303,24 @@ def _elevated_rejection_total(reference_total: float) -> float:
     return float(reference_total) + max(abs(float(reference_total)), 1.0) + _ACCEPTANCE_TOTAL_ATOL
 
 
+def _clone_evaluation_dict(evaluation: dict) -> dict:
+    """L3+L4: snapshot helper that returns an owned dict whose ``np.ndarray``
+    values do not alias caller-supplied buffers. Used at cache and sanitize
+    boundaries so subsequent caller mutation cannot corrupt accepted state.
+    """
+    snapshot = dict(evaluation)
+    for key, value in snapshot.items():
+        if isinstance(value, np.ndarray):
+            snapshot[key] = value.copy()
+    constraint_grads = snapshot.get("constraint_grads")
+    if isinstance(constraint_grads, list):
+        snapshot["constraint_grads"] = [
+            grad.copy() if isinstance(grad, np.ndarray) else np.asarray(grad, dtype=float).copy()
+            for grad in constraint_grads
+        ]
+    return snapshot
+
+
 def _sanitize_nonfinite_inner_evaluation(
     evaluation: dict,
     *,
@@ -1232,7 +1328,10 @@ def _sanitize_nonfinite_inner_evaluation(
 ) -> dict:
     invalid_fields = _nonfinite_evaluation_fields(evaluation)
     if not invalid_fields:
-        return evaluation
+        # L4: shallow-copy + per-array clone so the no-invalid-field fast
+        # path matches the contract of the sanitized branch (callers always
+        # get an owned dict).
+        return _clone_evaluation_dict(evaluation)
 
     sanitized = dict(fallback_evaluation)
     sanitized["total"] = _elevated_rejection_total(float(fallback_evaluation["total"]))
@@ -2068,7 +2167,25 @@ def _kkt_stationarity_norm(
         return None
 
     active_matrix = np.column_stack(active_constraint_grads)
-    multipliers, _residual_norm = nnls(active_matrix, -total_grad_array)
+    # M6: nnls can raise RuntimeError("too many iterations") on pathological
+    # active-Jacobians; bound iterations and surface the failure as None
+    # (the caller already treats None as "diagnostic unavailable") rather
+    # than aborting the ALM run through a diagnostic helper. Shape errors
+    # still propagate as ValueError — only the iteration-cap failure is caught.
+    try:
+        multipliers, _residual_norm = nnls(
+            active_matrix,
+            -total_grad_array,
+            maxiter=10 * active_matrix.shape[1],
+        )
+    except RuntimeError as exc:
+        warnings.warn(
+            f"_kkt_stationarity_norm: nnls failed for active-matrix shape "
+            f"{active_matrix.shape}: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
     residual = total_grad_array + active_matrix @ multipliers
     return float(np.linalg.norm(residual))
 
@@ -2101,8 +2218,19 @@ def _stationarity_metrics(
         kkt_stationarity_norm = None
     else:
         preferred_dual_update_values = routing_state.signal_state.preferred_dual_update_values
+        # M9: KKT stationarity is `‖∇f + Σλ_i∇c_i‖`, NOT `‖∇L_A + Σλ_i∇c_i‖`.
+        # Augmented gradient `∇L_A` already contains the active-constraint
+        # contribution `(λ + μc)∇c`, so feeding it to nnls' active-set
+        # projection collapses to ~0 once the inner solve converges and hides
+        # multiplier-quality defects. Use bare ∇f (`base_grad`) when the
+        # evaluation dict provides it; fall back to `metric_grad` only when
+        # the contract didn't expose a separate base gradient.
+        kkt_grad = np.asarray(
+            evaluation.get("base_grad", metric_grad),
+            dtype=float,
+        )
         kkt_stationarity_norm = _kkt_stationarity_norm(
-            metric_grad,
+            kkt_grad,
             evaluation.get("constraint_grads"),
             preferred_dual_update_values,
             routing_state.signal_state.hard_violation_values,
@@ -2141,6 +2269,32 @@ class _ALMNormalizedRunInputs:
     update_stationarity_tol: float
 
 
+def validate_initial_multipliers(multipliers, n_constraints: int) -> np.ndarray:
+    """Validate ALM initial multipliers at the driver boundary.
+
+    Inequality-ALM multipliers are non-negative by construction (Lagrange
+    multipliers for ``c_i <= 0``); NaN/Inf are always invalid; shape mismatch
+    against ``n_constraints`` would silently broadcast or raise far from the
+    actual fault. Returns an owned, finite, non-negative copy.
+    """
+    arr = np.asarray(multipliers, dtype=float)
+    if arr.shape != (n_constraints,):
+        raise ValueError(
+            f"ALM initial_multipliers shape {tuple(arr.shape)} != ({n_constraints},)"
+        )
+    if not np.isfinite(arr).all():
+        bad = np.where(~np.isfinite(arr))[0].tolist()
+        raise ValueError(
+            f"ALM initial_multipliers non-finite at indices {bad}"
+        )
+    if (arr < 0.0).any():
+        bad = np.where(arr < 0.0)[0].tolist()
+        raise ValueError(
+            f"ALM initial_multipliers negative at indices {bad}"
+        )
+    return arr.copy()
+
+
 def _normalize_alm_run_inputs(
     x0,
     constraint_names: Sequence[str],
@@ -2155,21 +2309,15 @@ def _normalize_alm_run_inputs(
         raise ValueError(
             "snapshot_accepted_state_fn and restore_incumbent_state_fn must be provided together"
         )
-    if settings.penalty_max is not None and settings.penalty_max <= 0.0:
-        raise ValueError("settings.penalty_max must be positive when provided")
-    if settings.penalty_max is not None and settings.penalty_max < settings.penalty_init:
-        raise ValueError(
-            f"settings.penalty_max ({settings.penalty_max}) must be >= "
-            f"settings.penalty_init ({settings.penalty_init})"
-        )
-    if settings.history_max_entries is not None and settings.history_max_entries <= 0:
-        raise ValueError("settings.history_max_entries must be positive or None")
+    # ALMSettings.__post_init__ now owns penalty_max / history_max_entries
+    # validation (SSOT post L5 fix); only runtime-supplied values are
+    # validated here.
     constraint_names_tuple, constraint_blocks_tuple = _build_constraint_metadata_tuples(
         constraint_names, constraint_blocks
     )
     x = np.asarray(x0, dtype=float).copy()
     multipliers = (
-        np.asarray(initial_multipliers, dtype=float).copy()
+        validate_initial_multipliers(initial_multipliers, len(constraint_names))
         if initial_multipliers is not None
         else np.zeros(len(constraint_names), dtype=float)
     )
@@ -2206,9 +2354,12 @@ def _attach_alm_constraint_metadata(
     constraint_names_tuple: tuple[str, ...],
     constraint_blocks_tuple: tuple[str, ...] | None,
 ) -> dict:
-    if constraint_blocks_tuple is None:
-        return evaluation
+    # L1: always shallow-copy. Previously the no-blocks lane returned the
+    # caller's dict (alias) while the blocks lane shallow-copied. Uniform
+    # ownership: this function returns a dict the caller owns.
     annotated = dict(evaluation)
+    if constraint_blocks_tuple is None:
+        return annotated
     annotated["constraint_names"] = constraint_names_tuple
     annotated["constraint_blocks"] = constraint_blocks_tuple
     return annotated
@@ -2376,11 +2527,13 @@ def _emit_alm_history_snapshot(
 ) -> None:
     if history_callback is None:
         return
-    # Callback contract: history is borrowed/read-only ALM state. The latest
-    # entry and multipliers are owned snapshots for checkpoint writers that
-    # persist the current iteration.
+    # L2: callback contract is now strict. The history list is a defensive
+    # shallow copy (mutations by the callback do not affect ALM internal
+    # state). The entries within the list remain shared references — the
+    # callback may read fields safely, but should not mutate them. The
+    # latest entry is a deep snapshot. Multipliers are an owned copy.
     history_callback(
-        history,
+        list(history),
         _snapshot_history_entry(latest_entry),
         multipliers.copy(),
         float(penalty),
@@ -3460,18 +3613,24 @@ def _emit_alm_subproblem_continue(
     run_state: ALMRunState,
     history_entry: dict,
     history_callback: Callable[[list[dict], dict, np.ndarray, float], None] | None,
+    is_final_outer: bool,
 ) -> _ALMContinuationStepResult:
     """Annotate ``subproblem_continue`` history fields, emit the snapshot,
     and finalize a CONTINUE_CONTINUATION step result.
 
     Shared by the signal-mismatch retry arm and the feasible-update retry
     arm; the two sites are bytewise-identical apart from prior trust-radius
-    bookkeeping done by their callers.
+    bookkeeping done by their callers. M2: when ``is_final_outer`` we annotate
+    ``outer_termination="max_outer"`` so the terminator fallback at
+    ``_termination_reason_from_history`` reports a ``max_outer*`` label rather
+    than surfacing the latest action string ``"subproblem_continue"``.
     """
     history_entry["subproblem_limit_reason"] = None
     history_entry["action"] = "subproblem_continue"
     history_entry["trust_radius"] = run_state.trust_radius
     history_entry["feasible_stall_count"] = int(state.feasible_stall_count)
+    if is_final_outer:
+        history_entry["outer_termination"] = "max_outer"
     _emit_alm_history_snapshot(
         history_callback,
         run_state.history,
@@ -3933,11 +4092,14 @@ def _run_alm_continuation_step(
         _dual_update_values,
         max_feasibility_violation,
     ) = _extract_constraint_state(state.final_eval)
+    # M5: post-inner routing must use the same clamped feasibility gate as the
+    # pre-inner routing at L3818-3840; the previous unclamped pass let the
+    # active masks diverge within one outer iteration on early ALM steps.
     routing_state = _constraint_routing_state(
         state.final_eval,
         state.multipliers,
         penalty_argument,
-        state.update_feasibility_tol,
+        effective_feasibility_tol,
     )
     (
         stationarity_norm,
@@ -3946,7 +4108,7 @@ def _run_alm_continuation_step(
     ) = _stationarity_metrics(
         state.final_eval,
         routing_state,
-        state.update_feasibility_tol,
+        effective_feasibility_tol,
     )
     raw_stationarity_norm = stationarity_norm
     feasibility_delta, feasibility_delta_tol = _feasibility_improvement_metrics(
@@ -3998,7 +4160,18 @@ def _run_alm_continuation_step(
                 ),
             )
 
-    state.inner_options = inner_attempt.last_inner_options
+    # M3.b: keep ``state.inner_options`` as the user's untouched anchor.
+    # Previously this site assigned ``inner_attempt.last_inner_options``
+    # back into ``state.inner_options``, which let the staged ``gtol``
+    # become the persisted base on the next call to ``_build_inner_options``
+    # and ratchet ``gtol`` monotonically looser. We deliberately do NOT
+    # write to ``state.inner_options`` here — each subsequent call to
+    # ``_build_inner_options(state.inner_options, update_stationarity_tol,
+    # ...)`` re-derives the staged values from the user's original base.
+    # Reporting fields (inner_maxiter / inner_maxls / inner_maxfun) read
+    # from ``inner_attempt.last_inner_options`` so the history reflects
+    # the values actually used by the inner solve, not the user's input.
+    last_used = inner_attempt.last_inner_options
     history_entry = _build_alm_history_entry(
         outer_iteration=outer_iteration,
         continuation_iteration=continuation_iteration,
@@ -4024,14 +4197,14 @@ def _run_alm_continuation_step(
         inner_success=bool(getattr(result, "success", False)),
         inner_message=str(getattr(result, "message", "")),
         inner_maxiter=None
-        if state.inner_options is None or "maxiter" not in state.inner_options
-        else int(state.inner_options["maxiter"]),
+        if last_used is None or "maxiter" not in last_used
+        else int(last_used["maxiter"]),
         inner_maxls=None
-        if state.inner_options is None or "maxls" not in state.inner_options
-        else int(state.inner_options["maxls"]),
+        if last_used is None or "maxls" not in last_used
+        else int(last_used["maxls"]),
         inner_maxfun=None
-        if state.inner_options is None or "maxfun" not in state.inner_options
-        else int(state.inner_options["maxfun"]),
+        if last_used is None or "maxfun" not in last_used
+        else int(last_used["maxfun"]),
         inner_profile=inner_attempt.last_inner_profile,
         inner_lbfgsb_projected_gradient_norm=_lbfgsb_projected_gradient_max_norm(
             state.final_eval["grad"],
@@ -4093,6 +4266,11 @@ def _run_alm_continuation_step(
         and stationarity_norm <= settings.stationarity_tol
         and not constraints_inactive_candidate
         and not signal_mismatch_active
+        # M4: cap-binding multipliers mean the dual update was clamped;
+        # KKT residual is being held artificially small by the cap, not
+        # by genuine convergence. Block the converged label and let the
+        # outer loop continue (a future dual update may unclamp).
+        and not run_state.last_cap_binding_active
     ):
         message = (
             "ALM converged: "
@@ -4136,7 +4314,11 @@ def _run_alm_continuation_step(
         )
 
     if constraints_inactive_candidate:
-        if stationarity_norm <= settings.stationarity_tol:
+        # M4: same cap-active gate applies to the constraints-inactive arm.
+        if (
+            stationarity_norm <= settings.stationarity_tol
+            and not run_state.last_cap_binding_active
+        ):
             message = (
                 "ALM converged with inactive hard constraints: "
                 f"max_violation={routing_state.hard_max_violation:.3e}, "
@@ -4223,6 +4405,7 @@ def _run_alm_continuation_step(
             run_state=run_state,
             history_entry=history_entry,
             history_callback=history_callback,
+            is_final_outer=is_final_outer,
         )
 
     if hard_feasible_for_update and stationarity_norm <= state.update_stationarity_tol:
@@ -4245,6 +4428,10 @@ def _run_alm_continuation_step(
         history_entry["multiplier_cap_binding_indices"] = list(
             dual_update.multiplier_cap_binding_indices
         )
+        # M4: non-sticky current predicate updates every dual_update
+        # (True or False). Sticky `cap_binding_detected` remains
+        # diagnostic-only.
+        run_state.last_cap_binding_active = bool(dual_update.multiplier_cap_binding)
         if dual_update.multiplier_cap_binding:
             run_state.cap_binding_detected = True
             run_state.cap_binding_indices.update(
@@ -4268,16 +4455,14 @@ def _run_alm_continuation_step(
         state.feasible_stall_count = (
             0 if made_inner_progress else state.feasible_stall_count + 1
         )
-        hit_stall_limit = (
+        plateau_stall_hit = state.feasible_stall_count >= _PLATEAU_STALL_LIMIT
+        max_continuations_hit = (
             continuation_iteration == settings.max_subproblem_continuations
-            or state.feasible_stall_count >= _PLATEAU_STALL_LIMIT
         )
-        if hit_stall_limit:
-            history_entry["subproblem_limit_reason"] = (
-                "plateau_stall"
-                if state.feasible_stall_count >= _PLATEAU_STALL_LIMIT
-                else "max_subproblem_continuations"
-            )
+        if plateau_stall_hit:
+            # Plateau-stall: terminate the run; multipliers/penalty are not
+            # advanced (consistent with prior behavior).
+            history_entry["subproblem_limit_reason"] = "plateau_stall"
             history_entry["trust_radius"] = run_state.trust_radius
             history_entry["feasible_stall_count"] = int(state.feasible_stall_count)
             history_entry["action"] = "subproblem_limit"
@@ -4290,31 +4475,55 @@ def _run_alm_continuation_step(
                 state.multipliers,
                 state.penalty,
             )
-            if state.feasible_stall_count >= _PLATEAU_STALL_LIMIT:
-                return _finalize_continuation_step(
-                    state,
-                    _ALMContinuationDecision.RETURN,
-                    _build_alm_failure_result_with_optional_restore(
-                        settings=settings,
-                        constraint_names=constraint_names,
-                        run_state=run_state,
-                        last_outer_iteration=outer_iteration,
-                        best_feasible=state.best_feasible,
-                        restore_incumbent_state_fn=restore_incumbent_state_fn,
-                        termination_reason="plateau_stall",
-                        message_prefix=(
-                            "ALM stopped after repeated feasible stationarity "
-                            "plateau without meaningful progress"
-                        ),
-                        evaluation=state.final_eval,
-                        multipliers_state=state.multipliers,
-                        penalty_state=state.penalty,
-                        inner_result=result,
-                        final_max_feasibility_violation=max_feasibility_violation,
-                    ),
-                )
             return _finalize_continuation_step(
-                state, _ALMContinuationDecision.BREAK_OUTER, None
+                state,
+                _ALMContinuationDecision.RETURN,
+                _build_alm_failure_result_with_optional_restore(
+                    settings=settings,
+                    constraint_names=constraint_names,
+                    run_state=run_state,
+                    last_outer_iteration=outer_iteration,
+                    best_feasible=state.best_feasible,
+                    restore_incumbent_state_fn=restore_incumbent_state_fn,
+                    termination_reason="plateau_stall",
+                    message_prefix=(
+                        "ALM stopped after repeated feasible stationarity "
+                        "plateau without meaningful progress"
+                    ),
+                    evaluation=state.final_eval,
+                    multipliers_state=state.multipliers,
+                    penalty_state=state.penalty,
+                    inner_result=result,
+                    final_max_feasibility_violation=max_feasibility_violation,
+                ),
+            )
+        if max_continuations_hit:
+            # M3.a: route `max_subproblem_continuations` exhaustion through
+            # the penalty-increase arm so μ actually advances. Previously
+            # this returned BREAK_OUTER with no state change — the next
+            # outer iteration re-ran an identical subproblem and burned
+            # outer budget. The penalty-increase arm bumps μ (or hits the
+            # cap and terminates cleanly); the new history action label
+            # `subproblem_limit_penalty_increase` carries the
+            # `subproblem_limit_reason="max_subproblem_continuations"`
+            # annotation for operator-visible traceability.
+            history_entry["subproblem_limit_reason"] = "max_subproblem_continuations"
+            history_entry["feasible_stall_count"] = int(state.feasible_stall_count)
+            return _emit_alm_penalty_increase_arm(
+                state=state,
+                settings=settings,
+                run_state=run_state,
+                evaluate_problem=evaluate_problem,
+                history_entry=history_entry,
+                history_callback=history_callback,
+                constraint_names=constraint_names,
+                constraint_names_tuple=constraint_names_tuple,
+                constraint_blocks_tuple=constraint_blocks_tuple,
+                last_outer_iteration=outer_iteration,
+                restore_incumbent_state_fn=restore_incumbent_state_fn,
+                inner_result=result,
+                is_final_outer=is_final_outer,
+                action="subproblem_limit_penalty_increase",
             )
         _grow_continuation_trust_radius(run_state, settings)
         if not made_inner_progress:
@@ -4327,6 +4536,7 @@ def _run_alm_continuation_step(
             run_state=run_state,
             history_entry=history_entry,
             history_callback=history_callback,
+            is_final_outer=is_final_outer,
         )
 
     return _emit_alm_penalty_increase_arm(

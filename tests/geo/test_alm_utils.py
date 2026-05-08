@@ -340,7 +340,7 @@ class ResidualHelperTests(unittest.TestCase):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
             max_outer_iterations=1,
-            max_subproblem_continuations=0,
+            max_subproblem_continuations=1,
             max_inner_attempts=1,
             penalty_init=1.0,
             penalty_scale=10.0,
@@ -389,7 +389,7 @@ class ResidualHelperTests(unittest.TestCase):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
             max_outer_iterations=1,
-            max_subproblem_continuations=0,
+            max_subproblem_continuations=1,
             max_inner_attempts=1,
             penalty_init=1.0,
             penalty_scale=10.0,
@@ -1132,32 +1132,34 @@ class AlmNormalizeRunInputsValidationTests(unittest.TestCase):
                 restore_incumbent_state_fn=None,
             )
 
-    def test_normalize_rejects_nonpositive_penalty_max(self):
+    def test_settings_construction_rejects_nonpositive_penalty_max(self):
+        # L5: ALMSettings.__post_init__ validates penalty_max — previously this
+        # check lived in _normalize_alm_run_inputs, allowing programmatic
+        # ALMSettings(penalty_max=0.0) to silently sit in memory.
         module = load_alm_utils_module()
-        settings = self._settings(module, penalty_max=0.0)
 
         with self.assertRaisesRegex(
-            ValueError, r"settings\.penalty_max must be positive when provided"
+            ValueError, r"ALMSettings\.penalty_max must be positive when provided"
         ):
-            self._normalize(module, settings)
+            self._settings(module, penalty_max=0.0)
 
-    def test_normalize_rejects_penalty_max_below_init(self):
+    def test_settings_construction_rejects_penalty_max_below_init(self):
         module = load_alm_utils_module()
-        settings = self._settings(module, penalty_init=10.0, penalty_max=5.0)
 
         with self.assertRaisesRegex(
-            ValueError, r"settings\.penalty_max \(5\.0\) must be >= settings\.penalty_init \(10\.0\)"
+            ValueError,
+            r"ALMSettings\.penalty_max \(5\.0\) must be >= penalty_init \(10\.0\)",
         ):
-            self._normalize(module, settings)
+            self._settings(module, penalty_init=10.0, penalty_max=5.0)
 
-    def test_normalize_rejects_nonpositive_history_max_entries(self):
+    def test_settings_construction_rejects_nonpositive_history_max_entries(self):
         module = load_alm_utils_module()
-        settings = self._settings(module, history_max_entries=0)
 
         with self.assertRaisesRegex(
-            ValueError, r"settings\.history_max_entries must be positive or None"
+            ValueError,
+            r"ALMSettings\.history_max_entries must be positive when provided",
         ):
-            self._normalize(module, settings)
+            self._settings(module, history_max_entries=0)
 
     def test_normalize_rejects_nonfinite_initial_penalty(self):
         module = load_alm_utils_module()
@@ -1182,6 +1184,153 @@ class AlmNormalizeRunInputsValidationTests(unittest.TestCase):
             r"initial ALM penalty \(10\.0\) must be <= settings\.penalty_max \(5\.0\)",
         ):
             self._normalize(module, settings, initial_penalty=10.0)
+
+    def test_normalize_rejects_initial_multipliers_wrong_shape(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module)
+
+        with self.assertRaisesRegex(
+            ValueError, r"ALM initial_multipliers shape \(2,\) != \(1,\)"
+        ):
+            self._normalize(module, settings, initial_multipliers=np.array([0.0, 1.0]))
+
+    def test_normalize_rejects_initial_multipliers_with_nan(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module)
+
+        with self.assertRaisesRegex(
+            ValueError, r"ALM initial_multipliers non-finite at indices \[0\]"
+        ):
+            self._normalize(module, settings, initial_multipliers=np.array([float("nan")]))
+
+    def test_normalize_rejects_initial_multipliers_with_inf(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module)
+
+        with self.assertRaisesRegex(
+            ValueError, r"ALM initial_multipliers non-finite at indices \[0\]"
+        ):
+            self._normalize(module, settings, initial_multipliers=np.array([float("inf")]))
+
+    def test_normalize_rejects_negative_initial_multipliers(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module)
+
+        with self.assertRaisesRegex(
+            ValueError, r"ALM initial_multipliers negative at indices \[0\]"
+        ):
+            self._normalize(module, settings, initial_multipliers=np.array([-1.0]))
+
+    def test_normalize_accepts_zero_initial_multipliers(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module)
+
+        normalized = self._normalize(
+            module, settings, initial_multipliers=np.array([0.0])
+        )
+        np.testing.assert_array_equal(normalized.multipliers, np.array([0.0]))
+
+    def test_normalize_accepts_positive_initial_multipliers(self):
+        module = load_alm_utils_module()
+        settings = self._settings(module)
+
+        normalized = self._normalize(
+            module, settings, initial_multipliers=np.array([2.5])
+        )
+        np.testing.assert_array_equal(normalized.multipliers, np.array([2.5]))
+
+
+class RequirePositiveAlmThresholdTests(unittest.TestCase):
+    def test_accepts_positive_finite_value(self):
+        module = load_alm_utils_module()
+        self.assertEqual(module.require_positive_alm_threshold("qs", 0.5), 0.5)
+
+    def test_accepts_subnormal_positive_value(self):
+        module = load_alm_utils_module()
+        # Real geometric tolerances can be ~1e-9; helper must not floor.
+        self.assertEqual(
+            module.require_positive_alm_threshold("micro", 1.0e-15), 1.0e-15
+        )
+
+    def test_rejects_zero(self):
+        module = load_alm_utils_module()
+        with self.assertRaisesRegex(
+            ValueError, r"ALM threshold 'qs' must be a finite positive value"
+        ):
+            module.require_positive_alm_threshold("qs", 0.0)
+
+    def test_rejects_negative(self):
+        module = load_alm_utils_module()
+        with self.assertRaisesRegex(
+            ValueError, r"ALM threshold 'qs' must be a finite positive value"
+        ):
+            module.require_positive_alm_threshold("qs", -1.0)
+
+    def test_rejects_nan(self):
+        module = load_alm_utils_module()
+        with self.assertRaisesRegex(
+            ValueError, r"ALM threshold 'qs' must be a finite positive value"
+        ):
+            module.require_positive_alm_threshold("qs", float("nan"))
+
+    def test_rejects_positive_inf(self):
+        module = load_alm_utils_module()
+        with self.assertRaisesRegex(
+            ValueError, r"ALM threshold 'qs' must be a finite positive value"
+        ):
+            module.require_positive_alm_threshold("qs", float("inf"))
+
+
+class ValidateInitialMultipliersTests(unittest.TestCase):
+    def test_accepts_zero_and_positive(self):
+        module = load_alm_utils_module()
+        result = module.validate_initial_multipliers([0.0, 1.5, 0.0], 3)
+        np.testing.assert_array_equal(result, np.array([0.0, 1.5, 0.0]))
+
+    def test_returns_owned_copy(self):
+        module = load_alm_utils_module()
+        source = np.array([0.5, 1.0])
+        result = module.validate_initial_multipliers(source, 2)
+        result[0] = 99.0
+        # Caller's array must not be mutated.
+        self.assertEqual(source[0], 0.5)
+
+    def test_rejects_shape_mismatch_too_short(self):
+        module = load_alm_utils_module()
+        with self.assertRaisesRegex(
+            ValueError, r"ALM initial_multipliers shape \(1,\) != \(3,\)"
+        ):
+            module.validate_initial_multipliers([0.0], 3)
+
+    def test_rejects_shape_mismatch_too_long(self):
+        module = load_alm_utils_module()
+        with self.assertRaisesRegex(
+            ValueError, r"ALM initial_multipliers shape \(4,\) != \(3,\)"
+        ):
+            module.validate_initial_multipliers([0.0, 1.0, 2.0, 3.0], 3)
+
+    def test_rejects_2d_shape(self):
+        module = load_alm_utils_module()
+        with self.assertRaisesRegex(
+            ValueError, r"ALM initial_multipliers shape \(1, 2\) != \(2,\)"
+        ):
+            module.validate_initial_multipliers([[0.0, 1.0]], 2)
+
+    def test_rejects_nan_with_indices(self):
+        module = load_alm_utils_module()
+        with self.assertRaisesRegex(
+            ValueError, r"ALM initial_multipliers non-finite at indices \[1, 3\]"
+        ):
+            module.validate_initial_multipliers(
+                [0.0, float("nan"), 1.0, float("inf")], 4
+            )
+
+    def test_rejects_negative_with_indices(self):
+        module = load_alm_utils_module()
+        with self.assertRaisesRegex(
+            ValueError, r"ALM initial_multipliers negative at indices \[0, 2\]"
+        ):
+            module.validate_initial_multipliers([-1.0, 0.0, -0.5, 1.0], 4)
 
 
 class AlmHistoryEntryBuilderTests(unittest.TestCase):
@@ -2207,6 +2356,140 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertTrue(result.history[1]["hard_positive_shift_zero"])
         self.assertFalse(result.history[1]["surrogate_max_value"] <= 0.0)
 
+    def test_alm_terminates_deterministically_under_sustained_signal_mismatch(self):
+        """Pin the deterministic-termination property of the hybrid signal contract.
+
+        Contract: when the hard activity mask disagrees with the surrogate
+        activity mask on every iteration, ``minimize_alm`` must terminate
+        within the outer iteration cap, must label the result as a failure
+        (``result.success is False``), and must produce the same
+        ``termination_reason`` and history action sequence across re-runs of
+        the same fixture. See ``docs/alm_hybrid_signal_contract_2026-05-08.md``
+        for the contract this test pins.
+        """
+        module = load_alm_utils_module()
+
+        def _build_settings():
+            return module.ALMSettings(
+                max_outer_iterations=5,
+                max_subproblem_continuations=2,
+                trust_radius_init=0.1,
+                trust_radius_min=0.01,
+                trust_radius_shrink=0.5,
+                trust_radius_grow=1.5,
+                max_inner_attempts=1,
+                feasibility_tol=1.0e-8,
+                stationarity_tol=1.0e-8,
+            )
+
+        def _build_evaluator():
+            def evaluate_problem(x, multipliers, penalty):
+                del multipliers, penalty
+                point = float(np.asarray(x, dtype=float)[0])
+                # Sustained mismatch: hard says feasible/inactive
+                # (-0.01 < -tol_band 1e-3 ⇒ mask False), surrogate says
+                # active and violating (0.2 ≥ -tol_band ⇒ mask True). Both
+                # masks disagree on every iteration regardless of the
+                # iterate, so signal_mismatch_active is True throughout.
+                if point < 0.5:
+                    total = 2.0
+                    grad = np.array([1.0])
+                    stationarity_norm = 1.0
+                else:
+                    total = 1.0
+                    grad = np.array([0.5])
+                    stationarity_norm = 0.5
+                return self._stage2_signal_evaluation(
+                    total=total,
+                    grad=grad,
+                    constraint_values=np.array([0.2]),
+                    dual_update_values=np.array([0.2]),
+                    hard_signed_constraint_values=np.array([-1.0e-2]),
+                    surrogate_signed_constraint_values=np.array([0.2]),
+                    hard_dual_update_values=np.array([-1.0e-2]),
+                    stationarity_norm=stationarity_norm,
+                )
+
+            return evaluate_problem
+
+        def _build_fake_minimize():
+            call_count = {"count": 0}
+
+            def fake_minimize(fun, x, jac, method, bounds, callback, options):
+                del fun, jac, method, bounds, callback, options
+                call_count["count"] += 1
+                if call_count["count"] == 1:
+                    return SimpleNamespace(
+                        x=np.array([1.0]),
+                        nit=1,
+                        success=True,
+                        message="CONVERGENCE",
+                    )
+                return SimpleNamespace(
+                    x=np.asarray(x, dtype=float).copy(),
+                    nit=0,
+                    success=False,
+                    message="ABNORMAL: line search failed",
+                )
+
+            return fake_minimize
+
+        def _run_once():
+            with patch.object(module, "minimize", side_effect=_build_fake_minimize()):
+                return module.minimize_alm(
+                    np.array([0.0]),
+                    ["demo_constraint"],
+                    _build_evaluator(),
+                    _build_settings(),
+                    {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+                )
+
+        first_result = _run_once()
+        second_result = _run_once()
+
+        # Termination is bounded by the outer iteration cap.
+        self.assertLessEqual(first_result.outer_iterations, 5)
+        self.assertLessEqual(second_result.outer_iterations, 5)
+
+        # Mismatch blocks the success label on both runs.
+        self.assertFalse(first_result.success)
+        self.assertFalse(second_result.success)
+
+        # Mismatch was actually present throughout (no false negative
+        # for the property being pinned).
+        self.assertTrue(
+            all(entry["signal_mismatch_active"] for entry in first_result.history)
+        )
+
+        # Termination reason is stable across re-runs.
+        self.assertEqual(
+            first_result.termination_reason,
+            second_result.termination_reason,
+        )
+
+        # Action sequence is identical across re-runs (no chatter between
+        # subproblem_continue / signal_mismatch_penalty_increase /
+        # signal_mismatch_stall arms under the same fixture).
+        first_actions = [entry["action"] for entry in first_result.history]
+        second_actions = [entry["action"] for entry in second_result.history]
+        self.assertEqual(first_actions, second_actions)
+
+        # Outer-iteration counts are identical across re-runs.
+        self.assertEqual(
+            first_result.outer_iterations,
+            second_result.outer_iterations,
+        )
+
+        # No success arm was reached: every action must come from the
+        # mismatch-or-continuation set, not from the converged or
+        # constraints_inactive_converged arms.
+        forbidden_actions = {
+            "converged",
+            "constraints_inactive_converged",
+        }
+        for action in first_actions:
+            self.assertNotIn(action, forbidden_actions)
+
     def test_minimize_alm_increases_penalty_only_when_feasibility_is_bad(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
@@ -2387,7 +2670,17 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(result.history[0]["action"], "infeasible_stall_penalty_increase")
         self.assertTrue(result.history[0]["infeasible_stall"])
         self.assertEqual(result.history[0]["inner_attempts"], 1)
-        self.assertIs(history_snapshots[-1]["history"], result.history)
+        # L2: callback receives a defensive copy of the history list (not
+        # the live ALM-internal list). The outer list identity must
+        # differ; entries within remain shared references and may have
+        # been mutated by ALM after the snapshot was taken (e.g., the
+        # final action annotation), so a per-iteration value-equality
+        # check against `result.history` is not appropriate. The length
+        # at callback time is at most the final length.
+        self.assertIsNot(history_snapshots[-1]["history"], result.history)
+        self.assertLessEqual(
+            len(history_snapshots[-1]["history"]), len(result.history)
+        )
         self.assertIsNot(history_snapshots[-1]["latest_entry"], result.history[0])
         self.assertTrue(history_snapshots[-1]["history_had_deferred_source"])
         self.assertNotIn(source_key, result.history[0])
@@ -3497,7 +3790,7 @@ class MinimizeAlmTests(unittest.TestCase):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
             max_outer_iterations=3,
-            max_subproblem_continuations=0,
+            max_subproblem_continuations=1,
             trust_radius_init=0.1,
             trust_radius_min=0.01,
             trust_radius_shrink=0.5,
@@ -3571,21 +3864,31 @@ class MinimizeAlmTests(unittest.TestCase):
             "final_iterate_worse_than_best_feasible",
         )
         self.assertEqual(result.termination_reason, "max_outer_restored_best_feasible")
-        self.assertEqual(minimize_calls["count"], 3)
+        # M5: post-inner routing now uses the clamped effective_feasibility_tol
+        # consistent with pre-inner; the third outer iteration adds one
+        # subproblem_continue before the subproblem_limit fires. Final
+        # best-feasible-restoration outcome is unchanged.
+        self.assertEqual(minimize_calls["count"], 4)
         self.assertEqual(result.history[0]["action"], "penalty_increase")
         self.assertEqual(result.history[1]["action"], "dual_update")
-        self.assertEqual(result.history[2]["action"], "subproblem_limit")
+        self.assertEqual(result.history[2]["action"], "subproblem_continue")
+        # M3.a: max_subproblem_continuations exhaustion now routes through the
+        # penalty-increase arm; the action label and outer_termination
+        # annotation come from `_emit_alm_penalty_increase_arm`.
         self.assertEqual(
-            result.history[2]["subproblem_limit_reason"],
+            result.history[3]["action"], "subproblem_limit_penalty_increase"
+        )
+        self.assertEqual(
+            result.history[3]["subproblem_limit_reason"],
             "max_subproblem_continuations",
         )
-        self.assertEqual(result.history[2]["outer_termination"], "max_outer")
+        self.assertEqual(result.history[3]["outer_termination"], "max_outer")
 
     def test_minimize_alm_restores_best_feasible_solver_owned_incumbent_state(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
             max_outer_iterations=3,
-            max_subproblem_continuations=0,
+            max_subproblem_continuations=1,
             trust_radius_init=0.1,
             trust_radius_min=0.01,
             trust_radius_shrink=0.5,
@@ -3944,6 +4247,132 @@ class MinimizeAlmTests(unittest.TestCase):
                 {"maxiter": 1},
                 initial_penalty=10.0,
             )
+
+    def test_minimize_alm_preserves_user_gtol_anchor_across_outer_iterations(self):
+        # M3.b regression: the user's `gtol` from inner_options must remain the
+        # base of `_build_inner_options`'s `max(base_gtol, staged_gtol)` rule
+        # across every outer iteration. A previous fix wrongly stripped gtol
+        # from persisted state, causing base to fall back to the 1e-12 default
+        # and forfeiting any user-supplied looser tolerance.
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=3,
+            max_subproblem_continuations=1,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+        )
+        gtol_user = 1.0e-3  # significantly looser than the 1e-12 default
+        observed_gtols: list[float] = []
+
+        def evaluate_problem(x, multipliers, penalty):
+            return _complete_alm_evaluation({
+                "total": 1.0,
+                "base_value": 1.0,
+                "grad": np.array([0.5]),
+                "constraint_values": np.array([0.5]),
+                "stationarity_norm": 0.5,
+            })
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            observed_gtols.append(float(options["gtol"]))
+            return SimpleNamespace(
+                x=np.asarray(x, dtype=float),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": gtol_user},
+            )
+
+        # Every observed inner-solve gtol must be at least the user's anchor.
+        # `staged_gtol` may exceed it (looser still), but it must never drop
+        # below — that would mean the schedule re-derived against a stripped
+        # default rather than the user's input.
+        self.assertGreater(len(observed_gtols), 1)
+        for gtol_observed in observed_gtols:
+            self.assertGreaterEqual(gtol_observed, gtol_user - 1e-15)
+
+    def test_minimize_alm_converges_to_kkt_on_active_linear_inequality(self):
+        # T1.a: gold-standard end-to-end KKT integration with corrected math.
+        # min  f(x,y) = 0.5*((x-1)^2 + (y-1)^2)
+        # s.t. c(x,y) = x + y - 1 <= 0
+        # Active at minimizer (0.5, 0.5) with Lagrange multiplier lambda = 0.5.
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=20,
+            max_subproblem_continuations=8,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            x_arr = np.asarray(x, dtype=float)
+            base_value = 0.5 * float((x_arr[0] - 1.0) ** 2 + (x_arr[1] - 1.0) ** 2)
+            base_grad = np.array([x_arr[0] - 1.0, x_arr[1] - 1.0], dtype=float)
+            constraint_values = np.array([x_arr[0] + x_arr[1] - 1.0], dtype=float)
+            constraint_grads = [np.array([1.0, 1.0], dtype=float)]
+            penalty_argument = float(penalty)
+            multipliers_arr = np.asarray(multipliers, dtype=float)
+            augmented_term = (
+                multipliers_arr[0] * max(constraint_values[0], 0.0)
+                + 0.5 * penalty_argument * max(constraint_values[0], 0.0) ** 2
+            )
+            shift = max(0.0, multipliers_arr[0] / max(penalty_argument, 1e-12))
+            shifted = constraint_values[0] + shift
+            if shifted > 0.0:
+                augmented_grad = (multipliers_arr[0] + penalty_argument * constraint_values[0]) * constraint_grads[0]
+            else:
+                augmented_grad = np.zeros(2, dtype=float)
+            total = base_value + augmented_term
+            grad = base_grad + augmented_grad
+            stationarity_norm = float(np.linalg.norm(grad))
+            return _complete_alm_evaluation({
+                "total": float(total),
+                "base_value": float(base_value),
+                "base_grad": base_grad,
+                "grad": grad,
+                "constraint_values": constraint_values,
+                "constraint_grads": constraint_grads,
+                "stationarity_norm": stationarity_norm,
+            })
+
+        result = module.minimize_alm(
+            np.array([0.0, 0.0]),
+            ["xy_sum_upper_bound"],
+            evaluate_problem,
+            settings,
+            {"maxiter": 200, "ftol": 1e-15, "gtol": 1e-15},
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.termination_reason, "converged")
+        np.testing.assert_allclose(result.x, np.array([0.5, 0.5]), atol=1e-5)
+        # KKT multiplier: lambda = 0.5 (NOT 1.0 — see FIX_PLAN.md T1.a math).
+        np.testing.assert_allclose(
+            np.asarray(result.multipliers, dtype=float),
+            np.array([0.5]),
+            atol=1e-5,
+        )
+        # Inequality multipliers must be non-negative.
+        self.assertGreaterEqual(float(result.multipliers[0]), 0.0)
+        # Constraint feasibility within tol.
+        final_eval = evaluate_problem(result.x, result.multipliers, result.penalty)
+        self.assertLessEqual(
+            float(np.max(final_eval["constraint_values"])),
+            settings.feasibility_tol + 1e-9,
+        )
+
 
 class AlmContinuationStepTests(unittest.TestCase):
     @staticmethod
@@ -4398,7 +4827,7 @@ class SkippedInnerShortcutTests(unittest.TestCase):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
             max_outer_iterations=1,
-            max_subproblem_continuations=0,
+            max_subproblem_continuations=1,
             penalty_init=1.0,
             penalty_scale=10.0,
             feasibility_tol=1.0e-6,
