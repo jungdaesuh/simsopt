@@ -3264,6 +3264,500 @@ def _run_alm_inner_attempts(request: ALMInnerAttemptRequest) -> ALMInnerAttemptR
     )
 
 
+@dataclass
+class _ContinuationStepState:
+    """Mutable carrier for the 11 sticky locals threaded through every
+    `_run_alm_continuation_step` return.
+
+    Each field mirrors a kwarg on `_run_alm_continuation_step` that may be
+    rewritten as the body progresses (penalty update, dual update, inner
+    attempt acceptance, etc.). Reads/writes happen through this carrier so
+    that the 15 return sites collapse to a single `_finalize_continuation_step`
+    call. The frozen public `_ALMContinuationStepResult` is rebuilt from this
+    carrier at each return.
+    """
+
+    multipliers: np.ndarray
+    penalty: float
+    update_feasibility_tol: float
+    update_stationarity_tol: float
+    feasible_stall_count: int
+    last_result: object | None
+    final_eval: dict | None
+    final_multipliers: np.ndarray
+    final_penalty: float
+    best_feasible: ALMFeasibleIncumbent | None
+    inner_options: dict | None
+
+
+def _finalize_continuation_step(
+    state: _ContinuationStepState,
+    decision: _ALMContinuationDecision,
+    result: object | None,
+) -> _ALMContinuationStepResult:
+    """Package the mutable continuation-step carrier into the frozen public
+    result dataclass. Single source of truth for the 13-field shape."""
+    return _ALMContinuationStepResult(
+        decision=decision,
+        result=result,
+        multipliers=state.multipliers,
+        penalty=state.penalty,
+        update_feasibility_tol=state.update_feasibility_tol,
+        update_stationarity_tol=state.update_stationarity_tol,
+        feasible_stall_count=state.feasible_stall_count,
+        last_result=state.last_result,
+        final_eval=state.final_eval,
+        final_multipliers=state.final_multipliers,
+        final_penalty=state.final_penalty,
+        best_feasible=state.best_feasible,
+        inner_options=state.inner_options,
+    )
+
+
+def _build_alm_converged_step_result(
+    *,
+    settings: ALMSettings,
+    constraint_names: Sequence[str],
+    run_state: ALMRunState,
+    outer_iteration: int,
+    evaluation: dict,
+    multipliers: np.ndarray,
+    penalty: float,
+    inner_result: object | None,
+    max_feasibility_violation: float,
+    stationarity_norm: float,
+    raw_stationarity_norm: float,
+    kkt_stationarity_norm: float,
+    termination_reason: str,
+    message: str,
+) -> object:
+    """Shared `_build_alm_result` constructor for the converged termination
+    arms (pre-inner ``converged`` and ``constraints_inactive_converged`` and
+    post-inner ``converged``)."""
+    return _build_alm_result(
+        settings=settings,
+        constraint_names=constraint_names,
+        run_state=run_state,
+        final_state=ALMFinalState(
+            success=True,
+            message=message,
+            termination_reason=termination_reason,
+            outer_iterations=outer_iteration,
+            evaluation=evaluation,
+            multipliers=multipliers,
+            penalty=penalty,
+            inner_result=inner_result,
+            restored_best_feasible=False,
+            restored_best_feasible_reason=None,
+            max_feasibility_violation=max_feasibility_violation,
+            stationarity_norm=stationarity_norm,
+            raw_stationarity_norm=raw_stationarity_norm,
+            kkt_stationarity_norm=kkt_stationarity_norm,
+            feasibility_tolerance=settings.feasibility_tol,
+            stationarity_tolerance=settings.stationarity_tol,
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class _PenaltyIncreaseOutcome:
+    """Result of `_apply_continuation_penalty_increase`.
+
+    ``cap_result`` is non-None when the penalty cap was hit, in which case the
+    caller must return RETURN with that payload. Otherwise the caller appends
+    its history-action string and returns BREAK_OUTER.
+    """
+
+    cap_result: object | None
+
+
+def _apply_continuation_penalty_increase(
+    *,
+    state: _ContinuationStepState,
+    settings: ALMSettings,
+    run_state: ALMRunState,
+    evaluate_problem: Callable[[np.ndarray, np.ndarray, object], dict],
+    history_entry: dict,
+    history_callback: Callable[[list[dict], dict, np.ndarray, float], None] | None,
+    constraint_names: Sequence[str],
+    constraint_names_tuple: tuple[str, ...],
+    constraint_blocks_tuple: tuple[str, ...] | None,
+    last_outer_iteration: int,
+    restore_incumbent_state_fn: Callable[[object], None] | None,
+    inner_result_for_cap: object | None,
+) -> _PenaltyIncreaseOutcome:
+    """Execute the shared penalty-increase + cap-handling sequence used at
+    three sites inside `_run_alm_continuation_step` (infeasible-stall,
+    signal-mismatch, feasible-update fallback).
+
+    Mutates ``state`` (penalty, feasible_stall_count, tolerances, final_eval,
+    final_multipliers, final_penalty) and ``run_state`` (penalty_cap_*). Does
+    NOT touch ``history_entry["action"]`` — the caller annotates that string
+    plus the optional ``outer_termination`` marker after a non-cap-hit.
+    """
+    penalty_transition = _apply_alm_penalty_increase(
+        settings=settings,
+        evaluate_problem=evaluate_problem,
+        x=run_state.x,
+        multipliers=state.multipliers,
+        penalty=state.penalty,
+        history_entry=history_entry,
+        trust_radius=run_state.trust_radius,
+        update_feasibility_tol=state.update_feasibility_tol,
+        update_stationarity_tol=state.update_stationarity_tol,
+        constraint_names=constraint_names,
+        constraint_names_tuple=constraint_names_tuple,
+        constraint_blocks_tuple=constraint_blocks_tuple,
+        history_callback=history_callback,
+        history=run_state.history,
+    )
+    state.penalty = penalty_transition.penalty
+    run_state.penalty_cap_reached = penalty_transition.penalty_cap_reached
+    run_state.penalty_cap_requested = penalty_transition.penalty_cap_requested
+    state.feasible_stall_count = penalty_transition.feasible_stall_count
+    state.update_feasibility_tol = penalty_transition.update_feasibility_tol
+    state.update_stationarity_tol = penalty_transition.update_stationarity_tol
+    state.final_eval = penalty_transition.penalty_update_state.evaluation
+    state.final_multipliers = state.multipliers.copy()
+    state.final_penalty = state.penalty
+    if not penalty_transition.cap_hit:
+        return _PenaltyIncreaseOutcome(cap_result=None)
+    return _PenaltyIncreaseOutcome(
+        cap_result=_handle_alm_penalty_cap_termination(
+            settings=settings,
+            constraint_names=constraint_names,
+            run_state=run_state,
+            last_outer_iteration=last_outer_iteration,
+            best_feasible=state.best_feasible,
+            restore_incumbent_state_fn=restore_incumbent_state_fn,
+            penalty_transition=penalty_transition,
+            multipliers=state.multipliers,
+            penalty=state.penalty,
+            result=inner_result_for_cap,
+        ),
+    )
+
+
+def _annotate_break_outer_history(
+    *,
+    history_entry: dict,
+    action: str,
+    trust_radius: float | None,
+    is_final_outer: bool,
+    history_callback: Callable[[list[dict], dict, np.ndarray, float], None] | None,
+    history: list[dict],
+    multipliers: np.ndarray,
+    penalty: float,
+) -> None:
+    """Common history-finalisation for the BREAK_OUTER arms that emit a
+    snapshot after a single ``action`` annotation. The optional
+    ``outer_termination`` marker is set when ``is_final_outer`` per guardrail
+    #4 (max_outer annotation at every break-arm site).
+    """
+    history_entry["action"] = action
+    history_entry["trust_radius"] = trust_radius
+    if is_final_outer:
+        history_entry["outer_termination"] = "max_outer"
+    _emit_alm_history_snapshot(
+        history_callback,
+        history,
+        history_entry,
+        multipliers,
+        penalty,
+    )
+
+
+def _grow_continuation_trust_radius(
+    run_state: ALMRunState,
+    settings: ALMSettings,
+) -> None:
+    """Grow the live trust radius in-place using the standard ALM growth rule.
+
+    Identical at the signal-mismatch ``CONTINUE_CONTINUATION`` arm and the
+    feasible-update ``CONTINUE_CONTINUATION`` arm; centralised so the trust
+    radius schedule lives in one place.
+    """
+    if run_state.trust_radius is None:
+        return
+    run_state.trust_radius = max(
+        run_state.trust_radius,
+        max(
+            settings.trust_radius_min,
+            float(run_state.trust_radius) * float(settings.trust_radius_grow),
+        ),
+    )
+
+
+def _emit_alm_subproblem_continue(
+    *,
+    state: _ContinuationStepState,
+    run_state: ALMRunState,
+    history_entry: dict,
+    history_callback: Callable[[list[dict], dict, np.ndarray, float], None] | None,
+) -> _ALMContinuationStepResult:
+    """Annotate ``subproblem_continue`` history fields, emit the snapshot,
+    and finalize a CONTINUE_CONTINUATION step result.
+
+    Shared by the signal-mismatch retry arm and the feasible-update retry
+    arm; the two sites are bytewise-identical apart from prior trust-radius
+    bookkeeping done by their callers.
+    """
+    history_entry["subproblem_limit_reason"] = None
+    history_entry["action"] = "subproblem_continue"
+    history_entry["trust_radius"] = run_state.trust_radius
+    history_entry["feasible_stall_count"] = int(state.feasible_stall_count)
+    _emit_alm_history_snapshot(
+        history_callback,
+        run_state.history,
+        history_entry,
+        state.multipliers,
+        state.penalty,
+    )
+    return _finalize_continuation_step(
+        state, _ALMContinuationDecision.CONTINUE_CONTINUATION, None
+    )
+
+
+def _emit_alm_stall_failure_step(
+    *,
+    state: _ContinuationStepState,
+    settings: ALMSettings,
+    constraint_names: Sequence[str],
+    run_state: ALMRunState,
+    last_outer_iteration: int,
+    restore_incumbent_state_fn: Callable[[object], None] | None,
+    history_entry: dict,
+    history_callback: Callable[[list[dict], dict, np.ndarray, float], None] | None,
+    action: str,
+    termination_reason: str,
+    message_prefix: str,
+    inner_result: object | None,
+    max_feasibility_violation: float,
+) -> _ALMContinuationStepResult:
+    """Emit the snapshot for ``constraints_inactive_stall`` /
+    ``signal_mismatch_stall`` arms and finalize the RETURN step result built
+    from `_build_alm_failure_result_with_optional_restore`.
+    """
+    history_entry["action"] = action
+    history_entry["trust_radius"] = run_state.trust_radius
+    _emit_alm_history_snapshot(
+        history_callback,
+        run_state.history,
+        history_entry,
+        state.multipliers,
+        state.penalty,
+    )
+    return _finalize_continuation_step(
+        state,
+        _ALMContinuationDecision.RETURN,
+        _build_alm_failure_result_with_optional_restore(
+            settings=settings,
+            constraint_names=constraint_names,
+            run_state=run_state,
+            last_outer_iteration=last_outer_iteration,
+            best_feasible=state.best_feasible,
+            restore_incumbent_state_fn=restore_incumbent_state_fn,
+            termination_reason=termination_reason,
+            message_prefix=message_prefix,
+            evaluation=state.final_eval,
+            multipliers_state=state.multipliers,
+            penalty_state=state.penalty,
+            inner_result=inner_result,
+            final_max_feasibility_violation=max_feasibility_violation,
+        ),
+    )
+
+
+def _emit_alm_converged_step(
+    *,
+    state: _ContinuationStepState,
+    settings: ALMSettings,
+    constraint_names: Sequence[str],
+    run_state: ALMRunState,
+    history_entry: dict,
+    history_callback: Callable[[list[dict], dict, np.ndarray, float], None] | None,
+    outer_iteration: int,
+    inner_result: object | None,
+    max_feasibility_violation: float,
+    stationarity_norm: float,
+    raw_stationarity_norm: float,
+    kkt_stationarity_norm: float,
+    termination_reason: str,
+    message: str,
+    action: str,
+) -> _ALMContinuationStepResult:
+    """Annotate the converged history action, emit the snapshot, and finalize
+    the RETURN step result built from ``_build_alm_converged_step_result``.
+    Shared by the post-inner converged arm and the constraints-inactive
+    converged arm; both pass ``state.final_eval`` as the evaluation.
+    """
+    history_entry["action"] = action
+    history_entry["trust_radius"] = run_state.trust_radius
+    _emit_alm_history_snapshot(
+        history_callback,
+        run_state.history,
+        history_entry,
+        state.multipliers,
+        state.penalty,
+    )
+    return _finalize_continuation_step(
+        state,
+        _ALMContinuationDecision.RETURN,
+        _build_alm_converged_step_result(
+            settings=settings,
+            constraint_names=constraint_names,
+            run_state=run_state,
+            outer_iteration=outer_iteration,
+            evaluation=state.final_eval,
+            multipliers=state.multipliers,
+            penalty=state.penalty,
+            inner_result=inner_result,
+            max_feasibility_violation=max_feasibility_violation,
+            stationarity_norm=stationarity_norm,
+            raw_stationarity_norm=raw_stationarity_norm,
+            kkt_stationarity_norm=kkt_stationarity_norm,
+            termination_reason=termination_reason,
+            message=message,
+        ),
+    )
+
+
+def _emit_alm_penalty_increase_arm(
+    *,
+    state: _ContinuationStepState,
+    settings: ALMSettings,
+    run_state: ALMRunState,
+    evaluate_problem: Callable[[np.ndarray, np.ndarray, object], dict],
+    history_entry: dict,
+    history_callback: Callable[[list[dict], dict, np.ndarray, float], None] | None,
+    constraint_names: Sequence[str],
+    constraint_names_tuple: tuple[str, ...],
+    constraint_blocks_tuple: tuple[str, ...] | None,
+    last_outer_iteration: int,
+    restore_incumbent_state_fn: Callable[[object], None] | None,
+    inner_result: object | None,
+    is_final_outer: bool,
+    action: str,
+) -> _ALMContinuationStepResult:
+    """Run the shared "penalty increase + cap-handling + BREAK_OUTER" arm.
+
+    On cap-hit, returns a RETURN step with the cap-termination payload. On
+    no-cap-hit, annotates the BREAK_OUTER history (action + trust_radius +
+    optional ``outer_termination`` for ``is_final_outer``) and emits the
+    snapshot. Used by the infeasible-stall, signal-mismatch, and feasible
+    fallback penalty-increase arms — three sites that previously each
+    consumed ~78 lines of bytewise-identical scaffolding.
+    """
+    outcome = _apply_continuation_penalty_increase(
+        state=state,
+        settings=settings,
+        run_state=run_state,
+        evaluate_problem=evaluate_problem,
+        history_entry=history_entry,
+        history_callback=history_callback,
+        constraint_names=constraint_names,
+        constraint_names_tuple=constraint_names_tuple,
+        constraint_blocks_tuple=constraint_blocks_tuple,
+        last_outer_iteration=last_outer_iteration,
+        restore_incumbent_state_fn=restore_incumbent_state_fn,
+        inner_result_for_cap=inner_result,
+    )
+    if outcome.cap_result is not None:
+        return _finalize_continuation_step(
+            state, _ALMContinuationDecision.RETURN, outcome.cap_result
+        )
+    _annotate_break_outer_history(
+        history_entry=history_entry,
+        action=action,
+        trust_radius=run_state.trust_radius,
+        is_final_outer=is_final_outer,
+        history_callback=history_callback,
+        history=run_state.history,
+        multipliers=state.multipliers,
+        penalty=state.penalty,
+    )
+    return _finalize_continuation_step(
+        state, _ALMContinuationDecision.BREAK_OUTER, None
+    )
+
+
+def _build_skipped_inner_history_entry(
+    *,
+    outer_iteration: int,
+    continuation_iteration: int,
+    constraint_names: Sequence[str],
+    state: _ContinuationStepState,
+    penalty_argument: float,
+    routing_state: object,
+    feasibility_values: np.ndarray,
+    solver_constraint_values: np.ndarray,
+    max_feasibility_violation: float,
+    stationarity_norm: float,
+    raw_stationarity_norm: float,
+    kkt_stationarity_norm: float,
+    signal_mismatch_active: bool,
+    effective_feasibility_tol: float,
+    trust_radius: float | None,
+    start_x: np.ndarray,
+) -> dict:
+    """Build the ``converged`` history entry for the pre-inner-solve fast-path
+    where the current iterate already satisfies the KKT stationarity gate.
+
+    Centralises the long ``_build_alm_history_entry`` keyword listing —
+    every "skipped inner solve" field defaults to its zero/None counterpart.
+    """
+    payload = _build_alm_history_entry(
+        outer_iteration=outer_iteration,
+        continuation_iteration=continuation_iteration,
+        constraint_names=constraint_names,
+        penalty=state.penalty,
+        penalty_argument=penalty_argument,
+        multipliers=state.multipliers,
+        post_update_multipliers=state.multipliers,
+        routing_state=routing_state,
+        feasibility_values=feasibility_values,
+        solver_constraint_values=solver_constraint_values,
+        max_feasibility_violation=max_feasibility_violation,
+        stationarity_norm=stationarity_norm,
+        raw_stationarity_norm=raw_stationarity_norm,
+        kkt_stationarity_norm=kkt_stationarity_norm,
+        signal_mismatch_active=signal_mismatch_active,
+        update_feasibility_tol=state.update_feasibility_tol,
+        effective_feasibility_tol=effective_feasibility_tol,
+        update_stationarity_tol=state.update_stationarity_tol,
+        trust_radius=trust_radius,
+        start_x=start_x,
+        inner_iterations=0,
+        inner_success=True,
+        inner_message=(
+            "ALM skipped inner solve; current iterate already satisfies the "
+            "KKT stationarity gate."
+        ),
+        inner_maxiter=None,
+        inner_maxls=None,
+        inner_maxfun=None,
+        inner_profile=None,
+        inner_lbfgsb_projected_gradient_norm=None,
+        inner_attempts=0,
+        accepted_move_norm=0.0,
+        objective_delta=0.0,
+        feasibility_delta=0.0,
+        feasibility_delta_tolerance=0.0,
+        stationarity_delta=0.0,
+        meaningful_progress=False,
+        feasible_stall_count=0,
+        infeasible_stall=False,
+        inner_false_success=False,
+        inner_stall_reason=None,
+        active_violation_index=None,
+        active_constraint_name=None,
+        nonfinite_candidate_evaluation=False,
+        nonfinite_candidate_fields=None,
+    )
+    payload["action"] = "converged"
+    return payload
+
+
 def _run_alm_continuation_step(
     *,
     settings: ALMSettings,
@@ -3293,16 +3787,29 @@ def _run_alm_continuation_step(
     constraint_names_tuple: tuple[str, ...],
     constraint_blocks_tuple: tuple[str, ...] | None,
 ) -> _ALMContinuationStepResult:
+    state = _ContinuationStepState(
+        multipliers=multipliers,
+        penalty=penalty,
+        update_feasibility_tol=update_feasibility_tol,
+        update_stationarity_tol=update_stationarity_tol,
+        feasible_stall_count=feasible_stall_count,
+        last_result=last_result,
+        final_eval=final_eval,
+        final_multipliers=final_multipliers,
+        final_penalty=final_penalty,
+        best_feasible=best_feasible,
+        inner_options=inner_options,
+    )
     start_x = run_state.x.copy()
-    penalty_argument = float(penalty)
+    penalty_argument = float(state.penalty)
     current_eval = _attach_alm_constraint_metadata(
-        evaluate_problem(run_state.x, multipliers, penalty_argument),
+        evaluate_problem(run_state.x, state.multipliers, penalty_argument),
         constraint_names_tuple,
         constraint_blocks_tuple,
     )
     _require_finite_evaluation(current_eval, context="ALM outer iterate evaluation")
     effective_feasibility_tol = _effective_feasibility_gate(
-        settings, update_feasibility_tol
+        settings, state.update_feasibility_tol
     )
     (
         current_solver_constraint_values,
@@ -3312,7 +3819,7 @@ def _run_alm_continuation_step(
     ) = _extract_constraint_state(current_eval)
     current_routing_state = _constraint_routing_state(
         current_eval,
-        multipliers,
+        state.multipliers,
         penalty_argument,
         effective_feasibility_tol,
     )
@@ -3326,7 +3833,6 @@ def _run_alm_continuation_step(
         current_routing_state,
         effective_feasibility_tol,
     )
-    current_conditioning = _conditioning_metrics(current_eval)
     current_constraints_inactive_candidate = (
         current_routing_state.signal_state.explicit_stage2_signals
         and current_routing_state.hard_max_violation <= settings.feasibility_tol
@@ -3341,66 +3847,36 @@ def _run_alm_continuation_step(
         and not current_constraints_inactive_candidate
         and not current_signal_mismatch_active
     ):
-        history_entry_payload = _build_alm_history_entry(
-            outer_iteration=outer_iteration,
-            continuation_iteration=continuation_iteration,
-            constraint_names=constraint_names,
-            penalty=penalty,
-            penalty_argument=penalty_argument,
-            multipliers=multipliers,
-            post_update_multipliers=multipliers,
-            routing_state=current_routing_state,
-            feasibility_values=current_feasibility_values,
-            solver_constraint_values=current_solver_constraint_values,
-            max_feasibility_violation=current_max_feasibility_violation,
-            stationarity_norm=current_stationarity_norm,
-            raw_stationarity_norm=current_raw_stationarity_norm,
-            kkt_stationarity_norm=current_kkt_stationarity_norm,
-            signal_mismatch_active=current_signal_mismatch_active,
-            update_feasibility_tol=update_feasibility_tol,
-            effective_feasibility_tol=effective_feasibility_tol,
-            update_stationarity_tol=update_stationarity_tol,
-            trust_radius=run_state.trust_radius,
-            start_x=start_x,
-            inner_iterations=0,
-            inner_success=True,
-            inner_message=(
-                "ALM skipped inner solve; current iterate already satisfies the "
-                "KKT stationarity gate."
-            ),
-            inner_maxiter=None,
-            inner_maxls=None,
-            inner_maxfun=None,
-            inner_profile=None,
-            inner_lbfgsb_projected_gradient_norm=None,
-            inner_attempts=0,
-            accepted_move_norm=0.0,
-            objective_delta=0.0,
-            feasibility_delta=0.0,
-            feasibility_delta_tolerance=0.0,
-            stationarity_delta=0.0,
-            meaningful_progress=False,
-            feasible_stall_count=0,
-            infeasible_stall=False,
-            inner_false_success=False,
-            inner_stall_reason=None,
-            active_violation_index=None,
-            active_constraint_name=None,
-            nonfinite_candidate_evaluation=False,
-            nonfinite_candidate_fields=None,
-        )
-        history_entry_payload["action"] = "converged"
         history_entry, run_state.history_truncated_count = _append_alm_history_entry(
             run_state.history,
-            ALMHistoryEntry(history_entry_payload),
+            ALMHistoryEntry(
+                _build_skipped_inner_history_entry(
+                    outer_iteration=outer_iteration,
+                    continuation_iteration=continuation_iteration,
+                    constraint_names=constraint_names,
+                    state=state,
+                    penalty_argument=penalty_argument,
+                    routing_state=current_routing_state,
+                    feasibility_values=current_feasibility_values,
+                    solver_constraint_values=current_solver_constraint_values,
+                    max_feasibility_violation=current_max_feasibility_violation,
+                    stationarity_norm=current_stationarity_norm,
+                    raw_stationarity_norm=current_raw_stationarity_norm,
+                    kkt_stationarity_norm=current_kkt_stationarity_norm,
+                    signal_mismatch_active=current_signal_mismatch_active,
+                    effective_feasibility_tol=effective_feasibility_tol,
+                    trust_radius=run_state.trust_radius,
+                    start_x=start_x,
+                )
+            ),
             settings.history_max_entries,
             run_state.history_truncated_count,
         )
-        history_entry.update(current_conditioning)
+        history_entry.update(_conditioning_metrics(current_eval))
         _attach_alm_history_diagnostics(
             history_entry,
             current_eval,
-            multipliers,
+            state.multipliers,
             penalty_argument,
             constraint_names,
             current_solver_constraint_values,
@@ -3412,83 +3888,64 @@ def _run_alm_continuation_step(
             history_callback,
             run_state.history,
             history_entry,
-            multipliers,
-            penalty,
+            state.multipliers,
+            state.penalty,
         )
-        final_eval = current_eval
-        final_multipliers = multipliers.copy()
-        final_penalty = penalty
-        incumbent_state = (
-            None
-            if snapshot_accepted_state_fn is None
-            else snapshot_accepted_state_fn()
-        )
-        best_feasible = ALMFeasibleIncumbent(
+        state.final_eval = current_eval
+        state.final_multipliers = state.multipliers.copy()
+        state.final_penalty = state.penalty
+        state.best_feasible = ALMFeasibleIncumbent(
             x=run_state.x.copy(),
             evaluation=current_eval,
-            multipliers=multipliers.copy(),
-            penalty=penalty,
-            inner_result=last_result,
-            incumbent_state=incumbent_state,
+            multipliers=state.multipliers.copy(),
+            penalty=state.penalty,
+            inner_result=state.last_result,
+            incumbent_state=(
+                None
+                if snapshot_accepted_state_fn is None
+                else snapshot_accepted_state_fn()
+            ),
         )
         message = (
             "ALM converged: "
             f"max_violation={current_max_feasibility_violation:.3e}, "
             f"stationarity={current_stationarity_norm:.3e}"
         )
-        result = _build_alm_result(
-            settings=settings,
-            constraint_names=constraint_names,
-            run_state=run_state,
-            final_state=ALMFinalState(
-                success=True,
-                message=message,
-                termination_reason="converged",
-                outer_iterations=outer_iteration,
+        return _finalize_continuation_step(
+            state,
+            _ALMContinuationDecision.RETURN,
+            _build_alm_converged_step_result(
+                settings=settings,
+                constraint_names=constraint_names,
+                run_state=run_state,
+                outer_iteration=outer_iteration,
                 evaluation=current_eval,
-                multipliers=multipliers,
-                penalty=penalty,
-                inner_result=last_result,
-                restored_best_feasible=False,
-                restored_best_feasible_reason=None,
+                multipliers=state.multipliers,
+                penalty=state.penalty,
+                inner_result=state.last_result,
                 max_feasibility_violation=current_max_feasibility_violation,
                 stationarity_norm=current_stationarity_norm,
                 raw_stationarity_norm=current_raw_stationarity_norm,
                 kkt_stationarity_norm=current_kkt_stationarity_norm,
-                feasibility_tolerance=settings.feasibility_tol,
-                stationarity_tolerance=settings.stationarity_tol,
+                termination_reason="converged",
+                message=message,
             ),
-        )
-        return _ALMContinuationStepResult(
-            decision=_ALMContinuationDecision.RETURN,
-            result=result,
-            multipliers=multipliers,
-            penalty=penalty,
-            update_feasibility_tol=update_feasibility_tol,
-            update_stationarity_tol=update_stationarity_tol,
-            feasible_stall_count=feasible_stall_count,
-            last_result=last_result,
-            final_eval=final_eval,
-            final_multipliers=final_multipliers,
-            final_penalty=final_penalty,
-            best_feasible=best_feasible,
-            inner_options=inner_options,
         )
 
     inner_attempt = _run_alm_inner_attempts(
         ALMInnerAttemptRequest(
             x=run_state.x,
             current_eval=current_eval,
-            multipliers=multipliers,
+            multipliers=state.multipliers,
             penalty_argument=penalty_argument,
             evaluate_problem=evaluate_problem,
-            inner_options=inner_options,
+            inner_options=state.inner_options,
             settings=settings,
             continuation_iteration=continuation_iteration,
             trust_radius=run_state.trust_radius,
             current_max_feasibility_violation=current_max_feasibility_violation,
-            update_feasibility_tol=update_feasibility_tol,
-            update_stationarity_tol=update_stationarity_tol,
+            update_feasibility_tol=state.update_feasibility_tol,
+            update_stationarity_tol=state.update_stationarity_tol,
             effective_feasibility_tol=effective_feasibility_tol,
             inner_callback=inner_callback,
             constraint_names_tuple=constraint_names_tuple,
@@ -3497,11 +3954,11 @@ def _run_alm_continuation_step(
     )
 
     result = inner_attempt.optimizer_result
-    last_result = result
+    state.last_result = result
     run_state.total_inner_iterations += inner_attempt.iterations
     run_state.x = inner_attempt.x
     run_state.trust_radius = inner_attempt.trust_radius
-    final_eval = inner_attempt.evaluation
+    state.final_eval = inner_attempt.evaluation
     if inner_attempt.evaluation is not current_eval and accepted_callback is not None:
         accepted_callback(run_state.x.copy())
     accepted_move_norm = float(np.linalg.norm(run_state.x - start_x))
@@ -3510,12 +3967,12 @@ def _run_alm_continuation_step(
         feasibility_values,
         _dual_update_values,
         max_feasibility_violation,
-    ) = _extract_constraint_state(final_eval)
+    ) = _extract_constraint_state(state.final_eval)
     routing_state = _constraint_routing_state(
-        final_eval,
-        multipliers,
+        state.final_eval,
+        state.multipliers,
         penalty_argument,
-        update_feasibility_tol,
+        state.update_feasibility_tol,
     )
     (
         raw_stationarity_norm,
@@ -3523,9 +3980,9 @@ def _run_alm_continuation_step(
         stationarity_norm,
         signal_mismatch_active,
     ) = _stationarity_metrics(
-        final_eval,
+        state.final_eval,
         routing_state,
-        update_feasibility_tol,
+        state.update_feasibility_tol,
     )
     feasibility_delta, feasibility_delta_tol = _feasibility_improvement_metrics(
         current_max_feasibility_violation,
@@ -3543,13 +4000,13 @@ def _run_alm_continuation_step(
         if active_violation_index is None
         else str(constraint_names[active_violation_index])
     )
-    final_multipliers = multipliers.copy()
-    final_penalty = penalty
+    state.final_multipliers = state.multipliers.copy()
+    state.final_penalty = state.penalty
     made_inner_progress = _made_meaningful_inner_progress(
         start_x,
         run_state.x,
         float(current_eval["total"]),
-        float(final_eval["total"]),
+        float(state.final_eval["total"]),
         current_max_feasibility_violation,
         max_feasibility_violation,
         current_stationarity_norm,
@@ -3558,34 +4015,33 @@ def _run_alm_continuation_step(
 
     if max_feasibility_violation <= settings.feasibility_tol:
         improves_best_feasible = (
-            best_feasible is None
-            or _incumbent_objective_value(final_eval)
-            < _incumbent_objective_value(best_feasible.evaluation)
+            state.best_feasible is None
+            or _incumbent_objective_value(state.final_eval)
+            < _incumbent_objective_value(state.best_feasible.evaluation)
         )
         if improves_best_feasible:
-            incumbent_state = (
-                None
-                if snapshot_accepted_state_fn is None
-                else snapshot_accepted_state_fn()
-            )
-            best_feasible = ALMFeasibleIncumbent(
+            state.best_feasible = ALMFeasibleIncumbent(
                 x=run_state.x.copy(),
-                evaluation=final_eval,
-                multipliers=multipliers.copy(),
-                penalty=penalty,
+                evaluation=state.final_eval,
+                multipliers=state.multipliers.copy(),
+                penalty=state.penalty,
                 inner_result=result,
-                incumbent_state=incumbent_state,
+                incumbent_state=(
+                    None
+                    if snapshot_accepted_state_fn is None
+                    else snapshot_accepted_state_fn()
+                ),
             )
 
-    inner_options = inner_attempt.last_inner_options
+    state.inner_options = inner_attempt.last_inner_options
     history_entry = _build_alm_history_entry(
         outer_iteration=outer_iteration,
         continuation_iteration=continuation_iteration,
         constraint_names=constraint_names,
-        penalty=penalty,
+        penalty=state.penalty,
         penalty_argument=penalty_argument,
-        multipliers=multipliers,
-        post_update_multipliers=multipliers,
+        multipliers=state.multipliers,
+        post_update_multipliers=state.multipliers,
         routing_state=routing_state,
         feasibility_values=feasibility_values,
         solver_constraint_values=solver_constraint_values,
@@ -3594,37 +4050,39 @@ def _run_alm_continuation_step(
         raw_stationarity_norm=raw_stationarity_norm,
         kkt_stationarity_norm=kkt_stationarity_norm,
         signal_mismatch_active=signal_mismatch_active,
-        update_feasibility_tol=update_feasibility_tol,
+        update_feasibility_tol=state.update_feasibility_tol,
         effective_feasibility_tol=effective_feasibility_tol,
-        update_stationarity_tol=update_stationarity_tol,
+        update_stationarity_tol=state.update_stationarity_tol,
         trust_radius=run_state.trust_radius,
         start_x=start_x,
         inner_iterations=int(inner_attempt.iterations),
         inner_success=bool(getattr(result, "success", False)),
         inner_message=str(getattr(result, "message", "")),
         inner_maxiter=None
-        if inner_options is None or "maxiter" not in inner_options
-        else int(inner_options["maxiter"]),
+        if state.inner_options is None or "maxiter" not in state.inner_options
+        else int(state.inner_options["maxiter"]),
         inner_maxls=None
-        if inner_options is None or "maxls" not in inner_options
-        else int(inner_options["maxls"]),
+        if state.inner_options is None or "maxls" not in state.inner_options
+        else int(state.inner_options["maxls"]),
         inner_maxfun=None
-        if inner_options is None or "maxfun" not in inner_options
-        else int(inner_options["maxfun"]),
+        if state.inner_options is None or "maxfun" not in state.inner_options
+        else int(state.inner_options["maxfun"]),
         inner_profile=inner_attempt.last_inner_profile,
         inner_lbfgsb_projected_gradient_norm=_lbfgsb_projected_gradient_max_norm(
-            final_eval["grad"],
+            state.final_eval["grad"],
             run_state.x,
             inner_attempt.bounds,
         ),
         inner_attempts=int(inner_attempt.attempts),
         accepted_move_norm=float(accepted_move_norm),
-        objective_delta=float(current_eval["total"]) - float(final_eval["total"]),
+        objective_delta=(
+            float(current_eval["total"]) - float(state.final_eval["total"])
+        ),
         feasibility_delta=float(feasibility_delta),
         feasibility_delta_tolerance=float(feasibility_delta_tol),
         stationarity_delta=float(current_stationarity_norm) - float(stationarity_norm),
         meaningful_progress=bool(made_inner_progress),
-        feasible_stall_count=int(feasible_stall_count),
+        feasible_stall_count=int(state.feasible_stall_count),
         infeasible_stall=bool(inner_attempt.forced_infeasible_penalty_cycle),
         inner_false_success=bool(inner_attempt.forced_inner_false_success),
         inner_stall_reason=inner_attempt.forced_infeasible_penalty_reason,
@@ -3641,17 +4099,17 @@ def _run_alm_continuation_step(
         settings.history_max_entries,
         run_state.history_truncated_count,
     )
-    history_entry.update(_conditioning_metrics(final_eval))
+    history_entry.update(_conditioning_metrics(state.final_eval))
     _attach_alm_history_diagnostics(
         history_entry,
-        final_eval,
-        multipliers,
+        state.final_eval,
+        state.multipliers,
         penalty_argument,
         constraint_names,
         solver_constraint_values,
         feasibility_values,
         routing_state,
-        update_feasibility_tol,
+        state.update_feasibility_tol,
     )
     hard_feasible_strict = routing_state.hard_max_violation <= settings.feasibility_tol
     hard_feasible_for_update = (
@@ -3671,406 +4129,152 @@ def _run_alm_continuation_step(
         and not constraints_inactive_candidate
         and not signal_mismatch_active
     ):
-        history_entry["action"] = "converged"
-        _emit_alm_history_snapshot(
-            history_callback,
-            run_state.history,
-            history_entry,
-            multipliers,
-            penalty,
-        )
         message = (
             "ALM converged: "
             f"max_violation={max_feasibility_violation:.3e}, "
             f"stationarity={stationarity_norm:.3e}"
         )
-        return _ALMContinuationStepResult(
-            decision=_ALMContinuationDecision.RETURN,
-            result=_build_alm_result(
-                settings=settings,
-                constraint_names=constraint_names,
-                run_state=run_state,
-                final_state=ALMFinalState(
-                    success=True,
-                    message=message,
-                    termination_reason="converged",
-                    outer_iterations=outer_iteration,
-                    evaluation=final_eval,
-                    multipliers=multipliers,
-                    penalty=penalty,
-                    inner_result=result,
-                    restored_best_feasible=False,
-                    restored_best_feasible_reason=None,
-                    max_feasibility_violation=max_feasibility_violation,
-                    stationarity_norm=stationarity_norm,
-                    raw_stationarity_norm=raw_stationarity_norm,
-                    kkt_stationarity_norm=kkt_stationarity_norm,
-                    feasibility_tolerance=settings.feasibility_tol,
-                    stationarity_tolerance=settings.stationarity_tol,
-                ),
-            ),
-            multipliers=multipliers,
-            penalty=penalty,
-            update_feasibility_tol=update_feasibility_tol,
-            update_stationarity_tol=update_stationarity_tol,
-            feasible_stall_count=feasible_stall_count,
-            last_result=last_result,
-            final_eval=final_eval,
-            final_multipliers=final_multipliers,
-            final_penalty=final_penalty,
-            best_feasible=best_feasible,
-            inner_options=inner_options,
+        return _emit_alm_converged_step(
+            state=state,
+            settings=settings,
+            constraint_names=constraint_names,
+            run_state=run_state,
+            history_entry=history_entry,
+            history_callback=history_callback,
+            outer_iteration=outer_iteration,
+            inner_result=result,
+            max_feasibility_violation=max_feasibility_violation,
+            stationarity_norm=stationarity_norm,
+            raw_stationarity_norm=raw_stationarity_norm,
+            kkt_stationarity_norm=kkt_stationarity_norm,
+            termination_reason="converged",
+            message=message,
+            action="converged",
         )
 
     if inner_attempt.forced_infeasible_penalty_cycle:
-        penalty_transition = _apply_alm_penalty_increase(
+        return _emit_alm_penalty_increase_arm(
+            state=state,
             settings=settings,
+            run_state=run_state,
             evaluate_problem=evaluate_problem,
-            x=run_state.x,
-            multipliers=multipliers,
-            penalty=penalty,
             history_entry=history_entry,
-            trust_radius=run_state.trust_radius,
-            update_feasibility_tol=update_feasibility_tol,
-            update_stationarity_tol=update_stationarity_tol,
+            history_callback=history_callback,
             constraint_names=constraint_names,
             constraint_names_tuple=constraint_names_tuple,
             constraint_blocks_tuple=constraint_blocks_tuple,
-            history_callback=history_callback,
-            history=run_state.history,
-        )
-        penalty = penalty_transition.penalty
-        run_state.penalty_cap_reached = penalty_transition.penalty_cap_reached
-        run_state.penalty_cap_requested = penalty_transition.penalty_cap_requested
-        feasible_stall_count = penalty_transition.feasible_stall_count
-        update_feasibility_tol = penalty_transition.update_feasibility_tol
-        update_stationarity_tol = penalty_transition.update_stationarity_tol
-        final_eval = penalty_transition.penalty_update_state.evaluation
-        final_multipliers = multipliers.copy()
-        final_penalty = penalty
-        if penalty_transition.cap_hit:
-            return _ALMContinuationStepResult(
-                decision=_ALMContinuationDecision.RETURN,
-                result=_handle_alm_penalty_cap_termination(
-                    settings=settings,
-                    constraint_names=constraint_names,
-                    run_state=run_state,
-                    last_outer_iteration=last_outer_iteration,
-                    best_feasible=best_feasible,
-                    restore_incumbent_state_fn=restore_incumbent_state_fn,
-                    penalty_transition=penalty_transition,
-                    multipliers=multipliers,
-                    penalty=penalty,
-                    result=result,
-                ),
-                multipliers=multipliers,
-                penalty=penalty,
-                update_feasibility_tol=update_feasibility_tol,
-                update_stationarity_tol=update_stationarity_tol,
-                feasible_stall_count=feasible_stall_count,
-                last_result=last_result,
-                final_eval=final_eval,
-                final_multipliers=final_multipliers,
-                final_penalty=final_penalty,
-                best_feasible=best_feasible,
-                inner_options=inner_options,
-            )
-        history_entry["action"] = "infeasible_stall_penalty_increase"
-        history_entry["trust_radius"] = run_state.trust_radius
-        if is_final_outer:
-            history_entry["outer_termination"] = "max_outer"
-        _emit_alm_history_snapshot(
-            history_callback,
-            run_state.history,
-            history_entry,
-            multipliers,
-            penalty,
-        )
-        return _ALMContinuationStepResult(
-            decision=_ALMContinuationDecision.BREAK_OUTER,
-            result=None,
-            multipliers=multipliers,
-            penalty=penalty,
-            update_feasibility_tol=update_feasibility_tol,
-            update_stationarity_tol=update_stationarity_tol,
-            feasible_stall_count=feasible_stall_count,
-            last_result=last_result,
-            final_eval=final_eval,
-            final_multipliers=final_multipliers,
-            final_penalty=final_penalty,
-            best_feasible=best_feasible,
-            inner_options=inner_options,
+            last_outer_iteration=last_outer_iteration,
+            restore_incumbent_state_fn=restore_incumbent_state_fn,
+            inner_result=result,
+            is_final_outer=is_final_outer,
+            action="infeasible_stall_penalty_increase",
         )
 
     if constraints_inactive_candidate:
         if stationarity_norm <= settings.stationarity_tol:
-            history_entry["action"] = "constraints_inactive_converged"
-            history_entry["trust_radius"] = run_state.trust_radius
-            _emit_alm_history_snapshot(
-                history_callback,
-                run_state.history,
-                history_entry,
-                multipliers,
-                penalty,
-            )
             message = (
                 "ALM converged with inactive hard constraints: "
                 f"max_violation={routing_state.hard_max_violation:.3e}, "
                 f"stationarity={stationarity_norm:.3e}"
             )
-            return _ALMContinuationStepResult(
-                decision=_ALMContinuationDecision.RETURN,
-                result=_build_alm_result(
-                    settings=settings,
-                    constraint_names=constraint_names,
-                    run_state=run_state,
-                    final_state=ALMFinalState(
-                        success=True,
-                        message=message,
-                        termination_reason="constraints_inactive_converged",
-                        outer_iterations=outer_iteration,
-                        evaluation=final_eval,
-                        multipliers=multipliers,
-                        penalty=penalty,
-                        inner_result=result,
-                        restored_best_feasible=False,
-                        restored_best_feasible_reason=None,
-                        max_feasibility_violation=max_feasibility_violation,
-                        stationarity_norm=stationarity_norm,
-                        raw_stationarity_norm=raw_stationarity_norm,
-                        kkt_stationarity_norm=kkt_stationarity_norm,
-                        feasibility_tolerance=settings.feasibility_tol,
-                        stationarity_tolerance=settings.stationarity_tol,
-                    ),
-                ),
-                multipliers=multipliers,
-                penalty=penalty,
-                update_feasibility_tol=update_feasibility_tol,
-                update_stationarity_tol=update_stationarity_tol,
-                feasible_stall_count=feasible_stall_count,
-                last_result=last_result,
-                final_eval=final_eval,
-                final_multipliers=final_multipliers,
-                final_penalty=final_penalty,
-                best_feasible=best_feasible,
-                inner_options=inner_options,
+            return _emit_alm_converged_step(
+                state=state,
+                settings=settings,
+                constraint_names=constraint_names,
+                run_state=run_state,
+                history_entry=history_entry,
+                history_callback=history_callback,
+                outer_iteration=outer_iteration,
+                inner_result=result,
+                max_feasibility_violation=max_feasibility_violation,
+                stationarity_norm=stationarity_norm,
+                raw_stationarity_norm=raw_stationarity_norm,
+                kkt_stationarity_norm=kkt_stationarity_norm,
+                termination_reason="constraints_inactive_converged",
+                message=message,
+                action="constraints_inactive_converged",
             )
         if not made_inner_progress and continuation_iteration > 0:
-            history_entry["action"] = "constraints_inactive_stall"
-            history_entry["trust_radius"] = run_state.trust_radius
-            _emit_alm_history_snapshot(
-                history_callback,
-                run_state.history,
-                history_entry,
-                multipliers,
-                penalty,
-            )
-            return _ALMContinuationStepResult(
-                decision=_ALMContinuationDecision.RETURN,
-                result=_build_alm_failure_result_with_optional_restore(
-                    settings=settings,
-                    constraint_names=constraint_names,
-                    run_state=run_state,
-                    last_outer_iteration=last_outer_iteration,
-                    best_feasible=best_feasible,
-                    restore_incumbent_state_fn=restore_incumbent_state_fn,
-                    termination_reason="constraints_inactive_stall",
-                    message_prefix=(
-                        "ALM stopped after hard constraints became inactive without "
-                        "further stationarity progress"
-                    ),
-                    evaluation=final_eval,
-                    multipliers_state=multipliers,
-                    penalty_state=penalty,
-                    inner_result=result,
-                    final_max_feasibility_violation=max_feasibility_violation,
+            return _emit_alm_stall_failure_step(
+                state=state,
+                settings=settings,
+                constraint_names=constraint_names,
+                run_state=run_state,
+                last_outer_iteration=last_outer_iteration,
+                restore_incumbent_state_fn=restore_incumbent_state_fn,
+                history_entry=history_entry,
+                history_callback=history_callback,
+                action="constraints_inactive_stall",
+                termination_reason="constraints_inactive_stall",
+                message_prefix=(
+                    "ALM stopped after hard constraints became inactive without "
+                    "further stationarity progress"
                 ),
-                multipliers=multipliers,
-                penalty=penalty,
-                update_feasibility_tol=update_feasibility_tol,
-                update_stationarity_tol=update_stationarity_tol,
-                feasible_stall_count=feasible_stall_count,
-                last_result=last_result,
-                final_eval=final_eval,
-                final_multipliers=final_multipliers,
-                final_penalty=final_penalty,
-                best_feasible=best_feasible,
-                inner_options=inner_options,
+                inner_result=result,
+                max_feasibility_violation=max_feasibility_violation,
             )
 
     if signal_mismatch_active and hard_feasible_strict:
         if not made_inner_progress or continuation_iteration > 0:
             if routing_state.surrogate_positive_shift_zero:
-                history_entry["action"] = "signal_mismatch_stall"
-                history_entry["trust_radius"] = run_state.trust_radius
-                _emit_alm_history_snapshot(
-                    history_callback,
-                    run_state.history,
-                    history_entry,
-                    multipliers,
-                    penalty,
-                )
-                return _ALMContinuationStepResult(
-                    decision=_ALMContinuationDecision.RETURN,
-                    result=_build_alm_failure_result_with_optional_restore(
-                        settings=settings,
-                        constraint_names=constraint_names,
-                        run_state=run_state,
-                        last_outer_iteration=last_outer_iteration,
-                        best_feasible=best_feasible,
-                        restore_incumbent_state_fn=restore_incumbent_state_fn,
-                        termination_reason="signal_mismatch_stall",
-                        message_prefix=(
-                            "ALM stopped after hard-feasible and surrogate-active "
-                            "signals repeated without corrective progress"
-                        ),
-                        evaluation=final_eval,
-                        multipliers_state=multipliers,
-                        penalty_state=penalty,
-                        inner_result=result,
-                        final_max_feasibility_violation=max_feasibility_violation,
+                return _emit_alm_stall_failure_step(
+                    state=state,
+                    settings=settings,
+                    constraint_names=constraint_names,
+                    run_state=run_state,
+                    last_outer_iteration=last_outer_iteration,
+                    restore_incumbent_state_fn=restore_incumbent_state_fn,
+                    history_entry=history_entry,
+                    history_callback=history_callback,
+                    action="signal_mismatch_stall",
+                    termination_reason="signal_mismatch_stall",
+                    message_prefix=(
+                        "ALM stopped after hard-feasible and surrogate-active "
+                        "signals repeated without corrective progress"
                     ),
-                    multipliers=multipliers,
-                    penalty=penalty,
-                    update_feasibility_tol=update_feasibility_tol,
-                    update_stationarity_tol=update_stationarity_tol,
-                    feasible_stall_count=feasible_stall_count,
-                    last_result=last_result,
-                    final_eval=final_eval,
-                    final_multipliers=final_multipliers,
-                    final_penalty=final_penalty,
-                    best_feasible=best_feasible,
-                    inner_options=inner_options,
+                    inner_result=result,
+                    max_feasibility_violation=max_feasibility_violation,
                 )
-            penalty_transition = _apply_alm_penalty_increase(
+            return _emit_alm_penalty_increase_arm(
+                state=state,
                 settings=settings,
+                run_state=run_state,
                 evaluate_problem=evaluate_problem,
-                x=run_state.x,
-                multipliers=multipliers,
-                penalty=penalty,
                 history_entry=history_entry,
-                trust_radius=run_state.trust_radius,
-                update_feasibility_tol=update_feasibility_tol,
-                update_stationarity_tol=update_stationarity_tol,
+                history_callback=history_callback,
                 constraint_names=constraint_names,
                 constraint_names_tuple=constraint_names_tuple,
                 constraint_blocks_tuple=constraint_blocks_tuple,
-                history_callback=history_callback,
-                history=run_state.history,
+                last_outer_iteration=last_outer_iteration,
+                restore_incumbent_state_fn=restore_incumbent_state_fn,
+                inner_result=result,
+                is_final_outer=is_final_outer,
+                action="signal_mismatch_penalty_increase",
             )
-            penalty = penalty_transition.penalty
-            run_state.penalty_cap_reached = penalty_transition.penalty_cap_reached
-            run_state.penalty_cap_requested = penalty_transition.penalty_cap_requested
-            feasible_stall_count = penalty_transition.feasible_stall_count
-            update_feasibility_tol = penalty_transition.update_feasibility_tol
-            update_stationarity_tol = penalty_transition.update_stationarity_tol
-            final_eval = penalty_transition.penalty_update_state.evaluation
-            final_multipliers = multipliers.copy()
-            final_penalty = penalty
-            if penalty_transition.cap_hit:
-                return _ALMContinuationStepResult(
-                    decision=_ALMContinuationDecision.RETURN,
-                    result=_handle_alm_penalty_cap_termination(
-                        settings=settings,
-                        constraint_names=constraint_names,
-                        run_state=run_state,
-                        last_outer_iteration=last_outer_iteration,
-                        best_feasible=best_feasible,
-                        restore_incumbent_state_fn=restore_incumbent_state_fn,
-                        penalty_transition=penalty_transition,
-                        multipliers=multipliers,
-                        penalty=penalty,
-                        result=result,
-                    ),
-                    multipliers=multipliers,
-                    penalty=penalty,
-                    update_feasibility_tol=update_feasibility_tol,
-                    update_stationarity_tol=update_stationarity_tol,
-                    feasible_stall_count=feasible_stall_count,
-                    last_result=last_result,
-                    final_eval=final_eval,
-                    final_multipliers=final_multipliers,
-                    final_penalty=final_penalty,
-                    best_feasible=best_feasible,
-                    inner_options=inner_options,
-                )
-            history_entry["action"] = "signal_mismatch_penalty_increase"
-            history_entry["trust_radius"] = run_state.trust_radius
-            if is_final_outer:
-                history_entry["outer_termination"] = "max_outer"
-            _emit_alm_history_snapshot(
-                history_callback,
-                run_state.history,
-                history_entry,
-                multipliers,
-                penalty,
-            )
-            return _ALMContinuationStepResult(
-                decision=_ALMContinuationDecision.BREAK_OUTER,
-                result=None,
-                multipliers=multipliers,
-                penalty=penalty,
-                update_feasibility_tol=update_feasibility_tol,
-                update_stationarity_tol=update_stationarity_tol,
-                feasible_stall_count=feasible_stall_count,
-                last_result=last_result,
-                final_eval=final_eval,
-                final_multipliers=final_multipliers,
-                final_penalty=final_penalty,
-                best_feasible=best_feasible,
-                inner_options=inner_options,
-            )
-        feasible_stall_count = 0
-        if run_state.trust_radius is not None:
-            run_state.trust_radius = max(
-                run_state.trust_radius,
-                max(
-                    settings.trust_radius_min,
-                    float(run_state.trust_radius) * float(settings.trust_radius_grow),
-                ),
-            )
-        history_entry["subproblem_limit_reason"] = None
-        history_entry["action"] = "subproblem_continue"
-        history_entry["trust_radius"] = run_state.trust_radius
-        history_entry["feasible_stall_count"] = int(feasible_stall_count)
-        _emit_alm_history_snapshot(
-            history_callback,
-            run_state.history,
-            history_entry,
-            multipliers,
-            penalty,
-        )
-        return _ALMContinuationStepResult(
-            decision=_ALMContinuationDecision.CONTINUE_CONTINUATION,
-            result=None,
-            multipliers=multipliers,
-            penalty=penalty,
-            update_feasibility_tol=update_feasibility_tol,
-            update_stationarity_tol=update_stationarity_tol,
-            feasible_stall_count=feasible_stall_count,
-            last_result=last_result,
-            final_eval=final_eval,
-            final_multipliers=final_multipliers,
-            final_penalty=final_penalty,
-            best_feasible=best_feasible,
-            inner_options=inner_options,
+        state.feasible_stall_count = 0
+        _grow_continuation_trust_radius(run_state, settings)
+        return _emit_alm_subproblem_continue(
+            state=state,
+            run_state=run_state,
+            history_entry=history_entry,
+            history_callback=history_callback,
         )
 
-    if hard_feasible_for_update and stationarity_norm <= update_stationarity_tol:
-        feasible_stall_count = 0
+    if hard_feasible_for_update and stationarity_norm <= state.update_stationarity_tol:
+        state.feasible_stall_count = 0
         dual_update = _handle_alm_dual_update_transition(
-            multipliers=multipliers,
+            multipliers=state.multipliers,
             routing_state=routing_state,
             penalty_argument=penalty_argument,
             settings=settings,
-            update_feasibility_tol=update_feasibility_tol,
-            update_stationarity_tol=update_stationarity_tol,
+            update_feasibility_tol=state.update_feasibility_tol,
+            update_stationarity_tol=state.update_stationarity_tol,
         )
-        multipliers = dual_update.multipliers
-        update_feasibility_tol = dual_update.update_feasibility_tol
-        update_stationarity_tol = dual_update.update_stationarity_tol
+        state.multipliers = dual_update.multipliers
+        state.update_feasibility_tol = dual_update.update_feasibility_tol
+        state.update_stationarity_tol = dual_update.update_stationarity_tol
         history_entry["post_update_multipliers"] = [
-            float(value) for value in multipliers
+            float(value) for value in state.multipliers
         ]
         history_entry["multiplier_cap_binding"] = dual_update.multiplier_cap_binding
         history_entry["multiplier_cap_binding_indices"] = list(
@@ -4081,49 +4285,36 @@ def _run_alm_continuation_step(
             run_state.cap_binding_indices.update(
                 dual_update.multiplier_cap_binding_indices
             )
-        history_entry["action"] = "dual_update"
-        history_entry["trust_radius"] = run_state.trust_radius
-        if is_final_outer:
-            history_entry["outer_termination"] = "max_outer"
-        _emit_alm_history_snapshot(
-            history_callback,
-            run_state.history,
-            history_entry,
-            multipliers,
-            penalty,
+        _annotate_break_outer_history(
+            history_entry=history_entry,
+            action="dual_update",
+            trust_radius=run_state.trust_radius,
+            is_final_outer=is_final_outer,
+            history_callback=history_callback,
+            history=run_state.history,
+            multipliers=state.multipliers,
+            penalty=state.penalty,
         )
-        return _ALMContinuationStepResult(
-            decision=_ALMContinuationDecision.BREAK_OUTER,
-            result=None,
-            multipliers=multipliers,
-            penalty=penalty,
-            update_feasibility_tol=update_feasibility_tol,
-            update_stationarity_tol=update_stationarity_tol,
-            feasible_stall_count=feasible_stall_count,
-            last_result=last_result,
-            final_eval=final_eval,
-            final_multipliers=final_multipliers,
-            final_penalty=final_penalty,
-            best_feasible=best_feasible,
-            inner_options=inner_options,
+        return _finalize_continuation_step(
+            state, _ALMContinuationDecision.BREAK_OUTER, None
         )
 
     if hard_feasible_for_update:
-        feasible_stall_count = (
-            0 if made_inner_progress else feasible_stall_count + 1
+        state.feasible_stall_count = (
+            0 if made_inner_progress else state.feasible_stall_count + 1
         )
         hit_stall_limit = (
             continuation_iteration == settings.max_subproblem_continuations
-            or feasible_stall_count >= _PLATEAU_STALL_LIMIT
+            or state.feasible_stall_count >= _PLATEAU_STALL_LIMIT
         )
         if hit_stall_limit:
             history_entry["subproblem_limit_reason"] = (
                 "plateau_stall"
-                if feasible_stall_count >= _PLATEAU_STALL_LIMIT
+                if state.feasible_stall_count >= _PLATEAU_STALL_LIMIT
                 else "max_subproblem_continuations"
             )
             history_entry["trust_radius"] = run_state.trust_radius
-            history_entry["feasible_stall_count"] = int(feasible_stall_count)
+            history_entry["feasible_stall_count"] = int(state.feasible_stall_count)
             history_entry["action"] = "subproblem_limit"
             if is_final_outer:
                 history_entry["outer_termination"] = "max_outer"
@@ -4131,174 +4322,88 @@ def _run_alm_continuation_step(
                 history_callback,
                 run_state.history,
                 history_entry,
-                multipliers,
-                penalty,
+                state.multipliers,
+                state.penalty,
             )
-            if feasible_stall_count >= _PLATEAU_STALL_LIMIT:
-                return _ALMContinuationStepResult(
-                    decision=_ALMContinuationDecision.RETURN,
-                    result=_build_alm_failure_result_with_optional_restore(
+            if state.feasible_stall_count >= _PLATEAU_STALL_LIMIT:
+                return _finalize_continuation_step(
+                    state,
+                    _ALMContinuationDecision.RETURN,
+                    _build_alm_failure_result_with_optional_restore(
                         settings=settings,
                         constraint_names=constraint_names,
                         run_state=run_state,
                         last_outer_iteration=last_outer_iteration,
-                        best_feasible=best_feasible,
+                        best_feasible=state.best_feasible,
                         restore_incumbent_state_fn=restore_incumbent_state_fn,
                         termination_reason="plateau_stall",
                         message_prefix=(
                             "ALM stopped after repeated feasible stationarity "
                             "plateau without meaningful progress"
                         ),
-                        evaluation=final_eval,
-                        multipliers_state=multipliers,
-                        penalty_state=penalty,
+                        evaluation=state.final_eval,
+                        multipliers_state=state.multipliers,
+                        penalty_state=state.penalty,
                         inner_result=result,
                         final_max_feasibility_violation=max_feasibility_violation,
                     ),
-                    multipliers=multipliers,
-                    penalty=penalty,
-                    update_feasibility_tol=update_feasibility_tol,
-                    update_stationarity_tol=update_stationarity_tol,
-                    feasible_stall_count=feasible_stall_count,
-                    last_result=last_result,
-                    final_eval=final_eval,
-                    final_multipliers=final_multipliers,
-                    final_penalty=final_penalty,
-                    best_feasible=best_feasible,
-                    inner_options=inner_options,
                 )
-            return _ALMContinuationStepResult(
-                decision=_ALMContinuationDecision.BREAK_OUTER,
-                result=None,
-                multipliers=multipliers,
-                penalty=penalty,
-                update_feasibility_tol=update_feasibility_tol,
-                update_stationarity_tol=update_stationarity_tol,
-                feasible_stall_count=feasible_stall_count,
-                last_result=last_result,
-                final_eval=final_eval,
-                final_multipliers=final_multipliers,
-                final_penalty=final_penalty,
-                best_feasible=best_feasible,
-                inner_options=inner_options,
+            return _finalize_continuation_step(
+                state, _ALMContinuationDecision.BREAK_OUTER, None
             )
-        if run_state.trust_radius is not None:
-            run_state.trust_radius = max(
-                run_state.trust_radius,
-                max(
-                    settings.trust_radius_min,
-                    float(run_state.trust_radius) * float(settings.trust_radius_grow),
-                ),
-            )
+        _grow_continuation_trust_radius(run_state, settings)
         if not made_inner_progress:
-            update_stationarity_tol = min(
-                update_stationarity_tol,
+            state.update_stationarity_tol = min(
+                state.update_stationarity_tol,
                 max(settings.stationarity_tol, 0.5 * stationarity_norm),
             )
-        history_entry["subproblem_limit_reason"] = None
-        history_entry["action"] = "subproblem_continue"
-        history_entry["trust_radius"] = run_state.trust_radius
-        history_entry["feasible_stall_count"] = int(feasible_stall_count)
-        _emit_alm_history_snapshot(
-            history_callback,
-            run_state.history,
-            history_entry,
-            multipliers,
-            penalty,
-        )
-        return _ALMContinuationStepResult(
-            decision=_ALMContinuationDecision.CONTINUE_CONTINUATION,
-            result=None,
-            multipliers=multipliers,
-            penalty=penalty,
-            update_feasibility_tol=update_feasibility_tol,
-            update_stationarity_tol=update_stationarity_tol,
-            feasible_stall_count=feasible_stall_count,
-            last_result=last_result,
-            final_eval=final_eval,
-            final_multipliers=final_multipliers,
-            final_penalty=final_penalty,
-            best_feasible=best_feasible,
-            inner_options=inner_options,
+        return _emit_alm_subproblem_continue(
+            state=state,
+            run_state=run_state,
+            history_entry=history_entry,
+            history_callback=history_callback,
         )
 
-    penalty_transition = _apply_alm_penalty_increase(
+    return _emit_alm_penalty_increase_arm(
+        state=state,
         settings=settings,
+        run_state=run_state,
         evaluate_problem=evaluate_problem,
-        x=run_state.x,
-        multipliers=multipliers,
-        penalty=penalty,
         history_entry=history_entry,
-        trust_radius=run_state.trust_radius,
-        update_feasibility_tol=update_feasibility_tol,
-        update_stationarity_tol=update_stationarity_tol,
+        history_callback=history_callback,
         constraint_names=constraint_names,
         constraint_names_tuple=constraint_names_tuple,
         constraint_blocks_tuple=constraint_blocks_tuple,
-        history_callback=history_callback,
-        history=run_state.history,
+        last_outer_iteration=last_outer_iteration,
+        restore_incumbent_state_fn=restore_incumbent_state_fn,
+        inner_result=result,
+        is_final_outer=is_final_outer,
+        action="penalty_increase",
     )
-    penalty = penalty_transition.penalty
-    run_state.penalty_cap_reached = penalty_transition.penalty_cap_reached
-    run_state.penalty_cap_requested = penalty_transition.penalty_cap_requested
-    feasible_stall_count = penalty_transition.feasible_stall_count
-    update_feasibility_tol = penalty_transition.update_feasibility_tol
-    update_stationarity_tol = penalty_transition.update_stationarity_tol
-    final_eval = penalty_transition.penalty_update_state.evaluation
-    final_multipliers = multipliers.copy()
-    final_penalty = penalty
-    if penalty_transition.cap_hit:
-        return _ALMContinuationStepResult(
-            decision=_ALMContinuationDecision.RETURN,
-            result=_handle_alm_penalty_cap_termination(
-                settings=settings,
-                constraint_names=constraint_names,
-                run_state=run_state,
-                last_outer_iteration=last_outer_iteration,
-                best_feasible=best_feasible,
-                restore_incumbent_state_fn=restore_incumbent_state_fn,
-                penalty_transition=penalty_transition,
-                multipliers=multipliers,
-                penalty=penalty,
-                result=result,
-            ),
-            multipliers=multipliers,
-            penalty=penalty,
-            update_feasibility_tol=update_feasibility_tol,
-            update_stationarity_tol=update_stationarity_tol,
-            feasible_stall_count=feasible_stall_count,
-            last_result=last_result,
-            final_eval=final_eval,
-            final_multipliers=final_multipliers,
-            final_penalty=final_penalty,
-            best_feasible=best_feasible,
-            inner_options=inner_options,
-        )
-    history_entry["action"] = "penalty_increase"
-    history_entry["trust_radius"] = run_state.trust_radius
-    if is_final_outer:
-        history_entry["outer_termination"] = "max_outer"
-    _emit_alm_history_snapshot(
-        history_callback,
-        run_state.history,
-        history_entry,
-        multipliers,
-        penalty,
-    )
-    return _ALMContinuationStepResult(
-        decision=_ALMContinuationDecision.BREAK_OUTER,
-        result=None,
-        multipliers=multipliers,
-        penalty=penalty,
-        update_feasibility_tol=update_feasibility_tol,
-        update_stationarity_tol=update_stationarity_tol,
-        feasible_stall_count=feasible_stall_count,
-        last_result=last_result,
-        final_eval=final_eval,
-        final_multipliers=final_multipliers,
-        final_penalty=final_penalty,
-        best_feasible=best_feasible,
-        inner_options=inner_options,
+
+
+def _finalize_outer_iteration(
+    step: _ALMContinuationStepResult,
+    decision: _ALMOuterDecision,
+    result: object | None,
+) -> _ALMOuterIterationResult:
+    """Package the latest continuation-step carrier as the frozen outer
+    iteration result. The 11 sticky fields are sourced directly from the
+    continuation step rather than re-listed at every outer return.
+    """
+    return _ALMOuterIterationResult(
+        decision=decision,
+        result=result,
+        multipliers=step.multipliers,
+        penalty=step.penalty,
+        update_feasibility_tol=step.update_feasibility_tol,
+        update_stationarity_tol=step.update_stationarity_tol,
+        last_result=step.last_result,
+        final_eval=step.final_eval,
+        final_multipliers=step.final_multipliers,
+        final_penalty=step.final_penalty,
+        best_feasible=step.best_feasible,
+        inner_options=step.inner_options,
     )
 
 
@@ -4373,28 +4478,16 @@ def _run_alm_outer_iteration(
         best_feasible = step.best_feasible
         inner_options = step.inner_options
         if step.decision == _ALMContinuationDecision.RETURN:
-            return _ALMOuterIterationResult(
-                decision=_ALMOuterDecision.RETURN,
-                result=step.result,
-                multipliers=multipliers,
-                penalty=penalty,
-                update_feasibility_tol=update_feasibility_tol,
-                update_stationarity_tol=update_stationarity_tol,
-                last_result=last_result,
-                final_eval=final_eval,
-                final_multipliers=final_multipliers,
-                final_penalty=final_penalty,
-                best_feasible=best_feasible,
-                inner_options=inner_options,
+            return _finalize_outer_iteration(
+                step, _ALMOuterDecision.RETURN, step.result
             )
         if step.decision == _ALMContinuationDecision.BREAK_OUTER:
             break
+    exhaust_decision = (
+        _ALMOuterDecision.EXHAUST if is_final_outer else _ALMOuterDecision.NEXT_OUTER
+    )
     return _ALMOuterIterationResult(
-        decision=(
-            _ALMOuterDecision.EXHAUST
-            if is_final_outer
-            else _ALMOuterDecision.NEXT_OUTER
-        ),
+        decision=exhaust_decision,
         result=None,
         multipliers=multipliers,
         penalty=penalty,
