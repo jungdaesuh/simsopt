@@ -161,4 +161,5 @@ markers = [
     "single_stage: single-stage optimization tests and probes",
     "stage2: Stage 2 optimization tests and probes",
     "boozer: BoozerSurface and Boozer optimizer tests",
+    "parity_census: derivative-input bit-identity census tests",
 ]

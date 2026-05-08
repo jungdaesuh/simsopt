@@ -1873,6 +1873,25 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(args.target_lane_boozer_newton_tol)
         self.assertIsNone(args.target_lane_boozer_newton_maxiter)
 
+    def test_parse_args_fullgraph_preserves_cpu_boozer_newton_default(self):
+        module = self.load_module()
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--backend",
+                "jax",
+                "--optimizer-backend",
+                "scipy-jax-fullgraph",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertIsNone(args.target_lane_boozer_newton_tol)
+        self.assertIsNone(args.target_lane_boozer_newton_maxiter)
+
     def test_parse_args_preserves_reference_outer_maxls_default(self):
         module = self.load_module()
 
@@ -2630,7 +2649,24 @@ class SingleStageExampleTests(unittest.TestCase):
         }
         boozer_surface = types.SimpleNamespace(
             surface=types.SimpleNamespace(x=np.array([0.1, 0.2])),
-            res={"success": True, "iota": 0.0034, "G": 2.0},
+            options={
+                "optimizer_backend": "scipy",
+                "least_squares_algorithm": "quasi-newton",
+                "newton_tol": 1e-11,
+                "newton_maxiter": 40,
+            },
+            boozer_type="ls",
+            res={
+                "success": True,
+                "iota": 0.0034,
+                "G": 2.0,
+                "linearization_kind": "hessian",
+                "linear_solve_backend": "dense-plu",
+                "dense_linear_solve_factors_available": True,
+                "dense_newton_steps_materialized": True,
+                "newton_iter": 2,
+                "final_gradient_norm": 1e-12,
+            },
         )
         adapter = module.SingleStageAdapter(
             run_dict=run_dict,
@@ -2676,14 +2712,42 @@ class SingleStageExampleTests(unittest.TestCase):
         }
         boozer_surface = types.SimpleNamespace(
             surface=types.SimpleNamespace(x=np.array([0.1, 0.2])),
-            res={"success": True, "iota": 0.0034, "G": 2.0},
+            options={
+                "optimizer_backend": "scipy",
+                "least_squares_algorithm": "quasi-newton",
+                "newton_tol": 1e-11,
+                "newton_maxiter": 40,
+            },
+            boozer_type="ls",
+            res={
+                "success": True,
+                "iota": 0.0034,
+                "G": 2.0,
+                "linearization_kind": "hessian",
+                "linear_solve_backend": "dense-plu",
+                "dense_linear_solve_factors_available": True,
+                "dense_newton_steps_materialized": True,
+                "newton_iter": 2,
+                "final_gradient_norm": 1e-12,
+            },
         )
+        class _Component:
+            def J(self):
+                return 0.5
+
+            def dJ(self, *, partials=False):
+                if partials:
+                    return lambda _target: np.array([1.0, 2.0, 3.0])
+                return np.array([1.0, 2.0, 3.0])
+
+        component = _Component()
         adapter = module.SingleStageAdapter(
             run_dict=run_dict,
             boozer_surface=boozer_surface,
             JF=object(),
             bs=object(),
-            objectives={},
+            objectives={"qs": component},
+            objective_weights={"qs": 2.0},
             diagnostics={},
             log_path="unused.log",
             apply_coil_dofs=lambda _x: None,
@@ -2708,9 +2772,42 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(event["candidate_optimizer_dofs"]["values"], [1.0, 2.0, 3.0])
         self.assertEqual(event["objective"]["value"], 1.25)
         self.assertEqual(event["native_gradient"]["inf_norm"], 30.0)
+        self.assertEqual(event["native_gradient"]["values"], [10.0, 20.0, 30.0])
         self.assertEqual(event["optimizer_gradient"]["inf_norm"], 30.0)
+        self.assertEqual(event["optimizer_gradient"]["values"], [10.0, 30.0, 20.0])
+        self.assertEqual(event["objective_components"]["qs"]["weight"], 2.0)
+        self.assertEqual(
+            event["objective_components"]["qs"]["gradient_basis"],
+            "optimizer",
+        )
+        self.assertEqual(event["objective_components"]["qs"]["objective"]["value"], 0.5)
+        self.assertEqual(
+            event["objective_components"]["qs"]["weighted_objective"]["value"],
+            1.0,
+        )
+        self.assertEqual(
+            event["objective_components"]["qs"]["gradient"]["values"],
+            [1.0, 3.0, 2.0],
+        )
+        self.assertEqual(
+            event["objective_components"]["qs"]["weighted_gradient"]["values"],
+            [2.0, 6.0, 4.0],
+        )
         self.assertTrue(event["native_gradient_used"])
         self.assertTrue(event["solver_success"])
+        self.assertEqual(event["boozer_solver_metadata"]["boozer_type"], "ls")
+        self.assertEqual(
+            event["boozer_solver_metadata"]["boozer_optimizer_backend"],
+            "scipy",
+        )
+        self.assertEqual(
+            event["boozer_solver_metadata"]["linear_solve_backend"],
+            "dense-plu",
+        )
+        self.assertTrue(
+            event["boozer_solver_metadata"]["dense_newton_steps_materialized"]
+        )
+        self.assertIsNone(event["iota_penalty_decomposition"])
         self.assertEqual(event["boozer_iota"]["value"], 0.0034)
         self.assertEqual(event["boozer_surface_dofs"]["values"], [0.1, 0.2])
         self.assertTrue(event["hardware_status"]["success"])
@@ -2750,6 +2847,51 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertFalse(events[0]["solver_success"])
         self.assertIsNone(events[0]["boozer_surface_dofs"])
+
+    def test_objective_evaluation_trace_replay_syncs_each_iteration_group(self):
+        module = self.load_module()
+
+        class FakeAdapter:
+            def __init__(self):
+                self.calls = []
+                self.syncs = []
+
+            def __call__(self, x):
+                self.calls.append(np.asarray(x, dtype=np.float64).copy())
+                return 0.0, np.zeros_like(x, dtype=np.float64)
+
+            def sync_accepted_step(self, x):
+                self.syncs.append(np.asarray(x, dtype=np.float64).copy())
+
+        adapter = FakeAdapter()
+        events = [
+            {
+                "accepted_iteration_target": 1,
+                "candidate_optimizer_dofs": {"values": [1.0, 0.0]},
+            },
+            {
+                "accepted_iteration_target": 1,
+                "candidate_optimizer_dofs": {"values": [2.0, 0.0]},
+            },
+            {
+                "accepted_iteration_target": 2,
+                "candidate_optimizer_dofs": {"values": [3.0, 0.0]},
+            },
+        ]
+
+        result = module.run_single_stage_objective_evaluation_trace_replay(
+            adapter,
+            events,
+        )
+
+        self.assertEqual(result.nit, 2)
+        self.assertEqual(result.nfev, 3)
+        np.testing.assert_array_equal(result.x, np.array([3.0, 0.0]))
+        np.testing.assert_array_equal(adapter.calls[0], np.array([1.0, 0.0]))
+        np.testing.assert_array_equal(adapter.calls[1], np.array([2.0, 0.0]))
+        np.testing.assert_array_equal(adapter.calls[2], np.array([3.0, 0.0]))
+        np.testing.assert_array_equal(adapter.syncs[0], np.array([2.0, 0.0]))
+        np.testing.assert_array_equal(adapter.syncs[1], np.array([3.0, 0.0]))
 
     def test_single_stage_runtime_stage2_seed_payload_requires_order(self):
         module = self.load_module()
@@ -5030,6 +5172,24 @@ class SingleStageExampleTests(unittest.TestCase):
         ):
             module.resolve_target_lane_boozer_newton_tol("jax", "ondevice", 0.0)
 
+    def test_resolve_target_lane_boozer_newton_tol_preserves_fullgraph_default(self):
+        module = self.load_module()
+
+        self.assertIsNone(
+            module.resolve_target_lane_boozer_newton_tol(
+                "jax",
+                "scipy-jax-fullgraph",
+                None,
+            )
+        )
+        self.assertIsNone(
+            module.resolve_target_lane_boozer_newton_tol(
+                "cpu",
+                "scipy",
+                None,
+            )
+        )
+
     def test_resolve_target_lane_boozer_newton_maxiter_rejects_nonpositive_override(
         self,
     ):
@@ -6011,6 +6171,7 @@ class SingleStageExampleTests(unittest.TestCase):
         )
         runtime_summary["hardware_status"] = {
             "success": None,
+            "violation_keys": ["skipped_in_benchmark_mode"],
             "violations": ["skipped_in_benchmark_mode"],
         }
         run_dict = {
@@ -6056,6 +6217,10 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsNone(metrics["curve_surface_min_dist"])
         self.assertIsNone(metrics["surface_vessel_min_dist"])
         self.assertIsNone(metrics["hardware_status"]["success"])
+        self.assertEqual(
+            metrics["hardware_status"]["violation_keys"],
+            ["skipped_in_benchmark_mode"],
+        )
         self.assertEqual(
             metrics["hardware_status"]["violations"],
             ["skipped_in_benchmark_mode"],
@@ -11478,6 +11643,74 @@ class SingleStageExampleTests(unittest.TestCase):
             run_dict["adaptive_failure_penalty_weight"],
         )
 
+    def test_failure_penalty_uses_primary_reject_class_for_intersections(self):
+        module = self.load_module()
+
+        class _BoozerSurface:
+            res = {"success": False, "residual": np.array([0.1])}
+
+        run_dict = {
+            "x_prev": np.zeros(2),
+            "J": 2.0,
+            "dJ": np.zeros(2),
+            "adaptive_failure_penalty_weight": 1.25,
+            "failure_count": 0,
+            "search_policy": "preserve_first",
+            "donor_class": "serialized_surface_state",
+        }
+
+        penalty, summary = module.compute_single_stage_failure_penalty(
+            np.zeros(2),
+            run_dict,
+            _BoozerSurface(),
+            success_solve=False,
+            is_intersecting=True,
+            hardware_status=None,
+        )
+
+        self.assertEqual(summary["reject_class"], "self_intersection")
+        self.assertEqual(summary["solver_score"], 0.0)
+        self.assertEqual(summary["residual_inf"], 0.1)
+        self.assertAlmostEqual(summary["penalty_multiplier"], 1.75)
+        self.assertAlmostEqual(penalty, 3.5)
+
+    def test_failure_penalty_reject_class_is_class_exclusive(self):
+        module = self.load_module()
+
+        class _BoozerSurface:
+            res = {"success": False, "residual": np.array([3.0])}
+
+        run_dict = {
+            "x_prev": np.zeros(2),
+            "J": 4.0,
+            "dJ": np.zeros(2),
+            "adaptive_failure_penalty_weight": 1.25,
+            "failure_count": 0,
+            "search_policy": "preserve_first",
+            "donor_class": "serialized_surface_state",
+        }
+        hardware_status = {
+            "success": False,
+            "violation_keys": ["curve_curve_min_dist", "max_curvature"],
+            "violations": ["unused text"],
+        }
+
+        penalty, summary = module.compute_single_stage_failure_penalty(
+            np.zeros(2),
+            run_dict,
+            _BoozerSurface(),
+            success_solve=False,
+            is_intersecting=True,
+            hardware_status=hardware_status,
+        )
+
+        self.assertEqual(summary["reject_class"], "self_intersection")
+        self.assertEqual(summary["solver_score"], 0.0)
+        self.assertEqual(summary["hardware_score"], 0.0)
+        self.assertEqual(summary["self_intersection_score"], 0.5)
+        self.assertAlmostEqual(summary["penalty_multiplier"], 1.75)
+        self.assertAlmostEqual(penalty, 7.0)
+
     def test_snapshot_restore_round_trip(self):
         """Wave 1.4: snapshot → restore → snapshot produces identical arrays."""
         module = self.load_module()
@@ -12156,6 +12389,78 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(recorded["iota"], 0.15)
         self.assertEqual(recorded["G"], 1.0)
 
+    def test_iota_penalty_decomposition_records_legacy_adjoint_layers(self):
+        module = self.load_module()
+        jf = module.Optimizable(x0=np.zeros(2))
+        factors = tuple(np.eye(3) for _ in range(3))
+        recorded = {}
+
+        class _AdjointState:
+            linearization_kind = "hessian"
+            linear_solve_backend = "dense-plu"
+            linear_solve_factors = factors
+            decision_size = 3
+
+            def solve_transpose(self, rhs):
+                recorded["rhs"] = np.asarray(rhs)
+                return np.array([1.0, 2.0, 3.0])
+
+            def project_coil_adjoint_derivative(self, adjoint):
+                recorded["adjoint"] = np.asarray(adjoint)
+                return module.Derivative({jf: np.array([4.0, 6.0])})
+
+        class _Surface:
+            x = np.array([0.25, 0.5])
+
+        class _BoozerSurface:
+            surface = _Surface()
+            res = {
+                "iota": 0.15,
+                "G": 1.0,
+                "PLU": factors,
+            }
+
+            def get_adjoint_runtime_state(self):
+                return _AdjointState()
+
+        class _RawIota:
+            boozer_surface = _BoozerSurface()
+
+            def J(self):
+                return 0.15
+
+        class _IotaPenalty:
+            obj = _RawIota()
+            cons = 0.1
+            f = "identity"
+
+            def J(self):
+                return 0.5 * (self.obj.J() - self.cons) ** 2
+
+        summary = module.summarize_single_stage_iota_penalty_decomposition(
+            _IotaPenalty(),
+            weight=10.0,
+            JF=jf,
+            optimizer_gradient=lambda gradient: np.asarray(gradient)[::-1],
+        )
+
+        np.testing.assert_allclose(recorded["rhs"], np.array([0.0, 1.0, 0.0]))
+        np.testing.assert_allclose(recorded["adjoint"], np.array([1.0, 2.0, 3.0]))
+        self.assertEqual(summary["projection_route"], "legacy_derivative")
+        self.assertEqual(summary["linear_solve_backend"], "dense-plu")
+        self.assertEqual(summary["dJ_ds"]["values"], [0.0, 1.0, 0.0])
+        self.assertEqual(summary["adjoint"]["values"], [1.0, 2.0, 3.0])
+        self.assertEqual(summary["native_projection_gradient"]["values"], [-4.0, -6.0])
+        self.assertEqual(
+            summary["optimizer_projection_gradient"]["values"],
+            [-6.0, -4.0],
+        )
+        self.assertEqual(summary["penalty_scale"]["value"], 0.04999999999999999)
+        np.testing.assert_allclose(
+            summary["weighted_penalty_optimizer_gradient"]["values"],
+            [-3.0, -2.0],
+        )
+
     def test_snapshot_to_pytree_accepts_deferred_surface_parent_graph(self):
         module = self.load_module()
         from simsopt.geo.surfacerzfourier import SurfaceRZFourier
@@ -12629,6 +12934,7 @@ class HardwareConstraintTests(unittest.TestCase):
         )
 
         self.assertTrue(status["success"])
+        self.assertEqual(status["violation_keys"], [])
         self.assertEqual(status["violations"], [])
 
     def test_stage2_hardware_constraints_report_each_violation(self):
@@ -12644,6 +12950,10 @@ class HardwareConstraintTests(unittest.TestCase):
         )
 
         self.assertFalse(status["success"])
+        self.assertEqual(
+            status["violation_keys"],
+            ["coil_coil_spacing", "max_curvature", "coil_length"],
+        )
         self.assertEqual(len(status["violations"]), 3)
         self.assertEqual(
             set(status["violations"]),
@@ -12668,6 +12978,7 @@ class HardwareConstraintTests(unittest.TestCase):
         )
 
         self.assertFalse(status["success"])
+        self.assertEqual(status["violation_keys"], ["self_intersection"])
         self.assertEqual(status["violations"], ["banana_curve is self-intersecting"])
 
     def test_stage2_hardware_constraints_report_isolated_violations(self):
@@ -12789,6 +13100,12 @@ class HardwareConstraintTests(unittest.TestCase):
         )
 
         self.assertTrue(status["success"])
+        self.assertEqual(status["violation_keys"], [])
+        self.assertAlmostEqual(
+            status["threshold_margins"]["curve_curve_min_dist"],
+            0.0,
+        )
+        self.assertAlmostEqual(status["threshold_margins"]["max_curvature"], 0.0)
         self.assertEqual(status["violations"], [])
 
     def test_single_stage_hardware_constraints_report_each_violation(self):
@@ -12806,6 +13123,17 @@ class HardwareConstraintTests(unittest.TestCase):
         )
 
         self.assertFalse(status["success"])
+        self.assertEqual(
+            status["violation_keys"],
+            [
+                "curve_curve_min_dist",
+                "curve_surface_min_dist",
+                "surface_vessel_min_dist",
+                "max_curvature",
+            ],
+        )
+        self.assertLess(status["threshold_margins"]["curve_curve_min_dist"], 0.0)
+        self.assertLess(status["threshold_margins"]["max_curvature"], 0.0)
         self.assertEqual(len(status["violations"]), 4)
         self.assertIn("coil_coil_min_dist", status["violations"][0])
         self.assertIn("coil_surface_min_dist", status["violations"][1])
@@ -13073,7 +13401,7 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertFalse(run_dict["hardware_constraint_status"]["success"])
         self.assertEqual(run_dict["failure_count"], 1)
         failure_summary = run_dict["last_candidate_failure"]
-        self.assertGreater(failure_summary["hardware_score"], 0.0)
+        self.assertEqual(failure_summary["hardware_score"], 0.5)
         self.assertTrue(failure_summary["solver_success"])
         self.assertAlmostEqual(failure_summary["penalty"], J_out - last_J)
 

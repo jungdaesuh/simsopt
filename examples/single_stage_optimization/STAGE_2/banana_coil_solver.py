@@ -201,6 +201,10 @@ def evaluate_stage2_hardware_constraints(
         status = {
             **status,
             "success": False,
+            "violation_keys": [
+                *status["violation_keys"],
+                "self_intersection",
+            ],
             "violations": [*status["violations"], "banana_curve is self-intersecting"],
         }
     status["self_intersecting"] = bool(self_intersecting)

@@ -125,6 +125,7 @@ from .optimizer_jax import (
     target_least_squares,
     target_minimize,
 )
+
 __all__ = ["BoozerSurfaceJAX", "build_boozer_surface_runtime_state"]
 
 
@@ -456,6 +457,29 @@ class _BoozerToroidalFluxFieldTerms:
     dB_dX: jax.Array
     A: jax.Array
     dA_dX: jax.Array
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class _BoozerPenaltyVectorizedInputs:
+    """Boundary inputs to ``boozer_residual_scalar_and_grad_cpu_ordered``.
+
+    The same arrays are produced by both
+    ``BoozerSurface._boozer_penalty_vectorized_inputs`` (CPU C++ path) and
+    ``_boozer_penalty_value_and_grad_inputs_cpu_ordered`` (JAX path). The
+    bit-identity census materializes JAX arrays via ``jax.device_get`` and
+    compares the float64 byte representations name-for-name.
+    """
+
+    G_value: jax.Array
+    iota: jax.Array
+    B: jax.Array
+    dB_dX: jax.Array
+    xphi: jax.Array
+    xtheta: jax.Array
+    dx_ds: jax.Array
+    dxphi_ds: jax.Array
+    dxtheta_ds: jax.Array
 
 
 @jax.tree_util.register_dataclass
@@ -874,7 +898,49 @@ def _geometry_from_surface_dofs(
     stellsym,
     scatter_indices,
     surface_kind,
+    parity_policy: str = "production",
 ):
+    if parity_policy == "cpu_ordered" and surface_kind in (
+        "generic",
+        "xyztensorfourier",
+    ):
+        from .surface_fourier_jax_cpu_ordered import (  # noqa: PLC0415
+            surface_gamma_from_dofs_cpu_ordered,
+            surface_gammadash1_from_dofs_cpu_ordered,
+            surface_gammadash2_from_dofs_cpu_ordered,
+        )
+
+        gamma = surface_gamma_from_dofs_cpu_ordered(
+            surface_dofs,
+            quadpoints_phi,
+            quadpoints_theta,
+            mpol,
+            ntor,
+            nfp,
+            stellsym,
+            scatter_indices=scatter_indices,
+        )
+        xphi = surface_gammadash1_from_dofs_cpu_ordered(
+            surface_dofs,
+            quadpoints_phi,
+            quadpoints_theta,
+            mpol,
+            ntor,
+            nfp,
+            stellsym,
+            scatter_indices=scatter_indices,
+        )
+        xtheta = surface_gammadash2_from_dofs_cpu_ordered(
+            surface_dofs,
+            quadpoints_phi,
+            quadpoints_theta,
+            mpol,
+            ntor,
+            nfp,
+            stellsym,
+            scatter_indices=scatter_indices,
+        )
+        return _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta)
     gamma, xphi, xtheta = _surface_geometry_from_dofs(
         surface_dofs,
         quadpoints_phi,
@@ -985,9 +1051,28 @@ def _field_terms_for_local_label(
     label_field_shape,
     coil_set_spec=None,
     group=None,
+    parity_policy: str = "production",
 ):
     del label_points, label_field_shape
-    if group is None:
+    if parity_policy == "cpu_ordered":
+        from ..jax_core.biotsavart_cpu_ordered import (  # noqa: PLC0415
+            biot_savart_B_and_dB_cpu_ordered,
+        )
+        from ..jax_core.field import grouped_field_inputs_from_spec  # noqa: PLC0415
+
+        if group is not None:
+            B, dB_dX = biot_savart_B_and_dB_cpu_ordered(points, *group)
+        else:
+            inputs = grouped_field_inputs_from_spec(coil_set_spec)
+            B = None
+            dB_dX = None
+            for gammas, gammadashs, currents in inputs:
+                B_g, dB_g = biot_savart_B_and_dB_cpu_ordered(
+                    points, gammas, gammadashs, currents
+                )
+                B = B_g if B is None else B + B_g
+                dB_dX = dB_g if dB_dX is None else dB_dX + dB_g
+    elif group is None:
         B, dB_dX = grouped_biot_savart_B_and_dB_from_spec(points, coil_set_spec)
     else:
         (B, dB_dX), _config = _evaluate_grouped_field_group(
@@ -1051,7 +1136,40 @@ def _surface_geometry_and_derivatives_from_dofs(
     stellsym,
     scatter_indices,
     surface_kind,
+    parity_policy: str = "production",
 ):
+    """Evaluate geometry and its DOF Jacobian.
+
+    Args:
+        parity_policy:
+            * ``"production"`` (default) — use the matmul/einsum hot path and
+              ``jax.jacfwd`` for the coefficient Jacobians. Same behavior the
+              JAX backend has shipped since M3.
+            * ``"cpu_ordered"`` — route through
+              :mod:`simsopt.geo.surface_fourier_jax_cpu_ordered`. Mirrors the
+              C++ ``surfacexyztensorfourier.h`` accumulation order; used by
+              the strict bit-identity census ladder
+              (``docs/boozer_derivative_bit_identity_impl_plan_2026-05-07.md``
+              Phase 2). Today this kernel set is implemented for
+              ``surface_kind in {"generic", "xyztensorfourier"}``; other
+              surface kinds fall back to ``"production"`` and the census will
+              keep flagging the residual drift.
+    """
+    if parity_policy == "cpu_ordered" and surface_kind in (
+        "generic",
+        "xyztensorfourier",
+    ):
+        return _surface_geometry_and_derivatives_cpu_ordered(
+            surface_dofs,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+            mpol=mpol,
+            ntor=ntor,
+            nfp=nfp,
+            stellsym=stellsym,
+            scatter_indices=scatter_indices,
+        )
+
     def geometry_arrays(sdofs):
         return _surface_geometry_from_dofs(
             sdofs,
@@ -1067,6 +1185,95 @@ def _surface_geometry_and_derivatives_from_dofs(
 
     gamma, xphi, xtheta = geometry_arrays(surface_dofs)
     dgamma, dxphi, dxtheta = jax.jacfwd(geometry_arrays)(surface_dofs)
+    return (
+        _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta),
+        _BoozerPenaltyGeometry(gamma=dgamma, xphi=dxphi, xtheta=dxtheta),
+    )
+
+
+def _surface_geometry_and_derivatives_cpu_ordered(
+    surface_dofs,
+    *,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+):
+    """CPU-ordered geometry + analytic-Jacobian path for parity census.
+
+    Geometry values come from the operator-for-operator C++ twins in
+    :mod:`simsopt.geo.surface_fourier_jax_cpu_ordered`; the coefficient
+    Jacobians come from the analytic ``dgamma_by_dcoeff`` family rather than
+    ``jax.jacfwd`` (per the plan §8 risk register: ``jacfwd`` over the parity
+    twins may still pick a derivative arithmetic order that differs from the
+    C++ analytic kernels).
+    """
+    from .surface_fourier_jax_cpu_ordered import (  # noqa: PLC0415 - parity-only
+        surface_gamma_from_dofs_cpu_ordered,
+        surface_gammadash1_from_dofs_cpu_ordered,
+        surface_gammadash2_from_dofs_cpu_ordered,
+        dgamma_by_dcoeff_cpu_ordered,
+        dgammadash1_by_dcoeff_cpu_ordered,
+        dgammadash2_by_dcoeff_cpu_ordered,
+    )
+
+    gamma = surface_gamma_from_dofs_cpu_ordered(
+        surface_dofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        scatter_indices=scatter_indices,
+    )
+    xphi = surface_gammadash1_from_dofs_cpu_ordered(
+        surface_dofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        scatter_indices=scatter_indices,
+    )
+    xtheta = surface_gammadash2_from_dofs_cpu_ordered(
+        surface_dofs,
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol,
+        ntor,
+        nfp,
+        stellsym,
+        scatter_indices=scatter_indices,
+    )
+    dgamma = dgamma_by_dcoeff_cpu_ordered(
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+    )
+    dxphi = dgammadash1_by_dcoeff_cpu_ordered(
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+    )
+    dxtheta = dgammadash2_by_dcoeff_cpu_ordered(
+        quadpoints_phi,
+        quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+    )
     return (
         _BoozerPenaltyGeometry(gamma=gamma, xphi=xphi, xtheta=xtheta),
         _BoozerPenaltyGeometry(gamma=dgamma, xphi=dxphi, xtheta=dxtheta),
@@ -1118,6 +1325,7 @@ def _label_value_from_surface_dofs(
     label_surface_kind,
     label_type,
     phi_idx,
+    parity_policy: str = "production",
 ):
     label_geometry = _geometry_from_surface_dofs(
         surface_dofs,
@@ -1129,6 +1337,7 @@ def _label_value_from_surface_dofs(
         stellsym=label_stellsym,
         scatter_indices=label_scatter_indices,
         surface_kind=label_surface_kind,
+        parity_policy=parity_policy,
     )
     return _compute_label(
         label_type,
@@ -1138,6 +1347,91 @@ def _label_value_from_surface_dofs(
         coil_arrays=coil_arrays,
         coil_set_spec=coil_set_spec,
     )
+
+
+def _boozer_penalty_value_and_grad_inputs_cpu_ordered(
+    x,
+    *,
+    coil_arrays=None,
+    coil_set_spec=None,
+    quadpoints_phi,
+    quadpoints_theta,
+    mpol,
+    ntor,
+    nfp,
+    stellsym,
+    scatter_indices,
+    surface_kind,
+    optimize_G,
+    parity_policy: str = "production",
+):
+    """Materialize the inputs consumed by
+    :func:`boozer_residual_scalar_and_grad_cpu_ordered`.
+
+    The same factoring backs both the production
+    ``_boozer_penalty_value_and_grad_cpu_ordered`` and the bit-identity
+    census reproducer; see
+    ``docs/boozer_derivative_bit_identity_impl_plan_2026-05-07.md`` Phase 1.
+
+    The returned ``_BoozerPenaltyVectorizedInputs`` is a JAX pytree, so this
+    helper is safe to call inside a traced computation. The census layer
+    materializes the arrays with ``jax.device_get`` after the trace.
+
+    Args:
+        parity_policy: ``"production"`` (default) routes through the matmul /
+            ``jax.jacfwd`` hot path; ``"cpu_ordered"`` selects the C++-ordered
+            surface kernels in ``surface_fourier_jax_cpu_ordered``. Phase 2
+            of the bit-identity plan exercises ``"cpu_ordered"``.
+
+    Returns:
+        Tuple of (optimizer_state, geometry, geometry_derivative, inputs).
+
+        ``inputs`` is the boundary record fed to
+        ``boozer_residual_scalar_and_grad_cpu_ordered``;
+        ``geometry`` and ``geometry_derivative`` are returned alongside
+        because the production caller still needs ``geometry.gamma``,
+        ``geometry_derivative.gamma`` for the rz-axis penalty term.
+    """
+    optimizer_state = _as_boozer_penalty_optimizer_state(x, optimize_G=optimize_G)
+    geometry, geometry_derivative = _surface_geometry_and_derivatives_from_dofs(
+        optimizer_state.surface_dofs,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        mpol=mpol,
+        ntor=ntor,
+        nfp=nfp,
+        stellsym=stellsym,
+        scatter_indices=scatter_indices,
+        surface_kind=surface_kind,
+        parity_policy=parity_policy,
+    )
+    G_value = (
+        optimizer_state.G
+        if optimize_G
+        else compute_G_from_currents(
+            _grouped_coil_currents(coil_arrays=coil_arrays, coil_set_spec=coil_set_spec)
+        )
+    )
+    field_terms = _field_terms_for_local_label(
+        _field_points_from_geometry(geometry),
+        _field_shape_from_geometry(geometry),
+        label_points=None,
+        label_field_shape=None,
+        coil_set_spec=coil_set_spec,
+        parity_policy=parity_policy,
+    )
+    inputs = _BoozerPenaltyVectorizedInputs(
+        G_value=G_value,
+        iota=optimizer_state.iota,
+        B=field_terms.B,
+        dB_dX=field_terms.dB_dX,
+        xphi=geometry.xphi,
+        xtheta=geometry.xtheta,
+        dx_ds=geometry_derivative.gamma,
+        dxphi_ds=geometry_derivative.xphi,
+        dxtheta_ds=geometry_derivative.xtheta,
+    )
+    return optimizer_state, geometry, geometry_derivative, inputs
 
 
 def _boozer_penalty_value_and_grad_cpu_ordered(
@@ -1167,43 +1461,35 @@ def _boozer_penalty_value_and_grad_cpu_ordered(
     phi_idx,
     optimize_G,
     weight_inv_modB,
+    parity_policy: str = "production",
 ):
-    optimizer_state = _as_boozer_penalty_optimizer_state(x, optimize_G=optimize_G)
-    geometry, geometry_derivative = _surface_geometry_and_derivatives_from_dofs(
-        optimizer_state.surface_dofs,
-        quadpoints_phi=quadpoints_phi,
-        quadpoints_theta=quadpoints_theta,
-        mpol=mpol,
-        ntor=ntor,
-        nfp=nfp,
-        stellsym=stellsym,
-        scatter_indices=scatter_indices,
-        surface_kind=surface_kind,
-    )
-    G_value = (
-        optimizer_state.G
-        if optimize_G
-        else compute_G_from_currents(
-            _grouped_coil_currents(coil_arrays=coil_arrays, coil_set_spec=coil_set_spec)
+    optimizer_state, geometry, geometry_derivative, inputs = (
+        _boozer_penalty_value_and_grad_inputs_cpu_ordered(
+            x,
+            coil_arrays=coil_arrays,
+            coil_set_spec=coil_set_spec,
+            quadpoints_phi=quadpoints_phi,
+            quadpoints_theta=quadpoints_theta,
+            mpol=mpol,
+            ntor=ntor,
+            nfp=nfp,
+            stellsym=stellsym,
+            scatter_indices=scatter_indices,
+            surface_kind=surface_kind,
+            optimize_G=optimize_G,
+            parity_policy=parity_policy,
         )
     )
-    field_terms = _field_terms_for_local_label(
-        _field_points_from_geometry(geometry),
-        _field_shape_from_geometry(geometry),
-        label_points=None,
-        label_field_shape=None,
-        coil_set_spec=coil_set_spec,
-    )
     value, gradient = boozer_residual_scalar_and_grad_cpu_ordered(
-        G_value,
-        optimizer_state.iota,
-        field_terms.B,
-        field_terms.dB_dX,
-        geometry.xphi,
-        geometry.xtheta,
-        geometry_derivative.gamma,
-        geometry_derivative.xphi,
-        geometry_derivative.xtheta,
+        inputs.G_value,
+        inputs.iota,
+        inputs.B,
+        inputs.dB_dX,
+        inputs.xphi,
+        inputs.xtheta,
+        inputs.dx_ds,
+        inputs.dxphi_ds,
+        inputs.dxtheta_ds,
         optimize_G=optimize_G,
         weight_inv_modB=weight_inv_modB,
     )
@@ -1222,16 +1508,13 @@ def _boozer_penalty_value_and_grad_cpu_ordered(
         label_surface_kind=label_surface_kind,
         label_type=label_type,
         phi_idx=phi_idx,
+        parity_policy=parity_policy,
     )
     constraint_weight = _as_jax_float64(constraint_weight)
     weight_sqrt = jnp.sqrt(constraint_weight)
     rl = weight_sqrt * (label_value - _as_jax_float64(targetlabel))
     rz = weight_sqrt * _surface_sample_z(geometry.gamma)
-    value = (
-        value
-        + _as_jax_float64(0.5) * rl * rl
-        + _as_jax_float64(0.5) * rz * rz
-    )
+    value = value + _as_jax_float64(0.5) * rl * rl + _as_jax_float64(0.5) * rz * rz
 
     surface_size = optimizer_state.surface_dofs.shape[0]
     surface_gradient = (
@@ -2008,13 +2291,18 @@ def _build_ls_group_vjp_callback(
 
     def vjp_groups(lm, _booz_surf, _iota, _G):
         current_generation = getattr(booz_surf, "_solver_generation", None)
-        if booz_surf.need_to_run_code or current_generation != snapshot.solver_generation:
+        if (
+            booz_surf.need_to_run_code
+            or current_generation != snapshot.solver_generation
+        ):
             raise RuntimeError(
                 "BoozerSurfaceJAX LS grouped VJP callback is stale; "
                 "re-run boozer_surface.run_code(...) before requesting adjoints."
             )
         bar_field_terms, bar_G = _ls_field_term_cotangents(snapshot, lm)
-        field_terms_builder = _select_structured_field_terms_builder(snapshot.label_type)
+        field_terms_builder = _select_structured_field_terms_builder(
+            snapshot.label_type
+        )
         points = _field_points_from_geometry(snapshot.geometry)
         field_shape = _field_shape_from_geometry(snapshot.geometry)
         label_points = _field_points_from_geometry(snapshot.label_geometry)
@@ -2067,7 +2355,9 @@ def _build_ls_grouped_vjp_snapshot(
         optimize_G=optimize_G,
     )
     coil_currents = _grouped_coil_currents(coil_set_spec=coil_set_spec)
-    G_value = optimizer_state.G if optimize_G else compute_G_from_currents(coil_currents)
+    G_value = (
+        optimizer_state.G if optimize_G else compute_G_from_currents(coil_currents)
+    )
     label_geometry = _geometry_from_surface_dofs(
         optimizer_state.surface_dofs,
         quadpoints_phi=booz_surf.label_quadpoints_phi,
@@ -2730,9 +3020,7 @@ class BoozerSurfaceJAX(Optimizable):
         )
         if self.boozer_type == "ls":
             if self.options["optimizer_backend"] not in VALID_OPTIMIZER_BACKENDS:
-                raise ValueError(
-                    "optimizer_backend must be one of: scipy, ondevice."
-                )
+                raise ValueError("optimizer_backend must be one of: scipy, ondevice.")
 
         runtime_state = (
             surface_runtime_state
@@ -2866,9 +3154,7 @@ class BoozerSurfaceJAX(Optimizable):
             if solve_transpose_with_status is None:
                 solve_transpose_with_status = solve_forward_with_status
             solve_forward_with_status = _with_host_status(solve_forward_with_status)
-            solve_transpose_with_status = _with_host_status(
-                solve_transpose_with_status
-            )
+            solve_transpose_with_status = _with_host_status(solve_transpose_with_status)
             return (
                 linearization_kind,
                 x.shape[0],
@@ -2894,7 +3180,9 @@ class BoozerSurfaceJAX(Optimizable):
             H_host = P_host @ L_host @ U_host
 
             def apply_forward(rhs):
-                return jnp.asarray(H_host @ np.asarray(rhs, dtype=np.float64), dtype=x.dtype)
+                return jnp.asarray(
+                    H_host @ np.asarray(rhs, dtype=np.float64), dtype=x.dtype
+                )
 
             def apply_transpose(rhs):
                 return jnp.asarray(
@@ -3025,7 +3313,9 @@ class BoozerSurfaceJAX(Optimizable):
             )
 
         if linearization_kind == "exact_jacobian":
-            residual_fn = self._make_exact_residual(self._compute_stellsym_mask_indices())
+            residual_fn = self._make_exact_residual(
+                self._compute_stellsym_mask_indices()
+            )
             operator = _optimizer_jax._jacobian_linear_operator(residual_fn, x)
 
             def solve_jacobian_system_with_status(rhs, *, transpose):
@@ -3395,7 +3685,15 @@ class BoozerSurfaceJAX(Optimizable):
         coil_set_spec=None,
         coil_arrays=None,
     ):
-        """Build the host-SciPy Boozer LS value/gradient parity closure."""
+        """Build the host-SciPy Boozer LS value/gradient parity closure.
+
+        Selects the surface and Biot-Savart parity twins automatically when
+        :func:`simsopt.backend.is_parity_mode` returns ``True``
+        (``SIMSOPT_BACKEND_MODE`` set to ``jax_cpu_parity`` or
+        ``jax_gpu_parity``). Production modes keep the matmul/jacfwd hot
+        path. The cache key includes the resolved policy so production and
+        parity closures do not collide.
+        """
         resolved_coil_set_spec = _hostify_tree(
             _resolved_coil_set_spec(
                 self.coil_set_spec,
@@ -3404,12 +3702,18 @@ class BoozerSurfaceJAX(Optimizable):
             )
         )
         resolved_constraint_weight = self._resolve_constraint_weight(constraint_weight)
+        parity_policy = "cpu_ordered" if is_parity_mode() else "production"
+        boozer_reduction_mode = (
+            "cpu_ordered_value_and_grad_parity_twins"
+            if parity_policy == "cpu_ordered"
+            else "cpu_ordered_value_and_grad"
+        )
         key = self._reference_penalty_cache_key(
             optimize_G,
             weight_inv_modB,
             resolved_constraint_weight,
             resolved_coil_set_spec,
-            boozer_reduction_mode="cpu_ordered_value_and_grad",
+            boozer_reduction_mode=boozer_reduction_mode,
         )
         objective_fn = self._reference_penalty_value_and_grad_cache.get(key)
         if objective_fn is None:
@@ -3439,6 +3743,7 @@ class BoozerSurfaceJAX(Optimizable):
                 phi_idx=self.phi_idx,
                 optimize_G=optimize_G,
                 weight_inv_modB=weight_inv_modB,
+                parity_policy=parity_policy,
             )
             objective_fn = jax.jit(objective_fn)
             self._reference_penalty_value_and_grad_cache[key] = objective_fn
@@ -4053,9 +4358,8 @@ class BoozerSurfaceJAX(Optimizable):
             optimize_G,
             coil_set_spec=coil_set_spec,
         )
-        finite = (
-            jnp.all(jnp.isfinite(newton_result["x"]))
-            & jnp.all(jnp.isfinite(newton_result["grad"]))
+        finite = jnp.all(jnp.isfinite(newton_result["x"])) & jnp.all(
+            jnp.isfinite(newton_result["grad"])
         )
         hessian = newton_result["hessian"]
         if hessian is not None:
@@ -4090,9 +4394,7 @@ class BoozerSurfaceJAX(Optimizable):
             "hessian_materialized": newton_result.get("hessian_materialized"),
             "dense_hessian_shape": newton_result.get("dense_hessian_shape"),
             "dense_hessian_bytes": newton_result.get("dense_hessian_bytes"),
-            "max_dense_hessian_bytes": newton_result.get(
-                "max_dense_hessian_bytes"
-            ),
+            "max_dense_hessian_bytes": newton_result.get("max_dense_hessian_bytes"),
             "dense_newton_steps_materialized": newton_result.get(
                 "dense_newton_steps_materialized"
             ),
@@ -4102,9 +4404,7 @@ class BoozerSurfaceJAX(Optimizable):
             "newton_iter": newton_result.get("newton_iter"),
             "final_gradient_norm": newton_result.get("final_gradient_norm"),
             "final_gradient_inf_norm": newton_result.get("final_gradient_inf_norm"),
-            "iterative_refinement_ran": newton_result.get(
-                "iterative_refinement_ran"
-            ),
+            "iterative_refinement_ran": newton_result.get("iterative_refinement_ran"),
             "final_step_iterative_refinement_ran": newton_result.get(
                 "final_step_iterative_refinement_ran"
             ),
@@ -4269,11 +4569,7 @@ class BoozerSurfaceJAX(Optimizable):
         }
         if method not in _ONDEVICE_OPTIMIZER_METHODS:
             optimizer_options.update(
-                {
-                    k: self.options[k]
-                    for k in _SCIPY_TRACE_OPTIONS
-                    if k in self.options
-                }
+                {k: self.options[k] for k in _SCIPY_TRACE_OPTIONS if k in self.options}
             )
         return optimizer_options
 
@@ -4373,7 +4669,9 @@ class BoozerSurfaceJAX(Optimizable):
                 constraint_weight,
             )
             least_squares_runner = (
-                target_least_squares if method == "lm-ondevice" else reference_least_squares
+                target_least_squares
+                if method == "lm-ondevice"
+                else reference_least_squares
             )
             result = least_squares_runner(
                 residual_fn,
@@ -4522,7 +4820,10 @@ class BoozerSurfaceJAX(Optimizable):
         if (
             not _host_all_finite(result["x"])
             or not _host_all_finite(result["grad"])
-            or (result["hessian"] is not None and not _host_all_finite(result["hessian"]))
+            or (
+                result["hessian"] is not None
+                and not _host_all_finite(result["hessian"])
+            )
         ):
             solve_generation = _advance_solver_generation(self)
             res = {
@@ -4555,9 +4856,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "dense_newton_steps_materialized": result.get(
                     "dense_newton_steps_materialized"
                 ),
-                "dense_newton_steps_message": result.get(
-                    "dense_newton_steps_message"
-                ),
+                "dense_newton_steps_message": result.get("dense_newton_steps_message"),
                 "newton_iter": result.get("newton_iter"),
                 "final_gradient_norm": result.get("final_gradient_norm"),
                 "final_gradient_inf_norm": result.get("final_gradient_inf_norm"),
@@ -4656,9 +4955,7 @@ class BoozerSurfaceJAX(Optimizable):
             "dense_newton_steps_materialized": result.get(
                 "dense_newton_steps_materialized"
             ),
-            "dense_newton_steps_message": result.get(
-                "dense_newton_steps_message"
-            ),
+            "dense_newton_steps_message": result.get("dense_newton_steps_message"),
             "newton_iter": result.get("newton_iter"),
             "final_gradient_norm": result.get("final_gradient_norm"),
             "final_gradient_inf_norm": result.get("final_gradient_inf_norm"),
@@ -4781,7 +5078,9 @@ class BoozerSurfaceJAX(Optimizable):
             )
             optimizer_method = "lm"
 
-        sdofs_final, iota_out, G_out = self._unpack_decision_vector(result.x, optimize_G)
+        sdofs_final, iota_out, G_out = self._unpack_decision_vector(
+            result.x, optimize_G
+        )
         self._set_surface_dofs(sdofs_final)
         resdict = {
             "info": result,
@@ -5188,11 +5487,7 @@ class BoozerSurfaceJAX(Optimizable):
             G_out = None
 
         self._set_surface_dofs(sdofs_final)
-        lm_out = (
-            float(_host_scalar(xl[-2]))
-            if self.stellsym
-            else _host_numpy(xl[-2:])
-        )
+        lm_out = float(_host_scalar(xl[-2])) if self.stellsym else _host_numpy(xl[-2:])
         success = bool(float(_host_scalar(norm)) <= tol)
         res = {
             "residual": residual,

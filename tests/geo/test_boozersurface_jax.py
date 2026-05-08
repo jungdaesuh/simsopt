@@ -112,9 +112,7 @@ _PUBLIC_EXACT_CONSTRAINTS_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS[
 ]
 _TRACEABLE_EXACT_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["traceable_exact"]
 _TRACEABLE_LS_RESULT_SCHEMA = _bsj._BOOZER_RESULT_SCHEMAS["traceable_ls"]
-_SOLVED_RUNTIME_STATE_FIELDS = frozenset(
-    {"sdofs", "iota", "G", "weight_inv_modB"}
-)
+_SOLVED_RUNTIME_STATE_FIELDS = frozenset({"sdofs", "iota", "G", "weight_inv_modB"})
 _ADJOINT_RUNTIME_STATE_FIELDS = frozenset(
     {
         "solved_state",
@@ -182,10 +180,7 @@ def _assert_operator_adjoint_state(adjoint_state, *, dense_factors_available):
     assert adjoint_state.linear_solve_backend == "operator"
     assert adjoint_state.linear_solve_factors is None
     assert adjoint_state.plu is None
-    assert (
-        adjoint_state.dense_linear_solve_factors_available
-        is dense_factors_available
-    )
+    assert adjoint_state.dense_linear_solve_factors_available is dense_factors_available
 
 
 def _assert_dense_plu_adjoint_state(adjoint_state):
@@ -303,8 +298,8 @@ def _solve_exact_well_conditioned_operator_case(monkeypatch, *, device):
     with jax.default_device(device):
         adjoint_state = case["booz"].get_adjoint_runtime_state()
         operator_adj, success = adjoint_state.solve_transpose_with_status(case["rhs"])
-        matrix_operator_adj, matrix_success = (
-            adjoint_state.solve_transpose_with_status(case["matrix_rhs"])
+        matrix_operator_adj, matrix_success = adjoint_state.solve_transpose_with_status(
+            case["matrix_rhs"]
         )
         matrix_applied = adjoint_state.apply_transpose(matrix_operator_adj)
         jax_dense_adj = jnp.linalg.solve(case["A"].T, case["rhs"])
@@ -1199,9 +1194,7 @@ class TestOptimizerAdapter:
         np.testing.assert_allclose(result.x, np.asarray(x0))
         np.testing.assert_allclose(result.jac, np.asarray([-2.0, 2.0]))
 
-    def test_reference_scipy_adapter_rejects_non_scalar_objective(
-        self, monkeypatch
-    ):
+    def test_reference_scipy_adapter_rejects_non_scalar_objective(self, monkeypatch):
         def fake_scipy_minimize(fun, x0, jac, method, options, callback=None):
             del jac, method, options, callback
             fun(x0)
@@ -1291,9 +1284,7 @@ class TestOptimizerAdapter:
         "method",
         ["lbfgs-scipy-jax", "lbfgs-scipy-jax-fullgraph"],
     )
-    def test_target_scipy_jax_requires_explicit_value_grad(
-        self, monkeypatch, method
-    ):
+    def test_target_scipy_jax_requires_explicit_value_grad(self, monkeypatch, method):
         monkeypatch.setattr(_opt, "_x64_enabled", lambda: True)
         with pytest.raises(RuntimeError, match="requires value_and_grad=True"):
             _opt.target_minimize(
@@ -1477,7 +1468,9 @@ class TestOptimizerAdapter:
             return jnp.full_like(solve_rhs, jnp.nan), False
 
         def fake_materialize(flat_residual_fn, materialize_x):
-            dense_calls.append((flat_residual_fn, np.asarray(materialize_x, dtype=float)))
+            dense_calls.append(
+                (flat_residual_fn, np.asarray(materialize_x, dtype=float))
+            )
             return None, None, None, jnp.eye(2, dtype=jnp.float64)
 
         monkeypatch.setattr(
@@ -1503,8 +1496,10 @@ class TestOptimizerAdapter:
         assert bool(np.asarray(success)) is False
         assert not np.any(np.isfinite(np.asarray(solved)))
 
-    def test_newton_polish_rejects_norm_increasing_operator_steps(self, monkeypatch):
-        """Newton polish must keep the last non-worsening iterate."""
+    def test_newton_polish_accepts_finite_norm_increasing_operator_steps(
+        self, monkeypatch
+    ):
+        """Newton polish follows the CPU Boozer finite-step contract."""
 
         def obj(x):
             return 0.5 * x[0] ** 2
@@ -1519,11 +1514,11 @@ class TestOptimizerAdapter:
         monkeypatch.setattr(_opt, "_hessian_vector_product_fn", fake_hvp_fn)
         monkeypatch.setattr(_opt, "_gmres_solve_newton_system", fake_gmres)
 
-        result = newton_polish(obj, jnp.array([1.0]), maxiter=5, tol=1e-12)
+        result = newton_polish(obj, jnp.array([1.0]), maxiter=1, tol=1e-12)
 
-        np.testing.assert_allclose(result["x"], np.array([1.0]), atol=1e-12)
-        np.testing.assert_allclose(result["grad"], np.array([1.0]), atol=1e-12)
-        assert result["nit"] == 0
+        np.testing.assert_allclose(result["x"], np.array([-9.0]), atol=1e-12)
+        np.testing.assert_allclose(result["grad"], np.array([-9.0]), atol=1e-12)
+        assert result["nit"] == 1
         assert not result["success"]
 
     def test_newton_polish_nonfinite_operator_step_fails_without_dense_fallback(
@@ -1844,9 +1839,7 @@ class _MockToroidalFluxLabel:
         return 0.0
 
 
-def _make_mock_toroidal_flux_boozer_surface(
-    nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1
-):
+def _make_mock_toroidal_flux_boozer_surface(nphi=8, ntheta=8, mpol=1, ntor=1, nfp=1):
     R0, r = 1.0, 0.1
     xc, yc, zc = _make_simple_torus_coeffs(R0, r, mpol, ntor, nfp)
     qphi = np.linspace(0, 1.0 / nfp, nphi, endpoint=False)
@@ -2151,7 +2144,9 @@ class TestBoozerSurfaceJAXClass:
         )()
         bs = _MockBiotSavart(_make_mock_coils())
 
-        with pytest.raises(TypeError, match="Unsupported BoozerSurfaceJAX surface type"):
+        with pytest.raises(
+            TypeError, match="Unsupported BoozerSurfaceJAX surface type"
+        ):
             BoozerSurfaceJAX(
                 bs,
                 spoof_surface,
@@ -3252,7 +3247,9 @@ class TestBoozerSurfaceJAXClass:
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = optimizer_backend
         booz.options["limited_memory"] = limited_memory
-        booz.options["materialize_dense_linearization"] = optimizer_backend != "ondevice"
+        booz.options["materialize_dense_linearization"] = (
+            optimizer_backend != "ondevice"
+        )
 
         captured = {}
 
@@ -4344,7 +4341,9 @@ class TestBoozerSurfaceJAXClass:
         assert res["PLU"] is not None
         assert callable(res["vjp"])
 
-    def test_get_adjoint_runtime_state_prefers_operator_callbacks_for_ls(self, monkeypatch):
+    def test_get_adjoint_runtime_state_prefers_operator_callbacks_for_ls(
+        self, monkeypatch
+    ):
         """LS runtime adjoints must stay operator-backed even when PLU exists."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
@@ -4379,7 +4378,9 @@ class TestBoozerSurfaceJAXClass:
             fake_solve_hessian_system,
         )
         adjoint_state = booz.get_adjoint_runtime_state()
-        solved = adjoint_state.solve_transpose(jnp.asarray([1.0, -2.0], dtype=jnp.float64))
+        solved = adjoint_state.solve_transpose(
+            jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        )
 
         _assert_operator_adjoint_state(
             adjoint_state,
@@ -4472,7 +4473,7 @@ class TestBoozerSurfaceJAXClass:
         monkeypatch.setattr(
             _bsj._optimizer_jax,
             "_hessian_vector_product_fn",
-            lambda _objective_fn: (lambda _x, vec: vec),
+            lambda _objective_fn: lambda _x, vec: vec,
         )
 
         def fake_solve_hessian_system_with_status(
@@ -4573,7 +4574,7 @@ class TestBoozerSurfaceJAXClass:
         monkeypatch.setattr(
             _bsj._optimizer_jax,
             "_hessian_vector_product_fn",
-            lambda _objective_fn: (lambda _x, vec: vec),
+            lambda _objective_fn: lambda _x, vec: vec,
         )
 
         def fake_solve_hessian_system_with_status(
@@ -4665,7 +4666,9 @@ class TestBoozerSurfaceJAXClass:
 
         def reject_jax_array_asarray(value, *args, **kwargs):
             if isinstance(value, jax.Array):
-                raise AssertionError("unexpected implicit device scalar materialization")
+                raise AssertionError(
+                    "unexpected implicit device scalar materialization"
+                )
             return original_asarray(value, *args, **kwargs)
 
         monkeypatch.setattr(_bsj.np, "asarray", reject_jax_array_asarray)
@@ -4713,7 +4716,7 @@ class TestBoozerSurfaceJAXClass:
         monkeypatch.setattr(
             _bsj.BoozerSurfaceJAX,
             "_make_exact_residual",
-            lambda self, _mask: (lambda _x: _x),
+            lambda self, _mask: lambda _x: _x,
         )
         monkeypatch.setattr(
             _bsj._optimizer_jax,
@@ -4747,7 +4750,9 @@ class TestBoozerSurfaceJAXClass:
 
         def reject_jax_array_asarray(value, *args, **kwargs):
             if isinstance(value, jax.Array):
-                raise AssertionError("unexpected implicit device scalar materialization")
+                raise AssertionError(
+                    "unexpected implicit device scalar materialization"
+                )
             return original_asarray(value, *args, **kwargs)
 
         monkeypatch.setattr(_bsj.np, "asarray", reject_jax_array_asarray)
@@ -4862,7 +4867,7 @@ class TestBoozerSurfaceJAXClass:
         monkeypatch.setattr(
             _bsj.BoozerSurfaceJAX,
             "_make_exact_residual",
-            lambda _self, _mask: (lambda x: x),
+            lambda _self, _mask: lambda x: x,
         )
 
         def fake_operator_solve(_residual_fn, _x, rhs, *, transpose, tol):
@@ -5827,9 +5832,7 @@ class TestBoozerSurfaceJAXExactPath:
             captured["materialize_dense_linearization"] = (
                 materialize_dense_linearization
             )
-            captured["max_dense_linearization_bytes"] = (
-                max_dense_linearization_bytes
-            )
+            captured["max_dense_linearization_bytes"] = max_dense_linearization_bytes
             captured["residual"] = residual_fn(x0, *args)
             return {
                 "x": x0,
@@ -8230,7 +8233,7 @@ class TestBuildBoozerSurfaceRuntimeState:
         monkeypatch.setattr(
             _bsj.BoozerSurfaceJAX,
             "_make_exact_residual",
-            lambda self, _mask: (lambda _x: _x),
+            lambda self, _mask: lambda _x: _x,
         )
         monkeypatch.setattr(
             _bsj._optimizer_jax,
@@ -8255,7 +8258,9 @@ class TestBuildBoozerSurfaceRuntimeState:
         )
 
         adjoint_state = booz.get_adjoint_runtime_state()
-        solved = adjoint_state.solve_transpose(jnp.asarray([2.0, -4.0], dtype=jnp.float64))
+        solved = adjoint_state.solve_transpose(
+            jnp.asarray([2.0, -4.0], dtype=jnp.float64)
+        )
         solved_with_status, solve_success = adjoint_state.solve_transpose_with_status(
             jnp.asarray([2.0, -4.0], dtype=jnp.float64)
         )
@@ -8284,7 +8289,11 @@ class TestBuildBoozerSurfaceRuntimeState:
             dense_factors_available=True,
         )
         np.testing.assert_allclose(
-            np.asarray(adjoint_state.apply_transpose(jnp.asarray([1.0, 3.0], dtype=jnp.float64))),
+            np.asarray(
+                adjoint_state.apply_transpose(
+                    jnp.asarray([1.0, 3.0], dtype=jnp.float64)
+                )
+            ),
             np.asarray([1.0, 3.0]),
         )
         assert streamed == [("cotangent", (0, 1))]

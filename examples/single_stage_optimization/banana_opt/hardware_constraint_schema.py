@@ -333,6 +333,7 @@ def format_hardware_constraint_violation(
 def _empty_constraint_status() -> dict[str, object]:
     return {
         "success": True,
+        "violation_keys": [],
         "violations": [],
         "constraints": {},
     }
@@ -368,6 +369,7 @@ def build_hardware_constraint_status(
     threshold_overrides: Mapping[str, float] | None = None,
 ) -> dict[str, object]:
     constraints: dict[str, dict[str, object]] = {}
+    violation_keys: list[str] = []
     violations: list[str] = []
     # Keep the top-level success/violations view intact while also surfacing
     # schema-driven traversal semantics for callers that need to distinguish
@@ -395,8 +397,10 @@ def build_hardware_constraint_status(
             traversal_status = traversal_statuses[spec.traversal_policy]
             traversal_status["constraints"][spec.name] = constraint_entry
             violation_message = f"{spec.name} {scalar_value} is not finite"
+            violation_keys.append(spec.name)
             violations.append(violation_message)
             traversal_status["success"] = False
+            traversal_status["violation_keys"].append(spec.name)
             traversal_status["violations"].append(violation_message)
             continue
         signed_value = hardware_constraint_signed_value(
@@ -427,11 +431,14 @@ def build_hardware_constraint_status(
                 scalar_value,
                 threshold_overrides=threshold_overrides,
             )
+            violation_keys.append(spec.name)
             violations.append(violation_message)
             traversal_status["success"] = False
+            traversal_status["violation_keys"].append(spec.name)
             traversal_status["violations"].append(violation_message)
     return {
         "success": not violations,
+        "violation_keys": violation_keys,
         "violations": violations,
         "constraints": constraints,
         "allowed_traversal_status": traversal_statuses["allowed"],

@@ -1702,7 +1702,9 @@ class TestOptimizerAdapterPrivate:
             captured.update(kwargs)
             return object()
 
-        monkeypatch.setattr(_opt, "_minimize_lbfgs_private_value_and_grad", fake_minimize)
+        monkeypatch.setattr(
+            _opt, "_minimize_lbfgs_private_value_and_grad", fake_minimize
+        )
         monkeypatch.setattr(
             _opt,
             "_private_lbfgs_result_to_optimize_result",
@@ -2012,7 +2014,9 @@ class TestLBFGSMethodPrivate:
         assert result.nfev == 1
         assert result.njev == 1
         np.testing.assert_allclose(np.asarray(result.x), np.asarray(x0))
-        np.testing.assert_allclose(np.asarray(result.jac), np.asarray(optimizer_seed[1]))
+        np.testing.assert_allclose(
+            np.asarray(result.jac), np.asarray(optimizer_seed[1])
+        )
         assert float(result.fun) == pytest.approx(0.0)
 
     @PRIVATE_OPTIMIZER_RUNTIME
@@ -2266,10 +2270,10 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
-    def test_newton_polish_traceable_rejected_step_keeps_zero_iterations(
+    def test_newton_polish_traceable_accepts_finite_norm_increasing_operator_steps(
         self, monkeypatch
     ):
-        """Rejected traceable Newton steps must not increment nit or emit progress."""
+        """Traceable Newton follows the CPU Boozer finite-step contract."""
         observed = {"progress_calls": 0}
 
         def fake_operator_only_linear_solve(_matvec, rhs, *, tol):
@@ -2297,10 +2301,10 @@ class TestBoozerSurfaceJAXClassPrivate:
             ),
         )
 
-        np.testing.assert_allclose(np.asarray(result["x"]), np.asarray(x0))
-        assert int(result["nit"]) == 0
+        np.testing.assert_allclose(np.asarray(result["x"]), 8.0 * np.asarray(x0))
+        assert int(result["nit"]) == 3
         assert bool(result["success"]) is False
-        assert observed["progress_calls"] == 0
+        assert observed["progress_calls"] == 3
 
     @PRIVATE_OPTIMIZER_RUNTIME
     def test_run_code_ondevice_limited_memory_routes_to_lbfgs(self, monkeypatch):
@@ -2513,21 +2517,29 @@ class TestBoozerSurfaceJAXClassPrivate:
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LIMITED_MEMORY_RUNTIME
     def test_run_code_ondevice_limited_memory_runs_without_monkeypatch(self):
-        """limited_memory=True must run the real lbfgs-ondevice lane."""
+        """limited_memory=True must run lbfgs-ondevice and gate failed polish."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["limited_memory"] = True
         booz.options["ftol"] = 0.0
 
         res = booz.run_code(iota=0.3, G=0.05)
+        pre_newton = res["pre_newton"]
 
         assert res is not None
         assert res["type"] == "ls"
         assert np.isfinite(res["fun"])
-        assert np.max(np.abs(np.asarray(res["jacobian"]))) < 1.0e-6
+        assert pre_newton["optimizer_method"] == "lbfgs-ondevice"
+        assert np.max(np.abs(np.asarray(pre_newton["gradient"]))) < 1.0e-6
+        assert np.all(np.isfinite(np.asarray(res["jacobian"])))
+        assert res["success"] is False
+        assert res["primal_success"] is False
+        assert res["adjoint_linear_solve_available"] is False
         assert res["PLU"] is not None
         assert bool(np.asarray(res["hessian_materialized"])) is True
         assert res["dense_linear_solve_factors_available"] is True
         assert res["linear_solve_backend"] == "operator"
         assert callable(res["vjp"])
         assert res["optimizer_method"] == "lbfgs-ondevice"
+        with pytest.raises(RuntimeError, match="no successful solve state"):
+            booz.get_solved_runtime_state()

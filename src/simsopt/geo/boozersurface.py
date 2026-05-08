@@ -315,6 +315,7 @@ class BoozerSurface(Optimizable):
                 - `bfgs_maxiter` (int): maximum number of iterations for BFGS solver. Defaults to 1500.
                 - `limited_memory` (bool): True if L-BFGS solver is desired, False if the BFGS solver otherwise. Defaults to False.
                 - `weight_inv_modB` (float): for BoozerLS surfaces, weight the residual by modB so that it does not scale with coil currents.  Defaults to True.
+                - `record_scipy_callback_trace` (bool): for BoozerLS surfaces, record every SciPy objective callback evaluation. Defaults to False.
         """
         super().__init__(depends_on=[biotsavart])
 
@@ -357,6 +358,8 @@ class BoozerSurface(Optimizable):
                 options["limited_memory"] = False
             if "weight_inv_modB" not in options:
                 options["weight_inv_modB"] = True
+            if "record_scipy_callback_trace" not in options:
+                options["record_scipy_callback_trace"] = False
         self.options = options
 
     def recompute_bell(self, parent=None):
@@ -462,6 +465,31 @@ class BoozerSurface(Optimizable):
                 limited_memory=self.options["limited_memory"],
                 weight_inv_modB=self.options["weight_inv_modB"],
             )
+            pre_newton_surface_dofs = np.asarray(
+                res["s"].get_dofs(), dtype=float
+            ).copy()
+            pre_newton_decision_pieces = [
+                pre_newton_surface_dofs,
+                np.asarray([float(res["iota"])], dtype=float),
+            ]
+            if res["G"] is not None:
+                pre_newton_decision_pieces.append(
+                    np.asarray([float(res["G"])], dtype=float)
+                )
+            pre_newton = {
+                "optimizer_method": res.get("optimizer_method"),
+                "success": bool(res["success"]),
+                "iter": int(res["iter"]),
+                "fun": float(res["fun"]),
+                "iota": float(res["iota"]),
+                "G": None if res["G"] is None else float(res["G"]),
+                "surface_dofs": pre_newton_surface_dofs,
+                "decision_vector": np.concatenate(pre_newton_decision_pieces),
+                "gradient": np.asarray(res["gradient"], dtype=float).copy(),
+                "scipy_call_contract": res.get("scipy_call_contract"),
+                "scipy_initial_call": res.get("scipy_initial_call"),
+                "scipy_callback_trace": res.get("scipy_callback_trace"),
+            }
             iota, G = res["iota"], res["G"]
 
             ## polish off using Newton's method
@@ -475,6 +503,8 @@ class BoozerSurface(Optimizable):
                 maxiter=self.options["newton_maxiter"],
                 weight_inv_modB=self.options["weight_inv_modB"],
             )
+            res["optimizer_method"] = pre_newton["optimizer_method"]
+            res["pre_newton"] = pre_newton
             return res
 
     def boozer_penalty_constraints(
@@ -610,6 +640,65 @@ class BoozerSurface(Optimizable):
         d2val = J.T @ J + np.sum(r[:, None, None] * H, axis=0)
         return val, dval, d2val
 
+    def _boozer_penalty_vectorized_inputs(self, sdofs, derivatives):
+        """Materialize the arrays consumed by ``_call_boozer_residual_ds*``.
+
+        This is the CPU-side boundary helper for the bit-identity census
+        (``docs/boozer_derivative_bit_identity_impl_plan_2026-05-07.md`` Phase
+        1). The same materialized arrays feed ``_call_boozer_residual``,
+        ``_call_boozer_residual_ds``, and ``_call_boozer_residual_ds2`` inside
+        ``boozer_penalty_constraints_vectorized``. Splitting the materialization
+        out lets the parity census assert byte-identity on these arrays without
+        re-running the residual contraction.
+
+        Args:
+            sdofs (ndarray): Surface DOFs only (without iota/G appended).
+            derivatives (int): 0, 1, or 2; controls whether Jacobian and
+                Hessian inputs are also returned.
+
+        Side effects:
+            Calls ``self.surface.set_dofs(sdofs)`` and
+            ``self.biotsavart.set_points`` / ``self.biotsavart.compute`` at the
+            resulting surface quadrature points.
+
+        Returns:
+            dict: keys ``'gamma'``, ``'xphi'``, ``'xtheta'``, ``'B'``,
+            ``'nphi'``, ``'ntheta'``. When ``derivatives >= 1`` it additionally
+            contains ``'dB_dx'``, ``'dx_dc'``, ``'dxphi_dc'``, and
+            ``'dxtheta_dc'``. When ``derivatives == 2`` it also contains
+            ``'d2B_by_dXdX'``.
+        """
+        assert derivatives in (0, 1, 2)
+        s = self.surface
+        s.set_dofs(sdofs)
+        biotsavart = self.biotsavart
+        gamma = s.gamma()
+        xphi = s.gammadash1()
+        xtheta = s.gammadash2()
+        nphi = gamma.shape[0]
+        ntheta = gamma.shape[1]
+        gamma_flat = gamma.reshape((gamma.size // 3, 3)).copy()
+        biotsavart.set_points(gamma_flat)
+        biotsavart.compute(derivatives)
+        inputs = {
+            "gamma": gamma,
+            "xphi": xphi,
+            "xtheta": xtheta,
+            "B": biotsavart.B().reshape((nphi, ntheta, 3)),
+            "nphi": nphi,
+            "ntheta": ntheta,
+        }
+        if derivatives >= 1:
+            inputs["dx_dc"] = s.dgamma_by_dcoeff()
+            inputs["dxphi_dc"] = s.dgammadash1_by_dcoeff()
+            inputs["dxtheta_dc"] = s.dgammadash2_by_dcoeff()
+            inputs["dB_dx"] = biotsavart.dB_by_dX().reshape((nphi, ntheta, 3, 3))
+        if derivatives == 2:
+            inputs["d2B_by_dXdX"] = biotsavart.d2B_by_dXdX().reshape(
+                (nphi, ntheta, 3, 3, 3)
+            )
+        return inputs
+
     def boozer_penalty_constraints_vectorized(
         self,
         dofs,
@@ -656,35 +745,23 @@ class BoozerSurface(Optimizable):
             )
 
         s = self.surface
-        nphi = s.quadpoints_phi.size
-        ntheta = s.quadpoints_theta.size
         nsurfdofs = sdofs.size
 
-        s.set_dofs(sdofs)
-
-        surface = self.surface
-        biotsavart = self.biotsavart
-        x = surface.gamma()
-        xphi = surface.gammadash1()
-        xtheta = surface.gammadash2()
-        nphi = x.shape[0]
-        ntheta = x.shape[1]
-
-        xsemiflat = x.reshape((x.size // 3, 3)).copy()
-        biotsavart.set_points(xsemiflat)
-        biotsavart.compute(derivatives)
-        B = biotsavart.B().reshape((nphi, ntheta, 3))
-
+        inputs = self._boozer_penalty_vectorized_inputs(sdofs, derivatives)
+        nphi = inputs["nphi"]
+        ntheta = inputs["ntheta"]
+        xphi = inputs["xphi"]
+        xtheta = inputs["xtheta"]
+        B = inputs["B"]
         if derivatives >= 1:
-            dx_dc = surface.dgamma_by_dcoeff()
-            dxphi_dc = surface.dgammadash1_by_dcoeff()
-            dxtheta_dc = surface.dgammadash2_by_dcoeff()
-            dB_dx = biotsavart.dB_by_dX().reshape((nphi, ntheta, 3, 3))
-
+            dB_dx = inputs["dB_dx"]
+            dx_dc = inputs["dx_dc"]
+            dxphi_dc = inputs["dxphi_dc"]
+            dxtheta_dc = inputs["dxtheta_dc"]
         if derivatives == 2:
-            d2B_by_dXdX = biotsavart.d2B_by_dXdX().reshape((nphi, ntheta, 3, 3, 3))
+            d2B_by_dXdX = inputs["d2B_by_dXdX"]
 
-        num_res = 3 * s.quadpoints_phi.size * s.quadpoints_theta.size
+        num_res = 3 * nphi * ntheta
         if derivatives == 0:
             val = _call_boozer_residual(G, iota, xphi, xtheta, B, weight_inv_modB)
             boozer = (val,)
@@ -909,7 +986,45 @@ class BoozerSurface(Optimizable):
             options["maxcor"] = 200
             options["ftol"] = tol
 
-        res = minimize(fun, x, jac=True, method=method, options=options)
+        scipy_initial_call = {}
+        scipy_callback_trace = (
+            [] if self.options["record_scipy_callback_trace"] else None
+        )
+
+        def scipy_fun(x_np):
+            value, gradient = fun(x_np)
+            if "payload" not in scipy_initial_call:
+                scipy_initial_call["payload"] = {
+                    "decision_vector": np.asarray(x_np, dtype=float).copy(),
+                    "fun": np.asarray(value, dtype=float)[()],
+                    "gradient": np.asarray(gradient, dtype=float).copy(),
+                }
+            if scipy_callback_trace is not None:
+                scipy_callback_trace.append(
+                    {
+                        "decision_vector": np.asarray(x_np, dtype=float).copy(),
+                        "fun": np.asarray(value, dtype=float)[()],
+                        "gradient": np.asarray(gradient, dtype=float).copy(),
+                    }
+                )
+            return value, gradient
+
+        res = minimize(scipy_fun, x, jac=True, method=method, options=options)
+        scipy_call_contract = {
+            "semantic_method": "lbfgs" if limited_memory else "bfgs",
+            "scipy_method": method,
+            "scipy_options": dict(options),
+            "callback": None,
+            "success": bool(res.success),
+            "status": int(getattr(res, "status", 0)),
+            "message": str(getattr(res, "message", "")),
+            "nit": int(getattr(res, "nit", 0)),
+            "nfev": int(getattr(res, "nfev", 0)),
+            "njev": int(getattr(res, "njev", 0)),
+        }
+        res.scipy_call_contract = scipy_call_contract
+        res.scipy_initial_call = scipy_initial_call["payload"]
+        res.scipy_callback_trace = scipy_callback_trace
 
         resdict = {
             "fun": res.fun,
@@ -918,6 +1033,10 @@ class BoozerSurface(Optimizable):
             "info": res,
             "success": res.success,
             "G": None,
+            "optimizer_method": method,
+            "scipy_call_contract": scipy_call_contract,
+            "scipy_initial_call": scipy_initial_call["payload"],
+            "scipy_callback_trace": scipy_callback_trace,
             "weight_inv_modB": weight_inv_modB,
             "type": "ls",
         }
@@ -1003,11 +1122,15 @@ class BoozerSurface(Optimizable):
         )
 
         norm = np.linalg.norm(dval)
+        final_step_dense_refinement_ran = False
+        dense_refinement_ran = False
         while i < maxiter and norm > tol:
             d2val += stab * np.identity(d2val.shape[0])
             dx = np.linalg.solve(d2val, dval)
-            if norm < 1e-9:
+            refine_step = norm < 1e-9
+            if refine_step:
                 dx += np.linalg.solve(d2val, dval - d2val @ dx)
+                dense_refinement_ran = True
             x = x - dx
             val, dval, d2val = self.boozer_penalty_constraints_vectorized(
                 x,
@@ -1018,6 +1141,7 @@ class BoozerSurface(Optimizable):
             )
             norm = np.linalg.norm(dval)
             i = i + 1
+            final_step_dense_refinement_ran = bool(refine_step)
 
         r = self.boozer_penalty_constraints(
             x,
@@ -1029,11 +1153,14 @@ class BoozerSurface(Optimizable):
         )
 
         P, L, U = lu(d2val)
+        hessian_shape = tuple(int(dim) for dim in d2val.shape)
         res = {
+            "fun": val,
             "residual": r,
             "jacobian": dval,
             "hessian": d2val,
             "iter": i,
+            "newton_iter": i,
             "success": norm <= tol,
             "G": None,
             "PLU": (P, L, U),
@@ -1049,6 +1176,22 @@ class BoozerSurface(Optimizable):
             ),
             "type": "ls",
             "weight_inv_modB": weight_inv_modB,
+            "linearization_kind": "hessian",
+            "linear_solve_backend": "dense-plu",
+            "dense_linear_solve_factors_available": True,
+            "dense_newton_steps_materialized": True,
+            "hessian_materialized": True,
+            "dense_hessian_shape": hessian_shape,
+            "dense_hessian_bytes": int(d2val.nbytes),
+            "max_dense_hessian_bytes": None,
+            "final_gradient_norm": float(norm),
+            "final_gradient_inf_norm": float(np.linalg.norm(dval, ord=np.inf)),
+            "iterative_refinement_ran": bool(dense_refinement_ran),
+            "final_step_iterative_refinement_ran": bool(
+                final_step_dense_refinement_ran
+            ),
+            "dense_refinement_ran": bool(dense_refinement_ran),
+            "final_step_dense_refinement_ran": bool(final_step_dense_refinement_ran),
         }
         if G is None:
             s.set_dofs(x[:-1])

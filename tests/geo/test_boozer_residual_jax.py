@@ -15,8 +15,8 @@ import sys
 import pytest
 import numpy as np
 
-import jax
 import jax.numpy as jnp
+
 _TESTS_ROOT = Path(__file__).resolve().parents[1]
 if str(_TESTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_TESTS_ROOT))
@@ -28,7 +28,6 @@ from conftest import (
     parity_acceptance_tolerance,
     parity_device,
     parity_default_device,
-    parity_lane,
     parity_rng,
 )
 
@@ -98,6 +97,31 @@ def _numpy_boozer_residual_reference(G, iota, B, xphi, xtheta, *, weight_inv_mod
     return residual.reshape(-1), scalar
 
 
+def _numpy_cpu_ordered_boozer_scalar_reference(
+    G,
+    iota,
+    B,
+    xphi,
+    xtheta,
+    *,
+    weight_inv_modB,
+):
+    tang = xphi + iota * xtheta
+    B2 = B[..., 0] * B[..., 0] + B[..., 1] * B[..., 1] + B[..., 2] * B[..., 2]
+    residual = G * B - B2[..., None] * tang
+    if weight_inv_modB:
+        residual = residual / np.sqrt(B2)[..., None]
+
+    total = np.float64(0.0)
+    for i in range(residual.shape[0]):
+        for j in range(residual.shape[1]):
+            r0 = residual[i, j, 0]
+            r1 = residual[i, j, 1]
+            r2 = residual[i, j, 2]
+            total += r0 * r0 + r1 * r1 + r2 * r2
+    return 0.5 * total / residual.size
+
+
 def _make_near_floor_data(nphi=48, ntheta=48, seed=77, residual_scale=1e-12):
     rng = parity_rng(seed)
     xphi = rng.randn(nphi, ntheta, 3) * 0.15 + np.array([1.0, 0.0, 0.0])
@@ -108,7 +132,9 @@ def _make_near_floor_data(nphi=48, ntheta=48, seed=77, residual_scale=1e-12):
     tang_sq = np.sum(tang * tang, axis=-1, keepdims=True)
     base_field = (G / tang_sq) * tang
     perturbation = rng.randn(nphi, ntheta, 3)
-    perturbation /= np.linalg.norm(perturbation.reshape(-1)) / np.sqrt(perturbation.size)
+    perturbation /= np.linalg.norm(perturbation.reshape(-1)) / np.sqrt(
+        perturbation.size
+    )
     B = base_field + residual_scale * perturbation
     return G, iota, device_float64(B), device_float64(xphi), device_float64(xtheta)
 
@@ -179,6 +205,38 @@ class TestBoozerResidualScalar:
         )
 
         np.testing.assert_allclose(J_jax, J_ref, rtol=1e-14)
+
+    def test_cpu_ordered_reduction_matches_ordered_numpy_reference(self):
+        """CPU-ordered mode mirrors the sopp point/component accumulation order."""
+        nphi, ntheta = 7, 9
+        B, xphi, xtheta = _make_synthetic_data(nphi, ntheta)
+        G, iota = 1.5, 0.3
+
+        B_np = host_array(B)
+        xphi_np = host_array(xphi)
+        xtheta_np = host_array(xtheta)
+        reference = _numpy_cpu_ordered_boozer_scalar_reference(
+            G,
+            iota,
+            B_np,
+            xphi_np,
+            xtheta_np,
+            weight_inv_modB=True,
+        )
+
+        actual = host_scalar(
+            boozer_residual_scalar(
+                G,
+                iota,
+                B,
+                xphi,
+                xtheta,
+                weight_inv_modB=True,
+                reduction_mode="cpu_ordered",
+            )
+        )
+
+        np.testing.assert_allclose(actual, reference, rtol=0.0, atol=0.0)
 
     def test_zero_residual(self):
         """When B is consistent with Boozer, residual should be near zero."""
@@ -262,8 +320,10 @@ class TestBoozerResidualScalar:
             )
         )
         amplitudes = host_array(B)[0, :, 0]
-        reference = 0.5 * math.fsum(float(value * value) for value in amplitudes) / (
-            3.0 * amplitudes.size
+        reference = (
+            0.5
+            * math.fsum(float(value * value) for value in amplitudes)
+            / (3.0 * amplitudes.size)
         )
 
         np.testing.assert_allclose(

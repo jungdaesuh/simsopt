@@ -1,0 +1,56 @@
+{
+  "candidate_id": "outer_optimizer_progress.json#pair=3#linesearch=4#accepted=1",
+  "first_divergence": {
+    "kind": "array",
+    "max_abs_diff": 2.220446049250313e-16,
+    "name": "gamma",
+    "stage": "boozer_ls_callback_input"
+  },
+  "fixture": "synthetic-ncsx-volume",
+  "ladder": [
+    "gamma",
+    "xphi",
+    "xtheta",
+    "dx_ds",
+    "dxphi_ds",
+    "dxtheta_ds",
+    "B",
+    "dB_dX"
+  ],
+  "n_arrays_compared": 8,
+  "n_byte_identical_arrays": 0,
+  "ndjson": ".artifacts/parity/20260507-boozer-deriv-input-repro-m1/cpu_ordered_full/census.ndjson",
+  "parity_policy": "cpu_ordered",
+  "runtime": {
+    "argv": [
+      "benchmarks/parity/boozer_derivative_input_repro.py",
+      "--census",
+      "--parity-policy",
+      "cpu_ordered",
+      "--dump-arrays",
+      ".artifacts/parity/20260507-boozer-deriv-input-repro-m1/cpu_ordered_full"
+    ],
+    "cwd": "/Users/suhjungdae/code/columbia/simsopt-jax",
+    "env": {
+      "CUDA_VISIBLE_DEVICES": null,
+      "JAX_ENABLE_X64": null,
+      "JAX_PLATFORMS": null,
+      "MKL_NUM_THREADS": null,
+      "NUMEXPR_NUM_THREADS": null,
+      "OMP_NUM_THREADS": null,
+      "OPENBLAS_NUM_THREADS": null,
+      "SIMSOPT_BACKEND": null,
+      "SIMSOPT_BACKEND_MODE": null,
+      "SIMSOPT_BACKEND_STRICT": null,
+      "SIMSOPT_JAX_PLATFORM": null,
+      "SIMSOPT_JAX_TRANSFER_GUARD": null,
+      "VECLIB_MAXIMUM_THREADS": null,
+      "XLA_FLAGS": null
+    },
+    "executable": "/Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python",
+    "machine": "arm64",
+    "platform": "macOS-26.2-arm64-arm-64bit",
+    "processor": "arm",
+    "python": "3.11.15"
+  }
+}

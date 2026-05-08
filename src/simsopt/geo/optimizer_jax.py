@@ -1536,8 +1536,7 @@ def levenberg_marquardt(
     residual = residual_eval(x)
     linearization_rows = int(np.asarray(jnp.asarray(residual).size))
     linearization_cols = sum(
-        int(np.asarray(jnp.asarray(leaf).size))
-        for leaf in jax.tree_util.tree_leaves(x)
+        int(np.asarray(jnp.asarray(leaf).size)) for leaf in jax.tree_util.tree_leaves(x)
     )
     dense_report = _least_squares_dense_linearization_report(
         linearization_rows,
@@ -1626,8 +1625,10 @@ def _jacobian_vector_product_fn(residual_fn):
     return jax.jit(lambda x, v: jax.jvp(residual_fn, (x,), (v,))[1])
 
 
-def _materialize_dense_hessian(hvp_fn, x):
+def _materialize_dense_hessian(hvp_fn, x, *, symmetrize=True):
     dense = _materialize_dense_linear_operator(hvp_fn, x)
+    if not bool(symmetrize):
+        return dense
     return 0.5 * (dense + dense.T)
 
 
@@ -1725,6 +1726,15 @@ def _stabilize_dense_hessian(H, stab):
     return H + stab_value * jnp.eye(H.shape[0], dtype=H.dtype)
 
 
+def _solve_dense_newton_step(H, grad, *, refine):
+    H_host = np.asarray(H, dtype=np.float64)
+    grad_host = np.asarray(grad, dtype=np.float64)
+    dx = np.linalg.solve(H_host, grad_host)
+    if refine:
+        dx = dx + np.linalg.solve(H_host, grad_host - H_host @ dx)
+    return jnp.asarray(dx, dtype=jnp.asarray(grad).dtype)
+
+
 def _least_squares_dense_hessian_report(size, dtype, max_dense_bytes):
     return _dense_square_operator_report(
         "hessian",
@@ -1819,10 +1829,9 @@ def _least_squares_dense_linearization_policy(rows, cols, dtype, max_dense_bytes
         dtype,
         max_dense_bytes,
     )
-    materialize_linearization = (
-        max_dense_bytes is None
-        or report["dense_linearization_bytes"] <= int(max_dense_bytes)
-    )
+    materialize_linearization = max_dense_bytes is None or report[
+        "dense_linearization_bytes"
+    ] <= int(max_dense_bytes)
     report["failure_category"] = None
     report["failure_stage"] = None
     report["message"] = None
@@ -1838,13 +1847,13 @@ def _least_squares_dense_linearization_policy(rows, cols, dtype, max_dense_bytes
     return materialize_linearization, report
 
 
-def _newton_candidate_status(current_norm, x_next, grad_next):
+def _newton_step_finite(x_next, grad_next):
+    return jnp.all(jnp.isfinite(x_next)) & jnp.all(jnp.isfinite(grad_next))
+
+
+def _newton_candidate_status(x_next, grad_next):
     candidate_norm = jnp.linalg.norm(grad_next)
-    accepted = (
-        jnp.all(jnp.isfinite(x_next))
-        & jnp.all(jnp.isfinite(grad_next))
-        & (candidate_norm <= current_norm)
-    )
+    accepted = _newton_step_finite(x_next, grad_next)
     return accepted, candidate_norm
 
 
@@ -1993,8 +2002,7 @@ def _least_squares_normal_operator(residual_fn, x):
     )
     dtype = first_leaf.dtype
     decision_size = sum(
-        int(np.asarray(jnp.asarray(leaf).size))
-        for leaf in jax.tree_util.tree_leaves(x)
+        int(np.asarray(jnp.asarray(leaf).size)) for leaf in jax.tree_util.tree_leaves(x)
     )
 
     def matvec_column(v):
@@ -2166,6 +2174,7 @@ def newton_polish(
     stab=0.0,
     materialize_hessian=True,
     max_dense_hessian_bytes=None,
+    dense_newton_steps=False,
     progress_callback=None,
 ):
     """Newton polish using exact Hessian-vector products.
@@ -2184,31 +2193,66 @@ def newton_polish(
     val, grad = val_and_grad_fn(x)
     norm = jnp.linalg.norm(grad)
 
+    hessian_size = int(np.asarray(jnp.asarray(x).size))
+    dense_step_materialized, dense_step_report = _resolve_dense_hessian_materialization(
+        bool(dense_newton_steps),
+        hessian_size,
+        x.dtype,
+        max_dense_hessian_bytes,
+    )
+
     nit = 0
+    iterative_refinement_ran = False
+    final_step_iterative_refinement_ran = False
+    dense_refinement_ran = False
+    final_step_dense_refinement_ran = False
     while nit < maxiter and float(norm) > tol:
         linear_tol = min(1e-10, max(float(tol) * 0.1, 1e-14))
-        dx, linear_residual, _ = _gmres_solve_newton_system(
-            hvp_fn,
-            x,
-            grad,
-            stab=stab,
-            tol=linear_tol,
-        )
-        linear_residual_norm = float(np.linalg.norm(np.asarray(linear_residual)))
-        if np.all(np.isfinite(np.asarray(dx))) and linear_residual_norm > linear_tol:
-            correction, _, _ = _gmres_solve_newton_system(
+        dense_refine_step = False
+        if dense_step_materialized:
+            refine_step = float(norm) < 1e-9
+            dense_refine_step = refine_step
+            H_step = _stabilize_dense_hessian(
+                _materialize_dense_hessian(
+                    hvp_fn,
+                    x,
+                    symmetrize=False,
+                ),
+                stab,
+            )
+            dx = _solve_dense_newton_step(H_step, grad, refine=refine_step)
+            dense_refinement_ran = dense_refinement_ran or refine_step
+            iterative_refinement_ran = iterative_refinement_ran or refine_step
+        else:
+            refine_step = False
+            dx, linear_residual, _ = _gmres_solve_newton_system(
                 hvp_fn,
                 x,
-                linear_residual,
+                grad,
                 stab=stab,
                 tol=linear_tol,
             )
-            if np.all(np.isfinite(np.asarray(correction))):
-                dx = dx + correction
+            linear_residual_norm = float(np.linalg.norm(np.asarray(linear_residual)))
+            if (
+                np.all(np.isfinite(np.asarray(dx)))
+                and linear_residual_norm > linear_tol
+            ):
+                correction, _, _ = _gmres_solve_newton_system(
+                    hvp_fn,
+                    x,
+                    linear_residual,
+                    stab=stab,
+                    tol=linear_tol,
+                )
+                if np.all(np.isfinite(np.asarray(correction))):
+                    dx = dx + correction
+                    iterative_refinement_ran = True
+                    refine_step = True
         candidate_x = x - dx
         candidate_val, candidate_grad = val_and_grad_fn(candidate_x)
         accepted, candidate_norm = _newton_candidate_status(
-            norm, candidate_x, candidate_grad
+            candidate_x,
+            candidate_grad,
         )
         if not bool(accepted):
             break
@@ -2217,19 +2261,30 @@ def newton_polish(
         grad = candidate_grad
         norm = candidate_norm
         nit += 1
+        final_step_iterative_refinement_ran = bool(refine_step)
+        final_step_dense_refinement_ran = bool(dense_refine_step)
         if progress_callback is not None:
             progress_callback(nit, float(val), float(norm))
 
-    hessian_size = int(np.asarray(jnp.asarray(x).size))
     materialize_hessian, dense_report = _resolve_dense_hessian_materialization(
         materialize_hessian,
         hessian_size,
         x.dtype,
         max_dense_hessian_bytes,
     )
+    if bool(dense_newton_steps):
+        dense_report["dense_newton_steps_materialized"] = dense_step_materialized
+        dense_report["dense_newton_steps_message"] = dense_step_report["message"]
     H = None
     if materialize_hessian:
-        H = _stabilize_dense_hessian(_materialize_dense_hessian(hvp_fn, x), stab)
+        H = _stabilize_dense_hessian(
+            _materialize_dense_hessian(
+                hvp_fn,
+                x,
+                symmetrize=not bool(dense_newton_steps),
+            ),
+            stab,
+        )
 
     return {
         "x": x,
@@ -2237,7 +2292,16 @@ def newton_polish(
         "grad": grad,
         "hessian": H,
         "nit": nit,
+        "newton_iter": nit,
         "success": bool(float(norm) <= tol),
+        "final_gradient_norm": float(norm),
+        "final_gradient_inf_norm": float(jnp.linalg.norm(grad, ord=jnp.inf)),
+        "iterative_refinement_ran": bool(iterative_refinement_ran),
+        "final_step_iterative_refinement_ran": bool(
+            final_step_iterative_refinement_ran
+        ),
+        "dense_refinement_ran": bool(dense_refinement_ran),
+        "final_step_dense_refinement_ran": bool(final_step_dense_refinement_ran),
         "hessian_materialized": materialize_hessian,
         **dense_report,
     }
@@ -2277,11 +2341,13 @@ def _make_traceable_newton_polish_runner(
         val0, grad0 = val_and_grad_fn(x_init)
         norm0 = jnp.linalg.norm(grad0)
         hessian_size = int(np.asarray(jnp.asarray(x_init).size))
-        materialize_final_hessian, dense_report = _resolve_dense_hessian_materialization(
-            requested_materialize_hessian,
-            hessian_size,
-            x_init.dtype,
-            max_dense_hessian_bytes,
+        materialize_final_hessian, dense_report = (
+            _resolve_dense_hessian_materialization(
+                requested_materialize_hessian,
+                hessian_size,
+                x_init.dtype,
+                max_dense_hessian_bytes,
+            )
         )
 
         def cond_fun(state):
@@ -2309,10 +2375,11 @@ def _make_traceable_newton_polish_runner(
                 operand=None,
             )
             val_next, grad_next = val_and_grad_fn(x_next)
-            accepted, candidate_norm = _newton_candidate_status(
-                state["norm"], x_next, grad_next
+            candidate_accepted, candidate_norm = _newton_candidate_status(
+                x_next,
+                grad_next,
             )
-            accepted = linear_success & accepted
+            accepted = linear_success & candidate_accepted
             next_nit = state["nit"] + 1
             if progress_callback is not None:
                 lax.cond(
@@ -2784,9 +2851,8 @@ def reference_minimize(
             "reference_minimize() only supports failure_callback for "
             "method='lbfgs-trace'."
         )
-    if (
-        initial_value_and_grad is not None
-        and (method not in _REFERENCE_TRACE_METHODS or not value_and_grad)
+    if initial_value_and_grad is not None and (
+        method not in _REFERENCE_TRACE_METHODS or not value_and_grad
     ):
         raise ValueError(
             "reference_minimize() only supports initial_value_and_grad for "
@@ -2849,9 +2915,8 @@ def target_minimize(
             "target_minimize() only supports failure_callback for "
             "method='lbfgs-ondevice'."
         )
-    if (
-        initial_value_and_grad is not None
-        and (method != "lbfgs-ondevice" or not value_and_grad)
+    if initial_value_and_grad is not None and (
+        method != "lbfgs-ondevice" or not value_and_grad
     ):
         raise ValueError(
             "target_minimize() only supports initial_value_and_grad for "
@@ -2860,8 +2925,7 @@ def target_minimize(
     if method in _TARGET_SCIPY_CONTROL_METHODS:
         if not value_and_grad:
             raise RuntimeError(
-                "target_minimize() requires value_and_grad=True for "
-                f"method={method!r}."
+                f"target_minimize() requires value_and_grad=True for method={method!r}."
             )
         fun = wrap_strict_target_lane_value_and_grad(fun)
         fun, x0, callback, pytree_adapter = _prepare_optimizer_callable_inputs(

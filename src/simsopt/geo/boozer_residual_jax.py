@@ -36,6 +36,7 @@ where ``N = 3 · nphi · ntheta`` (matching the C++ normalization).
 import numpy as np
 import jax
 import jax.numpy as jnp
+from jax import lax
 
 from ..jax_core._math_utils import (
     as_jax_float64 as _as_jax_float64,
@@ -54,8 +55,11 @@ from ..jax_core.reductions import (
     validate_reduction_mode,
 )
 
+_BOOZER_CPU_ORDERED_REDUCTION_MODE = "cpu_ordered"
+
 __all__ = [
     "boozer_residual_scalar",
+    "boozer_residual_scalar_and_grad_cpu_ordered",
     "boozer_residual_grad",
     "boozer_residual_hessian",
     "boozer_residual_vector",
@@ -93,6 +97,23 @@ def _boozer_weighted_residual(G, iota, B, xphi, xtheta, weight_inv_modB):
     return residual
 
 
+def _cpu_ordered_boozer_square_sum(rtil):
+    """Sum residual squares in the same point/component order as sopp."""
+    nphi, ntheta = rtil.shape[:2]
+    zero = jnp.sum(rtil, dtype=rtil.dtype) - jnp.sum(rtil, dtype=rtil.dtype)
+
+    def phi_body(i, phi_acc):
+        def theta_body(j, theta_acc):
+            r0 = rtil[i, j, 0]
+            r1 = rtil[i, j, 1]
+            r2 = rtil[i, j, 2]
+            return theta_acc + (r0 * r0 + r1 * r1 + r2 * r2)
+
+        return lax.fori_loop(0, ntheta, theta_body, phi_acc)
+
+    return lax.fori_loop(0, nphi, phi_body, zero)
+
+
 def boozer_residual_scalar(
     G,
     iota,
@@ -112,27 +133,29 @@ def boozer_residual_scalar(
         xtheta:(nphi, ntheta, 3)  surface tangent dγ/dθ.
         weight_inv_modB: if True, weight residual by 1/|B|.
         reduction_mode: ``"default"`` keeps the validated pairwise scalar
-            accumulation, while ``"strict_oracle"`` promotes the final scalar
-            contraction to compensated summation for oracle investigations.
+            accumulation, ``"strict_oracle"`` promotes the final scalar
+            contraction to compensated summation for oracle investigations,
+            and ``"cpu_ordered"`` mirrors the C++ point/component accumulation
+            order for host-SciPy Boozer LS parity checks.
 
     Returns:
         J: scalar objective value.
     """
     G = _as_runtime_float64(G, reference=B)
     iota = _as_runtime_float64(iota, reference=B)
-    validate_reduction_mode(reduction_mode)
     nphi, ntheta, _ = B.shape
     num_res = _as_runtime_float64(3 * nphi * ntheta, reference=B)
     rtil = _boozer_weighted_residual(G, iota, B, xphi, xtheta, weight_inv_modB)
-    return (
-        _as_runtime_float64(0.5, reference=rtil)
-        * scalar_square_sum(
+    if reduction_mode == _BOOZER_CPU_ORDERED_REDUCTION_MODE:
+        square_sum = _cpu_ordered_boozer_square_sum(rtil)
+    else:
+        validate_reduction_mode(reduction_mode)
+        square_sum = scalar_square_sum(
             rtil,
             reduction_mode=reduction_mode,
             default="pairwise",
         )
-        / num_res
-    )
+    return _as_runtime_float64(0.5, reference=rtil) * square_sum / num_res
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +315,120 @@ def boozer_residual_vector(G, iota, B, xphi, xtheta, weight_inv_modB=True):
         xtheta,
         weight_inv_modB,
     ).ravel()
+
+
+def boozer_residual_scalar_and_grad_cpu_ordered(
+    G,
+    iota,
+    B,
+    dB_dX,
+    xphi,
+    xtheta,
+    dx_ds,
+    dxphi_ds,
+    dxtheta_ds,
+    *,
+    optimize_G,
+    weight_inv_modB=True,
+):
+    """CPU-ordered Boozer LS scalar and first derivative.
+
+    Mirrors ``sopp.boozer_residual_ds`` for the scalarized first-derivative
+    path: each ``(phi, theta)`` point contributes component triples in order,
+    and the gradient is accumulated in the same point order before the final
+    ``num_res`` normalization.
+    """
+    G = _as_runtime_float64(G, reference=B)
+    iota = _as_runtime_float64(iota, reference=B)
+    nphi, ntheta = B.shape[:2]
+    nsurfdofs = dx_ds.shape[-1]
+    grad_size = nsurfdofs + (2 if optimize_G else 1)
+    num_res = _as_runtime_float64(3 * nphi * ntheta, reference=B)
+    zero = jnp.sum(B, dtype=B.dtype) - jnp.sum(B, dtype=B.dtype)
+    grad0 = jnp.zeros((grad_size,), dtype=B.dtype)
+
+    def point_body(flat_index, state):
+        value, grad = state
+        i = flat_index // ntheta
+        j = flat_index - i * ntheta
+
+        B0 = B[i, j, 0]
+        B1 = B[i, j, 1]
+        B2_component = B[i, j, 2]
+        B2 = B0 * B0 + B1 * B1 + B2_component * B2_component
+        rB2 = _as_runtime_float64(1.0, reference=B) / B2
+        wij = (
+            jnp.sqrt(rB2) if weight_inv_modB else _as_runtime_float64(1.0, reference=B)
+        )
+
+        tang0 = xphi[i, j, 0] + iota * xtheta[i, j, 0]
+        tang1 = xphi[i, j, 1] + iota * xtheta[i, j, 1]
+        tang2 = xphi[i, j, 2] + iota * xtheta[i, j, 2]
+
+        res0 = G * B0 - B2 * tang0
+        res1 = G * B1 - B2 * tang1
+        res2 = G * B2_component - B2 * tang2
+
+        rtil0 = res0 * wij
+        rtil1 = res1 * wij
+        rtil2 = res2 * wij
+        value = value + _as_runtime_float64(0.5, reference=B) * (
+            rtil0 * rtil0 + rtil1 * rtil1 + rtil2 * rtil2
+        )
+
+        dx0 = dx_ds[i, j, 0, :]
+        dx1 = dx_ds[i, j, 1, :]
+        dx2 = dx_ds[i, j, 2, :]
+        dB0 = (
+            dB_dX[i, j, 0, 0] * dx0 + dB_dX[i, j, 1, 0] * dx1 + dB_dX[i, j, 2, 0] * dx2
+        )
+        dB1 = (
+            dB_dX[i, j, 0, 1] * dx0 + dB_dX[i, j, 1, 1] * dx1 + dB_dX[i, j, 2, 1] * dx2
+        )
+        dB2_component = (
+            dB_dX[i, j, 0, 2] * dx0 + dB_dX[i, j, 1, 2] * dx1 + dB_dX[i, j, 2, 2] * dx2
+        )
+        dB2 = _as_runtime_float64(2.0, reference=B) * (
+            B0 * dB0 + B1 * dB1 + B2_component * dB2_component
+        )
+
+        dtang0 = iota * dxtheta_ds[i, j, 0, :] + dxphi_ds[i, j, 0, :]
+        dtang1 = iota * dxtheta_ds[i, j, 1, :] + dxphi_ds[i, j, 1, :]
+        dtang2 = iota * dxtheta_ds[i, j, 2, :] + dxphi_ds[i, j, 2, :]
+
+        dres0 = G * dB0 - (dB2 * tang0 + B2 * dtang0)
+        dres1 = G * dB1 - (dB2 * tang1 + B2 * dtang1)
+        dres2 = G * dB2_component - (dB2 * tang2 + B2 * dtang2)
+
+        if weight_inv_modB:
+            dmodB = _as_runtime_float64(0.5, reference=B) * dB2 * wij
+            dw = -dmodB * rB2
+        else:
+            dw = jnp.zeros_like(dB2)
+        drtil0 = dres0 * wij + dw * res0
+        drtil1 = dres1 * wij + dw * res1
+        drtil2 = dres2 * wij + dw * res2
+        surface_grad = rtil0 * drtil0 + rtil1 * drtil1 + rtil2 * drtil2
+        grad = grad.at[:nsurfdofs].add(surface_grad)
+
+        dres0_iota = -B2 * xtheta[i, j, 0]
+        dres1_iota = -B2 * xtheta[i, j, 1]
+        dres2_iota = -B2 * xtheta[i, j, 2]
+        iota_grad = (
+            rtil0 * dres0_iota * wij
+            + rtil1 * dres1_iota * wij
+            + rtil2 * dres2_iota * wij
+        )
+        grad = grad.at[nsurfdofs].add(iota_grad)
+
+        if optimize_G:
+            G_grad = rtil0 * wij * B0 + rtil1 * wij * B1 + rtil2 * wij * B2_component
+            grad = grad.at[nsurfdofs + 1].add(G_grad)
+
+        return value, grad
+
+    value, grad = lax.fori_loop(0, nphi * ntheta, point_body, (zero, grad0))
+    return value / num_res, grad / num_res
 
 
 def _get_surface_fns():
@@ -474,8 +611,10 @@ def boozer_penalty_composed(
         optimize_G: whether G is in the decision vector.
         weight_inv_modB: weight residual by 1/|B|.
         reduction_mode: ``"default"`` keeps the validated pairwise scalar
-            accumulation, while ``"strict_oracle"`` enables the dedicated
-            compensated scalar contraction for oracle investigations.
+            accumulation, ``"strict_oracle"`` enables the dedicated
+            compensated scalar contraction for oracle investigations, and
+            ``"cpu_ordered"`` mirrors the C++ point/component accumulation
+            order for host-SciPy Boozer LS parity checks.
 
     Returns:
         Scalar objective value.
