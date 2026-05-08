@@ -1,7 +1,7 @@
 import copy
 from dataclasses import dataclass
 from enum import Enum
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Callable, Mapping, Sequence
 
 import numpy as np
@@ -262,12 +262,12 @@ _BOXED_FEASIBLE_CONTINUATION_PROFILE = ALMInnerSolveProfile(
     default_maxls=40,
 )
 _DEFAULT_TAYLOR_EPSILONS = tuple(float(0.5**power) for power in range(7, 13))
-_BOXED_INNER_PROFILES = {
+_BOXED_INNER_PROFILES = MappingProxyType({
     (False, False): _BOXED_INFEASIBLE_INITIAL_PROFILE,
     (False, True): _BOXED_INFEASIBLE_CONTINUATION_PROFILE,
     (True, False): _BOXED_FEASIBLE_INITIAL_PROFILE,
     (True, True): _BOXED_FEASIBLE_CONTINUATION_PROFILE,
-}
+})
 _OWNED_EVALUATION_ARRAY_FIELDS = (
     "grad",
     "metric_grad",
@@ -369,43 +369,6 @@ def upper_bound_residual(metric_value: float, upper_bound: float) -> float:
 
 def lower_bound_residual(metric_value: float, lower_bound: float) -> float:
     return positive_part(lower_bound - metric_value)
-
-
-def normalized_quadratic_penalty_residual(
-    penalty_value: float,
-    penalty_grad,
-    normalization: float = 1.0,
-    reference_grad=None,
-):
-    normalization = max(float(normalization), np.finfo(float).eps)
-    normalized_value = positive_part(penalty_value) / normalization
-    if normalized_value <= 0.0:
-        reference = penalty_grad if reference_grad is None else reference_grad
-        return 0.0, zero_gradient_like(reference)
-
-    residual = float(np.sqrt(normalized_value))
-    scale = 0.5 / (residual * normalization)
-    return residual, scale * np.asarray(penalty_grad, dtype=float)
-
-
-def normalized_lp_penalty_residual(
-    penalty_value: float,
-    penalty_grad,
-    p: int,
-    normalization: float = 1.0,
-    reference_grad=None,
-):
-    if p <= 0:
-        raise ValueError("p must be positive")
-    normalization = max(float(normalization), np.finfo(float).eps)
-    scaled_value = (float(p) * positive_part(penalty_value)) / normalization
-    if scaled_value <= 0.0:
-        reference = penalty_grad if reference_grad is None else reference_grad
-        return 0.0, zero_gradient_like(reference)
-
-    residual = float(scaled_value ** (1.0 / float(p)))
-    scale = (scaled_value ** (1.0 / float(p) - 1.0)) / normalization
-    return residual, scale * np.asarray(penalty_grad, dtype=float)
 
 
 def augmented_inequality_objective(
@@ -4484,6 +4447,10 @@ def _run_alm_outer_iteration(
             )
         if step.decision == _ALMContinuationDecision.BREAK_OUTER:
             break
+        if step.decision != _ALMContinuationDecision.CONTINUE_CONTINUATION:
+            raise AssertionError(
+                f"unhandled continuation decision {step.decision!r}"
+            )
     exhaust_decision = (
         _ALMOuterDecision.EXHAUST if is_final_outer else _ALMOuterDecision.NEXT_OUTER
     )
@@ -4597,6 +4564,10 @@ def _minimize_alm_impl(
             return outcome.result
         if outcome.decision == _ALMOuterDecision.EXHAUST:
             break
+        if outcome.decision != _ALMOuterDecision.NEXT_OUTER:
+            raise AssertionError(
+                f"unhandled outer decision {outcome.decision!r}"
+            )
 
     if final_eval is None or last_result is None:
         raise RuntimeError(

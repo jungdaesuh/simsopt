@@ -100,31 +100,6 @@ class ResidualHelperTests(unittest.TestCase):
         self.assertEqual(module.lower_bound_residual(2.5, 2.0), 0.0)
         self.assertEqual(module.lower_bound_residual(1.5, 2.0), 0.5)
 
-    def test_normalized_quadratic_penalty_residual_undoes_extra_square(self):
-        module = load_alm_utils_module()
-
-        residual, grad = module.normalized_quadratic_penalty_residual(
-            penalty_value=18.0,
-            penalty_grad=np.array([4.0, -2.0]),
-            normalization=2.0,
-        )
-
-        self.assertAlmostEqual(residual, 3.0)
-        np.testing.assert_allclose(grad, np.array([1.0 / 3.0, -1.0 / 6.0]))
-
-    def test_normalized_lp_penalty_residual_extracts_single_level_violation(self):
-        module = load_alm_utils_module()
-
-        residual, grad = module.normalized_lp_penalty_residual(
-            penalty_value=12.0,
-            penalty_grad=np.array([24.0]),
-            p=4,
-            normalization=3.0,
-        )
-
-        self.assertAlmostEqual(residual, 2.0)
-        np.testing.assert_allclose(grad, np.array([1.0]))
-
     def test_augmented_inequality_objective_uses_projected_multiplier_shift(self):
         module = load_alm_utils_module()
 
