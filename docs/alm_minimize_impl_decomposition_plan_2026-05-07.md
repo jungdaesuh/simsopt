@@ -2,10 +2,9 @@
 
 Date: 2026-05-07
 
-Status: in progress. Phases 1a-5 are implemented in the current
-worktree; Phase Final closeout remains partially pending. The baseline
-facts below describe the pre-implementation starting point unless
-explicitly labeled current.
+Status: implemented and validated. Phases 1a-Final are implemented in
+the current worktree. The baseline facts below describe the
+pre-implementation starting point unless explicitly labeled current.
 
 ## Current Implementation Status
 
@@ -18,12 +17,13 @@ explicitly labeled current.
   `_run_alm_outer_iteration`.
 - [x] Phase 5 collapsed `_minimize_alm_impl` to the normalized driver
   and verified the <= 500 LOC / closure-free structural gate.
-- [ ] Phase Final simplification pass remains open.
+- [x] Phase Final simplification pass completed; the final structural
+  metrics and closeout notes below match the current worktree.
 
-Current structural metric after Phase 5:
+Current structural metric after Phase Final:
 `_minimize_alm_impl` is 127 LOC with zero nested function definitions;
-`_run_alm_outer_iteration` is 105 LOC with zero nested function
-definitions; `_run_alm_continuation_step` is 1,036 LOC with zero nested
+`_run_alm_outer_iteration` is 93 LOC with zero nested function
+definitions; `_run_alm_continuation_step` is 622 LOC with zero nested
 function definitions.
 
 Scope source: pre-existing structural debt under
@@ -143,13 +143,14 @@ loop body extracted into one helper, and the terminal failure return.
 
 ### Architecture Requirements
 
-- Each new helper takes frozen state objects, the existing mutable
-  `ALMRunState` accumulator, primitive scalars, and `np.ndarray` data
-  as inputs. Pass `ALMSettings`, `ALMRunState`,
-  `_ALMContinuationStepResult`, primitive scalars, and `np.ndarray`
-  data; do not introduce new mutable lists or dicts beyond the
-  existing `history` list and `history_entry` dict that are already
-  mutable on this code path.
+- Helper boundaries use frozen result/config carriers except for the
+  explicit per-call mutable accumulators: `ALMRunState` owns cross-step
+  run state, and `_ContinuationStepState` owns the sticky continuation
+  locals inside one helper call. Pass `ALMSettings`, `ALMRunState`,
+  `_ContinuationStepState`, `_ALMContinuationStepResult`, primitive
+  scalars, and `np.ndarray` data; do not introduce new mutable lists or
+  dicts beyond the existing `history` list and `history_entry` dict
+  already mutable on this code path.
 - The outer-iteration body must be expressed as one driver that owns:
   - per-iteration setup (`outer_state_callback`, stall counter init).
   - the continuation loop, dispatched into one continuation-step helper
@@ -657,7 +658,7 @@ is green.
 
 ### Phase Final: Simplification And Closeout
 
-- [ ] Run `code-simplifier` on touched files only:
+- [x] Run `code-simplifier` on touched files only:
   `examples/single_stage_optimization/alm_utils.py` and any test
   module that gained helpers in Phase 0-4. No semantic changes.
 - [x] Update this plan with completed checkboxes, the final
@@ -670,9 +671,8 @@ is green.
   `docs/alm_hardening_engineering_followup_todo_2026-05-07.md`
   Backlog 5 status block.
 
-Acceptance: the trackers no longer carry stale line counts and the
-remaining open checkbox is the optional behavior-preserving
-simplification pass.
+Acceptance: the trackers no longer carry stale line counts and no
+Phase Final checkbox remains open.
 
 ## Test Strategy
 
@@ -751,7 +751,8 @@ for node in tree.body:
 PY
 ```
 
-Stale-code grep gate (must return zero hits after Phase 5):
+Stale-code grep gate (must return exactly one production hit after
+Phase 5, inside `_run_alm_outer_iteration`):
 
 ```bash
 git grep -nE "for continuation_iteration in range\\(settings\\.max_subproblem_continuations \\+ 1\\)" \
@@ -821,20 +822,23 @@ if any of the following hold:
 
 ## Notes
 
-- `_minimize_alm_impl` is 1,040 lines today. The four extraction
+- At baseline, `_minimize_alm_impl` was 1,040 lines. The four extraction
   helpers projected here together carry ~470-580 lines depending on
   how much of the per-iteration boilerplate stays in the driver. The
-  driver target after extraction is ~140 lines, well below the
-  500-line bound.
-- Backlog 5 already exposed the five frozen state carriers
+  current driver is 127 lines, well below the 500-line bound.
+- Backlog 5 already exposed five state-carrier dataclasses
   (`ALMRunState`, `ALMFinalState`, `ALMHistoryEntry`,
   `ALMInnerAttemptRequest`, `ALMInnerAttemptResult`) and 77 private
-  module-level helpers, so this plan composes existing pieces rather
-  than introducing new abstractions. The four new private dataclasses
+  module-level helpers before this decomposition pass. `ALMRunState`
+  is the mutable per-call accumulator; the other four are frozen. The
+  current tree now has 93 private helpers after the Phase Final arm
+  simplification. New private carriers introduced by this decomposition
   (`_ALMNormalizedRunInputs`, `_ALMOuterIterationResult`,
-  `_ALMContinuationStepResult`, `_ALMDualUpdateResult`) are private
-  with leading underscore prefixes and stay out of the public
-  module surface.
+  `_ALMContinuationStepResult`, `_ALMDualUpdateResult`,
+  `_ContinuationStepState`, `_PenaltyIncreaseOutcome`) remain private
+  with leading underscore prefixes and stay out of the public module
+  surface. `_ContinuationStepState` is the only new mutable carrier,
+  and it does not escape a continuation-step call.
 - The continuation-step helper is the load-bearing extraction. Each
   of the other three helpers (normalize, penalty-cap, dual-update)
   is small enough to land independently without disturbing the
