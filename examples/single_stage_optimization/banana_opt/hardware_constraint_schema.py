@@ -5,6 +5,7 @@ import sys
 from dataclasses import dataclass
 from typing import Collection, Iterable, Literal, Mapping
 
+from alm_utils import require_positive_alm_threshold
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
     COIL_COIL_MIN_DIST_M,
@@ -55,9 +56,25 @@ class ALMConstraintMetadata:
     dual_update_value_kind: Literal["surrogate", "hard"]
     feasibility_value_kind: Literal["surrogate", "hard"]
     certification_value_kind: Literal["hard"]
+    scale_floor_applied: bool = False
 
     def __post_init__(self) -> None:
         _validate_alm_metadata(self, name=self.source or "ALM metadata")
+
+
+def resolve_alm_scale_with_provenance(
+    raw_value: float, floor: float, base_source: str
+) -> tuple[float, bool, str]:
+    """Returns (scale, floor_applied, source). Source is suffixed `:floored` when the floor activated.
+
+    Caller validates positivity via `require_positive_alm_threshold`; this helper
+    only floors and records provenance — no defensive re-validation here so that
+    the SSOT for positivity stays at the call site (M7 + H1 contract).
+    """
+    floor_applied = raw_value < floor
+    scale = floor if floor_applied else raw_value
+    source = f"{base_source}:floored" if floor_applied else base_source
+    return scale, floor_applied, source
 
 
 _ALM_SURROGATE_VALUE_KIND_TUPLE = (
@@ -270,11 +287,26 @@ def get_hardware_constraint_spec_for_alm_name(name: str) -> HardwareConstraintSp
     return get_hardware_constraint_spec(_schema_name_from_alm_or_schema_name(name))
 
 
-def _resolved_alm_scale(spec: HardwareConstraintSpec, raw_threshold: float) -> float:
-    return max(
-        raw_threshold if spec.alm_scale is None else float(spec.alm_scale),
-        ALM_PHYSICAL_SCALE_FLOOR,
+def _resolved_alm_scale_with_provenance(
+    spec: HardwareConstraintSpec, raw_threshold: float
+) -> tuple[float, bool, str]:
+    candidate = raw_threshold if spec.alm_scale is None else float(spec.alm_scale)
+    require_positive_alm_threshold(f"hardware:{spec.name}.alm_scale", candidate)
+    base_source = (
+        f"threshold:{spec.name}"
+        if spec.alm_scale is None
+        else f"schema:{spec.name}.alm_scale"
     )
+    return resolve_alm_scale_with_provenance(
+        candidate, ALM_PHYSICAL_SCALE_FLOOR, base_source
+    )
+
+
+def _resolved_alm_scale(spec: HardwareConstraintSpec, raw_threshold: float) -> float:
+    scale, _floor_applied, _source = _resolved_alm_scale_with_provenance(
+        spec, raw_threshold
+    )
+    return scale
 
 
 def _alm_activity_tolerance_from_scale(
@@ -326,11 +358,8 @@ def hardware_constraint_alm_metadata(
     schema_name = _schema_name_from_alm_or_schema_name(name)
     spec = get_hardware_constraint_spec(schema_name)
     raw_threshold = _resolved_threshold(spec, threshold_overrides)
-    scale = _resolved_alm_scale(spec, raw_threshold)
-    source = (
-        f"threshold:{schema_name}"
-        if spec.alm_scale is None
-        else f"schema:{schema_name}.alm_scale"
+    scale, scale_floor_applied, source = _resolved_alm_scale_with_provenance(
+        spec, raw_threshold
     )
     metadata = ALMConstraintMetadata(
         scale=scale,
@@ -347,6 +376,7 @@ def hardware_constraint_alm_metadata(
         dual_update_value_kind=dual_update_value_kind,
         feasibility_value_kind=feasibility_value_kind,
         certification_value_kind="hard",
+        scale_floor_applied=scale_floor_applied,
     )
     return metadata
 

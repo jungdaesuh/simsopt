@@ -24,6 +24,9 @@ SMOOTH_DISTANCE_SELECTION_PATH = (
 SINGLE_STAGE_OBJECTIVES_PATH = (
     EXAMPLES_ROOT / "banana_opt" / "single_stage_objectives.py"
 )
+HARDWARE_CONSTRAINT_SCHEMA_PATH = (
+    EXAMPLES_ROOT / "banana_opt" / "hardware_constraint_schema.py"
+)
 SINGLE_STAGE_SEARCH_POLICY_PATH = (
     EXAMPLES_ROOT / "banana_opt" / "single_stage_search_policy.py"
 )
@@ -680,17 +683,74 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 iota_penalty_threshold=None,
             )
 
-    def test_stage2_alm_constraint_metadata_floors_explicit_zero_iota_threshold(self):
+    def test_stage2_alm_constraint_metadata_rejects_explicit_zero_iota_threshold(self):
+        # Zero is invalid as a normalization scale base — the silent-floor
+        # behavior would inflate the signal by 1e12. Validation now fails fast.
+        with self.assertRaisesRegex(
+            ValueError,
+            r"ALM threshold 'stage2:iota_penalty' must be a finite positive value",
+        ):
+            self.module._stage2_alm_constraint_metadata(
+                ("iota_penalty",),
+                threshold_overrides={},
+                activity_tolerance_by_name={"iota_penalty": 0.0},
+                iota_penalty_threshold=0.0,
+            )
+
+    def test_stage2_alm_constraint_metadata_rejects_explicit_negative_iota_threshold(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"ALM threshold 'stage2:iota_penalty' must be a finite positive value",
+        ):
+            self.module._stage2_alm_constraint_metadata(
+                ("iota_penalty",),
+                threshold_overrides={},
+                activity_tolerance_by_name={"iota_penalty": 0.0},
+                iota_penalty_threshold=-1.0,
+            )
+
+    def test_stage2_alm_constraint_metadata_accepts_subnormal_positive_iota_threshold(self):
+        # Subnormal positive threshold passes validation; floor applies as
+        # defense-in-depth so scale never goes below ALM_OBJECTIVE_SCALE_FLOOR.
         metadata_by_name = self.module._stage2_alm_constraint_metadata(
             ("iota_penalty",),
             threshold_overrides={},
             activity_tolerance_by_name={"iota_penalty": 0.0},
-            iota_penalty_threshold=0.0,
+            iota_penalty_threshold=1.0e-15,
         )
-
         metadata = metadata_by_name["iota_penalty"]
-        self.assertEqual(metadata.raw_threshold, 0.0)
+        self.assertEqual(metadata.raw_threshold, 1.0e-15)
         self.assertEqual(metadata.scale, self.module.ALM_OBJECTIVE_SCALE_FLOOR)
+
+    def test_stage2_iota_alm_metadata_records_scale_floor_when_threshold_below_floor(self):
+        # M7 provenance: a tiny-but-positive threshold floors the scale and the
+        # metadata records both the bool flag and the ":floored" source suffix.
+        metadata_by_name = self.module._stage2_alm_constraint_metadata(
+            ("iota_penalty",),
+            threshold_overrides={},
+            activity_tolerance_by_name={"iota_penalty": 0.0},
+            iota_penalty_threshold=5.0e-13,
+        )
+        metadata = metadata_by_name["iota_penalty"]
+        self.assertEqual(metadata.scale, self.module.ALM_OBJECTIVE_SCALE_FLOOR)
+        self.assertTrue(metadata.scale_floor_applied)
+        self.assertTrue(metadata.source.endswith(":floored"))
+        self.assertEqual(metadata.source, "stage2_iota_penalty_threshold:floored")
+
+    def test_stage2_iota_alm_metadata_does_not_record_floor_when_threshold_above_floor(self):
+        # M7 provenance: a healthy positive threshold leaves scale == raw and
+        # neither the flag nor a ":floored" suffix is recorded.
+        metadata_by_name = self.module._stage2_alm_constraint_metadata(
+            ("iota_penalty",),
+            threshold_overrides={},
+            activity_tolerance_by_name={"iota_penalty": 0.0},
+            iota_penalty_threshold=1.0,
+        )
+        metadata = metadata_by_name["iota_penalty"]
+        self.assertEqual(metadata.scale, 1.0)
+        self.assertFalse(metadata.scale_floor_applied)
+        self.assertFalse(metadata.source.endswith(":floored"))
+        self.assertEqual(metadata.source, "stage2_iota_penalty_threshold")
 
     def test_stage2_alm_constraint_metadata_requires_explicit_length_threshold(self):
         with self.assertRaisesRegex(
@@ -2593,6 +2653,35 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
     MODULE_PATH = SINGLE_STAGE_OBJECTIVES_PATH
     MODULE_PREFIX = "banana_single_stage_objectives"
 
+    def test_physics_alm_metadata_records_scale_floor_when_threshold_below_floor(self):
+        # M7 provenance: a tiny-but-positive threshold (5e-13 < 1e-12 floor)
+        # floors the scale and stamps `scale_floor_applied=True` plus a
+        # `:floored` source suffix so post-run audits are unambiguous.
+        metadata = self.module._physics_alm_metadata(
+            "qs_error",
+            threshold=5.0e-13,
+            activity_tolerance=0.0,
+        )
+        self.assertEqual(metadata.scale, self.module.ALM_OBJECTIVE_SCALE_FLOOR)
+        self.assertTrue(metadata.scale_floor_applied)
+        self.assertTrue(metadata.source.endswith(":floored"))
+        self.assertEqual(metadata.source, "threshold:qs_error:floored")
+        self.assertEqual(metadata.raw_threshold, 5.0e-13)
+
+    def test_physics_alm_metadata_does_not_record_floor_when_threshold_above_floor(self):
+        # M7 provenance: a healthy threshold leaves scale == raw and the
+        # provenance flag stays `False` with no `:floored` source suffix.
+        metadata = self.module._physics_alm_metadata(
+            "qs_error",
+            threshold=1.0,
+            activity_tolerance=0.0,
+        )
+        self.assertEqual(metadata.scale, 1.0)
+        self.assertFalse(metadata.scale_floor_applied)
+        self.assertFalse(metadata.source.endswith(":floored"))
+        self.assertEqual(metadata.source, "threshold:qs_error")
+        self.assertEqual(metadata.raw_threshold, 1.0)
+
     @staticmethod
     def _make_projected_base_terms():
         return (
@@ -3696,7 +3785,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             qs_threshold=1.0,
             boozer_threshold=1.0,
             iota_penalty_threshold=0.5,
-            length_penalty_threshold=0.0,
+            length_penalty_threshold=1.0e-12,
         )
 
         self.assertEqual(
@@ -4471,3 +4560,116 @@ class SingleStageSearchPolicyModuleTests(_ModuleTestCase):
         self.assertFalse(decision.allow_boozer_eval)
         self.assertTrue(decision.over_threshold)
         self.assertEqual(decision.reason, "curvature_traversal_budget_exhausted")
+
+
+class HardwareConstraintSchemaModuleTests(unittest.TestCase):
+    # Direct import (not dynamic _load_module) because hardware_constraint_schema
+    # itself defines `ALMConstraintMetadata` as a dataclass at module scope; the
+    # dataclass decorator needs `cls.__module__` registered in `sys.modules`,
+    # which the test-only loader does not provide. The transitive imports made
+    # by sibling tests succeed because they load files that *consume* the
+    # dataclass under its real `banana_opt.hardware_constraint_schema` name.
+    def setUp(self):
+        sys.path.insert(0, str(EXAMPLES_ROOT))
+        try:
+            import banana_opt.hardware_constraint_schema as schema_module
+        finally:
+            sys.path[:] = [p for p in sys.path if p != str(EXAMPLES_ROOT)]
+        self.module = schema_module
+
+    def test_resolve_alm_scale_with_provenance_floors_when_below_floor(self):
+        # M7 SSOT helper: floor activates → scale clamps and source gains the
+        # `:floored` suffix; flag is True.
+        scale, floor_applied, source = self.module.resolve_alm_scale_with_provenance(
+            5.0e-13, 1.0e-12, "threshold:demo"
+        )
+        self.assertEqual(scale, 1.0e-12)
+        self.assertTrue(floor_applied)
+        self.assertEqual(source, "threshold:demo:floored")
+
+    def test_resolve_alm_scale_with_provenance_passes_through_when_above_floor(self):
+        # M7 SSOT helper: when raw >= floor the scale stays equal to raw and
+        # the source string is unchanged.
+        scale, floor_applied, source = self.module.resolve_alm_scale_with_provenance(
+            2.5, 1.0e-12, "threshold:demo"
+        )
+        self.assertEqual(scale, 2.5)
+        self.assertFalse(floor_applied)
+        self.assertEqual(source, "threshold:demo")
+
+    def test_hardware_constraint_alm_metadata_records_floor_for_subnormal_threshold(self):
+        # M7 hardware-schema mirror: the threshold-driven path records floor
+        # provenance when the override falls below the physical scale floor.
+        metadata = self.module.hardware_constraint_alm_metadata(
+            "coil_coil_spacing",
+            threshold_overrides={"coil_coil_spacing": 1.0e-300},
+        )
+        self.assertEqual(metadata.scale, self.module.ALM_PHYSICAL_SCALE_FLOOR)
+        self.assertTrue(metadata.scale_floor_applied)
+        self.assertEqual(metadata.source, "threshold:coil_coil_spacing:floored")
+
+    def test_hardware_constraint_alm_metadata_does_not_record_floor_for_healthy_threshold(self):
+        # M7 hardware-schema mirror: the healthy-threshold path leaves
+        # `scale_floor_applied=False` and the source string unsuffixed.
+        metadata = self.module.hardware_constraint_alm_metadata(
+            "coil_coil_spacing",
+            threshold_overrides={"coil_coil_spacing": 0.05},
+        )
+        self.assertEqual(metadata.scale, 0.05)
+        self.assertFalse(metadata.scale_floor_applied)
+        self.assertEqual(metadata.source, "threshold:coil_coil_spacing")
+
+    def test_hardware_constraint_alm_metadata_records_floor_when_spec_alm_scale_subnormal(self):
+        # M7 hardware-schema mirror: the alm_scale-driven path also records
+        # floor provenance and stamps the `schema:` base source.
+        spec = self.module.HardwareConstraintSpec(
+            name="coil_coil_spacing",
+            kind="lower_bound",
+            threshold=0.05,
+            applies_to=frozenset({"alm"}),
+            traversal_policy="allowed",
+            alm_scale=1.0e-300,
+            alm_block="geometry",
+        )
+        scale, floor_applied, source = self.module._resolved_alm_scale_with_provenance(
+            spec, raw_threshold=0.05
+        )
+        self.assertEqual(scale, self.module.ALM_PHYSICAL_SCALE_FLOOR)
+        self.assertTrue(floor_applied)
+        self.assertEqual(source, "schema:coil_coil_spacing.alm_scale:floored")
+
+    def test_hardware_constraint_alm_metadata_does_not_record_floor_when_spec_alm_scale_healthy(self):
+        # M7 hardware-schema mirror: healthy spec.alm_scale path keeps
+        # `scale_floor_applied=False` and the unsuffixed `schema:` source.
+        spec = self.module.HardwareConstraintSpec(
+            name="coil_coil_spacing",
+            kind="lower_bound",
+            threshold=0.05,
+            applies_to=frozenset({"alm"}),
+            traversal_policy="allowed",
+            alm_scale=0.1,
+            alm_block="geometry",
+        )
+        scale, floor_applied, source = self.module._resolved_alm_scale_with_provenance(
+            spec, raw_threshold=0.05
+        )
+        self.assertEqual(scale, 0.1)
+        self.assertFalse(floor_applied)
+        self.assertEqual(source, "schema:coil_coil_spacing.alm_scale")
+
+    def test_alm_constraint_metadata_default_scale_floor_applied_is_false(self):
+        # Backward-compat: existing constructors that omit `scale_floor_applied`
+        # default to False so legacy call sites and pickles still load.
+        metadata = self.module.ALMConstraintMetadata(
+            scale=1.0,
+            block="physics",
+            activity_tolerance=0.0,
+            raw_threshold=1.0,
+            source="threshold:legacy_demo",
+            objective_value_kind="raw_physics",
+            gradient_value_kind="raw_physics",
+            dual_update_value_kind="hard",
+            feasibility_value_kind="hard",
+            certification_value_kind="hard",
+        )
+        self.assertFalse(metadata.scale_floor_applied)
