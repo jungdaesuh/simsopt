@@ -323,6 +323,12 @@ _BOXED_INNER_PROFILES = MappingProxyType({
     (True, False): _BOXED_FEASIBLE_INITIAL_PROFILE,
     (True, True): _BOXED_FEASIBLE_CONTINUATION_PROFILE,
 })
+_STAGE2_SIGNAL_ARRAY_FIELDS = (
+    "hard_signed_constraint_values",
+    "hard_violation_values",
+    "surrogate_signed_constraint_values",
+    "hard_dual_update_values",
+)
 _OWNED_EVALUATION_ARRAY_FIELDS = (
     "grad",
     "metric_grad",
@@ -330,10 +336,7 @@ _OWNED_EVALUATION_ARRAY_FIELDS = (
     "constraint_values",
     "feasibility_values",
     "dual_update_values",
-    "hard_signed_constraint_values",
-    "hard_violation_values",
-    "surrogate_signed_constraint_values",
-    "hard_dual_update_values",
+    *_STAGE2_SIGNAL_ARRAY_FIELDS,
     "raw_constraint_values",
     "raw_solver_constraint_values",
     "raw_dual_update_values",
@@ -837,13 +840,23 @@ def _surrogate_kkt_stationarity_norm(
     routing_state: ALMConstraintRoutingState,
     feasibility_gate: float,
 ) -> float | None:
-    metric_grad = np.asarray(
-        evaluation.get("metric_grad", evaluation["grad"]),
+    # M9 (mirrored to surrogate side): KKT stationarity is `‖∇f + Σλ_i∇c_i‖`,
+    # NOT `‖∇L_A + Σλ_i∇c_i‖`. Augmented gradient `∇L_A` already contains the
+    # active-constraint contribution, so feeding it to nnls collapses the
+    # diagnostic to ~0 once the inner solve converges and hides multiplier-
+    # quality defects. Use bare ∇f (`base_grad`) when the evaluation dict
+    # provides it; fall back to `metric_grad` (or `grad`) only when the
+    # contract did not expose a separate base gradient.
+    base_grad = np.asarray(
+        evaluation.get(
+            "base_grad",
+            evaluation.get("metric_grad", evaluation["grad"]),
+        ),
         dtype=float,
     )
     surrogate_values = routing_state.signal_state.surrogate_signed_constraint_values
     return _kkt_stationarity_norm(
-        metric_grad,
+        base_grad,
         evaluation.get("constraint_grads"),
         surrogate_values,
         np.maximum(surrogate_values, 0.0),
@@ -1275,6 +1288,12 @@ def _nonfinite_evaluation_fields(evaluation: dict) -> tuple[str, ...]:
         "metric_grad",
         "base_grad",
         "constraint_activity_tolerances",
+        # H2: explicit stage-2 signal arrays participate in routing and
+        # the dual update; a NaN here flows directly into multiplier
+        # projection. The hybrid surrogate-vs-hard contract documented in
+        # docs/alm_hybrid_signal_contract_2026-05-08.md depends on these
+        # being finite at every evaluation boundary.
+        *_STAGE2_SIGNAL_ARRAY_FIELDS,
     )
     for field_name in optional_array_fields:
         if field_name not in evaluation:
@@ -1663,6 +1682,17 @@ def _project_nonnegative_multipliers_with_diagnostics(
         dual_update_values,
         penalty,
     )
+    # H3: defense-in-depth after the H2 whitelist closes the upstream NaN
+    # path. `updated > cap` is False for NaN and `np.minimum(NaN, cap)` is
+    # NaN, so a non-finite multiplier would otherwise propagate silently
+    # with `cap_binding=False`. Surface the contract violation loudly.
+    if not np.all(np.isfinite(updated)):
+        nonfinite_indices = np.flatnonzero(~np.isfinite(updated)).tolist()
+        raise ValueError(
+            "ALM multiplier projection produced non-finite values at indices "
+            f"{nonfinite_indices}; upstream evaluation should have been rejected "
+            "by _require_finite_evaluation"
+        )
     if multiplier_max is None:
         return updated, False, []
     cap = float(multiplier_max)
@@ -1979,15 +2009,9 @@ def _extract_constraint_state(evaluation: dict):
 def _extract_stage2_constraint_signal_state(
     evaluation: dict,
 ) -> ALMConstraintSignalState:
-    stage2_signal_fields = (
-        "hard_signed_constraint_values",
-        "hard_violation_values",
-        "surrogate_signed_constraint_values",
-        "hard_dual_update_values",
-    )
     explicit_stage2_signals = any(
         key in evaluation
-        for key in stage2_signal_fields
+        for key in _STAGE2_SIGNAL_ARRAY_FIELDS
     )
     (
         solver_constraint_values,
@@ -1997,7 +2021,7 @@ def _extract_stage2_constraint_signal_state(
     ) = _extract_constraint_state(evaluation)
     if explicit_stage2_signals:
         missing_fields = [
-            field for field in stage2_signal_fields if field not in evaluation
+            field for field in _STAGE2_SIGNAL_ARRAY_FIELDS if field not in evaluation
         ]
         if missing_fields:
             raise KeyError(
@@ -3970,6 +3994,14 @@ def _run_alm_continuation_step(
         and current_stationarity_norm <= settings.stationarity_tol
         and not current_constraints_inactive_candidate
         and not current_signal_mismatch_active
+        # M4: cap-binding multipliers mean the prior dual update was clamped;
+        # KKT residual is being held artificially small by the cap, not by
+        # genuine convergence. Block the converged label on the start-of-outer
+        # skipped-inner shortcut too — same `not run_state.last_cap_binding_active`
+        # invariant as the post-inner converged arm and the constraints-inactive
+        # converged arm later in this same `_run_alm_continuation_step` — and let
+        # the outer loop continue (a future dual update may unclamp).
+        and not run_state.last_cap_binding_active
     ):
         history_entry, run_state.history_truncated_count = _append_alm_history_entry(
             run_state.history,

@@ -40,7 +40,10 @@ DEFAULT_HARDWARE_SEARCH_MODE = "warn"
 DEFAULT_ALM_QS_THRESHOLD = 3.0e-3
 DEFAULT_ALM_BOOZER_THRESHOLD = 1.0e-2
 DEFAULT_ALM_IOTA_PENALTY_THRESHOLD = 1.0e-4
-DEFAULT_ALM_LENGTH_PENALTY_THRESHOLD = 0.0
+# Length-penalty threshold T in squared-penalty units; constraint is
+# 0.5*max(L - L_target, 0)**2 <= T. With T=1e-4, allowable overshoot is
+# sqrt(2*T) ~= 0.014 m. See README "Length threshold units" section.
+DEFAULT_ALM_LENGTH_PENALTY_THRESHOLD = 1.0e-4
 
 
 def parse_args() -> argparse.Namespace:
@@ -202,6 +205,13 @@ def parse_args() -> argparse.Namespace:
         "--alm-length-penalty-threshold",
         type=float,
         default=DEFAULT_ALM_LENGTH_PENALTY_THRESHOLD,
+        help=(
+            "thresholded_physics-mode upper bound T for the coil-length penalty objective. "
+            "Units: squared-penalty units. The constraint is "
+            "0.5*max(L - L_target, 0)**2 <= T (no length_weight factor). "
+            "To target a desired overshoot d, set T = 0.5 * d**2 "
+            "(e.g. d = 0.014 m -> T ~= 1e-4). See README 'Length threshold units'."
+        ),
     )
     return parser.parse_args()
 

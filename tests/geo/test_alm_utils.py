@@ -248,6 +248,28 @@ class ResidualHelperTests(unittest.TestCase):
         self.assertTrue(cap_binding)
         self.assertEqual(cap_indices, [0])
 
+    def test_project_nonnegative_multipliers_with_diagnostics_rejects_nonfinite(self):
+        # H3: NaN/Inf in updated multipliers must surface as ValueError.
+        # `updated > cap` is False for NaN, and `np.minimum(NaN, cap)` is NaN,
+        # so without the H3 guard a non-finite multiplier would propagate
+        # silently with `cap_binding=False`. Defense-in-depth after H2 closes
+        # the upstream `_nonfinite_evaluation_fields` whitelist gap.
+        module = load_alm_utils_module()
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            module._project_nonnegative_multipliers_with_diagnostics(
+                multipliers=np.array([0.0]),
+                dual_update_values=np.array([np.nan]),
+                penalty=1.0,
+                multiplier_max=10.0,
+            )
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            module._project_nonnegative_multipliers_with_diagnostics(
+                multipliers=np.array([np.inf]),
+                dual_update_values=np.array([0.0]),
+                penalty=1.0,
+                multiplier_max=10.0,
+            )
+
     def test_minimize_alm_records_constraint_blocks_as_diagnostics_only(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
@@ -743,6 +765,67 @@ class ResidualHelperTests(unittest.TestCase):
             module._surrogate_kkt_stationarity_norm(
                 evaluation,
                 routing_state,
+                feasibility_gate=1.0,
+            ),
+            0.0,
+        )
+
+    def test_surrogate_kkt_stationarity_norm_prefers_base_grad(self):
+        # H4 (mirror of M9 from bf936a0a4): the surrogate KKT diagnostic must
+        # consume bare ∇f (`base_grad`), not the augmented gradient
+        # (`metric_grad`/`grad`). Otherwise the residual collapses to ~0 once
+        # L-BFGS-B converges and hides multiplier-quality defects, even though
+        # the dual problem is far from optimal.
+        module = load_alm_utils_module()
+        # base_grad ≠ grad. NNLS for `1.0·λ = -base_grad[0]` with λ ≥ 0
+        # clamps to 0 (RHS positive impossible), so residual = ‖0 − (−2.0)‖ = 2.
+        # If the helper used `grad` (augmented, zero at inner-solve minimum),
+        # the residual would be 0.
+        evaluation_with_base = {
+            "total": 0.0,
+            "grad": np.array([0.0]),
+            "base_grad": np.array([2.0]),
+            "constraint_values": np.array([0.0]),
+            "feasibility_values": np.array([0.0]),
+            "dual_update_values": np.array([0.0]),
+            "hard_signed_constraint_values": np.array([0.0]),
+            "hard_violation_values": np.array([0.0]),
+            "surrogate_signed_constraint_values": np.array([0.0]),
+            "hard_dual_update_values": np.array([0.0]),
+            "constraint_grads": [np.array([1.0])],
+            "constraint_activity_tolerances": np.array([0.0]),
+        }
+        routing_state_with_base = module._constraint_routing_state(
+            evaluation_with_base,
+            np.zeros(1),
+            1.0,
+            feasibility_gate=1.0,
+        )
+
+        self.assertAlmostEqual(
+            module._surrogate_kkt_stationarity_norm(
+                evaluation_with_base,
+                routing_state_with_base,
+                feasibility_gate=1.0,
+            ),
+            2.0,
+        )
+
+        # Backward-compat: when `base_grad` is absent, fall back to
+        # `metric_grad` then `grad` (preserves the pre-H4 contract).
+        evaluation_no_base = dict(evaluation_with_base)
+        del evaluation_no_base["base_grad"]
+        routing_state_no_base = module._constraint_routing_state(
+            evaluation_no_base,
+            np.zeros(1),
+            1.0,
+            feasibility_gate=1.0,
+        )
+
+        self.assertAlmostEqual(
+            module._surrogate_kkt_stationarity_norm(
+                evaluation_no_base,
+                routing_state_no_base,
                 feasibility_gate=1.0,
             ),
             0.0,
@@ -2694,6 +2777,29 @@ class MinimizeAlmTests(unittest.TestCase):
         history_snapshots[-1]["latest_entry"]["constraint_values"][0] = 99.0
         self.assertEqual(result.history[0]["action"], "infeasible_stall_penalty_increase")
         self.assertEqual(result.history[0]["constraint_values"], [2.0])
+
+    def test_nonfinite_evaluation_fields_detects_stage2_signal_arrays(self):
+        # H2: explicit stage-2 signal arrays must be in the
+        # `_nonfinite_evaluation_fields` whitelist so a NaN in any of them is
+        # caught at the `_require_finite_evaluation` boundary, not silently
+        # propagated through the dual update via `_extract_stage2_constraint_signal_state`.
+        module = load_alm_utils_module()
+        base = {"total": 0.0, "grad": np.zeros(1)}
+        for kind, sentinel in (("nan", np.nan), ("inf", np.inf)):
+            for field in module._STAGE2_SIGNAL_ARRAY_FIELDS:
+                with self.subTest(field=field, kind=kind):
+                    evaluation = dict(base)
+                    evaluation[field] = np.array([sentinel])
+                    self.assertIn(
+                        field,
+                        module._nonfinite_evaluation_fields(evaluation),
+                    )
+
+        # Finite stage-2 fields are not flagged.
+        finite = dict(base)
+        for field in module._STAGE2_SIGNAL_ARRAY_FIELDS:
+            finite[field] = np.array([0.0])
+        self.assertEqual(module._nonfinite_evaluation_fields(finite), ())
 
     def test_sanitize_nonfinite_evaluation_copies_only_owned_gradient_arrays(self):
         module = load_alm_utils_module()
@@ -4870,6 +4976,77 @@ class SkippedInnerShortcutTests(unittest.TestCase):
         self.assertEqual(result.history[0]["inner_iterations"], 0)
         self.assertEqual(result.history[0]["inner_attempts"], 0)
         self.assertEqual(len(evaluator_calls), 1)
+
+    def test_minimize_alm_blocks_skipped_inner_shortcut_when_cap_was_bound(self):
+        """H1: pin the M4 cap-binding gate on the start-of-outer skipped-inner
+        shortcut. After a prior outer iteration's dual update binds at
+        ``multiplier_max``, the next outer's pre-inner shortcut must NOT emit
+        ``success=True, "converged"`` even if feasibility/stationarity hold at
+        the cap-clamped multipliers — the cap distorts the Lagrangian, so KKT
+        is not actually attained.
+
+        Scenario:
+        1. Outer 0: evaluator returns infeasible (constraint = 0.5) when
+           multipliers are still zero, forcing the inner solve and a dual
+           update that clamps the multiplier at ``multiplier_max=0.2`` — sets
+           ``run_state.last_cap_binding_active = True``.
+        2. Outer 1 start: evaluator returns feasible+stationary when
+           multipliers > 0. Without the H1 gate, the start-of-outer
+           skipped-inner shortcut in ``_run_alm_continuation_step`` (the
+           third success arm, alongside the post-inner converged arm and
+           the constraints-inactive arm) fires and falsely labels
+           ``converged``. With the gate, the shortcut is blocked.
+        """
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=2,
+            max_subproblem_continuations=1,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-6,
+            stationarity_tol=1e-6,
+            relaxed_feasibility_gate_cap=1.0,
+            multiplier_max=0.2,
+            history_max_entries=None,
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x, penalty
+            if float(multipliers[0]) <= 0.0:
+                return _complete_alm_evaluation({
+                    "total": 1.0,
+                    "grad": np.array([1.0]),
+                    "constraint_values": np.array([0.5]),
+                    "stationarity_norm": 1.0,
+                })
+            return _complete_alm_evaluation({
+                "total": 0.0,
+                "grad": np.zeros(1),
+                "constraint_values": np.array([0.0]),
+                "stationarity_norm": 0.0,
+            })
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, x, jac, method, bounds, callback, options
+            return SimpleNamespace(
+                x=np.array([0.0]),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([0.1]),
+                ["c0"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+            )
+
+        self.assertTrue(result.multiplier_cap_binding)
+        self.assertFalse(result.success)
+        self.assertNotEqual(result.termination_reason, "converged")
 
 
 if __name__ == "__main__":

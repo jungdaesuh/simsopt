@@ -1400,7 +1400,17 @@ def parse_args():
             if "ALM_IOTA_PENALTY_THRESHOLD" in os.environ
             else None
         ),
-        help="thresholded_physics-mode upper bound for the Jiota penalty objective.",
+        help=(
+            "thresholded_physics-mode upper bound T for the Jiota penalty objective. "
+            "Units: squared-penalty units, NOT iota deviation. The actual constraint "
+            "is 0.5*(iota - iota_target)**2 <= T (no iotas_weight factor: that weight "
+            "is the soft-objective scalarization weight in non-ALM modes and does NOT "
+            "enter the ALM constraint). To target a desired iota deviation d, set "
+            "T = 0.5 * d**2 (e.g. d = 0.01 -> T = 0.5 * 0.01**2 = 5e-5). This is "
+            "intentionally different from --stage2-iota-tolerance, which is a direct "
+            "iota deviation (|iota - iota_target| <= tolerance). See the 'Iota "
+            "threshold units' section of examples/single_stage_optimization/README.md."
+        ),
     )
     parser.add_argument(
         "--alm-length-penalty-threshold",
@@ -1410,7 +1420,19 @@ def parse_args():
             if "ALM_LENGTH_PENALTY_THRESHOLD" in os.environ
             else None
         ),
-        help="thresholded_physics-mode upper bound for the single-stage length penalty objective.",
+        help=(
+            "thresholded_physics-mode upper bound T for the single-stage coil-length "
+            "penalty objective JCurveLength. Units: squared-penalty units, NOT a length "
+            "deviation in meters. The actual constraint is "
+            "0.5*max(L - L_target, 0)**2 <= T, with JCurveLength built as "
+            "QuadraticPenalty(curvelength, length_target, f='max') so only one-sided "
+            "overshoot (L > L_target) contributes; underruns produce zero penalty. "
+            "No length_weight factor enters this ALM constraint: --length-weight is the "
+            "soft-objective scalarization weight in non-ALM modes and does NOT enter "
+            "here. To target a desired overshoot d in meters, set T = 0.5 * d**2 "
+            "(e.g. d = 0.014 m -> T = 0.5 * 0.014**2 ~= 1e-4). See the 'Length "
+            "threshold units' section of examples/single_stage_optimization/README.md."
+        ),
     )
     parser.add_argument(
         "--iota-target",

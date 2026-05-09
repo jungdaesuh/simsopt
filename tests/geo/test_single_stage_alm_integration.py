@@ -346,7 +346,7 @@ def make_single_stage_thresholded_physics_rerun_args(**overrides):
         "alm_qs_threshold": 3e-3,
         "alm_boozer_threshold": 1e-2,
         "alm_iota_penalty_threshold": 1e-4,
-        "alm_length_penalty_threshold": 0.0,
+        "alm_length_penalty_threshold": 1e-4,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -2152,6 +2152,26 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(args.cs_dist, 0.015)
         self.assertEqual(args.curvature_threshold, 100.0)
         self.assertEqual(args.single_stage_banana_current_mode, "shared")
+
+    def test_default_alm_length_penalty_threshold_passes_validator(self):
+        """Regression: default length-penalty threshold must satisfy require_positive_alm_threshold.
+
+        Prior to the fix, DEFAULT_ALM_LENGTH_PENALTY_THRESHOLD was 0.0, which the
+        validator (added in a169f296a) rejects. The runner's str() forwarding then
+        crashed every default invocation. Pin the default to a strictly positive
+        value so the runner is invokable without overrides.
+        """
+        module = load_single_stage_thresholded_physics_rerun_module()
+        alm_utils = load_alm_utils_module()
+
+        default_threshold = module.DEFAULT_ALM_LENGTH_PENALTY_THRESHOLD
+        self.assertGreater(default_threshold, 0.0)
+
+        validated = alm_utils.require_positive_alm_threshold(
+            "--alm-length-penalty-threshold",
+            default_threshold,
+        )
+        self.assertEqual(validated, float(default_threshold))
 
     def test_single_stage_thresholded_physics_rerun_wrapper_rejects_stage2_surface_mismatch(self):
         module = load_single_stage_thresholded_physics_rerun_module()

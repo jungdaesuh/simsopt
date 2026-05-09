@@ -9992,6 +9992,101 @@ class CurrentBaselineContractTests(unittest.TestCase):
         ):
             module.validate_single_stage_alm_formulation_args(args)
 
+    def test_alm_iota_penalty_threshold_help_documents_squared_penalty_units(self):
+        # The CLI help text for --alm-iota-penalty-threshold must pin the actual
+        # constraint form 0.5*(iota - iota_target)**2 <= T (with NO iotas_weight
+        # factor: see single_stage_objectives._objective_upper_bound_constraint
+        # call on Jiota = QuadraticPenalty(..., f='identity')) and the correct
+        # operator-facing conversion T = 0.5 * d**2. It must also cross-link to
+        # --stage2-iota-tolerance because that flag uses the deviation directly,
+        # not the squared penalty units, and operators must not assume the two
+        # flags are interchangeable in numerical scale.
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--help",
+            ],
+        ), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            with self.assertRaises(SystemExit) as excinfo:
+                module.parse_args()
+
+        help_text = stdout.getvalue()
+        # argparse hard-wraps long help strings around column ~58, breaking on
+        # internal spaces. Collapsing whitespace ("\n   " -> " ") yields the
+        # rendered prose minus the wrap geometry. argparse may also break a
+        # long flag like --stage2-iota-tolerance at an internal hyphen, leaving
+        # "--stage2-iota- tolerance" after collapse; we tolerate that by
+        # asserting on the wrap-resilient prefix --stage2-iota- and the
+        # adjacent token "tolerance" rather than the brittle full flag.
+        help_text_flat = " ".join(help_text.split())
+        self.assertEqual(excinfo.exception.code, 0)
+        self.assertIn("--alm-iota-penalty-threshold", help_text_flat)
+        self.assertIn("squared-penalty units", help_text_flat)
+        self.assertIn("--stage2-iota-", help_text_flat)
+        self.assertIn("tolerance, which is a direct iota deviation", help_text_flat)
+        # Pin the actual constraint formula and conversion. These exact strings
+        # appear in the (whitespace-collapsed) help text, so any future drift
+        # away from the correct half-squared form fails this assertion.
+        self.assertIn("0.5*(iota - iota_target)**2 <= T", help_text_flat)
+        self.assertIn("T = 0.5 * d**2", help_text_flat)
+        # Pin the worked example numerically so operators always have a sanity
+        # check: deviation 0.01 -> threshold 0.5 * 0.01**2 = 5e-5.
+        self.assertEqual(0.5 * 0.01**2, 5e-5)
+        self.assertIn(
+            "d = 0.01 -> T = 0.5 * 0.01**2 = 5e-5",
+            help_text_flat,
+        )
+
+    def test_alm_iota_penalty_constraint_uses_half_squared_form(self):
+        # Pins the math identity at the CONSTRAINT level: the iota_penalty entry
+        # in the thresholded_physics ALM constraint set is built by feeding
+        # Jiota = QuadraticPenalty(surface_iota_term, iota_target) (with default
+        # f='identity') into _objective_upper_bound_constraint, with NO weight
+        # factor. The QuadraticPenalty contract from
+        # simsopt.objectives.utilities is J() = 0.5 * (obj.J() - cons)**2, so
+        # the constraint reduces to 0.5 * (iota - iota_target)**2 <= T. This
+        # test guards against future help-text drift by anchoring the formula
+        # at the place the operator-facing docs MUST reflect.
+        module = load_single_stage_example_module()
+
+        class FixedIotaTerm(Optimizable):
+            def __init__(self, value):
+                super().__init__(x0=np.array([0.0]))
+                self._value = float(value)
+
+            def J(self):
+                return self._value
+
+            def dJ(self, partials=False):
+                if partials:
+                    return lambda _objective: np.array([0.0])
+                return np.array([0.0])
+
+        iota_target = 0.42
+        deviation = 0.01
+        iota_term = FixedIotaTerm(iota_target + deviation)
+
+        Jiota = module.build_single_stage_iota_objective(
+            iota_term,
+            iota_target,
+            goal_mode="target",
+        )
+
+        # build_single_stage_iota_objective in target mode is documented as
+        # QuadraticPenalty(iota_term, iota_target) with default f='identity'.
+        from simsopt.objectives.utilities import QuadraticPenalty
+
+        self.assertIsInstance(Jiota, QuadraticPenalty)
+        self.assertEqual(Jiota.f, "identity")
+        # The penalty value is exactly 0.5 * deviation**2 -- this is the term
+        # bounded by --alm-iota-penalty-threshold in thresholded_physics mode.
+        self.assertAlmostEqual(Jiota.J(), 0.5 * deviation**2)
+        self.assertAlmostEqual(Jiota.J(), 5e-5)
+
     def test_single_stage_parse_args_accepts_boozer_stage_refinement_flags(self):
         module = load_single_stage_example_module()
 

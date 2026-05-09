@@ -566,6 +566,55 @@ Important current behavior:
 - realized hardware status is intentionally split: `search_hardware_status` describes the search-role contract used for accepted/trial single-stage states, while `artifact_hardware_status` describes final artifact certification and drives `HARDWARE_CONSTRAINTS_OK` / `HARDWARE_CONSTRAINT_VIOLATIONS`
 - both status objects are schema-driven and now expose `allowed_traversal_status` and `forbidden_traversal_status` buckets so wrappers can distinguish soft-search violations from constraints that are supposed to forbid traversal in penalty mode
 
+## Iota threshold units
+
+Two CLI flags both bound iota error, but they intentionally use different operator-facing units. Pick the right one for the run path you are configuring:
+
+- `--stage2-iota-tolerance` (Stage 2 ALM and Stage 2 iota decision gate)
+  Units: dimensionless iota deviation. The constraint is `|iota - iota_target| <= tolerance`. A value of `5e-3` means "iota must land within 0.005 of the target".
+
+- `--alm-iota-penalty-threshold` (single-stage `--alm-formulation thresholded_physics`)
+  Units: squared-penalty units, NOT iota deviation. The actual constraint is `0.5 * (iota - iota_target)^2 <= T`, with NO `iotas_weight` factor. (`--iotas-weight` is the soft-objective scalarization weight in non-ALM modes; it does not enter this ALM constraint.) A value of `1e-3` does NOT mean "iota deviation 1e-3"; it means "the half-squared penalty is at most 1e-3".
+
+This split exists because Stage 2 expresses the constraint geometrically while single-stage thresholded-physics ALM bounds the same `QuadraticPenalty` objective (`0.5 * (iota - iota_target)^2`) that the inner solve already evaluates, so no separate iota gradient path is required there.
+
+Operator-facing conversion. To target a desired iota deviation `d` in single-stage ALM:
+
+```
+--alm-iota-penalty-threshold = 0.5 * d**2
+```
+
+Example: target deviation `d = 0.01`:
+
+```
+--alm-iota-penalty-threshold = 0.5 * 0.01**2 = 5e-5
+```
+
+The conversion is independent of `--iotas-weight`. The Stage 2 `--stage2-iota-tolerance` value is also independent of any weight and uses the deviation directly.
+
+## Length threshold units
+
+The single-stage `--alm-length-penalty-threshold` flag (active under `--alm-formulation thresholded_physics`) bounds the coil-length penalty objective `JCurveLength`. Its units are intentionally not a length deviation in meters, so operators must convert before setting a target overshoot.
+
+- `--alm-length-penalty-threshold` (single-stage `--alm-formulation thresholded_physics`)
+  Units: squared-penalty units, NOT a length deviation in meters. The actual constraint is `0.5 * max(L - L_target, 0)^2 <= T`, with NO `length_weight` factor. (`--length-weight` is the soft-objective scalarization weight in non-ALM modes; it does not enter this ALM constraint.) The penalty is built as `JCurveLength = QuadraticPenalty(curvelength, length_target, f="max")`, so only one-sided overshoot (`L > L_target`) contributes; underruns produce zero penalty. A value of `1e-4` does NOT mean "length overshoot 1e-4 m"; it means "the half-squared one-sided penalty is at most 1e-4".
+
+This mirrors the iota-threshold split above: single-stage thresholded-physics ALM bounds the same `QuadraticPenalty` objective that the inner solve already evaluates, so no separate length gradient path is required.
+
+Operator-facing conversion. To target a desired one-sided overshoot `d` in meters in single-stage ALM:
+
+```
+--alm-length-penalty-threshold = 0.5 * d**2
+```
+
+Example: target overshoot `d = 0.014` m:
+
+```
+--alm-length-penalty-threshold = 0.5 * 0.014**2 ~= 1e-4
+```
+
+The conversion is independent of `--length-weight`.
+
 ## Hardware Search Policy
 
 Search-time realized hardware handling is explicit in current single-stage code:
