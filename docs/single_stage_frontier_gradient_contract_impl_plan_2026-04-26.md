@@ -1,8 +1,18 @@
 # Single-Stage Frontier Gradient Contract Implementation Plan
 
 Date: 2026-04-26
-Status: proposal, validated against current tree at `1f78c5b71`
+Status: Superseded historical plan for NSGA3-specific sections; gradient-contract notes remain historical context
 Scope: `examples/single_stage_optimization/` frontier objective assembly, search rejection, campaign reporting, evaluator cache, and lane isolation
+
+## 2026-05-07 Supersession Note
+
+- [x] NSGA3-specific gates, artifact writes, and validation phases in this file are superseded by the bloat-reduction execution.
+- [x] `banana_opt/frontier_engine_nsga3.py` was deleted.
+- [x] `banana_opt/frontier_engine_base.py` was renamed to `banana_opt/frontier_progress_state.py`.
+- [x] `banana_opt/frontier_engine_multilane_local.py` was folded into `banana_opt/frontier_scalarization.py`.
+- [x] `banana_opt/frontier_evaluator.py` was removed after the NSGA3/global-evaluator path became unreferenced by production code.
+
+The non-NSGA3 optimizer-contract discussion remains useful historical context, but the evaluator-cache, "Patch 6 NSGA3", and "Phase 10: Early NSGA3 validation" sections no longer apply to the current code.
 
 ## Review Verdict
 
@@ -270,7 +280,7 @@ Patch 5 cache/atomic-write gates:
 - interrupted-write tests leave either old valid JSON or new valid JSON
 - resume succeeds from the written artifacts
 
-Patch 6 NSGA3 gates:
+Patch 6 NSGA3 gates — SUPERSEDED 2026-05-07:
 
 - invalid reference mode, invalid objective count, invalid reference-direction shape, and unsupported banana-current mode fail before evaluator construction
 - population size and reference-direction count policy is visible in the manifest
@@ -622,9 +632,15 @@ Rules:
 - Do not derive normalization adaptively from the live archive.
 - Archive members record both raw and normalized metrics.
 
-### Phase 9: Evaluator cache and atomic writes
+### Phase 9: Evaluator cache and atomic writes — SUPERSEDED 2026-05-07
 
-Refactor evaluator and NSGA3 artifact writes to use one shared atomic JSON writer.
+> **SUPERSEDED 2026-05-07.** The evaluator seam and NSGA3 path were deleted by the bloat-reduction execution. The bullets below referenced `frontier_evaluator.py` (removed), `SingleStageFrontierEvaluator` (removed), `frontier_engine_nsga3.py` (deleted), and their cache/checkpoint artifacts (no longer produced). They are historical context only and must NOT be executed.
+>
+> The only still-potentially-live element of the original phase was the "any frontier campaign writer still using direct `write_text`" line. If atomic-write hardening for current campaign writers is needed, track it via `docs/frontier_mode_bloat_reduction_todo_plan_2026-05-07.md` rather than this superseded phase.
+
+Historical reference (deleted-path context — do not execute):
+
+Refactored evaluator and NSGA3 artifact writes were planned to use one shared atomic JSON writer.
 
 Suggested helper:
 
@@ -639,7 +655,7 @@ def write_json_atomic(path, payload):
     ...
 ```
 
-Implementation requirements:
+Implementation requirements (historical):
 
 - create temp file in the same directory as the target
 - write JSON with deterministic formatting, including `sort_keys=True`
@@ -652,24 +668,22 @@ Implementation requirements:
 
 Python documents `os.replace` as overwriting an existing file and making the rename atomic when successful, with failure possible across filesystems.[^python-os-replace]
 
-Apply the helper to:
+Originally planned application (all deleted-path; do not execute):
 
-- evaluator spec writes
-- evaluator disk cache writes
-- NSGA3 population checkpoint writes
-- NSGA3 generation history writes
-- any frontier campaign writer still using direct `write_text`
+- ~~evaluator spec writes~~ — SUPERSEDED; evaluator seam deleted.
+- ~~evaluator disk cache writes~~ — SUPERSEDED; evaluator seam deleted.
+- ~~NSGA3 population checkpoint writes~~ — SUPERSEDED; engine deleted.
+- ~~NSGA3 generation history writes~~ — SUPERSEDED; engine deleted.
+- frontier campaign writers still using direct `write_text` — track separately if still applicable; not via this superseded phase.
 
-Add an LRU cap to `SingleStageFrontierEvaluator._cache`.
+Required tests (historical, all SUPERSEDED):
 
-Required tests:
+- ~~cache evicts oldest entries after capacity is reached~~ — SUPERSEDED.
+- ~~cache hit/miss counters remain correct~~ — SUPERSEDED.
+- ~~atomic writer leaves valid old or valid new JSON after simulated interrupted write~~ — historical; carry over only if atomic-write hardening is reopened against current writers under the bloat-reduction tracker.
+- ~~disk cache schema mismatch is ignored without mutating in-memory cache~~ — SUPERSEDED.
 
-- cache evicts oldest entries after capacity is reached
-- cache hit/miss counters remain correct
-- atomic writer leaves valid old or valid new JSON after simulated interrupted write
-- disk cache schema mismatch is ignored without mutating in-memory cache
-
-### Phase 10: Early NSGA3 validation
+### Phase 10: Early NSGA3 validation — SUPERSEDED 2026-05-07
 
 Move unsupported engine-argument checks before evaluator/runtime allocation.
 
@@ -738,7 +752,7 @@ This phase is documentation and artifact semantics unless new differentiable phy
 
 ### Patch 1: Correctness only
 
-Files likely touched:
+Files likely touched in the superseded evaluator-cache path:
 
 - `banana_opt/frontier_constraints.py`
 - `SINGLE_STAGE/single_stage_banana_example.py`
@@ -817,7 +831,7 @@ Exit criteria:
 - important checkpoint writes use flush and `fsync`
 - cache schema and counters are tested
 
-### Patch 6: NSGA3 validation
+### Patch 6: NSGA3 validation — SUPERSEDED 2026-05-07
 
 Files likely touched:
 

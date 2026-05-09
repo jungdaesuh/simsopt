@@ -1,24 +1,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Mapping
+from types import MappingProxyType
+from typing import Callable, Literal, Mapping, Sequence
 
 from .frontier_archive import FrontierArchiveMember
 from .frontier_contracts import SUPPORTED_FRONTIER_RECOMMENDATION_POLICIES
 from .frontier_dominance import (
+    PARETO_OBJECTIVE_SPECS,
     objective_metric_scale,
     resolve_pareto_normalization_reference_metrics,
 )
 
-_BALANCED_POLICY_METRICS = (
-    ("iota", True),
-    ("volume", True),
-    ("qa_error", False),
-    ("boozer_residual", False),
+_BALANCED_POLICY_METRICS = tuple(
+    (metric_name, direction == "max")
+    for metric_name, direction, _ in PARETO_OBJECTIVE_SPECS
 )
 
+Direction = Literal["asc", "desc"]
+KeyFn = Callable[[FrontierArchiveMember], tuple[object, ...]]
+KeyFactory = Callable[[Mapping[str, object] | None], KeyFn]
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, slots=True)
 class FrontierRecommendationGateRule:
     constraint_metric: str
     required_value: bool
@@ -26,28 +30,24 @@ class FrontierRecommendationGateRule:
     rationale: str
 
 
-_POLICY_GATE_RULES: dict[str, FrontierRecommendationGateRule | None] = {
-    "balanced": None,
-    "closest_to_seed": None,
-    "max_iota_under_safe_boozer": FrontierRecommendationGateRule(
-        constraint_metric="frontier_trust_ok",
-        required_value=True,
-        missing_is_eligible=True,
-        rationale=(
-            "Boozer-trust gating is permissive for missing values so legacy archive "
-            "members without trust metadata are not discarded automatically."
-        ),
+_BOOZER_TRUST_GATE_RULE = FrontierRecommendationGateRule(
+    constraint_metric="frontier_trust_ok",
+    required_value=True,
+    missing_is_eligible=True,
+    rationale=(
+        "Boozer-trust gating is permissive for missing values so legacy archive "
+        "members without trust metadata are not discarded automatically."
     ),
-    "max_volume_under_safe_hardware": FrontierRecommendationGateRule(
-        constraint_metric="hardware_constraints_ok",
-        required_value=True,
-        missing_is_eligible=False,
-        rationale=(
-            "Hardware-safe recommendation requires an explicit hard-hardware pass; "
-            "missing hardware metadata is treated as unsafe."
-        ),
+)
+_HARDWARE_SAFE_GATE_RULE = FrontierRecommendationGateRule(
+    constraint_metric="hardware_constraints_ok",
+    required_value=True,
+    missing_is_eligible=False,
+    rationale=(
+        "Hardware-safe recommendation requires an explicit hard-hardware pass; "
+        "missing hardware metadata is treated as unsafe."
     ),
-}
+)
 
 
 def recommend_frontier_member(
@@ -58,48 +58,227 @@ def recommend_frontier_member(
 ) -> dict[str, object] | None:
     if not members:
         return None
-    if policy_name not in SUPPORTED_FRONTIER_RECOMMENDATION_POLICIES:
+    policy = RECOMMENDATION_POLICIES.get(policy_name)
+    if policy is None:
         raise ValueError(f"Unsupported frontier recommendation policy: {policy_name}")
-    if policy_name == "balanced":
-        return _recommend_balanced(
-            members,
-            pareto_objective_normalization=pareto_objective_normalization,
-        )
-    if policy_name == "max_iota_under_safe_boozer":
-        return _recommend_max_iota_under_safe_boozer(members)
-    if policy_name == "max_volume_under_safe_hardware":
-        return _recommend_max_volume_under_safe_hardware(members)
-    return _recommend_closest_to_seed(members)
 
-
-def _recommend_balanced(
-    members: list[FrontierArchiveMember],
-    *,
-    pareto_objective_normalization: Mapping[str, object] | None = None,
-) -> dict[str, object]:
-    ranked_members = sorted(
+    key_factory, gate_rule, rationale = policy
+    recommended_member, eligible_members, gate_inputs = select_best(
         members,
-        key=lambda member: _balanced_policy_sort_key(
-            member,
-            pareto_objective_normalization=pareto_objective_normalization,
-        ),
+        key=key_factory(pareto_objective_normalization),
+        gate_rule=gate_rule,
     )
-    recommended_member = ranked_members[0]
-    policy_score = _balanced_policy_score(
+    policy_score = _policy_score(
+        policy_name,
         recommended_member,
         pareto_objective_normalization=pareto_objective_normalization,
     )
+    recommendation_flags = {
+        **recommended_member.recommendation_flags,
+        policy_name: True,
+    }
+    if policy_name == "balanced":
+        recommendation_flags["balanced_score"] = policy_score
     return {
         "recommended_member": replace(
             recommended_member,
-            recommendation_flags={
-                **recommended_member.recommendation_flags,
-                "balanced": True,
-                "balanced_score": policy_score,
-            },
+            recommendation_flags=recommendation_flags,
         ),
-        "policy_name": "balanced",
-        "policy_inputs": {
+        "policy_name": policy_name,
+        "policy_inputs": _policy_inputs(
+            policy_name,
+            recommended_member,
+            eligible_members,
+            gate_inputs,
+            pareto_objective_normalization=pareto_objective_normalization,
+        ),
+        "policy_rationale": rationale,
+        "policy_score": policy_score,
+        "gate_fallback": bool(gate_inputs["gate_fallback_to_all_members"]),
+    }
+
+
+def select_best(
+    members: Sequence[FrontierArchiveMember],
+    *,
+    key: KeyFn,
+    gate_rule: FrontierRecommendationGateRule | None,
+) -> tuple[
+    FrontierArchiveMember,
+    tuple[FrontierArchiveMember, ...],
+    dict[str, object],
+]:
+    eligible_members, gate_inputs = _eligible_members_for_gate_rule(
+        members,
+        gate_rule=gate_rule,
+    )
+    return min(eligible_members, key=key), eligible_members, gate_inputs
+
+
+def lex_priority(metrics: Sequence[tuple[str, Direction]]) -> KeyFn:
+    def key(member: FrontierArchiveMember) -> tuple[object, ...]:
+        return (
+            *(
+                _maximize_tiebreak_key(member.objective_metrics.get(metric_name))
+                if direction == "desc"
+                else _minimize_tiebreak_key(member.objective_metrics.get(metric_name))
+                for metric_name, direction in metrics
+            ),
+            member.member_id,
+        )
+
+    return key
+
+
+def scalar_score(
+    score_fn: Callable[[FrontierArchiveMember], float],
+    *,
+    tiebreak_metrics: Sequence[tuple[str, bool]] = (),
+) -> KeyFn:
+    def key(member: FrontierArchiveMember) -> tuple[object, ...]:
+        return (
+            -score_fn(member),
+            *(
+                _maximize_tiebreak_key(member.objective_metrics.get(metric_name))
+                if maximize
+                else _minimize_tiebreak_key(member.objective_metrics.get(metric_name))
+                for metric_name, maximize in tiebreak_metrics
+            ),
+            member.member_id,
+        )
+
+    return key
+
+
+def none_aware_lex(field: str, *, fallback: KeyFn) -> KeyFn:
+    if field != "distance_from_seed":
+        raise ValueError(f"Unsupported none-aware frontier member field: {field}")
+
+    def key(member: FrontierArchiveMember) -> tuple[object, ...]:
+        value = member.distance_from_seed
+        return (
+            value is None,
+            float("inf") if value is None else float(value),
+            *fallback(member),
+        )
+
+    return key
+
+
+def _balanced_key(
+    pareto_objective_normalization: Mapping[str, object] | None,
+) -> KeyFn:
+    return scalar_score(
+        lambda member: _balanced_policy_score(
+            member,
+            pareto_objective_normalization=pareto_objective_normalization,
+        ),
+        tiebreak_metrics=_BALANCED_POLICY_METRICS,
+    )
+
+
+def _closest_to_seed_key(
+    pareto_objective_normalization: Mapping[str, object] | None,
+) -> KeyFn:
+    return none_aware_lex(
+        "distance_from_seed",
+        fallback=scalar_score(
+            lambda member: _balanced_policy_score(
+                member,
+                pareto_objective_normalization=pareto_objective_normalization,
+            )
+        ),
+    )
+
+
+def _fixed_key(key: KeyFn) -> KeyFactory:
+    return lambda _: key
+
+
+RECOMMENDATION_POLICIES: Mapping[
+    str,
+    tuple[KeyFactory, FrontierRecommendationGateRule | None, str],
+] = MappingProxyType(
+    {
+        "balanced": (
+            _balanced_key,
+            None,
+            "Select the certified archive member with the best normalized balanced "
+            "improvement score relative to the shared seed reference metrics.",
+        ),
+        "max_iota_under_safe_boozer": (
+            _fixed_key(
+                lex_priority(
+                    (
+                        ("iota", "desc"),
+                        ("boozer_residual", "asc"),
+                        ("volume", "desc"),
+                        ("qa_error", "asc"),
+                    )
+                )
+            ),
+            _BOOZER_TRUST_GATE_RULE,
+            "Select the certified archive member with the highest iota among "
+            "members that still satisfy the frontier Boozer trust contract.",
+        ),
+        "max_volume_under_safe_hardware": (
+            _fixed_key(
+                lex_priority(
+                    (
+                        ("volume", "desc"),
+                        ("iota", "desc"),
+                        ("qa_error", "asc"),
+                        ("boozer_residual", "asc"),
+                    )
+                )
+            ),
+            _HARDWARE_SAFE_GATE_RULE,
+            "Select the certified archive member with the largest volume among "
+            "members that still satisfy the hard hardware certification contract.",
+        ),
+        "closest_to_seed": (
+            _closest_to_seed_key,
+            None,
+            "Select the certified archive member that stays closest to the shared "
+            "seed reference in normalized Pareto-objective space.",
+        ),
+    }
+)
+
+if tuple(RECOMMENDATION_POLICIES) != SUPPORTED_FRONTIER_RECOMMENDATION_POLICIES:
+    raise ValueError("Frontier recommendation policy registry drifted from contract")
+
+
+def _policy_score(
+    policy_name: str,
+    member: FrontierArchiveMember,
+    *,
+    pareto_objective_normalization: Mapping[str, object] | None,
+) -> object:
+    if policy_name == "balanced":
+        return _balanced_policy_score(
+            member,
+            pareto_objective_normalization=pareto_objective_normalization,
+        )
+    if policy_name == "max_iota_under_safe_boozer":
+        return member.objective_metrics.get("iota")
+    if policy_name == "max_volume_under_safe_hardware":
+        return member.objective_metrics.get("volume")
+    if member.distance_from_seed is None:
+        return None
+    return -float(member.distance_from_seed)
+
+
+def _policy_inputs(
+    policy_name: str,
+    recommended_member: FrontierArchiveMember,
+    eligible_members: tuple[FrontierArchiveMember, ...],
+    gate_inputs: dict[str, object],
+    *,
+    pareto_objective_normalization: Mapping[str, object] | None,
+) -> dict[str, object]:
+    if policy_name == "balanced":
+        return {
             "objective_metrics": dict(recommended_member.objective_metrics),
             "reference_metrics": dict(recommended_member.reference_metrics),
             "pareto_objective_normalization_kind": (
@@ -107,125 +286,13 @@ def _recommend_balanced(
                 if pareto_objective_normalization is None
                 else pareto_objective_normalization.get("kind")
             ),
-        },
-        "policy_rationale": (
-            "Select the certified archive member with the best normalized balanced "
-            "improvement score relative to the shared seed reference metrics."
-        ),
-        "policy_score": policy_score,
-    }
-
-
-def _recommend_max_iota_under_safe_boozer(
-    members: list[FrontierArchiveMember],
-) -> dict[str, object]:
-    eligible_members, gate_inputs = _eligible_members_for_policy(
-        members,
-        policy_name="max_iota_under_safe_boozer",
-    )
-    ranked_members = sorted(eligible_members, key=_max_iota_under_safe_boozer_sort_key)
-    recommended_member = ranked_members[0]
+        }
+    if policy_name == "closest_to_seed":
+        return {"distance_metric": "normalized_objective_distance"}
     return {
-        "recommended_member": replace(
-            recommended_member,
-            recommendation_flags={
-                **recommended_member.recommendation_flags,
-                "max_iota_under_safe_boozer": True,
-            },
-        ),
-        "policy_name": "max_iota_under_safe_boozer",
-        "policy_inputs": {
-            "eligible_member_ids": [member.member_id for member in eligible_members],
-            **gate_inputs,
-        },
-        "policy_rationale": (
-            "Select the certified archive member with the highest iota among "
-            "members that still satisfy the frontier Boozer trust contract."
-        ),
-        "policy_score": recommended_member.objective_metrics.get("iota"),
+        "eligible_member_ids": [member.member_id for member in eligible_members],
+        **gate_inputs,
     }
-
-
-def _recommend_max_volume_under_safe_hardware(
-    members: list[FrontierArchiveMember],
-) -> dict[str, object]:
-    eligible_members, gate_inputs = _eligible_members_for_policy(
-        members,
-        policy_name="max_volume_under_safe_hardware",
-    )
-    ranked_members = sorted(
-        eligible_members,
-        key=_max_volume_under_safe_hardware_sort_key,
-    )
-    recommended_member = ranked_members[0]
-    return {
-        "recommended_member": replace(
-            recommended_member,
-            recommendation_flags={
-                **recommended_member.recommendation_flags,
-                "max_volume_under_safe_hardware": True,
-            },
-        ),
-        "policy_name": "max_volume_under_safe_hardware",
-        "policy_inputs": {
-            "eligible_member_ids": [member.member_id for member in eligible_members],
-            **gate_inputs,
-        },
-        "policy_rationale": (
-            "Select the certified archive member with the largest volume among "
-            "members that still satisfy the hard hardware certification contract."
-        ),
-        "policy_score": recommended_member.objective_metrics.get("volume"),
-    }
-
-
-def _recommend_closest_to_seed(
-    members: list[FrontierArchiveMember],
-) -> dict[str, object]:
-    ranked_members = sorted(members, key=_closest_to_seed_sort_key)
-    recommended_member = ranked_members[0]
-    return {
-        "recommended_member": replace(
-            recommended_member,
-            recommendation_flags={
-                **recommended_member.recommendation_flags,
-                "closest_to_seed": True,
-            },
-        ),
-        "policy_name": "closest_to_seed",
-        "policy_inputs": {
-            "distance_metric": "normalized_objective_distance",
-        },
-        "policy_rationale": (
-            "Select the certified archive member that stays closest to the shared "
-            "seed reference in normalized Pareto-objective space."
-        ),
-        "policy_score": (
-            None
-            if recommended_member.distance_from_seed is None
-            else -float(recommended_member.distance_from_seed)
-        ),
-    }
-
-def _balanced_policy_sort_key(
-    member: FrontierArchiveMember,
-    *,
-    pareto_objective_normalization: Mapping[str, object] | None = None,
-) -> tuple[object, ...]:
-    metric_tiebreak_keys = []
-    for metric_name, maximize in _BALANCED_POLICY_METRICS:
-        value = member.objective_metrics.get(metric_name)
-        metric_tiebreak_keys.append(
-            _maximize_tiebreak_key(value) if maximize else _minimize_tiebreak_key(value)
-        )
-    return (
-        -_balanced_policy_score(
-            member,
-            pareto_objective_normalization=pareto_objective_normalization,
-        ),
-        *metric_tiebreak_keys,
-        member.member_id,
-    )
 
 
 def _balanced_policy_score(
@@ -241,41 +308,6 @@ def _balanced_policy_score(
             pareto_objective_normalization=pareto_objective_normalization,
         )
         for metric_name, maximize in _BALANCED_POLICY_METRICS
-    )
-
-
-def _max_iota_under_safe_boozer_sort_key(
-    member: FrontierArchiveMember,
-) -> tuple[object, ...]:
-    return (
-        _maximize_tiebreak_key(member.objective_metrics.get("iota")),
-        _minimize_tiebreak_key(member.objective_metrics.get("boozer_residual")),
-        _maximize_tiebreak_key(member.objective_metrics.get("volume")),
-        _minimize_tiebreak_key(member.objective_metrics.get("qa_error")),
-        member.member_id,
-    )
-
-
-def _max_volume_under_safe_hardware_sort_key(
-    member: FrontierArchiveMember,
-) -> tuple[object, ...]:
-    return (
-        _maximize_tiebreak_key(member.objective_metrics.get("volume")),
-        _maximize_tiebreak_key(member.objective_metrics.get("iota")),
-        _minimize_tiebreak_key(member.objective_metrics.get("qa_error")),
-        _minimize_tiebreak_key(member.objective_metrics.get("boozer_residual")),
-        member.member_id,
-    )
-
-
-def _closest_to_seed_sort_key(
-    member: FrontierArchiveMember,
-) -> tuple[object, ...]:
-    return (
-        member.distance_from_seed is None,
-        float("inf") if member.distance_from_seed is None else float(member.distance_from_seed),
-        -_balanced_policy_score(member),
-        member.member_id,
     )
 
 
@@ -315,24 +347,23 @@ def _minimize_tiebreak_key(value: float | None) -> tuple[bool, float]:
     return (False, float(value))
 
 
-def _eligible_members_for_policy(
-    members: list[FrontierArchiveMember],
+def _eligible_members_for_gate_rule(
+    members: Sequence[FrontierArchiveMember],
     *,
-    policy_name: str,
-) -> tuple[list[FrontierArchiveMember], dict[str, object]]:
-    gate_rule = _POLICY_GATE_RULES[policy_name]
+    gate_rule: FrontierRecommendationGateRule | None,
+) -> tuple[tuple[FrontierArchiveMember, ...], dict[str, object]]:
     if gate_rule is None:
-        return list(members), {
+        return tuple(members), {
             "gate_constraint_metric": None,
             "gate_missing_is_eligible": None,
             "gate_fallback_to_all_members": False,
         }
-    eligible_members = [
+    eligible_members = tuple(
         member for member in members if _member_satisfies_gate_rule(member, gate_rule)
-    ]
+    )
     used_fallback = False
     if not eligible_members:
-        eligible_members = list(members)
+        eligible_members = tuple(members)
         used_fallback = True
     return eligible_members, {
         "gate_constraint_metric": gate_rule.constraint_metric,
@@ -350,4 +381,4 @@ def _member_satisfies_gate_rule(
     value = member.constraint_metrics.get(gate_rule.constraint_metric)
     if value is None:
         return gate_rule.missing_is_eligible
-    return bool(value) is gate_rule.required_value
+    return bool(value) == gate_rule.required_value

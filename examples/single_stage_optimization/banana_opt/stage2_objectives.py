@@ -11,6 +11,7 @@ from alm_utils import (
     augmented_inequality_objective,
     normalize_alm_constraints,
     normalize_alm_constraint_signals,
+    require_positive_alm_threshold,
     upper_bound_residual,
     zero_gradient_like,
 )
@@ -32,6 +33,7 @@ from banana_opt.hardware_constraint_schema import (
     build_threshold_overrides,
     hardware_constraint_alm_metadata,
     hardware_constraint_alm_names,
+    resolve_alm_scale_with_provenance,
 )
 from banana_opt.poloidal_extent import poloidal_extent_rad_from_objective
 from banana_opt.single_stage_geometry import build_surface_configs
@@ -696,7 +698,7 @@ def _require_explicit_stage2_alm_threshold(name: str, value) -> float:
         raise ValueError(
             f"Stage 2 ALM constraint {name!r} requires an explicit threshold."
         )
-    return float(value)
+    return require_positive_alm_threshold(f"stage2:{name}", value)
 
 
 def _stage2_alm_constraint_metadata(
@@ -720,17 +722,23 @@ def _stage2_alm_constraint_metadata(
                 "iota_penalty",
                 iota_penalty_threshold,
             )
+            scale, scale_floor_applied, source = resolve_alm_scale_with_provenance(
+                raw_threshold,
+                ALM_OBJECTIVE_SCALE_FLOOR,
+                "stage2_iota_penalty_threshold",
+            )
             metadata_by_name[constraint_name] = ALMConstraintMetadata(
-                scale=max(raw_threshold, ALM_OBJECTIVE_SCALE_FLOOR),
+                scale=scale,
                 block="physics",
                 activity_tolerance=activity_tolerance,
                 raw_threshold=raw_threshold,
-                source="stage2_iota_penalty_threshold",
+                source=source,
                 objective_value_kind="raw_physics",
                 gradient_value_kind="raw_physics",
                 dual_update_value_kind="hard",
                 feasibility_value_kind="hard",
                 certification_value_kind="hard",
+                scale_floor_applied=scale_floor_applied,
             )
             continue
         if (

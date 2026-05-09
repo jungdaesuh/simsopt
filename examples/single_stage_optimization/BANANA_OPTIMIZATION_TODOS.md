@@ -1144,7 +1144,7 @@ Current anchors:
   `resolve_frontier_lane_warm_start`
 - `examples/single_stage_optimization/run_single_stage_frontier_campaign.py` ::
   lane execution loop
-- `examples/single_stage_optimization/banana_opt/frontier_engine_base.py`
+- `examples/single_stage_optimization/banana_opt/frontier_progress_state.py`
 - `examples/single_stage_optimization/banana_opt/frontier_campaign_reporting.py`
 - `tests/geo/test_frontier_contracts.py`
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Mapping
+from dataclasses import dataclass
+from typing import ClassVar, Mapping
 
 from .frontier_dominance import (
     PARETO_OBJECTIVE_NORMALIZATION_IDEAL_NADIR_RULES,
@@ -21,6 +22,7 @@ FRONTIER_ARCHIVE_STATES = (
     FRONTIER_ARCHIVE_STATE_REJECTED,
 )
 FRONTIER_FINAL_OUTPUT_ARCHIVE_STATES = (FRONTIER_ARCHIVE_STATE_CERTIFIED,)
+SUPPORTED_FRONTIER_ENGINES = ("multilane_local",)
 
 FRONTIER_ARCHIVE_SCHEMA_VERSION = "frontier_archive_v1"
 FRONTIER_CAMPAIGN_PROGRESS_SCHEMA_VERSION = "frontier_campaign_progress_v1"
@@ -50,6 +52,69 @@ SUPPORTED_FRONTIER_RECOMMENDATION_POLICIES = (
     "max_volume_under_safe_hardware",
     "closest_to_seed",
 )
+
+DELETED_FRONTIER_SUMMARY_FIELDS = (
+    "frontier_generation_history",
+    "frontier_generation_history_path",
+    "frontier_engine_stats",
+    "frontier_evaluator_spec",
+    "frontier_evaluator_spec_path",
+    "frontier_population_checkpoint_path",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class EpsilonThresholds:
+    qa_max: float | None = None
+    boozer_max: float | None = None
+
+    QA_MAX_KEY: ClassVar[str] = "epsilon_constraint_qa_max"
+    BOOZER_MAX_KEY: ClassVar[str] = "epsilon_constraint_boozer_max"
+
+    @classmethod
+    def from_rerun_contract(
+        cls,
+        contract: Mapping[str, object],
+        *,
+        require_all: bool = False,
+        require_any: bool = False,
+    ) -> "EpsilonThresholds":
+        scalarization_params = _require_mapping(contract, "scalarization_params")
+        if require_all:
+            for threshold_key in (cls.QA_MAX_KEY, cls.BOOZER_MAX_KEY):
+                if (
+                    threshold_key not in scalarization_params
+                    or scalarization_params.get(threshold_key) is None
+                ):
+                    raise ValueError(
+                        "epsilon_constraint_sweep_v1 missing threshold key "
+                        f"{threshold_key!r}"
+                    )
+        thresholds = cls(
+            qa_max=_optional_float(scalarization_params, cls.QA_MAX_KEY),
+            boozer_max=_optional_float(scalarization_params, cls.BOOZER_MAX_KEY),
+        )
+        if require_any and thresholds.qa_max is None and thresholds.boozer_max is None:
+            raise ValueError(
+                "epsilon_constraint_sweep_v1 missing threshold key "
+                f"{cls.QA_MAX_KEY!r} or {cls.BOOZER_MAX_KEY!r}"
+            )
+        return thresholds
+
+    @classmethod
+    def from_goal_config(cls, config: object) -> "EpsilonThresholds":
+        return cls(
+            qa_max=_optional_attr_float(config, cls.QA_MAX_KEY),
+            boozer_max=_optional_attr_float(config, cls.BOOZER_MAX_KEY),
+        )
+
+    def as_payload(self) -> dict[str, float]:
+        payload: dict[str, float] = {}
+        if self.qa_max is not None:
+            payload[self.QA_MAX_KEY] = float(self.qa_max)
+        if self.boozer_max is not None:
+            payload[self.BOOZER_MAX_KEY] = float(self.boozer_max)
+        return payload
 
 
 def pareto_objective_vector_contract() -> list[dict[str, str]]:
@@ -99,6 +164,7 @@ def validate_frontier_lane_contract_payload(payload: Mapping[str, object]) -> No
             "rerun_contract",
         ),
     )
+    _require_supported_frontier_engine(payload["engine"], field_name="engine")
     _require_mapping(payload, "scalarization_params")
     _require_mapping(payload, "rerun_contract")
 
@@ -130,6 +196,7 @@ def validate_frontier_lane_record_payload(payload: Mapping[str, object]) -> None
             "final_certified",
         ),
     )
+    _require_supported_frontier_engine(payload["engine"], field_name="engine")
     _require_mapping(payload, "scalarization_params")
     _require_mapping(payload, "rerun_contract")
     _require_mapping(payload, "weights")
@@ -155,6 +222,11 @@ def validate_frontier_campaign_progress_payload(payload: Mapping[str, object]) -
             "provisional_archive_members",
             "archive_members",
         ),
+    )
+    _require_supported_frontier_engine(
+        payload["frontier_engine"],
+        field_name="frontier_engine",
+        artifact_name="progress",
     )
     lane_records = _require_list(payload, "lane_records")
     provisional_members = _require_list(payload, "provisional_archive_members")
@@ -294,6 +366,11 @@ def validate_frontier_campaign_manifest_payload(payload: Mapping[str, object]) -
     )
     if payload["PARETO_OBJECTIVE_VECTOR"] != pareto_objective_vector_contract():
         raise ValueError("Manifest Pareto objective vector drifted from the frozen contract")
+    _require_supported_frontier_engine(
+        payload["FRONTIER_ENGINE"],
+        field_name="FRONTIER_ENGINE",
+        artifact_name="manifest",
+    )
     if payload["ARCHIVE_MEMBERSHIP_RULES"] != frontier_archive_membership_rules_contract():
         raise ValueError("Manifest archive membership rules drifted from the frozen contract")
     if payload["ARCHIVE_STATE_SEMANTICS"] != frontier_archive_state_semantics_contract():
@@ -336,6 +413,7 @@ def validate_frontier_recommended_payload(payload: Mapping[str, object]) -> None
             "policy_inputs",
             "policy_rationale",
             "policy_score",
+            "gate_fallback",
             "recommended_metrics",
             "frontier_archive_size",
         ),
@@ -346,6 +424,12 @@ def validate_frontier_recommended_payload(payload: Mapping[str, object]) -> None
 
 
 def validate_frontier_campaign_summary_payload(payload: Mapping[str, object]) -> None:
+    deleted_fields = sorted(set(payload).intersection(DELETED_FRONTIER_SUMMARY_FIELDS))
+    if deleted_fields:
+        raise ValueError(
+            "Deleted frontier summary fields are not supported: "
+            + ", ".join(deleted_fields)
+        )
     _require_schema_version(
         payload,
         expected=FRONTIER_CAMPAIGN_SUMMARY_SCHEMA_VERSION,
@@ -381,6 +465,11 @@ def validate_frontier_campaign_summary_payload(payload: Mapping[str, object]) ->
             "target_comparison",
         ),
     )
+    _require_supported_frontier_engine(
+        payload["frontier_engine"],
+        field_name="frontier_engine",
+        artifact_name="summary",
+    )
     _require_list(payload, "frontier_lane_specs")
     frontier_lanes = _require_list(payload, "frontier_lanes")
     frontier_hypervolume_history = _require_list(
@@ -413,9 +502,6 @@ def validate_frontier_campaign_summary_payload(payload: Mapping[str, object]) ->
             raise ValueError(
                 "frontier_lanes in final summary must not expose provisional_member_ids"
             )
-    _validate_optional_nsga3_summary_payload(payload)
-
-
 def _validate_pareto_normalization_payload(payload: Mapping[str, object]) -> None:
     _require_schema_version(
         payload,
@@ -443,51 +529,6 @@ def _validate_pareto_normalization_payload(payload: Mapping[str, object]) -> Non
     raise ValueError("Unsupported Pareto normalization kind")
 
 
-def _validate_optional_nsga3_summary_payload(payload: Mapping[str, object]) -> None:
-    generation_history = payload.get("frontier_generation_history")
-    if generation_history is not None:
-        generation_history_list = _require_list(
-            payload,
-            "frontier_generation_history",
-        )
-        for entry in generation_history_list:
-            if not isinstance(entry, Mapping):
-                raise ValueError("frontier_generation_history entries must be mappings")
-            _require_keys(
-                entry,
-                (
-                    "generation",
-                    "population_size",
-                    "feasible_count",
-                    "archive_size",
-                    "archive_growth",
-                    "cv_min",
-                    "cv_mean",
-                    "cv_max",
-                    "failure_histogram",
-                    "cache_hits",
-                    "cache_misses",
-                    "hypervolume",
-                ),
-            )
-            _require_mapping(entry, "failure_histogram")
-    engine_stats = payload.get("frontier_engine_stats")
-    if engine_stats is not None:
-        _require_mapping(payload, "frontier_engine_stats")
-    evaluator_spec = payload.get("frontier_evaluator_spec")
-    if evaluator_spec is not None:
-        spec_payload = _require_mapping(payload, "frontier_evaluator_spec")
-        _require_keys(spec_payload, ("schema_version", "run_identity"))
-    for path_field in (
-        "frontier_evaluator_spec_path",
-        "frontier_population_checkpoint_path",
-        "frontier_generation_history_path",
-    ):
-        path_value = payload.get(path_field)
-        if path_value is not None and not isinstance(path_value, str):
-            raise ValueError(f"{path_field} must be a string when present")
-
-
 def _require_schema_version(
     payload: Mapping[str, object],
     *,
@@ -505,6 +546,19 @@ def _require_keys(payload: Mapping[str, object], keys: tuple[str, ...]) -> None:
         raise ValueError(f"Missing required frontier contract keys: {missing}")
 
 
+def _require_supported_frontier_engine(
+    value: object,
+    *,
+    field_name: str,
+    artifact_name: str = "lane contract",
+) -> None:
+    frontier_engine = str(value)
+    if frontier_engine not in SUPPORTED_FRONTIER_ENGINES:
+        raise ValueError(
+            f"Unsupported frontier engine in {artifact_name}: {frontier_engine}"
+        )
+
+
 def _require_mapping(
     payload: Mapping[str, object],
     field_name: str,
@@ -520,3 +574,17 @@ def _require_list(payload: Mapping[str, object], field_name: str) -> list[object
     if not isinstance(value, list):
         raise ValueError(f"{field_name} must be a list")
     return value
+
+
+def _optional_float(payload: Mapping[str, object], field_name: str) -> float | None:
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    return float(value)
+
+
+def _optional_attr_float(config: object, field_name: str) -> float | None:
+    value = getattr(config, field_name)
+    if value is None:
+        return None
+    return float(value)

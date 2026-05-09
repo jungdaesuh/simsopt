@@ -9992,6 +9992,138 @@ class CurrentBaselineContractTests(unittest.TestCase):
         ):
             module.validate_single_stage_alm_formulation_args(args)
 
+    def test_validate_single_stage_alm_formulation_args_rejects_zero_threshold(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            alm_formulation="thresholded_physics",
+            single_stage_goal_mode="single_stage",
+            constraint_method="alm",
+            alm_qs_threshold=0.0,
+            alm_boozer_threshold=0.2,
+            alm_iota_penalty_threshold=0.3,
+            alm_length_penalty_threshold=0.4,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"ALM threshold '--alm-qs-threshold' must be a finite positive value",
+        ):
+            module.validate_single_stage_alm_formulation_args(args)
+
+    def test_validate_single_stage_alm_formulation_args_rejects_negative_threshold(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            alm_formulation="thresholded_physics",
+            single_stage_goal_mode="single_stage",
+            constraint_method="alm",
+            alm_qs_threshold=0.1,
+            alm_boozer_threshold=-0.2,
+            alm_iota_penalty_threshold=0.3,
+            alm_length_penalty_threshold=0.4,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"ALM threshold '--alm-boozer-threshold' must be a finite positive value",
+        ):
+            module.validate_single_stage_alm_formulation_args(args)
+
+    def test_validate_single_stage_alm_formulation_args_rejects_nan_threshold(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            alm_formulation="thresholded_physics",
+            single_stage_goal_mode="single_stage",
+            constraint_method="alm",
+            alm_qs_threshold=0.1,
+            alm_boozer_threshold=0.2,
+            alm_iota_penalty_threshold=float("nan"),
+            alm_length_penalty_threshold=0.4,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"ALM threshold '--alm-iota-penalty-threshold' must be a finite positive value",
+        ):
+            module.validate_single_stage_alm_formulation_args(args)
+
+    def test_validate_single_stage_alm_formulation_args_accepts_positive_thresholds(self):
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            alm_formulation="thresholded_physics",
+            single_stage_goal_mode="single_stage",
+            constraint_method="alm",
+            alm_qs_threshold=1.0e-9,
+            alm_boozer_threshold=0.2,
+            alm_iota_penalty_threshold=0.3,
+            alm_length_penalty_threshold=0.4,
+        )
+        # Strictly-positive, even very small (real geometric tolerance regime), must pass.
+        module.validate_single_stage_alm_formulation_args(args)
+
+    def test_validate_single_stage_alm_formulation_args_rejects_weighted_sum_alm_with_nonzero_length_weight(self):
+        # Per .alm_audit/FIX_PLAN.md S1: weighted_sum + ALM owns the coil-length
+        # constraint as an inequality, while build_total_objective also pulls the
+        # same QuadraticPenalty in via LENGTH_WEIGHT. Combining the two double-feeds
+        # the same boundary and corrupts the saved ALM multiplier, so we reject the
+        # combination loudly instead of silently zeroing the operator's weight.
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            alm_formulation="weighted_sum",
+            single_stage_goal_mode="single_stage",
+            constraint_method="alm",
+            length_weight=1.0,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"ALM weighted_sum formulation owns the coil-length constraint",
+        ):
+            module.validate_single_stage_alm_formulation_args(args)
+
+    def test_validate_single_stage_alm_formulation_args_accepts_weighted_sum_alm_with_zero_length_weight(self):
+        # Setting --length-weight 0 is the documented escape hatch in S1 — it
+        # disables the soft penalty path so the ALM constraint is the sole owner.
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            alm_formulation="weighted_sum",
+            single_stage_goal_mode="single_stage",
+            constraint_method="alm",
+            length_weight=0.0,
+        )
+        module.validate_single_stage_alm_formulation_args(args)
+
+    def test_validate_single_stage_alm_formulation_args_thresholded_physics_alm_unaffected_by_length_weight(self):
+        # thresholded_physics ALM ignores LENGTH_WEIGHT entirely (see
+        # single_stage_objectives.evaluate_base_objective): it returns total=0,
+        # grad=0 in that mode, so the double-feed bug cannot trigger and the new
+        # check must not engage.
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            alm_formulation="thresholded_physics",
+            single_stage_goal_mode="single_stage",
+            constraint_method="alm",
+            length_weight=1.0,
+            alm_qs_threshold=0.1,
+            alm_boozer_threshold=0.2,
+            alm_iota_penalty_threshold=0.3,
+            alm_length_penalty_threshold=0.4,
+        )
+        module.validate_single_stage_alm_formulation_args(args)
+
+    def test_validate_single_stage_alm_formulation_args_weighted_sum_no_alm_unaffected(self):
+        # Pure weighted_sum (no ALM) is the legacy soft-penalty path; LENGTH_WEIGHT
+        # is the only owner of the coil-length term, so the new check must not
+        # engage. This guards against accidentally widening the raise to penalty
+        # mode.
+        module = load_single_stage_example_module()
+        args = SimpleNamespace(
+            alm_formulation="weighted_sum",
+            single_stage_goal_mode="single_stage",
+            constraint_method="penalty",
+            length_weight=1.0,
+        )
+        module.validate_single_stage_alm_formulation_args(args)
+
     def test_alm_iota_penalty_threshold_help_documents_squared_penalty_units(self):
         # The CLI help text for --alm-iota-penalty-threshold must pin the actual
         # constraint form 0.5*(iota - iota_target)**2 <= T (with NO iotas_weight
@@ -11627,6 +11759,51 @@ class AlmUtilsTests(unittest.TestCase):
             module.validate_resume_alm_state(
                 {
                     "multipliers": [2.0],
+                    "penalty": 3.0,
+                },
+                ["coil_surface_spacing"],
+            )
+
+    def test_validate_resume_alm_state_rejects_nan_multipliers(self):
+        module = load_single_stage_example_module()
+
+        with self.assertRaisesRegex(
+            ValueError, r"ALM initial_multipliers non-finite at indices \[1\]"
+        ):
+            module.validate_resume_alm_state(
+                {
+                    "constraint_names": ["coil_surface_spacing", "max_curvature"],
+                    "multipliers": [2.0, float("nan")],
+                    "penalty": 3.0,
+                },
+                ["coil_surface_spacing", "max_curvature"],
+            )
+
+    def test_validate_resume_alm_state_rejects_negative_multipliers(self):
+        module = load_single_stage_example_module()
+
+        with self.assertRaisesRegex(
+            ValueError, r"ALM initial_multipliers negative at indices \[0\]"
+        ):
+            module.validate_resume_alm_state(
+                {
+                    "constraint_names": ["coil_surface_spacing", "max_curvature"],
+                    "multipliers": [-1.0, 2.0],
+                    "penalty": 3.0,
+                },
+                ["coil_surface_spacing", "max_curvature"],
+            )
+
+    def test_validate_resume_alm_state_rejects_inf_multipliers(self):
+        module = load_single_stage_example_module()
+
+        with self.assertRaisesRegex(
+            ValueError, r"ALM initial_multipliers non-finite at indices \[0\]"
+        ):
+            module.validate_resume_alm_state(
+                {
+                    "constraint_names": ["coil_surface_spacing"],
+                    "multipliers": [float("inf")],
                     "penalty": 3.0,
                 },
                 ["coil_surface_spacing"],

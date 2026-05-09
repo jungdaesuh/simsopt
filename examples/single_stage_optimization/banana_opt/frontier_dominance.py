@@ -1,9 +1,13 @@
+"""Pareto objective extraction, normalization, and dominance predicates."""
+
 from __future__ import annotations
 
 import json
 import math
 from pathlib import Path
 from typing import Mapping
+
+import numpy as np
 
 PARETO_OBJECTIVE_SPECS = (
     ("iota", "max", "FINAL_IOTA"),
@@ -103,7 +107,7 @@ CONSTRAINT_METRIC_FIELDS = {
 
 
 def _as_finite_float(value) -> float | None:
-    if value is None:
+    if value is None or isinstance(value, (bool, np.bool_)):
         return None
     numeric = float(value)
     if not math.isfinite(numeric):
@@ -185,6 +189,10 @@ def dominates(
         incumbent_value = incumbent_metrics.get(metric_name)
         if candidate_value is None or incumbent_value is None:
             return False
+        if not math.isfinite(float(candidate_value)) or not math.isfinite(
+            float(incumbent_value)
+        ):
+            raise ValueError(f"Non-finite Pareto metric {metric_name!r}")
         metric_tolerance = float(tolerances.get(metric_name, 0.0))
         if not _better_or_equal(
             direction,
@@ -293,41 +301,38 @@ def build_pareto_objective_normalization(
             if reference_metrics.get(metric_name) is not None
         }
     if kind == PARETO_OBJECTIVE_NORMALIZATION_KIND_SEED_RELATIVE:
-        return {
-            "schema_version": PARETO_OBJECTIVE_NORMALIZATION_SCHEMA_VERSION,
-            "kind": PARETO_OBJECTIVE_NORMALIZATION_KIND_SEED_RELATIVE,
-            "distance_metric": "euclidean",
-            "reference_metrics": resolved_reference_metrics,
-            "metric_rules": {
-                metric_name: dict(rule_payload)
-                for metric_name, rule_payload in PARETO_OBJECTIVE_NORMALIZATION_RULES.items()
-            },
+        normalization_rules = PARETO_OBJECTIVE_NORMALIZATION_RULES
+        extra_payload: dict[str, object] = {}
+    elif kind == PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR:
+        if normalization_spec_path is None:
+            raise ValueError(
+                "fixed ideal/nadir normalization requires "
+                "--frontier-normalization-spec-file"
+            )
+        normalization_spec = load_pareto_normalization_spec(normalization_spec_path)
+        normalization_rules = PARETO_OBJECTIVE_NORMALIZATION_IDEAL_NADIR_RULES
+        extra_payload = {
+            "ideal_metrics": _coerce_defined_normalization_metrics(
+                normalization_spec,
+                field_name="ideal_metrics",
+            ),
+            "nadir_metrics": _coerce_defined_normalization_metrics(
+                normalization_spec,
+                field_name="nadir_metrics",
+            ),
         }
-    if kind != PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR:
+    else:
         raise ValueError(f"Unsupported Pareto normalization kind: {kind}")
-    if normalization_spec_path is None:
-        raise ValueError(
-            "fixed ideal/nadir normalization requires --frontier-normalization-spec-file"
-        )
-    normalization_spec = load_pareto_normalization_spec(normalization_spec_path)
-    ideal_metrics = _coerce_defined_normalization_metrics(
-        normalization_spec,
-        field_name="ideal_metrics",
-    )
-    nadir_metrics = _coerce_defined_normalization_metrics(
-        normalization_spec,
-        field_name="nadir_metrics",
-    )
+
     return {
         "schema_version": PARETO_OBJECTIVE_NORMALIZATION_SCHEMA_VERSION,
-        "kind": PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR,
+        "kind": kind,
         "distance_metric": "euclidean",
         "reference_metrics": resolved_reference_metrics,
-        "ideal_metrics": ideal_metrics,
-        "nadir_metrics": nadir_metrics,
+        **extra_payload,
         "metric_rules": {
             metric_name: dict(rule_payload)
-            for metric_name, rule_payload in PARETO_OBJECTIVE_NORMALIZATION_IDEAL_NADIR_RULES.items()
+            for metric_name, rule_payload in normalization_rules.items()
         },
     }
 

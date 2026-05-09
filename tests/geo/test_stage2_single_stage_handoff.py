@@ -755,6 +755,69 @@ class HandoffModuleTests(unittest.TestCase):
             np.array([2.5, -1.5], dtype=float),
         )
 
+    def test_attempt_initialize_boozer_surface_fits_mismatched_seed_order(self):
+        module = load_handoff_module()
+        seed_gamma = np.ones((2, 2, 3), dtype=float)
+        surf_prev = SimpleNamespace(
+            quadpoints_theta=np.array([0.0, 0.5]),
+            quadpoints_phi=np.array([0.0, 0.2]),
+            gamma=lambda: np.zeros((2, 2, 3), dtype=float),
+        )
+        initial_surface_guess = SimpleNamespace(
+            get_dofs=lambda: np.array([2.5, -1.5], dtype=float),
+            gamma=lambda: seed_gamma,
+        )
+
+        class _HigherOrderSurface:
+            fit_inputs = []
+
+            def __init__(self, **kwargs):
+                del kwargs
+                self.dofs = np.zeros(4, dtype=float)
+                self._gamma = np.zeros((2, 2, 3), dtype=float)
+
+            def least_squares_fit(self, gamma):
+                self._gamma = np.asarray(gamma, dtype=float)
+                type(self).fit_inputs.append(self._gamma.copy())
+
+            def gamma(self):
+                return self._gamma.copy()
+
+            def is_self_intersecting(self):
+                return False
+
+        class _FakeBoozerSurface:
+            def __init__(self, bs, surf, vol, vol_target, constraint_weight, options, I=0.0):
+                del bs, vol, vol_target, constraint_weight, options, I
+                self.surface = surf
+                self.res = {"iota": 0.2, "G": 0.35, "success": True}
+                self.need_to_run_code = True
+
+            def run_code(self, iota, G):
+                del iota, G
+                self.need_to_run_code = False
+                return {"success": True}
+
+        result = module.attempt_initialize_boozer_surface(
+            surf_prev,
+            mpol=8,
+            ntor=6,
+            bs=object(),
+            vol_target=0.1,
+            constraint_weight=1.0,
+            iota=0.2,
+            G0=0.35,
+            boozer_I=0.0,
+            initial_surface_guess=initial_surface_guess,
+            nfp=5,
+            surface_cls=_HigherOrderSurface,
+            volume_cls=self._ConstantVolumeLabel,
+            boozer_surface_cls=_FakeBoozerSurface,
+        )
+
+        self.assertTrue(result.success)
+        np.testing.assert_allclose(_HigherOrderSurface.fit_inputs[0], seed_gamma)
+
     def test_run_boozer_with_failure_policy_accepts_cached_result_state(self):
         module = load_handoff_module()
 

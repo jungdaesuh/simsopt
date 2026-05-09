@@ -2066,7 +2066,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         command = module.build_single_stage_thresholded_physics_command(args)
 
-        self.assertIn("--allow-init-only-stage2-seed", command)
+        self.assertNotIn("--allow-init-only-stage2-seed", command)
         self.assertEqual(
             command[command.index("--equilibrium-path") + 1],
             str(Path("eq/demo.nc").resolve()),
@@ -2355,6 +2355,11 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertIn('"--stage2-bs-path"', source)
         self.assertIn('"STAGE2_BS_PATH"', source)
+
+    def test_stage2_writes_loadable_surface_seed_artifact(self):
+        source = STAGE2_MODULE_PATH.read_text()
+
+        self.assertIn('new_surf.save(OUT_DIR_ITER + "surf_opt.json")', source)
 
     def test_stage2_results_contract_records_hardware_status_fields(self):
         source = STAGE2_MODULE_PATH.read_text()

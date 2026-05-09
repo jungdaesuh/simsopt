@@ -35,17 +35,17 @@ from .frontier_dominance import (
     DEFAULT_DOMINANCE_TOLERANCE,
     build_pareto_objective_normalization,
 )
-from .frontier_engine_multilane_local import FrontierLaneSpec
 from .frontier_runtime_calibration import (
     FrontierResolvedRuntimeDefaults,
     build_frontier_early_stop_policy,
     effective_lane_budget,
     effective_total_budget,
-    resolve_frontier_runtime_defaults,
+    resolve_frontier_runtime_defaults_from_args,
 )
 from .frontier_scalarization import (
     FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
     FRONTIER_REFERENCE_MODE_EPSILON,
+    FrontierLaneSpec,
     frontier_scalarization_family,
 )
 
@@ -56,7 +56,7 @@ DEFAULT_ARCHIVE_JSON = "frontier_archive.json"
 DEFAULT_RECOMMENDED_JSON = "frontier_recommended.json"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FrontierCampaignPaths:
     manifest_path: Path
     progress_path: Path
@@ -65,7 +65,7 @@ class FrontierCampaignPaths:
     summary_path: Path
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FrontierCampaignManifest:
     schema_version: str
     frontier_version: str
@@ -177,32 +177,7 @@ def build_frontier_campaign_manifest(
     runtime_defaults: FrontierResolvedRuntimeDefaults | None = None,
 ) -> dict[str, object]:
     if runtime_defaults is None:
-        runtime_defaults = resolve_frontier_runtime_defaults(
-            profile_name=getattr(
-                args,
-                "frontier_runtime_calibration_profile",
-                "reduced_fixture_v1",
-            ),
-            requested_num_lanes=getattr(args, "frontier_num_lanes", None),
-            requested_lane_budget=getattr(args, "frontier_lane_budget", None),
-            requested_total_budget=getattr(args, "frontier_total_budget", None),
-            requested_checkpoint_every=getattr(args, "checkpoint_every", None),
-            requested_early_stop_patience_lanes=getattr(
-                args,
-                "frontier_early_stop_patience_lanes",
-                None,
-            ),
-            requested_early_stop_min_certified=getattr(
-                args,
-                "frontier_early_stop_min_certified",
-                None,
-            ),
-            requested_early_stop_min_hypervolume_gain=getattr(
-                args,
-                "frontier_early_stop_min_hypervolume_gain",
-                None,
-            ),
-        )
+        runtime_defaults = resolve_frontier_runtime_defaults_from_args(args)
     hypervolume_reference = resolve_hypervolume_reference(
         reference_spec=args.frontier_hypervolume_reference,
         seed_results=stage2_results,
@@ -243,16 +218,8 @@ def build_frontier_campaign_manifest(
         pareto_objective_vector=pareto_objective_vector_contract(),
         pareto_objective_normalization=build_pareto_objective_normalization(
             hypervolume_reference,
-            kind=getattr(
-                args,
-                "frontier_normalization_kind",
-                "seed_relative_reference_fraction_with_floor",
-            ),
-            normalization_spec_path=getattr(
-                args,
-                "frontier_normalization_spec_file",
-                None,
-            ),
+            kind=args.frontier_normalization_kind,
+            normalization_spec_path=args.frontier_normalization_spec_file,
         ),
         dominance_tolerance=dict(DEFAULT_DOMINANCE_TOLERANCE),
         duplicate_distance_threshold=DEFAULT_DUPLICATE_DISTANCE_THRESHOLD,
@@ -332,6 +299,7 @@ def build_recommended_summary(
             "policy_inputs": None,
             "policy_rationale": None,
             "policy_score": None,
+            "gate_fallback": False,
             "recommended_metrics": None,
             "frontier_archive_size": archive_size,
         }
@@ -346,6 +314,7 @@ def build_recommended_summary(
         "policy_inputs": recommendation_payload["policy_inputs"],
         "policy_rationale": recommendation_payload["policy_rationale"],
         "policy_score": recommendation_payload["policy_score"],
+        "gate_fallback": bool(recommendation_payload["gate_fallback"]),
         "recommended_metrics": dict(recommended_member.objective_metrics),
         "frontier_archive_size": archive_size,
     }
@@ -409,16 +378,8 @@ def build_frontier_campaign_summary(
     )
     pareto_objective_normalization = build_pareto_objective_normalization(
         hypervolume_reference,
-        kind=getattr(
-            args,
-            "frontier_normalization_kind",
-            "seed_relative_reference_fraction_with_floor",
-        ),
-        normalization_spec_path=getattr(
-            args,
-            "frontier_normalization_spec_file",
-            None,
-        ),
+        kind=args.frontier_normalization_kind,
+        normalization_spec_path=args.frontier_normalization_spec_file,
     )
     certified_members = certified_archive_members(archive_members)
     annotated_certified_members = annotate_hypervolume_contributions(
@@ -466,7 +427,7 @@ def build_frontier_campaign_summary(
         "frontier_num_lanes": len(lane_specs),
         "frontier_lane_specs": [lane.to_json_dict() for lane in lane_specs],
         "frontier_lanes": [
-            _sanitize_lane_record_for_final_output(lane_record)
+            {**lane_record, "provisional_member_ids": []}
             for lane_record in lane_records
         ],
         "frontier_archive": serialize_frontier_archive(
@@ -521,14 +482,6 @@ def build_frontier_campaign_summary(
         )
     validate_frontier_campaign_summary_payload(summary)
     return summary
-
-
-def _sanitize_lane_record_for_final_output(
-    lane_record: dict[str, object],
-) -> dict[str, object]:
-    sanitized = dict(lane_record)
-    sanitized["provisional_member_ids"] = []
-    return sanitized
 
 
 def write_json(path: Path, payload: dict[str, object]) -> None:

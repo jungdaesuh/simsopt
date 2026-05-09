@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import math
+import warnings
 from dataclasses import asdict, dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Mapping
 
 from .frontier_contracts import (
+    EpsilonThresholds,
     FRONTIER_ARCHIVE_SCHEMA_VERSION,
     FRONTIER_ARCHIVE_STATE_CERTIFIED,
     FRONTIER_ARCHIVE_STATE_PROVISIONAL,
@@ -19,6 +22,7 @@ from .frontier_contracts import (
 from .frontier_dominance import (
     DEFAULT_DOMINANCE_TOLERANCE,
     PARETO_OBJECTIVE_SPECS,
+    _as_finite_float,
     dominates,
     extract_constraint_metrics,
     extract_objective_metrics,
@@ -31,9 +35,10 @@ from .frontier_dominance import (
 from .frontier_scalarization import FRONTIER_REFERENCE_MODE_EPSILON
 
 DEFAULT_DUPLICATE_DISTANCE_THRESHOLD = 0.10
+EPSILON_CONSTRAINT_CERTIFICATION_SLACK = 1.0e-12
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FrontierArchiveMember:
     member_id: str
     lane_id: str
@@ -182,11 +187,11 @@ def frontier_archive_member_from_json_dict(
         archive_state=str(payload["archive_state"]),
         dominance_signature=dict(payload.get("dominance_signature", {})),
         objective_metrics={
-            str(key): None if value is None else float(value)
+            str(key): _as_finite_float(value)
             for key, value in objective_metrics_payload.items()
         },
         reference_metrics={
-            str(key): None if value is None else float(value)
+            str(key): _as_finite_float(value)
             for key, value in reference_metrics_payload.items()
         },
         constraint_metrics=dict(payload.get("constraint_metrics", {})),
@@ -312,13 +317,16 @@ def annotate_archive_members(
 def archive_best_by_metric(members: list[FrontierArchiveMember]) -> dict[str, dict[str, object]]:
     if not members:
         return {}
+    from .frontier_recommendation import Direction, lex_priority, select_best
+
     best_by_metric: dict[str, dict[str, object]] = {}
     for metric_name, direction in objective_metric_direction_map().items():
-        ranked = sorted(
+        metric_direction: Direction = "desc" if direction == "max" else "asc"
+        best_member, _, _ = select_best(
             members,
-            key=lambda member: _metric_sort_key(member, metric_name, direction),
+            key=lex_priority(((metric_name, metric_direction),)),
+            gate_rule=None,
         )
-        best_member = ranked[0]
         best_by_metric[metric_name] = {
             "member_id": best_member.member_id,
             "value": best_member.objective_metrics.get(metric_name),
@@ -408,24 +416,29 @@ def resolve_hypervolume_reference(
 ) -> dict[str, float] | None:
     parsed_reference = parse_hypervolume_reference(reference_spec)
     if parsed_reference is not None:
+        _warn_if_hypervolume_reference_not_nadir(parsed_reference, members)
         return parsed_reference
     if seed_results is not None:
         seed_metrics = extract_objective_metrics(seed_results)
         if all(seed_metrics.get(metric_name) is not None for metric_name, _, _ in PARETO_OBJECTIVE_SPECS):
-            return {
+            resolved_reference = {
                 metric_name: float(seed_metrics[metric_name])
                 for metric_name, _, _ in PARETO_OBJECTIVE_SPECS
             }
+            _warn_if_hypervolume_reference_not_nadir(resolved_reference, members)
+            return resolved_reference
     if members:
         for member in members:
             if all(
                 member.reference_metrics.get(metric_name) is not None
                 for metric_name, _, _ in PARETO_OBJECTIVE_SPECS
             ):
-                return {
+                resolved_reference = {
                     metric_name: float(member.reference_metrics[metric_name])
                     for metric_name, _, _ in PARETO_OBJECTIVE_SPECS
                 }
+                _warn_if_hypervolume_reference_not_nadir(resolved_reference, members)
+                return resolved_reference
     return None
 
 
@@ -436,11 +449,11 @@ def frontier_archive_hypervolume(
 ) -> float | None:
     if hypervolume_reference is None:
         return None
-    boxes = _hypervolume_boxes(
+    boxes, reference_tuple = _hypervolume_cache_key(
         members,
         hypervolume_reference=hypervolume_reference,
     )
-    return _union_hypervolume(boxes)
+    return _hypervolume_cached(boxes, reference_tuple)
 
 
 def annotate_hypervolume_contributions(
@@ -581,18 +594,6 @@ def _member_preference_key(member: FrontierArchiveMember) -> tuple[object, ...]:
     )
 
 
-def _metric_sort_key(
-    member: FrontierArchiveMember,
-    metric_name: str,
-    direction: str,
-) -> tuple[object, ...]:
-    value = member.objective_metrics.get(metric_name)
-    if value is None:
-        return (True, 0.0, member.member_id)
-    signed_value = -float(value) if direction == "max" else float(value)
-    return (False, signed_value, member.member_id)
-
-
 def _evaluate_epsilon_constraint_status(
     objective_metrics: Mapping[str, float | None],
     rerun_contract: Mapping[str, object],
@@ -600,20 +601,22 @@ def _evaluate_epsilon_constraint_status(
     scalarization_type = str(rerun_contract.get("scalarization_type", ""))
     if scalarization_type != FRONTIER_REFERENCE_MODE_EPSILON:
         return {"ok": True, "violations": {}}
-    scalarization_params = rerun_contract.get("scalarization_params", {})
-    if not isinstance(scalarization_params, Mapping):
-        return {"ok": True, "violations": {}}
+    epsilon_thresholds = EpsilonThresholds.from_rerun_contract(
+        rerun_contract,
+        require_any=True,
+    )
     violation_map: dict[str, float] = {}
-    for metric_name, param_key in (
-        ("qa_error", "epsilon_constraint_qa_max"),
-        ("boozer_residual", "epsilon_constraint_boozer_max"),
+    for metric_name, limit in (
+        ("qa_error", epsilon_thresholds.qa_max),
+        ("boozer_residual", epsilon_thresholds.boozer_max),
     ):
-        limit = scalarization_params.get(param_key)
+        if limit is None:
+            continue
         metric_value = objective_metrics.get(metric_name)
-        if limit is None or metric_value is None:
+        if metric_value is None:
             continue
         excess = float(metric_value) - float(limit)
-        if excess > 0.0:
+        if excess > EPSILON_CONSTRAINT_CERTIFICATION_SLACK:
             violation_map[metric_name] = excess
     return {
         "ok": not violation_map,
@@ -626,6 +629,7 @@ def _hypervolume_boxes(
     *,
     hypervolume_reference: Mapping[str, float],
 ) -> list[tuple[float, ...]]:
+    """Build nonnegative boxes; worse-than-reference axes contribute zero extent."""
     boxes: list[tuple[float, ...]] = []
     for member in members:
         box = []
@@ -646,6 +650,72 @@ def _hypervolume_boxes(
         if box and any(extent > 0.0 for extent in box):
             boxes.append(tuple(box))
     return boxes
+
+
+def _hypervolume_cache_key(
+    members: list[FrontierArchiveMember],
+    *,
+    hypervolume_reference: Mapping[str, float],
+) -> tuple[tuple[tuple[float, ...], ...], tuple[float, ...]]:
+    boxes = tuple(
+        sorted(
+            _hypervolume_boxes(
+                members,
+                hypervolume_reference=hypervolume_reference,
+            )
+        )
+    )
+    reference_tuple = tuple(
+        float(hypervolume_reference[metric_name])
+        for metric_name, _, _ in PARETO_OBJECTIVE_SPECS
+    )
+    return boxes, reference_tuple
+
+
+@lru_cache(maxsize=1024)
+def _hypervolume_cached(
+    boxes: tuple[tuple[float, ...], ...],
+    reference_tuple: tuple[float, ...],
+) -> float:
+    return _hypervolume_uncached(boxes, reference_tuple)
+
+
+def _hypervolume_uncached(
+    boxes: tuple[tuple[float, ...], ...],
+    reference_tuple: tuple[float, ...],
+) -> float:
+    _ = reference_tuple
+    return _union_hypervolume(list(boxes))
+
+
+def _warn_if_hypervolume_reference_not_nadir(
+    hypervolume_reference: Mapping[str, float] | None,
+    members: list[FrontierArchiveMember] | None,
+) -> None:
+    if hypervolume_reference is None or not members:
+        return
+    for member in members:
+        for metric_name, direction, _ in PARETO_OBJECTIVE_SPECS:
+            metric_value = member.objective_metrics.get(metric_name)
+            reference_value = hypervolume_reference.get(metric_name)
+            if metric_value is None or reference_value is None:
+                continue
+            if (
+                direction == "max"
+                and float(metric_value) < float(reference_value)
+            ) or (
+                direction == "min"
+                and float(metric_value) > float(reference_value)
+            ):
+                warnings.warn(
+                    (
+                        "hypervolume reference is not a nadir for "
+                        f"{member.member_id}:{metric_name}"
+                    ),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return
 
 
 def _union_hypervolume(boxes: list[tuple[float, ...]]) -> float:

@@ -1336,11 +1336,6 @@ def append_single_stage_handoff_flags(command: list[str], args: object) -> None:
         "--banana-surf-radius",
         getattr(args, "banana_surf_radius", None),
     )
-    append_bool_flag(
-        command,
-        "--allow-init-only-stage2-seed",
-        bool(getattr(args, "allow_init_only_stage2_seed", False)),
-    )
 
 
 def run_poincare_artifact(

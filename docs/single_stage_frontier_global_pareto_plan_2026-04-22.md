@@ -1,8 +1,18 @@
 # Single-Stage Frontier + Global Pareto Plan
 
 Date: 2026-04-22  
-Status: Merged execution plan after frontier validation and global-engine design review  
+Status: Superseded historical plan after the 2026-05-07 frontier bloat reduction execution
 Scope: `examples/single_stage_optimization/SINGLE_STAGE/` and supporting `banana_opt/` frontier modules
+
+## 2026-05-07 Supersession Note
+
+- [x] `NSGA-III` was dropped after no validated production `"frontier_engine": "nsga3"` artifacts were found.
+- [x] `--frontier-engine` now supports the local multilane path only.
+- [x] `frontier_engine_base.py` was renamed to `frontier_progress_state.py`.
+- [x] `frontier_engine_multilane_local.py` was folded into `frontier_scalarization.py`.
+- [x] The unused `frontier_evaluator.py` seam was removed with the deleted global-engine path; any evaluator/spec tasks below are historical, not current implementation work.
+
+This document remains as the historical global-engine design record. Its NSGA-III implementation phases, evaluator seam, and `frontier_engine_*` file references no longer describe the current code.
 
 ## Goal
 
@@ -51,12 +61,12 @@ This does **not** mean `NSGA-III` is the final engine. It means it is the best f
 
 The frontier hardening items are small, high-signal fixes to the current local engine. The evaluator seam is the true blocker for any global engine. Without a deterministic evaluator, caching is unsound, cross-worker comparisons are noisy, and distributed execution is brittle. Only after that seam exists does it make sense to compare global engines.
 
-## Current Code Anchors
+## Historical Code Anchors
 
 ### Frontier runner and archive
 
 - [`examples/single_stage_optimization/run_single_stage_frontier_campaign.py`](../examples/single_stage_optimization/run_single_stage_frontier_campaign.py)
-- [`examples/single_stage_optimization/banana_opt/frontier_engine_base.py`](../examples/single_stage_optimization/banana_opt/frontier_engine_base.py)
+- [`examples/single_stage_optimization/banana_opt/frontier_progress_state.py`](../examples/single_stage_optimization/banana_opt/frontier_progress_state.py)
 - [`examples/single_stage_optimization/banana_opt/frontier_archive.py`](../examples/single_stage_optimization/banana_opt/frontier_archive.py)
 - [`examples/single_stage_optimization/banana_opt/frontier_campaign_reporting.py`](../examples/single_stage_optimization/banana_opt/frontier_campaign_reporting.py)
 - [`examples/single_stage_optimization/banana_opt/frontier_recommendation.py`](../examples/single_stage_optimization/banana_opt/frontier_recommendation.py)
@@ -159,7 +169,10 @@ Trigger:
 - [ ] A full-simplex achievement-mode path exists without breaking legacy shared mode
 - [ ] The reference-direction generator used by the new achievement mode is reusable by the first global engine instead of being reimplemented a second time
 
-## Phase 2: Evaluator Seam Extraction
+## Phase 2: Evaluator Seam Extraction — SUPERSEDED 2026-05-07
+
+> **SUPERSEDED 2026-05-07.** The `frontier_evaluator.py` seam was removed when the global-engine path was deleted (see top-of-file supersession note). All checkboxes in this phase are historical context only and must NOT be executed. Do not treat unchecked items here as live TODOs.
+
 
 Objective: create a deterministic, serializable evaluator suitable for population algorithms, caching, and distributed execution.
 
@@ -260,13 +273,16 @@ Suggested initial invalidation buckets:
 - [x] Cache semantics are explicit
 - [ ] Shadow-run agreement passes on a mixed sample including failures
 
-## Phase 3: First Global Engine
+## Phase 3: First Global Engine — SUPERSEDED 2026-05-07
+
+> **SUPERSEDED 2026-05-07.** `NSGA-III` was dropped and `--frontier-engine` now supports `multilane_local` only (see top-of-file supersession note). All checkboxes in this phase, including the Phase 3 exit criteria below, are historical context only and must NOT be executed. `frontier_engine_nsga3.py` no longer exists in the tree.
+
 
 Objective: add the first true global Pareto engine with the smallest reasonable architectural lift.
 
-### 3.1 Add `NSGA-III` first
+### 3.1 Add `NSGA-III` first — SUPERSEDED 2026-05-07
 
-- [ ] Add `nsga3` under `--frontier-engine`
+- [x] Do not add `nsga3` under `--frontier-engine`; the engine path was removed by the bloat-reduction execution.
 - [ ] Keep `multilane_local` intact as the baseline engine
 - [ ] Reuse the same objective and certification contracts as far as possible
 
@@ -320,13 +336,16 @@ Example gate template:
 - [ ] non-dominated archive size >= `target`
 - [ ] wall-clock <= `budget`
 
-### Phase 3 exit criteria
+### Phase 3 exit criteria — SUPERSEDED 2026-05-07
 
-- [ ] `nsga3` runs end-to-end through the existing archive path
-- [ ] Telemetry is available for each generation
-- [ ] The benchmark is judged against pre-committed thresholds, not post hoc intuition
+- [x] ~~`nsga3` runs end-to-end through the existing archive path~~ — SUPERSEDED; engine deleted.
+- [x] ~~Telemetry is available for each generation~~ — SUPERSEDED; not applicable to `multilane_local`-only path.
+- [x] ~~The benchmark is judged against pre-committed thresholds, not post hoc intuition~~ — SUPERSEDED; no `multilane_local` vs `nsga3` benchmark exists.
 
-## Phase 4: Cost-Driven Surrogate Escalation
+## Phase 4: Cost-Driven Surrogate Escalation — SUPERSEDED 2026-05-07
+
+> **SUPERSEDED 2026-05-07.** This phase depended on the evaluator seam (Phase 2) and global engine (Phase 3), both of which were deleted. Checkboxes below are historical context only and must NOT be executed.
+
 
 Objective: escalate to surrogate assistance only if plain global true-evaluation search is too expensive.
 
@@ -360,7 +379,10 @@ Objective: escalate to surrogate assistance only if plain global true-evaluation
 - [ ] Surrogates are introduced only if the cost trigger is hit
 - [ ] True-evaluation audit is mandatory for surrogate-led archive decisions
 
-## Phase 5: Decomposition Engine Follow-On
+## Phase 5: Decomposition Engine Follow-On — SUPERSEDED 2026-05-07
+
+> **SUPERSEDED 2026-05-07.** This phase depended on the evaluator seam (Phase 2) and global engine (Phase 3), both of which were deleted. Checkboxes below are historical context only and must NOT be executed.
+
 
 Objective: consider constrained decomposition only after the first global engine is in place and benchmarked.
 
@@ -452,7 +474,7 @@ Deferred because:
 ### Repo-local resources
 
 - [`run_single_stage_frontier_campaign.py`](../examples/single_stage_optimization/run_single_stage_frontier_campaign.py): frontier engine selection, lane execution, archive updates
-- [`frontier_engine_base.py`](../examples/single_stage_optimization/banana_opt/frontier_engine_base.py): lane contracts, progress format, archive replay
+- [`frontier_progress_state.py`](../examples/single_stage_optimization/banana_opt/frontier_progress_state.py): lane contracts, progress format, archive replay
 - [`frontier_archive.py`](../examples/single_stage_optimization/banana_opt/frontier_archive.py): archive membership, epsilon certification, hypervolume plumbing
 - [`frontier_recommendation.py`](../examples/single_stage_optimization/banana_opt/frontier_recommendation.py): current policy-specific gate asymmetry
 - [`frontier_dominance.py`](../examples/single_stage_optimization/banana_opt/frontier_dominance.py): certification contract and Pareto semantics

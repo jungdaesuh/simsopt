@@ -4,11 +4,7 @@ from alm_utils import (
     augmented_inequality_objective,
     normalize_alm_constraint_grads,
     normalize_alm_constraint_signals,
-)
-from banana_opt.frontier_constraints import annotate_search_evaluation_finiteness
-from banana_opt.frontier_scalarization import (
-    FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
-    FRONTIER_REFERENCE_MODE_EPSILON,
+    require_positive_alm_threshold,
 )
 from banana_opt.hardware_constraint_schema import (
     ALMConstraintMetadata,
@@ -18,11 +14,14 @@ from banana_opt.hardware_constraint_schema import (
     get_hardware_constraint_spec,
     hardware_constraint_alm_activity_tolerance,
     hardware_constraint_alm_metadata,
+    resolve_alm_scale_with_provenance,
 )
+from banana_opt.objective_gradients import objective_gradient as _objective_gradient
 from banana_opt.poloidal_extent import (
     poloidal_extent_rad_from_objective,
     poloidal_extent_signed_constraint,
 )
+from banana_opt.search_evaluation import annotate_search_evaluation_finiteness
 from banana_opt.single_stage_constraints import single_stage_constraint_activity_tolerances
 from banana_opt.smooth_distance_selection import (
     pairwise_block_min,
@@ -109,18 +108,6 @@ def _resolve_surface_objective_terms(
     objective_J_QS_obj = raw_J_QS_obj if JNonQSObjective is None else JNonQSObjective
     objective_J_Boozer_obj = raw_J_Boozer_obj if JBoozerObjective is None else JBoozerObjective
     return raw_J_QS_obj, raw_J_Boozer_obj, objective_J_QS_obj, objective_J_Boozer_obj
-
-
-def _objective_gradient(objective, objective_optimizable=None):
-    if objective_optimizable is None:
-        return np.asarray(objective.dJ(), dtype=float)
-    try:
-        partial_gradient = objective.dJ(partials=True)
-    except TypeError:
-        return np.asarray(objective.dJ(), dtype=float)
-    if callable(partial_gradient):
-        return np.asarray(partial_gradient(objective_optimizable), dtype=float)
-    return np.asarray(partial_gradient, dtype=float)
 
 
 def _positive_violation(signed_value):
@@ -250,342 +237,6 @@ def _hard_max_curvature_signed_constraint(curve, threshold):
         threshold
     )
     return signed_value, _positive_violation(signed_value)
-
-
-def augment_frontier_metric_state(
-    objective_eval,
-    *,
-    surface_iota_term,
-    surface_volume_term,
-    objective_optimizable=None,
-):
-    annotated = dict(objective_eval)
-    annotated["J_iota_metric"] = float(surface_iota_term.J())
-    annotated["dJ_iota_metric"] = _objective_gradient(
-        surface_iota_term,
-        objective_optimizable,
-    )
-    if surface_volume_term is None:
-        annotated["J_volume_metric"] = 0.0
-        annotated["dJ_volume_metric"] = np.zeros_like(
-            np.asarray(annotated["grad"], dtype=float)
-        )
-    else:
-        annotated["J_volume_metric"] = float(surface_volume_term.J())
-        annotated["dJ_volume_metric"] = _objective_gradient(
-            surface_volume_term,
-            objective_optimizable,
-        )
-    return annotated
-
-
-def apply_frontier_scalarization_override(
-    objective_eval,
-    *,
-    enabled,
-    frontier_goal_config,
-    surface_iota_term,
-    surface_volume_term,
-    effective_res_weight,
-    effective_iotas_weight,
-    effective_volume_weight,
-    length_weight,
-    cc_weight,
-    cs_weight,
-    curvature_weight,
-    surf_dist_weight,
-    poloidal_extent_weight=0.0,
-    objective_optimizable=None,
-    alm_formulation="weighted_sum",
-    alm_multipliers=None,
-    alm_penalty=None,
-):
-    if not enabled or frontier_goal_config is None:
-        return dict(objective_eval)
-    annotated = augment_frontier_metric_state(
-        objective_eval,
-        surface_iota_term=surface_iota_term,
-        surface_volume_term=surface_volume_term,
-        objective_optimizable=objective_optimizable,
-    )
-    annotated["frontier_scalarization_type"] = frontier_goal_config.scalarization_type
-    frontier_goal_total, frontier_goal_grad = _frontier_goal_component_total_grad(
-        annotated,
-        effective_res_weight=effective_res_weight,
-        effective_iotas_weight=effective_iotas_weight,
-        effective_volume_weight=effective_volume_weight,
-    )
-    replacement_total = float(frontier_goal_total)
-    replacement_grad = np.asarray(frontier_goal_grad, dtype=float)
-
-    if (
-        frontier_goal_config.scalarization_type
-        == FRONTIER_REFERENCE_MODE_ACHIEVEMENT
-    ):
-        chebyshev_eval = _frontier_chebyshev_goal(annotated, frontier_goal_config)
-        replacement_total = float(chebyshev_eval["frontier_scalarization_total"])
-        replacement_grad = np.asarray(
-            chebyshev_eval["frontier_scalarization_grad"],
-            dtype=float,
-        )
-        annotated.update(chebyshev_eval)
-    elif (
-        frontier_goal_config.scalarization_type
-        == FRONTIER_REFERENCE_MODE_EPSILON
-    ):
-        epsilon_penalties = _frontier_epsilon_penalties(
-            annotated,
-            frontier_goal_config=frontier_goal_config,
-        )
-        epsilon_penalty_total = float(
-            sum(entry["penalty"] for entry in epsilon_penalties.values())
-        )
-        epsilon_penalty_grad = sum(
-            (
-                np.asarray(entry["grad"], dtype=float)
-                for entry in epsilon_penalties.values()
-            ),
-            np.zeros_like(replacement_grad),
-        )
-        replacement_total += epsilon_penalty_total
-        replacement_grad = replacement_grad + epsilon_penalty_grad
-        annotated["frontier_epsilon_penalty"] = float(epsilon_penalty_total)
-        annotated["frontier_epsilon_constraints"] = {
-            metric_name: {
-                "threshold": entry["threshold"],
-                "excess": entry["excess"],
-                "excess_ratio": entry["excess_ratio"],
-                "penalty": entry["penalty"],
-            }
-            for metric_name, entry in epsilon_penalties.items()
-        }
-
-    annotated["frontier_goal_total"] = float(replacement_total)
-    annotated["frontier_goal_grad"] = np.asarray(replacement_grad, dtype=float)
-
-    if alm_formulation == "weighted_sum":
-        if "constraint_values" in annotated and "constraint_grads" in annotated:
-            if alm_multipliers is None or alm_penalty is None:
-                raise ValueError(
-                    "ALM frontier scalarization override requires explicit multipliers and penalty"
-                )
-            base_total, base_grad = _frontier_alm_base_total_grad(
-                annotated,
-                length_weight=length_weight,
-            )
-            base_total += float(replacement_total)
-            base_grad = base_grad + replacement_grad
-            alm_eval = augmented_inequality_objective(
-                base_total,
-                base_grad,
-                annotated["constraint_values"],
-                annotated["constraint_grads"],
-                np.asarray(alm_multipliers, dtype=float),
-                float(alm_penalty),
-            )
-            annotated.update(alm_eval)
-            annotated["physics_total"] = float(base_total)
-            annotated["base_total"] = float(base_total)
-        else:
-            penalty_total, penalty_grad = _frontier_penalty_geometry_total_grad(
-                annotated,
-                length_weight=length_weight,
-                cc_weight=cc_weight,
-                cs_weight=cs_weight,
-                curvature_weight=curvature_weight,
-                surf_dist_weight=surf_dist_weight,
-                poloidal_extent_weight=poloidal_extent_weight,
-            )
-            annotated["total"] = penalty_total + float(replacement_total)
-            annotated["grad"] = penalty_grad + replacement_grad
-    return annotated
-
-
-def _frontier_goal_component_total_grad(
-    objective_eval,
-    *,
-    effective_res_weight,
-    effective_iotas_weight,
-    effective_volume_weight,
-):
-    total = (
-        float(objective_eval["J_QS_objective"])
-        + float(effective_res_weight) * float(objective_eval["J_Boozer_objective"])
-        + float(effective_iotas_weight) * float(objective_eval["J_iota"])
-        + float(effective_volume_weight) * float(objective_eval.get("J_volume", 0.0))
-    )
-    grad = (
-        np.asarray(objective_eval["dJ_QS_objective"], dtype=float)
-        + float(effective_res_weight)
-        * np.asarray(objective_eval["dJ_Boozer_objective"], dtype=float)
-        + float(effective_iotas_weight)
-        * np.asarray(objective_eval["dJ_iota"], dtype=float)
-        + float(effective_volume_weight)
-        * np.asarray(objective_eval.get("dJ_volume", 0.0), dtype=float)
-    )
-    return float(total), grad
-
-
-def _frontier_penalty_geometry_total_grad(
-    objective_eval,
-    *,
-    length_weight,
-    cc_weight,
-    cs_weight,
-    curvature_weight,
-    surf_dist_weight,
-    poloidal_extent_weight=0.0,
-):
-    total = (
-        float(length_weight) * float(objective_eval["J_len"])
-        + float(cc_weight) * float(objective_eval["J_cc"])
-        + float(cs_weight) * float(objective_eval["J_cs"])
-        + float(curvature_weight) * float(objective_eval["J_curvature"])
-        + float(surf_dist_weight) * float(objective_eval.get("J_surf", 0.0))
-    )
-    grad = (
-        float(length_weight) * np.asarray(objective_eval["dJ_len"], dtype=float)
-        + float(cc_weight) * np.asarray(objective_eval["dJ_cc"], dtype=float)
-        + float(cs_weight) * np.asarray(objective_eval["dJ_cs"], dtype=float)
-        + float(curvature_weight)
-        * np.asarray(objective_eval["dJ_curvature"], dtype=float)
-        + float(surf_dist_weight)
-        * np.asarray(objective_eval.get("dJ_surf", 0.0), dtype=float)
-        + float(poloidal_extent_weight)
-        * np.asarray(objective_eval.get("dJ_poloidal_extent", 0.0), dtype=float)
-    )
-    total += float(poloidal_extent_weight) * float(
-        objective_eval.get("J_poloidal_extent", 0.0)
-    )
-    return float(total), grad
-
-
-def _frontier_alm_base_total_grad(
-    objective_eval,
-    *,
-    length_weight,
-):
-    total = float(length_weight) * float(objective_eval["J_len"])
-    grad = float(length_weight) * np.asarray(objective_eval["dJ_len"], dtype=float)
-    return float(total), grad
-
-
-def _frontier_chebyshev_goal(objective_eval, frontier_goal_config):
-    deltas = np.asarray(
-        [
-            frontier_goal_config.chebyshev_weight_iota
-            * (
-                (frontier_goal_config.iota_reference - float(objective_eval["J_iota_metric"]))
-                / frontier_goal_config.iota_scale
-            ),
-            frontier_goal_config.chebyshev_weight_volume
-            * (
-                (frontier_goal_config.volume_reference - float(objective_eval["J_volume_metric"]))
-                / frontier_goal_config.volume_scale
-            ),
-            frontier_goal_config.chebyshev_weight_qa
-            * (
-                (float(objective_eval["J_QS"]) - frontier_goal_config.qs_reference)
-                / frontier_goal_config.qs_reference
-            ),
-            frontier_goal_config.chebyshev_weight_boozer
-            * (
-                (float(objective_eval["J_Boozer"]) - frontier_goal_config.boozer_reference)
-                / frontier_goal_config.boozer_reference
-            ),
-        ],
-        dtype=float,
-    )
-    sharpness = float(frontier_goal_config.chebyshev_sharpness)
-    max_delta = float(np.max(deltas))
-    exp_shifted = np.exp(sharpness * (deltas - max_delta))
-    sum_exp = float(np.sum(exp_shifted))
-    softmax_weights = exp_shifted / sum_exp
-    chebyshev_total = (
-        max_delta
-        + np.log(sum_exp) / sharpness
-        + frontier_goal_config.chebyshev_rho * float(np.sum(deltas))
-    )
-    directional_grads = np.stack([
-        -frontier_goal_config.chebyshev_weight_iota
-        * np.asarray(objective_eval["dJ_iota_metric"], dtype=float)
-        / frontier_goal_config.iota_scale,
-        -frontier_goal_config.chebyshev_weight_volume
-        * np.asarray(objective_eval["dJ_volume_metric"], dtype=float)
-        / frontier_goal_config.volume_scale,
-        frontier_goal_config.chebyshev_weight_qa
-        * np.asarray(objective_eval["dJ_QS"], dtype=float)
-        / frontier_goal_config.qs_reference,
-        frontier_goal_config.chebyshev_weight_boozer
-        * np.asarray(objective_eval["dJ_Boozer"], dtype=float)
-        / frontier_goal_config.boozer_reference,
-    ])
-    coeffs = softmax_weights + frontier_goal_config.chebyshev_rho
-    chebyshev_grad = (coeffs[:, None] * directional_grads).sum(axis=0)
-    return {
-        "frontier_scalarization_total": float(chebyshev_total),
-        "frontier_scalarization_grad": chebyshev_grad,
-        "frontier_chebyshev_deltas": deltas.tolist(),
-        "frontier_chebyshev_softmax_weights": softmax_weights.tolist(),
-    }
-
-
-def _frontier_epsilon_penalties(
-    objective_eval,
-    *,
-    frontier_goal_config,
-):
-    epsilon_penalties: dict[str, dict[str, object]] = {}
-    if frontier_goal_config.epsilon_constraint_qa_max is not None:
-        epsilon_penalties["qa_error"] = _frontier_excess_penalty(
-            objective_eval["J_QS"],
-            objective_eval["dJ_QS"],
-            threshold=frontier_goal_config.epsilon_constraint_qa_max,
-            scale=max(frontier_goal_config.qs_reference, 1.0e-6),
-            penalty_weight=frontier_goal_config.epsilon_penalty_weight,
-        )
-    if frontier_goal_config.epsilon_constraint_boozer_max is not None:
-        epsilon_penalties["boozer_residual"] = _frontier_excess_penalty(
-            objective_eval["J_Boozer"],
-            objective_eval["dJ_Boozer"],
-            threshold=frontier_goal_config.epsilon_constraint_boozer_max,
-            scale=max(frontier_goal_config.boozer_reference, 1.0e-6),
-            penalty_weight=frontier_goal_config.epsilon_penalty_weight,
-        )
-    return epsilon_penalties
-
-
-def _frontier_excess_penalty(
-    value,
-    grad,
-    *,
-    threshold,
-    scale,
-    penalty_weight,
-):
-    excess = max(float(value) - float(threshold), 0.0)
-    excess_ratio = excess / float(scale)
-    penalty = float(penalty_weight) * float(excess_ratio**2)
-    penalty_grad = (
-        np.zeros_like(np.asarray(grad, dtype=float))
-        if excess <= 0.0
-        else (
-            float(penalty_weight)
-            * 2.0
-            * excess_ratio
-            / float(scale)
-            * np.asarray(grad, dtype=float)
-        )
-    )
-    return {
-        "enabled": True,
-        "threshold": float(threshold),
-        "scale": float(scale),
-        "excess": float(excess),
-        "excess_ratio": float(excess_ratio),
-        "penalty": float(penalty),
-        "grad": np.asarray(penalty_grad, dtype=float),
-    }
 
 
 def _penalty_search_constraint_payload(
@@ -849,18 +500,22 @@ def _physics_alm_metadata(
     threshold: float,
     activity_tolerance: float,
 ) -> ALMConstraintMetadata:
-    raw_threshold = float(threshold)
+    raw_threshold = require_positive_alm_threshold(f"threshold:{name}", threshold)
+    scale, scale_floor_applied, source = resolve_alm_scale_with_provenance(
+        raw_threshold, ALM_OBJECTIVE_SCALE_FLOOR, f"threshold:{name}"
+    )
     return ALMConstraintMetadata(
-        scale=max(raw_threshold, ALM_OBJECTIVE_SCALE_FLOOR),
+        scale=scale,
         block="physics",
         activity_tolerance=float(activity_tolerance),
         raw_threshold=raw_threshold,
-        source=f"threshold:{name}",
+        source=source,
         objective_value_kind="raw_physics",
         gradient_value_kind="raw_physics",
         dual_update_value_kind="hard",
         feasibility_value_kind="hard",
         certification_value_kind="hard",
+        scale_floor_applied=scale_floor_applied,
     )
 
 

@@ -1,31 +1,45 @@
-import importlib
-import sys
 import unittest
-from pathlib import Path
 
 import numpy as np
 
-
-EXAMPLE_ROOT = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+from geo._frontier_test_helpers import (
+    load_frontier_constraints_module,
+    load_search_evaluation_module,
+    load_search_policy_module,
 )
-if str(EXAMPLE_ROOT) not in sys.path:
-    sys.path.insert(0, str(EXAMPLE_ROOT))
-
-
-def load_frontier_constraints_module():
-    return importlib.import_module("banana_opt.frontier_constraints")
-
-
-def load_search_policy_module():
-    return importlib.import_module("banana_opt.single_stage_search_policy")
 
 
 class FrontierConstraintTests(unittest.TestCase):
+    def _hardware_result(self, **overrides):
+        result = {
+            "success": False,
+            "violations": ["coil_coil_min_dist low", "max_curvature high"],
+            "curve_curve_min_dist": 0.06,
+            "cc_dist": 0.08,
+            "curve_surface_min_dist": 0.04,
+            "cs_dist": 0.03,
+            "surface_vessel_min_dist": 0.05,
+            "ss_dist": 0.05,
+            "max_curvature": 48.0,
+            "curvature_threshold": 40.0,
+        }
+        result.update(overrides)
+        return result
+
+    def _surface_status(self, **overrides):
+        status = {
+            "solve_success": [True, True],
+            "self_intersections": [False, False],
+            "volumes_ordered": True,
+            "gap_ok": True,
+            "vessel_gap_ok": True,
+            "nesting_ok": True,
+        }
+        status.update(overrides)
+        return status
+
     def test_annotate_search_evaluation_finiteness_flags_nonfinite_fields(self):
-        module = load_frontier_constraints_module()
+        module = load_search_evaluation_module()
 
         evaluation = module.annotate_search_evaluation_finiteness(
             {
@@ -46,6 +60,29 @@ class FrontierConstraintTests(unittest.TestCase):
         self.assertEqual(
             evaluation["nonfinite_fields"],
             ["total", "grad", "constraint_values", "constraint_grads[1]"],
+        )
+
+    def test_annotate_search_evaluation_finiteness_flags_derived_frontier_fields(self):
+        module = load_search_evaluation_module()
+
+        evaluation = module.annotate_search_evaluation_finiteness(
+            {
+                "frontier_rank_total": float("inf"),
+                "frontier_base_total": 1.0,
+                "frontier_scalarization_total": float("nan"),
+                "frontier_goal_grad": np.array([1.0, np.nan]),
+                "frontier_scalarization_grad": np.array([1.0, 2.0]),
+            }
+        )
+
+        self.assertFalse(evaluation["finite_eval_ok"])
+        self.assertEqual(
+            evaluation["nonfinite_fields"],
+            [
+                "frontier_rank_total",
+                "frontier_scalarization_total",
+                "frontier_goal_grad",
+            ],
         )
 
     def test_evaluate_frontier_trust_penalty_matches_threshold_relative_contract(self):
@@ -79,18 +116,7 @@ class FrontierConstraintTests(unittest.TestCase):
         search_policy_module = load_search_policy_module()
 
         contract = module.evaluate_frontier_hardware_search_contract(
-            {
-                "success": False,
-                "violations": ["coil_coil_min_dist low", "max_curvature high"],
-                "curve_curve_min_dist": 0.06,
-                "cc_dist": 0.08,
-                "curve_surface_min_dist": 0.04,
-                "cs_dist": 0.03,
-                "surface_vessel_min_dist": 0.05,
-                "ss_dist": 0.05,
-                "max_curvature": 48.0,
-                "curvature_threshold": 40.0,
-            },
+            self._hardware_result(),
             policy=search_policy_module.HardwareSearchPolicy("hard", 0),
             context=search_policy_module.SearchContext(
                 accepted_iterations=2,
@@ -124,109 +150,65 @@ class FrontierConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(contract["deficit"], 0.25)
         self.assertAlmostEqual(contract["rejection_increment"], 84.0)
 
-    def test_evaluate_frontier_hardware_search_penalty_scales_with_max_violation_ratio(self):
+    def test_evaluate_frontier_hardware_search_penalty_cases(self):
         module = load_frontier_constraints_module()
-
-        penalty = module.evaluate_frontier_hardware_search_penalty(
-            {
-                "success": False,
-                "violations": ["coil_coil_min_dist low", "max_curvature high"],
-                "curve_curve_min_dist": 0.06,
-                "cc_dist": 0.08,
-                "curve_surface_min_dist": 0.04,
-                "cs_dist": 0.03,
-                "surface_vessel_min_dist": 0.05,
-                "ss_dist": 0.05,
-                "max_curvature": 48.0,
-                "curvature_threshold": 40.0,
-            },
-            previous_objective=3.5,
-            penalty_scale=4.0,
-        )
-
-        self.assertAlmostEqual(penalty["max_violation_ratio"], 0.25)
-        self.assertAlmostEqual(penalty["penalty"], 3.5)
-
-    def test_evaluate_frontier_hardware_search_penalty_uses_explicit_violation_ratios(self):
-        module = load_frontier_constraints_module()
-
-        penalty = module.evaluate_frontier_hardware_search_penalty(
-            {
-                "success": False,
-                "violations": ["coil_coil_spacing penalty 2.5e-1 exceeds 0"],
-                "violation_ratios": {
-                    "coil_coil_spacing_penalty": 0.25,
-                    "max_curvature_penalty": 0.0,
-                },
-                "curve_curve_min_dist": None,
-                "cc_dist": 0.08,
-            },
-            previous_objective=3.5,
-            penalty_scale=4.0,
-        )
-
-        self.assertAlmostEqual(
-            penalty["violation_ratios"]["coil_coil_spacing_penalty"],
-            0.25,
-        )
-        self.assertAlmostEqual(
-            penalty["violation_ratios"]["max_curvature_penalty"],
-            0.0,
-        )
-        self.assertAlmostEqual(penalty["max_violation_ratio"], 0.25)
-        self.assertAlmostEqual(penalty["penalty"], 3.5)
-
-    def test_evaluate_frontier_hardware_search_penalty_merges_explicit_and_current_ratios(self):
-        module = load_frontier_constraints_module()
-
-        penalty = module.evaluate_frontier_hardware_search_penalty(
-            {
-                "success": False,
-                "violations": ["|banana_current| exceeds threshold"],
-                "violation_ratios": {
-                    "coil_coil_spacing_penalty": 0.0,
-                    "max_curvature_penalty": 0.0,
-                },
-                "banana_current_A": 2.4e4,
-                "banana_current_max_A": 1.6e4,
-            },
-            previous_objective=3.5,
-            penalty_scale=4.0,
-        )
-
-        self.assertAlmostEqual(penalty["violation_ratios"]["banana_current"], 0.5)
-        self.assertAlmostEqual(
-            penalty["violation_ratios"]["coil_coil_spacing_penalty"],
-            0.0,
-        )
-        self.assertAlmostEqual(penalty["max_violation_ratio"], 0.5)
-        self.assertAlmostEqual(penalty["penalty"], 7.0)
-
-    def test_evaluate_frontier_hardware_search_penalty_uses_schema_constraint_ratios(self):
-        module = load_frontier_constraints_module()
-
-        penalty = module.evaluate_frontier_hardware_search_penalty(
-            {
-                "success": False,
-                "violations": ["|banana_current| exceeds threshold"],
-                "constraints": {
-                    "banana_current": {
-                        "threshold": 1.6e4,
-                        "violation": 4.0e3,
+        zero_penalties = {
+            "coil_coil_spacing_penalty": 0.0,
+            "max_curvature_penalty": 0.0,
+        }
+        cases = [
+            ("normalized_current_values", self._hardware_result(), {}, 0.25, 3.5),
+            (
+                "explicit_violation_ratios",
+                self._hardware_result(
+                    violations=["coil_coil_spacing penalty 2.5e-1 exceeds 0"],
+                    violation_ratios={
+                        "coil_coil_spacing_penalty": 0.25,
+                        "max_curvature_penalty": 0.0,
                     },
-                },
-                "violation_ratios": {
-                    "coil_coil_spacing_penalty": 0.0,
-                    "max_curvature_penalty": 0.0,
-                },
-            },
-            previous_objective=3.5,
-            penalty_scale=4.0,
-        )
-
-        self.assertAlmostEqual(penalty["violation_ratios"]["banana_current"], 0.25)
-        self.assertAlmostEqual(penalty["max_violation_ratio"], 0.25)
-        self.assertAlmostEqual(penalty["penalty"], 3.5)
+                    curve_curve_min_dist=None,
+                ),
+                {"coil_coil_spacing_penalty": 0.25, "max_curvature_penalty": 0.0},
+                0.25,
+                3.5,
+            ),
+            (
+                "explicit_plus_current_ratios",
+                self._hardware_result(
+                    violations=["|banana_current| exceeds threshold"],
+                    violation_ratios=zero_penalties,
+                    banana_current_A=2.4e4,
+                    banana_current_max_A=1.6e4,
+                ),
+                {"banana_current": 0.5, "coil_coil_spacing_penalty": 0.0},
+                0.5,
+                7.0,
+            ),
+            (
+                "schema_constraint_ratios",
+                self._hardware_result(
+                    violations=["|banana_current| exceeds threshold"],
+                    constraints={
+                        "banana_current": {"threshold": 1.6e4, "violation": 4.0e3}
+                    },
+                    violation_ratios=zero_penalties,
+                ),
+                {"banana_current": 0.25},
+                0.25,
+                3.5,
+            ),
+        ]
+        for name, result, expected_ratios, expected_max, expected_penalty in cases:
+            with self.subTest(name=name):
+                penalty = module.evaluate_frontier_hardware_search_penalty(
+                    result,
+                    previous_objective=3.5,
+                    penalty_scale=4.0,
+                )
+                for ratio_name, expected in expected_ratios.items():
+                    self.assertAlmostEqual(penalty["violation_ratios"][ratio_name], expected)
+                self.assertAlmostEqual(penalty["max_violation_ratio"], expected_max)
+                self.assertAlmostEqual(penalty["penalty"], expected_penalty)
 
     def test_evaluate_frontier_topology_search_penalty_scales_with_deficit(self):
         module = load_frontier_constraints_module()
@@ -245,57 +227,41 @@ class FrontierConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(penalty["deficit"], 0.25)
         self.assertAlmostEqual(penalty["penalty"], 42.0)
 
-    def test_evaluate_frontier_hard_invalidation_rejects_nonfinite_search_eval(self):
+    def test_evaluate_frontier_hard_invalidation_cases(self):
         module = load_frontier_constraints_module()
-
-        invalidation = module.evaluate_frontier_hard_invalidation(
-            search_eval={
-                "finite_eval_ok": False,
-                "nonfinite_fields": ["total", "grad"],
-            },
-            surface_success=True,
-        )
-
-        self.assertTrue(invalidation["invalid"])
-        self.assertEqual(invalidation["reason"], "nonfinite_evaluation")
-        self.assertEqual(invalidation["fields"], ["total", "grad"])
-
-    def test_evaluate_frontier_hard_invalidation_classifies_surface_solve_failure(self):
-        module = load_frontier_constraints_module()
-
-        invalidation = module.evaluate_frontier_hard_invalidation(
-            search_eval={"finite_eval_ok": True},
-            surface_success=False,
-            surface_status={
-                "solve_success": [False, True],
-                "self_intersections": [False, False],
-                "volumes_ordered": True,
-                "gap_ok": True,
-                "vessel_gap_ok": True,
-                "nesting_ok": True,
-            },
-        )
-
-        self.assertTrue(invalidation["invalid"])
-        self.assertEqual(invalidation["reason"], "surface_solve_failed")
-        self.assertEqual(invalidation["fields"], ["solve_success"])
-
-    def test_evaluate_frontier_hard_invalidation_classifies_unrestorable_geometry(self):
-        module = load_frontier_constraints_module()
-
-        invalidation = module.evaluate_frontier_hard_invalidation(
-            search_eval={"finite_eval_ok": True},
-            surface_success=False,
-            surface_status={
-                "solve_success": [True, True],
-                "self_intersections": [True, False],
-                "volumes_ordered": True,
-                "gap_ok": True,
-                "vessel_gap_ok": True,
-                "nesting_ok": True,
-            },
-        )
-
-        self.assertTrue(invalidation["invalid"])
-        self.assertEqual(invalidation["reason"], "geometry_state_unrestorable")
-        self.assertEqual(invalidation["fields"], ["self_intersections"])
+        cases = [
+            (
+                "nonfinite_search_eval",
+                {"finite_eval_ok": False, "nonfinite_fields": ["total", "grad"]},
+                True,
+                None,
+                "nonfinite_evaluation",
+                ["total", "grad"],
+            ),
+            (
+                "surface_solve_failure",
+                {"finite_eval_ok": True},
+                False,
+                self._surface_status(solve_success=[False, True]),
+                "surface_solve_failed",
+                ["solve_success"],
+            ),
+            (
+                "unrestorable_geometry",
+                {"finite_eval_ok": True},
+                False,
+                self._surface_status(self_intersections=[True, False]),
+                "geometry_state_unrestorable",
+                ["self_intersections"],
+            ),
+        ]
+        for name, search_eval, surface_success, surface_status, reason, fields in cases:
+            with self.subTest(name=name):
+                invalidation = module.evaluate_frontier_hard_invalidation(
+                    search_eval=search_eval,
+                    surface_success=surface_success,
+                    surface_status=surface_status,
+                )
+                self.assertTrue(invalidation["invalid"])
+                self.assertEqual(invalidation["reason"], reason)
+                self.assertEqual(invalidation["fields"], fields)

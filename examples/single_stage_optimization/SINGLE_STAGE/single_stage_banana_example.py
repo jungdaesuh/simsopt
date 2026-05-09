@@ -59,7 +59,9 @@ from alm_utils import (
     alm_raw_dual_estimates,
     augmented_inequality_objective,  # noqa: F401 - legacy module-level export.
     minimize_alm,
+    require_positive_alm_threshold,
     validate_alm_cli_args,
+    validate_initial_multipliers,
 )
 from plotting_utils import norm_field_plot, cross_section_plot
 from topology_scorer import (
@@ -94,7 +96,7 @@ from banana_opt.basin_hopping import run_basin_hopping, telemetry_values as basi
 from banana_opt.basin_hopping import (  # noqa: F401 - re-exported for importlib-loaded tests
     _normalized_step_rms as basin_normalized_step_rms,
 )
-from banana_opt.frontier_constraints import (
+from banana_opt.single_stage_search_contracts import (
     apply_frontier_search_contract_penalties as _apply_frontier_search_contract_penalties_impl,
     annotate_frontier_search_eval as _annotate_frontier_search_eval_impl,
     evaluate_frontier_hard_invalidation as _evaluate_frontier_hard_invalidation_impl,
@@ -263,7 +265,6 @@ from banana_opt.single_stage_search_policy import (
 )
 from banana_opt.single_stage_objectives import (
     ALM_HARD_GEOMETRY_DUAL_SIGNALS,
-    apply_frontier_scalarization_override as _apply_frontier_scalarization_override_impl,
     average_surface_objectives as _average_surface_objectives_impl,
     build_total_objective as _build_total_objective_impl,
     evaluate_base_objective as _evaluate_base_objective_impl,
@@ -287,6 +288,7 @@ from banana_opt.frontier_scalarization import (
     FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
     FRONTIER_REFERENCE_MODE_EPSILON,
     FRONTIER_REFERENCE_MODE_REFERENCE_POINTS,
+    apply_frontier_scalarization_override as _apply_frontier_scalarization_override_impl,
 )
 from banana_opt.surface_mode_contracts import (
     DEFAULT_INNER_SURFACE_RATIO,
@@ -2653,7 +2655,6 @@ def build_frontier_goal_config(
         chebyshev_sharpness=_frontier_override_or_default(
             chebyshev_sharpness_override,
             _FRONTIER_CHEBYSHEV_SHARPNESS,
-            minimum=1.0e-12,
         ),
         chebyshev_weight_iota=_frontier_override_or_default(
             chebyshev_weight_iota_override,
@@ -2957,6 +2958,23 @@ def validate_surface_mode_constraint_args(
 
 def validate_single_stage_alm_formulation_args(args):
     if args.alm_formulation == "weighted_sum":
+        # Scoped strict raise: weighted_sum + ALM owns the coil-length constraint as
+        # an inequality at length_target. The base objective also adds
+        # LENGTH_WEIGHT * QuadraticPenalty(curvelength, length_target, "max") via
+        # build_total_objective, which double-feeds the same boundary and corrupts
+        # the saved ALM multiplier. thresholded_physics + ALM is unaffected because
+        # LENGTH_WEIGHT does not enter JF in that mode (see single_stage_objectives
+        # evaluate_base_objective). See .alm_audit/FIX_PLAN.md S1.
+        if (
+            args.constraint_method == "alm"
+            and float(args.length_weight) != 0.0
+        ):
+            raise ValueError(
+                "ALM weighted_sum formulation owns the coil-length constraint; "
+                f"--length-weight must be 0 in this mode (got {args.length_weight}). "
+                "Set --length-weight 0 explicitly, or use "
+                "--alm-formulation thresholded_physics."
+            )
         return
     if args.single_stage_goal_mode == "frontier":
         raise ValueError(
@@ -2984,14 +3002,8 @@ def validate_single_stage_alm_formulation_args(args):
             + ", ".join(missing_thresholds)
         )
 
-    negative_thresholds = [
-        flag_name for flag_name, value in required_thresholds.items() if float(value) < 0.0
-    ]
-    if negative_thresholds:
-        raise ValueError(
-            "thresholded_physics ALM thresholds must be non-negative: "
-            + ", ".join(negative_thresholds)
-        )
+    for flag_name, value in required_thresholds.items():
+        require_positive_alm_threshold(flag_name, value)
 
 
 def single_stage_alm_constraint_names(
@@ -4380,13 +4392,16 @@ def validate_resume_alm_state(resume_alm_state, constraint_names):
             "ALM resume constraint_names mismatch: "
             f"saved={saved_constraint_names}, current={current_constraint_names}"
         )
-    multipliers = np.asarray(resume_alm_state["multipliers"], dtype=float)
-    if multipliers.shape != (len(current_constraint_names),):
+    raw_multipliers = np.asarray(resume_alm_state["multipliers"], dtype=float)
+    if raw_multipliers.shape != (len(current_constraint_names),):
         raise ValueError(
             "ALM resume multiplier length mismatch: "
-            f"saved={multipliers.shape[0]}, current={len(current_constraint_names)}"
+            f"saved={raw_multipliers.shape[0]}, current={len(current_constraint_names)}"
         )
-    return multipliers.copy(), float(resume_alm_state["penalty"])
+    multipliers = validate_initial_multipliers(
+        raw_multipliers, len(current_constraint_names)
+    )
+    return multipliers, float(resume_alm_state["penalty"])
 
 
 def build_single_stage_alm_settings(args):
@@ -9036,12 +9051,17 @@ if __name__ == "__main__":
             )
 
         def history_callback(history, latest_history_entry, multipliers, penalty):
-            alm_partial_state["history"] = history
             update_single_stage_alm_smoothing_from_history(latest_history_entry)
-            if history:
-                history[-1]["smoothing_changed"] = latest_history_entry[
+            # L2: never mutate the borrowed history (or the entries it
+            # references — those are shared with ALM internal state). Build
+            # an owned shallow copy of each entry, annotate the latest with
+            # `smoothing_changed`, and emit that copy in partial-state.
+            owned_history = [dict(entry) for entry in history]
+            if owned_history:
+                owned_history[-1]["smoothing_changed"] = latest_history_entry[
                     "smoothing_changed"
                 ]
+            alm_partial_state["history"] = owned_history
             emit_alm_partial_state(
                 multipliers,
                 penalty,

@@ -534,6 +534,8 @@ def _surface_dofs(surface) -> np.ndarray:
     get_dofs = getattr(surface, "get_dofs", None)
     if callable(get_dofs):
         return np.asarray(get_dofs(), dtype=float)
+    if hasattr(surface, "local_full_x"):
+        return np.asarray(surface.local_full_x, dtype=float)
     return np.asarray(surface.dofs, dtype=float)
 
 
@@ -547,6 +549,14 @@ def _assign_surface_dofs(surface, dofs) -> None:
         set_dofs(resolved_dofs)
         return
     surface.dofs = resolved_dofs
+
+
+def _seed_surface_from_guess(surface, initial_surface_guess) -> None:
+    guess_dofs = _surface_dofs(initial_surface_guess)
+    if len(guess_dofs) == len(_surface_dofs(surface)):
+        _assign_surface_dofs(surface, guess_dofs)
+        return
+    surface.least_squares_fit(initial_surface_guess.gamma())
 
 
 def _snapshot_boozer_initialization_state(
@@ -659,7 +669,7 @@ def attempt_initialize_boozer_surface(
     if initial_surface_guess is None:
         surf.least_squares_fit(surf_prev.gamma())
     else:
-        _assign_surface_dofs(surf, _surface_dofs(initial_surface_guess))
+        _seed_surface_from_guess(surf, initial_surface_guess)
 
     if constraint_weight is not None:
         vol = volume_cls(surf)

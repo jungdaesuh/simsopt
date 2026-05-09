@@ -1,276 +1,168 @@
-import importlib
-import sys
 import unittest
-from pathlib import Path
 
-
-EXAMPLE_ROOT = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+from geo._frontier_test_helpers import (
+    load_frontier_archive_module,
+    load_frontier_recommendation_module,
+    make_frontier_archive_member,
 )
-if str(EXAMPLE_ROOT) not in sys.path:
-    sys.path.insert(0, str(EXAMPLE_ROOT))
-
-
-def load_frontier_archive_module():
-    return importlib.import_module("banana_opt.frontier_archive")
-
-
-def load_frontier_recommendation_module():
-    return importlib.import_module("banana_opt.frontier_recommendation")
 
 
 class FrontierRecommendationTests(unittest.TestCase):
-    def _make_member(
+    def setUp(self):
+        self.archive_module = load_frontier_archive_module()
+        self.recommendation_module = load_frontier_recommendation_module()
+
+    def _assert_recommended(
         self,
-        archive_module,
+        recommendation,
         *,
         member_id: str,
-        iota: float,
-        volume: float,
-        qa_error: float,
-        boozer_residual: float,
-        distance_from_seed: float,
-        frontier_trust_ok: bool = True,
-        hardware_constraints_ok: bool = True,
-        reference_metrics: dict[str, float] | None = None,
-    ):
-        return archive_module.FrontierArchiveMember(
-            member_id=member_id,
-            lane_id=member_id.split(":")[-1],
-            campaign_id="campaign",
-            archive_state="certified",
-            dominance_signature={},
-            objective_metrics={
-                "iota": iota,
-                "volume": volume,
-                "qa_error": qa_error,
-                "boozer_residual": boozer_residual,
-            },
-            reference_metrics=(
-                {
-                    "iota": 0.15,
-                    "volume": 0.10,
-                    "qa_error": 0.012,
-                    "boozer_residual": 0.008,
-                }
-                if reference_metrics is None
-                else dict(reference_metrics)
-            ),
-            constraint_metrics={
-                "frontier_trust_ok": frontier_trust_ok,
-                "hardware_constraints_ok": hardware_constraints_ok,
-            },
-            hard_certification_ok=True,
-            soft_search_score=-1.0,
-            distance_from_seed=distance_from_seed,
-            hypervolume_contribution=None,
-            recommendation_flags={},
-            rerun_contract={},
-            result_source="final",
-            results_path=f"/tmp/{member_id}.json",
-            termination_reason="ok",
-            success=True,
-        )
-
-    def test_recommend_frontier_member_max_iota_under_safe_boozer_prefers_highest_iota(self):
-        archive_module = load_frontier_archive_module()
-        recommendation_module = load_frontier_recommendation_module()
-
-        safe_high_iota = self._make_member(
-            archive_module,
-            member_id="campaign:lane_01",
-            iota=0.19,
-            volume=0.10,
-            qa_error=0.012,
-            boozer_residual=0.0078,
-            distance_from_seed=0.40,
-        )
-        safer_lower_iota = self._make_member(
-            archive_module,
-            member_id="campaign:lane_02",
-            iota=0.17,
-            volume=0.11,
-            qa_error=0.010,
-            boozer_residual=0.0065,
-            distance_from_seed=0.20,
-        )
-
-        recommendation = recommendation_module.recommend_frontier_member(
-            [safer_lower_iota, safe_high_iota],
-            policy_name="max_iota_under_safe_boozer",
-        )
-
+        policy_name: str | None = None,
+    ) -> None:
         self.assertIsNotNone(recommendation)
-        assert recommendation is not None
-        self.assertEqual(
-            recommendation["recommended_member"].member_id,
-            "campaign:lane_01",
-        )
-        self.assertEqual(
-            recommendation["policy_name"],
-            "max_iota_under_safe_boozer",
-        )
-        self.assertTrue(recommendation["policy_inputs"]["gate_missing_is_eligible"])
+        self.assertEqual(recommendation["recommended_member"].member_id, member_id)
+        if policy_name is not None:
+            self.assertEqual(recommendation["policy_name"], policy_name)
 
-    def test_recommend_frontier_member_max_volume_under_safe_hardware_prefers_highest_volume(self):
-        archive_module = load_frontier_archive_module()
-        recommendation_module = load_frontier_recommendation_module()
-
-        lower_volume = self._make_member(
-            archive_module,
-            member_id="campaign:lane_01",
-            iota=0.19,
-            volume=0.10,
-            qa_error=0.011,
-            boozer_residual=0.007,
-            distance_from_seed=0.25,
+    def _member(self, *, member_id="campaign:lane_01", **overrides):
+        values = {
+            "iota": 0.17,
+            "volume": 0.11,
+            "qa_error": 0.010,
+            "boozer_residual": 0.007,
+            "distance_from_seed": 0.0,
+        }
+        values.update(overrides)
+        return make_frontier_archive_member(
+            self.archive_module,
+            member_id=member_id,
+            **values,
         )
-        higher_volume = self._make_member(
-            archive_module,
+
+    def test_recommend_empty_archive_returns_none(self):
+        self.assertIsNone(self.recommendation_module.recommend_frontier_member([]))
+
+    def test_recommend_single_member_archive_returns_that_member(self):
+        member = self._member()
+
+        recommendation = self.recommendation_module.recommend_frontier_member([member])
+
+        self._assert_recommended(recommendation, member_id="campaign:lane_01")
+        self.assertFalse(recommendation["gate_fallback"])
+
+    def test_recommend_tiebreaker_is_member_id_lex_ordered(self):
+        member_b = self._member(member_id="campaign:lane_02")
+        member_a = self._member()
+
+        recommendation = self.recommendation_module.recommend_frontier_member(
+            [member_b, member_a],
+            policy_name="balanced",
+        )
+
+        self._assert_recommended(recommendation, member_id="campaign:lane_01")
+
+    def test_recommend_with_no_safe_members_surfaces_gate_fallback(self):
+        lower_volume = self._member(
+            iota=0.18,
+            distance_from_seed=0.1,
+            hardware_constraints_ok=False,
+        )
+        higher_volume = self._member(
             member_id="campaign:lane_02",
-            iota=0.17,
             volume=0.12,
-            qa_error=0.012,
+            qa_error=0.011,
             boozer_residual=0.0075,
-            distance_from_seed=0.30,
+            distance_from_seed=0.2,
+            hardware_constraints_ok=False,
         )
 
-        recommendation = recommendation_module.recommend_frontier_member(
+        recommendation = self.recommendation_module.recommend_frontier_member(
             [lower_volume, higher_volume],
             policy_name="max_volume_under_safe_hardware",
         )
 
-        self.assertIsNotNone(recommendation)
-        assert recommendation is not None
-        self.assertEqual(
-            recommendation["recommended_member"].member_id,
-            "campaign:lane_02",
-        )
-        self.assertEqual(
-            recommendation["policy_name"],
-            "max_volume_under_safe_hardware",
-        )
-        self.assertFalse(recommendation["policy_inputs"]["gate_missing_is_eligible"])
-
-    def test_recommend_frontier_member_closest_to_seed_prefers_smallest_distance(self):
-        archive_module = load_frontier_archive_module()
-        recommendation_module = load_frontier_recommendation_module()
-
-        farther = self._make_member(
-            archive_module,
-            member_id="campaign:lane_01",
-            iota=0.18,
-            volume=0.11,
-            qa_error=0.011,
-            boozer_residual=0.007,
-            distance_from_seed=0.30,
-        )
-        closer = self._make_member(
-            archive_module,
-            member_id="campaign:lane_02",
-            iota=0.16,
-            volume=0.102,
-            qa_error=0.0115,
-            boozer_residual=0.0078,
-            distance_from_seed=0.08,
+        self._assert_recommended(recommendation, member_id="campaign:lane_02")
+        self.assertTrue(recommendation["gate_fallback"])
+        self.assertTrue(
+            recommendation["policy_inputs"]["gate_fallback_to_all_members"]
         )
 
-        recommendation = recommendation_module.recommend_frontier_member(
-            [farther, closer],
-            policy_name="closest_to_seed",
-        )
-
-        self.assertIsNotNone(recommendation)
-        assert recommendation is not None
-        self.assertEqual(
-            recommendation["recommended_member"].member_id,
-            "campaign:lane_02",
-        )
-        self.assertEqual(recommendation["policy_name"], "closest_to_seed")
-
-    def test_safe_boozer_policy_treats_missing_trust_as_eligible(self):
-        archive_module = load_frontier_archive_module()
-        recommendation_module = load_frontier_recommendation_module()
-
-        missing_trust_high_iota = self._make_member(
-            archive_module,
-            member_id="campaign:lane_01",
-            iota=0.20,
-            volume=0.101,
-            qa_error=0.012,
-            boozer_residual=0.008,
-            distance_from_seed=0.40,
-            frontier_trust_ok=None,
-        )
-        explicit_safe_lower_iota = self._make_member(
-            archive_module,
-            member_id="campaign:lane_02",
-            iota=0.18,
-            volume=0.11,
-            qa_error=0.011,
-            boozer_residual=0.007,
-            distance_from_seed=0.20,
-            frontier_trust_ok=True,
-        )
-
-        recommendation = recommendation_module.recommend_frontier_member(
-            [explicit_safe_lower_iota, missing_trust_high_iota],
-            policy_name="max_iota_under_safe_boozer",
-        )
-
-        self.assertIsNotNone(recommendation)
-        assert recommendation is not None
-        self.assertEqual(
-            recommendation["recommended_member"].member_id,
-            "campaign:lane_01",
-        )
-
-    def test_safe_hardware_policy_treats_missing_hardware_as_ineligible(self):
-        archive_module = load_frontier_archive_module()
-        recommendation_module = load_frontier_recommendation_module()
-
-        missing_hardware_high_volume = self._make_member(
-            archive_module,
-            member_id="campaign:lane_01",
-            iota=0.19,
-            volume=0.13,
-            qa_error=0.011,
-            boozer_residual=0.007,
-            distance_from_seed=0.30,
-            hardware_constraints_ok=None,
-        )
-        explicit_safe_lower_volume = self._make_member(
-            archive_module,
-            member_id="campaign:lane_02",
-            iota=0.17,
-            volume=0.11,
-            qa_error=0.010,
-            boozer_residual=0.0065,
-            distance_from_seed=0.20,
-            hardware_constraints_ok=True,
-        )
-
-        recommendation = recommendation_module.recommend_frontier_member(
-            [missing_hardware_high_volume, explicit_safe_lower_volume],
-            policy_name="max_volume_under_safe_hardware",
-        )
-
-        self.assertIsNotNone(recommendation)
-        assert recommendation is not None
-        self.assertEqual(
-            recommendation["recommended_member"].member_id,
-            "campaign:lane_02",
-        )
+    def test_recommend_frontier_member_policy_cases(self):
+        cases = [
+            (
+                "balanced",
+                "campaign:lane_01",
+                [
+                    self._member(member_id="campaign:lane_02", iota=0.19, volume=0.095, qa_error=0.015, boozer_residual=0.011),
+                    self._member(iota=0.165, volume=0.108, qa_error=0.011, boozer_residual=0.0075),
+                ],
+                None,
+            ),
+            (
+                "max_iota_under_safe_boozer",
+                "campaign:lane_01",
+                [
+                    self._member(iota=0.17, boozer_residual=0.0065, distance_from_seed=0.20),
+                    self._member(member_id="campaign:lane_01", iota=0.19, qa_error=0.012),
+                ],
+                True,
+            ),
+            (
+                "max_volume_under_safe_hardware",
+                "campaign:lane_02",
+                [
+                    self._member(iota=0.19, volume=0.10, qa_error=0.011, distance_from_seed=0.25),
+                    self._member(member_id="campaign:lane_02", volume=0.12, qa_error=0.012),
+                ],
+                False,
+            ),
+            (
+                "closest_to_seed",
+                "campaign:lane_02",
+                [
+                    self._member(iota=0.18, qa_error=0.011, distance_from_seed=0.30),
+                    self._member(member_id="campaign:lane_02", iota=0.16, volume=0.102, distance_from_seed=0.08),
+                ],
+                None,
+            ),
+            (
+                "max_iota_under_safe_boozer",
+                "campaign:lane_01",
+                [
+                    self._member(iota=0.18, qa_error=0.011, frontier_trust_ok=True),
+                    self._member(member_id="campaign:lane_01", iota=0.20, frontier_trust_ok=None),
+                ],
+                True,
+            ),
+            (
+                "max_volume_under_safe_hardware",
+                "campaign:lane_02",
+                [
+                    self._member(iota=0.19, volume=0.13, hardware_constraints_ok=None),
+                    self._member(member_id="campaign:lane_02", hardware_constraints_ok=True),
+                ],
+                False,
+            ),
+        ]
+        for policy_name, member_id, members, gate_missing_is_eligible in cases:
+            with self.subTest(policy_name=policy_name, member_id=member_id):
+                recommendation = self.recommendation_module.recommend_frontier_member(
+                    members,
+                    policy_name=policy_name,
+                )
+                self._assert_recommended(
+                    recommendation,
+                    member_id=member_id,
+                    policy_name=policy_name,
+                )
+                if gate_missing_is_eligible is not None:
+                    self.assertEqual(
+                        recommendation["policy_inputs"]["gate_missing_is_eligible"],
+                        gate_missing_is_eligible,
+                    )
 
     def test_recommend_frontier_member_balanced_uses_fixed_ideal_nadir_normalization(self):
-        archive_module = load_frontier_archive_module()
-        recommendation_module = load_frontier_recommendation_module()
-
-        aggressive_iota_tradeoff = self._make_member(
-            archive_module,
-            member_id="campaign:lane_01",
+        aggressive_iota_tradeoff = self._member(
             iota=0.17,
             volume=0.10,
             qa_error=0.012,
@@ -283,8 +175,7 @@ class FrontierRecommendationTests(unittest.TestCase):
                 "boozer_residual": 0.008,
             },
         )
-        near_seed_member = self._make_member(
-            archive_module,
+        near_seed_member = self._member(
             member_id="campaign:lane_02",
             iota=0.15,
             volume=0.10,
@@ -320,25 +211,15 @@ class FrontierRecommendationTests(unittest.TestCase):
             },
         }
 
-        default_recommendation = recommendation_module.recommend_frontier_member(
+        default_recommendation = self.recommendation_module.recommend_frontier_member(
             [aggressive_iota_tradeoff, near_seed_member],
             policy_name="balanced",
         )
-        normalized_recommendation = recommendation_module.recommend_frontier_member(
+        normalized_recommendation = self.recommendation_module.recommend_frontier_member(
             [aggressive_iota_tradeoff, near_seed_member],
             policy_name="balanced",
             pareto_objective_normalization=fixed_ideal_nadir_normalization,
         )
 
-        self.assertIsNotNone(default_recommendation)
-        self.assertIsNotNone(normalized_recommendation)
-        assert default_recommendation is not None
-        assert normalized_recommendation is not None
-        self.assertEqual(
-            default_recommendation["recommended_member"].member_id,
-            "campaign:lane_02",
-        )
-        self.assertEqual(
-            normalized_recommendation["recommended_member"].member_id,
-            "campaign:lane_01",
-        )
+        self._assert_recommended(default_recommendation, member_id="campaign:lane_02")
+        self._assert_recommended(normalized_recommendation, member_id="campaign:lane_01")

@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+"""Frontier scalarization contracts and lane-spec generation.
+
+The legacy shared reference mode is a local iota/volume reward-share sweep. It
+does not sweep QA error or Boozer residual reference directions; use the
+achievement full-simplex mode for generated 4-objective reference directions.
+"""
+
 import json
 import math
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Mapping
+from types import MappingProxyType
+from typing import Callable, Mapping
 
-from .frontier_engine_multilane_local import (
-    FrontierLaneSpec,
-    generate_multilane_local_specs,
-)
+import numpy as np
+
+from alm_utils import augmented_inequality_objective
+from .frontier_contracts import EpsilonThresholds
+from .objective_gradients import objective_gradient as _objective_gradient
+from .search_evaluation import annotate_search_evaluation_finiteness
 
 FRONTIER_REFERENCE_MODE_SHARED = "shared_seed_relative_frontier_v2"
 FRONTIER_REFERENCE_MODE_REFERENCE_POINTS = "reference_point_sweep_v1"
@@ -29,6 +40,8 @@ FRONTIER_EPSILON_SPEC_SCHEMA_VERSION = "frontier_epsilon_spec_v1"
 FRONTIER_ACHIEVEMENT_SPEC_SCHEMA_VERSION = "frontier_achievement_spec_v1"
 _REFERENCE_METRIC_FLOOR = 1.0e-6
 _TRUST_THRESHOLD_FLOOR = 1.0e-5
+# Positive floor intentionally breaks exact simplex unit-sum to keep
+# downstream Chebyshev divisions finite for pure-axis directions.
 _WEIGHT_FLOOR = 1.0e-12
 _DEFAULT_CHEBYSHEV_RHO = 1.0e-3
 _DEFAULT_CHEBYSHEV_SHARPNESS = 12.0
@@ -37,6 +50,458 @@ _REFERENCE_METRIC_KEYS = frozenset(
     {"iota", "volume", "qa_error", "boozer_residual"}
 )
 _EPSILON_METRIC_KEYS = frozenset({"qa_error", "boozer_residual"})
+
+
+@dataclass(frozen=True, slots=True)
+class FrontierLaneSpec:
+    lane_id: str
+    scalarization_type: str
+    scalarization_params: dict[str, float]
+    iotas_weight: float
+    frontier_volume_weight: float
+    res_weight: float
+    lane_budget: int | None
+
+    def to_json_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+    @classmethod
+    def from_json_dict(
+        cls,
+        payload: dict[str, object],
+    ) -> "FrontierLaneSpec":
+        scalarization_params_payload = payload.get("scalarization_params", {})
+        return cls(
+            lane_id=str(payload["lane_id"]),
+            scalarization_type=str(payload["scalarization_type"]),
+            scalarization_params={
+                str(key): float(value)
+                for key, value in scalarization_params_payload.items()
+            },
+            iotas_weight=float(payload["iotas_weight"]),
+            frontier_volume_weight=float(payload["frontier_volume_weight"]),
+            res_weight=float(payload["res_weight"]),
+            lane_budget=None
+            if payload.get("lane_budget") is None
+            else int(payload["lane_budget"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _FrontierLaneSpecRequest:
+    num_lanes: int
+    iotas_weight: float
+    frontier_volume_weight: float | None
+    res_weight: float
+    lane_budget: int | None
+    stage2_results: Mapping[str, object] | None
+    reference_points_file: str | None
+    epsilon_spec_file: str | None
+    full_simplex_partitions: int | None
+
+
+_FrontierLaneSpecGenerator = Callable[
+    [_FrontierLaneSpecRequest],
+    list[FrontierLaneSpec],
+]
+
+
+def generate_multilane_local_specs(
+    *,
+    num_lanes: int,
+    iotas_weight: float,
+    frontier_volume_weight: float | None,
+    res_weight: float,
+    lane_budget: int | None,
+) -> list[FrontierLaneSpec]:
+    """Generate the legacy local iota/volume share sweep.
+
+    This mode varies only the iota and volume reward shares on the clamped
+    interval [0.2, 0.8]. QS and Boozer residual weights are not swept here; use
+    achievement_chebyshev_full_simplex_v1 for 4-objective reference directions.
+    """
+    if num_lanes <= 0:
+        raise ValueError("--frontier-num-lanes must be positive")
+
+    base_volume_weight = (
+        float(iotas_weight)
+        if frontier_volume_weight is None
+        else float(frontier_volume_weight)
+    )
+    total_reward_weight = float(iotas_weight) + base_volume_weight
+    if num_lanes == 1:
+        shares = [0.5]
+    else:
+        min_share = 0.2
+        max_share = 0.8
+        step = (max_share - min_share) / float(num_lanes - 1)
+        shares = [min_share + step * index for index in range(num_lanes)]
+
+    lane_specs: list[FrontierLaneSpec] = []
+    for index, iota_share in enumerate(shares):
+        volume_share = 1.0 - iota_share
+        lane_specs.append(
+            FrontierLaneSpec(
+                lane_id=f"lane_{index + 1:02d}",
+                scalarization_type="weight_schedule_v1",
+                scalarization_params={
+                    "iota_share": float(iota_share),
+                    "volume_share": float(volume_share),
+                },
+                iotas_weight=total_reward_weight * float(iota_share),
+                frontier_volume_weight=total_reward_weight * float(volume_share),
+                res_weight=float(res_weight),
+                lane_budget=lane_budget,
+            )
+        )
+    return lane_specs
+
+
+def augment_frontier_metric_state(
+    objective_eval,
+    *,
+    surface_iota_term,
+    surface_volume_term,
+    objective_optimizable=None,
+):
+    annotated = dict(objective_eval)
+    annotated["J_iota_metric"] = float(surface_iota_term.J())
+    annotated["dJ_iota_metric"] = _objective_gradient(
+        surface_iota_term,
+        objective_optimizable,
+    )
+    if surface_volume_term is None:
+        annotated["J_volume_metric"] = 0.0
+        annotated["dJ_volume_metric"] = np.zeros_like(
+            np.asarray(annotated["grad"], dtype=float)
+        )
+    else:
+        annotated["J_volume_metric"] = float(surface_volume_term.J())
+        annotated["dJ_volume_metric"] = _objective_gradient(
+            surface_volume_term,
+            objective_optimizable,
+        )
+    return annotated
+
+
+def apply_frontier_scalarization_override(
+    objective_eval,
+    *,
+    enabled,
+    frontier_goal_config,
+    surface_iota_term,
+    surface_volume_term,
+    effective_res_weight,
+    effective_iotas_weight,
+    effective_volume_weight,
+    length_weight,
+    cc_weight,
+    cs_weight,
+    curvature_weight,
+    surf_dist_weight,
+    poloidal_extent_weight=0.0,
+    objective_optimizable=None,
+    alm_formulation="weighted_sum",
+    alm_multipliers=None,
+    alm_penalty=None,
+):
+    if not enabled or frontier_goal_config is None:
+        return dict(objective_eval)
+    annotated = augment_frontier_metric_state(
+        objective_eval,
+        surface_iota_term=surface_iota_term,
+        surface_volume_term=surface_volume_term,
+        objective_optimizable=objective_optimizable,
+    )
+    annotated["frontier_scalarization_type"] = frontier_goal_config.scalarization_type
+    frontier_goal_total, frontier_goal_grad = _frontier_goal_component_total_grad(
+        annotated,
+        effective_res_weight=effective_res_weight,
+        effective_iotas_weight=effective_iotas_weight,
+        effective_volume_weight=effective_volume_weight,
+    )
+    replacement_total = float(frontier_goal_total)
+    replacement_grad = np.asarray(frontier_goal_grad, dtype=float)
+
+    if frontier_goal_config.scalarization_type == FRONTIER_REFERENCE_MODE_ACHIEVEMENT:
+        chebyshev_eval = _frontier_chebyshev_goal(annotated, frontier_goal_config)
+        replacement_total = float(chebyshev_eval["frontier_scalarization_total"])
+        replacement_grad = np.asarray(
+            chebyshev_eval["frontier_scalarization_grad"],
+            dtype=float,
+        )
+        annotated.update(chebyshev_eval)
+    elif frontier_goal_config.scalarization_type == FRONTIER_REFERENCE_MODE_EPSILON:
+        # Hybrid epsilon method: keep the weighted base objective and add a fixed
+        # quadratic constraint penalty rather than replacing the objective by pure f_k.
+        epsilon_penalties = _frontier_epsilon_penalties(
+            annotated,
+            frontier_goal_config=frontier_goal_config,
+        )
+        epsilon_penalty_total = float(
+            sum(entry["penalty"] for entry in epsilon_penalties.values())
+        )
+        epsilon_penalty_grad = sum(
+            (
+                np.asarray(entry["grad"], dtype=float)
+                for entry in epsilon_penalties.values()
+            ),
+            np.zeros_like(replacement_grad),
+        )
+        replacement_total += epsilon_penalty_total
+        replacement_grad = replacement_grad + epsilon_penalty_grad
+        annotated["frontier_epsilon_penalty"] = float(epsilon_penalty_total)
+        annotated["frontier_epsilon_constraints"] = {
+            metric_name: {
+                "threshold": entry["threshold"],
+                "excess": entry["excess"],
+                "excess_ratio": entry["excess_ratio"],
+                "penalty": entry["penalty"],
+            }
+            for metric_name, entry in epsilon_penalties.items()
+        }
+
+    annotated["frontier_goal_total"] = float(replacement_total)
+    annotated["frontier_goal_grad"] = np.asarray(replacement_grad, dtype=float)
+
+    if alm_formulation == "weighted_sum":
+        if "constraint_values" in annotated and "constraint_grads" in annotated:
+            if alm_multipliers is None or alm_penalty is None:
+                raise ValueError(
+                    "ALM frontier scalarization override requires explicit multipliers and penalty"
+                )
+            base_total, base_grad = _frontier_alm_base_total_grad(
+                annotated,
+                length_weight=length_weight,
+            )
+            base_total += float(replacement_total)
+            base_grad = base_grad + replacement_grad
+            alm_eval = augmented_inequality_objective(
+                base_total,
+                base_grad,
+                annotated["constraint_values"],
+                annotated["constraint_grads"],
+                np.asarray(alm_multipliers, dtype=float),
+                float(alm_penalty),
+            )
+            annotated.update(alm_eval)
+            annotated["physics_total"] = float(base_total)
+            annotated["base_total"] = float(base_total)
+        else:
+            penalty_total, penalty_grad = _frontier_penalty_geometry_total_grad(
+                annotated,
+                length_weight=length_weight,
+                cc_weight=cc_weight,
+                cs_weight=cs_weight,
+                curvature_weight=curvature_weight,
+                surf_dist_weight=surf_dist_weight,
+                poloidal_extent_weight=poloidal_extent_weight,
+            )
+            annotated["total"] = penalty_total + float(replacement_total)
+            annotated["grad"] = penalty_grad + replacement_grad
+    return annotate_search_evaluation_finiteness(annotated)
+
+
+def _frontier_goal_component_total_grad(
+    objective_eval,
+    *,
+    effective_res_weight,
+    effective_iotas_weight,
+    effective_volume_weight,
+):
+    total = (
+        float(objective_eval["J_QS_objective"])
+        + float(effective_res_weight) * float(objective_eval["J_Boozer_objective"])
+        + float(effective_iotas_weight) * float(objective_eval["J_iota"])
+        + float(effective_volume_weight) * float(objective_eval.get("J_volume", 0.0))
+    )
+    grad = (
+        np.asarray(objective_eval["dJ_QS_objective"], dtype=float)
+        + float(effective_res_weight)
+        * np.asarray(objective_eval["dJ_Boozer_objective"], dtype=float)
+        + float(effective_iotas_weight)
+        * np.asarray(objective_eval["dJ_iota"], dtype=float)
+        + float(effective_volume_weight)
+        * np.asarray(objective_eval.get("dJ_volume", 0.0), dtype=float)
+    )
+    return float(total), grad
+
+
+def _frontier_penalty_geometry_total_grad(
+    objective_eval,
+    *,
+    length_weight,
+    cc_weight,
+    cs_weight,
+    curvature_weight,
+    surf_dist_weight,
+    poloidal_extent_weight=0.0,
+):
+    total = (
+        float(length_weight) * float(objective_eval["J_len"])
+        + float(cc_weight) * float(objective_eval["J_cc"])
+        + float(cs_weight) * float(objective_eval["J_cs"])
+        + float(curvature_weight) * float(objective_eval["J_curvature"])
+        + float(surf_dist_weight) * float(objective_eval.get("J_surf", 0.0))
+    )
+    grad = (
+        float(length_weight) * np.asarray(objective_eval["dJ_len"], dtype=float)
+        + float(cc_weight) * np.asarray(objective_eval["dJ_cc"], dtype=float)
+        + float(cs_weight) * np.asarray(objective_eval["dJ_cs"], dtype=float)
+        + float(curvature_weight)
+        * np.asarray(objective_eval["dJ_curvature"], dtype=float)
+        + float(surf_dist_weight)
+        * np.asarray(objective_eval.get("dJ_surf", 0.0), dtype=float)
+        + float(poloidal_extent_weight)
+        * np.asarray(objective_eval.get("dJ_poloidal_extent", 0.0), dtype=float)
+    )
+    total += float(poloidal_extent_weight) * float(
+        objective_eval.get("J_poloidal_extent", 0.0)
+    )
+    return float(total), grad
+
+
+def _frontier_alm_base_total_grad(
+    objective_eval,
+    *,
+    length_weight,
+):
+    total = float(length_weight) * float(objective_eval["J_len"])
+    grad = float(length_weight) * np.asarray(objective_eval["dJ_len"], dtype=float)
+    return float(total), grad
+
+
+def _frontier_chebyshev_goal(objective_eval, frontier_goal_config):
+    deltas = np.asarray(
+        [
+            frontier_goal_config.chebyshev_weight_iota
+            * (
+                (
+                    frontier_goal_config.iota_reference
+                    - float(objective_eval["J_iota_metric"])
+                )
+                / frontier_goal_config.iota_scale
+            ),
+            frontier_goal_config.chebyshev_weight_volume
+            * (
+                (
+                    frontier_goal_config.volume_reference
+                    - float(objective_eval["J_volume_metric"])
+                )
+                / frontier_goal_config.volume_scale
+            ),
+            frontier_goal_config.chebyshev_weight_qa
+            * (
+                (float(objective_eval["J_QS"]) - frontier_goal_config.qs_reference)
+                / frontier_goal_config.qs_reference
+            ),
+            frontier_goal_config.chebyshev_weight_boozer
+            * (
+                (
+                    float(objective_eval["J_Boozer"])
+                    - frontier_goal_config.boozer_reference
+                )
+                / frontier_goal_config.boozer_reference
+            ),
+        ],
+        dtype=float,
+    )
+    sharpness = float(frontier_goal_config.chebyshev_sharpness)
+    if not (math.isfinite(sharpness) and sharpness > 0.0):
+        raise ValueError(
+            "frontier_chebyshev_sharpness must be a positive finite float, "
+            f"got {sharpness!r}"
+        )
+    max_delta = float(np.max(deltas))
+    exp_shifted = np.exp(sharpness * (deltas - max_delta))
+    sum_exp = float(np.sum(exp_shifted))
+    softmax_weights = exp_shifted / sum_exp
+    chebyshev_total = (
+        max_delta
+        + np.log(sum_exp) / sharpness
+        + frontier_goal_config.chebyshev_rho * float(np.sum(deltas))
+    )
+    directional_grads = np.stack([
+        -frontier_goal_config.chebyshev_weight_iota
+        * np.asarray(objective_eval["dJ_iota_metric"], dtype=float)
+        / frontier_goal_config.iota_scale,
+        -frontier_goal_config.chebyshev_weight_volume
+        * np.asarray(objective_eval["dJ_volume_metric"], dtype=float)
+        / frontier_goal_config.volume_scale,
+        frontier_goal_config.chebyshev_weight_qa
+        * np.asarray(objective_eval["dJ_QS"], dtype=float)
+        / frontier_goal_config.qs_reference,
+        frontier_goal_config.chebyshev_weight_boozer
+        * np.asarray(objective_eval["dJ_Boozer"], dtype=float)
+        / frontier_goal_config.boozer_reference,
+    ])
+    coeffs = softmax_weights + frontier_goal_config.chebyshev_rho
+    chebyshev_grad = (coeffs[:, None] * directional_grads).sum(axis=0)
+    return {
+        "frontier_scalarization_total": float(chebyshev_total),
+        "frontier_scalarization_grad": chebyshev_grad,
+        "frontier_chebyshev_deltas": deltas.tolist(),
+        "frontier_chebyshev_softmax_weights": softmax_weights.tolist(),
+    }
+
+
+def _frontier_epsilon_penalties(
+    objective_eval,
+    *,
+    frontier_goal_config,
+):
+    epsilon_penalties: dict[str, dict[str, object]] = {}
+    thresholds = EpsilonThresholds.from_goal_config(frontier_goal_config)
+    if thresholds.qa_max is not None:
+        epsilon_penalties["qa_error"] = _frontier_excess_penalty(
+            objective_eval["J_QS"],
+            objective_eval["dJ_QS"],
+            threshold=thresholds.qa_max,
+            scale=max(frontier_goal_config.qs_reference, 1.0e-6),
+            penalty_weight=frontier_goal_config.epsilon_penalty_weight,
+        )
+    if thresholds.boozer_max is not None:
+        epsilon_penalties["boozer_residual"] = _frontier_excess_penalty(
+            objective_eval["J_Boozer"],
+            objective_eval["dJ_Boozer"],
+            threshold=thresholds.boozer_max,
+            scale=max(frontier_goal_config.boozer_reference, 1.0e-6),
+            penalty_weight=frontier_goal_config.epsilon_penalty_weight,
+        )
+    return epsilon_penalties
+
+
+def _frontier_excess_penalty(
+    value,
+    grad,
+    *,
+    threshold,
+    scale,
+    penalty_weight,
+):
+    excess = max(float(value) - float(threshold), 0.0)
+    excess_ratio = excess / float(scale)
+    penalty = float(penalty_weight) * float(excess_ratio**2)
+    penalty_grad = (
+        np.zeros_like(np.asarray(grad, dtype=float))
+        if excess <= 0.0
+        else (
+            float(penalty_weight)
+            * 2.0
+            * excess_ratio
+            / float(scale)
+            * np.asarray(grad, dtype=float)
+        )
+    )
+    return {
+        "enabled": True,
+        "threshold": float(threshold),
+        "scale": float(scale),
+        "excess": float(excess),
+        "excess_ratio": float(excess_ratio),
+        "penalty": float(penalty),
+        "grad": np.asarray(penalty_grad, dtype=float),
+    }
 
 
 def frontier_scalarization_family(
@@ -125,6 +590,12 @@ def _resolve_reward_weights(
     default_iotas_weight: float,
     default_frontier_volume_weight: float | None,
 ) -> tuple[float, float]:
+    default_iota_weight = float(default_iotas_weight)
+    default_volume_weight = (
+        default_iota_weight
+        if default_frontier_volume_weight is None
+        else float(default_frontier_volume_weight)
+    )
     explicit_iota_weight = _optional_float(lane_payload, "iotas_weight")
     explicit_volume_weight = _optional_float(
         lane_payload,
@@ -132,38 +603,27 @@ def _resolve_reward_weights(
     )
     if explicit_iota_weight is not None or explicit_volume_weight is not None:
         iota_weight = (
-            float(default_iotas_weight)
+            default_iota_weight
             if explicit_iota_weight is None
             else explicit_iota_weight
         )
         volume_weight = (
-            float(default_iotas_weight)
-            if explicit_volume_weight is None and default_frontier_volume_weight is None
-            else (
-                float(default_frontier_volume_weight)
-                if explicit_volume_weight is None
-                else explicit_volume_weight
-            )
+            default_volume_weight
+            if explicit_volume_weight is None
+            else explicit_volume_weight
         )
     else:
         iota_share = _optional_float(lane_payload, "iota_share")
         volume_share = _optional_float(lane_payload, "volume_share")
         if iota_share is None and volume_share is None:
-            iota_weight = float(default_iotas_weight)
-            volume_weight = (
-                float(default_iotas_weight)
-                if default_frontier_volume_weight is None
-                else float(default_frontier_volume_weight)
-            )
+            iota_weight = default_iota_weight
+            volume_weight = default_volume_weight
         else:
             if iota_share is None or volume_share is None:
                 raise ValueError(
                     "lane payload must provide both iota_share and volume_share"
                 )
-            total_reward = _total_reward_weight(
-                default_iotas_weight,
-                default_frontier_volume_weight,
-            )
+            total_reward = default_iota_weight + default_volume_weight
             iota_weight = total_reward * float(iota_share)
             volume_weight = total_reward * float(volume_share)
     if iota_weight < 0.0 or volume_weight < 0.0:
@@ -228,30 +688,22 @@ def _reference_scalarization_params(
                 reference_point["boozer_residual"],
                 _REFERENCE_METRIC_FLOOR,
             )
-    for payload_key, param_key, minimum in (
-        ("frontier_reference_iota", "frontier_reference_iota", None),
-        ("frontier_reference_iota_scale", "frontier_reference_iota_scale", _REFERENCE_METRIC_FLOOR),
-        ("frontier_reference_volume", "frontier_reference_volume", None),
-        ("frontier_reference_volume_scale", "frontier_reference_volume_scale", _REFERENCE_METRIC_FLOOR),
-        ("frontier_reference_qa", "frontier_reference_qa", _REFERENCE_METRIC_FLOOR),
-        ("frontier_reference_boozer", "frontier_reference_boozer", _REFERENCE_METRIC_FLOOR),
-        ("frontier_boozer_trust_threshold", "frontier_boozer_trust_threshold", _TRUST_THRESHOLD_FLOOR),
-        (
-            "frontier_boozer_trust_penalty_scale",
-            "frontier_boozer_trust_penalty_scale",
-            _REFERENCE_METRIC_FLOOR,
-        ),
-        ("frontier_chebyshev_sharpness", "frontier_chebyshev_sharpness", _WEIGHT_FLOOR),
-        (
-            "frontier_epsilon_penalty_weight",
-            "frontier_epsilon_penalty_weight",
-            0.0,
-        ),
+    for payload_key, minimum in (
+        ("frontier_reference_iota", None),
+        ("frontier_reference_iota_scale", _REFERENCE_METRIC_FLOOR),
+        ("frontier_reference_volume", None),
+        ("frontier_reference_volume_scale", _REFERENCE_METRIC_FLOOR),
+        ("frontier_reference_qa", _REFERENCE_METRIC_FLOOR),
+        ("frontier_reference_boozer", _REFERENCE_METRIC_FLOOR),
+        ("frontier_boozer_trust_threshold", _TRUST_THRESHOLD_FLOOR),
+        ("frontier_boozer_trust_penalty_scale", _REFERENCE_METRIC_FLOOR),
+        ("frontier_chebyshev_sharpness", None),
+        ("frontier_epsilon_penalty_weight", 0.0),
     ):
         value = _optional_float(lane_payload, payload_key)
         if value is None:
             continue
-        params[param_key] = max(value, minimum) if minimum is not None else value
+        params[payload_key] = max(value, minimum) if minimum is not None else value
     return params, reference_point
 
 
@@ -338,6 +790,7 @@ def _select_reference_directions(
     n_dim: int,
     partitions: int | None,
 ) -> list[tuple[float, ...]]:
+    """Select by enumeration-order rounding, not geometric-distance sampling."""
     if requested_num_directions <= 0:
         raise ValueError("--frontier-num-lanes must be positive")
     if partitions is not None:
@@ -447,17 +900,14 @@ def _achievement_chebyshev_lane_specs(
                     if _optional_float(lane_payload, "rho") is None
                     else float(_optional_float(lane_payload, "rho")),
                 ),
-                "frontier_chebyshev_sharpness": max(
-                    _WEIGHT_FLOOR,
-                    float(
-                        scalarization_params.get(
-                            "frontier_chebyshev_sharpness",
-                            _DEFAULT_CHEBYSHEV_SHARPNESS,
-                        )
+                "frontier_chebyshev_sharpness": float(
+                    scalarization_params.get(
+                        "frontier_chebyshev_sharpness",
+                        _DEFAULT_CHEBYSHEV_SHARPNESS,
                     )
-                    if _optional_float(lane_payload, "sharpness") is None
-                    else float(_optional_float(lane_payload, "sharpness")),
-                ),
+                )
+                if _optional_float(lane_payload, "sharpness") is None
+                else float(_optional_float(lane_payload, "sharpness")),
                 "frontier_chebyshev_weight_iota": metric_weights["iota"],
                 "frontier_chebyshev_weight_volume": metric_weights["volume"],
                 "frontier_chebyshev_weight_qa": metric_weights["qa_error"],
@@ -632,15 +1082,17 @@ def _epsilon_constraint_lane_specs(
             )
         qa_epsilon = epsilon_constraints.get("qa_error")
         if qa_epsilon is not None:
-            scalarization_params["epsilon_constraint_qa_max"] = float(qa_epsilon)
+            scalarization_params.update(
+                EpsilonThresholds(qa_max=float(qa_epsilon)).as_payload()
+            )
             scalarization_params.setdefault(
                 "frontier_reference_qa",
                 max(float(qa_epsilon), _REFERENCE_METRIC_FLOOR),
             )
         boozer_epsilon = epsilon_constraints.get("boozer_residual")
         if boozer_epsilon is not None:
-            scalarization_params["epsilon_constraint_boozer_max"] = float(
-                boozer_epsilon
+            scalarization_params.update(
+                EpsilonThresholds(boozer_max=float(boozer_epsilon)).as_payload()
             )
             scalarization_params.setdefault(
                 "frontier_reference_boozer",
@@ -648,6 +1100,8 @@ def _epsilon_constraint_lane_specs(
             )
             scalarization_params.setdefault(
                 "frontier_boozer_trust_threshold",
+                # This intentionally ties the trust-residual cap to the epsilon cap:
+                # both penalties apply additively when Boozer exceeds the shared limit.
                 max(float(boozer_epsilon), _TRUST_THRESHOLD_FLOOR),
             )
         if reference_point is None:
@@ -697,6 +1151,101 @@ def _epsilon_constraint_lane_specs(
     return lane_specs
 
 
+def _shared_lane_specs_from_request(
+    request: _FrontierLaneSpecRequest,
+) -> list[FrontierLaneSpec]:
+    return generate_multilane_local_specs(
+        num_lanes=request.num_lanes,
+        iotas_weight=request.iotas_weight,
+        frontier_volume_weight=request.frontier_volume_weight,
+        res_weight=request.res_weight,
+        lane_budget=request.lane_budget,
+    )
+
+
+def _reference_point_lane_specs_from_request(
+    request: _FrontierLaneSpecRequest,
+) -> list[FrontierLaneSpec]:
+    if request.reference_points_file is None:
+        raise ValueError(
+            "--frontier-reference-points-file is required for "
+            f"{FRONTIER_REFERENCE_MODE_REFERENCE_POINTS}"
+        )
+    return _reference_point_lane_specs(
+        path=request.reference_points_file,
+        default_iotas_weight=request.iotas_weight,
+        default_frontier_volume_weight=request.frontier_volume_weight,
+        default_res_weight=request.res_weight,
+        default_lane_budget=request.lane_budget,
+    )
+
+
+def _epsilon_lane_specs_from_request(
+    request: _FrontierLaneSpecRequest,
+) -> list[FrontierLaneSpec]:
+    if request.epsilon_spec_file is None:
+        raise ValueError(
+            "--frontier-epsilon-spec-file is required for "
+            f"{FRONTIER_REFERENCE_MODE_EPSILON}"
+        )
+    return _epsilon_constraint_lane_specs(
+        path=request.epsilon_spec_file,
+        default_iotas_weight=request.iotas_weight,
+        default_frontier_volume_weight=request.frontier_volume_weight,
+        default_res_weight=request.res_weight,
+        default_lane_budget=request.lane_budget,
+        seed_reference_metrics=_seed_reference_metrics(request.stage2_results),
+    )
+
+
+def _achievement_lane_specs_from_request(
+    request: _FrontierLaneSpecRequest,
+) -> list[FrontierLaneSpec]:
+    if request.reference_points_file is None:
+        raise ValueError(
+            "--frontier-reference-points-file is required for "
+            f"{FRONTIER_REFERENCE_MODE_ACHIEVEMENT}"
+        )
+    return _achievement_chebyshev_lane_specs(
+        path=request.reference_points_file,
+        default_iotas_weight=request.iotas_weight,
+        default_frontier_volume_weight=request.frontier_volume_weight,
+        default_res_weight=request.res_weight,
+        default_lane_budget=request.lane_budget,
+    )
+
+
+def _achievement_full_simplex_lane_specs_from_request(
+    request: _FrontierLaneSpecRequest,
+) -> list[FrontierLaneSpec]:
+    return _achievement_full_simplex_lane_specs(
+        num_lanes=request.num_lanes,
+        default_iotas_weight=request.iotas_weight,
+        default_frontier_volume_weight=request.frontier_volume_weight,
+        default_res_weight=request.res_weight,
+        default_lane_budget=request.lane_budget,
+        seed_reference_metrics=_seed_reference_metrics(request.stage2_results),
+        full_simplex_partitions=request.full_simplex_partitions,
+    )
+
+
+_FRONTIER_LANE_SPEC_GENERATORS: Mapping[str, _FrontierLaneSpecGenerator] = (
+    MappingProxyType(
+        {
+            FRONTIER_REFERENCE_MODE_SHARED: _shared_lane_specs_from_request,
+            FRONTIER_REFERENCE_MODE_REFERENCE_POINTS: (
+                _reference_point_lane_specs_from_request
+            ),
+            FRONTIER_REFERENCE_MODE_EPSILON: _epsilon_lane_specs_from_request,
+            FRONTIER_REFERENCE_MODE_ACHIEVEMENT: _achievement_lane_specs_from_request,
+            FRONTIER_REFERENCE_MODE_ACHIEVEMENT_FULL_SIMPLEX: (
+                _achievement_full_simplex_lane_specs_from_request
+            ),
+        }
+    )
+)
+
+
 def generate_frontier_lane_specs(
     *,
     reference_mode: str,
@@ -710,62 +1259,19 @@ def generate_frontier_lane_specs(
     epsilon_spec_file: str | None,
     full_simplex_partitions: int | None = None,
 ) -> list[FrontierLaneSpec]:
-    if reference_mode == FRONTIER_REFERENCE_MODE_SHARED:
-        return generate_multilane_local_specs(
+    generator = _FRONTIER_LANE_SPEC_GENERATORS.get(reference_mode)
+    if generator is None:
+        raise ValueError(f"Unsupported frontier reference mode {reference_mode!r}")
+    return generator(
+        _FrontierLaneSpecRequest(
             num_lanes=num_lanes,
             iotas_weight=iotas_weight,
             frontier_volume_weight=frontier_volume_weight,
             res_weight=res_weight,
             lane_budget=lane_budget,
-        )
-    if reference_mode == FRONTIER_REFERENCE_MODE_REFERENCE_POINTS:
-        if reference_points_file is None:
-            raise ValueError(
-                "--frontier-reference-points-file is required for "
-                f"{FRONTIER_REFERENCE_MODE_REFERENCE_POINTS}"
-            )
-        return _reference_point_lane_specs(
-            path=reference_points_file,
-            default_iotas_weight=iotas_weight,
-            default_frontier_volume_weight=frontier_volume_weight,
-            default_res_weight=res_weight,
-            default_lane_budget=lane_budget,
-        )
-    if reference_mode == FRONTIER_REFERENCE_MODE_EPSILON:
-        if epsilon_spec_file is None:
-            raise ValueError(
-                "--frontier-epsilon-spec-file is required for "
-                f"{FRONTIER_REFERENCE_MODE_EPSILON}"
-            )
-        return _epsilon_constraint_lane_specs(
-            path=epsilon_spec_file,
-            default_iotas_weight=iotas_weight,
-            default_frontier_volume_weight=frontier_volume_weight,
-            default_res_weight=res_weight,
-            default_lane_budget=lane_budget,
-            seed_reference_metrics=_seed_reference_metrics(stage2_results),
-        )
-    if reference_mode == FRONTIER_REFERENCE_MODE_ACHIEVEMENT:
-        if reference_points_file is None:
-            raise ValueError(
-                "--frontier-reference-points-file is required for "
-                f"{FRONTIER_REFERENCE_MODE_ACHIEVEMENT}"
-            )
-        return _achievement_chebyshev_lane_specs(
-            path=reference_points_file,
-            default_iotas_weight=iotas_weight,
-            default_frontier_volume_weight=frontier_volume_weight,
-            default_res_weight=res_weight,
-            default_lane_budget=lane_budget,
-        )
-    if reference_mode == FRONTIER_REFERENCE_MODE_ACHIEVEMENT_FULL_SIMPLEX:
-        return _achievement_full_simplex_lane_specs(
-            num_lanes=num_lanes,
-            default_iotas_weight=iotas_weight,
-            default_frontier_volume_weight=frontier_volume_weight,
-            default_res_weight=res_weight,
-            default_lane_budget=lane_budget,
-            seed_reference_metrics=_seed_reference_metrics(stage2_results),
+            stage2_results=stage2_results,
+            reference_points_file=reference_points_file,
+            epsilon_spec_file=epsilon_spec_file,
             full_simplex_partitions=full_simplex_partitions,
         )
-    raise ValueError(f"Unsupported frontier reference mode {reference_mode!r}")
+    )

@@ -36,6 +36,8 @@ EXPECTED_LOCAL_SIMSOPT_INIT = (
     Path(__file__).resolve().parents[2] / "src" / "simsopt" / "__init__.py"
 )
 EXPECTED_FINITE_CURRENT_MODE = "wataru_proxy_field"
+if str(EXAMPLE_ROOT) not in sys.path:
+    sys.path.insert(0, str(EXAMPLE_ROOT))
 
 
 def stage2_results_with_digest(stage2_bs_path: Path, payload: dict) -> dict:
@@ -84,6 +86,10 @@ def load_frontier_campaign_module():
         FRONTIER_CAMPAIGN_PATH,
         "run_single_stage_frontier_campaign",
     )
+
+
+def load_frontier_scalarization_module():
+    return importlib.import_module("banana_opt.frontier_scalarization")
 
 
 def _run_python_snippet(source: str, *args: str) -> str:
@@ -2418,7 +2424,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             case_output_root=Path("outputs/target").resolve(),
         )
 
-        self.assertIn("--allow-init-only-stage2-seed", command)
+        self.assertNotIn("--allow-init-only-stage2-seed", command)
         self.assertEqual(
             command[command.index("--equilibrium-path") + 1],
             str(Path("eq/demo.nc").resolve()),
@@ -3335,6 +3341,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "policy_rationale": None,
                     "policy_score": None,
                     "recommended_metrics": None,
+                    "gate_fallback": False,
                     "frontier_archive_size": 0,
                 },
             )
@@ -3806,7 +3813,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 "3",
             ]
         )
-        lane_specs = module.generate_multilane_local_specs(
+        scalarization = load_frontier_scalarization_module()
+        lane_specs = scalarization.generate_multilane_local_specs(
             num_lanes=3,
             iotas_weight=args.iotas_weight,
             frontier_volume_weight=args.frontier_volume_weight,
@@ -4209,7 +4217,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "3",
                 ]
             )
-            lane_specs = module.generate_multilane_local_specs(
+            scalarization = load_frontier_scalarization_module()
+            lane_specs = scalarization.generate_multilane_local_specs(
                 num_lanes=3,
                 iotas_weight=base_args.iotas_weight,
                 frontier_volume_weight=base_args.frontier_volume_weight,
@@ -4432,7 +4441,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "1",
                 ]
             )
-            lane_specs = module.generate_multilane_local_specs(
+            scalarization = load_frontier_scalarization_module()
+            lane_specs = scalarization.generate_multilane_local_specs(
                 num_lanes=1,
                 iotas_weight=base_args.iotas_weight,
                 frontier_volume_weight=base_args.frontier_volume_weight,
@@ -4458,7 +4468,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 output_root / "campaign_progress.json",
                 campaign_id=campaign_id,
                 frontier_version="original_frontier_version",
-                frontier_engine="original_frontier_engine",
+                frontier_engine=base_args.frontier_engine,
                 target_payload=None,
                 lane_records=[],
                 provisional_archive_members=[],
@@ -4509,7 +4519,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             )
             self.assertEqual(
                 progress_payload["frontier_engine"],
-                "original_frontier_engine",
+                "multilane_local",
             )
             self.assertEqual(
                 summary["frontier_version"],
@@ -4523,6 +4533,69 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 summary["frontier_lanes"][0]["warm_start_source"],
                 str(original_stage2_bs_path.resolve()),
             )
+
+    def test_frontier_campaign_resume_rejects_unsupported_progress_engine(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            progress_path = Path(tmpdir) / "campaign_progress.json"
+            progress_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "frontier_campaign_progress_v1",
+                        "campaign_id": "legacy-deleted-engine",
+                        "frontier_version": "frontier_v3_multilane_local_v1",
+                        "frontier_engine": "deleted_engine",
+                        "target_payload": None,
+                        "lane_records": [],
+                        "provisional_archive_members": [],
+                        "archive_members": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "Unsupported frontier engine"):
+                module.load_frontier_campaign_progress(progress_path)
+
+    def test_frontier_campaign_resume_rejects_unsupported_manifest_engine(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            output_root.mkdir()
+            stage2_bs_path, stage2_results_path, stage2_results = (
+                self._write_stage2_seed_artifact(tmpdir_path)
+            )
+            base_args = module.parse_args(
+                [
+                    "--plasma-surf-filename", "demo.nc",
+                    "--stage2-bs-path", str(stage2_bs_path),
+                    "--output-root", str(output_root),
+                ]
+            )
+            lane_specs = load_frontier_scalarization_module().generate_multilane_local_specs(
+                num_lanes=1,
+                iotas_weight=base_args.iotas_weight,
+                frontier_volume_weight=base_args.frontier_volume_weight,
+                res_weight=base_args.res_weight,
+                lane_budget=base_args.frontier_lane_budget,
+            )
+            manifest = module.build_frontier_campaign_manifest(
+                base_args,
+                campaign_id="legacy-unsupported-engine",
+                stage2_bs_path=stage2_bs_path,
+                stage2_results_path=stage2_results_path,
+                stage2_results=stage2_results,
+                lane_specs=lane_specs,
+            )
+            manifest["FRONTIER_ENGINE"] = "unsupported_frontier_engine_v0"
+            manifest_path = output_root / "campaign_manifest.json"
+            module.write_json(manifest_path, manifest)
+
+            with self.assertRaisesRegex(ValueError, "Unsupported frontier engine"):
+                module.load_resume_manifest(manifest_path)
 
     def test_frontier_campaign_resume_salvages_missing_lane_from_partial_artifact_before_rerun(self):
         module = load_frontier_campaign_module()
@@ -4557,7 +4630,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "3",
                 ]
             )
-            lane_specs = module.generate_multilane_local_specs(
+            scalarization = load_frontier_scalarization_module()
+            lane_specs = scalarization.generate_multilane_local_specs(
                 num_lanes=3,
                 iotas_weight=base_args.iotas_weight,
                 frontier_volume_weight=base_args.frontier_volume_weight,
@@ -4893,7 +4967,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "3",
                 ]
             )
-            lane_specs = module.generate_multilane_local_specs(
+            scalarization = load_frontier_scalarization_module()
+            lane_specs = scalarization.generate_multilane_local_specs(
                 num_lanes=3,
                 iotas_weight=base_args.iotas_weight,
                 frontier_volume_weight=base_args.frontier_volume_weight,
@@ -5147,7 +5222,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             )
             self.assertEqual(summary["frontier_archive_size"], 1)
 
-    def test_frontier_campaign_nsga3_records_generation_summary(self):
+    def test_frontier_campaign_resume_after_early_stop_skips_remaining_lanes(self):
         module = load_frontier_campaign_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -5165,72 +5240,9 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     },
                 )
             )
-            archive_payload = {
-                "status": "completed",
-                **self._minimal_frontier_payload(
-                    output_root,
-                    lane_id="gen_0001_cand_0000",
-                    final_iota=0.182,
-                    final_volume=0.112,
-                    nonqs_ratio=0.0104,
-                    boozer_residual=0.0069,
-                ),
-            }
-            archive_member = module.build_archive_member_from_results(
-                campaign_id="nsga3-campaign",
-                lane_id="gen_0001_cand_0000",
-                payload=archive_payload,
-                rerun_contract={
-                    "frontier_engine": "nsga3",
-                    "candidate_x": [0.0, 1.0],
-                },
-            )
-            engine_artifacts = SimpleNamespace(
-                evaluator_spec={
-                    "schema_version": "single_stage_frontier_evaluator_spec_v1",
-                    "run_identity": "nsga3-test",
-                },
-                evaluator_spec_path=str(
-                    output_root / "global_engine_nsga3" / "evaluator_spec.json"
-                ),
-                generation_history=[
-                    {
-                        "generation": 1,
-                        "population_size": 3,
-                        "feasible_count": 2,
-                        "archive_size": 1,
-                        "archive_growth": 1,
-                        "cv_min": 0.0,
-                        "cv_mean": 0.1,
-                        "cv_max": 0.3,
-                        "failure_histogram": {"evaluator_candidate_valid": 2},
-                        "cache_hits": 3,
-                        "cache_misses": 3,
-                        "hypervolume": 1.0e-4,
-                    }
-                ],
-                archive_members=[archive_member],
-                provisional_archive_members=[],
-                population_checkpoint_path=str(
-                    output_root / "global_engine_nsga3" / "population_checkpoint.json"
-                ),
-                generation_history_path=str(
-                    output_root / "global_engine_nsga3" / "generation_history.json"
-                ),
-                engine_stats={
-                    "population_size": 3,
-                    "generations": 1,
-                    "archive_size": 1,
-                    "cache_hits": 3,
-                    "cache_misses": 3,
-                },
-            )
 
-            with patch.object(
-                sys,
-                "argv",
+            base_args = module.parse_args(
                 [
-                    "run_single_stage_frontier_campaign.py",
                     "--plasma-surf-filename",
                     "demo.nc",
                     "--stage2-bs-path",
@@ -5239,209 +5251,140 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     str(output_root),
                     "--summary-json",
                     str(summary_path),
-                    "--skip-target",
-                    "--frontier-engine",
-                    "nsga3",
-                    "--frontier-reference-mode",
-                    "achievement_chebyshev_full_simplex_v1",
-                    "--frontier-full-simplex-partitions",
-                    "1",
                     "--frontier-num-lanes",
                     "3",
-                ],
-            ), patch.object(
-                module.goal_mode_comparison,
-                "load_validated_stage2_seed_metadata",
-                return_value=(
-                    stage2_bs_path.resolve(),
-                    stage2_results_path.resolve(),
-                    stage2_results,
+                    "--skip-target",
+                    "--frontier-early-stop-patience-lanes",
+                    "1",
+                    "--frontier-early-stop-min-certified",
+                    "1",
+                    "--frontier-early-stop-min-hypervolume-gain",
+                    "1.0",
+                ]
+            )
+            scalarization = load_frontier_scalarization_module()
+            lane_specs = scalarization.generate_multilane_local_specs(
+                num_lanes=3,
+                iotas_weight=base_args.iotas_weight,
+                frontier_volume_weight=base_args.frontier_volume_weight,
+                res_weight=base_args.res_weight,
+                lane_budget=base_args.frontier_lane_budget,
+            )
+            campaign_id = "earlystopresume123"
+            module.write_json(
+                output_root / "campaign_manifest.json",
+                module.build_frontier_campaign_manifest(
+                    base_args,
+                    campaign_id=campaign_id,
+                    stage2_bs_path=stage2_bs_path.resolve(),
+                    stage2_results_path=stage2_results_path.resolve(),
+                    stage2_results=stage2_results,
+                    lane_specs=lane_specs,
                 ),
-            ), patch.object(
-                module,
-                "run_nsga3_frontier_campaign",
-                return_value=engine_artifacts,
-            ) as run_engine:
-                self.assertEqual(module.main(), 0)
-
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
-
-            self.assertEqual(run_engine.call_count, 1)
-            self.assertEqual(summary["frontier_engine"], "nsga3")
-            self.assertEqual(summary["frontier_archive_size"], 1)
-            self.assertEqual(summary["frontier_feasible_lane_count"], 2)
-            self.assertEqual(summary["frontier_generation_history"][0]["generation"], 1)
-            self.assertEqual(
-                summary["frontier_hypervolume_history"][0]["lane_id"],
-                "generation_0001",
-            )
-            self.assertEqual(
-                summary["frontier_hypervolume_history"][0]["hypervolume"],
-                1.0e-4,
-            )
-            module.validate_frontier_campaign_summary_payload(summary)
-            self.assertEqual(
-                summary["frontier_evaluator_spec_path"],
-                engine_artifacts.evaluator_spec_path,
-            )
-            self.assertEqual(
-                summary["frontier_population_checkpoint_path"],
-                engine_artifacts.population_checkpoint_path,
-            )
-            self.assertEqual(
-                summary["frontier_generation_history_path"],
-                engine_artifacts.generation_history_path,
-            )
-            self.assertEqual(
-                summary["frontier_engine_stats"]["cache_hits"],
-                3,
-            )
-            self.assertEqual(
-                summary["frontier_evaluator_spec"]["schema_version"],
-                "single_stage_frontier_evaluator_spec_v1",
             )
 
-    def test_frontier_campaign_nsga3_resume_reuses_saved_engine_artifacts(self):
-        module = load_frontier_campaign_module()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir_path = Path(tmpdir)
-            output_root = tmpdir_path / "outputs"
-            summary_path = tmpdir_path / "summary.json"
-            stage2_bs_path, stage2_results_path, stage2_results = (
-                self._write_stage2_seed_artifact(
-                    tmpdir_path,
-                    overrides={
-                        "FINAL_IOTA": 0.15,
-                        "FINAL_VOLUME": 0.10,
-                        "NONQS_RATIO": 0.012,
-                        "BOOZER_RESIDUAL": 0.008,
-                    },
-                )
-            )
-            archive_payload = {
-                "status": "completed",
-                **self._minimal_frontier_payload(
-                    output_root,
-                    lane_id="gen_0001_cand_0000",
-                    final_iota=0.182,
-                    final_volume=0.112,
-                    nonqs_ratio=0.0104,
-                    boozer_residual=0.0069,
-                ),
-            }
-            archive_member = module.build_archive_member_from_results(
-                campaign_id="nsga3-campaign",
-                lane_id="gen_0001_cand_0000",
-                payload=archive_payload,
-                rerun_contract={
-                    "frontier_engine": "nsga3",
-                    "candidate_x": [0.0, 1.0],
-                },
-            )
-            progress = module.FrontierCampaignProgress(
-                schema_version="frontier_campaign_progress_v1",
-                campaign_id="nsga3-campaign",
-                frontier_version="frontier_v3_multilane_local_v1",
-                frontier_engine="nsga3",
-                target_payload=None,
-                lane_records=[],
-                provisional_archive_members=[],
-                archive_members=[archive_member],
-            )
-            engine_dir = output_root / "global_engine_nsga3"
-            engine_dir.mkdir(parents=True, exist_ok=True)
-            module.write_frontier_campaign_progress(
-                output_root / "campaign_progress.json",
-                progress,
-            )
-            (engine_dir / "evaluator_spec.json").write_text(
-                json.dumps(
-                    {
-                        "schema_version": "single_stage_frontier_evaluator_spec_v1",
-                        "args_payload": {
-                            "single_stage_goal_mode": "frontier",
-                            "frontier_engine": "nsga3",
-                        },
-                        "stage2_bs_path": str(stage2_bs_path),
-                        "stage2_results_path": str(stage2_results_path),
-                        "stage2_results": dict(stage2_results),
-                        "run_identity": "nsga3-test",
-                        "decision_variables": [
-                            {
-                                "name": "phic(1)",
-                                "semantic_role": "phic",
-                                "harmonic_index": 1,
-                                "lower_bound": -1.0,
-                                "upper_bound": 1.0,
-                            },
-                            {
-                                "name": "zs(1)",
-                                "semantic_role": "zs",
-                                "harmonic_index": 1,
-                                "lower_bound": 0.0,
-                                "upper_bound": 1.0,
-                            },
-                        ],
-                        "lower_bounds": [-1.0, 0.0],
-                        "upper_bounds": [1.0, 1.0],
-                        "seed_x": [0.0, 1.0],
-                        "reference_metrics": {
-                            "iota": 0.15,
-                            "volume": 0.10,
-                            "qa_error": 0.012,
-                            "boozer_residual": 0.008,
-                        },
-                        "cv_bucket_names": [
-                            "surface_solve_failed",
-                            "geometry_state_unrestorable",
-                            "missing_search_eval",
-                            "nonfinite_evaluation",
-                            "topology_broken",
-                            "topology_deficit",
-                            "hardware_violation_ratio",
-                            "frontier_trust_excess_ratio",
-                        ],
-                        "surface_weight_schedule": [1.0],
-                        "search_gate": {"surface_gap_threshold": 0.0},
-                    }
-                ),
-                encoding="utf-8",
-            )
-            (engine_dir / "population_checkpoint.json").write_text(
-                json.dumps(
-                    {
-                        "population_size": 3,
-                        "generations": 1,
-                        "ref_dirs": [[1.0, 0.0, 0.0, 0.0]],
-                        "X": [[0.0, 1.0]],
-                        "F": [[-0.182, -0.112, 0.0104, 0.0069]],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            (engine_dir / "generation_history.json").write_text(
-                json.dumps(
+            lane_records: list = []
+            archive_members: list = []
+            provisional_members: list = []
+            for lane_index, (lane_spec, payload_kwargs) in enumerate(
+                zip(
+                    lane_specs[:2],
                     [
                         {
-                            "generation": 1,
-                            "population_size": 3,
-                            "feasible_count": 2,
-                            "archive_size": 1,
-                            "archive_growth": 1,
-                            "cv_min": 0.0,
-                            "cv_mean": 0.1,
-                            "cv_max": 0.3,
-                            "failure_histogram": {
-                                "evaluator_candidate_valid": 2
-                            },
-                            "cache_hits": 3,
-                            "cache_misses": 3,
-                            "hypervolume": 1.0e-4,
+                            "final_iota": 0.181,
+                            "final_volume": 0.111,
+                            "nonqs_ratio": 0.0105,
+                            "boozer_residual": 0.0070,
+                        },
+                        {
+                            "final_iota": 0.170,
+                            "final_volume": 0.106,
+                            "nonqs_ratio": 0.0115,
+                            "boozer_residual": 0.0078,
+                        },
+                    ],
+                )
+            ):
+                lane_args = module.build_frontier_lane_args(base_args, lane_spec)
+                lane_payload = {
+                    "status": "completed",
+                    **self._minimal_frontier_payload(
+                        output_root,
+                        lane_id=lane_spec.lane_id,
+                        **payload_kwargs,
+                    ),
+                }
+                lane_payload["results_summary"] = (
+                    module.goal_mode_comparison.result_metric_subset(
+                        lane_payload["results"]
+                    )
+                )
+                lane_contract = module.build_frontier_lane_contract_for_spec(
+                    lane_args,
+                    lane_spec,
+                    campaign_id=campaign_id,
+                    stage2_bs_path=stage2_bs_path.resolve(),
+                    warm_start_source=str(stage2_bs_path.resolve()),
+                    lane_budget=int(lane_args.maxiter),
+                    lane_index=lane_index,
+                )
+                provisional_member = module.build_archive_member_from_results(
+                    campaign_id=campaign_id,
+                    lane_id=lane_spec.lane_id,
+                    payload=lane_payload,
+                    rerun_contract=lane_contract.rerun_contract,
+                    archive_state=module.FRONTIER_ARCHIVE_STATE_PROVISIONAL,
+                )
+                archive_member = module.build_archive_member_from_results(
+                    campaign_id=campaign_id,
+                    lane_id=lane_spec.lane_id,
+                    payload=lane_payload,
+                    rerun_contract=lane_contract.rerun_contract,
+                )
+                provisional_members.append(provisional_member)
+                # Only lane_01 is certified for our stagnation scenario.
+                if lane_index == 0:
+                    archive_members.append(archive_member)
+                lane_records.append(
+                    module.build_lane_record_from_payload(
+                        lane_contract,
+                        lane_spec,
+                        int(lane_args.maxiter),
+                        lane_payload,
+                        provisional_archive_member=provisional_member,
+                        archive_member=archive_member if lane_index == 0 else None,
+                        archive_update={
+                            "action": "inserted",
+                            "member_id": archive_member.member_id,
+                            "dominated_members": [],
                         }
-                    ]
-                ),
-                encoding="utf-8",
+                        if lane_index == 0
+                        else None,
+                    )
+                )
+            triggered_early_stop = {
+                "policy": {
+                    "patience_lanes": 1,
+                    "min_certified": 1,
+                    "min_hypervolume_gain": 1.0,
+                },
+                "triggered": True,
+                "reason": "archive_stagnation",
+                "no_improvement_streak": 1,
+                "best_hypervolume": 1.0,
+                "best_archive_size": 1,
+                "stopped_after_lane_id": "lane_02",
+            }
+            module.persist_campaign_progress(
+                output_root / "campaign_progress.json",
+                campaign_id=campaign_id,
+                frontier_version=base_args.frontier_version,
+                frontier_engine=base_args.frontier_engine,
+                target_payload=None,
+                lane_records=lane_records,
+                provisional_archive_members=provisional_members,
+                archive_members=archive_members,
+                early_stop_status=triggered_early_stop,
             )
 
             with patch.object(
@@ -5457,15 +5400,15 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     str(output_root),
                     "--summary-json",
                     str(summary_path),
-                    "--skip-target",
-                    "--frontier-engine",
-                    "nsga3",
-                    "--frontier-reference-mode",
-                    "achievement_chebyshev_full_simplex_v1",
-                    "--frontier-full-simplex-partitions",
-                    "1",
                     "--frontier-num-lanes",
                     "3",
+                    "--skip-target",
+                    "--frontier-early-stop-patience-lanes",
+                    "1",
+                    "--frontier-early-stop-min-certified",
+                    "1",
+                    "--frontier-early-stop-min-hypervolume-gain",
+                    "1.0",
                     "--resume",
                 ],
             ), patch.object(
@@ -5477,21 +5420,27 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     stage2_results,
                 ),
             ), patch.object(
-                module,
-                "run_nsga3_frontier_campaign",
-            ) as run_engine:
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+            ) as run_case:
                 self.assertEqual(module.main(), 0)
+                self.assertEqual(run_case.call_count, 0)
 
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
-
-            self.assertEqual(run_engine.call_count, 0)
-            self.assertEqual(summary["frontier_engine"], "nsga3")
-            self.assertEqual(summary["frontier_archive_size"], 1)
-            self.assertEqual(summary["frontier_feasible_lane_count"], 2)
+            self.assertTrue(summary["frontier_early_stop"]["triggered"])
             self.assertEqual(
-                Path(summary["frontier_population_checkpoint_path"]).resolve(),
-                (engine_dir / "population_checkpoint.json").resolve(),
+                summary["frontier_early_stop"]["stopped_after_lane_id"],
+                "lane_02",
             )
+            self.assertEqual(
+                [lane["lane_id"] for lane in summary["frontier_lanes"]],
+                ["lane_01", "lane_02"],
+            )
+            progress = module.load_frontier_campaign_progress(
+                output_root / "campaign_progress.json"
+            )
+            self.assertIsNotNone(progress.early_stop_status)
+            self.assertTrue(progress.early_stop_status["triggered"])
 
     def test_resolve_frontier_lane_warm_start_reuses_latest_certified_final_artifact(self):
         module = load_frontier_campaign_module()

@@ -24,7 +24,7 @@ from .frontier_archive import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FrontierLaneContract:
     schema_version: str
     lane_id: str
@@ -81,7 +81,7 @@ class FrontierLaneContract:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FrontierLaneRecord:
     schema_version: str
     lane_contract: FrontierLaneContract
@@ -191,7 +191,7 @@ class FrontierLaneRecord:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FrontierCampaignProgress:
     schema_version: str
     campaign_id: str
@@ -201,6 +201,7 @@ class FrontierCampaignProgress:
     lane_records: list[FrontierLaneRecord]
     provisional_archive_members: list[FrontierArchiveMember]
     archive_members: list[FrontierArchiveMember]
+    early_stop_status: dict[str, object] | None = None
 
     def to_json_dict(self) -> dict[str, object]:
         payload = {
@@ -216,6 +217,7 @@ class FrontierCampaignProgress:
             "archive_members": [
                 member.to_json_dict() for member in self.archive_members
             ],
+            "early_stop_status": self.early_stop_status,
         }
         validate_frontier_campaign_progress_payload(payload)
         return payload
@@ -225,6 +227,7 @@ class FrontierCampaignProgress:
         cls,
         payload: Mapping[str, object],
     ) -> FrontierCampaignProgress:
+        validate_frontier_campaign_progress_payload(payload)
         lane_records = [
             FrontierLaneRecord.from_json_dict(item)
             for item in payload.get("lane_records", [])
@@ -249,6 +252,7 @@ class FrontierCampaignProgress:
         if not archive_members:
             archive_members = replay_archive_from_lane_records(lane_records)
         target_payload = payload.get("target_payload")
+        early_stop_status_payload = payload.get("early_stop_status")
         return cls(
             schema_version=str(
                 payload.get(
@@ -265,6 +269,9 @@ class FrontierCampaignProgress:
             lane_records=lane_records,
             provisional_archive_members=provisional_archive_members,
             archive_members=archive_members,
+            early_stop_status=None
+            if early_stop_status_payload is None
+            else dict(early_stop_status_payload),
         )
 
 

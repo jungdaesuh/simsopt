@@ -5,6 +5,8 @@ from typing import Mapping
 
 import numpy as np
 
+# Diagnostic max/min-ratio gate on raw objective magnitudes. This is not a
+# numerical preconditioner and does not rescale optimizer variables or gradients.
 FRONTIER_CONDITIONING_SCHEMA_VERSION = "frontier_conditioning_v1"
 FRONTIER_CONDITIONING_MAX_RATIO = 1.0e3
 
