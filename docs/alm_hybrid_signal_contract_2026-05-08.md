@@ -13,11 +13,11 @@ The inner-solve augmented Lagrangian uses **surrogate** (smoothed) signed constr
 Choke-point citations (paths relative to repo root):
 
 - Inner objective is fed the surrogate signal:
-  - `examples/single_stage_optimization/banana_opt/stage2_objectives.py:1944` — `augmented_inequality_objective(...)` is called with `normalized_surrogate_signed_constraint_values` as the constraint argument that drives the augmented penalty term.
-  - `examples/single_stage_optimization/banana_opt/stage2_objectives.py:1955-1972` — both signal channels (`hard_signed_constraint_values`, `hard_violation_values`, `surrogate_signed_constraint_values`, `hard_dual_update_values`, plus their raw counterparts) are stored on the evaluation dict so downstream ALM control flow can pick the correct one without re-evaluating geometry.
+  - `examples/single_stage_optimization/banana_opt/stage2_objectives.py:1951-1958` — `augmented_inequality_objective(...)` is called with `normalized_surrogate_signed_constraint_values` as the constraint argument that drives the augmented penalty term.
+  - `examples/single_stage_optimization/banana_opt/stage2_objectives.py:1966-1980` — both signal channels (`hard_signed_constraint_values`, `hard_violation_values`, `surrogate_signed_constraint_values`, `hard_dual_update_values`, plus their raw counterparts) are stored on the evaluation dict so downstream ALM control flow can pick the correct one without re-evaluating geometry.
 - Dual update consumes the hard signal:
-  - `examples/single_stage_optimization/alm_utils.py:1915-1953` — `_extract_stage2_constraint_signal_state` selects `hard_dual_update_values` as `preferred_dual_update_values` when explicit stage-2 signals are present, and surfaces both masks via `ALMConstraintSignalState`.
-  - `examples/single_stage_optimization/alm_utils.py:2988-2995` — `_handle_alm_dual_update_transition` projects new multipliers using `routing_state.signal_state.preferred_dual_update_values` (the hard channel).
+  - `examples/single_stage_optimization/alm_utils.py:2009-2061` — `_extract_stage2_constraint_signal_state` selects `hard_dual_update_values` as `preferred_dual_update_values` when explicit stage-2 signals are present, and surfaces both masks via `ALMConstraintSignalState`.
+  - `examples/single_stage_optimization/alm_utils.py:3114-3130` — `_handle_alm_dual_update_transition` projects new multipliers using `routing_state.signal_state.preferred_dual_update_values` (the hard channel).
 
 ## Why we accept the trade-off
 
@@ -39,16 +39,16 @@ The hybrid forfeits both the rate-of-convergence guarantees and the strict KKT-a
 Two safeguards prevent the hybrid from silently accepting a smoothed-feasible-but-hard-infeasible design as "converged":
 
 1. **Mismatch detection**.
-   - `examples/single_stage_optimization/alm_utils.py:2007-2022` — `_constraint_routing_state` builds both `hard_activity_mask` and `surrogate_activity_mask` and sets `signal_mismatch_active = True` when the masks disagree on any constraint (active-mask disagreement) or when the hard side reports feasible while the surrogate positive shift is live (boundary disagreement at `alm_utils.py:2036-2042`).
-   - The mismatch flag is propagated into every history entry (see `_constraint_routing_state` consumers in `alm_utils.py:2806`, the skipped-inner shortcut path at `alm_utils.py:3873`, and the continuation step recorder).
+   - `examples/single_stage_optimization/alm_utils.py:2103-2149` — `_constraint_routing_state` builds both `hard_activity_mask` and `surrogate_activity_mask` and sets `signal_mismatch_active = True` when the masks disagree on any constraint (active-mask disagreement) or when the hard side reports feasible while the surrogate positive shift is live (boundary disagreement at `examples/single_stage_optimization/alm_utils.py:2143-2149`).
+   - The mismatch flag is propagated into every history entry (see `_constraint_routing_state` consumers in `examples/single_stage_optimization/alm_utils.py:2941`, the skipped-inner shortcut path at `examples/single_stage_optimization/alm_utils.py:3873`, and the continuation step recorder).
 
 2. **Converged-gate guard**.
-   - `examples/single_stage_optimization/alm_utils.py:4133-4138` — the converged branch requires `not signal_mismatch_active` *in addition to* the standard feasibility-and-stationarity tolerance check. A run that reaches small max-violation and small stationarity norm under sustained mismatch will not be labeled `converged`. The same guard appears at `alm_utils.py:4125-4131` for the `constraints_inactive_candidate` path and at the skipped-inner shortcut at `alm_utils.py:3851-3855`.
+   - `examples/single_stage_optimization/alm_utils.py:4296-4305` — the converged branch requires `not signal_mismatch_active` *in addition to* the standard feasibility-and-stationarity tolerance check. A run that reaches small max-violation and small stationarity norm under sustained mismatch will not be labeled `converged`. The same guard appears at `examples/single_stage_optimization/alm_utils.py:4288-4294` for the `constraints_inactive_candidate` path and at the skipped-inner shortcut at `examples/single_stage_optimization/alm_utils.py:3992-4005`.
    - Effect: false-success labeling is structurally blocked. The run can still terminate with a non-success label (`max_outer`, `signal_mismatch_stall`, `signal_mismatch_penalty_increase` cycles followed by `max_outer`, etc.), but `result.success` cannot be `True` while the mismatch is active.
 
 ## Residual risk class
 
-The remaining risk is **failure-labeling chatter** under sustained mismatch: the run terminates without success, but the specific termination reason and history action sequence depend on whether the mismatch fires the `signal_mismatch_stall` arm at `alm_utils.py:4224-4244`, the `signal_mismatch_penalty_increase` arm at `alm_utils.py:4245-4260`, or simply lets the outer iteration cap exhaust into `max_outer`. The deterministic-termination property test (see Verification below) pins this behavior.
+The remaining risk is **failure-labeling chatter** under sustained mismatch: the run terminates without success, but the specific termination reason and history action sequence depend on whether the mismatch fires the `signal_mismatch_stall` arm at `examples/single_stage_optimization/alm_utils.py:4396-4416`, the `signal_mismatch_penalty_increase` arm at `examples/single_stage_optimization/alm_utils.py:4417-4432`, or simply lets the outer iteration cap exhaust into `max_outer`. The deterministic-termination property test (see Verification below) pins this behavior.
 
 We accept this residual risk because:
 - The output is always a non-success result; downstream consumers gate on `result.success`.
@@ -59,13 +59,13 @@ We accept this residual risk because:
 
 This contract is the single source of truth for the surrogate-vs-hard signal split in ALM mode. The following refactors are forbidden without first re-deriving the relevant theorem:
 
-- **Routing hard signals into the inner objective.** Any change that passes `hard_signed_constraint_values` (or the raw equivalents at `stage2_objectives.py:1970-1973`) to `augmented_inequality_objective` requires a fresh smoothness analysis showing that L-BFGS-B convergence still holds, including line-search behavior at activation boundaries.
+- **Routing hard signals into the inner objective.** Any change that passes `hard_signed_constraint_values` (or the raw equivalents at `stage2_objectives.py:1967-1980`) to `augmented_inequality_objective` requires a fresh smoothness analysis showing that L-BFGS-B convergence still holds, including line-search behavior at activation boundaries.
 
-- **Routing surrogate signals into the dual update.** Any change that passes `surrogate_signed_constraint_values` (or any non-hard channel) into `_project_nonnegative_multipliers_with_diagnostics` at `alm_utils.py:2988-2995` requires a fresh dual-convergence analysis showing that the multiplier sequence converges to a KKT point of the *hard* problem, not the smoothed problem.
+- **Routing surrogate signals into the dual update.** Any change that passes `surrogate_signed_constraint_values` (or any non-hard channel) into `_project_nonnegative_multipliers_with_diagnostics` at `alm_utils.py:3123-3130` requires a fresh dual-convergence analysis showing that the multiplier sequence converges to a KKT point of the *hard* problem, not the smoothed problem.
 
-- **Removing the `signal_mismatch_active` guard from the converged gate.** The two `not signal_mismatch_active` clauses in the converged branch (`alm_utils.py:4133-4138`) and the constraints-inactive branch (`alm_utils.py:4125-4131`), plus the same guard at the skipped-inner shortcut (`alm_utils.py:3851-3855`), are load-bearing for the false-success block. They must remain coupled to the converged labels.
+- **Removing the `signal_mismatch_active` guard from the converged gate.** The two `not signal_mismatch_active` clauses in the converged branch (`examples/single_stage_optimization/alm_utils.py:4296-4305`) and the constraints-inactive branch (`examples/single_stage_optimization/alm_utils.py:4288-4294`), plus the same guard at the skipped-inner shortcut (`examples/single_stage_optimization/alm_utils.py:3992-4005`), are load-bearing for the false-success block. They must remain coupled to the converged labels.
 
-- **Removing the `hard_dual_update_values` field from stage-2 evaluation output.** `_extract_stage2_constraint_signal_state` raises `KeyError` when this field is missing (alm_utils.py:1915-1923); that strict-error behavior is part of the contract surface and must not be loosened.
+- **Removing the `hard_dual_update_values` field from stage-2 evaluation output.** `_extract_stage2_constraint_signal_state` raises `KeyError` when this field is missing (`alm_utils.py:2009-2030`); that strict-error behavior is part of the contract surface and must not be loosened.
 
 ## Verification
 

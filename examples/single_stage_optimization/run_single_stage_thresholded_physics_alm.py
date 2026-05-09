@@ -190,16 +190,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alm-max-inner-attempts", type=int, default=4)
     parser.add_argument("--alm-distance-smoothing", type=float, default=0.005)
     parser.add_argument("--alm-curvature-smoothing", type=float, default=0.05)
-    parser.add_argument("--alm-qs-threshold", type=float, default=DEFAULT_ALM_QS_THRESHOLD)
+    parser.add_argument(
+        "--alm-qs-threshold",
+        type=float,
+        default=DEFAULT_ALM_QS_THRESHOLD,
+        help=(
+            "thresholded_physics-mode upper bound T for the quasi-symmetry "
+            "objective J_QS. Units are the objective's normalized scalar units; "
+            "T is not a physical length or iota deviation."
+        ),
+    )
     parser.add_argument(
         "--alm-boozer-threshold",
         type=float,
         default=DEFAULT_ALM_BOOZER_THRESHOLD,
+        help=(
+            "thresholded_physics-mode upper bound T for the Boozer residual "
+            "objective. Units are the Boozer residual objective's scalar units."
+        ),
     )
     parser.add_argument(
         "--alm-iota-penalty-threshold",
         type=float,
         default=DEFAULT_ALM_IOTA_PENALTY_THRESHOLD,
+        help=(
+            "thresholded_physics-mode upper bound T for the Jiota penalty objective. "
+            "Units: squared-penalty units. The constraint is "
+            "0.5*(iota - iota_target)**2 <= T (no iotas_weight factor). "
+            "To target a desired iota deviation d, set T = 0.5 * d**2 "
+            "(e.g. d = 0.01 -> T = 5e-5). See README 'Iota threshold units'."
+        ),
     )
     parser.add_argument(
         "--alm-length-penalty-threshold",

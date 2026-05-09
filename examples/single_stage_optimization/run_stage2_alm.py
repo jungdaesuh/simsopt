@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -59,6 +58,7 @@ from banana_opt.constraint_contract import (  # noqa: E402
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_stage2_alm"
 STAGE2_CC_THRESHOLD_FLOOR = COIL_COIL_MIN_DIST_M
 DEFAULT_SUMMARY_JSON = "stage2_alm_summary.json"
+DEFAULT_STAGE2_BASIN_SEED = 0
 _BASE_STAGE2_PROFILE = {
     "major_radius": VACUUM_VESSEL_MAJOR_RADIUS_M,
     "toroidal_flux": 0.24,
@@ -222,6 +222,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--stage2-timeout-seconds", type=float, default=0.0)
     parser.add_argument(
+        "--basin-seed",
+        type=int,
+        default=None,
+        help=(
+            "Optional deterministic basin-hopping seed override. Used only when "
+            "the resolved Stage 2 spec has basin_hops > 0; omitted or negative "
+            f"spec seeds normalize to {DEFAULT_STAGE2_BASIN_SEED}."
+        ),
+    )
+    parser.add_argument(
         "--cc-threshold",
         type=float,
         default=None,
@@ -369,7 +379,7 @@ def _normalize_basin_seed(*, basin_hops: int, basin_seed: int | None) -> int | N
         return None
     if basin_seed is not None and int(basin_seed) >= 0:
         return int(basin_seed)
-    return int.from_bytes(os.urandom(4), "big")
+    return DEFAULT_STAGE2_BASIN_SEED
 
 
 def _load_stage2_spec_json(spec_json_path: str | Path) -> tuple[Path, dict]:
@@ -532,11 +542,14 @@ def build_stage2_alm_config(
     output_root = resolved_path(args.output_root)
     equilibria_dir = resolved_optional_path(args.equilibria_dir)
     basin_hops = int(resolved_spec["basin_hops"])
+    basin_seed_override = (
+        args.basin_seed
+        if args.basin_seed is not None
+        else resolved_spec["basin_seed"]
+    )
     basin_seed = _normalize_basin_seed(
         basin_hops=basin_hops,
-        basin_seed=(
-            None if resolved_spec["basin_seed"] is None else int(resolved_spec["basin_seed"])
-        ),
+        basin_seed=None if basin_seed_override is None else int(basin_seed_override),
     )
     raw_cc = float(constraint_contract["CC_THRESHOLD"])
     if raw_cc < STAGE2_CC_THRESHOLD_FLOOR:

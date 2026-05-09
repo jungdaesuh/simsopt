@@ -3017,9 +3017,10 @@ def single_stage_alm_constraint_names(
         "coil_coil_spacing",
         "coil_surface_spacing",
         "max_curvature",
-        "coil_length",
         "poloidal_extent",
     }
+    if alm_formulation != "thresholded_physics":
+        available_names.add("coil_length")
     use_independent_banana_currents = (
         banana_current_state is not None
         and banana_current_state.mode == BANANA_CURRENT_MODE_INDEPENDENT

@@ -1,5 +1,6 @@
 import ast
 import hashlib
+import io
 import importlib
 import importlib.util
 import json
@@ -241,6 +242,7 @@ def make_stage2_alm_wrapper_args(**overrides):
         "output_root": "outputs",
         "summary_json": None,
         "stage2_timeout_seconds": 0.0,
+        "basin_seed": None,
         "toroidal_flux": None,
         "cc_threshold": None,
         "curvature_threshold": None,
@@ -975,6 +977,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             include_surface_stack=True,
         )
         self.assertIn("surface_surface_spacing", stacked_constraint_names)
+        self.assertNotIn("coil_length_upper_bound", stacked_constraint_names)
+        self.assertIn("length_penalty", stacked_constraint_names)
 
     def test_stage2_alm_constraint_names_follow_shared_schema(self):
         schema_module = load_hardware_constraint_schema_module()
@@ -1845,35 +1849,18 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         module = load_stage2_alm_wrapper_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            disabled_spec_path = Path(tmpdir) / "stage2_spec_disabled.json"
-            disabled_spec_path.write_text(
-                json.dumps(
-                    {
-                        "major_radius": 0.976,
-                        "toroidal_flux": 0.24,
-                        "length_weight": 5.0e-4,
-                        "cc_weight": 100.0,
-                        "cc_threshold": 0.05,
-                        "curvature_weight": 1.0e-4,
-                        "curvature_threshold": 40.0,
-                        "banana_surf_radius": 0.22,
-                        "tf_current_A": -8.0e4,
-                        "order": 2,
-                        "banana_init_current_A": 1.0e4,
-                        "banana_current_max_A": 1.6e4,
-                        "alm_max_outer_iters": 10,
-                        "alm_penalty_init": 1.0,
-                        "alm_penalty_scale": 10.0,
-                        "alm_penalty_max": 1.0e8,
-                        "basin_hops": 0,
-                        "basin_stepsize": 0.01,
-                        "basin_temperature": 2.5,
-                        "basin_niter_success": 8,
-                        "basin_seed": 11,
-                        "init_only": False,
-                    }
-                ),
-                encoding="utf-8",
+            def write_stage2_spec(filename, **overrides):
+                spec_path = Path(tmpdir) / filename
+                spec_path.write_text(
+                    json.dumps(make_complete_stage2_spec_payload(**overrides)),
+                    encoding="utf-8",
+                )
+                return spec_path
+
+            disabled_spec_path = write_stage2_spec(
+                "stage2_spec_disabled.json",
+                basin_hops=0,
+                basin_seed=11,
             )
             disabled_args = make_stage2_alm_wrapper_args(
                 profile=None,
@@ -1885,51 +1872,37 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 resolved_spec=disabled_spec,
             )
 
-            enabled_spec_path = Path(tmpdir) / "stage2_spec_enabled.json"
-            enabled_spec_path.write_text(
-                json.dumps(
-                    {
-                        "major_radius": 0.976,
-                        "toroidal_flux": 0.24,
-                        "length_weight": 5.0e-4,
-                        "cc_weight": 100.0,
-                        "cc_threshold": 0.05,
-                        "curvature_weight": 1.0e-4,
-                        "curvature_threshold": 40.0,
-                        "banana_surf_radius": 0.22,
-                        "tf_current_A": -8.0e4,
-                        "order": 2,
-                        "banana_init_current_A": 1.0e4,
-                        "banana_current_max_A": 1.6e4,
-                        "alm_max_outer_iters": 10,
-                        "alm_penalty_init": 1.0,
-                        "alm_penalty_scale": 10.0,
-                        "alm_penalty_max": 1.0e8,
-                        "basin_hops": 3,
-                        "basin_stepsize": 0.01,
-                        "basin_temperature": 2.5,
-                        "basin_niter_success": 8,
-                        "basin_seed": -1,
-                        "init_only": False,
-                    }
-                ),
-                encoding="utf-8",
+            enabled_spec_path = write_stage2_spec(
+                "stage2_spec_enabled.json",
+                basin_hops=3,
+                basin_seed=-1,
             )
             enabled_args = make_stage2_alm_wrapper_args(
                 profile=None,
                 stage2_spec_json=str(enabled_spec_path),
             )
             enabled_spec, _ = module.resolve_stage2_spec_payload(enabled_args)
-            with patch.object(module.os, "urandom", return_value=b"\x00\x00\x00*"):
-                enabled_config = module.build_stage2_alm_config(
-                    enabled_args,
-                    resolved_spec=enabled_spec,
-                )
+            enabled_config = module.build_stage2_alm_config(
+                enabled_args,
+                resolved_spec=enabled_spec,
+            )
+
+            override_args = make_stage2_alm_wrapper_args(
+                profile=None,
+                stage2_spec_json=str(enabled_spec_path),
+                basin_seed=42,
+            )
+            override_config = module.build_stage2_alm_config(
+                override_args,
+                resolved_spec=enabled_spec,
+            )
 
         self.assertIsNone(disabled_config.basin_seed)
         self.assertIsNone(module._expected_stage2_artifact_metadata(disabled_config)["basin_seed"])
-        self.assertEqual(enabled_config.basin_seed, 42)
-        self.assertEqual(module._expected_stage2_artifact_metadata(enabled_config)["basin_seed"], 42)
+        self.assertEqual(enabled_config.basin_seed, 0)
+        self.assertEqual(module._expected_stage2_artifact_metadata(enabled_config)["basin_seed"], 0)
+        self.assertEqual(override_config.basin_seed, 42)
+        self.assertEqual(module._expected_stage2_artifact_metadata(override_config)["basin_seed"], 42)
 
     def test_single_stage_thresholded_physics_rerun_wrapper_pins_thresholded_physics_thresholds_and_warn_mode(self):
         source = SINGLE_STAGE_THRESHOLDED_PHYSICS_RERUN_MODULE_PATH.read_text()
@@ -1945,6 +1918,32 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn('"--alm-boozer-threshold"', source)
         self.assertIn('"--alm-iota-penalty-threshold"', source)
         self.assertIn('"--alm-length-penalty-threshold"', source)
+
+    def test_single_stage_thresholded_physics_rerun_help_documents_threshold_units(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            ["run_single_stage_thresholded_physics_alm.py", "--help"],
+        ), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            with self.assertRaises(SystemExit) as excinfo:
+                module.parse_args()
+
+        help_text = " ".join(stdout.getvalue().split())
+        self.assertEqual(excinfo.exception.code, 0)
+        for expected in (
+            "--alm-qs-threshold",
+            "objective J_QS",
+            "--alm-boozer-threshold",
+            "Boozer residual objective",
+            "--alm-iota-penalty-threshold",
+            "0.5*(iota - iota_target)**2 <= T",
+            "no iotas_weight factor",
+            "--alm-length-penalty-threshold",
+            "0.5*max(L - L_target, 0)**2 <= T",
+        ):
+            self.assertIn(expected, help_text)
 
     def test_single_stage_thresholded_physics_rerun_wrapper_resolves_cli_paths(self):
         module = load_single_stage_thresholded_physics_rerun_module()

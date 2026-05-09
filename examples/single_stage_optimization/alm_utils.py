@@ -830,9 +830,9 @@ def _surrogate_hard_sign_mismatch(
     surrogate_signed_values: np.ndarray,
     hard_signed_values: np.ndarray,
 ) -> list[bool]:
-    surrogate_signs = np.sign(np.asarray(surrogate_signed_values, dtype=float))
-    hard_signs = np.sign(np.asarray(hard_signed_values, dtype=float))
-    return (surrogate_signs != hard_signs).tolist()
+    surrogate_values = np.asarray(surrogate_signed_values, dtype=float)
+    hard_values = np.asarray(hard_signed_values, dtype=float)
+    return (surrogate_values * hard_values < 0.0).tolist()
 
 
 def _surrogate_kkt_stationarity_norm(
@@ -4279,7 +4279,7 @@ def _run_alm_continuation_step(
         solver_constraint_values,
         feasibility_values,
         routing_state,
-        state.update_feasibility_tol,
+        effective_feasibility_tol,
     )
     hard_feasible_strict = routing_state.hard_max_violation <= settings.feasibility_tol
     hard_feasible_for_update = (
@@ -4393,7 +4393,7 @@ def _run_alm_continuation_step(
                 max_feasibility_violation=max_feasibility_violation,
             )
 
-    if signal_mismatch_active and hard_feasible_strict:
+    if signal_mismatch_active and hard_feasible_for_update:
         if not made_inner_progress or continuation_iteration > 0:
             if routing_state.surrogate_positive_shift_zero:
                 return _emit_alm_stall_failure_step(
@@ -4440,7 +4440,11 @@ def _run_alm_continuation_step(
             is_final_outer=is_final_outer,
         )
 
-    if hard_feasible_for_update and stationarity_norm <= state.update_stationarity_tol:
+    if (
+        hard_feasible_for_update
+        and not signal_mismatch_active
+        and stationarity_norm <= state.update_stationarity_tol
+    ):
         state.feasible_stall_count = 0
         dual_update = _handle_alm_dual_update_transition(
             multipliers=state.multipliers,

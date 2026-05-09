@@ -27,6 +27,49 @@ def load_alm_utils_module():
     return _alm_utils
 
 
+def _read_cited_source(repo_root: Path, citation: str) -> str:
+    path_text, line_text = citation.rsplit(":", 1)
+    start_text, end_text = line_text.split("-")
+    start = int(start_text)
+    end = int(end_text)
+    source_lines = (repo_root / path_text).read_text(encoding="utf-8").splitlines()
+    return "\n".join(source_lines[start - 1:end])
+
+
+class AlmHybridSignalContractDocTests(unittest.TestCase):
+    def test_documented_code_citations_still_point_to_contract_anchors(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        doc_path = repo_root / "docs" / "alm_hybrid_signal_contract_2026-05-08.md"
+        doc = doc_path.read_text(encoding="utf-8")
+        citations = {
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:1951-1958": (
+                "augmented_inequality_objective("
+            ),
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:1966-1980": (
+                '"hard_dual_update_values"'
+            ),
+            "examples/single_stage_optimization/alm_utils.py:2009-2061": (
+                "def _extract_stage2_constraint_signal_state"
+            ),
+            "examples/single_stage_optimization/alm_utils.py:3114-3130": (
+                "routing_state.signal_state.preferred_dual_update_values"
+            ),
+            "examples/single_stage_optimization/alm_utils.py:2103-2149": (
+                "def _constraint_routing_state"
+            ),
+            "examples/single_stage_optimization/alm_utils.py:4296-4305": (
+                "and not signal_mismatch_active"
+            ),
+            "examples/single_stage_optimization/alm_utils.py:3992-4005": (
+                "and not run_state.last_cap_binding_active"
+            ),
+        }
+        for citation, anchor in citations.items():
+            with self.subTest(citation=citation):
+                self.assertIn(citation, doc)
+                self.assertIn(anchor, _read_cited_source(repo_root, citation))
+
+
 def _complete_alm_evaluation(evaluation: dict) -> dict:
     completed = dict(evaluation)
     if "constraint_values" in completed:
@@ -829,6 +872,17 @@ class ResidualHelperTests(unittest.TestCase):
                 feasibility_gate=1.0,
             ),
             0.0,
+        )
+
+    def test_surrogate_hard_sign_mismatch_does_not_flag_exact_boundary(self):
+        module = load_alm_utils_module()
+
+        self.assertEqual(
+            module._surrogate_hard_sign_mismatch(
+                np.array([-1.0e-3, 1.0e-3, -1.0e-3]),
+                np.array([0.0, -2.0e-3, 3.0e-3]),
+            ),
+            [False, True, True],
         )
 
     def test_lbfgsb_projected_gradient_max_norm_uses_projected_infinity_norm(self):
@@ -2439,6 +2493,60 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertTrue(result.history[1]["hard_positive_shift_zero"])
         self.assertFalse(result.history[1]["surrogate_max_value"] <= 0.0)
 
+    def test_relaxed_stage2_signal_mismatch_does_not_dual_update(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=1,
+            max_subproblem_continuations=1,
+            max_inner_attempts=1,
+            feasibility_tol=1.0e-6,
+            stationarity_tol=1.0e-6,
+            penalty_init=1.0,
+            relaxed_feasibility_gate_cap=1.0e-2,
+            history_max_entries=None,
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x, multipliers, penalty
+            return self._stage2_signal_evaluation(
+                constraint_values=np.array([1.0e-3]),
+                dual_update_values=np.array([1.0e-3]),
+                feasibility_values=np.array([1.0e-3]),
+                hard_signed_constraint_values=np.array([-1.0e-3]),
+                hard_violation_values=np.array([1.0e-3]),
+                surrogate_signed_constraint_values=np.array([1.0e-3]),
+                hard_dual_update_values=np.array([1.0e-3]),
+                constraint_grads=[np.array([0.0])],
+                constraint_activity_tolerances=np.array([0.0]),
+                stationarity_norm=0.0,
+            )
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del jac, method, bounds, callback, options
+            x_array = np.asarray(x, dtype=float)
+            fun(x_array)
+            return SimpleNamespace(
+                x=x_array.copy(),
+                nit=0,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 1},
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.history[0]["action"], "signal_mismatch_penalty_increase")
+        self.assertTrue(result.history[0]["signal_mismatch_active"])
+        np.testing.assert_allclose(result.history[0]["post_update_multipliers"], [0.0])
+        np.testing.assert_allclose(result.multipliers, np.array([0.0]))
+
     def test_alm_terminates_deterministically_under_sustained_signal_mismatch(self):
         """Pin the deterministic-termination property of the hybrid signal contract.
 
@@ -3485,6 +3593,63 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertAlmostEqual(result.history[0]["feasibility_tolerance"], 0.1)
         self.assertAlmostEqual(result.history[0]["effective_feasibility_tolerance"], 1.0e-2)
         self.assertEqual(result.history[0]["outer_termination"], "max_outer")
+
+    def test_post_inner_history_diagnostics_use_effective_feasibility_gate(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=1,
+            max_subproblem_continuations=1,
+            trust_radius_init=0.1,
+            trust_radius_min=0.01,
+            trust_radius_shrink=0.5,
+            trust_radius_grow=1.5,
+            max_inner_attempts=1,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+            relaxed_feasibility_gate_cap=1e-2,
+        )
+        captured_feasibility_gates = []
+        original_attach = module._attach_alm_history_diagnostics
+
+        def capture_attach(*args, **kwargs):
+            captured_feasibility_gates.append(float(args[-1]))
+            return original_attach(*args, **kwargs)
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x, multipliers, penalty
+            return _complete_alm_evaluation({
+                "total": 0.0,
+                "grad": np.array([0.2]),
+                "constraint_values": np.array([2.5e-2]),
+                "stationarity_norm": 0.2,
+            })
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, jac, method, bounds, callback, options
+            return SimpleNamespace(
+                x=np.asarray(x, dtype=float),
+                nit=1,
+                success=False,
+                message="STOP: plateau",
+            )
+
+        with patch.object(
+            module,
+            "_attach_alm_history_diagnostics",
+            side_effect=capture_attach,
+        ), patch.object(module, "minimize", side_effect=fake_minimize):
+            module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 30, "ftol": 1e-12, "gtol": 1e-12},
+            )
+
+        self.assertGreaterEqual(len(captured_feasibility_gates), 1)
+        self.assertAlmostEqual(captured_feasibility_gates[0], 1.0e-2)
 
     def test_minimize_alm_dual_updates_after_zero_work_feasible_stall_when_tolerances_are_met(self):
         module = load_alm_utils_module()
