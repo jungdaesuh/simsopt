@@ -1152,6 +1152,10 @@ def write_json(path: str | Path, payload: object) -> None:
         json.dump(_json_portable_value(payload), outfile, indent=2, allow_nan=False)
 
 
+def json_dumps(payload: object, *, indent: int | None = None) -> str:
+    return json.dumps(_json_portable_value(payload), indent=indent, allow_nan=False)
+
+
 def write_csv_rows(
     path: str | Path,
     rows: Sequence[Mapping[str, object]],

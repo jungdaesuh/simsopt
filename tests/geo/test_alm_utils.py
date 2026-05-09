@@ -48,19 +48,19 @@ class AlmHybridSignalContractDocTests(unittest.TestCase):
             "examples/single_stage_optimization/banana_opt/stage2_objectives.py:1966-1980": (
                 '"hard_dual_update_values"'
             ),
-            "examples/single_stage_optimization/alm_utils.py:2009-2061": (
+            "examples/single_stage_optimization/alm_utils.py:2133-2185": (
                 "def _extract_stage2_constraint_signal_state"
             ),
-            "examples/single_stage_optimization/alm_utils.py:3114-3130": (
+            "examples/single_stage_optimization/alm_utils.py:3246-3254": (
                 "routing_state.signal_state.preferred_dual_update_values"
             ),
-            "examples/single_stage_optimization/alm_utils.py:2103-2149": (
+            "examples/single_stage_optimization/alm_utils.py:2227-2275": (
                 "def _constraint_routing_state"
             ),
-            "examples/single_stage_optimization/alm_utils.py:4296-4305": (
+            "examples/single_stage_optimization/alm_utils.py:4420-4429": (
                 "and not signal_mismatch_active"
             ),
-            "examples/single_stage_optimization/alm_utils.py:3992-4005": (
+            "examples/single_stage_optimization/alm_utils.py:4118-4129": (
                 "and not run_state.last_cap_binding_active"
             ),
         }
@@ -1298,6 +1298,34 @@ class AlmNormalizeRunInputsValidationTests(unittest.TestCase):
         ):
             self._settings(module, history_max_entries=0)
 
+    def test_settings_construction_rejects_nonfinite_scalar_fields(self):
+        module = load_alm_utils_module()
+        scalar_fields = (
+            "max_outer_iterations",
+            "max_subproblem_continuations",
+            "penalty_init",
+            "penalty_scale",
+            "penalty_max",
+            "feasibility_tol",
+            "stationarity_tol",
+            "trust_radius_init",
+            "trust_radius_min",
+            "trust_radius_shrink",
+            "trust_radius_grow",
+            "max_inner_attempts",
+            "relaxed_feasibility_gate_cap",
+            "multiplier_max",
+            "history_max_entries",
+        )
+
+        for field in scalar_fields:
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"ALMSettings\.{field} must be finite",
+                ):
+                    self._settings(module, **{field: float("nan")})
+
     def test_normalize_rejects_nonfinite_initial_penalty(self):
         module = load_alm_utils_module()
         settings = self._settings(module)
@@ -1416,6 +1444,55 @@ class RequirePositiveAlmThresholdTests(unittest.TestCase):
             ValueError, r"ALM threshold 'qs' must be a finite positive value"
         ):
             module.require_positive_alm_threshold("qs", float("inf"))
+
+
+class ValidateAlmCliArgsTests(unittest.TestCase):
+    @staticmethod
+    def _args(**overrides):
+        defaults = dict(
+            alm_max_outer_iters=10,
+            alm_max_subproblem_continuations=20,
+            alm_penalty_init=1.0,
+            alm_penalty_scale=10.0,
+            alm_penalty_max=1.0e8,
+            alm_feas_tol=1.0e-6,
+            alm_stationarity_tol=1.0e-6,
+            alm_trust_radius_init=0.05,
+            alm_trust_radius_min=1.0e-4,
+            alm_trust_radius_shrink=0.5,
+            alm_trust_radius_grow=1.5,
+            alm_max_inner_attempts=4,
+            alm_curvature_smoothing=0.25,
+            alm_distance_smoothing=0.005,
+        )
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def test_rejects_nonfinite_scalar_fields(self):
+        module = load_alm_utils_module()
+        field_to_flag = {
+            "alm_max_outer_iters": "--alm-max-outer-iters",
+            "alm_max_subproblem_continuations": "--alm-max-subproblem-continuations",
+            "alm_penalty_init": "--alm-penalty-init",
+            "alm_penalty_scale": "--alm-penalty-scale",
+            "alm_penalty_max": "--alm-penalty-max",
+            "alm_feas_tol": "--alm-feas-tol",
+            "alm_stationarity_tol": "--alm-stationarity-tol",
+            "alm_trust_radius_init": "--alm-trust-radius-init",
+            "alm_trust_radius_min": "--alm-trust-radius-min",
+            "alm_trust_radius_shrink": "--alm-trust-radius-shrink",
+            "alm_trust_radius_grow": "--alm-trust-radius-grow",
+            "alm_max_inner_attempts": "--alm-max-inner-attempts",
+            "alm_curvature_smoothing": "--alm-curvature-smoothing",
+            "alm_distance_smoothing": "--alm-distance-smoothing",
+        }
+
+        for field, flag_name in field_to_flag.items():
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, rf"{flag_name} must be finite"):
+                    module.validate_alm_cli_args(
+                        self._args(**{field: float("nan")})
+                    )
 
 
 class ValidateInitialMultipliersTests(unittest.TestCase):

@@ -20,8 +20,10 @@ from workflow_runner_common import (  # noqa: E402
     resolve_stage2_artifact_path,
     resolved_path,
     resolved_optional_path,
+    json_dumps,
     timeout_or_none,
     stage2_artifact_config_flat_dict,
+    write_json,
     write_dry_run_marker,
 )
 from workflow_helpers import (  # noqa: E402
@@ -54,6 +56,7 @@ from banana_opt.constraint_contract import (  # noqa: E402
     build_constraint_metadata,
     resolve_constraint_contract_from_wire_names,
 )
+from alm_utils import validate_alm_cli_args  # noqa: E402
 
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_stage2_alm"
 STAGE2_CC_THRESHOLD_FLOOR = COIL_COIL_MIN_DIST_M
@@ -825,6 +828,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     resolved_spec, resolved_spec_source = resolve_stage2_spec_payload(args)
     config = build_stage2_alm_config(args, resolved_spec=resolved_spec)
+    validate_alm_cli_args(config)
     constraint_metadata = build_stage2_constraint_artifacts(
         args=args,
         config=config,
@@ -887,9 +891,8 @@ def main(argv: list[str] | None = None) -> int:
             constraint_metadata=constraint_metadata,
         )
 
-    with summary_path.open("w", encoding="utf-8") as outfile:
-        json.dump(summary, outfile, indent=2)
-    print(json.dumps(summary, indent=2))
+    write_json(summary_path, summary)
+    print(json_dumps(summary, indent=2))
     return 0
 
 

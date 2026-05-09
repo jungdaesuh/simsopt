@@ -13,6 +13,19 @@ ALM_SCHEMA_VERSION = "alm_normalized_constraints_v2"
 _HISTORY_DIAGNOSTICS_SOURCE_KEY = "_constraint_history_diagnostics_source"
 
 
+def _finite_alm_value(name: str, value) -> float:
+    value_f = float(value)
+    if not np.isfinite(value_f):
+        raise ValueError(f"{name} must be finite")
+    return value_f
+
+
+def _finite_alm_value_or_none(name: str, value) -> float | None:
+    if value is None:
+        return None
+    return _finite_alm_value(name, value)
+
+
 @dataclass(frozen=True)
 class ALMSettings:
     max_outer_iterations: int = 10
@@ -38,43 +51,110 @@ class ALMSettings:
         # Mirrors `validate_alm_cli_args` so direct programmatic construction
         # cannot bypass the CLI-level guards (L5: programmatic
         # `ALMSettings(trust_radius_grow=0.5)` previously silently shrank).
-        if self.max_outer_iterations <= 0:
+        max_outer_iterations = _finite_alm_value(
+            "ALMSettings.max_outer_iterations",
+            self.max_outer_iterations,
+        )
+        max_subproblem_continuations = _finite_alm_value(
+            "ALMSettings.max_subproblem_continuations",
+            self.max_subproblem_continuations,
+        )
+        penalty_init = _finite_alm_value("ALMSettings.penalty_init", self.penalty_init)
+        penalty_scale = _finite_alm_value(
+            "ALMSettings.penalty_scale",
+            self.penalty_scale,
+        )
+        penalty_max = _finite_alm_value_or_none(
+            "ALMSettings.penalty_max",
+            self.penalty_max,
+        )
+        feasibility_tol = _finite_alm_value(
+            "ALMSettings.feasibility_tol",
+            self.feasibility_tol,
+        )
+        stationarity_tol = _finite_alm_value(
+            "ALMSettings.stationarity_tol",
+            self.stationarity_tol,
+        )
+        trust_radius_init = _finite_alm_value_or_none(
+            "ALMSettings.trust_radius_init",
+            self.trust_radius_init,
+        )
+        trust_radius_min = _finite_alm_value(
+            "ALMSettings.trust_radius_min",
+            self.trust_radius_min,
+        )
+        trust_radius_shrink = _finite_alm_value(
+            "ALMSettings.trust_radius_shrink",
+            self.trust_radius_shrink,
+        )
+        trust_radius_grow = _finite_alm_value(
+            "ALMSettings.trust_radius_grow",
+            self.trust_radius_grow,
+        )
+        max_inner_attempts = _finite_alm_value(
+            "ALMSettings.max_inner_attempts",
+            self.max_inner_attempts,
+        )
+        relaxed_feasibility_gate_cap = _finite_alm_value(
+            "ALMSettings.relaxed_feasibility_gate_cap",
+            self.relaxed_feasibility_gate_cap,
+        )
+        multiplier_max = _finite_alm_value_or_none(
+            "ALMSettings.multiplier_max",
+            self.multiplier_max,
+        )
+        history_max_entries = _finite_alm_value_or_none(
+            "ALMSettings.history_max_entries",
+            self.history_max_entries,
+        )
+        if max_outer_iterations <= 0:
             raise ValueError("ALMSettings.max_outer_iterations must be positive")
-        if self.max_subproblem_continuations < 0:
+        if max_subproblem_continuations < 0:
             # Zero is valid: the inner-loop range is
             # ``range(max_subproblem_continuations + 1)``, so 0 means
             # "one attempt, no retries" — a legitimate no-continuation
             # mode used by hardware-constraint test fixtures.
-            raise ValueError("ALMSettings.max_subproblem_continuations must be nonnegative")
-        if self.penalty_init <= 0.0:
+            raise ValueError(
+                "ALMSettings.max_subproblem_continuations must be nonnegative"
+            )
+        if penalty_init <= 0.0:
             raise ValueError("ALMSettings.penalty_init must be positive")
-        if self.penalty_scale <= 1.0:
+        if penalty_scale <= 1.0:
             raise ValueError("ALMSettings.penalty_scale must be greater than 1")
-        if self.penalty_max is not None and self.penalty_max <= 0.0:
+        if penalty_max is not None and penalty_max <= 0.0:
             raise ValueError("ALMSettings.penalty_max must be positive when provided")
-        if self.penalty_max is not None and self.penalty_max < self.penalty_init:
+        if penalty_max is not None and penalty_max < penalty_init:
             raise ValueError(
                 f"ALMSettings.penalty_max ({self.penalty_max}) must be >= "
                 f"penalty_init ({self.penalty_init})"
             )
-        if self.feasibility_tol <= 0.0:
+        if feasibility_tol <= 0.0:
             raise ValueError("ALMSettings.feasibility_tol must be positive")
-        if self.stationarity_tol <= 0.0:
+        if stationarity_tol <= 0.0:
             raise ValueError("ALMSettings.stationarity_tol must be positive")
-        if self.trust_radius_init is not None and self.trust_radius_init < 0.0:
+        if trust_radius_init is not None and trust_radius_init < 0.0:
             raise ValueError("ALMSettings.trust_radius_init must be nonnegative")
-        if self.trust_radius_min <= 0.0:
+        if trust_radius_min <= 0.0:
             raise ValueError("ALMSettings.trust_radius_min must be positive")
-        if not (0.0 < self.trust_radius_shrink < 1.0):
+        if not (0.0 < trust_radius_shrink < 1.0):
             raise ValueError("ALMSettings.trust_radius_shrink must be in (0, 1)")
-        if self.trust_radius_grow <= 1.0:
+        if trust_radius_grow <= 1.0:
             raise ValueError("ALMSettings.trust_radius_grow must be greater than 1")
-        if self.max_inner_attempts <= 0:
+        if max_inner_attempts <= 0:
             raise ValueError("ALMSettings.max_inner_attempts must be positive")
-        if self.multiplier_max is not None and self.multiplier_max <= 0.0:
-            raise ValueError("ALMSettings.multiplier_max must be positive when provided")
-        if self.history_max_entries is not None and self.history_max_entries <= 0:
-            raise ValueError("ALMSettings.history_max_entries must be positive when provided")
+        if relaxed_feasibility_gate_cap <= 0.0:
+            raise ValueError(
+                "ALMSettings.relaxed_feasibility_gate_cap must be positive"
+            )
+        if multiplier_max is not None and multiplier_max <= 0.0:
+            raise ValueError(
+                "ALMSettings.multiplier_max must be positive when provided"
+            )
+        if history_max_entries is not None and history_max_entries <= 0:
+            raise ValueError(
+                "ALMSettings.history_max_entries must be positive when provided"
+            )
 
 
 @dataclass(frozen=True)
@@ -390,35 +470,79 @@ def require_positive_alm_threshold(name: str, value) -> float:
 
 
 def validate_alm_cli_args(args) -> None:
-    if args.alm_max_outer_iters <= 0:
+    alm_max_outer_iters = _finite_alm_value(
+        "--alm-max-outer-iters",
+        args.alm_max_outer_iters,
+    )
+    if alm_max_outer_iters <= 0:
         raise ValueError("--alm-max-outer-iters must be positive")
-    max_subproblem_continuations = getattr(args, "alm_max_subproblem_continuations", None)
+    max_subproblem_continuations = getattr(
+        args,
+        "alm_max_subproblem_continuations",
+        None,
+    )
+    if max_subproblem_continuations is not None:
+        max_subproblem_continuations = _finite_alm_value(
+            "--alm-max-subproblem-continuations",
+            max_subproblem_continuations,
+        )
     if max_subproblem_continuations is not None and max_subproblem_continuations < 0:
         # Zero is valid (single-attempt mode); the loop is
         # ``range(max_subproblem_continuations + 1)``.
         raise ValueError("--alm-max-subproblem-continuations must be nonnegative")
-    if args.alm_penalty_init <= 0.0:
+    penalty_init = _finite_alm_value("--alm-penalty-init", args.alm_penalty_init)
+    penalty_scale = _finite_alm_value("--alm-penalty-scale", args.alm_penalty_scale)
+    penalty_max = _finite_alm_value_or_none(
+        "--alm-penalty-max",
+        getattr(args, "alm_penalty_max", None),
+    )
+    feas_tol = _finite_alm_value("--alm-feas-tol", args.alm_feas_tol)
+    stationarity_tol = _finite_alm_value(
+        "--alm-stationarity-tol",
+        args.alm_stationarity_tol,
+    )
+    if penalty_init <= 0.0:
         raise ValueError("--alm-penalty-init must be positive")
-    if args.alm_penalty_scale <= 1.0:
+    if penalty_scale <= 1.0:
         raise ValueError("--alm-penalty-scale must be greater than 1")
-    penalty_max = getattr(args, "alm_penalty_max", None)
     if penalty_max is not None and penalty_max <= 0.0:
         raise ValueError("--alm-penalty-max must be positive")
-    if penalty_max is not None and penalty_max < args.alm_penalty_init:
+    if penalty_max is not None and penalty_max < penalty_init:
         raise ValueError(
             f"--alm-penalty-max ({penalty_max}) must be >= --alm-penalty-init ({args.alm_penalty_init})"
         )
-    if args.alm_feas_tol <= 0.0:
+    if feas_tol <= 0.0:
         raise ValueError("--alm-feas-tol must be positive")
-    if args.alm_stationarity_tol <= 0.0:
+    if stationarity_tol <= 0.0:
         raise ValueError("--alm-stationarity-tol must be positive")
-    trust_radius_init = getattr(args, "alm_trust_radius_init", None)
-    trust_radius_min = getattr(args, "alm_trust_radius_min", None)
-    trust_radius_shrink = getattr(args, "alm_trust_radius_shrink", None)
-    trust_radius_grow = getattr(args, "alm_trust_radius_grow", None)
-    max_inner_attempts = getattr(args, "alm_max_inner_attempts", None)
-    curvature_smoothing = getattr(args, "alm_curvature_smoothing", None)
-    distance_smoothing = getattr(args, "alm_distance_smoothing", None)
+    trust_radius_init = _finite_alm_value_or_none(
+        "--alm-trust-radius-init",
+        getattr(args, "alm_trust_radius_init", None),
+    )
+    trust_radius_min = _finite_alm_value_or_none(
+        "--alm-trust-radius-min",
+        getattr(args, "alm_trust_radius_min", None),
+    )
+    trust_radius_shrink = _finite_alm_value_or_none(
+        "--alm-trust-radius-shrink",
+        getattr(args, "alm_trust_radius_shrink", None),
+    )
+    trust_radius_grow = _finite_alm_value_or_none(
+        "--alm-trust-radius-grow",
+        getattr(args, "alm_trust_radius_grow", None),
+    )
+    max_inner_attempts = _finite_alm_value_or_none(
+        "--alm-max-inner-attempts",
+        getattr(args, "alm_max_inner_attempts", None),
+    )
+    curvature_smoothing = _finite_alm_value_or_none(
+        "--alm-curvature-smoothing",
+        getattr(args, "alm_curvature_smoothing", None),
+    )
+    distance_smoothing = _finite_alm_value_or_none(
+        "--alm-distance-smoothing",
+        getattr(args, "alm_distance_smoothing", None),
+    )
     if trust_radius_init is not None and trust_radius_init < 0.0:
         raise ValueError("--alm-trust-radius-init must be nonnegative")
     if trust_radius_min is not None and trust_radius_min <= 0.0:

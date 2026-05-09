@@ -98,6 +98,18 @@ def write_stage2_results_with_digest(stage2_bs_path: Path, stage2_results: dict)
     return results_path
 
 
+def assert_uses_portable_summary_json_writer(
+    testcase: unittest.TestCase,
+    module_path: Path,
+) -> None:
+    source = module_path.read_text()
+
+    testcase.assertIn("write_json(summary_path, summary)", source)
+    testcase.assertIn("json_dumps(summary, indent=2)", source)
+    testcase.assertNotIn("json.dump(summary", source)
+    testcase.assertNotIn("json.dumps(summary", source)
+
+
 def load_alm_utils_module():
     alm_utils_path = (
         Path(__file__).resolve().parents[2]
@@ -1904,6 +1916,46 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(override_config.basin_seed, 42)
         self.assertEqual(module._expected_stage2_artifact_metadata(override_config)["basin_seed"], 42)
 
+    def test_stage2_alm_wrapper_rejects_nonfinite_alm_spec_before_summary_output(self):
+        module = load_stage2_alm_wrapper_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            spec_path = tmpdir_path / "stage2_nan_alm_spec.json"
+            spec_path.write_text(
+                json.dumps(
+                    make_complete_stage2_spec_payload(
+                        alm_distance_smoothing=float("nan")
+                    )
+                ),
+                encoding="utf-8",
+            )
+            output_root = tmpdir_path / "outputs"
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "--alm-distance-smoothing must be finite",
+            ):
+                module.main(
+                    [
+                        "--dry-run",
+                        "--plasma-surf-filename",
+                        DEFAULT_ALM_WRAPPER_SURFACE,
+                        "--stage2-spec-json",
+                        str(spec_path),
+                        "--output-root",
+                        str(output_root),
+                    ]
+                )
+
+            self.assertFalse(output_root.exists())
+
+    def test_stage2_alm_wrapper_uses_portable_summary_json_writer(self):
+        assert_uses_portable_summary_json_writer(
+            self,
+            STAGE2_ALM_WRAPPER_MODULE_PATH,
+        )
+
     def test_single_stage_thresholded_physics_rerun_wrapper_pins_thresholded_physics_thresholds_and_warn_mode(self):
         source = SINGLE_STAGE_THRESHOLDED_PHYSICS_RERUN_MODULE_PATH.read_text()
 
@@ -2171,6 +2223,35 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             default_threshold,
         )
         self.assertEqual(validated, float(default_threshold))
+
+    def test_single_stage_thresholded_physics_rerun_wrapper_rejects_nonfinite_threshold(self):
+        module = load_single_stage_thresholded_physics_rerun_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_single_stage_thresholded_physics_alm.py",
+                "--dry-run",
+                "--plasma-surf-filename",
+                DEFAULT_ALM_WRAPPER_SURFACE,
+                "--stage2-bs-path",
+                "seed.json",
+                "--alm-qs-threshold",
+                "nan",
+            ],
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "ALM threshold '--alm-qs-threshold' must be a finite positive value",
+            ):
+                module.main()
+
+    def test_single_stage_thresholded_physics_rerun_wrapper_uses_portable_summary_json_writer(self):
+        assert_uses_portable_summary_json_writer(
+            self,
+            SINGLE_STAGE_THRESHOLDED_PHYSICS_RERUN_MODULE_PATH,
+        )
 
     def test_single_stage_thresholded_physics_rerun_wrapper_rejects_stage2_surface_mismatch(self):
         module = load_single_stage_thresholded_physics_rerun_module()

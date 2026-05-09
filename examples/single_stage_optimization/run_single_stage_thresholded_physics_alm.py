@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -18,6 +17,7 @@ from workflow_runner_common import (  # noqa: E402
     clear_dry_run_marker,
     discover_single_results_path,
     dry_run_marker_path,
+    json_dumps,
     load_json,
     load_validated_stage2_seed_results,
     maybe_load_validated_stage2_seed_results,
@@ -27,11 +27,16 @@ from workflow_runner_common import (  # noqa: E402
     validate_constraint_cli_overrides,
     run_command,
     snapshot_single_results_paths,
+    write_json,
     write_dry_run_marker,
 )
 from banana_opt.single_stage_banana_current_mode import (  # noqa: E402
     BANANA_CURRENT_MODE_INDEPENDENT,
     BANANA_CURRENT_MODE_SHARED,
+)
+from alm_utils import (  # noqa: E402
+    require_positive_alm_threshold,
+    validate_alm_cli_args,
 )
 
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_single_stage_thresholded_physics_alm"
@@ -44,6 +49,12 @@ DEFAULT_ALM_IOTA_PENALTY_THRESHOLD = 1.0e-4
 # 0.5*max(L - L_target, 0)**2 <= T. With T=1e-4, allowable overshoot is
 # sqrt(2*T) ~= 0.014 m. See README "Length threshold units" section.
 DEFAULT_ALM_LENGTH_PENALTY_THRESHOLD = 1.0e-4
+_ALM_THRESHOLD_ARGS = (
+    ("--alm-qs-threshold", "alm_qs_threshold"),
+    ("--alm-boozer-threshold", "alm_boozer_threshold"),
+    ("--alm-iota-penalty-threshold", "alm_iota_penalty_threshold"),
+    ("--alm-length-penalty-threshold", "alm_length_penalty_threshold"),
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -411,8 +422,15 @@ def build_summary(
     return summary
 
 
+def validate_thresholded_physics_alm_args(args: argparse.Namespace) -> None:
+    validate_alm_cli_args(args)
+    for flag_name, attr_name in _ALM_THRESHOLD_ARGS:
+        require_positive_alm_threshold(flag_name, getattr(args, attr_name))
+
+
 def main() -> int:
     args = parse_args()
+    validate_thresholded_physics_alm_args(args)
     output_root = resolved_path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     command = build_single_stage_thresholded_physics_command(args)
@@ -462,9 +480,8 @@ def main() -> int:
             results=results,
         )
 
-    with summary_path.open("w", encoding="utf-8") as outfile:
-        json.dump(summary, outfile, indent=2)
-    print(json.dumps(summary, indent=2))
+    write_json(summary_path, summary)
+    print(json_dumps(summary, indent=2))
     return 0
 
 
