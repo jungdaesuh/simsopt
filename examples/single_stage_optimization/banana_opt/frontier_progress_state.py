@@ -232,25 +232,10 @@ class FrontierCampaignProgress:
             FrontierLaneRecord.from_json_dict(item)
             for item in payload.get("lane_records", [])
         ]
-        archive_members_payload = payload.get("archive_members", [])
-        provisional_archive_members_payload = payload.get(
-            "provisional_archive_members",
-            [],
+        provisional_archive_members = replay_provisional_archive_from_lane_records(
+            lane_records
         )
-        archive_members = [
-            frontier_archive_member_from_json_dict(item)
-            for item in archive_members_payload
-        ]
-        provisional_archive_members = [
-            frontier_archive_member_from_json_dict(item)
-            for item in provisional_archive_members_payload
-        ]
-        if not provisional_archive_members:
-            provisional_archive_members = replay_provisional_archive_from_lane_records(
-                lane_records
-            )
-        if not archive_members:
-            archive_members = replay_archive_from_lane_records(lane_records)
+        archive_members = replay_archive_from_lane_records(lane_records)
         target_payload = payload.get("target_payload")
         early_stop_status_payload = payload.get("early_stop_status")
         return cls(

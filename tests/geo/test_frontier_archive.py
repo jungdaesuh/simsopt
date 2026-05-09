@@ -1,3 +1,4 @@
+from dataclasses import replace
 import math
 import unittest
 import warnings
@@ -394,6 +395,80 @@ class FrontierArchiveTests(unittest.TestCase):
         replayed_members = progress_state_module.replay_archive_from_lane_records(lane_records)
 
         self.assertEqual([member.member_id for member in replayed_members], ["campaign:lane_02"])
+
+    def test_progress_resume_rebuilds_stale_persisted_archives_from_lane_records(self):
+        archive_module = load_frontier_archive_module()
+        progress_state_module = load_frontier_progress_state_module()
+
+        incumbent = self._member(
+            archive_module,
+            iota=0.17,
+            volume=0.10,
+            qa_error=0.011,
+            boozer_residual=0.008,
+        )
+        candidate = self._member(
+            archive_module,
+            member_id="campaign:lane_02",
+            soft_search_score=-1.5,
+        )
+        candidate_provisional = replace(
+            candidate,
+            member_id="campaign:lane_02:provisional",
+            archive_state=archive_module.FRONTIER_ARCHIVE_STATE_PROVISIONAL,
+        )
+        stale_provisional = replace(
+            incumbent,
+            member_id="campaign:lane_01:provisional",
+            archive_state=archive_module.FRONTIER_ARCHIVE_STATE_PROVISIONAL,
+        )
+
+        archive_members, incumbent_update = archive_module.update_frontier_archive(
+            [],
+            incumbent,
+        )
+        archive_members, candidate_update = archive_module.update_frontier_archive(
+            archive_members,
+            candidate,
+        )
+        lane_records = [
+            self._lane_record(
+                progress_state_module,
+                "lane_01",
+                incumbent,
+                archive_update=incumbent_update,
+            ),
+            self._lane_record(
+                progress_state_module,
+                "lane_02",
+                candidate,
+                archive_update=candidate_update,
+                provisional_archive_member=candidate_provisional,
+                results=None,
+            ),
+        ]
+        payload = {
+            "schema_version": progress_state_module.FRONTIER_CAMPAIGN_PROGRESS_SCHEMA_VERSION,
+            "campaign_id": "campaign",
+            "frontier_version": "frontier_v3_multilane_local_v1",
+            "frontier_engine": "multilane_local",
+            "target_payload": None,
+            "lane_records": [record.to_json_dict() for record in lane_records],
+            "provisional_archive_members": [stale_provisional.to_json_dict()],
+            "archive_members": [incumbent.to_json_dict()],
+            "early_stop_status": None,
+        }
+
+        progress = progress_state_module.FrontierCampaignProgress.from_json_dict(payload)
+
+        self.assertEqual(
+            [member.member_id for member in progress.provisional_archive_members],
+            ["campaign:lane_02:provisional"],
+        )
+        self.assertEqual(
+            [member.member_id for member in progress.archive_members],
+            ["campaign:lane_02"],
+        )
 
     def test_finalize_archive_member_converts_provisional_member_to_canonical_final_member(self):
         archive_module = load_frontier_archive_module()

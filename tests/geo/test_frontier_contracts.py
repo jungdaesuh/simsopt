@@ -219,6 +219,58 @@ class FrontierContractTests(unittest.TestCase):
         self.assertEqual(status["reason"], "archive_stagnation")
         self.assertEqual(status["no_improvement_streak"], 2)
 
+    def test_update_frontier_early_stop_status_treats_archive_growth_as_progress(self):
+        archive_module = load_frontier_archive_module()
+        runtime_calibration = load_frontier_runtime_calibration_module()
+        runtime_defaults = self._runtime_defaults(
+            runtime_calibration,
+            requested_num_lanes=2,
+            requested_lane_budget=10,
+            requested_early_stop_patience_lanes=1,
+            requested_early_stop_min_certified=1,
+            requested_early_stop_min_hypervolume_gain=1.0,
+        )
+        iota_member = make_frontier_archive_member(
+            archive_module,
+            member_id="campaign:lane_01",
+            iota=0.18,
+            volume=0.10,
+            qa_error=0.012,
+            boozer_residual=0.008,
+            soft_search_score=-1.0,
+            distance_from_seed=0.1,
+            results_path="/tmp/lane_01/results.json",
+        )
+        volume_member = make_frontier_archive_member(
+            archive_module,
+            member_id="campaign:lane_02",
+            iota=0.15,
+            volume=0.11,
+            qa_error=0.012,
+            boozer_residual=0.008,
+            soft_search_score=-1.1,
+            distance_from_seed=0.1,
+            results_path="/tmp/lane_02/results.json",
+        )
+
+        status = runtime_calibration.update_frontier_early_stop_status(
+            status=None,
+            certified_archive_members_list=[iota_member],
+            hypervolume_reference=self.HYPERVOLUME_REFERENCE,
+            runtime_defaults=runtime_defaults,
+        )
+        status = runtime_calibration.update_frontier_early_stop_status(
+            status=status,
+            certified_archive_members_list=[iota_member, volume_member],
+            hypervolume_reference=self.HYPERVOLUME_REFERENCE,
+            runtime_defaults=runtime_defaults,
+        )
+
+        self.assertFalse(status["triggered"])
+        self.assertEqual(status["no_improvement_streak"], 0)
+        self.assertEqual(status["best_archive_size"], 2)
+        self.assertEqual(status["best_hypervolume"], 0.0)
+
     def test_epsilon_thresholds_round_trip(self):
         contracts = load_frontier_contracts_module()
 

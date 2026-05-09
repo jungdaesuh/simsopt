@@ -288,20 +288,27 @@ def update_frontier_early_stop_status(
     )
     previous_best_hypervolume = previous_status.get("best_hypervolume")
     previous_best_archive_size = int(previous_status.get("best_archive_size", 0))
+    archive_size_improved = len(certified_members) > previous_best_archive_size
 
-    improved = False
-    if current_hypervolume is not None:
-        improved = (
+    hypervolume_improved = (
+        current_hypervolume is not None
+        and (
             previous_best_hypervolume is None
             or float(current_hypervolume) >= float(previous_best_hypervolume)
             + runtime_defaults.early_stop_min_hypervolume_gain
         )
-    else:
-        improved = len(certified_members) > previous_best_archive_size
+    )
+    improved = archive_size_improved or hypervolume_improved
 
     if improved:
         previous_status["no_improvement_streak"] = 0
-        previous_status["best_hypervolume"] = current_hypervolume
+        best_hypervolume = previous_best_hypervolume
+        if current_hypervolume is not None and (
+            previous_best_hypervolume is None
+            or float(current_hypervolume) > float(previous_best_hypervolume)
+        ):
+            best_hypervolume = current_hypervolume
+        previous_status["best_hypervolume"] = best_hypervolume
         previous_status["best_archive_size"] = len(certified_members)
     else:
         previous_status["no_improvement_streak"] = int(
