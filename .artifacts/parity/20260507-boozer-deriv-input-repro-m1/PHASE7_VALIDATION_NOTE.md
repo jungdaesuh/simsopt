@@ -135,17 +135,40 @@ in this slice:
 
 1. **Phase 4 (residual-FMA restructuring).** The remaining 1–2 ULP gap
    on `gamma`, `B`, and the gradient cascade is FMA-fusion (plan §1
-   item 3). Closing it requires either:
-   - A `jax.lax.optimization_barrier` probe under the exact transform
-     stack (`jax.jacfwd` for surface derivatives at line 1069 + the
-     `jax.value_and_grad` for label terms at line 1211); the plan §18
-     probe log only verified the barrier under `jax.jit` and `jax.vmap`,
-     **not** under those autodiff transforms.
-   - The Side Track x86_64 FMA-fusion reproducer
-     (`benchmarks/parity/lane4_fma_fusion_repro_x86.py` and
-     `lane5_hlo_dump_repro_x86.py` per plan §5) to confirm the fusion
-     shape XLA picks on the production target before adopting any
-     restructuring.
+   item 3). Closing it is now driven by **explicit grouping** plus a
+   **canonical CPU-oracle boundary-input bundle**, not by
+   `optimization_barrier`.
+
+   > **Retracted lever (2026-05-08):** prior versions of this note
+   > directed an `optimization_barrier` probe under
+   > `jax.jacfwd(_surface_geometry_and_derivatives_from_dofs)` and
+   > `jax.value_and_grad(_label_value_from_surface_dofs)`. That
+   > direction is **dead** — see plan §19.2 and §21:
+   > `OptimizationBarrierExpander` deletes the barrier op before LLVM
+   > IR is emitted, so the autodiff-rule question is moot at the
+   > LLVM-fusion layer. `reduce_precision(x, 11, 52)` on float64 is
+   > similarly a no-op (plan §19.3). Phase 4 treats explicit grouping
+   > as a local candidate lever per plan §19.5; production acceptance
+   > still requires x86_64 float64 object-code proof.
+
+   The path to closure is the Phase 4 entry checklist in plan §10:
+   - **P4.1** — pin producer snapshots and a canonical CPU-oracle
+     residual-input bundle to `.npy` with sha256 manifest.
+   - **P4.2** — baseline the C++ object disassembly at
+     `src/simsoptpp/boozerresidual_impl.h:128/137/148` (and the
+     iota_grad/G_grad sites at :176-183, :190-197).
+   - **P4.3** — restructure the JAX 3-term sums in
+     `boozer_residual_scalar_and_grad_cpu_ordered` (lines 320-432)
+     into the right-nested explicit-grouping shape.
+   - **P4.4** — verify the JAX object code shape matches C++ via
+     post-opt LLVM IR + `objdump`.
+   - **P4.5/P4.5b** — canonical-input byte tests as the byte arbiters;
+     producer CPU-vs-JAX dumps remain upstream diagnostics.
+
+   Side Track x86_64 FMA-fusion reproducers (plan §5,
+   `lane4_fma_fusion_repro_x86.py` / `lane5_hlo_dump_repro_x86.py`)
+   are still useful for confirming the XLA fusion shape on the
+   production target before P4.3 lands.
 
    **Phase 4 is therefore not yet ready to ship.** The strict gate at
    `benchmarks/single_stage_init_parity.py:1905` will continue to report
@@ -189,16 +212,37 @@ this slice** — Phase 4 is the gate for that.
 
 ## Next slice (Phase 4 entry checklist)
 
-Per plan §10:
+Per plan §10 / §16 (revised 2026-05-08):
 
 - [ ] Keep Phase 4 staged separately from unrelated artifact directories.
-- [ ] Re-run the `optimization_barrier` probe under
-      `jax.jacfwd(_surface_geometry_and_derivatives_from_dofs)` and
-      `jax.value_and_grad(_label_value_from_surface_dofs)`.
+- [ ] **P4.1** — extend
+      `benchmarks/parity/boozer_derivative_input_repro.py` (or the
+      capture helper in `boozer_derivative_input_census.py`) with a
+      `--dump-arrays-as-npy <DIR>` mode that writes per-array `.npy`
+      producer snapshots, a canonical CPU-oracle residual-input bundle,
+      and a `manifest.json` of (role, name, sha256) pairs. See plan
+      §10 P4.1.
+- [ ] **P4.2** — baseline C++ object disassembly at
+      `src/simsoptpp/boozerresidual_impl.h:128/137/148` plus the
+      iota_grad/G_grad FMA sites at :176-183 and :190-197.
+- [ ] **P4.3** — restructure the JAX 3-term sums in
+      `boozer_residual_scalar_and_grad_cpu_ordered` (lines 320-432) to
+      the right-nested explicit-grouping shape (plan §20 ablation
+      surface).
 - [ ] Land the Side Track lane 4/5 x86_64 reproducers under
-      `.artifacts/bit-identity-deepdive-2026-05-07/lane{4,5}_x86_repro/`.
-- [ ] Decide between explicit-grouping restructuring vs
-      `optimization_barrier`-guarded fma fixed point.
-- [ ] Re-run the strict `single_stage_init_parity.py` gate; emit a new
-      artifact under
+      `.artifacts/bit-identity-deepdive-2026-05-07/lane{4,5}_x86_repro/`
+      to confirm the XLA fusion shape on the production target before
+      P4.3 lands.
+- [ ] **P4.4** — verify JAX object code shape matches C++ via
+      post-opt LLVM IR + `objdump`.
+- [ ] **P4.5 / P4.5b** — residual-only and full penalty
+      value+gradient byte tests using the canonical pinned input bundle;
+      both must report `max_abs_diff == 0.0`.
+- [ ] **P4.6** — re-run the strict `single_stage_init_parity.py`
+      gate against the failing artifact's candidate end-to-end; emit a
+      new artifact under
       `.artifacts/parity/<DATE>-derivative-bit-identity-zeroing-pass/`.
+
+> **Removed (2026-05-08):** the prior `optimization_barrier` probe
+> step and the explicit-grouping-vs-barrier decision step are dead.
+> See plan §19.2 / §21 for why; do not pursue them.

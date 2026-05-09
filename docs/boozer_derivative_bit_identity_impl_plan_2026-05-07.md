@@ -6,6 +6,8 @@
   Phase 4 entry checklist authoritative in §10 (revised), §19, §20, §21
 - Companion strategy doc: `docs/boozer_derivative_bit_identity_zeroing_plan_2026-05-07.md`
   (older `optimization_barrier`/`reduce_precision` wording superseded by §21)
+- Companion dual-mode doc: `docs/parity_dual_mode_contract_2026-05-08.md`
+  (diagnostic reporting context only; does not loosen the strict gate)
 - Companion in-flight slice: `docs/boozer_bfgs_pre_newton_contract_impl_plan_2026-05-07.md`
 
 ## 1. Why This Plan Exists
@@ -465,7 +467,7 @@ for (int j = 0; j < num_quad_points; ++j) {
 > 2026-05-07) recommended `jax.lax.optimization_barrier` and
 > `jax.lax.reduce_precision` as FMA-fusion levers. Empirical probes on
 > 2026-05-08 (recorded in §19) **retracted** both. This revision replaces
-> §10 with the validated direction. See §19 for the supporting evidence and
+> §10 with the candidate direction. See §19 for the supporting evidence and
 > §20 for the expanded ablation surface.
 
 **Context.** Phase 2/3 left a 1–2 ULP gradient drift after the cpu_ordered
@@ -480,7 +482,7 @@ it doesn't. This phase aligns the JAX expression structure to the C++
 nesting, then verifies via post-optimization LLVM IR + object disassembly,
 and validates with a boundary-pinned residual-gradient byte test.
 
-### Validated levers and dead ends (2026-05-08)
+### Local probes, candidate levers, and dead ends (2026-05-08)
 
 * **`jax.lax.optimization_barrier`** — DEAD END at the LLVM-fusion layer.
   XLA's `OptimizationBarrierExpander` (`xla/service/cpu/cpu_compiler.cc:943`)
@@ -508,11 +510,13 @@ and validates with a boundary-pinned residual-gradient byte test.
   is inside a `/* ... */` block comment 132-151; the inline
   `_mm_rsqrt_ps` ps-roundtrip is at line 156). JAX's
   `_explicit_rsqrt = 1.0 / jnp.sqrt(x)` should match modulo libm.
-* **Explicit grouping (validated lever).** Right-nesting
+* **Explicit grouping (local candidate lever).** Right-nesting
   `tail = c*d + e*f; result = a*b + tail` in JAX produces, on aarch64,
   object code shaped `fmul e*f; fmadd c*d + tail; fmadd a*b + tail` —
   matching the C++ `xsimd::fma(a, b, xsimd::fma(c, d, e*f))` nesting at
-  `boozerresidual_impl.h:128`. Empirical reproducer recorded in §19.
+  `boozerresidual_impl.h:128`. Empirical reproducer recorded in §19. This
+  is not a production acceptance proof until the same shape is confirmed for
+  float64 on the x86_64 production target.
 
 ### Tasks (revised)
 
@@ -523,24 +527,32 @@ and validates with a boundary-pinned residual-gradient byte test.
       helpers in `benchmarks/parity/boozer_derivative_input_census.py` and
       `benchmarks/parity/boozer_derivative_input_repro.py` only digest
       `tobytes()` for the SHA-256 column; they do not persist arrays. P4.1
-      must EXTEND the capture helper (or the repro driver) to also write
-      each boundary array to `.npy`. Suggested CLI surface (final flag
-      name is implementer's choice; this is the recommended shape):
+      must EXTEND the capture helper (or the repro driver) to write two
+      distinct artifacts:
+      - producer snapshots: `cpu_<name>.npy` and `jax_<name>.npy`, preserving
+        the current CPU-vs-JAX boundary-input census evidence;
+      - a canonical residual-input bundle: `canonical_<name>.npy`, copied
+        from the CPU oracle producer and used as the single input set for
+        both the C++ and JAX residual calls in P4.5/P4.5b.
+      Suggested CLI surface (final flag name is implementer's choice; this
+      is the recommended shape):
       ```
       python benchmarks/parity/boozer_derivative_input_repro.py \
           --census --parity-policy cpu_ordered \
           --dump-arrays-as-npy .artifacts/parity/<DATE>-residual-pinned-inputs/
       ```
       Implementation: write the CPU side via
-      `np.save(<dir>/cpu_<name>.npy, np.ascontiguousarray(arr, dtype=np.float64))`
-      and the JAX side via
+      `np.save(<dir>/cpu_<name>.npy, np.ascontiguousarray(arr, dtype=np.float64))`,
+      write the JAX side via
       `np.save(<dir>/jax_<name>.npy, np.asarray(jax.device_get(arr), dtype=np.float64))`,
-      matching the bytes the existing SHA-256 column already digests, for
-      every name in `CENSUS_BOUNDARY_ARRAY_ORDER`. Emit a sibling
-      `manifest.json` listing the (name, sha256) pairs so the loader can
-      verify integrity. Once written, subsequent tests act on
-      byte-identical inputs across CPU and JAX, isolating residual-assembly
-      arithmetic from upstream surface/BS drift.
+      and write `canonical_<name>.npy` from the CPU side for every name in
+      `CENSUS_BOUNDARY_ARRAY_ORDER`. Emit a sibling `manifest.json` listing
+      the role (`cpu`, `jax`, `canonical`), name, dtype, shape, and sha256
+      for every file. The producer snapshots remain upstream diagnostics:
+      current `cpu_ordered_full` has `n_byte_identical_arrays = 0`, so they
+      cannot be used to claim residual isolation. The canonical bundle is
+      what makes P4.5/P4.5b feed byte-identical inputs to both residual
+      implementations.
 - [ ] **P4.2 — Baseline C++ object disassembly.** Disassemble the simsoptpp
       `.o` for the xsimd::fma sites at `boozerresidual_impl.h:128, 137, 148`
       with `objdump -d` (and on the production target host if applicable,
@@ -565,10 +577,14 @@ and validates with a boundary-pinned residual-gradient byte test.
       P4.2 C++ baseline at the corresponding instruction sites.
 - [ ] **P4.5 — Boundary-pinned residual-only byte test.**
       Add `tests/geo/test_boozer_residual_pinned_input_byte_parity.py`
-      under the `parity_census` marker. Loads pinned `.npy` from P4.1,
-      calls `boozer_residual_scalar_and_grad_cpu_ordered` (JAX) and
-      `_call_boozer_residual_ds` (CPU C++) on byte-identical inputs,
-      asserts `max|grad_jax - grad_cpu| == 0.0`. **This test is the
+      under the `parity_census` marker. Load the P4.1
+      `canonical_<name>.npy` bundle once, then pass the same host arrays to
+      `_call_boozer_residual_ds` (CPU C++) and to
+      `boozer_residual_scalar_and_grad_cpu_ordered` (JAX). Do not feed
+      separate `cpu_<name>.npy` and `jax_<name>.npy` producer snapshots into
+      this test; those arrays are allowed to remain non-byte-identical and
+      belong to the upstream census. Assert `max|grad_jax - grad_cpu| == 0.0`.
+      **This test is the
       *first-tier* arbiter — it isolates the residual kernel only.**
       Object-shape match in P4.4 is a *necessary* condition, not
       sufficient — vector lane behavior, sub-expression reordering, and
@@ -597,7 +613,7 @@ and validates with a boundary-pinned residual-gradient byte test.
       Each of those last two added terms is its own product-sum, and the
       final `gradient + rl·label + rz·dgamma` itself is a 3-term sum
       (another FMA-shape candidate not in §20). P4.5b extends P4.5 by
-      pinning the same boundary inputs and additionally pinning the label
+      pinning the same canonical boundary inputs and additionally pinning the label
       geometry / coil_set_spec, then comparing
       `_boozer_penalty_value_and_grad_cpu_ordered` (JAX) against
       `boozer_penalty_constraints_vectorized` (CPU) at byte level for both
@@ -620,13 +636,20 @@ and validates with a boundary-pinned residual-gradient byte test.
       * Document the residual as instruction-selection-level divergence not
         reachable from JAX-source-level changes.
       * Surface contract-level alternatives to the project owner as POLICY
-        decisions, NOT root-cause closures:
+        decisions, NOT root-cause closures. **Under v2 3b semantics
+        (`docs/parity_dual_mode_contract_2026-05-08.md` §10) the
+        production tolerance contract is locked: no `rtol=1e-N` lane
+        relaxes the strict byte-identity gate. The originally-listed
+        `strict_pre_newton_state` lane at `rtol=1e-12` is therefore
+        REMOVED from this list.** Remaining policy alternatives:
         - Adopt noise-tolerant BFGS (Shi-Xie-Byrd-Nocedal 2020 lengthening,
           arXiv:2010.04352) — addresses BFGS amplification at algorithm
           level, not at gradient bit identity.
-        - Add a `strict_pre_newton_state` lane to
-          `PARITY_LADDER_TOLERANCES` at `rtol=1e-12` — relaxes byte-identity
-          to a documented ULP-bound.
+        - Accept the residual gap as a **build-host fingerprint** and
+          quarantine the affected gate as build-pinned: pass on the
+          local x86_64 build host, document explicitly that strict-mode
+          bytes are valid only on this build (cross-host pinning is a
+          dual-mode plan DM-E #3 slice).
       * Neither of these is a "fix" — they're acceptance-contract changes.
         They MUST be merged as explicit policy decisions, not as silent
         Phase 4 closure.
@@ -728,7 +751,7 @@ that are necessary to close the gate.
 
 | Risk | Mitigation |
 |---|---|
-| ~~`jax.lax.optimization_barrier` behavior under autodiff transforms~~ — RETRACTED 2026-05-08 (see §19.2, §21). The HLO `optimization_barrier` is erased by `OptimizationBarrierExpander` before LLVM IR is emitted; the autodiff-rule question is moot at the LLVM-fusion layer. | Risk closed. Phase 4 uses explicit grouping (validated empirically per §19.5) rather than `optimization_barrier`. |
+| ~~`jax.lax.optimization_barrier` behavior under autodiff transforms~~ — RETRACTED 2026-05-08 (see §19.2, §21). The HLO `optimization_barrier` is erased by `OptimizationBarrierExpander` before LLVM IR is emitted; the autodiff-rule question is moot at the LLVM-fusion layer. | Risk closed. Phase 4 investigates explicit grouping as a local candidate lever (see §19.5) rather than `optimization_barrier`; production acceptance still requires x86_64 float64 object-code proof. |
 | Cross-machine byte identity breaks (laptop dev vs RunPod prod) | Out of scope; document explicitly. Each host has its own per-build oracle. |
 | Adding `reduction(+:val)` to C++ surface kernels in future would break per-build determinism | Add CI lint that blocks new OMP reductions in `surfacexyztensorfourier.h`, `biot_savart_impl.h`, `boozerresidual_impl.h`. |
 | `jax.jacfwd` over `*_cpu_ordered` may still choose derivative arithmetic/batching order that differs from C++ analytic derivative routines | Default to analytic dgamma_by_dcoeff kernels; do not rely on jacfwd for parity twins. |
@@ -769,15 +792,28 @@ that are necessary to close the gate.
   surface in `boozer_residual_scalar_and_grad_cpu_ordered` at lines
   320–432 (≥14 candidate FMA-shape sites — see §20).
 
-### Untouched (do not modify)
+### Untouched (do not modify within this slice)
 
 - `src/simsoptpp/**` — CPU C++/pybind oracle stays read-only.
-- `benchmarks/single_stage_init_parity.py:1905` gate function.
-- `tests/test_benchmark_helpers.py:1415` gate regression test.
-- `benchmarks/validation_ladder_contract.py::PARITY_LADDER_TOLERANCES`.
+- `benchmarks/single_stage_init_parity.py:1905` gate function.†
+- `tests/test_benchmark_helpers.py:1415` gate regression test.†
+- `benchmarks/validation_ladder_contract.py::PARITY_LADDER_TOLERANCES`.†
 - Production JAX hot-path kernels: `surface_fourier_jax.py`,
   `jax_core/biotsavart.py`, `jax_core/field.py`, `field/biotsavart_jax_backend.py`
   — all keep matmul/einsum/jacfwd hot path.
+
+> **† Carve-out for the dual-mode contract.** The three "†" files are
+> *untouched within the bit-identity slice itself*, but the parallel
+> dual-mode workstream (`docs/parity_dual_mode_contract_2026-05-08.md`
+> §2.6, slices DM-A/DM-B) explicitly modifies them to add the
+> `PARITY_LADDER_REPORTING_CONTEXT["pre_newton_state_empirical"]`
+> reporting context and the optional `severity_context` argument on the
+> gate function. That carve-out is
+> narrowly scoped: gate pass/fail decisions, the strict byte-identity
+> contract, and existing `PARITY_LADDER_TOLERANCES` entries are
+> **not** permitted to change. If DM-A/B lands before Phase 4's gate
+> work, Phase 4 inherits the augmented file shape; this plan's
+> implementer simply re-runs against the post-DM-A/B state.
 
 ## 16. Today's First Checkbox (revised 2026-05-08)
 
@@ -797,8 +833,9 @@ Start here:
       `benchmarks/parity/boozer_derivative_input_repro.py` and/or the
       capture helpers in `benchmarks/parity/boozer_derivative_input_census.py`
       with a `--dump-arrays-as-npy <DIR>` mode (or equivalent flag) that
-      writes per-array `.npy` byte dumps plus a `manifest.json` with
-      (name, sha256) integrity pairs. See §10 P4.1 for the full spec.
+      writes producer snapshots plus a canonical CPU-oracle residual-input
+      bundle and a `manifest.json` with role/name/sha256 integrity pairs.
+      See §10 P4.1 for the full spec.
 
 After P4.1, P4.2 (C++ object disassembly baseline) and P4.3 (restructure
 JAX 3-term sums per §20) are the next steps. P4.4 verifies via post-opt
@@ -877,13 +914,14 @@ Recorded against the runtime resolved by `.conda/jax-0.9.2/bin/python`.
   emitted, so even if the autodiff rules preserve the HLO op, it does
   not block the LLVM-level `fmul + fadd → fmadd` combine. Phase 4 must
   NOT use `optimization_barrier` as an FMA-fusion lever; see §10
-  (revised) for the validated approach (explicit grouping + object-code
-  verification).**
+  (revised) for the local candidate approach (explicit grouping +
+  object-code verification).**
 - `jax.lax.fma` / `jnp.fma`: absent in JAX 0.10.0. ~~`optimization_barrier`
   is one of the available levers~~ — RETRACTED, see entry above. The
-  validated lever for Phase 4 is explicit right-nested grouping at the
-  JAX expression level (§19.5), with verification via object disassembly
-  (§19.6); there is no JAX-source-level FMA primitive to call directly.
+  local candidate lever for Phase 4 is explicit right-nested grouping at
+  the JAX expression level (§19.5), with verification via object
+  disassembly (§19.6); there is no JAX-source-level FMA primitive to call
+  directly.
 
 ### CPU oracle build
 
@@ -916,8 +954,9 @@ Recorded against the runtime resolved by `.conda/jax-0.9.2/bin/python`.
 ## 19. Phase 4 Empirical Validations (2026-05-08)
 
 This section records the probes that retracted the original §10 levers
-(`optimization_barrier`, `reduce_precision`) and validated the explicit
-grouping path. All probes ran on the local aarch64 host (Apple Silicon)
+(`optimization_barrier`, `reduce_precision`) and identified explicit
+grouping as the local candidate path. All probes ran on the local aarch64
+host (Apple Silicon)
 against the JAX 0.9.2 conda env at `.conda/jax-0.9.2/bin/python`. The
 production target is RunPod x86_64 (A100/H100); per the Side Track in §5,
 those probes are pending and may pick a different fma shape — re-run before
@@ -1034,7 +1073,8 @@ This shape — `fmul; fmadd; fmadd` with the trailing free multiply at the
 deepest position — is exactly what C++
 `xsimd::fma(a, b, xsimd::fma(c, d, e*f))` produces at
 `boozerresidual_impl.h:128`. **Explicit grouping is therefore an empirically
-validated lever, not a guess.**
+supported local candidate lever, not a guess.** It is not production-accepted
+until verified as float64 on the x86_64 production target.
 
 The example was on float32 (Python literals defaulted to f32 in the probe);
 the structural conclusion holds for f64 because the same SelectionDAG /
