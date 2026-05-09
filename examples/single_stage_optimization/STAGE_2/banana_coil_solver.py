@@ -2143,7 +2143,9 @@ def main(parsed_args=None):
     pointData = {"B_N/B": np.sum(new_bs.B().reshape(unitn.shape) *
         unitn, axis=2)[:, :, None] / np.sqrt(np.sum(new_bs.B().reshape(unitn.shape)**2, axis=2))[:, :, None]}
     new_surf.to_vtk(OUT_DIR_ITER + "surf_opt", extra_data=pointData)
-    new_surf.save(OUT_DIR_ITER + "surf_opt.json")
+    save_surf = getattr(new_surf, "save", None)
+    if callable(save_surf):
+        save_surf(OUT_DIR_ITER + "surf_opt.json")
     VV.to_vtk(OUT_DIR_ITER + "VV")
 
     # Create toroidal cross section plot

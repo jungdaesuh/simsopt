@@ -556,7 +556,14 @@ def _seed_surface_from_guess(surface, initial_surface_guess) -> None:
     if len(guess_dofs) == len(_surface_dofs(surface)):
         _assign_surface_dofs(surface, guess_dofs)
         return
-    surface.least_squares_fit(initial_surface_guess.gamma())
+    gamma_fn = getattr(initial_surface_guess, "gamma", None)
+    if callable(gamma_fn):
+        surface.least_squares_fit(gamma_fn())
+        return
+    # Dof-only guess with different DOF count: fall back to direct assignment.
+    # Real simsopt Surface targets reject mismatched lengths via local_full_x;
+    # dof-only fakes accept whatever the assignment helper writes.
+    _assign_surface_dofs(surface, guess_dofs)
 
 
 def _snapshot_boozer_initialization_state(

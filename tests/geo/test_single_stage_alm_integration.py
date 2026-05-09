@@ -2359,7 +2359,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
     def test_stage2_writes_loadable_surface_seed_artifact(self):
         source = STAGE2_MODULE_PATH.read_text()
 
-        self.assertIn('new_surf.save(OUT_DIR_ITER + "surf_opt.json")', source)
+        self.assertIn('save_surf = getattr(new_surf, "save", None)', source)
+        self.assertIn('save_surf(OUT_DIR_ITER + "surf_opt.json")', source)
 
     def test_stage2_results_contract_records_hardware_status_fields(self):
         source = STAGE2_MODULE_PATH.read_text()
