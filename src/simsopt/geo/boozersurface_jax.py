@@ -2895,6 +2895,23 @@ def _ls_factorization_backend(
     return "lapack-dgetrf"
 
 
+def _ls_shared_lu_piv_dispatch(optimizer_backend: str | None, lu_piv) -> bool:
+    return optimizer_backend != "scipy" and lu_piv is not None
+
+
+def _ls_linear_solve_backend(
+    *,
+    optimizer_backend: str | None,
+    plu_available: bool,
+    shared_lu_piv_dispatch: bool,
+) -> str:
+    if shared_lu_piv_dispatch:
+        return "dense-plu-shared"
+    if optimizer_backend == "scipy" and plu_available:
+        return "dense-plu"
+    return "operator"
+
+
 def _ls_factor_once_dispatch_eligible(H, *, max_dense_jacobian_bytes) -> bool:
     """Return whether ``decision_size**2 * 8 <= max_dense_jacobian_bytes``.
 
@@ -3368,10 +3385,9 @@ class BoozerSurfaceJAX(Optimizable):
                 linear_solve_factors,
             )
 
-        if (
-            linearization_kind == "hessian"
-            and self.options["optimizer_backend"] != "scipy"
-            and self.res.get("LU_PIV") is not None
+        if linearization_kind == "hessian" and _ls_shared_lu_piv_dispatch(
+            self.options["optimizer_backend"],
+            self.res.get("LU_PIV"),
         ):
             # Phase 2 factor-once dispatch (see
             # docs/parity_scientific_equivalence_contract_2026-05-09.md
@@ -5199,11 +5215,15 @@ class BoozerSurfaceJAX(Optimizable):
         else:
             lu_piv = None
             plu = None
+        shared_lu_piv_dispatch = _ls_shared_lu_piv_dispatch(
+            self.options["optimizer_backend"],
+            lu_piv,
+        )
         ls_hessian_symmetry_rel = _ls_hessian_symmetry_rel(H)
         ls_factorization_backend = _ls_factorization_backend(
             H if plu is not None else None,
             optimizer_backend=self.options["optimizer_backend"],
-            shared_dispatch=lu_piv is not None,
+            shared_dispatch=shared_lu_piv_dispatch,
         )
 
         G_for_res = (
@@ -5260,12 +5280,11 @@ class BoozerSurfaceJAX(Optimizable):
             "type": "ls",
             "optimizer_method": method,
             "linearization_kind": "hessian",
-            "linear_solve_backend": "dense-plu"
-            if (
-                lu_piv is not None
-                or (self.options["optimizer_backend"] == "scipy" and plu is not None)
-            )
-            else "operator",
+            "linear_solve_backend": _ls_linear_solve_backend(
+                optimizer_backend=self.options["optimizer_backend"],
+                plu_available=plu is not None,
+                shared_lu_piv_dispatch=shared_lu_piv_dispatch,
+            ),
             "dense_linear_solve_factors_available": plu is not None,
             "solve_generation": solve_generation,
             "weight_inv_modB": weight_inv_modB,

@@ -588,7 +588,8 @@ CPU/JAX `final_hessian` and `final_jacobian` summaries through:
 **Status:** module landed. `benchmarks/_cpp_compatible_probe.py`
 exposes `cpp_compatible_ls_newton_polish` (LS skeleton: validates
 `optimizer_backend="scipy"` and `materialize_dense_linearization=True`,
-then forwards to `BoozerSurfaceJAX.run_code()`) and
+then forwards explicit `iota_initial` / `G_initial` to
+`BoozerSurfaceJAX.run_code(iota, G=...)`) and
 `cpp_compatible_exact_newton` (host-resident dense exact Newton with
 unconditional Wilkinson refinement, no monotone-norm guard, host
 ``np.linalg.solve`` only, sign convention ``x ← x − dx`` matching

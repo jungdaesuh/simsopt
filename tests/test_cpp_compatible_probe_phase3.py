@@ -89,9 +89,19 @@ class _SyntheticLSBoozerSurface:
     def __init__(self, options: dict[str, Any]):
         self.boozer_type = "ls"
         self.options = dict(options)
+        self.run_code_args: tuple[float, float | None] | None = None
 
-    def run_code(self):
+    def run_code(self, iota, G=None):
+        self.run_code_args = (iota, G)
         return {"sentinel": "synthetic-ls-run-code-result"}
+
+
+def _run_synthetic_ls_probe(boozer_surface):
+    return _cpp_compatible_probe.cpp_compatible_ls_newton_polish(
+        boozer_surface,
+        iota_initial=0.31,
+        G_initial=0.07,
+    )
 
 
 def _make_linear_residual_fn(A: np.ndarray, b: np.ndarray):
@@ -145,8 +155,9 @@ def test_ls_skeleton_routes_through_scipy_backend():
             "materialize_dense_linearization": True,
         }
     )
-    result = _cpp_compatible_probe.cpp_compatible_ls_newton_polish(booz_ok)
+    result = _run_synthetic_ls_probe(booz_ok)
     assert result == {"sentinel": "synthetic-ls-run-code-result"}
+    assert booz_ok.run_code_args == (0.31, 0.07)
 
     # Wrong backend: harness must refuse before any solve work.
     booz_bad_backend = _SyntheticLSBoozerSurface(
@@ -156,7 +167,7 @@ def test_ls_skeleton_routes_through_scipy_backend():
         }
     )
     with pytest.raises(ValueError, match="optimizer_backend"):
-        _cpp_compatible_probe.cpp_compatible_ls_newton_polish(booz_bad_backend)
+        _run_synthetic_ls_probe(booz_bad_backend)
 
     # Missing materialization: harness must refuse.
     booz_bad_materialize = _SyntheticLSBoozerSurface(
@@ -166,7 +177,7 @@ def test_ls_skeleton_routes_through_scipy_backend():
         }
     )
     with pytest.raises(ValueError, match="materialize_dense_linearization"):
-        _cpp_compatible_probe.cpp_compatible_ls_newton_polish(booz_bad_materialize)
+        _run_synthetic_ls_probe(booz_bad_materialize)
 
     # Exact-mode booz must not be accepted by the LS entrypoint.
     booz_exact = _SyntheticLSBoozerSurface(
@@ -177,7 +188,7 @@ def test_ls_skeleton_routes_through_scipy_backend():
     )
     booz_exact.boozer_type = "exact"
     with pytest.raises(ValueError, match="LS-mode"):
-        _cpp_compatible_probe.cpp_compatible_ls_newton_polish(booz_exact)
+        _run_synthetic_ls_probe(booz_exact)
 
 
 # ---------------------------------------------------------------------------
@@ -631,7 +642,10 @@ def test_harness_public_api_signatures():
     )
 
     ls_sig = inspect.signature(_cpp_compatible_probe.cpp_compatible_ls_newton_polish)
-    assert list(ls_sig.parameters) == ["boozer_surface"]
+    assert list(ls_sig.parameters) == ["boozer_surface", "iota_initial", "G_initial"]
+    assert ls_sig.parameters["iota_initial"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert ls_sig.parameters["G_initial"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert ls_sig.parameters["G_initial"].default is None
 
     exact_sig = inspect.signature(_cpp_compatible_probe.cpp_compatible_exact_newton)
     expected_params = ["boozer_surface", "iota_initial", "G_initial", "tol", "maxiter"]

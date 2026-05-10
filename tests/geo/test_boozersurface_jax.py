@@ -4533,6 +4533,45 @@ class TestBoozerSurfaceJAXClass:
         np.testing.assert_allclose(H.T @ np.asarray(solved), np.asarray(rhs))
         assert bool(np.asarray(success)) is True
 
+    def test_get_adjoint_runtime_state_uses_shared_lu_piv_for_ondevice_hessian(self):
+        """JAX on-device factor-once metadata must match the packed-LU branch."""
+        booz = _make_mock_boozer_surface()
+        booz.options["optimizer_backend"] = "ondevice"
+        booz.need_to_run_code = False
+        n = booz._pack_decision_vector(0.3, 0.05).size
+        H = jnp.diag(jnp.linspace(1.0, 2.0, n, dtype=jnp.float64))
+        lu_piv = _opt._factor_dense_hessian(H, optimizer_backend="ondevice")
+        plu = _opt._plu_from_lu_piv(lu_piv)
+        booz.res = {
+            "success": True,
+            "primal_success": True,
+            "adjoint_linear_solve_available": True,
+            "sdofs": _runtime_sdofs_for(booz),
+            "iota": jnp.asarray(0.3, dtype=jnp.float64),
+            "G": jnp.asarray(0.05, dtype=jnp.float64),
+            "weight_inv_modB": True,
+            "linearization_kind": "hessian",
+            "hessian": H,
+            "PLU": plu,
+            "LU_PIV": lu_piv,
+            "dense_linear_solve_factors_available": True,
+            "vjp_groups": lambda *_args, **_kwargs: iter(()),
+        }
+
+        adjoint_state = booz.get_adjoint_runtime_state()
+        rhs = jnp.arange(1, n + 1, dtype=jnp.float64)
+        solved = adjoint_state.solve_forward(rhs)
+        expected = _opt._lu_solve_dense_hessian(
+            lu_piv,
+            rhs,
+            transpose=False,
+        )
+
+        assert adjoint_state.linear_solve_backend == "dense-plu-shared"
+        assert adjoint_state.linear_solve_factors is not None
+        assert adjoint_state.dense_linear_solve_factors_available is True
+        np.testing.assert_array_equal(np.asarray(solved), np.asarray(expected))
+
     def test_get_adjoint_runtime_state_rejects_unknown_kind_even_when_plu_exists(
         self,
     ):

@@ -128,7 +128,12 @@ def _validate_ls_harness_options(boozer_surface) -> None:
             )
 
 
-def cpp_compatible_ls_newton_polish(boozer_surface):
+def cpp_compatible_ls_newton_polish(
+    boozer_surface,
+    *,
+    iota_initial: float,
+    G_initial: float | None = None,
+):
     """Run the C++-compatible LS Newton-polish skeleton on a BoozerSurfaceJAX.
 
     Reference: ``docs/parity_scientific_equivalence_contract_2026-05-09.md``
@@ -155,6 +160,11 @@ def cpp_compatible_ls_newton_polish(boozer_surface):
             constructor option contract honoring
             ``optimizer_backend="scipy"`` and
             ``materialize_dense_linearization=True``.
+        iota_initial: Initial guess for the rotational transform. This
+            is forwarded to ``BoozerSurfaceJAX.run_code(iota, G=...)``.
+        G_initial: Optional initial guess for ``G``. ``None`` preserves
+            the standard ``run_code`` contract where ``G`` is computed
+            from fixed coil currents.
 
     Returns:
         The standard LS result dict from
@@ -170,7 +180,11 @@ def cpp_compatible_ls_newton_polish(boozer_surface):
             f"got boozer_type={boozer_surface.boozer_type!r}."
         )
     _validate_ls_harness_options(boozer_surface)
-    return boozer_surface.run_code()
+    G_value = None if G_initial is None else float(G_initial)
+    return boozer_surface.run_code(
+        float(iota_initial),
+        G=G_value,
+    )
 
 
 def _materialize_jacobian_host(residual_fn, x_jax) -> np.ndarray:

@@ -254,7 +254,7 @@ def test_ls_factorization_backend_reports_dense_plu_shared():
     assert (
         bsj._ls_factorization_backend(
             H,
-            optimizer_backend="scipy",
+            optimizer_backend="ondevice",
             shared_dispatch=True,
         )
         == "dense-plu-shared"
@@ -267,6 +267,38 @@ def test_ls_factorization_backend_reports_dense_plu_shared():
             shared_dispatch=False,
         )
         == "lapack-dgetrf"
+    )
+
+
+def test_ls_shared_dispatch_and_backend_labels_match_runtime_lanes():
+    H = jnp.eye(3, dtype=jnp.float64)
+    lu_piv = opt_jax._factor_dense_hessian(H, optimizer_backend="ondevice")
+
+    assert bsj._ls_shared_lu_piv_dispatch("ondevice", lu_piv) is True
+    assert bsj._ls_shared_lu_piv_dispatch("scipy", lu_piv) is False
+    assert (
+        bsj._ls_linear_solve_backend(
+            optimizer_backend="ondevice",
+            plu_available=True,
+            shared_lu_piv_dispatch=True,
+        )
+        == "dense-plu-shared"
+    )
+    assert (
+        bsj._ls_linear_solve_backend(
+            optimizer_backend="scipy",
+            plu_available=True,
+            shared_lu_piv_dispatch=False,
+        )
+        == "dense-plu"
+    )
+    assert (
+        bsj._ls_linear_solve_backend(
+            optimizer_backend="ondevice",
+            plu_available=True,
+            shared_lu_piv_dispatch=False,
+        )
+        == "operator"
     )
 
 
