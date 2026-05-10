@@ -78,7 +78,10 @@ from workflow_helpers import (
     format_local_stage2_seed_dir_without_init_current,
     format_local_stage2_seed_dir_without_tf,
 )
-from workflow_runner_common import load_stage2_artifact_results
+from workflow_runner_common import (
+    load_stage2_artifact_results,
+    json_dumps as _common_json_dumps,
+)
 from banana_opt.artifact_contracts import (
     STAGE2_SEED_CONTRACT_HASH_KEY,
     upgrade_legacy_stage2_artifact_results,
@@ -4440,8 +4443,11 @@ def _jsonable_value(value):
 
 def write_json_artifact(path, payload):
     temp_path = f"{path}.tmp"
+    serialized = _common_json_dumps(payload, indent=2)
     with open(temp_path, "w", encoding="utf-8") as outfile:
-        json.dump(_jsonable_value(payload), outfile, indent=2)
+        outfile.write(serialized)
+        outfile.flush()
+        os.fsync(outfile.fileno())
     os.replace(temp_path, path)
 
 

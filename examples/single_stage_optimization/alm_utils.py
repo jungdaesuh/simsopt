@@ -2,8 +2,9 @@ import copy
 import warnings
 from dataclasses import dataclass
 from enum import Enum
+from numbers import Integral
 from types import MappingProxyType, SimpleNamespace
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 from scipy.optimize import minimize, nnls
@@ -24,6 +25,33 @@ def _finite_alm_value_or_none(name: str, value) -> float | None:
     if value is None:
         return None
     return _finite_alm_value(name, value)
+
+
+def _finite_alm_integer(name: str, value) -> int:
+    _finite_alm_value(name, value)
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise ValueError(f"{name} must be an integer")
+    return int(value)
+
+
+def _finite_alm_integer_or_none(name: str, value) -> int | None:
+    if value is None:
+        return None
+    return _finite_alm_integer(name, value)
+
+
+def _positive_alm_integer(name: str, value) -> int:
+    value_i = _finite_alm_integer(name, value)
+    if value_i <= 0:
+        raise ValueError(f"{name} must be positive")
+    return value_i
+
+
+def _positive_alm_value(name: str, value) -> float:
+    value_f = _finite_alm_value(name, value)
+    if value_f <= 0.0:
+        raise ValueError(f"{name} must be positive")
+    return value_f
 
 
 @dataclass(frozen=True)
@@ -51,11 +79,11 @@ class ALMSettings:
         # Mirrors `validate_alm_cli_args` so direct programmatic construction
         # cannot bypass the CLI-level guards (L5: programmatic
         # `ALMSettings(trust_radius_grow=0.5)` previously silently shrank).
-        max_outer_iterations = _finite_alm_value(
+        max_outer_iterations = _finite_alm_integer(
             "ALMSettings.max_outer_iterations",
             self.max_outer_iterations,
         )
-        max_subproblem_continuations = _finite_alm_value(
+        max_subproblem_continuations = _finite_alm_integer(
             "ALMSettings.max_subproblem_continuations",
             self.max_subproblem_continuations,
         )
@@ -92,7 +120,7 @@ class ALMSettings:
             "ALMSettings.trust_radius_grow",
             self.trust_radius_grow,
         )
-        max_inner_attempts = _finite_alm_value(
+        max_inner_attempts = _finite_alm_integer(
             "ALMSettings.max_inner_attempts",
             self.max_inner_attempts,
         )
@@ -104,7 +132,7 @@ class ALMSettings:
             "ALMSettings.multiplier_max",
             self.multiplier_max,
         )
-        history_max_entries = _finite_alm_value_or_none(
+        history_max_entries = _finite_alm_integer_or_none(
             "ALMSettings.history_max_entries",
             self.history_max_entries,
         )
@@ -470,7 +498,7 @@ def require_positive_alm_threshold(name: str, value) -> float:
 
 
 def validate_alm_cli_args(args) -> None:
-    alm_max_outer_iters = _finite_alm_value(
+    alm_max_outer_iters = _finite_alm_integer(
         "--alm-max-outer-iters",
         args.alm_max_outer_iters,
     )
@@ -482,7 +510,7 @@ def validate_alm_cli_args(args) -> None:
         None,
     )
     if max_subproblem_continuations is not None:
-        max_subproblem_continuations = _finite_alm_value(
+        max_subproblem_continuations = _finite_alm_integer(
             "--alm-max-subproblem-continuations",
             max_subproblem_continuations,
         )
@@ -531,7 +559,7 @@ def validate_alm_cli_args(args) -> None:
         "--alm-trust-radius-grow",
         getattr(args, "alm_trust_radius_grow", None),
     )
-    max_inner_attempts = _finite_alm_value_or_none(
+    max_inner_attempts = _finite_alm_integer_or_none(
         "--alm-max-inner-attempts",
         getattr(args, "alm_max_inner_attempts", None),
     )
@@ -1885,19 +1913,37 @@ def _build_inner_options(
     profile: ALMInnerSolveProfile,
 ) -> dict:
     options = dict(inner_options)
+    if "maxiter" in options:
+        options["maxiter"] = _positive_alm_integer(
+            "inner_options.maxiter",
+            options["maxiter"],
+        )
+    if "maxfun" in options and options["maxfun"] is not None:
+        options["maxfun"] = _positive_alm_integer(
+            "inner_options.maxfun",
+            options["maxfun"],
+        )
+    if "ftol" in options:
+        options["ftol"] = _positive_alm_value("inner_options.ftol", options["ftol"])
+    if "gtol" in options:
+        options["gtol"] = _positive_alm_value("inner_options.gtol", options["gtol"])
+
     base_gtol = float(options.get("gtol", 1e-12))
     staged_gtol = max(
         np.finfo(float).eps,
         min(1e-4, 0.1 * float(update_stationarity_tol)),
     )
     options["gtol"] = max(base_gtol, staged_gtol)
-    options["maxls"] = max(1, int(options.get("maxls", profile.default_maxls)))
+    options["maxls"] = _positive_alm_integer(
+        "inner_options.maxls",
+        options.get("maxls", profile.default_maxls),
+    )
 
     if profile.maxiter_cap is None or profile.maxls_cap is None or profile.ftol_floor is None:
         return options
 
-    requested_maxiter = max(1, int(options.get("maxiter", 150)))
-    requested_maxls = max(1, int(options.get("maxls", profile.default_maxls)))
+    requested_maxiter = int(options.get("maxiter", 150))
+    requested_maxls = int(options.get("maxls", profile.default_maxls))
     requested_maxfun = options.get("maxfun")
     base_ftol = float(options.get("ftol", 1e-15))
 
@@ -1937,6 +1983,10 @@ def _termination_reason_from_history(
             return "max_outer_after_dual_update"
         if latest_action == "subproblem_limit":
             return "max_outer_after_subproblem_limit"
+        if latest_action == "subproblem_limit_penalty_increase":
+            return "max_outer_after_subproblem_limit_penalty_increase"
+        if latest_action == "signal_mismatch_penalty_increase":
+            return "max_outer_after_signal_mismatch_penalty_increase"
         if latest_action == "infeasible_stall_penalty_increase":
             return "max_outer_after_infeasible_stall"
         if latest_action == "penalty_increase":
@@ -2299,6 +2349,13 @@ def _kkt_stationarity_norm(
     total_grad_array = np.asarray(total_grad, dtype=float).reshape(-1)
     if total_grad_array.size == 0:
         return 0.0
+    # In `thresholded_physics` mode the base objective is identically zero, so
+    # the bare physics gradient is structurally zero and `nnls(A, -grad_f)`
+    # collapses to `lambda=0, residual=0` regardless of multiplier quality.
+    # The diagnostic is meaningless in that regime; report unavailable instead
+    # of emitting a misleading "0" that operators read as "converged KKT".
+    if not np.any(total_grad_array):
+        return None
 
     active_constraint_grads = []
     for constraint_grad, constraint_value, _feasibility_value, activity_tolerance in zip(
@@ -2837,19 +2894,27 @@ def _apply_alm_penalty_increase(
         update_stationarity_tol,
         _penalty_schedule_tolerance(settings.stationarity_tol, next_penalty),
     )
+    # The history entry records `effective_feasibility_tolerance` via
+    # `_effective_feasibility_gate(...)`. Routing state and KKT diagnostics
+    # in the same entry must use the same clamped gate; otherwise a single
+    # entry encodes two different active-set definitions.
+    next_effective_feasibility_tol = _effective_feasibility_gate(
+        settings,
+        next_feasibility_tol,
+    )
     penalty_update_state = _evaluate_alm_penalty_state(
         evaluate_problem=evaluate_problem,
         x=x,
         multipliers=multipliers,
         penalty=next_penalty,
-        feasibility_gate=next_feasibility_tol,
+        feasibility_gate=next_effective_feasibility_tol,
         constraint_names_tuple=constraint_names_tuple,
         constraint_blocks_tuple=constraint_blocks_tuple,
     )
     _refresh_alm_history_for_penalty_update(
         history_entry,
         penalty_update_state,
-        feasibility_gate=next_feasibility_tol,
+        feasibility_gate=next_effective_feasibility_tol,
         penalty=next_penalty,
         constraint_names=constraint_names,
         settings=settings,

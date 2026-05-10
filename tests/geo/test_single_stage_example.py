@@ -11264,9 +11264,9 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                     patch.object(module, "minimize_alm", side_effect=fake_minimize_alm),
                     patch.object(module, "run_basin_hopping", side_effect=fake_run_basin_hopping),
                     patch.object(
-                        module.json,
-                        "dump",
-                        side_effect=lambda data, _outfile, indent=2: runtime.__setitem__("results", data),
+                        module,
+                        "write_json",
+                        side_effect=lambda _path, data: runtime.__setitem__("results", data),
                     ),
                 ]
                 for patcher in common_patches:

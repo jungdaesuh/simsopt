@@ -48,19 +48,19 @@ class AlmHybridSignalContractDocTests(unittest.TestCase):
             "examples/single_stage_optimization/banana_opt/stage2_objectives.py:1966-1980": (
                 '"hard_dual_update_values"'
             ),
-            "examples/single_stage_optimization/alm_utils.py:2133-2185": (
+            "examples/single_stage_optimization/alm_utils.py:2183-2235": (
                 "def _extract_stage2_constraint_signal_state"
             ),
-            "examples/single_stage_optimization/alm_utils.py:3246-3254": (
+            "examples/single_stage_optimization/alm_utils.py:3303-3319": (
                 "routing_state.signal_state.preferred_dual_update_values"
             ),
-            "examples/single_stage_optimization/alm_utils.py:2227-2275": (
+            "examples/single_stage_optimization/alm_utils.py:2277-2335": (
                 "def _constraint_routing_state"
             ),
-            "examples/single_stage_optimization/alm_utils.py:4420-4429": (
+            "examples/single_stage_optimization/alm_utils.py:4485-4495": (
                 "and not signal_mismatch_active"
             ),
-            "examples/single_stage_optimization/alm_utils.py:4118-4129": (
+            "examples/single_stage_optimization/alm_utils.py:4181-4194": (
                 "and not run_state.last_cap_binding_active"
             ),
         }
@@ -663,7 +663,10 @@ class ResidualHelperTests(unittest.TestCase):
         )
         self.assertIsNone(diagnostics["objective_to_augmented_term_ratio"])
         self.assertAlmostEqual(diagnostics["augmented_gradient_norm"], 0.0)
-        self.assertAlmostEqual(diagnostics["surrogate_kkt_stationarity_norm"], 0.0)
+        # KKT residual is unavailable when grad_f is structurally zero (e.g.
+        # `thresholded_physics` mode), because nnls collapses to lambda=0,
+        # residual=0 regardless of multiplier quality.
+        self.assertIsNone(diagnostics["surrogate_kkt_stationarity_norm"])
         self.assertEqual(
             diagnostics["multiplier_interpretation"],
             "differentiable_alm_multipliers",
@@ -815,13 +818,14 @@ class ResidualHelperTests(unittest.TestCase):
 
     def test_surrogate_kkt_stationarity_norm_prefers_base_grad(self):
         # H4 (mirror of M9 from bf936a0a4): the surrogate KKT diagnostic must
-        # consume bare ∇f (`base_grad`), not the augmented gradient
+        # consume bare grad_f (`base_grad`), not the augmented gradient
         # (`metric_grad`/`grad`). Otherwise the residual collapses to ~0 once
         # L-BFGS-B converges and hides multiplier-quality defects, even though
         # the dual problem is far from optimal.
         module = load_alm_utils_module()
-        # base_grad ≠ grad. NNLS for `1.0·λ = -base_grad[0]` with λ ≥ 0
-        # clamps to 0 (RHS positive impossible), so residual = ‖0 − (−2.0)‖ = 2.
+        # base_grad differs from grad. NNLS for `1.0 * lambda = -base_grad[0]`
+        # with lambda >= 0 clamps to 0 (RHS positive impossible), so the
+        # residual norm is 2.
         # If the helper used `grad` (augmented, zero at inner-solve minimum),
         # the residual would be 0.
         evaluation_with_base = {
@@ -855,9 +859,12 @@ class ResidualHelperTests(unittest.TestCase):
         )
 
         # Backward-compat: when `base_grad` is absent, fall back to
-        # `metric_grad` then `grad` (preserves the pre-H4 contract).
+        # `metric_grad` then `grad` (preserves the pre-H4 contract). Use a
+        # non-zero `grad` so the diagnostic is meaningful; a structurally
+        # zero gradient (e.g. `thresholded_physics` mode) returns `None`.
         evaluation_no_base = dict(evaluation_with_base)
         del evaluation_no_base["base_grad"]
+        evaluation_no_base["grad"] = np.array([3.0])
         routing_state_no_base = module._constraint_routing_state(
             evaluation_no_base,
             np.zeros(1),
@@ -865,14 +872,89 @@ class ResidualHelperTests(unittest.TestCase):
             feasibility_gate=1.0,
         )
 
+        # NNLS for `1.0 * lambda = -3.0` with lambda >= 0 clamps to 0,
+        # leaving residual norm 3.
         self.assertAlmostEqual(
             module._surrogate_kkt_stationarity_norm(
                 evaluation_no_base,
                 routing_state_no_base,
                 feasibility_gate=1.0,
             ),
-            0.0,
+            3.0,
         )
+
+        # Structural-zero gradient (e.g. `thresholded_physics`): `None`, not 0.
+        evaluation_zero_grad = dict(evaluation_with_base)
+        del evaluation_zero_grad["base_grad"]
+        routing_state_zero_grad = module._constraint_routing_state(
+            evaluation_zero_grad,
+            np.zeros(1),
+            1.0,
+            feasibility_gate=1.0,
+        )
+        self.assertIsNone(
+            module._surrogate_kkt_stationarity_norm(
+                evaluation_zero_grad,
+                routing_state_zero_grad,
+                feasibility_gate=1.0,
+            ),
+        )
+
+    def test_alm_subproblem_continue_marks_max_outer_when_is_final_outer(self):
+        # Audit-v2 H11: `_emit_alm_subproblem_continue` is called from both the
+        # signal-mismatch retry arm and the feasible-update retry arm; when
+        # `is_final_outer=True` it must annotate `outer_termination="max_outer"`
+        # on the history entry so `_termination_reason_from_history` reports a
+        # `max_outer*` label rather than surfacing the bare action string.
+        # The signal-mismatch path is exercised by
+        # `test_minimize_alm_escalates_penalty_after_repeated_stage2_signal_mismatch`;
+        # this test pins the helper directly so the feasible-update retry call
+        # site cannot regress without flipping a test.
+        module = load_alm_utils_module()
+        state = module._ContinuationStepState(
+            multipliers=np.zeros(1),
+            penalty=1.0,
+            update_feasibility_tol=1.0,
+            update_stationarity_tol=1.0,
+            feasible_stall_count=2,
+            last_result=None,
+            final_eval=None,
+            final_multipliers=np.zeros(1),
+            final_penalty=1.0,
+            best_feasible=None,
+            inner_options=None,
+        )
+        run_state = module.ALMRunState(
+            x=np.zeros(1),
+            total_inner_iterations=0,
+            trust_radius=0.5,
+            history=[],
+            history_truncated_count=0,
+            cap_binding_detected=False,
+            cap_binding_indices=set(),
+            penalty_cap_reached=False,
+            penalty_cap_requested=None,
+        )
+
+        def emit_history_entry(*, is_final_outer):
+            history_entry = {}
+            module._emit_alm_subproblem_continue(
+                state=state,
+                run_state=run_state,
+                history_entry=history_entry,
+                history_callback=None,
+                is_final_outer=is_final_outer,
+            )
+            return history_entry
+
+        history_entry_final = emit_history_entry(is_final_outer=True)
+        self.assertEqual(history_entry_final["action"], "subproblem_continue")
+        self.assertEqual(history_entry_final["outer_termination"], "max_outer")
+        self.assertEqual(history_entry_final["feasible_stall_count"], 2)
+
+        history_entry_mid = emit_history_entry(is_final_outer=False)
+        self.assertEqual(history_entry_mid["action"], "subproblem_continue")
+        self.assertNotIn("outer_termination", history_entry_mid)
 
     def test_surrogate_hard_sign_mismatch_does_not_flag_exact_boundary(self):
         module = load_alm_utils_module()
@@ -1326,6 +1408,23 @@ class AlmNormalizeRunInputsValidationTests(unittest.TestCase):
                 ):
                     self._settings(module, **{field: float("nan")})
 
+    def test_settings_construction_rejects_noninteger_loop_fields(self):
+        module = load_alm_utils_module()
+        integer_fields = (
+            "max_outer_iterations",
+            "max_subproblem_continuations",
+            "max_inner_attempts",
+            "history_max_entries",
+        )
+
+        for field in integer_fields:
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"ALMSettings\.{field} must be an integer",
+                ):
+                    self._settings(module, **{field: 1.5})
+
     def test_normalize_rejects_nonfinite_initial_penalty(self):
         module = load_alm_utils_module()
         settings = self._settings(module)
@@ -1493,6 +1592,22 @@ class ValidateAlmCliArgsTests(unittest.TestCase):
                     module.validate_alm_cli_args(
                         self._args(**{field: float("nan")})
                     )
+
+    def test_rejects_noninteger_loop_fields(self):
+        module = load_alm_utils_module()
+        field_to_flag = {
+            "alm_max_outer_iters": "--alm-max-outer-iters",
+            "alm_max_subproblem_continuations": "--alm-max-subproblem-continuations",
+            "alm_max_inner_attempts": "--alm-max-inner-attempts",
+        }
+
+        for field, flag_name in field_to_flag.items():
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"{flag_name} must be an integer",
+                ):
+                    module.validate_alm_cli_args(self._args(**{field: 1.5}))
 
 
 class ValidateInitialMultipliersTests(unittest.TestCase):
@@ -1865,6 +1980,49 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(options["maxls"], 20)
         self.assertNotIn("maxfun", options)
         self.assertGreaterEqual(options["gtol"], 1e-4)
+
+    def test_build_inner_options_rejects_noninteger_work_limits(self):
+        module = load_alm_utils_module()
+        profile = module._select_inner_solve_profile(
+            trust_radius=0.05,
+            continuation_iteration=1,
+            feasible_enough=True,
+        )
+        field_to_error = {
+            "maxiter": "inner_options.maxiter must be an integer",
+            "maxls": "inner_options.maxls must be an integer",
+            "maxfun": "inner_options.maxfun must be an integer",
+        }
+
+        for field, error in field_to_error.items():
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, error):
+                    module._build_inner_options(
+                        {field: 1.5},
+                        update_stationarity_tol=1.0,
+                        profile=profile,
+                    )
+
+    def test_build_inner_options_rejects_nonfinite_tolerances(self):
+        module = load_alm_utils_module()
+        profile = module._select_inner_solve_profile(
+            trust_radius=None,
+            continuation_iteration=0,
+            feasible_enough=False,
+        )
+        field_to_error = {
+            "ftol": "inner_options.ftol must be finite",
+            "gtol": "inner_options.gtol must be finite",
+        }
+
+        for field, error in field_to_error.items():
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, error):
+                    module._build_inner_options(
+                        {field: float("nan")},
+                        update_stationarity_tol=1.0,
+                        profile=profile,
+                    )
 
     def test_classify_infeasible_inner_stall_scales_move_tolerance_with_iterate_norm(self):
         module = load_alm_utils_module()
@@ -2561,7 +2719,13 @@ class MinimizeAlmTests(unittest.TestCase):
             )
 
         self.assertFalse(result.success)
-        self.assertEqual(result.termination_reason, "max_outer")
+        # The terminal action is `signal_mismatch_penalty_increase`, so the
+        # outer-cap reason carries that label (audit-v2 M10) rather than the
+        # bare `max_outer` fallback.
+        self.assertEqual(
+            result.termination_reason,
+            "max_outer_after_signal_mismatch_penalty_increase",
+        )
         self.assertEqual(minimize_calls["count"], 4)
         self.assertEqual(result.history[0]["action"], "subproblem_continue")
         self.assertTrue(result.history[0]["signal_mismatch_active"])

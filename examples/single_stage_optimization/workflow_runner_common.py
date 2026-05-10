@@ -9,8 +9,10 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Callable, Mapping, Sequence, TypeVar
+
+import numpy as np
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -1128,13 +1130,19 @@ def clear_dry_run_marker(output_root: str | Path) -> None:
 
 
 def _json_portable_value(payload: object) -> object:
+    if isinstance(payload, PurePath):
+        return str(payload)
+    if isinstance(payload, np.ndarray):
+        return _json_portable_value(payload.tolist())
+    if isinstance(payload, np.generic):
+        return _json_portable_value(payload.item())
     if isinstance(payload, float):
         if not math.isfinite(payload):
             return None
         return payload
     if isinstance(payload, Mapping):
         return {
-            key: _json_portable_value(value)
+            str(key): _json_portable_value(value)
             for key, value in payload.items()
         }
     if isinstance(payload, Sequence) and not isinstance(

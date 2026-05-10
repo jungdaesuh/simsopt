@@ -30,7 +30,6 @@ from simsopt.geo import (
 from simsopt.geo.curveobjectives import CurveSurfaceDistance
 from simsopt._core.optimizable import load
 from simsopt.objectives import SquaredFlux, QuadraticPenalty
-import json
 
 from alm_utils import (
     minimize_alm,
@@ -48,6 +47,7 @@ from workflow_helpers import (
 )
 from workflow_runner_common import (
     load_stage2_artifact_results,
+    write_json,
 )
 from banana_opt.artifact_contracts import (
     STAGE2_BS_SHA256_KEY,
@@ -2277,8 +2277,7 @@ def main(parsed_args=None):
             new_surf=new_surf,
             constraint_metadata=constraint_metadata,
         )
-        with open(secondary_stage2_results_path, "w") as outfile:
-            json.dump(secondary_results, outfile, indent=2)
+        write_json(secondary_stage2_results_path, secondary_results)
         secondary_artifact_metadata = build_stage2_secondary_artifact_metadata(
             secondary_stage2_bs_path=secondary_stage2_bs_path,
             secondary_stage2_results_path=secondary_stage2_results_path,
@@ -2299,8 +2298,7 @@ def main(parsed_args=None):
         constraint_metadata=constraint_metadata,
     )
     results.update(secondary_artifact_metadata)
-    with open(os.path.join(OUT_DIR_ITER, "results.json"), "w") as outfile:
-        json.dump(results, outfile, indent=2)
+    write_json(os.path.join(OUT_DIR_ITER, "results.json"), results)
 
 
 if __name__ == "__main__":
