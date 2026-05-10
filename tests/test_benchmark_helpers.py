@@ -3302,6 +3302,275 @@ def test_operator_action_max_relative_error_rejects_shape_mismatch():
         )
 
 
+def test_compute_dense_operator_action_max_rel_error_zero_for_identical():
+    from benchmarks.parity_solve_quality import (
+        compute_dense_operator_action_max_rel_error,
+    )
+
+    rng = np.random.default_rng(0)
+    H = rng.standard_normal(size=(8, 8))
+    H = H + H.T  # symmetric
+
+    rel = compute_dense_operator_action_max_rel_error(
+        H,
+        H,
+        artifact_name="banana_coil",
+    )
+    assert rel == 0.0
+
+
+def test_compute_dense_operator_action_max_rel_error_tracks_perturbation():
+    from benchmarks.parity_solve_quality import (
+        compute_dense_operator_action_max_rel_error,
+    )
+
+    rng = np.random.default_rng(0)
+    H_cpp = rng.standard_normal(size=(8, 8))
+    H_cpp = H_cpp + H_cpp.T
+    H_jax = H_cpp + 1e-12 * rng.standard_normal(size=(8, 8))
+
+    rel = compute_dense_operator_action_max_rel_error(
+        H_jax,
+        H_cpp,
+        artifact_name="banana_coil",
+    )
+    assert 0.0 < rel < 1e-10
+
+
+def test_compute_dense_operator_action_max_rel_error_supports_rectangular():
+    from benchmarks.parity_solve_quality import (
+        compute_dense_operator_action_max_rel_error,
+    )
+
+    rng = np.random.default_rng(0)
+    J_cpp = rng.standard_normal(size=(10, 6))  # exact path: m >= n
+    J_jax = J_cpp + 1e-13 * rng.standard_normal(size=(10, 6))
+
+    rel = compute_dense_operator_action_max_rel_error(
+        J_jax,
+        J_cpp,
+        artifact_name="exact_fixture",
+    )
+    assert 0.0 <= rel < 1e-10
+
+
+def test_compute_dense_operator_action_max_rel_error_rejects_shape_mismatch():
+    from benchmarks.parity_solve_quality import (
+        compute_dense_operator_action_max_rel_error,
+    )
+
+    with pytest.raises(ValueError, match="must share shape"):
+        compute_dense_operator_action_max_rel_error(
+            np.zeros((6, 6)),
+            np.zeros((6, 5)),
+            artifact_name="invalid",
+        )
+
+    with pytest.raises(ValueError, match="must be 2D"):
+        compute_dense_operator_action_max_rel_error(
+            np.zeros(6),
+            np.zeros(6),
+            artifact_name="invalid",
+        )
+
+
+def test_compute_dense_operator_action_max_rel_error_is_deterministic():
+    from benchmarks.parity_solve_quality import (
+        compute_dense_operator_action_max_rel_error,
+    )
+
+    rng = np.random.default_rng(7)
+    H_cpp = rng.standard_normal(size=(7, 7))
+    H_cpp = H_cpp + H_cpp.T
+    H_jax = H_cpp + 1e-11 * rng.standard_normal(size=(7, 7))
+
+    first = compute_dense_operator_action_max_rel_error(
+        H_jax,
+        H_cpp,
+        artifact_name="banana_coil",
+    )
+    second = compute_dense_operator_action_max_rel_error(
+        H_jax,
+        H_cpp,
+        artifact_name="banana_coil",
+    )
+
+    assert first == second
+
+
+def _matrix_summary(matrix: np.ndarray) -> dict[str, object]:
+    """Mimic ``_summarize_host_array`` output shape for unit tests."""
+    flat = np.asarray(matrix, dtype=np.float64).reshape(-1)
+    return {
+        "values": flat.tolist(),
+        "all_finite": bool(np.all(np.isfinite(flat))),
+        "shape": [int(dim) for dim in matrix.shape],
+    }
+
+
+def test_summary_matrix_round_trips_2d():
+    rng = np.random.default_rng(0)
+    matrix = rng.standard_normal(size=(5, 4))
+
+    recovered = single_stage_init_parity_module._summary_matrix(_matrix_summary(matrix))
+
+    assert recovered is not None
+    np.testing.assert_array_equal(recovered, matrix)
+
+
+def test_summary_matrix_returns_none_when_shape_missing():
+    summary = {
+        "values": [1.0, 2.0, 3.0, 4.0],
+        "all_finite": True,
+    }
+
+    assert single_stage_init_parity_module._summary_matrix(summary) is None
+
+
+def test_summary_matrix_returns_none_for_non_2d_shape():
+    summary = {
+        "values": [1.0, 2.0, 3.0, 4.0],
+        "all_finite": True,
+        "shape": [4],
+    }
+
+    assert single_stage_init_parity_module._summary_matrix(summary) is None
+
+
+def test_summary_matrix_returns_none_for_non_finite_payload():
+    summary = {
+        "values": [1.0, float("nan"), 2.0, 3.0],
+        "all_finite": False,
+        "shape": [2, 2],
+    }
+
+    assert single_stage_init_parity_module._summary_matrix(summary) is None
+
+
+def test_compute_solve_quality_probe_pair_emits_ls_metric_when_paired():
+    rng = np.random.default_rng(1)
+    H_cpp = rng.standard_normal(size=(6, 6))
+    H_cpp = H_cpp + H_cpp.T
+    H_jax = H_cpp + 1e-12 * rng.standard_normal(size=(6, 6))
+    cpu_decomposition = {
+        "final_hessian": _matrix_summary(H_cpp),
+    }
+    jax_decomposition = {
+        "final_hessian": _matrix_summary(H_jax),
+    }
+
+    metrics = single_stage_init_parity_module._compute_solve_quality_probe_pair(
+        cpu_decomposition=cpu_decomposition,
+        jax_decomposition=jax_decomposition,
+        artifact_name="phase1_5_test",
+    )
+
+    assert metrics["ls_hessian_action_max_rel"] is not None
+    assert 0.0 < metrics["ls_hessian_action_max_rel"] < 1e-10
+    assert metrics["exact_jacobian_action_max_rel"] is None
+
+
+def test_compute_solve_quality_probe_pair_emits_exact_metric_when_paired():
+    rng = np.random.default_rng(2)
+    J_cpp = rng.standard_normal(size=(8, 6))
+    J_jax = J_cpp + 1e-12 * rng.standard_normal(size=(8, 6))
+    cpu_decomposition = {
+        "final_jacobian": _matrix_summary(J_cpp),
+    }
+    jax_decomposition = {
+        "final_jacobian": _matrix_summary(J_jax),
+    }
+
+    metrics = single_stage_init_parity_module._compute_solve_quality_probe_pair(
+        cpu_decomposition=cpu_decomposition,
+        jax_decomposition=jax_decomposition,
+        artifact_name="phase1_5_exact_test",
+    )
+
+    assert metrics["exact_jacobian_action_max_rel"] is not None
+    assert 0.0 < metrics["exact_jacobian_action_max_rel"] < 1e-10
+    assert metrics["ls_hessian_action_max_rel"] is None
+
+
+def test_compute_solve_quality_probe_pair_returns_none_when_inputs_missing():
+    metrics = single_stage_init_parity_module._compute_solve_quality_probe_pair(
+        cpu_decomposition=None,
+        jax_decomposition=None,
+        artifact_name="missing",
+    )
+
+    assert metrics["ls_hessian_action_max_rel"] is None
+    assert metrics["exact_jacobian_action_max_rel"] is None
+
+
+def test_compute_solve_quality_probe_pair_skips_shape_mismatch():
+    cpu_hessian = np.eye(4)
+    jax_hessian = np.eye(5)
+    cpu_decomposition = {"final_hessian": _matrix_summary(cpu_hessian)}
+    jax_decomposition = {"final_hessian": _matrix_summary(jax_hessian)}
+
+    metrics = single_stage_init_parity_module._compute_solve_quality_probe_pair(
+        cpu_decomposition=cpu_decomposition,
+        jax_decomposition=jax_decomposition,
+        artifact_name="shape_mismatch",
+    )
+
+    assert metrics["ls_hessian_action_max_rel"] is None
+
+
+def test_aggregate_solve_quality_probes_tracks_max_and_pair_index():
+    aggregate: dict[str, float | None] = {
+        "ls_hessian_action_max_rel": None,
+        "ls_hessian_action_max_rel_pair_index": None,
+        "exact_jacobian_action_max_rel": None,
+        "exact_jacobian_action_max_rel_pair_index": None,
+    }
+    single_stage_init_parity_module._aggregate_solve_quality_probes(
+        aggregate,
+        pair_metrics={
+            "ls_hessian_action_max_rel": 1e-9,
+            "exact_jacobian_action_max_rel": 5e-10,
+        },
+        pair_index=1,
+    )
+    single_stage_init_parity_module._aggregate_solve_quality_probes(
+        aggregate,
+        pair_metrics={
+            "ls_hessian_action_max_rel": 1e-11,
+            "exact_jacobian_action_max_rel": 9e-10,
+        },
+        pair_index=2,
+    )
+
+    # ls peak observed in pair 1, exact peak observed in pair 2
+    assert aggregate["ls_hessian_action_max_rel"] == 1e-9
+    assert aggregate["ls_hessian_action_max_rel_pair_index"] == 1
+    assert aggregate["exact_jacobian_action_max_rel"] == 9e-10
+    assert aggregate["exact_jacobian_action_max_rel_pair_index"] == 2
+
+
+def test_aggregate_solve_quality_probes_skips_none_values():
+    aggregate: dict[str, float | None] = {
+        "ls_hessian_action_max_rel": None,
+        "ls_hessian_action_max_rel_pair_index": None,
+        "exact_jacobian_action_max_rel": None,
+        "exact_jacobian_action_max_rel_pair_index": None,
+    }
+    single_stage_init_parity_module._aggregate_solve_quality_probes(
+        aggregate,
+        pair_metrics={
+            "ls_hessian_action_max_rel": None,
+            "exact_jacobian_action_max_rel": None,
+        },
+        pair_index=1,
+    )
+
+    assert aggregate["ls_hessian_action_max_rel"] is None
+    assert aggregate["exact_jacobian_action_max_rel"] is None
+    assert aggregate["ls_hessian_action_max_rel_pair_index"] is None
+    assert aggregate["exact_jacobian_action_max_rel_pair_index"] is None
+
+
 def test_describe_compile_behavior_tracks_cache_state(monkeypatch):
     monkeypatch.delenv(_JAX_COMPILATION_CACHE_ENV_VAR, raising=False)
     monkeypatch.delenv(_SIMSOPT_DISABLE_COMPILATION_CACHE_ENV_VAR, raising=False)

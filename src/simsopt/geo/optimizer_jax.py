@@ -50,9 +50,11 @@ import numpy as np
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.linalg as jsp_linalg
 from jax.flatten_util import ravel_pytree
 from jax import lax
 from jax.scipy.sparse.linalg import gmres
+import scipy.linalg
 from scipy.optimize import OptimizeResult
 
 from ..backend import (
@@ -1734,6 +1736,84 @@ def _solve_dense_newton_step(H, grad, *, refine):
     if refine:
         dx = dx + np.linalg.solve(H_host, grad_host - H_host @ dx)
     return jnp.asarray(dx, dtype=jnp.asarray(grad).dtype)
+
+
+def _factor_dense_hessian(H, *, optimizer_backend):
+    """Factor a dense LS Hessian once and return packed ``(lu, piv)``.
+
+    Per ``docs/parity_scientific_equivalence_contract_2026-05-09.md`` §5.3
+    (Phase 2 adjoint factor-once hybrid). The resulting factors are reused
+    for both forward and adjoint solves so the bytes are bit-identical by
+    construction.
+
+    The ``optimizer_backend == "scipy"`` branch routes through host LAPACK
+    ``dgetrf`` via ``scipy.linalg.lu_factor`` so the LS reference lane keeps
+    matching CPU pivot tie-breaks. All other backends call
+    ``jax.scipy.linalg.lu_factor`` on ``H``'s device, which dispatches to
+    LAPACK on CPU and cuSOLVER ``getrf`` on CUDA. Both APIs use the same
+    0-indexed packed pivot semantics, so the returned ``(lu, piv)`` is a
+    drop-in to ``jax.scipy.linalg.lu_solve``.
+    """
+    if H is None:
+        return None
+    if optimizer_backend == "scipy":
+        H_host = np.asarray(H, dtype=np.float64)
+        lu_host, piv_host = scipy.linalg.lu_factor(H_host)
+        lu = jnp.asarray(lu_host, dtype=H.dtype)
+        piv = jnp.asarray(piv_host, dtype=jnp.int32)
+        return lu, piv
+    return jsp_linalg.lu_factor(H)
+
+
+def _lu_solve_dense_hessian(lu_piv, rhs, *, transpose):
+    """Solve a dense LS Hessian system from packed ``(lu, piv)`` factors.
+
+    Routes through ``jax.scipy.linalg.lu_solve`` with ``trans=1`` for the
+    transpose path so adjoint and forward solves consume the same packed
+    factor bytes. Pivot reconstruction stays inside the LAPACK/cuSOLVER
+    contract; no manual ``_piv_from(P)`` rebuilding happens at the call
+    site.
+    """
+    lu, piv = lu_piv
+    trans = 1 if transpose else 0
+    return jsp_linalg.lu_solve((lu, piv), rhs, trans=trans)
+
+
+@jax.jit
+def _plu_from_lu_piv(lu_piv):
+    """Derive ``(P, L, U)`` matrices from packed ``(lu, piv)`` factors.
+
+    Used for backward-compatible reporting under the
+    ``"dense-plu-shared"`` factorization backend: the ``res["PLU"]`` slot
+    keeps surfacing the public triple while the runtime forward and
+    adjoint solves consume the same ``(lu, piv)`` factor bytes. The
+    permutation array is built with ``lax.fori_loop`` so the helper is
+    JIT-traceable; the ``jax.jit`` wrapper hoists the static-shape
+    ``jnp.eye`` / ``jnp.zeros`` constructors inside the trace so callers
+    in strict transfer-guard contexts do not pay a host roundtrip per
+    invocation.
+    """
+    lu, piv = lu_piv
+    n = lu.shape[0]
+    eye = jnp.eye(n, dtype=lu.dtype)
+    L = jnp.tril(lu, k=-1) + eye
+    U = jnp.triu(lu)
+
+    def body(i, perm):
+        a = perm[i]
+        b = perm[piv[i]]
+        perm = perm.at[i].set(b)
+        perm = perm.at[piv[i]].set(a)
+        return perm
+
+    perm = lax.fori_loop(0, n, body, jnp.arange(n, dtype=jnp.int32))
+    columns = jnp.arange(n, dtype=jnp.int32)
+    P = (
+        jnp.zeros((n, n), dtype=lu.dtype)
+        .at[perm, columns]
+        .set(jnp.asarray(1.0, dtype=lu.dtype))
+    )
+    return P, L, U
 
 
 def _least_squares_dense_hessian_report(size, dtype, max_dense_bytes):

@@ -8,6 +8,13 @@ fields without depending on Python's randomized ``hash()``.
 
 Standard-basis-only probe sets are explicitly forbidden because they collapse
 the operator-action gate to dense-bytes parity.
+
+Phase 1.5 adds ``compute_dense_operator_action_max_rel_error`` — the
+arbiter-side composition that materializes both probe construction and
+maximum-relative-error reduction in one call so the parity benchmark only
+imports a single SSOT entrypoint per gate. Both the LS gate L4
+(``ls_hessian_action_max_rel``) and the Exact gate E3
+(``exact_jacobian_action_max_rel``) consume this composition.
 """
 
 from __future__ import annotations
@@ -113,3 +120,65 @@ def operator_action_max_relative_error(
     ref = np.linalg.norm(op_cpp, axis=0)
     rel = diff / np.maximum(ref, float(eps))
     return float(np.max(rel))
+
+
+def compute_dense_operator_action_max_rel_error(
+    op_jax_dense: np.ndarray,
+    op_cpp_dense: np.ndarray,
+    *,
+    artifact_name: str,
+    extra_basis_index: int = 0,
+    eps: float = 1e-30,
+) -> float:
+    """Return the LS L4 / Exact E3 operator-action max relative error.
+
+    SSOT composition for the scientific-equivalence ladder gates L4
+    (``ls_hessian_action_max_rel``) and E3
+    (``exact_jacobian_action_max_rel``) per
+    ``docs/parity_scientific_equivalence_contract_2026-05-09.md`` §4.
+
+    The function performs two steps the arbiter would otherwise duplicate:
+
+    1. Build the deterministic probe set using
+       ``construct_operator_action_probes(decision_size, artifact_name)``.
+    2. Apply each dense operator to the probe set and reduce via
+       ``operator_action_max_relative_error``.
+
+    Operator dimensionality requirements:
+
+    - For LS (gate L4) the operators are ``(n, n)`` symmetric Hessians whose
+      action ``H @ v`` lives in ``R^n``. ``decision_size = n``.
+    - For Exact (gate E3) the Jacobian is ``(m, n)`` where ``m >= n`` because
+      the augmented residual stacks the constraint rows. The probe set must
+      be applied as ``J @ v`` with ``v in R^n``; ``decision_size = n``.
+
+    Both ``op_jax_dense`` and ``op_cpp_dense`` must share shape and have at
+    least 2 dimensions. ``decision_size`` is inferred from the second axis.
+
+    Standard-basis-only probe sets remain forbidden — gate L4 / E3 are smoke
+    diagnostics, not proofs of operator equality. The rigorous proof method
+    is the existing ``direct-hessian-oracle`` lane in
+    ``benchmarks/validation_ladder_contract.py``.
+    """
+    op_jax = np.asarray(op_jax_dense, dtype=np.float64)
+    op_cpp = np.asarray(op_cpp_dense, dtype=np.float64)
+    if op_jax.shape != op_cpp.shape:
+        raise ValueError(
+            "JAX and C++ operators must share shape; "
+            f"got JAX={op_jax.shape}, C++={op_cpp.shape}."
+        )
+    if op_jax.ndim != 2:
+        raise ValueError(f"Operators must be 2D; got ndim={op_jax.ndim}.")
+    decision_size = int(op_cpp.shape[1])
+    probes = construct_operator_action_probes(
+        decision_size=decision_size,
+        artifact_name=artifact_name,
+        extra_basis_index=extra_basis_index,
+    )
+    op_jax_action = op_jax @ probes
+    op_cpp_action = op_cpp @ probes
+    return operator_action_max_relative_error(
+        op_jax_action,
+        op_cpp_action,
+        eps=eps,
+    )

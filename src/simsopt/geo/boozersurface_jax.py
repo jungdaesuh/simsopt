@@ -235,9 +235,17 @@ _BOOZER_TRACEABLE_RESULT_KEYS = frozenset(
         "weight_inv_modB",
     }
 )
+# ``lu_piv`` is the Phase 2 packed-factor companion to the public ``plu``
+# triple (see docs/parity_scientific_equivalence_contract_2026-05-09.md
+# §5.3). It is optional metadata: traceable consumers that supply only
+# the legacy 3-tuple ``(P, L, U)`` without packed factors stay supported.
+# Therefore ``lu_piv`` belongs to neither the required nor forbidden
+# set, mirroring how ``LU_PIV`` is optional on the public ``newton``
+# schema.
 _BOOZER_TRACEABLE_FORBIDDEN_RESULT_KEYS = frozenset(
     {
         "PLU",
+        "LU_PIV",
         "s",
         "info",
         "vjp",
@@ -322,6 +330,13 @@ _BOOZER_RESULT_SCHEMAS = {
             }
         ),
     ),
+    # ``LU_PIV`` is the Phase 2 packed-factor companion to the public
+    # ``PLU`` triple (see
+    # docs/parity_scientific_equivalence_contract_2026-05-09.md §5.3).
+    # It is optional metadata: schema consumers that supply only the
+    # legacy ``PLU`` triple without packed factors stay supported, so
+    # ``LU_PIV`` is intentionally absent from both required and
+    # forbidden sets.
     "newton": _BoozerResultSchema(
         required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
         | _BOOZER_RUNTIME_RESULT_KEYS
@@ -2764,6 +2779,39 @@ def _traceable_plu_or_dummy(matrix, *, finite):
     )
 
 
+def _traceable_lu_piv_or_dummy(matrix, *, finite):
+    """Factor a finite matrix once via ``lu_factor`` for shared dispatch.
+
+    Phase 2 traceable analog of :func:`_traceable_plu_or_dummy` for the
+    Phase 2 factor-once contract. Returns ``(lu, piv)`` packed factors;
+    the public ``(P, L, U)`` triple is derived FROM THE SAME factors via
+    :func:`_optimizer_jax._plu_from_lu_piv` so the bytes are
+    bit-identical by construction. Failed-solve states materialize NaN
+    factors with a placeholder pivot vector so accidental downstream
+    solves propagate NaN visibly.
+    """
+
+    def compute(mat):
+        return _optimizer_jax._factor_dense_hessian(mat, optimizer_backend="ondevice")
+
+    def dummy(mat):
+        nan_fill = jnp.full_like(mat, jnp.nan)
+        nan_piv = jnp.zeros((mat.shape[0],), dtype=jnp.int32)
+        return nan_fill, nan_piv
+
+    if isinstance(finite, (bool, np.bool_)):
+        return compute(matrix) if bool(finite) else dummy(matrix)
+    if (
+        isinstance(finite, jax.Array)
+        and finite.shape == ()
+        and not isinstance(finite, jax.core.Tracer)
+    ):
+        finite_value = bool(np.asarray(jax.device_get(finite)))
+        return compute(matrix) if finite_value else dummy(matrix)
+
+    return jax.lax.cond(jnp.asarray(finite, dtype=jnp.bool_), compute, dummy, matrix)
+
+
 def _exact_newton_reporting_fields(result):
     return {
         "message": result.get("message"),
@@ -2813,29 +2861,73 @@ def _ls_hessian_symmetry_rel(H) -> float | None:
     return float(norms[1]) / H_norm
 
 
-def _ls_factorization_backend(H, *, optimizer_backend: str | None) -> str | None:
+def _ls_factorization_backend(
+    H,
+    *,
+    optimizer_backend: str | None,
+    shared_dispatch: bool = False,
+) -> str | None:
     """Return the LS factorization backend string for the result dict.
 
     Per ``docs/parity_scientific_equivalence_contract_2026-05-09.md`` §3.1.
-    ``"dense-plu-shared"`` is reserved for the Phase 2 factor-once adjoint
-    hybrid; today the LS LU is local to the Newton-polish reporting step.
-    Returns ``None`` when ``H`` is absent.
+    Returns ``None`` when ``H`` is absent. When ``shared_dispatch`` is
+    ``True`` the Phase 2 factor-once dispatch is active: the forward and
+    adjoint solves consume the same packed ``(lu, piv)`` factor bytes by
+    construction (see §5.3), and the field reports
+    ``"dense-plu-shared"``.
 
-    The ``optimizer_backend == "scipy"`` branch always reports
-    ``lapack-dgetrf`` because ``scipy.linalg.lu`` materializes ``np.asarray(H)``
-    on the host before calling LAPACK ``dgetrf``. Other backends route
-    through ``jax.scipy.linalg.lu`` on ``H``'s device; the device platform
-    determines the underlying factorization (LAPACK on CPU,
+    The ``optimizer_backend == "scipy"`` branch reports ``lapack-dgetrf``
+    because ``scipy.linalg.lu_factor`` materializes ``np.asarray(H)`` on
+    the host before calling LAPACK ``dgetrf``. Other backends route
+    through ``jax.scipy.linalg.lu_factor`` on ``H``'s device; the device
+    platform determines the underlying factorization (LAPACK on CPU,
     cuSOLVER ``cusolverDnDgetrf`` on CUDA).
     """
     if H is None:
         return None
+    if shared_dispatch:
+        return "dense-plu-shared"
     if optimizer_backend == "scipy":
         return "lapack-dgetrf"
     platform = str(H.device.platform).lower()
     if platform in {"gpu", "cuda"}:
         return "cusolver-getrf-ffi"
     return "lapack-dgetrf"
+
+
+def _ls_factor_once_dispatch_eligible(H, *, max_dense_jacobian_bytes) -> bool:
+    """Return whether ``decision_size**2 * 8 <= max_dense_jacobian_bytes``.
+
+    Phase 2 (`docs/parity_scientific_equivalence_contract_2026-05-09.md`
+    §5.3) shares ``(lu, piv)`` between LS forward and adjoint solves only
+    when the dense factor fits inside the byte budget. Above the budget,
+    the runtime stays on the existing operator-only adjoint path so the
+    CLAUDE.md exact-lane scaling-limit guarantees keep holding for large
+    problems. ``H`` must already be a real materialized matrix; ``None``
+    short-circuits to ``False``.
+
+    Budget-key contract:
+    - ``max_dense_linearization_bytes`` (`_DEFAULT_OPTIONS_LS`) gates
+      whether the LS Hessian is materialized in the first place by the
+      Newton-polish runner; if that gate fails, ``H`` is ``None`` and
+      this helper short-circuits without consulting
+      ``max_dense_jacobian_bytes``.
+    - ``max_dense_jacobian_bytes`` (this argument) is the
+      *shared* dense-factor byte budget across the LS factor-once path
+      and the Exact Jacobian materialization path. Operators that want
+      to allow large LS Hessians but disable LS factor-once dispatch
+      can set ``max_dense_jacobian_bytes`` below
+      ``max_dense_linearization_bytes`` and the runtime will fall back
+      to operator-only LS adjoints while still emitting the dense
+      Hessian for reporting. Both options default to 512 MB.
+    """
+    if H is None:
+        return False
+    if max_dense_jacobian_bytes is None:
+        return True
+    n = int(H.shape[0])
+    itemsize = int(np.dtype(np.float64).itemsize)
+    return n * n * itemsize <= int(max_dense_jacobian_bytes)
 
 
 _DEFAULT_MAX_DENSE_JACOBIAN_BYTES = 512 * 1024 * 1024
@@ -3274,6 +3366,72 @@ class BoozerSurfaceJAX(Optimizable):
                 solve_transpose_with_status,
                 linear_solve_backend,
                 linear_solve_factors,
+            )
+
+        if (
+            linearization_kind == "hessian"
+            and self.options["optimizer_backend"] != "scipy"
+            and self.res.get("LU_PIV") is not None
+        ):
+            # Phase 2 factor-once dispatch (see
+            # docs/parity_scientific_equivalence_contract_2026-05-09.md
+            # §5.3): forward and adjoint solves consume the same packed
+            # ``(lu, piv)`` so their factor bytes are bit-identical by
+            # construction. The public PLU triple stays load-bearing for
+            # the ``linear_solve_factors`` reporting field. The
+            # ``optimizer_backend == "scipy"`` lane is intentionally
+            # excluded — it routes through the scipy host-LAPACK block
+            # below to preserve C++-oracle byte parity for the
+            # ``cpp_compatible_probe`` LS skeleton (which depends on
+            # ``scipy.linalg.solve_triangular`` host-resident factor
+            # consumption rather than the device ``lu_solve`` getrs
+            # call). ``apply_forward`` / ``apply_transpose`` use the
+            # device-resident Hessian directly so the JAX/CUDA LS lane
+            # never crosses host on the runtime callback path.
+            lu_piv = self.res["LU_PIV"]
+            lu_device = jnp.asarray(lu_piv[0], dtype=x.dtype)
+            piv_device = jnp.asarray(lu_piv[1], dtype=jnp.int32)
+            H_dev = jnp.asarray(self.res["hessian"], dtype=x.dtype)
+
+            def apply_forward(rhs):
+                return H_dev @ jnp.asarray(rhs, dtype=x.dtype)
+
+            def apply_transpose(rhs):
+                return H_dev.T @ jnp.asarray(rhs, dtype=x.dtype)
+
+            def solve_forward(rhs):
+                return _optimizer_jax._lu_solve_dense_hessian(
+                    (lu_device, piv_device),
+                    jnp.asarray(rhs, dtype=x.dtype),
+                    transpose=False,
+                )
+
+            def solve_transpose(rhs):
+                return _optimizer_jax._lu_solve_dense_hessian(
+                    (lu_device, piv_device),
+                    jnp.asarray(rhs, dtype=x.dtype),
+                    transpose=True,
+                )
+
+            def solve_forward_with_status(rhs):
+                solved = solve_forward(rhs)
+                return solved, jnp.all(jnp.isfinite(solved))
+
+            def solve_transpose_with_status(rhs):
+                solved = solve_transpose(rhs)
+                return solved, jnp.all(jnp.isfinite(solved))
+
+            return pack_callbacks(
+                apply_forward,
+                apply_transpose,
+                solve_forward,
+                solve_transpose,
+                solve_forward_with_status=solve_forward_with_status,
+                solve_transpose_with_status=solve_transpose_with_status,
+                linear_solve_backend="dense-plu-shared",
+                linear_solve_factors=tuple(
+                    jnp.asarray(factor, dtype=x.dtype) for factor in self.res["PLU"]
+                ),
             )
 
         if (
@@ -4371,6 +4529,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "residual": result["residual"],
                 "jacobian": jacobian,
                 "plu": None,
+                "lu_piv": None,
                 "nit": result["nit"],
                 "success": primal_success,
                 "primal_success": primal_success,
@@ -4473,12 +4632,33 @@ class BoozerSurfaceJAX(Optimizable):
         hessian = newton_result["hessian"]
         if hessian is not None:
             finite = finite & jnp.all(jnp.isfinite(hessian))
-            P, L, U = _traceable_plu_or_dummy(
+            # Phase 2 (docs/parity_scientific_equivalence_contract_2026-05-09.md
+            # §5.3): factor once via lu_factor on the traceable lane so
+            # the public PLU triple is derived from the same packed
+            # factors that the IFT adjoint consumes. Failed-solve
+            # propagation keeps the all-NaN ``(P, L, U)`` contract from
+            # ``_traceable_plu_or_dummy`` so silent zero-gradient
+            # propagation cannot occur.
+            lu, piv = _traceable_lu_piv_or_dummy(
                 hessian,
                 finite=finite,
             )
+            lu_piv = (lu, piv)
+            P_shared, L_shared, U_shared = _optimizer_jax._plu_from_lu_piv(lu_piv)
+            P_dummy, L_dummy, U_dummy = _traceable_plu_or_dummy(
+                hessian,
+                finite=finite,
+            )
+            # Use the shared-factor ``(P, L, U)`` on success; on failure
+            # substitute the all-NaN dummy triple so failed-solve
+            # consumers cannot treat a partially-finite ``P = I`` as a
+            # valid factorization.
+            P = jnp.where(finite, P_shared, P_dummy)
+            L = jnp.where(finite, L_shared, L_dummy)
+            U = jnp.where(finite, U_shared, U_dummy)
             plu = (P, L, U)
         else:
+            lu_piv = None
             plu = None
         primal_success = newton_result["success"] & finite
         return {
@@ -4490,6 +4670,7 @@ class BoozerSurfaceJAX(Optimizable):
             "grad": newton_result["grad"],
             "hessian": hessian,
             "plu": plu,
+            "lu_piv": lu_piv,
             "nit": newton_result["nit"],
             "success": primal_success,
             "primal_success": primal_success,
@@ -4948,6 +5129,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "s": s,
                 "iota": iota_out,
                 "PLU": None,
+                "LU_PIV": None,
                 "vjp": None,
                 "vjp_groups": None,
                 "type": "ls",
@@ -4990,7 +5172,24 @@ class BoozerSurfaceJAX(Optimizable):
 
         self._set_surface_dofs(sdofs_final)
         H = result["hessian"]
-        if H is not None:
+        # Phase 2 (docs/parity_scientific_equivalence_contract_2026-05-09.md
+        # §5.3): factor once via lu_factor when the dense factor fits in
+        # the byte budget so the LS forward and adjoint solves share the
+        # same packed (lu, piv) bytes by construction. The public PLU
+        # triple is derived from the same factorization.
+        shared_dispatch_eligible = _ls_factor_once_dispatch_eligible(
+            H,
+            max_dense_jacobian_bytes=self.options["max_dense_jacobian_bytes"],
+        )
+        if H is not None and shared_dispatch_eligible:
+            lu_piv = _optimizer_jax._factor_dense_hessian(
+                H,
+                optimizer_backend=self.options["optimizer_backend"],
+            )
+            P, L, U = _optimizer_jax._plu_from_lu_piv(lu_piv)
+            plu = (P, L, U)
+        elif H is not None:
+            lu_piv = None
             if self.options["optimizer_backend"] == "scipy":
                 P, L, U = scipy.linalg.lu(np.asarray(H, dtype=np.float64))
                 plu = tuple(jnp.asarray(factor, dtype=H.dtype) for factor in (P, L, U))
@@ -4998,11 +5197,13 @@ class BoozerSurfaceJAX(Optimizable):
                 P, L, U = jax.scipy.linalg.lu(H)
                 plu = (P, L, U)
         else:
+            lu_piv = None
             plu = None
         ls_hessian_symmetry_rel = _ls_hessian_symmetry_rel(H)
         ls_factorization_backend = _ls_factorization_backend(
             H if plu is not None else None,
             optimizer_backend=self.options["optimizer_backend"],
+            shared_dispatch=lu_piv is not None,
         )
 
         G_for_res = (
@@ -5053,13 +5254,17 @@ class BoozerSurfaceJAX(Optimizable):
             "s": s,
             "iota": iota_out,
             "PLU": plu,
+            "LU_PIV": lu_piv,
             "vjp": vjp_callback,
             "vjp_groups": vjp_groups_callback,
             "type": "ls",
             "optimizer_method": method,
             "linearization_kind": "hessian",
             "linear_solve_backend": "dense-plu"
-            if self.options["optimizer_backend"] == "scipy" and plu is not None
+            if (
+                lu_piv is not None
+                or (self.options["optimizer_backend"] == "scipy" and plu is not None)
+            )
             else "operator",
             "dense_linear_solve_factors_available": plu is not None,
             "solve_generation": solve_generation,

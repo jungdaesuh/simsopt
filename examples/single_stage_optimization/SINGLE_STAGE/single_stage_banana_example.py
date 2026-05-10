@@ -195,9 +195,7 @@ SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES = (
 _SINGLE_STAGE_SEARCH_POLICY_PRESERVE_FIRST = "preserve_first"
 _SINGLE_STAGE_SEARCH_POLICY_REPAIR_FIRST = "repair_first"
 _SINGLE_STAGE_SEARCH_POLICY_GLOBAL_SEARCH = "global_search"
-_STANDARD_JAX_SURFACE_OBJECTIVES_DIAGNOSTIC_KEY = (
-    "standard_jax_surface_objectives"
-)
+_STANDARD_JAX_SURFACE_OBJECTIVES_DIAGNOSTIC_KEY = "standard_jax_surface_objectives"
 _TIMED_STAGE_LABELS = frozenset(
     {
         "after_boozer_surface_fit",
@@ -1056,9 +1054,7 @@ def build_single_stage_problem_contract(
             "diagnose_target_lane_scaled_phase1": bool(
                 getattr(args, "diagnose_target_lane_scaled_phase1", False)
             ),
-            "diagnostic_callbacks": bool(
-                getattr(args, "diagnostic_callbacks", False)
-            ),
+            "diagnostic_callbacks": bool(getattr(args, "diagnostic_callbacks", False)),
             "record_target_lane_invalid_state_events": bool(
                 getattr(args, "record_target_lane_invalid_state_events", False)
             ),
@@ -1808,8 +1804,7 @@ def use_target_lane_value_and_grad(
     """Return whether the production fused target-lane
     value/grad contract is active."""
     return bool(
-        backend == "jax"
-        and optimizer_backend in _JAX_TARGET_OUTER_OPTIMIZER_BACKENDS
+        backend == "jax" and optimizer_backend in _JAX_TARGET_OUTER_OPTIMIZER_BACKENDS
     )
 
 
@@ -2180,9 +2175,7 @@ def load_single_stage_jax_warm_start_state(run_dir, *, runtime_spec_path=None):
             f"{_SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME}; run seed conversion first: "
             f"{resolved_runtime_spec_path}"
         )
-    surface_path, results_path = resolve_single_stage_warm_start_paths(
-        resolved_run_dir
-    )
+    surface_path, results_path = resolve_single_stage_warm_start_paths(resolved_run_dir)
     return {
         "surface": load_serialized_surface_state(surface_path),
         "iota": None,
@@ -2679,7 +2672,9 @@ def load_single_stage_jax_runtime_seed_spec(
     if payload["schema"] != _SINGLE_STAGE_JAX_RUNTIME_SPEC_SCHEMA:
         raise ValueError("JAX warm-start runtime spec has the wrong schema")
     if int(payload["schema_version"]) != _SINGLE_STAGE_JAX_RUNTIME_SPEC_VERSION:
-        raise ValueError("JAX warm-start runtime spec has an unsupported schema version")
+        raise ValueError(
+            "JAX warm-start runtime spec has an unsupported schema version"
+        )
     if payload["self_intersection_mode"] != _SINGLE_STAGE_JAX_SELF_INTERSECTION_MODE:
         raise ValueError(
             "JAX warm-start runtime spec must use supported-surface JAX "
@@ -3279,9 +3274,7 @@ def _fit_surface_xyz_tensor_dofs_to_gamma(
         quadpoints_theta=quadpoints_theta_host,
     )
     rhs_host = np.reshape(target_gamma_host, (-1,))
-    fitted_dofs, _, rank, _ = np.linalg.lstsq(
-        design_matrix_host, rhs_host, rcond=None
-    )
+    fitted_dofs, _, rank, _ = np.linalg.lstsq(design_matrix_host, rhs_host, rcond=None)
     fitted_dofs_host = _canonicalize_surface_xyz_tensor_fit_dofs(
         np.asarray(fitted_dofs, dtype=float),
         mpol=mpol,
@@ -4739,7 +4732,9 @@ class BoozerResidualExact(Optimizable):
 
     def _adjoint_coil_derivative(self, dJ_ds, *, iota, G):
         booz_surf = self.boozer_surface
-        get_adjoint_runtime_state = getattr(booz_surf, "get_adjoint_runtime_state", None)
+        get_adjoint_runtime_state = getattr(
+            booz_surf, "get_adjoint_runtime_state", None
+        )
         if callable(get_adjoint_runtime_state):
             adjoint_state = get_adjoint_runtime_state()
             rhs = jnp.asarray(dJ_ds, dtype=jnp.float64)
@@ -5289,7 +5284,9 @@ def _require_cached_target_lane_reporting_metrics(
         )
     cached_metrics = run_dict["target_lane_reporting_metrics"]
     cached_coil_dofs = run_dict["target_lane_reporting_coil_dofs"]
-    include_distance_metrics = run_dict["target_lane_reporting_include_distance_metrics"]
+    include_distance_metrics = run_dict[
+        "target_lane_reporting_include_distance_metrics"
+    ]
     if (
         cached_metrics is None
         or cached_coil_dofs is None
@@ -5710,9 +5707,7 @@ def _supported_surface_self_intersection_inputs(surface):
     scatter_indices = None
     if surface_kind == "xyztensorfourier":
         scatter_indices = (
-            _as_jax_int32(stellsym_scatter_indices(mpol, ntor))
-            if stellsym
-            else None
+            _as_jax_int32(stellsym_scatter_indices(mpol, ntor)) if stellsym else None
         )
         expected_dofs = (
             int(scatter_indices.size)
@@ -5996,7 +5991,9 @@ def evaluate_surface_self_intersection(surface, *, require_supported_surface=Fal
     return bool(surface.is_self_intersecting()), True
 
 
-def update_self_intersection_status(run_dict, surface, *, require_supported_surface=False):
+def update_self_intersection_status(
+    run_dict, surface, *, require_supported_surface=False
+):
     """Refresh self-intersection status in the shared run-state dictionary."""
     (
         run_dict["intersecting"],
@@ -6234,12 +6231,14 @@ def configure_single_stage_target_lane_accepted_step_sync(
     """Install the array-native accepted-step sync and disable CPU reevaluation."""
     if not use_target_lane:
         return
-    adapter.accepted_step_state_sync = build_single_stage_target_lane_accepted_step_sync(
-        boozer_surface,
-        bs,
-        iota_target,
-        outer_objective_config=outer_objective_config,
-        success_filter=success_filter,
+    adapter.accepted_step_state_sync = (
+        build_single_stage_target_lane_accepted_step_sync(
+            boozer_surface,
+            bs,
+            iota_target,
+            outer_objective_config=outer_objective_config,
+            success_filter=success_filter,
+        )
     )
     adapter.reevaluate_before_accept = False
 
@@ -7059,10 +7058,7 @@ def build_target_lane_first_line_search_diagnosis(
     )
     curvature_tol = step_eps * step_norm * y_norm
     valid_curvature = bool(
-        np.isfinite(yts)
-        and np.isfinite(yty)
-        and yts > curvature_tol
-        and yty > 0.0
+        np.isfinite(yts) and np.isfinite(yty) and yts > curvature_tol and yty > 0.0
     )
     rejected_step = bool(line_search_result.failed or nonfinite_step or stalled_step)
     return {
@@ -7086,9 +7082,7 @@ def build_target_lane_first_line_search_diagnosis(
             "ngev": int(line_search_result.ngev),
             "alpha": _summarize_host_scalar(alpha_star),
             "value": _summarize_host_scalar(f_star),
-            "directional_derivative": _summarize_host_scalar(
-                float(np.dot(g_star, p0))
-            ),
+            "directional_derivative": _summarize_host_scalar(float(np.dot(g_star, p0))),
             "requested_initial_step": _summarize_host_scalar(
                 line_search_result.requested_initial_step
             ),
@@ -7098,13 +7092,9 @@ def build_target_lane_first_line_search_diagnosis(
             "best_finite_alpha": _summarize_host_scalar(
                 line_search_result.best_finite_alpha
             ),
-            "returned_alpha": _summarize_host_scalar(
-                line_search_result.returned_alpha
-            ),
+            "returned_alpha": _summarize_host_scalar(line_search_result.returned_alpha),
             "failure_reason": str(line_search_result.failure_reason),
-            "armijo_margin": _summarize_host_scalar(
-                line_search_result.armijo_margin
-            ),
+            "armijo_margin": _summarize_host_scalar(line_search_result.armijo_margin),
             "curvature_margin": _summarize_host_scalar(
                 line_search_result.curvature_margin
             ),
@@ -7722,11 +7712,7 @@ def resolve_target_lane_boozer_bfgs_tol(
     """Resolve the temporary Boozer LS tolerance override for target-lane trials."""
     if target_lane_boozer_bfgs_tol is not None:
         resolved = float(target_lane_boozer_bfgs_tol)
-    elif (
-        field_backend == "jax"
-        and optimizer_backend == "ondevice"
-        and benchmark_mode
-    ):
+    elif field_backend == "jax" and optimizer_backend == "ondevice" and benchmark_mode:
         resolved = _TARGET_LANE_BOOZER_BFGS_TOL_BENCHMARK_DEFAULT
     else:
         return None
@@ -9223,10 +9209,7 @@ def resolve_target_lane_boozer_init_base_overrides(
     )
     newton_tol_override = (
         _TARGET_LANE_BOOZER_NEWTON_TOL_FULL_MEMORY_DEFAULT
-        if (
-            target_lane_boozer_newton_tol is None
-            and not bool(boozer_limited_memory)
-        )
+        if (target_lane_boozer_newton_tol is None and not bool(boozer_limited_memory))
         else (
             None
             if target_lane_boozer_newton_tol is None
@@ -9345,9 +9328,7 @@ def compute_single_stage_failure_penalty(
         is_intersecting=is_intersecting,
         hardware_score=raw_hardware_score,
     )
-    solver_score = (
-        min(residual_inf, 4.0) if reject_class == "solver" else 0.0
-    )
+    solver_score = min(residual_inf, 4.0) if reject_class == "solver" else 0.0
     hardware_score = raw_hardware_score if reject_class == "hardware" else 0.0
     self_intersection_score = 0.5 if reject_class == "self_intersection" else 0.0
     failure_count = int(run_dict.get("failure_count", 0))
@@ -9650,9 +9631,7 @@ def _summarize_single_stage_pre_newton_state(pre_newton):
             pre_newton.get("decision_vector")
         ),
         "gradient": _summarize_optional_host_vector(pre_newton.get("gradient")),
-        "scipy_call_contract": _jsonable_value(
-            pre_newton.get("scipy_call_contract")
-        ),
+        "scipy_call_contract": _jsonable_value(pre_newton.get("scipy_call_contract")),
         "scipy_initial_call": _summarize_single_stage_scipy_initial_call(
             pre_newton.get("scipy_initial_call")
         ),
@@ -9674,10 +9653,20 @@ def summarize_single_stage_boozer_solve_decomposition(boozer_surface):
         solved_state.iota,
         solved_state.G,
     )
+    # The exact-mode result dict carries ``res["jacobian"]`` as the dense
+    # m x n augmented Jacobian (boozersurface_jax.py:5687). The LS-mode
+    # dict reuses the same key for the gradient vector
+    # (boozersurface_jax.py:5231). The probe arbiter for gate E3 needs
+    # the dense matrix shape, so emit ``final_jacobian`` ONLY when the
+    # solve type is ``exact``; emit ``None`` otherwise so the parity
+    # arbiter can skip without misinterpreting an LS gradient as a
+    # Jacobian.
+    boozer_type = res.get("type")
+    final_jacobian_summary = None
+    if boozer_type == "exact":
+        final_jacobian_summary = _summarize_optional_host_array(res.get("jacobian"))
     return {
-        "pre_newton": _summarize_single_stage_pre_newton_state(
-            res.get("pre_newton")
-        ),
+        "pre_newton": _summarize_single_stage_pre_newton_state(res.get("pre_newton")),
         "final_iota": _summarize_host_scalar(solved_state.iota),
         "final_G": _summarize_optional_host_scalar(solved_state.G),
         "final_surface_dofs": _summarize_host_vector(solved_state.sdofs),
@@ -9688,6 +9677,7 @@ def summarize_single_stage_boozer_solve_decomposition(boozer_surface):
             res.get("jacobian", res.get("gradient"))
         ),
         "final_hessian": _summarize_optional_host_array(res.get("hessian")),
+        "final_jacobian": final_jacobian_summary,
         "linear_solve_factors": _summarize_single_stage_linear_solve_factors(
             res.get("PLU")
         ),
@@ -9719,9 +9709,7 @@ def summarize_boozer_solver_trace_metadata(boozer_surface):
         "dense_linear_solve_factors_available": res.get(
             "dense_linear_solve_factors_available"
         ),
-        "dense_newton_steps_materialized": res.get(
-            "dense_newton_steps_materialized"
-        ),
+        "dense_newton_steps_materialized": res.get("dense_newton_steps_materialized"),
         "hessian_materialized": res.get("hessian_materialized"),
         "dense_hessian_shape": res.get("dense_hessian_shape"),
         "dense_hessian_bytes": res.get("dense_hessian_bytes"),
@@ -9734,9 +9722,7 @@ def summarize_boozer_solver_trace_metadata(boozer_surface):
             "final_step_iterative_refinement_ran"
         ),
         "dense_refinement_ran": res.get("dense_refinement_ran"),
-        "final_step_dense_refinement_ran": res.get(
-            "final_step_dense_refinement_ran"
-        ),
+        "final_step_dense_refinement_ran": res.get("final_step_dense_refinement_ran"),
         # Scientific-equivalence ladder reporting fields per
         # docs/parity_scientific_equivalence_contract_2026-05-09.md §3.
         # The JAX BoozerSurface emits these on its result dict; the CPU
@@ -9800,7 +9786,9 @@ def _single_stage_iota_penalty_gradient_scale(iota_penalty):
         return max(diff, 0.0)
     if iota_penalty.f == "min":
         return min(diff, 0.0)
-    raise ValueError(f"Unsupported QuadraticPenalty wrapping function {iota_penalty.f!r}.")
+    raise ValueError(
+        f"Unsupported QuadraticPenalty wrapping function {iota_penalty.f!r}."
+    )
 
 
 def _single_stage_iota_adjoint_rhs(adjoint_state, G):
@@ -9934,9 +9922,7 @@ def load_single_stage_objective_evaluation_replay_events(progress_json_path):
     with open(progress_json_path) as f:
         payload = json.load(f)
     return [
-        event
-        for event in payload["events"]
-        if event["label"] == "objective_evaluation"
+        event for event in payload["events"] if event["label"] == "objective_evaluation"
     ]
 
 
@@ -10809,9 +10795,7 @@ def export_requested_single_stage_artifacts(
                 bs_diag.B().reshape(unitn.shape) * unitn,
                 axis=2,
             )[:, :, None]
-            / np.sqrt(np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2))[
-                :, :, None
-            ]
+            / np.sqrt(np.sum(bs_diag.B().reshape(unitn.shape) ** 2, axis=2))[:, :, None]
         }
         boozer_surface.surface.to_vtk(
             os.path.join(output_dir, "surf_opt"),
@@ -11528,8 +11512,8 @@ if __name__ == "__main__":
         outer_contract,
         constraint_method=CONSTRAINT_METHOD,
     )
-    use_full_graph_jax_scipy = single_stage_optimizer_contract_uses_full_graph_jax_scipy(
-        outer_contract
+    use_full_graph_jax_scipy = (
+        single_stage_optimizer_contract_uses_full_graph_jax_scipy(outer_contract)
     )
     use_coil_optimizer_dofs = bool(use_target_lane)
     target_lane_coil_dof_size = single_stage_target_coil_dof_size(bs)
@@ -11940,9 +11924,7 @@ if __name__ == "__main__":
             if use_target_lane
             else None
         ),
-        optimizer_to_coil_dofs=(
-            lambda x: target_coil_dofs_from_optimizer_dofs(x)
-        )
+        optimizer_to_coil_dofs=(lambda x: target_coil_dofs_from_optimizer_dofs(x))
         if use_target_lane
         else None,
         optimizer_gradient_transform=(
@@ -12393,10 +12375,13 @@ if __name__ == "__main__":
                 outer_optimizer_run_start_s,
                 outer_optimizer_end_s,
             )
-            if single_stage_host_postprocess_required(
-                use_target_lane=use_target_lane,
-                write_full_artifacts=write_full_artifacts,
-            ) and not use_target_lane:
+            if (
+                single_stage_host_postprocess_required(
+                    use_target_lane=use_target_lane,
+                    write_full_artifacts=write_full_artifacts,
+                )
+                and not use_target_lane
+            ):
                 restore_single_stage_host_state(
                     use_target_lane=use_target_lane,
                     JF=JF,
@@ -12574,9 +12559,7 @@ if __name__ == "__main__":
                             objective_value=_summarize_host_scalar(
                                 initial_target_value
                             ),
-                            objective_grad=_summarize_host_vector(
-                                initial_target_grad
-                            ),
+                            objective_grad=_summarize_host_vector(initial_target_grad),
                         )
                 if args.replay_objective_evaluation_trace is not None:
                     if use_target_lane:
@@ -12584,8 +12567,10 @@ if __name__ == "__main__":
                             "--replay-objective-evaluation-trace requires the "
                             "host-dispatched adapter objective path."
                         )
-                    replay_events = load_single_stage_objective_evaluation_replay_events(
-                        args.replay_objective_evaluation_trace
+                    replay_events = (
+                        load_single_stage_objective_evaluation_replay_events(
+                            args.replay_objective_evaluation_trace
+                        )
                     )
                     replay_start_s = _perf_counter_s()
                     record_outer_optimizer_event(
@@ -12928,7 +12913,9 @@ if __name__ == "__main__":
                         record_outer_optimizer_event(
                             "target_lane_optimistix_final_sync_returned",
                             phase="diagnostic",
-                            elapsed_s=timings.get("target_lane_optimistix_final_sync_s"),
+                            elapsed_s=timings.get(
+                                "target_lane_optimistix_final_sync_s"
+                            ),
                         )
                     final_volume = initial_volume
                     final_iota = initial_iota
@@ -13019,12 +13006,10 @@ if __name__ == "__main__":
                                             effective_initial_step_scale,
                                         )
                                     )
-                                    phase1_optimizer_initial_value_and_grad = (
-                                        build_scaled_outer_problem_initial_value_and_grad(
-                                            target_lane_optimizer_initial_value_and_grad,
-                                            phase1_anchor_dofs,
-                                            effective_initial_step_scale,
-                                        )
+                                    phase1_optimizer_initial_value_and_grad = build_scaled_outer_problem_initial_value_and_grad(
+                                        target_lane_optimizer_initial_value_and_grad,
+                                        phase1_anchor_dofs,
+                                        effective_initial_step_scale,
                                     )
                                     main_optimizer_initial_value_and_grad = None
                                     phase1_scalar_fun = None
@@ -13536,11 +13521,7 @@ if __name__ == "__main__":
     final_reporting_coil_dofs = (
         target_coil_dofs_from_optimizer_dofs(final_optimizer_dofs)
         if use_target_lane
-        else (
-            bs.x.copy()
-            if use_full_graph_jax_scipy
-            else final_optimizer_dofs
-        )
+        else (bs.x.copy() if use_full_graph_jax_scipy else final_optimizer_dofs)
     )
     final_penalty_metrics = resolve_single_stage_final_penalty_metrics(
         use_target_lane=use_target_lane,
@@ -13912,9 +13893,7 @@ if __name__ == "__main__":
         "FINAL_BOOZER_RESIDUAL": final_result_snapshot.final_metrics[
             "final_boozer_residual"
         ],
-        "FINAL_IOTA_PENALTY": final_result_snapshot.final_metrics[
-            "final_iota_penalty"
-        ],
+        "FINAL_IOTA_PENALTY": final_result_snapshot.final_metrics["final_iota_penalty"],
         "FINAL_LENGTH_PENALTY": final_result_snapshot.final_metrics[
             "final_length_penalty"
         ],
@@ -14103,9 +14082,7 @@ if __name__ == "__main__":
             target_lane_first_line_search_diagnosis
         )
     if target_lane_optimistix_diagnosis is not None:
-        results["TARGET_LANE_OPTIMISTIX_DIAGNOSIS"] = (
-            target_lane_optimistix_diagnosis
-        )
+        results["TARGET_LANE_OPTIMISTIX_DIAGNOSIS"] = target_lane_optimistix_diagnosis
     if target_lane_scaled_phase1_diagnosis is not None:
         results["TARGET_LANE_SCALED_PHASE1_DIAGNOSIS"] = (
             target_lane_scaled_phase1_diagnosis

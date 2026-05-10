@@ -2,8 +2,14 @@
 
 - Date: 2026-05-09
 - Branch: `gpu-purity-stage2-20260405`
-- Status: Phase 0 + Phase 1 reporting skeleton landed in `2f71d5afa`;
-  Phase 1.5+ calibration/enforcement not started
+- Status: Phase 0 + Phase 1 reporting skeleton landed in `2f71d5afa`
+  (schema-drift fix in `1f1adfc42`). Phase 1.5 reporting wiring,
+  Phase 2 LS factor-once adjoint hybrid, and Phase 3
+  `cpp_compatible_probe` harness all landed in the working tree on
+  2026-05-10 (uncommitted; awaits final commit). Phase 1.5
+  calibration sweep + tolerance lock remains deferred — it requires
+  production runs against `.artifacts/parity/` corpus. Phase 5
+  (Skeel/EW/Hager–Higham) remains deferred per §9.
 - Companion docs:
   - `docs/parity_dual_mode_contract_2026-05-08.md`
     (existing dual-mode runtime contract; this plan adds a **second-axis
@@ -149,13 +155,18 @@ probe directions, not proofs of operator equivalence** — see §4 for
 the proof framing and the cross-reference to the existing
 `direct-hessian-oracle` lane.
 
-**Initial enforcement status.** Until Phase 1 lands the new ladder
-lane, result-schema fields, arbiter probes, and calibration corpus,
-gates L4 / L5 / E3 / E4 / E5 / E7 are **reporting-only**. The
-existing strict gates (`linear_solve_factors`, `final_hessian`, and
-the pre-Newton blocker — see §8) remain authoritative until they are
-formally retired by a follow-up amendment after the new ladder is
-populated and calibrated.
+**Initial enforcement status.** Phase 1 landed the new ladder
+lane, result-schema fields, and the deterministic operator-action
+probe helpers (commits `2f71d5afa` + `1f1adfc42`). Phase 1.5 added
+the per-pair arbiter wiring that emits `ls_hessian_action_max_rel`
+and `exact_jacobian_action_max_rel` into the parity artifact JSON
+under `solve_quality_probes`. Gates L4 / L5 / E3 / E4 / E5 / E7
+remain **reporting-only** until the calibration sweep populates the
+corpus and the §2 tolerance schedule is locked. The existing strict
+gates (`linear_solve_factors`, `final_hessian`, and the pre-Newton
+blocker — see §8) remain authoritative until they are formally
+retired by a follow-up amendment after the new ladder is populated
+and calibrated.
 
 ## 3. Solve-Quality Field Sets
 
@@ -167,9 +178,9 @@ materializes and the existing strict gate is formally retired.
 `linear_solve_factors` itself is **not** debug-only in live code —
 the SciPy reference runtime callbacks build
 `H_host = P @ L @ U` and use it as `apply_forward`/`apply_transpose`
-(`boozersurface_jax.py:3172-3199`), and the traceable adjoint
+(`boozersurface_jax.py:3418-3475`), and the traceable adjoint
 `_traceable_solve_plu_linearization` consumes the PLU factors for
-triangular solves (`surfaceobjectives_jax.py:3010-3024`). The factor
+triangular solves (`surfaceobjectives_jax.py:3017-3055`). The factor
 storage is therefore load-bearing for those code paths and must
 continue to be emitted faithfully. This plan adds new fields *next
 to* `linear_solve_factors`; it does not remove or relabel it.
@@ -265,7 +276,7 @@ For LS Newton polish (harness skeleton):
 For BoozerExact (harness skeleton — requires new code, see caveats
 below):
 
-- The exact normalizer at `boozersurface_jax.py:2912-2913` currently
+- The exact normalizer at `boozersurface_jax.py:3097` currently
   pops `optimizer_backend` for `boozer_type == "exact"`, so today the
   exact path has no `optimizer_backend="scipy"` channel. The harness
   cannot route through the existing scipy skeleton; it must materialize
@@ -319,8 +330,8 @@ and adjoint solves via `jax.custom_vjp` with `lax.stop_gradient` on
 the factors. The dense `(P, L, U)` triple is emitted from the same
 factorization for the public `linear_solve_factors` reporting field
 and continues to be load-bearing for the LS reference callbacks
-(`boozersurface_jax.py:3172-3199`) and the traceable adjoint PLU
-solve (`surfaceobjectives_jax.py:3010-3024`).
+(`boozersurface_jax.py:3418-3475`) and the traceable adjoint PLU
+solve (`surfaceobjectives_jax.py:3017-3055`).
 
 Above the byte-budget, fall back to the existing operator-only
 adjoint, preserving the CLAUDE.md "exact JAX never falls back to
@@ -328,8 +339,8 @@ dense factors" guarantee for large-n exact problems.
 
 In the LS path the `(P, L, U)` triple is **already load-bearing**
 runtime data (consumed by the SciPy reference callbacks at
-`boozersurface_jax.py:3172-3199` and the traceable adjoint at
-`surfaceobjectives_jax.py:3010-3024`); Phase 2 unifies the forward and
+`boozersurface_jax.py:3418-3475` and the traceable adjoint at
+`surfaceobjectives_jax.py:3017-3055`); Phase 2 unifies the forward and
 adjoint solves onto the same factor bytes via `lu_factor`/`lu_solve`
 without changing the load-bearing status of those bytes.
 
@@ -381,8 +392,8 @@ exception: when `decision_size² × 8 ≤ max_dense_jacobian_bytes`, the
 LS forward and adjoint solves consume the same `(lu, piv)` factors
 stored under `lax.stop_gradient` to ensure bit-equal forward/adjoint
 Hessian action. The LS `(P, L, U)` field is load-bearing runtime data
-(see `boozersurface_jax.py:3172-3199`,
-`surfaceobjectives_jax.py:3010-3024`); the **exact** lane's `(P, L, U)`
+(see `boozersurface_jax.py:3418-3475`,
+`surfaceobjectives_jax.py:3017-3055`); the **exact** lane's `(P, L, U)`
 remains debug metadata only, and `BoozerSurfaceJAX.get_adjoint_runtime_state()`
 remains the runtime SSOT for the exact-lane adjoint."
 
@@ -396,7 +407,7 @@ dense factors at runtime. The `cpp_compatible_probe` harness
 materializes a dense host-resident reference exact solver for
 diagnostic comparison only; it is not exposed through the
 `BoozerSurfaceJAX` user API and the exact normalizer at
-`boozersurface_jax.py:2912-2913` continues to strip
+`boozersurface_jax.py:3097` continues to strip
 `optimizer_backend` from the user-visible exact path. Batched exact
 adjoints in `production_operator` solve one RHS at a time through the
 same operator seam."
@@ -406,10 +417,10 @@ same operator seam."
 The CLAUDE.md "Adjoint / warm-start operator solves" rule that
 "dense PLU data in exact results is public/debug metadata" applies to
 the **exact** lane. In the **LS** lane, the SciPy reference runtime
-callbacks at `boozersurface_jax.py:3172-3199` build `H_host = P @ L @ U`
+callbacks at `boozersurface_jax.py:3418-3475` build `H_host = P @ L @ U`
 from `self.res["PLU"]` and use it as `apply_forward`/`apply_transpose`,
 and the traceable adjoint `_traceable_solve_plu_linearization` at
-`surfaceobjectives_jax.py:3010-3024` consumes the PLU factors for
+`surfaceobjectives_jax.py:3017-3055` consumes the PLU factors for
 triangular solves. In those LS paths, `linear_solve_factors` is
 load-bearing runtime data, not metadata. This plan does not
 change that — it only changes how the parity arbiter compares
@@ -505,26 +516,62 @@ Phase 4 (BFGS root cause) ── independent investigation, blocks gate L3 / E2 
   point both flip together.
 
 ### Phase 1.5 deliverables (after calibration)
-- Calibration sweep per §10 risk register #4.
-- Lock the §2 tolerance values in `PARITY_LADDER_TOLERANCES`.
+- Calibration sweep per §10 risk register #4. **Status:** deferred —
+  requires production CPU/GPU runs against the
+  `.artifacts/parity/` corpus. The Phase 1.5 reporting wiring below
+  emits the metrics needed to seed the calibration corpus once
+  production runs are available.
+- Lock the §2 tolerance values in `PARITY_LADDER_TOLERANCES`. **Status:**
+  pending calibration. Today the §2 thresholds remain the documented
+  upper bounds; the `ls_solve_quality` and `exact_solve_quality` lanes
+  retain `reporting_only=True` until the corpus completes.
 - Promote LS gates L4 / L5 and Exact gates E3 / E4 / E5 / E7 from
-  reporting-only to enforcing.
+  reporting-only to enforcing. **Status:** L4 / E3 reporting hooks
+  landed (see below); promotion to enforcing waits on calibration.
 - File a follow-up amendment to retire the existing `(P, L, U)`
   byte-parity probe in favor of the operator-action probes; this
   amendment is gated on the `cpp_compatible_probe` harness landing
   and producing reproducible reference trajectories.
 
+**Phase 1.5 reporting hooks landed (this commit set).** The arbiter
+in `benchmarks/single_stage_init_parity.py` now consumes paired
+CPU/JAX `final_hessian` and `final_jacobian` summaries through:
+
+- `benchmarks/parity_solve_quality.py::compute_dense_operator_action_max_rel_error`
+  — SSOT composition of `construct_operator_action_probes` +
+  `operator_action_max_relative_error` for gates L4 (LS Hessian
+  action) and E3 (exact Jacobian action).
+- `benchmarks/single_stage_init_parity.py::_summary_matrix` —
+  reshape a flattened `_summarize_host_array` payload back to its 2D
+  ``shape`` so the parity arbiter can apply operator probes against
+  recovered Hessians / Jacobians.
+- `benchmarks/single_stage_init_parity.py::_compute_solve_quality_probe_pair`
+  — per-pair probe computation; returns ``None`` when either lane is
+  missing the dense operator capture (no NaN injection).
+- `benchmarks/single_stage_init_parity.py::_aggregate_solve_quality_probes`
+  — fixture-level max aggregator with pair-index annotation.
+- ``compare_same_candidate_objective_replay`` now returns a
+  ``"solve_quality_probes"`` field carrying the aggregated values.
+  Reporting-only: failures are NOT extended on these values.
+- Exact-mode capture: `summarize_single_stage_boozer_solve_decomposition`
+  now emits ``"final_jacobian"`` only for ``boozer_type == "exact"``,
+  preserving LS gradient semantics on the existing ``"final_gradient"``
+  slot.
+
 ### Phase 2 deliverables
-- `boozersurface_jax.py:3267-3412` — adjoint factor-once dispatch
-  (LS path; the SciPy reference runtime callbacks at `:3172-3199`
-  already use the PLU bytes — Phase 2 unifies the channel).
+- `boozersurface_jax.py:3356-3416` — adjoint factor-once dispatch
+  (non-scipy LS lane; the SciPy reference runtime callbacks at
+  `:3418-3475` already share the PLU bytes — Phase 2 wires the
+  packed `(lu, piv)` channel for the JAX-on-device LS lane and
+  preserves the SciPy host-LAPACK lane for `cpp_compatible_probe`
+  byte parity).
 - `surfaceobjectives_jax.py:2949-3378` — IFT wrappers consume shared
-  factors. The traceable adjoint at `:3010-3024` already does this;
+  factors. The traceable adjoint at `:3017-3055` already does this;
   Phase 2 propagates the same single-source-of-truth to the LS
   forward path.
-- New test in `tests/integration/test_single_stage_jax.py` proving
-  forward and adjoint Hessian action are bit-equal under
-  `dense-plu-shared`.
+- New test `tests/integration/test_factor_once_adjoint_phase2.py`
+  proving forward and adjoint Hessian action are bit-equal
+  (`np.array_equal`) under `dense-plu-shared`.
 - CLAUDE.md amendments land here.
 
 ### Phase 3 deliverables
@@ -532,11 +579,26 @@ Phase 4 (BFGS root cause) ── independent investigation, blocks gate L3 / E2 
   `benchmarks/_cpp_compatible_probe.py` (or equivalent location)
   implementing the dense host-resident exact Newton per §5.1.
 - **No** `lane=` parameter on `BoozerSurfaceJAX`. The exact
-  normalizer at `boozersurface_jax.py:2912-2913` is unchanged.
+  normalizer at `boozersurface_jax.py:3097` is unchanged.
 - Parity benchmark harness invokes the probe via direct import,
   not through the user constructor.
 - Test: probe reproduces C++ Newton iterates within Exact gates
   E1–E6 across all fixtures.
+
+**Status:** module landed. `benchmarks/_cpp_compatible_probe.py`
+exposes `cpp_compatible_ls_newton_polish` (LS skeleton: validates
+`optimizer_backend="scipy"` and `materialize_dense_linearization=True`,
+then forwards to `BoozerSurfaceJAX.run_code()`) and
+`cpp_compatible_exact_newton` (host-resident dense exact Newton with
+unconditional Wilkinson refinement, no monotone-norm guard, host
+``np.linalg.solve`` only, sign convention ``x ← x − dx`` matching
+`boozersurface.py:1670`). Public-API contract tests in
+`tests/test_cpp_compatible_probe_phase3.py` cover host-LAPACK
+discipline, refinement unconditionality, monotone-guard absence, sign
+convention, augmented-residual assembly, smoke E3 probe shape, and
+constructor pre-conditions. End-to-end E1–E6 reproducibility across
+the `.artifacts/parity/` corpus is a follow-up calibration item that
+joins the Phase 1.5 calibration sweep deferred above.
 
 ### Phase 5 deliverables (deferred)
 - 5.1 Skeel/FERR forward-error gate (JAX-native rewrite required; see §6).
@@ -596,8 +658,8 @@ Phase 4 (BFGS root cause) ── independent investigation, blocks gate L3 / E2 
   benchmark-harness diagnostic, not a product API.
 - Does **not** classify `linear_solve_factors` as debug-only;
   it remains load-bearing runtime data for the LS reference SciPy
-  callbacks (`boozersurface_jax.py:3172-3199`) and the traceable
-  adjoint PLU solve (`surfaceobjectives_jax.py:3010-3024`).
+  callbacks (`boozersurface_jax.py:3418-3475`) and the traceable
+  adjoint PLU solve (`surfaceobjectives_jax.py:3017-3055`).
 - Does **not** enforce gates L4 / E3 as proofs of operator
   equivalence — they are smoke-regression diagnostics on `k+1 ≤ 9`
   probe directions; rigorous operator parity remains under the
@@ -630,11 +692,11 @@ Phase 4 (BFGS root cause) ── independent investigation, blocks gate L3 / E2 
   (release blockers, unchanged by this plan):
   `benchmarks/single_stage_init_parity.py:2000-2030, 3047-3051`
 - LS reference runtime callbacks (load-bearing PLU usage):
-  `src/simsopt/geo/boozersurface_jax.py:3172-3199`
+  `src/simsopt/geo/boozersurface_jax.py:3418-3475`
 - Traceable adjoint PLU solve (load-bearing PLU usage):
-  `src/simsopt/geo/surfaceobjectives_jax.py:3010-3024`
+  `src/simsopt/geo/surfaceobjectives_jax.py:3017-3055`
 - Exact normalizer that strips `optimizer_backend`:
-  `src/simsopt/geo/boozersurface_jax.py:2912-2913`
+  `src/simsopt/geo/boozersurface_jax.py:3097`
 - Unknown-lane rejection in ladder contract:
   `benchmarks/validation_ladder_contract.py:254-259`
 - Unknown-lane test guard:

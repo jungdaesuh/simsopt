@@ -65,6 +65,9 @@ from benchmarks.single_stage_smoke_fixture import (
     DEFAULT_STAGE2_BS_PATH,
     DEFAULT_VOL_TARGET,
 )
+from benchmarks.parity_solve_quality import (
+    compute_dense_operator_action_max_rel_error,
+)
 
 
 REQUESTED_PLATFORM = preparse_platform(sys.argv[1:])
@@ -1152,6 +1155,27 @@ def _summary_vector(summary: dict[str, Any] | None) -> np.ndarray | None:
     return np.asarray(values, dtype=float).reshape(-1)
 
 
+def _summary_matrix(summary: dict[str, Any] | None) -> np.ndarray | None:
+    """Reshape a flattened ``_summarize_host_array`` payload back to 2D.
+
+    Used by the scientific-equivalence ladder solve-quality probes (gates L4
+    / E3) to recover the dense Hessian / Jacobian operator from a captured
+    parity artifact. ``shape`` is required for matrix recovery; vectors and
+    higher-rank tensors return ``None``. Non-finite payloads also return
+    ``None`` so the probe wiring can skip cleanly without injecting NaNs.
+    """
+    if summary is None or not bool(summary.get("all_finite", False)):
+        return None
+    values = summary.get("values")
+    shape = summary.get("shape")
+    if values is None or shape is None:
+        return None
+    shape_tuple = tuple(int(dim) for dim in shape)
+    if len(shape_tuple) != 2:
+        return None
+    return np.asarray(values, dtype=float).reshape(shape_tuple)
+
+
 def _max_abs_diff(left: np.ndarray, right: np.ndarray) -> float:
     if left.shape != right.shape:
         return float("inf")
@@ -1855,6 +1879,92 @@ def _compare_same_candidate_boozer_solve_decomposition(
     )
 
 
+def _compute_solve_quality_probe_pair(
+    *,
+    cpu_decomposition: dict[str, Any] | None,
+    jax_decomposition: dict[str, Any] | None,
+    artifact_name: str,
+) -> dict[str, float | None]:
+    """Compute the LS L4 / Exact E3 operator-action max-rel-error for one pair.
+
+    Per ``docs/parity_scientific_equivalence_contract_2026-05-09.md`` §4 and
+    §2 (gates L4 + E3). Reads the captured ``final_hessian`` from each
+    paired ``boozer_solve_decomposition`` (the LS branch supplies a square
+    Hessian); when both lanes provide a 2D matrix of matching shape the
+    deterministic probe set is applied and the maximum relative error is
+    reported. Returns ``None`` for fields that cannot be computed (missing
+    summary, shape mismatch, or non-2D shape) so the parity arbiter can
+    record reporting-only metrics without injecting NaNs.
+
+    Phase 1.5 is reporting-only: callers must NOT extend the failure list
+    on the returned values until the calibration sweep in §10 risk register
+    item 4 finishes and the §2 tolerance schedule is locked.
+    """
+    metrics: dict[str, float | None] = {
+        "ls_hessian_action_max_rel": None,
+        "exact_jacobian_action_max_rel": None,
+    }
+    if cpu_decomposition is None or jax_decomposition is None:
+        return metrics
+
+    cpu_hessian = _summary_matrix(cpu_decomposition.get("final_hessian"))
+    jax_hessian = _summary_matrix(jax_decomposition.get("final_hessian"))
+    if (
+        cpu_hessian is not None
+        and jax_hessian is not None
+        and cpu_hessian.shape == jax_hessian.shape
+        and cpu_hessian.ndim == 2
+        and cpu_hessian.shape[0] == cpu_hessian.shape[1]
+    ):
+        metrics["ls_hessian_action_max_rel"] = (
+            compute_dense_operator_action_max_rel_error(
+                jax_hessian,
+                cpu_hessian,
+                artifact_name=f"{artifact_name}/ls_hessian",
+            )
+        )
+
+    cpu_jacobian = _summary_matrix(cpu_decomposition.get("final_jacobian"))
+    jax_jacobian = _summary_matrix(jax_decomposition.get("final_jacobian"))
+    if (
+        cpu_jacobian is not None
+        and jax_jacobian is not None
+        and cpu_jacobian.shape == jax_jacobian.shape
+        and cpu_jacobian.ndim == 2
+    ):
+        metrics["exact_jacobian_action_max_rel"] = (
+            compute_dense_operator_action_max_rel_error(
+                jax_jacobian,
+                cpu_jacobian,
+                artifact_name=f"{artifact_name}/exact_jacobian",
+            )
+        )
+    return metrics
+
+
+def _aggregate_solve_quality_probes(
+    aggregate: dict[str, float | None],
+    *,
+    pair_metrics: dict[str, float | None],
+    pair_index: int,
+) -> None:
+    """Update the fixture-level solve-quality probe aggregate with one pair.
+
+    The aggregate carries the *maximum* observed value per gate plus the
+    pair index where that maximum was seen. Reporting-only: callers must not
+    flag failures based on these aggregates until the calibration sweep
+    locks the §2 tolerance schedule.
+    """
+    for field in ("ls_hessian_action_max_rel", "exact_jacobian_action_max_rel"):
+        value = pair_metrics.get(field)
+        if value is None:
+            continue
+        previous = aggregate.get(field)
+        if previous is None or float(value) > float(previous):
+            aggregate[field] = float(value)
+            aggregate[f"{field}_pair_index"] = pair_index
+
+
 def _update_parity_bug_census(
     census: dict[str, dict[str, Any]],
     *,
@@ -2120,6 +2230,18 @@ def compare_same_candidate_objective_replay(
     max_boozer_solve_decomposition_layer_diffs = {}
     max_boozer_scipy_callback_abs_diff = 0.0
     first_boozer_scipy_callback_split = None
+    # Phase 1.5 reporting-only solve-quality probe aggregate per
+    # docs/parity_scientific_equivalence_contract_2026-05-09.md §2 + §4.
+    # Carries fixture-level max(L4 / E3) values together with the pair index
+    # where each maximum was observed. Calibration-locked enforcement is
+    # gated on §10 risk register item 4 — these values stay reporting-only
+    # until the calibration corpus completes.
+    solve_quality_probe_aggregate: dict[str, float | None] = {
+        "ls_hessian_action_max_rel": None,
+        "ls_hessian_action_max_rel_pair_index": None,
+        "exact_jacobian_action_max_rel": None,
+        "exact_jacobian_action_max_rel_pair_index": None,
+    }
     parity_bug_census_layers: dict[str, dict[str, Any]] = {}
     first_parity_bug_census_divergence = None
     solver_contract_diagnostics: list[str] = []
@@ -2233,6 +2355,17 @@ def compare_same_candidate_objective_replay(
                 line_search_evaluation=cpu_event.get("line_search_evaluation"),
             )
         )
+        if compare_native_gradient_layers:
+            solve_quality_pair_metrics = _compute_solve_quality_probe_pair(
+                cpu_decomposition=cpu_boozer_solve_decomposition,
+                jax_decomposition=jax_boozer_solve_decomposition,
+                artifact_name=f"single_stage_init_parity/pair{pair_index}",
+            )
+            _aggregate_solve_quality_probes(
+                solve_quality_probe_aggregate,
+                pair_metrics=solve_quality_pair_metrics,
+                pair_index=pair_index,
+            )
         _update_parity_bug_census(
             parity_bug_census_layers,
             family="boozer_solve",
@@ -2478,6 +2611,13 @@ def compare_same_candidate_objective_replay(
         "first_boozer_solve_decomposition_divergence": (
             first_boozer_solve_decomposition_divergence
         ),
+        # Phase 1.5 reporting-only solve-quality probe slot per
+        # docs/parity_scientific_equivalence_contract_2026-05-09.md §2 + §4.
+        # Field-level None means "not computed" (e.g. native_gradient was
+        # not used, or the lane omitted the dense Hessian / Jacobian
+        # capture). Promoted to enforcing only after the §10 risk register
+        # #4 calibration sweep completes and the §2 schedule is locked.
+        "solve_quality_probes": dict(solve_quality_probe_aggregate),
         "parity_bug_census": _finalize_parity_bug_census(
             parity_bug_census_layers,
             first_divergence=first_parity_bug_census_divergence,

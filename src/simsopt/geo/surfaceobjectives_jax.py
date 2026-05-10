@@ -180,6 +180,8 @@ def _traceable_diag_progress(message):
     if raw_value.strip().lower() in {"", "0", "false", "no", "off"}:
         return
     print(f"[traceable-runtime-diagnose] {message}", flush=True)
+
+
 logger = logging.getLogger(__name__)
 
 _TRACEABLE_SINGLE_STAGE_OUTER_TERM_SPECS = (
@@ -215,7 +217,9 @@ def _traceable_single_stage_outer_term_dependency_flags(term_name):
     try:
         return _TRACEABLE_SINGLE_STAGE_OUTER_TERM_DEPENDENCY_FLAGS[term_name]
     except KeyError as exc:
-        raise ValueError(f"Unknown traceable single-stage outer term {term_name!r}.") from exc
+        raise ValueError(
+            f"Unknown traceable single-stage outer term {term_name!r}."
+        ) from exc
 
 
 def _traceable_single_stage_weight_is_active(weight):
@@ -250,9 +254,7 @@ def _traceable_single_stage_effective_dependency_flags(
         (
             candidate_depends_on_x_inner,
             candidate_depends_on_coil_dofs,
-        ) = _traceable_single_stage_outer_term_dependency_flags(
-            candidate_term_name
-        )
+        ) = _traceable_single_stage_outer_term_dependency_flags(candidate_term_name)
         depends_on_x_inner = depends_on_x_inner or candidate_depends_on_x_inner
         depends_on_coil_dofs = depends_on_coil_dofs or candidate_depends_on_coil_dofs
     return depends_on_x_inner, depends_on_coil_dofs
@@ -434,18 +436,11 @@ def surface_mean_cross_sectional_area_jax_from_dofs(spec, dofs):
     x = gamma[:, :, 0]
     y = gamma[:, :, 1]
     radius_squared = x * x + y * y
-    jacobian_00 = (
-        x * gammadash1[:, :, 1] - y * gammadash1[:, :, 0]
-    ) / radius_squared
-    jacobian_01 = (
-        x * gammadash2[:, :, 1] - y * gammadash2[:, :, 0]
-    ) / radius_squared
-    dz_dtheta = gammadash2[:, :, 2] - (
-        gammadash1[:, :, 2] * jacobian_01 / jacobian_00
-    )
-    signed_area = (
-        jnp.mean(jnp.sqrt(radius_squared) * dz_dtheta * jacobian_00)
-        / (2.0 * jnp.pi)
+    jacobian_00 = (x * gammadash1[:, :, 1] - y * gammadash1[:, :, 0]) / radius_squared
+    jacobian_01 = (x * gammadash2[:, :, 1] - y * gammadash2[:, :, 0]) / radius_squared
+    dz_dtheta = gammadash2[:, :, 2] - (gammadash1[:, :, 2] * jacobian_01 / jacobian_00)
+    signed_area = jnp.mean(jnp.sqrt(radius_squared) * dz_dtheta * jacobian_00) / (
+        2.0 * jnp.pi
     )
     return jnp.abs(signed_area)
 
@@ -456,18 +451,17 @@ def surface_minor_radius_jax_from_dofs(spec, dofs):
 
 
 def surface_major_radius_jax_from_dofs(spec, dofs):
-    _gamma, _gammadash1, _gammadash2, volume = (
-        _surface_gamma_tangents_volume_from_dofs(spec, dofs)
+    _gamma, _gammadash1, _gammadash2, volume = _surface_gamma_tangents_volume_from_dofs(
+        spec, dofs
     )
     minor_radius = surface_minor_radius_jax_from_dofs(spec, dofs)
     return jnp.abs(volume) / (2.0 * jnp.pi * jnp.pi * minor_radius * minor_radius)
 
 
 def surface_aspect_ratio_jax_from_dofs(spec, dofs):
-    return (
-        surface_major_radius_jax_from_dofs(spec, dofs)
-        / surface_minor_radius_jax_from_dofs(spec, dofs)
-    )
+    return surface_major_radius_jax_from_dofs(
+        spec, dofs
+    ) / surface_minor_radius_jax_from_dofs(spec, dofs)
 
 
 def surface_dmean_cross_sectional_area_jax_from_dofs(spec, dofs):
@@ -538,9 +532,9 @@ def surface_principal_curvature_jax_from_dofs(
     )
     k1 = curvature[:, :, 2]
     k2 = curvature[:, :, 3]
-    return jnp.sum(
-        norm_normal * jnp.exp(-(k1 - kappamax1) / weight1)
-    ) + jnp.sum(norm_normal * jnp.exp(-(-k2 - kappamax2) / weight2))
+    return jnp.sum(norm_normal * jnp.exp(-(k1 - kappamax1) / weight1)) + jnp.sum(
+        norm_normal * jnp.exp(-(-k2 - kappamax2) / weight2)
+    )
 
 
 def _surface_dprincipal_curvature_jax_from_dofs(
@@ -1698,9 +1692,7 @@ def _public_dJ_from_native_cache(surface_objective):
         if surface_objective._dJ_by_dcoil_dofs is None:
             surface_objective.compute(compute_gradient=True)
         else:
-            surface_objective._dJ = _project_native_dJ_by_dcoil_dofs(
-                surface_objective
-            )
+            surface_objective._dJ = _project_native_dJ_by_dcoil_dofs(surface_objective)
     return surface_objective._dJ
 
 
@@ -1946,9 +1938,7 @@ def _ensure_solved_value_state(booz_surf):
 def _resolved_boozer_solved_runtime_state(booz_surf):
     """Return the solved-state runtime summary for value-path consumers."""
     _ensure_solved_value_state(booz_surf)
-    return _require_boozer_runtime_state_method(
-        booz_surf, "get_solved_runtime_state"
-    )()
+    return _require_boozer_runtime_state_method(booz_surf, "get_solved_runtime_state")()
 
 
 def _resolved_boozer_adjoint_runtime_state(booz_surf):
@@ -2972,15 +2962,35 @@ def _traceable_solve_hessian_linearization(
     )
 
 
+def _traceable_plu_unpack_triple(linear_solve_factors):
+    """Return ``(P, L, U)`` from a 3- or 5-tuple ``linear_solve_factors``.
+
+    Phase 2 (``docs/parity_scientific_equivalence_contract_2026-05-09.md``
+    §5.3) packs the LS forward path's ``(lu, piv)`` factors alongside
+    the public ``(P, L, U)`` triple as a 5-tuple
+    ``(P, L, U, lu, piv)`` so that the byte-shared dispatch can route
+    forward and adjoint solves through ``jsp_linalg.lu_solve``. The
+    legacy 3-tuple form remains the supported triangular fallback.
+    """
+    return linear_solve_factors[0], linear_solve_factors[1], linear_solve_factors[2]
+
+
+def _traceable_plu_unpack_lu_piv(linear_solve_factors):
+    """Return ``(lu, piv)`` from a 5-tuple ``linear_solve_factors``, else ``None``."""
+    if len(linear_solve_factors) == 5:
+        return linear_solve_factors[3], linear_solve_factors[4]
+    return None
+
+
 def _traceable_plu_matvec(linear_solve_factors, vector, *, transpose):
-    P, L, U = linear_solve_factors
+    P, L, U = _traceable_plu_unpack_triple(linear_solve_factors)
     if transpose:
         return U.T @ (L.T @ (P.T @ vector))
     return P @ (L @ (U @ vector))
 
 
 def _traceable_plu_matrix(linear_solve_factors):
-    P, L, U = linear_solve_factors
+    P, L, U = _traceable_plu_unpack_triple(linear_solve_factors)
     return P @ (L @ U)
 
 
@@ -2999,10 +3009,7 @@ def _traceable_plu_residual_tolerance(
         safety
         * dimension
         * eps
-        * (
-            jnp.linalg.norm(matrix) * jnp.linalg.norm(solution)
-            + jnp.linalg.norm(rhs)
-        )
+        * (jnp.linalg.norm(matrix) * jnp.linalg.norm(solution) + jnp.linalg.norm(rhs))
     )
     return jnp.maximum(residual_tol, backward_error)
 
@@ -3014,15 +3021,33 @@ def _traceable_solve_plu_linearization(
     linear_solve_tol,
     transpose,
 ):
-    """Solve a dense PLU snapshot with a residual-quality success contract."""
-    P, L, U = linear_solve_factors
-    if transpose:
-        y = jsp_linalg.solve_triangular(U.T, rhs, lower=True)
-        z = jsp_linalg.solve_triangular(L.T, y, lower=False)
-        solution = P @ z
+    """Solve a dense PLU snapshot with a residual-quality success contract.
+
+    Phase 2 (``docs/parity_scientific_equivalence_contract_2026-05-09.md``
+    §5.3): when ``linear_solve_factors`` is a 5-tuple
+    ``(P, L, U, lu, piv)``, the forward and adjoint solves consume the
+    same packed ``(lu, piv)`` factor bytes via ``jsp_linalg.lu_solve``.
+    The legacy 3-tuple ``(P, L, U)`` form preserves the existing
+    triangular-solve fallback for callers that do not have packed
+    factors available.
+    """
+    lu_piv = _traceable_plu_unpack_lu_piv(linear_solve_factors)
+    if lu_piv is not None:
+        lu, piv = lu_piv
+        solution = jsp_linalg.lu_solve(
+            (lu, piv),
+            rhs,
+            trans=1 if transpose else 0,
+        )
     else:
-        y = jsp_linalg.solve_triangular(L, P.T @ rhs, lower=True)
-        solution = jsp_linalg.solve_triangular(U, y, lower=False)
+        P, L, U = _traceable_plu_unpack_triple(linear_solve_factors)
+        if transpose:
+            y = jsp_linalg.solve_triangular(U.T, rhs, lower=True)
+            z = jsp_linalg.solve_triangular(L.T, y, lower=False)
+            solution = P @ z
+        else:
+            y = jsp_linalg.solve_triangular(L, P.T @ rhs, lower=True)
+            solution = jsp_linalg.solve_triangular(U, y, lower=False)
     residual = rhs - _traceable_plu_matvec(
         linear_solve_factors,
         solution,
@@ -3139,10 +3164,42 @@ def _pack_traceable_forward_result(
 
 
 def _traceable_result_linear_solve_factors(solve_result, linearization_kind):
-    """Return factors carried by traceable autodiff state, if this kind uses them."""
+    """Return factors carried by traceable autodiff state, if this kind uses them.
+
+    Phase 2 (``docs/parity_scientific_equivalence_contract_2026-05-09.md``
+    §5.3): when the traceable solve materialized packed ``(lu, piv)``
+    factors via :func:`_optimizer_jax._factor_dense_hessian`, the result
+    is the 5-tuple ``(P, L, U, lu, piv)`` so the IFT adjoint can route
+    through ``jsp_linalg.lu_solve``. The legacy 3-tuple ``(P, L, U)``
+    form remains the supported triangular fallback.
+    """
     if linearization_kind == "exact_jacobian":
         return None
-    return solve_result["plu"]
+    plu = solve_result["plu"]
+    if plu is None:
+        return None
+    lu_piv = solve_result.get("lu_piv")
+    if lu_piv is None:
+        return plu
+    return (plu[0], plu[1], plu[2], lu_piv[0], lu_piv[1])
+
+
+def _build_linear_solve_factors_from_res(res):
+    """Return the public ``linear_solve_factors`` tuple for a solved ``res``.
+
+    The compatibility-lane ``run_code()`` result dict stores the public
+    ``(P, L, U)`` triple under ``res["PLU"]`` and the Phase 2 packed
+    factors under ``res["LU_PIV"]``. When both are present the linear
+    solve helpers receive the 5-tuple ``(P, L, U, lu, piv)`` so adjoint
+    solves consume the same packed factor bytes as the forward solve.
+    """
+    plu = res.get("PLU")
+    if plu is None:
+        return None
+    lu_piv = res.get("LU_PIV")
+    if lu_piv is None:
+        return plu
+    return (plu[0], plu[1], plu[2], lu_piv[0], lu_piv[1])
 
 
 def _resolve_traceable_solved_state(
@@ -3203,10 +3260,12 @@ def _traceable_general_forward_result(
     )
 
     def _run_traceable_solve(_):
-        warmstart_sdofs, warmstart_iota, warmstart_G = booz_jax._unpack_decision_vector_jax(
-            warmstart_x,
-            optimize_G,
-            coil_set_spec=coil_set_spec,
+        warmstart_sdofs, warmstart_iota, warmstart_G = (
+            booz_jax._unpack_decision_vector_jax(
+                warmstart_x,
+                optimize_G,
+                coil_set_spec=coil_set_spec,
+            )
         )
         solve_result = booz_jax.run_code_traceable(
             coil_set_spec,
@@ -3221,9 +3280,7 @@ def _traceable_general_forward_result(
             coil_set_spec=coil_set_spec,
         )
         primal_success = solve_result["primal_success"]
-        adjoint_linear_solve_available = solve_result[
-            "adjoint_linear_solve_available"
-        ]
+        adjoint_linear_solve_available = solve_result["adjoint_linear_solve_available"]
         success = primal_success
         if success_filter is not None:
             success = success & jax.lax.cond(
@@ -3263,10 +3320,12 @@ def _traceable_general_forward_result(
         return _run_traceable_solve(None)
 
     def _warmstart_failure(_):
-        warmstart_sdofs, warmstart_iota, warmstart_G = booz_jax._unpack_decision_vector_jax(
-            warmstart_x,
-            optimize_G,
-            coil_set_spec=coil_set_spec,
+        warmstart_sdofs, warmstart_iota, warmstart_G = (
+            booz_jax._unpack_decision_vector_jax(
+                warmstart_x,
+                optimize_G,
+                coil_set_spec=coil_set_spec,
+            )
         )
         failure_value = _evaluate_traceable_total_objective(
             warmstart_x,
@@ -3702,7 +3761,9 @@ def _build_traceable_objective_state(
     }
     linearization_kind = booz_jax.res["linearization_kind"]
     baseline_linear_solve_factors = (
-        None if linearization_kind == "exact_jacobian" else booz_jax.res["PLU"]
+        None
+        if linearization_kind == "exact_jacobian"
+        else _build_linear_solve_factors_from_res(booz_jax.res)
     )
     linear_solve_tol = booz_jax._linear_solve_tolerance()
     linear_solve_stab = float(booz_jax.options.get("newton_stab", 0.0))
@@ -4212,10 +4273,14 @@ def _make_traceable_objective_from_compiled_bundle(compiled_bundle):
     def f_fwd(coil_dofs):
         coil_dofs = _as_jax_float64(coil_dofs)
         result = compiled_forward_result_for(coil_dofs)
+        # Phase 2 (docs/parity_scientific_equivalence_contract_2026-05-09.md
+        # §5.3 / §6): stop_gradient on the cached factor state so the
+        # IFT adjoint backward pass cannot retrace into the linear-solve
+        # factorization graph.
         return result["value"], (
             coil_dofs,
-            result["x"],
-            result["linear_solve_factors"],
+            lax.stop_gradient(result["x"]),
+            jax.tree_util.tree_map(lax.stop_gradient, result["linear_solve_factors"]),
             result["primal_success"],
         )
 
@@ -4420,10 +4485,9 @@ def _traceable_reporting_metrics_from_solution(
     surface_B_normal = jnp.sum(surface_B * surface_unit_normal, axis=-1)
     surface_B_norm = jnp.sqrt(jnp.sum(surface_B * surface_B, axis=-1))
     surface_area = surface_normal_norm / surface_normal_norm.size
-    field_error = (
-        jnp.sum(jnp.abs(surface_B_normal / surface_B_norm) * surface_area)
-        / jnp.sum(surface_area)
-    )
+    field_error = jnp.sum(
+        jnp.abs(surface_B_normal / surface_B_norm) * surface_area
+    ) / jnp.sum(surface_area)
     coil_specs = coil_specs_from_dof_extraction_spec(
         coil_dof_extraction_spec,
         coil_dofs,
@@ -4725,9 +4789,7 @@ def _traceable_term_adjoint_solve_report(
         matrix = _traceable_plu_matrix(solved_linear_solve_factors)
         report["plu"] = {
             "matrix_norm": _summarize_traceable_scalar(jnp.linalg.norm(matrix)),
-            "base_residual_tolerance": _summarize_traceable_scalar(
-                base_residual_tol
-            ),
+            "base_residual_tolerance": _summarize_traceable_scalar(base_residual_tol),
             "residual_tolerance": _summarize_traceable_scalar(residual_tol),
             "residual_norm": _summarize_traceable_scalar(residual_norm),
             "relative_residual": _summarize_traceable_scalar(
@@ -4814,9 +4876,7 @@ def diagnose_traceable_objective_runtime(
         baseline_x,
         optimize_G,
     )
-    baseline_success = _traceable_runtime_deviceify_tree(
-        np.asarray(True, dtype=bool)
-    )
+    baseline_success = _traceable_runtime_deviceify_tree(np.asarray(True, dtype=bool))
     # The gradient diagnosis always evaluates the cached solved baseline. Peel
     # that state directly here so this host-side diagnostic does not spend
     # minutes compiling the full coil-dependent forward-result JIT before it
@@ -4891,7 +4951,9 @@ def diagnose_traceable_objective_runtime(
             "direct_grad": _summarize_traceable_gradient(direct_grad),
             "implicit_grad": _summarize_traceable_gradient(implicit_grad),
             "total_grad": _summarize_traceable_gradient(term_total_grad),
-            "linear_solve_success": bool(np.asarray(jax.device_get(linear_solve_success))),
+            "linear_solve_success": bool(
+                np.asarray(jax.device_get(linear_solve_success))
+            ),
         }
         issues = []
         if not term_report["raw_value"]["finite"]:
@@ -5452,9 +5514,7 @@ def make_traceable_single_stage_alm_runtime_bundle(
                 penalty=penalty,
             )
             evaluation["x"] = forward_result["x"]
-            evaluation["linear_solve_factors"] = forward_result[
-                "linear_solve_factors"
-            ]
+            evaluation["linear_solve_factors"] = forward_result["linear_solve_factors"]
             evaluation["success"] = forward_result["success"]
             return evaluation
 
@@ -5512,10 +5572,16 @@ def make_traceable_single_stage_alm_runtime_bundle(
 
     def _objective_fwd(coil_dofs, multipliers, penalty):
         evaluation = compiled_evaluation_for(coil_dofs, multipliers, penalty)
+        # Phase 2 (docs/parity_scientific_equivalence_contract_2026-05-09.md
+        # §5.3 / §6): stop_gradient on the cached factor state so the
+        # IFT adjoint backward pass cannot retrace into the linear-solve
+        # factorization graph.
         return evaluation["total"], (
             coil_dofs,
-            evaluation["x"],
-            evaluation["linear_solve_factors"],
+            lax.stop_gradient(evaluation["x"]),
+            jax.tree_util.tree_map(
+                lax.stop_gradient, evaluation["linear_solve_factors"]
+            ),
             evaluation["success"],
             multipliers,
             penalty,
