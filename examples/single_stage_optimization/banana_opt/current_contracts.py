@@ -100,8 +100,10 @@ _BOOZER_CURRENT_CONVENTION_BY_MODE: Mapping[
     # variables. Physical enclosed current in amperes therefore maps to μ0*I_A
     # at the API boundary, not μ0/(2π)*I_A.
     "boozer_surrogate": "mu0",
-    # Wataru confirmed his workflow intentionally uses BoozerSurface(..., I=μ0*I_A)
+    # Wataru confirmed his workflow intentionally uses BoozerSurfaceFiniteI(..., I=μ0*I_A)
     # with no extra 2π factor. This matches the normalized-angle SIMSOPT API.
+    # (Originally written as BoozerSurface(..., I=...); the I= kwarg moved to the
+    # examples-side BoozerSurfaceFiniteI wrapper during the finite-I refactor.)
     "wataru_proxy_field": "mu0",
 }
 

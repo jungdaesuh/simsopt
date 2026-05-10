@@ -10,108 +10,6 @@ from functools import partial
 
 __all__ = ['BoozerSurface']
 
-_BOOZER_RESIDUAL_CALL_MODE = None
-_BOOZER_RESIDUAL_DS_CALL_MODE = None
-_BOOZER_RESIDUAL_DS2_CALL_MODE = None
-
-
-def _explicit_current_transform(I, size):
-    transform = np.eye(size)
-    transform[-1, -2] = I
-    return transform
-
-
-def _alpha_only_to_explicit_current_gradient(I, gradient):
-    return _explicit_current_transform(I, gradient.shape[0]).T @ gradient
-
-
-def _alpha_only_to_explicit_current_hessian(I, hessian):
-    transform = _explicit_current_transform(I, hessian.shape[0])
-    return transform.T @ hessian @ transform
-
-
-def _call_boozer_residual(alpha, G, I, iota, xphi, xtheta, B, weight_inv_modB):
-    global _BOOZER_RESIDUAL_CALL_MODE
-    if _BOOZER_RESIDUAL_CALL_MODE == "with_I":
-        return sopp.boozer_residual(G, I, iota, xphi, xtheta, B, weight_inv_modB)
-    if _BOOZER_RESIDUAL_CALL_MODE == "alpha_only":
-        return sopp.boozer_residual(alpha, iota, xphi, xtheta, B, weight_inv_modB)
-    try:
-        value = sopp.boozer_residual(G, I, iota, xphi, xtheta, B, weight_inv_modB)
-    except TypeError as exc:
-        if "incompatible function arguments" not in str(exc):
-            raise
-        _BOOZER_RESIDUAL_CALL_MODE = "alpha_only"
-        return sopp.boozer_residual(alpha, iota, xphi, xtheta, B, weight_inv_modB)
-    _BOOZER_RESIDUAL_CALL_MODE = "with_I"
-    return value
-
-
-def _call_boozer_residual_ds(
-    alpha, G, I, iota, B, dB_dx, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
-):
-    global _BOOZER_RESIDUAL_DS_CALL_MODE
-    if _BOOZER_RESIDUAL_DS_CALL_MODE == "with_I":
-        return sopp.boozer_residual_ds(
-            G, I, iota, B, dB_dx, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
-        )
-    if _BOOZER_RESIDUAL_DS_CALL_MODE == "alpha_only":
-        value, gradient = sopp.boozer_residual_ds(
-            alpha, iota, B, dB_dx, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
-        )
-        return value, _alpha_only_to_explicit_current_gradient(I, gradient)
-    try:
-        value = sopp.boozer_residual_ds(
-            G, I, iota, B, dB_dx, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
-        )
-    except TypeError as exc:
-        if "incompatible function arguments" not in str(exc):
-            raise
-        _BOOZER_RESIDUAL_DS_CALL_MODE = "alpha_only"
-        value, gradient = sopp.boozer_residual_ds(
-            alpha, iota, B, dB_dx, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
-        )
-        return value, _alpha_only_to_explicit_current_gradient(I, gradient)
-    _BOOZER_RESIDUAL_DS_CALL_MODE = "with_I"
-    return value
-
-
-def _call_boozer_residual_ds2(
-    alpha, G, I, iota, B, dB_dx, d2B_dx2, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
-):
-    global _BOOZER_RESIDUAL_DS2_CALL_MODE
-    if _BOOZER_RESIDUAL_DS2_CALL_MODE == "with_I":
-        return sopp.boozer_residual_ds2(
-            G, I, iota, B, dB_dx, d2B_dx2, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
-        )
-    if _BOOZER_RESIDUAL_DS2_CALL_MODE == "alpha_only":
-        value, gradient, hessian = sopp.boozer_residual_ds2(
-            alpha, iota, B, dB_dx, d2B_dx2, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
-        )
-        return (
-            value,
-            _alpha_only_to_explicit_current_gradient(I, gradient),
-            _alpha_only_to_explicit_current_hessian(I, hessian),
-        )
-    try:
-        value = sopp.boozer_residual_ds2(
-            G, I, iota, B, dB_dx, d2B_dx2, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
-        )
-    except TypeError as exc:
-        if "incompatible function arguments" not in str(exc):
-            raise
-        _BOOZER_RESIDUAL_DS2_CALL_MODE = "alpha_only"
-        value, gradient, hessian = sopp.boozer_residual_ds2(
-            alpha, iota, B, dB_dx, d2B_dx2, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, weight_inv_modB
-        )
-        return (
-            value,
-            _alpha_only_to_explicit_current_gradient(I, gradient),
-            _alpha_only_to_explicit_current_hessian(I, hessian),
-        )
-    _BOOZER_RESIDUAL_DS2_CALL_MODE = "with_I"
-    return value
-
 
 class BoozerSurface(Optimizable):
     r"""
@@ -187,7 +85,7 @@ class BoozerSurface(Optimizable):
     *[2]: Giuliani, A., Wechsung, F., Cerfon, A., Landreman, M., & Stadler, G. (2023). Direct stellarator coil optimization for nested magnetic surfaces with precise quasi-symmetry. Physics of Plasmas, 30(4).*
     """
 
-    def __init__(self, biotsavart, surface, label, targetlabel, constraint_weight=None, options=None, I=0.):
+    def __init__(self, biotsavart, surface, label, targetlabel, constraint_weight=None, options=None):
         """
         Args:
             biotsavart (:obj:`~simsopt.field.BiotSavart`): BiotSavart object.
@@ -219,7 +117,6 @@ class BoozerSurface(Optimizable):
         self.label = label
         self.targetlabel = targetlabel
         self.constraint_weight = constraint_weight
-        self.I = float(I)
         self.boozer_type = 'ls' if constraint_weight is not None else 'exact'
         self.need_to_run_code = True
         self.res = None
@@ -254,10 +151,6 @@ class BoozerSurface(Optimizable):
 
     def recompute_bell(self, parent=None):
         self.need_to_run_code = True
-
-    def _with_fixed_current(self, resdict):
-        resdict["I"] = self.I
-        return resdict
 
     def run_code_from_last_solution(self):
         if self.res is None:
@@ -378,7 +271,7 @@ class BoozerSurface(Optimizable):
 
         s.set_dofs(sdofs)
 
-        boozer = boozer_surface_residual(s, iota, G, biotsavart, derivatives=derivatives, weight_inv_modB=weight_inv_modB, I=self.I)
+        boozer = boozer_surface_residual(s, iota, G, biotsavart, derivatives=derivatives, weight_inv_modB=weight_inv_modB)
         # normalizing the residuals here
         boozer = tuple([b/np.sqrt(num_res) for b in boozer])
 
@@ -490,19 +383,14 @@ class BoozerSurface(Optimizable):
             d2B_by_dXdX = biotsavart.d2B_by_dXdX().reshape((nphi, ntheta, 3, 3, 3))
 
         num_res = 3 * s.quadpoints_phi.size * s.quadpoints_theta.size
-        alpha = G + iota * self.I
         if derivatives == 0:
-            val = _call_boozer_residual(alpha, G, self.I, iota, xphi, xtheta, B, weight_inv_modB)
+            val = sopp.boozer_residual(G, iota, xphi, xtheta, B, weight_inv_modB)
             boozer = val,
         elif derivatives == 1:
-            val, dval = _call_boozer_residual_ds(
-                alpha, G, self.I, iota, B, dB_dx, xphi, xtheta, dx_dc, dxphi_dc, dxtheta_dc, weight_inv_modB
-            )
+            val, dval = sopp.boozer_residual_ds(G, iota, B, dB_dx, xphi, xtheta, dx_dc, dxphi_dc, dxtheta_dc, weight_inv_modB)
             boozer = val, dval
         elif derivatives == 2:
-            val, dval, d2val = _call_boozer_residual_ds2(
-                alpha, G, self.I, iota, B, dB_dx, d2B_by_dXdX, xphi, xtheta, dx_dc, dxphi_dc, dxtheta_dc, weight_inv_modB
-            )
+            val, dval, d2val = sopp.boozer_residual_ds2(G, iota, B, dB_dx, d2B_by_dXdX, xphi, xtheta, dx_dc, dxphi_dc, dxtheta_dc, weight_inv_modB)
             boozer = val, dval, d2val
 
         # normalizing the residuals here
@@ -584,7 +472,7 @@ class BoozerSurface(Optimizable):
         s.set_dofs(sdofs)
         nsurfdofs = sdofs.size
 
-        boozer = boozer_surface_residual(s, iota, G, biotsavart, derivatives=derivatives+1, I=self.I)
+        boozer = boozer_surface_residual(s, iota, G, biotsavart, derivatives=derivatives+1)
         r, J = boozer[0:2]
 
         dl = np.zeros((xl.shape[0]-2,))
@@ -681,7 +569,6 @@ class BoozerSurface(Optimizable):
         resdict = {
             "fun": res.fun, "gradient": res.jac, "iter": res.nit, "info": res, "success": res.success, "G": None, 'weight_inv_modB': weight_inv_modB, 'type': 'ls'
         }
-        resdict = self._with_fixed_current(resdict)
         if G is None:
             s.set_dofs(res.x[:-1])
             iota = res.x[-1]
@@ -767,7 +654,6 @@ class BoozerSurface(Optimizable):
             "PLU": (P, L, U), "vjp": partial(boozer_surface_dlsqgrad_dcoils_vjp, weight_inv_modB=weight_inv_modB),
             "type": "ls", "weight_inv_modB": weight_inv_modB
         }
-        res = self._with_fixed_current(res)
         if G is None:
             s.set_dofs(x[:-1])
             iota = x[-1]
@@ -840,9 +726,9 @@ class BoozerSurface(Optimizable):
                 norm = np.linalg.norm(b)
                 lam *= 1/3
                 i += 1
-            resdict = self._with_fixed_current({
+            resdict = {
                 "residual": r, "gradient": b, "jacobian": JTJ, "success": norm <= tol
-            })
+            }
             if G is None:
                 s.set_dofs(x[:-1])
                 iota = x[-1]
@@ -864,7 +750,6 @@ class BoozerSurface(Optimizable):
             "info": res, "residual": res.fun, "gradient": res.grad, "jacobian": res.jac, "success": res.status > 0,
             "G": None,
         }
-        resdict = self._with_fixed_current(resdict)
         if G is None:
             s.set_dofs(res.x[:-1])
             iota = res.x[-1]
@@ -952,9 +837,9 @@ class BoozerSurface(Optimizable):
         else:
             lm = xl[-2:]
 
-        res = self._with_fixed_current({
+        res = {
             "residual": val, "jacobian": dval, "iter": i, "success": norm <= tol, "lm": lm, "G": None,
-        })
+        }
         if G is not None:
             s.set_dofs(xl[:-4])
             iota = xl[-4]
@@ -1088,7 +973,7 @@ class BoozerSurface(Optimizable):
             G = 2. * np.pi * np.sum(np.abs([c.current.get_value() for c in self.biotsavart.coils])) * (4 * np.pi * 10**(-7) / (2 * np.pi))
         x = np.concatenate((s.get_dofs(), [iota, G]))
         i = 0
-        r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1, I=self.I)
+        r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
         norm = 1e6
         while i < maxiter:
             if s.stellsym:
@@ -1117,7 +1002,7 @@ class BoozerSurface(Optimizable):
             iota = x[-2]
             G = x[-1]
             i += 1
-            r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1, I=self.I)
+            r, J = boozer_surface_residual(s, iota, G, self.biotsavart, derivatives=1)
 
         if s.stellsym:
             J = np.vstack((
@@ -1137,7 +1022,6 @@ class BoozerSurface(Optimizable):
             "mask": mask, 'type': 'exact', "weight_inv_modB": False,
             "vjp": boozer_surface_dexactresidual_dcoils_dcurrents_vjp
         }
-        res = self._with_fixed_current(res)
 
         if verbose:
             print(f"NEWTON solve - {res['success']}  iter={res['iter']}, iota={res['iota']:.16f}, ||residual||_inf = {np.linalg.norm(res['residual'], ord=np.inf):.3e}", flush=True)

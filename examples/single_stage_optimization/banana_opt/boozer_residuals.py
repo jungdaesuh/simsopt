@@ -8,12 +8,30 @@ from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt.geo.surfaceobjectives import (
     _boozer_lsqgrad_vjp_from_residual_state,
     _boozer_residual_dJ_by_dB,
-    _resolve_boozer_current_I,
-    boozer_surface_residual_dB,
 )
 from simsopt.objectives.utilities import forward_backward
 
+# Finite-enclosed-current support has moved out of src/simsopt and into the
+# examples-side wrapper module. We pull the I-aware residual + lsq vjp from
+# there so this file no longer depends on fork-only src/ symbols.
+from .boozer_finite_current import (
+    boozer_surface_residual_dB_finite_I,
+    _lsqgrad_vjp_finite_I,
+)
+
 __all__ = ["BoozerResidualExact", "RefinedBoozerResidual"]
+
+
+def _resolve_boozer_current_I(booz_surf):
+    """Read the enclosed plasma current ``I`` from a Boozer surface object.
+
+    Returns the wrapper-side ``self.I`` when present (set by
+    :class:`banana_opt.boozer_finite_current.BoozerSurfaceFiniteI`), or the
+    cached ``res["I"]`` when the solver stamped it, or 0.0 (vacuum) for plain
+    upstream ``BoozerSurface`` instances.
+    """
+    res = getattr(booz_surf, "res", None) or {}
+    return float(res.get("I", getattr(booz_surf, "I", 0.0)))
 
 
 def _quadpoints_for_multiplier(in_surface, grid_multiplier):
@@ -136,7 +154,7 @@ class RefinedBoozerResidual(Optimizable):
         weight_inv_modB = self._weight_inv_modB()
 
         if self.boozer_surface.res["type"] == "ls":
-            r, r_dB, J, d2r_dsdB, d2r_dsdgradB = boozer_surface_residual_dB(
+            r, r_dB, J, d2r_dsdB, d2r_dsdgradB = boozer_surface_residual_dB_finite_I(
                 surface,
                 iota,
                 G,
@@ -146,7 +164,7 @@ class RefinedBoozerResidual(Optimizable):
                 I=I,
             )
         else:
-            r, r_dB, J = boozer_surface_residual_dB(
+            r, r_dB, J = boozer_surface_residual_dB_finite_I(
                 surface,
                 iota,
                 G,
@@ -206,7 +224,7 @@ class RefinedBoozerResidual(Optimizable):
         surface = self.surface
         sqrt_n = np.sqrt(_num_boozer_components(surface))
         I = _resolve_boozer_current_I(self.boozer_surface)
-        r, r_dB = boozer_surface_residual_dB(
+        r, r_dB = boozer_surface_residual_dB_finite_I(
             surface,
             self.boozer_surface.res["iota"],
             self.boozer_surface.res["G"],

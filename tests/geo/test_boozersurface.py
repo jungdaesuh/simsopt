@@ -1,4 +1,6 @@
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -23,159 +25,35 @@ from simsopt.geo.surfaceobjectives import (
 from simsopt.configs.zoo import get_ncsx_data, get_hsx_data, get_giuliani_data
 from .surface_test_helpers import get_surface, get_exact_surface, get_boozer_surface
 
+# Finite-enclosed-current support lives in examples/banana_opt/ (off-tree from
+# upstream simsopt). Put that directory on the import path so we can exercise
+# the wrapper subclass alongside the upstream BoozerSurface.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_EXAMPLES_PATH = _REPO_ROOT / "examples" / "single_stage_optimization"
+if str(_EXAMPLES_PATH) not in sys.path:
+    sys.path.insert(0, str(_EXAMPLES_PATH))
+from banana_opt.boozer_finite_current import (
+    BoozerSurfaceFiniteI,
+    boozer_surface_residual_finite_I,
+    boozer_surface_residual_dB_finite_I,
+    _exact_vjp_finite_I,
+    _lsqgrad_vjp_finite_I,
+)
+
 
 surfacetypes_list = ["SurfaceXYZFourier", "SurfaceXYZTensorFourier"]
 stellsym_list = [True, False]
 
 
 class BoozerSurfaceTests(unittest.TestCase):
-    def test_boozer_residual_helpers_fall_back_to_alpha_only_extension(self):
-        alpha = 1.25
-        G = 0.5
-        current_I = 0.75
-        iota = -0.2
-        xphi = np.zeros((1, 1, 3))
-        xtheta = np.zeros((1, 1, 3))
-        B = np.zeros((1, 1, 3))
-        dB_dx = np.zeros((1, 1, 3, 3))
-        d2B_dx2 = np.zeros((1, 1, 3, 3, 3))
-        dx_ds = np.zeros((1, 1, 3, 1))
-        dxphi_ds = np.zeros((1, 1, 3, 1))
-        dxtheta_ds = np.zeros((1, 1, 3, 1))
-        alpha_only_gradient = np.array([3.0, 5.0, 7.0])
-        alpha_only_hessian = np.array(
-            [
-                [11.0, 13.0, 17.0],
-                [13.0, 19.0, 23.0],
-                [17.0, 23.0, 29.0],
-            ]
-        )
-        residual_calls = []
-        residual_ds_calls = []
-        residual_ds2_calls = []
-
-        def fake_boozer_residual(*args):
-            residual_calls.append(args)
-            if len(args) == 7:
-                raise TypeError("incompatible function arguments")
-            return "alpha-only-residual"
-
-        def fake_boozer_residual_ds(*args):
-            residual_ds_calls.append(args)
-            if len(args) == 11:
-                raise TypeError("incompatible function arguments")
-            return ("alpha-only-ds", alpha_only_gradient.copy())
-
-        def fake_boozer_residual_ds2(*args):
-            residual_ds2_calls.append(args)
-            if len(args) == 12:
-                raise TypeError("incompatible function arguments")
-            return (
-                "alpha-only-ds2",
-                alpha_only_gradient.copy(),
-                alpha_only_hessian.copy(),
-            )
-
-        previous_residual_mode = boozersurface_module._BOOZER_RESIDUAL_CALL_MODE
-        previous_residual_ds_mode = boozersurface_module._BOOZER_RESIDUAL_DS_CALL_MODE
-        previous_residual_ds2_mode = boozersurface_module._BOOZER_RESIDUAL_DS2_CALL_MODE
-        boozersurface_module._BOOZER_RESIDUAL_CALL_MODE = None
-        boozersurface_module._BOOZER_RESIDUAL_DS_CALL_MODE = None
-        boozersurface_module._BOOZER_RESIDUAL_DS2_CALL_MODE = None
-        try:
-            with patch.object(boozersurface_module.sopp, "boozer_residual", side_effect=fake_boozer_residual):
-                residual = boozersurface_module._call_boozer_residual(
-                    alpha, G, current_I, iota, xphi, xtheta, B, True
-                )
-            with patch.object(boozersurface_module.sopp, "boozer_residual_ds", side_effect=fake_boozer_residual_ds):
-                residual_ds = boozersurface_module._call_boozer_residual_ds(
-                    alpha, G, current_I, iota, B, dB_dx, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, True
-                )
-            with patch.object(boozersurface_module.sopp, "boozer_residual_ds2", side_effect=fake_boozer_residual_ds2):
-                residual_ds2 = boozersurface_module._call_boozer_residual_ds2(
-                    alpha, G, current_I, iota, B, dB_dx, d2B_dx2, xphi, xtheta, dx_ds, dxphi_ds, dxtheta_ds, True
-                )
-        finally:
-            boozersurface_module._BOOZER_RESIDUAL_CALL_MODE = previous_residual_mode
-            boozersurface_module._BOOZER_RESIDUAL_DS_CALL_MODE = previous_residual_ds_mode
-            boozersurface_module._BOOZER_RESIDUAL_DS2_CALL_MODE = previous_residual_ds2_mode
-
-        self.assertEqual(residual, "alpha-only-residual")
-        expected_gradient = np.array(
-            [alpha_only_gradient[0], alpha_only_gradient[1] + current_I * alpha_only_gradient[2], alpha_only_gradient[2]]
-        )
-        expected_hessian = np.array(
-            [
-                [11.0, 25.75, 17.0],
-                [25.75, 69.8125, 44.75],
-                [17.0, 44.75, 29.0],
-            ]
-        )
-        self.assertEqual(residual_ds[0], "alpha-only-ds")
-        self.assertEqual(residual_ds2[0], "alpha-only-ds2")
-        np.testing.assert_allclose(residual_ds[1], expected_gradient)
-        np.testing.assert_allclose(residual_ds2[1], expected_gradient)
-        np.testing.assert_allclose(residual_ds2[2], expected_hessian)
-        self.assertEqual(len(residual_calls), 2)
-        self.assertEqual(len(residual_ds_calls), 2)
-        self.assertEqual(len(residual_ds2_calls), 2)
-        self.assertEqual(len(residual_calls[0]), 7)
-        self.assertEqual(len(residual_calls[1]), 6)
-        self.assertEqual(len(residual_ds_calls[0]), 11)
-        self.assertEqual(len(residual_ds_calls[1]), 10)
-        self.assertEqual(len(residual_ds2_calls[0]), 12)
-        self.assertEqual(len(residual_ds2_calls[1]), 11)
-        self.assertEqual(residual_calls[1][0], alpha)
-        self.assertEqual(residual_ds_calls[1][0], alpha)
-        self.assertEqual(residual_ds2_calls[1][0], alpha)
-
-    def test_boozer_dresidual_dc_falls_back_to_alpha_only_extension(self):
-        alpha = 1.25
-        G = 0.5
-        current_I = 0.75
-        iota = -0.2
-        dB_dc = np.zeros((1, 1, 3, 1))
-        B = np.zeros((1, 1, 3))
-        tang = np.zeros((1, 1, 3))
-        B2 = np.zeros((1, 1))
-        dxphi_dc = np.zeros((1, 1, 3, 1))
-        dxtheta_dc = np.zeros((1, 1, 3, 1))
-        calls = []
-
-        def fake_boozer_dresidual_dc(*args):
-            calls.append(args)
-            if len(args) == 9:
-                raise TypeError("incompatible function arguments")
-            return "alpha-only"
-
-        previous_mode = surfaceobjectives_module._BOOZER_DRESIDUAL_DC_CALL_MODE
-        surfaceobjectives_module._BOOZER_DRESIDUAL_DC_CALL_MODE = None
-        try:
-            with patch.object(
-                surfaceobjectives_module.sopp,
-                "boozer_dresidual_dc",
-                side_effect=fake_boozer_dresidual_dc,
-            ):
-                result = surfaceobjectives_module._call_boozer_dresidual_dc(
-                    alpha,
-                    G,
-                    current_I,
-                    dB_dc,
-                    B,
-                    tang,
-                    B2,
-                    dxphi_dc,
-                    iota,
-                    dxtheta_dc,
-                )
-        finally:
-            surfaceobjectives_module._BOOZER_DRESIDUAL_DC_CALL_MODE = previous_mode
-
-        self.assertEqual(result, "alpha-only")
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(len(calls[0]), 9)
-        self.assertEqual(len(calls[1]), 8)
-        self.assertEqual(calls[1][0], alpha)
+    # Two ABI-fallback tests previously lived here
+    # (test_boozer_residual_helpers_fall_back_to_alpha_only_extension and
+    # test_boozer_dresidual_dc_falls_back_to_alpha_only_extension). They
+    # exercised src/-side machinery that wired finite-I support into the
+    # upstream-only C++ kernel via a `with_I → alpha_only` fallback. That
+    # machinery now lives in examples/single_stage_optimization/banana_opt/
+    # boozer_finite_current.py (alongside BoozerSurfaceFiniteI), and is
+    # exercised by the BoozerSurfaceFiniteI test cases below.
 
     def _make_area_boozer_surface(self, *, current_I, mpol, ntor, phis, thetas, constraint_weight, options):
         curves, currents, ma = get_ncsx_data()
@@ -189,7 +67,7 @@ class BoozerSurfaceTests(unittest.TestCase):
         )
         surface.fit_to_curve(ma, 0.1, flip_theta=True)
         label = Area(surface)
-        boozer_surface = BoozerSurface(
+        boozer_surface = BoozerSurfaceFiniteI(
             bs, surface, label, label.J(), constraint_weight=constraint_weight,
             options=options, I=current_I,
         )
@@ -748,7 +626,7 @@ class BoozerSurfaceTests(unittest.TestCase):
         iota = -0.3
 
         for current_I in [0.0, 0.37]:
-            boozer_surface = BoozerSurface(bs, s, tf, tf_target, I=current_I)
+            boozer_surface = BoozerSurfaceFiniteI(bs, s, tf, tf_target, I=current_I)
             x = np.concatenate((s.get_dofs(), [iota, G]))
             self._assert_penalty_constraints_derivatives2_cpp_python_match(
                 boozer_surface, x, optimize_G=True, weight_inv_modB=weight_inv_modB,
@@ -783,7 +661,7 @@ class BoozerSurfaceTests(unittest.TestCase):
 
         tf_target = 0.1
         for current_I in [0.0, 0.37]:
-            boozer_surface = BoozerSurface(bs, s, tf, tf_target, I=current_I)
+            boozer_surface = BoozerSurfaceFiniteI(bs, s, tf, tf_target, I=current_I)
 
             iota = -0.3
             x = np.concatenate((s.get_dofs(), [iota]))
@@ -813,14 +691,14 @@ class BoozerSurfaceTests(unittest.TestCase):
         coeffs = bs.x.copy()
         direction = np.random.rand(*coeffs.shape) - 0.5
         lm = np.random.rand(int(res["mask"].sum()) + 1) - 0.5
-        dfdx = boozer_surface_dexactresidual_dcoils_dcurrents_vjp(
-            lm, boozer_surface, res["iota"], res["G"]
+        dfdx = _exact_vjp_finite_I(
+            current_I, lm, boozer_surface, res["iota"], res["G"]
         )(bs)
         directional_derivative = dfdx @ direction
 
         def f(dofs):
             bs.x = dofs
-            residual = boozer_surface_residual(
+            residual = boozer_surface_residual_finite_I(
                 boozer_surface.surface, res["iota"], res["G"], bs,
                 derivatives=0, I=current_I,
             )[0]
@@ -847,20 +725,20 @@ class BoozerSurfaceTests(unittest.TestCase):
         coeffs = bs.x.copy()
         direction = np.random.rand(*coeffs.shape) - 0.5
         iota = -0.3
-        boozer = boozer_surface_residual_dB(
+        boozer = boozer_surface_residual_dB_finite_I(
             boozer_surface.surface, iota, G0, bs, derivatives=1,
             weight_inv_modB=True, I=current_I,
         )
         num_points = 3 * boozer_surface.surface.quadpoints_phi.size * boozer_surface.surface.quadpoints_theta.size
         lm = np.random.rand(boozer[2].shape[1]) - 0.5
-        dfdx = boozer_surface_dlsqgrad_dcoils_vjp(
-            lm, boozer_surface, iota, G0, weight_inv_modB=True
+        dfdx = _lsqgrad_vjp_finite_I(
+            current_I, lm, boozer_surface, iota, G0, weight_inv_modB=True
         )(bs)
         directional_derivative = dfdx @ direction
 
         def f(dofs):
             bs.x = dofs
-            residual_terms = boozer_surface_residual_dB(
+            residual_terms = boozer_surface_residual_dB_finite_I(
                 boozer_surface.surface, iota, G0, bs, derivatives=1,
                 weight_inv_modB=True, I=current_I,
             )

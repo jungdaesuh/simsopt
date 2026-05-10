@@ -237,7 +237,9 @@ def make_frontier_goal_config(module, **overrides):
         "volume_reference": 0.10,
         "volume_scale": 0.01,
         "qs_reference": 1.0e-4,
+        "qs_scale": 2.5e-5,
         "boozer_reference": 1.0e-6,
+        "boozer_scale": 2.5e-7,
         "boozer_trust_threshold": 1.0e-5,
         "boozer_trust_penalty_scale": 5.0e-5,
         "effective_qs_weight": 1.0,
@@ -570,7 +572,7 @@ class SingleStageExampleTests(unittest.TestCase):
     ):
         with patch.object(module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier), patch.object(
             module, "Volume", FakeVolume
-        ), patch.object(module, "BoozerSurface", FakeBoozerSurface):
+        ), patch.object(module, "BoozerSurfaceFiniteI", FakeBoozerSurface):
             return module.initialize_boozer_surface(
                 surf_prev,
                 mpol=TEST_MPOL,
@@ -620,6 +622,10 @@ class SingleStageExampleTests(unittest.TestCase):
         ), patch.object(module, "NonQuasiSymmetricRatio", _NonQS), patch.object(
             module,
             "BoozerResidual",
+            _Residual,
+        ), patch.object(
+            module,
+            "RefinedBoozerResidual",
             _Residual,
         ), patch.object(
             module,
@@ -792,10 +798,21 @@ class SingleStageExampleTests(unittest.TestCase):
 
     @contextmanager
     def patched_boozer_residual_dB_evaluators(self, modules, residual_dB):
+        # The residual_dB callable exists under two names depending on which
+        # module is being patched: the upstream-only `boozer_surface_residual_dB`
+        # in `simsopt.geo.surfaceobjectives`, and the I-aware
+        # `boozer_surface_residual_dB_finite_I` re-exported through the
+        # examples-side `banana_opt.boozer_residuals` and defined in
+        # `banana_opt.boozer_finite_current`. Patch whichever symbol the
+        # module exposes so existing call-tracking tests keep working without
+        # caring about the wrapper rename.
         with ExitStack() as stack:
             for module in modules:
                 stack.enter_context(patch.object(module, "SurfaceXYZTensorFourier", FakeResolvedSurface))
-                stack.enter_context(patch.object(module, "boozer_surface_residual_dB", side_effect=residual_dB))
+                if hasattr(module, "boozer_surface_residual_dB_finite_I"):
+                    stack.enter_context(patch.object(module, "boozer_surface_residual_dB_finite_I", side_effect=residual_dB))
+                if hasattr(module, "boozer_surface_residual_dB"):
+                    stack.enter_context(patch.object(module, "boozer_surface_residual_dB", side_effect=residual_dB))
             yield
 
     def build_differentiable_boozer_case(
@@ -924,7 +941,16 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIs(module.BoozerResidualExact, residual_module.BoozerResidualExact)
         self.assertIs(module.RefinedBoozerResidual, residual_module.RefinedBoozerResidual)
         self.assertNotIn("boozer_surface_residual", vars(residual_module))
-        self.assertIs(residual_module.boozer_surface_residual_dB, boozer_surface_residual_dB)
+        # After the finite-I refactor, RefinedBoozerResidual evaluates the
+        # residual through the examples-side wrapper rather than the upstream
+        # vacuum function. Verify it pulls the wrapper symbol from
+        # boozer_finite_current and re-exports it locally.
+        from banana_opt.boozer_finite_current import boozer_surface_residual_dB_finite_I
+        self.assertIs(
+            residual_module.boozer_surface_residual_dB_finite_I,
+            boozer_surface_residual_dB_finite_I,
+        )
+        self.assertNotIn("boozer_surface_residual_dB", vars(residual_module))
         self.assertIs(residual_module.forward_backward, forward_backward)
 
     def test_boozer_residual_exact_not_defined_inline(self):
@@ -1056,7 +1082,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
         with patch.object(module, "SurfaceXYZTensorFourier", FakeSurfaceXYZTensorFourier), patch.object(
             module, "Volume", FakeVolume
-        ), patch.object(module, "BoozerSurface", FakeBoozerSurface):
+        ), patch.object(module, "BoozerSurfaceFiniteI", FakeBoozerSurface):
             boozer_surface = module.initialize_boozer_surface(
                 surf_prev,
                 mpol=TEST_MPOL,
@@ -1091,10 +1117,17 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(fake_bs.last_vjp_input.shape, (expected_point_count, 3))
 
     def test_refined_boozer_residual_k1_matches_standard_boozer_residual(self):
+        # The vacuum-current branch is the only case where standard
+        # BoozerResidual (now upstream/vacuum-only) equals RefinedBoozerResidual
+        # at k=1. For finite I, RefinedBoozerResidual carries the iota*I*B
+        # correction via the boozer_finite_current wrapper while standard
+        # BoozerResidual does not (the I-aware path moved to BoozerResidualFiniteI
+        # in banana_opt). The finite-I divergence is asserted in the wrapper-side
+        # tests in tests/geo/test_boozersurface.py.
         module = self.load_module()
         residual_module = self.residual_module(module)
 
-        for current_I in (0.0, TEST_BOOZER_I):
+        for current_I in (0.0,):
             for stored_weight_inv_modB in (False, True):
                 with self.subTest(
                     current_I=current_I,
@@ -7411,7 +7444,15 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(config.volume_reference, 0.10)
         self.assertAlmostEqual(config.volume_scale, 0.01)
         self.assertAlmostEqual(config.qs_reference, 2.0e-4)
+        # qs_scale defaults to ``max(|initial_qs_objective|, 1e-6) * 0.25``
+        # (per the iota_scale heuristic). For initial_qs_objective=2.0e-4
+        # this yields 5.0e-5.
+        self.assertAlmostEqual(config.qs_scale, 5.0e-5)
         self.assertAlmostEqual(config.boozer_reference, 1.0e-6)
+        # boozer_scale defaults to
+        # ``max(|initial_boozer_objective|, 1e-6) * 0.25 = 1e-6 * 0.25 = 2.5e-7``.
+        # The post-default ``minimum=1e-6`` floor then lifts it to 1e-6.
+        self.assertAlmostEqual(config.boozer_scale, 1.0e-6)
         self.assertAlmostEqual(config.boozer_trust_threshold, 1.0e-5)
         self.assertAlmostEqual(config.boozer_trust_penalty_scale, 5.0e-5)
         self.assertAlmostEqual(config.effective_boozer_weight, 1.0)
@@ -7465,7 +7506,9 @@ class HardwareConstraintTests(unittest.TestCase):
             volume_reference_override=0.105,
             volume_scale_override=0.015,
             qs_reference_override=0.011,
+            qs_scale_override=0.0028,
             boozer_reference_override=0.007,
+            boozer_scale_override=0.0018,
             boozer_trust_threshold_override=0.009,
             boozer_trust_penalty_scale_override=0.045,
         )
@@ -7475,7 +7518,9 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(config.volume_reference, 0.105)
         self.assertAlmostEqual(config.volume_scale, 0.015)
         self.assertAlmostEqual(config.qs_reference, 0.011)
+        self.assertAlmostEqual(config.qs_scale, 0.0028)
         self.assertAlmostEqual(config.boozer_reference, 0.007)
+        self.assertAlmostEqual(config.boozer_scale, 0.0018)
         self.assertAlmostEqual(config.boozer_trust_threshold, 0.009)
         self.assertAlmostEqual(config.boozer_trust_penalty_scale, 0.045)
         self.assertAlmostEqual(config.effective_iota_weight, 1.0)
@@ -9803,6 +9848,11 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         constraint_values = np.array([0.2])
         constraint_grads = [np.array([2.0, -1.0])]
+        # ALM and non-ALM branches now both consume the full geometry-penalty
+        # bundle (length, cc, cs, curvature, surf_dist, poloidal_extent) so
+        # ``physics_total`` is comparable across formulations. Weights for cc,
+        # cs, curvature and surf_dist are zero, so those rows do not affect
+        # the expected base total.
         objective_eval = {
             "total": 999.0,
             "grad": np.array([99.0, 99.0]),
@@ -9820,6 +9870,14 @@ class CurrentBaselineContractTests(unittest.TestCase):
             "dJ_volume": np.array([0.0, 0.5]),
             "J_len": 2.0,
             "dJ_len": np.array([0.6, 0.7]),
+            "J_cc": 1.1,
+            "dJ_cc": np.array([0.0, 0.0]),
+            "J_cs": 0.9,
+            "dJ_cs": np.array([0.0, 0.0]),
+            "J_curvature": 0.5,
+            "dJ_curvature": np.array([0.0, 0.0]),
+            "J_surf": 0.3,
+            "dJ_surf": np.array([0.0, 0.0]),
             "constraint_values": constraint_values,
             "constraint_grads": constraint_grads,
         }

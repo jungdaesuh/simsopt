@@ -86,6 +86,7 @@ from banana_opt.artifact_contracts import (
     STAGE2_SEED_CONTRACT_HASH_KEY,
     upgrade_legacy_stage2_artifact_results,
 )
+from banana_opt.boozer_finite_current import BoozerSurfaceFiniteI
 from banana_opt.boozer_residuals import (  # noqa: F401 - re-exported for importlib-loaded tests
     BoozerResidualExact,
     RefinedBoozerResidual,
@@ -1857,7 +1858,7 @@ def initialize_boozer_surface(
         nfp=nfp,
         surface_cls=SurfaceXYZTensorFourier,
         volume_cls=Volume,
-        boozer_surface_cls=BoozerSurface,
+        boozer_surface_cls=BoozerSurfaceFiniteI,
     )
 
 
@@ -2438,7 +2439,9 @@ class PreservedTimeoutReplayConfig:
     frontier_volume_reference: float | None = None
     frontier_volume_scale: float | None = None
     frontier_qs_reference: float | None = None
+    frontier_qs_scale: float | None = None
     frontier_boozer_reference: float | None = None
+    frontier_boozer_scale: float | None = None
     frontier_boozer_trust_threshold: float | None = None
     frontier_boozer_trust_penalty_scale: float | None = None
     frontier_effective_qs_weight: float | None = None
@@ -2472,7 +2475,15 @@ class FrontierGoalConfig:
     volume_reference: float
     volume_scale: float
     qs_reference: float
+    # ``qs_scale`` and ``boozer_scale`` are the Chebyshev / epsilon-penalty
+    # denominators. They were previously aliased to ``qs_reference`` /
+    # ``boozer_reference``, which conflated "where am I?" with "what's the
+    # gradient step size?". They are required (no defaults) per the SSOT
+    # guardrail; ``build_frontier_goal_config`` derives them when callers do
+    # not pass overrides.
+    qs_scale: float
     boozer_reference: float
+    boozer_scale: float
     boozer_trust_threshold: float
     boozer_trust_penalty_scale: float
     effective_qs_weight: float
@@ -2571,7 +2582,9 @@ def build_frontier_goal_config(
     volume_reference_override=None,
     volume_scale_override=None,
     qs_reference_override=None,
+    qs_scale_override=None,
     boozer_reference_override=None,
+    boozer_scale_override=None,
     boozer_trust_threshold_override=None,
     boozer_trust_penalty_scale_override=None,
     scalarization_type=None,
@@ -2597,6 +2610,21 @@ def build_frontier_goal_config(
     boozer_reference = _frontier_override_or_default(
         boozer_reference_override,
         default_boozer_reference,
+        minimum=1e-6,
+    )
+    # qs_scale and boozer_scale set the Chebyshev gradient step size and the
+    # epsilon excess-penalty quadratic curvature. They are intentionally
+    # decoupled from the reference targets (qs_reference / boozer_reference);
+    # the ``* 0.25`` heuristic mirrors the iota_scale default and gives a
+    # delta range of roughly ``±4`` for a one-reference-unit drift.
+    qs_scale = _frontier_override_or_default(
+        qs_scale_override,
+        max(abs(float(initial_qs_objective)), 1e-6) * 0.25,
+        minimum=1e-6,
+    )
+    boozer_scale = _frontier_override_or_default(
+        boozer_scale_override,
+        max(abs(float(initial_boozer_objective)), 1e-6) * 0.25,
         minimum=1e-6,
     )
     boozer_trust_threshold = _frontier_override_or_default(
@@ -2629,7 +2657,9 @@ def build_frontier_goal_config(
             minimum=1e-6,
         ),
         qs_reference=qs_reference,
+        qs_scale=qs_scale,
         boozer_reference=boozer_reference,
+        boozer_scale=boozer_scale,
         boozer_trust_threshold=boozer_trust_threshold,
         boozer_trust_penalty_scale=_frontier_override_or_default(
             boozer_trust_penalty_scale_override,
@@ -2726,7 +2756,9 @@ PRESERVED_TIMEOUT_REPLAY_CONFIG = PreservedTimeoutReplayConfig(
     frontier_volume_reference=None,
     frontier_volume_scale=None,
     frontier_qs_reference=None,
+    frontier_qs_scale=None,
     frontier_boozer_reference=None,
+    frontier_boozer_scale=None,
     frontier_boozer_trust_threshold=None,
     frontier_boozer_trust_penalty_scale=None,
     frontier_effective_qs_weight=None,
@@ -3685,7 +3717,12 @@ def build_boozer_derived_objective_terms(stage, surface_data, coils):
 
 
 def boozer_residual_class_for_stage(stage):
-    return BoozerResidualExact if stage == "final" else BoozerResidual
+    # Both branches must be I-aware. Pre-revert, upstream BoozerResidual
+    # threaded I via _resolve_boozer_current_I; that helper now lives only on
+    # RefinedBoozerResidual (which reads getattr(boozer_surface, "I", 0.0))
+    # so non-final stages are routed through it instead of vanilla
+    # BoozerResidual to keep the residual consistent with the I-aware surface.
+    return BoozerResidualExact if stage == "final" else RefinedBoozerResidual
 
 
 def build_single_stage_objective_bundle(
@@ -5964,9 +6001,14 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
         ),
         frontier_volume_scale=frontier_replay_value("frontier_volume_scale", "volume_scale"),
         frontier_qs_reference=frontier_replay_value("frontier_qs_reference", "qs_reference"),
+        frontier_qs_scale=frontier_replay_value("frontier_qs_scale", "qs_scale"),
         frontier_boozer_reference=frontier_replay_value(
             "frontier_boozer_reference",
             "boozer_reference",
+        ),
+        frontier_boozer_scale=frontier_replay_value(
+            "frontier_boozer_scale",
+            "boozer_scale",
         ),
         frontier_boozer_trust_threshold=frontier_replay_value(
             "frontier_boozer_trust_threshold",
@@ -6359,7 +6401,9 @@ def build_preserved_timeout_results_payload(
         "FRONTIER_REFERENCE_VOLUME": replay_config.frontier_volume_reference,
         "FRONTIER_REFERENCE_VOLUME_SCALE": replay_config.frontier_volume_scale,
         "FRONTIER_REFERENCE_QA": replay_config.frontier_qs_reference,
+        "FRONTIER_REFERENCE_QA_SCALE": replay_config.frontier_qs_scale,
         "FRONTIER_REFERENCE_BOOZER": replay_config.frontier_boozer_reference,
+        "FRONTIER_REFERENCE_BOOZER_SCALE": replay_config.frontier_boozer_scale,
         "FRONTIER_SCALARIZATION_TYPE": replay_config.frontier_scalarization_type,
         "FRONTIER_CHEBYSHEV_RHO": replay_config.frontier_chebyshev_rho,
         "FRONTIER_CHEBYSHEV_SHARPNESS": replay_config.frontier_chebyshev_sharpness,
@@ -7671,6 +7715,9 @@ def callback(x):
             build_frontier_conditioning_report(
                 objective_eval,
                 sample_label="first_accepted",
+                effective_iotas_weight=EFFECTIVE_IOTAS_WEIGHT,
+                effective_volume_weight=EFFECTIVE_VOLUME_WEIGHT,
+                effective_res_weight=EFFECTIVE_RES_WEIGHT,
             )
         )
     if best_accepted_updated:
@@ -8512,6 +8559,9 @@ if __name__ == "__main__":
         else build_frontier_conditioning_report(
             initial_search_eval,
             sample_label="seed",
+            effective_iotas_weight=EFFECTIVE_IOTAS_WEIGHT,
+            effective_volume_weight=EFFECTIVE_VOLUME_WEIGHT,
+            effective_res_weight=EFFECTIVE_RES_WEIGHT,
         )
     )
     initial_search_gate = build_surface_search_gate(
@@ -9929,8 +9979,14 @@ if __name__ == "__main__":
         "FRONTIER_REFERENCE_QA": (
             None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.qs_reference
         ),
+        "FRONTIER_REFERENCE_QA_SCALE": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.qs_scale
+        ),
         "FRONTIER_REFERENCE_BOOZER": (
             None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.boozer_reference
+        ),
+        "FRONTIER_REFERENCE_BOOZER_SCALE": (
+            None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.boozer_scale
         ),
         "FRONTIER_SCALARIZATION_TYPE": (
             None if FRONTIER_GOAL_CONFIG is None else FRONTIER_GOAL_CONFIG.scalarization_type

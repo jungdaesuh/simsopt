@@ -10,6 +10,8 @@ from simsopt._core.optimizable import load
 from simsopt.geo import BoozerSurface, SurfaceXYZTensorFourier
 from simsopt.geo.surfaceobjectives import Volume
 
+from .boozer_finite_current import BoozerSurfaceFiniteI
+
 from .coil_groups import (
     COIL_GROUP_ROLE_BANANA,
     COIL_GROUP_ROLE_PROXY,
@@ -663,7 +665,7 @@ def attempt_initialize_boozer_surface(
     nfp=5,
     surface_cls=SurfaceXYZTensorFourier,
     volume_cls=Volume,
-    boozer_surface_cls=BoozerSurface,
+    boozer_surface_cls=BoozerSurfaceFiniteI,
 ) -> BoozerInitializationResult:
     surf = surface_cls(
         mpol=mpol,
@@ -761,7 +763,7 @@ def initialize_boozer_surface(
     nfp=5,
     surface_cls=SurfaceXYZTensorFourier,
     volume_cls=Volume,
-    boozer_surface_cls=BoozerSurface,
+    boozer_surface_cls=BoozerSurfaceFiniteI,
 ):
     """Initialize a Boozer surface via either the "least squares" or "exact" path.
 
