@@ -170,6 +170,12 @@ def test_public_solver_result_schema_registry_is_mode_aware():
     assert "plu" in schemas["exact"].forbidden_keys
     assert "linearization_kind" in schemas["newton"].required_keys
     assert "linearization_kind" in schemas["lbfgs"].forbidden_keys
+    for schema_name in ("lbfgs", "ls_manual", "ls_lm", "newton", "traceable_ls"):
+        assert set(_bsj.SOLVE_QUALITY_LS_FIELDS) <= schemas[schema_name].required_keys
+    for schema_name in ("exact", "exact_constraints", "traceable_exact"):
+        assert (
+            set(_bsj.SOLVE_QUALITY_EXACT_FIELDS) <= schemas[schema_name].required_keys
+        )
 
 
 def _assert_runtime_state_schema(runtime_state, required_fields):
@@ -5415,6 +5421,7 @@ class TestBoozerSurfaceJAXExactPath:
             "jacobian_materialized",
             "linear_solve_backend",
             "dense_linear_solve_factors_available",
+            "exact_factorization_backend",
         }
         assert expected_keys <= set(res.keys())
         _assert_result_schema(res, _PUBLIC_EXACT_RESULT_SCHEMA)
@@ -5424,6 +5431,7 @@ class TestBoozerSurfaceJAXExactPath:
         assert all(piece is not None for piece in res["PLU"])
         assert res["linear_solve_backend"] == "operator"
         assert res["dense_linear_solve_factors_available"] is True
+        assert res["exact_factorization_backend"] == _bsj.EXACT_FACTORIZATION_BACKEND
         assert res["vjp"] is _boozer_exact_coil_vjp
         assert callable(res["vjp"])
 
@@ -5526,6 +5534,7 @@ class TestBoozerSurfaceJAXExactPath:
         assert res["adjoint_linear_solve_available"] is False
         assert res["failure_category"] == "scaling_limit"
         assert res["failure_stage"] == "dense_jacobian_finalization"
+        assert res["exact_factorization_backend"] == _bsj.EXACT_FACTORIZATION_BACKEND
         assert res["jacobian_materialized"] is False
         assert res["dense_jacobian_shape"] is not None
         assert res["dense_jacobian_bytes"] is not None
@@ -5657,6 +5666,9 @@ class TestBoozerSurfaceJAXExactPath:
         assert result["jacobian_materialized"] is False
         assert result["max_dense_jacobian_bytes"] is None
         assert result["message"] is None
+        for field in _bsj.SOLVE_QUALITY_EXACT_FIELDS:
+            assert field in result
+        assert result["exact_factorization_backend"] == _bsj.EXACT_FACTORIZATION_BACKEND
 
     def test_run_code_traceable_exact_reuses_stable_residual_callable(
         self, monkeypatch
@@ -5888,6 +5900,9 @@ class TestBoozerSurfaceJAXExactPath:
         result = booz.run_code_traceable(coil_set_spec, sdofs, iota, G)
 
         assert result["type"] == "ls"
+        _assert_result_schema(result, _TRACEABLE_LS_RESULT_SCHEMA)
+        for field in _bsj.SOLVE_QUALITY_LS_FIELDS:
+            assert result[field] is None
         assert bool(result["success"])
         np.testing.assert_allclose(np.asarray(result["fun"]), np.asarray(expected_fun))
         np.testing.assert_allclose(
@@ -6320,6 +6335,7 @@ class TestBoozerSurfaceJAXExactPath:
             "optimizer_method": "lbfgs-ondevice",
             "type": "ls",
             "weight_inv_modB": booz.options["weight_inv_modB"],
+            **_bsj._none_solve_quality_fields(_bsj.SOLVE_QUALITY_LS_FIELDS),
             "hessian_materialized": None,
             "dense_hessian_shape": None,
             "dense_hessian_bytes": None,
@@ -6408,6 +6424,7 @@ class TestBoozerSurfaceJAXExactPath:
         assert result["plu"] is None
         assert result["linear_solve_backend"] == "operator"
         assert result["dense_linear_solve_factors_available"] is False
+        assert result["exact_factorization_backend"] == _bsj.EXACT_FACTORIZATION_BACKEND
 
     def test_exact_accepts_and_ignores_optimizer_backend_option(self):
         """Exact solves accept optimizer_backend but ignore it."""

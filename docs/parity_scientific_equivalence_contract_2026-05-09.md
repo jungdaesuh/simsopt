@@ -2,7 +2,8 @@
 
 - Date: 2026-05-09
 - Branch: `gpu-purity-stage2-20260405`
-- Status: planning artifact (not started)
+- Status: Phase 0 + Phase 1 reporting skeleton landed in `2f71d5afa`;
+  Phase 1.5+ calibration/enforcement not started
 - Companion docs:
   - `docs/parity_dual_mode_contract_2026-05-08.md`
     (existing dual-mode runtime contract; this plan adds a **second-axis
@@ -23,10 +24,10 @@
 
 Move the C++ vs JAX Newton-polish + final-output parity contract from
 "byte-identity to C++" to **scientific equivalence under a two-lane
-architecture**. The reference lane proves JAX solves the same problem
-as C++ within condition-aware tolerances; the production lane is free
-to use JAX-native operator-backed solves wherever JAX is genuinely
-better.
+architecture**. The reference lane supplies C++-oracle regression
+evidence that JAX solves the same problem within condition-aware
+tolerances; the production lane is free to use JAX-native
+operator-backed solves wherever JAX is genuinely better.
 
 This plan is **additive**:
 
@@ -177,11 +178,11 @@ to* `linear_solve_factors`; it does not remove or relabel it.
 
 | Field                           | Definition                                                          | Source path                                          |
 |---------------------------------|----------------------------------------------------------------------|------------------------------------------------------|
-| `ls_hessian_symmetry_rel`       | `‖H − H.T‖_F / ‖H‖_F`                                                | computed at `optimizer_jax.py:1632` post-symmetrize  |
+| `ls_hessian_symmetry_rel`       | `‖H − H.T‖_F / ‖H‖_F`                                                | computed from the final materialized Hessian in `boozersurface_jax.py` after `optimizer_jax._materialize_dense_hessian(..., symmetrize=True)` |
 | `ls_hessian_action_max_rel`     | max over deterministic probe set of `‖H_jax v − H_cpp v‖ / ‖H_cpp v‖` | parity arbiter, see §4                              |
 | `ls_newton_linear_residual_rel` | `‖H·dx − g‖ / ‖g‖`                                                  | computed at the Newton step site post-solve         |
 | `ls_newton_step_abs_diff_rel`   | `‖dx_jax − dx_ref‖ / max(‖dx_ref‖, ε)` against seeded reference dx  | parity arbiter, see §4                              |
-| `ls_factorization_backend`      | string ∈ {`lapack-dgetrf`, `cusolver-getrf-ffi`, `dense-plu-shared`} (LU factorization routines: `scipy.linalg.lu` / `jax.scipy.linalg.lu` lower to LAPACK `dgetrf` on CPU and cuSOLVER `cusolverDnDgetrf` on CUDA) | result-dict assignment in `boozersurface_jax.py` |
+| `ls_factorization_backend`      | string ∈ {`lapack-dgetrf`, `cusolver-getrf-ffi`, `dense-plu-shared`} (SciPy/JAX CPU LU is LAPACK-backed; the CUDA label denotes the intended cuSOLVER-backed JAX device path and must be hardware-proven before enforcement) | result-dict assignment in `boozersurface_jax.py` |
 | `ls_condition_estimate`         | Hager–Higham 1-norm condition number of H (operator matvecs)         | new helper near `optimizer_jax.py:1899`              |
 
 ### 3.2 Exact solve-quality fields (gates E3–E5, E7)
@@ -457,11 +458,11 @@ Phase 0 (this doc + ladder + CLAUDE.md note)
 Phase 4 (BFGS root cause) ── independent investigation, blocks gate L3 / E2 final tolerance only
 ```
 
-### Phase 0 deliverables (this doc)
+### Phase 0 deliverables (landed in `2f71d5afa`)
 - `docs/parity_scientific_equivalence_contract_2026-05-09.md` (this file)
 - Two new ladder lanes in `benchmarks/validation_ladder_contract.py`
-  (slots into the existing `PARITY_LADDER_TOLERANCES` SSOT at line 52;
-  unknown-lane rejection at line 254 will accept these once added):
+  (slots into the existing `PARITY_LADDER_TOLERANCES` SSOT; the
+  unknown-lane rejection test accepts both keys):
   ```python
   PARITY_LADDER_TOLERANCES["ls-solve-quality"] = {
       "ls_hessian_symmetry_rel_tol": 1e-10,
@@ -482,18 +483,22 @@ Phase 4 (BFGS root cause) ── independent investigation, blocks gate L3 / E2 
   no enforcement, no removal of the existing `linear_solve_factors`
   byte-parity probe.
 
-### Phase 1 deliverables
-- `optimizer_jax.py:1632` — mirror-upper symmetrization, `symmetrize=True` default.
-- `optimizer_jax.py:2284` — flip to `symmetrize=True`.
-- `boozersurface_jax.py:4938-4954, 5365-5388` — emit the LS and Exact
-  solve-quality fields into the result dict alongside the existing
+### Phase 1 deliverables (landed in `2f71d5afa`)
+- `optimizer_jax.py` — mirror-upper symmetrization with `symmetrize=True`
+  default for materialized Hessian reporting. Dense Newton-step
+  application remains operator-policy controlled and is not a
+  byte-identity claim by itself.
+- `boozersurface_jax.py` — emit the LS and Exact solve-quality fields
+  into public and traceable result schemas alongside the existing
   `linear_solve_factors`.
-- `benchmarks/single_stage_init_parity.py:192-252` — add new probe
-  rows for the solve-quality fields. **The existing `(P, L, U)`
-  probes remain for now**; this phase adds reporting, it does not
-  remove the strict gate.
-- `tests/test_benchmark_helpers.py:3165` (the unknown-lane rejection
-  test) — add the two new lane keys to the accepted set.
+- `single_stage_banana_example.py` — propagate the reporting keys into
+  parity summaries where result metadata is already collected.
+- `benchmarks/parity_solve_quality.py` — provide deterministic
+  operator-action probe helpers. Full `single_stage_init_parity.py`
+  arbiter rows for solve-quality probes remain Phase 1.5 / Phase 2
+  calibration work and are not enforced in Phase 1.
+- `tests/test_benchmark_helpers.py` — add the two new lane keys to the
+  accepted set.
 - `*_condition_estimate` field emits `None` placeholder; the
   matching `*_condition_estimate_present` ladder key stays `False`
   until Phase 5.3 lands the Hager–Higham implementation, at which

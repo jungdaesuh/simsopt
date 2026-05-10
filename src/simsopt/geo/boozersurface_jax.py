@@ -126,7 +126,44 @@ from .optimizer_jax import (
     target_minimize,
 )
 
-__all__ = ["BoozerSurfaceJAX", "build_boozer_surface_runtime_state"]
+SOLVE_QUALITY_LS_FIELDS: tuple[str, ...] = (
+    "ls_hessian_symmetry_rel",
+    "ls_hessian_action_max_rel",
+    "ls_newton_linear_residual_rel",
+    "ls_newton_step_abs_diff_rel",
+    "ls_factorization_backend",
+    "ls_condition_estimate",
+)
+
+
+SOLVE_QUALITY_EXACT_FIELDS: tuple[str, ...] = (
+    "exact_jacobian_action_max_rel",
+    "exact_newton_linear_residual_rel",
+    "exact_refinement_correction_rel",
+    "exact_adjoint_solve_residual_rel",
+    "exact_factorization_backend",
+    "exact_condition_estimate",
+)
+
+
+_BOOZER_LS_SOLVE_QUALITY_RESULT_KEYS = frozenset(SOLVE_QUALITY_LS_FIELDS)
+_BOOZER_EXACT_SOLVE_QUALITY_RESULT_KEYS = frozenset(SOLVE_QUALITY_EXACT_FIELDS)
+
+
+# Per docs/parity_scientific_equivalence_contract_2026-05-09.md §3.2: exact
+# Newton solves the linearization through the operator GMRES seam in
+# ``simsopt.geo.optimizer_jax`` (``_run_operator_gmres``); dense PLU storage
+# is reporting metadata only.
+EXACT_FACTORIZATION_BACKEND: str = "operator-gmres"
+
+
+__all__ = [
+    "BoozerSurfaceJAX",
+    "EXACT_FACTORIZATION_BACKEND",
+    "SOLVE_QUALITY_EXACT_FIELDS",
+    "SOLVE_QUALITY_LS_FIELDS",
+    "build_boozer_surface_runtime_state",
+]
 
 
 @dataclass(frozen=True)
@@ -215,6 +252,7 @@ _BOOZER_RESULT_SCHEMAS = {
     "lbfgs": _BoozerResultSchema(
         required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
         | _BOOZER_RUNTIME_RESULT_KEYS
+        | _BOOZER_LS_SOLVE_QUALITY_RESULT_KEYS
         | frozenset(
             {
                 "fun",
@@ -244,6 +282,7 @@ _BOOZER_RESULT_SCHEMAS = {
     "ls_manual": _BoozerResultSchema(
         required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
         | _BOOZER_RUNTIME_RESULT_KEYS
+        | _BOOZER_LS_SOLVE_QUALITY_RESULT_KEYS
         | frozenset({"residual", "gradient", "jacobian", "optimizer_method"}),
         forbidden_keys=frozenset(
             {
@@ -265,6 +304,7 @@ _BOOZER_RESULT_SCHEMAS = {
     "ls_lm": _BoozerResultSchema(
         required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
         | _BOOZER_RUNTIME_RESULT_KEYS
+        | _BOOZER_LS_SOLVE_QUALITY_RESULT_KEYS
         | frozenset({"info", "residual", "gradient", "jacobian", "optimizer_method"}),
         forbidden_keys=frozenset(
             {
@@ -287,6 +327,7 @@ _BOOZER_RESULT_SCHEMAS = {
         | _BOOZER_RUNTIME_RESULT_KEYS
         | _BOOZER_LINEARIZED_RESULT_KEYS
         | _BOOZER_HESSIAN_REPORTING_RESULT_KEYS
+        | _BOOZER_LS_SOLVE_QUALITY_RESULT_KEYS
         | frozenset(
             {
                 "residual",
@@ -308,6 +349,7 @@ _BOOZER_RESULT_SCHEMAS = {
         | _BOOZER_RUNTIME_RESULT_KEYS
         | _BOOZER_LINEARIZED_RESULT_KEYS
         | _BOOZER_EXACT_REPORTING_RESULT_KEYS
+        | _BOOZER_EXACT_SOLVE_QUALITY_RESULT_KEYS
         | frozenset(
             {
                 "residual",
@@ -328,6 +370,7 @@ _BOOZER_RESULT_SCHEMAS = {
     "exact_constraints": _BoozerResultSchema(
         required_keys=_BOOZER_SOLVER_RESULT_CORE_KEYS
         | _BOOZER_RUNTIME_RESULT_KEYS
+        | _BOOZER_EXACT_SOLVE_QUALITY_RESULT_KEYS
         | frozenset({"residual", "jacobian", "iter", "lm"}),
         forbidden_keys=frozenset(
             {
@@ -354,6 +397,7 @@ _BOOZER_RESULT_SCHEMAS = {
     "traceable_exact": _BoozerResultSchema(
         required_keys=_BOOZER_TRACEABLE_RESULT_KEYS
         | _BOOZER_EXACT_REPORTING_RESULT_KEYS
+        | _BOOZER_EXACT_SOLVE_QUALITY_RESULT_KEYS
         | frozenset({"residual", "jacobian"}),
         forbidden_keys=_BOOZER_TRACEABLE_FORBIDDEN_RESULT_KEYS
         | frozenset({"grad", "hessian", "optimizer_method"}),
@@ -361,6 +405,7 @@ _BOOZER_RESULT_SCHEMAS = {
     "traceable_ls": _BoozerResultSchema(
         required_keys=_BOOZER_TRACEABLE_RESULT_KEYS
         | _BOOZER_HESSIAN_REPORTING_RESULT_KEYS
+        | _BOOZER_LS_SOLVE_QUALITY_RESULT_KEYS
         | frozenset({"grad", "hessian", "optimizer_method"}),
         forbidden_keys=_BOOZER_TRACEABLE_FORBIDDEN_RESULT_KEYS
         | frozenset({"residual", "jacobian"}),
@@ -2731,33 +2776,6 @@ def _exact_newton_reporting_fields(result):
     }
 
 
-SOLVE_QUALITY_LS_FIELDS: tuple[str, ...] = (
-    "ls_hessian_symmetry_rel",
-    "ls_hessian_action_max_rel",
-    "ls_newton_linear_residual_rel",
-    "ls_newton_step_abs_diff_rel",
-    "ls_factorization_backend",
-    "ls_condition_estimate",
-)
-
-
-SOLVE_QUALITY_EXACT_FIELDS: tuple[str, ...] = (
-    "exact_jacobian_action_max_rel",
-    "exact_newton_linear_residual_rel",
-    "exact_refinement_correction_rel",
-    "exact_adjoint_solve_residual_rel",
-    "exact_factorization_backend",
-    "exact_condition_estimate",
-)
-
-
-# Per docs/parity_scientific_equivalence_contract_2026-05-09.md §3.2: exact
-# Newton solves the linearization through the operator GMRES seam in
-# ``simsopt.geo.optimizer_jax`` (``_run_operator_gmres``); dense PLU storage
-# is reporting metadata only.
-EXACT_FACTORIZATION_BACKEND: str = "operator-gmres"
-
-
 def _none_solve_quality_fields(field_names: tuple[str, ...]) -> dict[str, None]:
     """Return ``None`` placeholders for solve-quality reporting fields.
 
@@ -4363,6 +4381,8 @@ class BoozerSurfaceJAX(Optimizable):
                 "type": "exact",
                 "weight_inv_modB": weight_inv_modB,
                 **_exact_newton_reporting_fields(result),
+                **_none_solve_quality_fields(SOLVE_QUALITY_EXACT_FIELDS),
+                "exact_factorization_backend": EXACT_FACTORIZATION_BACKEND,
             }
 
         optimize_G = G is not None
@@ -4480,6 +4500,7 @@ class BoozerSurfaceJAX(Optimizable):
             "optimizer_method": method,
             "type": "ls",
             "weight_inv_modB": weight_inv_modB,
+            **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
             "hessian_materialized": newton_result.get("hessian_materialized"),
             "dense_hessian_shape": newton_result.get("dense_hessian_shape"),
             "dense_hessian_bytes": newton_result.get("dense_hessian_bytes"),
@@ -5317,7 +5338,8 @@ class BoozerSurfaceJAX(Optimizable):
             'message', 'failure_category', 'failure_stage',
             'jacobian_materialized',
             'dense_jacobian_shape', 'dense_jacobian_bytes',
-            'max_dense_jacobian_bytes'.
+            'max_dense_jacobian_bytes', and Exact solve-quality reporting
+            fields from ``SOLVE_QUALITY_EXACT_FIELDS``.
             Exact mode enforces options['max_dense_jacobian_bytes'] before the
             final dense Jacobian/PLU materialization step.
         """
@@ -5401,6 +5423,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "dense_linear_solve_factors_available": False,
                 **exact_reporting,
                 **_none_solve_quality_fields(SOLVE_QUALITY_EXACT_FIELDS),
+                "exact_factorization_backend": EXACT_FACTORIZATION_BACKEND,
             }
             self.res = res
             self.need_to_run_code = False
