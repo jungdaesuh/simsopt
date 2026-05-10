@@ -294,7 +294,7 @@ def update_frontier_early_stop_status(
         current_hypervolume is not None
         and (
             previous_best_hypervolume is None
-            or float(current_hypervolume) >= float(previous_best_hypervolume)
+            or float(current_hypervolume) > float(previous_best_hypervolume)
             + runtime_defaults.early_stop_min_hypervolume_gain
         )
     )

@@ -35,14 +35,11 @@ from banana_opt.frontier_campaign_execution import (  # noqa: E402
     FRONTIER_LANE_WARM_START_MODE_SEED,
     FrontierLaneExecution,
     FrontierLaneExecutionResult,
-    build_frontier_lane_args,
-    build_frontier_lane_contract_for_spec,
     build_frontier_lane_execution,
     build_frontier_lane_execution_groups,
-    lane_rng_seed,
-    resolve_frontier_lane_warm_start,
 )
 from banana_opt.frontier_contracts import (  # noqa: E402
+    FRONTIER_CAMPAIGN_PROGRESS_SCHEMA_VERSION,
     SUPPORTED_FRONTIER_ENGINES,
     SUPPORTED_FRONTIER_RECOMMENDATION_POLICIES,
     validate_frontier_campaign_manifest_payload,
@@ -51,7 +48,6 @@ from banana_opt.frontier_progress_state import (  # noqa: E402
     FrontierCampaignProgress,
     FrontierLaneContract,
     FrontierLaneRecord,
-    build_frontier_lane_contract,
     build_frontier_lane_record,
     load_frontier_campaign_progress,
     serialize_goal_mode_payload,
@@ -82,22 +78,19 @@ from workflow_runner_common import (  # noqa: E402
 )
 
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_single_stage_frontier_campaign"
-__all__ = (
-    "FRONTIER_LANE_WARM_START_MODE_REUSE_LATEST_CERTIFIED",
-    "FRONTIER_LANE_WARM_START_MODE_SEED",
-    "build_frontier_lane_args",
-    "build_frontier_lane_contract",
-    "build_frontier_lane_contract_for_spec",
-    "build_frontier_lane_execution_groups",
-    "lane_rng_seed",
-    "resolve_frontier_lane_warm_start",
-)
 
 
 def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
         raise argparse.ArgumentTypeError("value must be >= 1")
+    return parsed
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be >= 0")
     return parsed
 
 
@@ -146,7 +139,7 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--frontier-full-simplex-partitions",
-        type=int,
+        type=_positive_int,
         default=None,
         help=(
             "Optional Das-Dennis partition count for auto-generated full-simplex "
@@ -155,16 +148,16 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
             "only when partitions are omitted."
         ),
     )
-    parser.add_argument("--frontier-num-lanes", type=int, default=3)
+    parser.add_argument("--frontier-num-lanes", type=_positive_int, default=3)
     parser.add_argument(
         "--frontier-lane-budget",
-        type=int,
+        type=_positive_int,
         default=None,
         help="Optional per-lane maxiter override for frontier lanes.",
     )
     parser.add_argument(
         "--frontier-total-budget",
-        type=int,
+        type=_positive_int,
         default=None,
         help="Optional campaign budget metadata. Defaults to num_lanes * lane_budget.",
     )
@@ -215,13 +208,13 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--frontier-early-stop-patience-lanes",
-        type=int,
+        type=_non_negative_int,
         default=None,
         help="Optional no-improvement lane streak before the campaign stops early.",
     )
     parser.add_argument(
         "--frontier-early-stop-min-certified",
-        type=int,
+        type=_non_negative_int,
         default=None,
         help="Minimum certified archive size before early-stop logic activates.",
     )
@@ -431,7 +424,7 @@ def persist_campaign_progress(
     write_frontier_campaign_progress(
         path,
         FrontierCampaignProgress(
-            schema_version="frontier_campaign_progress_v1",
+            schema_version=FRONTIER_CAMPAIGN_PROGRESS_SCHEMA_VERSION,
             campaign_id=campaign_id,
             frontier_version=frontier_version,
             frontier_engine=frontier_engine,
@@ -484,7 +477,9 @@ def build_lane_record_from_payload(
         results_path=None
         if lane_payload.get("results_path") is None
         else str(lane_payload["results_path"]),
-        results=lane_payload.get("results"),
+        # Persist only the trimmed metric subset; the full results dict is
+        # used solely to build the archive member upstream of this call.
+        results=lane_payload.get("results_summary"),
         error_type=lane_payload.get("error_type"),
         error_message=lane_payload.get("error_message"),
     )
@@ -513,7 +508,9 @@ def resume_or_run_goal_mode_case(
     if resume:
         resume_checkpoint = maybe_resume_solver_checkpoint_path(output_root / goal_mode)
         if resume_checkpoint is not None:
-            args.resume_solver_checkpoint = str(resume_checkpoint)
+            args = argparse.Namespace(
+                **{**vars(args), "resume_solver_checkpoint": str(resume_checkpoint)},
+            )
     return run_goal_mode_case_safe(
         args,
         goal_mode=goal_mode,
@@ -536,16 +533,10 @@ def main() -> int:
     )
     paths.summary_path.parent.mkdir(parents=True, exist_ok=True)
 
-    resumed_progress = None
     resume_manifest = None
     if args.resume:
-        if paths.progress_path.exists():
-            resumed_progress = load_frontier_campaign_progress(paths.progress_path)
         resume_manifest = load_resume_manifest(paths.manifest_path)
         args = argparse.Namespace(**vars(args))
-        if resumed_progress is not None:
-            args.frontier_version = resumed_progress.frontier_version
-            args.frontier_engine = resumed_progress.frontier_engine
         if resume_manifest is not None:
             seed_artifact_path = resume_manifest.get("SEED_ARTIFACT_PATH")
             if seed_artifact_path is not None:
@@ -559,6 +550,27 @@ def main() -> int:
         stage2_bs_path, stage2_results_path, stage2_results = (
             goal_mode_comparison.load_validated_stage2_seed_metadata(args)
         )
+
+    # Resolve normalization before replaying progress so duplicate detection
+    # and distance metrics match the original campaign's invariants.
+    initial_hypervolume_reference = resolve_hypervolume_reference(
+        reference_spec=args.frontier_hypervolume_reference,
+        seed_results=stage2_results,
+    )
+    pareto_objective_normalization = build_pareto_objective_normalization(
+        initial_hypervolume_reference,
+        kind=args.frontier_normalization_kind,
+        normalization_spec_path=args.frontier_normalization_spec_file,
+    )
+
+    resumed_progress = None
+    if args.resume and paths.progress_path.exists():
+        resumed_progress = load_frontier_campaign_progress(
+            paths.progress_path,
+            pareto_objective_normalization=pareto_objective_normalization,
+        )
+        args.frontier_version = resumed_progress.frontier_version
+        args.frontier_engine = resumed_progress.frontier_engine
     resumed_lane_specs = resume_lane_specs_from_manifest(resume_manifest)
     lane_specs = (
         resumed_lane_specs
@@ -582,11 +594,10 @@ def main() -> int:
             args,
             requested_num_lanes=len(lane_specs),
         )
-    campaign_id = (
-        resumed_progress.campaign_id
-        if resumed_progress is not None
-        else uuid.uuid4().hex[:12]
-    )
+    if resumed_progress is not None:
+        campaign_id = resumed_progress.campaign_id
+    else:
+        campaign_id = uuid.uuid4().hex[:12]
     manifest = build_frontier_campaign_manifest(
         args,
         campaign_id=campaign_id,
@@ -618,15 +629,12 @@ def main() -> int:
     provisional_archive_members = [] if resumed_progress is None else list(
         resumed_progress.provisional_archive_members
     )
+    # Final hypervolume_reference may incorporate member-derived fallback
+    # once we have the resumed archive; it is recomputed at end-of-loop.
     hypervolume_reference = resolve_hypervolume_reference(
         reference_spec=args.frontier_hypervolume_reference,
         seed_results=stage2_results,
         members=archive_members,
-    )
-    pareto_objective_normalization = build_pareto_objective_normalization(
-        hypervolume_reference,
-        kind=args.frontier_normalization_kind,
-        normalization_spec_path=args.frontier_normalization_spec_file,
     )
     early_stop_status = (
         dict(resumed_progress.early_stop_status)

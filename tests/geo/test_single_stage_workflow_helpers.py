@@ -88,6 +88,14 @@ def load_frontier_campaign_module():
     )
 
 
+def load_frontier_campaign_execution_module():
+    return importlib.import_module("banana_opt.frontier_campaign_execution")
+
+
+def load_frontier_progress_state_module():
+    return importlib.import_module("banana_opt.frontier_progress_state")
+
+
 def load_frontier_scalarization_module():
     return importlib.import_module("banana_opt.frontier_scalarization")
 
@@ -3356,6 +3364,54 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             )
             self.assertEqual(manifest["FRONTIER_ENGINE"], "multilane_local")
 
+    def test_frontier_campaign_new_runs_allocate_unique_campaign_ids(self):
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            missing_stage2_bs_path = tmpdir_path / "missing" / "biot_savart_opt.json"
+
+            def run_once(name: str):
+                output_root = tmpdir_path / f"{name}_outputs"
+                summary_path = tmpdir_path / f"{name}_summary.json"
+                with patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "run_single_stage_frontier_campaign.py",
+                        "--dry-run",
+                        "--plasma-surf-filename",
+                        "demo.nc",
+                        "--stage2-bs-path",
+                        str(missing_stage2_bs_path),
+                        "--output-root",
+                        str(output_root),
+                        "--summary-json",
+                        str(summary_path),
+                        "--frontier-num-lanes",
+                        "1",
+                    ],
+                ):
+                    self.assertEqual(module.main(), 0)
+                return json.loads(summary_path.read_text(encoding="utf-8"))[
+                    "frontier_campaign_id"
+                ]
+
+            with patch.object(
+                module.uuid,
+                "uuid4",
+                side_effect=[
+                    SimpleNamespace(hex="aaaaaaaaaaaa00000000000000000000"),
+                    SimpleNamespace(hex="bbbbbbbbbbbb00000000000000000000"),
+                ],
+            ):
+                first_campaign_id = run_once("first")
+                second_campaign_id = run_once("second")
+
+            self.assertEqual(first_campaign_id, "aaaaaaaaaaaa")
+            self.assertEqual(second_campaign_id, "bbbbbbbbbbbb")
+            self.assertNotEqual(first_campaign_id, second_campaign_id)
+
     def test_frontier_campaign_main_writes_archive_recommendation_and_survives_failed_lane(self):
         module = load_frontier_campaign_module()
 
@@ -3467,17 +3523,10 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 summary["recommended_member"]["recommended_member_id"].split(":")[-1],
                 "lane_01",
             )
-            self.assertEqual(
-                len(progress_payload["provisional_archive_members"]),
-                2,
-            )
-            self.assertTrue(
-                all(
-                    member["archive_state"] == "provisional"
-                    and member["member_id"].endswith(":provisional")
-                    for member in progress_payload["provisional_archive_members"]
-                )
-            )
+            # provisional_archive_members no longer persisted to progress.json;
+            # the SSOT is each lane_record's provisional_member_ids array.
+            self.assertNotIn("provisional_archive_members", progress_payload)
+            self.assertNotIn("archive_members", progress_payload)
             self.assertEqual(
                 progress_payload["lane_records"][0]["provisional_member_ids"],
                 [
@@ -4186,6 +4235,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
 
     def test_frontier_campaign_resume_reuses_progress_and_only_runs_missing_lanes(self):
         module = load_frontier_campaign_module()
+        execution_module = load_frontier_campaign_execution_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -4259,8 +4309,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             lane_01_payload["results_summary"] = module.goal_mode_comparison.result_metric_subset(
                 lane_01_payload["results"]
             )
-            lane_01_args = module.build_frontier_lane_args(base_args, lane_specs[0])
-            lane_01_contract = module.build_frontier_lane_contract_for_spec(
+            lane_01_args = execution_module.build_frontier_lane_args(base_args, lane_specs[0])
+            lane_01_contract = execution_module.build_frontier_lane_contract_for_spec(
                 lane_01_args,
                 lane_specs[0],
                 campaign_id=campaign_id,
@@ -4599,6 +4649,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
 
     def test_frontier_campaign_resume_salvages_missing_lane_from_partial_artifact_before_rerun(self):
         module = load_frontier_campaign_module()
+        execution_module = load_frontier_campaign_execution_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -4676,8 +4727,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     lane_01_payload["results"]
                 )
             )
-            lane_01_args = module.build_frontier_lane_args(base_args, lane_specs[0])
-            lane_01_contract = module.build_frontier_lane_contract_for_spec(
+            lane_01_args = execution_module.build_frontier_lane_args(base_args, lane_specs[0])
+            lane_01_contract = execution_module.build_frontier_lane_contract_for_spec(
                 lane_01_args,
                 lane_specs[0],
                 campaign_id=campaign_id,
@@ -4878,6 +4929,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
 
     def test_frontier_campaign_resume_matches_clean_archive_on_deterministic_smoke_fixture(self):
         module = load_frontier_campaign_module()
+        execution_module = load_frontier_campaign_execution_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -5012,8 +5064,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     resume_lane_01_payload["results"]
                 )
             )
-            lane_01_args = module.build_frontier_lane_args(base_args, lane_specs[0])
-            lane_01_contract = module.build_frontier_lane_contract_for_spec(
+            lane_01_args = execution_module.build_frontier_lane_args(base_args, lane_specs[0])
+            lane_01_contract = execution_module.build_frontier_lane_contract_for_spec(
                 lane_01_args,
                 lane_specs[0],
                 campaign_id=campaign_id,
@@ -5224,6 +5276,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
 
     def test_frontier_campaign_resume_after_early_stop_skips_remaining_lanes(self):
         module = load_frontier_campaign_module()
+        execution_module = load_frontier_campaign_execution_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -5305,7 +5358,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     ],
                 )
             ):
-                lane_args = module.build_frontier_lane_args(base_args, lane_spec)
+                lane_args = execution_module.build_frontier_lane_args(base_args, lane_spec)
                 lane_payload = {
                     "status": "completed",
                     **self._minimal_frontier_payload(
@@ -5319,7 +5372,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                         lane_payload["results"]
                     )
                 )
-                lane_contract = module.build_frontier_lane_contract_for_spec(
+                lane_contract = execution_module.build_frontier_lane_contract_for_spec(
                     lane_args,
                     lane_spec,
                     campaign_id=campaign_id,
@@ -5444,6 +5497,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
 
     def test_resolve_frontier_lane_warm_start_reuses_latest_certified_final_artifact(self):
         module = load_frontier_campaign_module()
+        execution_module = load_frontier_campaign_execution_module()
+        progress_state_module = load_frontier_progress_state_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -5459,7 +5514,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             warmed_bs_path = lane_results_path.with_name("biot_savart_opt.json")
             warmed_bs_path.write_text("{}", encoding="utf-8")
 
-            lane_contract = module.build_frontier_lane_contract(
+            lane_contract = progress_state_module.build_frontier_lane_contract(
                 campaign_id="campaign",
                 lane_id="lane_01",
                 engine="multilane_local",
@@ -5535,7 +5590,7 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             ]
 
             warm_start_path, warm_start_source = (
-                module.resolve_frontier_lane_warm_start(
+                execution_module.resolve_frontier_lane_warm_start(
                     base_stage2_bs_path=base_stage2_bs_path,
                     lane_records_by_id={"lane_01": lane_record},
                     lane_specs=lane_specs,

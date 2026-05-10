@@ -492,6 +492,8 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, str(path))
     except BaseException:
         os.unlink(tmp_path)

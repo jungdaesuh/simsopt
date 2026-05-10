@@ -28,6 +28,8 @@ def write_solver_checkpoint(path: Path, payload: Mapping[str, object]) -> None:
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
             json.dump(dict(payload), handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp_path, str(path))
     except BaseException:
         os.unlink(tmp_path)

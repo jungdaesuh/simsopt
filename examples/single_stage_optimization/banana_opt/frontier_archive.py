@@ -62,13 +62,6 @@ class FrontierArchiveMember:
     def to_json_dict(self) -> dict[str, object]:
         return asdict(self)
 
-    @classmethod
-    def from_json_dict(
-        cls,
-        payload: Mapping[str, object],
-    ) -> FrontierArchiveMember:
-        return frontier_archive_member_from_json_dict(payload)
-
 
 def build_archive_member_from_results(
     *,
@@ -305,8 +298,8 @@ def annotate_archive_members(
         replace(
             member,
             dominance_signature={
-                "dominates": dominates_by_id[member.member_id],
-                "dominated_by": dominated_by_id[member.member_id],
+                "dominates": sorted(dominates_by_id[member.member_id]),
+                "dominated_by": sorted(dominated_by_id[member.member_id]),
             },
         )
         for member in members
@@ -317,16 +310,22 @@ def annotate_archive_members(
 def archive_best_by_metric(members: list[FrontierArchiveMember]) -> dict[str, dict[str, object]]:
     if not members:
         return {}
-    from .frontier_recommendation import Direction, lex_priority, select_best
-
     best_by_metric: dict[str, dict[str, object]] = {}
     for metric_name, direction in objective_metric_direction_map().items():
-        metric_direction: Direction = "desc" if direction == "max" else "asc"
-        best_member, _, _ = select_best(
-            members,
-            key=lex_priority(((metric_name, metric_direction),)),
-            gate_rule=None,
-        )
+        sign = -1.0 if direction == "max" else 1.0
+
+        def sort_key(
+            member: FrontierArchiveMember,
+            *,
+            metric=metric_name,
+            sign=sign,
+        ) -> tuple[bool, float, str]:
+            value = member.objective_metrics.get(metric)
+            if value is None:
+                return (True, 0.0, member.member_id)
+            return (False, sign * float(value), member.member_id)
+
+        best_member = min(members, key=sort_key)
         best_by_metric[metric_name] = {
             "member_id": best_member.member_id,
             "value": best_member.objective_metrics.get(metric_name),
@@ -347,7 +346,10 @@ def serialize_frontier_archive(
         else {str(key): float(value) for key, value in hypervolume_reference.items()}
     )
     annotated_members = annotate_hypervolume_contributions(
-        members,
+        annotate_archive_members(
+            members,
+            tolerances=dominance_tolerance,
+        ),
         hypervolume_reference=reference_metrics,
     )
     payload = {
@@ -517,7 +519,9 @@ def _insert_candidate_and_drop_dominated(
     }
     if replaced_member_id is not None:
         update["replaced_member_id"] = replaced_member_id
-    return annotate_archive_members(updated_members, tolerances=tolerances), update
+    # Dominance signatures are serialization metadata only; defer to
+    # serialize_frontier_archive to avoid O(N^2) work on every insert.
+    return sorted(updated_members, key=lambda member: member.member_id), update
 
 
 def _coerce_optional_float(value) -> float | None:

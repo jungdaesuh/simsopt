@@ -5,6 +5,7 @@ from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
 from geo._frontier_test_helpers import (
+    load_frontier_campaign_execution_module,
     load_frontier_campaign_module,
     load_frontier_scalarization_module,
     load_goal_mode_comparison_module,
@@ -71,7 +72,8 @@ class FrontierScalarizationTests(unittest.TestCase):
             res_weight=res_weight,
             lane_budget=lane_budget,
         )
-        lane_args = frontier_campaign_module.build_frontier_lane_args(args, lane_spec)
+        execution_module = load_frontier_campaign_execution_module()
+        lane_args = execution_module.build_frontier_lane_args(args, lane_spec)
         return goal_mode_module.build_single_stage_goal_mode_command(
             lane_args,
             goal_mode="frontier",
@@ -558,6 +560,12 @@ class FrontierScalarizationTests(unittest.TestCase):
         self.assertEqual(set(directions), {(1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0), (0.0, 0.0, 0.0, 1.0)})
 
     def test_lane_rng_seed_uses_explicit_lane_index(self):
-        frontier_campaign_module = load_frontier_campaign_module()
+        execution_module = load_frontier_campaign_execution_module()
 
-        self.assertEqual((frontier_campaign_module.lane_rng_seed(42, lane_index=0), frontier_campaign_module.lane_rng_seed(42, lane_index=3)), (42, 45))
+        self.assertEqual(
+            (
+                execution_module.lane_rng_seed(42, lane_index=0),
+                execution_module.lane_rng_seed(42, lane_index=3),
+            ),
+            (42, 45),
+        )

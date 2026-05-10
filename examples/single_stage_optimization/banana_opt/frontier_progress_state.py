@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Mapping
 
 from .frontier_contracts import (
+    FRONTIER_ARCHIVE_STATE_CERTIFIED,
     FRONTIER_ARCHIVE_STATE_PROVISIONAL,
     FRONTIER_CAMPAIGN_PROGRESS_SCHEMA_VERSION,
     FRONTIER_LANE_CONTRACT_SCHEMA_VERSION,
@@ -18,10 +19,11 @@ from .frontier_contracts import (
 )
 from .frontier_archive import (
     FrontierArchiveMember,
-    build_archive_member_from_results,
     frontier_archive_member_from_json_dict,
     update_frontier_archive,
 )
+
+__all__ = ("FRONTIER_CAMPAIGN_PROGRESS_SCHEMA_VERSION",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,10 +138,9 @@ class FrontierLaneRecord:
             )
         else:
             lane_contract = FrontierLaneContract.from_json_dict(payload)
+        validate_frontier_lane_record_payload(payload)
         return cls(
-            schema_version=str(
-                payload.get("schema_version", FRONTIER_LANE_RECORD_SCHEMA_VERSION)
-            ),
+            schema_version=str(payload["schema_version"]),
             lane_contract=lane_contract,
             status=str(payload["status"]),
             command=[str(item) for item in payload.get("command", [])],
@@ -204,6 +205,9 @@ class FrontierCampaignProgress:
     early_stop_status: dict[str, object] | None = None
 
     def to_json_dict(self) -> dict[str, object]:
+        # archive_members and provisional_archive_members are SSOT-rebuilt
+        # from lane_records on load; persisting them once duplicated state
+        # and let provisional bloat the progress file linearly with lanes.
         payload = {
             "schema_version": self.schema_version,
             "campaign_id": self.campaign_id,
@@ -211,12 +215,6 @@ class FrontierCampaignProgress:
             "frontier_engine": self.frontier_engine,
             "target_payload": self.target_payload,
             "lane_records": [record.to_json_dict() for record in self.lane_records],
-            "provisional_archive_members": [
-                member.to_json_dict() for member in self.provisional_archive_members
-            ],
-            "archive_members": [
-                member.to_json_dict() for member in self.archive_members
-            ],
             "early_stop_status": self.early_stop_status,
         }
         validate_frontier_campaign_progress_payload(payload)
@@ -226,6 +224,8 @@ class FrontierCampaignProgress:
     def from_json_dict(
         cls,
         payload: Mapping[str, object],
+        *,
+        pareto_objective_normalization: Mapping[str, object] | None = None,
     ) -> FrontierCampaignProgress:
         validate_frontier_campaign_progress_payload(payload)
         lane_records = [
@@ -233,18 +233,17 @@ class FrontierCampaignProgress:
             for item in payload.get("lane_records", [])
         ]
         provisional_archive_members = replay_provisional_archive_from_lane_records(
-            lane_records
+            lane_records,
+            pareto_objective_normalization=pareto_objective_normalization,
         )
-        archive_members = replay_archive_from_lane_records(lane_records)
+        archive_members = replay_archive_from_lane_records(
+            lane_records,
+            pareto_objective_normalization=pareto_objective_normalization,
+        )
         target_payload = payload.get("target_payload")
         early_stop_status_payload = payload.get("early_stop_status")
         return cls(
-            schema_version=str(
-                payload.get(
-                    "schema_version",
-                    FRONTIER_CAMPAIGN_PROGRESS_SCHEMA_VERSION,
-                )
-            ),
+            schema_version=str(payload["schema_version"]),
             campaign_id=str(payload["campaign_id"]),
             frontier_version=str(payload["frontier_version"]),
             frontier_engine=str(payload["frontier_engine"]),
@@ -289,43 +288,60 @@ def write_frontier_campaign_progress(
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             json.dump(progress.to_json_dict(), f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, str(path))
     except BaseException:
         os.unlink(tmp_path)
         raise
 
 
-def load_frontier_campaign_progress(path: Path) -> FrontierCampaignProgress:
+def load_frontier_campaign_progress(
+    path: Path,
+    *,
+    pareto_objective_normalization: Mapping[str, object] | None = None,
+) -> FrontierCampaignProgress:
     return FrontierCampaignProgress.from_json_dict(
-        json.loads(path.read_text(encoding="utf-8"))
+        json.loads(path.read_text(encoding="utf-8")),
+        pareto_objective_normalization=pareto_objective_normalization,
     )
 
 
 def replay_archive_from_lane_records(
     lane_records: list[FrontierLaneRecord],
+    *,
+    pareto_objective_normalization: Mapping[str, object] | None = None,
 ) -> list[FrontierArchiveMember]:
     archive_members: list[FrontierArchiveMember] = []
     for lane_record in lane_records:
         archive_member_payload = lane_record.archive_member
         if archive_member_payload is None:
             continue
-        archive_member = frontier_archive_member_from_json_dict(
-            archive_member_payload
+        # Strip stale hypervolume_contribution: it was computed against the
+        # campaign's prior hypervolume reference, which may differ from the
+        # one resolved at resume time. The archive serializer recomputes it.
+        archive_member = replace(
+            frontier_archive_member_from_json_dict(archive_member_payload),
+            hypervolume_contribution=None,
         )
         archive_members, _ = update_frontier_archive(
             archive_members,
             archive_member,
+            pareto_objective_normalization=pareto_objective_normalization,
         )
     return archive_members
 
 
 def replay_provisional_archive_from_lane_records(
     lane_records: list[FrontierLaneRecord],
+    *,
+    pareto_objective_normalization: Mapping[str, object] | None = None,
 ) -> list[FrontierArchiveMember]:
     provisional_members: list[FrontierArchiveMember] = []
     for lane_record in lane_records:
         provisional_member = _replay_provisional_member_from_lane_record(
-            lane_record
+            lane_record,
+            pareto_objective_normalization=pareto_objective_normalization,
         )
         if provisional_member is not None:
             provisional_members.append(provisional_member)
@@ -334,26 +350,16 @@ def replay_provisional_archive_from_lane_records(
 
 def _replay_provisional_member_from_lane_record(
     lane_record: FrontierLaneRecord,
+    *,
+    pareto_objective_normalization: Mapping[str, object] | None = None,
 ) -> FrontierArchiveMember | None:
+    # Lane records persist the trimmed metric subset (lower-case keys), not
+    # the full upper-case solver results, so rebuild the provisional member
+    # from the certified archive_member ledger entry instead.
+    _ = pareto_objective_normalization
     provisional_member_ids = lane_record.provisional_member_ids
     if not provisional_member_ids:
         return None
-    if (
-        lane_record.results is not None
-        and lane_record.result_source is not None
-        and lane_record.results_path is not None
-    ):
-        return build_archive_member_from_results(
-            campaign_id=lane_record.lane_contract.campaign_id,
-            lane_id=lane_record.lane_contract.lane_id,
-            payload={
-                "result_source": lane_record.result_source,
-                "results_path": lane_record.results_path,
-                "results": lane_record.results,
-            },
-            rerun_contract=lane_record.lane_contract.rerun_contract,
-            archive_state=FRONTIER_ARCHIVE_STATE_PROVISIONAL,
-        )
     archive_member_payload = lane_record.archive_member
     if archive_member_payload is None:
         return None
@@ -361,6 +367,7 @@ def _replay_provisional_member_from_lane_record(
         frontier_archive_member_from_json_dict(archive_member_payload),
         member_id=provisional_member_ids[0],
         archive_state=FRONTIER_ARCHIVE_STATE_PROVISIONAL,
+        hypervolume_contribution=None,
     )
 
 
@@ -427,7 +434,7 @@ def build_frontier_lane_record(
     if archive_member is not None:
         archive_member_payload = archive_member.to_json_dict()
         archive_member_id = archive_member.member_id
-        if archive_member.archive_state == "certified":
+        if archive_member.archive_state == FRONTIER_ARCHIVE_STATE_CERTIFIED:
             certified_member_ids.append(archive_member.member_id)
             final_certified = True
     return FrontierLaneRecord(

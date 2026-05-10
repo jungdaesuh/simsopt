@@ -39,10 +39,13 @@ def load_frontier_archive_module(): return load_banana_opt_module("frontier_arch
 def load_frontier_campaign_module(): return load_module(FRONTIER_CAMPAIGN_PATH, "run_single_stage_frontier_campaign")
 
 
+def load_frontier_campaign_execution_module(): return load_banana_opt_module("frontier_campaign_execution")
+
+
 def load_frontier_conditioning_module(): return load_banana_opt_module("frontier_conditioning")
 
 
-def load_frontier_constraints_module(): return load_banana_opt_module("frontier_constraints")
+def load_frontier_constraints_module(): return load_banana_opt_module("single_stage_search_contracts")
 
 
 def load_frontier_contracts_module(): return load_banana_opt_module("frontier_contracts")

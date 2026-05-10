@@ -136,6 +136,8 @@ def frontier_archive_membership_rules_contract() -> dict[str, object]:
 
 
 def frontier_archive_state_semantics_contract() -> dict[str, object]:
+    # "Visible in progress" means lane_records expose member IDs. Full archive
+    # member payloads are rebuilt from lane records and are not persisted there.
     return {
         "supported_states": list(FRONTIER_ARCHIVE_STATES),
         "provisional_visible_in_progress": True,
@@ -219,8 +221,6 @@ def validate_frontier_campaign_progress_payload(payload: Mapping[str, object]) -
             "frontier_engine",
             "target_payload",
             "lane_records",
-            "provisional_archive_members",
-            "archive_members",
         ),
     )
     _require_supported_frontier_engine(
@@ -229,26 +229,10 @@ def validate_frontier_campaign_progress_payload(payload: Mapping[str, object]) -
         artifact_name="progress",
     )
     lane_records = _require_list(payload, "lane_records")
-    provisional_members = _require_list(payload, "provisional_archive_members")
-    archive_members = _require_list(payload, "archive_members")
     for lane_record in lane_records:
         if not isinstance(lane_record, Mapping):
             raise ValueError("lane_records entries must be mappings")
         validate_frontier_lane_record_payload(lane_record)
-    for member_payload in provisional_members:
-        if not isinstance(member_payload, Mapping):
-            raise ValueError("provisional_archive_members entries must be mappings")
-        validate_frontier_archive_member_payload(
-            member_payload,
-            expected_state=FRONTIER_ARCHIVE_STATE_PROVISIONAL,
-        )
-    for member_payload in archive_members:
-        if not isinstance(member_payload, Mapping):
-            raise ValueError("archive_members entries must be mappings")
-        validate_frontier_archive_member_payload(
-            member_payload,
-            expected_state=FRONTIER_ARCHIVE_STATE_CERTIFIED,
-        )
 
 
 def validate_frontier_archive_member_payload(

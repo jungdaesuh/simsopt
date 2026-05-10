@@ -74,11 +74,6 @@ PARETO_OBJECTIVE_NORMALIZATION_IDEAL_NADIR_RULES = {
         "floor": 1.0e-6,
     },
 }
-SUPPORTED_PARETO_NORMALIZATION_KINDS = (
-    PARETO_OBJECTIVE_NORMALIZATION_KIND_SEED_RELATIVE,
-    PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR,
-)
-
 REFERENCE_METRIC_FIELDS = {
     "iota": "FRONTIER_REFERENCE_IOTA",
     "volume": "FRONTIER_REFERENCE_VOLUME",
@@ -278,7 +273,7 @@ def load_pareto_normalization_spec(path: str | Path) -> dict[str, object]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"Expected JSON object in {path}")
-    schema_version = payload.get("schema_version", payload.get("SCHEMA_VERSION"))
+    schema_version = payload.get("schema_version")
     if schema_version != PARETO_OBJECTIVE_NORMALIZATION_SPEC_SCHEMA_VERSION:
         raise ValueError(
             f"{path} must declare schema_version="

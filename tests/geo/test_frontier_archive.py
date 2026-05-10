@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from geo._frontier_test_helpers import (
     load_frontier_archive_module,
+    load_frontier_contracts_module,
     load_frontier_dominance_module,
     load_frontier_progress_state_module,
     load_frontier_reporting_module,
@@ -398,6 +399,7 @@ class FrontierArchiveTests(unittest.TestCase):
 
     def test_progress_resume_rebuilds_stale_persisted_archives_from_lane_records(self):
         archive_module = load_frontier_archive_module()
+        contracts_module = load_frontier_contracts_module()
         progress_state_module = load_frontier_progress_state_module()
 
         incumbent = self._member(
@@ -448,7 +450,7 @@ class FrontierArchiveTests(unittest.TestCase):
             ),
         ]
         payload = {
-            "schema_version": progress_state_module.FRONTIER_CAMPAIGN_PROGRESS_SCHEMA_VERSION,
+            "schema_version": contracts_module.FRONTIER_CAMPAIGN_PROGRESS_SCHEMA_VERSION,
             "campaign_id": "campaign",
             "frontier_version": "frontier_v3_multilane_local_v1",
             "frontier_engine": "multilane_local",

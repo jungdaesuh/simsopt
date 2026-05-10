@@ -45,7 +45,7 @@ _TRUST_THRESHOLD_FLOOR = 1.0e-5
 _WEIGHT_FLOOR = 1.0e-12
 _DEFAULT_CHEBYSHEV_RHO = 1.0e-3
 _DEFAULT_CHEBYSHEV_SHARPNESS = 12.0
-_STRICT_TOP_LEVEL_KEYS = frozenset({"schema_version", "SCHEMA_VERSION", "lanes"})
+_STRICT_TOP_LEVEL_KEYS = frozenset({"schema_version", "lanes"})
 _REFERENCE_METRIC_KEYS = frozenset(
     {"iota", "volume", "qa_error", "boozer_residual"}
 )
@@ -555,7 +555,7 @@ def _require_lane_entries(
         allowed_keys=_STRICT_TOP_LEVEL_KEYS,
         context=str(path),
     )
-    observed_schema = payload.get("schema_version", payload.get("SCHEMA_VERSION"))
+    observed_schema = payload.get("schema_version")
     if observed_schema != schema_version:
         raise ValueError(
             f"{path} must declare schema_version={schema_version!r}; "
@@ -657,8 +657,16 @@ def _seed_reference_metrics(
     }
     for results_key, metric_name in field_map.items():
         value = stage2_results.get(results_key)
-        if value is not None:
-            metrics[metric_name] = float(value)
+        if value is None:
+            continue
+        coerced = float(value)
+        # Stage-2 may emit NaN when a surface solve does not converge. NaN
+        # propagates through `max(NaN, floor) → NaN` into the runtime
+        # Chebyshev scalarization and silently corrupts every lane spec
+        # that depends on the reference vector.
+        if not math.isfinite(coerced):
+            continue
+        metrics[metric_name] = coerced
     return metrics
 
 
@@ -790,7 +798,11 @@ def _select_reference_directions(
     n_dim: int,
     partitions: int | None,
 ) -> list[tuple[float, ...]]:
-    """Select by enumeration-order rounding, not geometric-distance sampling."""
+    """Select by enumeration-order rounding, not geometric-distance sampling.
+
+    When partitions is provided, the full Das-Dennis family for that
+    partition count is emitted (requested_num_directions is ignored).
+    """
     if requested_num_directions <= 0:
         raise ValueError("--frontier-num-lanes must be positive")
     if partitions is not None:

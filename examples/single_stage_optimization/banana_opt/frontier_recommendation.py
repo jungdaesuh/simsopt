@@ -63,11 +63,14 @@ def recommend_frontier_member(
         raise ValueError(f"Unsupported frontier recommendation policy: {policy_name}")
 
     key_factory, gate_rule, rationale = policy
-    recommended_member, eligible_members, gate_inputs = select_best(
+    selection = select_best(
         members,
         key=key_factory(pareto_objective_normalization),
         gate_rule=gate_rule,
     )
+    if selection is None:
+        return None
+    recommended_member, eligible_members, gate_inputs = selection
     policy_score = _policy_score(
         policy_name,
         recommended_member,
@@ -94,7 +97,7 @@ def recommend_frontier_member(
         ),
         "policy_rationale": rationale,
         "policy_score": policy_score,
-        "gate_fallback": bool(gate_inputs["gate_fallback_to_all_members"]),
+        "gate_fallback": False,
     }
 
 
@@ -107,11 +110,13 @@ def select_best(
     FrontierArchiveMember,
     tuple[FrontierArchiveMember, ...],
     dict[str, object],
-]:
+] | None:
     eligible_members, gate_inputs = _eligible_members_for_gate_rule(
         members,
         gate_rule=gate_rule,
     )
+    if not eligible_members:
+        return None
     return min(eligible_members, key=key), eligible_members, gate_inputs
 
 
@@ -356,21 +361,15 @@ def _eligible_members_for_gate_rule(
         return tuple(members), {
             "gate_constraint_metric": None,
             "gate_missing_is_eligible": None,
-            "gate_fallback_to_all_members": False,
         }
     eligible_members = tuple(
         member for member in members if _member_satisfies_gate_rule(member, gate_rule)
     )
-    used_fallback = False
-    if not eligible_members:
-        eligible_members = tuple(members)
-        used_fallback = True
     return eligible_members, {
         "gate_constraint_metric": gate_rule.constraint_metric,
         "gate_missing_is_eligible": gate_rule.missing_is_eligible,
         "gate_required_value": gate_rule.required_value,
         "gate_rationale": gate_rule.rationale,
-        "gate_fallback_to_all_members": used_fallback,
     }
 
 
