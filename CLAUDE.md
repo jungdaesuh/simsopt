@@ -146,6 +146,29 @@ Programmatic:
 from simsopt.backend import get_backend, is_jax_backend, get_jax_platform
 ```
 
+## Parity modes
+
+The strict CPU/JAX byte-identity gate (`_pre_newton_census_gate_failures`
+in `benchmarks/single_stage_init_parity.py`) remains a release blocker
+for production CI. The runtime supports two orthogonal mode families:
+
+- **`*_parity` modes** (`jax_cpu_parity`, `jax_gpu_parity`) — verification
+  lanes. Run cpu_ordered twins, target byte identity to the C++ oracle
+  within build, slower (5-20×).
+- **`*_fast` modes** (`jax_cpu_fast`, `jax_gpu_fast`) — researcher
+  speed-opt-out lanes. Run matmul/jacfwd/einsum hot paths. **Explicitly
+  fail the byte-identity gate by construction.** Use for non-publication
+  exploration only; pre-publication artifacts MUST come from `*_parity`
+  lanes.
+- **`native_cpu`** — C++ reference oracle. No JAX involved.
+
+All modes share **one strict gate contract**. The fast lanes do not get
+a relaxed tolerance lane; they are speed promises without a parity
+claim.
+
+See `docs/parity_dual_mode_contract_2026-05-08.md` for the full
+specification (mode matrix, reporting context, DM-A/B/D/E slices).
+
 ## Key Conventions
 
 - **Tensor convention**: `dB_by_dX[p, j, l] = ∂_j B_l(x_p)` — axis 1 is derivative direction, axis 2 is B component. Matches SIMSOPT `fields.rst`.
