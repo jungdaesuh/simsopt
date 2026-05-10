@@ -214,6 +214,7 @@ class UnifiedRunnerStage2InputTests(unittest.TestCase):
                 stage2_order=None,
                 stage2_tf_current_A=None,
                 stage2_toroidal_flux=None,
+                stage2_basin_seed=None,
             )
 
             with patch.object(

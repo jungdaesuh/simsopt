@@ -155,6 +155,12 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         help="Optional Stage 2 generation override for the normalized toroidal flux label.",
     )
     parser.add_argument(
+        "--stage2-basin-seed",
+        type=int,
+        default=None,
+        help="Optional Stage 2 generation basin-hopping seed override.",
+    )
+    parser.add_argument(
         "--recovery-output-root",
         "--repair-output-root",
         dest="recovery_output_root",
@@ -299,6 +305,7 @@ def build_stage2_generation_args(
         order=args.stage2_order,
         tf_current_A=args.stage2_tf_current_A,
         toroidal_flux=args.stage2_toroidal_flux,
+        basin_seed=args.stage2_basin_seed,
         constraint_method="alm",
         stage2_iota_mode="off",
         stage2_iota_target=None,

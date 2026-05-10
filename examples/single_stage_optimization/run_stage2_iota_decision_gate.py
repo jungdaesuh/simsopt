@@ -106,6 +106,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--order", type=int, default=None)
     parser.add_argument("--tf-current-A", type=float, default=None)
     parser.add_argument("--toroidal-flux", type=float, default=None)
+    parser.add_argument("--basin-seed", type=int, default=None)
     parser.add_argument(
         "--benchmark-modes",
         default=DEFAULT_BENCHMARK_MODES,
@@ -225,6 +226,7 @@ def build_stage2_mode_args(
         order=args.order,
         tf_current_A=args.tf_current_A,
         toroidal_flux=args.toroidal_flux,
+        basin_seed=args.basin_seed,
         constraint_method=_constraint_method_for_mode(mode),
         stage2_iota_mode=mode,
         stage2_iota_target=None if mode == "off" else args.stage2_iota_target,

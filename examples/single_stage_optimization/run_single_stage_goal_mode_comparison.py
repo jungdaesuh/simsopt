@@ -403,7 +403,7 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--basin-stepsize", type=float, default=0.01)
     parser.add_argument("--basin-temperature", type=float, default=1.0)
     parser.add_argument("--basin-niter-success", type=int, default=0)
-    parser.add_argument("--basin-seed", type=int, default=-1)
+    parser.add_argument("--basin-seed", type=int, default=0)
     parser.add_argument("--init-only", action="store_true")
     return parser
 
@@ -727,8 +727,7 @@ def build_single_stage_goal_mode_command(
         )
         if args.basin_niter_success > 0:
             command.extend(["--basin-niter-success", str(args.basin_niter_success)])
-        if args.basin_seed >= 0:
-            command.extend(["--basin-seed", str(args.basin_seed)])
+        command.extend(["--basin-seed", str(args.basin_seed)])
     if args.init_only:
         command.append("--init-only")
     return command
