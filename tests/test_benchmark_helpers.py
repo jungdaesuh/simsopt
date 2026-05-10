@@ -517,7 +517,9 @@ def test_single_stage_init_fixture_files_are_vendored():
     assert DEFAULT_STAGE2_BS_PATH.parent == DEFAULT_STAGE2_SEED_DIR
     assert DEFAULT_STAGE2_BS_PATH.is_file()
     assert DEFAULT_STAGE2_BS_PATH.with_name("results.json").is_file()
-    assert DEFAULT_STAGE2_BS_PATH.with_name("single_stage_jax_runtime_spec.json").is_file()
+    assert DEFAULT_STAGE2_BS_PATH.with_name(
+        "single_stage_jax_runtime_spec.json"
+    ).is_file()
 
 
 def test_single_stage_init_fixture_runtime_seed_spec_loads():
@@ -923,8 +925,7 @@ def test_single_stage_init_same_candidate_replay_compares_boozer_metadata(tmp_pa
 
     assert replay["status"] == "fail"
     assert (
-        "boozer_solver_metadata.linear_solve_backend mismatch"
-        in replay["failures"][0]
+        "boozer_solver_metadata.linear_solve_backend mismatch" in replay["failures"][0]
     )
 
 
@@ -1143,11 +1144,7 @@ def test_single_stage_init_same_candidate_replay_compares_boozer_scipy_callback_
         in replay["failures"][0]
     )
     split = replay["first_boozer_scipy_callback_split"]
-    assert {
-        key: value
-        for key, value in split.items()
-        if key != "max_abs_diff"
-    } == {
+    assert {key: value for key, value in split.items() if key != "max_abs_diff"} == {
         "pair_index": 1,
         "cpu_event_index": 1,
         "jax_event_index": 1,
@@ -1226,9 +1223,7 @@ def test_single_stage_init_same_candidate_replay_reports_boozer_scipy_callback_t
         "boozer_solver_metadata.pre_newton_scipy_callback_trace length mismatch"
         in replay["failures"][0]
     )
-    assert replay["first_boozer_scipy_callback_split"]["reason"] == (
-        "length mismatch"
-    )
+    assert replay["first_boozer_scipy_callback_split"]["reason"] == ("length mismatch")
 
 
 def test_single_stage_init_same_candidate_replay_reports_component_owner(tmp_path):
@@ -1400,8 +1395,7 @@ def test_single_stage_init_same_candidate_replay_reports_parity_bug_census(
 
     census = replay["parity_bug_census"]
     divergent_layers = {
-        f"{entry['family']}.{entry['layer']}"
-        for entry in census["divergent_layers"]
+        f"{entry['family']}.{entry['layer']}" for entry in census["divergent_layers"]
     }
     assert census["status"] == "recorded"
     assert census["divergent_layer_count"] >= 3
@@ -1412,8 +1406,9 @@ def test_single_stage_init_same_candidate_replay_reports_parity_bug_census(
     assert "iota_penalty.weighted_penalty_optimizer_gradient" in divergent_layers
 
 
-def test_single_stage_init_pre_newton_census_divergence_is_gate_failure():
-    census = {
+def _pre_newton_gate_census_fixture():
+    """Census fixture mirroring the production divergent-layer shape."""
+    return {
         "status": "recorded",
         "divergent_layers": [
             {
@@ -1443,10 +1438,154 @@ def test_single_stage_init_pre_newton_census_divergence_is_gate_failure():
         ],
     }
 
+
+def test_single_stage_init_pre_newton_census_divergence_is_gate_failure():
+    census = _pre_newton_gate_census_fixture()
+
+    failures = single_stage_init_parity_module._pre_newton_census_gate_failures(census)
+
+    assert failures == [
+        "Parity bug census reported divergent "
+        "boozer_solve.pre_newton_state: max_abs_diff=4.5e-09 "
+        "at pair 4 (line-search eval 4)."
+    ]
+
+
+def test_single_stage_init_pre_newton_census_gate_no_severity_context_matches_strict():
+    """Explicit severity_context=None must keep the strict-only message."""
+    census = _pre_newton_gate_census_fixture()
+
     failures = single_stage_init_parity_module._pre_newton_census_gate_failures(
-        census
+        census,
+        severity_context=None,
     )
 
+    assert failures == [
+        "Parity bug census reported divergent "
+        "boozer_solve.pre_newton_state: max_abs_diff=4.5e-09 "
+        "at pair 4 (line-search eval 4)."
+    ]
+
+
+def test_single_stage_init_pre_newton_census_gate_empty_per_layer_matches_strict():
+    """Empty per_layer (INSUFFICIENT_SAMPLES / corpus-not-built) is a no-op."""
+    census = _pre_newton_gate_census_fixture()
+
+    failures = single_stage_init_parity_module._pre_newton_census_gate_failures(
+        census,
+        severity_context={"per_layer": {}},
+    )
+
+    assert failures == [
+        "Parity bug census reported divergent "
+        "boozer_solve.pre_newton_state: max_abs_diff=4.5e-09 "
+        "at pair 4 (line-search eval 4)."
+    ]
+
+
+def test_single_stage_init_pre_newton_census_gate_emits_severity_context():
+    """Populated severity_context augments the message but preserves the gate."""
+    census = _pre_newton_gate_census_fixture()
+    severity_context = {
+        "threshold_kind": "empirical_per_layer",
+        "purpose": "report_severity",
+        "source_artifacts": ["passing-artifact-A", "passing-artifact-B"],
+        "per_layer": {
+            "boozer_solve.pre_newton_state": {
+                "baseline_max": 4.5e-11,
+                "safety_factor": 5.0,
+                "corpus_p95": 9.04e-12,
+                "sample_size": 4,
+            },
+            # Intentionally omit the iota_penalty.adjoint and other layers —
+            # they are not pre_newton_* so the gate must ignore them anyway.
+        },
+    }
+
+    failures = single_stage_init_parity_module._pre_newton_census_gate_failures(
+        census,
+        severity_context=severity_context,
+    )
+
+    # Strict-gate semantics preserved: still exactly one pre_newton failure.
+    assert len(failures) == 1
+    message = failures[0]
+    # Original prefix is preserved verbatim.
+    assert message.startswith(
+        "Parity bug census reported divergent "
+        "boozer_solve.pre_newton_state: max_abs_diff=4.5e-09 "
+        "at pair 4 (line-search eval 4)"
+    )
+    # Severity classification appears (drift 4.5e-9 vs threshold 5*4.5e-11=2.25e-10
+    # → ratio 20× → SEVERE).
+    assert "[SEVERE:" in message
+    assert "4.50e-11" in message
+    assert "5× safety factor" in message
+    assert "corpus p95=9.04e-12" in message
+    assert "across 4 passing artifacts" in message
+
+
+def test_single_stage_init_pre_newton_census_gate_marginal_classification():
+    """Drift below the safety-adjusted threshold is reported as marginal."""
+    census = {
+        "status": "recorded",
+        "divergent_layers": [
+            {
+                "family": "boozer_solve",
+                "layer": "pre_newton_state",
+                "max_abs_diff": 1e-10,
+                "pair_index": 1,
+                "line_search_evaluation": 1,
+                "diverged": True,
+            },
+        ],
+    }
+    severity_context = {
+        "per_layer": {
+            "boozer_solve.pre_newton_state": {
+                # baseline_max=1e-10, safety_factor=5 → threshold=5e-10.
+                # drift 1e-10 / 5e-10 = 0.2 → marginal.
+                "baseline_max": 1e-10,
+                "safety_factor": 5.0,
+            },
+        },
+    }
+
+    failures = single_stage_init_parity_module._pre_newton_census_gate_failures(
+        census,
+        severity_context=severity_context,
+    )
+
+    assert len(failures) == 1
+    message = failures[0]
+    assert "[marginal:" in message
+    # No corpus details supplied → only the default safety-factor parenthetical.
+    assert "corpus p95" not in message
+    assert "across" not in message
+
+
+def test_single_stage_init_pre_newton_census_gate_layer_absent_from_context():
+    """Layers absent from per_layer must fall back to the strict-only message."""
+    census = _pre_newton_gate_census_fixture()
+    severity_context = {
+        "per_layer": {
+            # Only the final_solved_state layer has empirical data here, and
+            # that layer is not even in the divergent census. Pre_newton_state
+            # is absent → no severity tag.
+            "boozer_solve.final_solved_state": {
+                "baseline_max": 1e-12,
+                "safety_factor": 5.0,
+            },
+        },
+    }
+
+    failures = single_stage_init_parity_module._pre_newton_census_gate_failures(
+        census,
+        severity_context=severity_context,
+    )
+
+    # Strict-gate semantics preserved: identical message to the strict-only
+    # case because pre_newton_state has no entry in per_layer.
     assert failures == [
         "Parity bug census reported divergent "
         "boozer_solve.pre_newton_state: max_abs_diff=4.5e-09 "
@@ -1466,8 +1605,7 @@ def test_single_stage_init_same_candidate_gate_fails_missing_replay_trace():
     )
 
     assert failures == [
-        "Same-candidate objective replay comparison did not pass: "
-        "status=not-recorded.",
+        "Same-candidate objective replay comparison did not pass: status=not-recorded.",
         "Same-candidate objective replay did not record a parity bug census.",
     ]
 
@@ -1544,12 +1682,10 @@ def test_single_stage_init_optimizer_path_reports_first_candidate_split(tmp_path
     assert comparison["status"] == "split"
     assert comparison["paired_event_count"] == 2
     assert comparison["first_candidate_split_event"]["pair_index"] == 2
-    assert comparison["first_candidate_split_event"][
-        "cpu_accepted_iteration_target"
-    ] == 2
-    assert comparison["first_candidate_split_event"][
-        "cpu_line_search_evaluation"
-    ] == 3
+    assert (
+        comparison["first_candidate_split_event"]["cpu_accepted_iteration_target"] == 2
+    )
+    assert comparison["first_candidate_split_event"]["cpu_line_search_evaluation"] == 3
     assert comparison["max_candidate_event"]["candidate_abs_diff"] == pytest.approx(
         2e-12
     )
@@ -1612,7 +1748,9 @@ def test_single_stage_init_exact_replay_requires_identical_candidates(tmp_path):
     assert replay["status"] == "fail"
     assert replay["require_exact_candidates"]
     assert replay["same_candidate_event_count"] == 0
-    assert "candidate_optimizer_dofs mismatch under exact replay" in replay["failures"][0]
+    assert (
+        "candidate_optimizer_dofs mismatch under exact replay" in replay["failures"][0]
+    )
 
 
 def test_single_stage_init_surface_geometry_gate_is_init_only(tmp_path):
@@ -1712,7 +1850,10 @@ def test_single_stage_init_parity_ondevice_passes_on_real_cuda_runtime(tmp_path)
     payload = json.loads(output_json.read_text(encoding="utf-8"))
 
     assert payload["passed"] is True
-    assert payload["comparison"]["jax_outer_optimizer_method"] == TARGET_OUTER_OPTIMIZER_METHOD
+    assert (
+        payload["comparison"]["jax_outer_optimizer_method"]
+        == TARGET_OUTER_OPTIMIZER_METHOD
+    )
     assert payload["comparison"]["jax_self_intersecting"] is False
 
 
@@ -1759,7 +1900,9 @@ def _assert_benchmark_module_import_bootstraps_local_simsopt(module_name: str) -
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert str(repo_root / "src" / "simsopt" / "__init__.py") in completed.stdout.strip()
+    assert (
+        str(repo_root / "src" / "simsopt" / "__init__.py") in completed.stdout.strip()
+    )
 
 
 def test_single_stage_init_parity_import_bootstraps_local_simsopt():
@@ -1872,13 +2015,12 @@ def test_repo_pythonpath_env_adds_detected_cuda_toolchain_root(monkeypatch, tmp_
     env = repo_pythonpath_env(platform="cuda")
 
     assert env["PATH"].split(os.pathsep)[0] == str(bin_dir)
-    assert (
-        env["XLA_FLAGS"].split()[0]
-        == f"--xla_gpu_cuda_data_dir={cuda_root}"
-    )
+    assert env["XLA_FLAGS"].split()[0] == f"--xla_gpu_cuda_data_dir={cuda_root}"
 
 
-def test_repo_pythonpath_env_respects_explicit_cuda_data_dir_flag(monkeypatch, tmp_path):
+def test_repo_pythonpath_env_respects_explicit_cuda_data_dir_flag(
+    monkeypatch, tmp_path
+):
     cuda_root = tmp_path / "cuda"
     bin_dir = cuda_root / "bin"
     bin_dir.mkdir(parents=True)
@@ -1937,13 +2079,8 @@ def test_repo_pythonpath_env_prefers_active_env_cuda_toolchain_root(
     env = repo_pythonpath_env(platform="cuda")
 
     assert env["PATH"].split(os.pathsep)[0] == str(active_bin_dir)
-    assert (
-        env["LD_LIBRARY_PATH"].split(os.pathsep)[0] == str(active_nvjitlink_dir)
-    )
-    assert (
-        env["XLA_FLAGS"].split()[0]
-        == f"--xla_gpu_cuda_data_dir={active_root}"
-    )
+    assert env["LD_LIBRARY_PATH"].split(os.pathsep)[0] == str(active_nvjitlink_dir)
+    assert env["XLA_FLAGS"].split()[0] == f"--xla_gpu_cuda_data_dir={active_root}"
 
 
 def test_repo_pythonpath_env_detects_target_arch_nvjitlink_dir(monkeypatch, tmp_path):
@@ -1976,14 +2113,10 @@ def test_repo_pythonpath_env_detects_target_arch_nvjitlink_dir(monkeypatch, tmp_
     env = repo_pythonpath_env(platform="cuda")
 
     assert env["PATH"].split(os.pathsep)[0] == str(active_bin_dir)
-    assert (
-        env["LD_LIBRARY_PATH"].split(os.pathsep)[0]
-        == str(active_target_nvjitlink_dir)
+    assert env["LD_LIBRARY_PATH"].split(os.pathsep)[0] == str(
+        active_target_nvjitlink_dir
     )
-    assert (
-        env["XLA_FLAGS"].split()[0]
-        == f"--xla_gpu_cuda_data_dir={active_root}"
-    )
+    assert env["XLA_FLAGS"].split()[0] == f"--xla_gpu_cuda_data_dir={active_root}"
 
 
 def test_repo_pythonpath_env_bundled_cuda_clears_local_toolchain_overrides(
@@ -2063,7 +2196,9 @@ def test_apply_compilation_cache_policy_honors_disable_flag(monkeypatch):
     assert _JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES_ENV_VAR not in os.environ
 
 
-def test_benchmark_compilation_cache_dir_uses_repo_artifacts_root(monkeypatch, tmp_path):
+def test_benchmark_compilation_cache_dir_uses_repo_artifacts_root(
+    monkeypatch, tmp_path
+):
     monkeypatch.setattr(
         "benchmarks.validation_ladder_common.REPO_ROOT",
         tmp_path,
@@ -2384,7 +2519,9 @@ def _release_gate_lane(*, backend, gpu_memory_mb=None, include_gpu_facts=True):
     }
 
 
-def _release_gate_fixed_state_artifact(*, comparison_status="pass", gpu_memory_mb=1024.0):
+def _release_gate_fixed_state_artifact(
+    *, comparison_status="pass", gpu_memory_mb=1024.0
+):
     return {
         "schema_version": 1,
         "lanes": {
@@ -2528,9 +2665,10 @@ def test_single_stage_parity_matrix_blocks_unmatched_trajectory_artifacts():
 
     matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(report)
 
-    assert matrix["comparisons"]["jax_cpu_vs_h100_same_state_value_grad"][
-        "status"
-    ] == "pass"
+    assert (
+        matrix["comparisons"]["jax_cpu_vs_h100_same_state_value_grad"]["status"]
+        == "pass"
+    )
     assert matrix["comparisons"]["full_trajectory_parity"]["status"] == "blocked"
     assert matrix["passed"] is False
 
@@ -2540,16 +2678,16 @@ def test_single_stage_parity_matrix_reports_absolute_deltas():
     report["jax_cpu_vs_h100_value_grad"]["objective_abs_delta"] = -1.0e-15
     report["jax_cpu_vs_h100_value_grad"]["objective_rel_delta"] = -1.0e-15
     report["jax_cpu_vs_h100_value_grad"]["grad_max_abs_delta"] = -1.0e-12
-    report["same_seed_no_optimizer_metrics"]["INITIAL_VOLUME"]["values"][
-        "jax_cpu"
-    ] = 0.999999999999
+    report["same_seed_no_optimizer_metrics"]["INITIAL_VOLUME"]["values"]["jax_cpu"] = (
+        0.999999999999
+    )
 
     matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(report)
 
     same_state = matrix["comparisons"]["jax_cpu_vs_h100_same_state_value_grad"]
-    metric = matrix["comparisons"]["cpu_scipy_vs_jax_cpu_same_seed_metrics"][
-        "metrics"
-    ]["INITIAL_VOLUME"]
+    metric = matrix["comparisons"]["cpu_scipy_vs_jax_cpu_same_seed_metrics"]["metrics"][
+        "INITIAL_VOLUME"
+    ]
     assert same_state["objective_abs_delta"] >= 0.0
     assert same_state["objective_rel_delta"] >= 0.0
     assert same_state["grad_max_abs_delta"] >= 0.0
@@ -2646,9 +2784,7 @@ def test_single_stage_parity_matrix_reports_drifted_optimizer_state_traces(tmp_p
     trace_pairs = comparisons["optimizer_state_trace_pairs"]
     assert trace_pairs["status"] == "drift"
     assert comparisons["full_trajectory_parity"]["status"] == "drift"
-    assert (
-        trace_pairs["pairs"]["jax_cpu_vs_h100_gpu"]["status"] == "drift"
-    )
+    assert trace_pairs["pairs"]["jax_cpu_vs_h100_gpu"]["status"] == "drift"
 
 
 def test_single_stage_parity_matrix_compares_later_trace_entries(tmp_path):
@@ -2730,10 +2866,13 @@ def test_release_gate_blocks_mixed_full_run_objective_contract(tmp_path):
     bucket = matrix["buckets"]["full_run_artifact_contract"]
     assert bucket["status"] == "blocked"
     assert "full_run_artifact_contract" in matrix["blocking_buckets"]
-    assert any("objective_configuration_hash" in failure for failure in bucket["failures"])
-    assert matrix["comparisons"]["cpu_scipy_vs_jax_cpu_same_seed_metrics"][
-        "status"
-    ] == "blocked"
+    assert any(
+        "objective_configuration_hash" in failure for failure in bucket["failures"]
+    )
+    assert (
+        matrix["comparisons"]["cpu_scipy_vs_jax_cpu_same_seed_metrics"]["status"]
+        == "blocked"
+    )
     assert matrix["first_divergence"]["stage"] == "run_contract"
     assert matrix["release_gate_passed"] is False
 
@@ -2791,7 +2930,9 @@ def test_release_gate_blocks_missing_cuda_provenance():
 
     bucket = matrix["buckets"]["performance_memory_report"]
     assert bucket["status"] == "blocked"
-    assert any("NVIDIA GPU facts are missing" in failure for failure in bucket["failures"])
+    assert any(
+        "NVIDIA GPU facts are missing" in failure for failure in bucket["failures"]
+    )
 
 
 def test_release_gate_blocks_missing_cuda_version_provenance():
@@ -2886,9 +3027,7 @@ def test_release_gate_final_metric_drift_has_structured_first_divergence(tmp_pat
     _write_optimizer_trace_progress(jax_cpu_progress)
     _write_optimizer_trace_progress(gpu_progress)
     report = _release_gate_parity_report()
-    report["same_seed_no_optimizer_metrics"]["FINAL_VOLUME"]["values"][
-        "jax_gpu"
-    ] = 1.5
+    report["same_seed_no_optimizer_metrics"]["FINAL_VOLUME"]["values"]["jax_gpu"] = 1.5
 
     matrix = single_stage_parity_matrix.build_single_stage_parity_matrix(
         report,
@@ -2980,17 +3119,13 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
     assert direct_hessian["requires_direct_cpp_oracle"] is True
     assert direct_hessian["full_matrix_required"] is True
 
-    exact_well_conditioned = parity_ladder_tolerances(
-        "exact-well-conditioned-adjoint"
-    )
+    exact_well_conditioned = parity_ladder_tolerances("exact-well-conditioned-adjoint")
     assert exact_well_conditioned["adjoint_rtol"] == pytest.approx(1e-6)
     assert exact_well_conditioned["adjoint_atol"] == pytest.approx(1e-8)
     assert exact_well_conditioned["residual_rel_tol"] == pytest.approx(1e-10)
     assert exact_well_conditioned["vector_parity_required"] is True
 
-    exact_ill_conditioned = parity_ladder_tolerances(
-        "exact-ill-conditioned-adjoint"
-    )
+    exact_ill_conditioned = parity_ladder_tolerances("exact-ill-conditioned-adjoint")
     assert exact_ill_conditioned["adjoint_rtol"] is None
     assert exact_ill_conditioned["residual_rel_tol"] == pytest.approx(1e-10)
     assert exact_ill_conditioned["operator_failure_allowed"] is True
@@ -3024,9 +3159,7 @@ def test_parity_ladder_tolerances_return_independent_copy():
     direct = parity_ladder_tolerances("direct_kernel")
     direct["rtol"] = 1.0
 
-    assert parity_ladder_tolerances("direct_kernel")["rtol"] == pytest.approx(
-        1e-10
-    )
+    assert parity_ladder_tolerances("direct_kernel")["rtol"] == pytest.approx(1e-10)
 
 
 def test_parity_ladder_tolerances_reject_unknown_lane():
@@ -3272,8 +3405,7 @@ def test_query_nvcc_version_records_release(monkeypatch):
         assert text is True
         return types.SimpleNamespace(
             stdout=(
-                f"Cuda compilation tools, release {_FAKE_NVCC_VERSION}, "
-                "V12.4.131\n"
+                f"Cuda compilation tools, release {_FAKE_NVCC_VERSION}, V12.4.131\n"
             )
         )
 
@@ -3713,8 +3845,9 @@ def test_single_stage_init_case_threads_profile_target_lane_only_flag(
     monkeypatch.setattr(
         single_stage_init_parity_module,
         "run_python_script",
-        lambda _script_path, command, **kwargs: observed_command.extend(command)
-        or argparse.Namespace(stdout="", stderr=""),
+        lambda _script_path, command, **kwargs: (
+            observed_command.extend(command) or argparse.Namespace(stdout="", stderr="")
+        ),
     )
 
     def fake_find_single_file(root: str | Path, pattern: str) -> Path:
@@ -3791,10 +3924,10 @@ def _observe_single_stage_case_invocations(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(
         single_stage_init_parity_module,
         "run_python_script",
-        lambda _script_path, command, **kwargs: observed_invocations.append(
-            (list(command), dict(kwargs["env"]))
-        )
-        or argparse.Namespace(stdout="", stderr=""),
+        lambda _script_path, command, **kwargs: (
+            observed_invocations.append((list(command), dict(kwargs["env"])))
+            or argparse.Namespace(stdout="", stderr="")
+        ),
     )
     return observed_invocations
 
@@ -4114,18 +4247,20 @@ def test_single_stage_init_full_run_contract_records_reportable_lane_state(
 
     lanes = contract["lanes"]
     assert set(lanes) == {"cpu_scipy", "jax_cpu"}
-    assert contract["runtime_seed_spec_hash"] == single_stage_parity_matrix._file_sha256(
-        seed_spec
+    assert contract[
+        "runtime_seed_spec_hash"
+    ] == single_stage_parity_matrix._file_sha256(seed_spec)
+    assert (
+        lanes["cpu_scipy"]["runtime_seed_spec_hash"]
+        == contract["runtime_seed_spec_hash"]
     )
-    assert lanes["cpu_scipy"]["runtime_seed_spec_hash"] == contract[
-        "runtime_seed_spec_hash"
-    ]
-    assert lanes["jax_cpu"]["runtime_seed_spec_hash"] == contract[
-        "runtime_seed_spec_hash"
-    ]
-    assert lanes["cpu_scipy"]["objective_configuration_hash"] == lanes["jax_cpu"][
-        "objective_configuration_hash"
-    ]
+    assert (
+        lanes["jax_cpu"]["runtime_seed_spec_hash"] == contract["runtime_seed_spec_hash"]
+    )
+    assert (
+        lanes["cpu_scipy"]["objective_configuration_hash"]
+        == lanes["jax_cpu"]["objective_configuration_hash"]
+    )
     assert lanes["cpu_scipy"]["missing_objective_config_keys"] == []
     assert lanes["cpu_scipy"]["run_family_id"] == contract["run_family_id"]
     assert lanes["jax_cpu"]["run_family_id"] == contract["run_family_id"]
@@ -4133,9 +4268,9 @@ def test_single_stage_init_full_run_contract_records_reportable_lane_state(
     assert lanes["cpu_scipy"]["results_json"] == str(
         Path(cpu_case["run_dir"]) / "results.json"
     )
-    assert lanes["jax_cpu"]["progress_json"] == jax_case[
-        "outer_optimizer_progress_json"
-    ]
+    assert (
+        lanes["jax_cpu"]["progress_json"] == jax_case["outer_optimizer_progress_json"]
+    )
 
 
 def test_single_stage_init_full_run_contract_preserves_objective_mismatch(
@@ -4817,7 +4952,9 @@ def test_single_stage_outer_loop_probe_rejects_missing_step_or_wrong_method():
         expected_boozer_optimizer_method="bfgs-ondevice",
     )
 
-    assert any("required 10 accepted optimizer iterations" in failure for failure in failures)
+    assert any(
+        "required 10 accepted optimizer iterations" in failure for failure in failures
+    )
     assert any(
         "requested inner Boozer optimizer method" in failure for failure in failures
     )
@@ -4844,9 +4981,7 @@ def test_single_stage_outer_loop_probe_profile_only_allows_zero_iterations():
 
 
 def test_single_stage_outer_loop_probe_builds_phase1_note_from_scaled_phase1_diagnosis():
-    disable_reason = (
-        single_stage_init_parity_module._TARGET_LANE_COMPILE_DIAGNOSTICS_HOST_CALLBACK_REASON
-    )
+    disable_reason = single_stage_init_parity_module._TARGET_LANE_COMPILE_DIAGNOSTICS_HOST_CALLBACK_REASON
     note = single_stage_outer_loop_probe.build_phase1_diagnostic_note(
         {
             "iterations": 0,
@@ -5091,7 +5226,10 @@ def _assert_named_benchmark_env_bootstrap(
     )
     assert 'python -m pip install -e ".[JAX_GPU,dev]"' in workflow_text
     if verify_python:
-        assert 'conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" python -V' in workflow_text
+        assert (
+            'conda run --no-capture-output -n "$BENCHMARK_ENV_NAME" python -V'
+            in workflow_text
+        )
 
 
 def test_compute_derivative_l2_metrics_ignores_missing_dependency_keys():
@@ -5365,7 +5503,9 @@ def test_compute_direct_and_total_gradients_uses_live_boozer_g(monkeypatch):
 
 def test_grouped_adjoint_memory_probe_requires_complete_finite_metrics():
     failures = evaluate_grouped_adjoint_memory_probe(
-        _grouped_adjoint_memory_metrics(snapshots=_complete_grouped_adjoint_snapshots()),
+        _grouped_adjoint_memory_metrics(
+            snapshots=_complete_grouped_adjoint_snapshots()
+        ),
         budget=_grouped_adjoint_budget("cpu"),
     )
 
@@ -5401,7 +5541,9 @@ def test_grouped_adjoint_memory_probe_rejects_missing_timings_or_warm_recompile(
     )
 
     assert any("required timing fields" in failure for failure in failures)
-    assert any("steady-state grouped-VJP recompilation" in failure for failure in failures)
+    assert any(
+        "steady-state grouped-VJP recompilation" in failure for failure in failures
+    )
 
 
 def test_grouped_adjoint_memory_probe_rejects_unrepresentative_grouped_vjp():
@@ -5461,12 +5603,10 @@ def test_grouped_adjoint_baseline_comparison_enforces_ship_gate():
         snapshots=snapshots,
         grouped_vjp_timings=_grouped_vjp_timings_for_fraction(0.75, 3.0),
     )
-    passing_metrics["baseline_comparison"] = (
-        _build_grouped_adjoint_baseline_comparison(
-            current_metrics=passing_metrics,
-            baseline_payload=baseline_payload,
-            baseline_json="/tmp/baseline.json",
-        )
+    passing_metrics["baseline_comparison"] = _build_grouped_adjoint_baseline_comparison(
+        current_metrics=passing_metrics,
+        baseline_payload=baseline_payload,
+        baseline_json="/tmp/baseline.json",
     )
 
     assert passing_metrics["baseline_comparison"]["speedup_gate_passed"] is True
@@ -5485,12 +5625,10 @@ def test_grouped_adjoint_baseline_comparison_enforces_ship_gate():
         snapshots=snapshots,
         grouped_vjp_timings=_grouped_vjp_timings_for_fraction(0.9, 3.0),
     )
-    failing_metrics["baseline_comparison"] = (
-        _build_grouped_adjoint_baseline_comparison(
-            current_metrics=failing_metrics,
-            baseline_payload=baseline_payload,
-            baseline_json="/tmp/baseline.json",
-        )
+    failing_metrics["baseline_comparison"] = _build_grouped_adjoint_baseline_comparison(
+        current_metrics=failing_metrics,
+        baseline_payload=baseline_payload,
+        baseline_json="/tmp/baseline.json",
     )
 
     failures = evaluate_grouped_adjoint_memory_probe(
@@ -5540,7 +5678,9 @@ def test_grouped_adjoint_memory_payload_records_limited_memory_route():
     assert payload["timings"]["first_compile_time_s"] == pytest.approx(0.25)
     assert payload["baseline_comparison"] is None
     assert payload["cache_stability"]["warm_compile_event_count"] == 0
-    assert payload["memory"]["budget"]["max_peak_gpu_memory_mb"] == pytest.approx(12288.0)
+    assert payload["memory"]["budget"]["max_peak_gpu_memory_mb"] == pytest.approx(
+        12288.0
+    )
     assert payload["memory"]["device_memory_profile_path"] == "/tmp/grouped.prof"
 
 
@@ -5670,7 +5810,9 @@ def test_tier5_stage2_e2e_probe_args_thread_optimizer_backend():
     assert command[optimizer_backend_idx + 1] == "ondevice"
 
 
-def test_stage2_benchmark_scripts_default_to_repo_fixture_equilibria_dir(tmp_path, monkeypatch):
+def test_stage2_benchmark_scripts_default_to_repo_fixture_equilibria_dir(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr(
         sys,
         "argv",
@@ -5681,7 +5823,9 @@ def test_stage2_benchmark_scripts_default_to_repo_fixture_equilibria_dir(tmp_pat
         ],
     )
     stage2_value_gradient_args = stage2_value_gradient_parity_module.parse_args()
-    assert stage2_value_gradient_args.plasma_surf_filename == DEFAULT_PLASMA_SURF_FILENAME
+    assert (
+        stage2_value_gradient_args.plasma_surf_filename == DEFAULT_PLASMA_SURF_FILENAME
+    )
     assert stage2_value_gradient_args.equilibria_dir == str(DEFAULT_EQUILIBRIA_DIR)
 
     monkeypatch.setattr(
@@ -5838,17 +5982,13 @@ def test_weekly_tier5_manifest_targets_ondevice_benchmark_mode():
     assert manifest["runtime_contract"]["strict_backend"] is True
     assert manifest["runtime_contract"]["transfer_guard"] == "log"
     assert manifest["performance_budget"]["profile"] == "stable_hardware_weekly"
-    assert (
-        manifest["performance_budget"]["tier2_stage2_e2e"]["min_outer_speedup_vs_cpu"]
-        == pytest.approx(1.25)
-    )
-    assert (
-        manifest["performance_budget"]["tier2_stage2_e2e"]["max_compile_overhead_s"]
-        == pytest.approx(60.0)
-    )
-    assert (
-        manifest["memory_budget"]["max_peak_gpu_memory_mb"] == pytest.approx(12288.0)
-    )
+    assert manifest["performance_budget"]["tier2_stage2_e2e"][
+        "min_outer_speedup_vs_cpu"
+    ] == pytest.approx(1.25)
+    assert manifest["performance_budget"]["tier2_stage2_e2e"][
+        "max_compile_overhead_s"
+    ] == pytest.approx(60.0)
+    assert manifest["memory_budget"]["max_peak_gpu_memory_mb"] == pytest.approx(12288.0)
 
 
 def test_weekly_tier5_manifest_includes_grouped_adjoint_memory_probe_command():
@@ -5886,7 +6026,10 @@ def test_weekly_tier5_workflow_sets_cache_and_ondevice_contract():
     assert "continue-on-error: true" in workflow_text
     assert "benchmarks/grouped_adjoint_memory_probe.py" in workflow_text
     assert "--record-jax-compile-diagnostics" in workflow_text
-    assert "--device-memory-profile-out benchmark_artifacts/grouped_adjoint_memory_profile.prof" in workflow_text
+    assert (
+        "--device-memory-profile-out benchmark_artifacts/grouped_adjoint_memory_profile.prof"
+        in workflow_text
+    )
     assert "if-no-files-found: ignore" in workflow_text
     assert "Fail on benchmark gate regressions" in workflow_text
 
@@ -5898,7 +6041,7 @@ def test_gpu_parity_workflow_enforces_strict_transfer_guard_contract():
     assert "SIMSOPT_BACKEND_MODE: jax_gpu_parity" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
-    assert 'XLA_FLAGS: --xla_gpu_deterministic_ops=true' in workflow_text
+    assert "XLA_FLAGS: --xla_gpu_deterministic_ops=true" in workflow_text
     assert "setuptools_scm" not in workflow_text
     assert "benchmarks/stage2_value_gradient_parity.py" in workflow_text
     assert "--fixture real" in workflow_text
@@ -5906,7 +6049,10 @@ def test_gpu_parity_workflow_enforces_strict_transfer_guard_contract():
     assert "--optimizer-backend ondevice" in workflow_text
     assert "tests/geo/test_boozer_residual_jax.py \\" in workflow_text
     assert "-k gpu_parity" in workflow_text
-    assert "benchmark_artifacts/stage2_value_gradient_parity_real_cuda.json" in workflow_text
+    assert (
+        "benchmark_artifacts/stage2_value_gradient_parity_real_cuda.json"
+        in workflow_text
+    )
     assert "benchmark_artifacts/single_stage_outer_loop_cuda.json" in workflow_text
 
 
@@ -5919,7 +6065,7 @@ def test_gpu_parity_workflow_adds_full_suite_disallow_lane():
     assert "runs-on: [self-hosted, gpu]" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
-    assert 'XLA_FLAGS: --xla_gpu_deterministic_ops=true' in workflow_text
+    assert "XLA_FLAGS: --xla_gpu_deterministic_ops=true" in workflow_text
     assert 'JAX_ENABLE_X64: "1"' in workflow_text
     assert 'PYTHONUNBUFFERED: "1"' in workflow_text
     assert 'XLA_PYTHON_CLIENT_PREALLOCATE: "false"' in workflow_text
@@ -5950,7 +6096,7 @@ def test_smoke_workflow_adds_cuda_e2e_target_lane_gate():
     assert "runs-on: [self-hosted, gpu]" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
-    assert 'XLA_FLAGS: --xla_gpu_deterministic_ops=true' in workflow_text
+    assert "XLA_FLAGS: --xla_gpu_deterministic_ops=true" in workflow_text
     assert 'JAX_ENABLE_X64: "1"' in workflow_text
     gpu_e2e = _workflow_job_section(
         workflow_text,
@@ -5972,11 +6118,13 @@ def test_smoke_workflow_adds_cuda_strict_transfer_guard_pytest_lane():
     assert "tests/integration/test_single_stage_jax_cpu_reference.py" in workflow_text
     assert "tests/integration/test_single_stage_physics_parity.py" in workflow_text
     assert "jax-gpu-strict-purity:" in workflow_text
-    assert "name: JAX GPU strict purity (CUDA, transfer_guard=disallow)" in workflow_text
+    assert (
+        "name: JAX GPU strict purity (CUDA, transfer_guard=disallow)" in workflow_text
+    )
     assert "runs-on: [self-hosted, gpu]" in workflow_text
     assert 'SIMSOPT_BACKEND_STRICT: "1"' in workflow_text
     assert "SIMSOPT_JAX_TRANSFER_GUARD: disallow" in workflow_text
-    assert 'XLA_FLAGS: --xla_gpu_deterministic_ops=true' in workflow_text
+    assert "XLA_FLAGS: --xla_gpu_deterministic_ops=true" in workflow_text
     assert 'JAX_ENABLE_X64: "1"' in workflow_text
     strict_purity = _workflow_job_section(workflow_text, "jax-gpu-strict-purity")
     assert 'XLA_PYTHON_CLIENT_PREALLOCATE: "false"' in strict_purity
@@ -6006,14 +6154,15 @@ def test_smoke_workflow_runs_accessibility_with_simsoptpp_lane():
     assert "src/simsopt/geo/accessibility.py" in workflow_text
     assert "tests/geo/test_accessibility.py" in workflow_text
     assert "Run accessibility FD/Hessian tests" in private_optimizer
-    assert "python -m pytest tests/geo/test_accessibility.py -v --tb=short" in private_optimizer
+    assert (
+        "python -m pytest tests/geo/test_accessibility.py -v --tb=short"
+        in private_optimizer
+    )
     assert "tests/geo/test_accessibility.py \\" not in public_unit
 
 
 def test_h200_production_proof_workflow_launches_real_h200_hf_job():
-    workflow_text = _h200_production_proof_workflow_path().read_text(
-        encoding="utf-8"
-    )
+    workflow_text = _h200_production_proof_workflow_path().read_text(encoding="utf-8")
 
     assert "workflow_dispatch:" in workflow_text
     assert "image:" in workflow_text
@@ -6025,9 +6174,11 @@ def test_h200_production_proof_workflow_launches_real_h200_hf_job():
     assert "--hardware h200" in workflow_text
     assert "--platform cuda" in workflow_text
     assert "--no-detach" in workflow_text
-    assert "--repo-url \"https://github.com/${{ github.repository }}.git\"" in workflow_text
-    assert "--repo-ref \"${{ github.ref_name }}\"" in workflow_text
-    assert "--repo-sha \"${{ github.sha }}\"" in workflow_text
+    assert (
+        '--repo-url "https://github.com/${{ github.repository }}.git"' in workflow_text
+    )
+    assert '--repo-ref "${{ github.ref_name }}"' in workflow_text
+    assert '--repo-sha "${{ github.sha }}"' in workflow_text
     assert "--single-stage-warm-start-run-dir" in workflow_text
     assert "--single-stage-jax-runtime-seed-spec" in workflow_text
     assert "Set exactly one single-stage seed input." in workflow_text
@@ -6038,14 +6189,10 @@ def test_smoke_workflow_pins_jax_ci_contract_ratchet_gate():
 
     assert "Run CI contract helper tests" in workflow_text
     assert "tests/test_benchmark_helpers.py \\" in workflow_text
-    assert (
-        'jax_ci_contract_ratchet_rel_tol_tightens_without_loosening'
-        in workflow_text
-    )
+    assert "jax_ci_contract_ratchet_rel_tol_tightens_without_loosening" in workflow_text
     assert "jax_ci_contract_reduction_order_probe_tracks_ulp_distance" in workflow_text
     assert (
-        "jax_ci_contract_same_device_probe_requires_bitwise_identity"
-        in workflow_text
+        "jax_ci_contract_same_device_probe_requires_bitwise_identity" in workflow_text
     )
     assert "jax_ci_contract_payload_tracks_ratchet_and_pass_state" in workflow_text
 
@@ -6066,7 +6213,9 @@ def test_legacy_gpu_benchmark_wrapper_applies_grouped_probe_env_override(
     monkeypatch, tmp_path
 ):
     artifacts_dir = tmp_path / "artifacts"
-    dense_audit_cache_dir = tmp_path / "jax-compilation-cache" / "jax_gpu_fast-dense-audit"
+    dense_audit_cache_dir = (
+        tmp_path / "jax-compilation-cache" / "jax_gpu_fast-dense-audit"
+    )
     manifest_path = tmp_path / "stable_hardware_weekly_tier5.json"
     manifest_path.write_text(
         json.dumps(
@@ -7089,7 +7238,9 @@ def test_summarize_stage2_e2e_performance_probe_separates_cold_outer_and_warm():
     assert summary["headline_metric"] == "outer_speedup_vs_cpu"
     assert summary["headline_speedup_vs_cpu"] == pytest.approx(0.8)
     assert summary["supports_performance_headline"] is True
-    assert summary["timing_semantics"] == "separate_cold_end_to_end_and_warm_steady_state"
+    assert (
+        summary["timing_semantics"] == "separate_cold_end_to_end_and_warm_steady_state"
+    )
 
 
 def test_summarize_stage2_e2e_performance_probe_falls_back_to_cold_without_warm_timing():
@@ -7282,9 +7433,7 @@ def test_tier5_provenance_extra_uses_real_single_stage_fixture():
     )
 
     assert provenance_extra["fixture"] == "real-single-stage-init"
-    assert provenance_extra["lane"] == resolve_probe_lane(
-        optimizer_backend="ondevice"
-    )
+    assert provenance_extra["lane"] == resolve_probe_lane(optimizer_backend="ondevice")
     assert provenance_extra["phase"] == "gpu"
 
 
@@ -7347,7 +7496,9 @@ def test_build_tier5_performance_contract_routes_parity_and_headline_sources():
     assert contract["headline_performance_source"]["metric_path"] == (
         "summary_by_name.tier2_stage2_e2e.outer_speedup_vs_cpu"
     )
-    assert contract["headline_performance_source"]["speedup_vs_cpu"] == pytest.approx(0.8)
+    assert contract["headline_performance_source"]["speedup_vs_cpu"] == pytest.approx(
+        0.8
+    )
     assert contract["sharding_source"]["active_path"] == (
         "rungs.tier2_stage2_e2e.provenance.sharding_active"
     )
@@ -7484,21 +7635,24 @@ def test_build_aggregate_payload_merges_gpu_and_cpu_phase_artifacts():
     assert payload["aggregate"]["pending_rungs"] == []
     assert payload["aggregate"]["phase_passed"] is True
     assert payload["aggregate"]["passed"] is True
-    assert payload["summary_by_name"]["tier4_adjoint_fd"]["cpu_elapsed_s"] == pytest.approx(
-        13.0
-    )
-    assert payload["summary_by_name"]["tier4_adjoint_fd"]["lane_elapsed_s"] == pytest.approx(
-        11.0
-    )
-    assert payload["summary_by_name"]["tier4_adjoint_fd"]["outer_elapsed_s"] == pytest.approx(
-        24.0
-    )
+    assert payload["summary_by_name"]["tier4_adjoint_fd"][
+        "cpu_elapsed_s"
+    ] == pytest.approx(13.0)
+    assert payload["summary_by_name"]["tier4_adjoint_fd"][
+        "lane_elapsed_s"
+    ] == pytest.approx(11.0)
+    assert payload["summary_by_name"]["tier4_adjoint_fd"][
+        "outer_elapsed_s"
+    ] == pytest.approx(24.0)
     assert payload["summary_by_name"][TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG][
         "speedup_vs_cpu"
     ] == pytest.approx(2.0)
-    assert payload["aggregate"]["performance_contract"]["headline_performance_source"][
-        "metric_path"
-    ] == "summary_by_name.tier2_stage2_e2e.outer_speedup_vs_cpu"
+    assert (
+        payload["aggregate"]["performance_contract"]["headline_performance_source"][
+            "metric_path"
+        ]
+        == "summary_by_name.tier2_stage2_e2e.outer_speedup_vs_cpu"
+    )
     assert payload["phase_inputs"]["gpu"]["phase"] == "gpu"
     assert payload["phase_inputs"]["cpu"]["phase"] == "cpu"
 
@@ -7517,7 +7671,10 @@ def test_build_aggregate_payload_ignores_failed_informational_outer_loop_rung():
         cpu_payload=_tier5_cpu_phase_payload(),
     )
 
-    assert payload["summary_by_name"][TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG]["passed"] is False
+    assert (
+        payload["summary_by_name"][TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG]["passed"]
+        is False
+    )
     assert payload["aggregate"]["phase_passed"] is True
     assert payload["aggregate"]["passed"] is True
 
@@ -7600,7 +7757,9 @@ def test_tier5_aggregate_main_skips_runtime_initialization(monkeypatch, tmp_path
     monkeypatch.setattr(
         tier5_performance_characterization,
         "load_json",
-        lambda path: {"phase": "gpu"} if str(path).endswith("gpu.json") else {"phase": "cpu"},
+        lambda path: (
+            {"phase": "gpu"} if str(path).endswith("gpu.json") else {"phase": "cpu"}
+        ),
     )
     monkeypatch.setattr(
         tier5_performance_characterization,

@@ -128,9 +128,7 @@ _SAME_CANDIDATE_X_ATOL = 1e-8
 _OPTIMIZER_PATH_CANDIDATE_SPLIT_ATOL = 1e-12
 _SAME_CANDIDATE_SCALAR_RTOL = 1e-10
 _SAME_CANDIDATE_SCALAR_ATOL = 1e-12
-_SAME_CANDIDATE_GRADIENT_TOLERANCES = parity_ladder_tolerances(
-    "ls-wrapper-gradient"
-)
+_SAME_CANDIDATE_GRADIENT_TOLERANCES = parity_ladder_tolerances("ls-wrapper-gradient")
 _SAME_CANDIDATE_GRADIENT_RTOL = _SAME_CANDIDATE_GRADIENT_TOLERANCES["rtol"]
 _SAME_CANDIDATE_GRADIENT_ATOL = _SAME_CANDIDATE_GRADIENT_TOLERANCES["atol"]
 _IOTA_DECOMPOSITION_DIAGNOSTIC_ATOL = 1e-13
@@ -172,9 +170,7 @@ _SAME_CANDIDATE_BOOZER_METADATA_EXACT_KEYS = (
     "dense_refinement_ran",
     "final_step_dense_refinement_ran",
 )
-_SAME_CANDIDATE_BOOZER_METADATA_SHAPE_KEYS = (
-    "dense_hessian_shape",
-)
+_SAME_CANDIDATE_BOOZER_METADATA_SHAPE_KEYS = ("dense_hessian_shape",)
 _SAME_CANDIDATE_BOOZER_METADATA_NUMERIC_KEYS = (
     "newton_tol",
     "newton_maxiter",
@@ -716,10 +712,7 @@ def resolve_target_lane_compile_diagnostics(
     """Resolve whether compile/cache diagnostics can run on this target-lane mode."""
     if not enable_compile_diagnostics:
         return False, None
-    if (
-        diagnose_target_lane_scaled_phase1
-        or record_target_lane_invalid_state_events
-    ):
+    if diagnose_target_lane_scaled_phase1 or record_target_lane_invalid_state_events:
         return False, _TARGET_LANE_COMPILE_DIAGNOSTICS_HOST_CALLBACK_REASON
     return True, None
 
@@ -959,7 +952,9 @@ def _should_compare_surface_geometry(
     return bool(not benchmark_mode and int(args.maxiter) <= 0)
 
 
-def _needs_shared_init_seed(args: argparse.Namespace, *, reference_backend: str) -> bool:
+def _needs_shared_init_seed(
+    args: argparse.Namespace, *, reference_backend: str
+) -> bool:
     return bool(reference_backend == "cpu" and int(args.maxiter) > 0)
 
 
@@ -1049,9 +1044,10 @@ def _run_single_stage_case_pair(
                 case_root / "single_stage_jax_runtime_seed_spec.json",
                 args,
             )
-    if bool(getattr(args, "record_objective_evaluation_trace", False)) and int(
-        args.maxiter
-    ) > 0:
+    if (
+        bool(getattr(args, "record_objective_evaluation_trace", False))
+        and int(args.maxiter) > 0
+    ):
         same_candidate_replay_case = _run_single_stage_case(
             target_args,
             "jax",
@@ -1126,7 +1122,9 @@ def _load_optimizer_state_trace_from_case(case: dict[str, Any]) -> list[dict[str
     return []
 
 
-def _load_objective_evaluation_events_from_case(case: dict[str, Any]) -> list[dict[str, Any]]:
+def _load_objective_evaluation_events_from_case(
+    case: dict[str, Any],
+) -> list[dict[str, Any]]:
     progress_path = Path(case["outer_optimizer_progress_json"])
     if not progress_path.exists():
         return []
@@ -1588,7 +1586,9 @@ def _compare_same_candidate_scipy_callback_trace(
         gradient_reference = (
             None
             if cpu_gradient is None
-            else (0.0 if cpu_gradient.size == 0 else float(np.max(np.abs(cpu_gradient))))
+            else (
+                0.0 if cpu_gradient.size == 0 else float(np.max(np.abs(cpu_gradient)))
+            )
         )
         if (
             first_split is None
@@ -1671,7 +1671,9 @@ def _compare_same_candidate_objective_components(
         "max_slice_gradient_abs_diff": max_gradient,
         "max_slice_objective_owner": objective_owner,
         "max_slice_gradient_owner": gradient_owner,
-        "max_slice_pair_index": pair_index if objective_owner or gradient_owner else None,
+        "max_slice_pair_index": pair_index
+        if objective_owner or gradient_owner
+        else None,
         "max_slice_line_search_evaluation": line_search_evaluation
         if objective_owner or gradient_owner
         else None,
@@ -1705,7 +1707,9 @@ def _diagnostic_vector_abs_diff(
     return _path_vector_abs_diff(cpu_summary, jax_summary)
 
 
-def _iota_decomposition_layer_diverged(layer_diff: float, layer_reference: float) -> bool:
+def _iota_decomposition_layer_diverged(
+    layer_diff: float, layer_reference: float
+) -> bool:
     return bool(
         layer_diff
         > (
@@ -1902,10 +1906,117 @@ def _finalize_parity_bug_census(
     }
 
 
+def _empirical_severity_context(
+    layer_full_name: str,
+    max_abs: float,
+    severity_context: dict[str, Any] | None,
+) -> str:
+    """Return a parenthesized severity tag for inclusion in failure messages.
+
+    Computes the drift / threshold ratio against an empirical baseline and
+    classifies the result per
+    `docs/parity_dual_mode_contract_2026-05-08.md` §11.5:
+
+    - ``drift / threshold <= 1.0``: ``marginal``
+    - ``1.0 < drift / threshold <= 10.0``: ``moderate``
+    - ``drift / threshold > 10.0``: ``severe``
+
+    The baseline is read from
+    ``severity_context["per_layer"][layer_full_name]``. Required fields are
+    ``baseline_max`` (float) and ``safety_factor`` (float, default ``5.0``).
+    The reporting threshold is ``safety_factor * baseline_max``.
+
+    Optional fields enrich the message when present:
+
+    - ``corpus_p95`` — corpus p95 of ``max_abs_diff``
+    - ``sample_size`` — number of corpus artifacts contributing
+    - ``source_artifacts`` — list/iterable of corpus artifacts
+
+    Returns an empty string when ``severity_context`` is ``None``, when its
+    ``per_layer`` mapping is missing/empty (the ``INSUFFICIENT_SAMPLES``
+    state pre-corpus), when the requested layer is absent from
+    ``per_layer``, or when ``baseline_max``/``safety_factor`` are missing
+    or zero. Callers therefore never need a guard around this helper.
+    """
+    if severity_context is None:
+        return ""
+    per_layer = severity_context.get("per_layer")
+    if not isinstance(per_layer, dict) or not per_layer:
+        return ""
+    layer_entry = per_layer.get(layer_full_name)
+    if not isinstance(layer_entry, dict):
+        return ""
+    baseline_raw = layer_entry.get("baseline_max")
+    safety_raw = layer_entry.get("safety_factor", 5.0)
+    if baseline_raw is None or safety_raw is None:
+        return ""
+    try:
+        baseline_max = float(baseline_raw)
+        safety_factor = float(safety_raw)
+    except (TypeError, ValueError):
+        return ""
+    if baseline_max == 0.0 or safety_factor == 0.0:
+        return ""
+    threshold = safety_factor * baseline_max
+    if threshold == 0.0:
+        return ""
+    ratio = float(max_abs) / threshold
+    if ratio > 10.0:
+        severity = "SEVERE"
+    elif ratio > 1.0:
+        severity = "moderate"
+    else:
+        severity = "marginal"
+    parenthetical_bits: list[str] = []
+    parenthetical_bits.append(f"{safety_factor:g}× safety factor")
+    corpus_p95 = layer_entry.get("corpus_p95")
+    if corpus_p95 is not None:
+        try:
+            corpus_p95_value = float(corpus_p95)
+        except (TypeError, ValueError):
+            corpus_p95_value = None
+        if corpus_p95_value is not None:
+            parenthetical_bits.append(f"corpus p95={corpus_p95_value:.2e}")
+    sample_size = layer_entry.get("sample_size")
+    if sample_size is None:
+        sample_size = layer_entry.get("source_artifacts")
+        if sample_size is not None:
+            try:
+                sample_size = len(sample_size)
+            except TypeError:
+                sample_size = None
+    if isinstance(sample_size, bool):
+        sample_size = None
+    if isinstance(sample_size, int) and sample_size > 0:
+        artifact_word = "artifact" if sample_size == 1 else "artifacts"
+        parenthetical_bits.append(f"across {sample_size} passing {artifact_word}")
+    parenthetical = ", ".join(parenthetical_bits)
+    return (
+        f" [{severity}: drift is {ratio:g}× empirical baseline of "
+        f"{baseline_max:.2e} ({parenthetical})]"
+    )
+
+
 def _pre_newton_census_gate_failures(
     parity_bug_census: dict[str, Any] | None,
+    *,
+    severity_context: dict[str, Any] | None = None,
 ) -> list[str]:
-    """Return hard-gate failures for Boozer pre-Newton diagnostic divergence."""
+    """Hard-gate: any boozer_solve.pre_newton_* divergent layer fails.
+
+    When ``severity_context`` is provided (typically the
+    ``PARITY_LADDER_REPORTING_CONTEXT["pre_newton_state_empirical"]`` dict
+    or a compatible structure), failure messages are augmented with
+    empirical-baseline drift context (e.g. ``"drift is 100× empirical
+    baseline of 4.5e-11"``). The augmented context is REPORTING ONLY —
+    the gate's pass/fail decision is unchanged from the prior strict-only
+    behavior. When ``severity_context`` is ``None`` or its ``per_layer``
+    dict is empty / missing (the ``INSUFFICIENT_SAMPLES`` state pre-corpus),
+    behavior is identical to the prior strict-only gate.
+
+    See ``docs/parity_dual_mode_contract_2026-05-08.md`` §2.4 and §11.5
+    for the contract this helper implements.
+    """
     if not parity_bug_census:
         return []
     failures = []
@@ -1914,11 +2025,22 @@ def _pre_newton_census_gate_failures(
         layer = str(entry.get("layer", ""))
         if family != "boozer_solve" or not layer.startswith("pre_newton"):
             continue
+        max_abs_raw = entry.get("max_abs_diff")
+        try:
+            max_abs_value = float(max_abs_raw) if max_abs_raw is not None else 0.0
+        except (TypeError, ValueError):
+            max_abs_value = 0.0
+        severity_tag = _empirical_severity_context(
+            f"{family}.{layer}",
+            max_abs_value,
+            severity_context,
+        )
         failures.append(
             "Parity bug census reported divergent "
-            f"{family}.{layer}: max_abs_diff={entry.get('max_abs_diff')} "
+            f"{family}.{layer}: max_abs_diff={max_abs_raw} "
             f"at pair {entry.get('pair_index')} "
-            f"(line-search eval {entry.get('line_search_evaluation')})."
+            f"(line-search eval {entry.get('line_search_evaluation')})"
+            f"{severity_tag}."
         )
     return failures
 
@@ -2067,8 +2189,7 @@ def compare_same_candidate_objective_replay(
             event_failures.extend(solver_contract_failures)
         else:
             solver_contract_diagnostics.extend(
-                f"pair {pair_index}: {failure}"
-                for failure in solver_contract_failures
+                f"pair {pair_index}: {failure}" for failure in solver_contract_failures
             )
         max_boozer_metadata_abs_diff = max(
             max_boozer_metadata_abs_diff,
@@ -2086,9 +2207,7 @@ def compare_same_candidate_objective_replay(
                 "pair_index": pair_index,
                 "cpu_event_index": cpu_event.get("event_index"),
                 "jax_event_index": jax_event.get("event_index"),
-                "accepted_iteration_target": cpu_event.get(
-                    "accepted_iteration_target"
-                ),
+                "accepted_iteration_target": cpu_event.get("accepted_iteration_target"),
                 "line_search_evaluation": cpu_event.get("line_search_evaluation"),
                 **boozer_metadata_summary["first_scipy_callback_split"],
             }
@@ -2126,9 +2245,9 @@ def compare_same_candidate_objective_replay(
             max_boozer_solve_decomposition_abs_diff = (
                 boozer_solve_decomposition_summary["max_abs_diff"]
             )
-            max_boozer_solve_decomposition_layer = (
-                boozer_solve_decomposition_summary["max_layer"]
-            )
+            max_boozer_solve_decomposition_layer = boozer_solve_decomposition_summary[
+                "max_layer"
+            ]
             max_boozer_solve_decomposition_pair_index = (
                 boozer_solve_decomposition_summary["pair_index"]
             )
@@ -2188,22 +2307,15 @@ def compare_same_candidate_objective_replay(
             pair_index=pair_index,
             line_search_evaluation=cpu_event.get("line_search_evaluation"),
         )
-        if (
-            slice_summary["max_slice_objective_abs_diff"]
-            > max_slice_objective_abs_diff
-        ):
-            max_slice_objective_abs_diff = slice_summary[
-                "max_slice_objective_abs_diff"
-            ]
+        if slice_summary["max_slice_objective_abs_diff"] > max_slice_objective_abs_diff:
+            max_slice_objective_abs_diff = slice_summary["max_slice_objective_abs_diff"]
             max_slice_objective_owner = slice_summary["max_slice_objective_owner"]
             max_slice_pair_index = slice_summary["max_slice_pair_index"]
             max_slice_line_search_evaluation = slice_summary[
                 "max_slice_line_search_evaluation"
             ]
         if slice_summary["max_slice_gradient_abs_diff"] > max_slice_gradient_abs_diff:
-            max_slice_gradient_abs_diff = slice_summary[
-                "max_slice_gradient_abs_diff"
-            ]
+            max_slice_gradient_abs_diff = slice_summary["max_slice_gradient_abs_diff"]
             max_slice_gradient_owner = slice_summary["max_slice_gradient_owner"]
             max_slice_pair_index = slice_summary["max_slice_pair_index"]
             max_slice_line_search_evaluation = slice_summary[
@@ -2221,20 +2333,13 @@ def compare_same_candidate_objective_replay(
             family="iota_penalty",
             summary=iota_decomposition_summary,
         )
-        if (
-            iota_decomposition_summary["max_abs_diff"]
-            > max_iota_decomposition_abs_diff
-        ):
-            max_iota_decomposition_abs_diff = iota_decomposition_summary[
-                "max_abs_diff"
-            ]
+        if iota_decomposition_summary["max_abs_diff"] > max_iota_decomposition_abs_diff:
+            max_iota_decomposition_abs_diff = iota_decomposition_summary["max_abs_diff"]
             max_iota_decomposition_layer = iota_decomposition_summary["max_layer"]
-            max_iota_decomposition_pair_index = iota_decomposition_summary[
-                "pair_index"
+            max_iota_decomposition_pair_index = iota_decomposition_summary["pair_index"]
+            max_iota_decomposition_line_search_evaluation = iota_decomposition_summary[
+                "line_search_evaluation"
             ]
-            max_iota_decomposition_line_search_evaluation = (
-                iota_decomposition_summary["line_search_evaluation"]
-            )
             max_iota_decomposition_layer_diffs = dict(
                 iota_decomposition_summary["layer_diffs"]
             )
@@ -2326,7 +2431,9 @@ def compare_same_candidate_objective_replay(
                 f"pair {pair_index}: {failure}" for failure in event_failures
             )
     if same_candidate_event_count == 0:
-        failures.append("No paired objective-evaluation events shared the same candidate.")
+        failures.append(
+            "No paired objective-evaluation events shared the same candidate."
+        )
     return {
         "status": "pass" if not failures else "fail",
         "cpu_event_count": len(cpu_events),
@@ -2750,13 +2857,13 @@ def main() -> None:
         case_artifacts_dir.mkdir(parents=True, exist_ok=True)
         (
             cpu_case,
-                jax_case,
-                jax_seed_spec,
-                seed_case,
-                same_candidate_replay_case,
-            ) = _run_single_stage_case_pair(
-                args,
-                benchmark_mode=benchmark_mode,
+            jax_case,
+            jax_seed_spec,
+            seed_case,
+            same_candidate_replay_case,
+        ) = _run_single_stage_case_pair(
+            args,
+            benchmark_mode=benchmark_mode,
             reference_backend=reference_backend,
             reference_benchmark_mode=reference_benchmark_mode,
             case_root=case_artifacts_dir,

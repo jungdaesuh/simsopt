@@ -151,6 +151,27 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# Reporting-only context (NOT a tolerance lane; does NOT gate)
+#
+# This dict augments gate FAILURE MESSAGES with empirical-baseline severity
+# context. The gate's pass/fail decision is unchanged. Per-layer thresholds
+# are populated by Slice DM-B once Phase 4 produces the first passing
+# strict-gate artifact (corpus is empty as of 2026-05-08).
+#
+# See docs/parity_dual_mode_contract_2026-05-08.md §2.3 for the design
+# rationale and §11 for the threshold-derivation methodology DM-B uses to
+# fill in `per_layer`.
+PARITY_LADDER_REPORTING_CONTEXT: dict[str, dict[str, object]] = {
+    "pre_newton_state_empirical": {
+        "threshold_kind": "empirical_per_layer",
+        "purpose": "report_severity",  # NOT "gate"
+        "source_artifacts": [],  # populated by DM-B from passing artifacts
+        "per_layer": {},  # empty skeleton; DM-B populates from corpus
+        "requires_byte_identity": False,
+    },
+}
+
 CI_REPRODUCIBILITY_CONTRACT = {
     "gpu_reduction_order_max_ulp": 10,
     "gpu_reduction_order_rel_tol": 1e-12,
@@ -389,9 +410,8 @@ def evaluate_tier5_performance_budget(
         max_compile_overhead = rung_budget.get("max_compile_overhead_s")
         compile_overhead = rung_summary.get("lane_compile_overhead_s")
         if max_compile_overhead is not None:
-            if (
-                compile_overhead is None
-                or float(compile_overhead) > float(max_compile_overhead)
+            if compile_overhead is None or float(compile_overhead) > float(
+                max_compile_overhead
             ):
                 failures.append(
                     f"{rung_name} compile overhead "
@@ -523,9 +543,7 @@ def build_stage2_hf_plan(
     if explicit_geometry_repro:
         stage2_rungs.append(_GEOMETRY_REPRO_STAGE2_RUNG_NAME)
     effective_geometry_rel_tol = (
-        float(geometry_rel_tol)
-        if explicit_geometry_repro
-        else default_geometry_rel_tol
+        float(geometry_rel_tol) if explicit_geometry_repro else default_geometry_rel_tol
     )
     if explicit_geometry_repro:
         geometry_policy = "explicit-repro-gate"
