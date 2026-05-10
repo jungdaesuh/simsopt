@@ -181,7 +181,7 @@ to* `linear_solve_factors`; it does not remove or relabel it.
 | `ls_hessian_action_max_rel`     | max over deterministic probe set of `‖H_jax v − H_cpp v‖ / ‖H_cpp v‖` | parity arbiter, see §4                              |
 | `ls_newton_linear_residual_rel` | `‖H·dx − g‖ / ‖g‖`                                                  | computed at the Newton step site post-solve         |
 | `ls_newton_step_abs_diff_rel`   | `‖dx_jax − dx_ref‖ / max(‖dx_ref‖, ε)` against seeded reference dx  | parity arbiter, see §4                              |
-| `ls_factorization_backend`      | string ∈ {`lapack-dgesv`, `cusolver-getrf-ffi`, `dense-plu-shared`}  | result-dict assignment in `boozersurface_jax.py`     |
+| `ls_factorization_backend`      | string ∈ {`lapack-dgetrf`, `cusolver-getrf-ffi`, `dense-plu-shared`} (LU factorization routines: `scipy.linalg.lu` / `jax.scipy.linalg.lu` lower to LAPACK `dgetrf` on CPU and cuSOLVER `cusolverDnDgetrf` on CUDA) | result-dict assignment in `boozersurface_jax.py` |
 | `ls_condition_estimate`         | Hager–Higham 1-norm condition number of H (operator matvecs)         | new helper near `optimizer_jax.py:1899`              |
 
 ### 3.2 Exact solve-quality fields (gates E3–E5, E7)
@@ -192,7 +192,7 @@ to* `linear_solve_factors`; it does not remove or relabel it.
 | `exact_newton_linear_residual_rel`   | `‖J·dx − b‖ / ‖b‖` where `b` is the augmented residual vector and Newton step is `x ← x − dx` (matches CPU sign convention at `boozersurface.py:1645,1668-1670`) | computed at the Newton step site post-solve |
 | `exact_refinement_correction_rel`    | `‖dx_after_IR − dx_before_IR‖ / max(‖dx_before_IR‖, ε)` (per-iter)  | optimizer_jax.py around `:2497-2515, 2587-2623`      |
 | `exact_adjoint_solve_residual_rel`   | `‖J^T λ − u‖ / ‖u‖` measured at adjoint solve completion            | `surfaceobjectives_jax.py` adjoint exit             |
-| `exact_factorization_backend`        | string ∈ {`lapack-dgesv`, `cusolver-getrf-ffi`, `operator-gmres`}   | result-dict assignment                              |
+| `exact_factorization_backend`        | string ∈ {`lapack-dgetrf`, `cusolver-getrf-ffi`, `operator-gmres`} (operator GMRES is the runtime path; the LAPACK / cuSOLVER aliases are reserved for the Phase 3 `cpp_compatible_probe` harness reference solver) | result-dict assignment |
 | `exact_condition_estimate`           | Hager–Higham 1-norm condition number of J (operator matvecs)        | new helper near `optimizer_jax.py:1899`              |
 
 The Hager–Higham implementation must be JAX-native (see §6); a

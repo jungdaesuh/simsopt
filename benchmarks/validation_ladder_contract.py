@@ -149,6 +149,33 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         "requires_cpu_gpu_devices": True,
         "uses_cancellation_stress": True,
     },
+    # Scientific-equivalence ladder lanes per
+    # docs/parity_scientific_equivalence_contract_2026-05-09.md §2 + §9.
+    # These lanes are reporting-only at Phase 0/1: the parity arbiter does
+    # not yet enforce these thresholds, and the existing
+    # ``linear_solve_factors`` byte-parity probe and the pre-Newton hard
+    # gate ``_pre_newton_census_gate_failures`` in
+    # ``benchmarks/single_stage_init_parity.py`` remain authoritative.
+    # ``*_condition_estimate_present`` is False until the JAX-native
+    # Hager–Higham helper lands in Phase 5.3 — the matching
+    # ``*_condition_estimate`` result-dict field emits ``None`` until then.
+    "ls_solve_quality": {
+        "ls_hessian_symmetry_rel_tol": 1e-10,
+        "ls_hessian_action_max_rel_tol": 1e-8,
+        "ls_newton_linear_residual_rel_tol": 1e-8,
+        "ls_newton_step_abs_diff_rel_tol": 1e-8,
+        "ls_condition_estimate_present": False,
+        "requires_same_state": True,
+        "reporting_only": True,
+    },
+    "exact_solve_quality": {
+        "exact_jacobian_action_max_rel_tol": 1e-8,
+        "exact_newton_linear_residual_rel_tol": 1e-8,
+        "exact_adjoint_solve_residual_rel_tol": 1e-8,
+        "exact_condition_estimate_present": False,
+        "requires_same_state": True,
+        "reporting_only": True,
+    },
 }
 
 # ---------------------------------------------------------------------------

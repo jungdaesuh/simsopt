@@ -3093,6 +3093,8 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
         "gpu_runtime",
         "reduction_cpu_gpu",
         "reporting_contract",
+        "ls_solve_quality",
+        "exact_solve_quality",
     }
     assert set(PARITY_LADDER_TOLERANCES) == expected_lanes
 
@@ -3154,6 +3156,29 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
     assert reduction_cpu_gpu["atol"] == pytest.approx(1e-12)
     assert reduction_cpu_gpu["requires_cpu_gpu_devices"] is True
 
+    ls_solve_quality = parity_ladder_tolerances("ls-solve-quality")
+    assert ls_solve_quality["ls_hessian_symmetry_rel_tol"] == pytest.approx(1e-10)
+    assert ls_solve_quality["ls_hessian_action_max_rel_tol"] == pytest.approx(1e-8)
+    assert ls_solve_quality["ls_newton_linear_residual_rel_tol"] == pytest.approx(1e-8)
+    assert ls_solve_quality["ls_newton_step_abs_diff_rel_tol"] == pytest.approx(1e-8)
+    assert ls_solve_quality["ls_condition_estimate_present"] is False
+    assert ls_solve_quality["requires_same_state"] is True
+    assert ls_solve_quality["reporting_only"] is True
+
+    exact_solve_quality = parity_ladder_tolerances("exact-solve-quality")
+    assert exact_solve_quality["exact_jacobian_action_max_rel_tol"] == pytest.approx(
+        1e-8
+    )
+    assert exact_solve_quality["exact_newton_linear_residual_rel_tol"] == pytest.approx(
+        1e-8
+    )
+    assert exact_solve_quality["exact_adjoint_solve_residual_rel_tol"] == pytest.approx(
+        1e-8
+    )
+    assert exact_solve_quality["exact_condition_estimate_present"] is False
+    assert exact_solve_quality["requires_same_state"] is True
+    assert exact_solve_quality["reporting_only"] is True
+
 
 def test_parity_ladder_tolerances_return_independent_copy():
     direct = parity_ladder_tolerances("direct_kernel")
@@ -3165,6 +3190,116 @@ def test_parity_ladder_tolerances_return_independent_copy():
 def test_parity_ladder_tolerances_reject_unknown_lane():
     with pytest.raises(ValueError, match="Unknown parity ladder lane"):
         parity_ladder_tolerances("exact-dense-plu-parity")
+
+
+def test_construct_operator_action_probes_is_deterministic():
+    from benchmarks.parity_solve_quality import construct_operator_action_probes
+
+    first = construct_operator_action_probes(
+        decision_size=20,
+        artifact_name="banana_coil",
+    )
+    second = construct_operator_action_probes(
+        decision_size=20,
+        artifact_name="banana_coil",
+    )
+
+    assert first.shape == (20, 9)
+    np.testing.assert_array_equal(first, second)
+
+
+def test_construct_operator_action_probes_separate_artifact_names():
+    from benchmarks.parity_solve_quality import construct_operator_action_probes
+
+    first = construct_operator_action_probes(
+        decision_size=12,
+        artifact_name="banana_coil",
+    )
+    second = construct_operator_action_probes(
+        decision_size=12,
+        artifact_name="hbt_baseline",
+    )
+
+    assert not np.allclose(first, second)
+
+
+def test_construct_operator_action_probes_orthonormal_gaussian_columns():
+    from benchmarks.parity_solve_quality import construct_operator_action_probes
+
+    probes = construct_operator_action_probes(
+        decision_size=20,
+        artifact_name="banana_coil",
+    )
+
+    gaussian = probes[:, :8]
+    np.testing.assert_allclose(gaussian.T @ gaussian, np.eye(8), atol=1e-10)
+    np.testing.assert_array_equal(probes[:, -1], np.eye(20)[:, 0])
+
+
+def test_construct_operator_action_probes_small_decision_size():
+    from benchmarks.parity_solve_quality import construct_operator_action_probes
+
+    probes = construct_operator_action_probes(
+        decision_size=5,
+        artifact_name="small_fixture",
+    )
+
+    assert probes.shape == (5, 6)
+    np.testing.assert_array_equal(probes[:, -1], np.eye(5)[:, 0])
+
+
+def test_construct_operator_action_probes_rejects_invalid_inputs():
+    from benchmarks.parity_solve_quality import construct_operator_action_probes
+
+    with pytest.raises(ValueError, match="decision_size must be positive"):
+        construct_operator_action_probes(
+            decision_size=0,
+            artifact_name="invalid",
+        )
+
+    with pytest.raises(ValueError, match="basis_index must lie in"):
+        construct_operator_action_probes(
+            decision_size=4,
+            artifact_name="invalid",
+            extra_basis_index=4,
+        )
+
+
+def test_operator_action_max_relative_error_zero_for_identical_inputs():
+    from benchmarks.parity_solve_quality import operator_action_max_relative_error
+
+    rng = np.random.default_rng(0)
+    op = rng.standard_normal(size=(12, 5))
+
+    rel = operator_action_max_relative_error(op, op)
+    assert rel == 0.0
+
+
+def test_operator_action_max_relative_error_tracks_perturbation():
+    from benchmarks.parity_solve_quality import operator_action_max_relative_error
+
+    rng = np.random.default_rng(0)
+    op_cpp = rng.standard_normal(size=(12, 5))
+    op_jax = op_cpp + 1e-12 * rng.standard_normal(size=(12, 5))
+
+    rel = operator_action_max_relative_error(op_jax, op_cpp)
+    assert 0.0 < rel < 1e-10
+
+
+def test_operator_action_max_relative_error_rejects_shape_mismatch():
+    from benchmarks.parity_solve_quality import operator_action_max_relative_error
+
+    with pytest.raises(ValueError, match="must share shape"):
+        operator_action_max_relative_error(
+            np.zeros((12, 5)),
+            np.zeros((12, 4)),
+        )
+
+    with pytest.raises(ValueError, match="must be 2D"):
+        operator_action_max_relative_error(
+            np.zeros(12),
+            np.zeros(12),
+        )
 
 
 def test_describe_compile_behavior_tracks_cache_state(monkeypatch):

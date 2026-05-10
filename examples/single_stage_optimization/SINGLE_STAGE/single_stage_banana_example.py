@@ -9696,6 +9696,11 @@ def summarize_single_stage_boozer_solve_decomposition(boozer_surface):
 
 def summarize_boozer_solver_trace_metadata(boozer_surface):
     """Return solver-route metadata needed to interpret parity replay."""
+    from simsopt.geo.boozersurface_jax import (
+        SOLVE_QUALITY_EXACT_FIELDS,
+        SOLVE_QUALITY_LS_FIELDS,
+    )
+
     res = getattr(boozer_surface, "res", {})
     options = getattr(boozer_surface, "options", {})
     boozer_type = getattr(boozer_surface, "boozer_type", res.get("type"))
@@ -9732,6 +9737,15 @@ def summarize_boozer_solver_trace_metadata(boozer_surface):
         "final_step_dense_refinement_ran": res.get(
             "final_step_dense_refinement_ran"
         ),
+        # Scientific-equivalence ladder reporting fields per
+        # docs/parity_scientific_equivalence_contract_2026-05-09.md §3.
+        # The JAX BoozerSurface emits these on its result dict; the CPU
+        # C++ trace produces ``None`` because C++ ``BoozerSurface`` does
+        # not emit these fields. Field names are owned by
+        # ``simsopt.geo.boozersurface_jax.SOLVE_QUALITY_*_FIELDS`` (SSOT);
+        # the parity arbiter does not gate on them at Phase 1.
+        **{key: res.get(key) for key in SOLVE_QUALITY_LS_FIELDS},
+        **{key: res.get(key) for key in SOLVE_QUALITY_EXACT_FIELDS},
     }
     pre_newton = res.get("pre_newton") if isinstance(res, dict) else None
     if isinstance(pre_newton, dict):

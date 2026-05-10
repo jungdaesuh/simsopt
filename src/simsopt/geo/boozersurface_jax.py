@@ -2731,6 +2731,95 @@ def _exact_newton_reporting_fields(result):
     }
 
 
+SOLVE_QUALITY_LS_FIELDS: tuple[str, ...] = (
+    "ls_hessian_symmetry_rel",
+    "ls_hessian_action_max_rel",
+    "ls_newton_linear_residual_rel",
+    "ls_newton_step_abs_diff_rel",
+    "ls_factorization_backend",
+    "ls_condition_estimate",
+)
+
+
+SOLVE_QUALITY_EXACT_FIELDS: tuple[str, ...] = (
+    "exact_jacobian_action_max_rel",
+    "exact_newton_linear_residual_rel",
+    "exact_refinement_correction_rel",
+    "exact_adjoint_solve_residual_rel",
+    "exact_factorization_backend",
+    "exact_condition_estimate",
+)
+
+
+# Per docs/parity_scientific_equivalence_contract_2026-05-09.md §3.2: exact
+# Newton solves the linearization through the operator GMRES seam in
+# ``simsopt.geo.optimizer_jax`` (``_run_operator_gmres``); dense PLU storage
+# is reporting metadata only.
+EXACT_FACTORIZATION_BACKEND: str = "operator-gmres"
+
+
+def _none_solve_quality_fields(field_names: tuple[str, ...]) -> dict[str, None]:
+    """Return ``None`` placeholders for solve-quality reporting fields.
+
+    Used by result-dict finalizers that do not materialize a Hessian /
+    Jacobian (e.g. BFGS, manual LS, LM, exact constraint Newton). The keys
+    must always be present so consumers iterating ``res.keys()`` see a
+    stable schema across all ``type``-tagged result dicts.
+    """
+    return dict.fromkeys(field_names, None)
+
+
+def _ls_hessian_symmetry_rel(H) -> float | None:
+    """Return ``‖H − H.T‖_F / ‖H‖_F`` for the LS solve-quality ladder.
+
+    Per ``docs/parity_scientific_equivalence_contract_2026-05-09.md`` §3.1.
+    Returns ``None`` when ``H`` is unavailable or has zero Frobenius norm;
+    a non-finite norm propagates so the parity arbiter can flag a
+    NaN/Inf-laden Hessian instead of treating it as "field unavailable".
+    """
+    if H is None:
+        return None
+    norms = np.asarray(
+        jnp.stack(
+            [
+                jnp.linalg.norm(H, ord="fro"),
+                jnp.linalg.norm(H - H.T, ord="fro"),
+            ]
+        )
+    )
+    H_norm = float(norms[0])
+    if not np.isfinite(H_norm):
+        return H_norm
+    if H_norm == 0.0:
+        return None
+    return float(norms[1]) / H_norm
+
+
+def _ls_factorization_backend(H, *, optimizer_backend: str | None) -> str | None:
+    """Return the LS factorization backend string for the result dict.
+
+    Per ``docs/parity_scientific_equivalence_contract_2026-05-09.md`` §3.1.
+    ``"dense-plu-shared"`` is reserved for the Phase 2 factor-once adjoint
+    hybrid; today the LS LU is local to the Newton-polish reporting step.
+    Returns ``None`` when ``H`` is absent.
+
+    The ``optimizer_backend == "scipy"`` branch always reports
+    ``lapack-dgetrf`` because ``scipy.linalg.lu`` materializes ``np.asarray(H)``
+    on the host before calling LAPACK ``dgetrf``. Other backends route
+    through ``jax.scipy.linalg.lu`` on ``H``'s device; the device platform
+    determines the underlying factorization (LAPACK on CPU,
+    cuSOLVER ``cusolverDnDgetrf`` on CUDA).
+    """
+    if H is None:
+        return None
+    if optimizer_backend == "scipy":
+        return "lapack-dgetrf"
+    platform = str(H.device.platform).lower()
+    if platform in {"gpu", "cuda"}:
+        return "cusolver-getrf-ffi"
+    return "lapack-dgetrf"
+
+
 _DEFAULT_MAX_DENSE_JACOBIAN_BYTES = 512 * 1024 * 1024
 
 
@@ -4755,6 +4844,7 @@ class BoozerSurfaceJAX(Optimizable):
             "scipy_callback_trace": getattr(result, "scipy_callback_trace", None),
             "weight_inv_modB": weight_inv_modB,
             "type": "ls",
+            **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
         }
         self.res = resdict
         self.need_to_run_code = False
@@ -4871,6 +4961,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "failure_category": result.get("failure_category"),
                 "failure_stage": result.get("failure_stage"),
                 "message": result.get("message"),
+                **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
             }
             self.res = res
             self.need_to_run_code = False
@@ -4887,6 +4978,11 @@ class BoozerSurfaceJAX(Optimizable):
                 plu = (P, L, U)
         else:
             plu = None
+        ls_hessian_symmetry_rel = _ls_hessian_symmetry_rel(H)
+        ls_factorization_backend = _ls_factorization_backend(
+            H if plu is not None else None,
+            optimizer_backend=self.options["optimizer_backend"],
+        )
 
         G_for_res = (
             G_out
@@ -4970,6 +5066,13 @@ class BoozerSurfaceJAX(Optimizable):
             "failure_category": result.get("failure_category"),
             "failure_stage": result.get("failure_stage"),
             "message": result.get("message"),
+            # Scientific-equivalence ladder reporting fields per
+            # docs/parity_scientific_equivalence_contract_2026-05-09.md §3.1.
+            # action_max / step_abs_diff are populated by the parity
+            # arbiter; condition_estimate is a Phase 5.3 placeholder.
+            **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
+            "ls_hessian_symmetry_rel": ls_hessian_symmetry_rel,
+            "ls_factorization_backend": ls_factorization_backend,
         }
         self.res = res
         self.need_to_run_code = False
@@ -5041,6 +5144,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "type": "ls",
                 "weight_inv_modB": weight_inv_modB,
                 "optimizer_method": "manual",
+                **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
             }
             self.res = resdict
             self.need_to_run_code = False
@@ -5097,6 +5201,7 @@ class BoozerSurfaceJAX(Optimizable):
             "type": "ls",
             "weight_inv_modB": weight_inv_modB,
             "optimizer_method": optimizer_method,
+            **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
         }
         self.res = resdict
         self.need_to_run_code = False
@@ -5295,6 +5400,7 @@ class BoozerSurfaceJAX(Optimizable):
                 "linear_solve_backend": "operator",
                 "dense_linear_solve_factors_available": False,
                 **exact_reporting,
+                **_none_solve_quality_fields(SOLVE_QUALITY_EXACT_FIELDS),
             }
             self.res = res
             self.need_to_run_code = False
@@ -5385,6 +5491,14 @@ class BoozerSurfaceJAX(Optimizable):
             "solve_generation": solve_generation,
             "weight_inv_modB": self.options["weight_inv_modB"],
             **exact_reporting,
+            # Scientific-equivalence ladder reporting fields per
+            # docs/parity_scientific_equivalence_contract_2026-05-09.md §3.2.
+            # action_max / linear_residual / refinement_correction /
+            # adjoint_solve_residual are populated by the parity arbiter or
+            # downstream optimizer plumbing; condition_estimate is a Phase
+            # 5.3 placeholder.
+            **_none_solve_quality_fields(SOLVE_QUALITY_EXACT_FIELDS),
+            "exact_factorization_backend": EXACT_FACTORIZATION_BACKEND,
         }
         self.res = res
         self.need_to_run_code = False
@@ -5503,6 +5617,7 @@ class BoozerSurfaceJAX(Optimizable):
             "iota": iota_out,
             "weight_inv_modB": self.options["weight_inv_modB"],
             "type": "exact_constraints",
+            **_none_solve_quality_fields(SOLVE_QUALITY_EXACT_FIELDS),
         }
         self.res = res
         self.need_to_run_code = False

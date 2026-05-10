@@ -1408,7 +1408,14 @@ class TestOptimizerAdapter:
         np.testing.assert_allclose(result["x"], np.array([0.0]), atol=1e-12)
 
     def test_newton_polish_dense_steps_use_materialized_solve(self, monkeypatch):
-        """CPU-parity Newton polish uses dense steps when explicitly requested."""
+        """CPU-parity Newton polish uses dense steps when explicitly requested.
+
+        Per ``docs/parity_scientific_equivalence_contract_2026-05-09.md`` §9
+        Phase 1, the *final* reported Hessian is always mirror-upper
+        symmetrized regardless of ``dense_newton_steps``. The per-iter dense
+        Newton step keeps ``symmetrize=False`` so its solve bytes stay
+        consistent with the C++ oracle's pre-symmetrization Hessian.
+        """
         A = jnp.array([[2.0, 0.5], [0.5, 3.0]], dtype=jnp.float64)
         b = jnp.array([1.0, 2.0], dtype=jnp.float64)
         symmetrize_requests = []
@@ -1441,8 +1448,104 @@ class TestOptimizerAdapter:
             np.linalg.solve(np.asarray(A), np.asarray(b)),
             atol=1e-12,
         )
-        assert symmetrize_requests == [False, False]
+        assert symmetrize_requests == [False, True]
         assert result["dense_newton_steps_materialized"] is True
+
+    def test_materialize_dense_hessian_is_bit_symmetric_under_mirror_upper(self):
+        """Mirror-upper symmetrization yields a bit-symmetric Hessian.
+
+        Per ``docs/parity_scientific_equivalence_contract_2026-05-09.md`` §5.1
+        and §9 Phase 1, ``_materialize_dense_hessian`` must produce ``H ==
+        H.T`` element-wise (no FP rounding) so the LU input is bit-symmetric
+        and the upper triangle of the raw HVP-built Hessian is preserved.
+        """
+        rng = np.random.default_rng(0)
+        A = rng.standard_normal(size=(7, 7))
+        A = A + A.T
+        # Inject FP rounding asymmetry so the symmetrization is observable.
+        A[0, 1] += 1e-15
+
+        def hvp_fn(_x, v):
+            return jnp.asarray(A) @ v
+
+        x = jnp.zeros(7, dtype=jnp.float64)
+        H_symmetric = _opt._materialize_dense_hessian(hvp_fn, x, symmetrize=True)
+        H_raw = _opt._materialize_dense_hessian(hvp_fn, x, symmetrize=False)
+
+        sym_diff = float(jnp.linalg.norm(H_symmetric - H_symmetric.T, ord="fro"))
+        upper_diff = float(
+            jnp.linalg.norm(jnp.triu(H_symmetric) - jnp.triu(H_raw), ord="fro")
+        )
+        assert sym_diff == 0.0
+        assert upper_diff == 0.0
+
+    def test_solve_quality_helpers_handle_edge_inputs(self):
+        """Solve-quality helpers propagate non-finite norms instead of masking.
+
+        Per ``docs/parity_scientific_equivalence_contract_2026-05-09.md`` §3.1,
+        a NaN-laden Hessian is a real failure signal — the helper must NOT
+        silently substitute ``None``. Zero-norm Hessians stay ``None``
+        (degenerate, not "field unavailable" — but consistent with the spec
+        formula that has no defined value at zero norm).
+        """
+        from simsopt.geo.boozersurface_jax import (
+            EXACT_FACTORIZATION_BACKEND,
+            _ls_factorization_backend,
+            _ls_hessian_symmetry_rel,
+            _none_solve_quality_fields,
+            SOLVE_QUALITY_EXACT_FIELDS,
+            SOLVE_QUALITY_LS_FIELDS,
+        )
+
+        assert _ls_hessian_symmetry_rel(None) is None
+        assert _ls_hessian_symmetry_rel(jnp.zeros((3, 3))) is None
+        assert np.isnan(_ls_hessian_symmetry_rel(jnp.full((3, 3), jnp.nan)))
+        assert np.isinf(_ls_hessian_symmetry_rel(jnp.full((3, 3), jnp.inf)))
+        symmetric = jnp.asarray([[2.0, 0.5], [0.5, 3.0]])
+        assert _ls_hessian_symmetry_rel(symmetric) == 0.0
+
+        assert _ls_factorization_backend(None, optimizer_backend="scipy") is None
+        H = jnp.asarray([[1.0, 0.0], [0.0, 1.0]])
+        assert (
+            _ls_factorization_backend(H, optimizer_backend="scipy") == "lapack-dgetrf"
+        )
+        assert _ls_factorization_backend(H, optimizer_backend="ondevice") == (
+            "cusolver-getrf-ffi"
+            if str(H.device.platform).lower() in {"gpu", "cuda"}
+            else "lapack-dgetrf"
+        )
+        assert EXACT_FACTORIZATION_BACKEND == "operator-gmres"
+
+        ls_placeholders = _none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS)
+        exact_placeholders = _none_solve_quality_fields(SOLVE_QUALITY_EXACT_FIELDS)
+        assert set(ls_placeholders) == set(SOLVE_QUALITY_LS_FIELDS)
+        assert set(exact_placeholders) == set(SOLVE_QUALITY_EXACT_FIELDS)
+        assert all(value is None for value in ls_placeholders.values())
+        assert all(value is None for value in exact_placeholders.values())
+
+    def test_solve_quality_field_sets_match_contract(self):
+        """The frozen field tuples must match the contract §3.1 / §3.2 spec."""
+        from simsopt.geo.boozersurface_jax import (
+            SOLVE_QUALITY_EXACT_FIELDS,
+            SOLVE_QUALITY_LS_FIELDS,
+        )
+
+        assert SOLVE_QUALITY_LS_FIELDS == (
+            "ls_hessian_symmetry_rel",
+            "ls_hessian_action_max_rel",
+            "ls_newton_linear_residual_rel",
+            "ls_newton_step_abs_diff_rel",
+            "ls_factorization_backend",
+            "ls_condition_estimate",
+        )
+        assert SOLVE_QUALITY_EXACT_FIELDS == (
+            "exact_jacobian_action_max_rel",
+            "exact_newton_linear_residual_rel",
+            "exact_refinement_correction_rel",
+            "exact_adjoint_solve_residual_rel",
+            "exact_factorization_backend",
+            "exact_condition_estimate",
+        )
 
     def test_least_squares_normal_system_fails_closed_on_nonfinite_operator_solve(
         self, monkeypatch
@@ -3178,7 +3281,13 @@ class TestBoozerSurfaceJAXClass:
         )
 
     def test_newton_polish_dense_hessian_symmetrizes_numerical_asymmetry(self):
-        """Dense-compatible Hessian artifacts keep the current symmetrization."""
+        """Dense-compatible Hessian artifacts mirror the upper triangle.
+
+        Per ``docs/parity_scientific_equivalence_contract_2026-05-09.md`` §5.1,
+        symmetrization preserves the upper triangle of the raw HVP-built
+        Hessian and copies it into the lower triangle so the LU input is
+        bit-symmetric without averaging.
+        """
         operator = jnp.asarray(
             [
                 [2.0, 0.5 + 1.0e-8, -0.25],
@@ -3195,13 +3304,10 @@ class TestBoozerSurfaceJAXClass:
             hvp_fn,
             jnp.zeros(3, dtype=jnp.float64),
         )
+        expected = jnp.triu(operator) + jnp.triu(operator, 1).T
 
-        np.testing.assert_allclose(
-            np.asarray(dense),
-            np.asarray(0.5 * (operator + operator.T)),
-            rtol=1e-12,
-            atol=1e-12,
-        )
+        np.testing.assert_array_equal(np.asarray(dense), np.asarray(expected))
+        np.testing.assert_array_equal(np.asarray(dense), np.asarray(dense.T))
 
     def test_recompute_bell(self):
         """recompute_bell sets the dirty flag."""

@@ -1629,7 +1629,8 @@ def _materialize_dense_hessian(hvp_fn, x, *, symmetrize=True):
     dense = _materialize_dense_linear_operator(hvp_fn, x)
     if not bool(symmetrize):
         return dense
-    return 0.5 * (dense + dense.T)
+    upper = jnp.triu(dense)
+    return upper + jnp.triu(dense, 1).T
 
 
 def _materialize_dense_jacobian(jvp_fn, x):
@@ -2281,7 +2282,7 @@ def newton_polish(
             _materialize_dense_hessian(
                 hvp_fn,
                 x,
-                symmetrize=not bool(dense_newton_steps),
+                symmetrize=True,
             ),
             stab,
         )
