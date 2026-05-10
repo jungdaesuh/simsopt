@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import datetime
 import json
 import os
 import platform
@@ -318,10 +319,24 @@ def _run_census(
     runtime_env: dict[str, Any],
     candidate_id: str,
     parity_policy: str = "production",
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run the synthetic-fixture census and emit NDJSON.
 
-    Returns a small summary suitable for printing / assertion in tests.
+    Returns
+    -------
+    summary, materialized
+        ``summary`` is a small dict suitable for printing / assertion in tests.
+        ``materialized`` exposes the raw CPU/JAX host-numpy arrays and scalar
+        values so downstream artifact writers (e.g.
+        ``--dump-arrays-as-npy``) can persist the same boundary inputs that
+        fed the census without rerunning the fixture. Keys:
+
+        - ``cpu_arrays``: dict[str, np.ndarray] for every name in
+          ``CENSUS_BOUNDARY_ARRAY_ORDER``.
+        - ``jax_arrays``: dict[str, np.ndarray], same names.
+        - ``cpu_scalars``: dict[str, float] for every name in
+          ``CENSUS_BOUNDARY_SCALAR_ORDER``.
+        - ``jax_scalars``: dict[str, float], same names.
     """
 
     from benchmarks.parity.boozer_derivative_input_census import (  # noqa: PLC0415
@@ -336,6 +351,9 @@ def _run_census(
     fixture = _build_synthetic_fixture()
     cpu_arrays_dict = _materialize_cpu_arrays_dict(fixture)
     jax_arrays_dict = _materialize_jax_arrays_dict(fixture, parity_policy=parity_policy)
+    cpu_scalars_dict, jax_scalars_dict = _materialize_scalar_dicts(
+        fixture, parity_policy=parity_policy
+    )
     cpu_array_records, cpu_scalar_records = capture_cpu_boozer_inputs(
         fixture["boozer_cpu"],
         sdofs=fixture["sdofs"],
@@ -398,7 +416,13 @@ def _run_census(
         "ndjson": str(ndjson_path),
     }
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
-    return summary
+    materialized = {
+        "cpu_arrays": cpu_arrays_dict,
+        "jax_arrays": jax_arrays_dict,
+        "cpu_scalars": cpu_scalars_dict,
+        "jax_scalars": jax_scalars_dict,
+    }
+    return summary, materialized
 
 
 def _materialize_cpu_arrays_dict(fixture: dict[str, Any]) -> dict[str, Any]:
@@ -474,6 +498,201 @@ def _materialize_jax_arrays_dict(
     }
 
 
+def _materialize_scalar_dicts(
+    fixture: dict[str, Any],
+    *,
+    parity_policy: str = "production",
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Materialize CPU and JAX scalar boundary inputs as plain Python floats.
+
+    The CPU side reads ``iota``/``G``/``weight_inv_modB`` directly from the
+    fixture (the same values
+    :func:`capture_cpu_boozer_inputs` consumes). The JAX side runs the
+    private ``_boozer_penalty_value_and_grad_inputs_cpu_ordered`` helper and
+    extracts the scalar fields stored on ``inputs`` so the producer-side
+    snapshots reflect what the JAX boundary actually computes (G recomputed
+    from coil currents when ``optimize_G`` is False, etc.).
+
+    Returns
+    -------
+    cpu_scalars, jax_scalars
+        Dicts keyed by names from
+        :data:`benchmarks.parity.boozer_derivative_input_census.CENSUS_BOUNDARY_SCALAR_ORDER`.
+    """
+    import jax  # noqa: PLC0415
+    import jax.numpy as jnp  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
+
+    from simsopt.geo.boozersurface_jax import (  # noqa: PLC0415
+        _boozer_penalty_value_and_grad_inputs_cpu_ordered,
+        _hostify_tree,
+        _resolved_coil_set_spec,
+    )
+
+    booz_jax = fixture["boozer_jax"]
+    pieces = [
+        np.asarray(fixture["sdofs"], dtype=np.float64),
+        np.asarray([float(fixture["iota"])], dtype=np.float64),
+    ]
+    if fixture["optimize_G"]:
+        pieces.append(np.asarray([float(fixture["G"])], dtype=np.float64))
+    x = jnp.asarray(np.concatenate(pieces), dtype=jnp.float64)
+    coil_set_spec = _hostify_tree(_resolved_coil_set_spec(booz_jax.coil_set_spec))
+    _, _, _, inputs = _boozer_penalty_value_and_grad_inputs_cpu_ordered(
+        x,
+        coil_arrays=None,
+        coil_set_spec=coil_set_spec,
+        quadpoints_phi=_hostify_tree(booz_jax.quadpoints_phi),
+        quadpoints_theta=_hostify_tree(booz_jax.quadpoints_theta),
+        mpol=booz_jax.mpol,
+        ntor=booz_jax.ntor,
+        nfp=booz_jax.nfp,
+        stellsym=booz_jax.stellsym,
+        scatter_indices=_hostify_tree(booz_jax.scatter_indices),
+        surface_kind=booz_jax._surface_geometry_kind,
+        optimize_G=fixture["optimize_G"],
+        parity_policy=parity_policy,
+    )
+    weight_flag = 1.0 if bool(fixture["weight_inv_modB"]) else 0.0
+    cpu_scalars = {
+        "G_value": float(fixture["G"]),
+        "iota": float(fixture["iota"]),
+        "weight_inv_modB": weight_flag,
+    }
+    jax_scalars = {
+        "G_value": float(np.asarray(jax.device_get(inputs.G_value))),
+        "iota": float(np.asarray(jax.device_get(inputs.iota))),
+        "weight_inv_modB": weight_flag,
+    }
+    return cpu_scalars, jax_scalars
+
+
+def _dump_arrays_as_npy(
+    dump_dir: Path,
+    *,
+    cpu_arrays: dict[str, Any],
+    jax_arrays: dict[str, Any],
+    cpu_scalars: dict[str, float],
+    jax_scalars: dict[str, float],
+    parity_policy: str,
+    summary: dict[str, Any],
+) -> Path:
+    """Write per-array ``.npy`` snapshots plus a CPU-canonical bundle.
+
+    Drives the artifact layout consumed by Slice P4.5/P4.5b of
+    ``docs/boozer_derivative_bit_identity_impl_plan_2026-05-07.md``:
+
+    - ``cpu_<name>.npy`` and ``jax_<name>.npy`` for every name in
+      :data:`CENSUS_BOUNDARY_ARRAY_ORDER` (and analogously for the scalar
+      ladder) — the upstream producer snapshots that preserve the raw census
+      evidence.
+    - ``canonical_<name>.npy`` for every name, copied from the **CPU oracle
+      side** for every kind. The canonical bundle is the single byte-identical
+      input set that both the C++ and JAX residual implementations consume in
+      the boundary-pinned residual byte tests.
+    - ``manifest.json`` listing role / name / kind / dtype / shape / sha256
+      for every persisted file plus top-level provenance fields.
+
+    No compression: ``np.save`` writes raw float64 bytes to ``.npy`` so the
+    downstream byte tests can read them back without lossy round-trips.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    from benchmarks.parity.boozer_derivative_input_census import (  # noqa: PLC0415
+        CENSUS_BOUNDARY_ARRAY_ORDER,
+        CENSUS_BOUNDARY_SCALAR_ORDER,
+        _sha256_float64_bytes,
+    )
+
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    manifest_files: list[dict[str, Any]] = []
+
+    def _canonicalize(arr: np.ndarray) -> np.ndarray:
+        """C-contiguous float64 view that preserves 0-d shape.
+
+        ``np.ascontiguousarray`` upgrades a 0-d array to ``(1,)`` (NumPy
+        documents this as part of its rule that contiguous arrays have
+        ``ndim >= 1``); ``np.require`` with the ``'C'`` requirement keeps
+        ``ndim == 0`` and still guarantees C-contiguous bytes.
+        """
+        return np.require(arr, dtype=np.float64, requirements="C")
+
+    def _write_array(role: str, name: str, kind: str, arr: np.ndarray) -> None:
+        canonical = _canonicalize(arr)
+        filename = f"{role}_{name}.npy"
+        path = dump_dir / filename
+        np.save(path, canonical, allow_pickle=False)
+        manifest_files.append(
+            {
+                "role": role,
+                "name": name,
+                "kind": kind,
+                "dtype": "float64",
+                "shape": list(int(s) for s in canonical.shape),
+                "path": filename,
+                "sha256": _sha256_float64_bytes(canonical),
+            }
+        )
+
+    # Producer + canonical arrays
+    for name in CENSUS_BOUNDARY_ARRAY_ORDER:
+        if name not in cpu_arrays or name not in jax_arrays:
+            raise KeyError(
+                f"materialized arrays missing canonical name {name!r}; "
+                "expected every entry in CENSUS_BOUNDARY_ARRAY_ORDER"
+            )
+        cpu_arr = _canonicalize(cpu_arrays[name])
+        jax_arr = _canonicalize(np.asarray(jax_arrays[name], dtype=np.float64))
+        _write_array("cpu", name, "array", cpu_arr)
+        _write_array("jax", name, "array", jax_arr)
+        # Canonical comes from the CPU oracle; do NOT derive from JAX.
+        _write_array("canonical", name, "array", cpu_arr)
+
+    # Producer + canonical scalars (0-d float64 arrays)
+    for name in CENSUS_BOUNDARY_SCALAR_ORDER:
+        if name not in cpu_scalars or name not in jax_scalars:
+            raise KeyError(
+                f"materialized scalars missing canonical name {name!r}; "
+                "expected every entry in CENSUS_BOUNDARY_SCALAR_ORDER"
+            )
+        cpu_val = np.asarray(float(cpu_scalars[name]), dtype=np.float64).reshape(())
+        jax_val = np.asarray(float(jax_scalars[name]), dtype=np.float64).reshape(())
+        _write_array("cpu", name, "scalar", cpu_val)
+        _write_array("jax", name, "scalar", jax_val)
+        _write_array("canonical", name, "scalar", cpu_val)
+
+    manifest_files.sort(key=lambda entry: (entry["role"], entry["kind"], entry["name"]))
+
+    census_summary_subset = {
+        key: summary[key]
+        for key in (
+            "candidate_id",
+            "fixture",
+            "parity_policy",
+            "n_arrays_compared",
+            "n_byte_identical_arrays",
+            "first_divergence",
+            "ladder",
+        )
+        if key in summary
+    }
+
+    manifest = {
+        "dump_directory": str(dump_dir),
+        "parity_policy": parity_policy,
+        "boundary_array_order": list(CENSUS_BOUNDARY_ARRAY_ORDER),
+        "boundary_scalar_order": list(CENSUS_BOUNDARY_SCALAR_ORDER),
+        "canonical_source": "cpu",
+        "census_summary": census_summary_subset,
+        "files": manifest_files,
+        "plan_doc": PLAN_DOC,
+        "created_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    manifest_path = dump_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return manifest_path
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -541,12 +760,30 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "C++ oracle either way."
         ),
     )
+    parser.add_argument(
+        "--dump-arrays-as-npy",
+        type=Path,
+        default=None,
+        help=(
+            "Output directory for per-array .npy snapshots plus a CPU-canonical "
+            "residual-input bundle (`canonical_<name>.npy`) and `manifest.json`. "
+            "Composes with --census + --parity-policy; the census run is what "
+            "materializes the CPU/JAX boundary arrays this flag persists. See "
+            "P4.1 in " + PLAN_DOC + " for the bundle contract."
+        ),
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
+
+    if args.dump_arrays_as_npy is not None and not args.census:
+        parser.error(
+            "--dump-arrays-as-npy requires --census; the census run is what "
+            "materializes the CPU/JAX boundary arrays the dump persists."
+        )
 
     runtime_env = _capture_runtime_environment()
     record = extract_candidate(
@@ -562,7 +799,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"inf_norm={record.inf_norm}")
     print(f"wrote candidate summary: {summary_path}")
     if args.census:
-        summary = _run_census(
+        summary, materialized = _run_census(
             artifact_dir=args.dump_arrays,
             runtime_env=runtime_env,
             candidate_id=record.candidate_id,
@@ -578,6 +815,18 @@ def main(argv: list[str] | None = None) -> int:
                 f"max_abs_diff={fd['max_abs_diff']!r}"
             )
         print(f"census ndjson: {summary['ndjson']}")
+
+        if args.dump_arrays_as_npy is not None:
+            manifest_path = _dump_arrays_as_npy(
+                args.dump_arrays_as_npy,
+                cpu_arrays=materialized["cpu_arrays"],
+                jax_arrays=materialized["jax_arrays"],
+                cpu_scalars=materialized["cpu_scalars"],
+                jax_scalars=materialized["jax_scalars"],
+                parity_policy=args.parity_policy,
+                summary=summary,
+            )
+            print(f"dump-arrays-as-npy manifest: {manifest_path}")
     return 0
 
 

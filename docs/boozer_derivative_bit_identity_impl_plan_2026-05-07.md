@@ -66,8 +66,8 @@ contract requires the BFGS trajectory itself to be byte-identical.
 ## 2. Contract (Hard Constraints — Do Not Change)
 
 From `docs/boozer_derivative_bit_identity_zeroing_plan_2026-05-07.md:142–160`,
-gate code at `benchmarks/single_stage_init_parity.py:1905`, regression test at
-`tests/test_benchmark_helpers.py:1415`:
+gate code at `_pre_newton_census_gate_failures` in `benchmarks/single_stage_init_parity.py`, regression test at
+`test_single_stage_init_pre_newton_census_divergence_is_gate_failure` in `tests/test_benchmark_helpers.py`:
 
 - **Definition Of Zero** — all of the following must hold on the CPU parity
   lane:
@@ -470,11 +470,23 @@ for (int j = 0; j < num_quad_points; ++j) {
 > §10 with the candidate direction. See §19 for the supporting evidence and
 > §20 for the expanded ablation surface.
 
+> **Cross-reference (2026-05-08):** see
+> `docs/parity_dual_mode_contract_2026-05-08.md` (3b semantics) for how
+> dual-mode parity reporting layers ON TOP of Phase 4. **The dual-mode
+> contract does NOT loosen Phase 4's strict byte-identity contract.**
+> The strict gate at `_pre_newton_census_gate_failures` in `benchmarks/single_stage_init_parity.py`
+> stays as a release blocker; DM-A/B/D add empirical-severity reporting
+> to the gate's failure messages (so triage is faster) and a
+> `jax_cpu_fast` opt-in mode for non-publication-grade speed
+> experiments (which fail the gate by construction). Phase 4
+> acceptance criteria are unchanged: P4.5 / P4.5b boundary byte tests
+> at `max_abs_diff == 0.0`, plus P4.6 strict-gate pass.
+
 **Context.** Phase 2/3 left a 1–2 ULP gradient drift after the cpu_ordered
 surface and Biot-Savart twins reduced the dominant `gamma` and `B`
 contributions. The residual lives in the gradient assembly inside
 `boozer_residual_scalar_and_grad_cpu_ordered`
-(`src/simsopt/geo/boozer_residual_jax.py:320–432`). The C++ oracle uses
+(`boozer_residual_scalar_and_grad_cpu_ordered` in `src/simsopt/geo/boozer_residual_jax.py`). The C++ oracle uses
 explicit `xsimd::fma` nests at
 `src/simsoptpp/boozerresidual_impl.h:128, 137, 148`, so on the C++ side
 fusion is *forced* — the JAX side either fuses to the same nesting shape or
@@ -735,7 +747,7 @@ that are necessary to close the gate.
 - [ ] New regression tests:
   - [ ] Census byte-identity of all surface and BS arrays.
   - [ ] Fixed-candidate CPU/JAX Boozer LS scalar + gradient `max_abs_diff == 0.0`.
-  - [ ] `tests/test_benchmark_helpers.py:1415` continues to lock the gate.
+  - [ ] `test_single_stage_init_pre_newton_census_divergence_is_gate_failure` in `tests/test_benchmark_helpers.py` continues to lock the gate.
 - [ ] Update validation note:
   `.artifacts/parity/20260507-bfgs-prenewton-cpuordered-vg-m1/VALIDATION_NOTE.md`
   with a "superseded by 2026-05-07 derivative bit-identity zeroing" tag, and
@@ -795,8 +807,8 @@ that are necessary to close the gate.
 ### Untouched (do not modify within this slice)
 
 - `src/simsoptpp/**` — CPU C++/pybind oracle stays read-only.
-- `benchmarks/single_stage_init_parity.py:1905` gate function.†
-- `tests/test_benchmark_helpers.py:1415` gate regression test.†
+- `_pre_newton_census_gate_failures` in `benchmarks/single_stage_init_parity.py` gate function.†
+- `test_single_stage_init_pre_newton_census_divergence_is_gate_failure` in `tests/test_benchmark_helpers.py` gate regression test.†
 - `benchmarks/validation_ladder_contract.py::PARITY_LADDER_TOLERANCES`.†
 - Production JAX hot-path kernels: `surface_fourier_jax.py`,
   `jax_core/biotsavart.py`, `jax_core/field.py`, `field/biotsavart_jax_backend.py`
@@ -851,8 +863,8 @@ P4.6 / P4.7.
   `.artifacts/bit-identity-deepdive-2026-05-07/agent_{1..6}_*.md`
 - Surviving lane reproducers: `/tmp/lane{2,3,6}_repro*.py` (lanes 4 and 5
   must be recreated; see Side Track).
-- Gate code: `benchmarks/single_stage_init_parity.py:1905`
-- Gate regression: `tests/test_benchmark_helpers.py:1415`
+- Gate code: `_pre_newton_census_gate_failures` in `benchmarks/single_stage_init_parity.py`
+- Gate regression: `test_single_stage_init_pre_newton_census_divergence_is_gate_failure` in `tests/test_benchmark_helpers.py`
 - CPU oracle entry: `src/simsoptpp/boozerresidual_py.cpp:11`
 - JAX entry: `src/simsopt/geo/boozer_residual_jax.py:320`
 - Surface CPU: `src/simsoptpp/surfacexyztensorfourier.h` (16 OMP directives,
@@ -937,10 +949,11 @@ Recorded against the runtime resolved by `.conda/jax-0.9.2/bin/python`.
 
 ### Backend SSOT
 
-- `is_parity_mode()` defined at `src/simsopt/backend/runtime.py:1199`.
-- `_MODE_ENV = "SIMSOPT_BACKEND_MODE"` at `runtime.py:38`.
-- `VALID_BACKEND_MODES` includes `jax_cpu_parity` and `jax_gpu_parity` at
-  `runtime.py:102–103`.
+- `is_parity_mode()` defined in `src/simsopt/backend/runtime.py`.
+- `_MODE_ENV = "SIMSOPT_BACKEND_MODE"` in `runtime.py`.
+- `VALID_BACKEND_MODES` (in `runtime.py`) includes `jax_cpu_parity` and
+  `jax_gpu_parity` (and the dual-mode-contract additions
+  `jax_cpu_fast` / `jax_gpu_fast`).
 - `_make_penalty_value_and_grad_cpu_ordered_with` factory at
   `boozersurface_jax.py:3680` is the cache-keyed wiring point.
 

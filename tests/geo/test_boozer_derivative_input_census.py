@@ -298,3 +298,185 @@ def test_ndjson_emission_stable(tmp_path, census_records_and_arrays, diffs):
     for line in text:
         rec = json.loads(line)
         assert "kind" in rec
+
+
+# ---------------------------------------------------------------------------
+# P4.1 — canonical .npy bundle (--dump-arrays-as-npy)
+
+
+def test_dump_arrays_as_npy_requires_census(tmp_path):
+    """The dump flag is meaningless without --census materializing the arrays.
+
+    Argparse should error out with a clear message rather than silently writing
+    an empty bundle.
+    """
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[2]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    from benchmarks.parity.boozer_derivative_input_repro import main
+
+    dump_dir = tmp_path / "no_census"
+    artifact_dir = tmp_path / "artifact"
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "--dump-arrays",
+                str(artifact_dir),
+                "--dump-arrays-as-npy",
+                str(dump_dir),
+                "--parity-policy",
+                "cpu_ordered",
+            ]
+        )
+    assert excinfo.value.code != 0
+    assert not dump_dir.exists() or not any(dump_dir.iterdir())
+
+
+@pytest.fixture(scope="module")
+def npy_bundle_dir(tmp_path_factory):
+    """Run the repro CLI with --census --dump-arrays-as-npy once per module."""
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[2]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    from benchmarks.parity.boozer_derivative_input_repro import main
+
+    bundle = tmp_path_factory.mktemp("npy_bundle")
+    artifact_dir = bundle / "artifact"
+    dump_dir = bundle / "dump"
+    rc = main(
+        [
+            "--dump-arrays",
+            str(artifact_dir),
+            "--census",
+            "--parity-policy",
+            "cpu_ordered",
+            "--dump-arrays-as-npy",
+            str(dump_dir),
+        ]
+    )
+    assert rc == 0
+    return dump_dir
+
+
+def test_dump_arrays_as_npy_manifest_present(npy_bundle_dir):
+    import json
+
+    manifest_path = npy_bundle_dir / "manifest.json"
+    assert manifest_path.is_file(), "manifest.json must be produced"
+    manifest = json.loads(manifest_path.read_text())
+    for key in (
+        "dump_directory",
+        "parity_policy",
+        "boundary_array_order",
+        "boundary_scalar_order",
+        "canonical_source",
+        "census_summary",
+        "files",
+        "created_at_utc",
+    ):
+        assert key in manifest, f"manifest missing top-level key {key!r}"
+    assert manifest["parity_policy"] == "cpu_ordered"
+    assert manifest["canonical_source"] == "cpu"
+
+    from benchmarks.parity.boozer_derivative_input_census import (
+        CENSUS_BOUNDARY_ARRAY_ORDER,
+        CENSUS_BOUNDARY_SCALAR_ORDER,
+    )
+
+    assert manifest["boundary_array_order"] == list(CENSUS_BOUNDARY_ARRAY_ORDER)
+    assert manifest["boundary_scalar_order"] == list(CENSUS_BOUNDARY_SCALAR_ORDER)
+
+
+def test_dump_arrays_as_npy_files_validate(npy_bundle_dir):
+    """Every manifest entry must exist on disk and digest-match its bytes."""
+    import hashlib
+    import json
+
+    manifest = json.loads((npy_bundle_dir / "manifest.json").read_text())
+    files = manifest["files"]
+    assert files, "manifest must list at least one file"
+
+    expected_roles = {"cpu", "jax", "canonical"}
+    seen_roles: set[str] = set()
+
+    for entry in files:
+        seen_roles.add(entry["role"])
+        assert entry["role"] in expected_roles
+        assert entry["kind"] in {"array", "scalar"}
+        assert entry["dtype"] == "float64"
+        path = npy_bundle_dir / entry["path"]
+        assert path.is_file(), f"missing file referenced by manifest: {entry['path']}"
+
+        loaded = np.load(path, allow_pickle=False)
+        assert loaded.dtype == np.float64
+        assert list(int(s) for s in loaded.shape) == entry["shape"]
+        canonical_bytes = np.ascontiguousarray(loaded, dtype=np.float64).tobytes()
+        assert hashlib.sha256(canonical_bytes).hexdigest() == entry["sha256"]
+
+    assert seen_roles == expected_roles
+
+
+def test_dump_arrays_as_npy_canonical_matches_cpu(npy_bundle_dir):
+    """Canonical bundle must be byte-identical to the CPU producer side.
+
+    This is the contract that lets P4.5/P4.5b feed identical inputs to both
+    residual implementations: canonical_<name>.npy IS cpu_<name>.npy verbatim.
+    """
+    import json
+
+    manifest = json.loads((npy_bundle_dir / "manifest.json").read_text())
+    by_role_name: dict[tuple[str, str], dict[str, object]] = {
+        (entry["role"], entry["name"]): entry for entry in manifest["files"]
+    }
+
+    from benchmarks.parity.boozer_derivative_input_census import (
+        CENSUS_BOUNDARY_ARRAY_ORDER,
+        CENSUS_BOUNDARY_SCALAR_ORDER,
+    )
+
+    for name in list(CENSUS_BOUNDARY_ARRAY_ORDER) + list(CENSUS_BOUNDARY_SCALAR_ORDER):
+        cpu_entry = by_role_name[("cpu", name)]
+        canonical_entry = by_role_name[("canonical", name)]
+        assert cpu_entry["sha256"] == canonical_entry["sha256"], (
+            f"canonical_{name}.npy diverged from cpu_{name}.npy "
+            f"({cpu_entry['sha256']!r} vs {canonical_entry['sha256']!r}); "
+            "the canonical bundle must come from the CPU oracle."
+        )
+        cpu_path = npy_bundle_dir / cpu_entry["path"]
+        canonical_path = npy_bundle_dir / canonical_entry["path"]
+        assert cpu_path.read_bytes() == canonical_path.read_bytes()
+
+
+def test_dump_arrays_as_npy_canonical_loads_with_expected_shapes(npy_bundle_dir):
+    """Loading every canonical_<name>.npy returns float64 with the manifest shape."""
+    import json
+
+    manifest = json.loads((npy_bundle_dir / "manifest.json").read_text())
+    canonical_entries = [e for e in manifest["files"] if e["role"] == "canonical"]
+    assert canonical_entries, "manifest missing canonical role entries"
+
+    from benchmarks.parity.boozer_derivative_input_census import (
+        CENSUS_BOUNDARY_ARRAY_ORDER,
+        CENSUS_BOUNDARY_SCALAR_ORDER,
+    )
+
+    expected_names = set(CENSUS_BOUNDARY_ARRAY_ORDER) | set(
+        CENSUS_BOUNDARY_SCALAR_ORDER
+    )
+    seen_names = {e["name"] for e in canonical_entries}
+    assert expected_names.issubset(seen_names)
+
+    for entry in canonical_entries:
+        arr = np.load(npy_bundle_dir / entry["path"], allow_pickle=False)
+        assert arr.dtype == np.float64
+        assert list(int(s) for s in arr.shape) == entry["shape"]
+        if entry["kind"] == "scalar":
+            assert arr.shape == ()
+        else:
+            assert arr.shape != ()
