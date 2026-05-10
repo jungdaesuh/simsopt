@@ -379,8 +379,8 @@ def boozer_residual_scalar_and_grad_cpu_ordered(
         dx0 = dx_ds[i, j, 0, :]
         dx1 = dx_ds[i, j, 1, :]
         dx2 = dx_ds[i, j, 2, :]
-        dB0 = (
-            dB_dX[i, j, 0, 0] * dx0 + dB_dX[i, j, 1, 0] * dx1 + dB_dX[i, j, 2, 0] * dx2
+        dB0 = dB_dX[i, j, 0, 0] * dx0 + (
+            dB_dX[i, j, 1, 0] * dx1 + dB_dX[i, j, 2, 0] * dx2
         )
         dB1 = (
             dB_dX[i, j, 0, 1] * dx0 + dB_dX[i, j, 1, 1] * dx1 + dB_dX[i, j, 2, 1] * dx2

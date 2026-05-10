@@ -18,12 +18,15 @@ from conftest import (
     _restore_loaded_jax_runtime_config,
     ensure_gpu_determinism_xla_flag,
 )
+
 _BACKEND_MODULE_NAMES = (
     "simsopt",
     "simsopt.backend",
     "simsopt.backend.runtime",
 )
 _MISSING_MODULE = object()
+
+
 def _snapshot_backend_modules() -> dict[str, object]:
     return {
         name: sys.modules.get(name, _MISSING_MODULE) for name in _BACKEND_MODULE_NAMES
@@ -373,6 +376,64 @@ def test_fast_mode_policy_helpers(monkeypatch):
     _assert_transfer_guard_resolution(
         backend,
         mode="jax_gpu_fast",
+        expected="log",
+    )
+
+
+def test_jax_cpu_fast_mode_wiring(monkeypatch):
+    """Slice DM-A wiring check: ``jax_cpu_fast`` must round-trip through every
+    mode-keyed SSOT (runtime target, policy, field-kernel defaults, sharding,
+    transfer guard) without raising ``KeyError``.
+    """
+    _clear_backend_env(monkeypatch)
+    _disable_chunk_autotune(monkeypatch)
+    backend = _fresh_backend()
+
+    config = backend.set_backend("jax_cpu_fast", configure_runtime=False)
+
+    assert config.mode == "jax_cpu_fast"
+    assert config.backend == "jax"
+    assert config.jax_platform == "cpu"
+    assert backend.get_backend_mode() == "jax_cpu_fast"
+    assert backend.get_backend() == "jax"
+    assert backend.get_jax_platform() == "cpu"
+
+    policy = backend.get_backend_policy()
+
+    _assert_backend_policy(
+        policy,
+        mode="jax_cpu_fast",
+        backend_name="jax",
+        platform="cpu",
+        strict=False,
+        parity_mode=False,
+        requires_x64=True,
+        chunk_policy="performance_tuned",
+        tolerance_tier="fast",
+        compilation_cache_policy="optional_persistent",
+        provenance_label="jax_cpu_fast",
+    )
+    assert backend.is_parity_mode() is False
+    assert backend.is_parity_mode("jax_cpu_fast") is False
+
+    tuning = backend.get_field_kernel_tuning("jax_cpu_fast")
+    assert tuning.mode == "jax_cpu_fast"
+    assert tuning.chunk_policy == "performance_tuned"
+    assert tuning.coil_chunk_size == 64
+    assert tuning.quadrature_block_size == 64
+    assert backend.get_coil_chunk_size("jax_cpu_fast") == 64
+    assert backend.get_quadrature_block_size("jax_cpu_fast") == 64
+
+    runtime = sys.modules["simsopt.backend.runtime"]
+    monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 0)
+    monkeypatch.setattr(runtime, "_detect_global_jax_device_count", lambda policy: 0)
+    sharding_tuning = backend.get_sharding_tuning("jax_cpu_fast")
+    assert sharding_tuning.strategy == "none"
+    assert backend.get_sharding_strategy("jax_cpu_fast") == "none"
+
+    _assert_transfer_guard_resolution(
+        backend,
+        mode="jax_cpu_fast",
         expected="log",
     )
 
@@ -1276,7 +1337,9 @@ def test_as_jax_array_initializes_distributed_runtime_before_device_put(monkeypa
     )
 
 
-def test_as_runtime_array_initializes_distributed_runtime_before_device_put(monkeypatch):
+def test_as_runtime_array_initializes_distributed_runtime_before_device_put(
+    monkeypatch,
+):
     _assert_distributed_runtime_initializes_before_device_put(
         monkeypatch,
         lambda math_utils: math_utils.as_runtime_float64(
@@ -1641,10 +1704,7 @@ def test_restore_loaded_jax_runtime_config_restores_nullable_fields_to_none():
         "jax_platforms": "cpu",
         "jax_compilation_cache_dir": "/tmp/simsopt-jax-restore-cache",
     }
-    original = {
-        name: getattr(jax_module.config, name)
-        for name in snapshot
-    }
+    original = {name: getattr(jax_module.config, name) for name in snapshot}
     try:
         for name, value in mutated.items():
             jax_module.config.update(name, value)

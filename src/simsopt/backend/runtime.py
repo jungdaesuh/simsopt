@@ -5,9 +5,10 @@ This module keeps the legacy environment-variable contract working while adding
 an explicit mode-based public API for the new runtime surface:
 
 - ``native_cpu``
+- ``jax_cpu_fast``
 - ``jax_cpu_parity``
-- ``jax_gpu_parity``
 - ``jax_gpu_fast``
+- ``jax_gpu_parity``
 - ``jax_metal_smoke``
 
 The mode API is the SSOT. The older ``SIMSOPT_BACKEND`` /
@@ -99,14 +100,16 @@ _GPU_DETERMINISM_XLA_FLAGS = (
 
 VALID_BACKEND_MODES = (
     "native_cpu",
+    "jax_cpu_fast",
     "jax_cpu_parity",
-    "jax_gpu_parity",
     "jax_gpu_fast",
+    "jax_gpu_parity",
     "jax_metal_smoke",
 )
 
 _MODE_TO_RUNTIME = {
     "native_cpu": ("cpu", "cpu"),
+    "jax_cpu_fast": ("jax", "cpu"),
     "jax_cpu_parity": ("jax", "cpu"),
     "jax_gpu_parity": ("jax", "cuda"),
     "jax_gpu_fast": ("jax", "cuda"),
@@ -129,6 +132,15 @@ _MODE_POLICY_DEFAULTS = {
         "tolerance_tier": "cpu_reference",
         "compilation_cache_policy": "not_applicable",
         "provenance_label": "native_cpu",
+        **_NO_CI_REPRODUCIBILITY_DEFAULTS,
+    },
+    "jax_cpu_fast": {
+        "parity_mode": False,
+        "requires_x64": True,
+        "chunk_policy": "performance_tuned",
+        "tolerance_tier": "fast",
+        "compilation_cache_policy": "optional_persistent",
+        "provenance_label": "jax_cpu_fast",
         **_NO_CI_REPRODUCIBILITY_DEFAULTS,
     },
     "jax_cpu_parity": {
@@ -175,6 +187,7 @@ _MODE_POLICY_DEFAULTS = {
 
 _FIELD_KERNEL_DEFAULTS = {
     "native_cpu": {"coil_chunk_size": 0, "quadrature_block_size": 0},
+    "jax_cpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64},
     "jax_cpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0},
     "jax_gpu_parity": {"coil_chunk_size": 16, "quadrature_block_size": 0},
     "jax_gpu_fast": {"coil_chunk_size": 64, "quadrature_block_size": 64},
@@ -188,6 +201,7 @@ _POINT_CHUNK_SIZE_BY_POLICY = {
 _PAIRWISE_PENALTY_CHUNK_SIZE_BY_POLICY = dict(_POINT_CHUNK_SIZE_BY_POLICY)
 _MODE_SHARDING_DEFAULTS = {
     "native_cpu": "none",
+    "jax_cpu_fast": "none",
     "jax_cpu_parity": "none",
     "jax_gpu_parity": "none",
     "jax_gpu_fast": "hybrid",
@@ -296,6 +310,7 @@ _FIELD_KERNEL_ENV_BY_KEY = {
 }
 _DEFAULT_TRANSFER_GUARD_BY_MODE = {
     "native_cpu": None,
+    "jax_cpu_fast": "log",
     "jax_cpu_parity": "log",
     "jax_gpu_parity": "log",
     "jax_gpu_fast": "log",
@@ -467,9 +482,7 @@ def target_lane_purity_active() -> bool:
 
 class _StrictTargetLanePurity:
     def __enter__(self):
-        self._token = _target_lane_purity_depth.set(
-            _target_lane_purity_depth.get() + 1
-        )
+        self._token = _target_lane_purity_depth.set(_target_lane_purity_depth.get() + 1)
         return self
 
     def __exit__(self, exc_type, exc, traceback):
