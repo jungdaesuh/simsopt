@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
+import numpy as np
+
 from geo._frontier_test_helpers import (
     load_frontier_campaign_execution_module,
     load_frontier_campaign_module,
@@ -61,6 +63,8 @@ class FrontierScalarizationTests(unittest.TestCase):
                 "demo.nc",
                 "--stage2-bs-path",
                 "/tmp/demo/biot_savart_opt.json",
+                "--frontier-hypervolume-reference",
+                "auto:seed",
             ]
         )
         lane_spec = frontier_campaign_module.FrontierLaneSpec(
@@ -303,7 +307,7 @@ class FrontierScalarizationTests(unittest.TestCase):
                 tmpdir,
                 "achievement.json",
                 {
-                    "schema_version": "frontier_achievement_spec_v1",
+                    "schema_version": module.FRONTIER_ACHIEVEMENT_SPEC_SCHEMA_VERSION,
                     "lanes": [
                         {
                             "lane_id": "lane_tradeoff",
@@ -313,6 +317,8 @@ class FrontierScalarizationTests(unittest.TestCase):
                                 "qa_error": 0.011,
                                 "boozer_residual": 0.007,
                             },
+                            "frontier_reference_qa_scale": 0.011 * 0.25,
+                            "frontier_reference_boozer_scale": 0.007 * 0.25,
                             "metric_weights": {
                                 "iota": 2.0,
                                 "volume": 1.5,
@@ -347,7 +353,9 @@ class FrontierScalarizationTests(unittest.TestCase):
                 "frontier_reference_iota": 0.17,
                 "frontier_reference_volume": 0.105,
                 "frontier_reference_qa": 0.011,
+                "frontier_reference_qa_scale": 0.011 * 0.25,
                 "frontier_reference_boozer": 0.007,
+                "frontier_reference_boozer_scale": 0.007 * 0.25,
                 "frontier_chebyshev_rho": 0.02,
                 "frontier_chebyshev_sharpness": 18.0,
                 "frontier_chebyshev_weight_iota": 2.0,
@@ -370,6 +378,8 @@ class FrontierScalarizationTests(unittest.TestCase):
                 boozer_reference=0.006,
                 iota_scale=0.03,
                 volume_scale=0.02,
+                qs_scale=0.0025,
+                boozer_scale=0.0015,
                 chebyshev_sharpness=sharpness,
                 chebyshev_rho=0.0,
             )
@@ -388,6 +398,81 @@ class FrontierScalarizationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 module._frontier_chebyshev_goal(objective_eval, config(invalid))
 
+    def test_chebyshev_goal_uses_qs_scale_distinct_from_qs_reference(self):
+        """F1.1: chebyshev gradient and delta divide by qs_scale, not qs_reference."""
+        module = load_frontier_scalarization_module()
+
+        def config(qs_scale_value):
+            return SimpleNamespace(
+                chebyshev_weight_iota=1.0,
+                chebyshev_weight_volume=1.0,
+                chebyshev_weight_qa=1.0,
+                chebyshev_weight_boozer=1.0,
+                iota_reference=0.18,
+                volume_reference=0.12,
+                qs_reference=0.010,
+                boozer_reference=0.006,
+                iota_scale=0.03,
+                volume_scale=0.02,
+                qs_scale=qs_scale_value,
+                boozer_scale=0.0015,
+                chebyshev_sharpness=12.0,
+                chebyshev_rho=0.0,
+            )
+
+        objective_eval = {
+            "J_iota_metric": 0.18,
+            "J_volume_metric": 0.12,
+            "J_QS": 0.020,
+            "J_Boozer": 0.006,
+            "dJ_iota_metric": [0.0],
+            "dJ_volume_metric": [0.0],
+            "dJ_QS": [1.0],
+            "dJ_Boozer": [0.0],
+        }
+        # Halving qs_scale must double the qa-axis gradient contribution.
+        # If the implementation still divided by qs_reference, halving
+        # qs_scale would have no effect on the gradient. The softmax weight
+        # of the QA axis nudges by O(1/sharpness) when scale halves, so we
+        # require ~6 decimal places, not bit-exact equality.
+        result_a = module._frontier_chebyshev_goal(objective_eval, config(0.005))
+        result_b = module._frontier_chebyshev_goal(objective_eval, config(0.0025))
+        grad_a = float(np.asarray(result_a["frontier_scalarization_grad"])[0])
+        grad_b = float(np.asarray(result_b["frontier_scalarization_grad"])[0])
+        self.assertAlmostEqual(grad_b / grad_a, 2.0, places=6)
+
+    def test_excess_penalty_uses_qs_scale_distinct_from_qs_reference(self):
+        """F1.3: epsilon excess penalty divides by qs_scale, not qs_reference."""
+        module = load_frontier_scalarization_module()
+
+        config = SimpleNamespace(
+            qs_reference=0.010,
+            boozer_reference=0.006,
+            qs_scale=0.005,
+            boozer_scale=0.003,
+            epsilon_constraint_qa_max=0.012,
+            epsilon_constraint_boozer_max=None,
+            epsilon_penalty_weight=4.0,
+        )
+        objective_eval = {
+            "J_QS": 0.020,
+            "J_Boozer": 0.005,
+            "dJ_QS": np.asarray([1.0]),
+            "dJ_Boozer": np.asarray([0.0]),
+        }
+        penalties = module._frontier_epsilon_penalties(
+            objective_eval,
+            frontier_goal_config=config,
+        )
+        excess = 0.020 - 0.012
+        expected_ratio = excess / config.qs_scale
+        expected_penalty = config.epsilon_penalty_weight * expected_ratio ** 2
+        self.assertAlmostEqual(
+            penalties["qa_error"]["penalty"],
+            expected_penalty,
+            places=12,
+        )
+
     def test_achievement_scalarization_scaling_invariance(self):
         module = load_frontier_scalarization_module()
         candidates = {"member_a": (0.20, 0.13, 0.009, 0.005), "member_b": (0.16, 0.11, 0.011, 0.007)}
@@ -404,6 +489,8 @@ class FrontierScalarizationTests(unittest.TestCase):
                 boozer_reference=0.006 * scale,
                 iota_scale=0.03 * scale,
                 volume_scale=0.02 * scale,
+                qs_scale=0.0025 * scale,
+                boozer_scale=0.0015 * scale,
                 chebyshev_sharpness=12.0,
                 chebyshev_rho=0.02,
             )
@@ -508,14 +595,17 @@ class FrontierScalarizationTests(unittest.TestCase):
     def test_generate_frontier_lane_specs_full_simplex_mode_uses_seed_reference_metrics(self):
         module = load_frontier_scalarization_module()
 
+        # 4 directions == C(1+4-1, 4-1) is the partition=1 Das-Dennis count.
+        # Selection-by-rounding over a larger family is no longer permitted; the
+        # request must match a Das-Dennis count exactly when partitions is None.
         lane_specs = self._generate_lanes(
             module,
             reference_mode=module.FRONTIER_REFERENCE_MODE_ACHIEVEMENT_FULL_SIMPLEX,
-            num_lanes=5,
+            num_lanes=4,
             stage2_results={"FINAL_IOTA": 0.17, "FINAL_VOLUME": 0.105, "NONQS_RATIO": 0.011, "BOOZER_RESIDUAL": 0.007},
         )
 
-        self.assertEqual(len(lane_specs), 5)
+        self.assertEqual(len(lane_specs), 4)
         self.assertTrue(all(lane.scalarization_type == module.FRONTIER_REFERENCE_MODE_ACHIEVEMENT for lane in lane_specs))
         self.assertTrue(all(lane.scalarization_params["frontier_reference_iota"] == 0.17 and lane.scalarization_params["frontier_reference_volume"] == 0.105 for lane in lane_specs))
         self.assertTrue(all(lane.scalarization_params["frontier_chebyshev_sharpness"] == 12.0 for lane in lane_specs))
@@ -529,23 +619,49 @@ class FrontierScalarizationTests(unittest.TestCase):
             )
         )
 
+    def test_generate_frontier_lane_specs_full_simplex_rejects_non_dasdennis_count(self):
+        module = load_frontier_scalarization_module()
+
+        with self.assertRaisesRegex(ValueError, "does not match any Das-Dennis"):
+            self._generate_lanes(
+                module,
+                reference_mode=module.FRONTIER_REFERENCE_MODE_ACHIEVEMENT_FULL_SIMPLEX,
+                num_lanes=5,
+                stage2_results={"FINAL_IOTA": 0.17, "FINAL_VOLUME": 0.105, "NONQS_RATIO": 0.011, "BOOZER_RESIDUAL": 0.007},
+            )
+
     def test_generate_frontier_lane_specs_full_simplex_partitions_emit_full_direction_family(self):
         module = load_frontier_scalarization_module()
 
         lane_specs = self._generate_lanes(
             module,
             reference_mode=module.FRONTIER_REFERENCE_MODE_ACHIEVEMENT_FULL_SIMPLEX,
-            num_lanes=3,
+            num_lanes=4,
             stage2_results={"FINAL_IOTA": 0.17, "FINAL_VOLUME": 0.105, "NONQS_RATIO": 0.011, "BOOZER_RESIDUAL": 0.007},
             full_simplex_partitions=1,
         )
         directions = module.generate_frontier_reference_directions(
-            requested_num_directions=3,
+            requested_num_directions=4,
             n_dim=4,
             partitions=1,
         )
 
         self.assertEqual(len(lane_specs), 4)
+        for lane in lane_specs:
+            weights = (
+                lane.scalarization_params["frontier_chebyshev_weight_iota"],
+                lane.scalarization_params["frontier_chebyshev_weight_volume"],
+                lane.scalarization_params["frontier_chebyshev_weight_qa"],
+                lane.scalarization_params["frontier_chebyshev_weight_boozer"],
+            )
+            self.assertAlmostEqual(sum(weights), 1.0, places=15)
+            for weight in weights:
+                self.assertGreaterEqual(weight, module._WEIGHT_FLOOR / 2.0)
+        # Each direction places ~1.0 on a single axis; flooring three other
+        # components at ``_WEIGHT_FLOOR`` and renormalizing to a unit simplex
+        # leaves the dominant axis at ``1 / (1 + 3·_WEIGHT_FLOOR)``.
+        dominant_weight = 1.0 / (1.0 + 3.0 * module._WEIGHT_FLOOR)
+        floor_weight = module._WEIGHT_FLOOR / (1.0 + 3.0 * module._WEIGHT_FLOOR)
         observed_weight_vectors = {
             (
                 lane.scalarization_params["frontier_chebyshev_weight_iota"],
@@ -555,9 +671,25 @@ class FrontierScalarizationTests(unittest.TestCase):
             )
             for lane in lane_specs
         }
-        self.assertEqual(observed_weight_vectors, {(1.0, 1.0e-12, 1.0e-12, 1.0e-12), (1.0e-12, 1.0, 1.0e-12, 1.0e-12), (1.0e-12, 1.0e-12, 1.0, 1.0e-12), (1.0e-12, 1.0e-12, 1.0e-12, 1.0)})
+        self.assertEqual(
+            observed_weight_vectors,
+            {
+                (dominant_weight, floor_weight, floor_weight, floor_weight),
+                (floor_weight, dominant_weight, floor_weight, floor_weight),
+                (floor_weight, floor_weight, dominant_weight, floor_weight),
+                (floor_weight, floor_weight, floor_weight, dominant_weight),
+            },
+        )
         self.assertEqual(len(directions), 4)
-        self.assertEqual(set(directions), {(1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0), (0.0, 0.0, 0.0, 1.0)})
+        self.assertEqual(
+            set(directions),
+            {
+                (1.0, 0.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0, 0.0),
+                (0.0, 0.0, 1.0, 0.0),
+                (0.0, 0.0, 0.0, 1.0),
+            },
+        )
 
     def test_lane_rng_seed_uses_explicit_lane_index(self):
         execution_module = load_frontier_campaign_execution_module()
@@ -568,4 +700,212 @@ class FrontierScalarizationTests(unittest.TestCase):
                 execution_module.lane_rng_seed(42, lane_index=3),
             ),
             (42, 45),
+        )
+
+    def test_chebyshev_goal_uses_separate_qs_scale(self):
+        # F1.1: ``qs_scale`` decouples the Chebyshev gradient step from
+        # ``qs_reference``. To isolate the denominator, set every metric
+        # exactly at its reference (deltas all zero, softmax weights uniform);
+        # the only term that varies between configurations is the
+        # ``1 / qs_scale`` factor in the gradient.
+        module = load_frontier_scalarization_module()
+
+        def config(qs_scale):
+            return SimpleNamespace(
+                chebyshev_weight_iota=1.0,
+                chebyshev_weight_volume=1.0,
+                chebyshev_weight_qa=1.0,
+                chebyshev_weight_boozer=1.0,
+                iota_reference=0.18,
+                volume_reference=0.12,
+                qs_reference=1.0,
+                qs_scale=qs_scale,
+                boozer_reference=0.006,
+                boozer_scale=0.0015,
+                iota_scale=0.03,
+                volume_scale=0.02,
+                chebyshev_sharpness=12.0,
+                chebyshev_rho=1.0e-3,
+            )
+
+        objective_eval = {
+            "J_iota_metric": 0.18,
+            "J_volume_metric": 0.12,
+            "J_QS": 1.0,
+            "J_Boozer": 0.006,
+            "dJ_iota_metric": [0.0, 0.0],
+            "dJ_volume_metric": [0.0, 0.0],
+            "dJ_QS": [1.0, 0.0],
+            "dJ_Boozer": [0.0, 0.0],
+        }
+        eval_half = module._frontier_chebyshev_goal(objective_eval, config(qs_scale=0.5))
+        eval_one = module._frontier_chebyshev_goal(objective_eval, config(qs_scale=1.0))
+        self.assertAlmostEqual(
+            float(eval_half["frontier_scalarization_grad"][0])
+            / float(eval_one["frontier_scalarization_grad"][0]),
+            2.0,
+            places=10,
+        )
+
+    def test_excess_penalty_uses_qs_scale_not_qs_reference(self):
+        # F1.3: epsilon excess penalty divides by ``qs_scale``, not
+        # ``qs_reference``. Holding qs_reference fixed and varying qs_scale
+        # must change the penalty value.
+        module = load_frontier_scalarization_module()
+
+        def config(qs_scale):
+            return SimpleNamespace(
+                qs_reference=0.010,
+                boozer_reference=0.006,
+                qs_scale=qs_scale,
+                boozer_scale=0.003,
+                epsilon_constraint_qa_max=0.012,
+                epsilon_constraint_boozer_max=None,
+                epsilon_penalty_weight=4.0,
+            )
+
+        objective_eval = {
+            "J_QS": 0.020,
+            "J_Boozer": 0.005,
+            "dJ_QS": np.asarray([1.0]),
+            "dJ_Boozer": np.asarray([0.0]),
+        }
+        penalty_at_scale_one = module._frontier_epsilon_penalties(
+            objective_eval,
+            frontier_goal_config=config(0.005),
+        )
+        penalty_at_scale_two = module._frontier_epsilon_penalties(
+            objective_eval,
+            frontier_goal_config=config(0.010),
+        )
+        # Doubling qs_scale halves the excess_ratio; penalty ∝ ratio^2 so
+        # penalty quarters.
+        self.assertAlmostEqual(
+            penalty_at_scale_two["qa_error"]["penalty"] * 4.0,
+            penalty_at_scale_one["qa_error"]["penalty"],
+            places=12,
+        )
+
+    def test_achievement_spec_v1_loads_fail(self):
+        # F1.1 / F1.3: the schema bump from v1 to v2 is a hard load-time
+        # failure. Old specs must be migrated, not silently accepted.
+        module = load_frontier_scalarization_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stale_path = self._write_spec(
+                tmpdir,
+                "achievement_v1.json",
+                {
+                    "schema_version": "frontier_achievement_spec_v1",
+                    "lanes": [
+                        {
+                            "lane_id": "lane_a",
+                            "reference_point": {
+                                "iota": 0.17,
+                                "volume": 0.105,
+                                "qa_error": 0.011,
+                                "boozer_residual": 0.007,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "frontier_achievement_spec_v2",
+            ):
+                self._generate_lanes(
+                    module,
+                    reference_mode=module.FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
+                    reference_points_file=str(stale_path),
+                )
+
+    def test_physics_total_matches_across_alm_and_non_alm_branches(self):
+        # F1.2: ``physics_total`` (ALM) and ``total`` (non-ALM) must both
+        # include the full geometry-penalty bundle so a fixed physical
+        # configuration produces identical pre-replacement values.
+        module = load_frontier_scalarization_module()
+
+        grad_dim = 3
+
+        def make_eval():
+            return {
+                "J_QS_objective": 0.4,
+                "dJ_QS_objective": np.zeros(grad_dim),
+                "J_Boozer_objective": 0.3,
+                "dJ_Boozer_objective": np.zeros(grad_dim),
+                "J_iota": 0.1,
+                "dJ_iota": np.zeros(grad_dim),
+                "J_volume": 0.2,
+                "dJ_volume": np.zeros(grad_dim),
+                "J_len": 5.0,
+                "dJ_len": np.ones(grad_dim),
+                "J_cc": 1.5,
+                "dJ_cc": np.full(grad_dim, 0.5),
+                "J_cs": 0.75,
+                "dJ_cs": np.full(grad_dim, 0.25),
+                "J_curvature": 2.0,
+                "dJ_curvature": np.full(grad_dim, 0.1),
+                "J_surf": 0.6,
+                "dJ_surf": np.full(grad_dim, 0.2),
+                "J_poloidal_extent": 0.3,
+                "dJ_poloidal_extent": np.full(grad_dim, 0.05),
+                "total": 0.0,
+                "grad": np.zeros(grad_dim),
+            }
+
+        config = SimpleNamespace(
+            scalarization_type="weight_schedule_v1",
+        )
+        common_args = dict(
+            enabled=True,
+            frontier_goal_config=config,
+            surface_iota_term=SimpleNamespace(
+                J=lambda: 0.18,
+                dJ=lambda: np.zeros(grad_dim),
+            ),
+            surface_volume_term=SimpleNamespace(
+                J=lambda: 0.12,
+                dJ=lambda: np.zeros(grad_dim),
+            ),
+            effective_res_weight=1.0,
+            effective_iotas_weight=1.0,
+            effective_volume_weight=1.0,
+            length_weight=2.0,
+            cc_weight=0.5,
+            cs_weight=0.25,
+            curvature_weight=0.1,
+            surf_dist_weight=0.05,
+            poloidal_extent_weight=0.025,
+        )
+
+        non_alm_eval = module.apply_frontier_scalarization_override(
+            make_eval(),
+            **common_args,
+        )
+
+        alm_payload = make_eval()
+        alm_payload["constraint_values"] = np.zeros(2)
+        alm_payload["constraint_grads"] = np.zeros((2, grad_dim))
+        alm_eval = module.apply_frontier_scalarization_override(
+            alm_payload,
+            alm_formulation="weighted_sum",
+            alm_multipliers=np.zeros(2),
+            alm_penalty=1.0,
+            **common_args,
+        )
+
+        # Same physical configuration must yield the same pre-replacement
+        # geometry+frontier total; non-ALM stores it under ``total`` and ALM
+        # under ``physics_total`` / ``base_total``.
+        self.assertAlmostEqual(
+            float(non_alm_eval["total"]),
+            float(alm_eval["physics_total"]),
+            places=12,
+        )
+        self.assertAlmostEqual(
+            float(alm_eval["physics_total"]),
+            float(alm_eval["base_total"]),
+            places=12,
         )

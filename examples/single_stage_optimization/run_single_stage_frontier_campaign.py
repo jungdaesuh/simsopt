@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import json
@@ -15,9 +16,11 @@ if str(SCRIPT_DIR) not in sys.path:
 import run_single_stage_goal_mode_comparison as goal_mode_comparison  # noqa: E402
 from banana_opt.frontier_archive import (  # noqa: E402
     FRONTIER_ARCHIVE_STATE_PROVISIONAL,
+    HYPERVOLUME_REFERENCE_AUTO_SEED_SENTINEL,
     build_archive_member_from_results,
     certified_archive_members,
     finalize_archive_member,
+    parse_hypervolume_reference,
     resolve_hypervolume_reference,
     serialize_frontier_archive,
     update_frontier_archive,
@@ -54,6 +57,10 @@ from banana_opt.frontier_progress_state import (  # noqa: E402
     write_frontier_campaign_progress,
 )
 from banana_opt.frontier_scalarization import (  # noqa: E402
+    FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
+    FRONTIER_REFERENCE_MODE_ACHIEVEMENT_FULL_SIMPLEX,
+    FRONTIER_REFERENCE_MODE_EPSILON,
+    FRONTIER_REFERENCE_MODE_REFERENCE_POINTS,
     FRONTIER_REFERENCE_MODE_SHARED,
     FrontierLaneSpec,
     SUPPORTED_FRONTIER_REFERENCE_MODES,
@@ -64,6 +71,7 @@ from banana_opt.frontier_dominance import (  # noqa: E402
     PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR,
     PARETO_OBJECTIVE_NORMALIZATION_KIND_SEED_RELATIVE,
     build_pareto_objective_normalization,
+    build_pareto_objective_normalization_from_persisted_payload,
 )
 from banana_opt.frontier_runtime_calibration import (  # noqa: E402
     SUPPORTED_FRONTIER_RUNTIME_CALIBRATION_PROFILES,
@@ -128,6 +136,21 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser.add_argument(
         "--frontier-hypervolume-reference",
         default=None,
+        help=(
+            "REQUIRED. The campaign-wide hypervolume reference is a "
+            "campaign-level IMMUTABLE INVARIANT — operators must commit "
+            "to it explicitly. Accepted forms:\n"
+            "  * 'auto:seed' (explicit opt-in to the stage-2 seed metrics; "
+            "    commits the campaign to the semantics 'no certified lane "
+            "    regresses vs the seed on any Pareto axis' — if any axis "
+            "    regresses, archive serialization raises and the operator "
+            "    must rerun with explicit values)\n"
+            "  * Comma list of 4 floats in iota,volume,qa_error,boozer_residual "
+            "    order, e.g. '0.10,0.08,0.020,0.015'\n"
+            "  * key=val list, e.g. "
+            "    'iota=0.10,volume=0.08,qa_error=0.020,boozer_residual=0.015'\n"
+            "  * JSON object form with the same keys"
+        ),
     )
     parser.add_argument(
         "--frontier-reference-points-file",
@@ -234,11 +257,131 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         action="store_true",
         help="Resume a previously started frontier campaign from campaign_progress.json.",
     )
+    parser.add_argument(
+        "--allow-resume-arg-drift",
+        action="store_true",
+        help=(
+            "Permit CLI flags to override the persisted manifest on resume. "
+            "Default behavior restores manifest-authoritative fields silently so "
+            "the resumed campaign honors the original contract; with this flag "
+            "set, the user-supplied CLI values win and the manifest is rewritten "
+            "to match. --frontier-lane-warm-start-mode and --frontier-lane-workers "
+            "are runtime-only and not part of the manifest contract; supply them "
+            "on resume as needed."
+        ),
+    )
     return parser
 
 
+_REFERENCE_MODE_REQUIRED_FLAGS: dict[str, frozenset[str]] = {
+    FRONTIER_REFERENCE_MODE_REFERENCE_POINTS: frozenset(
+        {"frontier_reference_points_file"}
+    ),
+    FRONTIER_REFERENCE_MODE_ACHIEVEMENT: frozenset(
+        {"frontier_reference_points_file"}
+    ),
+    FRONTIER_REFERENCE_MODE_EPSILON: frozenset({"frontier_epsilon_spec_file"}),
+    FRONTIER_REFERENCE_MODE_ACHIEVEMENT_FULL_SIMPLEX: frozenset(
+        {"frontier_full_simplex_partitions"}
+    ),
+}
+_REFERENCE_MODE_FLAG_BLAME: dict[str, str] = {
+    "frontier_reference_points_file": "--frontier-reference-points-file",
+    "frontier_epsilon_spec_file": "--frontier-epsilon-spec-file",
+    "frontier_full_simplex_partitions": "--frontier-full-simplex-partitions",
+}
+
+
+def _modes_for_attribute(attribute: str) -> set[str]:
+    return {
+        mode
+        for mode, required in _REFERENCE_MODE_REQUIRED_FLAGS.items()
+        if attribute in required
+    }
+
+
+def _validate_reference_mode_flags(args: argparse.Namespace) -> None:
+    reference_mode = args.frontier_reference_mode
+    expected_flags = _REFERENCE_MODE_REQUIRED_FLAGS.get(reference_mode, frozenset())
+    for attribute, cli_flag in _REFERENCE_MODE_FLAG_BLAME.items():
+        if getattr(args, attribute, None) is None:
+            continue
+        if attribute in expected_flags:
+            continue
+        raise argparse.ArgumentTypeError(
+            f"{cli_flag} is only valid with "
+            f"--frontier-reference-mode in "
+            f"{sorted(_modes_for_attribute(attribute))!r}; got {reference_mode!r}"
+        )
+
+
+def _require_hypervolume_reference(args: argparse.Namespace) -> None:
+    """Enforce that --frontier-hypervolume-reference is supplied explicitly.
+
+    The campaign-wide hypervolume reference is a campaign-level IMMUTABLE
+    INVARIANT: there is no implicit default. Operators must either
+    commit to explicit metric values or opt in to the seed-derived
+    reference via the ``auto:seed`` sentinel. Failing here keeps the
+    ambiguous "seed silently wins" behavior out of every downstream
+    artifact (manifest, archive, summary, early-stop snapshot).
+
+    Also normalizes the spec by parsing it once so that malformed
+    explicit specs (e.g. wrong cardinality, bad JSON) surface at
+    argument parse time rather than after stage-2 seed loading.
+    """
+    reference_spec = args.frontier_hypervolume_reference
+    if reference_spec is None:
+        raise argparse.ArgumentTypeError(
+            "--frontier-hypervolume-reference is required. Pass explicit "
+            "metric values (e.g. '0.10,0.08,0.020,0.015' or "
+            "'iota=0.10,volume=0.08,qa_error=0.020,boozer_residual=0.015') or "
+            f"the {HYPERVOLUME_REFERENCE_AUTO_SEED_SENTINEL!r} sentinel to "
+            "opt in to the seed-derived reference."
+        )
+    if str(reference_spec).strip() == HYPERVOLUME_REFERENCE_AUTO_SEED_SENTINEL:
+        return
+    parse_hypervolume_reference(reference_spec)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    return build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv)
+    _validate_reference_mode_flags(args)
+    _require_hypervolume_reference(args)
+    return args
+
+
+_LOGGER = logging.getLogger("frontier_campaign")
+
+
+def _log_lane_workers_overridden_to_sequential(
+    *,
+    args: argparse.Namespace,
+    lane_execution_groups: list[list[tuple[int, FrontierLaneSpec]]],
+    runtime_defaults,
+) -> None:
+    if int(args.frontier_lane_workers) <= 1:
+        return
+    if not lane_execution_groups:
+        return
+    if any(len(group) > 1 for group in lane_execution_groups):
+        return
+    reasons: list[str] = []
+    if args.frontier_lane_warm_start_mode == FRONTIER_LANE_WARM_START_MODE_REUSE_LATEST_CERTIFIED:
+        reasons.append("warm_start_mode=reuse_latest_certified")
+    if int(runtime_defaults.early_stop_patience_lanes) > 0:
+        reasons.append(
+            f"early_stop_patience_lanes={runtime_defaults.early_stop_patience_lanes}"
+        )
+    if not reasons:
+        # frontier_lanes_require_ordered_execution returned True only when
+        # lane_workers itself is 1 — that path is excluded above.
+        reasons.append("unknown_dependency_predicate")
+    _LOGGER.warning(
+        "frontier_lane_workers=%d but lane execution groups serialized to size 1; "
+        "ordered execution forced by: %s",
+        int(args.frontier_lane_workers),
+        ", ".join(reasons),
+    )
 
 
 def run_goal_mode_case_safe(
@@ -319,26 +462,22 @@ def run_frontier_lane_execution_group(
         return list(executor.map(run_lane, executions))
 
 
-def maybe_resume_goal_mode_payload_from_artifacts(
+def _resume_payload(
     args: argparse.Namespace,
     *,
     goal_mode: str,
     stage2_bs_path: Path,
-    output_root: Path,
-) -> dict[str, object] | None:
-    case_output_root = output_root / goal_mode
-    if not case_output_root.exists():
-        return None
+    case_output_root: Path,
+    result_source: str,
+    results_path: Path,
+    results: dict[str, object],
+) -> dict[str, object]:
     command = goal_mode_comparison.build_single_stage_goal_mode_command(
         args,
         goal_mode=goal_mode,
         stage2_bs_path=stage2_bs_path,
         case_output_root=case_output_root,
     )
-    resumed_results = _load_resumed_results(case_output_root)
-    if resumed_results is None:
-        return None
-    result_source, results_path, results = resumed_results
     return {
         "status": "completed",
         "command": command,
@@ -349,32 +488,80 @@ def maybe_resume_goal_mode_payload_from_artifacts(
     }
 
 
-def _load_resumed_results(
+def maybe_resume_goal_mode_payload_from_artifacts(
+    args: argparse.Namespace,
+    *,
+    goal_mode: str,
+    stage2_bs_path: Path,
+    output_root: Path,
+) -> dict[str, object] | None:
+    case_output_root = output_root / goal_mode
+    if not case_output_root.exists():
+        return None
+    final_results = _load_final_results(case_output_root)
+    if final_results is not None:
+        result_source, results_path, results = final_results
+        return _resume_payload(
+            args,
+            goal_mode=goal_mode,
+            stage2_bs_path=stage2_bs_path,
+            case_output_root=case_output_root,
+            result_source=result_source,
+            results_path=results_path,
+            results=results,
+        )
+    salvage_results = _load_salvage_results(case_output_root)
+    if salvage_results is None:
+        return None
+    result_source, results_path, results = salvage_results
+    return _resume_payload(
+        args,
+        goal_mode=goal_mode,
+        stage2_bs_path=stage2_bs_path,
+        case_output_root=case_output_root,
+        result_source=result_source,
+        results_path=results_path,
+        results=results,
+    )
+
+
+def _load_final_results(
     case_output_root: Path,
 ) -> tuple[str, Path, dict[str, object]] | None:
     try:
         results_path = goal_mode_comparison.discover_single_results_path(
             case_output_root,
         )
+    except FileNotFoundError:
+        return None
+    try:
         return (
             "final",
             results_path,
             goal_mode_comparison.load_json(results_path),
         )
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+    except json.JSONDecodeError:
+        return None
+
+
+def _load_salvage_results(
+    case_output_root: Path,
+) -> tuple[str, Path, dict[str, object]] | None:
     try:
         result_source, results_path = (
             goal_mode_comparison.discover_single_stage_salvage_results_path(
                 case_output_root,
             )
         )
+    except FileNotFoundError:
+        return None
+    try:
         return (
             result_source,
             results_path,
             goal_mode_comparison.load_json(results_path),
         )
-    except (FileNotFoundError, json.JSONDecodeError):
+    except json.JSONDecodeError:
         return None
 
 
@@ -407,6 +594,79 @@ def load_resume_manifest(manifest_path: Path) -> dict[str, object] | None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     validate_frontier_campaign_manifest_payload(manifest)
     return manifest
+
+
+def _apply_manifest_overrides_to_args(
+    args: argparse.Namespace,
+    manifest: dict[str, object],
+) -> argparse.Namespace:
+    """Overlay manifest-authoritative fields onto args.
+
+    Returns a new ``argparse.Namespace`` so the original args object is not
+    mutated. Restores every field that is part of the persisted manifest
+    contract:
+
+    - ``FRONTIER_RUNTIME_CALIBRATION.profile.profile_name`` →
+      ``frontier_runtime_calibration_profile``.
+    - ``FRONTIER_RUNTIME_CALIBRATION.resolved_defaults.lane_budget`` /
+      ``total_budget`` → ``frontier_lane_budget`` / ``frontier_total_budget``.
+    - ``FRONTIER_EARLY_STOP_POLICY.{patience_lanes, min_certified,
+      min_hypervolume_gain}`` → matching ``frontier_early_stop_*`` fields.
+    - ``RNG_SEED`` → ``frontier_rng_seed``.
+    - ``FRONTIER_HYPERVOLUME_REFERENCE`` → ``frontier_hypervolume_reference``.
+    - ``PARETO_OBJECTIVE_NORMALIZATION.kind`` →
+      ``frontier_normalization_kind``.
+    - ``FRONTIER_RECOMMENDATION_POLICY`` →
+      ``frontier_recommendation_policy``.
+    - ``FRONTIER_REFERENCE_MODE`` → ``frontier_reference_mode``.
+    - ``FRONTIER_REFERENCE_POINTS_FILE`` /
+      ``FRONTIER_EPSILON_SPEC_FILE`` → matching ``frontier_*_file`` fields.
+    - ``FRONTIER_LANE_WARM_START_MODE`` → ``frontier_lane_warm_start_mode``.
+
+    Skips ``--frontier-lane-workers``: not part of the manifest contract
+    (runtime-only setting; the user can adjust thread count without
+    triggering arg-drift). ``--frontier-full-simplex-partitions`` is
+    captured indirectly via ``LANE_SPECS`` (handled by
+    ``resume_lane_specs_from_manifest``).
+    """
+
+    runtime_calibration = manifest["FRONTIER_RUNTIME_CALIBRATION"]
+    profile = runtime_calibration["profile"]
+    resolved = runtime_calibration["resolved_defaults"]
+    early_stop = manifest["FRONTIER_EARLY_STOP_POLICY"]
+    normalization = manifest["PARETO_OBJECTIVE_NORMALIZATION"]
+
+    overrides: dict[str, object] = {
+        "frontier_runtime_calibration_profile": profile["profile_name"],
+        "frontier_lane_budget": int(resolved["lane_budget"]),
+        "frontier_total_budget": int(resolved["total_budget"]),
+        "frontier_early_stop_patience_lanes": int(early_stop["patience_lanes"]),
+        "frontier_early_stop_min_certified": int(early_stop["min_certified"]),
+        "frontier_early_stop_min_hypervolume_gain": float(
+            early_stop["min_hypervolume_gain"]
+        ),
+        "frontier_rng_seed": int(manifest["RNG_SEED"]),
+        "frontier_hypervolume_reference": manifest["FRONTIER_HYPERVOLUME_REFERENCE"],
+        "frontier_normalization_kind": str(normalization["kind"]),
+        "frontier_recommendation_policy": str(
+            manifest["FRONTIER_RECOMMENDATION_POLICY"]
+        ),
+        "frontier_reference_mode": str(manifest["FRONTIER_REFERENCE_MODE"]),
+        "frontier_lane_warm_start_mode": str(
+            manifest["FRONTIER_LANE_WARM_START_MODE"]
+        ),
+    }
+
+    reference_points_file = manifest["FRONTIER_REFERENCE_POINTS_FILE"]
+    overrides["frontier_reference_points_file"] = (
+        None if reference_points_file is None else str(reference_points_file)
+    )
+    epsilon_spec_file = manifest["FRONTIER_EPSILON_SPEC_FILE"]
+    overrides["frontier_epsilon_spec_file"] = (
+        None if epsilon_spec_file is None else str(epsilon_spec_file)
+    )
+
+    return argparse.Namespace(**{**vars(args), **overrides})
 
 
 def persist_campaign_progress(
@@ -493,24 +753,58 @@ def resume_or_run_goal_mode_case(
     output_root: Path,
     resume: bool,
 ) -> dict[str, object]:
-    payload = (
-        maybe_resume_goal_mode_payload_from_artifacts(
+    if not resume:
+        return run_goal_mode_case_safe(
             args,
             goal_mode=goal_mode,
             stage2_bs_path=stage2_bs_path,
             output_root=output_root,
         )
-        if resume
-        else None
-    )
-    if payload is not None:
-        return payload
-    if resume:
-        resume_checkpoint = maybe_resume_solver_checkpoint_path(output_root / goal_mode)
-        if resume_checkpoint is not None:
-            args = argparse.Namespace(
-                **{**vars(args), "resume_solver_checkpoint": str(resume_checkpoint)},
+
+    case_output_root = output_root / goal_mode
+    if case_output_root.exists():
+        final_results = _load_final_results(case_output_root)
+        if final_results is not None:
+            result_source, results_path, results = final_results
+            return _resume_payload(
+                args,
+                goal_mode=goal_mode,
+                stage2_bs_path=stage2_bs_path,
+                case_output_root=case_output_root,
+                result_source=result_source,
+                results_path=results_path,
+                results=results,
             )
+
+    # Prefer continuing the optimizer from a solver checkpoint over treating a
+    # partial salvage snapshot as final. A killed lane that wrote both must
+    # resume the run from the checkpoint, not freeze on the partial best.
+    resume_checkpoint = maybe_resume_solver_checkpoint_path(case_output_root)
+    if resume_checkpoint is not None:
+        args = argparse.Namespace(
+            **{**vars(args), "resume_solver_checkpoint": str(resume_checkpoint)},
+        )
+        return run_goal_mode_case_safe(
+            args,
+            goal_mode=goal_mode,
+            stage2_bs_path=stage2_bs_path,
+            output_root=output_root,
+        )
+
+    if case_output_root.exists():
+        salvage_results = _load_salvage_results(case_output_root)
+        if salvage_results is not None:
+            result_source, results_path, results = salvage_results
+            return _resume_payload(
+                args,
+                goal_mode=goal_mode,
+                stage2_bs_path=stage2_bs_path,
+                case_output_root=case_output_root,
+                result_source=result_source,
+                results_path=results_path,
+                results=results,
+            )
+
     return run_goal_mode_case_safe(
         args,
         goal_mode=goal_mode,
@@ -521,7 +815,6 @@ def resume_or_run_goal_mode_case(
 
 def main() -> int:
     args = parse_args()
-    runtime_defaults = resolve_frontier_runtime_defaults_from_args(args)
     output_root = resolved_path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     summary_path = resolved_optional_path(args.summary_json)
@@ -536,11 +829,23 @@ def main() -> int:
     resume_manifest = None
     if args.resume:
         resume_manifest = load_resume_manifest(paths.manifest_path)
-        args = argparse.Namespace(**vars(args))
         if resume_manifest is not None:
+            if args.allow_resume_arg_drift:
+                _LOGGER.warning(
+                    "--allow-resume-arg-drift set; CLI runtime calibration / "
+                    "early-stop / RNG / normalization values may diverge from "
+                    "the persisted manifest and the manifest will be rewritten."
+                )
+                args = argparse.Namespace(**vars(args))
+            else:
+                args = _apply_manifest_overrides_to_args(args, resume_manifest)
             seed_artifact_path = resume_manifest.get("SEED_ARTIFACT_PATH")
             if seed_artifact_path is not None:
                 args.stage2_bs_path = str(resolved_path(str(seed_artifact_path)))
+        else:
+            args = argparse.Namespace(**vars(args))
+
+    runtime_defaults = resolve_frontier_runtime_defaults_from_args(args)
 
     if args.dry_run:
         stage2_bs_path, stage2_results_path, stage2_results = (
@@ -557,11 +862,28 @@ def main() -> int:
         reference_spec=args.frontier_hypervolume_reference,
         seed_results=stage2_results,
     )
-    pareto_objective_normalization = build_pareto_objective_normalization(
-        initial_hypervolume_reference,
-        kind=args.frontier_normalization_kind,
-        normalization_spec_path=args.frontier_normalization_spec_file,
-    )
+    # When resuming a manifest that locked in a normalization (especially the
+    # ``ideal_nadir`` kind whose ``--frontier-normalization-spec-file`` is not
+    # persisted), the manifest's PARETO_OBJECTIVE_NORMALIZATION payload is the
+    # authoritative SSOT for the resolved normalization. Rehydrating from the
+    # spec-file path would require the operator to re-pass the original CLI
+    # arg on every resume; instead, rebuild from the persisted payload so the
+    # manifest alone is sufficient to resume.
+    if (
+        resume_manifest is not None
+        and not args.allow_resume_arg_drift
+    ):
+        pareto_objective_normalization = (
+            build_pareto_objective_normalization_from_persisted_payload(
+                resume_manifest["PARETO_OBJECTIVE_NORMALIZATION"],
+            )
+        )
+    else:
+        pareto_objective_normalization = build_pareto_objective_normalization(
+            initial_hypervolume_reference,
+            kind=args.frontier_normalization_kind,
+            normalization_spec_path=args.frontier_normalization_spec_file,
+        )
 
     resumed_progress = None
     if args.resume and paths.progress_path.exists():
@@ -598,16 +920,26 @@ def main() -> int:
         campaign_id = resumed_progress.campaign_id
     else:
         campaign_id = uuid.uuid4().hex[:12]
-    manifest = build_frontier_campaign_manifest(
-        args,
-        campaign_id=campaign_id,
-        stage2_bs_path=stage2_bs_path,
-        stage2_results_path=stage2_results_path,
-        stage2_results=stage2_results,
-        lane_specs=lane_specs,
-        runtime_defaults=runtime_defaults,
+    should_refresh_manifest = (
+        not paths.manifest_path.exists()
+        or (args.resume and args.allow_resume_arg_drift)
     )
-    if not args.resume or not paths.manifest_path.exists():
+    # Only (re)build the campaign manifest payload when it will actually be
+    # written to disk. When resuming without drift, the on-disk manifest is
+    # the authoritative SSOT and the in-memory rebuild would (a) be discarded
+    # and (b) routes back through ``build_pareto_objective_normalization`` --
+    # which fails for ``ideal_nadir`` campaigns because the manifest never
+    # persists the original ``--frontier-normalization-spec-file`` path.
+    if should_refresh_manifest:
+        manifest = build_frontier_campaign_manifest(
+            args,
+            campaign_id=campaign_id,
+            stage2_bs_path=stage2_bs_path,
+            stage2_results_path=stage2_results_path,
+            stage2_results=stage2_results,
+            lane_specs=lane_specs,
+            runtime_defaults=runtime_defaults,
+        )
         write_json(paths.manifest_path, manifest)
 
     target_payload = (
@@ -629,13 +961,15 @@ def main() -> int:
     provisional_archive_members = [] if resumed_progress is None else list(
         resumed_progress.provisional_archive_members
     )
-    # Final hypervolume_reference may incorporate member-derived fallback
-    # once we have the resumed archive; it is recomputed at end-of-loop.
-    hypervolume_reference = resolve_hypervolume_reference(
-        reference_spec=args.frontier_hypervolume_reference,
-        seed_results=stage2_results,
-        members=archive_members,
-    )
+    # The campaign-wide hypervolume reference is IMMUTABLE: the value
+    # resolved above (CLI spec + seed) is the SSOT used by early-stop,
+    # history, the persisted archive, and the summary. No member-derived
+    # fallback, no post-loop re-resolve, no reporting-time nadir
+    # extension — if the certified archive regresses on any axis vs the
+    # resolved reference, ``serialize_frontier_archive`` fails fast and
+    # the operator must rerun with an explicit
+    # ``--frontier-hypervolume-reference``.
+    hypervolume_reference = initial_hypervolume_reference
     early_stop_status = (
         dict(resumed_progress.early_stop_status)
         if resumed_progress is not None
@@ -684,6 +1018,11 @@ def main() -> int:
             lane_workers=args.frontier_lane_workers,
         )
     )
+    _log_lane_workers_overridden_to_sequential(
+        args=args,
+        lane_execution_groups=lane_execution_groups,
+        runtime_defaults=runtime_defaults,
+    )
     for lane_execution_group in lane_execution_groups:
         executions = [
             build_frontier_lane_execution(
@@ -718,7 +1057,6 @@ def main() -> int:
                     payload=lane_payload,
                     rerun_contract=execution.lane_contract.rerun_contract,
                     archive_state=FRONTIER_ARCHIVE_STATE_PROVISIONAL,
-                    pareto_objective_normalization=pareto_objective_normalization,
                 )
                 provisional_archive_members.append(provisional_archive_member)
                 archive_member = finalize_archive_member(provisional_archive_member)
@@ -768,16 +1106,17 @@ def main() -> int:
             pareto_objective_normalization=pareto_objective_normalization,
         )
 
-    # Final reporting uses the post-loop certified archive, not the initial resume set.
-    hypervolume_reference = resolve_hypervolume_reference(
-        reference_spec=args.frontier_hypervolume_reference,
-        seed_results=stage2_results,
-        members=certified_members,
-    )
+    # Final reporting uses the SAME immutable ``hypervolume_reference``
+    # resolved before the lane loop. ``serialize_frontier_archive`` asserts
+    # the reference is a per-axis nadir for the certified archive; if a lane
+    # regressed vs the resolved reference it raises here so the user can
+    # rerun with an explicit ``--frontier-hypervolume-reference`` instead of
+    # silently extending the reference at reporting time.
     write_json(
         paths.archive_path,
         serialize_frontier_archive(
             certified_members,
+            campaign_id=campaign_id,
             hypervolume_reference=hypervolume_reference,
         ),
     )
@@ -796,6 +1135,7 @@ def main() -> int:
         stage2_bs_path=stage2_bs_path,
         stage2_results_path=stage2_results_path,
         stage2_results=stage2_results,
+        output_root=output_root,
         paths=paths,
         lane_specs=lane_specs,
         target_payload=target_payload,
@@ -805,10 +1145,21 @@ def main() -> int:
         delta_fn=goal_mode_comparison.delta,
         runtime_defaults=runtime_defaults,
         early_stop_status=early_stop_status,
+        hypervolume_reference=hypervolume_reference,
+        pareto_objective_normalization=pareto_objective_normalization,
     )
     write_json(paths.summary_path, summary)
     print(json.dumps(summary, indent=2))
-    return 0
+    if args.dry_run:
+        return 0
+    target_failed = (
+        not args.skip_target
+        and target_payload is not None
+        and target_payload.get("status") == "failed"
+    )
+    if target_failed:
+        return 1
+    return 0 if certified_members else 1
 
 
 if __name__ == "__main__":

@@ -147,7 +147,33 @@ class FrontierArchiveTests(unittest.TestCase):
         self.assertFalse(module.dominates(better, better))
         self.assertTrue(module.dominates(better, worse))
         self.assertFalse(module.dominates(worse, better))
-        self.assertFalse(module.dominates(better, worse) and module.dominates(worse, better))
+        # Anti-symmetry: at most one direction of dominance can hold.
+        self.assertTrue(
+            module.dominates(better, worse) ^ module.dominates(worse, better)
+        )
+
+    def test_dominates_raises_on_missing_or_none_metric(self):
+        module = load_frontier_dominance_module()
+        complete = {
+            "iota": 0.18,
+            "volume": 0.11,
+            "qa_error": 0.010,
+            "boozer_residual": 0.007,
+        }
+        missing_key = {key: complete[key] for key in complete if key != "qa_error"}
+        none_value = {**complete, "boozer_residual": None}
+
+        # Missing keys raise KeyError: completeness is the upstream invariant.
+        with self.assertRaises(KeyError):
+            module.dominates(missing_key, complete)
+        with self.assertRaises(KeyError):
+            module.dominates(complete, missing_key)
+        # None values raise ValueError: incomplete-data members must be
+        # filtered upstream via objective_metrics_complete.
+        with self.assertRaisesRegex(ValueError, "is None"):
+            module.dominates(none_value, complete)
+        with self.assertRaisesRegex(ValueError, "is None"):
+            module.dominates(complete, none_value)
 
     def test_archive_best_by_metric_uses_objective_directions(self):
         archive_module = load_frontier_archive_module()
@@ -303,6 +329,50 @@ class FrontierArchiveTests(unittest.TestCase):
                 for key, expected in expected_update.items():
                     self.assertEqual(update[key], expected)
                 self.assertEqual([member.member_id for member in updated_members], expected_ids)
+
+    def test_find_duplicate_member_index_returns_closest_match_with_lex_tiebreak(self):
+        archive_module = load_frontier_archive_module()
+        # Two incumbents both within the duplicate distance threshold of the
+        # candidate; the second is closer. Closest must win regardless of
+        # iteration order.
+        far_incumbent = self._member(
+            archive_module,
+            member_id="campaign:lane_far",
+            iota=0.180,
+            volume=0.110,
+            qa_error=0.0100,
+            boozer_residual=0.0070,
+        )
+        near_incumbent = self._member(
+            archive_module,
+            member_id="campaign:lane_near",
+            iota=0.1800001,
+            volume=0.1100001,
+            qa_error=0.0100001,
+            boozer_residual=0.0070001,
+        )
+        candidate = self._member(
+            archive_module,
+            member_id="campaign:lane_candidate",
+            iota=0.1800002,
+            volume=0.1100002,
+            qa_error=0.0100002,
+            boozer_residual=0.0070002,
+        )
+
+        forward_index = archive_module._find_duplicate_member_index(
+            [far_incumbent, near_incumbent],
+            candidate,
+            duplicate_distance_threshold=archive_module.DEFAULT_DUPLICATE_DISTANCE_THRESHOLD,
+        )
+        reversed_index = archive_module._find_duplicate_member_index(
+            [near_incumbent, far_incumbent],
+            candidate,
+            duplicate_distance_threshold=archive_module.DEFAULT_DUPLICATE_DISTANCE_THRESHOLD,
+        )
+
+        self.assertEqual([far_incumbent, near_incumbent][forward_index].member_id, "campaign:lane_near")
+        self.assertEqual([near_incumbent, far_incumbent][reversed_index].member_id, "campaign:lane_near")
 
     def test_update_frontier_archive_uses_fixed_ideal_nadir_normalization_for_duplicates(self):
         archive_module = load_frontier_archive_module()
@@ -489,6 +559,44 @@ class FrontierArchiveTests(unittest.TestCase):
         self.assertEqual(final_member.member_id, "campaign:lane_01")
         self.assertEqual(final_member.archive_state, archive_module.FRONTIER_ARCHIVE_STATE_CERTIFIED)
 
+    def test_finalize_archive_member_appends_rejected_suffix_to_uncertified_member(self):
+        archive_module = load_frontier_archive_module()
+        # Hardware-feasibility OK but final-feasibility off → uncertified.
+        rejected_payload = {
+            "result_source": "final",
+            "results_path": "/tmp/lane_rejected/results.json",
+            "results": {
+                "FINAL_IOTA": 0.18,
+                "FINAL_VOLUME": 0.11,
+                "NONQS_RATIO": 0.011,
+                "BOOZER_RESIDUAL": 0.007,
+                "FINAL_FEASIBILITY_OK": False,
+                "HARDWARE_CONSTRAINTS_OK": True,
+                "FINAL_TOPOLOGY_GATE_SUCCESS": True,
+                "FRONTIER_TRUST_OK": True,
+                "FRONTIER_REFERENCE_IOTA": 0.15,
+                "FRONTIER_REFERENCE_VOLUME": 0.10,
+                "FRONTIER_REFERENCE_QA": 0.012,
+                "FRONTIER_REFERENCE_BOOZER": 0.008,
+                "FRONTIER_RANK_OBJECTIVE_J": -1.0,
+                "OPTIMIZER_SUCCESS": True,
+                "TERMINATION_MESSAGE": "ok",
+            },
+        }
+        provisional_member = archive_module.build_archive_member_from_results(
+            campaign_id="campaign",
+            lane_id="lane_01",
+            payload=rejected_payload,
+            rerun_contract={},
+            archive_state=archive_module.FRONTIER_ARCHIVE_STATE_PROVISIONAL,
+        )
+        final_member = archive_module.finalize_archive_member(provisional_member)
+
+        self.assertFalse(provisional_member.hard_certification_ok)
+        self.assertEqual(provisional_member.member_id, "campaign:lane_01:provisional")
+        self.assertEqual(final_member.archive_state, archive_module.FRONTIER_ARCHIVE_STATE_REJECTED)
+        self.assertEqual(final_member.member_id, "campaign:lane_01:rejected")
+
     def test_build_frontier_lane_record_tracks_provisional_and_certified_ids(self):
         archive_module = load_frontier_archive_module()
         progress_state_module = load_frontier_progress_state_module()
@@ -528,17 +636,22 @@ class FrontierArchiveTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(hypervolume_total)
-        self.assertAlmostEqual(hypervolume_total, 3.6e-9)
+        # Default places=7 yields 5e-8 tolerance — 14x the expected magnitude
+        # of these ~1e-9 values. Tighten to delta=1e-15 (double-precision floor).
+        self.assertAlmostEqual(hypervolume_total, 3.6e-9, delta=1e-15)
         contributions = {member.member_id: member.hypervolume_contribution for member in annotated_members}
-        self.assertAlmostEqual(contributions["campaign:lane_01"], 1.2e-9)
-        self.assertAlmostEqual(contributions["campaign:lane_02"], 1.6e-9)
+        self.assertAlmostEqual(contributions["campaign:lane_01"], 1.2e-9, delta=1e-15)
+        self.assertAlmostEqual(contributions["campaign:lane_02"], 1.6e-9, delta=1e-15)
 
         serialized = archive_module.serialize_frontier_archive(
             [member_a, member_b],
+            campaign_id="campaign",
             hypervolume_reference=self.HYPERVOLUME_REFERENCE,
         )
-        self.assertAlmostEqual(serialized["hypervolume_total"], 3.6e-9)
+        self.assertAlmostEqual(serialized["hypervolume_total"], 3.6e-9, delta=1e-15)
         self.assertEqual(serialized["hypervolume_reference"], self.HYPERVOLUME_REFERENCE)
+        self.assertEqual(serialized["frontier_campaign_id"], "campaign")
+        self.assertIn("created_at", serialized)
 
     def test_hypervolume_permutation_invariance_and_cache_key(self):
         archive_module = load_frontier_archive_module()
@@ -586,6 +699,7 @@ class FrontierArchiveTests(unittest.TestCase):
             )
             archive_module.serialize_frontier_archive(
                 members,
+                campaign_id="campaign",
                 hypervolume_reference=self.HYPERVOLUME_REFERENCE,
             )
             archive_module.frontier_archive_hypervolume(
@@ -651,6 +765,149 @@ class FrontierArchiveTests(unittest.TestCase):
 
         self.assertEqual(len(caught), 1)
         self.assertIn("not a nadir", str(caught[0].message))
+
+    def test_resolve_hypervolume_reference_raises_when_spec_none(self):
+        archive_module = load_frontier_archive_module()
+        with self.assertRaisesRegex(
+            ValueError,
+            "hypervolume reference is required",
+        ):
+            archive_module.resolve_hypervolume_reference(
+                reference_spec=None,
+                seed_results={
+                    "FINAL_IOTA": 0.15,
+                    "FINAL_VOLUME": 0.10,
+                    "NONQS_RATIO": 0.012,
+                    "BOOZER_RESIDUAL": 0.008,
+                },
+            )
+
+    def test_resolve_hypervolume_reference_raises_on_empty_spec(self):
+        archive_module = load_frontier_archive_module()
+        with self.assertRaisesRegex(
+            ValueError,
+            "hypervolume reference spec must be an explicit value",
+        ):
+            archive_module.resolve_hypervolume_reference(
+                reference_spec="",
+                seed_results={
+                    "FINAL_IOTA": 0.15,
+                    "FINAL_VOLUME": 0.10,
+                    "NONQS_RATIO": 0.012,
+                    "BOOZER_RESIDUAL": 0.008,
+                },
+            )
+
+    def test_resolve_hypervolume_reference_handles_auto_seed_sentinel(self):
+        archive_module = load_frontier_archive_module()
+        resolved = archive_module.resolve_hypervolume_reference(
+            reference_spec=archive_module.HYPERVOLUME_REFERENCE_AUTO_SEED_SENTINEL,
+            seed_results={
+                "FINAL_IOTA": 0.15,
+                "FINAL_VOLUME": 0.10,
+                "NONQS_RATIO": 0.012,
+                "BOOZER_RESIDUAL": 0.008,
+            },
+        )
+        self.assertEqual(
+            resolved,
+            {
+                "iota": 0.15,
+                "volume": 0.10,
+                "qa_error": 0.012,
+                "boozer_residual": 0.008,
+            },
+        )
+
+    def test_resolve_hypervolume_reference_auto_seed_raises_without_seed(self):
+        archive_module = load_frontier_archive_module()
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires stage-2 seed results",
+        ):
+            archive_module.resolve_hypervolume_reference(
+                reference_spec=archive_module.HYPERVOLUME_REFERENCE_AUTO_SEED_SENTINEL,
+                seed_results=None,
+            )
+
+    def test_resolve_hypervolume_reference_auto_seed_raises_on_incomplete_seed(self):
+        archive_module = load_frontier_archive_module()
+        with self.assertRaisesRegex(
+            ValueError,
+            "missing axes",
+        ):
+            archive_module.resolve_hypervolume_reference(
+                reference_spec=archive_module.HYPERVOLUME_REFERENCE_AUTO_SEED_SENTINEL,
+                seed_results={
+                    "FINAL_IOTA": 0.15,
+                    "FINAL_VOLUME": 0.10,
+                    # NONQS_RATIO and BOOZER_RESIDUAL omitted.
+                },
+            )
+
+    def test_resolve_hypervolume_reference_does_not_derive_from_members(self):
+        archive_module = load_frontier_archive_module()
+        # A member exists with full reference_metrics, but the new
+        # contract NEVER derives the reference from members — that was
+        # the third-tier silent fallback. The members argument is
+        # diagnostic-only.
+        member = self._member(
+            archive_module,
+            reference_metrics={
+                "iota": 0.15,
+                "volume": 0.10,
+                "qa_error": 0.012,
+                "boozer_residual": 0.008,
+            },
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "hypervolume reference is required",
+        ):
+            archive_module.resolve_hypervolume_reference(
+                reference_spec=None,
+                seed_results=None,
+                members=[member],
+            )
+
+    def test_resolve_hypervolume_reference_parses_comma_list(self):
+        archive_module = load_frontier_archive_module()
+        resolved = archive_module.resolve_hypervolume_reference(
+            reference_spec="0.10,0.08,0.020,0.015",
+            seed_results=None,
+        )
+        self.assertEqual(
+            resolved,
+            {
+                "iota": 0.10,
+                "volume": 0.08,
+                "qa_error": 0.020,
+                "boozer_residual": 0.015,
+            },
+        )
+
+    def test_serialize_frontier_archive_raises_when_reference_not_nadir(self):
+        archive_module = load_frontier_archive_module()
+        # iota direction is "max"; reference iota=0.21 exceeds the member's
+        # iota=0.20 so the reference is not a nadir on the iota axis.
+        member = self._member(
+            archive_module,
+            iota=0.20,
+            boozer_residual=0.006,
+        )
+
+        non_nadir_reference = {
+            "iota": 0.21,
+            "volume": 0.10,
+            "qa_error": 0.012,
+            "boozer_residual": 0.008,
+        }
+        with self.assertRaisesRegex(ValueError, "not a nadir"):
+            archive_module.serialize_frontier_archive(
+                [member],
+                campaign_id="campaign",
+                hypervolume_reference=non_nadir_reference,
+            )
 
     def test_build_archive_member_from_results_applies_epsilon_certification_contract(self):
         archive_module = load_frontier_archive_module()

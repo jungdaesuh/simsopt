@@ -4,9 +4,12 @@ import json
 import math
 import warnings
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Mapping
+
+import numpy as np
 
 from .frontier_contracts import (
     EpsilonThresholds,
@@ -50,7 +53,6 @@ class FrontierArchiveMember:
     constraint_metrics: dict[str, object]
     hard_certification_ok: bool
     soft_search_score: float | None
-    distance_from_seed: float | None
     hypervolume_contribution: float | None
     recommendation_flags: dict[str, object]
     rerun_contract: dict[str, object]
@@ -70,21 +72,10 @@ def build_archive_member_from_results(
     payload: Mapping[str, object],
     rerun_contract: Mapping[str, object],
     archive_state: str | None = None,
-    pareto_objective_normalization: Mapping[str, object] | None = None,
 ) -> FrontierArchiveMember:
     results = payload["results"]
     objective_metrics = extract_objective_metrics(results)
     reference_metrics = extract_reference_metrics(results)
-    normalization_reference_metrics = resolve_pareto_normalization_reference_metrics(
-        reference_metrics,
-        pareto_objective_normalization=pareto_objective_normalization,
-    )
-    distance_from_seed = normalized_objective_distance(
-        _defined_metrics(objective_metrics),
-        _defined_metrics(reference_metrics),
-        reference_metrics=normalization_reference_metrics,
-        pareto_objective_normalization=pareto_objective_normalization,
-    )
     epsilon_constraint_status = _evaluate_epsilon_constraint_status(
         objective_metrics,
         rerun_contract,
@@ -120,7 +111,6 @@ def build_archive_member_from_results(
         },
         hard_certification_ok=hard_certification_ok,
         soft_search_score=soft_search_score,
-        distance_from_seed=distance_from_seed,
         hypervolume_contribution=None,
         recommendation_flags={},
         rerun_contract=dict(rerun_contract),
@@ -190,7 +180,6 @@ def frontier_archive_member_from_json_dict(
         constraint_metrics=dict(payload.get("constraint_metrics", {})),
         hard_certification_ok=bool(payload.get("hard_certification_ok", False)),
         soft_search_score=_coerce_optional_float(payload.get("soft_search_score")),
-        distance_from_seed=_coerce_optional_float(payload.get("distance_from_seed")),
         hypervolume_contribution=_coerce_optional_float(
             payload.get("hypervolume_contribution")
         ),
@@ -336,6 +325,7 @@ def archive_best_by_metric(members: list[FrontierArchiveMember]) -> dict[str, di
 def serialize_frontier_archive(
     members: list[FrontierArchiveMember],
     *,
+    campaign_id: str,
     dominance_tolerance: Mapping[str, float] | None = None,
     duplicate_distance_threshold: float = DEFAULT_DUPLICATE_DISTANCE_THRESHOLD,
     hypervolume_reference: Mapping[str, float] | None = None,
@@ -352,8 +342,11 @@ def serialize_frontier_archive(
         ),
         hypervolume_reference=reference_metrics,
     )
+    _assert_hypervolume_reference_is_nadir(reference_metrics, annotated_members)
     payload = {
         "schema_version": FRONTIER_ARCHIVE_SCHEMA_VERSION,
+        "frontier_campaign_id": str(campaign_id),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "pareto_objective_vector": pareto_objective_vector_contract(),
         "archive_membership_rules": frontier_archive_membership_rules_contract(),
         "archive_state_semantics": frontier_archive_state_semantics_contract(),
@@ -373,14 +366,39 @@ def serialize_frontier_archive(
     return payload
 
 
+HYPERVOLUME_REFERENCE_AUTO_SEED_SENTINEL = "auto:seed"
+
+
 def parse_hypervolume_reference(
-    reference_spec: str | None,
-) -> dict[str, float] | None:
+    reference_spec: str,
+) -> dict[str, float]:
+    """Parse an explicit hypervolume reference spec into a metric mapping.
+
+    Accepts only the explicit value forms (numeric list / ``key=val`` /
+    JSON object). The ``auto:seed`` sentinel is NOT handled here — callers
+    must dispatch on it via
+    :func:`resolve_hypervolume_reference` before parsing. Passing ``None``
+    or the empty string is a programming error and raises ``ValueError``:
+    the contract is that the orchestrator validates presence before
+    reaching this helper.
+    """
     if reference_spec is None:
-        return None
+        raise ValueError(
+            "hypervolume reference spec must be an explicit value or "
+            f"the {HYPERVOLUME_REFERENCE_AUTO_SEED_SENTINEL!r} sentinel"
+        )
     stripped = str(reference_spec).strip()
     if not stripped:
-        return None
+        raise ValueError(
+            "hypervolume reference spec must be an explicit value or "
+            f"the {HYPERVOLUME_REFERENCE_AUTO_SEED_SENTINEL!r} sentinel"
+        )
+    if stripped == HYPERVOLUME_REFERENCE_AUTO_SEED_SENTINEL:
+        raise ValueError(
+            f"parse_hypervolume_reference does not handle the "
+            f"{HYPERVOLUME_REFERENCE_AUTO_SEED_SENTINEL!r} sentinel; "
+            "call resolve_hypervolume_reference instead"
+        )
     metric_names = [metric_name for metric_name, _, _ in PARETO_OBJECTIVE_SPECS]
     if stripped.startswith("{"):
         payload = json.loads(stripped)
@@ -415,33 +433,80 @@ def resolve_hypervolume_reference(
     reference_spec: str | None,
     seed_results: Mapping[str, object] | None = None,
     members: list[FrontierArchiveMember] | None = None,
-) -> dict[str, float] | None:
-    parsed_reference = parse_hypervolume_reference(reference_spec)
-    if parsed_reference is not None:
-        _warn_if_hypervolume_reference_not_nadir(parsed_reference, members)
-        return parsed_reference
-    if seed_results is not None:
+) -> dict[str, float]:
+    """Resolve the campaign-wide hypervolume reference from an explicit spec.
+
+    The campaign-wide hypervolume reference is a CAMPAIGN-LEVEL IMMUTABLE
+    INVARIANT. Operators MUST commit to it explicitly — there is no
+    silent fallback to seed metrics or member-derived values.
+
+    Contract:
+
+    - ``reference_spec`` is REQUIRED. Passing ``None`` raises
+      ``ValueError`` so the calling CLI / orchestrator can surface a
+      clear error rather than picking up a hidden default. The accepted
+      value forms are:
+
+      * ``"auto:seed"`` — explicit opt-in to using the stage-2 seed
+        metrics as the reference. This is intentionally noisy: the
+        sentinel commits the operator to the semantics "no certified
+        lane regresses vs the seed on any Pareto axis"; if any axis
+        regresses, ``serialize_frontier_archive`` raises and the
+        operator must rerun with an explicit numeric reference.
+      * Comma list (``"0.10,0.08,0.020,0.015"``), ``key=val`` list
+        (``"iota=0.10,volume=0.08,qa_error=0.020,..."``), or JSON
+        object form — parsed by :func:`parse_hypervolume_reference`.
+
+    - ``seed_results`` is consulted ONLY when ``reference_spec`` is the
+      ``"auto:seed"`` sentinel. Required completeness on every Pareto
+      axis; missing seed_results or missing axis values raise
+      ``ValueError``.
+
+    - ``members`` is diagnostic-only. It is forwarded to
+      :func:`_warn_if_hypervolume_reference_not_nadir` so callers see a
+      warning when the resolved reference is not a per-axis nadir for
+      the certified archive; it is NEVER used to derive the reference.
+
+    The historical "if members exist, try member.reference_metrics" and
+    "if seed_results is present, derive silently" branches have been
+    removed. Both were implicit guesses that committed downstream
+    consumers to invariants the operator never explicitly accepted.
+    """
+    if reference_spec is None:
+        raise ValueError(
+            "hypervolume reference is required: pass "
+            "--frontier-hypervolume-reference with explicit metric values "
+            f"(e.g. '0.10,0.08,0.020,0.015') or {HYPERVOLUME_REFERENCE_AUTO_SEED_SENTINEL!r} "
+            "to opt in to the seed-derived reference"
+        )
+    if reference_spec == HYPERVOLUME_REFERENCE_AUTO_SEED_SENTINEL:
+        if seed_results is None:
+            raise ValueError(
+                f"{HYPERVOLUME_REFERENCE_AUTO_SEED_SENTINEL!r} hypervolume "
+                "reference requires stage-2 seed results, but none were "
+                "loaded; pass explicit metric values instead"
+            )
         seed_metrics = extract_objective_metrics(seed_results)
-        if all(seed_metrics.get(metric_name) is not None for metric_name, _, _ in PARETO_OBJECTIVE_SPECS):
-            resolved_reference = {
-                metric_name: float(seed_metrics[metric_name])
-                for metric_name, _, _ in PARETO_OBJECTIVE_SPECS
-            }
-            _warn_if_hypervolume_reference_not_nadir(resolved_reference, members)
-            return resolved_reference
-    if members:
-        for member in members:
-            if all(
-                member.reference_metrics.get(metric_name) is not None
-                for metric_name, _, _ in PARETO_OBJECTIVE_SPECS
-            ):
-                resolved_reference = {
-                    metric_name: float(member.reference_metrics[metric_name])
-                    for metric_name, _, _ in PARETO_OBJECTIVE_SPECS
-                }
-                _warn_if_hypervolume_reference_not_nadir(resolved_reference, members)
-                return resolved_reference
-    return None
+        missing_axes = [
+            metric_name
+            for metric_name, _, _ in PARETO_OBJECTIVE_SPECS
+            if seed_metrics.get(metric_name) is None
+        ]
+        if missing_axes:
+            raise ValueError(
+                f"{HYPERVOLUME_REFERENCE_AUTO_SEED_SENTINEL!r} hypervolume "
+                "reference requires the seed to report every Pareto axis; "
+                f"missing axes: {sorted(missing_axes)!r}"
+            )
+        resolved_reference = {
+            metric_name: float(seed_metrics[metric_name])
+            for metric_name, _, _ in PARETO_OBJECTIVE_SPECS
+        }
+        _warn_if_hypervolume_reference_not_nadir(resolved_reference, members)
+        return resolved_reference
+    parsed_reference = parse_hypervolume_reference(reference_spec)
+    _warn_if_hypervolume_reference_not_nadir(parsed_reference, members)
+    return parsed_reference
 
 
 def frontier_archive_hypervolume(
@@ -536,16 +601,6 @@ def _coerce_optional_str(value) -> str | None:
     return str(value)
 
 
-def _defined_metrics(
-    metrics: Mapping[str, float | None],
-) -> dict[str, float]:
-    return {
-        key: value
-        for key, value in metrics.items()
-        if value is not None
-    }
-
-
 def _find_duplicate_member_index(
     members: list[FrontierArchiveMember],
     candidate: FrontierArchiveMember,
@@ -553,6 +608,8 @@ def _find_duplicate_member_index(
     duplicate_distance_threshold: float,
     pareto_objective_normalization: Mapping[str, object] | None = None,
 ) -> int | None:
+    best_index: int | None = None
+    best_distance: float = math.inf
     for index, member in enumerate(members):
         reference_metrics = resolve_pareto_normalization_reference_metrics(
             _shared_reference_metrics(member, candidate),
@@ -564,9 +621,18 @@ def _find_duplicate_member_index(
             reference_metrics=reference_metrics,
             pareto_objective_normalization=pareto_objective_normalization,
         )
-        if distance is not None and distance <= duplicate_distance_threshold:
-            return index
-    return None
+        if distance is None or distance > duplicate_distance_threshold:
+            continue
+        if (
+            distance < best_distance
+            or (
+                distance == best_distance
+                and best_index is not None
+                and member.member_id < members[best_index].member_id
+            )
+        ):
+            best_index, best_distance = index, distance
+    return best_index
 
 
 def _shared_reference_metrics(
@@ -696,8 +762,45 @@ def _warn_if_hypervolume_reference_not_nadir(
     hypervolume_reference: Mapping[str, float] | None,
     members: list[FrontierArchiveMember] | None,
 ) -> None:
-    if hypervolume_reference is None or not members:
+    violation = _find_hypervolume_reference_nadir_violation(
+        hypervolume_reference,
+        members,
+    )
+    if violation is None:
         return
+    warnings.warn(
+        (
+            "hypervolume reference is not a nadir for "
+            f"{violation[0]}:{violation[1]}"
+        ),
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+
+def _assert_hypervolume_reference_is_nadir(
+    hypervolume_reference: Mapping[str, float] | None,
+    members: list[FrontierArchiveMember] | None,
+) -> None:
+    violation = _find_hypervolume_reference_nadir_violation(
+        hypervolume_reference,
+        members,
+    )
+    if violation is None:
+        return
+    member_id, metric_name = violation
+    raise ValueError(
+        "hypervolume reference is not a nadir for "
+        f"{member_id}:{metric_name}"
+    )
+
+
+def _find_hypervolume_reference_nadir_violation(
+    hypervolume_reference: Mapping[str, float] | None,
+    members: list[FrontierArchiveMember] | None,
+) -> tuple[str, str] | None:
+    if hypervolume_reference is None or not members:
+        return None
     for member in members:
         for metric_name, direction, _ in PARETO_OBJECTIVE_SPECS:
             metric_value = member.objective_metrics.get(metric_name)
@@ -711,37 +814,46 @@ def _warn_if_hypervolume_reference_not_nadir(
                 direction == "min"
                 and float(metric_value) > float(reference_value)
             ):
-                warnings.warn(
-                    (
-                        "hypervolume reference is not a nadir for "
-                        f"{member.member_id}:{metric_name}"
-                    ),
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                return
+                return member.member_id, metric_name
+    return None
 
 
 def _union_hypervolume(boxes: list[tuple[float, ...]]) -> float:
     if not boxes:
         return 0.0
-    dimension = len(boxes[0])
-    if dimension == 1:
-        return max(box[0] for box in boxes)
-    boundaries = sorted({0.0, *[box[0] for box in boxes]})
+    box_array = np.asarray(boxes, dtype=float)
+    return _union_hypervolume_axis(box_array, axis=0)
+
+
+def _union_hypervolume_axis(box_array: np.ndarray, *, axis: int) -> float:
+    """Sweep along ``axis`` of a (num_boxes, dim) array; recurse on later axes.
+
+    The view-based recursion drops the per-frame tuple-slice copy: each call
+    indexes columns of the same underlying array via integer slicing, so only
+    the active-row mask allocates per frame.
+    """
+    num_rows, dim = box_array.shape
+    if num_rows == 0:
+        return 0.0
+    remaining_axes = dim - axis
+    if remaining_axes == 1:
+        return float(box_array[:, axis].max())
+    column = box_array[:, axis]
+    boundaries = np.unique(np.concatenate(([0.0], column)))
     hypervolume = 0.0
     lower = 0.0
-    for upper in boundaries[1:]:
+    for upper_value in boundaries[1:]:
+        upper = float(upper_value)
         width = upper - lower
         if width <= 0.0:
             lower = upper
             continue
-        active_boxes = [
-            box[1:]
-            for box in boxes
-            if box[0] >= upper
-        ]
-        hypervolume += width * _union_hypervolume(active_boxes)
+        active_mask = column >= upper
+        if active_mask.any():
+            hypervolume += width * _union_hypervolume_axis(
+                box_array[active_mask],
+                axis=axis + 1,
+            )
         lower = upper
     return hypervolume
 
@@ -755,6 +867,8 @@ def _build_member_id(
     base_member_id = f"{campaign_id}:{lane_id}"
     if archive_state == FRONTIER_ARCHIVE_STATE_PROVISIONAL:
         return f"{base_member_id}:provisional"
+    if archive_state == FRONTIER_ARCHIVE_STATE_REJECTED:
+        return f"{base_member_id}:rejected"
     return base_member_id
 
 

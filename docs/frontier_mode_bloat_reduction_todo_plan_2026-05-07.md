@@ -2,13 +2,13 @@
 
 **Date:** 2026-05-07 (revised same day per Codex review)
 **Branch:** surrogate-confinement-v2
-**Status:** Implemented except certified-lane smoke and external-team NSGA3-use confirmation. Current dirty-tree validation includes the 467-test targeted frontier/workflow/ALM slice and the repo full suite (`./run_tests`: `Ran 1802 tests in 1408.073s`, `OK (skipped=94)`) after the current code updates; DC.13 remains open only for the certified-lane smoke blocker. Dry-run smoke, non-dry campaign JSON smoke, post-DC.5 focused sweep, algorithm-invariant backfill, all LOC gates, and removable-LOC audit budget are complete.
+**Status:** Implemented except certified-lane smoke and external-team NSGA3-use confirmation. Current dirty-tree validation includes the 489-test targeted frontier/workflow/ALM slice after the current code updates; prior repo full-suite evidence remains `./run_tests`: `Ran 1802 tests in 1408.073s`, `OK (skipped=94)`. DC.13 remains open only for the certified-lane smoke blocker. Dry-run smoke, non-dry campaign JSON smoke, post-DC.5 focused sweep, algorithm-invariant backfill, all LOC gates, and removable-LOC audit budget are complete.
 **Owner:** TBD
 **Estimated effort:** ~3-5 focused days; can be split across PRs
 
 **Blocking inputs before final closeout:**
 - **D1.4:** Team confirmation that no retained production result requires NSGA3-specific Pareto coverage beyond `multilane_local` + ε-constraint.
-- **1A.10 / CC.3 / DC.13:** A current strict Stage 2 artifact that is checksum-bound, signed-current, hardware-clean, non-init-only, and Boozer-bootable enough to produce at least one certified frontier lane. Local searches, probes, adjacent-artifact/doc sweeps, current-code smoke variants, and the r59 closeout audit did not find one; the strongest JSON-surface handoff smoke timed out with zero archive members.
+- **1A.10 / CC.3 / DC.13:** A current strict Stage 2 artifact that is checksum-bound, signed-current, hardware-clean, non-init-only, and Boozer-bootable enough to produce at least one certified frontier lane. Local searches, probes, adjacent-artifact/doc sweeps, current-code smoke variants, and the r60 closeout audit did not find one; the strongest JSON-surface handoff smoke timed out with zero archive members.
 
 **Blocker closure criteria:**
 - **D1.4 closes only with external confirmation.** Local grep/artifact searches support the `DROP` decision, but they cannot prove that no teammate has a retained external NSGA3 campaign. Close this only after recording a team answer, or reopen the decision if a real NSGA3 artifact/benchmark is supplied.
@@ -29,16 +29,16 @@
    ```
 3. Only after both checks pass should `D1.4`, `1A.10`, `CC.3`, and `DC.13` be marked complete.
 
-**Completion audit snapshot (2026-05-09 r59):**
+**Completion audit snapshot (2026-05-10 r60):**
 
 | Objective requirement | Evidence artifact | Status |
 |---|---|---|
 | Execute the bloat-reduction implementation plan | Implementation entries r7-r35 plus current closed checklist items; r49 closed DC.21 deferred follow-up via WONTFIX | Complete except rows below |
-| Validate code/test/tooling coverage | r51 fresh 467-test frontier/workflow/ALM slice, repo `./run_tests` (`Ran 1802 tests in 1408.073s`, `OK (skipped=94)`), r54/r55 scoped checks (`ruff`, touched-scope `compileall`, `git diff --check`, stale-import grep, 467-test slice, dry-run shape probe), r56-r59 untracked/cache-artifact cross-checks, and audit subagents found no additional implementable plan item | Complete for code paths covered by this plan |
+| Validate code/test/tooling coverage | r60 current dirty-tree check at `d8deb9e11`: `git diff --check` PASS, scoped `ruff check` PASS, and targeted frontier/workflow/ALM slice ran 489 tests with `OK`; prior repo `./run_tests` evidence remains `Ran 1802 tests in 1408.073s`, `OK (skipped=94)`; r56-r59 untracked/cache-artifact cross-checks and audit subagents found no additional implementable plan item | Complete for code paths covered by this plan |
 | Preserve current JSON/runtime-calibration shape | D3 recorded preserve-shape; dry-run and non-dry wrapper smoke produced expected manifest/summary/progress/archive/recommendation JSON; DC.21 WONTFIX retains 2-profile `FRONTIER_RUNTIME_CALIBRATION_PROFILES` to keep the JSON contract stable | Complete for wrapper shape |
-| Remove/deprecate NSGA3 code path | Deleted engine/evaluator files, validators reject deleted engines/fields, local/adjacent artifact scan found no retained local NSGA3 artifacts; r56 inspected the local NSGA-III revival plan and found it dormant, with no trigger artifact or benchmark attached | Locally complete; external D1.4 confirmation still open |
-| Produce final certified-lane smoke | Current strict smoke summaries have `frontier_feasible_lane_count=0` and `frontier_archive_size=0`; r34 circular probe reports `BOOZER_BOOTABLE=false`; r50 `--stage2-iota-mode=alm` decision-gate failed twice; r52 strict post-handoff smoke failed Boozer initialization; r53 strongest JSON-surface handoff smoke timed out after 300 s with zero archive members; r59 found no newer certified-lane evidence | Blocked at physics/fixture layer; close criteria narrowed to external action (new fixture / contract relaxation / iota target amendment) |
-| Close all checklist items | Open boxes remain `D1.4`, `1A.10`, `CC.3`, `DC.13`; DC.21 deferred follow-up closed WONTFIX in r49; r59 closed no additional item | Blocked at the same 4 boxes |
+| Remove/deprecate NSGA3 code path | Deleted engine/evaluator files, validators reject deleted engines/fields, local/adjacent artifact scan found no retained local NSGA3 artifacts; r60 verified `SUPPORTED_FRONTIER_ENGINES=("multilane_local",)`, `banana_opt.frontier_engine_nsga3` is not importable, and no `*nsga3*` source/test/cache files remain | Locally complete; external D1.4 confirmation still open |
+| Produce final certified-lane smoke | Current strict smoke summaries have `frontier_feasible_lane_count=0` and `frontier_archive_size=0`; r34 circular probe reports `BOOZER_BOOTABLE=false`; r50 `--stage2-iota-mode=alm` decision-gate failed twice; r52 strict post-handoff smoke failed Boozer initialization; r53 strongest JSON-surface handoff smoke timed out after 300 s with zero archive members; r60 repo-wide summary/archive scan found no current certified-lane evidence | Blocked at physics/fixture layer; close criteria narrowed to external action (new fixture / contract relaxation / iota target amendment) |
+| Close all checklist items | Open boxes remain `D1.4`, `1A.10`, `CC.3`, `DC.13`; DC.21 deferred follow-up closed WONTFIX in r49; r60 closed no additional item | Blocked at the same 4 boxes |
 
 **Revision log:**
 - 2026-05-07 r1 — initial draft
@@ -339,6 +339,12 @@
   - User asked whether NSGA3 is still alive. Live Python source/test grep found no active NSGA3 implementation; `importlib.util.find_spec("banana_opt.frontier_engine_nsga3")` returned `None`.
   - Removed three ignored stale bytecode files left under `examples/single_stage_optimization/banana_opt/__pycache__/frontier_engine_nsga3.cpython-{310,311,313}.pyc`. A follow-up `find` for `frontier_engine_nsga3.py`, `frontier_engine_nsga3*.pyc`, and `*nsga3*.pyc` returned no live/cache file hits.
   - No checklist item closed; the 4 open blockers are unchanged.
+- 2026-05-10 r60 — current-code blocker recheck:
+  - Rechecked the updated tree at `d8deb9e11`. Checklist count remains **184 closed `[x]`, 2 deferred `[~]`, 4 open `[ ]`**; the open boxes are still `D1.4`, `1A.10`, `CC.3`, and `DC.13`.
+  - D1.4 remains externally blocked. Local scans of `docs/`, `.alm_audit_v2/`, and `validation_report.md` found no team answer, retained external NSGA3-only production result, or benchmark requiring NSGA3-specific Pareto coverage. The local NSGA-III revival plan remains dormant and has no trigger artifact attached.
+  - The certified-lane close predicate still has zero passing artifacts. Repo-wide `single_stage_frontier_campaign_summary.json` scan found seven current non-dry `multilane_local` summaries; each has `frontier_feasible_lane_count=0`, `frontier_archive_size=0`, and zero archive members. The repo-wide `frontier_archive.json` scan found member-bearing artifacts only in older `frontier_v4_canonical_*` archives already rejected as current strict Stage 2 evidence.
+  - Confirmed NSGA3 is still not live: `SUPPORTED_FRONTIER_ENGINES=("multilane_local",)`, `importlib.util.find_spec("banana_opt.frontier_engine_nsga3")` returned `None`, and `find examples/single_stage_optimization tests/geo -name '*nsga3*'` returned no source/test/cache files.
+  - Fresh validation passed: `git diff --check`; scoped `ruff check`; and `PYTHONPATH=tests python -m unittest -q -b geo.test_frontier_archive geo.test_frontier_contracts geo.test_frontier_recommendation geo.test_frontier_scalarization geo.test_frontier_constraints geo.test_single_stage_workflow_helpers geo.test_stage2_single_stage_handoff geo.test_single_stage_alm_integration geo.test_alm_utils` (`Ran 489 tests in 5.723s`, `OK`). No checklist item closed.
 
 ---
 

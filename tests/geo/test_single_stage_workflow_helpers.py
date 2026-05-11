@@ -1,4 +1,5 @@
 from contextlib import redirect_stdout
+import argparse
 import hashlib
 import inspect
 import importlib.util
@@ -3322,6 +3323,11 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     str(summary_path),
                     "--frontier-num-lanes",
                     "3",
+                    # Dry-run skips seed loading; the hypervolume reference
+                    # must be supplied explicitly because seed_results is
+                    # None and auto:seed would fail.
+                    "--frontier-hypervolume-reference",
+                    "0.15,0.10,0.012,0.008",
                 ],
             ):
                 self.assertEqual(module.main(), 0)
@@ -3392,6 +3398,11 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                         str(summary_path),
                         "--frontier-num-lanes",
                         "1",
+                        # Dry-run skips seed loading; the hypervolume
+                        # reference must be supplied explicitly because
+                        # seed_results is None and auto:seed would fail.
+                        "--frontier-hypervolume-reference",
+                        "0.15,0.10,0.012,0.008",
                     ],
                 ):
                     self.assertEqual(module.main(), 0)
@@ -3442,13 +3453,19 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 nonqs_ratio=0.011,
                 boozer_residual=0.0075,
             )
+            # Lane metrics are equal-or-better than the seed on every axis
+            # so the seed-derived hypervolume reference is a nadir for the
+            # certified archive. The campaign no longer auto-extends the
+            # reference at reporting time: any regression would fail fast
+            # at ``serialize_frontier_archive`` and require the operator
+            # to pass an explicit ``--frontier-hypervolume-reference``.
             lane_03 = self._minimal_frontier_payload(
                 output_root,
                 lane_id="lane_03",
                 final_iota=0.19,
-                final_volume=0.095,
-                nonqs_ratio=0.015,
-                boozer_residual=0.011,
+                final_volume=0.100,
+                nonqs_ratio=0.012,
+                boozer_residual=0.008,
                 result_source="best_feasible_partial",
             )
 
@@ -3467,6 +3484,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     str(summary_path),
                     "--frontier-num-lanes",
                     "3",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
                 ],
             ), patch.object(
                 module.goal_mode_comparison,
@@ -3550,6 +3569,236 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 0.015,
             )
 
+    def test_frontier_campaign_uses_one_hypervolume_reference_for_early_stop_and_final_summary(self):
+        """One immutable hypervolume reference drives early-stop AND final reporting.
+
+        The orchestrator resolves a single ``hypervolume_reference`` from
+        ``--frontier-hypervolume-reference`` + seed metrics at the top of
+        ``main()`` and threads that SAME reference through:
+
+        - ``frontier_early_stop.best_hypervolume`` (lane-loop early-stop)
+        - ``frontier_hypervolume`` (final summary)
+        - ``frontier_hypervolume_history`` (per-lane history)
+        - ``frontier_hypervolume_reference`` (persisted in summary + archive)
+
+        Re-resolving or auto-extending the reference at archive serialization
+        time would silently mutate the value an auditor sees in the summary
+        vs the value that drove early-stop decisions — Codex MEDIUM finding
+        #2. This test pins the contract: the early-stop snapshot's
+        ``best_hypervolume`` matches the summary's final ``frontier_hypervolume``
+        when the lane loop terminates with the certified archive observed by
+        the early-stop policy.
+        """
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            stage2_bs_path, stage2_results_path, stage2_results = (
+                self._write_stage2_seed_artifact(
+                    tmpdir_path,
+                    overrides={
+                        "FINAL_IOTA": 0.15,
+                        "FINAL_VOLUME": 0.10,
+                        "NONQS_RATIO": 0.012,
+                        "BOOZER_RESIDUAL": 0.008,
+                    },
+                )
+            )
+
+            lane_01_payload = self._minimal_frontier_payload(
+                output_root,
+                lane_id="lane_01",
+                final_iota=0.181,
+                final_volume=0.111,
+                nonqs_ratio=0.0105,
+                boozer_residual=0.0070,
+            )
+            lane_02_payload = self._minimal_frontier_payload(
+                output_root,
+                lane_id="lane_02",
+                final_iota=0.170,
+                final_volume=0.106,
+                # Stays equal-or-better than seed on every axis so the
+                # seed-derived reference remains the per-axis nadir.
+                nonqs_ratio=0.0115,
+                boozer_residual=0.0078,
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                    "--skip-target",
+                    # Force early stop after lane_02 so the early-stop
+                    # snapshot's archive equals the final certified archive.
+                    "--frontier-early-stop-patience-lanes",
+                    "1",
+                    "--frontier-early-stop-min-certified",
+                    "1",
+                    "--frontier-early-stop-min-hypervolume-gain",
+                    "1.0",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    stage2_results_path.resolve(),
+                    stage2_results,
+                ),
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+                side_effect=[lane_01_payload, lane_02_payload],
+            ):
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            archive = json.loads(
+                (output_root / "frontier_archive.json").read_text(encoding="utf-8")
+            )
+            manifest = json.loads(
+                (output_root / "campaign_manifest.json").read_text(encoding="utf-8")
+            )
+
+            # The SAME hypervolume_reference dict must appear in the
+            # manifest, the summary, AND the persisted archive: there is
+            # exactly one campaign-wide reference.
+            expected_reference = {
+                "iota": 0.15,
+                "volume": 0.10,
+                "qa_error": 0.012,
+                "boozer_residual": 0.008,
+            }
+            self.assertEqual(
+                manifest["FRONTIER_HYPERVOLUME_REFERENCE_METRICS"],
+                expected_reference,
+            )
+            self.assertEqual(
+                summary["frontier_hypervolume_reference"],
+                expected_reference,
+            )
+            self.assertEqual(
+                archive["hypervolume_reference"],
+                expected_reference,
+            )
+
+            # Early-stop's ``best_hypervolume`` is measured against the
+            # SAME reference as ``frontier_hypervolume`` in the summary.
+            # Because the certified archive observed by the last
+            # ``update_frontier_early_stop_status`` call is the same one
+            # that flows into ``build_frontier_campaign_summary``, the two
+            # totals MUST be equal.
+            self.assertTrue(summary["frontier_early_stop"]["triggered"])
+            self.assertEqual(
+                summary["frontier_early_stop"]["stopped_after_lane_id"],
+                "lane_02",
+            )
+            self.assertAlmostEqual(
+                summary["frontier_early_stop"]["best_hypervolume"],
+                summary["frontier_hypervolume"],
+            )
+            self.assertAlmostEqual(
+                archive["hypervolume_total"],
+                summary["frontier_hypervolume"],
+            )
+
+    def test_frontier_campaign_serialize_archive_raises_on_non_nadir_when_reference_not_extended(self):
+        """An explicit non-nadir reference fails fast at archive serialization.
+
+        Codex MEDIUM finding #2 required the orchestrator to STOP silently
+        extending the resolved reference to a per-axis nadir at archive
+        build time. When the operator passes
+        ``--frontier-hypervolume-reference`` that is dominated by a
+        certified member on some axis, the campaign now MUST raise from
+        ``serialize_frontier_archive`` instead of mutating the reference
+        — the operator is responsible for supplying a valid nadir or
+        widening the spec.
+        """
+        module = load_frontier_campaign_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            stage2_bs_path, stage2_results_path, stage2_results = (
+                self._write_stage2_seed_artifact(
+                    tmpdir_path,
+                    overrides={
+                        "FINAL_IOTA": 0.15,
+                        "FINAL_VOLUME": 0.10,
+                        "NONQS_RATIO": 0.012,
+                        "BOOZER_RESIDUAL": 0.008,
+                    },
+                )
+            )
+
+            # iota direction is "max": a nadir reference must be ≤ every
+            # certified member's iota. The CLI reference below has
+            # iota=0.25, but the certified lane reports iota=0.20 — so
+            # the reference is ABOVE the member on the iota axis and is
+            # NOT a valid nadir. ``serialize_frontier_archive`` raises.
+            lane_01_payload = self._minimal_frontier_payload(
+                output_root,
+                lane_id="lane_01",
+                final_iota=0.20,
+                final_volume=0.111,
+                nonqs_ratio=0.0105,
+                boozer_residual=0.0070,
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "1",
+                    "--skip-target",
+                    # iota axis (max) is violated: reference iota=0.25 >
+                    # lane iota=0.20 → non-nadir, must raise.
+                    "--frontier-hypervolume-reference",
+                    "0.25,0.10,0.012,0.008",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    stage2_results_path.resolve(),
+                    stage2_results,
+                ),
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+                side_effect=[lane_01_payload],
+            ):
+                with self.assertRaisesRegex(ValueError, "not a nadir"):
+                    module.main()
+
     def test_frontier_campaign_runs_independent_seed_lane_group_with_workers(self):
         module = load_frontier_campaign_module()
 
@@ -3616,6 +3865,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "--frontier-early-stop-patience-lanes",
                     "0",
                     "--skip-target",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
                 ],
             ), patch.object(
                 module.goal_mode_comparison,
@@ -3695,6 +3946,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                         "--frontier-early-stop-patience-lanes",
                         "0",
                         "--skip-target",
+                        "--frontier-hypervolume-reference",
+                        "auto:seed",
                     ],
                 ), patch.object(
                     module.goal_mode_comparison,
@@ -3759,6 +4012,10 @@ class FrontierCampaignScriptTests(unittest.TestCase):
     def test_frontier_campaign_parse_args_accepts_v4_resume_contract_flags(self):
         module = load_frontier_campaign_module()
 
+        # Mode-specific flag validation requires that the supplied
+        # ``--frontier-reference-points-file`` matches reference-point /
+        # achievement modes; the historical permissiveness that accepted
+        # ``--frontier-epsilon-spec-file`` for the wrong mode is now rejected.
         args = module.parse_args(
             [
                 "--plasma-surf-filename",
@@ -3771,8 +4028,6 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 "0.15,0.10,0.012,0.008",
                 "--frontier-reference-points-file",
                 "/tmp/reference_points.json",
-                "--frontier-epsilon-spec-file",
-                "/tmp/epsilon.json",
                 "--resume",
             ]
         )
@@ -3786,12 +4041,95 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             args.frontier_reference_points_file,
             "/tmp/reference_points.json",
         )
-        self.assertEqual(
-            args.frontier_epsilon_spec_file,
-            "/tmp/epsilon.json",
-        )
+        self.assertIsNone(args.frontier_epsilon_spec_file)
         self.assertEqual(args.frontier_lane_warm_start_mode, "seed")
         self.assertTrue(args.resume)
+
+    def test_frontier_campaign_parse_args_rejects_mode_inconsistent_flags(self):
+        module = load_frontier_campaign_module()
+
+        with self.assertRaisesRegex(
+            argparse.ArgumentTypeError,
+            "--frontier-epsilon-spec-file is only valid with",
+        ):
+            module.parse_args(
+                [
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    "/tmp/demo/biot_savart_opt.json",
+                    "--frontier-reference-mode",
+                    "reference_point_sweep_v1",
+                    "--frontier-epsilon-spec-file",
+                    "/tmp/epsilon.json",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
+                ]
+            )
+
+    def test_parse_args_requires_hypervolume_reference(self):
+        """Operators MUST commit to the hypervolume reference explicitly.
+
+        The campaign-wide hypervolume reference is a campaign-level
+        IMMUTABLE INVARIANT. Omitting ``--frontier-hypervolume-reference``
+        is no longer treated as "use the seed metrics as a silent
+        default" — that hidden semantic committed downstream consumers
+        to invariants the operator never explicitly accepted. ``parse_args``
+        now rejects the omission with a clear error pointing operators
+        at the explicit values and the ``auto:seed`` sentinel.
+        """
+        module = load_frontier_campaign_module()
+
+        with self.assertRaisesRegex(
+            argparse.ArgumentTypeError,
+            "--frontier-hypervolume-reference is required",
+        ):
+            module.parse_args(
+                [
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    "/tmp/demo/biot_savart_opt.json",
+                ]
+            )
+
+    def test_parse_args_accepts_hypervolume_reference_auto_seed_sentinel(self):
+        module = load_frontier_campaign_module()
+        args = module.parse_args(
+            [
+                "--plasma-surf-filename",
+                "demo.nc",
+                "--stage2-bs-path",
+                "/tmp/demo/biot_savart_opt.json",
+                "--frontier-hypervolume-reference",
+                "auto:seed",
+            ]
+        )
+        self.assertEqual(args.frontier_hypervolume_reference, "auto:seed")
+
+    def test_parse_args_rejects_malformed_explicit_hypervolume_reference(self):
+        """Explicit specs are parsed at argument time, not later.
+
+        Surfacing the malformed value at parse time keeps the failure
+        close to the CLI invocation instead of after stage-2 seed
+        loading.
+        """
+        module = load_frontier_campaign_module()
+        with self.assertRaisesRegex(
+            ValueError,
+            "hypervolume reference must provide",
+        ):
+            module.parse_args(
+                [
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    "/tmp/demo/biot_savart_opt.json",
+                    "--frontier-hypervolume-reference",
+                    # Three values — wrong cardinality.
+                    "0.10,0.08,0.020",
+                ]
+            )
 
     def test_frontier_campaign_parse_args_accepts_runtime_calibration_and_early_stop_flags(self):
         module = load_frontier_campaign_module()
@@ -3810,6 +4148,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 "2",
                 "--frontier-early-stop-min-hypervolume-gain",
                 "0.0015",
+                "--frontier-hypervolume-reference",
+                "auto:seed",
             ]
         )
 
@@ -3835,6 +4175,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 "/tmp/demo/biot_savart_opt.json",
                 "--frontier-lane-workers",
                 "4",
+                "--frontier-hypervolume-reference",
+                "auto:seed",
             ]
         )
 
@@ -3848,6 +4190,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "/tmp/demo/biot_savart_opt.json",
                     "--frontier-lane-workers",
                     "0",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
                 ]
             )
 
@@ -3862,6 +4206,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 "/tmp/demo/biot_savart_opt.json",
                 "--frontier-num-lanes",
                 "3",
+                "--frontier-hypervolume-reference",
+                "auto:seed",
             ]
         )
         scalarization = load_frontier_scalarization_module()
@@ -3932,6 +4278,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 "closest_to_seed",
                 "--frontier-lane-warm-start-mode",
                 "reuse_latest_certified",
+                "--frontier-hypervolume-reference",
+                "auto:seed",
             ]
         )
 
@@ -3958,6 +4306,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 "fixed_ideal_nadir_span_with_floor",
                 "--frontier-normalization-spec-file",
                 "/tmp/frontier_norm.json",
+                "--frontier-hypervolume-reference",
+                "auto:seed",
             ]
         )
 
@@ -4076,6 +4426,11 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "fixed_ideal_nadir_span_with_floor",
                     "--frontier-normalization-spec-file",
                     str(normalization_spec_path),
+                    # No seed_results threaded through; the hypervolume
+                    # reference must be explicit because auto:seed cannot
+                    # resolve without a stage-2 seed.
+                    "--frontier-hypervolume-reference",
+                    "0.15,0.10,0.012,0.008",
                 ]
             )
             lane_specs = [
@@ -4123,6 +4478,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 "/tmp/demo/biot_savart_opt.json",
                 "--frontier-num-lanes",
                 "1",
+                "--frontier-hypervolume-reference",
+                "0.15,0.10,0.012,0.008",
             ]
         )
         lane_specs = [
@@ -4161,6 +4518,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 "/tmp/demo/biot_savart_opt.json",
                 "--frontier-num-lanes",
                 "1",
+                "--frontier-hypervolume-reference",
+                "0.15,0.10,0.012,0.008",
             ]
         )
         lane_specs = [
@@ -4200,6 +4559,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 "/tmp/demo/biot_savart_opt.json",
                 "--frontier-num-lanes",
                 "2",
+                "--frontier-hypervolume-reference",
+                "0.15,0.10,0.012,0.008",
             ]
         )
         lane_specs = [
@@ -4267,6 +4628,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     str(summary_path),
                     "--frontier-num-lanes",
                     "3",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
                 ]
             )
             scalarization = load_frontier_scalarization_module()
@@ -4381,7 +4744,9 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 final_iota=0.181,
                 final_volume=0.101,
                 nonqs_ratio=0.0115,
-                boozer_residual=0.0085,
+                # boozer matches the seed nadir; the campaign no longer
+                # auto-extends the hypervolume reference at reporting time.
+                boozer_residual=0.008,
             )
 
             with patch.object(
@@ -4400,6 +4765,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "--frontier-num-lanes",
                     "3",
                     "--resume",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
                 ],
             ), patch.object(
                 module.goal_mode_comparison,
@@ -4491,6 +4858,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     str(summary_path),
                     "--frontier-num-lanes",
                     "1",
+                    "--frontier-hypervolume-reference",
+                    "0.15,0.10,0.012,0.008",
                 ]
             )
             scalarization = load_frontier_scalarization_module()
@@ -4551,7 +4920,14 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     str(summary_path),
                     "--frontier-version",
                     "mutated_frontier_version",
+                    "--skip-target",
                     "--resume",
+                    # Manifest persists the original explicit reference;
+                    # resume restores it via _apply_manifest_overrides_to_args.
+                    # CLI value here only satisfies the required-flag
+                    # validator (manifest wins under default resume mode).
+                    "--frontier-hypervolume-reference",
+                    "0.15,0.10,0.012,0.008",
                 ],
             ), patch.object(
                 module.goal_mode_comparison,
@@ -4625,6 +5001,10 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "--plasma-surf-filename", "demo.nc",
                     "--stage2-bs-path", str(stage2_bs_path),
                     "--output-root", str(output_root),
+                    # stage2_results lacks objective metrics; auto:seed
+                    # would fail, so pass explicit values.
+                    "--frontier-hypervolume-reference",
+                    "0.15,0.10,0.012,0.008",
                 ]
             )
             lane_specs = load_frontier_scalarization_module().generate_multilane_local_specs(
@@ -4681,6 +5061,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     str(summary_path),
                     "--frontier-num-lanes",
                     "3",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
                 ]
             )
             scalarization = load_frontier_scalarization_module()
@@ -4805,7 +5187,9 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 final_iota=0.181,
                 final_volume=0.101,
                 nonqs_ratio=0.0115,
-                boozer_residual=0.0085,
+                # boozer matches the seed nadir; the campaign no longer
+                # auto-extends the hypervolume reference at reporting time.
+                boozer_residual=0.008,
             )
 
             with patch.object(
@@ -4824,6 +5208,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "--frontier-num-lanes",
                     "3",
                     "--resume",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
                 ],
             ), patch.object(
                 module.goal_mode_comparison,
@@ -4904,6 +5290,10 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "1",
                     "--skip-target",
                     "--resume",
+                    # stage2_results lacks objective metrics; auto:seed
+                    # would fail, so pass explicit values.
+                    "--frontier-hypervolume-reference",
+                    "0.15,0.10,0.012,0.008",
                 ],
             ), patch.object(
                 module.goal_mode_comparison,
@@ -4964,7 +5354,9 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 final_iota=0.181,
                 final_volume=0.101,
                 nonqs_ratio=0.0115,
-                boozer_residual=0.0085,
+                # boozer matches the seed nadir; the campaign no longer
+                # auto-extends the hypervolume reference at reporting time.
+                boozer_residual=0.008,
             )
 
             with patch.object(
@@ -4982,6 +5374,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     str(clean_summary_path),
                     "--frontier-num-lanes",
                     "3",
+                    "--frontier-hypervolume-reference",
+                    "0.15,0.10,0.012,0.008",
                 ],
             ), patch.object(
                 module.goal_mode_comparison,
@@ -5019,6 +5413,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     str(resume_summary_path),
                     "--frontier-num-lanes",
                     "3",
+                    "--frontier-hypervolume-reference",
+                    "0.15,0.10,0.012,0.008",
                 ]
             )
             scalarization = load_frontier_scalarization_module()
@@ -5127,7 +5523,9 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                 final_iota=0.181,
                 final_volume=0.101,
                 nonqs_ratio=0.0115,
-                boozer_residual=0.0085,
+                # boozer matches the seed nadir; the campaign no longer
+                # auto-extends the hypervolume reference at reporting time.
+                boozer_residual=0.008,
             )
 
             with patch.object(
@@ -5146,6 +5544,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "--frontier-num-lanes",
                     "3",
                     "--resume",
+                    "--frontier-hypervolume-reference",
+                    "0.15,0.10,0.012,0.008",
                 ],
             ), patch.object(
                 module.goal_mode_comparison,
@@ -5243,6 +5643,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "1",
                     "--frontier-early-stop-min-hypervolume-gain",
                     "1.0",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
                 ],
             ), patch.object(
                 module.goal_mode_comparison,
@@ -5315,6 +5717,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "1",
                     "--frontier-early-stop-min-hypervolume-gain",
                     "1.0",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
                 ]
             )
             scalarization = load_frontier_scalarization_module()
@@ -5465,6 +5869,8 @@ class FrontierCampaignScriptTests(unittest.TestCase):
                     "--frontier-early-stop-min-hypervolume-gain",
                     "1.0",
                     "--resume",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
                 ],
             ), patch.object(
                 module.goal_mode_comparison,
@@ -5496,6 +5902,697 @@ class FrontierCampaignScriptTests(unittest.TestCase):
             )
             self.assertIsNotNone(progress.early_stop_status)
             self.assertTrue(progress.early_stop_status["triggered"])
+
+    def _persist_skip_target_resume_fixture(
+        self,
+        module,
+        execution_module,
+        scalarization,
+        *,
+        tmpdir_path: Path,
+        output_root: Path,
+        manifest_args_argv: list[str],
+    ) -> tuple[Path, Path, dict, str, list]:
+        """Persist a manifest+progress fixture that triggers immediate early stop.
+
+        Returns ``(stage2_bs_path, stage2_results_path, stage2_results,
+        campaign_id, lane_specs)``. The fixture writes:
+
+        - ``campaign_manifest.json`` built from ``manifest_args_argv``.
+        - ``campaign_progress.json`` with one certified lane and an
+          ``early_stop_status`` whose ``triggered=True`` so the resume run
+          skips the remaining lanes (and thus does not invoke ``run_goal_mode_case``).
+        - ``--skip-target`` is appended to ``manifest_args_argv`` so the
+          target baseline is not run on resume either.
+        """
+        stage2_bs_path, stage2_results_path, stage2_results = (
+            self._write_stage2_seed_artifact(
+                tmpdir_path,
+                overrides={
+                    "FINAL_IOTA": 0.15,
+                    "FINAL_VOLUME": 0.10,
+                    "NONQS_RATIO": 0.012,
+                    "BOOZER_RESIDUAL": 0.008,
+                },
+            )
+        )
+        manifest_args = module.parse_args(manifest_args_argv)
+        lane_specs = scalarization.generate_multilane_local_specs(
+            num_lanes=3,
+            iotas_weight=manifest_args.iotas_weight,
+            frontier_volume_weight=manifest_args.frontier_volume_weight,
+            res_weight=manifest_args.res_weight,
+            lane_budget=manifest_args.frontier_lane_budget,
+        )
+        campaign_id = "manifest-restore-fixture"
+        module.write_json(
+            output_root / "campaign_manifest.json",
+            module.build_frontier_campaign_manifest(
+                manifest_args,
+                campaign_id=campaign_id,
+                stage2_bs_path=stage2_bs_path.resolve(),
+                stage2_results_path=stage2_results_path.resolve(),
+                stage2_results=stage2_results,
+                lane_specs=lane_specs,
+            ),
+        )
+        lane_01_payload = {
+            "status": "completed",
+            **self._minimal_frontier_payload(
+                output_root,
+                lane_id="lane_01",
+                final_iota=0.181,
+                final_volume=0.111,
+                nonqs_ratio=0.0105,
+                boozer_residual=0.0070,
+            ),
+        }
+        lane_01_payload["results_summary"] = (
+            module.goal_mode_comparison.result_metric_subset(
+                lane_01_payload["results"]
+            )
+        )
+        lane_01_args = execution_module.build_frontier_lane_args(
+            manifest_args, lane_specs[0]
+        )
+        lane_01_contract = execution_module.build_frontier_lane_contract_for_spec(
+            lane_01_args,
+            lane_specs[0],
+            campaign_id=campaign_id,
+            stage2_bs_path=stage2_bs_path.resolve(),
+            warm_start_source=str(stage2_bs_path.resolve()),
+            lane_budget=int(lane_01_args.maxiter),
+            lane_index=0,
+        )
+        lane_01_member = module.build_archive_member_from_results(
+            campaign_id=campaign_id,
+            lane_id="lane_01",
+            payload=lane_01_payload,
+            rerun_contract=lane_01_contract.rerun_contract,
+        )
+        lane_01_provisional = module.build_archive_member_from_results(
+            campaign_id=campaign_id,
+            lane_id="lane_01",
+            payload=lane_01_payload,
+            rerun_contract=lane_01_contract.rerun_contract,
+            archive_state=module.FRONTIER_ARCHIVE_STATE_PROVISIONAL,
+        )
+        lane_01_record = module.build_lane_record_from_payload(
+            lane_01_contract,
+            lane_specs[0],
+            int(lane_01_args.maxiter),
+            lane_01_payload,
+            provisional_archive_member=lane_01_provisional,
+            archive_member=lane_01_member,
+            archive_update={
+                "action": "inserted",
+                "member_id": lane_01_member.member_id,
+                "dominated_members": [],
+            },
+        )
+        triggered_early_stop = {
+            "policy": {
+                "patience_lanes": 1,
+                "min_certified": 1,
+                "min_hypervolume_gain": 1.0,
+            },
+            "triggered": True,
+            "reason": "archive_stagnation",
+            "no_improvement_streak": 1,
+            "best_hypervolume": 1.0,
+            "best_archive_size": 1,
+            "stopped_after_lane_id": "lane_01",
+        }
+        module.persist_campaign_progress(
+            output_root / "campaign_progress.json",
+            campaign_id=campaign_id,
+            frontier_version=manifest_args.frontier_version,
+            frontier_engine=manifest_args.frontier_engine,
+            target_payload=None,
+            lane_records=[lane_01_record],
+            provisional_archive_members=[lane_01_provisional],
+            archive_members=[lane_01_member],
+            early_stop_status=triggered_early_stop,
+        )
+        return (
+            stage2_bs_path,
+            stage2_results_path,
+            stage2_results,
+            campaign_id,
+            lane_specs,
+        )
+
+    def test_frontier_campaign_resume_restores_runtime_calibration_from_manifest(self):
+        module = load_frontier_campaign_module()
+        execution_module = load_frontier_campaign_execution_module()
+        scalarization = load_frontier_scalarization_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            stage2_bs_path = tmpdir_path / "stage2" / "biot_savart_opt.json"
+
+            (
+                stage2_bs_path,
+                _,
+                stage2_results,
+                campaign_id,
+                _,
+            ) = self._persist_skip_target_resume_fixture(
+                module,
+                execution_module,
+                scalarization,
+                tmpdir_path=tmpdir_path,
+                output_root=output_root,
+                manifest_args_argv=[
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(tmpdir_path / "stage2" / "biot_savart_opt.json"),
+                    "--frontier-num-lanes",
+                    "3",
+                    "--skip-target",
+                    "--frontier-runtime-calibration-profile",
+                    "canonical_seed_v1",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
+                ],
+            )
+
+            manifest_payload = json.loads(
+                (output_root / "campaign_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                manifest_payload["FRONTIER_RUNTIME_CALIBRATION"]["profile"][
+                    "profile_name"
+                ],
+                "canonical_seed_v1",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                    "--skip-target",
+                    # CLI omits --frontier-runtime-calibration-profile so the
+                    # parser default ``reduced_fixture_v1`` is supplied; the
+                    # manifest must override that default on resume.
+                    "--resume",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    (tmpdir_path / "stage2" / "results.json").resolve(),
+                    stage2_results,
+                ),
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+            ) as run_case:
+                self.assertEqual(module.main(), 0)
+                self.assertEqual(run_case.call_count, 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                summary["frontier_runtime_calibration"]["profile"]["profile_name"],
+                "canonical_seed_v1",
+            )
+            self.assertEqual(
+                summary["frontier_runtime_calibration"]["resolved_defaults"][
+                    "lane_budget"
+                ],
+                300,
+            )
+            # Manifest-on-disk must remain byte-identical when resume does not
+            # opt into drift.
+            manifest_after = json.loads(
+                (output_root / "campaign_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest_after, manifest_payload)
+
+    def test_frontier_campaign_resume_restores_early_stop_policy_from_manifest(self):
+        module = load_frontier_campaign_module()
+        execution_module = load_frontier_campaign_execution_module()
+        scalarization = load_frontier_scalarization_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+
+            (
+                stage2_bs_path,
+                _,
+                stage2_results,
+                _,
+                _,
+            ) = self._persist_skip_target_resume_fixture(
+                module,
+                execution_module,
+                scalarization,
+                tmpdir_path=tmpdir_path,
+                output_root=output_root,
+                manifest_args_argv=[
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(tmpdir_path / "stage2" / "biot_savart_opt.json"),
+                    "--frontier-num-lanes",
+                    "3",
+                    "--skip-target",
+                    "--frontier-early-stop-patience-lanes",
+                    "5",
+                    "--frontier-early-stop-min-certified",
+                    "4",
+                    "--frontier-early-stop-min-hypervolume-gain",
+                    "0.0125",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
+                ],
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                    "--skip-target",
+                    # CLI deliberately omits the early-stop knobs so the
+                    # parser defaults (None → profile fallback) would normally
+                    # apply; the manifest restore must override.
+                    "--resume",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    (tmpdir_path / "stage2" / "results.json").resolve(),
+                    stage2_results,
+                ),
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+            ):
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            resolved = summary["frontier_runtime_calibration"]["resolved_defaults"]
+            self.assertEqual(resolved["early_stop_patience_lanes"], 5)
+            self.assertEqual(resolved["early_stop_min_certified"], 4)
+            self.assertAlmostEqual(
+                resolved["early_stop_min_hypervolume_gain"],
+                0.0125,
+            )
+
+    def test_frontier_campaign_resume_restores_rng_seed_from_manifest(self):
+        module = load_frontier_campaign_module()
+        execution_module = load_frontier_campaign_execution_module()
+        scalarization = load_frontier_scalarization_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+
+            (
+                stage2_bs_path,
+                _,
+                stage2_results,
+                _,
+                _,
+            ) = self._persist_skip_target_resume_fixture(
+                module,
+                execution_module,
+                scalarization,
+                tmpdir_path=tmpdir_path,
+                output_root=output_root,
+                manifest_args_argv=[
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(tmpdir_path / "stage2" / "biot_savart_opt.json"),
+                    "--frontier-num-lanes",
+                    "3",
+                    "--skip-target",
+                    "--frontier-rng-seed",
+                    "4242",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
+                ],
+            )
+
+            captured_args: dict[str, object] = {}
+            original_resolve = module.resolve_frontier_runtime_defaults_from_args
+
+            def capture_resolve(args, *positional, **keyword):
+                captured_args["frontier_rng_seed"] = args.frontier_rng_seed
+                return original_resolve(args, *positional, **keyword)
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                    "--skip-target",
+                    # CLI passes a different seed; the manifest seed must win.
+                    "--frontier-rng-seed",
+                    "9",
+                    "--resume",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    (tmpdir_path / "stage2" / "results.json").resolve(),
+                    stage2_results,
+                ),
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+            ), patch.object(
+                module,
+                "resolve_frontier_runtime_defaults_from_args",
+                side_effect=capture_resolve,
+            ):
+                self.assertEqual(module.main(), 0)
+
+            self.assertEqual(captured_args["frontier_rng_seed"], 4242)
+
+    def test_frontier_campaign_allow_resume_arg_drift_overrides_manifest(self):
+        module = load_frontier_campaign_module()
+        execution_module = load_frontier_campaign_execution_module()
+        scalarization = load_frontier_scalarization_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+
+            (
+                stage2_bs_path,
+                _,
+                stage2_results,
+                _,
+                _,
+            ) = self._persist_skip_target_resume_fixture(
+                module,
+                execution_module,
+                scalarization,
+                tmpdir_path=tmpdir_path,
+                output_root=output_root,
+                manifest_args_argv=[
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(tmpdir_path / "stage2" / "biot_savart_opt.json"),
+                    "--frontier-num-lanes",
+                    "3",
+                    "--skip-target",
+                    "--frontier-runtime-calibration-profile",
+                    "canonical_seed_v1",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
+                ],
+            )
+
+            manifest_before = json.loads(
+                (output_root / "campaign_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                manifest_before["FRONTIER_RUNTIME_CALIBRATION"]["profile"][
+                    "profile_name"
+                ],
+                "canonical_seed_v1",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                    "--skip-target",
+                    "--frontier-runtime-calibration-profile",
+                    "reduced_fixture_v1",
+                    "--allow-resume-arg-drift",
+                    "--resume",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    (tmpdir_path / "stage2" / "results.json").resolve(),
+                    stage2_results,
+                ),
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+            ):
+                self.assertEqual(module.main(), 0)
+
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                summary["frontier_runtime_calibration"]["profile"]["profile_name"],
+                "reduced_fixture_v1",
+            )
+            # Manifest must be rewritten so the on-disk record reflects the
+            # actual run.
+            manifest_after = json.loads(
+                (output_root / "campaign_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                manifest_after["FRONTIER_RUNTIME_CALIBRATION"]["profile"][
+                    "profile_name"
+                ],
+                "reduced_fixture_v1",
+            )
+
+    def test_frontier_campaign_ideal_nadir_resume_uses_manifest_payload_without_spec_file_cli(self):
+        # Regression: a frontier campaign created with
+        # ``--frontier-normalization-kind=fixed_ideal_nadir_span_with_floor`` and
+        # ``--frontier-normalization-spec-file <path>`` persists the resolved
+        # ``PARETO_OBJECTIVE_NORMALIZATION`` payload to the manifest but does
+        # NOT persist the spec-file path (the resolved values supersede it).
+        # On resume, the operator must NOT be forced to re-pass the original
+        # CLI ``--frontier-normalization-spec-file`` arg: the manifest is the
+        # authoritative SSOT and the resume must rebuild the normalization
+        # directly from the persisted payload.
+        module = load_frontier_campaign_module()
+        execution_module = load_frontier_campaign_execution_module()
+        scalarization = load_frontier_scalarization_module()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            output_root = tmpdir_path / "outputs"
+            summary_path = tmpdir_path / "summary.json"
+            normalization_spec_path = tmpdir_path / "normalization.json"
+            normalization_spec_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "frontier_pareto_normalization_spec_v1",
+                        "ideal_metrics": {
+                            "iota": 0.22,
+                            "volume": 0.13,
+                            "qa_error": 0.008,
+                            "boozer_residual": 0.004,
+                        },
+                        "nadir_metrics": {
+                            "iota": 0.14,
+                            "volume": 0.09,
+                            "qa_error": 0.020,
+                            "boozer_residual": 0.012,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            (
+                stage2_bs_path,
+                _,
+                stage2_results,
+                _,
+                _,
+            ) = self._persist_skip_target_resume_fixture(
+                module,
+                execution_module,
+                scalarization,
+                tmpdir_path=tmpdir_path,
+                output_root=output_root,
+                manifest_args_argv=[
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(tmpdir_path / "stage2" / "biot_savart_opt.json"),
+                    "--frontier-num-lanes",
+                    "3",
+                    "--skip-target",
+                    "--frontier-normalization-kind",
+                    "fixed_ideal_nadir_span_with_floor",
+                    "--frontier-normalization-spec-file",
+                    str(normalization_spec_path),
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
+                ],
+            )
+
+            manifest_before = json.loads(
+                (output_root / "campaign_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                manifest_before["PARETO_OBJECTIVE_NORMALIZATION"]["kind"],
+                "fixed_ideal_nadir_span_with_floor",
+            )
+            self.assertEqual(
+                manifest_before["PARETO_OBJECTIVE_NORMALIZATION"]["ideal_metrics"][
+                    "iota"
+                ],
+                0.22,
+            )
+
+            captured_normalization: dict[str, object] = {}
+            original_load_progress = module.load_frontier_campaign_progress
+
+            def capture_normalization(progress_path, *, pareto_objective_normalization):
+                captured_normalization["payload"] = pareto_objective_normalization
+                return original_load_progress(
+                    progress_path,
+                    pareto_objective_normalization=pareto_objective_normalization,
+                )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "run_single_stage_frontier_campaign.py",
+                    "--plasma-surf-filename",
+                    "demo.nc",
+                    "--stage2-bs-path",
+                    str(stage2_bs_path),
+                    "--output-root",
+                    str(output_root),
+                    "--summary-json",
+                    str(summary_path),
+                    "--frontier-num-lanes",
+                    "3",
+                    "--skip-target",
+                    # CLI deliberately omits BOTH
+                    # --frontier-normalization-kind and
+                    # --frontier-normalization-spec-file so the parser
+                    # defaults to seed_relative with no spec file; the
+                    # manifest must restore the ideal_nadir normalization
+                    # directly from the persisted payload (the bug pre-fix
+                    # raised ValueError on the spec-file requirement).
+                    "--resume",
+                    "--frontier-hypervolume-reference",
+                    "auto:seed",
+                ],
+            ), patch.object(
+                module.goal_mode_comparison,
+                "load_validated_stage2_seed_metadata",
+                return_value=(
+                    stage2_bs_path.resolve(),
+                    (tmpdir_path / "stage2" / "results.json").resolve(),
+                    stage2_results,
+                ),
+            ), patch.object(
+                module.goal_mode_comparison,
+                "run_goal_mode_case",
+            ) as run_case, patch.object(
+                module,
+                "load_frontier_campaign_progress",
+                side_effect=capture_normalization,
+            ):
+                self.assertEqual(module.main(), 0)
+                # Skip-target + triggered early stop means no lanes are
+                # actually executed during resume.
+                self.assertEqual(run_case.call_count, 0)
+
+            # The resume must have built the runtime normalization directly
+            # from the persisted manifest payload, NOT from the parser
+            # default (seed_relative).
+            runtime_normalization = captured_normalization["payload"]
+            self.assertEqual(
+                runtime_normalization["kind"],
+                "fixed_ideal_nadir_span_with_floor",
+            )
+            self.assertEqual(
+                runtime_normalization["ideal_metrics"],
+                manifest_before["PARETO_OBJECTIVE_NORMALIZATION"]["ideal_metrics"],
+            )
+            self.assertEqual(
+                runtime_normalization["nadir_metrics"],
+                manifest_before["PARETO_OBJECTIVE_NORMALIZATION"]["nadir_metrics"],
+            )
+            self.assertEqual(
+                runtime_normalization["metric_rules"],
+                manifest_before["PARETO_OBJECTIVE_NORMALIZATION"]["metric_rules"],
+            )
+            self.assertEqual(
+                runtime_normalization["reference_metrics"],
+                manifest_before["PARETO_OBJECTIVE_NORMALIZATION"]["reference_metrics"],
+            )
+            # Manifest-on-disk must remain byte-identical when resume does
+            # not opt into drift (the persisted PARETO_OBJECTIVE_NORMALIZATION
+            # is the authoritative SSOT).
+            manifest_after = json.loads(
+                (output_root / "campaign_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest_after, manifest_before)
 
     def test_resolve_frontier_lane_warm_start_reuses_latest_certified_final_artifact(self):
         module = load_frontier_campaign_module()

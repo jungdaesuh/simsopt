@@ -82,6 +82,7 @@ class FrontierCampaignManifest:
     frontier_hypervolume_reference_metrics: dict[str, float] | None
     frontier_reference_points_file: str | None
     frontier_epsilon_spec_file: str | None
+    frontier_lane_warm_start_mode: str
     pareto_objective_vector: list[dict[str, str]]
     pareto_objective_normalization: dict[str, object]
     dominance_tolerance: dict[str, float]
@@ -116,6 +117,7 @@ class FrontierCampaignManifest:
             "FRONTIER_HYPERVOLUME_REFERENCE_METRICS": self.frontier_hypervolume_reference_metrics,
             "FRONTIER_REFERENCE_POINTS_FILE": self.frontier_reference_points_file,
             "FRONTIER_EPSILON_SPEC_FILE": self.frontier_epsilon_spec_file,
+            "FRONTIER_LANE_WARM_START_MODE": self.frontier_lane_warm_start_mode,
             "PARETO_OBJECTIVE_VECTOR": self.pareto_objective_vector,
             "PARETO_OBJECTIVE_NORMALIZATION": self.pareto_objective_normalization,
             "DOMINANCE_TOLERANCE": self.dominance_tolerance,
@@ -215,6 +217,7 @@ def build_frontier_campaign_manifest(
         frontier_hypervolume_reference_metrics=hypervolume_reference,
         frontier_reference_points_file=args.frontier_reference_points_file,
         frontier_epsilon_spec_file=args.frontier_epsilon_spec_file,
+        frontier_lane_warm_start_mode=args.frontier_lane_warm_start_mode,
         pareto_objective_vector=pareto_objective_vector_contract(),
         pareto_objective_normalization=build_pareto_objective_normalization(
             hypervolume_reference,
@@ -267,17 +270,16 @@ def build_frontier_hypervolume_history(
                 pareto_objective_normalization=pareto_objective_normalization,
             )
         certified_members = certified_archive_members(running_archive)
-        annotated_members = annotate_hypervolume_contributions(
-            certified_members,
-            hypervolume_reference=hypervolume_reference,
-        )
+        # The history only needs archive size and total hypervolume; the
+        # leave-one-out per-member contribution annotation costs O(N) extra
+        # hypervolume calls per step and the result is discarded.
         history.append(
             {
                 "lane_id": lane_record.get("lane_id"),
                 "status": lane_record.get("status"),
-                "archive_size": len(annotated_members),
+                "archive_size": len(certified_members),
                 "hypervolume": frontier_archive_hypervolume(
-                    annotated_members,
+                    certified_members,
                     hypervolume_reference=hypervolume_reference,
                 ),
             }
@@ -361,6 +363,7 @@ def build_frontier_campaign_summary(
     stage2_bs_path: Path,
     stage2_results_path: Path | None,
     stage2_results: dict | None,
+    output_root: Path,
     paths: FrontierCampaignPaths,
     lane_specs: list[FrontierLaneSpec],
     target_payload: dict[str, object] | None,
@@ -370,17 +373,17 @@ def build_frontier_campaign_summary(
     delta_fn,
     runtime_defaults: FrontierResolvedRuntimeDefaults,
     early_stop_status: dict[str, object],
+    hypervolume_reference: dict[str, float] | None,
+    pareto_objective_normalization: dict[str, object],
 ) -> dict[str, object]:
-    hypervolume_reference = resolve_hypervolume_reference(
-        reference_spec=args.frontier_hypervolume_reference,
-        seed_results=stage2_results,
-        members=archive_members,
-    )
-    pareto_objective_normalization = build_pareto_objective_normalization(
-        hypervolume_reference,
-        kind=args.frontier_normalization_kind,
-        normalization_spec_path=args.frontier_normalization_spec_file,
-    )
+    # ``hypervolume_reference`` and ``pareto_objective_normalization`` are
+    # resolved once by the orchestrator and threaded through unchanged: the
+    # campaign-wide hypervolume reference is IMMUTABLE and must match the
+    # value used for early-stop decisions, the hypervolume history, and the
+    # persisted archive. No re-resolve, no nadir-extension here — if the
+    # certified archive regresses vs the resolved reference the downstream
+    # ``serialize_frontier_archive`` call raises ``ValueError`` so the
+    # operator can rerun with an explicit ``--frontier-hypervolume-reference``.
     certified_members = certified_archive_members(archive_members)
     annotated_certified_members = annotate_hypervolume_contributions(
         certified_members,
@@ -406,13 +409,21 @@ def build_frontier_campaign_summary(
         for lane_record in lane_records
         if lane_record.get("archive_update") is not None
     ]
+    ran_lane_ids = {
+        lane_record.get("lane_id") for lane_record in lane_records
+    }
+    frontier_lanes_skipped = [
+        lane_spec.lane_id
+        for lane_spec in lane_specs
+        if lane_spec.lane_id not in ran_lane_ids
+    ]
     summary: dict[str, object] = {
         "schema_version": FRONTIER_CAMPAIGN_SUMMARY_SCHEMA_VERSION,
         "frontier_version": args.frontier_version,
         "frontier_engine": args.frontier_engine,
         "frontier_campaign_id": campaign_id,
         "dry_run": bool(args.dry_run),
-        "output_root": str(Path(args.output_root).resolve()),
+        "output_root": str(output_root),
         "manifest_path": str(paths.manifest_path),
         "progress_path": str(paths.progress_path),
         "archive_path": str(paths.archive_path),
@@ -430,8 +441,10 @@ def build_frontier_campaign_summary(
             {**lane_record, "provisional_member_ids": []}
             for lane_record in lane_records
         ],
+        "frontier_lanes_skipped": frontier_lanes_skipped,
         "frontier_archive": serialize_frontier_archive(
             annotated_certified_members,
+            campaign_id=campaign_id,
             hypervolume_reference=hypervolume_reference,
         ),
         "frontier_archive_size": len(annotated_certified_members),

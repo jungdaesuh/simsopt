@@ -37,12 +37,31 @@ SUPPORTED_FRONTIER_REFERENCE_MODES = (
 )
 FRONTIER_REFERENCE_POINTS_SCHEMA_VERSION = "frontier_reference_points_v1"
 FRONTIER_EPSILON_SPEC_SCHEMA_VERSION = "frontier_epsilon_spec_v1"
-FRONTIER_ACHIEVEMENT_SPEC_SCHEMA_VERSION = "frontier_achievement_spec_v1"
+# v2 mandates ``frontier_reference_qa_scale`` / ``frontier_reference_boozer_scale``
+# alongside the existing reference targets so the Chebyshev gradient and
+# epsilon excess penalty stop conflating scale with target. There is no
+# back-compat path; v1 specs raise at load.
+FRONTIER_ACHIEVEMENT_SPEC_SCHEMA_VERSION = "frontier_achievement_spec_v2"
 _REFERENCE_METRIC_FLOOR = 1.0e-6
 _TRUST_THRESHOLD_FLOOR = 1.0e-5
-# Positive floor intentionally breaks exact simplex unit-sum to keep
-# downstream Chebyshev divisions finite for pure-axis directions.
+# Positive floor keeps Chebyshev divisions finite for pure-axis directions.
+# The flooring breaks simplex unit-sum, so consumers must renormalize via
+# ``_floor_and_normalize_simplex_weights`` before persisting weights.
 _WEIGHT_FLOOR = 1.0e-12
+
+
+def _floor_and_normalize_simplex_weights(
+    direction: tuple[float, ...],
+) -> tuple[float, ...]:
+    """Apply ``_WEIGHT_FLOOR`` per component and renormalize to unit sum.
+
+    Pure-axis Das-Dennis directions contain zeros. Without flooring the
+    Chebyshev gradient divides by zero; without renormalization the
+    flooring breaks the documented ``Σwᵢ = 1`` lane-payload invariant.
+    """
+    floored = tuple(max(component, _WEIGHT_FLOOR) for component in direction)
+    total = sum(floored)
+    return tuple(weight / total for weight in floored)
 _DEFAULT_CHEBYSHEV_RHO = 1.0e-3
 _DEFAULT_CHEBYSHEV_SHARPNESS = 12.0
 _STRICT_TOP_LEVEL_KEYS = frozenset({"schema_version", "lanes"})
@@ -265,17 +284,26 @@ def apply_frontier_scalarization_override(
     annotated["frontier_goal_grad"] = np.asarray(replacement_grad, dtype=float)
 
     if alm_formulation == "weighted_sum":
+        # SSOT: both ALM and non-ALM branches sum the full geometry-penalty
+        # bundle (length, cc, cs, curvature, surf_dist, poloidal_extent) into
+        # ``base_total`` / ``physics_total`` so cross-formulation comparisons
+        # operate on the same physical denominator.
+        penalty_total, penalty_grad = _frontier_penalty_geometry_total_grad(
+            annotated,
+            length_weight=length_weight,
+            cc_weight=cc_weight,
+            cs_weight=cs_weight,
+            curvature_weight=curvature_weight,
+            surf_dist_weight=surf_dist_weight,
+            poloidal_extent_weight=poloidal_extent_weight,
+        )
         if "constraint_values" in annotated and "constraint_grads" in annotated:
             if alm_multipliers is None or alm_penalty is None:
                 raise ValueError(
                     "ALM frontier scalarization override requires explicit multipliers and penalty"
                 )
-            base_total, base_grad = _frontier_alm_base_total_grad(
-                annotated,
-                length_weight=length_weight,
-            )
-            base_total += float(replacement_total)
-            base_grad = base_grad + replacement_grad
+            base_total = float(penalty_total) + float(replacement_total)
+            base_grad = penalty_grad + replacement_grad
             alm_eval = augmented_inequality_objective(
                 base_total,
                 base_grad,
@@ -288,16 +316,7 @@ def apply_frontier_scalarization_override(
             annotated["physics_total"] = float(base_total)
             annotated["base_total"] = float(base_total)
         else:
-            penalty_total, penalty_grad = _frontier_penalty_geometry_total_grad(
-                annotated,
-                length_weight=length_weight,
-                cc_weight=cc_weight,
-                cs_weight=cs_weight,
-                curvature_weight=curvature_weight,
-                surf_dist_weight=surf_dist_weight,
-                poloidal_extent_weight=poloidal_extent_weight,
-            )
-            annotated["total"] = penalty_total + float(replacement_total)
+            annotated["total"] = float(penalty_total) + float(replacement_total)
             annotated["grad"] = penalty_grad + replacement_grad
     return annotate_search_evaluation_finiteness(annotated)
 
@@ -361,16 +380,6 @@ def _frontier_penalty_geometry_total_grad(
     return float(total), grad
 
 
-def _frontier_alm_base_total_grad(
-    objective_eval,
-    *,
-    length_weight,
-):
-    total = float(length_weight) * float(objective_eval["J_len"])
-    grad = float(length_weight) * np.asarray(objective_eval["dJ_len"], dtype=float)
-    return float(total), grad
-
-
 def _frontier_chebyshev_goal(objective_eval, frontier_goal_config):
     deltas = np.asarray(
         [
@@ -393,7 +402,7 @@ def _frontier_chebyshev_goal(objective_eval, frontier_goal_config):
             frontier_goal_config.chebyshev_weight_qa
             * (
                 (float(objective_eval["J_QS"]) - frontier_goal_config.qs_reference)
-                / frontier_goal_config.qs_reference
+                / frontier_goal_config.qs_scale
             ),
             frontier_goal_config.chebyshev_weight_boozer
             * (
@@ -401,7 +410,7 @@ def _frontier_chebyshev_goal(objective_eval, frontier_goal_config):
                     float(objective_eval["J_Boozer"])
                     - frontier_goal_config.boozer_reference
                 )
-                / frontier_goal_config.boozer_reference
+                / frontier_goal_config.boozer_scale
             ),
         ],
         dtype=float,
@@ -421,22 +430,33 @@ def _frontier_chebyshev_goal(objective_eval, frontier_goal_config):
         + np.log(sum_exp) / sharpness
         + frontier_goal_config.chebyshev_rho * float(np.sum(deltas))
     )
-    directional_grads = np.stack([
-        -frontier_goal_config.chebyshev_weight_iota
-        * np.asarray(objective_eval["dJ_iota_metric"], dtype=float)
-        / frontier_goal_config.iota_scale,
-        -frontier_goal_config.chebyshev_weight_volume
-        * np.asarray(objective_eval["dJ_volume_metric"], dtype=float)
-        / frontier_goal_config.volume_scale,
-        frontier_goal_config.chebyshev_weight_qa
-        * np.asarray(objective_eval["dJ_QS"], dtype=float)
-        / frontier_goal_config.qs_reference,
-        frontier_goal_config.chebyshev_weight_boozer
-        * np.asarray(objective_eval["dJ_Boozer"], dtype=float)
-        / frontier_goal_config.boozer_reference,
-    ])
     coeffs = softmax_weights + frontier_goal_config.chebyshev_rho
-    chebyshev_grad = (coeffs[:, None] * directional_grads).sum(axis=0)
+    chebyshev_grad = (
+        (
+            -float(coeffs[0])
+            * float(frontier_goal_config.chebyshev_weight_iota)
+            / float(frontier_goal_config.iota_scale)
+        )
+        * np.asarray(objective_eval["dJ_iota_metric"], dtype=float)
+        + (
+            -float(coeffs[1])
+            * float(frontier_goal_config.chebyshev_weight_volume)
+            / float(frontier_goal_config.volume_scale)
+        )
+        * np.asarray(objective_eval["dJ_volume_metric"], dtype=float)
+        + (
+            float(coeffs[2])
+            * float(frontier_goal_config.chebyshev_weight_qa)
+            / float(frontier_goal_config.qs_scale)
+        )
+        * np.asarray(objective_eval["dJ_QS"], dtype=float)
+        + (
+            float(coeffs[3])
+            * float(frontier_goal_config.chebyshev_weight_boozer)
+            / float(frontier_goal_config.boozer_scale)
+        )
+        * np.asarray(objective_eval["dJ_Boozer"], dtype=float)
+    )
     return {
         "frontier_scalarization_total": float(chebyshev_total),
         "frontier_scalarization_grad": chebyshev_grad,
@@ -453,11 +473,13 @@ def _frontier_epsilon_penalties(
     epsilon_penalties: dict[str, dict[str, object]] = {}
     thresholds = EpsilonThresholds.from_goal_config(frontier_goal_config)
     if thresholds.qa_max is not None:
+        # qs_scale already enforces ``_REFERENCE_METRIC_FLOOR`` at config-build
+        # time, so the historical ``max(..., 1e-6)`` clamp is redundant.
         epsilon_penalties["qa_error"] = _frontier_excess_penalty(
             objective_eval["J_QS"],
             objective_eval["dJ_QS"],
             threshold=thresholds.qa_max,
-            scale=max(frontier_goal_config.qs_reference, 1.0e-6),
+            scale=frontier_goal_config.qs_scale,
             penalty_weight=frontier_goal_config.epsilon_penalty_weight,
         )
     if thresholds.boozer_max is not None:
@@ -465,7 +487,7 @@ def _frontier_epsilon_penalties(
             objective_eval["J_Boozer"],
             objective_eval["dJ_Boozer"],
             threshold=thresholds.boozer_max,
-            scale=max(frontier_goal_config.boozer_reference, 1.0e-6),
+            scale=frontier_goal_config.boozer_scale,
             penalty_weight=frontier_goal_config.epsilon_penalty_weight,
         )
     return epsilon_penalties
@@ -702,7 +724,9 @@ def _reference_scalarization_params(
         ("frontier_reference_volume", None),
         ("frontier_reference_volume_scale", _REFERENCE_METRIC_FLOOR),
         ("frontier_reference_qa", _REFERENCE_METRIC_FLOOR),
+        ("frontier_reference_qa_scale", _REFERENCE_METRIC_FLOOR),
         ("frontier_reference_boozer", _REFERENCE_METRIC_FLOOR),
+        ("frontier_reference_boozer_scale", _REFERENCE_METRIC_FLOOR),
         ("frontier_boozer_trust_threshold", _TRUST_THRESHOLD_FLOOR),
         ("frontier_boozer_trust_penalty_scale", _REFERENCE_METRIC_FLOOR),
         ("frontier_chebyshev_sharpness", None),
@@ -798,10 +822,15 @@ def _select_reference_directions(
     n_dim: int,
     partitions: int | None,
 ) -> list[tuple[float, ...]]:
-    """Select by enumeration-order rounding, not geometric-distance sampling.
+    """Emit the full Das-Dennis reference-direction family for a partition count.
 
-    When partitions is provided, the full Das-Dennis family for that
-    partition count is emitted (requested_num_directions is ignored).
+    When ``partitions`` is provided, the full Das-Dennis family for that
+    partition count is emitted (``requested_num_directions`` is ignored).
+
+    When ``partitions`` is omitted, ``requested_num_directions`` must equal
+    ``C(p + n - 1, n - 1)`` for some partition ``p``. Selection-by-rounding
+    over a larger family is no longer permitted because it produces
+    non-uniform geometric coverage.
     """
     if requested_num_directions <= 0:
         raise ValueError("--frontier-num-lanes must be positive")
@@ -816,33 +845,31 @@ def _select_reference_directions(
         partitions=resolved_partitions,
     ) < requested_num_directions:
         resolved_partitions += 1
-    directions = _das_dennis_reference_directions(
+    if (
+        _direction_count(n_dim=n_dim, partitions=resolved_partitions)
+        != requested_num_directions
+    ):
+        smaller_count = _direction_count(
+            n_dim=n_dim,
+            partitions=resolved_partitions - 1,
+        )
+        larger_count = _direction_count(
+            n_dim=n_dim,
+            partitions=resolved_partitions,
+        )
+        raise ValueError(
+            f"--frontier-num-lanes={requested_num_directions} does not match "
+            f"any Das-Dennis reference-direction count for n_dim={n_dim}. "
+            "Selection-by-rounding produces non-uniform geometric coverage "
+            "and is no longer permitted; supply --frontier-full-simplex-partitions "
+            "explicitly to pick a partition. Nearest valid counts: "
+            f"{smaller_count} (partitions={resolved_partitions - 1}) or "
+            f"{larger_count} (partitions={resolved_partitions})."
+        )
+    return _das_dennis_reference_directions(
         n_dim=n_dim,
         partitions=resolved_partitions,
     )
-    if len(directions) <= requested_num_directions:
-        return directions
-    if requested_num_directions == 1:
-        return [directions[0]]
-    selected_indices = [
-        round(index * (len(directions) - 1) / float(requested_num_directions - 1))
-        for index in range(requested_num_directions)
-    ]
-    unique_indices: list[int] = []
-    seen: set[int] = set()
-    for index in selected_indices:
-        if index in seen:
-            continue
-        unique_indices.append(index)
-        seen.add(index)
-    next_index = 0
-    while len(unique_indices) < requested_num_directions:
-        if next_index not in seen:
-            unique_indices.append(next_index)
-            seen.add(next_index)
-        next_index += 1
-    unique_indices.sort()
-    return [directions[index] for index in unique_indices]
 
 
 def generate_frontier_reference_directions(
@@ -903,6 +930,19 @@ def _achievement_chebyshev_lane_specs(
             raise ValueError(
                 "achievement/Chebyshev lanes require a reference_point"
             )
+        # v2 requires explicit qa/boozer scales so the Chebyshev gradient and
+        # epsilon excess penalty stop conflating scale with target. v1 specs
+        # are rejected at the schema_version gate above; specs that pass the
+        # gate but omit the scale keys are caught here.
+        for required_scale_key in (
+            "frontier_reference_qa_scale",
+            "frontier_reference_boozer_scale",
+        ):
+            if required_scale_key not in scalarization_params:
+                raise ValueError(
+                    f"achievement/Chebyshev lane {index + 1} is missing "
+                    f"required key {required_scale_key!r}"
+                )
         metric_weights = _resolve_metric_weights(lane_payload)
         scalarization_params.update(
             {
@@ -979,35 +1019,54 @@ def _achievement_full_simplex_lane_specs(
         if default_frontier_volume_weight is None
         else float(default_frontier_volume_weight)
     )
-    return [
-        FrontierLaneSpec(
-            lane_id=f"simplex_{index + 1:02d}",
-            scalarization_type=FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
-            scalarization_params={
-                "frontier_reference_iota": float(seed_reference_metrics["iota"]),
-                "frontier_reference_volume": float(seed_reference_metrics["volume"]),
-                "frontier_reference_qa": max(
-                    float(seed_reference_metrics["qa_error"]),
-                    _REFERENCE_METRIC_FLOOR,
-                ),
-                "frontier_reference_boozer": max(
-                    float(seed_reference_metrics["boozer_residual"]),
-                    _REFERENCE_METRIC_FLOOR,
-                ),
-                "frontier_chebyshev_rho": _DEFAULT_CHEBYSHEV_RHO,
-                "frontier_chebyshev_sharpness": _DEFAULT_CHEBYSHEV_SHARPNESS,
-                "frontier_chebyshev_weight_iota": max(direction[0], _WEIGHT_FLOOR),
-                "frontier_chebyshev_weight_volume": max(direction[1], _WEIGHT_FLOOR),
-                "frontier_chebyshev_weight_qa": max(direction[2], _WEIGHT_FLOOR),
-                "frontier_chebyshev_weight_boozer": max(direction[3], _WEIGHT_FLOOR),
-            },
-            iotas_weight=float(default_iotas_weight),
-            frontier_volume_weight=default_volume_weight,
-            res_weight=float(default_res_weight),
-            lane_budget=default_lane_budget,
+    # The 0.25 factor matches the existing iota_scale heuristic in
+    # ``build_frontier_goal_config`` and gives a Chebyshev delta range of
+    # roughly ``±4`` for a metric drift of one reference unit, which keeps the
+    # log-sum-exp smoothing well-conditioned without saturating the softmax.
+    qa_scale = max(
+        float(seed_reference_metrics["qa_error"]) * 0.25,
+        _REFERENCE_METRIC_FLOOR,
+    )
+    boozer_scale = max(
+        float(seed_reference_metrics["boozer_residual"]) * 0.25,
+        _REFERENCE_METRIC_FLOOR,
+    )
+    lane_specs: list[FrontierLaneSpec] = []
+    for index, direction in enumerate(directions):
+        normalized_weights = _floor_and_normalize_simplex_weights(direction)
+        lane_specs.append(
+            FrontierLaneSpec(
+                lane_id=f"simplex_{index + 1:02d}",
+                scalarization_type=FRONTIER_REFERENCE_MODE_ACHIEVEMENT,
+                scalarization_params={
+                    "frontier_reference_iota": float(seed_reference_metrics["iota"]),
+                    "frontier_reference_volume": float(
+                        seed_reference_metrics["volume"]
+                    ),
+                    "frontier_reference_qa": max(
+                        float(seed_reference_metrics["qa_error"]),
+                        _REFERENCE_METRIC_FLOOR,
+                    ),
+                    "frontier_reference_qa_scale": qa_scale,
+                    "frontier_reference_boozer": max(
+                        float(seed_reference_metrics["boozer_residual"]),
+                        _REFERENCE_METRIC_FLOOR,
+                    ),
+                    "frontier_reference_boozer_scale": boozer_scale,
+                    "frontier_chebyshev_rho": _DEFAULT_CHEBYSHEV_RHO,
+                    "frontier_chebyshev_sharpness": _DEFAULT_CHEBYSHEV_SHARPNESS,
+                    "frontier_chebyshev_weight_iota": normalized_weights[0],
+                    "frontier_chebyshev_weight_volume": normalized_weights[1],
+                    "frontier_chebyshev_weight_qa": normalized_weights[2],
+                    "frontier_chebyshev_weight_boozer": normalized_weights[3],
+                },
+                iotas_weight=float(default_iotas_weight),
+                frontier_volume_weight=default_volume_weight,
+                res_weight=float(default_res_weight),
+                lane_budget=default_lane_budget,
+            )
         )
-        for index, direction in enumerate(directions)
-    ]
+    return lane_specs
 
 
 def _epsilon_constraint_lane_specs(

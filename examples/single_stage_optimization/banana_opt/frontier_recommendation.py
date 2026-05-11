@@ -8,7 +8,8 @@ from .frontier_archive import FrontierArchiveMember
 from .frontier_contracts import SUPPORTED_FRONTIER_RECOMMENDATION_POLICIES
 from .frontier_dominance import (
     PARETO_OBJECTIVE_SPECS,
-    objective_metric_scale,
+    normalized_objective_distance,
+    pareto_scaled_difference,
     resolve_pareto_normalization_reference_metrics,
 )
 
@@ -155,21 +156,6 @@ def scalar_score(
     return key
 
 
-def none_aware_lex(field: str, *, fallback: KeyFn) -> KeyFn:
-    if field != "distance_from_seed":
-        raise ValueError(f"Unsupported none-aware frontier member field: {field}")
-
-    def key(member: FrontierArchiveMember) -> tuple[object, ...]:
-        value = member.distance_from_seed
-        return (
-            value is None,
-            float("inf") if value is None else float(value),
-            *fallback(member),
-        )
-
-    return key
-
-
 def _balanced_key(
     pareto_objective_normalization: Mapping[str, object] | None,
 ) -> KeyFn:
@@ -185,14 +171,55 @@ def _balanced_key(
 def _closest_to_seed_key(
     pareto_objective_normalization: Mapping[str, object] | None,
 ) -> KeyFn:
-    return none_aware_lex(
-        "distance_from_seed",
-        fallback=scalar_score(
-            lambda member: _balanced_policy_score(
-                member,
-                pareto_objective_normalization=pareto_objective_normalization,
-            )
+    """Recompute seed-relative distance per call against the active normalization.
+
+    The distance was previously cached on the archive member at insert time;
+    that cache went stale whenever the campaign's `pareto_objective_normalization`
+    differed at recommendation time. The recommendation key now lives entirely
+    in recommendation logic.
+    """
+    balanced_fallback = scalar_score(
+        lambda member: _balanced_policy_score(
+            member,
+            pareto_objective_normalization=pareto_objective_normalization,
         ),
+        tiebreak_metrics=_BALANCED_POLICY_METRICS,
+    )
+
+    def key(member: FrontierArchiveMember) -> tuple[object, ...]:
+        distance = _closest_to_seed_distance(
+            member,
+            pareto_objective_normalization=pareto_objective_normalization,
+        )
+        return (
+            distance is None,
+            float("inf") if distance is None else float(distance),
+            *balanced_fallback(member),
+        )
+
+    return key
+
+
+def _closest_to_seed_distance(
+    member: FrontierArchiveMember,
+    *,
+    pareto_objective_normalization: Mapping[str, object] | None,
+) -> float | None:
+    """Distance from `member.objective_metrics` to the seed reference under the
+    active Pareto normalization. Returns `None` when no reference is available
+    or when any objective metric / matched reference value is missing.
+    """
+    reference_metrics = resolve_pareto_normalization_reference_metrics(
+        member.reference_metrics,
+        pareto_objective_normalization=pareto_objective_normalization,
+    )
+    if reference_metrics is None:
+        return None
+    return normalized_objective_distance(
+        member.objective_metrics,
+        reference_metrics,
+        reference_metrics=reference_metrics,
+        pareto_objective_normalization=pareto_objective_normalization,
     )
 
 
@@ -269,9 +296,11 @@ def _policy_score(
         return member.objective_metrics.get("iota")
     if policy_name == "max_volume_under_safe_hardware":
         return member.objective_metrics.get("volume")
-    if member.distance_from_seed is None:
-        return None
-    return -float(member.distance_from_seed)
+    distance = _closest_to_seed_distance(
+        member,
+        pareto_objective_normalization=pareto_objective_normalization,
+    )
+    return None if distance is None else -float(distance)
 
 
 def _policy_inputs(
@@ -323,6 +352,14 @@ def _normalized_delta(
     maximize: bool,
     pareto_objective_normalization: Mapping[str, object] | None = None,
 ) -> float:
+    """Normalized improvement of `member.objective_metrics[metric_name]` against
+    the active reference. Treats both inputs as upstream-certified invariants:
+    certified archive members must have all four `objective_metrics` populated
+    (`is_certified_results` enforces `objective_metrics_complete`), and the
+    active normalization must publish a reference value for each metric. Any
+    missing input is a contract break, not a "no data, treat as at-reference"
+    fallback (F4.2).
+    """
     value = member.objective_metrics.get(metric_name)
     reference_metrics = resolve_pareto_normalization_reference_metrics(
         member.reference_metrics,
@@ -330,13 +367,17 @@ def _normalized_delta(
     )
     reference = None if reference_metrics is None else reference_metrics.get(metric_name)
     if value is None or reference is None:
-        return 0.0
-    scale = objective_metric_scale(
+        raise ValueError(
+            "_normalized_delta requires complete metric and reference data; "
+            f"got value={value!r}, reference={reference!r} for {metric_name!r}"
+        )
+    delta = pareto_scaled_difference(
         metric_name,
+        value,
         reference,
+        scale_reference=reference,
         pareto_objective_normalization=pareto_objective_normalization,
     )
-    delta = (float(value) - float(reference)) / scale
     return delta if maximize else -delta
 
 

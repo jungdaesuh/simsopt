@@ -935,6 +935,17 @@ def run_goal_mode_case(
     output_root: Path,
 ) -> dict:
     case_output_root = output_root / goal_mode
+    command = build_single_stage_goal_mode_command(
+        args,
+        goal_mode=goal_mode,
+        stage2_bs_path=stage2_bs_path,
+        case_output_root=case_output_root,
+    )
+    # Resume F06: hermetic dry-run — do not materialize the lane subtree on
+    # disk. Downstream tooling (snapshot helpers, summary builders) rely on
+    # the lane directory only existing when the lane has actually run.
+    if args.dry_run:
+        return {"command": command}
     case_output_root.mkdir(parents=True, exist_ok=True)
     previous_results_snapshot = snapshot_single_results_paths(case_output_root)
     previous_preserved_snapshot = snapshot_single_stage_preserved_results_paths(
@@ -945,14 +956,6 @@ def run_goal_mode_case(
         "previous_results_snapshot": previous_results_snapshot,
         "previous_preserved_snapshot": previous_preserved_snapshot,
     }
-    command = build_single_stage_goal_mode_command(
-        args,
-        goal_mode=goal_mode,
-        stage2_bs_path=stage2_bs_path,
-        case_output_root=case_output_root,
-    )
-    if args.dry_run:
-        return {"command": command}
     timeout_seconds = timeout_or_none(args.single_stage_timeout_seconds)
     try:
         run_command(

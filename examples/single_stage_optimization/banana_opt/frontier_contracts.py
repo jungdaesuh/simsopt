@@ -253,7 +253,6 @@ def validate_frontier_archive_member_payload(
             "constraint_metrics",
             "hard_certification_ok",
             "soft_search_score",
-            "distance_from_seed",
             "hypervolume_contribution",
             "recommendation_flags",
             "rerun_contract",
@@ -290,6 +289,8 @@ def validate_frontier_archive_payload(payload: Mapping[str, object]) -> None:
     _require_keys(
         payload,
         (
+            "frontier_campaign_id",
+            "created_at",
             "pareto_objective_vector",
             "archive_membership_rules",
             "archive_state_semantics",
@@ -335,6 +336,7 @@ def validate_frontier_campaign_manifest_payload(payload: Mapping[str, object]) -
             "FRONTIER_REFERENCE_MODE",
             "FRONTIER_SCALARIZATION_FAMILY",
             "FRONTIER_CONSTRAINT_MODE",
+            "FRONTIER_LANE_WARM_START_MODE",
             "PARETO_OBJECTIVE_VECTOR",
             "PARETO_OBJECTIVE_NORMALIZATION",
             "DOMINANCE_TOLERANCE",
@@ -425,14 +427,19 @@ def validate_frontier_campaign_summary_payload(payload: Mapping[str, object]) ->
             "frontier_version",
             "frontier_engine",
             "frontier_campaign_id",
+            "dry_run",
             "output_root",
             "manifest_path",
             "progress_path",
             "archive_path",
             "recommended_path",
+            "stage2_bs_path",
+            "stage2_results_path",
+            "stage2_artifact_init_only",
             "frontier_num_lanes",
             "frontier_lane_specs",
             "frontier_lanes",
+            "frontier_lanes_skipped",
             "frontier_archive",
             "frontier_archive_size",
             "frontier_archive_best_by_metric",
@@ -455,6 +462,7 @@ def validate_frontier_campaign_summary_payload(payload: Mapping[str, object]) ->
         artifact_name="summary",
     )
     _require_list(payload, "frontier_lane_specs")
+    _require_list(payload, "frontier_lanes_skipped")
     frontier_lanes = _require_list(payload, "frontier_lanes")
     frontier_hypervolume_history = _require_list(
         payload,
@@ -471,6 +479,10 @@ def validate_frontier_campaign_summary_payload(payload: Mapping[str, object]) ->
     validate_frontier_recommended_payload(recommended_member)
     _require_mapping(frontier_runtime_calibration, "resolved_defaults")
     _require_mapping(frontier_early_stop, "policy")
+    _require_keys(
+        frontier_early_stop,
+        ("policy", "triggered", "reason", "stopped_after_lane_id"),
+    )
     for history_entry in frontier_hypervolume_history:
         if not isinstance(history_entry, Mapping):
             raise ValueError("frontier_hypervolume_history entries must be mappings")

@@ -107,6 +107,14 @@ class FrontierLaneRecord:
     error_message: str | None
 
     def to_json_dict(self) -> dict[str, object]:
+        # Non-validating: per F9 perf, the per-record validation is dropped
+        # from intermediate persists. Validation now happens once per persist
+        # at the progress-payload boundary in
+        # ``validate_frontier_campaign_progress_payload``, which iterates
+        # lane_records and runs ``validate_frontier_lane_record_payload``
+        # for each. Callers that want a validated payload (e.g., unit tests
+        # that round-trip a single record) should use
+        # ``to_validated_json_dict`` instead.
         payload = asdict(self)
         payload.pop("lane_contract", None)
         payload.update(
@@ -126,6 +134,10 @@ class FrontierLaneRecord:
                 "rerun_contract": dict(self.lane_contract.rerun_contract),
             }
         )
+        return payload
+
+    def to_validated_json_dict(self) -> dict[str, object]:
+        payload = self.to_json_dict()
         validate_frontier_lane_record_payload(payload)
         return payload
 
@@ -208,7 +220,9 @@ class FrontierCampaignProgress:
         # archive_members and provisional_archive_members are SSOT-rebuilt
         # from lane_records on load; persisting them once duplicated state
         # and let provisional bloat the progress file linearly with lanes.
-        payload = {
+        # Non-validating (F9 perf): use ``to_validated_json_dict`` at the
+        # write boundary to assert the contract once per persist.
+        return {
             "schema_version": self.schema_version,
             "campaign_id": self.campaign_id,
             "frontier_version": self.frontier_version,
@@ -217,6 +231,9 @@ class FrontierCampaignProgress:
             "lane_records": [record.to_json_dict() for record in self.lane_records],
             "early_stop_status": self.early_stop_status,
         }
+
+    def to_validated_json_dict(self) -> dict[str, object]:
+        payload = self.to_json_dict()
         validate_frontier_campaign_progress_payload(payload)
         return payload
 
@@ -287,7 +304,10 @@ def write_frontier_campaign_progress(
     )
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            json.dump(progress.to_json_dict(), f, indent=2)
+            # Validate once at the write boundary (F9 perf): per-record
+            # validation is no longer redundantly invoked from each
+            # ``record.to_json_dict()``.
+            json.dump(progress.to_validated_json_dict(), f, indent=2)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, str(path))

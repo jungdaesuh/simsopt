@@ -30,7 +30,6 @@ class FrontierRecommendationTests(unittest.TestCase):
             "volume": 0.11,
             "qa_error": 0.010,
             "boozer_residual": 0.007,
-            "distance_from_seed": 0.0,
         }
         values.update(overrides)
         return make_frontier_archive_member(
@@ -64,7 +63,6 @@ class FrontierRecommendationTests(unittest.TestCase):
     def test_recommend_with_no_safe_members_returns_none_for_strict_gate(self):
         lower_volume = self._member(
             iota=0.18,
-            distance_from_seed=0.1,
             hardware_constraints_ok=False,
         )
         higher_volume = self._member(
@@ -72,7 +70,6 @@ class FrontierRecommendationTests(unittest.TestCase):
             volume=0.12,
             qa_error=0.011,
             boozer_residual=0.0075,
-            distance_from_seed=0.2,
             hardware_constraints_ok=False,
         )
 
@@ -148,7 +145,7 @@ class FrontierRecommendationTests(unittest.TestCase):
                 "max_iota_under_safe_boozer",
                 "campaign:lane_01",
                 [
-                    self._member(iota=0.17, boozer_residual=0.0065, distance_from_seed=0.20),
+                    self._member(iota=0.17, boozer_residual=0.0065),
                     self._member(member_id="campaign:lane_01", iota=0.19, qa_error=0.012),
                 ],
                 True,
@@ -157,7 +154,7 @@ class FrontierRecommendationTests(unittest.TestCase):
                 "max_volume_under_safe_hardware",
                 "campaign:lane_02",
                 [
-                    self._member(iota=0.19, volume=0.10, qa_error=0.011, distance_from_seed=0.25),
+                    self._member(iota=0.19, volume=0.10, qa_error=0.011),
                     self._member(member_id="campaign:lane_02", volume=0.12, qa_error=0.012),
                 ],
                 False,
@@ -166,8 +163,8 @@ class FrontierRecommendationTests(unittest.TestCase):
                 "closest_to_seed",
                 "campaign:lane_02",
                 [
-                    self._member(iota=0.18, qa_error=0.011, distance_from_seed=0.30),
-                    self._member(member_id="campaign:lane_02", iota=0.16, volume=0.102, distance_from_seed=0.08),
+                    self._member(iota=0.18, qa_error=0.011),
+                    self._member(member_id="campaign:lane_02", iota=0.16, volume=0.102),
                 ],
                 None,
             ),
@@ -213,7 +210,6 @@ class FrontierRecommendationTests(unittest.TestCase):
             volume=0.10,
             qa_error=0.012,
             boozer_residual=0.012,
-            distance_from_seed=0.10,
             reference_metrics={
                 "iota": 0.15,
                 "volume": 0.10,
@@ -227,7 +223,6 @@ class FrontierRecommendationTests(unittest.TestCase):
             volume=0.10,
             qa_error=0.012,
             boozer_residual=0.008,
-            distance_from_seed=0.0,
             reference_metrics={
                 "iota": 0.15,
                 "volume": 0.10,

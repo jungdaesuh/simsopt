@@ -177,13 +177,34 @@ def dominates(
     *,
     tolerance: Mapping[str, float] | None = None,
 ) -> bool:
+    """Pareto dominance with Laumanns-2002 ε-tight semantics.
+
+    Returns True iff `candidate_metrics` weakly dominates `incumbent_metrics`
+    on every metric in `PARETO_OBJECTIVE_SPECS` and strictly dominates on at
+    least one. Weak dominance uses the (>=, -tau) test; strict dominance uses
+    the (>, +tau) test (see Laumanns, Thiele, Deb, Zitzler 2002, "Combining
+    Convergence and Diversity in Evolutionary Multi-objective Optimization").
+    The 2*tau gap between these tests creates an intentional ε-archive
+    buffer band where ε-close neighbors are mutually non-dominated; this is
+    a convergence/diversity guarantee, not a bug. Per-metric tau defaults to
+    `DEFAULT_DOMINANCE_TOLERANCE`.
+
+    Both inputs MUST contain all four `PARETO_OBJECTIVE_SPECS` keys with
+    finite numeric values. Missing keys raise KeyError; None values raise
+    ValueError. Completeness is the upstream invariant: callers are required
+    to filter incomplete members (see `objective_metrics_complete`) before
+    invoking this predicate. Non-finite values raise ValueError.
+    """
     tolerances = DEFAULT_DOMINANCE_TOLERANCE if tolerance is None else tolerance
     strictly_better_on_any = False
     for metric_name, direction, _ in PARETO_OBJECTIVE_SPECS:
-        candidate_value = candidate_metrics.get(metric_name)
-        incumbent_value = incumbent_metrics.get(metric_name)
+        candidate_value = candidate_metrics[metric_name]
+        incumbent_value = incumbent_metrics[metric_name]
         if candidate_value is None or incumbent_value is None:
-            return False
+            raise ValueError(
+                f"Pareto metric {metric_name!r} is None; dominance requires "
+                f"complete metrics (filter upstream via objective_metrics_complete)"
+            )
         if not math.isfinite(float(candidate_value)) or not math.isfinite(
             float(incumbent_value)
         ):
@@ -206,6 +227,33 @@ def dominates(
     return strictly_better_on_any
 
 
+def pareto_scaled_difference(
+    metric_name: str,
+    left_value: float,
+    right_value: float,
+    *,
+    scale_reference: float | None,
+    pareto_objective_normalization: Mapping[str, object] | None = None,
+) -> float:
+    """Single-source-of-truth ``(left - right) / scale`` for Pareto metrics.
+
+    The scale is derived from ``objective_metric_scale`` against the supplied
+    ``scale_reference`` (the seed reference for the metric). Used by
+    ``_normalized_delta`` (recommendation policy) and
+    ``normalized_objective_distance`` (archive duplicate detection); both
+    funnel through this helper so the seed-relative-vs-ideal-nadir scaling
+    rules are enforced exactly once. Lane-internal Chebyshev scalarization
+    uses a different per-lane scale (see ``FrontierGoalConfig.{iota,volume,qs,boozer}_scale``)
+    and does not call this helper.
+    """
+    scale = objective_metric_scale(
+        metric_name,
+        scale_reference,
+        pareto_objective_normalization=pareto_objective_normalization,
+    )
+    return (float(left_value) - float(right_value)) / scale
+
+
 def normalized_objective_distance(
     left_metrics: Mapping[str, float],
     right_metrics: Mapping[str, float],
@@ -220,12 +268,16 @@ def normalized_objective_distance(
         if left_value is None or right_value is None:
             return None
         reference_value = None if reference_metrics is None else reference_metrics.get(metric_name)
-        scale = objective_metric_scale(
-            metric_name,
-            reference_value,
-            pareto_objective_normalization=pareto_objective_normalization,
+        squared_distance += (
+            pareto_scaled_difference(
+                metric_name,
+                left_value,
+                right_value,
+                scale_reference=reference_value,
+                pareto_objective_normalization=pareto_objective_normalization,
+            )
+            ** 2
         )
-        squared_distance += ((float(left_value) - float(right_value)) / scale) ** 2
     return math.sqrt(squared_distance)
 
 
@@ -235,6 +287,23 @@ def objective_metric_scale(
     *,
     pareto_objective_normalization: Mapping[str, object] | None = None,
 ) -> float:
+    """Per-metric normalization scale for `(value - reference) / scale` deltas.
+
+    Two branches:
+    - Fixed ideal/nadir branch (`PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR`):
+      scale is the ideal-to-nadir span, floored. Direction-aware ordering of
+      ideal vs. nadir is enforced at spec-load time by
+      `_validate_ideal_nadir_directions`; the `abs(...)` here only guards
+      against floating-point sign noise on the difference.
+    - Seed-relative branch (default): scale is `abs(reference) * fraction`,
+      floored. The `abs(reference_value)` is a no-op for the four metrics
+      defined in `PARETO_OBJECTIVE_SPECS` because they are non-negative by
+      domain (`iota`, `volume` >= 0; `qa_error`, `boozer_residual` >= 0). It
+      is preserved as a defensive sign guard, but it would mask a sign flip
+      if a signed Pareto metric were added in the future. Any future signed
+      metric MUST switch to the ideal/nadir branch (where direction is
+      explicit) rather than rely on this branch.
+    """
     if (
         pareto_objective_normalization is not None
         and str(pareto_objective_normalization.get("kind"))
@@ -306,15 +375,21 @@ def build_pareto_objective_normalization(
             )
         normalization_spec = load_pareto_normalization_spec(normalization_spec_path)
         normalization_rules = PARETO_OBJECTIVE_NORMALIZATION_IDEAL_NADIR_RULES
+        ideal_metrics_payload = _coerce_defined_normalization_metrics(
+            normalization_spec,
+            field_name="ideal_metrics",
+        )
+        nadir_metrics_payload = _coerce_defined_normalization_metrics(
+            normalization_spec,
+            field_name="nadir_metrics",
+        )
+        _validate_ideal_nadir_directions(
+            ideal_metrics_payload,
+            nadir_metrics_payload,
+        )
         extra_payload = {
-            "ideal_metrics": _coerce_defined_normalization_metrics(
-                normalization_spec,
-                field_name="ideal_metrics",
-            ),
-            "nadir_metrics": _coerce_defined_normalization_metrics(
-                normalization_spec,
-                field_name="nadir_metrics",
-            ),
+            "ideal_metrics": ideal_metrics_payload,
+            "nadir_metrics": nadir_metrics_payload,
         }
     else:
         raise ValueError(f"Unsupported Pareto normalization kind: {kind}")
@@ -330,6 +405,124 @@ def build_pareto_objective_normalization(
             for metric_name, rule_payload in normalization_rules.items()
         },
     }
+
+
+def build_pareto_objective_normalization_from_persisted_payload(
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    """Rebuild a Pareto normalization dict from a persisted manifest payload.
+
+    The manifest's ``PARETO_OBJECTIVE_NORMALIZATION`` block is the single
+    source of truth for the resolved normalization once the campaign is
+    underway: it captures ``kind``, ``ideal_metrics`` / ``nadir_metrics``
+    (for ``ideal_nadir``), ``reference_metrics``, ``metric_rules``, and
+    ``distance_metric``. The original CLI ``--frontier-normalization-spec-file``
+    is intentionally NOT persisted (the resolved values supersede it), so
+    a resume that defaults ``args.frontier_normalization_spec_file=None``
+    cannot route through :func:`build_pareto_objective_normalization`'s
+    spec-file branch for ``ideal_nadir`` campaigns.
+
+    This helper rebuilds an equivalent normalization dict directly from the
+    persisted payload, enforcing the same frozen contracts that
+    :func:`_validate_pareto_normalization_payload` checks at manifest-load
+    time plus the direction-aware ideal/nadir invariant from
+    :func:`_validate_ideal_nadir_directions`. Drifted payloads raise
+    ``ValueError``.
+    """
+    schema_version = payload.get("schema_version")
+    if schema_version != PARETO_OBJECTIVE_NORMALIZATION_SCHEMA_VERSION:
+        raise ValueError(
+            f"Persisted Pareto normalization payload must declare "
+            f"schema_version={PARETO_OBJECTIVE_NORMALIZATION_SCHEMA_VERSION!r}; "
+            f"got {schema_version!r}"
+        )
+    if payload.get("distance_metric") != "euclidean":
+        raise ValueError(
+            "Persisted Pareto normalization payload must use distance_metric='euclidean'"
+        )
+    kind = payload.get("kind")
+    metric_rules_payload = payload.get("metric_rules")
+    if not isinstance(metric_rules_payload, Mapping):
+        raise ValueError(
+            "Persisted Pareto normalization payload missing 'metric_rules' mapping"
+        )
+    persisted_metric_rules = {
+        metric_name: dict(rule_payload)
+        for metric_name, rule_payload in metric_rules_payload.items()
+    }
+    reference_metrics_payload = payload.get("reference_metrics")
+    resolved_reference_metrics: dict[str, float] | None
+    if reference_metrics_payload is None:
+        resolved_reference_metrics = None
+    elif isinstance(reference_metrics_payload, Mapping):
+        resolved_reference_metrics = {
+            metric_name: float(reference_metrics_payload[metric_name])
+            for metric_name, _, _ in PARETO_OBJECTIVE_SPECS
+            if reference_metrics_payload.get(metric_name) is not None
+        }
+    else:
+        raise ValueError(
+            "Persisted Pareto normalization payload 'reference_metrics' must be a mapping or null"
+        )
+    if kind == PARETO_OBJECTIVE_NORMALIZATION_KIND_SEED_RELATIVE:
+        if persisted_metric_rules != PARETO_OBJECTIVE_NORMALIZATION_RULES:
+            raise ValueError(
+                "Persisted seed-relative Pareto normalization metric_rules drifted "
+                "from the frozen contract"
+            )
+        return {
+            "schema_version": PARETO_OBJECTIVE_NORMALIZATION_SCHEMA_VERSION,
+            "kind": PARETO_OBJECTIVE_NORMALIZATION_KIND_SEED_RELATIVE,
+            "distance_metric": "euclidean",
+            "reference_metrics": resolved_reference_metrics,
+            "metric_rules": {
+                metric_name: dict(rule_payload)
+                for metric_name, rule_payload in PARETO_OBJECTIVE_NORMALIZATION_RULES.items()
+            },
+        }
+    if kind == PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR:
+        if persisted_metric_rules != PARETO_OBJECTIVE_NORMALIZATION_IDEAL_NADIR_RULES:
+            raise ValueError(
+                "Persisted ideal/nadir Pareto normalization metric_rules drifted "
+                "from the frozen contract"
+            )
+        ideal_metrics_payload = payload.get("ideal_metrics")
+        nadir_metrics_payload = payload.get("nadir_metrics")
+        if not isinstance(ideal_metrics_payload, Mapping):
+            raise ValueError(
+                "Persisted ideal/nadir Pareto normalization payload missing "
+                "'ideal_metrics' mapping"
+            )
+        if not isinstance(nadir_metrics_payload, Mapping):
+            raise ValueError(
+                "Persisted ideal/nadir Pareto normalization payload missing "
+                "'nadir_metrics' mapping"
+            )
+        ideal_metrics = _coerce_defined_normalization_metrics(
+            payload,
+            field_name="ideal_metrics",
+        )
+        nadir_metrics = _coerce_defined_normalization_metrics(
+            payload,
+            field_name="nadir_metrics",
+        )
+        _validate_ideal_nadir_directions(ideal_metrics, nadir_metrics)
+        return {
+            "schema_version": PARETO_OBJECTIVE_NORMALIZATION_SCHEMA_VERSION,
+            "kind": PARETO_OBJECTIVE_NORMALIZATION_KIND_IDEAL_NADIR,
+            "distance_metric": "euclidean",
+            "reference_metrics": resolved_reference_metrics,
+            "ideal_metrics": ideal_metrics,
+            "nadir_metrics": nadir_metrics,
+            "metric_rules": {
+                metric_name: dict(rule_payload)
+                for metric_name, rule_payload
+                in PARETO_OBJECTIVE_NORMALIZATION_IDEAL_NADIR_RULES.items()
+            },
+        }
+    raise ValueError(
+        f"Unsupported Pareto normalization kind in persisted payload: {kind!r}"
+    )
 
 
 def resolve_pareto_normalization_reference_metrics(
@@ -371,3 +564,37 @@ def _coerce_defined_normalization_metrics(
         ]
         raise ValueError(f"{field_name} is missing metrics: {missing}")
     return metrics
+
+
+def _validate_ideal_nadir_directions(
+    ideal_metrics: Mapping[str, float],
+    nadir_metrics: Mapping[str, float],
+) -> None:
+    """Reject direction-inverted ideal/nadir specs.
+
+    For `direction == "max"` the ideal value MUST be strictly greater than
+    the nadir; for `direction == "min"` the ideal MUST be strictly less than
+    the nadir. Without this check, `objective_metric_scale` would absorb the
+    inversion via `abs(...)` while downstream `(value - reference) / scale`
+    deltas silently flip sign.
+    """
+    inversions: list[str] = []
+    for metric_name, direction, _ in PARETO_OBJECTIVE_SPECS:
+        ideal_value = float(ideal_metrics[metric_name])
+        nadir_value = float(nadir_metrics[metric_name])
+        if direction == "max":
+            if not (ideal_value > nadir_value):
+                inversions.append(
+                    f"{metric_name} (max-direction): ideal={ideal_value!r} "
+                    f"must be > nadir={nadir_value!r}"
+                )
+        else:
+            if not (ideal_value < nadir_value):
+                inversions.append(
+                    f"{metric_name} (min-direction): ideal={ideal_value!r} "
+                    f"must be < nadir={nadir_value!r}"
+                )
+    if inversions:
+        raise ValueError(
+            "Direction-inverted Pareto ideal/nadir spec: " + "; ".join(inversions)
+        )
