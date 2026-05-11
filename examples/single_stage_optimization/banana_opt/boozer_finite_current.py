@@ -35,8 +35,8 @@ This is exactly ``T^T g`` for the (N x N) elementary transform
     T[-1, -2] = I              # (last_row=G, second_to_last_col=iota)
 
 and similarly ``H_true = T^T H_alpha T`` for Hessians.  ``T`` is identity plus
-a single off-diagonal scalar, so every transform reduces to a rank-one update
-``out[..., -2] += I * tensor[..., -1]`` and we never materialize ``T``.
+a single off-diagonal scalar, so these transforms reduce to direct rank-one
+slice updates and we never materialize ``T``.
 
 Design rationale
 ----------------
@@ -323,8 +323,9 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         return payload
 
     def run_code(self, iota, G=None):
-        super().run_code(iota, G=G)
-        return self._annotate_current(self.res)
+        result = super().run_code(iota, G=G)
+        self._annotate_current(self.res)
+        return self._annotate_current(result)
 
     def boozer_penalty_constraints(
         self,

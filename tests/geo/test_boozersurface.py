@@ -73,6 +73,19 @@ class BoozerSurfaceTests(unittest.TestCase):
         )
         return bs, G0, boozer_surface
 
+    def _make_small_area_boozer_surface(self, *, current_I):
+        mpol = 3
+        ntor = 3
+        return self._make_area_boozer_surface(
+            current_I=current_I,
+            mpol=mpol,
+            ntor=ntor,
+            phis=np.linspace(0, 1/3, 2*ntor+1, endpoint=False),
+            thetas=np.linspace(0, 1, 2*mpol+1, endpoint=False),
+            constraint_weight=100.,
+            options={"weight_inv_modB": False},
+        )
+
     def _assert_directional_fd_convergence(self, f, coeffs, direction, directional_derivative):
         err_old = 1e9
         epsilons = np.power(2., -np.asarray(range(11, 18)))
@@ -83,19 +96,7 @@ class BoozerSurfaceTests(unittest.TestCase):
             err_old = err
 
     def test_unsolved_boozer_surface_objectives_require_initial_run_code(self):
-        mpol = 3
-        ntor = 3
-        phis = np.linspace(0, 1/3, 2*ntor+1, endpoint=False)
-        thetas = np.linspace(0, 1, 2*mpol+1, endpoint=False)
-        bs, _, boozer_surface = self._make_area_boozer_surface(
-            current_I=0.0,
-            mpol=mpol,
-            ntor=ntor,
-            phis=phis,
-            thetas=thetas,
-            constraint_weight=100.,
-            options={"weight_inv_modB": False},
-        )
+        bs, _, boozer_surface = self._make_small_area_boozer_surface(current_I=0.0)
         error = "BoozerSurface has no solved state"
 
         with self.assertRaisesRegex(RuntimeError, error):
@@ -114,6 +115,22 @@ class BoozerSurfaceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, error):
             objectives[-1].dJ_by_dB()
+
+    def test_finite_current_run_code_preserves_cached_upstream_return(self):
+        _, _, boozer_surface = self._make_small_area_boozer_surface(current_I=0.37)
+        boozer_surface.res = {
+            "type": "ls",
+            "success": True,
+            "iota": -0.3,
+            "G": 1.0,
+        }
+        boozer_surface.need_to_run_code = False
+
+        result = boozer_surface.run_code(-0.3, G=1.0)
+
+        self.assertIsNone(result)
+        self.assertEqual(boozer_surface.res["I"], 0.37)
+        self.assertIn("vjp", boozer_surface.res)
 
     def _assert_penalty_constraints_cpp_python_match(self, boozer_surface, x, *, optimize_G, weight_inv_modB):
         w = 0.
