@@ -149,7 +149,9 @@ _STRICT_REFERENCE_LEAST_SQUARES_DETAIL = (
     "the host-side reference least-squares optimizer lane"
 )
 _EISENSTAT_WALKER_GAMMA = 0.9
-_EISENSTAT_WALKER_ALPHA = 2.0
+# α=2 is inlined as ``ratio * ratio`` inside
+# ``_eisenstat_walker_choice2_tolerance`` for bit-stable evaluation; see
+# Eisenstat & Walker (1996) eq. (2.6).
 _EISENSTAT_WALKER_MIN_ETA = 1.0e-12
 _EISENSTAT_WALKER_MAX_ETA = 0.5
 _NEWTON_BACKTRACKING_MAX_STEPS = 8
@@ -1945,9 +1947,7 @@ def _newton_candidate_status(x_next, grad_next):
 
 
 def _newton_backtracking_continue(state):
-    return (
-        state["iteration"] < _NEWTON_BACKTRACKING_MAX_STEPS
-    ) & (~state["accepted"])
+    return (state["iteration"] < _NEWTON_BACKTRACKING_MAX_STEPS) & (~state["accepted"])
 
 
 def _backtracking_value_grad_step(
@@ -2104,11 +2104,20 @@ def _linear_solve_residual_tolerance(rhs, tol):
 
 
 def _relative_residual_norm(residual, rhs, *, ord=None):
+    """Return ``||residual|| / max(||rhs||, 1)`` when ``||rhs||`` is not
+    representably nonzero (denormals included), else ``||residual|| /
+    ||rhs||``. The unit fallback prevents the denormal floor from
+    inflating residual_rel by ~10^308 when the RHS is the zero vector
+    (a legitimate degenerate adjoint state) which would otherwise force
+    the forward-error gate to spurious failure.
+    """
     dtype = rhs.dtype
     residual_norm = jnp.linalg.norm(residual, ord=ord)
     rhs_norm = jnp.linalg.norm(rhs, ord=ord)
-    floor = _device_scalar(jnp.finfo(dtype).tiny, dtype=dtype)
-    return residual_norm / jnp.maximum(rhs_norm, floor)
+    tiny = _device_scalar(jnp.finfo(dtype).tiny, dtype=dtype)
+    one = _device_scalar(1.0, dtype=dtype)
+    safe_norm = jnp.where(rhs_norm > tiny, rhs_norm, one)
+    return residual_norm / safe_norm
 
 
 def _relative_residual_1_norm(residual, rhs):
@@ -2118,12 +2127,13 @@ def _relative_residual_1_norm(residual, rhs):
 def _forward_error_bound(residual_rel, condition_estimate):
     dtype = residual_rel.dtype
     one = _device_scalar(1.0, dtype=dtype)
+    inf_value = _device_scalar(jnp.inf, dtype=dtype)
     scaled = condition_estimate * residual_rel
     denominator = one - scaled
     return jnp.where(
         denominator > _device_scalar(0.0, dtype=dtype),
         scaled / denominator,
-        jnp.inf,
+        inf_value,
     )
 
 
@@ -2137,6 +2147,17 @@ def _forward_error_success(residual_rel, condition_estimate, *, tol):
 
 
 def _eisenstat_walker_choice2_tolerance(norm, previous_norm, *, tol):
+    """Return the Eisenstat-Walker Choice-2 relative linear-solve tolerance.
+
+    Eisenstat & Walker, "Choosing the Forcing Terms in an Inexact Newton
+    Method," SIAM J. Sci. Comput. 17(1):16-32 (1996), eq. (2.6) with
+    γ=0.9, α=2. The returned value is the **relative** linear residual
+    tolerance (`||A·dx + r_k|| ≤ η · ||r_k||`) consumed directly as
+    `tol=` by `jax.scipy.sparse.linalg.gmres`, which interprets `tol` as
+    relative to `||rhs||`. A fixed strict cap from the legacy contract
+    bounds the value from above so the linear solve never undercuts the
+    Newton convergence target.
+    """
     dtype = norm.dtype
     tol_value = _optimizer_scalar(tol, dtype=dtype)
     strict_cap = jnp.minimum(
@@ -2147,18 +2168,18 @@ def _eisenstat_walker_choice2_tolerance(norm, previous_norm, *, tol):
         ),
     )
     gamma = _device_scalar(_EISENSTAT_WALKER_GAMMA, dtype=dtype)
-    alpha = _device_scalar(_EISENSTAT_WALKER_ALPHA, dtype=dtype)
     eta_min = _device_scalar(_EISENSTAT_WALKER_MIN_ETA, dtype=dtype)
     eta_max = _device_scalar(_EISENSTAT_WALKER_MAX_ETA, dtype=dtype)
     denominator = jnp.maximum(
         previous_norm,
         _device_scalar(jnp.finfo(dtype).tiny, dtype=dtype),
     )
-    eta = gamma * jnp.power(norm / denominator, alpha)
+    ratio = norm / denominator
+    eta = gamma * (ratio * ratio)
     eta = jnp.clip(eta, eta_min, eta_max)
     return jnp.maximum(
         _device_scalar(1e-14, dtype=dtype),
-        jnp.minimum(strict_cap, eta * norm),
+        jnp.minimum(strict_cap, eta),
     )
 
 
@@ -2182,6 +2203,8 @@ def _hager_higham_inverse_1_norm_estimate(
     def unit_vector(index):
         return jnp.where(indices == index, one, zero)
 
+    inf_value = _device_scalar(jnp.inf, dtype=dtype)
+
     def body_fun(_iteration, state):
         x, best_estimate = state
         y = solve(x)
@@ -2192,22 +2215,43 @@ def _hager_higham_inverse_1_norm_estimate(
         next_x = unit_vector(next_index)
         finite = jnp.all(jnp.isfinite(y)) & jnp.all(jnp.isfinite(z))
         next_estimate = jnp.maximum(best_estimate, estimate)
-        return next_x, jnp.where(finite, next_estimate, jnp.inf)
+        return next_x, jnp.where(finite, next_estimate, inf_value)
 
-    _, estimate = lax.fori_loop(0, int(iterations), body_fun, (x0, zero))
+    # ``lax.fori_loop`` lowers the Python integer bounds through a weakly
+    # typed host-to-device conversion that strict transfer-guard contexts
+    # flag as a violation. Mirror the ``_run_operator_gmres`` allowance:
+    # scope the relaxation to the library call so the surrounding solve
+    # path stays strict-transfer clean.
+    with jax.transfer_guard("allow"):
+        _, estimate = lax.fori_loop(0, int(iterations), body_fun, (x0, zero))
     return estimate
 
 
-def _dense_matrix_condition_estimate(matrix):
-    """Return a JAX-native Hager-Higham 1-norm condition estimate."""
+def _dense_matrix_condition_estimate(matrix, *, lu_piv=None):
+    """Return a JAX-native Hager-Higham 1-norm condition estimate.
+
+    The Hager-Higham iteration evaluates ``A⁻¹`` and ``A⁻ᵀ`` repeatedly,
+    so the inner solves consume cached ``(lu, piv)`` factors via
+    ``jsp_linalg.lu_solve``. When ``lu_piv`` is supplied (e.g., the
+    Phase-2 5-tuple ``(P, L, U, lu, piv)`` ``linear_solve_factors``
+    snapshot) no factorization runs at all; otherwise the helper
+    factorizes ``matrix`` once and shares those bytes across every
+    inner solve. The naïve ``jnp.linalg.solve`` form re-factorized for
+    every call, costing 10 × O(n³) per estimate instead of the present
+    O(n³) + 10 × O(n²).
+    """
     matrix = jnp.asarray(matrix)
     size = int(matrix.shape[0])
 
+    if lu_piv is None:
+        lu_piv = jsp_linalg.lu_factor(matrix)
+    lu, piv = lu_piv
+
     def solve(rhs):
-        return jnp.linalg.solve(matrix, rhs)
+        return jsp_linalg.lu_solve((lu, piv), rhs, trans=0)
 
     def transpose_solve(rhs):
-        return jnp.linalg.solve(matrix.T, rhs)
+        return jsp_linalg.lu_solve((lu, piv), rhs, trans=1)
 
     matrix_norm = _matrix_one_norm(matrix)
     inverse_norm = _hager_higham_inverse_1_norm_estimate(
@@ -2216,9 +2260,7 @@ def _dense_matrix_condition_estimate(matrix):
         size=size,
         dtype=matrix.dtype,
     )
-    estimate = matrix_norm * inverse_norm
-    finite_matrix = jnp.all(jnp.isfinite(matrix)) & jnp.isfinite(matrix_norm)
-    return jnp.where(finite_matrix & jnp.isfinite(estimate), estimate, jnp.inf)
+    return matrix_norm * inverse_norm
 
 
 def _dense_matrix_solve_forward_error_success(matrix, solution, rhs, *, tol):

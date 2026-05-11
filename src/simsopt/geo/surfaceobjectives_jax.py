@@ -2999,8 +2999,17 @@ def _traceable_plu_residual_tolerance(
     solution,
     rhs,
     residual_tol,
+    *,
+    matrix=None,
 ):
-    matrix = _traceable_plu_matrix(linear_solve_factors)
+    """Return the Wilkinson-style backward-error pad for the success gate.
+
+    The ``matrix`` argument lets callers that have already materialized
+    ``P @ L @ U`` reuse it; otherwise the dense product is rebuilt from
+    ``linear_solve_factors`` once.
+    """
+    if matrix is None:
+        matrix = _traceable_plu_matrix(linear_solve_factors)
     dtype = rhs.dtype
     eps = _optimizer_jax._device_scalar(jnp.finfo(dtype).eps, dtype=dtype)
     dimension = _optimizer_jax._device_scalar(matrix.shape[0], dtype=dtype)
@@ -3048,6 +3057,7 @@ def _traceable_solve_plu_linearization(
         else:
             y = jsp_linalg.solve_triangular(L, P.T @ rhs, lower=True)
             solution = jsp_linalg.solve_triangular(U, y, lower=False)
+    matrix = _traceable_plu_matrix(linear_solve_factors)
     residual = rhs - _traceable_plu_matvec(
         linear_solve_factors,
         solution,
@@ -3063,12 +3073,19 @@ def _traceable_solve_plu_linearization(
         solution,
         rhs,
         residual_tol,
+        matrix=matrix,
     )
-    matrix = _traceable_plu_matrix(linear_solve_factors)
-    operator_matrix = matrix.T if transpose else matrix
     residual_rel = _optimizer_jax._relative_residual_1_norm(residual, rhs)
+    # ``_traceable_solve_plu_linearization`` is only reached for the LS
+    # lane (``linearization_kind == "hessian"``) where ``matrix`` is the
+    # symmetric Hessian and so ``κ_1(matrix) == κ_1(matrix.T)``. Hand the
+    # native ``matrix`` plus its ``(lu, piv)`` factors to the condition
+    # estimator regardless of ``transpose``: this lets Hager-Higham reuse
+    # the cached factors via ``jsp_linalg.lu_solve`` (10 × O(n²)) instead
+    # of refactorizing ``matrix`` 10 times (10 × O(n³)).
     condition_estimate = _optimizer_jax._dense_matrix_condition_estimate(
-        operator_matrix
+        matrix,
+        lu_piv=lu_piv,
     )
     forward_error_success = _optimizer_jax._forward_error_success(
         residual_rel,

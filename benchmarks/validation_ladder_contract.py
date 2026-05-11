@@ -172,6 +172,7 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
     "exact_solve_quality": {
         "exact_jacobian_action_max_rel_tol": 1e-8,
         "exact_newton_linear_residual_rel_tol": 1e-8,
+        "exact_refinement_correction_rel_tol": 1e-9,
         "exact_adjoint_solve_residual_rel_tol": 1e-8,
         "exact_condition_estimate_present": True,
         "requires_same_state": True,

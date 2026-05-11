@@ -494,6 +494,7 @@ Phase 4 (BFGS root cause) ── independent investigation, blocks gate L3 / E2 
   PARITY_LADDER_TOLERANCES["exact-solve-quality"] = {
       "exact_jacobian_action_max_rel_tol": 1e-8,
       "exact_newton_linear_residual_rel_tol": 1e-8,
+      "exact_refinement_correction_rel_tol": 1e-9,
       "exact_adjoint_solve_residual_rel_tol": 1e-8,
       "exact_condition_estimate_present": True,
   }

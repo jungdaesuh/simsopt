@@ -3172,6 +3172,9 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
     assert exact_solve_quality["exact_newton_linear_residual_rel_tol"] == pytest.approx(
         1e-8
     )
+    assert exact_solve_quality["exact_refinement_correction_rel_tol"] == pytest.approx(
+        1e-9
+    )
     assert exact_solve_quality["exact_adjoint_solve_residual_rel_tol"] == pytest.approx(
         1e-8
     )

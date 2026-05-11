@@ -235,13 +235,13 @@ _BOOZER_TRACEABLE_RESULT_KEYS = frozenset(
         "weight_inv_modB",
     }
 )
-# ``lu_piv`` is the Phase 2 packed-factor companion to the public ``plu``
-# triple (see docs/parity_scientific_equivalence_contract_2026-05-09.md
-# §5.3). It is optional metadata: traceable consumers that supply only
-# the legacy 3-tuple ``(P, L, U)`` without packed factors stay supported.
-# Therefore ``lu_piv`` belongs to neither the required nor forbidden
-# set, mirroring how ``LU_PIV`` is optional on the public ``newton``
-# schema.
+# Lowercase ``lu_piv`` is the private traceable companion to the public
+# lowercase ``plu`` triple (see
+# docs/parity_scientific_equivalence_contract_2026-05-09.md §5.3).
+# Traceable consumers may still receive only the legacy ``(P, L, U)``
+# triple, so lowercase ``lu_piv`` is neither required nor forbidden.
+# Uppercase ``LU_PIV`` is a public result-dict key and remains forbidden
+# on the traceable result schema alongside uppercase ``PLU``.
 _BOOZER_TRACEABLE_FORBIDDEN_RESULT_KEYS = frozenset(
     {
         "PLU",
@@ -2861,12 +2861,22 @@ def _ls_hessian_symmetry_rel(H) -> float | None:
     return float(norms[1]) / H_norm
 
 
-def _dense_condition_estimate_or_none(matrix):
+def _dense_condition_estimate_or_none(matrix, *, lu_piv=None):
+    """Return the Hager-Higham 1-norm κ̂ of ``matrix`` (or ``None``).
+
+    Pass ``lu_piv = (lu, piv)`` whenever the caller already holds the
+    factorization of ``matrix`` so the Hager-Higham iteration consumes
+    those packed factors via ``jsp_linalg.lu_solve`` rather than
+    refactorizing ``matrix`` for every inner solve.
+    """
     if matrix is None:
         return None
     if len(matrix.shape) != 2 or matrix.shape[0] != matrix.shape[1]:
         return None
-    estimate = _optimizer_jax._dense_matrix_condition_estimate(matrix)
+    estimate = _optimizer_jax._dense_matrix_condition_estimate(
+        matrix,
+        lu_piv=lu_piv,
+    )
     if isinstance(estimate, jax.core.Tracer):
         return estimate
     if isinstance(estimate, jax.Array):
@@ -4698,7 +4708,10 @@ class BoozerSurfaceJAX(Optimizable):
             lu_piv = None
             plu = None
         primal_success = newton_result["success"] & finite
-        ls_condition_estimate = _dense_condition_estimate_or_none(hessian)
+        ls_condition_estimate = _dense_condition_estimate_or_none(
+            hessian,
+            lu_piv=lu_piv,
+        )
         return {
             "x": newton_result["x"],
             "sdofs": sdofs_out,
@@ -5243,7 +5256,10 @@ class BoozerSurfaceJAX(Optimizable):
             lu_piv,
         )
         ls_hessian_symmetry_rel = _ls_hessian_symmetry_rel(H)
-        ls_condition_estimate = _dense_condition_estimate_or_none(H)
+        ls_condition_estimate = _dense_condition_estimate_or_none(
+            H,
+            lu_piv=lu_piv,
+        )
         ls_factorization_backend = _ls_factorization_backend(
             H if plu is not None else None,
             optimizer_backend=self.options["optimizer_backend"],

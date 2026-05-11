@@ -6028,7 +6028,16 @@ class TestBoozerSurfaceJAXExactPath:
 
         assert result["type"] == "ls"
         _assert_result_schema(result, _TRACEABLE_LS_RESULT_SCHEMA)
+        # ``ls_condition_estimate`` is populated eagerly from the materialized
+        # Hessian on the traceable LS path (Phase 5), so it is no longer ``None``
+        # even with the fake newton-polish runner here. The κ_1 of the identity
+        # Hessian is 1.0 by definition. Other LS quality fields remain ``None``
+        # placeholders until the parity arbiter populates them.
+        condition_estimate = result["ls_condition_estimate"]
+        assert condition_estimate == pytest.approx(1.0)
         for field in _bsj.SOLVE_QUALITY_LS_FIELDS:
+            if field == "ls_condition_estimate":
+                continue
             assert result[field] is None
         assert bool(result["success"])
         np.testing.assert_allclose(np.asarray(result["fun"]), np.asarray(expected_fun))
