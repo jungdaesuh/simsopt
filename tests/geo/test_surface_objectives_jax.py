@@ -1452,6 +1452,51 @@ def test_traceable_hessian_solve_uses_dense_plu_forward_and_transpose():
     )
 
 
+def test_traceable_hessian_plu_solve_requires_forward_error_gate(monkeypatch):
+    matrix = jnp.asarray(
+        [
+            [3.0, 0.25],
+            [-0.5, 2.0],
+        ],
+        dtype=jnp.float64,
+    )
+    rhs = jnp.asarray([0.2, -0.6], dtype=jnp.float64)
+    linear_solve_factors = jax.scipy.linalg.lu(matrix)
+    residual_norm_calls = {"count": 0}
+    original_relative_residual_1_norm = optimizer_jax_module._relative_residual_1_norm
+
+    def relative_residual_1_norm(residual, current_rhs):
+        residual_norm_calls["count"] += 1
+        return original_relative_residual_1_norm(residual, current_rhs)
+
+    monkeypatch.setattr(
+        optimizer_jax_module,
+        "_forward_error_success",
+        lambda *_args, **_kwargs: jnp.asarray(False),
+    )
+    monkeypatch.setattr(
+        optimizer_jax_module,
+        "_relative_residual_1_norm",
+        relative_residual_1_norm,
+    )
+
+    _solution, success = surfaceobjectives_jax_module._traceable_solve_linearization(
+        object(),
+        jnp.zeros_like(rhs),
+        rhs,
+        coil_set_spec=None,
+        objective_kwargs={},
+        linear_solve_factors=linear_solve_factors,
+        linearization_kind="hessian",
+        linear_solve_tol=1.0e-10,
+        linear_solve_stab=0.0,
+        transpose=False,
+    )
+
+    assert bool(np.asarray(success)) is False
+    assert residual_norm_calls["count"] == 1
+
+
 def test_traceable_hessian_plu_solve_is_jittable():
     matrix = jnp.asarray(
         [

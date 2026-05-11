@@ -2861,6 +2861,19 @@ def _ls_hessian_symmetry_rel(H) -> float | None:
     return float(norms[1]) / H_norm
 
 
+def _dense_condition_estimate_or_none(matrix):
+    if matrix is None:
+        return None
+    if len(matrix.shape) != 2 or matrix.shape[0] != matrix.shape[1]:
+        return None
+    estimate = _optimizer_jax._dense_matrix_condition_estimate(matrix)
+    if isinstance(estimate, jax.core.Tracer):
+        return estimate
+    if isinstance(estimate, jax.Array):
+        return float(_host_scalar(estimate))
+    return float(estimate)
+
+
 def _ls_factorization_backend(
     H,
     *,
@@ -4536,6 +4549,7 @@ class BoozerSurfaceJAX(Optimizable):
             half = _as_runtime_float64(0.5, reference=result["residual"])
             primal_success = result["success"] & finite
             adjoint_linear_solve_available = primal_success
+            exact_condition_estimate = _dense_condition_estimate_or_none(jacobian)
             return {
                 "x": result["x"],
                 "sdofs": sdofs_exact,
@@ -4558,6 +4572,13 @@ class BoozerSurfaceJAX(Optimizable):
                 **_exact_newton_reporting_fields(result),
                 **_none_solve_quality_fields(SOLVE_QUALITY_EXACT_FIELDS),
                 "exact_factorization_backend": EXACT_FACTORIZATION_BACKEND,
+                "exact_condition_estimate": exact_condition_estimate,
+                "exact_newton_linear_residual_rel": result.get(
+                    "exact_newton_linear_residual_rel"
+                ),
+                "exact_refinement_correction_rel": result.get(
+                    "exact_refinement_correction_rel"
+                ),
             }
 
         optimize_G = G is not None
@@ -4677,6 +4698,7 @@ class BoozerSurfaceJAX(Optimizable):
             lu_piv = None
             plu = None
         primal_success = newton_result["success"] & finite
+        ls_condition_estimate = _dense_condition_estimate_or_none(hessian)
         return {
             "x": newton_result["x"],
             "sdofs": sdofs_out,
@@ -4698,6 +4720,7 @@ class BoozerSurfaceJAX(Optimizable):
             "type": "ls",
             "weight_inv_modB": weight_inv_modB,
             **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
+            "ls_condition_estimate": ls_condition_estimate,
             "hessian_materialized": newton_result.get("hessian_materialized"),
             "dense_hessian_shape": newton_result.get("dense_hessian_shape"),
             "dense_hessian_bytes": newton_result.get("dense_hessian_bytes"),
@@ -5220,6 +5243,7 @@ class BoozerSurfaceJAX(Optimizable):
             lu_piv,
         )
         ls_hessian_symmetry_rel = _ls_hessian_symmetry_rel(H)
+        ls_condition_estimate = _dense_condition_estimate_or_none(H)
         ls_factorization_backend = _ls_factorization_backend(
             H if plu is not None else None,
             optimizer_backend=self.options["optimizer_backend"],
@@ -5314,10 +5338,11 @@ class BoozerSurfaceJAX(Optimizable):
             # Scientific-equivalence ladder reporting fields per
             # docs/parity_scientific_equivalence_contract_2026-05-09.md §3.1.
             # action_max / step_abs_diff are populated by the parity
-            # arbiter; condition_estimate is a Phase 5.3 placeholder.
+            # arbiter; condition_estimate is populated when dense H exists.
             **_none_solve_quality_fields(SOLVE_QUALITY_LS_FIELDS),
             "ls_hessian_symmetry_rel": ls_hessian_symmetry_rel,
             "ls_factorization_backend": ls_factorization_backend,
+            "ls_condition_estimate": ls_condition_estimate,
         }
         self.res = res
         self.need_to_run_code = False
@@ -5662,6 +5687,7 @@ class BoozerSurfaceJAX(Optimizable):
             plu = (P, L, U)
         else:
             plu = None
+        exact_condition_estimate = _dense_condition_estimate_or_none(J)
 
         nphi = len(self.quadpoints_phi)
         ntheta = len(self.quadpoints_theta)
@@ -5742,10 +5768,17 @@ class BoozerSurfaceJAX(Optimizable):
             # docs/parity_scientific_equivalence_contract_2026-05-09.md §3.2.
             # action_max / linear_residual / refinement_correction /
             # adjoint_solve_residual are populated by the parity arbiter or
-            # downstream optimizer plumbing; condition_estimate is a Phase
-            # 5.3 placeholder.
+            # downstream optimizer plumbing; condition_estimate is populated
+            # when dense J exists.
             **_none_solve_quality_fields(SOLVE_QUALITY_EXACT_FIELDS),
             "exact_factorization_backend": EXACT_FACTORIZATION_BACKEND,
+            "exact_condition_estimate": exact_condition_estimate,
+            "exact_newton_linear_residual_rel": result.get(
+                "exact_newton_linear_residual_rel"
+            ),
+            "exact_refinement_correction_rel": result.get(
+                "exact_refinement_correction_rel"
+            ),
         }
         self.res = res
         self.need_to_run_code = False

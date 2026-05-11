@@ -3161,7 +3161,7 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
     assert ls_solve_quality["ls_hessian_action_max_rel_tol"] == pytest.approx(1e-8)
     assert ls_solve_quality["ls_newton_linear_residual_rel_tol"] == pytest.approx(1e-8)
     assert ls_solve_quality["ls_newton_step_abs_diff_rel_tol"] == pytest.approx(1e-8)
-    assert ls_solve_quality["ls_condition_estimate_present"] is False
+    assert ls_solve_quality["ls_condition_estimate_present"] is True
     assert ls_solve_quality["requires_same_state"] is True
     assert ls_solve_quality["reporting_only"] is True
 
@@ -3175,7 +3175,7 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
     assert exact_solve_quality["exact_adjoint_solve_residual_rel_tol"] == pytest.approx(
         1e-8
     )
-    assert exact_solve_quality["exact_condition_estimate_present"] is False
+    assert exact_solve_quality["exact_condition_estimate_present"] is True
     assert exact_solve_quality["requires_same_state"] is True
     assert exact_solve_quality["reporting_only"] is True
 

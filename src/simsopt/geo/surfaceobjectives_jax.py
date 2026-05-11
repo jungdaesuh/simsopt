@@ -3064,11 +3064,23 @@ def _traceable_solve_plu_linearization(
         rhs,
         residual_tol,
     )
+    matrix = _traceable_plu_matrix(linear_solve_factors)
+    operator_matrix = matrix.T if transpose else matrix
+    residual_rel = _optimizer_jax._relative_residual_1_norm(residual, rhs)
+    condition_estimate = _optimizer_jax._dense_matrix_condition_estimate(
+        operator_matrix
+    )
+    forward_error_success = _optimizer_jax._forward_error_success(
+        residual_rel,
+        condition_estimate,
+        tol=linear_solve_tol,
+    )
     success = (
         jnp.all(jnp.isfinite(solution))
         & jnp.all(jnp.isfinite(residual))
         & jnp.isfinite(residual_norm)
         & (residual_norm <= residual_tol)
+        & forward_error_success
     )
     return solution, success
 

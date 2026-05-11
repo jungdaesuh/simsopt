@@ -148,6 +148,12 @@ _STRICT_REFERENCE_JAX_OPTIMIZER_DETAIL = "the host-side JAX reference optimizer 
 _STRICT_REFERENCE_LEAST_SQUARES_DETAIL = (
     "the host-side reference least-squares optimizer lane"
 )
+_EISENSTAT_WALKER_GAMMA = 0.9
+_EISENSTAT_WALKER_ALPHA = 2.0
+_EISENSTAT_WALKER_MIN_ETA = 1.0e-12
+_EISENSTAT_WALKER_MAX_ETA = 0.5
+_NEWTON_BACKTRACKING_MAX_STEPS = 8
+_HAGER_HIGHAM_CONDITION_ITERATIONS = 5
 _SCALAR_VALUE_AND_GRAD_CACHE_LOCK = Lock()
 _CACHEABLE_VALUE_AND_GRAD_ATTR = "_simsopt_cache_jit_value_and_grad"
 _CACHED_VALUE_AND_GRAD_ATTR = "_simsopt_cached_jit_value_and_grad"
@@ -1938,6 +1944,93 @@ def _newton_candidate_status(x_next, grad_next):
     return accepted, candidate_norm
 
 
+def _newton_backtracking_continue(state):
+    return (
+        state["iteration"] < _NEWTON_BACKTRACKING_MAX_STEPS
+    ) & (~state["accepted"])
+
+
+def _backtracking_value_grad_step(
+    val_and_grad_fn,
+    x,
+    dx,
+    current_val,
+    current_grad,
+    current_norm,
+):
+    dtype = jnp.asarray(x).dtype
+    one = _device_scalar(1.0, dtype=dtype)
+    half = _device_scalar(0.5, dtype=dtype)
+    state0 = {
+        "iteration": jnp.asarray(0, dtype=jnp.int32),
+        "alpha": one,
+        "x": x,
+        "val": current_val,
+        "grad": current_grad,
+        "norm": current_norm,
+        "accepted": jnp.asarray(False),
+    }
+
+    def body_fun(state):
+        candidate_x = x - state["alpha"] * dx
+        candidate_val, candidate_grad = val_and_grad_fn(candidate_x)
+        candidate_accepted, candidate_norm = _newton_candidate_status(
+            candidate_x,
+            candidate_grad,
+        )
+        candidate_accepted = candidate_accepted & (candidate_norm <= current_norm)
+        return {
+            "iteration": state["iteration"] + 1,
+            "alpha": state["alpha"] * half,
+            "x": lax.select(candidate_accepted, candidate_x, state["x"]),
+            "val": lax.select(candidate_accepted, candidate_val, state["val"]),
+            "grad": lax.select(candidate_accepted, candidate_grad, state["grad"]),
+            "norm": lax.select(candidate_accepted, candidate_norm, state["norm"]),
+            "accepted": candidate_accepted,
+        }
+
+    return lax.while_loop(_newton_backtracking_continue, body_fun, state0)
+
+
+def _backtracking_residual_step(residual_eval, x, dx, residual, current_norm):
+    dtype = jnp.asarray(x).dtype
+    one = _device_scalar(1.0, dtype=dtype)
+    half = _device_scalar(0.5, dtype=dtype)
+    state0 = {
+        "iteration": jnp.asarray(0, dtype=jnp.int32),
+        "alpha": one,
+        "x": x,
+        "residual": residual,
+        "norm": current_norm,
+        "accepted": jnp.asarray(False),
+    }
+
+    def body_fun(state):
+        candidate_x = x - state["alpha"] * dx
+        candidate_residual = residual_eval(candidate_x)
+        candidate_norm = jnp.linalg.norm(candidate_residual)
+        candidate_accepted = (
+            jnp.all(jnp.isfinite(candidate_x))
+            & jnp.all(jnp.isfinite(candidate_residual))
+            & jnp.isfinite(candidate_norm)
+            & (candidate_norm <= current_norm)
+        )
+        return {
+            "iteration": state["iteration"] + 1,
+            "alpha": state["alpha"] * half,
+            "x": lax.select(candidate_accepted, candidate_x, state["x"]),
+            "residual": lax.select(
+                candidate_accepted,
+                candidate_residual,
+                state["residual"],
+            ),
+            "norm": lax.select(candidate_accepted, candidate_norm, state["norm"]),
+            "accepted": candidate_accepted,
+        }
+
+    return lax.while_loop(_newton_backtracking_continue, body_fun, state0)
+
+
 def _gmres_iteration_limits(n):
     restart = max(5, min(n, 64))
     maxiter = 10
@@ -2008,6 +2101,131 @@ def _linear_solve_residual_tolerance(rhs, tol):
         minimum,
         ten * tol_value * scale,
     )
+
+
+def _relative_residual_norm(residual, rhs, *, ord=None):
+    dtype = rhs.dtype
+    residual_norm = jnp.linalg.norm(residual, ord=ord)
+    rhs_norm = jnp.linalg.norm(rhs, ord=ord)
+    floor = _device_scalar(jnp.finfo(dtype).tiny, dtype=dtype)
+    return residual_norm / jnp.maximum(rhs_norm, floor)
+
+
+def _relative_residual_1_norm(residual, rhs):
+    return _relative_residual_norm(residual, rhs, ord=1)
+
+
+def _forward_error_bound(residual_rel, condition_estimate):
+    dtype = residual_rel.dtype
+    one = _device_scalar(1.0, dtype=dtype)
+    scaled = condition_estimate * residual_rel
+    denominator = one - scaled
+    return jnp.where(
+        denominator > _device_scalar(0.0, dtype=dtype),
+        scaled / denominator,
+        jnp.inf,
+    )
+
+
+def _forward_error_success(residual_rel, condition_estimate, *, tol):
+    dtype = residual_rel.dtype
+    tol_value = _optimizer_scalar(tol, dtype=dtype)
+    floor = jnp.sqrt(_device_scalar(jnp.finfo(dtype).eps, dtype=dtype))
+    gate = jnp.maximum(floor, _device_scalar(10.0, dtype=dtype) * tol_value)
+    ferr = _forward_error_bound(residual_rel, condition_estimate)
+    return jnp.isfinite(ferr) & (ferr <= gate)
+
+
+def _eisenstat_walker_choice2_tolerance(norm, previous_norm, *, tol):
+    dtype = norm.dtype
+    tol_value = _optimizer_scalar(tol, dtype=dtype)
+    strict_cap = jnp.minimum(
+        _device_scalar(1e-10, dtype=dtype),
+        jnp.maximum(
+            tol_value * _device_scalar(0.1, dtype=dtype),
+            _device_scalar(1e-14, dtype=dtype),
+        ),
+    )
+    gamma = _device_scalar(_EISENSTAT_WALKER_GAMMA, dtype=dtype)
+    alpha = _device_scalar(_EISENSTAT_WALKER_ALPHA, dtype=dtype)
+    eta_min = _device_scalar(_EISENSTAT_WALKER_MIN_ETA, dtype=dtype)
+    eta_max = _device_scalar(_EISENSTAT_WALKER_MAX_ETA, dtype=dtype)
+    denominator = jnp.maximum(
+        previous_norm,
+        _device_scalar(jnp.finfo(dtype).tiny, dtype=dtype),
+    )
+    eta = gamma * jnp.power(norm / denominator, alpha)
+    eta = jnp.clip(eta, eta_min, eta_max)
+    return jnp.maximum(
+        _device_scalar(1e-14, dtype=dtype),
+        jnp.minimum(strict_cap, eta * norm),
+    )
+
+
+def _matrix_one_norm(matrix):
+    return jnp.max(jnp.sum(jnp.abs(matrix), axis=0))
+
+
+def _hager_higham_inverse_1_norm_estimate(
+    solve,
+    transpose_solve,
+    *,
+    size,
+    dtype,
+    iterations=_HAGER_HIGHAM_CONDITION_ITERATIONS,
+):
+    one = _device_scalar(1.0, dtype=dtype)
+    zero = _device_scalar(0.0, dtype=dtype)
+    indices = jnp.arange(size)
+    x0 = jnp.full((size,), one / _device_scalar(size, dtype=dtype), dtype=dtype)
+
+    def unit_vector(index):
+        return jnp.where(indices == index, one, zero)
+
+    def body_fun(_iteration, state):
+        x, best_estimate = state
+        y = solve(x)
+        estimate = jnp.sum(jnp.abs(y))
+        signs = jnp.where(y >= zero, one, -one)
+        z = transpose_solve(signs)
+        next_index = jnp.argmax(jnp.abs(z))
+        next_x = unit_vector(next_index)
+        finite = jnp.all(jnp.isfinite(y)) & jnp.all(jnp.isfinite(z))
+        next_estimate = jnp.maximum(best_estimate, estimate)
+        return next_x, jnp.where(finite, next_estimate, jnp.inf)
+
+    _, estimate = lax.fori_loop(0, int(iterations), body_fun, (x0, zero))
+    return estimate
+
+
+def _dense_matrix_condition_estimate(matrix):
+    """Return a JAX-native Hager-Higham 1-norm condition estimate."""
+    matrix = jnp.asarray(matrix)
+    size = int(matrix.shape[0])
+
+    def solve(rhs):
+        return jnp.linalg.solve(matrix, rhs)
+
+    def transpose_solve(rhs):
+        return jnp.linalg.solve(matrix.T, rhs)
+
+    matrix_norm = _matrix_one_norm(matrix)
+    inverse_norm = _hager_higham_inverse_1_norm_estimate(
+        solve,
+        transpose_solve,
+        size=size,
+        dtype=matrix.dtype,
+    )
+    estimate = matrix_norm * inverse_norm
+    finite_matrix = jnp.all(jnp.isfinite(matrix)) & jnp.isfinite(matrix_norm)
+    return jnp.where(finite_matrix & jnp.isfinite(estimate), estimate, jnp.inf)
+
+
+def _dense_matrix_solve_forward_error_success(matrix, solution, rhs, *, tol):
+    residual = rhs - matrix @ solution
+    residual_rel = _relative_residual_1_norm(residual, rhs)
+    condition_estimate = _dense_matrix_condition_estimate(matrix)
+    return _forward_error_success(residual_rel, condition_estimate, tol=tol)
 
 
 def _solve_square_vector_system_operator_only(matvec, rhs, *, tol):
@@ -2412,13 +2630,6 @@ def _make_traceable_newton_polish_runner(
 
         dtype = jnp.asarray(x_init).dtype
         tol_value = _optimizer_scalar(tol, dtype=dtype)
-        linear_tol = jnp.minimum(
-            _device_scalar(1e-10, dtype=dtype),
-            jnp.maximum(
-                tol_value * _device_scalar(0.1, dtype=dtype),
-                _device_scalar(1e-14, dtype=dtype),
-            ),
-        )
         val0, grad0 = val_and_grad_fn(x_init)
         norm0 = jnp.linalg.norm(grad0)
         hessian_size = int(np.asarray(jnp.asarray(x_init).size))
@@ -2440,6 +2651,11 @@ def _make_traceable_newton_polish_runner(
 
         def body_fun(state):
             stab_value = _optimizer_scalar(stab, dtype=state["x"].dtype)
+            linear_tol = _eisenstat_walker_choice2_tolerance(
+                state["norm"],
+                state["previous_norm"],
+                tol=tol_value,
+            )
 
             def matvec(v):
                 return hvp_fn(state["x"], v) + stab_value * v
@@ -2449,18 +2665,15 @@ def _make_traceable_newton_polish_runner(
                 state["grad"],
                 tol=linear_tol,
             )
-            x_next = lax.cond(
-                linear_success,
-                lambda _: state["x"] - dx,
-                lambda _: state["x"],
-                operand=None,
+            candidate = _backtracking_value_grad_step(
+                val_and_grad_fn,
+                state["x"],
+                dx,
+                state["val"],
+                state["grad"],
+                state["norm"],
             )
-            val_next, grad_next = val_and_grad_fn(x_next)
-            candidate_accepted, candidate_norm = _newton_candidate_status(
-                x_next,
-                grad_next,
-            )
-            accepted = linear_success & candidate_accepted
+            accepted = linear_success & candidate["accepted"]
             next_nit = state["nit"] + 1
             if progress_callback is not None:
                 lax.cond(
@@ -2468,17 +2681,22 @@ def _make_traceable_newton_polish_runner(
                     lambda _: jax.debug.callback(
                         progress_callback,
                         next_nit,
-                        val_next,
-                        candidate_norm,
+                        candidate["val"],
+                        candidate["norm"],
                     ),
                     lambda _: None,
                     operand=None,
                 )
             return {
-                "x": lax.select(accepted, x_next, state["x"]),
-                "val": lax.select(accepted, val_next, state["val"]),
-                "grad": lax.select(accepted, grad_next, state["grad"]),
-                "norm": lax.select(accepted, candidate_norm, state["norm"]),
+                "x": lax.select(accepted, candidate["x"], state["x"]),
+                "val": lax.select(accepted, candidate["val"], state["val"]),
+                "grad": lax.select(accepted, candidate["grad"], state["grad"]),
+                "norm": lax.select(accepted, candidate["norm"], state["norm"]),
+                "previous_norm": lax.select(
+                    accepted,
+                    state["norm"],
+                    state["previous_norm"],
+                ),
                 "nit": lax.select(accepted, next_nit, state["nit"]),
                 "stalled": ~accepted,
             }
@@ -2491,6 +2709,7 @@ def _make_traceable_newton_polish_runner(
                 "val": val0,
                 "grad": grad0,
                 "norm": norm0,
+                "previous_norm": norm0,
                 "nit": jnp.asarray(0, dtype=jnp.int32),
                 "stalled": jnp.asarray(False),
             },
@@ -2575,12 +2794,18 @@ def newton_exact(
     linear_tol = min(1e-10, max(float(tol) * 0.1, 1e-14))
 
     nit = 0
+    exact_newton_linear_residual_rel = None
+    exact_refinement_correction_rel = None
     while nit < maxiter and float(norm) > tol:
         dx, linear_residual, _ = _gmres_solve_exact_newton_system(
             jvp_fn,
             x,
             r,
             tol=linear_tol,
+        )
+        dx_before_refinement = dx
+        exact_newton_linear_residual_rel = float(
+            _relative_residual_norm(linear_residual, r)
         )
         linear_residual_norm = float(np.linalg.norm(np.asarray(linear_residual)))
         if not np.all(np.isfinite(np.asarray(dx))):
@@ -2594,6 +2819,10 @@ def newton_exact(
             )
             if np.all(np.isfinite(np.asarray(correction))):
                 dx = dx + correction
+                denominator = np.linalg.norm(np.asarray(dx_before_refinement))
+                exact_refinement_correction_rel = float(
+                    np.linalg.norm(np.asarray(correction)) / max(denominator, 1e-30)
+                )
         x_candidate = x - dx
         r_candidate = res_fn(x_candidate)
         norm_candidate = jnp.linalg.norm(r_candidate)
@@ -2621,6 +2850,8 @@ def newton_exact(
             "nit": nit,
             "success": bool(float(norm) <= tol),
             "jacobian_materialized": False,
+            "exact_newton_linear_residual_rel": exact_newton_linear_residual_rel,
+            "exact_refinement_correction_rel": exact_refinement_correction_rel,
             **report,
         }
 
@@ -2633,6 +2864,8 @@ def newton_exact(
         "nit": nit,
         "success": bool(float(norm) <= tol),
         "jacobian_materialized": True,
+        "exact_newton_linear_residual_rel": exact_newton_linear_residual_rel,
+        "exact_refinement_correction_rel": exact_refinement_correction_rel,
         **report,
     }
 
@@ -2652,55 +2885,106 @@ def _make_traceable_exact_newton_runner(
 
         dtype = jnp.asarray(x_init).dtype
         tol_value = _optimizer_scalar(tol, dtype=dtype)
-        linear_tol = jnp.minimum(
-            _device_scalar(1e-10, dtype=dtype),
-            jnp.maximum(
-                tol_value * _device_scalar(0.1, dtype=dtype),
-                _device_scalar(1e-14, dtype=dtype),
-            ),
-        )
         r0 = residual_eval(x_init)
         norm0 = jnp.linalg.norm(r0)
 
         def cond_fun(state):
-            return (state["nit"] < maxiter) & (state["norm"] > tol_value)
+            return (
+                (state["nit"] < maxiter)
+                & (state["norm"] > tol_value)
+                & (~state["stalled"])
+            )
 
         def body_fun(state):
+            linear_tol_iteration = _eisenstat_walker_choice2_tolerance(
+                state["norm"],
+                state["previous_norm"],
+                tol=tol_value,
+            )
             dx, linear_residual, _ = _gmres_solve_exact_newton_system(
                 jvp_fn,
                 state["x"],
                 state["residual"],
-                tol=linear_tol,
+                tol=linear_tol_iteration,
             )
             linear_residual_norm = jnp.linalg.norm(linear_residual)
+            linear_residual_rel = _relative_residual_norm(
+                linear_residual,
+                state["residual"],
+            )
 
             def add_correction(current_dx):
                 correction, _, _ = _gmres_solve_exact_newton_system(
                     jvp_fn,
                     state["x"],
                     linear_residual,
-                    tol=linear_tol,
+                    tol=linear_tol_iteration,
                 )
-                return lax.cond(
-                    jnp.all(jnp.isfinite(correction)),
-                    lambda corr: current_dx + corr,
-                    lambda _corr: current_dx,
-                    correction,
+                correction_rel = jnp.linalg.norm(correction) / jnp.maximum(
+                    jnp.linalg.norm(current_dx),
+                    _device_scalar(
+                        jnp.finfo(current_dx.dtype).tiny,
+                        dtype=current_dx.dtype,
+                    ),
+                )
+                correction_finite = jnp.all(jnp.isfinite(correction))
+                return (
+                    lax.cond(
+                        correction_finite,
+                        lambda corr: current_dx + corr,
+                        lambda _corr: current_dx,
+                        correction,
+                    ),
+                    lax.select(
+                        correction_finite,
+                        correction_rel,
+                        _device_scalar(jnp.nan, dtype=current_dx.dtype),
+                    ),
                 )
 
-            dx = lax.cond(
-                jnp.all(jnp.isfinite(dx)) & (linear_residual_norm > linear_tol),
+            dx, correction_rel = lax.cond(
+                jnp.all(jnp.isfinite(dx))
+                & (linear_residual_norm > linear_tol_iteration),
                 add_correction,
-                lambda current_dx: current_dx,
+                lambda current_dx: (
+                    current_dx,
+                    _device_scalar(0.0, dtype=current_dx.dtype),
+                ),
                 dx,
             )
-            x_next = state["x"] - dx
-            residual_next = residual_eval(x_next)
+            candidate = _backtracking_residual_step(
+                residual_eval,
+                state["x"],
+                dx,
+                state["residual"],
+                state["norm"],
+            )
+            accepted = candidate["accepted"]
             return {
-                "x": x_next,
-                "residual": residual_next,
-                "norm": jnp.linalg.norm(residual_next),
-                "nit": state["nit"] + 1,
+                "x": lax.select(accepted, candidate["x"], state["x"]),
+                "residual": lax.select(
+                    accepted,
+                    candidate["residual"],
+                    state["residual"],
+                ),
+                "norm": lax.select(accepted, candidate["norm"], state["norm"]),
+                "previous_norm": lax.select(
+                    accepted,
+                    state["norm"],
+                    state["previous_norm"],
+                ),
+                "nit": lax.select(accepted, state["nit"] + 1, state["nit"]),
+                "stalled": ~accepted,
+                "exact_newton_linear_residual_rel": lax.select(
+                    accepted,
+                    linear_residual_rel,
+                    state["exact_newton_linear_residual_rel"],
+                ),
+                "exact_refinement_correction_rel": lax.select(
+                    accepted,
+                    correction_rel,
+                    state["exact_refinement_correction_rel"],
+                ),
             }
 
         state = lax.while_loop(
@@ -2710,7 +2994,17 @@ def _make_traceable_exact_newton_runner(
                 "x": x_init,
                 "residual": r0,
                 "norm": norm0,
+                "previous_norm": norm0,
                 "nit": jnp.asarray(0, dtype=jnp.int32),
+                "stalled": jnp.asarray(False),
+                "exact_newton_linear_residual_rel": jnp.asarray(
+                    jnp.nan,
+                    dtype=dtype,
+                ),
+                "exact_refinement_correction_rel": jnp.asarray(
+                    jnp.nan,
+                    dtype=dtype,
+                ),
             },
         )
         return {
@@ -2718,6 +3012,10 @@ def _make_traceable_exact_newton_runner(
             "residual": state["residual"],
             "nit": state["nit"],
             "success": state["norm"] <= tol_value,
+            "exact_newton_linear_residual_rel": state[
+                "exact_newton_linear_residual_rel"
+            ],
+            "exact_refinement_correction_rel": state["exact_refinement_correction_rel"],
         }
 
     run_solver.__name__ = "traceable_exact_newton_run_solver"

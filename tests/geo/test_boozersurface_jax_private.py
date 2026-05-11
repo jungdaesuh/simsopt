@@ -2270,10 +2270,10 @@ class TestBoozerSurfaceJAXClassPrivate:
 
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
-    def test_newton_polish_traceable_accepts_finite_norm_increasing_operator_steps(
+    def test_newton_polish_traceable_backtracks_norm_increasing_operator_steps(
         self, monkeypatch
     ):
-        """Traceable Newton follows the CPU Boozer finite-step contract."""
+        """Phase 5 production Newton rejects finite but non-descent steps."""
         observed = {"progress_calls": 0}
 
         def fake_operator_only_linear_solve(_matvec, rhs, *, tol):
@@ -2301,10 +2301,10 @@ class TestBoozerSurfaceJAXClassPrivate:
             ),
         )
 
-        np.testing.assert_allclose(np.asarray(result["x"]), 8.0 * np.asarray(x0))
-        assert int(result["nit"]) == 3
+        np.testing.assert_allclose(np.asarray(result["x"]), np.asarray(x0))
+        assert int(result["nit"]) == 0
         assert bool(result["success"]) is False
-        assert observed["progress_calls"] == 3
+        assert observed["progress_calls"] == 0
 
     @PRIVATE_OPTIMIZER_RUNTIME
     def test_run_code_ondevice_limited_memory_routes_to_lbfgs(self, monkeypatch):
@@ -2538,7 +2538,7 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert res["PLU"] is not None
         assert bool(np.asarray(res["hessian_materialized"])) is True
         assert res["dense_linear_solve_factors_available"] is True
-        assert res["linear_solve_backend"] == "operator"
+        assert res["linear_solve_backend"] == "dense-plu-shared"
         assert callable(res["vjp"])
         assert res["optimizer_method"] == "lbfgs-ondevice"
         with pytest.raises(RuntimeError, match="no successful solve state"):

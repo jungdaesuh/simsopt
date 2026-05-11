@@ -1797,6 +1797,94 @@ class TestOptimizerAdapter:
 
         assert bool(solve_success(jnp.zeros(2)))
 
+    def test_dense_matrix_condition_estimate_matches_diagonal_condition(self):
+        """Phase 5 Hager-Higham estimate is JAX-native for dense operators."""
+        matrix = jnp.diag(jnp.asarray([0.25, 1.0, 4.0], dtype=jnp.float64))
+
+        estimate = _opt._dense_matrix_condition_estimate(matrix)
+
+        assert float(np.asarray(estimate)) == pytest.approx(16.0)
+
+    def test_hager_higham_inverse_estimate_keeps_best_iteration(self):
+        """Hager-Higham estimate must not regress to the final probe only."""
+
+        def solve(x):
+            return jnp.asarray([100.0 * x[1], x[0]], dtype=x.dtype)
+
+        def transpose_solve(_signs):
+            return jnp.asarray([2.0, 1.0], dtype=jnp.float64)
+
+        estimate = _opt._hager_higham_inverse_1_norm_estimate(
+            solve,
+            transpose_solve,
+            size=2,
+            dtype=jnp.float64,
+            iterations=3,
+        )
+
+        assert float(np.asarray(estimate)) == pytest.approx(50.5)
+
+    def test_dense_matrix_forward_error_gate_rejects_bad_solution(self):
+        """Phase 5 Skeel/FERR gate rejects large forward-error risk."""
+        matrix = jnp.diag(jnp.asarray([1.0e-8, 1.0], dtype=jnp.float64))
+        rhs = jnp.asarray([1.0e-8, 1.0], dtype=jnp.float64)
+        good_solution = jnp.linalg.solve(matrix, rhs)
+        bad_solution = jnp.asarray([0.0, 1.0], dtype=jnp.float64)
+
+        assert bool(
+            np.asarray(
+                _opt._dense_matrix_solve_forward_error_success(
+                    matrix,
+                    good_solution,
+                    rhs,
+                    tol=1.0e-10,
+                )
+            )
+        )
+        assert not bool(
+            np.asarray(
+                _opt._dense_matrix_solve_forward_error_success(
+                    matrix,
+                    bad_solution,
+                    rhs,
+                    tol=1.0e-10,
+                )
+            )
+        )
+
+    def test_eisenstat_walker_tolerance_preserves_strict_newton_cap(self):
+        """Phase 5 forcing must not loosen the established Newton solve cap."""
+        norm = jnp.asarray(8.0, dtype=jnp.float64)
+
+        linear_tol = _opt._eisenstat_walker_choice2_tolerance(
+            norm,
+            norm,
+            tol=1.0e-14,
+        )
+
+        assert float(np.asarray(linear_tol)) == pytest.approx(1.0e-14)
+
+    def test_newton_exact_traceable_backtracks_oversized_newton_step(self):
+        """Phase 5 exact traceable Newton backtracks residual-increasing steps."""
+
+        def residual(x):
+            return jnp.asarray([x[0] ** 2 - 1.0], dtype=x.dtype)
+
+        x0 = jnp.asarray([0.1], dtype=jnp.float64)
+        initial_norm = float(np.linalg.norm(np.asarray(residual(x0))))
+
+        result = _opt.newton_exact_traceable(
+            residual,
+            x0,
+            maxiter=1,
+            tol=1e-14,
+        )
+
+        final_norm = float(np.linalg.norm(np.asarray(result["residual"])))
+        assert final_norm < initial_norm
+        assert float(np.asarray(result["x"][0])) < 5.0
+        assert int(np.asarray(result["nit"])) == 1
+
 
 class TestNewtonPolishBoozer:
     """Test Newton polish after BFGS on the Boozer penalty objective."""

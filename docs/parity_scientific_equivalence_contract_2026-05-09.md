@@ -8,8 +8,11 @@
   `cpp_compatible_probe` harness landed in `19b4e5ef6`, with probe
   contract alignment in `d88cc79e4`. Phase 1.5
   calibration sweep + tolerance lock remains deferred — it requires
-  production runs against `.artifacts/parity/` corpus. Phase 5
-  (Skeel/EW/Hager–Higham) remains deferred per §9.
+  production runs against `.artifacts/parity/` corpus. Phase 5 CPU
+  implementation (Skeel/FERR gate, Eisenstat–Walker Choice-2
+  forcing under the existing strict residual cap, monotone
+  backtracking, and Hager–Higham condition estimates) is implemented
+  in the current change set; GPU proof remains deferred per §9.
 - Companion docs:
   - `docs/parity_dual_mode_contract_2026-05-08.md`
     (existing dual-mode runtime contract; this plan adds a **second-axis
@@ -67,9 +70,10 @@ The two lanes are scoped distinctly:
   introduced. Live behavior today: residual-gated GMRES on
   HVP/JVP operator solves (`optimizer_jax.py:1947-1992, 2360-2368`),
   conditional iterative refinement (`optimizer_jax.py:2447-2497`),
-  no globalization. Forward-error-gated refinement (Skeel/FERR) and
-  Eisenstat–Walker INB backtracking are **future work** (Phase 5),
-  not properties of the current lane.
+  Skeel/FERR forward-error gating on dense PLU compatibility solves,
+  and Eisenstat–Walker Choice-2 forcing under the existing strict
+  residual cap with monotone residual/gradient backtracking on the
+  traceable Newton paths.
 
 - **`cpp_compatible_probe`** is a **harness-only diagnostic mode**
   exposed through the parity benchmark, not a user-facing
@@ -80,11 +84,11 @@ The two lanes are scoped distinctly:
 
 | Lane                    | Purpose                                            | Linear solver (today)                  | Iterative refinement (today)         | Globalization (today) |
 |-------------------------|----------------------------------------------------|----------------------------------------|--------------------------------------|-----------------------|
-| `production_operator`   | JAX-native at scale (existing default user lane)   | Operator GMRES on HVP/JVP              | Conditional, GMRES-residual gated   | None                  |
+| `production_operator`   | JAX-native at scale (existing default user lane)   | Operator GMRES on HVP/JVP              | Conditional, GMRES/FERR gated       | EW Choice-2 under strict residual cap + monotone backtracking on traceable Newton paths |
 | `cpp_compatible_probe`  | Harness-only diagnostic vs C++; not a user lane    | Host `np.linalg.solve` on materialized H/J via `optimizer_backend="scipy"` skeleton + harness adapter | LS: conditional, gated on `norm < 1e-9` (matches `boozersurface.py:1130`); Exact: unconditional Wilkinson (matches `boozersurface.py:1669`) | None (matches C++)    |
 
-Future-work properties (Phase 5) are tracked separately and are NOT
-implied by the lane labels above.
+GPU proof and production-tolerance enforcement are tracked separately
+and are NOT implied by the lane labels above.
 
 The two algorithmic lanes are orthogonal to the runtime modes:
 
@@ -194,7 +198,7 @@ to* `linear_solve_factors`; it does not remove or relabel it.
 | `ls_newton_linear_residual_rel` | `‖H·dx − g‖ / ‖g‖`                                                  | computed at the Newton step site post-solve         |
 | `ls_newton_step_abs_diff_rel`   | `‖dx_jax − dx_ref‖ / max(‖dx_ref‖, ε)` against seeded reference dx  | parity arbiter, see §4                              |
 | `ls_factorization_backend`      | string ∈ {`lapack-dgetrf`, `cusolver-getrf-ffi`, `dense-plu-shared`} (SciPy/JAX CPU LU is LAPACK-backed; the CUDA label denotes the intended cuSOLVER-backed JAX device path and must be hardware-proven before enforcement) | result-dict assignment in `boozersurface_jax.py` |
-| `ls_condition_estimate`         | Hager–Higham 1-norm condition number of H (operator matvecs)         | new helper near `optimizer_jax.py:1899`              |
+| `ls_condition_estimate`         | Hager–Higham 1-norm condition number of H when the dense compatibility operator is available | `_dense_matrix_condition_estimate` in `optimizer_jax.py` |
 
 ### 3.2 Exact solve-quality fields (gates E3–E5, E7)
 
@@ -205,11 +209,11 @@ to* `linear_solve_factors`; it does not remove or relabel it.
 | `exact_refinement_correction_rel`    | `‖dx_after_IR − dx_before_IR‖ / max(‖dx_before_IR‖, ε)` (per-iter)  | optimizer_jax.py around `:2588-2597, 2675-2696`      |
 | `exact_adjoint_solve_residual_rel`   | `‖J^T λ − u‖ / ‖u‖` measured at adjoint solve completion            | `surfaceobjectives_jax.py` adjoint exit             |
 | `exact_factorization_backend`        | string ∈ {`lapack-dgetrf`, `cusolver-getrf-ffi`, `operator-gmres`} (operator GMRES is the runtime path; the LAPACK / cuSOLVER aliases are reserved for the Phase 3 `cpp_compatible_probe` harness reference solver) | result-dict assignment |
-| `exact_condition_estimate`           | Hager–Higham 1-norm condition number of J (operator matvecs)        | new helper near `optimizer_jax.py:1899`              |
+| `exact_condition_estimate`           | Hager–Higham 1-norm condition number of J when the dense compatibility operator is available | `_dense_matrix_condition_estimate` in `optimizer_jax.py` |
 
-The Hager–Higham implementation must be JAX-native (see §6); a
-placeholder `None` is acceptable in Phase 1 with population in Phase
-5.3.
+The Hager–Higham implementation is JAX-native (see §6). A `None`
+condition estimate means the dense compatibility operator was not
+available for that solve; it is no longer a schema placeholder.
 
 ## 4. Operator-Action Probe Specification
 
@@ -304,24 +308,26 @@ below):
 
 ### 5.2 `production_operator` (the existing default user lane)
 
-Unchanged from current default. The existing
-`newton_exact_traceable` (`optimizer_jax.py:2641-2752`) and the M5 IFT
+The existing `newton_exact_traceable` production lane and the M5 IFT
 adjoint operator-backed contract (CLAUDE.md "Adjoint / warm-start
-operator solves") are preserved. Live algorithmic properties **today**:
+operator solves") are preserved, with the Phase 5 production-only
+solve-quality additions described below. Live algorithmic properties
+**today**:
 
 - Linear solve: residual-gated GMRES on operator HVP/JVP
   (`optimizer_jax.py:1947-1992, 2360-2368`).
 - Iterative refinement: conditional, gated on GMRES linear residual
   (`optimizer_jax.py:2588-2597` non-traceable;
   `optimizer_jax.py:2675-2696` traceable).
-- Globalization: none on the traceable production path; a strict
-  monotone-norm guard exists on the legacy non-traceable
-  `newton_exact` only (`optimizer_jax.py:2600-2605`).
+- Globalization: the traceable production Newton paths use
+  Eisenstat–Walker Choice-2 forcing under the existing strict residual
+  cap plus monotone residual/gradient backtracking. The legacy
+  non-traceable `newton_exact` retains its monotone-norm guard.
 
-Phase 5 may add a JAX-native Skeel forward-error gate (replacing the
-GMRES-residual gate) and Eisenstat–Walker INB backtracking. Those are
-production improvements deferred to a future workstream and **are
-not properties of `production_operator` today**.
+Phase 5 adds a JAX-native Skeel/FERR forward-error gate for dense PLU
+compatibility solves and Hager–Higham condition estimates for dense
+operators. GPU hardware proof and production tolerance enforcement
+remain calibration work, not CPU implementation blockers.
 
 ### 5.3 Adjoint factor-once hybrid
 
@@ -483,13 +489,13 @@ Phase 4 (BFGS root cause) ── independent investigation, blocks gate L3 / E2 
       "ls_hessian_action_max_rel_tol": 1e-8,
       "ls_newton_linear_residual_rel_tol": 1e-8,
       "ls_newton_step_abs_diff_rel_tol": 1e-8,
-      "ls_condition_estimate_present": False,  # placeholder; flip True in Phase 5.3
+      "ls_condition_estimate_present": True,
   }
   PARITY_LADDER_TOLERANCES["exact-solve-quality"] = {
       "exact_jacobian_action_max_rel_tol": 1e-8,
       "exact_newton_linear_residual_rel_tol": 1e-8,
       "exact_adjoint_solve_residual_rel_tol": 1e-8,
-      "exact_condition_estimate_present": False,  # placeholder; flip True in Phase 5.3
+      "exact_condition_estimate_present": True,
   }
   ```
 - CLAUDE.md amendment notes (do not land amendments until Phase 2 ships).
@@ -513,10 +519,10 @@ Phase 4 (BFGS root cause) ── independent investigation, blocks gate L3 / E2 
   calibration work and are not enforced in Phase 1.
 - `tests/test_benchmark_helpers.py` — add the two new lane keys to the
   accepted set.
-- `*_condition_estimate` field emits `None` placeholder; the
-  matching `*_condition_estimate_present` ladder key stays `False`
-  until Phase 5.3 lands the Hager–Higham implementation, at which
-  point both flip together.
+- `*_condition_estimate` is populated by the JAX-native Hager–Higham
+  helper when a dense compatibility operator is available. It remains
+  `None` only for solves that intentionally do not carry dense
+  operator state.
 
 ### Phase 1.5 deliverables (after calibration)
 - Calibration sweep per §10 risk register #4. **Status:** deferred —
@@ -604,10 +610,14 @@ constructor pre-conditions. End-to-end E1–E6 reproducibility across
 the `.artifacts/parity/` corpus is a follow-up calibration item that
 joins the Phase 1.5 calibration sweep deferred above.
 
-### Phase 5 deliverables (deferred)
-- 5.1 Skeel/FERR forward-error gate (JAX-native rewrite required; see §6).
-- 5.2 Eisenstat-Walker INB backtracking with Choice-2 forcing.
-- 5.3 Hager–Higham `condition_estimate` field implementation.
+### Phase 5 deliverables (CPU landed; GPU proof deferred)
+- 5.1 Skeel/FERR forward-error gate for dense PLU compatibility solves.
+- 5.2 Eisenstat–Walker Choice-2 forcing under the existing strict
+  residual cap with monotone backtracking on traceable Newton paths.
+- 5.3 Hager–Higham `condition_estimate` field implementation for
+  dense compatibility operators.
+- Remaining proof: CUDA runs over the `.artifacts/parity/` corpus and
+  promotion from reporting-only to enforcing after calibration.
 
 ## 10. Risk Register
 
@@ -679,8 +689,8 @@ joins the Phase 1.5 calibration sweep deferred above.
 - JAX dense Newton solve: `src/simsopt/geo/optimizer_jax.py:1732-1738`
 - JAX exact Newton (non-traceable, has monotone guard):
   `src/simsopt/geo/optimizer_jax.py:2554-2637` (guard at 2600-2605)
-- JAX exact Newton (traceable, no monotone guard):
-  `src/simsopt/geo/optimizer_jax.py:2641-2752`
+- JAX exact Newton (traceable, EW Choice-2 + monotone backtracking):
+  `_make_traceable_exact_newton_runner` in `src/simsopt/geo/optimizer_jax.py`
 - JAX operator GMRES seam: `src/simsopt/geo/optimizer_jax.py:1947-1992`
 - JAX adjoint runtime state:
   `src/simsopt/geo/boozersurface_jax.py:3340-3684`
