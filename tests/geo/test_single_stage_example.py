@@ -1208,7 +1208,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 boozer_surface,
                 biotsavart,
                 grid_multiplier=4,
-                include_label_constraint=False,
+                include_label_constraint=True,
                 weight_inv_modB=True,
             )
 
@@ -1228,6 +1228,7 @@ class SingleStageExampleTests(unittest.TestCase):
             np.testing.assert_allclose(exact.surface.quadpoints_theta, expected_theta)
             np.testing.assert_allclose(refined.surface.quadpoints_phi, expected_phi)
             np.testing.assert_allclose(refined.surface.quadpoints_theta, expected_theta)
+            self.assertTrue(exact.include_label_constraint)
             self.assertEqual(exact.J(), refined.J())
             np.testing.assert_allclose(
                 exact.dJ(partials=True)(biotsavart),
@@ -2272,6 +2273,7 @@ class SingleStageExampleTests(unittest.TestCase):
         module.Jiota = object()
         module.IOTAS_WEIGHT = 1.0
         module.JCurveLength = object()
+        module.JCurveLengthMin = object()
         module.LENGTH_WEIGHT = 1.0
         module.JCurveCurve = object()
         module.CC_WEIGHT = 1.0
@@ -2391,6 +2393,7 @@ class SingleStageExampleTests(unittest.TestCase):
         module.Jiota = object()
         module.IOTAS_WEIGHT = 1.0
         module.JCurveLength = object()
+        module.JCurveLengthMin = object()
         module.LENGTH_WEIGHT = 1.0
         module.JCurveCurve = object()
         module.CC_WEIGHT = 1.0
@@ -2754,6 +2757,7 @@ class HardwareConstraintTests(unittest.TestCase):
         module.Jiota = object()
         module.IOTAS_WEIGHT = 1.0
         module.JCurveLength = _LengthObjective()
+        module.JCurveLengthMin = _LengthObjective()
         module.LENGTH_WEIGHT = 1.0
         module.JCurveCurve = _DistanceObjective(0.04)
         module.CC_WEIGHT = 1.0
@@ -7272,6 +7276,7 @@ class HardwareConstraintTests(unittest.TestCase):
         module.Jiota = "jiota"
         module.IOTAS_WEIGHT = 2.0
         module.JCurveLength = "length"
+        module.JCurveLengthMin = "length_min"
         module.LENGTH_WEIGHT = 3.0
         module.JCurveCurve = "curve_curve"
         module.CC_WEIGHT = 4.0
@@ -7884,6 +7889,7 @@ class HardwareConstraintTests(unittest.TestCase):
             module.JF = _ScalarObjective(1.23)
             module.Jiota = _ScalarObjective(0.33)
             module.JCurveLength = _ScalarObjective(0.44)
+            module.JCurveLengthMin = _ScalarObjective(0.0)
             module.JCurveCurve = _DistanceObjective(0.55, 0.66)
             module.JCurveSurface = _DistanceObjective(0.77, 0.88)
             module.JSurfSurf = None
@@ -8037,6 +8043,7 @@ class HardwareConstraintTests(unittest.TestCase):
             module.JF = _ScalarObjective(1.23)
             module.Jiota = _ScalarObjective(0.33)
             module.JCurveLength = _ScalarObjective(0.44)
+            module.JCurveLengthMin = _ScalarObjective(0.0)
             module.JCurveCurve = _DistanceObjective(0.55, 0.66)
             module.JCurveSurface = _DistanceObjective(0.77, 0.88)
             module.JSurfSurf = None
@@ -10326,7 +10333,21 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.banana_current_max_A, 16000.0)
         self.assertEqual(args.single_stage_banana_current_mode, "shared")
         self.assertEqual(args.single_stage_banana_current_coordinate_scaling, "none")
+        self.assertEqual(args.alm_qs_threshold, 3.0e-3)
+        self.assertEqual(args.alm_boozer_threshold, 1.0e-4)
+        self.assertEqual(args.alm_iota_penalty_threshold, 1.0e-4)
+        self.assertEqual(args.alm_length_penalty_threshold, 1.0e-4)
         self.assertFalse(args.flip_banana)
+
+    def test_single_stage_uses_quartic_curvature_penalty(self):
+        module = load_single_stage_example_module()
+        source = EXAMPLE_MODULE_PATH.read_text()
+
+        self.assertEqual(module.CURVATURE_P_NORM, 4)
+        self.assertIn("LpCurveCurvature(\n        banana_curves[0],", source)
+        self.assertIn("CURVATURE_P_NORM", source)
+        self.assertIn("JCurveLengthMin = QuadraticPenalty(", source)
+        self.assertIn("COIL_LENGTH_MIN_FRACTION * length_target", source)
 
     def test_single_stage_parse_args_accepts_flip_banana(self):
         module = load_single_stage_example_module()
@@ -10473,6 +10494,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                     "coil_surface_spacing",
                     "max_curvature",
                     "coil_length_upper_bound",
+                    "coil_length_min",
                     "poloidal_extent",
                     "width_min",
                     "width_max",
@@ -10823,7 +10845,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "cc_weight": 100.0,
             "curvature_weight": 1e-4,
             "curvature_threshold": 100.0,
-            "curvature_p_norm": 2,
+            "curvature_p_norm": 4,
             "squared_flux_weight": 1.0,
             "basin_hops": 0,
             "basin_stepsize": 0.01,

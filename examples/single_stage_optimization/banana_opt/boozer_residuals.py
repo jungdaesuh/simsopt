@@ -243,6 +243,6 @@ class BoozerResidualExact(RefinedBoozerResidual):
             boozer_surface,
             bs,
             grid_multiplier=4,
-            include_label_constraint=False,
+            include_label_constraint=True,
             weight_inv_modB=True,
         )

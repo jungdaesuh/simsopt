@@ -154,6 +154,7 @@ from banana_opt.hardware_contracts import (
     BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
     COIL_COIL_MIN_DIST_M,
     COIL_LENGTH_HARD_LIMIT_M,
+    COIL_LENGTH_MIN_FRACTION,
     COIL_LENGTH_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
     MAX_CURVATURE_INV_M,
@@ -325,6 +326,11 @@ DEFAULT_HARDWARE_SEARCH_MODE = "hard"
 DEFAULT_HARDWARE_SEARCH_SOFT_ITERATIONS = 0
 DEFAULT_CURVATURE_TRAVERSAL_BAND = 0.0
 DEFAULT_CURVATURE_TRAVERSAL_EVAL_BUDGET = 0
+CURVATURE_P_NORM = 4
+DEFAULT_ALM_QS_THRESHOLD = 3.0e-3
+DEFAULT_ALM_BOOZER_THRESHOLD = 1.0e-4
+DEFAULT_ALM_IOTA_PENALTY_THRESHOLD = 1.0e-4
+DEFAULT_ALM_LENGTH_PENALTY_THRESHOLD = 1.0e-4
 _DEFAULT_SINGLE_STAGE_SEED_REGIME = "auto"
 _SINGLE_STAGE_SEED_REGIME_AUTO = "auto"
 # Derive from single_stage_phase1 to keep one canonical source of truth for string values.
@@ -338,6 +344,8 @@ SINGLE_STAGE_THRESHOLDED_PHYSICS_CONSTRAINT_NAMES = (
     "iota_penalty",
     "length_penalty",
 )
+
+
 DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
     "wout_nfp22ginsburg_000_014417_iota15.nc": {
         "major_radius": VACUUM_VESSEL_MAJOR_RADIUS_M,
@@ -1394,23 +1402,25 @@ def parse_args():
     parser.add_argument(
         "--alm-qs-threshold",
         type=float,
-        default=float(os.environ["ALM_QS_THRESHOLD"]) if "ALM_QS_THRESHOLD" in os.environ else None,
+        default=float(os.environ["ALM_QS_THRESHOLD"])
+        if "ALM_QS_THRESHOLD" in os.environ
+        else DEFAULT_ALM_QS_THRESHOLD,
         help="thresholded_physics-mode upper bound for the quasi-symmetry objective J_QS.",
     )
     parser.add_argument(
         "--alm-boozer-threshold",
         type=float,
-        default=float(os.environ["ALM_BOOZER_THRESHOLD"]) if "ALM_BOOZER_THRESHOLD" in os.environ else None,
+        default=float(os.environ["ALM_BOOZER_THRESHOLD"])
+        if "ALM_BOOZER_THRESHOLD" in os.environ
+        else DEFAULT_ALM_BOOZER_THRESHOLD,
         help="thresholded_physics-mode upper bound for the Boozer residual objective.",
     )
     parser.add_argument(
         "--alm-iota-penalty-threshold",
         type=float,
-        default=(
-            float(os.environ["ALM_IOTA_PENALTY_THRESHOLD"])
-            if "ALM_IOTA_PENALTY_THRESHOLD" in os.environ
-            else None
-        ),
+        default=float(os.environ["ALM_IOTA_PENALTY_THRESHOLD"])
+        if "ALM_IOTA_PENALTY_THRESHOLD" in os.environ
+        else DEFAULT_ALM_IOTA_PENALTY_THRESHOLD,
         help=(
             "thresholded_physics-mode upper bound T for the Jiota penalty objective. "
             "Units: squared-penalty units, NOT iota deviation. The actual constraint "
@@ -1426,18 +1436,17 @@ def parse_args():
     parser.add_argument(
         "--alm-length-penalty-threshold",
         type=float,
-        default=(
-            float(os.environ["ALM_LENGTH_PENALTY_THRESHOLD"])
-            if "ALM_LENGTH_PENALTY_THRESHOLD" in os.environ
-            else None
-        ),
+        default=float(os.environ["ALM_LENGTH_PENALTY_THRESHOLD"])
+        if "ALM_LENGTH_PENALTY_THRESHOLD" in os.environ
+        else DEFAULT_ALM_LENGTH_PENALTY_THRESHOLD,
         help=(
             "thresholded_physics-mode upper bound T for the single-stage coil-length "
             "penalty objective JCurveLength. Units: squared-penalty units, NOT a length "
             "deviation in meters. The actual constraint is "
             "0.5*max(L - L_target, 0)**2 <= T, with JCurveLength built as "
             "QuadraticPenalty(curvelength, length_target, f='max') so only one-sided "
-            "overshoot (L > L_target) contributes; underruns produce zero penalty. "
+            "overshoot (L > L_target) contributes; the separate coil_length_min ALM "
+            "hardware constraint handles underrun collapse. "
             "No length_weight factor enters this ALM constraint: --length-weight is the "
             "soft-objective scalarization weight in non-ALM modes and does NOT enter "
             "here. To target a desired overshoot d in meters, set T = 0.5 * d**2 "
@@ -3061,6 +3070,7 @@ def single_stage_alm_constraint_names(
     available_names = {
         "coil_coil_spacing",
         "coil_surface_spacing",
+        "coil_length_min",
         "max_curvature",
         "poloidal_extent",
         "width_min",
@@ -3793,6 +3803,11 @@ def build_single_stage_objective_bundle(
         IOTAS_WEIGHT=IOTAS_WEIGHT,
     )
     JCurveLength = QuadraticPenalty(curvelength, length_target, "max")
+    JCurveLengthMin = QuadraticPenalty(
+        curvelength,
+        COIL_LENGTH_MIN_FRACTION * length_target,
+        "min",
+    )
     JCurveCurve = CurveCurveDistance(curves, CC_DIST)
     JCurveSurface = CurveSurfaceDistance(curves, outer_surface, CS_DIST)
     JSurfSurf = (
@@ -3800,7 +3815,11 @@ def build_single_stage_objective_bundle(
         if len(surface_data) == 1 and vessel_surface is not None
         else None
     )
-    JCurvature = LpCurveCurvature(banana_curves[0], 2, CURVATURE_THRESHOLD)
+    JCurvature = LpCurveCurvature(
+        banana_curves[0],
+        CURVATURE_P_NORM,
+        CURVATURE_THRESHOLD,
+    )
     JPoloidalExtent = PoloidalExtent(
         banana_curves[0],
         VACUUM_VESSEL_MAJOR_RADIUS_M,
@@ -3835,6 +3854,7 @@ def build_single_stage_objective_bundle(
         SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
         JSurfSurf=JSurfSurf,
         JPoloidalExtent=JPoloidalExtent,
+        JCurveLengthMin=JCurveLengthMin,
     )
     return {
         "surface_iota_terms": surface_iota_terms,
@@ -3857,6 +3877,7 @@ def build_single_stage_objective_bundle(
         "effective_volume_weight": goal_objective_terms["effective_volume_weight"],
         "frontier_goal_config": frontier_goal_config,
         "JCurveLength": JCurveLength,
+        "JCurveLengthMin": JCurveLengthMin,
         "JCurveCurve": JCurveCurve,
         "JCurveSurface": JCurveSurface,
         "JSurfSurf": JSurfSurf,
@@ -3885,6 +3906,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global EFFECTIVE_VOLUME_WEIGHT
     global FRONTIER_GOAL_CONFIG
     global JCurveLength
+    global JCurveLengthMin
     global JCurveCurve
     global JCurveSurface
     global JSurfSurf
@@ -3910,6 +3932,7 @@ def apply_single_stage_objective_bundle(objective_bundle):
     EFFECTIVE_VOLUME_WEIGHT = objective_bundle["effective_volume_weight"]
     FRONTIER_GOAL_CONFIG = objective_bundle["frontier_goal_config"]
     JCurveLength = objective_bundle["JCurveLength"]
+    JCurveLengthMin = objective_bundle["JCurveLengthMin"]
     JCurveCurve = objective_bundle["JCurveCurve"]
     JCurveSurface = objective_bundle["JCurveSurface"]
     JSurfSurf = objective_bundle["JSurfSurf"]
@@ -4219,6 +4242,7 @@ def evaluate_total_objective(
     SURF_DIST_WEIGHT=0.0,
     JPoloidalExtent=None,
     include_diagnostics=True,
+    JCurveLengthMin=None,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
     return apply_frontier_scalarization_override(
@@ -4247,6 +4271,7 @@ def evaluate_total_objective(
             include_diagnostics=include_diagnostics,
             POLOIDAL_EXTENT_WEIGHT=POLOIDAL_EXTENT_WEIGHT,
             JPoloidalExtent=JPoloidalExtent,
+            JCurveLengthMin=JCurveLengthMin,
         ),
         alm_formulation="weighted_sum",
     )
@@ -4263,6 +4288,7 @@ def evaluate_base_objective(
     LENGTH_WEIGHT,
     *,
     include_diagnostics=True,
+    JCurveLengthMin=None,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
     return _evaluate_base_objective_impl(
@@ -4282,6 +4308,7 @@ def evaluate_base_objective(
         JNonQSObjective=objective_terms["JNonQSObjective"],
         JBoozerObjective=objective_terms["JBoozerObjective"],
         include_diagnostics=include_diagnostics,
+        JCurveLengthMin=JCurveLengthMin,
     )
 
 
@@ -4304,6 +4331,7 @@ def evaluate_alm_objective(
     JCoilWidth=None,
     JCurveSelfIntersect=None,
     include_diagnostics=True,
+    JCurveLengthMin=None,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
     distance_smoothing, curvature_smoothing = current_alm_smoothing()
@@ -4372,6 +4400,7 @@ def evaluate_alm_objective(
             length_penalty_threshold=args.alm_length_penalty_threshold,
             coil_length_objective=curvelength,
             coil_length_threshold=length_target,
+            coil_length_min_threshold=COIL_LENGTH_MIN_FRACTION * length_target,
             banana_current=current_single_stage_alm_banana_current(),
             banana_currents=current_single_stage_alm_banana_currents(),
             banana_current_threshold=args.banana_current_max_A,
@@ -4389,6 +4418,7 @@ def evaluate_alm_objective(
             JNonQSObjective=objective_terms["JNonQSObjective"],
             JBoozerObjective=objective_terms["JBoozerObjective"],
             include_diagnostics=include_diagnostics,
+            JCurveLengthMin=JCurveLengthMin,
         ),
         alm_formulation=args.alm_formulation,
     )
@@ -4418,6 +4448,7 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
                 JCoilWidth=JCoilWidth,
                 JCurveSelfIntersect=JCurveSelfIntersect,
                 include_diagnostics=include_diagnostics,
+                JCurveLengthMin=JCurveLengthMin,
             )
         )
     return annotate_frontier_search_eval(
@@ -4440,6 +4471,7 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
             SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
             JPoloidalExtent=JPoloidalExtent,
             include_diagnostics=include_diagnostics,
+            JCurveLengthMin=JCurveLengthMin,
         )
     )
 
@@ -9600,6 +9632,7 @@ if __name__ == "__main__":
             IOTAS_WEIGHT,
             JCurveLength,
             LENGTH_WEIGHT,
+            JCurveLengthMin=JCurveLengthMin,
         )
 
         # Save optimized coil configurations

@@ -71,6 +71,7 @@ def build_total_objective(
     JSurfSurf=None,
     POLOIDAL_EXTENT_WEIGHT=0.0,
     JPoloidalExtent=None,
+    JCurveLengthMin=None,
 ):
     objective = (
         JnonQSRatio
@@ -87,6 +88,8 @@ def build_total_objective(
         objective = objective + SURF_DIST_WEIGHT * JSurfSurf
     if JPoloidalExtent is not None:
         objective = objective + POLOIDAL_EXTENT_WEIGHT * JPoloidalExtent
+    if JCurveLengthMin is not None:
+        objective = objective + LENGTH_WEIGHT * JCurveLengthMin
     return objective
 
 
@@ -122,6 +125,22 @@ def _objective_upper_bound_constraint(objective, threshold, objective_optimizabl
     signed_value = float(objective.J()) - float(threshold)
     grad = _objective_gradient(objective, objective_optimizable)
     return signed_value, grad, _positive_violation(signed_value)
+
+
+def _objective_lower_bound_constraint(objective, threshold, objective_optimizable):
+    signed_value = float(threshold) - float(objective.J())
+    grad = -_objective_gradient(objective, objective_optimizable)
+    return signed_value, grad, _positive_violation(signed_value)
+
+
+def _optional_objective_value_and_gradient(
+    objective,
+    reference_grad,
+    objective_optimizable,
+):
+    if objective is None:
+        return 0.0, np.zeros_like(reference_grad)
+    return float(objective.J()), _objective_gradient(objective, objective_optimizable)
 
 
 def _scalar_abs_upper_bound_constraint(optimizable, threshold, objective_optimizable):
@@ -286,6 +305,7 @@ def evaluate_total_objective(
     include_diagnostics=True,
     POLOIDAL_EXTENT_WEIGHT=0.0,
     JPoloidalExtent=None,
+    JCurveLengthMin=None,
 ):
     (
         raw_J_QS_obj,
@@ -319,6 +339,7 @@ def evaluate_total_objective(
         JSurfSurf=JSurfSurf,
         POLOIDAL_EXTENT_WEIGHT=POLOIDAL_EXTENT_WEIGHT,
         JPoloidalExtent=JPoloidalExtent,
+        JCurveLengthMin=JCurveLengthMin,
     )
     total_grad = _objective_gradient(total_objective, objective_optimizable)
     constraint_names, constraint_values = _penalty_search_constraint_payload(
@@ -345,6 +366,11 @@ def evaluate_total_objective(
         if JVolume is None
         else _objective_gradient(JVolume, objective_optimizable)
     )
+    length_min_value, length_min_grad = _optional_objective_value_and_gradient(
+        JCurveLengthMin,
+        total_grad,
+        objective_optimizable,
+    )
     evaluation.update({
         "diagnostics_included": True,
         "J_QS": float(raw_J_QS_obj.J()),
@@ -367,6 +393,8 @@ def evaluate_total_objective(
         "dJ_volume": volume_grad,
         "J_len": float(JCurveLength.J()),
         "dJ_len": _objective_gradient(JCurveLength, objective_optimizable),
+        "J_len_min": length_min_value,
+        "dJ_len_min": length_min_grad,
         "J_cc": float(JCurveCurve.J()),
         "dJ_cc": _objective_gradient(JCurveCurve, objective_optimizable),
         "J_cs": float(JCurveSurface.J()),
@@ -409,6 +437,7 @@ def evaluate_base_objective(
     JNonQSObjective=None,
     JBoozerObjective=None,
     include_diagnostics=True,
+    JCurveLengthMin=None,
 ):
     if _surface_pair is not None:
         raw_J_QS_obj, raw_J_Boozer_obj = _surface_pair
@@ -422,6 +451,8 @@ def evaluate_base_objective(
         + IOTAS_WEIGHT * Jiota
         + LENGTH_WEIGHT * JCurveLength
     )
+    if JCurveLengthMin is not None:
+        base_objective = base_objective + LENGTH_WEIGHT * JCurveLengthMin
     if JVolume is not None:
         base_objective = base_objective + VOLUME_WEIGHT * JVolume
     physics_total = float(base_objective.J())
@@ -449,6 +480,11 @@ def evaluate_base_objective(
         if JVolume is None
         else _objective_gradient(JVolume, objective_optimizable)
     )
+    length_min_value, length_min_grad = _optional_objective_value_and_gradient(
+        JCurveLengthMin,
+        base_grad,
+        objective_optimizable,
+    )
     evaluation.update({
         "diagnostics_included": True,
         "J_QS": float(raw_J_QS_obj.J()),
@@ -465,6 +501,8 @@ def evaluate_base_objective(
         "dJ_volume": volume_grad,
         "J_len": float(JCurveLength.J()),
         "dJ_len": _objective_gradient(JCurveLength, objective_optimizable),
+        "J_len_min": length_min_value,
+        "dJ_len_min": length_min_grad,
     })
     return annotate_search_evaluation_finiteness(evaluation)
 
@@ -477,6 +515,7 @@ def _single_stage_hardware_threshold_overrides(
     surface_surface_min_distance=0.0,
     surface_stack_min_distance=0.0,
     coil_length_threshold=None,
+    coil_length_min_threshold=None,
     banana_current_threshold=None,
     poloidal_extent_threshold=None,
     width_min_threshold=None,
@@ -490,6 +529,7 @@ def _single_stage_hardware_threshold_overrides(
             ("surface_vessel_spacing", surface_surface_min_distance),
             ("surface_surface_spacing", surface_stack_min_distance),
             ("coil_length", coil_length_threshold),
+            ("coil_length_min", coil_length_min_threshold),
             ("banana_current", banana_current_threshold),
             ("poloidal_extent", poloidal_extent_threshold),
             ("width_min", width_min_threshold),
@@ -537,6 +577,7 @@ def _single_stage_alm_constraint_metadata(
     metadata_by_name: dict[str, ALMConstraintMetadata] = {}
     exact_hardware_names = {
         "coil_length_upper_bound",
+        "coil_length_min",
         "banana_current_upper_bound",
         "width_min",
         "width_max",
@@ -554,6 +595,7 @@ def _single_stage_alm_constraint_metadata(
         "surface_vessel_spacing",
         "surface_surface_spacing",
         "max_curvature",
+        "coil_length_min",
         "poloidal_extent",
         "width_min",
         "width_max",
@@ -666,6 +708,7 @@ def evaluate_alm_objective(
     length_penalty_threshold=0.0,
     coil_length_objective=None,
     coil_length_threshold=None,
+    coil_length_min_threshold=None,
     banana_current=None,
     banana_currents=None,
     banana_current_threshold=None,
@@ -681,6 +724,7 @@ def evaluate_alm_objective(
     JNonQSObjective=None,
     JBoozerObjective=None,
     include_diagnostics=True,
+    JCurveLengthMin=None,
 ):
     raw_surface_pair = _surface_objective_pair(surface_weights, nonQSs, brs)
     raw_J_QS_obj, raw_J_Boozer_obj = raw_surface_pair
@@ -701,6 +745,7 @@ def evaluate_alm_objective(
         JNonQSObjective=JNonQSObjective,
         JBoozerObjective=JBoozerObjective,
         include_diagnostics=include_diagnostics,
+        JCurveLengthMin=JCurveLengthMin,
     )
 
     (
@@ -805,6 +850,12 @@ def evaluate_alm_objective(
         hardware_constraints["coil_length_upper_bound"] = _objective_upper_bound_constraint(
             coil_length_objective,
             coil_length_threshold,
+            objective_optimizable,
+        )
+    if coil_length_objective is not None and coil_length_min_threshold is not None:
+        hardware_constraints["coil_length_min"] = _objective_lower_bound_constraint(
+            coil_length_objective,
+            coil_length_min_threshold,
             objective_optimizable,
         )
     if banana_current is not None and banana_current_threshold is not None:
@@ -1027,6 +1078,7 @@ def evaluate_alm_objective(
         surface_surface_min_distance=surface_surface_min_distance,
         surface_stack_min_distance=surface_stack_min_distance,
         coil_length_threshold=coil_length_threshold,
+        coil_length_min_threshold=coil_length_min_threshold,
         banana_current_threshold=banana_current_threshold,
         poloidal_extent_threshold=poloidal_extent_threshold,
         width_min_threshold=width_min_threshold,
@@ -1056,6 +1108,7 @@ def evaluate_alm_objective(
         metadata_name = _banana_current_alm_metadata_name(constraint_name)
         if metadata_name in {
             "coil_length_upper_bound",
+            "coil_length_min",
             "banana_current_upper_bound",
             "poloidal_extent",
             "width_min",
@@ -1202,6 +1255,12 @@ def evaluate_alm_objective(
                 coil_length_spec.threshold
                 if coil_length_threshold is None
                 else float(coil_length_threshold)
+            )
+            coil_length_min_spec = get_hardware_constraint_spec("coil_length_min")
+            base_eval["coil_length_min_threshold"] = (
+                coil_length_min_spec.threshold
+                if coil_length_min_threshold is None
+                else float(coil_length_min_threshold)
             )
         if banana_current_threshold is not None:
             base_eval["banana_current_upper_bound_threshold"] = float(

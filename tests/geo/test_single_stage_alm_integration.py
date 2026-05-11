@@ -358,7 +358,7 @@ def make_single_stage_thresholded_physics_rerun_args(**overrides):
         "alm_distance_smoothing": 0.005,
         "alm_curvature_smoothing": 0.05,
         "alm_qs_threshold": 3e-3,
-        "alm_boozer_threshold": 1e-2,
+        "alm_boozer_threshold": 1e-4,
         "alm_iota_penalty_threshold": 1e-4,
         "alm_length_penalty_threshold": 1e-4,
     }
@@ -413,6 +413,10 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "DEFAULT_HARDWARE_SEARCH_SOFT_ITERATIONS": 0,
             "DEFAULT_CURVATURE_TRAVERSAL_BAND": 0.0,
             "DEFAULT_CURVATURE_TRAVERSAL_EVAL_BUDGET": 0,
+            "DEFAULT_ALM_QS_THRESHOLD": 3.0e-3,
+            "DEFAULT_ALM_BOOZER_THRESHOLD": 1.0e-4,
+            "DEFAULT_ALM_IOTA_PENALTY_THRESHOLD": 1.0e-4,
+            "DEFAULT_ALM_LENGTH_PENALTY_THRESHOLD": 1.0e-4,
             "DEFAULT_LBFGSB_MAXCOR": 40,
             "DEFAULT_INNER_SURFACE_RATIO": 0.8,
             "DEFAULT_STAGE2_SEEDS_BY_PLASMA": {},
@@ -697,6 +701,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "surface_surface_spacing",
                 "max_curvature",
                 "coil_length",
+                "coil_length_min",
                 "poloidal_extent",
                 "width_min",
                 "width_max",
@@ -708,6 +713,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             },
         )
         self.assertEqual(specs["coil_length"].applies_to, frozenset({"alm", "artifact"}))
+        self.assertEqual(specs["coil_length_min"].applies_to, frozenset({"alm"}))
+        self.assertEqual(specs["coil_length_min"].kind, "lower_bound")
         self.assertEqual(
             specs["poloidal_extent"].applies_to,
             frozenset({"penalty", "alm", "artifact"}),
@@ -1000,6 +1007,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "surface_vessel_spacing",
                 "max_curvature",
                 "coil_length_upper_bound",
+                "coil_length_min",
                 "poloidal_extent",
                 "width_min",
                 "width_max",
@@ -1016,6 +1024,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIn("width_min", stacked_constraint_names)
         self.assertIn("width_max", stacked_constraint_names)
         self.assertIn("self_intersect", stacked_constraint_names)
+        self.assertIn("coil_length_min", stacked_constraint_names)
         self.assertNotIn("coil_length_upper_bound", stacked_constraint_names)
         self.assertIn("length_penalty", stacked_constraint_names)
 
@@ -2234,6 +2243,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(args.cs_dist, 0.015)
         self.assertEqual(args.curvature_threshold, 100.0)
         self.assertEqual(args.single_stage_banana_current_mode, "shared")
+        self.assertEqual(args.alm_boozer_threshold, 1.0e-4)
 
     def test_default_alm_length_penalty_threshold_passes_validator(self):
         """Regression: default length-penalty threshold must satisfy require_positive_alm_threshold.

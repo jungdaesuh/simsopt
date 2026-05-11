@@ -2803,6 +2803,34 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(weighted_avg.J(), (0.5 * 2.0 + 6.0) / 1.5)
         np.testing.assert_allclose(weighted_avg.dJ(), [10.0 / 3.0, 4.0 / 3.0])
 
+    def test_evaluate_total_objective_includes_length_floor_penalty(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        length_max = _FakeAlgebraicObjective(1.0, [0.1, 0.2])
+        length_min = _FakeAlgebraicObjective(2.0, [0.3, 0.4])
+
+        result = self.module.evaluate_total_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JCurveLength=length_max,
+            LENGTH_WEIGHT=5.0,
+            JCurveCurve=zero,
+            CC_WEIGHT=0.0,
+            JCurveSurface=zero,
+            CS_WEIGHT=0.0,
+            JCurvature=zero,
+            CURVATURE_WEIGHT=0.0,
+            JCurveLengthMin=length_min,
+        )
+
+        self.assertAlmostEqual(result["total"], 15.0)
+        self.assertAlmostEqual(result["J_len"], 1.0)
+        self.assertAlmostEqual(result["J_len_min"], 2.0)
+        np.testing.assert_allclose(result["grad"], [2.0, 3.0])
+
     def test_evaluate_total_objective_preserves_component_breakdown(self):
         nonqs = [
             _FakeAlgebraicObjective(2.0, [2.0, 0.0]),
@@ -3952,6 +3980,73 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         )
 
         np.testing.assert_allclose(result["grad"], [9.0, -2.0, 0.0, 0.0])
+
+    def test_evaluate_alm_objective_enforces_coil_length_floor_constraint(self):
+        objective = SimpleNamespace(name="full")
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0], [0.0, 0.0, 0.0, 0.0])
+        raw_length = _FakeAlgebraicObjective(
+            0.8,
+            [0.2, -0.1],
+            [0.2, -0.1, 0.0, 0.0],
+        )
+
+        result = self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            JCurveSurface=zero,
+            JCurvature=zero,
+            multipliers=np.array([0.0]),
+            penalty=1.0,
+            objective_optimizable=objective,
+            curves=["curve_a"],
+            curve_curve_min_distance=0.05,
+            outer_surface="outer",
+            curve_surface_min_distance=0.02,
+            banana_curve="banana",
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=("coil_length_min",),
+            curve_curve_constraint_fn=lambda *_args: (
+                0.0,
+                np.array([0.0, 0.0, 0.0, 0.0]),
+                0.0,
+            ),
+            curve_surface_constraint_fn=lambda *_args: (
+                0.0,
+                np.array([0.0, 0.0, 0.0, 0.0]),
+                0.0,
+            ),
+            curvature_constraint_fn=lambda *_args: (
+                0.0,
+                np.array([0.0, 0.0, 0.0, 0.0]),
+                0.0,
+            ),
+            activity_tolerances_fn=lambda ds, cs, include_surface_surface, include_surface_stack=False: np.array(
+                [ds, ds, cs],
+                dtype=float,
+            ),
+            coil_length_objective=raw_length,
+            coil_length_min_threshold=0.95,
+        )
+
+        self.assertEqual(result["constraint_names"], ["coil_length_min"])
+        self.assertAlmostEqual(result["coil_length_min_threshold"], 0.95)
+        np.testing.assert_allclose(result["raw_constraint_values"], [0.15])
+        np.testing.assert_allclose(result["raw_feasibility_values"], [0.15])
+        np.testing.assert_allclose(
+            result["raw_constraint_grads"][0],
+            [-0.2, 0.1, 0.0, 0.0],
+        )
 
     def test_evaluate_alm_objective_thresholded_physics_formulation_promotes_physics_terms_to_constraints(
         self,

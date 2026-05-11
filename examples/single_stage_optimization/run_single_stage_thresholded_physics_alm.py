@@ -43,7 +43,7 @@ DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_single_stage_thresholded_physics_alm
 DEFAULT_SUMMARY_JSON = "single_stage_thresholded_physics_alm_summary.json"
 DEFAULT_HARDWARE_SEARCH_MODE = "warn"
 DEFAULT_ALM_QS_THRESHOLD = 3.0e-3
-DEFAULT_ALM_BOOZER_THRESHOLD = 1.0e-2
+DEFAULT_ALM_BOOZER_THRESHOLD = 1.0e-4
 DEFAULT_ALM_IOTA_PENALTY_THRESHOLD = 1.0e-4
 # Length-penalty threshold T in squared-penalty units; constraint is
 # 0.5*max(L - L_target, 0)**2 <= T. With T=1e-4, allowable overshoot is
