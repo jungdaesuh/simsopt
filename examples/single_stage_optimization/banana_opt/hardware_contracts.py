@@ -21,9 +21,12 @@ VACUUM_VESSEL_MAJOR_RADIUS_M = 0.976
 VACUUM_VESSEL_MINOR_RADIUS_M = 0.222
 BANANA_WINDING_SURFACE_MAJOR_RADIUS_M = VACUUM_VESSEL_MAJOR_RADIUS_M
 BANANA_WINDING_MINOR_RADIUS_M = 0.21
-# Active banana port-fit bounds. The 0.17 m max is the hardware-contract value
-# inherited from the external driver; do not widen it to a nominal 0.30 m port
-# example without revising the physical clearance budget.
+# Port-fit bounds on ProjectedEllipseWidth.J() (short-axis diameter of the
+# best-fit ellipse to the coil curve projected onto the winding surface).
+# Max 0.17 m is the bare-curve allowance for a 0.30 m port aperture; the
+# remaining ~0.13 m budgets coil pack, insulation, supports, and tolerance.
+# Min 0.05 m prevents the optimizer from collapsing the coil to a degenerate
+# zero-width shape.
 BANANA_WIDTH_MIN_M = 0.05
 BANANA_WIDTH_MAX_M = 0.17
 BANANA_SELF_INTERSECT_ALM_SCALE = 1.0
