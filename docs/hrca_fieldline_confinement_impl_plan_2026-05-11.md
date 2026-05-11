@@ -93,10 +93,9 @@ Per-seed objective:
 
 ```text
 J_seed(c) =
-    (1 / Phi_H) integral_0^Phi_H [
+    (1 / Phi_H) integral_phi0^(phi0 + Phi_H) [
         q_wall(x(phi; c))
       + radial_weight * q_radial(x(phi; c))
-      + bphi_weight * q_bphi(x(phi; c))
     ] dphi
 ```
 
@@ -113,7 +112,9 @@ Let `d_wall(x)` be smooth signed distance, positive inside the safe region.
 Use a non-saturating soft barrier:
 
 ```text
-q_wall(x) = softplus((margin - d_wall(x)) / distance_scale)^2
+z_wall(x) = (margin - d_wall(x)) / distance_scale
+softplus_eps(z) = eps * log(1 + exp(z / eps))
+q_wall(x) = softplus_eps(z_wall(x))^2
 ```
 
 Do not use a bounded sigmoid as the primary v0 loss. It can saturate and remove useful gradient when a line is already bad.
@@ -133,6 +134,7 @@ Do not derive `s_proxy` from discontinuous field-line classification or a live s
 Track `B_phi / |B|` along every trajectory.
 
 - [ ] Add a report-only `bphi_min_observed` metric in v0.
+- [ ] Keep `bphi_weight = 0` in v0; the wall/radial objective must not include `q_bphi` yet.
 - [ ] Add a smooth guard loss only after the report-only metric shows failures matter.
 - [ ] Hard-fail validation if `B_phi` approaches zero enough to make the phi-parametrized RHS ill-conditioned.
 
@@ -160,9 +162,11 @@ Do not add `src/simsopt/field/hrca_*` in v0. Keep the feature experimental and l
 ### Public Objective Class
 
 ```python
-class FieldlineConfinement:
+class FieldlineConfinement(Optimizable):
     """Experimental fixed-horizon differentiable field-line risk objective."""
 ```
+
+The optimizer-facing version must implement SIMSOPT-style `J()` and `dJ()` methods and register the field dependency through `Optimizable.__init__(..., depends_on=[field])` or an equivalent local wrapper. Diagnostic-only v0 code may use a plain helper class, but it must not be wired into objective arithmetic until this `Optimizable` contract exists.
 
 Initial constructor contract:
 
@@ -187,6 +191,15 @@ Return object:
 - [ ] SDF domain violation count
 - [ ] step size and horizon metadata
 - [ ] optional trajectory summary for debugging
+
+### Stateful Field Ownership
+
+SIMSOPT magnetic fields are stateful: `set_points(...)` determines the points used by `B()`, `dB_by_dX()`, and `B_vjp(...)`.
+
+- [ ] HRCA must either own a dedicated field object or save/restore field points around every evaluation.
+- [ ] HRCA must call `field.set_points(...)` immediately before every `B()`, `dB_by_dX()`, and `B_vjp(...)` batch.
+- [ ] HRCA diagnostics must not leave shared field objects with HRCA stage points installed.
+- [ ] Add a regression test proving another objective evaluated before/after HRCA sees its own points, not HRCA's cached points.
 
 ## Derivative Contract
 
@@ -339,6 +352,7 @@ Objective: implement `dJ()` for the exact discrete RK4 objective.
 - [ ] Implement reverse kernels for `f = [R B_R / B_phi, R B_Z / B_phi]`.
 - [ ] Implement reverse RK4 sweep.
 - [ ] Accumulate Cartesian magnetic-field cotangents at all RK stages.
+- [ ] Reset the field to the exact VJP stage-point batch before calling `field.B_vjp(vB)`.
 - [ ] Call `field.B_vjp(vB)` once per batch or per seed batch.
 - [ ] Return a derivative object compatible with SIMSOPT objective aggregation.
 - [ ] Add optional debug mode returning intermediate adjoint norms.
@@ -495,4 +509,3 @@ HRCA can move from diagnostic to low-weight auxiliary objective only after all a
 - [ ] Holdout seeds improve in a matched experiment.
 - [ ] No primary physics objective or engineering constraint degrades beyond predeclared tolerance.
 - [ ] Greene residue remains the primary topology-gradient implementation priority.
-
