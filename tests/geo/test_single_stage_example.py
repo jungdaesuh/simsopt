@@ -620,10 +620,6 @@ class SingleStageExampleTests(unittest.TestCase):
             _Iotas,
         ), patch.object(module, "NonQuasiSymmetricRatio", _NonQS), patch.object(
             module,
-            "BoozerResidual",
-            _Residual,
-        ), patch.object(
-            module,
             "RefinedBoozerResidual",
             _Residual,
         ), patch.object(
@@ -10360,6 +10356,21 @@ class CurrentBaselineContractTests(unittest.TestCase):
             -0.15,
         )
 
+    def test_flip_banana_banner_reports_effective_iota_target(self):
+        module = load_single_stage_example_module()
+
+        self.assertEqual(
+            module.format_flip_banana_banner(0.15, -0.15),
+            "[FLIP_BANANA] --flip-banana active: iota_target will be negated "
+            "(requested 0.15 -> effective -0.15; mirror banana convention).",
+        )
+
+    def test_single_stage_startup_prints_flip_banana_banner(self):
+        source = EXAMPLE_MODULE_PATH.read_text()
+
+        self.assertIn("print(format_flip_banana_banner(", source)
+        self.assertIn("flush=True", source)
+
     def test_single_stage_parse_args_accepts_independent_banana_current_mode(self):
         module = load_single_stage_example_module()
 
@@ -10463,6 +10474,9 @@ class CurrentBaselineContractTests(unittest.TestCase):
                     "max_curvature",
                     "coil_length_upper_bound",
                     "poloidal_extent",
+                    "width_min",
+                    "width_max",
+                    "self_intersect",
                     "banana_current_0_upper_bound",
                     "banana_current_1_upper_bound",
                 ],

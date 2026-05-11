@@ -1272,6 +1272,19 @@ def resolve_single_stage_iota_target_arg(args: object) -> float:
     return -iota_target if bool(getattr(args, "flip_banana", False)) else iota_target
 
 
+def format_flip_banana_banner(
+    requested_iota_target: float,
+    effective_iota_target: float,
+) -> str:
+    requested = float(requested_iota_target)
+    effective = float(effective_iota_target)
+    return (
+        "[FLIP_BANANA] --flip-banana active: iota_target will be negated "
+        f"(requested {requested:.6g} -> effective {effective:.6g}; "
+        "mirror banana convention)."
+    )
+
+
 def env_optional_int(name: str) -> int | None:
     value = os.environ.get(name)
     return None if value is None else int(value)

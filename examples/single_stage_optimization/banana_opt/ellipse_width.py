@@ -107,10 +107,11 @@ class ProjectedEllipseWidth(Optimizable):
 
     .. code-block:: python
 
+        from banana_opt.hardware_contracts import BANANA_WIDTH_MAX_M, BANANA_WIDTH_MIN_M
         from simsopt.objectives import QuadraticPenalty
         Jw = ProjectedEllipseWidth(curve, R_winding=0.976, a_winding=0.210)
-        Jmin = QuadraticPenalty(Jw, 0.05, "min")  # don't let it collapse
-        Jmax = QuadraticPenalty(Jw, 0.30, "max")  # fits through 30 cm port
+        Jmin = QuadraticPenalty(Jw, BANANA_WIDTH_MIN_M, "min")
+        Jmax = QuadraticPenalty(Jw, BANANA_WIDTH_MAX_M, "max")
 
     Parameters
     ----------

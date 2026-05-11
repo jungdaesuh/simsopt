@@ -36,6 +36,11 @@ POLOIDAL_EXTENT_PATH = EXAMPLES_ROOT / "banana_opt" / "poloidal_extent.py"
 ELLIPSE_WIDTH_PATH = EXAMPLES_ROOT / "banana_opt" / "ellipse_width.py"
 SELF_INTERSECT_PATH = EXAMPLES_ROOT / "banana_opt" / "self_intersect.py"
 TAYLOR_TEST_EPSILONS = (1.0e-3, 5.0e-4, 2.5e-4, 1.25e-4)
+MANUFACTURABILITY_ALM_CONSTRAINT_NAMES = (
+    "width_min",
+    "width_max",
+    "self_intersect",
+)
 
 sys.path.insert(0, str(EXAMPLES_ROOT))
 from alm_utils import ALM_SCHEMA_VERSION  # noqa: E402
@@ -372,6 +377,10 @@ def _constant_constraint_result_with_hard_signal(
         )
 
     return constraint
+
+
+def _zero_constraint_result_2d(*_args, **_kwargs):
+    return 0.0, np.zeros(2), 0.0
 
 
 class _FakeBiotSavart:
@@ -3153,7 +3162,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
             curvature_threshold=40.0,
             distance_smoothing=0.01,
             curvature_smoothing=0.05,
-            constraint_names=("width_min", "width_max", "self_intersect"),
+            constraint_names=MANUFACTURABILITY_ALM_CONSTRAINT_NAMES,
             curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
             curve_surface_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
             curvature_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
@@ -3170,7 +3179,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
 
         self.assertEqual(
             result["constraint_names"],
-            ["width_min", "width_max", "self_intersect"],
+            list(MANUFACTURABILITY_ALM_CONSTRAINT_NAMES),
         )
         np.testing.assert_allclose(result["constraint_scales"], [0.05, 0.17, 1.0])
         np.testing.assert_allclose(result["raw_thresholds"], [0.05, 0.17, 0.0])
@@ -3180,6 +3189,84 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["objective_value_kinds"], ["hard", "hard", "hard"])
         self.assertEqual(result["gradient_value_kinds"], ["hard", "hard", "hard"])
         self.assertEqual(result["dual_update_value_kinds"], ["hard", "hard", "hard"])
+
+    def test_evaluate_alm_objective_accepts_real_width_and_self_intersect_objectives(self):
+        ellipse_module = _load_module(ELLIPSE_WIDTH_PATH, "banana_ellipse_width_real")
+        self_intersect_module = _load_module(
+            SELF_INTERSECT_PATH,
+            "banana_self_intersect_real",
+        )
+        curve = _manufacturability_test_curve()
+        coil_width = ellipse_module.ProjectedEllipseWidth(
+            curve,
+            0.976,
+            0.210,
+        )
+        self_intersect = self_intersect_module.CurveSelfIntersect(
+            curve,
+            0.20,
+            neighbor_skip=1,
+        )
+        width_value = coil_width.J()
+        self_intersect_value = self_intersect.J()
+        self.assertGreater(width_value, 0.0)
+        self.assertGreater(self_intersect_value, 0.0)
+        width_violation = 0.01
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+
+        result = self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            JCurveSurface=zero,
+            JCurvature=zero,
+            multipliers=np.array([0.0, 0.0, 0.0]),
+            penalty=1.0,
+            objective_optimizable=curve,
+            curves=[curve],
+            curve_curve_min_distance=0.05,
+            outer_surface=object(),
+            curve_surface_min_distance=0.02,
+            banana_curve=curve,
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=MANUFACTURABILITY_ALM_CONSTRAINT_NAMES,
+            curve_curve_constraint_fn=_zero_constraint_result_2d,
+            curve_surface_constraint_fn=_zero_constraint_result_2d,
+            curvature_constraint_fn=_zero_constraint_result_2d,
+            activity_tolerances_fn=lambda *_args, **_kwargs: np.zeros(3),
+            JCoilWidth=coil_width,
+            width_min_threshold=width_value + width_violation,
+            width_max_threshold=width_value - width_violation,
+            JCurveSelfIntersect=self_intersect,
+        )
+
+        self.assertEqual(
+            result["constraint_names"],
+            list(MANUFACTURABILITY_ALM_CONSTRAINT_NAMES),
+        )
+        self.assertGreater(result["raw_constraint_values"][0], 0.0)
+        self.assertGreater(result["raw_constraint_values"][1], 0.0)
+        self.assertGreater(result["raw_constraint_values"][2], 0.0)
+        np.testing.assert_allclose(
+            result["raw_constraint_values"],
+            [width_violation, width_violation, self_intersect_value],
+            rtol=1.0e-10,
+            atol=1.0e-12,
+        )
+        for gradient in result["raw_constraint_grads"]:
+            self.assertEqual(gradient.shape, (2,))
+            self.assertTrue(np.all(np.isfinite(gradient)))
+        self.assertGreater(np.linalg.norm(result["raw_constraint_grads"][2]), 0.0)
 
     def test_evaluate_alm_objective_uses_hard_surface_stack_for_dual_signal(self):
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])

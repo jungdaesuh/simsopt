@@ -77,6 +77,7 @@ from workflow_helpers import (
     format_local_stage2_seed_dir_without_tf,
 )
 from workflow_runner_common import (
+    format_flip_banana_banner,
     load_stage2_artifact_results,
     json_dumps as _common_json_dumps,
     resolve_single_stage_iota_target_arg as resolve_single_stage_iota_target,
@@ -8087,6 +8088,9 @@ if __name__ == "__main__":
     # CONFIGURATION PARAMETERS
     # ==============================================================================
     args = apply_default_stage2_seed_args(parse_args())
+    iota_target = resolve_single_stage_iota_target(args)
+    if args.flip_banana:
+        print(format_flip_banana_banner(args.iota_target, iota_target), flush=True)
     if args.banana_current_fd_diagnostics:
         args.banana_current_diagnostics = True
     if args.banana_current_fd_relative_step_fraction <= 0.0:
@@ -8175,7 +8179,6 @@ if __name__ == "__main__":
     CONFINEMENT_SURROGATE_MEAN_WEIGHT = args.confinement_surrogate_mean_weight
     CONFINEMENT_SURROGATE_WORST_WEIGHT = args.confinement_surrogate_worst_weight
     CONFINEMENT_SURROGATE_EARLY_WEIGHT = args.confinement_surrogate_early_weight
-    iota_target = resolve_single_stage_iota_target(args)
     num_tf_coils = resolve_stage2_num_tf_coils(stage2_results, args.num_tf_coils)
     if not (0.0 <= args.inner_surface_initial_weight <= 1.0):
         raise ValueError("--inner-surface-initial-weight must be between 0 and 1")

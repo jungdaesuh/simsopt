@@ -723,7 +723,16 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(specs["self_intersect"].applies_to, frozenset({"alm"}))
         self.assertEqual(specs["self_intersect"].threshold, 0.0)
         self.assertEqual(specs["self_intersect"].alm_scale, 1.0)
+        self.assertIsNone(specs["self_intersect"].alm_block)
         self.assertTrue(specs["self_intersect"].allow_zero_threshold)
+        self.assertEqual(
+            schema_module.hardware_constraint_alm_block("self_intersect"),
+            "geometry",
+        )
+        self.assertEqual(
+            schema_module.hardware_constraint_alm_activity_tolerance("self_intersect"),
+            0.0,
+        )
         self.assertEqual(
             specs["banana_current"].applies_to,
             frozenset({"penalty", "alm", "artifact"}),

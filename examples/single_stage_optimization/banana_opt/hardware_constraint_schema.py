@@ -194,7 +194,9 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         applies_to=frozenset({"alm"}),
         traversal_policy="allowed",
         alm_scale=BANANA_SELF_INTERSECT_ALM_SCALE,
-        alm_block="geometry",
+        # Clean topology is exactly zero penalty. Traversal stays allowed so ALM
+        # can steer out of crossed designs, but any positive hinge value remains
+        # active with zero slack.
         allow_zero_threshold=True,
     ),
     HardwareConstraintSpec(
