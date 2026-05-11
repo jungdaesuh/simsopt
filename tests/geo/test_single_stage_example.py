@@ -1121,9 +1121,8 @@ class SingleStageExampleTests(unittest.TestCase):
         # BoozerResidual (now upstream/vacuum-only) equals RefinedBoozerResidual
         # at k=1. For finite I, RefinedBoozerResidual carries the iota*I*B
         # correction via the boozer_finite_current wrapper while standard
-        # BoozerResidual does not (the I-aware path moved to BoozerResidualFiniteI
-        # in banana_opt). The finite-I divergence is asserted in the wrapper-side
-        # tests in tests/geo/test_boozersurface.py.
+        # BoozerResidual does not. The finite-I divergence is asserted in the
+        # wrapper-side tests in tests/geo/test_boozersurface.py.
         module = self.load_module()
         residual_module = self.residual_module(module)
 

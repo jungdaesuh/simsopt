@@ -34,7 +34,9 @@ This is exactly ``T^T g`` for the (N x N) elementary transform
     T = I_N
     T[-1, -2] = I              # (last_row=G, second_to_last_col=iota)
 
-and similarly ``H_true = T^T H_alpha T`` for Hessians.
+and similarly ``H_true = T^T H_alpha T`` for Hessians.  ``T`` is identity plus
+a single off-diagonal scalar, so every transform reduces to a rank-one update
+``out[..., -2] += I * tensor[..., -1]`` and we never materialize ``T``.
 
 Design rationale
 ----------------
@@ -42,17 +44,14 @@ Design rationale
   clean copy of upstream simsopt so the fork can be rebased / cleanly merged.
 * No private helpers from ``src/`` are imported.  The wrapper depends only on
   the public upstream API: ``boozer_surface_residual``,
-  ``boozer_surface_residual_dB``, the ``BoozerSurface`` and ``BoozerResidual``
-  classes, and the ``simsoptpp`` upstream kernel signatures.
+  ``boozer_surface_residual_dB``, the ``BoozerSurface`` class, and the
+  ``simsoptpp`` upstream kernel signatures.
 * The four ``BoozerSurface`` numerical methods that *consume* ``alpha`` are
   overridden in :class:`BoozerSurfaceFiniteI` rather than monkey-patching: the
   upstream methods are transcribed verbatim, with the substitution
   ``G -> G + iota * self.I`` at the residual call site and the ``T^T g`` /
   ``T^T H T`` transform applied to gradients/Hessians where the upstream
   kernel returns derivatives in the alpha-fixed basis.
-* :class:`BoozerResidualFiniteI` reads ``self.boozer_surface.I`` and routes
-  through the I-aware ``boozer_surface_residual_dB_finite_I`` wrapper so that
-  ``J`` and ``dJ/dB`` are computed against the correct residual.
 """
 
 from functools import partial
@@ -64,58 +63,76 @@ import simsoptpp as sopp
 
 from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.geo.surfaceobjectives import (
-    BoozerResidual,
     boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
     boozer_surface_dlsqgrad_dcoils_vjp,
     boozer_surface_residual,
     boozer_surface_residual_dB,
 )
-from simsopt.objectives.utilities import forward_backward, forward_solve
+from simsopt.objectives.utilities import forward_solve
 
 __all__ = [
     "boozer_surface_residual_finite_I",
     "boozer_surface_residual_dB_finite_I",
     "BoozerSurfaceFiniteI",
-    "BoozerResidualFiniteI",
 ]
 
 
-# ---------------------------------------------------------------------------
-# Basis-transform helpers (moved from src/).  These convert derivative tensors
-# returned in the alpha-only basis (where alpha = G_eff is held fixed) into
-# the (iota, G; I-external) basis used by the optimizer.
-# ---------------------------------------------------------------------------
+_MU0_OVER_2PI = 4 * np.pi * 1e-7 / (2 * np.pi)
 
 
-def _explicit_current_transform(I, size):
-    """Elementary (size x size) transform mapping the alpha-fixed basis to
-    the (iota, G) basis when ``alpha = G + iota * I``.
-
-    The last two coordinates of the basis are assumed to be ``[..., iota, G]``;
-    ``size`` therefore must be at least 2.
+def _default_G_from_coils(biotsavart):
+    """Upstream default: ``G = sum(|coil currents|) * mu_0``.  Used when the
+    caller does not pass an explicit ``G``.
     """
-
-    transform = np.eye(size)
-    transform[-1, -2] = I
-    return transform
-
-
-def _alpha_only_to_explicit_current_gradient(I, gradient):
-    """Apply ``T^T`` to a gradient (1-D vector or 2-D Jacobian-row stack)."""
-
-    return _explicit_current_transform(I, gradient.shape[0]).T @ gradient
+    return (
+        2.0
+        * np.pi
+        * np.sum(np.abs([c.current.get_value() for c in biotsavart.coils]))
+        * _MU0_OVER_2PI
+    )
 
 
-def _alpha_only_to_explicit_current_hessian(I, hessian):
-    """Apply ``T^T H T`` to a Hessian (2-D matrix)."""
+def _to_explicit_current_basis(I_value, tensor):
+    """Apply ``T^T`` along the trailing basis axis: rank-one update
+    ``out[..., -2] += I_value * tensor[..., -1]``.
 
-    transform = _explicit_current_transform(I, hessian.shape[0])
-    return transform.T @ hessian @ transform
+    ``T = I_N + I_value * e_{-1} e_{-2}^T``.  ``T^T @ x`` (or, equivalently,
+    ``x @ T`` when the basis is on the trailing axis) is identity except for
+    a single shifted slice; we apply the rank-one update directly instead of
+    materializing ``T``.  Supports any shape with the basis on the last axis
+    (1-D vector, 2-D Jacobian rows, 3-D / 4-D mixed-derivative tensors).
+    """
+    if I_value == 0.0:
+        return tensor
+    out = tensor.copy()
+    out[..., -2] += I_value * tensor[..., -1]
+    return out
 
 
-# ---------------------------------------------------------------------------
-# Module-level (function-style) wrappers.
-# ---------------------------------------------------------------------------
+def _to_explicit_current_basis_hessian(I_value, hessian):
+    """Apply ``T^T H T`` along the trailing two axes: column update then row
+    update.  Supports a 2-D Hessian or a 3-D residual-stack ``(M, N, N)``.
+    """
+    if I_value == 0.0:
+        return hessian
+    out = hessian.copy()
+    out[..., -2] += I_value * hessian[..., -1]
+    out[..., -2, :] += I_value * out[..., -1, :]
+    return out
+
+
+def _T_apply_to_lm(I_value, lm):
+    """Apply ``T`` (the forward transform) to a Lagrange-multiplier vector:
+    ``out[-1] += I_value * lm[-2]``.
+
+    Used by the lsq adjoint via the identity
+    ``vjp(lm . J_new^T . r) = vjp((T @ lm) . J_upstream^T . r)``.
+    """
+    if I_value == 0.0:
+        return lm
+    out = lm.copy()
+    out[-1] += I_value * lm[-2]
+    return out
 
 
 def boozer_surface_residual_finite_I(
@@ -138,21 +155,13 @@ def boozer_surface_residual_finite_I(
 
     user_provided_G = G is not None
     if not user_provided_G:
-        # Same convention as upstream: deduce G from coil currents in the
-        # vacuum limit so the caller doesn't have to.
-        G = (
-            2.0
-            * np.pi
-            * np.sum(np.abs([c.current.get_value() for c in biotsavart.coils]))
-            * (4 * np.pi * 1e-7 / (2 * np.pi))
-        )
+        G = _default_G_from_coils(biotsavart)
 
     G_effective = G + iota * I
 
-    # Always pass G_effective (never None) to upstream so that the upstream
-    # kernel can populate the alpha-derivative column we need for the basis
-    # transform.  When the outer caller passed ``G=None`` we drop that column
-    # (and the corresponding Hessian row/col) from the returned tensors so
+    # Always pass G_effective (never None) so the upstream kernel populates
+    # the alpha-derivative column the basis transform needs.  When the outer
+    # caller passed G=None we drop that column from the returned tensors so
     # the upstream public contract is preserved.
     boozer = boozer_surface_residual(
         surface,
@@ -168,16 +177,14 @@ def boozer_surface_residual_finite_I(
 
     if derivatives == 1:
         r, J = boozer
-        # J is shape (num_residuals, nsurfdofs + 2): ..., iota, G_effective.
-        J_new = _alpha_only_to_explicit_current_gradient(I, J.T).T
+        J_new = _to_explicit_current_basis(I, J)
         if not user_provided_G:
             J_new = J_new[:, :-1]
         return r, J_new
 
     r, J, H = boozer
-    J_new = _alpha_only_to_explicit_current_gradient(I, J.T).T
-    transform = _explicit_current_transform(I, H.shape[1])
-    H_new = np.einsum("ji,kjl,lm->kim", transform, H, transform, optimize=True)
+    J_new = _to_explicit_current_basis(I, J)
+    H_new = _to_explicit_current_basis_hessian(I, H)
     if not user_provided_G:
         J_new = J_new[:, :-1]
         H_new = H_new[:, :-1, :-1]
@@ -204,12 +211,7 @@ def boozer_surface_residual_dB_finite_I(
 
     user_provided_G = G is not None
     if not user_provided_G:
-        G = (
-            2.0
-            * np.pi
-            * np.sum(np.abs([c.current.get_value() for c in biotsavart.coils]))
-            * (4 * np.pi * 1e-7 / (2 * np.pi))
-        )
+        G = _default_G_from_coils(biotsavart)
 
     G_effective = G + iota * I
 
@@ -224,55 +226,30 @@ def boozer_surface_residual_dB_finite_I(
     )
 
     if derivatives == 0:
-        # (rtil_flat, drtil_dB_flat); neither depends on the (iota, G) basis.
         return out
 
-    # derivatives == 1: structure depends on include_mixed_derivatives
     if include_mixed_derivatives:
         rtil, drtil_dB, J, d2_dsdB, d2_dsdgradB = out
-    else:
-        rtil, drtil_dB, J = out
-
-    # Always pre-transform; the upstream tensors are sized for G_effective
-    # (since we always pass it).  When the outer caller passed ``G=None`` we
-    # drop the trailing G column from every transformed tensor afterwards.
-    J_new = _alpha_only_to_explicit_current_gradient(I, J.T).T
-
-    if include_mixed_derivatives:
-        # d2r/dsdB has shape (num_components, 3, N) and d2r/dsdgradB has shape
-        # (num_components, 3, 3, N), with the surface-state basis on the
-        # trailing axis. Apply the elementary transform to that last axis.
-        transform = _explicit_current_transform(I, J_new.shape[1])
-        d2_dsdB_new = np.einsum("ijk,kl->ijl", d2_dsdB, transform, optimize=True)
-        d2_dsdgradB_new = np.einsum(
-            "ijkl,lm->ijkm", d2_dsdgradB, transform, optimize=True
-        )
+        J_new = _to_explicit_current_basis(I, J)
+        d2_dsdB_new = _to_explicit_current_basis(I, d2_dsdB)
+        d2_dsdgradB_new = _to_explicit_current_basis(I, d2_dsdgradB)
         if not user_provided_G:
             J_new = J_new[:, :-1]
             d2_dsdB_new = d2_dsdB_new[..., :-1]
             d2_dsdgradB_new = d2_dsdgradB_new[..., :-1]
         return rtil, drtil_dB, J_new, d2_dsdB_new, d2_dsdgradB_new
 
+    rtil, drtil_dB, J = out
+    J_new = _to_explicit_current_basis(I, J)
     if not user_provided_G:
         J_new = J_new[:, :-1]
     return rtil, drtil_dB, J_new
 
 
-# ---------------------------------------------------------------------------
-# Adjoint (vjp) wrappers.  The upstream vjp callbacks compute their internal
-# alpha as ``G`` and so silently drop the iota * I contribution.  We wrap them
-# to substitute G_effective = G + iota * I before delegating.
-# ---------------------------------------------------------------------------
-
-
 def _exact_vjp_finite_I(I_value, lm, booz_surf, iota, G):
     """``boozer_surface_dexactresidual_dcoils_dcurrents_vjp`` with the I
-    substitution applied via ``G -> G + iota * I``.
-
-    The upstream vjp uses ``alpha = G`` internally; passing ``G + iota * I``
-    yields the correct ``alpha`` for the finite-I residual.
+    substitution ``G -> G + iota * I`` applied to the upstream alpha-only vjp.
     """
-
     G_effective = G + iota * I_value
     return boozer_surface_dexactresidual_dcoils_dcurrents_vjp(
         lm, booz_surf, iota, G_effective
@@ -282,25 +259,18 @@ def _exact_vjp_finite_I(I_value, lm, booz_surf, iota, G):
 def _lsqgrad_vjp_finite_I(I_value, lm, booz_surf, iota, G, weight_inv_modB=True):
     """``boozer_surface_dlsqgrad_dcoils_vjp`` with the I substitution applied.
 
-    The upstream lsq adjoint computes ``vjp(lm @ J_upstream^T @ residual)``,
-    where ``J_upstream`` is the Jacobian in the alpha-only basis. We want
-    ``vjp(lm @ J_new^T @ residual)`` where ``J_new = J_upstream @ T`` is the
-    Jacobian in the explicit-current basis (T is the elementary transform).
+    The upstream lsq adjoint computes ``vjp(lm . J_upstream^T . residual)``,
+    where ``J_upstream`` is the Jacobian in the alpha-only basis.  We want
+    ``vjp(lm . J_new^T . residual)`` where ``J_new = J_upstream @ T``.
     Substituting: ``lm @ J_new^T @ r = lm @ T^T @ J_upstream^T @ r =
-    (T @ lm) @ J_upstream^T @ r``. So we pass ``T @ lm`` (not ``lm``) to the
-    upstream vjp, plus ``G_effective = G + iota * I`` for the residual.
+    (T @ lm) @ J_upstream^T @ r``.  So we pass ``T @ lm`` to the upstream vjp
+    plus ``G_effective = G + iota * I`` for the residual.
     """
     G_effective = G + iota * I_value
-    transform = _explicit_current_transform(I_value, np.asarray(lm).shape[0])
-    lm_upstream = transform @ lm
+    lm_upstream = _T_apply_to_lm(I_value, lm)
     return boozer_surface_dlsqgrad_dcoils_vjp(
         lm_upstream, booz_surf, iota, G_effective, weight_inv_modB=weight_inv_modB
     )
-
-
-# ---------------------------------------------------------------------------
-# BoozerSurface override that carries an enclosed current ``I``.
-# ---------------------------------------------------------------------------
 
 
 class BoozerSurfaceFiniteI(BoozerSurface):
@@ -335,13 +305,13 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         self.I = float(I)
 
     def _annotate_current(self, payload):
-        """Attach the enclosed-current value to a result dict in place and,
-        for LS-type solver outputs, replace the upstream alpha-only adjoint
-        VJP with the I-aware variant. The exact-Newton path already installs
-        an I-aware VJP via ``solve_residual_equation_exactly_newton``.
+        """Attach ``self.I`` to a result dict and, for LS-type results, swap
+        the upstream alpha-only adjoint vjp for the I-aware variant.  The
+        exact-Newton path installs the I-aware vjp directly inside
+        :meth:`solve_residual_equation_exactly_newton`; idempotent on re-runs.
         """
-        if not isinstance(payload, dict):
-            return payload
+        if payload is None:
+            return None
         payload["I"] = self.I
         if payload.get("type") == "ls":
             weight_inv_modB = payload.get("weight_inv_modB", True)
@@ -353,17 +323,9 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         return payload
 
     def run_code(self, iota, G=None):
-        result = super().run_code(iota, G=G)
-        # ``run_code`` returns either the inner solver's result dict or
-        # nothing (when ``need_to_run_code`` is already False).  In every
-        # case, propagate ``I`` (and patch the LS adjoint VJP if relevant)
-        # into ``self.res`` for downstream consumers.
-        self._annotate_current(self.res)
-        return self._annotate_current(result)
+        super().run_code(iota, G=G)
+        return self._annotate_current(self.res)
 
-    # ------------------------------------------------------------------
-    # boozer_penalty_constraints --- python (non-vectorized) version.
-    # ------------------------------------------------------------------
     def boozer_penalty_constraints(
         self,
         x,
@@ -460,9 +422,6 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         d2l = np.zeros((x.shape[0], x.shape[0]))
         d2l[:nsurfdofs, :nsurfdofs] = self.label.d2J_by_dsurfacecoefficientsdsurfacecoefficients()
 
-        # ``H`` is a (num_residuals, N, N) tensor.  We must aggregate it via
-        # ``sum(r * H, axis=0)`` *before* adding it to a 2-D matrix; trying to
-        # add the 3-D tensor directly would be a dimension mismatch.
         H_full = np.concatenate(
             (
                 H,
@@ -474,9 +433,6 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         d2val = J.T @ J + np.sum(r[:, None, None] * H_full, axis=0)
         return val, dval, d2val
 
-    # ------------------------------------------------------------------
-    # boozer_penalty_constraints_vectorized --- C++ kernel version.
-    # ------------------------------------------------------------------
     def boozer_penalty_constraints_vectorized(
         self,
         dofs,
@@ -487,10 +443,9 @@ class BoozerSurfaceFiniteI(BoozerSurface):
     ):
         """Vectorized finite-I implementation matching upstream behavior.
 
-        We call the upstream-only (post-revert) ``sopp.boozer_residual*``
-        kernels with ``alpha = G + iota * self.I``.  When derivatives are
-        requested, the kernel returns a gradient/Hessian in the alpha-fixed
-        basis which we transform into the (..., iota, G) basis here.
+        Calls the upstream-only ``sopp.boozer_residual*`` kernels with
+        ``alpha = G + iota * self.I``; the gradient/Hessian in the alpha-fixed
+        basis are then transformed into the (..., iota, G) basis here.
         """
 
         assert derivatives in [0, 1, 2]
@@ -501,19 +456,7 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         else:
             sdofs = dofs[:-1]
             iota = dofs[-1]
-            # Match upstream: derive G from coil currents using the
-            # underscore-prefixed ``_coils`` attribute (consistent with the
-            # upstream pattern at the same point in this method).
-            G = (
-                2.0
-                * np.pi
-                * np.sum(
-                    np.abs(
-                        [coil.current.get_value() for coil in self.biotsavart._coils]
-                    )
-                )
-                * (4 * np.pi * 1e-7 / (2 * np.pi))
-            )
+            G = _default_G_from_coils(self.biotsavart)
 
         s = self.surface
         nphi = s.quadpoints_phi.size
@@ -563,7 +506,7 @@ class BoozerSurfaceFiniteI(BoozerSurface):
                 dxtheta_dc,
                 weight_inv_modB,
             )
-            dval = _alpha_only_to_explicit_current_gradient(self.I, dval)
+            dval = _to_explicit_current_basis(self.I, dval)
             boozer = val, dval
         elif derivatives == 2:
             val, dval, d2val = sopp.boozer_residual_ds2(
@@ -579,8 +522,8 @@ class BoozerSurfaceFiniteI(BoozerSurface):
                 dxtheta_dc,
                 weight_inv_modB,
             )
-            dval = _alpha_only_to_explicit_current_gradient(self.I, dval)
-            d2val = _alpha_only_to_explicit_current_hessian(self.I, d2val)
+            dval = _to_explicit_current_basis(self.I, dval)
+            d2val = _to_explicit_current_basis_hessian(self.I, d2val)
             boozer = val, dval, d2val
 
         # normalizing the residuals here
@@ -630,9 +573,6 @@ class BoozerSurfaceFiniteI(BoozerSurface):
 
         return r, J, H
 
-    # ------------------------------------------------------------------
-    # boozer_exact_constraints --- Lagrange-multiplier formulation.
-    # ------------------------------------------------------------------
     def boozer_exact_constraints(self, xl, derivatives=0, optimize_G=True):
         r"""Finite-I version of :meth:`BoozerSurface.boozer_exact_constraints`."""
 
@@ -691,10 +631,6 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         dres[-1, :-2] = drz
         return res, dres
 
-    # ------------------------------------------------------------------
-    # solve_residual_equation_exactly_newton --- the Newton solver
-    # used by the BoozerExact path.
-    # ------------------------------------------------------------------
     def solve_residual_equation_exactly_newton(
         self, tol=1e-10, maxiter=10, iota=0.0, G=None, verbose=False
     ):
@@ -726,16 +662,7 @@ class BoozerSurfaceFiniteI(BoozerSurface):
 
         label = self.label
         if G is None:
-            G = (
-                2.0
-                * np.pi
-                * np.sum(
-                    np.abs(
-                        [c.current.get_value() for c in self.biotsavart.coils]
-                    )
-                )
-                * (4 * np.pi * 1e-7 / (2 * np.pi))
-            )
+            G = _default_G_from_coils(self.biotsavart)
         x = np.concatenate((s.get_dofs(), [iota, G]))
         i = 0
         r, J = boozer_surface_residual_finite_I(
@@ -826,179 +753,3 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         self.res = res
         self.need_to_run_code = False
         return res
-
-
-# ---------------------------------------------------------------------------
-# BoozerResidual override that respects the enclosed-current value carried by
-# its associated BoozerSurface.
-# ---------------------------------------------------------------------------
-
-
-class BoozerResidualFiniteI(BoozerResidual):
-    """A :class:`BoozerResidual` that reads ``self.boozer_surface.I`` and
-    evaluates the Boozer residual through :func:`boozer_surface_residual_dB_finite_I`.
-
-    The class structure (inputs, outputs, gradient assembly) is identical to
-    upstream; the only differences are the residual call site and the use of
-    the I-aware least-squares-vjp wrapper for the BoozerLS branch.
-    """
-
-    def _enclosed_current(self):
-        return float(getattr(self.boozer_surface, "I", 0.0))
-
-    def compute(self):
-        self.boozer_surface.run_code_from_last_solution()
-
-        self.surface.set_dofs(self.in_surface.get_dofs())
-
-        nphi = self.surface.quadpoints_phi.size
-        ntheta = self.surface.quadpoints_theta.size
-        num_points = 3 * nphi * ntheta
-        sqrt_num_points = np.sqrt(num_points)
-
-        surface = self.surface
-        booz_surf = self.boozer_surface
-        iota = booz_surf.res["iota"]
-        G = booz_surf.res["G"]
-        I_value = self._enclosed_current()
-        weight_inv_modB = booz_surf.res["weight_inv_modB"]
-        if booz_surf.res["type"] == "ls":
-            r, r_dB, J, d2r_dsdB, d2r_dsdgradB = boozer_surface_residual_dB_finite_I(
-                surface,
-                iota,
-                G,
-                self.biotsavart,
-                derivatives=1,
-                weight_inv_modB=weight_inv_modB,
-                I=I_value,
-            )
-        else:
-            r, r_dB, J = boozer_surface_residual_dB_finite_I(
-                surface,
-                iota,
-                G,
-                self.biotsavart,
-                derivatives=1,
-                weight_inv_modB=weight_inv_modB,
-                I=I_value,
-                include_mixed_derivatives=False,
-            )
-        constraint_scale = np.sqrt(self.constraint_weight)
-        label_residual = self.boozer_surface.label.J() - self.boozer_surface.targetlabel
-        rtil = np.concatenate((r / sqrt_num_points, [constraint_scale * label_residual]))
-        self._J = 0.5 * np.sum(rtil ** 2)
-
-        P, L, U = booz_surf.res["PLU"]
-
-        dJ_by_dB = self._scaled_dJ_by_dB(r, r_dB, sqrt_num_points)
-        dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
-
-        dl = np.zeros((J.shape[1],))
-        dlabel_dsurface = self.boozer_surface.label.dJ_by_dsurfacecoefficients()
-        dl[: dlabel_dsurface.size] = dlabel_dsurface
-        Jtil = np.concatenate(
-            (J / sqrt_num_points, constraint_scale * dl[None, :]), axis=0
-        )
-        dJ_ds = Jtil.T @ rtil
-
-        adj = forward_backward(P, L, U, dJ_ds)
-
-        if booz_surf.res["type"] == "ls":
-            adj_times_dg_dcoil = self._lsq_vjp_finite_I(
-                adj,
-                booz_surf,
-                iota,
-                G,
-                I_value,
-                weight_inv_modB,
-                r,
-                r_dB,
-                J,
-                d2r_dsdB,
-                d2r_dsdgradB,
-                sqrt_num_points,
-            )
-        else:
-            adj_times_dg_dcoil = booz_surf.res["vjp"](adj, booz_surf, iota, G)
-        self._dJ = dJ_by_dcoils - adj_times_dg_dcoil
-
-    def dJ_by_dB(self):
-        """Return the partial derivative of the objective with respect to B."""
-
-        res = self.boozer_surface.run_code_from_last_solution()
-        self.surface.set_dofs(self.in_surface.get_dofs())
-        surface = self.surface
-        nphi = self.surface.quadpoints_phi.size
-        ntheta = self.surface.quadpoints_theta.size
-        num_points = 3 * nphi * ntheta
-        I_value = self._enclosed_current()
-        r, r_dB = boozer_surface_residual_dB_finite_I(
-            surface,
-            res["iota"],
-            res["G"],
-            self.biotsavart,
-            derivatives=0,
-            weight_inv_modB=res["weight_inv_modB"],
-            I=I_value,
-        )
-        return self._scaled_dJ_by_dB(r, r_dB, np.sqrt(num_points))
-
-    # ------------------------------------------------------------------
-    # Local helpers -- functional, no state.
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _scaled_dJ_by_dB(r, r_dB, sqrt_num_components):
-        """Mirror of upstream ``_boozer_residual_dJ_by_dB`` so we don't depend
-        on the private symbol."""
-        scaled_r = r / sqrt_num_components
-        scaled_r_dB = r_dB / sqrt_num_components
-        dJ_by_dB = scaled_r[:, None] * scaled_r_dB
-        return np.sum(dJ_by_dB.reshape((-1, 3, 3)), axis=1)
-
-    @staticmethod
-    def _lsq_vjp_finite_I(
-        lm,
-        booz_surf,
-        iota,
-        G,
-        I_value,
-        weight_inv_modB,
-        r,
-        r_dB,
-        J,
-        d2r_dsdB,
-        d2r_dsdgradB,
-        sqrt_num_components,
-    ):
-        """Inlined I-aware version of ``_boozer_lsqgrad_vjp_from_residual_state``.
-
-        The upstream helper is private; rather than import it (which would
-        couple us to a src/-internal symbol) we re-implement the same
-        contraction here.  All inputs are already in the I-aware basis.
-        """
-        r_scaled = r / sqrt_num_components
-        dr_dB = r_dB.reshape((-1, 3, 3)) / sqrt_num_components
-        dr_ds = J / sqrt_num_components
-        d2r_dsdB_scaled = d2r_dsdB / sqrt_num_components
-        d2r_dsdgradB_scaled = d2r_dsdgradB / sqrt_num_components
-
-        v1 = np.sum(
-            np.sum(lm[:, None] * dr_ds.T, axis=0).reshape((-1, 3, 1)) * dr_dB,
-            axis=1,
-        )
-        v2 = np.sum(
-            r_scaled.reshape((-1, 3, 1))
-            * np.sum(lm[None, None, :] * d2r_dsdB_scaled, axis=-1).reshape(
-                (-1, 3, 3)
-            ),
-            axis=1,
-        )
-        v3 = np.sum(
-            r_scaled.reshape((-1, 3, 1, 1))
-            * np.sum(lm[None, None, None, :] * d2r_dsdgradB_scaled, axis=-1).reshape(
-                (-1, 3, 3, 3)
-            ),
-            axis=1,
-        )
-        dres_dcoils = booz_surf.biotsavart.B_and_dB_vjp(v1 + v2, v3)
-        return dres_dcoils[0] + dres_dcoils[1]
