@@ -1267,6 +1267,11 @@ def append_bool_flag(command: list[str], flag: str, enabled: bool) -> None:
         command.append(flag)
 
 
+def resolve_single_stage_iota_target_arg(args: object) -> float:
+    iota_target = float(getattr(args, "iota_target"))
+    return -iota_target if bool(getattr(args, "flip_banana", False)) else iota_target
+
+
 def env_optional_int(name: str) -> int | None:
     value = os.environ.get(name)
     return None if value is None else int(value)
@@ -1347,6 +1352,11 @@ def append_single_stage_handoff_flags(command: list[str], args: object) -> None:
         command,
         "--banana-surf-radius",
         getattr(args, "banana_surf_radius", None),
+    )
+    append_bool_flag(
+        command,
+        "--flip-banana",
+        bool(getattr(args, "flip_banana", False)),
     )
 
 

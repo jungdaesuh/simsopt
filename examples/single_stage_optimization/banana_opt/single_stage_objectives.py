@@ -479,6 +479,8 @@ def _single_stage_hardware_threshold_overrides(
     coil_length_threshold=None,
     banana_current_threshold=None,
     poloidal_extent_threshold=None,
+    width_min_threshold=None,
+    width_max_threshold=None,
 ) -> dict[str, float]:
     return build_threshold_overrides(
         (
@@ -490,6 +492,8 @@ def _single_stage_hardware_threshold_overrides(
             ("coil_length", coil_length_threshold),
             ("banana_current", banana_current_threshold),
             ("poloidal_extent", poloidal_extent_threshold),
+            ("width_min", width_min_threshold),
+            ("width_max", width_max_threshold),
         )
     )
 
@@ -531,7 +535,13 @@ def _single_stage_alm_constraint_metadata(
     length_penalty_threshold,
 ) -> dict[str, ALMConstraintMetadata]:
     metadata_by_name: dict[str, ALMConstraintMetadata] = {}
-    exact_hardware_names = {"coil_length_upper_bound", "banana_current_upper_bound"}
+    exact_hardware_names = {
+        "coil_length_upper_bound",
+        "banana_current_upper_bound",
+        "width_min",
+        "width_max",
+        "self_intersect",
+    }
     physics_threshold_by_name = {
         "qs_error": qs_threshold,
         "boozer_residual": boozer_threshold,
@@ -545,6 +555,9 @@ def _single_stage_alm_constraint_metadata(
         "surface_surface_spacing",
         "max_curvature",
         "poloidal_extent",
+        "width_min",
+        "width_max",
+        "self_intersect",
     }
     for constraint_name in constraint_names:
         activity_tolerance = activity_tolerance_by_name.get(constraint_name)
@@ -661,6 +674,10 @@ def evaluate_alm_objective(
     poloidal_extent_smoothing=None,
     poloidal_extent_constraint_fn=None,
     poloidal_extent_constraint_with_hard_signal_fn=None,
+    JCoilWidth=None,
+    width_min_threshold=None,
+    width_max_threshold=None,
+    JCurveSelfIntersect=None,
     JNonQSObjective=None,
     JBoozerObjective=None,
     include_diagnostics=True,
@@ -839,6 +856,33 @@ def evaluate_alm_objective(
             poloidal_extent_grad,
             poloidal_extent_violation,
         )
+    coil_width_value = None
+    self_intersect_penalty = None
+    if JCoilWidth is not None:
+        coil_width_value = float(JCoilWidth.J())
+        coil_width_grad = _objective_gradient(JCoilWidth, objective_optimizable)
+        if width_min_threshold is not None:
+            width_min_signed_value = float(width_min_threshold) - coil_width_value
+            hardware_constraints["width_min"] = (
+                width_min_signed_value,
+                -coil_width_grad,
+                _positive_violation(width_min_signed_value),
+            )
+        if width_max_threshold is not None:
+            width_max_signed_value = coil_width_value - float(width_max_threshold)
+            hardware_constraints["width_max"] = (
+                width_max_signed_value,
+                coil_width_grad,
+                _positive_violation(width_max_signed_value),
+            )
+    if JCurveSelfIntersect is not None:
+        self_intersect_penalty = float(JCurveSelfIntersect.J())
+        self_intersect_signed_value = self_intersect_penalty
+        hardware_constraints["self_intersect"] = (
+            self_intersect_signed_value,
+            _objective_gradient(JCurveSelfIntersect, objective_optimizable),
+            _positive_violation(self_intersect_signed_value),
+        )
 
     hard_signed_values_by_name: dict[str, float] = {
         name: float(values[0]) for name, values in hardware_constraints.items()
@@ -985,6 +1029,8 @@ def evaluate_alm_objective(
         coil_length_threshold=coil_length_threshold,
         banana_current_threshold=banana_current_threshold,
         poloidal_extent_threshold=poloidal_extent_threshold,
+        width_min_threshold=width_min_threshold,
+        width_max_threshold=width_max_threshold,
     )
     geometry_tolerances = np.asarray(
         activity_tolerances_fn(
@@ -1012,6 +1058,9 @@ def evaluate_alm_objective(
             "coil_length_upper_bound",
             "banana_current_upper_bound",
             "poloidal_extent",
+            "width_min",
+            "width_max",
+            "self_intersect",
         }:
             constraint_tolerance_by_name[constraint_name] = (
                 _hardware_alm_activity_tolerance(
@@ -1167,5 +1216,14 @@ def evaluate_alm_objective(
             base_eval["poloidal_extent_threshold_rad"] = float(
                 poloidal_extent_threshold
             )
+        if JCoilWidth is not None:
+            base_eval["coil_width"] = coil_width_value
+            if width_min_threshold is not None:
+                base_eval["coil_width_min_threshold"] = float(width_min_threshold)
+            if width_max_threshold is not None:
+                base_eval["coil_width_max_threshold"] = float(width_max_threshold)
+        if JCurveSelfIntersect is not None:
+            base_eval["self_intersect_penalty"] = self_intersect_penalty
+            base_eval["self_intersect_threshold"] = 0.0
     base_eval["alm_formulation"] = alm_formulation
     return annotate_search_evaluation_finiteness(base_eval)

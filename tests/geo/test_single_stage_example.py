@@ -20,7 +20,6 @@ import simsopt.geo.surfaceobjectives as surfaceobjectives_module
 from simsopt._core.derivative import Derivative
 from simsopt._core.optimizable import Optimizable
 from simsopt.field.coil import Current, ScaledCurrent
-from simsopt.geo.surfaceobjectives import boozer_surface_residual_dB
 from simsopt.objectives.utilities import forward_backward
 
 
@@ -10331,6 +10330,35 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.banana_current_max_A, 16000.0)
         self.assertEqual(args.single_stage_banana_current_mode, "shared")
         self.assertEqual(args.single_stage_banana_current_coordinate_scaling, "none")
+        self.assertFalse(args.flip_banana)
+
+    def test_single_stage_parse_args_accepts_flip_banana(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            ["single_stage_banana_example.py", "--flip-banana"],
+        ):
+            args = module.parse_args()
+
+        self.assertTrue(args.flip_banana)
+
+    def test_resolve_single_stage_iota_target_negates_flip_banana(self):
+        module = load_single_stage_example_module()
+
+        self.assertEqual(
+            module.resolve_single_stage_iota_target(
+                SimpleNamespace(iota_target=0.15, flip_banana=False)
+            ),
+            0.15,
+        )
+        self.assertEqual(
+            module.resolve_single_stage_iota_target(
+                SimpleNamespace(iota_target=0.15, flip_banana=True)
+            ),
+            -0.15,
+        )
 
     def test_single_stage_parse_args_accepts_independent_banana_current_mode(self):
         module = load_single_stage_example_module()

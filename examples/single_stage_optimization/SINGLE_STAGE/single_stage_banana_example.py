@@ -32,7 +32,6 @@ from simsopt._core.optimizable import Optimizable
 from simsopt.geo import (
     SurfaceRZFourier,
     SurfaceXYZTensorFourier,
-    BoozerSurface,
     CurveCWSFourierCPP,
     curves_to_vtk,
     CurveLength,
@@ -40,7 +39,6 @@ from simsopt.geo import (
 )
 from simsopt.geo.surfaceobjectives import (
     Volume,
-    BoozerResidual,
     Iotas,
     NonQuasiSymmetricRatio,
     SurfaceSurfaceDistance,
@@ -81,6 +79,7 @@ from workflow_helpers import (
 from workflow_runner_common import (
     load_stage2_artifact_results,
     json_dumps as _common_json_dumps,
+    resolve_single_stage_iota_target_arg as resolve_single_stage_iota_target,
 )
 from banana_opt.artifact_contracts import (
     STAGE2_SEED_CONTRACT_HASH_KEY,
@@ -148,7 +147,10 @@ from banana_opt.current_contracts import (
 )
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
+    BANANA_WIDTH_MAX_M,
+    BANANA_WIDTH_MIN_M,
     BANANA_WINDING_MINOR_RADIUS_M,
+    BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
     COIL_COIL_MIN_DIST_M,
     COIL_LENGTH_HARD_LIMIT_M,
     COIL_LENGTH_TARGET_M,
@@ -164,6 +166,7 @@ from banana_opt.hardware_contracts import (
     is_major_radius_offspec,
     validate_major_radius,
 )
+from banana_opt.ellipse_width import ProjectedEllipseWidth as EllipseWidth
 from banana_opt.hardware_constraint_schema import (
     build_hardware_constraint_artifact_payload_fields,
     hardware_constraint_alm_names,
@@ -181,6 +184,7 @@ from banana_opt.poloidal_extent import (
     smooth_max_poloidal_extent_signed_constraint as _smooth_max_poloidal_extent_signed_constraint,
     smooth_max_poloidal_extent_signed_constraint_with_hard_signal,
 )
+from banana_opt.self_intersect import CurveSelfIntersect
 from banana_opt.single_stage_phase1 import (  # noqa: F401 — re-exported for test access via importlib
     DEFAULT_PHASE1_CONFIG,
     Phase1Config,
@@ -1450,6 +1454,11 @@ def parse_args():
             "Target-mode iota penalty center and Boozer initialization guess. In frontier mode "
             "the outer objective no longer targets this value."
         ),
+    )
+    parser.add_argument(
+        "--flip-banana",
+        action="store_true",
+        help="Negate --iota-target for mirror-flipped banana-coil seeds.",
     )
     parser.add_argument("--num-tf-coils", type=int, default=int(os.environ.get("NUM_TF_COILS", "20")))
     parser.add_argument(
@@ -3053,6 +3062,9 @@ def single_stage_alm_constraint_names(
         "coil_surface_spacing",
         "max_curvature",
         "poloidal_extent",
+        "width_min",
+        "width_max",
+        "self_intersect",
     }
     if alm_formulation != "thresholded_physics":
         available_names.add("coil_length")
@@ -3793,6 +3805,16 @@ def build_single_stage_objective_bundle(
         VACUUM_VESSEL_MAJOR_RADIUS_M,
         POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     )
+    JCoilWidth = EllipseWidth(
+        banana_curves[0],
+        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        BANANA_WINDING_MINOR_RADIUS_M,
+    )
+    JCurveSelfIntersect = CurveSelfIntersect(
+        banana_curves[0],
+        1.0 / CURVATURE_THRESHOLD,
+        neighbor_skip=int(1.5 * banana_curves[0].order),
+    )
     JF = build_total_objective(
         goal_objective_terms["JnonQSRatioObjective"],
         goal_objective_terms["effective_res_weight"],
@@ -3839,6 +3861,8 @@ def build_single_stage_objective_bundle(
         "JSurfSurf": JSurfSurf,
         "JCurvature": JCurvature,
         "JPoloidalExtent": JPoloidalExtent,
+        "JCoilWidth": JCoilWidth,
+        "JCurveSelfIntersect": JCurveSelfIntersect,
         "JF": JF,
     }
 
@@ -3865,6 +3889,8 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JSurfSurf
     global JCurvature
     global JPoloidalExtent
+    global JCoilWidth
+    global JCurveSelfIntersect
     global JF
 
     surface_iota_terms = objective_bundle["surface_iota_terms"]
@@ -3888,6 +3914,8 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JSurfSurf = objective_bundle["JSurfSurf"]
     JCurvature = objective_bundle["JCurvature"]
     JPoloidalExtent = objective_bundle["JPoloidalExtent"]
+    JCoilWidth = objective_bundle["JCoilWidth"]
+    JCurveSelfIntersect = objective_bundle["JCurveSelfIntersect"]
     JF = objective_bundle["JF"]
 
 
@@ -4272,6 +4300,8 @@ def evaluate_alm_objective(
     penalty,
     JSurfSurf=None,
     JPoloidalExtent=None,
+    JCoilWidth=None,
+    JCurveSelfIntersect=None,
     include_diagnostics=True,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
@@ -4351,6 +4381,10 @@ def evaluate_alm_objective(
             poloidal_extent_constraint_with_hard_signal_fn=(
                 smooth_max_poloidal_extent_signed_constraint_with_hard_signal
             ),
+            JCoilWidth=JCoilWidth,
+            width_min_threshold=BANANA_WIDTH_MIN_M,
+            width_max_threshold=BANANA_WIDTH_MAX_M,
+            JCurveSelfIntersect=JCurveSelfIntersect,
             JNonQSObjective=objective_terms["JNonQSObjective"],
             JBoozerObjective=objective_terms["JBoozerObjective"],
             include_diagnostics=include_diagnostics,
@@ -4380,6 +4414,8 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
                 ALM_PENALTY,
                 JSurfSurf=JSurfSurf,
                 JPoloidalExtent=JPoloidalExtent,
+                JCoilWidth=JCoilWidth,
+                JCurveSelfIntersect=JCurveSelfIntersect,
                 include_diagnostics=include_diagnostics,
             )
         )
@@ -8023,6 +8059,8 @@ JVolume = None
 JnonQSRatioObjective = None
 JBoozerResidualObjective = None
 JPoloidalExtent = None
+JCoilWidth = None
+JCurveSelfIntersect = None
 EFFECTIVE_RES_WEIGHT = 0.0
 EFFECTIVE_IOTAS_WEIGHT = 0.0
 EFFECTIVE_VOLUME_WEIGHT = 0.0
@@ -8137,7 +8175,7 @@ if __name__ == "__main__":
     CONFINEMENT_SURROGATE_MEAN_WEIGHT = args.confinement_surrogate_mean_weight
     CONFINEMENT_SURROGATE_WORST_WEIGHT = args.confinement_surrogate_worst_weight
     CONFINEMENT_SURROGATE_EARLY_WEIGHT = args.confinement_surrogate_early_weight
-    iota_target = args.iota_target
+    iota_target = resolve_single_stage_iota_target(args)
     num_tf_coils = resolve_stage2_num_tf_coils(stage2_results, args.num_tf_coils)
     if not (0.0 <= args.inner_surface_initial_weight <= 1.0):
         raise ValueError("--inner-surface-initial-weight must be between 0 and 1")
@@ -9961,6 +9999,7 @@ if __name__ == "__main__":
         "FINAL_TOPOLOGY_STOP_REASON_COUNTS": final_topology_status["stop_reason_counts"],
         "TARGET_VOLUME": None if args.single_stage_goal_mode == "frontier" else float(vol_target),
         "TARGET_IOTA": None if args.single_stage_goal_mode == "frontier" else float(iota_target),
+        "FLIP_BANANA": bool(args.flip_banana),
         "BOOZER_SURFACE_TARGET_VOLUMES": [float(entry["target_volume"]) for entry in surface_data],
         "SINGLE_STAGE_GOAL_MODE": args.single_stage_goal_mode,
         "SINGLE_STAGE_GOAL_MODE_IMPL": current_frontier_goal_mode_impl(),

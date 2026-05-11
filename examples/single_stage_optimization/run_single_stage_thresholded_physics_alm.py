@@ -111,6 +111,11 @@ def parse_args() -> argparse.Namespace:
     # Set this explicitly from the equilibrium and working surface.
     # The 0.20 value is only a convenience default for historical reruns.
     parser.add_argument("--iota-target", type=float, default=0.20)
+    parser.add_argument(
+        "--flip-banana",
+        action="store_true",
+        help="Forward mirror-flipped banana-coil convention into the single-stage run.",
+    )
     parser.add_argument("--vol-target", type=float, default=0.10)
     parser.add_argument(
         "--constraint-weight",

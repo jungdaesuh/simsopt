@@ -262,6 +262,11 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
         default=float(os.environ["ALM_LENGTH_PENALTY_THRESHOLD"]) if "ALM_LENGTH_PENALTY_THRESHOLD" in os.environ else None,
     )
     parser.add_argument("--iota-target", type=float, default=0.15)
+    parser.add_argument(
+        "--flip-banana",
+        action="store_true",
+        help="Forward mirror-flipped banana-coil convention into the single-stage run.",
+    )
     parser.add_argument("--vol-target", type=float, default=0.10)
     parser.add_argument(
         "--constraint-weight",

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+from simsopt._core import Optimizable
 from simsopt.field.coil import Current, ScaledCurrent
 
 
@@ -32,6 +33,8 @@ SINGLE_STAGE_SEARCH_POLICY_PATH = (
 )
 SINGLE_STAGE_INCUMBENTS_PATH = EXAMPLES_ROOT / "banana_opt" / "incumbents.py"
 POLOIDAL_EXTENT_PATH = EXAMPLES_ROOT / "banana_opt" / "poloidal_extent.py"
+ELLIPSE_WIDTH_PATH = EXAMPLES_ROOT / "banana_opt" / "ellipse_width.py"
+SELF_INTERSECT_PATH = EXAMPLES_ROOT / "banana_opt" / "self_intersect.py"
 TAYLOR_TEST_EPSILONS = (1.0e-3, 5.0e-4, 2.5e-4, 1.25e-4)
 
 sys.path.insert(0, str(EXAMPLES_ROOT))
@@ -268,6 +271,37 @@ class _FakeDerivative:
         if other == 0:
             return self
         return self.__add__(other)
+
+
+class _FakeOptimizableCurve(Optimizable):
+    def __init__(self, gamma_points, gammadash_points, *, order=3):
+        self._gamma = np.asarray(gamma_points, dtype=float)
+        self._gammadash = np.asarray(gammadash_points, dtype=float)
+        self.quadpoints = np.linspace(0.0, 1.0, len(self._gamma), endpoint=False)
+        self.order = int(order)
+        super().__init__()
+
+    def gamma(self):
+        return self._gamma.copy()
+
+    def gammadash(self):
+        return self._gammadash.copy()
+
+    def dgamma_by_dcoeff_vjp(self, point_gradient):
+        return _FakeDerivative(
+            [
+                float(np.sum(point_gradient[:, 0])),
+                float(np.sum(point_gradient[:, 2])),
+            ]
+        )
+
+    def dgammadash_by_dcoeff_vjp(self, tangent_gradient):
+        return _FakeDerivative(
+            [
+                float(np.sum(tangent_gradient[:, 0])),
+                float(np.sum(tangent_gradient[:, 2])),
+            ]
+        )
 
 
 class _FakeCurrentObjective:
@@ -547,6 +581,59 @@ class PoloidalExtentModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(surrogate_violation, surrogate_signed_value)
         self.assertAlmostEqual(hard_signed_value, theta - threshold)
         self.assertEqual(hard_violation, 0.0)
+
+
+def _manufacturability_test_curve():
+    theta = np.linspace(0.0, 2.0 * np.pi, 8, endpoint=False)
+    gamma = np.column_stack(
+        [
+            0.976 + 0.08 * np.cos(theta),
+            0.08 * np.sin(theta),
+            0.02 * np.sin(2.0 * theta),
+        ]
+    )
+    gammadash = np.column_stack(
+        [
+            -0.08 * 2.0 * np.pi * np.sin(theta),
+            0.08 * 2.0 * np.pi * np.cos(theta),
+            0.04 * 2.0 * np.pi * np.cos(2.0 * theta),
+        ]
+    )
+    return _FakeOptimizableCurve(gamma, gammadash, order=3)
+
+
+class EllipseWidthModuleTests(_ModuleTestCase):
+    MODULE_PATH = ELLIPSE_WIDTH_PATH
+    MODULE_PREFIX = "banana_ellipse_width"
+
+    def test_projected_ellipse_width_instantiates_and_returns_finite_width(self):
+        objective = self.module.ProjectedEllipseWidth(
+            _manufacturability_test_curve(),
+            0.976,
+            0.210,
+        )
+
+        width = objective.J()
+
+        self.assertGreater(width, 0.0)
+        self.assertTrue(np.isfinite(width))
+
+
+class CurveSelfIntersectModuleTests(_ModuleTestCase):
+    MODULE_PATH = SELF_INTERSECT_PATH
+    MODULE_PREFIX = "banana_self_intersect"
+
+    def test_curve_self_intersect_instantiates_and_returns_finite_penalty(self):
+        objective = self.module.CurveSelfIntersect(
+            _manufacturability_test_curve(),
+            0.01,
+            neighbor_skip=2,
+        )
+
+        penalty = objective.J()
+
+        self.assertGreaterEqual(penalty, 0.0)
+        self.assertTrue(np.isfinite(penalty))
 
 
 class Stage2ObjectiveModuleTests(_ModuleTestCase):
@@ -3007,6 +3094,92 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["J_surf"], 0.9)
         self.assertAlmostEqual(result["J_curvature"], 0.8)
         np.testing.assert_allclose(result["grad"], [8.0, -3.0])
+
+    def test_evaluate_alm_objective_includes_width_and_self_intersect_constraints(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        coil_width = _FakeAlgebraicObjective(0.12, [0.2, 0.0])
+        self_intersect = _FakeAlgebraicObjective(0.003, [0.0, 0.4])
+
+        def fake_augmented(
+            base_value,
+            base_grad,
+            constraint_values,
+            constraint_grads,
+            multipliers,
+            penalty,
+        ):
+            self.assertAlmostEqual(base_value, 0.0)
+            np.testing.assert_allclose(base_grad, [0.0, 0.0])
+            np.testing.assert_allclose(
+                constraint_values,
+                [-1.4, -0.05 / 0.17, 0.003],
+            )
+            np.testing.assert_allclose(constraint_grads[0], [-4.0, 0.0])
+            np.testing.assert_allclose(
+                constraint_grads[1],
+                [0.2 / 0.17, 0.0],
+            )
+            np.testing.assert_allclose(constraint_grads[2], [0.0, 0.4])
+            np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3])
+            self.assertAlmostEqual(penalty, 7.0)
+            return {
+                "total": 1.25,
+                "grad": np.array([3.0, -2.0]),
+                "stationarity_norm": 0.5,
+            }
+
+        result = self.module.evaluate_alm_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JVolume=None,
+            VOLUME_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            JCurveSurface=zero,
+            JCurvature=zero,
+            multipliers=np.array([0.1, 0.2, 0.3]),
+            penalty=7.0,
+            objective_optimizable=SimpleNamespace(),
+            curves=["curve_a"],
+            curve_curve_min_distance=0.05,
+            outer_surface="outer",
+            curve_surface_min_distance=0.02,
+            banana_curve="banana",
+            curvature_threshold=40.0,
+            distance_smoothing=0.01,
+            curvature_smoothing=0.05,
+            constraint_names=("width_min", "width_max", "self_intersect"),
+            curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
+            curve_surface_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
+            curvature_constraint_fn=lambda *_args: (-0.1, np.array([0.0, 0.0]), 0.0),
+            augmented_inequality_objective_fn=fake_augmented,
+            activity_tolerances_fn=lambda *_args, **_kwargs: np.array(
+                [0.0, 0.0, 0.0],
+                dtype=float,
+            ),
+            JCoilWidth=coil_width,
+            width_min_threshold=0.05,
+            width_max_threshold=0.17,
+            JCurveSelfIntersect=self_intersect,
+        )
+
+        self.assertEqual(
+            result["constraint_names"],
+            ["width_min", "width_max", "self_intersect"],
+        )
+        np.testing.assert_allclose(result["constraint_scales"], [0.05, 0.17, 1.0])
+        np.testing.assert_allclose(result["raw_thresholds"], [0.05, 0.17, 0.0])
+        np.testing.assert_allclose(result["raw_constraint_values"], [-0.07, -0.05, 0.003])
+        np.testing.assert_allclose(result["feasibility_values"], [0.0, 0.0, 0.003])
+        self.assertEqual(result["constraint_blocks"], ["geometry", "geometry", "geometry"])
+        self.assertEqual(result["objective_value_kinds"], ["hard", "hard", "hard"])
+        self.assertEqual(result["gradient_value_kinds"], ["hard", "hard", "hard"])
+        self.assertEqual(result["dual_update_value_kinds"], ["hard", "hard", "hard"])
 
     def test_evaluate_alm_objective_uses_hard_surface_stack_for_dual_signal(self):
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])

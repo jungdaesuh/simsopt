@@ -698,6 +698,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "max_curvature",
                 "coil_length",
                 "poloidal_extent",
+                "width_min",
+                "width_max",
+                "self_intersect",
                 "banana_current",
                 "tf_current",
                 "lcfs_major_radius",
@@ -712,6 +715,15 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(specs["surface_surface_spacing"].applies_to, frozenset({"alm"}))
         self.assertEqual(specs["surface_surface_spacing"].alm_block, "surface")
         self.assertEqual(specs["poloidal_extent"].kind, "upper_bound")
+        self.assertEqual(specs["width_min"].kind, "lower_bound")
+        self.assertEqual(specs["width_min"].applies_to, frozenset({"alm"}))
+        self.assertEqual(specs["width_max"].kind, "upper_bound")
+        self.assertEqual(specs["width_max"].applies_to, frozenset({"alm"}))
+        self.assertEqual(specs["self_intersect"].kind, "upper_bound")
+        self.assertEqual(specs["self_intersect"].applies_to, frozenset({"alm"}))
+        self.assertEqual(specs["self_intersect"].threshold, 0.0)
+        self.assertEqual(specs["self_intersect"].alm_scale, 1.0)
+        self.assertTrue(specs["self_intersect"].allow_zero_threshold)
         self.assertEqual(
             specs["banana_current"].applies_to,
             frozenset({"penalty", "alm", "artifact"}),
@@ -980,6 +992,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "max_curvature",
                 "coil_length_upper_bound",
                 "poloidal_extent",
+                "width_min",
+                "width_max",
+                "self_intersect",
                 "banana_current_upper_bound",
             ],
         )
@@ -989,6 +1004,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             include_surface_stack=True,
         )
         self.assertIn("surface_surface_spacing", stacked_constraint_names)
+        self.assertIn("width_min", stacked_constraint_names)
+        self.assertIn("width_max", stacked_constraint_names)
+        self.assertIn("self_intersect", stacked_constraint_names)
         self.assertNotIn("coil_length_upper_bound", stacked_constraint_names)
         self.assertIn("length_penalty", stacked_constraint_names)
 
@@ -1999,7 +2017,10 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
     def test_single_stage_thresholded_physics_rerun_wrapper_resolves_cli_paths(self):
         module = load_single_stage_thresholded_physics_rerun_module()
-        args = make_single_stage_thresholded_physics_rerun_args(equilibria_dir="eqdir")
+        args = make_single_stage_thresholded_physics_rerun_args(
+            equilibria_dir="eqdir",
+            flip_banana=True,
+        )
 
         command = module.build_single_stage_thresholded_physics_command(args)
 
@@ -2015,6 +2036,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             command[command.index("--equilibria-dir") + 1],
             str(Path("eqdir").resolve()),
         )
+        self.assertIn("--flip-banana", command)
 
     def test_single_stage_thresholded_physics_rerun_wrapper_parse_args_accepts_seed_order_upgrade(self):
         module = load_single_stage_thresholded_physics_rerun_module()

@@ -2424,6 +2424,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
         args.constraint_weight = -1.0
         args.num_tf_coils = 18
         args.stage2_seed_tf_current_A = 12345.0
+        args.flip_banana = True
 
         command = module.build_single_stage_goal_mode_command(
             args,
@@ -2461,6 +2462,7 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             command[command.index("--stage2-seed-tf-current-A") + 1],
             "12345.0",
         )
+        self.assertIn("--flip-banana", command)
 
     def test_build_single_stage_goal_mode_command_rejects_offcontract_values(self):
         module = load_goal_mode_comparison_module()

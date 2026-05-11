@@ -8,6 +8,9 @@ from typing import Collection, Iterable, Literal, Mapping
 from alm_utils import require_positive_alm_threshold
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
+    BANANA_SELF_INTERSECT_ALM_SCALE,
+    BANANA_WIDTH_MAX_M,
+    BANANA_WIDTH_MIN_M,
     COIL_COIL_MIN_DIST_M,
     COIL_LENGTH_HARD_LIMIT_M,
     COIL_PLASMA_MIN_DIST_M,
@@ -42,6 +45,7 @@ class HardwareConstraintSpec:
     alm_scale: float | None = None
     alm_block: ALMBlock | None = None
     alm_activity_tolerance_fraction: float = 0.0
+    allow_zero_threshold: bool = False
 
 
 @dataclass(frozen=True)
@@ -168,6 +172,32 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         traversal_policy="allowed",
     ),
     HardwareConstraintSpec(
+        name="width_min",
+        kind="lower_bound",
+        threshold=BANANA_WIDTH_MIN_M,
+        alm_activity_tolerance_fraction=ALM_ACTIVITY_TOLERANCE_FRACTION,
+        applies_to=frozenset({"alm"}),
+        traversal_policy="allowed",
+    ),
+    HardwareConstraintSpec(
+        name="width_max",
+        kind="upper_bound",
+        threshold=BANANA_WIDTH_MAX_M,
+        alm_activity_tolerance_fraction=ALM_ACTIVITY_TOLERANCE_FRACTION,
+        applies_to=frozenset({"alm"}),
+        traversal_policy="allowed",
+    ),
+    HardwareConstraintSpec(
+        name="self_intersect",
+        kind="upper_bound",
+        threshold=0.0,
+        applies_to=frozenset({"alm"}),
+        traversal_policy="allowed",
+        alm_scale=BANANA_SELF_INTERSECT_ALM_SCALE,
+        alm_block="geometry",
+        allow_zero_threshold=True,
+    ),
+    HardwareConstraintSpec(
         name="banana_current",
         kind="box_bound",
         threshold=BANANA_CURRENT_HARD_LIMIT_A,
@@ -207,6 +237,9 @@ _DEFAULT_ALM_BLOCK_BY_NAME: Mapping[str, ALMBlock] = {
     "max_curvature": "geometry",
     "coil_length": "geometry",
     "poloidal_extent": "geometry",
+    "width_min": "geometry",
+    "width_max": "geometry",
+    "self_intersect": "geometry",
     "banana_current": "current",
     "tf_current": "current",
     "lcfs_major_radius": "surface",
@@ -676,6 +709,8 @@ def _resolved_threshold(
     if threshold_overrides is not None and spec.name in threshold_overrides:
         return float(threshold_overrides[spec.name])
     if spec.threshold <= 0.0:
+        if spec.threshold == 0.0 and spec.allow_zero_threshold:
+            return float(spec.threshold)
         raise ValueError(
             f"Constraint {spec.name!r} has no canonical hardware threshold; "
             "supply an explicit positive threshold override."
