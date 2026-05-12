@@ -73,6 +73,17 @@ Overall native JAX port status is PARTIAL because every CUDA row is still open.
   `tests/integration/test_single_stage_physics_parity.py:447`.
 - Deferred `XYZTensorFourier` surfaces are reprojected instead of bypassed:
   `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py:3473`.
+- Lightning AI production-proof launcher route gap (recorded in
+  `c6fcebfd5 docs: record Lightning banana parity route gap`) is closed by the
+  checked-in launcher
+  `benchmarks/lightning_jobs/launch_production_gpu_proof.py`. The launcher
+  shares the HF Jobs proof-command body (same `run_proof` argv, same
+  `bootstrap_runtime.sh`, same image contract) and adds the Nebius-specific
+  fixes (`bash -lc` entrypoint, `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT`
+  export before `pip install`, `simsopt-jax-parity-proofs` connection mount
+  at `/proof`, durable preflight JSON at
+  `.artifacts/lightning_h200_preflight.json`). Coverage:
+  `tests/test_lightning_production_gpu_proof.py:1` (15 unit tests passing).
 
 ## Prompt Checklist
 
@@ -198,6 +209,21 @@ git diff --check
 
 Result: py_compile passed; `ruff check` passed; `ruff format --check` reported
 `8 files already formatted`; `git diff --check` passed.
+
+Lightning launcher unit tests (added in this pass):
+
+```bash
+JAX_ENABLE_X64=True JAX_PLATFORMS=cpu python -m pytest -q tests/test_lightning_production_gpu_proof.py
+```
+
+Result: `15 passed`. The new test module pins the dry-run preflight
+schema, bash-wrapped command body, the `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT`
+fix for non-PEP440 release tags, the shared `run_proof` argv contract
+with the HF Jobs launcher (so the two launchers cannot drift), the
+single-hardware-per-invocation contract (so the preflight snapshot
+cannot be silently overwritten), and the `LIGHTNING_TERMINAL_FAILURE_STATUSES`
+membership in the actual `lightning_sdk.Status` enum (so the poller cannot
+hang on an unknown status string).
 
 Earlier proof-surface results from this repair pass:
 
@@ -354,20 +380,68 @@ Pre-paid credit balance is insufficient - add more credits to your account to us
   reports `0.0` quota for both "Running On-Demand G and VT instances" and
   "Running On-Demand P instances". The repo also has no AWS/GCP-native proof
   launcher comparable to `benchmarks/hf_jobs/launch_production_gpu_proof.py`.
-- Lightning AI CLI lists GPU machines including `H200`, and a tiny
-  `CPU_SMALL` smoke job can be submitted, inspected as `Completed`, and
-  deleted. That route is not accepted as proof-ready here because
-  `lightning inspect job` exposes only command/image/machine/status/cost, not
-  stdout or proof artifacts, and the repo has no Lightning-native launcher or
-  artifact export contract for the production CUDA proof.
+- Lightning AI now has a usable proof-artifact route through the
+  `simsopt-jax-parity-proofs` data connection. A CPU smoke job completed after
+  mounting the data-connection root at `/proof` and wrote
+  `cpu-smoke/20260512T191520Z/proof.json`, which was visible through
+  `lightning_sdk.filesystem.Filesystem`. Mounting a missing nested connection
+  path failed before container startup, so production proof jobs must mount the
+  connection root and create run-specific subdirectories inside the job.
+- Lightning's default AWS account rejects the single-H200 proof shape before
+  job creation with `accelerator lit-h200x-1 not found for this AWS cluster`.
+  The default accelerator listing exposes H200 as `lit-h200x-8` on AWS, while
+  Nebius exposes `lit-h200x-1`. Three current-SHA Lightning H200 proof attempts
+  on Nebius all finished in non-success states and produced no CUDA proof
+  artifact:
+  - `simsopt-jax-h200-proof-20260512t192927z` — `Failed`; Lightning's default
+    `/bin/sh` command wrapper rejected the proof script's `set -o pipefail`.
+  - `simsopt-jax-h200-proof-bash-20260512t194502z` — `Failed`; the bash retry
+    cleared the shell error but `pip install -e .` aborted inside
+    `setuptools_scm.vcs_versioning` because the non-PEP440 release tag
+    `banana-surface-parity-m7-unitnormal-r1` could not be parsed as a version.
+  - `simsopt-jax-h200-proof-version-20260512t200228z` — `Stopped` with
+    `total_cost=0.0` and no artifact entries; the corrected command exports
+    `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT=0.0.0+proof.c6fcebfd` ahead of
+    `pip install`, but the job stopped before producing runtime logs (likely
+    Nebius H200 capacity exhaustion or image-pull failure on the cluster).
+- The checked-in launcher
+  `benchmarks/lightning_jobs/launch_production_gpu_proof.py` now closes the
+  route gap recorded in `c6fcebfd5 docs: record Lightning banana parity route
+  gap`. It reuses the HF Jobs launcher's preflight, `run_proof` argv builder,
+  and bootstrap script, and adds:
+  - `entrypoint="bash -lc"` on the Lightning job to avoid the `sh` failure
+    mode that killed the first Nebius attempt;
+  - `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT="0.0.0+proof.<sha[:8]>"`
+    exported before `pip install -e .` to neutralise the non-PEP440 tag
+    failure mode that killed the second Nebius attempt;
+  - `path_mappings={"/proof": "simsopt-jax-parity-proofs"}` so the connection
+    root mounts at `/proof` and run-specific subdirectories are created
+    inside the job, matching the mount contract that the failed-nested-path
+    smoke run established;
+  - durable preflight JSON at `.artifacts/lightning_h200_preflight.json`
+    matching the existing audit snapshot schema, with `command_shell`,
+    `setuptools_scm_pretend_version_for_simsopt`, `cloud_account`,
+    `cloud_provider`, `artifact_connection`, `artifact_relative_path`, and
+    `artifact_container_dir` fields.
+  Unit tests at `tests/test_lightning_production_gpu_proof.py` pin the dry-run
+  preflight schema, the bash-wrapped command body, the setuptools-scm fix, the
+  results-dir-under-mount layout, and the shared `run_proof` argv contract with
+  the HF launcher.
 
 ## Remaining Blockers
 
-1. Add usable GPU credits/capacity: HF Jobs H200 launch is currently rejected
-   with `402 Payment Required`; Runpod is blocked by negative balance/no pods;
-   GitHub Actions has no registered GPU runners; GCP billing is disabled; and
-   the configured AWS GPU-family quotas are zero. Lightning needs a
-   proof-artifact export path before it can be treated as a valid fallback.
+1. Add or wait for usable GPU capacity. HF Jobs H200 launch is currently
+   rejected with `402 Payment Required`; Runpod is blocked by negative
+   balance/no pods; GitHub Actions has no registered GPU runners; GCP billing
+   is disabled; and the configured AWS GPU-family quotas are zero. Lightning's
+   artifact path is proven and the checked-in launcher
+   `benchmarks/lightning_jobs/launch_production_gpu_proof.py` resolves the
+   prior `sh`/`set -o pipefail` and `setuptools_scm` non-PEP440 tag failure
+   modes, but the third Lightning H200 Nebius attempt
+   `simsopt-jax-h200-proof-version-20260512t200228z` stopped without runtime
+   logs (`total_cost=0.0`, no artifact entries). The launcher is ready to
+   resubmit when Nebius H200 capacity returns; no further launcher fix is
+   required for the next attempt.
 2. Run the current tree on real CUDA hardware and emit a current-SHA proof
    bundle with exact command, dirty-tree status, JAX/jaxlib versions, x64 mode,
    backend, CUDA/XLA flags, `CUDA_VISIBLE_DEVICES`, `nvidia-smi` facts,
