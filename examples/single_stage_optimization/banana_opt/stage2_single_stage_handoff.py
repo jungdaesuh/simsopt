@@ -7,7 +7,7 @@ from typing import Mapping
 import numpy as np
 
 from simsopt._core.optimizable import load
-from simsopt.geo import BoozerSurface, SurfaceXYZTensorFourier
+from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt.geo.surfaceobjectives import Volume
 
 from .boozer_finite_current import BoozerSurfaceFiniteI
@@ -23,6 +23,7 @@ from .coil_groups import (
 )
 from .current_contracts import resolve_finite_current_mode, resolve_loaded_tf_current_A
 from .hardware_contracts import (
+    COIL_LENGTH_MIN_FRACTION,
     MAX_CURVATURE_INV_M,
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     validate_banana_winding_surface_radius,
@@ -32,6 +33,7 @@ from .hardware_contracts import (
 )
 from .hardware_constraint_schema import (
     build_hardware_constraint_status,
+    build_threshold_overrides,
     hardware_constraint_artifact_field_names,
     hardware_constraint_artifact_value_field_names,
 )
@@ -336,9 +338,21 @@ def evaluate_stage2_seed_hardware_contract(
     stage2_results: Mapping[str, object],
 ) -> dict[str, object]:
     measured_values = _stage2_seed_measured_values(stage2_results)
+    length_target = _first_stage2_result_value(
+        stage2_results,
+        ("length_target", "LENGTH_TARGET"),
+    )
+    length_min_target = (
+        None if length_target is None else COIL_LENGTH_MIN_FRACTION * float(length_target)
+    )
     return build_hardware_constraint_status(
         measured_values,
         applies_to="artifact",
+        threshold_overrides=build_threshold_overrides(
+            (
+                ("coil_length_min", length_min_target),
+            )
+        ),
         require_values=True,
     )
 

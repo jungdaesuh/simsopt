@@ -550,6 +550,25 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "--constraint-method=alm"):
             validate_args(args)
 
+    def test_single_stage_validate_weighted_sum_alm_rejects_nonpositive_boozer_threshold(self):
+        alm_utils = load_alm_utils_module()
+        functions = extract_functions(
+            SINGLE_STAGE_MODULE_PATH,
+            ["validate_single_stage_alm_formulation_args"],
+            {"require_positive_alm_threshold": alm_utils.require_positive_alm_threshold},
+        )
+        validate_args = functions["validate_single_stage_alm_formulation_args"]
+        args = SimpleNamespace(
+            alm_formulation="weighted_sum",
+            single_stage_goal_mode="target",
+            constraint_method="alm",
+            alm_boozer_threshold=0.0,
+            length_weight=0.0,
+        )
+
+        with self.assertRaisesRegex(ValueError, "--alm-boozer-threshold"):
+            validate_args(args)
+
     def test_single_stage_builds_bounded_alm_settings(self):
         alm_utils = load_alm_utils_module()
         functions = extract_functions(
@@ -713,7 +732,10 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             },
         )
         self.assertEqual(specs["coil_length"].applies_to, frozenset({"alm", "artifact"}))
-        self.assertEqual(specs["coil_length_min"].applies_to, frozenset({"alm"}))
+        self.assertEqual(
+            specs["coil_length_min"].applies_to,
+            frozenset({"alm", "artifact"}),
+        )
         self.assertEqual(specs["coil_length_min"].kind, "lower_bound")
         self.assertEqual(
             specs["poloidal_extent"].applies_to,
@@ -752,6 +774,15 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             ),
             ("banana_current_A", "BANANA_CURRENT_A"),
         )
+        self.assertEqual(
+            schema_module.hardware_constraint_artifact_value_field_names(
+                "coil_length_min"
+            ),
+            ("coil_length", "COIL_LENGTH"),
+        )
+        payload_names = schema_module.hardware_constraint_artifact_payload_field_names()
+        self.assertIn("LENGTH_MIN_TARGET", payload_names)
+        self.assertEqual(len(payload_names), len(set(payload_names)))
 
     def test_penalty_box_bound_names_follow_forbidden_traversal_policy(self):
         schema_module = load_hardware_constraint_schema_module()

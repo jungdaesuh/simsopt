@@ -3012,6 +3012,11 @@ def validate_surface_mode_constraint_args(
 
 def validate_single_stage_alm_formulation_args(args):
     if args.alm_formulation == "weighted_sum":
+        if args.constraint_method == "alm":
+            require_positive_alm_threshold(
+                "--alm-boozer-threshold",
+                args.alm_boozer_threshold,
+            )
         # Scoped strict raise: weighted_sum + ALM owns the coil-length constraint as
         # an inequality at length_target. The base objective also adds
         # LENGTH_WEIGHT * QuadraticPenalty(curvelength, length_target, "max") via
@@ -3718,7 +3723,13 @@ def build_best_feasible_results_summary(
         restore_single_stage_incumbent_state(run_dict, current_state)
 
 
-def build_boozer_derived_objective_terms(stage, surface_data, coils):
+def build_boozer_derived_objective_terms(
+    stage,
+    surface_data,
+    coils,
+    *,
+    boozer_residual_threshold=0.0,
+):
     boozer_surfaces = [entry["boozer_surface"] for entry in surface_data]
     boozer_objective_biot_savarts = [BiotSavart(coils) for _surface in boozer_surfaces]
     surface_iota_terms = [Iotas(surface) for surface in boozer_surfaces]
@@ -3727,8 +3738,17 @@ def build_boozer_derived_objective_terms(stage, surface_data, coils):
         for index, surface in enumerate(boozer_surfaces)
     ]
     boozer_residual_cls = boozer_residual_class_for_stage(stage)
+    boozer_residual_kwargs = (
+        {}
+        if boozer_residual_cls is BoozerResidualExact
+        else {"threshold": boozer_residual_threshold}
+    )
     brs = [
-        boozer_residual_cls(surface, boozer_objective_biot_savarts[index])
+        boozer_residual_cls(
+            surface,
+            boozer_objective_biot_savarts[index],
+            **boozer_residual_kwargs,
+        )
         for index, surface in enumerate(boozer_surfaces)
     ]
     return {
@@ -3746,6 +3766,22 @@ def boozer_residual_class_for_stage(stage):
     # so non-final stages are routed through it instead of vanilla
     # BoozerResidual to keep the residual consistent with the I-aware surface.
     return BoozerResidualExact if stage == "final" else RefinedBoozerResidual
+
+
+def boozer_residual_threshold_for_stage(
+    stage,
+    *,
+    constraint_method,
+    alm_formulation,
+    alm_boozer_threshold,
+):
+    if (
+        stage == "final"
+        or constraint_method != "alm"
+        or alm_formulation == "thresholded_physics"
+    ):
+        return 0.0
+    return float(alm_boozer_threshold)
 
 
 def build_single_stage_objective_bundle(
@@ -3770,8 +3806,14 @@ def build_single_stage_objective_bundle(
     vessel_gap_threshold=0.0,
     goal_mode="target",
     frontier_goal_config=None,
+    boozer_residual_threshold=0.0,
 ):
-    boozer_terms = build_boozer_derived_objective_terms(stage, surface_data, coils)
+    boozer_terms = build_boozer_derived_objective_terms(
+        stage,
+        surface_data,
+        coils,
+        boozer_residual_threshold=boozer_residual_threshold,
+    )
     surface_iota_terms = boozer_terms["surface_iota_terms"]
     nonQSs = boozer_terms["nonQSs"]
     brs = boozer_terms["brs"]
@@ -8585,6 +8627,12 @@ if __name__ == "__main__":
             vessel_gap_threshold=SS_DIST,
             goal_mode=args.single_stage_goal_mode,
             frontier_goal_config=frontier_goal_config,
+            boozer_residual_threshold=boozer_residual_threshold_for_stage(
+                stage_name,
+                constraint_method=CONSTRAINT_METHOD,
+                alm_formulation=ALM_FORMULATION,
+                alm_boozer_threshold=args.alm_boozer_threshold,
+            ),
         )
         apply_single_stage_objective_bundle(objective_bundle)
         return objective_bundle

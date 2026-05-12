@@ -289,7 +289,7 @@ class SnapshotParityTests(unittest.TestCase):
         )["evaluate_stage2_hardware_constraints"]
         cases = [
             (1.7, 1.75, 0.08, 0.05, 39.0, 40.0),
-            (1.8, 1.75, 0.04, 0.05, 41.0, 40.0),
+            (2.1, 1.75, 0.04, 0.05, 41.0, 40.0),
         ]
 
         for case in cases:

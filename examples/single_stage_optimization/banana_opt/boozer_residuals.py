@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from simsopt._core.derivative import derivative_dec
+from simsopt._core.derivative import Derivative, derivative_dec
 from simsopt._core.optimizable import Optimizable
 from simsopt.geo import SurfaceXYZTensorFourier
 from simsopt.geo.surfaceobjectives import (
@@ -16,7 +16,6 @@ from simsopt.objectives.utilities import forward_backward
 # there so this file no longer depends on fork-only src/ symbols.
 from .boozer_finite_current import (
     boozer_surface_residual_dB_finite_I,
-    _lsqgrad_vjp_finite_I,
 )
 
 __all__ = ["BoozerResidualExact", "RefinedBoozerResidual"]
@@ -80,6 +79,7 @@ class RefinedBoozerResidual(Optimizable):
         grid_multiplier: int = 1,
         include_label_constraint: bool = True,
         weight_inv_modB: bool | None = None,
+        threshold: float = 0.0,
     ):
         if grid_multiplier < 1:
             raise ValueError("grid_multiplier must be >= 1")
@@ -90,6 +90,7 @@ class RefinedBoozerResidual(Optimizable):
         self.grid_multiplier = grid_multiplier
         self.include_label_constraint = include_label_constraint
         self.weight_inv_modB = weight_inv_modB
+        self.threshold = float(threshold)
 
         phis, thetas = _quadpoints_for_multiplier(in_surface, grid_multiplier)
 
@@ -192,7 +193,11 @@ class RefinedBoozerResidual(Optimizable):
                 (Jtil, constraint_scale * dl[None, :]),
                 axis=0,
             )
-        self._J = 0.5 * np.sum(rtil**2)
+        residual_value = 0.5 * np.sum(rtil**2)
+        self._J = max(0.0, residual_value - self.threshold)
+        if residual_value <= self.threshold:
+            self._dJ = Derivative({self.biotsavart: np.zeros_like(self.biotsavart.x)})
+            return
 
         dJ_by_dB = _boozer_residual_dJ_by_dB(r, r_dB, sqrt_n)
         dJ_by_dcoils = self.biotsavart.B_vjp(dJ_by_dB)
@@ -234,7 +239,16 @@ class RefinedBoozerResidual(Optimizable):
             I=I,
         )
 
-        return _boozer_residual_dJ_by_dB(r, r_dB, sqrt_n)
+        residual_value = 0.5 * np.sum((r / sqrt_n) ** 2)
+        if self.include_label_constraint:
+            constraint_scale = np.sqrt(self.constraint_weight)
+            label_residual = self.boozer_surface.label.J() - self.boozer_surface.targetlabel
+            residual_value += 0.5 * (constraint_scale * label_residual) ** 2
+        dJ_by_dB = _boozer_residual_dJ_by_dB(r, r_dB, sqrt_n)
+        if residual_value <= self.threshold:
+            return np.zeros_like(dJ_by_dB)
+
+        return dJ_by_dB
 
 
 class BoozerResidualExact(RefinedBoozerResidual):

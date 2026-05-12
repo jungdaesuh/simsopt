@@ -7,6 +7,7 @@ from scipy.spatial.distance import cdist
 
 from simsopt.geo import SurfaceRZFourier
 
+from banana_opt.hardware_contracts import COIL_LENGTH_MIN_FRACTION
 from banana_opt.hardware_constraint_schema import (
     build_hardware_constraint_status,
     build_threshold_overrides,
@@ -283,6 +284,9 @@ def evaluate_single_stage_hardware_constraints(
     banana_current_A=None,
     banana_current_max_A=None,
 ):
+    length_min_target = (
+        None if length_target is None else COIL_LENGTH_MIN_FRACTION * float(length_target)
+    )
     shared_threshold_inputs = (
         ("coil_coil_spacing", cc_dist),
         ("coil_surface_spacing", cs_dist),
@@ -293,10 +297,14 @@ def evaluate_single_stage_hardware_constraints(
         ("banana_current", banana_current_max_A),
     )
     search_threshold_overrides = build_threshold_overrides(
-        shared_threshold_inputs + (("coil_length", length_target),)
+        shared_threshold_inputs
+        + (
+            ("coil_length", length_target),
+            ("coil_length_min", length_min_target),
+        )
     )
     artifact_threshold_overrides = build_threshold_overrides(
-        shared_threshold_inputs
+        shared_threshold_inputs + (("coil_length_min", length_min_target),)
     )
     measured_values = {
         "coil_coil_spacing": curve_curve_min_dist,
@@ -304,6 +312,7 @@ def evaluate_single_stage_hardware_constraints(
         "surface_vessel_spacing": surface_vessel_min_dist,
         "max_curvature": max_curvature,
         "coil_length": coil_length,
+        "coil_length_min": coil_length,
         "poloidal_extent": poloidal_extent_rad,
         "tf_current": tf_current_A,
         "banana_current": banana_current_A,
@@ -334,6 +343,7 @@ def evaluate_single_stage_hardware_constraints(
         "curvature_threshold": float(curvature_threshold),
         "coil_length": _optional_float(coil_length),
         "length_target": _optional_float(length_target),
+        "length_min_target": _optional_float(length_min_target),
         "poloidal_extent_rad": _optional_float(poloidal_extent_rad),
         "poloidal_extent_threshold_rad": _optional_float(
             poloidal_extent_threshold_rad

@@ -607,9 +607,10 @@ class SingleStageExampleTests(unittest.TestCase):
                 self.biotsavart = biotsavart
 
         class _Residual:
-            def __init__(self, boozer_surface, biotsavart):
+            def __init__(self, boozer_surface, biotsavart, *, threshold=0.0):
                 self.boozer_surface = boozer_surface
                 self.biotsavart = biotsavart
+                self.threshold = threshold
 
         class _ExactResidual(_Residual):
             pass
@@ -645,6 +646,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 "search",
                 surface_data,
                 ["coil"],
+                boozer_residual_threshold=1.0e-4,
             )
             final_terms = module.build_boozer_derived_objective_terms(
                 "final",
@@ -668,6 +670,8 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertIsInstance(search_terms["brs"][0], patched_types.residual_cls)
         self.assertNotIsInstance(search_terms["brs"][0], patched_types.exact_residual_cls)
         self.assertIsInstance(final_terms["brs"][0], patched_types.exact_residual_cls)
+        self.assertEqual(search_terms["brs"][0].threshold, 1.0e-4)
+        self.assertEqual(search_terms["brs"][1].threshold, 1.0e-4)
         self.assertEqual(len(patched_types.biot_savarts), 4)
 
     def test_boozer_residual_stage_selection_keeps_exact_residual_final_only(self):
@@ -686,6 +690,28 @@ class SingleStageExampleTests(unittest.TestCase):
                 module.boozer_residual_class_for_stage("final"),
                 patched_types.exact_residual_cls,
             )
+
+    def test_boozer_residual_threshold_for_stage_skips_final_and_thresholded_physics(
+        self,
+    ):
+        module = self.load_module()
+
+        cases = (
+            ("search", "alm", "weighted_sum", 1.0e-4),
+            ("final", "alm", "weighted_sum", 0.0),
+            ("search", "alm", "thresholded_physics", 0.0),
+        )
+        for stage, constraint_method, alm_formulation, expected in cases:
+            with self.subTest(stage=stage, alm_formulation=alm_formulation):
+                self.assertEqual(
+                    module.boozer_residual_threshold_for_stage(
+                        stage,
+                        constraint_method=constraint_method,
+                        alm_formulation=alm_formulation,
+                        alm_boozer_threshold=1.0e-4,
+                    ),
+                    expected,
+                )
 
     def test_frontier_reference_metrics_share_boozer_objective_biot_savarts(self):
         module = self.load_module()
@@ -1190,6 +1216,60 @@ class SingleStageExampleTests(unittest.TestCase):
 
         self.assertEqual(residual_calls, [(1, True, TEST_BOOZER_I)])
         self.assertEqual(biotsavart.b_and_dB_vjp_calls, 1)
+
+    def test_refined_boozer_residual_threshold_clamps_value_and_gradient(self):
+        module = self.load_module()
+        residual_module = self.residual_module(module)
+        _, boozer_surface, biotsavart = self.build_differentiable_boozer_case(
+            current_I=TEST_BOOZER_I,
+            weight_inv_modB=True,
+        )
+
+        with self.patched_boozer_residual_dB_evaluators(
+            (residual_module,),
+            self.differentiable_residual_dB,
+        ):
+            raw = residual_module.RefinedBoozerResidual(
+                boozer_surface,
+                biotsavart,
+                grid_multiplier=1,
+                include_label_constraint=True,
+                weight_inv_modB=None,
+            )
+            raw_value = raw.J()
+            raw_gradient = raw.dJ(partials=True)(biotsavart)
+            active = residual_module.RefinedBoozerResidual(
+                boozer_surface,
+                biotsavart,
+                grid_multiplier=1,
+                include_label_constraint=True,
+                weight_inv_modB=None,
+                threshold=raw_value / 2.0,
+            )
+            inactive = residual_module.RefinedBoozerResidual(
+                boozer_surface,
+                biotsavart,
+                grid_multiplier=1,
+                include_label_constraint=True,
+                weight_inv_modB=None,
+                threshold=raw_value * 2.0,
+            )
+
+            self.assertGreater(raw_value, 0.0)
+            self.assertAlmostEqual(active.J(), raw_value / 2.0)
+            np.testing.assert_allclose(
+                active.dJ(partials=True)(biotsavart),
+                raw_gradient,
+            )
+            self.assertEqual(inactive.J(), 0.0)
+            np.testing.assert_allclose(
+                inactive.dJ(partials=True)(biotsavart),
+                np.zeros_like(raw_gradient),
+            )
+            np.testing.assert_allclose(
+                inactive.dJ_by_dB(),
+                np.zeros_like(raw.dJ_by_dB()),
+            )
 
     def test_boozer_residual_exact_matches_refined_k4_compatibility_config(self):
         module = self.load_module()
@@ -2858,6 +2938,44 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertIn("max_curvature", status["violations"][1])
         self.assertIn("coil_length", status["violations"][2])
 
+    def test_stage2_hardware_constraints_report_length_floor(self):
+        module = load_stage2_module()
+
+        status = module.evaluate_stage2_hardware_constraints(
+            coil_length=0.8,
+            length_target=1.9,
+            curve_curve_min_dist=0.05,
+            cc_threshold=0.05,
+            max_curvature=40.0,
+            curvature_threshold=40.0,
+        )
+
+        self.assertFalse(status["success"])
+        self.assertEqual(
+            status["violations"],
+            ["coil_length_min 0.800000 below threshold 0.950000"],
+        )
+        self.assertEqual(status["length_min_target"], 0.95)
+
+    def test_stage2_hardware_constraints_use_hard_upper_length_for_artifacts(self):
+        module = load_stage2_module()
+
+        status = module.evaluate_stage2_hardware_constraints(
+            coil_length=1.95,
+            length_target=1.9,
+            curve_curve_min_dist=0.05,
+            cc_threshold=0.05,
+            max_curvature=40.0,
+            curvature_threshold=40.0,
+        )
+
+        self.assertTrue(status["success"])
+        self.assertEqual(
+            status["constraints"]["coil_length"]["threshold"],
+            module.COIL_LENGTH_HARD_LIMIT_M,
+        )
+        self.assertEqual(status["length_target"], 1.9)
+
     def test_single_stage_hardware_constraints_report_each_violation(self):
         module = load_single_stage_example_module()
 
@@ -2941,6 +3059,34 @@ class HardwareConstraintTests(unittest.TestCase):
             search_status["constraints"]["banana_current"]["threshold"],
             1.6e4,
         )
+
+    def test_single_stage_hardware_constraints_report_artifact_length_floor(self):
+        module = load_single_stage_example_module()
+
+        status = module.evaluate_single_stage_hardware_constraints(
+            curve_curve_min_dist=0.05,
+            cc_dist=0.05,
+            curve_surface_min_dist=0.02,
+            cs_dist=0.02,
+            surface_vessel_min_dist=0.04,
+            ss_dist=0.04,
+            max_curvature=40.0,
+            curvature_threshold=40.0,
+            coil_length=0.8,
+            length_target=1.9,
+        )
+        artifact_status = status["artifact_hardware_status"]
+
+        self.assertFalse(artifact_status["success"])
+        self.assertEqual(
+            artifact_status["violations"],
+            ["coil_length_min 0.800000 below threshold 0.950000"],
+        )
+        self.assertEqual(
+            artifact_status["constraints"]["coil_length_min"]["threshold"],
+            0.95,
+        )
+        self.assertEqual(status["length_min_target"], 0.95)
 
     def test_surface_vessel_min_dist_uses_single_source_for_results(self):
         module = load_single_stage_example_module()
@@ -10131,6 +10277,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             single_stage_goal_mode="single_stage",
             constraint_method="alm",
             length_weight=1.0,
+            alm_boozer_threshold=0.2,
         )
 
         with self.assertRaisesRegex(
@@ -10148,6 +10295,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             single_stage_goal_mode="single_stage",
             constraint_method="alm",
             length_weight=0.0,
+            alm_boozer_threshold=0.2,
         )
         module.validate_single_stage_alm_formulation_args(args)
 

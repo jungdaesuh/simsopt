@@ -169,7 +169,7 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         kind="lower_bound",
         threshold=COIL_LENGTH_MIN_TARGET_M,
         alm_activity_tolerance_fraction=ALM_ACTIVITY_TOLERANCE_FRACTION,
-        applies_to=frozenset({"alm"}),
+        applies_to=frozenset({"alm", "artifact"}),
         traversal_policy="allowed",
     ),
     HardwareConstraintSpec(
@@ -263,6 +263,7 @@ _ARTIFACT_VALUE_FIELD_BY_NAME = {
     "surface_vessel_spacing": ("surface_vessel_min_dist", "SURFACE_VESSEL_MIN_DIST"),
     "max_curvature": ("max_curvature", "MAX_CURVATURE"),
     "coil_length": ("coil_length", "COIL_LENGTH"),
+    "coil_length_min": ("coil_length", "COIL_LENGTH"),
     "poloidal_extent": ("poloidal_extent_rad", "POLOIDAL_EXTENT_RAD"),
     "banana_current": ("banana_current_A", "BANANA_CURRENT_A"),
     "tf_current": ("tf_current_A", "TF_CURRENT_A"),
@@ -271,6 +272,7 @@ _ARTIFACT_VALUE_FIELD_BY_NAME = {
 }
 _ARTIFACT_THRESHOLD_FIELD_BY_NAME = {
     "coil_length": ("length_target", "LENGTH_TARGET"),
+    "coil_length_min": ("length_min_target", "LENGTH_MIN_TARGET"),
     "poloidal_extent": (
         "poloidal_extent_threshold_rad",
         "POLOIDAL_EXTENT_THRESHOLD_RAD",
@@ -536,7 +538,7 @@ def hardware_constraint_artifact_payload_field_names(
                 f"{prefix}HARDWARE_CONSTRAINT_VIOLATIONS",
             )
         )
-    return tuple(field_names)
+    return tuple(dict.fromkeys(field_names))
 
 
 def build_hardware_constraint_artifact_payload_fields(

@@ -20,6 +20,7 @@ from banana_opt.coil_groups import (
     build_contiguous_manifest,
 )
 from banana_opt.hardware_contracts import (
+    COIL_LENGTH_MIN_FRACTION,
     TF_CURRENT_HARD_LIMIT_A,
     fixed_stage2_clearance_contract,
     is_major_radius_offspec,
@@ -1208,9 +1209,10 @@ def evaluate_stage2_hardware_constraints(
     final_plasma_major_radius_m=None,
     final_plasma_minor_radius_m=None,
 ):
+    length_min_target = COIL_LENGTH_MIN_FRACTION * float(length_target)
     artifact_threshold_overrides = build_threshold_overrides(
         (
-            ("coil_length", length_target),
+            ("coil_length_min", length_min_target),
             ("coil_coil_spacing", cc_threshold),
             ("max_curvature", curvature_threshold),
             ("coil_surface_spacing", coil_surface_threshold),
@@ -1222,6 +1224,7 @@ def evaluate_stage2_hardware_constraints(
     )
     measured_values = {
         "coil_length": coil_length,
+        "coil_length_min": coil_length,
         "coil_coil_spacing": curve_curve_min_dist,
         "max_curvature": max_curvature,
         "coil_surface_spacing": curve_surface_min_dist,
@@ -1241,6 +1244,7 @@ def evaluate_stage2_hardware_constraints(
         {
             "coil_length": float(coil_length),
             "length_target": float(length_target),
+            "length_min_target": float(length_min_target),
             "curve_curve_min_dist": float(curve_curve_min_dist),
             "cc_threshold": float(cc_threshold),
             "max_curvature": float(max_curvature),
