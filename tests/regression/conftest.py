@@ -1,65 +1,84 @@
 """Regression panel pytest configuration.
 
-Pins ``OMP_NUM_THREADS=1`` for determinism (if not set externally) and
-auto-skips the snapshot-dependent tests when the runtime platform does not
-match the platform the snapshots were generated on.
+Strict env / platform gate for the colleague-artifact regression panel.
+The panel asserts SHA-equality on snapshots generated under specific
+conditions (Darwin/arm64, Accelerate BLAS, numpy version recorded in the
+snapshot `_meta`, `OMP_NUM_THREADS=1`). Running with mismatched
+conditions would produce spurious failures that have nothing to do with
+simsopt-core correctness.
 
-See ``docs/regression_panel_colleague_artifacts_2026-05-11.md`` §6.4 (platform
-pinning) and §11 R2 (cross-platform mitigation).
+Behavior: when any gate condition is violated, every test in
+`tests/regression/test_colleague_artifact.py` and
+`tests/regression/test_negative_control.py` is skipped with a clear
+reason. The gate does **not** modify the operator's environment (no
+`os.environ.setdefault`) — silent env mutation is a footgun.
+
+See ``docs/regression_panel_colleague_artifacts_2026-05-11.md`` §5.5 and
+§6.4. Tests/regression/README.md documents the local-only acceptance
+line.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import platform
-import warnings
+from pathlib import Path
 
+import numpy as np
 import pytest
 
-# Set OMP threads to 1 as early as possible — before BLAS is initialized by
-# any heavy import in the regression-dir tests. This affects subprocesses and
-# any libraries that read the env at first use. If a parallel BLAS is already
-# initialized in this process (e.g., numpy was imported by tests/conftest.py
-# first), this set has no effect — see the pytest_configure check below for
-# the runtime warning.
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-
-# Snapshot-pinned platform — must match the one used by
-# tests/regression/_generate_colleague_snapshots.py at generation time.
 _SNAPSHOT_SYSTEM = "darwin"
 _SNAPSHOT_MACHINE = "arm64"
+_SNAPSHOT_DIR = Path(__file__).resolve().parent / "colleague_artifact_snapshots"
 
 
-def pytest_configure(config):
-    if os.environ.get("OMP_NUM_THREADS") != "1":
-        warnings.warn(
-            f"OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS', '<unset>')!r}; "
-            "regression panel requires '1' for ULP-tight snapshot reproducibility. "
-            "Re-run with OMP_NUM_THREADS=1 in the environment.",
-            UserWarning,
+def _load_snapshot_meta():
+    """Return a representative snapshot's _meta, or None if no snapshot exists."""
+    snaps = sorted(_SNAPSHOT_DIR.glob("*.snapshot.json"))
+    if not snaps:
+        return None
+    with open(snaps[0]) as f:
+        return json.load(f).get("_meta", {})
+
+
+def _gate_reasons():
+    """Collect every condition under which the panel must skip. Returns a list of human-readable strings; empty means gate is open."""
+    reasons = []
+
+    sys_name = platform.system().lower()
+    machine = platform.machine()
+    if (sys_name, machine) != (_SNAPSHOT_SYSTEM, _SNAPSHOT_MACHINE):
+        reasons.append(
+            f"platform: got {sys_name}/{machine}, snapshots pinned to "
+            f"{_SNAPSHOT_SYSTEM}/{_SNAPSHOT_MACHINE} (see plan §6.4)"
         )
+
+    omp = os.environ.get("OMP_NUM_THREADS")
+    if omp != "1":
+        reasons.append(
+            f"OMP_NUM_THREADS={omp!r}, required '1' for ULP-tight BLAS reduction order"
+        )
+
+    meta = _load_snapshot_meta()
+    if meta is not None:
+        expected_numpy = meta.get("numpy_version")
+        if expected_numpy and np.__version__ != expected_numpy:
+            reasons.append(
+                f"numpy: got {np.__version__}, snapshot generated under {expected_numpy}"
+            )
+
+    return reasons
 
 
 def pytest_collection_modifyitems(config, items):
-    """Auto-skip snapshot-dependent tests on a non-baseline platform.
-
-    The negative-control and colleague-artifact panels rely on the snapshots
-    under ``colleague_artifact_snapshots/`` which are Darwin/arm64-pinned by
-    construction (see plan §6.4). Running them elsewhere produces spurious
-    SHA mismatches that have nothing to do with simsopt-core correctness.
-    """
-    sys_name = platform.system().lower()
-    machine = platform.machine()
-    if (sys_name, machine) == (_SNAPSHOT_SYSTEM, _SNAPSHOT_MACHINE):
+    """Skip every panel + negative-control test when any gate condition fails."""
+    reasons = _gate_reasons()
+    if not reasons:
         return
 
     skip = pytest.mark.skip(
-        reason=(
-            f"Regression panel snapshots are pinned to "
-            f"{_SNAPSHOT_SYSTEM}/{_SNAPSHOT_MACHINE}; running on "
-            f"{sys_name}/{machine}. To enable on a second platform, generate a "
-            f"platform-keyed snapshot (see plan §6.4) — do not relax tolerances."
-        )
+        reason="regression panel gate: " + "; ".join(reasons)
     )
     for item in items:
         path_str = str(item.fspath)
