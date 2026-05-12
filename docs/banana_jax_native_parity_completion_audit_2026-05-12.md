@@ -11,8 +11,10 @@ but the completion contract still requires current-SHA real CUDA evidence:
 
 ## Current Tree
 
-- HEAD inspected after scoped commit/push:
+- Implementation proof-state commit inspected after scoped commit/push:
   `03a3243c76f377c303efdb00d0efbcf12e8d69b5`.
+- Later audit-only status commits may advance branch `HEAD`; use
+  `git rev-parse HEAD` for the live audit document commit.
 - The intended parity/fix files are committed in
   `03a3243c76f377c303efdb00d0efbcf12e8d69b5` and clean after commit:
   - `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py`
@@ -28,9 +30,10 @@ but the completion contract still requires current-SHA real CUDA evidence:
   VTU, and scratch files remain unclaimed and were not treated as proof.
 - Local runtime: JAX `0.9.2`, jaxlib `0.9.2`, backend `cpu`, devices
   `[('cpu', 'cpu')]`.
-- CUDA proof state: `nvidia-smi` is unavailable locally, and
+- CUDA proof state: `nvidia-smi` is unavailable locally, and for the
+  implementation proof-state commit
   `rg -l "03a3243c76f377c303efdb00d0efbcf12e8d69b5" .artifacts/runpod_prod_signoff .artifacts/parity .artifacts/pytest`
-  returned no current-SHA artifacts.
+  returned no proof-state CUDA artifacts.
 
 ## Lane Verdicts
 
@@ -253,10 +256,11 @@ git ls-remote --heads fork gpu-purity-stage2-20260405
 git rev-list --left-right --count fork/gpu-purity-stage2-20260405...HEAD
 ```
 
-Results: `HEAD` is
-`03a3243c76f377c303efdb00d0efbcf12e8d69b5`; the intended proof-state
-files are clean; the fork branch now resolves to the same SHA; ahead/behind is
-`0 0`.
+Results: implementation proof-state `HEAD` was
+`03a3243c76f377c303efdb00d0efbcf12e8d69b5`; the intended proof-state files
+were clean; the fork branch resolved to the same SHA; ahead/behind was `0 0`.
+Subsequent commits in this file are audit-only status updates, not code/test
+changes to the proof path.
 
 ## Remote Proof Launch Feasibility
 
