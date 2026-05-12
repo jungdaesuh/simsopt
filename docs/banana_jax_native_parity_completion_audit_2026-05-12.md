@@ -11,8 +11,10 @@ but the completion contract still requires current-SHA real CUDA evidence:
 
 ## Current Tree
 
-- HEAD inspected: `215891905d357ab370b2a5ba21d47eab7efec99d`.
-- Dirty tracked files are the intended parity/fix files:
+- HEAD inspected after scoped commit/push:
+  `03a3243c76f377c303efdb00d0efbcf12e8d69b5`.
+- The intended parity/fix files are committed in
+  `03a3243c76f377c303efdb00d0efbcf12e8d69b5` and clean after commit:
   - `examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py`
   - `src/simsopt/geo/boozersurface_jax.py`
   - `src/simsopt/geo/optimizer_jax.py`
@@ -21,12 +23,13 @@ but the completion contract still requires current-SHA real CUDA evidence:
   - `tests/geo/test_single_stage_example.py`
   - `tests/geo/test_surface_objectives_jax.py`
   - `tests/integration/test_single_stage_physics_parity.py`
+  - `docs/banana_jax_native_parity_completion_audit_2026-05-12.md`
 - Many preexisting untracked `.artifacts/`, `.claude/`, `.conda/`, image,
   VTU, and scratch files remain unclaimed and were not treated as proof.
 - Local runtime: JAX `0.9.2`, jaxlib `0.9.2`, backend `cpu`, devices
   `[('cpu', 'cpu')]`.
 - CUDA proof state: `nvidia-smi` is unavailable locally, and
-  `rg -l "215891905d357ab370b2a5ba21d47eab7efec99d" .artifacts/runpod_prod_signoff .artifacts/parity .artifacts/pytest`
+  `rg -l "03a3243c76f377c303efdb00d0efbcf12e8d69b5" .artifacts/runpod_prod_signoff .artifacts/parity .artifacts/pytest`
   returned no current-SHA artifacts.
 
 ## Lane Verdicts
@@ -226,11 +229,34 @@ git rev-parse HEAD
 git status --short
 python -c "import jax, jaxlib; print('jax', jax.__version__); print('jaxlib', jaxlib.__version__); print('backend', jax.default_backend()); print('devices', [(d.platform, d.device_kind) for d in jax.devices()])"
 nvidia-smi
-rg -l "215891905d357ab370b2a5ba21d47eab7efec99d" .artifacts/runpod_prod_signoff .artifacts/parity .artifacts/pytest
+rg -l "03a3243c76f377c303efdb00d0efbcf12e8d69b5" .artifacts/runpod_prod_signoff .artifacts/parity .artifacts/pytest
 ```
 
 Results: current SHA confirmed; local backend is CPU; `nvidia-smi` not found;
 current-SHA artifact search returned no files.
+
+After committing the scoped proof-state slice:
+
+```bash
+git rev-parse HEAD
+git status --short -- docs/banana_jax_native_parity_completion_audit_2026-05-12.md \
+  examples/single_stage_optimization/SINGLE_STAGE/single_stage_banana_example.py \
+  src/simsopt/geo/boozersurface_jax.py \
+  src/simsopt/geo/optimizer_jax.py \
+  src/simsopt/geo/surfaceobjectives_jax.py \
+  tests/geo/test_boozersurface_jax_private.py \
+  tests/geo/test_single_stage_example.py \
+  tests/geo/test_surface_objectives_jax.py \
+  tests/integration/test_single_stage_physics_parity.py
+git push fork gpu-purity-stage2-20260405
+git ls-remote --heads fork gpu-purity-stage2-20260405
+git rev-list --left-right --count fork/gpu-purity-stage2-20260405...HEAD
+```
+
+Results: `HEAD` is
+`03a3243c76f377c303efdb00d0efbcf12e8d69b5`; the intended proof-state
+files are clean; the fork branch now resolves to the same SHA; ahead/behind is
+`0 0`.
 
 ## Remote Proof Launch Feasibility
 
@@ -245,13 +271,11 @@ remaining release blocker.
 - `runpodctl user` succeeds but reports a negative client balance, and
   `runpodctl pod list` returns `[]`; no existing Runpod pod can run the current
   proof.
-- The fork branch `gpu-purity-stage2-20260405` is 21 commits behind local
-  `HEAD` for this workspace state. `git ls-remote --heads fork
-  gpu-purity-stage2-20260405` reports remote tip
-  `7f5e526ef8a12992a22a3b525f04f794e9c1501e`, while local `HEAD` is
-  `215891905d357ab370b2a5ba21d47eab7efec99d`.
-- The HF production-proof preflight/dry-run against the current SHA failed
-  before launching a paid job:
+- The fork branch `gpu-purity-stage2-20260405` now contains the current
+  proof-state commit
+  `03a3243c76f377c303efdb00d0efbcf12e8d69b5`.
+- The HF production-proof preflight/dry-run against the pushed current SHA
+  passes and emits the expected H200 launch plan:
 
 ```bash
 PATH="$PWD/.artifacts/hf-cli-bin:$PATH" \
@@ -262,40 +286,60 @@ python benchmarks/hf_jobs/launch_production_gpu_proof.py \
   --platform cuda \
   --repo-url https://github.com/jungdaesuh/simsopt.git \
   --repo-ref gpu-purity-stage2-20260405 \
-  --repo-sha 215891905d357ab370b2a5ba21d47eab7efec99d \
+  --repo-sha 03a3243c76f377c303efdb00d0efbcf12e8d69b5 \
   --single-stage-jax-runtime-seed-spec benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json
 ```
 
-Result:
+Result: preflight JSON confirms `repo_ref_commit` equals
+`03a3243c76f377c303efdb00d0efbcf12e8d69b5`, `platform` is `cuda`, hardware is
+`h200`, and the command would clone the pushed branch and check out the exact
+current SHA.
+
+- The real foreground H200 proof launch was attempted with the same pushed
+  SHA:
+
+```bash
+PATH="$PWD/.artifacts/hf-cli-bin:$PATH" \
+SIMSOPT_HF_GPU_IMAGE=ghcr.io/jungdaesuh/simsopt-jax-hf-production-proof:banana-surface-parity-m7-image-r1 \
+python benchmarks/hf_jobs/launch_production_gpu_proof.py \
+  --hardware h200 \
+  --platform cuda \
+  --no-detach \
+  --timeout 8h \
+  --repo-url https://github.com/jungdaesuh/simsopt.git \
+  --repo-ref gpu-purity-stage2-20260405 \
+  --repo-sha 03a3243c76f377c303efdb00d0efbcf12e8d69b5 \
+  --single-stage-jax-runtime-seed-spec benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json
+```
+
+Result: Hugging Face Jobs rejected the launch before job creation:
 
 ```text
-repo SHA 215891905d357ab370b2a5ba21d47eab7efec99d is not present on https://github.com/jungdaesuh/simsopt.git under refs/heads/gpu-purity-stage2-20260405; HF checkout would fail.
+Error: Client error '402 Payment Required' for url 'https://huggingface.co/api/jobs/CreativeEngineer'
+Pre-paid credit balance is insufficient - add more credits to your account to use Jobs.
 ```
 
 - The local tree contains `.github/workflows/jax_h200_production_proof.yml`
-  in tracked history, but the fork branch is 21 commits behind local `HEAD`.
-  `gh workflow list --repo jungdaesuh/simsopt --all` currently exposes
-  `JAX HF CUDA Image` and `JAX Smoke Tests`, not the local
-  `JAX H200 Production Proof` workflow.
+  in tracked history, but `gh workflow list --repo jungdaesuh/simsopt --all`
+  currently exposes `JAX HF CUDA Image` and `JAX Smoke Tests`, not
+  `JAX H200 Production Proof`. The direct HF launcher no longer depends on
+  that workflow listing because the pushed branch/SHA preflight now passes.
 
 ## Remaining Blockers
 
-1. Make the current proof state remotely executable: commit and push the exact
-   proof state to a reachable ref, or use an approved remote path that applies
-   the exact local patch and records the dirty-tree status as part of the proof.
-2. Add usable GPU credits/capacity: Runpod is currently blocked by negative
-   balance/no pods, and an HF H200 run should not be expected to succeed until
-   account funding is available.
-3. Run the current tree on real CUDA hardware and emit a current-SHA proof
+1. Add usable GPU credits/capacity: HF Jobs H200 launch is currently rejected
+   with `402 Payment Required`; Runpod is also blocked by negative balance/no
+   pods.
+2. Run the current tree on real CUDA hardware and emit a current-SHA proof
    bundle with exact command, dirty-tree status, JAX/jaxlib versions, x64 mode,
    backend, CUDA/XLA flags, `CUDA_VISIBLE_DEVICES`, `nvidia-smi` facts,
    driver/runtime version, peak RSS, peak GPU memory, pass/fail metadata, and
    parity JSON.
-4. Prove CPU/C++/SciPy oracle vs JAX GPU at identical fixed states, not only
+3. Prove CPU/C++/SciPy oracle vs JAX GPU at identical fixed states, not only
    JAX-vs-JAX agreement.
-5. Prove JAX CPU vs JAX GPU agreement on the same current states.
-6. Run the current-SHA E2E GPU path:
+4. Prove JAX CPU vs JAX GPU agreement on the same current states.
+5. Run the current-SHA E2E GPU path:
    Stage 2 strict reduced/full output -> saved spec/restart/output artifacts ->
    single-stage init/continuation -> parity matrix/proof report.
-7. After current CUDA proof exists, update any manifest rows or TODO checkboxes
+6. After current CUDA proof exists, update any manifest rows or TODO checkboxes
    that still point at historical or non-current proof artifacts.
