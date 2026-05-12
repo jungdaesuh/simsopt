@@ -354,13 +354,20 @@ Pre-paid credit balance is insufficient - add more credits to your account to us
   reports `0.0` quota for both "Running On-Demand G and VT instances" and
   "Running On-Demand P instances". The repo also has no AWS/GCP-native proof
   launcher comparable to `benchmarks/hf_jobs/launch_production_gpu_proof.py`.
+- Lightning AI CLI lists GPU machines including `H200`, and a tiny
+  `CPU_SMALL` smoke job can be submitted, inspected as `Completed`, and
+  deleted. That route is not accepted as proof-ready here because
+  `lightning inspect job` exposes only command/image/machine/status/cost, not
+  stdout or proof artifacts, and the repo has no Lightning-native launcher or
+  artifact export contract for the production CUDA proof.
 
 ## Remaining Blockers
 
 1. Add usable GPU credits/capacity: HF Jobs H200 launch is currently rejected
    with `402 Payment Required`; Runpod is blocked by negative balance/no pods;
    GitHub Actions has no registered GPU runners; GCP billing is disabled; and
-   the configured AWS GPU-family quotas are zero.
+   the configured AWS GPU-family quotas are zero. Lightning needs a
+   proof-artifact export path before it can be treated as a valid fallback.
 2. Run the current tree on real CUDA hardware and emit a current-SHA proof
    bundle with exact command, dirty-tree status, JAX/jaxlib versions, x64 mode,
    backend, CUDA/XLA flags, `CUDA_VISIBLE_DEVICES`, `nvidia-smi` facts,
