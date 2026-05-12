@@ -3,13 +3,16 @@
 Date: 2026-05-12
 Branch context: `gpu-purity-stage2-20260405`
 Repo: `/Users/suhjungdae/code/columbia/simsopt-jax`
-Reviewed against current HEAD: `8b471e8e3`
+Prompt base commit: `fa3f877af`
+Source audit base: `8b471e8e3` (parent of the prompt base commit)
+Current review pass: in-flight on top of `fa3f877af` until the next commit
+lands
 
 ## Review status
 
 This revision fixes issues found in the original prompt after checking the
 current tree, upstream SIMSOPT, the repo-local JAX runtime, and official JAX /
-SIMSOPT documentation:
+SIMSOPT / CUDA documentation:
 
 - The default scope is now P0-P2 only. P3-P5 are future-scope inventory in this
   document and must be initialized as skipped unless the human launching the
@@ -27,6 +30,10 @@ SIMSOPT documentation:
   and propose the dependency for human review.
 - `.artifacts/` is not ignored in this repo, so state updates are useful for
   resumption but must not create noisy in-progress commits.
+- Context7 resolution in this review returned `/google/jax`,
+  `/hiddensymmetries/simsopt`, and `/websites/nvidia_cuda`. Upstream SIMSOPT
+  local HEAD and `hiddenSymmetries/simsopt` remote HEAD both resolved to
+  `1b0cc3a96063197cdbdd01559e04c25456fbe6ff`.
 
 ## How to use
 
@@ -127,12 +134,19 @@ Read these local files before selecting work:
   user-visible support boundaries. If these disagree with source, fix the stale
   doc or mark the prompt item blocked.
 
-Official docs to consult before introducing or changing JAX behavior:
+Official docs to consult before introducing or changing JAX, SIMSOPT, or CUDA
+behavior:
 
-- Resolve JAX docs with Context7 first:
-  `npx ctx7@latest library JAX "<full question>"`
-  then:
-  `npx ctx7@latest docs /google/jax "<full question>"`.
+- Use Context7 under the local three-command budget. This review already
+  resolved the relevant IDs, so use these IDs directly for docs unless a new
+  library is introduced:
+  - JAX: `npx ctx7@latest docs /google/jax "<full question>"`
+  - SIMSOPT:
+    `npx ctx7@latest docs /hiddensymmetries/simsopt "<full question>"`
+  - CUDA: `npx ctx7@latest docs /websites/nvidia_cuda "<full question>"`
+  If a new library is introduced, first run
+  `npx ctx7@latest library <name> "<full question>"`, then fetch docs for the
+  chosen `/org/project` ID.
 - Use official JAX pages when the issue involves these topics:
   - `https://docs.jax.dev/en/latest/jit-compilation.html`
   - `https://docs.jax.dev/en/latest/transfer_guard.html`
@@ -144,6 +158,11 @@ Official docs to consult before introducing or changing JAX behavior:
   - `https://simsopt.readthedocs.io/latest/simsopt_user.field.html`
   - `https://simsopt.readthedocs.io/latest/simsopt_user.geo.html`
   - `https://simsopt.readthedocs.io/latest/simsopt_user.objectives.html`
+- Use official CUDA / NVIDIA docs when the issue involves GPU runtime,
+  driver/toolkit compatibility, streams, memory, or proof artifact claims:
+  - `https://docs.jax.dev/en/latest/installation.html#nvidia-gpu`
+  - `https://docs.nvidia.com/deploy/cuda-compatibility/`
+  - `https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html`
 
 Runtime preflight:
 
@@ -159,6 +178,17 @@ PY
 
 If the repo-local interpreter is missing or imports fail, mark environment
 validation BLOCKED. Do not switch to another Python silently.
+
+Local GPU preflight:
+
+```bash
+command -v nvidia-smi
+nvidia-smi --query-gpu=name,driver_version,cuda_version --format=csv,noheader
+```
+
+If `nvidia-smi` is absent, exits nonzero, or reports no CUDA-capable device,
+mark local GPU validation BLOCKED and keep all GPU evidence fields
+`not_claimed` or `deferred`. Do not infer CUDA success from the CPU backend.
 
 ## 1. State file (resumption protocol)
 
@@ -184,7 +214,7 @@ Commit state only as part of a completed or blocked item commit.
         "adapter_module": "src/simsopt/.../*_jax*.py",
         "parity_test": "tests/...::Test...",
         "transfer_guard_test": "tests/...",
-        "multi_device_test": "tests/subprocess/...",
+        "multi_device_test": "tests/test_jax_import_smoke.py::...",
         "parity_lane": "direct-kernel|derivative-heavy|adjoint|...",
         "cuda_smoke": "not_claimed|deferred|verified",
         "commit_sha": "<sha>"
@@ -246,9 +276,14 @@ as if they were CPU-only. For each item, audit current source first, identify
 the remaining CPU/host-transfer edge if one exists, and either close that edge
 or mark the item complete with evidence.
 
-1. [ ] `field/coilobjective.py` and remaining wrappers around `geo/_distance_jax.py`
+1. [ ] `field/coilobjective.py` (`CurrentPenalty`) and remaining
+   `geo/curveobjectives.py` wrappers around `geo/_distance_jax.py`
 2. [ ] `field/selffield.py` - regularized self-field JAX coverage and tests
-3. [ ] `geo/curveobjectives.py` - Lp curvature / length / centerline-offset
+3. [ ] `geo/curveobjectives.py` non-distance objectives - `CurveLength`,
+   `LpCurveCurvature(Barrier)`, `LpCurveTorsion`, `ArclengthVariation`,
+   `MeanSquaredCurvature`, `LinkingNumber`, `FramedCurveTwist`. Distance
+   classes (`CurveCurveDistance(Barrier)`, `CurveSurfaceDistance`,
+   `MinimumDistance`, `MinCurveCurveDistance`) are owned by item 1.
 4. [ ] `geo/strain_optimization.py` - strain accumulators / postprocessing
 5. [ ] `field/force.py` - finite-build force kernel pre-compute layers
 
@@ -267,7 +302,7 @@ block the item instead of adding the dependency.
 
 ### Tier P2 - active: Python wrappers that depend on Tier P1
 
-9. [ ] `field/magneticfieldclasses.py` (`Dommaschk`, `Reiman`, `DipoleField`,
+9. [ ] `field/magneticfieldclasses.py` (`Dommaschk`, `Reiman`,
    `InterpolatedField`) - depends on items 6 and 7
 10. [ ] `field/tracing.py` - depends on item 8
 
@@ -282,19 +317,20 @@ block the item instead of adding the dependency.
 14. [ ] `simsoptpp/dipole_field.cpp` to `jax_core/dipole_field.py`
 15. [ ] `simsoptpp/permanent_magnet_optimization.cpp` to
     `jax_core/pm_optimization.py`
-16. [ ] `geo/permanent_magnet_grid.py` - depends on 14 and 15
-17. [ ] `solve/permanent_magnet_optimization.py` - depends on 14 and 15
-18. [ ] `simsoptpp/wireframe_optimization.cpp`,
+16. [ ] `field/magneticfieldclasses.py` (`DipoleField`) - depends on 14
+17. [ ] `geo/permanent_magnet_grid.py` - depends on 14 and 15
+18. [ ] `solve/permanent_magnet_optimization.py` - depends on 14 and 15
+19. [ ] `simsoptpp/wireframe_optimization.cpp`,
     `magneticfield_wireframe.cpp`, and `wireframe_field_impl.h` to
     `jax_core/wireframe.py`
-19. [ ] `field/wireframefield.py` - depends on 18
-20. [ ] `solve/wireframe_optimization.py` - depends on 18
+20. [ ] `field/wireframefield.py` - depends on 19
+21. [ ] `solve/wireframe_optimization.py` - depends on 19
 
 ### Tier P5 - future-scope; skipped unless `active_scope` includes P5
 
-21. [ ] `simsoptpp/boozerradialinterpolant.cpp` and
+22. [ ] `simsoptpp/boozerradialinterpolant.cpp` and
     `boozermagneticfield*.h` to `jax_core/boozer_radial_interp.py`
-22. [ ] `field/boozermagneticfield.py` - depends on 21
+23. [ ] `field/boozermagneticfield.py` - depends on 22
 
 Skip list (do not port; if you touch these, escalate):
 
@@ -413,15 +449,16 @@ running `pytest tests/subprocess/` directly collects zero tests. The real
 4-device entries live in `tests/test_jax_import_smoke.py` (e.g.
 `test_grouped_biot_savart_coil_collective_parity_and_lowering`,
 `test_grouped_biot_savart_accepts_explicit_point_sharding`,
-`test_pairwise_penalty_accepts_explicit_row_sharding`). The outer test sets
-its own subprocess env (`XLA_FLAGS=--xla_force_host_platform_device_count=4`,
-`SIMSOPT_JAX_SHARDING=…`); re-running the smoke file with the same flag at
-the parent level just exposes the multi-device proxy assertion in the parent
-process too:
+`test_pairwise_penalty_accepts_explicit_row_sharding`). The outer test
+already propagates the multi-device env (`XLA_FLAGS=--xla_force_host_platform_device_count=4`,
+`SIMSOPT_JAX_SHARDING=…`) into its own subprocess via
+`_build_clean_subprocess_env` / `extra_env`, and the parent process performs
+no multi-device assertion; therefore do NOT prepend `XLA_FLAGS` at the parent
+level. On slower hosts the extra parent-side 4-device JAX initialization can
+push the subprocess past its hard-coded 60 s timeout. Run:
 
 ```bash
-XLA_FLAGS=--xla_force_host_platform_device_count=4 \
-  "$PY" -m pytest tests/test_jax_import_smoke.py \
+"$PY" -m pytest tests/test_jax_import_smoke.py \
   -k "collective or sharding or subprocess" -v
 ```
 
