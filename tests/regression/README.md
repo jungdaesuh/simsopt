@@ -7,6 +7,17 @@ configurations supplied by a collaborator's optimization artifacts.
 Plan and design rationale:
 [`docs/regression_panel_colleague_artifacts_2026-05-11.md`](../../docs/regression_panel_colleague_artifacts_2026-05-11.md).
 
+## Scope and acceptance
+
+This panel is a **local Darwin/arm64 forward gate**, not a CI gate. The
+acceptance line is:
+
+```sh
+OMP_NUM_THREADS=1 python -m pytest tests/regression/ -q
+```
+
+CI integration is intentionally out of scope (see plan §5.5).
+
 ## What this panel proves
 
 For each of the 4 colleague artifacts (`bsurf_opt_{01,02,10,20}kA.json`,

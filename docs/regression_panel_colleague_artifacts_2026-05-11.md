@@ -152,13 +152,17 @@ Additional oracle: Biot-Savart is exactly linear in coil currents. On one loaded
 
 **Size:** ~40 LOC.
 
-### 5.5 CI / pre-commit wiring
+### 5.5 CI / pre-commit wiring — **N/A by user directive (2026-05-12)**
 
-**Where:** `pyproject.toml` (pytest options, only if needed), GitHub Actions config under `.github/workflows/`.
+Originally proposed to add `tests/regression/` to a GitHub Actions workflow with `OMP_NUM_THREADS=1`. Subsequently scoped out: the panel is a **local Darwin/arm64 forward gate** invoked manually:
 
-**What:** `pyproject.toml` already discovers `tests/`, so add config only if the new regression directory is excluded by local tooling. Add `OMP_NUM_THREADS=1` to the test env (determinism). Document in `tests/README.md`.
+```sh
+OMP_NUM_THREADS=1 python -m pytest tests/regression/ -q
+```
 
-**Size:** ~10 LOC of config.
+Active workflow note: `.github/workflows/tests.yml:185-201` runs `coverage run -m unittest discover` over `tests/{configs,core,field,geo,mhd,objectives,solve,util}`. `tests/regression/` is **not** in that list and is not intended to gate CI.
+
+The `tox.ini` `OMP_NUM_THREADS=1` setting in `[testenv]` (`4515bcba6`) remains as documentation-of-intent for any future re-enablement of tox-based CI; the active workflow does not use tox. `tests/README.md` documents the local-only acceptance line.
 
 ## 6. Test design
 
@@ -293,8 +297,8 @@ The plan is complete when all of the following hold:
 - [ ] **AC4.** Negative-control injection (§7.1) demonstrably fails the test.
 - [ ] **AC5.** In-memory Biot-Savart current-linearity sanity check (single artifact, unique leaf `Current` DOFs ×2 in memory, assert B doubles at rtol=1e-13) passes. The original cross-artifact assertion was removed — see §7.3 for why.
 - [ ] **AC6.** Cache invalidation probe passes (bit-equal after mutate-and-restore).
-- [ ] **AC7.** Per-Tier-A-commit numerics-impact ledger (§7.2) produced and committed to `tests/regression/TIER_A_LEDGER.md`. Each entry: commit SHA, "no observed shift" or "shifted [field], delta [magnitude]".
-- [ ] **AC8.** CI runs `tests/regression/` and is green.
+- [ ] **AC7.** Per-Tier-A-commit numerics-impact ledger (§7.2) produced and committed to `tests/regression/TIER_A_LEDGER.md`. Each entry: commit SHA, "no observed shift in panel invariants" or "shifted [field], delta [magnitude]", or "unexercised by this panel" / "joint/stacked evidence only" where applicable. Verdicts must be scoped to what the panel actually observes — do not claim "numerically equivalent" when the codepath is not exercised.
+- [ ] **AC8.** ~~CI runs `tests/regression/` and is green.~~ **N/A by user directive (2026-05-12).** Replaced with: `OMP_NUM_THREADS=1 python -m pytest tests/regression/ -q` passes locally on Darwin/arm64, with `tests/README.md` documenting the local-only acceptance line and `tests/regression/conftest.py` enforcing platform + env gating.
 - [ ] **AC9.** `tests/regression/README.md` documents: what the panel proves, what it does not prove, how to regenerate snapshots, how to add a new artifact.
 
 ## 10. Sequencing
