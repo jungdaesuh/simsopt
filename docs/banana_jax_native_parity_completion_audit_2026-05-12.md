@@ -348,12 +348,19 @@ Pre-paid credit balance is insufficient - add more credits to your account to us
   usable GitHub Actions GPU capacity for the current proof.
 - The direct HF launcher no longer depends on that workflow listing because the
   pushed branch/SHA preflight now passes.
+- Read-only fallback checks for other authenticated cloud CLIs did not expose a
+  usable immediate GPU route: the configured GCP project cannot query Compute
+  Engine regions because billing is disabled, and the configured AWS region
+  reports `0.0` quota for both "Running On-Demand G and VT instances" and
+  "Running On-Demand P instances". The repo also has no AWS/GCP-native proof
+  launcher comparable to `benchmarks/hf_jobs/launch_production_gpu_proof.py`.
 
 ## Remaining Blockers
 
 1. Add usable GPU credits/capacity: HF Jobs H200 launch is currently rejected
-   with `402 Payment Required`; Runpod is also blocked by negative balance/no
-   pods.
+   with `402 Payment Required`; Runpod is blocked by negative balance/no pods;
+   GitHub Actions has no registered GPU runners; GCP billing is disabled; and
+   the configured AWS GPU-family quotas are zero.
 2. Run the current tree on real CUDA hardware and emit a current-SHA proof
    bundle with exact command, dirty-tree status, JAX/jaxlib versions, x64 mode,
    backend, CUDA/XLA flags, `CUDA_VISIBLE_DEVICES`, `nvidia-smi` facts,
