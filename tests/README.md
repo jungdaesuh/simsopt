@@ -39,3 +39,17 @@ See the [python unittest documentation](https://docs.python.org/3/library/unitte
 ### Parallel testing with pytest
 
 Requires installing pytest along with pytest-xdist or pytest-parallel.  Install either of them with pip. With pytest-xdist, run `pytest -n <N> geo` to run all tests in the `geo` folder in parallel. For pytest-parallel, use `pytest --workers <N> geo`. Here <N> is the number of cores you want to use. In place of a specific number for <N>, use `auto` to automatically use all the avaialable cores in the machine.
+
+## Regression panel (`tests/regression/`)
+
+`tests/regression/` contains a forward-pinned, snapshot-based panel that asserts the simsopt math layer (`src/simsopt`, `src/simsoptpp`) produces stable numerical outputs at fixed configurations supplied by collaborator artifacts. See `tests/regression/README.md` for the panel-specific docs and `docs/regression_panel_colleague_artifacts_2026-05-11.md` for the design rationale.
+
+The panel is **platform-pinned**: snapshots are generated on macOS Silicon (Darwin/arm64) with Accelerate BLAS and `OMP_NUM_THREADS=1`. On any other platform the panel auto-skips via `tests/regression/conftest.py` to avoid spurious SHA mismatches.
+
+To run locally:
+
+```bash
+OMP_NUM_THREADS=1 python -m pytest tests/regression/ -v
+```
+
+Forty panel tests + six negative-control resolution tests = 46 expected. The conftest sets `OMP_NUM_THREADS=1` if unset and warns if it has been set to anything else.
