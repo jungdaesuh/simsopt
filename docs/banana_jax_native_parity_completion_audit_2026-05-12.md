@@ -323,6 +323,14 @@ Error: Client error '402 Payment Required' for url 'https://huggingface.co/api/j
 Pre-paid credit balance is insufficient - add more credits to your account to use Jobs.
 ```
 
+- After the audit-only GitHub Actions blocker update, the same foreground H200
+  launch was retried at `2026-05-12T18:42:53Z` against pushed branch head
+  `34b9cdaa748b40cc7ab7a7f98d1ca00512f55a5d`. Preflight resolved
+  `repo_ref_commit` to the same SHA, with `platform=cuda`, `hardware=h200`,
+  and expected JAX `0.9.2`. Hugging Face Jobs again rejected the launch before
+  job creation with `402 Payment Required`, so no current CUDA proof artifact
+  was produced.
+
 - The local tree contains `.github/workflows/jax_h200_production_proof.yml`
   in tracked history, but `gh workflow run jax_h200_production_proof.yml
   --repo jungdaesuh/simsopt --ref gpu-purity-stage2-20260405` is blocked with
@@ -331,11 +339,13 @@ Pre-paid credit balance is insufficient - add more credits to your account to us
 - `gh workflow list --repo jungdaesuh/simsopt --all` currently exposes `JAX HF
   CUDA Image` and `JAX Smoke Tests`, not `JAX H200 Production Proof`. `JAX HF
   CUDA Image` builds/pushes the CUDA image only; it does not execute the parity
-  proof.
+  proof. Local `.github/workflows/jax_gpu_parity.yml` also has
+  `workflow_dispatch` and self-hosted GPU jobs, but it is not exposed by the
+  fork's default-branch workflow list.
 - `JAX Smoke Tests` contains self-hosted GPU jobs in its YAML, but it has no
   `workflow_dispatch` trigger for this branch. `gh api
-  repos/jungdaesuh/simsopt/actions/runners` returns no registered runners, so
-  there is no usable GitHub Actions GPU capacity for the current proof.
+  repos/jungdaesuh/simsopt/actions/runners` returns `total=0`, so there is no
+  usable GitHub Actions GPU capacity for the current proof.
 - The direct HF launcher no longer depends on that workflow listing because the
   pushed branch/SHA preflight now passes.
 
