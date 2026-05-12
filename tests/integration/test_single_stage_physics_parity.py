@@ -163,6 +163,7 @@ def _build_single_stage_script_command(
     optimizer_backend: str,
     maxiter: int,
     stage2_bs_path: Path,
+    jax_runtime_seed_spec: Path | None = None,
     benchmark_mode: bool = False,
     record_jax_compile_diagnostics: bool = False,
     disable_target_lane_success_filter: bool = False,
@@ -201,7 +202,14 @@ def _build_single_stage_script_command(
         str(DEFAULT_EQUILIBRIA_DIR),
     ]
     if backend == "jax":
-        command += ["--optimizer-backend", optimizer_backend]
+        if jax_runtime_seed_spec is None:
+            raise ValueError("JAX single-stage commands require a runtime seed spec.")
+        command += [
+            "--optimizer-backend",
+            optimizer_backend,
+            "--jax-runtime-seed-spec",
+            str(jax_runtime_seed_spec),
+        ]
     if benchmark_mode:
         command.append("--benchmark-mode")
     if record_jax_compile_diagnostics:
@@ -214,6 +222,59 @@ def _build_single_stage_script_command(
             str(target_lane_accepted_step_sync),
         ]
     return command
+
+
+def _compile_jax_runtime_seed_spec(stage2_bs_path: Path, output_path: Path) -> Path:
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+    from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+    fixture = build_real_single_stage_init_fixture(
+        backend="cpu",
+        plasma_surf_filename=DEFAULT_PLASMA_SURF_FILENAME,
+        equilibria_dir=DEFAULT_EQUILIBRIA_DIR,
+        stage2_bs_path=stage2_bs_path,
+        nphi=DEFAULT_SMOKE_NPHI,
+        ntheta=DEFAULT_SMOKE_NTHETA,
+        mpol=DEFAULT_SMOKE_MPOL,
+        ntor=DEFAULT_SMOKE_NTOR,
+        vol_target=DEFAULT_VOL_TARGET,
+        iota_target=DEFAULT_IOTA_TARGET,
+    )
+    boozer_surface = fixture["boozer_surface"]
+    biot_savart = fixture["bs"]
+    _, stage2_results = single_stage_example.load_stage2_results(str(stage2_bs_path))
+    stage2_seed = single_stage_example.build_single_stage_runtime_stage2_seed_payload(
+        stage2_results,
+        banana_surf_radius=float(stage2_results["banana_surf_radius"]),
+    )
+    runtime_seed_bs = BiotSavartJAX(biot_savart.coils)
+    return Path(
+        single_stage_example.write_single_stage_jax_runtime_seed_spec(
+            str(output_path),
+            surface=boozer_surface.surface,
+            iota=float(boozer_surface.res["iota"]),
+            G=float(boozer_surface.res["G"]),
+            mpol=DEFAULT_SMOKE_MPOL,
+            ntor=DEFAULT_SMOKE_NTOR,
+            quadpoints_phi=boozer_surface.surface.quadpoints_phi,
+            quadpoints_theta=boozer_surface.surface.quadpoints_theta,
+            coil_dof_extraction_spec=runtime_seed_bs.coil_dof_extraction_spec(),
+            coil_dofs=runtime_seed_bs.x.copy(),
+            num_tf_coils=DEFAULT_NUM_TF_COILS,
+            banana_curve_index=DEFAULT_NUM_TF_COILS,
+            tf_current_A=single_stage_example.resolve_loaded_tf_current_A(
+                stage2_results.get("TF_CURRENT_A"),
+                biot_savart.coils[:DEFAULT_NUM_TF_COILS],
+                enforce_limit=False,
+            ),
+            banana_current_A=float(
+                biot_savart.coils[DEFAULT_NUM_TF_COILS].current.get_value()
+            ),
+            stage2_seed=stage2_seed,
+        )
+    )
 
 
 def test_single_stage_subprocess_env_preserves_existing_xla_flags(monkeypatch):
@@ -248,11 +309,20 @@ def _run_single_stage_script(
 ) -> SingleStageOuterRun:
     with tempfile.TemporaryDirectory(prefix=f"single-stage-{backend}-") as tmp_dir:
         output_root = Path(tmp_dir) / "outputs"
+        jax_runtime_seed_spec = (
+            _compile_jax_runtime_seed_spec(
+                stage2_bs_path,
+                Path(tmp_dir) / "single_stage_jax_runtime_spec.json",
+            )
+            if backend == "jax"
+            else None
+        )
         command = _build_single_stage_script_command(
             backend=backend,
             optimizer_backend=optimizer_backend,
             maxiter=maxiter,
             stage2_bs_path=stage2_bs_path,
+            jax_runtime_seed_spec=jax_runtime_seed_spec,
         )
         command[0:0] = [
             "--output-root",
@@ -291,13 +361,24 @@ def _run_single_stage_script_results(
     disable_target_lane_success_filter: bool = False,
     target_lane_accepted_step_sync: str | None = None,
 ) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix=f"single-stage-{backend}-results-") as tmp_dir:
+    with tempfile.TemporaryDirectory(
+        prefix=f"single-stage-{backend}-results-"
+    ) as tmp_dir:
         output_root = Path(tmp_dir) / "outputs"
+        jax_runtime_seed_spec = (
+            _compile_jax_runtime_seed_spec(
+                stage2_bs_path,
+                Path(tmp_dir) / "single_stage_jax_runtime_spec.json",
+            )
+            if backend == "jax"
+            else None
+        )
         command = _build_single_stage_script_command(
             backend=backend,
             optimizer_backend=optimizer_backend,
             maxiter=maxiter,
             stage2_bs_path=stage2_bs_path,
+            jax_runtime_seed_spec=jax_runtime_seed_spec,
             benchmark_mode=benchmark_mode,
             record_jax_compile_diagnostics=record_jax_compile_diagnostics,
             disable_target_lane_success_filter=disable_target_lane_success_filter,
@@ -365,9 +446,34 @@ def _run_single_stage_outer_loop_probe(
 
 def _load_single_stage_outputs(output_root: Path) -> tuple[dict[str, Any], Any, Any]:
     results_path = find_single_file(output_root, "results.json")
-    surface_path = find_single_file(output_root, "surf_opt.json")
-    biot_savart_path = find_single_file(output_root, "biot_savart_opt.json")
-    return dict(load_json(results_path)), load(surface_path), load(biot_savart_path)
+    results = dict(load_json(results_path))
+    surface_paths = list(output_root.rglob("surf_opt.json"))
+    biot_savart_paths = list(output_root.rglob("biot_savart_opt.json"))
+    if surface_paths and biot_savart_paths:
+        return results, load(surface_paths[0]), load(biot_savart_paths[0])
+
+    from examples.single_stage_optimization.SINGLE_STAGE import (
+        single_stage_banana_example as single_stage_example,
+    )
+    from simsopt.field.biotsavart_jax_backend import SingleStageRuntimeSpecBiotSavartJAX
+
+    runtime_spec_path = find_single_file(
+        output_root, "single_stage_jax_runtime_spec.json"
+    )
+    runtime_state = single_stage_example.load_single_stage_jax_runtime_seed_spec(
+        runtime_spec_path,
+        mpol=DEFAULT_SMOKE_MPOL,
+        ntor=DEFAULT_SMOKE_NTOR,
+        nphi=DEFAULT_SMOKE_NPHI,
+        ntheta=DEFAULT_SMOKE_NTHETA,
+    )
+    return (
+        results,
+        single_stage_example.build_single_stage_surface_from_jax_runtime_spec(
+            runtime_state["runtime_spec"]
+        ),
+        SingleStageRuntimeSpecBiotSavartJAX(runtime_state["runtime_spec"]),
+    )
 
 
 def _physics_summary(
@@ -599,7 +705,12 @@ def _assert_outer_loop_single_step_consistency(
         err_msg=f"{context}: final iota drift exceeded absolute tolerance",
     )
     for label, cpu_value, jax_value, ceiling in (
-        ("mean_abs_bdotn_over_b", cpu.mean_abs_bdotn_over_b, jax.mean_abs_bdotn_over_b, 5e-3),
+        (
+            "mean_abs_bdotn_over_b",
+            cpu.mean_abs_bdotn_over_b,
+            jax.mean_abs_bdotn_over_b,
+            5e-3,
+        ),
     ):
         assert np.isfinite(cpu_value), f"{context}: CPU {label} was non-finite"
         assert np.isfinite(jax_value), f"{context}: JAX {label} was non-finite"
@@ -611,8 +722,18 @@ def _assert_outer_loop_single_step_consistency(
         )
 
     for label, threshold, cpu_value, jax_value in (
-        ("curve_curve_distance", 0.05, cpu.curve_curve_distance, jax.curve_curve_distance),
-        ("curve_surface_distance", 0.02, cpu.curve_surface_distance, jax.curve_surface_distance),
+        (
+            "curve_curve_distance",
+            0.05,
+            cpu.curve_curve_distance,
+            jax.curve_curve_distance,
+        ),
+        (
+            "curve_surface_distance",
+            0.02,
+            cpu.curve_surface_distance,
+            jax.curve_surface_distance,
+        ),
     ):
         assert cpu_value >= threshold, (
             f"{context}: CPU {label} violated hard threshold {threshold}"

@@ -192,7 +192,7 @@ def _patch_traceable_hessian_solve(monkeypatch, solve_hessian_system_with_status
     )
     monkeypatch.setattr(
         surfaceobjectives_jax_module._optimizer_jax,
-        "_solve_hessian_system_with_status",
+        "_solve_hessian_least_squares_system_with_status",
         solve_hessian_system_with_status,
     )
 
@@ -1769,7 +1769,9 @@ def test_traceable_runtime_cache_key_avoids_value_hashing_runtime_state(monkeypa
     assert not any(tree is state["objective_kwargs"] for tree in seen_trees)
     assert not any(tree is state["baseline_x"] for tree in seen_trees)
     assert not any(tree is state["baseline_value"] for tree in seen_trees)
-    assert not any(tree is state["baseline_linear_solve_factors"] for tree in seen_trees)
+    assert not any(
+        tree is state["baseline_linear_solve_factors"] for tree in seen_trees
+    )
     assert not any(tree is state["baseline_coil_dofs"] for tree in seen_trees)
     assert optimizer_option_methods == ["bfgs-ondevice"]
 
@@ -2625,11 +2627,11 @@ def test_non_qs_ratio_native_gradient_stays_flat_until_public_boundary(monkeypat
     obj._dJ = None
     obj._dJ_by_dcoil_dofs = None
     obj._compute_value = lambda _sdofs, _coil_set_spec: 1.75
-    obj._direct_coil_gradient = lambda _coil_dofs, _sdofs: (
-        jnp.asarray([4.0, -1.0], dtype=jnp.float64)
+    obj._direct_coil_gradient = lambda _coil_dofs, _sdofs: jnp.asarray(
+        [4.0, -1.0], dtype=jnp.float64
     )
-    obj._compute_dJ_ds = lambda _coil_set_spec, _sdofs, _decision_size: (
-        jnp.asarray([0.0, 1.0], dtype=jnp.float64)
+    obj._compute_dJ_ds = lambda _coil_set_spec, _sdofs, _decision_size: jnp.asarray(
+        [0.0, 1.0], dtype=jnp.float64
     )
 
     solved_state = types.SimpleNamespace(
@@ -3872,9 +3874,11 @@ def test_traceable_seeded_initial_value_surfaces_failed_solve_gradient(monkeypat
         lambda *_args, **_kwargs: seeded_compiled_bundle,
     )
 
-    seeded = surfaceobjectives_jax_module._ensure_traceable_runtime_seeded_value_and_grad(
-        runtime_entry,
-        object(),
+    seeded = (
+        surfaceobjectives_jax_module._ensure_traceable_runtime_seeded_value_and_grad(
+            runtime_entry,
+            object(),
+        )
     )
 
     value, grad = seeded.optimizer_initial_value_and_grad
@@ -3916,9 +3920,11 @@ def test_traceable_seeded_value_and_grad_builds_general_only_bundle(monkeypatch)
         build_compiled_bundle,
     )
 
-    seeded = surfaceobjectives_jax_module._ensure_traceable_runtime_seeded_value_and_grad(
-        runtime_entry,
-        object(),
+    seeded = (
+        surfaceobjectives_jax_module._ensure_traceable_runtime_seeded_value_and_grad(
+            runtime_entry,
+            object(),
+        )
     )
     cached_seeded = (
         surfaceobjectives_jax_module._ensure_traceable_runtime_seeded_value_and_grad(
@@ -4223,8 +4229,10 @@ def test_traceable_custom_vjp_surfaces_adjoint_solve_failure_as_nan_gradient():
             jnp.asarray(False, dtype=bool),
         ),
     }
-    objective = surfaceobjectives_jax_module._make_traceable_objective_from_compiled_bundle(
-        compiled_bundle
+    objective = (
+        surfaceobjectives_jax_module._make_traceable_objective_from_compiled_bundle(
+            compiled_bundle
+        )
     )
 
     grad = jax.grad(objective)(jnp.asarray([0.5, -0.25], dtype=jnp.float64))
@@ -5605,8 +5613,7 @@ class TestPrincipalCurvatureJAXObjectParity:
         from simsopt.geo import PrincipalCurvatureJAX
 
         assert (
-            PrincipalCurvatureJAX
-            is surfaceobjectives_jax_module.PrincipalCurvatureJAX
+            PrincipalCurvatureJAX is surfaceobjectives_jax_module.PrincipalCurvatureJAX
         )
 
     @pytest.mark.parametrize(
@@ -5630,10 +5637,12 @@ class TestPrincipalCurvatureJAXObjectParity:
         dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
 
         def principal_curvature(inner_dofs):
-            return surfaceobjectives_jax_module.surface_principal_curvature_jax_from_dofs(
-                spec,
-                inner_dofs,
-                **_PRINCIPAL_CURVATURE_KWARGS,
+            return (
+                surfaceobjectives_jax_module.surface_principal_curvature_jax_from_dofs(
+                    spec,
+                    inner_dofs,
+                    **_PRINCIPAL_CURVATURE_KWARGS,
+                )
             )
 
         _taylor_test_first_order(

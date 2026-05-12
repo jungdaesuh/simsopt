@@ -2953,7 +2953,7 @@ def _traceable_solve_hessian_linearization(
         coil_set_spec=coil_set_spec,
         **_traceable_inner_objective_kwargs(objective_kwargs),
     )
-    return _optimizer_jax._solve_hessian_system_with_status(
+    return _optimizer_jax._solve_hessian_least_squares_system_with_status(
         objective_fn,
         solved_x,
         rhs,
@@ -3195,22 +3195,12 @@ def _pack_traceable_forward_result(
 def _traceable_result_linear_solve_factors(solve_result, linearization_kind):
     """Return factors carried by traceable autodiff state, if this kind uses them.
 
-    Phase 2 (``docs/parity_scientific_equivalence_contract_2026-05-09.md``
-    §5.3): when the traceable solve materialized packed ``(lu, piv)``
-    factors via :func:`_optimizer_jax._factor_dense_hessian`, the result
-    is the 5-tuple ``(P, L, U, lu, piv)`` so the IFT adjoint can route
-    through ``jsp_linalg.lu_solve``. The legacy 3-tuple ``(P, L, U)``
-    form remains the supported triangular fallback.
+    Dense factor snapshots remain reporting/parity artifacts on the JAX
+    on-device LS lane. The runtime target objective keeps adjoint solves
+    operator-backed so compiled value/grad paths do not stage dense LU solves.
     """
-    if linearization_kind == "exact_jacobian":
-        return None
-    plu = solve_result["plu"]
-    if plu is None:
-        return None
-    lu_piv = solve_result.get("lu_piv")
-    if lu_piv is None:
-        return plu
-    return (plu[0], plu[1], plu[2], lu_piv[0], lu_piv[1])
+    del solve_result, linearization_kind
+    return None
 
 
 def _build_linear_solve_factors_from_res(res):
@@ -3301,6 +3291,7 @@ def _traceable_general_forward_result(
             warmstart_sdofs,
             warmstart_iota,
             warmstart_G,
+            materialize_dense_linearization=False,
         )
         solved_sdofs, solved_iota, solved_G = _resolve_traceable_solved_state(
             booz_jax,
@@ -3789,11 +3780,7 @@ def _build_traceable_objective_state(
         "stellsym_surface": booz_jax.stellsym,
     }
     linearization_kind = booz_jax.res["linearization_kind"]
-    baseline_linear_solve_factors = (
-        None
-        if linearization_kind == "exact_jacobian"
-        else _build_linear_solve_factors_from_res(booz_jax.res)
-    )
+    baseline_linear_solve_factors = None
     linear_solve_tol = booz_jax._linear_solve_tolerance()
     linear_solve_stab = float(booz_jax.options.get("newton_stab", 0.0))
 
@@ -4832,6 +4819,66 @@ def _traceable_term_adjoint_solve_report(
         )
         hvp_fn = _optimizer_jax._hessian_vector_product_fn(objective_fn)
         candidate_stab = float(linear_solve_stab)
+        solution, attempt_success = (
+            _optimizer_jax._solve_hessian_least_squares_system_with_status(
+                objective_fn,
+                solved_x,
+                rhs,
+                stab=candidate_stab,
+                tol=linear_solve_tol,
+            )
+        )
+        normal_operator = _optimizer_jax._hessian_linear_operator(
+            objective_fn,
+            solved_x,
+            stab=candidate_stab,
+        )
+        normal_rhs = normal_operator["transpose_matvec"](rhs)
+        normal_residual = normal_rhs - normal_operator["transpose_matvec"](
+            normal_operator["matvec"](solution)
+        )
+        normal_residual_tol = _optimizer_jax._linear_solve_residual_tolerance(
+            normal_rhs,
+            linear_solve_tol,
+        )
+        residual_tol = _optimizer_jax._linear_solve_residual_tolerance(
+            rhs,
+            linear_solve_tol,
+        )
+        residual = rhs - normal_operator["matvec"](solution)
+        residual_norm = jnp.linalg.norm(residual)
+        normal_residual_norm = jnp.linalg.norm(normal_residual)
+        report["hessian_least_squares_operator"] = {
+            "attempts": [
+                {
+                    "stab": candidate_stab,
+                    "success": bool(np.asarray(jax.device_get(attempt_success))),
+                    "solution": _summarize_traceable_gradient(solution),
+                    "solution_norm": _summarize_traceable_scalar(
+                        jnp.linalg.norm(solution)
+                    ),
+                    "normal_residual_tolerance": _summarize_traceable_scalar(
+                        normal_residual_tol
+                    ),
+                    "normal_residual_norm": _summarize_traceable_scalar(
+                        normal_residual_norm
+                    ),
+                    "normal_relative_residual": _summarize_traceable_scalar(
+                        _optimizer_jax._relative_residual_norm(
+                            normal_residual,
+                            normal_rhs,
+                        )
+                    ),
+                    "primal_residual_tolerance": _summarize_traceable_scalar(
+                        residual_tol
+                    ),
+                    "primal_residual_norm": _summarize_traceable_scalar(residual_norm),
+                    "primal_relative_residual": _summarize_traceable_scalar(
+                        _optimizer_jax._relative_residual_norm(residual, rhs)
+                    ),
+                }
+            ]
+        }
         solution, attempt_success = _optimizer_jax._solve_hessian_system_with_status(
             objective_fn,
             solved_x,
@@ -4839,13 +4886,8 @@ def _traceable_term_adjoint_solve_report(
             stab=candidate_stab,
             tol=linear_solve_tol,
         )
-        residual_tol = _optimizer_jax._linear_solve_residual_tolerance(
-            rhs,
-            linear_solve_tol,
-        )
         residual = rhs - (hvp_fn(solved_x, solution) + candidate_stab * solution)
         residual_norm = jnp.linalg.norm(residual)
-        rhs_norm = jnp.linalg.norm(rhs)
         report["hessian_operator"] = {
             "attempts": [
                 {
@@ -4858,7 +4900,7 @@ def _traceable_term_adjoint_solve_report(
                     "residual_tolerance": _summarize_traceable_scalar(residual_tol),
                     "residual_norm": _summarize_traceable_scalar(residual_norm),
                     "relative_residual": _summarize_traceable_scalar(
-                        residual_norm / rhs_norm
+                        _optimizer_jax._relative_residual_norm(residual, rhs)
                     ),
                 }
             ]
@@ -5225,6 +5267,7 @@ def _make_traceable_objective_profile_suite_from_compiled_bundle(
                 warmstart_sdofs,
                 warmstart_iota,
                 warmstart_G,
+                materialize_dense_linearization=False,
             )
             solved_sdofs, solved_iota, solved_G = _resolve_traceable_solved_state(
                 booz_jax,

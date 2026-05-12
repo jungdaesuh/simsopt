@@ -4513,7 +4513,15 @@ class BoozerSurfaceJAX(Optimizable):
             self._traceable_exact_residual_cache[key] = residual_fn
         return self._traceable_exact_residual_cache[key]
 
-    def run_code_traceable(self, coil_source, sdofs, iota, G):
+    def run_code_traceable(
+        self,
+        coil_source,
+        sdofs,
+        iota,
+        G,
+        *,
+        materialize_dense_linearization=True,
+    ):
         """Trace-safe pure-array inner solve for the ondevice target lane.
 
         Accepts a preferred immutable ``GroupedCoilSetSpec`` or the legacy
@@ -4611,6 +4619,7 @@ class BoozerSurfaceJAX(Optimizable):
                 tol=self.options["bfgs_tol"],
                 materialize_dense_linearization=bool(
                     self.options["materialize_dense_linearization"]
+                    and materialize_dense_linearization
                 ),
                 max_dense_linearization_bytes=self.options[
                     "max_dense_linearization_bytes"
@@ -4657,6 +4666,10 @@ class BoozerSurfaceJAX(Optimizable):
             weight_inv_modB,
         )
 
+        materialize_traceable_hessian = bool(
+            self.options["materialize_dense_linearization"]
+            and materialize_dense_linearization
+        )
         newton_result = self._run_newton_polish_for_method(
             method,
             obj_fn,
@@ -4664,7 +4677,7 @@ class BoozerSurfaceJAX(Optimizable):
             maxiter=self.options["newton_maxiter"],
             tol=self.options["newton_tol"],
             stab=self.options["newton_stab"],
-            materialize_hessian=bool(self.options["materialize_dense_linearization"]),
+            materialize_hessian=materialize_traceable_hessian,
             max_dense_hessian_bytes=self.options["max_dense_linearization_bytes"],
             objective_args=(coil_set_spec,),
         )

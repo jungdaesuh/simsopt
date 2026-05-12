@@ -63,8 +63,7 @@ _SINGLE_STAGE_CPU_ONLY_SCIPY = (
     "single-stage outer loop CPU/reference lane only supports optimizer_backend='scipy'"
 )
 _OPTIMIZER_BACKEND_INVALID = (
-    "optimizer_backend must be one of: scipy, ondevice, scipy-jax, "
-    "scipy-jax-fullgraph."
+    "optimizer_backend must be one of: scipy, ondevice, scipy-jax, scipy-jax-fullgraph."
 )
 
 
@@ -1524,7 +1523,9 @@ class SingleStageExampleTests(unittest.TestCase):
         self.assertEqual(payload["events"][0]["phase"], "phase1")
         self.assertEqual(payload["events"][1]["iteration"], 1)
 
-    def test_build_event_progress_recorder_serializes_scaled_phase_optimizer_state(self):
+    def test_build_event_progress_recorder_serializes_scaled_phase_optimizer_state(
+        self,
+    ):
         module = self.load_module()
         phase1_state = module.build_target_lane_scaled_outer_phase_state(
             np.array([10.0, 20.0], dtype=np.float64),
@@ -1577,9 +1578,7 @@ class SingleStageExampleTests(unittest.TestCase):
             "scipy",
         )
         self.assertEqual(
-            module.resolve_boozer_optimizer_backend(
-                "jax", "scipy-jax", "ondevice"
-            ),
+            module.resolve_boozer_optimizer_backend("jax", "scipy-jax", "ondevice"),
             "ondevice",
         )
         self.assertEqual(
@@ -2411,7 +2410,9 @@ class SingleStageExampleTests(unittest.TestCase):
             with patch.object(
                 module,
                 "load",
-                side_effect=AssertionError("JAX warm-start loader must not call load()"),
+                side_effect=AssertionError(
+                    "JAX warm-start loader must not call load()"
+                ),
             ), self.assertRaisesRegex(ValueError, "surface payload is not a SIMSON"):
                 module.load_single_stage_warm_start_state(str(run_dir))
 
@@ -2496,7 +2497,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 )
 
         self.assertTrue(path.endswith(module._SINGLE_STAGE_JAX_RUNTIME_SPEC_FILENAME))
-        np.testing.assert_allclose(module.host_array(loaded["surface_dofs"]), surface_dofs)
+        np.testing.assert_allclose(
+            module.host_array(loaded["surface_dofs"]), surface_dofs
+        )
         self.assertEqual(float(module.host_array(loaded["iota"])), 0.123)
         self.assertEqual(float(module.host_array(loaded["G"])), 4.5)
         self.assertEqual(loaded["stage2_seed"]["banana_surf_radius"], 0.22)
@@ -2731,6 +2734,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 "final_gradient_norm": 1e-12,
             },
         )
+
         class _Component:
             def J(self):
                 return 0.5
@@ -3235,9 +3239,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 return np.ones((1, 3), dtype=np.float64)
 
         def capture_curves_to_vtk(curves, *_args, **_kwargs):
-            captured["curves_to_vtk_dofs"] = module.host_array(
-                curves[0].get_dofs()
-            )
+            captured["curves_to_vtk_dofs"] = module.host_array(curves[0].get_dofs())
 
         def capture_cross_section(_surf_coils, _surface, banana_curve, *_args):
             captured["cross_section_banana_dofs"] = module.host_array(
@@ -3438,9 +3440,7 @@ class SingleStageExampleTests(unittest.TestCase):
 
         def kappa_scalar(owner):
             coil_spec = coil_specs_from_dof_extraction_spec(extraction_spec, owner)[0]
-            _gamma, gammadash, gammadashdash = curve_geometry_from_spec(
-                coil_spec.curve
-            )
+            _gamma, gammadash, gammadashdash = curve_geometry_from_spec(coil_spec.curve)
             kappa = jnp.linalg.norm(
                 jnp.cross(gammadash, gammadashdash),
                 axis=1,
@@ -3677,12 +3677,14 @@ class SingleStageExampleTests(unittest.TestCase):
             auto_initial_step_maxiter=3,
         )
 
-        target_lane_settings = module.resolve_single_stage_policy_initial_phase_settings(
-            policy,
-            initial_step_scale=1.0,
-            initial_step_maxiter=0,
-            field_backend="jax",
-            optimizer_backend="ondevice",
+        target_lane_settings = (
+            module.resolve_single_stage_policy_initial_phase_settings(
+                policy,
+                initial_step_scale=1.0,
+                initial_step_maxiter=0,
+                field_backend="jax",
+                optimizer_backend="ondevice",
+            )
         )
 
         self.assertEqual(target_lane_settings["initial_step_scale"], 1.0)
@@ -4001,6 +4003,64 @@ class SingleStageExampleTests(unittest.TestCase):
             )
 
         np.testing.assert_allclose(projected_dofs, source_dofs)
+        self.assertIsNone(deferred_surface._materialized_surface)
+
+    def test_project_surface_dofs_to_resolution_reprojects_deferred_xyz_surface(
+        self,
+    ):
+        module = self.load_module()
+        source_dofs = np.linspace(
+            0.04,
+            0.04 * len(module.stellsym_scatter_indices(2, 2)),
+            len(module.stellsym_scatter_indices(2, 2)),
+        )
+        deferred_surface = module.DeferredSurfaceXYZTensorFourier(
+            mpol=2,
+            ntor=2,
+            nfp=5,
+            stellsym=True,
+            quadpoints_phi=np.linspace(0.0, 0.2, 5, endpoint=False),
+            quadpoints_theta=np.linspace(0.0, 1.0, 5, endpoint=False),
+            dofs=source_dofs,
+        )
+        target_phi = np.linspace(0.0, 0.2, 7, endpoint=False)
+        target_theta = np.linspace(0.0, 1.0, 9, endpoint=False)
+        expected_gamma = module.surface_gamma_from_dofs(
+            jnp.asarray(source_dofs, dtype=jnp.float64),
+            jnp.asarray(target_phi, dtype=jnp.float64),
+            jnp.asarray(target_theta, dtype=jnp.float64),
+            deferred_surface.mpol,
+            deferred_surface.ntor,
+            deferred_surface.nfp,
+            deferred_surface.stellsym,
+            scatter_indices=module.stellsym_scatter_indices(
+                deferred_surface.mpol, deferred_surface.ntor
+            ),
+        )
+        captured = {}
+
+        def _fit_surface_xyz_tensor_dofs_to_gamma(target_gamma, **kwargs):
+            captured["target_gamma"] = np.asarray(target_gamma)
+            captured["kwargs"] = kwargs
+            return np.array([1.0, 2.0]), True
+
+        with patch.object(
+            module,
+            "_fit_surface_xyz_tensor_dofs_to_gamma",
+            side_effect=_fit_surface_xyz_tensor_dofs_to_gamma,
+        ):
+            projected_dofs = module.project_surface_dofs_to_resolution(
+                deferred_surface,
+                mpol=3,
+                ntor=3,
+                quadpoints_phi=target_phi,
+                quadpoints_theta=target_theta,
+            )
+
+        np.testing.assert_allclose(projected_dofs, np.array([1.0, 2.0]))
+        np.testing.assert_allclose(captured["target_gamma"], np.asarray(expected_gamma))
+        self.assertEqual(captured["kwargs"]["mpol"], 3)
+        self.assertEqual(captured["kwargs"]["ntor"], 3)
         self.assertIsNone(deferred_surface._materialized_surface)
 
     def test_project_single_stage_warm_start_surface_dofs_uses_gamma_fast_path_for_xyz_surface(
@@ -5084,7 +5144,9 @@ class SingleStageExampleTests(unittest.TestCase):
             }
             event[cause] = True
 
-            self.assertTrue(module.single_stage_retry_triggered_by_invalid_state([event]))
+            self.assertTrue(
+                module.single_stage_retry_triggered_by_invalid_state([event])
+            )
 
     def test_resolve_single_stage_outer_maxls_rejects_nonpositive_budget(self):
         module = self.load_module()
@@ -5360,15 +5422,13 @@ class SingleStageExampleTests(unittest.TestCase):
                 value_and_grad_fun,
                 target_lane_profile,
                 optimizer_initial_value_and_grad,
-            ) = (
-                module.build_target_lane_outer_objectives(
-                    object(),
-                    object(),
-                    object(),
-                    use_value_and_grad=True,
-                    profile_target_lane=False,
-                    outer_objective_config=None,
-                )
+            ) = module.build_target_lane_outer_objectives(
+                object(),
+                object(),
+                object(),
+                use_value_and_grad=True,
+                profile_target_lane=False,
+                outer_objective_config=None,
             )
 
         self.assertIsNotNone(scalar_fun)
@@ -5416,16 +5476,14 @@ class SingleStageExampleTests(unittest.TestCase):
                 value_and_grad_fun,
                 target_lane_profile,
                 optimizer_initial_value_and_grad,
-            ) = (
-                module.build_target_lane_outer_objectives(
-                    object(),
-                    object(),
-                    object(),
-                    use_value_and_grad=False,
-                    profile_target_lane=False,
-                    outer_objective_config=outer_objective_config_marker,
-                    success_filter=success_filter_marker,
-                )
+            ) = module.build_target_lane_outer_objectives(
+                object(),
+                object(),
+                object(),
+                use_value_and_grad=False,
+                profile_target_lane=False,
+                outer_objective_config=outer_objective_config_marker,
+                success_filter=success_filter_marker,
             )
 
         self.assertIs(scalar_fun, objective_marker)
@@ -5837,7 +5895,9 @@ class SingleStageExampleTests(unittest.TestCase):
                 saved_paths.append(str(path))
 
             def gamma(self):
-                raise AssertionError("restart-only target export should not sample gamma")
+                raise AssertionError(
+                    "restart-only target export should not sample gamma"
+                )
 
             def unitnormal(self):
                 raise AssertionError(
@@ -5878,10 +5938,9 @@ class SingleStageExampleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(
             module,
             "update_self_intersection_status",
-            side_effect=lambda rd, _surface, **_kwargs: rd.__setitem__(
-                "self_intersection_check_available", True
-            )
-            or False,
+            side_effect=lambda rd, _surface, **_kwargs: (
+                rd.__setitem__("self_intersection_check_available", True) or False
+            ),
         ):
             module.restore_single_stage_host_state(
                 use_target_lane=True,
@@ -6317,9 +6376,7 @@ class SingleStageExampleTests(unittest.TestCase):
             incumbent["target_lane_reporting_coil_dofs"],
             np.array([1.0, -2.0], dtype=np.float64),
         )
-        self.assertTrue(
-            incumbent["target_lane_reporting_include_distance_metrics"]
-        )
+        self.assertTrue(incumbent["target_lane_reporting_include_distance_metrics"])
 
     def test_build_single_stage_target_lane_accepted_step_sync_can_skip_state_commit(
         self,
@@ -6595,9 +6652,7 @@ class SingleStageExampleTests(unittest.TestCase):
             "solved_total_gradient": jax.jit(
                 lambda x, solved_x, factors: x + solved_x + factors
             ),
-            "value_and_grad_pipeline": jax.jit(
-                lambda x: (jnp.sum(x**2), 2.0 * x)
-            ),
+            "value_and_grad_pipeline": jax.jit(lambda x: (jnp.sum(x**2), 2.0 * x)),
         }
 
         profile = module.profile_traceable_target_lane_objective(
@@ -7180,7 +7235,9 @@ class SingleStageExampleTests(unittest.TestCase):
             "optimizer_initial_value_and_grad"
         ]
         self.assertEqual(float(optimizer_seed_value), 3.5)
-        self.assertIsInstance(optimizer_seed_grad, module.ScaledOuterPhaseOptimizerState)
+        self.assertIsInstance(
+            optimizer_seed_grad, module.ScaledOuterPhaseOptimizerState
+        )
         np.testing.assert_allclose(
             np.asarray(optimizer_seed_grad.step_dofs, dtype=np.float64),
             np.array([1.0, -1.5], dtype=np.float64),
@@ -8622,9 +8679,7 @@ class SingleStageExampleTests(unittest.TestCase):
                     run_dict=run_dict,
                     single_stage_search_policy=policy,
                     progress_event_callback=(
-                        lambda label, **extra: progress_events.append(
-                            (label, extra)
-                        )
+                        lambda label, **extra: progress_events.append((label, extra))
                     ),
                 )
             )
@@ -9847,7 +9902,15 @@ class SingleStageExampleTests(unittest.TestCase):
             progress_callback=None,
             failure_callback=None,
         ):
-            del method, tol, maxiter, options, callback, progress_callback, failure_callback
+            del (
+                method,
+                tol,
+                maxiter,
+                options,
+                callback,
+                progress_callback,
+                failure_callback,
+            )
             captured["fun"] = fun
             captured["x0"] = x0
             captured["value_and_grad"] = value_and_grad
@@ -12528,7 +12591,9 @@ class SingleStageExampleTests(unittest.TestCase):
 
             def get_solved_runtime_state(self):
                 return types.SimpleNamespace(
-                    sdofs=jnp.asarray(np.arange(template_surface.x.size), dtype=jnp.float64),
+                    sdofs=jnp.asarray(
+                        np.arange(template_surface.x.size), dtype=jnp.float64
+                    ),
                     iota=jnp.asarray(0.15, dtype=jnp.float64),
                     G=jnp.asarray(1.0, dtype=jnp.float64),
                 )
@@ -12695,9 +12760,7 @@ class SingleStageExampleTests(unittest.TestCase):
                     banana_current_max_A=jax.device_put(
                         np.asarray(500.0, dtype=np.float64)
                     ),
-                    tf_current_A=jax.device_put(
-                        np.asarray(80000.0, dtype=np.float64)
-                    ),
+                    tf_current_A=jax.device_put(np.asarray(80000.0, dtype=np.float64)),
                     tf_current_limit_A=jax.device_put(
                         np.asarray(90000.0, dtype=np.float64)
                     ),
@@ -13634,7 +13697,9 @@ class FtolGtolDefaultTests(unittest.TestCase):
     def test_parse_args_accepts_outer_ftol_override(self):
         module = load_single_stage_example_module()
 
-        with patch.object(sys, "argv", ["single_stage_banana_example.py", "--outer-ftol", "0.0"]):
+        with patch.object(
+            sys, "argv", ["single_stage_banana_example.py", "--outer-ftol", "0.0"]
+        ):
             args = module.parse_args()
 
         self.assertEqual(args.outer_ftol, 0.0)

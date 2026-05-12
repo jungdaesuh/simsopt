@@ -3486,7 +3486,10 @@ def _target_gamma_from_supported_surface(
         source_nfp = surface.nfp
         source_stellsym = surface.stellsym
     else:
-        surface_class = type(surface).__name__
+        if getattr(surface, "jax_surface_kind", None) == "xyztensorfourier":
+            surface_class = "SurfaceXYZTensorFourier"
+        else:
+            surface_class = type(surface).__name__
         if not hasattr(surface, "get_dofs"):
             return None
         source_dofs = _as_jax_float64(surface.get_dofs())

@@ -2451,6 +2451,45 @@ def _solve_hessian_system_with_status(
     )
 
 
+def _solve_hessian_least_squares_system_with_status(
+    objective_fn,
+    x,
+    rhs,
+    *,
+    stab,
+    tol,
+):
+    """Solve singular Hessian systems through operator-only normal equations.
+
+    Some LS Boozer fixtures expose gauge-null Hessian directions, so the
+    adjoint equation can be inconsistent even with finite branch tangents. The
+    target lane uses the Moore-Penrose minimum-residual system for those
+    Hessian linearizations while keeping the path matrix-free: solve
+    ``H.T @ H @ y = H.T @ rhs`` through the same operator GMRES contract.
+    """
+    operator = _hessian_linear_operator(objective_fn, x, stab=stab)
+    rhs = jnp.asarray(rhs)
+    normal_rhs = operator["transpose_matvec"](rhs)
+
+    def normal_matvec(vector):
+        return operator["transpose_matvec"](operator["matvec"](vector))
+
+    solution, normal_success = _solve_square_array_system_operator_only(
+        normal_matvec,
+        normal_rhs,
+        tol=tol,
+    )
+    normal_residual = normal_rhs - normal_matvec(solution)
+    primal_residual = rhs - operator["matvec"](solution)
+    success = (
+        normal_success
+        & jnp.all(jnp.isfinite(solution))
+        & jnp.all(jnp.isfinite(normal_residual))
+        & jnp.all(jnp.isfinite(primal_residual))
+    )
+    return solution, success
+
+
 def _jacobian_linear_operator(residual_fn, x):
     jvp_fn = _jacobian_vector_product_fn(residual_fn)
     residual_x, pullback = jax.vjp(residual_fn, x)

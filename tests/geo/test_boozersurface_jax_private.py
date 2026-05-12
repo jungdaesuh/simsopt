@@ -2146,6 +2146,33 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert "_lu_solve" not in jaxpr_text
         assert "lu_pivots_to_permutation" not in jaxpr_text
 
+    @PRIVATE_OPTIMIZER_RUNTIME
+    @REQUIRES_PRIVATE_OPTIMIZER_RUNTIME
+    def test_hessian_least_squares_system_solves_singular_minimum_residual(self):
+        x = jnp.asarray([1.0, -2.0], dtype=jnp.float64)
+        rhs = jnp.asarray([1.0, 1.0], dtype=jnp.float64)
+
+        def objective(z):
+            return 0.5 * z[0] * z[0]
+
+        solution, success = _opt._solve_hessian_least_squares_system_with_status(
+            objective,
+            x,
+            rhs,
+            stab=0.0,
+            tol=1e-10,
+        )
+        hessian_residual = rhs - jnp.asarray([solution[0], 0.0], dtype=jnp.float64)
+        normal_residual = jnp.asarray(
+            [hessian_residual[0], 0.0],
+            dtype=jnp.float64,
+        )
+
+        assert bool(np.asarray(success))
+        np.testing.assert_allclose(solution, np.asarray([1.0, 0.0]))
+        np.testing.assert_allclose(normal_residual, np.zeros(2), atol=1e-12)
+        assert np.linalg.norm(np.asarray(hessian_residual)) == pytest.approx(1.0)
+
     def test_gmres_iteration_limits_bound_hvp_work(self):
         assert _opt._gmres_iteration_limits(39) == (39, 10)
         assert _opt._gmres_iteration_limits(663) == (64, 10)
