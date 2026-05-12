@@ -29,7 +29,7 @@ Stage 2 routing branch:
 
 - `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py:726-732` — `resolve_stage2_default_optimizer_backend()` returns `"scipy"` when field backend is not JAX
 - `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py:730` — `if field_backend == "jax":` (optimizer-backend resolver)
-- `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py:1812` — second `if field_backend == "jax":` guard inside `resolve_optimizer_contract_for_stage2_outer_loop`
+- `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py:1923` — `resolve_stage2_optimizer_contract` (renamed from `resolve_optimizer_contract_for_stage2_outer_loop` after the 2026-05-05 snapshot) — the function still branches on field backend to pick the optimizer contract
 - `examples/single_stage_optimization/STAGE_2/banana_coil_solver.py:2830-2847` — primary objective lane branch; CPU `else` branch constructs `Jf = SquaredFlux(new_surf, new_bs)` (line 2846) and prints `Stage 2 backend: CPU (simsoptpp)` (line 2847)
 
 Single-stage routing branches:

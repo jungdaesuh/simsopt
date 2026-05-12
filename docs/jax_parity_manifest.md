@@ -24,9 +24,16 @@ M7 image publication and real-image H200 dry-run preflight are complete for the
 last pushed runtime validation tag `banana-surface-parity-m7-unitnormal-r1`
 (`0b6293b075342acc5cf996160ecf4bd87f709610`) using the published image
 `banana-surface-parity-m7-image-r1`, but the real CUDA rows remain open because
-the H200 launch is blocked by external GPU account credits. The latest local
+the H200 launch is blocked by external GPU account credits. Two checked-in
+launchers now satisfy the same proof contract (same image, same `run_proof`
+argv, same `bootstrap_runtime.sh`): `benchmarks/hf_jobs/launch_production_gpu_proof.py`
+(Hugging Face Jobs, blocked on `402 Payment Required` at the latest attempt)
+and `benchmarks/lightning_jobs/launch_production_gpu_proof.py` (Lightning AI,
+defaults to lit-h200x-1 on Nebius, runs under `bash -lc` with
+`SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT` exported and mounts the
+`simsopt-jax-parity-proofs` data connection at `/proof`). The latest local HF
 launcher fix pins `hf jobs inspect --format json` for no-detach status checks;
-include that fix in the next validation tag before retrying real H200.
+include both launchers in the next validation tag before retrying real H200.
 
 Exact parity means the mirrored JAX test runs with:
 
@@ -58,7 +65,7 @@ watermark.
 | `tests/geo/test_surface_rzfourier.py` | `tests/geo/test_surface_rzfourier_jax.py` | partial | Strict tolerance-based CPU/JAX parity for the RZ geometry/object API surface (`surface_spec`/`to_spec`, `*_jax`, DOF round-trips, gradients, loaders, and `copy`). Non-RZ geometry/object API and added surface-objective wrappers now have local non-CUDA evidence in the section below. Conditional VTK, label, and higher paired-point rows remain outside the banana contract unless the scope expands to claim them. |
 | `tests/geo/test_surface_objectives.py::ToroidalFlux*` | `tests/geo/test_surface_objectives_jax.py` | complete | Upstream `ToroidalFlux` value, first-derivative, Hessian, coil-derivative, constant-in-index, and Taylor checks are mirrored across the surface-type and `stellsym` sweep with tolerance-based CPU/JAX parity. Scalar value tolerances are owned by the `derivative_heavy` ladder lane; this is tolerance-based parity, not exact arithmetic parity. |
 | `tests/geo/test_boozersurface.py` | `tests/geo/test_boozersurface_jax.py` | cpu-contract-complete | Boozer CPU parity closure is complete for math kernels, solver results, guard behavior, derivatives/adjoints, and supported public APIs. Parity remains contract-based: solved-state quality and public result semantics are the oracle, not mutable object identity or iterate-by-iterate solver trajectory. |
-| `tests/integration/test_single_stage_example.py` and single-stage Boozer integration slices | `tests/integration/test_single_stage_jax_cpu_reference.py` | cpu-contract-complete | Dedicated CPU/JAX Boozer integration tests compare convergence success, residual norms, final solver objective, and final physics quantities (`iota`, `G`, label value/error, anchored axis-z). CUDA Boozer parity is not claimed by this CPU closure and still requires the optional hardware validation gate in the Boozer plan. |
+| `tests/geo/test_single_stage_example.py` and single-stage Boozer integration slices | `tests/integration/test_single_stage_jax_cpu_reference.py` | cpu-contract-complete | Dedicated CPU/JAX Boozer integration tests compare convergence success, residual norms, final solver objective, and final physics quantities (`iota`, `G`, label value/error, anchored axis-z). CUDA Boozer parity is not claimed by this CPU closure and still requires the optional hardware validation gate in the Boozer plan. |
 
 ## Surface And Objective Non-CUDA Evidence
 

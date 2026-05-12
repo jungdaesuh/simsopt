@@ -283,15 +283,7 @@ Stage 2's `new_bs.save(...)` and `new_surf.save(...)` at finalization both call 
    - Specifically: lines 3497-3500 (the unconditional `bs.save()` / `surf.save()`), plus any `.J()` / `.dJ()` / `host_float(.J())` calls during the post-optimizer reporting (lines 3286+ already call `capture_stage2_trajectory_snapshot` — those are tracked as the snapshot/callback rerouting follow-up in the out-of-scope list, not here)
    - Categorize: (a) reads that already come from the runtime bundle, (b) reads that re-enter the legacy graph during artifact emission.
 
-2. **PREREQUISITE — expose final specs from optimizer DOFs on the bundle.** `Stage2TargetObjectiveBundle` (`src/simsopt/objectives/stage2_target_objective_jax.py:104`) is a `NamedTuple` whose current fields are:
-   - `objective`, `expected_dof_count`, `value_and_grad`, `terms`, `raw_terms`, `least_squares_residual`, `alm_value_and_grad_builder`, `field_sharding_summary`, `pairwise_penalty_sharding_summary`
-
-   It does **not** expose `accepted_step_summary`, `coil_set_spec`, or `surface_spec`. The original implementation sketch referenced fields that don't exist; before the spec writers (subtask 3) can be wired, the bundle must be extended:
-   - Add a new field `final_specs_from_dofs: Callable[[jnp.ndarray], FinalSpecBundle] | None = None` to `Stage2TargetObjectiveBundle`
-   - Implement a `FinalSpecBundle` `NamedTuple` (or dataclass) holding `coil_set_spec: GroupedCoilSetSpec` and `surface_spec: SurfaceRZFourierSpec | SurfaceXYZTensorFourierSpec`
-   - In the bundle factory (the function that constructs `Stage2TargetObjectiveBundle`), close over the runtime `coil_set_spec` and `surface_spec` and return a `final_specs_from_dofs(final_dofs)` callable that materializes the final specs by applying `final_dofs` to the captured spec's DOF map (no re-entry into `Optimizable`; pure spec arithmetic mirroring `grouped_coil_set_spec_from_lists` / `grouped_coil_set_spec_from_coil_specs` at `stage2_target_objective_jax.py:25-26`)
-   - Add a unit test that constructs a bundle, calls `final_specs_from_dofs(initial_dofs)`, and asserts the resulting specs equal the input specs bit-for-bit
-   - Estimated subtask cost: ~½ day
+2. **PREREQUISITE — expose final specs from optimizer DOFs on the bundle.** **DONE** as of `src/simsopt/objectives/stage2_target_objective_jax.py:139` (`final_specs_from_dofs: Callable[[jnp.ndarray], FinalSpecBundle]`) and `:149` (`reporting_summary: Stage2ReportingFn | None`). The bundle factory closes over `coil_set_spec`/`surface_spec` and returns the callable at `:1290-1291`. Subtask 3 (spec-based JSON writers) consumes the bundle field directly; no further bundle-extension work is needed before wiring.
 
 3. **Implement spec-based JSON writers.** New helpers in `src/simsopt/_core/json.py` (or a sibling `_spec_writers.py`):
    - `save_biot_savart_spec(path: str, coil_set_spec) -> None` — emits a SIMSON-wrapped JSON that round-trips through `load(path)` / `load_specs(path)` (TODO 3) to an equivalent state

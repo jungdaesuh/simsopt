@@ -428,6 +428,59 @@ Pre-paid credit balance is insufficient - add more credits to your account to us
   results-dir-under-mount layout, and the shared `run_proof` argv contract with
   the HF launcher.
 
+## Next-Launch Runbook
+
+When GPU capacity is restored (HF Jobs credits added, Nebius H200 freed,
+Runpod balance topped up, or a new GPU route opens), the following
+launcher invocation is the canonical retry path. Replace
+`<CURRENT_SHA>` with `git rev-parse HEAD` immediately before launching;
+the launcher emits a preflight to `.artifacts/lightning_h200_preflight.json`
+that downstream audit tooling reads.
+
+```bash
+# Lightning AI (preferred while HF Jobs balance is at 402):
+SIMSOPT_LIGHTNING_GPU_IMAGE=ghcr.io/jungdaesuh/simsopt-jax-hf-production-proof:banana-surface-parity-m7-image-r1 \
+python benchmarks/lightning_jobs/launch_production_gpu_proof.py \
+  --repo-url https://github.com/jungdaesuh/simsopt.git \
+  --repo-ref gpu-purity-stage2-20260405 \
+  --repo-sha <CURRENT_SHA> \
+  --single-stage-jax-runtime-seed-spec benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json \
+  --no-detach \
+  --max-runtime-s 28800
+```
+
+```bash
+# Hugging Face Jobs (once credits are restored):
+PATH="$PWD/.artifacts/hf-cli-bin:$PATH" \
+SIMSOPT_HF_GPU_IMAGE=ghcr.io/jungdaesuh/simsopt-jax-hf-production-proof:banana-surface-parity-m7-image-r1 \
+python benchmarks/hf_jobs/launch_production_gpu_proof.py \
+  --hardware h200 \
+  --platform cuda \
+  --no-detach \
+  --timeout 8h \
+  --repo-url https://github.com/jungdaesuh/simsopt.git \
+  --repo-ref gpu-purity-stage2-20260405 \
+  --repo-sha <CURRENT_SHA> \
+  --single-stage-jax-runtime-seed-spec benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json
+```
+
+After the job completes, recover the proof artifacts. For Lightning,
+the data connection subpath is `production-gpu-proof/<CURRENT_SHA>/<TIMESTAMP>/`;
+read it through `lightning_sdk.filesystem.Filesystem` or
+`Teamspace.download_folder`. For HF Jobs, the artifacts stream back to
+`hf jobs inspect --format json <JOB_ID>` and the published proof bundle
+follows the existing M7 retrieval flow.
+
+The expected proof contents are: `cuda_canary_ptx.json`,
+`cuda_canary_cubin.json`, `stage2_cold.json`, `stage2_warm.json`,
+`single_stage_cold.json`, `single_stage_warm.json`,
+`boozer_well_conditioned_adjoint.json`, and
+`reduction_cancellation_stress.json`. Each carries provenance, parity,
+and validator fields per
+`benchmarks/validation_ladder_contract.py::GPU_PROOF_PARITY_CONTRACTS`.
+The `run_production_gpu_proof.sh` finalizer rejects any payload that
+fails its parity contract before returning success.
+
 ## Remaining Blockers
 
 1. Add or wait for usable GPU capacity. HF Jobs H200 launch is currently

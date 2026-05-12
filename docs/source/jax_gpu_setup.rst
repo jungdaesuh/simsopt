@@ -337,6 +337,47 @@ separate ship gates.
          python benchmarks/hf_jobs/launch_production_gpu_proof.py \
          --stage2-maxiter 60 --geometry-rel-tol 1e-6
 
+Lightning AI
+------------
+
+``benchmarks/lightning_jobs/launch_production_gpu_proof.py`` is a sibling
+launcher that satisfies the same proof contract as the Hugging Face Jobs
+route. It shares the HF launcher's preflight, ``run_proof`` argv builder,
+``bootstrap_runtime.sh``, and image expectations through direct SSOT
+imports, then specialises three Lightning-specific pieces:
+
+* ``entrypoint="bash -lc"`` so the proof script's ``set -o pipefail`` is
+  honoured (Lightning's default ``sh -c`` rejects it).
+* ``SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SIMSOPT="0.0.0+proof.<sha[:8]>"``
+  is exported before ``pip install -e .`` so non-PEP440 release tags
+  (for example ``banana-surface-parity-m7-unitnormal-r1``) cannot abort
+  the install step.
+* The ``simsopt-jax-parity-proofs`` data connection is mounted at
+  ``/proof`` via ``path_mappings``; the proof script's results directory
+  lives at ``/proof/production-gpu-proof/<sha>/<timestamp>`` so artifacts
+  land outside the ephemeral job container.
+
+Launch a single H200 (lit-h200x-1 on Nebius) proof against the current
+fork SHA::
+
+    SIMSOPT_LIGHTNING_GPU_IMAGE=<registry>/simsopt-jax:cuda12-jax092 \
+      python benchmarks/lightning_jobs/launch_production_gpu_proof.py \
+        --single-stage-jax-runtime-seed-spec \
+        benchmarks/fixtures/single_stage_seed_iota15/single_stage_jax_runtime_spec.json
+
+Defaults: ``--hardware H200`` (single-valued by design; one launch =
+one job), ``--cloud-provider nebius``, ``--cloud-account
+lightning-nebius-prod``, ``--max-runtime-s 28800`` (8h). A preflight
+JSON snapshot is written to
+``.artifacts/lightning_h200_preflight.json``. Pass ``--dry-run`` to
+print the resolved preflight, machine selection, and job command body
+without contacting the Lightning control plane.
+
+After submission, recover the proof JSON by downloading the
+data-connection subpath ``production-gpu-proof/<sha>/<timestamp>``
+through ``lightning_sdk.filesystem.Filesystem`` or
+``Teamspace.download_folder``.
+
 Troubleshooting
 ---------------
 
