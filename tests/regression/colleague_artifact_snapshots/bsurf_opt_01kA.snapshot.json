@@ -1,0 +1,124 @@
+{
+  "_meta": {
+    "artifact_file": "bsurf_opt_01kA.json",
+    "generated_at": "2026-05-12T03:39:14+00:00",
+    "head_sha": "b32efa8182e0224ed47b371517b229162e692439",
+    "numpy_version": "2.4.3",
+    "scipy_version": "1.17.1",
+    "blas": "accelerate/unknown",
+    "platform_system": "darwin",
+    "platform_machine": "arm64",
+    "omp_num_threads": "1",
+    "format_version": 1
+  },
+  "I": 0.0001256637061435917,
+  "boozer_surface_class": "BoozerSurfaceFiniteI",
+  "surface_geometry": {
+    "type": "SurfaceXYZTensorFourier",
+    "gamma_shape": [
+      64,
+      63,
+      3
+    ],
+    "gamma_sha256": "fcbf6a5f45b0dbc62aaa0520801c6ed8a41898aba99541a0813defef6f4d0c59",
+    "gamma_sample_first10_flat": [
+      0.9819960838918267,
+      0.0,
+      0.0,
+      0.9818774385236051,
+      3.70959175150907e-06,
+      0.0048138310555654335,
+      0.9815059910658477,
+      1.7624459611147256e-05,
+      0.009477893587297294,
+      0.9808575936865873
+    ],
+    "normal_sha256": "bc7ca3589847c27209f348bd8e361c2f987bf27f3e160f93c357ac2ad427421a",
+    "normal_sample_first10_flat": [
+      1.9203357410068271,
+      -0.0,
+      0.0,
+      1.8819387149428193,
+      -0.0009552327434007563,
+      0.09520295281505052,
+      1.8152081151926165,
+      -0.0016931726081381667,
+      0.20088382640733293,
+      1.799082858748275
+    ]
+  },
+  "volume": 0.09997813697448642,
+  "biot_savart_eval": {
+    "eval_points_seed": 1234,
+    "n_eval_points": 100,
+    "eval_points_sha256": "55b4cebca42cd320021a6b07997555cc0dcd326c62c39b7dcb727654e9cdad0a",
+    "B_sha256": "8431174feb757e79c5f39c647f1367413cebdfbf180ac4010188b33d777b586b",
+    "B_sample_first10_flat": [
+      0.10330474143385615,
+      -0.2572076421788973,
+      0.0007641552623017405,
+      0.3121181825267575,
+      -0.3868999552285669,
+      0.027677882638708223,
+      0.35875227895953093,
+      -0.31870309811414776,
+      -0.01658510632982856,
+      0.29787133780588265
+    ],
+    "dB_sha256": "59e6bdafae7dfaf51fc000a0ccad2feffefc86324e519203d066649203dee97f",
+    "dB_sample_first10_flat": [
+      -0.15482697137495935,
+      0.3468158181811269,
+      0.020982029362818736,
+      0.34711616068085327,
+      0.11360659780186358,
+      0.04317448267961171,
+      0.020957663151424666,
+      0.04335598237312299,
+      0.04122037357309577,
+      -1.6897199124873754
+    ]
+  },
+  "coil0_geometry": {
+    "type": "CurveXYZFourier",
+    "gamma_shape": [
+      15,
+      3
+    ],
+    "gamma_sha256": "0cd8a5ea7438686c87adcd1383434547aceff4e0888cd1ccc4151bd3c53cf868",
+    "gamma_sample_first10_flat": [
+      1.3590591566589096,
+      0.2152538238953577,
+      0.0,
+      1.3249030992677528,
+      0.2098440358617666,
+      -0.16269465723032006,
+      1.228340819715254,
+      0.19455007325838264,
+      -0.2972579301909577,
+      1.08606881337681
+    ],
+    "dgamma_dcoeff_shape": [
+      15,
+      3,
+      9
+    ],
+    "dgamma_dcoeff_sha256": "aa5b58ea836ae21d717a394787b98cbf68d8e5e62cd1e7c872f2678c9cef9a15"
+  },
+  "curve_curve_distance": {
+    "minimum_distance": 0.05,
+    "downsample": 2,
+    "value": 0.18623167501046117
+  },
+  "boozer_kernel_path_b": {
+    "iota": 0.27,
+    "G0_formula": "MU0 * sum(|coil.current.get_value()|)",
+    "sum_abs_I_coil": 1788378.8876530577,
+    "G0": 2.247343190114373,
+    "G_eff": 2.247377119315032,
+    "wrapper_residual_sqsum_half": 4232.464819758124,
+    "raw_kernel_value": 4232.464819758125,
+    "raw_kernel_value_at_G0": 4232.397353242265,
+    "weight_inv_modB": false
+  }
+}
