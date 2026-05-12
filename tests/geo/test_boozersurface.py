@@ -1,12 +1,13 @@
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
-import simsopt.geo.boozersurface as boozersurface_module
-import simsopt.geo.surfaceobjectives as surfaceobjectives_module
-from simsopt.field.coil import coils_via_symmetries
+import simsoptpp as sopp
+from simsopt._core.json import GSONEncoder, SIMSON
+from simsopt.field.coil import Current, CurrentSum, ScaledCurrent, coils_via_symmetries
 from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.field.biotsavart import BiotSavart
 from simsopt.geo import SurfaceXYZTensorFourier, SurfaceRZFourier
@@ -17,10 +18,6 @@ from simsopt.geo.surfaceobjectives import (
     MajorRadius,
     NonQuasiSymmetricRatio,
     ToroidalFlux,
-    boozer_surface_dexactresidual_dcoils_dcurrents_vjp,
-    boozer_surface_dlsqgrad_dcoils_vjp,
-    boozer_surface_residual,
-    boozer_surface_residual_dB,
 )
 from simsopt.configs.zoo import get_ncsx_data, get_hsx_data, get_giuliani_data
 from .surface_test_helpers import get_surface, get_exact_surface, get_boozer_surface
@@ -39,6 +36,7 @@ from banana_opt.boozer_finite_current import (
     _exact_vjp_finite_I,
     _lsqgrad_vjp_finite_I,
 )
+from banana_opt.json_compat import load_boozer_finite_i
 
 
 surfacetypes_list = ["SurfaceXYZFourier", "SurfaceXYZTensorFourier"]
@@ -46,15 +44,6 @@ stellsym_list = [True, False]
 
 
 class BoozerSurfaceTests(unittest.TestCase):
-    # Two ABI-fallback tests previously lived here
-    # (test_boozer_residual_helpers_fall_back_to_alpha_only_extension and
-    # test_boozer_dresidual_dc_falls_back_to_alpha_only_extension). They
-    # exercised src/-side machinery that wired finite-I support into the
-    # upstream-only C++ kernel via a `with_I → alpha_only` fallback. That
-    # machinery now lives in examples/single_stage_optimization/banana_opt/
-    # boozer_finite_current.py (alongside BoozerSurfaceFiniteI), and is
-    # exercised by the BoozerSurfaceFiniteI test cases below.
-
     def _make_area_boozer_surface(self, *, current_I, mpol, ntor, phis, thetas, constraint_weight, options):
         curves, currents, ma = get_ncsx_data()
         coils = coils_via_symmetries(curves, currents, 3, True)
@@ -86,6 +75,21 @@ class BoozerSurfaceTests(unittest.TestCase):
             options={"weight_inv_modB": False},
         )
 
+    def _unique_leaf_currents(self, biotsavart):
+        leaves = {}
+        pending = [coil.current for coil in reversed(biotsavart.coils)]
+
+        while pending:
+            current = pending.pop()
+            if isinstance(current, Current):
+                leaves[id(current)] = current
+            elif isinstance(current, ScaledCurrent):
+                pending.append(current.current_to_scale)
+            elif isinstance(current, CurrentSum):
+                pending.append(current.current_b)
+                pending.append(current.current_a)
+        return list(leaves.values())
+
     def _assert_directional_fd_convergence(self, f, coeffs, direction, directional_derivative):
         err_old = 1e9
         epsilons = np.power(2., -np.asarray(range(11, 18)))
@@ -115,6 +119,102 @@ class BoozerSurfaceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, error):
             objectives[-1].dJ_by_dB()
+
+    def test_legacy_boozer_surface_I_json_loads_as_examples_finite_I(self):
+        _, _, boozer_surface = self._make_small_area_boozer_surface(current_I=0.123)
+        payload = json.loads(json.dumps(SIMSON(boozer_surface), cls=GSONEncoder))
+
+        serialized = next(
+            item
+            for item in payload["simsopt_objs"].values()
+            if item.get("@class") == "BoozerSurfaceFiniteI"
+        )
+        serialized["@module"] = "simsopt.geo.boozersurface"
+        serialized["@class"] = "BoozerSurface"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "legacy_boozer_surface_i.json"
+            path.write_text(json.dumps(payload))
+            loaded = load_boozer_finite_i(path)
+
+        self.assertIsInstance(loaded, BoozerSurfaceFiniteI)
+        self.assertEqual(loaded.I, 0.123)
+        self.assertAlmostEqual(loaded.label.J(), boozer_surface.label.J())
+        self.assertIs(loaded.label.surface, loaded.surface)
+
+    def test_finite_current_path_b_uses_nonzero_iota_kernel_equivalence(self):
+        current_I = 0.37
+        bs, G0, boozer_surface = self._make_small_area_boozer_surface(current_I=current_I)
+        surface = boozer_surface.surface
+        iota = 0.27
+        weight_inv_modB = False
+
+        residual = boozer_surface_residual_finite_I(
+            surface,
+            iota,
+            G0,
+            bs,
+            derivatives=0,
+            weight_inv_modB=weight_inv_modB,
+            I=current_I,
+        )[0]
+
+        x = surface.gamma()
+        xsemiflat = x.reshape((x.size // 3, 3)).copy()
+        bs.set_points(xsemiflat)
+        B = bs.B().reshape(x.shape)
+        finite_current_kernel_value = sopp.boozer_residual(
+            G0 + iota * current_I,
+            iota,
+            surface.gammadash1(),
+            surface.gammadash2(),
+            B,
+            weight_inv_modB,
+        )
+        zero_current_kernel_value = sopp.boozer_residual(
+            G0,
+            iota,
+            surface.gammadash1(),
+            surface.gammadash2(),
+            B,
+            weight_inv_modB,
+        )
+
+        self.assertNotEqual(G0 + iota * current_I, G0)
+        self.assertNotEqual(finite_current_kernel_value, zero_current_kernel_value)
+        self.assertAlmostEqual(
+            finite_current_kernel_value,
+            0.5 * np.sum(residual ** 2),
+            places=12,
+        )
+
+    def test_in_memory_biot_savart_linearity_scales_leaf_currents_once(self):
+        bs, _, _ = self._make_small_area_boozer_surface(current_I=0.0)
+        points = np.ascontiguousarray(
+            np.array(
+                [
+                    [1.22, 0.03, 0.05],
+                    [1.08, 0.19, -0.04],
+                    [0.97, -0.11, 0.08],
+                ]
+            )
+        )
+        bs.set_points(points)
+        B0 = bs.B().copy()
+
+        currents = self._unique_leaf_currents(bs)
+        original_dofs = [current.x.copy() for current in currents]
+        for current in currents:
+            current.x = 2.0 * current.x
+        bs.clear_cached_properties()
+        bs.set_points(points)
+        B1 = bs.B().copy()
+
+        for current, dofs in zip(currents, original_dofs):
+            current.x = dofs
+        bs.clear_cached_properties()
+
+        np.testing.assert_allclose(B1, 2.0 * B0, rtol=1.0e-13, atol=1.0e-14)
 
     def test_finite_current_run_code_preserves_cached_upstream_return(self):
         _, _, boozer_surface = self._make_small_area_boozer_surface(current_I=0.37)
