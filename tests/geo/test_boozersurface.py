@@ -18,6 +18,8 @@ from simsopt.geo.surfaceobjectives import (
     MajorRadius,
     NonQuasiSymmetricRatio,
     ToroidalFlux,
+    _boozer_residual_dJ_by_dB,
+    boozer_surface_residual_dB,
 )
 from simsopt.configs.zoo import get_ncsx_data, get_hsx_data, get_giuliani_data
 from .surface_test_helpers import get_surface, get_exact_surface, get_boozer_surface
@@ -215,6 +217,56 @@ class BoozerSurfaceTests(unittest.TestCase):
         bs.clear_cached_properties()
 
         np.testing.assert_allclose(B1, 2.0 * B0, rtol=1.0e-13, atol=1.0e-14)
+
+    def test_boozer_residual_dj_by_db_solved_state_equivalent_to_pre_01828e4f6_code_path(self):
+        """Isolated proof for `01828e4f6` — on solved state, the new
+        ``run_code_from_last_solution()`` call site in
+        ``BoozerResidual.dJ_by_dB`` must produce identical numerics to
+        the pre-commit direct ``self.boozer_surface.res`` access.
+
+        The commit changed the unsolved-state failure mode (now raises
+        ``RuntimeError`` with a clear message instead of an opaque
+        ``NoneType`` error). On the happy path — populated ``res``,
+        ``need_to_run_code == False`` — the two code paths must be
+        numerically identical. This test pins that equivalence by
+        running both directly and asserting bit-equality.
+
+        See ``docs/regression_panel_colleague_artifacts_2026-05-11.md``
+        §3.1 (Path B) and ``tests/regression/TIER_A_LEDGER.md``.
+        """
+        bs, G0, boozer_surface = self._make_small_area_boozer_surface(current_I=0.0)
+        # Populate solved state without running the (slow) solver.
+        boozer_surface.res = {
+            "type": "ls",
+            "success": True,
+            "iota": -0.3,
+            "G": G0,
+            "weight_inv_modB": False,
+        }
+        boozer_surface.need_to_run_code = False
+
+        # Post-01828e4f6 path: BoozerResidual.dJ_by_dB calls
+        # run_code_from_last_solution() internally.
+        br = BoozerResidual(boozer_surface, BiotSavart(bs.coils))
+        dJ_post = br.dJ_by_dB()
+
+        # Pre-01828e4f6 path: replicate the pre-commit body inline, accessing
+        # boozer_surface.res directly (the removed code path).
+        res = boozer_surface.res
+        surface = br.surface
+        surface.set_dofs(br.in_surface.get_dofs())
+        nphi = surface.quadpoints_phi.size
+        ntheta = surface.quadpoints_theta.size
+        num_points = 3 * nphi * ntheta
+        r, r_dB = boozer_surface_residual_dB(
+            surface, res['iota'], res['G'], br.biotsavart,
+            derivatives=0, weight_inv_modB=res['weight_inv_modB'],
+        )
+        dJ_pre = _boozer_residual_dJ_by_dB(r, r_dB, np.sqrt(num_points))
+
+        # Bit-equality — the commit must not have altered numerics on the
+        # solved-state happy path.
+        np.testing.assert_array_equal(dJ_post, dJ_pre)
 
     def test_finite_current_run_code_preserves_cached_upstream_return(self):
         _, _, boozer_surface = self._make_small_area_boozer_surface(current_I=0.37)
