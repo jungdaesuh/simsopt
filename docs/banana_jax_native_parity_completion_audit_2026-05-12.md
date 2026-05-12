@@ -324,10 +324,20 @@ Pre-paid credit balance is insufficient - add more credits to your account to us
 ```
 
 - The local tree contains `.github/workflows/jax_h200_production_proof.yml`
-  in tracked history, but `gh workflow list --repo jungdaesuh/simsopt --all`
-  currently exposes `JAX HF CUDA Image` and `JAX Smoke Tests`, not
-  `JAX H200 Production Proof`. The direct HF launcher no longer depends on
-  that workflow listing because the pushed branch/SHA preflight now passes.
+  in tracked history, but `gh workflow run jax_h200_production_proof.yml
+  --repo jungdaesuh/simsopt --ref gpu-purity-stage2-20260405` is blocked with
+  HTTP 404 because GitHub Actions dispatch only sees workflows present on the
+  repository default branch, currently `master`.
+- `gh workflow list --repo jungdaesuh/simsopt --all` currently exposes `JAX HF
+  CUDA Image` and `JAX Smoke Tests`, not `JAX H200 Production Proof`. `JAX HF
+  CUDA Image` builds/pushes the CUDA image only; it does not execute the parity
+  proof.
+- `JAX Smoke Tests` contains self-hosted GPU jobs in its YAML, but it has no
+  `workflow_dispatch` trigger for this branch. `gh api
+  repos/jungdaesuh/simsopt/actions/runners` returns no registered runners, so
+  there is no usable GitHub Actions GPU capacity for the current proof.
+- The direct HF launcher no longer depends on that workflow listing because the
+  pushed branch/SHA preflight now passes.
 
 ## Remaining Blockers
 
