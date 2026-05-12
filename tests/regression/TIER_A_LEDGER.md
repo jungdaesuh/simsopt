@@ -106,15 +106,28 @@ For each commit C in `{01828e4f6, a30aef73e, 78dbd74bb, 315a3b107, d3688c6ea, a9
 
 "No observed shift in panel invariants" means all 40 tests in the panel still pass after the revert. "Shifted X" would mean at least one invariant test failed, identifying which math-layer quantity moved.
 
-For `d3688c6ea`, isolated revert was infeasible; the stacked revert (a91f4bbe0 first, then d3688c6ea) was used and produces the same final tree as joint revert. Since `a91f4bbe0` alone is independently equivalent, the joint pass certifies `d3688c6ea` is equivalent up to ULP-tight panel tolerance.
+For `d3688c6ea`, isolated revert was infeasible; the stacked revert (a91f4bbe0 first, then d3688c6ea) was used and produces the same final tree as joint revert. The joint-revert pass plus `a91f4bbe0`'s independent panel-clean revert is **joint/stacked evidence only** for `d3688c6ea`. Cancellations between the two commits cannot be ruled out by this evidence, so isolated equivalence of `d3688c6ea` is **not** certified by the ledger.
 
 ## Post-ledger verification
 
-Final state at HEAD `17e1dc3fdd087727e63d62f22ac905e76715f57e`:
+### Original ledger baseline (at the time the reversal runs were performed)
+
+HEAD: `17e1dc3fdd087727e63d62f22ac905e76715f57e`
 
 ```
 $ OMP_NUM_THREADS=1 python -m pytest tests/regression/ -q
 46 passed, 12 warnings in 7.57s
 ```
 
-No `revert-test-*` branches remain; no scratch commits in the reflog of `surrogate-confinement-v2`; simsopt rebuilt back to `1.9.4.dev564+g17e1dc3fd`.
+No `revert-test-*` branches remained; no scratch commits in the reflog of `surrogate-confinement-v2`; simsopt rebuilt back to `1.9.4.dev564+g17e1dc3fd`.
+
+### Current post-correction state (this file's wording corrections)
+
+HEAD: `9f6a4f903` (or successor — see `git log --oneline`)
+
+```
+$ OMP_NUM_THREADS=1 python -m pytest tests/regression/ -q
+52 passed
+```
+
+52 = 40 panel tests + 12 negative-control tests (8 end-to-end panel-resolution + 3 threshold-sanity + 1 baseline). The post-Step-E commits (`560b98caa` ledger wording, `274fe2e80` strict env gate, `9f6a4f903` shared helpers + true end-to-end negative controls) do not change the reversal-run evidence above — they tighten the proof quality and scope-honesty of the conclusions drawn from it.

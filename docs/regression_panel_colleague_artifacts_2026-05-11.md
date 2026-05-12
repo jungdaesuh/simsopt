@@ -238,8 +238,8 @@ SHA-256 comparison is the primary check; the per-element tolerance check is a se
 
 Required for ULP-tight reproducibility:
 
-- `OMP_NUM_THREADS=1` (set in CI and test fixture)
-- Pinned `numpy` and `scipy` versions in the project's lockfile
+- `OMP_NUM_THREADS=1` — operator must set this in the shell before invoking the panel. `tests/regression/conftest.py` does **not** mutate the environment (intentional, post-correction); it skips the panel with a loud reason if the env is wrong. The acceptance line in `tests/README.md` makes the requirement explicit. (CI is N/A by user directive — see §5.5.)
+- Pinned `numpy` and `scipy` versions in the project's lockfile. `conftest.py` reads `numpy_version` from the snapshot `_meta` and skips on mismatch.
 - Document BLAS implementation if cross-platform (e.g., Accelerate on Darwin vs MKL on Linux) — expect small ULP-level cross-platform drift in matrix products; if observed, relax `dB` tolerance to 1e-11 and document in the snapshot file.
 
 ### 6.4 Platform pinning — important
