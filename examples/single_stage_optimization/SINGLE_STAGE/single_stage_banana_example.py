@@ -41,7 +41,6 @@ from simsopt.geo.surfaceobjectives import (
     Volume,
     Iotas,
     NonQuasiSymmetricRatio,
-    SurfaceSurfaceDistance,
 )
 from simsopt.geo.curveobjectives import CurveCurveDistance, CurveSurfaceDistance
 from simsopt.field import (
@@ -262,9 +261,6 @@ from banana_opt.single_stage_constraints import (
     smooth_min_surface_stack_signed_constraint as _smooth_min_surface_stack_signed_constraint,
     smooth_min_surface_stack_signed_constraint_with_hard_signal
     as _smooth_min_surface_stack_signed_constraint_with_hard_signal,
-    smooth_min_surface_surface_signed_constraint as _smooth_min_surface_surface_signed_constraint,
-    smooth_min_surface_surface_signed_constraint_with_hard_signal
-    as _smooth_min_surface_surface_signed_constraint_with_hard_signal,
 )
 from banana_opt.single_stage_search_policy import (
     CurvatureTraversalPolicy,
@@ -1649,10 +1645,6 @@ def parse_args():
                         help="Coil-surface distance penalty weight (default 1).")
     parser.add_argument("--cs-dist", type=float, default=float(os.environ.get("CS_DIST", str(COIL_PLASMA_MIN_DIST_M))),
                         help="Minimum coil-surface distance in meters (default 0.015 = 1.5 cm, HBT spec).")
-    parser.add_argument("--surf-dist-weight", type=float, default=float(os.environ.get("SURF_DIST_WEIGHT", "1000")),
-                        help="Surface-vessel distance penalty weight (default 1000).")
-    parser.add_argument("--ss-dist", type=float, default=float(os.environ.get("SS_DIST", str(PLASMA_VESSEL_MIN_DIST_M))),
-                        help="Minimum surface-vessel distance in meters (default 0.04).")
     parser.add_argument(
         "--maxcor",
         type=int,
@@ -1997,13 +1989,11 @@ def evaluate_single_stage_hardware_constraints(
 
 
 def compute_single_stage_surface_vessel_min_dist(
-    surface_vessel_distance_obj,
     surface_status,
     outer_surface=None,
     vessel_surface=None,
 ):
     return _compute_single_stage_surface_vessel_min_dist(
-        surface_vessel_distance_obj,
         surface_status,
         outer_surface,
         vessel_surface,
@@ -2133,7 +2123,6 @@ _ALM_DISTANCE_GAP_CONSTRAINT_NAMES = frozenset(
     (
         "coil_coil_spacing",
         "coil_surface_spacing",
-        "surface_vessel_spacing",
         "surface_surface_spacing",
     )
 )
@@ -3068,7 +3057,6 @@ def validate_single_stage_alm_formulation_args(args):
 def single_stage_alm_constraint_names(
     *,
     alm_formulation,
-    include_surface_surface,
     include_surface_stack=False,
     banana_current_state=None,
 ):
@@ -3090,8 +3078,6 @@ def single_stage_alm_constraint_names(
     )
     if not use_independent_banana_currents:
         available_names.add("banana_current")
-    if include_surface_surface:
-        available_names.add("surface_vessel_spacing")
     if include_surface_stack:
         available_names.add("surface_surface_spacing")
     names = list(hardware_constraint_alm_names(names=available_names))
@@ -3456,7 +3442,6 @@ def apply_frontier_scalarization_override(objective_eval, *, alm_formulation="we
         cc_weight=globals().get("CC_WEIGHT", 0.0),
         cs_weight=globals().get("CS_WEIGHT", 0.0),
         curvature_weight=globals().get("CURVATURE_WEIGHT", 0.0),
-        surf_dist_weight=globals().get("SURF_DIST_WEIGHT", 0.0),
         poloidal_extent_weight=POLOIDAL_EXTENT_WEIGHT,
         objective_optimizable=globals().get("JF"),
         alm_formulation=alm_formulation,
@@ -3596,7 +3581,6 @@ def build_best_feasible_results_summary(
     run_dict,
     curve_curve_distance_obj,
     curve_surface_distance_obj,
-    surface_surface_distance_obj,
     banana_curve,
     curvelength_obj,
     cc_dist,
@@ -3658,7 +3642,6 @@ def build_best_feasible_results_summary(
             cc_dist,
             curve_surface_distance_obj,
             cs_dist,
-            surface_surface_distance_obj,
             run_dict["surface_status"],
             ss_dist,
             banana_curve,
@@ -3801,9 +3784,6 @@ def build_single_stage_objective_bundle(
     CURVATURE_WEIGHT,
     CURVATURE_THRESHOLD,
     length_target=None,
-    SURF_DIST_WEIGHT=0.0,
-    vessel_surface=None,
-    vessel_gap_threshold=0.0,
     goal_mode="target",
     frontier_goal_config=None,
     boozer_residual_threshold=0.0,
@@ -3852,11 +3832,6 @@ def build_single_stage_objective_bundle(
     )
     JCurveCurve = CurveCurveDistance(curves, CC_DIST)
     JCurveSurface = CurveSurfaceDistance(curves, outer_surface, CS_DIST)
-    JSurfSurf = (
-        SurfaceSurfaceDistance(outer_surface, vessel_surface, vessel_gap_threshold)
-        if len(surface_data) == 1 and vessel_surface is not None
-        else None
-    )
     JCurvature = LpCurveCurvature(
         banana_curves[0],
         CURVATURE_P_NORM,
@@ -3893,8 +3868,6 @@ def build_single_stage_objective_bundle(
         JCurveSurface,
         CURVATURE_WEIGHT,
         JCurvature,
-        SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
-        JSurfSurf=JSurfSurf,
         JPoloidalExtent=JPoloidalExtent,
         JCurveLengthMin=JCurveLengthMin,
     )
@@ -3922,7 +3895,6 @@ def build_single_stage_objective_bundle(
         "JCurveLengthMin": JCurveLengthMin,
         "JCurveCurve": JCurveCurve,
         "JCurveSurface": JCurveSurface,
-        "JSurfSurf": JSurfSurf,
         "JCurvature": JCurvature,
         "JPoloidalExtent": JPoloidalExtent,
         "JCoilWidth": JCoilWidth,
@@ -3951,7 +3923,6 @@ def apply_single_stage_objective_bundle(objective_bundle):
     global JCurveLengthMin
     global JCurveCurve
     global JCurveSurface
-    global JSurfSurf
     global JCurvature
     global JPoloidalExtent
     global JCoilWidth
@@ -3977,7 +3948,6 @@ def apply_single_stage_objective_bundle(objective_bundle):
     JCurveLengthMin = objective_bundle["JCurveLengthMin"]
     JCurveCurve = objective_bundle["JCurveCurve"]
     JCurveSurface = objective_bundle["JCurveSurface"]
-    JSurfSurf = objective_bundle["JSurfSurf"]
     JCurvature = objective_bundle["JCurvature"]
     JPoloidalExtent = objective_bundle["JPoloidalExtent"]
     JCoilWidth = objective_bundle["JCoilWidth"]
@@ -4280,8 +4250,6 @@ def evaluate_total_objective(
     CS_WEIGHT,
     JCurvature,
     CURVATURE_WEIGHT,
-    JSurfSurf=None,
-    SURF_DIST_WEIGHT=0.0,
     JPoloidalExtent=None,
     include_diagnostics=True,
     JCurveLengthMin=None,
@@ -4303,8 +4271,6 @@ def evaluate_total_objective(
             CS_WEIGHT,
             JCurvature,
             CURVATURE_WEIGHT,
-            JSurfSurf=JSurfSurf,
-            SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
             JNonQSObjective=objective_terms["JNonQSObjective"],
             JBoozerObjective=objective_terms["JBoozerObjective"],
             JVolume=objective_terms["JVolume"],
@@ -4368,7 +4334,6 @@ def evaluate_alm_objective(
     JCurvature,
     multipliers,
     penalty,
-    JSurfSurf=None,
     JPoloidalExtent=None,
     JCoilWidth=None,
     JCurveSelfIntersect=None,
@@ -4405,7 +4370,6 @@ def evaluate_alm_objective(
             curvature_smoothing=curvature_smoothing,
             constraint_names=single_stage_alm_constraint_names(
                 alm_formulation=args.alm_formulation,
-                include_surface_surface=JSurfSurf is not None,
                 include_surface_stack=single_stage_surface_stack_alm_enabled(
                     len(surface_data),
                     SURFACE_GAP_THRESHOLD,
@@ -4420,13 +4384,6 @@ def evaluate_alm_objective(
             ),
             curve_surface_constraint_with_hard_signal_fn=(
                 _smooth_min_curve_surface_signed_constraint_with_hard_signal
-            ),
-            JSurfSurf=JSurfSurf,
-            vessel_surface=VV,
-            surface_surface_min_distance=SS_DIST,
-            surface_surface_constraint_fn=_smooth_min_surface_surface_signed_constraint,
-            surface_surface_constraint_with_hard_signal_fn=(
-                _smooth_min_surface_surface_signed_constraint_with_hard_signal
             ),
             surface_stack_surfaces=current_single_stage_alm_surface_stack_surfaces(),
             surface_stack_min_distance=SURFACE_GAP_THRESHOLD,
@@ -4485,7 +4442,6 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
                 JCurvature,
                 ALM_MULTIPLIERS,
                 ALM_PENALTY,
-                JSurfSurf=JSurfSurf,
                 JPoloidalExtent=JPoloidalExtent,
                 JCoilWidth=JCoilWidth,
                 JCurveSelfIntersect=JCurveSelfIntersect,
@@ -4509,8 +4465,6 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
             CS_WEIGHT,
             JCurvature,
             CURVATURE_WEIGHT,
-            JSurfSurf=JSurfSurf,
-            SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
             JPoloidalExtent=JPoloidalExtent,
             include_diagnostics=include_diagnostics,
             JCurveLengthMin=JCurveLengthMin,
@@ -5551,7 +5505,7 @@ def evaluate_banana_current_fd_probe(
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
-        SS_DIST if len(surface_data) > 1 else 0.0,
+        PLASMA_VESSEL_MIN_DIST_M if len(surface_data) > 1 else 0.0,
     )
     search_surface_weights = build_surface_search_weights(
         len(surface_data),
@@ -5594,9 +5548,8 @@ def evaluate_banana_current_fd_probe(
             CC_DIST,
             JCurveSurface,
             CS_DIST,
-            JSurfSurf,
             stack_status,
-            SS_DIST,
+            PLASMA_VESSEL_MIN_DIST_M,
             banana_curve,
             CURVATURE_THRESHOLD,
             **current_single_stage_hardware_snapshot_kwargs(),
@@ -6874,9 +6827,8 @@ def build_total_objective(
     JCurveSurface,
     CURVATURE_WEIGHT,
     JCurvature,
-    SURF_DIST_WEIGHT=0.0,
-    JSurfSurf=None,
     JPoloidalExtent=None,
+    JCurveLengthMin=None,
 ):
     return _build_total_objective_impl(
         JnonQSRatio,
@@ -6894,10 +6846,9 @@ def build_total_objective(
         JCurveSurface,
         CURVATURE_WEIGHT,
         JCurvature,
-        SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
-        JSurfSurf=JSurfSurf,
         POLOIDAL_EXTENT_WEIGHT=POLOIDAL_EXTENT_WEIGHT,
         JPoloidalExtent=JPoloidalExtent,
+        JCurveLengthMin=JCurveLengthMin,
     )
 
 
@@ -7271,7 +7222,7 @@ def evaluate_search_step(x):
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
-        SS_DIST if len(surface_data) > 1 else 0.0,
+        PLASMA_VESSEL_MIN_DIST_M if len(surface_data) > 1 else 0.0,
     )
     solver_search_gate = surface_stack_search_gate_for_solver(
         search_gate,
@@ -7445,7 +7396,7 @@ def evaluate_search_step(x):
                 objective_eval,
                 CC_DIST,
                 CS_DIST,
-                SS_DIST,
+                PLASMA_VESSEL_MIN_DIST_M,
                 CURVATURE_THRESHOLD,
                 **current_single_stage_hardware_snapshot_kwargs(),
             )
@@ -7660,8 +7611,6 @@ def search_eval_has_diagnostics(objective_eval):
                 "dJ_Boozer",
                 "J_iota",
                 "dJ_iota",
-                "J_surf",
-                "dJ_surf",
                 "J_curvature",
                 "dJ_curvature",
             )
@@ -7699,7 +7648,7 @@ def callback(x):
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
-        SS_DIST if len(surface_data) > 1 else 0.0,
+        PLASMA_VESSEL_MIN_DIST_M if len(surface_data) > 1 else 0.0,
     )
     if (
         'last_successful_eval' in run_dict
@@ -7732,7 +7681,7 @@ def callback(x):
         surface_data,
         vessel_surface=VV if len(surface_data) > 1 else None,
         surface_gap_threshold=SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
-        vessel_gap_threshold=SS_DIST if len(surface_data) > 1 else 0.0,
+        vessel_gap_threshold=PLASMA_VESSEL_MIN_DIST_M if len(surface_data) > 1 else 0.0,
         enforce_nesting=True,
     )
     run_dict['search_surface_status'] = search_stack_status
@@ -7773,8 +7722,6 @@ def callback(x):
     dJ_cc = np.linalg.norm(JCurveCurve.dJ())
     J_cs = JCurveSurface.J()
     dJ_cs = np.linalg.norm(JCurveSurface.dJ())
-    J_surf = objective_eval['J_surf']
-    dJ_surf = np.linalg.norm(objective_eval['dJ_surf'])
     J_curvature = objective_eval['J_curvature']
     dJ_curvature = np.linalg.norm(objective_eval['dJ_curvature'])
 
@@ -7792,9 +7739,8 @@ def callback(x):
         CC_DIST,
         JCurveSurface,
         CS_DIST,
-        JSurfSurf,
         full_stack_status,
-        SS_DIST,
+        PLASMA_VESSEL_MIN_DIST_M,
         banana_curve,
         CURVATURE_THRESHOLD,
         outer_entry["boozer_surface"].surface,
@@ -7923,8 +7869,7 @@ def callback(x):
     print(f"{'Curve Length Penalty':{width}} = {J_len:.6e} (dJ = {dJ_len:.6e})", file=buffer)
     print(f"{'Curve-Curve Penalty':{width}} = {J_cc:.6e} (min={curvecurve_min:.3e}) (dJ = {dJ_cc:.6e})", file=buffer)
     print(f"{'Curve-Surface Penalty':{width}} = {J_cs:.6e} (min={curvesurf_min:.3e}) (dJ = {dJ_cs:.6e})", file=buffer)
-    print(f"{'Surf-Vessel Penalty':{width}} = {J_surf:.6e} (dJ = {dJ_surf:.6e})", file=buffer) 
-    print(f"{'Curvature Penalty':{width}} = {J_curvature:.6e} (dJ = {dJ_curvature:.6e})", file=buffer) 
+    print(f"{'Curvature Penalty':{width}} = {J_curvature:.6e} (dJ = {dJ_curvature:.6e})", file=buffer)
     print(f"{'⟨|B·n|⟩':{width}} = {BdotN:.6e}", file=buffer)
     if len(surface_data) > 1:
         print(f"{'Surface search weights':{width}} = {objective_eval['surface_weights'].tolist()}", file=buffer)
@@ -8551,12 +8496,6 @@ if __name__ == "__main__":
             f"--cs-dist must be >= {COIL_PLASMA_MIN_DIST_M:.3f} m."
         )
     CS_DIST = float(args.cs_dist)
-    SURF_DIST_WEIGHT = args.surf_dist_weight
-    if args.ss_dist < PLASMA_VESSEL_MIN_DIST_M:
-        raise ValueError(
-            f"--ss-dist must be >= {PLASMA_VESSEL_MIN_DIST_M:.3f} m."
-        )
-    SS_DIST = float(args.ss_dist)
     CURVATURE_WEIGHT = args.curvature_weight
     CURVATURE_THRESHOLD = float(args.curvature_threshold)
     if args.curvature_threshold > MAX_CURVATURE_INV_M:
@@ -8564,8 +8503,6 @@ if __name__ == "__main__":
             f"--curvature-threshold must be <= {MAX_CURVATURE_INV_M:.1f} m^-1."
         )
     SURFACE_GAP_THRESHOLD = max(args.surface_gap_threshold, 0.0)
-    if len(surface_data) > 1 and SURF_DIST_WEIGHT != 0:
-        print("WARNING: SURF_DIST_WEIGHT is diagnostic-only in multi-surface mode; outer-vessel spacing is enforced as a rejection gate.")
 
     requested_length_target = float(args.length_target)
     if requested_length_target > COIL_LENGTH_HARD_LIMIT_M:
@@ -8622,9 +8559,6 @@ if __name__ == "__main__":
             CURVATURE_WEIGHT,
             CURVATURE_THRESHOLD,
             length_target=length_target,
-            SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
-            vessel_surface=VV,
-            vessel_gap_threshold=SS_DIST,
             goal_mode=args.single_stage_goal_mode,
             frontier_goal_config=frontier_goal_config,
             boozer_residual_threshold=boozer_residual_threshold_for_stage(
@@ -8648,7 +8582,6 @@ if __name__ == "__main__":
     def current_single_stage_alm_constraint_names():
         return single_stage_alm_constraint_names(
             alm_formulation=ALM_FORMULATION,
-            include_surface_surface=JSurfSurf is not None,
             include_surface_stack=single_stage_surface_stack_alm_enabled(
                 len(surface_data),
                 SURFACE_GAP_THRESHOLD,
@@ -8691,13 +8624,13 @@ if __name__ == "__main__":
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
-        SS_DIST if len(surface_data) > 1 else 0.0,
+        PLASMA_VESSEL_MIN_DIST_M if len(surface_data) > 1 else 0.0,
     )
     initial_surface_status = evaluate_surface_stack(
         surface_data,
         vessel_surface=VV if len(surface_data) > 1 else None,
         surface_gap_threshold=SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
-        vessel_gap_threshold=SS_DIST if len(surface_data) > 1 else 0.0,
+        vessel_gap_threshold=PLASMA_VESSEL_MIN_DIST_M if len(surface_data) > 1 else 0.0,
         enforce_nesting=True,
     )
     initial_search_surface_status = evaluate_surface_stack(
@@ -8719,9 +8652,8 @@ if __name__ == "__main__":
         CC_DIST,
         JCurveSurface,
         CS_DIST,
-        JSurfSurf,
         initial_surface_status,
-        SS_DIST,
+        PLASMA_VESSEL_MIN_DIST_M,
         banana_curve,
         CURVATURE_THRESHOLD,
         outer_surface_data["boozer_surface"].surface,
@@ -9052,9 +8984,8 @@ if __name__ == "__main__":
                     CC_DIST,
                     JCurveSurface,
                     CS_DIST,
-                    JSurfSurf,
                     run_dict["surface_status"],
-                    SS_DIST,
+                    PLASMA_VESSEL_MIN_DIST_M,
                     banana_curve,
                     CURVATURE_THRESHOLD,
                     outer_surface,
@@ -9413,7 +9344,6 @@ if __name__ == "__main__":
             cc_weight=CC_WEIGHT,
             cs_weight=CS_WEIGHT,
             curvature_weight=CURVATURE_WEIGHT,
-            surf_dist_weight=SURF_DIST_WEIGHT,
         )
 
         def restore_accepted_state():
@@ -9663,7 +9593,7 @@ if __name__ == "__main__":
             run_dict,
             vessel_surface=VV if len(surface_data) > 1 else None,
             surface_gap_threshold=SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
-            vessel_gap_threshold=SS_DIST if len(surface_data) > 1 else 0.0,
+            vessel_gap_threshold=PLASMA_VESSEL_MIN_DIST_M if len(surface_data) > 1 else 0.0,
         )
         final_source_stage = run_dict.get("accepted_boozer_stage", final_source_stage)
 
@@ -9696,9 +9626,8 @@ if __name__ == "__main__":
             CC_DIST,
             JCurveSurface,
             CS_DIST,
-            JSurfSurf,
             run_dict["surface_status"],
-            SS_DIST,
+            PLASMA_VESSEL_MIN_DIST_M,
             banana_curve,
             CURVATURE_THRESHOLD,
             outer_surface_data["boozer_surface"].surface,
@@ -9760,9 +9689,8 @@ if __name__ == "__main__":
             CC_DIST,
             JCurveSurface,
             CS_DIST,
-            JSurfSurf,
             run_dict["surface_status"],
-            SS_DIST,
+            PLASMA_VESSEL_MIN_DIST_M,
             banana_curve,
             CURVATURE_THRESHOLD,
             outer_surface_data["boozer_surface"].surface,
@@ -9787,12 +9715,11 @@ if __name__ == "__main__":
         run_dict,
         JCurveCurve,
         JCurveSurface,
-        JSurfSurf,
         banana_curve,
         curvelength,
         CC_DIST,
         CS_DIST,
-        SS_DIST,
+        PLASMA_VESSEL_MIN_DIST_M,
         CURVATURE_THRESHOLD,
         length_target,
         stage2_tf_current_A,
@@ -9821,7 +9748,7 @@ if __name__ == "__main__":
         "length_target": float(length_target),
         "cc_threshold": float(CC_DIST),
         "coil_plasma_min_dist_m": float(CS_DIST),
-        "plasma_vessel_min_dist_m": float(SS_DIST),
+        "plasma_vessel_min_dist_m": float(PLASMA_VESSEL_MIN_DIST_M),
         "curvature_threshold": float(CURVATURE_THRESHOLD),
         "banana_surf_radius": float(banana_surf_radius),
     }
@@ -9916,8 +9843,6 @@ if __name__ == "__main__":
         "CC_WEIGHT": CC_WEIGHT,
         "CS_DIST": CS_DIST,
         "CS_WEIGHT": CS_WEIGHT,
-        "SS_DIST": SS_DIST,
-        "SURF_DIST_WEIGHT": SURF_DIST_WEIGHT,
         "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
         "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
         "LENGTH_WEIGHT": LENGTH_WEIGHT,

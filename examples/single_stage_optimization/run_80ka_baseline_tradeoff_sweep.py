@@ -160,7 +160,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--curvature-weight", type=float, default=0.1)
     parser.add_argument("--length-weight", type=float, default=1.0)
     parser.add_argument("--cs-weight", type=float, default=1.0)
-    parser.add_argument("--surf-dist-weight", type=float, default=1000.0)
     parser.add_argument(
         "--scan-weights",
         default="res_weight,iotas_weight,cc_weight,curvature_weight,length_weight",
@@ -358,8 +357,6 @@ def build_single_stage_command(
         str(case.length_weight),
         "--cs-weight",
         str(case.cs_weight),
-        "--surf-dist-weight",
-        str(case.surf_dist_weight),
     ]
     if getattr(args, "seed_order_upgrade", None) is not None:
         command.extend(["--seed-order-upgrade", str(args.seed_order_upgrade)])
@@ -467,7 +464,6 @@ def build_sweep_cases(args: argparse.Namespace):
             "curvature_weight": args.curvature_weight,
             "length_weight": args.length_weight,
             "cs_weight": args.cs_weight,
-            "surf_dist_weight": args.surf_dist_weight,
         },
         parse_csv(args.scan_weights, str),
         parse_csv(args.weight_multipliers, float),

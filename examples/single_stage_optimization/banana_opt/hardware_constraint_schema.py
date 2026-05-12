@@ -135,13 +135,6 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         traversal_policy="allowed",
     ),
     HardwareConstraintSpec(
-        name="surface_vessel_spacing",
-        kind="lower_bound",
-        threshold=PLASMA_VESSEL_MIN_DIST_M,
-        applies_to=frozenset({"penalty", "alm", "artifact"}),
-        traversal_policy="allowed",
-    ),
-    HardwareConstraintSpec(
         name="surface_surface_spacing",
         kind="lower_bound",
         threshold=0.0,
@@ -243,7 +236,6 @@ _SCHEMA_BY_NAME = {spec.name: spec for spec in HARDWARE_CONSTRAINT_SCHEMA}
 _DEFAULT_ALM_BLOCK_BY_NAME: Mapping[str, ALMBlock] = {
     "coil_coil_spacing": "geometry",
     "coil_surface_spacing": "geometry",
-    "surface_vessel_spacing": "surface",
     "surface_surface_spacing": "surface",
     "max_curvature": "geometry",
     "coil_length": "geometry",
@@ -260,7 +252,6 @@ _DEFAULT_ALM_BLOCK_BY_NAME: Mapping[str, ALMBlock] = {
 _ARTIFACT_VALUE_FIELD_BY_NAME = {
     "coil_coil_spacing": ("curve_curve_min_dist", "CURVE_CURVE_MIN_DIST"),
     "coil_surface_spacing": ("curve_surface_min_dist", "CURVE_SURFACE_MIN_DIST"),
-    "surface_vessel_spacing": ("surface_vessel_min_dist", "SURFACE_VESSEL_MIN_DIST"),
     "max_curvature": ("max_curvature", "MAX_CURVATURE"),
     "coil_length": ("coil_length", "COIL_LENGTH"),
     "coil_length_min": ("coil_length", "COIL_LENGTH"),

@@ -2671,7 +2671,6 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["MAX_CURVATURE"], 41.0)
         self.assertEqual(result["CURVE_CURVE_MIN_DIST"], 0.04)
         self.assertEqual(result["CURVE_SURFACE_MIN_DIST"], 0.017)
-        self.assertEqual(result["SURFACE_VESSEL_MIN_DIST"], 0.041)
 
     def test_smooth_max_curvature_signed_constraint_uses_active_window(self):
         curve = _FakeCurve(
@@ -2831,47 +2830,6 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["J_len_min"], 2.0)
         np.testing.assert_allclose(result["grad"], [2.0, 3.0])
 
-    def test_evaluate_total_objective_preserves_component_breakdown(self):
-        nonqs = [
-            _FakeAlgebraicObjective(2.0, [2.0, 0.0]),
-            _FakeAlgebraicObjective(6.0, [4.0, 0.0]),
-        ]
-        brs = [
-            _FakeAlgebraicObjective(10.0, [1.0, 1.0]),
-            _FakeAlgebraicObjective(20.0, [3.0, 3.0]),
-        ]
-        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
-        surface_term = _FakeAlgebraicObjective(1.5, [0.1, 0.2])
-
-        result = self.module.evaluate_total_objective(
-            np.array([0.5, 1.0]),
-            nonqs,
-            brs,
-            RES_WEIGHT=2.0,
-            Jiota=zero,
-            IOTAS_WEIGHT=3.0,
-            JCurveLength=zero,
-            LENGTH_WEIGHT=4.0,
-            JCurveCurve=zero,
-            CC_WEIGHT=5.0,
-            JCurveSurface=zero,
-            CS_WEIGHT=6.0,
-            JCurvature=zero,
-            CURVATURE_WEIGHT=7.0,
-            JSurfSurf=surface_term,
-            SURF_DIST_WEIGHT=8.0,
-            JVolume=None,
-            VOLUME_WEIGHT=0.0,
-        )
-
-        self.assertAlmostEqual(result["J_QS"], (0.5 * 2.0 + 6.0) / 1.5)
-        self.assertAlmostEqual(result["J_Boozer"], (0.5 * 10.0 + 20.0) / 1.5)
-        self.assertAlmostEqual(result["J_surf"], 1.5)
-        self.assertAlmostEqual(result["J_volume"], 0.0)
-        np.testing.assert_allclose(result["dJ_surf"], [0.1, 0.2])
-        self.assertAlmostEqual(result["total"], 50.0)
-        np.testing.assert_allclose(result["grad"], [8.8, 6.266666666666667])
-
     def test_evaluate_total_objective_fast_path_skips_component_breakdown(self):
         nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]
         brs = [_FakeAlgebraicObjective(3.0, [0.5, 0.5])]
@@ -2926,47 +2884,6 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["total"], 25.0)
         np.testing.assert_allclose(result["grad"], [4.6, 2.8])
 
-    def test_evaluate_total_objective_fast_path_emits_penalty_constraint_payload(self):
-        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
-
-        result = self.module.evaluate_total_objective(
-            np.array([1.0]),
-            [zero],
-            [zero],
-            RES_WEIGHT=0.0,
-            Jiota=zero,
-            IOTAS_WEIGHT=0.0,
-            JCurveLength=zero,
-            LENGTH_WEIGHT=0.0,
-            JCurveCurve=_FakeAlgebraicObjective(0.6, [0.1, 0.0]),
-            CC_WEIGHT=1.0,
-            JCurveSurface=_FakeAlgebraicObjective(0.7, [0.0, 0.1]),
-            CS_WEIGHT=1.0,
-            JCurvature=_FakeAlgebraicObjective(0.8, [0.2, 0.3]),
-            CURVATURE_WEIGHT=1.0,
-            JSurfSurf=_FakeAlgebraicObjective(0.9, [0.4, 0.5]),
-            SURF_DIST_WEIGHT=1.0,
-            include_diagnostics=False,
-        )
-
-        self.assertEqual(
-            result["constraint_names"],
-            [
-                "coil_coil_spacing",
-                "coil_surface_spacing",
-                "max_curvature",
-                "surface_vessel_spacing",
-            ],
-        )
-        np.testing.assert_allclose(
-            result["dual_update_values"],
-            [0.6, 0.7, 0.8, 0.9],
-        )
-        self.assertEqual(
-            result["search_hardware_constraint_payload_kind"],
-            "penalty_objective",
-        )
-
     def test_evaluate_total_objective_supports_frontier_specific_objective_terms(self):
         nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]
         brs = [_FakeAlgebraicObjective(3.0, [0.5, 0.5])]
@@ -3005,132 +2922,6 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["J_volume"], -0.3)
         self.assertAlmostEqual(result["total"], 23.0)
         np.testing.assert_allclose(result["grad"], [9.9, 1.0])
-
-    def test_evaluate_alm_objective_builds_constraint_payload(self):
-        nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]
-        brs = [_FakeAlgebraicObjective(3.0, [0.5, 0.5])]
-        jiota = _FakeAlgebraicObjective(4.0, [0.2, 0.1])
-        jlength = _FakeAlgebraicObjective(5.0, [1.0, 1.5])
-        jcc = _FakeAlgebraicObjective(0.6, [0.3, 0.4])
-        jcs = _FakeAlgebraicObjective(0.7, [0.5, 0.6])
-        jcurv = _FakeAlgebraicObjective(0.8, [0.7, 0.8])
-        jsurf = _FakeAlgebraicObjective(0.9, [0.9, 1.0])
-
-        def fake_augmented(
-            base_value,
-            base_grad,
-            constraint_values,
-            constraint_grads,
-            multipliers,
-            penalty,
-        ):
-            self.assertAlmostEqual(base_value, 25.0)
-            np.testing.assert_allclose(base_grad, [4.6, 2.8])
-            np.testing.assert_allclose(constraint_values, [-2.0, 10.0, 0.0075, -10.0])
-            np.testing.assert_allclose(constraint_grads[0], [20.0, 0.0])
-            np.testing.assert_allclose(constraint_grads[1], [0.0, 50.0])
-            np.testing.assert_allclose(constraint_grads[2], [0.025, -0.025])
-            np.testing.assert_allclose(constraint_grads[3], [12.5, 12.5])
-            np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3, 0.4])
-            self.assertAlmostEqual(penalty, 9.0)
-            return {
-                "total": 25.0,
-                "grad": np.array([8.0, -3.0]),
-                "stationarity_norm": 0.125,
-            }
-
-        result = self.module.evaluate_alm_objective(
-            np.array([1.0]),
-            nonqs,
-            brs,
-            RES_WEIGHT=2.0,
-            Jiota=jiota,
-            IOTAS_WEIGHT=3.0,
-            JVolume=None,
-            VOLUME_WEIGHT=0.0,
-            JCurveLength=jlength,
-            LENGTH_WEIGHT=1.0,
-            JCurveCurve=jcc,
-            JCurveSurface=jcs,
-            JCurvature=jcurv,
-            multipliers=np.array([0.1, 0.2, 0.3, 0.4]),
-            penalty=9.0,
-            objective_optimizable=SimpleNamespace(),
-            curves=["curve_a"],
-            curve_curve_min_distance=0.05,
-            outer_surface="outer",
-            curve_surface_min_distance=0.02,
-            banana_curve="banana",
-            curvature_threshold=40.0,
-            distance_smoothing=0.01,
-            curvature_smoothing=0.05,
-            constraint_names=(
-                "coil_coil_spacing",
-                "coil_surface_spacing",
-                "max_curvature",
-                "surface_vessel_spacing",
-            ),
-            curve_curve_constraint_fn=lambda *_args: (-0.1, np.array([1.0, 0.0]), 0.0),
-            curve_surface_constraint_fn=lambda *_args: (0.2, np.array([0.0, 1.0]), 0.2),
-            curvature_constraint_fn=lambda *_args: (0.3, np.array([1.0, -1.0]), 0.3),
-            JSurfSurf=jsurf,
-            vessel_surface="vessel",
-            surface_surface_min_distance=0.04,
-            surface_surface_constraint_fn=lambda *_args: (
-                -0.4,
-                np.array([0.5, 0.5]),
-                0.0,
-            ),
-            augmented_inequality_objective_fn=fake_augmented,
-            activity_tolerances_fn=lambda ds, cs, include_surface_surface, include_surface_stack=False: np.array(
-                [ds * 4.0, ds * 4.0, cs * 4.0, ds * 4.0]
-                if include_surface_surface
-                else [ds * 4.0, ds * 4.0, cs * 4.0],
-                dtype=float,
-            ),
-        )
-
-        self.assertEqual(
-            result["constraint_names"],
-            [
-                "coil_coil_spacing",
-                "coil_surface_spacing",
-                "max_curvature",
-                "surface_vessel_spacing",
-            ],
-        )
-        np.testing.assert_allclose(result["dual_update_values"], [-2.0, 10.0, 0.0075, -10.0])
-        np.testing.assert_allclose(result["feasibility_values"], [0.0, 10.0, 0.0075, 0.0])
-        np.testing.assert_allclose(
-            result["constraint_activity_tolerances"], [0.8, 2.0, 0.005, 1.0]
-        )
-        np.testing.assert_allclose(
-            result["constraint_scales"],
-            [0.05, 0.02, 40.0, 0.04],
-        )
-        self.assertEqual(
-            result["constraint_blocks"],
-            ["geometry", "geometry", "geometry", "surface"],
-        )
-        self.assertEqual(
-            result["objective_value_kinds"],
-            ["surrogate", "surrogate", "surrogate", "surrogate"],
-        )
-        np.testing.assert_allclose(
-            result["raw_dual_update_values"],
-            [-0.1, 0.2, 0.3, -0.4],
-        )
-        np.testing.assert_allclose(
-            result["raw_feasibility_values"],
-            [0.0, 0.2, 0.3, 0.0],
-        )
-        self.assertAlmostEqual(result["base_total"], 25.0)
-        self.assertAlmostEqual(result["max_feasibility_violation"], 10.0)
-        self.assertAlmostEqual(result["J_cc"], 0.6)
-        self.assertAlmostEqual(result["J_cs"], 0.7)
-        self.assertAlmostEqual(result["J_surf"], 0.9)
-        self.assertAlmostEqual(result["J_curvature"], 0.8)
-        np.testing.assert_allclose(result["grad"], [8.0, -3.0])
 
     def test_evaluate_alm_objective_includes_width_and_self_intersect_constraints(self):
         zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
@@ -3973,7 +3764,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 0.3,
             ),
             augmented_inequality_objective_fn=fake_augmented,
-            activity_tolerances_fn=lambda ds, cs, include_surface_surface, include_surface_stack=False: np.array(
+            activity_tolerances_fn=lambda ds, cs, include_surface_stack=False: np.array(
                 [ds * 4.0, ds * 4.0, cs * 4.0],
                 dtype=float,
             ),
@@ -4031,7 +3822,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 np.array([0.0, 0.0, 0.0, 0.0]),
                 0.0,
             ),
-            activity_tolerances_fn=lambda ds, cs, include_surface_surface, include_surface_stack=False: np.array(
+            activity_tolerances_fn=lambda ds, cs, include_surface_stack=False: np.array(
                 [ds, ds, cs],
                 dtype=float,
             ),
@@ -4132,7 +3923,7 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
                 0.3,
             ),
             augmented_inequality_objective_fn=fake_augmented,
-            activity_tolerances_fn=lambda ds, cs, include_surface_surface, include_surface_stack=False: np.array(
+            activity_tolerances_fn=lambda ds, cs, include_surface_stack=False: np.array(
                 [ds * 4.0, ds * 4.0, cs * 4.0],
                 dtype=float,
             ),
@@ -4325,8 +4116,7 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
             cc_dist=0.05,
             curve_surface_distance_obj=SimpleNamespace(shortest_distance=lambda: 0.03),
             cs_dist=0.02,
-            surface_vessel_distance_obj=SimpleNamespace(shortest_distance=lambda: 0.01),
-            surface_status={"outer_vessel_gap": 0.5},
+            surface_status={"outer_vessel_gap": 0.01},
             ss_dist=0.04,
             banana_curve=SimpleNamespace(kappa=lambda: np.array([39.0, 41.0])),
             curvature_threshold=40.0,
@@ -4341,7 +4131,7 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
         self.assertNotIn("status", result)
         self.assertNotIn("artifact_status", result)
         self.assertFalse(result["search_hardware_status"]["success"])
-        self.assertEqual(len(result["search_hardware_status"]["violations"]), 3)
+        self.assertEqual(len(result["search_hardware_status"]["violations"]), 2)
 
     def test_evaluate_single_stage_hardware_snapshot_keeps_top_level_constraints_in_search_role(
         self,
@@ -4351,7 +4141,6 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
             cc_dist=0.05,
             curve_surface_distance_obj=SimpleNamespace(shortest_distance=lambda: 0.02),
             cs_dist=0.02,
-            surface_vessel_distance_obj=SimpleNamespace(shortest_distance=lambda: 0.04),
             surface_status={"outer_vessel_gap": 0.5},
             ss_dist=0.04,
             banana_curve=SimpleNamespace(kappa=lambda: np.array([40.0, 40.0])),
@@ -4378,11 +4167,10 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
                 "constraint_names": [
                     "coil_coil_spacing",
                     "coil_surface_spacing",
-                    "surface_vessel_spacing",
                     "max_curvature",
                     "banana_current_upper_bound",
                 ],
-                "dual_update_values": np.array([0.01, -0.003, 0.004, 0.5, 1000.0]),
+                "dual_update_values": np.array([0.01, -0.003, 0.5, 1000.0]),
                 "search_hardware_constraint_payload_kind": "signed_residual",
             },
             cc_dist=0.05,
@@ -4394,7 +4182,6 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
 
         self.assertAlmostEqual(result["curve_curve_min_dist"], 0.04)
         self.assertAlmostEqual(result["curve_surface_min_dist"], 0.023)
-        self.assertAlmostEqual(result["surface_vessel_min_dist"], 0.036)
         self.assertAlmostEqual(result["max_curvature"], 40.5)
         self.assertAlmostEqual(result["banana_current_A"], 1.7e4)
         self.assertFalse(result["search_hardware_status"]["success"])
@@ -4629,9 +4416,8 @@ class SingleStageConstraintModuleTests(_ModuleTestCase):
         tolerances = self.module.single_stage_constraint_activity_tolerances(
             0.005,
             0.05,
-            include_surface_surface=True,
         )
-        np.testing.assert_allclose(tolerances, [0.02, 0.02, 0.2, 0.02])
+        np.testing.assert_allclose(tolerances, [0.02, 0.02, 0.2])
 
     def test_softmin_selection_window_uses_shared_truncation_factor(self):
         self.assertAlmostEqual(self.module.softmin_selection_window(0.25), 1.0)

@@ -217,7 +217,6 @@ def apply_frontier_scalarization_override(
     cc_weight,
     cs_weight,
     curvature_weight,
-    surf_dist_weight,
     poloidal_extent_weight=0.0,
     objective_optimizable=None,
     alm_formulation="weighted_sum",
@@ -294,7 +293,6 @@ def apply_frontier_scalarization_override(
             cc_weight=cc_weight,
             cs_weight=cs_weight,
             curvature_weight=curvature_weight,
-            surf_dist_weight=surf_dist_weight,
             poloidal_extent_weight=poloidal_extent_weight,
         )
         if "constraint_values" in annotated and "constraint_grads" in annotated:
@@ -353,7 +351,6 @@ def _frontier_penalty_geometry_total_grad(
     cc_weight,
     cs_weight,
     curvature_weight,
-    surf_dist_weight,
     poloidal_extent_weight=0.0,
 ):
     total = (
@@ -361,7 +358,6 @@ def _frontier_penalty_geometry_total_grad(
         + float(cc_weight) * float(objective_eval["J_cc"])
         + float(cs_weight) * float(objective_eval["J_cs"])
         + float(curvature_weight) * float(objective_eval["J_curvature"])
-        + float(surf_dist_weight) * float(objective_eval.get("J_surf", 0.0))
     )
     grad = (
         float(length_weight) * np.asarray(objective_eval["dJ_len"], dtype=float)
@@ -369,8 +365,6 @@ def _frontier_penalty_geometry_total_grad(
         + float(cs_weight) * np.asarray(objective_eval["dJ_cs"], dtype=float)
         + float(curvature_weight)
         * np.asarray(objective_eval["dJ_curvature"], dtype=float)
-        + float(surf_dist_weight)
-        * np.asarray(objective_eval.get("dJ_surf", 0.0), dtype=float)
         + float(poloidal_extent_weight)
         * np.asarray(objective_eval.get("dJ_poloidal_extent", 0.0), dtype=float)
     )

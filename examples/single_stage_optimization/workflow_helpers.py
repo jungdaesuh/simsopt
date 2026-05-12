@@ -101,7 +101,6 @@ class SingleStageWeightCase:
     curvature_weight: float
     length_weight: float
     cs_weight: float
-    surf_dist_weight: float
 
 
 _DEFAULT_STAGE2_ALM_MAX_SUBPROBLEM_CONTINUATIONS = 20
@@ -666,7 +665,6 @@ def build_weight_cases(
         curvature_weight=float(base_weights["curvature_weight"]),
         length_weight=float(base_weights["length_weight"]),
         cs_weight=float(base_weights["cs_weight"]),
-        surf_dist_weight=float(base_weights["surf_dist_weight"]),
     )
     cases = [baseline]
     seen = {
@@ -677,7 +675,6 @@ def build_weight_cases(
             baseline.curvature_weight,
             baseline.length_weight,
             baseline.cs_weight,
-            baseline.surf_dist_weight,
         )
     }
     for weight_name in scan_weights:
@@ -692,7 +689,6 @@ def build_weight_cases(
                 "curvature_weight": baseline.curvature_weight,
                 "length_weight": baseline.length_weight,
                 "cs_weight": baseline.cs_weight,
-                "surf_dist_weight": baseline.surf_dist_weight,
             }
             fields[weight_name] = fields[weight_name] * scaled_multiplier
             signature = (
@@ -702,7 +698,6 @@ def build_weight_cases(
                 fields["curvature_weight"],
                 fields["length_weight"],
                 fields["cs_weight"],
-                fields["surf_dist_weight"],
             )
             if signature in seen:
                 continue

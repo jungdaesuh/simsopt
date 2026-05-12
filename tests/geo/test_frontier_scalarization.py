@@ -847,8 +847,6 @@ class FrontierScalarizationTests(unittest.TestCase):
                 "dJ_cs": np.full(grad_dim, 0.25),
                 "J_curvature": 2.0,
                 "dJ_curvature": np.full(grad_dim, 0.1),
-                "J_surf": 0.6,
-                "dJ_surf": np.full(grad_dim, 0.2),
                 "J_poloidal_extent": 0.3,
                 "dJ_poloidal_extent": np.full(grad_dim, 0.05),
                 "total": 0.0,
@@ -876,7 +874,6 @@ class FrontierScalarizationTests(unittest.TestCase):
             cc_weight=0.5,
             cs_weight=0.25,
             curvature_weight=0.1,
-            surf_dist_weight=0.05,
             poloidal_extent_weight=0.025,
         )
 

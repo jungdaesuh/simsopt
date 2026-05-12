@@ -304,33 +304,6 @@ class SnapshotParityTests(unittest.TestCase):
             self.assertEqual(actual["max_curvature"], expected["max_curvature"])
             self.assertEqual(actual["curvature_threshold"], expected["curvature_threshold"])
 
-    def test_single_stage_hardware_constraints_matches_snapshot(self):
-        snapshot = _extract_snapshot_functions(
-            *SINGLE_STAGE_SNAPSHOT,
-            function_names=("evaluate_single_stage_hardware_constraints",),
-        )["evaluate_single_stage_hardware_constraints"]
-        cases = [
-            (0.06, 0.05, 0.03, 0.02, 0.05, 0.04, 38.0, 40.0),
-            (0.04, 0.05, 0.01, 0.02, 0.03, 0.04, 41.5, 40.0),
-        ]
-
-        for case in cases:
-            expected = snapshot(*case)
-            actual = self.current_single_stage_geometry.evaluate_single_stage_hardware_constraints(
-                *case
-            )
-            self.assertEqual(actual["success"], expected["success"])
-            self.assertEqual(len(actual["violations"]), len(expected["violations"]))
-            self.assertEqual(actual["search_hardware_status"]["success"], expected["success"])
-            self.assertEqual(
-                len(actual["search_hardware_status"]["violations"]),
-                len(expected["violations"]),
-            )
-            self.assertEqual(actual["curve_curve_min_dist"], expected["curve_curve_min_dist"])
-            self.assertEqual(actual["curve_surface_min_dist"], expected["curve_surface_min_dist"])
-            self.assertEqual(actual["surface_vessel_min_dist"], expected["surface_vessel_min_dist"])
-            self.assertEqual(actual["max_curvature"], expected["max_curvature"])
-
     def test_build_surface_configs_matches_single_stage_snapshot(self):
         snapshot = _extract_snapshot_functions(
             *SINGLE_STAGE_SNAPSHOT,
@@ -407,47 +380,6 @@ class SnapshotParityTests(unittest.TestCase):
                 stage2_module.build_hbt_reference_surfaces(5, 0.2),
                 ("LCFS", "CWS", "VV"),
             )
-
-    def test_compute_surface_vessel_min_dist_matches_snapshot(self):
-        snapshot = _extract_snapshot_functions(
-            *SINGLE_STAGE_SNAPSHOT,
-            function_names=("compute_single_stage_surface_vessel_min_dist",),
-            extra_globals={"cdist": self.current_single_stage_geometry.cdist},
-        )["compute_single_stage_surface_vessel_min_dist"]
-
-        direct_obj = _FakeDistanceObjective(0.17)
-        direct_status = {"outer_vessel_gap": 0.05}
-        self.assertEqual(
-            self.current_single_stage_geometry.compute_single_stage_surface_vessel_min_dist(
-                direct_obj,
-                direct_status,
-            ),
-            snapshot(direct_obj, direct_status),
-        )
-
-        cached_status = {"outer_vessel_gap": 0.11}
-        self.assertEqual(
-            self.current_single_stage_geometry.compute_single_stage_surface_vessel_min_dist(
-                None,
-                cached_status,
-            ),
-            snapshot(None, cached_status),
-        )
-
-        outer_surface = SimpleNamespace(
-            gamma=lambda: np.array([[[0.0, 0.0, 0.0]], [[2.0, 0.0, 0.0]]], dtype=float)
-        )
-        vessel_surface = SimpleNamespace(
-            gamma=lambda: np.array([[[1.0, 0.0, 0.0]], [[4.0, 0.0, 0.0]]], dtype=float)
-        )
-        actual = self.current_single_stage_geometry.compute_single_stage_surface_vessel_min_dist(
-            None,
-            {"outer_vessel_gap": None},
-            outer_surface,
-            vessel_surface,
-        )
-        expected = snapshot(None, {"outer_vessel_gap": None}, outer_surface, vessel_surface)
-        self.assertEqual(actual, expected)
 
     def test_topology_gate_deficit_matches_snapshot(self):
         snapshot = _extract_snapshot_functions(

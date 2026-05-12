@@ -419,7 +419,6 @@ def single_stage_constraint_activity_tolerances(
     distance_smoothing,
     curvature_smoothing,
     *,
-    include_surface_surface,
     include_surface_stack=False,
 ):
     distance_activity_tolerance = softmin_selection_window(distance_smoothing)
@@ -428,8 +427,6 @@ def single_stage_constraint_activity_tolerances(
         distance_activity_tolerance,
         4.0 * float(curvature_smoothing),
     ]
-    if include_surface_surface:
-        tolerances.append(distance_activity_tolerance)
     if include_surface_stack:
         tolerances.append(distance_activity_tolerance)
     return np.asarray([max(value, _SMOOTHING_EPS) for value in tolerances], dtype=float)

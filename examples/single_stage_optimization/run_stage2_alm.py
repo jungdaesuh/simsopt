@@ -794,7 +794,7 @@ def build_summary(
             ),
             "plasma_vessel_min_dist": stage2_results.get(
                 "SURFACE_VESSEL_MIN_DIST",
-                stage2_results.get("PLASMA_VESSEL_MIN_DIST"),
+                stage2_results.get("surface_vessel_min_dist"),
             ),
             "plasma_vessel_threshold": stage2_results.get(
                 "PLASMA_VESSEL_MIN_DIST_M",

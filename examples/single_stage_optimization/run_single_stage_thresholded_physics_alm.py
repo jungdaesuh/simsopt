@@ -416,7 +416,6 @@ def build_summary(
             "alm_final_stationarity_norm": results.get("ALM_FINAL_STATIONARITY_NORM"),
             "curve_curve_min_dist": results.get("CURVE_CURVE_MIN_DIST"),
             "curve_surface_min_dist": results.get("CURVE_SURFACE_MIN_DIST"),
-            "surface_vessel_min_dist": results.get("SURFACE_VESSEL_MIN_DIST"),
             "max_curvature": results.get("MAX_CURVATURE"),
             "nonqs_ratio": results.get("NONQS_RATIO"),
             "boozer_residual": results.get("BOOZER_RESIDUAL"),

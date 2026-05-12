@@ -290,7 +290,6 @@ def evaluate_single_stage_hardware_constraints(
     shared_threshold_inputs = (
         ("coil_coil_spacing", cc_dist),
         ("coil_surface_spacing", cs_dist),
-        ("surface_vessel_spacing", ss_dist),
         ("max_curvature", curvature_threshold),
         ("poloidal_extent", poloidal_extent_threshold_rad),
         ("tf_current", tf_current_limit_A),
@@ -309,7 +308,6 @@ def evaluate_single_stage_hardware_constraints(
     measured_values = {
         "coil_coil_spacing": curve_curve_min_dist,
         "coil_surface_spacing": curve_surface_min_dist,
-        "surface_vessel_spacing": surface_vessel_min_dist,
         "max_curvature": max_curvature,
         "coil_length": coil_length,
         "coil_length_min": coil_length,
@@ -444,11 +442,6 @@ def evaluate_single_stage_search_hardware_snapshot(
             signed_values["coil_surface_spacing"],
         )
     surface_vessel_min_dist = None
-    if payload_kind == "signed_residual" and "surface_vessel_spacing" in signed_values:
-        surface_vessel_min_dist = _lower_bound_measurement_from_signed(
-            ss_dist,
-            signed_values["surface_vessel_spacing"],
-        )
     max_curvature = None
     if payload_kind == "signed_residual" and "max_curvature" in signed_values:
         max_curvature = _upper_bound_measurement_from_signed(
@@ -474,7 +467,6 @@ def evaluate_single_stage_search_hardware_snapshot(
         (
             ("coil_coil_spacing", cc_dist),
             ("coil_surface_spacing", cs_dist),
-            ("surface_vessel_spacing", ss_dist),
             ("max_curvature", curvature_threshold),
             ("poloidal_extent", poloidal_extent_threshold_rad),
             ("banana_current", banana_current_max_A),
@@ -483,7 +475,6 @@ def evaluate_single_stage_search_hardware_snapshot(
     measured_values = {
         "coil_coil_spacing": curve_curve_min_dist,
         "coil_surface_spacing": curve_surface_min_dist,
-        "surface_vessel_spacing": surface_vessel_min_dist,
         "max_curvature": max_curvature,
         "coil_length": coil_length,
         "poloidal_extent": poloidal_extent_rad,
@@ -545,23 +536,16 @@ def evaluate_single_stage_search_hardware_snapshot(
 
 
 def compute_single_stage_surface_vessel_min_dist(
-    surface_vessel_distance_obj,
     surface_status,
     outer_surface=None,
     vessel_surface=None,
 ):
-    if surface_vessel_distance_obj is not None and hasattr(
-        surface_vessel_distance_obj,
-        "shortest_distance",
-    ):
-        return float(surface_vessel_distance_obj.shortest_distance())
     outer_vessel_gap = surface_status.get("outer_vessel_gap")
     if outer_vessel_gap is not None:
         return float(outer_vessel_gap)
     if outer_surface is None or vessel_surface is None:
         raise ValueError(
-            "Need outer_surface and vessel_surface when no surface-vessel "
-            "distance object or cached gap is available."
+            "Need outer_surface and vessel_surface when no cached gap is available."
         )
     return float(
         np.min(
@@ -578,7 +562,6 @@ def evaluate_single_stage_hardware_snapshot(
     cc_dist,
     curve_surface_distance_obj,
     cs_dist,
-    surface_vessel_distance_obj,
     surface_status,
     ss_dist,
     banana_curve,
@@ -597,7 +580,6 @@ def evaluate_single_stage_hardware_snapshot(
     curve_curve_min_dist = float(curve_curve_distance_obj.shortest_distance())
     curve_surface_min_dist = float(curve_surface_distance_obj.shortest_distance())
     surface_vessel_min_dist = compute_single_stage_surface_vessel_min_dist(
-        surface_vessel_distance_obj,
         surface_status,
         outer_surface,
         vessel_surface,

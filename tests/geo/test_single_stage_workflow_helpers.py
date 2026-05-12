@@ -1076,7 +1076,6 @@ class BaselineSweepScriptTests(unittest.TestCase):
             curvature_weight=0.1,
             length_weight=1.0,
             cs_weight=1.0,
-            surf_dist_weight=1000.0,
             scan_weights="res_weight,cc_weight",
             weight_multipliers="0.5,1.0,2.0",
         )
@@ -1093,7 +1092,6 @@ class BaselineSweepScriptTests(unittest.TestCase):
             curvature_weight=0.1,
             length_weight=1.0,
             cs_weight=1.0,
-            surf_dist_weight=1000.0,
         )
 
         command = module.build_single_stage_command(
@@ -1124,7 +1122,6 @@ class BaselineSweepScriptTests(unittest.TestCase):
             curvature_weight=0.1,
             length_weight=1.0,
             cs_weight=1.0,
-            surf_dist_weight=1000.0,
         )
 
         command = module.build_single_stage_command(
@@ -1185,7 +1182,6 @@ class BaselineSweepScriptTests(unittest.TestCase):
             curvature_weight=0.1,
             length_weight=1.0,
             cs_weight=1.0,
-            surf_dist_weight=1000.0,
         )
         command = module.build_single_stage_command(
             args,
@@ -1225,7 +1221,6 @@ class BaselineSweepScriptTests(unittest.TestCase):
             curvature_weight=0.1,
             length_weight=1.0,
             cs_weight=1.0,
-            surf_dist_weight=1000.0,
         )
 
         command = module.build_single_stage_command(
@@ -2112,10 +2107,8 @@ class GoalModeComparisonScriptTests(unittest.TestCase):
             length_weight=1.0,
             length_target=1.75,
             cs_weight=1.0,
-            surf_dist_weight=1000.0,
             cc_dist=0.05,
             cs_dist=0.02,
-            ss_dist=0.04,
             curvature_threshold=40.0,
             checkpoint_every=5,
             topology_gate_fieldlines=6,

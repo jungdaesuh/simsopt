@@ -373,10 +373,8 @@ def build_parser(*, add_help: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--length-weight", type=float, default=1.0)
     parser.add_argument("--length-target", type=float, default=float(os.environ["SS_LENGTH_TARGET"]) if "SS_LENGTH_TARGET" in os.environ else None)
     parser.add_argument("--cs-weight", type=float, default=1.0)
-    parser.add_argument("--surf-dist-weight", type=float, default=1000.0)
     parser.add_argument("--cc-dist", type=float, default=0.05)
     parser.add_argument("--cs-dist", type=float, default=0.015)
-    parser.add_argument("--ss-dist", type=float, default=0.04)
     parser.add_argument("--curvature-threshold", type=float, default=100.0)
     parser.add_argument("--checkpoint-every", type=int, default=int(os.environ.get("CHECKPOINT_EVERY", "0")))
     parser.add_argument(
@@ -501,14 +499,10 @@ def build_single_stage_goal_mode_command(
         str(args.length_weight),
         "--cs-weight",
         str(args.cs_weight),
-        "--surf-dist-weight",
-        str(args.surf_dist_weight),
         "--cc-dist",
         str(args.cc_dist),
         "--cs-dist",
         str(args.cs_dist),
-        "--ss-dist",
-        str(args.ss_dist),
         "--curvature-threshold",
         str(args.curvature_threshold),
         "--num-surfaces",
@@ -758,7 +752,6 @@ def result_metric_subset(results: dict) -> dict:
         "max_curvature": results.get("MAX_CURVATURE"),
         "curve_curve_min_dist": results.get("CURVE_CURVE_MIN_DIST"),
         "curve_surface_min_dist": results.get("CURVE_SURFACE_MIN_DIST"),
-        "surface_vessel_min_dist": results.get("SURFACE_VESSEL_MIN_DIST"),
         "invalid_state_rejects_total": results.get("INVALID_STATE_REJECTS_TOTAL"),
         "topology_gate_rejects": results.get("TOPOLOGY_GATE_REJECTS"),
         "hardware_rejects": results.get("HARDWARE_REJECTS"),
@@ -775,7 +768,6 @@ def result_metric_subset(results: dict) -> dict:
         "best_feasible_base_objective_j": results.get("BEST_FEASIBLE_BASE_OBJECTIVE_J"),
         "best_feasible_curve_curve_min_dist": results.get("BEST_FEASIBLE_CURVE_CURVE_MIN_DIST"),
         "best_feasible_curve_surface_min_dist": results.get("BEST_FEASIBLE_CURVE_SURFACE_MIN_DIST"),
-        "best_feasible_surface_vessel_min_dist": results.get("BEST_FEASIBLE_SURFACE_VESSEL_MIN_DIST"),
         "best_feasible_max_curvature": results.get("BEST_FEASIBLE_MAX_CURVATURE"),
         "best_feasible_hardware_constraints_ok": results.get("BEST_FEASIBLE_HARDWARE_CONSTRAINTS_OK"),
         "best_feasible_final_topology_gate_success": results.get("BEST_FEASIBLE_FINAL_TOPOLOGY_GATE_SUCCESS"),

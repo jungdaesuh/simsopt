@@ -67,8 +67,6 @@ def build_total_objective(
     JCurveSurface,
     CURVATURE_WEIGHT,
     JCurvature,
-    SURF_DIST_WEIGHT=0.0,
-    JSurfSurf=None,
     POLOIDAL_EXTENT_WEIGHT=0.0,
     JPoloidalExtent=None,
     JCurveLengthMin=None,
@@ -84,8 +82,6 @@ def build_total_objective(
     )
     if JVolume is not None:
         objective = objective + VOLUME_WEIGHT * JVolume
-    if JSurfSurf is not None:
-        objective = objective + SURF_DIST_WEIGHT * JSurfSurf
     if JPoloidalExtent is not None:
         objective = objective + POLOIDAL_EXTENT_WEIGHT * JPoloidalExtent
     if JCurveLengthMin is not None:
@@ -186,10 +182,6 @@ def _hardware_alm_activity_tolerance(
     )
 
 
-def _flat_surface_points(surface) -> np.ndarray:
-    return surface_points_and_tree(surface)[0]
-
-
 def _hard_min_curve_curve_signed_constraint(curves, minimum_distance):
     curve_points = [np.asarray(curve.gamma(), dtype=float) for curve in curves]
     curve_trees = [point_tree(points) for points in curve_points]
@@ -215,21 +207,6 @@ def _hard_min_curve_surface_signed_constraint(curves, surface, minimum_distance)
             right_tree=surface_tree,
         )
         for curve in curves
-    )
-    signed_value = float(minimum_distance) - float(hard_min)
-    return signed_value, _positive_violation(signed_value)
-
-
-def _hard_min_surface_surface_signed_constraint(
-    surface_1,
-    surface_2,
-    minimum_distance,
-):
-    flat_surface_2, surface_2_tree = surface_points_and_tree(surface_2)
-    hard_min = pairwise_block_min(
-        _flat_surface_points(surface_1),
-        flat_surface_2,
-        right_tree=surface_2_tree,
     )
     signed_value = float(minimum_distance) - float(hard_min)
     return signed_value, _positive_violation(signed_value)
@@ -262,15 +239,12 @@ def _penalty_search_constraint_payload(
     JCurveCurve,
     JCurveSurface,
     JCurvature,
-    JSurfSurf,
 ):
     constraint_terms = [
         ("coil_coil_spacing", JCurveCurve),
         ("coil_surface_spacing", JCurveSurface),
         ("max_curvature", JCurvature),
     ]
-    if JSurfSurf is not None:
-        constraint_terms.append(("surface_vessel_spacing", JSurfSurf))
     return (
         [name for name, _ in constraint_terms],
         np.asarray(
@@ -295,8 +269,6 @@ def evaluate_total_objective(
     CS_WEIGHT,
     JCurvature,
     CURVATURE_WEIGHT,
-    JSurfSurf=None,
-    SURF_DIST_WEIGHT=0.0,
     JNonQSObjective=None,
     JBoozerObjective=None,
     JVolume=None,
@@ -335,8 +307,6 @@ def evaluate_total_objective(
         JCurveSurface,
         CURVATURE_WEIGHT,
         JCurvature,
-        SURF_DIST_WEIGHT=SURF_DIST_WEIGHT,
-        JSurfSurf=JSurfSurf,
         POLOIDAL_EXTENT_WEIGHT=POLOIDAL_EXTENT_WEIGHT,
         JPoloidalExtent=JPoloidalExtent,
         JCurveLengthMin=JCurveLengthMin,
@@ -346,7 +316,6 @@ def evaluate_total_objective(
         JCurveCurve,
         JCurveSurface,
         JCurvature,
-        JSurfSurf,
     )
     evaluation = {
         "total": float(total_objective.J()),
@@ -399,12 +368,6 @@ def evaluate_total_objective(
         "dJ_cc": _objective_gradient(JCurveCurve, objective_optimizable),
         "J_cs": float(JCurveSurface.J()),
         "dJ_cs": _objective_gradient(JCurveSurface, objective_optimizable),
-        "J_surf": 0.0 if JSurfSurf is None else float(JSurfSurf.J()),
-        "dJ_surf": (
-            np.zeros_like(total_grad)
-            if JSurfSurf is None
-            else _objective_gradient(JSurfSurf, objective_optimizable)
-        ),
         "J_curvature": float(JCurvature.J()),
         "dJ_curvature": _objective_gradient(JCurvature, objective_optimizable),
         "J_poloidal_extent": (
@@ -512,7 +475,6 @@ def _single_stage_hardware_threshold_overrides(
     curve_curve_min_distance,
     curve_surface_min_distance,
     curvature_threshold,
-    surface_surface_min_distance=0.0,
     surface_stack_min_distance=0.0,
     coil_length_threshold=None,
     coil_length_min_threshold=None,
@@ -526,7 +488,6 @@ def _single_stage_hardware_threshold_overrides(
             ("coil_coil_spacing", curve_curve_min_distance),
             ("coil_surface_spacing", curve_surface_min_distance),
             ("max_curvature", curvature_threshold),
-            ("surface_vessel_spacing", surface_surface_min_distance),
             ("surface_surface_spacing", surface_stack_min_distance),
             ("coil_length", coil_length_threshold),
             ("coil_length_min", coil_length_min_threshold),
@@ -592,7 +553,6 @@ def _single_stage_alm_constraint_metadata(
     exact_geometry_names = {
         "coil_coil_spacing",
         "coil_surface_spacing",
-        "surface_vessel_spacing",
         "surface_surface_spacing",
         "max_curvature",
         "coil_length_min",
@@ -689,11 +649,6 @@ def evaluate_alm_objective(
     curvature_constraint_fn,
     curve_curve_constraint_with_hard_signal_fn=None,
     curve_surface_constraint_with_hard_signal_fn=None,
-    JSurfSurf=None,
-    vessel_surface=None,
-    surface_surface_min_distance=0.0,
-    surface_surface_constraint_fn=None,
-    surface_surface_constraint_with_hard_signal_fn=None,
     surface_stack_surfaces=None,
     surface_stack_min_distance=0.0,
     surface_stack_constraint_fn=None,
@@ -803,28 +758,6 @@ def evaluate_alm_objective(
             curvature_violation,
         ),
     }
-    if JSurfSurf is not None:
-        (
-            surface_surface_signed_value,
-            surface_surface_grad,
-            surface_surface_violation,
-            surface_surface_hard_signed_value,
-            surface_surface_hard_violation,
-        ) = _evaluate_constraint_with_optional_hard_signal(
-            surface_surface_constraint_fn,
-            surface_surface_constraint_with_hard_signal_fn,
-            hard_surrogate_diagnostics,
-            outer_surface,
-            vessel_surface,
-            surface_surface_min_distance,
-            distance_smoothing,
-            objective_optimizable,
-        )
-        hardware_constraints["surface_vessel_spacing"] = (
-            surface_surface_signed_value,
-            surface_surface_grad,
-            surface_surface_violation,
-        )
     if surface_stack_surfaces is not None:
         (
             surface_stack_signed_value,
@@ -966,21 +899,6 @@ def evaluate_alm_objective(
         hard_signed_values_by_name["max_curvature"], hard_violation_values_by_name[
             "max_curvature"
         ] = _hard_max_curvature_signed_constraint(banana_curve, curvature_threshold)
-        if JSurfSurf is not None:
-            surface_surface_hard_signed_value, surface_surface_hard_violation = (
-                _resolve_hard_signal(
-                    surface_surface_hard_signed_value,
-                    surface_surface_hard_violation,
-                    _hard_min_surface_surface_signed_constraint,
-                    outer_surface,
-                    vessel_surface,
-                    surface_surface_min_distance,
-                )
-            )
-            (
-                hard_signed_values_by_name["surface_vessel_spacing"],
-                hard_violation_values_by_name["surface_vessel_spacing"],
-            ) = (surface_surface_hard_signed_value, surface_surface_hard_violation)
         if surface_stack_surfaces is not None:
             surface_stack_hard_signed_value, surface_stack_hard_violation = (
                 _resolve_hard_signal(
@@ -1075,7 +993,6 @@ def evaluate_alm_objective(
         curve_curve_min_distance=curve_curve_min_distance,
         curve_surface_min_distance=curve_surface_min_distance,
         curvature_threshold=curvature_threshold,
-        surface_surface_min_distance=surface_surface_min_distance,
         surface_stack_min_distance=surface_stack_min_distance,
         coil_length_threshold=coil_length_threshold,
         coil_length_min_threshold=coil_length_min_threshold,
@@ -1088,14 +1005,11 @@ def evaluate_alm_objective(
         activity_tolerances_fn(
             distance_smoothing,
             curvature_smoothing,
-            include_surface_surface=JSurfSurf is not None,
             include_surface_stack=surface_stack_surfaces is not None,
         ),
         dtype=float,
     )
     geometry_names = ["coil_coil_spacing", "coil_surface_spacing", "max_curvature"]
-    if JSurfSurf is not None:
-        geometry_names.append("surface_vessel_spacing")
     if surface_stack_surfaces is not None:
         geometry_names.append("surface_surface_spacing")
     if JPoloidalExtent is not None:
@@ -1241,12 +1155,6 @@ def evaluate_alm_objective(
         base_eval["dJ_cc"] = np.asarray(JCurveCurve.dJ(), dtype=float)
         base_eval["J_cs"] = float(JCurveSurface.J())
         base_eval["dJ_cs"] = np.asarray(JCurveSurface.dJ(), dtype=float)
-        base_eval["J_surf"] = 0.0 if JSurfSurf is None else float(JSurfSurf.J())
-        base_eval["dJ_surf"] = (
-            np.zeros_like(np.asarray(base_eval["grad"], dtype=float))
-            if JSurfSurf is None
-            else np.asarray(JSurfSurf.dJ(), dtype=float)
-        )
         base_eval["J_curvature"] = float(JCurvature.J())
         base_eval["dJ_curvature"] = np.asarray(JCurvature.dJ(), dtype=float)
         if coil_length_objective is not None:

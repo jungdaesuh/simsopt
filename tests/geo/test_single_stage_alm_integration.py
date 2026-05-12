@@ -620,7 +620,6 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                     (
                         "coil_coil_spacing",
                         "coil_surface_spacing",
-                        "surface_vessel_spacing",
                         "surface_surface_spacing",
                     )
                 ),
@@ -716,7 +715,6 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             {
                 "coil_coil_spacing",
                 "coil_surface_spacing",
-                "surface_vessel_spacing",
                 "surface_surface_spacing",
                 "max_curvature",
                 "coil_length",
@@ -937,7 +935,6 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             {
                 "coil_coil_spacing": 0.05,
                 "coil_surface_spacing": 0.02,
-                "surface_vessel_spacing": 0.04,
                 "max_curvature": 40.0,
                 "coil_length": 2.1,
                 "poloidal_extent": 0.7,
@@ -960,7 +957,6 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             [
                 "coil_coil_spacing",
                 "coil_surface_spacing",
-                "surface_vessel_spacing",
                 "max_curvature",
                 "coil_length",
                 "poloidal_extent",
@@ -1028,14 +1024,12 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         constraint_names = functions["single_stage_alm_constraint_names"](
             alm_formulation="weighted_sum",
-            include_surface_surface=True,
         )
         self.assertEqual(
             constraint_names,
             [
                 "coil_coil_spacing",
                 "coil_surface_spacing",
-                "surface_vessel_spacing",
                 "max_curvature",
                 "coil_length_upper_bound",
                 "coil_length_min",
@@ -1048,7 +1042,6 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
         stacked_constraint_names = functions["single_stage_alm_constraint_names"](
             alm_formulation="thresholded_physics",
-            include_surface_surface=False,
             include_surface_stack=True,
         )
         self.assertIn("surface_surface_spacing", stacked_constraint_names)
@@ -2664,10 +2657,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         tolerances = single_stage_constraint_activity_tolerances(
             0.005,
             0.05,
-            include_surface_surface=True,
         )
 
-        self.assertEqual(tolerances.tolist(), [0.02, 0.02, 0.2, 0.02])
+        self.assertEqual(tolerances.tolist(), [0.02, 0.02, 0.2])
 
 
 if __name__ == "__main__":

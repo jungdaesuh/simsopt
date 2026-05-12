@@ -92,7 +92,6 @@ CONSTRAINT_METRIC_FIELDS = {
     "coil_length": "COIL_LENGTH",
     "curve_curve_min_dist": "CURVE_CURVE_MIN_DIST",
     "curve_surface_min_dist": "CURVE_SURFACE_MIN_DIST",
-    "surface_vessel_min_dist": "SURFACE_VESSEL_MIN_DIST",
     "max_curvature": "MAX_CURVATURE",
     "hardware_constraints_ok": "HARDWARE_CONSTRAINTS_OK",
     "final_feasibility_ok": "FINAL_FEASIBILITY_OK",

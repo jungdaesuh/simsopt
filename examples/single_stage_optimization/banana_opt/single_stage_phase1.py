@@ -53,7 +53,6 @@ class Phase1Config:
     cc_weight: float = 0.0
     cs_weight: float = 0.0
     curvature_weight: float = 0.0
-    surf_dist_weight: float = 0.0
     local_maxiter: int = _PENALTY_FEASIBLE_START_LOCAL_MAXITER
     local_relative_radius: float = _PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS
     local_max_attempts: int = _PENALTY_FEASIBLE_START_LOCAL_MAX_ATTEMPTS
@@ -73,7 +72,6 @@ def build_phase1_config(
     cc_weight=0.0,
     cs_weight=0.0,
     curvature_weight=0.0,
-    surf_dist_weight=0.0,
     local_maxiter=_PENALTY_FEASIBLE_START_LOCAL_MAXITER,
     local_relative_radius=_PENALTY_FEASIBLE_START_LOCAL_RELATIVE_RADIUS,
     local_max_attempts=_PENALTY_FEASIBLE_START_LOCAL_MAX_ATTEMPTS,
@@ -89,7 +87,6 @@ def build_phase1_config(
         cc_weight=float(cc_weight),
         cs_weight=float(cs_weight),
         curvature_weight=float(curvature_weight),
-        surf_dist_weight=float(surf_dist_weight),
         local_maxiter=int(local_maxiter),
         local_relative_radius=float(local_relative_radius),
         local_max_attempts=int(local_max_attempts),
@@ -479,7 +476,6 @@ def _repair_phase1_total_grad(objective_eval, *, phase1_config):
         ("J_cc", "dJ_cc", phase1_config.cc_weight),
         ("J_cs", "dJ_cs", phase1_config.cs_weight),
         ("J_curvature", "dJ_curvature", phase1_config.curvature_weight),
-        ("J_surf", "dJ_surf", phase1_config.surf_dist_weight),
     ):
         if value_key not in objective_eval or grad_key not in objective_eval:
             continue

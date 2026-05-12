@@ -37,7 +37,6 @@ FRONTIER_CERTIFICATION_ONLY_METRICS = (
     "coil_length",
     "curve_curve_min_dist",
     "curve_surface_min_dist",
-    "surface_vessel_min_dist",
     "max_curvature",
     "hardware_constraints_ok",
     "final_feasibility_ok",

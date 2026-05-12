@@ -139,8 +139,6 @@ def diagnostic_search_eval_payload(base_payload):
         "dJ_Boozer": np.array([0.2, -0.2]),
         "J_iota": 1.0e-3,
         "dJ_iota": np.array([0.3, -0.3]),
-        "J_surf": 0.0,
-        "dJ_surf": np.array([0.0, 0.0]),
         "J_curvature": 0.0,
         "dJ_curvature": np.array([0.0, 0.0]),
         **base_payload,
@@ -1712,7 +1710,6 @@ class SingleStageExampleTests(unittest.TestCase):
         module.surface_data = surface_data
         module.VV = object()
         module.SURFACE_GAP_THRESHOLD = 0.0
-        module.SS_DIST = 0.0
         module.JF = _JF()
 
         J_out, dJ_out = module.fun(np.ones(5))
@@ -2345,7 +2342,6 @@ class SingleStageExampleTests(unittest.TestCase):
         module.surface_iota_terms = [SimpleNamespace(J=lambda: TEST_IOTA), SimpleNamespace(J=lambda: TEST_IOTA)]
         module.VV = object()
         module.SURFACE_GAP_THRESHOLD = 0.0
-        module.SS_DIST = 0.0
         module.JF = _JF()
         module.bs = object()
         module.nonQSs = []
@@ -2361,8 +2357,6 @@ class SingleStageExampleTests(unittest.TestCase):
         module.CS_WEIGHT = 1.0
         module.JCurvature = object()
         module.CURVATURE_WEIGHT = 1.0
-        module.JSurfSurf = None
-        module.SURF_DIST_WEIGHT = 0.0
         module.RES_WEIGHT = 1.0
         module.MULTISURFACE_RAMP_ITERATIONS = 0
         module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
@@ -2465,7 +2459,6 @@ class SingleStageExampleTests(unittest.TestCase):
         module.surface_iota_terms = [SimpleNamespace(J=lambda: TEST_IOTA), SimpleNamespace(J=lambda: TEST_IOTA)]
         module.VV = object()
         module.SURFACE_GAP_THRESHOLD = 0.0
-        module.SS_DIST = 0.0
         module.JF = _JF()
         module.bs = object()
         module.nonQSs = []
@@ -2481,8 +2474,6 @@ class SingleStageExampleTests(unittest.TestCase):
         module.CS_WEIGHT = 1.0
         module.JCurvature = object()
         module.CURVATURE_WEIGHT = 1.0
-        module.JSurfSurf = None
-        module.SURF_DIST_WEIGHT = 0.0
         module.RES_WEIGHT = 1.0
         module.MULTISURFACE_RAMP_ITERATIONS = 0
         module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
@@ -2829,7 +2820,6 @@ class HardwareConstraintTests(unittest.TestCase):
         module.surface_iota_terms = [SimpleNamespace(J=lambda: TEST_IOTA), SimpleNamespace(J=lambda: TEST_IOTA)]
         module.VV = object()
         module.SURFACE_GAP_THRESHOLD = 0.0
-        module.SS_DIST = 0.04
         module.JF = _JF()
         module.bs = object()
         module.nonQSs = []
@@ -2848,8 +2838,6 @@ class HardwareConstraintTests(unittest.TestCase):
         module.JCurvature = _CurvatureObjective()
         module.CURVATURE_WEIGHT = 1.0
         module.CURVATURE_THRESHOLD = 40.0
-        module.JSurfSurf = _DistanceObjective(0.05)
-        module.SURF_DIST_WEIGHT = 1.0
         module.RES_WEIGHT = 1.0
         module.MULTISURFACE_RAMP_ITERATIONS = 0
         module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
@@ -2892,8 +2880,6 @@ class HardwareConstraintTests(unittest.TestCase):
                 "dJ_Boozer": np.zeros(3),
                 "J_iota": 0.0,
                 "dJ_iota": np.zeros(3),
-                "J_surf": 0.0,
-                "dJ_surf": np.zeros(3),
                 "J_curvature": 0.0,
                 "dJ_curvature": np.zeros(3),
                 **search_hardware_penalty_payload(search_hardware_values),
@@ -2984,18 +2970,17 @@ class HardwareConstraintTests(unittest.TestCase):
             cc_dist=0.05,
             curve_surface_min_dist=0.01,
             cs_dist=0.02,
-            surface_vessel_min_dist=0.03,
+            surface_vessel_min_dist=0.05,
             ss_dist=0.04,
             max_curvature=41.0,
             curvature_threshold=40.0,
         )
 
         self.assertFalse(status["success"])
-        self.assertEqual(len(status["violations"]), 4)
+        self.assertEqual(len(status["violations"]), 3)
         self.assertIn("coil_coil_spacing", status["violations"][0])
         self.assertIn("coil_surface_spacing", status["violations"][1])
-        self.assertIn("surface_vessel_spacing", status["violations"][2])
-        self.assertIn("max_curvature", status["violations"][3])
+        self.assertIn("max_curvature", status["violations"][2])
 
     def test_single_stage_hardware_constraints_report_current_and_length_violations(self):
         module = load_single_stage_example_module()
@@ -3005,7 +2990,7 @@ class HardwareConstraintTests(unittest.TestCase):
             cc_dist=0.05,
             curve_surface_min_dist=0.02,
             cs_dist=0.02,
-            surface_vessel_min_dist=0.04,
+            surface_vessel_min_dist=0.05,
             ss_dist=0.04,
             max_curvature=40.0,
             curvature_threshold=40.0,
@@ -3068,7 +3053,7 @@ class HardwareConstraintTests(unittest.TestCase):
             cc_dist=0.05,
             curve_surface_min_dist=0.02,
             cs_dist=0.02,
-            surface_vessel_min_dist=0.04,
+            surface_vessel_min_dist=0.05,
             ss_dist=0.04,
             max_curvature=40.0,
             curvature_threshold=40.0,
@@ -3091,10 +3076,6 @@ class HardwareConstraintTests(unittest.TestCase):
     def test_surface_vessel_min_dist_uses_single_source_for_results(self):
         module = load_single_stage_example_module()
 
-        class _DistanceObjective:
-            def shortest_distance(self):
-                return 0.123
-
         class _Surface:
             def __init__(self, points):
                 self._points = np.asarray(points, dtype=float).reshape((-1, 1, 3))
@@ -3104,21 +3085,12 @@ class HardwareConstraintTests(unittest.TestCase):
 
         self.assertEqual(
             module.compute_single_stage_surface_vessel_min_dist(
-                _DistanceObjective(),
-                {"outer_vessel_gap": 0.456},
-            ),
-            0.123,
-        )
-        self.assertEqual(
-            module.compute_single_stage_surface_vessel_min_dist(
-                None,
                 {"outer_vessel_gap": 0.456},
             ),
             0.456,
         )
         self.assertEqual(
             module.compute_single_stage_surface_vessel_min_dist(
-                None,
                 {"outer_vessel_gap": None},
                 _Surface([[0.0, 0.0, 0.0]]),
                 _Surface([[0.0, 0.3, 0.4]]),
@@ -5038,7 +5010,6 @@ class HardwareConstraintTests(unittest.TestCase):
                 run_dict,
                 curve_curve_distance_obj=object(),
                 curve_surface_distance_obj=object(),
-                surface_surface_distance_obj=object(),
                 banana_curve=self.inboard_midplane_curve(),
                 curvelength_obj=SimpleNamespace(J=lambda: 2.1),
                 cc_dist=0.05,
@@ -5050,14 +5021,12 @@ class HardwareConstraintTests(unittest.TestCase):
                 banana_coils=[SimpleNamespace(current=SimpleNamespace(get_value=lambda: 1.4e4))],
                 banana_current_max_A=1.6e4,
                 outer_surface=object(),
-                vessel_surface=object(),
             )
 
         self.assertTrue(summary["BEST_FEASIBLE_AVAILABLE"])
         self.assertEqual(summary["BEST_FEASIBLE_STAGE"], "accepted")
         self.assertEqual(summary["BEST_FEASIBLE_CURVE_CURVE_MIN_DIST"], 0.0501)
         self.assertEqual(summary["BEST_FEASIBLE_CURVE_SURFACE_MIN_DIST"], 0.067)
-        self.assertEqual(summary["BEST_FEASIBLE_SURFACE_VESSEL_MIN_DIST"], 0.082)
         self.assertEqual(summary["BEST_FEASIBLE_POLOIDAL_EXTENT_RAD"], 0.0)
         self.assertEqual(
             summary["BEST_FEASIBLE_POLOIDAL_EXTENT_THRESHOLD_RAD"],
@@ -5157,7 +5126,6 @@ class HardwareConstraintTests(unittest.TestCase):
                 run_dict,
                 curve_curve_distance_obj=object(),
                 curve_surface_distance_obj=object(),
-                surface_surface_distance_obj=object(),
                 banana_curve=self.inboard_midplane_curve(),
                 curvelength_obj=SimpleNamespace(J=lambda: 2.1),
                 cc_dist=0.05,
@@ -5169,7 +5137,6 @@ class HardwareConstraintTests(unittest.TestCase):
                 banana_coils=[SimpleNamespace(current=SimpleNamespace(get_value=lambda: 1.4e4))],
                 banana_current_max_A=1.6e4,
                 outer_surface=object(),
-                vessel_surface=object(),
             )
 
         self.assertTrue(summary["BEST_FEASIBLE_AVAILABLE"])
@@ -5402,7 +5369,6 @@ class HardwareConstraintTests(unittest.TestCase):
         module.MULTISURFACE_RAMP_ITERATIONS = 0
         module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
         module.SURFACE_GAP_THRESHOLD = 0.0
-        module.SS_DIST = 0.04
         module.JF = _JF()
         module.banana_curve = _Curve()
         module.surface_data = [
@@ -5577,8 +5543,6 @@ class HardwareConstraintTests(unittest.TestCase):
                 "dJ_Boozer": np.zeros(3),
                 "J_iota": 0.0,
                 "dJ_iota": np.zeros(3),
-                "J_surf": 0.0,
-                "dJ_surf": np.zeros(3),
                 "J_curvature": 0.0,
                 "dJ_curvature": np.zeros(3),
                 **search_hardware_penalty_payload((0.25, 0.0, 0.0)),
@@ -5678,8 +5642,6 @@ class HardwareConstraintTests(unittest.TestCase):
             "dJ_Boozer": np.zeros(3),
             "J_iota": 0.0,
             "dJ_iota": np.zeros(3),
-            "J_surf": 0.0,
-            "dJ_surf": np.zeros(3),
             "J_curvature": 0.0,
             "dJ_curvature": np.zeros(3),
         }
@@ -5724,7 +5686,6 @@ class HardwareConstraintTests(unittest.TestCase):
         module.JCurveCurve = _DistanceObjective(0.55, 0.04)
         module.JCurveSurface = _DistanceObjective(0.77, 0.03)
         module.JCurvature = _ScalarObjective(0.99)
-        module.JSurfSurf = None
         module.banana_curve = _Curve()
         module.curvelength = _CurveLength()
         module.bs = _BS()
@@ -5770,7 +5731,6 @@ class HardwareConstraintTests(unittest.TestCase):
         module.MULTISURFACE_RAMP_ITERATIONS = 0
         module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
         module.SURFACE_GAP_THRESHOLD = 0.0
-        module.SS_DIST = 0.04
         module.TOPOLOGY_GATE_TMAX = 2.0
         module.TOPOLOGY_GATE_TOL = 1e-7
         module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.25
@@ -5843,7 +5803,6 @@ class HardwareConstraintTests(unittest.TestCase):
         module.MULTISURFACE_RAMP_ITERATIONS = 0
         module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
         module.SURFACE_GAP_THRESHOLD = 0.0
-        module.SS_DIST = 0.04
         module.TOPOLOGY_GATE_TMAX = 2.0
         module.TOPOLOGY_GATE_TOL = 1.0e-3
         module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.5
@@ -5855,7 +5814,6 @@ class HardwareConstraintTests(unittest.TestCase):
         module.bs = object()
         module.JCurveCurve = object()
         module.JCurveSurface = object()
-        module.JSurfSurf = None
         module.banana_curve = object()
         module.JF = SimpleNamespace(x=np.zeros(2))
         module.surface_iota_terms = [SimpleNamespace(J=lambda: 0.15)]
@@ -5940,7 +5898,6 @@ class HardwareConstraintTests(unittest.TestCase):
         module.MULTISURFACE_RAMP_ITERATIONS = 0
         module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
         module.SURFACE_GAP_THRESHOLD = 0.0
-        module.SS_DIST = 0.04
         module.TOPOLOGY_GATE_TMAX = 2.0
         module.TOPOLOGY_GATE_TOL = 1.0e-3
         module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.5
@@ -5953,7 +5910,6 @@ class HardwareConstraintTests(unittest.TestCase):
         module.bs = object()
         module.JCurveCurve = object()
         module.JCurveSurface = object()
-        module.JSurfSurf = None
         module.banana_curve = object()
         module.JF = SimpleNamespace(x=np.zeros(2))
         module.surface_iota_terms = [SimpleNamespace(J=lambda: 0.15)]
@@ -6048,7 +6004,6 @@ class HardwareConstraintTests(unittest.TestCase):
         module.MULTISURFACE_RAMP_ITERATIONS = 0
         module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
         module.SURFACE_GAP_THRESHOLD = 0.0
-        module.SS_DIST = 0.04
         module.TOPOLOGY_GATE_TMAX = 2.0
         module.TOPOLOGY_GATE_TOL = 1.0e-3
         module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.5
@@ -6061,7 +6016,6 @@ class HardwareConstraintTests(unittest.TestCase):
         module.bs = object()
         module.JCurveCurve = object()
         module.JCurveSurface = object()
-        module.JSurfSurf = None
         module.banana_curve = object()
         module.JF = SimpleNamespace(x=np.zeros(2))
         module.surface_iota_terms = [SimpleNamespace(J=lambda: 0.15)]
@@ -6142,7 +6096,6 @@ class HardwareConstraintTests(unittest.TestCase):
         module.MULTISURFACE_RAMP_ITERATIONS = 0
         module.INNER_SURFACE_INITIAL_WEIGHT = 1.0
         module.SURFACE_GAP_THRESHOLD = 0.0
-        module.SS_DIST = 0.04
         module.TOPOLOGY_GATE_TMAX = 2.0
         module.TOPOLOGY_GATE_TOL = 1.0e-3
         module.TOPOLOGY_GATE_SURVIVAL_THRESHOLD = 0.5
@@ -6154,7 +6107,6 @@ class HardwareConstraintTests(unittest.TestCase):
         module.bs = object()
         module.JCurveCurve = object()
         module.JCurveSurface = object()
-        module.JSurfSurf = None
         module.banana_curve = object()
         module.JF = SimpleNamespace(x=np.zeros(2))
         module.surface_iota_terms = [SimpleNamespace(J=lambda: 0.15)]
@@ -6196,8 +6148,6 @@ class HardwareConstraintTests(unittest.TestCase):
             "dJ_cs": np.array([0.25, -0.25]),
             "J_curvature": 0.25,
             "dJ_curvature": np.array([0.1, -0.1]),
-            "J_surf": 0.0,
-            "dJ_surf": np.zeros(2),
             "surface_weights": np.array([1.0]),
             **search_hardware_penalty_payload((0.1, 0.0, 0.0)),
         }
@@ -7120,7 +7070,6 @@ class HardwareConstraintTests(unittest.TestCase):
         module.CC_WEIGHT = 101.0
         module.CS_WEIGHT = 103.0
         module.CURVATURE_WEIGHT = 107.0
-        module.SURF_DIST_WEIGHT = 109.0
         run_dict = {
             "accepted_iterations": 0,
             "accepted_x": np.array([1.0, -1.0]),
@@ -7159,8 +7108,6 @@ class HardwareConstraintTests(unittest.TestCase):
                 "dJ_cs": np.array([0.0, 1.0]),
                 "J_curvature": 4.0,
                 "dJ_curvature": np.array([-1.0, 2.0]),
-                "J_surf": 5.0,
-                "dJ_surf": np.array([3.0, -2.0]),
             }
 
         def fake_minimize(fun, x0, **kwargs):
@@ -7194,21 +7141,19 @@ class HardwareConstraintTests(unittest.TestCase):
                     cc_weight=2.0,
                     cs_weight=3.0,
                     curvature_weight=5.0,
-                    surf_dist_weight=7.0,
                 ),
             ),
         )
 
         self.assertEqual(
             captured["total"],
-            2.0 * 2.0 + 3.0 * 3.0 + 5.0 * 4.0 + 7.0 * 5.0,
+            2.0 * 2.0 + 3.0 * 3.0 + 5.0 * 4.0,
         )
         np.testing.assert_allclose(
             captured["grad"],
             2.0 * np.array([1.0, 0.0])
             + 3.0 * np.array([0.0, 1.0])
-            + 5.0 * np.array([-1.0, 2.0])
-            + 7.0 * np.array([3.0, -2.0]),
+            + 5.0 * np.array([-1.0, 2.0]),
         )
         self.assertTrue(captured["repair_mode_during_eval"])
         self.assertFalse(run_dict["phase1_repair_mode_active"])
@@ -7430,8 +7375,6 @@ class HardwareConstraintTests(unittest.TestCase):
         module.CS_WEIGHT = 5.0
         module.JCurvature = "curvature"
         module.CURVATURE_WEIGHT = 6.0
-        module.JSurfSurf = None
-        module.SURF_DIST_WEIGHT = 0.0
 
         with patch.object(
             module,
@@ -7447,7 +7390,7 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertFalse(result["diagnostics_included"])
         self.assertFalse(evaluate_mock.call_args.kwargs["include_diagnostics"])
 
-    def test_build_total_objective_skips_missing_volume_and_surface_vessel_terms(self):
+    def test_build_total_objective_skips_missing_volume_term(self):
         module = self.load_module()
 
         total = module.build_total_objective(
@@ -7466,8 +7409,6 @@ class HardwareConstraintTests(unittest.TestCase):
             FakeAlgebraicObjective(13.0, [0.5, 0.5]),
             14.0,
             FakeAlgebraicObjective(15.0, [2.0, -2.0]),
-            SURF_DIST_WEIGHT=1000.0,
-            JSurfSurf=None,
         )
 
         self.assertAlmostEqual(
@@ -7495,8 +7436,6 @@ class HardwareConstraintTests(unittest.TestCase):
             FakeAlgebraicObjective(13.0, [0.5, 0.5]),
             14.0,
             FakeAlgebraicObjective(15.0, [2.0, -2.0]),
-            SURF_DIST_WEIGHT=0.0,
-            JSurfSurf=None,
         )
 
         self.assertAlmostEqual(
@@ -7504,6 +7443,34 @@ class HardwareConstraintTests(unittest.TestCase):
             1 + 2 * 3 + 4 * 5 + 6 * 7 + 8 * 9 + 10 * 11 + 12 * 13 + 14 * 15,
         )
         np.testing.assert_allclose(total.dJ(), [61.0, 0.0])
+
+    def test_build_total_objective_forwards_length_min_term(self):
+        module = self.load_module()
+
+        total = module.build_total_objective(
+            FakeAlgebraicObjective(1.0, [1.0, 0.0]),
+            2.0,
+            FakeAlgebraicObjective(3.0, [0.0, 2.0]),
+            4.0,
+            FakeAlgebraicObjective(5.0, [1.0, 1.0]),
+            6.0,
+            None,
+            8.0,
+            FakeAlgebraicObjective(9.0, [0.0, 3.0]),
+            10.0,
+            FakeAlgebraicObjective(11.0, [1.0, -1.0]),
+            12.0,
+            FakeAlgebraicObjective(13.0, [0.5, 0.5]),
+            14.0,
+            FakeAlgebraicObjective(15.0, [2.0, -2.0]),
+            JCurveLengthMin=FakeAlgebraicObjective(17.0, [4.0, 1.0]),
+        )
+
+        self.assertAlmostEqual(
+            total.J(),
+            1 + 2 * 3 + 4 * 5 + 8 * 9 + 8 * 17 + 10 * 11 + 12 * 13 + 14 * 15,
+        )
+        np.testing.assert_allclose(total.dJ(), [81.0, 8.0])
 
     def test_build_single_stage_iota_objective_target_mode_uses_quadratic_penalty(self):
         module = self.load_module()
@@ -7912,7 +7879,6 @@ class HardwareConstraintTests(unittest.TestCase):
         }
         module.VV = SimpleNamespace(gamma=lambda: np.array([[[1.0, 0.0, 0.0]]]))
         module.SURFACE_GAP_THRESHOLD = 0.0
-        module.SS_DIST = 0.0
         module.JF = _JF()
 
         J_out, dJ_out = module.fun(np.ones(5))
@@ -8029,7 +7995,6 @@ class HardwareConstraintTests(unittest.TestCase):
             module.brs = [_ScalarObjective(0.20), _ScalarObjective(0.24)]
             module.VV = SimpleNamespace(gamma=lambda: np.array([[[1.0, 0.0, 0.0]]]))
             module.SURFACE_GAP_THRESHOLD = 0.0
-            module.SS_DIST = 0.0
             module.MULTISURFACE_RAMP_ITERATIONS = 5
             module.INNER_SURFACE_INITIAL_WEIGHT = 0.0
             module.JF = _ScalarObjective(1.23)
@@ -8038,7 +8003,6 @@ class HardwareConstraintTests(unittest.TestCase):
             module.JCurveLengthMin = _ScalarObjective(0.0)
             module.JCurveCurve = _DistanceObjective(0.55, 0.66)
             module.JCurveSurface = _DistanceObjective(0.77, 0.88)
-            module.JSurfSurf = None
             module.JCurvature = _ScalarObjective(0.99)
             module.RES_WEIGHT = 1000.0
             module.IOTAS_WEIGHT = 200.0
@@ -8049,7 +8013,6 @@ class HardwareConstraintTests(unittest.TestCase):
             module.CS_DIST = 0.02
             module.CURVATURE_WEIGHT = 0.1
             module.CURVATURE_THRESHOLD = 40.0
-            module.SURF_DIST_WEIGHT = 1000.0
             module.banana_curve = _Curve()
             module.curvelength = _CurveLength()
             module.bs = _BS()
@@ -8183,7 +8146,6 @@ class HardwareConstraintTests(unittest.TestCase):
             module.brs = [_ScalarObjective(0.20), _ScalarObjective(0.24)]
             module.VV = SimpleNamespace(gamma=lambda: np.array([[[1.0, 0.0, 0.0]]]))
             module.SURFACE_GAP_THRESHOLD = 0.005
-            module.SS_DIST = 0.0
             module.MULTISURFACE_RAMP_ITERATIONS = 5
             module.INNER_SURFACE_INITIAL_WEIGHT = 0.0
             module.JF = _ScalarObjective(1.23)
@@ -8192,7 +8154,6 @@ class HardwareConstraintTests(unittest.TestCase):
             module.JCurveLengthMin = _ScalarObjective(0.0)
             module.JCurveCurve = _DistanceObjective(0.55, 0.66)
             module.JCurveSurface = _DistanceObjective(0.77, 0.88)
-            module.JSurfSurf = None
             module.JCurvature = _ScalarObjective(0.99)
             module.RES_WEIGHT = 1000.0
             module.IOTAS_WEIGHT = 200.0
@@ -8203,7 +8164,6 @@ class HardwareConstraintTests(unittest.TestCase):
             module.CS_DIST = 0.02
             module.CURVATURE_WEIGHT = 0.1
             module.CURVATURE_THRESHOLD = 40.0
-            module.SURF_DIST_WEIGHT = 1000.0
             module.banana_curve = _Curve()
             module.curvelength = _CurveLength()
             module.bs = _BS()
@@ -9764,7 +9724,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
         module.CC_WEIGHT = 0.0
         module.CS_WEIGHT = 0.0
         module.CURVATURE_WEIGHT = 0.0
-        module.SURF_DIST_WEIGHT = 0.0
 
         objective_eval = {
             "total": 0.0,
@@ -9789,8 +9748,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
             "dJ_cs": np.zeros(2),
             "J_curvature": 0.0,
             "dJ_curvature": np.zeros(2),
-            "J_surf": 0.0,
-            "dJ_surf": np.zeros(2),
         }
 
         scalarized = module.apply_frontier_scalarization_override(objective_eval)
@@ -9835,7 +9792,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
         module.CC_WEIGHT = 0.0
         module.CS_WEIGHT = 0.0
         module.CURVATURE_WEIGHT = 0.0
-        module.SURF_DIST_WEIGHT = 0.0
 
         objective_eval = {
             "total": 0.0,
@@ -9860,8 +9816,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
             "dJ_cs": np.zeros(2),
             "J_curvature": 0.0,
             "dJ_curvature": np.zeros(2),
-            "J_surf": 0.0,
-            "dJ_surf": np.zeros(2),
         }
 
         scalarized = module.apply_frontier_scalarization_override(objective_eval)
@@ -9923,7 +9877,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
         module.CC_WEIGHT = 0.0
         module.CS_WEIGHT = 0.0
         module.CURVATURE_WEIGHT = 0.0
-        module.SURF_DIST_WEIGHT = 0.0
 
         objective_eval = {
             "total": 0.0,
@@ -9948,8 +9901,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
             "dJ_cs": np.zeros(4),
             "J_curvature": 0.0,
             "dJ_curvature": np.zeros(4),
-            "J_surf": 0.0,
-            "dJ_surf": np.zeros(4),
         }
 
         scalarized = module.apply_frontier_scalarization_override(objective_eval)
@@ -9989,7 +9940,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
         module.CC_WEIGHT = 0.0
         module.CS_WEIGHT = 0.0
         module.CURVATURE_WEIGHT = 0.0
-        module.SURF_DIST_WEIGHT = 0.0
         module.ALM_MULTIPLIERS = np.array([0.4])
         module.ALM_PENALTY = 10.0
 
@@ -10023,8 +9973,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
             "dJ_cs": np.array([0.0, 0.0]),
             "J_curvature": 0.5,
             "dJ_curvature": np.array([0.0, 0.0]),
-            "J_surf": 0.3,
-            "dJ_surf": np.array([0.0, 0.0]),
             "constraint_values": constraint_values,
             "constraint_grads": constraint_grads,
         }
@@ -10634,7 +10582,6 @@ class CurrentBaselineContractTests(unittest.TestCase):
             self.assertEqual(
                 module.single_stage_alm_constraint_names(
                     alm_formulation="weighted_sum",
-                    include_surface_surface=False,
                     banana_current_state=module.banana_current_state,
                 ),
                 [
@@ -11644,7 +11591,6 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         )
         self.assertNotEqual(runtime["results"]["FINAL_LCFS_MAJOR_RADIUS_M"], 0.88)
         self.assertNotEqual(runtime["results"]["FINAL_LCFS_MINOR_RADIUS_M"], 0.12)
-        self.assertEqual(runtime["results"]["SURFACE_VESSEL_MIN_DIST"], 0.045)
         self.assertEqual(runtime["curve_surface_surface_label"], "lcfs")
 
     def test_stage2_main_rejects_wataru_seed_without_results_sidecar(self):

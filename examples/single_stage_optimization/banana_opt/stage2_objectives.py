@@ -21,6 +21,7 @@ from banana_opt.coil_groups import (
 )
 from banana_opt.hardware_contracts import (
     COIL_LENGTH_MIN_FRACTION,
+    PLASMA_VESSEL_MIN_DIST_M,
     TF_CURRENT_HARD_LIMIT_A,
     fixed_stage2_clearance_contract,
     is_major_radius_offspec,
@@ -1109,6 +1110,8 @@ def build_stage2_results(
         "FINAL_LCFS_MINOR_RADIUS_M": float(final_plasma_minor_radius_m),
         "FIELD_ERROR": float(field_error),
         "SELF_INTERSECTING": intersecting,
+        "SURFACE_VESSEL_MIN_DIST": hardware_snapshot.get("surface_vessel_min_dist"),
+        "PLASMA_VESSEL_MIN_DIST_M": float(PLASMA_VESSEL_MIN_DIST_M),
         **build_hardware_constraint_artifact_payload_fields(hardware_snapshot),
     }
 
@@ -1216,7 +1219,6 @@ def evaluate_stage2_hardware_constraints(
             ("coil_coil_spacing", cc_threshold),
             ("max_curvature", curvature_threshold),
             ("coil_surface_spacing", coil_surface_threshold),
-            ("surface_vessel_spacing", plasma_vessel_threshold),
             ("poloidal_extent", poloidal_extent_threshold_rad),
             ("banana_current", banana_current_threshold),
             ("tf_current", tf_current_threshold),
@@ -1228,7 +1230,6 @@ def evaluate_stage2_hardware_constraints(
         "coil_coil_spacing": curve_curve_min_dist,
         "max_curvature": max_curvature,
         "coil_surface_spacing": curve_surface_min_dist,
-        "surface_vessel_spacing": plasma_vessel_min_dist,
         "poloidal_extent": poloidal_extent_rad,
         "banana_current": banana_current_A,
         "tf_current": tf_current_A,
