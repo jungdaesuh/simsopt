@@ -94,10 +94,11 @@ None of the 6 panel-scope reverts produced an observable shift in any of the 40 
 
 - Mixed Tier-A commits (commits that also touch `examples/single_stage_optimization/banana_opt/`) were intentionally excluded from this ledger. Reverting them touches the panel's loader and changes more than just the math layer. See plan §3 coverage table.
 - The `e9a94b1d0` tracing commit is out-of-panel by design but is covered by three direct assertion tests it added itself to `tests/field/test_fieldline.py`:
-  - `test_levelset_stopping_detects_within_step_surface_exit`
-  - `test_levelset_stopping_detects_subsample_width_surface_exit`
-  - `test_levelset_stopping_refines_to_interpolant_resolution`
-  All three exercise `res_phi_hits` with real geometric assertions (exit coordinate, refinement-to-resolution accuracy) and pass at HEAD `62f31e0c4`. Audited 2026-05-12.
+  - `test_levelset_stopping_detects_within_step_surface_exit` (`tests/field/test_fieldline.py:121`)
+  - `test_levelset_stopping_detects_subsample_width_surface_exit` (`tests/field/test_fieldline.py:136`)
+  - `test_levelset_stopping_refines_to_interpolant_resolution` (`tests/field/test_fieldline.py:180`)
+  All three exercise `res_phi_hits` with real geometric assertions (exit coordinate, refinement-to-resolution accuracy) and pass at HEAD. Audited 2026-05-12.
+- Note: `pytest -k levelset_stopping` selects a **fourth** test, `test_levelset_stopping_detects_leave_and_reenter_within_single_step` (`tests/field/test_fieldline.py:149`), which was added by a different commit (`1a5da2c87` — *test: cover dense levelset stop regressions*) targeting the same family. It also passes at HEAD and is a coupled regression guard on the same tracing infrastructure `e9a94b1d0` modified. So the `-k levelset_stopping` selection reports 4 passed, of which 3 are directly from `e9a94b1d0`.
 - `78dbd74bb` is covered by three direct unit tests it added itself (see per-commit entry above). The panel's `dJ` paths additionally exercise the aggregation indirectly.
 
 ## Methodology / fingerprint definition
@@ -113,7 +114,9 @@ For each commit C in `{01828e4f6, a30aef73e, 78dbd74bb, 315a3b107, d3688c6ea, a9
 
 "No observed shift in panel invariants" means all 40 tests in the panel still pass after the revert. "Shifted X" would mean at least one invariant test failed, identifying which math-layer quantity moved.
 
-For `d3688c6ea`, isolated revert was infeasible; the stacked revert (a91f4bbe0 first, then d3688c6ea) was used and produces the same final tree as joint revert. The joint-revert pass plus `a91f4bbe0`'s independent panel-clean revert is **joint/stacked evidence only** for `d3688c6ea`. Cancellations between the two commits cannot be ruled out by this evidence, so isolated equivalence of `d3688c6ea` is **not** certified by the ledger.
+For `d3688c6ea`, isolated revert at the branch tip was infeasible (text conflict with subsequent `a91f4bbe0`); the original ledger run used a stacked revert (a91f4bbe0 first, then d3688c6ea) on that basis. That joint-revert evidence is **suggestive but not isolated proof** — cancellations between the two commits could not be ruled out by it.
+
+The isolated proof was added later (2026-05-12, commit `ca6fbe49a`) via a **historical-walk**: the C++ extension was rebuilt at `d3688c6ea~1` (parent commit, before `a91f4bbe0` exists in history) and at `d3688c6ea` (post-commit, still before `a91f4bbe0`), running an identical deterministic `SurfaceXYZTensorFourier` micro-test at each point. The SHA-256s of `gamma`, `normal`, `gammadash1`, `gammadash2` were bit-equal between the two builds. Combined with the diff analysis (the commit's changes to `surfacexyztensorfourier.h` are (a) a math-preserving refactor of inline `bc_enforcer` math into `*_core` helpers and (b) addition of third-derivative methods that no first-derivative path calls), this **does** certify isolated equivalence on the panel-exercised first-derivative outputs. See the per-commit detail above for the recorded SHAs.
 
 ## Post-ledger verification
 
