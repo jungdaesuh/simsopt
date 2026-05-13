@@ -1,0 +1,56 @@
+{
+  "item": "04",
+  "status": "complete_cpu_oracle",
+  "hot_path_change": false,
+  "cuda_status": "not_claimed",
+  "reason": "Item 04 closes existing JAX coverage with two NEW integration parity tests (test_boozer_surface_basic_passes_residual_and_label_parity and test_boozer_qa_wrappers_passes_native_supported_parity). The kernel surface (boozer_residual_scalar / vector / grad / hessian, BoozerSurfaceJAX traceable runtime bundle, IotasJAX / MajorRadiusJAX / NonQuasiSymmetricRatioJAX wrappers, label_constraints_jax) is already exercised by existing benchmarks. The new tests reuse existing JAX kernels at fixed surface DOFs and copy CPU-solved state for QA wrappers; no new compiled hot path is introduced and no public BoozerSurfaceJAX wrapper/adjoint kernel is changed.",
+  "existing_benchmarks_covering_item_04_hot_paths": [
+    "benchmarks/jax_derivative_benchmark.py (boozer residual derivative timing harness)",
+    "benchmarks/non_banana_example_cpp_jax_cpu_parity.py (non-banana example CPU C++/JAX parity harness, includes Boozer fixed-state + QA wrapper paths)",
+    "benchmarks/non_banana_example_parity_fixtures.py (NCSX Boozer surface basic + QA wrappers production fixtures)",
+    "benchmarks/single_stage_smoke_fixture.py (real reduced-grid single-stage init fixture; nphi=31, ntheta=16, ncoils=20)",
+    "benchmarks/single_stage_init_parity.py (strict CPU/JAX byte-identity gate)"
+  ],
+  "production_scale_floor": {
+    "ncoils_floor": 4,
+    "nphi_floor": 16,
+    "ntheta_floor": 8,
+    "cited_existing_production_tests": [
+      "tests/integration/test_single_stage_jax_cpu_reference.py (build_real_single_stage_init_fixture: nphi=31, ntheta=16, ncoils=20; production-scale fixture for BoozerResidualJAX, IotasJAX, NonQuasiSymmetricRatioJAX, MajorRadiusJAX, BoozerSurfaceJAX)",
+      "tests/integration/test_single_stage_physics_parity.py (production-scale CPU/JAX physics parity across M5 wrappers)",
+      "tests/integration/test_factor_once_adjoint_phase2.py (adjoint factor sharing at production scale)",
+      "tests/geo/test_boozersurface_jax.py::TestUpstreamFactoryBoozerMatrix (upstream NCSX matrix; 11 surface combinations across SurfaceXYZTensorFourier mpol=5 ntor=5 with NCSX nfp=3 / 18 total coils; nphi=11 ntheta=11 in the exact-Newton fixture, nphi=20 ntheta=20 in the LS fixture)",
+      "tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_surface_basic_passes_residual_and_label_parity (NCSX mpol=5 ntor=5 nphi=11 ntheta=11; 18 NCSX coils; smoke-resolution fixed-state)",
+      "tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_qa_wrappers_passes_native_supported_parity (same NCSX setup; QA wrappers solved-state)"
+    ],
+    "scale_floor_assessment": "The two NEW item-04 integration tests run at the same NCSX smoke resolution used by the upstream example (mpol=5, ntor=5, nphi=11, ntheta=11, 18 coils via nfp=3 symmetry). Production-scale floor for Boozer kernels (nphi>=16, ntheta>=8, ncoils>=4) is satisfied by ncoils=18 and ntheta=11 but NOT strictly by nphi=11. However: (1) the same Boozer kernels (BoozerSurfaceJAX, BoozerResidualJAX, IotasJAX, MajorRadiusJAX, NonQuasiSymmetricRatioJAX, label_constraints_jax) are exercised at nphi=31, ntheta=16, ncoils=20 by tests/integration/test_single_stage_jax_cpu_reference.py via build_real_single_stage_init_fixture; (2) the get_boozer_surface helper with boozer_type='ls' uses nphi=20 ntheta=20 with NCSX 18 coils, exercised by tests/geo/test_boozersurface_jax.py::TestUpstreamFactoryBoozerMatrix LS path; (3) the boozer_surface_basic fixture mirrors the exact resolution used by examples/2_Intermediate/boozer.py (the upstream lab-notebook setting). The floor is satisfied via these existing production-scale fixtures, not the new fixed-state ones."
+  },
+  "dense_materialization_budget": {
+    "boozer_residual_scalar": "scalar float64",
+    "boozer_residual_vector": "float64[3 * nphi * ntheta + n_constraints]",
+    "boozer_residual_grad": "float64[n_decision]",
+    "boozer_residual_hessian": "float64[n_decision, n_decision]",
+    "boozer_residual_jacobian_composed": "float64[n_residual, n_decision]",
+    "exact_newton_dense_jacobian": "float64[n_decision, n_decision]; gated by max_dense_jacobian_bytes (default budget plumbed via runtime contract); exact lane is operator-backed at runtime, dense PLU is reporting metadata only",
+    "ls_lane_dense_plu": "float64[n_decision, n_decision]; load-bearing runtime data when decision_size**2 * 8 <= max_dense_jacobian_bytes (boozersurface_jax.py:3418-3475, surfaceobjectives_jax.py:3017-3055)"
+  },
+  "donation_decision": {
+    "donate_argnums": "not used",
+    "donate_argnames": "not used",
+    "rationale": "Public wrappers (BoozerSurfaceJAX, BoozerResidualJAX, IotasJAX, MajorRadiusJAX, NonQuasiSymmetricRatioJAX) keep Optimizable wrapper state alive for downstream Derivative projection; donating input arrays would corrupt the wrappers' coil/surface trees and invalidate subsequent value/dJ calls. git grep 'donate_argnums|donate_argnames' over the 8 in-scope source modules returns 0 hits."
+  },
+  "validation": [
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python -m pytest tests/geo/test_boozersurface_jax.py tests/geo/test_boozer_residual_jax.py tests/geo/test_boozer_derivatives_jax.py tests/integration/test_single_stage_jax.py -m \"not private_optimizer_runtime\" -q",
+      "result": "417 passed, 19 skipped, 1 failed (test_boozersurface_jax.py::TestNewtonPolishBoozer::test_newton_polish_reduces_gradient — PRE-EXISTING failure also present at parent a9da18fac and at item-04 pre-impl tree e94464801~1; not item-04 regression)"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python -m pytest tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_surface_basic_passes_residual_and_label_parity tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_qa_wrappers_passes_native_supported_parity -q",
+      "result": "2 passed"
+    },
+    {
+      "command": "SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python -m pytest tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_surface_basic_passes_residual_and_label_parity tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_qa_wrappers_passes_native_supported_parity -q",
+      "result": "2 passed"
+    }
+  ]
+}

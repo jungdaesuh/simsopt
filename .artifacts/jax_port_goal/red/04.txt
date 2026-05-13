@@ -1,0 +1,116 @@
+Item 04 red-step / pre-implementation evidence
+==============================================
+
+Status: complete. Two NEW integration parity tests were added by item 04
+work. Both were confirmed FAILING against the pre-impl tree before the
+implementation landed.
+
+NEW tests added in scope:
+  tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_surface_basic_passes_residual_and_label_parity
+  tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_qa_wrappers_passes_native_supported_parity
+
+The item-04 NEW tests were committed at:
+  e94464801 ("feat: close non-banana Phase 6 Boozer parity gap")
+
+Pre-impl parent commit (the tree the new tests were written against):
+  e94464801~1 = 3d5b51731 ("docs: tighten JAX port prompt review gates")
+
+Procedure
+---------
+
+  git worktree add --detach /tmp/simsopt-jax-item04-red e94464801~1
+  cp tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py \
+     /tmp/simsopt-jax-item04-red/tests/integration/
+  cd /tmp/simsopt-jax-item04-red
+  JAX_ENABLE_X64=True JAX_PLATFORMS=cpu PYTHONPATH=src \
+    /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python \
+    -m pytest \
+      tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_surface_basic_passes_residual_and_label_parity \
+      tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_qa_wrappers_passes_native_supported_parity \
+      -q
+
+Result on pre-impl tree (`3d5b51731`)
+------------------------------------
+
+  2 failed in 0.50s
+
+Captured failure pointers (full traceback recorded in run logs):
+
+  FAILED tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_surface_basic_passes_residual_and_label_parity
+    AssertionError: Fixture 'boozer_surface_basic' (unsupported_native_jax):
+    Native JAX coverage for boozer_surface_residual lives in
+    src/simsopt/geo/boozer_residual_jax.py (M3) and is exercised by
+    tests/geo/test_boozer_residual_jax.py and tests/geo/test_boozer_derivatives_jax.py.
+    The harness lane shape (BiotSavart B + SquaredFlux value/gradient)
+    does not yet carry boozer residual vectors, iota/G inputs, or label
+    values, so wiring this fixture into the per-fixture parity report is
+    a follow-up plan that extends LaneArtifact with optional Boozer
+    residual fields and a corresponding comparison branch.
+    assert <pre-impl-error-string> is None
+
+  FAILED tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_qa_wrappers_passes_native_supported_parity
+    AssertionError: Fixture 'boozer_qa_wrappers' (unsupported_native_jax):
+    BoozerSurfaceJAX, IotasJAX, MajorRadiusJAX, and NonQuasiSymmetricRatioJAX
+    exist in src/simsopt/geo/{boozersurface_jax,surfaceobjectives_jax}.py
+    and have parity coverage in tests/integration/test_single_stage_jax.py.
+    Wiring those wrappers into a fixed-solved-state per-fixture report is
+    a follow-up plan; the harness currently does not capture solved
+    Boozer surfaces (iota/G/PLU runtime state) as fixture artifacts.
+    assert <pre-impl-error-string> is None
+
+Post-fix command (current HEAD = `a9da18fac`)
+--------------------------------------------
+
+  JAX_ENABLE_X64=True JAX_PLATFORMS=cpu \
+    /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python \
+    -m pytest \
+      tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_surface_basic_passes_residual_and_label_parity \
+      tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_qa_wrappers_passes_native_supported_parity \
+      -q
+
+Result on post-fix tree: 2 passed in 4.93s.
+
+Transfer-guard run
+------------------
+
+  SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu \
+    /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python \
+    -m pytest \
+      tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_surface_basic_passes_residual_and_label_parity \
+      tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_qa_wrappers_passes_native_supported_parity \
+      -q
+
+Result: 2 passed in 4.89s.
+
+Tolerance contract
+------------------
+
+Both NEW tests assert tolerances pulled from
+``benchmarks.validation_ladder_contract.PARITY_LADDER_TOLERANCES["direct_kernel"]``
+(see test source lines 351-353 and 408-413 in
+tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py).
+
+`git diff` over the new test paths shows zero hits for inline atol/rtol
+numeric literals; the comparison entries are populated by the harness
+which pulls from the parity-ladder contract.
+
+Targeted invariants
+-------------------
+
+The NEW tests target specific item-04 invariants that the pre-impl tree
+did not satisfy:
+
+- `test_boozer_surface_basic`: Boozer residual + Area / Volume /
+  ToroidalFlux CPU C++ vs JAX parity at the direct_kernel lane, with
+  expected quantity set {surface_gamma, surface_unit_normal, field_B,
+  boozer_residual, area, volume, toroidal_flux}.
+- `test_boozer_qa_wrappers`: solved-state Iotas / MajorRadius /
+  NonQuasiSymmetricRatio CPU/JAX parity at the direct_kernel lane,
+  plus the contract that CPU-only `sum_CurveLength` is listed under
+  `unsupported_components` with verdict `partial`.
+
+Both invariants are explicit JAX-native scalar parity claims that
+required wiring the harness LaneArtifact with Boozer residual / label /
+QA-wrapper fields and constructing independent CPU/JAX lane fixtures.
+The pre-impl tree returned `verdict=unsupported` for both fixtures and
+the new tests refused to pass that classification.

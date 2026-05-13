@@ -154,31 +154,49 @@
       "id": "04",
       "tier": "P0",
       "title": "Boozer surface objectives, label constraints, and CPU-wrapper parity boundaries",
-      "status": "in_progress",
-      "closure_level": "not_complete",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
       "evidence": {
+        "source_audit": "src/simsopt/geo/boozersurface.py; src/simsopt/geo/boozersurface_jax.py; src/simsopt/geo/boozer_residual_jax.py; src/simsopt/geo/surfaceobjectives.py; src/simsopt/geo/surfaceobjectives_jax.py; src/simsopt/geo/label_constraints_jax.py; src/simsopt/geo/_boozersurface_current_guard.py; src/simsopt/geo/_simsoptpp_boozer_compat.py",
+        "upstream_oracle": "upstream_hss:src/simsopt/geo/surfaceobjectives.py:340 (boozer_surface_residual); :68,119,170 (Area, Volume, ToroidalFlux); :627,681,881 (MajorRadius, NonQuasiSymmetricRatio, Iotas)",
+        "upstream_audit_sha": "1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
+        "kernel_module": "src/simsopt/geo/boozer_residual_jax.py; src/simsopt/geo/surfaceobjectives_jax.py; src/simsopt/geo/label_constraints_jax.py",
+        "adapter_module": "src/simsopt/geo/boozersurface_jax.py; src/simsopt/geo/surfaceobjectives_jax.py (BoozerResidualJAX, IotasJAX, MajorRadiusJAX, NonQuasiSymmetricRatioJAX, AspectRatioJAX, PrincipalCurvatureJAX, QfmResidualJAX)",
         "plan": ".artifacts/jax_port_goal/plans/04.md",
         "coverage_matrix": ".artifacts/jax_port_goal/plans/04-coverage.md",
         "jax_transform_plan": ".artifacts/jax_port_goal/plans/04-jax-transform.md",
         "math_physics_invariants": ".artifacts/jax_port_goal/plans/04-invariants.md",
-        "restart_check": ".artifacts/jax_port_goal/restart/04.md",
+        "oracle_contract": "fixed_state_scalar_and_vector",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/04.md",
         "red_evidence": ".artifacts/jax_port_goal/red/04.txt",
+        "parity_test": "tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_surface_basic_passes_residual_and_label_parity; tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_qa_wrappers_passes_native_supported_parity; tests/geo/test_boozer_residual_jax.py; tests/geo/test_boozer_derivatives_jax.py; tests/geo/test_boozersurface_jax.py; tests/integration/test_single_stage_jax.py",
+        "transfer_guard_test": "tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py (validated under SIMSOPT_JAX_TRANSFER_GUARD=disallow)",
+        "multi_device_test": "tests/test_jax_import_smoke.py::test_grouped_biot_savart_coil_collective_parity_and_lowering (Boozer pipeline)",
         "bench_artifact": ".artifacts/jax_port_goal/bench/04.json",
+        "parity_lane": "direct-kernel and adjoint",
         "parity_artifacts": [
           ".artifacts/parity/20260512-non-banana-examples/all-supported-cpu.json",
           ".artifacts/parity/20260512-non-banana-examples/all-cpu.json"
         ],
-        "tests": [
-          "tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_surface_basic_passes_residual_and_label_parity",
-          "tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_qa_wrappers_passes_native_supported_parity"
-        ],
-        "cuda_smoke": "not_claimed"
-      },
-      "open_gaps": [
-        "Full item 4 source audit and coverage matrix is not complete.",
-        "Boozer optimizer trajectory and public BoozerSurfaceJAX wrapper/adjoint claims are not closed by the non-banana fixed-state fixture.",
-        "QFM / standard surface objective and remaining wrapper surfaces are still pending."
-      ]
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "a093a02f6",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
     },
     {
       "id": "05",
