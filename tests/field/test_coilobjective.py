@@ -88,6 +88,35 @@ def test_current_penalty_pure_preserves_infinite_penalty():
     assert jnp.isinf(current_penalty_pure(jnp.asarray(np.inf), 5.0))
 
 
+def test_current_penalty_production_scale_multi_coil_sum_parity():
+    """Production-scale floor: sum-over-ncoils CurrentPenalty matches a
+    NumPy reference at the Stage-2 banana TF coil count (16 coils).
+    """
+    ncoils = 16
+    rng = np.random.default_rng(seed=1729)
+    current_values = rng.normal(loc=0.0, scale=8.0, size=ncoils).astype(np.float64)
+    threshold = 5.0
+
+    objectives = [CurrentPenalty(Current(float(v)), threshold) for v in current_values]
+    jax_total = sum(float(obj.J()) for obj in objectives)
+    numpy_total = float(np.sum(np.maximum(np.abs(current_values) - threshold, 0.0) ** 2))
+
+    assert jax_total == pytest.approx(numpy_total, rel=_RTOL, abs=_ATOL)
+
+    currents_device = jax.device_put(current_values)
+    thresholds_device = jax.device_put(np.full(ncoils, threshold, dtype=np.float64))
+
+    with jax.transfer_guard("disallow"):
+        vmap_values = jax.vmap(current_penalty_pure)(currents_device, thresholds_device)
+
+    np.testing.assert_allclose(
+        np.asarray(vmap_values),
+        np.maximum(np.abs(current_values) - threshold, 0.0) ** 2,
+        rtol=_RTOL,
+        atol=_ATOL,
+    )
+
+
 def test_current_penalty_wrapper_uses_explicit_transfer_boundary():
     objective = CurrentPenalty(Current(8.0), threshold=5.0)
 

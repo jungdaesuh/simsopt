@@ -1,0 +1,47 @@
+Item 01 red-step evidence (refreshed for lane-tolerance test file).
+
+Procedure:
+
+  git worktree add --detach /tmp/simsopt-jax-item01-red/wt e94464801
+  cp tests/field/test_coilobjective.py /tmp/simsopt-jax-item01-red/wt/tests/field/
+  cd /tmp/simsopt-jax-item01-red/wt
+  JAX_ENABLE_X64=True JAX_PLATFORMS=cpu PYTHONPATH=src \
+    /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python \
+    -m pytest tests/field/test_coilobjective.py -q
+
+Parent commit under test: e94464801 ("feat: close non-banana Phase 6 Boozer
+parity gap").
+
+Result on parent commit with the new test file: 7 failed, 1 passed.
+
+Representative failures (full trace captured above; truncated here to file
+pointers):
+
+- test_current_penalty_matches_scalar_cpu_oracle[3.0-5.0-0.0-0.0]
+  IndexError: too many indices for array: array is 0-dimensional, but 1 were
+  indexed (Derivative.__call__ on scalar gradient block).
+- test_current_penalty_matches_scalar_cpu_oracle[8.0-5.0-9.0-6.0] and
+  [-8.0-5.0-9.0--6.0] same Derivative shape failure.
+- test_current_penalty_projects_scaled_current_gradient_to_base_current
+  same Derivative shape failure.
+- test_current_penalty_projects_current_sum_gradient_to_each_base_current
+  same Derivative shape failure.
+- test_current_penalty_pure_jit_vmap_accepts_device_inputs_under_strict_guard
+  JaxRuntimeError: INVALID_ARGUMENT: Disallowed host-to-device transfer
+  (Python scalar 0 host literal inside current_penalty_pure).
+- test_current_penalty_wrapper_uses_explicit_transfer_boundary
+  Same Disallowed host-to-device transfer at coilobjective.py:15.
+
+Only passing test on parent: test_current_penalty_pure_preserves_infinite_penalty
+(no Derivative or strict-guard exposure).
+
+Post-fix command (current HEAD's tree with the same test file):
+
+  JAX_ENABLE_X64=True JAX_PLATFORMS=cpu \
+    .conda/jax-0.9.2/bin/python -m pytest tests/field/test_coilobjective.py -q
+
+Post-fix result: 8 passed.
+
+Test file imports tolerances from
+benchmarks.validation_ladder_contract.parity_ladder_tolerances("direct_kernel")
+so no atol/rtol numeric literals are inlined.

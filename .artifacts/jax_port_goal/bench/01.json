@@ -1,0 +1,41 @@
+{
+  "item": "01",
+  "status": "complete_cpu_oracle",
+  "hot_path_change": false,
+  "cuda_status": "not_claimed",
+  "reason": "CurrentPenalty is a scalar penalty wrapper; no new hot-path production kernel is introduced. The strict-transfer-guard fix touches a 0-D / 2-vector pure path. Distance wrappers (CurveCurveDistance, CurveSurfaceDistance, MinCurveCurveDistance) already used JAX cullers and chunked pairwise reductions in the parent commit; no new production-scale kernel was added in item 01.",
+  "production_scale_floor": {
+    "ncoils_used_in_new_tests": 16,
+    "ncoils_floor": 4,
+    "fixture": "tests/field/test_coilobjective.py::test_current_penalty_production_scale_multi_coil_sum_parity",
+    "cited_existing_production_tests": [
+      "tests/integration/test_single_stage_jax_cpu_reference.py (CurveCurveDistance / CurveSurfaceDistance in single-stage banana 16-coil setting)",
+      "tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py (distance wrappers in non-banana production fixtures)",
+      "tests/test_jax_import_smoke.py:1005-1019 (CurveCurveDistance and CurveSurfaceDistance subprocess wrappers)"
+    ],
+    "nquadpoints_note": "CurrentPenalty is a scalar penalty per current; nquadpoints is not applicable. Distance kernels are exercised at nquadpoints>=64 by the cited single-stage and non-banana production fixtures."
+  },
+  "dense_materialization_budget": {
+    "current_penalty": "scalar float64 in pure wrapper and float64[16] in vmap'd production-scale fixture",
+    "curve_distance_dense_path": "row_count * col_count pairwise distance matrix",
+    "curve_distance_chunked_path": "chunk_size * chunk_size pairwise block plus masks and weights"
+  },
+  "validation": [
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/field/test_coilobjective.py -q",
+      "result": "9 passed"
+    },
+    {
+      "command": "SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/field/test_coilobjective.py -q",
+      "result": "9 passed"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest -q tests/geo/test_distance_jax.py tests/geo/test_curve_objectives.py -k 'distance_jax or pairwise_penalty_chunking_matches_dense_paths or curve_surface_chunked_gradient_respects_strict_transfer_guard or curve_surface_dense_path_respects_strict_transfer_guard or curve_surface_chunked_path_does_not_materialize_dense_matrix or pairwise_penalty_chunking_preserves_infeasible_barrier_inf or pairwise_penalty_chunking_preserves_finite_zero_penalty_gradients or pairwise_penalty_accepts_explicit_row_sharding or pairwise_penalty_chunking_is_strict_transfer_safe'",
+      "result": "14 passed, 19 deselected"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest -q tests/test_jax_import_smoke.py -k 'pairwise_penalty_accepts_explicit_row_sharding or pairwise_curve_penalty_pure_functions or legacy_curve_objective_values or legacy_curve_objective_gradients'",
+      "result": "15 passed, 104 deselected"
+    }
+  ]
+}
