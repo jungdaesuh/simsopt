@@ -32,7 +32,6 @@ class FrontierConstraintTests(unittest.TestCase):
             "self_intersections": [False, False],
             "volumes_ordered": True,
             "gap_ok": True,
-            "vessel_gap_ok": True,
             "nesting_ok": True,
         }
         status.update(overrides)

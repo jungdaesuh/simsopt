@@ -2375,7 +2375,6 @@ class SingleStageExampleTests(unittest.TestCase):
                 "self_intersections": [False, False],
                 "volumes_ordered": True,
                 "gap_ok": True,
-                "vessel_gap_ok": True,
                 "nesting_ok": True,
                 "adjacent_gaps": [0.01],
                 "outer_vessel_gap": 0.1,
@@ -2492,7 +2491,6 @@ class SingleStageExampleTests(unittest.TestCase):
                 "self_intersections": [False, False],
                 "volumes_ordered": True,
                 "gap_ok": True,
-                "vessel_gap_ok": True,
                 "nesting_ok": True,
                 "adjacent_gaps": [0.01],
                 "outer_vessel_gap": 0.1,
@@ -2679,10 +2677,8 @@ class SingleStageExampleTests(unittest.TestCase):
             ramp_iterations=5,
             initial_inner_weight=0.0,
             surface_gap_threshold=0.005,
-            vessel_gap_threshold=0.04,
         )
         self.assertEqual(single["surface_gap_threshold"], 0.005)
-        self.assertEqual(single["vessel_gap_threshold"], 0.0)
         self.assertTrue(single["enforce_nesting"])
         self.assertEqual(single["gate_scale"], 1.0)
 
@@ -2692,10 +2688,8 @@ class SingleStageExampleTests(unittest.TestCase):
             ramp_iterations=5,
             initial_inner_weight=0.0,
             surface_gap_threshold=0.005,
-            vessel_gap_threshold=0.04,
         )
         self.assertEqual(start["surface_gap_threshold"], 0.0)
-        self.assertEqual(start["vessel_gap_threshold"], 0.0)
         self.assertFalse(start["enforce_nesting"])
         self.assertEqual(start["gate_scale"], 0.0)
 
@@ -2705,10 +2699,8 @@ class SingleStageExampleTests(unittest.TestCase):
             ramp_iterations=5,
             initial_inner_weight=0.0,
             surface_gap_threshold=0.005,
-            vessel_gap_threshold=0.04,
         )
         self.assertAlmostEqual(mid["surface_gap_threshold"], 0.002)
-        self.assertAlmostEqual(mid["vessel_gap_threshold"], 0.0)
         self.assertFalse(mid["enforce_nesting"])
         self.assertAlmostEqual(mid["gate_scale"], 0.4)
 
@@ -2718,10 +2710,8 @@ class SingleStageExampleTests(unittest.TestCase):
             ramp_iterations=5,
             initial_inner_weight=0.0,
             surface_gap_threshold=0.005,
-            vessel_gap_threshold=0.04,
         )
         self.assertAlmostEqual(done["surface_gap_threshold"], 0.005)
-        self.assertAlmostEqual(done["vessel_gap_threshold"], 0.0)
         self.assertTrue(done["enforce_nesting"])
         self.assertAlmostEqual(done["gate_scale"], 1.0)
 
@@ -2861,7 +2851,6 @@ class HardwareConstraintTests(unittest.TestCase):
                 "self_intersections": [False, False],
                 "volumes_ordered": True,
                 "gap_ok": True,
-                "vessel_gap_ok": True,
                 "nesting_ok": True,
                 "adjacent_gaps": [0.1],
                 "outer_vessel_gap": 0.05,
@@ -5524,7 +5513,6 @@ class HardwareConstraintTests(unittest.TestCase):
                 "self_intersections": [False, False],
                 "volumes_ordered": True,
                 "gap_ok": True,
-                "vessel_gap_ok": True,
                 "nesting_ok": True,
                 "adjacent_gaps": [0.1],
                 "outer_vessel_gap": 0.05,
@@ -5651,7 +5639,6 @@ class HardwareConstraintTests(unittest.TestCase):
             "self_intersections": [False],
             "volumes_ordered": True,
             "gap_ok": True,
-            "vessel_gap_ok": True,
             "nesting_ok": True,
             "adjacent_gaps": [],
             "outer_vessel_gap": None,
@@ -5764,7 +5751,6 @@ class HardwareConstraintTests(unittest.TestCase):
                 "self_intersections": [False],
                 "volumes_ordered": True,
                 "gap_ok": True,
-                "vessel_gap_ok": True,
                 "nesting_ok": True,
                 "adjacent_gaps": [],
                 "outer_vessel_gap": None,
@@ -5839,7 +5825,6 @@ class HardwareConstraintTests(unittest.TestCase):
             "self_intersections": [False],
             "volumes_ordered": True,
             "gap_ok": True,
-            "vessel_gap_ok": True,
             "nesting_ok": True,
             "adjacent_gaps": [],
             "outer_vessel_gap": None,
@@ -5935,7 +5920,6 @@ class HardwareConstraintTests(unittest.TestCase):
             "self_intersections": [False],
             "volumes_ordered": True,
             "gap_ok": True,
-            "vessel_gap_ok": True,
             "nesting_ok": True,
             "adjacent_gaps": [],
             "outer_vessel_gap": None,
@@ -6041,7 +6025,6 @@ class HardwareConstraintTests(unittest.TestCase):
             "self_intersections": [False],
             "volumes_ordered": True,
             "gap_ok": True,
-            "vessel_gap_ok": True,
             "nesting_ok": True,
             "adjacent_gaps": [],
             "outer_vessel_gap": None,
@@ -6133,7 +6116,6 @@ class HardwareConstraintTests(unittest.TestCase):
             "self_intersections": [False],
             "volumes_ordered": True,
             "gap_ok": True,
-            "vessel_gap_ok": True,
             "nesting_ok": True,
             "adjacent_gaps": [],
             "outer_vessel_gap": None,
@@ -7880,7 +7862,7 @@ class HardwareConstraintTests(unittest.TestCase):
             {"boozer_surface": SimpleNamespace(surface=_FakeSurface(0.10, [[0.4, 0.0, 0.0]]), res={"success": True, "iota": 0.15})},
         ]
         vessel = _FakeSurface(0.2, [[1.0, 0.0, 0.0]])
-        good_status = module.evaluate_surface_stack(good_stack, vessel_surface=vessel, surface_gap_threshold=0.1, vessel_gap_threshold=0.1)
+        good_status = module.evaluate_surface_stack(good_stack, vessel_surface=vessel, surface_gap_threshold=0.1)
         self.assertTrue(good_status["success"])
         self.assertEqual(good_status["adjacent_gaps"], [0.4])
 

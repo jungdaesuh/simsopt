@@ -4328,7 +4328,6 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
                 state=state,
                 vessel_surface="VV",
                 surface_gap_threshold=0.05,
-                vessel_gap_threshold=0.04,
                 enforce_nesting=False,
             )
 
@@ -4345,7 +4344,6 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
             surface_data,
             vessel_surface="VV",
             surface_gap_threshold=0.05,
-            vessel_gap_threshold=0.04,
             enforce_nesting=False,
         )
         self.assertEqual(result, {"success": True})

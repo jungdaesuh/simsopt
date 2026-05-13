@@ -2122,7 +2122,6 @@ def surface_stack_search_gate_for_solver(search_gate, *, constraint_method, surf
     ) and str(constraint_method) == "alm":
         solver_gate = dict(search_gate)
         solver_gate["surface_gap_threshold"] = 0.0
-        solver_gate["vessel_gap_threshold"] = 0.0
         return solver_gate
     return search_gate
 
@@ -5542,7 +5541,6 @@ def evaluate_banana_current_fd_probe(
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
-        PLASMA_VESSEL_MIN_DIST_M if len(surface_data) > 1 else 0.0,
     )
     search_surface_weights = build_surface_search_weights(
         len(surface_data),
@@ -5557,7 +5555,6 @@ def evaluate_banana_current_fd_probe(
         reference_surface_state,
         vessel_surface=VV if len(surface_data) > 1 else None,
         surface_gap_threshold=search_gate["surface_gap_threshold"],
-        vessel_gap_threshold=search_gate["vessel_gap_threshold"],
         enforce_nesting=search_gate["enforce_nesting"],
     )
     try:
@@ -6897,7 +6894,14 @@ def build_total_objective(
     )
 
 
-def finalize_surface_stack(x, objective, surface_data, run_state, vessel_surface=None, surface_gap_threshold=0.0, vessel_gap_threshold=0.0):
+def finalize_surface_stack(
+    x,
+    objective,
+    surface_data,
+    run_state,
+    vessel_surface=None,
+    surface_gap_threshold=0.0,
+):
     status = solve_surface_stack_at_dofs(
         x,
         objective,
@@ -6905,7 +6909,6 @@ def finalize_surface_stack(x, objective, surface_data, run_state, vessel_surface
         run_state["surface_state"],
         vessel_surface=vessel_surface,
         surface_gap_threshold=surface_gap_threshold,
-        vessel_gap_threshold=vessel_gap_threshold,
         enforce_nesting=True,
     )
     if status["success"]:
@@ -6922,7 +6925,6 @@ def finalize_surface_stack(x, objective, surface_data, run_state, vessel_surface
             surface_data,
             vessel_surface=vessel_surface,
             surface_gap_threshold=surface_gap_threshold,
-            vessel_gap_threshold=vessel_gap_threshold,
         )
     run_state["intersecting"] = any(run_state["surface_status"]["self_intersections"])
     return run_state["surface_status"]
@@ -7267,7 +7269,6 @@ def evaluate_search_step(x):
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
-        PLASMA_VESSEL_MIN_DIST_M if len(surface_data) > 1 else 0.0,
     )
     solver_search_gate = surface_stack_search_gate_for_solver(
         search_gate,
@@ -7291,7 +7292,6 @@ def evaluate_search_step(x):
         run_dict['surface_state'],
         vessel_surface=VV if len(surface_data) > 1 else None,
         surface_gap_threshold=solver_search_gate['surface_gap_threshold'],
-        vessel_gap_threshold=solver_search_gate['vessel_gap_threshold'],
         enforce_nesting=solver_search_gate['enforce_nesting'],
     )
     metrics["surface_solve_seconds"] += time.perf_counter() - surface_solve_start
@@ -7691,7 +7691,6 @@ def callback(x):
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
-        PLASMA_VESSEL_MIN_DIST_M if len(surface_data) > 1 else 0.0,
     )
     if (
         'last_successful_eval' in run_dict
@@ -7717,14 +7716,12 @@ def callback(x):
         surface_data,
         vessel_surface=VV if len(surface_data) > 1 else None,
         surface_gap_threshold=search_gate['surface_gap_threshold'],
-        vessel_gap_threshold=search_gate['vessel_gap_threshold'],
         enforce_nesting=search_gate['enforce_nesting'],
     )
     full_stack_status = evaluate_surface_stack(
         surface_data,
         vessel_surface=VV if len(surface_data) > 1 else None,
         surface_gap_threshold=SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
-        vessel_gap_threshold=PLASMA_VESSEL_MIN_DIST_M if len(surface_data) > 1 else 0.0,
         enforce_nesting=True,
     )
     run_dict['search_surface_status'] = search_stack_status
@@ -7918,7 +7915,6 @@ def callback(x):
         print(f"{'Surface search weights':{width}} = {objective_eval['surface_weights'].tolist()}", file=buffer)
         print(f"{'Surface gate scale':{width}} = {search_gate['gate_scale']:.6f}", file=buffer)
         print(f"{'Search gap threshold':{width}} = {search_gate['surface_gap_threshold']:.6e}", file=buffer)
-        print(f"{'Search vessel gap':{width}} = {search_gate['vessel_gap_threshold']:.6e}", file=buffer)
         print(f"{'Search nesting enforced':{width}} = {search_gate['enforce_nesting']}", file=buffer)
         if topology_status['enabled']:
             print(
@@ -8671,20 +8667,17 @@ if __name__ == "__main__":
         MULTISURFACE_RAMP_ITERATIONS,
         INNER_SURFACE_INITIAL_WEIGHT,
         SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
-        PLASMA_VESSEL_MIN_DIST_M if len(surface_data) > 1 else 0.0,
     )
     initial_surface_status = evaluate_surface_stack(
         surface_data,
         vessel_surface=VV if len(surface_data) > 1 else None,
         surface_gap_threshold=SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
-        vessel_gap_threshold=PLASMA_VESSEL_MIN_DIST_M if len(surface_data) > 1 else 0.0,
         enforce_nesting=True,
     )
     initial_search_surface_status = evaluate_surface_stack(
         surface_data,
         vessel_surface=VV if len(surface_data) > 1 else None,
         surface_gap_threshold=initial_search_gate["surface_gap_threshold"],
-        vessel_gap_threshold=initial_search_gate["vessel_gap_threshold"],
         enforce_nesting=initial_search_gate["enforce_nesting"],
     )
     initial_topology_status = final_topology_gate_for_results(
@@ -9640,7 +9633,6 @@ if __name__ == "__main__":
             run_dict,
             vessel_surface=VV if len(surface_data) > 1 else None,
             surface_gap_threshold=SURFACE_GAP_THRESHOLD if len(surface_data) > 1 else 0.0,
-            vessel_gap_threshold=PLASMA_VESSEL_MIN_DIST_M if len(surface_data) > 1 else 0.0,
         )
         final_source_stage = run_dict.get("accepted_boozer_stage", final_source_stage)
 

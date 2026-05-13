@@ -185,7 +185,6 @@ def evaluate_surface_stack(
     surface_data,
     vessel_surface=None,
     surface_gap_threshold=0.0,
-    vessel_gap_threshold=0.0,
     enforce_nesting=True,
 ):
     volumes = [entry["boozer_surface"].surface.volume() for entry in surface_data]
@@ -255,7 +254,6 @@ def evaluate_surface_stack(
         "outer_vessel_gap": outer_vessel_gap,
         "volumes_ordered": volumes_ordered,
         "gap_ok": gap_ok,
-        "vessel_gap_ok": True,
         "nesting_ok": nesting_ok,
         "bad_nesting_phis": bad_nesting_phis,
     }
@@ -628,7 +626,6 @@ def solve_surface_stack_at_dofs(
     state,
     vessel_surface=None,
     surface_gap_threshold=0.0,
-    vessel_gap_threshold=0.0,
     enforce_nesting=True,
 ):
     restore_surface_states(surface_data, state)
@@ -639,7 +636,6 @@ def solve_surface_stack_at_dofs(
         surface_data,
         vessel_surface=vessel_surface,
         surface_gap_threshold=surface_gap_threshold,
-        vessel_gap_threshold=vessel_gap_threshold,
         enforce_nesting=enforce_nesting,
     )
 
@@ -685,12 +681,10 @@ def build_surface_search_gate(
     ramp_iterations,
     initial_inner_weight,
     surface_gap_threshold,
-    vessel_gap_threshold,
 ):
     if num_surfaces <= 1:
         return {
             "surface_gap_threshold": float(surface_gap_threshold),
-            "vessel_gap_threshold": 0.0,
             "enforce_nesting": True,
             "gate_scale": 1.0,
         }
@@ -703,7 +697,6 @@ def build_surface_search_gate(
     )
     return {
         "surface_gap_threshold": float(surface_gap_threshold) * gate_scale,
-        "vessel_gap_threshold": 0.0,
         "enforce_nesting": bool(gate_scale >= 1.0),
         "gate_scale": float(gate_scale),
     }

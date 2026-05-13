@@ -666,7 +666,6 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
         search_gate = {
             "surface_gap_threshold": 0.02,
-            "vessel_gap_threshold": 0.04,
             "enforce_nesting": True,
         }
 
@@ -680,7 +679,6 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             functions["single_stage_surface_stack_alm_enabled"](2, 0.02)
         )
         self.assertEqual(solver_gate["surface_gap_threshold"], 0.0)
-        self.assertEqual(solver_gate["vessel_gap_threshold"], 0.0)
         self.assertTrue(solver_gate["enforce_nesting"])
         self.assertEqual(search_gate["surface_gap_threshold"], 0.02)
 
