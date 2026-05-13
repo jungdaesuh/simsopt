@@ -19,6 +19,18 @@ from .search_evaluation import (
 )
 
 _DEFAULT_FRONTIER_SEARCH_CONTRACT_PENALTY_SCALE = 4.0
+_DIAGNOSTIC_HARDWARE_RATIO_NAMES = frozenset(
+    {
+        "surface_vessel_min_dist",
+        "surface_vessel_spacing",
+        "surface_vessel_spacing_penalty",
+        "plasma_vessel_min_dist",
+        "plasma_vessel_min_dist_m",
+        "plasma_vessel_spacing",
+        "plasma_vessel_spacing_penalty",
+        "lcfs_vessel_spacing",
+    }
+)
 
 
 def evaluate_frontier_trust_status(
@@ -356,16 +368,7 @@ def hardware_violation_ratios(
 
 
 def _is_diagnostic_hardware_ratio_name(name: str) -> bool:
-    return name in {
-        "surface_vessel_min_dist",
-        "surface_vessel_spacing",
-        "surface_vessel_spacing_penalty",
-        "plasma_vessel_min_dist",
-        "plasma_vessel_min_dist_m",
-        "plasma_vessel_spacing",
-        "plasma_vessel_spacing_penalty",
-        "lcfs_vessel_spacing",
-    }
+    return name in _DIAGNOSTIC_HARDWARE_RATIO_NAMES
 
 
 def _lower_bound_violation_ratio(value, minimum) -> float:

@@ -220,7 +220,6 @@ def evaluate_surface_stack(
 
     volumes_ordered = np.all(np.diff(volumes) > 0.0) if len(volumes) > 1 else True
     gap_ok = all(gap > surface_gap_threshold for gap in adjacent_gaps)
-    vessel_gap_ok = True
     nesting_ok = True
     bad_nesting_phis = []
     if (
@@ -244,7 +243,6 @@ def evaluate_surface_stack(
         and not any(self_intersections)
         and volumes_ordered
         and gap_ok
-        and vessel_gap_ok
         and nesting_ok
     )
     return {
@@ -257,7 +255,7 @@ def evaluate_surface_stack(
         "outer_vessel_gap": outer_vessel_gap,
         "volumes_ordered": volumes_ordered,
         "gap_ok": gap_ok,
-        "vessel_gap_ok": vessel_gap_ok,
+        "vessel_gap_ok": True,
         "nesting_ok": nesting_ok,
         "bad_nesting_phis": bad_nesting_phis,
     }
