@@ -74,16 +74,23 @@ from banana_opt.stage2_geometry import (
 )
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
+    BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
+    BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR,
+    BANANA_WIDTH_MAX_M,
+    BANANA_WIDTH_MIN_M,
     BANANA_WINDING_MINOR_RADIUS_M,
     BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
     COIL_COIL_MIN_DIST_M,
     COIL_LENGTH_HARD_LIMIT_M,
+    COIL_LENGTH_MIN_FRACTION,
     COIL_LENGTH_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
     MAX_CURVATURE_INV_M,
     PLASMA_VESSEL_MIN_DIST_M,
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     POLOIDAL_EXTENT_WEIGHT,
+    STAGE2_SELF_INTERSECT_WEIGHT_DEFAULT,
+    STAGE2_WIDTH_WEIGHT_DEFAULT,
     TF_CURRENT_CW_DEFAULT_A,
     TARGET_LCFS_MAX_MAJOR_RADIUS_M,
     TARGET_LCFS_MAX_MINOR_RADIUS_M,
@@ -126,11 +133,13 @@ from banana_opt.stage2_objectives import (
     stage2_constraint_activity_tolerances,
     validate_stage2_coil_partition_counts,
 )
+from banana_opt.ellipse_width import ProjectedEllipseWidth
 from banana_opt.poloidal_extent import (
     PoloidalExtent,
     max_poloidal_extent_rad,
     smooth_max_poloidal_extent_signed_constraint,
 )
+from banana_opt.self_intersect import CurveSelfIntersect
 
 REPO_ROOT = os.path.abspath(os.path.join(SIMSOPT_ROOT, ".."))
 DATABASE_EQUILIBRIA_DIR = os.path.join(REPO_ROOT, "DATABASE", "EQUILIBRIA")
@@ -169,9 +178,13 @@ def stage2_alm_constraint_names(
 ) -> tuple[str, ...]:
     available_names = {
         "coil_length",
+        "coil_length_min",
         "coil_coil_spacing",
         "max_curvature",
         "banana_current",
+        "width_min",
+        "width_max",
+        "self_intersect",
     }
     if include_coil_surface:
         available_names.add("coil_surface_spacing")
@@ -654,6 +667,24 @@ def parse_args():
         help="Curve-length penalty weight.",
     )
     parser.add_argument(
+        "--stage2-width-weight",
+        type=float,
+        default=float(os.environ.get(
+            "STAGE2_WIDTH_WEIGHT",
+            str(STAGE2_WIDTH_WEIGHT_DEFAULT),
+        )),
+        help="Stage 2 weighted width hinge weight (penalty path).",
+    )
+    parser.add_argument(
+        "--stage2-selfint-weight",
+        type=float,
+        default=float(os.environ.get(
+            "STAGE2_SELF_INTERSECT_WEIGHT",
+            str(STAGE2_SELF_INTERSECT_WEIGHT_DEFAULT),
+        )),
+        help="Stage 2 curve self-intersect penalty weight.",
+    )
+    parser.add_argument(
         "--length-target",
         type=float,
         default=float(os.environ.get("LENGTH_TARGET", str(COIL_LENGTH_TARGET_M))),
@@ -853,6 +884,9 @@ def build_secondary_stage2_results_kwargs(
         "final_coil_length": secondary_state["coil_length"],
         "final_curve_curve_min_dist": secondary_state["curve_curve_min_dist"],
         "final_curve_surface_min_dist": secondary_state["curve_surface_min_dist"],
+        "final_coil_width": secondary_state["coil_width"],
+        "final_self_intersect_penalty": secondary_state["self_intersect_penalty"],
+        "final_shortest_self_distance": secondary_state["shortest_self_distance"],
         "hardware_status": secondary_state["hardware_status"],
     }
 
@@ -1150,6 +1184,12 @@ def _capture_stage2_artifact_state(
     final_plasma_major_radius_m,
     final_plasma_minor_radius_m,
     stage2_iota_runtime=None,
+    Jw=None,
+    Jself=None,
+    length_min_target=None,
+    width_min_threshold=None,
+    width_max_threshold=None,
+    self_intersect_min_distance=None,
 ):
     candidate_x = np.asarray(dofs, dtype=float).copy()
     JF.x = candidate_x
@@ -1161,6 +1201,9 @@ def _capture_stage2_artifact_state(
     poloidal_extent_rad = _stage2_poloidal_extent_rad(new_banana_curve)
     banana_current_A = float(new_banana_coils[0].current.get_value())
     tf_current_A = float(new_tf_coils[0].current.get_value())
+    coil_width = float(Jw.J())
+    self_intersect_penalty = float(Jself.J())
+    shortest_self_distance = float(Jself.shortest_self_distance())
     hardware_status = _evaluate_stage2_hardware_constraints(
         coil_length,
         length_target,
@@ -1174,6 +1217,13 @@ def _capture_stage2_artifact_state(
         plasma_vessel_threshold=plasma_vessel_threshold,
         poloidal_extent_rad=poloidal_extent_rad,
         poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
+        coil_width=coil_width,
+        width_min_threshold=width_min_threshold,
+        width_max_threshold=width_max_threshold,
+        self_intersect_penalty=self_intersect_penalty,
+        self_intersect_threshold=0.0,
+        shortest_self_distance=shortest_self_distance,
+        self_intersect_min_distance=self_intersect_min_distance,
         banana_current_A=banana_current_A,
         banana_current_threshold=banana_current_max_A,
         tf_current_A=tf_current_A,
@@ -1196,6 +1246,14 @@ def _capture_stage2_artifact_state(
         "poloidal_extent_rad": poloidal_extent_rad,
         "banana_current_A": banana_current_A,
         "tf_current_A": tf_current_A,
+        "coil_width": coil_width,
+        "width_min_threshold": float(width_min_threshold),
+        "width_max_threshold": float(width_max_threshold),
+        "self_intersect_penalty": self_intersect_penalty,
+        "self_intersect_threshold": 0.0,
+        "shortest_self_distance": shortest_self_distance,
+        "self_intersect_min_distance": float(self_intersect_min_distance),
+        "length_min_target": float(length_min_target),
         "hardware_status": hardware_status,
         "stage2_iota_value": None if iota_state is None else iota_state.iota,
         "stage2_iota_penalty": None if iota_state is None else iota_state.penalty,
@@ -1643,7 +1701,31 @@ def main(parsed_args=None):
         BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
         POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     )
+    Jw = ProjectedEllipseWidth(
+        new_banana_curve,
+        BANANA_WINDING_SURFACE_MAJOR_RADIUS_M,
+        BANANA_WINDING_MINOR_RADIUS_M,
+    )
+    Jself = CurveSelfIntersect(
+        new_banana_curve,
+        BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
+        neighbor_skip=int(
+            BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR * new_banana_curve.order
+        ),
+    )
+    LENGTH_MIN_TARGET = COIL_LENGTH_MIN_FRACTION * LENGTH_TARGET
+    Jlsmin = QuadraticPenalty(Jls, LENGTH_MIN_TARGET, "min")
+    Jwmin = QuadraticPenalty(Jw, BANANA_WIDTH_MIN_M, "min")
+    Jwmax = QuadraticPenalty(Jw, BANANA_WIDTH_MAX_M, "max")
     print(f"Initial coil length: {Jls.J():.2f} [m]")
+    print(
+        f"Initial coil width: {Jw.J():.4f} [m] "
+        f"(min={BANANA_WIDTH_MIN_M:.4f}, max={BANANA_WIDTH_MAX_M:.4f})"
+    )
+    print(
+        f"Initial coil self-distance: {Jself.shortest_self_distance():.4f} [m] "
+        f"(min={BANANA_SELF_INTERSECT_MIN_DISTANCE_M:.4f})"
+    )
     stage2_iota_runtime = None
     if args.stage2_iota_mode in {"soft", "alm"}:
         stage2_iota_runtime = build_stage2_iota_runtime(
@@ -1678,11 +1760,13 @@ def main(parsed_args=None):
     SQUARED_FLUX_WEIGHT = args.squared_flux_weight
     CONSTRAINT_METHOD = args.constraint_method
     JF = SQUARED_FLUX_WEIGHT * Jf \
-        + LENGTH_WEIGHT * QuadraticPenalty(Jls, LENGTH_TARGET, "max") \
+        + LENGTH_WEIGHT * (QuadraticPenalty(Jls, LENGTH_TARGET, "max") + Jlsmin) \
         + CC_WEIGHT * Jccdist \
         + CC_WEIGHT * Jcsdist \
         + CURVATURE_WEIGHT * Jc \
-        + POLOIDAL_EXTENT_WEIGHT * Jpe
+        + POLOIDAL_EXTENT_WEIGHT * Jpe \
+        + args.stage2_width_weight * (Jwmin + Jwmax) \
+        + args.stage2_selfint_weight * Jself
     BASE_OBJECTIVE = SQUARED_FLUX_WEIGHT * Jf
     if args.alm_taylor_test and CONSTRAINT_METHOD != "alm":
         raise ValueError("--alm-taylor-test requires --constraint-method=alm")
@@ -1795,6 +1879,12 @@ def main(parsed_args=None):
             final_plasma_major_radius_m=plasma_geometry.lcfs_major_radius_m,
             final_plasma_minor_radius_m=plasma_geometry.lcfs_minor_radius_m,
             stage2_iota_runtime=stage2_iota_runtime,
+            Jw=Jw,
+            Jself=Jself,
+            length_min_target=LENGTH_MIN_TARGET,
+            width_min_threshold=BANANA_WIDTH_MIN_M,
+            width_max_threshold=BANANA_WIDTH_MAX_M,
+            self_intersect_min_distance=BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
         )
 
     selected_result_x = None
@@ -1858,6 +1948,12 @@ def main(parsed_args=None):
                 stage2_iota_runtime=(
                     stage2_iota_runtime if args.stage2_iota_mode == "alm" else None
                 ),
+                Jw=Jw,
+                width_min_threshold=BANANA_WIDTH_MIN_M,
+                width_max_threshold=BANANA_WIDTH_MAX_M,
+                Jself=Jself,
+                self_intersect_threshold=0.0,
+                length_min_target=LENGTH_MIN_TARGET,
             )
 
         def stage2_contract_passes(candidate_state):
@@ -2085,6 +2181,9 @@ def main(parsed_args=None):
         final_max_curvature = float(np.max(new_banana_curve.kappa()))
         final_poloidal_extent_rad = _stage2_poloidal_extent_rad(new_banana_curve)
         final_banana_current_A = float(new_banana_coils[0].current.get_value())
+        final_coil_width = float(Jw.J())
+        final_self_intersect_penalty = float(Jself.J())
+        final_shortest_self_distance = float(Jself.shortest_self_distance())
         hardware_status = _evaluate_stage2_hardware_constraints(
             final_coil_length,
             LENGTH_TARGET,
@@ -2098,6 +2197,13 @@ def main(parsed_args=None):
             plasma_vessel_threshold=PLASMA_VESSEL_MIN_DIST_M,
             poloidal_extent_rad=final_poloidal_extent_rad,
             poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+            coil_width=final_coil_width,
+            width_min_threshold=BANANA_WIDTH_MIN_M,
+            width_max_threshold=BANANA_WIDTH_MAX_M,
+            self_intersect_penalty=final_self_intersect_penalty,
+            self_intersect_threshold=0.0,
+            shortest_self_distance=final_shortest_self_distance,
+            self_intersect_min_distance=BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
             banana_current_A=final_banana_current_A,
             banana_current_threshold=args.banana_current_max_A,
             tf_current_A=float(new_tf_coils[0].current.get_value()),
@@ -2112,7 +2218,18 @@ def main(parsed_args=None):
         final_max_curvature = final_artifact_state["max_curvature"]
         final_poloidal_extent_rad = final_artifact_state["poloidal_extent_rad"]
         final_banana_current_A = final_artifact_state["banana_current_A"]
+        final_coil_width = final_artifact_state["coil_width"]
+        final_self_intersect_penalty = final_artifact_state["self_intersect_penalty"]
+        final_shortest_self_distance = final_artifact_state["shortest_self_distance"]
         hardware_status = final_artifact_state["hardware_status"]
+    print(
+        f"Final coil width: {final_coil_width:.4f} [m] "
+        f"(min={BANANA_WIDTH_MIN_M:.4f}, max={BANANA_WIDTH_MAX_M:.4f})"
+    )
+    print(
+        f"Final coil self-distance: {final_shortest_self_distance:.4f} [m] "
+        f"(min={BANANA_SELF_INTERSECT_MIN_DISTANCE_M:.4f})"
+    )
     final_iota_feasible = (
         None
         if final_artifact_state is None
@@ -2236,6 +2353,14 @@ def main(parsed_args=None):
         plasma_vessel_min_dist=plasma_vessel_min_dist,
         final_poloidal_extent_rad=final_poloidal_extent_rad,
         poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+        final_coil_width=final_coil_width,
+        width_min_threshold=BANANA_WIDTH_MIN_M,
+        width_max_threshold=BANANA_WIDTH_MAX_M,
+        final_self_intersect_penalty=final_self_intersect_penalty,
+        self_intersect_threshold=0.0,
+        final_shortest_self_distance=final_shortest_self_distance,
+        self_intersect_min_distance=BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
+        length_min_target=LENGTH_MIN_TARGET,
         hardware_status=hardware_status,
     )
     constraint_metadata = build_stage2_constraint_artifact_metadata(

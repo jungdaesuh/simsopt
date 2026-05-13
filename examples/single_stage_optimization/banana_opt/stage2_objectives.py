@@ -568,8 +568,16 @@ def _build_stage2_artifact_hardware_snapshot(
     tf_current_A,
     final_plasma_major_radius_m,
     final_plasma_minor_radius_m,
+    final_coil_width=None,
+    width_min_threshold=None,
+    width_max_threshold=None,
+    final_self_intersect_penalty=None,
+    self_intersect_threshold=None,
+    final_shortest_self_distance=None,
+    self_intersect_min_distance=None,
+    length_min_target=None,
 ):
-    return {
+    snapshot = {
         "coil_length": final_coil_length,
         "length_target": length_target,
         "curve_curve_min_dist": final_curve_curve_min_dist,
@@ -586,6 +594,23 @@ def _build_stage2_artifact_hardware_snapshot(
         "lcfs_minor_radius_m": final_plasma_minor_radius_m,
         "artifact_hardware_status": hardware_status,
     }
+    if length_min_target is not None:
+        snapshot["length_min_target"] = float(length_min_target)
+    if final_coil_width is not None:
+        snapshot["coil_width"] = float(final_coil_width)
+    if width_min_threshold is not None:
+        snapshot["width_min_threshold"] = float(width_min_threshold)
+    if width_max_threshold is not None:
+        snapshot["width_max_threshold"] = float(width_max_threshold)
+    if final_self_intersect_penalty is not None:
+        snapshot["self_intersect_penalty"] = float(final_self_intersect_penalty)
+    if self_intersect_threshold is not None:
+        snapshot["self_intersect_threshold"] = float(self_intersect_threshold)
+    if final_shortest_self_distance is not None:
+        snapshot["shortest_self_distance"] = float(final_shortest_self_distance)
+    if self_intersect_min_distance is not None:
+        snapshot["self_intersect_min_distance"] = float(self_intersect_min_distance)
+    return snapshot
 
 
 def _stage2_constraint_names(
@@ -596,12 +621,16 @@ def _stage2_constraint_names(
 ) -> tuple[str, ...]:
     requested_names = [
         "coil_length",
+        "coil_length_min",
         "coil_coil_spacing",
         "max_curvature",
         "banana_current",
+        "width_min",
+        "width_max",
+        "self_intersect",
     ]
     if include_coil_surface:
-        requested_names.insert(2, "coil_surface_spacing")
+        requested_names.insert(3, "coil_surface_spacing")
     if include_poloidal_extent:
         requested_names.append("poloidal_extent")
     constraint_names = list(hardware_constraint_alm_names(names=tuple(requested_names)))
@@ -616,23 +645,34 @@ def _legacy_stage2_constraint_names(
     include_poloidal_extent: bool = False,
     include_iota_penalty: bool = False,
 ) -> tuple[str, ...]:
+    # Must match the schema-driven order returned by `_stage2_constraint_names`
+    # (which forwards through `hardware_constraint_alm_names`) so the tolerance
+    # list zips into the same per-constraint mapping the ALM evaluator consumes.
     if include_coil_surface:
         constraint_names = [
-            "coil_length_upper_bound",
             "coil_coil_spacing",
             "coil_surface_spacing",
             "max_curvature",
-            "banana_current_upper_bound",
+            "coil_length_upper_bound",
+            "coil_length_min",
         ]
     else:
         constraint_names = [
-            "coil_length_upper_bound",
             "coil_coil_spacing",
             "max_curvature",
-            "banana_current_upper_bound",
+            "coil_length_upper_bound",
+            "coil_length_min",
         ]
     if include_poloidal_extent:
         constraint_names.append("poloidal_extent")
+    constraint_names.extend(
+        [
+            "width_min",
+            "width_max",
+            "self_intersect",
+            "banana_current_upper_bound",
+        ]
+    )
     if include_iota_penalty:
         constraint_names.append("iota_penalty")
     return tuple(constraint_names)
@@ -679,10 +719,15 @@ def _stage2_hardware_threshold_overrides(
     banana_current_max_A,
     Jcsdist=None,
     poloidal_extent_threshold_rad=None,
+    length_min_target=None,
+    width_min_threshold=None,
+    width_max_threshold=None,
+    self_intersect_threshold=None,
 ) -> dict[str, float]:
     return build_threshold_overrides(
         (
             ("coil_length", length_target),
+            ("coil_length_min", length_min_target),
             ("coil_coil_spacing", Jccdist.minimum_distance),
             (
                 "coil_surface_spacing",
@@ -691,6 +736,9 @@ def _stage2_hardware_threshold_overrides(
             ("max_curvature", Jc.threshold),
             ("banana_current", banana_current_max_A),
             ("poloidal_extent", poloidal_extent_threshold_rad),
+            ("width_min", width_min_threshold),
+            ("width_max", width_max_threshold),
+            ("self_intersect", self_intersect_threshold),
         )
     )
 
@@ -716,6 +764,12 @@ def _stage2_alm_constraint_metadata(
         "coil_surface_spacing",
         "max_curvature",
         "poloidal_extent",
+    }
+    hard_hardware_names = {
+        "coil_length_min",
+        "width_min",
+        "width_max",
+        "self_intersect",
     }
     for constraint_name in constraint_names:
         activity_tolerance = float(activity_tolerance_by_name[constraint_name])
@@ -748,6 +802,17 @@ def _stage2_alm_constraint_metadata(
             and "coil_length" not in threshold_overrides
         ):
             _require_explicit_stage2_alm_threshold("coil_length_upper_bound", None)
+        if constraint_name in hard_hardware_names:
+            metadata_by_name[constraint_name] = hardware_constraint_alm_metadata(
+                constraint_name,
+                threshold_overrides=threshold_overrides,
+                activity_tolerance=activity_tolerance,
+                objective_value_kind="hard",
+                gradient_value_kind="hard",
+                dual_update_value_kind="hard",
+                feasibility_value_kind="hard",
+            )
+            continue
         uses_surrogate = constraint_name in surrogate_hardware_names
         metadata_by_name[constraint_name] = hardware_constraint_alm_metadata(
             constraint_name,
@@ -833,6 +898,14 @@ def build_stage2_results(
     plasma_vessel_min_dist=None,
     final_poloidal_extent_rad=None,
     poloidal_extent_threshold_rad=None,
+    final_coil_width=None,
+    width_min_threshold=None,
+    width_max_threshold=None,
+    final_self_intersect_penalty=None,
+    self_intersect_threshold=None,
+    final_shortest_self_distance=None,
+    self_intersect_min_distance=None,
+    length_min_target=None,
 ):
     alm_enabled = constraint_method == "alm"
     hardware_snapshot = _build_stage2_artifact_hardware_snapshot(
@@ -850,6 +923,14 @@ def build_stage2_results(
         tf_current_A=tf_current_A,
         final_plasma_major_radius_m=final_plasma_major_radius_m,
         final_plasma_minor_radius_m=final_plasma_minor_radius_m,
+        final_coil_width=final_coil_width,
+        width_min_threshold=width_min_threshold,
+        width_max_threshold=width_max_threshold,
+        final_self_intersect_penalty=final_self_intersect_penalty,
+        self_intersect_threshold=self_intersect_threshold,
+        final_shortest_self_distance=final_shortest_self_distance,
+        self_intersect_min_distance=self_intersect_min_distance,
+        length_min_target=length_min_target,
     )
     validate_stage2_coil_partition_counts(
         total_coils=total_coils,
@@ -1112,6 +1193,16 @@ def build_stage2_results(
         "SELF_INTERSECTING": intersecting,
         "SURFACE_VESSEL_MIN_DIST": hardware_snapshot.get("surface_vessel_min_dist"),
         "PLASMA_VESSEL_MIN_DIST_M": float(PLASMA_VESSEL_MIN_DIST_M),
+        "SHORTEST_SELF_DISTANCE": (
+            None
+            if final_shortest_self_distance is None
+            else float(final_shortest_self_distance)
+        ),
+        "SELF_INTERSECT_MIN_DISTANCE": (
+            None
+            if self_intersect_min_distance is None
+            else float(self_intersect_min_distance)
+        ),
         **build_hardware_constraint_artifact_payload_fields(hardware_snapshot),
     }
 
@@ -1205,6 +1296,13 @@ def evaluate_stage2_hardware_constraints(
     plasma_vessel_threshold=None,
     poloidal_extent_rad=None,
     poloidal_extent_threshold_rad=None,
+    coil_width=None,
+    width_min_threshold=None,
+    width_max_threshold=None,
+    self_intersect_penalty=None,
+    self_intersect_threshold=None,
+    shortest_self_distance=None,
+    self_intersect_min_distance=None,
     banana_current_A=None,
     banana_current_threshold=None,
     tf_current_A=None,
@@ -1220,6 +1318,9 @@ def evaluate_stage2_hardware_constraints(
             ("max_curvature", curvature_threshold),
             ("coil_surface_spacing", coil_surface_threshold),
             ("poloidal_extent", poloidal_extent_threshold_rad),
+            ("width_min", width_min_threshold),
+            ("width_max", width_max_threshold),
+            ("self_intersect", self_intersect_threshold),
             ("banana_current", banana_current_threshold),
             ("tf_current", tf_current_threshold),
         )
@@ -1231,6 +1332,9 @@ def evaluate_stage2_hardware_constraints(
         "max_curvature": max_curvature,
         "coil_surface_spacing": curve_surface_min_dist,
         "poloidal_extent": poloidal_extent_rad,
+        "width_min": coil_width,
+        "width_max": coil_width,
+        "self_intersect": self_intersect_penalty,
         "banana_current": banana_current_A,
         "tf_current": tf_current_A,
         "lcfs_major_radius": final_plasma_major_radius_m,
@@ -1261,6 +1365,20 @@ def evaluate_stage2_hardware_constraints(
     if poloidal_extent_rad is not None and poloidal_extent_threshold_rad is not None:
         status["poloidal_extent_rad"] = float(poloidal_extent_rad)
         status["poloidal_extent_threshold_rad"] = float(poloidal_extent_threshold_rad)
+    if coil_width is not None:
+        status["coil_width"] = float(coil_width)
+    if width_min_threshold is not None:
+        status["width_min_threshold"] = float(width_min_threshold)
+    if width_max_threshold is not None:
+        status["width_max_threshold"] = float(width_max_threshold)
+    if self_intersect_penalty is not None:
+        status["self_intersect_penalty"] = float(self_intersect_penalty)
+    if self_intersect_threshold is not None:
+        status["self_intersect_threshold"] = float(self_intersect_threshold)
+    if shortest_self_distance is not None:
+        status["shortest_self_distance"] = float(shortest_self_distance)
+    if self_intersect_min_distance is not None:
+        status["self_intersect_min_distance"] = float(self_intersect_min_distance)
     if banana_current_A is not None and banana_current_threshold is not None:
         status["banana_current_A"] = float(banana_current_A)
         status["banana_current_threshold"] = float(banana_current_threshold)
@@ -1280,31 +1398,46 @@ def stage2_constraint_activity_tolerances(
     *,
     length_tolerance: float = 1e-3,
     banana_current_tolerance: float = 1e-3,
+    width_tolerance: float = 1e-3,
+    self_intersect_tolerance: float = 1e-6,
     include_coil_surface: bool = False,
     include_poloidal_extent: bool = False,
     include_iota_penalty: bool = False,
     iota_tolerance: float = 0.0,
 ):
+    # The returned tolerance order must match `_legacy_stage2_constraint_names`
+    # so that `resolve_stage2_constraint_activity_tolerances` zips them into the
+    # correct per-constraint mapping that the ALM evaluator consumes by name.
     distance_activity_tolerance = max(
         softmin_selection_window(distance_smoothing),
         _SMOOTHING_EPS,
     )
-    tolerances = [
-        length_tolerance,
-        distance_activity_tolerance,
-        max(4.0 * float(curvature_smoothing), _SMOOTHING_EPS),
-        banana_current_tolerance,
-    ]
+    curvature_activity_tolerance = max(4.0 * float(curvature_smoothing), _SMOOTHING_EPS)
     if include_coil_surface:
         tolerances = [
-            tolerances[0],
-            tolerances[1],
-            tolerances[1],
-            tolerances[2],
-            tolerances[3],
+            distance_activity_tolerance,
+            distance_activity_tolerance,
+            curvature_activity_tolerance,
+            length_tolerance,
+            length_tolerance,
+        ]
+    else:
+        tolerances = [
+            distance_activity_tolerance,
+            curvature_activity_tolerance,
+            length_tolerance,
+            length_tolerance,
         ]
     if include_poloidal_extent:
         tolerances.append(max(float(curvature_smoothing), _SMOOTHING_EPS))
+    tolerances.extend(
+        [
+            width_tolerance,
+            width_tolerance,
+            self_intersect_tolerance,
+            banana_current_tolerance,
+        ]
+    )
     if include_iota_penalty:
         tolerances.append(
             max(stage2_iota_penalty_threshold(iota_tolerance), _SMOOTHING_EPS)
@@ -1646,11 +1779,43 @@ def evaluate_stage2_alm_problem(
     poloidal_extent_smoothing=None,
     smooth_poloidal_extent_signed_constraint=None,
     stage2_iota_runtime: Stage2IotaRuntime | None = None,
+    Jw=None,
+    width_min_threshold=None,
+    width_max_threshold=None,
+    Jself=None,
+    self_intersect_threshold=0.0,
+    length_min_target=None,
     emit_diagnostics=False,
 ):
+    # Stage 2 ALM mandates the full geometric-parity contract; the penalty path
+    # and ALM path enforce the same hardware terms (see jhalpern30 parity plan).
+    if (
+        Jw is None
+        or Jself is None
+        or length_min_target is None
+        or width_min_threshold is None
+        or width_max_threshold is None
+    ):
+        raise ValueError(
+            "evaluate_stage2_alm_problem requires Jw, Jself, "
+            "length_min_target, width_min_threshold, width_max_threshold; the "
+            "Stage 2 ALM path enforces the full hardware contract."
+        )
     length_target = _require_explicit_stage2_alm_threshold(
         "coil_length_upper_bound",
         length_target,
+    )
+    length_min_target = _require_explicit_stage2_alm_threshold(
+        "coil_length_min",
+        length_min_target,
+    )
+    width_min_threshold = _require_explicit_stage2_alm_threshold(
+        "width_min",
+        width_min_threshold,
+    )
+    width_max_threshold = _require_explicit_stage2_alm_threshold(
+        "width_max",
+        width_max_threshold,
     )
     base_objective.x = dofs
     base_value = float(base_objective.J())
@@ -1662,6 +1827,9 @@ def evaluate_stage2_alm_problem(
     length_grad = np.asarray(
         Jls.dJ(partials=True)(base_objective_optimizable), dtype=float
     )
+    length_min_signed_value = float(length_min_target) - coil_length
+    length_min_violation = max(0.0, length_min_signed_value)
+    length_min_grad = -length_grad
 
     (
         curve_curve_signed_value,
@@ -1717,6 +1885,27 @@ def evaluate_stage2_alm_problem(
         curvature_smoothing,
         base_objective_optimizable,
     )
+    coil_width_value = float(Jw.J())
+    coil_width_grad = np.asarray(
+        Jw.dJ(partials=True)(base_objective_optimizable), dtype=float
+    )
+    width_min_signed_value = float(width_min_threshold) - coil_width_value
+    width_min_violation = max(0.0, width_min_signed_value)
+    width_min_grad = -coil_width_grad
+    width_max_signed_value = coil_width_value - float(width_max_threshold)
+    width_max_violation = max(0.0, width_max_signed_value)
+    width_max_grad = coil_width_grad
+
+    self_intersect_value = float(Jself.J())
+    self_intersect_grad = np.asarray(
+        Jself.dJ(partials=True)(base_objective_optimizable), dtype=float
+    )
+    self_intersect_signed_value = (
+        self_intersect_value - float(self_intersect_threshold)
+    )
+    self_intersect_violation = max(0.0, self_intersect_signed_value)
+    shortest_self_distance = float(Jself.shortest_self_distance())
+
     include_poloidal_extent = (
         Jpoloidal is not None
         and poloidal_extent_threshold_rad is not None
@@ -1793,27 +1982,43 @@ def evaluate_stage2_alm_problem(
     )
     hard_by_name = {
         "coil_length_upper_bound": coil_length - length_target,
+        "coil_length_min": length_min_signed_value,
         "coil_coil_spacing": curve_curve_hard_signed_value,
         "max_curvature": max_curvature - Jc.threshold,
         "banana_current_upper_bound": banana_current_signed_value,
+        "width_min": width_min_signed_value,
+        "width_max": width_max_signed_value,
+        "self_intersect": self_intersect_signed_value,
     }
     surrogate_by_name = {
         "coil_length_upper_bound": coil_length - length_target,
+        "coil_length_min": length_min_signed_value,
         "coil_coil_spacing": curve_curve_signed_value,
         "max_curvature": curvature_signed_value,
         "banana_current_upper_bound": banana_current_signed_value,
+        "width_min": width_min_signed_value,
+        "width_max": width_max_signed_value,
+        "self_intersect": self_intersect_signed_value,
     }
     grad_by_name = {
         "coil_length_upper_bound": length_grad,
+        "coil_length_min": length_min_grad,
         "coil_coil_spacing": curve_curve_grad,
         "max_curvature": curvature_grad,
         "banana_current_upper_bound": banana_current_grad,
+        "width_min": width_min_grad,
+        "width_max": width_max_grad,
+        "self_intersect": self_intersect_grad,
     }
     feasibility_by_name = {
         "coil_length_upper_bound": length_violation,
+        "coil_length_min": length_min_violation,
         "coil_coil_spacing": curve_curve_violation,
         "max_curvature": curvature_violation,
         "banana_current_upper_bound": banana_current_violation,
+        "width_min": width_min_violation,
+        "width_max": width_max_violation,
+        "self_intersect": self_intersect_violation,
     }
     if include_poloidal_extent:
         hard_by_name["poloidal_extent"] = poloidal_extent_hard_signed_value
@@ -1890,6 +2095,10 @@ def evaluate_stage2_alm_problem(
         banana_current_max_A=banana_current_max_A,
         Jcsdist=Jcsdist,
         poloidal_extent_threshold_rad=poloidal_extent_threshold_rad,
+        length_min_target=length_min_target,
+        width_min_threshold=width_min_threshold,
+        width_max_threshold=width_max_threshold,
+        self_intersect_threshold=self_intersect_threshold,
     )
     metadata_by_name = _stage2_alm_constraint_metadata(
         active_names,
@@ -2024,6 +2233,16 @@ def evaluate_stage2_alm_problem(
         outstr += (
             f", Curvature={max_curvature:.2f}, Curv+={curvature_violation:.2e}, "
             f"Curvg={curvature_signed_value:.2e}"
+        )
+        outstr += f", LenMin+={length_min_violation:.2e}"
+        outstr += (
+            f", W={coil_width_value:.3f}m, "
+            f"Wmin+={width_min_violation:.2e}, "
+            f"Wmax+={width_max_violation:.2e}"
+        )
+        outstr += (
+            f", SI={shortest_self_distance:.3f}m, "
+            f"SI+={self_intersect_violation:.2e}"
         )
         outstr += (
             f", |BananaI|={banana_current_abs_A:.2f}A, "

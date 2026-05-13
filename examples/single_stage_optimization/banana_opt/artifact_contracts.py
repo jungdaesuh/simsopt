@@ -13,7 +13,10 @@ from .current_contracts import (
     resolve_boozer_current_convention,
     resolve_effective_current_mode,
 )
-from .hardware_contracts import fixed_stage2_artifact_hardware_contract
+from .hardware_contracts import (
+    fixed_stage2_artifact_hardware_contract,
+    stage2_artifact_hardware_contract,
+)
 from .hardware_constraint_schema import build_bootability_recovery_payload_fields
 from .constraint_contract import CONSTRAINT_SCHEMA_VERSION
 from workflow_helpers import canonical_stage2_iota_constraint_weight
@@ -369,8 +372,7 @@ def expected_locked_baseline_stage2_artifact_metadata(
         "CC_THRESHOLD": config.cc_threshold,
         "CURVATURE_WEIGHT": config.curvature_weight,
         "CURVATURE_THRESHOLD": config.curvature_threshold,
-        **fixed_stage2_artifact_hardware_contract(),
-        "LENGTH_TARGET": config.length_target,
+        **stage2_artifact_hardware_contract(config.length_target),
         "banana_surf_radius": config.banana_surf_radius,
         "order": config.order,
         "CONSTRAINT_METHOD": config.constraint_method,

@@ -32,6 +32,23 @@ BANANA_WINDING_MINOR_RADIUS_M = 0.21
 BANANA_WIDTH_MIN_M = 0.05
 BANANA_WIDTH_MAX_M = 0.17
 BANANA_SELF_INTERSECT_ALM_SCALE = 1.0
+# Minimum allowed self-distance for the banana coil curve. The external
+# jhalpern30 driver activates `CurveSelfIntersect` at 1/CURVATURE_THRESHOLD,
+# which matches our reciprocal of the maximum allowed curvature.
+BANANA_SELF_INTERSECT_MIN_DISTANCE_M = 1.0 / MAX_CURVATURE_INV_M
+# Neighbor-skip factor for CurveSelfIntersect: at runtime, neighbor_skip is
+# computed as int(BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR * curve.order).
+# 1.5x order matches the external driver convention so the mask excludes
+# nearest curve-parameter neighbors that are trivially close but not
+# topologically self-intersecting.
+BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR = 1.5
+# Initial scalarization weights for the new geometric parity terms. These are
+# intentionally 100x below the external driver's 1e2 width/self weights and
+# match this repo's calibration. Final calibration is validation work.
+STAGE2_WIDTH_WEIGHT_DEFAULT = 1.0
+STAGE2_SELF_INTERSECT_WEIGHT_DEFAULT = 1.0
+SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT = 1.0
+SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT = 1.0
 POLOIDAL_EXTENT_HALF_WIDTH_RAD = 45.0 * math.pi / 180.0
 POLOIDAL_EXTENT_WEIGHT = 1.0
 LCFS_CLEARANCE_REFERENCE_MAJOR_RADIUS_M = VACUUM_VESSEL_MAJOR_RADIUS_M
@@ -50,11 +67,21 @@ def fixed_stage2_clearance_contract() -> dict[str, float]:
     }
 
 
-def fixed_stage2_artifact_hardware_contract() -> dict[str, float]:
+def stage2_artifact_hardware_contract(length_target_m: float) -> dict[str, float]:
+    length_target = float(length_target_m)
     return {
         **fixed_stage2_clearance_contract(),
-        "LENGTH_TARGET": COIL_LENGTH_TARGET_M,
+        "LENGTH_TARGET": length_target,
+        "LENGTH_MIN_TARGET": COIL_LENGTH_MIN_FRACTION * length_target,
+        "WIDTH_MIN_THRESHOLD": BANANA_WIDTH_MIN_M,
+        "WIDTH_MAX_THRESHOLD": BANANA_WIDTH_MAX_M,
+        "SELF_INTERSECT_THRESHOLD": 0.0,
+        "SELF_INTERSECT_MIN_DISTANCE": BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
     }
+
+
+def fixed_stage2_artifact_hardware_contract() -> dict[str, float]:
+    return stage2_artifact_hardware_contract(COIL_LENGTH_TARGET_M)
 
 
 def validate_tf_current_limit(tf_current_A: float) -> float:

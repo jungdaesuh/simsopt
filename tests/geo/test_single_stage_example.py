@@ -7472,6 +7472,179 @@ class HardwareConstraintTests(unittest.TestCase):
         )
         np.testing.assert_allclose(total.dJ(), [81.0, 8.0])
 
+    def test_build_total_objective_forwards_self_intersect_term(self):
+        module = self.load_module()
+
+        total = module.build_total_objective(
+            FakeAlgebraicObjective(1.0, [1.0, 0.0]),
+            2.0,
+            FakeAlgebraicObjective(3.0, [0.0, 2.0]),
+            4.0,
+            FakeAlgebraicObjective(5.0, [1.0, 1.0]),
+            6.0,
+            None,
+            8.0,
+            FakeAlgebraicObjective(9.0, [0.0, 3.0]),
+            10.0,
+            FakeAlgebraicObjective(11.0, [1.0, -1.0]),
+            12.0,
+            FakeAlgebraicObjective(13.0, [0.5, 0.5]),
+            14.0,
+            FakeAlgebraicObjective(15.0, [2.0, -2.0]),
+            JCurveSelfIntersect=FakeAlgebraicObjective(19.0, [0.5, -0.25]),
+            SELFINT_WEIGHT=3.0,
+        )
+
+        self.assertAlmostEqual(
+            total.J(),
+            1 + 2 * 3 + 4 * 5 + 8 * 9 + 10 * 11 + 12 * 13 + 14 * 15 + 3 * 19,
+        )
+        # base length-min/volume terms zero out; only SELFINT weighted contribution
+        # adds [3*0.5, 3*-0.25] = [1.5, -0.75] to the existing [49.0, 0.0].
+        np.testing.assert_allclose(total.dJ(), [50.5, -0.75])
+
+    def test_build_total_objective_omits_width_self_terms_when_objectives_missing(self):
+        # ALM path keeps width/self as ALM constraints only; penalty path with
+        # JCoilWidth=None and JCurveSelfIntersect=None must match the legacy
+        # length-only objective so historical penalty runs see no regression.
+        module = self.load_module()
+
+        legacy = module.build_total_objective(
+            FakeAlgebraicObjective(1.0, [1.0, 0.0]),
+            2.0,
+            FakeAlgebraicObjective(3.0, [0.0, 2.0]),
+            4.0,
+            FakeAlgebraicObjective(5.0, [1.0, 1.0]),
+            6.0,
+            None,
+            8.0,
+            FakeAlgebraicObjective(9.0, [0.0, 3.0]),
+            10.0,
+            FakeAlgebraicObjective(11.0, [1.0, -1.0]),
+            12.0,
+            FakeAlgebraicObjective(13.0, [0.5, 0.5]),
+            14.0,
+            FakeAlgebraicObjective(15.0, [2.0, -2.0]),
+        )
+
+        explicit_zero = module.build_total_objective(
+            FakeAlgebraicObjective(1.0, [1.0, 0.0]),
+            2.0,
+            FakeAlgebraicObjective(3.0, [0.0, 2.0]),
+            4.0,
+            FakeAlgebraicObjective(5.0, [1.0, 1.0]),
+            6.0,
+            None,
+            8.0,
+            FakeAlgebraicObjective(9.0, [0.0, 3.0]),
+            10.0,
+            FakeAlgebraicObjective(11.0, [1.0, -1.0]),
+            12.0,
+            FakeAlgebraicObjective(13.0, [0.5, 0.5]),
+            14.0,
+            FakeAlgebraicObjective(15.0, [2.0, -2.0]),
+            JCoilWidth=None,
+            WIDTH_WEIGHT=2.0,
+            JCurveSelfIntersect=None,
+            SELFINT_WEIGHT=3.0,
+        )
+
+        self.assertAlmostEqual(legacy.J(), explicit_zero.J())
+        np.testing.assert_allclose(legacy.dJ(), explicit_zero.dJ())
+
+    def test_build_single_stage_objective_bundle_uses_hardware_self_intersect_distance(self):
+        module = self.load_module()
+        banana_curve = SimpleNamespace(order=8)
+        outer_surface = object()
+        self_objective = object()
+        recorded_self_intersect_call = {}
+
+        def fake_curve_self_intersect(curve, minimum_distance, *, neighbor_skip):
+            recorded_self_intersect_call.update(
+                {
+                    "curve": curve,
+                    "minimum_distance": minimum_distance,
+                    "neighbor_skip": neighbor_skip,
+                }
+            )
+            return self_objective
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    module,
+                    "build_boozer_derived_objective_terms",
+                    return_value={
+                        "surface_iota_terms": ["iota"],
+                        "nonQSs": ["nonqs"],
+                        "brs": ["br"],
+                        "boozer_objective_biot_savarts": ["bs"],
+                    },
+                )
+            )
+            for name in (
+                "CurveLength",
+                "Volume",
+                "build_single_stage_iota_objective",
+                "build_single_stage_volume_objective",
+                "average_surface_objectives",
+                "QuadraticPenalty",
+                "CurveCurveDistance",
+                "CurveSurfaceDistance",
+                "LpCurveCurvature",
+                "PoloidalExtent",
+                "EllipseWidth",
+            ):
+                stack.enter_context(patch.object(module, name, return_value=object()))
+            stack.enter_context(
+                patch.object(
+                    module,
+                    "resolve_single_stage_goal_objective_terms",
+                    return_value={
+                        "JnonQSRatioObjective": object(),
+                        "effective_res_weight": 1.0,
+                        "JBoozerResidualObjective": object(),
+                        "effective_iotas_weight": 1.0,
+                        "effective_volume_weight": 1.0,
+                    },
+                )
+            )
+            stack.enter_context(
+                patch.object(module, "CurveSelfIntersect", fake_curve_self_intersect)
+            )
+            stack.enter_context(
+                patch.object(module, "build_total_objective", return_value=object())
+            )
+
+            bundle = module.build_single_stage_objective_bundle(
+                stage="full",
+                surface_data=[{"boozer_surface": SimpleNamespace(surface=outer_surface)}],
+                coils=["coil"],
+                curves=["curve"],
+                banana_curves=[banana_curve],
+                iota_target=0.2,
+                RES_WEIGHT=1.0,
+                IOTAS_WEIGHT=1.0,
+                LENGTH_WEIGHT=1.0,
+                CC_WEIGHT=1.0,
+                CC_DIST=0.05,
+                CS_WEIGHT=1.0,
+                CS_DIST=0.015,
+                CURVATURE_WEIGHT=1.0,
+                CURVATURE_THRESHOLD=20.0,
+            )
+
+        self.assertIs(recorded_self_intersect_call["curve"], banana_curve)
+        self.assertAlmostEqual(
+            recorded_self_intersect_call["minimum_distance"],
+            module.BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
+        )
+        self.assertEqual(
+            recorded_self_intersect_call["neighbor_skip"],
+            int(module.BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR * banana_curve.order),
+        )
+        self.assertIs(bundle["JCurveSelfIntersect"], self_objective)
+
     def test_build_single_stage_iota_objective_target_mode_uses_quadratic_penalty(self):
         module = self.load_module()
         surface_iota = FakeAlgebraicObjective(0.15, [1.0, -2.0])
@@ -9092,6 +9265,17 @@ class CurrentBaselineContractTests(unittest.TestCase):
             "MAX_CURVATURE": module.MAX_CURVATURE_INV_M,
             "POLOIDAL_EXTENT_RAD": module.POLOIDAL_EXTENT_HALF_WIDTH_RAD,
             "POLOIDAL_EXTENT_THRESHOLD_RAD": module.POLOIDAL_EXTENT_HALF_WIDTH_RAD,
+            "COIL_WIDTH": 0.10,
+            "WIDTH_MIN_THRESHOLD": module.BANANA_WIDTH_MIN_M,
+            "WIDTH_MAX_THRESHOLD": module.BANANA_WIDTH_MAX_M,
+            "SELF_INTERSECT_PENALTY": 0.0,
+            "SELF_INTERSECT_THRESHOLD": 0.0,
+            "SHORTEST_SELF_DISTANCE": (
+                hardware_contracts.BANANA_SELF_INTERSECT_MIN_DISTANCE_M
+            ),
+            "SELF_INTERSECT_MIN_DISTANCE": (
+                hardware_contracts.BANANA_SELF_INTERSECT_MIN_DISTANCE_M
+            ),
             "SURFACE_VESSEL_MIN_DIST": module.PLASMA_VESSEL_MIN_DIST_M,
             "BANANA_CURRENT_A": module.BANANA_CURRENT_HARD_LIMIT_A,
             "FINAL_LCFS_MAJOR_RADIUS_M": (
@@ -10942,6 +11126,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "curvature_threshold": 100.0,
             "curvature_p_norm": 4,
             "squared_flux_weight": 1.0,
+            "stage2_width_weight": 1.0,
+            "stage2_selfint_weight": 1.0,
             "basin_hops": 0,
             "basin_stepsize": 0.01,
             "basin_temperature": 2.5,
@@ -11116,6 +11302,17 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
 
             def shortest_distance(self):
                 return 0.02
+
+        class FakeProjectedEllipseWidth(FakeStage2Objective):
+            def __init__(self):
+                super().__init__(0.10, [0.0, 0.0])
+
+        class FakeCurveSelfIntersect(FakeStage2Objective):
+            def __init__(self):
+                super().__init__(0.0, [0.0, 0.0])
+
+            def shortest_self_distance(self):
+                return 0.5
 
         fake_bs = FakeBiotSavart()
         fake_working_surface = FakeSurface(
@@ -11344,6 +11541,22 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 "poloidal_extent_rad": float(state["poloidal_extent_rad"]),
                 "banana_current_A": float(state["banana_current_A"]),
                 "tf_current_A": float(state["tf_current_A"]),
+                "coil_width": float(state.get("coil_width", 0.10)),
+                "width_min_threshold": float(state.get("width_min_threshold", 0.05)),
+                "width_max_threshold": float(state.get("width_max_threshold", 0.17)),
+                "self_intersect_penalty": float(
+                    state.get("self_intersect_penalty", 0.0)
+                ),
+                "self_intersect_threshold": float(
+                    state.get("self_intersect_threshold", 0.0)
+                ),
+                "shortest_self_distance": float(
+                    state.get("shortest_self_distance", 0.5)
+                ),
+                "self_intersect_min_distance": float(
+                    state.get("self_intersect_min_distance", 0.01)
+                ),
+                "length_min_target": float(state.get("length_min_target", 0.95)),
                 "hardware_status": {
                     "success": bool(state["hardware_status"]["success"]),
                     "violations": list(state["hardware_status"]["violations"]),
@@ -11460,6 +11673,16 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                         module,
                         "max_poloidal_extent_rad",
                         lambda *_args, **_kwargs: 0.0,
+                    ),
+                    patch.object(
+                        module,
+                        "ProjectedEllipseWidth",
+                        lambda *_args, **_kwargs: FakeProjectedEllipseWidth(),
+                    ),
+                    patch.object(
+                        module,
+                        "CurveSelfIntersect",
+                        lambda *_args, **_kwargs: FakeCurveSelfIntersect(),
                     ),
                     patch.object(
                         module,

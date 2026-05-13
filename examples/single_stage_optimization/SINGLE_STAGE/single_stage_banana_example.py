@@ -147,6 +147,8 @@ from banana_opt.current_contracts import (
 )
 from banana_opt.hardware_contracts import (
     BANANA_CURRENT_HARD_LIMIT_A,
+    BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
+    BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR,
     BANANA_WIDTH_MAX_M,
     BANANA_WIDTH_MIN_M,
     BANANA_WINDING_MINOR_RADIUS_M,
@@ -160,6 +162,8 @@ from banana_opt.hardware_contracts import (
     PLASMA_VESSEL_MIN_DIST_M,
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     POLOIDAL_EXTENT_WEIGHT,
+    SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT,
+    SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT,
     TF_CURRENT_CW_DEFAULT_A,
     TF_CURRENT_HARD_LIMIT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
@@ -1514,6 +1518,24 @@ def parse_args():
     parser.add_argument("--curvature-weight", type=float, default=float(os.environ.get("CURVATURE_WEIGHT", "0.1")))
     parser.add_argument("--length-weight", type=float, default=float(os.environ.get("SS_LENGTH_WEIGHT", "1")),
                         help="Curve length penalty weight (default 1).")
+    parser.add_argument(
+        "--single-stage-width-weight",
+        type=float,
+        default=float(os.environ.get(
+            "SINGLE_STAGE_WIDTH_WEIGHT",
+            str(SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT),
+        )),
+        help="Penalty weight for the Single Stage width hinge terms (lower+upper).",
+    )
+    parser.add_argument(
+        "--single-stage-selfint-weight",
+        type=float,
+        default=float(os.environ.get(
+            "SINGLE_STAGE_SELF_INTERSECT_WEIGHT",
+            str(SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT),
+        )),
+        help="Penalty weight for the Single Stage curve self-intersection term.",
+    )
     parser.add_argument(
         "--banana-current-max-A",
         type=float,
@@ -3849,8 +3871,10 @@ def build_single_stage_objective_bundle(
     )
     JCurveSelfIntersect = CurveSelfIntersect(
         banana_curves[0],
-        1.0 / CURVATURE_THRESHOLD,
-        neighbor_skip=int(1.5 * banana_curves[0].order),
+        BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
+        neighbor_skip=int(
+            BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR * banana_curves[0].order
+        ),
     )
     JF = build_total_objective(
         goal_objective_terms["JnonQSRatioObjective"],
@@ -4253,6 +4277,10 @@ def evaluate_total_objective(
     JPoloidalExtent=None,
     include_diagnostics=True,
     JCurveLengthMin=None,
+    JCoilWidth=None,
+    WIDTH_WEIGHT=0.0,
+    JCurveSelfIntersect=None,
+    SELFINT_WEIGHT=0.0,
 ):
     objective_terms = resolve_current_surface_objective_terms(RES_WEIGHT, IOTAS_WEIGHT)
     return apply_frontier_scalarization_override(
@@ -4280,6 +4308,10 @@ def evaluate_total_objective(
             POLOIDAL_EXTENT_WEIGHT=POLOIDAL_EXTENT_WEIGHT,
             JPoloidalExtent=JPoloidalExtent,
             JCurveLengthMin=JCurveLengthMin,
+            JCoilWidth=JCoilWidth,
+            WIDTH_WEIGHT=WIDTH_WEIGHT,
+            JCurveSelfIntersect=JCurveSelfIntersect,
+            SELFINT_WEIGHT=SELFINT_WEIGHT,
         ),
         alm_formulation="weighted_sum",
     )
@@ -4468,6 +4500,10 @@ def evaluate_search_objective(surface_weights, *, include_diagnostics=None):
             JPoloidalExtent=JPoloidalExtent,
             include_diagnostics=include_diagnostics,
             JCurveLengthMin=JCurveLengthMin,
+            JCoilWidth=JCoilWidth,
+            WIDTH_WEIGHT=SINGLE_STAGE_WIDTH_WEIGHT,
+            JCurveSelfIntersect=JCurveSelfIntersect,
+            SELFINT_WEIGHT=SINGLE_STAGE_SELFINT_WEIGHT,
         )
     )
 
@@ -6829,6 +6865,10 @@ def build_total_objective(
     JCurvature,
     JPoloidalExtent=None,
     JCurveLengthMin=None,
+    JCoilWidth=None,
+    WIDTH_WEIGHT=0.0,
+    JCurveSelfIntersect=None,
+    SELFINT_WEIGHT=0.0,
 ):
     return _build_total_objective_impl(
         JnonQSRatio,
@@ -6849,6 +6889,10 @@ def build_total_objective(
         POLOIDAL_EXTENT_WEIGHT=POLOIDAL_EXTENT_WEIGHT,
         JPoloidalExtent=JPoloidalExtent,
         JCurveLengthMin=JCurveLengthMin,
+        JCoilWidth=JCoilWidth,
+        WIDTH_WEIGHT=WIDTH_WEIGHT,
+        JCurveSelfIntersect=JCurveSelfIntersect,
+        SELFINT_WEIGHT=SELFINT_WEIGHT,
     )
 
 
@@ -8081,6 +8125,8 @@ JBoozerResidualObjective = None
 JPoloidalExtent = None
 JCoilWidth = None
 JCurveSelfIntersect = None
+SINGLE_STAGE_WIDTH_WEIGHT = 0.0
+SINGLE_STAGE_SELFINT_WEIGHT = 0.0
 EFFECTIVE_RES_WEIGHT = 0.0
 EFFECTIVE_IOTAS_WEIGHT = 0.0
 EFFECTIVE_VOLUME_WEIGHT = 0.0
@@ -8482,6 +8528,8 @@ if __name__ == "__main__":
     # Objective function weights and parameters (all configurable via CLI)
     # Hardware floors/ceilings are strict; weights remain freely configurable.
     LENGTH_WEIGHT = args.length_weight
+    SINGLE_STAGE_WIDTH_WEIGHT = float(args.single_stage_width_weight)
+    SINGLE_STAGE_SELFINT_WEIGHT = float(args.single_stage_selfint_weight)
     RES_WEIGHT = args.res_weight
     IOTAS_WEIGHT = args.iotas_weight
     CC_WEIGHT = args.cc_weight

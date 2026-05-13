@@ -439,6 +439,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "BANANA_CURRENT_COORDINATE_SCALING_SEED_RELATIVE": "seed-relative",
             "MAX_CURVATURE_INV_M": 100.0,
             "PLASMA_VESSEL_MIN_DIST_M": 0.04,
+            "SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT": 1.0,
+            "SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT": 1.0,
             "env_flag": lambda name: False,
             "_DEFAULT_SINGLE_STAGE_SEED_REGIME": "auto",
             "_SINGLE_STAGE_SEED_REGIME_AUTO": "auto",
@@ -743,11 +745,14 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(specs["surface_surface_spacing"].alm_block, "surface")
         self.assertEqual(specs["poloidal_extent"].kind, "upper_bound")
         self.assertEqual(specs["width_min"].kind, "lower_bound")
-        self.assertEqual(specs["width_min"].applies_to, frozenset({"alm"}))
+        self.assertEqual(specs["width_min"].applies_to, frozenset({"alm", "artifact"}))
         self.assertEqual(specs["width_max"].kind, "upper_bound")
-        self.assertEqual(specs["width_max"].applies_to, frozenset({"alm"}))
+        self.assertEqual(specs["width_max"].applies_to, frozenset({"alm", "artifact"}))
         self.assertEqual(specs["self_intersect"].kind, "upper_bound")
-        self.assertEqual(specs["self_intersect"].applies_to, frozenset({"alm"}))
+        self.assertEqual(
+            specs["self_intersect"].applies_to,
+            frozenset({"alm", "artifact"}),
+        )
         self.assertEqual(specs["self_intersect"].threshold, 0.0)
         self.assertEqual(specs["self_intersect"].alm_scale, 1.0)
         self.assertIsNone(specs["self_intersect"].alm_block)
@@ -778,8 +783,26 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             ),
             ("coil_length", "COIL_LENGTH"),
         )
+        self.assertEqual(
+            schema_module.hardware_constraint_artifact_value_field_names("width_min"),
+            ("coil_width", "COIL_WIDTH"),
+        )
+        self.assertEqual(
+            schema_module.hardware_constraint_artifact_value_field_names("width_max"),
+            ("coil_width", "COIL_WIDTH"),
+        )
+        self.assertEqual(
+            schema_module.hardware_constraint_artifact_value_field_names(
+                "self_intersect"
+            ),
+            ("self_intersect_penalty", "SELF_INTERSECT_PENALTY"),
+        )
         payload_names = schema_module.hardware_constraint_artifact_payload_field_names()
         self.assertIn("LENGTH_MIN_TARGET", payload_names)
+        self.assertIn("WIDTH_MIN_THRESHOLD", payload_names)
+        self.assertIn("WIDTH_MAX_THRESHOLD", payload_names)
+        self.assertIn("SELF_INTERSECT_PENALTY", payload_names)
+        self.assertIn("SELF_INTERSECT_THRESHOLD", payload_names)
         self.assertEqual(len(payload_names), len(set(payload_names)))
 
     def test_penalty_box_bound_names_follow_forbidden_traversal_policy(self):
@@ -1072,6 +1095,10 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "coil_surface_spacing",
                 "max_curvature",
                 "coil_length_upper_bound",
+                "coil_length_min",
+                "width_min",
+                "width_max",
+                "self_intersect",
                 "banana_current_upper_bound",
             ),
         )
@@ -1607,6 +1634,11 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(metadata["COIL_PLASMA_MIN_DIST_M"], 0.015)
         self.assertEqual(metadata["PLASMA_VESSEL_MIN_DIST_M"], 0.04)
         self.assertEqual(metadata["LENGTH_TARGET"], 1.9)
+        self.assertEqual(metadata["LENGTH_MIN_TARGET"], 0.95)
+        self.assertEqual(metadata["WIDTH_MIN_THRESHOLD"], 0.05)
+        self.assertEqual(metadata["WIDTH_MAX_THRESHOLD"], 0.17)
+        self.assertEqual(metadata["SELF_INTERSECT_THRESHOLD"], 0.0)
+        self.assertEqual(metadata["SELF_INTERSECT_MIN_DISTANCE"], 0.01)
 
     def test_stage2_alm_wrapper_load_validated_artifact_rejects_legacy_contract_metadata(self):
         module = load_stage2_alm_wrapper_module()
@@ -2462,7 +2494,13 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         tolerances = stage2_constraint_activity_tolerances(0.005, 0.05)
 
-        self.assertEqual(tolerances, [1e-3, 0.02, 0.2, 1e-3])
+        # Order: coil_coil_spacing, max_curvature, coil_length_upper_bound,
+        # coil_length_min, width_min, width_max, self_intersect,
+        # banana_current_upper_bound.
+        self.assertEqual(
+            tolerances,
+            [0.02, 0.2, 1e-3, 1e-3, 1e-3, 1e-3, 1e-6, 1e-3],
+        )
 
     def test_stage2_builds_bounded_alm_settings(self):
         alm_utils = load_alm_utils_module()

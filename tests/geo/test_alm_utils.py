@@ -42,10 +42,10 @@ class AlmHybridSignalContractDocTests(unittest.TestCase):
         doc_path = repo_root / "docs" / "alm_hybrid_signal_contract_2026-05-08.md"
         doc = doc_path.read_text(encoding="utf-8")
         citations = {
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:1951-1958": (
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2165-2172": (
                 "augmented_inequality_objective("
             ),
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:1966-1980": (
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2173-2201": (
                 '"hard_dual_update_values"'
             ),
             "examples/single_stage_optimization/alm_utils.py:2183-2235": (

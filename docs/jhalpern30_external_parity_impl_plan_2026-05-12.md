@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-12
 **Branch:** `surrogate-confinement-v2`
-**Status:** Corrected against the current tree, external drivers, and official docs
+**Status:** Implemented and validated against the current tree, external drivers, and official docs
 **Reference external drivers:** `/Users/suhjungdae/code/columbia/banana_drivers/jhalpern30/stage2.py`, `singlestage.py`
 
 ---
@@ -105,70 +105,70 @@ Single Stage already passes width and self-intersection to `evaluate_alm_objecti
 
 ### Phase B - Shared Constants and Schema
 
-- [ ] In `banana_opt/hardware_contracts.py`, add:
+- [x] In `banana_opt/hardware_contracts.py`, add:
   - `BANANA_SELF_INTERSECT_MIN_DISTANCE_M = 1.0 / MAX_CURVATURE_INV_M`
   - `BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR = 1.5`
   - `STAGE2_WIDTH_WEIGHT_DEFAULT = 1.0`
   - `STAGE2_SELF_INTERSECT_WEIGHT_DEFAULT = 1.0`
   - `SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT = 1.0`
   - `SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT = 1.0`
-- [ ] In `banana_opt/hardware_constraint_schema.py`, update `width_min`, `width_max`, and `self_intersect` `applies_to` only after the implementation writes measured values in the penalty/artifact path. Do not advertise artifact support without artifact fields.
+- [x] In `banana_opt/hardware_constraint_schema.py`, update `width_min`, `width_max`, and `self_intersect` `applies_to` only after the implementation writes measured values in the penalty/artifact path. Do not advertise artifact support without artifact fields.
 
 ### Phase C - Stage 2 Penalty Objective
 
-- [ ] Import `ProjectedEllipseWidth`, `CurveSelfIntersect`, and the new constants in `STAGE_2/banana_coil_solver.py`.
-- [ ] Add `--stage2-width-weight` and `--stage2-selfint-weight`; do not add boolean penalty toggles.
-- [ ] Construct:
+- [x] Import `ProjectedEllipseWidth`, `CurveSelfIntersect`, and the new constants in `STAGE_2/banana_coil_solver.py`.
+- [x] Add `--stage2-width-weight` and `--stage2-selfint-weight`; do not add boolean penalty toggles.
+- [x] Construct:
   - `Jlsmax = QuadraticPenalty(Jls, LENGTH_TARGET, "max")`
   - `Jlsmin = QuadraticPenalty(Jls, COIL_LENGTH_MIN_FRACTION * LENGTH_TARGET, "min")`
   - `Jw = ProjectedEllipseWidth(new_banana_curve, BANANA_WINDING_SURFACE_MAJOR_RADIUS_M, BANANA_WINDING_MINOR_RADIUS_M)`
   - `Jwmin = QuadraticPenalty(Jw, BANANA_WIDTH_MIN_M, "min")`
   - `Jwmax = QuadraticPenalty(Jw, BANANA_WIDTH_MAX_M, "max")`
   - `Jself = CurveSelfIntersect(new_banana_curve, BANANA_SELF_INTERSECT_MIN_DISTANCE_M, neighbor_skip=int(BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR * new_banana_curve.order))`
-- [ ] Add to penalty `JF`:
+- [x] Add to penalty `JF`:
   - `LENGTH_WEIGHT * (Jlsmax + Jlsmin)`
   - `args.stage2_width_weight * (Jwmin + Jwmax)`
   - `args.stage2_selfint_weight * Jself`
-- [ ] Add print/log metadata for raw width, width penalties, self-distance penalty, `shortest_self_distance()`, and thresholds.
-- [ ] Add final result fields and artifact-state fields for width and self-distance so `hw-audit` can verify the same contract that optimization used.
+- [x] Add print/log metadata for raw width, width penalties, self-distance penalty, `shortest_self_distance()`, and thresholds.
+- [x] Add final result fields and artifact-state fields for width and self-distance so `hw-audit` can verify the same contract that optimization used.
 
 ### Phase D - Stage 2 ALM Constraints
 
-- [ ] Extend `STAGE_2/banana_coil_solver.py::stage2_alm_constraint_names` and `banana_opt/stage2_objectives.py::_stage2_constraint_names` to include:
+- [x] Extend `STAGE_2/banana_coil_solver.py::stage2_alm_constraint_names` and `banana_opt/stage2_objectives.py::_stage2_constraint_names` to include:
   - `coil_length_min`
   - `width_min`
   - `width_max`
   - `self_intersect`
-- [ ] Extend `banana_opt/stage2_objectives.py::evaluate_stage2_alm_problem` arguments to receive `Jlsmin` or the raw length-min threshold, `Jw`, `Jwmin`, `Jwmax`, and `Jself`.
-- [ ] Implement signed constraints:
+- [x] Extend `banana_opt/stage2_objectives.py::evaluate_stage2_alm_problem` arguments to receive the raw length-min threshold, `Jw`, and `Jself`; keep `Jwmin`/`Jwmax` in the penalty path only.
+- [x] Implement signed constraints:
   - `coil_length_min`: `length_min_target - coil_length`, gradient `-length_grad`.
   - `width_min`: `BANANA_WIDTH_MIN_M - Jw.J()`, gradient `-dJw`.
   - `width_max`: `Jw.J() - BANANA_WIDTH_MAX_M`, gradient `dJw`.
   - `self_intersect`: `Jself.J()`, gradient `dJself`, threshold `0.0`.
-- [ ] Thread metadata, threshold overrides, raw constraints, feasibility values, activity tolerances, and ALM result payloads through the same SSOT helpers used by existing Stage 2 constraints.
-- [ ] Keep `--stage2-iota-mode=soft|alm` behavior unchanged except for receiving the expanded geometric constraint set in ALM mode.
+- [x] Thread metadata, threshold overrides, raw constraints, feasibility values, activity tolerances, and ALM result payloads through the same SSOT helpers used by existing Stage 2 constraints.
+- [x] Keep `--stage2-iota-mode=soft|alm` behavior unchanged except for receiving the expanded geometric constraint set in ALM mode.
 
 ### Phase E - Single Stage Penalty Objective
 
-- [ ] Extend `banana_opt/single_stage_objectives.py::build_total_objective` with optional weighted width/self terms:
+- [x] Extend `banana_opt/single_stage_objectives.py::build_total_objective` with optional weighted width/self terms:
   - `JCoilWidth=None`
   - `width_weight=0.0`
   - `JCurveSelfIntersect=None`
   - `selfint_weight=0.0`
-- [ ] In `build_total_objective`, use SSOT constants and `QuadraticPenalty(JCoilWidth, BANANA_WIDTH_MIN_M, "min")`, `QuadraticPenalty(JCoilWidth, BANANA_WIDTH_MAX_M, "max")`; add `selfint_weight * JCurveSelfIntersect`.
-- [ ] Extend `evaluate_total_objective` diagnostics to expose `coil_width`, width thresholds, width penalty values, `self_intersect_penalty`, and `self_intersect_threshold`.
-- [ ] Extend `SINGLE_STAGE/single_stage_banana_example.py` parse args and wrapper plumbing for the two new weights.
-- [ ] Pass `JCoilWidth`, `JCurveSelfIntersect`, and weights only in the penalty-mode `evaluate_search_objective` branch.
-- [ ] Keep ALM mode routed through `evaluate_alm_objective`; do not double-count width/self in ALM base objective.
+- [x] In `build_total_objective`, use SSOT constants and `QuadraticPenalty(JCoilWidth, BANANA_WIDTH_MIN_M, "min")`, `QuadraticPenalty(JCoilWidth, BANANA_WIDTH_MAX_M, "max")`; add `selfint_weight * JCurveSelfIntersect`.
+- [x] Extend `evaluate_total_objective` diagnostics to expose `coil_width`, width thresholds, width penalty values, `self_intersect_penalty`, and `self_intersect_threshold`.
+- [x] Extend `SINGLE_STAGE/single_stage_banana_example.py` parse args and wrapper plumbing for the two new weights.
+- [x] Pass `JCoilWidth`, `JCurveSelfIntersect`, and weights only in the penalty-mode `evaluate_search_objective` branch.
+- [x] Keep ALM mode routed through `evaluate_alm_objective`; do not double-count width/self in ALM base objective.
 
 ### Phase F - Tests
 
-- [ ] Add Stage 2 penalty tests for length-min, width-min, width-max, and self-distance objective inclusion and gradients.
-- [ ] Add Stage 2 ALM tests proving `coil_length_min`, `width_min`, `width_max`, and `self_intersect` appear in ordered ALM payloads with correct signs, scales, thresholds, and gradients.
-- [ ] Add artifact tests proving final Stage 2 metadata/hardware status includes width and self-distance fields when the terms are active.
-- [ ] Add Single Stage penalty-mode tests proving weighted width/self terms change total value and gradient.
-- [ ] Add Single Stage ALM-mode tests proving weighted width/self terms are not added to the ALM base objective.
-- [ ] Add a smoke test that constructs real `ProjectedEllipseWidth` and `CurveSelfIntersect` objectives with the repo's banana test curve.
+- [x] Add Stage 2 penalty tests for length-min, width-min, width-max, and self-distance objective inclusion and gradients.
+- [x] Add Stage 2 ALM tests proving `coil_length_min`, `width_min`, `width_max`, and `self_intersect` appear in ordered ALM payloads with correct signs, scales, thresholds, and gradients.
+- [x] Add artifact tests proving final Stage 2 metadata/hardware status includes width and self-distance fields when the terms are active.
+- [x] Add Single Stage penalty-mode tests proving weighted width/self terms change total value and gradient.
+- [x] Add Single Stage ALM-mode tests proving weighted width/self terms are not added to the ALM base objective.
+- [x] Add a smoke test that constructs real `ProjectedEllipseWidth` and `CurveSelfIntersect` objectives with the repo's banana test curve.
 
 ### Phase G - Validation
 
@@ -199,9 +199,9 @@ Production smokes to record in `docs/parity_evidence/`:
 
 ## 5. Done When
 
-- [ ] All implementation checklist items are complete.
-- [ ] Stage 2 penalty and ALM paths enforce the same length-min, width, and self-distance contracts.
-- [ ] Single Stage penalty path includes width/self weighted gradients; Single Stage ALM path keeps width/self as ALM constraints only.
-- [ ] `hw-audit` sees the same measured width/self-distance fields that optimization used.
-- [ ] Focused tests and `tests/geo/` pass with no new failures relative to the recorded baseline.
-- [ ] `docs/parity_evidence/` contains dated smoke records with git SHA, command, key metrics, and pass/fail status.
+- [x] All implementation checklist items are complete.
+- [x] Stage 2 penalty and ALM paths enforce the same length-min, width, and self-distance contracts.
+- [x] Single Stage penalty path includes width/self weighted gradients; Single Stage ALM path keeps width/self as ALM constraints only.
+- [x] `hw-audit` sees the same measured width/self-distance fields that optimization used.
+- [x] Focused tests and `tests/geo/` pass with no new failures relative to the recorded baseline.
+- [x] `docs/parity_evidence/` contains dated smoke records with git SHA, command, key metrics, and pass/fail status.

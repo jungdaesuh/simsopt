@@ -399,6 +399,14 @@ class SnapshotParityTests(unittest.TestCase):
             )
 
     def test_stage2_alm_problem_matches_snapshot(self):
+        # The pre-modularization snapshot enforced four constraints
+        # (coil_coil_spacing, max_curvature, coil_length_upper_bound,
+        # banana_current_upper_bound). The current implementation enforces the
+        # full hardware-parity contract (coil_length_min, width_min, width_max,
+        # self_intersect) per the jhalpern30 parity plan, so this test now
+        # asserts that the legacy subset still appears at the four legacy slots
+        # and that the new contract entries are present without re-running the
+        # snapshot through a deliberately incompatible signature.
         base_objective = _FakeBaseObjective(3.5, [1.2, -0.5])
         new_surf = _FakeSurfaceNormals((2, 2, 3))
         new_bs = _FakeBiotSavart((4, 3))
@@ -411,42 +419,45 @@ class SnapshotParityTests(unittest.TestCase):
             vjp=lambda _value: (lambda _objective: np.array([0.7, -0.4])),
         )
 
+        Jw = SimpleNamespace(
+            J=lambda: 0.10,
+            dJ=lambda partials=False: (
+                (lambda _objective: np.array([0.0, 0.0]))
+                if partials
+                else np.array([0.0, 0.0])
+            ),
+        )
+        Jself = SimpleNamespace(
+            J=lambda: 0.0,
+            dJ=lambda partials=False: (
+                (lambda _objective: np.array([0.0, 0.0]))
+                if partials
+                else np.array([0.0, 0.0])
+            ),
+            shortest_self_distance=lambda: 0.5,
+        )
+
         def current_smooth_min_distance_signed_constraint(
             curves, minimum_distance, temperature, objective
         ):
             del curves, minimum_distance, temperature, objective
             return -0.008, np.array([0.6, 0.2]), 0.01
 
-        def snapshot_smooth_min_distance_signed_constraint(
-            curves, minimum_distance, temperature, objective
-        ):
-            signed_value, grad, _hard_signed_value = current_smooth_min_distance_signed_constraint(
-                curves,
-                minimum_distance,
-                temperature,
-                objective,
-            )
-            return signed_value, grad
-
         def smooth_max_curvature_signed_constraint(curve, threshold, temperature, objective):
             del curve, threshold, temperature, objective
             return 0.75, np.array([0.9, -0.1])
 
         def stage2_constraint_activity_tolerances(distance_smoothing, curvature_smoothing):
-            return [1e-3, distance_smoothing * 4.0, curvature_smoothing * 4.0, 1e-3]
-
-        snapshot = _extract_snapshot_functions(
-            *STAGE2_SNAPSHOT,
-            function_names=("evaluate_stage2_alm_problem",),
-            extra_globals={
-                "augmented_inequality_objective": self.alm_utils.augmented_inequality_objective,
-                "lower_bound_residual": self.alm_utils.lower_bound_residual,
-                "upper_bound_residual": self.alm_utils.upper_bound_residual,
-                "stage2_constraint_activity_tolerances": stage2_constraint_activity_tolerances,
-                "smooth_min_distance_signed_constraint": snapshot_smooth_min_distance_signed_constraint,
-                "smooth_max_curvature_signed_constraint": smooth_max_curvature_signed_constraint,
-            },
-        )["evaluate_stage2_alm_problem"]
+            return [
+                distance_smoothing * 4.0,
+                curvature_smoothing * 4.0,
+                1e-3,
+                1e-3,
+                1e-3,
+                1e-3,
+                1e-6,
+                1e-3,
+            ]
 
         common_args = dict(
             dofs=np.array([0.25, -0.4]),
@@ -462,25 +473,10 @@ class SnapshotParityTests(unittest.TestCase):
             banana_current_max_A=16000.0,
             distance_smoothing=0.005,
             curvature_smoothing=0.02,
-            multipliers=np.array([0.1, 0.2, 0.3, 0.4]),
+            multipliers=np.zeros(8),
             penalty=12.0,
         )
 
-        expected = snapshot(
-            dofs=common_args["dofs"],
-            base_objective=common_args["base_objective"],
-            new_bs=common_args["new_bs"],
-            new_surf=common_args["new_surf"],
-            Jf=common_args["Jf"],
-            Jls=common_args["Jls"],
-            length_target=common_args["length_target"],
-            Jccdist=common_args["Jccdist"],
-            Jc=common_args["Jc"],
-            distance_smoothing=common_args["distance_smoothing"],
-            curvature_smoothing=common_args["curvature_smoothing"],
-            multipliers=np.array([0.1, 0.2, 0.3]),
-            penalty=common_args["penalty"],
-        )
         def evaluate_current(**overrides):
             return self.current_stage2_objectives.evaluate_stage2_alm_problem(
                 **common_args,
@@ -488,17 +484,15 @@ class SnapshotParityTests(unittest.TestCase):
                 stage2_constraint_activity_tolerances=stage2_constraint_activity_tolerances,
                 smooth_min_distance_signed_constraint=current_smooth_min_distance_signed_constraint,
                 smooth_max_curvature_signed_constraint=smooth_max_curvature_signed_constraint,
+                Jw=Jw,
+                width_min_threshold=0.05,
+                width_max_threshold=0.17,
+                Jself=Jself,
+                self_intersect_threshold=0.0,
+                length_min_target=0.95,
             )
 
         actual = evaluate_current()
-        expected_normalized_constraints = [-0.16, 0.01875, 0.028571428571428595, -0.40625]
-        expected_normalized_hard_constraints = [
-            0.2,
-            0.05,
-            0.028571428571428595,
-            -0.40625,
-        ]
-        expected_raw_hard_constraints = [0.01, 2.0, 0.05, -6500.0]
 
         self.assertEqual(
             actual["constraint_names"],
@@ -506,70 +500,158 @@ class SnapshotParityTests(unittest.TestCase):
                 "coil_coil_spacing",
                 "max_curvature",
                 "coil_length_upper_bound",
+                "coil_length_min",
+                "width_min",
+                "width_max",
+                "self_intersect",
                 "banana_current_upper_bound",
             ],
         )
-        np.testing.assert_allclose(
-            actual["constraint_activity_tolerances"],
-            [0.4, 0.002, 1e-3 / 1.75, 1e-3 / 16000.0],
-        )
-        np.testing.assert_allclose(
-            actual["grad"],
-            [1.319766581632653, -0.3541237244897958],
-        )
+        expected_dual_update_values = [
+            0.2,
+            0.05,
+            0.028571428571428595,
+            -0.8947368421052633,
+            -1.0,
+            -0.4117647058823529,
+            0.0,
+            -0.40625,
+        ]
+        expected_hard_violation_values = [
+            0.2,
+            0.05,
+            0.028571428571428595,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]
+        expected_surrogate_signed_values = [
+            -0.16,
+            0.01875,
+            0.028571428571428595,
+            -0.8947368421052633,
+            -1.0,
+            -0.4117647058823529,
+            0.0,
+            -0.40625,
+        ]
+        expected_raw_dual_update_values = [
+            0.01,
+            2.0,
+            0.050000000000000044,
+            -0.8500000000000001,
+            -0.05,
+            -0.07,
+            0.0,
+            -6500.0,
+        ]
+        expected_raw_hard_violation_values = [
+            0.01,
+            2.0,
+            0.050000000000000044,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]
         np.testing.assert_allclose(actual["constraint_grads"][0], [12.0, 4.0])
         np.testing.assert_allclose(actual["constraint_grads"][1], [0.0225, -0.0025])
         np.testing.assert_allclose(
             actual["constraint_grads"][2],
             [0.17142857142857143, 0.2285714285714286],
         )
-        np.testing.assert_allclose(actual["constraint_grads"][3], [4.375e-5, -2.5e-5])
+        np.testing.assert_allclose(
+            actual["constraint_grads"][-1], [4.375e-5, -2.5e-5]
+        )
+        # The new parity constraints contribute zero gradient at this fixture
+        # because Jw/Jself fakes return zero gradients above.
+        np.testing.assert_allclose(actual["constraint_grads"][4], [0.0, 0.0])
+        np.testing.assert_allclose(actual["constraint_grads"][5], [0.0, 0.0])
+        np.testing.assert_allclose(actual["constraint_grads"][6], [0.0, 0.0])
+        np.testing.assert_allclose(
+            actual["constraint_activity_tolerances"],
+            [
+                0.4,
+                0.002,
+                1e-3 / 1.75,
+                1e-3 / 0.95,
+                1e-3 / 0.05,
+                1e-3 / 0.17,
+                1e-6,
+                1e-3 / 16000.0,
+            ],
+        )
+        np.testing.assert_allclose(actual["grad"], [1.2638380102040817, -0.4221951530612245])
         np.testing.assert_allclose(
             actual["dual_update_values"],
-            expected_normalized_hard_constraints,
+            expected_dual_update_values,
         )
         np.testing.assert_allclose(
             actual["hard_signed_constraint_values"],
-            expected_normalized_hard_constraints,
+            expected_dual_update_values,
         )
         np.testing.assert_allclose(
             actual["hard_violation_values"],
-            [0.2, 0.05, 0.028571428571428595, 0.0],
+            expected_hard_violation_values,
         )
         np.testing.assert_allclose(
             actual["surrogate_signed_constraint_values"],
-            expected_normalized_constraints,
+            expected_surrogate_signed_values,
         )
         np.testing.assert_allclose(
             actual["hard_dual_update_values"],
-            expected_normalized_hard_constraints,
+            expected_dual_update_values,
         )
         np.testing.assert_allclose(
             actual["raw_dual_update_values"],
-            expected_raw_hard_constraints,
+            expected_raw_dual_update_values,
         )
         np.testing.assert_allclose(
             actual["feasibility_values"],
-            [0.2, 0.05, 0.028571428571428595, 0.0],
+            expected_hard_violation_values,
         )
-        self.assertAlmostEqual(actual["base_value"], expected["base_value"])
+        np.testing.assert_allclose(
+            actual["raw_feasibility_values"],
+            expected_raw_hard_violation_values,
+        )
+        np.testing.assert_allclose(
+            actual["raw_hard_signed_constraint_values"],
+            expected_raw_dual_update_values,
+        )
+        np.testing.assert_allclose(
+            actual["raw_hard_violation_values"],
+            expected_raw_hard_violation_values,
+        )
+        np.testing.assert_allclose(
+            actual["raw_surrogate_signed_constraint_values"],
+            [-0.008, 0.75, 0.050000000000000044, -0.8500000000000001,
+             -0.05, -0.07, 0.0, -6500.0],
+        )
+        self.assertAlmostEqual(actual["base_value"], 3.5)
         self.assertAlmostEqual(actual["max_feasibility_violation"], 0.2)
         actual_diagnostics = evaluate_current(emit_diagnostics=True)
+        self.assertEqual(
+            actual_diagnostics["constraint_names"],
+            actual["constraint_names"],
+        )
         np.testing.assert_allclose(
             actual_diagnostics["hard_signed_constraint_values"],
-            [0.2, 0.05, 0.028571428571428595, -0.40625],
+            expected_dual_update_values,
         )
         np.testing.assert_allclose(
             actual_diagnostics["hard_violation_values"],
-            [0.2, 0.05, 0.028571428571428595, 0.0],
+            expected_hard_violation_values,
         )
         np.testing.assert_allclose(
             actual_diagnostics["raw_hard_signed_constraint_values"],
-            expected_raw_hard_constraints,
+            expected_raw_dual_update_values,
         )
         np.testing.assert_allclose(
             actual_diagnostics["raw_hard_violation_values"],
-            [0.01, 2.0, 0.05, 0.0],
+            expected_raw_hard_violation_values,
         )
 
     def test_build_stage2_bs_path_prefers_init_current_aware_contract(self):

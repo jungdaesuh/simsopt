@@ -1,10 +1,17 @@
 import numpy as np
 
+from simsopt.objectives import QuadraticPenalty
+
 from alm_utils import (
     augmented_inequality_objective,
     normalize_alm_constraint_grads,
     normalize_alm_constraint_signals,
     require_positive_alm_threshold,
+)
+from banana_opt.hardware_contracts import (
+    BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
+    BANANA_WIDTH_MAX_M,
+    BANANA_WIDTH_MIN_M,
 )
 from banana_opt.hardware_constraint_schema import (
     ALMConstraintMetadata,
@@ -70,6 +77,10 @@ def build_total_objective(
     POLOIDAL_EXTENT_WEIGHT=0.0,
     JPoloidalExtent=None,
     JCurveLengthMin=None,
+    JCoilWidth=None,
+    WIDTH_WEIGHT=0.0,
+    JCurveSelfIntersect=None,
+    SELFINT_WEIGHT=0.0,
 ):
     objective = (
         JnonQSRatio
@@ -86,6 +97,13 @@ def build_total_objective(
         objective = objective + POLOIDAL_EXTENT_WEIGHT * JPoloidalExtent
     if JCurveLengthMin is not None:
         objective = objective + LENGTH_WEIGHT * JCurveLengthMin
+    if JCoilWidth is not None:
+        objective = objective + WIDTH_WEIGHT * (
+            QuadraticPenalty(JCoilWidth, BANANA_WIDTH_MIN_M, "min")
+            + QuadraticPenalty(JCoilWidth, BANANA_WIDTH_MAX_M, "max")
+        )
+    if JCurveSelfIntersect is not None:
+        objective = objective + SELFINT_WEIGHT * JCurveSelfIntersect
     return objective
 
 
@@ -278,6 +296,10 @@ def evaluate_total_objective(
     POLOIDAL_EXTENT_WEIGHT=0.0,
     JPoloidalExtent=None,
     JCurveLengthMin=None,
+    JCoilWidth=None,
+    WIDTH_WEIGHT=0.0,
+    JCurveSelfIntersect=None,
+    SELFINT_WEIGHT=0.0,
 ):
     (
         raw_J_QS_obj,
@@ -310,6 +332,10 @@ def evaluate_total_objective(
         POLOIDAL_EXTENT_WEIGHT=POLOIDAL_EXTENT_WEIGHT,
         JPoloidalExtent=JPoloidalExtent,
         JCurveLengthMin=JCurveLengthMin,
+        JCoilWidth=JCoilWidth,
+        WIDTH_WEIGHT=WIDTH_WEIGHT,
+        JCurveSelfIntersect=JCurveSelfIntersect,
+        SELFINT_WEIGHT=SELFINT_WEIGHT,
     )
     total_grad = _objective_gradient(total_objective, objective_optimizable)
     constraint_names, constraint_values = _penalty_search_constraint_payload(
@@ -377,6 +403,33 @@ def evaluate_total_objective(
             np.zeros_like(total_grad)
             if JPoloidalExtent is None
             else _objective_gradient(JPoloidalExtent, objective_optimizable)
+        ),
+        "J_coil_width": (
+            0.0 if JCoilWidth is None else float(JCoilWidth.J())
+        ),
+        "dJ_coil_width": (
+            np.zeros_like(total_grad)
+            if JCoilWidth is None
+            else _objective_gradient(JCoilWidth, objective_optimizable)
+        ),
+        "J_self_intersect": (
+            0.0 if JCurveSelfIntersect is None else float(JCurveSelfIntersect.J())
+        ),
+        "dJ_self_intersect": (
+            np.zeros_like(total_grad)
+            if JCurveSelfIntersect is None
+            else _objective_gradient(JCurveSelfIntersect, objective_optimizable)
+        ),
+        "coil_width_min_threshold": (
+            None if JCoilWidth is None else BANANA_WIDTH_MIN_M
+        ),
+        "coil_width_max_threshold": (
+            None if JCoilWidth is None else BANANA_WIDTH_MAX_M
+        ),
+        "self_intersect_min_distance": (
+            None
+            if JCurveSelfIntersect is None
+            else BANANA_SELF_INTERSECT_MIN_DISTANCE_M
         ),
     })
     return annotate_search_evaluation_finiteness(evaluation)

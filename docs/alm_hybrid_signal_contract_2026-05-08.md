@@ -13,8 +13,8 @@ The inner-solve augmented Lagrangian uses **surrogate** (smoothed) signed constr
 Choke-point citations (paths relative to repo root):
 
 - Inner objective is fed the surrogate signal:
-  - `examples/single_stage_optimization/banana_opt/stage2_objectives.py:1951-1958` — `augmented_inequality_objective(...)` is called with `normalized_surrogate_signed_constraint_values` as the constraint argument that drives the augmented penalty term.
-  - `examples/single_stage_optimization/banana_opt/stage2_objectives.py:1966-1980` — both signal channels (`hard_signed_constraint_values`, `hard_violation_values`, `surrogate_signed_constraint_values`, `hard_dual_update_values`, plus their raw counterparts) are stored on the evaluation dict so downstream ALM control flow can pick the correct one without re-evaluating geometry.
+  - `examples/single_stage_optimization/banana_opt/stage2_objectives.py:2165-2172` — `augmented_inequality_objective(...)` is called with `normalized_surrogate_signed_constraint_values` as the constraint argument that drives the augmented penalty term.
+  - `examples/single_stage_optimization/banana_opt/stage2_objectives.py:2173-2201` — both signal channels (`hard_signed_constraint_values`, `hard_violation_values`, `surrogate_signed_constraint_values`, `hard_dual_update_values`, plus their raw counterparts) are stored on the evaluation dict so downstream ALM control flow can pick the correct one without re-evaluating geometry.
 - Dual update consumes the hard signal:
   - `examples/single_stage_optimization/alm_utils.py:2183-2235` — `_extract_stage2_constraint_signal_state` selects `hard_dual_update_values` as `preferred_dual_update_values` when explicit stage-2 signals are present, and surfaces both masks via `ALMConstraintSignalState`.
   - `examples/single_stage_optimization/alm_utils.py:3303-3319` — `_handle_alm_dual_update_transition` projects new multipliers using `routing_state.signal_state.preferred_dual_update_values` (the hard channel).

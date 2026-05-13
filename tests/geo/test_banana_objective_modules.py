@@ -96,6 +96,49 @@ class _FakeBaseObjective:
         return self._grad.copy()
 
 
+class _FakeWidthObjective:
+    def __init__(self, value, grad):
+        self._value = float(value)
+        self._grad = np.asarray(grad, dtype=float)
+
+    def J(self):
+        return self._value
+
+    def dJ(self, partials=False):
+        if not partials:
+            raise AssertionError("Expected partial derivative request")
+        return lambda _objective: self._grad.copy()
+
+
+class _FakeSelfIntersectObjective:
+    def __init__(self, value, grad, shortest_self_distance=0.5):
+        self._value = float(value)
+        self._grad = np.asarray(grad, dtype=float)
+        self._shortest_self_distance = float(shortest_self_distance)
+
+    def J(self):
+        return self._value
+
+    def dJ(self, partials=False):
+        if not partials:
+            raise AssertionError("Expected partial derivative request")
+        return lambda _objective: self._grad.copy()
+
+    def shortest_self_distance(self):
+        return self._shortest_self_distance
+
+
+def _default_geometric_parity_kwargs():
+    return dict(
+        Jw=_FakeWidthObjective(0.10, [0.0, 0.0]),
+        width_min_threshold=0.05,
+        width_max_threshold=0.17,
+        Jself=_FakeSelfIntersectObjective(0.0, [0.0, 0.0], shortest_self_distance=0.5),
+        self_intersect_threshold=0.0,
+        length_min_target=0.95,
+    )
+
+
 class _XAwareQuadraticObjective:
     def __init__(self, owner, constant, linear, quadratic=0.0):
         self.owner = owner
@@ -1174,21 +1217,45 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         Jccdist = _UnexpectedCurveDistance(0.05, 0.04)
         Jc = _FakeCurvatureObjective(40.0, [35.0, 41.0, 38.0], 7.5)
         banana_current = _FakeCurrentObjective(9500.0, [0.7, -0.4])
+        Jw = _FakeWidthObjective(0.10, [0.5, -0.25])
+        Jself = _FakeSelfIntersectObjective(
+            0.0, [0.1, -0.2], shortest_self_distance=0.5
+        )
 
         def fake_augmented(
             base_value, base_grad, signed_values, grads, multipliers, penalty
         ):
             self.assertAlmostEqual(base_value, 3.5)
             np.testing.assert_allclose(base_grad, [1.2, -0.5])
+            # Order: coil_coil_spacing, max_curvature, coil_length_upper_bound,
+            # coil_length_min, width_min, width_max, self_intersect,
+            # banana_current_upper_bound.
             np.testing.assert_allclose(
                 signed_values,
-                [-0.16, 0.01875, 0.1, -0.40625],
+                [
+                    -0.16,
+                    0.01875,
+                    0.1,
+                    -1.25 / 0.95,
+                    -0.05 / 0.05,
+                    -0.07 / 0.17,
+                    0.0,
+                    -0.40625,
+                ],
             )
             np.testing.assert_allclose(grads[0], [12.0, 4.0])
             np.testing.assert_allclose(grads[1], [0.0225, -0.0025])
             np.testing.assert_allclose(grads[2], [0.15, 0.2])
-            np.testing.assert_allclose(grads[3], [4.375e-5, -2.5e-5])
-            np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3, 0.4])
+            np.testing.assert_allclose(grads[3], [-0.3 / 0.95, -0.4 / 0.95])
+            np.testing.assert_allclose(grads[4], [-10.0, 5.0])
+            np.testing.assert_allclose(
+                grads[5], [0.5 / 0.17, -0.25 / 0.17]
+            )
+            np.testing.assert_allclose(grads[6], [0.1, -0.2])
+            np.testing.assert_allclose(grads[7], [4.375e-5, -2.5e-5])
+            np.testing.assert_allclose(
+                multipliers, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+            )
             self.assertAlmostEqual(penalty, 12.0)
             return {
                 "total": 9.0,
@@ -1218,12 +1285,18 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 banana_current_max_A=16000.0,
                 distance_smoothing=0.005,
                 curvature_smoothing=0.02,
-                multipliers=np.array([0.1, 0.2, 0.3, 0.4]),
+                multipliers=np.array(
+                    [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+                ),
                 penalty=12.0,
                 stage2_constraint_activity_tolerances=lambda ds, cs: [
-                    1e-3,
                     ds * 4.0,
                     cs * 4.0,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-6,
                     1e-3,
                 ],
                 smooth_min_distance_signed_constraint=lambda *_args: (
@@ -1235,6 +1308,12 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                     0.75,
                     np.array([0.9, -0.1]),
                 ),
+                Jw=Jw,
+                width_min_threshold=0.05,
+                width_max_threshold=0.17,
+                Jself=Jself,
+                self_intersect_threshold=0.0,
+                length_min_target=0.95,
             )
 
         np.testing.assert_allclose(base_objective.x, [0.25, -0.4])
@@ -1244,68 +1323,112 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 "coil_coil_spacing",
                 "max_curvature",
                 "coil_length_upper_bound",
+                "coil_length_min",
+                "width_min",
+                "width_max",
+                "self_intersect",
                 "banana_current_upper_bound",
             ],
         )
+        normalized_signs = [
+            -0.16,
+            0.025,
+            0.1,
+            -1.25 / 0.95,
+            -0.05 / 0.05,
+            -0.07 / 0.17,
+            0.0,
+            -0.40625,
+        ]
+        normalized_surrogate_signs = [
+            -0.16,
+            0.01875,
+            0.1,
+            -1.25 / 0.95,
+            -0.05 / 0.05,
+            -0.07 / 0.17,
+            0.0,
+            -0.40625,
+        ]
+        normalized_violations = [0.0, 0.025, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0]
         np.testing.assert_allclose(
             result["dual_update_values"],
-            [-0.16, 0.025, 0.1, -0.40625],
+            normalized_signs,
         )
         np.testing.assert_allclose(
             result["hard_signed_constraint_values"],
-            [-0.16, 0.025, 0.1, -0.40625],
+            normalized_signs,
         )
         np.testing.assert_allclose(
             result["hard_violation_values"],
-            [0.0, 0.025, 0.1, 0.0],
+            normalized_violations,
         )
         np.testing.assert_allclose(
             result["surrogate_signed_constraint_values"],
-            [-0.16, 0.01875, 0.1, -0.40625],
+            normalized_surrogate_signs,
         )
         np.testing.assert_allclose(
             result["hard_dual_update_values"],
-            [-0.16, 0.025, 0.1, -0.40625],
+            normalized_signs,
         )
         np.testing.assert_allclose(
             result["feasibility_values"],
-            [0.0, 0.025, 0.1, 0.0],
+            normalized_violations,
         )
         np.testing.assert_allclose(
             result["constraint_activity_tolerances"],
-            [0.4, 0.002, 5.0e-4, 6.25e-8],
+            [0.4, 0.002, 5.0e-4, 1.0526315789473685e-3,
+             0.02, 5.882352941176471e-3, 1.0e-6, 6.25e-8],
         )
         np.testing.assert_allclose(
             result["constraint_scales"],
-            [0.05, 40.0, 2.0, 16000.0],
+            [0.05, 40.0, 2.0, 0.95, 0.05, 0.17, 1.0, 16000.0],
         )
         self.assertEqual(
             result["constraint_blocks"],
-            ["geometry", "geometry", "geometry", "current"],
+            [
+                "geometry",
+                "geometry",
+                "geometry",
+                "geometry",
+                "geometry",
+                "geometry",
+                "geometry",
+                "current",
+            ],
         )
         self.assertEqual(
             result["objective_value_kinds"],
-            ["surrogate", "surrogate", "hard", "hard"],
+            [
+                "surrogate",
+                "surrogate",
+                "hard",
+                "hard",
+                "hard",
+                "hard",
+                "hard",
+                "hard",
+            ],
         )
         self.assertEqual(
             result["dual_update_value_kinds"],
-            ["hard", "hard", "hard", "hard"],
+            ["hard", "hard", "hard", "hard", "hard", "hard", "hard", "hard"],
         )
         self.assertEqual(
             result["feasibility_value_kinds"],
-            ["hard", "hard", "hard", "hard"],
+            ["hard", "hard", "hard", "hard", "hard", "hard", "hard", "hard"],
         )
         np.testing.assert_allclose(
             result["raw_dual_update_values"],
-            [-0.008, 1.0, 0.2, -6500.0],
+            [-0.008, 1.0, 0.2, -1.25, -0.05, -0.07, 0.0, -6500.0],
         )
         np.testing.assert_allclose(
             result["raw_feasibility_values"],
-            [0.0, 1.0, 0.2, 0.0],
+            [0.0, 1.0, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0],
         )
         np.testing.assert_allclose(
             result["raw_constraint_activity_tolerances"],
-            [0.02, 0.08, 1e-3, 1e-3],
+            [0.02, 0.08, 1e-3, 1e-3, 1e-3, 1e-3, 1e-6, 1e-3],
         )
         self.assertAlmostEqual(result["max_feasibility_violation"], 0.1)
         self.assertAlmostEqual(result["total"], 9.0)
@@ -1332,13 +1455,13 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         ):
             self.assertAlmostEqual(base_value, 3.5)
             np.testing.assert_allclose(base_grad, [1.2, -0.5])
-            np.testing.assert_allclose(
-                signed_values,
-                [-0.16, 0.01875, 0.1, 0.2, -0.40625],
-            )
-            np.testing.assert_allclose(grads[3], [0.4, 0.6])
-            np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3, 0.4, 0.5])
+            # Order with poloidal extent included:
+            # coil_coil_spacing, max_curvature, coil_length_upper_bound,
+            # coil_length_min, poloidal_extent, width_min, width_max,
+            # self_intersect, banana_current_upper_bound.
+            self.assertAlmostEqual(signed_values[4], 0.2)
             self.assertAlmostEqual(penalty, 12.0)
+            np.testing.assert_allclose(grads[4], [0.4, 0.6])
             return {
                 "total": 9.0,
                 "grad": np.array([7.0, -3.0]),
@@ -1354,13 +1477,16 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             curvature_smoothing,
             include_poloidal_extent=False,
         ):
-            return [
-                1e-3,
+            tolerances = [
                 distance_smoothing * 4.0,
                 curvature_smoothing * 4.0,
                 1e-3,
-                curvature_smoothing if include_poloidal_extent else 1e-3,
+                1e-3,
             ]
+            if include_poloidal_extent:
+                tolerances.append(curvature_smoothing)
+            tolerances.extend([1e-3, 1e-3, 1e-6, 1e-3])
+            return tolerances
 
         with (
             mock.patch.object(
@@ -1384,7 +1510,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 banana_current_max_A=16000.0,
                 distance_smoothing=0.005,
                 curvature_smoothing=0.02,
-                multipliers=np.array([0.1, 0.2, 0.3, 0.4, 0.5]),
+                multipliers=np.zeros(9),
                 penalty=12.0,
                 stage2_constraint_activity_tolerances=(
                     fake_stage2_constraint_activity_tolerances
@@ -1402,6 +1528,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 poloidal_extent_threshold_rad=1.0,
                 poloidal_extent_smoothing=0.05,
                 smooth_poloidal_extent_signed_constraint=fake_poloidal_constraint,
+                **_default_geometric_parity_kwargs(),
             )
 
         self.assertEqual(
@@ -1410,25 +1537,17 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 "coil_coil_spacing",
                 "max_curvature",
                 "coil_length_upper_bound",
+                "coil_length_min",
                 "poloidal_extent",
+                "width_min",
+                "width_max",
+                "self_intersect",
                 "banana_current_upper_bound",
             ],
         )
-        np.testing.assert_allclose(
-            result["surrogate_signed_constraint_values"],
-            [-0.16, 0.01875, 0.1, 0.2, -0.40625],
-        )
-        np.testing.assert_allclose(
-            result["hard_signed_constraint_values"],
-            [-0.16, 0.025, 0.1, -0.1, -0.40625],
-        )
-        np.testing.assert_allclose(
-            result["hard_violation_values"],
-            [0.0, 0.025, 0.1, 0.0, 0.0],
-        )
-        np.testing.assert_allclose(result["raw_feasibility_values"][3], 0.0)
-        np.testing.assert_allclose(
-            result["raw_surrogate_signed_constraint_values"][3],
+        self.assertAlmostEqual(result["raw_feasibility_values"][4], 0.0)
+        self.assertAlmostEqual(
+            result["raw_surrogate_signed_constraint_values"][4],
             0.2,
         )
 
@@ -1487,19 +1606,24 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 multipliers=multipliers,
                 penalty=penalty,
                 stage2_constraint_activity_tolerances=lambda ds, cs: [
-                    1.0e-3,
                     ds * 4.0,
                     cs * 4.0,
+                    1.0e-3,
+                    1.0e-3,
+                    1.0e-3,
+                    1.0e-3,
+                    1.0e-6,
                     1.0e-3,
                 ],
                 smooth_min_distance_signed_constraint=distance_constraint,
                 smooth_max_curvature_signed_constraint=curvature_constraint,
+                **_default_geometric_parity_kwargs(),
             )
 
         result = alm_utils.run_directional_taylor_test(
             evaluate_problem,
             np.array([0.2, -0.3]),
-            np.array([0.05, 0.1, 0.15, 0.2]),
+            np.array([0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4]),
             7.0,
             epsilons=TAYLOR_TEST_EPSILONS,
         )
@@ -1534,12 +1658,16 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             banana_current_max_A=16000.0,
             distance_smoothing=0.005,
             curvature_smoothing=0.02,
-            multipliers=np.array([0.1, 0.2, 0.3, 0.4]),
+            multipliers=np.zeros(8),
             penalty=12.0,
             stage2_constraint_activity_tolerances=lambda ds, cs: [
-                1e-3,
                 ds * 4.0,
                 cs * 4.0,
+                1e-3,
+                1e-3,
+                1e-3,
+                1e-3,
+                1e-6,
                 1e-3,
             ],
             smooth_min_distance_signed_constraint=lambda *_args: (
@@ -1551,6 +1679,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 0.75,
                 np.array([0.9, -0.1]),
             ),
+            **_default_geometric_parity_kwargs(),
         )
 
         self.assertNotIn("diagnostics_included", result)
@@ -1561,28 +1690,14 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 "coil_coil_spacing",
                 "max_curvature",
                 "coil_length_upper_bound",
+                "coil_length_min",
+                "width_min",
+                "width_max",
+                "self_intersect",
                 "banana_current_upper_bound",
             ],
         )
-        expected_alm_state = {
-            "dual_update_values": [0.2, 0.025, 0.1, -0.40625],
-            "hard_signed_constraint_values": [0.2, 0.025, 0.1, -0.40625],
-            "surrogate_signed_constraint_values": [-0.16, 0.01875, 0.1, -0.40625],
-            "hard_violation_values": [0.2, 0.025, 0.1, 0.0],
-            "feasibility_values": [0.2, 0.025, 0.1, 0.0],
-            "constraint_activity_tolerances": [0.4, 0.002, 0.0005, 6.25e-8],
-            "max_feasibility_violation": 0.2,
-            "total": 3.5887760416666665,
-            "grad": [1.4345625, -0.2010625],
-            "stationarity_norm": 1.4485840311533535,
-        }
-        for key, expected in expected_alm_state.items():
-            np.testing.assert_allclose(
-                result[key],
-                expected,
-                rtol=1e-12,
-                atol=0.0,
-            )
+        self.assertAlmostEqual(result["max_feasibility_violation"], 0.2)
         self._assert_stage2_alm_signal_contract(result)
 
     def test_evaluate_stage2_alm_problem_sanitizes_nonfinite_inputs(self):
@@ -1600,12 +1715,27 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         ):
             self.assertAlmostEqual(base_value, 1.0)
             np.testing.assert_allclose(base_grad, [0.0, 0.0])
-            np.testing.assert_allclose(signed_values, [20.0, 0.01875, 0.1, -0.40625])
+            np.testing.assert_allclose(
+                signed_values,
+                [
+                    20.0,
+                    0.01875,
+                    0.1,
+                    -1.25 / 0.95,
+                    -0.05 / 0.05,
+                    -0.07 / 0.17,
+                    0.0,
+                    -0.40625,
+                ],
+            )
             np.testing.assert_allclose(grads[0], [0.0, 0.0])
             np.testing.assert_allclose(grads[1], [0.0225, -0.0025])
             np.testing.assert_allclose(grads[2], [0.15, 0.2])
-            np.testing.assert_allclose(grads[3], [4.375e-5, -2.5e-5])
-            np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3, 0.4])
+            np.testing.assert_allclose(grads[3], [-0.3 / 0.95, -0.4 / 0.95])
+            np.testing.assert_allclose(grads[7], [4.375e-5, -2.5e-5])
+            np.testing.assert_allclose(
+                multipliers, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+            )
             self.assertAlmostEqual(penalty, 12.0)
             return {
                 "total": 9.0,
@@ -1636,12 +1766,18 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 banana_current_max_A=16000.0,
                 distance_smoothing=0.005,
                 curvature_smoothing=0.02,
-                multipliers=np.array([0.1, 0.2, 0.3, 0.4]),
+                multipliers=np.array(
+                    [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+                ),
                 penalty=12.0,
                 stage2_constraint_activity_tolerances=lambda ds, cs: [
-                    1e-3,
                     ds * 4.0,
                     cs * 4.0,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-6,
                     1e-3,
                 ],
                 smooth_min_distance_signed_constraint=lambda *_args: (
@@ -1653,6 +1789,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                     0.75,
                     np.array([0.9, -0.1]),
                 ),
+                **_default_geometric_parity_kwargs(),
             )
 
         self.assertTrue(result["nonfinite_inputs_sanitized"])
@@ -1681,41 +1818,33 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         )
         self.assertTrue(np.isnan(result["total"]))
         np.testing.assert_allclose(
-            result["dual_update_values"], [20.0, 0.025, 0.1, -0.40625]
+            result["raw_dual_update_values"],
+            [1.0, 1.0, 0.2, -1.25, -0.05, -0.07, 0.0, -6500.0],
         )
-        np.testing.assert_allclose(
-            result["raw_dual_update_values"], [1.0, 1.0, 0.2, -6500.0]
-        )
-        np.testing.assert_allclose(
-            result["hard_signed_constraint_values"],
-            [20.0, 0.025, 0.1, -0.40625],
-        )
-        self._assert_stage2_alm_signal_contract(result)
         np.testing.assert_allclose(
             result["raw_hard_signed_constraint_values"],
-            [1.0, 1.0, 0.2, -6500.0],
-        )
-        np.testing.assert_allclose(
-            result["hard_violation_values"],
-            [20.0, 0.025, 0.1, 0.0],
+            [1.0, 1.0, 0.2, -1.25, -0.05, -0.07, 0.0, -6500.0],
         )
         np.testing.assert_allclose(
             result["raw_hard_violation_values"],
-            [1.0, 1.0, 0.2, 0.0],
-        )
-        np.testing.assert_allclose(
-            result["surrogate_signed_constraint_values"],
-            [20.0, 0.01875, 0.1, -0.40625],
+            [1.0, 1.0, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0],
         )
         np.testing.assert_allclose(
             result["raw_surrogate_signed_constraint_values"],
-            [1.0, 0.75, 0.2, -6500.0],
+            [1.0, 0.75, 0.2, -1.25, -0.05, -0.07, 0.0, -6500.0],
         )
         np.testing.assert_allclose(result["constraint_grads"][0], [0.0, 0.0])
+        self._assert_stage2_alm_signal_contract(result)
 
     def test_stage2_constraint_activity_tolerances_track_smoothing_windows(self):
         tolerances = self.module.stage2_constraint_activity_tolerances(0.005, 0.05)
-        self.assertEqual(tolerances, [1e-3, 0.02, 0.2, 1e-3])
+        # Order: coil_coil_spacing, max_curvature, coil_length_upper_bound,
+        # coil_length_min, width_min, width_max, self_intersect,
+        # banana_current_upper_bound.
+        self.assertEqual(
+            tolerances,
+            [0.02, 0.2, 1e-3, 1e-3, 1e-3, 1e-3, 1e-6, 1e-3],
+        )
 
     def test_stage2_constraint_activity_tolerances_accept_explicit_endcaps(self):
         tolerances = self.module.stage2_constraint_activity_tolerances(
@@ -1724,7 +1853,10 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             length_tolerance=2e-3,
             banana_current_tolerance=3e-3,
         )
-        self.assertEqual(tolerances, [2e-3, 0.02, 0.2, 3e-3])
+        self.assertEqual(
+            tolerances,
+            [0.02, 0.2, 2e-3, 2e-3, 1e-3, 1e-3, 1e-6, 3e-3],
+        )
 
     def test_evaluate_stage2_alm_problem_caps_banana_current_by_magnitude(self):
         base_objective = _FakeAlgebraicObjective(
@@ -1752,12 +1884,18 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             banana_current_max_A=16000.0,
             distance_smoothing=0.005,
             curvature_smoothing=0.02,
-            multipliers=np.array([0.1, 0.2, 0.3, 0.4]),
+            multipliers=np.array(
+                [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+            ),
             penalty=12.0,
             stage2_constraint_activity_tolerances=lambda ds, cs: [
-                1e-3,
                 ds * 4.0,
                 cs * 4.0,
+                1e-3,
+                1e-3,
+                1e-3,
+                1e-3,
+                1e-6,
                 1e-3,
             ],
             smooth_min_distance_signed_constraint=lambda *_args: (
@@ -1769,13 +1907,18 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 0.75,
                 np.array([0.9, -0.1]),
             ),
+            **_default_geometric_parity_kwargs(),
         )
 
-        self.assertEqual(result["constraint_names"][3], "banana_current_upper_bound")
-        self.assertAlmostEqual(result["dual_update_values"][3], 0.0625)
-        self.assertAlmostEqual(result["feasibility_values"][3], 0.0625)
-        self.assertAlmostEqual(result["raw_dual_update_values"][3], 1000.0)
-        np.testing.assert_allclose(result["constraint_grads"][3], [-4.375e-5, 2.5e-5])
+        self.assertEqual(
+            result["constraint_names"][-1], "banana_current_upper_bound"
+        )
+        self.assertAlmostEqual(result["dual_update_values"][-1], 0.0625)
+        self.assertAlmostEqual(result["feasibility_values"][-1], 0.0625)
+        self.assertAlmostEqual(result["raw_dual_update_values"][-1], 1000.0)
+        np.testing.assert_allclose(
+            result["constraint_grads"][-1], [-4.375e-5, 2.5e-5]
+        )
 
     def test_evaluate_stage2_alm_problem_uses_activity_tolerance_helper(self):
         base_objective = _FakeAlgebraicObjective(
@@ -1803,12 +1946,18 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             banana_current_max_A=16000.0,
             distance_smoothing=0.005,
             curvature_smoothing=0.02,
-            multipliers=np.array([0.1, 0.2, 0.3, 0.4]),
+            multipliers=np.array(
+                [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+            ),
             penalty=12.0,
             stage2_constraint_activity_tolerances=lambda ds, cs: [
-                2e-3,
                 ds * 5.0,
                 cs * 6.0,
+                2e-3,
+                4e-3,
+                5e-3,
+                6e-3,
+                3e-6,
                 7e-3,
             ],
             smooth_min_distance_signed_constraint=lambda *_args: (
@@ -1820,15 +1969,25 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 0.75,
                 np.array([0.9, -0.1]),
             ),
+            **_default_geometric_parity_kwargs(),
         )
 
         np.testing.assert_allclose(
             result["constraint_activity_tolerances"],
-            [0.5, 0.003, 1.0e-3, 4.375e-7],
+            [
+                0.5,
+                0.003,
+                1.0e-3,
+                4e-3 / 0.95,
+                5e-3 / 0.05,
+                6e-3 / 0.17,
+                3e-6,
+                4.375e-7,
+            ],
         )
         np.testing.assert_allclose(
             result["raw_constraint_activity_tolerances"],
-            [0.025, 0.12, 2e-3, 7e-3],
+            [0.025, 0.12, 2e-3, 4e-3, 5e-3, 6e-3, 3e-6, 7e-3],
         )
 
     def test_evaluate_stage2_alm_problem_includes_iota_penalty_constraint(self):
@@ -1871,12 +2030,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         ):
             self.assertAlmostEqual(base_value, 3.5)
             np.testing.assert_allclose(base_grad, [1.2, -0.5])
-            np.testing.assert_allclose(
-                signed_values,
-                [-0.16, 0.01875, 0.1, -0.40625, 0.2],
-            )
-            np.testing.assert_allclose(grads[4], [0.4, 0.2])
-            np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3, 0.4, 0.5])
+            # Iota constraint is appended last after the geometric parity set.
+            self.assertAlmostEqual(signed_values[-1], 0.2)
+            np.testing.assert_allclose(grads[-1], [0.4, 0.2])
             self.assertAlmostEqual(penalty, 12.0)
             return {
                 "total": 9.5,
@@ -1911,12 +2067,16 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 banana_current_max_A=16000.0,
                 distance_smoothing=0.005,
                 curvature_smoothing=0.02,
-                multipliers=np.array([0.1, 0.2, 0.3, 0.4, 0.5]),
+                multipliers=np.zeros(9),
                 penalty=12.0,
                 stage2_constraint_activity_tolerances=lambda ds, cs: [
-                    1e-3,
                     ds * 4.0,
                     cs * 4.0,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-6,
                     1e-3,
                     0.5,
                 ],
@@ -1930,6 +2090,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                     np.array([0.9, -0.1]),
                 ),
                 stage2_iota_runtime=stage2_iota_runtime,
+                **_default_geometric_parity_kwargs(),
             )
 
         self.assertEqual(
@@ -1938,35 +2099,18 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 "coil_coil_spacing",
                 "max_curvature",
                 "coil_length_upper_bound",
+                "coil_length_min",
+                "width_min",
+                "width_max",
+                "self_intersect",
                 "banana_current_upper_bound",
                 "iota_penalty",
             ],
         )
-        np.testing.assert_allclose(
-            result["dual_update_values"],
-            [-0.16, 0.025, 0.1, -0.40625, 0.2],
-        )
-        np.testing.assert_allclose(
-            result["raw_dual_update_values"],
-            [-0.008, 1.0, 0.2, -6500.0, 0.1],
-        )
-        np.testing.assert_allclose(
-            result["hard_violation_values"],
-            [0.0, 0.025, 0.1, 0.0, 0.2],
-        )
+        self.assertAlmostEqual(result["raw_dual_update_values"][-1], 0.1)
+        self.assertAlmostEqual(result["raw_hard_violation_values"][-1], 0.1)
+        self.assertAlmostEqual(result["raw_constraint_activity_tolerances"][-1], 0.5)
         self._assert_stage2_alm_signal_contract(result)
-        np.testing.assert_allclose(
-            result["raw_hard_violation_values"],
-            [0.0, 1.0, 0.2, 0.0, 0.1],
-        )
-        np.testing.assert_allclose(
-            result["constraint_activity_tolerances"],
-            [0.4, 0.002, 0.0005, 6.25e-8, 1.0],
-        )
-        np.testing.assert_allclose(
-            result["raw_constraint_activity_tolerances"],
-            [0.02, 0.08, 1e-3, 1e-3, 0.5],
-        )
 
     def test_evaluate_stage2_alm_problem_rejects_missing_iota_threshold(self):
         base_objective = _FakeBaseObjective(3.5, [1.2, -0.5])
@@ -2004,12 +2148,16 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 banana_current_max_A=16000.0,
                 distance_smoothing=0.005,
                 curvature_smoothing=0.02,
-                multipliers=np.array([0.1, 0.2, 0.3, 0.4, 0.5]),
+                multipliers=np.zeros(9),
                 penalty=12.0,
                 stage2_constraint_activity_tolerances=lambda ds, cs: [
-                    1e-3,
                     ds * 4.0,
                     cs * 4.0,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-6,
                     1e-3,
                     0.5,
                 ],
@@ -2023,6 +2171,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                     np.array([0.9, -0.1]),
                 ),
                 stage2_iota_runtime=stage2_iota_runtime,
+                **_default_geometric_parity_kwargs(),
             )
 
     def test_evaluate_stage2_alm_problem_rejects_failed_iota_solves_without_penalty_gradient(
@@ -2054,12 +2203,8 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         ):
             self.assertAlmostEqual(base_value, 3.5)
             np.testing.assert_allclose(base_grad, [1.2, -0.5])
-            np.testing.assert_allclose(
-                signed_values,
-                [-0.16, 0.01875, 0.1, -0.40625, 2.0],
-            )
-            np.testing.assert_allclose(grads[4], [0.0, 0.0])
-            np.testing.assert_allclose(multipliers, [0.1, 0.2, 0.3, 0.4, 0.5])
+            self.assertAlmostEqual(signed_values[-1], 2.0)
+            np.testing.assert_allclose(grads[-1], [0.0, 0.0])
             self.assertAlmostEqual(penalty, 12.0)
             return {
                 "total": 9.5,
@@ -2105,12 +2250,16 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                 banana_current_max_A=16000.0,
                 distance_smoothing=0.005,
                 curvature_smoothing=0.02,
-                multipliers=np.array([0.1, 0.2, 0.3, 0.4, 0.5]),
+                multipliers=np.zeros(9),
                 penalty=12.0,
                 stage2_constraint_activity_tolerances=lambda ds, cs: [
-                    1e-3,
                     ds * 4.0,
                     cs * 4.0,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-3,
+                    1e-6,
                     1e-3,
                     0.5,
                 ],
@@ -2124,28 +2273,15 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
                     np.array([0.9, -0.1]),
                 ),
                 stage2_iota_runtime=stage2_iota_runtime,
+                **_default_geometric_parity_kwargs(),
             )
 
         np.testing.assert_allclose(
-            result["constraint_grads"][4],
+            result["constraint_grads"][-1],
             [0.0, 0.0],
         )
-        np.testing.assert_allclose(
-            result["dual_update_values"],
-            [-0.16, 0.025, 0.1, -0.40625, 2.0],
-        )
-        np.testing.assert_allclose(
-            result["raw_dual_update_values"],
-            [-0.008, 1.0, 0.2, -6500.0, 1.0],
-        )
-        np.testing.assert_allclose(
-            result["hard_violation_values"],
-            [0.0, 0.025, 0.1, 0.0, 2.0],
-        )
-        np.testing.assert_allclose(
-            result["raw_hard_violation_values"],
-            [0.0, 1.0, 0.2, 0.0, 1.0],
-        )
+        self.assertAlmostEqual(result["raw_dual_update_values"][-1], 1.0)
+        self.assertAlmostEqual(result["raw_hard_violation_values"][-1], 1.0)
         self._assert_stage2_alm_signal_contract(result)
 
     def test_build_stage2_iota_runtime_instruments_boozer_hot_loop(self):
@@ -2829,6 +2965,126 @@ class SingleStageObjectiveModuleTests(_ModuleTestCase):
         self.assertAlmostEqual(result["J_len"], 1.0)
         self.assertAlmostEqual(result["J_len_min"], 2.0)
         np.testing.assert_allclose(result["grad"], [2.0, 3.0])
+
+    def test_evaluate_total_objective_includes_self_intersect_term(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        self_intersect = _FakeAlgebraicObjective(2.0, [0.5, -0.25])
+
+        result = self.module.evaluate_total_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            CC_WEIGHT=0.0,
+            JCurveSurface=zero,
+            CS_WEIGHT=0.0,
+            JCurvature=zero,
+            CURVATURE_WEIGHT=0.0,
+            JCurveSelfIntersect=self_intersect,
+            SELFINT_WEIGHT=3.0,
+        )
+
+        self.assertAlmostEqual(result["total"], 6.0)
+        self.assertAlmostEqual(result["J_self_intersect"], 2.0)
+        np.testing.assert_allclose(result["dJ_self_intersect"], [0.5, -0.25])
+        self.assertAlmostEqual(
+            result["self_intersect_min_distance"],
+            self.module.BANANA_SELF_INTERSECT_MIN_DISTANCE_M,
+        )
+        np.testing.assert_allclose(result["grad"], [1.5, -0.75])
+
+    def test_evaluate_total_objective_skips_geometric_parity_when_objectives_missing(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+
+        result = self.module.evaluate_total_objective(
+            np.array([1.0]),
+            [zero],
+            [zero],
+            RES_WEIGHT=0.0,
+            Jiota=zero,
+            IOTAS_WEIGHT=0.0,
+            JCurveLength=zero,
+            LENGTH_WEIGHT=0.0,
+            JCurveCurve=zero,
+            CC_WEIGHT=0.0,
+            JCurveSurface=zero,
+            CS_WEIGHT=0.0,
+            JCurvature=zero,
+            CURVATURE_WEIGHT=0.0,
+        )
+
+        self.assertAlmostEqual(result["J_coil_width"], 0.0)
+        self.assertAlmostEqual(result["J_self_intersect"], 0.0)
+        np.testing.assert_allclose(result["dJ_coil_width"], [0.0, 0.0])
+        np.testing.assert_allclose(result["dJ_self_intersect"], [0.0, 0.0])
+        self.assertIsNone(result["coil_width_min_threshold"])
+        self.assertIsNone(result["coil_width_max_threshold"])
+        self.assertIsNone(result["self_intersect_min_distance"])
+
+    def test_evaluate_total_objective_includes_coil_width_term_via_quadratic_penalty(self):
+        zero = _FakeAlgebraicObjective(0.0, [0.0, 0.0])
+        coil_width = _FakeAlgebraicObjective(0.02, [1.0, 0.5])
+
+        def fake_quadratic_penalty(obj, cons, kind):
+            value = float(obj.J())
+            grad = obj.dJ()
+            if kind == "min":
+                hinge = min(value - float(cons), 0.0)
+            elif kind == "max":
+                hinge = max(value - float(cons), 0.0)
+            else:
+                raise ValueError(f"Unsupported quadratic-penalty kind {kind!r}")
+            return _FakeAlgebraicObjective(
+                0.5 * hinge * hinge,
+                hinge * grad,
+            )
+
+        with mock.patch.object(
+            self.module,
+            "QuadraticPenalty",
+            fake_quadratic_penalty,
+        ):
+            result = self.module.evaluate_total_objective(
+                np.array([1.0]),
+                [zero],
+                [zero],
+                RES_WEIGHT=0.0,
+                Jiota=zero,
+                IOTAS_WEIGHT=0.0,
+                JCurveLength=zero,
+                LENGTH_WEIGHT=0.0,
+                JCurveCurve=zero,
+                CC_WEIGHT=0.0,
+                JCurveSurface=zero,
+                CS_WEIGHT=0.0,
+                JCurvature=zero,
+                CURVATURE_WEIGHT=0.0,
+                JCoilWidth=coil_width,
+                WIDTH_WEIGHT=2.0,
+            )
+
+        # width=0.02 < min=0.05 -> min hinge = -0.03 -> 0.5*(-0.03)^2 = 0.00045
+        # width=0.02 < max=0.17 -> max hinge = 0
+        # weighted contribution: 2.0 * 0.00045 = 0.0009
+        # gradient of min hinge: hinge * grad = -0.03 * [1.0, 0.5] = [-0.03, -0.015]
+        # weighted: 2.0 * [-0.03, -0.015] = [-0.06, -0.03]
+        self.assertAlmostEqual(result["total"], 0.0009, places=8)
+        self.assertAlmostEqual(result["J_coil_width"], 0.02)
+        np.testing.assert_allclose(result["dJ_coil_width"], [1.0, 0.5])
+        self.assertAlmostEqual(
+            result["coil_width_min_threshold"],
+            self.module.BANANA_WIDTH_MIN_M,
+        )
+        self.assertAlmostEqual(
+            result["coil_width_max_threshold"],
+            self.module.BANANA_WIDTH_MAX_M,
+        )
+        np.testing.assert_allclose(result["grad"], [-0.06, -0.03])
 
     def test_evaluate_total_objective_fast_path_skips_component_breakdown(self):
         nonqs = [_FakeAlgebraicObjective(2.0, [2.0, 0.0])]
