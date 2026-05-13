@@ -14,9 +14,10 @@ tests in `tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py`.
 
 ## Per-fixture summary
 
-The table reflects the refreshed JSON artifacts, generated against base
-HEAD `c23f704f6fac06308110270f0522e60b0533bea9` with the artifact
-dirty-tree metadata recorded in each file.
+The table reflects the refreshed JSON artifacts under
+`.artifacts/parity/20260512-non-banana-examples/`; the authoritative
+git HEAD and dirty-tree metadata for each row is recorded in the JSON
+artifact's `metadata` block.
 
 | Fixture | Verdict | Native components compared | Failing | Unsupported | Max abs diff (gradient) | Max abs diff (B) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -26,8 +27,8 @@ dirty-tree metadata recorded in each file.
 | `full_stage2_composite` | partial | 7 | 0 | 5 | 3.5e-17 | 4.4e-16 |
 | `planar_stage2_composite` | partial | 7 | 0 | 6 | 3.8e-17 | 5.0e-16 |
 | `position_orientation_flux_support_gate` | unsupported | 0 | 0 | 0 | n/a | n/a |
-| `boozer_surface_basic` | unsupported | 0 | 0 | 0 | n/a | n/a |
-| `boozer_qa_wrappers` | unsupported | 0 | 0 | 0 | n/a | n/a |
+| `boozer_surface_basic` | pass | 7 | 0 | 0 | n/a | 1.3e-15 |
+| `boozer_qa_wrappers` | partial | 6 | 0 | 1 | n/a | 8.9e-16 |
 | `finite_beta_target_flux` | unsupported | 0 | 0 | 0 | n/a | n/a |
 | `finitebuild_multifilament_support_gate` | unsupported | 0 | 0 | 0 | n/a | n/a |
 | `qfm_surface` | unsupported | 0 | 0 | 0 | n/a | n/a |
@@ -69,6 +70,28 @@ Verdict legend:
   with planar coils (`CurvePlanarFourier` exposes `to_spec()`).
   `LinkingNumber` plus the planar geometry penalties are listed as
   unsupported (six entries).
+- `boozer_surface_basic` — Phase 6 P2 fixture. The harness rebuilds the
+  NCSX initial surface on independent CPU and JAX coil trees and compares
+  the pre-solve `boozer_surface_residual` vector, `Area`, `Volume`, and
+  `ToroidalFlux` labels at fixed `iota=-0.4` and `G0` from coil currents.
+  All seven direct-kernel comparisons pass: surface gamma/unit normal,
+  field B, Boozer residual, and the three labels (`max_abs_diff` ≤ 2.7e-14
+  on the residual, ≤ 9e-16 on the labels).
+- `boozer_qa_wrappers` — Phase 6 P2 fixture. The harness solves the NCSX
+  Boozer surface once on the CPU side via
+  `boozer_surface.solve_residual_equation_exactly_newton(tol=1e-13)` at
+  `iota=-0.406` and `G0`, transfers the converged surface DOFs into an
+  independent JAX-side surface, and compares the solved-state `Iotas`,
+  `MajorRadius`, and `NonQuasiSymmetricRatio` scalar values. The CPU lane
+  uses the upstream wrappers; the JAX lane uses the solved iota scalar plus
+  pure-JAX helpers (`surface_major_radius_jax_from_dofs`, `_qs_ratio_pure`).
+  This fixture does not claim public `BoozerSurfaceJAX` wrapper or adjoint
+  parity. Six direct-kernel comparisons pass:
+  `surface_gamma`, `surface_unit_normal`, `field_B`, `iota`,
+  `major_radius` (`max_abs_diff = 2.7e-15`), and `nq_symmetric_ratio`
+  (`max_abs_diff = 2.4e-19`). `sum_CurveLength` from the upstream
+  example's length quadratic penalty is listed in
+  `unsupported_components` (no native JAX `CurveLength` wrapper).
 
 ### Unsupported (gated)
 
@@ -92,13 +115,6 @@ Verdict legend:
   `build_lanes`-style multifilament composite constructor (flux + length
   + curvature + filament-arclength variation + min-distance penalty),
   which is not wired into this harness.
-- `boozer_surface_basic`, `boozer_qa_wrappers` — Phase 6. Native JAX
-  Boozer residual + wrapper coverage already exists in
-  `tests/geo/test_boozer_residual_jax.py`,
-  `tests/geo/test_boozer_derivatives_jax.py`, and
-  `tests/integration/test_single_stage_jax.py`. Per-fixture wiring needs
-  the harness LaneArtifact to carry Boozer residual vectors / iota / G
-  / label values; that extension is a follow-up plan.
 - `finite_beta_target_flux` — Phase 7. The blocker is `VirtualCasing`
   preprocessing; once a cached `vcasing_*.nc` is checked in for the
   W7-X target equilibrium, this fixture flips to a partial verdict
@@ -153,13 +169,13 @@ Walking the plan's "Definition Of Done" item by item:
   exact unsupported components — `cws_saved_local_flux_nfp{2,3}` report
   the precise upstream `simsopt.load` failure; `full_stage2_composite`
   reports the five CPU-only components.
-- [~] P2 Boozer/planar fixtures have fixed-state coverage before any
-  optimizer trajectory claims — planar fixture passes; Boozer is reported
-  as `unsupported` with classification reason pointing at existing JAX
-  parity test coverage (`tests/geo/test_boozer_residual_jax.py`,
-  `tests/geo/test_boozer_derivatives_jax.py`,
-  `tests/integration/test_single_stage_jax.py`). Per-fixture harness
-  wiring is a follow-up plan.
+- [x] P2 Boozer/planar fixtures have fixed-state coverage before any
+  optimizer trajectory claims — planar fixture passes,
+  `boozer_surface_basic` passes fixed-state residual + label parity, and
+  `boozer_qa_wrappers` passes solved-state Iotas / MajorRadius /
+  NonQuasiSymmetricRatio scalar parity (length-penalty term listed as
+  unsupported until a native JAX `CurveLength` wrapper lands). This is not a
+  public `BoozerSurfaceJAX` wrapper/adjoint parity claim.
 - [x] Position/orientation and finite-build fixtures are reported as
   support gates with precise unsupported reasons.
 - [x] All JSON artifacts include current git SHA and dirty-tree metadata.
@@ -178,17 +194,16 @@ loosening any current tolerance:
 
 1. Upstream `simsopt.load()` deserializer support for `CurveCWSFourier`.
    Unblocks `cws_saved_local_flux_nfp{2,3}` → `pass`.
-2. Harness `LaneArtifact` extension for Boozer residual / iota / G /
-   label fields, plus a parallel `_supported_comparisons_boozer` branch.
-   Unblocks `boozer_surface_basic` and `boozer_qa_wrappers`.
-3. Same `LaneArtifact` extension covers `qfm_surface`.
-4. Checked-in cached `vcasing_*.nc` artifact for the W7-X target
+2. Fixed-state residual / label wiring equivalent to the Boozer branch for
+   `qfm_surface`.
+3. Checked-in cached `vcasing_*.nc` artifact for the W7-X target
    equilibrium. Unblocks `finite_beta_target_flux` → `partial`.
-5. `OrientedCurveXYZFourier.to_spec()` plus an immutable spec contract.
+4. `OrientedCurveXYZFourier.to_spec()` plus an immutable spec contract.
    Unblocks `position_orientation_flux_support_gate` → `partial`.
-6. Native JAX implementations of `CurveLength`, `CurveCurveDistance`,
+5. Native JAX implementations of `CurveLength`, `CurveCurveDistance`,
    `CurveSurfaceDistance`, `LpCurveCurvature`, `MeanSquaredCurvature`,
    `LinkingNumber`, and `QuadraticPenalty`. Each implementation flips
    the corresponding entry of `unsupported_components` to a native
    comparison line. Largest cross-fixture lever for moving
-   `full_stage2_composite` and `planar_stage2_composite` to `pass`.
+   `full_stage2_composite`, `planar_stage2_composite`, and
+   `boozer_qa_wrappers` to `pass`.

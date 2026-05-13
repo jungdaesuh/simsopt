@@ -62,6 +62,13 @@ class FixtureSpec:
     classification: str
     classification_reason: str = ""
     inputs: Mapping[str, Any] = field(default_factory=dict)
+    # ``fixture_kind`` selects the comparison surface in the harness.
+    # ``"biot_savart_squared_flux"`` (default) covers field B, B·n, surface
+    # geometry, and SquaredFlux objective + gradient.
+    # ``"boozer_surface_fixed_state"`` selects fixed-state Boozer residual +
+    # labels (Area/Volume/ToroidalFlux) at an unsolved (iota, G, surface)
+    # triplet — no inner solve is run.
+    fixture_kind: str = "biot_savart_squared_flux"
 
 
 @dataclass(frozen=True)
@@ -1030,6 +1037,637 @@ def _build_cws_saved_local_flux(*, nfp: int):
 
 
 # ---------------------------------------------------------------------------
+# Phase 6 — P2 Boozer surface fixed-state residual + label fixture
+#
+# Source: examples/2_Intermediate/boozer.py
+#
+# Fixed-state parity: build the NCSX initial guess (tube-around-axis surface,
+# iota=-0.4, G0 from coil currents) and compare CPU
+# ``boozer_surface_residual`` against the JAX ``boozer_residual_vector``
+# kernel at the same unsolved state. The CPU and JAX sides also compute
+# Area/Volume/ToroidalFlux labels independently for parity. No BFGS/LM solve
+# is executed — the comparison is purely on the pre-solve residual and
+# label values at a fixed (surface, iota, G) triplet.
+
+
+def _build_boozer_surface_basic():
+    """Build the NCSX boozer fixed-state fixture (residual + labels).
+
+    Mirrors the opening setup of ``examples/2_Intermediate/boozer.py``: the
+    NCSX configuration is loaded via ``simsopt.configs.get_data('ncsx')``,
+    a ``SurfaceXYZTensorFourier`` is fit to the magnetic axis with minor
+    radius 0.10, ``iota=-0.4`` and ``G0`` from the coil current sum are
+    used as the residual decision variables. The CPU oracle computes
+    ``boozer_surface_residual`` with ``weight_inv_modB=False`` (the
+    example default); the JAX side computes ``boozer_residual_vector`` on
+    the same surface tangents using ``BiotSavartJAX`` for the magnetic
+    field. Both sides also compute Area, Volume, and ToroidalFlux labels
+    on independent coil trees so neither lane mutates the other's
+    Optimizable nodes.
+    """
+    import time
+
+    start_setup = time.perf_counter()
+    field_mod, _objectives_mod, geo_mod = _cpu_imports()
+    BiotSavart = field_mod.BiotSavart
+    SurfaceXYZTensorFourier = geo_mod.SurfaceXYZTensorFourier
+    Area = geo_mod.Area
+    Volume = geo_mod.Volume
+    ToroidalFlux = geo_mod.ToroidalFlux
+    boozer_surface_residual = geo_mod.boozer_surface_residual
+
+    from simsopt.configs import get_data
+
+    # CPU lane data
+    base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
+    bs_tf_cpu = BiotSavart(bs.coils)
+    current_sum = nfp * sum(abs(c.get_value()) for c in base_currents)
+    G0 = 2.0 * np.pi * current_sum * (4.0 * np.pi * 1e-7 / (2.0 * np.pi))
+    iota_value = -0.4
+
+    mpol = 5
+    ntor = 5
+    stellsym = True
+    phis = np.linspace(0.0, 1.0 / nfp, 2 * ntor + 1, endpoint=False)
+    thetas = np.linspace(0.0, 1.0, 2 * mpol + 1, endpoint=False)
+    surface_cpu = SurfaceXYZTensorFourier(
+        mpol=mpol,
+        ntor=ntor,
+        stellsym=stellsym,
+        nfp=nfp,
+        quadpoints_phi=phis,
+        quadpoints_theta=thetas,
+    )
+    surface_cpu.fit_to_curve(ma, 0.10, flip_theta=True)
+
+    surface_gamma_cpu = np.asarray(surface_cpu.gamma(), dtype=np.float64)
+    surface_unit_normal_cpu = np.asarray(surface_cpu.unitnormal(), dtype=np.float64)
+    nphi_cpu, ntheta_cpu = surface_gamma_cpu.shape[:2]
+
+    # CPU field at surface points (used for B parity + B·n bookkeeping).
+    bs.set_points(surface_gamma_cpu.reshape(-1, 3))
+    field_B_cpu = np.asarray(bs.B(), dtype=np.float64).reshape(nphi_cpu, ntheta_cpu, 3)
+    Bdotn_cpu = np.sum(field_B_cpu * surface_unit_normal_cpu, axis=2)
+
+    # CPU residual + labels.
+    r_cpu = np.asarray(
+        boozer_surface_residual(
+            surface_cpu,
+            iota_value,
+            G0,
+            bs,
+            derivatives=0,
+            weight_inv_modB=False,
+        )[0],
+        dtype=np.float64,
+    )
+    area_cpu_value = float(Area(surface_cpu).J())
+    volume_cpu_value = float(Volume(surface_cpu).J())
+    toroidal_flux_cpu_value = float(ToroidalFlux(surface_cpu, bs_tf_cpu).J())
+    setup_seconds_cpu = time.perf_counter() - start_setup
+
+    cpu_components = {
+        "boozer_residual_norm": float(np.linalg.norm(r_cpu)),
+        "area": area_cpu_value,
+        "volume": volume_cpu_value,
+        "toroidal_flux": toroidal_flux_cpu_value,
+        "iota": float(iota_value),
+        "G": float(G0),
+    }
+    cpu_dof_names = tuple(surface_cpu.dof_names)
+    cpu_free_mask = np.asarray(surface_cpu.local_dofs_free_status, dtype=bool)
+    cpu_active_dofs = np.asarray(surface_cpu.x, dtype=np.float64)
+    cpu_raw_arrays = {
+        "field_B": field_B_cpu,
+        "surface_gamma": surface_gamma_cpu,
+        "surface_unit_normal": surface_unit_normal_cpu,
+        "Bdotn": Bdotn_cpu,
+        "boozer_residual": r_cpu,
+        "area": np.array([area_cpu_value], dtype=np.float64),
+        "volume": np.array([volume_cpu_value], dtype=np.float64),
+        "toroidal_flux": np.array([toroidal_flux_cpu_value], dtype=np.float64),
+    }
+
+    cpu_lane = LaneArtifact(
+        lane="cpu_cpp",
+        objective_total=None,
+        objective_native_subtotal=None,
+        components=_flatten_components(cpu_components),
+        gradient=None,
+        gradient_norm=None,
+        active_dof_names=cpu_dof_names,
+        active_dof_hash=_hash_array(cpu_active_dofs),
+        fixed_free_mask_hash=_hash_mask(cpu_free_mask),
+        native_curve_spec_hashes=(),
+        surface_point_hash=_hash_array(surface_gamma_cpu),
+        unit_normal_hash=_hash_array(surface_unit_normal_cpu),
+        field_B_hash=_hash_array(field_B_cpu),
+        field_B_max=float(np.max(np.abs(field_B_cpu))),
+        field_B_mean=float(np.mean(np.abs(field_B_cpu))),
+        Bdotn_array_hash=_hash_array(Bdotn_cpu),
+        Bdotn_max=float(np.max(np.abs(Bdotn_cpu))),
+        Bdotn_mean=float(np.mean(np.abs(Bdotn_cpu))),
+        raw_arrays=cpu_raw_arrays,
+        timing={"setup_s": float(setup_seconds_cpu), "execute_s": 0.0},
+    )
+
+    # JAX lane: rebuild NCSX independently so coil DOF trees stay disjoint.
+    start_jax_setup = time.perf_counter()
+    bs_jax_mod, _flux_jax_mod = _jax_imports()
+    BiotSavartJAX = bs_jax_mod.BiotSavartJAX
+    from simsopt.geo.boozer_residual_jax import boozer_residual_vector
+    from simsopt.geo.label_constraints_jax import (
+        area_jax as area_jax_fn,
+        toroidal_flux_jax as toroidal_flux_jax_fn,
+        volume_jax as volume_jax_fn,
+    )
+
+    (
+        base_curves_jax,
+        base_currents_jax,
+        ma_jax,
+        nfp_jax,
+        bs_jax_field,
+    ) = get_data("ncsx")
+    current_sum_jax = nfp_jax * sum(abs(c.get_value()) for c in base_currents_jax)
+    G0_jax = 2.0 * np.pi * current_sum_jax * (4.0 * np.pi * 1e-7 / (2.0 * np.pi))
+
+    # The JAX surface DOFs must match the CPU lane positionally (otherwise
+    # the boozer_residual comparison is meaningless). Fit_to_curve is
+    # deterministic for the same magnetic axis + radius, so the JAX-side
+    # surface comes out byte-equal to the CPU side.
+    surface_jax = SurfaceXYZTensorFourier(
+        mpol=mpol,
+        ntor=ntor,
+        stellsym=stellsym,
+        nfp=nfp_jax,
+        quadpoints_phi=phis,
+        quadpoints_theta=thetas,
+    )
+    surface_jax.fit_to_curve(ma_jax, 0.10, flip_theta=True)
+    surface_gamma_jax = np.asarray(surface_jax.gamma(), dtype=np.float64)
+    surface_xphi_jax = np.asarray(surface_jax.gammadash1(), dtype=np.float64)
+    surface_xtheta_jax = np.asarray(surface_jax.gammadash2(), dtype=np.float64)
+    surface_normal_jax = np.asarray(surface_jax.normal(), dtype=np.float64)
+    surface_unit_normal_jax = np.asarray(surface_jax.unitnormal(), dtype=np.float64)
+    nphi_jax, ntheta_jax = surface_gamma_jax.shape[:2]
+
+    # Verify native-spec contract on the JAX coils before building B/A.
+    coils_jax_independent = list(bs_jax_field.coils)
+    native_spec_hashes = _verify_jax_native_spec_contract(coils_jax_independent)
+
+    # JAX B at the surface points (raveled).
+    bs_jax_B = BiotSavartJAX(coils_jax_independent)
+    bs_jax_B.set_points(surface_gamma_jax.reshape(-1, 3))
+    field_B_jax_flat = np.asarray(bs_jax_B.B(), dtype=np.float64)
+    field_B_jax = field_B_jax_flat.reshape(nphi_jax, ntheta_jax, 3)
+
+    # JAX residual.
+    r_jax = np.asarray(
+        boozer_residual_vector(
+            G0_jax,
+            iota_value,
+            field_B_jax,
+            surface_xphi_jax,
+            surface_xtheta_jax,
+            weight_inv_modB=False,
+        ),
+        dtype=np.float64,
+    )
+
+    # JAX labels: Area, Volume use unnormalized surface normal; ToroidalFlux
+    # uses A at the idx=0 phi slice (matching the CPU ToroidalFlux default).
+    area_jax_value = float(area_jax_fn(surface_normal_jax))
+    volume_jax_value = float(volume_jax_fn(surface_gamma_jax, surface_normal_jax))
+
+    # Build a *second* independent BiotSavartJAX for ToroidalFlux to mirror
+    # the CPU side's separate ``bs_tf`` (also a separate BiotSavart in the
+    # example). The CPU ToroidalFlux uses the idx=0 phi slice of gamma.
+    bs_jax_tf = BiotSavartJAX(list(bs_jax_field.coils))
+    tf_gamma_slice = surface_gamma_jax[0]
+    bs_jax_tf.set_points(np.ascontiguousarray(tf_gamma_slice))
+    A_jax_slice = np.asarray(bs_jax_tf.A(), dtype=np.float64)
+    toroidal_flux_jax_value = float(
+        toroidal_flux_jax_fn(
+            A_jax_slice,
+            surface_xtheta_jax[0],
+            ntheta_jax,
+        )
+    )
+    Bdotn_jax = np.sum(field_B_jax * surface_unit_normal_jax, axis=2)
+
+    setup_seconds_jax = time.perf_counter() - start_jax_setup
+
+    jax_components = {
+        "boozer_residual_norm": float(np.linalg.norm(r_jax)),
+        "area": area_jax_value,
+        "volume": volume_jax_value,
+        "toroidal_flux": toroidal_flux_jax_value,
+        "iota": float(iota_value),
+        "G": float(G0_jax),
+    }
+    jax_dof_names = tuple(surface_jax.dof_names)
+    jax_free_mask = np.asarray(surface_jax.local_dofs_free_status, dtype=bool)
+    jax_active_dofs = np.asarray(surface_jax.x, dtype=np.float64)
+    jax_raw_arrays = {
+        "field_B": field_B_jax,
+        "surface_gamma": surface_gamma_jax,
+        "surface_unit_normal": surface_unit_normal_jax,
+        "Bdotn": Bdotn_jax,
+        "boozer_residual": r_jax,
+        "area": np.array([area_jax_value], dtype=np.float64),
+        "volume": np.array([volume_jax_value], dtype=np.float64),
+        "toroidal_flux": np.array([toroidal_flux_jax_value], dtype=np.float64),
+    }
+
+    jax_lane = LaneArtifact(
+        lane="jax_cpu",
+        objective_total=None,
+        objective_native_subtotal=None,
+        components=_flatten_components(jax_components),
+        gradient=None,
+        gradient_norm=None,
+        active_dof_names=jax_dof_names,
+        active_dof_hash=_hash_array(jax_active_dofs),
+        fixed_free_mask_hash=_hash_mask(jax_free_mask),
+        native_curve_spec_hashes=native_spec_hashes,
+        surface_point_hash=_hash_array(surface_gamma_jax),
+        unit_normal_hash=_hash_array(surface_unit_normal_jax),
+        field_B_hash=_hash_array(field_B_jax),
+        field_B_max=float(np.max(np.abs(field_B_jax))),
+        field_B_mean=float(np.mean(np.abs(field_B_jax))),
+        Bdotn_array_hash=_hash_array(Bdotn_jax),
+        Bdotn_max=float(np.max(np.abs(Bdotn_jax))),
+        Bdotn_mean=float(np.mean(np.abs(Bdotn_jax))),
+        raw_arrays=jax_raw_arrays,
+        timing={
+            "setup_s": float(setup_seconds_jax),
+            "execute_s": 0.0,
+        },
+    )
+
+    # No gradient-based perturbation diagnostic for this fixture: the
+    # comparison is a fixed-state residual+label snapshot, so we leave
+    # cpu_native_subproblem_J/jax_native_subproblem_J unset.
+    return FixtureBuild(
+        spec=BOOZER_SURFACE_BASIC_SPEC,
+        cpu_lane=cpu_lane,
+        jax_lane=jax_lane,
+        unsupported_components=(),
+        cpu_native_subproblem_J=None,
+        jax_native_subproblem_J=None,
+        x0=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — P2 Boozer QA scalar fixed-solved-state fixture
+#
+# Source: examples/2_Intermediate/boozerQA.py
+#
+# Fixed-solved-state parity: solve the Boozer surface once on the CPU side
+# via ``BoozerSurface.solve_residual_equation_exactly_newton`` (the same
+# Newton solve the upstream example uses), then evaluate the QA scalar values
+# at that solved (surface, iota, G) triplet on both CPU and JAX lanes. We do
+# not solve a second time on the JAX side because the plan instructions
+# explicitly require keeping solver-path differences separate from value
+# parity, and because public ``BoozerSurfaceJAX`` wrapper/adjoint parity
+# belongs to the dedicated BoozerSurfaceJAX tests, not this copied-state
+# fixture.
+#
+# The CPU lane evaluates the upstream wrappers (``Iotas``, ``MajorRadius``,
+# ``NonQuasiSymmetricRatio``, and ``sum(CurveLength)``) on the solved
+# BoozerSurface. The JAX lane recomputes the corresponding scalars as pure
+# JAX functions:
+#
+#   * ``Iotas``: returns the solved iota directly. JAX side reads the same
+#     scalar; the comparison gates that both lanes report the same iota.
+#   * ``MajorRadius``: evaluated through
+#     ``surface_major_radius_jax_from_dofs`` on the surface spec built from
+#     the solved DOFs.
+#   * ``NonQuasiSymmetricRatio``: evaluated through
+#     ``_qs_ratio_pure`` on the auxiliary sDIM=20 quadrature grid using a
+#     ``BiotSavartJAX`` ``coil_set_spec``.
+#   * Length penalty (``sum(CurveLength)``): no native JAX path today;
+#     classified in ``unsupported_components``.
+#
+# Verdict is therefore ``"partial"`` (length penalty unsupported) once all
+# native comparisons pass. This fixture does not claim public
+# ``BoozerSurfaceJAX`` wrapper or adjoint parity.
+
+
+def _build_boozer_qa_wrappers():
+    """Build the NCSX BoozerQA fixed-solved-state scalar fixture.
+
+    Mirrors the opening setup of ``examples/2_Intermediate/boozerQA.py``:
+    the NCSX configuration is loaded via ``simsopt.configs.get_data``,
+    a ``SurfaceXYZTensorFourier`` is fit to the magnetic axis with minor
+    radius 0.10, the surface is solved with
+    ``BoozerSurface.solve_residual_equation_exactly_newton`` (Newton tol
+    ``1e-13``, ``maxiter=20``, initial ``iota=-0.406``), and the QA
+    upstream CPU wrappers are then evaluated at the solved state and compared
+    to JAX scalar helpers over the copied solved-state DOFs.
+
+    Resolution is held at ``mpol=ntor=5`` to keep the fixture cheap
+    (Newton converges in ~7 iterations, total fixture build time well
+    under one second on CPU). The upstream example uses ``mpol=ntor=6``;
+    the lower resolution is justified here because the parity claim is on
+    same-state scalar values derived from the converged state and not on
+    solver path behavior.
+    """
+    import time
+
+    start_setup = time.perf_counter()
+    field_mod, _objectives_mod, geo_mod = _cpu_imports()
+    BiotSavart = field_mod.BiotSavart
+    SurfaceXYZTensorFourier = geo_mod.SurfaceXYZTensorFourier
+    BoozerSurface = geo_mod.BoozerSurface
+    Volume = geo_mod.Volume
+    MajorRadius = geo_mod.MajorRadius
+    CurveLength = geo_mod.CurveLength
+    NonQuasiSymmetricRatio = geo_mod.NonQuasiSymmetricRatio
+    Iotas = geo_mod.Iotas
+
+    from simsopt.configs import get_data
+
+    # CPU lane: load NCSX, fit surface, solve via exact Newton, evaluate
+    # the four upstream quantities (Iotas, MajorRadius,
+    # NonQuasiSymmetricRatio, sum(CurveLength)) at the solved state.
+    base_curves, base_currents, ma, nfp, bs = get_data("ncsx")
+    current_sum = nfp * sum(abs(c.get_value()) for c in base_currents)
+    G0 = 2.0 * np.pi * current_sum * (4.0 * np.pi * 1e-7 / (2.0 * np.pi))
+    iota_initial = -0.406
+
+    mpol = 5
+    ntor = 5
+    stellsym = True
+    minor_radius = 0.10
+    sDIM = 20  # NonQuasiSymmetricRatio auxiliary-surface half-resolution.
+    phis = np.linspace(0.0, 1.0 / nfp, 2 * ntor + 1, endpoint=False)
+    thetas = np.linspace(0.0, 1.0, 2 * mpol + 1, endpoint=False)
+    surface_cpu = SurfaceXYZTensorFourier(
+        mpol=mpol,
+        ntor=ntor,
+        stellsym=stellsym,
+        nfp=nfp,
+        quadpoints_phi=phis,
+        quadpoints_theta=thetas,
+    )
+    surface_cpu.fit_to_curve(ma, minor_radius, flip_theta=True)
+
+    vol_cpu = Volume(surface_cpu)
+    vol_target_cpu = vol_cpu.J()
+    boozer_surface_cpu = BoozerSurface(bs, surface_cpu, vol_cpu, vol_target_cpu)
+    res_cpu = boozer_surface_cpu.solve_residual_equation_exactly_newton(
+        tol=1e-13,
+        maxiter=20,
+        iota=iota_initial,
+        G=G0,
+    )
+    if not res_cpu["success"]:
+        raise FixtureNotSupportedError(
+            "Phase 6 boozerQA wrappers fixture: CPU exact Newton solve did "
+            f"not converge (iter={res_cpu.get('iter')}, "
+            f"residual_norm="
+            f"{float(np.linalg.norm(np.asarray(res_cpu.get('residual', []), dtype=np.float64))):.3e}"
+            "). The fixture builder requires a converged Newton state."
+        )
+    solved_iota = float(res_cpu["iota"])
+    solved_G = float(res_cpu["G"])
+
+    # Surface geometry at the solved state (for hashing and arrays).
+    surface_gamma_cpu = np.asarray(surface_cpu.gamma(), dtype=np.float64)
+    surface_unit_normal_cpu = np.asarray(surface_cpu.unitnormal(), dtype=np.float64)
+    nphi_cpu, ntheta_cpu = surface_gamma_cpu.shape[:2]
+
+    bs.set_points(surface_gamma_cpu.reshape(-1, 3))
+    field_B_cpu = np.asarray(bs.B(), dtype=np.float64).reshape(nphi_cpu, ntheta_cpu, 3)
+    Bdotn_cpu = np.sum(field_B_cpu * surface_unit_normal_cpu, axis=2)
+
+    # Upstream CPU wrappers at the solved state. Iotas.J() returns the
+    # solved iota; MajorRadius.J() returns the surface major radius;
+    # NonQuasiSymmetricRatio uses a fresh BiotSavart (matches the upstream
+    # boozerQA.py pattern of ``bs_nonQS = BiotSavart(bs.coils)``).
+    iotas_cpu_value = float(Iotas(boozer_surface_cpu).J())
+    major_radius_cpu_value = float(MajorRadius(boozer_surface_cpu).J())
+    bs_nonQS_cpu = BiotSavart(bs.coils)
+    nqs_cpu_value = float(
+        NonQuasiSymmetricRatio(boozer_surface_cpu, bs_nonQS_cpu, sDIM=sDIM).J()
+    )
+    length_sum_cpu_value = float(sum(CurveLength(c).J() for c in base_curves))
+
+    setup_seconds_cpu = time.perf_counter() - start_setup
+
+    cpu_components = {
+        "iota": iotas_cpu_value,
+        "major_radius": major_radius_cpu_value,
+        "nq_symmetric_ratio": nqs_cpu_value,
+        "G": solved_G,
+        # Length penalty is CPU-only; it is included in the CPU components
+        # for traceability but excluded from native cross-lane comparison
+        # via the unsupported_components list returned below.
+        "sum_CurveLength": length_sum_cpu_value,
+    }
+    cpu_dof_names = tuple(surface_cpu.dof_names)
+    cpu_free_mask = np.asarray(surface_cpu.local_dofs_free_status, dtype=bool)
+    cpu_active_dofs = np.asarray(surface_cpu.x, dtype=np.float64)
+    cpu_raw_arrays = {
+        "field_B": field_B_cpu,
+        "surface_gamma": surface_gamma_cpu,
+        "surface_unit_normal": surface_unit_normal_cpu,
+        "Bdotn": Bdotn_cpu,
+        "iota": np.array([iotas_cpu_value], dtype=np.float64),
+        "major_radius": np.array([major_radius_cpu_value], dtype=np.float64),
+        "nq_symmetric_ratio": np.array([nqs_cpu_value], dtype=np.float64),
+    }
+
+    cpu_lane = LaneArtifact(
+        lane="cpu_cpp",
+        objective_total=None,
+        objective_native_subtotal=None,
+        components=_flatten_components(cpu_components),
+        gradient=None,
+        gradient_norm=None,
+        active_dof_names=cpu_dof_names,
+        active_dof_hash=_hash_array(cpu_active_dofs),
+        fixed_free_mask_hash=_hash_mask(cpu_free_mask),
+        native_curve_spec_hashes=(),
+        surface_point_hash=_hash_array(surface_gamma_cpu),
+        unit_normal_hash=_hash_array(surface_unit_normal_cpu),
+        field_B_hash=_hash_array(field_B_cpu),
+        field_B_max=float(np.max(np.abs(field_B_cpu))),
+        field_B_mean=float(np.mean(np.abs(field_B_cpu))),
+        Bdotn_array_hash=_hash_array(Bdotn_cpu),
+        Bdotn_max=float(np.max(np.abs(Bdotn_cpu))),
+        Bdotn_mean=float(np.mean(np.abs(Bdotn_cpu))),
+        raw_arrays=cpu_raw_arrays,
+        timing={"setup_s": float(setup_seconds_cpu), "execute_s": 0.0},
+    )
+
+    # JAX lane: rebuild NCSX independently so the JAX coil tree is disjoint
+    # from the CPU one; copy the solved surface DOFs over from the CPU
+    # lane so both lanes evaluate the wrappers at byte-equal surface state.
+    start_jax_setup = time.perf_counter()
+    bs_jax_mod, _flux_jax_mod = _jax_imports()
+    BiotSavartJAX = bs_jax_mod.BiotSavartJAX
+    from simsopt.geo.boozersurface_jax import _generic_surface_scatter_operator
+    from simsopt.geo.surfaceobjectives_jax import (
+        _qs_ratio_pure,
+        surface_major_radius_jax_from_dofs,
+    )
+
+    (
+        base_curves_jax,
+        base_currents_jax,
+        ma_jax,
+        nfp_jax,
+        bs_jax_field,
+    ) = get_data("ncsx")
+    # Construct the JAX-side surface from byte-equal DOFs so the wrappers
+    # see the same converged state. ``set_dofs`` is the public mutation API
+    # for SurfaceXYZTensorFourier; the surface_spec() snapshot afterwards
+    # is what the pure-JAX scalar helpers consume.
+    surface_jax = SurfaceXYZTensorFourier(
+        mpol=mpol,
+        ntor=ntor,
+        stellsym=stellsym,
+        nfp=nfp_jax,
+        quadpoints_phi=phis,
+        quadpoints_theta=thetas,
+    )
+    surface_jax.set_dofs(np.asarray(surface_cpu.get_dofs(), dtype=np.float64))
+    surface_gamma_jax = np.asarray(surface_jax.gamma(), dtype=np.float64)
+    surface_unit_normal_jax = np.asarray(surface_jax.unitnormal(), dtype=np.float64)
+    nphi_jax, ntheta_jax = surface_gamma_jax.shape[:2]
+
+    coils_jax_independent = list(bs_jax_field.coils)
+    native_spec_hashes = _verify_jax_native_spec_contract(coils_jax_independent)
+
+    # Native JAX B at the surface points (raveled). Used only for B parity
+    # bookkeeping; the wrapper values do not require this B array directly,
+    # but it gates that BiotSavartJAX construction succeeded and produces a
+    # finite field over the surface.
+    bs_jax_B = BiotSavartJAX(coils_jax_independent)
+    bs_jax_B.set_points(surface_gamma_jax.reshape(-1, 3))
+    field_B_jax_flat = np.asarray(bs_jax_B.B(), dtype=np.float64)
+    field_B_jax = field_B_jax_flat.reshape(nphi_jax, ntheta_jax, 3)
+    Bdotn_jax = np.sum(field_B_jax * surface_unit_normal_jax, axis=2)
+
+    # Iotas scalar: equal to the solved iota. This comparison gates that both
+    # lanes agree on the scalar state reported by the CPU wrapper extraction.
+    # It is intentionally a cross-lane sanity check rather than a public
+    # BoozerSurfaceJAX wrapper or adjoint check.
+    iotas_jax_value = float(solved_iota)
+
+    # MajorRadius scalar: pure JAX over the surface spec built from the
+    # solved DOFs.
+    surface_spec_jax = surface_jax.surface_spec()
+    sdofs_jax = np.asarray(surface_jax.get_dofs(), dtype=np.float64)
+    major_radius_jax_value = float(
+        surface_major_radius_jax_from_dofs(surface_spec_jax, sdofs_jax)
+    )
+
+    # NonQuasiSymmetricRatio scalar: pure JAX through
+    # ``_qs_ratio_pure`` on an auxiliary sDIM=20 quadrature grid (matching
+    # the upstream NonQuasiSymmetricRatio default and the CPU oracle
+    # configuration above). The auxiliary grid is independent of the
+    # solved surface quadrature grid.
+    aux_phi = np.linspace(0.0, 1.0 / nfp_jax, 2 * sDIM, endpoint=False)
+    aux_theta = np.linspace(0.0, 1.0, 2 * sDIM, endpoint=False)
+    bs_jax_nonQS = BiotSavartJAX(list(bs_jax_field.coils))
+    coil_set_spec_nqs = bs_jax_nonQS.coil_set_spec()
+    # ``_qs_ratio_pure`` requires the same surface_kind / scatter_indices
+    # contract that BoozerSurfaceJAX would set up internally: for stellsym
+    # ``xyztensorfourier`` surfaces, scatter indices are the generic
+    # scatter operator built from ``stellsym_scatter_indices`` rather than
+    # the raw integer mask used for RZFourier surfaces.
+    scatter_indices = (
+        _generic_surface_scatter_operator(mpol, ntor) if stellsym else None
+    )
+    nqs_jax_value = float(
+        _qs_ratio_pure(
+            sdofs_jax,
+            coil_set_spec_nqs,
+            quadpoints_phi=aux_phi,
+            quadpoints_theta=aux_theta,
+            mpol=mpol,
+            ntor=ntor,
+            nfp=nfp_jax,
+            stellsym=stellsym,
+            scatter_indices=scatter_indices,
+            surface_kind="xyztensorfourier",
+            axis=0,
+        )
+    )
+
+    setup_seconds_jax = time.perf_counter() - start_jax_setup
+
+    jax_components = {
+        "iota": iotas_jax_value,
+        "major_radius": major_radius_jax_value,
+        "nq_symmetric_ratio": nqs_jax_value,
+        "G": solved_G,
+    }
+    jax_dof_names = tuple(surface_jax.dof_names)
+    jax_free_mask = np.asarray(surface_jax.local_dofs_free_status, dtype=bool)
+    jax_active_dofs = np.asarray(surface_jax.x, dtype=np.float64)
+    jax_raw_arrays = {
+        "field_B": field_B_jax,
+        "surface_gamma": surface_gamma_jax,
+        "surface_unit_normal": surface_unit_normal_jax,
+        "Bdotn": Bdotn_jax,
+        "iota": np.array([iotas_jax_value], dtype=np.float64),
+        "major_radius": np.array([major_radius_jax_value], dtype=np.float64),
+        "nq_symmetric_ratio": np.array([nqs_jax_value], dtype=np.float64),
+    }
+
+    jax_lane = LaneArtifact(
+        lane="jax_cpu",
+        objective_total=None,
+        objective_native_subtotal=None,
+        components=_flatten_components(jax_components),
+        gradient=None,
+        gradient_norm=None,
+        active_dof_names=jax_dof_names,
+        active_dof_hash=_hash_array(jax_active_dofs),
+        fixed_free_mask_hash=_hash_mask(jax_free_mask),
+        native_curve_spec_hashes=native_spec_hashes,
+        surface_point_hash=_hash_array(surface_gamma_jax),
+        unit_normal_hash=_hash_array(surface_unit_normal_jax),
+        field_B_hash=_hash_array(field_B_jax),
+        field_B_max=float(np.max(np.abs(field_B_jax))),
+        field_B_mean=float(np.mean(np.abs(field_B_jax))),
+        Bdotn_array_hash=_hash_array(Bdotn_jax),
+        Bdotn_max=float(np.max(np.abs(Bdotn_jax))),
+        Bdotn_mean=float(np.mean(np.abs(Bdotn_jax))),
+        raw_arrays=jax_raw_arrays,
+        timing={
+            "setup_s": float(setup_seconds_jax),
+            "execute_s": 0.0,
+        },
+    )
+
+    # The length-penalty wrapper (``sum(CurveLength)`` in upstream
+    # ``boozerQA.py``) has no pure-JAX implementation today: CurveLength
+    # is a CPU-only Optimizable and the QuadraticPenalty around it
+    # depends on the same CPU-only objective. The plan §"Math, Physics,
+    # And Computation Gates" requires this term to be listed in
+    # unsupported_components rather than evaluated through a CPU
+    # substitute on the JAX side, so the verdict will be ``"partial"``
+    # once the three native comparisons (iota, major_radius,
+    # nq_symmetric_ratio) pass.
+    return FixtureBuild(
+        spec=BOOZER_QA_WRAPPERS_SPEC,
+        cpu_lane=cpu_lane,
+        jax_lane=jax_lane,
+        unsupported_components=("sum_CurveLength",),
+        cpu_native_subproblem_J=None,
+        jax_native_subproblem_J=None,
+        x0=None,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Unsupported / support-gate classification builders
 
 
@@ -1483,35 +2121,73 @@ POSITION_ORIENTATION_FLUX_SUPPORT_GATE_SPEC = FixtureSpec(
 BOOZER_SURFACE_BASIC_SPEC = FixtureSpec(
     fixture_id="boozer_surface_basic",
     source_example="examples/2_Intermediate/boozer.py",
-    classification=UNSUPPORTED_NATIVE_JAX,
+    classification=SUPPORTED,
     classification_reason=(
-        "Native JAX coverage for boozer_surface_residual lives in "
-        "src/simsopt/geo/boozer_residual_jax.py (M3) and is exercised by "
-        "tests/geo/test_boozer_residual_jax.py and "
-        "tests/geo/test_boozer_derivatives_jax.py. The harness lane "
-        "shape (BiotSavart B + SquaredFlux value/gradient) does not yet "
-        "carry boozer residual vectors, iota/G inputs, or label values, "
-        "so wiring this fixture into the per-fixture parity report is a "
-        "follow-up plan that extends LaneArtifact with optional Boozer "
-        "residual fields and a corresponding comparison branch."
+        "Fixed-state Boozer residual parity at the NCSX initial guess "
+        "(tube-around-axis surface, iota=-0.4, G0 from coil currents): "
+        "CPU ``boozer_surface_residual`` (weight_inv_modB=False) versus "
+        "JAX ``boozer_residual_vector`` via ``BiotSavartJAX``. The label "
+        "comparison covers Area and Volume against "
+        "``simsopt.geo.label_constraints_jax.{area_jax,volume_jax}`` and "
+        "ToroidalFlux against ``toroidal_flux_jax`` consuming the JAX "
+        "vector potential A(idx=0 phi slice). No BFGS/LM solve is run; "
+        "the comparison is purely on the pre-solve residual vector and "
+        "the three label scalars at a fixed (surface, iota, G) triplet."
     ),
+    fixture_kind="boozer_surface_fixed_state",
+    inputs={
+        "config_name": "ncsx",
+        "mpol": 5,
+        "ntor": 5,
+        "stellsym": True,
+        "minor_radius": 0.10,
+        "fit_to_curve_flip_theta": True,
+        "iota_value": -0.4,
+        "weight_inv_modB": False,
+        "G0_source": "2π * (nfp * Σ|I_k|) * μ0/(2π)",
+        "labels": ("area", "volume", "toroidal_flux"),
+    },
 )
 
 
 BOOZER_QA_WRAPPERS_SPEC = FixtureSpec(
     fixture_id="boozer_qa_wrappers",
     source_example="examples/2_Intermediate/boozerQA.py",
-    classification=UNSUPPORTED_NATIVE_JAX,
+    classification=SUPPORTED,
     classification_reason=(
-        "BoozerSurfaceJAX, IotasJAX, MajorRadiusJAX, and "
-        "NonQuasiSymmetricRatioJAX exist in "
-        "src/simsopt/geo/{boozersurface_jax,surfaceobjectives_jax}.py and "
-        "have parity coverage in "
-        "tests/integration/test_single_stage_jax.py. Wiring those "
-        "wrappers into a fixed-solved-state per-fixture report is a "
-        "follow-up plan; the harness currently does not capture solved "
-        "Boozer surfaces (iota/G/PLU runtime state) as fixture artifacts."
+        "Fixed-solved-state QA scalar parity at the NCSX boozerQA "
+        "configuration (NCSX coils, SurfaceXYZTensorFourier at mpol=ntor=5 "
+        "fit to magnetic axis with minor radius 0.10, surface solved via "
+        "BoozerSurface.solve_residual_equation_exactly_newton at tol=1e-13 "
+        "starting from iota=-0.406 and G0=2π·(nfp·Σ|I_k|)·μ0/(2π)). At the "
+        "converged state the CPU lane evaluates upstream wrappers Iotas, "
+        "MajorRadius, and NonQuasiSymmetricRatio (auxiliary surface "
+        "sDIM=20), and the JAX lane recomputes the corresponding scalar "
+        "values from the solved iota plus pure-JAX helpers "
+        "(surface_major_radius_jax_from_dofs, _qs_ratio_pure) on a fresh "
+        "BiotSavartJAX coil_set_spec. This fixture does not claim public "
+        "BoozerSurfaceJAX wrapper or adjoint parity. The CPU-side length "
+        "penalty sum(CurveLength) has no native JAX path today and is "
+        "listed in unsupported_components, so the verdict is 'partial'."
     ),
+    fixture_kind="boozer_qa_wrappers_solved_state",
+    inputs={
+        "config_name": "ncsx",
+        "mpol": 5,
+        "ntor": 5,
+        "stellsym": True,
+        "minor_radius": 0.10,
+        "fit_to_curve_flip_theta": True,
+        "iota_initial": -0.406,
+        "G0_source": "2π * (nfp * Σ|I_k|) * μ0/(2π)",
+        "solver": "BoozerSurface.solve_residual_equation_exactly_newton",
+        "solver_tol": 1e-13,
+        "solver_maxiter": 20,
+        "label": "volume",
+        "wrapper_set": ("iota", "major_radius", "nq_symmetric_ratio"),
+        "non_quasisymmetric_sDIM": 20,
+        "length_penalty_classification": "sum_CurveLength (unsupported)",
+    },
 )
 
 
@@ -1628,11 +2304,11 @@ FIXTURE_REGISTRY: Mapping[str, FixtureRecord] = {
     ),
     BOOZER_SURFACE_BASIC_SPEC.fixture_id: FixtureRecord(
         spec=BOOZER_SURFACE_BASIC_SPEC,
-        builder=_unsupported_classification_builder(BOOZER_SURFACE_BASIC_SPEC),
+        builder=_build_boozer_surface_basic,
     ),
     BOOZER_QA_WRAPPERS_SPEC.fixture_id: FixtureRecord(
         spec=BOOZER_QA_WRAPPERS_SPEC,
-        builder=_unsupported_classification_builder(BOOZER_QA_WRAPPERS_SPEC),
+        builder=_build_boozer_qa_wrappers,
     ),
     FINITE_BETA_TARGET_FLUX_SPEC.fixture_id: FixtureRecord(
         spec=FINITE_BETA_TARGET_FLUX_SPEC,

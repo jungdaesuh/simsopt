@@ -43,6 +43,9 @@ pytest.importorskip(
 
 from benchmarks import non_banana_example_cpp_jax_cpu_parity as harness  # noqa: E402
 from benchmarks import non_banana_example_parity_fixtures as fixtures  # noqa: E402
+from benchmarks.validation_ladder_contract import (  # noqa: E402
+    PARITY_LADDER_TOLERANCES,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -279,8 +282,6 @@ def test_cws_saved_local_flux_parity(fixture_id):
     [
         "position_orientation_flux_support_gate",
         "finitebuild_multifilament_support_gate",
-        "boozer_surface_basic",
-        "boozer_qa_wrappers",
         "finite_beta_target_flux",
         "qfm_surface",
     ],
@@ -294,6 +295,134 @@ def test_deferred_fixtures_report_unsupported(fixture_id):
     )
     assert entry["error"] is not None
     assert entry["comparisons"]["cpu_cpp_vs_jax_cpu"] == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — P2 Boozer surface fixed-state residual + label fixture parity.
+
+
+def test_boozer_surface_basic_passes_residual_and_label_parity():
+    """Fixed-state Boozer parity must pass for residual + labels.
+
+    The fixture rebuilds the NCSX initial state on both CPU and JAX lanes
+    (independent coil trees) and compares the pre-solve Boozer residual
+    vector plus Area, Volume, and ToroidalFlux labels. The verdict must
+    be 'pass' (no unsupported components) and every recorded comparison
+    must individually pass.
+    """
+    payload = harness.run_fixtures(["boozer_surface_basic"])
+    entry = _select_fixture(payload, "boozer_surface_basic")
+    assert entry["error"] is None, entry["error"]
+    assert entry["verdict"] == "pass", entry
+    assert entry["unsupported_components"] == []
+    failing = [
+        cmp
+        for cmp in entry["comparisons"]["cpu_cpp_vs_jax_cpu"]
+        if cmp["verdict"] != "pass"
+    ]
+    assert not failing, f"Boozer fixed-state comparisons failed: {failing}"
+
+    # Sanity-check that the expected quantities were exercised.
+    recorded_quantities = {
+        cmp["quantity"] for cmp in entry["comparisons"]["cpu_cpp_vs_jax_cpu"]
+    }
+    expected_quantities = {
+        "surface_gamma",
+        "surface_unit_normal",
+        "field_B",
+        "boozer_residual",
+        "area",
+        "volume",
+        "toroidal_flux",
+    }
+    assert expected_quantities <= recorded_quantities, (
+        f"Missing expected comparisons: {expected_quantities - recorded_quantities}"
+    )
+
+    # Label and residual values must agree at the direct_kernel bucket.
+    for cmp in entry["comparisons"]["cpu_cpp_vs_jax_cpu"]:
+        if cmp["quantity"] in {
+            "boozer_residual",
+            "area",
+            "volume",
+            "toroidal_flux",
+        }:
+            assert cmp["tolerance_bucket"] == "direct_kernel", cmp
+            expected_tolerance = PARITY_LADDER_TOLERANCES["direct_kernel"]
+            assert cmp["tolerance_rtol"] == expected_tolerance["rtol"], cmp
+            assert cmp["tolerance_atol"] == expected_tolerance["atol"], cmp
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — P2 BoozerQA wrappers fixed-solved-state parity.
+
+
+def test_boozer_qa_wrappers_passes_native_supported_parity():
+    """Solved-state QA wrapper parity must pass for Iotas/MajorRadius/NQS.
+
+    The fixture solves the NCSX Boozer surface on the CPU side via
+    ``BoozerSurface.solve_residual_equation_exactly_newton``, then
+    evaluates the upstream QA wrappers (Iotas, MajorRadius,
+    NonQuasiSymmetricRatio) on both lanes. The JAX side recomputes the
+    wrappers as pure JAX functions
+    (``surface_major_radius_jax_from_dofs``, ``_qs_ratio_pure``) at the
+    byte-equal solved surface DOFs and using a fresh ``BiotSavartJAX``
+    coil_set_spec.
+
+    The CPU-only length penalty ``sum(CurveLength)`` is listed as
+    unsupported, so the contractual verdict is 'partial'. Every recorded
+    native comparison must individually pass at the direct_kernel bucket.
+    """
+    payload = harness.run_fixtures(["boozer_qa_wrappers"])
+    entry = _select_fixture(payload, "boozer_qa_wrappers")
+    assert entry["error"] is None, entry["error"]
+    assert entry["verdict"] == "partial", entry
+    assert "sum_CurveLength" in entry["unsupported_components"]
+
+    failing = [
+        cmp
+        for cmp in entry["comparisons"]["cpu_cpp_vs_jax_cpu"]
+        if cmp["verdict"] != "pass"
+    ]
+    assert not failing, f"BoozerQA wrapper comparisons failed: {failing}"
+
+    # Sanity-check that the expected quantities were exercised.
+    recorded_quantities = {
+        cmp["quantity"] for cmp in entry["comparisons"]["cpu_cpp_vs_jax_cpu"]
+    }
+    expected_quantities = {
+        "surface_gamma",
+        "surface_unit_normal",
+        "field_B",
+        "iota",
+        "major_radius",
+        "nq_symmetric_ratio",
+    }
+    assert expected_quantities <= recorded_quantities, (
+        f"Missing expected comparisons: {expected_quantities - recorded_quantities}"
+    )
+
+    # The wrapper scalars must use the direct_kernel bucket: the JAX side
+    # is a pure-JAX recomputation at the same surface DOFs, with no LS
+    # solver / adjoint involved in this fixture's parity claim.
+    expected_tolerance = PARITY_LADDER_TOLERANCES["direct_kernel"]
+    for cmp in entry["comparisons"]["cpu_cpp_vs_jax_cpu"]:
+        if cmp["quantity"] in {"iota", "major_radius", "nq_symmetric_ratio"}:
+            assert cmp["tolerance_bucket"] == "direct_kernel", cmp
+            assert cmp["tolerance_rtol"] == expected_tolerance["rtol"], cmp
+            assert cmp["tolerance_atol"] == expected_tolerance["atol"], cmp
+
+    # CPU lane must record the CPU-only length penalty for traceability,
+    # even though it is excluded from cross-lane comparison.
+    cpu_components = entry["lanes"]["cpu_cpp"]["components"]
+    assert "sum_CurveLength" in cpu_components
+    assert "iota" in cpu_components
+    assert "major_radius" in cpu_components
+    assert "nq_symmetric_ratio" in cpu_components
+
+    # Native curve spec hashes must be present on the JAX lane.
+    spec_hashes = entry["native_spec_contract"]["native_curve_spec_hashes"]
+    assert spec_hashes, "JAX lane must have non-empty native curve spec hashes"
 
 
 # ---------------------------------------------------------------------------

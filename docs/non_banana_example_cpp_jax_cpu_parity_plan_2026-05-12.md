@@ -160,7 +160,7 @@ physics bug. Therefore:
 | P2 | `examples/2_Intermediate/stage_two_optimization_planar_coils.py:98` | `CurvePlanarFourier`, `BiotSavart`, `SquaredFlux`, geometry penalties, linking number | Adds planar-coil coverage where JAX-side curve support exists. | Same-state flux/geometry components; linking-number handling classified |
 | Gap gate | `examples/1_Simple/optimize_coil_position_orientation.py:54` | TF/windowpane coils, position/orientation/current DOFs, `SquaredFlux` | Useful example, but `OrientedCurveXYZFourier` currently lacks the immutable native curve spec required by `BiotSavartJAX`. | CPU fixture plus explicit unsupported-native-JAX finding until spec support exists |
 | P2 | `examples/2_Intermediate/boozer.py:42` | `BoozerSurface`, `boozer_surface_residual`, `ToroidalFlux`, `Area` | Good Boozer surface contract fixture, but solver trajectory is fragile. | Fixed-state residual/label checks before solve trajectory |
-| P2 | `examples/2_Intermediate/boozerQA.py:67` | `BoozerSurface`, `NonQuasiSymmetricRatio`, `Iotas`, `MajorRadius`, length penalty | High-value wrapper parity after base Boozer residual/state parity is stable. | Fixed solved-state wrapper outputs and adjoints |
+| P2 | `examples/2_Intermediate/boozerQA.py:67` | `BoozerSurface`, `NonQuasiSymmetricRatio`, `Iotas`, `MajorRadius`, length penalty | High-value solved-state scalar parity after base Boozer residual/state parity is stable. | Fixed solved-state scalar outputs; public wrapper/adjoint parity remains in the dedicated BoozerSurfaceJAX lanes |
 | P3 | `examples/2_Intermediate/stage_two_optimization_finite_beta.py:112` | `SquaredFlux(target=vc.B_external_normal)` | Covers nonzero target normal field, but VirtualCasing makes setup heavier. | Target-array shape/value hash, then `J`/`dJ` |
 | P3 | `examples/3_Advanced/stage_two_optimization_finitebuild.py:123` | Multifilament finite-build coils, `BiotSavart`, `SquaredFlux`, length and distance penalties | Important upstream example class, but multifilament construction needs a native-spec support check before any JAX pass claim. | CPU fixture plus native-spec support classification |
 | P3 | `examples/1_Simple/qfm.py:37` | `QfmResidual`, `QfmSurface`, volume/area/toroidal-flux labels | Useful if expanding beyond the core coil/flux/Boozer parity surface. | Fixed-state QFM residual and label checks |
@@ -299,6 +299,7 @@ not invent looser fixture-local tolerances.
 | Boozer residual at fixed state | `direct_kernel` |
 | Boozer residual Jacobian/JVP/VJP | `derivative_heavy` |
 | `IotasJAX`, `MajorRadiusJAX`, `NonQuasiSymmetricRatioJAX` wrapper values and gradients | `branch_stable_resolve` plus `fd_gradient` diagnostics unless a stricter direct wrapper lane is already available |
+| BoozerQA copied-solved-state scalar helpers | `direct_kernel`; not a public `BoozerSurfaceJAX` wrapper/adjoint lane |
 | QFM residual at fixed state | `direct_kernel` |
 | Composite objective total over mixed native/unsupported components | no pass bucket; report `partial` or `unsupported` |
 
@@ -620,30 +621,31 @@ Source examples:
 
 Todos:
 
-- [ ] Start with fixed-state residual checks before full solves:
-  - [ ] `boozer_surface_residual`
-  - [ ] iota/G inputs
-  - [ ] label value
-  - [ ] residual norm
-- [ ] Add label fixtures:
-  - [ ] `Area`
-  - [ ] `ToroidalFlux`
-  - [ ] `Volume`
+- [x] Start with fixed-state residual checks before full solves:
+  - [x] `boozer_surface_residual`
+  - [x] iota/G inputs
+  - [x] label value
+  - [x] residual norm
+- [x] Add label fixtures:
+  - [x] `Area`
+  - [x] `ToroidalFlux`
+  - [x] `Volume`
 - [ ] For `boozer.py`, compare:
-  - [ ] pre-solve residual vector
+  - [x] pre-solve residual vector
   - [ ] post-LBFGS contract fields as diagnostics only
   - [ ] post-Levenberg-Marquardt final residual envelope
-- [ ] For `boozerQA.py`, compare wrapper outputs:
-  - [ ] `NonQuasiSymmetricRatio`
-  - [ ] `Iotas`
-  - [ ] `MajorRadius`
-  - [ ] length penalty
-- [ ] Keep solver path differences separate from wrapper value/gradient parity.
+- [x] For `boozerQA.py`, compare solved-state scalar outputs:
+  - [x] `NonQuasiSymmetricRatio`
+  - [x] `Iotas`
+  - [x] `MajorRadius`
+  - [x] length penalty classified as unsupported native JAX component
+- [ ] Keep solver path differences separate from public wrapper value/gradient parity.
 
 Acceptance gate:
 
-- [ ] Boozer fixed-state residual and wrapper outputs agree where JAX wrappers
-      claim support.
+- [x] Boozer fixed-state residual and copied-solved-state scalar outputs agree
+      where the harness claims support. Public `BoozerSurfaceJAX`
+      wrapper/adjoint parity is not claimed by this fixture.
 - [ ] Solver trajectory drift is reported as integration behavior, not as the
       first oracle.
 

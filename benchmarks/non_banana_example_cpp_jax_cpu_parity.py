@@ -15,8 +15,13 @@ Implements the harness described by
   geometry penalties are listed in ``unsupported_components``.
 * Phase 5/7 — position/orientation and finite-build support gates with live
   CPU fixture probes.
-* Phase 6/7/8 — Boozer, finite-beta, and QFM entries are explicit
-  unsupported records until their non-BiotSavart lane artifacts are wired.
+* Phase 6/7/8 — the basic Boozer fixed-state fixture is wired for
+  residual/label parity, and the BoozerQA wrappers fixture is wired for
+  fixed-solved-state parity of Iotas / MajorRadius /
+  NonQuasiSymmetricRatio with the CPU-only length penalty listed as
+  unsupported; remaining finite-beta and QFM entries are explicit
+  unsupported records until their non-BiotSavart lane artifacts are
+  wired.
 
 CPU only — the benchmark refuses to run if any CUDA device is visible to
 JAX after configuration.
@@ -131,6 +136,19 @@ _TOLERANCE_BUCKETS = {
     "SquaredFlux": "ls_wrapper_gradient",
     "SquaredFluxJAX": "ls_wrapper_gradient",
     "gradient": "ls_wrapper_gradient",
+    # Phase 6 fixed-state Boozer fixture: residual vector and labels are
+    # direct kernel comparisons (no LS/gradient wrapper involved).
+    "boozer_residual": "direct_kernel",
+    "area": "direct_kernel",
+    "volume": "direct_kernel",
+    "toroidal_flux": "direct_kernel",
+    # Phase 6 boozerQA wrappers fixture: each wrapper value is compared as
+    # a direct-kernel scalar at the shared solved (surface, iota, G)
+    # state. The JAX-side recomputations are pure JAX (no LS solver, no
+    # adjoint), so direct_kernel is the appropriate bucket.
+    "iota": "direct_kernel",
+    "major_radius": "direct_kernel",
+    "nq_symmetric_ratio": "direct_kernel",
 }
 
 
@@ -303,9 +321,33 @@ def _lane_to_jsonable(lane: LaneArtifact) -> Mapping[str, Any]:
 
 
 def _supported_comparisons(build: FixtureBuild) -> Sequence[Mapping[str, Any]]:
-    """Compute comparison entries for every native-supported quantity."""
+    """Compute comparison entries for every native-supported quantity.
+
+    Branches on ``build.spec.fixture_kind``: the default
+    ``biot_savart_squared_flux`` kind compares surface geometry, field B,
+    B·n, the SquaredFlux scalar, the objective_native_subtotal, and the
+    gradient. The ``boozer_surface_fixed_state`` kind compares surface
+    geometry, field B, the Boozer residual vector, and the Area / Volume /
+    ToroidalFlux scalars; the SquaredFlux / gradient comparisons are
+    skipped because they are not part of the Boozer fixed-state contract.
+    The ``boozer_qa_wrappers_solved_state`` kind compares surface
+    geometry, field B, and the three native-supported QA scalar values
+    corresponding to the upstream wrappers (Iotas, MajorRadius,
+    NonQuasiSymmetricRatio) at the CPU-solved state. The JAX lane uses
+    the solved iota scalar plus pure-JAX helper functions over the copied
+    solved surface DOFs; it does not claim public ``BoozerSurfaceJAX``
+    wrapper or adjoint parity. Gradients and the CPU-only length penalty
+    are not compared in this fixture.
+    """
     cpu = build.cpu_lane
     jax_lane = build.jax_lane
+    fixture_kind = build.spec.fixture_kind
+
+    if fixture_kind == "boozer_surface_fixed_state":
+        return _boozer_fixed_state_comparisons(cpu, jax_lane)
+    if fixture_kind == "boozer_qa_wrappers_solved_state":
+        return _boozer_qa_wrappers_comparisons(cpu, jax_lane)
+
     comparisons = []
 
     # Surface geometry first (independent of field/objective).
@@ -376,6 +418,168 @@ def _supported_comparisons(build: FixtureBuild) -> Sequence[Mapping[str, Any]]:
             quantity="gradient",
             component="objective",
             active_dof_names=cpu.active_dof_names,
+        )
+    )
+    return comparisons
+
+
+def _boozer_fixed_state_comparisons(
+    cpu: LaneArtifact,
+    jax_lane: LaneArtifact,
+) -> Sequence[Mapping[str, Any]]:
+    """Comparisons specific to the fixed-state Boozer fixture.
+
+    Compares:
+      * surface geometry (gamma, unit normal) — same DOF state by
+        construction, so byte parity is expected;
+      * field B at the surface points;
+      * the Boozer residual vector (no inner solve);
+      * Area, Volume, and ToroidalFlux scalar labels.
+
+    No SquaredFlux scalar, no gradient comparison — those are not part of
+    the Boozer fixed-state contract for this fixture.
+    """
+    comparisons = []
+    comparisons.append(
+        _compare_array(
+            cpu_arr=cpu.raw_arrays["surface_gamma"],
+            jax_arr=jax_lane.raw_arrays["surface_gamma"],
+            quantity="surface_gamma",
+            component="surface",
+            active_dof_names=cpu.active_dof_names,
+        )
+    )
+    comparisons.append(
+        _compare_array(
+            cpu_arr=cpu.raw_arrays["surface_unit_normal"],
+            jax_arr=jax_lane.raw_arrays["surface_unit_normal"],
+            quantity="surface_unit_normal",
+            component="surface",
+            active_dof_names=cpu.active_dof_names,
+        )
+    )
+    comparisons.append(
+        _compare_array(
+            cpu_arr=cpu.raw_arrays["field_B"],
+            jax_arr=jax_lane.raw_arrays["field_B"],
+            quantity="field_B",
+            component="biot_savart",
+            active_dof_names=cpu.active_dof_names,
+        )
+    )
+    comparisons.append(
+        _compare_array(
+            cpu_arr=cpu.raw_arrays["boozer_residual"],
+            jax_arr=jax_lane.raw_arrays["boozer_residual"],
+            quantity="boozer_residual",
+            component="boozer",
+            active_dof_names=cpu.active_dof_names,
+        )
+    )
+    comparisons.append(
+        _compare_scalar(
+            cpu_value=cpu.components["area"],
+            jax_value=jax_lane.components["area"],
+            quantity="area",
+            component="label",
+        )
+    )
+    comparisons.append(
+        _compare_scalar(
+            cpu_value=cpu.components["volume"],
+            jax_value=jax_lane.components["volume"],
+            quantity="volume",
+            component="label",
+        )
+    )
+    comparisons.append(
+        _compare_scalar(
+            cpu_value=cpu.components["toroidal_flux"],
+            jax_value=jax_lane.components["toroidal_flux"],
+            quantity="toroidal_flux",
+            component="label",
+        )
+    )
+    return comparisons
+
+
+def _boozer_qa_wrappers_comparisons(
+    cpu: LaneArtifact,
+    jax_lane: LaneArtifact,
+) -> Sequence[Mapping[str, Any]]:
+    """Comparisons specific to the boozerQA fixed-solved-state scalar fixture.
+
+    Compares:
+      * surface geometry (gamma, unit normal) — same surface DOF state by
+        construction (JAX side imports CPU-solved DOFs), so byte parity is
+        expected at the direct_kernel bucket;
+      * field B at the surface points — gates that BiotSavartJAX
+        reproduces the CPU BiotSavart magnetic field at the same surface
+        points;
+      * Iotas scalar — degenerate cross-lane comparison (both lanes report
+        the same CPU-solved iota);
+      * MajorRadius scalar — exercises the pure-JAX
+        ``surface_major_radius_jax_from_dofs`` against the CPU
+        ``MajorRadius.J()`` oracle at the same surface DOFs;
+      * NonQuasiSymmetricRatio scalar — exercises the pure-JAX
+        ``_qs_ratio_pure`` against the CPU ``NonQuasiSymmetricRatio.J()``
+        oracle at the same surface DOFs + auxiliary sDIM grid.
+
+    This fixture does not claim public ``BoozerSurfaceJAX`` wrapper or
+    adjoint parity. No gradient comparison, no length-penalty comparison:
+    those are explicitly out of scope for this fixed-solved-state fixture
+    and the length penalty is recorded in ``unsupported_components``.
+    """
+    comparisons = []
+    comparisons.append(
+        _compare_array(
+            cpu_arr=cpu.raw_arrays["surface_gamma"],
+            jax_arr=jax_lane.raw_arrays["surface_gamma"],
+            quantity="surface_gamma",
+            component="surface",
+            active_dof_names=cpu.active_dof_names,
+        )
+    )
+    comparisons.append(
+        _compare_array(
+            cpu_arr=cpu.raw_arrays["surface_unit_normal"],
+            jax_arr=jax_lane.raw_arrays["surface_unit_normal"],
+            quantity="surface_unit_normal",
+            component="surface",
+            active_dof_names=cpu.active_dof_names,
+        )
+    )
+    comparisons.append(
+        _compare_array(
+            cpu_arr=cpu.raw_arrays["field_B"],
+            jax_arr=jax_lane.raw_arrays["field_B"],
+            quantity="field_B",
+            component="biot_savart",
+            active_dof_names=cpu.active_dof_names,
+        )
+    )
+    comparisons.append(
+        _compare_scalar(
+            cpu_value=cpu.components["iota"],
+            jax_value=jax_lane.components["iota"],
+            quantity="iota",
+            component="wrapper",
+        )
+    )
+    comparisons.append(
+        _compare_scalar(
+            cpu_value=cpu.components["major_radius"],
+            jax_value=jax_lane.components["major_radius"],
+            quantity="major_radius",
+            component="wrapper",
+        )
+    )
+    comparisons.append(
+        _compare_scalar(
+            cpu_value=cpu.components["nq_symmetric_ratio"],
+            jax_value=jax_lane.components["nq_symmetric_ratio"],
+            quantity="nq_symmetric_ratio",
+            component="wrapper",
         )
     )
     return comparisons
