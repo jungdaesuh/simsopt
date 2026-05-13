@@ -1,0 +1,33 @@
+{
+  "item": "13",
+  "platform": "cpu",
+  "jax_version": "0.10.0",
+  "jaxlib_version": "0.10.0",
+  "config": {
+    "nx": 16,
+    "ny": 16,
+    "nz": 16,
+    "degree": 4,
+    "value_size": 3,
+    "n_eval_points": 512,
+    "rule": "uniform"
+  },
+  "samples": 100,
+  "warmup_calls": 5,
+  "jax": {
+    "median_s": 0.0006300415261648595,
+    "p95_s": 0.0007704999297857285,
+    "std_s": 5.856082658841704e-05,
+    "min_s": 0.0005532499635592103,
+    "max_s": 0.0008040830725803971
+  },
+  "cpp_oracle": {
+    "median_s": 9.047897765412927e-05,
+    "p95_s": 0.00010204198770225048,
+    "std_s": 1.9482168841957106e-05,
+    "min_s": 8.708401583135128e-05,
+    "max_s": 0.00025283300783485174
+  },
+  "cuda_status": "not_claimed",
+  "reason": "CPU JAX-only bench; CUDA proof requires an approved GPU run."
+}
