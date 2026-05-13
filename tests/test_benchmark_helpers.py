@@ -3095,6 +3095,8 @@ def test_parity_ladder_tolerances_capture_precision_lanes():
         "reporting_contract",
         "ls_solve_quality",
         "exact_solve_quality",
+        "pm_mwpgp_fixed_step",
+        "event_time_tracing",
     }
     assert set(PARITY_LADDER_TOLERANCES) == expected_lanes
 
@@ -6790,6 +6792,30 @@ def test_canonicalize_traceable_exact_quadrature_preserves_exact_half_period_gri
     np.testing.assert_allclose(np.asarray(quadpoints_theta), booz.quadpoints_theta)
     assert mask_indices.ndim == 1
     assert mask_indices.size > 0
+
+
+def test_canonicalize_traceable_exact_quadrature_preserves_non_stellsym_grid():
+    booz = types.SimpleNamespace(
+        mpol=2,
+        ntor=2,
+        nfp=5,
+        stellsym=False,
+        quadpoints_phi=Surface.get_phi_quadpoints(nphi=31, range="half period", nfp=5),
+        quadpoints_theta=Surface.get_theta_quadpoints(ntheta=16),
+    )
+
+    quadpoints_phi, quadpoints_theta, mask_indices = (
+        _canonicalize_traceable_exact_quadrature(booz)
+    )
+
+    np.testing.assert_allclose(np.asarray(quadpoints_phi), booz.quadpoints_phi)
+    np.testing.assert_allclose(np.asarray(quadpoints_theta), booz.quadpoints_theta)
+    assert mask_indices.ndim == 1
+    assert (
+        mask_indices.size == np.asarray(booz.quadpoints_phi).size
+        * np.asarray(booz.quadpoints_theta).size
+        * 3
+    )
 
 
 def _stage2_e2e_comparison_case(**overrides):

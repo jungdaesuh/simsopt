@@ -16,11 +16,10 @@ import jax.numpy as jnp
 import numpy as np
 from jax import lax
 
-from ..._core.jax_host_boundary import host_array as _host_callback_array
+from ..._core.jax_host_boundary import host_array as _callback_host_array
 from ..optimizer_jax import (
     PRIVATE_OPTIMIZER_JAX_VERSION,
     _CACHEABLE_VALUE_AND_GRAD_ATTR,
-    _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR,
     _x64_enabled,
     private_optimizer_runtime_is_supported,
 )
@@ -143,13 +142,11 @@ def _host_quadmin(a, fa, fpa, b, fb):
 
 def _line_search_sample_valid_host(phi, dphi, grad):
     return (
-        np.isfinite(phi)
-        and np.isfinite(dphi)
-        and np.all(np.isfinite(np.asarray(grad)))
+        np.isfinite(phi) and np.isfinite(dphi) and np.all(np.isfinite(np.asarray(grad)))
     )
 
 
-def _emit_host_callback(callback, *args):
+def _emit_debug_callback(callback, *args):
     """Dispatch private-optimizer callbacks without ordered-effect tokens.
 
     JAX 0.9.2 lowers ``ordered=True`` debug callbacks through a host token that
@@ -216,19 +213,19 @@ def _cached_private_solver(cache_owner, *, cache_key, builder):
         if compiled is not None:
             return compiled
     compiled = builder()
-    try:
-        with _PRIVATE_SOLVER_CACHE_LOCK:
-            cached = getattr(cache_owner, _PRIVATE_SOLVER_CACHE_ATTR, None)
-            if cached is None:
-                cached = {}
-                setattr(cache_owner, _PRIVATE_SOLVER_CACHE_ATTR, cached)
-            existing = cached.get(cache_key)
-            if existing is None:
-                cached[cache_key] = compiled
-                return compiled
-            return existing
-    except (AttributeError, TypeError):
-        return compiled
+    # Double-checked install under the cache lock. ``cache_owner`` has been
+    # marked via ``_mark_cacheable_jit_value_and_grad`` (the marker check
+    # above gated this branch), so ``setattr`` cannot raise.
+    with _PRIVATE_SOLVER_CACHE_LOCK:
+        cached = getattr(cache_owner, _PRIVATE_SOLVER_CACHE_ATTR, None)
+        if cached is None:
+            cached = {}
+            setattr(cache_owner, _PRIVATE_SOLVER_CACHE_ATTR, cached)
+        existing = cached.get(cache_key)
+        if existing is None:
+            cached[cache_key] = compiled
+            return compiled
+        return existing
 
 
 def _promote_dtypes_inexact(*args):
@@ -298,13 +295,13 @@ def _emit_iteration_callbacks(callback, progress_callback, x_kp1, next_k, f_kp1,
     only exposes an observability/compatibility seam here.
     """
     if callback is not None:
-        _emit_host_callback(
-            lambda x: callback(_host_callback_array(x, dtype=float)),
+        _emit_debug_callback(
+            lambda x: callback(_callback_host_array(x, dtype=float)),
             x_kp1,
         )
     if progress_callback is not None:
         grad_inf = _norm(g_kp1, ord=jnp.inf)
-        _emit_host_callback(
+        _emit_debug_callback(
             lambda iteration, fun_value, grad_inf_value: progress_callback(
                 int(iteration),
                 float(fun_value),

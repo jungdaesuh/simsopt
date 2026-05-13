@@ -1,0 +1,343 @@
+"""JAX-backed Optimizable wrappers for framed curves and rotations.
+
+Wave R4 item 18: provide ``Optimizable`` adapters that mirror the public
+API of :class:`simsopt.geo.framedcurve.FramedCurveFrenet`,
+:class:`FramedCurveCentroid`, :class:`FrameRotation`, and
+:class:`ZeroRotation`, while routing hot paths through the JAX kernels
+in :mod:`simsopt.jax_core.framedcurve`.
+
+These wrappers follow the same adapter pattern used by
+``BiotSavartJAX``: the CPU-derived parent curve participates in the
+``Optimizable`` dependency graph for DOF orchestration, while frame
+evaluation, derivative, and VJP work is delegated to the immutable
+JAX kernels. The wrappers do **not** subclass ``sopp.Curve`` — they
+sit alongside the C++/CPU framed-curve classes as a parallel JAX
+implementation.
+
+Conventions
+-----------
+* ``FrameRotationJAX`` / ``ZeroRotationJAX`` carry the same DOFs as their
+  upstream counterparts so a JAX-backed framed curve can be swapped into
+  an existing pipeline that expects the ``FrameRotation`` interface.
+* ``FramedCurveFrenetJAX`` / ``FramedCurveCentroidJAX`` mirror the public
+  ``rotated_frame``, ``rotated_frame_dash``, ``frame_torsion``, and
+  ``frame_binormal_curvature`` methods.
+* All host-facing arrays are converted through
+  :func:`simsopt.jax_core._math_utils.as_jax_float64`; outputs of the
+  JAX kernels stay as ``jax.Array`` so downstream JAX consumers do not
+  trigger implicit host transfers.
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from .._core.derivative import Derivative
+from .._core.optimizable import Optimizable
+from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
+from ..jax_core.framedcurve import (
+    rotated_centroid_frame,
+    rotated_centroid_frame_dash,
+    rotated_frenet_frame,
+    rotated_frenet_frame_dash,
+    rotation_alpha,
+    rotation_alphadash,
+    rotation_dcoeff,
+    rotationdash_dcoeff,
+)
+
+
+__all__ = [
+    "FrameRotationJAX",
+    "ZeroRotationJAX",
+    "FramedCurveCentroidJAX",
+    "FramedCurveFrenetJAX",
+]
+
+
+def _inner(a: jax.Array, b: jax.Array) -> jax.Array:
+    return jnp.sum(a * b, axis=1)
+
+
+def _torsion_centroid(
+    gamma: jax.Array,
+    gammadash: jax.Array,
+    gammadashdash: jax.Array,
+    alpha: jax.Array,
+    alphadash: jax.Array,
+) -> jax.Array:
+    _t, _, b = rotated_centroid_frame(gamma, gammadash, alpha)
+    _td, ndash, _bd = rotated_centroid_frame_dash(
+        gamma, gammadash, gammadashdash, alpha, alphadash
+    )
+    arc_length = jnp.linalg.norm(gammadash, axis=1)[:, None]
+    return _inner(ndash / arc_length, b)
+
+
+def _binormal_curvature_centroid(
+    gamma: jax.Array,
+    gammadash: jax.Array,
+    gammadashdash: jax.Array,
+    alpha: jax.Array,
+    alphadash: jax.Array,
+) -> jax.Array:
+    _t, _, b = rotated_centroid_frame(gamma, gammadash, alpha)
+    tdash, _nd, _bd = rotated_centroid_frame_dash(
+        gamma, gammadash, gammadashdash, alpha, alphadash
+    )
+    arc_length = jnp.linalg.norm(gammadash, axis=1)[:, None]
+    return _inner(tdash / arc_length, b)
+
+
+def _torsion_frenet(
+    gamma: jax.Array,
+    gammadash: jax.Array,
+    gammadashdash: jax.Array,
+    gammadashdashdash: jax.Array,
+    alpha: jax.Array,
+    alphadash: jax.Array,
+) -> jax.Array:
+    _t, _, b = rotated_frenet_frame(gamma, gammadash, gammadashdash, alpha)
+    _td, ndash, _bd = rotated_frenet_frame_dash(
+        gamma,
+        gammadash,
+        gammadashdash,
+        gammadashdashdash,
+        alpha,
+        alphadash,
+    )
+    arc_length = jnp.linalg.norm(gammadash, axis=1)[:, None]
+    return _inner(ndash / arc_length, b)
+
+
+def _binormal_curvature_frenet(
+    gamma: jax.Array,
+    gammadash: jax.Array,
+    gammadashdash: jax.Array,
+    gammadashdashdash: jax.Array,
+    alpha: jax.Array,
+    alphadash: jax.Array,
+) -> jax.Array:
+    _t, _, b = rotated_frenet_frame(gamma, gammadash, gammadashdash, alpha)
+    tdash, _nd, _bd = rotated_frenet_frame_dash(
+        gamma,
+        gammadash,
+        gammadashdash,
+        gammadashdashdash,
+        alpha,
+        alphadash,
+    )
+    arc_length = jnp.linalg.norm(gammadash, axis=1)[:, None]
+    return _inner(tdash / arc_length, b)
+
+
+class FrameRotationJAX(Optimizable):
+    """Optimizable Fourier rotation backed by JAX kernels.
+
+    Public API mirrors :class:`simsopt.geo.framedcurve.FrameRotation`:
+    ``alpha(quadpoints)``, ``alphadash(quadpoints)``,
+    ``dalpha_by_dcoeff_vjp``, and ``dalphadash_by_dcoeff_vjp``.
+    The host-side Jacobian helpers ``rotation_dcoeff`` /
+    ``rotationdash_dcoeff`` are reused so the VJP path stays compatible
+    with the C++ ``sopp.vjp`` accumulator.
+    """
+
+    def __init__(
+        self,
+        quadpoints: object,
+        order: int,
+        scale: float = 1.0,
+        dofs: object | None = None,
+    ) -> None:
+        self.order = int(order)
+        self.scale = float(scale)
+        if dofs is None:
+            super().__init__(x0=np.zeros((2 * self.order + 1,)))
+        else:
+            super().__init__(dofs=dofs)
+        self.quadpoints = quadpoints
+        self.jac = rotation_dcoeff(quadpoints, self.order)
+        self.jacdash = rotationdash_dcoeff(quadpoints, self.order)
+
+    def _rotation_value(
+        self,
+        evaluator,
+        quadpoints: object,
+    ) -> jax.Array:
+        return _as_jax_float64(self.scale) * evaluator(
+            _as_jax_float64(self._dofs.full_x),
+            _as_jax_float64(quadpoints),
+            self.order,
+        )
+
+    def jax_alpha(self, dofs: object, points: object) -> jax.Array:
+        return rotation_alpha(
+            _as_jax_float64(dofs),
+            _as_jax_float64(points),
+            self.order,
+        )
+
+    def jax_alphadash(self, dofs: object, points: object) -> jax.Array:
+        return rotation_alphadash(
+            _as_jax_float64(dofs),
+            _as_jax_float64(points),
+            self.order,
+        )
+
+    def alpha(self, quadpoints: object) -> jax.Array:
+        return self._rotation_value(rotation_alpha, quadpoints)
+
+    def alphadash(self, quadpoints: object) -> jax.Array:
+        return self._rotation_value(rotation_alphadash, quadpoints)
+
+    def dalpha_by_dcoeff_vjp(self, quadpoints: object, v: object) -> Derivative:
+        del quadpoints  # Jacobian is precomputed for ``self.quadpoints``.
+        gradient = (
+            self.scale
+            * np.asarray(self.jac, dtype=np.float64).T
+            @ np.asarray(v, dtype=np.float64)
+        )
+        return Derivative({self: gradient})
+
+    def dalphadash_by_dcoeff_vjp(self, quadpoints: object, v: object) -> Derivative:
+        del quadpoints
+        gradient = (
+            self.scale
+            * np.asarray(self.jacdash, dtype=np.float64).T
+            @ np.asarray(v, dtype=np.float64)
+        )
+        return Derivative({self: gradient})
+
+
+class ZeroRotationJAX(Optimizable):
+    """Optimizable zero-rotation stub matching :class:`ZeroRotation`."""
+
+    def __init__(self, quadpoints: object) -> None:
+        super().__init__()
+        quad_array = np.asarray(quadpoints, dtype=np.float64)
+        self.quadpoints = quad_array
+        self._zero = jnp.zeros(int(quad_array.size), dtype=jnp.float64)
+
+    def alpha(self, quadpoints: object) -> jax.Array:
+        del quadpoints
+        return self._zero
+
+    def alphadash(self, quadpoints: object) -> jax.Array:
+        del quadpoints
+        return self._zero
+
+    def dalpha_by_dcoeff_vjp(self, quadpoints: object, v: object) -> Derivative:
+        del quadpoints, v
+        return Derivative({})
+
+    def dalphadash_by_dcoeff_vjp(self, quadpoints: object, v: object) -> Derivative:
+        del quadpoints, v
+        return Derivative({})
+
+
+class _FramedCurveJAXBase(Optimizable):
+    """Shared infrastructure for the JAX framed-curve wrappers."""
+
+    def __init__(self, curve, rotation) -> None:
+        self.curve = curve
+        if rotation is None:
+            rotation = ZeroRotationJAX(curve.quadpoints)
+        self.rotation = rotation
+        deps = [curve, rotation]
+        Optimizable.__init__(self, x0=np.asarray([], dtype=np.float64), depends_on=deps)
+
+    @property
+    def quadpoints(self):
+        return self.curve.quadpoints
+
+    def _alpha(self) -> jax.Array:
+        return _as_jax_float64(self.rotation.alpha(self.curve.quadpoints))
+
+    def _alphadash(self) -> jax.Array:
+        return _as_jax_float64(self.rotation.alphadash(self.curve.quadpoints))
+
+
+class FramedCurveFrenetJAX(_FramedCurveJAXBase):
+    """JAX-backed Frenet frame wrapper.
+
+    Mirrors the public surface of
+    :class:`simsopt.geo.framedcurve.FramedCurveFrenet`:
+    ``rotated_frame``, ``rotated_frame_dash``, ``frame_torsion``,
+    ``frame_binormal_curvature``. The DOF graph is composed via the
+    underlying ``curve`` and ``rotation`` Optimizables; this wrapper
+    holds no DOFs of its own.
+    """
+
+    def _scalar_inputs(self):
+        return (
+            _as_jax_float64(self.curve.gamma()),
+            _as_jax_float64(self.curve.gammadash()),
+            _as_jax_float64(self.curve.gammadashdash()),
+            _as_jax_float64(self.curve.gammadashdashdash()),
+            self._alpha(),
+            self._alphadash(),
+        )
+
+    def rotated_frame(self) -> tuple[jax.Array, jax.Array, jax.Array]:
+        gamma, gammadash, gammadashdash, _gddd, alpha, _ad = self._scalar_inputs()
+        return rotated_frenet_frame(gamma, gammadash, gammadashdash, alpha)
+
+    def rotated_frame_dash(self) -> tuple[jax.Array, jax.Array, jax.Array]:
+        gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash = (
+            self._scalar_inputs()
+        )
+        return rotated_frenet_frame_dash(
+            gamma,
+            gammadash,
+            gammadashdash,
+            gammadashdashdash,
+            alpha,
+            alphadash,
+        )
+
+    def frame_torsion(self) -> jax.Array:
+        return _torsion_frenet(*self._scalar_inputs())
+
+    def frame_binormal_curvature(self) -> jax.Array:
+        return _binormal_curvature_frenet(*self._scalar_inputs())
+
+
+class FramedCurveCentroidJAX(_FramedCurveJAXBase):
+    """JAX-backed centroid frame wrapper.
+
+    Mirrors the public surface of
+    :class:`simsopt.geo.framedcurve.FramedCurveCentroid`:
+    ``rotated_frame``, ``rotated_frame_dash``, ``frame_torsion``,
+    ``frame_binormal_curvature``.
+    """
+
+    def _scalar_inputs(self):
+        return (
+            _as_jax_float64(self.curve.gamma()),
+            _as_jax_float64(self.curve.gammadash()),
+            _as_jax_float64(self.curve.gammadashdash()),
+            self._alpha(),
+            self._alphadash(),
+        )
+
+    def rotated_frame(self) -> tuple[jax.Array, jax.Array, jax.Array]:
+        gamma, gammadash, _gdd, alpha, _ad = self._scalar_inputs()
+        return rotated_centroid_frame(gamma, gammadash, alpha)
+
+    def rotated_frame_dash(self) -> tuple[jax.Array, jax.Array, jax.Array]:
+        gamma, gammadash, gammadashdash, alpha, alphadash = self._scalar_inputs()
+        return rotated_centroid_frame_dash(
+            gamma,
+            gammadash,
+            gammadashdash,
+            alpha,
+            alphadash,
+        )
+
+    def frame_torsion(self) -> jax.Array:
+        return _torsion_centroid(*self._scalar_inputs())
+
+    def frame_binormal_curvature(self) -> jax.Array:
+        return _binormal_curvature_centroid(*self._scalar_inputs())

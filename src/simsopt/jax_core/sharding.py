@@ -28,20 +28,29 @@ __all__ = [
 
 @dataclass(frozen=True)
 class CoilGroupCollectiveConfig:
-    """Resolved mesh contract for coil-axis grouped-field collectives."""
+    """Resolved mesh contract for coil-axis grouped-field collectives.
+
+    Supports both 1D (``coil_groups``) and 2D (``points_coils``) mesh
+    geometries. For 2D, ``_point_axis_name`` carries the active point-axis
+    name and ``_point_device_count`` records the point-axis size.
+    """
 
     mesh: Mesh
     axis_name: str
     device_count: int
     strategy: str
+    _point_axis_name: str | None = None
+    _point_device_count: int = 1
 
     @property
     def mesh_axes(self) -> tuple[str, ...]:
-        return (self.axis_name,)
+        if self._point_axis_name is None:
+            return (self.axis_name,)
+        return (self._point_axis_name, self.axis_name)
 
     @property
     def point_axis_name(self) -> str | None:
-        return None
+        return self._point_axis_name
 
     @property
     def coil_axis_name(self) -> str:
@@ -53,7 +62,7 @@ class CoilGroupCollectiveConfig:
 
     @property
     def point_device_count(self) -> int:
-        return 1
+        return self._point_device_count
 
     @property
     def coil_device_count(self) -> int:
@@ -64,12 +73,15 @@ FieldCollectiveConfig = CoilGroupCollectiveConfig
 
 
 def _devices_for_platform(platform: str) -> tuple[object, ...]:
+    # Caller has already gated on JAX mode (sharding is only invoked when
+    # ``policy.backend == "jax"`` and ``policy.jax_platform`` is set). If
+    # ``jax.devices(backend=...)`` raises ``RuntimeError`` here, the
+    # requested platform is genuinely unavailable on this host — a
+    # configuration error, not a graceful-degradation case. Let it
+    # propagate.
     backend_name = "gpu" if platform == "cuda" else platform
     maybe_initialize_distributed_jax()
-    try:
-        return tuple(jax.devices(backend=backend_name))
-    except Exception:
-        return ()
+    return tuple(jax.devices(backend=backend_name))
 
 
 @lru_cache(maxsize=8)
@@ -78,6 +90,37 @@ def _mesh_for(platform: str, axis_name: str) -> Mesh | None:
     if not devices:
         return None
     return Mesh(np.asarray(devices, dtype=object), (axis_name,))
+
+
+@lru_cache(maxsize=8)
+def _mesh_2d_for(
+    platform: str,
+    point_axis_name: str,
+    coil_axis_name: str,
+    point_device_count: int,
+    coil_device_count: int,
+) -> Mesh | None:
+    devices = _devices_for_platform(platform)
+    if not devices:
+        return None
+    required = point_device_count * coil_device_count
+    if required != len(devices):
+        raise ValueError(
+            f"points_coils 2D mesh requires "
+            f"point_device_count * coil_device_count == device_count; "
+            f"got {point_device_count} * {coil_device_count} = {required}, "
+            f"but {len(devices)} devices are available."
+        )
+    if point_axis_name == coil_axis_name:
+        raise ValueError(
+            f"points_coils 2D mesh requires distinct axis names; "
+            f"got point_axis_name={point_axis_name!r} == "
+            f"coil_axis_name={coil_axis_name!r}."
+        )
+    device_array = np.asarray(devices, dtype=object).reshape(
+        point_device_count, coil_device_count
+    )
+    return Mesh(device_array, (point_axis_name, coil_axis_name))
 
 
 def _partition_spec_for_axis(axis_name: str, ndim: int) -> P:
@@ -162,7 +205,7 @@ def _should_shard_pairwise_rows(points_a, tuning) -> bool:
 
 
 def _should_shard_coil_group(currents, tuning) -> bool:
-    if not tuning.active or tuning.strategy != "coil_groups":
+    if not tuning.active or tuning.strategy not in {"coil_groups", "points_coils"}:
         return False
     return int(currents.shape[0]) >= int(tuning.min_coils_to_shard)
 
@@ -172,16 +215,44 @@ def coil_group_collective_config(
     *,
     mode: str | None = None,
 ) -> CoilGroupCollectiveConfig | None:
-    """Return the active coil-axis collective config for a rectangular group."""
+    """Return the active coil-axis collective config for a rectangular group.
+
+    Builds a 1D mesh for ``coil_groups`` and a 2D point/coil mesh for
+    ``points_coils``. Both strategies reduce over the coil axis with
+    ``lax.psum``; the 2D variant additionally shards the point axis.
+    """
     tuning = get_sharding_tuning(mode)
     if not _should_shard_coil_group(currents, tuning):
         return None
-    axis_name = tuning.coil_axis_name
-    mesh = _mesh_for(tuning.platform, axis_name)
-    device_count = int(mesh.shape[axis_name])
+    coil_axis_name = tuning.coil_axis_name
+    if tuning.strategy == "points_coils":
+        point_axis_name = tuning.point_axis_name
+        point_device_count = int(tuning.point_device_count)
+        coil_device_count = int(tuning.coil_device_count)
+        mesh = _mesh_2d_for(
+            tuning.platform,
+            point_axis_name,
+            coil_axis_name,
+            point_device_count,
+            coil_device_count,
+        )
+        if mesh is None:
+            return None
+        return CoilGroupCollectiveConfig(
+            mesh=mesh,
+            axis_name=coil_axis_name,
+            device_count=coil_device_count,
+            strategy=tuning.strategy,
+            _point_axis_name=point_axis_name,
+            _point_device_count=point_device_count,
+        )
+    mesh = _mesh_for(tuning.platform, coil_axis_name)
+    if mesh is None:
+        return None
+    device_count = int(mesh.shape[coil_axis_name])
     return CoilGroupCollectiveConfig(
         mesh=mesh,
-        axis_name=axis_name,
+        axis_name=coil_axis_name,
         device_count=device_count,
         strategy=tuning.strategy,
     )
@@ -339,10 +410,7 @@ def inspect_array_sharding_summary(value) -> dict[str, object]:
         observed["kind"] = type(observed_sharding).__name__
         observed["spec"] = str(getattr(observed_sharding, "spec", None))
 
-    try:
-        inspect_fn(value, callback=_capture)
-    except Exception:
-        return summary
+    inspect_fn(value, callback=_capture)
     if observed:
         summary["inspected_kind"] = observed.get("kind")
         summary["inspected_spec"] = observed.get("spec")
@@ -351,6 +419,7 @@ def inspect_array_sharding_summary(value) -> dict[str, object]:
 
 def _clear_sharding_caches() -> None:
     _mesh_for.cache_clear()
+    _mesh_2d_for.cache_clear()
     _point_sharding_for.cache_clear()
     _replicated_sharding_for.cache_clear()
 

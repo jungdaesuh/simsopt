@@ -66,6 +66,17 @@ def _strict_field_coil_dof_extraction_spec(field):
     return coil_dof_extraction_spec()
 
 
+def _strict_field_dof_layout_version(field) -> int:
+    """Return the field's DOF-layout drift counter; field must expose it."""
+    layout_version = getattr(field, "_dof_layout_version", None)
+    if not isinstance(layout_version, int):
+        raise NotImplementedError(
+            "SquaredFluxJAX requires a field exposing integer "
+            "_dof_layout_version for drift detection."
+        )
+    return layout_version
+
+
 def _field_dofs_gradient_to_derivative(field, field_dofs_gradient):
     field_dofs_gradient = np.asarray(field_dofs_gradient, dtype=np.float64)
     deriv_data = {}
@@ -150,7 +161,7 @@ class SquaredFluxJAX(Optimizable):
         # Set evaluation points on the field adapter from the immutable spec.
         field.set_points_from_spec(field_eval_spec)
         self._field_points_version = field._points_version
-        self._field_dof_layout_version = getattr(field, "_dof_layout_version", None)
+        self._field_dof_layout_version = _strict_field_dof_layout_version(field)
 
         self._clear_cached_results()
         self._init_native_program(field)
@@ -286,7 +297,7 @@ class SquaredFluxJAX(Optimizable):
         )
 
     def _raise_if_field_dof_layout_drifted(self):
-        layout_version = getattr(self.field, "_dof_layout_version", None)
+        layout_version = _strict_field_dof_layout_version(self.field)
         if layout_version == self._field_dof_layout_version:
             return
         raise RuntimeError(

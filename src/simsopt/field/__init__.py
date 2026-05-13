@@ -32,8 +32,19 @@ _CPU_FIELD_MODULES = (
     "magnetic_axis_helpers",
     "force",
 )
-_JAX_FIELD_MODULES = ("biotsavart_jax_backend",)
-_JAX_FIELD_SIMSOPTPP_MODULES = ("magneticfieldclasses_jax",)
+_JAX_FIELD_MODULES = ("biotsavart_jax_backend", "sampling_jax")
+_JAX_FIELD_SIMSOPTPP_MODULES = (
+    "toroidal_field_jax",
+    "poloidal_field_jax",
+    "mirror_model_jax",
+    "dommaschk_jax",
+    "reiman_jax",
+    "circular_coil_jax",
+    "interpolated_field_jax",
+    "dipole_field_jax",
+    "wireframefield_jax",
+    "scalar_potential_rz_jax",
+)
 
 _cpu_field_modules = _CPU_FIELD_MODULES if _has_simsoptpp else ()
 _jax_field_modules = _JAX_FIELD_MODULES if _has_jax else ()

@@ -1,12 +1,22 @@
 import numpy as np
 import jax.numpy as jnp
-from jax import vjp, jvp
+from jax import vjp
 
 from ._simsoptpp import sopp_namespace
 
 sopp = sopp_namespace("Curve")
 from .._core.optimizable import Optimizable
 from .._core.derivative import Derivative
+from ..jax_core.framedcurve import (
+    rotated_centroid_frame,
+    rotated_centroid_frame_dash,
+    rotated_frenet_frame,
+    rotated_frenet_frame_dash,
+    rotation_alpha as jaxrotation_pure,
+    rotation_alphadash as jaxrotationdash_pure,
+    rotation_dcoeff,
+    rotationdash_dcoeff,
+)
 from .curve import Curve, _as_runtime_jax_float64
 from .jit import jit
 
@@ -487,30 +497,6 @@ class ZeroRotation(Optimizable):
         return Derivative({})
 
 
-@jit
-def rotated_centroid_frame(gamma, gammadash, alpha):
-    arc_length = jnp.linalg.norm(gammadash, axis=1)[:, None]
-    t = gammadash / arc_length
-    R = jnp.mean(gamma, axis=0)  # centroid
-    delta = gamma - R[None, :]
-    n = delta - jnp.sum(delta * t, axis=1)[:, None] * t
-    n = n / jnp.linalg.norm(n, axis=1)[:, None]
-    b = jnp.cross(t, n, axis=1)
-
-    # now rotate the frame by alpha
-    nn = jnp.cos(alpha)[:, None] * n - jnp.sin(alpha)[:, None] * b
-    bb = jnp.sin(alpha)[:, None] * n + jnp.cos(alpha)[:, None] * b
-    return t, nn, bb
-
-
-rotated_centroid_frame_dash = jit(
-    lambda gamma, gammadash, gammadashdash, alpha, alphadash: jvp(
-        rotated_centroid_frame,
-        (gamma, gammadash, alpha),
-        (gammadash, gammadashdash, alphadash),
-    )[1]
-)
-
 rotated_centroid_frame_dcoeff_vjp0 = jit(
     lambda gamma, gammadash, alpha, v: vjp(
         lambda g: rotated_centroid_frame(g, gammadash, alpha), gamma
@@ -574,36 +560,6 @@ rotated_centroid_frame_dash_dcoeff_vjp5 = jit(
     )[1](v)[0]
 )
 
-
-@jit
-def rotated_frenet_frame(gamma, gammadash, gammadashdash, alpha):
-    """Frenet frame of a curve rotated by a angle that varies along the coil path"""
-
-    arc_length = jnp.linalg.norm(gammadash, axis=1)
-    arc_length_col = arc_length[:, None]
-    t = gammadash / arc_length_col
-
-    tdash = (1.0 / arc_length_col) ** 2 * (
-        arc_length_col * gammadashdash
-        - (inner(gammadash, gammadashdash) / arc_length)[:, None] * gammadash
-    )
-
-    n = tdash / jnp.linalg.norm(tdash, axis=1)[:, None]
-    b = jnp.cross(t, n, axis=1)
-    # now rotate the frame by alpha
-    nn = jnp.cos(alpha)[:, None] * n - jnp.sin(alpha)[:, None] * b
-    bb = jnp.sin(alpha)[:, None] * n + jnp.cos(alpha)[:, None] * b
-
-    return t, nn, bb
-
-
-rotated_frenet_frame_dash = jit(
-    lambda gamma, gammadash, gammadashdash, gammadashdashdash, alpha, alphadash: jvp(
-        rotated_frenet_frame,
-        (gamma, gammadash, gammadashdash, alpha),
-        (gammadash, gammadashdash, gammadashdashdash, alphadash),
-    )[1]
-)
 
 rotated_frenet_frame_dcoeff_vjp0 = jit(
     lambda gamma, gammadash, gammadashdash, alpha, v: vjp(
@@ -876,42 +832,8 @@ def _centroid_binorm_vjps(gamma, gammadash, gammadashdash, alpha, alphadash, v):
     )
 
 
-def jaxrotation_pure(dofs, points, order):
-    rotation = jnp.zeros((len(points),))
-    rotation += dofs[0]
-    for j in range(1, order + 1):
-        rotation += dofs[2 * j - 1] * jnp.sin(2 * np.pi * j * points)
-        rotation += dofs[2 * j] * jnp.cos(2 * np.pi * j * points)
-    return rotation
-
-
-def jaxrotationdash_pure(dofs, points, order):
-    rotation = jnp.zeros((len(points),))
-    for j in range(1, order + 1):
-        rotation += dofs[2 * j - 1] * 2 * np.pi * j * jnp.cos(2 * np.pi * j * points)
-        rotation -= dofs[2 * j] * 2 * np.pi * j * jnp.sin(2 * np.pi * j * points)
-    return rotation
-
-
-_rotation_eval = jit(jaxrotation_pure, static_argnums=(2,))
-_rotationdash_eval = jit(jaxrotationdash_pure, static_argnums=(2,))
-
-
-def rotation_dcoeff(points, order):
-    jac = np.zeros((len(points), 2 * order + 1))
-    jac[:, 0] = 1
-    for j in range(1, order + 1):
-        jac[:, 2 * j - 1] = np.sin(2 * np.pi * j * points)
-        jac[:, 2 * j + 0] = np.cos(2 * np.pi * j * points)
-    return jac
-
-
-def rotationdash_dcoeff(points, order):
-    jac = np.zeros((len(points), 2 * order + 1))
-    for j in range(1, order + 1):
-        jac[:, 2 * j - 1] = +2 * np.pi * j * np.cos(2 * np.pi * j * points)
-        jac[:, 2 * j + 0] = -2 * np.pi * j * np.sin(2 * np.pi * j * points)
-    return jac
+_rotation_eval = jaxrotation_pure
+_rotationdash_eval = jaxrotationdash_pure
 
 
 def inner(a, b):

@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
 
-import jax.numpy as jnp
 from scipy.optimize import OptimizeResult
 
 from ..._core.jax_host_boundary import (
@@ -163,36 +160,6 @@ def _private_lbfgs_result_to_optimize_result(state):
         invalid_step_log=invalid_step_log,
         optimizer_state_trace=optimizer_state_trace,
     )
-
-
-def _coerce_dense_hess_inv(hess_inv, n, dtype):
-    if hess_inv is None:
-        warnings.warn(
-            "Hybrid BFGS continuation received no dense hess_inv; falling back to "
-            "identity warm start.",
-            RuntimeWarning,
-            stacklevel=3,
-        )
-        return jnp.eye(n, dtype=dtype)
-    try:
-        dense = _as_host_numpy(hess_inv)
-    except (TypeError, ValueError):
-        warnings.warn(
-            "Hybrid BFGS continuation could not densify hess_inv; falling back to "
-            "identity warm start.",
-            RuntimeWarning,
-            stacklevel=3,
-        )
-        return jnp.eye(n, dtype=dtype)
-    if dense.ndim != 2 or dense.shape != (n, n):
-        warnings.warn(
-            "Hybrid BFGS continuation received mismatched hess_inv shape; "
-            "falling back to identity warm start.",
-            RuntimeWarning,
-            stacklevel=3,
-        )
-        return jnp.eye(n, dtype=dtype)
-    return jnp.asarray(dense, dtype=dtype)
 
 
 def _scipy_result_is_continuable(result):

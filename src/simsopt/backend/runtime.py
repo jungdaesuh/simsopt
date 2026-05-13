@@ -68,7 +68,12 @@ _VALID_SHARDING_STRATEGIES = (
     "pairwise_rows",
     "hybrid",
     "coil_groups",
+    "points_coils",
 )
+_POINT_AXIS_SHARDING_STRATEGIES = frozenset(("points", "pairwise_rows", "hybrid"))
+_POINT_OWNED_SHARDING_STRATEGIES = frozenset(("points", "hybrid", "points_coils"))
+_PAIRWISE_ROW_SHARDING_STRATEGIES = frozenset(("pairwise_rows", "hybrid"))
+_COIL_AXIS_SHARDING_STRATEGIES = frozenset(("coil_groups", "points_coils"))
 _GUARDRAIL_ENV_VARS = (
     _DEBUG_NANS_ENV,
     _TRANSFER_GUARD_ENV,
@@ -623,14 +628,40 @@ def _resolve_min_coils_to_shard(policy: BackendPolicy) -> int:
     return _MIN_COILS_TO_SHARD_BY_POLICY[policy.chunk_policy]
 
 
-def _strategy_device_counts(strategy: str, device_count: int) -> tuple[int, int]:
+def _factor_device_count_2d(device_count: int) -> tuple[int, int]:
+    """Factor ``device_count`` into ``(point_count, coil_count)`` for a 2D mesh.
+
+    Picks the factor pair closest to a square mesh. ``device_count`` must be
+    positive; prime device counts yield ``(1, device_count)`` which still
+    constitutes a valid 2D mesh per the JAX shard_map contract.
+    """
     if device_count <= 0:
+        raise ValueError("points_coils sharding requires device_count > 0.")
+    best = (1, device_count)
+    best_aspect = float(device_count)
+    for point_count in range(1, int(device_count**0.5) + 1):
+        if device_count % point_count != 0:
+            continue
+        coil_count = device_count // point_count
+        aspect = max(point_count, coil_count) / min(point_count, coil_count)
+        if aspect < best_aspect:
+            best = (point_count, coil_count)
+            best_aspect = aspect
+    return best
+
+
+def _strategy_device_counts(strategy: str, device_count: int) -> tuple[int, int]:
+    if strategy == "none":
         return (0, 0)
+    if device_count <= 0:
+        raise ValueError(f"{strategy} sharding requires device_count > 0.")
     if strategy == "coil_groups":
         return (1, device_count)
-    if strategy in {"points", "pairwise_rows", "hybrid"}:
+    if strategy in _POINT_AXIS_SHARDING_STRATEGIES:
         return (device_count, 1)
-    return (0, 0)
+    if strategy == "points_coils":
+        return _factor_device_count_2d(device_count)
+    raise ValueError(f"unsupported sharding strategy {strategy!r}")
 
 
 def _strategy_mesh_axis_names(
@@ -641,13 +672,15 @@ def _strategy_mesh_axis_names(
 ) -> tuple[str, ...]:
     if strategy == "coil_groups":
         return (coil_axis_name,)
-    if strategy in {"points", "pairwise_rows", "hybrid"}:
+    if strategy in _POINT_AXIS_SHARDING_STRATEGIES:
         return (point_axis_name,)
+    if strategy == "points_coils":
+        return (point_axis_name, coil_axis_name)
     return ()
 
 
 def _strategy_reduced_axis_name(strategy: str, *, coil_axis_name: str) -> str | None:
-    if strategy == "coil_groups":
+    if strategy in _COIL_AXIS_SHARDING_STRATEGIES:
         return coil_axis_name
     return None
 
@@ -692,27 +725,25 @@ def _resolve_min_pairwise_rows_to_shard(policy: BackendPolicy) -> int:
 
 
 def _detect_local_jax_device_count(policy: BackendPolicy) -> int:
+    # ImportError boundary: simsopt is importable without JAX installed.
+    # Once JAX is present, enumeration errors must surface — the caller
+    # has already gated on policy.backend == "jax".
     try:
         import jax
     except ImportError:
         return 0
-    try:
-        backend_name = _runtime_jax_backend_name(policy.jax_platform)
-        return len(jax.local_devices(backend=backend_name))
-    except Exception:
-        return 0
+    backend_name = _runtime_jax_backend_name(policy.jax_platform)
+    return len(jax.local_devices(backend=backend_name))
 
 
 def _detect_global_jax_device_count(policy: BackendPolicy) -> int:
+    # Same ImportError boundary as _detect_local_jax_device_count.
     try:
         import jax
     except ImportError:
         return 0
-    try:
-        backend_name = _runtime_jax_backend_name(policy.jax_platform)
-        return len(jax.devices(backend=backend_name))
-    except Exception:
-        return 0
+    backend_name = _runtime_jax_backend_name(policy.jax_platform)
+    return len(jax.devices(backend=backend_name))
 
 
 def _visible_cuda_device_selector() -> str | None:
@@ -746,17 +777,15 @@ def _detect_imported_jax_cuda_device_index() -> int | None:
         is_initialized = getattr(distributed_module, "is_initialized", None)
         if not callable(is_initialized):
             return None
-        try:
-            if not bool(is_initialized()):
-                return None
-        except Exception:
+        if not bool(is_initialized()):
             return None
     local_devices = getattr(jax, "local_devices", None)
     if not callable(local_devices):
         return None
     try:
         devices = local_devices(backend="gpu")
-    except Exception:
+    except RuntimeError:
+        # GPU backend not available on this host: detection returns None.
         return None
     if not devices:
         return None
@@ -933,15 +962,18 @@ def _build_sharding_tuning(
     policy: BackendPolicy,
 ) -> ShardingTuning:
     strategy = _resolve_sharding_strategy(mode, policy)
+    distributed = get_distributed_runtime_config()
     if policy.backend != "jax":
         strategy = "none"
-    distributed = get_distributed_runtime_config()
-    local_device_count = _detect_local_jax_device_count(policy)
-    device_count = (
-        _detect_global_jax_device_count(policy)
-        if distributed.initialized
-        else local_device_count
-    )
+        local_device_count = 0
+        device_count = 0
+    else:
+        local_device_count = _detect_local_jax_device_count(policy)
+        device_count = (
+            _detect_global_jax_device_count(policy)
+            if distributed.initialized
+            else local_device_count
+        )
     point_axis_name = _resolve_sharding_axis_name()
     coil_axis_name = _resolve_coil_sharding_axis_name()
     point_device_count, coil_device_count = _strategy_device_counts(
@@ -1253,10 +1285,7 @@ def _jax_distributed_runtime_is_initialized() -> bool:
     is_initialized = getattr(distributed_module, "is_initialized", None)
     if not callable(is_initialized):
         return False
-    try:
-        return bool(is_initialized())
-    except Exception:
-        return False
+    return bool(is_initialized())
 
 
 def _invalidate_distributed_tuning_caches() -> None:
@@ -1386,19 +1415,25 @@ def get_sharding_strategy(mode: str | None = None) -> str:
 def should_shard_points(mode: str | None = None) -> bool:
     """Return ``True`` when point-axis sharding is active for the mode."""
     tuning = get_sharding_tuning(mode)
-    return tuning.active and tuning.strategy in {"points", "hybrid"}
+    return tuning.active and tuning.strategy in _POINT_OWNED_SHARDING_STRATEGIES
 
 
 def should_shard_pairwise_rows(mode: str | None = None) -> bool:
     """Return ``True`` when row-owned pairwise sharding is active for the mode."""
     tuning = get_sharding_tuning(mode)
-    return tuning.active and tuning.strategy in {"pairwise_rows", "hybrid"}
+    return tuning.active and tuning.strategy in _PAIRWISE_ROW_SHARDING_STRATEGIES
 
 
 def should_shard_coil_groups(mode: str | None = None) -> bool:
-    """Return ``True`` when coil-group collective sharding is active."""
+    """Return ``True`` when the coil axis is sharded by the active strategy.
+
+    Includes both the 1D ``coil_groups`` mesh and the 2D ``points_coils``
+    mesh; the predicate signals "coil axis collective is active," not
+    "1D-only mesh." Callers that need the 1D variant specifically should
+    compare ``get_sharding_strategy(mode) == 'coil_groups'`` directly.
+    """
     tuning = get_sharding_tuning(mode)
-    return tuning.active and tuning.strategy == "coil_groups"
+    return tuning.active and tuning.strategy in _COIL_AXIS_SHARDING_STRATEGIES
 
 
 def get_debug_nans(mode: str | None = None) -> bool:

@@ -961,6 +961,10 @@ class SurfaceClassifier():
         nr = int((self.rrange[1]-self.rrange[0])/h)
         nphi = int(2*np.pi/h)
         nz = int((self.zrange[1]-self.zrange[0])/h)
+        self._nr = nr
+        self._nphi = nphi
+        self._nz = nz
+        self._p = int(p)
 
         def fbatch(rs, phis, zs):
             xyz = np.zeros((len(rs), 3))
@@ -991,6 +995,33 @@ class SurfaceClassifier():
         d = -np.ones((rphiz.shape[0], 1))
         self.dist.evaluate_batch(rphiz, d)
         return d
+
+    def to_jax_classifier_fn(self):
+        """Return a JAX-traceable signed-distance classifier closure."""
+        from ..jax_core.regular_grid_interp import (
+            UniformInterpolationRule as JaxUniformInterpolationRule,
+            build_regular_grid_interpolant_3d,
+        )
+        from ..jax_core.surface_classifier import make_levelset_classifier
+
+        def fbatch_jax(rs, phis, zs):
+            rphiz = np.zeros((len(rs), 3), dtype=np.float64)
+            rphiz[:, 0] = np.asarray(rs, dtype=np.float64)
+            rphiz[:, 1] = np.asarray(phis, dtype=np.float64)
+            rphiz[:, 2] = np.asarray(zs, dtype=np.float64)
+            return np.asarray(self.evaluate_rphiz(rphiz), dtype=np.float64).ravel()
+
+        rule = JaxUniformInterpolationRule(self._p)
+        spec = build_regular_grid_interpolant_3d(
+            rule=rule,
+            xrange=(float(self.rrange[0]), float(self.rrange[1]), int(self._nr)),
+            yrange=(0.0, 2.0 * np.pi, int(self._nphi)),
+            zrange=(float(self.zrange[0]), float(self.zrange[1]), int(self._nz)),
+            value_size=1,
+            f=fbatch_jax,
+            out_of_bounds_ok=True,
+        )
+        return make_levelset_classifier(spec)
 
     @SimsoptRequires(gridToVTK is not None,
                      "to_vtk method requires pyevtk module")

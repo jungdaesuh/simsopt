@@ -18,7 +18,7 @@ from ._common import (
     _bool_scalar,
     _cubicmin,
     _dot,
-    _emit_host_callback,
+    _emit_debug_callback,
     _int_scalar,
     _line_search_sample_valid,
     _promote_dtypes_inexact,
@@ -47,7 +47,7 @@ def _emit_line_search_runtime_debug(
 ):
     """Emit runtime diagnostics when SIMSOPT_LBFGS_DEBUG is enabled.
 
-    The callback routes through ``_emit_host_callback`` (``ordered=False``) so
+    The callback routes through ``_emit_debug_callback`` (``ordered=False``) so
     strict ``transfer_guard='disallow'`` lanes do not trip on the JAX 0.9.2
     ``bool[0]`` host token associated with ``ordered=True``. One consequence is
     that debug prints from the line search may interleave with other unordered
@@ -56,7 +56,7 @@ def _emit_line_search_runtime_debug(
     """
     if not _LINE_SEARCH_DEBUG_ENABLED:
         return
-    _emit_host_callback(
+    _emit_debug_callback(
         lambda i, a, f, df: print(
             "[line-search-debug] "
             f"stage={stage} "
@@ -172,9 +172,7 @@ def _zoom(
             state.a_rec,
             state.phi_rec,
         )
-        use_cubic = (
-            state.has_rec & (a_j_cubic > a + cchk) & (a_j_cubic < b - cchk)
-        )
+        use_cubic = state.has_rec & (a_j_cubic > a + cchk) & (a_j_cubic < b - cchk)
         a_j_quad = _quadmin(
             state.a_lo,
             state.phi_lo,
@@ -377,10 +375,9 @@ def _apply_zoom_branch_result(
         nfev=state.nfev + zoom.nfev,
         ngev=state.ngev + zoom.ngev,
     )
-    improves_best = (
-        _line_search_sample_valid(zoom.best_phi, zoom.best_dphi, zoom.best_g)
-        & (zoom.best_phi < state.best_phi)
-    )
+    improves_best = _line_search_sample_valid(
+        zoom.best_phi, zoom.best_dphi, zoom.best_g
+    ) & (zoom.best_phi < state.best_phi)
     return state._replace(
         best_a=jnp.where(improves_best, zoom.best_a, state.best_a),
         best_phi=jnp.where(improves_best, zoom.best_phi, state.best_phi),
@@ -502,8 +499,10 @@ def _line_search_from_restricted_func_and_grad(
             best_g=jnp.where(improves_best_i, g_i, state.best_g),
         )
 
-        star_to_zoom1 = (~sample_valid) | wolfe_one(a_i, phi_i) | (
-            (phi_i >= state.phi_i1) & (state.i > _int_scalar(1))
+        star_to_zoom1 = (
+            (~sample_valid)
+            | wolfe_one(a_i, phi_i)
+            | ((phi_i >= state.phi_i1) & (state.i > _int_scalar(1)))
         )
         star_to_i = sample_valid & wolfe_two(dphi_i) & (~star_to_zoom1)
         star_to_zoom2 = (
@@ -601,10 +600,9 @@ def _line_search_from_restricted_func_and_grad(
         body,
         state,
     )
-    best_is_acceptable = (
-        _line_search_sample_valid(state.best_phi, state.best_dphi, state.best_g)
-        & (state.best_phi < phi_0)
-    )
+    best_is_acceptable = _line_search_sample_valid(
+        state.best_phi, state.best_dphi, state.best_g
+    ) & (state.best_phi < phi_0)
     state = state._replace(
         failed=jnp.where(
             (state.failed | (~state.done)) & best_is_acceptable,

@@ -804,10 +804,7 @@ def _runtime_cache_leaf_signature(leaf):
 
 
 def _runtime_cache_tree_signature(tree):
-    try:
-        leaves, treedef = jax.tree_util.tree_flatten(tree)
-    except TypeError:
-        return _runtime_cache_leaf_signature(tree)
+    leaves, treedef = jax.tree_util.tree_flatten(tree)
     return (
         "tree",
         repr(treedef),
@@ -842,6 +839,36 @@ def _generic_surface_scatter_operator(mpol: int, ntor: int):
 
 def _cross_product(left, right):
     return jnp.cross(left, right, axis=-1)
+
+
+def _cross_product_cpu_ordered(left, right):
+    return jnp.stack(
+        (
+            left[..., 1] * right[..., 2] - left[..., 2] * right[..., 1],
+            left[..., 2] * right[..., 0] - left[..., 0] * right[..., 2],
+            left[..., 0] * right[..., 1] - left[..., 1] * right[..., 0],
+        ),
+        axis=-1,
+    )
+
+
+def _surface_volume_cpu_ordered(gamma, normal):
+    nphi, ntheta = gamma.shape[:2]
+    zero = jnp.sum(gamma, dtype=gamma.dtype) - jnp.sum(gamma, dtype=gamma.dtype)
+    one_third = _as_runtime_float64(1.0 / 3.0, reference=gamma)
+
+    def point_body(flat_index, volume):
+        i = flat_index // ntheta
+        j = flat_index - i * ntheta
+        point = (
+            gamma[i, j, 0] * normal[i, j, 0]
+            + gamma[i, j, 1] * normal[i, j, 1]
+            + gamma[i, j, 2] * normal[i, j, 2]
+        )
+        return volume + one_third * point
+
+    volume = jax.lax.fori_loop(0, nphi * ntheta, point_body, zero)
+    return volume / _as_runtime_float64(nphi * ntheta, reference=gamma)
 
 
 def _select_axis0(array, index: int):
@@ -1406,6 +1433,7 @@ def _label_value_from_surface_dofs(
         _field_points_from_geometry(label_geometry),
         coil_arrays=coil_arrays,
         coil_set_spec=coil_set_spec,
+        parity_policy=parity_policy,
     )
 
 
@@ -1577,11 +1605,9 @@ def _boozer_penalty_value_and_grad_cpu_ordered(
     value = value + _as_jax_float64(0.5) * rl * rl + _as_jax_float64(0.5) * rz * rz
 
     surface_size = optimizer_state.surface_dofs.shape[0]
-    surface_gradient = (
-        gradient[:surface_size]
-        + rl * weight_sqrt * label_gradient
-        + rz * weight_sqrt * geometry_derivative.gamma[0, 0, 2, :]
-    )
+    drl = weight_sqrt * label_gradient
+    drz = weight_sqrt * geometry_derivative.gamma[0, 0, 2, :]
+    surface_gradient = gradient[:surface_size] + rl * drl + rz * drz
     return value, _concat_jax_float64(surface_gradient, gradient[surface_size:])
 
 
@@ -1622,14 +1648,22 @@ def _compute_label(
     label_points,
     coil_arrays=None,
     coil_set_spec=None,
+    parity_policy: str = "production",
 ):
     """Compute the label value (volume, area, or toroidal flux).
 
     Shared by penalty objective, exact residual, and residual vector.
     """
-    normal = _cross_product(label_geometry.xphi, label_geometry.xtheta)
     if label_type == "volume":
+        normal = (
+            _cross_product_cpu_ordered(label_geometry.xphi, label_geometry.xtheta)
+            if parity_policy == "cpu_ordered"
+            else _cross_product(label_geometry.xphi, label_geometry.xtheta)
+        )
+        if parity_policy == "cpu_ordered":
+            return _surface_volume_cpu_ordered(label_geometry.gamma, normal)
         return volume_jax(label_geometry.gamma, normal)
+    normal = _cross_product(label_geometry.xphi, label_geometry.xtheta)
     if label_type == "area":
         return area_jax(normal)
     ntheta = label_geometry.gamma.shape[1]

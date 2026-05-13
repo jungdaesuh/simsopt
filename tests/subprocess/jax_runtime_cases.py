@@ -270,9 +270,7 @@ def _run_compile_count_case(method: OptimizerMethod) -> None:
 def _run_biot_savart_point_chunking_case() -> None:
     _configure_strict_cpu_parity_backend()
 
-    points = jax.device_put(
-        np.arange(257 * 3, dtype=np.float64).reshape(257, 3) * 1e-3
-    )
+    points = jax.device_put(np.arange(257 * 3, dtype=np.float64).reshape(257, 3) * 1e-3)
     gammas = jax.device_put(
         np.linspace(0.0, 1.0, 2 * 8 * 3, dtype=np.float64).reshape(2, 8, 3)
     )
@@ -404,10 +402,7 @@ def _assert_implicit_host_transfer_rejected(
         normalized_message = message.lower()
         assert "transfer" in normalized_message and (
             "guard" in normalized_message or "disallow" in normalized_message
-        ), (
-            f"{case_name} raised the wrong transfer-guard error: "
-            f"{message}"
-        )
+        ), f"{case_name} raised the wrong transfer-guard error: {message}"
     else:
         raise AssertionError(
             f"{case_name} should reject implicit host input under transfer guard"
@@ -484,24 +479,28 @@ def _build_single_stage_transfer_guard_runtime_fixture():
         curvature_weight=0.1,
         curvature_threshold=40.0,
     )
-    success_filter = single_stage_example.build_single_stage_target_lane_hardware_success_filter(
-        boozer_surface,
-        bs,
-        banana_curve,
-        vessel_surface,
-        cc_dist=0.05,
-        cs_dist=0.02,
-        ss_dist=0.04,
-        curvature_threshold=40.0,
+    success_filter = (
+        single_stage_example.build_single_stage_target_lane_hardware_success_filter(
+            boozer_surface,
+            bs,
+            banana_curve,
+            vessel_surface,
+            cc_dist=0.05,
+            cs_dist=0.02,
+            ss_dist=0.04,
+            curvature_threshold=40.0,
+        )
     )
-    runtime_bundle = single_stage_example.get_traceable_single_stage_runtime_bundle_builder()(
-        boozer_surface,
-        bs,
-        fixture["iota_target"],
-        include_profile_suite=False,
-        include_host_wrappers=False,
-        outer_objective_config=config,
-        success_filter=success_filter,
+    runtime_bundle = (
+        single_stage_example.get_traceable_single_stage_runtime_bundle_builder()(
+            boozer_surface,
+            bs,
+            fixture["iota_target"],
+            include_profile_suite=False,
+            include_host_wrappers=False,
+            outer_objective_config=config,
+            success_filter=success_filter,
+        )
     )
     compiled_bundle = surfaceobjectives_jax_module._get_cached_traceable_runtime_entry(
         boozer_surface,
@@ -850,6 +849,13 @@ def _assert_allclose_to_reference(value, reference) -> None:
     )
 
 
+def _block_until_ready_tree(tree) -> None:
+    leaves = jax.tree_util.tree_leaves(tree)
+    for leaf in leaves:
+        if hasattr(leaf, "block_until_ready"):
+            leaf.block_until_ready()
+
+
 def _assert_mixed_quadrature_collective_parity(points: jax.Array) -> None:
     group_16 = [_collective_circular_coil(index, nquad=16) for index in range(3)]
     group_12 = [_collective_circular_coil(index + 3, nquad=12) for index in range(2)]
@@ -972,13 +978,7 @@ def _compiled_pullback_hlo(
     pullback: Callable[..., BiotSavartFieldPullback],
     *cotangents: jax.Array,
 ) -> str:
-    return (
-        jax.jit(pullback)
-        .lower(*cotangents)
-        .compile()
-        .as_text()
-        .lower()
-    )
+    return jax.jit(pullback).lower(*cotangents).compile().as_text().lower()
 
 
 def _assert_biot_savart_jax_native_pullback_collective_path(
@@ -1323,11 +1323,141 @@ def _run_grouped_biot_savart_coil_collective_case() -> None:
     assert summary["collective_axis"] == "coil"
     assert summary["collective_device_count"] == 4
 
-    lowered = jax.jit(grouped_biot_savart_B_from_spec).lower(
-        points,
-        coil_spec,
-    ).as_text()
+    lowered = (
+        jax.jit(grouped_biot_savart_B_from_spec)
+        .lower(
+            points,
+            coil_spec,
+        )
+        .as_text()
+    )
     assert "all_reduce" in lowered.lower()
+
+
+def _run_grouped_biot_savart_points_coils_collective_case() -> None:
+    """Verify ``points_coils`` 2D sharding lowers to a collective reduction.
+
+    Asserts:
+    - field result matches the dense reference,
+    - sharding summary advertises the 2D mesh axes and active collective,
+    - compiled HLO contains an ``all_reduce`` (reduction across coil axis),
+    - non-divisible coil counts and mixed quadrature groups still match the
+      dense reference.
+    """
+    with jax.transfer_guard("allow"):
+        points = jax.device_put(
+            np.linspace(0.1, 0.9, 24, dtype=np.float64).reshape(8, 3)
+        )
+        gammas, gammadashs, currents = _build_collective_circular_coils()
+        coil_spec = grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
+        stacked_gammas = jnp.stack(gammas)
+        stacked_gammadashs = jnp.stack(gammadashs)
+        stacked_currents = jnp.stack(currents)
+
+    with jax.transfer_guard("disallow"):
+        collective_B = grouped_biot_savart_B_from_spec(points, coil_spec)
+        dense_B_direct = biot_savart_B(
+            points, stacked_gammas, stacked_gammadashs, stacked_currents
+        )
+        collective_A = grouped_biot_savart_A_from_spec(points, coil_spec)
+        dense_A = biot_savart_A(
+            points, stacked_gammas, stacked_gammadashs, stacked_currents
+        )
+        collective_dB = grouped_biot_savart_dB_by_dX_from_spec(points, coil_spec)
+        dense_dB_direct = biot_savart_dB_by_dX(
+            points,
+            stacked_gammas,
+            stacked_gammadashs,
+            stacked_currents,
+        )
+        dense_B, dense_dB = biot_savart_B_and_dB(
+            points,
+            stacked_gammas,
+            stacked_gammadashs,
+            stacked_currents,
+        )
+        collective_B_and_dB = grouped_biot_savart_B_and_dB_from_spec(
+            points,
+            coil_spec,
+        )
+        summary = grouped_field_sharding_summary(points, coil_spec)
+        lowered = (
+            jax.jit(grouped_biot_savart_B_from_spec)
+            .lower(
+                points,
+                coil_spec,
+            )
+            .as_text()
+        )
+        _block_until_ready_tree(
+            (
+                collective_B,
+                dense_B_direct,
+                collective_A,
+                dense_A,
+                collective_dB,
+                dense_dB_direct,
+                dense_B,
+                dense_dB,
+                collective_B_and_dB,
+            )
+        )
+
+    _assert_allclose_to_reference(collective_B, dense_B_direct)
+    _assert_allclose_to_reference(collective_A, dense_A)
+    _assert_allclose_to_reference(collective_dB, dense_dB_direct)
+    collective_B, collective_dB = collective_B_and_dB
+    _assert_allclose_to_reference(collective_B, dense_B)
+    _assert_allclose_to_reference(collective_dB, dense_dB)
+
+    assert summary["field_collective"] is True, summary
+    assert summary["strategy"] == "points_coils", summary
+    assert summary["coil_axis"] == "coil", summary
+    assert summary["point_axis"] is not None, summary
+    assert summary["reduced_axis"] == "coil", summary
+    assert summary["collective_device_count"] >= 1
+    assert summary["point_device_count"] >= 1
+    assert (summary["point_device_count"] * summary["collective_device_count"]) == 4, (
+        summary
+    )
+    assert len(summary["mesh_axes"]) == 2, summary
+
+    assert "all_reduce" in lowered.lower(), lowered[:2000]
+
+    with jax.transfer_guard("allow"):
+        _assert_mixed_quadrature_collective_parity(points)
+
+
+def _run_grouped_biot_savart_points_coils_non_divisible_case() -> None:
+    """Verify ``points_coils`` handles non-divisible point counts via padding.
+
+    Forces ``point_device_count > 1`` (via a 2x2 mesh) and uses 7 points so
+    the point axis is not divisible. Asserts the result still matches the
+    dense reference (i.e. padding-trim is correct).
+    """
+    with jax.transfer_guard("allow"):
+        points = jax.device_put(
+            np.linspace(0.1, 0.9, 21, dtype=np.float64).reshape(7, 3)
+        )
+        gammas, gammadashs, currents = _build_collective_circular_coils()
+        coil_spec = grouped_coil_set_spec_from_lists(gammas, gammadashs, currents)
+        stacked_gammas = jnp.stack(gammas)
+        stacked_gammadashs = jnp.stack(gammadashs)
+        stacked_currents = jnp.stack(currents)
+
+    with jax.transfer_guard("disallow"):
+        dense_B = biot_savart_B(
+            points, stacked_gammas, stacked_gammadashs, stacked_currents
+        )
+        collective_B = grouped_biot_savart_B_from_spec(points, coil_spec)
+        summary = grouped_field_sharding_summary(points, coil_spec)
+        _block_until_ready_tree((dense_B, collective_B))
+
+    _assert_allclose_to_reference(collective_B, dense_B)
+
+    assert summary["field_collective"] is True
+    assert summary["strategy"] == "points_coils"
+    assert summary["point_device_count"] > 1, summary
 
 
 def _run_pairwise_penalty_explicit_row_sharding_case() -> None:
@@ -1475,21 +1605,27 @@ def _run_single_stage_surface_self_intersection_case() -> None:
     )
     surface.least_squares_fit(crossing_surface.gamma())
 
-    cross_section = single_stage_example._surface_phi0_cross_section_from_supported_dofs(
-        jax.device_put(np.asarray(surface.get_dofs(), dtype=np.float64), device=gpu),
-        jax.device_put(
-            np.asarray(surface.quadpoints_theta, dtype=np.float64),
-            device=gpu,
-        ),
-        jax.device_put(
-            single_stage_example.stellsym_scatter_indices(surface.mpol, surface.ntor),
-            device=gpu,
-        ),
-        mpol=surface.mpol,
-        ntor=surface.ntor,
-        nfp=surface.nfp,
-        stellsym=surface.stellsym,
-        surface_kind="xyztensorfourier",
+    cross_section = (
+        single_stage_example._surface_phi0_cross_section_from_supported_dofs(
+            jax.device_put(
+                np.asarray(surface.get_dofs(), dtype=np.float64), device=gpu
+            ),
+            jax.device_put(
+                np.asarray(surface.quadpoints_theta, dtype=np.float64),
+                device=gpu,
+            ),
+            jax.device_put(
+                single_stage_example.stellsym_scatter_indices(
+                    surface.mpol, surface.ntor
+                ),
+                device=gpu,
+            ),
+            mpol=surface.mpol,
+            ntor=surface.ntor,
+            nfp=surface.nfp,
+            stellsym=surface.stellsym,
+            surface_kind="xyztensorfourier",
+        )
     )
     assert cross_section.shape == (surface.quadpoints_theta.size, 3)
 
@@ -1659,9 +1795,9 @@ def _run_surface_rzfourier_normal_from_spec_case() -> None:
     _assert_finite_array(normal, expected_shape=(16, 16, 3))
 
 
-def _build_legacy_curve_objective_common_fixture() -> (
-    tuple[Sequence[object], SurfaceRZFourier, FrameRotation]
-):
+def _build_legacy_curve_objective_common_fixture() -> tuple[
+    Sequence[object], SurfaceRZFourier, FrameRotation
+]:
     _configure_transfer_guard_cpu_parity_backend()
 
     curves = create_equally_spaced_curves(
@@ -1686,15 +1822,15 @@ def _build_legacy_curve_objective_common_fixture() -> (
     return curves, surface, rotation
 
 
-def _build_legacy_curve_objective_value_fixture() -> (
-    tuple[Sequence[object], SurfaceRZFourier, FrameRotation]
-):
+def _build_legacy_curve_objective_value_fixture() -> tuple[
+    Sequence[object], SurfaceRZFourier, FrameRotation
+]:
     return _build_legacy_curve_objective_common_fixture()
 
 
-def _build_legacy_curve_objective_gradient_fixture() -> (
-    tuple[Sequence[object], SurfaceRZFourier, FrameRotation]
-):
+def _build_legacy_curve_objective_gradient_fixture() -> tuple[
+    Sequence[object], SurfaceRZFourier, FrameRotation
+]:
     curves, surface, rotation = _build_legacy_curve_objective_common_fixture()
     surface.set_rc(0, 0, 1.2)
     surface.set_rc(1, 0, 0.15)
@@ -1905,9 +2041,7 @@ def _build_stage2_target_objective_test_bundle(gpu: jax.Device):
         tf_curve.fix_all()
     for tf_current in tf_currents:
         tf_current.fix_all()
-    tf_coils = [
-        Coil(curve, current) for curve, current in zip(tf_curves, tf_currents)
-    ]
+    tf_coils = [Coil(curve, current) for curve, current in zip(tf_curves, tf_currents)]
 
     quadpoints = np.linspace(0.0, 1.0, 33, endpoint=False)
     banana_curve = CurveCWSFourierCPP(quadpoints, 2, coil_surf, G=0, H=0)
@@ -1969,7 +2103,9 @@ def _run_stage2_target_objective_ondevice_entry_case() -> None:
     bundle, dofs_jax = _build_stage2_target_objective_test_bundle(gpu)
     _, pullback = jax.vjp(bundle.objective, dofs_jax)
     grad = pullback(jax.device_put(np.array(1.0, dtype=np.float64), device=gpu))[0]
-    result = jax_minimize(bundle.objective, dofs_jax, method="lbfgs-ondevice", maxiter=1)
+    result = jax_minimize(
+        bundle.objective, dofs_jax, method="lbfgs-ondevice", maxiter=1
+    )
 
     assert np.isfinite(float(jax.device_get(bundle.objective(dofs_jax))))
     assert np.all(np.isfinite(np.asarray(jax.device_get(grad), dtype=np.float64)))
@@ -2176,6 +2312,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers.add_parser("grouped-gpu-spec-eval")
     subparsers.add_parser("grouped-explicit-point-sharding")
     subparsers.add_parser("grouped-coil-collective")
+    subparsers.add_parser("grouped-points-coils-collective")
+    subparsers.add_parser("grouped-points-coils-non-divisible")
     subparsers.add_parser("pairwise-penalty-explicit-row-sharding")
     subparsers.add_parser("shifted-grid-axis-sample")
     subparsers.add_parser("gamma-2d-eager-host-constants")
@@ -2188,9 +2326,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers.add_parser("surfacerzfourier-spec-defaults")
     subparsers.add_parser("surface-rzfourier-gamma-from-spec")
     subparsers.add_parser("surface-rzfourier-normal-from-spec")
-    legacy_curve_objective_value = subparsers.add_parser(
-        "legacy-curve-objective-value"
-    )
+    legacy_curve_objective_value = subparsers.add_parser("legacy-curve-objective-value")
     legacy_curve_objective_value.add_argument(
         "objective",
         choices=(
@@ -2256,6 +2392,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.case == "grouped-coil-collective":
         _run_grouped_biot_savart_coil_collective_case()
+        return 0
+    if args.case == "grouped-points-coils-collective":
+        _run_grouped_biot_savart_points_coils_collective_case()
+        return 0
+    if args.case == "grouped-points-coils-non-divisible":
+        _run_grouped_biot_savart_points_coils_non_divisible_case()
         return 0
     if args.case == "pairwise-penalty-explicit-row-sharding":
         _run_pairwise_penalty_explicit_row_sharding_case()

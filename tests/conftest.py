@@ -118,6 +118,49 @@ def _require_jax():
     return jax
 
 
+class _TwoRankReplayComm:
+    size = 2
+
+    def __init__(self, rank, expected_tys, expected_hits):
+        self.rank = rank
+        self._expected_tys = expected_tys
+        self._expected_hits = expected_hits
+        self._allgather_calls = 0
+
+    def allgather(self, value):
+        expected = (self._expected_tys, self._expected_hits)[self._allgather_calls]
+        _assert_list_arrays_close(value, expected[self.rank])
+        self._allgather_calls += 1
+        return expected
+
+    def allreduce(self, value):
+        return value
+
+
+def _assert_list_arrays_close(actual, expected):
+    assert len(actual) == len(expected)
+    for actual_array, expected_array in zip(actual, expected, strict=True):
+        np.testing.assert_allclose(actual_array, expected_array)
+
+
+def _assert_two_rank_replay_matches(no_comm_tys, no_comm_hits, run_with_comm):
+    expected_tys = [no_comm_tys[:1], no_comm_tys[1:]]
+    expected_hits = [no_comm_hits[:1], no_comm_hits[1:]]
+    for rank in range(_TwoRankReplayComm.size):
+        comm_tys, comm_hits = run_with_comm(
+            _TwoRankReplayComm(rank, expected_tys, expected_hits)
+        )
+        assert len(comm_tys) == len(no_comm_tys) == 2
+        assert len(comm_hits) == len(no_comm_hits) == 2
+        _assert_list_arrays_close(comm_tys, no_comm_tys)
+        _assert_list_arrays_close(comm_hits, no_comm_hits)
+
+
+@pytest.fixture
+def assert_two_rank_replay_matches():
+    return _assert_two_rank_replay_matches
+
+
 def _loaded_backend_module():
     module = sys.modules.get("simsopt.backend")
     if module is not None and hasattr(module, "invalidate_backend_cache"):

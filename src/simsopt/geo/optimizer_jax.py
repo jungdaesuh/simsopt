@@ -41,7 +41,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache, wraps
-import importlib
 import re
 from threading import Lock
 from typing import Callable
@@ -369,11 +368,7 @@ def _is_flat_optimizer_vector(x0) -> bool:
     if isinstance(x0, (jax.Array, np.ndarray)):
         return x0.ndim == 1
     if isinstance(x0, (list, tuple)):
-        try:
-            array = np.asarray(x0)
-        except Exception:
-            return False
-        return array.dtype != object and array.ndim == 1
+        return all(isinstance(item, (int, float, np.generic)) for item in x0)
     return False
 
 
@@ -399,18 +394,17 @@ def _prepare_optimizer_pytree_adapter(x0):
 
 
 def _mark_cacheable_jit_value_and_grad(fun):
-    try:
-        setattr(fun, _CACHEABLE_VALUE_AND_GRAD_ATTR, True)
-    except (AttributeError, TypeError):
-        pass
+    # ``fun`` must be a Python callable that accepts ``setattr`` (def, lambda,
+    # closure). Production call sites pass only such callables; if a future
+    # caller passes a builtin or ``__slots__`` instance the ``AttributeError``
+    # surfaces the contract violation rather than silently no-op'ing.
+    setattr(fun, _CACHEABLE_VALUE_AND_GRAD_ATTR, True)
     return fun
 
 
 def _mark_structured_private_solver_cacheable(fun, *, cache_token):
-    try:
-        setattr(fun, _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR, cache_token)
-    except (AttributeError, TypeError):
-        pass
+    # Same contract as ``_mark_cacheable_jit_value_and_grad``.
+    setattr(fun, _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR, cache_token)
     return fun
 
 
@@ -434,14 +428,14 @@ def _cached_jit_value_and_grad(fun):
     if cached is not None:
         return cached
     compiled = jax.jit(jax.value_and_grad(fun))
-    try:
-        with _SCALAR_VALUE_AND_GRAD_CACHE_LOCK:
-            cached = getattr(fun, _CACHED_VALUE_AND_GRAD_ATTR, None)
-            if cached is None:
-                setattr(fun, _CACHED_VALUE_AND_GRAD_ATTR, compiled)
-                return compiled
+    # Double-checked install under the cache lock. ``fun`` has already
+    # been marked via ``_mark_cacheable_jit_value_and_grad`` (the marker
+    # check above gated this branch), so ``setattr`` cannot raise.
+    with _SCALAR_VALUE_AND_GRAD_CACHE_LOCK:
+        cached = getattr(fun, _CACHED_VALUE_AND_GRAD_ATTR, None)
+        if cached is not None:
             return cached
-    except (AttributeError, TypeError):
+        setattr(fun, _CACHED_VALUE_AND_GRAD_ATTR, compiled)
         return compiled
 
 
@@ -469,8 +463,7 @@ def _finalize_optimizer_result(result, adapter):
 # The package is loaded on first access to a private symbol, so importing
 # optimizer_jax for SciPy / Newton paths never touches private optimizer internals.
 # ---------------------------------------------------------------------------
-_private_pkg = None  # None = untried, False = absent, module = loaded
-_PRIVATE_PKG_MODULE_NAME = f"{__package__}.optimizer_jax_private"
+_private_pkg = None
 
 _PRIVATE_LAZY_NAMES = frozenset(
     {
@@ -490,11 +483,9 @@ def _load_private_pkg():
     global _private_pkg
     if _private_pkg is None:
         try:
-            optimizer_jax_private = importlib.import_module(
-                ".optimizer_jax_private", __package__
-            )
-        except ImportError as exc:
-            if getattr(exc, "name", None) != _PRIVATE_PKG_MODULE_NAME:
+            import simsopt.geo.optimizer_jax_private as optimizer_jax_private
+        except ModuleNotFoundError as exc:
+            if exc.name != "simsopt.geo.optimizer_jax_private":
                 raise
             _private_pkg = False
         else:

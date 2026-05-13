@@ -392,9 +392,24 @@ def boozer_residual_scalar_and_grad_cpu_ordered(
             B0 * dB0 + B1 * dB1 + B2_component * dB2_component
         )
 
-        dtang0 = iota * dxtheta_ds[i, j, 0, :] + dxphi_ds[i, j, 0, :]
-        dtang1 = iota * dxtheta_ds[i, j, 1, :] + dxphi_ds[i, j, 1, :]
-        dtang2 = iota * dxtheta_ds[i, j, 2, :] + dxphi_ds[i, j, 2, :]
+        dtang_factors = jnp.asarray(
+            [iota, _as_runtime_float64(1.0, reference=B)], dtype=B.dtype
+        )
+        dtang0 = jnp.tensordot(
+            dtang_factors,
+            jnp.stack((dxtheta_ds[i, j, 0, :], dxphi_ds[i, j, 0, :])),
+            axes=((0,), (0,)),
+        )
+        dtang1 = jnp.tensordot(
+            dtang_factors,
+            jnp.stack((dxtheta_ds[i, j, 1, :], dxphi_ds[i, j, 1, :])),
+            axes=((0,), (0,)),
+        )
+        dtang2 = jnp.tensordot(
+            dtang_factors,
+            jnp.stack((dxtheta_ds[i, j, 2, :], dxphi_ds[i, j, 2, :])),
+            axes=((0,), (0,)),
+        )
 
         dres0 = G * dB0 - (dB2 * tang0 + B2 * dtang0)
         dres1 = G * dB1 - (dB2 * tang1 + B2 * dtang1)
@@ -408,7 +423,7 @@ def boozer_residual_scalar_and_grad_cpu_ordered(
         drtil0 = dres0 * wij + dw * res0
         drtil1 = dres1 * wij + dw * res1
         drtil2 = dres2 * wij + dw * res2
-        surface_grad = rtil0 * drtil0 + rtil1 * drtil1 + rtil2 * drtil2
+        surface_grad = rtil0 * drtil0 + (rtil1 * drtil1 + rtil2 * drtil2)
         grad = grad.at[:nsurfdofs].add(surface_grad)
 
         dres0_iota = -B2 * xtheta[i, j, 0]

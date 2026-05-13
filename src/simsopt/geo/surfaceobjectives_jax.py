@@ -1512,54 +1512,48 @@ def _traceable_full_single_stage_outer_objective(
 def _canonicalize_traceable_exact_quadrature(booz_jax):
     """Return exact-compatible quadrature for the traceable scalar objective.
 
-    Real single-stage fixtures often initialize Boozer least-squares surfaces
-    on the VMEC half-period integration grid. That grid uses half-cell-shifted
-    phi points for spectral quadrature, so it is valid for the solve but does
-    not match the unshifted quadrature families accepted by
-    ``SurfaceXYZTensorFourier.get_stellsym_mask()``. The traceable objective is
-    evaluated from surface DOFs, so it can safely canonicalize to an exact
-    quadrature family when the input surface uses a shifted integration grid.
+    VMEC half-period integration grids are half-cell shifted for spectral
+    quadrature. BoozerExact's stellsym mask accepts unshifted exact grids, so
+    the traceable scalar objective canonicalizes that known integration family
+    before building its fixed residual mask.
     """
     quadpoints_phi = np.asarray(booz_jax.quadpoints_phi, dtype=float)
     quadpoints_theta = np.asarray(booz_jax.quadpoints_theta, dtype=float)
 
-    def _mask_indices_for(phi_grid, theta_grid):
-        return _compute_stellsym_mask_indices_for_grid(
-            mpol=booz_jax.mpol,
-            ntor=booz_jax.ntor,
-            nfp=booz_jax.nfp,
-            stellsym=booz_jax.stellsym,
-            quadpoints_phi=phi_grid,
-            quadpoints_theta=theta_grid,
+    mpol = int(booz_jax.mpol)
+    ntor = int(booz_jax.ntor)
+    nfp = float(booz_jax.nfp)
+    if booz_jax.stellsym and quadpoints_phi.size > 1:
+        shifted_half_period_phi = np.asarray(
+            Surface.get_phi_quadpoints(
+                nphi=quadpoints_phi.size,
+                range=Surface.RANGE_HALF_PERIOD,
+                nfp=booz_jax.nfp,
+            ),
+            dtype=float,
         )
-
-    try:
-        mask_indices = _mask_indices_for(quadpoints_phi, quadpoints_theta)
-    except ValueError:
-        phi_max = float(np.max(quadpoints_phi)) if quadpoints_phi.size else 0.0
-        half_period_upper = 0.5 / float(booz_jax.nfp)
-        if phi_max <= half_period_upper + 1e-12:
+        if np.allclose(quadpoints_phi, shifted_half_period_phi):
             quadpoints_phi = np.linspace(
                 0.0,
-                half_period_upper,
-                int(booz_jax.ntor) + 1,
+                0.5 / nfp,
+                ntor + 1,
                 endpoint=False,
             )
-        else:
-            quadpoints_phi = np.linspace(
+            quadpoints_theta = np.linspace(
                 0.0,
-                1.0 / float(booz_jax.nfp),
-                2 * int(booz_jax.ntor) + 1,
+                1.0,
+                2 * mpol + 1,
                 endpoint=False,
             )
-        quadpoints_theta = np.linspace(
-            0.0,
-            1.0,
-            2 * int(booz_jax.mpol) + 1,
-            endpoint=False,
-        )
-        mask_indices = _mask_indices_for(quadpoints_phi, quadpoints_theta)
 
+    mask_indices = _compute_stellsym_mask_indices_for_grid(
+        mpol=mpol,
+        ntor=ntor,
+        nfp=booz_jax.nfp,
+        stellsym=booz_jax.stellsym,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+    )
     return (
         _as_jax_float64(quadpoints_phi),
         _as_jax_float64(quadpoints_theta),
@@ -1725,10 +1719,7 @@ def _traceable_cache_leaf_signature(leaf):
 
 def _traceable_cache_tree_signature(tree):
     """Build a deterministic cache signature for a pytree-like runtime object."""
-    try:
-        leaves, treedef = jax.tree_util.tree_flatten(tree)
-    except TypeError:
-        return _traceable_cache_leaf_signature(tree)
+    leaves, treedef = jax.tree_util.tree_flatten(tree)
     return (
         "tree",
         repr(treedef),
@@ -1772,10 +1763,7 @@ def _traceable_contract_leaf_signature(leaf):
 
 def _traceable_contract_tree_signature(tree):
     """Build a cheap cache signature for immutable runtime contracts."""
-    try:
-        leaves, treedef = jax.tree_util.tree_flatten(tree)
-    except TypeError:
-        return _traceable_contract_leaf_signature(tree)
+    leaves, treedef = jax.tree_util.tree_flatten(tree)
     return (
         "tree",
         repr(treedef),
@@ -1801,10 +1789,7 @@ def _traceable_runtime_hostify_leaf(leaf):
 
 def _traceable_runtime_hostify_tree(tree):
     """Recursively hostify runtime constants used by traceable closures."""
-    try:
-        return jax.tree_util.tree_map(_traceable_runtime_hostify_leaf, tree)
-    except TypeError:
-        return _traceable_runtime_hostify_leaf(tree)
+    return jax.tree_util.tree_map(_traceable_runtime_hostify_leaf, tree)
 
 
 def _traceable_runtime_deviceify_leaf(leaf):
@@ -1820,10 +1805,7 @@ def _traceable_runtime_deviceify_leaf(leaf):
 
 def _traceable_runtime_deviceify_tree(tree):
     """Recursively device-place cached runtime arrays for strict diagnostics."""
-    try:
-        return jax.tree_util.tree_map(_traceable_runtime_deviceify_leaf, tree)
-    except TypeError:
-        return _traceable_runtime_deviceify_leaf(tree)
+    return jax.tree_util.tree_map(_traceable_runtime_deviceify_leaf, tree)
 
 
 def _evaluate_scalar_or_value_and_grad(

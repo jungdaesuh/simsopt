@@ -1,8 +1,32 @@
-# Item 14 Blocker — `tracing.cpp` → `jax_core/tracing.py`
+# Item 14 Historical Blocker — `tracing.cpp` → `jax_core/tracing.py`
 
-Status: **BLOCKED** with category `missing_dependency`.
+Status: **RESOLVED FOR CPU-JAX / NO-GPU SCOPE**.
 
-Closure level: `blocked_dependency`.
+Closure level: `cpu_oracle_complete`.
+
+2026-05-13 continuation update: the original categorical blocker below is no
+longer current. The worktree now contains `src/simsopt/jax_core/tracing.py`
+with the in-repo DOPRI5 path, fieldline tracing, Cartesian vacuum
+guiding-centre tracing, Cartesian full-orbit tracing, Boozer-coordinate
+guiding-centre RHS variants, phi-plane event localization on the Cartesian
+fieldline / `gc_vac` lanes, and JAX stopping-criterion dataclasses for the
+Cartesian criteria, including `LevelsetStoppingCriterion` through the
+`SurfaceClassifier` bridge. Current CPU strict-transfer validation:
+`tests/jax_core/test_tracing_jax_item14.py`,
+`tests/jax_core/test_tracing_jax_levelset_events.py`,
+`tests/jax_core/test_tracing_jax_phi_events.py`,
+`tests/jax_core/test_tracing_jax_guiding_center.py`,
+`tests/jax_core/test_tracing_jax_fullorbit.py`,
+`tests/jax_core/test_tracing_jax_fullorbit_events.py`,
+`tests/jax_core/test_tracing_jax_gc_boozer.py`, and
+`tests/jax_core/test_tracing_jax_boozer_zeta_events.py`.
+
+This blocker is now retained only as provenance. Host-level MPI split/gather is
+implemented in the public wrappers and covered by fake two-rank replay tests.
+CPU Boozer field objects are intentionally rejected under the JAX backend
+rather than bridged through the C++ oracle; callers use
+`BoozerRadialInterpolantJAX`. No real `mpiexec` multi-rank proof or CUDA proof
+is claimed.
 
 ## Item 14 scope
 
@@ -34,7 +58,7 @@ Read at `src/simsoptpp/tracing.cpp` (parent commit `a9da18fac`):
 - **Stopping criteria**: 9 polymorphic `StoppingCriterion` subclasses polled
   every accepted step (`tracing.cpp:432-438`).
 
-## Why this is BLOCKED
+## Historical blocker rationale
 
 Three structural prerequisites must be ported before any meaningful Item 14
 JAX-native tracing port can claim parity with the C++ oracle for the public
@@ -131,10 +155,10 @@ port. This requires:
   "id": "14",
   "tier": "P1",
   "title": "tracing RK path",
-  "status": "blocked",
-  "closure_level": "blocked_dependency",
+  "status": "complete",
+  "closure_level": "cpu_oracle_complete",
   "blocker": {
-    "category": "missing_dependency",
+    "category": "public_surface_carveout",
     "detail": "Item 14 requires (a) item 13 closure for RegularGridInterpolant3D-backed LevelsetStoppingCriterion, (b) a JAX Boozer field port (P5 items 32-33, currently future-scope), (c) a JAX surface classifier kernel, and (d) a tolerance-policy decision on event-time accuracy for the bisection root solver. None of these are resolvable inside the active-scope budget without expanding active_scope and adding a tolerance lane.",
     "debug_artifact": ".artifacts/jax_port_goal/blockers/14-debug.md",
     "needs_user": true

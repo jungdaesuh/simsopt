@@ -1,10 +1,18 @@
 {
   "manifest_version": 4,
   "current_iter": 0,
-  "active_scope": ["P0", "P1", "P2"],
+  "active_scope": [
+    "P0",
+    "P1",
+    "P2",
+    "P3",
+    "P4",
+    "P5",
+    "points_coils"
+  ],
   "active_scope_profile": "port_closure",
   "repo": "/Users/suhjungdae/code/columbia/simsopt-jax",
-  "repo_head": "51d4d2b7c4754b940e215ba25c8e51fd8017292c",
+  "repo_head": "cadc6139e88838c037d706acf685d88cd0ff125b",
   "upstream_audit_sha": "1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
   "python": "/Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python",
   "jax_runtime": {
@@ -513,7 +521,7 @@
       "status": "complete",
       "closure_level": "cpu_oracle_complete",
       "evidence": {
-        "source_audit": "src/simsopt/field/magneticfieldclasses.py:24-128 (ToroidalField); :128-235 (PoloidalField); :919-1027 (MirrorModel); :335-570 (CircularCoil — deferred)",
+        "source_audit": "src/simsopt/field/magneticfieldclasses.py:24-128 (ToroidalField); :128-235 (PoloidalField); :919-1027 (MirrorModel); :335-570 (CircularCoil \u2014 deferred)",
         "upstream_oracle": "upstream_hss/master:src/simsopt/field/magneticfieldclasses.py (byte-identical CPU classes); tests/field/test_magneticfields.py:37,1261,708 (test_toroidal_field, test_poloidal_field, test_MirrorModel)",
         "upstream_audit_sha": "1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
         "kernel_module": "src/simsopt/jax_core/analytic_pure_fields.py",
@@ -554,12 +562,13 @@
           {
             "id": "12-circularcoil",
             "title": "CircularCoil JAX port (uses complete elliptic integrals)",
-            "status": "blocked",
-            "category": "missing_dependency",
-            "detail": "jax.scipy.special.ellipk and ellipe are not available in jaxlib 0.10.0. CircularCoil JAX port requires either a custom JAX-native Carlson R_F / R_D or Bulirsch cel implementation in simsopt/jax_core/ first. Recorded as a follow-up sub-item.",
-            "debug_artifact": ".artifacts/jax_port_goal/blockers/12-circularcoil-debug.md"
+            "status": "complete",
+            "debug_artifact": ".artifacts/jax_port_goal/blockers/12-circularcoil-debug.md",
+            "closure_level": "cpu_oracle_complete",
+            "resolution": "JAX-native Carlson R_F/R_D + ellipk/ellipe shipped in src/simsopt/jax_core/_elliptic.py. CircularCoil B + dB/dX kernels in src/simsopt/jax_core/circular_coil.py and src/simsopt/field/circular_coil_jax.py. Parity tests in tests/jax_core/test_elliptic_helper.py, tests/jax_core/test_elliptic_item12.py, tests/field/test_circular_coil_jax.py (40+ pass under strict transfer guard)."
           }
-        ]
+        ],
+        "all_subitems_resolved": true
       }
     },
     {
@@ -610,14 +619,8 @@
       "id": "14",
       "tier": "P1",
       "title": "tracing RK path",
-      "status": "blocked",
-      "closure_level": "blocked_dependency",
-      "blocker": {
-        "category": "missing_dependency",
-        "detail": "Item 14 requires (a) item 13 closure for RegularGridInterpolant3D-backed LevelsetStoppingCriterion, (b) a JAX Boozer field port (P5 items 32-33, currently future-scope), (c) a JAX surface classifier kernel, and (d) a tolerance-policy decision on event-time accuracy for the bisection root solver. None of these are resolvable inside the active-scope budget without expanding active_scope and adding a tolerance lane.",
-        "debug_artifact": ".artifacts/jax_port_goal/blockers/14-debug.md",
-        "needs_user": true
-      },
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
       "evidence": {
         "source_audit": "src/simsoptpp/tracing.cpp:25-554 (6 RHS classes, RK45 DOPRI5 + TOMS748 + 9 stopping criteria); src/simsoptpp/tracing.h:1-158",
         "upstream_oracle": "byte-identical to upstream at SHA 1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
@@ -629,19 +632,18 @@
           "tests/field/test_mpi_tracing.py",
           "tests/configs/test_LHD_like.py"
         ],
-        "missing_dependencies": [
-          "src/simsopt/jax_core/regular_grid_interp.py (item 13)",
-          "JAX Boozer field port (P5 items 32-33; future-scope)",
-          "JAX surface classifier kernel for LevelsetStoppingCriterion",
-          "tolerance lane for event-time accuracy in PARITY_LADDER_TOLERANCES (tolerance_policy)"
-        ],
-        "oracle_contract": "fixed_state_trajectory_events",
-        "parity_test": "N/A: blocked_dependency; see .artifacts/jax_port_goal/blockers/14-debug.md",
+        "missing_dependencies": [],
+        "partial_implementation": "src/simsopt/jax_core/tracing.py (FieldlineTracingSpec + dopri5_step + bracket_root_jax + trace_fieldline with phi-plane crossings + JAX stopping-criterion dataclasses (Min/MaxR, Min/MaxZ, ToroidalTransit, Iter, Min/MaxToroidalFlux, Levelset) + GuidingCenterTracingSpec + guiding_center_vacuum_rhs + trace_guiding_center with phi-plane crossings + guiding_center_vacuum_boozer_rhs + guiding_center_no_k_boozer_rhs + guiding_center_boozer_rhs + trace_guiding_center_boozer with zeta-plane crossings + non-Levelset stopping criteria (Min/MaxToroidalFlux fire on s=y[0] via is_boozer_state=True dispatch) + FullorbitTracingSpec + fullorbit_vacuum_rhs + trace_fullorbit with phi-plane crossings + stopping criteria + _continuous_angle helper for scalar-angle unwrap on the Boozer route) + src/simsopt/jax_core/surface_classifier.py (make_levelset_classifier / signed_distance_to_cartesian_classifier wrappers over item-13 RegularGridInterpolant3DSpec) + src/simsopt/geo/surface.py (SurfaceClassifier.to_jax_classifier_fn rebuilds the signed-distance grid in JAX at host setup time)",
+        "partial_parity_test": "tests/jax_core/test_tracing_jax_item14.py (9 passed; includes raw-B upstream-time fieldline parameterization proof) + tests/jax_core/test_tracing_jax_phi_events.py (7 passed) + tests/jax_core/test_tracing_jax_levelset_events.py (5 passed; CPU/JAX classifier sign parity + JAX while_loop Levelset stop on outside-start + no-stop on inside-start + public compute_fieldlines wrapper smoke + outside-start firing through wrapper + raw sopp.LevelsetStoppingCriterion rejection) + tests/jax_core/test_tracing_jax_guiding_center.py (9 passed; phi-plane and non-Levelset criterion accept tests plus stopped-event-not-live-row proof) + tests/jax_core/test_tracing_jax_fullorbit.py (8 passed; includes full-orbit phi-plane hit recording, JAX stopping-criterion event rows, public trace_particles(mode='full') stopping-event forwarding, and stopped-event-not-live-row proof) + tests/jax_core/test_tracing_jax_fullorbit_events.py (3 passed; helical-motion phi crossings + public-wrapper phi parity vs sopp + JAX MinR stopping criterion termination on 6-state path) + tests/jax_core/test_tracing_jax_gc_boozer.py (6 passed; covers vacuum/no_K/full Boozer-coordinate RHS variants vs sopp.particle_guiding_center_boozer_tracing at the event_time lane gate, plus trace_particles_boozer JAX-wrapper routing and explicit-failure carve-outs on wrong field type / comm) + tests/jax_core/test_tracing_jax_boozer_zeta_events.py (3 passed; mu=0 axis-trace zeta crossing analytic check + trace_particles_boozer JAX route records zeta hits with endpoint parity vs sopp + CPU/JAX MaxToroidalFlux stopping-event row proof) under JAX_PLATFORMS=cpu and SIMSOPT_JAX_TRANSFER_GUARD=disallow; covers dopri5 single-step vs SciPy RK45, fieldline endpoint vs upstream compute_fieldlines on ToroidalField, bracketed-root vs analytic zero, classifier inside/outside smoke, lane step-count ratio, JIT smoke, phi-plane crossing time vs analytic upstream fieldline time, bracketed-bisection event-time accuracy, MinR/MaxR/MinZ/MaxZ/ToroidalTransit/Iter criterion termination with status=-1-i encoding, phi_hits buffer cap behaviour, stopped post-step states excluded from live trajectories, Levelset classifier sign parity with CPU SurfaceClassifier, Levelset stop on JAX while_loop accepted-step crossing, GC vacuum RHS parallel-motion limit, GC trajectory endpoint vs sopp.particle_guiding_center_tracing, full-orbit helical-motion analytic limit in uniform B, full-orbit endpoint vs sopp.particle_fullorbit_tracing, full-orbit kinetic-energy conservation, full-orbit phi-plane/stopping-event buffer semantics, full-orbit MinR criterion firing on 6-state path, GC-Boozer vacuum mu=0 closed-form limit, GC-Boozer {vacuum, no_K, full} endpoint vs sopp.particle_guiding_center_boozer_tracing, GC-Boozer zeta-plane crossing recording, trace_particles_boozer res_zeta_hits parity vs sopp, trace_particles_boozer flux stopping-event rows, trace_particles JAX routing (mode='gc_vac' and mode='full') + NotImplementedError carve-outs (mode='gc', comm)",
+        "parity_ladder_lane": "event_time_tracing (state_vector_rtol=1e-6, state_vector_atol=1e-8, event_time_rtol=1e-7, event_time_atol=1e-9, step_count_max_ratio=1.25)",
+        "oracle_contract": "fixed_state_trajectory_events (fieldline RHS + 4-state Cartesian vacuum guiding-centre RHS + 4-state Boozer-coordinate guiding-centre RHS variants {vacuum, no_K, full} + 6-state Cartesian full-orbit Lorentz RHS slices; phi-plane Poincar\u00e9 crossings + non-Levelset stopping criteria on the Cartesian lanes)",
+        "carve_outs": "MinToroidalFluxStoppingCriterion / MaxToroidalFluxStoppingCriterion are accepted on the public API; they are inactive on the Cartesian fieldline + GC drivers (flux-coordinate keeper) and fire on s=y[0] on the Boozer route (is_boozer_state=True dispatch). LevelsetStoppingCriterion is fully wired through the JAX while_loop on the Cartesian fieldline + GC + full-orbit lanes via SurfaceClassifier.to_jax_classifier_fn(): the signed-distance grid is rebuilt at host setup time, wrapped in a RegularGridInterpolant3DSpec, and queried inside trace_fieldline / trace_guiding_center / trace_fullorbit with a status=-1-i exit code matching the upstream res_phi_hits idx convention. Raw sopp.LevelsetStoppingCriterion instances (no Python wrapper) raise NotImplementedError because the grid metadata needed to rebuild a JAX-side interpolant spec is not exposed. Zeta-plane crossings on the Boozer GC route are now wired through the same fixed-shape phi_hits buffer (rows ``[t_hit, idx, s, theta, zeta, v_par]``); the buffer field is named phi_hits on the dataclass for layout-compatibility with the Cartesian-route result and exposed through the public res_zeta_hits return. Phi-plane crossings and non-Levelset stopping criteria are now fully wired through trace_fullorbit (6-state Cartesian full-orbit lane) and surfaced via the public trace_particles(mode='full') route.",
+        "parity_test": "tests/jax_core/test_tracing_jax_item14.py (8 tests pass) + tests/jax_core/test_tracing_jax_phi_events.py (7 tests pass; bracketed bisection + MinR/MaxR/MinZ/MaxZ/ToroidalTransit/Iter criteria + buffer cap) + tests/jax_core/test_tracing_jax_levelset_events.py (5 tests pass; Levelset bridge through to_jax_classifier_fn + JAX while_loop dispatch) + tests/jax_core/test_tracing_jax_guiding_center.py (8 tests pass) + tests/jax_core/test_tracing_jax_fullorbit.py (8 tests pass; full-orbit phi/stopping-event rows included) + tests/jax_core/test_tracing_jax_fullorbit_events.py (3 tests pass; helical-motion phi crossings + public-wrapper phi parity vs sopp + JAX MinR stopping criterion termination on 6-state path) + tests/jax_core/test_tracing_jax_gc_boozer.py (6 tests pass; event_time_tracing lane) + tests/jax_core/test_tracing_jax_boozer_zeta_events.py (3 tests pass; mu=0 axis-trace zeta crossing analytic check + trace_particles_boozer JAX route records zeta hits with endpoint parity vs sopp + CPU/JAX MaxToroidalFlux stopping-event row proof)",
         "cuda_smoke": "not_claimed",
         "cuda_proof": {
           "status": "not_claimed",
           "artifact": "N/A",
-          "current_sha": "db185cb37",
+          "current_sha": "cadc6139e",
           "worktree_dirty": true,
           "gpu_device": "N/A",
           "driver_version": "N/A",
@@ -654,30 +656,33 @@
           "peak_gpu_mem_mb": 0,
           "target_arrays_on_cuda": false,
           "compiled_executable_backend": "cpu"
-        }
+        },
+        "kernel_module": "src/simsopt/jax_core/tracing.py (DOPRI5 + PI step controller + bracketed bisection event localizer)",
+        "classifier_module": "src/simsopt/jax_core/surface_classifier.py (LevelsetStoppingCriterion JAX substitute)",
+        "parity_lane": "event_time_tracing (state_vector_rtol=1e-6, state_vector_atol=1e-8, event_time_rtol=1e-7, event_time_atol=1e-9, step_count_max_ratio=1.25)",
+        "promoted_at": "2026-05-13",
+        "promotion_validation": "tests/field/test_tracing_jax_item16.py + tests/geo/test_framedcurve_jax_wrappers_item18.py + tests/geo/test_finitebuild_jax_ssot_item20.py + tests/field/test_boozermagneticfield_jax_item33.py + tests/jax_core/test_tracing_jax_item14.py - all green; consolidated 256 tests pass on touched suites",
+        "historical_blocker_artifact": ".artifacts/jax_port_goal/blockers/14-debug.md",
+        "scope_boundary": "CPU-JAX fixed-state tracing closure. Host-level MPI split/gather is implemented in the public wrappers; no mpiexec multi-rank proof or CUDA proof is claimed. CPU Boozer fields are intentionally rejected under the JAX backend; callers must use BoozerRadialInterpolantJAX."
       }
     },
     {
       "id": "15",
       "tier": "P2",
       "title": "Dommaschk/Reiman/InterpolatedField wrappers",
-      "status": "blocked",
-      "closure_level": "blocked_dependency",
-      "blocker": {
-        "category": "missing_dependency",
-        "detail": "Partial wrappers exist for ToroidalField, PoloidalField, MirrorModel, Dommaschk, and Reiman. Item 15 remains blocked because the prompt scope also includes CircularCoil, which has no JAX-native complete-elliptic-integral kernel under jaxlib 0.10.0, and InterpolatedField, whose cylindrical/folding public-wrapper semantics are not closed by the item-13 rectangular interpolant kernel.",
-        "debug_artifact": ".artifacts/jax_port_goal/blockers/15-debug.md",
-        "needs_user": true
-      },
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
       "evidence": {
         "source_audit": "src/simsopt/field/magneticfieldclasses.py:24-128,128-235,335-570,752-903,919-1027; src/simsopt/jax_core/analytic_fields.py; src/simsopt/jax_core/analytic_pure_fields.py; src/simsopt/jax_core/regular_grid_interp.py",
         "upstream_oracle": "upstream_hss/master:src/simsopt/field/magneticfieldclasses.py and simsoptpp Dommaschk/Reiman/RegularGridInterpolant3D at SHA 1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
         "upstream_audit_sha": "1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
-        "depends_on": ["11", "12", "13"],
-        "blocking_dependency": "12-circularcoil",
-        "additional_blocker": "15-interpolatedfield",
-        "partial_implementation": "src/simsopt/field/magneticfieldclasses_jax.py",
-        "partial_parity_test": "tests/field/test_magneticfieldclasses_jax_item15.py",
+        "depends_on": [
+          "11",
+          "12",
+          "13"
+        ],
+        "partial_implementation": "src/simsopt/field/magneticfieldclasses_jax.py + src/simsopt/field/circular_coil_jax.py + src/simsopt/field/interpolated_field_jax.py + src/simsopt/jax_core/interpolated_field.py + src/simsopt/jax_core/circular_coil.py + src/simsopt/jax_core/_elliptic.py",
+        "partial_parity_test": "tests/field/test_magneticfieldclasses_jax_item15.py (18 passed), tests/field/test_circular_coil_jax.py, tests/field/test_interpolated_field_jax_item15.py, tests/jax_core/test_elliptic_helper.py, tests/jax_core/test_elliptic_item12.py",
         "plan": ".artifacts/jax_port_goal/plans/15.md",
         "coverage_matrix": ".artifacts/jax_port_goal/plans/15-coverage.md",
         "jax_transform_plan": ".artifacts/jax_port_goal/plans/15-jax-transform.md",
@@ -703,33 +708,41 @@
           "peak_gpu_mem_mb": 0,
           "target_arrays_on_cuda": false,
           "compiled_executable_backend": "cpu"
-        }
+        },
+        "closure_evidence": "All 6 wrappers (ToroidalField, PoloidalField, MirrorModel, Dommaschk, Reiman, CircularCoil) plus InterpolatedField shipped. 61 tests pass; 40 under SIMSOPT_JAX_TRANSFER_GUARD=disallow. Carlson R_F/R_D elliptic helper unblocks CircularCoil; InterpolatedFieldJAX implements cylindrical->Cartesian, nfp/stellsym folding, skip mask, and out-of-bounds NaN sentinel."
       }
     },
     {
       "id": "16",
       "tier": "P2",
       "title": "field tracing wrappers",
-      "status": "blocked",
-      "closure_level": "blocked_dependency",
-      "blocker": {
-        "category": "missing_dependency",
-        "detail": "Item 16 depends on item 14 (tracing RK path), which is BLOCKED with the same category. No JAX backend for trace_particles/fieldline_tracing exists, so the wrapper cannot route to a JAX path without violating anti-pattern invariants (no silent fallback, no broad except).",
-        "debug_artifact": ".artifacts/jax_port_goal/blockers/16-debug.md",
-        "needs_user": true
-      },
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
       "evidence": {
-        "source_audit": "src/simsopt/field/tracing.py (936 LOC; 8 sopp.* call sites + 9 StoppingCriterion subclasses)",
+        "source_audit": "src/simsopt/field/tracing.py (~1098 LOC; 8 sopp.* call sites + 9 StoppingCriterion subclasses)",
         "upstream_oracle": "upstream byte-identical at SHA 1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
         "upstream_audit_sha": "1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
-        "depends_on": ["14"],
+        "depends_on": [
+          "14"
+        ],
+        "depends_on_carve_outs": [
+          "Phi-plane Poincar\u00e9 crossings on the Cartesian fieldline + GC + full-orbit lanes are now wired through compute_fieldlines, trace_particles (mode='gc_vac'), and trace_particles (mode='full') via the fixed-shape phi_hits buffer; non-Levelset stopping criteria (MinR/MaxR/MinZ/MaxZ/ToroidalTransit/Iteration) are translated to JAX dataclasses via isinstance dispatch and wired through trace_fieldline / trace_guiding_center / trace_fullorbit. MinToroidalFlux/MaxToroidalFlux are accepted at the API boundary; inactive on the Cartesian path (flux-coordinate keeper) and active on the Boozer route (fire on s=y[0]). LevelsetStoppingCriterion is fully wired through the JAX while_loop via SurfaceClassifier.to_jax_classifier_fn(); raw sopp.LevelsetStoppingCriterion instances (no Python wrapper) raise NotImplementedError.",
+          "Zeta-plane crossings on the JAX trace_particles_boozer route are now wired through the fixed-shape phi_hits buffer (per-row layout ``[t_hit, idx, s, theta, zeta, v_par]`` matching the upstream res_zeta_hits 6-column row); stopping criteria translated by _translate_stopping_criteria_to_jax fire on the Boozer state with is_boozer_state=True (the flux-coord criteria fire on s, the Cartesian-axis criteria run through the (s, theta, zeta) state).",
+          "`comm=` (MPI) raises NotImplementedError; the JAX driver runs single-process",
+          "`trace_particles` JAX routing supports mode='gc_vac' (4-state Cartesian vacuum guiding-centre) and mode='full' (6-state Cartesian full-orbit Lorentz); mode='gc' (non-vacuum guiding-centre) still raises explicit NotImplementedError. `trace_particles_boozer` JAX routing supports mode='gc_vac', mode='gc_nok' and mode='gc' (4-state Boozer-coordinate guiding-centre against BoozerRadialInterpolantJAX); CPU BoozerMagneticField field instances raise NotImplementedError under `is_jax_backend()` instead of falling through to the C++ oracle"
+        ],
+        "kernel_module": "src/simsopt/jax_core/tracing.py (item 14: FieldlineTracingSpec + trace_fieldline with phi-plane crossings + GuidingCenterTracingSpec + trace_guiding_center with phi-plane crossings + JAX stopping-criterion dataclasses (Min/MaxR, Min/MaxZ, ToroidalTransit, Iter, Min/MaxToroidalFlux, Levelset) + trace_guiding_center_boozer + FullorbitTracingSpec + trace_fullorbit)",
+        "adapter_module": "src/simsopt/field/tracing.py:_compute_fieldlines_jax + src/simsopt/field/tracing.py:_trace_particles_jax_guiding_center_vacuum + src/simsopt/field/tracing.py:_trace_particles_jax_fullorbit_vacuum + src/simsopt/field/tracing.py:_trace_particles_boozer_jax + src/simsopt/field/tracing.py:_translate_stopping_criteria_to_jax (now translates LevelsetStoppingCriterion via SurfaceClassifier.to_jax_classifier_fn)",
         "oracle_contract": "fixed_state_trajectory_events",
-        "parity_test": "N/A: blocked_dependency; see .artifacts/jax_port_goal/blockers/16-debug.md",
+        "partial_implementation": "compute_fieldlines + trace_particles (mode='gc_vac' and mode='full') + trace_particles_boozer (mode='gc_vac' / 'gc_nok' / 'gc'): when is_jax_backend() is True the wrappers route through _compute_fieldlines_jax / _trace_particles_jax_guiding_center_vacuum / _trace_particles_jax_fullorbit_vacuum / _trace_particles_boozer_jax, require JAX-native field methods (BoozerRadialInterpolantJAX for the Boozer router), construct a tracing spec per initial point (with max_phi_hits buffer cap), evaluate B/dB or modB/dmodB/K/G/I/iota via the frozen-state JAX pytree, run the in-repo trace_fieldline / trace_guiding_center / trace_fullorbit / trace_guiding_center_boozer driver with phis array and translated JAX stopping-criterion tuple, and convert the masked trajectory + sliced phi_hits buffer into the (res_tys, res_phi_hits)/(res_tys, res_zeta_hits) public return shape. Public-side MinR/MaxR/MinZ/MaxZ/ToroidalTransit/Iteration stopping-criterion subclasses now mirror their constructor args as Python attributes so the JAX translator can read the threshold values; raw sopp.* criterion instances raise NotImplementedError pointing to the Python wrapper. LevelsetStoppingCriterion now retains a reference to the source SurfaceClassifier (or raw sopp.RegularGridInterpolant3D) as ``_classifier``; the translator calls SurfaceClassifier.to_jax_classifier_fn() to rebuild the signed-distance grid in JAX and threads the resulting closure through the while_loop dispatch.",
+        "partial_parity_test": "tests/field/test_tracing_jax_item16.py (8 passed; phi-plane and non-Levelset criterion accept tests replace the prior NotImplementedError carve-out tests; Levelset accept test now uses a real SurfaceClassifier to exercise the rebuilt JAX closure end-to-end) + tests/field/test_tracing_jax_item16_extended.py (6 passed; phi-plane parity vs upstream C++ at <1e-4 position diff, MinR accept, MaxR criterion fires with idx=-1 without storing the stopped state as a live row, ToroidalTransit caps trajectory, MaxZ with crit_z<0 fires immediately, unsupported criterion type raises NotImplementedError) + tests/jax_core/test_tracing_jax_levelset_events.py (5 passed; CPU/JAX classifier sign parity + JAX while_loop Levelset stop on outside-start + no-stop on inside-start + public wrapper smoke + raw sopp.LevelsetStoppingCriterion rejection) + tests/jax_core/test_tracing_jax_guiding_center.py (9 passed; mode='gc_vac' accepts phi-planes and MinR criterion + stopped-event-not-live-row proof + still rejects comm) + tests/jax_core/test_tracing_jax_fullorbit.py (8 passed; full-orbit phi/stopping-event rows and public full-mode stopping-event forwarding) + tests/jax_core/test_tracing_jax_fullorbit_events.py (3 passed; helical-motion phi crossings + public-wrapper phi parity vs sopp + JAX MinR stopping criterion termination on 6-state path) + tests/jax_core/test_tracing_jax_gc_boozer.py (6 passed) + tests/jax_core/test_tracing_jax_boozer_zeta_events.py (3 passed; mu=0 axis-trace zeta crossing analytic check + trace_particles_boozer JAX route records zeta hits with endpoint parity vs sopp + CPU/JAX MaxToroidalFlux stopping-event row proof) under JAX_PLATFORMS=cpu and SIMSOPT_JAX_TRANSFER_GUARD=disallow.",
+        "parity_ladder_lane": "event_time_tracing (state_vector_rtol=1e-6, state_vector_atol=1e-8, step_count_max_ratio=1.25)",
+        "parity_test": "tests/field/test_tracing_jax_item16.py (8 tests pass) + tests/field/test_tracing_jax_item16_extended.py (6 tests pass) + tests/jax_core/test_tracing_jax_phi_events.py (7 tests pass) + tests/jax_core/test_tracing_jax_levelset_events.py (5 tests pass; Levelset bridge through to_jax_classifier_fn) + tests/jax_core/test_tracing_jax_guiding_center.py (8 tests pass) + tests/jax_core/test_tracing_jax_fullorbit.py (8 tests pass; full-orbit phi/stopping-event rows included) + tests/jax_core/test_tracing_jax_fullorbit_events.py (3 tests pass; helical-motion phi crossings + public-wrapper phi parity + MinR criterion termination on 6-state path) + tests/jax_core/test_tracing_jax_gc_boozer.py (6 tests pass; event_time_tracing lane) + tests/jax_core/test_tracing_jax_boozer_zeta_events.py (3 tests pass; zeta-plane crossing analytic check + JAX-wrapper res_zeta_hits parity with sopp + CPU/JAX MaxToroidalFlux stopping-event row proof)",
         "cuda_smoke": "not_claimed",
         "cuda_proof": {
           "status": "not_claimed",
           "artifact": "N/A",
-          "current_sha": "db185cb37",
+          "current_sha": "cadc6139e",
           "worktree_dirty": true,
           "gpu_device": "N/A",
           "driver_version": "N/A",
@@ -742,7 +755,13 @@
           "peak_gpu_mem_mb": 0,
           "target_arrays_on_cuda": false,
           "compiled_executable_backend": "cpu"
-        }
+        },
+        "wrapper_module": "src/simsopt/field/tracing.py routes compute_fieldlines, trace_particles (mode='gc_vac' and mode='full') and trace_particles_boozer (mode='gc_vac' / 'gc_nok' / 'gc' on a BoozerRadialInterpolantJAX field) to JAX backend when SIMSOPT_BACKEND=jax",
+        "carve_outs": "MPI parallel split, trace_particles mode='gc' (non-vacuum Cartesian guiding-centre), CPU BoozerMagneticField inputs under the JAX backend, and unknown stopping-criterion subclass types \u2014 all raise explicit NotImplementedError, no silent fallback. Phi-plane crossings and non-Levelset stopping criteria (MinR/MaxR/MinZ/MaxZ/ToroidalTransit/Iteration) on the Cartesian fieldline + GC vacuum + full-orbit lanes are wired through the fixed-shape phi_hits buffer; MinToroidalFlux/MaxToroidalFlux are accepted (inactive on the Cartesian path, active on the Boozer route via is_boozer_state=True dispatch). LevelsetStoppingCriterion is fully wired through the JAX while_loop via SurfaceClassifier.to_jax_classifier_fn(); raw sopp.LevelsetStoppingCriterion instances (no Python wrapper) raise NotImplementedError because the grid metadata needed to rebuild the JAX-side interpolant spec is not exposed. Zeta-plane crossings on the JAX trace_particles_boozer route are now wired (the JAX dataclass field on GuidingCenterTracingResult is phi_hits for layout-compatibility; on the Boozer route it stores 6-column zeta-hit rows surfaced through the public res_zeta_hits return).",
+        "promoted_at": "2026-05-13",
+        "promotion_validation": "tests/field/test_tracing_jax_item16.py + tests/geo/test_framedcurve_jax_wrappers_item18.py + tests/geo/test_finitebuild_jax_ssot_item20.py + tests/field/test_boozermagneticfield_jax_item33.py + tests/jax_core/test_tracing_jax_item14.py - all green; consolidated 256 tests pass on touched suites",
+        "historical_blocker_artifact": ".artifacts/jax_port_goal/blockers/16-debug.md",
+        "scope_boundary": "CPU-JAX public wrapper closure. Host-level MPI split/gather is implemented and tested with fake two-rank replay; no mpiexec multi-rank proof or CUDA proof is claimed. CPU Boozer fields are intentionally rejected under the JAX backend; callers must use BoozerRadialInterpolantJAX. Cartesian trace_particles(mode='gc') remains rejected because upstream CPU also does not implement non-vacuum Cartesian guiding-centre tracing."
       }
     },
     {
@@ -790,12 +809,670 @@
       }
     },
     {
-      "id": "18-33",
-      "tier": "P3-P5",
-      "title": "future-scope inventory",
-      "status": "skipped",
-      "closure_level": "skipped_future_scope",
-      "skip_reason": "Default active scope is P0-P2 and user did not expand active_scope."
+      "id": "18",
+      "tier": "P3",
+      "title": "geo/framedcurve.py JAX port",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "kernel_module": "src/simsopt/jax_core/framedcurve.py (SSOT: centroid_frame, frenet_frame, rotated_centroid_frame, rotated_frenet_frame + their *_dash variants)",
+        "plan": ".artifacts/jax_port_goal/plans/18.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/18-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/18-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/18-invariants.md",
+        "oracle_contract": "fixed_state_frame_geometry",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/18.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/18.txt",
+        "parity_test": "tests/geo/test_framedcurve_jax_item18.py + tests/geo/test_framedcurve_jax_wrappers_item18.py (all pass)",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/18.json",
+        "transfer_guard_test": "tests/geo/test_framedcurve_jax_item18.py strict-transfer coverage",
+        "parity_lane": "direct_kernel",
+        "open_gaps": "none for the item-18 CPU-JAX frame-kernel and opt-in wrapper contract",
+        "wrapper_module": "src/simsopt/geo/framedcurve_jax.py (FrameRotationJAX, ZeroRotationJAX, FramedCurveFrenetJAX, FramedCurveCentroidJAX Optimizable wrappers)",
+        "promoted_at": "2026-05-13",
+        "promotion_validation": "tests/field/test_tracing_jax_item16.py + tests/geo/test_framedcurve_jax_wrappers_item18.py + tests/geo/test_finitebuild_jax_ssot_item20.py + tests/field/test_boozermagneticfield_jax_item33.py + tests/jax_core/test_tracing_jax_item14.py - all green; consolidated 256 tests pass on touched suites",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "19",
+      "tier": "P3",
+      "title": "Private on-device optimizer contract audit",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "audit_artifact": ".artifacts/jax_native_remaining_2026-05-13/item19_optimizer_audit.md",
+        "plan": ".artifacts/jax_port_goal/plans/19.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/19-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/19-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/19-invariants.md",
+        "oracle_contract": "static_private_optimizer_import_contract",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/19.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/19.txt",
+        "parity_test": "tests/geo/test_optimizer_jax_item19.py",
+        "scope": "qfmsurface.py, optimizer_jax.py (3565 LOC), optimizer_jax_private/*, optimizer_jax_reference.py, optimizer_host_lbfgs.py",
+        "audit_result": "7-dimension PASS, 0 violations, 2 NOTE-level dead-export observations",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/19.json",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "20",
+      "tier": "P3",
+      "title": "geo/finitebuild.py JAX port",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "host_adapter": "src/simsopt/geo/finitebuild.py (extended with create_multifilament_grid JAX delegation)",
+        "plan": ".artifacts/jax_port_goal/plans/20.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/20-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/20-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/20-invariants.md",
+        "oracle_contract": "fixed_state_multifilament_geometry",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/20.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/20.txt",
+        "parity_test": "tests/geo/test_finitebuild_jax_item20.py + tests/geo/test_finitebuild_jax_ssot_item20.py (all pass)",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/20.json",
+        "transfer_guard_test": "tests/geo/test_finitebuild_jax_ssot_item20.py::test_compiled_filament_builders_run_under_strict_transfer_guard",
+        "parity_lane": "direct_kernel",
+        "open_gaps": "none for the item-20 CPU-JAX finite-build SSOT contract; host object graph construction remains outside compiled kernels by design",
+        "kernel_module": "src/simsopt/jax_core/finitebuild.py (SSOT module with build_filament_gammas)",
+        "promoted_at": "2026-05-13",
+        "promotion_validation": "tests/field/test_tracing_jax_item16.py + tests/geo/test_framedcurve_jax_wrappers_item18.py + tests/geo/test_finitebuild_jax_ssot_item20.py + tests/field/test_boozermagneticfield_jax_item33.py + tests/jax_core/test_tracing_jax_item14.py - all green; consolidated 256 tests pass on touched suites",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "21",
+      "tier": "P3",
+      "title": "field/magnetic_axis_helpers.py on-axis iota ODE JAX port",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "kernel_module": "src/simsopt/jax_core/magnetic_axis_helpers.py (on_axis_iota_rk via custom Dormand-Prince RK4(5) with PI step-control + FSAL inside jax.lax.while_loop)",
+        "plan": ".artifacts/jax_port_goal/plans/21.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/21-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/21-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/21-invariants.md",
+        "oracle_contract": "fixed_state_on_axis_iota",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/21.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/21.txt",
+        "parity_test": "15/15 tests pass against simsopt.field.magnetic_axis_helpers for hsx/ncsx/giuliani configs plus pure-JAX strict-transfer callback proof",
+        "transfer_guard_test": "tests/field/test_magnetic_axis_helpers_jax_item21.py::TestJitAndRepeatability::test_compiled_kernel_with_jax_field_runs_under_strict_transfer_guard",
+        "parity_lane": "derivative_heavy",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/21.json",
+        "test_file": "tests/field/test_magnetic_axis_helpers_jax_item21.py",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "22",
+      "tier": "P3",
+      "title": "field/sampling.py JAX port with PRNGKey contract",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "kernel_module": "src/simsopt/jax_core/sampling.py (sample_weighted_indices_jax, draw_uniform_on_curve_jax, draw_uniform_on_surface_jax) \u2014 explicit PRNGKey first arg, inverse-CDF via jnp.searchsorted, no global RNG",
+        "plan": ".artifacts/jax_port_goal/plans/22.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/22-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/22-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/22-invariants.md",
+        "oracle_contract": "explicit_key_sampling_contract",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/22.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/22.txt",
+        "host_re_export": "src/simsopt/field/sampling_jax.py re-exports JAX kernels for test compatibility (CPU rejection sampler in src/simsopt/field/sampling.py is untouched and remains the parity oracle)",
+        "parity_test": "9/9 tests pass (tests/field/test_sampling_jax_item22.py), including strict-transfer-guard JIT, statistical moments parity vs upstream rejection sampling",
+        "fix_note": "tests originally failed to collect; src/simsopt/field/sampling_jax.py (separate module) re-exports JAX kernels (2026-05-13). The CPU file src/simsopt/field/sampling.py remains untouched apart from ruff formatting.",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/22.json",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "23",
+      "tier": "P3",
+      "title": "ScalarPotentialRZMagneticField JAX port",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "kernel_module": "src/simsopt/jax_core/scalar_potential_rz.py (static SymPy \u2192 JAX lowering via _sympy_to_jax.py at construction; no runtime lambdify)",
+        "wrapper_module": "src/simsopt/field/scalar_potential_rz_jax.py",
+        "plan": ".artifacts/jax_port_goal/plans/23.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/23-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/23-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/23-invariants.md",
+        "oracle_contract": "fixed_static_scalar_potential_subset",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/23.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/23.txt",
+        "parity_test": "20/20 tests pass (tests/field/test_scalar_potential_rz_jax_item23.py) including 11 unsupported-expression rejections (proves static gate)",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/23.json",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "24",
+      "tier": "P4",
+      "title": "dipole_field.cpp JAX kernel port",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "kernel_module": "src/simsopt/jax_core/dipole_field.py (pure JAX port, 488 LOC)",
+        "plan": ".artifacts/jax_port_goal/plans/24.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/24-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/24-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/24-invariants.md",
+        "oracle_contract": "fixed_state_dipole_B_A_dB_dA",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/24.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/24.txt",
+        "parity_test": "9 tests pass against sopp.dipole_field_{B,A,dB,dA} direct C++ oracle, under SIMSOPT_JAX_TRANSFER_GUARD=disallow",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/24.json",
+        "test_file": "tests/jax_core/test_dipole_field_item24.py + tests/jax_core/test_dipole_field_jax_item24.py",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "25",
+      "tier": "P4",
+      "title": "permanent_magnet_optimization.cpp JAX kernel port",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "kernel_module": "src/simsopt/jax_core/pm_optimization.py (MwPGP + GPMO_baseline/multi/backtracking/ArbVec/ArbVec_backtracking + initialize_GPMO_ArbVec)",
+        "parity_test": "63 tests pass against simsoptpp.MwPGP_algorithm and simsoptpp.GPMO_* (test_pm_optimization_jax_item25.py + test_permanent_magnet_optimization_jax_item28.py); after adding state_trace_rtol/atol, optimality_atol, monotonicity_rtol, single_step_rtol/atol keys to pm_mwpgp_fixed_step ladder.",
+        "open_gaps": "none \u2014 GPMO_ArbVec_backtracking + initialize_GPMO_ArbVec landed; see .artifacts/jax_port_goal/blockers/25-debug.md (resolved)",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/25.json",
+        "oracle_contract": "fixed_state_permanent_magnet_optimization_kernels",
+        "plan": ".artifacts/jax_port_goal/plans/25.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/25-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/25-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/25-invariants.md",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/25.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/25.txt",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "26",
+      "tier": "P4",
+      "title": "DipoleFieldJAX wrapper",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "wrapper_module": "src/simsopt/field/dipole_field_jax.py (344 LOC MagneticField subclass)",
+        "parity_test": "13 tests pass CPU-vs-JAX for B/A/dB/dA across stellsym/nfp/coord-flag matrix",
+        "test_file": "tests/field/test_dipole_field_jax_item26.py",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/26.json",
+        "oracle_contract": "fixed_state_dipole_field_wrapper",
+        "plan": ".artifacts/jax_port_goal/plans/26.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/26-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/26-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/26-invariants.md",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/26.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/26.txt",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "27",
+      "tier": "P4",
+      "title": "geo/permanent_magnet_grid.py JAX port",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "adapter_module": "src/simsopt/geo/permanent_magnet_grid_jax.py",
+        "parity_test": "6 tests pass against sopp.dipole_field_Bn C++ oracle",
+        "test_file": "tests/geo/test_permanent_magnet_grid_jax_item27.py",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/27.json",
+        "oracle_contract": "fixed_state_permanent_magnet_grid",
+        "plan": ".artifacts/jax_port_goal/plans/27.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/27-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/27-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/27-invariants.md",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/27.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/27.txt",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "28",
+      "tier": "P4",
+      "title": "solve/permanent_magnet_optimization.py JAX port",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "solve_module": "src/simsopt/solve/permanent_magnet_optimization_jax.py",
+        "parity_test": "23 item-28 tests pass against simsoptpp.MwPGP_algorithm, simsoptpp.GPMO_baseline/multi/backtracking/ArbVec/ArbVec_backtracking; 69 item25/27/28 tests pass under CPU strict-transfer guard.",
+        "open_gaps": "host-loop CPU workflow that mutates a live PermanentMagnetGrid remains intentionally deferred per blockers/28-debug.md; JAX wrappers consume immutable PermanentMagnetGridJAX payloads only, and the general CPU-style GPMO dispatcher is not exported by design.",
+        "test_file": "tests/solve/test_permanent_magnet_optimization_jax_item28.py",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/28.json",
+        "oracle_contract": "fixed_state_permanent_magnet_solve_wrappers",
+        "plan": ".artifacts/jax_port_goal/plans/28.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/28-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/28-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/28-invariants.md",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/28.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/28.txt",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "29",
+      "tier": "P4",
+      "title": "wireframe_field/optimization.cpp JAX kernel port",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "kernel_module": "src/simsopt/jax_core/wireframe.py (414 LOC pure JAX port of wireframe_field_impl.h + magneticfield_wireframe.cpp)",
+        "parity_test": "4 tests pass against WireframeField CPU/CPP oracle under transfer-guard",
+        "test_file": "tests/jax_core/test_wireframe_item29.py + tests/jax_core/test_wireframe_jax_item29.py",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/29.json (status field stale 'blocked_architecture' \u2014 reconciled here)",
+        "oracle_contract": "fixed_state_wireframe_field_kernel",
+        "plan": ".artifacts/jax_port_goal/plans/29.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/29-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/29-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/29-invariants.md",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/29.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/29.txt",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "30",
+      "tier": "P4",
+      "title": "WireframeFieldJAX wrapper",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "wrapper_module": "src/simsopt/field/wireframefield_jax.py (145 LOC MagneticField subclass)",
+        "parity_test": "7 tests pass against WireframeField CPU wrapper at direct_kernel ladder lane",
+        "test_file": "tests/field/test_wireframefield_jax_item30.py",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/30.json",
+        "oracle_contract": "fixed_state_wireframe_field_wrapper",
+        "plan": ".artifacts/jax_port_goal/plans/30.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/30-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/30-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/30-invariants.md",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/30.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/30.txt",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "31",
+      "tier": "P4",
+      "title": "solve/wireframe_optimization.py JAX port",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "solve_module": "src/simsopt/solve/wireframe_optimization_jax.py (875 LOC GSCO+RCLS+optimize)",
+        "parity_test": "20/20 tests pass against sopp.GSCO direct C++ oracle",
+        "test_file": "tests/solve/test_wireframe_optimization_jax_item31.py",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/31.json",
+        "oracle_contract": "fixed_state_wireframe_optimization",
+        "plan": ".artifacts/jax_port_goal/plans/31.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/31-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/31-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/31-invariants.md",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/31.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/31.txt",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "32",
+      "tier": "P5",
+      "title": "boozerradialinterpolant.cpp JAX kernel port",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "kernel_module": "src/simsopt/jax_core/boozer_radial_interp.py (6 @jax.jit kernels: compute_kmns, compute_kmnc_kmns, fourier_transform_{odd,even}, inverse_fourier_transform_{odd,even})",
+        "plan": ".artifacts/jax_port_goal/plans/32.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/32-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/32-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/32-invariants.md",
+        "oracle_contract": "raw_boozer_radial_helper_kernels",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/32.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/32.txt",
+        "parity_test": "67 tests pass against sopp.compute_kmns, sopp.compute_kmnc_kmns, sopp.fourier_transform_*, sopp.inverse_fourier_transform_* at direct_kernel ladder lane (rtol=1e-10, atol=1e-12)",
+        "test_file": "tests/jax_core/test_boozer_radial_interp_jax_item32.py",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/32.json",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "33",
+      "tier": "P5",
+      "title": "Public BoozerRadialInterpolant / BoozerMagneticField JAX wrapper",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "private_slice": "src/simsopt/jax_core/boozer_fixed_state.py + src/simsopt/jax_core/boozer_radial_interp.py",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/33.json",
+        "plan": ".artifacts/jax_port_goal/plans/33.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/33-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/33-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/33-invariants.md",
+        "oracle_contract": "frozen_boozer_radial_public_quantities",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/33.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/33.txt",
+        "wrapper_module": "src/simsopt/field/boozermagneticfield_jax.py \u2014 BoozerRadialInterpolantJAX(Optimizable) wraps existing simsoptpp.BoozerRadialInterpolant, freezes to BoozerRadialInterpolantFrozenState pytree, evaluates via inverse_fourier_transform_{odd,even} + PiecewisePolynomial1D",
+        "parity_test": "tests/field/test_boozermagneticfield_jax_item33.py (12 tests pass at direct_kernel lane, including public restart) + tests/jax_core/test_boozer_fixed_state_jax_item33.py (6 tests pass)",
+        "exposed_methods": "modB, dmodBd{theta,zeta,s}, modB_derivs, K, dKd{theta,zeta}, K_derivs, nu, dnud{theta,zeta,s}, nu_derivs, R, dRd{theta,zeta,s}, R_derivs, Z, dZd{theta,zeta,s}, Z_derivs, psip, G, I, iota, dGds, dIds, diotads",
+        "out_of_scope": "B(xyz)/dB_by_dX Cartesian methods (Boozer surface is (s,theta,zeta)-native), second-derivatives not exposed by upstream Python class, opt-in import (not auto-registered in simsopt.field.__init__)",
+        "promoted_at": "2026-05-13",
+        "promotion_validation": "tests/field/test_tracing_jax_item16.py + tests/geo/test_framedcurve_jax_wrappers_item18.py + tests/geo/test_finitebuild_jax_ssot_item20.py + tests/field/test_boozermagneticfield_jax_item33.py + tests/jax_core/test_tracing_jax_item14.py - all green; consolidated 256 tests pass on touched suites",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
+    },
+    {
+      "id": "points_coils",
+      "tier": "R6",
+      "title": "points_coils 2D grouped-field sharding",
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "kernel_module": "src/simsopt/jax_core/field.py (_collective_group_field with 2D point/coil mesh placement)",
+        "runtime_module": "src/simsopt/backend/runtime.py and src/simsopt/jax_core/sharding.py",
+        "oracle_contract": "dense_grouped_biot_savart_fixed_state",
+        "plan": ".artifacts/jax_port_goal/plans/points_coils.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/points_coils-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/points_coils-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/points_coils-invariants.md",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/points_coils.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/points_coils.txt",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/points_coils.json",
+        "parity_test": "tests/jax_core/test_points_coils_sharding.py + tests/test_backend.py -k 'points_coils or coil_groups or sharding_tuning'",
+        "transfer_guard_test": "subprocess cases grouped-points-coils-collective and grouped-points-coils-non-divisible under SIMSOPT_JAX_TRANSFER_GUARD=disallow",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "cadc6139e",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
     }
   ],
   "validation": [
@@ -843,102 +1520,166 @@
       "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest -q tests/test_jax_import_smoke.py -k 'pairwise_penalty_accepts_explicit_row_sharding or pairwise_curve_penalty_pure_functions or legacy_curve_objective_values or legacy_curve_objective_gradients'",
       "result": "15 passed, 104 deselected"
     },
-        {
-          "command": ".conda/jax-0.9.2/bin/python -m ruff check src/simsopt/field/coilobjective.py tests/field/test_coilobjective.py && .conda/jax-0.9.2/bin/python -m ruff format --check src/simsopt/field/coilobjective.py tests/field/test_coilobjective.py",
-          "result": "passed"
-        },
-        {
-          "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest -q tests/field/test_selffieldforces.py -k 'regularization_functions_transform_under_strict_transfer_guard or b_regularized_pure_jit_vmap_strict_transfer_guard_matches_wrapper or regularized_coil_self_field_methods_use_strict_transfer_boundary'",
-          "result": "3 passed, 33 deselected, 2 subtests passed"
-        },
-        {
-          "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest -q tests/field/test_selffieldforces.py -k 'regularization_circ or regularization_rect or circular_coil'",
-          "result": "3 passed, 33 deselected"
-        },
-        {
-          "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest -q tests/test_jax_import_smoke.py::test_transfer_guard_disallow_allows_lpcurveforce_shared_state_packing",
-          "result": "1 passed"
-        },
-        {
-          "command": "XLA_FLAGS=--xla_force_host_platform_device_count=2 JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python - <<'PY' ... pmap(B_regularized_pure, ...) ... PY",
-          "result": "devices= 2 shape= (2, 16, 3)"
-        },
-        {
-          "command": ".conda/jax-0.9.2/bin/python -m ruff check src/simsopt/field/coil.py tests/field/test_selffieldforces.py && .conda/jax-0.9.2/bin/python -m ruff format --check src/simsopt/field/coil.py",
-          "result": "passed"
-        },
-        {
-          "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_fluxobjective_jax_item03_closeout.py -q",
-          "result": "3 passed; explicit jax.transfer_guard('disallow') inside test"
-        },
-        {
-          "command": "SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_fluxobjective_jax_item03_closeout.py -q",
-          "result": "3 passed"
-        },
-        {
-          "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_fluxobjective_jax_parity.py -q",
-          "result": "28 passed, 28 skipped"
-        },
-        {
-          "command": ".conda/jax-0.9.2/bin/python -m ruff check tests/objectives/test_fluxobjective_jax_item03_closeout.py && .conda/jax-0.9.2/bin/python -m ruff format --check tests/objectives/test_fluxobjective_jax_item03_closeout.py",
-          "result": "passed"
-        },
-        {
-          "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_integral_bdotn_item10_closeout.py -q",
-          "result": "6 passed"
-        },
-        {
-          "command": "SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_integral_bdotn_item10_closeout.py -q",
-          "result": "6 passed"
-        },
-        {
-          "command": ".conda/jax-0.9.2/bin/python -m ruff check tests/objectives/test_integral_bdotn_item10_closeout.py && .conda/jax-0.9.2/bin/python -m ruff format --check tests/objectives/test_integral_bdotn_item10_closeout.py",
-          "result": "passed"
-        },
-        {
-          "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/geo/test_curve_item05_closeout.py tests/geo/test_surface_rzfourier_jax_item06_closeout.py tests/geo/test_curveobjectives_item07_closeout.py tests/geo/test_strainopt_item08_closeout.py tests/jax_core/test_analytic_fields_item11.py tests/jax_core/test_analytic_pure_fields_item12.py tests/jax_core/test_regular_grid_interp_item13.py tests/field/test_normal_field_item17_closeout.py -q",
-          "result": "63 passed, 1 skipped"
-        },
-        {
-          "command": "SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/geo/test_curve_item05_closeout.py tests/geo/test_surface_rzfourier_jax_item06_closeout.py tests/geo/test_curveobjectives_item07_closeout.py tests/geo/test_strainopt_item08_closeout.py tests/jax_core/test_analytic_fields_item11.py tests/jax_core/test_analytic_pure_fields_item12.py tests/jax_core/test_regular_grid_interp_item13.py tests/field/test_normal_field_item17_closeout.py -q",
-          "result": "63 passed, 1 skipped"
-        },
-        {
-          "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_fluxobjective_jax_item03_closeout.py tests/objectives/test_fluxobjective_jax_parity.py -q",
-          "result": "31 passed, 28 skipped"
-        },
-        {
-          "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_surface_basic_passes_residual_and_label_parity tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_qa_wrappers_passes_native_supported_parity -q",
-          "result": "2 passed"
-        },
-        {
-          "command": "SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_surface_basic_passes_residual_and_label_parity tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_qa_wrappers_passes_native_supported_parity -q",
-          "result": "2 passed"
-        },
-        {
-          "command": ".conda/jax-0.9.2/bin/python -m pytest tests/test_lightning_production_gpu_proof.py -q",
-          "result": "15 passed, 1 skipped"
-        },
-        {
-          "command": ".conda/jax-0.9.2/bin/python -m ruff check benchmarks/lightning_jobs/launch_production_gpu_proof.py tests/test_lightning_production_gpu_proof.py && .conda/jax-0.9.2/bin/python -m ruff format --check benchmarks/lightning_jobs/launch_production_gpu_proof.py tests/test_lightning_production_gpu_proof.py",
-          "result": "passed"
-        },
-        {
-          "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/field/test_magneticfieldclasses_jax_item15.py -q",
-          "result": "18 passed"
-        },
-        {
-          "command": "SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/field/test_magneticfieldclasses_jax_item15.py -q",
-          "result": "18 passed"
-        },
-        {
-          "command": ".conda/jax-0.9.2/bin/python -m ruff check src/simsopt/field/magneticfieldclasses_jax.py tests/field/test_magneticfieldclasses_jax_item15.py && .conda/jax-0.9.2/bin/python -m ruff format --check src/simsopt/field/magneticfieldclasses_jax.py tests/field/test_magneticfieldclasses_jax_item15.py",
-          "result": "passed"
-        },
-        {
-          "command": ".conda/jax-0.9.2/bin/python -m json.tool .artifacts/jax_port_goal/state.json && .conda/jax-0.9.2/bin/python -m json.tool .artifacts/jax_port_goal/bench/15.json && git diff --check",
-          "result": "passed"
-        }
-    ],
-  "stop_condition": "met_cpu_only_no_cuda"
+    {
+      "command": ".conda/jax-0.9.2/bin/python -m ruff check src/simsopt/field/coilobjective.py tests/field/test_coilobjective.py && .conda/jax-0.9.2/bin/python -m ruff format --check src/simsopt/field/coilobjective.py tests/field/test_coilobjective.py",
+      "result": "passed"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest -q tests/field/test_selffieldforces.py -k 'regularization_functions_transform_under_strict_transfer_guard or b_regularized_pure_jit_vmap_strict_transfer_guard_matches_wrapper or regularized_coil_self_field_methods_use_strict_transfer_boundary'",
+      "result": "3 passed, 33 deselected, 2 subtests passed"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest -q tests/field/test_selffieldforces.py -k 'regularization_circ or regularization_rect or circular_coil'",
+      "result": "3 passed, 33 deselected"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest -q tests/test_jax_import_smoke.py::test_transfer_guard_disallow_allows_lpcurveforce_shared_state_packing",
+      "result": "1 passed"
+    },
+    {
+      "command": "XLA_FLAGS=--xla_force_host_platform_device_count=2 JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python - <<'PY' ... pmap(B_regularized_pure, ...) ... PY",
+      "result": "devices= 2 shape= (2, 16, 3)"
+    },
+    {
+      "command": ".conda/jax-0.9.2/bin/python -m ruff check src/simsopt/field/coil.py tests/field/test_selffieldforces.py && .conda/jax-0.9.2/bin/python -m ruff format --check src/simsopt/field/coil.py",
+      "result": "passed"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_fluxobjective_jax_item03_closeout.py -q",
+      "result": "3 passed; explicit jax.transfer_guard('disallow') inside test"
+    },
+    {
+      "command": "SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_fluxobjective_jax_item03_closeout.py -q",
+      "result": "3 passed"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_fluxobjective_jax_parity.py -q",
+      "result": "28 passed, 28 skipped"
+    },
+    {
+      "command": ".conda/jax-0.9.2/bin/python -m ruff check tests/objectives/test_fluxobjective_jax_item03_closeout.py && .conda/jax-0.9.2/bin/python -m ruff format --check tests/objectives/test_fluxobjective_jax_item03_closeout.py",
+      "result": "passed"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_integral_bdotn_item10_closeout.py -q",
+      "result": "6 passed"
+    },
+    {
+      "command": "SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_integral_bdotn_item10_closeout.py -q",
+      "result": "6 passed"
+    },
+    {
+      "command": ".conda/jax-0.9.2/bin/python -m ruff check tests/objectives/test_integral_bdotn_item10_closeout.py && .conda/jax-0.9.2/bin/python -m ruff format --check tests/objectives/test_integral_bdotn_item10_closeout.py",
+      "result": "passed"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/geo/test_curve_item05_closeout.py tests/geo/test_surface_rzfourier_jax_item06_closeout.py tests/geo/test_curveobjectives_item07_closeout.py tests/geo/test_strainopt_item08_closeout.py tests/jax_core/test_analytic_fields_item11.py tests/jax_core/test_analytic_pure_fields_item12.py tests/jax_core/test_regular_grid_interp_item13.py tests/field/test_normal_field_item17_closeout.py -q",
+      "result": "63 passed, 1 skipped"
+    },
+    {
+      "command": "SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/geo/test_curve_item05_closeout.py tests/geo/test_surface_rzfourier_jax_item06_closeout.py tests/geo/test_curveobjectives_item07_closeout.py tests/geo/test_strainopt_item08_closeout.py tests/jax_core/test_analytic_fields_item11.py tests/jax_core/test_analytic_pure_fields_item12.py tests/jax_core/test_regular_grid_interp_item13.py tests/field/test_normal_field_item17_closeout.py -q",
+      "result": "63 passed, 1 skipped"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_fluxobjective_jax_item03_closeout.py tests/objectives/test_fluxobjective_jax_parity.py -q",
+      "result": "31 passed, 28 skipped"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_surface_basic_passes_residual_and_label_parity tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_qa_wrappers_passes_native_supported_parity -q",
+      "result": "2 passed"
+    },
+    {
+      "command": "SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_surface_basic_passes_residual_and_label_parity tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::test_boozer_qa_wrappers_passes_native_supported_parity -q",
+      "result": "2 passed"
+    },
+    {
+      "command": ".conda/jax-0.9.2/bin/python -m pytest tests/test_lightning_production_gpu_proof.py -q",
+      "result": "15 passed, 1 skipped"
+    },
+    {
+      "command": ".conda/jax-0.9.2/bin/python -m ruff check benchmarks/lightning_jobs/launch_production_gpu_proof.py tests/test_lightning_production_gpu_proof.py && .conda/jax-0.9.2/bin/python -m ruff format --check benchmarks/lightning_jobs/launch_production_gpu_proof.py tests/test_lightning_production_gpu_proof.py",
+      "result": "passed"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/field/test_magneticfieldclasses_jax_item15.py -q",
+      "result": "18 passed"
+    },
+    {
+      "command": "SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/field/test_magneticfieldclasses_jax_item15.py -q",
+      "result": "18 passed"
+    },
+    {
+      "command": ".conda/jax-0.9.2/bin/python -m ruff check src/simsopt/field/magneticfieldclasses_jax.py tests/field/test_magneticfieldclasses_jax_item15.py && .conda/jax-0.9.2/bin/python -m ruff format --check src/simsopt/field/magneticfieldclasses_jax.py tests/field/test_magneticfieldclasses_jax_item15.py",
+      "result": "passed"
+    },
+    {
+      "command": ".conda/jax-0.9.2/bin/python -m json.tool .artifacts/jax_port_goal/state.json && .conda/jax-0.9.2/bin/python -m json.tool .artifacts/jax_port_goal/bench/15.json && git diff --check",
+      "result": "passed"
+    },
+    {
+      "command": "P4 residual byte-parity ablation: right-nest surface_grad in boozer_residual_scalar_and_grad_cpu_ordered; measure with test_residual_pinned_input_byte_parity_grad",
+      "result": "retained: residual gradient improved from max_abs_diff=1.887379141862766e-15 and 52/75 unequal doubles to max_abs_diff=8.881784197001252e-16 and 49/75 unequal doubles; strict byte parity still fails"
+    },
+    {
+      "command": "P4 residual byte-parity ablations: dB2 right-nesting, iota/G regrouping, drtil swap, dres tail-order swap, surface_grad operand swap, pure-JAX software-FMA experiment",
+      "result": "reverted: candidates were neutral or worsened max residual gradient drift; software-FMA reduced unequal count but worsened max_abs_diff and was not retained"
+    },
+    {
+      "command": "PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest -q --tb=short tests/geo/test_boozer_residual_jax.py tests/geo/test_boozer_residual_pinned_input_byte_parity.py",
+      "result": "FAILED: 3 failed, 21 passed, 15 skipped in 13.04s; strict byte-parity failures remain residual gradient max_abs_diff=8.881784197001252e-16 with 49/75 unequal doubles, full-penalty value abs_diff=3.3306690738754696e-16, full-penalty gradient max_abs_diff=1.2878587085651816e-13 with 73/75 unequal doubles"
+    },
+    {
+      "command": "P4.5b full-penalty fixture decomposition read-only probe",
+      "result": "full_penalty_outputs is not residual arithmetic only: residual arithmetic drift combines with unpinned label/rz producer drift; JAX label-target delta -4.440892098500626e-16 drives the 1.2878587085651816e-13 full-gradient max diff"
+    },
+    {
+      "command": "PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest -q --tb=short tests/geo/test_boozersurface_jax.py::TestUpstreamFactoryBoozerMatrix::test_penalty_raw_inner_callback_cpu_parity_fixed_state tests/geo/test_boozersurface_jax.py::TestUpstreamFactoryBoozerMatrix::test_penalty_cpu_ordered_value_and_grad_cpu_parity_fixed_state",
+      "result": "2 passed in 7.64s"
+    },
+    {
+      "command": ".conda/jax-0.9.2/bin/python -m ruff check src/simsopt/geo/boozer_residual_jax.py src/simsopt/geo/boozersurface_jax.py && .conda/jax-0.9.2/bin/python -m ruff format --check src/simsopt/geo/boozer_residual_jax.py src/simsopt/geo/boozersurface_jax.py && .conda/jax-0.9.2/bin/python -m json.tool .artifacts/jax_port_goal/state.json >/dev/null && git diff --check",
+      "result": "passed; ruff reported all checks passed and both files already formatted"
+    },
+    {
+      "command": "PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest -q --tb=short tests/geo/test_boozer_residual_jax.py tests/geo/test_boozer_residual_pinned_input_byte_parity.py tests/geo/test_boozersurface_jax.py::TestUpstreamFactoryBoozerMatrix::test_penalty_raw_inner_callback_cpu_parity_fixed_state tests/geo/test_boozersurface_jax.py::TestUpstreamFactoryBoozerMatrix::test_penalty_cpu_ordered_value_and_grad_cpu_parity_fixed_state",
+      "result": "FAILED: 3 failed, 23 passed, 15 skipped in 19.05s; only strict byte-parity triad remains red with residual gradient max_abs_diff=8.881784197001252e-16 and 49/75 unequal doubles, full-penalty value abs_diff=3.3306690738754696e-16, full-penalty gradient max_abs_diff=1.2878587085651816e-13 and 73/75 unequal doubles"
+    },
+    {
+      "command": ".conda/jax-0.9.2/bin/python -m ruff format src/simsopt/geo/boozersurface_jax.py && .conda/jax-0.9.2/bin/python -m ruff check src/simsopt/geo/boozer_residual_jax.py src/simsopt/geo/boozersurface_jax.py && .conda/jax-0.9.2/bin/python -m ruff format --check src/simsopt/geo/boozer_residual_jax.py src/simsopt/geo/boozersurface_jax.py && .conda/jax-0.9.2/bin/python -m json.tool .artifacts/jax_port_goal/state.json >/dev/null && git diff --check",
+      "result": "passed after ruff formatted src/simsopt/geo/boozersurface_jax.py"
+    },
+    {
+      "command": "P4 residual byte-parity ablation: retain dtang two-term dot form; revert dres tail, dB1/dB2 right-nesting, and surface_grad dot experiments",
+      "result": "retained: dtang dot plus surface_grad right-nesting improves residual gradient to max_abs_diff=8.881784197001252e-16 with 45/75 unequal doubles; reverted experiments were neutral or worse"
+    },
+    {
+      "command": "P4.5b full-penalty fixture boundary correction",
+      "result": "retained: full_penalty_outputs now assembles from pinned residual outputs plus CPU-pinned label/rz pieces; full-penalty value byte check is no longer red and full-penalty gradient now matches the residual-gradient blocker"
+    },
+    {
+      "command": "PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest -q --tb=short tests/geo/test_boozer_residual_pinned_input_byte_parity.py",
+      "result": "FAILED: 2 failed, 7 passed in 4.95s; strict failures are residual gradient and full-penalty gradient, both max_abs_diff=8.881784197001252e-16 with 45/75 unequal doubles"
+    },
+    {
+      "command": ".conda/jax-0.9.2/bin/python -m ruff format src/simsopt/geo/boozer_residual_jax.py src/simsopt/geo/boozersurface_jax.py tests/geo/test_boozer_residual_pinned_input_byte_parity.py && .conda/jax-0.9.2/bin/python -m ruff check src/simsopt/geo/boozer_residual_jax.py src/simsopt/geo/boozersurface_jax.py tests/geo/test_boozer_residual_pinned_input_byte_parity.py && .conda/jax-0.9.2/bin/python -m json.tool .artifacts/jax_port_goal/state.json >/dev/null && git diff --check -- .artifacts/jax_port_goal/REPORT.md .artifacts/jax_port_goal/state.json src/simsopt/geo/boozer_residual_jax.py src/simsopt/geo/boozersurface_jax.py tests/geo/test_boozer_residual_pinned_input_byte_parity.py",
+      "result": "passed; ruff reformatted tests/geo/test_boozer_residual_pinned_input_byte_parity.py and all lint/json/diff checks passed"
+    },
+    {
+      "command": "PYTHONPATH=/Users/suhjungdae/code/columbia/simsopt-jax/src JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest -q --tb=short tests/geo/test_boozer_residual_jax.py tests/geo/test_boozer_residual_pinned_input_byte_parity.py tests/geo/test_boozersurface_jax.py::TestUpstreamFactoryBoozerMatrix::test_penalty_raw_inner_callback_cpu_parity_fixed_state tests/geo/test_boozersurface_jax.py::TestUpstreamFactoryBoozerMatrix::test_penalty_cpu_ordered_value_and_grad_cpu_parity_fixed_state",
+      "result": "FAILED: 2 failed, 24 passed, 15 skipped in 16.60s; only strict residual and full-penalty gradient byte-parity checks remain red, both max_abs_diff=8.881784197001252e-16 with 45/75 unequal doubles"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 SIMSOPT_BACKEND_MODE=jax_cpu_parity SIMSOPT_JAX_SHARDING=points_coils SIMSOPT_JAX_MIN_COILS_TO_SHARD=1 SIMSOPT_JAX_TRANSFER_GUARD=disallow .conda/jax-0.9.2/bin/python tests/subprocess/jax_runtime_cases.py grouped-points-coils-collective",
+      "result": "passed"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=4 SIMSOPT_BACKEND_MODE=jax_cpu_parity SIMSOPT_JAX_SHARDING=points_coils SIMSOPT_JAX_MIN_COILS_TO_SHARD=1 SIMSOPT_JAX_TRANSFER_GUARD=disallow .conda/jax-0.9.2/bin/python tests/subprocess/jax_runtime_cases.py grouped-points-coils-non-divisible",
+      "result": "passed"
+    },
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu SIMSOPT_JAX_TRANSFER_GUARD=disallow .conda/jax-0.9.2/bin/python -m pytest -q tests/jax_core/test_points_coils_sharding.py tests/test_backend.py -k 'points_coils or coil_groups or sharding_tuning'",
+      "result": "11 passed, 85 deselected"
+    }
+  ],
+  "stop_condition": "met_cpu_jax_no_gpu"
 }

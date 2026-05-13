@@ -1,8 +1,29 @@
-# Item 16 Blocker — `field/tracing.py` JAX-native wrapper port
+# Item 16 Historical Blocker — `field/tracing.py` JAX-native wrapper port
 
-Status: **BLOCKED** with category `missing_dependency`.
+Status: **RESOLVED FOR CPU-JAX / NO-GPU SCOPE**.
 
-Closure level: `blocked_dependency`.
+Closure level: `cpu_oracle_complete`.
+
+2026-05-13 continuation update: the original categorical blocker below is no
+longer current. The public wrapper now routes JAX-native fields through
+`_compute_fieldlines_jax`, `_trace_particles_jax_guiding_center_vacuum`,
+`_trace_particles_jax_fullorbit_vacuum`, and `_trace_particles_boozer_jax`
+without a `pure_callback` bridge. Cartesian `compute_fieldlines` and
+`trace_particles(mode='gc_vac')` now surface `phis=` hits and translated
+stopping criteria, including `LevelsetStoppingCriterion` built from
+`SurfaceClassifier`; `trace_particles_boozer` routes `gc_vac` / `gc_nok` /
+`gc` through `BoozerRadialInterpolantJAX`. Cartesian full-orbit
+`trace_particles(mode='full')` also records `phis=` and translated
+stopping-criterion events through the fixed-shape event buffer. Boozer
+`trace_particles_boozer(...)` records `zetas=` rows and Boozer-relevant
+stopping criteria through the same event-buffer machinery.
+
+This blocker is now retained only as provenance. Host-level MPI split/gather is
+implemented in the public wrappers and covered by fake two-rank replay tests.
+CPU Boozer fields are intentionally rejected under the JAX backend; callers use
+`BoozerRadialInterpolantJAX`. Cartesian `mode='gc'` still raises, matching the
+upstream public surface where non-vacuum Cartesian guiding-centre tracing is
+not implemented. No real `mpiexec` multi-rank proof or CUDA proof is claimed.
 
 ## Item 16 scope
 
@@ -13,7 +34,7 @@ the C++ tracing kernels (`particle_guiding_center_tracing`,
 from `simsoptpp`. Per the goal prompt's manifest, item 16 depends on
 item 14.
 
-## Why this is BLOCKED
+## Historical blocker rationale
 
 Item 14 is BLOCKED with `missing_dependency` (see
 `.artifacts/jax_port_goal/blockers/14-debug.md`). Until item 14's JAX
@@ -50,10 +71,10 @@ Otherwise, item 16 remains BLOCKED.
   "id": "16",
   "tier": "P2",
   "title": "field tracing wrappers",
-  "status": "blocked",
-  "closure_level": "blocked_dependency",
+  "status": "complete",
+  "closure_level": "cpu_oracle_complete",
   "blocker": {
-    "category": "missing_dependency",
+    "category": "public_surface_carveout",
     "detail": "Item 16 depends on item 14 (tracing RK path), which is BLOCKED. No JAX backend for trace_particles/fieldline_tracing exists yet, so the wrapper cannot route to a JAX path without violating anti-pattern invariants.",
     "debug_artifact": ".artifacts/jax_port_goal/blockers/16-debug.md",
     "needs_user": true

@@ -10,14 +10,6 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..geo.curve import gamma_curve_on_surface
-from ..geo.framedcurve import (
-    jaxrotation_pure,
-    jaxrotationdash_pure,
-    rotated_centroid_frame,
-    rotated_centroid_frame_dash,
-    rotated_frenet_frame,
-    rotated_frenet_frame_dash,
-)
 from ..geo.curvehelical import curve_helical_pure
 from ..geo.curveplanarfourier import curveplanarfourier_pure
 from ..geo.curverzfourier import curverzfourier_pure
@@ -27,6 +19,14 @@ from ..geo.curvexyzfourier import (
 )
 from ._math_utils import (
     as_runtime_float64 as _as_runtime_float64,
+)
+from .framedcurve import (
+    rotated_centroid_frame,
+    rotated_centroid_frame_dash,
+    rotated_frenet_frame,
+    rotated_frenet_frame_dash,
+    rotation_alpha as jaxrotation_pure,
+    rotation_alphadash as jaxrotationdash_pure,
 )
 from .specs import (
     CurveCWSFourierRZSpec,

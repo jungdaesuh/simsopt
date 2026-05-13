@@ -7,7 +7,7 @@ from functools import partial
 import jax
 from jax import lax
 import numpy as np
-from jax.sharding import PartitionSpec as P
+from jax.sharding import NamedSharding, PartitionSpec as P
 
 from .biotsavart import (
     biot_savart_A,
@@ -72,7 +72,10 @@ def _tree_add(left, right):
 
 
 def _tree_trim_axis0(tree, size: int):
-    return jax.tree_util.tree_map(lambda leaf: leaf[:size], tree)
+    return jax.tree_util.tree_map(
+        lambda leaf: lax.slice_in_dim(leaf, start_index=0, limit_index=size, axis=0),
+        tree,
+    )
 
 
 def _runtime_group_inputs(reference, gammas, gammadashs, currents):
@@ -122,6 +125,42 @@ def _field_out_specs(kernel, config):
     return P(point_axis_name, None, None, None)
 
 
+def _axis_partition_spec(axis_name: str, ndim: int):
+    if ndim <= 0:
+        return P()
+    return P(axis_name, *([None] * (ndim - 1)))
+
+
+def _place_collective_group_inputs(points, gammas, gammadashs, currents, config):
+    point_spec = P()
+    if config.point_axis_name is not None:
+        point_spec = _axis_partition_spec(config.point_axis_name, int(points.ndim))
+    return (
+        jax.device_put(points, NamedSharding(config.mesh, point_spec)),
+        jax.device_put(
+            gammas,
+            NamedSharding(
+                config.mesh,
+                _axis_partition_spec(config.coil_axis_name, int(gammas.ndim)),
+            ),
+        ),
+        jax.device_put(
+            gammadashs,
+            NamedSharding(
+                config.mesh,
+                _axis_partition_spec(config.coil_axis_name, int(gammadashs.ndim)),
+            ),
+        ),
+        jax.device_put(
+            currents,
+            NamedSharding(
+                config.mesh,
+                _axis_partition_spec(config.coil_axis_name, int(currents.ndim)),
+            ),
+        ),
+    )
+
+
 def _collective_kernel(kernel, config):
     if config.point_axis_name is not None and kernel is biot_savart_B_and_dB:
         return partial(
@@ -142,10 +181,23 @@ def _collective_group_field(points, gammas, gammadashs, currents, kernel, config
         currents,
         config.coil_device_count,
     )
+    if config.point_axis_name is not None:
+        # The 2D ``points_coils`` mesh requires sharded inputs on the point
+        # axis. Forcing explicit ``jax.device_put`` here so the lowered
+        # ``shard_map`` does not trigger an implicit single-device →
+        # multi-device transfer that strict transfer-guard would reject.
+        # For 1D ``coil_groups`` we skip the pre-placement to avoid an
+        # avoidable JIT-recompile cost — the ``P()`` in_spec replicates the
+        # point input implicitly without triggering a transfer.
+        points, gammas, gammadashs, currents = _place_collective_group_inputs(
+            points,
+            gammas,
+            gammadashs,
+            currents,
+            config,
+        )
     point_spec = (
-        P()
-        if config.point_axis_name is None
-        else P(config.point_axis_name, None)
+        P() if config.point_axis_name is None else P(config.point_axis_name, None)
     )
 
     @partial(
@@ -257,13 +309,11 @@ def biot_savart_B_vjp_maybe_collective(points, v, gammas, gammadashs, currents):
         return biot_savart_B_vjp(points, v, gammas, gammadashs, currents)
 
     coil_count = int(currents.shape[0])
-    padded_gammas, padded_gammadashs, padded_currents = (
-        _pad_coil_axis_to_device_count(
-            gammas,
-            gammadashs,
-            currents,
-            config.coil_device_count,
-        )
+    padded_gammas, padded_gammadashs, padded_currents = _pad_coil_axis_to_device_count(
+        gammas,
+        gammadashs,
+        currents,
+        config.coil_device_count,
     )
 
     def _collective_forward(group_gammas, group_gammadashs, group_currents):

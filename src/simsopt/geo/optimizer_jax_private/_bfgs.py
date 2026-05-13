@@ -23,7 +23,6 @@ from ._common import (
     _scalar_value_and_grad,
 )
 from ._line_search import _line_search
-from ._result_converters import _coerce_dense_hess_inv
 from ._types import _BFGSResults
 
 
@@ -280,31 +279,3 @@ def _minimize_bfgs_private(
         builder=lambda: jax.jit(run_solver),
     )
     return solver(state)
-
-
-def _make_bfgs_continuation_state(result, *, gtol, norm):
-    x_k = _as_jax_dtype(result.x, jnp.float64)
-    f_k = _as_jax_dtype(result.fun, x_k.dtype)
-    g_k = _as_jax_dtype(result.jac, x_k.dtype)
-    H_k = _coerce_dense_hess_inv(
-        getattr(result, "hess_inv", None), x_k.shape[0], x_k.dtype
-    )
-
-    dphi_0 = _dot(g_k, -_dot(H_k, g_k))
-    H_k = jnp.where(dphi_0 < 0, H_k, _eye(H_k.shape[0], x_k.dtype))
-
-    return _BFGSResults(
-        converged=_bool_scalar(False),
-        failed=_bool_scalar(False),
-        k=_int_scalar(0),
-        nfev=_int_scalar(int(getattr(result, "nfev", 0))),
-        ngev=_int_scalar(int(getattr(result, "njev", getattr(result, "nfev", 0)))),
-        nhev=_int_scalar(0),
-        x_k=x_k,
-        f_k=f_k,
-        g_k=g_k,
-        H_k=H_k,
-        old_old_fval=f_k + _norm(g_k) * _as_jax_dtype(0.5, x_k.dtype),
-        status=_int_scalar(0),
-        line_search_status=_int_scalar(0),
-    )

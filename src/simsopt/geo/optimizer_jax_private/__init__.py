@@ -23,7 +23,6 @@ from ._line_search import (
     _zoom,
 )
 from ._bfgs import (
-    _make_bfgs_continuation_state,
     _minimize_bfgs_private,
 )
 from ._lbfgs import (
@@ -31,7 +30,6 @@ from ._lbfgs import (
     _minimize_lbfgs_private_value_and_grad,
 )
 from ._result_converters import (
-    _coerce_dense_hess_inv,
     _private_bfgs_result_to_optimize_result,
     _private_lbfgs_result_to_optimize_result,
     _scipy_result_is_continuable,

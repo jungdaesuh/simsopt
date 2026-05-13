@@ -1,5 +1,24 @@
 """Pure JAX kernel-layer specs and helpers."""
 
+from .framedcurve import (
+    centroid_frame,
+    centroid_frame_dash,
+    frenet_frame,
+    frenet_frame_dash,
+    rotated_centroid_frame,
+    rotated_centroid_frame_dash,
+    rotated_frenet_frame,
+    rotated_frenet_frame_dash,
+    rotation_alpha,
+    rotation_alphadash,
+    rotation_dcoeff,
+    rotationdash_dcoeff,
+)
+from .finitebuild import (
+    build_filament_gamma_and_dash,
+    build_filament_gammas,
+    compute_filament_offsets,
+)
 from .curve_geometry import (
     closed_curve_self_intersection_min_distance,
     closed_curve_self_intersection_penalty,
@@ -212,6 +231,21 @@ from .specs import (
 
 __all__ = [
     "BiotSavartSpec",
+    "build_filament_gamma_and_dash",
+    "build_filament_gammas",
+    "centroid_frame",
+    "centroid_frame_dash",
+    "compute_filament_offsets",
+    "frenet_frame",
+    "frenet_frame_dash",
+    "rotated_centroid_frame",
+    "rotated_centroid_frame_dash",
+    "rotated_frenet_frame",
+    "rotated_frenet_frame_dash",
+    "rotation_alpha",
+    "rotation_alphadash",
+    "rotation_dcoeff",
+    "rotationdash_dcoeff",
     "CoilSpec",
     "CoilGroupSpec",
     "CoilDofExtractionSpec",

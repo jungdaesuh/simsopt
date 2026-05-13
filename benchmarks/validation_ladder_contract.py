@@ -178,6 +178,35 @@ PARITY_LADDER_TOLERANCES: dict[str, dict[str, ParityToleranceValue]] = {
         "requires_same_state": True,
         "reporting_only": True,
     },
+    "pm_mwpgp_fixed_step": {
+        "rtol": 1e-9,
+        "atol": 1e-11,
+        "state_trace_rtol": 1e-9,
+        "state_trace_atol": 1e-11,
+        "optimality_atol": 1e-9,
+        "monotonicity_rtol": 1e-12,
+        "single_step_rtol": 1e-12,
+        "single_step_atol": 1e-14,
+        "requires_same_state": True,
+        "requires_direct_cpp_oracle": True,
+        "vector_parity_required": True,
+    },
+    # Event-time tracing lane: adaptive RK + bracketed event localization
+    # accuracy contract. Loose tolerances reflect that floating-point step
+    # control and root bisection accumulate drift over a trajectory; the
+    # state-vector comparison after N integration steps cannot match the
+    # direct-kernel lane. Used by items 14 (RK path) and 16 (tracing
+    # wrappers).
+    "event_time_tracing": {
+        "state_vector_rtol": 1e-6,
+        "state_vector_atol": 1e-8,
+        "event_time_rtol": 1e-7,
+        "event_time_atol": 1e-9,
+        "step_count_max_ratio": 1.25,
+        "requires_branch_stable_state": True,
+        "requires_event_localization": True,
+        "requires_x64": True,
+    },
 }
 
 # ---------------------------------------------------------------------------

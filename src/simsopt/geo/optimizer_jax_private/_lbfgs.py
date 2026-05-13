@@ -14,10 +14,11 @@ from ..optimizer_host_lbfgs import (
     line_search_failure_reason_to_code,
     line_search_value_and_grad_host as _line_search_value_and_grad_host,
     minimize_lbfgs_host_core,
-    relative_objective_reduction_host as _relative_objective_reduction_host,
-    two_loop_recursion_host as _two_loop_recursion_host,
 )
-from ..optimizer_jax import _prepare_optimizer_callable_inputs
+from ..optimizer_jax import (
+    _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR,
+    _prepare_optimizer_callable_inputs,
+)
 from ._common import (
     _as_jax_dtype,
     _bool_scalar,
@@ -26,7 +27,6 @@ from ._common import (
     _require_private_optimizer_runtime,
     _resolve_lbfgs_limits,
     _scalar_value_and_grad,
-    _STRUCTURED_SOLVER_CACHE_TOKEN_ATTR,
 )
 from ._types import (
     _LBFGSInvalidStepLog,
@@ -103,9 +103,7 @@ def _invalid_step_log_from_events(events, *, capacity, dtype):
         first_tested_alpha[index] = event.first_tested_alpha
         best_finite_alpha[index] = event.best_finite_alpha
         returned_alpha[index] = event.returned_alpha
-        failure_reason[index] = line_search_failure_reason_to_code(
-            event.failure_reason
-        )
+        failure_reason[index] = line_search_failure_reason_to_code(event.failure_reason)
         armijo_margin[index] = event.armijo_margin
         curvature_margin[index] = event.curvature_margin
 
@@ -178,9 +176,8 @@ def _cached_lbfgs_value_and_grad_kernel(
             None,
         )
     adapter_cache_key = None if adapter is None else adapter.solver_cache_key()
-    can_cache_kernel = (
-        cache_owner is not None
-        and (adapter is None or structured_solver_cache_token is not None)
+    can_cache_kernel = cache_owner is not None and (
+        adapter is None or structured_solver_cache_token is not None
     )
 
     def build_kernel():
@@ -213,7 +210,9 @@ def _eval_value_and_grad_host(kernel, x_host, *, dtype):
     )
 
 
-def _coerce_initial_value_and_grad_result_host(initial_value_and_grad, x_shape, *, dtype):
+def _coerce_initial_value_and_grad_result_host(
+    initial_value_and_grad, x_shape, *, dtype
+):
     value, grad = initial_value_and_grad
     value = float(_as_host_scalar(value, dtype=dtype))
     grad = _as_host_array(grad, dtype=dtype)

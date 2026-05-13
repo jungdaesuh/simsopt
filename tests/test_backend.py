@@ -1092,12 +1092,54 @@ def test_sharding_tuning_accepts_coil_groups_strategy(monkeypatch):
     assert backend.should_shard_coil_groups() is True
 
 
-def test_sharding_tuning_rejects_points_coils_strategy(monkeypatch):
+def test_sharding_tuning_registers_points_coils_strategy(monkeypatch):
     _clear_backend_env(monkeypatch)
-    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_gpu_fast")
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_fast")
     monkeypatch.setenv("SIMSOPT_JAX_SHARDING", "points_coils")
+    monkeypatch.setenv("SIMSOPT_JAX_MIN_COILS_TO_SHARD", "5")
     backend = _fresh_backend()
-    with pytest.raises(ValueError, match="SIMSOPT_JAX_SHARDING='points_coils'"):
+    runtime = sys.modules["simsopt.backend.runtime"]
+    monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 4)
+
+    tuning = backend.get_sharding_tuning()
+
+    assert tuning.strategy == "points_coils"
+    assert tuning.point_device_count * tuning.coil_device_count == tuning.device_count
+    assert tuning.point_device_count >= 1
+    assert tuning.coil_device_count >= 1
+    assert tuning.point_axis_name != tuning.coil_axis_name
+    assert tuning.reduced_axis_name == tuning.coil_axis_name
+    assert tuning.mesh_axes == (tuning.point_axis_name, tuning.coil_axis_name)
+    assert backend.should_shard_coil_groups() is True
+
+
+def test_sharding_tuning_factors_points_coils_device_count(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_fast")
+    monkeypatch.setenv("SIMSOPT_JAX_SHARDING", "points_coils")
+    monkeypatch.setenv("SIMSOPT_JAX_MIN_COILS_TO_SHARD", "1")
+    backend = _fresh_backend()
+    runtime = sys.modules["simsopt.backend.runtime"]
+    monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 6)
+
+    tuning = backend.get_sharding_tuning()
+
+    assert tuning.strategy == "points_coils"
+    assert tuning.point_device_count * tuning.coil_device_count == 6
+    # 6 = 2 * 3; closest-to-square factorization gives (2, 3)
+    assert min(tuning.point_device_count, tuning.coil_device_count) == 2
+    assert max(tuning.point_device_count, tuning.coil_device_count) == 3
+
+
+def test_sharding_tuning_rejects_active_strategy_without_devices(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("SIMSOPT_BACKEND_MODE", "jax_cpu_fast")
+    monkeypatch.setenv("SIMSOPT_JAX_SHARDING", "points")
+    backend = _fresh_backend()
+    runtime = sys.modules["simsopt.backend.runtime"]
+    monkeypatch.setattr(runtime, "_detect_local_jax_device_count", lambda policy: 0)
+
+    with pytest.raises(ValueError, match="points sharding requires device_count > 0"):
         backend.get_sharding_tuning()
 
 
