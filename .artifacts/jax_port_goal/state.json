@@ -4,7 +4,7 @@
   "active_scope": ["P0", "P1", "P2"],
   "active_scope_profile": "port_closure",
   "repo": "/Users/suhjungdae/code/columbia/simsopt-jax",
-  "repo_head": "ffada5daba4bd13d8c0523fecb6ec3fea5c0bb5f",
+  "repo_head": "85c4adc6fadcac43541652152d44279ad9ee69f1",
   "upstream_audit_sha": "1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
   "python": "/Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python",
   "jax_runtime": {
@@ -134,7 +134,7 @@
         "cuda_proof": {
           "status": "not_claimed",
           "artifact": "N/A",
-          "current_sha": "ffada5daba4bd13d8c0523fecb6ec3fea5c0bb5f",
+          "current_sha": "85c4adc6fadcac43541652152d44279ad9ee69f1",
           "worktree_dirty": true,
           "gpu_device": "N/A",
           "driver_version": "N/A",
@@ -232,7 +232,7 @@
         "cuda_proof": {
           "status": "not_claimed",
           "artifact": "N/A",
-          "current_sha": "ffada5daba4bd13d8c0523fecb6ec3fea5c0bb5f",
+          "current_sha": "85c4adc6fadcac43541652152d44279ad9ee69f1",
           "worktree_dirty": true,
           "gpu_device": "N/A",
           "driver_version": "N/A",
@@ -276,7 +276,7 @@
         "cuda_proof": {
           "status": "not_claimed",
           "artifact": "N/A",
-          "current_sha": "a0b647f4def4e2346c8a7b1a754dc4b451254957",
+          "current_sha": "85c4adc6fadcac43541652152d44279ad9ee69f1",
           "worktree_dirty": true,
           "gpu_device": "N/A",
           "driver_version": "N/A",
@@ -314,7 +314,33 @@
       "id": "14",
       "tier": "P1",
       "title": "tracing RK path",
-      "status": "pending"
+      "status": "blocked",
+      "closure_level": "blocked_dependency",
+      "blocker": {
+        "category": "missing_dependency",
+        "detail": "Item 14 requires (a) item 13 closure for RegularGridInterpolant3D-backed LevelsetStoppingCriterion, (b) a JAX Boozer field port (P5 items 32-33, currently future-scope), (c) a JAX surface classifier kernel, and (d) a tolerance-policy decision on event-time accuracy for the bisection root solver. None of these are resolvable inside the active-scope budget without expanding active_scope and adding a tolerance lane.",
+        "debug_artifact": ".artifacts/jax_port_goal/blockers/14-debug.md",
+        "needs_user": true
+      },
+      "evidence": {
+        "source_audit": "src/simsoptpp/tracing.cpp:25-554 (6 RHS classes, RK45 DOPRI5 + TOMS748 + 9 stopping criteria); src/simsoptpp/tracing.h:1-158",
+        "upstream_oracle": "byte-identical to upstream at SHA 1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
+        "upstream_audit_sha": "1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
+        "downstream_consumers": [
+          "src/simsopt/field/tracing.py (936 LOC; 8 sopp.* call sites + 9 StoppingCriterion subclasses)",
+          "tests/field/test_particle.py",
+          "tests/field/test_fieldline.py",
+          "tests/field/test_mpi_tracing.py",
+          "tests/configs/test_LHD_like.py"
+        ],
+        "missing_dependencies": [
+          "src/simsopt/jax_core/regular_grid_interp.py (item 13)",
+          "JAX Boozer field port (P5 items 32-33; future-scope)",
+          "JAX surface classifier kernel for LevelsetStoppingCriterion",
+          "tolerance lane for event-time accuracy in PARITY_LADDER_TOLERANCES (tolerance_policy)"
+        ],
+        "cuda_smoke": "not_claimed"
+      }
     },
     {
       "id": "15",
@@ -326,7 +352,21 @@
       "id": "16",
       "tier": "P2",
       "title": "field tracing wrappers",
-      "status": "pending"
+      "status": "blocked",
+      "closure_level": "blocked_dependency",
+      "blocker": {
+        "category": "missing_dependency",
+        "detail": "Item 16 depends on item 14 (tracing RK path), which is BLOCKED with the same category. No JAX backend for trace_particles/fieldline_tracing exists, so the wrapper cannot route to a JAX path without violating anti-pattern invariants (no silent fallback, no broad except).",
+        "debug_artifact": ".artifacts/jax_port_goal/blockers/16-debug.md",
+        "needs_user": true
+      },
+      "evidence": {
+        "source_audit": "src/simsopt/field/tracing.py (936 LOC; 8 sopp.* call sites + 9 StoppingCriterion subclasses)",
+        "upstream_oracle": "upstream byte-identical at SHA 1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
+        "upstream_audit_sha": "1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
+        "depends_on": ["14"],
+        "cuda_smoke": "not_claimed"
+      }
     },
     {
       "id": "17",

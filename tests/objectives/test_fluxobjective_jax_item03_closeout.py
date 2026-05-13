@@ -108,9 +108,9 @@ def test_squared_flux_jax_matches_cpp_oracle_under_strict_transfer_at_production
 
     The test does not call ``field.B()`` or any other path that would
     require implicit host transfers; the JAX adapter consumes the
-    immutable spec captured at construction. When run under
-    ``SIMSOPT_JAX_TRANSFER_GUARD=disallow``, the JAX value path must
-    not trigger any disallowed transfer.
+    immutable spec captured at construction. The explicit transfer-guard
+    context verifies that the JAX construction and value path do not
+    trigger disallowed implicit transfers.
     """
     coils, surface = _build_production_scale_stellsym_fixture()
 
@@ -121,9 +121,10 @@ def test_squared_flux_jax_matches_cpp_oracle_under_strict_transfer_at_production
     j_cpu = float(objective_cpu.J())
 
     # JAX-native path
-    bs_jax = BiotSavartJAX(coils)
-    objective_jax = SquaredFluxJAX(surface, bs_jax, definition=definition)
-    j_jax = float(objective_jax.J())
+    with jax.transfer_guard("disallow"):
+        bs_jax = BiotSavartJAX(coils)
+        objective_jax = SquaredFluxJAX(surface, bs_jax, definition=definition)
+        j_jax = float(objective_jax.J())
 
     np.testing.assert_allclose(
         j_jax,
