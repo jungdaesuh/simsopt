@@ -1,0 +1,30 @@
+{
+  "item": "15",
+  "status": "partial_blocked_dependency",
+  "hot_path_change": true,
+  "cuda_status": "not_claimed",
+  "reason": "Partial JAX-backed wrappers exist for ToroidalField, PoloidalField, MirrorModel, Dommaschk, and Reiman. Item 15 remains blocked because CircularCoil requires complete elliptic integrals that are not exposed by jaxlib 0.10.0, and InterpolatedField needs a wrapper-level cylindrical/folding spec beyond the item-13 rectangular interpolant kernel.",
+  "partial_implementation": [
+    "src/simsopt/field/magneticfieldclasses_jax.py",
+    "tests/field/test_magneticfieldclasses_jax_item15.py"
+  ],
+  "blocking_artifacts": [
+    ".artifacts/jax_port_goal/blockers/12-circularcoil-debug.md",
+    ".artifacts/jax_port_goal/blockers/15-debug.md",
+    ".artifacts/jax_port_goal/blockers/15-interpolatedfield-debug.md"
+  ],
+  "validation": [
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/field/test_magneticfieldclasses_jax_item15.py -q",
+      "result": "18 passed"
+    },
+    {
+      "command": "SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/field/test_magneticfieldclasses_jax_item15.py -q",
+      "result": "18 passed"
+    },
+    {
+      "command": ".conda/jax-0.9.2/bin/python -m ruff check src/simsopt/field/magneticfieldclasses_jax.py tests/field/test_magneticfieldclasses_jax_item15.py && .conda/jax-0.9.2/bin/python -m ruff format --check src/simsopt/field/magneticfieldclasses_jax.py tests/field/test_magneticfieldclasses_jax_item15.py",
+      "result": "passed"
+    }
+  ]
+}
