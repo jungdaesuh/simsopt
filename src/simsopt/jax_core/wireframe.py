@@ -118,14 +118,32 @@ def _gather_segment_nodes(
     return node0, node1
 
 
+def _wireframe_segment_B_from_arrays(
+    points: jax.Array,
+    node0: jax.Array,
+    node1: jax.Array,
+) -> jax.Array:
+    diff0 = points - node0
+    diff1 = points - node1
+    norm_diff0 = jnp.sqrt(jnp.sum(diff0 * diff0, axis=-1))
+    norm_diff1 = jnp.sqrt(jnp.sum(diff1 * diff1, axis=-1))
+    diff0_diff1 = norm_diff0 * norm_diff1
+    denom = diff0_diff1 * (diff0_diff1 + jnp.sum(diff0 * diff1, axis=-1))
+    factor = (norm_diff0 + norm_diff1) / denom
+    return _MU0_OVER_4PI * factor[:, None] * jnp.cross(diff0, diff1)
+
+
 def wireframe_segment_B(
     points: object,
     node0: object,
     node1: object,
 ) -> jax.Array:
     """Magnetic field from one straight wire segment with unit current."""
-    B, _ = wireframe_segment_B_and_dB_by_dX(points, node0, node1)
-    return B
+    return _wireframe_segment_B_from_arrays(
+        _as_jax_float64(points),
+        _as_jax_float64(node0),
+        _as_jax_float64(node1),
+    )
 
 
 def wireframe_segment_dB_by_dX(
@@ -144,9 +162,18 @@ def wireframe_segment_B_and_dB_by_dX(
     node1: object,
 ) -> tuple[jax.Array, jax.Array]:
     """Return ``(B, dB_by_dX)`` for one straight segment with unit current."""
-    points_jax = _as_jax_float64(points)
-    node0_jax = _as_jax_float64(node0)
-    node1_jax = _as_jax_float64(node1)
+    return _wireframe_segment_B_and_dB_by_dX_from_arrays(
+        _as_jax_float64(points),
+        _as_jax_float64(node0),
+        _as_jax_float64(node1),
+    )
+
+
+def _wireframe_segment_B_and_dB_by_dX_from_arrays(
+    points_jax: jax.Array,
+    node0_jax: jax.Array,
+    node1_jax: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
 
     diff0 = points_jax - node0_jax
     diff1 = points_jax - node1_jax
@@ -224,7 +251,7 @@ def wireframe_segment_B_contributions(
         node1_by_half: jax.Array,
         seg_sign: jax.Array,
     ) -> jax.Array:
-        return seg_sign * wireframe_segment_B(
+        return seg_sign * _wireframe_segment_B_from_arrays(
             points_jax,
             node0_by_half,
             node1_by_half,
@@ -259,11 +286,12 @@ def wireframe_segment_dB_by_dX_contributions(
         node1_by_half: jax.Array,
         seg_sign: jax.Array,
     ) -> jax.Array:
-        return seg_sign * wireframe_segment_dB_by_dX(
+        _B, dB = _wireframe_segment_B_and_dB_by_dX_from_arrays(
             points_jax,
             node0_by_half,
             node1_by_half,
         )
+        return seg_sign * dB
 
     def segment_dB(node0_by_segment: jax.Array, node1_by_segment: jax.Array):
         return jnp.sum(
@@ -278,43 +306,79 @@ def wireframe_segment_dB_by_dX_contributions(
     return jax.vmap(segment_dB, in_axes=(1, 1), out_axes=0)(node0, node1)
 
 
-def _wireframe_segment_B_and_dB_by_dX_contributions(
-    points: object,
-    nodes: object,
-    segments: object,
-    seg_signs: object,
+def _nodes_by_segment(
+    nodes: jax.Array, segments: jax.Array
 ) -> tuple[jax.Array, jax.Array]:
-    points_jax = _as_jax_float64(points)
-    seg_signs_jax = _as_jax_float64(seg_signs).reshape((-1,))
     node0, node1 = _gather_segment_nodes(nodes, segments)
+    return jnp.moveaxis(node0, 1, 0), jnp.moveaxis(node1, 1, 0)
 
-    def half_period_B_and_dB(
-        node0_by_half: jax.Array,
-        node1_by_half: jax.Array,
-        seg_sign: jax.Array,
-    ) -> tuple[jax.Array, jax.Array]:
-        B, dB = wireframe_segment_B_and_dB_by_dX(
-            points_jax,
-            node0_by_half,
-            node1_by_half,
-        )
-        return seg_sign * B, seg_sign * dB
 
-    def segment_B_and_dB(
-        node0_by_segment: jax.Array,
-        node1_by_segment: jax.Array,
-    ) -> tuple[jax.Array, jax.Array]:
-        B_by_half, dB_by_half = jax.vmap(half_period_B_and_dB)(
-            node0_by_segment,
-            node1_by_segment,
-            seg_signs_jax,
-        )
-        return jnp.sum(B_by_half, axis=0), jnp.sum(dB_by_half, axis=0)
+def _segment_total_B(
+    points: jax.Array,
+    node0_by_segment: jax.Array,
+    node1_by_segment: jax.Array,
+    seg_signs: jax.Array,
+) -> jax.Array:
+    def add_half_period(
+        acc: jax.Array, half_period: tuple[jax.Array, jax.Array, jax.Array]
+    ):
+        node0, node1, seg_sign = half_period
+        return acc + seg_sign * _wireframe_segment_B_from_arrays(
+            points, node0, node1
+        ), None
 
-    return jax.vmap(segment_B_and_dB, in_axes=(1, 1), out_axes=(0, 0))(
-        node0,
-        node1,
+    B, _ = jax.lax.scan(
+        add_half_period,
+        jnp.zeros_like(points),
+        (node0_by_segment, node1_by_segment, seg_signs),
     )
+    return B
+
+
+def _segment_total_dB(
+    points: jax.Array,
+    node0_by_segment: jax.Array,
+    node1_by_segment: jax.Array,
+    seg_signs: jax.Array,
+) -> jax.Array:
+    def add_half_period(
+        acc: jax.Array, half_period: tuple[jax.Array, jax.Array, jax.Array]
+    ):
+        node0, node1, seg_sign = half_period
+        _B, dB = _wireframe_segment_B_and_dB_by_dX_from_arrays(points, node0, node1)
+        return acc + seg_sign * dB, None
+
+    dB, _ = jax.lax.scan(
+        add_half_period,
+        jnp.zeros(points.shape + (3,), dtype=points.dtype),
+        (node0_by_segment, node1_by_segment, seg_signs),
+    )
+    return dB
+
+
+def _segment_total_B_and_dB(
+    points: jax.Array,
+    node0_by_segment: jax.Array,
+    node1_by_segment: jax.Array,
+    seg_signs: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    def add_half_period(
+        acc: tuple[jax.Array, jax.Array],
+        half_period: tuple[jax.Array, jax.Array, jax.Array],
+    ):
+        node0, node1, seg_sign = half_period
+        B_acc, dB_acc = acc
+        B, dB = _wireframe_segment_B_and_dB_by_dX_from_arrays(points, node0, node1)
+        return (B_acc + seg_sign * B, dB_acc + seg_sign * dB), None
+
+    return jax.lax.scan(
+        add_half_period,
+        (
+            jnp.zeros_like(points),
+            jnp.zeros(points.shape + (3,), dtype=points.dtype),
+        ),
+        (node0_by_segment, node1_by_segment, seg_signs),
+    )[0]
 
 
 @jax.jit
@@ -325,8 +389,15 @@ def _wireframe_B_jit(
     seg_signs: jax.Array,
     currents: jax.Array,
 ) -> jax.Array:
-    segment_B = wireframe_segment_B_contributions(points, nodes, segments, seg_signs)
-    return jnp.sum(currents[:, None, None] * segment_B, axis=0)
+    node0, node1 = _nodes_by_segment(nodes, segments)
+
+    def add_segment(acc: jax.Array, segment: tuple[jax.Array, jax.Array, jax.Array]):
+        node0_by_segment, node1_by_segment, current = segment
+        B = _segment_total_B(points, node0_by_segment, node1_by_segment, seg_signs)
+        return acc + current * B, None
+
+    B, _ = jax.lax.scan(add_segment, jnp.zeros_like(points), (node0, node1, currents))
+    return B
 
 
 @jax.jit
@@ -337,10 +408,19 @@ def _wireframe_dB_jit(
     seg_signs: jax.Array,
     currents: jax.Array,
 ) -> jax.Array:
-    segment_dB = wireframe_segment_dB_by_dX_contributions(
-        points, nodes, segments, seg_signs
+    node0, node1 = _nodes_by_segment(nodes, segments)
+
+    def add_segment(acc: jax.Array, segment: tuple[jax.Array, jax.Array, jax.Array]):
+        node0_by_segment, node1_by_segment, current = segment
+        dB = _segment_total_dB(points, node0_by_segment, node1_by_segment, seg_signs)
+        return acc + current * dB, None
+
+    dB, _ = jax.lax.scan(
+        add_segment,
+        jnp.zeros(points.shape + (3,), dtype=points.dtype),
+        (node0, node1, currents),
     )
-    return jnp.sum(currents[:, None, None, None] * segment_dB, axis=0)
+    return dB
 
 
 @jax.jit
@@ -351,12 +431,27 @@ def _wireframe_B_and_dB_jit(
     seg_signs: jax.Array,
     currents: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
-    segment_B, segment_dB = _wireframe_segment_B_and_dB_by_dX_contributions(
-        points, nodes, segments, seg_signs
-    )
-    B = jnp.sum(currents[:, None, None] * segment_B, axis=0)
-    dB = jnp.sum(currents[:, None, None, None] * segment_dB, axis=0)
-    return B, dB
+    node0, node1 = _nodes_by_segment(nodes, segments)
+
+    def add_segment(
+        acc: tuple[jax.Array, jax.Array],
+        segment: tuple[jax.Array, jax.Array, jax.Array],
+    ):
+        node0_by_segment, node1_by_segment, current = segment
+        B_acc, dB_acc = acc
+        B, dB = _segment_total_B_and_dB(
+            points, node0_by_segment, node1_by_segment, seg_signs
+        )
+        return (B_acc + current * B, dB_acc + current * dB), None
+
+    return jax.lax.scan(
+        add_segment,
+        (
+            jnp.zeros_like(points),
+            jnp.zeros(points.shape + (3,), dtype=points.dtype),
+        ),
+        (node0, node1, currents),
+    )[0]
 
 
 def _coerce_inputs(

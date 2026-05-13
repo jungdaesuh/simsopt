@@ -171,7 +171,7 @@ def test_fullorbit_jax_records_phi_plane_hits_on_helical_motion(event_time_lane)
         target_wrapped = phi_target
         diff = abs(phi_hit - target_wrapped)
         diff = min(diff, abs(2.0 * np.pi - diff))
-        # The bracketed bisection on a sub-step DOPRI5 interpolant
+        # The bracketed localizer on a sub-step DOPRI5 interpolant
         # localises the crossing to roughly the lane state-vector rtol
         # in the (x, y) plane → atan2 residual is comparable.
         assert diff < 1.0e-4, (

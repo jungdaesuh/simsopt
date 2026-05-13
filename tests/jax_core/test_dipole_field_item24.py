@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -115,6 +116,24 @@ def test_direct_cpp_parity_for_field_and_derivative_kernels() -> None:
     _assert_direct_kernel_close(actual_A, expected_A)
     _assert_direct_kernel_close(actual_dB, expected_dB)
     _assert_direct_kernel_close(actual_dA, expected_dA)
+
+
+def test_total_field_kernels_stream_over_dipoles() -> None:
+    """Total B/A/dB/dA kernels scan over dipoles instead of staging dense pairs."""
+
+    points = jnp.asarray(_POINTS, dtype=jnp.float64)
+    dipole_points = jnp.asarray(_DIPOLE_POINTS, dtype=jnp.float64)
+    dipole_moments = jnp.asarray(_DIPOLE_MOMENTS, dtype=jnp.float64)
+
+    kernels = (
+        dipole_field_B,
+        dipole_field_A,
+        dipole_field_dB,
+        dipole_field_dA,
+    )
+    for kernel in kernels:
+        jaxpr = str(jax.make_jaxpr(kernel)(points, dipole_points, dipole_moments))
+        assert "scan[" in jaxpr, kernel.__name__
 
 
 def test_immutable_spec_jits_without_host_oracle_dependency() -> None:

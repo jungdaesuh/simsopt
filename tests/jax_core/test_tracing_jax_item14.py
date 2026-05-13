@@ -4,17 +4,17 @@ This module validates three slices of the new
 ``simsopt.jax_core.tracing`` and ``simsopt.jax_core.surface_classifier``
 modules under the ``event_time_tracing`` parity-ladder lane:
 
-1. ``test_dopri5_step_recovers_analytic_solution_against_scipy`` — single
-   DOPRI5 step on the scalar ODE ``dy/dt = y`` matches the
-   SciPy ``solve_ivp(method='RK45')`` reference at the same step size
-   to within the lane state-vector tolerance.
+1. ``test_dopri5_step_recovers_analytic_solution`` — single
+   DOPRI5 step on the scalar ODE ``dy/dt = y`` matches the closed-form
+   ``y(h) = exp(h)`` to within the a-priori 5th-order truncation
+   ceiling.
 2. ``test_trace_fieldline_matches_upstream_compute_fieldlines_toroidal_axis`` —
    a single fieldline traced through a uniform toroidal field
    ``ToroidalField(R0, B0)`` agrees with the upstream
    ``simsopt.field.tracing.compute_fieldlines`` endpoint at the lane
    state-vector tolerance under the same ``dx/dt = B`` parameterisation.
 3. ``test_bracket_root_finds_zero_crossing_within_tolerance`` — the
-   ``bracket_root_jax`` bisection locates the analytic root of
+   ``bracket_root_jax`` Illinois localizer locates the analytic root of
    ``f(t) = t - 0.7`` over ``[0, 1]`` to within the lane
    ``event_time_atol``.
 
@@ -61,24 +61,23 @@ def event_time_lane():
 
 
 # ---------------------------------------------------------------------------
-# 1. Single DOPRI5 step vs SciPy
+# 1. Single DOPRI5 step vs analytic exp(h)
 # ---------------------------------------------------------------------------
 
 
-def test_dopri5_step_recovers_analytic_solution_against_scipy(event_time_lane):
-    """``dy/dt = y`` integrated for one DOPRI5 step matches SciPy at the same step.
+def test_dopri5_step_recovers_analytic_solution():
+    """``dy/dt = y`` integrated for one DOPRI5 step matches ``exp(h)`` analytically.
 
-    SciPy's ``solve_ivp(method='RK45')`` uses the same Dormand-Prince
-    Butcher tableau as this port. With matched initial step size and
-    tolerances set so the controller does not subdivide, the two
-    integrators must produce identical 5th-order outputs to within the
-    event-time state-vector lane.
+    The Dormand-Prince 5(4) pair has local truncation error
+    ``O(h^6)`` on the 5th-order solution; over a single step from
+    ``t=0`` to ``t=h=0.1`` the error is bounded by ``C * h^6`` with
+    ``C`` an ``O(1)`` constant determined by the Butcher tableau and
+    the RHS Lipschitz behaviour. For ``dy/dt = y`` the Jacobian is
+    bounded and ``h^6 = 1e-6`` sets the natural ceiling; we use
+    ``atol=1e-5`` to leave one order of headroom for the leading
+    coefficient. SciPy is intentionally absent — it carries its own
+    truncation error and is not a stronger oracle than ``np.exp``.
     """
-
-    from scipy.integrate import solve_ivp
-
-    state_rtol = float(event_time_lane["state_vector_rtol"])
-    state_atol = float(event_time_lane["state_vector_atol"])
 
     # JAX trial step: dy/dt = y, y(0) = 1, h = 0.1.
     def rhs(t, y):
@@ -93,32 +92,17 @@ def test_dopri5_step_recovers_analytic_solution_against_scipy(event_time_lane):
     y_new_jax, _y_err, _k7 = dopri5_step(rhs, t0, y0, h, k0)
     y_new_jax_np = np.asarray(y_new_jax)
 
-    # SciPy reference run: force a single step by setting max_step = h and
-    # disabling adaptive subdivision with tight tolerances. SciPy will
-    # still adaptively select a step but with such loose tolerances and a
-    # max_step ceiling we recover one step of the embedded RK4(5) pair.
-    sol = solve_ivp(
-        rhs,
-        (0.0, 0.1),
-        np.asarray(y0),
-        method="RK45",
-        rtol=1e-3,
-        atol=1e-6,
-        first_step=0.1,
-        max_step=0.1,
-        dense_output=False,
-    )
-    assert sol.success
-    y_scipy = sol.y[:, -1]
-
-    # Analytic check for severity context (not the gate).
+    # Analytic gate: single-step truncation ceiling for DOPRI5 with h=0.1
+    # is dominated by ``h^6 = 1e-6``; ``atol=1e-5`` leaves an order of
+    # headroom for the leading-coefficient constant.
     y_analytic = np.exp(0.1)
-
-    # Lane gate: state-vector parity.
-    assert np.allclose(y_new_jax_np, y_scipy, rtol=state_rtol, atol=state_atol), (
-        "DOPRI5 single-step state-vector parity failed: "
-        f"jax={y_new_jax_np}, scipy={y_scipy}, "
-        f"analytic={y_analytic}, lane_rtol={state_rtol}, lane_atol={state_atol}"
+    truncation_ceiling = 1.0e-5
+    abs_err = float(np.max(np.abs(y_new_jax_np - y_analytic)))
+    assert abs_err <= truncation_ceiling, (
+        "DOPRI5 single-step analytic parity failed: "
+        f"jax={y_new_jax_np}, analytic={y_analytic}, "
+        f"abs_err={abs_err}, truncation_ceiling={truncation_ceiling} "
+        "(h^6 ceiling for h=0.1)"
     )
 
 
@@ -274,12 +258,35 @@ def test_bracket_root_finds_zero_crossing_within_tolerance(event_time_lane):
     assert np.isclose(float(t_star), 0.7, rtol=event_rtol, atol=event_atol), (
         f"event-time parity failed: t_star={float(t_star)}, lane_atol={event_atol}"
     )
-    # Residual sanity: bisection should drive the residual at least as
-    # tight as the bracket width.
+    # Residual sanity: the localizer should drive the returned residual
+    # inside the event-time lane.
     assert abs(float(f_star)) <= event_atol, (
         f"event-time residual exceeds lane: |f(t_star)|={abs(float(f_star))}, "
         f"lane_atol={event_atol}"
     )
+
+
+def test_bracket_root_uses_false_position_candidate_for_linear_residual():
+    """A single Illinois false-position iteration solves a linear residual."""
+
+    def f(t):
+        return t - jnp.asarray(0.7, dtype=jnp.float64)
+
+    t_left = jnp.asarray(0.0, dtype=jnp.float64)
+    t_right = jnp.asarray(1.0, dtype=jnp.float64)
+    t_star, f_star, bracketed = bracket_root_jax(
+        f,
+        t_left,
+        t_right,
+        f(t_left),
+        f(t_right),
+        max_iters=1,
+        atol=jnp.asarray(0.0, dtype=jnp.float64),
+    )
+
+    assert bool(bracketed)
+    np.testing.assert_allclose(float(t_star), 0.7, rtol=0.0, atol=1e-15)
+    np.testing.assert_allclose(float(f_star), 0.0, rtol=0.0, atol=1e-15)
 
 
 def test_bracket_root_returns_false_when_no_sign_change(event_time_lane):
@@ -426,8 +433,8 @@ def test_trace_fieldline_step_count_within_lane_max_ratio(event_time_lane):
     The lane reports ``step_count_max_ratio=1.25``: the JAX integrator
     is allowed up to 25% more accepted steps than the upstream solver
     on the same fixture. This test runs a fieldline that stays at
-    constant R in a toroidal field; both integrators converge to the
-    same step controller, so the ratio should be well below 1.25.
+    constant R in a toroidal field, so both integrators should stay
+    comfortably inside the lane budget.
     """
 
     from simsopt.field.magneticfieldclasses import ToroidalField
@@ -472,28 +479,46 @@ def test_trace_fieldline_step_count_within_lane_max_ratio(event_time_lane):
 
 
 # ---------------------------------------------------------------------------
-# 6. Smoke: full trace under JIT
+# 6. Full trace under JIT vs analytic toroidal-field arc
 # ---------------------------------------------------------------------------
 
 
-def test_trace_fieldline_jit_compiles_and_runs():
-    """``trace_fieldline`` is JIT-compatible (no host-side appends or branches)."""
+def test_trace_fieldline_jit_matches_toroidal_field_closed_form():
+    """JIT-compiled ``trace_fieldline`` matches the analytic toroidal-field arc.
+
+    A pure toroidal field ``B = B0 * R0 / R`` advects a fieldline along
+    a circle at constant ``R`` and ``z=0``. With ``dx/dt = B`` the
+    angular rate is ``omega = |B| / R = B0 * R0 / R^2`` (constant on
+    the streamline), so the closed-form endpoint after time ``t`` from
+    ``(R, 0, 0)`` is
+
+        (R * cos(omega t), R * sin(omega t), 0).
+
+    This is the value oracle for the JIT path: parity is enforced
+    against the closed-form solution, not against a peer integrator.
+    """
 
     R0 = 1.0
     B0 = 1.0
+    R_init = 1.05
     field_fn = _toroidal_field_jax(R0, B0)
 
-    spec = FieldlineTracingSpec(tmax=0.5, rtol=1e-7, atol=1e-9, max_steps=400)
+    spec = FieldlineTracingSpec(tmax=0.5, rtol=1e-10, atol=1e-12, max_steps=400)
 
     @jax.jit
     def go(y0):
         return trace_fieldline(spec, y0, field_fn)
 
-    y0 = jnp.asarray([1.05, 0.0, 0.0], dtype=jnp.float64)
+    y0 = jnp.asarray([R_init, 0.0, 0.0], dtype=jnp.float64)
     result = go(y0)
-    # The JIT path must produce a finite endpoint and a positive accepted
-    # step count.
-    endpoint = np.asarray(result.trajectory[int(result.steps_taken), 1:4])
-    assert np.all(np.isfinite(endpoint))
-    assert int(result.steps_taken) > 0
+
     assert int(result.status) == 0
+    assert int(result.steps_taken) > 0
+
+    endpoint = np.asarray(result.trajectory[int(result.steps_taken), 1:4])
+    omega = B0 * R0 / (R_init * R_init)
+    theta = omega * spec.tmax
+    analytic_endpoint = np.array([R_init * np.cos(theta), R_init * np.sin(theta), 0.0])
+    # The integrator targets rtol=1e-10 over a finite arc; leave two
+    # orders of headroom for accumulated controller noise.
+    np.testing.assert_allclose(endpoint, analytic_endpoint, rtol=1e-8, atol=1e-10)

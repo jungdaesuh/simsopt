@@ -2177,67 +2177,45 @@ def _step_body(
       branch_inner_cg: ``|g_alpha_p|^2 <= |phi|^2`` AND ``alpha_cg < alpha_f``.
       branch_inner_expand: ``|g_alpha_p|^2 <= |phi|^2`` AND ``alpha_cg >= alpha_f``.
       branch_outer_proj: ``|g_alpha_p|^2 > |phi|^2`` -- vanilla projected gradient.
-
-    ``jnp.where`` is used (rather than ``lax.cond``) so that both
-    branches execute and the selection is fully vectorised. For the
-    Hessian-action step the cost difference is negligible because we
-    pay one extra ``A^T A`` matvec per iteration in the worst case;
-    this keeps the body free of tracer-dependent control flow.
     """
     x, g, p = state
-
-    # branch 1 candidates: conjugate-gradient step
-    ATAp = _hessian_action(p, A, reg_l2, nu)  # H p
-    gp = jnp.sum(g * p)
-    pATAp = jnp.sum(p * ATAp)
-    # Guard division by zero for ``alpha_cg``: when ``p == 0`` (e.g. after a
-    # projected-gradient step that immediately hit the boundary in all
-    # rows), ``pATAp == 0`` and ``alpha_cg`` is irrelevant. The C++ code
-    # divides unconditionally and would NaN here. We treat ``pATAp == 0``
-    # as the "boundary path is shortest" case by setting ``alpha_cg`` to
-    # ``+inf`` so ``alpha_cg < alpha_f`` is always false; this triggers
-    # the expansion branch which itself uses ``alpha_f`` rather than
-    # ``alpha_cg`` and is well-defined.
-    safe_pATAp = jnp.where(pATAp != 0.0, pATAp, 1.0)
-    alpha_cg = jnp.where(pATAp != 0.0, gp / safe_pATAp, jnp.inf)
-
-    alpha_fs = find_max_alphaf(x, p, m_maxima)  # (N,)
-    alpha_f = jnp.min(alpha_fs)
 
     g_alpha_p = g_reduced_projected_gradient(x, g, alpha, m_maxima)
     phi_g = phi_mwpgp(x, g, m_maxima)
     norm_g_alpha_p = jnp.sum(g_alpha_p * g_alpha_p)
     norm_phi = jnp.sum(phi_g * phi_g)
-
-    # ----- branch_inner_cg: conjugate gradient -----
-    x_cg = x - alpha_cg * p
-    g_cg = g - alpha_cg * ATAp
-    phi_cg = phi_mwpgp(x_cg, g_cg, m_maxima)
-    gamma_num = jnp.sum(phi_cg * ATAp)
-    gamma = jnp.where(pATAp != 0.0, gamma_num / safe_pATAp, 0.0)
-    p_cg = phi_cg - gamma * p
-
-    # ----- branch_inner_expand: mixed projected-expansion step -----
-    x_expand_raw = (x - alpha_f * p) - alpha * (g - alpha_f * ATAp)
-    x_expand = projection_l2_balls(x_expand_raw, m_maxima)
-    # ``g = H x - ATb_rs`` from scratch
-    g_expand = _hessian_action(x_expand, A, reg_l2, nu) - ATb_rs
-    p_expand = phi_mwpgp(x_expand, g_expand, m_maxima)
-
-    # ----- branch_outer_proj: plain projected gradient -----
-    x_proj = projection_l2_balls(x - alpha * g, m_maxima)
-    g_proj = _hessian_action(x_proj, A, reg_l2, nu) - ATb_rs
-    p_proj = phi_mwpgp(x_proj, g_proj, m_maxima)
-
-    # Branch selection mirrors C++ lines 234-301.
     inner = norm_g_alpha_p <= norm_phi
-    use_cg = inner & (alpha_cg < alpha_f)
-    use_expand = inner & jnp.logical_not(alpha_cg < alpha_f)
 
-    x_new = jnp.where(use_cg, x_cg, jnp.where(use_expand, x_expand, x_proj))
-    g_new = jnp.where(use_cg, g_cg, jnp.where(use_expand, g_expand, g_proj))
-    p_new = jnp.where(use_cg, p_cg, jnp.where(use_expand, p_expand, p_proj))
-    return x_new, g_new, p_new
+    def inner_branch(_operand):
+        ATAp = _hessian_action(p, A, reg_l2, nu)
+        gp = jnp.sum(g * p)
+        pATAp = jnp.sum(p * ATAp)
+        safe_pATAp = jnp.where(pATAp != 0.0, pATAp, 1.0)
+        alpha_cg = jnp.where(pATAp != 0.0, gp / safe_pATAp, jnp.inf)
+        alpha_f = jnp.min(find_max_alphaf(x, p, m_maxima))
+
+        def cg_branch(__operand):
+            x_cg = x - alpha_cg * p
+            g_cg = g - alpha_cg * ATAp
+            phi_cg = phi_mwpgp(x_cg, g_cg, m_maxima)
+            gamma_num = jnp.sum(phi_cg * ATAp)
+            gamma = jnp.where(pATAp != 0.0, gamma_num / safe_pATAp, 0.0)
+            return x_cg, g_cg, phi_cg - gamma * p
+
+        def expand_branch(__operand):
+            x_expand_raw = (x - alpha_f * p) - alpha * (g - alpha_f * ATAp)
+            x_expand = projection_l2_balls(x_expand_raw, m_maxima)
+            g_expand = _hessian_action(x_expand, A, reg_l2, nu) - ATb_rs
+            return x_expand, g_expand, phi_mwpgp(x_expand, g_expand, m_maxima)
+
+        return jax.lax.cond(alpha_cg < alpha_f, cg_branch, expand_branch, None)
+
+    def projected_gradient_branch(_operand):
+        x_proj = projection_l2_balls(x - alpha * g, m_maxima)
+        g_proj = _hessian_action(x_proj, A, reg_l2, nu) - ATb_rs
+        return x_proj, g_proj, phi_mwpgp(x_proj, g_proj, m_maxima)
+
+    return jax.lax.cond(inner, inner_branch, projected_gradient_branch, None)
 
 
 def mwpgp_step(

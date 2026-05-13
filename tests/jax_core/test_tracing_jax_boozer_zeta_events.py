@@ -175,7 +175,7 @@ def test_zeta_plane_crossing_recovers_axis_trajectory_on_boozer_route(
     zeta_target_wrapped = zeta_target - 2.0 * np.pi * np.floor(
         zeta_target / (2.0 * np.pi)
     )
-    # Bracketed-bisection refines the crossing on a sub-step DOPRI5
+    # The bracketed localizer refines the crossing on a sub-step DOPRI5
     # interpolant; final zeta-position error is dominated by the per-
     # step RK accuracy. Use a comfortable tolerance well above the
     # event_time_atol gate.

@@ -14,6 +14,8 @@ closed-form same-state evaluations and route through the
 
 from __future__ import annotations
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -22,6 +24,8 @@ import simsoptpp as sopp
 from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 
 from simsopt.jax_core.boozer_radial_interp import (
+    _build_angle_basis,
+    _compute_K_per_point,
     compute_kmnc_kmns,
     compute_kmns,
     fourier_transform_even,
@@ -105,6 +109,93 @@ def _make_half_grid_fields(
     bundle["G"] = 2.0 + 0.05 * rng.randn(num_surf)
     bundle["I"] = 0.1 + 0.02 * rng.randn(num_surf)
     return bundle
+
+
+def _k_per_point_jaxpr_dot_count(
+    *,
+    num_modes: int,
+    num_points: int,
+    modes_seed: int,
+    points_seed: int,
+    fields_seed: int,
+    stellsym: bool,
+) -> int:
+    xm, xn = _make_modes(num_modes, seed=modes_seed)
+    thetas, zetas = _make_quad_points(num_points, seed=points_seed)
+    bundle = _make_half_grid_fields(
+        num_modes=num_modes,
+        num_surf=1,
+        seed=fields_seed,
+        stellsym=stellsym,
+    )
+    cos_a, sin_a = _build_angle_basis(
+        jnp.asarray(xm),
+        jnp.asarray(xn),
+        jnp.asarray(thetas),
+        jnp.asarray(zetas),
+    )
+    kwargs = {
+        "cos_a": cos_a,
+        "sin_a": sin_a,
+        "xm": jnp.asarray(xm),
+        "xn": jnp.asarray(xn),
+        "rmnc": jnp.asarray(bundle["rmnc"][:, 0]),
+        "drmncds": jnp.asarray(bundle["drmncds"][:, 0]),
+        "zmns": jnp.asarray(bundle["zmns"][:, 0]),
+        "dzmnsds": jnp.asarray(bundle["dzmnsds"][:, 0]),
+        "numns": jnp.asarray(bundle["numns"][:, 0]),
+        "dnumnsds": jnp.asarray(bundle["dnumnsds"][:, 0]),
+        "bmnc": jnp.asarray(bundle["bmnc"][:, 0]),
+        "zetas": jnp.asarray(zetas),
+        "iota_isurf": jnp.asarray(bundle["iota"][0]),
+        "G_isurf": jnp.asarray(bundle["G"][0]),
+        "I_isurf": jnp.asarray(bundle["I"][0]),
+    }
+    if not stellsym:
+        kwargs |= {
+            "rmns": jnp.asarray(bundle["rmns"][:, 0]),
+            "drmnsds": jnp.asarray(bundle["drmnsds"][:, 0]),
+            "zmnc": jnp.asarray(bundle["zmnc"][:, 0]),
+            "dzmncds": jnp.asarray(bundle["dzmncds"][:, 0]),
+            "numnc": jnp.asarray(bundle["numnc"][:, 0]),
+            "dnumncds": jnp.asarray(bundle["dnumncds"][:, 0]),
+            "bmns": jnp.asarray(bundle["bmns"][:, 0]),
+        }
+    return str(jax.make_jaxpr(lambda: _compute_K_per_point(**kwargs))()).count(
+        "dot_general"
+    )
+
+
+def test_compute_K_per_point_batches_stellsym_fourier_sums() -> None:
+    num_modes = 8
+    num_points = 16
+    assert (
+        _k_per_point_jaxpr_dot_count(
+            num_modes=num_modes,
+            num_points=num_points,
+            modes_seed=3201,
+            points_seed=3202,
+            fields_seed=3203,
+            stellsym=True,
+        )
+        == 2
+    )
+
+
+def test_compute_K_per_point_batches_asym_fourier_sums() -> None:
+    num_modes = 8
+    num_points = 16
+    assert (
+        _k_per_point_jaxpr_dot_count(
+            num_modes=num_modes,
+            num_points=num_points,
+            modes_seed=3211,
+            points_seed=3212,
+            fields_seed=3213,
+            stellsym=False,
+        )
+        == 2
+    )
 
 
 # ----------------------------------------------------------------------

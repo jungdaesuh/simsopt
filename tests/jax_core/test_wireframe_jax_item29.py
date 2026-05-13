@@ -286,6 +286,25 @@ def test_combined_B_and_dB_matches_separate():
     )
 
 
+def test_total_field_kernels_stream_over_segments():
+    """Total B/dB kernels scan over segments instead of staging contribution cubes."""
+
+    nodes_hp = _closed_loop_nodes()
+    segments = _closed_loop_segments()
+    seg_signs = jnp.asarray([1.0], dtype=jnp.float64)
+    currents = jnp.asarray(np.linspace(1.0e4, 2.0e4, segments.shape[0]))
+    points = jnp.asarray(_off_loop_eval_points(count=8), dtype=jnp.float64)
+    nodes = jnp.asarray(np.stack([nodes_hp], axis=0), dtype=jnp.float64)
+    segments_jax = jnp.asarray(segments, dtype=jnp.int32)
+
+    kernels = (wireframe_B, wireframe_dB_by_dX, wireframe_B_and_dB_by_dX)
+    for kernel in kernels:
+        jaxpr = str(
+            jax.make_jaxpr(kernel)(points, nodes, segments_jax, seg_signs, currents)
+        )
+        assert "scan[" in jaxpr, kernel.__name__
+
+
 def test_dB_layout_convention_via_finite_difference():
     """Confirm ``dB[p, k, m] = d_m B_k`` (component-first, derivative second).
 

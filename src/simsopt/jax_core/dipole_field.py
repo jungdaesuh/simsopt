@@ -107,18 +107,36 @@ def _geometry(points: jax.Array, dipole_points: jax.Array):
     return r, rinv2, rinv3, rinv5
 
 
+def _point_dipole_geometry(points: jax.Array, dipole_point: jax.Array):
+    r = points - dipole_point[None, :]
+    r2 = jnp.sum(r * r, axis=-1)
+    rinv = _explicit_rsqrt(r2)
+    rinv2 = rinv * rinv
+    rinv3 = rinv * rinv2
+    rinv5 = rinv3 * rinv2
+    return r, rinv2, rinv3, rinv5
+
+
 @jax.jit
 def _dipole_field_B_jit(
     points: jax.Array, dipole_points: jax.Array, dipole_moments: jax.Array
 ) -> jax.Array:
-    r, _, rinv3, rinv5 = _geometry(points, dipole_points)
-    rdotm = jnp.sum(r * dipole_moments[None, :, :], axis=-1)
     three = _scalar(points, 3.0)
-    contribution = (
-        three * rdotm[:, :, None] * r * rinv5[:, :, None]
-        - dipole_moments[None, :, :] * rinv3[:, :, None]
+
+    def add_dipole(acc: jax.Array, dipole: tuple[jax.Array, jax.Array]):
+        dipole_point, moment = dipole
+        r, _, rinv3, rinv5 = _point_dipole_geometry(points, dipole_point)
+        rdotm = jnp.sum(r * moment[None, :], axis=-1)
+        contribution = (
+            three * rdotm[:, None] * r * rinv5[:, None]
+            - moment[None, :] * rinv3[:, None]
+        )
+        return acc + contribution, None
+
+    field, _ = jax.lax.scan(
+        add_dipole, jnp.zeros_like(points), (dipole_points, dipole_moments)
     )
-    return _scale(points) * jnp.sum(contribution, axis=1)
+    return _scale(points) * field
 
 
 def dipole_field_B(
@@ -145,9 +163,16 @@ def dipole_field_B_from_spec(points: object, spec: DipoleFieldSpec) -> jax.Array
 def _dipole_field_A_jit(
     points: jax.Array, dipole_points: jax.Array, dipole_moments: jax.Array
 ) -> jax.Array:
-    r, _, rinv3, _ = _geometry(points, dipole_points)
-    contribution = jnp.cross(dipole_moments[None, :, :], r, axis=-1) * rinv3[:, :, None]
-    return _scale(points) * jnp.sum(contribution, axis=1)
+    def add_dipole(acc: jax.Array, dipole: tuple[jax.Array, jax.Array]):
+        dipole_point, moment = dipole
+        r, _, rinv3, _ = _point_dipole_geometry(points, dipole_point)
+        contribution = jnp.cross(moment[None, :], r, axis=-1) * rinv3[:, None]
+        return acc + contribution, None
+
+    field, _ = jax.lax.scan(
+        add_dipole, jnp.zeros_like(points), (dipole_points, dipole_moments)
+    )
+    return _scale(points) * field
 
 
 def dipole_field_A(
@@ -174,26 +199,36 @@ def dipole_field_A_from_spec(points: object, spec: DipoleFieldSpec) -> jax.Array
 def _dipole_field_dB_jit(
     points: jax.Array, dipole_points: jax.Array, dipole_moments: jax.Array
 ) -> jax.Array:
-    r, rinv2, _, rinv5 = _geometry(points, dipole_points)
-    moments_b = dipole_moments[None, :, :]
-    rdotm = jnp.sum(r * moments_b, axis=-1)
-    delta = jnp.eye(3, dtype=points.dtype)[None, None, :, :]
-    rr = r[:, :, :, None] * r[:, :, None, :]
-    mj_rk = moments_b[:, :, :, None] * r[:, :, None, :]
-    mk_rj = r[:, :, :, None] * moments_b[:, :, None, :]
+    delta = jnp.eye(3, dtype=points.dtype)[None, :, :]
     three = _scalar(points, 3.0)
     five = _scalar(points, 5.0)
-    contribution = (
-        three
-        * rinv5[:, :, None, None]
-        * (
-            mj_rk
-            + mk_rj
-            + rdotm[:, :, None, None] * delta
-            - five * rdotm[:, :, None, None] * rr * rinv2[:, :, None, None]
+
+    def add_dipole(acc: jax.Array, dipole: tuple[jax.Array, jax.Array]):
+        dipole_point, moment = dipole
+        r, rinv2, _, rinv5 = _point_dipole_geometry(points, dipole_point)
+        moment_b = moment[None, :]
+        rdotm = jnp.sum(r * moment_b, axis=-1)
+        rr = r[:, :, None] * r[:, None, :]
+        mj_rk = moment_b[:, :, None] * r[:, None, :]
+        mk_rj = r[:, :, None] * moment_b[:, None, :]
+        contribution = (
+            three
+            * rinv5[:, None, None]
+            * (
+                mj_rk
+                + mk_rj
+                + rdotm[:, None, None] * delta
+                - five * rdotm[:, None, None] * rr * rinv2[:, None, None]
+            )
         )
+        return acc + contribution, None
+
+    field, _ = jax.lax.scan(
+        add_dipole,
+        jnp.zeros(points.shape + (3,), dtype=points.dtype),
+        (dipole_points, dipole_moments),
     )
-    return _scale(points) * jnp.sum(contribution, axis=1)
+    return _scale(points) * field
 
 
 def dipole_field_dB(
@@ -216,30 +251,40 @@ def dipole_field_dB_from_spec(points: object, spec: DipoleFieldSpec) -> jax.Arra
     return dipole_field_dB(points, spec.dipole_points, spec.dipole_moments)
 
 
-def _dipole_cross_derivative(moments: jax.Array) -> jax.Array:
-    mx = moments[None, :, 0]
-    my = moments[None, :, 1]
-    mz = moments[None, :, 2]
+def _dipole_cross_derivative(moment: jax.Array) -> jax.Array:
+    mx = moment[0]
+    my = moment[1]
+    mz = moment[2]
     zero = jnp.zeros_like(mx)
-    row_x = jnp.stack((zero, -mz, my), axis=-1)
-    row_y = jnp.stack((mz, zero, -mx), axis=-1)
-    row_z = jnp.stack((-my, mx, zero), axis=-1)
-    return jnp.stack((row_x, row_y, row_z), axis=-2)
+    row_x = jnp.stack((zero, -mz, my))
+    row_y = jnp.stack((mz, zero, -mx))
+    row_z = jnp.stack((-my, mx, zero))
+    return jnp.stack((row_x, row_y, row_z))
 
 
 @jax.jit
 def _dipole_field_dA_jit(
     points: jax.Array, dipole_points: jax.Array, dipole_moments: jax.Array
 ) -> jax.Array:
-    r, _, rinv3, rinv5 = _geometry(points, dipole_points)
-    mcrossr = jnp.cross(dipole_moments[None, :, :], r, axis=-1)
-    skew = _dipole_cross_derivative(dipole_moments)
     three = _scalar(points, 3.0)
-    contribution = (
-        skew * rinv3[:, :, None, None]
-        - three * mcrossr[:, :, :, None] * r[:, :, None, :] * rinv5[:, :, None, None]
+
+    def add_dipole(acc: jax.Array, dipole: tuple[jax.Array, jax.Array]):
+        dipole_point, moment = dipole
+        r, _, rinv3, rinv5 = _point_dipole_geometry(points, dipole_point)
+        mcrossr = jnp.cross(moment[None, :], r, axis=-1)
+        skew = _dipole_cross_derivative(moment)
+        contribution = (
+            skew[None, :, :] * rinv3[:, None, None]
+            - three * mcrossr[:, :, None] * r[:, None, :] * rinv5[:, None, None]
+        )
+        return acc + contribution, None
+
+    field, _ = jax.lax.scan(
+        add_dipole,
+        jnp.zeros(points.shape + (3,), dtype=points.dtype),
+        (dipole_points, dipole_moments),
     )
-    return _scale(points) * jnp.sum(contribution, axis=1)
+    return _scale(points) * field
 
 
 def dipole_field_dA(

@@ -44,11 +44,10 @@ def test_compute_fieldlines_jax_phi_plane_parity_vs_upstream(monkeypatch):
 
     Both lanes use the upstream ``dx/dt = B`` parametrisation and must
     agree on the recorded ``(x, y, z)`` at each phi-plane crossing
-    within a tolerance band that reflects the JAX driver's linear
-    in-step interpolant; the bracketed bisection is exact on the
-    interpolant but the trajectory itself is only known to RK accuracy
-    at each accepted step. With tight controller tolerances the
-    position match is well below 1e-4.
+    within a tolerance band that reflects the JAX driver's bracketed
+    event-time localization plus DOPRI5 sub-step state reconstruction.
+    With tight controller tolerances the position match is well below
+    1e-4.
     """
 
     R0_field = 1.3
@@ -70,8 +69,8 @@ def test_compute_fieldlines_jax_phi_plane_parity_vs_upstream(monkeypatch):
     cpu_hits = res_phi_hits_cpu[0]
 
     # JAX route: same raw-B integration time as upstream. Use tight
-    # tolerances (1e-12) so the linear-interpolant residual at each
-    # crossing is bounded well below the comparison threshold.
+    # tolerances (1e-12) so the localized event-state residual is
+    # bounded well below the comparison threshold.
     tmax_jax = tmax_cpp
     _force_jax_backend(monkeypatch)
     res_tys_jax, res_phi_hits_jax = compute_fieldlines(
@@ -92,12 +91,10 @@ def test_compute_fieldlines_jax_phi_plane_parity_vs_upstream(monkeypatch):
         f"no phi crossings to compare (cpu={cpu_hits.shape[0]}, jax={jax_hits.shape[0]})"
     )
 
-    # Position comparison tolerance: ~1e-4 reflects the linear in-step
-    # interpolant residual at the bracketed crossing. The bracketed
-    # bisection is byte-exact on the interpolant but the interpolant
-    # itself differs from the trajectory by an amount proportional to
-    # the step size at the crossing; tight controller tolerances
-    # (1e-12) keep this well within the comparison band.
+    # Position comparison tolerance: ~1e-4 covers the remaining RK
+    # controller and event-localizer differences against the C++ dense
+    # output oracle; tight controller tolerances (1e-12) keep this well
+    # within the comparison band.
     pos_tol = 1.0e-4
     for i in range(n_to_compare):
         cpu_xyz = np.asarray(cpu_hits[i, 2:5])

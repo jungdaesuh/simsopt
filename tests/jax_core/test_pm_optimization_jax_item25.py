@@ -1474,3 +1474,23 @@ class TestMwPGPSingleStep:
             rtol=_SINGLE_STEP_RTOL,
             atol=_SINGLE_STEP_ATOL,
         )
+
+    def test_step_body_uses_dynamic_branch_conditionals(self):
+        """MwPGP branches through ``lax.cond`` instead of eager ``select``."""
+
+        A, b, m_maxima, m_proxy, m0 = _random_problem(seed=25025, M=7, N=2)
+        ATb = (A.T @ b).reshape(2, 3)
+        spec = _make_spec(m_maxima, m_proxy, alpha=0.05, reg_l2=0.0, nu=1.0e100)
+        A_jax = jnp.asarray(A, dtype=jnp.float64)
+        ATb_jax = jnp.asarray(ATb, dtype=jnp.float64)
+        state = mwpgp_initial_state(
+            spec,
+            A_jax,
+            ATb_jax,
+            jnp.asarray(m0, dtype=jnp.float64),
+        )
+
+        jaxpr = str(
+            jax.make_jaxpr(lambda st: mwpgp_step(spec, st, A_jax, ATb_jax))(state)
+        )
+        assert "cond[" in jaxpr

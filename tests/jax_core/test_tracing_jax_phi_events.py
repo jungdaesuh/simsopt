@@ -68,12 +68,11 @@ def test_phi_plane_crossing_recovered_for_uniform_toroidal_field():
     The time at which phi = phi_target is
     ``phi_target * R**2 / (B0 * R0)`` for ``phi_target > 0``. We request a
     single phi target and assert the JAX driver records a crossing close to
-    the analytic upstream fieldline time. The exact event time is limited by the
-    in-step linear interpolant used by the bracketed event localizer
-    (the bisection is exact on the linear interpolant; the residual is
-    bounded by the RK step accuracy at the crossing step). The lane
-    contract therefore reports the bracketed-bisection ``event_time``
-    accuracy on the interpolant, not the underlying RK accuracy.
+    the analytic upstream fieldline time. The event localizer refines
+    the crossing time inside the accepted RK step and re-runs DOPRI5
+    over the localized sub-step to record the event state. The lane
+    contract therefore reports the bracketed-localizer ``event_time``
+    accuracy under the accepted-step DOPRI5 sub-step approximation.
     """
 
     R0 = 1.3
@@ -81,8 +80,8 @@ def test_phi_plane_crossing_recovered_for_uniform_toroidal_field():
     R_init = 1.4
     phi_target = 0.5  # rad
     tmax = (2.0 * np.pi * R_init * R_init) / (B0 * R0)
-    # Tight tolerances drive small steps so the linear interpolant in
-    # the bracketed localizer is close to the trajectory.
+    # Tight tolerances drive small steps for the bracketed localizer and
+    # the DOPRI5 sub-step state reconstruction.
     spec = FieldlineTracingSpec(
         tmax=float(tmax),
         rtol=1e-11,
@@ -103,10 +102,9 @@ def test_phi_plane_crossing_recovered_for_uniform_toroidal_field():
     t_actual = float(phi_hits[0, 0])
     idx = int(phi_hits[0, 1])
     assert idx == 0, f"expected phi-plane index 0, got {idx}"
-    # Event-time accuracy: bounded by the per-step RK error at the
-    # crossing step. Tight controller tolerances (~1e-11) keep steps
-    # small enough that the linear-interpolant residual is bounded
-    # well below 1e-6 in absolute event-time.
+    # Event-time accuracy is bounded by the per-step RK error at the
+    # crossing step. Tight controller tolerances (~1e-11) keep the
+    # localized residual well below 1e-6 in absolute event-time.
     assert abs(t_actual - t_expected) < 1.0e-6, (
         f"phi crossing time {t_actual} differs from analytic {t_expected} "
         f"by {abs(t_actual - t_expected)}"
@@ -129,11 +127,11 @@ def test_phi_plane_crossing_recovered_for_uniform_toroidal_field():
     assert abs(phi_hit - phi_target) < 1.0e-6
 
 
-def test_bracketed_bisection_localizes_phi_to_event_time_tolerance():
+def test_bracketed_localizer_finds_phi_to_event_time_tolerance():
     """``bracket_root_jax`` finds an explicit phi-zero crossing to lane atol.
 
     Direct accuracy check: feed a sinusoidal phi(t) of known root into
-    the bracketed bisection and verify the result is within
+    the bracketed event localizer and verify the result is within
     ``event_time_atol``. This is the underlying primitive the driver
     uses for phi-plane crossing refinement.
     """

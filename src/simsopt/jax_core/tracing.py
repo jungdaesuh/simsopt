@@ -1,7 +1,8 @@
 """JAX port of ``simsoptpp/tracing.cpp`` (Tier P1 item 14).
 
 This module implements an in-repo JAX Dormand-Prince RK4(5) integrator
-with a PI step controller and a bracketed bisection event localizer.
+with a PI step controller and a bracketed Illinois false-position event
+localizer.
 The implemented scope covers:
 
 - the fieldline RHS ``dx/dtau = B(x) / |B|`` (a length-parametrised
@@ -34,19 +35,13 @@ Carve-outs (NOT implemented here):
   exposed by the upstream public surface today and not required by
   the active JAX-native consumers.
 
-The bracketed event localizer is a simple bisection with a fixed
-iteration ceiling (``max_root_iters``). This deliberately replaces the
-upstream Boost ``toms748_solve`` because TOMS-748 requires inverse-
-quadratic-interpolation candidate logic and a runtime convergence
-check, neither of which compose cleanly with ``jax.lax.while_loop``'s
-fixed-shape carry. The accepted accuracy contract is the new
-``event_time_tracing`` lane in
-``benchmarks.validation_ladder_contract.PARITY_LADDER_TOLERANCES``;
-bisection converges to absolute tolerance ``(b - a) * 2^-iters`` per
-step, which at ``max_root_iters=60`` and a step ``<= tmax`` of ~200
-gives an event-time absolute tolerance below ``2e-16``. The lane gate
-of ``event_time_atol=1e-9`` therefore has a comfortable margin even
-under pathological step expansion.
+The bracketed event localizer uses an Illinois false-position update
+with a fixed iteration ceiling (``max_root_iters``). This keeps the
+same static ``jax.lax.while_loop`` carry shape required by JAX while
+using one RHS-style event residual evaluation per active iteration and
+avoiding the linear convergence of bisection. The accepted accuracy
+contract is the ``event_time_tracing`` lane in
+``benchmarks.validation_ladder_contract.PARITY_LADDER_TOLERANCES``.
 
 Architecture
 ============
@@ -62,7 +57,7 @@ Architecture
   ``(max_steps + 1, 4)``. Padded rows are populated with the final
   accepted state; the companion mask of shape ``(max_steps + 1,)``
   identifies the live prefix.
-- ``bracket_root_jax`` — bisection-based event localizer. Returns the
+- ``bracket_root_jax`` — Illinois false-position event localizer. Returns the
   bracketed root and a bool indicating whether the bracket actually
   contained a sign change.
 
@@ -235,10 +230,8 @@ class FieldlineTracingSpec:
         trajectory carry has shape ``(max_steps + 1, 4)`` (the ``+1``
         captures the initial state).
     max_root_iters
-        Static iteration ceiling for the bisection event localizer. At
-        60 iterations the bracketed root accuracy is ``(b - a) * 2^-60
-        ~= 8.7e-19 * (b - a)``, comfortably below the
-        ``event_time_atol = 1e-9`` lane gate.
+        Static iteration ceiling for the Illinois false-position event
+        localizer.
     max_phi_hits
         Static upper bound on the number of phi-plane and stopping-
         criterion event rows recorded. The ``phi_hits`` buffer has
@@ -519,25 +512,6 @@ def _continuous_angle(
     return angle_raw + k * two_pi
 
 
-def _linear_state_at(
-    fraction: jax.Array, y_old: jax.Array, y_new: jax.Array
-) -> jax.Array:
-    """Linear interpolation of the state between RK step endpoints.
-
-    The bisection event localizer needs a JAX-callable that returns a
-    state at an arbitrary in-step fraction ``s in [0, 1]``. A full
-    DOPRI5 dense output would re-run the step at a different ``h``; the
-    simpler contract used here is linear interpolation, which is
-    acceptable because (a) the bracketed bisection refines the crossing
-    time to absolute precision below ``2 * step / 2^60``, well under the
-    ``event_time_atol`` lane gate, and (b) the recorded position error
-    after refinement is dominated by the RK step accuracy, not the
-    per-step interpolant.
-    """
-
-    return y_old + fraction * (y_new - y_old)
-
-
 def _record_trajectory_row(
     traj: jax.Array,
     mask: jax.Array,
@@ -684,7 +658,7 @@ def _initial_step_size(t0: jax.Array, t_end: jax.Array) -> jax.Array:
     return jnp.minimum(h0, span)
 
 
-# ── Bracketed bisection event localizer ───────────────────────────────
+# ── Bracketed Illinois event localizer ────────────────────────────────
 
 
 def bracket_root_jax(
@@ -696,7 +670,7 @@ def bracket_root_jax(
     max_iters: int,
     atol: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Bisect to find ``t*`` with ``f(t*) = 0`` inside ``[t_left, t_right]``.
+    """Find ``t*`` with ``f(t*) = 0`` inside ``[t_left, t_right]``.
 
     Parameters
     ----------
@@ -710,8 +684,7 @@ def bracket_root_jax(
         caller can reuse function values already computed during the
         sign-crossing detection scan.
     max_iters
-        Static iteration ceiling. At iteration ``k``, the bracket has
-        shrunk to ``(t_right - t_left) * 2^-k``.
+        Static iteration ceiling for the Illinois false-position loop.
     atol
         Absolute width tolerance for early exit. When
         ``t_right - t_left <= atol`` the controller stops shrinking the
@@ -722,8 +695,7 @@ def bracket_root_jax(
     Returns
     -------
     t_star
-        Best estimate of the root: the bracket midpoint after the last
-        iteration.
+        Best false-position candidate or initial endpoint by absolute residual.
     f_at_t_star
         ``f(t_star)`` evaluated at the returned ``t_star``.
     bracketed
@@ -734,65 +706,61 @@ def bracket_root_jax(
     """
 
     dtype = f_left.dtype
-    bracketed_in = jnp.sign(f_left) * jnp.sign(f_right) < jnp.asarray(0.0, dtype=dtype)
-
+    zero = jnp.asarray(0.0, dtype=dtype)
+    half = jnp.asarray(0.5, dtype=dtype)
+    atol_arr = jnp.asarray(atol, dtype=dtype)
+    bracketed_in = jnp.sign(f_left) * jnp.sign(f_right) < zero
+    left_better = jnp.abs(f_left) <= jnp.abs(f_right)
     init = (
         jnp.asarray(0, dtype=jnp.int32),
         t_left,
         t_right,
         f_left,
         f_right,
+        jnp.where(left_better, t_left, t_right),
+        jnp.where(left_better, f_left, f_right),
     )
 
-    atol_arr = jnp.asarray(atol, dtype=dtype)
-
     def cond(carry):
-        i, _a, _b, _fa, _fb = carry
+        i, _a, _b, _fa, _fb, _best_t, _best_f = carry
         return i < jnp.asarray(int(max_iters), dtype=jnp.int32)
 
     def body(carry):
-        i, a, b, fa, fb = carry
+        i, a, b, fa, fb, best_t, best_f = carry
         width = b - a
-        midpoint = a + jnp.asarray(0.5, dtype=dtype) * width
-        # Freeze the bracket once we hit the requested absolute width.
         converged = width <= atol_arr
-        # Re-evaluate at the midpoint; the result is reused as the
-        # next-iteration boundary value on whichever side preserves the
-        # sign change.
-        fm = jax.lax.cond(
+        candidate = b - fb * width / (fb - fa)
+        fc = jax.lax.cond(
             converged,
-            lambda _: fa,
-            lambda _: f(midpoint),
+            lambda _: best_f,
+            lambda _: f(candidate),
             operand=None,
         )
-        # Update bracket sides if not converged.
-        keep_left = jnp.sign(fa) * jnp.sign(fm) <= jnp.asarray(0.0, dtype=dtype)
-        new_a = jnp.where(converged, a, jnp.where(keep_left, a, midpoint))
-        new_b = jnp.where(converged, b, jnp.where(keep_left, midpoint, b))
-        new_fa = jnp.where(converged, fa, jnp.where(keep_left, fa, fm))
-        new_fb = jnp.where(converged, fb, jnp.where(keep_left, fm, fb))
+        improves_best = jnp.logical_and(
+            jnp.logical_not(converged),
+            jnp.abs(fc) < jnp.abs(best_f),
+        )
+        best_t_next = jnp.where(improves_best, candidate, best_t)
+        best_f_next = jnp.where(improves_best, fc, best_f)
+
+        keep_left = jnp.sign(fa) * jnp.sign(fc) <= zero
+        new_a = jnp.where(converged, a, jnp.where(keep_left, a, candidate))
+        new_b = jnp.where(converged, b, jnp.where(keep_left, candidate, b))
+        new_fa = jnp.where(converged, fa, jnp.where(keep_left, half * fa, fc))
+        new_fb = jnp.where(converged, fb, jnp.where(keep_left, fc, half * fb))
         return (
             i + jnp.asarray(1, dtype=jnp.int32),
             new_a,
             new_b,
             new_fa,
             new_fb,
+            best_t_next,
+            best_f_next,
         )
 
-    _, a_final, b_final, fa_final, fb_final = jax.lax.while_loop(cond, body, init)
-    # Final returned root is the bracket midpoint; pick the endpoint
-    # value with the smaller absolute residual as a tighter estimate
-    # in case the bracket has visibly converged on one side.
-    t_star = jnp.asarray(0.5, dtype=dtype) * (a_final + b_final)
-    f_at_t_star = f(t_star)
-    # Compare midpoint residual against bracket endpoints; the caller
-    # gets the best of the three so we never report a worse estimate
-    # than what the bracket already proves.
-    candidates = jnp.stack([fa_final, fb_final, f_at_t_star])
-    points = jnp.stack([a_final, b_final, t_star])
-    idx = jnp.argmin(jnp.abs(candidates))
-    t_best = points[idx]
-    f_best = candidates[idx]
+    _, _a_final, _b_final, _fa_final, _fb_final, t_best, f_best = jax.lax.while_loop(
+        cond, body, init
+    )
     return t_best, f_best, bracketed_in
 
 

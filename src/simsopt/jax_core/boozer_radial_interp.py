@@ -36,7 +36,7 @@ scope** for this port. The downstream
 tracked separately as item 33 (P5) and is **not** part of this item.
 
 All kernels are pure JAX, ``jit``-compatible, and matmul-style: the C++
-double-nested loops collapse to ``einsum``s over the
+double-nested loops collapse to batched matrix products over the
 ``(num_points, num_modes)`` angle table. Numerical results match the C++
 kernel to ``direct_kernel`` tolerance (``rtol=1e-10``, ``atol=1e-12``).
 """
@@ -108,35 +108,95 @@ def _compute_K_per_point(
 
     Returns ``K`` of shape ``(num_points,)``.
     """
-    # Fourier sums over modes; result shape (num_points,).
     have_asym = rmns is not None
 
     if have_asym:
-        B = cos_a @ bmnc + sin_a @ bmns
-        R = cos_a @ rmnc + sin_a @ rmns
-        dRdtheta = -(sin_a * xm[None, :]) @ rmnc + (cos_a * xm[None, :]) @ rmns
-        dRdzeta = (sin_a * xn[None, :]) @ rmnc - (cos_a * xn[None, :]) @ rmns
-        dRds = cos_a @ drmncds + sin_a @ drmnsds
-        dZdtheta = (cos_a * xm[None, :]) @ zmns - (sin_a * xm[None, :]) @ zmnc
-        dZdzeta = -(cos_a * xn[None, :]) @ zmns + (sin_a * xn[None, :]) @ zmnc
-        dZds = sin_a @ dzmnsds + cos_a @ dzmncds
-        nu = sin_a @ numns + cos_a @ numnc
-        dnuds = sin_a @ dnumnsds + cos_a @ dnumncds
-        dnudtheta = (cos_a * xm[None, :]) @ numns - (sin_a * xm[None, :]) @ numnc
-        dnudzeta = -(cos_a * xn[None, :]) @ numns + (sin_a * xn[None, :]) @ numnc
+        cos_coeffs = jnp.stack(
+            (
+                bmnc,
+                rmnc,
+                xm * rmns,
+                -xn * rmns,
+                drmncds,
+                xm * zmns,
+                -xn * zmns,
+                dzmncds,
+                numnc,
+                dnumncds,
+                xm * numns,
+                -xn * numns,
+            ),
+            axis=-1,
+        )
+        sin_coeffs = jnp.stack(
+            (
+                bmns,
+                rmns,
+                -xm * rmnc,
+                xn * rmnc,
+                drmnsds,
+                -xm * zmnc,
+                xn * zmnc,
+                dzmnsds,
+                numns,
+                dnumnsds,
+                -xm * numnc,
+                xn * numnc,
+            ),
+            axis=-1,
+        )
+        values = cos_a @ cos_coeffs + sin_a @ sin_coeffs
+        (
+            B,
+            R,
+            dRdtheta,
+            dRdzeta,
+            dRds,
+            dZdtheta,
+            dZdzeta,
+            dZds,
+            nu,
+            dnuds,
+            dnudtheta,
+            dnudzeta,
+        ) = jnp.moveaxis(values, -1, 0)
     else:
-        B = cos_a @ bmnc
-        R = cos_a @ rmnc
-        dRdtheta = -(sin_a * xm[None, :]) @ rmnc
-        dRdzeta = (sin_a * xn[None, :]) @ rmnc
-        dRds = cos_a @ drmncds
-        dZdtheta = (cos_a * xm[None, :]) @ zmns
-        dZdzeta = -(cos_a * xn[None, :]) @ zmns
-        dZds = sin_a @ dzmnsds
-        nu = sin_a @ numns
-        dnuds = sin_a @ dnumnsds
-        dnudtheta = (cos_a * xm[None, :]) @ numns
-        dnudzeta = -(cos_a * xn[None, :]) @ numns
+        cos_coeffs = jnp.stack(
+            (
+                bmnc,
+                rmnc,
+                drmncds,
+                xm * zmns,
+                -xn * zmns,
+                xm * numns,
+                -xn * numns,
+            ),
+            axis=-1,
+        )
+        sin_coeffs = jnp.stack(
+            (
+                -xm * rmnc,
+                xn * rmnc,
+                dzmnsds,
+                numns,
+                dnumnsds,
+            ),
+            axis=-1,
+        )
+        cos_values = cos_a @ cos_coeffs
+        sin_values = sin_a @ sin_coeffs
+        B = cos_values[:, 0]
+        R = cos_values[:, 1]
+        dRdtheta = sin_values[:, 0]
+        dRdzeta = sin_values[:, 1]
+        dRds = cos_values[:, 2]
+        dZdtheta = cos_values[:, 3]
+        dZdzeta = cos_values[:, 4]
+        dZds = sin_values[:, 2]
+        nu = sin_values[:, 3]
+        dnuds = sin_values[:, 4]
+        dnudtheta = cos_values[:, 5]
+        dnudzeta = cos_values[:, 6]
 
     phi = zetas - nu
     dphids = -dnuds

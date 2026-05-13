@@ -118,12 +118,11 @@ def _compare_all_methods(bri, wrapper, points, method_names):
         raise AssertionError(f"Method parity failures:\n{report}")
 
 
-def test_freeze_boozer_radial_state_returns_pytree(stellsym_bri_and_jax):
+def test_freeze_boozer_radial_state_returns_jax_pytree(stellsym_bri_and_jax):
     bri, _ = stellsym_bri_and_jax
     state = freeze_boozer_radial_state(bri)
     assert isinstance(state, BoozerRadialInterpolantFrozenState)
     leaves, _ = jax.tree_util.tree_flatten(state)
-    # All leaves must be JAX arrays (not Python or NumPy objects).
     for leaf in leaves:
         assert isinstance(leaf, jax.Array), type(leaf)
 
@@ -225,15 +224,22 @@ def test_asym_public_api_matches_cpu(asym_bri_and_jax):
 
 
 def test_wrapper_is_not_exported_via_field_namespace_lazy_init():
-    # Item 33 deliberately does not auto-register the wrapper in the
-    # ``simsopt.field`` lazy-export map. Users must import the module
-    # path explicitly. This test guards against accidental promotion.
+    # Regression target: eager export of ``BoozerRadialInterpolantJAX`` via
+    # ``simsopt.field.__all__`` would trigger eager import of the JAX-only
+    # module, breaking CPU-only installs that do not have JAX available (see
+    # CLAUDE.md "No simsoptpp dependency" pattern — same constraint applies
+    # in reverse for JAX-only wrappers consumed from a CPU-only env).
     import simsopt.field as field_pkg
 
     assert "BoozerRadialInterpolantJAX" not in getattr(field_pkg, "__all__", ())
 
 
 def test_wrapper_has_no_dofs(stellsym_bri_and_jax):
+    # Regression target: ``BoozerRadialInterpolantJAX`` is a frozen evaluator,
+    # not an optimizable. Inadvertently exposing DOFs (e.g. via a stray
+    # ``Optimizable`` base or default DOF registration) would silently change
+    # the decision-vector size of any Stage 2 composite that includes it,
+    # corrupting the optimizer state without raising.
     _, wrapper = stellsym_bri_and_jax
     assert wrapper.local_full_x.size == 0
     assert wrapper.full_x.size == 0
