@@ -32,21 +32,28 @@ active scope (`P0`-`P2`) under `active_scope_profile=port_closure`, but it did
 not implement the future-scope inventory (`P3`-`P5`) and it intentionally left
 items `14`, `15`, and `16` as dependency-blocked.
 
-The full implementation remainder is the union of:
+Items `1`-`11`, `13`, and `17` are closeout-complete in
+`.artifacts/jax_port_goal/REPORT.md`. Item `12` is complete except for the
+documented `12-circularcoil` sub-item. The full implementation remainder is the
+union of:
 
-- [ ] `12-circularcoil`: JAX-native complete elliptic-integral support and the
-  `CircularCoil` kernel/wrapper.
-- [ ] Item `14`: JAX-native tracing RK path.
-- [ ] Item `15`: complete the remaining `CircularCoil` and `InterpolatedField`
+- [ ] `12-circularcoil` (ready, blocked only by implementation): JAX-native
+  complete elliptic-integral support and the `CircularCoil` kernel/wrapper.
+- [ ] Item `14` (blocked-by: Boozer field, surface classifier, event-time
+  tolerance lane): JAX-native tracing RK path.
+- [ ] Item `15` (blocked-by: `12-circularcoil` and `InterpolatedFieldJAX`
+  wrapper spec): complete the remaining `CircularCoil` and `InterpolatedField`
   public wrappers.
-- [ ] Item `16`: public `field/tracing.py` JAX wrapper routing.
-- [ ] Items `18`-`23`: prompt `P3` geometry / optimizer / sampler / scalar
-  potential lanes.
-- [ ] Items `24`-`31`: prompt `P4` permanent-magnet and wireframe lanes.
-- [ ] Items `32`-`33`: prompt `P5` Boozer radial interpolant and
-  Boozer-magnetic-field lanes.
-- [ ] Existing native-sharding remainder in this plan: finish `points_coils`
-  2D collective lowering and its CPU multi-device proof.
+- [ ] Item `16` (blocked-by: item `14`): public `field/tracing.py` JAX wrapper
+  routing.
+- [ ] Items `18`-`23` (ready after individual state rows): prompt `P3`
+  geometry / optimizer / sampler / scalar potential lanes.
+- [ ] Items `24`-`31` (ready after individual state rows): prompt `P4`
+  permanent-magnet and wireframe lanes.
+- [ ] Items `32`-`33` (execution-prerequisite for item `14` despite prompt tier
+  `P5`): Boozer radial interpolant and Boozer-magnetic-field lanes.
+- [ ] Existing native-sharding remainder (ready, atomic change-set required):
+  finish `points_coils` 2D collective lowering and its CPU multi-device proof.
 
 ### Scope Activation Rule
 
@@ -66,7 +73,8 @@ The full implementation remainder is the union of:
 
 ### 2026-05-13 Review Corrections
 
-- Current HEAD reviewed for this plan: `795d8e15f09c9f39569d25734b92e9e36d57112a`.
+- Base HEAD reviewed for this plan update:
+  `0489cef28278415f7e933edd7434bddc1d9e8f00`.
 - `points_coils` remains a future runtime-plus-kernel change, not a registered
   sharding strategy.
 - The JAX target optimizer contract is `ondevice` for production/default
@@ -75,21 +83,55 @@ The full implementation remainder is the union of:
 - Official source links were refreshed to current JAX, SIMSOPT, CUDA, and NCCL
   documentation.
 
+### Runtime Version Note
+
+- The repo-local interpreter path and conda env name remain historical:
+  `.conda/jax-0.9.2/bin/python` / `jax-0.9.2`.
+- The checked local environment currently imports `jax==0.10.0` and
+  `jaxlib==0.10.0`; fresh environment resolution is governed by
+  `pyproject.toml`.
+- The `12-circularcoil` blocker was validated against JAX/JAXLIB `0.10.0`:
+  `jax.scipy.special` still does not expose `ellipk` / `ellipe`.
+- Do not raise the `pyproject.toml` lower bound above `jax>=0.9.2,<1` unless a
+  future implementation lands a real `0.10`-only API dependency; record the
+  actual imported versions in every validation artifact.
+
+### Cross-Cutting Constraints
+
+- No silent fallback.
+- No broad `try/except`.
+- No host callbacks inside production compiled correctness paths. Diagnostic
+  callbacks are allowed only in explicitly named diagnostic/probe modes and
+  must not become correctness or fallback mechanisms.
+- No dynamic imports in product code.
+- No inlined tolerance literals outside the parity ladder SSOT.
+
+### Concurrent Tracks
+
+- Current branch: `gpu-purity-stage2-20260405`.
+- Strict CUDA / transfer-contract hardening is concurrent evidence work, not a
+  prerequisite for CPU-only full implementation.
+- CUDA release proof remains `not_claimed` in this plan unless the user
+  explicitly authorizes a `cuda_perf_release` profile.
+
 ### Dependency Graph
 
 The full remainder should not be executed strictly by item number. Several
-lower-numbered items are downstream of future-scope prerequisites:
+lower-numbered items are downstream of future-scope prerequisites. Prompt tier
+labels (`P3`/`P4`/`P5`) record the original prompt inventory order, not strict
+execution order; Wave R2 must precede Wave R3 even though its items are prompt
+tier `P5`.
 
-| Gate | Unlocks | Requirement |
-| --- | --- | --- |
-| Elliptic helper | `12-circularcoil`, item `15` `CircularCoil` wrapper | Implement JAX-native complete elliptic integrals in `src/simsopt/jax_core/_elliptic.py` with SciPy parity. |
-| InterpolatedField wrapper spec | Item `15`; part of tracing surface validation | Build a JAX wrapper-level spec over item-13 `regular_grid_interp`, including cylindrical coordinates, `nfp`, `stellsym`, skip masks, and out-of-domain semantics. |
-| Boozer radial interpolant | Items `33`, `14`, `16` | Port `simsoptpp/boozerradialinterpolant.cpp` and `boozermagneticfield*.h` into a JAX Boozer field spec/kernel. |
-| Event-time tolerance lane | Items `14`, `16` | Add a parity-ladder SSOT lane for adaptive RK dense-output and root-localization accuracy before replacing Boost TOMS748/DOPRI behavior. |
-| Framed/oriented curve kernels | Items `18`, `20` | Port frame ODE/framing kernels before finite-build geometry can claim JAX-native closure. |
-| Dipole / PM kernels | Items `26`-`28` | Port item `24` dipole field and item `25` PM optimization kernels before wrapper/grid/solve layers. |
-| Wireframe kernels | Items `30`-`31` | Port item `29` wireframe field and optimization kernels before public field/solve wrappers. |
-| `points_coils` 2D collective | Multi-device release track | Add 2D strategy registration/config and grouped-field 2D lowering before any CPU forced-device or CUDA collective signoff. |
+| Gate | Unlocks | Tier Cost Rough | Requirement |
+| --- | --- | --- | --- |
+| Elliptic helper | `12-circularcoil`, item `15` `CircularCoil` wrapper | M | Implement JAX-native complete elliptic integrals in `src/simsopt/jax_core/_elliptic.py` with SciPy parity. |
+| InterpolatedField wrapper spec | Item `15`; part of tracing surface validation | L | Build a JAX wrapper-level spec over item-13 `regular_grid_interp`, including cylindrical coordinates, `nfp`, `stellsym`, skip masks, and out-of-domain semantics. |
+| Boozer radial interpolant | Items `33`, `14`, `16` | XL | Port `simsoptpp/boozerradialinterpolant.cpp` and `boozermagneticfield*.h` into a JAX Boozer field spec/kernel. |
+| Event-time tolerance lane | Items `14`, `16` | L | Add a parity-ladder SSOT lane for adaptive RK dense-output and root-localization accuracy before replacing Boost TOMS748/DOPRI behavior. |
+| Framed curve kernels | Items `18`, `20` | M | Port `geo/framedcurve.py` frame ODE/framing kernels before finite-build geometry can claim JAX-native closure. |
+| Dipole / PM kernels | Items `26`-`28` | XL | Port item `24` dipole field and item `25` PM optimization kernels before wrapper/grid/solve layers. |
+| Wireframe kernels | Items `30`-`31` | XL | Port item `29` wireframe field and optimization kernels before public field/solve wrappers. |
+| `points_coils` 2D collective | Multi-device release track | L | Add 2D strategy registration/config and grouped-field 2D lowering before any CPU forced-device or CUDA collective signoff. |
 
 ### Execution Waves
 
@@ -105,11 +147,7 @@ lower-numbered items are downstream of future-scope prerequisites:
   authorizes GPUs.
 - [ ] Expand the state schema from aggregate `18-33` skipped row into individual
   pending item rows before coding prompt `P3`-`P5`.
-- [ ] Preserve the prompt anti-pattern rules: no silent fallback, no broad
-  `try/except`, no host callbacks inside production compiled correctness
-  paths, no dynamic imports, no inlined tolerance literals. Diagnostic
-  callbacks are allowed only in explicitly named diagnostic/probe modes and
-  must not become correctness or fallback mechanisms.
+- [ ] Enforce the top-level cross-cutting constraints for every activated wave.
 
 #### Wave R1 - Complete The Item-15 Math And Wrapper Surface
 
@@ -172,9 +210,10 @@ lower-numbered items are downstream of future-scope prerequisites:
 
 #### Wave R4 - Prompt P3 Geometry, Optimizer, Sampling, Scalar Potential
 
-- [ ] Item `18`: port `geo/framedcurve.py` and `geo/orientedcurve.py` ODE /
-  framing operations to specs and JAX kernels. Cover Frenet and centroid frame
-  variants and their VJP contracts.
+- [ ] Item `18`: port `geo/framedcurve.py` ODE / framing operations to specs
+  and JAX kernels. Cover `FramedCurveFrenet`, `FramedCurveCentroid`,
+  `FrameRotation`, `ZeroRotation`, `rotated_centroid_frame`, and
+  `rotated_frenet_frame` contracts. Upstream has no `geo/orientedcurve.py`.
 - [ ] Item `20`: port `geo/finitebuild.py` after item `18`; parity must include
   filament construction, frame offsets, and derivative/VJP behavior.
 - [ ] Item `19`: finish the private on-device optimizer contract audit for
@@ -198,6 +237,9 @@ lower-numbered items are downstream of future-scope prerequisites:
 - [ ] Item `25`: port `simsoptpp/permanent_magnet_optimization.cpp` to
   `src/simsopt/jax_core/pm_optimization.py`; define immutable PM grid and
   optimizer-state specs.
+- [ ] During items `25` and `28`, audit source-level initialization for any RNG
+  or orientation sampling. If present, route it through the item `22`
+  explicit-`PRNGKey` contract; do not introduce hidden global RNG state.
 - [ ] Item `26`: implement `DipoleFieldJAX` after item `24`.
 - [ ] Item `27`: port `geo/permanent_magnet_grid.py` after items `24` and
   `25`; preserve file/export behavior outside compiled kernels.
@@ -211,11 +253,18 @@ lower-numbered items are downstream of future-scope prerequisites:
 
 #### Wave R6 - `points_coils` 2D Sharding And Release Evidence
 
+- [ ] Land `points_coils` as a single atomic change-set: runtime strategy
+  registration, 2D device-count resolution, grouped-field kernel, replacement
+  tests, and summary fields must be reviewed together.
 - [ ] Finish the grouped-field 2D collective kernel: points sharded on the
   point axis, coils sharded on the coil axis, `lax.psum` over coil axis, and
   point-sharded output after reduction.
 - [ ] Add CPU forced-device StableHLO tests proving the `points_coils` lowering
   contains the expected collective reduction.
+- [ ] Replace
+  `tests/test_backend.py::test_sharding_tuning_rejects_points_coils_strategy`
+  with active `points_coils` registration/config tests in `tests/test_backend.py`
+  in the same change-set.
 - [ ] Add parity tests for non-divisible coil counts and mixed quadrature
   groups.
 - [ ] If and only if the user authorizes GPU work, run CUDA/NCCL smoke for
@@ -321,7 +370,8 @@ Official docs checked for this plan:
   `https://docs.jax.dev/en/latest/notebooks/shard_map.html`
 - JAX NVIDIA GPU installation and CUDA plugin contract:
   `https://docs.jax.dev/en/latest/installation.html`
-- SIMSOPT field API:
+- SIMSOPT public field API baseline. The local upstream source remains the
+  source of truth for `1.10.7.dev` deltas:
   `https://simsopt.readthedocs.io/v1.10.6/simsopt.field.html`
 - NVIDIA NCCL collective semantics:
   `https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html`
@@ -538,7 +588,9 @@ Goal: remove compatibility leftovers only after native parity is proven.
 Delete candidates:
 
 - [x] Script-local runtime-spec Biot-Savart adapter.
-- [ ] Duplicate runtime-spec loading helpers.
+- [ ] Duplicate runtime-spec loading helpers, if a targeted grep finds an
+  actual duplicate owner. Do not delete generic JSON/spec readers just because
+  they share the `single_stage_jax_runtime_spec.json` artifact name.
 - [x] Tests that patch removed host-compatibility helpers.
 - [x] Docs claiming CPU fallback behavior that no longer exists.
 - [x] Dead host pullback helpers that are no longer reachable.
@@ -558,19 +610,28 @@ Do not inline new tolerances.
 
 ### Direct Kernel Lane
 
-- [ ] `B`
-- [ ] `A`
-- [ ] grouped field
-- [ ] fixed-surface flux
-- [ ] raw Boozer residual
+- [x] `B`: `tests/objectives/test_integral_bdotn_item10_closeout.py` and
+  `tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py`.
+- [ ] `A`: CPU parity exists in `tests/integration/test_stage2_jax.py`, but it
+  still needs a parity-ladder-owned direct-kernel closeout row before this
+  checklist can mark it complete.
+- [x] grouped field: `tests/subprocess/jax_runtime_cases.py` covers
+  `coil_groups` grouped B/A/derivative parity and collective lowering; the
+  `points_coils` grouped field remains open under P3/R6.
+- [x] fixed-surface flux:
+  `tests/objectives/test_integral_bdotn_item10_closeout.py`.
+- [x] raw Boozer residual:
+  `tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py`.
 
 ### Derivative-Heavy Lane
 
-- [ ] `dB/dX`
+- [x] `dB/dX`: `tests/field/test_biotsavart_jax.py` and
+  `tests/field/test_biotsavart_jax_cpu_ordered.py`.
 - [x] Biot-Savart native cotangents
 - [x] projected `B_vjp`
-- [ ] surface coefficient Jacobians
-- [ ] Boozer residual derivatives
+- [x] surface coefficient Jacobians: `tests/geo/test_boozer_derivatives_jax.py`.
+- [x] Boozer residual derivatives: `tests/geo/test_boozer_residual_jax.py` and
+  `tests/geo/test_boozer_derivatives_jax.py`.
 
 ### Adjoint Lanes
 

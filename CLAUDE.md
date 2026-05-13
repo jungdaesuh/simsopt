@@ -3,29 +3,35 @@
 ## What This Is
 
 JAX worktree of simsopt for GPU-accelerated stellarator optimization.
-Branch: `jax-port`. Parent repo: `columbia/simsopt`.
+Current checkout branch: `gpu-purity-stage2-20260405`. Parent repo:
+`columbia/simsopt`.
 
 ## Environment
 
 Two environments are relevant:
 
-**Shared JAX 0.9.2 runtime** (reference `scipy` lane plus private optimizer lane):
+**Shared JAX runtime** (historical env name `jax-0.9.2`; current checked local
+env imports `jax==0.10.0`, `jaxlib==0.10.0`):
 ```bash
 conda env create -f envs/jax-0.9.2.yml
 conda activate jax-0.9.2
 ```
-- JAX 0.9.2, jaxlib 0.9.2, NumPy 2.x, Python 3.11
+- Current checked local env: JAX 0.10.0, jaxlib 0.10.0, NumPy 2.x, Python
+  3.11. Fresh env resolution follows `pyproject.toml`.
 - env recipe provides the build toolchain and performs the editable
   `simsopt[JAX,dev]` install used by local validation, including `ruff`
 - use this lane for import smoke, pure-JAX unit tests, Stage 2 parity, and the
   public CPU/GPU parity work
+- before recording version-sensitive evidence, verify the imported versions with
+  `python -c "import jax, jaxlib; print(jax.__version__, jaxlib.__version__)"`
 
 **Private optimizer lane** (`optimizer_backend="hybrid"` / `"ondevice"`):
 ```bash
 conda activate jax-0.9.2
 pip install -e .
 ```
-- JAX 0.9.2, jaxlib 0.9.2, NumPy 2.x, Python 3.11
+- same checked local JAX 0.10.0 / jaxlib 0.10.0 runtime, NumPy 2.x, Python
+  3.11
 - requires a full simsoptpp-backed editable install
 - use this lane for the private optimizer unit/integration tests and real
   `run_code()` validation
@@ -48,7 +54,7 @@ ruff format <changed-files>
 # Public pure-JAX unit tests (no simsoptpp)
 conda run -n jax-0.9.2 python -m pytest tests/test_jax_import_smoke.py tests/field/test_biotsavart_jax.py tests/geo/test_surface_fourier_jax.py tests/geo/test_boozer_residual_jax.py tests/objectives/test_integral_bdotn_jax.py tests/geo/test_boozer_derivatives_jax.py tests/geo/test_boozersurface_jax.py tests/integration/test_jax_native_path.py -m "not private_optimizer_runtime" -v
 
-# Private optimizer tests (same 0.9.2 runtime, simsoptpp-backed install)
+# Private optimizer tests (same checked local 0.10.0 runtime, simsoptpp-backed install)
 conda run -n jax-0.9.2 python -m pytest tests/geo/test_boozersurface_jax.py tests/integration/test_single_stage_jax.py -m "private_optimizer_runtime" -v
 
 # Benchmark/runtime helper regressions
@@ -189,7 +195,7 @@ specification (mode matrix, reporting context, DM-A/B/D/E slices).
 - **Mixed quadrature support**: `BiotSavartJAX._extract_coil_data_grouped()` groups coils by quadrature point count, evaluates each group via `biot_savart_B`, and sums. This allows TF coils (15-point) and banana coils (128-point) to coexist. `SquaredFluxJAX` consumes immutable field/surface specs on the native JAX lane; unsupported fields are rejected instead of routing through `field.B()` / `field.B_vjp()` compatibility calls.
 - **C++ ANGLE_RECOMPUTE brace pattern**: In `surfacerzfourier.cpp`, the VJP loops use `if(i % ANGLE_RECOMPUTE == 0)` to periodically recompute trig values. These blocks require explicit `{}` braces — bare `if` only guards the first statement, making costerm unconditional. Always add braces when touching these blocks.
 - **JAX scalar boundary conversions**: JAX integer/boolean scalars from `jnp` must be cast to `int()`/`bool()` before storing in result dicts consumed by SciPy or NumPy callers. Pattern: `"iter": int(result.nit), "success": bool(result.success)`.
-- **BFGS device residency**: `BoozerSurfaceJAX` least-squares solves expose three backends. `optimizer_backend="scipy"` remains the trusted reference backend. `optimizer_backend="ondevice"` and `optimizer_backend="hybrid"` still depend on private line-search internals in `optimizer_jax.py`, but they now target the same JAX 0.9.2 runtime.
+- **BFGS device residency**: `BoozerSurfaceJAX` least-squares solves expose three backends. `optimizer_backend="scipy"` remains the trusted reference backend. `optimizer_backend="ondevice"` and `optimizer_backend="hybrid"` still depend on private line-search internals in `optimizer_jax.py`, but they now target the same checked local JAX 0.10.0 runtime.
 
 ## Code Review History
 
