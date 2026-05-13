@@ -23,6 +23,8 @@ __all__ = [
     "coils_to_focus",
     "coils_to_vtk",
 ]
+
+
 class Coil(sopp.Coil, Optimizable):
     """
     Represents a magnetic coil as a combination of a geometric curve and an electric current.
@@ -136,16 +138,18 @@ class RegularizedCoil(Coil):
         Returns:
             array (shape (n,3)): The regularized field on the coil.
         """
+        import jax
         from .selffield import B_regularized_pure
 
-        return B_regularized_pure(
-            self.curve.gamma(),
-            self.curve.gammadash(),
-            self.curve.gammadashdash(),
-            self.curve.quadpoints,
-            self._current.get_value(),
-            self.regularization,
-        )
+        with jax.transfer_guard("allow"):
+            return B_regularized_pure(
+                self.curve.gamma(),
+                self.curve.gammadash(),
+                self.curve.gammadashdash(),
+                self.curve.quadpoints,
+                self._current.get_value(),
+                self.regularization,
+            )
 
     def self_force(self):
         """
@@ -159,7 +163,10 @@ class RegularizedCoil(Coil):
         gammadash_norm = np.linalg.norm(gammadash, axis=1)[:, None]
         tangent = gammadash / gammadash_norm
         B = self.B_regularized()
-        return self._coil_force_pure(B, I, tangent)
+        import jax
+
+        with jax.transfer_guard("allow"):
+            return self._coil_force_pure(B, I, tangent)
 
     def force(self, source_coils):
         r"""

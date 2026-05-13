@@ -4,6 +4,8 @@ import logging
 import os
 from unittest.mock import patch
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from scipy import constants
@@ -37,11 +39,17 @@ from simsopt.geo import (
     create_multifilament_grid,
 )
 from simsopt.field.selffield import (
+    B_regularized_pure,
     _rectangular_xsection_k,
     _rectangular_xsection_delta,
     regularization_circ,
     regularization_rect,
 )
+from benchmarks.validation_ladder_contract import parity_ladder_tolerances
+
+_ITEM02_DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct_kernel")
+_ITEM02_RTOL = _ITEM02_DIRECT_KERNEL_TOLS["rtol"]
+_ITEM02_ATOL = _ITEM02_DIRECT_KERNEL_TOLS["atol"]
 
 logger = logging.getLogger(__name__)
 
@@ -152,8 +160,130 @@ class SpecialFunctionsTests(unittest.TestCase):
             reg_rect2 > reg_rect
         )  # Larger dimensions should give larger regularization
 
+    def test_regularization_functions_transform_under_strict_transfer_guard(self):
+        radii = np.array([0.01, 0.02, 0.05], dtype=np.float64)
+        widths = np.array([0.01, 0.02, 0.03], dtype=np.float64)
+        heights = np.array([0.023, 0.03, 0.04], dtype=np.float64)
+        radii_device = jax.device_put(jnp.asarray(radii))
+        widths_device = jax.device_put(jnp.asarray(widths))
+        heights_device = jax.device_put(jnp.asarray(heights))
+
+        with jax.transfer_guard("disallow"):
+            circ = jax.jit(jax.vmap(regularization_circ))(radii_device)
+            rect = jax.jit(jax.vmap(regularization_rect))(
+                widths_device,
+                heights_device,
+            )
+            circ_grad = jax.jit(jax.vmap(jax.grad(regularization_circ)))(
+                radii_device,
+            )
+            rect_grad_a = jax.jit(jax.vmap(jax.grad(regularization_rect, argnums=0)))(
+                widths_device,
+                heights_device,
+            )
+            circ.block_until_ready()
+            rect.block_until_ready()
+            circ_grad.block_until_ready()
+            rect_grad_a.block_until_ready()
+
+        np.testing.assert_allclose(
+            circ,
+            radii**2 / np.sqrt(np.e),
+            rtol=_ITEM02_RTOL,
+            atol=_ITEM02_ATOL,
+        )
+        np.testing.assert_allclose(
+            circ_grad,
+            2 * radii / np.sqrt(np.e),
+            rtol=_ITEM02_RTOL,
+            atol=_ITEM02_ATOL,
+        )
+        self.assertTrue(np.all(np.isfinite(rect)))
+        self.assertTrue(np.all(np.isfinite(rect_grad_a)))
+
 
 class CoilForcesTest(unittest.TestCase):
+    def test_b_regularized_pure_jit_vmap_strict_transfer_guard_matches_wrapper(self):
+        n_quad = 24
+        curve = JaxCurveXYZFourier(n_quad, 1)
+        curve.x = np.array([0, 0, 1.7, 0, 1.7, 0, 0, 0.0, 0.0])
+        current = np.float64(1.0e4)
+        regularization = np.float64(np.asarray(regularization_rect(0.01, 0.023)))
+        coil = RegularizedCoil(curve, Current(current), regularization)
+        expected = np.asarray(coil.B_regularized())
+
+        gamma = jax.device_put(jnp.asarray(curve.gamma()))
+        gammadash = jax.device_put(jnp.asarray(curve.gammadash()))
+        gammadashdash = jax.device_put(jnp.asarray(curve.gammadashdash()))
+        quadpoints = jax.device_put(jnp.asarray(curve.quadpoints))
+        current_device = jax.device_put(jnp.asarray(current))
+        regularization_device = jax.device_put(jnp.asarray(regularization))
+        currents_device = jax.device_put(jnp.asarray([current, current / 2]))
+        regularizations_device = jax.device_put(
+            jnp.asarray([regularization, regularization])
+        )
+
+        with jax.transfer_guard("disallow"):
+            result = jax.jit(B_regularized_pure)(
+                gamma,
+                gammadash,
+                gammadashdash,
+                quadpoints,
+                current_device,
+                regularization_device,
+            )
+            batched = jax.jit(
+                jax.vmap(B_regularized_pure, in_axes=(0, 0, 0, None, 0, 0))
+            )(
+                jnp.stack([gamma, gamma]),
+                jnp.stack([gammadash, gammadash]),
+                jnp.stack([gammadashdash, gammadashdash]),
+                quadpoints,
+                currents_device,
+                regularizations_device,
+            )
+            result.block_until_ready()
+            batched.block_until_ready()
+
+        np.testing.assert_allclose(
+            result, expected, rtol=_ITEM02_RTOL, atol=_ITEM02_ATOL
+        )
+        np.testing.assert_allclose(
+            batched[0], expected, rtol=_ITEM02_RTOL, atol=_ITEM02_ATOL
+        )
+        np.testing.assert_allclose(
+            batched[1], expected / 2, rtol=_ITEM02_RTOL, atol=_ITEM02_ATOL
+        )
+
+    def test_regularized_coil_self_field_methods_use_strict_transfer_boundary(self):
+        for curve_type in (CurveXYZFourier, JaxCurveXYZFourier):
+            with self.subTest(curve_type=curve_type.__name__):
+                curve = curve_type(16, 1)
+                curve.x = np.array([0, 0, 1.0, 0, 1.0, 0, 0, 0.0, 0.0])
+                coil = RegularizedCoil(
+                    curve,
+                    Current(1.0e4),
+                    regularization_circ(0.01),
+                )
+                expected_B = np.asarray(coil.B_regularized())
+                expected_force = np.asarray(coil.self_force())
+
+                with jax.transfer_guard("disallow"):
+                    B = coil.B_regularized()
+                    force = coil.self_force()
+                    B.block_until_ready()
+                    force.block_until_ready()
+
+                np.testing.assert_allclose(
+                    B, expected_B, rtol=_ITEM02_RTOL, atol=_ITEM02_ATOL
+                )
+                np.testing.assert_allclose(
+                    force,
+                    expected_force,
+                    rtol=_ITEM02_RTOL,
+                    atol=_ITEM02_ATOL,
+                )
+
     def test_circular_coil(self):
         """Check whether B_reg and hoop force on a circular-centerline coil are correct."""
         R0 = 1.7
@@ -1766,18 +1896,150 @@ class CoilForcesTest(unittest.TestCase):
                 "seed": seed,
             }
             for seed, ncoils, nfp, stellsym, p, threshold, regularization, reg_name, downsample, use_jax_curve in [
-                (101, 2, 1, True, 2.5, 0.0, regularization_circ(a), "circular", 1, False),
-                (103, 2, 1, False, 2.5, 0.0, regularization_circ(a), "circular", 1, True),
-                (107, 2, 2, True, 3.0, 1e-4, regularization_rect(a, b), "rectangular", 1, False),
-                (109, 2, 2, False, 3.0, 1e-4, regularization_rect(a, b), "rectangular", 2, True),
-                (113, 3, 1, True, 2.5, 1e-3, regularization_circ(a), "circular", 1, False),
-                (127, 3, 1, False, 2.5, 1e-3, regularization_circ(a), "circular", 2, True),
-                (131, 2, 3, True, 4.0, 0.0, regularization_rect(a, b), "rectangular", 1, False),
-                (137, 2, 3, False, 4.0, 0.0, regularization_rect(a, b), "rectangular", 2, True),
-                (139, 3, 2, True, 2.0, 5e-4, regularization_circ(a), "circular", 1, True),
-                (149, 3, 2, False, 2.0, 5e-4, regularization_rect(a, b), "rectangular", 2, False),
-                (151, 2, 4, True, 3.0, 1e-3, regularization_circ(a), "circular", 1, True),
-                (157, 2, 4, False, 3.0, 1e-3, regularization_rect(a, b), "rectangular", 2, False),
+                (
+                    101,
+                    2,
+                    1,
+                    True,
+                    2.5,
+                    0.0,
+                    regularization_circ(a),
+                    "circular",
+                    1,
+                    False,
+                ),
+                (
+                    103,
+                    2,
+                    1,
+                    False,
+                    2.5,
+                    0.0,
+                    regularization_circ(a),
+                    "circular",
+                    1,
+                    True,
+                ),
+                (
+                    107,
+                    2,
+                    2,
+                    True,
+                    3.0,
+                    1e-4,
+                    regularization_rect(a, b),
+                    "rectangular",
+                    1,
+                    False,
+                ),
+                (
+                    109,
+                    2,
+                    2,
+                    False,
+                    3.0,
+                    1e-4,
+                    regularization_rect(a, b),
+                    "rectangular",
+                    2,
+                    True,
+                ),
+                (
+                    113,
+                    3,
+                    1,
+                    True,
+                    2.5,
+                    1e-3,
+                    regularization_circ(a),
+                    "circular",
+                    1,
+                    False,
+                ),
+                (
+                    127,
+                    3,
+                    1,
+                    False,
+                    2.5,
+                    1e-3,
+                    regularization_circ(a),
+                    "circular",
+                    2,
+                    True,
+                ),
+                (
+                    131,
+                    2,
+                    3,
+                    True,
+                    4.0,
+                    0.0,
+                    regularization_rect(a, b),
+                    "rectangular",
+                    1,
+                    False,
+                ),
+                (
+                    137,
+                    2,
+                    3,
+                    False,
+                    4.0,
+                    0.0,
+                    regularization_rect(a, b),
+                    "rectangular",
+                    2,
+                    True,
+                ),
+                (
+                    139,
+                    3,
+                    2,
+                    True,
+                    2.0,
+                    5e-4,
+                    regularization_circ(a),
+                    "circular",
+                    1,
+                    True,
+                ),
+                (
+                    149,
+                    3,
+                    2,
+                    False,
+                    2.0,
+                    5e-4,
+                    regularization_rect(a, b),
+                    "rectangular",
+                    2,
+                    False,
+                ),
+                (
+                    151,
+                    2,
+                    4,
+                    True,
+                    3.0,
+                    1e-3,
+                    regularization_circ(a),
+                    "circular",
+                    1,
+                    True,
+                ),
+                (
+                    157,
+                    2,
+                    4,
+                    False,
+                    3.0,
+                    1e-3,
+                    regularization_rect(a, b),
+                    "rectangular",
+                    2,
+                    False,
+                ),
             ]
         ]
         return broad_configs
@@ -1904,9 +2166,7 @@ class CoilForcesTest(unittest.TestCase):
     @pytest.mark.slow
     def test_Taylor_broad_upstream_sweep(self):
         """Run the restored broad force/torque Taylor sweep as slow coverage."""
-        self._run_self_field_taylor_configs(
-            self._self_field_taylor_configs(broad=True)
-        )
+        self._run_self_field_taylor_configs(self._self_field_taylor_configs(broad=True))
 
     @unittest.skipUnless(
         os.environ.get("SIMSOPT_RUN_FIELD_TIMING") == "1",

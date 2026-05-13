@@ -1,0 +1,31 @@
+Red command:
+
+JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest -q tests/field/test_selffieldforces.py -k 'regularization_functions_transform_under_strict_transfer_guard or b_regularized_pure_jit_vmap_strict_transfer_guard_matches_wrapper or regularized_coil_self_field_methods_use_strict_transfer_boundary'
+
+Result before the production fix:
+
+... [100%]
+2 failed, 3 passed, 33 deselected
+
+Failing edge:
+
+tests/field/test_selffieldforces.py::CoilForcesTest::test_regularized_coil_self_field_methods_use_strict_transfer_boundary
+
+Both subtests failed:
+
+- curve_type='CurveXYZFourier'
+- curve_type='JaxCurveXYZFourier'
+
+Failure:
+
+jax.errors.JaxRuntimeError: INVALID_ARGUMENT: Disallowed host-to-device transfer: aval=ShapedArray(float64[16,3])
+
+Source:
+
+src/simsopt/field/coil.py:141 in RegularizedCoil.B_regularized
+
+Interpretation:
+
+The pure `B_regularized_pure` device-input path already passed strict transfer
+guard. The bug was the public wrapper boundary, which passed host geometry and
+current values to the JAX kernel without an explicit transfer allowance.
