@@ -1,0 +1,69 @@
+{
+  "item": "09",
+  "status": "complete_cpu_oracle",
+  "hot_path_change": false,
+  "cuda_status": "not_claimed",
+  "reason": "Item 09 is a documentation and coverage closeout for the existing JAX port of src/simsopt/field/force.py. The module-level jit+grad lift at lines 953-976, the _SharedCoilState pre-compute layer at lines 313-820, and the six Optimizable wrappers (B2Energy, NetFluxes, SquaredMeanForce, LpCurveForce, LpCurveTorque, SquaredMeanTorque) are unchanged from the parent commit a9da18fac. No new production hot-path kernel is introduced.",
+  "production_scale_floor": {
+    "base_coils_in_new_test": 4,
+    "expanded_coils_in_new_test": 24,
+    "numquadpoints_in_new_test": 64,
+    "base_coil_floor": 4,
+    "numquadpoints_floor": 64,
+    "fixture": "tests/field/test_force_item09_closeout.py::test_lp_curve_force_production_scale_taylor_parity_under_strict_transfer_guard",
+    "cited_existing_production_tests": [
+      "tests/field/test_selffieldforces.py::CoilForcesTest::test_force_objectives (ncoils=4, numquadpoints=90 default)",
+      "tests/field/test_selffieldforces.py::CoilForcesTest::test_Taylor (ncoils=4 broad Taylor sweep)",
+      "tests/field/test_selffieldforces.py::CoilForcesTest::test_force_and_torque_objectives_with_different_quadpoints (mixed-quadpoints fixture)",
+      "tests/test_jax_import_smoke.py::test_transfer_guard_disallow_allows_lpcurveforce_shared_state_packing (subprocess smoke for SIMSOPT_JAX_TRANSFER_GUARD=disallow)"
+    ],
+    "nquadpoints_note": "All six wrappers in scope are exercised at ncoils>=4 and nquadpoints>=64 by the cited production fixtures and the new closeout test."
+  },
+  "dense_materialization_budget": {
+    "target_coil_state_bytes": 1536,
+    "source_coil_state_bytes": 36864,
+    "stacked_per_coil_curve_state_bytes": 36864,
+    "peak_intermediate_bytes": 36864,
+    "rij_norm_intermediate_bytes": 12288,
+    "donate_argnums": null,
+    "donate_argnames": null,
+    "donation_used": false,
+    "donation_rationale": "Upstream non-donating contract preserved. _J_args returns cached coil-state arrays that the wrapper reuses across J() and dJ() until Optimizable invalidates them via recompute_bell."
+  },
+  "validation": [
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/field/test_force_item09_closeout.py -q",
+      "result": "1 passed in 2.40s"
+    },
+    {
+      "command": "SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/field/test_force_item09_closeout.py -q",
+      "result": "1 passed in 2.51s"
+    },
+    {
+      "command": "(red-step worktree at a9da18fac) JAX_ENABLE_X64=True JAX_PLATFORMS=cpu PYTHONPATH=src .conda/jax-0.9.2/bin/python -m pytest tests/field/test_force_item09_closeout.py -q",
+      "result": "1 passed in 2.43s"
+    },
+    {
+      "command": "(red-step worktree at a9da18fac) SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu PYTHONPATH=src .conda/jax-0.9.2/bin/python -m pytest tests/field/test_force_item09_closeout.py -q",
+      "result": "1 passed in 2.23s"
+    }
+  ],
+  "cuda_proof": {
+    "status": "not_claimed",
+    "artifact": "N/A",
+    "current_sha": "ffada5daba4bd13d8c0523fecb6ec3fea5c0bb5f",
+    "parent_sha": "a9da18fac",
+    "worktree_dirty": true,
+    "gpu_device": "N/A",
+    "driver_version": "N/A",
+    "cuda_runtime": "N/A",
+    "jax_version": "0.10.0",
+    "jaxlib_version": "0.10.0",
+    "backend": "cpu",
+    "xla_flags": "N/A",
+    "cuda_visible_devices": "N/A",
+    "peak_gpu_mem_mb": 0,
+    "target_arrays_on_cuda": false,
+    "compiled_executable_backend": "cpu"
+  }
+}

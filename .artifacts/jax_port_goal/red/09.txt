@@ -1,0 +1,93 @@
+Item 09 red-step (closeout / green-on-parent) evidence.
+
+Procedure:
+
+  mkdir -p /tmp/simsopt-jax-item09-red
+  git worktree add --detach /tmp/simsopt-jax-item09-red/wt a9da18fac
+  cp tests/field/test_force_item09_closeout.py /tmp/simsopt-jax-item09-red/wt/tests/field/
+  cd /tmp/simsopt-jax-item09-red/wt
+  JAX_ENABLE_X64=True JAX_PLATFORMS=cpu PYTHONPATH=src \
+    /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python \
+    -m pytest tests/field/test_force_item09_closeout.py -q
+  SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu PYTHONPATH=src \
+    /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python \
+    -m pytest tests/field/test_force_item09_closeout.py -q
+
+Parent commit under test: a9da18fac
+  ("jax-port: close CurrentPenalty + distance wrappers [item 01]").
+
+Honest finding: item 09 is a documentation/coverage closeout for an
+already-completed JAX port of `src/simsopt/field/force.py`. The new
+production-scale Taylor parity test PASSES against the parent commit
+because the JAX port of `force.py` was already closed by prior work
+(the module-level `jit + grad` lift at `force.py:953-976`, the
+`_SharedCoilState` pre-compute layer at `force.py:313-820`, and the six
+`Optimizable` wrappers `B2Energy`, `NetFluxes`, `SquaredMeanForce`,
+`LpCurveForce`, `LpCurveTorque`, and `SquaredMeanTorque` are all present
+on the parent tree).
+
+The prompt explicitly anticipates this:
+
+  "The new test should pass on parent (no code change needed). Document
+   outcome in `.artifacts/jax_port_goal/red/09.txt`. Be honest."
+
+This is therefore a green-on-parent capture, not a red step in the
+"failing on parent" sense. It documents that the new test was honestly
+written before any implementation change and exercises the existing JAX
+graph on a production-scale fixture (`ncoils=4` base coils expanded to
+24 by `coils_via_symmetries(nfp=3, stellsym=True)`, `numquadpoints=64`).
+It also documents that the new tolerance lane import does not regress
+the parent's behavior.
+
+Result on parent commit with the new test file:
+
+  $ JAX_ENABLE_X64=True JAX_PLATFORMS=cpu PYTHONPATH=src \
+    /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python \
+    -m pytest tests/field/test_force_item09_closeout.py -q
+  .                                                                        [100%]
+  1 passed in 2.43s
+
+  $ SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu PYTHONPATH=src \
+    /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python \
+    -m pytest tests/field/test_force_item09_closeout.py -q
+  .                                                                        [100%]
+  1 passed in 2.23s
+
+Result on current tree (HEAD ffada5daba4bd13d8c0523fecb6ec3fea5c0bb5f at
+final validation; the working tree moved past a9da18fac through items
+02, 03, and 05 while item 09 was being closed out, and the new test
+remains green on every intermediate commit)
+with the new test file in place:
+
+  $ JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python \
+    -m pytest tests/field/test_force_item09_closeout.py -q
+  .                                                                        [100%]
+  1 passed in 2.40s
+
+  $ SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu \
+    .conda/jax-0.9.2/bin/python -m pytest tests/field/test_force_item09_closeout.py -q
+  .                                                                        [100%]
+  1 passed in 2.51s
+
+Test file imports tolerances from
+benchmarks.validation_ladder_contract.parity_ladder_tolerances("fd_gradient")
+so no `atol` / `rtol` numeric literal is inlined.
+
+Transfer-guard discipline note:
+
+The test exercises `obj.J()` under `jax.transfer_guard("disallow")` and
+re-evaluates `obj.dJ()` *outside* the strict guard. This matches the
+upstream subprocess smoke
+`tests/subprocess/import_smoke_cases.py::case_transfer_guard_disallow_allows_lpcurveforce_shared_state_packing`
+which also only calls `objective.J()` under
+`transfer_guard("disallow")`. The reason is that the public derivative
+projection at `_assemble_curve_current_derivative`
+(`src/simsopt/field/force.py:781`) iterates over per-coil derivative
+slices in Python with `dgamma[i]` indexing, which requires a small
+host-to-device transfer of the Python integer index by construction.
+That boundary discipline is the documented public contract for the JAX
+port, not a regression introduced by item 09.
+
+Worktree cleanup:
+
+  git worktree remove --force /tmp/simsopt-jax-item09-red/wt
