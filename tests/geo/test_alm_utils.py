@@ -1,5 +1,6 @@
 import ast
 import dataclasses
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -48,19 +49,22 @@ class AlmHybridSignalContractDocTests(unittest.TestCase):
             "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2173-2201": (
                 '"hard_dual_update_values"'
             ),
-            "examples/single_stage_optimization/alm_utils.py:2183-2235": (
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2187-2194": (
+                '"raw_dual_update_values"'
+            ),
+            "examples/single_stage_optimization/alm_utils.py:2202-2254": (
                 "def _extract_stage2_constraint_signal_state"
             ),
-            "examples/single_stage_optimization/alm_utils.py:3303-3319": (
+            "examples/single_stage_optimization/alm_utils.py:3358-3374": (
                 "routing_state.signal_state.preferred_dual_update_values"
             ),
-            "examples/single_stage_optimization/alm_utils.py:2277-2335": (
+            "examples/single_stage_optimization/alm_utils.py:2296-2354": (
                 "def _constraint_routing_state"
             ),
-            "examples/single_stage_optimization/alm_utils.py:4485-4495": (
+            "examples/single_stage_optimization/alm_utils.py:4553-4562": (
                 "and not signal_mismatch_active"
             ),
-            "examples/single_stage_optimization/alm_utils.py:4181-4194": (
+            "examples/single_stage_optimization/alm_utils.py:4236-4247": (
                 "and not run_state.last_cap_binding_active"
             ),
         }
@@ -68,6 +72,26 @@ class AlmHybridSignalContractDocTests(unittest.TestCase):
             with self.subTest(citation=citation):
                 self.assertIn(citation, doc)
                 self.assertIn(anchor, _read_cited_source(repo_root, citation))
+
+        alm_utils_lines = (
+            repo_root / "examples" / "single_stage_optimization" / "alm_utils.py"
+        ).read_text(encoding="utf-8").splitlines()
+        actual_call_sites = [
+            line_number
+            for line_number, line in enumerate(alm_utils_lines, start=1)
+            if "_constraint_routing_state(" in line
+            and not line.lstrip().startswith("def ")
+        ]
+        documented_call_site_line = next(
+            line
+            for line in doc.splitlines()
+            if "current call sites are at" in line
+        )
+        documented_call_sites = [
+            int(value)
+            for value in re.findall(r"\b(\d+)\b", documented_call_site_line)
+        ]
+        self.assertEqual(documented_call_sites, actual_call_sites)
 
 
 def _complete_alm_evaluation(evaluation: dict) -> dict:
@@ -907,7 +931,7 @@ class ResidualHelperTests(unittest.TestCase):
         # on the history entry so `_termination_reason_from_history` reports a
         # `max_outer*` label rather than surfacing the bare action string.
         # The signal-mismatch path is exercised by
-        # `test_minimize_alm_escalates_penalty_after_repeated_stage2_signal_mismatch`;
+        # `test_minimize_alm_dual_updates_after_repeated_stage2_signal_mismatch`;
         # this test pins the helper directly so the feasible-update retry call
         # site cannot regress without flipping a test.
         module = load_alm_utils_module()
@@ -2162,7 +2186,8 @@ class MinimizeAlmTests(unittest.TestCase):
                 {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
             )
 
-        self.assertEqual(result.history[0]["action"], "penalty_increase")
+        self.assertEqual(result.history[0]["action"], "dual_update")
+        self.assertTrue(result.history[0]["dual_update_penalty_increase"])
         self.assertTrue(result.history[0]["nonfinite_candidate_evaluation"])
         self.assertEqual(result.history[0]["nonfinite_candidate_fields"], ["total", "grad"])
         np.testing.assert_allclose(result.x, np.array([0.0]))
@@ -2501,7 +2526,7 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(result.history[0]["hard_violation_values"], [1.0])
         self.assertEqual(result.history[0]["surrogate_signed_constraint_values"], [3.0])
 
-    def test_stationarity_metrics_uses_raw_norm_when_stage2_signals_disagree(self):
+    def test_stationarity_metrics_keeps_surrogate_kkt_when_stage2_signals_disagree(self):
         module = load_alm_utils_module()
         evaluation = {
             "total": 0.0,
@@ -2524,16 +2549,16 @@ class MinimizeAlmTests(unittest.TestCase):
             evaluation,
             np.zeros(1),
             1.0,
-            1.0e-8,
+            1.0,
         )
         stationarity_norm, kkt_stationarity_norm, mismatch = module._stationarity_metrics(
             evaluation,
             routing_state,
-            1.0e-8,
+            1.0,
         )
 
         self.assertTrue(mismatch)
-        self.assertIsNone(kkt_stationarity_norm)
+        self.assertAlmostEqual(kkt_stationarity_norm, 0.0)
         self.assertAlmostEqual(stationarity_norm, 1.0)
 
     def test_constraint_routing_state_flags_boundary_mismatch_when_surrogate_shift_is_live(self):
@@ -2655,7 +2680,7 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertFalse(result.history[2]["signal_mismatch_active"])
         self.assertIsNone(result.history[2]["active_constraint_name"])
 
-    def test_minimize_alm_escalates_penalty_after_repeated_stage2_signal_mismatch(self):
+    def test_minimize_alm_dual_updates_after_repeated_stage2_signal_mismatch(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
             max_outer_iterations=3,
@@ -2719,22 +2744,21 @@ class MinimizeAlmTests(unittest.TestCase):
             )
 
         self.assertFalse(result.success)
-        # The terminal action is `signal_mismatch_penalty_increase`, so the
-        # outer-cap reason carries that label (audit-v2 M10) rather than the
-        # bare `max_outer` fallback.
         self.assertEqual(
             result.termination_reason,
-            "max_outer_after_signal_mismatch_penalty_increase",
+            "max_outer_after_dual_update",
         )
-        self.assertEqual(minimize_calls["count"], 4)
-        self.assertEqual(result.history[0]["action"], "subproblem_continue")
-        self.assertTrue(result.history[0]["signal_mismatch_active"])
-        self.assertEqual(result.history[1]["action"], "signal_mismatch_penalty_increase")
-        self.assertTrue(result.history[1]["signal_mismatch_active"])
-        self.assertTrue(result.history[1]["hard_positive_shift_zero"])
-        self.assertFalse(result.history[1]["surrogate_max_value"] <= 0.0)
+        self.assertEqual(minimize_calls["count"], 3)
+        self.assertEqual(
+            [entry["action"] for entry in result.history],
+            ["dual_update"] * 3,
+        )
+        self.assertTrue(all(entry["signal_mismatch_active"] for entry in result.history))
+        self.assertTrue(all(entry["hard_positive_shift_zero"] for entry in result.history))
+        self.assertEqual(result.history[-1]["outer_termination"], "max_outer")
+        np.testing.assert_allclose(result.history[0]["post_update_multipliers"], [0.0])
 
-    def test_relaxed_stage2_signal_mismatch_does_not_dual_update(self):
+    def test_relaxed_stage2_signal_mismatch_uses_surrogate_kkt_for_dual_update(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
             max_outer_iterations=1,
@@ -2750,6 +2774,8 @@ class MinimizeAlmTests(unittest.TestCase):
         def evaluate_problem(x, multipliers, penalty):
             del x, multipliers, penalty
             return self._stage2_signal_evaluation(
+                grad=np.array([10.0]),
+                base_grad=np.array([1.0]),
                 constraint_values=np.array([1.0e-3]),
                 dual_update_values=np.array([1.0e-3]),
                 feasibility_values=np.array([1.0e-3]),
@@ -2757,9 +2783,9 @@ class MinimizeAlmTests(unittest.TestCase):
                 hard_violation_values=np.array([1.0e-3]),
                 surrogate_signed_constraint_values=np.array([1.0e-3]),
                 hard_dual_update_values=np.array([1.0e-3]),
-                constraint_grads=[np.array([0.0])],
+                constraint_grads=[np.array([-1.0])],
                 constraint_activity_tolerances=np.array([0.0]),
-                stationarity_norm=0.0,
+                stationarity_norm=10.0,
             )
 
         def fake_minimize(fun, x, jac, method, bounds, callback, options):
@@ -2783,10 +2809,21 @@ class MinimizeAlmTests(unittest.TestCase):
             )
 
         self.assertFalse(result.success)
-        self.assertEqual(result.history[0]["action"], "signal_mismatch_penalty_increase")
+        self.assertEqual(
+            result.termination_reason,
+            "max_outer_after_dual_update",
+        )
+        self.assertEqual(result.history[0]["action"], "dual_update")
         self.assertTrue(result.history[0]["signal_mismatch_active"])
-        np.testing.assert_allclose(result.history[0]["post_update_multipliers"], [0.0])
-        np.testing.assert_allclose(result.multipliers, np.array([0.0]))
+        self.assertAlmostEqual(result.history[0]["raw_stationarity_norm"], 10.0)
+        self.assertAlmostEqual(result.history[0]["kkt_stationarity_norm"], 0.0)
+        self.assertAlmostEqual(
+            result.history[0]["surrogate_kkt_stationarity_norm"],
+            0.0,
+        )
+        self.assertEqual(result.history[0]["outer_termination"], "max_outer")
+        np.testing.assert_allclose(result.history[0]["post_update_multipliers"], [1.0e-3])
+        np.testing.assert_allclose(result.multipliers, np.array([1.0e-3]))
 
     def test_alm_terminates_deterministically_under_sustained_signal_mismatch(self):
         """Pin the deterministic-termination property of the hybrid signal contract.
@@ -2951,6 +2988,7 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.penalty, 100.0)
         self.assertEqual(result.termination_reason, "max_outer_after_infeasible_stall")
+        np.testing.assert_allclose(result.multipliers, np.array([0.0]))
         self.assertEqual(result.history[0]["action"], "infeasible_stall_penalty_increase")
         self.assertEqual(result.history[1]["action"], "infeasible_stall_penalty_increase")
         self.assertEqual(result.history[1]["outer_termination"], "max_outer")
@@ -3035,7 +3073,7 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(entry["block_penalties"]["geometry"]["penalty"], 2.0)
         self.assertEqual(diagnostic_array[0], 3.0)
 
-    def test_minimize_alm_short_circuits_zero_step_infeasible_stall(self):
+    def test_minimize_alm_short_circuits_zero_step_outside_update_window(self):
         module = load_alm_utils_module()
         source_key = module._HISTORY_DIAGNOSTICS_SOURCE_KEY
         settings = module.ALMSettings(
@@ -3100,6 +3138,8 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(len(minimize_calls), 1)
         self.assertEqual(len(history_snapshots), 1)
         self.assertEqual(result.history[0]["action"], "infeasible_stall_penalty_increase")
+        self.assertNotIn("dual_update_penalty_increase", result.history[0])
+        np.testing.assert_allclose(result.history[0]["post_update_multipliers"], [0.0])
         self.assertTrue(result.history[0]["infeasible_stall"])
         self.assertEqual(result.history[0]["inner_attempts"], 1)
         # L2: callback receives a defensive copy of the history list (not
@@ -3120,7 +3160,10 @@ class MinimizeAlmTests(unittest.TestCase):
             source_key,
             history_snapshots[-1]["latest_entry"],
         )
-        self.assertEqual(history_snapshots[-1]["latest_entry"]["action"], "infeasible_stall_penalty_increase")
+        self.assertEqual(
+            history_snapshots[-1]["latest_entry"]["action"],
+            "infeasible_stall_penalty_increase",
+        )
         self.assertEqual(history_snapshots[-1]["latest_entry"]["outer_termination"], "max_outer")
         history_snapshots[-1]["latest_entry"]["action"] = "mutated_by_callback_owner"
         history_snapshots[-1]["latest_entry"]["constraint_values"][0] = 99.0
@@ -3287,7 +3330,7 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertTrue(result.history[0]["meaningful_progress"])
         self.assertEqual(result.history[1]["multipliers"], [5.0e-3])
 
-    def test_minimize_alm_uses_current_progress_for_three_dual_updates_before_penalty(self):
+    def test_minimize_alm_records_penalty_increase_on_fourth_dual_update(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
             max_outer_iterations=4,
@@ -3343,6 +3386,7 @@ class MinimizeAlmTests(unittest.TestCase):
             [entry["action"] for entry in result.history],
             ["dual_update", "dual_update", "dual_update", "penalty_increase"],
         )
+        self.assertEqual(result.penalty, 10.0)
         self.assertEqual(result.history[-1]["outer_termination"], "max_outer")
 
     def test_minimize_alm_tolerances_nonincreasing_across_dual_penalty_dual(self):
@@ -3827,11 +3871,12 @@ class MinimizeAlmTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.penalty, 10.0)
-        self.assertEqual(result.termination_reason, "max_outer_after_infeasible_stall")
-        self.assertEqual(result.history[0]["action"], "infeasible_stall_penalty_increase")
+        self.assertEqual(result.termination_reason, "max_outer_after_dual_update")
+        self.assertEqual(result.history[0]["action"], "dual_update")
+        self.assertTrue(result.history[0]["dual_update_penalty_increase"])
         self.assertEqual(result.history[0]["inner_message"], "STOP: plateau")
         self.assertEqual(result.history[0]["inner_profile"], "boxed_infeasible_initial")
-        self.assertAlmostEqual(result.history[0]["feasibility_tolerance"], 0.1)
+        self.assertAlmostEqual(result.history[0]["feasibility_tolerance"], 10.0**-0.1)
         self.assertAlmostEqual(result.history[0]["effective_feasibility_tolerance"], 1.0e-2)
         self.assertEqual(result.history[0]["outer_termination"], "max_outer")
 
@@ -4219,7 +4264,7 @@ class MinimizeAlmTests(unittest.TestCase):
         )
         self.assertEqual(result.history[-1]["subproblem_limit_reason"], "plateau_stall")
 
-    def test_minimize_alm_escalates_penalty_for_material_violation_above_capped_gate(self):
+    def test_minimize_alm_short_circuits_zero_step_infeasible_stall(self):
         module = load_alm_utils_module()
         settings = module.ALMSettings(
             max_outer_iterations=2,
@@ -4252,6 +4297,101 @@ class MinimizeAlmTests(unittest.TestCase):
         self.assertEqual(result.history[0]["effective_feasibility_tolerance"], 1.0e-2)
         self.assertEqual(result.history[1]["action"], "infeasible_stall_penalty_increase")
         self.assertEqual(result.history[1]["outer_termination"], "max_outer")
+
+    def test_minimize_alm_updates_multipliers_on_stationary_hard_infeasibility(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=3,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+            relaxed_feasibility_gate_cap=1e-2,
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            del x, multipliers, penalty
+            return _complete_alm_evaluation({
+                "total": 0.0,
+                "grad": np.array([0.0]),
+                "constraint_values": np.array([0.25]),
+                "stationarity_norm": 0.0,
+            })
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del jac, method, bounds, callback, options
+            x_array = np.asarray(x, dtype=float)
+            fun(x_array)
+            return SimpleNamespace(
+                x=x_array.copy(),
+                nit=0,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+            )
+
+        self.assertFalse(result.success)
+        self.assertGreater(result.multipliers[0], 0.0)
+        self.assertEqual(result.termination_reason, "max_outer_after_dual_update")
+        self.assertEqual(result.history[0]["action"], "dual_update")
+        self.assertAlmostEqual(result.history[0]["post_update_multipliers"][0], 0.25)
+
+    def test_minimize_alm_refreshes_final_eval_after_no_penalty_dual_update(self):
+        module = load_alm_utils_module()
+        settings = module.ALMSettings(
+            max_outer_iterations=1,
+            penalty_init=1.0,
+            penalty_scale=10.0,
+            feasibility_tol=1e-8,
+            stationarity_tol=1e-8,
+            relaxed_feasibility_gate_cap=1e-2,
+        )
+
+        def evaluate_problem(x, multipliers, penalty):
+            del penalty
+            constraint_value = 1.0 if float(np.asarray(x)[0]) < 0.5 else 0.25
+            return _complete_alm_evaluation({
+                "total": 0.0,
+                "grad": np.array([float(np.asarray(multipliers)[0])]),
+                "constraint_values": np.array([constraint_value]),
+                "stationarity_norm": 0.0,
+            })
+
+        def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del jac, method, bounds, callback, options
+            candidate_x = np.array([1.0])
+            fun(candidate_x)
+            return SimpleNamespace(
+                x=candidate_x.copy(),
+                nit=1,
+                success=True,
+                message="CONVERGENCE",
+            )
+
+        with patch.object(module, "minimize", side_effect=fake_minimize):
+            result = module.minimize_alm(
+                np.array([0.0]),
+                ["demo_constraint"],
+                evaluate_problem,
+                settings,
+                {"maxiter": 5, "ftol": 1e-12, "gtol": 1e-12},
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.penalty, 1.0)
+        self.assertEqual(result.history[0]["action"], "dual_update")
+        self.assertNotIn("dual_update_penalty_increase", result.history[0])
+        self.assertAlmostEqual(result.history[0]["post_update_multipliers"][0], 0.25)
+        np.testing.assert_allclose(result.multipliers, np.array([0.25]))
+        self.assertAlmostEqual(result.final_augmented_gradient_norm, 0.25)
 
     def test_minimize_alm_accepts_kkt_stationarity_at_nearly_active_inequality_boundary(self):
         module = load_alm_utils_module()
@@ -4381,7 +4521,8 @@ class MinimizeAlmTests(unittest.TestCase):
         # subproblem_continue before the subproblem_limit fires. Final
         # best-feasible-restoration outcome is unchanged.
         self.assertEqual(minimize_calls["count"], 4)
-        self.assertEqual(result.history[0]["action"], "penalty_increase")
+        self.assertEqual(result.history[0]["action"], "dual_update")
+        self.assertTrue(result.history[0]["dual_update_penalty_increase"])
         self.assertEqual(result.history[1]["action"], "dual_update")
         self.assertEqual(result.history[2]["action"], "subproblem_continue")
         # M3.a: max_subproblem_continuations exhaustion now routes through the
@@ -4486,24 +4627,35 @@ class MinimizeAlmTests(unittest.TestCase):
         settings = module.ALMSettings(
             max_outer_iterations=1,
             max_subproblem_continuations=1,
-            feasibility_tol=1e-8,
-            stationarity_tol=1e-8,
+            feasibility_tol=1e-6,
+            stationarity_tol=1e-6,
+            penalty_init=1.0,
+            relaxed_feasibility_gate_cap=1e-2,
         )
+        returned_after_callback = {"value": False}
 
         def evaluate_problem(x, multipliers, penalty):
-            return {
-                "total": 0.0,
-                "grad": np.array([1.0]),
-                "constraint_values": np.array([-1.0e-4]),
-                "dual_update_values": np.array([-1.0e-4]),
-                "feasibility_values": np.array([0.0]),
-                "constraint_grads": [np.array([-1.0])],
-                "constraint_activity_tolerances": np.array([1.0e-3]),
-                "stationarity_norm": 1.0,
-            }
+            del x, multipliers, penalty
+            return self._stage2_signal_evaluation(
+                total=0.0,
+                grad=np.array([10.0]),
+                base_grad=np.array([1.0]),
+                constraint_values=np.array([0.25]),
+                dual_update_values=np.array([0.25]),
+                feasibility_values=np.array([0.25]),
+                hard_signed_constraint_values=np.array([0.25]),
+                hard_violation_values=np.array([0.25]),
+                surrogate_signed_constraint_values=np.array([0.25]),
+                hard_dual_update_values=np.array([0.25]),
+                constraint_grads=[np.array([-1.0])],
+                constraint_activity_tolerances=np.array([0.0]),
+                stationarity_norm=10.0,
+            )
 
         def fake_minimize(fun, x, jac, method, bounds, callback, options):
+            del fun, jac, method, bounds, options
             callback(np.asarray(x, dtype=float))
+            returned_after_callback["value"] = True
             return SimpleNamespace(
                 x=np.asarray(x, dtype=float),
                 nit=0,
@@ -4521,10 +4673,12 @@ class MinimizeAlmTests(unittest.TestCase):
             )
 
         self.assertFalse(result.success)
+        self.assertFalse(returned_after_callback["value"])
         self.assertEqual(result.history[0]["action"], "dual_update")
-        self.assertAlmostEqual(result.history[0]["raw_stationarity_norm"], 1.0)
+        self.assertAlmostEqual(result.history[0]["raw_stationarity_norm"], 10.0)
         self.assertAlmostEqual(result.history[0]["kkt_stationarity_norm"], 0.0)
-        self.assertAlmostEqual(result.history[0]["stationarity_norm"], 1.0)
+        self.assertAlmostEqual(result.history[0]["stationarity_norm"], 10.0)
+        self.assertAlmostEqual(result.history[0]["post_update_multipliers"][0], 0.25)
 
     def test_minimize_alm_skips_inner_solver_when_current_iterate_already_converged(self):
         module = load_alm_utils_module()

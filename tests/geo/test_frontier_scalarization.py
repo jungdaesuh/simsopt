@@ -671,15 +671,17 @@ class FrontierScalarizationTests(unittest.TestCase):
             )
             for lane in lane_specs
         }
-        self.assertEqual(
-            observed_weight_vectors,
-            {
-                (dominant_weight, floor_weight, floor_weight, floor_weight),
-                (floor_weight, dominant_weight, floor_weight, floor_weight),
-                (floor_weight, floor_weight, dominant_weight, floor_weight),
-                (floor_weight, floor_weight, floor_weight, dominant_weight),
-            },
-        )
+        expected_weight_vectors = {
+            (dominant_weight, floor_weight, floor_weight, floor_weight),
+            (floor_weight, dominant_weight, floor_weight, floor_weight),
+            (floor_weight, floor_weight, dominant_weight, floor_weight),
+            (floor_weight, floor_weight, floor_weight, dominant_weight),
+        }
+        observed_sorted = sorted(observed_weight_vectors, key=np.argmax)
+        expected_sorted = sorted(expected_weight_vectors, key=np.argmax)
+        self.assertEqual(len(observed_sorted), len(expected_sorted))
+        for observed, expected in zip(observed_sorted, expected_sorted):
+            np.testing.assert_allclose(observed, expected, rtol=0.0, atol=1.0e-15)
         self.assertEqual(len(directions), 4)
         self.assertEqual(
             set(directions),

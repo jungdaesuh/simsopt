@@ -2,7 +2,7 @@ import argparse
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -54,6 +54,11 @@ from banana_opt.artifact_contracts import (
     compute_stage2_bs_sha256,
     upgrade_legacy_stage2_artifact_results,
 )
+from banana_opt.alm_adaptive_smoothing import (
+    ALM_SMOOTHING_FLOOR_FRACTION,
+    adapt_alm_smoothing_from_history,
+)
+from banana_opt.alm_defaults import stage2_alm_default
 from banana_opt.constraint_contract import (
     build_constraint_metadata,
     resolve_constraint_contract_from_wire_names,
@@ -258,6 +263,14 @@ def build_lbfgsb_bounds(optimizable):
     )
 
 
+def _stage2_alm_env_float(env_name: str, suffix: str) -> float:
+    return float(os.environ.get(env_name, str(stage2_alm_default(suffix))))
+
+
+def _stage2_alm_env_int(env_name: str, suffix: str) -> int:
+    return int(os.environ.get(env_name, str(stage2_alm_default(suffix))))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run Stage 2 banana coil optimization against a fixed plasma surface.",
@@ -451,82 +464,103 @@ def parse_args():
     parser.add_argument(
         "--alm-max-outer-iters",
         type=int,
-        default=int(os.environ.get("ALM_MAX_OUTER_ITERS", "10")),
-        help="Maximum number of ALM outer iterations (default 10).",
+        default=_stage2_alm_env_int("ALM_MAX_OUTER_ITERS", "max_outer_iters"),
+        help=(
+            "Maximum number of ALM outer iterations "
+            f"(default {stage2_alm_default('max_outer_iters')})."
+        ),
     )
     parser.add_argument(
         "--alm-penalty-init",
         type=float,
-        default=float(os.environ.get("ALM_PENALTY_INIT", "1.0")),
-        help="Initial ALM penalty parameter (default 1.0).",
+        default=_stage2_alm_env_float("ALM_PENALTY_INIT", "penalty_init"),
+        help=(
+            "Initial ALM penalty parameter "
+            f"(default {stage2_alm_default('penalty_init')})."
+        ),
     )
     parser.add_argument(
         "--alm-penalty-scale",
         type=float,
-        default=float(os.environ.get("ALM_PENALTY_SCALE", "10.0")),
-        help="Multiplicative ALM penalty growth factor (default 10.0).",
+        default=_stage2_alm_env_float("ALM_PENALTY_SCALE", "penalty_scale"),
+        help=(
+            "Multiplicative ALM penalty growth factor "
+            f"(default {stage2_alm_default('penalty_scale')})."
+        ),
     )
     parser.add_argument(
         "--alm-penalty-max",
         type=float,
-        default=float(os.environ.get("ALM_PENALTY_MAX", "1e8")),
-        help="Maximum ALM penalty parameter before capped termination (default 1e8).",
+        default=_stage2_alm_env_float("ALM_PENALTY_MAX", "penalty_max"),
+        help=(
+            "Maximum ALM penalty parameter before capped termination "
+            f"(default {stage2_alm_default('penalty_max')})."
+        ),
     )
     parser.add_argument(
         "--alm-feas-tol",
         type=float,
-        default=float(os.environ.get("ALM_FEAS_TOL", "1e-6")),
+        default=_stage2_alm_env_float("ALM_FEAS_TOL", "feas_tol"),
         help=(
             "Dimensionless normalized ALM max-violation stopping tolerance "
-            "(default 1e-6)."
+            f"(default {stage2_alm_default('feas_tol')})."
         ),
     )
     parser.add_argument(
         "--alm-stationarity-tol",
         type=float,
-        default=float(os.environ.get("ALM_STATIONARITY_TOL", "1e-6")),
-        help="ALM augmented-gradient stopping tolerance (default 1e-6).",
+        default=_stage2_alm_env_float("ALM_STATIONARITY_TOL", "stationarity_tol"),
+        help=(
+            "ALM augmented-gradient stopping tolerance "
+            f"(default {stage2_alm_default('stationarity_tol')})."
+        ),
     )
     parser.add_argument(
         "--alm-trust-radius-init",
         type=float,
-        default=float(os.environ.get("ALM_TRUST_RADIUS_INIT", "0.05")),
+        default=_stage2_alm_env_float("ALM_TRUST_RADIUS_INIT", "trust_radius_init"),
         help="Initial relative trust radius for bounded ALM inner solves (0 disables bounds).",
     )
     parser.add_argument(
         "--alm-trust-radius-min",
         type=float,
-        default=float(os.environ.get("ALM_TRUST_RADIUS_MIN", "1e-4")),
+        default=_stage2_alm_env_float("ALM_TRUST_RADIUS_MIN", "trust_radius_min"),
         help="Minimum relative trust radius for bounded ALM inner solves.",
     )
     parser.add_argument(
         "--alm-trust-radius-shrink",
         type=float,
-        default=float(os.environ.get("ALM_TRUST_RADIUS_SHRINK", "0.5")),
+        default=_stage2_alm_env_float(
+            "ALM_TRUST_RADIUS_SHRINK", "trust_radius_shrink"
+        ),
         help="Multiplicative shrink factor for the ALM inner trust radius.",
     )
     parser.add_argument(
         "--alm-trust-radius-grow",
         type=float,
-        default=float(os.environ.get("ALM_TRUST_RADIUS_GROW", "1.5")),
+        default=_stage2_alm_env_float("ALM_TRUST_RADIUS_GROW", "trust_radius_grow"),
         help="Multiplicative growth factor for the ALM inner trust radius after good steps.",
     )
     parser.add_argument(
         "--alm-max-inner-attempts",
         type=int,
-        default=int(os.environ.get("ALM_MAX_INNER_ATTEMPTS", "4")),
+        default=_stage2_alm_env_int("ALM_MAX_INNER_ATTEMPTS", "max_inner_attempts"),
         help="Maximum number of trust-radius retries per ALM outer iteration.",
     )
     parser.add_argument(
         "--alm-max-subproblem-continuations",
         type=int,
-        default=int(os.environ.get("ALM_MAX_SUBPROBLEM_CONTINUATIONS", "20")),
+        default=_stage2_alm_env_int(
+            "ALM_MAX_SUBPROBLEM_CONTINUATIONS", "max_subproblem_continuations"
+        ),
         help="Maximum accepted-feasible continuation solves before forcing an ALM return.",
     )
     parser.add_argument(
         "--alm-distance-smoothing",
         type=float,
-        default=float(os.environ.get("ALM_DISTANCE_SMOOTHING", "0.005")),
+        default=_stage2_alm_env_float(
+            "ALM_DISTANCE_SMOOTHING", "distance_smoothing"
+        ),
         help="Distance soft-min temperature for Stage 2 ALM spacing constraints.",
     )
     parser.add_argument(
@@ -536,7 +570,9 @@ def parse_args():
         # kappa array) vs single-stage's 0.05. The wider window is appropriate
         # here because Stage 2 operates on a single banana coil with fewer
         # quadrature points and less sensitivity to curvature perturbations.
-        default=float(os.environ.get("ALM_CURVATURE_SMOOTHING", "0.25")),
+        default=_stage2_alm_env_float(
+            "ALM_CURVATURE_SMOOTHING", "curvature_smoothing"
+        ),
         help="Curvature soft-max temperature for Stage 2 ALM curvature constraints.",
     )
     parser.add_argument(
@@ -1462,6 +1498,96 @@ def _build_initialize_coils_kwargs(
     }
 
 
+@dataclass
+class Stage2AlmAdaptiveSmoothingState:
+    distance_smoothing: float
+    curvature_smoothing: float
+    events: list[dict] = field(default_factory=list)
+
+
+def _stage2_alm_adaptive_smoothing_update(
+    distance_smoothing,
+    curvature_smoothing,
+    latest_history_entry,
+    *,
+    distance_smoothing_min,
+    curvature_smoothing_min,
+):
+    previous_distance_smoothing = float(distance_smoothing)
+    previous_curvature_smoothing = float(curvature_smoothing)
+    adapted = adapt_alm_smoothing_from_history(
+        previous_distance_smoothing,
+        previous_curvature_smoothing,
+        latest_history_entry,
+        distance_smoothing_min=distance_smoothing_min,
+        curvature_smoothing_min=curvature_smoothing_min,
+    )
+    next_distance_smoothing = float(adapted["distance_smoothing"])
+    next_curvature_smoothing = float(adapted["curvature_smoothing"])
+    distance_gap_count = int(adapted["gap_counts"]["distance"])
+    curvature_gap_count = int(adapted["gap_counts"]["curvature"])
+    smoothing_changed = bool(
+        next_distance_smoothing != previous_distance_smoothing
+        or next_curvature_smoothing != previous_curvature_smoothing
+    )
+    event = None
+    if smoothing_changed:
+        event = {
+            "outer_iteration": latest_history_entry["outer_iteration"],
+            "distance_gap_count": distance_gap_count,
+            "curvature_gap_count": curvature_gap_count,
+            "previous_distance_smoothing": previous_distance_smoothing,
+            "distance_smoothing": next_distance_smoothing,
+            "previous_curvature_smoothing": previous_curvature_smoothing,
+            "curvature_smoothing": next_curvature_smoothing,
+        }
+    return {
+        "distance_smoothing": next_distance_smoothing,
+        "curvature_smoothing": next_curvature_smoothing,
+        "distance_gap_count": distance_gap_count,
+        "curvature_gap_count": curvature_gap_count,
+        "smoothing_changed": smoothing_changed,
+        "event": event,
+    }
+
+
+def _make_stage2_alm_adaptive_smoothing_callback(
+    distance_smoothing,
+    curvature_smoothing,
+    *,
+    distance_smoothing_min,
+    curvature_smoothing_min,
+):
+    state = Stage2AlmAdaptiveSmoothingState(
+        distance_smoothing=float(distance_smoothing),
+        curvature_smoothing=float(curvature_smoothing),
+    )
+
+    def history_callback(history, latest_history_entry, multipliers, penalty):
+        del history, multipliers, penalty
+        update = _stage2_alm_adaptive_smoothing_update(
+            state.distance_smoothing,
+            state.curvature_smoothing,
+            latest_history_entry,
+            distance_smoothing_min=distance_smoothing_min,
+            curvature_smoothing_min=curvature_smoothing_min,
+        )
+        state.distance_smoothing = float(update["distance_smoothing"])
+        state.curvature_smoothing = float(update["curvature_smoothing"])
+        if update["event"] is not None:
+            state.events.append(dict(update["event"]))
+
+    return state, history_callback
+
+
+def _stage2_alm_adaptive_smoothing_results(state):
+    return {
+        "ALM_EFFECTIVE_DISTANCE_SMOOTHING": float(state.distance_smoothing),
+        "ALM_EFFECTIVE_CURVATURE_SMOOTHING": float(state.curvature_smoothing),
+        "ALM_ADAPTIVE_SMOOTHING_EVENTS": list(state.events),
+    }
+
+
 def main(parsed_args=None):
     # PRE-INITIALIZATION
     # ---------------------------------------------------------------------------------------
@@ -1916,6 +2042,18 @@ def main(parsed_args=None):
             include_poloidal_extent=True,
             include_iota_penalty=args.stage2_iota_mode == "alm",
         )
+        alm_smoothing_state, history_callback = (
+            _make_stage2_alm_adaptive_smoothing_callback(
+                args.alm_distance_smoothing,
+                args.alm_curvature_smoothing,
+                distance_smoothing_min=(
+                    float(args.alm_distance_smoothing) * ALM_SMOOTHING_FLOOR_FRACTION
+                ),
+                curvature_smoothing_min=(
+                    float(args.alm_curvature_smoothing) * ALM_SMOOTHING_FLOOR_FRACTION
+                ),
+            )
+        )
 
         def evaluate_problem(inner_dofs, multipliers, penalty):
             return _evaluate_stage2_alm_problem(
@@ -1930,8 +2068,8 @@ def main(parsed_args=None):
                 Jc,
                 new_banana_coils[0].current,
                 args.banana_current_max_A,
-                args.alm_distance_smoothing,
-                args.alm_curvature_smoothing,
+                alm_smoothing_state.distance_smoothing,
+                alm_smoothing_state.curvature_smoothing,
                 multipliers,
                 penalty,
                 stage2_constraint_activity_tolerances,
@@ -1941,7 +2079,7 @@ def main(parsed_args=None):
                 smooth_min_curve_surface_signed_constraint=smooth_min_curve_surface_signed_constraint,
                 Jpoloidal=Jpe,
                 poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
-                poloidal_extent_smoothing=args.alm_curvature_smoothing,
+                poloidal_extent_smoothing=alm_smoothing_state.curvature_smoothing,
                 smooth_poloidal_extent_signed_constraint=smooth_max_poloidal_extent_signed_constraint,
                 stage2_iota_runtime=(
                     stage2_iota_runtime if args.stage2_iota_mode == "alm" else None
@@ -2061,6 +2199,7 @@ def main(parsed_args=None):
                 source="accepted_iterate",
             ),
             outer_state_callback=outer_state_callback,
+            history_callback=history_callback,
         )
         alm_result = res
         res_nit = res.nit
@@ -2420,6 +2559,8 @@ def main(parsed_args=None):
         new_surf=new_surf,
         constraint_metadata=constraint_metadata,
     )
+    if CONSTRAINT_METHOD == "alm":
+        results.update(_stage2_alm_adaptive_smoothing_results(alm_smoothing_state))
     results.update(secondary_artifact_metadata)
     write_json(os.path.join(OUT_DIR_ITER, "results.json"), results)
 

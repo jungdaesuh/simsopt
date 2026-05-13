@@ -30,6 +30,11 @@ from banana_opt.artifact_contracts import (
     compute_stage2_bs_sha256,
     upgrade_legacy_stage2_artifact_results,
 )
+from banana_opt.alm_defaults import (
+    SINGLE_STAGE_ALM_CLI_FIELDS,
+    STAGE2_ALM_CLI_FIELDS,
+    stage2_alm_default,
+)
 from banana_opt.constraint_contract import resolve_constraint_contract_from_wire_names
 from banana_opt.hardware_contracts import validate_major_radius
 
@@ -43,47 +48,11 @@ STAGE2_SIDECAR_REQUIRED_ERROR = (
 )
 
 T = TypeVar("T")
-# Single-stage and baseline-sweep ALM defaults. Stage 2 intentionally keeps a
-# wider curvature smoothing default on Stage2ArtifactConfig.
-SINGLE_STAGE_ALM_CLI_FIELDS = (
-    ("max_outer_iters", int, 10),
-    ("penalty_init", float, 1.0),
-    ("penalty_scale", float, 10.0),
-    ("penalty_max", float, 1.0e8),
-    ("feas_tol", float, 1.0e-6),
-    ("stationarity_tol", float, 1.0e-6),
-    ("trust_radius_init", float, 0.05),
-    ("trust_radius_min", float, 1.0e-4),
-    ("trust_radius_shrink", float, 0.5),
-    ("trust_radius_grow", float, 1.5),
-    ("max_inner_attempts", int, 4),
-    ("max_subproblem_continuations", int, 20),
-    ("distance_smoothing", float, 0.005),
-    ("curvature_smoothing", float, 0.05),
-)
-STAGE2_ALM_DEFAULT_OVERRIDES = {
-    "curvature_smoothing": 0.25,
-}
-STAGE2_ALM_CLI_FIELDS = tuple(
-    (
-        suffix,
-        value_type,
-        STAGE2_ALM_DEFAULT_OVERRIDES.get(suffix, default),
-    )
-    for suffix, value_type, default in SINGLE_STAGE_ALM_CLI_FIELDS
-)
-STAGE2_ALM_DEFAULTS = {
-    suffix: default for suffix, _value_type, default in STAGE2_ALM_CLI_FIELDS
-}
 STAGE2_ARTIFACT_PATH_FIELD_NAMES = tuple(
     name
     for name, parameter in inspect.signature(local_stage2_bs_path).parameters.items()
     if parameter.kind is inspect.Parameter.KEYWORD_ONLY
 )
-
-
-def stage2_alm_default(suffix: str) -> int | float:
-    return STAGE2_ALM_DEFAULTS[suffix]
 
 
 def alm_flag(suffix: str) -> str:
@@ -216,9 +185,9 @@ class Stage2ConstraintPolicy:
 
 @dataclass(frozen=True, slots=True)
 class Stage2AlmControls:
-    alm_max_outer_iters: int
-    alm_penalty_init: float
-    alm_penalty_scale: float
+    alm_max_outer_iters: int = stage2_alm_default("max_outer_iters")
+    alm_penalty_init: float = stage2_alm_default("penalty_init")
+    alm_penalty_scale: float = stage2_alm_default("penalty_scale")
     alm_penalty_max: float = stage2_alm_default("penalty_max")
     alm_feas_tol: float = stage2_alm_default("feas_tol")
     alm_stationarity_tol: float = stage2_alm_default("stationarity_tol")
@@ -299,11 +268,11 @@ class Stage2ArtifactConfig:
         banana_surf_radius: float,
         order: int,
         constraint_method: str,
-        alm_max_outer_iters: int,
-        alm_penalty_init: float,
-        alm_penalty_scale: float,
-        basin_hops: int,
-        basin_stepsize: float,
+        alm_max_outer_iters: int = stage2_alm_default("max_outer_iters"),
+        alm_penalty_init: float = stage2_alm_default("penalty_init"),
+        alm_penalty_scale: float = stage2_alm_default("penalty_scale"),
+        basin_hops: int = 0,
+        basin_stepsize: float = 0.01,
         alm_penalty_max: float = stage2_alm_default("penalty_max"),
         alm_feas_tol: float = stage2_alm_default("feas_tol"),
         alm_stationarity_tol: float = stage2_alm_default("stationarity_tol"),

@@ -1494,13 +1494,52 @@ class WorkflowRunnerCommonArtifactTests(unittest.TestCase):
         }
 
         self.assertEqual(stage2_suffixes, config_suffixes)
+        self.assertEqual(module.stage2_alm_default("penalty_init"), 0.1)
+        self.assertEqual(module.stage2_alm_default("penalty_scale"), 2.0)
         self.assertEqual(module.stage2_alm_default("curvature_smoothing"), 0.25)
+        single_stage_defaults = dict(
+            (suffix, default)
+            for suffix, _value_type, default in module.SINGLE_STAGE_ALM_CLI_FIELDS
+        )
+        self.assertEqual(single_stage_defaults["penalty_init"], 1.0)
+        self.assertEqual(single_stage_defaults["penalty_scale"], 10.0)
+        self.assertEqual(single_stage_defaults["curvature_smoothing"], 0.05)
+
+    def test_stage2_artifact_config_alm_defaults_use_stage2_metadata(self):
+        module = load_workflow_common_module()
+
+        config = module.Stage2ArtifactConfig(
+            plasma_surf_filename="demo.nc",
+            output_root=Path("/tmp/stage2"),
+            equilibria_dir=None,
+            tf_current_A=-8.0e4,
+            major_radius=0.976,
+            toroidal_flux=0.24,
+            length_weight=0.0005,
+            cc_weight=100.0,
+            cc_threshold=0.05,
+            curvature_weight=0.0001,
+            curvature_threshold=100.0,
+            banana_surf_radius=0.21,
+            order=2,
+            constraint_method="alm",
+        )
+
         self.assertEqual(
-            dict(
-                (suffix, default)
-                for suffix, _value_type, default in module.SINGLE_STAGE_ALM_CLI_FIELDS
-            )["curvature_smoothing"],
-            0.05,
+            config.alm_max_outer_iters,
+            module.stage2_alm_default("max_outer_iters"),
+        )
+        self.assertEqual(
+            config.alm_penalty_init,
+            module.stage2_alm_default("penalty_init"),
+        )
+        self.assertEqual(
+            config.alm_penalty_scale,
+            module.stage2_alm_default("penalty_scale"),
+        )
+        self.assertEqual(
+            config.alm_curvature_smoothing,
+            module.stage2_alm_default("curvature_smoothing"),
         )
 
     def test_stage2_artifact_config_flat_projection_preserves_payload_shape(self):

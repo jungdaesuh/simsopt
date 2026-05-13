@@ -10,7 +10,7 @@ Relationship: extends `docs/alm_hardening_closeout_todo_plan_2026-05-07.md` with
 
 ## Implementation Result
 
-- TODO 1/2 closed with Option A: `SINGLE_STAGE_ALM_CLI_FIELDS` names the single-stage / baseline-sweep defaults, while Stage 2 keeps its intentional `alm_curvature_smoothing = 0.25` default.
+- TODO 1/2 closed by keeping `SINGLE_STAGE_ALM_CLI_FIELDS` for single-stage / baseline-sweep defaults and deriving the Stage 2 ALM surface from explicit per-regime overrides in `banana_opt.alm_defaults.STAGE2_ALM_DEFAULT_OVERRIDES`.
 - TODO 3 closed with `_build_constraint_metadata_tuples(...)`, precomputed immutable metadata tuples, and no metadata attachment in the L-BFGS-B inner objective/callback hot path.
 - TODO 4 validation:
   - `.venv/bin/python -m pytest -q tests/geo/test_alm_utils.py` -> `91 passed, 3 subtests passed`
@@ -37,13 +37,15 @@ Out of scope for this followup: pre-existing structural debt (`minimize_alm` siz
 
 ### TODO 1: Rename `ALM_CLI_FIELDS` to disambiguate regime
 
-**Context.** `examples/single_stage_optimization/workflow_runner_common.py:42` defines `ALM_CLI_FIELDS` as the SSOT for ALM CLI metadata, but the tuple's defaults match the single-stage / baseline-sweep regime, not Stage 2:
+**Context.** `examples/single_stage_optimization/workflow_runner_common.py:42` originally defined `ALM_CLI_FIELDS` as the SSOT for ALM CLI metadata, but the tuple's defaults matched the single-stage / baseline-sweep regime, not every Stage 2 setting:
 
-| Field | `ALM_CLI_FIELDS` default | `Stage2ArtifactConfig.alm_curvature_smoothing` default | Stage 2 parser default |
-|---|---|---|---|
-| `curvature_smoothing` | `0.05` (line 56) | `0.25` (line 115) | `0.25` (`banana_coil_solver.py:526`) |
+| Field | single-stage / baseline-sweep default | Stage 2 override default |
+|---|---|---|
+| `penalty_init` | `1.0` | `0.1` |
+| `penalty_scale` | `10.0` | `2.0` |
+| `curvature_smoothing` | `0.05` | `0.25` |
 
-The split is **intentional** — `banana_coil_solver.py:520-525` documents that Stage 2 uses a broader softmax window. The bug is the misleading name: `ALM_CLI_FIELDS` claims to be the single source but actually encodes only one regime's defaults. A future maintainer who edits `ALM_CLI_FIELDS["curvature_smoothing"]` will silently NOT update Stage 2.
+The split is **intentional**. The bug was the misleading name: `ALM_CLI_FIELDS` claimed to be the single source but actually encoded only one regime's defaults. A future maintainer who edited the shared tuple would silently NOT update Stage 2.
 
 **Why it matters.** The `commit-only-work` pass will land Commit 2 (ALM CLI SSOT refactor) under the assumption that `ALM_CLI_FIELDS` is genuine SSOT. If the name stays, a future "fix the SSOT default" change becomes a covert single-stage-only change. Rename closes the drift class the SSOT rebrand was supposed to prevent.
 
@@ -52,12 +54,9 @@ The split is **intentional** — `banana_coil_solver.py:520-525` documents that 
 - [x] Rename the tuple to `SINGLE_STAGE_ALM_CLI_FIELDS` in `workflow_runner_common.py:42`.
 - [x] Update `alm_flag()` and `single_stage_alm_flag()` definitions if any callsite assumes the old name.
 - [x] Update `append_alm_cli_flags()` body at `workflow_runner_common.py:78` to iterate the renamed tuple.
-- [x] Decide on Stage 2 default surface (pick one):
-  - **Option A** — keep `Stage2ArtifactConfig.alm_curvature_smoothing = 0.25` as-is; the rename alone resolves the SSOT misnomer. No derivation. Smallest diff.
-  - **Option B1** — introduce `STAGE2_ALM_CLI_FIELDS` as a **full** sibling tuple (all 14 fields, with Stage 2 defaults: `curvature_smoothing=0.25`, others matching single-stage). Derive `Stage2ArtifactConfig` ALM defaults from this tuple via a factory or class-decorator. Symmetric with `SINGLE_STAGE_ALM_CLI_FIELDS`; full SSOT for both regimes.
-  - **Option B2** — keep one base `ALM_CLI_FIELDS_BASE` tuple plus a `STAGE2_ALM_OVERRIDES = {"curvature_smoothing": 0.25}` mapping. Derive both per-regime tuples by overlaying. Smaller surface; explicit about what differs.
-- [x] If Option B1 or B2 is chosen, also rewrite `Stage2ArtifactConfig` ALM defaults to derive from the chosen source so the `0.25` literal at `workflow_runner_common.py:115` disappears. (A diff-only tuple alone cannot derive the full Stage 2 ALM surface — Option B must cover all 14 fields, either directly or via a base+override merge.)
-- [x] Add a docstring or short comment near the renamed tuple noting it covers single-stage / baseline-sweep defaults only and that Stage 2 has its own distinct curvature-smoothing default.
+- [x] Decide on Stage 2 default surface: derive `STAGE2_ALM_CLI_FIELDS` from `SINGLE_STAGE_ALM_CLI_FIELDS` plus `STAGE2_ALM_DEFAULT_OVERRIDES`.
+- [x] Rewrite Stage 2 ALM defaults to derive from shared Stage 2 metadata so the Stage 2 `penalty_init=0.1`, `penalty_scale=2.0`, and `curvature_smoothing=0.25` defaults are owned by `banana_opt.alm_defaults.STAGE2_ALM_DEFAULT_OVERRIDES`.
+- [x] Add a short comment near the renamed tuple noting it covers single-stage / baseline-sweep defaults only and that Stage 2 has explicit per-regime overrides.
 
 **Acceptance.**
 
@@ -65,7 +64,7 @@ The split is **intentional** — `banana_coil_solver.py:520-525` documents that 
 - `git grep -nE "\bALM_CLI_FIELDS\b" docs/alm_hardening_closeout_todo_plan_2026-05-07.md` returns zero hits (the closeout tracker is updated as part of TODO 2).
 - This followup doc itself legitimately references both the old and new names in prose to describe the rename — it is intentionally **out of scope** for both gates.
 - The schema-parity test continues to pass after the rename.
-- The Stage 2 `0.25` curvature_smoothing default is preserved (no behavior change for Stage 2 callers).
+- The Stage 2 override defaults are preserved through `banana_opt.alm_defaults.STAGE2_ALM_DEFAULT_OVERRIDES`.
 
 **Suggested commit.** Folds into existing **Commit 2: ALM CLI SSOT refactor** in `docs/alm_hardening_closeout_todo_plan_2026-05-07.md:183`.
 
@@ -341,14 +340,14 @@ Items below are advisory cleanups or pre-existing structural debt. They surfaced
 
 A new ALM field previously had to be added to all three sites. **No existing test caught divergence between `SINGLE_STAGE_ALM_CLI_FIELDS` and `Stage2ArtifactConfig`.** The older schema-parity test only compared the baseline-sweep parser suffix set to `common.SINGLE_STAGE_ALM_CLI_FIELDS` — it never inspected `Stage2ArtifactConfig`'s `alm_*` field set or `resolve_stage2_artifact_path`'s keyword arguments. So a Stage 2 ALM field added to the single-stage tuple (or vice versa) silently went unverified.
 
-**Resolution.** Closed in the follow-up patch. Stage 2 now has `STAGE2_ALM_CLI_FIELDS`, derived from the single-stage tuple plus the explicit `curvature_smoothing=0.25` override. `Stage2ArtifactConfig` default values, Stage 2 ALM command emission, and artifact-path kwargs use that Stage 2 metadata, and the test suite checks Stage 2 tuple/dataclass/path-signature/path-kwarg parity.
+**Resolution.** Closed in the follow-up patch. Stage 2 now has `STAGE2_ALM_CLI_FIELDS`, derived from the single-stage tuple plus explicit Stage 2 overrides in `banana_opt.alm_defaults`. Current overrides are `penalty_init=0.1`, `penalty_scale=2.0`, and `curvature_smoothing=0.25`. `Stage2ArtifactConfig` default values, Stage 2 ALM command emission, parser defaults, wrapper profiles, and artifact-path kwargs use that Stage 2 metadata, and the test suite checks Stage 2 tuple/dataclass/path-signature/path-kwarg parity.
 
 **Tasks.**
 
-- [x] Decide whether `Stage2ArtifactConfig` derives its ALM field set from a per-regime tuple (Option B from TODO 1) or stays declarative.
+- [x] Decide whether `Stage2ArtifactConfig` derives its ALM field set from per-regime metadata or stays declarative.
 - [x] Keep `Stage2ArtifactConfig` declarative, but derive its ALM defaults and artifact-path kwarg projection from Stage 2 ALM metadata.
 - [x] Replace the explicit `local_stage2_bs_path` keyword argument list in `resolve_stage2_artifact_path` with a shared projection helper.
-- [x] Preserve the intentional Stage 2 `curvature_smoothing=0.25` vs single-stage `0.05` split.
+- [x] Preserve the intentional Stage 2 override split: `penalty_init=0.1`, `penalty_scale=2.0`, and `curvature_smoothing=0.25`.
 
 **Acceptance.** Stage 2 ALM tuple, dataclass field set, command flags, and artifact-path projection are checked together by regression tests; the artifact-path resolver no longer owns a duplicated ALM kwarg list.
 
@@ -435,7 +434,7 @@ Both grep invocations must return zero hits after TODO 1 + TODO 2. This followup
 
 ## Final Acceptance
 
-- [x] TODO 1: `ALM_CLI_FIELDS` renamed; Stage 2 default split resolved via Option A.
+- [x] TODO 1: `ALM_CLI_FIELDS` renamed; Stage 2 default split resolved via explicit per-regime overrides.
 - [x] TODO 2: All 10 dependent references updated atomically with TODO 1.
 - [x] TODO 3: `_build_constraint_metadata_tuples` helper extracted (length-mismatch ValueError preserved with the original message); `_attach_constraint_metadata` consumes precomputed tuples; three regression tests added and green — Test 1 (helper unit test, exact `str_calls == 1`), Test 2 (names scaling, no growth with `maxiter`), Test 3 (blocks scaling via monkeypatched helper, no growth with `maxiter`). Tests 2 and 3 use the `_make_fake_minimize` fixture to force inner-evaluation counts; Test 1 calls the helper directly and does not need it. The pre-existing length-mismatch regression test `tests/geo/test_alm_utils.py::test_minimize_alm_rejects_mismatched_constraint_block_metadata` continues to pass without modification.
 - [x] TODO 4: Validation runner returns green; both CLI tuple deletion gates (live code + closeout tracker) return zero hits.

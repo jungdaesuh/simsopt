@@ -376,14 +376,29 @@ class _ALMInnerAttemptEvaluator:
         )
         (
             callback_stationarity_norm,
-            _callback_kkt_stationarity_norm,
+            callback_kkt_stationarity_norm,
             _callback_signal_mismatch_active,
         ) = _stationarity_metrics(
             evaluation,
             callback_routing_state,
             self.request.effective_feasibility_tol,
         )
-        if (
+        if callback_routing_state.signal_state.explicit_stage2_signals:
+            callback_dual_update_max_violation = max(
+                float(callback_max_feasibility_violation),
+                float(callback_routing_state.hard_max_violation),
+            )
+            callback_dual_update_stationarity_norm = _dual_update_stationarity_norm(
+                callback_stationarity_norm,
+                callback_kkt_stationarity_norm,
+            )
+            if (
+                callback_dual_update_max_violation <= self.request.update_feasibility_tol
+                and callback_dual_update_stationarity_norm
+                <= self.request.update_stationarity_tol
+            ):
+                raise _EarlyStopInnerSolve(inner_x, evaluation)
+        elif (
             callback_max_feasibility_violation <= self.request.effective_feasibility_tol
             and callback_stationarity_norm <= self.request.update_stationarity_tol
         ):
@@ -1887,6 +1902,10 @@ def _penalty_schedule_tolerance(tolerance: float, penalty) -> float:
     return max(float(tolerance), 1.0 / _tolerance_schedule_penalty(penalty))
 
 
+def _penalty_feasibility_schedule_tolerance(tolerance: float, penalty) -> float:
+    return max(float(tolerance), 1.0 / _tolerance_schedule_penalty(penalty) ** 0.1)
+
+
 def _next_penalty(
     penalty: float,
     *,
@@ -2405,9 +2424,9 @@ def _stationarity_metrics(
     ``stationarity_norm`` is the raw augmented-Lagrangian gradient norm used as
     the inner-solve convergence trigger; callers that need the same value under
     the ``raw_stationarity_norm`` history-schema key alias it locally.
-    ``kkt_stationarity_norm`` is the active-set KKT residual diagnostic and is
-    ``None`` when ``signal_mismatch_active`` flips the routing state into the
-    surrogate-vs-hard mismatch arm.
+    ``kkt_stationarity_norm`` is the active-set KKT residual used for the inner
+    stationarity gate. Stage 2 computes it on the surrogate channel because that
+    is the differentiable subproblem; mismatch remains a separate success guard.
     """
     metric_grad = np.asarray(
         evaluation.get("metric_grad", evaluation["grad"]),
@@ -2419,8 +2438,12 @@ def _stationarity_metrics(
             np.linalg.norm(evaluation["grad"]),
         )
     )
-    if routing_state.signal_mismatch_active:
-        kkt_stationarity_norm = None
+    if routing_state.signal_state.explicit_stage2_signals:
+        kkt_stationarity_norm = _surrogate_kkt_stationarity_norm(
+            evaluation,
+            routing_state,
+            feasibility_gate,
+        )
     else:
         preferred_dual_update_values = routing_state.signal_state.preferred_dual_update_values
         # M9: KKT stationarity is `‖∇f + Σλ_i∇c_i‖`, NOT `‖∇L_A + Σλ_i∇c_i‖`.
@@ -2446,6 +2469,17 @@ def _stationarity_metrics(
         stationarity_norm,
         kkt_stationarity_norm,
         bool(routing_state.signal_mismatch_active),
+    )
+
+
+def _dual_update_stationarity_norm(
+    stationarity_norm: float,
+    kkt_stationarity_norm: float | None,
+) -> float:
+    return (
+        float(kkt_stationarity_norm)
+        if kkt_stationarity_norm is not None
+        else float(stationarity_norm)
     )
 
 
@@ -2545,7 +2579,7 @@ def _normalize_alm_run_inputs(
         constraint_names_tuple=constraint_names_tuple,
         constraint_blocks_tuple=constraint_blocks_tuple,
         trust_radius=_normalize_trust_radius(settings.trust_radius_init),
-        update_feasibility_tol=_penalty_schedule_tolerance(
+        update_feasibility_tol=_penalty_feasibility_schedule_tolerance(
             settings.feasibility_tol, penalty
         ),
         update_stationarity_tol=_penalty_schedule_tolerance(
@@ -2796,6 +2830,27 @@ def _evaluate_alm_penalty_state(
     )
 
 
+def _evaluate_alm_final_state(
+    *,
+    evaluate_problem: Callable[[np.ndarray, np.ndarray, object], dict],
+    x: np.ndarray,
+    multipliers: np.ndarray,
+    penalty_argument: object,
+    constraint_names_tuple: tuple[str, ...],
+    constraint_blocks_tuple: tuple[str, ...] | None,
+) -> dict:
+    evaluation = _attach_alm_constraint_metadata(
+        evaluate_problem(x, multipliers, penalty_argument),
+        constraint_names_tuple,
+        constraint_blocks_tuple,
+    )
+    _require_finite_evaluation(
+        evaluation,
+        context="ALM final state evaluation",
+    )
+    return evaluation
+
+
 def _refresh_alm_history_for_penalty_update(
     entry: dict,
     updated_state,
@@ -2886,13 +2941,13 @@ def _apply_alm_penalty_increase(
     if cap_hit:
         history_entry["action"] = "penalty_cap_reached"
         history_entry["trust_radius"] = trust_radius
-    next_feasibility_tol = min(
-        update_feasibility_tol,
-        _penalty_schedule_tolerance(settings.feasibility_tol, next_penalty),
+    next_feasibility_tol = _penalty_feasibility_schedule_tolerance(
+        settings.feasibility_tol,
+        next_penalty,
     )
-    next_stationarity_tol = min(
-        update_stationarity_tol,
-        _penalty_schedule_tolerance(settings.stationarity_tol, next_penalty),
+    next_stationarity_tol = _penalty_schedule_tolerance(
+        settings.stationarity_tol,
+        next_penalty,
     )
     # The history entry records `effective_feasibility_tolerance` via
     # `_effective_feasibility_gate(...)`. Routing state and KKT diagnostics
@@ -3718,9 +3773,8 @@ def _apply_continuation_penalty_increase(
     restore_incumbent_state_fn: Callable[[object], None] | None,
     inner_result_for_cap: object | None,
 ) -> _PenaltyIncreaseOutcome:
-    """Execute the shared penalty-increase + cap-handling sequence used at
-    three sites inside `_run_alm_continuation_step` (infeasible-stall,
-    signal-mismatch, feasible-update fallback).
+    """Execute the shared penalty-increase + cap-handling sequence used by
+    continuation arms that need to raise the penalty after state/history setup.
 
     Mutates ``state`` (penalty, feasible_stall_count, tolerances, final_eval,
     final_multipliers, final_penalty) and ``run_state`` (penalty_cap_*). Does
@@ -4474,6 +4528,20 @@ def _run_alm_continuation_step(
     hard_feasible_for_update = (
         routing_state.hard_max_violation <= effective_feasibility_tol
     )
+    dual_update_max_violation = max(
+        float(max_feasibility_violation),
+        float(routing_state.hard_max_violation),
+    )
+    within_dual_update_feasibility_window = (
+        dual_update_max_violation <= state.update_feasibility_tol
+    )
+    dual_update_stationarity_norm = _dual_update_stationarity_norm(
+        stationarity_norm,
+        kkt_stationarity_norm,
+    )
+    stationary_for_dual_update = (
+        dual_update_stationarity_norm <= state.update_stationarity_tol
+    )
     constraints_inactive_candidate = (
         routing_state.signal_state.explicit_stage2_signals
         and hard_feasible_strict
@@ -4514,24 +4582,6 @@ def _run_alm_continuation_step(
             termination_reason="converged",
             message=message,
             action="converged",
-        )
-
-    if inner_attempt.forced_infeasible_penalty_cycle:
-        return _emit_alm_penalty_increase_arm(
-            state=state,
-            settings=settings,
-            run_state=run_state,
-            evaluate_problem=evaluate_problem,
-            history_entry=history_entry,
-            history_callback=history_callback,
-            constraint_names=constraint_names,
-            constraint_names_tuple=constraint_names_tuple,
-            constraint_blocks_tuple=constraint_blocks_tuple,
-            last_outer_iteration=outer_iteration,
-            restore_incumbent_state_fn=restore_incumbent_state_fn,
-            inner_result=result,
-            is_final_outer=is_final_outer,
-            action="infeasible_stall_penalty_increase",
         )
 
     if constraints_inactive_candidate:
@@ -4582,6 +4632,114 @@ def _run_alm_continuation_step(
                 max_feasibility_violation=max_feasibility_violation,
             )
 
+    if (
+        within_dual_update_feasibility_window
+        and stationary_for_dual_update
+    ):
+        state.feasible_stall_count = 0
+        dual_update = _handle_alm_dual_update_transition(
+            multipliers=state.multipliers,
+            routing_state=routing_state,
+            penalty_argument=penalty_argument,
+            settings=settings,
+            update_feasibility_tol=state.update_feasibility_tol,
+            update_stationarity_tol=state.update_stationarity_tol,
+        )
+        state.multipliers = dual_update.multipliers
+        state.update_feasibility_tol = dual_update.update_feasibility_tol
+        state.update_stationarity_tol = dual_update.update_stationarity_tol
+        state.final_multipliers = state.multipliers.copy()
+        state.final_penalty = state.penalty
+        history_entry["post_update_multipliers"] = [
+            float(value) for value in state.multipliers
+        ]
+        history_entry["multiplier_cap_binding"] = dual_update.multiplier_cap_binding
+        history_entry["multiplier_cap_binding_indices"] = list(
+            dual_update.multiplier_cap_binding_indices
+        )
+        # M4: non-sticky current predicate updates every dual_update
+        # (True or False). Sticky `cap_binding_detected` remains
+        # diagnostic-only.
+        run_state.last_cap_binding_active = bool(dual_update.multiplier_cap_binding)
+        if dual_update.multiplier_cap_binding:
+            run_state.cap_binding_detected = True
+            run_state.cap_binding_indices.update(
+                dual_update.multiplier_cap_binding_indices
+            )
+        dual_update_penalty_required = (
+            inner_attempt.forced_infeasible_penalty_cycle
+            or (
+                routing_state.hard_max_violation > effective_feasibility_tol
+                and feasibility_delta <= feasibility_delta_tol
+            )
+        )
+        if dual_update_penalty_required:
+            outcome = _apply_continuation_penalty_increase(
+                state=state,
+                settings=settings,
+                run_state=run_state,
+                evaluate_problem=evaluate_problem,
+                history_entry=history_entry,
+                history_callback=history_callback,
+                constraint_names=constraint_names,
+                constraint_names_tuple=constraint_names_tuple,
+                constraint_blocks_tuple=constraint_blocks_tuple,
+                last_outer_iteration=outer_iteration,
+                restore_incumbent_state_fn=restore_incumbent_state_fn,
+                inner_result_for_cap=result,
+            )
+            history_entry["dual_update_penalty_increase"] = True
+            history_entry["dual_update_penalty_increase_reason"] = (
+                inner_attempt.forced_infeasible_penalty_reason
+                or "hard_feasibility_not_improved_after_dual_update"
+            )
+            if outcome.cap_result is not None:
+                return _finalize_continuation_step(
+                    state, _ALMContinuationDecision.RETURN, outcome.cap_result
+                )
+        else:
+            state.final_eval = _evaluate_alm_final_state(
+                evaluate_problem=evaluate_problem,
+                x=run_state.x,
+                multipliers=state.multipliers,
+                penalty_argument=penalty_argument,
+                constraint_names_tuple=constraint_names_tuple,
+                constraint_blocks_tuple=constraint_blocks_tuple,
+            )
+            state.final_multipliers = state.multipliers.copy()
+            state.final_penalty = state.penalty
+        _annotate_break_outer_history(
+            history_entry=history_entry,
+            action="dual_update",
+            trust_radius=run_state.trust_radius,
+            is_final_outer=is_final_outer,
+            history_callback=history_callback,
+            history=run_state.history,
+            multipliers=state.multipliers,
+            penalty=state.penalty,
+        )
+        return _finalize_continuation_step(
+            state, _ALMContinuationDecision.BREAK_OUTER, None
+        )
+
+    if inner_attempt.forced_infeasible_penalty_cycle:
+        return _emit_alm_penalty_increase_arm(
+            state=state,
+            settings=settings,
+            run_state=run_state,
+            evaluate_problem=evaluate_problem,
+            history_entry=history_entry,
+            history_callback=history_callback,
+            constraint_names=constraint_names,
+            constraint_names_tuple=constraint_names_tuple,
+            constraint_blocks_tuple=constraint_blocks_tuple,
+            last_outer_iteration=outer_iteration,
+            restore_incumbent_state_fn=restore_incumbent_state_fn,
+            inner_result=result,
+            is_final_outer=is_final_outer,
+            action="infeasible_stall_penalty_increase",
+        )
+
     if signal_mismatch_active and hard_feasible_for_update:
         if not made_inner_progress or continuation_iteration > 0:
             if routing_state.surrogate_positive_shift_zero:
@@ -4627,53 +4785,6 @@ def _run_alm_continuation_step(
             history_entry=history_entry,
             history_callback=history_callback,
             is_final_outer=is_final_outer,
-        )
-
-    if (
-        hard_feasible_for_update
-        and not signal_mismatch_active
-        and stationarity_norm <= state.update_stationarity_tol
-    ):
-        state.feasible_stall_count = 0
-        dual_update = _handle_alm_dual_update_transition(
-            multipliers=state.multipliers,
-            routing_state=routing_state,
-            penalty_argument=penalty_argument,
-            settings=settings,
-            update_feasibility_tol=state.update_feasibility_tol,
-            update_stationarity_tol=state.update_stationarity_tol,
-        )
-        state.multipliers = dual_update.multipliers
-        state.update_feasibility_tol = dual_update.update_feasibility_tol
-        state.update_stationarity_tol = dual_update.update_stationarity_tol
-        history_entry["post_update_multipliers"] = [
-            float(value) for value in state.multipliers
-        ]
-        history_entry["multiplier_cap_binding"] = dual_update.multiplier_cap_binding
-        history_entry["multiplier_cap_binding_indices"] = list(
-            dual_update.multiplier_cap_binding_indices
-        )
-        # M4: non-sticky current predicate updates every dual_update
-        # (True or False). Sticky `cap_binding_detected` remains
-        # diagnostic-only.
-        run_state.last_cap_binding_active = bool(dual_update.multiplier_cap_binding)
-        if dual_update.multiplier_cap_binding:
-            run_state.cap_binding_detected = True
-            run_state.cap_binding_indices.update(
-                dual_update.multiplier_cap_binding_indices
-            )
-        _annotate_break_outer_history(
-            history_entry=history_entry,
-            action="dual_update",
-            trust_radius=run_state.trust_radius,
-            is_final_outer=is_final_outer,
-            history_callback=history_callback,
-            history=run_state.history,
-            multipliers=state.multipliers,
-            penalty=state.penalty,
-        )
-        return _finalize_continuation_step(
-            state, _ALMContinuationDecision.BREAK_OUTER, None
         )
 
     if hard_feasible_for_update:

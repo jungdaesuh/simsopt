@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,72 +18,63 @@ import numpy as np
 from geo.test_basin_hopping import EXPECTED_BASIN_TELEMETRY_FIELDS
 
 
-SINGLE_STAGE_MODULE_PATH = (
+EXAMPLES_ROOT = (
     Path(__file__).resolve().parents[2]
     / "examples"
     / "single_stage_optimization"
+)
+EXAMPLES_ROOT_STR = str(EXAMPLES_ROOT)
+if EXAMPLES_ROOT_STR not in sys.path:
+    sys.path.insert(0, EXAMPLES_ROOT_STR)
+from banana_opt import alm_adaptive_smoothing as _alm_adaptive_smoothing  # noqa: E402
+
+
+SINGLE_STAGE_MODULE_PATH = (
+    EXAMPLES_ROOT
     / "SINGLE_STAGE"
     / "single_stage_banana_example.py"
 )
 SINGLE_STAGE_CONSTRAINTS_MODULE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+    EXAMPLES_ROOT
     / "banana_opt"
     / "single_stage_constraints.py"
 )
 SINGLE_STAGE_OBJECTIVES_MODULE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+    EXAMPLES_ROOT
     / "banana_opt"
     / "single_stage_objectives.py"
 )
 SINGLE_STAGE_BANANA_CURRENT_MODE_MODULE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+    EXAMPLES_ROOT
     / "banana_opt"
     / "single_stage_banana_current_mode.py"
 )
 STAGE2_MODULE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+    EXAMPLES_ROOT
     / "STAGE_2"
     / "banana_coil_solver.py"
 )
 STAGE2_OBJECTIVES_MODULE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+    EXAMPLES_ROOT
     / "banana_opt"
     / "stage2_objectives.py"
 )
 SMOOTH_DISTANCE_SELECTION_MODULE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+    EXAMPLES_ROOT
     / "banana_opt"
     / "smooth_distance_selection.py"
 )
 HARDWARE_CONSTRAINT_SCHEMA_MODULE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+    EXAMPLES_ROOT
     / "banana_opt"
     / "hardware_constraint_schema.py"
 )
 STAGE2_ALM_WRAPPER_MODULE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+    EXAMPLES_ROOT
     / "run_stage2_alm.py"
 )
 SINGLE_STAGE_THRESHOLDED_PHYSICS_RERUN_MODULE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "examples"
-    / "single_stage_optimization"
+    EXAMPLES_ROOT
     / "run_single_stage_thresholded_physics_alm.py"
 )
 DEFAULT_ALM_WRAPPER_SURFACE = "wout_nfp10ginsburg_desc_s024match_iota20.nc"
@@ -158,10 +150,12 @@ def load_hardware_constraint_schema_module():
 
 def extract_functions(module_path: Path, function_names: list[str], global_bindings: dict):
     tree = ast.parse(module_path.read_text(), filename=str(module_path))
+    function_name_set = set(function_names)
     selected_nodes = [
         node
         for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name in set(function_names)
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef))
+        and node.name in function_name_set
     ]
     module = ast.Module(body=selected_nodes, type_ignores=[])
     namespace = dict(global_bindings)
@@ -609,28 +603,6 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertIsNone(settings.trust_radius_init)
 
     def test_single_stage_adaptive_smoothing_counts_normalized_hard_surrogate_gaps(self):
-        functions = extract_functions(
-            SINGLE_STAGE_MODULE_PATH,
-            [
-                "adapt_alm_smoothing_from_history",
-                "normalized_hard_surrogate_gap_counts",
-                "shrink_alm_smoothing_for_gap_count",
-            ],
-            {
-                "np": np,
-                "_ALM_DISTANCE_GAP_CONSTRAINT_NAMES": frozenset(
-                    (
-                        "coil_coil_spacing",
-                        "coil_surface_spacing",
-                        "surface_surface_spacing",
-                    )
-                ),
-                "_ALM_CURVATURE_GAP_CONSTRAINT_NAMES": frozenset(
-                    ("max_curvature", "poloidal_extent")
-                ),
-                "_ALM_GAP_SHRINK_RATE": 0.25,
-            },
-        )
         history_entry = {
             "constraint_names": [
                 "surface_surface_spacing",
@@ -642,9 +614,11 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "effective_feasibility_tolerance": 1.0e-3,
         }
 
-        counts = functions["normalized_hard_surrogate_gap_counts"](history_entry)
+        counts = _alm_adaptive_smoothing.normalized_hard_surrogate_gap_counts(
+            history_entry
+        )
         self.assertEqual(counts, {"distance": 1, "curvature": 1})
-        adapted = functions["adapt_alm_smoothing_from_history"](
+        adapted = _alm_adaptive_smoothing.adapt_alm_smoothing_from_history(
             0.004,
             0.04,
             history_entry,
@@ -654,6 +628,103 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(adapted["gap_counts"], counts)
         self.assertAlmostEqual(adapted["distance_smoothing"], 0.0032)
         self.assertAlmostEqual(adapted["curvature_smoothing"], 0.032)
+
+    def test_stage2_adaptive_smoothing_update_records_runtime_event(self):
+        functions = extract_functions(
+            STAGE2_MODULE_PATH,
+            ["_stage2_alm_adaptive_smoothing_update"],
+            {
+                "adapt_alm_smoothing_from_history": (
+                    _alm_adaptive_smoothing.adapt_alm_smoothing_from_history
+                ),
+            },
+        )
+        history_entry = {
+            "outer_iteration": 3,
+            "constraint_names": [
+                "coil_surface_spacing",
+                "max_curvature",
+            ],
+            "surrogate_minus_hard_normalized_gap": [2.0e-3, 0.0],
+            "surrogate_hard_sign_mismatch_by_constraint": [False, True],
+            "effective_feasibility_tolerance": 1.0e-3,
+        }
+
+        update = functions["_stage2_alm_adaptive_smoothing_update"](
+            0.004,
+            0.04,
+            history_entry,
+            distance_smoothing_min=0.0005,
+            curvature_smoothing_min=0.005,
+        )
+
+        self.assertTrue(update["smoothing_changed"])
+        self.assertEqual(update["distance_gap_count"], 1)
+        self.assertEqual(update["curvature_gap_count"], 1)
+        self.assertAlmostEqual(update["distance_smoothing"], 0.0032)
+        self.assertAlmostEqual(update["curvature_smoothing"], 0.032)
+        self.assertEqual(update["event"]["outer_iteration"], 3)
+        self.assertEqual(update["event"]["distance_gap_count"], 1)
+        self.assertEqual(update["event"]["curvature_gap_count"], 1)
+        self.assertAlmostEqual(update["event"]["previous_distance_smoothing"], 0.004)
+        self.assertAlmostEqual(update["event"]["distance_smoothing"], 0.0032)
+        self.assertAlmostEqual(update["event"]["previous_curvature_smoothing"], 0.04)
+        self.assertAlmostEqual(update["event"]["curvature_smoothing"], 0.032)
+
+    def test_stage2_adaptive_smoothing_callback_updates_runtime_state_and_results(self):
+        functions = extract_functions(
+            STAGE2_MODULE_PATH,
+            [
+                "Stage2AlmAdaptiveSmoothingState",
+                "_stage2_alm_adaptive_smoothing_update",
+                "_make_stage2_alm_adaptive_smoothing_callback",
+                "_stage2_alm_adaptive_smoothing_results",
+            ],
+            {
+                "dataclass": dataclass,
+                "field": field,
+                "adapt_alm_smoothing_from_history": (
+                    _alm_adaptive_smoothing.adapt_alm_smoothing_from_history
+                ),
+            },
+        )
+        state, history_callback = functions[
+            "_make_stage2_alm_adaptive_smoothing_callback"
+        ](
+            0.004,
+            0.04,
+            distance_smoothing_min=0.0005,
+            curvature_smoothing_min=0.005,
+        )
+        history_entry = {
+            "outer_iteration": 4,
+            "constraint_names": [
+                "coil_surface_spacing",
+                "poloidal_extent",
+            ],
+            "surrogate_minus_hard_normalized_gap": [2.0e-3, 0.0],
+            "surrogate_hard_sign_mismatch_by_constraint": [False, True],
+            "effective_feasibility_tolerance": 1.0e-3,
+        }
+
+        history_callback([], history_entry, np.zeros(2), 1.0)
+
+        self.assertAlmostEqual(state.distance_smoothing, 0.0032)
+        self.assertAlmostEqual(state.curvature_smoothing, 0.032)
+        self.assertEqual(len(state.events), 1)
+        self.assertEqual(state.events[0]["outer_iteration"], 4)
+        metadata = functions["_stage2_alm_adaptive_smoothing_results"](state)
+        self.assertEqual(
+            set(metadata),
+            {
+                "ALM_EFFECTIVE_DISTANCE_SMOOTHING",
+                "ALM_EFFECTIVE_CURVATURE_SMOOTHING",
+                "ALM_ADAPTIVE_SMOOTHING_EVENTS",
+            },
+        )
+        self.assertAlmostEqual(metadata["ALM_EFFECTIVE_DISTANCE_SMOOTHING"], 0.0032)
+        self.assertAlmostEqual(metadata["ALM_EFFECTIVE_CURVATURE_SMOOTHING"], 0.032)
+        self.assertEqual(metadata["ALM_ADAPTIVE_SMOOTHING_EVENTS"], state.events)
 
     def test_single_stage_alm_surface_stack_gate_relaxes_spacing_only_for_solver(self):
         functions = extract_functions(
@@ -1273,13 +1344,25 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             str(Path("eqdir").resolve()),
         )
         self.assertIn("--alm-max-outer-iters", command)
-        self.assertEqual(command[command.index("--alm-max-outer-iters") + 1], "10")
+        self.assertEqual(
+            command[command.index("--alm-max-outer-iters") + 1],
+            str(module.stage2_alm_default("max_outer_iters")),
+        )
         self.assertIn("--alm-penalty-init", command)
-        self.assertEqual(command[command.index("--alm-penalty-init") + 1], "1.0")
+        self.assertEqual(
+            command[command.index("--alm-penalty-init") + 1],
+            str(module.stage2_alm_default("penalty_init")),
+        )
         self.assertIn("--alm-penalty-scale", command)
-        self.assertEqual(command[command.index("--alm-penalty-scale") + 1], "10.0")
+        self.assertEqual(
+            command[command.index("--alm-penalty-scale") + 1],
+            str(module.stage2_alm_default("penalty_scale")),
+        )
         self.assertIn("--alm-penalty-max", command)
-        self.assertEqual(command[command.index("--alm-penalty-max") + 1], "100000000.0")
+        self.assertEqual(
+            command[command.index("--alm-penalty-max") + 1],
+            str(float(module.stage2_alm_default("penalty_max"))),
+        )
         self.assertIn("--banana-current-max-A", command)
         self.assertEqual(command[command.index("--banana-current-max-A") + 1], "16000.0")
         self.assertEqual(command[command.index("--toroidal-flux") + 1], "0.37")
@@ -2532,6 +2615,22 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertIn('"--stage2-bs-path"', source)
         self.assertIn('"STAGE2_BS_PATH"', source)
+
+    def test_stage2_parse_args_alm_defaults_use_shared_metadata(self):
+        source = STAGE2_MODULE_PATH.read_text()
+
+        self.assertIn(
+            '_stage2_alm_env_float("ALM_PENALTY_INIT", "penalty_init")',
+            source,
+        )
+        self.assertIn(
+            '_stage2_alm_env_float("ALM_PENALTY_SCALE", "penalty_scale")',
+            source,
+        )
+        self.assertIn("stage2_alm_default('penalty_init')", source)
+        self.assertIn("stage2_alm_default('penalty_scale')", source)
+        self.assertNotIn('os.environ.get("ALM_PENALTY_INIT", "0.1")', source)
+        self.assertNotIn('os.environ.get("ALM_PENALTY_SCALE", "2.0")', source)
 
     def test_stage2_writes_loadable_surface_seed_artifact(self):
         source = STAGE2_MODULE_PATH.read_text()
