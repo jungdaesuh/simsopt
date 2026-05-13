@@ -296,13 +296,101 @@
       "id": "11",
       "tier": "P1",
       "title": "Dommaschk and Reiman kernels",
-      "status": "pending"
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "source_audit": "src/simsoptpp/dommaschk.cpp:1-533; src/simsoptpp/reiman.cpp:1-106; src/simsopt/field/magneticfieldclasses.py:752-841 (CPU wrappers)",
+        "upstream_oracle": "upstream_hss/master:src/simsoptpp/dommaschk.cpp; upstream_hss/master:src/simsoptpp/reiman.cpp; tests/field/test_magneticfields.py:642-1031 (test_Dommaschk paper fixtures, test_Reiman closed-form, subtest_reiman_dBdX_taylortest)",
+        "upstream_audit_sha": "1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
+        "kernel_module": "src/simsopt/jax_core/analytic_fields.py",
+        "adapter_module": "N/A: Python wrappers (Dommaschk, Reiman) in field/magneticfieldclasses.py are item 15 scope",
+        "plan": ".artifacts/jax_port_goal/plans/11.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/11-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/11-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/11-invariants.md",
+        "oracle_contract": "fixed_scalar_and_fixed_gradient_vjp",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/11.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/11.txt",
+        "parity_test": "tests/jax_core/test_analytic_fields_item11.py",
+        "transfer_guard_test": "N/A: kernel is pure compute; no Optimizable wrapper boundary in item 11 scope",
+        "multi_device_test": "N/A: per-point kernel; no shard_map / collective introduced",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/11.json",
+        "parity_lane": "direct-kernel",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "4dfb6c0ca",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      }
     },
     {
       "id": "12",
       "tier": "P1",
       "title": "pure analytic magnetic fields",
-      "status": "pending"
+      "status": "complete",
+      "closure_level": "cpu_oracle_complete",
+      "evidence": {
+        "source_audit": "src/simsopt/field/magneticfieldclasses.py:24-128 (ToroidalField); :128-235 (PoloidalField); :919-1027 (MirrorModel); :335-570 (CircularCoil — deferred)",
+        "upstream_oracle": "upstream_hss/master:src/simsopt/field/magneticfieldclasses.py (byte-identical CPU classes); tests/field/test_magneticfields.py:37,1261,708 (test_toroidal_field, test_poloidal_field, test_MirrorModel)",
+        "upstream_audit_sha": "1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
+        "kernel_module": "src/simsopt/jax_core/analytic_pure_fields.py",
+        "adapter_module": "N/A: Python wrappers (ToroidalField, PoloidalField, MirrorModel) in field/magneticfieldclasses.py remain CPU oracle",
+        "plan": ".artifacts/jax_port_goal/plans/12.md",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/12-coverage.md",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/12-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/12-invariants.md",
+        "oracle_contract": "fixed_scalar_and_fixed_gradient_vjp",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/12.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/12.txt",
+        "parity_test": "tests/jax_core/test_analytic_pure_fields_item12.py",
+        "transfer_guard_test": "tests/jax_core/test_analytic_pure_fields_item12.py (validated under jax.transfer_guard(disallow))",
+        "multi_device_test": "N/A: per-point kernels; no shard_map / collective",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/12.json",
+        "parity_lane": "direct-kernel",
+        "cuda_smoke": "not_claimed",
+        "cuda_proof": {
+          "status": "not_claimed",
+          "artifact": "N/A",
+          "current_sha": "4dfb6c0ca",
+          "worktree_dirty": true,
+          "gpu_device": "N/A",
+          "driver_version": "N/A",
+          "cuda_runtime": "N/A",
+          "jax_version": "0.10.0",
+          "jaxlib_version": "0.10.0",
+          "backend": "cpu",
+          "xla_flags": "N/A",
+          "cuda_visible_devices": "N/A",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": false,
+          "compiled_executable_backend": "cpu"
+        }
+      },
+      "partial_completion": {
+        "deferred_subitems": [
+          {
+            "id": "12-circularcoil",
+            "title": "CircularCoil JAX port (uses complete elliptic integrals)",
+            "status": "blocked",
+            "category": "missing_dependency",
+            "detail": "jax.scipy.special.ellipk and ellipe are not available in jaxlib 0.10.0. CircularCoil JAX port requires either a custom JAX-native Carlson R_F / R_D or Bulirsch cel implementation in simsopt/jax_core/ first. Recorded as a follow-up sub-item.",
+            "debug_artifact": ".artifacts/jax_port_goal/blockers/12-circularcoil-debug.md"
+          }
+        ]
+      }
     },
     {
       "id": "13",

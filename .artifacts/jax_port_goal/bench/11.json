@@ -1,0 +1,116 @@
+{
+  "item": "11",
+  "status": "complete_cpu_oracle",
+  "cuda_status": "not_claimed",
+  "kernels": {
+    "jax_module": "src/simsopt/jax_core/analytic_fields.py",
+    "cpp_reference": [
+      "src/simsoptpp/dommaschk.cpp",
+      "src/simsoptpp/reiman.cpp"
+    ]
+  },
+  "fixture": {
+    "K_modes": 4,
+    "N_points": 200,
+    "m_pairs_dommaschk": [
+      [
+        5,
+        3
+      ],
+      [
+        4,
+        2
+      ],
+      [
+        3,
+        1
+      ],
+      [
+        2,
+        4
+      ]
+    ],
+    "k_theta_reiman": [
+      6
+    ],
+    "timed_calls": 100,
+    "warmup_calls": 5,
+    "rng_seed": 1729
+  },
+  "python": "/Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python",
+  "jax_version": "0.10.0",
+  "jax_platform": "cpu",
+  "measurements": {
+    "dommaschk_B_jax": {
+      "sample_count": 100,
+      "median_s": 0.00013118749484419823,
+      "p95_s": 0.00024039586423896242,
+      "std_s": 5.1922468790854174e-05,
+      "min_s": 9.012501686811447e-05,
+      "max_s": 0.0003446670016273856
+    },
+    "dommaschk_B_cpp": {
+      "sample_count": 100,
+      "median_s": 0.0013936665491200984,
+      "p95_s": 0.001455594040453434,
+      "std_s": 3.6853595325988025e-05,
+      "min_s": 0.0013602080289274454,
+      "max_s": 0.0016233749920502305
+    },
+    "dommaschk_dB_jax": {
+      "sample_count": 100,
+      "median_s": 0.000254457991104573,
+      "p95_s": 0.0004698208242189139,
+      "std_s": 9.61835299532997e-05,
+      "min_s": 0.000161041971296072,
+      "max_s": 0.0007256250828504562
+    },
+    "dommaschk_dB_cpp": {
+      "sample_count": 100,
+      "median_s": 0.0026393335429020226,
+      "p95_s": 0.0027502811804879456,
+      "std_s": 7.095662376761338e-05,
+      "min_s": 0.002562958048656583,
+      "max_s": 0.002983334008604288
+    },
+    "reiman_B_jax": {
+      "sample_count": 100,
+      "median_s": 0.00020191649673506618,
+      "p95_s": 0.00045147573109716177,
+      "std_s": 0.00010310173976234359,
+      "min_s": 0.0001659160479903221,
+      "max_s": 0.0008634170517325401
+    },
+    "reiman_B_cpp": {
+      "sample_count": 100,
+      "median_s": 8.750008419156075e-06,
+      "p95_s": 1.0430678958073257e-05,
+      "std_s": 5.521235694073398e-07,
+      "min_s": 8.541974239051342e-06,
+      "max_s": 1.116609200835228e-05
+    },
+    "reiman_dB_jax": {
+      "sample_count": 100,
+      "median_s": 0.0002590414369478822,
+      "p95_s": 0.0012037788052111863,
+      "std_s": 0.0016443034198034222,
+      "min_s": 0.00016029109247028828,
+      "max_s": 0.015508832992054522
+    },
+    "reiman_dB_cpp": {
+      "sample_count": 100,
+      "median_s": 3.062502946704626e-05,
+      "p95_s": 3.45940701663494e-05,
+      "std_s": 5.23635850999067e-06,
+      "min_s": 3.0082999728620052e-05,
+      "max_s": 7.904099766165018e-05
+    }
+  },
+  "notes": [
+    "Times include JAX block_until_ready synchronization after a >=5-call warmup so they reflect steady-state compiled execution.",
+    "C++ baseline ran in the same Python process for fair comparison.",
+    "After the multimode refactor, the Dommaschk K-mode loop is unrolled inside a single JIT trace per (m_tuple, n_tuple) so the public entrypoint makes one compiled call.",
+    "No new dense materialization is introduced; largest output array is float64[K, N, 3, 3] = 8 * 4 * 200 * 9 = 57.6 kB.",
+    "CPU-only; no CUDA proof claimed under the active port_closure scope profile."
+  ]
+}

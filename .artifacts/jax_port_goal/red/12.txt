@@ -1,0 +1,35 @@
+Item 12 red-step evidence — N/A (Tier P1 new-kernel port, no pre-impl tree).
+
+Justification per section 4c / section 4a of the goal prompt:
+
+- This is a Tier P1 port. `src/simsopt/jax_core/analytic_pure_fields.py`
+  did not exist at the parent commit a9da18facfda9a51f14534ea9d06e76803213db0
+  (verified by `git show a9da18fac:src/simsopt/jax_core/analytic_pure_fields.py`
+  returning "fatal: path 'src/simsopt/jax_core/analytic_pure_fields.py'
+  does not exist in 'a9da18fac'").
+- The new parity tests in
+  `tests/jax_core/test_analytic_pure_fields_item12.py` import that
+  module's public symbols (`toroidal_B`, `poloidal_B`, `mirror_B`, …);
+  on the parent commit they would fail at import time with
+  `ModuleNotFoundError: No module named
+  'simsopt.jax_core.analytic_pure_fields'`. There is no pre-impl tree at
+  which the new tests could run "almost green" — the kernels do not
+  exist, so the import line itself is the red gate.
+- Empty-oracle reference: existing CPU / NumPy classes in
+  `src/simsopt/field/magneticfieldclasses.py` (`ToroidalField` lines
+  24-125, `PoloidalField` lines 128-234, `MirrorModel` lines 919-1027)
+  serve as the same-state parity oracles. The closed-form analytic
+  field formulas are from the standard `simsopt` documentation and from
+  the published WHAM mirror reference (arxiv:2305.06372).
+
+Recorded in state.json item 12 evidence as:
+  red_evidence: ".artifacts/jax_port_goal/red/12.txt"
+  red_evidence_kind: "tier_p1_new_kernel_n_a"
+
+The parent commit verification command:
+
+  git show a9da18fac:src/simsopt/jax_core/analytic_pure_fields.py
+
+returns nonzero with "path does not exist". The new tests reference this
+module by absolute import, so by definition they cannot run on the parent
+tree.
