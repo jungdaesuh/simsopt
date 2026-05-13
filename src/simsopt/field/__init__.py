@@ -32,7 +32,7 @@ _CPU_FIELD_MODULES = (
     "magnetic_axis_helpers",
     "force",
 )
-_JAX_FIELD_MODULES = ("biotsavart_jax_backend",)
+_JAX_FIELD_MODULES = ("biotsavart_jax_backend", "magneticfieldclasses_jax")
 
 _cpu_field_modules = _CPU_FIELD_MODULES if _has_simsoptpp else ()
 _jax_field_modules = _JAX_FIELD_MODULES if _has_jax else ()

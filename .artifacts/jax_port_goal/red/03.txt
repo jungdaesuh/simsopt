@@ -35,22 +35,22 @@ that no single existing fixture co-locates:
      `coils_via_symmetries` expansion).
   3. All three SquaredFlux `definition` variants in one parametrized
      test function.
-  4. Strict-transfer-guard discipline: the test does not rely on
-     implicit host-to-device transfers and is validated under
-     `SIMSOPT_JAX_TRANSFER_GUARD=disallow`.
+  4. Strict-transfer-guard discipline: the JAX construction and value path
+     run inside `jax.transfer_guard("disallow")`, so the strict boundary is
+     enforced directly by the test.
 
-Since the parent commit (`a9da18fac`) is also the current HEAD of
-`gpu-purity-stage2-20260405`, the new test passes on parent. This is
-the "no-op pre-existing-coverage proof" / "coverage-completeness
-witness" case explicitly allowed in the closeout prompt for items that
-add no code change.
+Since the item 03 parent commit (`a0b647f4d`) already has the same
+production SquaredFlux/SquaredFluxJAX implementation, the new test passes
+on parent. This is the "no-op pre-existing-coverage proof" /
+"coverage-completeness witness" case explicitly allowed in the closeout
+prompt for items that add no code change.
 
 Procedure
 ---------
 
   mkdir -p /tmp/simsopt-jax-item03-red
   git -C /Users/suhjungdae/code/columbia/simsopt-jax worktree add \
-      --detach /tmp/simsopt-jax-item03-red/wt a9da18fac
+      --detach /tmp/simsopt-jax-item03-red/wt a0b647f4d
   cp tests/objectives/test_fluxobjective_jax_item03_closeout.py \
      /tmp/simsopt-jax-item03-red/wt/tests/objectives/
   cd /tmp/simsopt-jax-item03-red/wt
@@ -61,9 +61,8 @@ Procedure
 Parent commit
 -------------
 
-`a9da18facfda9a51f14534ea9d06e76803213db0` ("jax-port: close
-CurrentPenalty + distance wrappers [item 01]"). This is the current
-HEAD of branch `gpu-purity-stage2-20260405`.
+`a0b647f4def4e2346c8a7b1a754dc4b451254957` ("jax-port: close
+regularized self-field [item 02]"). This is the item 03 parent commit.
 
 Result on parent (relaxed transfer guard)
 -----------------------------------------
@@ -83,27 +82,11 @@ Result on parent (relaxed transfer guard)
   tests/objectives/test_fluxobjective_jax_item03_closeout.py::
     test_squared_flux_jax_matches_cpp_oracle_under_strict_transfer_at_production_scale[local] PASSED [100%]
 
-  ============================== 3 passed in 2.55s ===============================
+  ============================== 3 passed in 2.38s ===============================
 
-Result on parent (`SIMSOPT_JAX_TRANSFER_GUARD=disallow`)
---------------------------------------------------------
-
-  ============================= test session starts ==============================
-  platform darwin -- Python 3.11.15, pytest-9.0.3, pluggy-1.6.0 --
-  /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python
-  cachedir: .pytest_cache
-  rootdir: /private/tmp/simsopt-jax-item03-red/wt
-  configfile: pyproject.toml
-  collecting ... collected 3 items
-
-  tests/objectives/test_fluxobjective_jax_item03_closeout.py::
-    test_squared_flux_jax_matches_cpp_oracle_under_strict_transfer_at_production_scale[quadratic flux] PASSED [ 33%]
-  tests/objectives/test_fluxobjective_jax_item03_closeout.py::
-    test_squared_flux_jax_matches_cpp_oracle_under_strict_transfer_at_production_scale[normalized] PASSED [ 66%]
-  tests/objectives/test_fluxobjective_jax_item03_closeout.py::
-    test_squared_flux_jax_matches_cpp_oracle_under_strict_transfer_at_production_scale[local] PASSED [100%]
-
-  ============================== 3 passed in 3.31s ===============================
+Note: the test itself wraps the JAX construction/value path in
+`jax.transfer_guard("disallow")`; this is stronger than relying on the
+`SIMSOPT_JAX_TRANSFER_GUARD` environment variable alone.
 
 Result on current tree (sanity check)
 -------------------------------------
@@ -112,13 +95,13 @@ Result on current tree (sanity check)
       .conda/jax-0.9.2/bin/python -m pytest \
       tests/objectives/test_fluxobjective_jax_item03_closeout.py -q
 
-  3 passed in 2.70s
+  3 passed in 2.40s
 
   SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu \
       .conda/jax-0.9.2/bin/python -m pytest \
       tests/objectives/test_fluxobjective_jax_item03_closeout.py -q
 
-  3 passed in 2.34s
+  3 passed in 2.45s
 
 Tolerance source
 ----------------
@@ -129,7 +112,7 @@ The test imports its tolerances from
 `_VALUE_RTOL` and `_VALUE_ATOL`. No `atol=`/`rtol=` numeric literals
 appear in the test body. Confirm with:
 
-  git diff a9da18fac..HEAD -- \
+  git diff a0b647f4d..HEAD -- \
       tests/objectives/test_fluxobjective_jax_item03_closeout.py \
       | grep -E '(atol|rtol)\s*=\s*[0-9eE.+-]+'
 
