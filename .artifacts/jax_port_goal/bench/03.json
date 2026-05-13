@@ -1,0 +1,51 @@
+{
+  "item": "03",
+  "status": "complete_cpu_oracle",
+  "hot_path_change": false,
+  "cuda_status": "not_claimed",
+  "reason": "N/A: no hot-path change because item 03 closes coverage gaps using existing kernels (SquaredFlux CPU C++ oracle, SquaredFluxJAX uniform-CurveXYZFourier fast path, SquaredFluxJAX spec-native path, integral_BdotN JAX kernel). All three were already implemented and benchmarked indirectly via Stage 2 short-run timings; no new production hot path is introduced.",
+  "production_scale_floor": {
+    "nphi_used_in_new_tests": 16,
+    "ntheta_used_in_new_tests": 8,
+    "ncoils_base_in_new_tests": 4,
+    "ncoils_total_after_symmetries_in_new_tests": 16,
+    "ncoils_floor": 4,
+    "nphi_floor": 16,
+    "ntheta_floor": 8,
+    "fixture": "tests/objectives/test_fluxobjective_jax_item03_closeout.py::test_squared_flux_jax_matches_cpp_oracle_under_strict_transfer_at_production_scale",
+    "cited_existing_production_tests": [
+      "tests/integration/test_stage2_jax.py::TestProductionScaleTarget* (nphi=31, ntheta=16, ncoils=20 TF + banana, nfp=5, stellsym=True)",
+      "tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py::* (real Stage 2 SquaredFlux/SquaredFluxJAX subproblem)",
+      "tests/integration/test_stage2_jax.py::TestMixedQuadrature* (TF + banana mixed quadrature parity)"
+    ]
+  },
+  "dense_materialization_budget": {
+    "surface_gamma": "float64[nphi, ntheta, 3] = float64[16, 8, 3] = 3 KiB",
+    "surface_normal": "float64[nphi, ntheta, 3] = float64[16, 8, 3] = 3 KiB",
+    "target_array": "float64[nphi, ntheta] = float64[16, 8] = 1 KiB",
+    "B_output": "float64[nphi*ntheta, 3] after grouped sum-across-coils = 384 float64 = 3 KiB",
+    "flat_coil_dofs": "approx. 2*ncoils_base*order = O(40) float64"
+  },
+  "validation": [
+    {
+      "command": "JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_fluxobjective_jax_item03_closeout.py -q",
+      "result": "3 passed in 2.70s"
+    },
+    {
+      "command": "SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu .conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_fluxobjective_jax_item03_closeout.py -q",
+      "result": "3 passed in 2.34s"
+    },
+    {
+      "command": ".conda/jax-0.9.2/bin/python -m ruff check tests/objectives/test_fluxobjective_jax_item03_closeout.py",
+      "result": "All checks passed!"
+    },
+    {
+      "command": ".conda/jax-0.9.2/bin/python -m ruff format tests/objectives/test_fluxobjective_jax_item03_closeout.py",
+      "result": "1 file left unchanged"
+    },
+    {
+      "command": "(parent commit a9da18fac, in worktree) JAX_ENABLE_X64=True JAX_PLATFORMS=cpu PYTHONPATH=src .conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_fluxobjective_jax_item03_closeout.py -q",
+      "result": "3 passed (no-op pre-existing-coverage proof; HEAD == parent)"
+    }
+  ]
+}

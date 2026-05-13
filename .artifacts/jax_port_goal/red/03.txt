@@ -1,0 +1,137 @@
+Item 03 red-step evidence: NO-OP PRE-EXISTING-COVERAGE PROOF.
+
+Interpretation note
+-------------------
+
+Item 03 (`SquaredFlux`/`SquaredFluxJAX` fixed-surface objective coverage)
+adds NO code change to `src/simsopt/objectives/fluxobjective.py` or
+`src/simsopt/objectives/fluxobjective_jax.py`. The CPU C++ oracle path
+(`SquaredFlux` → `sopp.integral_BdotN`), the JAX-native value path, and
+the JAX-native gradient path were all already implemented, covered by
+existing tests, and validated under the strict parity contract before
+this closeout.
+
+The audit summary in the goal prompt confirms this:
+
+  "All 3 `definition` variants (quadratic flux / normalized / local) are
+   covered for CPU and JAX in tests/objectives/test_fluxobjective.py,
+   tests/objectives/test_fluxobjective_jax_parity.py (~470 lines),
+   tests/objectives/test_integral_bdotn_jax.py, and
+   tests/integration/test_stage2_jax.py.
+   ...
+   stellsym=False covered by test_fluxobjective_jax_parity.py:303-340
+   (ncoils=2, all 3 definitions)."
+
+The new test file
+`tests/objectives/test_fluxobjective_jax_item03_closeout.py` does NOT
+target a wrong-sign / wrong-scale / missing-host-transfer regression
+that the parent commit was masking. Instead it bundles four attributes
+that no single existing fixture co-locates:
+
+  1. Production-scale grid (`nphi=16, ntheta=8`) with `ncoils=4` base
+     curves (LandremanPaul-style toroidal arrangement; expands to
+     `2 * nfp * ncoils = 16` total coils after symmetries).
+  2. Stellsym=True, nfp=2 (so the JAX path exercises
+     `coils_via_symmetries` expansion).
+  3. All three SquaredFlux `definition` variants in one parametrized
+     test function.
+  4. Strict-transfer-guard discipline: the test does not rely on
+     implicit host-to-device transfers and is validated under
+     `SIMSOPT_JAX_TRANSFER_GUARD=disallow`.
+
+Since the parent commit (`a9da18fac`) is also the current HEAD of
+`gpu-purity-stage2-20260405`, the new test passes on parent. This is
+the "no-op pre-existing-coverage proof" / "coverage-completeness
+witness" case explicitly allowed in the closeout prompt for items that
+add no code change.
+
+Procedure
+---------
+
+  mkdir -p /tmp/simsopt-jax-item03-red
+  git -C /Users/suhjungdae/code/columbia/simsopt-jax worktree add \
+      --detach /tmp/simsopt-jax-item03-red/wt a9da18fac
+  cp tests/objectives/test_fluxobjective_jax_item03_closeout.py \
+     /tmp/simsopt-jax-item03-red/wt/tests/objectives/
+  cd /tmp/simsopt-jax-item03-red/wt
+  JAX_ENABLE_X64=True JAX_PLATFORMS=cpu PYTHONPATH=src \
+      /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python \
+      -m pytest tests/objectives/test_fluxobjective_jax_item03_closeout.py -v
+
+Parent commit
+-------------
+
+`a9da18facfda9a51f14534ea9d06e76803213db0` ("jax-port: close
+CurrentPenalty + distance wrappers [item 01]"). This is the current
+HEAD of branch `gpu-purity-stage2-20260405`.
+
+Result on parent (relaxed transfer guard)
+-----------------------------------------
+
+  ============================= test session starts ==============================
+  platform darwin -- Python 3.11.15, pytest-9.0.3, pluggy-1.6.0 --
+  /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python
+  cachedir: .pytest_cache
+  rootdir: /private/tmp/simsopt-jax-item03-red/wt
+  configfile: pyproject.toml
+  collecting ... collected 3 items
+
+  tests/objectives/test_fluxobjective_jax_item03_closeout.py::
+    test_squared_flux_jax_matches_cpp_oracle_under_strict_transfer_at_production_scale[quadratic flux] PASSED [ 33%]
+  tests/objectives/test_fluxobjective_jax_item03_closeout.py::
+    test_squared_flux_jax_matches_cpp_oracle_under_strict_transfer_at_production_scale[normalized] PASSED [ 66%]
+  tests/objectives/test_fluxobjective_jax_item03_closeout.py::
+    test_squared_flux_jax_matches_cpp_oracle_under_strict_transfer_at_production_scale[local] PASSED [100%]
+
+  ============================== 3 passed in 2.55s ===============================
+
+Result on parent (`SIMSOPT_JAX_TRANSFER_GUARD=disallow`)
+--------------------------------------------------------
+
+  ============================= test session starts ==============================
+  platform darwin -- Python 3.11.15, pytest-9.0.3, pluggy-1.6.0 --
+  /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python
+  cachedir: .pytest_cache
+  rootdir: /private/tmp/simsopt-jax-item03-red/wt
+  configfile: pyproject.toml
+  collecting ... collected 3 items
+
+  tests/objectives/test_fluxobjective_jax_item03_closeout.py::
+    test_squared_flux_jax_matches_cpp_oracle_under_strict_transfer_at_production_scale[quadratic flux] PASSED [ 33%]
+  tests/objectives/test_fluxobjective_jax_item03_closeout.py::
+    test_squared_flux_jax_matches_cpp_oracle_under_strict_transfer_at_production_scale[normalized] PASSED [ 66%]
+  tests/objectives/test_fluxobjective_jax_item03_closeout.py::
+    test_squared_flux_jax_matches_cpp_oracle_under_strict_transfer_at_production_scale[local] PASSED [100%]
+
+  ============================== 3 passed in 3.31s ===============================
+
+Result on current tree (sanity check)
+-------------------------------------
+
+  JAX_ENABLE_X64=True JAX_PLATFORMS=cpu \
+      .conda/jax-0.9.2/bin/python -m pytest \
+      tests/objectives/test_fluxobjective_jax_item03_closeout.py -q
+
+  3 passed in 2.70s
+
+  SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu \
+      .conda/jax-0.9.2/bin/python -m pytest \
+      tests/objectives/test_fluxobjective_jax_item03_closeout.py -q
+
+  3 passed in 2.34s
+
+Tolerance source
+----------------
+
+The test imports its tolerances from
+`benchmarks.validation_ladder_contract.parity_ladder_tolerances("direct_kernel")`
+(see test file lines 49-51) and binds them to module-level constants
+`_VALUE_RTOL` and `_VALUE_ATOL`. No `atol=`/`rtol=` numeric literals
+appear in the test body. Confirm with:
+
+  git diff a9da18fac..HEAD -- \
+      tests/objectives/test_fluxobjective_jax_item03_closeout.py \
+      | grep -E '(atol|rtol)\s*=\s*[0-9eE.+-]+'
+
+Returns zero hits when run after the test is staged into the working
+tree.
