@@ -48,10 +48,12 @@ Design rationale
   ``simsoptpp`` upstream kernel signatures.
 * The four ``BoozerSurface`` numerical methods that *consume* ``alpha`` are
   overridden in :class:`BoozerSurfaceFiniteI` rather than monkey-patching: the
-  upstream methods are transcribed verbatim, with the substitution
+  upstream methods are transcribed closely, with the substitution
   ``G -> G + iota * self.I`` at the residual call site and the ``T^T g`` /
   ``T^T H T`` transform applied to gradients/Hessians where the upstream
-  kernel returns derivatives in the alpha-fixed basis.
+  kernel returns derivatives in the alpha-fixed basis.  The exact residual
+  Newton path additionally backtracks residual-worsening finite-I steps while
+  keeping the upstream full Newton step as the first trial.
 """
 
 from functools import partial
@@ -78,6 +80,7 @@ __all__ = [
 
 
 _MU0_OVER_2PI = 4 * np.pi * 1e-7 / (2 * np.pi)
+_EXACT_NEWTON_BACKTRACKING_STEPS = tuple(0.5 ** i for i in range(8))
 
 
 def _default_G_from_coils(biotsavart):
@@ -638,10 +641,11 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         """Finite-I version of
         :meth:`BoozerSurface.solve_residual_equation_exactly_newton`.
 
-        Logic is byte-for-byte upstream except the residual is computed via
-        :func:`boozer_surface_residual_finite_I`, the resulting result dict
-        is annotated with ``"I"``, and the stored vjp callback is wrapped to
-        substitute ``G -> G + iota * I`` before invoking the upstream vjp.
+        Logic follows upstream except the residual is computed via
+        :func:`boozer_surface_residual_finite_I`, each Newton direction is
+        accepted only at a residual-decreasing backtracking step, the result
+        dict is annotated with ``"I"``, and the stored vjp callback is wrapped
+        to substitute ``G -> G + iota * I`` before invoking the upstream vjp.
         """
 
         if not self.need_to_run_code:
@@ -662,6 +666,21 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         mask = mask.flatten()
 
         label = self.label
+
+        def residual_vector(residual):
+            label_constraints = [label.J() - self.targetlabel]
+            if not s.stellsym:
+                label_constraints.append(s.gamma()[0, 0, 2])
+            return np.concatenate((residual[mask], label_constraints))
+
+        def constrained_jacobian(residual_jacobian):
+            rows = [
+                residual_jacobian[mask, :],
+                np.concatenate((label.dJ(partials=True)(s), [0.0, 0.0])),
+            ]
+            if not s.stellsym:
+                rows.append(np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0.0, 0.0])))
+            return np.vstack(rows)
         if G is None:
             G = _default_G_from_coils(self.biotsavart)
         x = np.concatenate((s.get_dofs(), [iota, G]))
@@ -671,60 +690,53 @@ class BoozerSurfaceFiniteI(BoozerSurface):
         )
         norm = 1e6
         while i < maxiter:
-            if s.stellsym:
-                b = np.concatenate((r[mask], [(label.J() - self.targetlabel)]))
-            else:
-                b = np.concatenate(
-                    (
-                        r[mask],
-                        [(label.J() - self.targetlabel), s.gamma()[0, 0, 2]],
-                    )
-                )
+            b = residual_vector(r)
             norm = np.linalg.norm(b)
             if norm <= tol:
                 break
-            if s.stellsym:
-                J = np.vstack(
-                    (
-                        J[mask, :],
-                        np.concatenate((label.dJ(partials=True)(s), [0.0, 0.0])),
-                    )
-                )
-            else:
-                J = np.vstack(
-                    (
-                        J[mask, :],
-                        np.concatenate((label.dJ(partials=True)(s), [0.0, 0.0])),
-                        np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0.0, 0.0])),
-                    )
-                )
-            P, L, U = lu(J)
+            J_augmented = constrained_jacobian(J)
+            P, L, U = lu(J_augmented)
             dx = forward_solve(P, L, U, b)
-            dx += forward_solve(P, L, U, b - J @ dx)
-            x -= dx
-            s.set_dofs(x[:-2])
-            iota = x[-2]
-            G = x[-1]
-            i += 1
-            r, J = boozer_surface_residual_finite_I(
-                s, iota, G, self.biotsavart, derivatives=1, I=self.I
-            )
+            dx += forward_solve(P, L, U, b - J_augmented @ dx)
 
-        if s.stellsym:
-            J = np.vstack(
-                (
-                    J[mask, :],
-                    np.concatenate((label.dJ(partials=True)(s), [0.0, 0.0])),
+            if self.I == 0.0:
+                x -= dx
+                s.set_dofs(x[:-2])
+                iota = x[-2]
+                G = x[-1]
+                i += 1
+                r, J = boozer_surface_residual_finite_I(
+                    s, iota, G, self.biotsavart, derivatives=1, I=self.I
                 )
-            )
-        else:
-            J = np.vstack(
-                (
-                    J[mask, :],
-                    np.concatenate((label.dJ(partials=True)(s), [0.0, 0.0])),
-                    np.concatenate((s.dgamma_by_dcoeff()[0, 0, 2, :], [0.0, 0.0])),
+                continue
+
+            step_accepted = False
+            for step_scale in _EXACT_NEWTON_BACKTRACKING_STEPS:
+                x_trial = x - step_scale * dx
+                s.set_dofs(x_trial[:-2])
+                iota_trial = x_trial[-2]
+                G_trial = x_trial[-1]
+                r_trial, J_trial = boozer_surface_residual_finite_I(
+                    s, iota_trial, G_trial, self.biotsavart, derivatives=1, I=self.I
                 )
-            )
+                trial_norm = np.linalg.norm(residual_vector(r_trial))
+                if trial_norm < norm:
+                    x = x_trial
+                    iota = iota_trial
+                    G = G_trial
+                    r = r_trial
+                    J = J_trial
+                    norm = trial_norm
+                    step_accepted = True
+                    break
+
+            if not step_accepted:
+                s.set_dofs(x[:-2])
+                break
+
+            i += 1
+
+        J = constrained_jacobian(J)
 
         P, L, U = lu(J)
         res = {

@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import simsoptpp as sopp
@@ -91,6 +92,84 @@ class BoozerSurfaceTests(unittest.TestCase):
                 pending.append(current.current_b)
                 pending.append(current.current_a)
         return list(leaves.values())
+
+    def _make_synthetic_exact_finite_i_newton_surface(self):
+        surface = SurfaceXYZTensorFourier(
+            mpol=1,
+            ntor=1,
+            stellsym=True,
+            nfp=1,
+            quadpoints_phi=np.linspace(0, 1, 3, endpoint=False),
+            quadpoints_theta=np.linspace(0, 1, 3, endpoint=False),
+        )
+
+        class ConstantLabel:
+            def J(self):
+                return 0.0
+
+            def dJ(self, partials=True):
+                return lambda surface: np.zeros(surface.get_dofs().size)
+
+        curves, currents, _ = get_ncsx_data()
+        coils = coils_via_symmetries(curves, currents, 3, True)
+        return BoozerSurfaceFiniteI(
+            BiotSavart(coils),
+            surface,
+            ConstantLabel(),
+            0.0,
+            constraint_weight=None,
+            options={"verbose": False},
+            I=0.37,
+        )
+
+    def _patch_exact_newton_direction(self, direction):
+        solve_returns = [direction, np.zeros_like(direction)]
+
+        def forward_solve_once(_, __, ___, ____):
+            return solve_returns.pop(0)
+
+        return patch(
+            "banana_opt.boozer_finite_current.forward_solve",
+            side_effect=forward_solve_once,
+        )
+
+    def _run_synthetic_exact_newton_line_search(self, residual_values, *, current_I=0.37):
+        boozer_surface = self._make_synthetic_exact_finite_i_newton_surface()
+        boozer_surface.I = current_I
+        surface = boozer_surface.surface
+        direction = np.zeros(surface.get_dofs().size + 2)
+        direction[-2] = 1.0
+        residual_size = 3 * surface.quadpoints_phi.size * surface.quadpoints_theta.size
+        residual_iotas = []
+
+        def residual_finite_I(surface, iota, G, biotsavart, derivatives, I):
+            residual_iotas.append(iota)
+            residual = np.full(residual_size, residual_values[float(iota)])
+            jacobian = np.zeros((residual_size, surface.get_dofs().size + 2))
+            return residual, jacobian
+
+        with patch(
+            "banana_opt.boozer_finite_current.boozer_surface_residual_finite_I",
+            side_effect=residual_finite_I,
+        ), patch("banana_opt.boozer_finite_current.lu", return_value=(None, None, None)), (
+            self._patch_exact_newton_direction(direction)
+        ):
+            res = boozer_surface.solve_residual_equation_exactly_newton(
+                tol=1.0e-12,
+                maxiter=1,
+                iota=0.0,
+                G=2.0,
+            )
+
+        return res, residual_iotas
+
+    def _assert_synthetic_exact_newton_result(
+        self, res, residual_iotas, *, expected_iotas, expected_iter, expected_iota
+    ):
+        self.assertEqual(residual_iotas, expected_iotas)
+        self.assertEqual(res["iter"], expected_iter)
+        self.assertEqual(res["iota"], expected_iota)
+        self.assertEqual(res["G"], 2.0)
 
     def _assert_directional_fd_convergence(self, f, coeffs, direction, directional_derivative):
         err_old = 1e9
@@ -283,6 +362,88 @@ class BoozerSurfaceTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(boozer_surface.res["I"], 0.37)
         self.assertIn("vjp", boozer_surface.res)
+
+    def test_finite_current_exact_newton_accepts_full_residual_decrease_step(self):
+        res, residual_iotas = self._run_synthetic_exact_newton_line_search(
+            {0.0: 10.0, -1.0: 3.0}
+        )
+
+        self._assert_synthetic_exact_newton_result(
+            res,
+            residual_iotas,
+            expected_iotas=[0.0, -1.0],
+            expected_iter=1,
+            expected_iota=-1.0,
+        )
+
+    def test_finite_current_exact_newton_backtracks_residual_worsening_step(self):
+        res, residual_iotas = self._run_synthetic_exact_newton_line_search(
+            {0.0: 10.0, -1.0: 12.0, -0.5: 3.0}
+        )
+
+        self._assert_synthetic_exact_newton_result(
+            res,
+            residual_iotas,
+            expected_iotas=[0.0, -1.0, -0.5],
+            expected_iter=1,
+            expected_iota=-0.5,
+        )
+
+    def test_finite_current_exact_newton_rejects_all_worsening_steps(self):
+        residual_values = {0.0: 10.0}
+        for i in range(8):
+            residual_values[-0.5 ** i] = 12.0
+        res, residual_iotas = self._run_synthetic_exact_newton_line_search(
+            residual_values
+        )
+
+        self._assert_synthetic_exact_newton_result(
+            res,
+            residual_iotas,
+            expected_iotas=[0.0] + [-0.5 ** i for i in range(8)],
+            expected_iter=0,
+            expected_iota=0.0,
+        )
+        self.assertFalse(res["success"])
+
+    def test_finite_current_exact_newton_zero_current_keeps_upstream_full_step(self):
+        res, residual_iotas = self._run_synthetic_exact_newton_line_search(
+            {0.0: 10.0, -1.0: 12.0},
+            current_I=0.0,
+        )
+
+        self._assert_synthetic_exact_newton_result(
+            res,
+            residual_iotas,
+            expected_iotas=[0.0, -1.0],
+            expected_iter=1,
+            expected_iota=-1.0,
+        )
+        self.assertFalse(res["success"])
+
+    def test_finite_current_exact_newton_converges_on_task25_lane4_fixture(self):
+        mpol = 3
+        ntor = 3
+        current_I = 4 * np.pi * 1e-7 * 5000
+        _, G0, boozer_surface = self._make_area_boozer_surface(
+            current_I=current_I,
+            mpol=mpol,
+            ntor=ntor,
+            phis=np.linspace(0, 1 / 3, 2 * ntor + 1, endpoint=False),
+            thetas=np.linspace(0, 1, 2 * mpol + 1, endpoint=False),
+            constraint_weight=None,
+            options={"weight_inv_modB": False, "verbose": False},
+        )
+
+        res = boozer_surface.run_code(0.4, G=G0)
+
+        self.assertTrue(res["success"])
+        np.testing.assert_allclose(
+            res["iota"], 0.40283946329212617, rtol=1e-10, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            res["G"], 13.881987793895558, rtol=1e-10, atol=1e-12
+        )
 
     def _assert_penalty_constraints_cpp_python_match(self, boozer_surface, x, *, optimize_G, weight_inv_modB):
         w = 0.
