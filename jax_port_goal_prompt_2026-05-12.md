@@ -34,6 +34,19 @@ SIMSOPT / CUDA documentation:
   `/hiddensymmetries/simsopt`, and `/websites/nvidia_cuda`. Upstream SIMSOPT
   local HEAD and `hiddenSymmetries/simsopt` remote HEAD both resolved to
   `1b0cc3a96063197cdbdd01559e04c25456fbe6ff`.
+- Parity-coverage matrix is now a required plan deliverable. Every active
+  item builds a CPU/C++ → JAX coverage matrix at
+  `.artifacts/jax_port_goal/plans/<id>-coverage.md` (section 4a) and the
+  completion gate in section 4c refuses to mark COMPLETE while any
+  applicable oracle test row is unmapped or unclassified.
+- State schema bumped from v2 to v3: adds `coverage_matrix`,
+  `upstream_audit_sha`, `red_evidence`, and `bench_artifact`. A v2
+  state.json is not silently upgraded; in-progress items pause to backfill
+  the new artifacts before resuming.
+- Red-step evidence: cited new parity test must be confirmed FAILING against
+  the parent commit before implementation; capture saved to
+  `.artifacts/jax_port_goal/red/<id>.txt`. Empty-oracle N/A only applies to
+  Tier P1 new-kernel ports where no pre-impl tree exists.
 
 ## How to use
 
@@ -98,6 +111,25 @@ Gap and downstream checklist:
   correct or updated with validation evidence.
 - [ ] If the item is not fully JAX-native, the residual gap is recorded as
   BLOCKED or SKIPPED rather than reported complete.
+
+Parity-coverage checklist (every active item, gated by section 4a + 4c):
+
+- [ ] Coverage matrix `.artifacts/jax_port_goal/plans/<id>-coverage.md`
+  exists and enumerates every repo and upstream test reachable via
+  `git grep` over the item's kernel name, public class, and `simsoptpp`
+  symbol. `upstream_audit_sha` is recorded.
+- [ ] Every matrix row is classified `covered_by_unit_parity`,
+  `covered_by_integration_parity`, `oracle_only`, `wrapper_only`,
+  `not_applicable`, or `blocked`. No row is `unclassified`.
+- [ ] Every JAX parity test cited in the matrix exists on disk at the
+  commit's tree, is collected by pytest, is not skip/xfail, and asserts
+  against tolerances imported from `PARITY_LADDER_TOLERANCES[<lane>]`.
+- [ ] Empty-oracle items add ≥ 1 new parity test against a hand-derived
+  reference and cite the oracle source in the test docstring.
+- [ ] Red-step evidence: the new parity test was confirmed failing
+  against the parent commit; capture saved to
+  `.artifacts/jax_port_goal/red/<id>.txt`. The one allowed N/A is a
+  Tier P1 new-kernel port with no pre-impl tree.
 
 ## 0. Boot - read these every iteration
 
@@ -198,7 +230,7 @@ Commit state only as part of a completed or blocked item commit.
 
 ```json
 {
-  "manifest_version": 2,
+  "manifest_version": 3,
   "active_scope": ["P0", "P1", "P2"],
   "items": [
     {
@@ -210,11 +242,15 @@ Commit state only as part of a completed or blocked item commit.
       "evidence": {
         "source_audit": "src/...:line-line",
         "upstream_oracle": "/Users/suhjungdae/code/opensource/simsopt/src/simsopt/...",
+        "upstream_audit_sha": "1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
         "kernel_module": "src/simsopt/jax_core/...",
         "adapter_module": "src/simsopt/.../*_jax*.py",
+        "coverage_matrix": ".artifacts/jax_port_goal/plans/<id>-coverage.md",
+        "red_evidence": ".artifacts/jax_port_goal/red/<id>.txt",
         "parity_test": "tests/...::Test...",
         "transfer_guard_test": "tests/...",
         "multi_device_test": "tests/test_jax_import_smoke.py::...",
+        "bench_artifact": ".artifacts/jax_port_goal/bench/<id>.json",
         "parity_lane": "direct-kernel|derivative-heavy|adjoint|...",
         "cuda_smoke": "not_claimed|deferred|verified",
         "commit_sha": "<sha>"
@@ -227,11 +263,39 @@ Commit state only as part of a completed or blocked item commit.
 }
 ```
 
-For blocked items, replace `"blocker": null` with:
+Schema migration note: v2 → v3 adds `coverage_matrix`, `upstream_audit_sha`,
+`red_evidence`, and `bench_artifact`. A v2 state.json is forward-compatible
+only after each in-progress item is paused and its coverage matrix is
+backfilled per section 4a. Do not silently upgrade `manifest_version` without
+producing the new artifacts.
+
+For blocked items, replace `"blocker": null` with one of the section-5
+refusal categories:
 
 ```json
-{ "category": "...", "detail": "...", "needs_user": true }
+{
+  "category": "architecture|missing_dependency|parity_unreachable|transfer_guard_unreachable|tolerance_policy|gpu_run_needed",
+  "detail": "free-text plus pointer to .artifacts/jax_port_goal/blockers/<id>-debug.md",
+  "debug_artifact": ".artifacts/jax_port_goal/blockers/<id>-debug.md",
+  "needs_user": true
+}
 ```
+
+The `cuda_smoke` field has a per-run lifetime:
+
+- `not_claimed` is the default for any item validated only on CPU. Persists
+  across runs.
+- `deferred` requires a `deferred_reason` and an `expected_artifact` path
+  in the item's plan. A `deferred` value DOES NOT carry forward
+  automatically. The next run that touches this item must either promote
+  it to `verified` with the cited artifact in hand, or re-park it as
+  `deferred` with a fresh dated justification appended to the plan. The
+  final REPORT must list every `deferred` entry under "Deferred CUDA
+  verification" with the artifact path the next run needs to produce.
+- `verified` requires a current-SHA CUDA artifact path in evidence (e.g.
+  `.artifacts/jax_port_goal/cuda/<id>-<sha>.json` or a CI run URL). The
+  artifact must be produced by an approved GPU run, not inferred from
+  CPU + HLO proxies.
 
 At each iteration:
 
@@ -356,6 +420,9 @@ For each active manifest item:
 - Current-state source audit: what JAX path already exists, what remains CPU,
   and exact file:line evidence.
 - Upstream oracle audit: exact upstream C++/Python API and numerical contract.
+  Record the upstream SHA audited in the item's `upstream_audit_sha` evidence
+  field; if upstream advances during the port, re-audit before claiming
+  complete.
 - Downstream consumer graph: wrappers, examples, docs, tests, benchmarks, and
   integration paths that consume this item.
 - The C++ / Python kernel(s) being replaced or extended. Cite file:line.
@@ -364,6 +431,34 @@ For each active manifest item:
 - Parity-ladder lane (direct-kernel / derivative-heavy / adjoint / etc.).
 - Test files to create or extend: fixed-state parity, VJP/gradient parity,
   transfer guard, multi-device CPU, and downstream integration where relevant.
+- Existing-test coverage matrix (mandatory artifact at
+  `.artifacts/jax_port_goal/plans/<id>-coverage.md`). The matrix is the
+  primary parity-coverage gate; without it the item cannot reach COMPLETE.
+  Build it as follows:
+  - Enumerate every existing test exercising the same kernel / numerical
+    contract, in BOTH locations:
+    - this repo: `git grep -nE "<KernelName>|<simsoptpp_symbol>|<public_class>" tests/`
+    - upstream SIMSOPT:
+      `git -C /Users/suhjungdae/code/opensource/simsopt grep -nE "..." src/simsopt/tests/`
+  - For each test, record `{repo_or_upstream, test_path, node_id, brief_intent}`
+    plus a classification:
+    - `covered_by_unit_parity` — equivalent JAX parity test exists; cite path
+    - `covered_by_integration_parity` — pipeline coverage via a named JAX
+      integration test; cite path
+    - `oracle_only` — exists solely to validate CPU/C++ behavior; not portable
+    - `wrapper_only` — exercises `Optimizable` mutability or simsoptpp
+      plumbing; not portable
+    - `not_applicable` — one-line reason (external binary, file I/O, plotting)
+    - `blocked` — refusal category from section 5; cite blocker note
+  - Empty-oracle case: if both grep searches return zero applicable tests,
+    state that explicitly in the matrix AND add at least one new parity test
+    against a hand-derived reference (closed-form, NumPy oracle, or
+    documented limiting case). Empty oracle is not a license to skip
+    parity work.
+  - Stale-upstream guard: every matrix row that cites an upstream test
+    records the upstream SHA at audit time. If `upstream_audit_sha` advances
+    before the item is closed, re-run the upstream grep and append any new
+    tests to the matrix before marking complete.
 - Risk register: what could break, what existing test would catch it, and what
   new test closes the gap.
 
@@ -484,19 +579,112 @@ Required parity evidence:
 - [ ] Downstream API parity for every wrapper this item feeds.
 - [ ] For collective paths: StableHLO or optimized HLO contains the expected
   collective, checked with `jax.jit(...).lower(...).as_text()` or
-  `jax.jit(...).lower(...).compile().as_text()` as appropriate. Mark N/A if
-  the item does not introduce a collective.
+  `jax.jit(...).lower(...).compile().as_text()` as appropriate. Mark N/A
+  only if `git grep` over the item's diff shows zero `shard_map`, `psum`,
+  `all_reduce`, or `pjit` introductions; otherwise this checkbox is
+  required.
 
-Required performance / memory evidence, proportional to item size:
+Cited-test integrity (no fictional or de-fanged tests):
 
-- [ ] For hot-path kernels: a small `benchmarks/` micro-bench comparing
-  warm-run time against the upstream baseline and the closest existing JAX
-  kernel. Call `.block_until_ready()` before reading timings.
+- [ ] Every `parity_test` / `transfer_guard_test` / `multi_device_test` path
+  in this item's state-evidence entry resolves on disk at the commit's tree
+  (`git show <sha>:<path>` succeeds) and the named pytest node is collected
+  by `pytest --collect-only -q <path>::<node>`.
+- [ ] No cited test is decorated with `@pytest.mark.skip`,
+  `@pytest.mark.skipif`, `@pytest.mark.xfail`, or wrapped in a
+  `pytest.skip(...)` early-return at module / class / function scope.
+- [ ] Every parity assertion in the new test imports its tolerance from
+  `benchmarks.validation_ladder_contract.PARITY_LADDER_TOLERANCES[<lane>]`
+  or a helper that reads from it. No `atol=` / `rtol=` numeric literals
+  inlined inside the test body. Run
+  `git diff <base>..HEAD -- <new test paths> | grep -E "(atol|rtol)\s*=\s*[0-9eE.+-]+"`
+  and confirm zero hits.
+
+Production-scale floor (the lesson from closed TODO #39 — toy fixtures
+silently pass while real workloads diverge):
+
+- [ ] At least one parity fixture for this item runs at production scale.
+  Floor for Biot-Savart / flux / Boozer / surface kernels: `nphi ≥ 16`,
+  `ntheta ≥ 8`, `ncoils ≥ 4`. For curve / coil-objective kernels:
+  `ncoils ≥ 4`, `nquadpoints ≥ 64`. For tracing / fieldline integrators:
+  trajectory length ≥ the smallest production lab-notebook setting in
+  `examples/`. For new kernel families with no precedent: cite the closest
+  existing production-scale test in the repo and match or exceed its grid.
+- [ ] If the production-scale fixture cannot run inside the validation
+  budget on this host, the item is BLOCKED, not COMPLETE. Do not mark N/A
+  on this checkbox.
+
+Coverage completeness (the existing-test parity gate; see 4a coverage matrix):
+
+- [ ] The coverage matrix at `.artifacts/jax_port_goal/plans/<id>-coverage.md`
+  exists, is referenced from the item's `coverage_matrix` evidence field,
+  and lists every test surfaced by the repo and upstream `git grep` per 4a.
+- [ ] Every matrix row is classified — no row is `unclassified` or missing
+  a status. `covered_by_unit_parity` / `covered_by_integration_parity` rows
+  cite an existing JAX test path that resolves on disk and is collected by
+  `pytest --collect-only`.
+- [ ] For every cited JAX parity test in the matrix: it executes against the
+  item's commit and exits zero at the lane tolerance from
+  `PARITY_LADDER_TOLERANCES`. The exact pytest command + result line is
+  recorded in the item's plan or in the commit message.
+- [ ] `oracle_only` / `wrapper_only` / `not_applicable` rows each carry a
+  one-line reason. Generic classifications without a reason are not valid.
+- [ ] `blocked` rows cite a refusal category from section 5 and link the
+  `<id>-debug.md` artifact.
+- [ ] If `upstream_audit_sha` advanced between plan time and validate time,
+  the upstream grep has been re-run and any new tests appended and
+  classified before this checkbox is checked.
+- [ ] Empty-oracle items (zero rows from both greps) include at least one
+  new parity test built against a hand-derived / closed-form / NumPy
+  oracle, with the oracle source cited in the test docstring.
+
+Red-step evidence (lightweight TDD discipline — catches tests written
+after the implementation that ride on the already-green lane):
+
+- [ ] The new parity test cited in this item's `parity_test` evidence was
+  confirmed FAILING against the parent commit (pre-implementation tree)
+  before the implementation began. Capture the failing pytest stderr /
+  stdout (or a `< 100`-line excerpt with file:line pointers) to
+  `.artifacts/jax_port_goal/red/<id>.txt` and reference it from
+  `red_evidence` in state.json and from the commit message.
+- [ ] For partial-coverage closeouts where the existing JAX path already
+  passes most tests, the new parity test targets the specific NumPy edge,
+  host-transfer leak, or scale-floor behavior being closed — not a
+  rerun of the already-green path. Show this by citing the asserted
+  invariant (e.g., `transfer_guard=disallow` clean, production-scale
+  grid, finite-difference VJP at the lane tolerance) that the test
+  exercises and that the pre-impl tree did not satisfy.
+- [ ] If the item's only new test is the empty-oracle hand-derived
+  reference and there is no pre-impl tree at which it could fail (e.g.,
+  the kernel did not exist), state that explicitly in `red_evidence`
+  with the reason; this is the one acceptable N/A and only applies to
+  Tier P1 new-kernel ports.
+
+Required performance / memory evidence. "Proportional to item size" is not
+a license to skip; it bounds the scope of the bench, not whether one exists.
+Every hot-path item must have at least one of (a) a real micro-bench or (b)
+a written "no perf change expected because …" justification cited against
+concrete kernel changes — never both omitted.
+
+- [ ] For hot-path kernels: a `benchmarks/` micro-bench file is committed
+  alongside the implementation. It compares median + p95 warm-run time
+  against the upstream baseline (or the closest existing JAX kernel if no
+  upstream baseline exists) over **≥ 100 timed calls** after a
+  `.block_until_ready()`-gated warmup of **≥ 5 calls**. Timings come from
+  `time.perf_counter()` (not wall-clock or `%timeit`).
+- [ ] Bench output (median, p95, std, sample count) is appended to the
+  item's plan or saved under `.artifacts/jax_port_goal/bench/<id>.json`
+  and referenced from the commit message. Single-shot timings are not
+  acceptable.
 - [ ] For any new dense materialization: report bytes, compare against
   `max_dense_jacobian_bytes`, and keep the operator-backed alternative path.
-- [ ] If buffer donation is used, prove it at a real outer-jit boundary. Do
-  not claim donation benefit from internal `fori_loop` carries.
-- [ ] If only CPU validation ran, report it as CPU validation only.
+- [ ] If buffer donation is used, prove it at a real outer-jit boundary
+  with HLO showing the donated buffer. Internal `fori_loop` carries do not
+  count as donation evidence.
+- [ ] CPU-only validation must be stated explicitly in the commit message
+  and in the item's `cuda_smoke` field (`not_claimed` or `deferred`). This
+  is a reporting requirement, not a substitute for the production-scale
+  parity gate above.
 
 GPU reality:
 
@@ -528,45 +716,114 @@ jax-port: <short title> [item <id>]
 
 Do not add co-author footers unless the user explicitly asks for them.
 
-## 5. Refusal triggers (stop the item, mark BLOCKED, move on)
+## 5. Refusal triggers (BLOCK the item, write the diagnostic, move on)
 
-- The port would require subclassing or replacing `Optimizable` or `Derivative`.
-- The algorithm requires a dependency not already present in this repo.
-- Parity vs the upstream C++/SciPy oracle fails at the lane tolerance after
-  honest debugging.
-- A new `transfer_guard=disallow` violation would require weakening the runtime
-  contract.
-- The change would require modifying `validation_ladder_contract.py`
-  tolerances. Tolerances are user-owned policy, not agent-owned.
-- The work requires a GPU run and the user has not approved launching one.
+A refusal trigger fires only after the diagnostic budget below is exhausted
+and the artifact in `.artifacts/jax_port_goal/blockers/<id>-debug.md` has
+been written. A BLOCKED status without that artifact is not a valid stop —
+treat it as in_progress and finish the budget.
+
+Diagnostic budget (mandatory before BLOCKED is set):
+
+- Two timeboxes of **≤ 2 hours each** of active debugging.
+- After each timebox, append a dated section to
+  `.artifacts/jax_port_goal/blockers/<id>-debug.md` containing: the exact
+  failing command, the captured stderr/stdout (or a `< 100`-line excerpt
+  with file:line pointers), the current hypothesis, the next experiment.
+- If the second timebox does not close the issue, mark BLOCKED with the
+  category below and link the debug artifact from the blocker note.
+
+Refusal categories:
+
+- `architecture` — the port would require subclassing or replacing
+  `Optimizable`, `Derivative`, or CPU `BiotSavart`.
+- `missing_dependency` — the algorithm requires a runtime dependency not
+  already in `pyproject.toml`. Propose the dependency in the blocker note;
+  do not add it.
+- `parity_unreachable` — parity vs the upstream C++/SciPy oracle fails at
+  the lane tolerance after the two-timebox budget. The blocker note must
+  include the worst-case residual, the lane, the fixture parameters, and a
+  ruled-out hypothesis list.
+- `transfer_guard_unreachable` — closing the item would require weakening
+  the `transfer_guard=disallow` contract. Cite the offending op and the
+  JAX upstream issue / docs link if one exists.
+- `tolerance_policy` — closing the item would require modifying
+  `validation_ladder_contract.py::PARITY_LADDER_TOLERANCES`. Tolerances
+  are user-owned policy; never edit them to make a test pass.
+- `gpu_run_needed` — the work requires a GPU run and the user has not
+  approved launching one. Record what artifact the run would produce.
 
 ## 6. Anti-patterns - refuse unconditionally
+
+Implementation hygiene:
 
 - Silent CPU fallback inside a JAX target lane.
 - `except Exception:` to hide a real error.
 - Dynamic imports or `Any` casts.
 - `jnp.asarray(host_array)` in a hot path.
 - Dense materialization on production adjoint paths.
-- Inlining tolerances.
-- Declaring a CUDA result from CPU-only or HLO-only evidence.
-- "It is fine, the test passes locally" without the applicable validation set.
-- Skipping a `stellsym=True` case in a parity test.
 - Removing existing CPU / C++ paths. The parity oracle stays.
+
+Reporting and gate hygiene:
+
+- Declaring a CUDA result from CPU-only or HLO-only evidence.
+- "It is fine, the test passes locally" without the applicable validation
+  set.
+- Reporting CPU-only closure as full end-to-end closure.
+
+Test integrity (do not game the parity gates):
+
+- Inlining `atol` / `rtol` literals inside a new test instead of importing
+  from `benchmarks.validation_ladder_contract.PARITY_LADDER_TOLERANCES`.
+- Citing a `parity_test` / `transfer_guard_test` / `multi_device_test`
+  path that does not exist on disk at the commit's tree or is decorated
+  with `@pytest.mark.skip` / `skipif` / `xfail` or wrapped in a module-
+  or class-level `pytest.skip(...)`.
+- Marking the production-scale parity fixture as N/A. The floor in
+  section 4c is mandatory unless the item is BLOCKED.
+- Skipping a `stellsym=True` case in a parity test.
+- Submitting a one-shot timing as a benchmark; section 4c requires ≥ 100
+  timed calls with median + p95.
+
+Self-termination hygiene:
+
+- BLOCKING an item without writing `.artifacts/jax_port_goal/blockers/<id>-debug.md`
+  and exhausting the two-timebox diagnostic budget from section 5.
+- BLOCKING more than one active item per run with `architecture`,
+  `parity_unreachable`, or `transfer_guard_unreachable` self-issued.
+  Hitting that quota forces ESCALATE before any further BLOCK.
+- Marking an item `skipped` without an explicit human directive recorded
+  in the state file.
 
 ## 7. Stop condition
 
-Stop when either:
+Stop only when ALL of the following hold; the OR shortcuts that previously
+allowed self-termination via mass-BLOCKED have been removed:
 
-- Every item in `active_scope` is `complete`, `blocked`, or `skipped`, and
-  applicable targeted, regression, transfer-guard, multi-device CPU, and
-  downstream integration tests are green, and the final report exists; or
-- No eligible active item remains because dependencies or user decisions are
-  blocked.
+- Every item in `active_scope` is `complete`, `blocked`, or `skipped`. AND
+- The applicable targeted, regression, transfer-guard, and multi-device CPU
+  test runs from section 4c are green at the current HEAD. AND
+- The final report `.artifacts/jax_port_goal/REPORT.md` exists and lists
+  every active item's status with a one-line evidence pointer. AND
+- The BLOCK / ESCALATE quota was respected: at most **one** active item per
+  run may be BLOCKED with `architecture` / `parity_unreachable` /
+  `transfer_guard_unreachable` self-issued by the agent without prior
+  ESCALATE. Hitting that quota forces an ESCALATE entry that pauses the
+  run for user decision; the agent does not silently roll forward by
+  BLOCKING the remaining items in the same run.
+- For broad source changes (item touches > 5 source files or any file in
+  `src/simsopt/jax_core/`), the full test suite was run with the repo-local
+  interpreter and is green. AND
+- For every `cuda_smoke: deferred` evidence entry, the REPORT lists it
+  under "Deferred CUDA verification" with the artifact path the next run
+  needs to produce. `deferred` does not carry across runs implicitly; the
+  next run must explicitly promote it to `verified` or re-park it with a
+  fresh justification.
 
-For broad source changes, run the full test suite with the repo-local
-interpreter before declaring full closure. If full-suite, cross-env, or GPU
-validation is blocked by environment or hardware, state that explicitly and do
-not claim full end-to-end closure.
+If full-suite, cross-env, or GPU validation is blocked by environment or
+hardware, state that explicitly in the REPORT and do not claim full
+end-to-end closure. Reporting CPU-only closure as full closure is an
+anti-pattern (section 6).
 
 Write `.artifacts/jax_port_goal/REPORT.md` with:
 
@@ -578,13 +835,26 @@ Write `.artifacts/jax_port_goal/REPORT.md` with:
 
 ## 8. Escalate immediately (do not loop in the dark)
 
-- A blocker would require a user-facing API change.
+ESCALATE writes a user-facing `.artifacts/jax_port_goal/blockers/<id>.md`
+note AND a `needs_user: true` entry on the next-iteration state.json, then
+moves to the next eligible item. ESCALATE and BLOCKED share the same
+artifact contract — see section 5's diagnostic budget. The only difference
+is recipient: ESCALATE entries are surfaced at the top of the final REPORT
+under "User decisions required" and the run pauses on them by default.
+
+Escalate triggers:
+
+- A blocker would require a user-facing API change to upstream `Optimizable`,
+  `Derivative`, public method signatures, env-var contracts, or
+  `pyproject.toml` dependencies.
 - A skip-list item is actually critical to an active item.
-- An open PARTIAL item from `jax_gpu_port_todos_2026-04-08.md` (#24, #26, #27,
-  #29) becomes load-bearing.
-- Repeated parity failure at the lane tolerance after two honest fix attempts.
-  Write the diagnostic to `.artifacts/jax_port_goal/blockers/<id>.md` and move
-  on.
+- An open PARTIAL item from `jax_gpu_port_todos_2026-04-08.md` (#24, #26,
+  #27, #29) becomes load-bearing.
+- The two-timebox parity budget from section 5 is exhausted and the failure
+  is not categorically refusable (i.e., none of the refusal categories fit
+  cleanly). Write the diagnostic to
+  `.artifacts/jax_port_goal/blockers/<id>.md` with the same content the
+  BLOCKED protocol requires, plus a "Proposed user decision" section.
 
 Begin at iteration 0: read `state.json` if it exists. Otherwise create it from
 the manifest above with P0-P2 pending, P3-P5 skipped unless `active_scope`
