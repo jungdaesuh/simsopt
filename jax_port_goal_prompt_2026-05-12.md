@@ -5,8 +5,7 @@ Branch context: `gpu-purity-stage2-20260405`
 Repo: `/Users/suhjungdae/code/columbia/simsopt-jax`
 Original prompt base commit: `fa3f877af`
 Original source audit base: `8b471e8e3` (parent of the original prompt base)
-Current repo reconciliation base commit:
-`e0e6f21d71d0234ad4cdefeed63329c5648cbfb0`
+Current repo coverage-audit base commit: `9244982bf`
 
 ## Review status
 
@@ -42,6 +41,10 @@ SIMSOPT / CUDA documentation:
 - State schema source of truth is section 1's `manifest_version: 4` and
   migration note. A v2 or v3 state.json is not silently upgraded; in-progress
   items pause to backfill the required artifacts before resuming.
+- Repo-wide portable-surface inventory is now a manifest requirement. The
+  checklist below is the scope source of truth; every included file or kernel
+  must be present in the work manifest, explicitly owned by a manifest item, or
+  listed in the skip list before a run claims coverage closure.
 - Red-step evidence: cited new parity test must be confirmed FAILING against
   the parent commit before implementation; capture saved to
   `.artifacts/jax_port_goal/red/<id>.txt`. Empty-oracle N/A only applies to
@@ -122,6 +125,20 @@ Gap and downstream checklist:
   correct or updated with validation evidence.
 - [ ] If the item is not fully JAX-native, the residual gap is recorded as
   BLOCKED or SKIPPED rather than reported complete.
+
+Repo-wide portable-surface checklist:
+
+- [ ] Every numeric physics or optimization surface under `src/simsopt/field`,
+  `src/simsopt/geo`, `src/simsopt/objectives`, `src/simsopt/solve`, and every
+  non-binding compute kernel under `src/simsoptpp` is classified as one of:
+  `manifest_item`, `owned_dependency`, `parity_oracle`, `orchestration_only`,
+  `external_solver_wrapper`, `io_or_visualization`, `explicit_future_scope`, or
+  `explicit_skip`.
+- [ ] The manifest item that owns a file lists the public class/function names
+  and the downstream wrappers/tests that consume them.
+- [ ] If a newly discovered portable file is not in the manifest or skip list,
+  update this document before implementation. Do not silently treat the manifest
+  as complete.
 
 Parity-coverage checklist (every active item, gated by section 4a + 4c):
 
@@ -434,58 +451,92 @@ or mark the item complete with evidence.
 1. [ ] `field/coilobjective.py` (`CurrentPenalty`) and remaining
    `geo/curveobjectives.py` wrappers around `geo/_distance_jax.py`
 2. [ ] `field/selffield.py` - regularized self-field JAX coverage and tests
-3. [ ] `geo/curveobjectives.py` non-distance objectives - `CurveLength`,
+3. [ ] `objectives/fluxobjective.py` + `objectives/fluxobjective_jax.py` -
+   `SquaredFlux` / `SquaredFluxJAX` fixed-surface objective coverage,
+   derivative projection, and downstream Stage-2 consumers
+4. [ ] `geo/surfaceobjectives.py` + `geo/surfaceobjectives_jax.py` -
+   existing JAX objective wrappers, Boozer traceable runtime, QFM/standard
+   surface objectives, and CPU-wrapper parity boundaries
+5. [ ] `geo/{curve.py,curvexyzfourier.py,curverzfourier.py,
+   curveplanarfourier.py,curvehelical.py,curvecwsfourier.py,
+   curveperturbed.py}` + `jax_core/curve_geometry.py` - curve spec/geometry
+   adapter coverage and C++ curve-kernel parity closeouts
+6. [ ] `geo/{surface.py,surfacerzfourier.py,surfacexyzfourier.py,
+   surfacexyztensorfourier.py}` + `jax_core/{surface_rzfourier.py,
+   surface_fourier.py}` - surface spec/geometry adapter coverage and C++
+   surface-kernel parity closeouts
+7. [ ] `geo/curveobjectives.py` non-distance objectives - `CurveLength`,
    `LpCurveCurvature(Barrier)`, `LpCurveTorsion`, `ArclengthVariation`,
    `MeanSquaredCurvature`, `LinkingNumber`, `FramedCurveTwist`. Distance
    classes (`CurveCurveDistance(Barrier)`, `CurveSurfaceDistance`,
    `MinimumDistance`, `MinCurveCurveDistance`) are owned by item 1.
-4. [ ] `geo/strain_optimization.py` - strain accumulators / postprocessing
-5. [ ] `field/force.py` - finite-build force kernel pre-compute layers
+8. [ ] `geo/strain_optimization.py` - strain accumulators / postprocessing
+9. [ ] `field/force.py` - finite-build force kernel pre-compute layers
+10. [ ] `field/biotsavart_jax.py`, `field/biotsavart_jax_backend.py`,
+    `jax_core/biotsavart*.py`, `jax_core/objectives_flux.py`,
+    `objectives/integral_bdotn_jax.py`, and the existing
+    `simsoptpp/{biot_savart*,integral_BdotN.*}` parity oracles - close current
+    JAX Biot-Savart / BdotN coverage without modifying `field/biotsavart.py`
 
-### Tier P1 - active: independent C++ kernels
+### Tier P1 - active: independent field / C++ kernels
 
-Port only after proving the upstream C++ API shape and downstream consumer
-contract. If the algorithm requires a dependency not already in this repo,
-block the item instead of adding the dependency.
+Port only after proving the upstream API shape and downstream consumer contract.
+If the algorithm requires a dependency not already in this repo, block the item
+instead of adding the dependency.
 
-6. [ ] `simsoptpp/dommaschk.cpp` + `simsoptpp/reiman.cpp` to
+11. [ ] `simsoptpp/dommaschk.cpp` + `simsoptpp/reiman.cpp` to
    `jax_core/analytic_fields.py` + specs
-7. [ ] `simsoptpp/regular_grid_interpolant_3d*` to
+12. [ ] `field/magneticfieldclasses.py` pure analytic fields -
+   `ToroidalField`, `PoloidalField`, `CircularCoil`, and `MirrorModel` to
+   JAX specs/kernels. `ScalarPotentialRZMagneticField` is owned by item 23; do
+   not port it in P1.
+13. [ ] `simsoptpp/regular_grid_interpolant_3d*` to
    `jax_core/regular_grid_interp.py`
-8. [ ] `simsoptpp/tracing.cpp` to `jax_core/tracing.py` using an in-repo JAX RK
+14. [ ] `simsoptpp/tracing.cpp` to `jax_core/tracing.py` using an in-repo JAX RK
    implementation only
 
 ### Tier P2 - active: Python wrappers that depend on Tier P1
 
-9. [ ] `field/magneticfieldclasses.py` (`Dommaschk`, `Reiman`,
-   `InterpolatedField`) - depends on items 6 and 7
-10. [ ] `field/tracing.py` - depends on item 8
+15. [ ] `field/magneticfieldclasses.py` (`Dommaschk`, `Reiman`,
+   `InterpolatedField`, and the analytic-field public wrappers from item 12) -
+   depends on items 11-13
+16. [ ] `field/tracing.py` - depends on item 14
+17. [ ] `field/normal_field.py` (`NormalField`, `CoilNormalField`) -
+   Fourier normal-field transforms and coil-produced normal-field evaluation;
+   depends on items 3, 6, and 10
 
 ### Tier P3 - future-scope; skipped unless `active_scope` includes P3
 
-11. [ ] `geo/framedcurve.py` + `geo/orientedcurve.py` - ODE/framing replacement
-12. [ ] `geo/qfmsurface.py` - private on-device optimizer contract
-13. [ ] `geo/finitebuild.py` - finite-build geometry kernel
+18. [ ] `geo/framedcurve.py` + `geo/orientedcurve.py` - ODE/framing replacement
+19. [ ] `geo/qfmsurface.py` - private on-device optimizer contract
+20. [ ] `geo/finitebuild.py` - finite-build geometry kernel
+21. [ ] `field/magnetic_axis_helpers.py` - on-axis iota ODE using an in-repo
+   JAX RK/scan path and a field-spec contract
+22. [ ] `field/sampling.py` - stochastic curve/surface samplers using an
+   explicit `jax.random` PRNG-key contract, not hidden global RNG state
+23. [ ] `field/magneticfieldclasses.py` (`ScalarPotentialRZMagneticField`) -
+   optional symbolic-expression lowering; block if the only route is runtime
+   SymPy/lambdify execution inside a compiled path
 
 ### Tier P4 - future-scope; skipped unless `active_scope` includes P4
 
-14. [ ] `simsoptpp/dipole_field.cpp` to `jax_core/dipole_field.py`
-15. [ ] `simsoptpp/permanent_magnet_optimization.cpp` to
+24. [ ] `simsoptpp/dipole_field.cpp` to `jax_core/dipole_field.py`
+25. [ ] `simsoptpp/permanent_magnet_optimization.cpp` to
     `jax_core/pm_optimization.py`
-16. [ ] `field/magneticfieldclasses.py` (`DipoleField`) - depends on 14
-17. [ ] `geo/permanent_magnet_grid.py` - depends on 14 and 15
-18. [ ] `solve/permanent_magnet_optimization.py` - depends on 14 and 15
-19. [ ] `simsoptpp/wireframe_optimization.cpp`,
+26. [ ] `field/magneticfieldclasses.py` (`DipoleField`) - depends on 24
+27. [ ] `geo/permanent_magnet_grid.py` - depends on 24 and 25
+28. [ ] `solve/permanent_magnet_optimization.py` - depends on 24 and 25
+29. [ ] `simsoptpp/wireframe_optimization.cpp`,
     `magneticfield_wireframe.cpp`, and `wireframe_field_impl.h` to
     `jax_core/wireframe.py`
-20. [ ] `field/wireframefield.py` - depends on 19
-21. [ ] `solve/wireframe_optimization.py` - depends on 19
+30. [ ] `field/wireframefield.py` - depends on 29
+31. [ ] `solve/wireframe_optimization.py` - depends on 29
 
 ### Tier P5 - future-scope; skipped unless `active_scope` includes P5
 
-22. [ ] `simsoptpp/boozerradialinterpolant.cpp` and
+32. [ ] `simsoptpp/boozerradialinterpolant.cpp` and
     `boozermagneticfield*.h` to `jax_core/boozer_radial_interp.py`
-23. [ ] `field/boozermagneticfield.py` - depends on 22
+33. [ ] `field/boozermagneticfield.py` - depends on 32
 
 Skip list (do not port; if you touch these, escalate):
 
@@ -497,6 +548,9 @@ Skip list (do not port; if you touch these, escalate):
 - `util/`, `geo/plotting.py`, `field/mgrid.py`, `field/coilset.py`
 - `geo/{surfacegarabedian,surfacehenneberg,accessibility,hull,ports,wireframe_toroidal}.py`
   (auxiliary / historic / CAD; port only on explicit user request)
+- `src/simsoptpp/python*.cpp`, `src/simsoptpp/py*.h`, `*_py.*`,
+  cache/SIMD/xtensor support headers, and binding shims unless they are listed
+  as parity oracles or owned dependencies of a manifest item above
 
 If a non-skip-list active item cannot be ported without violating these
 invariants, mark BLOCKED with `needs_user: true` and move on. Do not silently
@@ -1033,7 +1087,8 @@ explicitly includes them, and `current_iter=0`.
 ## Notes for the human launching this
 
 - P0-P2 is the intended default scope. P3-P5 include algorithmic research lanes
-  such as PM, wireframe, Boozer radial interpolation, and frame ODE solvers;
+  such as frame ODE solvers, on-axis iota ODEs, stochastic samplers, symbolic
+  scalar-potential lowering, PM, wireframe, and Boozer radial interpolation;
   expand scope only after a fresh review.
 - The state file is for resumability, not a reason to create state-only
   commits. Commit only scoped useful artifacts.
