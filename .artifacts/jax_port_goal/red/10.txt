@@ -1,0 +1,118 @@
+Item 10 red-step evidence (chained Biot-Savart -> integral_BdotN closeout).
+
+Parent commit under test:
+  a9da18fac jax-port: close CurrentPenalty + distance wrappers [item 01]
+
+Current commit at item start:
+  e94464801 feat: close non-banana Phase 6 Boozer parity gap
+
+Procedure:
+
+  git worktree add --detach /tmp/simsopt-jax-item10-red a9da18fac
+  cp tests/objectives/test_integral_bdotn_item10_closeout.py \
+     /tmp/simsopt-jax-item10-red/tests/objectives/
+  cd /tmp/simsopt-jax-item10-red
+  JAX_ENABLE_X64=True JAX_PLATFORMS=cpu \
+    /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python \
+    -m pytest tests/objectives/test_integral_bdotn_item10_closeout.py -q
+
+Result on parent commit (`a9da18fac`):
+
+  ......
+  6 passed in 1.99s
+
+Same command with strict transfer guard:
+
+  SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu \
+    /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python \
+    -m pytest tests/objectives/test_integral_bdotn_item10_closeout.py -q
+
+Result on parent commit with strict transfer guard:
+
+  ......
+  6 passed in 2.03s
+
+Interpretation per section 4c (Red-step evidence carve-out for
+partial-coverage closeouts):
+
+Item 10 is a partial-coverage closeout. The audit summary established
+that the existing JAX path (`BiotSavartJAX` + `integral_BdotN`) was
+already byte-tight C++ parity in isolation. The audit also established
+that NO existing parity fixture chained these two kernels together at
+the production-scale floor for all three definition variants under both
+`stellsym=False` / `stellsym=True` with a strict transfer-guard
+discipline.
+
+The new test:
+
+  tests/objectives/test_integral_bdotn_item10_closeout.py
+    ::test_chained_biotsavartjax_integral_bdotn_matches_cpp_at_production_scale
+
+targets that specific missing fixture. The invariants it asserts that
+the pre-impl tree did not have a single fixture for:
+
+  1. Direct B-array parity between `BiotSavartJAX.B()` and
+     `BiotSavart.B()` at the production-scale floor (`ncoils >= 4`,
+     `nphi >= 16`, `ntheta >= 8`) for both `stellsym=False` and
+     `stellsym=True`.
+
+  2. C++ reducer applied to JAX B equals C++ reducer applied to C++ B
+     at the same tolerance — i.e. JAX -> NumPy roundtrip is faithful
+     (this is a "contiguity / reshape" guard).
+
+  3. Full chained parity:
+       `host_scalar(integral_BdotN(BiotSavartJAX.B(), target, normal, def))`
+       equals
+       `sopp.integral_BdotN(BiotSavart.B(), target, normal, def)`
+     at the `direct-kernel` lane tolerance, for all three definition
+     variants (`quadratic flux`, `normalized`, `local`).
+
+  4. The entire JAX evaluation lane is wrapped in
+     `jax.transfer_guard("disallow")`, and the test is also runnable
+     under the process-wide `SIMSOPT_JAX_TRANSFER_GUARD=disallow`
+     discipline (both invocations confirmed above).
+
+The test PASSES on the parent commit because no code change is needed
+for closeout — the audit established the existing path is already at
+parity. This is a coverage gate, not a red-bar test. Per the section 4c
+allowance:
+
+  "For partial-coverage closeouts where the existing JAX path already
+  passes most tests, the new parity test targets the specific NumPy
+  edge, host-transfer leak, or scale-floor behavior being closed — not
+  a rerun of the already-green path."
+
+The chained production-scale floor with `transfer_guard=disallow` is
+the specific invariant being closed; no individual existing test
+asserts all four points (1)-(4) in one fixture, especially across both
+symmetry modes and all three definitions.
+
+Post-fix (no code change) command on current HEAD tree:
+
+  JAX_ENABLE_X64=True JAX_PLATFORMS=cpu \
+    .conda/jax-0.9.2/bin/python -m pytest \
+    tests/objectives/test_integral_bdotn_item10_closeout.py -q
+
+Result:
+
+  ......
+  6 passed in 1.97s
+
+And under SIMSOPT_JAX_TRANSFER_GUARD=disallow:
+
+  ......
+  6 passed in 1.85s
+
+Tolerance source: `benchmarks.validation_ladder_contract.parity_ladder_tolerances("direct_kernel")`
+  rtol = 1e-10
+  atol = 1e-12
+
+No `atol=` / `rtol=` numeric literals are inlined in the new test
+body. Confirmed by:
+
+  git diff a9da18fac..HEAD -- tests/objectives/test_integral_bdotn_item10_closeout.py | \
+    grep -E "(atol|rtol)\s*=\s*[0-9eE.+-]+"
+
+(zero hits — all `rtol=` and `atol=` keyword references in the test
+either pass `_RTOL` / `_ATOL` from the ladder contract or pass `0.0`
+where a literal is the only valid value).
