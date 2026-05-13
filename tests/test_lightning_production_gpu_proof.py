@@ -237,7 +237,7 @@ def test_dry_run_emits_command_with_setuptools_scm_and_bash_safeguards(tmp_path)
     assert "--results-dir /proof/production-gpu-proof/" in stdout
 
 
-def test_dry_run_does_not_require_lightning_image_when_not_launching(tmp_path):
+def test_dry_run_requires_image_for_runnable_preflight_contract(tmp_path):
     env = _launcher_env(tmp_path, image=None)
     launcher_args = _default_launcher_args(tmp_path)
     preflight_path = tmp_path / "lightning_h200_preflight.json"
@@ -258,9 +258,37 @@ def test_dry_run_does_not_require_lightning_image_when_not_launching(tmp_path):
     )
 
     assert completed.returncode != 0
-    assert "Production GPU proof requires a prebuilt image" in (
-        completed.stdout + completed.stderr
+    output = completed.stdout + completed.stderr
+    assert "Production GPU proof requires a prebuilt image" in output
+    assert "SIMSOPT_LIGHTNING_GPU_IMAGE" in output
+    assert "SIMSOPT_HF_GPU_IMAGE" in output
+    assert "--image" in output
+
+
+def test_cloud_provider_rejects_unknown_provider(tmp_path):
+    env = _launcher_env(tmp_path)
+    launcher_args = _default_launcher_args(tmp_path)
+    preflight_path = tmp_path / "lightning_h200_preflight.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(LIGHTNING_LAUNCHER_SCRIPT),
+            "--dry-run",
+            "--cloud-provider",
+            "nebuis",
+            "--preflight-path",
+            str(preflight_path),
+            *launcher_args,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
     )
+
+    assert completed.returncode != 0
+    assert "invalid choice" in completed.stderr
 
 
 def test_proof_command_shares_run_proof_argv_with_hf_launcher(tmp_path):

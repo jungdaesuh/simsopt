@@ -32,13 +32,17 @@ _CPU_FIELD_MODULES = (
     "magnetic_axis_helpers",
     "force",
 )
-_JAX_FIELD_MODULES = ("biotsavart_jax_backend", "magneticfieldclasses_jax")
+_JAX_FIELD_MODULES = ("biotsavart_jax_backend",)
+_JAX_FIELD_SIMSOPTPP_MODULES = ("magneticfieldclasses_jax",)
 
 _cpu_field_modules = _CPU_FIELD_MODULES if _has_simsoptpp else ()
 _jax_field_modules = _JAX_FIELD_MODULES if _has_jax else ()
+_jax_simsoptpp_field_modules = (
+    _JAX_FIELD_SIMSOPTPP_MODULES if _has_jax and _has_simsoptpp else ()
+)
 
 _EXPORT_TO_MODULE, __all__ = build_lazy_export_map(
-    __file__, _cpu_field_modules + _jax_field_modules
+    __file__, _cpu_field_modules + _jax_field_modules + _jax_simsoptpp_field_modules
 )
 
 

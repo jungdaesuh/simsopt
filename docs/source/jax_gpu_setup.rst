@@ -371,7 +371,9 @@ lightning-nebius-prod``, ``--max-runtime-s 28800`` (8h). A preflight
 JSON snapshot is written to
 ``.artifacts/lightning_h200_preflight.json``. Pass ``--dry-run`` to
 print the resolved preflight, machine selection, and job command body
-without contacting the Lightning control plane.
+without contacting the Lightning control plane. Dry-runs still require
+the image and seed arguments so the generated preflight is the same
+contract a real launch would execute.
 
 After submission, recover the proof JSON by downloading the
 data-connection subpath ``production-gpu-proof/<sha>/<timestamp>``

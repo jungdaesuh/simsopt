@@ -24,6 +24,212 @@ The remaining work is therefore not "port SIMSOPT to JAX." The remaining work
 is to formalize the native equivalents of SIMSOPT object concepts, remove the
 last script-local/native-boundary seams, and extend multi-device sharding.
 
+## 2026-05-13 Full Remainder Update
+
+This section updates the plan after the CPU-only JAX-port closeout in
+`.artifacts/jax_port_goal/REPORT.md`. That closeout completed the default
+active scope (`P0`-`P2`) under `active_scope_profile=port_closure`, but it did
+not implement the future-scope inventory (`P3`-`P5`) and it intentionally left
+items `14`, `15`, and `16` as dependency-blocked.
+
+The full implementation remainder is the union of:
+
+- [ ] `12-circularcoil`: JAX-native complete elliptic-integral support and the
+  `CircularCoil` kernel/wrapper.
+- [ ] Item `14`: JAX-native tracing RK path.
+- [ ] Item `15`: complete the remaining `CircularCoil` and `InterpolatedField`
+  public wrappers.
+- [ ] Item `16`: public `field/tracing.py` JAX wrapper routing.
+- [ ] Items `18`-`23`: prompt `P3` geometry / optimizer / sampler / scalar
+  potential lanes.
+- [ ] Items `24`-`31`: prompt `P4` permanent-magnet and wireframe lanes.
+- [ ] Items `32`-`33`: prompt `P5` Boozer radial interpolant and
+  Boozer-magnetic-field lanes.
+- [ ] Existing native-sharding remainder in this plan: finish `points_coils`
+  2D collective lowering and its CPU multi-device proof.
+
+### Scope Activation Rule
+
+- [ ] Before implementation, update `.artifacts/jax_port_goal/state.json` or a
+  successor state file so `active_scope` explicitly includes the tiers being
+  worked. Do not rely on the old closeout's skipped `P3`-`P5` aggregate row as
+  execution state.
+- [ ] Split `18-33` into individual state rows before coding those items. Each
+  row needs the same evidence fields used by completed `P0`-`P2` work:
+  `source_audit`, `upstream_oracle`, `oracle_contract`,
+  `jax_transform_plan`, `math_physics_invariants`, `coverage_matrix`,
+  `red_evidence`, `parity_test`, `transfer_guard_test`, `bench_artifact`, and
+  `cuda_proof.status`.
+- [ ] Keep CUDA proof `not_claimed` unless the user explicitly starts a
+  `cuda_perf_release` run. CPU JAX full implementation is a valid next target;
+  CUDA release proof is a separate profile.
+
+### Dependency Graph
+
+The full remainder should not be executed strictly by item number. Several
+lower-numbered items are downstream of future-scope prerequisites:
+
+| Gate | Unlocks | Requirement |
+| --- | --- | --- |
+| Elliptic helper | `12-circularcoil`, item `15` `CircularCoil` wrapper | Implement JAX-native complete elliptic integrals in `src/simsopt/jax_core/_elliptic.py` with SciPy parity. |
+| InterpolatedField wrapper spec | Item `15`; part of tracing surface validation | Build a JAX wrapper-level spec over item-13 `regular_grid_interp`, including cylindrical coordinates, `nfp`, `stellsym`, skip masks, and out-of-domain semantics. |
+| Boozer radial interpolant | Items `33`, `14`, `16` | Port `simsoptpp/boozerradialinterpolant.cpp` and `boozermagneticfield*.h` into a JAX Boozer field spec/kernel. |
+| Event-time tolerance lane | Items `14`, `16` | Add a parity-ladder SSOT lane for adaptive RK dense-output and root-localization accuracy before replacing Boost TOMS748/DOPRI behavior. |
+| Framed/oriented curve kernels | Items `18`, `20` | Port frame ODE/framing kernels before finite-build geometry can claim JAX-native closure. |
+| Dipole / PM kernels | Items `26`-`28` | Port item `24` dipole field and item `25` PM optimization kernels before wrapper/grid/solve layers. |
+| Wireframe kernels | Items `30`-`31` | Port item `29` wireframe field and optimization kernels before public field/solve wrappers. |
+| `points_coils` 2D collective | Multi-device release track | Finish CPU forced-device collective lowering before any CUDA collective signoff. |
+
+### Execution Waves
+
+#### Wave R0 - Reconcile State And Plan Inputs
+
+- [ ] Commit or otherwise preserve the final closeout reconciliation files:
+  `.artifacts/jax_port_goal/REPORT.md`, `.artifacts/jax_port_goal/state.json`,
+  item-15 plan artifacts, and the lazy-export fix in
+  `src/simsopt/field/__init__.py`.
+- [ ] Decide whether the next run is CPU-only full implementation or
+  CUDA-performance release. Default to CPU-only unless the user explicitly
+  authorizes GPUs.
+- [ ] Expand the state schema from aggregate `18-33` skipped row into individual
+  pending item rows before coding prompt `P3`-`P5`.
+- [ ] Preserve the prompt anti-pattern rules: no silent fallback, no broad
+  `try/except`, no host callbacks inside compiled paths, no dynamic imports,
+  no inlined tolerance literals.
+
+#### Wave R1 - Complete The Item-15 Math And Wrapper Surface
+
+- [ ] Implement `src/simsopt/jax_core/_elliptic.py` using Carlson `R_F` and
+  `R_D` fixed-iteration `jax.lax.scan` kernels.
+- [ ] Add direct parity tests against `scipy.special.ellipk` and `ellipe` over
+  `m in [0, 1 - eps]`, including near-zero and near-one stress points. Use the
+  parity ladder for tolerances.
+- [ ] Implement `CircularCoil` B and `dB_by_dX` kernels. Prefer `jacfwd` of the
+  B kernel only if it meets parity and memory gates; otherwise use the closed
+  derivative formulas.
+- [ ] Add `CircularCoilJAX` to `src/simsopt/field/magneticfieldclasses_jax.py`
+  and export it only when both JAX and `simsoptpp` are available.
+- [ ] Implement an `InterpolatedFieldJAX` construction contract:
+  explicit source-field sampling at construction, immutable grid/spec arrays,
+  cylindrical-to-Cartesian coordinate conversion, `nfp` rotational folding,
+  `stellsym` z-folding, skip-mask behavior, and documented out-of-bounds
+  behavior.
+- [ ] Add wrapper parity for in-domain, folded, skip-mask, derivative, and
+  out-of-domain cases against the CPU `InterpolatedField` oracle.
+- [ ] Promote item `15` from `blocked_dependency` to `cpu_oracle_complete` only
+  after both `CircularCoilJAX` and `InterpolatedFieldJAX` pass strict
+  transfer-guard validation.
+
+#### Wave R2 - Boozer Field Before Tracing
+
+- [ ] Port `simsoptpp/boozerradialinterpolant.cpp` and related
+  `boozermagneticfield*.h` data contracts into
+  `src/simsopt/jax_core/boozer_radial_interp.py`.
+- [ ] Define immutable Boozer grid/interpolant specs with explicit coordinate
+  conventions, periodicity, derivative shape conventions, and field units.
+- [ ] Add direct fixed-state parity against the C++ Boozer radial interpolant
+  for B, derivatives, boundary/periodic points, and representative production
+  fixtures.
+- [ ] Implement `field/boozermagneticfield.py` JAX wrappers only after the
+  JAX core Boozer kernels are green.
+- [ ] Keep item `32` and item `33` separate: item `32` owns kernels/specs;
+  item `33` owns public wrapper routing and restart/serialization behavior.
+
+#### Wave R3 - Tracing Core And Public Tracing Wrappers
+
+- [ ] Add a new parity-ladder lane for tracing event-time / Poincare crossing
+  accuracy. This must be a contract update before coding item `14`, not an
+  after-the-fact tolerance exception.
+- [ ] Implement an in-repo JAX RK path for the C++ tracing surface:
+  fieldline RHS first, then guiding-center and full-orbit RHS after Boozer
+  fields are available.
+- [ ] Use fixed-shape carries with max-step caps and masks for JAX loops; do
+  not append Python lists or emit dynamic host objects from compiled kernels.
+- [ ] Implement a JAX-compatible bracketed event localizer with the chosen
+  tolerance lane; document why it is the accepted replacement for Boost
+  TOMS748.
+- [ ] Implement the JAX surface classifier used by
+  `LevelsetStoppingCriterion`; reuse item-13 / `InterpolatedFieldJAX` grid
+  specs where possible.
+- [ ] Add CPU parity against `tests/field/test_fieldline.py`,
+  `tests/field/test_particle.py`, and targeted Poincare/event fixtures.
+- [ ] Only after item `14` is green, wire `field/tracing.py` item `16` public
+  wrappers to the JAX backend. Do not add a placeholder backend or fallback.
+
+#### Wave R4 - Prompt P3 Geometry, Optimizer, Sampling, Scalar Potential
+
+- [ ] Item `18`: port `geo/framedcurve.py` and `geo/orientedcurve.py` ODE /
+  framing operations to specs and JAX kernels. Cover Frenet and centroid frame
+  variants and their VJP contracts.
+- [ ] Item `20`: port `geo/finitebuild.py` after item `18`; parity must include
+  filament construction, frame offsets, and derivative/VJP behavior.
+- [ ] Item `19`: finish the private on-device optimizer contract audit for
+  `qfmsurface.py`, `optimizer_jax.py`, `optimizer_jax_private/*`,
+  `optimizer_jax_reference.py`, and `optimizer_host_lbfgs.py`. Keep host
+  reference oracles explicit and outside compiled target mode.
+- [ ] Item `21`: implement `field/magnetic_axis_helpers.py` on-axis iota ODE
+  with an in-repo JAX RK/scan path and field-spec input. Reuse the tracing
+  tolerance lane if the same event/ODE accuracy contract applies.
+- [ ] Item `22`: port `field/sampling.py` with an explicit
+  `jax.random.PRNGKey` contract. No hidden global RNG state.
+- [ ] Item `23`: evaluate `ScalarPotentialRZMagneticField`. Proceed only if
+  symbolic expressions can be lowered to a static JAX expression/spec before
+  compile time; block if runtime SymPy/lambdify is the only path.
+
+#### Wave R5 - Prompt P4 Permanent Magnet And Wireframe Lanes
+
+- [ ] Item `24`: port `simsoptpp/dipole_field.cpp` to
+  `src/simsopt/jax_core/dipole_field.py`; include field, derivative, and
+  production-grid parity.
+- [ ] Item `25`: port `simsoptpp/permanent_magnet_optimization.cpp` to
+  `src/simsopt/jax_core/pm_optimization.py`; define immutable PM grid and
+  optimizer-state specs.
+- [ ] Item `26`: implement `DipoleFieldJAX` after item `24`.
+- [ ] Item `27`: port `geo/permanent_magnet_grid.py` after items `24` and
+  `25`; preserve file/export behavior outside compiled kernels.
+- [ ] Item `28`: port `solve/permanent_magnet_optimization.py` after item
+  `25`; optimizer state must be explicit arrays/specs, not mutable globals.
+- [ ] Item `29`: port `wireframe_optimization.cpp`,
+  `magneticfield_wireframe.cpp`, and `wireframe_field_impl.h` to
+  `src/simsopt/jax_core/wireframe.py`.
+- [ ] Item `30`: implement `WireframeFieldJAX` after item `29`.
+- [ ] Item `31`: port `solve/wireframe_optimization.py` after item `29`.
+
+#### Wave R6 - `points_coils` 2D Sharding And Release Evidence
+
+- [ ] Finish the grouped-field 2D collective kernel: points sharded on the
+  point axis, coils sharded on the coil axis, `lax.psum` over coil axis, and
+  point-sharded output after reduction.
+- [ ] Add CPU forced-device StableHLO tests proving the `points_coils` lowering
+  contains the expected collective reduction.
+- [ ] Add parity tests for non-divisible coil counts and mixed quadrature
+  groups.
+- [ ] If and only if the user authorizes GPU work, run CUDA/NCCL smoke for
+  `coil_groups` and `points_coils` and populate `cuda_proof` artifacts from
+  real CUDA execution.
+
+### Full Remainder Definition Of Done
+
+- [ ] Every item `14`-`33` has an individual state row with status
+  `complete`, `blocked`, or `skipped`; no aggregate `18-33` row remains for an
+  active full-implementation run.
+- [ ] Every completed item has `closure_level=cpu_oracle_complete` or
+  `closure_level=cuda_verified`, an oracle contract, coverage matrix,
+  JAX-transform plan, math/physics invariants, red evidence, restart note,
+  bench artifact, and targeted tests.
+- [ ] Every blocked item has a blocker artifact with category, specific missing
+  dependency, two-timebox evidence when applicable, and a proposed user
+  decision.
+- [ ] All new tolerances live in
+  `benchmarks/validation_ladder_contract.py`; tests import those tolerances
+  instead of inlining numeric `rtol` / `atol`.
+- [ ] Strict transfer-guard tests pass for every item that claims a JAX-native
+  host/device boundary.
+- [ ] Public CPU/SIMSOPT compatibility remains intact; upstream CPU/C++
+  behavior stays the oracle, not a path to edit away.
+- [ ] CUDA is either explicitly `not_claimed` or proven by real CUDA artifacts;
+  CPU/HLO proxies are never recorded as CUDA verification.
+
 ## Wave 1 Launch Status
 
 - [x] P1: added `BiotSavartJAX.B_pullback_native(v)` and

@@ -8,6 +8,7 @@ Active scope: `P0`, `P1`, `P2` (goal-prompt default; P3-P5 skipped).
 Active scope profile: `port_closure`.
 GPU policy: `no_gpu_runs`. User explicitly requested CPU JAX only.
 Upstream SIMSOPT audit SHA: `1b0cc3a96063197cdbdd01559e04c25456fbe6ff`.
+Repository audit HEAD: `db185cb37e8154970759b68789720132e64ce406`.
 Python runtime:
 `/Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python`
 (`jax==0.10.0`, `jaxlib==0.10.0`, CPU backend).
@@ -37,27 +38,27 @@ No CUDA artifact is claimed or deferred (`cuda_smoke=not_claimed`).
 
 ## Items table
 
-| # | Tier | Title | Status | Closure level | Parity test |
-|---|------|-------|--------|---------------|-------------|
-| 01 | P0 | CurrentPenalty + distance wrappers | complete | cpu_oracle_complete | tests/field/test_coilobjective.py |
-| 02 | P0 | regularized self-field JAX coverage | complete | cpu_oracle_complete | tests/field/test_selffieldforces.py + tests/field/test_selffield_item02_closeout.py |
-| 03 | P0 | SquaredFlux / SquaredFluxJAX | complete | cpu_oracle_complete | tests/objectives/test_fluxobjective_jax_item03_closeout.py |
-| 04 | P0 | Boozer surface objectives + wrappers | complete | cpu_oracle_complete | tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py |
-| 05 | P0 | curve spec/geometry adapter closeouts | complete | cpu_oracle_complete | tests/geo/test_curve_item05_closeout.py |
-| 06 | P0 | surface Fourier adapter closeouts | complete | cpu_oracle_complete | tests/geo/test_surface_rzfourier_jax_item06_closeout.py |
-| 07 | P0 | non-distance curve objectives | complete | cpu_oracle_complete | tests/geo/test_curveobjectives_item07_closeout.py |
-| 08 | P0 | strain optimization accumulators | complete | cpu_oracle_complete | tests/geo/test_strainopt_item08_closeout.py |
-| 09 | P0 | finite-build force pre-compute | complete | cpu_oracle_complete | tests/field/test_force_item09_closeout.py |
-| 10 | P0 | Biot-Savart / BdotN JAX closeouts | complete | cpu_oracle_complete | tests/objectives/test_integral_bdotn_item10_closeout.py |
-| 11 | P1 | Dommaschk + Reiman kernels | complete | cpu_oracle_complete | tests/jax_core/test_analytic_fields_item11.py |
-| 12 | P1 | pure analytic magnetic fields (T/P/Mirror) | complete (partial) | cpu_oracle_complete | tests/jax_core/test_analytic_pure_fields_item12.py |
-| 12-cc | P1 sub | CircularCoil JAX port | blocked | blocked_dependency | N/A (ellipk/ellipe missing in jaxlib 0.10.0) |
-| 13 | P1 | regular grid interpolant 3D | complete | cpu_oracle_complete | tests/jax_core/test_regular_grid_interp_item13.py |
-| 14 | P1 | tracing RK path | blocked | blocked_dependency | N/A |
-| 15 | P2 | analytic-field + InterpolatedField wrappers | blocked (partial) | blocked_dependency | tests/field/test_magneticfieldclasses_jax_item15.py (5 of 6 wrappers) |
-| 16 | P2 | field tracing wrappers | blocked | blocked_dependency | N/A |
-| 17 | P2 | NormalField / CoilNormalField | complete | cpu_oracle_complete | tests/field/test_normal_field_item17_closeout.py |
-| 18-33 | P3-P5 | future-scope inventory | skipped | skipped_future_scope | N/A |
+| # | Tier | Title | Status | Closure level | Oracle contract | Evidence pointer |
+|---|------|-------|--------|---------------|-----------------|------------------|
+| 01 | P0 | CurrentPenalty + distance wrappers | complete | cpu_oracle_complete | fixed_scalar_and_fixed_gradient_vjp | tests/field/test_coilobjective.py |
+| 02 | P0 | regularized self-field JAX coverage | complete | cpu_oracle_complete | regularized_self_field_analytic_and_wrapper_transfer_boundary | tests/field/test_selffieldforces.py + tests/field/test_selffield_item02_closeout.py |
+| 03 | P0 | SquaredFlux / SquaredFluxJAX | complete | cpu_oracle_complete | fixed_state_scalar_and_fixed_state_gradient_vjp | tests/objectives/test_fluxobjective_jax_item03_closeout.py |
+| 04 | P0 | Boozer surface objectives + wrappers | complete | cpu_oracle_complete | fixed_state_scalar_and_vector | tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py |
+| 05 | P0 | curve spec/geometry adapter closeouts | complete | cpu_oracle_complete | fixed_state_curve_geometry | tests/geo/test_curve_item05_closeout.py |
+| 06 | P0 | surface Fourier adapter closeouts | complete | cpu_oracle_complete | fixed_state_surface_geometry | tests/geo/test_surface_rzfourier_jax_item06_closeout.py |
+| 07 | P0 | non-distance curve objectives | complete | cpu_oracle_complete | fixed_state_scalar_and_fd_gradient | tests/geo/test_curveobjectives_item07_closeout.py |
+| 08 | P0 | strain optimization accumulators | complete | cpu_oracle_complete | fixed_gradient_vjp | tests/geo/test_strainopt_item08_closeout.py |
+| 09 | P0 | finite-build force pre-compute | complete | cpu_oracle_complete | fixed_state_scalar_and_directional_fd_gradient | tests/field/test_force_item09_closeout.py |
+| 10 | P0 | Biot-Savart / BdotN JAX closeouts | complete | cpu_oracle_complete | fixed_state_scalar | tests/objectives/test_integral_bdotn_item10_closeout.py |
+| 11 | P1 | Dommaschk + Reiman kernels | complete | cpu_oracle_complete | fixed_scalar_and_fixed_gradient_vjp | tests/jax_core/test_analytic_fields_item11.py |
+| 12 | P1 | pure analytic magnetic fields (T/P/Mirror) | complete (partial) | cpu_oracle_complete | fixed_scalar_and_fixed_gradient_vjp | tests/jax_core/test_analytic_pure_fields_item12.py |
+| 12-cc | P1 sub | CircularCoil JAX port | blocked | blocked_dependency | fixed_scalar_and_fixed_gradient_vjp | .artifacts/jax_port_goal/blockers/12-circularcoil-debug.md |
+| 13 | P1 | regular grid interpolant 3D | complete | cpu_oracle_complete | fixed_scalar | tests/jax_core/test_regular_grid_interp_item13.py |
+| 14 | P1 | tracing RK path | blocked | blocked_dependency | fixed_state_trajectory_events | .artifacts/jax_port_goal/blockers/14-debug.md |
+| 15 | P2 | analytic-field + InterpolatedField wrappers | blocked (partial) | blocked_dependency | fixed_state_vector_and_derivatives | tests/field/test_magneticfieldclasses_jax_item15.py + .artifacts/jax_port_goal/blockers/15-interpolatedfield-debug.md |
+| 16 | P2 | field tracing wrappers | blocked | blocked_dependency | fixed_state_trajectory_events | .artifacts/jax_port_goal/blockers/16-debug.md |
+| 17 | P2 | NormalField / CoilNormalField | complete | cpu_oracle_complete | fixed_scalar | tests/field/test_normal_field_item17_closeout.py |
+| 18-33 | P3-P5 | future-scope inventory | skipped | skipped_future_scope | N/A: future_scope | .artifacts/jax_port_goal/state.json |
 
 ## Commit log (this run)
 

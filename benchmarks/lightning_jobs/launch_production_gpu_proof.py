@@ -32,7 +32,9 @@ This launcher specialises only the Lightning-specific pieces:
   preflight on stdout.
 
 Run with ``--dry-run`` to print the preflight, machine selection, and
-resolved job command without contacting the Lightning control plane.
+resolved job command without contacting the Lightning control plane. Dry-runs
+still require the same image and seed inputs as a launch so the preflight
+matches the runnable production proof contract.
 """
 
 from __future__ import annotations
@@ -60,7 +62,7 @@ from benchmarks.hf_jobs.launch_production_gpu_proof import (  # noqa: E402
     _build_preflight_report,
     _build_run_proof_argv,
     _resolve_repo_defaults,
-    _validate_runtime_contract,
+    _validate_runtime_contract as _validate_hf_runtime_contract,
 )
 
 
@@ -93,6 +95,17 @@ def _setuptools_scm_pretend_version(resolved_sha: str) -> str:
     if not resolved_sha:
         raise SystemExit("Resolved repo SHA is empty; cannot derive pretend version.")
     return f"0.0.0+proof.{resolved_sha[:8]}"
+
+
+def _validate_lightning_runtime_contract(
+    args: argparse.Namespace,
+) -> argparse.Namespace:
+    if not args.image:
+        raise SystemExit(
+            "Production GPU proof requires a prebuilt image via "
+            "SIMSOPT_LIGHTNING_GPU_IMAGE, SIMSOPT_HF_GPU_IMAGE, or --image."
+        )
+    return _validate_hf_runtime_contract(args)
 
 
 def _artifact_relative_path(resolved_sha: str, timestamp: str) -> str:
@@ -342,6 +355,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cloud-provider",
         default=LIGHTNING_DEFAULT_CLOUD_PROVIDER,
+        choices=("nebius", "aws", "gcp"),
         help=(
             "Cloud provider for the Lightning job (nebius, aws, gcp). Nebius "
             "exposes lit-h200x-1; AWS default exposes only lit-h200x-8."
@@ -445,7 +459,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    args = _validate_runtime_contract(_resolve_repo_defaults(parse_args()))
+    args = _validate_lightning_runtime_contract(_resolve_repo_defaults(parse_args()))
     base_preflight = _build_preflight_report(args)
     resolved_sha = str(base_preflight["repo_sha"])
     timestamp = _utc_timestamp()
@@ -484,11 +498,6 @@ def main() -> None:
     if args.dry_run:
         print(f"[dry-run] command for {hardware}:\n{command}")
         return
-    if not args.image:
-        raise SystemExit(
-            "Production GPU proof requires a prebuilt image via "
-            "SIMSOPT_LIGHTNING_GPU_IMAGE / SIMSOPT_HF_GPU_IMAGE or --image."
-        )
     machine = _resolve_machine(hardware)
     job = _submit_lightning_job(
         job_name=job_name,
