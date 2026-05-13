@@ -1,0 +1,145 @@
+Item 17 red-step evidence — coverage-completeness witness.
+
+Interpretation note
+-------------------
+
+Item 17 (`NormalField` and `CoilNormalField` Fourier normal-field
+transforms and coil-produced normal-field evaluation) adds NO code change
+to `src/simsopt/field/normal_field.py`. The fork's `normal_field.py` is
+byte-identical to upstream SIMSOPT SHA
+`1b0cc3a96063197cdbdd01559e04c25456fbe6ff`:
+
+  $ diff -q simsopt-jax/src/simsopt/field/normal_field.py \
+           opensource/simsopt/src/simsopt/field/normal_field.py
+  # (zero lines of output)
+
+The module is pure NumPy at runtime; no `jax`, `jaxlib`, `simsoptpp`, or
+`Derivative` projection is imported. The downstream JAX-native paths it
+depends on (item 03 `SquaredFlux` / `SquaredFluxJAX`, item 06
+`surface_fourier_jax`, item 10 `BiotSavartJAX` / `integral_BdotN`) are
+already JAX-native on the parent commit; the public `NormalField` /
+`CoilNormalField` surface routes through CPU `BiotSavart` and the
+pure-NumPy `SurfaceRZFourier.fourier_transform_scalar` /
+`inverse_fourier_transform_scalar` helpers at
+`src/simsopt/geo/surfacerzfourier.py:2169` and 2269.
+
+The new test file
+`tests/field/test_normal_field_item17_closeout.py` does NOT target a
+wrong-sign / wrong-scale / missing-host-transfer regression that the
+parent commit was masking. Instead it bundles five attributes that no
+single existing fixture co-locates:
+
+  1. Production-scale fixture: `nphi=32`, `ntheta=16`, `nfp=2`,
+     `coils_per_period=4` (yielding `ncoils=8` after symmetry expansion),
+     `mpol=4 / ntor=3` for `stellsym=True` and `mpol=3 / ntor=2` for
+     `stellsym=False`. Existing `tests/field/test_normal_field.py`
+     fixtures sit at `mpol/ntor <= 6/4` and `nphi/ntheta` at the surface
+     default (not the production-scale floor named in the goal-prompt
+     section 4c).
+  2. Both `stellsym=True` and `stellsym=False` parameterized in a
+     single fixture, exercising both the sine-only `Vns` branch and the
+     `Vns / Vnc` cosine series.
+  3. Bit-tight `direct_kernel` parity-ladder lane (`rtol=1e-10`,
+     `atol=1e-12`) on the Fourier-pair round-trip identity AND the
+     `CoilNormalField` reduction-vs-direct-numpy-oracle parity.
+     `tests/field/test_normal_field.py::CoilNormalFieldTests::test_real_space_field`
+     uses `atol=1e-3` on the truncated-mpol reconstruction; the new
+     closeout test locks in the strictly tighter parity-ladder lane on
+     the non-truncated reduction.
+  4. Strict-transfer-guard discipline: every test runs under the
+     explicit `jax.transfer_guard("disallow")` context and is also
+     validated under the process-wide `SIMSOPT_JAX_TRANSFER_GUARD=disallow`
+     env-var. The discipline is vacuous on the NumPy hot path (no JAX
+     kernel is invoked by `normal_field.py`), but locks in the future
+     invariant that the public `vns` / `vnc` / `get_real_space_field`
+     accessors never silently add a JAX host-staging path.
+  5. Cache-invalidation parity at production scale: changing a
+     `CoilSet` DOF clears the `_vns` / `_vnc` cache and the next access
+     reproduces the new hand-rolled oracle bit-tight. Existing
+     `CoilNormalFieldTests::test_cache_vns` / `test_cache_vnc` only
+     assert that the cache becomes non-None after the first access; they
+     do not assert post-invalidation parity at the `direct_kernel` lane.
+
+Since the parent commit (`a9da18facfda9a51f14534ea9d06e76803213db0`) is
+also the original base of `gpu-purity-stage2-20260405`, the new test
+passes on parent. This is the "no-op pre-existing-coverage proof" /
+"coverage-completeness witness" case explicitly allowed in the closeout
+prompt for items that add no code change (section 4c carve-out).
+
+Procedure
+---------
+
+  git worktree add --detach /tmp/simsopt-jax-item17-red/wt a9da18fac
+  cp tests/field/test_normal_field_item17_closeout.py \
+     /tmp/simsopt-jax-item17-red/wt/tests/field/
+  cd /tmp/simsopt-jax-item17-red/wt
+
+  JAX_ENABLE_X64=True JAX_PLATFORMS=cpu PYTHONPATH=src \
+    /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python \
+    -m pytest tests/field/test_normal_field_item17_closeout.py -q
+
+  SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True \
+    JAX_PLATFORMS=cpu PYTHONPATH=src \
+    /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python \
+    -m pytest tests/field/test_normal_field_item17_closeout.py -q
+
+  git worktree remove --force /tmp/simsopt-jax-item17-red/wt
+
+Parent commit under test: `a9da18facfda9a51f14534ea9d06e76803213db0`
+("jax-port: close CurrentPenalty + distance wrappers [item 01]"). This
+matches the prompt-supplied parent SHA and the goal-prompt original base
+commit `fa3f877af` lineage.
+
+Result on parent commit with the new test file (default transfer guard):
+
+  .........                                                          [100%]
+  9 passed in 1.14s
+
+Result on parent commit with the new test file
+(SIMSOPT_JAX_TRANSFER_GUARD=disallow):
+
+  .........                                                          [100%]
+  9 passed in 0.95s
+
+Both invocations pass at parent because:
+
+  - `src/simsopt/field/normal_field.py` is byte-identical to upstream.
+  - `SurfaceRZFourier.fourier_transform_scalar` /
+    `inverse_fourier_transform_scalar` are pure NumPy and already
+    satisfy the upstream "inverse Fourier transform(Fourier transform)
+    = identity" invariant on the band-limited mode set (`surfacerzfourier.py:2249-2253`).
+  - `CoilNormalField.vns` / `.vnc` already use the SSOT reduction
+    formula at `normal_field.py:576-577` and 589-590, and the
+    `Optimizable.recompute_bell` cache invalidation is unchanged.
+  - The CPU `BiotSavart.B()` and `SurfaceRZFourier.normal()` oracles
+    are the parity reference for the hand-rolled CoilNormalField
+    oracle.
+
+This is the section-4c carve-out: a partial-coverage closeout where the
+existing path already passes most tests and the new test targets a
+previously unmapped production-scale + dual-symmetry + strict
+transfer-guard + bit-tight `direct_kernel` lane slice. Red-step is
+documented as PASSING on parent commit `a9da18facfda9a51f14534ea9d06e76803213db0`
+with "coverage-completeness witness" rationale rather than failing-on-parent
+evidence.
+
+Post-implementation result on the current HEAD's tree (after items 3, 5,
+6, 7, 8, 9, 10, 13 closeouts landed in parallel commits):
+
+  JAX_ENABLE_X64=True JAX_PLATFORMS=cpu \
+    .conda/jax-0.9.2/bin/python -m pytest \
+    tests/field/test_normal_field_item17_closeout.py -q
+  -> 9 passed in 0.96s
+
+  SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True \
+    JAX_PLATFORMS=cpu \
+    .conda/jax-0.9.2/bin/python -m pytest \
+    tests/field/test_normal_field_item17_closeout.py -q
+  -> 9 passed in 0.98s
+
+The test file imports tolerances from
+`benchmarks.validation_ladder_contract.parity_ladder_tolerances("direct_kernel")`
+and contains no `atol` / `rtol` numeric literals inlined in the test
+bodies. The only string occurrence of `rtol=1e-10` / `atol=1e-12` in
+the test file is inside the module docstring's parenthetical citation
+of the lane tolerances, not in an assertion call.
