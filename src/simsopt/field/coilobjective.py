@@ -10,13 +10,20 @@ __all__ = ["CurrentPenalty"]
 
 
 def current_penalty_pure(I, threshold):
-    abs_current = jnp.abs(I)
-    excess = abs_current - threshold
-    # Keep zero on-device for strict transfer_guard while preserving
-    # inf-current penalties.
-    zero_source = jnp.minimum(abs_current, threshold)
-    zero = zero_source - zero_source
-    positive_excess = jnp.maximum(excess, zero)
+    # The on-device zero is built from ``threshold - threshold`` (the
+    # callers always pass a finite threshold) so the strict
+    # ``transfer_guard("disallow")`` path never sees a Python literal:
+    # both ``jnp.maximum(excess, 0.0)`` and ``jnp.zeros_like(excess)``
+    # trip the guard because they materialise a host 0 on-device. The
+    # previous ``min(|I|, t) - min(|I|, t)`` trick avoided the guard
+    # but threaded 0 * inf through autodiff at I=±inf, returning NaN
+    # gradients that broke L-BFGS line-search backtracks after
+    # overshoots. ``jnp.maximum(excess, threshold - threshold)``
+    # autodifferentiates to ``sign(I)`` at the boundary, so the
+    # squared form has the correct ±inf gradient at I=±inf.
+    excess = jnp.abs(I) - threshold
+    on_device_zero = threshold - threshold
+    positive_excess = jnp.maximum(excess, on_device_zero)
     return positive_excess * positive_excess
 
 

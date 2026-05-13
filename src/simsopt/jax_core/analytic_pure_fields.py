@@ -332,7 +332,16 @@ def toroidal_B(spec: ToroidalFieldSpec, points: jax.Array) -> jax.Array:
 
 
 def toroidal_dB(spec: ToroidalFieldSpec, points: jax.Array) -> jax.Array:
-    """``dB/dX[p, j, l] = ∂_j B_l(x_p)`` for a toroidal field."""
+    """``dB[p, l, j] = ∂_j B_l(x_p)`` for a toroidal field.
+
+    Layout note: axis 1 is the B component, axis 2 is the derivative
+    direction. This matches the CPU oracle's ``np.array([dBdx,
+    dBdy, dBdz]).T`` storage in ``ToroidalField._dB_by_dX_impl``
+    rather than the abstract simsopt-jax tensor convention
+    documented in ``CLAUDE.md``. The deviation is intentional so
+    that ``direct_kernel`` same-state parity vs the CPU oracle holds
+    bit-for-bit. See the module-level docstring.
+    """
     R0, B0 = _toroidal_scalars(spec)
     return _toroidal_dB_jit(R0, B0, _validate_points(points))
 
@@ -350,7 +359,12 @@ def toroidal_A(spec: ToroidalFieldSpec, points: jax.Array) -> jax.Array:
 
 
 def toroidal_dA(spec: ToroidalFieldSpec, points: jax.Array) -> jax.Array:
-    """``dA/dX[p, j, l]`` matching the CPU oracle layout."""
+    """``dA[p, l, j] = ∂_j A_l(x_p)`` for a toroidal field's vector
+    potential.
+
+    Layout note: axis 1 is the A component, axis 2 is the derivative
+    direction (CPU-oracle layout; see ``toroidal_dB`` docstring).
+    """
     R0, B0 = _toroidal_scalars(spec)
     return _toroidal_dA_jit(R0, B0, _validate_points(points))
 
@@ -497,7 +511,11 @@ def poloidal_B(spec: PoloidalFieldSpec, points: jax.Array) -> jax.Array:
 
 
 def poloidal_dB(spec: PoloidalFieldSpec, points: jax.Array) -> jax.Array:
-    """``dB/dX[p, j, l]`` matching the CPU oracle layout."""
+    """``dB[p, l, j] = ∂_j B_l(x_p)`` for a poloidal field.
+
+    Layout note: axis 1 is the B component, axis 2 is the derivative
+    direction (CPU-oracle layout; see ``toroidal_dB`` docstring).
+    """
     R0, B0, q = _poloidal_scalars(spec)
     return _poloidal_dB_jit(R0, B0, q, _validate_points(points))
 

@@ -137,15 +137,6 @@ class ToroidalFieldJAX(MagneticField):
         self.B0 = float(B0)
         self._spec = ToroidalFieldSpec(R0=self.R0, B0=self.B0)
 
-    def _spec_refresh(self) -> None:
-        """Rebuild the immutable spec from current attributes.
-
-        ``ToroidalField`` is currently DOF-free upstream, but the spec
-        is rebuilt defensively so future DOF wiring stays consistent.
-        """
-
-        self._spec = ToroidalFieldSpec(R0=float(self.R0), B0=float(self.B0))
-
     def _B_impl(self, B):
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
         B[:] = np.asarray(
@@ -203,11 +194,6 @@ class PoloidalFieldJAX(MagneticField):
         self.q = float(q)
         self._spec = PoloidalFieldSpec(R0=self.R0, B0=self.B0, q=self.q)
 
-    def _spec_refresh(self) -> None:
-        self._spec = PoloidalFieldSpec(
-            R0=float(self.R0), B0=float(self.B0), q=float(self.q)
-        )
-
     def _B_impl(self, B):
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)
         B[:] = np.asarray(
@@ -248,11 +234,6 @@ class MirrorModelJAX(MagneticField):
         self.gamma = float(gamma)
         self.Z_m = float(Z_m)
         self._spec = MirrorModelSpec(B0=self.B0, gamma=self.gamma, Z_m=self.Z_m)
-
-    def _spec_refresh(self) -> None:
-        self._spec = MirrorModelSpec(
-            B0=float(self.B0), gamma=float(self.gamma), Z_m=float(self.Z_m)
-        )
 
     def _B_impl(self, B):
         points = np.asarray(self.get_points_cart_ref(), dtype=np.float64)

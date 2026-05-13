@@ -88,6 +88,21 @@ def test_current_penalty_pure_preserves_infinite_penalty():
     assert jnp.isinf(current_penalty_pure(jnp.asarray(np.inf), 5.0))
 
 
+def test_current_penalty_pure_gradient_at_infinity_preserves_sign():
+    """At I=±inf the analytic derivative is 2*(|I|-t)*sign(I) -> ±inf, not NaN.
+
+    Regression guard for the prior `zero_source - zero_source` strict-
+    transfer trick which forced 0 * inf through the chain rule and
+    silently turned the autodiff gradient into NaN at the boundary.
+    L-BFGS line-search overshoots that produce I=±inf rely on a
+    finite-or-infinite (not NaN) gradient to backtrack cleanly.
+    """
+    grad_pos = jax.grad(current_penalty_pure)(jnp.asarray(jnp.inf), 5.0)
+    grad_neg = jax.grad(current_penalty_pure)(jnp.asarray(-jnp.inf), 5.0)
+    assert jnp.isinf(grad_pos) and grad_pos > 0
+    assert jnp.isinf(grad_neg) and grad_neg < 0
+
+
 def test_current_penalty_production_scale_multi_coil_sum_parity():
     """Production-scale floor: sum-over-ncoils CurrentPenalty matches a
     NumPy reference at the Stage-2 banana TF coil count (16 coils).
