@@ -449,22 +449,27 @@ the remaining CPU/host-transfer edge if one exists, and either close that edge
 or mark the item complete with evidence.
 
 1. [ ] `field/coilobjective.py` (`CurrentPenalty`) and remaining
-   `geo/curveobjectives.py` wrappers around `geo/_distance_jax.py`
+   `geo/curveobjectives.py` wrappers around `geo/_distance_jax.py` and
+   `geo/_pairwise_reductions.py`
 2. [ ] `field/selffield.py` - regularized self-field JAX coverage and tests
 3. [ ] `objectives/fluxobjective.py` + `objectives/fluxobjective_jax.py` -
    `SquaredFlux` / `SquaredFluxJAX` fixed-surface objective coverage,
    derivative projection, and downstream Stage-2 consumers
-4. [ ] `geo/surfaceobjectives.py` + `geo/surfaceobjectives_jax.py` -
-   existing JAX objective wrappers, Boozer traceable runtime, QFM/standard
-   surface objectives, and CPU-wrapper parity boundaries
+4. [ ] `geo/boozersurface.py`, `geo/boozersurface_jax.py`,
+   `geo/surfaceobjectives.py`, `geo/surfaceobjectives_jax.py`,
+   `geo/label_constraints_jax.py`, `geo/_boozersurface_current_guard.py`, and
+   `geo/_simsoptpp_boozer_compat.py` - existing JAX objective wrappers, Boozer
+   traceable runtime, QFM/standard surface objectives, label constraints, and
+   CPU-wrapper parity boundaries
 5. [ ] `geo/{curve.py,curvexyzfourier.py,curverzfourier.py,
-   curveplanarfourier.py,curvehelical.py,curvecwsfourier.py,
-   curveperturbed.py}` + `jax_core/curve_geometry.py` - curve spec/geometry
-   adapter coverage and C++ curve-kernel parity closeouts
+   curvexyzfouriersymmetries.py,curveplanarfourier.py,curvehelical.py,
+   curvecwsfourier.py,curveperturbed.py}` + `jax_core/curve_geometry.py` -
+   curve spec/geometry adapter coverage and C++ curve-kernel parity closeouts
 6. [ ] `geo/{surface.py,surfacerzfourier.py,surfacexyzfourier.py,
-   surfacexyztensorfourier.py}` + `jax_core/{surface_rzfourier.py,
-   surface_fourier.py}` - surface spec/geometry adapter coverage and C++
-   surface-kernel parity closeouts
+   surfacexyztensorfourier.py,_surface_stellsym.py,
+   surface_fourier_jax_cpu_ordered.py}` + `jax_core/{surface_rzfourier.py,
+   surface_fourier.py}` - surface spec/geometry adapter coverage, stellsym
+   helpers, CPU-ordered parity twins, and C++ surface-kernel parity closeouts
 7. [ ] `geo/curveobjectives.py` non-distance objectives - `CurveLength`,
    `LpCurveCurvature(Barrier)`, `LpCurveTorsion`, `ArclengthVariation`,
    `MeanSquaredCurvature`, `LinkingNumber`, `FramedCurveTwist`. Distance
@@ -473,8 +478,10 @@ or mark the item complete with evidence.
 8. [ ] `geo/strain_optimization.py` - strain accumulators / postprocessing
 9. [ ] `field/force.py` - finite-build force kernel pre-compute layers
 10. [ ] `field/biotsavart_jax.py`, `field/biotsavart_jax_backend.py`,
+    `field/coil.py`, `field/_coil_graph.py`,
     `jax_core/biotsavart*.py`, `jax_core/objectives_flux.py`,
-    `objectives/integral_bdotn_jax.py`, and the existing
+    `objectives/integral_bdotn_jax.py`,
+    `objectives/stage2_target_objective_jax.py`, and the existing
     `simsoptpp/{biot_savart*,integral_BdotN.*}` parity oracles - close current
     JAX Biot-Savart / BdotN coverage without modifying `field/biotsavart.py`
 
@@ -508,7 +515,10 @@ instead of adding the dependency.
 ### Tier P3 - future-scope; skipped unless `active_scope` includes P3
 
 18. [ ] `geo/framedcurve.py` + `geo/orientedcurve.py` - ODE/framing replacement
-19. [ ] `geo/qfmsurface.py` - private on-device optimizer contract
+19. [ ] `geo/qfmsurface.py`, `geo/optimizer_jax.py`,
+   `geo/optimizer_jax_private/*`, `geo/optimizer_jax_reference.py`, and
+   `geo/optimizer_host_lbfgs.py` - private on-device optimizer contract and
+   host/reference parity oracles
 20. [ ] `geo/finitebuild.py` - finite-build geometry kernel
 21. [ ] `field/magnetic_axis_helpers.py` - on-axis iota ODE using an in-repo
    JAX RK/scan path and a field-spec contract
@@ -543,9 +553,11 @@ Skip list (do not port; if you touch these, escalate):
 - `mhd/*` (external Fortran / C++ binary wrappers)
 - `_core/optimizable.py`, `_core/derivative.py`, `_core/json.py`
 - `field/biotsavart.py` (parity oracle)
+- `_core/finite_difference.py` (finite-difference oracle / host optimizer helper)
 - `objectives/{least_squares,constrained,functions,utilities}.py`
 - `solve/serial.py`, `solve/mpi.py` (orchestration)
-- `util/`, `geo/plotting.py`, `field/mgrid.py`, `field/coilset.py`
+- `util/`, `geo/{config,jit,plotting}.py`, `field/mgrid.py`, `field/coilset.py`
+- `geo/_simsoptpp.py` and private helper modules not owned by a manifest item
 - `geo/{surfacegarabedian,surfacehenneberg,accessibility,hull,ports,wireframe_toroidal}.py`
   (auxiliary / historic / CAD; port only on explicit user request)
 - `src/simsoptpp/python*.cpp`, `src/simsoptpp/py*.h`, `*_py.*`,
