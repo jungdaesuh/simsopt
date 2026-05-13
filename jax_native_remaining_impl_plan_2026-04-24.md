@@ -64,6 +64,17 @@ The full implementation remainder is the union of:
   `cuda_perf_release` run. CPU JAX full implementation is a valid next target;
   CUDA release proof is a separate profile.
 
+### 2026-05-13 Review Corrections
+
+- Current HEAD reviewed for this plan: `795d8e15f09c9f39569d25734b92e9e36d57112a`.
+- `points_coils` remains a future runtime-plus-kernel change, not a registered
+  sharding strategy.
+- The JAX target optimizer contract is `ondevice` for production/default
+  execution, with explicit `scipy-jax` and `scipy-jax-fullgraph` parity/control
+  lanes.
+- Official source links were refreshed to current JAX, SIMSOPT, CUDA, and NCCL
+  documentation.
+
 ### Dependency Graph
 
 The full remainder should not be executed strictly by item number. Several
@@ -78,7 +89,7 @@ lower-numbered items are downstream of future-scope prerequisites:
 | Framed/oriented curve kernels | Items `18`, `20` | Port frame ODE/framing kernels before finite-build geometry can claim JAX-native closure. |
 | Dipole / PM kernels | Items `26`-`28` | Port item `24` dipole field and item `25` PM optimization kernels before wrapper/grid/solve layers. |
 | Wireframe kernels | Items `30`-`31` | Port item `29` wireframe field and optimization kernels before public field/solve wrappers. |
-| `points_coils` 2D collective | Multi-device release track | Finish CPU forced-device collective lowering before any CUDA collective signoff. |
+| `points_coils` 2D collective | Multi-device release track | Add 2D strategy registration/config and grouped-field 2D lowering before any CPU forced-device or CUDA collective signoff. |
 
 ### Execution Waves
 
@@ -95,8 +106,10 @@ lower-numbered items are downstream of future-scope prerequisites:
 - [ ] Expand the state schema from aggregate `18-33` skipped row into individual
   pending item rows before coding prompt `P3`-`P5`.
 - [ ] Preserve the prompt anti-pattern rules: no silent fallback, no broad
-  `try/except`, no host callbacks inside compiled paths, no dynamic imports,
-  no inlined tolerance literals.
+  `try/except`, no host callbacks inside production compiled correctness
+  paths, no dynamic imports, no inlined tolerance literals. Diagnostic
+  callbacks are allowed only in explicitly named diagnostic/probe modes and
+  must not become correctness or fallback mechanisms.
 
 #### Wave R1 - Complete The Item-15 Math And Wrapper Surface
 
@@ -239,13 +252,14 @@ lower-numbered items are downstream of future-scope prerequisites:
   through the native pullback payload.
 - [x] P2: promoted `SingleStageRuntimeSpecBiotSavartJAX` and its spec-backed
   coil/current/curve views into package code.
-- [x] P3: scaffolded strict `points_coils` runtime/sharding metadata with
-  explicit point and coil device counts.
-- [x] P3: kept `backend.should_shard_points()` false for `points_coils` until
-  grouped-field 2D execution is implemented.
+- [x] P3: added generic sharding metadata fields for point and coil device
+  counts without registering `points_coils`.
+- [x] P3: kept the runtime from activating `points_coils`; the current
+  environment value is rejected until grouped-field 2D execution is
+  implemented.
 - [x] P4: closed the Stage 2 ALM target seam so `backend='jax'` rejects
   `optimizer_backend='scipy'` and uses the target optimizer contract for
-  `optimizer_backend='ondevice'`.
+  `optimizer_backend='ondevice'` plus explicit JAX value/grad control lanes.
 - [x] P4: audited the single-stage target startup contract; no new code change
   was needed there.
 - [x] Code-simplifier pass: scoped to the Wave 1 files.
@@ -297,12 +311,22 @@ Official docs checked for this plan:
 
 - JAX JIT and pure-function model:
   `https://docs.jax.dev/en/latest/jit-compilation.html`
+- JAX explicit host/device transfer boundaries:
+  `https://docs.jax.dev/en/latest/transfer_guard.html`,
+  `https://docs.jax.dev/en/latest/_autosummary/jax.device_get.html`,
+  `https://docs.jax.dev/en/latest/_autosummary/jax.block_until_ready.html`
+- JAX default dtype and `jax_enable_x64` contract:
+  `https://docs.jax.dev/en/latest/default_dtypes.html`
 - JAX `shard_map` and `psum` collective semantics:
   `https://docs.jax.dev/en/latest/notebooks/shard_map.html`
+- JAX NVIDIA GPU installation and CUDA plugin contract:
+  `https://docs.jax.dev/en/latest/installation.html`
 - SIMSOPT field API:
-  `https://simsopt.readthedocs.io/v1.8.3/fields.html`
+  `https://simsopt.readthedocs.io/v1.10.6/simsopt.field.html`
 - NVIDIA NCCL collective semantics:
   `https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html`
+- NVIDIA CUDA programming model and memory/thread hierarchy:
+  `https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html`
 
 Local source contracts:
 
@@ -318,6 +342,10 @@ Local source contracts:
   `src/simsopt/jax_core/specs.py`
 - Current coil collective field path lives in:
   `src/simsopt/jax_core/field.py`
+- Current sharding strategy/config SSOT lives in:
+  `src/simsopt/backend/runtime.py`
+- Current negative `points_coils` proof lives in:
+  `tests/test_backend.py::test_sharding_tuning_rejects_points_coils_strategy`
 - Current parity tolerance SSOT lives in:
   `benchmarks/validation_ladder_contract.py`
 - Current adjoint SSOT lives in:
@@ -426,25 +454,31 @@ Current state:
 
 - `coil_groups` is registered in `src/simsopt/backend/runtime.py`.
 - `coil_groups` uses `jax.shard_map` plus `jax.lax.psum`.
-- `points_coils` is registered as a valid sharding strategy.
-- `points_coils` requires explicit point and coil device counts and rejects
-  product mismatches against the detected JAX device count.
-- Point sharding and coil collectives are separate code paths.
-- `points_coils` does not yet route grouped-field execution through a 2D
-  `shard_map`; that is Wave 2.
+- `points_coils` is not registered today. `SIMSOPT_JAX_SHARDING=points_coils`
+  is intentionally rejected by
+  `tests/test_backend.py::test_sharding_tuning_rejects_points_coils_strategy`.
+- Existing point-axis strategies (`points`, `pairwise_rows`, `hybrid`) and
+  coil-axis collectives are separate code paths.
+- `points_coils` must be added as one atomic runtime-plus-kernel change:
+  strategy validation, 2D mesh/device-count product check, grouped-field 2D
+  `shard_map`, and StableHLO/parity tests.
 
 Tasks:
 
-- [x] Add `points_coils` to `_VALID_SHARDING_STRATEGIES`.
-- [x] Extend `ShardingTuning` with point-axis and coil-axis mesh dimensions.
-- [x] Add env/config parsing for point device count and coil device count.
-- [x] Build a 2D mesh helper requiring:
+- [ ] Add `points_coils` to `_VALID_SHARDING_STRATEGIES` only in the same
+  change that wires the 2D grouped-field kernel.
+- [ ] Wire existing `ShardingTuning` point/coil metadata into the 2D strategy.
+- [ ] Add explicit point-axis and coil-axis device-count resolution for the 2D
+  strategy.
+- [ ] Build a 2D mesh helper requiring:
   `point_devices * coil_devices == device_count`.
 - [ ] Add a grouped-field 2D collective kernel:
   points sharded on point axis, coils sharded on coil axis.
 - [ ] Reduce over coil axis with `lax.psum`.
 - [ ] Keep output point-sharded after the coil reduction.
-- [x] Extend summaries to report:
+- [ ] Replace the current reject test with registration/config tests when the
+  kernel lands.
+- [ ] Extend summaries to report:
   `strategy`, `mesh_axes`, `point_axis`, `coil_axis`, `reduced_axis`,
   `field_collective`, and device counts.
 - [ ] Add StableHLO lowering tests asserting `all_reduce`.
@@ -466,11 +500,15 @@ Goal: make JAX target mode consistently use native/on-device contracts.
 Current state:
 
 - Target objective bundles are JAX-native.
-- Target optimizer contracts require `optimizer_backend='ondevice'`.
+- The production/default JAX target optimizer contract is
+  `optimizer_backend='ondevice'`.
+- Explicit parity/control lanes may use `optimizer_backend='scipy-jax'` or
+  `optimizer_backend='scipy-jax-fullgraph'` with JAX value/grad evaluation.
+  Plain `optimizer_backend='scipy'` remains rejected for `backend='jax'`.
 - Stage 2 ALM now resolves its inner optimizer through the same target
   optimizer contract.
-- Some startup/parity artifact paths can still construct host-driven objects
-  for diagnostics or compatibility.
+- Host reporting, parity artifacts, and explicit diagnostic callbacks must stay
+  outside production compiled correctness paths.
 
 Tasks:
 
@@ -479,7 +517,8 @@ Tasks:
 - [x] Audit single-stage JAX target startup for accidental SciPy/reference
   optimizer use.
 - [x] Keep CPU/reference mode explicit and separate.
-- [ ] Keep host reporting and artifact writing outside compiled kernels.
+- [ ] Keep host reporting, artifact writing, and diagnostic callbacks outside
+  production compiled correctness paths.
 - [x] Remove fallback wording from docs/tests when the path has been deleted.
 - [x] Add tests that reject JAX target mode with host/SciPy optimizer contracts.
 
@@ -552,7 +591,8 @@ April checklist for Boozer-specific exact-adjoint lane status.
 - [x] Assert StableHLO text contains `all_reduce`.
 - [x] Assert `grouped_field_sharding_summary(...)["field_collective"] is True`.
 - [x] Run with `SIMSOPT_JAX_SHARDING=coil_groups`.
-- [ ] Run with `SIMSOPT_JAX_SHARDING=points_coils` after P3.
+- [ ] Run with `SIMSOPT_JAX_SHARDING=points_coils` only after P3 registers the
+  strategy and replaces the current reject test.
 
 ### CUDA Smoke
 
@@ -571,7 +611,8 @@ April checklist for Boozer-specific exact-adjoint lane status.
   native cotangent API.
 - [x] Single-stage runtime-spec Biot-Savart adapter is package-owned, not
   script-owned.
-- [ ] `coil_groups` and `points_coils` both lower to collective reductions.
+- [ ] `coil_groups` lowers to collective reductions today; `points_coils`
+  registration plus 2D lowering has landed and lowers to collective reductions.
 - [x] Stage 2 and single-stage JAX target modes reject host optimizer seams.
 - [ ] Validation uses the parity ladder SSOT.
 - [x] Stale fallback code/docs/tests are removed only after parity coverage.
