@@ -511,6 +511,395 @@ def _build_minimal_stage2_state():
 
 
 # ---------------------------------------------------------------------------
+# Phase 3 — P1 full Stage-II composite fixture
+#
+# Source: examples/2_Intermediate/stage_two_optimization.py
+#
+# Native-JAX support today is limited to ``SquaredFlux`` / ``SquaredFluxJAX``
+# on the field side. The CPU lane mirrors the example's full composite for
+# documentation, but the JAX lane only runs the native-supported portion;
+# the remaining components (curve length / distance / curvature penalties
+# and the per-curve max-quadratic curvature penalty) are listed in
+# ``unsupported_components`` and excluded from the gradient comparison
+# basis. Verdict is therefore always ``"partial"`` while those wrappers
+# remain CPU-only.
+
+
+def _build_full_stage2_composite():
+    """Recreate the initial state of stage_two_optimization.py.
+
+    Plan parameters (verbatim from the upstream example): ``ncoils=4``,
+    ``R0=1.0``, ``R1=0.5``, ``order=5``, ``LENGTH_WEIGHT=1e-6``,
+    ``CC_THRESHOLD=0.1``, ``CC_WEIGHT=1000``, ``CS_THRESHOLD=0.3``,
+    ``CS_WEIGHT=10``, ``CURVATURE_THRESHOLD=5``, ``CURVATURE_WEIGHT=1e-6``,
+    ``MSC_THRESHOLD=5``, ``MSC_WEIGHT=1e-6``, ``nphi=32``, ``ntheta=32``,
+    surface ``input.LandremanPaul2021_QA`` half-period.
+    """
+    import time
+
+    start_setup = time.perf_counter()
+    field_mod, objectives_mod, geo_mod = _cpu_imports()
+    SurfaceRZFourier = geo_mod.SurfaceRZFourier
+    create_equally_spaced_curves = geo_mod.create_equally_spaced_curves
+    CurveLength = geo_mod.CurveLength
+    CurveCurveDistance = geo_mod.CurveCurveDistance
+    CurveSurfaceDistance = geo_mod.CurveSurfaceDistance
+    LpCurveCurvature = geo_mod.LpCurveCurvature
+    MeanSquaredCurvature = geo_mod.MeanSquaredCurvature
+    Current = field_mod.Current
+    coils_via_symmetries = field_mod.coils_via_symmetries
+    BiotSavart = field_mod.BiotSavart
+    SquaredFlux = objectives_mod.SquaredFlux
+    QuadraticPenalty = objectives_mod.QuadraticPenalty
+
+    nphi = 32
+    ntheta = 32
+    ncoils = 4
+    R0 = 1.0
+    R1 = 0.5
+    order = 5
+    LENGTH_WEIGHT = 1e-6
+    CC_THRESHOLD = 0.1
+    CC_WEIGHT = 1000
+    CS_THRESHOLD = 0.3
+    CS_WEIGHT = 10
+    CURVATURE_THRESHOLD = 5.0
+    CURVATURE_WEIGHT = 1e-6
+    MSC_THRESHOLD = 5
+    MSC_WEIGHT = 1e-6
+
+    filename = TESTS_FILES / "input.LandremanPaul2021_QA"
+    surface = SurfaceRZFourier.from_vmec_input(
+        str(filename),
+        range="half period",
+        nphi=nphi,
+        ntheta=ntheta,
+    )
+
+    base_curves = create_equally_spaced_curves(
+        ncoils, surface.nfp, stellsym=True, R0=R0, R1=R1, order=order
+    )
+    base_currents = [Current(1e5) for _ in range(ncoils)]
+    base_currents[0].fix_all()
+
+    coils = coils_via_symmetries(base_curves, base_currents, surface.nfp, True)
+    bs_cpu = BiotSavart(coils)
+    bs_cpu.set_points(surface.gamma().reshape((-1, 3)))
+
+    jf_cpu_sf = SquaredFlux(surface, bs_cpu)
+    curves = [c.curve for c in coils]
+    Jls = [CurveLength(c) for c in base_curves]
+    Jccdist = CurveCurveDistance(curves, CC_THRESHOLD, num_basecurves=ncoils)
+    Jcsdist = CurveSurfaceDistance(curves, surface, CS_THRESHOLD)
+    Jcs = [LpCurveCurvature(c, 2, CURVATURE_THRESHOLD) for c in base_curves]
+    Jmscs = [MeanSquaredCurvature(c) for c in base_curves]
+    msc_quadratic_terms = [QuadraticPenalty(J, MSC_THRESHOLD, "max") for J in Jmscs]
+    jf_full = (
+        jf_cpu_sf
+        + LENGTH_WEIGHT * sum(Jls)
+        + CC_WEIGHT * Jccdist
+        + CS_WEIGHT * Jcsdist
+        + CURVATURE_WEIGHT * sum(Jcs)
+        + MSC_WEIGHT * sum(msc_quadratic_terms)
+    )
+
+    squared_flux_value = float(jf_cpu_sf.J())
+    sum_length_value = float(sum(J.J() for J in Jls))
+    ccdist_value = float(Jccdist.J())
+    csdist_value = float(Jcsdist.J())
+    curvature_sum_value = float(sum(J.J() for J in Jcs))
+    msc_quadratic_sum_value = float(sum(J.J() for J in msc_quadratic_terms))
+    composite_total_value = float(jf_full.J())
+
+    # Plan §"Math, Physics, And Computation Gates" requires composite
+    # objective reporting to record BOTH raw component values (before
+    # weights) AND weighted component values, plus the composite total
+    # ``JF_total_cpu``. The raw entries below carry ``_raw`` suffixes; the
+    # ``_weighted`` entries reproduce the weights applied by the upstream
+    # example (LENGTH_WEIGHT * sum_CurveLength, CC_WEIGHT * ccdist, etc.).
+    extra_components_cpu = {
+        "SquaredFlux": squared_flux_value,
+        "sum_CurveLength_raw": sum_length_value,
+        "CurveCurveDistance_raw": ccdist_value,
+        "CurveSurfaceDistance_raw": csdist_value,
+        "sum_LpCurveCurvature_raw": curvature_sum_value,
+        "sum_QuadraticPenalty_MeanSquaredCurvature_max_raw": msc_quadratic_sum_value,
+        "sum_CurveLength_weighted": LENGTH_WEIGHT * sum_length_value,
+        "CurveCurveDistance_weighted": CC_WEIGHT * ccdist_value,
+        "CurveSurfaceDistance_weighted": CS_WEIGHT * csdist_value,
+        "sum_LpCurveCurvature_weighted": CURVATURE_WEIGHT * curvature_sum_value,
+        "sum_QuadraticPenalty_MeanSquaredCurvature_max_weighted": (
+            MSC_WEIGHT * msc_quadratic_sum_value
+        ),
+        "JF_total_cpu": composite_total_value,
+    }
+    setup_seconds_cpu = time.perf_counter() - start_setup
+
+    cpu_lane = _build_cpu_lane(
+        surface=surface,
+        coils=coils,
+        jf_cpu=jf_cpu_sf,
+        bs_cpu=bs_cpu,
+        target_array=None,
+        extra_components=extra_components_cpu,
+        setup_seconds=setup_seconds_cpu,
+    )
+
+    # JAX lane — build independent coils so neither lane mutates the other's
+    # Optimizable tree. SquaredFluxJAX is the only native-supported component
+    # of the full composite; the other terms are listed in
+    # ``unsupported_components`` and excluded from the gradient comparison.
+    start_jax_setup = time.perf_counter()
+    base_curves_jax = create_equally_spaced_curves(
+        ncoils, surface.nfp, stellsym=True, R0=R0, R1=R1, order=order
+    )
+    base_currents_jax = [Current(1e5) for _ in range(ncoils)]
+    base_currents_jax[0].fix_all()
+    coils_jax = coils_via_symmetries(
+        base_curves_jax, base_currents_jax, surface.nfp, True
+    )
+
+    bs_jax_mod, flux_jax_mod = _jax_imports()
+    BiotSavartJAX = bs_jax_mod.BiotSavartJAX
+    SquaredFluxJAX = flux_jax_mod.SquaredFluxJAX
+
+    bs_jax = BiotSavartJAX(coils_jax)
+    jf_jax = SquaredFluxJAX(surface, bs_jax)
+    setup_seconds_jax = time.perf_counter() - start_jax_setup
+
+    jax_lane = _build_jax_lane(
+        surface=surface,
+        coils=coils_jax,
+        bs_jax=bs_jax,
+        jf_jax=jf_jax,
+        target_array=None,
+        extra_components={},
+        setup_seconds=setup_seconds_jax,
+    )
+
+    x0 = np.asarray(jf_cpu_sf.x, dtype=np.float64).copy()
+
+    def _cpu_native_J(dofs: np.ndarray) -> float:
+        jf_cpu_sf.x = np.asarray(dofs, dtype=np.float64)
+        return float(jf_cpu_sf.J())
+
+    def _jax_native_J(dofs: np.ndarray) -> float:
+        jf_jax.x = np.asarray(dofs, dtype=np.float64)
+        return float(jf_jax.J())
+
+    return FixtureBuild(
+        spec=FULL_STAGE2_COMPOSITE_SPEC,
+        cpu_lane=cpu_lane,
+        jax_lane=jax_lane,
+        unsupported_components=(
+            "sum_CurveLength",
+            "CurveCurveDistance",
+            "CurveSurfaceDistance",
+            "sum_LpCurveCurvature",
+            "sum_QuadraticPenalty_MeanSquaredCurvature_max",
+        ),
+        cpu_native_subproblem_J=_cpu_native_J,
+        jax_native_subproblem_J=_jax_native_J,
+        x0=x0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — P2 planar Stage-II composite fixture
+#
+# Source: examples/2_Intermediate/stage_two_optimization_planar_coils.py
+#
+# Same partial-supported approach as Phase 3 with planar coils. The
+# ``CurvePlanarFourier`` family exposes ``to_spec()`` (verified via the
+# native-spec contract check inside ``_build_jax_lane``), so the JAX lane
+# constructs successfully. ``LinkingNumber``, the planar Stage-II length /
+# distance / curvature penalties, and the planar-fixture-specific
+# quadratic-penalty wrapping of the length sum all stay CPU-only and are
+# reported in ``unsupported_components``.
+
+
+def _build_planar_stage2_composite():
+    import time
+
+    start_setup = time.perf_counter()
+    field_mod, objectives_mod, geo_mod = _cpu_imports()
+    SurfaceRZFourier = geo_mod.SurfaceRZFourier
+    create_equally_spaced_planar_curves = geo_mod.create_equally_spaced_planar_curves
+    CurveLength = geo_mod.CurveLength
+    CurveCurveDistance = geo_mod.CurveCurveDistance
+    CurveSurfaceDistance = geo_mod.CurveSurfaceDistance
+    LpCurveCurvature = geo_mod.LpCurveCurvature
+    MeanSquaredCurvature = geo_mod.MeanSquaredCurvature
+    LinkingNumber = geo_mod.LinkingNumber
+    Current = field_mod.Current
+    coils_via_symmetries = field_mod.coils_via_symmetries
+    BiotSavart = field_mod.BiotSavart
+    SquaredFlux = objectives_mod.SquaredFlux
+    QuadraticPenalty = objectives_mod.QuadraticPenalty
+
+    nphi = 32
+    ntheta = 32
+    ncoils = 4
+    R0 = 1.0
+    R1 = 0.5
+    order = 5
+    LENGTH_WEIGHT = 10.0
+    LENGTH_QP_TARGET = 2.6 * ncoils  # mirrors upstream planar example
+    CC_THRESHOLD = 0.08
+    CC_WEIGHT = 1000
+    CS_THRESHOLD = 0.12
+    CS_WEIGHT = 10
+    CURVATURE_THRESHOLD = 10.0
+    CURVATURE_WEIGHT = 1e-6
+    MSC_THRESHOLD = 10
+    MSC_WEIGHT = 1e-6
+
+    filename = TESTS_FILES / "input.LandremanPaul2021_QA"
+    surface = SurfaceRZFourier.from_vmec_input(
+        str(filename),
+        range="half period",
+        nphi=nphi,
+        ntheta=ntheta,
+    )
+
+    base_curves = create_equally_spaced_planar_curves(
+        ncoils, surface.nfp, stellsym=True, R0=R0, R1=R1, order=order
+    )
+    base_currents = [Current(1e5) for _ in range(ncoils)]
+    base_currents[0].fix_all()
+
+    coils = coils_via_symmetries(base_curves, base_currents, surface.nfp, True)
+    bs_cpu = BiotSavart(coils)
+    bs_cpu.set_points(surface.gamma().reshape((-1, 3)))
+
+    jf_cpu_sf = SquaredFlux(surface, bs_cpu)
+    curves = [c.curve for c in coils]
+    Jls = [CurveLength(c) for c in base_curves]
+    Jccdist = CurveCurveDistance(curves, CC_THRESHOLD, num_basecurves=ncoils)
+    Jcsdist = CurveSurfaceDistance(curves, surface, CS_THRESHOLD)
+    Jcs = [LpCurveCurvature(c, 2, CURVATURE_THRESHOLD) for c in base_curves]
+    Jmscs = [MeanSquaredCurvature(c) for c in base_curves]
+    msc_quadratic_terms = [QuadraticPenalty(J, MSC_THRESHOLD) for J in Jmscs]
+    length_quadratic_penalty = QuadraticPenalty(sum(Jls), LENGTH_QP_TARGET)
+    linkNum = LinkingNumber(curves)
+
+    jf_full = (
+        jf_cpu_sf
+        + LENGTH_WEIGHT * length_quadratic_penalty
+        + CC_WEIGHT * Jccdist
+        + CS_WEIGHT * Jcsdist
+        + CURVATURE_WEIGHT * sum(Jcs)
+        + MSC_WEIGHT * sum(msc_quadratic_terms)
+        + linkNum
+    )
+
+    squared_flux_value = float(jf_cpu_sf.J())
+    length_qp_value = float(length_quadratic_penalty.J())
+    ccdist_value = float(Jccdist.J())
+    csdist_value = float(Jcsdist.J())
+    curvature_sum_value = float(sum(J.J() for J in Jcs))
+    msc_quadratic_sum_value = float(sum(J.J() for J in msc_quadratic_terms))
+    link_number_value = float(linkNum.J())
+    composite_total_value = float(jf_full.J())
+
+    # Plan §"Math, Physics, And Computation Gates" requires composite
+    # objective reporting to record raw component values, weighted
+    # component values, and the composite total. Planar fixture weights:
+    # LENGTH_WEIGHT * length_quadratic_penalty, CC_WEIGHT * ccdist,
+    # CS_WEIGHT * csdist, CURVATURE_WEIGHT * curvature_sum,
+    # MSC_WEIGHT * msc_quadratic_sum, and LinkingNumber has no weight
+    # multiplier (it enters the composite with weight 1).
+    extra_components_cpu = {
+        "SquaredFlux": squared_flux_value,
+        "QuadraticPenalty_over_sum_CurveLength_identity_raw": length_qp_value,
+        "CurveCurveDistance_raw": ccdist_value,
+        "CurveSurfaceDistance_raw": csdist_value,
+        "sum_LpCurveCurvature_raw": curvature_sum_value,
+        "sum_QuadraticPenalty_MeanSquaredCurvature_identity_raw": msc_quadratic_sum_value,
+        "LinkingNumber_raw": link_number_value,
+        "QuadraticPenalty_over_sum_CurveLength_identity_weighted": (
+            LENGTH_WEIGHT * length_qp_value
+        ),
+        "CurveCurveDistance_weighted": CC_WEIGHT * ccdist_value,
+        "CurveSurfaceDistance_weighted": CS_WEIGHT * csdist_value,
+        "sum_LpCurveCurvature_weighted": CURVATURE_WEIGHT * curvature_sum_value,
+        "sum_QuadraticPenalty_MeanSquaredCurvature_identity_weighted": (
+            MSC_WEIGHT * msc_quadratic_sum_value
+        ),
+        "LinkingNumber_weighted": link_number_value,
+        "JF_total_cpu": composite_total_value,
+    }
+    setup_seconds_cpu = time.perf_counter() - start_setup
+
+    cpu_lane = _build_cpu_lane(
+        surface=surface,
+        coils=coils,
+        jf_cpu=jf_cpu_sf,
+        bs_cpu=bs_cpu,
+        target_array=None,
+        extra_components=extra_components_cpu,
+        setup_seconds=setup_seconds_cpu,
+    )
+
+    # JAX lane: build independent planar coils so the JAX field adapter
+    # owns disjoint Curve/Current Optimizable nodes.
+    start_jax_setup = time.perf_counter()
+    base_curves_jax = create_equally_spaced_planar_curves(
+        ncoils, surface.nfp, stellsym=True, R0=R0, R1=R1, order=order
+    )
+    base_currents_jax = [Current(1e5) for _ in range(ncoils)]
+    base_currents_jax[0].fix_all()
+    coils_jax = coils_via_symmetries(
+        base_curves_jax, base_currents_jax, surface.nfp, True
+    )
+
+    bs_jax_mod, flux_jax_mod = _jax_imports()
+    BiotSavartJAX = bs_jax_mod.BiotSavartJAX
+    SquaredFluxJAX = flux_jax_mod.SquaredFluxJAX
+
+    bs_jax = BiotSavartJAX(coils_jax)
+    jf_jax = SquaredFluxJAX(surface, bs_jax)
+    setup_seconds_jax = time.perf_counter() - start_jax_setup
+
+    jax_lane = _build_jax_lane(
+        surface=surface,
+        coils=coils_jax,
+        bs_jax=bs_jax,
+        jf_jax=jf_jax,
+        target_array=None,
+        extra_components={},
+        setup_seconds=setup_seconds_jax,
+    )
+
+    x0 = np.asarray(jf_cpu_sf.x, dtype=np.float64).copy()
+
+    def _cpu_native_J(dofs: np.ndarray) -> float:
+        jf_cpu_sf.x = np.asarray(dofs, dtype=np.float64)
+        return float(jf_cpu_sf.J())
+
+    def _jax_native_J(dofs: np.ndarray) -> float:
+        jf_jax.x = np.asarray(dofs, dtype=np.float64)
+        return float(jf_jax.J())
+
+    return FixtureBuild(
+        spec=PLANAR_STAGE2_COMPOSITE_SPEC,
+        cpu_lane=cpu_lane,
+        jax_lane=jax_lane,
+        unsupported_components=(
+            "QuadraticPenalty_over_sum_CurveLength_identity",
+            "CurveCurveDistance",
+            "CurveSurfaceDistance",
+            "sum_LpCurveCurvature",
+            "sum_QuadraticPenalty_MeanSquaredCurvature_identity",
+            "LinkingNumber",
+        ),
+        cpu_native_subproblem_J=_cpu_native_J,
+        jax_native_subproblem_J=_jax_native_J,
+        x0=x0,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 — P1 saved CWS local-flux fixture
 
 
@@ -650,6 +1039,272 @@ def _raise_unsupported(message: str) -> Callable[[], FixtureBuild]:
 
 
 # ---------------------------------------------------------------------------
+# Phase 5 — Position/orientation support gate
+#
+# Source: examples/1_Simple/optimize_coil_position_orientation.py
+#
+# The plan requires that the harness build the CPU TF+windowpane coil
+# fixture *without* running the optimizer and then emit a precise
+# unsupported-native-JAX result because ``OrientedCurveXYZFourier`` does
+# not implement ``to_spec()``. We do exactly that here: the CPU fixture
+# is materialized so the failure carries the actual missing-spec class
+# name and the active DOF list the JAX lane would need to mirror once
+# native support lands.
+
+
+def _build_position_orientation_support_gate_probe():
+    """Build the CPU TF+windowpane fixture and probe JAX native-spec support.
+
+    Returns a builder that always raises ``FixtureNotSupportedError`` with
+    the precise unsupported curve class. The CPU fixture is constructed
+    only for the purpose of producing a detailed support-gate message that
+    documents what the JAX lane would need to mirror; the CPU objects are
+    not returned because the harness's ``unsupported`` verdict does not
+    carry lane data.
+    """
+    field_mod, objectives_mod, geo_mod = _cpu_imports()
+    SurfaceRZFourier = geo_mod.SurfaceRZFourier
+    create_equally_spaced_curves = geo_mod.create_equally_spaced_curves
+    create_equally_spaced_oriented_curves = (
+        geo_mod.create_equally_spaced_oriented_curves
+    )
+    Current = field_mod.Current
+    ScaledCurrent = importlib.import_module("simsopt.field.coil").ScaledCurrent
+    coils_via_symmetries = field_mod.coils_via_symmetries
+    BiotSavart = field_mod.BiotSavart
+    SquaredFlux = objectives_mod.SquaredFlux
+
+    nphi = 32
+    ntheta = 32
+    n_tf_coils = 4
+    n_wp_coils = 2
+    R0 = 1.0
+    R1 = 0.5
+
+    filename = TESTS_FILES / "input.LandremanPaul2021_QA"
+    surface = SurfaceRZFourier.from_vmec_input(
+        str(filename),
+        range="half period",
+        nphi=nphi,
+        ntheta=ntheta,
+    )
+
+    base_tf_curves = create_equally_spaced_curves(
+        n_tf_coils, surface.nfp, stellsym=True, R0=R0, R1=R1, order=2
+    )
+    base_wp_curves = create_equally_spaced_oriented_curves(
+        n_wp_coils, surface.nfp, R0=(R0 + R1) * 1.01, R1=R1 / 10, Z0=0, order=2
+    )
+    base_tf_currents = [ScaledCurrent(Current(1.0), 1e5) for _ in range(n_tf_coils)]
+    base_wp_currents = [ScaledCurrent(Current(1.0), 1e3) for _ in range(n_wp_coils)]
+
+    # DOF layout mirrors examples/1_Simple/optimize_coil_position_orientation.py
+    for curve in base_tf_curves:
+        curve.fix_all()
+    for curve in base_wp_curves:
+        curve.fix_all()
+        for xyz in ("x0", "y0", "z0"):
+            curve.unfix(xyz)
+        for ypr in ("yaw", "pitch", "roll"):
+            curve.unfix(ypr)
+    for current in base_tf_currents:
+        current.unfix_all()
+    for current in base_wp_currents:
+        current.unfix_all()
+    base_tf_currents[0].fix_all()
+
+    tf_coils = coils_via_symmetries(base_tf_curves, base_tf_currents, surface.nfp, True)
+    wp_coils = coils_via_symmetries(base_wp_curves, base_wp_currents, surface.nfp, True)
+    coils = tf_coils + wp_coils
+    bs_cpu = BiotSavart(coils)
+    bs_cpu.set_points(surface.gamma().reshape((-1, 3)))
+    jf_cpu = SquaredFlux(surface, bs_cpu)
+    active_dof_names = tuple(jf_cpu.dof_names)
+
+    # Probe the native-spec contract that BiotSavartJAX would enforce. We
+    # call the same predicate used internally so the support-gate message
+    # mirrors the actual rejection path.
+    offending = None
+    for coil in coils:
+        from simsopt.field.biotsavart_jax_backend import _unwrap_coil_curve_and_current
+
+        base_curve, _rotmat, _current, _scale = _unwrap_coil_curve_and_current(coil)
+        if not _curve_supports_native_jax(base_curve):
+            offending = type(base_curve).__name__
+            break
+
+    if offending is None:
+        # Should not happen with current source — included for forward
+        # compatibility: if OrientedCurveXYZFourier later acquires
+        # ``to_spec()``, this fixture must be flipped to SUPPORTED with a
+        # real build_lanes path instead of staying in the support-gate
+        # branch. The raise type must be ``FixtureNotSupportedError`` (not
+        # a bare ``RuntimeError``) so the harness driver records this as
+        # ``verdict='unsupported'`` per the prior commit's fail-closed
+        # contract — see ``_evaluate_unsupported_fixture`` in
+        # ``non_banana_example_cpp_jax_cpu_parity.py`` and Phase 7's
+        # analogous upgrade-path branch below.
+        raise FixtureNotSupportedError(
+            "Phase 5 support-gate probe found no missing native spec; "
+            "OrientedCurveXYZFourier appears to expose to_spec() now. "
+            "Flip POSITION_ORIENTATION_FLUX_SUPPORT_GATE_SPEC to SUPPORTED "
+            "and implement a real build_lanes constructor."
+        )
+
+    raise FixtureNotSupportedError(
+        f"Phase 5 support gate: {offending} does not implement to_spec() "
+        f"(checked via _supports_native_curve_geometry). BiotSavartJAX "
+        f"rejects this curve family until immutable native spec support "
+        f"is added. Active free DOFs the JAX lane would mirror once "
+        f"supported (count={len(active_dof_names)}): "
+        f"{', '.join(active_dof_names[:6])}{'...' if len(active_dof_names) > 6 else ''}."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — Finite-build multifilament support gate
+#
+# Source: examples/3_Advanced/stage_two_optimization_finitebuild.py
+#
+# Multifilament curves generated by ``create_multifilament_grid`` need a
+# native immutable spec on every filament before the JAX field adapter
+# can be constructed. We materialize the base curves at low resolution
+# and probe ``_supports_native_curve_geometry`` exactly the way
+# BiotSavartJAX does internally; if a single filament rejects the
+# contract the fixture is reported as a support gate.
+
+
+def _build_finitebuild_support_gate_probe():
+    field_mod, _objectives_mod, geo_mod = _cpu_imports()
+    SurfaceRZFourier = geo_mod.SurfaceRZFourier
+    create_equally_spaced_curves = geo_mod.create_equally_spaced_curves
+    Current = field_mod.Current
+
+    # Try to import the finite-build helpers. If the module is missing
+    # entirely, that is itself a support-gate signal.
+    try:
+        finitebuild_mod = importlib.import_module("simsopt.geo.finitebuild")
+    except ImportError as exc:
+        raise FixtureNotSupportedError(
+            "Phase 7 support gate (finite build): "
+            f"simsopt.geo.finitebuild import failed: {exc}. Native JAX "
+            "parity for multifilament coils requires both finitebuild and "
+            "an immutable spec on every filament curve."
+        ) from exc
+
+    create_multifilament_grid = getattr(
+        finitebuild_mod, "create_multifilament_grid", None
+    )
+    coil_mod = importlib.import_module("simsopt.field.coil")
+    apply_symmetries_to_curves = getattr(coil_mod, "apply_symmetries_to_curves", None)
+    apply_symmetries_to_currents = getattr(
+        coil_mod, "apply_symmetries_to_currents", None
+    )
+    if (
+        create_multifilament_grid is None
+        or apply_symmetries_to_curves is None
+        or apply_symmetries_to_currents is None
+    ):
+        raise FixtureNotSupportedError(
+            "Phase 7 support gate (finite build): missing one of "
+            "simsopt.geo.finitebuild.create_multifilament_grid or "
+            "simsopt.field.coil.apply_symmetries_to_curve(nt)s in this build."
+        )
+
+    ncoils = 3
+    R0 = 1.0
+    R1 = 0.5
+    order = 5
+    numfilaments_n = 2
+    numfilaments_b = 3
+    gapsize_n = 0.02
+    gapsize_b = 0.04
+    rot_order = 1
+    nfil = numfilaments_n * numfilaments_b
+
+    filename = TESTS_FILES / "input.LandremanPaul2021_QA"
+    surface = SurfaceRZFourier.from_vmec_input(
+        str(filename),
+        range="half period",
+        nphi=16,
+        ntheta=16,
+    )
+
+    base_curves = create_equally_spaced_curves(
+        ncoils, surface.nfp, stellsym=True, R0=R0, R1=R1, order=order
+    )
+    base_currents = []
+    for i in range(ncoils):
+        curr = Current(1.0)
+        if i == 0:
+            curr.fix_all()
+        base_currents.append(curr * (1e5 / nfil))
+
+    # ``create_multifilament_grid`` takes one base curve and returns a list
+    # of filament curves; concatenate over all base curves to get the full
+    # expanded filament set, mirroring the upstream finitebuild example.
+    filament_curves = []
+    for c in base_curves:
+        filament_curves.extend(
+            create_multifilament_grid(
+                c,
+                numfilaments_n,
+                numfilaments_b,
+                gapsize_n,
+                gapsize_b,
+                rotation_order=rot_order,
+            )
+        )
+    filament_currents = []
+    for current in base_currents:
+        filament_currents.extend([current] * nfil)
+
+    curves_fb = apply_symmetries_to_curves(filament_curves, surface.nfp, True)
+    # The current symmetry-expansion is exercised here for completeness, but
+    # only the symmetry-expanded curves are probed for native-spec support.
+    apply_symmetries_to_currents(filament_currents, surface.nfp, True)
+
+    # Mirror BiotSavartJAX's native-spec check on each symmetry-expanded
+    # filament. The field adapter strips ``RotatedCurve`` wrappers before
+    # probing ``_supports_native_curve_geometry``, so the probe must do
+    # the same: ``RotatedCurve`` itself never exposes ``to_spec()``, but
+    # the base curve underneath might. ``CurveFilament`` further wraps a
+    # ``FramedCurve(Centroid|Frenet)`` which depends on this build of
+    # simsopt for native-spec support.
+    from simsopt.geo.curve import RotatedCurve
+
+    offending = None
+    for curve in curves_fb:
+        base = curve
+        while isinstance(base, RotatedCurve):
+            base = base.curve
+        if not _curve_supports_native_jax(base):
+            offending = type(base).__name__
+            break
+
+    if offending is not None:
+        raise FixtureNotSupportedError(
+            f"Phase 7 support gate (finite build): {offending} (one of the "
+            f"expanded multifilament curves) does not implement to_spec() "
+            "(checked via _supports_native_curve_geometry). Multifilament "
+            "BiotSavartJAX construction needs an immutable native spec on "
+            "every filament curve."
+        )
+
+    # If we get here, every filament passes the native-spec contract.
+    # That signals an upgrade path: this fixture should be flipped to
+    # SUPPORTED in a follow-up plan that also writes a build_lanes
+    # constructor mirroring the upstream finitebuild example.
+    raise FixtureNotSupportedError(
+        "Phase 7 support gate (finite build): all expanded filament "
+        "curves expose native specs, but a full build_lanes constructor "
+        "for the finite-build composite (flux + curve length penalty + "
+        "MeanSquaredCurvature + MinimumDistance + filament-arclength "
+        "variation penalty) has not been implemented in this harness yet."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Specs
 
 
@@ -724,25 +1379,73 @@ CWS_SAVED_LOCAL_FLUX_NFP3_SPEC = FixtureSpec(
 FULL_STAGE2_COMPOSITE_SPEC = FixtureSpec(
     fixture_id="full_stage2_composite",
     source_example="examples/2_Intermediate/stage_two_optimization.py",
-    classification=UNSUPPORTED_NATIVE_JAX,
+    classification=SUPPORTED,
     classification_reason=(
-        "Full composite includes CurveCurveDistance, CurveSurfaceDistance, "
-        "LpCurveCurvature, MeanSquaredCurvature, and QuadraticPenalty over "
-        "sums; none are exposed as native JAX wrappers today. This fixture "
-        "is classified for follow-up plans."
+        "Composite Stage-II flux portion is native-supported via "
+        "SquaredFlux/SquaredFluxJAX. CurveLength, CurveCurveDistance, "
+        "CurveSurfaceDistance, LpCurveCurvature, and "
+        "QuadraticPenalty(MeanSquaredCurvature, 'max') do not have native "
+        "JAX wrappers today; they are listed in unsupported_components and "
+        "the verdict is 'partial' until those wrappers exist."
     ),
+    inputs={
+        "ncoils": 4,
+        "R0": 1.0,
+        "R1": 0.5,
+        "order": 5,
+        "LENGTH_WEIGHT": 1e-6,
+        "CC_THRESHOLD": 0.1,
+        "CC_WEIGHT": 1000,
+        "CS_THRESHOLD": 0.3,
+        "CS_WEIGHT": 10,
+        "CURVATURE_THRESHOLD": 5.0,
+        "CURVATURE_WEIGHT": 1e-6,
+        "MSC_THRESHOLD": 5,
+        "MSC_WEIGHT": 1e-6,
+        "nphi": 32,
+        "ntheta": 32,
+        "vmec_input": "tests/test_files/input.LandremanPaul2021_QA",
+        "surface_range": "half period",
+        "definition": "quadratic flux",
+        "target": None,
+    },
 )
 
 
 PLANAR_STAGE2_COMPOSITE_SPEC = FixtureSpec(
     fixture_id="planar_stage2_composite",
     source_example="examples/2_Intermediate/stage_two_optimization_planar_coils.py",
-    classification=UNSUPPORTED_NATIVE_JAX,
+    classification=SUPPORTED,
     classification_reason=(
-        "CurvePlanarFourier exposes a JAX spec, but LinkingNumber and the "
-        "shared geometry penalties used by the planar fixture do not have "
-        "native JAX wrappers today."
+        "CurvePlanarFourier exposes a native immutable JAX spec, so "
+        "BiotSavartJAX + SquaredFluxJAX construct successfully. "
+        "LinkingNumber and the shared geometry penalties used by the "
+        "planar fixture have no native JAX wrappers today; they are "
+        "listed in unsupported_components and the verdict is 'partial' "
+        "until those wrappers exist."
     ),
+    inputs={
+        "ncoils": 4,
+        "R0": 1.0,
+        "R1": 0.5,
+        "order": 5,
+        "LENGTH_WEIGHT": 10.0,
+        "LENGTH_QP_TARGET": 2.6 * 4,
+        "CC_THRESHOLD": 0.08,
+        "CC_WEIGHT": 1000,
+        "CS_THRESHOLD": 0.12,
+        "CS_WEIGHT": 10,
+        "CURVATURE_THRESHOLD": 10.0,
+        "CURVATURE_WEIGHT": 1e-6,
+        "MSC_THRESHOLD": 10,
+        "MSC_WEIGHT": 1e-6,
+        "nphi": 32,
+        "ntheta": 32,
+        "vmec_input": "tests/test_files/input.LandremanPaul2021_QA",
+        "surface_range": "half period",
+        "definition": "quadratic flux",
+        "target": None,
+    },
 )
 
 
@@ -753,8 +1456,25 @@ POSITION_ORIENTATION_FLUX_SUPPORT_GATE_SPEC = FixtureSpec(
     classification_reason=(
         "OrientedCurveXYZFourier does not implement to_spec(); BiotSavartJAX "
         "rejects this curve family until immutable native spec support is "
-        "added."
+        "added. The probe builds the CPU TF+windowpane fixture without "
+        "running the optimizer and records the exact rejecting curve type."
     ),
+    inputs={
+        "n_tf_coils": 4,
+        "n_wp_coils": 2,
+        "R0": 1.0,
+        "R1": 0.5,
+        "tf_curve_order": 2,
+        "wp_curve_order": 2,
+        "wp_active_dofs": ("x0", "y0", "z0", "yaw", "pitch", "roll"),
+        "tf_geometry_fixed": True,
+        "wp_geometry_fixed_except_position_orientation": True,
+        "tf_current_seed_fixed": True,
+        "vmec_input": "tests/test_files/input.LandremanPaul2021_QA",
+        "surface_range": "half period",
+        "nphi": 32,
+        "ntheta": 32,
+    },
 )
 
 
@@ -763,10 +1483,15 @@ BOOZER_SURFACE_BASIC_SPEC = FixtureSpec(
     source_example="examples/2_Intermediate/boozer.py",
     classification=UNSUPPORTED_NATIVE_JAX,
     classification_reason=(
-        "Boozer fixed-state residual JAX parity is covered by "
-        "tests/geo/test_boozer_residual_jax.py and the M3 derivative tests. "
-        "This non-banana fixture is classified for follow-up plans that "
-        "wire those checks into the per-fixture parity report."
+        "Native JAX coverage for boozer_surface_residual lives in "
+        "src/simsopt/geo/boozer_residual_jax.py (M3) and is exercised by "
+        "tests/geo/test_boozer_residual_jax.py and "
+        "tests/geo/test_boozer_derivatives_jax.py. The harness lane "
+        "shape (BiotSavart B + SquaredFlux value/gradient) does not yet "
+        "carry boozer residual vectors, iota/G inputs, or label values, "
+        "so wiring this fixture into the per-fixture parity report is a "
+        "follow-up plan that extends LaneArtifact with optional Boozer "
+        "residual fields and a corresponding comparison branch."
     ),
 )
 
@@ -776,9 +1501,14 @@ BOOZER_QA_WRAPPERS_SPEC = FixtureSpec(
     source_example="examples/2_Intermediate/boozerQA.py",
     classification=UNSUPPORTED_NATIVE_JAX,
     classification_reason=(
-        "BoozerSurfaceJAX + IotasJAX / NonQuasiSymmetricRatioJAX wrapper "
-        "parity already lives in tests/integration/test_single_stage_jax.py. "
-        "This non-banana fixture is classified for follow-up plans."
+        "BoozerSurfaceJAX, IotasJAX, MajorRadiusJAX, and "
+        "NonQuasiSymmetricRatioJAX exist in "
+        "src/simsopt/geo/{boozersurface_jax,surfaceobjectives_jax}.py and "
+        "have parity coverage in "
+        "tests/integration/test_single_stage_jax.py. Wiring those "
+        "wrappers into a fixed-solved-state per-fixture report is a "
+        "follow-up plan; the harness currently does not capture solved "
+        "Boozer surfaces (iota/G/PLU runtime state) as fixture artifacts."
     ),
 )
 
@@ -788,9 +1518,15 @@ FINITE_BETA_TARGET_FLUX_SPEC = FixtureSpec(
     source_example="examples/2_Intermediate/stage_two_optimization_finite_beta.py",
     classification=UNSUPPORTED_NATIVE_JAX,
     classification_reason=(
-        "Finite-beta target field comes from VirtualCasing which is not "
-        "wired into the non-banana parity harness; this fixture is classified "
-        "for follow-up plans."
+        "SquaredFluxJAX accepts a target normal-field array, so the JAX "
+        "side is supportable in principle. The blocker is the "
+        "VirtualCasing.from_vmec(...) preprocessing step: it requires a "
+        "VMEC run and is not wired into the non-banana parity harness "
+        "today. Once a cached vcasing_*.nc artifact is checked in for "
+        "the W7-X target equilibrium and a load path is added to the "
+        "harness, this fixture should be flipped to SUPPORTED with a "
+        "partial verdict (SquaredFluxJAX with target array native; CPU-"
+        "only length QuadraticPenalty(identity) listed as unsupported)."
     ),
 )
 
@@ -800,10 +1536,31 @@ FINITEBUILD_MULTIFILAMENT_SUPPORT_GATE_SPEC = FixtureSpec(
     source_example="examples/3_Advanced/stage_two_optimization_finitebuild.py",
     classification=SUPPORT_GATE,
     classification_reason=(
-        "Finite-build multifilament curves expose a partial JAX spec but "
-        "the multifilament construction has not been verified end-to-end "
-        "against the BiotSavartJAX native-spec contract yet."
+        "Finite-build multifilament curves are expanded by "
+        "simsopt.geo.finitebuild.create_multifilament_grid. The probe "
+        "materializes a low-resolution grid and checks each expanded "
+        "filament against the same _supports_native_curve_geometry "
+        "predicate BiotSavartJAX uses internally. The fixture stays "
+        "support_gate either because a filament lacks to_spec() or "
+        "because a full multifilament native-JAX build_lanes constructor "
+        "(flux + length + curvature + filament-arclength variation + "
+        "min-distance penalty) has not been wired into this harness yet."
     ),
+    inputs={
+        "ncoils": 3,
+        "R0": 1.0,
+        "R1": 0.5,
+        "order": 5,
+        "numfilaments_n": 2,
+        "numfilaments_b": 3,
+        "gapsize_n": 0.02,
+        "gapsize_b": 0.04,
+        "rotation_order": 1,
+        "vmec_input": "tests/test_files/input.LandremanPaul2021_QA",
+        "surface_range": "half period",
+        "nphi": 16,
+        "ntheta": 16,
+    },
 )
 
 
@@ -812,8 +1569,12 @@ QFM_SURFACE_SPEC = FixtureSpec(
     source_example="examples/1_Simple/qfm.py",
     classification=UNSUPPORTED_NATIVE_JAX,
     classification_reason=(
-        "QfmResidual does not have a native JAX wrapper; this fixture is "
-        "classified for follow-up plans."
+        "QfmResidualJAX exists at src/simsopt/geo/surfaceobjectives_jax.py "
+        "and has parity coverage elsewhere in the JAX-port test suite. "
+        "Wiring a per-fixture report for QFM-residual + label parity is a "
+        "follow-up plan because the harness LaneArtifact does not yet "
+        "carry QFM residual vectors / label values / surface DOF "
+        "comparisons; those are not BiotSavart/SquaredFlux quantities."
     ),
 )
 
@@ -853,17 +1614,15 @@ FIXTURE_REGISTRY: Mapping[str, FixtureRecord] = {
     ),
     FULL_STAGE2_COMPOSITE_SPEC.fixture_id: FixtureRecord(
         spec=FULL_STAGE2_COMPOSITE_SPEC,
-        builder=_unsupported_classification_builder(FULL_STAGE2_COMPOSITE_SPEC),
+        builder=_build_full_stage2_composite,
     ),
     PLANAR_STAGE2_COMPOSITE_SPEC.fixture_id: FixtureRecord(
         spec=PLANAR_STAGE2_COMPOSITE_SPEC,
-        builder=_unsupported_classification_builder(PLANAR_STAGE2_COMPOSITE_SPEC),
+        builder=_build_planar_stage2_composite,
     ),
     POSITION_ORIENTATION_FLUX_SUPPORT_GATE_SPEC.fixture_id: FixtureRecord(
         spec=POSITION_ORIENTATION_FLUX_SUPPORT_GATE_SPEC,
-        builder=_unsupported_classification_builder(
-            POSITION_ORIENTATION_FLUX_SUPPORT_GATE_SPEC
-        ),
+        builder=_build_position_orientation_support_gate_probe,
     ),
     BOOZER_SURFACE_BASIC_SPEC.fixture_id: FixtureRecord(
         spec=BOOZER_SURFACE_BASIC_SPEC,
@@ -879,9 +1638,7 @@ FIXTURE_REGISTRY: Mapping[str, FixtureRecord] = {
     ),
     FINITEBUILD_MULTIFILAMENT_SUPPORT_GATE_SPEC.fixture_id: FixtureRecord(
         spec=FINITEBUILD_MULTIFILAMENT_SUPPORT_GATE_SPEC,
-        builder=_unsupported_classification_builder(
-            FINITEBUILD_MULTIFILAMENT_SUPPORT_GATE_SPEC
-        ),
+        builder=_build_finitebuild_support_gate_probe,
     ),
     QFM_SURFACE_SPEC.fixture_id: FixtureRecord(
         spec=QFM_SURFACE_SPEC,

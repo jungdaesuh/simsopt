@@ -278,8 +278,6 @@ def test_cws_saved_local_flux_parity(fixture_id):
     [
         "position_orientation_flux_support_gate",
         "finitebuild_multifilament_support_gate",
-        "full_stage2_composite",
-        "planar_stage2_composite",
         "boozer_surface_basic",
         "boozer_qa_wrappers",
         "finite_beta_target_flux",
@@ -295,6 +293,104 @@ def test_deferred_fixtures_report_unsupported(fixture_id):
     )
     assert entry["error"] is not None
     assert entry["comparisons"]["cpu_cpp_vs_jax_cpu"] == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — P1 full Stage-II composite fixture parity (partial verdict).
+
+
+def test_full_stage2_composite_partial_pass_with_cpu_only_components():
+    """SquaredFlux portion must pass; CPU-only components must be listed.
+
+    Also enforces the plan §"Math, Physics, And Computation Gates"
+    requirement that composite objectives record BOTH raw and weighted
+    component values plus the composite total.
+    """
+    payload = harness.run_fixtures(["full_stage2_composite"])
+    entry = _select_fixture(payload, "full_stage2_composite")
+    assert entry["error"] is None, entry["error"]
+    assert entry["verdict"] == "partial", entry["verdict"]
+    failing = [
+        cmp
+        for cmp in entry["comparisons"]["cpu_cpp_vs_jax_cpu"]
+        if cmp["verdict"] != "pass"
+    ]
+    assert not failing, f"Native-supported comparisons failed: {failing}"
+
+    expected_unsupported = {
+        "sum_CurveLength",
+        "CurveCurveDistance",
+        "CurveSurfaceDistance",
+        "sum_LpCurveCurvature",
+        "sum_QuadraticPenalty_MeanSquaredCurvature_max",
+    }
+    assert set(entry["unsupported_components"]) == expected_unsupported, entry[
+        "unsupported_components"
+    ]
+    # Composite total is recorded in the CPU lane components for traceability
+    # but is not compared against the JAX subtotal (different physics).
+    cpu_components = entry["lanes"]["cpu_cpp"]["components"]
+    assert "JF_total_cpu" in cpu_components
+    assert "SquaredFlux" in cpu_components
+
+    # Plan §"Math, Physics, And Computation Gates": composite objectives
+    # must record raw component values (before weights) AND weighted
+    # component values for every unsupported component.
+    for component in (
+        "sum_CurveLength",
+        "CurveCurveDistance",
+        "CurveSurfaceDistance",
+        "sum_LpCurveCurvature",
+        "sum_QuadraticPenalty_MeanSquaredCurvature_max",
+    ):
+        assert f"{component}_raw" in cpu_components, (
+            f"Missing _raw entry for {component}: {sorted(cpu_components)}"
+        )
+        assert f"{component}_weighted" in cpu_components, (
+            f"Missing _weighted entry for {component}: {sorted(cpu_components)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — P2 planar Stage-II composite fixture parity (partial verdict).
+
+
+def test_planar_stage2_composite_partial_pass_with_link_number_unsupported():
+    payload = harness.run_fixtures(["planar_stage2_composite"])
+    entry = _select_fixture(payload, "planar_stage2_composite")
+    assert entry["error"] is None, entry["error"]
+    assert entry["verdict"] == "partial", entry["verdict"]
+    failing = [
+        cmp
+        for cmp in entry["comparisons"]["cpu_cpp_vs_jax_cpu"]
+        if cmp["verdict"] != "pass"
+    ]
+    assert not failing, f"Planar native-supported comparisons failed: {failing}"
+
+    # LinkingNumber must be listed as unsupported (the planar fixture is the
+    # only one that adds it).
+    assert "LinkingNumber" in entry["unsupported_components"]
+    # Native spec hashes must be present (CurvePlanarFourier exposes to_spec).
+    assert entry["native_spec_contract"]["native_curve_spec_hashes"]
+
+    # Plan §"Math, Physics, And Computation Gates": raw + weighted entries
+    # for every unsupported component. LinkingNumber enters with weight 1,
+    # so _raw and _weighted are equal but both must be recorded.
+    cpu_components = entry["lanes"]["cpu_cpp"]["components"]
+    for component in (
+        "QuadraticPenalty_over_sum_CurveLength_identity",
+        "CurveCurveDistance",
+        "CurveSurfaceDistance",
+        "sum_LpCurveCurvature",
+        "sum_QuadraticPenalty_MeanSquaredCurvature_identity",
+        "LinkingNumber",
+    ):
+        assert f"{component}_raw" in cpu_components, (
+            f"Missing _raw entry for {component}: {sorted(cpu_components)}"
+        )
+        assert f"{component}_weighted" in cpu_components, (
+            f"Missing _weighted entry for {component}: {sorted(cpu_components)}"
+        )
 
 
 # ---------------------------------------------------------------------------

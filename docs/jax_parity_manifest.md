@@ -117,3 +117,32 @@ Hessian/derivative slices: 16 `penalty_hessian` cases, and 45 combined
 | `exact_ill_conditioned_adjoint` | residual/failure-only | `tests/integration/test_single_stage_jax_cpu_reference.py::test_operator_adjoint_signoff_gate_on_exact_state`; mixed RHS fixture keeps residual-success and residual-failure behavior explicit without vector-parity claims. |
 | `branch_stable_resolve` | complete | Branch-stable re-solve FD and exact/LS branch tests in `tests/integration/test_single_stage_jax_cpu_reference.py` and `tests/geo/test_boozersurface_jax.py`. |
 | `fd_gradient` | complete | Directional finite-difference/Taylor evidence in `TestIotasJAXResolveFD`, `TestNonQSRatioJAXResolveFD`, and the fixed-state coil VJP directional FD slice. |
+
+## Non-Banana Example CPU/JAX CPU Inventory
+
+CPU-only fixed-state evidence for non-banana SIMSOPT examples. Implementation
+plan: [`non_banana_example_cpp_jax_cpu_parity_plan_2026-05-12.md`](non_banana_example_cpp_jax_cpu_parity_plan_2026-05-12.md).
+Results document: [`non_banana_example_cpp_jax_cpu_parity_results_2026-05-12.md`](non_banana_example_cpp_jax_cpu_parity_results_2026-05-12.md).
+JSON artifacts: `.artifacts/parity/20260512-non-banana-examples/`.
+
+These rows are independent of the banana inventory above; CUDA status is
+explicitly `out of scope` for this CPU-only plan.
+
+| Fixture | Verdict | Source example | Comparisons | Unsupported components | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `minimal_stage2_flux_length_gap` | partial | `examples/1_Simple/stage_two_optimization_minimal.py` | 7 native pass | `QuadraticPenalty_over_sum_CurveLength_max` | seed=1 Taylor diagnostic passes at `abs_diff < 1e-6` per eps |
+| `cws_saved_local_flux_nfp2` | unsupported | `examples/3_Advanced/curves_CWS_example.py` | 0 | n/a | Blocked by upstream `simsopt.load` CurveCWSFourier deserializer |
+| `cws_saved_local_flux_nfp3` | unsupported | `examples/3_Advanced/curves_CWS_example.py` | 0 | n/a | Same as nfp=2 |
+| `full_stage2_composite` | partial | `examples/2_Intermediate/stage_two_optimization.py` | 7 native pass | `sum_CurveLength`, `CurveCurveDistance`, `CurveSurfaceDistance`, `sum_LpCurveCurvature`, `sum_QuadraticPenalty_MeanSquaredCurvature_max` | SquaredFlux native; CPU-only geometry penalties listed |
+| `planar_stage2_composite` | partial | `examples/2_Intermediate/stage_two_optimization_planar_coils.py` | 7 native pass | length QP (identity), CC dist, CS dist, curvature sum, MSC QP sum, `LinkingNumber` | `CurvePlanarFourier` exposes `to_spec()` |
+| `position_orientation_flux_support_gate` | unsupported | `examples/1_Simple/optimize_coil_position_orientation.py` | 0 | n/a | `OrientedCurveXYZFourier` lacks `to_spec()`; CPU fixture is probe-built |
+| `boozer_surface_basic` | unsupported | `examples/2_Intermediate/boozer.py` | 0 | n/a | Native parity covered by `tests/geo/test_boozer_residual_jax.py`; per-fixture wiring is follow-up |
+| `boozer_qa_wrappers` | unsupported | `examples/2_Intermediate/boozerQA.py` | 0 | n/a | Native parity covered by `tests/integration/test_single_stage_jax.py`; per-fixture wiring is follow-up |
+| `finite_beta_target_flux` | unsupported | `examples/2_Intermediate/stage_two_optimization_finite_beta.py` | 0 | n/a | Blocked by `VirtualCasing` preprocessing not being wired into the harness |
+| `finitebuild_multifilament_support_gate` | unsupported | `examples/3_Advanced/stage_two_optimization_finitebuild.py` | 0 | n/a | All filament base curves expose native specs; missing full composite `build_lanes` constructor |
+| `qfm_surface` | unsupported | `examples/1_Simple/qfm.py` | 0 | n/a | `QfmResidualJAX` exists; per-fixture wiring needs harness LaneArtifact extension |
+
+`partial` rows above all show `max_abs_diff` for the native-supported
+`SquaredFlux` gradient at `~3.5e-17` (machine precision under `direct_kernel` /
+`ls_wrapper_gradient` buckets) and for `field_B` at `~5e-16` per the JSON
+artifact `comparisons` blocks. No native-supported comparison fails.
