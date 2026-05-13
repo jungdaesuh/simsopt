@@ -103,19 +103,12 @@ def asym_bri_and_jax():
 def _compare_all_methods(bri, wrapper, points, method_names):
     bri.set_points(points)
     wrapper.set_points(points)
-    failures = []
     for name in method_names:
         cpu_value = getattr(bri, name)()
         jax_value = getattr(wrapper, name)()
-        try:
-            np.testing.assert_allclose(
-                jax_value, cpu_value, rtol=_RTOL, atol=_ATOL, err_msg=name
-            )
-        except AssertionError as exc:
-            failures.append((name, str(exc)))
-    if failures:
-        report = "\n".join(f"{name}: {msg.splitlines()[0]}" for name, msg in failures)
-        raise AssertionError(f"Method parity failures:\n{report}")
+        np.testing.assert_allclose(
+            jax_value, cpu_value, rtol=_RTOL, atol=_ATOL, err_msg=name
+        )
 
 
 def test_freeze_boozer_radial_state_returns_jax_pytree(stellsym_bri_and_jax):

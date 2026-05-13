@@ -39,6 +39,7 @@ from simsopt.jax_core.wireframe import (
     wireframe_B_and_dB_by_dX,
     wireframe_dB_by_dX,
 )
+from .jaxpr_utils import count_jaxpr_primitives
 
 
 _DIRECT_KERNEL = parity_ladder_tolerances("direct_kernel")
@@ -299,10 +300,8 @@ def test_total_field_kernels_stream_over_segments():
 
     kernels = (wireframe_B, wireframe_dB_by_dX, wireframe_B_and_dB_by_dX)
     for kernel in kernels:
-        jaxpr = str(
-            jax.make_jaxpr(kernel)(points, nodes, segments_jax, seg_signs, currents)
-        )
-        assert "scan[" in jaxpr, kernel.__name__
+        jaxpr = jax.make_jaxpr(kernel)(points, nodes, segments_jax, seg_signs, currents)
+        assert count_jaxpr_primitives(jaxpr, "scan") == 2, kernel.__name__
 
 
 def test_dB_layout_convention_via_finite_difference():

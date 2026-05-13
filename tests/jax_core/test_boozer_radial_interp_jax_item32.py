@@ -37,6 +37,7 @@ from simsopt.jax_core.boozer_radial_interp import (
     inverse_fourier_transform_odd_1d,
     inverse_fourier_transform_odd_2d,
 )
+from .jaxpr_utils import count_jaxpr_primitives
 
 
 _DIRECT_KERNEL = parity_ladder_tolerances("direct_kernel")
@@ -161,8 +162,9 @@ def _k_per_point_jaxpr_dot_count(
             "dnumncds": jnp.asarray(bundle["dnumncds"][:, 0]),
             "bmns": jnp.asarray(bundle["bmns"][:, 0]),
         }
-    return str(jax.make_jaxpr(lambda: _compute_K_per_point(**kwargs))()).count(
-        "dot_general"
+    return count_jaxpr_primitives(
+        jax.make_jaxpr(lambda: _compute_K_per_point(**kwargs))(),
+        "dot_general",
     )
 
 
@@ -560,9 +562,8 @@ def test_kernels_are_jit_compatible() -> None:
     """All public kernels are wrapped in ``jax.jit`` and trace successfully.
 
     The kernels are decorated at module scope; calling them once forces a
-    trace. We check that the result is a JAX device array (no host
-    fallback) and that repeated calls produce identical output (the JIT
-    cache hit).
+    trace. We check that the result is a JAX device array and that
+    repeated calls produce identical output (the JIT cache hit).
     """
     import jax
 

@@ -2190,8 +2190,7 @@ def _step_body(
         ATAp = _hessian_action(p, A, reg_l2, nu)
         gp = jnp.sum(g * p)
         pATAp = jnp.sum(p * ATAp)
-        safe_pATAp = jnp.where(pATAp != 0.0, pATAp, 1.0)
-        alpha_cg = jnp.where(pATAp != 0.0, gp / safe_pATAp, jnp.inf)
+        alpha_cg = gp / pATAp
         alpha_f = jnp.min(find_max_alphaf(x, p, m_maxima))
 
         def cg_branch(__operand):
@@ -2199,7 +2198,7 @@ def _step_body(
             g_cg = g - alpha_cg * ATAp
             phi_cg = phi_mwpgp(x_cg, g_cg, m_maxima)
             gamma_num = jnp.sum(phi_cg * ATAp)
-            gamma = jnp.where(pATAp != 0.0, gamma_num / safe_pATAp, 0.0)
+            gamma = gamma_num / pATAp
             return x_cg, g_cg, phi_cg - gamma * p
 
         def expand_branch(__operand):

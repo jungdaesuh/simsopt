@@ -53,6 +53,7 @@ from simsopt.jax_core.pm_optimization import (
     phi_mwpgp,
     projection_l2_balls,
 )
+from .jaxpr_utils import count_jaxpr_primitives
 
 
 # ---------------------------------------------------------------------
@@ -1490,7 +1491,5 @@ class TestMwPGPSingleStep:
             jnp.asarray(m0, dtype=jnp.float64),
         )
 
-        jaxpr = str(
-            jax.make_jaxpr(lambda st: mwpgp_step(spec, st, A_jax, ATb_jax))(state)
-        )
-        assert "cond[" in jaxpr
+        jaxpr = jax.make_jaxpr(lambda st: mwpgp_step(spec, st, A_jax, ATb_jax))(state)
+        assert count_jaxpr_primitives(jaxpr, "cond") == 2

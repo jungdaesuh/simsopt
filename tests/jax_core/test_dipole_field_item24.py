@@ -24,6 +24,7 @@ from simsopt.jax_core.dipole_field import (
     dipole_field_dB_from_spec,
     make_dipole_field_spec,
 )
+from .jaxpr_utils import count_jaxpr_primitives
 
 _DIRECT_KERNEL = parity_ladder_tolerances("direct_kernel")
 _DIRECT_RTOL = _DIRECT_KERNEL["rtol"]
@@ -132,8 +133,8 @@ def test_total_field_kernels_stream_over_dipoles() -> None:
         dipole_field_dA,
     )
     for kernel in kernels:
-        jaxpr = str(jax.make_jaxpr(kernel)(points, dipole_points, dipole_moments))
-        assert "scan[" in jaxpr, kernel.__name__
+        jaxpr = jax.make_jaxpr(kernel)(points, dipole_points, dipole_moments)
+        assert count_jaxpr_primitives(jaxpr, "scan") == 1, kernel.__name__
 
 
 def test_immutable_spec_jits_without_host_oracle_dependency() -> None:
