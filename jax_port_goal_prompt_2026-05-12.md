@@ -5,7 +5,7 @@ Branch context: `gpu-purity-stage2-20260405`
 Repo: `/Users/suhjungdae/code/columbia/simsopt-jax`
 Original prompt base commit: `fa3f877af`
 Original source audit base: `8b471e8e3` (parent of the original prompt base)
-Current repo coverage-audit base commit: `9244982bf`
+Prior committed audit lineage: `9244982bf`, `80c669a6b`, `8d9afe507`.
 
 ## Review status
 
@@ -29,10 +29,14 @@ SIMSOPT / CUDA documentation:
   and propose the dependency for human review.
 - `.artifacts/` is not ignored in this repo, so state updates are useful for
   resumption but must not create noisy in-progress commits.
-- Context7 resolution in this review returned `/google/jax`,
-  `/hiddensymmetries/simsopt`, and `/websites/nvidia_cuda`. Upstream SIMSOPT
-  local HEAD and `hiddenSymmetries/simsopt` remote HEAD both resolved to
-  `1b0cc3a96063197cdbdd01559e04c25456fbe6ff`.
+- Prior Context7 resolution returned `/google/jax`,
+  `/hiddensymmetries/simsopt`, and `/websites/nvidia_cuda`.
+- Prior upstream SIMSOPT local HEAD and `hiddenSymmetries/simsopt` remote HEAD
+  both resolved to `1b0cc3a96063197cdbdd01559e04c25456fbe6ff`; re-check before
+  claiming a fresh upstream parity baseline.
+- Current review sources must include official JAX transfer guard / donation
+  docs, official NVIDIA CUDA programming docs, and official SIMSOPT API docs for
+  the item being edited.
 - Parity-coverage matrix is now a required plan deliverable. Every active
   item builds a CPU/C++ → JAX coverage matrix at
   `.artifacts/jax_port_goal/plans/<id>-coverage.md` (section 4a) and the
@@ -98,6 +102,8 @@ Host/device flow checklist:
 
 - [ ] All host-to-device staging is explicit and outside jitted hot paths.
 - [ ] No implicit host transfers occur under `SIMSOPT_JAX_TRANSFER_GUARD=disallow`.
+  CPU validation is weaker: JAX always allows fetching CPU buffers. CUDA
+  device-to-host transfer evidence requires a real CUDA artifact.
 - [ ] Boundary scalar casts (`int`, `bool`, host result dict values) happen only
   after the compiled path returns.
 - [ ] Multi-device CPU proxy covers any sharding or collective path touched by
@@ -170,8 +176,10 @@ JAX transform and memory strategy checklist:
   math contract and does not change the scalar objective, derivative shape, or
   solve residual being compared.
 - [ ] The plan states the dense materialization budget, expected largest array
-  shape/dtype, whether buffer donation is used, and where the HLO or benchmark
-  evidence will be saved.
+  shape/dtype, whether buffer donation is used, which positional
+  `donate_argnums` / named `donate_argnames` are donated, where the HLO or
+  benchmark evidence will be saved, and why the caller never reuses donated
+  buffers after the call.
 - [ ] Any touched sharding or collective path has a CPU proxy plus a required
   follow-up CUDA artifact path; CPU proxy evidence alone cannot close a CUDA
   performance claim.
@@ -250,16 +258,19 @@ behavior:
   `npx ctx7@latest library <name> "<full question>"`, then fetch docs for the
   chosen `/org/project` ID.
 - Use official JAX pages when the issue involves these topics:
+  - `https://docs.jax.dev/en/latest/_autosummary/jax.jit.html`
   - `https://docs.jax.dev/en/latest/jit-compilation.html`
   - `https://docs.jax.dev/en/latest/transfer_guard.html`
+  - `https://docs.jax.dev/en/latest/buffer_donation.html`
   - `https://docs.jax.dev/en/latest/gpu_memory_allocation.html`
   - `https://docs.jax.dev/en/latest/persistent_compilation_cache.html`
   - `https://docs.jax.dev/en/latest/default_dtypes.html`
   - `https://docs.jax.dev/en/latest/async_dispatch.html`
 - Use official SIMSOPT docs for public API parity:
-  - `https://simsopt.readthedocs.io/latest/simsopt_user.field.html`
-  - `https://simsopt.readthedocs.io/latest/simsopt_user.geo.html`
-  - `https://simsopt.readthedocs.io/latest/simsopt_user.objectives.html`
+  - `https://simsopt.readthedocs.io/latest/optimizable.html`
+  - `https://simsopt.readthedocs.io/latest/simsopt.field.html`
+  - `https://simsopt.readthedocs.io/latest/simsopt.geo.html`
+  - `https://simsopt.readthedocs.io/latest/simsopt.objectives.html`
 - Use official CUDA / NVIDIA docs when the issue involves GPU runtime,
   driver/toolkit compatibility, streams, memory, or proof artifact claims:
   - `https://docs.jax.dev/en/latest/installation.html#nvidia-gpu`
@@ -454,22 +465,27 @@ or mark the item complete with evidence.
 2. [ ] `field/selffield.py` - regularized self-field JAX coverage and tests
 3. [ ] `objectives/fluxobjective.py` + `objectives/fluxobjective_jax.py` -
    `SquaredFlux` / `SquaredFluxJAX` fixed-surface objective coverage,
-   derivative projection, and downstream Stage-2 consumers
+   derivative projection, `definition` variants (`quadratic flux`,
+   `normalized`, `local`), target-array shape semantics, and downstream Stage-2
+   consumers
 4. [ ] `geo/boozersurface.py`, `geo/boozersurface_jax.py`,
-   `geo/surfaceobjectives.py`, `geo/surfaceobjectives_jax.py`,
-   `geo/label_constraints_jax.py`, `geo/_boozersurface_current_guard.py`, and
-   `geo/_simsoptpp_boozer_compat.py` - existing JAX objective wrappers, Boozer
-   traceable runtime, QFM/standard surface objectives, label constraints, and
-   CPU-wrapper parity boundaries
+   `geo/boozer_residual_jax.py`, `geo/surfaceobjectives.py`,
+   `geo/surfaceobjectives_jax.py`, `geo/label_constraints_jax.py`,
+   `geo/_boozersurface_current_guard.py`, and `geo/_simsoptpp_boozer_compat.py`
+   - existing JAX objective wrappers, Boozer traceable runtime, QFM/standard
+   surface objectives, label constraints, iota/G decision variables, z-gauge
+   constraint, and CPU-wrapper parity boundaries
 5. [ ] `geo/{curve.py,curvexyzfourier.py,curverzfourier.py,
    curvexyzfouriersymmetries.py,curveplanarfourier.py,curvehelical.py,
    curvecwsfourier.py,curveperturbed.py}` + `jax_core/curve_geometry.py` -
    curve spec/geometry adapter coverage and C++ curve-kernel parity closeouts
-6. [ ] `geo/{surface.py,surfacerzfourier.py,surfacexyzfourier.py,
-   surfacexyztensorfourier.py,_surface_stellsym.py,
-   surface_fourier_jax_cpu_ordered.py}` + `jax_core/{surface_rzfourier.py,
-   surface_fourier.py}` - surface spec/geometry adapter coverage, stellsym
-   helpers, CPU-ordered parity twins, and C++ surface-kernel parity closeouts
+6. [ ] `geo/surface_fourier_jax.py`,
+   `geo/surface_fourier_jax_cpu_ordered.py`, and
+   `geo/{surface.py,surfacerzfourier.py,surfacexyzfourier.py,
+   surfacexyztensorfourier.py,_surface_stellsym.py}` +
+   `jax_core/{surface_rzfourier.py,surface_fourier.py}` - surface spec/geometry
+   adapter coverage, stellsym helpers, CPU-ordered parity twins, and C++
+   surface-kernel parity closeouts
 7. [ ] `geo/curveobjectives.py` non-distance objectives - `CurveLength`,
    `LpCurveCurvature(Barrier)`, `LpCurveTorsion`, `ArclengthVariation`,
    `MeanSquaredCurvature`, `LinkingNumber`, `FramedCurveTwist`. Distance
@@ -552,12 +568,14 @@ Skip list (do not port; if you touch these, escalate):
 
 - `mhd/*` (external Fortran / C++ binary wrappers)
 - `_core/optimizable.py`, `_core/derivative.py`, `_core/json.py`
+- `field/magneticfield.py` (public `MagneticField` cache / `Optimizable`
+  boundary and parity wrapper)
 - `field/biotsavart.py` (parity oracle)
 - `_core/finite_difference.py` (finite-difference oracle / host optimizer helper)
 - `objectives/{least_squares,constrained,functions,utilities}.py`
 - `solve/serial.py`, `solve/mpi.py` (orchestration)
 - `util/`, `geo/{config,jit,plotting}.py`, `field/mgrid.py`, `field/coilset.py`
-- `geo/_simsoptpp.py` and private helper modules not owned by a manifest item
+- package `__init__.py` files and `geo/_simsoptpp.py`
 - `geo/{surfacegarabedian,surfacehenneberg,accessibility,hull,ports,wireframe_toroidal}.py`
   (auxiliary / historic / CAD; port only on explicit user request)
 - `src/simsoptpp/python*.cpp`, `src/simsoptpp/py*.h`, `*_py.*`,
@@ -837,7 +855,9 @@ concrete kernel changes — never both omitted.
   `max_dense_jacobian_bytes`, and keep the operator-backed alternative path.
 - [ ] If buffer donation is used, prove it at a real outer-jit boundary
   with HLO showing the donated buffer. Internal `fori_loop` carries do not
-  count as donation evidence.
+  count as donation evidence. `donate_argnums` proof must exercise positional
+  calls, or the implementation must use explicit `donate_argnames`; a keyword
+  call through a `donate_argnums` wrapper is not donation evidence.
 - [ ] CPU-only validation must be stated explicitly in the commit message
   and in the item's `cuda_smoke` field (`not_claimed` or `deferred`). This
   is a reporting requirement, not a substitute for the production-scale
@@ -853,6 +873,9 @@ GPU reality:
   an approved GPU run.
 - [ ] Multi-device CPU subprocesses and HLO inspection are useful regression
   proxies, but they are not GPU proof.
+- [ ] CUDA memory evidence must distinguish host memory, device memory, and
+  managed/unified memory. Managed-memory access or a CPU/HLO proxy is not proof
+  that target arrays stayed resident in device memory for the measured path.
 - [ ] Do not launch GPU jobs unless the user explicitly approves them.
 - [ ] Tag each CPU-only item's state evidence with `cuda_smoke: not_claimed`
   or `cuda_smoke: deferred`, never `verified`.
