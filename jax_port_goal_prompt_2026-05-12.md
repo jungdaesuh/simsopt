@@ -3,10 +3,10 @@
 Date: 2026-05-12
 Branch context: `gpu-purity-stage2-20260405`
 Repo: `/Users/suhjungdae/code/columbia/simsopt-jax`
-Prompt base commit: `fa3f877af`
-Source audit base: `8b471e8e3` (parent of the prompt base commit)
-Current review pass: in-flight on top of `fa3f877af` until the next commit
-lands
+Original prompt base commit: `fa3f877af`
+Original source audit base: `8b471e8e3` (parent of the original prompt base)
+Current repo reconciliation base commit:
+`e0e6f21d71d0234ad4cdefeed63329c5648cbfb0`
 
 ## Review status
 
@@ -39,10 +39,9 @@ SIMSOPT / CUDA documentation:
   `.artifacts/jax_port_goal/plans/<id>-coverage.md` (section 4a) and the
   completion gate in section 4c refuses to mark COMPLETE while any
   applicable oracle test row is unmapped or unclassified.
-- State schema bumped from v2 to v3: adds `coverage_matrix`,
-  `upstream_audit_sha`, `red_evidence`, and `bench_artifact`. A v2
-  state.json is not silently upgraded; in-progress items pause to backfill
-  the new artifacts before resuming.
+- State schema source of truth is section 1's `manifest_version: 4` and
+  migration note. A v2 or v3 state.json is not silently upgraded; in-progress
+  items pause to backfill the required artifacts before resuming.
 - Red-step evidence: cited new parity test must be confirmed FAILING against
   the parent commit before implementation; capture saved to
   `.artifacts/jax_port_goal/red/<id>.txt`. Empty-oracle N/A only applies to
@@ -73,6 +72,18 @@ not invent shortcuts.
 Default active scope: P0-P2. P3-P5 are future-scope inventory in this document
 and must be initialized as skipped unless `active_scope` explicitly includes
 them.
+
+Default scope profile: `port_closure`. This means the run closes JAX-native
+port gaps with CPU/C++ oracle parity, transfer-guard evidence, production-scale
+CPU fixtures, and explicit CUDA deferral when no approved GPU run is available.
+Do not report this as CUDA performance release readiness.
+
+Optional scope profile: `cuda_perf_release`. This profile is active only when
+`active_scope_profile` is explicitly set to `cuda_perf_release` and the user has
+approved the required GPU runs. It adds real CUDA parity/performance artifacts,
+warm/cold compile-cache timings, GPU memory high-water marks, and production
+multi-device/sharding proof. CPU, HLO, and multi-device CPU evidence remain
+proxies under this profile until a current-SHA CUDA artifact exists.
 
 ## Required closure checklists
 
@@ -130,6 +141,48 @@ Parity-coverage checklist (every active item, gated by section 4a + 4c):
   against the parent commit; capture saved to
   `.artifacts/jax_port_goal/red/<id>.txt`. The one allowed N/A is a
   Tier P1 new-kernel port with no pre-impl tree.
+
+JAX transform and memory strategy checklist:
+
+- [ ] The item's plan lists the compiled boundary and the static arguments /
+  static spec metadata used to keep shapes stable.
+- [ ] The plan names every JAX transform used by the hot path (`jit`, `vmap`,
+  `scan`, `fori_loop`, `checkpoint`/`remat`, `shard_map`, `pmap`/collectives)
+  or states `N/A: <reason>` for each class of transform that is not applicable.
+- [ ] The plan explains why the chosen transform structure matches the SIMSOPT
+  math contract and does not change the scalar objective, derivative shape, or
+  solve residual being compared.
+- [ ] The plan states the dense materialization budget, expected largest array
+  shape/dtype, whether buffer donation is used, and where the HLO or benchmark
+  evidence will be saved.
+- [ ] Any touched sharding or collective path has a CPU proxy plus a required
+  follow-up CUDA artifact path; CPU proxy evidence alone cannot close a CUDA
+  performance claim.
+
+Math/physics invariant checklist:
+
+- [ ] The item records units/scales, current sign convention, orientation,
+  `stellsym=True` and `stellsym=False` coverage, derivative shape, and excluded
+  singular or near-coil regimes.
+- [ ] For field/objective items, the plan states whether parity is a
+  fixed-state scalar, fixed-state gradient/VJP, final optimizer envelope, or
+  step-by-step optimizer trajectory contract. Optimizer traces are diagnostics,
+  not the CPU/C++ oracle unless trajectory parity is explicitly scoped.
+- [ ] For Boozer or linear-solve work, residual evidence is reported in the
+  original physical basis after any preconditioning, normalization, or basis
+  transform. A transformed residual alone is not sufficient.
+- [ ] For new or changed parity tests, either red-step evidence or an explicit
+  negative control / tolerance-ratchet check proves the test catches a wrong
+  sign, wrong scale, or wrong state dependency.
+
+Serialization and restart compatibility checklist:
+
+- [ ] Any item touching specs, field objects, objectives, surfaces, Boozer
+  state, or runtime metadata proves that public SIMSOPT-facing artifact paths
+  still load consistently (`as_dict`/`from_dict`, restart JSON, runtime spec, or
+  the documented consumer for that item).
+- [ ] Compatibility/reporting metadata is not described as a production compute
+  lane unless the compiled runtime path actually consumes it.
 
 ## 0. Boot - read these every iteration
 
@@ -230,8 +283,9 @@ Commit state only as part of a completed or blocked item commit.
 
 ```json
 {
-  "manifest_version": 3,
+  "manifest_version": 4,
   "active_scope": ["P0", "P1", "P2"],
+  "active_scope_profile": "port_closure|cuda_perf_release",
   "items": [
     {
       "id": "<stable id>",
@@ -239,12 +293,17 @@ Commit state only as part of a completed or blocked item commit.
       "files": ["src/...", "src/..."],
       "depends_on": ["<other id>"],
       "status": "pending|in_progress|complete|blocked|skipped",
+      "closure_level": "open|cpu_oracle_complete|cuda_verified|blocked_architecture|blocked_dependency|blocked_env_gpu|blocked_math_parity|blocked_transfer_guard|skipped_future_scope",
       "evidence": {
         "source_audit": "src/...:line-line",
         "upstream_oracle": "/Users/suhjungdae/code/opensource/simsopt/src/simsopt/...",
         "upstream_audit_sha": "1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
         "kernel_module": "src/simsopt/jax_core/...",
         "adapter_module": "src/simsopt/.../*_jax*.py",
+        "jax_transform_plan": ".artifacts/jax_port_goal/plans/<id>-jax-transform.md",
+        "math_physics_invariants": ".artifacts/jax_port_goal/plans/<id>-invariants.md",
+        "oracle_contract": "fixed_scalar|fixed_gradient_vjp|optimizer_final_envelope|optimizer_trajectory",
+        "serialization_restart_check": ".artifacts/jax_port_goal/restart/<id>.md",
         "coverage_matrix": ".artifacts/jax_port_goal/plans/<id>-coverage.md",
         "red_evidence": ".artifacts/jax_port_goal/red/<id>.txt",
         "parity_test": "tests/...::Test...",
@@ -253,6 +312,23 @@ Commit state only as part of a completed or blocked item commit.
         "bench_artifact": ".artifacts/jax_port_goal/bench/<id>.json",
         "parity_lane": "direct-kernel|derivative-heavy|adjoint|...",
         "cuda_smoke": "not_claimed|deferred|verified",
+        "cuda_proof": {
+          "status": "not_claimed|deferred|verified",
+          "artifact": ".artifacts/jax_port_goal/cuda/<id>-<sha>.json|CI URL|N/A",
+          "current_sha": "<sha>",
+          "worktree_dirty": true,
+          "gpu_device": "H100|H200|A100|RTX...|N/A",
+          "driver_version": "<driver>|N/A",
+          "cuda_runtime": "<runtime>|N/A",
+          "jax_version": "<jax>",
+          "jaxlib_version": "<jaxlib>",
+          "backend": "cuda|cpu|N/A",
+          "xla_flags": "<XLA_FLAGS>",
+          "cuda_visible_devices": "<CUDA_VISIBLE_DEVICES>",
+          "peak_gpu_mem_mb": 0,
+          "target_arrays_on_cuda": true,
+          "compiled_executable_backend": "cuda|cpu|N/A"
+        },
         "commit_sha": "<sha>"
       },
       "blocker": null
@@ -264,10 +340,13 @@ Commit state only as part of a completed or blocked item commit.
 ```
 
 Schema migration note: v2 → v3 adds `coverage_matrix`, `upstream_audit_sha`,
-`red_evidence`, and `bench_artifact`. A v2 state.json is forward-compatible
-only after each in-progress item is paused and its coverage matrix is
-backfilled per section 4a. Do not silently upgrade `manifest_version` without
-producing the new artifacts.
+`red_evidence`, and `bench_artifact`. v3 → v4 adds `active_scope_profile`,
+`closure_level`, `jax_transform_plan`, `math_physics_invariants`,
+`oracle_contract`, `serialization_restart_check`, and `cuda_proof`. A v2 or v3
+state.json is forward-compatible only after each in-progress item is paused and
+the missing artifacts are backfilled per section 4a and the required closure
+checklists. Do not silently upgrade `manifest_version` without producing the new
+artifacts.
 
 For blocked items, replace `"blocker": null` with one of the section-5
 refusal categories:
@@ -292,10 +371,20 @@ The `cuda_smoke` field has a per-run lifetime:
   `deferred` with a fresh dated justification appended to the plan. The
   final REPORT must list every `deferred` entry under "Deferred CUDA
   verification" with the artifact path the next run needs to produce.
+  `deferred` is not a `closure_level`; for `active_scope_profile=port_closure`,
+  a CPU-oracle-complete item with deferred CUDA proof remains `status=complete`
+  and `closure_level=cpu_oracle_complete`.
 - `verified` requires a current-SHA CUDA artifact path in evidence (e.g.
   `.artifacts/jax_port_goal/cuda/<id>-<sha>.json` or a CI run URL). The
   artifact must be produced by an approved GPU run, not inferred from
   CPU + HLO proxies.
+
+`cuda_proof.status` must match `cuda_smoke`. For `verified`, every field in the
+`cuda_proof` object must be populated from the real CUDA run artifact; `N/A` is
+valid only for `not_claimed` or `deferred`. The artifact must prove the compiled
+executable backend is CUDA and that target arrays were resident on CUDA devices
+for the measured path. CPU proxy, HLO-only, or dry-run output may be cited in
+the plan, but cannot populate `cuda_proof.status: verified`.
 
 At each iteration:
 
@@ -304,10 +393,12 @@ At each iteration:
    `depends_on` items are all `complete`.
 3. Set the item `in_progress` in the working tree.
 4. Run section 4 end-to-end.
-5. On success: set `complete`, fill evidence, and make one scoped commit with
+5. On success: set `complete`, fill evidence, set `closure_level` to
+   `cpu_oracle_complete` or `cuda_verified`, and make one scoped commit with
    code, tests, docs, plans, and state for that item.
 6. On unrecoverable blocker: set `blocked`, fill blocker evidence, and make one
    scoped blocker commit only if the blocker note/state file is useful to keep.
+   Set `closure_level` from the section-5 blocker-to-closure mapping.
 7. If no eligible pending active item remains: stop and write the final report.
 
 ## 2. Architecture invariants - never violate
@@ -685,6 +776,10 @@ concrete kernel changes — never both omitted.
   and in the item's `cuda_smoke` field (`not_claimed` or `deferred`). This
   is a reporting requirement, not a substitute for the production-scale
   parity gate above.
+- [ ] The item's `jax_transform_plan` artifact names the transform stack,
+  static-shape strategy, dense materialization budget, donation decision, and
+  expected largest array shape/dtype. The benchmark or HLO artifact must link
+  back to this plan.
 
 GPU reality:
 
@@ -695,6 +790,12 @@ GPU reality:
 - [ ] Do not launch GPU jobs unless the user explicitly approves them.
 - [ ] Tag each CPU-only item's state evidence with `cuda_smoke: not_claimed`
   or `cuda_smoke: deferred`, never `verified`.
+- [ ] `active_scope_profile=port_closure` may finish with
+  `closure_level=cpu_oracle_complete` plus `cuda_smoke=deferred` entries in the
+  final REPORT; it may not claim CUDA release readiness.
+- [ ] `active_scope_profile=cuda_perf_release` requires
+  `closure_level=cuda_verified` for every CUDA-claimed item and a populated
+  `cuda_proof` object from a real GPU artifact.
 
 ### 4d. Commit
 
@@ -709,7 +810,13 @@ jax-port: <short title> [item <id>]
 - spec: <spec name or existing>
 - kernel: jax_core/<file or existing>
 - adapter: <file>
+- status: complete | blocked | skipped
+- closure level: cpu_oracle_complete | cuda_verified | blocked_architecture | blocked_dependency | blocked_env_gpu | blocked_math_parity | blocked_transfer_guard | skipped_future_scope
 - parity lane: <lane>
+- oracle contract: fixed_scalar | fixed_gradient_vjp | optimizer_final_envelope | optimizer_trajectory
+- JAX transform plan: .artifacts/jax_port_goal/plans/<id>-jax-transform.md
+- math/physics invariants: .artifacts/jax_port_goal/plans/<id>-invariants.md
+- serialization/restart check: .artifacts/jax_port_goal/restart/<id>.md
 - tests: <new or affected test paths>
 - coverage matrix: .artifacts/jax_port_goal/plans/<id>-coverage.md
 - red evidence: .artifacts/jax_port_goal/red/<id>.txt (or "N/A: <reason>"
@@ -718,6 +825,7 @@ jax-port: <short title> [item <id>]
   hot-path change because <one-line justification>")
 - upstream audit sha: <upstream SIMSOPT sha audited for this item>
 - cuda smoke: not_claimed | deferred | verified
+- cuda proof: .artifacts/jax_port_goal/cuda/<id>-<sha>.json | CI URL | N/A
 - docs checked: <official docs URLs or Context7 IDs>
 ```
 
@@ -734,6 +842,29 @@ A refusal trigger fires only after the diagnostic budget below is exhausted
 and the artifact in `.artifacts/jax_port_goal/blockers/<id>-debug.md` has
 been written. A BLOCKED status without that artifact is not a valid stop —
 treat it as in_progress and finish the budget.
+
+Exception: `gpu_run_needed` caused only by absent local CUDA hardware, absent
+`nvidia-smi`, missing remote GPU quota/auth, or lack of explicit user approval
+does not require two debug timeboxes. In that case, run the preflight command,
+write the blocker artifact immediately with the exact approved-run command and
+expected CUDA artifact path, set `status=blocked` and
+`closure_level=blocked_env_gpu`, and move on. Do not launch the GPU job. If the
+item has already satisfied the CPU/C++ oracle gates under
+`active_scope_profile=port_closure` and only optional CUDA proof is deferred,
+do not use this blocker path; set `status=complete`,
+`closure_level=cpu_oracle_complete`, `cuda_smoke=deferred`, and
+`cuda_proof.status=deferred`.
+
+Blocker-to-closure mapping is exact:
+
+| blocker `category` | required `closure_level` |
+| --- | --- |
+| `architecture` | `blocked_architecture` |
+| `missing_dependency` | `blocked_dependency` |
+| `parity_unreachable` | `blocked_math_parity` |
+| `tolerance_policy` | `blocked_math_parity` |
+| `transfer_guard_unreachable` | `blocked_transfer_guard` |
+| `gpu_run_needed` | `blocked_env_gpu` |
 
 Diagnostic budget (mandatory before BLOCKED is set):
 
@@ -779,9 +910,13 @@ Implementation hygiene:
 Reporting and gate hygiene:
 
 - Declaring a CUDA result from CPU-only or HLO-only evidence.
+- Marking `cuda_smoke: verified` when `cuda_proof.status` is not `verified`
+  with a current-SHA CUDA artifact.
 - "It is fine, the test passes locally" without the applicable validation
   set.
 - Reporting CPU-only closure as full end-to-end closure.
+- Reporting `closure_level=cpu_oracle_complete` as CUDA performance release
+  readiness.
 
 Test integrity (do not game the parity gates):
 
@@ -800,7 +935,8 @@ Test integrity (do not game the parity gates):
 Self-termination hygiene:
 
 - BLOCKING an item without writing `.artifacts/jax_port_goal/blockers/<id>-debug.md`
-  and exhausting the two-timebox diagnostic budget from section 5.
+  and exhausting the two-timebox diagnostic budget from section 5, except for
+  the explicit `gpu_run_needed` environment/approval exception in section 5.
 - BLOCKING more than one active item per run with `architecture`,
   `parity_unreachable`, or `transfer_guard_unreachable` self-issued.
   Hitting that quota forces ESCALATE before any further BLOCK.
@@ -813,10 +949,14 @@ Stop only when ALL of the following hold; the OR shortcuts that previously
 allowed self-termination via mass-BLOCKED have been removed:
 
 - Every item in `active_scope` is `complete`, `blocked`, or `skipped`. AND
+- Every completed item has `closure_level=cpu_oracle_complete` or
+  `closure_level=cuda_verified`; every blocked/skipped item has the matching
+  closure level from section 5 or `skipped_future_scope`. AND
 - The applicable targeted, regression, transfer-guard, and multi-device CPU
   test runs from section 4c are green at the current HEAD. AND
 - The final report `.artifacts/jax_port_goal/REPORT.md` exists and lists
-  every active item's status with a one-line evidence pointer. AND
+  every active item's status, closure level, oracle contract, and one-line
+  evidence pointer. AND
 - The BLOCK / ESCALATE quota was respected: at most **one** active item per
   run may be BLOCKED with `architecture` / `parity_unreachable` /
   `transfer_guard_unreachable` self-issued by the agent without prior
@@ -831,6 +971,10 @@ allowed self-termination via mass-BLOCKED have been removed:
   needs to produce. `deferred` does not carry across runs implicitly; the
   next run must explicitly promote it to `verified` or re-park it with a
   fresh justification.
+- If `active_scope_profile=cuda_perf_release`, every CUDA-claimed item has
+  `closure_level=cuda_verified` and a populated `cuda_proof` object from an
+  approved real GPU run. Otherwise the run is not a CUDA performance release
+  closure.
 
 If full-suite, cross-env, or GPU validation is blocked by environment or
 hardware, state that explicitly in the REPORT and do not claim full
@@ -841,7 +985,18 @@ Write `.artifacts/jax_port_goal/REPORT.md` with:
 
 - Completed active items and validation commands.
 - Blocked/skipped active items and exact blockers.
+- Closure level taxonomy for every active item:
+  `cpu_oracle_complete`, `cuda_verified`, `blocked_architecture`,
+  `blocked_dependency`, `blocked_env_gpu`, `blocked_math_parity`,
+  `blocked_transfer_guard`, or `skipped_future_scope`.
+- Oracle contract for every active item:
+  `fixed_scalar`, `fixed_gradient_vjp`, `optimizer_final_envelope`, or
+  `optimizer_trajectory`.
+- JAX transform/memory strategy artifacts and math/physics invariant artifacts.
+- Serialization/restart compatibility artifacts or explicit `N/A: <reason>`.
 - CPU, multi-device CPU, transfer-guard, cross-env, and GPU evidence separated.
+- CUDA proof table with `cuda_smoke`, `cuda_proof.status`, artifact path,
+  device/backend, and whether target arrays were resident on CUDA.
 - Any stale rows discovered in `jax_gpu_port_todos_2026-04-08.md` or local docs.
 - Any upstream/downstream API, math, physics, or computation discrepancy found.
 
