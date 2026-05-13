@@ -40,10 +40,9 @@ _jax_field_modules = _JAX_FIELD_MODULES if _has_jax else ()
 _jax_simsoptpp_field_modules = (
     _JAX_FIELD_SIMSOPTPP_MODULES if _has_jax and _has_simsoptpp else ()
 )
+_field_modules = _cpu_field_modules + _jax_field_modules + _jax_simsoptpp_field_modules
 
-_EXPORT_TO_MODULE, __all__ = build_lazy_export_map(
-    __file__, _cpu_field_modules + _jax_field_modules + _jax_simsoptpp_field_modules
-)
+_EXPORT_TO_MODULE, __all__ = build_lazy_export_map(__file__, _field_modules)
 
 
 def __getattr__(name):

@@ -148,10 +148,7 @@ jax.tree_util.register_dataclass(
 
 
 def _validate_points(points: jax.Array) -> jax.Array:
-    if isinstance(points, jax.Array):
-        points_arr = jnp.asarray(points, dtype=jnp.float64)
-    else:
-        points_arr = _as_jax_float64(points)
+    points_arr = _as_jax_float64(points)
     if points_arr.ndim != 2 or points_arr.shape[1] != 3:
         raise ValueError(
             f"points must have shape (N, 3); got {tuple(points_arr.shape)!r}."

@@ -66,9 +66,8 @@ the runtime ``jaxlib`` 0.10.0 build.
 
 from __future__ import annotations
 
+import jax
 import numpy as np
-
-import jax.numpy as jnp
 
 from .._core.json import GSONDecoder
 from ..jax_core._math_utils import as_jax_float64 as _as_jax_float64
@@ -106,7 +105,7 @@ __all__ = [
 ]
 
 
-def _points_device(points: np.ndarray) -> jnp.ndarray:
+def _points_device(points: np.ndarray) -> jax.Array:
     """Stage host points to a JAX float64 device array via the strict-safe
     ``jax.device_put`` path.
 

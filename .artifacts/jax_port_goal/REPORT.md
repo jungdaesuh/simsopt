@@ -8,7 +8,7 @@ Active scope: `P0`, `P1`, `P2` (goal-prompt default; P3-P5 skipped).
 Active scope profile: `port_closure`.
 GPU policy: `no_gpu_runs`. User explicitly requested CPU JAX only.
 Upstream SIMSOPT audit SHA: `1b0cc3a96063197cdbdd01559e04c25456fbe6ff`.
-Repository audit HEAD: `db185cb37e8154970759b68789720132e64ce406`.
+Repository reconciliation HEAD: `51d4d2b7c4754b940e215ba25c8e51fd8017292c`.
 Python runtime:
 `/Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python`
 (`jax==0.10.0`, `jaxlib==0.10.0`, CPU backend).
@@ -63,6 +63,7 @@ No CUDA artifact is claimed or deferred (`cuda_smoke=not_claimed`).
 ## Commit log (this run)
 
 ```
+51d4d2b7c jax-port: reconcile closeout and remaining plan [final reconciliation]
 2afd3c916 jax-port: partial close + block analytic-field/InterpolatedField wrappers [item 15]
 c6fbc4341 jax-port: close Boozer surface objectives + wrappers [item 04]
 a093a02f6 jax-port: close NormalField + CoilNormalField [item 17]
@@ -80,9 +81,6 @@ f6facd30d jax-port: close SquaredFlux/SquaredFluxJAX [item 03]
 a0b647f4d jax-port: close regularized self-field [item 02]
 a9da18fac jax-port: close CurrentPenalty + distance wrappers [item 01]
 ```
-
-(Plus this final-reconciliation commit for follow-up artifacts and
-REPORT.md.)
 
 ## Validation evidence
 

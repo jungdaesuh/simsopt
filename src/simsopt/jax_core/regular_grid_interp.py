@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import Callable, Literal
+from typing import Callable
 
 import jax
 import jax.numpy as jnp
@@ -41,9 +41,6 @@ import numpy as np
 _BOUNDARY_EPSILON = 1e-13
 
 
-InterpolationRuleKind = Literal["uniform", "chebyshev"]
-
-
 @dataclass(frozen=True)
 class InterpolationRule:
     """Closed-form 1D Lagrange interpolation rule on ``[0, 1]``."""
@@ -51,7 +48,6 @@ class InterpolationRule:
     nodes: np.ndarray
     scalings: np.ndarray
     degree: int
-    kind: InterpolationRuleKind
 
 
 def _build_scalings(nodes: np.ndarray) -> np.ndarray:
@@ -85,7 +81,6 @@ def UniformInterpolationRule(degree: int) -> InterpolationRule:
         nodes=nodes,
         scalings=_build_scalings(nodes),
         degree=degree_int,
-        kind="uniform",
     )
 
 
@@ -107,7 +102,6 @@ def ChebyshevInterpolationRule(degree: int) -> InterpolationRule:
         nodes=nodes,
         scalings=_build_scalings(nodes),
         degree=degree_int,
-        kind="chebyshev",
     )
 
 
@@ -174,8 +168,7 @@ def _validate_range(label: str, axis_range: tuple) -> tuple[float, float, int]:
     return minimum, maximum, n_cells
 
 
-def _default_skip(xs: np.ndarray, ys: np.ndarray, zs: np.ndarray) -> np.ndarray:
-    del ys, zs
+def _default_skip(xs: np.ndarray, *_unused: np.ndarray) -> np.ndarray:
     return np.zeros(xs.shape, dtype=bool)
 
 
@@ -317,11 +310,7 @@ def _build_cell_table(
                     k * degree : k * degree + degree + 1,
                 ]
                 row_counter += 1
-    if row_counter != cells_to_keep:
-        raise RuntimeError(
-            "internal cell bookkeeping mismatch: scheduled to write "
-            f"{cells_to_keep} cells but wrote {row_counter}"
-        )
+    assert row_counter == cells_to_keep
 
     return cell_to_row, cell_table
 
@@ -534,7 +523,14 @@ def _evaluate_batch_jit(
         zidx = jnp.clip(zidx_raw, 0, nz - 1)
 
         flat_cell_idx = (xidx * ny + yidx) * nz + zidx
-        row_idx = jnp.where(in_bounds, cell_to_row[flat_cell_idx], sentinel_row)
+        candidate_row = cell_to_row[flat_cell_idx]
+        is_kept_cell = candidate_row != sentinel_row
+        row_idx = jnp.where(in_bounds, candidate_row, sentinel_row)
+        # ``in_kept_cell`` distinguishes "in spatial bounds AND not a
+        # skipped cell" from "in spatial bounds but skipped". The C++
+        # binding raises in both not-in-bounds and skipped-cell cases
+        # when ``out_of_bounds_ok=False``; JAX routes both through NaN.
+        in_kept_cell = in_bounds & is_kept_cell
 
         xlocal = (x_clamped - xmesh[xidx]) / hx
         ylocal = (y_clamped - ymesh[yidx]) / hy
@@ -561,10 +557,11 @@ def _evaluate_batch_jit(
         )
         # ``out_of_bounds_ok=False`` surfaces NaN to the host so the
         # caller can detect the error post-hoc. The C++ binding raises
-        # at this point; raising from inside a jitted kernel would have
-        # to abandon JIT entirely, so we route through NaN instead.
+        # in both the not-in-bounds and skipped-cell cases; raising
+        # from inside a jitted kernel would abandon JIT entirely, so
+        # we route both through NaN instead.
         if not out_of_bounds_ok:
-            result = jnp.where(in_bounds, result, jnp.nan)
+            result = jnp.where(in_kept_cell, result, jnp.nan)
         return result
 
     return jax.vmap(evaluate_one)(xyz)
@@ -653,10 +650,8 @@ def estimate_error(
 
 
 __all__ = [
-    "_BOUNDARY_EPSILON",
     "ChebyshevInterpolationRule",
     "InterpolationRule",
-    "InterpolationRuleKind",
     "RegularGridInterpolant3DSpec",
     "UniformInterpolationRule",
     "build_regular_grid_interpolant_3d",

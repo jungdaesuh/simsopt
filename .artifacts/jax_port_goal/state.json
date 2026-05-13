@@ -4,7 +4,7 @@
   "active_scope": ["P0", "P1", "P2"],
   "active_scope_profile": "port_closure",
   "repo": "/Users/suhjungdae/code/columbia/simsopt-jax",
-  "repo_head": "db185cb37e8154970759b68789720132e64ce406",
+  "repo_head": "51d4d2b7c4754b940e215ba25c8e51fd8017292c",
   "upstream_audit_sha": "1b0cc3a96063197cdbdd01559e04c25456fbe6ff",
   "python": "/Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python",
   "jax_runtime": {

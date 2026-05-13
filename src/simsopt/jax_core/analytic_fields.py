@@ -42,7 +42,6 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 __all__ = [
     "DommaschkSpec",
@@ -616,17 +615,16 @@ def _dommaschk_dB_multimode_kernel(m_tuple: tuple[int, ...], n_tuple: tuple[int,
     return jax.jit(kernel)
 
 
-def _validate_dommaschk_spec(spec: DommaschkSpec) -> int:
+def _validate_dommaschk_spec(spec: DommaschkSpec) -> None:
     if not isinstance(spec, DommaschkSpec):
         raise TypeError("dommaschk kernel requires a DommaschkSpec")
     if len(spec.m) != len(spec.n):
         raise ValueError("DommaschkSpec.m and .n must have equal length")
-    coeffs = jnp.asarray(spec.coeffs)
+    coeffs = jnp.asarray(spec.coeffs, dtype=jnp.float64)
     if coeffs.ndim != 2 or coeffs.shape[1] != 2:
         raise ValueError("DommaschkSpec.coeffs must have shape [K, 2]")
     if coeffs.shape[0] != len(spec.m):
         raise ValueError("DommaschkSpec.coeffs length does not match mode-index length")
-    return int(coeffs.shape[0])
 
 
 def dommaschk_B(spec: DommaschkSpec, points: jax.Array) -> jax.Array:
@@ -679,15 +677,14 @@ def dommaschk_dB(spec: DommaschkSpec, points: jax.Array) -> jax.Array:
 # ── Reiman field ──────────────────────────────────────────────────────
 
 
-def _validate_reiman_spec(spec: ReimanSpec) -> int:
+def _validate_reiman_spec(spec: ReimanSpec) -> None:
     if not isinstance(spec, ReimanSpec):
         raise TypeError("reiman kernel requires a ReimanSpec")
-    eps = jnp.asarray(spec.epsilon)
+    eps = jnp.asarray(spec.epsilon, dtype=jnp.float64)
     if eps.ndim != 1:
         raise ValueError("ReimanSpec.epsilon must be 1-D")
     if eps.shape[0] != len(spec.k_theta):
         raise ValueError("ReimanSpec.epsilon length does not match k_theta length")
-    return int(eps.shape[0])
 
 
 def _reiman_pure_B(
@@ -897,8 +894,3 @@ def reiman_dB(spec: ReimanSpec, points: jax.Array) -> jax.Array:
         tuple(int(k) for k in spec.k_theta), int(spec.m0_symmetry)
     )
     return kernel(iota0, iota1, epsilon, points_arr)
-
-
-# Static-analysis hooks: keep ``np`` imported for downstream consumers
-# that may wish to construct specs from numpy arrays.
-_ = np

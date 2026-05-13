@@ -84,7 +84,8 @@ lower-numbered items are downstream of future-scope prerequisites:
 
 #### Wave R0 - Reconcile State And Plan Inputs
 
-- [ ] Commit or otherwise preserve the final closeout reconciliation files:
+- [x] Commit or otherwise preserve the final closeout reconciliation files
+  (committed as `51d4d2b7c`):
   `.artifacts/jax_port_goal/REPORT.md`, `.artifacts/jax_port_goal/state.json`,
   item-15 plan artifacts, and the lazy-export fix in
   `src/simsopt/field/__init__.py`.
