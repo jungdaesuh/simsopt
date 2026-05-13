@@ -711,8 +711,20 @@ jax-port: <short title> [item <id>]
 - adapter: <file>
 - parity lane: <lane>
 - tests: <new or affected test paths>
+- coverage matrix: .artifacts/jax_port_goal/plans/<id>-coverage.md
+- red evidence: .artifacts/jax_port_goal/red/<id>.txt (or "N/A: <reason>"
+  for Tier P1 new-kernel ports with no pre-impl tree)
+- bench artifact: .artifacts/jax_port_goal/bench/<id>.json (or "N/A: no
+  hot-path change because <one-line justification>")
+- upstream audit sha: <upstream SIMSOPT sha audited for this item>
+- cuda smoke: not_claimed | deferred | verified
 - docs checked: <official docs URLs or Context7 IDs>
 ```
+
+Every field is mandatory. Use the literal `N/A: <reason>` form when a
+field genuinely does not apply per the section 4c carve-outs; an empty
+field or a missing line is treated as omitted evidence and the commit
+must not be made.
 
 Do not add co-author footers unless the user explicitly asks for them.
 
