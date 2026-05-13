@@ -1,0 +1,64 @@
+Item 08 red-step evidence — strain_optimization wrapper transfer-guard
+closeout test against parent commit a9da18fac.
+
+Procedure:
+
+  git worktree add --detach /tmp/simsopt-jax-item08-red/wt a9da18fac
+  cp tests/geo/test_strainopt_item08_closeout.py \
+     /tmp/simsopt-jax-item08-red/wt/tests/geo/
+  cd /tmp/simsopt-jax-item08-red/wt
+  SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu \
+    PYTHONPATH=src \
+    /Users/suhjungdae/code/columbia/simsopt-jax/.conda/jax-0.9.2/bin/python \
+    -m pytest tests/geo/test_strainopt_item08_closeout.py -q
+
+Parent commit under test: a9da18fac ("jax-port: close CurrentPenalty +
+distance wrappers [item 01]"). On that tree, strain_optimization.py's
+LPTorsionalStrainPenalty.J() / LPBinormalCurvatureStrainPenalty.J() feed
+``framedcurve.curve.gammadash()`` (a host numpy array) directly into the
+module-level jit closure ``_lp_strain_penalty_value``. The implicit
+host->device transfer that JAX would do on entry violates
+``jax.transfer_guard("disallow")``.
+
+Result on parent commit with the new test file: 2 failed.
+
+Representative failures (file pointers; full output captured in this
+artifact's source listing below):
+
+- test_lp_torsional_penalty_production_scale_matches_numpy_reference_under_strict_guard
+  JaxRuntimeError: INVALID_ARGUMENT: Disallowed host-to-device transfer
+  aval=ShapedArray(float64[720,3]) at
+  src/simsopt/geo/strain_optimization.py:147 (LPTorsionalStrainPenalty.J
+  feeding gammadash into _lp_strain_penalty_value).
+- test_lp_binormal_penalty_zero_twist_circle_vanishes_in_frenet_frame
+  JaxRuntimeError: INVALID_ARGUMENT: Disallowed host-to-device transfer
+  aval=ShapedArray(float64[64,3]) at
+  src/simsopt/geo/strain_optimization.py:84
+  (LPBinormalCurvatureStrainPenalty.J feeding gammadash into
+  _lp_strain_penalty_value).
+
+Verbatim pytest output excerpt (parent commit, disallow):
+
+  FAILED tests/geo/test_strainopt_item08_closeout.py::test_lp_torsional_penalty_production_scale_matches_numpy_reference_under_strict_guard
+  FAILED tests/geo/test_strainopt_item08_closeout.py::test_lp_binormal_penalty_zero_twist_circle_vanishes_in_frenet_frame
+  2 failed in 1.27s
+
+Post-fix command (current HEAD's tree with the same test file and the
+explicit ``jax.transfer_guard("allow")`` + ``as_jax_float64`` staging at
+the gammadash host boundary):
+
+  JAX_ENABLE_X64=True JAX_PLATFORMS=cpu \
+    .conda/jax-0.9.2/bin/python \
+    -m pytest tests/geo/test_strainopt_item08_closeout.py -q
+
+Post-fix result: 2 passed.
+
+  SIMSOPT_JAX_TRANSFER_GUARD=disallow JAX_ENABLE_X64=True JAX_PLATFORMS=cpu \
+    .conda/jax-0.9.2/bin/python \
+    -m pytest tests/geo/test_strainopt_item08_closeout.py -q
+
+Post-fix result under strict env-level guard: 2 passed.
+
+Test file imports tolerances from
+``benchmarks.validation_ladder_contract.parity_ladder_tolerances("direct_kernel")``
+so no atol/rtol numeric literals are inlined.

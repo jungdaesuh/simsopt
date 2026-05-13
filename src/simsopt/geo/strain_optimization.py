@@ -1,11 +1,13 @@
 from functools import partial
 
+import jax
 import jax.numpy as jnp
 from jax import grad, vjp
 from simsopt._core import Optimizable
 from simsopt._core.derivative import derivative_dec
 from simsopt.geo.curveobjectives import Lp_torsion_pure
 from simsopt.geo.jit import jit
+from simsopt.jax_core._math_utils import as_jax_float64 as _as_jax_float64_array
 
 __all__ = [
     "LPBinormalCurvatureStrainPenalty",
@@ -80,7 +82,8 @@ class LPBinormalCurvatureStrainPenalty(Optimizable):
         This returns the value of the quantity.
         """
         strain_like = self.strain.binormal_curvature_strain()
-        gammadash = self.framedcurve.curve.gammadash()
+        with jax.transfer_guard("allow"):
+            gammadash = _as_jax_float64_array(self.framedcurve.curve.gammadash())
         return _lp_strain_penalty_value(
             strain_like,
             gammadash,
@@ -94,7 +97,8 @@ class LPBinormalCurvatureStrainPenalty(Optimizable):
         This returns the derivative of the quantity with respect to the curve and rotation dofs.
         """
         strain_like = self.strain.binormal_curvature_strain()
-        gammadash = self.framedcurve.curve.gammadash()
+        with jax.transfer_guard("allow"):
+            gammadash = _as_jax_float64_array(self.framedcurve.curve.gammadash())
         grad0, grad1 = _lp_strain_penalty_grad(
             strain_like,
             gammadash,
@@ -143,7 +147,8 @@ class LPTorsionalStrainPenalty(Optimizable):
         This returns the value of the quantity.
         """
         strain_like = self.strain.torsional_strain()
-        gammadash = self.framedcurve.curve.gammadash()
+        with jax.transfer_guard("allow"):
+            gammadash = _as_jax_float64_array(self.framedcurve.curve.gammadash())
         return _lp_strain_penalty_value(
             strain_like,
             gammadash,
@@ -157,7 +162,8 @@ class LPTorsionalStrainPenalty(Optimizable):
         This returns the derivative of the quantity with respect to the curve and rotation dofs.
         """
         strain_like = self.strain.torsional_strain()
-        gammadash = self.framedcurve.curve.gammadash()
+        with jax.transfer_guard("allow"):
+            gammadash = _as_jax_float64_array(self.framedcurve.curve.gammadash())
         grad0, grad1 = _lp_strain_penalty_grad(
             strain_like,
             gammadash,
