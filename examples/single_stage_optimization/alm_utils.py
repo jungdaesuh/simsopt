@@ -384,18 +384,13 @@ class _ALMInnerAttemptEvaluator:
             self.request.effective_feasibility_tol,
         )
         if callback_routing_state.signal_state.explicit_stage2_signals:
-            callback_dual_update_max_violation = max(
-                float(callback_max_feasibility_violation),
-                float(callback_routing_state.hard_max_violation),
-            )
-            callback_dual_update_stationarity_norm = _dual_update_stationarity_norm(
-                callback_stationarity_norm,
-                callback_kkt_stationarity_norm,
-            )
-            if (
-                callback_dual_update_max_violation <= self.request.update_feasibility_tol
-                and callback_dual_update_stationarity_norm
-                <= self.request.update_stationarity_tol
+            if _dual_update_gate_satisfied(
+                max_feasibility_violation=callback_max_feasibility_violation,
+                hard_max_violation=callback_routing_state.hard_max_violation,
+                stationarity_norm=callback_stationarity_norm,
+                kkt_stationarity_norm=callback_kkt_stationarity_norm,
+                update_feasibility_tol=self.request.update_feasibility_tol,
+                update_stationarity_tol=self.request.update_stationarity_tol,
             ):
                 raise _EarlyStopInnerSolve(inner_x, evaluation)
         elif (
@@ -2472,14 +2467,27 @@ def _stationarity_metrics(
     )
 
 
-def _dual_update_stationarity_norm(
+def _dual_update_gate_satisfied(
+    *,
+    max_feasibility_violation: float,
+    hard_max_violation: float,
     stationarity_norm: float,
     kkt_stationarity_norm: float | None,
-) -> float:
-    return (
+    update_feasibility_tol: float,
+    update_stationarity_tol: float,
+) -> bool:
+    dual_update_max_violation = max(
+        float(max_feasibility_violation),
+        float(hard_max_violation),
+    )
+    dual_update_stationarity_norm = (
         float(kkt_stationarity_norm)
         if kkt_stationarity_norm is not None
         else float(stationarity_norm)
+    )
+    return (
+        dual_update_max_violation <= float(update_feasibility_tol)
+        and dual_update_stationarity_norm <= float(update_stationarity_tol)
     )
 
 
@@ -4528,20 +4536,6 @@ def _run_alm_continuation_step(
     hard_feasible_for_update = (
         routing_state.hard_max_violation <= effective_feasibility_tol
     )
-    dual_update_max_violation = max(
-        float(max_feasibility_violation),
-        float(routing_state.hard_max_violation),
-    )
-    within_dual_update_feasibility_window = (
-        dual_update_max_violation <= state.update_feasibility_tol
-    )
-    dual_update_stationarity_norm = _dual_update_stationarity_norm(
-        stationarity_norm,
-        kkt_stationarity_norm,
-    )
-    stationary_for_dual_update = (
-        dual_update_stationarity_norm <= state.update_stationarity_tol
-    )
     constraints_inactive_candidate = (
         routing_state.signal_state.explicit_stage2_signals
         and hard_feasible_strict
@@ -4632,9 +4626,13 @@ def _run_alm_continuation_step(
                 max_feasibility_violation=max_feasibility_violation,
             )
 
-    if (
-        within_dual_update_feasibility_window
-        and stationary_for_dual_update
+    if _dual_update_gate_satisfied(
+        max_feasibility_violation=max_feasibility_violation,
+        hard_max_violation=routing_state.hard_max_violation,
+        stationarity_norm=stationarity_norm,
+        kkt_stationarity_norm=kkt_stationarity_norm,
+        update_feasibility_tol=state.update_feasibility_tol,
+        update_stationarity_tol=state.update_stationarity_tol,
     ):
         state.feasible_stall_count = 0
         dual_update = _handle_alm_dual_update_transition(

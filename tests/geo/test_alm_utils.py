@@ -52,19 +52,19 @@ class AlmHybridSignalContractDocTests(unittest.TestCase):
             "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2187-2194": (
                 '"raw_dual_update_values"'
             ),
-            "examples/single_stage_optimization/alm_utils.py:2202-2254": (
+            "examples/single_stage_optimization/alm_utils.py:2197-2249": (
                 "def _extract_stage2_constraint_signal_state"
             ),
-            "examples/single_stage_optimization/alm_utils.py:3358-3374": (
+            "examples/single_stage_optimization/alm_utils.py:3366-3382": (
                 "routing_state.signal_state.preferred_dual_update_values"
             ),
-            "examples/single_stage_optimization/alm_utils.py:2296-2354": (
+            "examples/single_stage_optimization/alm_utils.py:2291-2349": (
                 "def _constraint_routing_state"
             ),
-            "examples/single_stage_optimization/alm_utils.py:4553-4562": (
+            "examples/single_stage_optimization/alm_utils.py:4547-4556": (
                 "and not signal_mismatch_active"
             ),
-            "examples/single_stage_optimization/alm_utils.py:4236-4247": (
+            "examples/single_stage_optimization/alm_utils.py:4243-4256": (
                 "and not run_state.last_cap_binding_active"
             ),
         }
