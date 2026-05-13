@@ -1,11 +1,12 @@
 """CI-safe tests for the non-banana example CPU C++/JAX parity harness.
 
 Covers:
-  * Fixture registry completeness (all 10 plan IDs are present).
+  * Fixture registry completeness (all 11 plan IDs are present).
   * Phase 0 baseline gates (JAX x64 + no GPU devices required).
   * Phase 1 ``minimal_stage2_flux_length_gap`` value/gradient parity and
     its unsupported-component classification.
-  * Phase 2 ``cws_saved_local_flux_nfp2`` local-flux parity.
+  * Phase 2 ``cws_saved_local_flux_nfp{2,3}`` local-flux fixtures.
+  * Phase 3/4 full and planar Stage-II partial native-subproblem parity.
   * Support-gate fixture (``position_orientation_flux_support_gate``)
     correctly reports verdict='unsupported' without claiming a pass.
 

@@ -1,4 +1,4 @@
-"""Non-banana example CPU C++/JAX parity benchmark (Phase 0–2 implementation).
+"""Non-banana example CPU C++/JAX parity benchmark (Phase 0–8 implementation).
 
 Implements the harness described by
 ``docs/non_banana_example_cpp_jax_cpu_parity_plan_2026-05-12.md``:
@@ -8,15 +8,15 @@ Implements the harness described by
 * Phase 1 — P0 ``minimal_stage2_flux_length_gap`` fixed-state parity
   (SquaredFlux / SquaredFluxJAX, B, B·n, surface geometry, gradient,
   deterministic perturbation diagnostics).
-* Phase 2 — P1 ``cws_saved_local_flux_nfp{2,3}`` fixed-state parity
-  using the saved BiotSavart artifacts.
-
-Remaining fixtures (``full_stage2_composite``, ``planar_stage2_composite``,
-``position_orientation_flux_support_gate``, ``boozer_surface_basic``,
-``boozer_qa_wrappers``, ``finite_beta_target_flux``,
-``finitebuild_multifilament_support_gate``, ``qfm_surface``) are registered
-as explicit ``unsupported`` or ``support_gate`` records. Follow-up phases add
-native comparisons; this harness does not silently loosen unsupported gates.
+* Phase 2 — P1 ``cws_saved_local_flux_nfp{2,3}`` saved-artifact fixtures;
+  currently blocked by upstream ``CurveCWSFourier`` JSON deserialization.
+* Phase 3/4 — full and planar Stage-II fixed-state fixtures. Their
+  native-supported ``SquaredFlux`` subproblems are compared, while CPU-only
+  geometry penalties are listed in ``unsupported_components``.
+* Phase 5/7 — position/orientation and finite-build support gates with live
+  CPU fixture probes.
+* Phase 6/7/8 — Boozer, finite-beta, and QFM entries are explicit
+  unsupported records until their non-BiotSavart lane artifacts are wired.
 
 CPU only — the benchmark refuses to run if any CUDA device is visible to
 JAX after configuration.

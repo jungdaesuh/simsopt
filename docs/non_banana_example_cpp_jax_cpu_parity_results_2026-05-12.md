@@ -14,9 +14,9 @@ tests in `tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py`.
 
 ## Per-fixture summary
 
-The table reflects the most recent JSON artifact, generated against
-HEAD `e50bc4ced` (after which this document is being authored on the
-follow-up commit).
+The table reflects the refreshed JSON artifacts, generated against base
+HEAD `c23f704f6fac06308110270f0522e60b0533bea9` with the artifact
+dirty-tree metadata recorded in each file.
 
 | Fixture | Verdict | Native components compared | Failing | Unsupported | Max abs diff (gradient) | Max abs diff (B) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -112,15 +112,16 @@ Verdict legend:
 ## Reproducer commands
 
 The harness is CPU-only; commands force `JAX_PLATFORMS=cpu` and
-`JAX_ENABLE_X64=1` before `import jax`. Run from the repository root.
+`JAX_ENABLE_X64=1` before `import jax`. Run from the repository root using
+the Python/JAX environment recorded in each JSON artifact's metadata.
 
 ```bash
-JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 conda run -p .conda/jax-0.9.2 \
+JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
     python -m pytest tests/integration/test_non_banana_example_cpp_jax_cpu_parity.py -v
 ```
 
 ```bash
-JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 conda run -p .conda/jax-0.9.2 \
+JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
     python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
         --fixtures all-supported \
         --git-sha "$(git rev-parse HEAD)" \
@@ -129,7 +130,7 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 conda run -p .conda/jax-0.9.2 \
 ```
 
 ```bash
-JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 conda run -p .conda/jax-0.9.2 \
+JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 \
     python benchmarks/non_banana_example_cpp_jax_cpu_parity.py \
         --fixtures all \
         --git-sha "$(git rev-parse HEAD)" \

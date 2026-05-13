@@ -142,7 +142,9 @@ explicitly `out of scope` for this CPU-only plan.
 | `finitebuild_multifilament_support_gate` | unsupported | `examples/3_Advanced/stage_two_optimization_finitebuild.py` | 0 | n/a | All filament base curves expose native specs; missing full composite `build_lanes` constructor |
 | `qfm_surface` | unsupported | `examples/1_Simple/qfm.py` | 0 | n/a | `QfmResidualJAX` exists; per-fixture wiring needs harness LaneArtifact extension |
 
-`partial` rows above all show `max_abs_diff` for the native-supported
-`SquaredFlux` gradient at `~3.5e-17` (machine precision under `direct_kernel` /
-`ls_wrapper_gradient` buckets) and for `field_B` at `~5e-16` per the JSON
-artifact `comparisons` blocks. No native-supported comparison fails.
+`partial` rows above all pass their native-supported tolerance buckets. The
+minimal fixture records `max_abs_diff=1.4e-12` for the `SquaredFlux` gradient
+under the stricter `ls_wrapper_gradient` bucket; the full and planar Stage-II
+fixtures record gradient max-abs diffs of `3.5e-17` and `3.8e-17`,
+respectively. `field_B` max-abs diffs stay at `~5e-16` per the JSON artifact
+`comparisons` blocks. No native-supported comparison fails.

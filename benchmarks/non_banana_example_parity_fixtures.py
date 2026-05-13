@@ -101,8 +101,8 @@ class FixtureBuild:
     # matching ``cpu_lane.active_dof_names`` / ``jax_lane.active_dof_names``
     # (asserted positionally equal at compare time) and return ``float(J)``
     # for the *native-supported* portion of the objective only — i.e., the
-    # length penalty in the minimal Stage-II fixture is excluded from this
-    # callable on both sides.
+    # unsupported components listed for a partial fixture are excluded from
+    # this callable on both sides.
     cpu_native_subproblem_J: Optional[Callable[[np.ndarray], float]] = None
     jax_native_subproblem_J: Optional[Callable[[np.ndarray], float]] = None
     # Initial active free-DOF vector for the native subproblem.
@@ -954,6 +954,8 @@ def _build_cws_saved_local_flux(*, nfp: int):
         try:
             loaded = simsopt_load(str(coils_path))
         except TypeError as exc:
+            if "CurveCWSFourier" not in str(exc):
+                raise
             # Upstream simsopt JSON loader currently fails to reconstruct
             # ``CurveCWSFourier`` instances when handing them to the
             # simsoptpp ``Coil`` constructor. The plan requires fail-closed
