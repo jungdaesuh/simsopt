@@ -16,6 +16,8 @@ COIL_LENGTH_MIN_TARGET_M = COIL_LENGTH_TARGET_M * COIL_LENGTH_MIN_FRACTION
 COIL_LENGTH_HARD_LIMIT_M = 2.0
 COIL_COIL_MIN_DIST_M = 0.05
 COIL_PLASMA_MIN_DIST_M = 0.015
+# Diagnostic reference for the LCFS-to-vessel SurfaceSurfaceDistance metric.
+# wh_notes.md does not define this as an engineering acceptance floor.
 PLASMA_VESSEL_MIN_DIST_M = 0.04
 MAX_CURVATURE_INV_M = 100.0
 
@@ -63,7 +65,6 @@ TARGET_LCFS_MAX_MINOR_RADIUS_M = 0.15
 def fixed_stage2_clearance_contract() -> dict[str, float]:
     return {
         "COIL_PLASMA_MIN_DIST_M": COIL_PLASMA_MIN_DIST_M,
-        "PLASMA_VESSEL_MIN_DIST_M": PLASMA_VESSEL_MIN_DIST_M,
     }
 
 
@@ -125,9 +126,6 @@ def validate_target_lcfs_minor_radius(target_minor_radius_m: float) -> float:
 
 
 _MAJOR_RADIUS_TOL_M = 1.0e-12
-_PLASMA_VESSEL_CLEARANCE_TOL_M = 1.0e-9
-
-
 def is_major_radius_offspec(major_radius: float) -> bool:
     return abs(float(major_radius) - VACUUM_VESSEL_MAJOR_RADIUS_M) > _MAJOR_RADIUS_TOL_M
 
@@ -140,36 +138,6 @@ def validate_major_radius(major_radius: float) -> float:
         f"--major-radius must match the vacuum-vessel major radius "
         f"{VACUUM_VESSEL_MAJOR_RADIUS_M:.3f} m (got {radius:.6f}). "
         "Off-spec R0 produces coils that do not fit the HBT-EP vacuum vessel."
-    )
-
-
-def is_plasma_vessel_clearance_offspec(
-    plasma_vessel_min_dist_m: float,
-    *,
-    threshold: float = PLASMA_VESSEL_MIN_DIST_M,
-) -> bool:
-    clearance = float(plasma_vessel_min_dist_m)
-    clearance_threshold = float(threshold)
-    return clearance < clearance_threshold - _PLASMA_VESSEL_CLEARANCE_TOL_M
-
-
-def validate_plasma_vessel_clearance(
-    plasma_vessel_min_dist_m: float,
-    *,
-    threshold: float = PLASMA_VESSEL_MIN_DIST_M,
-) -> float:
-    clearance = float(plasma_vessel_min_dist_m)
-    clearance_threshold = float(threshold)
-    if not is_plasma_vessel_clearance_offspec(
-        clearance,
-        threshold=clearance_threshold,
-    ):
-        return clearance
-    raise ValueError(
-        "LCFS-to-vessel clearance violates the HBT-EP hardware contract "
-        f"({clearance:.6f} m < {clearance_threshold:.6f} m). "
-        "Use the direct LCFS-to-vessel spacing metric for fit validation, not "
-        "a proxy envelope."
     )
 
 

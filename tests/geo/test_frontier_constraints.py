@@ -132,6 +132,35 @@ class FrontierConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(contract["max_violation_ratio"], 0.25)
         self.assertAlmostEqual(contract["rejection_increment"], 3.5)
 
+    def test_frontier_hardware_ratios_ignore_diagnostic_surface_vessel_gap(self):
+        module = load_frontier_constraints_module()
+
+        penalty = module.evaluate_frontier_hardware_search_penalty(
+            self._hardware_result(
+                violations=["surface_vessel_min_dist below diagnostic reference"],
+                curve_curve_min_dist=0.08,
+                max_curvature=40.0,
+                surface_vessel_min_dist=0.0,
+                constraints={
+                    "surface_vessel_min_dist": {
+                        "threshold": 0.04,
+                        "violation": 0.04,
+                    }
+                },
+                violation_ratios={
+                    "surface_vessel_min_dist": 1.0,
+                    "plasma_vessel_spacing": 1.0,
+                },
+            ),
+            previous_objective=3.5,
+            penalty_scale=4.0,
+        )
+
+        self.assertNotIn("surface_vessel_min_dist", penalty["violation_ratios"])
+        self.assertNotIn("plasma_vessel_spacing", penalty["violation_ratios"])
+        self.assertAlmostEqual(penalty["max_violation_ratio"], 0.0)
+        self.assertAlmostEqual(penalty["penalty"], 0.0)
+
     def test_evaluate_frontier_topology_search_contract_uses_existing_deficit_scaling(self):
         module = load_frontier_constraints_module()
 

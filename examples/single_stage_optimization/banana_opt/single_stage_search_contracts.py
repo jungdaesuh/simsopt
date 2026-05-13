@@ -281,12 +281,6 @@ def evaluate_frontier_hard_invalidation(
                     "reason": "geometry_state_unrestorable",
                     "fields": ["adjacent_gaps"],
                 }
-            if not bool(surface_status.get("vessel_gap_ok", True)):
-                return {
-                    "invalid": True,
-                    "reason": "geometry_state_unrestorable",
-                    "fields": ["outer_vessel_gap"],
-                }
             if not bool(surface_status.get("nesting_ok", True)):
                 return {
                     "invalid": True,
@@ -330,10 +324,6 @@ def hardware_violation_ratios(
             hardware_status.get("curve_surface_min_dist"),
             hardware_status.get("cs_dist"),
         ),
-        "surface_vessel_min_dist": _lower_bound_violation_ratio(
-            hardware_status.get("surface_vessel_min_dist"),
-            hardware_status.get("ss_dist"),
-        ),
         "max_curvature": _upper_bound_violation_ratio(
             hardware_status.get("max_curvature"),
             hardware_status.get("curvature_threshold"),
@@ -348,6 +338,8 @@ def hardware_violation_ratios(
         ),
     }
     for name, entry in dict(hardware_status.get("constraints", {})).items():
+        if _is_diagnostic_hardware_ratio_name(str(name)):
+            continue
         threshold = abs(float(entry["threshold"]))
         if threshold > 0.0:
             ratios[str(name)] = float(entry["violation"]) / max(
@@ -357,8 +349,23 @@ def hardware_violation_ratios(
     explicit_ratios = hardware_status.get("violation_ratios")
     if explicit_ratios is not None:
         for name, value in dict(explicit_ratios).items():
+            if _is_diagnostic_hardware_ratio_name(str(name)):
+                continue
             ratios[str(name)] = float(value)
     return ratios
+
+
+def _is_diagnostic_hardware_ratio_name(name: str) -> bool:
+    return name in {
+        "surface_vessel_min_dist",
+        "surface_vessel_spacing",
+        "surface_vessel_spacing_penalty",
+        "plasma_vessel_min_dist",
+        "plasma_vessel_min_dist_m",
+        "plasma_vessel_spacing",
+        "plasma_vessel_spacing_penalty",
+        "lcfs_vessel_spacing",
+    }
 
 
 def _lower_bound_violation_ratio(value, minimum) -> float:

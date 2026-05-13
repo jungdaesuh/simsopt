@@ -97,7 +97,6 @@ from banana_opt.hardware_contracts import (
     TF_CURRENT_HARD_LIMIT_A,
     VACUUM_VESSEL_MAJOR_RADIUS_M,
     validate_major_radius,
-    validate_plasma_vessel_clearance,
     validate_target_lcfs_major_radius,
     validate_target_lcfs_minor_radius,
     validate_tf_current_limit,
@@ -211,12 +210,10 @@ def _print_taylor_test_summary(name: str, result: dict) -> None:
 def validate_banana_current_cli_args(args) -> None:
     banana_init_current_A = float(args.banana_init_current_A)
     banana_current_max_A = float(args.banana_current_max_A)
-    if banana_init_current_A <= 0.0:
-        raise ValueError("--banana-init-current-A must be positive.")
-    if banana_init_current_A > BANANA_CURRENT_HARD_LIMIT_A:
+    if not (-BANANA_CURRENT_HARD_LIMIT_A <= banana_init_current_A < 0.0):
         raise ValueError(
             f"--banana-init-current-A must be in the interval "
-            f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
+            f"[-{BANANA_CURRENT_HARD_LIMIT_A:.0f}, 0)."
         )
     if banana_current_max_A <= 0.0:
         raise ValueError("--banana-current-max-A must be positive.")
@@ -225,9 +222,9 @@ def validate_banana_current_cli_args(args) -> None:
             f"--banana-current-max-A must be in the interval "
             f"(0, {BANANA_CURRENT_HARD_LIMIT_A:.0f}]."
         )
-    if banana_init_current_A > banana_current_max_A:
+    if abs(banana_init_current_A) > banana_current_max_A:
         raise ValueError(
-            "--banana-init-current-A cannot exceed --banana-current-max-A."
+            "abs(--banana-init-current-A) cannot exceed --banana-current-max-A."
         )
     validate_tf_current_limit(args.tf_current_A)
 
@@ -350,8 +347,11 @@ def parse_args():
     parser.add_argument(
         "--banana-init-current-A",
         type=float,
-        default=float(os.environ.get("BANANA_INIT_CURRENT_A", "1e4")),
-        help="Fresh-initialization banana-coil current in SI amperes.",
+        default=float(os.environ.get("BANANA_INIT_CURRENT_A", "-1e4")),
+        help=(
+            "Fresh-initialization banana-coil current in SI amperes. Negative "
+            "current matches the CW TF convention for positive rotational transform."
+        ),
     )
     parser.add_argument(
         "--banana-current-max-A",
@@ -1554,7 +1554,6 @@ def main(parsed_args=None):
         target_lcfs_major_radius_m=target_lcfs_major_radius_m,
         target_lcfs_minor_radius_m=target_lcfs_minor_radius_m,
         vessel_surface=VV,
-        min_plasma_vessel_distance_m=PLASMA_VESSEL_MIN_DIST_M,
     )
     selected_geometry = geometry_preflight.selected
     if (
@@ -1594,7 +1593,6 @@ def main(parsed_args=None):
     if banana_surf_nfp != lcfs_probe.nfp:
         raise ValueError("Stage 2 geometry preflight selected inconsistent NFP.")
     plasma_vessel_min_dist = _surface_surface_min_distance(lcfs_surf, VV)
-    validate_plasma_vessel_clearance(plasma_vessel_min_dist)
 
     if args.stage2_bs_path:
         print(f"Loading Stage 2 seed from {args.stage2_bs_path}")

@@ -28,7 +28,6 @@ from .hardware_contracts import (
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     validate_banana_winding_surface_radius,
     validate_major_radius,
-    validate_plasma_vessel_clearance,
     validate_tf_current_limit,
 )
 from .hardware_constraint_schema import (
@@ -398,12 +397,6 @@ def validate_stage2_seed_contract(stage2_results):
             "Stage 2 seed poloidal-extent threshold exceeds the HBT-EP half-width "
             f"ceiling of {POLOIDAL_EXTENT_HALF_WIDTH_RAD:.6f} rad."
         )
-    surface_vessel_min_dist = _required_stage2_result_value(
-        stage2_results,
-        "SURFACE_VESSEL_MIN_DIST",
-        "LCFS clearance against the HBT-EP vacuum vessel",
-    )
-    validate_plasma_vessel_clearance(surface_vessel_min_dist)
     hardware_status = evaluate_stage2_seed_hardware_contract(stage2_results)
     if not hardware_status["success"]:
         raise ValueError(

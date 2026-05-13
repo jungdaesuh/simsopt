@@ -294,7 +294,7 @@ def make_complete_stage2_spec_payload(**overrides):
         "banana_surf_radius": 0.21,
         "tf_current_A": -8.0e4,
         "order": 3,
-        "banana_init_current_A": 1.2e4,
+        "banana_init_current_A": -1.2e4,
         "banana_current_max_A": 1.5e4,
         "alm_max_outer_iters": 15,
         "alm_penalty_init": 2.0,
@@ -680,7 +680,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             functions["single_stage_surface_stack_alm_enabled"](2, 0.02)
         )
         self.assertEqual(solver_gate["surface_gap_threshold"], 0.0)
-        self.assertEqual(solver_gate["vessel_gap_threshold"], 0.04)
+        self.assertEqual(solver_gate["vessel_gap_threshold"], 0.0)
         self.assertTrue(solver_gate["enforce_nesting"])
         self.assertEqual(search_gate["surface_gap_threshold"], 0.02)
 
@@ -1529,10 +1529,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(summary["resolved_stage2_config"]["output_root"], str(Path("outputs").resolve()))
         self.assertEqual(
             summary["fixed_stage2_hardware_contract"],
-            {
-                "COIL_PLASMA_MIN_DIST_M": 0.015,
-                "PLASMA_VESSEL_MIN_DIST_M": 0.04,
-            },
+            {"COIL_PLASMA_MIN_DIST_M": 0.015},
         )
         self.assertEqual(summary["output_contract"], "materialized_stage2_artifact")
         self.assertFalse(summary["contains_solver_outputs"])
@@ -1601,7 +1598,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                         "banana_surf_radius": 0.22,
                         "tf_current_A": -8.0e4,
                         "order": 2,
-                        "banana_init_current_A": 1.0e4,
+                        "banana_init_current_A": -1.0e4,
                         "banana_current_max_A": 1.6e4,
                         "alm_max_outer_iters": 10,
                         "alm_penalty_init": 1.0,
@@ -1632,7 +1629,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(metadata["basin_niter_success"], 8)
         self.assertEqual(metadata["basin_seed"], 11)
         self.assertEqual(metadata["COIL_PLASMA_MIN_DIST_M"], 0.015)
-        self.assertEqual(metadata["PLASMA_VESSEL_MIN_DIST_M"], 0.04)
+        self.assertNotIn("PLASMA_VESSEL_MIN_DIST_M", metadata)
         self.assertEqual(metadata["LENGTH_TARGET"], 1.9)
         self.assertEqual(metadata["LENGTH_MIN_TARGET"], 0.95)
         self.assertEqual(metadata["WIDTH_MIN_THRESHOLD"], 0.05)
@@ -1657,7 +1654,6 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
             legacy_results = module._expected_stage2_artifact_metadata(config)
             legacy_results.pop("COIL_PLASMA_MIN_DIST_M")
-            legacy_results.pop("PLASMA_VESSEL_MIN_DIST_M")
             legacy_results.pop("LENGTH_TARGET")
             legacy_results.pop("ALM_DISTANCE_SMOOTHING")
             legacy_results.pop("ALM_CURVATURE_SMOOTHING")
@@ -1805,7 +1801,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                         "banana_surf_radius": 0.22,
                         "tf_current_A": -8.0e4,
                         "order": 2,
-                        "banana_init_current_A": 1.0e4,
+                        "banana_init_current_A": -1.0e4,
                         "banana_current_max_A": 1.6e4,
                         "alm_max_outer_iters": 10,
                         "alm_penalty_init": 1.0,

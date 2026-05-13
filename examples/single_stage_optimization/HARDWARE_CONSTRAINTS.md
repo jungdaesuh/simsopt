@@ -9,7 +9,7 @@ Updated HBT constraint SSOT:
 - banana coil current has an upper limit of `16 kA`
 - coil length uses a `1.9 m` default target with a `2.0 m` hard ceiling
 - coil-plasma clearance is `1.5 cm`
-- plasma-vessel clearance is `4 cm`
+- LCFS-to-vessel spacing is recorded as a SurfaceSurfaceDistance diagnostic
 - maximum curvature is `100 m^-1`
 - banana winding surface minor radius is `0.21 m`
 
@@ -25,10 +25,8 @@ All hardware threshold CLI arguments are validated against the current HBT hardw
 | Curvature limit | `--curvature-threshold` | 100 | reject above 100m^-1 |
 | Coil length target | `--length-target` | 1.9m target, 2.0m hard ceiling | reject above 2.0m |
 
-Stage 2 also enforces the fixed LCFS-to-vessel clearance contract directly on the
-loaded plasma boundary. This is not a CLI-tunable floor because the plasma
-geometry is inherited from the donor equilibrium, not optimized by Stage 2.
-No historical off-spec bypass exists for this clearance gate.
+Stage 2 records LCFS-to-vessel spacing directly on the loaded plasma boundary,
+but this metric is diagnostic-only and does not reject otherwise valid seeds.
 
 ### Single-Stage (`single_stage_banana_example.py`)
 
@@ -38,7 +36,7 @@ No historical off-spec bypass exists for this clearance gate.
 | Curvature limit | `--curvature-threshold` | 100 | reject above 100m^-1 |
 | Coil length target | `--length-target` | 1.9m target, 2.0m hard ceiling | reject above 2.0m |
 | Coil-surface clearance | `--cs-dist` | 0.015m (1.5cm) | reject below 0.015m |
-| Surface-vessel clearance | `--ss-dist` | 0.04m (4cm) | reject below 0.04m |
+| Surface-vessel spacing | `--ss-dist` | diagnostic reference | recorded, not a hardware rejection gate |
 
 **Note:** The current HBT lane fixes the TF current baseline at `80 kA` and uses the tighter coil-plasma clearance plus `100 m^-1` curvature limit as the default hardware contract.
 

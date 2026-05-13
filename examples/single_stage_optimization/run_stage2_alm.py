@@ -71,7 +71,7 @@ _BASE_STAGE2_PROFILE = {
     "curvature_threshold": MAX_CURVATURE_INV_M,
     "banana_surf_radius": 0.21,
     "order": 2,
-    "banana_init_current_A": 1.0e4,
+    "banana_init_current_A": -1.0e4,
     "banana_current_max_A": BANANA_CURRENT_HARD_LIMIT_A,
     "length_target": COIL_LENGTH_TARGET_M,
     "target_lcfs_max_major_radius_m": TARGET_LCFS_MAX_MAJOR_RADIUS_M,

@@ -71,7 +71,7 @@ class Stage2SeedSpec:
     banana_surf_radius: float
     tf_current_A: float
     order: int
-    banana_init_current_A: float = 1.0e4
+    banana_init_current_A: float = -1.0e4
     banana_current_max_A: float = 1.6e4
     finite_current_mode: str = "wataru_proxy_field"
     proxy_plasma_current_A: float = 0.0

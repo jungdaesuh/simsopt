@@ -1602,7 +1602,7 @@ class SingleStageExampleTests(unittest.TestCase):
             parent.mkdir(parents=True)
             matched = (
                 parent
-                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=-80000-Order=2-CM=penalty-BH=3"
+                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=-10000-MAXC=16000-TFC=-80000-Order=2-CM=penalty-BH=3"
                 / "biot_savart_opt.json"
             )
             matched.parent.mkdir(parents=True)
@@ -1621,7 +1621,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 stage2_seed_banana_surf_radius=0.22,
                 stage2_seed_tf_current_A=-8.0e4,
                 stage2_seed_order=2,
-                stage2_seed_banana_init_current_A=1.0e4,
+                stage2_seed_banana_init_current_A=-1.0e4,
                 stage2_source="local",
                 local_stage2_root=str(root / "local"),
                 database_stage2_root=str(root / "database"),
@@ -1641,7 +1641,7 @@ class SingleStageExampleTests(unittest.TestCase):
                     parent
                     / (
                         "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-"
-                        f"SR=0.220-INITC=10000-MAXC=16000-TFC=-80000-Order=2{suffix}"
+                        f"SR=0.220-INITC=-10000-MAXC=16000-TFC=-80000-Order=2{suffix}"
                     )
                     / "biot_savart_opt.json"
                 )
@@ -1661,7 +1661,7 @@ class SingleStageExampleTests(unittest.TestCase):
                 stage2_seed_banana_surf_radius=0.22,
                 stage2_seed_tf_current_A=-8.0e4,
                 stage2_seed_order=2,
-                stage2_seed_banana_init_current_A=1.0e4,
+                stage2_seed_banana_init_current_A=-1.0e4,
                 stage2_source="local",
                 local_stage2_root=str(root / "local"),
                 database_stage2_root=str(root / "database"),
@@ -2682,7 +2682,7 @@ class SingleStageExampleTests(unittest.TestCase):
             vessel_gap_threshold=0.04,
         )
         self.assertEqual(single["surface_gap_threshold"], 0.005)
-        self.assertEqual(single["vessel_gap_threshold"], 0.04)
+        self.assertEqual(single["vessel_gap_threshold"], 0.0)
         self.assertTrue(single["enforce_nesting"])
         self.assertEqual(single["gate_scale"], 1.0)
 
@@ -2708,7 +2708,7 @@ class SingleStageExampleTests(unittest.TestCase):
             vessel_gap_threshold=0.04,
         )
         self.assertAlmostEqual(mid["surface_gap_threshold"], 0.002)
-        self.assertAlmostEqual(mid["vessel_gap_threshold"], 0.016)
+        self.assertAlmostEqual(mid["vessel_gap_threshold"], 0.0)
         self.assertFalse(mid["enforce_nesting"])
         self.assertAlmostEqual(mid["gate_scale"], 0.4)
 
@@ -2721,7 +2721,7 @@ class SingleStageExampleTests(unittest.TestCase):
             vessel_gap_threshold=0.04,
         )
         self.assertAlmostEqual(done["surface_gap_threshold"], 0.005)
-        self.assertAlmostEqual(done["vessel_gap_threshold"], 0.04)
+        self.assertAlmostEqual(done["vessel_gap_threshold"], 0.0)
         self.assertTrue(done["enforce_nesting"])
         self.assertAlmostEqual(done["gate_scale"], 1.0)
 
@@ -9311,8 +9311,8 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         self.assertIn("TFC=-80000", local_dir)
         self.assertIn("TFC=-80000", database_dir)
-        self.assertIn("INITC=10000", local_dir)
-        self.assertIn("INITC=10000", database_dir)
+        self.assertIn("INITC=-10000", local_dir)
+        self.assertIn("INITC=-10000", database_dir)
 
     def test_resolve_stage2_tf_current_rejects_metadata_mismatch_against_loaded_seed(self):
         module = load_single_stage_example_module()
@@ -9373,26 +9373,21 @@ class CurrentBaselineContractTests(unittest.TestCase):
             warnings.simplefilter("error")
             module.validate_stage2_seed_contract(stage2_results)
 
-    def test_validate_stage2_seed_contract_rejects_surface_vessel_clearance_below_threshold(self):
+    def test_validate_stage2_seed_contract_accepts_diagnostic_surface_vessel_clearance_below_reference(self):
         module = load_single_stage_example_module()
         stage2_results = self._upgrade_stage2_seed_results(
             module,
             SURFACE_VESSEL_MIN_DIST=module.PLASMA_VESSEL_MIN_DIST_M - 1.0e-3,
         )
 
-        with self.assertRaisesRegex(
-            ValueError,
-            "LCFS-to-vessel clearance violates the HBT-EP hardware contract",
-        ):
-            module.validate_stage2_seed_contract(stage2_results)
+        module.validate_stage2_seed_contract(stage2_results)
 
-    def test_validate_stage2_seed_contract_rejects_missing_surface_vessel_clearance(self):
+    def test_validate_stage2_seed_contract_accepts_missing_diagnostic_surface_vessel_clearance(self):
         module = load_single_stage_example_module()
         stage2_results = self._upgrade_stage2_seed_results(module)
         stage2_results.pop("SURFACE_VESSEL_MIN_DIST", None)
 
-        with self.assertRaisesRegex(ValueError, "missing SURFACE_VESSEL_MIN_DIST"):
-            module.validate_stage2_seed_contract(stage2_results)
+        module.validate_stage2_seed_contract(stage2_results)
 
     def test_validate_stage2_seed_contract_rejects_missing_banana_winding_radius(self):
         module = load_single_stage_example_module()
@@ -9525,7 +9520,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             outputs_dir = Path(tmpdir) / "outputs-demo.nc"
             current_dir = (
                 outputs_dir
-                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=-80000-Order=2-CM=penalty"
+                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=-10000-MAXC=16000-TFC=-80000-Order=2-CM=penalty"
             )
             current_dir.mkdir(parents=True)
             expected_path = current_dir / "biot_savart_opt.json"
@@ -9547,7 +9542,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 stage2_seed_banana_surf_radius=0.22,
                 stage2_seed_tf_current_A=-8.0e4,
                 stage2_seed_order=2,
-                stage2_seed_banana_init_current_A=1.0e4,
+                stage2_seed_banana_init_current_A=-1.0e4,
             )
 
             self.assertEqual(module.build_stage2_bs_path(args), str(expected_path))
@@ -9581,7 +9576,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 stage2_seed_banana_surf_radius=0.22,
                 stage2_seed_tf_current_A=-8.0e4,
                 stage2_seed_order=2,
-                stage2_seed_banana_init_current_A=1.0e4,
+                stage2_seed_banana_init_current_A=-1.0e4,
             )
 
             self.assertEqual(module.build_stage2_bs_path(args), str(expected_path))
@@ -9593,7 +9588,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             outputs_dir = Path(tmpdir) / "outputs-demo.nc"
             legacy_dir = (
                 outputs_dir
-                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.220-INITC=10000-MAXC=16000-TFC=-80000-Order=2-CM=penalty"
+                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=100-SR=0.220-INITC=-10000-MAXC=16000-TFC=-80000-Order=2-CM=penalty"
             )
             legacy_dir.mkdir(parents=True)
             expected_path = legacy_dir / "biot_savart_opt.json"
@@ -9615,7 +9610,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 stage2_seed_banana_surf_radius=module.BANANA_WINDING_MINOR_RADIUS_M,
                 stage2_seed_tf_current_A=-8.0e4,
                 stage2_seed_order=2,
-                stage2_seed_banana_init_current_A=1.0e4,
+                stage2_seed_banana_init_current_A=-1.0e4,
             )
 
             self.assertEqual(module.build_stage2_bs_path(args), str(expected_path))
@@ -9625,7 +9620,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             outputs_dir = Path(tmpdir) / "outputs-demo.nc"
-            legacy_dir = outputs_dir / "MR=0.976-TF=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.22-INITC=10000-TFC=-80000-Order=2"
+            legacy_dir = outputs_dir / "MR=0.976-TF=0.24-LW=0.0005-CCW=100-CW=0.0001-SR=0.22-INITC=-10000-TFC=-80000-Order=2"
             legacy_dir.mkdir(parents=True)
             expected_path = legacy_dir / "biot_savart_opt.json"
             expected_path.write_text("{}", encoding="utf-8")
@@ -9646,7 +9641,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 stage2_seed_banana_surf_radius=module.BANANA_WINDING_MINOR_RADIUS_M,
                 stage2_seed_tf_current_A=-8.0e4,
                 stage2_seed_order=2,
-                stage2_seed_banana_init_current_A=1.0e4,
+                stage2_seed_banana_init_current_A=-1.0e4,
             )
 
             self.assertEqual(module.build_stage2_bs_path(args), str(expected_path))
@@ -9658,7 +9653,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
             outputs_dir = Path(tmpdir) / "outputs-demo.nc"
             wataru_dir = (
                 outputs_dir
-                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=-80000-Order=2-FCM=wataru_proxy_field-PPC=9000-VFC=500-VFT=wataru_vf_template-CM=penalty"
+                / "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=-10000-MAXC=16000-TFC=-80000-Order=2-FCM=wataru_proxy_field-PPC=9000-VFC=500-VFT=wataru_vf_template-CM=penalty"
             )
             wataru_dir.mkdir(parents=True)
             expected_path = wataru_dir / "biot_savart_opt.json"
@@ -9680,7 +9675,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
                 stage2_seed_banana_surf_radius=0.22,
                 stage2_seed_tf_current_A=-8.0e4,
                 stage2_seed_order=2,
-                stage2_seed_banana_init_current_A=1.0e4,
+                stage2_seed_banana_init_current_A=-1.0e4,
             )
 
             self.assertEqual(module.build_stage2_bs_path(args), str(expected_path))
@@ -10813,7 +10808,7 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.stage2_seed_cc_threshold, 0.05)
         self.assertEqual(args.stage2_seed_major_radius, 0.976)
         self.assertEqual(args.stage2_seed_toroidal_flux, 0.24)
-        self.assertEqual(args.stage2_seed_banana_init_current_A, 1.0e4)
+        self.assertEqual(args.stage2_seed_banana_init_current_A, -1.0e4)
 
     def test_apply_default_stage2_seed_args_preserves_cli_overrides(self):
         module = load_single_stage_example_module()
@@ -10867,14 +10862,14 @@ class CurrentBaselineContractTests(unittest.TestCase):
             [
                 "banana_coil_solver.py",
                 "--banana-init-current-A",
-                "12000",
+                "-12000",
                 "--banana-current-max-A",
                 "16000",
             ],
         ):
             args = module.parse_args()
 
-        self.assertEqual(args.banana_init_current_A, 12000.0)
+        self.assertEqual(args.banana_init_current_A, -12000.0)
         self.assertEqual(args.banana_current_max_A, 16000.0)
 
     def test_stage2_validate_banana_current_cli_args_rejects_above_hardware_limit(self):
@@ -11079,7 +11074,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             "init_only": True,
             "banana_surf_radius": 0.21,
             "tf_current_A": -8.0e4,
-            "banana_init_current_A": 1.0e4,
+            "banana_init_current_A": -1.0e4,
             "banana_current_max_A": 1.6e4,
             "major_radius": 0.976,
             "toroidal_flux": 0.24,
@@ -11425,7 +11420,7 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
             self.assertEqual(len(tf_coils), 20)
             self.assertEqual(num_quadpoints, 16)
             self.assertEqual(order, 2)
-            self.assertEqual(banana_init_current_A, 1.0e4)
+            self.assertEqual(banana_init_current_A, -1.0e4)
             self.assertEqual(phi_center, np.pi / 4.0)
             self.assertEqual(theta_center, np.pi)
             self.assertEqual(phi_width, np.pi / 8.0)

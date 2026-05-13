@@ -220,9 +220,7 @@ def evaluate_surface_stack(
 
     volumes_ordered = np.all(np.diff(volumes) > 0.0) if len(volumes) > 1 else True
     gap_ok = all(gap > surface_gap_threshold for gap in adjacent_gaps)
-    vessel_gap_ok = (
-        outer_vessel_gap is None or outer_vessel_gap > vessel_gap_threshold
-    )
+    vessel_gap_ok = True
     nesting_ok = True
     bad_nesting_phis = []
     if (
@@ -694,7 +692,7 @@ def build_surface_search_gate(
     if num_surfaces <= 1:
         return {
             "surface_gap_threshold": float(surface_gap_threshold),
-            "vessel_gap_threshold": float(vessel_gap_threshold),
+            "vessel_gap_threshold": 0.0,
             "enforce_nesting": True,
             "gate_scale": 1.0,
         }
@@ -707,7 +705,7 @@ def build_surface_search_gate(
     )
     return {
         "surface_gap_threshold": float(surface_gap_threshold) * gate_scale,
-        "vessel_gap_threshold": float(vessel_gap_threshold) * gate_scale,
+        "vessel_gap_threshold": 0.0,
         "enforce_nesting": bool(gate_scale >= 1.0),
         "gate_scale": float(gate_scale),
     }

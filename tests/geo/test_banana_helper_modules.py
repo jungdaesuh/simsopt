@@ -225,7 +225,6 @@ class Stage2GeometryHelperTests(unittest.TestCase):
             target_lcfs_major_radius_m=0.92,
             target_lcfs_minor_radius_m=0.15,
             vessel_surface=FakeSurface(0.0, 0.0, 0.10),
-            min_plasma_vessel_distance_m=0.04,
             s_candidates=(0.24, 0.50),
             target_lcfs_major_radius_candidates_m=(0.92, 0.90),
         )
@@ -236,7 +235,7 @@ class Stage2GeometryHelperTests(unittest.TestCase):
         self.assertAlmostEqual(result.selected.lcfs_minor_radius_m, 0.14)
         self.assertEqual(len(result.candidates), 4)
 
-    def test_geometry_preflight_selects_smaller_plasma_when_max_target_collides(self):
+    def test_geometry_preflight_records_surface_vessel_distance_without_gating(self):
         class FakeSurface:
             def __init__(self, major_radius, minor_radius):
                 self._major_radius = float(major_radius)
@@ -257,19 +256,15 @@ class Stage2GeometryHelperTests(unittest.TestCase):
             target_lcfs_major_radius_m=0.92,
             target_lcfs_minor_radius_m=0.15,
             vessel_surface=object(),
-            min_plasma_vessel_distance_m=0.04,
             s_candidates=(0.24,),
             target_lcfs_major_radius_candidates_m=(0.92, 0.87),
             distance_fn=fake_distance,
         )
 
         self.assertEqual(result.selected.s_working, 0.24)
-        self.assertEqual(result.selected.target_lcfs_major_radius_m, 0.87)
+        self.assertEqual(result.selected.target_lcfs_major_radius_m, 0.92)
         self.assertEqual(result.selected.violations, ())
-        self.assertEqual(
-            result.candidates[0].violations,
-            ("plasma_vessel_min_dist<0.040000",),
-        )
+        self.assertAlmostEqual(result.selected.plasma_vessel_min_dist_m, 0.039)
 
     def test_geometry_preflight_includes_requested_target_below_scan_floor(self):
         class FakeSurface:
@@ -285,7 +280,6 @@ class Stage2GeometryHelperTests(unittest.TestCase):
             target_lcfs_major_radius_m=0.79,
             target_lcfs_minor_radius_m=0.15,
             vessel_surface=object(),
-            min_plasma_vessel_distance_m=0.04,
             s_candidates=(0.24,),
             distance_fn=lambda *_args: 0.05,
         )
@@ -309,7 +303,6 @@ class Stage2GeometryHelperTests(unittest.TestCase):
                 target_lcfs_major_radius_m=0.92,
                 target_lcfs_minor_radius_m=0.15,
                 vessel_surface=object(),
-                min_plasma_vessel_distance_m=0.04,
                 s_candidates=(0.24,),
                 target_lcfs_major_radius_candidates_m=(0.92,),
                 distance_fn=lambda *_args: 0.03,
@@ -543,28 +536,11 @@ class Stage2GeometryHelperTests(unittest.TestCase):
 class HardwareContractsPlasmaVesselClearanceTests(unittest.TestCase):
     def setUp(self):
         self.module = _load_module(HARDWARE_CONTRACTS_PATH, "banana_hardware_contracts")
-        self.threshold = self.module.PLASMA_VESSEL_MIN_DIST_M
 
-    def test_accepts_clearance_exactly_at_threshold(self):
-        clearance = self.module.validate_plasma_vessel_clearance(self.threshold)
-        self.assertEqual(clearance, self.threshold)
-
-    def test_accepts_clearance_above_threshold(self):
-        self.module.validate_plasma_vessel_clearance(self.threshold + 0.01)
-
-    def test_raises_when_clearance_falls_below_threshold(self):
-        with self.assertRaisesRegex(
-            ValueError,
-            "LCFS-to-vessel clearance violates the HBT-EP hardware contract",
-        ):
-            self.module.validate_plasma_vessel_clearance(self.threshold - 1e-6)
-
-    def test_is_plasma_vessel_clearance_offspec_detects_violation(self):
-        self.assertFalse(
-            self.module.is_plasma_vessel_clearance_offspec(self.threshold)
-        )
-        self.assertTrue(
-            self.module.is_plasma_vessel_clearance_offspec(self.threshold - 1e-6)
+    def test_fixed_stage2_clearance_contract_excludes_diagnostic_vessel_metric(self):
+        self.assertNotIn(
+            "PLASMA_VESSEL_MIN_DIST_M",
+            self.module.fixed_stage2_clearance_contract(),
         )
 
 

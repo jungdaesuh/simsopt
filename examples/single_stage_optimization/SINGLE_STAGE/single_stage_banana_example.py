@@ -358,7 +358,7 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "banana_surf_radius": BANANA_WINDING_MINOR_RADIUS_M,
         "tf_current_A": TF_CURRENT_CW_DEFAULT_A,
         "order": 2,
-        "banana_init_current_A": 1.0e4,
+        "banana_init_current_A": -1.0e4,
     },
     "wout_nfp22ginsburg_000_002084_iota20.nc": {
         "major_radius": VACUUM_VESSEL_MAJOR_RADIUS_M,
@@ -371,7 +371,7 @@ DEFAULT_STAGE2_SEEDS_BY_PLASMA = {
         "banana_surf_radius": BANANA_WINDING_MINOR_RADIUS_M,
         "tf_current_A": TF_CURRENT_CW_DEFAULT_A,
         "order": 2,
-        "banana_init_current_A": 1.0e4,
+        "banana_init_current_A": -1.0e4,
     },
 }
 def add_confinement_surrogate_args(parser):
@@ -884,7 +884,7 @@ _STAGE2_SEED_NON_CONSTRAINT_DEFAULTS = {
     "cc_weight": 100.0,
     "curvature_weight": 0.0001,
     "order": 2,
-    "banana_init_current_A": 1.0e4,
+    "banana_init_current_A": -1.0e4,
 }
 
 _STAGE2_SEED_CONTRACT_KEYS = (
@@ -2122,6 +2122,7 @@ def surface_stack_search_gate_for_solver(search_gate, *, constraint_method, surf
     ) and str(constraint_method) == "alm":
         solver_gate = dict(search_gate)
         solver_gate["surface_gap_threshold"] = 0.0
+        solver_gate["vessel_gap_threshold"] = 0.0
         return solver_gate
     return search_gate
 
@@ -7538,8 +7539,6 @@ def evaluate_search_step(x):
                 print("Surface volumes are not strictly ordered")
             if not stack_status['gap_ok']:
                 print(f"Adjacent surfaces too close: {stack_status['adjacent_gaps']}")
-            if not stack_status['vessel_gap_ok']:
-                print(f"Outer surface too close to vessel: {stack_status['outer_vessel_gap']}")
             if search_gate['enforce_nesting'] and not stack_status['nesting_ok']:
                 print(f"Surfaces are not nested on phi slices: {stack_status['bad_nesting_phis']}")
         hardware_status = run_dict.get("trial_hardware_status")

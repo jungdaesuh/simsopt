@@ -668,7 +668,7 @@ class SnapshotParityTests(unittest.TestCase):
             stage2_seed_banana_surf_radius=0.22,
             stage2_seed_tf_current_A=-8.0e4,
             stage2_seed_order=2,
-            stage2_seed_banana_init_current_A=1.0e4,
+            stage2_seed_banana_init_current_A=-1.0e4,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -685,7 +685,7 @@ class SnapshotParityTests(unittest.TestCase):
                 banana_surf_radius=0.22,
                 tf_current_A=-8.0e4,
                 order=2,
-                banana_init_current_A=1.0e4,
+                banana_init_current_A=-1.0e4,
             )
 
             local_dir = self.current_single_stage.format_local_stage2_seed_dir(seed_spec)

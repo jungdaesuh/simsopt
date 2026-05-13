@@ -192,13 +192,21 @@ class ConstraintContractResolverTests(unittest.TestCase):
         for key, message in (
             ("CC_THRESHOLD", "CC_THRESHOLD is below the hardware floor"),
             ("COIL_PLASMA_MIN_DIST_M", "COIL_PLASMA_MIN_DIST_M is below"),
-            ("PLASMA_VESSEL_MIN_DIST_M", "PLASMA_VESSEL_MIN_DIST_M is below"),
         ):
             with self.subTest(key=key):
                 with self.assertRaisesRegex(ValueError, message):
                     module.resolve_constraint_contract(
                         cli_overrides={key: 1.0e-6},
                     )
+
+    def test_plasma_vessel_distance_is_diagnostic_not_hardware_floor(self):
+        module = load_constraint_contract_module()
+
+        contract, _trace = module.resolve_constraint_contract(
+            cli_overrides={"PLASMA_VESSEL_MIN_DIST_M": 1.0e-6},
+        )
+
+        self.assertEqual(contract["PLASMA_VESSEL_MIN_DIST_M"], 1.0e-6)
 
     def test_tf_current_limit_rejects_zero_positive_and_over_limit_current(self):
         module = load_constraint_contract_module()

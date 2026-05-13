@@ -193,7 +193,7 @@ class Stage2GeometryConfig:
 @dataclass(frozen=True, slots=True)
 class Stage2HardwareConfig:
     tf_current_A: float
-    banana_init_current_A: float = 1.0e4
+    banana_init_current_A: float = -1.0e4
     banana_current_max_A: float = 1.6e4
 
 
@@ -321,7 +321,7 @@ class Stage2ArtifactConfig:
         basin_niter_success: int = 0,
         basin_seed: int | None = None,
         init_only: bool = False,
-        banana_init_current_A: float = 1.0e4,
+        banana_init_current_A: float = -1.0e4,
         banana_current_max_A: float = 1.6e4,
         length_target: float = DEFAULT_STAGE2_LENGTH_TARGET,
         finite_current_mode: str = "wataru_proxy_field",

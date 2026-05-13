@@ -201,7 +201,7 @@ class WorkflowHelpersTests(unittest.TestCase):
         )
 
         self.assertIn("TFC=-80000", run_dir)
-        self.assertIn("INITC=10000", run_dir)
+        self.assertIn("INITC=-10000", run_dir)
         self.assertIn("-CM=penalty", run_dir)
         self.assertIn("-BH=3-BS=0.01-BSeed=7-BT=2.5-BNS=8", run_dir)
 
@@ -236,7 +236,7 @@ class WorkflowHelpersTests(unittest.TestCase):
         self.assertEqual(
             str(artifact_path),
             "/tmp/stage2-root/outputs-demo.nc/"
-            "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=10000-MAXC=16000-TFC=-80000-Order=2-CM=penalty/"
+            "R0=0.976-s=0.24-LW=0.0005-CCW=100-CCT=0.05-CW=0.0001-CT=40-SR=0.220-INITC=-10000-MAXC=16000-TFC=-80000-Order=2-CM=penalty/"
             "biot_savart_opt.json",
         )
 
@@ -398,7 +398,7 @@ class WorkflowHelpersTests(unittest.TestCase):
             alm_max_outer_iters=10,
             alm_penalty_init=1.0,
             alm_penalty_scale=10.0,
-            alm_penalty_max=50.0,
+            alm_penalty_max=None,
             alm_feas_tol=1.0e-4,
             alm_stationarity_tol=2.0e-4,
             alm_trust_radius_init=0.15,
@@ -1023,7 +1023,7 @@ class BaselineSweepScriptTests(unittest.TestCase):
             "basin_stepsize": 0.01,
             "basin_seed": None,
             "init_only": False,
-            "banana_init_current_A": 1.0e4,
+            "banana_init_current_A": -1.0e4,
             "banana_current_max_A": 1.6e4,
         }
         config.update(overrides)
@@ -1373,7 +1373,7 @@ class BaselineSweepScriptTests(unittest.TestCase):
         self.assertEqual(loaded_results_path, stage2_results_path)
         self.assertEqual(loaded_results["NUM_TF_COILS"], 20)
         self.assertEqual(loaded_results["TF_CURRENT_SUM_ABS_A"], 1.6e6)
-        self.assertEqual(loaded_results["BANANA_INIT_CURRENT_A"], 1.0e4)
+        self.assertEqual(loaded_results["BANANA_INIT_CURRENT_A"], -1.0e4)
         self.assertEqual(loaded_results["BANANA_CURRENT_MAX_A"], 1.6e4)
 
     def test_build_summary_reports_non_dominated_cases_and_artifact_provenance(self):
@@ -2007,7 +2007,7 @@ class FiniteCurrentSmokeScriptTests(unittest.TestCase):
 
         upgraded_results = module.upgrade_legacy_stage2_artifact_results(legacy_results)
 
-        self.assertEqual(upgraded_results["BANANA_INIT_CURRENT_A"], 1.0e4)
+        self.assertEqual(upgraded_results["BANANA_INIT_CURRENT_A"], -1.0e4)
         self.assertEqual(upgraded_results["BANANA_CURRENT_MAX_A"], 1.6e4)
 
     def test_legacy_smoke_artifact_upgrades_banana_current_max_conservatively(self):

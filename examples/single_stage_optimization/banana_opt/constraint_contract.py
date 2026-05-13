@@ -8,9 +8,10 @@ redeclared. Three classes of field exist:
   radius) always come from :mod:`banana_opt.hardware_contracts` and are not
   routed through the profile/spec/cli override ladder.
 * Default engineering values (TF current, banana-coil current ceiling, length
-  target, coil-coil spacing threshold, coil-plasma and plasma-vessel clearances,
-  curvature ceiling, and the banana winding surface minor radius) ship with
-  hardware defaults and may be replaced via ``profile < spec_json < cli``.
+  target, coil-coil spacing threshold, coil-plasma clearance, curvature ceiling,
+  and the banana winding surface minor radius) ship with hardware defaults and
+  may be replaced via ``profile < spec_json < cli``. The plasma-vessel spacing
+  value is a diagnostic/objective reference, not a hardware acceptance floor.
 * Target plasma ceilings (the requested LCFS major/minor radius) live next to
   the engineering values but are validated against their own hardware caps and
   are **not** interchangeable with the vessel or winding-surface geometry.
@@ -219,13 +220,6 @@ def _validate_engineering_values(contract: dict[str, float]) -> None:
         raise ValueError(
             "COIL_PLASMA_MIN_DIST_M is below the hardware floor "
             f"{_hc.COIL_PLASMA_MIN_DIST_M:.3f} m."
-        )
-    if contract[_KEY_PLASMA_VESSEL_MIN_DIST_M] <= 0.0:
-        raise ValueError("PLASMA_VESSEL_MIN_DIST_M must be positive.")
-    if contract[_KEY_PLASMA_VESSEL_MIN_DIST_M] < _hc.PLASMA_VESSEL_MIN_DIST_M:
-        raise ValueError(
-            "PLASMA_VESSEL_MIN_DIST_M is below the hardware floor "
-            f"{_hc.PLASMA_VESSEL_MIN_DIST_M:.3f} m."
         )
     if contract[_KEY_CURVATURE_THRESHOLD] <= 0.0:
         raise ValueError("CURVATURE_THRESHOLD must be positive.")

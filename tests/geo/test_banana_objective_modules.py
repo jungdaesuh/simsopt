@@ -2596,7 +2596,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
     def test_build_stage2_results_maps_hardware_and_alm_fields(self):
         args = SimpleNamespace(
             init_only=False,
-            banana_init_current_A=1.0e4,
+            banana_init_current_A=-1.0e4,
             banana_current_max_A=1.6e4,
             basin_hops=2,
             basin_stepsize=0.01,
@@ -2663,7 +2663,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             num_banana_coils=4,
             num_proxy_coils=0,
             num_vf_coils=0,
-            initial_banana_current_A=1.2e4,
+            initial_banana_current_A=-1.2e4,
             banana_current_A=9.5e3,
             banana_to_tf_current_ratio=0.11875,
             finite_current_mode="boozer_surrogate",
@@ -2799,7 +2799,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["basin_best_hop_index"], 2)
         self.assertEqual(result["basin_best_result_source"], "hop")
         self.assertEqual(result["basin_objective_improvement"], 0.09)
-        self.assertEqual(result["BANANA_INIT_CURRENT_A"], 1.2e4)
+        self.assertEqual(result["BANANA_INIT_CURRENT_A"], -1.2e4)
         self.assertEqual(result["BANANA_CURRENT_MAX_A"], 1.6e4)
         self.assertEqual(result["TF_CURRENT_LIMIT_A"], 8.0e4)
         self.assertAlmostEqual(result["BANANA_TO_TF_CURRENT_RATIO"], 0.11875)

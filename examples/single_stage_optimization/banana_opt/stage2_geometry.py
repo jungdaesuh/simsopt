@@ -151,7 +151,6 @@ def select_plasma_geometry_preflight_candidate(
     target_lcfs_major_radius_m,
     target_lcfs_minor_radius_m,
     vessel_surface,
-    min_plasma_vessel_distance_m,
     s_candidates=None,
     target_lcfs_major_radius_candidates_m=None,
     distance_fn=scaled_surface_surface_min_distance,
@@ -164,7 +163,6 @@ def select_plasma_geometry_preflight_candidate(
         target_lcfs_major_radius_m
     )
     max_target_minor = validate_target_lcfs_minor_radius(target_lcfs_minor_radius_m)
-    min_vessel_gap = float(min_plasma_vessel_distance_m)
     resolved_s_candidates = (
         default_geometry_preflight_s_candidates(requested_surface_label)
         if s_candidates is None
@@ -205,10 +203,6 @@ def select_plasma_geometry_preflight_candidate(
             if lcfs_minor_radius > max_target_minor + 1.0e-12:
                 violations.append(
                     f"lcfs_minor_radius>{max_target_minor:.6f}"
-                )
-            if vessel_gap < min_vessel_gap - 1.0e-12:
-                violations.append(
-                    f"plasma_vessel_min_dist<{min_vessel_gap:.6f}"
                 )
             candidates.append(
                 PlasmaGeometryPreflightCandidate(
