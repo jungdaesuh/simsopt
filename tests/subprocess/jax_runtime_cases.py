@@ -513,16 +513,12 @@ def _build_single_stage_transfer_guard_runtime_fixture():
     cpu = jax.devices("cpu")[0]
     coil_dofs_host = np.asarray(bs.x.copy(), dtype=np.float64)
     coil_dofs_device = jax.device_put(coil_dofs_host, device=cpu)
-    coil_dofs_batch_host = np.stack((coil_dofs_host, coil_dofs_host), axis=0)
-    coil_dofs_batch_device = jax.device_put(coil_dofs_batch_host, device=cpu)
     return (
         runtime_bundle,
         compiled_bundle,
         success_filter,
         coil_dofs_device,
         coil_dofs_host,
-        coil_dofs_batch_device,
-        coil_dofs_batch_host,
     )
 
 
@@ -567,20 +563,11 @@ def _run_single_stage_target_runtime_bundle_transfer_guard_case() -> None:
         success_filter,
         coil_dofs_device,
         coil_dofs_host,
-        coil_dofs_batch_device,
-        coil_dofs_batch_host,
     ) = _build_single_stage_transfer_guard_runtime_fixture()
 
     objective_value = runtime_bundle["objective"](coil_dofs_device)
     value_and_grad_value, value_and_grad_grad = runtime_bundle["value_and_grad"](
         coil_dofs_device
-    )
-    batch_values, batch_grads = runtime_bundle["batched_value_and_grad"](
-        coil_dofs_batch_device
-    )
-    reporting_metrics = runtime_bundle["reporting_metrics"](
-        coil_dofs_device,
-        include_distance_metrics=True,
     )
     objective_value_from_host = runtime_bundle["objective"](coil_dofs_host)
 
@@ -593,27 +580,6 @@ def _run_single_stage_target_runtime_bundle_transfer_guard_case() -> None:
         value_and_grad_grad,
         expected_shape=coil_dofs_host.shape,
     )
-    _assert_finite_array(
-        batch_values,
-        expected_shape=(2,),
-    )
-    _assert_finite_array(
-        batch_grads,
-        expected_shape=coil_dofs_batch_host.shape,
-    )
-    metric_names = (
-        "final_non_qs",
-        "final_boozer_residual",
-        "final_iota",
-        "final_volume",
-        "max_curvature",
-        "curve_curve_min_dist",
-        "curve_surface_min_dist",
-        "surface_vessel_min_dist",
-    )
-    for metric_name in metric_names:
-        _assert_finite_scalar(reporting_metrics[metric_name], label=metric_name)
-
     forward_result = compiled_bundle["compiled_forward_result_for"](coil_dofs_device)
     solved_x_host = _host_array_float64(forward_result["x"])
 

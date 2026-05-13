@@ -3,9 +3,41 @@ import numpy as np
 import simsoptpp as sopp
 from .._core.optimizable import Optimizable
 from .._core.json import GSONDecoder
+from ..backend.runtime import raise_if_strict_jax_fallback
 from .mgrid import MGrid
 
 __all__ = ['MagneticField', 'MagneticFieldSum', 'MagneticFieldMultiply']
+
+
+def _is_jax_native_field(field) -> bool:
+    """Return True iff ``field`` and every composite child are JAX-native."""
+    if bool(getattr(type(field), "_simsopt_jax_native_field", False)):
+        return True
+    if isinstance(field, MagneticFieldMultiply):
+        return _is_jax_native_field(field.Bfield)
+    if isinstance(field, MagneticFieldSum):
+        return all(_is_jax_native_field(child) for child in field.Bfields)
+    return False
+
+
+def _raise_if_strict_jax_mixed_composition(
+    fields,
+    *,
+    operator_name: str,
+) -> None:
+    """Reject strict-JAX compositions that would call CPU-only children."""
+    cpu_children = [
+        f"{type(field).__name__}[index={index}]"
+        for index, field in enumerate(fields)
+        if not _is_jax_native_field(field)
+    ]
+    if not cpu_children:
+        return
+    detail = f"a CPU-only child set in {operator_name}: CPU children {cpu_children!r}"
+    raise_if_strict_jax_fallback(
+        component=f"simsopt.field.{operator_name}",
+        detail=detail,
+    )
 
 
 class MagneticField(sopp.MagneticField, Optimizable):
@@ -191,6 +223,10 @@ class MagneticFieldMultiply(MagneticField):
     """
 
     def __init__(self, scalar, Bfield):
+        _raise_if_strict_jax_mixed_composition(
+            [Bfield],
+            operator_name="MagneticFieldMultiply",
+        )
         MagneticField.__init__(self, depends_on=[Bfield])
         self.scalar = scalar
         self.Bfield = Bfield
@@ -240,6 +276,10 @@ class MagneticFieldSum(MagneticField):
     """
 
     def __init__(self, Bfields):
+        _raise_if_strict_jax_mixed_composition(
+            Bfields,
+            operator_name="MagneticFieldSum",
+        )
         MagneticField.__init__(self, depends_on=Bfields)
         self.Bfields = Bfields
 

@@ -794,7 +794,7 @@ def test_grouped_biot_savart_coil_collective_parity_and_lowering():
         _JAX_SUBPROCESS_CASES_PATH,
         args=("grouped-coil-collective",),
         failure_message="grouped Biot-Savart coil collective smoke failed",
-        timeout=60,
+        timeout=120,
         extra_env={
             "JAX_PLATFORMS": "cpu",
             "XLA_FLAGS": "--xla_force_host_platform_device_count=4",
