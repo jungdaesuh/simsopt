@@ -72,6 +72,9 @@ Default `inventory_only_scope`:
 
 - `N08_mhd_fixed_output_postprocessing`
 - `N10_generic_solver_orchestration_inventory`
+- `N12_qfm_surface_host_orchestration_inventory`
+- `N13_mgrid_io_inventory`
+- `N14_fourier_interpolation_utility_inventory`
 
 Default `skip_items`: none.
 
@@ -107,6 +110,12 @@ not repo runtime modes. When tests need the repo runtime lane, use the real
 Before changing code for an item, validate the item against current project
 source plus the relevant official docs.
 
+Context7 library ids selected during the 2026-05-13 doc review:
+
+- JAX: `/google/jax`
+- SIMSOPT: `/hiddensymmetries/simsopt`
+- CUDA Toolkit: `/websites/nvidia_cuda`
+
 - JAX:
   - Transfer guard: https://docs.jax.dev/en/latest/transfer_guard.html
   - `jax.jit`: https://docs.jax.dev/en/latest/_autosummary/jax.jit.html
@@ -134,12 +143,27 @@ Official-doc constraints to preserve:
   explicit `device_put`/`device_get` transfers are still allowed and CPU
   device-to-host fetches are always allowed. It is a guard, not by itself a
   proof that no host/device movement exists.
+  The `jax.transfer_guard(...)` context manager is thread-local; spawned threads
+  use the global option, so threaded/process validation must set the process
+  config or environment, not only a local context manager.
 - JAX buffer donation belongs on `jit`, `pmap`, or `pjit` boundaries. For
   `jit(shard_map(...))`, donation belongs on the `jit` wrapper, and donated
-  input buffers must not be reused after the call.
+  input buffers must not be reused after the call. Donation is positional:
+  keyword-argument calls do not donate buffers, so donation tests must exercise
+  the real positional call path.
+- `pmap` / `shard_map` migration-sensitive code must use explicit sharding and
+  explicit `device_put` placement. Do not rely on implicit resharding or
+  replicated-array indexing as a correctness or performance proof.
 - A CUDA claim requires a CUDA-enabled `jaxlib`, real CUDA-visible devices, and
   provenance from `jax.devices()`, `nvidia-smi`, driver/runtime versions, and
   `CUDA_VISIBLE_DEVICES`. Do not infer CUDA proof from package metadata alone.
+  `CUDA_VISIBLE_DEVICES` changes which GPUs are visible and their enumeration
+  order; an empty value means no GPUs are visible. Record `nvidia-smi -L` plus
+  `jax.devices()` and reject invalid/empty selectors for CUDA proof.
+- JAX's current installation docs recommend CUDA 13 wheels for new installs
+  while still documenting CUDA 12 wheels. The repo's `pyproject.toml` JAX extras
+  remain the source of truth for this run; record any upstream wheel-family
+  mismatch instead of changing dependencies inside a port item.
 - SIMSOPT MHD docs state VMEC/SPEC are external equilibrium-code interfaces
   that must be installed separately. Do not treat those solvers as native JAX
   port targets.
@@ -157,6 +181,16 @@ Official-doc constraints to preserve:
 - [ ] Confirm `pyproject.toml` JAX/JAX_GPU extras and official docs URL.
 - [ ] Confirm each candidate is still unported in the current tree before
   implementing it.
+- [ ] Confirm baseline-covered native candidates are not reopened as new active
+  work: `CurvePlanarFourier`, `CurvePerturbed`, `CurveCWSFourier`,
+  `CurveXYZFourier`, `CurveRZFourier`, `RotatedCurve` where already covered by
+  grouped-coil/curve wrappers, `SurfaceXYZFourier`, distance candidate spatial
+  hash routes, Boozer radial helper primitives (`sopp.compute_kmnc_kmns`,
+  `sopp.inverse_fourier_transform_*`), permanent-magnet fixed-state solve
+  wrappers, and wireframe fixed-state solve wrappers.
+- [ ] For any candidate named in an external audit, first classify whether it is
+  already covered by baseline items `01`-`33` / `points_coils`, a new portable
+  gap, host orchestration, IO/visualization, or an external solver wrapper.
 
 Recommended initial commands:
 
@@ -167,6 +201,8 @@ rg -n "stop_condition|cpu_oracle_complete|not_claimed|open_gaps" \
 rg -n "JAX =|JAX_GPU =|Documentation =" pyproject.toml
 rg -n "class .*\\(sopp|sopp\\.|import simsoptpp|from simsoptpp" \
   src/simsopt -g '*.py'
+rg -n "def is_jax_backend|raise_if_target_lane_bypass|raise_if_strict_jax_fallback" \
+  src/simsopt/backend/runtime.py src/simsopt
 rg --files src/simsoptpp src/simsopt/jax_core src/simsopt | sort
 ```
 
@@ -178,8 +214,9 @@ Create a new artifact root:
 
 Required files:
 
-- [ ] `state.json`: one row per item with status, owner files, oracle contract,
-  validation command, and closure level.
+- [ ] `state.json`: one row per item with status, closure level, owner files,
+  oracle contract, upstream source refs, downstream consumers, official-doc
+  refs, validation command, and residual risk.
 - [ ] `REPORT.md`: final summary with complete/block/skip table.
 - [ ] `plans/<id>.md`: item plan and implementation notes.
 - [ ] `plans/<id>-coverage.md`: coverage matrix.
@@ -187,11 +224,16 @@ Required files:
 - [ ] `plans/<id>-invariants.md`: math/API invariants.
 - [ ] `plans/<id>-source-refs.md`: current source lines and official-doc
   constraints used for the item.
+- [ ] `inventory/<id>.md`: source classification for inventory-only items.
+  This may replace `plans/<id>.md` only for inventory-only rows.
 - [ ] `red/<id>.txt`: failing pre-implementation test evidence for
   implementation items, or explicit `N/A` with reason for inventory-only,
   blocked, or decision-only items.
 - [ ] `bench/<id>.json`: validation and performance/proxy metadata when
   applicable.
+- [ ] `restart/<id>.md`: required when an item creates or changes a wrapper,
+  frozen state, serialization path, or restartable artifact. Use explicit `N/A`
+  with reason otherwise.
 
 ## Per-item closure checklist
 
@@ -222,14 +264,18 @@ For every active item:
   drift.
 - [ ] Update exports only when the public API has real implementation and tests.
 - [ ] Record remaining unsupported cases as explicit BLOCKED or SKIPPED rows.
+- [ ] Do not use absence from this N01-N14 list as evidence of an unported gap
+  until the baseline manifest and current source refs have been checked.
 
 For every inventory-only item:
 
 - [ ] Source audit and downstream inventory are complete.
 - [ ] No implementation is attempted unless the human promotes the item to
   `active_scope`.
-- [ ] The final row is `orchestration_only`, `external_solver_wrapper`,
-  `portable_gap`, `BLOCKED`, or `SKIPPED` with exact source evidence.
+- [ ] The final row has `status=SKIPPED` or `status=BLOCKED`,
+  `closure_level=inventory_only`, and a separate classification such as
+  `orchestration_only`, `external_solver_wrapper`, `portable_gap`,
+  `io_visualization`, or `skip`, with exact source evidence.
 
 Math, physics, and computation invariants to check where applicable:
 
@@ -262,6 +308,10 @@ Owner candidates:
 Tasks:
 
 - [ ] Audit `BoozerAnalytic` public methods and CPU equations.
+- [ ] Prove whether the proposed JAX route can avoid inherited
+  `BoozerMagneticField`/`sopp.BoozerMagneticField` helper paths, including the
+  current `sopp.compute_kmnc_kmns` and `sopp.inverse_fourier_transform_*`
+  call sites in `src/simsopt/field/boozermagneticfield.py`.
 - [ ] Decide whether to add `BoozerAnalyticJAX` or a shared Boozer analytic
   spec consumed by tracing.
 - [ ] Add CPU/JAX parity tests for `modB`, derivatives, `G`, `I`, `iota`,
@@ -287,6 +337,9 @@ Tasks:
 
 - [ ] Audit `InterpolatedBoozerField` C++/Python behavior and stored grid
   layout.
+- [ ] Use baseline item `33` / `BoozerRadialInterpolantJAX` as the structural
+  precedent: freeze CPU-owned Boozer data into an immutable pytree state before
+  calling compiled kernels.
 - [ ] Decide whether a frozen immutable grid spec can represent all needed
   public methods.
 - [ ] Implement only if the JAX path can evaluate from arrays without CPU
@@ -313,6 +366,9 @@ Tasks:
 
 - [ ] Inventory all concrete `BoozerMagneticField` subclasses.
 - [ ] Classify raw CPU Boozer fields separately from immutable JAX wrappers.
+- [ ] Inventory non-Boozer field types that share tracing dispatch, such as
+  `ToroidalField`, `PoloidalField`, and scalar-potential field routes, and prove
+  they do not route through Boozer-only conversion code.
 - [ ] Keep `trace_particles_boozer` fail-fast for unsupported CPU field types.
 - [ ] Add acceptance tests only for concrete native JAX field wrappers.
 - [ ] Add rejection tests for unsupported raw CPU Boozer fields.
@@ -326,6 +382,7 @@ Owner candidates:
 
 - `src/simsopt/geo/surfacegarabedian.py`
 - `src/simsopt/geo/surfacehenneberg.py`
+- `src/simsopt/geo/surfacerzfourier.py`
 - `src/simsopt/jax_core/surface_fourier.py`
 - `src/simsopt/jax_core/specs.py`
 
@@ -354,6 +411,8 @@ Owner candidates:
 Tasks:
 
 - [ ] Preserve the existing pure-JAX `JaxCurve` forward geometry path.
+- [ ] Use `src/simsopt/geo/curvexyzfourier.py::JaxCurveXYZFourier` as the
+  closest structural precedent before adding a new immutable spec.
 - [ ] Add `CurveXYZFourierSymmetriesSpec` if needed.
 - [ ] Add `to_spec()` / routing into `curve_spec_from_curve`.
 - [ ] Add parity for `gamma`, `gammadash`, higher derivatives, and VJP shape.
@@ -372,6 +431,8 @@ Owner candidates:
 Tasks:
 
 - [ ] Audit CPU clamped-dims semantics and DOF masking.
+- [ ] Start from the current fail-fast source:
+  `src/simsopt/geo/surfacexyztensorfourier.py:188-193`.
 - [ ] Extend the JAX spec to preserve clamped DOFs without changing the public
   scalar objective.
 - [ ] Prove `surface_spec()` no longer rejects clamped dimensions only after
@@ -396,7 +457,15 @@ Tasks:
 - [ ] Decide whether gradients are required; if not, document non-differentiable
   or integer-valued contract.
 - [ ] Include crossing/near-degenerate edge cases from the C++ assumptions.
-- [ ] Wire a public JAX wrapper only after parity and edge-case tests pass.
+- [ ] Wire the accepted kernel into `LinkingNumber.J` in
+  `src/simsopt/geo/curveobjectives.py` behind the existing
+  `simsopt.backend.runtime.is_jax_backend()` contract only after parity and
+  edge-case tests pass.
+- [ ] Preserve the existing target-lane bypass guard pattern used by nearby
+  curve objectives: `raise_if_target_lane_bypass(...)` before legacy entry,
+  with a route-specific name for `LinkingNumber.J`.
+- [ ] Preserve the CPU `sopp.compute_linking_number` oracle path and prove the
+  JAX route does not silently fall back to it in strict backend mode.
 
 ### N08_mhd_fixed_output_postprocessing
 
@@ -408,6 +477,10 @@ specific pure array kernels. Do not launch a broad MHD rewrite.
 
 Owner candidates:
 
+- `src/simsopt/mhd/boozer.py`
+- `src/simsopt/mhd/vmec.py`
+- `src/simsopt/mhd/spec.py`
+- `src/simsopt/mhd/virtual_casing.py`
 - `src/simsopt/mhd/vmec_diagnostics.py`
 - `src/simsopt/mhd/bootstrap.py`
 - `src/simsopt/mhd/profiles.py`
@@ -415,6 +488,9 @@ Owner candidates:
 Tasks:
 
 - [ ] Classify VMEC/SPEC/BOOZ_XFORM execution as external and out of scope.
+- [ ] Record explicit inventory rows for `Boozer`, `Quasisymmetry`, `Vmec`,
+  `Spec`, and virtual-casing wrapper surfaces as `external_solver_wrapper` or
+  host orchestration, not implementation targets.
 - [ ] Cite the official SIMSOPT MHD docs and current source lines proving which
   classes are external solver interfaces.
 - [ ] Identify pure array post-processing kernels, such as VMEC geometry and
@@ -434,10 +510,17 @@ Owner candidates:
 - `src/simsopt/field/magneticfield.py`
 - `src/simsopt/field/_jax_common.py`
 - `src/simsopt/jax_core/field.py`
+- new `src/simsopt/jax_core/magneticfield_composition.py` if justified
 
 Tasks:
 
 - [ ] Audit current composition behavior and cache invalidation.
+- [ ] Document how `MagneticField` point caches, `_set_points_cb`, and parent
+  invalidation interact with immutable JAX specs before adding composition
+  routing.
+- [ ] Treat `src/simsopt/jax_core/field.py` as grouped-coil field-kernel
+  precedent, not evidence that `MagneticFieldSum` or `MagneticFieldMultiply`
+  already have native JAX entry points.
 - [ ] Add JAX composition only for component fields with native JAX specs.
 - [ ] Preserve fail-fast behavior when any component is CPU-only.
 - [ ] Add parity for `B`, `dB_by_dX`, `A`, and derivative bundles when
@@ -457,10 +540,15 @@ Owner candidates:
 - `src/simsopt/solve/mpi.py`
 - `src/simsopt/geo/optimizer_jax.py`
 - `src/simsopt/geo/optimizer_jax_private/`
+- `src/simsopt/solve/permanent_magnet_optimization_jax.py`
+- `src/simsopt/solve/wireframe_optimization_jax.py`
 
 Tasks:
 
 - [ ] Inventory generic solve wrappers and downstream callers.
+- [ ] Inventory already-shipped strict opt-in wrappers,
+  `permanent_magnet_optimization_jax.py` and `wireframe_optimization_jax.py`,
+  as precedent before proposing any generic solve route.
 - [ ] Decide whether any pure-JAX objective family justifies a generic opt-in
   wrapper.
 - [ ] Do not replace SciPy/MPI host orchestration globally.
@@ -486,11 +574,88 @@ Tasks:
   `.artifacts/jax_port_goal/state.json`.
 - [ ] Decide whether to implement an immutable batch replacement or keep the
   live mutating workflow host-only.
+- [ ] Pick one final closure label explicitly: `BLOCKED` for a root missing
+  capability, or `SKIPPED` with a deferred-decision marker when the supported
+  native contract remains immutable `PermanentMagnetGridJAX`.
 - [ ] Do not silently export a CPU-style dispatcher as JAX.
 - [ ] If implemented, add parity for state updates, objective history, and
   solved magnet vectors.
 - [ ] If deferred, record why immutable `PermanentMagnetGridJAX` is the
   supported native contract.
+
+### N12_qfm_surface_host_orchestration_inventory
+
+Question: is `QfmSurface` a JAX-port target, or host solver orchestration around
+already-ported residual kernels?
+
+Default status: inventory-only. Promote only if the human asks for a scoped
+JAX-native QFM solve wrapper.
+
+Owner candidates:
+
+- `src/simsopt/geo/qfmsurface.py`
+- `src/simsopt/geo/surfaceobjectives.py`
+- `src/simsopt/geo/surfaceobjectives_jax.py`
+
+Tasks:
+
+- [ ] Record `QfmSurface` as host orchestration if its live contract mutates
+  `surface.x` and calls SciPy minimization.
+- [ ] Cite the current mutation and SciPy call sites:
+  `src/simsopt/geo/qfmsurface.py:49`, `src/simsopt/geo/qfmsurface.py:73`,
+  `src/simsopt/geo/qfmsurface.py:97`, `src/simsopt/geo/qfmsurface.py:133`,
+  and `src/simsopt/geo/qfmsurface.py:170`.
+- [ ] Verify the existing `QfmResidualJAX` coverage before opening any new QFM
+  physics/residual port task.
+- [ ] Classify any remaining gap as solver orchestration, not a missing residual
+  kernel, unless current source proves otherwise.
+- [ ] Leave this item `SKIPPED` unless a narrow immutable-state QFM solve
+  contract is promoted to `active_scope`.
+
+### N13_mgrid_io_inventory
+
+Question: is `MGrid` JAX-portable numerical work, or MAKEGRID file I/O and host
+data loading?
+
+Default status: inventory-only.
+
+Owner candidates:
+
+- `src/simsopt/field/mgrid.py`
+
+Tasks:
+
+- [ ] Classify `MGrid` public methods as `io_visualization`,
+  `orchestration_only`, or fixed-array post-processing with source refs.
+- [ ] Include downstream MGrid import/use coverage from
+  `tests/field/test_mgrid.py`, `tests/field/test_magneticfields.py`, and
+  `tests/field/test_coilset.py` before deciding it has no JAX consumer.
+- [ ] Do not port file parsing/writing paths to JAX.
+- [ ] Promote only if a pure fixed-array kernel is found that downstream JAX
+  routes actually consume.
+
+### N14_fourier_interpolation_utility_inventory
+
+Question: is `util/fourier_interpolation.py` on a current JAX production route,
+or only a host utility/test helper?
+
+Default status: inventory-only.
+
+Owner candidates:
+
+- `src/simsopt/util/fourier_interpolation.py`
+- `tests/util/test_fourier_interpolation.py`
+
+Tasks:
+
+- [ ] Inventory all source and test consumers before classifying this as a
+  Boozer or field-route blocker.
+- [ ] If it is only a NumPy host utility, mark `orchestration_only` or `skip`
+  with source refs.
+- [ ] Prove any claimed Boozer dependency with current `src/simsopt` references,
+  not test-only references.
+- [ ] Promote only if a compiled JAX production route actually depends on this
+  interpolation behavior.
 
 ## Final validation gate
 
@@ -533,11 +698,23 @@ print("devices", jax.devices())
 PY
 ```
 
+Expected CPU-only provenance shape:
+
+```text
+jax <version>
+jaxlib <version>
+devices [CpuDevice(id=0)]
+```
+
+Accept equivalent current-JAX CPU reprs only if every reported device has
+`platform == "cpu"` and no GPU/CUDA device appears.
+
 Additional CUDA validation is allowed only under `scope_profile=cuda_perf_release`
 and must include:
 
 ```bash
 nvidia-smi
+nvidia-smi -L
 CUDA_VISIBLE_DEVICES=<approved-devices> \
 JAX_ENABLE_X64=True \
 JAX_PLATFORMS=cuda \
@@ -569,7 +746,8 @@ Then include:
 
 - [ ] Confirm the user wants to start this as a new `/goal` run.
 - [ ] Select `active_scope`.
-- [ ] Decide whether to promote `N08` or `N10` from inventory-only to active.
+- [ ] Decide whether to promote any inventory-only item from
+  `inventory_only_scope` to `active_scope`.
 - [ ] Keep `scope_profile=cpu_port_closure` unless real CUDA proof is explicitly
   requested.
 - [ ] Start from a clean understanding of dirty worktree scope; do not revert
