@@ -64,10 +64,6 @@ class VmecSingleStageConfig:
             steps for J1 boundary-DOF gradient.
         eps_fd_xcoils_abs, eps_fd_xcoils_rel: Coil-DOF FD steps used only by
             the Taylor-test harness; production coil gradient is analytic.
-        step_clamp_boundary, step_clamp_coils: Driver step-clamp radii in
-            DOF norm. Placeholder defaults pending calibration. The clamp
-            barrier is implemented inline in ``J_scalar`` per plan
-            "Optimizer entrypoint".
         iota_tol: In-objective tolerance for ``IotaSurfaceTargetMiss``.
         iota_seed_quarantine_tol: Looser intake tolerance for
             ``seed_iota_surface_mismatch``.
@@ -139,10 +135,6 @@ class VmecSingleStageConfig:
     eps_fd_xsurface_rel: float = 0.0
     eps_fd_xcoils_abs: float = 0.0
     eps_fd_xcoils_rel: float = 1.0e-4
-
-    # Driver step-clamp radii (DOF norm)
-    step_clamp_boundary: float = 0.05
-    step_clamp_coils: float = 0.5
 
     # Iota promotion / quarantine thresholds
     iota_tol: float = 0.02

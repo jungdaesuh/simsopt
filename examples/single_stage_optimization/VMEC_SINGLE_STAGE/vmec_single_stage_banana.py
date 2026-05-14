@@ -28,16 +28,18 @@ Gradient contract (plan section "Gradient contract"):
     dJ2/dx_surface = analytic mixed derivative            (local SquaredFlux)
 
 Step-clamp barrier (plan section "Optimizer entrypoint"):
-the driver clamps proposed steps before any VMEC call. When the proposed
-``x`` violates the boundary or coil clamp, ``J_scalar`` returns the
-quadratic-barrier value and ``compute_grad`` returns its gradient *without*
-running VMEC. This gives scipy's line search a real value to backtrack
-against.
+the driver clamps proposed steps before any VMEC call. The clamp barrier
+is implemented in ``banana_drivers/04_vmec_singlestage_driver.py``, which
+wraps this bundle's ``J_and_grad`` and returns a finite quadratic-barrier
+value / gradient without running VMEC when the proposed ``x`` violates the
+boundary or coil clamp. **This module does not implement the clamp**; the
+bundle's ``J_scalar``, ``compute_grad``, and ``J_and_grad`` always run
+VMEC when called.
 
 This module is intentionally NOT a runnable script. The caller
 (``banana_drivers/04_vmec_singlestage_driver.py``) owns the MPI launch,
 scratch-directory chdir lifecycle, ``MPIFiniteDifference`` context manager,
-and the ``scipy.optimize.minimize`` call.
+the step-clamp barrier, and the ``scipy.optimize.minimize`` call.
 """
 
 from __future__ import annotations
@@ -453,8 +455,10 @@ def build_objective(
         (one VMEC run per call), ``J_scalar`` / ``compute_grad`` (thin
         views over the cached pair), ``dof_schema``, and DOF block sizes.
 
-        - ``J_scalar(x)``: returns ``J = J1 + w_coils * J2``, applying the
-          step-clamp barrier before any VMEC call.
+        - ``J_scalar(x)``: returns ``J = J1 + w_coils * J2`` from a single
+          VMEC run on ``x``. The step-clamp barrier is **not** applied here;
+          it lives in ``banana_drivers/04_vmec_singlestage_driver.py``, which
+          wraps this bundle.
         - ``compute_grad(x)``: returns ``dJ/dx`` per the plan gradient
           contract.
         - ``dof_schema``: typed manifest dict for ``artifact_manifest.json``.
@@ -569,14 +573,12 @@ def build_objective(
     boundary_slice = slice(n_coils_currents, n_coils_currents + n_boundary_dofs)
 
     # Full dof_names of the composite are SIMSOPT's authoritative order.
-    coils_currents_dof_names = (
-        list(JF.dof_names) if hasattr(JF, "dof_names")
-        else [f"jf_dof_{i}" for i in range(n_coils_currents)]
-    )
-    boundary_dof_names = (
-        list(surf.local_dof_names) if hasattr(surf, "local_dof_names")
-        else [f"boundary_{i}" for i in range(n_boundary_dofs)]
-    )
+    # ``Optimizable.dof_names`` and ``Surface.local_dof_names`` are stable
+    # documented SIMSOPT API; we use them directly and let AttributeError
+    # propagate if SIMSOPT ever regresses, rather than silently fabricating
+    # synthetic names that would corrupt the dof_schema SSOT.
+    coils_currents_dof_names = list(JF.dof_names)
+    boundary_dof_names = list(surf.local_dof_names)
 
     dof_schema = assemble_dof_schema(
         coil_dof_count=n_coil_shape_dofs,

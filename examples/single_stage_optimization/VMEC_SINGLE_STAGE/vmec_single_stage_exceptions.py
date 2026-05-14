@@ -85,9 +85,12 @@ class StepClampBarrierTriggered(VmecCallFailure):
     candidate whose step-clamp barrier dominated its objective can be tagged
     without misclassifying it as a VMEC failure.
 
-    The clamp barrier itself is implemented inline in ``J_scalar``/
-    ``compute_grad``; instances of this exception are never thrown out of
-    the objective. They are emitted on the diagnostic record only.
+    The clamp barrier itself is implemented in the driver layer
+    (``banana_drivers/04_vmec_singlestage_driver.py``), which wraps the
+    simsopt-surrogate objective bundle; the bundle's ``J_scalar`` /
+    ``compute_grad`` / ``J_and_grad`` always run VMEC. Instances of this
+    exception are never thrown out of the objective and are emitted on
+    the diagnostic record only.
     """
 
     failure_class: str = "step_clamp_barrier_triggered"

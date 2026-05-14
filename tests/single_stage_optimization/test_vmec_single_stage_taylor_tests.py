@@ -20,6 +20,7 @@ import pytest
 from examples.single_stage_optimization.VMEC_SINGLE_STAGE import (
     FIRST_ORDER_SLOPE_BAND,
     SECOND_ORDER_SLOPE_BAND,
+    assemble_dof_schema,
     assert_dJ1_dxcoils_zero,
     taylor_J2_alone_centered_eq28,
     taylor_J_combined_centered_eq29_xsurface,
@@ -174,3 +175,40 @@ def test_taylor_different_seeds_give_different_directions() -> None:
     out2 = taylor_J2_alone_centered_eq28(J, dJ, x0, rng_seed=1)
     # Different draws -> different errors at the same delta.
     assert out1["errors"] != out2["errors"]
+
+
+def test_dof_schema_preserves_simsopt_coil_shape_name_format() -> None:
+    """Coil-shape DOF names recorded in the schema must keep the SIMSOPT
+    mode-name format (``xc(n)``, ``xs(n)``, ``yc(n)``, ``ys(n)``, ``zc(n)``,
+    ``zs(n)`` produced by ``CurveXYZFourier.dof_names``). Asserting on the
+    mode-pattern substrings ensures we did not silently fabricate names via
+    a defensive fallback (see ``build_objective`` Fix A5)."""
+    # Names as SIMSOPT emits them via ``Optimizable.dof_names``: class-tagged
+    # prefix + colon + per-DOF token. Two coil-shape DOFs + one free current.
+    simsopt_style_names = [
+        "CurveXYZFourier1:xc(0)",
+        "CurveXYZFourier1:ys(1)",
+        "Current2:x0",
+    ]
+    schema = assemble_dof_schema(
+        coil_dof_count=2,
+        current_dof_count=1,
+        boundary_dof_count=1,
+        pinned_current_index=0,
+        pinned_current_value_A=-8.0e4,
+        fixed_boundary_modes=["rc(0,0)"],
+        coils_currents_dof_names=simsopt_style_names,
+        current_dof_names=["coil_2_current_A"],
+        boundary_dof_names=["zs(1,1)"],
+    )
+    recorded = schema["coils_currents"]["dof_names_in_order"]
+    assert recorded == simsopt_style_names
+    # At least one coil-shape name must carry an ``[xyz][cs](`` token.
+    mode_tokens = ("xc(", "xs(", "yc(", "ys(", "zc(", "zs(")
+    coil_shape_names = recorded[: schema["coils_currents"]["coil_shape_count"]]
+    assert any(
+        any(tok in name for tok in mode_tokens) for name in coil_shape_names
+    ), (
+        "coil_shape dof_names lost SIMSOPT mode-pattern format; "
+        "a defensive fallback may have re-entered build_objective"
+    )
