@@ -4299,6 +4299,9 @@ class HardwareConstraintTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["PLASMA_SURF_PATH"], "/equilibria/wout_test.nc")
+        self.assertEqual(payload["SEED_ARTIFACT_ROLE"], "stage2")
+        self.assertFalse(payload["OFFSPEC_REPLAY_DEBUG_ONLY"])
+        self.assertIsNone(payload["SINGLE_STAGE_RESUME_BS_PATH"])
         self.assertEqual(payload["STAGE2_BS_PATH"], "/seeds/biot_savart_opt.json")
         self.assertEqual(
             payload["STAGE2_SEED_SURF_PATH"],
@@ -4964,6 +4967,56 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(payload["FRONTIER_CHEBYSHEV_RHO"], 0.02)
         self.assertEqual(payload["FRONTIER_CHEBYSHEV_SHARPNESS"], 18.0)
         self.assertEqual(payload["FRONTIER_EPSILON_PENALTY_WEIGHT"], 9.0)
+
+    def test_current_preserved_timeout_replay_config_preserves_offspec_resume_role(
+        self,
+    ):
+        module = load_single_stage_example_module()
+        replay_seed = module.PreservedTimeoutReplayConfig(
+            plasma_surf_filename="wout_test.nc",
+            plasma_surf_path="/equilibria/wout_test.nc",
+            stage2_bs_path="/seeds/biot_savart_opt.json",
+            stage2_results_path="/seeds/results.json",
+            mpol=8,
+            ntor=6,
+            nphi=127,
+            ntheta=32,
+            constraint_weight=1.0,
+            constraint_method="penalty",
+            alm_formulation="weighted_sum",
+            max_iterations=30,
+            target_volume=0.10,
+            target_iota=0.15,
+        )
+
+        with patch.object(
+            module,
+            "PRESERVED_TIMEOUT_REPLAY_CONFIG",
+            replay_seed,
+        ), patch.object(
+            module,
+            "stage2_bs_path",
+            "/resume/biot_savart_opt.json",
+            create=True,
+        ), patch.object(
+            module,
+            "seed_artifact_role",
+            "single_stage_resume",
+            create=True,
+        ), patch.object(
+            module,
+            "args",
+            SimpleNamespace(offspec_replay_debug_only=True),
+            create=True,
+        ):
+            replay_config = module.current_preserved_timeout_replay_config()
+
+        self.assertEqual(replay_config.seed_artifact_role, "single_stage_resume")
+        self.assertTrue(replay_config.offspec_replay_debug_only)
+        self.assertEqual(
+            replay_config.single_stage_resume_bs_path,
+            "/resume/biot_savart_opt.json",
+        )
 
     def test_build_best_feasible_results_summary_emits_schema_backed_hardware_fields(self):
         module = load_single_stage_example_module()
@@ -9888,6 +9941,42 @@ class CurrentBaselineContractTests(unittest.TestCase):
             args = module.parse_args()
 
         self.assertEqual(args.seed_regime, "bridge_only")
+
+    def test_single_stage_parse_args_accepts_resume_replay_flags(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--single-stage-resume-bs-path",
+                "archives/biot_savart_opt.json",
+                "--offspec-replay-debug-only",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(
+            args.single_stage_resume_bs_path,
+            "archives/biot_savart_opt.json",
+        )
+        self.assertTrue(args.offspec_replay_debug_only)
+
+    def test_single_stage_resume_seed_requires_debug_only_role(self):
+        module = load_single_stage_example_module()
+
+        args = SimpleNamespace(
+            single_stage_resume_bs_path="archives/biot_savart_opt.json",
+            stage2_bs_path=None,
+            offspec_replay_debug_only=False,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "--single-stage-resume-bs-path requires --offspec-replay-debug-only",
+        ):
+            module.resolve_single_stage_seed_artifact(args)
 
     def test_single_stage_parse_args_accepts_stage2_seed_surf_path(self):
         module = load_single_stage_example_module()

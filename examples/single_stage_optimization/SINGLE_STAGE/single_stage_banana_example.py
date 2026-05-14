@@ -332,6 +332,8 @@ DEFAULT_HARDWARE_SEARCH_MODE = "hard"
 DEFAULT_HARDWARE_SEARCH_SOFT_ITERATIONS = 0
 DEFAULT_CURVATURE_TRAVERSAL_BAND = 0.0
 DEFAULT_CURVATURE_TRAVERSAL_EVAL_BUDGET = 0
+SEED_ARTIFACT_ROLE_STAGE2 = "stage2"
+SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME = "single_stage_resume"
 CURVATURE_P_NORM = 4
 DEFAULT_ALM_QS_THRESHOLD = 3.0e-3
 DEFAULT_ALM_BOOZER_THRESHOLD = 1.0e-4
@@ -713,12 +715,90 @@ def build_stage2_bs_path(args):
     return current_penalty_candidate
 
 
+def load_single_stage_resume_seed_results(resume_bs_path):
+    resume_bs_path = Path(resume_bs_path)
+    resume_results_path = resume_bs_path.with_name("results.json")
+    if not resume_results_path.is_file():
+        raise ValueError(
+            "Single-stage resume seed requires a sibling results.json; missing "
+            f"{resume_results_path}."
+        )
+    resume_results = json.loads(resume_results_path.read_text(encoding="utf-8"))
+    if not isinstance(resume_results, dict):
+        raise ValueError(
+            "Single-stage resume seed results.json must contain a JSON object."
+        )
+    return resume_results_path, resume_results
+
+
+def resolve_single_stage_seed_artifact(args):
+    resume_bs_path = args.single_stage_resume_bs_path
+    if resume_bs_path and args.stage2_bs_path:
+        raise ValueError(
+            "--single-stage-resume-bs-path and --stage2-bs-path are mutually exclusive."
+        )
+    if resume_bs_path:
+        if not args.offspec_replay_debug_only:
+            raise ValueError(
+                "--single-stage-resume-bs-path requires --offspec-replay-debug-only."
+            )
+        resume_results_path, resume_results = load_single_stage_resume_seed_results(
+            resume_bs_path
+        )
+        return (
+            resume_bs_path,
+            resume_results_path,
+            resume_results,
+            SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME,
+        )
+    if args.offspec_replay_debug_only:
+        raise ValueError(
+            "--offspec-replay-debug-only requires --single-stage-resume-bs-path."
+        )
+    stage2_bs_path = build_stage2_bs_path(args)
+    stage2_results_path, stage2_results = load_stage2_artifact_results(stage2_bs_path)
+    return stage2_bs_path, stage2_results_path, stage2_results, SEED_ARTIFACT_ROLE_STAGE2
+
+
+def validate_single_stage_resume_seed_contract(resume_results):
+    for key in ("MAJOR_RADIUS", "TOROIDAL_FLUX"):
+        if resume_results.get(key) is None:
+            raise ValueError(
+                "Single-stage resume seed results.json is missing "
+                f"{key}; cannot initialize the replay surface."
+            )
+    validate_major_radius(float(resume_results["MAJOR_RADIUS"]))
+    resolve_single_stage_banana_surf_radius(resume_results, None)
+
+
 def infer_uniform_tf_current_A(tf_coils):
     return _infer_uniform_coil_current_A(tf_coils)
 
 
 def resolve_stage2_tf_current_A(stage2_results, tf_coils):
     return _resolve_stage2_tf_current_A_impl(stage2_results, tf_coils)
+
+
+def resolve_single_stage_resume_tf_current_A(resume_results, tf_coils):
+    realized_tf_current_A = infer_uniform_tf_current_A(tf_coils)
+    if realized_tf_current_A is None:
+        raise ValueError(
+            "Loaded single-stage resume TF coils do not share a uniform fixed current; "
+            "cannot record replay current provenance."
+        )
+    recorded_tf_current_A = resume_results.get("TF_CURRENT_A")
+    if recorded_tf_current_A is not None and not np.isclose(
+        realized_tf_current_A,
+        float(recorded_tf_current_A),
+        rtol=0.0,
+        atol=1.0e-12,
+    ):
+        raise ValueError(
+            "Loaded single-stage resume TF coil current "
+            f"{realized_tf_current_A:.6f} A does not match the artifact metadata "
+            f"TF_CURRENT_A={float(recorded_tf_current_A):.6f} A."
+        )
+    return float(realized_tf_current_A)
 
 
 def resolve_stage2_num_tf_coils(stage2_results, requested_num_tf_coils):
@@ -1703,6 +1783,23 @@ def parse_args():
         help="Explicit path to the Stage 2 biot_savart_opt.json seed. Overrides all derived seed settings.",
     )
     parser.add_argument(
+        "--single-stage-resume-bs-path",
+        default=os.environ.get("SINGLE_STAGE_RESUME_BS_PATH"),
+        help=(
+            "Explicit path to a historical single-stage biot_savart_opt.json "
+            "resume seed. Requires --offspec-replay-debug-only and does not "
+            "claim the seed satisfies the Stage 2 handoff contract."
+        ),
+    )
+    parser.add_argument(
+        "--offspec-replay-debug-only",
+        action="store_true",
+        help=(
+            "Mark the run as a non-promotable historical/off-contract replay. "
+            "Only valid with --single-stage-resume-bs-path."
+        ),
+    )
+    parser.add_argument(
         "--stage2-seed-role",
         choices=["handoff", "recovery"],
         default=os.environ.get("STAGE2_SEED_ROLE", "handoff"),
@@ -2480,6 +2577,9 @@ class PreservedTimeoutReplayConfig:
     max_iterations: int | None
     target_volume: float | None
     target_iota: float | None
+    seed_artifact_role: str = SEED_ARTIFACT_ROLE_STAGE2
+    offspec_replay_debug_only: bool = False
+    single_stage_resume_bs_path: str | None = None
     requested_seed_regime: str | None = None
     effective_seed_regime: str | None = None
     single_stage_goal_mode: str | None = None
@@ -6057,6 +6157,21 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
     frontier_goal_config = globals().get("FRONTIER_GOAL_CONFIG", replay_config)
     surface_data_value = globals().get("surface_data")
     banana_current_state = globals().get("banana_current_state")
+    args_value = globals().get("args")
+    replay_seed_artifact_role = globals().get(
+        "seed_artifact_role",
+        replay_config.seed_artifact_role,
+    )
+    replay_offspec_debug = (
+        replay_config.offspec_replay_debug_only
+        if args_value is None
+        else bool(args_value.offspec_replay_debug_only)
+    )
+    replay_single_stage_resume_bs_path = (
+        str(stage2_bs_path)
+        if replay_seed_artifact_role == SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME
+        else replay_config.single_stage_resume_bs_path
+    )
     replay_banana_current_mode = replay_config.single_stage_banana_current_mode
     replay_banana_current_coordinate_scaling = (
         replay_config.single_stage_banana_current_coordinate_scaling
@@ -6087,6 +6202,9 @@ def current_preserved_timeout_replay_config() -> PreservedTimeoutReplayConfig:
         stage2_results_path=(
             replay_config.stage2_results_path if stage2_results_path is None else str(stage2_results_path)
         ),
+        seed_artifact_role=replay_seed_artifact_role,
+        offspec_replay_debug_only=replay_offspec_debug,
+        single_stage_resume_bs_path=replay_single_stage_resume_bs_path,
         mpol=globals().get("mpol", replay_config.mpol),
         ntor=globals().get("ntor", replay_config.ntor),
         nphi=globals().get("nphi", replay_config.nphi),
@@ -6450,6 +6568,9 @@ def build_preserved_timeout_results_payload(
     payload = {
         "PLASMA_SURF_FILENAME": replay_config.plasma_surf_filename,
         "PLASMA_SURF_PATH": replay_config.plasma_surf_path,
+        "SEED_ARTIFACT_ROLE": replay_config.seed_artifact_role,
+        "OFFSPEC_REPLAY_DEBUG_ONLY": replay_config.offspec_replay_debug_only,
+        "SINGLE_STAGE_RESUME_BS_PATH": replay_config.single_stage_resume_bs_path,
         "STAGE2_BS_PATH": replay_config.stage2_bs_path,
         "STAGE2_SEED_SURF_PATH": replay_config.stage2_seed_surf_path,
         "STAGE2_RESULTS_PATH": replay_config.stage2_results_path,
@@ -8189,15 +8310,25 @@ if __name__ == "__main__":
         raise ValueError(
             "--banana-current-fd-relative-step-fraction must be positive."
         )
-    stage2_bs_path = build_stage2_bs_path(args)
-    stage2_results_path, stage2_results = load_stage2_artifact_results(stage2_bs_path)
+    (
+        stage2_bs_path,
+        stage2_results_path,
+        stage2_results,
+        seed_artifact_role,
+    ) = resolve_single_stage_seed_artifact(args)
     stage2_results = upgrade_legacy_stage2_artifact_results(
         stage2_results,
         known_num_tf_coils=args.num_tf_coils,
         known_tf_current_A=args.stage2_seed_tf_current_A,
     )
-    validate_stage2_seed_contract(stage2_results)
-    if args.stage2_seed_role == "handoff":
+    if seed_artifact_role == SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME:
+        validate_single_stage_resume_seed_contract(stage2_results)
+    else:
+        validate_stage2_seed_contract(stage2_results)
+    if (
+        seed_artifact_role == SEED_ARTIFACT_ROLE_STAGE2
+        and args.stage2_seed_role == "handoff"
+    ):
         validate_stage2_seed_bootability_contract(stage2_results)
     R0 = validate_major_radius(float(stage2_results["MAJOR_RADIUS"]))
     s = float(stage2_results["TOROIDAL_FLUX"])
@@ -8350,6 +8481,13 @@ if __name__ == "__main__":
         stage2_bs_path=str(stage2_bs_path),
         stage2_seed_surf_path=stage2_seed_surf_path,
         stage2_results_path=str(stage2_results_path),
+        seed_artifact_role=seed_artifact_role,
+        offspec_replay_debug_only=bool(args.offspec_replay_debug_only),
+        single_stage_resume_bs_path=(
+            str(stage2_bs_path)
+            if seed_artifact_role == SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME
+            else None
+        ),
         mpol=mpol,
         ntor=ntor,
         nphi=nphi,
@@ -8418,7 +8556,13 @@ if __name__ == "__main__":
     # Clearance/length objectives operate on the optimizable banana curves only;
     # TF/proxy/VF curves are fixed field sources and must not enter the penalty.
     objective_curves = banana_curves
-    stage2_tf_current_A = resolve_stage2_tf_current_A(stage2_results, tf_coils)
+    if seed_artifact_role == SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME:
+        stage2_tf_current_A = resolve_single_stage_resume_tf_current_A(
+            stage2_results,
+            tf_coils,
+        )
+    else:
+        stage2_tf_current_A = resolve_stage2_tf_current_A(stage2_results, tf_coils)
     tf_current_sum_abs_A = float(sum(abs(c.current.get_value()) for c in tf_coils))
     initial_banana_current_A = banana_current_state.compatibility_current_A()
     if CONSTRAINT_METHOD == "penalty":
@@ -9807,26 +9951,42 @@ if __name__ == "__main__":
         "curvature_threshold": float(CURVATURE_THRESHOLD),
         "banana_surf_radius": float(banana_surf_radius),
     }
-    single_stage_constraint_contract, single_stage_constraint_trace = (
-        _resolve_constraint_contract_from_wire_names_impl(
-            cli_overrides=constraint_cli_layer,
-        )
-    )
     constraint_override_reason = args.constraint_override_reason
     constraint_profile_label = (
         "single_stage_solver"
         if args.constraint_profile_label in {None, ""}
         else str(args.constraint_profile_label)
     )
-    constraint_metadata = build_constraint_metadata(
-        single_stage_constraint_contract,
-        profile_name=constraint_profile_label,
-        override_reason=constraint_override_reason,
-        trace=single_stage_constraint_trace,
-    )
+    if args.offspec_replay_debug_only:
+        constraint_metadata = {
+            "CONSTRAINT_PROFILE": "offspec_replay_debug_only",
+            "EFFECTIVE_VALUES": constraint_cli_layer,
+            "OVERRIDE_REASON": "offspec_replay_debug_only",
+            "CONTRACT_HASH": None,
+            "CONTRACT_SCHEMA_VERSION": None,
+        }
+    else:
+        single_stage_constraint_contract, single_stage_constraint_trace = (
+            _resolve_constraint_contract_from_wire_names_impl(
+                cli_overrides=constraint_cli_layer,
+            )
+        )
+        constraint_metadata = build_constraint_metadata(
+            single_stage_constraint_contract,
+            profile_name=constraint_profile_label,
+            override_reason=constraint_override_reason,
+            trace=single_stage_constraint_trace,
+        )
     results = {
         "PLASMA_SURF_FILENAME": plasma_surf_filename,
         "PLASMA_SURF_PATH": file_loc,
+        "SEED_ARTIFACT_ROLE": seed_artifact_role,
+        "OFFSPEC_REPLAY_DEBUG_ONLY": bool(args.offspec_replay_debug_only),
+        "SINGLE_STAGE_RESUME_BS_PATH": (
+            str(stage2_bs_path)
+            if seed_artifact_role == SEED_ARTIFACT_ROLE_SINGLE_STAGE_RESUME
+            else None
+        ),
         "STAGE2_SOURCE": args.stage2_source,
         "STAGE2_BS_PATH": stage2_bs_path,
         "STAGE2_SEED_SURF_PATH": stage2_seed_surf_path,
