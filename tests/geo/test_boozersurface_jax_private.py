@@ -2544,7 +2544,7 @@ class TestBoozerSurfaceJAXClassPrivate:
     @PRIVATE_OPTIMIZER_RUNTIME
     @REQUIRES_PRIVATE_LIMITED_MEMORY_RUNTIME
     def test_run_code_ondevice_limited_memory_runs_without_monkeypatch(self):
-        """limited_memory=True must run lbfgs-ondevice and gate failed polish."""
+        """limited_memory=True must run lbfgs-ondevice and keep Newton polish authoritative."""
         booz = _make_mock_boozer_surface()
         booz.options["optimizer_backend"] = "ondevice"
         booz.options["limited_memory"] = True
@@ -2557,16 +2557,19 @@ class TestBoozerSurfaceJAXClassPrivate:
         assert res["type"] == "ls"
         assert np.isfinite(res["fun"])
         assert pre_newton["optimizer_method"] == "lbfgs-ondevice"
+        assert pre_newton["success"] is False
         assert np.max(np.abs(np.asarray(pre_newton["gradient"]))) < 1.0e-6
         assert np.all(np.isfinite(np.asarray(res["jacobian"])))
-        assert res["success"] is False
-        assert res["primal_success"] is False
-        assert res["adjoint_linear_solve_available"] is False
+        assert res["success"] is True
+        assert res["primal_success"] is True
+        assert res["adjoint_linear_solve_available"] is True
         assert res["PLU"] is not None
         assert bool(np.asarray(res["hessian_materialized"])) is True
         assert res["dense_linear_solve_factors_available"] is True
         assert res["linear_solve_backend"] == "dense-plu-shared"
         assert callable(res["vjp"])
         assert res["optimizer_method"] == "lbfgs-ondevice"
-        with pytest.raises(RuntimeError, match="no successful solve state"):
-            booz.get_solved_runtime_state()
+        solved_state = booz.get_solved_runtime_state()
+        np.testing.assert_allclose(
+            np.asarray(solved_state.sdofs), np.asarray(res["sdofs"])
+        )

@@ -21,6 +21,8 @@ __all__ = ["PoloidalFieldJAX"]
 class PoloidalFieldJAX(MagneticField):
     """JAX-backed poloidal field, drop-in for :class:`simsopt.field.PoloidalField`."""
 
+    _simsopt_jax_native_field = True
+
     def __init__(self, R0, B0, q):
         MagneticField.__init__(self)
         self.R0 = float(R0)

@@ -1,26 +1,38 @@
 import numpy as np
-from .curve import JaxCurve, jnp
+from .curve import JaxCurve, _as_runtime_float64_ref as _as_runtime_float64, jnp
 from math import gcd
 
 __all__ = ["CurveXYZFourierSymmetries"]
 
+_TWO_PI = 2.0 * np.pi
+
 
 def jaxXYZFourierSymmetriescurve_pure(dofs, quadpoints, order, nfp, stellsym, ntor):
-    theta, m = jnp.meshgrid(quadpoints, jnp.arange(order + 1), indexing="ij")
+    # Build mode-number / scalar tensors on-device so the kernel stays clean
+    # under ``JAX_TRANSFER_GUARD=disallow``. Python literal multiplications
+    # like ``2 * jnp.pi * nfp`` would otherwise trigger implicit host-to-device
+    # transfers of the materialised scalar.
+    two_pi = _as_runtime_float64(_TWO_PI, reference=quadpoints)
+    nfp_scalar = _as_runtime_float64(float(nfp), reference=quadpoints)
+    ntor_scalar = _as_runtime_float64(float(ntor), reference=quadpoints)
+    modes = _as_runtime_float64(
+        np.arange(order + 1, dtype=np.float64), reference=quadpoints
+    )
+
+    theta = jnp.expand_dims(quadpoints, axis=1)  # (N, 1)
+    m_row = jnp.expand_dims(modes, axis=0)  # (1, order+1)
+    angle_full = two_pi * nfp_scalar * m_row * theta
+    cos_full = jnp.cos(angle_full)
+    sin_tail = jnp.sin(angle_full[:, 1:])
 
     if stellsym:
         xc = dofs[: order + 1]
         ys = dofs[order + 1 : 2 * order + 1]
         zs = dofs[2 * order + 1 :]
 
-        xhat = np.sum(xc[None, :] * jnp.cos(2 * jnp.pi * nfp * m * theta), axis=1)
-        yhat = np.sum(
-            ys[None, :] * jnp.sin(2 * jnp.pi * nfp * m[:, 1:] * theta[:, 1:]), axis=1
-        )
-
-        z = jnp.sum(
-            zs[None, :] * jnp.sin(2 * jnp.pi * nfp * m[:, 1:] * theta[:, 1:]), axis=1
-        )
+        xhat = jnp.sum(xc[None, :] * cos_full, axis=1)
+        yhat = jnp.sum(ys[None, :] * sin_tail, axis=1)
+        z = jnp.sum(zs[None, :] * sin_tail, axis=1)
     else:
         xc = dofs[0 : order + 1]
         xs = dofs[order + 1 : 2 * order + 1]
@@ -29,32 +41,22 @@ def jaxXYZFourierSymmetriescurve_pure(dofs, quadpoints, order, nfp, stellsym, nt
         zc = dofs[4 * order + 2 : 5 * order + 3]
         zs = dofs[5 * order + 3 :]
 
-        xhat = np.sum(
-            xc[None, :] * jnp.cos(2 * jnp.pi * nfp * m * theta), axis=1
-        ) + np.sum(
-            xs[None, :] * jnp.sin(2 * jnp.pi * nfp * m[:, 1:] * theta[:, 1:]), axis=1
+        xhat = jnp.sum(xc[None, :] * cos_full, axis=1) + jnp.sum(
+            xs[None, :] * sin_tail, axis=1
         )
-        yhat = np.sum(
-            yc[None, :] * jnp.cos(2 * jnp.pi * nfp * m * theta), axis=1
-        ) + np.sum(
-            ys[None, :] * jnp.sin(2 * jnp.pi * nfp * m[:, 1:] * theta[:, 1:]), axis=1
+        yhat = jnp.sum(yc[None, :] * cos_full, axis=1) + jnp.sum(
+            ys[None, :] * sin_tail, axis=1
         )
-
-        z = np.sum(
-            zc[None, :] * jnp.cos(2 * jnp.pi * nfp * m * theta), axis=1
-        ) + np.sum(
-            zs[None, :] * jnp.sin(2 * jnp.pi * nfp * m[:, 1:] * theta[:, 1:]), axis=1
+        z = jnp.sum(zc[None, :] * cos_full, axis=1) + jnp.sum(
+            zs[None, :] * sin_tail, axis=1
         )
 
-    angle = 2 * jnp.pi * quadpoints * ntor
-    x = jnp.cos(angle) * xhat - jnp.sin(angle) * yhat
-    y = jnp.sin(angle) * xhat + jnp.cos(angle) * yhat
-
-    gamma = jnp.zeros((len(quadpoints), 3))
-    gamma = gamma.at[:, 0].add(x)
-    gamma = gamma.at[:, 1].add(y)
-    gamma = gamma.at[:, 2].add(z)
-    return gamma
+    angle = two_pi * quadpoints * ntor_scalar
+    cos_angle = jnp.cos(angle)
+    sin_angle = jnp.sin(angle)
+    x = cos_angle * xhat - sin_angle * yhat
+    y = sin_angle * xhat + cos_angle * yhat
+    return jnp.stack((x, y, z), axis=1)
 
 
 class CurveXYZFourierSymmetries(JaxCurve):
@@ -109,7 +111,7 @@ class CurveXYZFourierSymmetries(JaxCurve):
             )
 
         if gcd(ntor, nfp) != 1:
-            raise Exception("nfp and ntor must be coprime")
+            raise ValueError("nfp and ntor must be coprime")
 
         self.order = order
         self.nfp = nfp
@@ -160,3 +162,21 @@ class CurveXYZFourierSymmetries(JaxCurve):
 
     def set_dofs_impl(self, dofs):
         self.coefficients[:] = dofs[:]
+
+    def to_spec(self):
+        """Return an immutable JAX ``CurveXYZFourierSymmetriesSpec``.
+
+        The spec captures the host-side ``(dofs, quadpoints, order, nfp,
+        stellsym, ntor)`` tuple so downstream JAX routes can consume the
+        curve without holding a reference to this mutable wrapper.
+        """
+        from ..jax_core import make_curve_xyzfouriersymmetries_spec
+
+        return make_curve_xyzfouriersymmetries_spec(
+            dofs=self.get_dofs(),
+            quadpoints=self.quadpoints,
+            order=self.order,
+            nfp=self.nfp,
+            stellsym=self.stellsym,
+            ntor=self.ntor,
+        )

@@ -37,6 +37,7 @@ from .specs import (
     CurveRZFourierSpec,
     CurveSpec,
     CurveXYZFourierSpec,
+    CurveXYZFourierSymmetriesSpec,
     OptimizableDofMapSpec,
     RotationSpec,
     ZeroRotationSpec,
@@ -167,6 +168,20 @@ def _curve_gamma_kernel(spec: CurveSpec, dofs=None):
             spec.ell,
             spec.R0,
             spec.r,
+        )
+    if spec_kind == "xyz_fourier_symmetries":
+        from simsopt.geo.curvexyzfouriersymmetries import (
+            jaxXYZFourierSymmetriescurve_pure,
+        )
+
+        spec = cast(CurveXYZFourierSymmetriesSpec, spec)
+        return lambda quadpoints: jaxXYZFourierSymmetriescurve_pure(
+            curve_dofs,
+            quadpoints,
+            spec.order,
+            spec.nfp,
+            spec.stellsym,
+            spec.ntor,
         )
     if spec_kind == "cws_fourier_rz":
         spec = cast(CurveCWSFourierRZSpec, spec)
@@ -707,6 +722,45 @@ def closed_curve_self_intersection_summary(
     )
     penalty = _explicit_scalar(0.5, reference=gamma) * deficit * deficit
     return minimum_distance, tolerance, penalty, minimum_distance < tolerance
+
+
+@jax.jit
+def pair_linking_number_pure(
+    gamma1: jax.Array,
+    gammadash1: jax.Array,
+    gamma2: jax.Array,
+    gammadash2: jax.Array,
+    dphi1: jax.Array,
+    dphi2: jax.Array,
+) -> jax.Array:
+    """Gauss linking-number contribution for a single ordered curve pair.
+
+    Mirrors the C++ ``compute_linking_number`` inner pair contribution at
+    ``src/simsoptpp/python_distance.cpp:181-211``. Inputs are the dense
+    quadrature samples (``gamma``/``gammadash``) and the per-curve
+    quadrature step (``dphi``). The returned value is the rounded
+    absolute Gauss integral divided by ``4 * pi`` and is a non-negative
+    integer JAX scalar.
+
+    The kernel is pure and stateless; the host-side aggregator in
+    ``LinkingNumber.J`` iterates curve pairs and sums the integer
+    contributions.
+    """
+    gamma1 = _as_explicit_float64(gamma1)
+    gammadash1 = _as_explicit_float64(gammadash1, reference=gamma1)
+    gamma2 = _as_explicit_float64(gamma2, reference=gamma1)
+    gammadash2 = _as_explicit_float64(gammadash2, reference=gamma1)
+    dphi1 = _as_explicit_float64(dphi1, reference=gamma1)
+    dphi2 = _as_explicit_float64(dphi2, reference=gamma1)
+    difference = gamma1[:, None, :] - gamma2[None, :, :]
+    dr = jnp.linalg.norm(difference, axis=-1)
+    cross = jnp.cross(gammadash2[None, :, :], difference, axis=-1)
+    det = jnp.sum(gammadash1[:, None, :] * cross, axis=-1)
+    inv_dr3 = jnp.where(dr > 0, dr ** (-3), _explicit_scalar(0.0, reference=gamma1))
+    total = jnp.sum(det * inv_dr3)
+    four_pi = _explicit_scalar(4.0 * float(np.pi), reference=gamma1)
+    value = jnp.round(jnp.abs(total * dphi1 * dphi2) / four_pi)
+    return value.astype(jnp.int32)
 
 
 def curve_gamma_and_dash_from_spec(spec: CurveSpec):

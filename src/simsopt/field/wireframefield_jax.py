@@ -44,6 +44,8 @@ class WireframeFieldJAX(MagneticField):
     ``simsoptpp.WireframeField``.
     """
 
+    _simsopt_jax_native_field = True
+
     def __init__(self, wframe):
         MagneticField.__init__(self)
         self.wireframe = wframe

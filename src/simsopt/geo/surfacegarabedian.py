@@ -9,7 +9,7 @@ from .surfacerzfourier import SurfaceRZFourier
 
 logger = logging.getLogger(__name__)
 
-__all__ = ['SurfaceGarabedian']
+__all__ = ["SurfaceGarabedian"]
 
 
 class SurfaceGarabedian(sopp.Surface, Surface):
@@ -45,15 +45,24 @@ class SurfaceGarabedian(sopp.Surface, Surface):
         quadpoints_phi: Set this to a list or 1D array to set the :math:`\phi_j` grid points directly.
         quadpoints_theta: Set this to a list or 1D array to set the :math:`\theta_j` grid points directly.
     """
+
     mmin = Integer(max_value=0)
     mmax = Integer(min_value=1)
     nfp = Integer()
     nmin = Integer()
     nmax = Integer()
 
-    def __init__(self, nfp=1, mmax=1, mmin=0, nmax=0, nmin=None,
-                 quadpoints_phi=None, quadpoints_theta=None,
-                 dofs=None):
+    def __init__(
+        self,
+        nfp=1,
+        mmax=1,
+        mmin=0,
+        nmax=0,
+        nmin=None,
+        quadpoints_phi=None,
+        quadpoints_theta=None,
+        dofs=None,
+    ):
         if nmin is None:
             nmin = -nmax
         # Perform some validation.
@@ -80,8 +89,7 @@ class SurfaceGarabedian(sopp.Surface, Surface):
         sopp.Surface.__init__(self, quadpoints_phi, quadpoints_theta)
         if dofs is None:
             Delta = np.zeros(self.shape)
-            Surface.__init__(self, x0=Delta.ravel(),
-                             names=self._make_dof_names())
+            Surface.__init__(self, x0=Delta.ravel(), names=self._make_dof_names())
         else:
             Surface.__init__(self, dofs=dofs)
 
@@ -94,22 +102,24 @@ class SurfaceGarabedian(sopp.Surface, Surface):
         names = []
         for m in range(self.mmin, self.mmax + 1):
             for n in range(self.nmin, self.nmax + 1):
-                names.append(f'Delta({m},{n})')
+                names.append(f"Delta({m},{n})")
         return names
 
     def __repr__(self):
-        return self.name + f" (nfp={self.nfp}, " + \
-            f"mmin={self.mmin}, mmax={self.mmax}" + \
-            f", nmin={self.nmin}, nmax={self.nmax})"
+        return (
+            f"{self.name} (nfp={self.nfp}, "
+            f"mmin={self.mmin}, mmax={self.mmax}, "
+            f"nmin={self.nmin}, nmax={self.nmax})"
+        )
 
     @property
     def Delta(self):
         return self.local_full_x.reshape(self.shape)
 
     @Delta.setter
-    def Delta(self, Delta):
-        assert (self.shape == Delta.shape)
-        self.local_full_x = Delta.flatten()
+    def Delta(self, delta):
+        assert self.shape == delta.shape
+        self.local_full_x = delta.flatten()
 
     def get_Delta(self, m, n):
         r"""
@@ -128,7 +138,7 @@ class SurfaceGarabedian(sopp.Surface, Surface):
         """
         Return a 1D numpy array with all the degrees of freedom.
         """
-        self.local_full_x
+        return self.local_full_x
 
     def set_dofs(self, x):
         """
@@ -136,10 +146,10 @@ class SurfaceGarabedian(sopp.Surface, Surface):
         """
         # Check whether any elements actually change:
         if np.all(np.abs(self.get_dofs() - np.array(x)) == 0):
-            logger.info('set_dofs called, but no dofs actually changed')
+            logger.info("set_dofs called, but no dofs actually changed")
             return
 
-        logger.info('set_dofs called, and at least one dof changed')
+        logger.info("set_dofs called, and at least one dof changed")
 
         self.local_full_x = x
 
@@ -156,13 +166,35 @@ class SurfaceGarabedian(sopp.Surface, Surface):
         fn = self.fix if fixed else self.unfix
         for m in range(mmin, mmax + 1):
             for n in range(nmin, nmax + 1):
-                fn(f'Delta({m},{n})')
+                fn(f"Delta({m},{n})")
+
+    def to_spec(self):
+        """Return an immutable JAX ``SurfaceGarabedianSpec`` for this surface.
+
+        The spec captures the flat Δ_{m,n} DOF buffer plus the
+        ``(nfp, mmin, mmax, nmin, nmax)`` shape so downstream JAX routes
+        can produce an equivalent ``SurfaceRZFourierSpec`` via
+        :func:`simsopt.jax_core.garabedian_to_rzfourier_spec` without
+        holding a reference to this mutable wrapper.
+        """
+        from ..jax_core import make_surface_garabedian_spec
+
+        return make_surface_garabedian_spec(
+            dofs=self.get_dofs(),
+            quadpoints_phi=self.quadpoints_phi,
+            quadpoints_theta=self.quadpoints_theta,
+            nfp=self.nfp,
+            mmin=self.mmin,
+            mmax=self.mmax,
+            nmin=self.nmin,
+            nmax=self.nmax,
+        )
 
     def to_RZFourier(self):
         """
         Return a SurfaceRZFourier object with the identical shape.
 
-        For a derivation of the transformation here, see 
+        For a derivation of the transformation here, see
         https://terpconnect.umd.edu/~mattland/assets/notes/toroidal_surface_parameterizations.pdf
         """
         mpol = int(np.max((1, self.mmax - 1, 1 - self.mmin)))
@@ -195,12 +227,13 @@ class SurfaceGarabedian(sopp.Surface, Surface):
         https://terpconnect.umd.edu/~mattland/assets/notes/toroidal_surface_parameterizations.pdf
         """
         if not surf.stellsym:
-            raise RuntimeError('Non-stellarator-symmetric SurfaceGarabedian '
-                               'objects have not been implemented')
+            raise RuntimeError(
+                "Non-stellarator-symmetric SurfaceGarabedian "
+                "objects have not been implemented"
+            )
         mmax = surf.mpol + 1
         mmin = np.min((0, 1 - surf.mpol))
-        s = cls(nfp=surf.nfp, mmin=mmin, mmax=mmax,
-                nmin=-surf.ntor, nmax=surf.ntor)
+        s = cls(nfp=surf.nfp, mmin=mmin, mmax=mmax, nmin=-surf.ntor, nmax=surf.ntor)
         for n in range(-surf.ntor, surf.ntor + 1):
             for m in range(mmin, mmax + 1):
                 Delta = 0
@@ -217,9 +250,9 @@ class SurfaceGarabedian(sopp.Surface, Surface):
         Compute the surface area and the volume enclosed by the surface.
         """
         if self.new_x:
-            logger.info('Running calculation of area and volume')
+            logger.info("Running calculation of area and volume")
         else:
-            logger.info('area_volume called, but no need to recalculate')
+            logger.info("area_volume called, but no need to recalculate")
             return
 
         self.new_x = False
@@ -243,6 +276,8 @@ class SurfaceGarabedian(sopp.Surface, Surface):
         self.area_volume()
         return self._volume
 
-    return_fn_map = {'area': area,
-                     'volume': volume,
-                     'aspect-ratio': Surface.aspect_ratio}
+    return_fn_map = {
+        "area": area,
+        "volume": volume,
+        "aspect-ratio": Surface.aspect_ratio,
+    }

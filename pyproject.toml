@@ -162,4 +162,5 @@ markers = [
     "stage2: Stage 2 optimization tests and probes",
     "boozer: BoozerSurface and Boozer optimizer tests",
     "parity_census: derivative-input bit-identity census tests",
+    "jax_contract: pins external (JAX) library behaviour rather than simsopt code",
 ]

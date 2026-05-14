@@ -364,11 +364,27 @@ def _hostify_optimizer_tree(value):
     return jax.tree_util.tree_map(_hostify_optimizer_leaf, value)
 
 
+_FLAT_OPTIMIZER_REJECTED_DTYPE_KINDS = frozenset("MmOSU")
+
+
+def _is_supported_flat_optimizer_array(value) -> bool:
+    dtype = value.dtype
+    dtype_kind = getattr(dtype, "kind", None)
+    if dtype_kind in _FLAT_OPTIMIZER_REJECTED_DTYPE_KINDS:
+        return False
+    return value.ndim == 1 and (
+        jax.dtypes.issubdtype(dtype, jnp.number)
+        or jax.dtypes.issubdtype(dtype, jnp.bool_)
+    )
+
+
 def _is_flat_optimizer_vector(x0) -> bool:
     if isinstance(x0, (jax.Array, np.ndarray)):
-        return x0.ndim == 1
+        return _is_supported_flat_optimizer_array(x0)
     if isinstance(x0, (list, tuple)):
-        return all(isinstance(item, (int, float, np.generic)) for item in x0)
+        if not all(isinstance(item, (int, float, np.generic)) for item in x0):
+            return False
+        return _is_supported_flat_optimizer_array(np.asarray(x0))
     return False
 
 

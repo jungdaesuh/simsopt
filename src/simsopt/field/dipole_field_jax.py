@@ -194,6 +194,8 @@ class DipoleFieldJAX(MagneticField):
         R0: Major radius used by the ``"toroidal"`` coordinate flag.
     """
 
+    _simsopt_jax_native_field = True
+
     def __init__(
         self,
         dipole_grid,

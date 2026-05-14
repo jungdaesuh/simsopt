@@ -1229,6 +1229,35 @@ class LinkingNumber(Optimizable):
         """
 
     def J(self):
+        if is_jax_backend():
+            raise_if_target_lane_bypass("LinkingNumber.J")
+            from ..jax_core.curve_geometry import pair_linking_number_pure
+
+            total = 0
+            for p in range(1, len(self.curves)):
+                gamma_p = _as_jax_float64(self.curves[p].gamma())
+                gammadash_p = _as_jax_float64(self.curves[p].gammadash())
+                if self.downsample != 1:
+                    gamma_p = gamma_p[:: self.downsample]
+                    gammadash_p = gammadash_p[:: self.downsample]
+                dphi_p = _as_jax_float64(self.dphis[p])
+                for q in range(p):
+                    gamma_q = _as_jax_float64(self.curves[q].gamma())
+                    gammadash_q = _as_jax_float64(self.curves[q].gammadash())
+                    if self.downsample != 1:
+                        gamma_q = gamma_q[:: self.downsample]
+                        gammadash_q = gammadash_q[:: self.downsample]
+                    dphi_q = _as_jax_float64(self.dphis[q])
+                    contribution = pair_linking_number_pure(
+                        gamma_p,
+                        gammadash_p,
+                        gamma_q,
+                        gammadash_q,
+                        dphi_p,
+                        dphi_q,
+                    )
+                    total += int(contribution)
+            return total
         return sopp.compute_linking_number(
             [c.gamma() for c in self.curves],
             [c.gammadash() for c in self.curves],

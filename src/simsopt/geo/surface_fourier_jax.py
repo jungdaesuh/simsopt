@@ -119,11 +119,21 @@ def _zeros(shape, dtype):
 
 
 _TWO_PI_HOST = np.float64(2.0 * np.pi)
+_ONE_HOST = np.float64(1.0)
+_HALF_HOST = np.float64(0.5)
 _BASIS_SELECTORS3_HOST = np.eye(3, dtype=np.float64)
 
 
 def _two_pi(reference):
     return _as_runtime_float64(_TWO_PI_HOST, reference=reference)
+
+
+def _one(reference):
+    return _as_runtime_float64(_ONE_HOST, reference=reference)
+
+
+def _half(reference):
+    return _as_runtime_float64(_HALF_HOST, reference=reference)
 
 
 def _basis_selector(index: int, *, reference):
@@ -315,6 +325,180 @@ def _eval_hat_paired(V, W, coeffs):
     return jnp.sum((V @ coeffs.T) * W, axis=1)
 
 
+# ---------------------------------------------------------------------------
+# BC enforcer for SurfaceXYZTensorFourier ``clamped_dims`` (CPU parity helper)
+# ---------------------------------------------------------------------------
+#
+# The C++ ``SurfaceXYZTensorFourier`` multiplies basis functions on the
+# ``(m <= mpol, n <= ntor)`` cos-cos block by
+# ``E(phi, theta) = sin(nfp*phi/2)^2 + sin(theta/2)^2`` whenever
+# ``clamped_dims[dim]`` is true for that Cartesian component (see
+# ``src/simsoptpp/surfacexyztensorfourier.h:903-913``). The JAX kernel
+# computes the unclamped hat first, then adds a correction term
+# ``hat_block * (E - 1)`` for each clamped dim, where ``hat_block`` is
+# the sub-evaluation over the cos-cos coefficient quadrant only.
+
+
+def _bc_enforcer_angles(quadpoints_phi, quadpoints_theta, nfp):
+    qp = _as_jax_float64(quadpoints_phi)
+    qt = _as_jax_float64(quadpoints_theta)
+    two_pi_phi = _two_pi(qp)
+    two_pi_theta = _two_pi(qt)
+    nfp_f = _as_jax_float64(nfp)
+    phi_arg = nfp_f * (two_pi_phi * qp) * _half(qp)
+    theta_arg = (two_pi_theta * qt) * _half(qt)
+    return phi_arg, theta_arg, nfp_f, two_pi_phi, two_pi_theta
+
+
+def _bc_enforcer_grid(quadpoints_phi, quadpoints_theta, nfp):
+    """Return ``E(phi, theta) = sin(nfp*phi/2)^2 + sin(theta/2)^2``.
+
+    Shape: ``(nphi, ntheta)``. The arguments are the C++
+    quadpoints_phi/theta in [0, 1); the function uses
+    ``phi = 2*pi*quadpoints_phi`` internally to match the
+    ``cache_enforcer`` build at
+    ``src/simsoptpp/surfacexyztensorfourier.h:889-898``.
+    """
+    phi_arg, theta_arg, _, _, _ = _bc_enforcer_angles(
+        quadpoints_phi, quadpoints_theta, nfp
+    )
+    sin_phi_half = jnp.sin(phi_arg)
+    sin_theta_half = jnp.sin(theta_arg)
+    return (sin_phi_half * sin_phi_half)[:, None] + (sin_theta_half * sin_theta_half)[
+        None, :
+    ]
+
+
+def _bc_enforcer_grid_with_derivatives(quadpoints_phi, quadpoints_theta, nfp):
+    """Return the BC enforcer plus derivatives w.r.t. normalized phi/theta."""
+    phi_arg, theta_arg, nfp_f, two_pi_phi, two_pi_theta = _bc_enforcer_angles(
+        quadpoints_phi, quadpoints_theta, nfp
+    )
+    sin_phi_half = jnp.sin(phi_arg)
+    sin_theta_half = jnp.sin(theta_arg)
+    enforcer = (sin_phi_half * sin_phi_half)[:, None] + (
+        sin_theta_half * sin_theta_half
+    )[None, :]
+
+    dphi_term = jnp.sin(phi_arg + phi_arg) * nfp_f * two_pi_phi * _half(phi_arg)
+    dtheta_term = jnp.sin(theta_arg + theta_arg) * two_pi_theta * _half(theta_arg)
+    zero_phi = sin_phi_half - sin_phi_half
+    zero_theta = sin_theta_half - sin_theta_half
+    d_enforcer_dphi = dphi_term[:, None] + zero_theta[None, :]
+    d_enforcer_dtheta = zero_phi[:, None] + dtheta_term[None, :]
+    return enforcer, d_enforcer_dphi, d_enforcer_dtheta
+
+
+def _bc_enforcer_grid_lin(quadpoints_phi, quadpoints_theta, nfp):
+    """Paired-point variant of :func:`_bc_enforcer_grid`. Shape: ``(npairs,)``."""
+    phi_arg, theta_arg, _, _, _ = _bc_enforcer_angles(
+        _as_jax_float64(quadpoints_phi).reshape(-1),
+        _as_jax_float64(quadpoints_theta).reshape(-1),
+        nfp,
+    )
+    sin_phi_half = jnp.sin(phi_arg)
+    sin_theta_half = jnp.sin(theta_arg)
+    return sin_phi_half * sin_phi_half + sin_theta_half * sin_theta_half
+
+
+def _cos_cos_block_mask(coeffs, mpol, ntor):
+    mask = np.zeros(tuple(int(dim) for dim in coeffs.shape), dtype=np.float64)
+    mask[: int(mpol) + 1, : int(ntor) + 1] = 1.0
+    return _as_runtime_float64(mask, reference=coeffs)
+
+
+def _eval_hat_block(V, W, coeffs, mpol, ntor):
+    """Sub-evaluation over the ``(m <= mpol, n <= ntor)`` cos-cos block.
+
+    The cos-cos block sits in the first ``(mpol + 1, ntor + 1)``
+    sub-matrix of ``coeffs`` and corresponds to the first ``mpol + 1``
+    columns of ``W`` and the first ``ntor + 1`` columns of ``V``.
+    """
+    return _eval_hat(V, W, coeffs * _cos_cos_block_mask(coeffs, mpol, ntor))
+
+
+def _eval_hat_block_paired(V, W, coeffs, mpol, ntor):
+    return _eval_hat_paired(V, W, coeffs * _cos_cos_block_mask(coeffs, mpol, ntor))
+
+
+def _normalize_clamped_dims(clamped_dims):
+    """Validate the ``clamped_dims`` argument and coerce to a bool tuple."""
+    flags = tuple(bool(flag) for flag in clamped_dims)
+    if len(flags) != 3:
+        raise ValueError(
+            "clamped_dims must have exactly 3 boolean flags (x, y, z); "
+            f"got length {len(flags)}"
+        )
+    return flags
+
+
+def _apply_clamped_correction(hats, coeffs, clamped_dims, correction, eval_block):
+    return tuple(
+        hat + eval_block(coeff) * correction if clamped else hat
+        for hat, coeff, clamped in zip(hats, coeffs, clamped_dims)
+    )
+
+
+def _hats_with_clamping(
+    V,
+    W,
+    xc,
+    yc,
+    zc,
+    *,
+    quadpoints_phi,
+    quadpoints_theta,
+    nfp,
+    mpol,
+    ntor,
+    clamped_dims,
+):
+    """Return (xhat, yhat, zhat) on the dense grid with BC enforcer applied."""
+    hats = (_eval_hat(V, W, xc), _eval_hat(V, W, yc), _eval_hat(V, W, zc))
+    if not any(clamped_dims):
+        return hats
+    enforcer = _bc_enforcer_grid(quadpoints_phi, quadpoints_theta, nfp)
+    return _apply_clamped_correction(
+        hats,
+        (xc, yc, zc),
+        clamped_dims,
+        enforcer - _one(enforcer),
+        lambda coeff: _eval_hat_block(V, W, coeff, mpol, ntor),
+    )
+
+
+def _hats_with_clamping_paired(
+    V,
+    W,
+    xc,
+    yc,
+    zc,
+    *,
+    quadpoints_phi,
+    quadpoints_theta,
+    nfp,
+    mpol,
+    ntor,
+    clamped_dims,
+):
+    """Paired-point version of :func:`_hats_with_clamping`."""
+    hats = (
+        _eval_hat_paired(V, W, xc),
+        _eval_hat_paired(V, W, yc),
+        _eval_hat_paired(V, W, zc),
+    )
+    if not any(clamped_dims):
+        return hats
+    enforcer = _bc_enforcer_grid_lin(quadpoints_phi, quadpoints_theta, nfp)
+    return _apply_clamped_correction(
+        hats,
+        (xc, yc, zc),
+        clamped_dims,
+        enforcer - _one(enforcer),
+        lambda coeff: _eval_hat_block_paired(V, W, coeff, mpol, ntor),
+    )
+
+
 def _rotate_hat_components(quadpoints_phi, radial, toroidal):
     quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
     phi_angle = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax
@@ -331,7 +515,18 @@ def _rotate_hat_components_lin(quadpoints_phi, radial, toroidal):
     return radial * cphi - toroidal * sphi, radial * sphi + toroidal * cphi
 
 
-def surface_gamma(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp):
+def surface_gamma(
+    quadpoints_phi,
+    quadpoints_theta,
+    xc,
+    yc,
+    zc,
+    mpol,
+    ntor,
+    nfp,
+    *,
+    clamped_dims=(False, False, False),
+):
     """Evaluate surface Cartesian coordinates on the quadrature grid.
 
     Args:
@@ -341,44 +536,72 @@ def surface_gamma(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp)
         yc: (2*mpol+1, 2*ntor+1) coefficients for ŷ.
         zc: (2*mpol+1, 2*ntor+1) coefficients for z.
         mpol, ntor, nfp: integers (static).
+        clamped_dims: 3-tuple of Python bools selecting which Cartesian
+            components apply the C++ BC enforcer
+            ``E(phi, theta) = sin(nfp*phi/2)^2 + sin(theta/2)^2`` on the
+            ``(m <= mpol, n <= ntor)`` cos-cos coefficient block. Matches
+            ``SurfaceXYZTensorFourier::apply_bc_enforcer`` at
+            ``src/simsoptpp/surfacexyztensorfourier.h:903``.
 
     Returns:
         gamma: (nphi, ntheta, 3)  Cartesian [x, y, z].
     """
+    clamped_flags = _normalize_clamped_dims(clamped_dims)
     W, _ = build_theta_basis(quadpoints_theta, mpol)
     V, _ = build_phi_basis(quadpoints_phi, ntor, nfp)
 
-    xhat = _eval_hat(V, W, xc)  # (nphi, ntheta)
-    yhat = _eval_hat(V, W, yc)
-    z = _eval_hat(V, W, zc)
+    xhat, yhat, z = _hats_with_clamping(
+        V,
+        W,
+        xc,
+        yc,
+        zc,
+        quadpoints_phi=quadpoints_phi,
+        quadpoints_theta=quadpoints_theta,
+        nfp=nfp,
+        mpol=mpol,
+        ntor=ntor,
+        clamped_dims=clamped_flags,
+    )
 
-    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
-    phi_angle = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax  # (nphi,)
-    cphi = jnp.cos(phi_angle)[:, None]  # (nphi, 1)
-    sphi = jnp.sin(phi_angle)[:, None]
-
-    x = xhat * cphi - yhat * sphi
-    y = xhat * sphi + yhat * cphi
-
+    x, y = _rotate_hat_components(quadpoints_phi, xhat, yhat)
     return jnp.stack([x, y, z], axis=-1)
 
 
-def surface_gamma_lin(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp):
+def surface_gamma_lin(
+    quadpoints_phi,
+    quadpoints_theta,
+    xc,
+    yc,
+    zc,
+    mpol,
+    ntor,
+    nfp,
+    *,
+    clamped_dims=(False, False, False),
+):
     """Evaluate surface Cartesian coordinates at paired ``(phi[i], theta[i])``."""
+    clamped_flags = _normalize_clamped_dims(clamped_dims)
     quadpoints_phi_jax = _as_jax_float64(quadpoints_phi).reshape(-1)
     quadpoints_theta_jax = _as_jax_float64(quadpoints_theta).reshape(-1)
     W, _ = build_theta_basis(quadpoints_theta_jax, mpol)
     V, _ = build_phi_basis(quadpoints_phi_jax, ntor, nfp)
 
-    xhat = _eval_hat_paired(V, W, xc)
-    yhat = _eval_hat_paired(V, W, yc)
-    z = _eval_hat_paired(V, W, zc)
+    xhat, yhat, z = _hats_with_clamping_paired(
+        V,
+        W,
+        xc,
+        yc,
+        zc,
+        quadpoints_phi=quadpoints_phi_jax,
+        quadpoints_theta=quadpoints_theta_jax,
+        nfp=nfp,
+        mpol=mpol,
+        ntor=ntor,
+        clamped_dims=clamped_flags,
+    )
 
-    phi_angle = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax
-    cphi = jnp.cos(phi_angle)
-    sphi = jnp.sin(phi_angle)
-    x = xhat * cphi - yhat * sphi
-    y = xhat * sphi + yhat * cphi
+    x, y = _rotate_hat_components_lin(quadpoints_phi_jax, xhat, yhat)
     return jnp.stack([x, y, z], axis=-1)
 
 
@@ -391,8 +614,33 @@ def surface_gammadash1_lin(
     mpol,
     ntor,
     nfp,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate dγ/d(quadpoints_phi) at paired ``(phi[i], theta[i])``."""
+    # Derivatives w.r.t. quadrature parameters are obtained by autodiff
+    # through :func:`surface_gamma_lin`, which encodes the clamped BC
+    # enforcer multiplicatively. This keeps the analytic and clamped
+    # derivative formulas consistent with the C++ basis_fun_dphi/dtheta
+    # product rule at ``src/simsoptpp/surfacexyztensorfourier.h:966-1010``.
+    if any(_normalize_clamped_dims(clamped_dims)):
+
+        def _eval_single(qp_scalar):
+            qp_vec = jnp.atleast_1d(qp_scalar)
+            return surface_gamma_lin(
+                qp_vec,
+                quadpoints_theta,
+                xc,
+                yc,
+                zc,
+                mpol,
+                ntor,
+                nfp,
+                clamped_dims=clamped_dims,
+            )[0]
+
+        qp = _as_jax_float64(quadpoints_phi).reshape(-1)
+        return jax.vmap(jax.jacfwd(_eval_single))(qp)
     quadpoints_phi_jax = _as_jax_float64(quadpoints_phi).reshape(-1)
     quadpoints_theta_jax = _as_jax_float64(quadpoints_theta).reshape(-1)
     W, _ = build_theta_basis(quadpoints_theta_jax, mpol)
@@ -420,8 +668,28 @@ def surface_gammadash2_lin(
     mpol,
     ntor,
     nfp,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate dγ/d(quadpoints_theta) at paired ``(phi[i], theta[i])``."""
+    if any(_normalize_clamped_dims(clamped_dims)):
+
+        def _eval_single(qt_scalar):
+            qt_vec = jnp.atleast_1d(qt_scalar)
+            return surface_gamma_lin(
+                quadpoints_phi,
+                qt_vec,
+                xc,
+                yc,
+                zc,
+                mpol,
+                ntor,
+                nfp,
+                clamped_dims=clamped_dims,
+            )[0]
+
+        qt = _as_jax_float64(quadpoints_theta).reshape(-1)
+        return jax.vmap(jax.jacfwd(_eval_single))(qt)
     quadpoints_phi_jax = _as_jax_float64(quadpoints_phi).reshape(-1)
     quadpoints_theta_jax = _as_jax_float64(quadpoints_theta).reshape(-1)
     _, dW = build_theta_basis(quadpoints_theta_jax, mpol)
@@ -439,12 +707,132 @@ def surface_gammadash2_lin(
     return jnp.stack([dx, dy, dz_dtheta], axis=-1)
 
 
-def surface_gammadash1(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp):
+def _gammadash1_clamped(
+    quadpoints_phi,
+    quadpoints_theta,
+    xc,
+    yc,
+    zc,
+    mpol,
+    ntor,
+    nfp,
+    clamped_flags,
+):
+    """Differentiate :func:`surface_gamma` w.r.t. quadpoints_phi."""
+    W, _ = build_theta_basis(quadpoints_theta, mpol)
+    V, dV = build_phi_basis(quadpoints_phi, ntor, nfp)
+    enforcer, d_enforcer_dphi, _ = _bc_enforcer_grid_with_derivatives(
+        quadpoints_phi, quadpoints_theta, nfp
+    )
+    enforcer_correction = enforcer - _one(enforcer)
+    cx, cy, cz = clamped_flags
+
+    def _hat_and_dphi(coeffs, clamped_flag):
+        hat = _eval_hat(V, W, coeffs)
+        dhat_dphi = _eval_hat(dV, W, coeffs)
+        if not clamped_flag:
+            return hat, dhat_dphi
+        block_hat = _eval_hat_block(V, W, coeffs, mpol, ntor)
+        dblock_dphi = _eval_hat_block(dV, W, coeffs, mpol, ntor)
+        return (
+            hat + block_hat * enforcer_correction,
+            dhat_dphi + dblock_dphi * enforcer_correction + block_hat * d_enforcer_dphi,
+        )
+
+    xhat, dxhat_dphi = _hat_and_dphi(xc, cx)
+    yhat, dyhat_dphi = _hat_and_dphi(yc, cy)
+    _, dz_dphi = _hat_and_dphi(zc, cz)
+
+    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
+    two_pi = _two_pi(quadpoints_phi_jax)
+    phi_angle = two_pi * quadpoints_phi_jax
+    cphi = jnp.cos(phi_angle)[:, None]
+    sphi = jnp.sin(phi_angle)[:, None]
+
+    dx = (
+        dxhat_dphi * cphi
+        - xhat * (two_pi * sphi)
+        - dyhat_dphi * sphi
+        - yhat * (two_pi * cphi)
+    )
+    dy = (
+        dxhat_dphi * sphi
+        + xhat * (two_pi * cphi)
+        + dyhat_dphi * cphi
+        - yhat * (two_pi * sphi)
+    )
+    return jnp.stack([dx, dy, dz_dphi], axis=-1)
+
+
+def _gammadash2_clamped(
+    quadpoints_phi,
+    quadpoints_theta,
+    xc,
+    yc,
+    zc,
+    mpol,
+    ntor,
+    nfp,
+    clamped_flags,
+):
+    """Differentiate :func:`surface_gamma` w.r.t. quadpoints_theta (clamped path)."""
+    W, dW = build_theta_basis(quadpoints_theta, mpol)
+    V, _ = build_phi_basis(quadpoints_phi, ntor, nfp)
+    enforcer, _, d_enforcer_dtheta = _bc_enforcer_grid_with_derivatives(
+        quadpoints_phi, quadpoints_theta, nfp
+    )
+    enforcer_correction = enforcer - _one(enforcer)
+    cx, cy, cz = clamped_flags
+
+    def _hat_dtheta(coeffs, clamped_flag):
+        dhat_dtheta = _eval_hat(V, dW, coeffs)
+        if not clamped_flag:
+            return dhat_dtheta
+        block_hat = _eval_hat_block(V, W, coeffs, mpol, ntor)
+        dblock_dtheta = _eval_hat_block(V, dW, coeffs, mpol, ntor)
+        return (
+            dhat_dtheta
+            + dblock_dtheta * enforcer_correction
+            + block_hat * d_enforcer_dtheta
+        )
+
+    dxhat_dtheta = _hat_dtheta(xc, cx)
+    dyhat_dtheta = _hat_dtheta(yc, cy)
+    dz_dtheta = _hat_dtheta(zc, cz)
+    dx, dy = _rotate_hat_components(quadpoints_phi, dxhat_dtheta, dyhat_dtheta)
+    return jnp.stack([dx, dy, dz_dtheta], axis=-1)
+
+
+def surface_gammadash1(
+    quadpoints_phi,
+    quadpoints_theta,
+    xc,
+    yc,
+    zc,
+    mpol,
+    ntor,
+    nfp,
+    *,
+    clamped_dims=(False, False, False),
+):
     """Evaluate dγ/d(quadpoints_phi) — the toroidal tangent vector.
 
     Returns:
         gammadash1: (nphi, ntheta, 3).
     """
+    clamped_flags = _normalize_clamped_dims(clamped_dims)
+    if any(clamped_flags):
+        return _gammadash1_clamped(
+            quadpoints_phi,
+            quadpoints_theta,
+            xc,
+            yc,
+            zc,
+            mpol,
+            ntor,
+            nfp,
+            clamped_flags,
+        )
     W, _ = build_theta_basis(quadpoints_theta, mpol)
     V, dV = build_phi_basis(quadpoints_phi, ntor, nfp)
 
@@ -480,12 +868,36 @@ def surface_gammadash1(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor,
     return jnp.stack([dx, dy, dz], axis=-1)
 
 
-def surface_gammadash2(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp):
+def surface_gammadash2(
+    quadpoints_phi,
+    quadpoints_theta,
+    xc,
+    yc,
+    zc,
+    mpol,
+    ntor,
+    nfp,
+    *,
+    clamped_dims=(False, False, False),
+):
     """Evaluate dγ/d(quadpoints_theta) — the poloidal tangent vector.
 
     Returns:
         gammadash2: (nphi, ntheta, 3).
     """
+    clamped_flags = _normalize_clamped_dims(clamped_dims)
+    if any(clamped_flags):
+        return _gammadash2_clamped(
+            quadpoints_phi,
+            quadpoints_theta,
+            xc,
+            yc,
+            zc,
+            mpol,
+            ntor,
+            nfp,
+            clamped_flags,
+        )
     _, dW = build_theta_basis(quadpoints_theta, mpol)
     V, _ = build_phi_basis(quadpoints_phi, ntor, nfp)
 
@@ -493,16 +905,8 @@ def surface_gammadash2(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor,
     dyhat_dtheta = _eval_hat(V, dW, yc)
     dz_dtheta = _eval_hat(V, dW, zc)
 
-    quadpoints_phi_jax = _as_jax_float64(quadpoints_phi)
-    phi_angle = _two_pi(quadpoints_phi_jax) * quadpoints_phi_jax
-    cphi = jnp.cos(phi_angle)[:, None]
-    sphi = jnp.sin(phi_angle)[:, None]
-
-    dx = dxhat_dtheta * cphi - dyhat_dtheta * sphi
-    dy = dxhat_dtheta * sphi + dyhat_dtheta * cphi
-    dz = dz_dtheta
-
-    return jnp.stack([dx, dy, dz], axis=-1)
+    dx, dy = _rotate_hat_components(quadpoints_phi, dxhat_dtheta, dyhat_dtheta)
+    return jnp.stack([dx, dy, dz_dtheta], axis=-1)
 
 
 def surface_gammadash1dash1(
@@ -514,8 +918,34 @@ def surface_gammadash1dash1(
     mpol,
     ntor,
     nfp,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate d²γ/d(quadpoints_phi)²."""
+    if any(_normalize_clamped_dims(clamped_dims)):
+
+        def _eval_gd1(qp_full):
+            return surface_gammadash1(
+                qp_full,
+                quadpoints_theta,
+                xc,
+                yc,
+                zc,
+                mpol,
+                ntor,
+                nfp,
+                clamped_dims=clamped_dims,
+            )
+
+        qp = _as_jax_float64(quadpoints_phi)
+
+        def _diag(k1):
+            phi_slice = jnp.atleast_1d(qp[k1])
+            jac = jax.jacfwd(lambda v: _eval_gd1(v))(phi_slice)
+            # jac shape: (1, ntheta, 3, 1) -> (ntheta, 3)
+            return jac[0, :, :, 0]
+
+        return jax.vmap(_diag)(jnp.arange(qp.shape[0]))
     W, _ = build_theta_basis(quadpoints_theta, mpol)
     V, dV, ddV = _build_phi_basis_with_second(quadpoints_phi, ntor, nfp)
 
@@ -543,8 +973,34 @@ def surface_gammadash1dash2(
     mpol,
     ntor,
     nfp,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate d²γ/d(quadpoints_phi)d(quadpoints_theta)."""
+    if any(_normalize_clamped_dims(clamped_dims)):
+
+        def _eval_gd2(qp_full):
+            return surface_gammadash2(
+                qp_full,
+                quadpoints_theta,
+                xc,
+                yc,
+                zc,
+                mpol,
+                ntor,
+                nfp,
+                clamped_dims=clamped_dims,
+            )
+
+        qp = _as_jax_float64(quadpoints_phi)
+
+        def _diag(k1):
+            phi_slice = jnp.atleast_1d(qp[k1])
+            jac = jax.jacfwd(lambda v: _eval_gd2(v))(phi_slice)
+            # jac shape: (1, ntheta, 3, 1) -> (ntheta, 3)
+            return jac[0, :, :, 0]
+
+        return jax.vmap(_diag)(jnp.arange(qp.shape[0]))
     _, dW = build_theta_basis(quadpoints_theta, mpol)
     V, dV = build_phi_basis(quadpoints_phi, ntor, nfp)
 
@@ -570,8 +1026,34 @@ def surface_gammadash2dash2(
     mpol,
     ntor,
     nfp,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate d²γ/d(quadpoints_theta)²."""
+    if any(_normalize_clamped_dims(clamped_dims)):
+
+        def _eval_gd2(qt_full):
+            return surface_gammadash2(
+                quadpoints_phi,
+                qt_full,
+                xc,
+                yc,
+                zc,
+                mpol,
+                ntor,
+                nfp,
+                clamped_dims=clamped_dims,
+            )
+
+        qt = _as_jax_float64(quadpoints_theta)
+
+        def _diag(k2):
+            theta_slice = jnp.atleast_1d(qt[k2])
+            jac = jax.jacfwd(lambda v: _eval_gd2(v))(theta_slice)
+            # jac shape: (nphi, 1, 3, 1) -> (nphi, 3)
+            return jac[:, 0, :, 0]
+
+        return jnp.transpose(jax.vmap(_diag)(jnp.arange(qt.shape[0])), (1, 0, 2))
     _, _, ddW = _build_theta_basis_with_second(quadpoints_theta, mpol)
     V, _ = build_phi_basis(quadpoints_phi, ntor, nfp)
 
@@ -587,17 +1069,44 @@ def surface_gammadash2dash2(
     return jnp.stack([dx, dy, d2z_dtheta2], axis=-1)
 
 
-def surface_normal(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp):
+def surface_normal(
+    quadpoints_phi,
+    quadpoints_theta,
+    xc,
+    yc,
+    zc,
+    mpol,
+    ntor,
+    nfp,
+    *,
+    clamped_dims=(False, False, False),
+):
     """Compute the (unnormalized) surface normal n = gammadash1 × gammadash2.
 
     Returns:
         normal: (nphi, ntheta, 3).
     """
     gd1 = surface_gammadash1(
-        quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp
+        quadpoints_phi,
+        quadpoints_theta,
+        xc,
+        yc,
+        zc,
+        mpol,
+        ntor,
+        nfp,
+        clamped_dims=clamped_dims,
     )
     gd2 = surface_gammadash2(
-        quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp
+        quadpoints_phi,
+        quadpoints_theta,
+        xc,
+        yc,
+        zc,
+        mpol,
+        ntor,
+        nfp,
+        clamped_dims=clamped_dims,
     )
     return jnp.cross(gd1, gd2)
 
@@ -1509,6 +2018,8 @@ def surface_gamma_from_dofs(
     nfp,
     stellsym,
     scatter_indices=None,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate gamma as a pure function of the flat DOF vector.
 
@@ -1523,12 +2034,24 @@ def surface_gamma_from_dofs(
         stellsym: whether stellarator symmetry is active.
         scatter_indices: precomputed from :func:`stellsym_scatter_indices`.
             Required when ``stellsym=True``.
+        clamped_dims: optional 3-tuple of Python bools that mirrors the
+            CPU ``SurfaceXYZTensorFourier.clamped_dims`` BC enforcer.
 
     Returns:
         gamma: (nphi, ntheta, 3) Cartesian positions.
     """
     xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
-    return surface_gamma(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp)
+    return surface_gamma(
+        quadpoints_phi,
+        quadpoints_theta,
+        xc,
+        yc,
+        zc,
+        mpol,
+        ntor,
+        nfp,
+        clamped_dims=clamped_dims,
+    )
 
 
 def surface_gamma_lin_from_dofs(
@@ -1540,6 +2063,8 @@ def surface_gamma_lin_from_dofs(
     nfp,
     stellsym,
     scatter_indices=None,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate paired-point gamma as a pure function of the flat DOF vector."""
     xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
@@ -1552,6 +2077,7 @@ def surface_gamma_lin_from_dofs(
         mpol,
         ntor,
         nfp,
+        clamped_dims=clamped_dims,
     )
 
 
@@ -1564,11 +2090,21 @@ def surface_gammadash1_from_dofs(
     nfp,
     stellsym,
     scatter_indices=None,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate dγ/dφ as a pure function of DOFs (autodiff-compatible)."""
     xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
     return surface_gammadash1(
-        quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp
+        quadpoints_phi,
+        quadpoints_theta,
+        xc,
+        yc,
+        zc,
+        mpol,
+        ntor,
+        nfp,
+        clamped_dims=clamped_dims,
     )
 
 
@@ -1581,6 +2117,8 @@ def surface_gammadash1_lin_from_dofs(
     nfp,
     stellsym,
     scatter_indices=None,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate paired-point dγ/dφ as a pure function of DOFs."""
     xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
@@ -1593,6 +2131,7 @@ def surface_gammadash1_lin_from_dofs(
         mpol,
         ntor,
         nfp,
+        clamped_dims=clamped_dims,
     )
 
 
@@ -1605,11 +2144,21 @@ def surface_gammadash2_from_dofs(
     nfp,
     stellsym,
     scatter_indices=None,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate dγ/dθ as a pure function of DOFs (autodiff-compatible)."""
     xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
     return surface_gammadash2(
-        quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp
+        quadpoints_phi,
+        quadpoints_theta,
+        xc,
+        yc,
+        zc,
+        mpol,
+        ntor,
+        nfp,
+        clamped_dims=clamped_dims,
     )
 
 
@@ -1622,6 +2171,8 @@ def surface_gammadash2_lin_from_dofs(
     nfp,
     stellsym,
     scatter_indices=None,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate paired-point dγ/dθ as a pure function of DOFs."""
     xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
@@ -1634,6 +2185,7 @@ def surface_gammadash2_lin_from_dofs(
         mpol,
         ntor,
         nfp,
+        clamped_dims=clamped_dims,
     )
 
 
@@ -1646,11 +2198,21 @@ def surface_gammadash1dash1_from_dofs(
     nfp,
     stellsym,
     scatter_indices=None,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate d²γ/dφ² as a pure function of DOFs."""
     xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
     return surface_gammadash1dash1(
-        quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp
+        quadpoints_phi,
+        quadpoints_theta,
+        xc,
+        yc,
+        zc,
+        mpol,
+        ntor,
+        nfp,
+        clamped_dims=clamped_dims,
     )
 
 
@@ -1663,11 +2225,21 @@ def surface_gammadash1dash2_from_dofs(
     nfp,
     stellsym,
     scatter_indices=None,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate d²γ/dφdθ as a pure function of DOFs."""
     xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
     return surface_gammadash1dash2(
-        quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp
+        quadpoints_phi,
+        quadpoints_theta,
+        xc,
+        yc,
+        zc,
+        mpol,
+        ntor,
+        nfp,
+        clamped_dims=clamped_dims,
     )
 
 
@@ -1680,11 +2252,21 @@ def surface_gammadash2dash2_from_dofs(
     nfp,
     stellsym,
     scatter_indices=None,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate d²γ/dθ² as a pure function of DOFs."""
     xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
     return surface_gammadash2dash2(
-        quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp
+        quadpoints_phi,
+        quadpoints_theta,
+        xc,
+        yc,
+        zc,
+        mpol,
+        ntor,
+        nfp,
+        clamped_dims=clamped_dims,
     )
 
 
@@ -1697,10 +2279,22 @@ def surface_normal_from_dofs(
     nfp,
     stellsym,
     scatter_indices=None,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate unnormalized normal as a pure function of DOFs."""
     xc, yc, zc = _dofs_to_xyzc_any(dofs, mpol, ntor, stellsym, scatter_indices)
-    return surface_normal(quadpoints_phi, quadpoints_theta, xc, yc, zc, mpol, ntor, nfp)
+    return surface_normal(
+        quadpoints_phi,
+        quadpoints_theta,
+        xc,
+        yc,
+        zc,
+        mpol,
+        ntor,
+        nfp,
+        clamped_dims=clamped_dims,
+    )
 
 
 def surface_unitnormal_from_dofs(
@@ -1712,6 +2306,8 @@ def surface_unitnormal_from_dofs(
     nfp,
     stellsym,
     scatter_indices=None,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate unit normal as a pure function of DOFs."""
     return _unitnormal(
@@ -1724,6 +2320,7 @@ def surface_unitnormal_from_dofs(
             nfp,
             stellsym,
             scatter_indices,
+            clamped_dims=clamped_dims,
         )
     )
 
@@ -1737,6 +2334,8 @@ def surface_area_from_dofs(
     nfp,
     stellsym,
     scatter_indices=None,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate tensor-surface area as a pure function of DOFs."""
     return surface_area(
@@ -1749,6 +2348,7 @@ def surface_area_from_dofs(
             nfp,
             stellsym,
             scatter_indices,
+            clamped_dims=clamped_dims,
         )
     )
 
@@ -1762,6 +2362,8 @@ def surface_volume_from_dofs(
     nfp,
     stellsym,
     scatter_indices=None,
+    *,
+    clamped_dims=(False, False, False),
 ):
     """Evaluate tensor-surface volume as a pure function of DOFs."""
     gamma = surface_gamma_from_dofs(
@@ -1773,6 +2375,7 @@ def surface_volume_from_dofs(
         nfp,
         stellsym,
         scatter_indices,
+        clamped_dims=clamped_dims,
     )
     normal = surface_normal_from_dofs(
         dofs,
@@ -1783,6 +2386,7 @@ def surface_volume_from_dofs(
         nfp,
         stellsym,
         scatter_indices,
+        clamped_dims=clamped_dims,
     )
     return surface_volume(gamma, normal)
 

@@ -770,7 +770,12 @@ class TestSurfaceFourierSpecCppParity:
         pytest.importorskip("simsoptpp")
         pytest.importorskip("simsopt")
 
-    def test_tensor_surface_spec_rejects_clamped_dims(self):
+    def test_tensor_surface_spec_supports_clamped_dims(self):
+        """Regression: ``surface_spec()`` now constructs a spec for any
+        ``clamped_dims`` combination. Full CPU/JAX parity for each of the
+        8 combinations lives in
+        ``tests/geo/test_surface_xyz_tensor_clamped_jax.py``.
+        """
         from simsopt.geo import SurfaceXYZTensorFourier
 
         surface = SurfaceXYZTensorFourier(
@@ -783,8 +788,8 @@ class TestSurfaceFourierSpecCppParity:
             quadpoints_theta=np.linspace(0, 1.0, 6, endpoint=False),
         )
 
-        with pytest.raises(NotImplementedError, match="clamped_dims"):
-            surface.surface_spec()
+        spec = surface.surface_spec()
+        assert spec.clamped_dims == (True, False, False)
 
     @pytest.mark.parametrize("surface_cls_name", [
         "SurfaceXYZFourier",

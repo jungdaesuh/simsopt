@@ -30,6 +30,8 @@ class CircularCoilJAX(MagneticField):
     :mod:`simsopt.jax_core._elliptic`).
     """
 
+    _simsopt_jax_native_field = True
+
     def __init__(self, r0=0.1, center=(0, 0, 0), I=5e5 / np.pi, normal=(0, 0)):
         MagneticField.__init__(self)
         self.r0 = float(r0)

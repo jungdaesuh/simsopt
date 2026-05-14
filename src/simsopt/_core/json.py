@@ -615,6 +615,8 @@ def _coerce_decoded_spec_field(classname: str, key: str, value: object) -> objec
         return tuple(str(label) for label in value)
     if classname == "SingleStageSeedSpec" and key == "hardware_constants":
         return tuple((str(label), float(val)) for label, val in value)
+    if classname == "SurfaceXYZTensorFourierSpec" and key == "clamped_dims":
+        return tuple(bool(flag) for flag in value)
     return value
 
 
@@ -1009,6 +1011,8 @@ class _SpecGraphReader:
                 ntor=int(data["ntor"]),
             )
         if classname == "SurfaceXYZTensorFourierSpec":
+            clamped_dims_data = data.get("clamped_dims", (False, False, False))
+            clamped_dims = tuple(bool(flag) for flag in clamped_dims_data)
             return make_surface_xyz_tensor_fourier_spec(
                 dofs=data["dofs"],
                 quadpoints_phi=data["quadpoints_phi"],
@@ -1017,6 +1021,7 @@ class _SpecGraphReader:
                 stellsym=bool(data["stellsym"]),
                 mpol=int(data["mpol"]),
                 ntor=int(data["ntor"]),
+                clamped_dims=clamped_dims,
             )
         spec_cls = getattr(jax_specs, classname, None)
         if spec_cls is not None and _is_jax_core_spec_dataclass(spec_cls):

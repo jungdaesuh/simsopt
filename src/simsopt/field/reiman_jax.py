@@ -24,6 +24,8 @@ class ReimanJAX(MagneticField):
     :class:`simsopt.field.Reiman`.
     """
 
+    _simsopt_jax_native_field = True
+
     def __init__(self, iota0=0.15, iota1=0.38, k=None, epsilonk=None, m0=1):
         MagneticField.__init__(self)
         if k is None:

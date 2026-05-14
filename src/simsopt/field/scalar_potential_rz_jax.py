@@ -22,6 +22,8 @@ class ScalarPotentialRZMagneticFieldJAX(MagneticField):
     ``B`` and ``dB_by_dX`` evaluation then stays in pure JAX kernels.
     """
 
+    _simsopt_jax_native_field = True
+
     def __init__(self, phi_str: str):
         MagneticField.__init__(self)
         self.phi_str = str(phi_str)

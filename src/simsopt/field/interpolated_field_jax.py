@@ -155,6 +155,8 @@ class InterpolatedFieldJAX(MagneticField):
     :class:`MagneticField` carry over unchanged.
     """
 
+    _simsopt_jax_native_field = True
+
     def __init__(
         self,
         field,

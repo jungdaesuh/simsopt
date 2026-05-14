@@ -350,6 +350,9 @@ def _xla_flag_value(token: str, flag_name: str) -> bool | None:
 
 
 def _split_xla_flag_tokens(xla_flags: str | None) -> tuple[str, ...]:
+    # External-input parse contract: tokenize XLA_FLAGS env value via shlex.
+    # The narrow ValueError catch is a boundary parser (malformed user input
+    # returns an empty tuple), not a runtime error swallow.
     if not xla_flags:
         return ()
     try:
@@ -757,6 +760,9 @@ def _visible_cuda_device_selector() -> str | None:
 
 
 def _parse_visible_cuda_device_index() -> int | None:
+    # External-input parse contract: CUDA_VISIBLE_DEVICES env value.
+    # The narrow ValueError catch handles non-integer selectors (e.g. UUIDs
+    # or whitespace), not runtime errors.
     selector = _visible_cuda_device_selector()
     if selector is None:
         return None
@@ -812,6 +818,9 @@ def _detect_active_jax_cuda_device_selector() -> int | str | None:
 
 
 def _parse_nvidia_smi_indexed_value_row(raw_row: str) -> tuple[int, float] | None:
+    # External-input parse contract: a single nvidia-smi CSV row. The
+    # narrow ValueError catch handles malformed rows from the external
+    # tool, not runtime errors in this process.
     fields = [field.strip() for field in raw_row.split(",")]
     if len(fields) != 2:
         return None
@@ -832,6 +841,11 @@ def _query_gpu_metric_mb_from_nvidia_smi(
     ]
     if device_selector is not None:
         command.extend(["-i", str(device_selector)])
+    # External-tool availability boundary: nvidia-smi may be absent from
+    # PATH (FileNotFoundError) or exit non-zero on hosts without an
+    # NVIDIA driver (CalledProcessError). Both are expected absence
+    # signals, not runtime errors; return None so the caller can continue
+    # the ordered GPU-detection chain.
     try:
         result = subprocess.run(
             command,

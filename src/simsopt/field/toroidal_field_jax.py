@@ -28,6 +28,8 @@ class ToroidalFieldJAX(MagneticField):
     CPU ``ToroidalField`` remains the parity oracle.
     """
 
+    _simsopt_jax_native_field = True
+
     def __init__(self, R0, B0):
         MagneticField.__init__(self)
         self.R0 = float(R0)

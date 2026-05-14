@@ -93,7 +93,15 @@ class SurfaceXYZTensorFourier(sopp.SurfaceXYZTensorFourier, Surface):
           symmetry under rotation by :math:`\pi` about the x-axis.
         mpol: Maximum poloidal mode number included.
         ntor: Maximum toroidal mode number included, divided by ``nfp``.
-        clamped_dims: ???
+        clamped_dims: Length-3 list of booleans ``[cx, cy, cz]`` selecting
+            which Cartesian components (x, y, z) apply the boundary-condition
+            enforcer ``E(phi, theta) = sin(nfp*phi/2)^2 + sin(theta/2)^2``
+            to the basis functions whose ``(m, n)`` indices lie in the
+            ``(m <= mpol, n <= ntor)`` cos-cos block. The enforcer drives
+            those basis modes to zero at the magnetic axis (``phi = 0,
+            theta = 0``) without removing degrees of freedom. Default
+            ``[False, False, False]`` recovers the standard Fourier
+            tensor surface.
         quadpoints_phi: Set this to a list or 1D array to set the :math:`\phi_j` grid points directly.
         quadpoints_theta: Set this to a list or 1D array to set the :math:`\theta_j` grid points directly.
     """
@@ -185,12 +193,6 @@ class SurfaceXYZTensorFourier(sopp.SurfaceXYZTensorFourier, Surface):
         """Build an immutable JAX geometry spec from the current surface state."""
         from ..jax_core import make_surface_xyz_tensor_fourier_spec
 
-        if any(self.clamped_dims):
-            raise NotImplementedError(
-                "SurfaceXYZTensorFourier.surface_spec() does not support "
-                "clamped_dims yet; use native_cpu until a clamped-surface spec "
-                "and parity tests land."
-            )
         return make_surface_xyz_tensor_fourier_spec(
             dofs=self.get_dofs(),
             quadpoints_phi=self.quadpoints_phi,
@@ -199,6 +201,7 @@ class SurfaceXYZTensorFourier(sopp.SurfaceXYZTensorFourier, Surface):
             stellsym=self.stellsym,
             mpol=self.mpol,
             ntor=self.ntor,
+            clamped_dims=tuple(bool(flag) for flag in self.clamped_dims),
         )
 
     def to_spec(self):

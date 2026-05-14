@@ -155,6 +155,15 @@ def _scatter_indices_or_none(spec: SurfaceXYZTensorFourierSpec):
     return None
 
 
+def _clamped_dims_or_default(spec: SurfaceXYZTensorFourierSpec):
+    # ``SurfaceXYZTensorFourierSpec.clamped_dims`` is a declared dataclass
+    # field with a ``(False, False, False)`` default (specs.py), so the
+    # attribute is always present on a correctly-typed spec. Direct access
+    # surfaces a clear ``AttributeError`` if a wrong type ever leaks in,
+    # rather than silently returning the unclamped default.
+    return spec.clamped_dims
+
+
 def surface_xyz_tensor_fourier_gamma_from_spec(spec: SurfaceXYZTensorFourierSpec):
     return _surface_xyz_tensor_gamma_from_dofs(
         spec.dofs,
@@ -165,6 +174,7 @@ def surface_xyz_tensor_fourier_gamma_from_spec(spec: SurfaceXYZTensorFourierSpec
         spec.nfp,
         spec.stellsym,
         _scatter_indices_or_none(spec),
+        clamped_dims=_clamped_dims_or_default(spec),
     )
 
 
@@ -178,6 +188,7 @@ def surface_xyz_tensor_fourier_gammadash1_from_spec(spec: SurfaceXYZTensorFourie
         spec.nfp,
         spec.stellsym,
         _scatter_indices_or_none(spec),
+        clamped_dims=_clamped_dims_or_default(spec),
     )
 
 
@@ -191,6 +202,7 @@ def surface_xyz_tensor_fourier_gammadash2_from_spec(spec: SurfaceXYZTensorFourie
         spec.nfp,
         spec.stellsym,
         _scatter_indices_or_none(spec),
+        clamped_dims=_clamped_dims_or_default(spec),
     )
 
 
@@ -206,6 +218,7 @@ def surface_xyz_tensor_fourier_gammadash1dash1_from_spec(
         spec.nfp,
         spec.stellsym,
         _scatter_indices_or_none(spec),
+        clamped_dims=_clamped_dims_or_default(spec),
     )
 
 
@@ -221,6 +234,7 @@ def surface_xyz_tensor_fourier_gammadash1dash2_from_spec(
         spec.nfp,
         spec.stellsym,
         _scatter_indices_or_none(spec),
+        clamped_dims=_clamped_dims_or_default(spec),
     )
 
 
@@ -236,6 +250,7 @@ def surface_xyz_tensor_fourier_gammadash2dash2_from_spec(
         spec.nfp,
         spec.stellsym,
         _scatter_indices_or_none(spec),
+        clamped_dims=_clamped_dims_or_default(spec),
     )
 
 
@@ -256,6 +271,7 @@ def surface_xyz_tensor_fourier_unitnormal_from_spec(spec: SurfaceXYZTensorFourie
         spec.nfp,
         spec.stellsym,
         _scatter_indices_or_none(spec),
+        clamped_dims=_clamped_dims_or_default(spec),
     )
 
 

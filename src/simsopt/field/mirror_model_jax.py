@@ -23,6 +23,8 @@ class MirrorModelJAX(MagneticField):
     :class:`simsopt.field.MirrorModel`.
     """
 
+    _simsopt_jax_native_field = True
+
     def __init__(self, B0=6.51292, gamma=0.124904, Z_m=0.98):
         MagneticField.__init__(self)
         self.B0 = float(B0)

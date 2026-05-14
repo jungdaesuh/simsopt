@@ -50,6 +50,8 @@ class DommaschkJAX(MagneticField):
     the CPU class adds to the raw mode contribution.
     """
 
+    _simsopt_jax_native_field = True
+
     def __init__(self, mn=None, coeffs=None):
         MagneticField.__init__(self)
         if mn is None:
