@@ -251,7 +251,9 @@ def test_single_stage_curvature_threshold_policy_caps_at_100():
     assert single_stage_example.resolve_curvature_threshold(10.0) == pytest.approx(20.0)
     assert single_stage_example.resolve_curvature_threshold(30.0) == pytest.approx(30.0)
     assert single_stage_example.resolve_curvature_threshold(80.0) == pytest.approx(80.0)
-    assert single_stage_example.resolve_curvature_threshold(120.0) == pytest.approx(100.0)
+    assert single_stage_example.resolve_curvature_threshold(120.0) == pytest.approx(
+        100.0
+    )
 
 
 def _iota_unit_rhs_from_decision_size(n, *, optimize_G):
@@ -1950,9 +1952,7 @@ def _real_resolve_fd_baseline_outcome(real_resolve_fd_suite):
         surface_dofs=np.asarray(baseline_state.surface_dofs, dtype=float).copy(),
         iota=baseline_state.iota,
         G=baseline_state.G,
-        weight_inv_modB=bool(
-            baseline_state.result.get("weight_inv_modB", True)
-        ),
+        weight_inv_modB=bool(baseline_state.result.get("weight_inv_modB", True)),
     )
 
 
@@ -2385,7 +2385,18 @@ def test_make_boozer_setup_propagates_weight_inv_modB_to_cpu_and_jax():
 class TestBoozerResidualValue:
     """Both solvers produce small Boozer residuals at their solutions."""
 
-    def test_j_both_small(self, boozer_setup):
+    def test_j_both_below_health_ceiling(self, boozer_setup):
+        """Ceiling-only smoke coverage on the branch-divergent reduced fixture.
+
+        Asserts each lane's BoozerResidual.J() is below ``1e-3`` but does NOT
+        cross-compare the JAX and CPU values: this fixture is small-grid and
+        branch-divergent (the LS solver can land in different local minima
+        between CPU and JAX), so cross-lane parity here would be unreliable.
+
+        Cross-lane BoozerResidual value parity lives in the
+        ``branch-stable-resolve`` lane at
+        ``TestRealFixtureOndeviceM5Parity::test_real_fixture_ondevice_branch_stable_wrapper_values_match``.
+        """
         (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
             boozer_setup
         )
@@ -2401,12 +2412,24 @@ class TestBoozerResidualValue:
         assert j_jax < 1e-3, f"JAX BoozerResidual too large: {j_jax:.2e}"
         assert j_cpu < 1e-3, f"CPU BoozerResidual too large: {j_cpu:.2e}"
 
-    def test_value_path_matches_residual_helper_not_penalty_objective(
+    def test_value_routes_through_residual_helper_not_penalty_objective(
         self,
         boozer_setup,
         monkeypatch,
     ):
-        """BoozerResidualJAX value must use the CPU-parity residual helper."""
+        """Routing test: BoozerResidualJAX.J() takes the residual-helper path.
+
+        Monkeypatches the direct/adjoint gradient helpers and the penalty
+        objective to raise, then confirms ``BoozerResidualJAX.J()`` routes
+        through ``_boozer_residual_J_of_x_inner`` and not through
+        ``_boozer_penalty_objective``.
+
+        NOT a value-correctness check: the ``expected`` value is computed by
+        calling the *same* helper the wrapper is supposed to dispatch to, so
+        equality only proves routing.  Independent value parity against the
+        CPU reference oracle lives in the ``branch-stable-resolve`` lane at
+        ``TestRealFixtureOndeviceM5Parity::test_real_fixture_ondevice_branch_stable_wrapper_values_match``.
+        """
         import simsopt.geo.surfaceobjectives_jax as soj
 
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
@@ -2500,12 +2523,30 @@ class TestBoozerResidualValue:
         np.testing.assert_allclose(value, expected, rtol=1e-12, atol=1e-12)
         assert captured["value"] == value
 
+
+class TestBoozerResidualValueCaching:
+    """Internal-invariant tests: caching and boundary-cast contracts.
+
+    These are not value-correctness tests.  They guard performance
+    invariants (transform rebuild counts) and a known historical
+    boundary-cast bug class (a ``jax.Array`` leaking through
+    ``BoozerResidualJAX.constraint_weight`` instead of being cast to a
+    concrete Python ``float``).
+    """
+
     def test_direct_objective_value_and_grad_is_cached_per_instance(
         self,
         boozer_setup,
         monkeypatch,
     ):
-        """BoozerResidualJAX should not rebuild its direct objective transform."""
+        """Performance invariant: ``BoozerResidualJAX`` rebuilds its strict
+        value-and-grad transform exactly once per instance.
+
+        Counts factory invocations to verify the cached
+        ``_direct_objective_value_and_grad`` is reused across ``J()`` and
+        ``recompute_bell()`` calls.  Cache-count perf regression check, not
+        a physics-value test.
+        """
         import simsopt.geo.surfaceobjectives_jax as soj
 
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
@@ -2534,7 +2575,19 @@ class TestBoozerResidualValue:
         assert jr_jax._direct_objective_value_and_grad is cached_transform
 
     def test_constraint_weight_is_concrete_float_for_ls_surface(self, boozer_setup):
-        """LS-only BoozerResidualJAX should store a concrete penalty weight."""
+        """Boundary-cast contract: ``BoozerResidualJAX.constraint_weight`` is
+        a concrete Python ``float`` (NOT a ``jax.Array``).
+
+        The source-of-truth field on the LS Boozer surface payload is
+        ``constraint_weight: jax.Array`` (see
+        ``boozersurface_jax.py:551``), and the wrapper deliberately casts
+        to ``float`` at construction time
+        (``surfaceobjectives_jax.py:2163``).  Without this cast the wrapper
+        would re-emit a traced ``jax.Array`` through its public attribute,
+        breaking SciPy/NumPy consumers that read ``constraint_weight`` as a
+        host scalar (the same bug class as the JAX-scalar boundary issue
+        called out in CLAUDE.md).
+        """
         (_, _, _, _, bs_jax, _, booz_jax, _) = boozer_setup
 
         jr_jax = BoozerResidualJAX(booz_jax, bs_jax)
@@ -2553,7 +2606,13 @@ class TestBoozerResidualValue:
 class TestIotasValue:
     """IotasJAX.J() is finite at independently converged solutions."""
 
-    def test_j_finite(self, boozer_setup):
+    def test_j_finite_branch_divergent_smoke(self, boozer_setup):
+        """Branch-divergent small-grid coverage -- health-only finiteness check.
+
+        Cross-lane ``IotasJAX`` value parity belongs to the
+        ``branch-stable-resolve`` lane at
+        ``TestRealFixtureOndeviceM5Parity::test_real_fixture_ondevice_branch_stable_wrapper_values_match``.
+        """
         (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
             boozer_setup
         )
@@ -2576,13 +2635,20 @@ class TestIotasValue:
 
 
 class TestAdjointSolveConsistency:
-    """Validate the exposed adjoint linear system: H^T adj = dJ_ds.
+    """Validate adjoint residual self-consistency (Tier-4 gate, not vector parity).
 
-    This proves the adjoint pipeline is correct without relying on
-    re-solve FD (which branch-switches on small grids — confirmed
-    to happen on BOTH CPU and JAX solvers on this config).  This is
-    Tier 4 adjoint residual self-consistency evidence, not vector parity
-    with a dense PLU solve.
+    These tests assert ``||H^T adj - dJ_ds|| / ||dJ_ds|| < _ADJOINT_RESIDUAL_REL_TOL``
+    after the runtime operator solves for ``adj`` against the transpose
+    Hessian.  This is Tier-4 adjoint residual self-consistency evidence: it
+    proves the operator/solver pair is internally consistent (forward x
+    inverse is approximately identity on ``dJ_ds``) without relying on
+    re-solve FD, which branch-switches on the small-grid fixture on BOTH
+    CPU and JAX solvers.
+
+    It is intentionally NOT vector parity against an independent dense
+    reference: dense-vs-operator adjoint vector parity is covered by the
+    ``exact-well-conditioned-adjoint`` lane at
+    ``tests/geo/test_boozersurface_jax.py::test_exact_well_conditioned_operator_adjoint_matches_dense_reference_and_plu``.
     """
 
     def test_device_native_adjoint_solve_satisfies_runtime_operator(self, boozer_setup):
@@ -2596,7 +2662,9 @@ class TestAdjointSolveConsistency:
             optimize_G=booz_jax.res["G"] is not None,
         )
         adjoint, success = adjoint_state.solve_transpose_with_status(dJ_ds)
-        residual = np.asarray(adjoint_state.apply_transpose(adjoint) - dJ_ds, dtype=float)
+        residual = np.asarray(
+            adjoint_state.apply_transpose(adjoint) - dJ_ds, dtype=float
+        )
 
         assert bool(np.asarray(success))
         assert np.all(np.isfinite(np.asarray(adjoint, dtype=float)))
@@ -2627,8 +2695,15 @@ class TestAdjointSolveConsistency:
             f"Adjoint solve residual too large: {rel:.2e}"
         )
 
-    def test_vjp_produces_finite_derivative(self, boozer_setup):
-        """Streamed runtime VJPs produce a finite, non-zero Derivative."""
+    def test_vjp_runs_and_produces_finite_nonzero_derivative(self, boozer_setup):
+        """Smoke: streamed runtime VJP returns a finite, non-zero Derivative.
+
+        Health-only check.  Does NOT compare the VJP output against an
+        independent FD or analytic oracle, so it cannot catch sign flips or
+        magnitude drifts.  Vector-direction parity for the streamed
+        grouped-coil VJP path is covered separately by
+        ``test_coil_cotangent_projection_matches_explicit_sum``.
+        """
         (coils, surf_cpu, surf_jax, bs_cpu, bs_jax, booz_cpu, booz_jax, vol_cpu) = (
             boozer_setup
         )
@@ -4575,9 +4650,7 @@ def _assert_run_code_ls_parity(
     options=None,
     max_iota_diff=_RUN_CODE_LS_PARITY_DEFAULT_IOTA_TOL,
 ) -> dict[str, object]:
-    solver_options = dict(
-        _RUN_CODE_LS_PARITY_OPTIONS if options is None else options
-    )
+    solver_options = dict(_RUN_CODE_LS_PARITY_OPTIONS if options is None else options)
     surf_cpu = clone_tensor_surface(problem.surface)
     surf_jax = clone_tensor_surface(problem.surface)
     bs_cpu = BiotSavart(problem.coils)
@@ -5718,9 +5791,8 @@ class TestExactSolveCPUJAXParity:
         adjoint_state = exact_pair.booz_jax_exact.get_adjoint_runtime_state()
         assert adjoint_state.linear_solve_backend == "operator"
         assert adjoint_state.linear_solve_factors is None
-        assert (
-            adjoint_state.dense_linear_solve_factors_available
-            is bool(exact_pair.res_jax["PLU"] is not None)
+        assert adjoint_state.dense_linear_solve_factors_available is bool(
+            exact_pair.res_jax["PLU"] is not None
         )
 
         dJ_ds = _iota_unit_rhs_from_decision_size(
@@ -5852,9 +5924,7 @@ class TestIotasJAXResolveFD:
         (_, _, _, _, bs_jax, _, booz_jax, _) = setup
         baseline_state = _snapshot_boozer_setup_state(setup)
         baseline_iota = float(booz_jax.res["iota"])
-        baseline_G = (
-            None if booz_jax.res["G"] is None else float(booz_jax.res["G"])
-        )
+        baseline_G = None if booz_jax.res["G"] is None else float(booz_jax.res["G"])
         gradient = np.asarray(IotasJAX(booz_jax).dJ(), dtype=float)
         x0 = np.asarray(bs_jax.x, dtype=float).copy()
         directions = _real_resolve_fd_probe_directions(len(x0))[:3]
@@ -5921,15 +5991,13 @@ class TestIotasJAXResolveFD:
                     )
             max_rejected_directions = int(
                 np.floor(
-                    _REAL_RESOLVE_FD_MAX_DIRECTION_REJECTION_FRACTION
-                    * len(directions)
+                    _REAL_RESOLVE_FD_MAX_DIRECTION_REJECTION_FRACTION * len(directions)
                 )
             )
             assert rejected_directions <= max_rejected_directions, (
                 "IotasJAX controlled LS re-solve FD rejected too many near-zero "
                 f"directions: {rejected_directions}/{len(directions)} "
-                f"(max {max_rejected_directions}). "
-                + " | ".join(direction_failures)
+                f"(max {max_rejected_directions}). " + " | ".join(direction_failures)
             )
             required_validated_directions = len(directions) - rejected_directions
             assert validated_directions == required_validated_directions, (
@@ -6218,38 +6286,42 @@ class TestTraceableObjective:
         vessel_surface.set_rc(1, 0, 0.222)
         vessel_surface.set_zs(1, 0, 0.222)
         banana_curve = bs_jax.coils[-1].curve
-        outer_objective_config = single_stage_example.build_target_lane_outer_objective_config(
-            booz_jax,
-            bs_jax,
-            banana_curve,
-            vessel_surface,
-            non_qs_weight=1.0,
-            residual_weight=1000.0,
-            iota_weight=100.0,
-            length_weight=1.0,
-            length_target=1.7,
-            curve_curve_threshold=0.05,
-            curve_curve_weight=100.0,
-            curve_surface_threshold=0.02,
-            curve_surface_weight=1.0,
-            surface_vessel_threshold=0.04,
-            surface_vessel_weight=1000.0,
-            curvature_threshold=40.0,
-            curvature_weight=0.1,
+        outer_objective_config = (
+            single_stage_example.build_target_lane_outer_objective_config(
+                booz_jax,
+                bs_jax,
+                banana_curve,
+                vessel_surface,
+                non_qs_weight=1.0,
+                residual_weight=1000.0,
+                iota_weight=100.0,
+                length_weight=1.0,
+                length_target=1.7,
+                curve_curve_threshold=0.05,
+                curve_curve_weight=100.0,
+                curve_surface_threshold=0.02,
+                curve_surface_weight=1.0,
+                surface_vessel_threshold=0.04,
+                surface_vessel_weight=1000.0,
+                curvature_threshold=40.0,
+                curvature_weight=0.1,
+            )
         )
-        alm_config = single_stage_example.build_traceable_single_stage_alm_runtime_config(
-            constraint_names=single_stage_example.single_stage_alm_constraint_names(
+        alm_config = (
+            single_stage_example.build_traceable_single_stage_alm_runtime_config(
+                constraint_names=single_stage_example.single_stage_alm_constraint_names(
+                    alm_formulation=alm_formulation,
+                    include_surface_surface=True,
+                ),
                 alm_formulation=alm_formulation,
-                include_surface_surface=True,
-            ),
-            alm_formulation=alm_formulation,
-            distance_smoothing=0.005,
-            curvature_smoothing=0.05,
-            qs_threshold=3e-3,
-            boozer_threshold=1e-2,
-            iota_penalty_threshold=1e-4,
-            length_penalty_threshold=0.0,
-            banana_current_threshold=1.6e4,
+                distance_smoothing=0.005,
+                curvature_smoothing=0.05,
+                qs_threshold=3e-3,
+                boozer_threshold=1e-2,
+                iota_penalty_threshold=1e-4,
+                length_penalty_threshold=0.0,
+                banana_current_threshold=1.6e4,
+            )
         )
         runtime_bundle = make_traceable_single_stage_alm_runtime_bundle(
             booz_jax,
@@ -6335,9 +6407,7 @@ class TestTraceableObjective:
         )
         assert np.all(np.isfinite(np.asarray(gated_grad)))
 
-    def test_runtime_bundle_allows_strict_transfer_guard(
-        self, monkeypatch, request
-    ):
+    def test_runtime_bundle_allows_strict_transfer_guard(self, monkeypatch, request):
         """Traceable runtime bundle bootstrap must be strict-safe on CPU parity."""
         import simsopt.config as simsopt_config
         from simsopt.backend import invalidate_backend_cache
@@ -6428,27 +6498,31 @@ class TestTraceableObjective:
         vessel_surface.set_rc(0, 0, 1.2)
         vessel_surface.set_rc(1, 0, 0.15)
         vessel_surface.set_zs(1, 0, 0.15)
-        config = single_stage_example.build_traceable_single_stage_outer_objective_config(
-            booz_jax,
-            bs_jax,
-            banana_curve,
-            vessel_surface,
-            non_qs_weight=1.0,
-            residual_weight=1000.0,
-            iota_weight=100.0,
-            length_weight=5.0e-4,
-            length_target=length_target,
-            curve_curve_weight=100.0,
-            curve_curve_threshold=0.05,
-            curve_surface_weight=1.0,
-            curve_surface_threshold=0.02,
-            surface_vessel_weight=1000.0,
-            surface_vessel_threshold=0.04,
-            curvature_weight=0.1,
-            curvature_threshold=40.0,
+        config = (
+            single_stage_example.build_traceable_single_stage_outer_objective_config(
+                booz_jax,
+                bs_jax,
+                banana_curve,
+                vessel_surface,
+                non_qs_weight=1.0,
+                residual_weight=1000.0,
+                iota_weight=100.0,
+                length_weight=5.0e-4,
+                length_target=length_target,
+                curve_curve_weight=100.0,
+                curve_curve_threshold=0.05,
+                curve_surface_weight=1.0,
+                curve_surface_threshold=0.02,
+                surface_vessel_weight=1000.0,
+                surface_vessel_threshold=0.04,
+                curvature_weight=0.1,
+                curvature_threshold=40.0,
+            )
         )
         from simsopt.jax_core._math_utils import as_jax_float64
-        from simsopt.geo.surfaceobjectives_jax import make_traceable_objective_runtime_bundle
+        from simsopt.geo.surfaceobjectives_jax import (
+            make_traceable_objective_runtime_bundle,
+        )
 
         runtime_bundle = make_traceable_objective_runtime_bundle(
             booz_jax,
@@ -6461,9 +6535,7 @@ class TestTraceableObjective:
         host_coil_dofs = np.asarray(bs_jax.x.copy(), dtype=np.float64)
 
         host_value = runtime_bundle["host_objective"](host_coil_dofs)
-        host_value_vg, host_grad = runtime_bundle["host_value_and_grad"](
-            host_coil_dofs
-        )
+        host_value_vg, host_grad = runtime_bundle["host_value_and_grad"](host_coil_dofs)
 
         assert np.isfinite(host_value)
         assert np.isfinite(host_value_vg)
@@ -6738,24 +6810,26 @@ class TestTraceableObjective:
         vessel_surface.set_rc(1, 0, 0.222)
         vessel_surface.set_zs(1, 0, 0.222)
 
-        config = single_stage_example.build_traceable_single_stage_outer_objective_config(
-            booz_jax,
-            bs_jax,
-            banana_curve,
-            vessel_surface,
-            non_qs_weight=1.0,
-            residual_weight=1000.0,
-            iota_weight=100.0,
-            length_weight=5.0e-4,
-            length_target=length_target,
-            curve_curve_weight=100.0,
-            curve_curve_threshold=0.05,
-            curve_surface_weight=1.0,
-            curve_surface_threshold=0.02,
-            surface_vessel_weight=1000.0,
-            surface_vessel_threshold=0.04,
-            curvature_weight=0.1,
-            curvature_threshold=40.0,
+        config = (
+            single_stage_example.build_traceable_single_stage_outer_objective_config(
+                booz_jax,
+                bs_jax,
+                banana_curve,
+                vessel_surface,
+                non_qs_weight=1.0,
+                residual_weight=1000.0,
+                iota_weight=100.0,
+                length_weight=5.0e-4,
+                length_target=length_target,
+                curve_curve_weight=100.0,
+                curve_curve_threshold=0.05,
+                curve_surface_weight=1.0,
+                curve_surface_threshold=0.02,
+                surface_vessel_weight=1000.0,
+                surface_vessel_threshold=0.04,
+                curvature_weight=0.1,
+                curvature_threshold=40.0,
+            )
         )
 
         from simsopt.geo.surfaceobjectives_jax import make_traceable_objective
@@ -6847,27 +6921,31 @@ class TestTraceableObjective:
         vessel_surface.set_rc(1, 0, 0.15)
         vessel_surface.set_zs(1, 0, 0.15)
 
-        config = single_stage_example.build_traceable_single_stage_outer_objective_config(
-            booz_jax,
-            bs_jax,
-            banana_curve,
-            vessel_surface,
-            non_qs_weight=1.0,
-            residual_weight=1000.0,
-            iota_weight=100.0,
-            length_weight=5.0e-4,
-            length_target=length_target,
-            curve_curve_weight=100.0,
-            curve_curve_threshold=0.05,
-            curve_surface_weight=1.0,
-            curve_surface_threshold=0.02,
-            surface_vessel_weight=1000.0,
-            surface_vessel_threshold=0.04,
-            curvature_weight=0.1,
-            curvature_threshold=40.0,
+        config = (
+            single_stage_example.build_traceable_single_stage_outer_objective_config(
+                booz_jax,
+                bs_jax,
+                banana_curve,
+                vessel_surface,
+                non_qs_weight=1.0,
+                residual_weight=1000.0,
+                iota_weight=100.0,
+                length_weight=5.0e-4,
+                length_target=length_target,
+                curve_curve_weight=100.0,
+                curve_curve_threshold=0.05,
+                curve_surface_weight=1.0,
+                curve_surface_threshold=0.02,
+                surface_vessel_weight=1000.0,
+                surface_vessel_threshold=0.04,
+                curvature_weight=0.1,
+                curvature_threshold=40.0,
+            )
         )
 
-        from simsopt.geo.surfaceobjectives_jax import make_traceable_objective_runtime_bundle
+        from simsopt.geo.surfaceobjectives_jax import (
+            make_traceable_objective_runtime_bundle,
+        )
 
         runtime_bundle = make_traceable_objective_runtime_bundle(
             booz_jax,
@@ -6963,24 +7041,26 @@ class TestTraceableObjective:
         vessel_surface.set_rc(1, 0, 0.15)
         vessel_surface.set_zs(1, 0, 0.15)
 
-        config = single_stage_example.build_traceable_single_stage_outer_objective_config(
-            booz_jax,
-            bs_jax,
-            banana_curve,
-            vessel_surface,
-            non_qs_weight=1.0,
-            residual_weight=1000.0,
-            iota_weight=100.0,
-            length_weight=5.0e-4,
-            length_target=length_target,
-            curve_curve_weight=100.0,
-            curve_curve_threshold=0.05,
-            curve_surface_weight=1.0,
-            curve_surface_threshold=0.02,
-            surface_vessel_weight=1000.0,
-            surface_vessel_threshold=0.04,
-            curvature_weight=0.1,
-            curvature_threshold=40.0,
+        config = (
+            single_stage_example.build_traceable_single_stage_outer_objective_config(
+                booz_jax,
+                bs_jax,
+                banana_curve,
+                vessel_surface,
+                non_qs_weight=1.0,
+                residual_weight=1000.0,
+                iota_weight=100.0,
+                length_weight=5.0e-4,
+                length_target=length_target,
+                curve_curve_weight=100.0,
+                curve_curve_threshold=0.05,
+                curve_surface_weight=1.0,
+                curve_surface_threshold=0.02,
+                surface_vessel_weight=1000.0,
+                surface_vessel_threshold=0.04,
+                curvature_weight=0.1,
+                curvature_threshold=40.0,
+            )
         )
 
         _, IotasJAX, NonQuasiSymmetricRatioJAX = (
@@ -7092,24 +7172,26 @@ class TestTraceableObjective:
         vessel_surface.set_rc(1, 0, 0.15)
         vessel_surface.set_zs(1, 0, 0.15)
 
-        config = single_stage_example.build_traceable_single_stage_outer_objective_config(
-            booz_jax,
-            bs_jax,
-            banana_curve,
-            vessel_surface,
-            non_qs_weight=1.0,
-            residual_weight=1000.0,
-            iota_weight=100.0,
-            length_weight=5.0e-4,
-            length_target=length_target,
-            curve_curve_weight=100.0,
-            curve_curve_threshold=cc_dist,
-            curve_surface_weight=1.0,
-            curve_surface_threshold=cs_dist,
-            surface_vessel_weight=1000.0,
-            surface_vessel_threshold=ss_dist,
-            curvature_weight=0.1,
-            curvature_threshold=curvature_threshold,
+        config = (
+            single_stage_example.build_traceable_single_stage_outer_objective_config(
+                booz_jax,
+                bs_jax,
+                banana_curve,
+                vessel_surface,
+                non_qs_weight=1.0,
+                residual_weight=1000.0,
+                iota_weight=100.0,
+                length_weight=5.0e-4,
+                length_target=length_target,
+                curve_curve_weight=100.0,
+                curve_curve_threshold=cc_dist,
+                curve_surface_weight=1.0,
+                curve_surface_threshold=cs_dist,
+                surface_vessel_weight=1000.0,
+                surface_vessel_threshold=ss_dist,
+                curvature_weight=0.1,
+                curvature_threshold=curvature_threshold,
+            )
         )
         sync_accepted_step = (
             single_stage_example.build_single_stage_target_lane_accepted_step_sync(
@@ -7955,7 +8037,9 @@ class TestTraceableObjective:
         )
 
         scipy_x = np.asarray(scipy_result.x, dtype=np.dtype(dtype))
-        target_x = np.asarray(_host_metric_array(target_result.x), dtype=np.dtype(dtype))
+        target_x = np.asarray(
+            _host_metric_array(target_result.x), dtype=np.dtype(dtype)
+        )
         scipy_fun, scipy_grad = self._eval_traceable_value_and_grad_host(
             fun_vg,
             scipy_x,
@@ -7984,8 +8068,7 @@ class TestTraceableObjective:
             rtol=1.0e-10,
             atol=1.0e-12,
             err_msg=(
-                "SciPy endpoint gradient must re-evaluate through the shared "
-                "evaluator."
+                "SciPy endpoint gradient must re-evaluate through the shared evaluator."
             ),
         )
         np.testing.assert_allclose(
@@ -7994,8 +8077,7 @@ class TestTraceableObjective:
             rtol=1.0e-10,
             atol=1.0e-12,
             err_msg=(
-                "Target L-BFGS endpoint must re-evaluate through the shared "
-                "evaluator."
+                "Target L-BFGS endpoint must re-evaluate through the shared evaluator."
             ),
         )
         np.testing.assert_allclose(

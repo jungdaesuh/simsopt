@@ -55,7 +55,9 @@ LEGACY_STAGE2_UPGRADED_FIELDS = {
 }
 
 
-def extract_functions(module_path: Path, function_names: list[str], global_bindings: dict):
+def extract_functions(
+    module_path: Path, function_names: list[str], global_bindings: dict
+):
     tree = ast.parse(module_path.read_text(), filename=str(module_path))
     selected_nodes = [
         node
@@ -122,7 +124,7 @@ def load_single_stage_thresholded_physics_rerun_module():
     spec = importlib.util.spec_from_file_location(
         f"run_single_stage_thresholded_physics_alm_{uuid.uuid4().hex}",
         SINGLE_STAGE_THRESHOLDED_PHYSICS_RERUN_MODULE_PATH,
-        )
+    )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -183,7 +185,9 @@ def make_single_stage_thresholded_physics_rerun_args(**overrides):
 
 
 class SingleStageAlmIntegrationTests(unittest.TestCase):
-    def test_validate_banana_winding_surface_radius_enforces_coil_vessel_clearance(self):
+    def test_validate_banana_winding_surface_radius_enforces_coil_vessel_clearance(
+        self,
+    ):
         contracts_module = load_hardware_contracts_module()
 
         self.assertEqual(
@@ -193,7 +197,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "coil-to-vessel clearance contract"):
             contracts_module.validate_banana_winding_surface_radius(0.2201)
 
-    def test_single_stage_alm_inner_optimizer_contract_selects_target_only_for_alm(self):
+    def test_single_stage_alm_inner_optimizer_contract_selects_target_only_for_alm(
+        self,
+    ):
         from simsopt.geo.optimizer_jax import (
             ReferenceOptimizerContract,
             TargetOptimizerContract,
@@ -204,7 +210,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             ["resolve_single_stage_alm_inner_optimizer_contract"],
             {},
         )
-        resolve_contract = functions["resolve_single_stage_alm_inner_optimizer_contract"]
+        resolve_contract = functions[
+            "resolve_single_stage_alm_inner_optimizer_contract"
+        ]
         target_contract = TargetOptimizerContract(method="lbfgs-ondevice")
 
         self.assertIs(
@@ -310,13 +318,17 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         stage2_results = {"banana_surf_radius": 0.220}
 
         self.assertEqual(
-            functions["resolve_single_stage_banana_surface_radius"](args, stage2_results),
+            functions["resolve_single_stage_banana_surface_radius"](
+                args, stage2_results
+            ),
             0.220,
         )
 
         args = SimpleNamespace(banana_surf_radius=0.2201)
         with self.assertRaisesRegex(ValueError, "coil-to-vessel clearance contract"):
-            functions["resolve_single_stage_banana_surface_radius"](args, stage2_results)
+            functions["resolve_single_stage_banana_surface_radius"](
+                args, stage2_results
+            )
 
     def test_single_stage_load_stage2_results_upgrades_legacy_artifact_metadata(self):
         artifact_contracts_module = load_stage2_artifact_contracts_module()
@@ -356,6 +368,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         from simsopt.jax_core.curve_geometry import (
             closed_curve_self_intersection_summary,
         )
+        from simsopt.geo.surfacerzfourier import SurfaceRZFourier
+        from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
 
         helpers_dir = str(Path(__file__).resolve().parent)
         if helpers_dir not in sys.path:
@@ -388,6 +402,8 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 "closed_curve_self_intersection_summary": (
                     closed_curve_self_intersection_summary
                 ),
+                "SurfaceRZFourier": SurfaceRZFourier,
+                "SurfaceXYZTensorFourier": SurfaceXYZTensorFourier,
                 "surfrz_gamma_lin": surfrz_gamma_lin,
                 "surfxyztensor_gamma_lin": surfxyztensor_gamma_lin,
             },
@@ -531,7 +547,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["constraint_names"], ["curve_curve", "curve_surface"])
         self.assertEqual(payload["multipliers"], [0.5, 0.25])
         self.assertEqual(payload["history_length"], 1)
-        self.assertEqual(payload["latest_history_entry"]["constraint_values"], [0.1, 0.2])
+        self.assertEqual(
+            payload["latest_history_entry"]["constraint_values"], [0.1, 0.2]
+        )
         self.assertEqual(
             payload["latest_history_entry"]["solver_constraint_values"],
             [0.3, 0.4],
@@ -556,6 +574,32 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["final_stationarity_norm"], 0.15)
 
     def test_native_alm_target_lane_does_not_call_scipy_minimize(self):
+        """Native ALM target lane converges to the constrained KKT optimum.
+
+        Problem: minimize ``(x - 1)^2`` subject to ``x <= 0``. Feasibility
+        channel returns ``max(x, 0)``, so the feasible region is ``x <= 0``.
+
+        - Unconstrained minimum at ``x = 1`` is **infeasible**.
+        - Constrained optimum sits on the boundary at ``x = 0`` where the
+          constraint is **active**. From the KKT stationarity condition
+          ``2(x - 1) + mu = 0`` at ``x = 0`` the theoretical active
+          multiplier is ``mu = 2``.
+        - The **primal** objective ``(x - 1)^2`` *increases* along the path
+          ``x: 1.5 -> 0`` (from ``0.25`` to ``1.0``), so the test asserts
+          decrease of the **augmented-Lagrangian total**, not the primal.
+        - For this 1-D fixture the constraint is never feasible at
+          intermediate iterates, so the ALM dual-update branch never fires;
+          convergence happens via penalty growth (``rho`` increases each
+          outer iteration). The implementation projects multipliers via
+          ``max(0, mu + rho * c)``, so the test only asserts the multiplier
+          is finite and non-negative, not the theoretical ``mu = 2``
+          attained on a dual-update trajectory.
+
+        The asserted KKT-anchored facts replace the previous weak progress
+        gate (``result.x[0] < 1.5``), which accepted a single line-search
+        step.
+        """
+
         from simsopt.geo.optimizer_jax import (
             PRIVATE_OPTIMIZER_JAX_VERSION,
             TargetOptimizerContract,
@@ -563,18 +607,22 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         )
 
         if not private_optimizer_runtime_is_supported(PRIVATE_OPTIMIZER_JAX_VERSION):
-            self.skipTest("Private JAX optimizer runtime is unavailable in this environment.")
+            self.skipTest(
+                "Private JAX optimizer runtime is unavailable in this environment."
+            )
 
         alm_utils = load_alm_utils_module()
         original_minimize = alm_utils.minimize
 
         def fail_if_called(*args, **kwargs):
-            raise AssertionError("SciPy minimize should not be called on the native ALM lane.")
+            raise AssertionError(
+                "SciPy minimize should not be called on the native ALM lane."
+            )
 
         alm_utils.minimize = fail_if_called
         try:
             settings = alm_utils.ALMSettings(
-                max_outer_iterations=1,
+                max_outer_iterations=10,
                 max_subproblem_continuations=0,
                 penalty_init=1.0,
                 penalty_scale=10.0,
@@ -592,12 +640,16 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
             def evaluate_problem(x, multipliers, penalty):
                 x_arr = np.asarray(x, dtype=float).reshape((-1,))
-                multiplier = float(np.asarray(multipliers, dtype=float).reshape((-1,))[0])
+                multiplier = float(
+                    np.asarray(multipliers, dtype=float).reshape((-1,))[0]
+                )
                 penalty_value = float(penalty)
                 base_total = float((x_arr[0] - 1.0) ** 2)
                 base_grad = np.asarray([2.0 * (x_arr[0] - 1.0)], dtype=float)
                 constraint_value = np.asarray([x_arr[0]], dtype=float)
-                positive_shift = max(0.0, multiplier + penalty_value * float(constraint_value[0]))
+                positive_shift = max(
+                    0.0, multiplier + penalty_value * float(constraint_value[0])
+                )
                 total = base_total + 0.5 / penalty_value * (
                     positive_shift**2 - multiplier**2
                 )
@@ -616,7 +668,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 import jax.numpy as jnp
 
                 x_arr = jnp.asarray(x, dtype=jnp.float64).reshape((-1,))
-                multiplier = jnp.asarray(multipliers, dtype=jnp.float64).reshape((-1,))[0]
+                multiplier = jnp.asarray(multipliers, dtype=jnp.float64).reshape((-1,))[
+                    0
+                ]
                 penalty_value = jnp.asarray(penalty, dtype=jnp.float64)
                 base_total = jnp.square(x_arr[0] - 1.0)
                 constraint_value = x_arr[0]
@@ -627,16 +681,24 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 total = base_total + 0.5 / penalty_value * (
                     jnp.square(positive_shift) - jnp.square(multiplier)
                 )
-                grad = jnp.asarray([2.0 * (x_arr[0] - 1.0) + positive_shift], dtype=jnp.float64)
+                grad = jnp.asarray(
+                    [2.0 * (x_arr[0] - 1.0) + positive_shift], dtype=jnp.float64
+                )
                 return total, grad
 
+            initial_x = np.asarray([1.5], dtype=float)
+            initial_multipliers = np.zeros(1, dtype=float)
+            initial_penalty = float(settings.penalty_init)
+
             result = alm_utils.minimize_alm(
-                np.asarray([1.5], dtype=float),
+                initial_x,
                 ["x_upper_bound"],
                 evaluate_problem,
                 settings,
                 inner_options,
-                inner_optimizer_contract=TargetOptimizerContract(method="lbfgs-ondevice"),
+                inner_optimizer_contract=TargetOptimizerContract(
+                    method="lbfgs-ondevice"
+                ),
                 target_inner_value_and_grad=target_inner_value_and_grad,
             )
         finally:
@@ -644,12 +706,74 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertTrue(hasattr(result, "inner_result"))
-        self.assertLess(float(np.asarray(result.x, dtype=float)[0]), 1.5)
         self.assertEqual(len(result.multipliers), 1)
         self.assertEqual(len(result.constraint_values), 1)
-        self.assertTrue(np.all(np.isfinite(np.asarray(result.multipliers, dtype=float))))
+        # Finiteness guards (NaN/inf returns must fail the test).
+        self.assertTrue(
+            np.all(np.isfinite(np.asarray(result.multipliers, dtype=float)))
+        )
         self.assertTrue(
             np.all(np.isfinite(np.asarray(result.constraint_values, dtype=float)))
+        )
+
+        # KKT assertion 1: ALM converged to the constrained optimum ``x = 0``.
+        # ``feasibility_tol = 1e-6``; allow a small multiple for finite-iteration drift.
+        final_x = float(np.asarray(result.x, dtype=float)[0])
+        self.assertLessEqual(
+            abs(final_x),
+            10.0 * settings.feasibility_tol,
+            f"ALM did not converge to constrained optimum x=0; got x={final_x}",
+        )
+
+        # KKT assertion 2: feasibility achieved (constraint ``x <= 0`` satisfied to tol).
+        final_constraint = float(np.asarray(result.constraint_values, dtype=float)[0])
+        self.assertLessEqual(
+            final_constraint,
+            settings.feasibility_tol,
+            f"ALM did not satisfy feasibility; got constraint_value={final_constraint}",
+        )
+
+        # KKT assertion 3: the ALM driver actually flagged convergence.
+        self.assertTrue(
+            bool(result.success),
+            f"ALM did not converge: message={result.message!r}",
+        )
+
+        # KKT assertion 4: multiplier is sign-correct (non-negative inequality
+        # multiplier projection). The theoretical active multiplier at the
+        # constrained optimum is ``mu = 2``; in this fixture the dual update
+        # never fires (the constraint is not feasible at any intermediate
+        # iterate), so the multiplier stays on the lower bound after the
+        # ``max(0, ...)`` projection. The assertion is therefore the
+        # sign-and-bound invariant, not the theoretical value.
+        final_multiplier = float(np.asarray(result.multipliers, dtype=float)[0])
+        self.assertGreaterEqual(
+            final_multiplier,
+            0.0,
+            f"Multiplier projection violated sign convention; got mu={final_multiplier}",
+        )
+
+        # KKT assertion 5: augmented-Lagrangian total **decreased** along the
+        # ALM trajectory. The PRIMAL objective ``(x - 1)^2`` *increases* on
+        # this path (0.25 -> 1.0), so we recompute the Lagrangian total at the
+        # initial and final iterates using the same ``evaluate_problem``
+        # callback as an independent oracle. This is the most defensible form
+        # (independent of internal result-field naming).
+        initial_eval = evaluate_problem(initial_x, initial_multipliers, initial_penalty)
+        final_eval = evaluate_problem(
+            np.asarray(result.x, dtype=float),
+            np.asarray(result.multipliers, dtype=float),
+            float(result.penalty),
+        )
+        initial_total = float(initial_eval["total"])
+        final_total = float(final_eval["total"])
+        self.assertLess(
+            final_total,
+            initial_total,
+            (
+                f"Augmented-Lagrangian total did not decrease: "
+                f"initial={initial_total}, final={final_total}"
+            ),
         )
 
     def test_target_alm_requires_native_value_and_grad(self):
@@ -716,7 +840,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 evaluate_problem,
                 settings,
                 inner_options,
-                inner_optimizer_contract=TargetOptimizerContract(method="lbfgs-ondevice"),
+                inner_optimizer_contract=TargetOptimizerContract(
+                    method="lbfgs-ondevice"
+                ),
             )
 
     def test_single_stage_results_surface_keeps_surrogate_alm_aliases(self):
@@ -774,7 +900,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(command[command.index("--length-target") + 1], "1.7")
         self.assertIn("--minimal-artifacts", command)
 
-    def test_single_stage_thresholded_physics_wrapper_rejects_init_only_stage2_seed(self):
+    def test_single_stage_thresholded_physics_wrapper_rejects_init_only_stage2_seed(
+        self,
+    ):
         module = load_single_stage_thresholded_physics_rerun_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -797,10 +925,14 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
                 plasma_surf_filename=DEFAULT_ALM_WRAPPER_SURFACE,
             )
 
-            with self.assertRaisesRegex(ValueError, "requires a non-init-only Stage 2 artifact"):
+            with self.assertRaisesRegex(
+                ValueError, "requires a non-init-only Stage 2 artifact"
+            ):
                 module.load_validated_stage2_seed_metadata(args)
 
-    def test_single_stage_thresholded_physics_wrapper_upgrades_legacy_stage2_seed_metadata(self):
+    def test_single_stage_thresholded_physics_wrapper_upgrades_legacy_stage2_seed_metadata(
+        self,
+    ):
         module = load_single_stage_thresholded_physics_rerun_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -818,7 +950,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
 
         assert_legacy_stage2_fields_upgraded(self, stage2_results)
 
-    def test_single_stage_thresholded_physics_wrapper_dry_run_writes_marker_and_summary(self):
+    def test_single_stage_thresholded_physics_wrapper_dry_run_writes_marker_and_summary(
+        self,
+    ):
         module = load_single_stage_thresholded_physics_rerun_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -853,7 +987,9 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             self.assertFalse(summary["contains_solver_outputs"])
             self.assertEqual(summary["dry_run_marker_path"], str(marker_path))
             self.assertTrue(marker_path.exists())
-            self.assertIn("dry run only", marker_path.read_text(encoding="utf-8").lower())
+            self.assertIn(
+                "dry run only", marker_path.read_text(encoding="utf-8").lower()
+            )
 
 
 if __name__ == "__main__":

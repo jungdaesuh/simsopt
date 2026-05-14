@@ -1,11 +1,17 @@
-"""SSOT parity tests for the pure JAX finite-build kernel.
+"""SSOT analytic-oracle and runtime tests for the pure JAX finite-build kernel.
 
 Wave R4 item 20 closure: ``simsopt.jax_core.finitebuild`` exposes the
 kernel-level filament construction used by
-``simsopt.geo.finitebuild.create_multifilament_grid``. These tests pin
-``build_filament_gammas`` to bit-identity with the host adapter on a
-representative ``CurveXYZFourier + FrameRotation`` configuration at the
-``direct_kernel`` parity-ladder lane.
+``simsopt.geo.finitebuild.create_multifilament_grid``. The host adapter
+``CurveFilament.gamma()`` already runs through ``gamma_jax`` (see
+``simsopt/geo/finitebuild.py``), so comparing the SSOT helper against
+``CurveFilament.gamma()`` is a JAX-vs-JAX tautology rather than an
+independent oracle. The geometry test in this module replaces that
+tautology with a hand-derived closed-form check on a planar unit
+circle.
+
+Audit finding #3 reference:
+``.artifacts/jax-test-audit-2026-05-13/TEST_QUALITY_TODOS.md``.
 """
 
 from __future__ import annotations
@@ -14,7 +20,6 @@ import jax
 import numpy as np
 import pytest
 
-from benchmarks.validation_ladder_contract import parity_ladder_tolerances
 from simsopt.geo.curvexyzfourier import CurveXYZFourier
 from simsopt.geo.finitebuild import create_multifilament_grid
 from simsopt.jax_core import (
@@ -24,22 +29,36 @@ from simsopt.jax_core import (
 )
 
 
-_DIRECT_KERNEL = parity_ladder_tolerances("direct_kernel")
-_RTOL = _DIRECT_KERNEL["rtol"]
-_ATOL = _DIRECT_KERNEL["atol"]
-
 _NQUADPOINTS = 64
 _CURVE_ORDER = 3
 _GRID_NN = 2
 _GRID_NB = 3
 _GAP_N = 0.025
 _GAP_B = 0.018
-_ROTATION_ORDER = 1
 _RNG_SEED = 4242
 _PERTURB_SCALE = 0.02
+_ANALYTIC_RTOL = 1e-12
+_ANALYTIC_ATOL = 1e-12
+
+
+def _unit_circle_curve(nquadpoints: int = _NQUADPOINTS) -> CurveXYZFourier:
+    """Return a ``CurveXYZFourier`` parameterising the planar unit circle.
+
+    The Fourier ordering for order 1 stores DOFs as
+    ``[xc(0), xs(1), xc(1), yc(0), ys(1), yc(1), zc(0), zs(1), zc(1)]``,
+    so setting ``xc(1) = 1`` and ``ys(1) = 1`` yields
+    ``gamma(t) = (cos(2 pi t), sin(2 pi t), 0)``.
+    """
+    curve = CurveXYZFourier(nquadpoints, 1)
+    dofs = np.zeros(9, dtype=np.float64)
+    dofs[2] = 1.0  # xc(1)
+    dofs[4] = 1.0  # ys(1)
+    curve.x = dofs
+    return curve
 
 
 def _seed_curve() -> CurveXYZFourier:
+    """Non-planar perturbed curve used by the offset and transfer-guard tests."""
     rng = np.random.default_rng(_RNG_SEED)
     curve = CurveXYZFourier(_NQUADPOINTS, _CURVE_ORDER)
     ndofs = 3 * (2 * _CURVE_ORDER + 1)
@@ -52,98 +71,71 @@ def _seed_curve() -> CurveXYZFourier:
     return curve
 
 
-@pytest.mark.parametrize("frame_kind", ("centroid", "frenet"))
-@pytest.mark.parametrize("rotation_order", (None, _ROTATION_ORDER))
-def test_build_filament_gammas_matches_create_multifilament_grid(
-    frame_kind: str,
-    rotation_order: int | None,
-):
-    curve = _seed_curve()
+def test_build_filament_gammas_matches_planar_circle_closed_form():
+    """Closed-form planar-circle oracle pins the SSOT filament builder.
+
+    For ``gamma(t) = (cos(2 pi t), sin(2 pi t), 0)`` on the planar unit
+    circle, the unrotated centroid frame has
+    ``T(t) = (-sin(2 pi t),  cos(2 pi t), 0)``,
+    ``N(t) = ( cos(2 pi t),  sin(2 pi t), 0)``,
+    ``B(t) = T x N = (0, 0, -1)``.
+    With ``alpha = 0`` (``rotation_order=None`` => ``ZeroRotation``),
+    the filament at offset ``(dn, db)`` is therefore
+
+        gamma_fil(t)     = ((1 + dn) cos(2 pi t), (1 + dn) sin(2 pi t), -db)
+        gammadash_fil(t) = 2 pi * (-(1 + dn) sin(2 pi t), (1 + dn) cos(2 pi t), 0).
+
+    These formulas are independent of ``build_filament_gammas``,
+    ``CurveFilament.gamma()``, and ``create_multifilament_grid``; agreement
+    at ``rtol=1e-12`` therefore proves the SSOT kernel matches the
+    Singh et al. (2020) construction up to floating-point round-off.
+    """
+    curve = _unit_circle_curve()
+    # 1x1 grid yields a single centred filament that carries the
+    # ``ZeroRotation`` frame; offsets are supplied explicitly below.
     filaments = create_multifilament_grid(
         curve,
-        numfilaments_n=_GRID_NN,
-        numfilaments_b=_GRID_NB,
-        gapsize_n=_GAP_N,
-        gapsize_b=_GAP_B,
-        rotation_order=rotation_order,
-        frame=frame_kind,
+        numfilaments_n=1,
+        numfilaments_b=1,
+        gapsize_n=1.0,
+        gapsize_b=1.0,
+        rotation_order=None,
+        frame="centroid",
+    )
+    spec = filaments[0].to_spec()
+
+    dn = 0.1
+    db = 0.05
+    filament_arrays = build_filament_gammas(spec, ((dn, db),))
+    assert len(filament_arrays) == 1
+
+    gamma_jax = np.asarray(filament_arrays[0][0], dtype=np.float64)
+    gammadash_jax = np.asarray(filament_arrays[0][1], dtype=np.float64)
+
+    two_pi_t = 2.0 * np.pi * np.asarray(curve.quadpoints, dtype=np.float64)
+    cos_t = np.cos(two_pi_t)
+    sin_t = np.sin(two_pi_t)
+    z_offset = np.full_like(cos_t, -db)
+    analytic_gamma = np.column_stack([(1.0 + dn) * cos_t, (1.0 + dn) * sin_t, z_offset])
+    analytic_gammadash = np.column_stack(
+        [
+            -2.0 * np.pi * (1.0 + dn) * sin_t,
+            2.0 * np.pi * (1.0 + dn) * cos_t,
+            np.zeros_like(cos_t),
+        ]
     )
 
-    if rotation_order is not None:
-        shared_rotation = filaments[0].rotation
-        rng = np.random.default_rng(_RNG_SEED + 1)
-        shared_rotation.x = 0.1 * rng.standard_normal(shared_rotation.dof_size)
-
-    offsets = compute_filament_offsets(
-        numfilaments_n=_GRID_NN,
-        numfilaments_b=_GRID_NB,
-        gapsize_n=_GAP_N,
-        gapsize_b=_GAP_B,
-    )
-    assert len(offsets) == len(filaments)
-    for filament, (dn, db) in zip(filaments, offsets, strict=True):
-        assert filament.dn == pytest.approx(dn)
-        assert filament.db == pytest.approx(db)
-
-    # Build one spec from the first filament; all filaments share the
-    # base curve + rotation Optimizable graph, so one spec captures the
-    # shared frame state.
-    sample_spec = filaments[0].to_spec()
-
-    filament_arrays = build_filament_gammas(sample_spec, offsets)
-    assert len(filament_arrays) == len(filaments)
-
-    for index, (filament, (gamma_jax, gammadash_jax)) in enumerate(
-        zip(filaments, filament_arrays, strict=True)
-    ):
-        gamma_host = np.asarray(filament.gamma(), dtype=np.float64)
-        gammadash_host = np.asarray(filament.gammadash(), dtype=np.float64)
-        np.testing.assert_allclose(
-            np.asarray(gamma_jax, dtype=np.float64),
-            gamma_host,
-            rtol=_RTOL,
-            atol=_ATOL,
-            err_msg=f"SSOT gamma diverges for filament {index} ({frame_kind})",
-        )
-        np.testing.assert_allclose(
-            np.asarray(gammadash_jax, dtype=np.float64),
-            gammadash_host,
-            rtol=_RTOL,
-            atol=_ATOL,
-            err_msg=f"SSOT gammadash diverges for filament {index} ({frame_kind})",
-        )
-
-
-@pytest.mark.parametrize("frame_kind", ("centroid", "frenet"))
-def test_build_filament_gamma_and_dash_matches_grid_first_filament(frame_kind: str):
-    """Single-filament SSOT path matches the host adapter for offset (dn, db)."""
-    curve = _seed_curve()
-    filaments = create_multifilament_grid(
-        curve,
-        numfilaments_n=_GRID_NN,
-        numfilaments_b=_GRID_NB,
-        gapsize_n=_GAP_N,
-        gapsize_b=_GAP_B,
-        rotation_order=_ROTATION_ORDER,
-        frame=frame_kind,
-    )
-    rng = np.random.default_rng(_RNG_SEED + 2)
-    filaments[0].rotation.x = 0.1 * rng.standard_normal(filaments[0].rotation.dof_size)
-
-    target = filaments[3]
-    spec = target.to_spec()
-    gamma_jax, gammadash_jax = build_filament_gamma_and_dash(spec)
     np.testing.assert_allclose(
-        np.asarray(gamma_jax, dtype=np.float64),
-        np.asarray(target.gamma(), dtype=np.float64),
-        rtol=_RTOL,
-        atol=_ATOL,
+        gamma_jax,
+        analytic_gamma,
+        rtol=_ANALYTIC_RTOL,
+        atol=_ANALYTIC_ATOL,
     )
     np.testing.assert_allclose(
-        np.asarray(gammadash_jax, dtype=np.float64),
-        np.asarray(target.gammadash(), dtype=np.float64),
-        rtol=_RTOL,
-        atol=_ATOL,
+        gammadash_jax,
+        analytic_gammadash,
+        rtol=_ANALYTIC_RTOL,
+        atol=_ANALYTIC_ATOL,
     )
 
 

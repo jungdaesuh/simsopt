@@ -5,12 +5,14 @@ This module closes the two coverage gaps identified in the item 05 audit of
 curvexyzfouriersymmetries,curveplanarfourier,curvehelical,curvecwsfourier,
 curveperturbed}.py`` and ``src/simsopt/jax_core/curve_geometry.py``:
 
-1. ``CurveXYZFourierSymmetries`` had no JAX-spec parity test row. Because
-   the class does not implement ``to_spec()`` and ``curve_spec_from_curve``
-   raises ``NotImplementedError`` for it on parent commit ``a9da18fac``,
-   this file documents the architecture limitation explicitly through
-   ``test_curvexyzfouriersymmetries_spec_routing_is_documented_blocker``
-   rather than silently skipping or speculatively passing.
+1. ``CurveXYZFourierSymmetries`` had no JAX-spec parity test row. The
+   architecture blocker noted in the item 05 plan has since been lifted:
+   the class now exposes ``to_spec()`` returning a
+   ``CurveXYZFourierSymmetriesSpec``, and ``curve_spec_from_curve``
+   dispatches to it. The positive parity row is pinned in
+   ``test_curvexyzfouriersymmetries_exposes_immutable_spec_with_geometry_parity``
+   at the ``direct_kernel`` lane tolerance, mirroring the production-scale
+   parametrized parity test below.
 2. No existing curve-class parity fixture co-asserted ``ncoils >= 4`` AND
    ``nquadpoints >= 64`` against the spec-driven ``curve_geometry_from_dofs``
    path. The parametrized ``test_curve_spec_pullback_production_scale_parity``
@@ -169,31 +171,19 @@ def test_curve_spec_pullback_production_scale_parity(
         )
 
 
-def test_curvexyzfouriersymmetries_spec_routing_is_documented_blocker():
-    """Document that ``CurveXYZFourierSymmetries`` has no immutable JAX spec.
+def test_curvexyzfouriersymmetries_exposes_immutable_spec_with_geometry_parity():
+    """Pin ``CurveXYZFourierSymmetries`` -> spec -> geometry parity at production scale.
 
     ``CurveXYZFourierSymmetries`` (``src/simsopt/geo/curvexyzfouriersymmetries.py``)
-    is a ``JaxCurve`` subclass: its forward geometry ``curve.gamma()`` already
-    runs through ``jit``-compiled ``gamma_pure`` -> ``gamma_jax``. However,
-    the class does NOT implement ``to_spec()`` and it does NOT carry a
-    ``surf`` attribute, so the surface-fallback branch of
-    ``curve_spec_from_curve`` (``src/simsopt/jax_core/curve_geometry.py:104-129``)
-    is unreachable. Calling ``curve_spec_from_curve(curve)`` raises
-    ``NotImplementedError("Curve type CurveXYZFourierSymmetries does not
-    expose an immutable JAX spec.")``.
+    is a ``JaxCurve`` subclass. The blocker recorded in the item 05 plan
+    (``.artifacts/jax_port_goal/plans/05.md`` section-5 architecture candidate)
+    has been lifted: the class now exposes ``to_spec()`` returning a
+    ``CurveXYZFourierSymmetriesSpec``, and ``curve_spec_from_curve`` dispatches
+    to it. This test pins the positive parity row in place of the prior
+    blocker assertion (``pytest.raises(NotImplementedError)``).
 
-    The architecture limitation is recorded as a section-5 ``architecture``
-    candidate in the item 05 plan
-    (``.artifacts/jax_port_goal/plans/05.md``). Routing this class through
-    ``curve_spec_from_curve`` requires adding a new ``CurveXYZFourierSymmetriesSpec``
-    plus a ``to_spec`` method on the class; per the item 05 prompt, the
-    closeout MAY NOT modify source classes, so the parity row is skipped
-    with an explicit blocker rather than silently passing.
-
-    Indirect coverage of the underlying kernel exists in
-    ``tests/geo/test_curve.py`` (``CurveXYZFourierSymmetries{1,2,3}`` rows in
-    ``Testing.curvetypes``), which exercises ``curve.gamma()`` -- itself a
-    ``jit``-compiled JAX evaluation -- against the upstream oracle.
+    Oracle: CPU ``curve.gamma()`` at production scale (nquadpoints=64).
+    Lane: ``direct_kernel`` (rtol/atol from ``parity_ladder_tolerances``).
     """
     curve = CurveXYZFourierSymmetries(
         _PRODUCTION_NQUADPOINTS,
@@ -206,20 +196,24 @@ def test_curvexyzfouriersymmetries_spec_routing_is_documented_blocker():
     curve.set("xc(1)", -0.3)
     curve.set("zs(1)", -0.3)
 
-    # Forward parity over the existing pure-JAX hot path remains valid: the
-    # class is a JaxCurve subclass, so ``curve.gamma()`` is a JAX evaluation
-    # at any production-scale quadpoint count. Smoke that path so the
-    # blocker test still proves the geometry is reachable.
-    gamma = np.asarray(curve.gamma(), dtype=np.float64)
-    assert gamma.shape == (_PRODUCTION_NQUADPOINTS, 3)
-    assert np.isfinite(gamma).all()
+    spec = curve_spec_from_curve(curve)
+    assert type(spec).__name__ == "CurveXYZFourierSymmetriesSpec"
 
-    with pytest.raises(NotImplementedError, match="CurveXYZFourierSymmetries"):
-        curve_spec_from_curve(curve)
+    gamma_cpu = np.asarray(curve.gamma(), dtype=np.float64)
+    gamma_jax = np.asarray(
+        curve_geometry_from_dofs(spec, spec.dofs)[0],
+        dtype=np.float64,
+    )
 
-    pytest.skip(
-        "CurveXYZFourierSymmetries does not expose an immutable JAX spec on "
-        "parent commit a9da18fac; routing it through curve_spec_from_curve "
-        "requires a source-side CurveXYZFourierSymmetriesSpec + to_spec() "
-        "which is out of scope for item 05 closeout (architecture blocker)."
+    assert gamma_cpu.shape == (_PRODUCTION_NQUADPOINTS, 3)
+    assert gamma_jax.shape == (_PRODUCTION_NQUADPOINTS, 3)
+    np.testing.assert_allclose(
+        gamma_jax,
+        gamma_cpu,
+        rtol=_RTOL,
+        atol=_ATOL,
+        err_msg=(
+            "CurveXYZFourierSymmetries: JAX spec geometry diverges from CPU "
+            "oracle at production scale (nquadpoints=64)."
+        ),
     )

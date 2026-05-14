@@ -10,7 +10,10 @@ arithmetic-order reason." Today the residual is FMA-fusion (Phase 4
 territory), so these tests assert (a) the cpu_ordered output reproduces the
 C++ values within tightly bounded ULP drift and (b) it is *strictly tighter*
 than the production matmul kernel — proving the Phase 2 substitution
-removes the dominant arithmetic-order divergence even before Phase 4.
+removes the dominant arithmetic-order divergence even before Phase 4. The
+routing test additionally asserts the cpu_ordered branch meets the same
+absolute ULP ceiling, so the routing path cannot silently drift while only
+beating production.
 """
 
 from __future__ import annotations
@@ -20,6 +23,12 @@ import pytest
 
 
 pytestmark = [pytest.mark.parity_census, pytest.mark.boozer]
+
+
+# ULP ceiling for cpu_ordered surface gamma vs the C++ oracle. Documented
+# arithmetic-order residual is FMA-fusion only; this bound is the SSOT
+# across every test in this module that asserts cpu_ordered gamma drift.
+_SURFACE_GAMMA_ULP_CEILING = 1e-13
 
 
 _FIXTURE_PARAMS = [
@@ -136,7 +145,7 @@ def test_surface_gamma_cpu_ordered_matches_cpp_within_ulp(
         f"cpu_ordered drift {cpu_ordered_drift!r} exceeds production matmul "
         f"drift {production_drift!r}; Phase 2 substitution must not regress."
     )
-    assert cpu_ordered_drift < 1e-13, (
+    assert cpu_ordered_drift < _SURFACE_GAMMA_ULP_CEILING, (
         f"cpu_ordered gamma drift {cpu_ordered_drift!r} exceeds the FMA-fusion "
         "ULP ceiling; investigate."
     )
@@ -276,9 +285,20 @@ def test_dgamma_by_dcoeff_cpu_ordered_matches_cpp(
         assert diff < 1e-13, f"{name}: cpu_ordered drift {diff!r} too large"
 
 
-def test_parity_policy_routes_through_cpu_ordered_kernels(cpu_jax_pair):
+def test_parity_policy_routes_through_cpu_ordered_kernels_and_meets_ulp_ceiling(
+    cpu_jax_pair,
+):
     """The parity policy gate exposes the cpu_ordered kernels via
-    ``_surface_geometry_and_derivatives_from_dofs``."""
+    ``_surface_geometry_and_derivatives_from_dofs``.
+
+    Two assertions:
+
+    1. cpu_ordered must not regress vs the production matmul kernel (the
+       Phase 2 substitution should be at least as tight as production).
+    2. cpu_ordered must meet the same absolute FMA-fusion ULP ceiling
+       enforced by the sibling within-ULP test, so the routing path
+       cannot silently drift while only beating production.
+    """
     import jax
 
     from simsopt.geo.boozersurface_jax import (
@@ -315,10 +335,13 @@ def test_parity_policy_routes_through_cpu_ordered_kernels(cpu_jax_pair):
     cpp_gamma = np.asarray(fx["surface"].gamma(), dtype=np.float64)
     prod = np.asarray(jax.device_get(geom_prod.gamma), dtype=np.float64)
     cpu = np.asarray(jax.device_get(geom_cpu.gamma), dtype=np.float64)
-    assert np.max(np.abs(prod - cpp_gamma)) > 0.0, (
-        "production matmul should diverge from C++ at sub-ULP magnitudes "
-        "(if it doesn't, the test fixture is too small to surface the bug)"
+    prod_drift = np.max(np.abs(prod - cpp_gamma))
+    cpu_drift = np.max(np.abs(cpu - cpp_gamma))
+    assert cpu_drift <= prod_drift + 1e-18, (
+        "parity_policy='cpu_ordered' must not regress vs production"
     )
-    assert (
-        np.max(np.abs(cpu - cpp_gamma)) <= np.max(np.abs(prod - cpp_gamma)) + 1e-18
-    ), "parity_policy='cpu_ordered' must not regress vs production"
+    assert cpu_drift < _SURFACE_GAMMA_ULP_CEILING, (
+        f"cpu_ordered gamma drift {cpu_drift!r} exceeds the FMA-fusion "
+        "ULP ceiling; the routing path cannot silently drift while only "
+        "beating production."
+    )

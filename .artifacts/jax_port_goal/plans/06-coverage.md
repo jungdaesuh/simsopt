@@ -78,7 +78,7 @@ upstream `tests/geo/` for `SurfaceRZFourier`, `SurfaceXYZFourier`, and
 | current | `tests/geo/test_surface_fourier_jax.py::TestSurfaceXYZFourierJaxCppParity::test_second_coordinate_derivative_dcoeff_match_cpp` (parametrized stellsym=True/False) | XYZ second derivative dcoeff | `covered_by_unit_parity` | same node |
 | current | `tests/geo/test_surface_fourier_jax.py::TestSurfaceFourierSecondNormalDerivativeParity::test_d2normal_by_dcoeffdcoeff_matches_cpp` (parametrized SurfaceXYZFourier, SurfaceXYZTensorFourier x stellsym=True/False) | d2normal / coeff-coeff parity | `covered_by_unit_parity` | same node |
 | current | `tests/geo/test_surface_fourier_jax.py::TestSurfaceFourierPairedPointParity::test_gamma_and_tangent_lin_match_cpp` (parametrized SurfaceXYZFourier, SurfaceXYZTensorFourier x stellsym=True/False) | Paired-point linearization parity | `covered_by_unit_parity` | same node |
-| current | `tests/geo/test_surface_fourier_jax.py::TestSurfaceFourierSpecCppParity::test_tensor_surface_spec_rejects_clamped_dims` | Spec rejects clamped dims | `covered_by_unit_parity` | same node |
+| current | `tests/geo/test_surface_fourier_jax.py::TestSurfaceFourierSpecCppParity::test_tensor_surface_spec_supports_clamped_dims` | Spec supports clamped dims | `covered_by_unit_parity` | same node |
 | current | `tests/geo/test_surface_fourier_jax.py::TestSurfaceFourierSpecCppParity::test_spec_geometry_and_normals_match_cpp` (parametrized SurfaceXYZFourier, SurfaceXYZTensorFourier x stellsym=True/False) | Spec-driven geometry/normal parity | `covered_by_unit_parity` | same node |
 | current | `tests/geo/test_surface_fourier_jax.py::TestSurfaceFourierSpecCppParity::test_spec_second_coordinate_derivatives_match_cpp` (parametrized) | Spec second coord derivatives parity | `covered_by_unit_parity` | same node |
 | current | `tests/geo/test_surface_fourier_jax.py::TestSurfaceFourierSpecCppParity::test_area_volume_derivatives_match_cpp` (parametrized) | Spec area/volume derivatives | `covered_by_unit_parity` | same node |
@@ -101,7 +101,7 @@ upstream `tests/geo/` for `SurfaceRZFourier`, `SurfaceXYZFourier`, and
 | current | `tests/geo/test_surface_fourier_jax_cpu_ordered.py::test_surface_gamma_cpu_ordered_matches_cpp_within_ulp` | CPU-ordered gamma within ULP of CPP, 20x20 stellsym=True / 13x9 stellsym=False | `covered_by_unit_parity` | same node |
 | current | `tests/geo/test_surface_fourier_jax_cpu_ordered.py::test_surface_gammadash_cpu_ordered_matches_cpp` | CPU-ordered gammadash parity | `covered_by_unit_parity` | same node |
 | current | `tests/geo/test_surface_fourier_jax_cpu_ordered.py::test_dgamma_by_dcoeff_cpu_ordered_matches_cpp` | CPU-ordered dgamma_by_dcoeff parity | `covered_by_unit_parity` | same node |
-| current | `tests/geo/test_surface_fourier_jax_cpu_ordered.py::test_parity_policy_routes_through_cpu_ordered_kernels` | Parity policy enforces CPU-ordered twin | `covered_by_unit_parity` | same node |
+| current | `tests/geo/test_surface_fourier_jax_cpu_ordered.py::test_parity_policy_routes_through_cpu_ordered_kernels_and_meets_ulp_ceiling` | Parity policy enforces CPU-ordered twin (no-regression + absolute ULP ceiling) | `covered_by_unit_parity` | same node |
 
 ## Surface Optimizable / serialization / IO (current repo)
 

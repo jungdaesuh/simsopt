@@ -139,16 +139,15 @@ def _run_python_script(
     return result.returncode, result.stderr.strip()
 
 
-def _run_python_script_json_payload(
+def _run_python_script_capture(
     script_path: Path,
     *,
     args: Sequence[str] = (),
-    failure_message: str,
     timeout: int = 30,
     extra_env: dict[str, str] | None = None,
-) -> dict[str, object]:
-    """Run a subprocess smoke case and parse the final JSON stdout line."""
-    result = subprocess.run(
+) -> subprocess.CompletedProcess[str]:
+    """Run a repo-local Python script and return the completed process."""
+    return subprocess.run(
         [sys.executable, str(script_path), *args],
         capture_output=True,
         text=True,
@@ -156,10 +155,71 @@ def _run_python_script_json_payload(
         cwd=_REPO_ROOT,
         env=_build_clean_subprocess_env(extra_env),
     )
+
+
+def _last_json_payload_or_none(stdout: str) -> dict[str, object] | None:
+    """Return the last non-empty JSON object on subprocess stdout, if any."""
+    for line in reversed(stdout.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(payload, dict):
+            return payload
+        return None
+    return None
+
+
+def _maybe_skip_from_subprocess_stdout(stdout: str, *, expected_case: str) -> None:
+    """Honor a ``{"skipped": true, ...}`` sentinel by raising ``pytest.skip``."""
+    payload = _last_json_payload_or_none(stdout)
+    if payload is None:
+        return
+    if payload.get("skipped") is not True:
+        return
+    assert payload.get("checked") is False, (
+        f"{expected_case}: skipped sentinel must have checked=False, got {payload!r}"
+    )
+    assert payload.get("case") == expected_case, (
+        f"{expected_case}: skipped sentinel case mismatch, got {payload!r}"
+    )
+    skip_reason = payload.get("skip_reason")
+    assert isinstance(skip_reason, str) and skip_reason, (
+        f"{expected_case}: skipped sentinel must carry a non-empty skip_reason, got {payload!r}"
+    )
+    pytest.skip(f"{expected_case}: {skip_reason}")
+
+
+def _run_python_script_json_payload(
+    script_path: Path,
+    *,
+    args: Sequence[str] = (),
+    failure_message: str,
+    timeout: int = 30,
+    extra_env: dict[str, str] | None = None,
+    expected_case: str | None = None,
+) -> dict[str, object]:
+    """Run a subprocess smoke case and parse the final JSON stdout line.
+
+    If ``expected_case`` is provided and the subprocess emits a skip sentinel,
+    this raises ``pytest.skip`` instead of returning the sentinel payload.
+    """
+    result = _run_python_script_capture(
+        script_path,
+        args=args,
+        timeout=timeout,
+        extra_env=extra_env,
+    )
     assert result.returncode == 0, f"{failure_message}:\n{result.stderr.strip()}"
-    stdout_lines = [
-        line for line in result.stdout.strip().splitlines() if line.strip()
-    ]
+    if expected_case is not None:
+        _maybe_skip_from_subprocess_stdout(
+            result.stdout,
+            expected_case=expected_case,
+        )
+    stdout_lines = [line for line in result.stdout.strip().splitlines() if line.strip()]
     assert stdout_lines, f"{failure_message}: subprocess emitted no JSON payload"
     payload = json.loads(stdout_lines[-1])
     assert isinstance(payload, dict), f"{failure_message}: payload is not an object"
@@ -218,13 +278,18 @@ def _assert_python_script_passes(
             failure_message=failure_message,
         )
         return
-    rc, err = _run_python_script(
+    result = _run_python_script_capture(
         script_path,
         args=args,
         timeout=timeout,
         extra_env=extra_env,
     )
-    assert rc == 0, f"{failure_message}:\n{err}"
+    assert result.returncode == 0, f"{failure_message}:\n{result.stderr.strip()}"
+    if script_path == _JAX_SUBPROCESS_CASES_PATH:
+        _maybe_skip_from_subprocess_stdout(
+            result.stdout,
+            expected_case=str(args[0]),
+        )
 
 
 def _find_private_jax_src_usages(path: Path) -> list[str]:
@@ -589,9 +654,7 @@ def test_transfer_guard_disallow_enforces_single_stage_target_runtime_boundaries
     _assert_python_script_passes(
         _JAX_SUBPROCESS_CASES_PATH,
         args=("single-stage-target-runtime-transfer-guard",),
-        failure_message=(
-            "single-stage target runtime transfer-guard contract drifted"
-        ),
+        failure_message=("single-stage target runtime transfer-guard contract drifted"),
         timeout=300,
     )
 
@@ -602,6 +665,7 @@ def _assert_ondevice_optimizer_reuses_compiled_solver(method: str) -> None:
         args=("compile-count", method),
         failure_message=f"{method} compile-count smoke failed",
         extra_env={"JAX_ENABLE_COMPILATION_CACHE": "0"},
+        expected_case="compile-count",
     )
     assert payload == {
         "case": "compile-count",
@@ -630,6 +694,7 @@ def test_target_lbfgs_ondevice_reuses_compiled_solver_across_identical_value_and
             "target lbfgs-ondevice value-and-grad compile-count smoke failed"
         ),
         extra_env={"JAX_ENABLE_COMPILATION_CACHE": "0"},
+        expected_case="target-compile-count",
     )
     assert payload == {
         "case": "target-compile-count",
@@ -651,6 +716,7 @@ def test_stage2_target_outer_loop_reuses_compiled_solver_across_identical_calls(
             "JAX_ENABLE_COMPILATION_CACHE": "0",
             "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
         },
+        expected_case="stage2-target-compile-count",
     )
     assert payload == {
         "case": "stage2-target-compile-count",
@@ -1112,14 +1178,12 @@ def test_transfer_guard_disallow_rejects_squaredfluxjax_surface_without_spec():
     )
 
 
-def test_transfer_guard_disallow_rejects_clamped_xyztensor_surface_spec():
-    """Clamped tensor surfaces need their own immutable spec before JAX routing."""
+def test_transfer_guard_disallow_allows_clamped_xyztensor_surface_spec():
+    """Clamped tensor surfaces should route through their immutable JAX spec."""
     _assert_python_script_passes(
         _IMPORT_SMOKE_CASES_PATH,
-        args=(
-            "case_transfer_guard_disallow_rejects_clamped_xyztensor_surface_spec",
-        ),
-        failure_message="Clamped SurfaceXYZTensorFourier rejection smoke failed",
+        args=("case_transfer_guard_disallow_allows_clamped_xyztensor_surface_spec",),
+        failure_message="Clamped SurfaceXYZTensorFourier transfer-guard smoke failed",
     )
 
 
@@ -1288,6 +1352,14 @@ def test_import_pure_jax_modules():
     _assert_import_smoke_case_passes(
         "case_import_pure_jax_modules",
         "import pure JAX modules failed",
+    )
+
+
+def test_public_jax_helpers_are_exposed_on_package_roots():
+    """simsopt.solve and simsopt.geo must expose the public JAX helper API."""
+    _assert_import_smoke_case_passes(
+        "case_public_jax_helpers_are_exposed_on_package_roots",
+        "public JAX helper export surface failed",
     )
 
 

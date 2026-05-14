@@ -1617,7 +1617,7 @@
       "result": "passed"
     },
     {
-      "command": "P4 residual byte-parity ablation: right-nest surface_grad in boozer_residual_scalar_and_grad_cpu_ordered; measure with test_residual_pinned_input_byte_parity_grad",
+      "command": "P4 residual byte-parity ablation: right-nest surface_grad in boozer_residual_scalar_and_grad_cpu_ordered; measure with test_residual_pinned_input_byte_parity_grad (test deleted per 2026-05-13 audit #9; current ship gate is the drift-ceiling test test_residual_gradient_within_drift_ceiling in the same file)",
       "result": "retained: residual gradient improved from max_abs_diff=1.887379141862766e-15 and 52/75 unequal doubles to max_abs_diff=8.881784197001252e-16 and 49/75 unequal doubles; strict byte parity still fails"
     },
     {

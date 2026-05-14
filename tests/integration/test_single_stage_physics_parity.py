@@ -677,6 +677,27 @@ def _assert_outer_loop_single_step_consistency(
     accepted line-search steps even when both optimize the same objective.
     Require the objective and core field quantities to remain close while hard
     geometry constraints stay satisfied on both lanes.
+
+    Cross-lane vs ceilings-only metric classification:
+
+    * Cross-lane (CPU and JAX must converge to the same value on the same
+      field, modulo line-search differences):
+        - ``final_objective``         (rtol=5e-4)
+        - ``final_volume``            (rtol=2e-3)
+        - ``final_iota``              (atol=3e-4)
+        - ``mean_abs_bdotn_over_b``   (rtol=5e-3) — quality metric on the
+          shared B-field and surface; if both lanes optimize the same
+          objective they must agree on the resulting field-error norm.
+    * Ceilings-only (hard geometry/coil-design constraints; both lanes must
+      satisfy them independently, but the absolute value is path-dependent
+      because each L-BFGS trajectory walks through different feasible
+      interiors of the constraint set):
+        - ``curve_curve_distance``        (>= 0.05)
+        - ``curve_surface_distance``      (>= 0.02)
+        - ``banana_curve_max_curvature``  (<= 40.0)
+      A cross-lane equality assertion here would over-constrain the
+      optimizer — two trajectories with different accepted step lengths
+      can legitimately end at different points inside the feasible set.
     """
     cpu = cpu_run.summary
     jax = jax_run.summary
@@ -719,6 +740,23 @@ def _assert_outer_loop_single_step_consistency(
         )
         assert jax_value <= ceiling, (
             f"{context}: JAX {label} exceeded physical ceiling {ceiling}"
+        )
+        # Cross-lane assertion (audit #14): mean_abs_bdotn_over_b is a
+        # quality metric on the same B-field and surface; if both lanes
+        # truly optimize the same objective and reach the same accepted
+        # step neighborhood, the resulting field-error norm must agree
+        # within a loose-but-honest tolerance. The ceiling check above
+        # only catches absolute violations; this catches two divergent
+        # trajectories that both happen to stay under the ceiling.
+        np.testing.assert_allclose(
+            jax_value,
+            cpu_value,
+            rtol=5e-3,
+            atol=0.0,
+            err_msg=(
+                f"{context}: {label} should converge cross-lane "
+                "(quality metric on same field)"
+            ),
         )
 
     for label, threshold, cpu_value, jax_value in (
@@ -847,6 +885,14 @@ class TestSingleStagePhysicsSmokeParity:
         )
 
 
+# Audit #22 pin (the no-progress sentinel): require the strict-transfer-guard
+# CUDA outer-loop probe to reduce the objective by at least 5% over its 10
+# accepted L-BFGS iterations. This is a conservative floor — a healthy outer
+# loop typically descends much further; the floor catches a "barely moved"
+# regression that ``objective_decrease > 0`` alone would silently accept.
+_CUDA_OUTER_LOOP_OBJECTIVE_DECREASE_RATIO_CEILING = 0.95
+
+
 class TestSingleStageOuterLoopGpuProof:
     @pytest.mark.slow
     def test_cuda_outer_loop_probe_converges_under_strict_transfer_guard(self):
@@ -860,13 +906,22 @@ class TestSingleStageOuterLoopGpuProof:
             transfer_guard="disallow",
         )
 
+        # Audit #22: the probe driver self-reports ``payload["passed"]`` /
+        # ``payload["failures"]`` — asserting on those would be circular.
+        # Instead, assert the rung tag and the individual physics-content
+        # fields that *compose* the probe verdict, then independently
+        # re-evaluate the final objective from the recorded component
+        # penalties (a code path that does not flow through the
+        # optimizer's tracked ``fun`` value).
         assert payload["rung"] == TIER3_SINGLE_STAGE_OUTER_LOOP_RUNG
-        assert payload["passed"] is True
-        assert payload["failures"] == []
 
         provenance = payload["provenance"]
         assert provenance["backend_mode"] == "jax_gpu_parity"
         assert provenance["backend_strict"] is True
+        # SIMSOPT_JAX_TRANSFER_GUARD=disallow makes any host<->device
+        # transfer raise inside the subprocess; reaching this assertion
+        # means the subprocess returned normally, so the
+        # transfer-guard violation count is exactly zero.
         assert provenance["transfer_guard"] == "disallow"
 
         probe = payload["probe"]
@@ -885,42 +940,73 @@ class TestSingleStageOuterLoopGpuProof:
         assert probe["self_intersecting"] is False
         assert all(probe["finite_result_keys"].values())
 
-
-class TestSingleStageOuterLoopCompileSmoke:
-    @pytest.mark.slow
-    def test_cpu_target_lane_case_records_compile_diagnostic_accounting(self):
-        results = _run_single_stage_script_results(
-            backend="jax",
-            optimizer_backend="ondevice",
-            platform="cpu",
-            stage2_bs_path=DEFAULT_STAGE2_BS_PATH,
-            maxiter=2,
-            benchmark_mode=True,
-            record_jax_compile_diagnostics=True,
-            target_lane_accepted_step_sync="final-only",
+        # Audit #22 point 2: pin the objective-decrease ratio against a
+        # recorded ceiling so a "moved by epsilon" regression fails loudly
+        # instead of riding through on ``objective_decrease > 0`` alone.
+        initial_objective = float(probe["initial_objective"])
+        final_objective = float(probe["final_objective"])
+        assert initial_objective > 0.0, (
+            "initial single-stage outer-loop objective must be strictly "
+            "positive (weighted-penalty sum); got "
+            f"{initial_objective}."
+        )
+        objective_decrease_ratio = final_objective / initial_objective
+        assert objective_decrease_ratio < 1.0, (
+            "Final/initial objective ratio must be < 1 for a real "
+            f"descent; got {objective_decrease_ratio}."
+        )
+        assert objective_decrease_ratio < (
+            _CUDA_OUTER_LOOP_OBJECTIVE_DECREASE_RATIO_CEILING
+        ), (
+            "Outer-loop objective ratio (final/initial) regressed past "
+            "the pinned 5%-decrease ceiling "
+            f"{_CUDA_OUTER_LOOP_OBJECTIVE_DECREASE_RATIO_CEILING}; got "
+            f"{objective_decrease_ratio} "
+            f"(initial={initial_objective}, final={final_objective})."
         )
 
-        diagnostics = results.get("JAX_COMPILE_DIAGNOSTICS")
-        assert isinstance(diagnostics, dict)
-        compile_targets = diagnostics.get("compile_targets")
-        cache_miss_sites = diagnostics.get("cache_miss_sites")
-        assert isinstance(compile_targets, dict)
-        assert isinstance(cache_miss_sites, dict)
-        compile_event_count = int(diagnostics.get("compile_event_count", -1))
-        cache_miss_count = int(diagnostics.get("cache_miss_count", -1))
-        compile_target_parse_miss_count = int(
-            diagnostics.get("compile_target_parse_miss_count", -1)
+        # Audit #22 point 3: independent re-evaluation oracle. The probe
+        # records ``FINAL_OBJECTIVE`` from the optimizer's tracked ``fun``
+        # value, while ``FINAL_NON_QS`` / ``FINAL_*_PENALTY`` come from a
+        # separate post-optimization JAX path (the runtime bundle's
+        # ``reporting_metrics`` JIT, not ``value_and_grad``). Recomposing
+        # the weighted sum and matching ``FINAL_OBJECTIVE`` at machine
+        # precision validates the optimizer's reported value through a
+        # code path that does not flow through the optimizer.
+        results = payload["results"]
+        recomputed_final_objective = (
+            float(results["FINAL_NON_QS"])
+            + float(results["RES_WEIGHT"]) * float(results["FINAL_BOOZER_RESIDUAL"])
+            + float(results["IOTAS_WEIGHT"]) * float(results["FINAL_IOTA_PENALTY"])
+            + float(results["LENGTH_WEIGHT"]) * float(results["FINAL_LENGTH_PENALTY"])
+            + float(results["CC_WEIGHT"]) * float(results["FINAL_CURVE_CURVE_PENALTY"])
+            + float(results["CS_WEIGHT"])
+            * float(results["FINAL_CURVE_SURFACE_PENALTY"])
+            + float(results["SURF_DIST_WEIGHT"])
+            * float(results["FINAL_SURFACE_VESSEL_PENALTY"])
+            + float(results["CURVATURE_WEIGHT"])
+            * float(results["FINAL_CURVATURE_PENALTY"])
         )
-        cache_miss_site_parse_miss_count = int(
-            diagnostics.get("cache_miss_site_parse_miss_count", -1)
+        np.testing.assert_allclose(
+            recomputed_final_objective,
+            final_objective,
+            rtol=1e-10,
+            atol=0.0,
+            err_msg=(
+                "Independent recomputation of the final outer-loop "
+                "objective from weighted penalty components disagreed "
+                "with the optimizer's reported FINAL_OBJECTIVE; the "
+                "probe verdict is no longer self-consistent."
+            ),
         )
-        assert compile_event_count >= 0
-        assert cache_miss_count >= 0
-        assert compile_target_parse_miss_count >= 0
-        assert cache_miss_site_parse_miss_count >= 0
-        assert sum(int(value) for value in compile_targets.values()) == (
-            compile_event_count - compile_target_parse_miss_count
-        )
-        assert sum(int(value) for value in cache_miss_sites.values()) == (
-            cache_miss_count - cache_miss_site_parse_miss_count
-        )
+
+
+# Audit #23: ``TestSingleStageOuterLoopCompileSmoke`` moved to
+# ``tests/test_jax_compile_diagnostics.py`` as
+# ``TestJaxCompileDiagnosticParser``. That test verifies parser
+# invariants of the ``JAX_COMPILE_DIAGNOSTICS`` recorder; it is an
+# instrumentation/bookkeeping test, not physics parity, and so does not
+# belong in a file named ``*_physics_parity.py``. The helper
+# ``_run_single_stage_script_results`` defined above is intentionally
+# kept here as the single source of truth — the new file imports it
+# rather than duplicating ~200 lines of subprocess plumbing.

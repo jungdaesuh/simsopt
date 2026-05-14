@@ -44,10 +44,7 @@ STAGE2_SCRIPT = (
     / "banana_coil_solver.py"
 )
 RUN_STAGE2_ALM_SCRIPT = (
-    REPO_ROOT
-    / "examples"
-    / "single_stage_optimization"
-    / "run_stage2_alm.py"
+    REPO_ROOT / "examples" / "single_stage_optimization" / "run_stage2_alm.py"
 )
 _EQUILIBRIA_PATHS_MODULE = (
     REPO_ROOT / "examples" / "single_stage_optimization" / "equilibria_paths.py"
@@ -59,8 +56,7 @@ _TARGET_BACKEND_REQUIREMENT = (
     "optimizer_backend='scipy-jax-fullgraph'"
 )
 _OPTIMIZER_BACKEND_CHOICES = (
-    "optimizer_backend must be one of: scipy, ondevice, scipy-jax, "
-    "scipy-jax-fullgraph."
+    "optimizer_backend must be one of: scipy, ondevice, scipy-jax, scipy-jax-fullgraph."
 )
 
 
@@ -185,7 +181,7 @@ def _reduced_stage2_reference_args(*extra_args: str) -> tuple[str, ...]:
     )
 
 
-_SHORT_RUN_PARITY_RTOL = 1e-3
+_SHORT_RUN_CONVERGENCE_RTOL = 1e-3
 _STAGE2_VALUE_PARITY_RTOL = 1e-12
 _STAGE2_GRADIENT_PARITY_RTOL = 1e-11
 _STAGE2_GRADIENT_PARITY_ATOL = 1e-15
@@ -237,12 +233,8 @@ _TARGET_OBJECTIVE_COMPOSITE_GRAD_ATOL = 1.5e-11
 _TARGET_OBJECTIVE_FD_EPS = 1e-6
 _TARGET_OBJECTIVE_FD_ATOL = 2e-5
 _REPORTING_CONTRACT_TOLERANCES = parity_ladder_tolerances("reporting_contract")
-_REPORTING_CONTRACT_VALUE_RTOL = _REPORTING_CONTRACT_TOLERANCES[
-    "scalar_value_rtol"
-]
-_REPORTING_CONTRACT_VALUE_ATOL = _REPORTING_CONTRACT_TOLERANCES[
-    "scalar_value_atol"
-]
+_REPORTING_CONTRACT_VALUE_RTOL = _REPORTING_CONTRACT_TOLERANCES["scalar_value_rtol"]
+_REPORTING_CONTRACT_VALUE_ATOL = _REPORTING_CONTRACT_TOLERANCES["scalar_value_atol"]
 _REPORTING_CONTRACT_DISTANCE_RTOL = _REPORTING_CONTRACT_TOLERANCES["distance_rtol"]
 _REPORTING_CONTRACT_DISTANCE_ATOL = _REPORTING_CONTRACT_TOLERANCES["distance_atol"]
 _BACKEND_RUNTIME_ENV_VARS = (
@@ -548,6 +540,7 @@ def _isolated_backend_runtime(mode: str):
         invalidate_backend_cache()
         invalidate_kernel_cache()
 
+
 def _build_stage2_target_objective_contract_case(
     definition: str = "quadratic flux",
     *,
@@ -751,17 +744,13 @@ def test_stage2_curvature_threshold_policy_clamps_only_to_shared_hardware_ceilin
 def test_stage2_alm_constraint_names_follow_shared_schema():
     stage2_script = _load_stage2_script_module()
 
-    assert stage2_script.stage2_alm_constraint_names(
-        include_coil_surface=False
-    ) == (
+    assert stage2_script.stage2_alm_constraint_names(include_coil_surface=False) == (
         "coil_coil_spacing",
         "max_curvature",
         "coil_length_upper_bound",
         "banana_current_upper_bound",
     )
-    assert stage2_script.stage2_alm_constraint_names(
-        include_coil_surface=True
-    ) == (
+    assert stage2_script.stage2_alm_constraint_names(include_coil_surface=True) == (
         "coil_coil_spacing",
         "coil_surface_spacing",
         "max_curvature",
@@ -860,7 +849,9 @@ def test_run_stage2_alm_spec_json_backfills_optional_solver_and_wrapper_keys(tmp
     assert resolved_spec["init_only"] is False
 
 
-def test_run_stage2_alm_load_validated_artifact_rejects_partial_metadata_match(tmp_path):
+def test_run_stage2_alm_load_validated_artifact_rejects_partial_metadata_match(
+    tmp_path,
+):
     wrapper = _load_run_stage2_alm_module()
     args = _make_run_stage2_alm_args(tmp_path, output_root_name=".")
     resolved_spec = dict(wrapper.DEFAULT_STAGE2_PROFILES["standard_80ka"])
@@ -1089,9 +1080,7 @@ class TestObjectiveValueParity:
         cpu_j = float(jf_cpu.J())
         jax_j = float(jf_jax.J())
         assert np.isposinf(cpu_j), f"CPU zero-current J should be +inf, got {cpu_j}"
-        assert np.isposinf(jax_j), (
-            f"JAX zero-current J should be +inf, got {jax_j}"
-        )
+        assert np.isposinf(jax_j), f"JAX zero-current J should be +inf, got {jax_j}"
 
 
 # -----------------------------------------------------------------------
@@ -1234,7 +1223,19 @@ class TestCompositeGradient:
 class TestShortOptimizationRun:
     """A short L-BFGS-B run must produce comparable results."""
 
-    def test_short_run_parity(self, coil_surf_setup):
+    def test_short_run_convergence_smoke(self, coil_surf_setup):
+        """Convergence smoke test: a 20-step L-BFGS-B run on CPU and JAX must
+        end at the same minimum to ``_SHORT_RUN_CONVERGENCE_RTOL`` (1e-3).
+
+        This is NOT a byte-identity parity gate. Same-state direct-kernel
+        parity at ``rtol=1e-10..1e-12`` is enforced separately in
+        ``tests/field/test_biotsavart_jax_cpu_ordered.py`` and
+        ``tests/geo/test_surface_fourier_jax_cpu_ordered.py`` per the
+        parity ladder in ``benchmarks/validation_ladder_contract.py``.
+        Optimizer trajectories cannot meet that bound because JAX/XLA
+        reduction order is unspecified and L-BFGS-B Hessian state amplifies
+        ULP-level differences across steps.
+        """
         coils, surf, base_curves, base_currents = coil_surf_setup
 
         MAXITER = 20
@@ -1303,7 +1304,7 @@ class TestShortOptimizationRun:
         print(f"JAX: J={j_jax:.8e}, nit={nit_jax}")
 
         rel_diff = relative_error(j_jax, j_cpu)
-        assert rel_diff < _SHORT_RUN_PARITY_RTOL, (
+        assert rel_diff < _SHORT_RUN_CONVERGENCE_RTOL, (
             f"Short-run final objectives differ by {rel_diff:.2%}: "
             f"CPU={j_cpu:.6e}, JAX={j_jax:.6e}"
         )
@@ -1336,8 +1337,8 @@ class TestShortOptimizationRun:
 _TRAJECTORY_MAXITER = 50
 _TRAJECTORY_OBJ_PARITY_RTOL = 1e-6
 _TRAJECTORY_DOF_L2_RTOL = 1e-6
-_PHYSICS_PARITY_RTOL = 1e-3
-_BASIN_OBJ_PARITY_RTOL = 1e-2
+_PHYSICS_CONVERGENCE_RTOL = 1e-3
+_BASIN_OBJ_CONVERGENCE_RTOL = 1e-2
 _BASIN_DOF_L2_RTOL = 1e-2
 _BASIN_PERTURBATION_FRACTION = 5e-3
 _LENGTH_WEIGHT = 1e-3
@@ -1496,7 +1497,17 @@ class TestOptimizerTrajectoryParity:
         )
 
     def test_physics_quantities_at_convergence(self, trajectory_results):
-        """P29: max|B.n|/|B| and coil lengths agree to 3+ digits."""
+        """P29 convergence check: max|B.n|/|B| and coil lengths agree to 3+
+        digits between CPU and JAX after 50 L-BFGS-B steps.
+
+        This is NOT a byte-identity parity gate. The ``_PHYSICS_CONVERGENCE_RTOL``
+        of 1e-3 reflects the upstream physics-at-convergence range and is
+        calibrated, not strict. Same-state direct-kernel parity
+        (``rtol=1e-10..1e-12``) is enforced separately in
+        ``tests/field/test_biotsavart_jax_cpu_ordered.py`` and
+        ``tests/geo/test_surface_fourier_jax_cpu_ordered.py`` per the
+        parity ladder in ``benchmarks/validation_ladder_contract.py``.
+        """
         cpu, jax_r = trajectory_results
 
         bn_rel = relative_error(jax_r["max_BdotN_over_B"], cpu["max_BdotN_over_B"])
@@ -1504,7 +1515,7 @@ class TestOptimizerTrajectoryParity:
             f"|B.n|/|B|: CPU={cpu['max_BdotN_over_B']:.6e}, "
             f"JAX={jax_r['max_BdotN_over_B']:.6e}, rel_err={bn_rel:.2e}"
         )
-        assert bn_rel < _PHYSICS_PARITY_RTOL, (
+        assert bn_rel < _PHYSICS_CONVERGENCE_RTOL, (
             f"|B.n|/|B| diverged: rel_err={bn_rel:.2e}"
         )
 
@@ -1515,12 +1526,25 @@ class TestOptimizerTrajectoryParity:
         for i, (lc, lj) in enumerate(zip(cpu["coil_lengths"], jax_r["coil_lengths"])):
             rel = relative_error(lj, lc)
             print(f"Coil {i} length: CPU={lc:.6f}, JAX={lj:.6f}, rel={rel:.2e}")
-            assert rel < _PHYSICS_PARITY_RTOL, (
+            assert rel < _PHYSICS_CONVERGENCE_RTOL, (
                 f"Coil {i} length diverged: rel={rel:.2e}"
             )
 
     def test_basin_stability(self):
-        """P30: Perturbed initial coils converge to same local minimum."""
+        """P30 convergence/basin smoke test: perturbed initial coils converge
+        to the same local minimum on CPU and JAX within
+        ``_BASIN_OBJ_CONVERGENCE_RTOL`` (1e-2) on the objective and
+        ``_BASIN_DOF_L2_RTOL`` (1e-2) on the DOFs.
+
+        This is NOT a byte-identity parity gate. Gradient differences
+        compound through the L-BFGS-B Hessian approximation over 50 steps
+        under perturbation, so the 1e-2 tolerance is calibrated rather than
+        strict. Same-state direct-kernel parity at ``rtol=1e-10..1e-12``
+        is enforced separately in
+        ``tests/field/test_biotsavart_jax_cpu_ordered.py`` and
+        ``tests/geo/test_surface_fourier_jax_cpu_ordered.py`` per the
+        parity ladder in ``benchmarks/validation_ladder_contract.py``.
+        """
         rng = np.random.RandomState(42)
 
         # Get DOF count from a throwaway build
@@ -1536,7 +1560,7 @@ class TestOptimizerTrajectoryParity:
             f"Basin stability: CPU={cpu['final_obj']:.8e}, "
             f"JAX={jax_r['final_obj']:.8e}, rel_err={obj_rel:.2e}"
         )
-        assert obj_rel < _BASIN_OBJ_PARITY_RTOL, (
+        assert obj_rel < _BASIN_OBJ_CONVERGENCE_RTOL, (
             f"Perturbed runs diverged: rel_err={obj_rel:.2e}"
         )
 
@@ -2192,9 +2216,13 @@ class TestMixedQuadratureParity:
         shifted_points = surf.gamma().reshape((-1, 3)) + np.array([0.05, 0.0, 0.0])
         bs_jax.set_points(shifted_points)
 
-        with pytest.raises(RuntimeError, match="captures fixed field-evaluation points"):
+        with pytest.raises(
+            RuntimeError, match="captures fixed field-evaluation points"
+        ):
             jf_jax.J()
-        with pytest.raises(RuntimeError, match="captures fixed field-evaluation points"):
+        with pytest.raises(
+            RuntimeError, match="captures fixed field-evaluation points"
+        ):
             jf_jax.dJ()
 
     def test_gradient_then_value_reuses_cached_squared_flux_value_on_mixed_quadrature(
@@ -3713,7 +3741,9 @@ class TestStage2OptimizerContract:
 
         def forbidden_scipy_minimize(*_args, **_kwargs):
             calls["scipy"] += 1
-            raise AssertionError("SciPy minimize should not run on the ALM ondevice lane")
+            raise AssertionError(
+                "SciPy minimize should not run on the ALM ondevice lane"
+            )
 
         def fake_target_minimize(
             fun,
@@ -3839,8 +3869,8 @@ class TestStage2OptimizerContract:
 
     def test_stage2_target_alm_value_and_grad_matches_host_evaluation(self):
         stage2_script = _load_stage2_script_module()
-        _objective, target_bundle, context = _build_stage2_target_objective_contract_case(
-            return_context=True
+        _objective, target_bundle, context = (
+            _build_stage2_target_objective_contract_case(return_context=True)
         )
         dofs = jax.device_put(
             np.asarray(
@@ -4677,8 +4707,10 @@ class TestStage2OptimizerContract:
         )
 
     def test_target_scalar_objective_exposes_final_specs_from_dofs(self):
-        objective, target_bundle, context = _build_stage2_target_objective_contract_case(
-            return_context=True,
+        objective, target_bundle, context = (
+            _build_stage2_target_objective_contract_case(
+                return_context=True,
+            )
         )
         dofs = np.asarray(objective.x, dtype=np.float64)
 

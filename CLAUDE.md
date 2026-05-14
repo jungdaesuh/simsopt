@@ -196,6 +196,7 @@ specification (mode matrix, reporting context, DM-A/B/D/E slices).
 - **C++ ANGLE_RECOMPUTE brace pattern**: In `surfacerzfourier.cpp`, the VJP loops use `if(i % ANGLE_RECOMPUTE == 0)` to periodically recompute trig values. These blocks require explicit `{}` braces — bare `if` only guards the first statement, making costerm unconditional. Always add braces when touching these blocks.
 - **JAX scalar boundary conversions**: JAX integer/boolean scalars from `jnp` must be cast to `int()`/`bool()` before storing in result dicts consumed by SciPy or NumPy callers. Pattern: `"iter": int(result.nit), "success": bool(result.success)`.
 - **BFGS device residency**: `BoozerSurfaceJAX` least-squares solves expose three backends. `optimizer_backend="scipy"` remains the trusted reference backend. `optimizer_backend="ondevice"` and `optimizer_backend="hybrid"` still depend on private line-search internals in `optimizer_jax.py`, but they now target the same checked local JAX 0.10.0 runtime.
+- **Test oracle lint**: New `test_*_jax_*.py` files must cite an independent oracle for every parity assertion (C++ symbol, closed-form expression, FD, or pinned dataset). Re-export `is`-identity, JAX-vs-JAX, and "host wrapper that routes through JAX" comparisons are tautologies. See `tests/REVIEWER_ORACLE_LINT.md`.
 
 ## Code Review History
 

@@ -197,11 +197,17 @@ JAX_ENABLE_X64=True JAX_PLATFORMS=cpu \
 
 Result: `2 failed, 7 passed in 4.95s`; the combined residual + CPU-ordered
 Boozer smoke run was `2 failed, 24 passed, 15 skipped in 16.60s`. The failures
-are:
+were on the strict byte-parity tests (historical names below; tests have
+since been deleted per 2026-05-13 audit #9, replaced by explicit drift-ceiling
+tests `test_residual_value_within_drift_ceiling`,
+`test_residual_gradient_within_drift_ceiling`,
+`test_full_penalty_value_within_drift_ceiling`,
+`test_full_penalty_gradient_within_drift_ceiling` in
+`tests/geo/test_boozer_residual_pinned_input_byte_parity.py`):
 
-- `test_residual_pinned_input_byte_parity_grad`:
+- `test_residual_pinned_input_byte_parity_grad` (deleted):
   `max_abs_diff=8.881784197001252e-16`, `45/75` unequal doubles.
-- `test_full_penalty_pinned_input_byte_parity_grad`:
+- `test_full_penalty_pinned_input_byte_parity_grad` (deleted):
   `max_abs_diff=8.881784197001252e-16`, `45/75` unequal doubles.
 
 CPU-ordered Boozer penalty closure smoke after the full-penalty assembly
@@ -379,14 +385,12 @@ coverage includes `tests/field/test_magneticfieldclasses_jax_item15.py`,
    `dB[p, l, j]` whereas `MirrorModel` uses `dB[p, j, l]`. The JAX
    kernels match each class's layout; the inconsistency is documented
    in `12-invariants.md` for future harmonization.
-3. `CurveXYZFourierSymmetries` has no `to_spec()` and cannot be routed
-   through `curve_spec_from_curve` without a source change. Recorded
-   as a documented architecture-class blocker in
-   `tests/geo/test_curve_item05_closeout.py::test_curvexyzfouriersymmetries_spec_routing_is_documented_blocker`
-   and in `state.json` item 05 `open_gaps`. Closing it requires (a)
-   `CurveXYZFourierSymmetriesSpec`, (b) a `to_spec` method on the
-   class, and (c) a new branch in `_curve_gamma_kernel`. Out of scope
-   for this prompt's "do not modify source classes" constraint.
+3. `CurveXYZFourierSymmetries` now exposes `to_spec()` returning
+   `CurveXYZFourierSymmetriesSpec`, and `curve_spec_from_curve`
+   dispatches to it (architecture blocker closed post-item-05). The
+   positive parity row is pinned in
+   `tests/geo/test_curve_item05_closeout.py::test_curvexyzfouriersymmetries_exposes_immutable_spec_with_geometry_parity`
+   at the `direct_kernel` tolerance lane (oracle: CPU `curve.gamma()`).
 4. The pre-existing
    `tests/geo/test_boozersurface_jax.py::TestNewtonPolishBoozer::test_newton_polish_reduces_gradient`
    failure was reproduced at both `a9da18fac` and the pre-item-04

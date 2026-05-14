@@ -367,12 +367,21 @@ def test_terminal_failure_statuses_match_lightning_sdk_enum():
     not members of ``lightning_sdk.Status``. A job that finishes outside the
     expected vocabulary would otherwise be classified as transitional and the
     poller would block until the 8h timeout.
+
+    Gated on ``LIGHTNING_SDK_AVAILABLE=1``: set this env var in lightning-capable
+    CI jobs so SDK enum drift is caught. If the env var is set but
+    ``lightning_sdk`` cannot be imported, the test fails hard — that signals a
+    CI configuration regression rather than an environment without the SDK.
     """
 
-    try:
-        from lightning_sdk import Status
-    except ImportError:
-        pytest.skip("lightning_sdk not installed in this environment")
+    if not os.environ.get("LIGHTNING_SDK_AVAILABLE"):
+        pytest.skip(
+            "set LIGHTNING_SDK_AVAILABLE=1 in lightning-capable CI to enforce "
+            "lightning_sdk.Status enum drift detection"
+        )
+    # ImportError below is a CI bug: env var set but module missing.
+    from lightning_sdk import Status
+
     sdk_status_names = {member.name for member in Status}
     assert launcher.LIGHTNING_TERMINAL_FAILURE_STATUSES <= sdk_status_names, (
         "LIGHTNING_TERMINAL_FAILURE_STATUSES contains names not present in "

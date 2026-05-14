@@ -467,8 +467,10 @@ def case_repo_bootstrap_reloads_local_simsoptpp_over_foreign_module() -> None:
         import simsopt
         import simsoptpp
 
-        assert Path(simsopt.__file__).resolve().is_relative_to(
-            (src_root / "simsopt").resolve()
+        assert (
+            Path(simsopt.__file__)
+            .resolve()
+            .is_relative_to((src_root / "simsopt").resolve())
         )
         assert Path(simsoptpp.__file__) == fake_extension
         assert simsoptpp.using_xsimd is False
@@ -613,7 +615,9 @@ def case_entrypoint_runtime_helper_accepts_multi_platform_env_list() -> None:
     assert os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
 
 
-def case_entrypoint_runtime_helper_promotes_cuda_to_cuda_cpu_for_callback_flags() -> None:
+def case_entrypoint_runtime_helper_promotes_cuda_to_cuda_cpu_for_callback_flags() -> (
+    None
+):
     import os
 
     from repo_bootstrap import configure_entrypoint_jax_runtime
@@ -1253,7 +1257,7 @@ def case_transfer_guard_disallow_allows_squaredfluxjax_construction() -> None:
     assert np.isfinite(mixed_objective.J())
 
 
-def case_transfer_guard_disallow_rejects_clamped_xyztensor_surface_spec() -> None:
+def case_transfer_guard_disallow_allows_clamped_xyztensor_surface_spec() -> None:
     import numpy as np
     import simsopt.config as simsopt_config
     from simsopt.geo import CurveXYZFourier, SurfaceXYZTensorFourier
@@ -1274,12 +1278,9 @@ def case_transfer_guard_disallow_rejects_clamped_xyztensor_surface_spec() -> Non
     curve = CurveXYZFourier(16, 1)
     curve.x = np.array([1.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1])
     bs_jax = BiotSavartJAX([Coil(curve, Current(1.0))])
-    try:
-        SquaredFluxJAX(surf, bs_jax)
-    except NotImplementedError as exc:
-        assert "clamped_dims" in str(exc)
-    else:
-        raise AssertionError("expected clamped SurfaceXYZTensorFourier to fail")
+    objective = SquaredFluxJAX(surf, bs_jax)
+    assert objective._flux_spec.normal.shape == (8, 8, 3)
+    assert np.isfinite(objective.J())
 
 
 def case_transfer_guard_disallow_rejects_squaredfluxjax_surface_without_spec() -> None:
@@ -1730,9 +1731,7 @@ def case_jax_core_specs_are_pytrees() -> None:
     dof_map_leaves, _ = jax.tree_util.tree_flatten(identity_curve_map)
     surface_leaves, _ = jax.tree_util.tree_flatten(surface_spec)
     surface_xyz_leaves, _ = jax.tree_util.tree_flatten(surface_xyz_spec)
-    surface_xyztensor_leaves, _ = jax.tree_util.tree_flatten(
-        surface_xyztensor_spec
-    )
+    surface_xyztensor_leaves, _ = jax.tree_util.tree_flatten(surface_xyztensor_spec)
     zero_rotation_leaves, _ = jax.tree_util.tree_flatten(zero_rotation_spec)
 
     def assert_round_trip(spec):
@@ -2113,6 +2112,51 @@ def case_import_pure_jax_modules() -> None:
     assert callable(stellsym_scatter_indices)
     assert callable(boozer_residual_scalar)
     assert callable(integral_BdotN)
+
+
+def case_public_jax_helpers_are_exposed_on_package_roots() -> None:
+    """Pin the public export surface for the JAX solve/geo helpers.
+
+    The solve helpers are wildcard re-exported from
+    ``simsopt.solve.permanent_magnet_optimization_jax`` and
+    ``simsopt.solve.wireframe_optimization_jax`` whenever JAX is installed.
+    The geo helpers resolve through ``simsopt.geo.__getattr__`` and require
+    both JAX and ``simsoptpp`` to be importable.
+    """
+    import simsopt.solve as solve
+
+    solve_helpers = (
+        "relax_and_split_jax",
+        "GPMO_ArbVec_backtracking_jax",
+        "setup_initial_condition_jax",
+        "optimize_wireframe_jax",
+        "greedy_stellarator_coil_optimization_jax",
+        "regularized_constrained_least_squares_jax",
+    )
+    missing_solve = [name for name in solve_helpers if not hasattr(solve, name)]
+    assert not missing_solve, (
+        f"simsopt.solve is missing public JAX helpers: {missing_solve}"
+    )
+
+    try:
+        from simsoptpp import Curve as _  # type: ignore[import-untyped]  # noqa: F401
+
+        has_simsoptpp = True
+    except (ImportError, AttributeError):
+        has_simsoptpp = False
+
+    if not has_simsoptpp:
+        raise SkippedCase(
+            "simsopt.geo JAX exports require simsoptpp for the lazy-export path"
+        )
+
+    import simsopt.geo as geo
+
+    geo_helpers = ("PermanentMagnetGridJAX", "permanent_magnet_grid_to_jax")
+    missing_geo = [name for name in geo_helpers if not hasattr(geo, name)]
+    assert not missing_geo, (
+        f"simsopt.geo is missing public JAX PM-grid helpers: {missing_geo}"
+    )
 
 
 def case_m5_classes_require_simsoptpp() -> None:

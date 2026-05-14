@@ -1,3 +1,19 @@
+"""AST audit for pytest skip/xfail/subprocess-skip sentinels.
+
+This file checks **static, mechanically detectable** properties — every
+`pytest.mark.skip`/`skipif`/`xfail` and every subprocess-case `_skip_case(...)`
+sentinel must carry a non-empty reason, and tests must not silently swallow
+subprocess skips.
+
+The complementary **human-review** rule for test quality — "what's the
+independent oracle for this assertion?" — lives at
+`tests/REVIEWER_ORACLE_LINT.md`. Oracle quality is not statically detectable
+in general (a re-export `is`-identity check vs. an analytic comparison can
+look identical at the AST level), so it is enforced by reviewer checklist
+during code review of new `test_*_jax_*.py` files. See AI-3 in
+`.artifacts/jax-test-audit-2026-05-13/TEST_QUALITY_TODOS.md`.
+"""
+
 from __future__ import annotations
 
 import ast
@@ -5,6 +21,16 @@ from pathlib import Path
 
 
 _TEST_ROOT = Path(__file__).resolve().parent
+_SUBPROCESS_CASES_DIR = _TEST_ROOT / "subprocess"
+_SKIP_SENTINEL_CALL_NAME = "_skip_case"
+_SUBPROCESS_CASE_NAME_PREFIX = "_run_"
+_SUBPROCESS_CASE_NAME_SUFFIX = "_case"
+_VALUE_DISPATCH_CASE_FUNCTIONS = frozenset(
+    {
+        "_run_legacy_curve_objective_value_case",
+        "_run_legacy_curve_objective_gradient_case",
+    }
+)
 _SKIP_XFAIL_MARKERS = {"skip", "skipif", "xfail"}
 _SKIP_XFAIL_RUNTIME_CALLS = {"skip", "xfail"}
 _MARKER_REASON_POSITION = {
@@ -43,9 +69,8 @@ def _keyword_message(call: ast.Call) -> bool:
 def _has_message(call: ast.Call, *, positional_index: int) -> bool:
     if _keyword_message(call):
         return True
-    return (
-        len(call.args) > positional_index
-        and _is_non_empty_message(call.args[positional_index])
+    return len(call.args) > positional_index and _is_non_empty_message(
+        call.args[positional_index]
     )
 
 
@@ -95,8 +120,7 @@ def _audit_tree(tree: ast.AST, relative_path: Path) -> list[str]:
             positional_index=_MARKER_REASON_POSITION[marker_name],
         ):
             failures.append(
-                f"{relative_path}:{node.lineno}: "
-                f"{call_name} needs a non-empty reason"
+                f"{relative_path}:{node.lineno}: {call_name} needs a non-empty reason"
             )
         if marker_name == "xfail" and not _keyword_bool(node, "strict"):
             failures.append(
@@ -175,5 +199,150 @@ def test_pytest_skip_xfail_contracts_are_explicit_and_ci_audited():
     for path in _iter_test_python_files():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         failures.extend(_audit_tree(tree, path.relative_to(_TEST_ROOT.parent)))
+
+    assert failures == []
+
+
+def _iter_subprocess_case_files() -> list[Path]:
+    if not _SUBPROCESS_CASES_DIR.is_dir():
+        return []
+    return sorted(
+        path for path in _SUBPROCESS_CASES_DIR.glob("*_cases.py") if path.is_file()
+    )
+
+
+def _is_skip_sentinel_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == _SKIP_SENTINEL_CALL_NAME
+    )
+
+
+def _branch_calls_skip_sentinel(statements: list[ast.stmt]) -> bool:
+    return any(
+        isinstance(statement, ast.Expr) and _is_skip_sentinel_call(statement.value)
+        for statement in statements
+    )
+
+
+def _audit_subprocess_case_function(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    relative_path: Path,
+) -> list[str]:
+    failures: list[str] = []
+    if func.name in _VALUE_DISPATCH_CASE_FUNCTIONS:
+        return failures
+    for sub in ast.walk(func):
+        if not isinstance(sub, ast.If):
+            continue
+        body = sub.body
+        if not body or not isinstance(body[-1], ast.Return):
+            continue
+        if body[-1].value is not None or _branch_calls_skip_sentinel(body[:-1]):
+            continue
+        failures.append(
+            f"{relative_path}:{sub.lineno}: silent return in {func.name} — "
+            f"must call {_SKIP_SENTINEL_CALL_NAME}(reason) before returning"
+        )
+        if body[:-1]:
+            failures.append(
+                f"{relative_path}:{body[-1].lineno}: silent return in {func.name} — "
+                "logging or other side effects are not a skip sentinel"
+            )
+    return failures
+
+
+def _audit_subprocess_case_tree(tree: ast.AST, relative_path: Path) -> list[str]:
+    failures: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not (
+            node.name.startswith(_SUBPROCESS_CASE_NAME_PREFIX)
+            and node.name.endswith(_SUBPROCESS_CASE_NAME_SUFFIX)
+        ):
+            continue
+        failures.extend(_audit_subprocess_case_function(node, relative_path))
+    return failures
+
+
+def _audit_subprocess_case_source(source: str) -> list[str]:
+    return _audit_subprocess_case_tree(
+        ast.parse(source),
+        Path("tests/subprocess/example_cases.py"),
+    )
+
+
+def test_subprocess_case_audit_rejects_silent_returns():
+    failures = _audit_subprocess_case_source(
+        """
+def _run_silent_case():
+    if not _configure_backend():
+        return
+    do_work()
+
+
+def _run_silent_gpu_case():
+    gpu = _configure_strict_gpu_fast_backend()
+    if gpu is None:
+        return
+    do_work()
+
+
+def _run_logged_silent_case():
+    if not _configure_backend():
+        print("backend unavailable")
+        return
+    do_work()
+"""
+    )
+
+    assert failures == [
+        "tests/subprocess/example_cases.py:3: silent return in _run_silent_case — "
+        "must call _skip_case(reason) before returning",
+        "tests/subprocess/example_cases.py:10: silent return in _run_silent_gpu_case — "
+        "must call _skip_case(reason) before returning",
+        "tests/subprocess/example_cases.py:16: silent return in _run_logged_silent_case — "
+        "must call _skip_case(reason) before returning",
+        "tests/subprocess/example_cases.py:18: silent return in _run_logged_silent_case — "
+        "logging or other side effects are not a skip sentinel",
+    ]
+
+
+def test_subprocess_case_audit_accepts_skip_sentinel_emissions():
+    assert (
+        _audit_subprocess_case_source(
+            """
+def _run_explicit_skip_case():
+    if not _configure_backend():
+        _skip_case("backend unavailable")
+        return
+    do_work()
+
+
+def _run_explicit_skip_gpu_case():
+    gpu = _configure_strict_gpu_fast_backend()
+    if gpu is None:
+        _skip_case("no gpu device detected")
+        return
+    do_work()
+"""
+        )
+        == []
+    )
+
+
+def test_subprocess_case_audit_covers_all_repo_subprocess_case_files():
+    failures: list[str] = []
+    case_files = _iter_subprocess_case_files()
+    assert case_files, (
+        f"audit must find at least one subprocess case file under {_SUBPROCESS_CASES_DIR}"
+    )
+    for path in case_files:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        failures.extend(
+            _audit_subprocess_case_tree(tree, path.relative_to(_TEST_ROOT.parent))
+        )
 
     assert failures == []

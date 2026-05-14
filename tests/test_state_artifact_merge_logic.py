@@ -1,3 +1,16 @@
+"""Tests the merge logic of the single-stage state artifact.
+
+This file tests *artifact-merge logic*, not real CPU/GPU parity. The helper
+``_cpu_artifact_with_fake_cuda_lane`` exists only to exercise the merge code
+path: it constructs a synthetic CUDA-tagged artifact by relabeling the JAX
+CPU lane, so any "GPU parity" outcome here is structurally guaranteed by
+construction and proves nothing about real JAX-on-GPU behaviour.
+
+Real CPU/GPU JAX parity is tested in
+``tests/integration/test_single_stage_jax_cpu_reference.py`` under
+``TestRealFixtureGpuM5Parity`` (requires a CUDA device).
+"""
+
 import numpy as np
 
 from benchmarks.single_stage_cpp_jax_state_parity import (

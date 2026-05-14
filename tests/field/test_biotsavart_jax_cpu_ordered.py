@@ -12,7 +12,9 @@ Mirrors ``src/simsoptpp/biot_savart_impl.h`` operator-for-operator:
 The Phase 3 acceptance gate matches Phase 2's: byte identity OR documented
 arithmetic-order reason. Today FMA-fusion remains the residual; these tests
 pin the cpu_ordered output within the documented ULP ceiling and assert
-no-regression vs the production matmul kernel.
+no-regression vs the production matmul kernel. The routing test additionally
+asserts the cpu_ordered branch meets the same absolute ULP ceiling, so the
+routing path cannot silently drift while only beating production.
 """
 
 from __future__ import annotations
@@ -22,6 +24,13 @@ import pytest
 
 
 pytestmark = [pytest.mark.parity_census, pytest.mark.boozer]
+
+
+# ULP ceilings for cpu_ordered vs C++ oracle on the NCSX Boozer fixture.
+# Documented arithmetic-order residual is FMA-fusion only; these bounds are
+# the SSOT across every test in this module.
+_BIOT_SAVART_B_ULP_CEILING = 5e-14
+_BIOT_SAVART_DB_ULP_CEILING = 1e-13
 
 
 @pytest.fixture(scope="module")
@@ -99,7 +108,7 @@ def test_bs_cpu_ordered_B_within_ulp_of_cpp(fixture_for_bs_parity):
     cpu_ordered_drift = np.max(np.abs(B_cpu_ordered - B_cpp))
     # FMA-fusion bracket — production drift is ~1e-15; cpu_ordered must not
     # exceed this and must remain within the documented ULP ceiling.
-    assert cpu_ordered_drift < 5e-14
+    assert cpu_ordered_drift < _BIOT_SAVART_B_ULP_CEILING
     assert np.all(np.isfinite(B_cpu_ordered))
 
 
@@ -113,7 +122,7 @@ def test_bs_cpu_ordered_dB_within_ulp_of_cpp(fixture_for_bs_parity):
     _, groups = _grouped_inputs_for_jax(bs_cpu)
     _, dB_cpu_ordered = _accumulate_cpu_ordered(points, groups)
     cpu_ordered_drift = np.max(np.abs(dB_cpu_ordered - dB_cpp))
-    assert cpu_ordered_drift < 1e-13
+    assert cpu_ordered_drift < _BIOT_SAVART_DB_ULP_CEILING
     assert np.all(np.isfinite(dB_cpu_ordered))
 
 
@@ -147,10 +156,18 @@ def test_bs_cpu_ordered_does_not_regress_vs_production(fixture_for_bs_parity):
     assert cpu_dB_drift <= prod_dB_drift * 1.001 + 1e-18
 
 
-def test_field_terms_parity_policy_routes_through_cpu_ordered(
+def test_field_terms_parity_policy_routes_through_cpu_ordered_and_meets_ulp_ceiling(
     fixture_for_bs_parity,
 ):
-    """Confirm ``_field_terms_for_local_label`` honours ``parity_policy``."""
+    """Confirm ``_field_terms_for_local_label`` honours ``parity_policy``.
+
+    Asserts BOTH:
+    * no-regression: ``cpu_ordered`` drift does not exceed ``production`` drift
+      (catches cpu_ordered regressing relative to production);
+    * absolute ULP ceiling: ``cpu_ordered`` drift stays within the documented
+      ULP bound vs the C++ oracle (catches the case where both production
+      and cpu_ordered drift together away from C++).
+    """
     import jax
 
     from simsopt.geo.boozersurface_jax import (
@@ -196,7 +213,12 @@ def test_field_terms_parity_policy_routes_through_cpu_ordered(
     dB_prod = np.asarray(jax.device_get(terms_prod.dB_dX), dtype=np.float64)
     dB_cpu = np.asarray(jax.device_get(terms_cpu.dB_dX), dtype=np.float64)
 
-    # Both should match the C++ oracle within the documented ULP ceiling;
-    # cpu_ordered must not regress.
+    # No-regression: cpu_ordered must match or beat production drift vs C++.
     assert np.max(np.abs(B_cpu - B_cpp)) <= np.max(np.abs(B_prod - B_cpp)) + 1e-18
     assert np.max(np.abs(dB_cpu - dB_cpp)) <= np.max(np.abs(dB_prod - dB_cpp)) + 1e-18
+
+    # Absolute ULP ceiling: cpu_ordered must meet the same hard parity bound
+    # the sibling cpu_ordered tests enforce. This catches the failure mode
+    # where production AND cpu_ordered both drift together away from C++.
+    assert np.max(np.abs(B_cpu - B_cpp)) < _BIOT_SAVART_B_ULP_CEILING
+    assert np.max(np.abs(dB_cpu - dB_cpp)) < _BIOT_SAVART_DB_ULP_CEILING

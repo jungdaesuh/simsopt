@@ -243,26 +243,54 @@ def _cws_artifacts_present(fixture_id: str) -> bool:
     return coils_path.exists() and vmec_path.exists()
 
 
+_CWS_CURVECWSFOURIER_XFAIL_REASON = (
+    "Upstream simsopt.load() cannot currently reconstruct CurveCWSFourier "
+    "saved artifacts, so the parity harness reports verdict='unsupported' "
+    "with 'CurveCWSFourier' in entry['error']. Flip this xfail (delete the "
+    "marker) once the upstream JSON deserializer learns the CurveCWSFourier "
+    "schema and the fixture starts returning verdict in ('pass', 'partial')."
+)
+
+
 @pytest.mark.parametrize(
     "fixture_id",
-    ["cws_saved_local_flux_nfp2", "cws_saved_local_flux_nfp3"],
+    [
+        pytest.param(
+            "cws_saved_local_flux_nfp2",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason=_CWS_CURVECWSFOURIER_XFAIL_REASON,
+            ),
+        ),
+        pytest.param(
+            "cws_saved_local_flux_nfp3",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason=_CWS_CURVECWSFOURIER_XFAIL_REASON,
+            ),
+        ),
+    ],
 )
 def test_cws_saved_local_flux_parity(fixture_id):
     if not _cws_artifacts_present(fixture_id):
         pytest.skip(f"{fixture_id} requires saved CWS artifacts in examples/3_Advanced")
     payload = harness.run_fixtures([fixture_id])
     entry = _select_fixture(payload, fixture_id)
-    if (
+    # Strict xfail trigger: today the harness reports verdict='unsupported'
+    # with 'CurveCWSFourier' in entry['error'] because upstream simsopt.load()
+    # cannot reconstruct the saved CurveCWSFourier artifacts. When the
+    # upstream deserializer fix lands, this assertion will pass, the rest of
+    # the test body will run, and strict-xfail will flag the parameter as
+    # XPASS -> FAIL so the marker must be removed.
+    assert not (
         entry["verdict"] == "unsupported"
         and entry["error"]
         and "CurveCWSFourier" in entry["error"]
-    ):
-        pytest.skip(
-            "Upstream simsopt.load() cannot currently reconstruct "
-            "CurveCWSFourier saved artifacts; the fixture is correctly "
-            "reported as unsupported. Re-enable once the upstream JSON "
-            "deserializer learns the CurveCWSFourier schema."
-        )
+    ), (
+        "upstream CurveCWSFourier deserializer appears fixed: "
+        f"verdict={entry['verdict']!r}, error={entry['error']!r}. "
+        "Remove the xfail marker and re-enable the parity assertions below."
+    )
     assert entry["error"] is None, entry["error"]
     assert entry["verdict"] in ("pass", "partial"), entry
     failing = [

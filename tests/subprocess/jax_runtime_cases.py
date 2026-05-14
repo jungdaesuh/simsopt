@@ -15,6 +15,20 @@ _LOCAL_SIMSOPT_IMPORT_PATHS = (_REPO_ROOT, _SRC_DIR)
 _SINGLE_STAGE_TRANSFER_GUARD_SNAPSHOT_PATH = (
     _REPO_ROOT / "tests" / "test_files" / "single_stage_transfer_guard_snapshot.json"
 )
+_STRICT_CPU_PARITY_SKIP_REASON = (
+    "strict CPU parity backend unavailable: private optimizer runtime not supported"
+)
+_STRICT_GPU_FAST_SKIP_REASON = (
+    "strict GPU fast backend unavailable: no GPU device detected"
+)
+
+
+class SkippedCase(RuntimeError):
+    pass
+
+
+def _skip_case(reason: str) -> None:
+    raise SkippedCase(reason)
 
 
 def _prepend_sys_path(path: Path) -> None:
@@ -235,6 +249,7 @@ def _assert_lbfgs_private_solver_does_not_compile(run_once) -> int:
 
 def _run_compile_count_case(method: OptimizerMethod) -> None:
     if not _configure_strict_cpu_parity_backend():
+        _skip_case(_STRICT_CPU_PARITY_SKIP_REASON)
         return
 
     half = jax.device_put(np.asarray(0.5, dtype=np.float64))
@@ -288,6 +303,7 @@ def _run_biot_savart_point_chunking_case() -> None:
 
 def _run_target_compile_count_case() -> None:
     if not _configure_strict_cpu_parity_backend():
+        _skip_case(_STRICT_CPU_PARITY_SKIP_REASON)
         return
 
     half = jax.device_put(np.asarray(0.5, dtype=np.float64))
@@ -344,6 +360,7 @@ def _load_stage2_script_module():
 
 def _run_stage2_target_compile_count_case() -> None:
     if not _configure_strict_cpu_parity_backend():
+        _skip_case(_STRICT_CPU_PARITY_SKIP_REASON)
         return
 
     stage2_script = _load_stage2_script_module()
@@ -555,6 +572,7 @@ def _assert_finite_array(value, *, expected_shape=None) -> np.ndarray:
 
 def _run_single_stage_target_runtime_bundle_transfer_guard_case() -> None:
     if not _configure_strict_cpu_parity_backend():
+        _skip_case(_STRICT_CPU_PARITY_SKIP_REASON)
         return
 
     (
@@ -711,6 +729,7 @@ def _build_curvecws_surface() -> SurfaceRZFourier:
 def _run_grouped_biot_savart_gpu_spec_eval_case() -> None:
     gpu = _configure_strict_gpu_fast_backend()
     if gpu is None:
+        _skip_case(_STRICT_GPU_FAST_SKIP_REASON)
         return
 
     points, gamma, gammadash = _build_single_grouped_biot_savart_device_geometry(gpu)
@@ -1474,6 +1493,7 @@ def _run_shifted_grid_axis_sample_case() -> None:
 
 def _run_gamma_2d_eager_host_constants_case() -> None:
     if _configure_strict_gpu_fast_backend() is None:
+        _skip_case(_STRICT_GPU_FAST_SKIP_REASON)
         return
 
     modes = np.zeros(10, dtype=np.float64)
@@ -1487,6 +1507,7 @@ def _run_gamma_2d_eager_host_constants_case() -> None:
 def _run_closed_curve_self_intersection_summary_case() -> None:
     gpu = _configure_strict_gpu_fast_backend()
     if gpu is None:
+        _skip_case(_STRICT_GPU_FAST_SKIP_REASON)
         return
 
     gamma = jax.device_put(
@@ -1514,6 +1535,7 @@ def _run_closed_curve_self_intersection_summary_case() -> None:
 def _run_single_stage_surface_self_intersection_case() -> None:
     gpu = _configure_strict_gpu_fast_backend()
     if gpu is None:
+        _skip_case(_STRICT_GPU_FAST_SKIP_REASON)
         return
 
     from examples.single_stage_optimization.SINGLE_STAGE import (
@@ -1605,6 +1627,7 @@ def _run_single_stage_surface_self_intersection_case() -> None:
 def _run_surface_xyztensorfourier_gamma_from_dofs_case() -> None:
     gpu = _configure_strict_gpu_fast_backend()
     if gpu is None:
+        _skip_case(_STRICT_GPU_FAST_SKIP_REASON)
         return
 
     surf = SurfaceXYZTensorFourier(
@@ -2053,6 +2076,7 @@ def _build_stage2_target_objective_test_bundle(gpu: jax.Device):
 def _run_stage2_target_objective_host_closure_constants_case() -> None:
     gpu = _configure_strict_gpu_fast_backend()
     if gpu is None:
+        _skip_case(_STRICT_GPU_FAST_SKIP_REASON)
         return
 
     bundle, dofs_jax = _build_stage2_target_objective_test_bundle(gpu)
@@ -2064,6 +2088,7 @@ def _run_stage2_target_objective_host_closure_constants_case() -> None:
 def _run_stage2_target_objective_ondevice_entry_case() -> None:
     gpu = _configure_strict_gpu_fast_backend()
     if gpu is None:
+        _skip_case(_STRICT_GPU_FAST_SKIP_REASON)
         return
 
     bundle, dofs_jax = _build_stage2_target_objective_test_bundle(gpu)
@@ -2081,6 +2106,7 @@ def _run_stage2_target_objective_ondevice_entry_case() -> None:
 def _run_grouped_biot_savart_gpu_current_arrays_case() -> None:
     gpu = _configure_strict_gpu_fast_backend()
     if gpu is None:
+        _skip_case(_STRICT_GPU_FAST_SKIP_REASON)
         return
 
     points, gamma0, gamma1, gammadash0, gammadash1 = (
@@ -2104,6 +2130,7 @@ def _run_grouped_biot_savart_gpu_current_arrays_case() -> None:
 def _run_grouped_biot_savart_host_scalar_currents_case() -> None:
     gpu = _configure_strict_gpu_fast_backend()
     if gpu is None:
+        _skip_case(_STRICT_GPU_FAST_SKIP_REASON)
         return
 
     points, gamma0, gamma1, gammadash0, gammadash1 = (
@@ -2128,6 +2155,7 @@ def _run_grouped_biot_savart_host_scalar_currents_case() -> None:
 def _run_grouped_biot_savart_host_spec_vjp_case() -> None:
     gpu = _configure_strict_gpu_fast_backend()
     if gpu is None:
+        _skip_case(_STRICT_GPU_FAST_SKIP_REASON)
         return
 
     points = jax.device_put(
@@ -2152,6 +2180,7 @@ def _run_grouped_biot_savart_host_spec_vjp_case() -> None:
 
 def _run_mutable_objective_state_case() -> None:
     if not _configure_strict_cpu_parity_backend():
+        _skip_case(_STRICT_CPU_PARITY_SKIP_REASON)
         return
 
     objective = _ShiftedQuadratic([0.0, 0.0])
@@ -2175,6 +2204,7 @@ def _run_mutable_objective_state_case() -> None:
 
 def _run_structured_mutable_objective_state_case() -> None:
     if not _configure_strict_cpu_parity_backend():
+        _skip_case(_STRICT_CPU_PARITY_SKIP_REASON)
         return
 
     objective = _StructuredShiftedQuadraticValueAndGrad([0.0, 0.0])
@@ -2259,6 +2289,119 @@ def _parse_legacy_curve_objective_gradient_case(
     raise ValueError(f"unsupported legacy curve objective gradient case {case!r}")
 
 
+def _dispatch_case(args: argparse.Namespace) -> None:
+    if args.case == "compile-count":
+        _run_compile_count_case(_parse_optimizer_method(args.method))
+        return
+    if args.case == "biot-savart-point-chunking":
+        _run_biot_savart_point_chunking_case()
+        return
+    if args.case == "target-compile-count":
+        _run_target_compile_count_case()
+        return
+    if args.case == "stage2-target-compile-count":
+        _run_stage2_target_compile_count_case()
+        return
+    if args.case == "mutable-objective-state":
+        _run_mutable_objective_state_case()
+        return
+    if args.case == "structured-mutable-objective-state":
+        _run_structured_mutable_objective_state_case()
+        return
+    if args.case == "grouped-gpu-spec-eval":
+        _run_grouped_biot_savart_gpu_spec_eval_case()
+        return
+    if args.case == "grouped-explicit-point-sharding":
+        _run_grouped_biot_savart_explicit_point_sharding_case()
+        return
+    if args.case == "grouped-coil-collective":
+        _run_grouped_biot_savart_coil_collective_case()
+        return
+    if args.case == "grouped-points-coils-collective":
+        _run_grouped_biot_savart_points_coils_collective_case()
+        return
+    if args.case == "grouped-points-coils-non-divisible":
+        _run_grouped_biot_savart_points_coils_non_divisible_case()
+        return
+    if args.case == "pairwise-penalty-explicit-row-sharding":
+        _run_pairwise_penalty_explicit_row_sharding_case()
+        return
+    if args.case == "shifted-grid-axis-sample":
+        _run_shifted_grid_axis_sample_case()
+        return
+    if args.case == "gamma-2d-eager-host-constants":
+        _run_gamma_2d_eager_host_constants_case()
+        return
+    if args.case == "closed-curve-self-intersection-summary":
+        _run_closed_curve_self_intersection_summary_case()
+        return
+    if args.case == "single-stage-surface-self-intersection":
+        _run_single_stage_surface_self_intersection_case()
+        return
+    if args.case == "surface-xyztensorfourier-gamma-from-dofs":
+        _run_surface_xyztensorfourier_gamma_from_dofs_case()
+        return
+    if args.case == "project-surface-dofs-to-resolution":
+        _run_project_surface_dofs_to_resolution_case()
+        return
+    if args.case == "coil-symmetry-spec-identity-default":
+        _run_coil_symmetry_spec_identity_default_case()
+        return
+    if args.case == "pairwise-curve-penalty-pure-functions":
+        _run_pairwise_curve_penalty_pure_functions_case()
+        return
+    if args.case == "surfacerzfourier-spec-defaults":
+        _run_surfacerzfourier_spec_defaults_case()
+        return
+    if args.case == "surface-rzfourier-gamma-from-spec":
+        _run_surface_rzfourier_gamma_from_spec_case()
+        return
+    if args.case == "surface-rzfourier-normal-from-spec":
+        _run_surface_rzfourier_normal_from_spec_case()
+        return
+    if args.case == "legacy-curve-objective-value":
+        _run_legacy_curve_objective_value_case(
+            _parse_legacy_curve_objective_value_case(args.objective)
+        )
+        return
+    if args.case == "legacy-curve-objective-gradient":
+        _run_legacy_curve_objective_gradient_case(
+            _parse_legacy_curve_objective_gradient_case(args.objective)
+        )
+        return
+    if args.case == "curvecwsfouriercpp-init":
+        _run_curvecwsfouriercpp_init_case()
+        return
+    if args.case == "curvecwsfouriercpp-curve-length-gradient":
+        _run_curvecwsfouriercpp_curve_length_gradient_case()
+        return
+    if args.case == "curvecwsfouriercpp-curve-distance-gradient":
+        _run_curvecwsfouriercpp_curve_distance_gradient_case()
+        return
+    if args.case == "curveperturbed-init":
+        _run_curveperturbed_init_case()
+        return
+    if args.case == "stage2-target-objective-host-closure-constants":
+        _run_stage2_target_objective_host_closure_constants_case()
+        return
+    if args.case == "stage2-target-objective-ondevice-entry":
+        _run_stage2_target_objective_ondevice_entry_case()
+        return
+    if args.case == "single-stage-target-runtime-transfer-guard":
+        _run_single_stage_target_runtime_bundle_transfer_guard_case()
+        return
+    if args.case == "grouped-gpu-current-arrays":
+        _run_grouped_biot_savart_gpu_current_arrays_case()
+        return
+    if args.case == "grouped-host-scalar-currents":
+        _run_grouped_biot_savart_host_scalar_currents_case()
+        return
+    if args.case == "grouped-host-spec-vjp":
+        _run_grouped_biot_savart_host_spec_vjp_case()
+        return
+    raise ValueError(f"unsupported subprocess case {args.case!r}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Process-isolated JAX runtime regression cases.",
@@ -2332,116 +2475,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    if args.case == "compile-count":
-        _run_compile_count_case(_parse_optimizer_method(args.method))
-        return 0
-    if args.case == "biot-savart-point-chunking":
-        _run_biot_savart_point_chunking_case()
-        return 0
-    if args.case == "target-compile-count":
-        _run_target_compile_count_case()
-        return 0
-    if args.case == "stage2-target-compile-count":
-        _run_stage2_target_compile_count_case()
-        return 0
-    if args.case == "mutable-objective-state":
-        _run_mutable_objective_state_case()
-        return 0
-    if args.case == "structured-mutable-objective-state":
-        _run_structured_mutable_objective_state_case()
-        return 0
-    if args.case == "grouped-gpu-spec-eval":
-        _run_grouped_biot_savart_gpu_spec_eval_case()
-        return 0
-    if args.case == "grouped-explicit-point-sharding":
-        _run_grouped_biot_savart_explicit_point_sharding_case()
-        return 0
-    if args.case == "grouped-coil-collective":
-        _run_grouped_biot_savart_coil_collective_case()
-        return 0
-    if args.case == "grouped-points-coils-collective":
-        _run_grouped_biot_savart_points_coils_collective_case()
-        return 0
-    if args.case == "grouped-points-coils-non-divisible":
-        _run_grouped_biot_savart_points_coils_non_divisible_case()
-        return 0
-    if args.case == "pairwise-penalty-explicit-row-sharding":
-        _run_pairwise_penalty_explicit_row_sharding_case()
-        return 0
-    if args.case == "shifted-grid-axis-sample":
-        _run_shifted_grid_axis_sample_case()
-        return 0
-    if args.case == "gamma-2d-eager-host-constants":
-        _run_gamma_2d_eager_host_constants_case()
-        return 0
-    if args.case == "closed-curve-self-intersection-summary":
-        _run_closed_curve_self_intersection_summary_case()
-        return 0
-    if args.case == "single-stage-surface-self-intersection":
-        _run_single_stage_surface_self_intersection_case()
-        return 0
-    if args.case == "surface-xyztensorfourier-gamma-from-dofs":
-        _run_surface_xyztensorfourier_gamma_from_dofs_case()
-        return 0
-    if args.case == "project-surface-dofs-to-resolution":
-        _run_project_surface_dofs_to_resolution_case()
-        return 0
-    if args.case == "coil-symmetry-spec-identity-default":
-        _run_coil_symmetry_spec_identity_default_case()
-        return 0
-    if args.case == "pairwise-curve-penalty-pure-functions":
-        _run_pairwise_curve_penalty_pure_functions_case()
-        return 0
-    if args.case == "surfacerzfourier-spec-defaults":
-        _run_surfacerzfourier_spec_defaults_case()
-        return 0
-    if args.case == "surface-rzfourier-gamma-from-spec":
-        _run_surface_rzfourier_gamma_from_spec_case()
-        return 0
-    if args.case == "surface-rzfourier-normal-from-spec":
-        _run_surface_rzfourier_normal_from_spec_case()
-        return 0
-    if args.case == "legacy-curve-objective-value":
-        _run_legacy_curve_objective_value_case(
-            _parse_legacy_curve_objective_value_case(args.objective)
+    try:
+        _dispatch_case(args)
+    except SkippedCase as exc:
+        print(
+            json.dumps(
+                {
+                    "case": args.case,
+                    "checked": False,
+                    "skipped": True,
+                    "skip_reason": str(exc),
+                },
+                sort_keys=True,
+            )
         )
-        return 0
-    if args.case == "legacy-curve-objective-gradient":
-        _run_legacy_curve_objective_gradient_case(
-            _parse_legacy_curve_objective_gradient_case(args.objective)
-        )
-        return 0
-    if args.case == "curvecwsfouriercpp-init":
-        _run_curvecwsfouriercpp_init_case()
-        return 0
-    if args.case == "curvecwsfouriercpp-curve-length-gradient":
-        _run_curvecwsfouriercpp_curve_length_gradient_case()
-        return 0
-    if args.case == "curvecwsfouriercpp-curve-distance-gradient":
-        _run_curvecwsfouriercpp_curve_distance_gradient_case()
-        return 0
-    if args.case == "curveperturbed-init":
-        _run_curveperturbed_init_case()
-        return 0
-    if args.case == "stage2-target-objective-host-closure-constants":
-        _run_stage2_target_objective_host_closure_constants_case()
-        return 0
-    if args.case == "stage2-target-objective-ondevice-entry":
-        _run_stage2_target_objective_ondevice_entry_case()
-        return 0
-    if args.case == "single-stage-target-runtime-transfer-guard":
-        _run_single_stage_target_runtime_bundle_transfer_guard_case()
-        return 0
-    if args.case == "grouped-gpu-current-arrays":
-        _run_grouped_biot_savart_gpu_current_arrays_case()
-        return 0
-    if args.case == "grouped-host-scalar-currents":
-        _run_grouped_biot_savart_host_scalar_currents_case()
-        return 0
-    if args.case == "grouped-host-spec-vjp":
-        _run_grouped_biot_savart_host_spec_vjp_case()
-        return 0
-    raise ValueError(f"unsupported subprocess case {args.case!r}")
+    return 0
 
 
 if __name__ == "__main__":
