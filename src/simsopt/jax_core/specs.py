@@ -93,6 +93,120 @@ jax.tree_util.register_dataclass(
 
 
 @dataclass(frozen=True)
+class CurveXYZFourierSymmetriesSpec:
+    """Immutable payload for pure JAX CurveXYZFourierSymmetries geometry.
+
+    Mirrors ``simsopt.geo.curvexyzfouriersymmetries.CurveXYZFourierSymmetries``
+    constructor parameters needed by ``jaxXYZFourierSymmetriescurve_pure``.
+    ``nfp`` and ``ntor`` must be coprime (enforced at host-side construction;
+    the spec is the frozen runtime payload).
+    """
+
+    dofs: jax.Array
+    quadpoints: jax.Array
+    order: int
+    nfp: int
+    stellsym: bool
+    ntor: int
+
+
+jax.tree_util.register_dataclass(
+    CurveXYZFourierSymmetriesSpec,
+    data_fields=["dofs", "quadpoints"],
+    meta_fields=["order", "nfp", "stellsym", "ntor"],
+)
+
+
+@dataclass(frozen=True)
+class SurfaceGarabedianSpec:
+    """Immutable payload for pure JAX SurfaceGarabedian geometry.
+
+    Mirrors ``simsopt.geo.surfacegarabedian.SurfaceGarabedian`` constructor
+    parameters and the flattened Δ_{m,n} DOF buffer. The downstream
+    converter ``garabedian_to_rzfourier_spec`` consumes the Δ array plus
+    the (mmin, mmax, nmin, nmax) shape meta to produce a
+    ``SurfaceRZFourierSpec`` consumable by the existing item-05 / surface
+    RZFourier JAX pipeline.
+
+    Stellsym is hard-coded True on the host class (and on this spec) per
+    the upstream contract — non-stellsym Garabedian surfaces would
+    require imaginary Δ values, which the upstream class explicitly
+    rejects.
+    """
+
+    dofs: jax.Array
+    quadpoints_phi: jax.Array
+    quadpoints_theta: jax.Array
+    nfp: int
+    mmin: int
+    mmax: int
+    nmin: int
+    nmax: int
+
+
+jax.tree_util.register_dataclass(
+    SurfaceGarabedianSpec,
+    data_fields=["dofs", "quadpoints_phi", "quadpoints_theta"],
+    meta_fields=["nfp", "mmin", "mmax", "nmin", "nmax"],
+)
+
+
+@dataclass(frozen=True)
+class SurfaceHennebergSpec:
+    """Immutable payload for pure JAX SurfaceHenneberg geometry.
+
+    Mirrors ``simsopt.geo.surfacehenneberg.SurfaceHenneberg`` state used by
+    the ``gamma_impl`` / ``gammadash1_impl`` / ``gammadash2_impl`` kernels
+    (see ``surfacehenneberg.py:588-740`` for the CPU oracle and the
+    Henneberg-Helander-Drevlak paper *J. Plasma Phys.* 87, 905870503 (2021)
+    for the parameterisation).
+
+    DOF families
+    ------------
+    - ``R0nH``  : shape ``(nmax+1,)``, coefficients of ``cos(nfp·n·φ)`` in
+      ``R0H(φ)``. Index ``n`` runs ``0..nmax``.
+    - ``Z0nH``  : shape ``(nmax+1,)``, coefficients of ``sin(nfp·n·φ)`` in
+      ``Z0H(φ)``. Index ``0`` is always zero (no ``sin(0)`` mode); the slot
+      is retained so the host-class flat DOF layout matches.
+    - ``bn``    : shape ``(nmax+1,)``, coefficients of ``cos(nfp·n·φ)`` in
+      ``b(φ)``. Index ``n`` runs ``0..nmax``.
+    - ``rhomn`` : shape ``(mmax+1, 2·nmax+1)``, coefficients of
+      ``cos(m·θ + nfp·n·φ - α·φ)`` in ``ρ(θ,φ)``. Column index is
+      ``n + nmax``. The ``(m=0, n<=0)`` cells are zero by convention (the
+      host class never writes them).
+
+    The discrete ``alpha_fac`` ∈ {-1, 0, +1} is the only freedom in the
+    helicity selector ``α = 0.5·nfp·alpha_fac``. Stellsym is hard-coded
+    True on the host class (and on this spec).
+    """
+
+    R0nH: jax.Array
+    Z0nH: jax.Array
+    bn: jax.Array
+    rhomn: jax.Array
+    quadpoints_phi: jax.Array
+    quadpoints_theta: jax.Array
+    nfp: int
+    alpha_fac: int
+    mmax: int
+    nmax: int
+
+
+jax.tree_util.register_dataclass(
+    SurfaceHennebergSpec,
+    data_fields=[
+        "R0nH",
+        "Z0nH",
+        "bn",
+        "rhomn",
+        "quadpoints_phi",
+        "quadpoints_theta",
+    ],
+    meta_fields=["nfp", "alpha_fac", "mmax", "nmax"],
+)
+
+
+@dataclass(frozen=True)
 class OptimizableDofMapSpec:
     """Immutable mapping from an owner's full DOF vector into one nested Optimizable."""
 
@@ -384,12 +498,13 @@ class SurfaceXYZTensorFourierSpec:
     stellsym: bool
     mpol: int
     ntor: int
+    clamped_dims: tuple[bool, bool, bool] = (False, False, False)
 
 
 jax.tree_util.register_dataclass(
     SurfaceXYZTensorFourierSpec,
     data_fields=["dofs", "quadpoints_phi", "quadpoints_theta", "scatter_indices"],
-    meta_fields=["nfp", "stellsym", "mpol", "ntor"],
+    meta_fields=["nfp", "stellsym", "mpol", "ntor", "clamped_dims"],
 )
 
 
@@ -568,6 +683,7 @@ CurveSpec = Union[
     CurveRZFourierSpec,
     CurvePlanarFourierSpec,
     CurveHelicalSpec,
+    CurveXYZFourierSymmetriesSpec,
     CurveCWSFourierRZSpec,
     CurvePerturbedSpec,
     CurveFilamentSpec,
@@ -578,6 +694,7 @@ CurveSpecKind = Literal[
     "rz_fourier",
     "planar_fourier",
     "helical",
+    "xyz_fourier_symmetries",
     "cws_fourier_rz",
     "perturbed",
     "filament",
@@ -594,6 +711,8 @@ def curve_spec_kind(spec: CurveSpec) -> CurveSpecKind:
         return "planar_fourier"
     if isinstance(spec, CurveHelicalSpec):
         return "helical"
+    if isinstance(spec, CurveXYZFourierSymmetriesSpec):
+        return "xyz_fourier_symmetries"
     if isinstance(spec, CurveCWSFourierRZSpec):
         return "cws_fourier_rz"
     if isinstance(spec, CurvePerturbedSpec):
@@ -644,6 +763,290 @@ def make_curve_rzfourier_spec(
         order=int(order),
         nfp=int(nfp),
         stellsym=bool(stellsym),
+    )
+
+
+def make_curve_xyzfouriersymmetries_spec(
+    *,
+    dofs: object,
+    quadpoints: object,
+    order: int,
+    nfp: int,
+    stellsym: bool,
+    ntor: int,
+) -> CurveXYZFourierSymmetriesSpec:
+    from math import gcd
+
+    nfp_int = int(nfp)
+    ntor_int = int(ntor)
+    if gcd(ntor_int, nfp_int) != 1:
+        raise ValueError(
+            "CurveXYZFourierSymmetriesSpec requires nfp and ntor coprime; "
+            f"got nfp={nfp_int}, ntor={ntor_int}"
+        )
+    return CurveXYZFourierSymmetriesSpec(
+        dofs=_as_float64_array(dofs),
+        quadpoints=_as_float64_array(quadpoints),
+        order=int(order),
+        nfp=nfp_int,
+        stellsym=bool(stellsym),
+        ntor=ntor_int,
+    )
+
+
+def make_surface_garabedian_spec(
+    *,
+    dofs: object,
+    quadpoints_phi: object,
+    quadpoints_theta: object,
+    nfp: int,
+    mmin: int,
+    mmax: int,
+    nmin: int,
+    nmax: int,
+) -> SurfaceGarabedianSpec:
+    """Build a ``SurfaceGarabedianSpec`` from the host-class state.
+
+    The Δ_{m,n} buffer is captured as a flat float64 array; the (mmin,
+    mmax, nmin, nmax) shape parameters are static meta_fields so they
+    seed the JIT cache as compile keys.
+    """
+    return SurfaceGarabedianSpec(
+        dofs=_as_float64_array(dofs),
+        quadpoints_phi=_as_float64_array(quadpoints_phi),
+        quadpoints_theta=_as_float64_array(quadpoints_theta),
+        nfp=int(nfp),
+        mmin=int(mmin),
+        mmax=int(mmax),
+        nmin=int(nmin),
+        nmax=int(nmax),
+    )
+
+
+def _garabedian_to_rzfourier_indices(
+    *, mmin: int, mmax: int, nmin: int, nmax: int
+) -> tuple[
+    int,
+    int,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    """Pre-compute the static (m, n) → Δ index mapping at host time.
+
+    Returns ``(mpol, ntor, idx1, idx2, rc_has1, rc_has2, zs_has1,
+    zs_has2)``. The rc and zs gathers differ at the (m=0, n=0) slot:
+    rc[0, 0] = Δ[1, 0] (single contribution) but zs[0, 0] = 0, so the
+    two output channels need separate masks.
+
+    For all other (m, n) inside the loop range, rc and zs share the
+    standard Δ1 ± Δ2 pattern, masked by whether each (1±m, ±n) lookup
+    lies inside the Δ rectangle.
+    """
+    mpol = int(max(1, mmax - 1, 1 - mmin))
+    ntor = int(max(nmax, -nmin))
+    ndim = nmax - nmin + 1
+    width = 2 * ntor + 1
+    height = mpol + 1
+
+    delta_idx1 = np.zeros((height, width), dtype=np.int64)
+    delta_idx2 = np.zeros((height, width), dtype=np.int64)
+    rc_has1 = np.zeros((height, width), dtype=np.bool_)
+    rc_has2 = np.zeros((height, width), dtype=np.bool_)
+    zs_has1 = np.zeros((height, width), dtype=np.bool_)
+    zs_has2 = np.zeros((height, width), dtype=np.bool_)
+
+    # CPU oracle (surfacegarabedian.py:171-184):
+    #   rc[0, 0] = Δ[1, 0]                              (set explicitly)
+    #   for m in range(mpol+1):
+    #       n_start = 1 if m == 0 else -ntor
+    #       for n in range(n_start, ntor+1):
+    #           Δ1 = Δ[1-m, -n] if in range else 0
+    #           Δ2 = Δ[1+m, n] if in range else 0
+    #           rc[m, n] = Δ1 + Δ2;  zs[m, n] = Δ1 - Δ2
+    # Negative-n entries at m=0 are never written and remain zero.
+    # The (m=0, n=0) entry is set from Δ[1, 0] alone — *not* doubled —
+    # and zs[0, 0] is never touched (stays 0).
+    for m_out in range(height):
+        n_start = 1 if m_out == 0 else -ntor
+        for n_out in range(n_start, ntor + 1):
+            n_out_idx = n_out + ntor
+
+            mA, nA = 1 - m_out, -n_out
+            mB, nB = 1 + m_out, n_out
+
+            if mmin <= mA <= mmax and nmin <= nA <= nmax:
+                row = mA - mmin
+                col = nA - nmin
+                delta_idx1[m_out, n_out_idx] = row * ndim + col
+                rc_has1[m_out, n_out_idx] = True
+                zs_has1[m_out, n_out_idx] = True
+
+            if mmin <= mB <= mmax and nmin <= nB <= nmax:
+                row = mB - mmin
+                col = nB - nmin
+                delta_idx2[m_out, n_out_idx] = row * ndim + col
+                rc_has2[m_out, n_out_idx] = True
+                zs_has2[m_out, n_out_idx] = True
+
+    # Handle (m=0, n=0) explicitly: rc gets Δ[1, 0]; zs stays 0.
+    if mmin <= 1 <= mmax and nmin <= 0 <= nmax:
+        col = -nmin
+        row = 1 - mmin
+        delta_idx1[0, ntor] = row * ndim + col
+        rc_has1[0, ntor] = True
+        # zs_has1[0, ntor] stays False (zs[0, 0] is never set).
+
+    return (
+        mpol,
+        ntor,
+        delta_idx1,
+        delta_idx2,
+        rc_has1,
+        rc_has2,
+        zs_has1,
+        zs_has2,
+    )
+
+
+def garabedian_to_rzfourier_spec(
+    garabedian_spec: SurfaceGarabedianSpec,
+) -> SurfaceRZFourierSpec:
+    """Convert a ``SurfaceGarabedianSpec`` to an equivalent ``SurfaceRZFourierSpec``.
+
+    Mirrors ``SurfaceGarabedian.to_RZFourier`` (see
+    ``src/simsopt/geo/surfacegarabedian.py:161-186``) but stays pure
+    functional / JAX-friendly: the (m, n) -> Δ index mapping is static
+    metadata, and the per-mode conversion is a gather followed by the
+    same add/subtract algebra as the CPU oracle.
+
+    Stellsym=True is the host-class invariant; the resulting RZ spec
+    therefore has all-zero ``rs`` and ``zc`` buffers.
+    """
+    (
+        mpol,
+        ntor,
+        idx1,
+        idx2,
+        rc_has1,
+        rc_has2,
+        zs_has1,
+        zs_has2,
+    ) = _garabedian_to_rzfourier_indices(
+        mmin=garabedian_spec.mmin,
+        mmax=garabedian_spec.mmax,
+        nmin=garabedian_spec.nmin,
+        nmax=garabedian_spec.nmax,
+    )
+
+    dofs = garabedian_spec.dofs
+    idx1_jax = _as_int32_array(idx1)
+    idx2_jax = _as_int32_array(idx2)
+    delta1 = jnp.take(dofs, idx1_jax)
+    delta2 = jnp.take(dofs, idx2_jax)
+    zero = delta1 - delta1
+
+    def mask(mask_array: np.ndarray) -> jax.Array:
+        return _as_int32_array(mask_array).astype(jnp.bool_)
+
+    rc = jnp.where(mask(rc_has1), delta1, zero) + jnp.where(mask(rc_has2), delta2, zero)
+    zs = jnp.where(mask(zs_has1), delta1, zero) - jnp.where(mask(zs_has2), delta2, zero)
+
+    zero_like_rc = rc - rc
+    return SurfaceRZFourierSpec(
+        rc=rc,
+        zs=zs,
+        rs=zero_like_rc,
+        zc=zero_like_rc,
+        quadpoints_phi=garabedian_spec.quadpoints_phi,
+        quadpoints_theta=garabedian_spec.quadpoints_theta,
+        nfp=garabedian_spec.nfp,
+        stellsym=True,
+        mpol=int(mpol),
+        ntor=int(ntor),
+    )
+
+
+def make_surface_henneberg_spec(
+    *,
+    R0nH: object,
+    Z0nH: object,
+    bn: object,
+    rhomn: object,
+    quadpoints_phi: object,
+    quadpoints_theta: object,
+    nfp: int,
+    alpha_fac: int,
+    mmax: int,
+    nmax: int,
+) -> SurfaceHennebergSpec:
+    """Build a ``SurfaceHennebergSpec`` from host-class state.
+
+    Mirrors the four DOF families of
+    ``simsopt.geo.surfacehenneberg.SurfaceHenneberg`` plus the discrete
+    ``alpha_fac`` ∈ {-1, 0, +1}. Shape parameters are static meta_fields
+    that seed the JIT cache as compile keys.
+
+    Raises
+    ------
+    ValueError
+        If ``alpha_fac`` is not in ``{-1, 0, 1}`` or if any of the DOF
+        arrays disagrees with the declared ``(mmax, nmax)`` shape.
+    """
+    nfp_int = int(nfp)
+    if nfp_int < 1:
+        raise ValueError(f"nfp must be >= 1, got {nfp_int}")
+
+    mmax_int = int(mmax)
+    if mmax_int < 1:
+        raise ValueError(f"mmax must be >= 1, got {mmax_int}")
+
+    nmax_int = int(nmax)
+    if nmax_int < 0:
+        raise ValueError(f"nmax must be >= 0, got {nmax_int}")
+
+    alpha_int = int(alpha_fac)
+    if alpha_int not in (-1, 0, 1):
+        raise ValueError(f"alpha_fac must be one of -1, 0, +1; got {alpha_int}")
+
+    R0nH_jax = _as_float64_array(R0nH)
+    Z0nH_jax = _as_float64_array(Z0nH)
+    bn_jax = _as_float64_array(bn)
+    rhomn_jax = _as_float64_array(rhomn)
+
+    expected_1d = (nmax_int + 1,)
+    expected_2d = (mmax_int + 1, 2 * nmax_int + 1)
+    if R0nH_jax.shape != expected_1d:
+        raise ValueError(
+            f"R0nH shape mismatch: expected {expected_1d}, got {R0nH_jax.shape}"
+        )
+    if Z0nH_jax.shape != expected_1d:
+        raise ValueError(
+            f"Z0nH shape mismatch: expected {expected_1d}, got {Z0nH_jax.shape}"
+        )
+    if bn_jax.shape != expected_1d:
+        raise ValueError(
+            f"bn shape mismatch: expected {expected_1d}, got {bn_jax.shape}"
+        )
+    if rhomn_jax.shape != expected_2d:
+        raise ValueError(
+            f"rhomn shape mismatch: expected {expected_2d}, got {rhomn_jax.shape}"
+        )
+
+    return SurfaceHennebergSpec(
+        R0nH=R0nH_jax,
+        Z0nH=Z0nH_jax,
+        bn=bn_jax,
+        rhomn=rhomn_jax,
+        quadpoints_phi=_as_float64_array(quadpoints_phi),
+        quadpoints_theta=_as_float64_array(quadpoints_theta),
+        nfp=nfp_int,
+        alpha_fac=alpha_int,
+        mmax=mmax_int,
+        nmax=nmax_int,
     )
 
 
@@ -1148,10 +1551,17 @@ def make_surface_xyz_tensor_fourier_spec(
     mpol: int,
     ntor: int,
     scatter_indices: object | None = None,
+    clamped_dims: tuple[bool, bool, bool] = (False, False, False),
 ) -> SurfaceXYZTensorFourierSpec:
     mpol_int = int(mpol)
     ntor_int = int(ntor)
     stellsym_bool = bool(stellsym)
+    clamped_tuple = tuple(bool(flag) for flag in clamped_dims)
+    if len(clamped_tuple) != 3:
+        raise ValueError(
+            "clamped_dims must have exactly 3 boolean flags (x, y, z); "
+            f"got length {len(clamped_tuple)}"
+        )
     return SurfaceXYZTensorFourierSpec(
         dofs=_as_float64_array(dofs),
         quadpoints_phi=_as_float64_array(quadpoints_phi),
@@ -1166,4 +1576,5 @@ def make_surface_xyz_tensor_fourier_spec(
         stellsym=stellsym_bool,
         mpol=mpol_int,
         ntor=ntor_int,
+        clamped_dims=clamped_tuple,
     )

@@ -76,6 +76,37 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ..field.boozermagneticfield_jax import (
+    BoozerRadialInterpolantFrozenState,
+    _eval_dGds as _radial_dGds,
+    _eval_dIds as _radial_dIds,
+    _eval_dKdtheta as _radial_dKdtheta,
+    _eval_dKdzeta as _radial_dKdzeta,
+    _eval_dmodBds as _radial_dmodBds,
+    _eval_dmodBdtheta as _radial_dmodBdtheta,
+    _eval_dmodBdzeta as _radial_dmodBdzeta,
+    _eval_G as _radial_G,
+    _eval_I as _radial_I,
+    _eval_iota as _radial_iota,
+    _eval_K as _radial_K,
+    _eval_modB as _radial_modB,
+)
+from .boozer_analytic import (
+    BoozerAnalyticFrozenState,
+    _eval_dGds as _analytic_dGds,
+    _eval_dIds as _analytic_dIds,
+    _eval_dKdtheta as _analytic_dKdtheta,
+    _eval_dKdzeta as _analytic_dKdzeta,
+    _eval_dmodBds as _analytic_dmodBds,
+    _eval_dmodBdtheta as _analytic_dmodBdtheta,
+    _eval_dmodBdzeta as _analytic_dmodBdzeta,
+    _eval_G as _analytic_G,
+    _eval_I as _analytic_I,
+    _eval_iota as _analytic_iota,
+    _eval_K as _analytic_K,
+    _eval_modB as _analytic_modB,
+)
+
 __all__ = [
     "FieldlineTracingSpec",
     "FieldlineTracingResult",
@@ -1882,6 +1913,88 @@ def _boozer_scalar(value: jax.Array) -> jax.Array:
     return jnp.asarray(value, dtype=jnp.float64).reshape(-1)[0]
 
 
+# The frozen-state -> evaluator family dispatch keys. The Boozer
+# guiding-centre RHS factories consume the union of these twelve scalar
+# evaluators (modB + its three first derivatives, K + its two angular
+# derivatives, and the four scalar radial profiles G/I/iota with the
+# two radial-derivative profiles dGds/dIds). Holding the key set in one
+# tuple keeps the call-site contract uniform across the three RHS
+# factories and is the SSOT for what each frozen-state branch must
+# provide.
+_BOOZER_RHS_EVAL_KEYS: tuple[str, ...] = (
+    "modB",
+    "dmodBds",
+    "dmodBdtheta",
+    "dmodBdzeta",
+    "K",
+    "dKdtheta",
+    "dKdzeta",
+    "G",
+    "I",
+    "iota",
+    "dGds",
+    "dIds",
+)
+
+
+def _boozer_field_evaluators(state) -> dict[str, Callable]:
+    """Return the set of evaluator callables matching the frozen-state type.
+
+    This is a Python-static dispatch evaluated once at RHS-factory time,
+    outside the JIT trace. The returned callables are bound to a
+    particular state shape; the inner ``rhs(t, y)`` function captures
+    them by closure and JAX traces a single homogeneous evaluator graph
+    per call.
+
+    Supported state types:
+
+    - :class:`simsopt.jax_core.boozer_analytic.BoozerAnalyticFrozenState`
+      — closed-form analytic evaluators from
+      :mod:`simsopt.jax_core.boozer_analytic`.
+    - :class:`simsopt.field.boozermagneticfield_jax.BoozerRadialInterpolantFrozenState`
+      — spline + Fourier evaluators from
+      :mod:`simsopt.field.boozermagneticfield_jax`.
+
+    Raises:
+        TypeError: when the state type has no JAX evaluators registered.
+    """
+    if isinstance(state, BoozerAnalyticFrozenState):
+        return {
+            "modB": _analytic_modB,
+            "dmodBds": _analytic_dmodBds,
+            "dmodBdtheta": _analytic_dmodBdtheta,
+            "dmodBdzeta": _analytic_dmodBdzeta,
+            "K": _analytic_K,
+            "dKdtheta": _analytic_dKdtheta,
+            "dKdzeta": _analytic_dKdzeta,
+            "G": _analytic_G,
+            "I": _analytic_I,
+            "iota": _analytic_iota,
+            "dGds": _analytic_dGds,
+            "dIds": _analytic_dIds,
+        }
+    if isinstance(state, BoozerRadialInterpolantFrozenState):
+        return {
+            "modB": _radial_modB,
+            "dmodBds": _radial_dmodBds,
+            "dmodBdtheta": _radial_dmodBdtheta,
+            "dmodBdzeta": _radial_dmodBdzeta,
+            "K": _radial_K,
+            "dKdtheta": _radial_dKdtheta,
+            "dKdzeta": _radial_dKdzeta,
+            "G": _radial_G,
+            "I": _radial_I,
+            "iota": _radial_iota,
+            "dGds": _radial_dGds,
+            "dIds": _radial_dIds,
+        }
+    raise TypeError(
+        f"No JAX RHS evaluators registered for frozen-state type "
+        f"{type(state).__name__}. Supported types: "
+        f"BoozerAnalyticFrozenState, BoozerRadialInterpolantFrozenState."
+    )
+
+
 def guiding_center_vacuum_boozer_rhs(
     boozer_field,
     m: float,
@@ -1911,23 +2024,17 @@ def guiding_center_vacuum_boozer_rhs(
     ----------
     boozer_field
         Either a :class:`simsopt.field.boozermagneticfield_jax.BoozerRadialInterpolantJAX`
-        instance (preferred) or a ``(frozen_state, psi0)`` tuple. The
-        RHS reads ``modB``, ``modB_derivs``, ``iota``, ``G`` and
-        ``psi0`` from the frozen state.
+        instance, a :class:`simsopt.field.boozermagneticfield_jax.BoozerAnalyticJAX`
+        instance, or a ``(frozen_state, psi0)`` tuple. The RHS reads
+        ``modB``, ``modB_derivs``, ``iota``, ``G`` and ``psi0`` from
+        the frozen state; the evaluator family is selected at
+        factory-call time by :func:`_boozer_field_evaluators`.
     m, q, mu
         Particle mass, charge, and magnetic moment (Python floats).
     """
 
-    from ..field.boozermagneticfield_jax import (
-        _eval_dmodBds,
-        _eval_dmodBdtheta,
-        _eval_dmodBdzeta,
-        _eval_G,
-        _eval_iota,
-        _eval_modB,
-    )
-
     state, psi0_host = _resolve_boozer_field_state(boozer_field)
+    evals = _boozer_field_evaluators(state)
     m_arr = jnp.asarray(m, dtype=jnp.float64)
     q_arr = jnp.asarray(q, dtype=jnp.float64)
     mu_arr = jnp.asarray(mu, dtype=jnp.float64)
@@ -1937,12 +2044,12 @@ def guiding_center_vacuum_boozer_rhs(
         del _t
         v_par = y[3]
         point = _boozer_point_2d(y)
-        modB = _boozer_scalar(_eval_modB(state, point))
-        dmodBds = _boozer_scalar(_eval_dmodBds(state, point))
-        dmodBdtheta = _boozer_scalar(_eval_dmodBdtheta(state, point))
-        dmodBdzeta = _boozer_scalar(_eval_dmodBdzeta(state, point))
-        G = _boozer_scalar(_eval_G(state, point))
-        iota = _boozer_scalar(_eval_iota(state, point))
+        modB = _boozer_scalar(evals["modB"](state, point))
+        dmodBds = _boozer_scalar(evals["dmodBds"](state, point))
+        dmodBdtheta = _boozer_scalar(evals["dmodBdtheta"](state, point))
+        dmodBdzeta = _boozer_scalar(evals["dmodBdzeta"](state, point))
+        G = _boozer_scalar(evals["G"](state, point))
+        iota = _boozer_scalar(evals["iota"](state, point))
 
         fak1 = m_arr * v_par * v_par / modB + m_arr * mu_arr
 
@@ -1972,26 +2079,18 @@ def guiding_center_no_k_boozer_rhs(
     ----------
     boozer_field
         Either a :class:`simsopt.field.boozermagneticfield_jax.BoozerRadialInterpolantJAX`
-        instance (preferred) or a ``(frozen_state, psi0)`` tuple. The
-        RHS reads ``modB``, ``modB_derivs``, ``iota``, ``G``, ``I``,
-        ``dGds``, ``dIds`` and ``psi0`` from the frozen state.
+        instance, a :class:`simsopt.field.boozermagneticfield_jax.BoozerAnalyticJAX`
+        instance, or a ``(frozen_state, psi0)`` tuple. The RHS reads
+        ``modB``, ``modB_derivs``, ``iota``, ``G``, ``I``, ``dGds``,
+        ``dIds`` and ``psi0`` from the frozen state; the evaluator
+        family is selected at factory-call time by
+        :func:`_boozer_field_evaluators`.
     m, q, mu
         Particle mass, charge, and magnetic moment (Python floats).
     """
 
-    from ..field.boozermagneticfield_jax import (
-        _eval_dGds,
-        _eval_dIds,
-        _eval_dmodBds,
-        _eval_dmodBdtheta,
-        _eval_dmodBdzeta,
-        _eval_G,
-        _eval_I,
-        _eval_iota,
-        _eval_modB,
-    )
-
     state, psi0_host = _resolve_boozer_field_state(boozer_field)
+    evals = _boozer_field_evaluators(state)
     m_arr = jnp.asarray(m, dtype=jnp.float64)
     q_arr = jnp.asarray(q, dtype=jnp.float64)
     mu_arr = jnp.asarray(mu, dtype=jnp.float64)
@@ -2001,15 +2100,15 @@ def guiding_center_no_k_boozer_rhs(
         del _t
         v_par = y[3]
         point = _boozer_point_2d(y)
-        modB = _boozer_scalar(_eval_modB(state, point))
-        dmodBds = _boozer_scalar(_eval_dmodBds(state, point))
-        dmodBdtheta = _boozer_scalar(_eval_dmodBdtheta(state, point))
-        dmodBdzeta = _boozer_scalar(_eval_dmodBdzeta(state, point))
-        G = _boozer_scalar(_eval_G(state, point))
-        I_val = _boozer_scalar(_eval_I(state, point))
-        iota = _boozer_scalar(_eval_iota(state, point))
-        dGds = _boozer_scalar(_eval_dGds(state, point))
-        dIds = _boozer_scalar(_eval_dIds(state, point))
+        modB = _boozer_scalar(evals["modB"](state, point))
+        dmodBds = _boozer_scalar(evals["dmodBds"](state, point))
+        dmodBdtheta = _boozer_scalar(evals["dmodBdtheta"](state, point))
+        dmodBdzeta = _boozer_scalar(evals["dmodBdzeta"](state, point))
+        G = _boozer_scalar(evals["G"](state, point))
+        I_val = _boozer_scalar(evals["I"](state, point))
+        iota = _boozer_scalar(evals["iota"](state, point))
+        dGds = _boozer_scalar(evals["dGds"](state, point))
+        dIds = _boozer_scalar(evals["dIds"](state, point))
         dGdpsi = dGds / psi0
         dIdpsi = dIds / psi0
         dmodBdpsi = dmodBds / psi0
@@ -2057,30 +2156,18 @@ def guiding_center_boozer_rhs(
     ----------
     boozer_field
         Either a :class:`simsopt.field.boozermagneticfield_jax.BoozerRadialInterpolantJAX`
-        instance (preferred) or a ``(frozen_state, psi0)`` tuple. The
-        RHS reads ``modB``, ``modB_derivs``, ``K``, ``K_derivs``,
-        ``iota``, ``G``, ``I``, ``dGds``, ``dIds`` and ``psi0`` from
-        the frozen state.
+        instance, a :class:`simsopt.field.boozermagneticfield_jax.BoozerAnalyticJAX`
+        instance, or a ``(frozen_state, psi0)`` tuple. The RHS reads
+        ``modB``, ``modB_derivs``, ``K``, ``K_derivs``, ``iota``,
+        ``G``, ``I``, ``dGds``, ``dIds`` and ``psi0`` from the frozen
+        state; the evaluator family is selected at factory-call time
+        by :func:`_boozer_field_evaluators`.
     m, q, mu
         Particle mass, charge, and magnetic moment (Python floats).
     """
 
-    from ..field.boozermagneticfield_jax import (
-        _eval_dGds,
-        _eval_dIds,
-        _eval_dKdtheta,
-        _eval_dKdzeta,
-        _eval_dmodBds,
-        _eval_dmodBdtheta,
-        _eval_dmodBdzeta,
-        _eval_G,
-        _eval_I,
-        _eval_iota,
-        _eval_K,
-        _eval_modB,
-    )
-
     state, psi0_host = _resolve_boozer_field_state(boozer_field)
+    evals = _boozer_field_evaluators(state)
     m_arr = jnp.asarray(m, dtype=jnp.float64)
     q_arr = jnp.asarray(q, dtype=jnp.float64)
     mu_arr = jnp.asarray(mu, dtype=jnp.float64)
@@ -2090,18 +2177,18 @@ def guiding_center_boozer_rhs(
         del _t
         v_par = y[3]
         point = _boozer_point_2d(y)
-        modB = _boozer_scalar(_eval_modB(state, point))
-        dmodBds = _boozer_scalar(_eval_dmodBds(state, point))
-        dmodBdtheta = _boozer_scalar(_eval_dmodBdtheta(state, point))
-        dmodBdzeta = _boozer_scalar(_eval_dmodBdzeta(state, point))
-        K_val = _boozer_scalar(_eval_K(state, point))
-        dKdtheta = _boozer_scalar(_eval_dKdtheta(state, point))
-        dKdzeta = _boozer_scalar(_eval_dKdzeta(state, point))
-        G = _boozer_scalar(_eval_G(state, point))
-        I_val = _boozer_scalar(_eval_I(state, point))
-        iota = _boozer_scalar(_eval_iota(state, point))
-        dGds = _boozer_scalar(_eval_dGds(state, point))
-        dIds = _boozer_scalar(_eval_dIds(state, point))
+        modB = _boozer_scalar(evals["modB"](state, point))
+        dmodBds = _boozer_scalar(evals["dmodBds"](state, point))
+        dmodBdtheta = _boozer_scalar(evals["dmodBdtheta"](state, point))
+        dmodBdzeta = _boozer_scalar(evals["dmodBdzeta"](state, point))
+        K_val = _boozer_scalar(evals["K"](state, point))
+        dKdtheta = _boozer_scalar(evals["dKdtheta"](state, point))
+        dKdzeta = _boozer_scalar(evals["dKdzeta"](state, point))
+        G = _boozer_scalar(evals["G"](state, point))
+        I_val = _boozer_scalar(evals["I"](state, point))
+        iota = _boozer_scalar(evals["iota"](state, point))
+        dGds = _boozer_scalar(evals["dGds"](state, point))
+        dIds = _boozer_scalar(evals["dIds"](state, point))
         dGdpsi = dGds / psi0
         dIdpsi = dIds / psi0
         dmodBdpsi = dmodBds / psi0
