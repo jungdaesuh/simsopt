@@ -548,6 +548,20 @@ class HardwareContractsEnvFlagTests(unittest.TestCase):
     def setUp(self):
         self.module = _load_module(HARDWARE_CONTRACTS_PATH, "banana_hardware_contracts")
 
+    def test_validate_target_lcfs_major_radius_accepts_roundoff(self):
+        roundoff_major_radius = 0.9200000000000039
+
+        self.assertEqual(
+            self.module.validate_target_lcfs_major_radius(roundoff_major_radius),
+            roundoff_major_radius,
+        )
+
+    def test_validate_target_lcfs_major_radius_rejects_real_excess(self):
+        real_excess_major_radius = 0.92000000001
+
+        with self.assertRaisesRegex(ValueError, "target LCFS major radius"):
+            self.module.validate_target_lcfs_major_radius(real_excess_major_radius)
+
     def test_env_flag_recognizes_truthy_values(self):
         flag_name = "BANANA_OPT_TEST_FLAG"
         original = os.environ.get(flag_name)

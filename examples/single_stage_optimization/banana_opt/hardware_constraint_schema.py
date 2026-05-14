@@ -15,6 +15,7 @@ from banana_opt.hardware_contracts import (
     COIL_LENGTH_HARD_LIMIT_M,
     COIL_LENGTH_MIN_TARGET_M,
     COIL_PLASMA_MIN_DIST_M,
+    LCFS_RADIUS_ABS_TOL_M,
     MAX_CURVATURE_INV_M,
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     TARGET_LCFS_MAX_MAJOR_RADIUS_M,
@@ -46,6 +47,7 @@ class HardwareConstraintSpec:
     alm_block: ALMBlock | None = None
     alm_activity_tolerance_fraction: float = 0.0
     allow_zero_threshold: bool = False
+    violation_abs_tol: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -221,6 +223,7 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         threshold=TARGET_LCFS_MAX_MAJOR_RADIUS_M,
         applies_to=frozenset({"artifact"}),
         traversal_policy="allowed",
+        violation_abs_tol=LCFS_RADIUS_ABS_TOL_M,
     ),
     HardwareConstraintSpec(
         name="lcfs_minor_radius",
@@ -228,6 +231,7 @@ HARDWARE_CONSTRAINT_SCHEMA: tuple[HardwareConstraintSpec, ...] = (
         threshold=TARGET_LCFS_MAX_MINOR_RADIUS_M,
         applies_to=frozenset({"artifact"}),
         traversal_policy="allowed",
+        violation_abs_tol=LCFS_RADIUS_ABS_TOL_M,
     ),
 )
 
@@ -530,6 +534,7 @@ def hardware_constraint_artifact_payload_field_names(
     if include_status:
         field_names.extend(
             (
+                f"{prefix}CURVE_CURVE_DISTANCE_METRIC_KIND",
                 f"{prefix}HARDWARE_CONSTRAINTS_OK",
                 f"{prefix}HARDWARE_CONSTRAINT_VIOLATIONS",
             )
@@ -568,6 +573,10 @@ def build_hardware_constraint_artifact_payload_fields(
             None if threshold_value is None else float(threshold_value)
         )
 
+    metric_kind = hardware_snapshot.get("curve_curve_distance_metric_kind")
+    payload_fields[f"{prefix}CURVE_CURVE_DISTANCE_METRIC_KIND"] = (
+        None if metric_kind is None else str(metric_kind)
+    )
     artifact_hardware_status = hardware_snapshot.get("artifact_hardware_status")
     payload_fields[f"{prefix}HARDWARE_CONSTRAINTS_OK"] = (
         None
@@ -751,14 +760,12 @@ def hardware_constraint_violation(
     *,
     threshold_overrides: Mapping[str, float] | None = None,
 ) -> float:
-    return max(
-        0.0,
-        hardware_constraint_signed_value(
-            spec,
-            value,
-            threshold_overrides=threshold_overrides,
-        ),
+    signed_value = hardware_constraint_signed_value(
+        spec,
+        value,
+        threshold_overrides=threshold_overrides,
     )
+    return max(0.0, signed_value - float(spec.violation_abs_tol))
 
 
 def format_hardware_constraint_violation(

@@ -2640,6 +2640,9 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             constraint_scale_sources=["one", "limit", "threshold"],
             raw_dual_estimates=[0.1, 0.002, 0.3],
             alm_schema_version=ALM_SCHEMA_VERSION,
+            exit_class="feasible_stationarity_unmet",
+            hard_constraints_feasible=True,
+            stationarity_satisfied=False,
             trust_radius=0.125,
             multiplier_cap_binding=True,
             multiplier_cap_binding_indices=[1],
@@ -2729,6 +2732,10 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
         self.assertEqual(result["ALM_OUTER_ITERATIONS"], 4)
         self.assertEqual(result["ALM_FINAL_TRUST_RADIUS"], 0.125)
         self.assertEqual(result["ALM_SCHEMA_VERSION"], ALM_SCHEMA_VERSION)
+        self.assertEqual(result["ALM_EXIT_CLASS"], "feasible_stationarity_unmet")
+        self.assertTrue(result["ALM_HARD_CONSTRAINTS_FEASIBLE"])
+        self.assertFalse(result["ALM_STATIONARITY_SATISFIED"])
+        self.assertEqual(result["CURVE_CURVE_DISTANCE_METRIC_KIND"], "banana_coils")
         self.assertTrue(result["ALM_MULTIPLIER_CAP_BINDING"])
         self.assertEqual(result["ALM_MULTIPLIER_CAP_BINDING_INDICES"], [1])
         np.testing.assert_allclose(result["ALM_FINAL_CONSTRAINT_VALUES"], [0.0, 1.0, 0.0])
@@ -4991,6 +4998,50 @@ class HardwareConstraintSchemaModuleTests(unittest.TestCase):
         self.assertEqual(scale, 2.5)
         self.assertFalse(floor_applied)
         self.assertEqual(source, "threshold:demo")
+
+    def test_lcfs_artifact_upper_bound_tolerates_roundoff(self):
+        spec = self.module.get_hardware_constraint_spec("lcfs_major_radius")
+        roundoff_major_radius = 0.9200000000000039
+
+        self.assertEqual(
+            self.module.hardware_constraint_violation(spec, roundoff_major_radius),
+            0.0,
+        )
+
+    def test_lcfs_artifact_payload_writes_ok_for_roundoff(self):
+        roundoff_major_radius = 0.9200000000000039
+        lcfs_constraint_names = {"lcfs_major_radius", "lcfs_minor_radius"}
+        status = self.module.build_hardware_constraint_status(
+            {
+                "lcfs_major_radius": roundoff_major_radius,
+                "lcfs_minor_radius": 0.15,
+            },
+            applies_to="artifact",
+            names=lcfs_constraint_names,
+            require_values=True,
+        )
+        payload = self.module.build_hardware_constraint_artifact_payload_fields(
+            {
+                "lcfs_major_radius_m": roundoff_major_radius,
+                "lcfs_minor_radius_m": 0.15,
+                "artifact_hardware_status": status,
+            },
+            names=lcfs_constraint_names,
+        )
+
+        self.assertTrue(status["success"])
+        self.assertEqual(status["violations"], [])
+        self.assertIs(payload["HARDWARE_CONSTRAINTS_OK"], True)
+        self.assertEqual(payload["HARDWARE_CONSTRAINT_VIOLATIONS"], [])
+
+    def test_lcfs_artifact_upper_bound_rejects_real_excess(self):
+        spec = self.module.get_hardware_constraint_spec("lcfs_major_radius")
+        real_excess_major_radius = 0.92000000001
+
+        self.assertGreater(
+            self.module.hardware_constraint_violation(spec, real_excess_major_radius),
+            0.0,
+        )
 
     def test_hardware_constraint_alm_metadata_records_floor_for_subnormal_threshold(self):
         # M7 hardware-schema mirror: the threshold-driven path records floor

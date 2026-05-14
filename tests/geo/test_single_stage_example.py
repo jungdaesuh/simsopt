@@ -3007,6 +3007,7 @@ class HardwareConstraintTests(unittest.TestCase):
         )
         self.assertFalse(artifact_status["success"])
         self.assertEqual(len(artifact_status["violations"]), 3)
+        self.assertEqual(status["curve_curve_distance_metric_kind"], "all_coils")
         self.assertIn("coil_length", artifact_status["violations"][0])
         self.assertIn("banana_current", artifact_status["violations"][1])
         self.assertIn("tf_current", artifact_status["violations"][2])

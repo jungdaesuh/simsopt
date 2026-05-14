@@ -9888,6 +9888,17 @@ if __name__ == "__main__":
         "ALM_PARTIAL_STATE_FILENAME": "alm_state.partial.json" if CONSTRAINT_METHOD == "alm" else None,
         "ALM_TERMINATION_REASON": getattr(alm_result, "termination_reason", None),
         "ALM_CONVERGED": getattr(alm_result, "converged_to_tolerances", None),
+        "ALM_EXIT_CLASS": getattr(alm_result, "exit_class", None),
+        "ALM_HARD_CONSTRAINTS_FEASIBLE": getattr(
+            alm_result,
+            "hard_constraints_feasible",
+            None,
+        ),
+        "ALM_STATIONARITY_SATISFIED": getattr(
+            alm_result,
+            "stationarity_satisfied",
+            None,
+        ),
         "ALM_RESTORED_BEST_FEASIBLE": getattr(alm_result, "restored_best_feasible", None),
         "ALM_RESTORED_BEST_FEASIBLE_REASON": getattr(
             alm_result,

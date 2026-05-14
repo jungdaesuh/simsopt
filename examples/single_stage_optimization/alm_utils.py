@@ -3074,6 +3074,21 @@ def _build_alm_result(
         history=run_state.history,
         history_truncated_count=run_state.history_truncated_count,
     )
+    hard_constraints_feasible = (
+        float(routing_state.hard_max_violation) <= float(final_state.feasibility_tolerance)
+    )
+    stationarity_satisfied = (
+        float(final_state.stationarity_norm)
+        <= float(final_state.stationarity_tolerance)
+    )
+    if final_state.success:
+        exit_class = "converged"
+    elif hard_constraints_feasible and not stationarity_satisfied:
+        exit_class = "feasible_stationarity_unmet"
+    elif hard_constraints_feasible:
+        exit_class = "feasible_not_converged"
+    else:
+        exit_class = "hard_constraints_unmet"
     return SimpleNamespace(
         alm_schema_version=ALM_SCHEMA_VERSION,
         alm_summary=alm_summary,
@@ -3160,6 +3175,9 @@ def _build_alm_result(
         optimizer_success=inner_optimizer_success,
         optimizer_message=inner_optimizer_message,
         converged_to_tolerances=bool(final_state.success),
+        exit_class=exit_class,
+        hard_constraints_feasible=bool(hard_constraints_feasible),
+        stationarity_satisfied=bool(stationarity_satisfied),
         restored_best_feasible=bool(final_state.restored_best_feasible),
         restored_best_feasible_reason=final_state.restored_best_feasible_reason,
         final_max_feasibility_violation=float(final_state.max_feasibility_violation),

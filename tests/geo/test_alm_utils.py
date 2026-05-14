@@ -43,28 +43,28 @@ class AlmHybridSignalContractDocTests(unittest.TestCase):
         doc_path = repo_root / "docs" / "alm_hybrid_signal_contract_2026-05-08.md"
         doc = doc_path.read_text(encoding="utf-8")
         citations = {
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2165-2172": (
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2177-2184": (
                 "augmented_inequality_objective("
             ),
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2173-2201": (
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2185-2212": (
                 '"hard_dual_update_values"'
             ),
-            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2187-2194": (
+            "examples/single_stage_optimization/banana_opt/stage2_objectives.py:2199-2206": (
                 '"raw_dual_update_values"'
             ),
             "examples/single_stage_optimization/alm_utils.py:2197-2249": (
                 "def _extract_stage2_constraint_signal_state"
             ),
-            "examples/single_stage_optimization/alm_utils.py:3366-3382": (
+            "examples/single_stage_optimization/alm_utils.py:3384-3402": (
                 "routing_state.signal_state.preferred_dual_update_values"
             ),
             "examples/single_stage_optimization/alm_utils.py:2291-2349": (
                 "def _constraint_routing_state"
             ),
-            "examples/single_stage_optimization/alm_utils.py:4547-4556": (
+            "examples/single_stage_optimization/alm_utils.py:4558-4567": (
                 "and not signal_mismatch_active"
             ),
-            "examples/single_stage_optimization/alm_utils.py:4243-4256": (
+            "examples/single_stage_optimization/alm_utils.py:4265-4278": (
                 "and not run_state.last_cap_binding_active"
             ),
         }
@@ -103,6 +103,71 @@ def _complete_alm_evaluation(evaluation: dict) -> dict:
         if "dual_update_values" not in completed:
             completed["dual_update_values"] = constraint_values.copy()
     return completed
+
+
+class AlmResultExitClassTests(unittest.TestCase):
+    def test_build_alm_result_classifies_feasible_stationarity_unmet(self):
+        module = load_alm_utils_module()
+        feasibility_tolerance = 1.0e-4
+        stationarity_tolerance = 1.0e-5
+        evaluation = _complete_alm_evaluation(
+            {
+                "total": 1.0,
+                "base_value": 1.0,
+                "base_grad": np.array([0.0]),
+                "grad": np.array([1.0e-3]),
+                "constraint_values": np.array([-0.1]),
+                "constraint_grads": [np.array([1.0])],
+                "hard_signed_constraint_values": np.array([-0.1]),
+                "hard_violation_values": np.array([0.0]),
+                "surrogate_signed_constraint_values": np.array([-0.1]),
+                "hard_dual_update_values": np.array([-0.1]),
+            }
+        )
+        run_state = module.ALMRunState(
+            x=np.array([0.0]),
+            total_inner_iterations=1,
+            trust_radius=None,
+            history=[],
+            history_truncated_count=0,
+            cap_binding_detected=False,
+            cap_binding_indices=set(),
+            penalty_cap_reached=False,
+            penalty_cap_requested=None,
+        )
+        final_state = module.ALMFinalState(
+            success=False,
+            message="max outer",
+            termination_reason="max_outer",
+            outer_iterations=3,
+            evaluation=evaluation,
+            multipliers=np.array([0.0]),
+            penalty=1.0,
+            inner_result=SimpleNamespace(success=False, message="max outer"),
+            restored_best_feasible=False,
+            restored_best_feasible_reason=None,
+            max_feasibility_violation=0.0,
+            stationarity_norm=1.0e-3,
+            raw_stationarity_norm=1.0e-3,
+            kkt_stationarity_norm=None,
+            feasibility_tolerance=feasibility_tolerance,
+            stationarity_tolerance=stationarity_tolerance,
+        )
+
+        result = module._build_alm_result(
+            settings=module.ALMSettings(
+                feasibility_tol=feasibility_tolerance,
+                stationarity_tol=stationarity_tolerance,
+            ),
+            constraint_names=["clearance"],
+            run_state=run_state,
+            final_state=final_state,
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.exit_class, "feasible_stationarity_unmet")
+        self.assertTrue(result.hard_constraints_feasible)
+        self.assertFalse(result.stationarity_satisfied)
 
 
 class _CountingName:

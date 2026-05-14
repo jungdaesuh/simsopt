@@ -61,6 +61,7 @@ LCFS_CLEARANCE_REFERENCE_MINOR_RADIUS_M = (
 
 TARGET_LCFS_MAX_MAJOR_RADIUS_M = 0.92
 TARGET_LCFS_MAX_MINOR_RADIUS_M = 0.15
+LCFS_RADIUS_ABS_TOL_M = 1.0e-12
 
 
 def fixed_stage2_clearance_contract() -> dict[str, float]:
@@ -108,7 +109,7 @@ def validate_banana_winding_surface_radius(banana_surf_radius: float) -> float:
 
 def validate_target_lcfs_major_radius(target_major_radius_m: float) -> float:
     radius = float(target_major_radius_m)
-    if not (0.0 < radius <= TARGET_LCFS_MAX_MAJOR_RADIUS_M):
+    if not (0.0 < radius <= TARGET_LCFS_MAX_MAJOR_RADIUS_M + LCFS_RADIUS_ABS_TOL_M):
         raise ValueError(
             "Requested target LCFS major radius must lie in "
             f"(0, {TARGET_LCFS_MAX_MAJOR_RADIUS_M:.3f}] m."
@@ -118,7 +119,7 @@ def validate_target_lcfs_major_radius(target_major_radius_m: float) -> float:
 
 def validate_target_lcfs_minor_radius(target_minor_radius_m: float) -> float:
     radius = float(target_minor_radius_m)
-    if not (0.0 < radius <= TARGET_LCFS_MAX_MINOR_RADIUS_M):
+    if not (0.0 < radius <= TARGET_LCFS_MAX_MINOR_RADIUS_M + LCFS_RADIUS_ABS_TOL_M):
         raise ValueError(
             "Requested target LCFS minor radius must lie in "
             f"(0, {TARGET_LCFS_MAX_MINOR_RADIUS_M:.3f}] m."

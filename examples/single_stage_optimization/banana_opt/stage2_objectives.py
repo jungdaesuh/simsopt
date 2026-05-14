@@ -581,6 +581,7 @@ def _build_stage2_artifact_hardware_snapshot(
         "coil_length": final_coil_length,
         "length_target": length_target,
         "curve_curve_min_dist": final_curve_curve_min_dist,
+        "curve_curve_distance_metric_kind": "banana_coils",
         "max_curvature": final_max_curvature,
         "curve_surface_min_dist": final_curve_surface_min_dist,
         "surface_vessel_min_dist": plasma_vessel_min_dist,
@@ -1049,6 +1050,17 @@ def build_stage2_results(
         "ALM_TAYLOR_RESULT": alm_taylor_result,
         "ALM_TERMINATION_REASON": getattr(alm_result, "termination_reason", None),
         "ALM_CONVERGED": getattr(alm_result, "converged_to_tolerances", None),
+        "ALM_EXIT_CLASS": getattr(alm_result, "exit_class", None),
+        "ALM_HARD_CONSTRAINTS_FEASIBLE": getattr(
+            alm_result,
+            "hard_constraints_feasible",
+            None,
+        ),
+        "ALM_STATIONARITY_SATISFIED": getattr(
+            alm_result,
+            "stationarity_satisfied",
+            None,
+        ),
         "ALM_RESTORED_BEST_FEASIBLE": getattr(
             alm_result, "restored_best_feasible", None
         ),
