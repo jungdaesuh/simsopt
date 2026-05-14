@@ -221,81 +221,385 @@ Status: active `/goal` scope. The top-level **Checklist** (G0/T1/T2/T3/G1/G2)
 and **Acceptance Criteria** sections above are the SSOT for this wave. This
 subsection is kept as a stable anchor so cross-wave references resolve.
 
-### Wave 2 - BiotSavart Derivative Ladder
+### Wave 2 - BiotSavart Derivative Ladder Closeout
 
-Status: follow-on wave. Partially stale. `A`, `dA_by_dX`, and `d2A_by_dXdX`
-already exist; do not reimplement them. The likely live gap is the
-coil-current derivative ladder and direct parity around it.
+Status: revalidated 2026-05-14 against base HEAD `b2b7688955` (Wave 1 tip).
+Ready to become the next active `/goal` slice once Wave 1 lands. Scope =
+close the remaining BiotSavart derivative-ladder gaps surfaced by the
+2026-05-13 audit: one missing spatial-Hessian wrapper method, the entire
+six-method coil-current derivative ladder, and the still-missing direct
+C++ parity assertions for `dA_by_dX`, `d2B_by_dXdX`, and `d2A_by_dXdX`.
+B-side `B`/`dB_by_dX` parity is complete; `B_vjp` direct C++ parity
+landed in Wave 1 (`test_biotsavart_jax.py:542`); A-value parity lives in
+`tests/field/test_biotsavart_A_direct_kernel_closeout.py`.
 
-Files likely touched:
+#### Current-Tree Corrections (verified 2026-05-14 at HEAD `b2b7688955`)
 
-- `src/simsopt/field/biotsavart_jax_backend.py`
-- `src/simsopt/jax_core/biotsavart.py`
-- `src/simsopt/field/biotsavart_jax.py`
-- `tests/field/test_biotsavart_jax.py`
-- `tests/field/test_biotsavart_jax_parity.py`
-- `.artifacts/jax_port_gap_audit_2026-05-13/STATUS.md`
+These corrections are part of the Wave 2 contract. Do not reintroduce
+the stale claims from the first draft.
 
-Workstreams:
+- **`BiotSavartJAX` already exposes (do not reimplement):** `B`
+  (`biotsavart_jax_backend.py:1439`), `dB_by_dX` (`:1465`), `A` (`:1447`),
+  `dA_by_dX` (`:1451`), `d2A_by_dXdX` (`:1458`), `B_and_dB` (`:1476`),
+  `B_vjp` (`:1539`), `A_vjp` (`:1616`), `A_and_dA_vjp` (`:1620`),
+  `B_and_dB_vjp` (`:1628`), plus the native-pullback variants `*_pullback_native`
+  / `*_cotangents`.
+- **Confirmed live gaps on `BiotSavartJAX`** (no method present at
+  `biotsavart_jax_backend.py` 1439-1634 method block):
+  - `d2B_by_dXdX()` — the unit kernel `biot_savart_d2B_by_dXdX` already
+    exists at `src/simsopt/jax_core/biotsavart.py:585` (declared in
+    `__all__` at `:40`), but the grouped wrapper layer in
+    `src/simsopt/jax_core/field.py` (where every other
+    `grouped_biot_savart_*_from_spec` lives — see `:495`,
+    `:506`, `:517`, `:531` for B/A/dA/d2A) does not import
+    `biot_savart_d2B_by_dXdX`, has no entry for it in the
+    `_empty_grouped_field_result` dispatch (`:52-67`), and exposes no
+    `grouped_biot_savart_d2B_by_dXdX_from_spec`. Therefore neither
+    `SpecBackedBiotSavartJAX` (method block `:511-:545`) nor
+    `BiotSavartJAX` (method block `:1439-:1634`) can expose a
+    `d2B_by_dXdX()` method without first lifting the grouped helper.
+    Contrast with the symmetric A-side path:
+    `grouped_biot_savart_d2A_by_dXdX_from_spec` is defined at
+    `jax_core/field.py:531`, imported at `biotsavart_jax_backend.py:42`,
+    and consumed by `d2A_by_dXdX()` at `:529` and `:1458`.
+  - `dB_by_dcoilcurrents(compute_derivatives=0)` — CPU contract at
+    `src/simsopt/field/biotsavart.py:30` returns
+    `list[ndarray[npoints, 3]]` of length `ncoils`.
+  - `d2B_by_dXdcoilcurrents(compute_derivatives=1)` — CPU contract at
+    `biotsavart.py:40` returns `list[ndarray[npoints, 3, 3]]`.
+  - `d3B_by_dXdXdcoilcurrents(compute_derivatives=2)` — CPU contract at
+    `biotsavart.py:50` returns `list[ndarray[npoints, 3, 3, 3]]`.
+  - `dA_by_dcoilcurrents(compute_derivatives=0)` — CPU contract at
+    `biotsavart.py:132` returns `list[ndarray[npoints, 3]]`.
+  - `d2A_by_dXdcoilcurrents(compute_derivatives=1)` — CPU contract at
+    `biotsavart.py:142` returns `list[ndarray[npoints, 3, 3]]`.
+  - `d3A_by_dXdXdcoilcurrents(compute_derivatives=2)` — CPU contract at
+    `biotsavart.py:152` returns `list[ndarray[npoints, 3, 3, 3]]`.
+- **Direct C++ parity already covered:** `B`
+  (`test_biotsavart_jax.py:507`), `dB_by_dX` (`:522`), `B_vjp` (`:542`
+  added by Wave 1), and `A` value (`test_biotsavart_A_direct_kernel_closeout.py`).
+  The existing `B` row still has an inline `rtol=1e-10` at
+  `test_biotsavart_jax.py:520`; Wave 2 should migrate it to
+  `parity_ladder_tolerances("direct_kernel")` while adding the new rows,
+  so the C++ parity block has one tolerance SSOT.
+- **Confirmed missing direct C++ parity** (no co-import of the
+  corresponding `simsopt.field.BiotSavart` Python method or `simsoptpp`
+  symbol with the JAX path at the lane tolerance):
+  - `dA_by_dX` (M-1 mirror in `jax_cpp_parity_test_gaps.md`).
+  - `d2B_by_dXdX` (M-2 in `jax_cpp_parity_test_gaps.md`).
+  - `d2A_by_dXdX` (M-2 in `jax_cpp_parity_test_gaps.md`).
+- **Analytic / Taylor coverage already present** in
+  `tests/field/test_biotsavart_jax_parity.py::TestBiotSavartParitySuite`
+  (`:229`): `dB_by_dX` Taylor (`:316`), `dA_by_dX` Taylor (`:293`),
+  `d2B_by_dXdX` symmetry + Taylor (`:367,377,400`), `B_vjp` channel-wise
+  Taylor (`:415`), aggregate current-linearity exact-FD across `B`,
+  `dB`, `A`, `dA`, `d2B`, `d2A` (`:490`, using helper
+  `_assert_current_linearity` at `:205`). These are oracle type 3
+  (FD/Taylor) — they do not satisfy
+  `derivative_heavy.requires_direct_cpp_oracle` on their own. The
+  aggregate current-linearity test does NOT validate the per-coil
+  decomposition that `dB_by_dcoilcurrents` exposes; that decomposition
+  is what Wave 2 must additionally test.
+- **Tolerance lane mapping** from
+  `benchmarks/validation_ladder_contract.py::PARITY_LADDER_TOLERANCES`
+  (validated 2026-05-14):
+  - `dB_by_dcoilcurrents`, `dA_by_dcoilcurrents` (per-coil B/A at unit
+    current) — `direct_kernel` (`rtol=1e-10`, `atol=1e-12`).
+  - `d2B_by_dXdcoilcurrents`, `d2A_by_dXdcoilcurrents`,
+    `d3B_by_dXdXdcoilcurrents`, `d3A_by_dXdXdcoilcurrents` — these are
+    per-coil unit-current B/A spatial-derivative bundles. Use
+    `derivative_heavy` (`first_derivative_*` for `d{B,A}_by_dXdc`,
+    `second_derivative_*` for `d{B,A}_by_dXdXdc`).
+  - `d2B_by_dXdX`, `d2A_by_dXdX`, `dA_by_dX` parity — use
+    `derivative_heavy.first_derivative_*` for `dA_by_dX` and
+    `derivative_heavy.second_derivative_*` for `d2B_by_dXdX` /
+    `d2A_by_dXdX`.
+- **External authority checks (2026-05-14):**
+  - JAX documentation models `jax.jacfwd` as pushing a Euclidean basis
+    through JVPs and transposing the result, and documents `vmap` as
+    stacking mapped outputs. That matches the local raw `jacfwd^2` axis
+    analysis in `jax_core/biotsavart.py:462-476`.
+  - JAX `shard_map` documentation describes rank-preserving block mapping
+    with output assembly controlled by `out_specs`. Therefore the grouped
+    d2B helper must have an explicit 4D output-spec path when point-axis
+    sharding is active.
+  - SIMSOPT 1.10.6 user docs list the full current-derivative ladder
+    (`d{B,A}_by_dcoilcurrents`, `d2{B,A}_by_dXdcoilcurrents`,
+    `d3{B,A}_by_dXdXdcoilcurrents`) as part of the CPU `BiotSavart`
+    public API; the current tree's `src/simsopt/field/biotsavart.py`
+    is the authoritative shape/line contract for this fork.
+  - NVIDIA's CUDA Programming Guide documents CPU/GPU floating-point
+    differences around fused multiply-add and dot-product accumulation.
+    Wave 2 remains a CPU-only C++/JAX parity slice; do not claim CUDA
+    parity from these tests. Any GPU/CUDA signoff belongs in a later
+    `gpu_runtime` lane with deterministic-XLA provenance.
 
-- [ ] **W2-B0 - Current-tree revalidation**
-  - [ ] Confirm current public API on `BiotSavartJAX`, `SpecBackedBiotSavartJAX`,
-        and `simsopt.jax_core.biotsavart`.
-  - [ ] Confirm CPU shape contracts from `simsopt.field.biotsavart.BiotSavart`.
-  - [ ] Confirm current direct C++ parity tests for `B`, `dB_by_dX`, `A`,
-        `dA_by_dX`, `d2B_by_dXdX`, `d2A_by_dXdX`, and `B_vjp`.
-  - [ ] Validated 2026-05-14 against base/audit HEAD `da44735ab`:
-        `dA_by_dcoilcurrents`, `d2A_by_dXdcoilcurrents`,
-        `d3A_by_dXdXdcoilcurrents`, and their B-side analogs
-        (`dB_by_dcoilcurrents` family) are not present in
-        `src/simsopt/field/biotsavart_jax_backend.py`. Reconfirm absence in
-        `biotsavart_jax_backend.py` and `simsopt/jax_core/biotsavart.py`
-        before implementing W2-B1 / W2-B2.
-  - [ ] Update `STATUS.md` with the live gap list before implementation.
+#### Files In Scope
 
-- [ ] **W2-B1 - B-side coil-current derivatives**
-  - [ ] Implement `dB_by_dcoilcurrents` if missing.
-  - [ ] Implement `d2B_by_dXdcoilcurrents` if missing.
-  - [ ] Implement `d3B_by_dXdXdcoilcurrents` if missing.
-  - [ ] Preserve tensor convention:
-        `dB_by_dX[p, j, l] = partial_j B_l(x_p)`.
-  - [ ] Preserve mixed quadrature grouping for TF/banana mixed coil sets.
-  - [ ] Avoid `simsoptpp` imports in source modules.
+- `src/simsopt/field/biotsavart_jax_backend.py` — expose the seven
+  missing methods on both `BiotSavartJAX` (method block `:1439-:1634`)
+  and `SpecBackedBiotSavartJAX` (method block `:511-:545`). The two
+  classes do not inherit from each other; both surface the same public
+  API and both must remain in sync.
+- `src/simsopt/jax_core/field.py` — add `grouped_biot_savart_d2B_by_dXdX`
+  / `grouped_biot_savart_d2B_by_dXdX_from_spec` /
+  `grouped_biot_savart_d2B_by_dXdX_from_inputs` mirroring the d2A trio
+  at `:531-:540`; import `biot_savart_d2B_by_dXdX` next to
+  `biot_savart_d2A_by_dXdX` (`jax_core/field.py:18`); extend the
+  `_empty_grouped_field_result` kernel dispatch (`:52-67`) and the
+  `_field_out_specs` sharding dispatch (`:113-125`) so the 4D Hessian
+  branch explicitly covers `biot_savart_d2B_by_dXdX` instead of relying
+  on the current catch-all 4D return.
+- `src/simsopt/jax_core/__init__.py` — export the new
+  `grouped_biot_savart_d2B_by_dXdX_from_spec` and
+  `grouped_biot_savart_d2B_by_dXdX_from_inputs` helpers next to the
+  existing d2A exports, so public `simsopt.jax_core` imports stay
+  consistent.
+- `src/simsopt/jax_core/biotsavart.py` — no kernel changes required;
+  `biot_savart_d2B_by_dXdX` (`:585`) is already in `__all__` (`:40`).
+- `tests/field/test_biotsavart_jax.py` — extend
+  `TestBiotSavartJaxCppParity` (`:497`) with the missing parity rows
+  using the existing `_ncsx_biotsavart_parity_fixture` (`:341`) whose
+  5-tuple return is `(bs, points_np, gammas_np, gds_np, currents_np)`.
+- `tests/field/test_biotsavart_jax_parity.py` — add per-coil
+  current-linearity tests using the existing
+  `_assert_current_linearity` helper template (`:205`) — see W2-B6.
+- `.artifacts/jax_port_gap_audit_2026-05-13/STATUS.md` — append a Wave 2
+  outcome section.
 
-- [ ] **W2-B2 - A-side coil-current derivatives**
-  - [ ] Keep existing `A`, `dA_by_dX`, and `d2A_by_dXdX`.
-  - [ ] Implement `dA_by_dcoilcurrents` if missing.
-  - [ ] Implement `d2A_by_dXdcoilcurrents` if missing.
-  - [ ] Implement `d3A_by_dXdXdcoilcurrents` if missing.
-  - [ ] Match CPU axis conventions from `BiotSavart`.
+#### Out Of Scope
 
-- [ ] **W2-B3 - Direct C++ parity**
-  - [ ] Add direct oracle tests for every newly exposed current derivative.
-  - [ ] Add direct oracle `B_vjp` coverage if Wave 1 did not already land it
-        in the canonical parity section.
-  - [ ] Use `direct_kernel` for values and `derivative_heavy` for first/second
-        derivatives.
-  - [ ] Reuse existing fixtures where possible; do not create a parallel test
-        dialect.
+- Re-implementing `A`, `dA_by_dX`, `d2A_by_dXdX`, `B_vjp`, `A_vjp`,
+  `B_and_dB_vjp`, `A_and_dA_vjp` (all already present).
+- Rewriting the `TestBiotSavartJaxChunkedSelfConsistency` self-consistency
+  probes — Wave 1 already classified them.
+- Adding a `BiotSavartJAX.compute(derivatives=N)` batched cache entrypoint;
+  the cpp_port_gap audit classifies the bundled cache fill as
+  NON-PORTABLE-by-design (per-method calls are the JAX-native shape).
+- `WireframeField::compute(derivatives=2)` Hessian — that lives in a
+  later wave and uses a different kernel.
+- Mixed CPU-JAX `MagneticFieldSum` composition (covered by Wave 6).
 
-- [ ] **W2-B4 - Coil-current Taylor mirrors**
-  - [ ] Mirror `tests/field/test_biotsavart.py` current Taylor tests for `B`.
-  - [ ] Mirror vector-potential current Taylor tests for `A`.
-  - [ ] Use C++ value parity plus type-3 FD/Taylor convergence as separate
-        oracles.
-  - [ ] Record observed convergence orders in the test or `STATUS.md`.
+#### Workstreams
 
-Validation:
+- [ ] **W2-B0 - Current-tree revalidation (small)**
+  - [ ] Re-grep `biotsavart_jax_backend.py` for the seven method names
+        in the gap list and confirm absence on both `BiotSavartJAX`
+        (`:878`) and `SpecBackedBiotSavartJAX` (`:405`).
+  - [ ] Re-grep `jax_core/field.py` for `grouped_biot_savart_d2B_by_dXdX`
+        and confirm absence (and that `biot_savart_d2B_by_dXdX` is not
+        imported there).
+  - [ ] Confirm `_ncsx_biotsavart_parity_fixture` (`:341`) still
+        returns a 5-tuple `(bs, points_np, gammas_np, gds_np,
+        currents_np)` from a `simsoptpp`-backed
+        `simsopt.field.BiotSavart`.
+  - [ ] Append the verified gap list to
+        `.artifacts/jax_port_gap_audit_2026-05-13/STATUS.md` before
+        starting W2-B1.
 
-- [ ] `ruff check` / `ruff format --check` on changed files.
-- [ ] `.conda/jax-0.9.2/bin/python -m pytest tests/field/test_biotsavart_jax.py tests/field/test_biotsavart_jax_parity.py -v`
-- [ ] Run the public pure-JAX command from `CLAUDE.md` if shared helpers change.
+- [ ] **W2-B1 - Expose `d2B_by_dXdX()` on both wrapper classes
+      (smallest fix first)**
+  - [ ] In `simsopt/jax_core/field.py`: import
+        `biot_savart_d2B_by_dXdX` next to the existing
+        `biot_savart_d2A_by_dXdX` import (`:18`).
+  - [ ] Extend `_empty_grouped_field_result` (`:52-67`) with a single
+        new branch `if kernel is biot_savart_d2B_by_dXdX: return
+        _zeros_float64((point_count, 3, 3, 3))` — mirror the d2A
+        branch (`:58`).
+  - [ ] Extend `_field_out_specs` (`:113-125`) so
+        `biot_savart_d2A_by_dXdX` and `biot_savart_d2B_by_dXdX` share
+        an explicit `(point_axis_name, None, None, None)` sharding
+        entry. The current fallback happens to return that spec for d2A,
+        but Wave 2 should make the Hessian kernels explicit.
+  - [ ] Add `grouped_biot_savart_d2B_by_dXdX_from_spec` /
+        `_from_inputs` mirroring the d2A trio at `:531-:540` — single
+        call into `_accumulate_grouped_field(points, coil_spec,
+        biot_savart_d2B_by_dXdX)`. No new low-level integrand.
+  - [ ] In `biotsavart_jax_backend.py`: add the new grouped helper to
+        the import block (`:36-50`) and add `d2B_by_dXdX()` methods on
+        both `SpecBackedBiotSavartJAX` (next to `d2A_by_dXdX` at
+        `:529`) and `BiotSavartJAX` (next to `d2A_by_dXdX` at `:1458`).
+        Each method body is a single call into the new grouped helper
+        with `(self._points_jax, self.coil_set_spec())`.
+  - [ ] In `simsopt/jax_core/__init__.py`, add matching import and
+        `__all__` entries for the new grouped d2B helpers.
+  - [ ] Tensor convention: the unit JAX kernel at
+        `jax_core/biotsavart.py:462-476` transposes raw `jacfwd²` axes
+        `(component, d1, d2)` to `(d1, d2, component)`, then vmaps
+        over points to produce shape `(npoints, 3, 3, 3)` with
+        `d2B[p, j, k, l] = ∂_j ∂_k B_l(x_p) = ∂_k ∂_j B_l(x_p)`. This
+        matches the CPU C++ pybind docstring
+        (`simsoptpp/python_magneticfield.cpp:31`,
+        "`\partial_k\partial_j B_l(x_i)`") by Schwarz symmetry — no
+        runtime reordering needed at the JAX/CPU boundary.
+  - [ ] Mixed-quadrature grouping (TF + banana coexistence) flows
+        through the existing `_accumulate_grouped_field` path used by
+        the d2A helper. No new grouping code needed.
 
-Acceptance:
+- [ ] **W2-B2 - B-side coil-current derivatives**
+  - [ ] Implement `BiotSavartJAX.dB_by_dcoilcurrents(compute_derivatives=0)`
+        as a per-coil unit-current B-field bundle. Signature,
+        Python-list structure, per-entry shape `(npoints, 3)`, and
+        per-coil ordering match
+        `simsopt.field.biotsavart.BiotSavart.dB_by_dcoilcurrents`
+        (`biotsavart.py:30`).
+  - [ ] Implement `d2B_by_dXdcoilcurrents(compute_derivatives=1)` —
+        Python list with `(npoints, 3, 3)` entries, matching
+        `biotsavart.py:40`.
+  - [ ] Implement `d3B_by_dXdXdcoilcurrents(compute_derivatives=2)` —
+        Python list with `(npoints, 3, 3, 3)` entries, matching
+        `biotsavart.py:50`.
+  - [ ] Implementation: build each list entry `b_k`, `db_k`, `d2b_k`
+        by calling the existing per-point kernels
+        (`biot_savart_B` / `biot_savart_dB_by_dX` /
+        `biot_savart_d2B_by_dXdX`) with a single-coil input and
+        `currents = jnp.array([1.0])`. The math identity
+        `dB/dI_k = b_k(x)` follows from
+        `B(x) = Σ_k I_k · b_k(x)` (already validated as exact in
+        `test_B_and_dB_linearity_in_current` at
+        `test_biotsavart_jax_parity.py:490`). Mirror this construction
+        on `SpecBackedBiotSavartJAX`.
+  - [ ] `compute_derivatives` argument: accept for signature parity
+        with the CPU class. The JAX path has no fieldcache, so the
+        argument value has no runtime effect; do not branch on it and
+        do not validate it (per `CLAUDE.md` "no defensive checks").
+        Document this in the docstring.
+  - [ ] No `simsoptpp` imports in source modules.
 
-- [ ] New JAX current-derivative methods shape-match CPU `BiotSavart`.
-- [ ] Direct C++ parity exists for new methods.
-- [ ] Existing `A`/`dA`/`d2A` behavior is not regressed or duplicated.
+- [ ] **W2-B3 - A-side coil-current derivatives**
+  - [ ] Implement `dA_by_dcoilcurrents(compute_derivatives=0)` —
+        Python list with `(npoints, 3)` entries, matching
+        `biotsavart.py:132`. Body:
+        per-coil `biot_savart_A(points, [γ_k], [γ'_k], [1.0])`.
+  - [ ] Implement `d2A_by_dXdcoilcurrents(compute_derivatives=1)` —
+        Python list with `(npoints, 3, 3)` entries, matching
+        `biotsavart.py:142`. Body:
+        per-coil `biot_savart_dA_by_dX(...)` at unit current.
+  - [ ] Implement `d3A_by_dXdXdcoilcurrents(compute_derivatives=2)` —
+        Python list with `(npoints, 3, 3, 3)` entries, matching
+        `biotsavart.py:152`. Body:
+        per-coil `biot_savart_d2A_by_dXdX(...)` at unit current.
+  - [ ] Same `compute_derivatives` semantics as W2-B2.
+
+- [ ] **W2-B4 - Direct C++ parity (closeout for already-existing
+      methods)**
+  - [ ] Replace the existing inline `rtol=1e-10` in
+        `test_B_parity_ncsx` (`test_biotsavart_jax.py:520`) with
+        `parity_ladder_tolerances("direct_kernel")` values. Keep
+        self-consistency tests' intentionally inline tight floors
+        separate from C++ parity-lane tolerances.
+  - [ ] Add `test_dA_by_dX_parity_ncsx` to `TestBiotSavartJaxCppParity`
+        comparing `BiotSavartJAX.dA_by_dX()` against
+        `BiotSavart.dA_by_dX()` at the
+        `derivative_heavy.first_derivative` lane.
+  - [ ] Add `test_d2B_by_dXdX_parity_ncsx` comparing
+        `BiotSavartJAX.d2B_by_dXdX()` against
+        `BiotSavart.d2B_by_dXdX()` at the
+        `derivative_heavy.second_derivative` lane (depends on W2-B1).
+  - [ ] Add `test_d2A_by_dXdX_parity_ncsx` comparing
+        `BiotSavartJAX.d2A_by_dXdX()` against
+        `BiotSavart.d2A_by_dXdX()` at the same lane.
+  - [ ] Each test must co-import a `simsoptpp`-backed `BiotSavart` and
+        cite the oracle type per
+        `tests/REVIEWER_ORACLE_LINT.md`. Reuse
+        `_ncsx_biotsavart_parity_fixture` rather than building a
+        parallel fixture. Tolerances must come from
+        `PARITY_LADDER_TOLERANCES` via
+        `parity_ladder_tolerances(...)` (matching the existing
+        `_DERIVATIVE_HEAVY_TOLS` usage at `test_biotsavart_jax.py`).
+        No inline `rtol=`/`atol=` literals.
+
+- [ ] **W2-B5 - Direct C++ parity (coil-current ladder)**
+  - [ ] Add `test_dB_by_dcoilcurrents_parity_ncsx` comparing the JAX
+        list-of-arrays against `BiotSavart.dB_by_dcoilcurrents()` on
+        identical coils/points at the `direct_kernel` lane (per-coil
+        unit-current B is a value-like quantity).
+  - [ ] Add the symmetric `test_dA_by_dcoilcurrents_parity_ncsx`.
+  - [ ] Add `test_d2B_by_dXdcoilcurrents_parity_ncsx` and
+        `test_d2A_by_dXdcoilcurrents_parity_ncsx` at
+        `derivative_heavy.first_derivative`.
+  - [ ] Add `test_d3B_by_dXdXdcoilcurrents_parity_ncsx` and
+        `test_d3A_by_dXdXdcoilcurrents_parity_ncsx` at
+        `derivative_heavy.second_derivative`.
+  - [ ] Each test must compare list element-by-element (preserving
+        per-coil ordering — the CPU list ordering is the live coil
+        ordering from `BiotSavart._coils`) and reuse
+        `_ncsx_biotsavart_parity_fixture`. Use
+        `len(jax_list) == len(cpu_list)` as the structural check, then
+        per-index `assert_allclose`.
+
+- [ ] **W2-B6 - Per-coil current-linearity FD coverage**
+  - [ ] In `test_biotsavart_jax_parity.py`, add per-coil
+        current-linearity tests for `dB_by_dcoilcurrents` and
+        `dA_by_dcoilcurrents`. For each coil k, perturb only that
+        coil's current by `+ε` and `-ε` (with all other currents fixed).
+        Verify both equivalent exact-linear identities:
+        `(B(I_k+ε)-B(I_k-ε))/(2ε) == dB_by_dcoilcurrents[k]` and
+        `B(I_k+ε)-B(I_k) == ε * dB_by_dcoilcurrents[k]` (same for `A`).
+        Biot-Savart is exactly linear in I, so a single FD step is exact
+        to machine precision (no convergence series needed). This mirrors
+        the helper pattern in `_assert_current_linearity` (`:205`), and
+        corresponds to the upstream test
+        `test_biotsavart_coil_current_taylortest`
+        (`simsopt/tests/field/test_biotsavart.py:276`) and its
+        vector-potential analog (`:402`).
+  - [ ] These are type-3 (FD-on-the-JAX-stack) oracles, distinct from
+        W2-B5's direct C++ list-equality oracles. Do not present them
+        as parity oracles.
+  - [ ] The existing aggregate `test_B_and_dB_linearity_in_current`
+        (`:490`) covers Σ_k linearity but does NOT validate the
+        per-coil decomposition — keep both.
+
+#### Validation
+
+- [ ] `ruff check` and `ruff format --check` on every changed
+      Python file.
+- [ ] `.conda/jax-0.9.2/bin/python -m pytest tests/field/test_biotsavart_jax.py tests/field/test_biotsavart_jax_parity.py tests/field/test_biotsavart_A_direct_kernel_closeout.py tests/test_jax_import_smoke.py -k 'biotsavart or grouped_biot_savart' -v`
+- [ ] Public pure-JAX command from `CLAUDE.md` if any shared
+      helper (kernel-cache, grouped wrapper, or `jax_core/__init__.py`
+      public export) is touched.
+- [ ] No `tests/integration/` run is required unless a Stage 2 path is
+      observed to regress.
+
+#### Acceptance Criteria
+
+The Wave 2 `/goal` is complete when:
+
+1. `BiotSavartJAX` and `SpecBackedBiotSavartJAX` both expose a
+   `d2B_by_dXdX()` method whose value matches
+   `BiotSavart.d2B_by_dXdX()` on the NCSX parity fixture at the
+   `derivative_heavy.second_derivative` lane. `jax_core/field.py`
+   exposes `grouped_biot_savart_d2B_by_dXdX_from_spec` /
+   `_from_inputs`; `jax_core/__init__.py` re-exports both helpers; and
+   `_empty_grouped_field_result` / `_field_out_specs` recognize the new
+   kernel.
+2. `BiotSavartJAX` and `SpecBackedBiotSavartJAX` both expose the six
+   coil-current derivative methods
+   (`{d,d2,d3}{B,A}_by_d[X[X]]dcoilcurrents`) with CPU-matching
+   signatures, default `compute_derivatives` arguments, Python-list
+   return structure, per-entry shapes, and per-coil ordering. The JAX
+   methods return per-coil JAX arrays, not host-materialized NumPy
+   arrays; the `compute_derivatives` argument is accepted but not
+   branched on.
+3. `tests/field/test_biotsavart_jax.py::TestBiotSavartJaxCppParity`
+   contains direct-C++ parity rows for `dA_by_dX`, `d2B_by_dXdX`,
+   `d2A_by_dXdX`, and all six coil-current derivative methods, each
+   citing its oracle type and using `PARITY_LADDER_TOLERANCES` entries
+   via `parity_ladder_tolerances(...)`; the pre-existing `B` and
+   `dB_by_dX` rows also use the same SSOT lane constants. No inline
+   tolerance literals remain in direct C++ parity rows.
+4. `tests/field/test_biotsavart_jax_parity.py` carries per-coil
+   current-linearity coverage for `dB_by_dcoilcurrents` and
+   `dA_by_dcoilcurrents` — distinct from the W2-B4/W2-B5 direct-C++
+   parity rows. The aggregate `test_B_and_dB_linearity_in_current`
+   (`:490`) remains green.
+5. Existing `A`/`dA_by_dX`/`d2A_by_dXdX`/`B`/`dB_by_dX`/`B_vjp` parity
+   tests remain green; existing chunked self-consistency tests
+   (`TestBiotSavartJaxChunkedSelfConsistency`, `:578`) remain green;
+   existing Taylor invariants remain green. No `simsoptpp` import is
+   introduced into any `src/simsopt/**` module.
+6. `STATUS.md` records the verified gap list (pre-implementation), the
+   landed method/test changes, and the focused validation outcomes.
 
 ### Wave 3 - MHD Reductions
 
