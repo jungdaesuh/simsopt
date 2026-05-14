@@ -38,7 +38,6 @@ from simsopt.backend import invalidate_backend_cache
 from simsopt.jax_core.field import (
     grouped_biot_savart_B_from_spec,
     grouped_coil_set_spec_from_lists,
-    grouped_field_sharding_summary,
 )
 from simsopt.jax_core import sharding as sharding_core
 
@@ -207,9 +206,7 @@ def _make_accumulation_order_fixture(
 
         base_radius = 0.72 + 0.018 * ((coil_index % 7) - 3)
         radius = base_radius + 8.0e-4 * np.cos(radial_mode)
-        z = 4.0e-3 * (coil_index - 0.5 * (ncoils - 1)) + 6.0e-4 * np.sin(
-            vertical_mode
-        )
+        z = 4.0e-3 * (coil_index - 0.5 * (ncoils - 1)) + 6.0e-4 * np.sin(vertical_mode)
 
         d_radius_dt = -8.0e-4 * (2.0 * np.pi * 5.0) * np.sin(radial_mode)
         dz_dt = 6.0e-4 * (2.0 * np.pi * 3.0) * np.cos(vertical_mode)
@@ -227,9 +224,7 @@ def _make_accumulation_order_fixture(
             d_radius_dt * sin_theta + radius * cos_theta * dtheta_dt
         )
         gammadashs[coil_index, :, 2] = dz_dt
-        currents[coil_index] = ((-1.0) ** coil_index) * (
-            5.0e4 + 750.0 * coil_index
-        )
+        currents[coil_index] = ((-1.0) ** coil_index) * (5.0e4 + 750.0 * coil_index)
 
     point_radius = 0.34 + 0.08 * rng.random(npoints)
     point_phi = 2.0 * np.pi * rng.random(npoints)
@@ -250,6 +245,18 @@ def _make_accumulation_order_fixture(
 
 
 def _dense_reference_fields(module, points, gammas, gammadashs, currents):
+    """Evaluate B, A, dB/dX, dA/dX through the same JAX kernel without chunking.
+
+    This is a chunked-vs-dense self-consistency helper, NOT a C++ parity
+    oracle: the "dense" path runs the exact same JAX integrand
+    (``module._one_point_dense`` with ``module._biot_savart_B_integrand``
+    /``module._biot_savart_A_integrand``) under ``jax.vmap`` and
+    ``jax.jacfwd``. Comparing chunked output against this reference
+    verifies that chunking does not perturb the reduction, not that the
+    JAX implementation matches the C++ ``simsoptpp.BiotSavart`` symbol.
+    Direct C++ parity assertions live in ``TestBiotSavartJaxCppParity``.
+    """
+
     def _dense_B(x):
         return module._one_point_dense(
             x,
@@ -270,16 +277,17 @@ def _dense_reference_fields(module, points, gammas, gammadashs, currents):
 
     dense_B = _dense_B_reference(module, points, gammas, gammadashs, currents)
     dense_A = jax.vmap(_dense_A)(points)
-    dense_dB = jax.vmap(lambda x: jnp.swapaxes(jax.jacfwd(_dense_B)(x), -1, -2))(
-        points
-    )
-    dense_dA = jax.vmap(lambda x: jnp.swapaxes(jax.jacfwd(_dense_A)(x), -1, -2))(
-        points
-    )
+    dense_dB = jax.vmap(lambda x: jnp.swapaxes(jax.jacfwd(_dense_B)(x), -1, -2))(points)
+    dense_dA = jax.vmap(lambda x: jnp.swapaxes(jax.jacfwd(_dense_A)(x), -1, -2))(points)
     return dense_B, dense_A, dense_dB, dense_dA
 
 
 def _dense_B_reference(module, points, gammas, gammadashs, currents):
+    """Run the same JAX B-integrand through ``jax.vmap`` without chunking.
+
+    Self-consistency helper (see ``_dense_reference_fields``). Not a C++
+    parity oracle.
+    """
     return jax.vmap(
         lambda x: module._one_point_dense(
             x,
@@ -292,6 +300,15 @@ def _dense_B_reference(module, points, gammas, gammadashs, currents):
 
 
 def _dense_B_vjp(module, points, v, gammas, gammadashs, currents):
+    """VJP through the same JAX kernel without chunking, via ``jax.vjp``.
+
+    Self-consistency helper for chunking probes: returns ``pullback(v)``
+    where the forward pass is the dense (non-chunked) JAX integrand.
+    Not a C++ parity oracle for ``BiotSavart.B_vjp``; the direct
+    ``BiotSavart.B_vjp`` parity assertion lives in
+    ``TestBiotSavartJaxCppParity``.
+    """
+
     def _dense_B(group_gammas, group_gammadashs, group_currents):
         return jax.vmap(
             lambda x: module._one_point_dense(
@@ -522,9 +539,56 @@ class TestBiotSavartJaxCppParity:
             atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
         )
 
+    def test_B_vjp_parity_ncsx(self):
+        """``BiotSavartJAX.B_vjp(v)`` matches ``BiotSavart.B_vjp(v)`` per coil.
 
-class TestBiotSavartJaxChunkedParity:
-    """Directly compare chunked low-level kernels against dense references."""
+        Oracle: C++ reference symbol ``simsoptpp.biot_savart_vjp_graph``
+        invoked through ``simsopt.field.biotsavart.BiotSavart.B_vjp``
+        (acceptable oracle type 1, see ``tests/REVIEWER_ORACLE_LINT.md``).
+        Both ``Derivative`` objects are evaluated against each coil to
+        compare the per-coil cotangent contributions on identical
+        coils/points/cotangent. Lane: ``derivative_heavy`` first-derivative
+        tolerances from the validation-ladder SSOT.
+        """
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+        bs_cpu, points_np, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        coils = list(bs_cpu._coils)
+
+        bs_jax = BiotSavartJAX(coils)
+        bs_jax.set_points(points_np)
+
+        v = np.asarray(bs_cpu.B(), dtype=np.float64).copy()
+        deriv_cpu = bs_cpu.B_vjp(v)
+        deriv_jax = bs_jax.B_vjp(v)
+
+        for coil in coils:
+            np.testing.assert_allclose(
+                np.asarray(deriv_jax(coil)),
+                np.asarray(deriv_cpu(coil)),
+                rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+                atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+                err_msg=(
+                    "BiotSavartJAX.B_vjp() does not match BiotSavart.B_vjp() "
+                    "on the NCSX parity fixture"
+                ),
+            )
+
+
+class TestBiotSavartJaxChunkedSelfConsistency:
+    """Chunked-vs-dense JAX self-consistency for the low-level kernels.
+
+    This class checks that chunking (coil chunks, quadrature blocks,
+    point chunks, mesh sharding) does not perturb the JAX reduction
+    against the SAME JAX kernel evaluated dense (no chunking). The dense
+    reference is the JAX kernel itself (``module._one_point_dense``
+    under ``jax.vmap`` / ``jax.jacfwd`` / ``jax.vjp``), not the C++
+    ``simsoptpp.BiotSavart`` symbol — so these tests are explicit
+    Tier-4 self-consistency probes per
+    ``tests/REVIEWER_ORACLE_LINT.md``. Direct C++ parity assertions for
+    ``B``, ``dB/dX``, and ``B_vjp`` live in
+    ``TestBiotSavartJaxCppParity`` above.
+    """
 
     def test_backend_cache_invalidation_clears_kernel_cache(self):
         with _kernel_tuning_env("jax_cpu_parity"):
@@ -779,9 +843,7 @@ class TestBiotSavartJaxChunkedParity:
     def test_many_coil_many_quadrature_reduction_order_matches_dense_reference(
         self, mode, rtol, atol
     ):
-        points, gammas, gammadashs, currents = _make_accumulation_order_fixture(
-            seed=41
-        )
+        points, gammas, gammadashs, currents = _make_accumulation_order_fixture(seed=41)
 
         with _kernel_tuning_env(
             mode,
@@ -929,7 +991,9 @@ class TestBiotSavartJaxChunkedParity:
         dense_B = biot_savart_B(points, gammas, gammadashs, currents)
         grouped_B = grouped_biot_savart_B_from_spec(points, coil_spec)
 
-        np.testing.assert_allclose(np.asarray(grouped_B), np.asarray(dense_B), atol=1e-14)
+        np.testing.assert_allclose(
+            np.asarray(grouped_B), np.asarray(dense_B), atol=1e-14
+        )
         assert isinstance(grouped_B.sharding, NamedSharding)
 
     def test_grouped_biot_savart_jit_accepts_forced_point_sharding(self, monkeypatch):

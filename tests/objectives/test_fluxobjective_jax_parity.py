@@ -30,10 +30,12 @@ _SQUARED_FLUX_DEFINITIONS = (
     "normalized",
     "local",
 )
-_VALUE_RTOL = 1e-12
-_VALUE_ATOL = 1e-15
-_GRADIENT_RTOL = 1e-11
-_GRADIENT_ATOL = 1e-14
+# SSOT parity tolerances from the validation-ladder contract.
+# Value parity (CPU C++ ``SquaredFlux.J()`` oracle vs ``SquaredFluxJAX.J()``)
+# uses the ``direct_kernel`` lane; gradient parity uses the first-derivative
+# row of the ``derivative_heavy`` lane.
+_FLUX_VALUE_TOLS = parity_ladder_tolerances("direct_kernel")
+_FLUX_GRADIENT_TOLS = parity_ladder_tolerances("derivative_heavy")
 _FD_GRADIENT_TOLS = parity_ladder_tolerances("fd-gradient")
 
 
@@ -225,15 +227,19 @@ def _single_valid_flux_value_and_gradient(definition):
         numerator = bdotn**2 * norm_n
         denominator = field_norm_sq * norm_n
         value = 0.5 * numerator / denominator
-        gradient = 0.5 * (
-            (2.0 * bdotn * normal) * denominator - numerator * (2.0 * field)
-        ) / denominator**2
+        gradient = (
+            0.5
+            * ((2.0 * bdotn * normal) * denominator - numerator * (2.0 * field))
+            / denominator**2
+        )
     elif definition == "local":
         value = 0.5 * bdotn**2 * norm_n / field_norm_sq / grid_size
-        gradient = 0.5 * norm_n * (
-            (2.0 * bdotn * normal) * field_norm_sq
-            - bdotn**2 * (2.0 * field)
-        ) / (field_norm_sq**2 * grid_size)
+        gradient = (
+            0.5
+            * norm_n
+            * ((2.0 * bdotn * normal) * field_norm_sq - bdotn**2 * (2.0 * field))
+            / (field_norm_sq**2 * grid_size)
+        )
     else:
         raise ValueError(f"Unknown flux definition {definition!r}.")
 
@@ -241,15 +247,22 @@ def _single_valid_flux_value_and_gradient(definition):
 
 
 def _assert_flux_value_parity(actual, reference):
-    np.testing.assert_allclose(actual, reference, rtol=_VALUE_RTOL, atol=_VALUE_ATOL)
-
-
-def _assert_flux_gradient_parity(actual, reference):
+    """Value parity assertion using the ``direct_kernel`` lane SSOT."""
     np.testing.assert_allclose(
         actual,
         reference,
-        rtol=_GRADIENT_RTOL,
-        atol=_GRADIENT_ATOL,
+        rtol=_FLUX_VALUE_TOLS["rtol"],
+        atol=_FLUX_VALUE_TOLS["atol"],
+    )
+
+
+def _assert_flux_gradient_parity(actual, reference):
+    """Gradient parity assertion using the ``derivative_heavy`` lane SSOT."""
+    np.testing.assert_allclose(
+        actual,
+        reference,
+        rtol=_FLUX_GRADIENT_TOLS["first_derivative_rtol"],
+        atol=_FLUX_GRADIENT_TOLS["first_derivative_atol"],
     )
 
 
@@ -277,6 +290,29 @@ def _assert_squared_flux_directional_fd(objective):
 
 
 def _flux_kernel_value_and_grad(*, definition, normal, B, target):
+    """Fixed-surface edge-contract helper for the flux kernel.
+
+    NOT a CPU/JAX parity oracle. Constructs a fixed-surface flux spec
+    around a small hand-built ``(normal, B, target)`` triplet and
+    returns ``(value, grad_B)`` from the JAX flux integrand. Used only
+    by the three edge-contract tests below — zero normals,
+    degenerate-normal masking, and singular zero-field handling — to
+    pin specific finite-or-infinite contract behaviour on hand-built
+    fixtures. Those tests cite either oracle type 2 (closed-form NumPy
+    expressions, e.g. ``_single_valid_flux_value_and_gradient``) or
+    documented contract semantics (NaN/Inf masking), not JAX-vs-JAX
+    parity.
+
+    Call sites:
+      * ``test_quadratic_flux_zero_normals_contract``
+      * ``test_degenerate_normals_do_not_perturb_valid_flux_contracts``
+      * ``test_singular_zero_field_contract``
+
+    Do not cite this helper as a parity oracle in new tests; route
+    CPU/JAX parity through ``SquaredFlux``/``SquaredFluxJAX`` and the
+    ``_assert_flux_value_parity`` / ``_assert_flux_gradient_parity``
+    lane-driven helpers above.
+    """
     normal_array = np.asarray(normal, dtype=np.float64)
     flux_spec = make_fixed_surface_flux_spec(
         points=np.zeros_like(normal_array.reshape((-1, 3))),
@@ -290,7 +326,6 @@ def _flux_kernel_value_and_grad(*, definition, normal, B, target):
         return fixed_surface_flux_integral_from_B(B_arg, flux_spec)
 
     return jax.value_and_grad(objective)(B_flat)
-
 
 
 @pytest.fixture(autouse=True)
@@ -320,6 +355,20 @@ def test_squaredfluxjax_gradient_matches_directional_taylor_fd(definition):
 
 
 def test_squaredfluxjax_large_point_cloud_grouped_vjp_matches_dense(monkeypatch):
+    """JAX chunked-vs-dense self-consistency on the flux integral.
+
+    This is a Tier-4 self-consistency check (JAX-vs-JAX through the same
+    kernel under different chunk parameters) per
+    ``tests/REVIEWER_ORACLE_LINT.md``, NOT a CPU/JAX parity test — so
+    the looser parity-lane SSOT is the wrong floor here. The tight
+    inline bounds match the historical ratcheted floor for the
+    chunked-vs-dense flux self-consistency contract (commit
+    ``7e8e8f622`` for value; gradient bound mirrors the comparable
+    BiotSavart chunked-self-consistency tests in
+    ``tests/field/test_biotsavart_jax.py`` that use ``atol=1e-14``
+    inline). Loosening to the parity lane would silently widen the
+    chunking-bug detection window for the flux path.
+    """
     try:
         dense_value, dense_gradient = _large_grouped_flux_value_and_gradient(
             monkeypatch,
@@ -334,8 +383,15 @@ def test_squaredfluxjax_large_point_cloud_grouped_vjp_matches_dense(monkeypatch)
     finally:
         invalidate_backend_cache()
 
-    _assert_flux_value_parity(chunked_value, dense_value)
-    _assert_flux_gradient_parity(chunked_gradient, dense_gradient)
+    # Chunked-vs-dense JAX self-consistency: tight inline bounds, not the
+    # parity-lane SSOT. See test docstring for rationale.
+    np.testing.assert_allclose(chunked_value, dense_value, rtol=1e-12, atol=1e-15)
+    np.testing.assert_allclose(
+        chunked_gradient,
+        dense_gradient,
+        rtol=1e-11,
+        atol=1e-14,
+    )
 
 
 @pytest.mark.parametrize(
@@ -428,7 +484,9 @@ def test_squaredfluxjax_zero_current_gradient_raises_objective_failure(definitio
 
 def test_squaredfluxjax_rejects_field_point_mutation_after_construction():
     _, objective = _make_native_flux_objectives("quadratic flux")
-    mutated_points = np.asarray(objective.surface.gamma().reshape((-1, 3)), dtype=np.float64)
+    mutated_points = np.asarray(
+        objective.surface.gamma().reshape((-1, 3)), dtype=np.float64
+    )
     mutated_points[:, 0] += 1.0e-3
     objective.field.set_points(mutated_points)
 
