@@ -217,7 +217,7 @@ Confirmed NOT bugs (false positives):
 - **nfp factor in volume/area**: correct — nfp cancels with quadrature step `1/(nfp*nphi)`.
 - **J_z omission from adjoint source**: correct — inner-solve regularizer, not part of `J_outer`.
 - **framedcurve.py API change** (4-arg → 3-arg): all callers already updated.
-- **BiotSavartJAX missing d2B_by_dXdX/A/compute**: backlog items, not needed by current consumers.
+- **BiotSavartJAX missing `compute(derivatives=N)` bundled cache entrypoint**: classified NON-PORTABLE-by-design (see `.artifacts/jax_port_gap_audit_2026-05-13/cpp_port_gap.md`); per-method JAX calls are the canonical JAX-native shape.
 - **SciPy host loop in optimizer**: not a bug. It remains the default least-squares backend, but the on-device and hybrid backends are now supported and validated separately.
 - **LS solve divergence CPU vs JAX**: did not reproduce — both converge to machine precision.
 

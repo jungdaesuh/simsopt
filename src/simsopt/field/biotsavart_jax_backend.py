@@ -119,6 +119,13 @@ def _per_coil_unit_field(points, coil_set_spec, kernel):
     on the single-coil view with ``currents = [1.0]``. Biot-Savart is
     exactly linear in ``I``, so the resulting array equals
     ``∂F/∂I_k`` for the matching spatial-derivative kernel.
+
+    The output is a list of ``ncoils`` separate JAX arrays — one per
+    coil — so coil-axis collective reduction does not apply. The
+    ``SIMSOPT_JAX_SHARDING=coil_groups`` collective path (used by
+    ``grouped_biot_savart_*_from_spec``) is bypassed here by design,
+    relying instead on the JAX kernel cache for compile-time reuse
+    within a quadrature group.
     """
     ncoils = sum(len(group.coil_indices) for group in coil_set_spec.groups)
     unit_current = jnp.ones((1,), dtype=jnp.float64)

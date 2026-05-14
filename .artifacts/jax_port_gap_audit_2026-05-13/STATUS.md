@@ -695,3 +695,103 @@ Final verdict: **PASS** (1 iteration, no confirmed findings).
     public gate 722/60).
 - Mistake Book: 0 new entries.
 - Advisories: none above the noise floor.
+
+## Wave 2 Deep Code Review (2026-05-14)
+
+A second adversarial review pass was run with 6 parallel Opus 4.7
+max-effort agents targeting (a) math/physics correctness,
+(b) JAX official docs (via `ctx7`), (c) SIMSOPT contract conformance
++ downstream consumers, (d) CUDA/GPU + transfer-guard,
+(e) performance/memory/thread-safety, and (f) stale code + e2e
+regression.
+
+- Math/physics: all correct.
+  `jacfwd(jacfwd(...))` axis order verified empirically by an
+  isolated 3→3 Hessian probe. The `(1, 2, 0)` transpose at
+  `jax_core/biotsavart.py:468-476` maps the raw
+  `(component, d1, d2)` output to the upstream
+  `[d1, d2, component]` convention.
+  Unit-current trick `dB/dI_k = b_k(x)` confirmed against the C++
+  fieldcache contract at
+  `src/simsoptpp/magneticfield_biotsavart.cpp:38-77`: each per-coil
+  slot stores the raw rotated unit-current kernel, with the signed
+  `ScaledCurrent(base, -1.0)` factor applied only at the
+  `B = Σ currents[i] * Bi` accumulation step. Both JAX and CPU
+  paths use the unsigned kernel for `dB_by_dcoilcurrents[i]`, so the
+  18-coil NCSX (`nfp=3, stellsym=True`) parity tests can succeed at
+  `direct_kernel` tolerance without sign cancellation hiding errors.
+  Schwarz symmetry (`∂_j ∂_k B_l = ∂_k ∂_j B_l`) is enforced by the
+  existing `test_d2B_dXdX_symmetric` at
+  `tests/field/test_biotsavart_jax_parity.py:362-382` (`atol=1e-14`).
+- JAX official docs: cross-checked via `ctx7` (3-command budget
+  honored). `jacfwd` nested composition, `shard_map` rank-preserving
+  `out_specs`, `jnp.ones((1,), dtype=jnp.float64)` under the x64
+  init gate at `src/simsopt/__init__.py:29`, and JIT cache behavior
+  for Python-int slicing all match canonical JAX 0.10 usage.
+- SIMSOPT contract: all seven new methods match the CPU public-API
+  shapes and per-coil ordering. The JAX
+  `B_and_dB_vjp`/`A_and_dA_vjp` deliberately bypass
+  `dB_by_dcoilcurrents` / `d2B_by_dXdcoilcurrents` and use native
+  `jax.vjp` through grouped pullbacks — this is the documented M0
+  adapter contract divergence, not a regression. No CPU consumer
+  reachable through `BiotSavartJAX` can break because
+  `BiotSavartJAX` does not inherit from `sopp.BiotSavart` and has no
+  `compute()`/fieldcache surface.
+- CUDA/GPU: per-coil-current methods bypass
+  `_accumulate_grouped_field` by design — they output `ncoils`
+  separate JAX arrays (one per coil), not a coil-axis-reducible
+  array, so `SIMSOPT_JAX_SHARDING=coil_groups` collective reduction
+  does not apply. `jnp.ones((1,), dtype=jnp.float64)` stays on the
+  default device (no host→device transfer); slicing
+  `gammas[pos:pos+1]` lowers to `lax.slice_in_dim`. The dense d2B
+  output `(npoints, 3, 3, 3)` shards via the explicit
+  `P(point_axis_name, None, None, None)` spec at
+  `jax_core/field.py:124-125`, which is canonical per the JAX
+  `shard_map` doc.
+- Performance/memory: parity with the CPU memory contract — both
+  return `[(npoints, ..., 3)] * ncoils`. JIT cache is keyed on
+  shape via `lru_cache(maxsize=32)`; mixed-quadrature scenarios
+  pay one compile per `(integrand, diff_mode, nquad)` bucket and
+  then reuse. Thread-safe by construction (immutable spec,
+  function-local `unit_current`, no module-level mutable state).
+- Stale code / e2e regression: one actionable doc fix.
+  - **Fixed**: `CLAUDE.md:220` previously claimed `BiotSavartJAX`
+    was "missing d2B_by_dXdX/A/compute". As of Wave 2, `d2B_by_dXdX`
+    is implemented and `A`/`dA_by_dX`/`d2A_by_dXdX` were already
+    present pre-Wave 2. Rewrote the entry to clarify that only
+    `compute(derivatives=N)` remains, and is classified
+    NON-PORTABLE-by-design per the
+    `.artifacts/jax_port_gap_audit_2026-05-13/cpp_port_gap.md`
+    audit.
+  - No dead code introduced. `_field_out_specs` and
+    `_empty_grouped_field_result` `raise ValueError` branches are
+    unreachable from production callers, serving as guards against
+    future kernel additions. The linter follow-up consolidated the
+    `dA_by_dX`/`dB_by_dX` and `d2A_by_dXdX`/`d2B_by_dXdX` branches
+    into single `kernel in {...}` checks (DRY improvement, no
+    behavior change). `_per_coil_unit_field` was also tightened from
+    a `[None] * ncoils` list-index pattern to a
+    `dict[int, jax.Array]` plus final list comprehension —
+    semantically equivalent for the contiguous-index invariant but
+    more robust to non-contiguous future inputs.
+  - No integration / benchmark / example regression. The CPU-only
+    Boozer consumer paths (`src/simsopt/geo/surfaceobjectives.py`,
+    `src/simsopt/geo/boozersurface.py`) cannot reach
+    `BiotSavartJAX` through `boozer_penalty_constraints*` because
+    `BiotSavartJAX` does not inherit from `sopp.BiotSavart`.
+
+Re-validation after fix + linter mods:
+
+```
+.conda/jax-0.9.2/bin/ruff check src/simsopt/field/biotsavart_jax_backend.py \
+  src/simsopt/jax_core/field.py src/simsopt/jax_core/__init__.py \
+  tests/field/test_biotsavart_jax.py tests/field/test_biotsavart_jax_parity.py \
+  CLAUDE.md
+# → All checks passed!
+
+.conda/jax-0.9.2/bin/ruff format --check (same 5 source/test files)
+# → 5 files already formatted
+
+.conda/jax-0.9.2/bin/python -m pytest tests/field/test_biotsavart_jax.py tests/field/test_biotsavart_jax_parity.py -v
+# → 74 passed in 38.56s
+```
