@@ -34,12 +34,13 @@ Worktree: `/Users/suhjungdae/code/columbia/simsopt-jax`
 - Wave 1 is closed. `STATUS.md` records the implementation, follow-up review,
   and final public pure-JAX regression gate.
 - Wave 2 is active but incomplete. W2-B0 is recorded in `STATUS.md` at
-  baseline HEAD `d773344d1`; live HEAD is `c84cfd23f` with uncommitted Wave 2
-  implementation/test edits. Do not close Wave 2 until `STATUS.md` records the
-  landed changes and validation outcomes.
+  baseline HEAD `d773344d1`; live HEAD is `6ef760950` with uncommitted Wave 2
+  implementation/test edits and a dirty `STATUS.md`. Do not close Wave 2 until
+  `STATUS.md` records the landed changes and validation outcomes.
 - Waves 3-7 are follow-on plans. They were expanded from the audit inputs and
-  current-tree spot checks, but each wave still needs a fresh pre-state block
-  before implementation.
+  current-tree spot checks, and this revision routes the remaining audit
+  open questions and high-value mirror sketches. Each wave still needs a fresh
+  pre-state block before implementation.
 
 ## Wave Expansion Requirements
 
@@ -62,9 +63,10 @@ Each follow-on wave must satisfy these requirements before it becomes a new
   runtime claims outside CPU/JAX fixed-state wave closure unless the wave is
   explicitly scoped around that boundary.
 - Treat transfer-guard evidence as platform-specific. JAX's official transfer
-  guard docs allow CPU-buffer fetches regardless of guard level, so a CPU-only
-  `transfer_guard("disallow")` check is useful for accidental implicit-transfer
-  smoke coverage but is not a GPU transfer-proof or CUDA runtime proof.
+  guard docs allow explicit fetches to a CPU device regardless of guard level,
+  so a CPU-only `transfer_guard("disallow")` check is useful for accidental
+  implicit-transfer smoke coverage but is not a GPU transfer-proof or CUDA
+  runtime proof.
 - Append outcome and validation evidence to `STATUS.md`; do not replace prior
   wave history.
 
@@ -91,16 +93,30 @@ Dependency rules:
 - Wave 7 is a queue, not a single implementation wave. Promote exactly one
   W7-X slice at a time into its own `/goal` after fresh pre-state validation.
 
+Residual requirement routing:
+
+| Residual Audit Item | Wave Routing | Required Treatment |
+|---|---|---|
+| `boozer_dresidual_dc` C++ kernel | Wave 7 / W7-X5 | Reclassify as covered-by-composed-JAX only if `boozer_residual_jacobian_composed` / `boozer_residual_coil_vjp` still match the CPU contract. If a direct wrapper is selected, compare against `sopp.boozer_dresidual_dc`; do not use JAX autodiff alone as the oracle. |
+| GSCO / wireframe optimization open question | Wave 7 / W7-X3 | Current tree has `tests/solve/test_wireframe_optimization_jax_item31.py`. Treat the audit question as stale unless a fresh run shows missing RCLS/GSCO coverage; keep it separate from wireframe field-Hessian work. |
+| `RotatedCurve` `sopp.matmult` VJP forwarding | Wave 4 / W4-C5 | Replace with JAX linear algebra only if the CPU trampoline is still on a JAX-consumer path; add CPU rotation-VJP parity before calling it closed. |
+| `get_phi` tracing helper | Wave 7 / W7-X9 | `_continuous_phi` exists as an internal JAX helper. Promote or test a public wrapper only if a public CPU `sopp.get_phi` mirror is required; otherwise document it as internal tracing support. |
+| `Surface::scale` / `SurfaceScaled` | Wave 5 / W5-S5 | Treat mutable CPU scaling as a pure spec/dof transform only if a live JAX caller needs it; otherwise record host-object scaling as deferred. |
+| Finitebuild `FilamentPack` + BiotSavart symmetry mirror | Wave 7 / W7-X10 | Existing finitebuild JAX kernels cover filament geometry. The remaining mirror is the symmetry-multiplied filament plus BiotSavart field value path. |
+| CircularCoil optimization E2E | Wave 7 / W7-X11 | Do not claim this from `CircularCoilJAX` B/dB parity. It is a problem-wrapper / solver-entrypoint mirror and depends on the W7-X6 `LeastSquaresProblem` decision. |
+| BoozerRadialInterpolant / InterpolatedBoozerField convergence-rate mirrors | Wave 7 / W7-X12 | Existing JAX wrappers cover fixed-state evaluation. The remaining audit item is interpolation/convergence-rate behavior against CPU fixtures. |
+| `vmec_compute_geometry` / `vmec_fieldlines` | Wave 3 / W3-M5 | Keep VMEC execution and file IO on the host. Port only frozen-array post-processing reducers unless a dedicated host-boundary wave is opened. |
+
 ## External Authority Review (2026-05-14)
 
 Primary sources checked for this doc review:
 
 | Source | Checked Contract | Plan Consequence |
 |---|---|---|
-| JAX official docs | `jacfwd` is forward-mode, column-by-column Jacobian evaluation; `shard_map` is rank-preserving block mapping assembled by `out_specs`; transfer guards distinguish explicit from implicit transfers and always allow CPU-buffer fetches. | Wave 2 tensor-axis and sharding requirements stand. CPU `transfer_guard("disallow")` tests are smoke coverage, not CUDA transfer proof. |
+| JAX official docs | `jacfwd` is forward-mode, column-by-column Jacobian evaluation; `shard_map` is rank-preserving block mapping assembled by `out_specs`; transfer guards distinguish explicit from implicit transfers and always allow explicit fetches to a CPU device. | Wave 2 tensor-axis and sharding requirements stand. CPU `transfer_guard("disallow")` tests are smoke coverage, not CUDA transfer proof. |
 | SIMSOPT official docs + local source | `BiotSavart` exposes the B/A current-derivative ladder; this fork's source remains authoritative for current branch shapes, wrappers, and exports. | Wave 2 should compare against the local CPU `BiotSavart` API, not only older readthedocs snapshots. |
 | SIMSOPT MHD docs | VMEC/SPEC are separately installed Fortran/f90wrap equilibrium-code interfaces; f90wrapped singleton classes cannot safely create multiple solver objects in the same kernel. | Wave 3 stays frozen-array/payload-only unless a dedicated host-boundary runner wave is opened. |
-| NVIDIA CUDA Programming Guide | IEEE-754 compliant CPU and GPU executions can still differ because of associativity, fused multiply-add, subnormal handling, NaN payload behavior, and dot-product reduction order. | CPU JAX/C++ fixed-state parity is not CUDA parity; CUDA claims need a separate GPU lane with deterministic-XLA/runtime provenance. |
+| NVIDIA CUDA Programming Guide | IEEE-754 arithmetic is not associative, and CPU/GPU executions can differ when contraction/FMA use, special-value handling, subnormal handling, or dot-product/reduction accumulation order differs. | CPU JAX/C++ fixed-state parity is not CUDA parity; CUDA claims need a separate GPU lane with deterministic-XLA/runtime provenance. |
 
 ## Current-Tree Corrections
 
@@ -113,7 +129,7 @@ claims from the first draft.
   `src/simsopt/jax_core/biotsavart.py:617` (`biot_savart_A`) and
   `src/simsopt/jax_core/field.py:511,522,536` (grouped A/dA/d2A). `A_vjp` /
   `A_and_dA_vjp` are at `biotsavart_jax_backend.py:1773,1777`.
-- At live HEAD `c84cfd23f` plus the current dirty tree, Wave 2 method surfaces
+- At live HEAD `6ef760950` plus the current dirty tree, Wave 2 method surfaces
   are already present in source: `d2B_by_dXdX()` at
   `biotsavart_jax_backend.py:572,1566`, grouped d2B helpers at
   `jax_core/field.py:550,557`, and the six B/A current-derivative methods at
@@ -296,7 +312,8 @@ Waves 3-7 are complete follow-on plans, but each later wave must be revalidated
 against the live tree before it becomes a new `/goal` or implementation PR. The
 first draft contained stale claims at `da44735ab`; Waves 3-7 were expanded on
 2026-05-14 from the four audit inputs plus current-tree spot checks at HEAD
-`d773344d1`. Line numbers remain advisory.
+`d773344d1`, then residual audit requirements were routed at HEAD
+`6ef760950`. Line numbers remain advisory.
 
 ### Wave 1 - Tautology And Oracle Classification Fixes
 
@@ -308,9 +325,10 @@ is kept as a stable anchor so cross-wave references resolve.
 ### Wave 2 - BiotSavart Derivative Ladder Closeout
 
 Status: active but incomplete. W2-B0 is recorded in `STATUS.md` at baseline
-HEAD `d773344d1`; live HEAD `c84cfd23f` has uncommitted Wave 2
-implementation/test edits. The gap list below is the pre-implementation
-baseline and acceptance target, not a live absence claim after those edits.
+HEAD `d773344d1`; live HEAD `6ef760950` has uncommitted Wave 2
+implementation/test edits and a dirty `STATUS.md`. The gap list below is the
+pre-implementation baseline and acceptance target, not a live absence claim
+after those edits.
 Scope = close the remaining BiotSavart derivative-ladder gaps surfaced by the
 2026-05-13 audit: one missing spatial-Hessian wrapper method, the entire
 six-method coil-current derivative ladder, and the still-missing direct
@@ -709,6 +727,10 @@ post-processing classes in `src/simsopt/mhd`.
   fraction / Redl bootstrap pipeline. This is larger than the first MHD
   reduction slice because it mixes SciPy splines, optimization, profile
   objects, and geometry containers.
+- `src/simsopt/mhd/vmec_diagnostics.py:1208` defines
+  `vmec_compute_geometry`; `:1770` defines `vmec_fieldlines`. These remain
+  VMEC-post-processing utilities, not evidence that VMEC execution is
+  JAX-portable.
 - `vmec.run()`, `boozer.run()`, BOOZXFORM output generation, VMEC adjoint
   re-runs in `IotaTargetMetric.dJ()` / `IotaWeighted.dJ()` /
   `WellWeighted.dJ()`, NetCDF reads, MPI grouping, and plotting remain
@@ -797,6 +819,19 @@ post-processing classes in `src/simsopt/mhd`.
   - [ ] Document every non-portable Fortran/MPI/file-IO boundary in
         `STATUS.md`.
 
+- [ ] **W3-M5 - VMEC post-processing utilities**
+  - [ ] Revalidate `vmec_compute_geometry` and `vmec_fieldlines` callers and
+        split them by contract: host VMEC execution, frozen-array geometry
+        reducer, fieldline integrator, and plotting/diagnostic output.
+  - [ ] Port only frozen-array algebra that can be tested without running
+        VMEC inside a JAX transform.
+  - [ ] If a `vmec_fieldlines` reducer is selected, keep VMEC-coordinate
+        interpolation/diagnostic semantics separate from Cartesian tracing.
+        Reuse Wave 7 `get_phi` rules only for code that actually consumes
+        Cartesian transit post-processing.
+  - [ ] Record VMEC runner, NetCDF, and MPI requirements as host-boundary
+        blockers unless this wave is explicitly superseded by a runner plan.
+
 #### Validation
 
 - [ ] `.conda/jax-0.9.2/bin/python -m pytest tests/mhd/test_boozer*.py tests/mhd/test_vmec_diagnostics*.py -v`
@@ -815,7 +850,9 @@ The Wave 3 `/goal` is complete when:
    adjoint reruns are outside the JAX hot path and documented as such.
 3. Redl/bootstrap rows are either explicitly deferred with blockers or split
    into their own current-tree implementation plan.
-4. `STATUS.md` records the verified MHD gap list, files changed, and validation
+4. VMEC post-processing utilities are either ported as frozen-array reducers
+   with CPU fixture parity or deferred with exact host-boundary blockers.
+5. `STATUS.md` records the verified MHD gap list, files changed, and validation
    outcomes.
 
 ### Wave 4 - Curve Geometry And Objectives
@@ -836,6 +873,9 @@ candidate coverage.
   `_curve_geometry_with_third_derivative_from_dofs`, including a
   `CurvePerturbedSpec` path. Revalidate the actual supported spec set before
   adding any third-derivative code; do not assume it is XYZFourier-only.
+- `src/simsopt/geo/curve.py:1375,1389,1404,1419` still uses
+  `sopp.matmult` while forwarding rotated-curve VJP cotangents. This is a
+  residual C++-primitive question, not a broad curve-geometry blocker.
 - Existing current-tree curve JAX tests include
   `tests/geo/test_curve_item05_closeout.py`,
   `tests/geo/test_curvexyzfouriersymmetries_spec_jax.py`,
@@ -925,6 +965,18 @@ candidate coverage.
         needed by the current production lane.
   - [ ] Keep any deferred surface-bound curve item tied to Wave 5 surface scope.
 
+- [ ] **W4-C5 - Rotated-curve VJP primitive cleanup**
+  - [ ] Revalidate whether `sopp.matmult` in rotated-curve cotangent
+        forwarding is reachable from a supported JAX-native consumer.
+  - [ ] If it is a live JAX path, replace the primitive with `jnp.matmul` or a
+        named pure helper and preserve the existing cotangent orientation.
+  - [ ] Add parity for `dgamma_by_dcoeff_vjp`,
+        `dgammadash_by_dcoeff_vjp`, `dgammadashdash_by_dcoeff_vjp`, and
+        `dgammadashdashdash_by_dcoeff_vjp` against the CPU rotated-curve
+        methods or centered FD.
+  - [ ] If it is CPU-only Optimizable plumbing, document it as deferred rather
+        than promoting it as a required JAX-core API.
+
 #### Validation
 
 - [ ] `.conda/jax-0.9.2/bin/python -m pytest tests/geo/test_curve.py tests/geo/test_curve_objectives.py tests/geo/test_curve_item05_closeout.py tests/geo/test_curveobjectives_item07_closeout.py tests/geo/test_curvexyzfouriersymmetries_spec_jax.py tests/geo/test_framedcurve_jax_item18.py tests/geo/test_framedcurve_jax_wrappers_item18.py -v`
@@ -942,8 +994,10 @@ The Wave 4 `/goal` is complete when:
    JAX-vs-JAX or wrapper-vs-kernel tautology.
 3. Missing third-derivative / VJP surfaces are either implemented across the
    verified spec set or deferred with exact unsupported spec names.
-4. Existing curve closeout tests remain green and import paths stay acyclic.
-5. `STATUS.md` records implemented mirrors, deferred curve rows, and validation
+4. Rotated-curve VJP forwarding is either pure-JAX with CPU/FD parity or
+   explicitly classified as CPU-only plumbing.
+5. Existing curve closeout tests remain green and import paths stay acyclic.
+6. `STATUS.md` records implemented mirrors, deferred curve rows, and validation
    outcomes.
 
 ### Wave 5 - Surfaces
@@ -973,6 +1027,10 @@ surface-curvature helpers in `surfaceobjectives_jax.py`.
 - `SurfaceRZFourier` still exposes CPU third-parametric-derivative `_lin`
   methods at `src/simsopt/geo/surfacerzfourier.py:402-417`; no matching JAX
   helper names were found in the spot check.
+- `src/simsopt/geo/surface.py:1052` defines CPU `SurfaceScaled`, and
+  `src/simsoptpp/surface.cpp:104` exposes mutable `Surface::scale` behavior
+  through the CPU surface family. Treat this as a pure spec/dof-transform
+  question, not a reason to add mutable JAX surface objects by default.
 
 #### Files In Scope
 
@@ -982,11 +1040,15 @@ surface-curvature helpers in `surfaceobjectives_jax.py`.
   fundamental-form helpers are still needed after W5-S0
 - `src/simsopt/geo/surface_bootstrap_jax.py` only if W5-S0 proves a real
   bootstrap-kernel gap remains
+- `src/simsopt/geo/surface.py` only if W5-S5 selects a public
+  `SurfaceScaled` / scaling adapter boundary
 - `tests/geo/test_surface_fourier_jax.py`
 - `tests/geo/test_surface_rzfourier_jax.py`
 - `tests/geo/test_surface_objectives_jax.py`
 - `tests/geo/test_surface_henneberg_jax.py`
 - `tests/geo/test_surface_garabedian_jax.py`
+- `tests/geo/test_surface.py` only as a CPU reference source for
+  `SurfaceScaled` / `scale`
 - new surface test files only when the existing files would become too broad
 
 #### Out Of Scope
@@ -1056,6 +1118,18 @@ surface-curvature helpers in `surfaceobjectives_jax.py`.
   - [ ] If `SurfaceScaled` is needed, implement it as a pure spec/dof transform
         and test against the CPU object method; otherwise record as deferred.
 
+- [ ] **W5-S5 - Surface scale contract**
+  - [ ] Revalidate `Surface::scale` and `SurfaceScaled` audit rows against the
+        current JAX surface specs.
+  - [ ] If selected, model scaling as an immutable dof/spec transform and test
+        `gamma`, derivative tensors, dof names, and fixed/free semantics
+        against CPU `SurfaceScaled`.
+  - [ ] Keep in-place CPU mutation semantics at the host boundary. Do not add a
+        mutable JAX object whose state diverges from its spec/dof inputs.
+  - [ ] If only initialization code uses scaling, document the CPU
+        initialization boundary in `STATUS.md` and do not port it in this
+        wave.
+
 #### Validation
 
 - [ ] `.conda/jax-0.9.2/bin/python -m pytest tests/geo/test_surface_fourier_jax.py tests/geo/test_surface_rzfourier_jax.py tests/geo/test_surface_objectives_jax.py tests/geo/test_surface_henneberg_jax.py tests/geo/test_surface_garabedian_jax.py -v`
@@ -1073,9 +1147,11 @@ The Wave 5 `/goal` is complete when:
 3. No new surface module duplicates existing working JAX kernels or generic
    helpers.
 4. Deferred host-object features (`fit_to_curve`, LSQ bootstrap,
-   `SurfaceScaled`, `SurfaceRZPseudospectral`) are documented with exact
-   blockers and not silently treated as implemented.
-5. `STATUS.md` records implemented rows, stale-pruned rows, deferred rows, and
+   `SurfaceScaled` / `scale`, `SurfaceRZPseudospectral`) are documented with
+   exact blockers and not silently treated as implemented.
+5. Any selected scaling support is immutable-spec based and has CPU object
+   parity for value, derivative, and fixed/free semantics.
+6. `STATUS.md` records implemented rows, stale-pruned rows, deferred rows, and
    validation outcomes.
 
 ### Wave 6 - Field Composition And Analytic Gaps
@@ -1104,6 +1180,10 @@ the contract.
   `GradAbsB_cyl` and `B_cyl` on the interpolated-field wrapper; broader
   `B_cyl` / `A_cyl` / `GradAbsB_cyl` access on arbitrary JAX magnetic fields
   remains a separate revalidation item.
+- `tests/field/test_magneticfields_optimization.py:17,55,101` exercises CPU
+  `CircularCoil` current, position, and orientation optimization. That is not
+  closed by `CircularCoilJAX` B/dB fixed-state parity; route the optimization
+  mirror through Wave 7 after the problem-wrapper decision.
 
 #### Files In Scope
 
@@ -1181,6 +1261,8 @@ the contract.
         CPU-missing methods with synthetic JAX surfaces.
   - [ ] Extend tests in the existing wrapper-specific files rather than
         creating duplicate suites.
+  - [ ] Keep CircularCoil optimization E2E mirrors out of Wave 6; this
+        workstream closes field kernels and wrappers only.
 
 - [ ] **W6-F5 - Cylindrical accessors**
   - [ ] Revalidate `B_cyl`, `A_cyl`, and `GradAbsB_cyl` across
@@ -1252,6 +1334,23 @@ skipped.
 - `src/simsopt/field/normal_field.py:20,522` and
   `src/simsopt/field/mgrid.py:22` remain CPU/file-oriented ancillary
   surfaces.
+- `tests/solve/test_wireframe_optimization_jax_item31.py:397,466,521,570`
+  already covers fixed-state GSCO / wrapper / public optimize-wireframe JAX
+  paths against CPU or C++ oracles. Revalidate before carrying the audit's
+  GSCO open question forward.
+- `src/simsopt/jax_core/finitebuild.py` and
+  `tests/geo/test_finitebuild_jax_item20.py` already cover filament geometry
+  and VJP kernels. The remaining high-value finitebuild row is the
+  `FilamentPack` + symmetry-expanded BiotSavart mirror, not the base filament
+  geometry.
+- `src/simsopt/field/boozermagneticfield_jax.py:810,1271` defines
+  `BoozerRadialInterpolantJAX` and `InterpolatedBoozerFieldJAX`; the audit's
+  remaining item is convergence-rate / interpolation behavior, not basic
+  fixed-state public-wrapper parity.
+- `src/simsopt/geo/boozer_residual_jax.py:717,743` provides composed JAX
+  residual Jacobian and coil VJP paths that mirror the role of
+  `sopp.boozer_dresidual_dc`. Decide whether the optimized direct kernel is a
+  required public parity surface before adding a new wrapper.
 
 #### Files In Scope By Slice
 
@@ -1264,9 +1363,27 @@ skipped.
 - `src/simsopt/field/normal_field_jax.py` only if W7-X7 is selected
 - `src/simsopt/field/mgrid_jax.py` or `src/simsopt/jax_core/mgrid.py` only if
   W7-X8 is selected
+- `src/simsopt/jax_core/finitebuild.py` only if W7-X10 is selected
+- `src/simsopt/geo/finitebuild.py` only as a host adapter reference for
+  W7-X10
+- `src/simsopt/field/circular_coil_jax.py` only if W7-X11 is selected
+- `src/simsopt/geo/optimizer_jax.py` only if W7-X11 uses `target_minimize`
+  directly instead of a W7-X6 least-squares wrapper
+- `src/simsopt/field/boozermagneticfield_jax.py` only if W7-X12 is selected
+- `src/simsopt/geo/boozer_residual_jax.py` only if W7-X5 selects direct
+  `boozer_dresidual_dc` parity
 - `tests/field/test_coilset_jax.py`
 - `tests/geo/test_qfm_jax.py`
 - `tests/field/test_wireframefield_jax_item30.py`
+- `tests/solve/test_wireframe_optimization_jax_item31.py` if W7-X3 revalidates
+  GSCO / wireframe solver coverage
+- `tests/geo/test_finitebuild_jax_item20.py` and
+  `tests/geo/test_finitebuild.py` if W7-X10 is selected
+- `tests/field/test_circular_coil_jax.py` and
+  `tests/field/test_magneticfields_optimization.py` if W7-X11 is selected
+- `tests/field/test_boozermagneticfield_jax_item33.py`,
+  `tests/field/test_interpolated_boozer_field_jax.py`, and
+  `tests/field/test_boozermagneticfields.py` if W7-X12 is selected
 - `tests/geo/test_surface_objectives_jax.py`
 - `tests/geo/test_boozersurface_jax.py`
 - `tests/objectives/test_least_squares_jax.py` / `test_constrained_jax.py`
@@ -1318,6 +1435,9 @@ skipped.
 
 - [ ] **W7-X3 - Wireframe `compute(derivatives=2)`**
   - [ ] Revalidate whether JAX wireframe has `d2B_by_dXdX`.
+  - [ ] Revalidate `tests/solve/test_wireframe_optimization_jax_item31.py`
+        before carrying GSCO/RCLS/`optimize_wireframe_jax` as an open gap.
+        If those tests still pass, mark the audit's GSCO question as stale.
   - [ ] Implement analytic `d2B_by_dXdX` only if still missing.
   - [ ] Add C++ oracle parity and Taylor tests.
   - [ ] Keep cache orchestration differences documented as non-portable.
@@ -1342,6 +1462,11 @@ skipped.
         unmirrored.
   - [ ] Keep solver-trajectory claims separate from fixed-state value/gradient
         parity.
+  - [ ] Revalidate whether `boozer_dresidual_dc` is intentionally superseded
+        by `boozer_residual_jacobian_composed` /
+        `boozer_residual_coil_vjp`. If a direct kernel is still required,
+        add a dedicated parity test against `sopp.boozer_dresidual_dc` or the
+        existing `_call_boozer_dresidual_dc` compatibility wrapper.
   - [ ] Candidate CPU fixtures from the test-mirror audit:
         `tests/geo/test_boozersurface.py:534,732,864,907`.
   - [ ] Record iteration counts, residual norms, branch choices, and any
@@ -1374,19 +1499,74 @@ skipped.
 - [ ] **W7-X9 - Tracing and particle post-processing tails**
   - [ ] Revalidate `compute_resonances`, `compute_toroidal_transits`,
         `compute_poloidal_transits`, and missing stopping-criterion behavior.
+  - [ ] Revalidate whether private `jax_core.tracing._continuous_phi` is enough
+        for supported tracing paths or whether a public `get_phi` mirror is
+        needed for CPU API parity.
+  - [ ] If `get_phi` is promoted, compare unwrap behavior against
+        `sopp.get_phi` over branch-cut and multi-turn cases.
   - [ ] Port only pure post-processing or already-supported JAX-tracer branches.
   - [ ] Keep collisional / non-vacuum `sopp.particle_*` branches out of scope
         unless selected as a dedicated tracing wave.
 
+- [ ] **W7-X10 - Finitebuild `FilamentPack` + BiotSavart mirrors**
+  - [ ] Revalidate `src/simsopt/jax_core/finitebuild.py`,
+        `tests/geo/test_finitebuild_jax_item20.py`, and
+        `tests/geo/test_finitebuild_jax_ssot_item20.py` before adding new
+        geometry kernels.
+  - [ ] Treat existing filament gamma/gammadash/VJP support as already
+        implemented unless current tests fail.
+  - [ ] Add a mirror only for the remaining high-value CPU scenario:
+        `FilamentPack` / `create_multifilament_grid` combined with
+        stellarator-symmetry expansion and BiotSavart field evaluation.
+  - [ ] Use CPU finitebuild + `BiotSavart` as oracle; do not use the same JAX
+        filament geometry as both fixture builder and reference.
+  - [ ] Keep plotting, coil serialization, and broad coil-object mutation out
+        of this slice.
+
+- [ ] **W7-X11 - CircularCoil optimization mirrors**
+  - [ ] Revalidate CPU optimization fixtures in
+        `tests/field/test_magneticfields_optimization.py:17,55,101`.
+  - [ ] Decide with W7-X6 whether the JAX mirror should use a new
+        `LeastSquaresProblemJAX` wrapper or the existing `target_minimize`
+        public JAX solve path.
+  - [ ] Mirror current, position, and orientation optimization separately so
+        field-kernel parity failures do not get conflated with solver
+        convergence failures.
+  - [ ] Compare final optimized dofs and final residuals against CPU fixtures;
+        record iteration-count differences as solver trajectory evidence, not
+        fixed-state parity.
+
+- [ ] **W7-X12 - Boozer magnetic-field convergence-rate tails**
+  - [ ] Revalidate `BoozerRadialInterpolantJAX` and
+        `InterpolatedBoozerFieldJAX` fixed-state tests before adding new
+        convergence mirrors.
+  - [ ] Mirror the CPU vacuum and interpolation convergence-rate fixtures from
+        `tests/field/test_boozermagneticfields.py:289,744` only if fixture
+        cost is acceptable for the selected lane.
+  - [ ] Distinguish fixed-state scalar parity from grid-refinement convergence
+        behavior. A single fixed grid parity test does not close convergence
+        rate.
+  - [ ] Keep VMEC/Boozer external execution and spline construction on the
+        host boundary; freeze state before entering JAX evaluators.
+
 #### Validation
 
 - [ ] Run focused tests for each implemented W7 item.
+- [ ] For reclassification-only W7 items, run the existing focused test that
+      proves the audit row is stale before marking it pruned.
 - [ ] Run the public pure-JAX command from `CLAUDE.md` after any shared solver
       or objective wrapper change.
 - [ ] Run private optimizer and integration suites only for solver/objective
       changes that affect Stage 2 or single-stage paths.
 - [ ] For each new public module, add/import it through existing lazy export
       smoke tests or a focused import-smoke row.
+- [ ] Candidate focused commands by selected slice:
+      `tests/solve/test_wireframe_optimization_jax_item31.py` for W7-X3,
+      `tests/geo/test_finitebuild_jax_item20.py` for W7-X10,
+      `tests/field/test_circular_coil_jax.py` plus the selected optimization
+      mirror for W7-X11, and
+      `tests/field/test_boozermagneticfield_jax_item33.py`
+      `tests/field/test_interpolated_boozer_field_jax.py` for W7-X12.
 
 #### Acceptance Criteria
 
@@ -1399,7 +1579,9 @@ The Wave 7 queue is actionable when each selected `/goal` slice satisfies:
    parity, and iteration-history parity.
 4. File IO, serialization, MPI, and plotting rows are either host-boundary
    setup or explicitly deferred.
-5. No unrelated long-tail item is folded into a PR without a fresh scope check.
+5. Stale audit questions such as already-covered GSCO are pruned with focused
+   current-tree evidence instead of being reimplemented.
+6. No unrelated long-tail item is folded into a PR without a fresh scope check.
 
 ## Notes For Executors
 
