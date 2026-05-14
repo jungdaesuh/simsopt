@@ -1,6 +1,7 @@
 # GOAL - Wave 1 JAX parity-test remediation (validated 2026-05-14)
 
-**/goal-ready objective:** Against current HEAD `da44735ab`, remediate the
+**/goal-ready objective:** Validated against base HEAD `da44735ab` (the audit
+parent); this audit / goal doc was committed as `d258c9285`. Remediate the
 still-valid Wave 1 parity-test gaps from the 2026-05-13 JAX port audit:
 move Boozer residual unit coverage onto a direct C++ oracle, make BiotSavart
 chunked tests stop presenting JAX-dense references as parity oracles, reconcile
@@ -49,12 +50,19 @@ claims from the first draft.
   `src/simsopt/jax_core/magneticfield_composition.py`.
 - Boozer residual direct C++ parity exists in integration coverage:
   `tests/integration/test_single_stage_jax_cpu_reference.py` co-imports
-  `BoozerResidual` (CPU) and `BoozerResidualJAX` (lines 108, 154) and
-  compares `.J()` / `.dJ()` at `:548-572` and `:2404-2405`. The focused unit
-  file `tests/geo/test_boozer_residual_jax.py` still uses
-  `_numpy_boozer_residual_reference` at `:402` and `:432` only (helper defined
-  at `:89`). The goal is unit-level oracle cleanup at those two callsites,
-  not a claim that all C++ parity is absent.
+  `BoozerResidual` (CPU) and `BoozerResidualJAX` (lines 108, 154). The
+  strongest direct-parity references are
+  `TestBoozerResidualCPUParity:8156` (JAX `boozer_residual_scalar` vs C++
+  `sopp.boozer_residual` at the same state),
+  `TestBoozerResidualDerivativeCPUParity:5536` (composed Jacobian vs CPU
+  oracle), and the wrapper-gradient parity fixture at `:4818`
+  (`test_real_fixture_ondevice_parity_and_wrapper_gradients`). The focused
+  unit file `tests/geo/test_boozer_residual_jax.py` carries unit-level
+  NumPy-formula tautologies at four sites: inline formulas at `:163-188`
+  (`test_matches_numpy`, weighted) and `:192-207` (`test_no_weight`,
+  unweighted) inside `TestBoozerResidualScalar`, plus
+  `_numpy_boozer_residual_reference` (defined `:89`) at `:402` and `:432`.
+  The goal is unit-level oracle cleanup at all four sites.
 - `tests/objectives/test_fluxobjective_jax_parity.py` already compares
   `SquaredFluxJAX.dJ()` against `SquaredFlux.dJ()` using CPU `SquaredFlux(...)`
   instantiated at `:169,199`, and includes directional FD coverage. The
@@ -94,40 +102,59 @@ Out of scope:
         goal, focused validation commands, and final pass/fail status.
 
 - [ ] **T1 - Boozer residual unit C++ oracle**
-  - [ ] Read `tests/geo/test_boozer_residual_jax.py` (the
-        `_numpy_boozer_residual_reference` callsites are at `:402` and `:432`
-        only; helper at `:89`) and the existing direct integration parity in
-        `tests/integration/test_single_stage_jax_cpu_reference.py:548-572,
-        2404-2405`.
-  - [ ] Add direct C++ oracle checks at those two callsites for weighted and
-        unweighted scalar residuals using either `simsopt._simsoptpp.boozer_residual`
-        directly (`src/simsoptpp/boozerresidual_py.cpp:4`) or via the
-        `BoozerResidual` Python wrapper from `simsopt.geo.surfaceobjectives`
-        (matching the integration-parity import at
-        `tests/integration/test_single_stage_jax_cpu_reference.py:108`).
+  - [ ] Read `tests/geo/test_boozer_residual_jax.py`. Inline NumPy-formula
+        tautologies live at `:163-188` (`test_matches_numpy`, weighted) and
+        `:192-207` (`test_no_weight`, unweighted), both inside
+        `TestBoozerResidualScalar`. The named helper
+        `_numpy_boozer_residual_reference` (definition `:89`) is called at
+        `:402` and `:432`. Existing direct integration parity:
+        `TestBoozerResidualCPUParity:8156`,
+        `TestBoozerResidualDerivativeCPUParity:5536`, and the
+        wrapper-gradient parity fixture at `:4818` in
+        `tests/integration/test_single_stage_jax_cpu_reference.py`.
+  - [ ] Add direct C++ oracle checks at all four tautology sites
+        (`:163-188`, `:192-207`, `:402`, `:432`) for weighted and unweighted
+        scalar residuals. Two equivalent oracle entry points:
+        (a) call the top-level `simsoptpp.boozer_residual` symbol directly
+        (`src/simsoptpp/boozerresidual_py.cpp:4`); or
+        (b) call `_call_boozer_residual` at
+        `src/simsopt/geo/boozersurface.py:104` — a thin Python wrapper
+        around the same C++ symbol. Note: `boozersurface.py:4` imports
+        `simsoptpp` at module top, so any use of (b) requires `simsoptpp`
+        to be importable.
   - [ ] For `boozer_residual_vector`, do not invent a component oracle: the
         public C++ API exposes only the scalar `boozer_residual` and the
         derivative variants `boozer_residual_ds` / `_ds2`
-        (`boozerresidual_py.cpp:4,11,22`). Compare the JAX vector to the C++
-        scalar via `0.5 * sum(r²) / r.size` (matching the NumPy reference at
-        `tests/geo/test_boozer_residual_jax.py:97`) and document the
-        vector→scalar boundary explicitly.
+        (`boozerresidual_py.cpp:4,11,22`). Compare the JAX vector to the
+        C++ scalar via `0.5 * sum(r²) / r.size` (matching the NumPy
+        reference at `tests/geo/test_boozer_residual_jax.py:97`) and
+        document the vector→scalar boundary explicitly.
   - [ ] Keep finite-difference gradient/Hessian tests only where they are
         genuinely FD tests. Do not label FD-only checks as C++ parity.
-  - [ ] Leave non-C++ tests runnable in pure-JAX environments. C++ oracle tests
-        may use local `pytest.importorskip("simsopt._simsoptpp")`.
+  - [ ] Leave non-C++ tests runnable in pure-JAX environments. C++ oracle
+        tests may use module-scope or per-test
+        `pytest.importorskip("simsoptpp")` — top-level module name; there
+        is no `simsopt._simsoptpp`.
 
 - [ ] **T2 - BiotSavart chunked reference classification**
   - [ ] Read all `_dense_B_vjp` and `_dense_reference_fields` call sites in
         `tests/field/test_biotsavart_jax.py`. Helpers are defined at `:252`
         (`_dense_reference_fields`) and `:294` (`_dense_B_vjp`); current
         callsites are `_dense_B_vjp` at `:585` and `_dense_reference_fields`
-        at `:621,862,980` (all inside `TestBiotSavartJaxCppParity` starting
-        at `:480`). Validated 2026-05-14: both helpers are pure JAX autodiff
+        at `:621,862,980`, all inside `TestBiotSavartJaxChunkedParity`
+        (`:526`, docstring `:527`: "Directly compare chunked low-level
+        kernels against dense references."). The adjacent
+        `TestBiotSavartJaxCppParity` (`:480`) is a genuine C++-parity class
+        (uses `pytest.importorskip("simsoptpp")` and compares JAX against
+        `bs.B()` (`:494`, asserted `:503`) and `bs.dB_by_dX()` (`:509`,
+        asserted `:518`)) — leave it alone.
+        Validated 2026-05-14: both `_dense_*` helpers are pure JAX autodiff
         on the same `module._one_point_dense` kernel (`jax.vjp`, `jax.vmap`
-        + `jax.jacfwd`), so they are chunked-vs-dense self-consistency probes,
-        not C++ oracles. Move them out of `TestBiotSavartJaxCppParity` or
-        rename the enclosing class to remove the parity claim.
+        + `jax.jacfwd`), so they are chunked-vs-dense self-consistency
+        probes, not C++ oracles. Rename `TestBiotSavartJaxChunkedParity`
+        (e.g., to `TestBiotSavartJaxChunkedSelfConsistency`) and rewrite
+        its `:527` docstring to make clear the dense reference is the
+        non-chunked JAX kernel, not a C++ oracle.
   - [ ] If a test is a chunked-vs-dense implementation self-consistency test,
         rename/comment it as such and keep it out of direct C++ parity claims.
   - [ ] Add or move direct C++ oracle assertions for any still-missing
@@ -155,9 +182,9 @@ Out of scope:
 - [ ] **G1 - Focused validation**
   - [ ] `ruff check` on every changed Python file.
   - [ ] `ruff format --check` on every changed Python file.
-  - [ ] `conda run -n jax-0.9.2 python -m pytest tests/geo/test_boozer_residual_jax.py -v`
-  - [ ] `conda run -n jax-0.9.2 python -m pytest tests/field/test_biotsavart_jax.py -v`
-  - [ ] `conda run -n jax-0.9.2 python -m pytest tests/objectives/test_fluxobjective_jax_parity.py -v`
+  - [ ] `.conda/jax-0.9.2/bin/python -m pytest tests/geo/test_boozer_residual_jax.py -v`
+  - [ ] `.conda/jax-0.9.2/bin/python -m pytest tests/field/test_biotsavart_jax.py -v`
+  - [ ] `.conda/jax-0.9.2/bin/python -m pytest tests/objectives/test_fluxobjective_jax_parity.py -v`
 
 - [ ] **G2 - Regression gate**
   - [ ] Run the public pure-JAX command from `CLAUDE.md` if the focused tests
@@ -217,7 +244,7 @@ Workstreams:
   - [ ] Confirm CPU shape contracts from `simsopt.field.biotsavart.BiotSavart`.
   - [ ] Confirm current direct C++ parity tests for `B`, `dB_by_dX`, `A`,
         `dA_by_dX`, `d2B_by_dXdX`, `d2A_by_dXdX`, and `B_vjp`.
-  - [ ] Validated 2026-05-14 against HEAD `da44735ab`:
+  - [ ] Validated 2026-05-14 against base/audit HEAD `da44735ab`:
         `dA_by_dcoilcurrents`, `d2A_by_dXdcoilcurrents`,
         `d3A_by_dXdXdcoilcurrents`, and their B-side analogs
         (`dB_by_dcoilcurrents` family) are not present in
@@ -261,7 +288,7 @@ Workstreams:
 Validation:
 
 - [ ] `ruff check` / `ruff format --check` on changed files.
-- [ ] `conda run -n jax-0.9.2 python -m pytest tests/field/test_biotsavart_jax.py tests/field/test_biotsavart_jax_parity.py -v`
+- [ ] `.conda/jax-0.9.2/bin/python -m pytest tests/field/test_biotsavart_jax.py tests/field/test_biotsavart_jax_parity.py -v`
 - [ ] Run the public pure-JAX command from `CLAUDE.md` if shared helpers change.
 
 Acceptance:
@@ -312,7 +339,7 @@ Workstreams:
 
 Validation:
 
-- [ ] `conda run -n jax-0.9.2 python -m pytest tests/mhd/test_boozer*.py tests/mhd/test_vmec_diagnostics*.py -v`
+- [ ] `.conda/jax-0.9.2/bin/python -m pytest tests/mhd/test_boozer*.py tests/mhd/test_vmec_diagnostics*.py -v`
 - [ ] Run focused import-smoke tests if new modules are exported.
 
 Acceptance:
@@ -326,13 +353,20 @@ Status: follow-on wave. Current `src/simsopt/jax_core/curve_geometry.py` must
 be checked first; do not assume pure functions still live only in
 `src/simsopt/geo/curve.py`.
 
-Files likely touched:
+Files likely touched (revalidated 2026-05-14):
 
 - `src/simsopt/jax_core/curve_geometry.py`
 - `src/simsopt/geo/curve.py`
 - `src/simsopt/geo/curveobjectives.py`
-- `tests/geo/test_curve_jax.py`
-- `tests/geo/test_curve_objectives_jax.py` or existing closeout files
+- existing curve-JAX / closeout tests in the current tree:
+  `tests/geo/test_curve_item05_closeout.py`,
+  `tests/geo/test_curveobjectives_item07_closeout.py`,
+  `tests/geo/test_curvexyzfouriersymmetries_spec_jax.py`,
+  `tests/geo/test_framedcurve_jax_item18.py`,
+  `tests/geo/test_framedcurve_jax_wrappers_item18.py`. Pick or create the
+  W4-C2 mirror file during W4-C0 — do not assume
+  `tests/geo/test_curve_jax.py` or `tests/geo/test_curve_objectives_jax.py`
+  exist (they do not).
 
 Workstreams:
 
@@ -365,7 +399,7 @@ Workstreams:
 
 Validation:
 
-- [ ] `conda run -n jax-0.9.2 python -m pytest tests/geo/test_curve.py tests/geo/test_curve_jax.py tests/geo/test_curve_objectives.py tests/geo/test_curve_objectives_jax.py -v`
+- [ ] `.conda/jax-0.9.2/bin/python -m pytest tests/geo/test_curve.py tests/geo/test_curve_objectives.py tests/geo/test_curve_item05_closeout.py tests/geo/test_curveobjectives_item07_closeout.py tests/geo/test_curvexyzfouriersymmetries_spec_jax.py tests/geo/test_framedcurve_jax_item18.py tests/geo/test_framedcurve_jax_wrappers_item18.py -v`
 
 Acceptance:
 
@@ -421,7 +455,7 @@ Workstreams:
 
 Validation:
 
-- [ ] `conda run -n jax-0.9.2 python -m pytest tests/geo/test_surface_fourier_jax.py tests/geo/test_surface_rzfourier_jax.py -v`
+- [ ] `.conda/jax-0.9.2/bin/python -m pytest tests/geo/test_surface_fourier_jax.py tests/geo/test_surface_rzfourier_jax.py -v`
 - [ ] Add new focused surface test files to the command as they are created.
 
 Acceptance:
@@ -483,7 +517,7 @@ Workstreams:
 
 Validation:
 
-- [ ] `conda run -n jax-0.9.2 python -m pytest tests/field/test_magnetic_field_composition_jax.py tests/field/test_magneticfieldclasses_jax_item15.py -v`
+- [ ] `.conda/jax-0.9.2/bin/python -m pytest tests/field/test_magnetic_field_composition_jax.py tests/field/test_magneticfieldclasses_jax_item15.py -v`
 - [ ] Add scalar-potential focused tests only if W6-F4 is implemented.
 
 Acceptance:
