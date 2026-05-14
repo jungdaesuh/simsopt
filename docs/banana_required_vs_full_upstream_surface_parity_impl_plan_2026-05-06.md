@@ -887,7 +887,7 @@ Release-gate unit/schema checks:
 
 ```bash
 $PY -m pytest -q \
-  tests/test_single_stage_cpp_jax_state_parity.py \
+  tests/test_state_artifact_merge_logic.py \
   tests/integration/test_single_stage_dof_mapping.py \
   tests/test_benchmark_helpers.py \
   -k "release_gate or fixed_state or coordinate_mapping or single_stage_parity_matrix"

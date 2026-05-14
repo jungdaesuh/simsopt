@@ -140,7 +140,7 @@ Required investigation loop:
 
 8. Run or extend the existing proof surfaces:
    - tests/docs/test_banana_parity_coverage_manifest.py
-   - tests/test_single_stage_cpp_jax_state_parity.py
+   - tests/test_state_artifact_merge_logic.py
    - tests/test_hf_production_gpu_proof.py
    - tests/integration/test_stage2_jax.py
    - tests/integration/test_stage2_target_lane_purity.py

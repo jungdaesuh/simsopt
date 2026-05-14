@@ -229,7 +229,7 @@ Earlier proof-surface results from this repair pass:
 
 - Docs/manifest/target-lane proof slice:
   `tests/docs/test_banana_parity_coverage_manifest.py`,
-  `tests/test_single_stage_cpp_jax_state_parity.py`,
+  `tests/test_state_artifact_merge_logic.py`,
   `tests/test_hf_production_gpu_proof.py`,
   `tests/integration/test_stage2_target_lane_purity.py`:
   `62 passed in 30.96s`.

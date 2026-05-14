@@ -1947,9 +1947,13 @@ def _newton_step_finite(x_next, grad_next):
     return jnp.all(jnp.isfinite(x_next)) & jnp.all(jnp.isfinite(grad_next))
 
 
-def _newton_candidate_status(x_next, grad_next):
+def _newton_candidate_status(x_next, val_next, grad_next):
     candidate_norm = jnp.linalg.norm(grad_next)
-    accepted = _newton_step_finite(x_next, grad_next)
+    accepted = (
+        _newton_step_finite(x_next, grad_next)
+        & jnp.isfinite(val_next)
+        & jnp.isfinite(candidate_norm)
+    )
     return accepted, candidate_norm
 
 
@@ -1983,6 +1987,7 @@ def _backtracking_value_grad_step(
         candidate_val, candidate_grad = val_and_grad_fn(candidate_x)
         candidate_accepted, candidate_norm = _newton_candidate_status(
             candidate_x,
+            candidate_val,
             candidate_grad,
         )
         candidate_accepted = candidate_accepted & (candidate_norm <= current_norm)
@@ -2635,18 +2640,20 @@ def newton_polish(
                     dx = dx + correction
                     iterative_refinement_ran = True
                     refine_step = True
-        candidate_x = x - dx
-        candidate_val, candidate_grad = val_and_grad_fn(candidate_x)
-        accepted, candidate_norm = _newton_candidate_status(
-            candidate_x,
-            candidate_grad,
+        candidate = _backtracking_value_grad_step(
+            val_and_grad_fn,
+            x,
+            dx,
+            val,
+            grad,
+            norm,
         )
-        if not bool(accepted):
+        if not bool(candidate["accepted"]):
             break
-        x = candidate_x
-        val = candidate_val
-        grad = candidate_grad
-        norm = candidate_norm
+        x = candidate["x"]
+        val = candidate["val"]
+        grad = candidate["grad"]
+        norm = candidate["norm"]
         nit += 1
         final_step_iterative_refinement_ran = bool(refine_step)
         final_step_dense_refinement_ran = bool(dense_refine_step)

@@ -33,6 +33,14 @@ from ..jax_core import (
     make_coil_set_dof_extraction_spec,
     make_optimizable_dof_map_spec,
 )
+from ..jax_core.biotsavart import (
+    biot_savart_A,
+    biot_savart_B,
+    biot_savart_d2A_by_dXdX,
+    biot_savart_d2B_by_dXdX,
+    biot_savart_dA_by_dX,
+    biot_savart_dB_by_dX,
+)
 from ..jax_core.field import (
     biot_savart_B_vjp_maybe_collective,
     grouped_biot_savart_A_from_inputs,
@@ -40,6 +48,7 @@ from ..jax_core.field import (
     grouped_biot_savart_B_and_dB_from_spec,
     grouped_biot_savart_B_from_spec,
     grouped_biot_savart_d2A_by_dXdX_from_spec,
+    grouped_biot_savart_d2B_by_dXdX_from_spec,
     grouped_biot_savart_dA_by_dX_from_inputs,
     grouped_biot_savart_dA_by_dX_from_spec,
     grouped_biot_savart_dB_by_dX_from_inputs,
@@ -101,6 +110,30 @@ def _block_until_ready(value):
     for leaf in jax.tree_util.tree_leaves(value):
         if hasattr(leaf, "block_until_ready"):
             leaf.block_until_ready()
+
+
+def _per_coil_unit_field(points, coil_set_spec, kernel):
+    """Per-coil unit-current field as a list of JAX arrays.
+
+    For each coil ``k`` in the public coil ordering, evaluates ``kernel``
+    on the single-coil view with ``currents = [1.0]``. Biot-Savart is
+    exactly linear in ``I``, so the resulting array equals
+    ``∂F/∂I_k`` for the matching spatial-derivative kernel.
+    """
+    ncoils = sum(len(group.coil_indices) for group in coil_set_spec.groups)
+    unit_current = jnp.ones((1,), dtype=jnp.float64)
+    result_by_index: dict[int, jax.Array] = {}
+    for group in coil_set_spec.groups:
+        for position, coil_index in enumerate(group.coil_indices):
+            single_gamma = group.gammas[position : position + 1]
+            single_gammadash = group.gammadashs[position : position + 1]
+            result_by_index[int(coil_index)] = kernel(
+                points,
+                single_gamma,
+                single_gammadash,
+                unit_current,
+            )
+    return [result_by_index[index] for index in range(ncoils)]
 
 
 def _build_profile_breakdown(timings):
@@ -237,9 +270,7 @@ class SpecBackedCurrent:
             self._owner.coil_dof_extraction_spec(),
             self._owner.x,
         )[self._coil_index]
-        return host_float(coil_spec.current.value[0]) * float(
-            coil_spec.symmetry.scale
-        )
+        return host_float(coil_spec.current.value[0]) * float(coil_spec.symmetry.scale)
 
 
 class SpecBackedCurve(Optimizable):
@@ -290,12 +321,12 @@ class SpecBackedCurve(Optimizable):
         return (gamma @ rotmat, *(derivative @ rotmat for derivative in derivatives))
 
     def _geometry(self) -> tuple[jax.Array, ...]:
-        return self._apply_symmetry(*curve_geometry_from_spec(self._current_curve_spec()))
+        return self._apply_symmetry(
+            *curve_geometry_from_spec(self._current_curve_spec())
+        )
 
     def gamma(self) -> np.ndarray:
-        gamma, _gammadash = curve_gamma_and_dash_from_spec(
-            self._current_curve_spec()
-        )
+        gamma, _gammadash = curve_gamma_and_dash_from_spec(self._current_curve_spec())
         return host_array(self._apply_symmetry(gamma)[0], dtype=np.float64)
 
     def gammadash(self) -> np.ndarray:
@@ -538,10 +569,71 @@ class SpecBackedBiotSavartJAX(Optimizable):
             self.coil_set_spec(),
         )
 
+    def d2B_by_dXdX(self) -> jax.Array:
+        return grouped_biot_savart_d2B_by_dXdX_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
     def B_and_dB(self) -> tuple[jax.Array, jax.Array]:
         return grouped_biot_savart_B_and_dB_from_spec(
             self._points_jax,
             self.coil_set_spec(),
+        )
+
+    def dB_by_dcoilcurrents(self, compute_derivatives=0) -> list[jax.Array]:
+        """Per-coil B at unit current — list of ``(npoints, 3)`` JAX arrays.
+
+        Mirrors ``simsopt.field.BiotSavart.dB_by_dcoilcurrents`` in shape
+        and per-coil ordering. ``compute_derivatives`` is accepted for
+        signature compatibility but has no runtime effect — the JAX path
+        materialises the per-coil field on demand and does not consume the
+        fieldcache used by the C++ class.
+        """
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_B,
+        )
+
+    def d2B_by_dXdcoilcurrents(self, compute_derivatives=1) -> list[jax.Array]:
+        """Per-coil ``dB/dX`` at unit current — list of ``(npoints, 3, 3)``."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_dB_by_dX,
+        )
+
+    def d3B_by_dXdXdcoilcurrents(self, compute_derivatives=2) -> list[jax.Array]:
+        """Per-coil ``d2B/dXdX`` at unit current — list of ``(npoints, 3, 3, 3)``."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_d2B_by_dXdX,
+        )
+
+    def dA_by_dcoilcurrents(self, compute_derivatives=0) -> list[jax.Array]:
+        """Per-coil A at unit current — list of ``(npoints, 3)`` JAX arrays."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_A,
+        )
+
+    def d2A_by_dXdcoilcurrents(self, compute_derivatives=1) -> list[jax.Array]:
+        """Per-coil ``dA/dX`` at unit current — list of ``(npoints, 3, 3)``."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_dA_by_dX,
+        )
+
+    def d3A_by_dXdXdcoilcurrents(self, compute_derivatives=2) -> list[jax.Array]:
+        """Per-coil ``d2A/dXdX`` at unit current — list of ``(npoints, 3, 3, 3)``."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_d2A_by_dXdX,
         )
 
     def _add_single_coil_cotangent_to_dofs_gradient(
@@ -832,9 +924,7 @@ def _project_single_coil_cotangent_data(coil, dg, dgd, dc):
     deriv_data = {}
     _merge_curve_pullback_data(deriv_data, curve, dg, dgd)
     if current.dof_size > 0:
-        current_cotangent = jnp.atleast_1d(
-            _as_jax_float64(scale) * _as_jax_float64(dc)
-        )
+        current_cotangent = jnp.atleast_1d(_as_jax_float64(scale) * _as_jax_float64(dc))
         _merge_derivative_data(deriv_data, current.vjp(current_cotangent))
     return deriv_data
 
@@ -1473,6 +1563,18 @@ class BiotSavartJAX(Optimizable):
             self.coil_set_spec(),
         )
 
+    def d2B_by_dXdX(self):
+        """Spatial Hessian d2B/dXdX at the evaluation points.
+
+        Returns:
+            (npoints, 3, 3, 3) JAX array where
+            ``[p, j, k, l] = ∂_j ∂_k B_l(x_p)``.
+        """
+        return grouped_biot_savart_d2B_by_dXdX_from_spec(
+            self._points_jax,
+            self.coil_set_spec(),
+        )
+
     def B_and_dB(self):
         """Combined B and dB/dX (single JIT compilation).
 
@@ -1482,6 +1584,61 @@ class BiotSavartJAX(Optimizable):
         return grouped_biot_savart_B_and_dB_from_spec(
             self._points_jax,
             self.coil_set_spec(),
+        )
+
+    def dB_by_dcoilcurrents(self, compute_derivatives=0):
+        """Per-coil B at unit current — list of ``(npoints, 3)`` JAX arrays.
+
+        Mirrors ``simsopt.field.BiotSavart.dB_by_dcoilcurrents`` in shape
+        and per-coil ordering. ``compute_derivatives`` is accepted for
+        signature compatibility but has no runtime effect — the JAX path
+        materialises the per-coil field on demand and does not consume the
+        fieldcache used by the C++ class.
+        """
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_B,
+        )
+
+    def d2B_by_dXdcoilcurrents(self, compute_derivatives=1):
+        """Per-coil ``dB/dX`` at unit current — list of ``(npoints, 3, 3)``."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_dB_by_dX,
+        )
+
+    def d3B_by_dXdXdcoilcurrents(self, compute_derivatives=2):
+        """Per-coil ``d2B/dXdX`` at unit current — list of ``(npoints, 3, 3, 3)``."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_d2B_by_dXdX,
+        )
+
+    def dA_by_dcoilcurrents(self, compute_derivatives=0):
+        """Per-coil A at unit current — list of ``(npoints, 3)`` JAX arrays."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_A,
+        )
+
+    def d2A_by_dXdcoilcurrents(self, compute_derivatives=1):
+        """Per-coil ``dA/dX`` at unit current — list of ``(npoints, 3, 3)``."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_dA_by_dX,
+        )
+
+    def d3A_by_dXdXdcoilcurrents(self, compute_derivatives=2):
+        """Per-coil ``d2A/dXdX`` at unit current — list of ``(npoints, 3, 3, 3)``."""
+        return _per_coil_unit_field(
+            self._points_jax,
+            self.coil_set_spec(),
+            biot_savart_d2A_by_dXdX,
         )
 
     # ------------------------------------------------------------------

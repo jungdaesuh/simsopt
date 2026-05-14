@@ -171,9 +171,7 @@ def _assert_second_derivative_taylor_convergence(
     for d1 in range(3):
         for d2 in range(3):
             target = second_derivative[d1, d2]
-            direction = _device_float64_array(
-                np.eye(1, 3, k=d2, dtype=np.float64)
-            )
+            direction = _device_float64_array(np.eye(1, 3, k=d2, dtype=np.float64))
             err = 1e6
             for i in range(5, 10):
                 eps = 0.5**i
@@ -351,9 +349,9 @@ class TestBiotSavartParitySuite:
         points = _device_float64_array(
             _BASE_POINTS + 0.001 * (np.random.rand(*_BASE_POINTS.shape) - 0.5)
         )
-        dB_idx = _host_array(biot_savart_dB_by_dX(points, gammas, gammadashs, currents))[
-            idx
-        ]
+        dB_idx = _host_array(
+            biot_savart_dB_by_dX(points, gammas, gammadashs, currents)
+        )[idx]
 
         # Divergence-free: Tr(dB/dX) = 0
         assert abs(dB_idx[0, 0] + dB_idx[1, 1] + dB_idx[2, 2]) < 1e-14
@@ -511,6 +509,116 @@ class TestBiotSavartParitySuite:
 
 
 # ---------------------------------------------------------------------------
+# Test: Per-coil current-linearity (W2-B6)
+# ---------------------------------------------------------------------------
+
+
+def _make_shifted_fourier_coils(nquad, shifts):
+    """Build a multi-coil JAX-only fixture from translated Fourier coils.
+
+    Each coil is the ``_make_fourier_coil`` curve translated by the
+    corresponding 3-vector in ``shifts``. Returns stacked
+    ``(ncoils, nquad, 3)`` arrays.
+    """
+    gammas_list = []
+    gammadashs_list = []
+    for shift in shifts:
+        gamma, gammadash = _make_fourier_coil(nquad)
+        gammas_list.append(gamma[0] + _device_float64_array(shift))
+        # Translation does not change gammadash.
+        gammadashs_list.append(gammadash[0])
+    return (
+        _device_float64_array(jnp.stack(gammas_list, axis=0)),
+        _device_float64_array(jnp.stack(gammadashs_list, axis=0)),
+    )
+
+
+class TestBiotSavartCoilCurrentLinearity:
+    """Type-3 (FD-on-the-JAX-stack) per-coil current-linearity coverage.
+
+    These are NOT C++ parity oracles — they verify the JAX kernel's
+    exact linearity in coil current for the per-coil decomposition
+    that ``BiotSavartJAX.dB_by_dcoilcurrents()`` /
+    ``dA_by_dcoilcurrents()`` return. The aggregate
+    ``test_B_and_dB_linearity_in_current`` at ``:490`` covers the
+    Σ_k linearity but NOT the per-coil decomposition.
+
+    Upstream reference: ``test_biotsavart_coil_current_taylortest``
+    in ``simsopt/tests/field/test_biotsavart.py:276`` and its
+    vector-potential analog at ``:402``.
+    """
+
+    _SHIFTS = (
+        (0.0, 0.0, 0.0),
+        (0.05, -0.03, 0.02),
+        (-0.04, 0.06, -0.01),
+    )
+    _BASELINE_CURRENTS = (1e4, 7.5e3, 1.2e4)
+    _EPS = 1e-3
+
+    def _per_coil_unit_field(self, kernel_fn, gammas, gammadashs, points):
+        """Per-coil unit-current field — matches BiotSavartJAX.{dB,dA}_by_dcoilcurrents.
+
+        For coil ``k``, returns ``kernel_fn(points, gammas[k:k+1],
+        gammadashs[k:k+1], jnp.array([1.0]))``. The identity
+        ``dB/dI_k = b_k(x)`` follows from ``B(I) = Σ_k I_k · b_k``.
+        """
+        unit_current = _device_float64_array([1.0])
+        return [
+            kernel_fn(points, gammas[k : k + 1], gammadashs[k : k + 1], unit_current)
+            for k in range(gammas.shape[0])
+        ]
+
+    def _assert_per_coil_linearity(self, kernel_fn):
+        gammas, gammadashs = _make_shifted_fourier_coils(nquad=200, shifts=self._SHIFTS)
+        points = _device_float64_array(_BASE_POINTS)
+        ncoils = gammas.shape[0]
+        baseline = _device_float64_array(self._BASELINE_CURRENTS)
+        eps = self._EPS
+
+        per_coil_unit = self._per_coil_unit_field(kernel_fn, gammas, gammadashs, points)
+
+        field_baseline = _host_array(kernel_fn(points, gammas, gammadashs, baseline))
+
+        for k in range(ncoils):
+            unit_k = _host_array(per_coil_unit[k])
+
+            plus = baseline.at[k].add(eps)
+            minus = baseline.at[k].add(-eps)
+            field_plus = _host_array(kernel_fn(points, gammas, gammadashs, plus))
+            field_minus = _host_array(kernel_fn(points, gammas, gammadashs, minus))
+
+            central_fd = (field_plus - field_minus) / (2.0 * eps)
+            central_err = float(np.linalg.norm(central_fd - unit_k))
+            assert central_err < _CURRENT_LINEARITY_TOL, (
+                f"coil {k}: central FD mismatch {central_err:.2e}"
+            )
+
+            forward_residual = field_plus - field_baseline - eps * unit_k
+            forward_err = float(np.linalg.norm(forward_residual))
+            assert forward_err < _CURRENT_LINEARITY_TOL, (
+                f"coil {k}: forward FD mismatch {forward_err:.2e}"
+            )
+
+    def test_dB_by_dcoilcurrents_per_coil_linearity(self):
+        """Per-coil ``dB/dI_k`` equals the per-coil unit-current B field.
+
+        Verifies the exact-linear identity that
+        ``BiotSavartJAX.dB_by_dcoilcurrents()`` returns, using FD on the
+        pure-JAX ``biot_savart_B`` kernel.
+        """
+        self._assert_per_coil_linearity(biot_savart_B)
+
+    def test_dA_by_dcoilcurrents_per_coil_linearity(self):
+        """Per-coil ``dA/dI_k`` equals the per-coil unit-current A field.
+
+        Vector-potential analogue of
+        ``test_dB_by_dcoilcurrents_per_coil_linearity``.
+        """
+        self._assert_per_coil_linearity(biot_savart_A)
+
+
+# ---------------------------------------------------------------------------
 # Test: Grouped Biot-Savart gradient (mixed quadrature)
 # ---------------------------------------------------------------------------
 
@@ -592,9 +700,7 @@ class TestGroupedBiotSavartGradient:
                 fd = (
                     _host_float(J(perturb(eps_device * h)))
                     - _host_float(J(perturb(-eps_device * h)))
-                ) / (
-                    2 * eps
-                )
+                ) / (2 * eps)
                 new_err = abs(fd - dJ_dh)
                 if new_err < 1e-12:
                     break
@@ -782,7 +888,9 @@ class TestCurveTypeParametrization:
         offsets = 0.05 * (rng.rand(5, 3) - 0.5)
         points = _device_float64_array(_host_array(centroid)[None, :] + offsets)
 
-        dB = biot_savart_dB_by_dX(points, gammas, gammadashs, _device_float64_array([1e4]))
+        dB = biot_savart_dB_by_dX(
+            points, gammas, gammadashs, _device_float64_array([1e4])
+        )
         dB_np = _host_array(dB)
         for i in range(dB_np.shape[0]):
             div_B = dB_np[i, 0, 0] + dB_np[i, 1, 1] + dB_np[i, 2, 2]
@@ -796,9 +904,7 @@ class TestCurveTypeParametrization:
         _, _, _, gammas, gammadashs, points = _make_curve_type_fixture(curvetype)
         I = 1e4
         B_full = biot_savart_B(points, gammas, gammadashs, _device_float64_array([I]))
-        B_unit = biot_savart_B(
-            points, gammas, gammadashs, _device_float64_array([1.0])
-        )
+        B_unit = biot_savart_B(points, gammas, gammadashs, _device_float64_array([1.0]))
         err = float(np.linalg.norm(_host_array(B_full) - I * _host_array(B_unit)))
         assert err < 1e-15, f"{curvetype}: B linearity error {err:.2e}"
 
@@ -811,8 +917,7 @@ class TestCurveTypeParametrization:
 
         np.random.seed(99)
         perturbed_dofs = _device_float64_array(
-            _host_array(spec.dofs)
-            + 0.05 * np.random.rand(len(spec.dofs))
+            _host_array(spec.dofs) + 0.05 * np.random.rand(len(spec.dofs))
         )
         from simsopt.jax_core import curve_spec_with_dofs
 

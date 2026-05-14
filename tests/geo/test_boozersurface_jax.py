@@ -1605,29 +1605,81 @@ class TestOptimizerAdapter:
         assert bool(np.asarray(success)) is False
         assert not np.any(np.isfinite(np.asarray(solved)))
 
-    def test_newton_polish_accepts_finite_norm_increasing_operator_steps(
-        self, monkeypatch
-    ):
-        """Newton polish follows the CPU Boozer finite-step contract."""
-
-        def obj(x):
-            return 0.5 * x[0] ** 2
+    @staticmethod
+    def _patch_newton_polish_linear_step(monkeypatch, step, residual):
+        step = jnp.asarray(step, dtype=jnp.float64)
+        residual = jnp.asarray(residual, dtype=jnp.float64)
 
         def fake_hvp_fn(_objective_fn):
             return lambda _x, v: v
 
         def fake_gmres(_hvp_fn, _x, _rhs, *, stab, tol):
             del stab, tol
-            return jnp.array([10.0]), jnp.array([0.0]), None
+            return step, residual, None
 
         monkeypatch.setattr(_opt, "_hessian_vector_product_fn", fake_hvp_fn)
         monkeypatch.setattr(_opt, "_gmres_solve_newton_system", fake_gmres)
 
+    def test_newton_polish_backtracks_finite_norm_increasing_operator_steps(
+        self, monkeypatch
+    ):
+        """Newton polish backtracks finite operator steps that worsen gradient norm."""
+
+        def obj(x):
+            return 0.5 * x[0] ** 2
+
+        self._patch_newton_polish_linear_step(monkeypatch, [10.0], [0.0])
+
         result = newton_polish(obj, jnp.array([1.0]), maxiter=1, tol=1e-12)
 
-        np.testing.assert_allclose(result["x"], np.array([-9.0]), atol=1e-12)
-        np.testing.assert_allclose(result["grad"], np.array([-9.0]), atol=1e-12)
+        np.testing.assert_allclose(result["x"], np.array([-0.25]), atol=1e-12)
+        np.testing.assert_allclose(result["grad"], np.array([-0.25]), atol=1e-12)
         assert result["nit"] == 1
+        assert not result["success"]
+
+    def test_newton_polish_backtracks_nonfinite_value_candidate(self, monkeypatch):
+        """Newton polish must reject candidates with non-finite objective values."""
+
+        def obj(x):
+            return jnp.where(x[0] < 0.9, jnp.inf, 0.5 * x[0] ** 2)
+
+        self._patch_newton_polish_linear_step(monkeypatch, [0.2], [0.0])
+
+        result = newton_polish(
+            obj,
+            jnp.array([1.0], dtype=jnp.float64),
+            maxiter=1,
+            tol=1e-12,
+            materialize_hessian=False,
+        )
+
+        np.testing.assert_allclose(result["x"], np.array([0.9]), atol=1e-12)
+        assert np.isfinite(float(result["fun"]))
+        np.testing.assert_allclose(result["grad"], np.array([0.9]), atol=1e-12)
+        assert result["nit"] == 1
+        assert not result["success"]
+
+    def test_newton_polish_rejects_nonfinite_gradient_norm_candidate(self, monkeypatch):
+        """Finite gradient entries are not enough when their norm overflows."""
+
+        def obj(x):
+            return 1e308 * x[0] + 1e308 * x[1]
+
+        self._patch_newton_polish_linear_step(
+            monkeypatch,
+            [0.0, 0.0],
+            [0.0, 0.0],
+        )
+
+        result = newton_polish(
+            obj,
+            jnp.zeros(2, dtype=jnp.float64),
+            maxiter=1,
+            tol=1e-12,
+            materialize_hessian=False,
+        )
+
+        assert result["nit"] == 0
         assert not result["success"]
 
     def test_newton_polish_nonfinite_operator_step_fails_without_dense_fallback(
@@ -1884,6 +1936,28 @@ class TestOptimizerAdapter:
         assert final_norm < initial_norm
         assert float(np.asarray(result["x"][0])) < 5.0
         assert int(np.asarray(result["nit"])) == 1
+
+    def test_newton_polish_backtracks_gradient_increasing_step(self):
+        """Host Newton polish must reject a full Newton step that worsens gradient."""
+
+        def objective(x):
+            return x[0] ** 4 + x[0]
+
+        x0 = jnp.asarray([0.1], dtype=jnp.float64)
+        initial_grad_norm = float(jnp.linalg.norm(jax.grad(objective)(x0)))
+
+        result = newton_polish(
+            objective,
+            x0,
+            maxiter=1,
+            tol=1e-14,
+            materialize_hessian=False,
+        )
+
+        final_grad_norm = float(jnp.linalg.norm(result["grad"]))
+        assert final_grad_norm <= initial_grad_norm
+        assert float(result["x"][0]) > -1.0
+        assert int(result["nit"]) == 1
 
 
 class TestNewtonPolishBoozer:

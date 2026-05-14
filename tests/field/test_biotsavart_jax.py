@@ -102,6 +102,7 @@ biot_savart_A = _bs.biot_savart_A
 biot_savart_dA_by_dX = _bs.biot_savart_dA_by_dX
 
 MU0 = 4.0 * np.pi * 1e-7
+_DIRECT_KERNEL_TOLS = parity_ladder_tolerances("direct-kernel")
 _DERIVATIVE_HEAVY_TOLS = parity_ladder_tolerances("derivative-heavy")
 _KERNEL_TUNING_ENV_VARS = (
     "SIMSOPT_BACKEND_MODE",
@@ -505,6 +506,15 @@ class TestBiotSavartJaxCppParity:
         pytest.importorskip("simsopt")
 
     def test_B_parity_ncsx(self):
+        """``biot_savart_B`` matches ``BiotSavart.B()`` on the NCSX fixture.
+
+        Oracle: C++ reference symbol ``simsoptpp::biot_savart_B`` accessed
+        through ``simsopt.field.biotsavart.BiotSavart.B`` (acceptable
+        oracle type 1, see ``tests/REVIEWER_ORACLE_LINT.md``). Lane:
+        ``direct-kernel`` value tolerances from the validation-ladder
+        SSOT (``benchmarks/validation_ladder_contract.py::
+        PARITY_LADDER_TOLERANCES``).
+        """
         bs, points_np, gammas_np, gds_np, currents_np = (
             _ncsx_biotsavart_parity_fixture()
         )
@@ -517,7 +527,12 @@ class TestBiotSavartJaxCppParity:
             jnp.array(currents_np),
         )
 
-        np.testing.assert_allclose(np.array(B_jax), B_ref, rtol=1e-10)
+        np.testing.assert_allclose(
+            np.array(B_jax),
+            B_ref,
+            rtol=_DIRECT_KERNEL_TOLS["rtol"],
+            atol=_DIRECT_KERNEL_TOLS["atol"],
+        )
 
     def test_dB_by_dX_parity_ncsx(self):
         bs, points_np, gammas_np, gds_np, currents_np = (
@@ -573,6 +588,226 @@ class TestBiotSavartJaxCppParity:
                     "on the NCSX parity fixture"
                 ),
             )
+
+    def test_dA_by_dX_parity_ncsx(self):
+        """``BiotSavartJAX.dA_by_dX()`` matches ``BiotSavart.dA_by_dX()``.
+
+        Oracle: C++ reference symbol ``simsoptpp::BiotSavart::dA_by_dX``
+        accessed through ``simsopt.field.biotsavart.BiotSavart.dA_by_dX``
+        (acceptable oracle type 1, see ``tests/REVIEWER_ORACLE_LINT.md``).
+        Lane: ``derivative-heavy`` first-derivative tolerances from the
+        validation-ladder SSOT.
+        """
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+        bs, points_np, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        dA_ref = bs.dA_by_dX()
+
+        bs_jax = BiotSavartJAX(list(bs._coils))
+        bs_jax.set_points(points_np)
+        dA_jax = bs_jax.dA_by_dX()
+
+        np.testing.assert_allclose(
+            np.array(dA_jax),
+            dA_ref,
+            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
+
+    def test_d2B_by_dXdX_parity_ncsx(self):
+        """``BiotSavartJAX.d2B_by_dXdX()`` matches ``BiotSavart.d2B_by_dXdX()``.
+
+        Oracle: C++ reference symbol ``simsoptpp::BiotSavart::d2B_by_dXdX``
+        accessed through ``simsopt.field.biotsavart.BiotSavart.d2B_by_dXdX``
+        (acceptable oracle type 1, see ``tests/REVIEWER_ORACLE_LINT.md``).
+        Lane: ``derivative-heavy`` second-derivative tolerances from the
+        validation-ladder SSOT.
+        """
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+        bs, points_np, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        d2B_ref = bs.d2B_by_dXdX()
+
+        bs_jax = BiotSavartJAX(list(bs._coils))
+        bs_jax.set_points(points_np)
+        d2B_jax = bs_jax.d2B_by_dXdX()
+
+        np.testing.assert_allclose(
+            np.array(d2B_jax),
+            d2B_ref,
+            rtol=_DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
+        )
+
+    def test_d2A_by_dXdX_parity_ncsx(self):
+        """``BiotSavartJAX.d2A_by_dXdX()`` matches ``BiotSavart.d2A_by_dXdX()``.
+
+        Oracle: C++ reference symbol ``simsoptpp::BiotSavart::d2A_by_dXdX``
+        accessed through ``simsopt.field.biotsavart.BiotSavart.d2A_by_dXdX``
+        (acceptable oracle type 1, see ``tests/REVIEWER_ORACLE_LINT.md``).
+        Lane: ``derivative-heavy`` second-derivative tolerances from the
+        validation-ladder SSOT.
+        """
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+        bs, points_np, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        d2A_ref = bs.d2A_by_dXdX()
+
+        bs_jax = BiotSavartJAX(list(bs._coils))
+        bs_jax.set_points(points_np)
+        d2A_jax = bs_jax.d2A_by_dXdX()
+
+        np.testing.assert_allclose(
+            np.array(d2A_jax),
+            d2A_ref,
+            rtol=_DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
+        )
+
+
+class TestBiotSavartJaxCppCoilCurrentParity:
+    """Compare JAX coil-current ladder against the C++ simsoptpp lists.
+
+    Oracle: C++ reference symbols
+    ``simsoptpp::BiotSavart::{dB,dA}_by_dcoilcurrents``,
+    ``simsoptpp::BiotSavart::{d2B,d2A}_by_dXdcoilcurrents``,
+    ``simsoptpp::BiotSavart::{d3B,d3A}_by_dXdXdcoilcurrents`` accessed
+    through the matching ``simsopt.field.biotsavart.BiotSavart`` Python
+    methods (acceptable oracle type 1, see
+    ``tests/REVIEWER_ORACLE_LINT.md``). Each test compares the JAX list
+    against the C++ list element-by-element on the NCSX parity fixture,
+    using tolerances from ``benchmarks/validation_ladder_contract.py::
+    PARITY_LADDER_TOLERANCES``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_simsoptpp(self):
+        sopp = pytest.importorskip("simsoptpp")
+        if not hasattr(sopp, "BiotSavart"):
+            pytest.skip("simsoptpp compiled extensions not available")
+        pytest.importorskip("simsopt")
+
+    @staticmethod
+    def _assert_coil_current_list_parity(cache_method, list_method, *, rtol, atol):
+        from simsopt.field.biotsavart_jax_backend import BiotSavartJAX
+
+        bs, points_np, _, _, _ = _ncsx_biotsavart_parity_fixture()
+        # Populate the matching C++ fieldcache entries before pulling the
+        # per-coil list, so ordering is deterministic.
+        getattr(bs, cache_method)()
+        cpu_list = getattr(bs, list_method)()
+
+        bs_jax = BiotSavartJAX(list(bs._coils))
+        bs_jax.set_points(points_np)
+        jax_list = getattr(bs_jax, list_method)()
+
+        assert len(jax_list) == len(cpu_list)
+        for k, (j_entry, c_entry) in enumerate(zip(jax_list, cpu_list)):
+            np.testing.assert_allclose(
+                np.array(j_entry),
+                c_entry,
+                rtol=rtol,
+                atol=atol,
+                err_msg=f"coil {k}",
+            )
+
+    def test_dB_by_dcoilcurrents_parity_ncsx(self):
+        """``BiotSavartJAX.dB_by_dcoilcurrents()`` matches CPU list per coil.
+
+        Oracle: C++ reference symbol
+        ``simsoptpp::BiotSavart::dB_by_dcoilcurrents`` accessed through
+        ``simsopt.field.biotsavart.BiotSavart.dB_by_dcoilcurrents``
+        (acceptable oracle type 1). Lane: ``direct-kernel`` value
+        tolerances from the validation-ladder SSOT.
+        """
+        self._assert_coil_current_list_parity(
+            "B",
+            "dB_by_dcoilcurrents",
+            rtol=_DIRECT_KERNEL_TOLS["rtol"],
+            atol=_DIRECT_KERNEL_TOLS["atol"],
+        )
+
+    def test_dA_by_dcoilcurrents_parity_ncsx(self):
+        """``BiotSavartJAX.dA_by_dcoilcurrents()`` matches CPU list per coil.
+
+        Oracle: C++ reference symbol
+        ``simsoptpp::BiotSavart::dA_by_dcoilcurrents`` accessed through
+        ``simsopt.field.biotsavart.BiotSavart.dA_by_dcoilcurrents``
+        (acceptable oracle type 1). Lane: ``direct-kernel`` value
+        tolerances from the validation-ladder SSOT.
+        """
+        self._assert_coil_current_list_parity(
+            "A",
+            "dA_by_dcoilcurrents",
+            rtol=_DIRECT_KERNEL_TOLS["rtol"],
+            atol=_DIRECT_KERNEL_TOLS["atol"],
+        )
+
+    def test_d2B_by_dXdcoilcurrents_parity_ncsx(self):
+        """``BiotSavartJAX.d2B_by_dXdcoilcurrents()`` matches CPU list per coil.
+
+        Oracle: C++ reference symbol
+        ``simsoptpp::BiotSavart::d2B_by_dXdcoilcurrents`` accessed
+        through ``simsopt.field.biotsavart.BiotSavart.d2B_by_dXdcoilcurrents``
+        (acceptable oracle type 1). Lane: ``derivative-heavy``
+        first-derivative tolerances from the validation-ladder SSOT.
+        """
+        self._assert_coil_current_list_parity(
+            "dB_by_dX",
+            "d2B_by_dXdcoilcurrents",
+            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
+
+    def test_d2A_by_dXdcoilcurrents_parity_ncsx(self):
+        """``BiotSavartJAX.d2A_by_dXdcoilcurrents()`` matches CPU list per coil.
+
+        Oracle: C++ reference symbol
+        ``simsoptpp::BiotSavart::d2A_by_dXdcoilcurrents`` accessed
+        through ``simsopt.field.biotsavart.BiotSavart.d2A_by_dXdcoilcurrents``
+        (acceptable oracle type 1). Lane: ``derivative-heavy``
+        first-derivative tolerances from the validation-ladder SSOT.
+        """
+        self._assert_coil_current_list_parity(
+            "dA_by_dX",
+            "d2A_by_dXdcoilcurrents",
+            rtol=_DERIVATIVE_HEAVY_TOLS["first_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["first_derivative_atol"],
+        )
+
+    def test_d3B_by_dXdXdcoilcurrents_parity_ncsx(self):
+        """``BiotSavartJAX.d3B_by_dXdXdcoilcurrents()`` matches CPU list per coil.
+
+        Oracle: C++ reference symbol
+        ``simsoptpp::BiotSavart::d3B_by_dXdXdcoilcurrents`` accessed
+        through
+        ``simsopt.field.biotsavart.BiotSavart.d3B_by_dXdXdcoilcurrents``
+        (acceptable oracle type 1). Lane: ``derivative-heavy``
+        second-derivative tolerances from the validation-ladder SSOT.
+        """
+        self._assert_coil_current_list_parity(
+            "d2B_by_dXdX",
+            "d3B_by_dXdXdcoilcurrents",
+            rtol=_DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
+        )
+
+    def test_d3A_by_dXdXdcoilcurrents_parity_ncsx(self):
+        """``BiotSavartJAX.d3A_by_dXdXdcoilcurrents()`` matches CPU list per coil.
+
+        Oracle: C++ reference symbol
+        ``simsoptpp::BiotSavart::d3A_by_dXdXdcoilcurrents`` accessed
+        through
+        ``simsopt.field.biotsavart.BiotSavart.d3A_by_dXdXdcoilcurrents``
+        (acceptable oracle type 1). Lane: ``derivative-heavy``
+        second-derivative tolerances from the validation-ladder SSOT.
+        """
+        self._assert_coil_current_list_parity(
+            "d2A_by_dXdX",
+            "d3A_by_dXdXdcoilcurrents",
+            rtol=_DERIVATIVE_HEAVY_TOLS["second_derivative_rtol"],
+            atol=_DERIVATIVE_HEAVY_TOLS["second_derivative_atol"],
+        )
 
 
 class TestBiotSavartJaxChunkedSelfConsistency:
