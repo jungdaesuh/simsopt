@@ -83,6 +83,10 @@ def _new_derivative():
     return Derivative({})
 
 
+def _reset_biot_savart_points_to_surface(biotsavart, surface) -> None:
+    biotsavart.set_points(surface.gamma().reshape((-1, 3)))
+
+
 @dataclass
 class Stage2IotaRuntimeStats:
     bootstrap_seconds: float
@@ -225,6 +229,7 @@ class Stage2IotaRuntime:
     ntor: int
     stats: Stage2IotaRuntimeStats
     initial_state: Stage2IotaState
+    last_state: Stage2IotaState
     guarded_boozer_evaluator: Stage2GuardedBoozerEvaluator | None = None
     effective_weight: float | None = None
 
@@ -337,36 +342,42 @@ def evaluate_stage2_iota(
     stage2_iota_runtime: Stage2IotaRuntime,
 ) -> Stage2IotaEvaluation:
     if stage2_iota_runtime.guarded_boozer_evaluator is not None:
-        return stage2_iota_runtime.guarded_boozer_evaluator.evaluate(
+        evaluation = stage2_iota_runtime.guarded_boozer_evaluator.evaluate(
             stage2_iota_runtime.iota_term,
             stage2_iota_runtime.penalty_objective,
             target=stage2_iota_runtime.target,
             tolerance=stage2_iota_runtime.tolerance,
         )
-    return _evaluate_stage2_iota_terms(
-        stage2_iota_runtime.iota_term,
-        stage2_iota_runtime.penalty_objective,
-        target=stage2_iota_runtime.target,
-        tolerance=stage2_iota_runtime.tolerance,
-    )
+    else:
+        evaluation = _evaluate_stage2_iota_terms(
+            stage2_iota_runtime.iota_term,
+            stage2_iota_runtime.penalty_objective,
+            target=stage2_iota_runtime.target,
+            tolerance=stage2_iota_runtime.tolerance,
+        )
+    stage2_iota_runtime.last_state = evaluation.state
+    return evaluation
 
 
 def evaluate_stage2_iota_state(
     stage2_iota_runtime: Stage2IotaRuntime,
 ) -> Stage2IotaState:
     if stage2_iota_runtime.guarded_boozer_evaluator is not None:
-        return stage2_iota_runtime.guarded_boozer_evaluator.evaluate_state(
+        state = stage2_iota_runtime.guarded_boozer_evaluator.evaluate_state(
             stage2_iota_runtime.iota_term,
             stage2_iota_runtime.penalty_objective,
             target=stage2_iota_runtime.target,
             tolerance=stage2_iota_runtime.tolerance,
         )
-    return _build_stage2_iota_state(
-        stage2_iota_runtime.iota_term,
-        stage2_iota_runtime.penalty_objective,
-        target=stage2_iota_runtime.target,
-        tolerance=stage2_iota_runtime.tolerance,
-    )
+    else:
+        state = _build_stage2_iota_state(
+            stage2_iota_runtime.iota_term,
+            stage2_iota_runtime.penalty_objective,
+            target=stage2_iota_runtime.target,
+            tolerance=stage2_iota_runtime.tolerance,
+        )
+    stage2_iota_runtime.last_state = state
+    return state
 
 
 def _coerce_stage2_partition_counts(
@@ -529,6 +540,7 @@ def build_stage2_iota_runtime(
         ntor=int(ntor),
         stats=stats,
         initial_state=initial_state,
+        last_state=initial_state,
         guarded_boozer_evaluator=guarded_boozer_evaluator,
     )
 
@@ -1243,6 +1255,7 @@ def make_stage2_fun(
         iota_evaluation = None
         if soft_mode_enabled:
             iota_evaluation = evaluate_stage2_iota(stage2_iota_runtime)
+            _reset_biot_savart_points_to_surface(new_bs, new_surf)
             iota_state = iota_evaluation.state
             if iota_state.solve_failed:
                 J, grad = _build_stage2_soft_failure_reject_value_and_grad(
@@ -1986,6 +1999,7 @@ def evaluate_stage2_alm_problem(
                 iota_state.penalty - stage2_iota_penalty_threshold_value
             )
             iota_grad = np.asarray(iota_evaluation.penalty_grad, dtype=float)
+        _reset_biot_savart_points_to_surface(new_bs, new_surf)
 
     active_names = _stage2_constraint_names(
         include_coil_surface=include_coil_surface,

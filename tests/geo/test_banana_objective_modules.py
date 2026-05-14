@@ -429,9 +429,13 @@ def _zero_constraint_result_2d(*_args, **_kwargs):
 class _FakeBiotSavart:
     def __init__(self, field_shape):
         self._field = np.zeros(field_shape, dtype=float)
+        self.points = None
 
     def B(self):
         return self._field.copy()
+
+    def set_points(self, points):
+        self.points = np.asarray(points, dtype=float).copy()
 
 
 class _FakeSurfaceNormals:
@@ -440,6 +444,9 @@ class _FakeSurfaceNormals:
 
     def unitnormal(self):
         return self._unitnormal.copy()
+
+    def gamma(self):
+        return np.zeros(self._unitnormal.shape, dtype=float)
 
 
 class _FakeSurfaceState:
@@ -913,10 +920,12 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             def dJ(self):
                 return np.array([1.0, -2.0])
 
+        new_bs = _FakeBiotSavart((2, 3))
+        new_surf = _FakeSurfaceNormals((1, 2, 3))
         fun = self.module.make_stage2_fun(
             _JF(),
-            _FakeBiotSavart((2, 3)),
-            _FakeSurfaceNormals((1, 2, 3)),
+            new_bs,
+            new_surf,
             _FakeScalarObjective(0.12),
             _FakeScalarObjective(1.75),
             SimpleNamespace(shortest_distance=lambda: 0.055),
@@ -1025,10 +1034,12 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             state=second_state,
             penalty_grad=np.array([0.1, -0.2]),
         )
+        new_bs = _FakeBiotSavart((2, 3))
+        new_surf = _FakeSurfaceNormals((1, 2, 3))
         fun = self.module.make_stage2_fun(
             _JF(),
-            _FakeBiotSavart((2, 3)),
-            _FakeSurfaceNormals((1, 2, 3)),
+            new_bs,
+            new_surf,
             _FakeScalarObjective(0.12),
             _FakeScalarObjective(1.75),
             SimpleNamespace(shortest_distance=lambda: 0.055),
@@ -1061,6 +1072,7 @@ class Stage2ObjectiveModuleTests(_ModuleTestCase):
             first_grad,
             [1.0, -2.0] + expected_effective_weight * np.array([0.2, -0.1]),
         )
+        np.testing.assert_allclose(new_bs.points, new_surf.gamma().reshape((-1, 3)))
         self.assertAlmostEqual(
             second_value,
             1.23 + expected_effective_weight * second_state.penalty,

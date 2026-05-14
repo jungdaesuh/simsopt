@@ -1578,15 +1578,18 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 runtime_calls=7,
             ),
             initial_state=SimpleNamespace(iota=0.18, penalty=0.03),
+            last_state=SimpleNamespace(
+                iota=0.201,
+                penalty=0.0,
+                abs_error=1.0e-3,
+                feasible=True,
+                solve_failed=False,
+            ),
             penalty_threshold=5.0e-3,
             effective_weight=2.5,
         )
 
         with patch.object(
-            module,
-            "evaluate_stage2_iota_state",
-            return_value=SimpleNamespace(iota=0.201, penalty=0.0),
-        ), patch.object(
             module,
             "probe_stage2_seed_bootability",
             return_value={
@@ -1614,9 +1617,12 @@ class Stage2IotaReportingTests(unittest.TestCase):
         self.assertEqual(payload["STAGE2_IOTA_BOOTSTRAP_SECONDS"], 0.25)
         self.assertEqual(payload["STAGE2_IOTA_RUNTIME_SECONDS"], 1.5)
         self.assertEqual(payload["STAGE2_IOTA_RUNTIME_CALLS"], 7)
+        self.assertEqual(payload["STAGE2_IOTA_FINAL"], 0.201)
+        self.assertEqual(payload["STAGE2_IOTA_VALUE"], 0.201)
+        self.assertFalse(payload["STAGE2_IOTA_FINAL_SOLVE_FAILED"])
         self.assertIsNotNone(payload["STAGE2_IOTA_PROBE_SECONDS"])
 
-    def test_stage2_iota_hot_loop_payload_nulls_final_values_after_solve_failure(self):
+    def test_stage2_iota_hot_loop_payload_preserves_final_values_after_solve_failure(self):
         module = load_stage2_module()
 
         args = SimpleNamespace(
@@ -1636,25 +1642,31 @@ class Stage2IotaReportingTests(unittest.TestCase):
                 runtime_calls=7,
             ),
             initial_state=SimpleNamespace(iota=0.18, penalty=0.03),
+            last_state=SimpleNamespace(
+                iota=0.201,
+                penalty=0.0,
+                abs_error=1.0e-3,
+                feasible=False,
+                solve_failed=True,
+            ),
             penalty_threshold=5.0e-3,
             effective_weight=2.5,
         )
 
-        with patch.object(
-            module,
-            "evaluate_stage2_iota_state",
-            return_value=SimpleNamespace(iota=0.201, penalty=0.0, solve_failed=True),
-        ):
-            payload = module.build_stage2_iota_hot_loop_payload(
-                args=args,
-                stage2_iota_runtime=runtime,
-            )
+        payload = module.build_stage2_iota_hot_loop_payload(
+            args=args,
+            stage2_iota_runtime=runtime,
+        )
 
         self.assertEqual(payload["STAGE2_IOTA_INITIAL"], 0.18)
         self.assertEqual(payload["STAGE2_IOTA_INITIAL_PENALTY"], 0.03)
         self.assertEqual(payload["STAGE2_IOTA_EFFECTIVE_WEIGHT"], 2.5)
-        self.assertIsNone(payload["STAGE2_IOTA_FINAL"])
-        self.assertIsNone(payload["STAGE2_IOTA_FINAL_PENALTY"])
+        self.assertEqual(payload["STAGE2_IOTA_FINAL"], 0.201)
+        self.assertEqual(payload["STAGE2_IOTA_VALUE"], 0.201)
+        self.assertEqual(payload["STAGE2_IOTA_FINAL_PENALTY"], 0.0)
+        self.assertEqual(payload["STAGE2_IOTA_FINAL_ABS_ERROR"], 1.0e-3)
+        self.assertFalse(payload["STAGE2_IOTA_FINAL_FEASIBLE"])
+        self.assertTrue(payload["STAGE2_IOTA_FINAL_SOLVE_FAILED"])
 
     def test_stage2_secondary_artifact_helpers_return_standard_bundle_paths(self):
         module = load_stage2_module()

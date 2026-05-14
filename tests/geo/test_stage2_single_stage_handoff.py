@@ -379,6 +379,12 @@ class HandoffModuleTests(unittest.TestCase):
         def J(self):
             return 0.1
 
+    def test_compute_tf_G0_preserves_tf_current_sign(self):
+        module = load_handoff_module()
+        tf_coils = [self._fixed_current_coil(-8.0e4) for _ in range(20)]
+
+        self.assertAlmostEqual(module.compute_tf_G0(tf_coils), -4.0e-7 * np.pi * 1.6e6)
+
     def test_classify_bootability_result_rejects_iota_mismatch(self):
         module = load_handoff_module()
 
@@ -973,6 +979,65 @@ class HandoffModuleTests(unittest.TestCase):
             module.BOOTABILITY_REASON_MISSING_ARTIFACT_METADATA,
         )
         self.assertFalse(module.bootability_passes(status))
+
+    def test_probe_stage2_seed_bootability_does_not_gate_on_full_hardware_contract(self):
+        module = load_handoff_module()
+        initial_surface = SimpleNamespace(nfp=5)
+        initialization = module.BoozerInitializationResult(
+            boozer_surface=object(),
+            solve_success=True,
+            self_intersecting=False,
+            success=True,
+            solved_iota=0.2,
+            solved_G=0.3,
+            volume=0.1,
+        )
+
+        with patch.object(
+            module,
+            "validate_stage2_seed_contract",
+            side_effect=ValueError("hardware contract failure"),
+        ) as validate_contract, patch.object(
+            module,
+            "partition_loaded_stage2_coils",
+            return_value=SimpleNamespace(tf_coils=[object()]),
+        ), patch.object(
+            module,
+            "resolve_stage2_tf_current_A",
+            return_value=-80000.0,
+        ), patch.object(
+            module,
+            "_probe_initialization_inputs",
+            return_value=(initial_surface, 0.1, None, 0.2, 0.3),
+        ), patch.object(
+            module,
+            "attempt_initialize_boozer_surface",
+            return_value=initialization,
+        ):
+            status = module.probe_stage2_seed_bootability(
+                stage2_bs_path="/tmp/demo/biot_savart_opt.json",
+                stage2_artifact_results={
+                    "MAJOR_RADIUS": 0.976,
+                    "TOROIDAL_FLUX": 1.0,
+                    "banana_surf_radius": 0.21,
+                },
+                plasma_surf_filename="demo.nc",
+                equilibria_dir="/tmp/equilibria",
+                num_tf_coils=20,
+                nphi=91,
+                ntheta=32,
+                mpol=8,
+                ntor=6,
+                vol_target=0.1,
+                iota_target=0.2,
+                iota_tolerance=5.0e-3,
+                constraint_weight=1.0,
+                bs_loader=lambda path: SimpleNamespace(coils=[object()]),
+            )
+
+        validate_contract.assert_not_called()
+        self.assertEqual(status["BOOTABILITY_REASON"], module.BOOTABILITY_REASON_OK)
+        self.assertTrue(module.bootability_passes(status))
 
     def test_partition_loaded_stage2_coils_uses_recorded_proxy_and_vf_counts(self):
         module = load_handoff_module()

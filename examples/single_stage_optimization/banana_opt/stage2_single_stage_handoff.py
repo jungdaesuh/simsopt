@@ -409,7 +409,7 @@ def compute_tf_G0(tf_coils) -> float:
     # Keep G0 tied to the TF bundle only. Proxy/VF coils already enter the
     # loaded Biot-Savart field, so folding them into the toroidal-current seed
     # here would double count their effect during the Boozer initialization.
-    current_sum = float(sum(abs(coil.current.get_value()) for coil in tf_coils))
+    current_sum = float(sum(coil.current.get_value() for coil in tf_coils))
     return 2.0 * np.pi * current_sum * (4.0 * np.pi * 10.0 ** (-7) / (2.0 * np.pi))
 
 
@@ -1016,7 +1016,6 @@ def probe_stage2_seed_bootability(
             ),
         )
     try:
-        validate_stage2_seed_contract(stage2_artifact_results)
         bs = bs_loader(stage2_bs_path)
         coil_partitions = partition_loaded_stage2_coils(
             bs.coils,

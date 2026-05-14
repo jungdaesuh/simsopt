@@ -971,15 +971,19 @@ def build_stage2_iota_hot_loop_payload(
         "STAGE2_IOTA_INITIAL_PENALTY": None,
         "STAGE2_IOTA_FINAL": None,
         "STAGE2_IOTA_FINAL_PENALTY": None,
+        "STAGE2_IOTA_FINAL_ABS_ERROR": None,
+        "STAGE2_IOTA_FINAL_FEASIBLE": None,
+        "STAGE2_IOTA_FINAL_SOLVE_FAILED": None,
+        "STAGE2_IOTA_VALUE": None,
+        "STAGE2_IOTA_PENALTY": None,
+        "STAGE2_IOTA_ABS_ERROR": None,
+        "STAGE2_IOTA_FEASIBLE": None,
         "STAGE2_IOTA_PENALTY_THRESHOLD": None,
     }
     if stage2_iota_runtime is None:
         return payload
 
-    final_state = evaluate_stage2_iota_state(stage2_iota_runtime)
-    final_solve_failed = bool(getattr(final_state, "solve_failed", False))
-    final_iota = None if final_solve_failed else final_state.iota
-    final_penalty = None if final_solve_failed else final_state.penalty
+    final_state = stage2_iota_runtime.last_state
     payload.update(
         {
             "STAGE2_IOTA_BOOTSTRAP_SECONDS": stage2_iota_runtime.stats.bootstrap_seconds,
@@ -988,8 +992,15 @@ def build_stage2_iota_hot_loop_payload(
             "STAGE2_IOTA_EFFECTIVE_WEIGHT": stage2_iota_runtime.effective_weight,
             "STAGE2_IOTA_INITIAL": stage2_iota_runtime.initial_state.iota,
             "STAGE2_IOTA_INITIAL_PENALTY": stage2_iota_runtime.initial_state.penalty,
-            "STAGE2_IOTA_FINAL": final_iota,
-            "STAGE2_IOTA_FINAL_PENALTY": final_penalty,
+            "STAGE2_IOTA_FINAL": final_state.iota,
+            "STAGE2_IOTA_FINAL_PENALTY": final_state.penalty,
+            "STAGE2_IOTA_FINAL_ABS_ERROR": final_state.abs_error,
+            "STAGE2_IOTA_FINAL_FEASIBLE": final_state.feasible,
+            "STAGE2_IOTA_FINAL_SOLVE_FAILED": final_state.solve_failed,
+            "STAGE2_IOTA_VALUE": final_state.iota,
+            "STAGE2_IOTA_PENALTY": final_state.penalty,
+            "STAGE2_IOTA_ABS_ERROR": final_state.abs_error,
+            "STAGE2_IOTA_FEASIBLE": final_state.feasible,
             "STAGE2_IOTA_PENALTY_THRESHOLD": stage2_iota_runtime.penalty_threshold,
         }
     )
@@ -1203,6 +1214,8 @@ def _capture_stage2_artifact_state(
     JF,
     BASE_OBJECTIVE,
     Jf,
+    new_bs,
+    new_surf,
     Jls,
     Jccdist,
     Jcsdist,
@@ -1272,6 +1285,8 @@ def _capture_stage2_artifact_state(
         if stage2_iota_runtime is None
         else evaluate_stage2_iota_state(stage2_iota_runtime)
     )
+    if stage2_iota_runtime is not None:
+        new_bs.set_points(new_surf.gamma().reshape((-1, 3)))
     return {
         "x": candidate_x,
         "field_objective": float(Jf.J()),
@@ -1295,6 +1310,9 @@ def _capture_stage2_artifact_state(
         "stage2_iota_penalty": None if iota_state is None else iota_state.penalty,
         "stage2_iota_abs_error": None if iota_state is None else iota_state.abs_error,
         "stage2_iota_feasible": None if iota_state is None else iota_state.feasible,
+        "stage2_iota_solve_failed": (
+            None if iota_state is None else iota_state.solve_failed
+        ),
     }
 
 
@@ -1986,6 +2004,8 @@ def main(parsed_args=None):
             JF=JF,
             BASE_OBJECTIVE=BASE_OBJECTIVE,
             Jf=Jf,
+            new_bs=new_bs,
+            new_surf=new_surf,
             Jls=Jls,
             Jccdist=Jccdist,
             Jcsdist=Jcsdist,
