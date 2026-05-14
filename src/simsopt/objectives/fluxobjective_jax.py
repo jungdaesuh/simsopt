@@ -41,7 +41,11 @@ from ..jax_core.objectives_flux import (
 from ..jax_core import coil_specs_from_dof_extraction_spec
 from ..jax_core.field import grouped_coil_set_spec_from_coil_specs
 
-__all__ = ["SquaredFluxJAX"]
+__all__ = [
+    "SquaredFluxJAX",
+    "coil_current_fixed_geometry_flux_jax",
+    "coil_current_fixed_geometry_value_and_grad_jax",
+]
 
 
 def _raise_if_nonfinite_squared_flux_gradient(*, definition: str, value, grad) -> None:
@@ -75,6 +79,42 @@ def _strict_field_dof_layout_version(field) -> int:
             "_dof_layout_version for drift detection."
         )
     return layout_version
+
+
+def coil_current_fixed_geometry_flux_jax(
+    points,
+    gammas,
+    gammadashs,
+    currents,
+    flux_spec,
+):
+    """Return fixed-geometry coil-current normal-field flux in pure JAX."""
+    B = biot_savart_B(
+        _as_jax_float64(points),
+        _as_jax_float64(gammas),
+        _as_jax_float64(gammadashs),
+        _as_jax_float64(currents),
+    )
+    return fixed_surface_flux_integral_from_B(B, flux_spec)
+
+
+def coil_current_fixed_geometry_value_and_grad_jax(
+    points,
+    gammas,
+    gammadashs,
+    currents,
+    flux_spec,
+):
+    """Return value and gradient with respect to fixed-geometry coil currents."""
+    return jax.value_and_grad(
+        lambda current_values: coil_current_fixed_geometry_flux_jax(
+            points,
+            gammas,
+            gammadashs,
+            current_values,
+            flux_spec,
+        )
+    )(_as_jax_float64(currents))
 
 
 def _field_dofs_gradient_to_derivative(field, field_dofs_gradient):

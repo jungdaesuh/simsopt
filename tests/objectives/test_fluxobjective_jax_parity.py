@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -20,16 +23,33 @@ from simsopt.geo.surfacexyzfourier import SurfaceXYZFourier
 from simsopt.geo.surfacexyztensorfourier import SurfaceXYZTensorFourier
 from simsopt.jax_core import (
     fixed_surface_flux_integral_from_B,
+    fixed_surface_flux_specs_from_surface,
     make_fixed_surface_flux_spec,
 )
 from simsopt.objectives.fluxobjective import SquaredFlux
-from simsopt.objectives.fluxobjective_jax import SquaredFluxJAX
+from simsopt.objectives.fluxobjective_jax import (
+    SquaredFluxJAX,
+    coil_current_fixed_geometry_flux_jax,
+    coil_current_fixed_geometry_value_and_grad_jax,
+)
 
 _SQUARED_FLUX_DEFINITIONS = (
     "quadratic flux",
     "normalized",
     "local",
 )
+_STAGE2_MINIMAL_INPUT = (
+    Path(__file__).resolve().parents[1]
+    / "test_files"
+    / "input.LandremanPaul2021_QA"
+)
+_STAGE2_MINIMAL_NCOILS = 4
+_STAGE2_MINIMAL_NPHI = 32
+_STAGE2_MINIMAL_NTHETA = 32
+_STAGE2_MINIMAL_COIL_ORDER = 5
+_STAGE2_MINIMAL_COIL_MAJOR_RADIUS = 1.0
+_STAGE2_MINIMAL_COIL_MINOR_RADIUS = 0.5
+_STAGE2_MINIMAL_CURRENT = 1.0e5
 # SSOT parity tolerances from the validation-ladder contract.
 # Value parity (CPU C++ ``SquaredFlux.J()`` oracle vs ``SquaredFluxJAX.J()``)
 # uses the ``direct_kernel`` lane; gradient parity uses the first-derivative
@@ -62,6 +82,16 @@ class _NonNativeFakeField(Optimizable):
     def set_points_from_spec(self, field_eval_spec):
         self._points = np.asarray(field_eval_spec.points, dtype=np.float64)
         self._points_version += 1
+
+
+class _FixedGeometryCurrentFluxCase(NamedTuple):
+    points: object
+    gammas: object
+    gammadashs: object
+    currents: object
+    flux_spec: object
+    coils: object
+    surface: SurfaceRZFourier
 
 
 def _make_native_flux_parity_case(current_values=(1e5, 1e5)):
@@ -362,6 +392,146 @@ def test_fluxobjective_gradient_parity(definition):
 def test_squaredfluxjax_gradient_matches_directional_taylor_fd(definition):
     _, objective_jax = _make_native_flux_objectives(definition)
     _assert_squared_flux_directional_fd(objective_jax)
+
+
+def _fixed_geometry_current_flux_case():
+    stellsym = True
+    surface = SurfaceRZFourier.from_vmec_input(
+        _STAGE2_MINIMAL_INPUT,
+        range="half period",
+        nphi=_STAGE2_MINIMAL_NPHI,
+        ntheta=_STAGE2_MINIMAL_NTHETA,
+    )
+    base_curves = create_equally_spaced_curves(
+        _STAGE2_MINIMAL_NCOILS,
+        surface.nfp,
+        stellsym=stellsym,
+        R0=_STAGE2_MINIMAL_COIL_MAJOR_RADIUS,
+        R1=_STAGE2_MINIMAL_COIL_MINOR_RADIUS,
+        order=_STAGE2_MINIMAL_COIL_ORDER,
+    )
+    base_currents = [
+        Current(_STAGE2_MINIMAL_CURRENT) for _ in range(_STAGE2_MINIMAL_NCOILS)
+    ]
+    coils = coils_via_symmetries(
+        base_curves,
+        base_currents,
+        surface.nfp,
+        stellsym,
+    )
+    bs_jax = BiotSavartJAX(coils)
+    coil_dofs = jnp.asarray(bs_jax.x, dtype=jnp.float64)
+    groups = bs_jax.grouped_coil_arrays_from_dofs(coil_dofs)
+    assert len(groups) == 1
+    gammas, gammadashs, currents = groups[0]
+    field_eval_spec, flux_spec = fixed_surface_flux_specs_from_surface(
+        surface,
+        definition="quadratic flux",
+    )
+    return _FixedGeometryCurrentFluxCase(
+        points=field_eval_spec.points,
+        gammas=gammas,
+        gammadashs=gammadashs,
+        currents=currents,
+        flux_spec=flux_spec,
+        coils=coils,
+        surface=surface,
+    )
+
+
+def test_coil_current_fixed_geometry_flux_matches_cpu_squaredflux_oracle():
+    """Current-only helper must match the CPU/C++ ``SquaredFlux`` oracle.
+
+    Oracle: type 1 — CPU ``SquaredFlux.J()`` delegates to the C++
+    ``simsoptpp.integral_BdotN`` reference for the
+    ``examples/1_Simple/stage_two_optimization_minimal.py`` QA surface and
+    symmetry-expanded Stage-II coil set.
+    Lane: parity, direct-kernel tolerance from
+    ``PARITY_LADDER_TOLERANCES["direct_kernel"]``.
+    """
+    case = _fixed_geometry_current_flux_case()
+
+    actual = coil_current_fixed_geometry_flux_jax(
+        case.points,
+        case.gammas,
+        case.gammadashs,
+        case.currents,
+        case.flux_spec,
+    )
+    bs_cpu = BiotSavart(case.coils)
+    bs_cpu.set_points(case.surface.gamma().reshape((-1, 3)))
+    expected = SquaredFlux(case.surface, bs_cpu, definition="quadratic flux").J()
+
+    np.testing.assert_allclose(
+        np.asarray(actual),
+        np.asarray(expected),
+        rtol=_DIRECT_KERNEL_TOLS["rtol"],
+        atol=_DIRECT_KERNEL_TOLS["atol"],
+    )
+
+
+def test_coil_current_fixed_geometry_value_and_grad_matches_finite_difference():
+    """Validate the current-gradient contract without reusing reverse-mode AD.
+
+    Oracle: type 4 — central finite-difference directional derivative of the
+    scalar current-only flux objective on the fixed Stage-II QA fixture.
+    Lane: parity, fd-gradient tolerance from
+    ``PARITY_LADDER_TOLERANCES["fd-gradient"]``.
+    """
+    case = _fixed_geometry_current_flux_case()
+    value, grad = coil_current_fixed_geometry_value_and_grad_jax(
+        case.points,
+        case.gammas,
+        case.gammadashs,
+        case.currents,
+        case.flux_spec,
+    )
+    direction = jnp.linspace(-0.75, 1.0, case.currents.size, dtype=jnp.float64)
+    step = jnp.asarray(10.0, dtype=jnp.float64)
+    forward = coil_current_fixed_geometry_flux_jax(
+        case.points,
+        case.gammas,
+        case.gammadashs,
+        case.currents + step * direction,
+        case.flux_spec,
+    )
+    backward = coil_current_fixed_geometry_flux_jax(
+        case.points,
+        case.gammas,
+        case.gammadashs,
+        case.currents - step * direction,
+        case.flux_spec,
+    )
+    finite_difference = (forward - backward) / (2.0 * step)
+
+    assert np.isfinite(np.asarray(value))
+    np.testing.assert_allclose(
+        np.asarray(jnp.vdot(grad, direction)),
+        np.asarray(finite_difference),
+        rtol=_FD_GRADIENT_TOLS["directional_fd_rtol"],
+        atol=_FD_GRADIENT_TOLS["directional_fd_atol"],
+    )
+
+
+def test_coil_current_fixed_geometry_value_and_grad_jits_under_strict_transfer_guard():
+    """The current-only Stage-II QA kernel stays usable under JIT."""
+    case = _fixed_geometry_current_flux_case()
+
+    @jax.jit
+    def compiled(current_values):
+        return coil_current_fixed_geometry_value_and_grad_jax(
+            case.points,
+            case.gammas,
+            case.gammadashs,
+            current_values,
+            case.flux_spec,
+        )
+
+    with jax.transfer_guard("disallow"):
+        value, grad = compiled(case.currents)
+
+    assert np.isfinite(np.asarray(value))
+    assert np.asarray(grad).shape == tuple(case.currents.shape)
 
 
 def test_squaredfluxjax_large_point_cloud_grouped_vjp_matches_dense(monkeypatch):

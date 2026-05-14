@@ -41,6 +41,7 @@ from simsopt.geo.boozersurface import BoozerSurface
 from simsopt.geo import optimizer_jax as optimizer_jax_module
 from simsopt.geo import surfaceobjectives as surfaceobjectives_module
 from simsopt.geo import surfaceobjectives_jax as surfaceobjectives_jax_module
+from simsopt.geo.qfmsurface import QfmSurface
 from simsopt.backend import invalidate_backend_cache
 from simsopt.geo._pairwise_reductions import pairwise_selected_smoothmin_distance_pure
 from simsopt.geo.surfaceobjectives import ToroidalFlux
@@ -137,6 +138,12 @@ _QFM_VALUE_RTOL = 1e-12
 _QFM_VALUE_ATOL = 1e-12
 _QFM_GRAD_RTOL = 1e-10
 _QFM_GRAD_ATOL = 1e-10
+_QFM_PENALTY_LABELS = ("area", "volume", "toroidal_flux")
+_QFM_PENALTY_TARGET_OFFSET = 0.03
+_NCSX_QFM_MPOL = 5
+_NCSX_QFM_NTOR = 5
+_NCSX_QFM_NPHI = 25
+_NCSX_QFM_NTHETA = 25
 _PRINCIPAL_CURVATURE_KWARGS = {
     "kappamax1": 1.0,
     "kappamax2": 2.2,
@@ -6080,6 +6087,121 @@ class TestQfmResidualJAXObjectParity:
             atol=_QFM_GRAD_ATOL,
         )
         assert abs(qfm_jax.J() - initial_value) > 1e-14
+
+
+def _qfm_penalty_label(label_name, surface, biotsavart):
+    if label_name == "area":
+        return surfaceobjectives_module.Area(surface)
+    if label_name == "volume":
+        return surfaceobjectives_module.Volume(surface)
+    if label_name == "toroidal_flux":
+        return ToroidalFlux(surface, BiotSavart(biotsavart.coils))
+    raise ValueError(f"Unknown QFM penalty test label: {label_name!r}.")
+
+
+def _qfm_penalty_target(label_value):
+    return label_value - _QFM_PENALTY_TARGET_OFFSET * (abs(label_value) + 1.0)
+
+
+def _make_ncsx_qfm_example_penalty_case():
+    _base_curves, _base_currents, ma, nfp, bs_cpu = get_data("ncsx")
+    phis = np.linspace(0.0, 1.0 / nfp, _NCSX_QFM_NPHI, endpoint=False)
+    thetas = np.linspace(0.0, 1.0, _NCSX_QFM_NTHETA, endpoint=False)
+    surface = SurfaceRZFourier(
+        mpol=_NCSX_QFM_MPOL,
+        ntor=_NCSX_QFM_NTOR,
+        stellsym=True,
+        nfp=nfp,
+        quadpoints_phi=phis,
+        quadpoints_theta=thetas,
+    )
+    surface.fit_to_curve(ma, 0.2, flip_theta=True)
+    return bs_cpu, BiotSavartJAX(bs_cpu.coils), surface
+
+
+class TestQfmPenaltyJAX:
+    @pytest.mark.parametrize("label_name", _QFM_PENALTY_LABELS)
+    def test_qfm_penalty_value_and_gradient_match_cpu_qfmsurface(
+        self,
+        label_name,
+    ):
+        """Match CPU ``QfmSurface.qfm_penalty_constraints`` value/gradient.
+
+        Oracle: type 1 — CPU ``QfmSurface.qfm_penalty_constraints`` composes
+        the NCSX ``examples/1_Simple/qfm.py`` fixed initial surface and coils
+        with ``QfmResidual`` and ``Area`` / ``Volume`` / ``ToroidalFlux``
+        C++/CPU primitives.
+        Lane: parity, rtol=1e-12 (value) / 1e-10 (gradient), atol=1e-12
+        (value) / 1e-10 (gradient).
+        """
+        bs_cpu, bs_jax, surface = _make_ncsx_qfm_example_penalty_case()
+        label = _qfm_penalty_label(label_name, surface, bs_cpu)
+        label_value = label.J()
+        targetlabel = _qfm_penalty_target(label_value)
+        constraint_weight = 1.75
+        qfm_surface = QfmSurface(bs_cpu, surface, label, targetlabel)
+        dofs = np.asarray(surface.get_dofs(), dtype=np.float64)
+
+        cpu_value, cpu_grad = qfm_surface.qfm_penalty_constraints(
+            dofs,
+            derivatives=1,
+            constraint_weight=constraint_weight,
+        )
+        coil_set_spec = bs_jax.coil_set_spec_from_dofs(
+            jnp.asarray(bs_jax.x, dtype=jnp.float64)
+        )
+        jax_value, jax_grad = (
+            surfaceobjectives_jax_module.surface_qfm_penalty_value_and_grad_jax_from_dofs(
+                surface.surface_spec(),
+                jnp.asarray(dofs, dtype=jnp.float64),
+                coil_set_spec,
+                label=label_name,
+                targetlabel=targetlabel,
+                constraint_weight=constraint_weight,
+            )
+        )
+
+        np.testing.assert_allclose(
+            host_scalar(jax_value),
+            cpu_value,
+            rtol=_QFM_VALUE_RTOL,
+            atol=_QFM_VALUE_ATOL,
+        )
+        np.testing.assert_allclose(
+            host_array(jax_grad, dtype=np.float64),
+            cpu_grad,
+            rtol=_QFM_GRAD_RTOL,
+            atol=_QFM_GRAD_ATOL,
+        )
+
+    def test_qfm_penalty_jits_under_strict_transfer_guard(self):
+        """The pure QFM penalty value/gradient is usable as a JIT kernel."""
+        _bs_cpu, bs_jax, surface = _make_ncsx_qfm_example_penalty_case()
+        dofs = jnp.asarray(surface.get_dofs(), dtype=jnp.float64)
+        coil_set_spec = bs_jax.coil_set_spec_from_dofs(
+            jnp.asarray(bs_jax.x, dtype=jnp.float64)
+        )
+        surface_spec = surface.surface_spec()
+        targetlabel = _qfm_penalty_target(surfaceobjectives_module.Area(surface).J())
+
+        @jax.jit
+        def compiled(surface_dofs):
+            return (
+                surfaceobjectives_jax_module.surface_qfm_penalty_value_and_grad_jax_from_dofs(
+                    surface_spec,
+                    surface_dofs,
+                    coil_set_spec,
+                    label="area",
+                    targetlabel=targetlabel,
+                    constraint_weight=2.0,
+                )
+            )
+
+        with jax.transfer_guard("disallow"):
+            value, grad = compiled(dofs)
+
+        assert np.isfinite(host_scalar(value))
+        assert host_array(grad, dtype=np.float64).shape == tuple(dofs.shape)
 
 
 def test_major_radius_jax_value_and_native_adjoint_gradient():

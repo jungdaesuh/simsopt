@@ -53,9 +53,10 @@ from ..jax_core._math_utils import (
 )
 from ..jax_core.curve_geometry import curve_geometry_from_spec
 from ..jax_core.field import (
-    grouped_biot_savart_B_from_spec,
     coil_set_spec_from_dof_extraction_spec,
     coil_specs_from_dof_extraction_spec,
+    grouped_biot_savart_A_from_spec,
+    grouped_biot_savart_B_from_spec,
     grouped_coil_currents_from_spec,
 )
 from ..jax_core.specs import surface_spec_kind
@@ -107,7 +108,7 @@ from .boozersurface_jax import (
     _make_boozer_penalty_objective_closure,
 )
 from . import optimizer_jax as _optimizer_jax
-from .label_constraints_jax import compute_G_from_currents
+from .label_constraints_jax import compute_G_from_currents, toroidal_flux_jax
 from ._surface_stellsym import (
     compute_stellsym_mask_indices_for_grid as _compute_stellsym_mask_indices_for_grid,
 )
@@ -156,6 +157,9 @@ __all__ = [
     "surface_minor_radius_jax_from_dofs",
     "surface_principal_curvature_jax_from_dofs",
     "surface_qfm_residual_jax_from_dofs",
+    "surface_qfm_label_jax_from_dofs",
+    "surface_qfm_penalty_jax_from_dofs",
+    "surface_qfm_penalty_value_and_grad_jax_from_dofs",
     "surface_volume_jax_from_dofs",
 ]
 
@@ -637,6 +641,84 @@ def surface_qfm_residual_jax_from_dofs(spec, dofs, coil_set_spec):
     return jnp.sum(B_normal * B_normal * norm_normal) / jnp.sum(
         B_norm_squared * norm_normal
     )
+
+
+def surface_qfm_label_jax_from_dofs(
+    spec,
+    dofs,
+    coil_set_spec,
+    *,
+    label: str,
+    toroidal_flux_idx: int = 0,
+):
+    """Return the QFM constraint label using the JAX surface/field lane."""
+    if label == "area":
+        return surface_area_jax_from_dofs(spec, dofs)
+    if label == "volume":
+        return surface_volume_jax_from_dofs(spec, dofs)
+    if label == "toroidal_flux":
+        gamma, _, gammadash2 = _surface_gamma_tangents_from_dofs(
+            spec,
+            dofs,
+        )
+        A = grouped_biot_savart_A_from_spec(
+            gamma[toroidal_flux_idx],
+            coil_set_spec,
+        )
+        return toroidal_flux_jax(
+            A,
+            gammadash2[toroidal_flux_idx],
+            gamma.shape[1],
+        )
+    raise ValueError(f"Unknown QFM label: {label!r}.")
+
+
+def surface_qfm_penalty_jax_from_dofs(
+    spec,
+    dofs,
+    coil_set_spec,
+    *,
+    label: str,
+    targetlabel,
+    constraint_weight=1.0,
+    toroidal_flux_idx: int = 0,
+):
+    """Return ``QFM + 0.5 * weight * (label - target)^2`` in pure JAX."""
+    qfm = surface_qfm_residual_jax_from_dofs(spec, dofs, coil_set_spec)
+    label_value = surface_qfm_label_jax_from_dofs(
+        spec,
+        dofs,
+        coil_set_spec,
+        label=label,
+        toroidal_flux_idx=toroidal_flux_idx,
+    )
+    residual = label_value - _as_runtime_float64(targetlabel, reference=qfm)
+    weight = _as_runtime_float64(constraint_weight, reference=qfm)
+    return qfm + 0.5 * weight * residual * residual
+
+
+def surface_qfm_penalty_value_and_grad_jax_from_dofs(
+    spec,
+    dofs,
+    coil_set_spec,
+    *,
+    label: str,
+    targetlabel,
+    constraint_weight=1.0,
+    toroidal_flux_idx: int = 0,
+):
+    """Return QFM penalty value and gradient with respect to surface dofs."""
+    return jax.value_and_grad(
+        lambda surface_dofs: surface_qfm_penalty_jax_from_dofs(
+            spec,
+            surface_dofs,
+            coil_set_spec,
+            label=label,
+            targetlabel=targetlabel,
+            constraint_weight=constraint_weight,
+            toroidal_flux_idx=toroidal_flux_idx,
+        )
+    )(_as_jax_float64(dofs))
 
 
 def _surface_dqfm_residual_jax_from_dofs(spec, dofs, coil_set_spec):
