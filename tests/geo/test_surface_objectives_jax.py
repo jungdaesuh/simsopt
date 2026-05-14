@@ -5137,11 +5137,38 @@ def _make_aspect_ratio_surface(surfacetype, stellsym):
     )
 
 
-def _make_aspect_ratio_pair(surfacetype, stellsym, **kwargs):
+def _make_surface_objective_pair(surfacetype, stellsym, cpu_cls, jax_cls, **kwargs):
     surface = _make_aspect_ratio_surface(surfacetype, stellsym)
-    return (
-        surfaceobjectives_module.AspectRatio(surface, **kwargs),
-        surfaceobjectives_jax_module.AspectRatioJAX(surface, **kwargs),
+    return cpu_cls(surface, **kwargs), jax_cls(surface, **kwargs)
+
+
+def _make_aspect_ratio_pair(surfacetype, stellsym, **kwargs):
+    return _make_surface_objective_pair(
+        surfacetype,
+        stellsym,
+        surfaceobjectives_module.AspectRatio,
+        surfaceobjectives_jax_module.AspectRatioJAX,
+        **kwargs,
+    )
+
+
+def _make_area_pair(surfacetype, stellsym, **kwargs):
+    return _make_surface_objective_pair(
+        surfacetype,
+        stellsym,
+        surfaceobjectives_module.Area,
+        surfaceobjectives_jax_module.AreaJAX,
+        **kwargs,
+    )
+
+
+def _make_volume_pair(surfacetype, stellsym, **kwargs):
+    return _make_surface_objective_pair(
+        surfacetype,
+        stellsym,
+        surfaceobjectives_module.Volume,
+        surfaceobjectives_jax_module.VolumeJAX,
+        **kwargs,
     )
 
 
@@ -5471,6 +5498,107 @@ class TestAspectRatioJAXObjectParity:
             jax.hessian(aspect_ratio),
             dofs,
             epsilons=np.power(2.0, -np.arange(11, 19, dtype=float)),
+        )
+
+
+class TestAreaVolumeJAXObjectParity:
+    @pytest.mark.parametrize("pair_factory", (_make_area_pair, _make_volume_pair))
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_area_volume_value_parity_matrix(
+        self,
+        pair_factory,
+        surfacetype,
+        stellsym,
+    ):
+        cpu_obj, jax_obj = pair_factory(surfacetype, stellsym)
+
+        np.testing.assert_allclose(
+            jax_obj.J(),
+            cpu_obj.J(),
+            rtol=_ASPECT_RATIO_VALUE_RTOL,
+            atol=_ASPECT_RATIO_VALUE_ATOL,
+        )
+
+    @pytest.mark.parametrize("pair_factory", (_make_area_pair, _make_volume_pair))
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_area_volume_first_derivative_parity_matrix(
+        self,
+        pair_factory,
+        surfacetype,
+        stellsym,
+    ):
+        cpu_obj, jax_obj = pair_factory(surfacetype, stellsym)
+
+        np.testing.assert_allclose(
+            jax_obj.dJ_by_dsurfacecoefficients(),
+            cpu_obj.dJ_by_dsurfacecoefficients(),
+            rtol=_ASPECT_RATIO_GRAD_RTOL,
+            atol=_ASPECT_RATIO_GRAD_ATOL,
+        )
+        np.testing.assert_allclose(
+            jax_obj.dJ(partials=True)(jax_obj.surface),
+            cpu_obj.dJ(partials=True)(cpu_obj.surface),
+            rtol=_ASPECT_RATIO_GRAD_RTOL,
+            atol=_ASPECT_RATIO_GRAD_ATOL,
+        )
+
+    @pytest.mark.parametrize("pair_factory", (_make_area_pair, _make_volume_pair))
+    @pytest.mark.parametrize("surfacetype", _SURFACE_TYPES)
+    @pytest.mark.parametrize("stellsym", _STELLSYM_OPTIONS)
+    def test_area_volume_second_derivative_parity_matrix(
+        self,
+        pair_factory,
+        surfacetype,
+        stellsym,
+    ):
+        cpu_obj, jax_obj = pair_factory(surfacetype, stellsym)
+
+        np.testing.assert_allclose(
+            jax_obj.d2J_by_dsurfacecoefficientsdsurfacecoefficients(),
+            cpu_obj.d2J_by_dsurfacecoefficientsdsurfacecoefficients(),
+            rtol=_ASPECT_RATIO_HESS_RTOL,
+            atol=_ASPECT_RATIO_HESS_ATOL,
+        )
+
+    @pytest.mark.parametrize("pair_factory", (_make_area_pair, _make_volume_pair))
+    def test_area_volume_regridded_wrapper_parity(self, pair_factory):
+        cpu_obj, jax_obj = pair_factory(
+            "SurfaceRZFourier",
+            stellsym=False,
+            nphi=9,
+            ntheta=10,
+        )
+
+        np.testing.assert_allclose(
+            jax_obj.J(),
+            cpu_obj.J(),
+            rtol=_ASPECT_RATIO_VALUE_RTOL,
+            atol=_ASPECT_RATIO_VALUE_ATOL,
+        )
+        np.testing.assert_allclose(
+            jax_obj.dJ_by_dsurfacecoefficients(),
+            cpu_obj.dJ_by_dsurfacecoefficients(),
+            rtol=_ASPECT_RATIO_GRAD_RTOL,
+            atol=_ASPECT_RATIO_GRAD_ATOL,
+        )
+
+    @pytest.mark.parametrize(
+        "export_name",
+        (
+            "AreaJAX",
+            "VolumeJAX",
+            "surface_area_jax_from_dofs",
+            "surface_volume_jax_from_dofs",
+        ),
+    )
+    def test_area_volume_lazy_package_exports(self, export_name):
+        import simsopt.geo as geo_module
+
+        assert getattr(geo_module, export_name) is getattr(
+            surfaceobjectives_jax_module,
+            export_name,
         )
 
 

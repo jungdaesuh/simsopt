@@ -795,3 +795,216 @@ Re-validation after fix + linter mods:
 .conda/jax-0.9.2/bin/python -m pytest tests/field/test_biotsavart_jax.py tests/field/test_biotsavart_jax_parity.py -v
 # → 74 passed in 38.56s
 ```
+
+## Waves 3-7 Execution Update (2026-05-14)
+
+**Branch**: `gpu-purity-stage2-20260405`
+**Base HEAD during implementation**: `e5298458e`
+**Worktree note**: current worktree includes new untracked Wave 3/4 source and
+test files that are part of this remediation slice:
+`src/simsopt/jax_core/mhd_reductions.py`,
+`tests/mhd/test_boozer_jax.py`,
+`tests/mhd/test_vmec_diagnostics_jax.py`, and
+`tests/geo/test_curve_objectives_jax.py`. It also contains many pre-existing
+unrelated `.artifacts/` files. This update only records the Wave 3-7
+remediation slice.
+
+### Wave 3 - MHD Reductions
+
+Implemented frozen-array pure JAX reducers in
+`src/simsopt/jax_core/mhd_reductions.py` and exported them through
+`src/simsopt/jax_core/__init__.py`.
+
+- `boozer_quasisymmetry_residuals` mirrors the frozen Boozer spectral
+  post-processing contract for QA/QP/QH helicities, `B00`/`symmetric`
+  normalization, and `even`/`stellopt`/`stellopt_ornl` weighting.
+- `boozer_quasisymmetry_mode_indices` is the host-side fixed-metadata helper
+  for Boozer mode classification. The JAX residual reducer consumes those
+  fixed-shape index arrays and traces with the indices, selected surfaces, and
+  radial labels as JAX inputs.
+- `iota_target_metric_j`, `iota_weighted_j`, and `well_weighted_j` cover the
+  VMEC diagnostic reducers as pure array operations.
+- Oracle type: CPU `Quasisymmetry`, `IotaTargetMetric`, `IotaWeighted`, and
+  `WellWeighted` `.J()` paths driven by frozen fake solver objects. This does
+  not claim VMEC, BOOZXFORM, NetCDF, MPI, plotting, Redl/bootstrap, `dJ`, or
+  `shape_gradient` runner portability.
+- Explicit W3-M1 deferral: `QuasisymmetryRatioResidual` remains outside this
+  slice. Its CPU path calls `vmec.run()`, uses VMEC `wout` interpolation and
+  theta/phi grid reconstruction, and needs a dedicated frozen-VMEC-payload
+  reducer design with pinned CPU fixtures before it can be claimed.
+- Crucible follow-up: the first review pass flagged NumPy same-formula MHD
+  oracle helpers. They were removed; the tests now call the real CPU object
+  methods above. The second review pass flagged direct-`jit` tracing when
+  Boozer mode metadata was passed as normal inputs; this was fixed by splitting
+  host-side mode-index construction from the fixed-shape JAX reducer.
+- Validation: `JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu .conda/jax-0.9.2/bin/python -m pytest tests/mhd/test_boozer_jax.py tests/mhd/test_vmec_diagnostics_jax.py -q`
+  passed after the oracle and JIT-contract fixes (`8 passed, 2 warnings`).
+
+### Wave 4 - Curve Geometry And Objectives
+
+Implemented JAX-core ownership wrappers in `src/simsopt/jax_core/curve_geometry.py`
+and exported them through `src/simsopt/jax_core/__init__.py`.
+
+- Added `curve_incremental_arclength_from_spec/_from_dofs`,
+  `curve_kappa_from_spec/_from_dofs`, and
+  `curve_torsion_from_spec/_from_dofs` as the public JAX-core route over the
+  existing pure geometry helpers.
+- Added `tests/geo/test_curve_objectives_jax.py` with CPU-oracle coverage for
+  `CurveLength`, `LpCurveCurvature`, `LpCurveCurvatureBarrier`,
+  `LpCurveTorsion`, `CurveCurveDistance`, `CurveCurveDistanceBarrier`,
+  `ArclengthVariation`, and `MeanSquaredCurvature`.
+- Oracle type: CPU object values for wrapper parity; pure helper values are
+  compared against those CPU objects, not JAX-vs-JAX identity.
+- Deferred rows: RotatedCurve `sopp.matmult` VJP forwarding remains classified
+  as CPU-only plumbing until a JAX consumer path needs it. Third-derivative
+  curve surfaces remain unsupported by this slice.
+- Validation: `JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu .conda/jax-0.9.2/bin/python -m pytest tests/geo/test_curve_objectives_jax.py -q`
+  passed (`3 passed`).
+
+### Wave 5 - Surfaces
+
+Closed as a reclassification and validation wave; no new surface kernel was
+selected.
+
+- Stale-pruned claims: projected-normal/object API coverage, generic
+  surface-curvature value/gradient helpers, RZ fundamental-form helpers, and
+  XYZ/XYZTensor/Henneberg/Garabedian principal-curvature coverage are already
+  present in the current tree.
+- Deferred rows: RZ third `_lin` helpers, pure bootstrap/LSQ/fit-to-curve
+  kernels, `SurfaceScaled` / mutable `Surface::scale`, and
+  `SurfaceRZPseudospectral` remain host-boundary or unselected items.
+- Validation:
+  `JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu .conda/jax-0.9.2/bin/python -m pytest`
+  on the targeted surface object/API and curvature-helper nodes passed
+  (`43 passed, 3 skipped`).
+
+### Wave 6 - Field Composition And Analytic Gaps
+
+Implemented the still-missing field-composition and CircularCoil analytic rows.
+
+- Added `circular_coil_A` to `src/simsopt/jax_core/circular_coil.py`, exported
+  the circular-coil kernels from `simsopt.jax_core`, and wired
+  `CircularCoilJAX._A_impl` in `src/simsopt/field/circular_coil_jax.py`.
+- Fixed the local elliptic helper's exact endpoint contract so `ellipk(1)`
+  diverges and `ellipe(1) == 1`, matching SciPy and preserving CPU
+  `CircularCoil` NaN propagation on the coil filament.
+- Extended `tests/field/test_circular_coil_jax.py` to cover CPU parity, JIT,
+  transfer-guard, package export, dtype/shape, malformed-point handling for
+  `A`, and the coil-filament singularity.
+- Extended `tests/field/test_magnetic_field_composition_jax.py` with public
+  `MagneticFieldSum.d2A_by_dXdX`, `MagneticFieldMultiply.d2A_by_dXdX`, and
+  pure `compose_d2B_*` / `compose_d2A_*` coverage.
+- Oracle type: CPU `CircularCoil` for `A`, CPU `MagneticFieldSum` /
+  `MagneticFieldMultiply` for d2B, and manual closed-form opaque child tensors
+  for d2A composition algebra where CPU child contracts are absent.
+- Deferred rows: CircularCoilJAX `dA_by_dX`, `d2A_by_dXdX`, and
+  `d2B_by_dXdX` remain deferred because the CPU public methods exist through
+  the magnetic-field base class but `CircularCoil` does not override the
+  corresponding implementation hooks, so calls hit the base not-implemented
+  virtuals. CircularCoil optimization stays in W7-X11.
+- Validation:
+  `JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu .conda/jax-0.9.2/bin/python -m pytest tests/field/test_magnetic_field_composition_jax.py tests/field/test_magneticfieldclasses_jax_item15.py tests/field/test_circular_coil_jax.py tests/field/test_dipole_field_jax_item26.py tests/field/test_scalar_potential_rz_jax_item23.py -q`
+  passed (`97 passed, 10 warnings`).
+  `JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu .conda/jax-0.9.2/bin/python -m pytest tests/jax_core/test_elliptic_helper.py tests/field/test_circular_coil_jax.py -q`
+  passed (`26 passed, 9 warnings`).
+
+### Wave 7 - Composite And Ancillary Ports
+
+Wave 7 remains a long-tail queue. This pass completed W7-X0 revalidation and
+selected W7-X4's narrow Area/Volume wrapper gap.
+
+- Implemented `AreaJAX`, `VolumeJAX`, and generic
+  `surface_area_jax_from_dofs` / `surface_volume_jax_from_dofs` plus first and
+  second derivative helpers in `src/simsopt/geo/surfaceobjectives_jax.py`.
+- Added `TestAreaVolumeJAXObjectParity` to
+  `tests/geo/test_surface_objectives_jax.py` for value, first derivative,
+  second derivative, regridded wrapper, and lazy package export parity.
+- Oracle type: CPU `Area` / `Volume` object wrappers and CPU surface derivative
+  methods.
+- Revalidated stale-prunable W7 rows:
+  - Wireframe GSCO/RCLS and public optimize-wireframe JAX coverage:
+    `tests/solve/test_wireframe_optimization_jax_item31.py`
+    `tests/field/test_wireframefield_jax_item30.py` passed (`27 passed`).
+  - Finitebuild base geometry/SSOT coverage:
+    `tests/geo/test_finitebuild_jax_item20.py`
+    `tests/geo/test_finitebuild_jax_ssot_item20.py` passed (`19 passed`).
+  - QFM residual and ToroidalFlux object-level JAX-field parity:
+    selected `tests/geo/test_surface_objectives_jax.py` nodes passed
+    (`41 passed, 26 skipped`).
+  - Boozer fixed-state wrapper checks:
+    `tests/field/test_boozermagneticfield_jax_item33.py` passed
+    (`12 passed, 2 warnings`) and
+    `tests/field/test_interpolated_boozer_field_jax.py` passed
+    (`39 passed, 2 warnings`).
+  - Import smoke after new surface exports:
+    `tests/test_jax_import_smoke.py -k 'surface or jax_core' -q` passed
+    (`15 passed, 2 skipped, 103 deselected`).
+- Deferred rows stay separate PR-sized W7 goals: `CoilSetJAX`,
+  `QfmSurfaceJAX`, wireframe `d2B_by_dXdX`, direct Boozer convergence-history
+  mirrors, least-squares/constrained wrappers, NormalField, MGrid, tracing
+  post-processing tails, FilamentPack + symmetry BiotSavart mirror,
+  CircularCoil optimization E2E, and Boozer-field convergence-rate tails.
+
+### Review Follow-up (2026-05-14)
+
+Additional adversarial review after the Waves 3-7 closeout found two issues in
+the surface-objective slice and fixed both:
+
+- `surface_area_jax_from_dofs` was computing volume and
+  `surface_volume_jax_from_dofs` was computing tangents/normal even though the
+  values were discarded. The shared helper was split into dedicated
+  gamma/tangent and volume paths so Area/Volume no longer materialize
+  unrelated geometry work on CPU/GPU.
+- The helper split exposed a real `AspectRatioJAX` regression for regridded
+  `SurfaceXYZTensorFourier(clamped_dims=...)`: the path returned `nan` instead
+  of preserving the existing unsupported contract. The mean-cross-section
+  helper now fails fast with `NotImplementedError` for clamped tensor specs,
+  matching the existing test contract and avoiding silent physics output.
+
+### Combined Quality Gates
+
+Post-format validation on the changed Python files:
+
+```
+.conda/jax-0.9.2/bin/ruff format --check \
+  src/simsopt/jax_core/_elliptic.py \
+  src/simsopt/jax_core/__init__.py \
+  src/simsopt/jax_core/mhd_reductions.py \
+  src/simsopt/jax_core/curve_geometry.py \
+  src/simsopt/jax_core/circular_coil.py \
+  src/simsopt/field/circular_coil_jax.py \
+  src/simsopt/geo/surfaceobjectives_jax.py \
+  tests/jax_core/test_elliptic_helper.py \
+  tests/mhd/test_boozer_jax.py \
+  tests/mhd/test_vmec_diagnostics_jax.py \
+  tests/geo/test_curve_objectives_jax.py \
+  tests/geo/test_surface_objectives_jax.py \
+  tests/field/test_circular_coil_jax.py \
+  tests/field/test_magnetic_field_composition_jax.py
+# passed
+
+.conda/jax-0.9.2/bin/ruff check (same Python files)
+# passed
+
+git diff --check -- .artifacts/jax_port_gap_audit_2026-05-13/GOAL_remediation.md \
+  .artifacts/jax_port_gap_audit_2026-05-13/STATUS.md src/simsopt tests
+# passed
+
+JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu .conda/jax-0.9.2/bin/python -m pytest \
+  tests/mhd/test_boozer_jax.py \
+  tests/mhd/test_vmec_diagnostics_jax.py \
+  tests/geo/test_curve_objectives_jax.py \
+  tests/geo/test_surface_objectives_jax.py::TestAreaVolumeJAXObjectParity \
+  tests/field/test_circular_coil_jax.py \
+  tests/field/test_magnetic_field_composition_jax.py -q
+# 98 passed, 11 warnings in 27.90s
+
+JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu .conda/jax-0.9.2/bin/python -m pytest \
+  tests/geo/test_surface_objectives_jax.py::TestAspectRatioJAXObjectParity \
+  tests/geo/test_surface_objectives_jax.py::TestQfmResidualJAXObjectParity -q
+# 43 passed in 37.20s
+
+JAX_ENABLE_X64=True JAX_PLATFORM_NAME=cpu .conda/jax-0.9.2/bin/python -m pytest \
+  tests/test_jax_import_smoke.py -k 'surface or jax_core' -q
+# 15 passed, 2 skipped, 103 deselected in 40.85s
+```

@@ -119,6 +119,7 @@ from .surfaceobjectives import (
 )
 
 __all__ = [
+    "AreaJAX",
     "AspectRatioJAX",
     "BoozerResidualJAX",
     "IotasJAX",
@@ -126,6 +127,7 @@ __all__ = [
     "NonQuasiSymmetricRatioJAX",
     "PrincipalCurvatureJAX",
     "QfmResidualJAX",
+    "VolumeJAX",
     "compute_standard_surface_objective_gradients",
     "make_traceable_single_stage_alm_runtime_bundle",
     "make_traceable_objective",
@@ -133,22 +135,28 @@ __all__ = [
     "make_traceable_objective_seeded_value_and_grad",
     "make_traceable_objective_value_and_grad",
     "make_traceable_objective_profile_suite",
+    "surface_area_jax_from_dofs",
     "surface_aspect_ratio_jax_from_dofs",
     "surface_curvatures_jax_from_dofs",
+    "surface_d2area_jax_from_dofs",
     "surface_d2aspect_ratio_jax_from_dofs",
     "surface_d2major_radius_jax_from_dofs",
     "surface_d2mean_cross_sectional_area_jax_from_dofs",
     "surface_d2minor_radius_jax_from_dofs",
+    "surface_d2volume_jax_from_dofs",
+    "surface_darea_jax_from_dofs",
     "surface_daspect_ratio_jax_from_dofs",
     "surface_dmajor_radius_jax_from_dofs",
     "surface_dmean_cross_sectional_area_jax_from_dofs",
     "surface_dminor_radius_jax_from_dofs",
     "surface_dsurface_curvatures_jax_from_dofs",
+    "surface_dvolume_jax_from_dofs",
     "surface_major_radius_jax_from_dofs",
     "surface_mean_cross_sectional_area_jax_from_dofs",
     "surface_minor_radius_jax_from_dofs",
     "surface_principal_curvature_jax_from_dofs",
     "surface_qfm_residual_jax_from_dofs",
+    "surface_volume_jax_from_dofs",
 ]
 
 _MISSING_STREAMING_GROUP_VJP_ERROR = (
@@ -279,7 +287,7 @@ def _surface_spec_with_dofs(spec, dofs):
     return replace(spec, dofs=_as_jax_float64(dofs))
 
 
-def _surface_gamma_tangents_volume_from_dofs(spec, dofs):
+def _surface_gamma_tangents_from_dofs(spec, dofs):
     dofs = _as_jax_float64(dofs)
     kind = surface_spec_kind(spec)
     if kind == "rz_fourier":
@@ -287,7 +295,6 @@ def _surface_gamma_tangents_volume_from_dofs(spec, dofs):
             surface_rz_fourier_gamma_from_dofs(spec, dofs),
             surface_rz_fourier_gammadash1_from_dofs(spec, dofs),
             surface_rz_fourier_gammadash2_from_dofs(spec, dofs),
-            surface_rz_fourier_volume_from_dofs(spec, dofs),
         )
     if kind == "xyz_fourier":
         spec_with_dofs = _surface_spec_with_dofs(spec, dofs)
@@ -295,7 +302,6 @@ def _surface_gamma_tangents_volume_from_dofs(spec, dofs):
             surface_xyz_fourier_gamma_from_spec(spec_with_dofs),
             surface_xyz_fourier_gammadash1_from_spec(spec_with_dofs),
             surface_xyz_fourier_gammadash2_from_spec(spec_with_dofs),
-            surface_xyz_fourier_volume_from_spec(spec_with_dofs),
         )
     if kind == "xyz_tensor_fourier":
         spec_with_dofs = _surface_spec_with_dofs(spec, dofs)
@@ -303,8 +309,20 @@ def _surface_gamma_tangents_volume_from_dofs(spec, dofs):
             surface_xyz_tensor_fourier_gamma_from_spec(spec_with_dofs),
             surface_xyz_tensor_fourier_gammadash1_from_spec(spec_with_dofs),
             surface_xyz_tensor_fourier_gammadash2_from_spec(spec_with_dofs),
-            surface_xyz_tensor_fourier_volume_from_spec(spec_with_dofs),
         )
+    raise TypeError(f"Unsupported surface spec kind {kind!r}.")
+
+
+def _surface_volume_from_dofs(spec, dofs):
+    dofs = _as_jax_float64(dofs)
+    kind = surface_spec_kind(spec)
+    if kind == "rz_fourier":
+        return surface_rz_fourier_volume_from_dofs(spec, dofs)
+    spec_with_dofs = _surface_spec_with_dofs(spec, dofs)
+    if kind == "xyz_fourier":
+        return surface_xyz_fourier_volume_from_spec(spec_with_dofs)
+    if kind == "xyz_tensor_fourier":
+        return surface_xyz_tensor_fourier_volume_from_spec(spec_with_dofs)
     raise TypeError(f"Unsupported surface spec kind {kind!r}.")
 
 
@@ -408,6 +426,40 @@ def _surface_normal_norm_jax_from_dofs(spec, dofs):
     return norm_normal
 
 
+def surface_area_jax_from_dofs(spec, dofs):
+    _gamma, gammadash1, gammadash2 = _surface_gamma_tangents_from_dofs(spec, dofs)
+    normal = _surface_normal_from_tangents(gammadash1, gammadash2)
+    return jnp.mean(_surface_norm(normal))
+
+
+def surface_volume_jax_from_dofs(spec, dofs):
+    return _surface_volume_from_dofs(spec, dofs)
+
+
+def surface_darea_jax_from_dofs(spec, dofs):
+    return jax.grad(lambda x: surface_area_jax_from_dofs(spec, x))(
+        _as_jax_float64(dofs)
+    )
+
+
+def surface_dvolume_jax_from_dofs(spec, dofs):
+    return jax.grad(lambda x: surface_volume_jax_from_dofs(spec, x))(
+        _as_jax_float64(dofs)
+    )
+
+
+def surface_d2area_jax_from_dofs(spec, dofs):
+    return jax.hessian(lambda x: surface_area_jax_from_dofs(spec, x))(
+        _as_jax_float64(dofs)
+    )
+
+
+def surface_d2volume_jax_from_dofs(spec, dofs):
+    return jax.hessian(lambda x: surface_volume_jax_from_dofs(spec, x))(
+        _as_jax_float64(dofs)
+    )
+
+
 def surface_curvatures_jax_from_dofs(spec, dofs):
     _norm_normal, curvature = _surface_normal_norm_and_curvatures_jax_from_dofs(
         spec,
@@ -429,7 +481,12 @@ def _surface_dnormal_norm_jax_from_dofs(spec, dofs):
 
 
 def surface_mean_cross_sectional_area_jax_from_dofs(spec, dofs):
-    gamma, gammadash1, gammadash2, _volume = _surface_gamma_tangents_volume_from_dofs(
+    if surface_spec_kind(spec) == "xyz_tensor_fourier" and any(spec.clamped_dims):
+        raise NotImplementedError(
+            "SurfaceXYZTensorFourier clamped_dims are not supported by "
+            "surface_mean_cross_sectional_area_jax_from_dofs."
+        )
+    gamma, gammadash1, gammadash2 = _surface_gamma_tangents_from_dofs(
         spec,
         dofs,
     )
@@ -451,9 +508,7 @@ def surface_minor_radius_jax_from_dofs(spec, dofs):
 
 
 def surface_major_radius_jax_from_dofs(spec, dofs):
-    _gamma, _gammadash1, _gammadash2, volume = _surface_gamma_tangents_volume_from_dofs(
-        spec, dofs
-    )
+    volume = _surface_volume_from_dofs(spec, dofs)
     minor_radius = surface_minor_radius_jax_from_dofs(spec, dofs)
     return jnp.abs(volume) / (2.0 * jnp.pi * jnp.pi * minor_radius * minor_radius)
 
@@ -565,7 +620,7 @@ def _surface_dprincipal_curvature_jax_from_dofs(
 
 
 def surface_qfm_residual_jax_from_dofs(spec, dofs, coil_set_spec):
-    gamma, gammadash1, gammadash2, _volume = _surface_gamma_tangents_volume_from_dofs(
+    gamma, gammadash1, gammadash2 = _surface_gamma_tangents_from_dofs(
         spec,
         dofs,
     )
@@ -606,9 +661,7 @@ def _surface_objective_surface_view(surface, *, range, nphi, ntheta):
     return surface.copy(nphi=nphi, ntheta=ntheta, range=resolved_range)
 
 
-class AspectRatioJAX(Optimizable):
-    """JAX-backed wrapper class for surface aspect ratio."""
-
+class _SurfaceScalarMetricJAX(Optimizable):
     def __init__(self, surface, range=None, nphi=None, ntheta=None):
         self.surface = _surface_objective_surface_view(
             surface,
@@ -626,7 +679,7 @@ class AspectRatioJAX(Optimizable):
 
     def J(self):
         spec, dofs = self._surface_spec_and_dofs()
-        return _host_scalar(surface_aspect_ratio_jax_from_dofs(spec, dofs))
+        return _host_scalar(self._value_fn(spec, dofs))
 
     @derivative_dec
     def dJ(self):
@@ -634,11 +687,35 @@ class AspectRatioJAX(Optimizable):
 
     def dJ_by_dsurfacecoefficients(self):
         spec, dofs = self._surface_spec_and_dofs()
-        return _host_array(_surface_daspect_ratio_jax_from_dofs(spec, dofs))
+        return _host_array(self._gradient_fn(spec, dofs))
 
     def d2J_by_dsurfacecoefficientsdsurfacecoefficients(self):
         spec, dofs = self._surface_spec_and_dofs()
-        return _host_array(_surface_d2aspect_ratio_jax_from_dofs(spec, dofs))
+        return _host_array(self._hessian_fn(spec, dofs))
+
+
+class AspectRatioJAX(_SurfaceScalarMetricJAX):
+    """JAX-backed wrapper class for surface aspect ratio."""
+
+    _value_fn = staticmethod(surface_aspect_ratio_jax_from_dofs)
+    _gradient_fn = staticmethod(_surface_daspect_ratio_jax_from_dofs)
+    _hessian_fn = staticmethod(_surface_d2aspect_ratio_jax_from_dofs)
+
+
+class AreaJAX(_SurfaceScalarMetricJAX):
+    """JAX-backed wrapper class for surface area."""
+
+    _value_fn = staticmethod(surface_area_jax_from_dofs)
+    _gradient_fn = staticmethod(surface_darea_jax_from_dofs)
+    _hessian_fn = staticmethod(surface_d2area_jax_from_dofs)
+
+
+class VolumeJAX(_SurfaceScalarMetricJAX):
+    """JAX-backed wrapper class for enclosed surface volume."""
+
+    _value_fn = staticmethod(surface_volume_jax_from_dofs)
+    _gradient_fn = staticmethod(surface_dvolume_jax_from_dofs)
+    _hessian_fn = staticmethod(surface_d2volume_jax_from_dofs)
 
 
 class PrincipalCurvatureJAX(Optimizable):
