@@ -7454,6 +7454,35 @@ class HardwareConstraintTests(unittest.TestCase):
         )
         np.testing.assert_allclose(total.dJ(), [81.0, 8.0])
 
+    def test_build_total_objective_forwards_poloidal_extent_term(self):
+        module = self.load_module()
+
+        total = module.build_total_objective(
+            FakeAlgebraicObjective(1.0, [1.0, 0.0]),
+            2.0,
+            FakeAlgebraicObjective(3.0, [0.0, 2.0]),
+            4.0,
+            FakeAlgebraicObjective(5.0, [1.0, 1.0]),
+            6.0,
+            None,
+            8.0,
+            FakeAlgebraicObjective(9.0, [0.0, 3.0]),
+            10.0,
+            FakeAlgebraicObjective(11.0, [1.0, -1.0]),
+            12.0,
+            FakeAlgebraicObjective(13.0, [0.5, 0.5]),
+            14.0,
+            FakeAlgebraicObjective(15.0, [2.0, -2.0]),
+            POLOIDAL_EXTENT_WEIGHT=2.5,
+            JPoloidalExtent=FakeAlgebraicObjective(17.0, [4.0, 1.0]),
+        )
+
+        self.assertAlmostEqual(
+            total.J(),
+            1 + 2 * 3 + 4 * 5 + 8 * 9 + 10 * 11 + 12 * 13 + 14 * 15 + 2.5 * 17,
+        )
+        np.testing.assert_allclose(total.dJ(), [59.0, 2.5])
+
     def test_build_total_objective_forwards_self_intersect_term(self):
         module = self.load_module()
 
@@ -7594,7 +7623,7 @@ class HardwareConstraintTests(unittest.TestCase):
             stack.enter_context(
                 patch.object(module, "CurveSelfIntersect", fake_curve_self_intersect)
             )
-            stack.enter_context(
+            build_total_mock = stack.enter_context(
                 patch.object(module, "build_total_objective", return_value=object())
             )
 
@@ -7624,6 +7653,10 @@ class HardwareConstraintTests(unittest.TestCase):
         self.assertEqual(
             recorded_self_intersect_call["neighbor_skip"],
             int(module.BANANA_SELF_INTERSECT_SKIP_ORDER_FACTOR * banana_curve.order),
+        )
+        self.assertEqual(
+            build_total_mock.call_args.kwargs["POLOIDAL_EXTENT_WEIGHT"],
+            module.SINGLE_STAGE_POLOIDAL_WEIGHT,
         )
         self.assertIs(bundle["JCurveSelfIntersect"], self_objective)
 
@@ -8958,6 +8991,9 @@ class RunIdentityTests(unittest.TestCase):
             single_stage_goal_mode="target",
             cc_dist=0.05,
             cc_weight=100.0,
+            single_stage_poloidal_weight=1.0,
+            single_stage_width_weight=1.0,
+            single_stage_selfint_weight=1.0,
             curvature_weight=0.0001,
             curvature_threshold=40.0,
             constraint_method="penalty",
@@ -9128,6 +9164,19 @@ class RunIdentityTests(unittest.TestCase):
         alm_config = self._build_identity(module, alm_args)
 
         self.assertNotEqual(penalty_config, alm_config)
+
+    def test_run_identity_changes_when_single_stage_shape_weights_change(self):
+        module = load_single_stage_example_module()
+        base_args = self._make_identity_args()
+        changed_args = self._make_identity_args()
+        changed_args.single_stage_poloidal_weight = 4.0
+        changed_args.single_stage_width_weight = 2.5
+        changed_args.single_stage_selfint_weight = 3.5
+
+        self.assertNotEqual(
+            self._build_identity(module, base_args),
+            self._build_identity(module, changed_args),
+        )
 
     def test_run_identity_changes_when_physical_plasma_current_changes(self):
         module = load_single_stage_example_module()
@@ -9686,6 +9735,28 @@ class CurrentBaselineContractTests(unittest.TestCase):
         self.assertEqual(args.hardware_search_soft_iterations, 3)
         self.assertEqual(args.curvature_traversal_band, 0.05)
         self.assertEqual(args.curvature_traversal_eval_budget, 2)
+
+    def test_single_stage_parse_args_accepts_shape_weight_flags(self):
+        module = load_single_stage_example_module()
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "single_stage_banana_example.py",
+                "--single-stage-poloidal-weight",
+                "4.0",
+                "--single-stage-width-weight",
+                "2.5",
+                "--single-stage-selfint-weight",
+                "3.5",
+            ],
+        ):
+            args = module.parse_args()
+
+        self.assertEqual(args.single_stage_poloidal_weight, 4.0)
+        self.assertEqual(args.single_stage_width_weight, 2.5)
+        self.assertEqual(args.single_stage_selfint_weight, 3.5)
 
     def test_single_stage_parse_args_uses_measured_lbfgsb_maxcor_default(self):
         module = load_single_stage_example_module()

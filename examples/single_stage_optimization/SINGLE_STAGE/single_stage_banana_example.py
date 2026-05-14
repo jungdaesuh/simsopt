@@ -166,6 +166,7 @@ from banana_opt.hardware_contracts import (
     PLASMA_VESSEL_MIN_DIST_M,
     POLOIDAL_EXTENT_HALF_WIDTH_RAD,
     POLOIDAL_EXTENT_WEIGHT,
+    SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT,
     SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT,
     SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT,
     TF_CURRENT_CW_DEFAULT_A,
@@ -1523,6 +1524,15 @@ def parse_args():
     parser.add_argument("--length-weight", type=float, default=float(os.environ.get("SS_LENGTH_WEIGHT", "1")),
                         help="Curve length penalty weight (default 1).")
     parser.add_argument(
+        "--single-stage-poloidal-weight",
+        type=float,
+        default=float(os.environ.get(
+            "SINGLE_STAGE_POLOIDAL_WEIGHT",
+            str(SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT),
+        )),
+        help="Penalty weight for the Single Stage poloidal extent hinge term.",
+    )
+    parser.add_argument(
         "--single-stage-width-weight",
         type=float,
         default=float(os.environ.get(
@@ -2318,6 +2328,9 @@ class RunIdentityConfig:
     plasma_current_A: float
     cc_dist: float
     cc_weight: float
+    single_stage_poloidal_weight: float
+    single_stage_width_weight: float
+    single_stage_selfint_weight: float
     curvature_weight: float
     curvature_threshold: float
     banana_surf_radius: float
@@ -2813,6 +2826,9 @@ def make_run_identity_config(
         plasma_current_A=plasma_current_A,
         cc_dist=args.cc_dist,
         cc_weight=args.cc_weight,
+        single_stage_poloidal_weight=args.single_stage_poloidal_weight,
+        single_stage_width_weight=args.single_stage_width_weight,
+        single_stage_selfint_weight=args.single_stage_selfint_weight,
         curvature_weight=args.curvature_weight,
         curvature_threshold=args.curvature_threshold,
         banana_surf_radius=banana_surf_radius,
@@ -3403,7 +3419,7 @@ def apply_frontier_scalarization_override(objective_eval, *, alm_formulation="we
         cc_weight=globals().get("CC_WEIGHT", 0.0),
         cs_weight=globals().get("CS_WEIGHT", 0.0),
         curvature_weight=globals().get("CURVATURE_WEIGHT", 0.0),
-        poloidal_extent_weight=POLOIDAL_EXTENT_WEIGHT,
+        poloidal_extent_weight=SINGLE_STAGE_POLOIDAL_WEIGHT,
         objective_optimizable=globals().get("JF"),
         alm_formulation=alm_formulation,
         alm_multipliers=globals().get("ALM_MULTIPLIERS"),
@@ -3831,6 +3847,7 @@ def build_single_stage_objective_bundle(
         JCurveSurface,
         CURVATURE_WEIGHT,
         JCurvature,
+        POLOIDAL_EXTENT_WEIGHT=SINGLE_STAGE_POLOIDAL_WEIGHT,
         JPoloidalExtent=JPoloidalExtent,
         JCurveLengthMin=JCurveLengthMin,
     )
@@ -4244,7 +4261,7 @@ def evaluate_total_objective(
             VOLUME_WEIGHT=objective_terms["effective_volume_weight"],
             objective_optimizable=globals().get("JF"),
             include_diagnostics=include_diagnostics,
-            POLOIDAL_EXTENT_WEIGHT=POLOIDAL_EXTENT_WEIGHT,
+            POLOIDAL_EXTENT_WEIGHT=SINGLE_STAGE_POLOIDAL_WEIGHT,
             JPoloidalExtent=JPoloidalExtent,
             JCurveLengthMin=JCurveLengthMin,
             JCoilWidth=JCoilWidth,
@@ -6800,6 +6817,7 @@ def build_total_objective(
     JCurveSurface,
     CURVATURE_WEIGHT,
     JCurvature,
+    POLOIDAL_EXTENT_WEIGHT=POLOIDAL_EXTENT_WEIGHT,
     JPoloidalExtent=None,
     JCurveLengthMin=None,
     JCoilWidth=None,
@@ -8059,6 +8077,7 @@ JBoozerResidualObjective = None
 JPoloidalExtent = None
 JCoilWidth = None
 JCurveSelfIntersect = None
+SINGLE_STAGE_POLOIDAL_WEIGHT = POLOIDAL_EXTENT_WEIGHT
 SINGLE_STAGE_WIDTH_WEIGHT = 0.0
 SINGLE_STAGE_SELFINT_WEIGHT = 0.0
 EFFECTIVE_RES_WEIGHT = 0.0
@@ -8462,6 +8481,7 @@ if __name__ == "__main__":
     # Objective function weights and parameters (all configurable via CLI)
     # Hardware floors/ceilings are strict; weights remain freely configurable.
     LENGTH_WEIGHT = args.length_weight
+    SINGLE_STAGE_POLOIDAL_WEIGHT = float(args.single_stage_poloidal_weight)
     SINGLE_STAGE_WIDTH_WEIGHT = float(args.single_stage_width_weight)
     SINGLE_STAGE_SELFINT_WEIGHT = float(args.single_stage_selfint_weight)
     RES_WEIGHT = args.res_weight
@@ -9821,6 +9841,9 @@ if __name__ == "__main__":
         "CC_WEIGHT": CC_WEIGHT,
         "CS_DIST": CS_DIST,
         "CS_WEIGHT": CS_WEIGHT,
+        "SINGLE_STAGE_POLOIDAL_WEIGHT": SINGLE_STAGE_POLOIDAL_WEIGHT,
+        "SINGLE_STAGE_WIDTH_WEIGHT": SINGLE_STAGE_WIDTH_WEIGHT,
+        "SINGLE_STAGE_SELFINT_WEIGHT": SINGLE_STAGE_SELFINT_WEIGHT,
         "CURVATURE_WEIGHT": CURVATURE_WEIGHT,
         "CURVATURE_THRESHOLD": CURVATURE_THRESHOLD,
         "LENGTH_WEIGHT": LENGTH_WEIGHT,
