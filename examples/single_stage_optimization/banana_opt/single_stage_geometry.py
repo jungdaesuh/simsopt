@@ -20,10 +20,19 @@ from topology_scorer import (
 from workflow_helpers import validate_normalized_toroidal_flux
 
 
+_SURFACE_GOES_BACK_ERROR_FRAGMENT = "surface 'goes back' on itself"
+
+
+def _is_surface_goes_back_error(error):
+    return _SURFACE_GOES_BACK_ERROR_FRAGMENT in str(error)
+
+
 def surface_self_intersection_status(surface):
     try:
         return bool(surface.is_self_intersecting()), True
-    except RuntimeError:
+    except Exception as error:
+        if not _is_surface_goes_back_error(error):
+            raise
         return True, False
 
 

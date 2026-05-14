@@ -601,7 +601,7 @@ class HandoffModuleTests(unittest.TestCase):
 
             def is_self_intersecting(self):
                 self.self_intersection_calls += 1
-                raise RuntimeError("ground missing")
+                raise Exception("surface 'goes back' on itself")
 
         class _FakeBoozerSurface:
             def __init__(
@@ -650,6 +650,16 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertIsNone(boozer_surface.res)
         self.assertTrue(boozer_surface.need_to_run_code)
         self.assertEqual(boozer_surface.surface.self_intersection_calls, 1)
+
+    def test_surface_self_intersection_status_propagates_unrelated_error(self):
+        geometry = importlib.import_module("banana_opt.single_stage_geometry")
+
+        class _FakeSurface:
+            def is_self_intersecting(self):
+                raise RuntimeError("ground missing")
+
+        with self.assertRaisesRegex(RuntimeError, "ground missing"):
+            geometry.surface_self_intersection_status(_FakeSurface())
 
     def test_attempt_initialize_boozer_surface_propagates_volume_exception(self):
         module = load_handoff_module()
