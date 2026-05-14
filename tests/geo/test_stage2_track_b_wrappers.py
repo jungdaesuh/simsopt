@@ -109,6 +109,7 @@ class DonorRepairWrapperTests(unittest.TestCase):
 
             probe_failed = {
                 "BOOZER_BOOTABLE": False,
+                "IOTA_NEAR_TARGET": False,
                 "IOTA_FEASIBLE": False,
                 "BOOTABILITY_REASON": "self_intersection",
                 "BOOTABILITY_STAGE": "probe",
@@ -118,6 +119,7 @@ class DonorRepairWrapperTests(unittest.TestCase):
             }
             probe_bootable = {
                 "BOOZER_BOOTABLE": True,
+                "IOTA_NEAR_TARGET": True,
                 "IOTA_FEASIBLE": True,
                 "BOOTABILITY_REASON": "ok",
                 "BOOTABILITY_STAGE": "probe",
@@ -125,16 +127,6 @@ class DonorRepairWrapperTests(unittest.TestCase):
                 "BOOTABILITY_SOLVED_IOTA": 0.2005,
                 "BOOTABILITY_ABS_IOTA_ERROR": 5.0e-4,
             }
-            recovered_probe = {
-                "BOOZER_BOOTABLE": True,
-                "IOTA_FEASIBLE": True,
-                "BOOTABILITY_REASON": "ok",
-                "BOOTABILITY_STAGE": "recovery",
-                "BOOTABILITY_TARGET_IOTA": 0.18,
-                "BOOTABILITY_SOLVED_IOTA": 0.1801,
-                "BOOTABILITY_ABS_IOTA_ERROR": 1.0e-4,
-            }
-
             with patch.object(
                 module.unified_runner,
                 "resolve_stage2_input",
@@ -154,16 +146,7 @@ class DonorRepairWrapperTests(unittest.TestCase):
             ), patch.object(
                 module.unified_runner,
                 "run_recovery_stage",
-                return_value={
-                    "status": "completed",
-                    "results_path": str(root / "recovery" / "results.json"),
-                    "recovered_bs_path": str(root / "recovery" / "biot_savart_opt.json"),
-                    "recovery_probe": recovered_probe,
-                    "recovery_succeeded": True,
-                    "recovery_iters": 9,
-                    "recovery_termination_reason": "bootable",
-                },
-            ):
+            ) as recovery_mock:
                 result = module.main(
                     [
                         "--plasma-surf-filename",
@@ -182,13 +165,18 @@ class DonorRepairWrapperTests(unittest.TestCase):
                 )
 
             self.assertEqual(result, 0)
+            recovery_mock.assert_not_called()
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
-            self.assertEqual(summary["best_case_id"], "repair_iota_0p18")
+            self.assertEqual(summary["best_case_id"], "repair_iota_0p2")
+            self.assertEqual(
+                summary["cases"][0]["blocking_reason"],
+                module.unified_runner.BLOCKING_REASON_PRE_BOOZER_REPAIR_REQUIRED,
+            )
             best_donor = json.loads(best_donor_path.read_text(encoding="utf-8"))
             self.assertTrue(best_donor["handoff_bootable"])
             self.assertEqual(
                 best_donor["selected_seed_source"],
-                module.unified_runner.SEED_SOURCE_RECOVERED_STAGE2_DONOR,
+                module.unified_runner.SEED_SOURCE_DIRECT_STAGE2_DONOR,
             )
 
 
@@ -286,6 +274,7 @@ class Stage2DecisionGateTests(unittest.TestCase):
                         "OPTIMIZER_SUCCESS": True,
                         "HARDWARE_CONSTRAINTS_OK": True,
                         "BOOZER_BOOTABLE": True,
+                        "IOTA_NEAR_TARGET": True,
                         "IOTA_FEASIBLE": True,
                     },
                 ),

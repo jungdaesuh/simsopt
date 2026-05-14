@@ -99,6 +99,18 @@ def _valid_stage2_contract_fields() -> dict[str, object]:
         "BANANA_CURRENT_A": 1.1e4,
         "FINAL_LCFS_MAJOR_RADIUS_M": 0.92,
         "FINAL_LCFS_MINOR_RADIUS_M": 0.15,
+        "BOOZER_BOOTABLE": True,
+        "IOTA_NEAR_TARGET": True,
+        "IOTA_FEASIBLE": True,
+        "BOOTABILITY_REASON": "ok",
+        "BOOTABILITY_STAGE": "probe",
+        "BOOTABILITY_TARGET_IOTA": 0.2,
+        "BOOTABILITY_SOLVED_IOTA": 0.2,
+        "BOOTABILITY_SELF_INTERSECTING": False,
+        "BOOTABILITY_SOLVE_SUCCESS": True,
+        "BOOTABILITY_ABS_IOTA_ERROR": 0.0,
+        "BOOTABILITY_ERROR_TYPE": None,
+        "BOOTABILITY_ERROR_MESSAGE": None,
     }
 
 
@@ -226,6 +238,7 @@ def _bootability_status(
         abs_iota_error = abs(float(solved_iota) - 0.2)
     return {
         "BOOZER_BOOTABLE": bootable,
+        "IOTA_NEAR_TARGET": iota_feasible,
         "IOTA_FEASIBLE": iota_feasible,
         "BOOTABILITY_REASON": reason,
         "BOOTABILITY_STAGE": stage,
@@ -246,6 +259,7 @@ class HandoffSchemaTests(unittest.TestCase):
         payload = module.build_bootability_recovery_payload_fields(
             {
                 "BOOZER_BOOTABLE": True,
+                "IOTA_NEAR_TARGET": False,
                 "IOTA_FEASIBLE": False,
                 "BOOTABILITY_REASON": "iota_mismatch",
                 "BOOTABILITY_STAGE": "probe",
@@ -269,6 +283,7 @@ class HandoffSchemaTests(unittest.TestCase):
             module.bootability_recovery_payload_field_names(),
             (
                 "BOOZER_BOOTABLE",
+                "IOTA_NEAR_TARGET",
                 "IOTA_FEASIBLE",
                 "BOOTABILITY_REASON",
                 "BOOTABILITY_STAGE",
@@ -288,6 +303,7 @@ class HandoffSchemaTests(unittest.TestCase):
             ),
         )
         self.assertTrue(payload["BOOZER_BOOTABLE"])
+        self.assertFalse(payload["IOTA_NEAR_TARGET"])
         self.assertFalse(payload["IOTA_FEASIBLE"])
         self.assertEqual(payload["BOOTABILITY_REASON"], "iota_mismatch")
         self.assertAlmostEqual(payload["BOOTABILITY_ABS_IOTA_ERROR"], 0.02)
@@ -303,6 +319,7 @@ class HandoffSchemaTests(unittest.TestCase):
         upgraded = module.upgrade_legacy_stage2_artifact_results({})
 
         self.assertIsNone(upgraded["BOOZER_BOOTABLE"])
+        self.assertIsNone(upgraded["IOTA_NEAR_TARGET"])
         self.assertIsNone(upgraded["BOOTABILITY_REASON"])
         self.assertFalse(upgraded["RECOVERY_ATTEMPTED"])
         self.assertFalse(upgraded["RECOVERY_SUCCEEDED"])
@@ -385,7 +402,38 @@ class HandoffModuleTests(unittest.TestCase):
 
         self.assertAlmostEqual(module.compute_tf_G0(tf_coils), -4.0e-7 * np.pi * 1.6e6)
 
-    def test_classify_bootability_result_rejects_iota_mismatch(self):
+    def test_validate_stage2_seed_contract_accepts_nonbootable_recovery_input(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "TF_CURRENT_A": -8.0e4,
+            "BOOZER_BOOTABLE": False,
+            "IOTA_FEASIBLE": False,
+            "BOOTABILITY_REASON": module.BOOTABILITY_REASON_SELF_INTERSECTION,
+            "BOOTABILITY_SOLVED_IOTA": -1.0e-5,
+            "BOOTABILITY_TARGET_IOTA": -0.16,
+        }
+
+        module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_handoff_contract_rejects_nonbootable_artifact(self):
+        module = load_handoff_module()
+        stage2_results = {
+            **_valid_stage2_contract_fields(),
+            "TF_CURRENT_A": -8.0e4,
+            "BOOZER_BOOTABLE": False,
+            "IOTA_FEASIBLE": False,
+            "BOOTABILITY_REASON": module.BOOTABILITY_REASON_SELF_INTERSECTION,
+            "BOOTABILITY_SOLVED_IOTA": -1.0e-5,
+            "BOOTABILITY_TARGET_IOTA": -0.16,
+        }
+
+        with self.assertRaisesRegex(ValueError, "not single-stage bootable"):
+            module.validate_stage2_seed_handoff_contract(stage2_results)
+
+    def test_classify_bootability_result_accepts_iota_mismatch_as_evaluable_domain(
+        self,
+    ):
         module = load_handoff_module()
 
         status = module.classify_bootability_result(
@@ -403,9 +451,24 @@ class HandoffModuleTests(unittest.TestCase):
             iota_tolerance=1.0e-3,
         )
 
-        self.assertFalse(module.bootability_passes(status))
+        self.assertTrue(module.bootability_passes(status))
+        self.assertTrue(status["BOOZER_BOOTABLE"])
+        self.assertFalse(status["IOTA_NEAR_TARGET"])
+        self.assertFalse(status["IOTA_FEASIBLE"])
         self.assertEqual(status["BOOTABILITY_REASON"], module.BOOTABILITY_REASON_IOTA_MISMATCH)
         self.assertAlmostEqual(status["BOOTABILITY_ABS_IOTA_ERROR"], 0.08)
+
+    def test_bootability_passes_rejects_truthy_non_boolean_flags(self):
+        module = load_handoff_module()
+
+        self.assertFalse(
+            module.bootability_passes(
+                {
+                    "BOOZER_BOOTABLE": 1,
+                    "IOTA_FEASIBLE": "true",
+                }
+            )
+        )
 
     def test_attempt_initialize_boozer_surface_keeps_probe_failures_visible(self):
         module = load_handoff_module()
@@ -495,7 +558,7 @@ class HandoffModuleTests(unittest.TestCase):
         self.assertIsNone(result.error_type)
         np.testing.assert_allclose(result.boozer_surface.surface.x, [9.0, -4.0])
 
-    def test_attempt_initialize_boozer_surface_restores_state_when_self_intersection_check_raises(
+    def test_attempt_initialize_boozer_surface_classifies_self_intersection_check_failure(
         self,
     ):
         module = load_handoff_module()
@@ -563,23 +626,25 @@ class HandoffModuleTests(unittest.TestCase):
                 self.need_to_run_code = False
                 return {"success": True, "iota": float(iota), "G": float(G)}
 
-        with self.assertRaisesRegex(RuntimeError, "ground missing"):
-            module.attempt_initialize_boozer_surface(
-                surf_prev,
-                mpol=8,
-                ntor=6,
-                bs=object(),
-                vol_target=0.1,
-                constraint_weight=1.0,
-                iota=0.2,
-                G0=0.35,
-                boozer_I=0.0,
-                nfp=5,
-                surface_cls=_FakeSurface,
-                volume_cls=self._ConstantVolumeLabel,
-                boozer_surface_cls=_FakeBoozerSurface,
-            )
+        result = module.attempt_initialize_boozer_surface(
+            surf_prev,
+            mpol=8,
+            ntor=6,
+            bs=object(),
+            vol_target=0.1,
+            constraint_weight=1.0,
+            iota=0.2,
+            G0=0.35,
+            boozer_I=0.0,
+            nfp=5,
+            surface_cls=_FakeSurface,
+            volume_cls=self._ConstantVolumeLabel,
+            boozer_surface_cls=_FakeBoozerSurface,
+        )
 
+        self.assertTrue(result.solve_success)
+        self.assertTrue(result.self_intersecting)
+        self.assertFalse(result.success)
         boozer_surface = created_boozer_surfaces[0]
         np.testing.assert_allclose(boozer_surface.surface.x, [0.0, 0.0])
         self.assertIsNone(boozer_surface.res)
@@ -1724,7 +1789,7 @@ class UnifiedRunnerTests(unittest.TestCase):
                     handoff,
                     stage=handoff.BOOTABILITY_STAGE_PROBE,
                     reason=handoff.BOOTABILITY_REASON_IOTA_MISMATCH,
-                    bootable=False,
+                    bootable=True,
                     iota_feasible=False,
                     solved_iota=0.05,
                     self_intersecting=False,
@@ -1956,44 +2021,23 @@ class UnifiedRunnerTests(unittest.TestCase):
             str(Path("seed/surf_opt_boozer_surface.json").resolve()),
         )
         self.assertEqual(
+            command[command.index("--stage2-seed-role") + 1],
+            "recovery",
+        )
+        self.assertEqual(
             command[command.index("--single-stage-banana-current-mode") + 1],
             "independent",
         )
 
-    def test_recovery_only_updates_recovery_results_with_handoff_metadata(self):
+    def test_recovery_only_nonbootable_reports_pre_boozer_repair_required(self):
         wrapper = load_wrapper_module()
         handoff = load_handoff_module()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            stage2_bs_path, stage2_results_path = self._stage2_seed_paths(root)
+            stage2_bs_path, _ = self._stage2_seed_paths(root)
             output_root = root / "outputs"
-            recovery_case_dir = output_root / "recovery" / "mpol=8-ntor=6-test"
-
-            def fake_recovery_run(command, *, output_root, timeout_seconds):
-                self.assertEqual(Path(output_root), output_root)
-                recovery_case_dir.mkdir(parents=True, exist_ok=True)
-                _write_json(
-                    recovery_case_dir / "results.json",
-                    {
-                        "PLASMA_SURF_FILENAME": "demo.nc",
-                        "init_only": False,
-                        "iterations": 7,
-                    },
-                )
-                (recovery_case_dir / "biot_savart_opt.json").write_text(
-                    "{}",
-                    encoding="utf-8",
-                )
-                return (
-                    "final",
-                    recovery_case_dir / "results.json",
-                    json.loads(
-                        (recovery_case_dir / "results.json").read_text(
-                            encoding="utf-8"
-                        )
-                    ),
-                )
+            summary_path = output_root / wrapper.DEFAULT_SUMMARY_JSON
 
             initial_probe = _bootability_status(
                 handoff,
@@ -2004,25 +2048,15 @@ class UnifiedRunnerTests(unittest.TestCase):
                 solved_iota=0.0003,
                 self_intersecting=True,
             )
-            recovered_probe = _bootability_status(
-                handoff,
-                stage=handoff.BOOTABILITY_STAGE_RECOVERY,
-                reason=handoff.BOOTABILITY_REASON_OK,
-                bootable=True,
-                iota_feasible=True,
-                solved_iota=0.2004,
-                self_intersecting=False,
-            )
 
             with patch.object(
                 wrapper,
                 "build_probe_status",
-                side_effect=[initial_probe, recovered_probe],
+                return_value=initial_probe,
             ), patch.object(
                 wrapper,
-                "run_single_stage_command_with_salvage",
-                side_effect=fake_recovery_run,
-            ):
+                "run_recovery_stage",
+            ) as recovery_mock:
                 result = wrapper.main(
                     [
                         "--recovery-only",
@@ -2036,34 +2070,17 @@ class UnifiedRunnerTests(unittest.TestCase):
                 )
 
             self.assertEqual(result, 0)
-            recovered_results = json.loads(
-                (recovery_case_dir / "results.json").read_text(encoding="utf-8")
-            )
-            expected_stage2_bs_path = str(stage2_bs_path.resolve())
-            expected_stage2_results_path = str(stage2_results_path.resolve())
-            self.assertTrue(recovered_results["BOOZER_BOOTABLE"])
-            self.assertTrue(recovered_results["IOTA_FEASIBLE"])
-            self.assertTrue(recovered_results["RECOVERY_ATTEMPTED"])
-            self.assertTrue(recovered_results["RECOVERY_SUCCEEDED"])
-            self.assertEqual(recovered_results["RECOVERY_ITERS"], 7)
+            recovery_mock.assert_not_called()
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
             self.assertEqual(
-                recovered_results["RECOVERY_TERMINATION_REASON"],
-                "bootable",
+                summary["blocking_reason"],
+                wrapper.BLOCKING_REASON_PRE_BOOZER_REPAIR_REQUIRED,
             )
-            self.assertEqual(
-                recovered_results["STAGE2_BS_PATH"],
-                expected_stage2_bs_path,
-            )
-            self.assertEqual(
-                recovered_results["STAGE2_RESULTS_PATH"],
-                expected_stage2_results_path,
-            )
-            self.assertEqual(
-                recovered_results["UNIFIED_SEED_SOURCE"],
-                wrapper.SEED_SOURCE_RECOVERED_STAGE2_DONOR,
-            )
+            self.assertEqual(summary["next_required_lane"], wrapper.LANE_PRE_BOOZER_REPAIR)
+            self.assertIsNone(summary["recovery"])
+            self.assertIsNone(summary["full_single_stage"])
 
-    def test_full_mode_augments_final_results_with_recovered_handoff_metadata(self):
+    def test_full_mode_accepts_bootable_iota_off_target_without_recovery(self):
         wrapper = load_wrapper_module()
         handoff = load_handoff_module()
 
@@ -2071,32 +2088,8 @@ class UnifiedRunnerTests(unittest.TestCase):
             root = Path(tmpdir)
             stage2_bs_path, stage2_results_path = self._stage2_seed_paths(root)
             output_root = root / "outputs"
-            recovery_case_dir = output_root / "recovery" / "mpol=8-ntor=6-test"
             full_case_dir = output_root / "full" / "target" / "mpol=8-ntor=6-test"
-
-            def fake_recovery_run(command, *, output_root, timeout_seconds):
-                recovery_case_dir.mkdir(parents=True, exist_ok=True)
-                _write_json(
-                    recovery_case_dir / "results.json",
-                    {
-                        "PLASMA_SURF_FILENAME": "demo.nc",
-                        "init_only": False,
-                        "iterations": 11,
-                    },
-                )
-                (recovery_case_dir / "biot_savart_opt.json").write_text(
-                    "{}",
-                    encoding="utf-8",
-                )
-                return (
-                    "final",
-                    recovery_case_dir / "results.json",
-                    json.loads(
-                        (recovery_case_dir / "results.json").read_text(
-                            encoding="utf-8"
-                        )
-                    ),
-                )
+            expected_handoff_bs_path = stage2_bs_path.resolve()
 
             def fake_full_run(
                 args,
@@ -2106,10 +2099,8 @@ class UnifiedRunnerTests(unittest.TestCase):
                 warm_start_surface_stem=None,
             ):
                 full_case_dir.mkdir(parents=True, exist_ok=True)
-                self.assertEqual(
-                    warm_start_surface_stem.resolve(),
-                    (recovery_case_dir / "surf_opt").resolve(),
-                )
+                self.assertEqual(stage2_bs_path.resolve(), expected_handoff_bs_path)
+                self.assertIsNone(warm_start_surface_stem)
                 _write_json(
                     full_case_dir / "results.json",
                     {
@@ -2133,35 +2124,25 @@ class UnifiedRunnerTests(unittest.TestCase):
             initial_probe = _bootability_status(
                 handoff,
                 stage=handoff.BOOTABILITY_STAGE_PROBE,
-                reason=handoff.BOOTABILITY_REASON_SELF_INTERSECTION,
-                bootable=False,
-                iota_feasible=False,
-                solved_iota=0.0002,
-                self_intersecting=True,
-            )
-            recovered_probe = _bootability_status(
-                handoff,
-                stage=handoff.BOOTABILITY_STAGE_RECOVERY,
-                reason=handoff.BOOTABILITY_REASON_OK,
+                reason=handoff.BOOTABILITY_REASON_IOTA_MISMATCH,
                 bootable=True,
-                iota_feasible=True,
-                solved_iota=0.1999,
+                iota_feasible=False,
+                solved_iota=0.12,
                 self_intersecting=False,
             )
 
             with patch.object(
                 wrapper,
                 "build_probe_status",
-                side_effect=[initial_probe, recovered_probe],
+                return_value=initial_probe,
             ), patch.object(
                 wrapper,
-                "run_single_stage_command_with_salvage",
-                side_effect=fake_recovery_run,
-            ), patch.object(
+                "run_recovery_stage",
+            ) as recovery_mock, patch.object(
                 wrapper,
                 "run_full_single_stage",
                 side_effect=fake_full_run,
-            ):
+            ) as full_mock:
                 result = wrapper.main(
                     [
                         "--plasma-surf-filename",
@@ -2174,20 +2155,20 @@ class UnifiedRunnerTests(unittest.TestCase):
                 )
 
             self.assertEqual(result, 0)
+            recovery_mock.assert_not_called()
+            full_mock.assert_called_once()
             final_results = json.loads(
                 (full_case_dir / "results.json").read_text(encoding="utf-8")
             )
             expected_stage2_bs_path = str(stage2_bs_path.resolve())
             expected_stage2_results_path = str(stage2_results_path.resolve())
             self.assertTrue(final_results["BOOZER_BOOTABLE"])
-            self.assertTrue(final_results["IOTA_FEASIBLE"])
-            self.assertTrue(final_results["RECOVERY_ATTEMPTED"])
-            self.assertTrue(final_results["RECOVERY_SUCCEEDED"])
-            self.assertEqual(final_results["RECOVERY_ITERS"], 11)
-            self.assertEqual(
-                final_results["RECOVERY_TERMINATION_REASON"],
-                "bootable",
-            )
+            self.assertFalse(final_results["IOTA_NEAR_TARGET"])
+            self.assertFalse(final_results["IOTA_FEASIBLE"])
+            self.assertFalse(final_results["RECOVERY_ATTEMPTED"])
+            self.assertFalse(final_results["RECOVERY_SUCCEEDED"])
+            self.assertIsNone(final_results["RECOVERY_ITERS"])
+            self.assertIsNone(final_results["RECOVERY_TERMINATION_REASON"])
             self.assertEqual(
                 final_results["STAGE2_BS_PATH"],
                 expected_stage2_bs_path,
@@ -2198,7 +2179,7 @@ class UnifiedRunnerTests(unittest.TestCase):
             )
             self.assertEqual(
                 final_results["UNIFIED_SEED_SOURCE"],
-                wrapper.SEED_SOURCE_RECOVERED_STAGE2_DONOR,
+                wrapper.SEED_SOURCE_DIRECT_STAGE2_DONOR,
             )
 
     def test_recovery_only_conflict_with_skip_recovery_is_rejected(self):

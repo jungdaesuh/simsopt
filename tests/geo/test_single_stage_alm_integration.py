@@ -311,6 +311,7 @@ def make_single_stage_thresholded_physics_rerun_args(**overrides):
         "dry_run": False,
         "plasma_surf_filename": DEFAULT_ALM_WRAPPER_SURFACE,
         "stage2_bs_path": "relative/seed.json",
+        "stage2_seed_role": "handoff",
         "output_root": "outputs",
         "equilibria_dir": None,
         "equilibrium_path": None,
@@ -433,6 +434,7 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
             "BANANA_CURRENT_COORDINATE_SCALING_SEED_RELATIVE": "seed-relative",
             "MAX_CURVATURE_INV_M": 100.0,
             "PLASMA_VESSEL_MIN_DIST_M": 0.04,
+            "SINGLE_STAGE_POLOIDAL_WEIGHT_DEFAULT": 1.0,
             "SINGLE_STAGE_WIDTH_WEIGHT_DEFAULT": 1.0,
             "SINGLE_STAGE_SELF_INTERSECT_WEIGHT_DEFAULT": 1.0,
             "env_flag": lambda name: False,
@@ -2178,6 +2180,10 @@ class SingleStageAlmIntegrationTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--stage2-bs-path") + 1],
             str(Path("relative/seed.json").resolve()),
+        )
+        self.assertEqual(
+            command[command.index("--stage2-seed-role") + 1],
+            "handoff",
         )
         self.assertEqual(
             command[command.index("--output-root") + 1],

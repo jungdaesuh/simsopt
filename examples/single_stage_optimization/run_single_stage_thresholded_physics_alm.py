@@ -77,6 +77,15 @@ def parse_args() -> argparse.Namespace:
         help="Path to the Stage 2 biot_savart_opt.json seed artifact.",
     )
     parser.add_argument(
+        "--stage2-seed-role",
+        choices=["handoff", "recovery"],
+        default="handoff",
+        help=(
+            "Validation role forwarded into the single-stage entrypoint. Use "
+            "'recovery' only for bounded Stage 2.5 bootability repair."
+        ),
+    )
+    parser.add_argument(
         "--allow-init-only-stage2-seed",
         action="store_true",
         help=(
@@ -290,6 +299,8 @@ def build_single_stage_thresholded_physics_command(
         plasma_surf_filename,
         "--stage2-bs-path",
         str(stage2_bs_path),
+        "--stage2-seed-role",
+        args.stage2_seed_role,
         "--output-root",
         str(output_root),
         "--nphi",

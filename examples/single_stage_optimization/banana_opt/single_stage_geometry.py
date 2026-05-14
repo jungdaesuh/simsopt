@@ -20,6 +20,17 @@ from topology_scorer import (
 from workflow_helpers import validate_normalized_toroidal_flux
 
 
+def surface_self_intersection_status(surface):
+    try:
+        return bool(surface.is_self_intersecting()), True
+    except RuntimeError:
+        return True, False
+
+
+def surface_is_self_intersecting(surface):
+    return surface_self_intersection_status(surface)[0]
+
+
 def scale_surface_to_major_radius(surface, major_radius):
     scale = major_radius / surface.major_radius()
     surface.set_dofs(surface.get_dofs() * scale)
@@ -191,14 +202,8 @@ def evaluate_surface_stack(
     iotas = [entry["boozer_surface"].res["iota"] for entry in surface_data]
     solve_success = [bool(entry["boozer_surface"].res["success"]) for entry in surface_data]
 
-    def safe_is_self_intersecting(surface):
-        try:
-            return bool(surface.is_self_intersecting())
-        except Exception:
-            return True
-
     self_intersections = [
-        safe_is_self_intersecting(entry["boozer_surface"].surface)
+        surface_is_self_intersecting(entry["boozer_surface"].surface)
         for entry in surface_data
     ]
     adjacent_gaps = []
@@ -277,6 +282,13 @@ def evaluate_single_stage_hardware_constraints(
     tf_current_limit_A=None,
     banana_current_A=None,
     banana_current_max_A=None,
+    coil_width=None,
+    width_min_threshold=None,
+    width_max_threshold=None,
+    self_intersect_penalty=None,
+    self_intersect_threshold=None,
+    lcfs_major_radius_m=None,
+    lcfs_minor_radius_m=None,
 ):
     length_min_target = (
         None if length_target is None else COIL_LENGTH_MIN_FRACTION * float(length_target)
@@ -286,6 +298,9 @@ def evaluate_single_stage_hardware_constraints(
         ("coil_surface_spacing", cs_dist),
         ("max_curvature", curvature_threshold),
         ("poloidal_extent", poloidal_extent_threshold_rad),
+        ("width_min", width_min_threshold),
+        ("width_max", width_max_threshold),
+        ("self_intersect", self_intersect_threshold),
         ("tf_current", tf_current_limit_A),
         ("banana_current", banana_current_max_A),
     )
@@ -306,8 +321,13 @@ def evaluate_single_stage_hardware_constraints(
         "coil_length": coil_length,
         "coil_length_min": coil_length,
         "poloidal_extent": poloidal_extent_rad,
+        "width_min": coil_width,
+        "width_max": coil_width,
+        "self_intersect": self_intersect_penalty,
         "tf_current": tf_current_A,
         "banana_current": banana_current_A,
+        "lcfs_major_radius": lcfs_major_radius_m,
+        "lcfs_minor_radius": lcfs_minor_radius_m,
     }
     search_hardware_status = build_hardware_constraint_status(
         measured_values,
@@ -318,6 +338,7 @@ def evaluate_single_stage_hardware_constraints(
         measured_values,
         applies_to="artifact",
         threshold_overrides=artifact_threshold_overrides,
+        require_values=True,
     )
     return {
         "success": search_hardware_status["success"],
@@ -345,6 +366,13 @@ def evaluate_single_stage_hardware_constraints(
         "tf_current_limit_A": _optional_float(tf_current_limit_A),
         "banana_current_A": _optional_float(banana_current_A),
         "banana_current_max_A": _optional_float(banana_current_max_A),
+        "coil_width": _optional_float(coil_width),
+        "width_min_threshold": _optional_float(width_min_threshold),
+        "width_max_threshold": _optional_float(width_max_threshold),
+        "self_intersect_penalty": _optional_float(self_intersect_penalty),
+        "self_intersect_threshold": _optional_float(self_intersect_threshold),
+        "lcfs_major_radius_m": _optional_float(lcfs_major_radius_m),
+        "lcfs_minor_radius_m": _optional_float(lcfs_minor_radius_m),
     }
 
 
@@ -572,6 +600,13 @@ def evaluate_single_stage_hardware_snapshot(
     tf_current_limit_A=None,
     banana_current_A=None,
     banana_current_max_A=None,
+    coil_width=None,
+    width_min_threshold=None,
+    width_max_threshold=None,
+    self_intersect_penalty=None,
+    self_intersect_threshold=None,
+    lcfs_major_radius_m=None,
+    lcfs_minor_radius_m=None,
 ):
     curve_curve_min_dist = float(curve_curve_distance_obj.shortest_distance())
     curve_surface_min_dist = float(curve_surface_distance_obj.shortest_distance())
@@ -580,6 +615,11 @@ def evaluate_single_stage_hardware_snapshot(
         outer_surface,
         vessel_surface,
     )
+    resolved_lcfs_major_radius_m = lcfs_major_radius_m
+    resolved_lcfs_minor_radius_m = lcfs_minor_radius_m
+    if outer_surface is not None:
+        resolved_lcfs_major_radius_m = outer_surface.major_radius()
+        resolved_lcfs_minor_radius_m = outer_surface.minor_radius()
     max_curvature = float(np.max(banana_curve.kappa()))
     return evaluate_single_stage_hardware_constraints(
         curve_curve_min_dist,
@@ -598,6 +638,13 @@ def evaluate_single_stage_hardware_snapshot(
         tf_current_limit_A=tf_current_limit_A,
         banana_current_A=banana_current_A,
         banana_current_max_A=banana_current_max_A,
+        coil_width=coil_width,
+        width_min_threshold=width_min_threshold,
+        width_max_threshold=width_max_threshold,
+        self_intersect_penalty=self_intersect_penalty,
+        self_intersect_threshold=self_intersect_threshold,
+        lcfs_major_radius_m=resolved_lcfs_major_radius_m,
+        lcfs_minor_radius_m=resolved_lcfs_minor_radius_m,
     )
 
 

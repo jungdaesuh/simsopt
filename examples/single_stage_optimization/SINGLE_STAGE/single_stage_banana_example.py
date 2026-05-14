@@ -229,6 +229,7 @@ from banana_opt.stage2_single_stage_handoff import (
     resolve_stage2_num_tf_coils as _resolve_stage2_num_tf_coils_impl,
     resolve_stage2_tf_current_A as _resolve_stage2_tf_current_A_impl,
     validate_loaded_stage2_coils_partition as _validate_loaded_stage2_coils_partition_impl,
+    validate_stage2_seed_bootability_contract as _validate_stage2_seed_bootability_contract_impl,
     validate_stage2_seed_contract as _validate_stage2_seed_contract_impl,
 )
 from banana_opt.single_stage_geometry import (
@@ -1702,6 +1703,16 @@ def parse_args():
         help="Explicit path to the Stage 2 biot_savart_opt.json seed. Overrides all derived seed settings.",
     )
     parser.add_argument(
+        "--stage2-seed-role",
+        choices=["handoff", "recovery"],
+        default=os.environ.get("STAGE2_SEED_ROLE", "handoff"),
+        help=(
+            "Validation role for --stage2-bs-path. 'handoff' requires a hardware-clean "
+            "and bootable Stage 2 seed; 'recovery' requires the hardware seed contract "
+            "only so the bounded Stage 2.5 recovery lane can repair bootability."
+        ),
+    )
+    parser.add_argument(
         "--stage2-seed-surf-path",
         default=os.environ.get("STAGE2_SEED_SURF_PATH"),
         help=(
@@ -2003,6 +2014,13 @@ def evaluate_single_stage_hardware_constraints(
     tf_current_limit_A=None,
     banana_current_A=None,
     banana_current_max_A=None,
+    coil_width=None,
+    width_min_threshold=None,
+    width_max_threshold=None,
+    self_intersect_penalty=None,
+    self_intersect_threshold=None,
+    lcfs_major_radius_m=None,
+    lcfs_minor_radius_m=None,
 ):
     return _evaluate_single_stage_hardware_constraints(
         curve_curve_min_dist,
@@ -2021,6 +2039,13 @@ def evaluate_single_stage_hardware_constraints(
         tf_current_limit_A=tf_current_limit_A,
         banana_current_A=banana_current_A,
         banana_current_max_A=banana_current_max_A,
+        coil_width=coil_width,
+        width_min_threshold=width_min_threshold,
+        width_max_threshold=width_max_threshold,
+        self_intersect_penalty=self_intersect_penalty,
+        self_intersect_threshold=self_intersect_threshold,
+        lcfs_major_radius_m=lcfs_major_radius_m,
+        lcfs_minor_radius_m=lcfs_minor_radius_m,
     )
 
 
@@ -2043,7 +2068,13 @@ def single_stage_banana_poloidal_extent_rad(banana_curve):
     )
 
 
-def current_single_stage_hardware_snapshot_kwargs(*, coil_length=None):
+def current_single_stage_common_hardware_snapshot_kwargs(
+    *,
+    coil_length=None,
+    tf_current_A=None,
+    banana_current_A=None,
+    banana_current_max_A=None,
+):
     curvelength_obj = globals().get("curvelength")
     resolved_coil_length = None
     if curvelength_obj is not None:
@@ -2051,7 +2082,11 @@ def current_single_stage_hardware_snapshot_kwargs(*, coil_length=None):
     if coil_length is not None:
         resolved_coil_length = float(coil_length)
     resolved_length_target = globals().get("length_target")
-    resolved_tf_current_A = globals().get("stage2_tf_current_A")
+    resolved_tf_current_A = (
+        globals().get("stage2_tf_current_A")
+        if tf_current_A is None
+        else float(tf_current_A)
+    )
     poloidal_extent_obj = globals().get("JPoloidalExtent")
     resolved_poloidal_extent_rad = (
         None
@@ -2059,17 +2094,17 @@ def current_single_stage_hardware_snapshot_kwargs(*, coil_length=None):
         else poloidal_extent_rad_from_objective(poloidal_extent_obj)
     )
     banana_current_state = globals().get("banana_current_state")
-    resolved_banana_current_A = (
-        None
-        if banana_current_state is None
-        else banana_current_state.control_current_A()
-    )
+    resolved_banana_current_A = banana_current_A
+    if resolved_banana_current_A is None and banana_current_state is not None:
+        resolved_banana_current_A = banana_current_state.control_current_A()
     args_value = globals().get("args")
-    resolved_banana_current_max_A = getattr(
-        args_value,
-        "banana_current_max_A",
-        BANANA_CURRENT_HARD_LIMIT_A,
-    )
+    resolved_banana_current_max_A = banana_current_max_A
+    if resolved_banana_current_max_A is None:
+        resolved_banana_current_max_A = getattr(
+            args_value,
+            "banana_current_max_A",
+            BANANA_CURRENT_HARD_LIMIT_A,
+        )
     penalty_box_bounds = resolve_penalty_traversal_forbidden_box_bounds(
         {"banana_current": resolved_banana_current_max_A},
     )
@@ -2090,6 +2125,43 @@ def current_single_stage_hardware_snapshot_kwargs(*, coil_length=None):
             else float(penalty_banana_current_max_A)
         ),
     }
+
+
+def current_single_stage_hardware_snapshot_kwargs(
+    *,
+    coil_length=None,
+    tf_current_A=None,
+    banana_current_A=None,
+    banana_current_max_A=None,
+):
+    snapshot_kwargs = current_single_stage_common_hardware_snapshot_kwargs(
+        coil_length=coil_length,
+        tf_current_A=tf_current_A,
+        banana_current_A=banana_current_A,
+        banana_current_max_A=banana_current_max_A,
+    )
+    coil_width_obj = globals().get("JCoilWidth")
+    self_intersect_obj = globals().get("JCurveSelfIntersect")
+    snapshot_kwargs.update(
+        {
+            "coil_width": (
+                None if coil_width_obj is None else float(coil_width_obj.J())
+            ),
+            "width_min_threshold": BANANA_WIDTH_MIN_M,
+            "width_max_threshold": BANANA_WIDTH_MAX_M,
+            "self_intersect_penalty": (
+                None
+                if self_intersect_obj is None
+                else float(self_intersect_obj.J())
+            ),
+            "self_intersect_threshold": 0.0,
+        }
+    )
+    return snapshot_kwargs
+
+
+def current_single_stage_search_hardware_snapshot_kwargs():
+    return current_single_stage_common_hardware_snapshot_kwargs()
 
 
 def current_single_stage_alm_banana_current():
@@ -3625,18 +3697,16 @@ def build_best_feasible_results_summary(
             curvature_threshold,
             outer_surface,
             vessel_surface,
-            coil_length=float(curvelength_obj.J()),
-            length_target=length_target,
-            poloidal_extent_rad=single_stage_banana_poloidal_extent_rad(banana_curve),
-            poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
-            tf_current_A=tf_current_A,
-            tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
-            banana_current_A=(
-                None
-                if resolved_banana_current_state is None
-                else resolved_banana_current_state.control_current_A()
+            **current_single_stage_hardware_snapshot_kwargs(
+                coil_length=float(curvelength_obj.J()),
+                tf_current_A=tf_current_A,
+                banana_current_A=(
+                    None
+                    if resolved_banana_current_state is None
+                    else resolved_banana_current_state.control_current_A()
+                ),
+                banana_current_max_A=banana_current_max_A,
             ),
-            banana_current_max_A=banana_current_max_A,
         )
         surface_status = run_dict["surface_status"]
         search_eval = run_dict["search_eval"]
@@ -7400,7 +7470,7 @@ def evaluate_search_step(x):
                 CS_DIST,
                 PLASMA_VESSEL_MIN_DIST_M,
                 CURVATURE_THRESHOLD,
-                **current_single_stage_hardware_snapshot_kwargs(),
+                **current_single_stage_search_hardware_snapshot_kwargs(),
             )
             metrics["hardware_snapshot_seconds"] += (
                 time.perf_counter() - hardware_snapshot_start
@@ -8101,6 +8171,10 @@ def validate_stage2_seed_contract(stage2_results):
     _validate_stage2_seed_contract_impl(stage2_results)
 
 
+def validate_stage2_seed_bootability_contract(stage2_results):
+    _validate_stage2_seed_bootability_contract_impl(stage2_results)
+
+
 if __name__ == "__main__":
     # ==============================================================================
     # CONFIGURATION PARAMETERS
@@ -8123,6 +8197,8 @@ if __name__ == "__main__":
         known_tf_current_A=args.stage2_seed_tf_current_A,
     )
     validate_stage2_seed_contract(stage2_results)
+    if args.stage2_seed_role == "handoff":
+        validate_stage2_seed_bootability_contract(stage2_results)
     R0 = validate_major_radius(float(stage2_results["MAJOR_RADIUS"]))
     s = float(stage2_results["TOROIDAL_FLUX"])
     order = int(stage2_results.get("order", args.stage2_seed_order))
@@ -8657,17 +8733,8 @@ if __name__ == "__main__":
         CURVATURE_THRESHOLD,
         outer_surface_data["boozer_surface"].surface,
         VV,
-        coil_length=float(curvelength.J()),
-        length_target=length_target,
-        poloidal_extent_rad=single_stage_banana_poloidal_extent_rad(banana_curve),
-        poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
-        tf_current_A=stage2_tf_current_A,
-        tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
-        banana_current_A=banana_current_state.control_current_A(),
-        banana_current_max_A=getattr(
-            args,
-            "banana_current_max_A",
-            BANANA_CURRENT_HARD_LIMIT_A,
+        **current_single_stage_hardware_snapshot_kwargs(
+            coil_length=float(curvelength.J()),
         ),
     )
     run_dict = {
@@ -9630,14 +9697,9 @@ if __name__ == "__main__":
             CURVATURE_THRESHOLD,
             outer_surface_data["boozer_surface"].surface,
             VV,
-            coil_length=float(curvelength.J()),
-            length_target=length_target,
-            poloidal_extent_rad=single_stage_banana_poloidal_extent_rad(banana_curve),
-            poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
-            tf_current_A=stage2_tf_current_A,
-            tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
-            banana_current_A=banana_current_state.control_current_A(),
-            banana_current_max_A=args.banana_current_max_A,
+            **current_single_stage_hardware_snapshot_kwargs(
+                coil_length=float(curvelength.J()),
+            ),
         )
         final_max_curvature = final_hardware_snapshot["max_curvature"]
         final_surface_volumes = [entry["boozer_surface"].surface.volume() for entry in surface_data]
@@ -9693,14 +9755,9 @@ if __name__ == "__main__":
             CURVATURE_THRESHOLD,
             outer_surface_data["boozer_surface"].surface,
             VV,
-            coil_length=float(curvelength.J()),
-            length_target=length_target,
-            poloidal_extent_rad=single_stage_banana_poloidal_extent_rad(banana_curve),
-            poloidal_extent_threshold_rad=POLOIDAL_EXTENT_HALF_WIDTH_RAD,
-            tf_current_A=stage2_tf_current_A,
-            tf_current_limit_A=TF_CURRENT_HARD_LIMIT_A,
-            banana_current_A=banana_current_state.control_current_A(),
-            banana_current_max_A=args.banana_current_max_A,
+            **current_single_stage_hardware_snapshot_kwargs(
+                coil_length=float(curvelength.J()),
+            ),
         )
     nonqs_ratio = None if args.init_only else float(JnonQSRatio.J())
     boozer_residual = None if args.init_only else float(JBoozerResidual.J())

@@ -1208,6 +1208,12 @@ def _stage2_poloidal_extent_rad(banana_curve):
     )
 
 
+def _evaluate_stage2_flux_objective_on_own_grid(Jf):
+    Jf.recompute_bell()
+    Jf.field.clear_cached_properties()
+    return float(Jf.J())
+
+
 def _capture_stage2_artifact_state(
     *,
     dofs,
@@ -1285,11 +1291,9 @@ def _capture_stage2_artifact_state(
         if stage2_iota_runtime is None
         else evaluate_stage2_iota_state(stage2_iota_runtime)
     )
-    if stage2_iota_runtime is not None:
-        new_bs.set_points(new_surf.gamma().reshape((-1, 3)))
     return {
         "x": candidate_x,
-        "field_objective": float(Jf.J()),
+        "field_objective": _evaluate_stage2_flux_objective_on_own_grid(Jf),
         "coil_length": coil_length,
         "curve_curve_min_dist": curve_curve_min_dist,
         "curve_surface_min_dist": curve_surface_min_dist,

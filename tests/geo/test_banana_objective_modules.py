@@ -28,6 +28,7 @@ SINGLE_STAGE_OBJECTIVES_PATH = (
 HARDWARE_CONSTRAINT_SCHEMA_PATH = (
     EXAMPLES_ROOT / "banana_opt" / "hardware_constraint_schema.py"
 )
+HARDWARE_CONTRACTS_PATH = EXAMPLES_ROOT / "banana_opt" / "hardware_contracts.py"
 SINGLE_STAGE_SEARCH_POLICY_PATH = (
     EXAMPLES_ROOT / "banana_opt" / "single_stage_search_policy.py"
 )
@@ -59,6 +60,22 @@ def _load_module(module_path: Path, prefix: str):
     finally:
         sys.path[:] = original_sys_path
     return module
+
+
+def _in_bounds_lcfs_major_radius_m():
+    hardware_contracts = _load_module(
+        HARDWARE_CONTRACTS_PATH,
+        "banana_hw_contracts",
+    )
+    return hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M - 0.01
+
+
+def _in_bounds_lcfs_minor_radius_m():
+    hardware_contracts = _load_module(
+        HARDWARE_CONTRACTS_PATH,
+        "banana_hw_contracts",
+    )
+    return hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M - 0.01
 
 
 class _FakeScalarObjective:
@@ -436,6 +453,9 @@ class _FakeBiotSavart:
 
     def set_points(self, points):
         self.points = np.asarray(points, dtype=float).copy()
+
+    def clear_cached_properties(self):
+        pass
 
 
 class _FakeSurfaceNormals:
@@ -4405,6 +4425,69 @@ class SingleStageGeometryModuleTests(_ModuleTestCase):
         self.assertNotIn("artifact_status", result)
         self.assertFalse(result["search_hardware_status"]["success"])
         self.assertEqual(len(result["search_hardware_status"]["violations"]), 2)
+        self.assertFalse(result["artifact_hardware_status"]["success"])
+        self.assertIn(
+            "missing required hardware constraint metric width_min",
+            result["artifact_hardware_status"]["violations"],
+        )
+        self.assertIn(
+            "missing required hardware constraint metric width_max",
+            result["artifact_hardware_status"]["violations"],
+        )
+        self.assertIn(
+            "missing required hardware constraint metric self_intersect",
+            result["artifact_hardware_status"]["violations"],
+        )
+
+    def test_evaluate_single_stage_hardware_snapshot_records_artifact_width_and_self_intersect(
+        self,
+    ):
+        result = self.module.evaluate_single_stage_hardware_snapshot(
+            curve_curve_distance_obj=SimpleNamespace(shortest_distance=lambda: 0.05),
+            cc_dist=0.05,
+            curve_surface_distance_obj=SimpleNamespace(shortest_distance=lambda: 0.02),
+            cs_dist=0.02,
+            surface_status={"outer_vessel_gap": 0.04},
+            ss_dist=0.04,
+            banana_curve=SimpleNamespace(kappa=lambda: np.array([39.0, 40.0])),
+            curvature_threshold=40.0,
+            outer_surface=SimpleNamespace(
+                major_radius=_in_bounds_lcfs_major_radius_m,
+                minor_radius=_in_bounds_lcfs_minor_radius_m,
+            ),
+            coil_length=1.9,
+            length_target=1.9,
+            poloidal_extent_rad=0.7,
+            poloidal_extent_threshold_rad=0.8,
+            tf_current_A=-8.0e4,
+            tf_current_limit_A=8.0e4,
+            banana_current_A=-1.6e4,
+            banana_current_max_A=1.6e4,
+            coil_width=0.12,
+            width_min_threshold=0.05,
+            width_max_threshold=0.17,
+            self_intersect_penalty=0.0,
+            self_intersect_threshold=0.0,
+        )
+
+        artifact_status = result["artifact_hardware_status"]
+
+        self.assertTrue(artifact_status["success"])
+        self.assertEqual(artifact_status["violations"], [])
+        self.assertEqual(
+            artifact_status["constraints"]["width_min"]["value"],
+            0.12,
+        )
+        self.assertEqual(
+            artifact_status["constraints"]["width_max"]["value"],
+            0.12,
+        )
+        self.assertEqual(
+            artifact_status["constraints"]["self_intersect"]["value"],
+            0.0,
+        )
+        self.assertEqual(result["coil_width"], 0.12)
+        self.assertEqual(result["self_intersect_penalty"], 0.0)
 
     def test_evaluate_single_stage_hardware_snapshot_keeps_top_level_constraints_in_search_role(
         self,

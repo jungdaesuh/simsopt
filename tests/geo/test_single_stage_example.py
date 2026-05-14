@@ -131,6 +131,16 @@ def load_hardware_contracts_module():
     )
 
 
+def in_bounds_lcfs_major_radius_m():
+    hardware_contracts = load_hardware_contracts_module()
+    return hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M - 0.01
+
+
+def in_bounds_lcfs_minor_radius_m():
+    hardware_contracts = load_hardware_contracts_module()
+    return hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M - 0.01
+
+
 def diagnostic_search_eval_payload(base_payload):
     return {
         "J_QS": 2.5e-4,
@@ -2985,10 +2995,19 @@ class HardwareConstraintTests(unittest.TestCase):
             curvature_threshold=40.0,
             coil_length=2.1,
             length_target=1.7,
+            poloidal_extent_rad=0.7,
+            poloidal_extent_threshold_rad=0.8,
             tf_current_A=9.0e4,
             tf_current_limit_A=8.0e4,
             banana_current_A=1.7e4,
             banana_current_max_A=1.6e4,
+            coil_width=0.12,
+            width_min_threshold=0.05,
+            width_max_threshold=0.17,
+            self_intersect_penalty=0.0,
+            self_intersect_threshold=0.0,
+            lcfs_major_radius_m=in_bounds_lcfs_major_radius_m(),
+            lcfs_minor_radius_m=in_bounds_lcfs_minor_radius_m(),
         )
         search_status = status["search_hardware_status"]
         artifact_status = status["artifact_hardware_status"]
@@ -3049,6 +3068,19 @@ class HardwareConstraintTests(unittest.TestCase):
             curvature_threshold=40.0,
             coil_length=0.8,
             length_target=1.9,
+            poloidal_extent_rad=0.7,
+            poloidal_extent_threshold_rad=0.8,
+            tf_current_A=-8.0e4,
+            tf_current_limit_A=8.0e4,
+            banana_current_A=-1.6e4,
+            banana_current_max_A=1.6e4,
+            coil_width=0.12,
+            width_min_threshold=0.05,
+            width_max_threshold=0.17,
+            self_intersect_penalty=0.0,
+            self_intersect_threshold=0.0,
+            lcfs_major_radius_m=in_bounds_lcfs_major_radius_m(),
+            lcfs_minor_radius_m=in_bounds_lcfs_minor_radius_m(),
         )
         artifact_status = status["artifact_hardware_status"]
 
@@ -7974,6 +8006,12 @@ class HardwareConstraintTests(unittest.TestCase):
             def volume(self):
                 return self._volume
 
+            def major_radius(self):
+                return in_bounds_lcfs_major_radius_m()
+
+            def minor_radius(self):
+                return in_bounds_lcfs_minor_radius_m()
+
             def gamma(self):
                 return self._point.reshape((1, 1, 3))
 
@@ -8024,6 +8062,12 @@ class HardwareConstraintTests(unittest.TestCase):
 
             def volume(self):
                 return self._volume
+
+            def major_radius(self):
+                return in_bounds_lcfs_major_radius_m()
+
+            def minor_radius(self):
+                return in_bounds_lcfs_minor_radius_m()
 
             def gamma(self):
                 return self._point.reshape((1, 1, 3))
@@ -8093,6 +8137,12 @@ class HardwareConstraintTests(unittest.TestCase):
 
             def volume(self):
                 return self._volume
+
+            def major_radius(self):
+                return in_bounds_lcfs_major_radius_m()
+
+            def minor_radius(self):
+                return in_bounds_lcfs_minor_radius_m()
 
             def gamma(self):
                 return self._point.reshape((1, 1, 3))
@@ -8248,6 +8298,12 @@ class HardwareConstraintTests(unittest.TestCase):
 
             def volume(self):
                 return self._volume
+
+            def major_radius(self):
+                return in_bounds_lcfs_major_radius_m()
+
+            def minor_radius(self):
+                return in_bounds_lcfs_minor_radius_m()
 
             def gamma(self):
                 return self._point.reshape((1, 1, 3))
@@ -9488,6 +9544,20 @@ class CurrentBaselineContractTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "poloidal-extent threshold exceeds"):
             module.validate_stage2_seed_contract(stage2_results)
+
+    def test_validate_stage2_seed_bootability_contract_rejects_nonbootable_handoff(self):
+        module = load_single_stage_example_module()
+        stage2_results = self._upgrade_stage2_seed_results(
+            module,
+            BOOZER_BOOTABLE=False,
+            IOTA_FEASIBLE=False,
+            BOOTABILITY_REASON="self_intersection",
+            BOOTABILITY_SOLVED_IOTA=-1.0e-5,
+            BOOTABILITY_TARGET_IOTA=0.16,
+        )
+
+        with self.assertRaisesRegex(ValueError, "not single-stage bootable"):
+            module.validate_stage2_seed_bootability_contract(stage2_results)
 
     def test_resolve_single_stage_banana_surf_radius_defaults_to_loaded_artifact(self):
         module = load_single_stage_example_module()
@@ -11237,9 +11307,13 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
                 self.x = np.zeros(2, dtype=float) if x is None else np.asarray(x, dtype=float)
                 self.lower_bounds = np.full(self.x.shape, -np.inf, dtype=float)
                 self.upper_bounds = np.full(self.x.shape, np.inf, dtype=float)
+                self.field = SimpleNamespace(clear_cached_properties=lambda: None)
 
             def J(self):
                 return self._value
+
+            def recompute_bell(self):
+                return None
 
             def dJ(self, partials=False):
                 if partials:
@@ -11373,8 +11447,8 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         fake_lcfs_surface = FakeSurface(
             label="lcfs",
             gamma_value=0.2,
-            major_radius=0.91,
-            minor_radius=0.14,
+            major_radius=in_bounds_lcfs_major_radius_m(),
+            minor_radius=in_bounds_lcfs_minor_radius_m(),
         )
         fake_plasma_geometry = SimpleNamespace(
             working_surface=fake_working_surface,
@@ -11855,8 +11929,14 @@ class Stage2RuntimeSmokeTests(unittest.TestCase):
         )
         self.assertEqual(runtime["plasma_geometry_args"][0], 0.92)
         self.assertEqual(runtime["results"]["MAJOR_RADIUS"], 0.976)
-        self.assertEqual(runtime["results"]["FINAL_LCFS_MAJOR_RADIUS_M"], 0.91)
-        self.assertEqual(runtime["results"]["FINAL_LCFS_MINOR_RADIUS_M"], 0.14)
+        self.assertEqual(
+            runtime["results"]["FINAL_LCFS_MAJOR_RADIUS_M"],
+            in_bounds_lcfs_major_radius_m(),
+        )
+        self.assertEqual(
+            runtime["results"]["FINAL_LCFS_MINOR_RADIUS_M"],
+            in_bounds_lcfs_minor_radius_m(),
+        )
         self.assertNotEqual(
             runtime["results"]["MAJOR_RADIUS"],
             runtime["results"]["FINAL_LCFS_MAJOR_RADIUS_M"],

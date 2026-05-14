@@ -36,7 +36,10 @@ from .hardware_constraint_schema import (
     hardware_constraint_artifact_field_names,
     hardware_constraint_artifact_value_field_names,
 )
-from .single_stage_geometry import build_surface_configs
+from .single_stage_geometry import (
+    build_surface_configs,
+    surface_self_intersection_status,
+)
 
 BOOTABILITY_REASON_OK = "ok"
 BOOTABILITY_REASON_MISSING_ARTIFACT_METADATA = "missing_artifact_metadata"
@@ -70,6 +73,8 @@ __all__ = [
     "classify_bootability_result",
     "compute_tf_G0",
     "evaluate_stage2_seed_hardware_contract",
+    "validate_stage2_seed_bootability_contract",
+    "validate_stage2_seed_handoff_contract",
     "initialize_boozer_surface",
     "load_warm_start_boozer_seed",
     "partition_loaded_stage2_coils",
@@ -356,6 +361,22 @@ def evaluate_stage2_seed_hardware_contract(
     )
 
 
+def validate_stage2_seed_bootability_contract(
+    stage2_results: Mapping[str, object],
+) -> None:
+    if bootability_passes(stage2_results):
+        return
+    raise ValueError(
+        "Stage 2 seed artifact is not single-stage bootable: "
+        f"BOOZER_BOOTABLE={stage2_results.get('BOOZER_BOOTABLE')!r}, "
+        f"IOTA_NEAR_TARGET={stage2_results.get('IOTA_NEAR_TARGET')!r}, "
+        f"IOTA_FEASIBLE={stage2_results.get('IOTA_FEASIBLE')!r}, "
+        f"BOOTABILITY_REASON={stage2_results.get('BOOTABILITY_REASON')!r}, "
+        f"BOOTABILITY_SOLVED_IOTA={stage2_results.get('BOOTABILITY_SOLVED_IOTA')!r}, "
+        f"BOOTABILITY_TARGET_IOTA={stage2_results.get('BOOTABILITY_TARGET_IOTA')!r}."
+    )
+
+
 def validate_stage2_seed_contract(stage2_results):
     tf_current_A = stage2_results.get("TF_CURRENT_A")
     if tf_current_A is None:
@@ -403,6 +424,11 @@ def validate_stage2_seed_contract(stage2_results):
             "Stage 2 seed artifact violates the full HBT-EP hardware contract: "
             + "; ".join(hardware_status["violations"])
         )
+
+
+def validate_stage2_seed_handoff_contract(stage2_results):
+    validate_stage2_seed_contract(stage2_results)
+    validate_stage2_seed_bootability_contract(stage2_results)
 
 
 def compute_tf_G0(tf_coils) -> float:
@@ -599,13 +625,11 @@ def _check_self_intersection_after_initialization(
     boozer_surface,
     pre_solve_state: _BoozerInitializationState,
 ) -> bool:
-    self_intersection_check_completed = False
-    try:
-        self_intersecting = bool(boozer_surface.surface.is_self_intersecting())
-        self_intersection_check_completed = True
-    finally:
-        if not self_intersection_check_completed:
-            _restore_boozer_initialization_state(boozer_surface, pre_solve_state)
+    self_intersecting, check_completed = surface_self_intersection_status(
+        boozer_surface.surface
+    )
+    if not check_completed:
+        _restore_boozer_initialization_state(boozer_surface, pre_solve_state)
     return self_intersecting
 
 
@@ -834,6 +858,7 @@ def _bootability_failure(
         abs_iota_error = abs(float(solved_iota) - float(target_iota))
     return {
         "BOOZER_BOOTABLE": False,
+        "IOTA_NEAR_TARGET": False,
         "IOTA_FEASIBLE": False,
         "BOOTABILITY_REASON": reason,
         "BOOTABILITY_STAGE": stage,
@@ -885,19 +910,17 @@ def classify_bootability_result(
             solve_success=True,
         )
     abs_iota_error = abs(float(solved_iota) - float(target_iota))
-    if abs_iota_error > float(iota_tolerance):
-        return _bootability_failure(
-            stage=stage,
-            target_iota=target_iota,
-            reason=BOOTABILITY_REASON_IOTA_MISMATCH,
-            solved_iota=solved_iota,
-            self_intersecting=False,
-            solve_success=True,
-        )
+    iota_near_target = abs_iota_error <= float(iota_tolerance)
+    bootability_reason = (
+        BOOTABILITY_REASON_OK
+        if iota_near_target
+        else BOOTABILITY_REASON_IOTA_MISMATCH
+    )
     return {
         "BOOZER_BOOTABLE": True,
-        "IOTA_FEASIBLE": True,
-        "BOOTABILITY_REASON": BOOTABILITY_REASON_OK,
+        "IOTA_NEAR_TARGET": iota_near_target,
+        "IOTA_FEASIBLE": iota_near_target,
+        "BOOTABILITY_REASON": bootability_reason,
         "BOOTABILITY_STAGE": stage,
         "BOOTABILITY_TARGET_IOTA": float(target_iota),
         "BOOTABILITY_SOLVED_IOTA": float(solved_iota),
@@ -910,10 +933,7 @@ def classify_bootability_result(
 
 
 def bootability_passes(bootability_status: Mapping[str, object]) -> bool:
-    return bool(
-        bootability_status.get("BOOZER_BOOTABLE")
-        and bootability_status.get("IOTA_FEASIBLE")
-    )
+    return bootability_status.get("BOOZER_BOOTABLE") is True
 
 
 def _required_handoff_metadata_keys(

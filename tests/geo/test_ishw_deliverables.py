@@ -70,6 +70,20 @@ def load_stage2_module():
     return load_module(STAGE2_ENTRYPOINT_PATH, "banana_coil_solver")
 
 
+def load_hardware_contracts_module():
+    return importlib.import_module("banana_opt.hardware_contracts")
+
+
+def in_bounds_lcfs_major_radius_m():
+    hardware_contracts = load_hardware_contracts_module()
+    return hardware_contracts.TARGET_LCFS_MAX_MAJOR_RADIUS_M - 0.01
+
+
+def in_bounds_lcfs_minor_radius_m():
+    hardware_contracts = load_hardware_contracts_module()
+    return hardware_contracts.TARGET_LCFS_MAX_MINOR_RADIUS_M - 0.01
+
+
 def write_stage2_results_with_digest(stage2_bs_path: Path, stage2_results: dict) -> Path:
     results_path = stage2_bs_path.with_name("results.json")
     payload = dict(stage2_results)
@@ -1283,6 +1297,122 @@ class IshwPlotTests(unittest.TestCase):
 
 
 class Stage2IotaReportingTests(unittest.TestCase):
+    def test_stage2_artifact_capture_resets_flux_grid_after_iota_probe(self):
+        module = load_stage2_module()
+        np = module.np
+
+        class _Surface:
+            def gamma(self):
+                return np.zeros((2, 3, 3))
+
+            def normal(self):
+                return np.zeros((2, 3, 3))
+
+        class _Field:
+            def __init__(self):
+                self.point_count = 4
+                self.cache_count = 4
+                self.clear_count = 0
+
+            def set_points(self, points):
+                self.point_count = len(points)
+
+            def clear_cached_properties(self):
+                self.cache_count = None
+                self.clear_count += 1
+
+            def B(self):
+                if self.cache_count is None:
+                    self.cache_count = self.point_count
+                return np.zeros((self.cache_count, 3))
+
+        class _SquaredFlux:
+            def __init__(self, surface, field):
+                self.surface = surface
+                self.field = field
+                self.recompute_calls = 0
+
+            def recompute_bell(self):
+                self.recompute_calls += 1
+                self.field.set_points(self.surface.gamma().reshape((-1, 3)))
+
+            def J(self):
+                self.field.B().reshape(self.surface.normal().shape)
+                return 0.25
+
+        surface = _Surface()
+        field = _Field()
+        squared_flux = _SquaredFlux(surface, field)
+
+        def evaluate_iota(_runtime):
+            field.set_points(np.zeros((4, 3)))
+            field.cache_count = 4
+            return SimpleNamespace(
+                iota=0.16,
+                penalty=0.0,
+                abs_error=0.0,
+                feasible=True,
+                solve_failed=False,
+            )
+
+        with patch.object(
+            module,
+            "_stage2_poloidal_extent_rad",
+            return_value=0.1,
+        ), patch.object(
+            module,
+            "evaluate_stage2_iota_state",
+            side_effect=evaluate_iota,
+        ):
+            state = module._capture_stage2_artifact_state(
+                dofs=[0.0, 1.0],
+                JF=SimpleNamespace(x=None),
+                BASE_OBJECTIVE=SimpleNamespace(x=None),
+                Jf=squared_flux,
+                new_bs=field,
+                new_surf=surface,
+                Jls=SimpleNamespace(J=lambda: 1.1),
+                Jccdist=SimpleNamespace(shortest_distance=lambda: 0.06),
+                Jcsdist=SimpleNamespace(shortest_distance=lambda: 0.02),
+                new_banana_curve=SimpleNamespace(kappa=lambda: np.array([10.0])),
+                new_banana_coils=[
+                    SimpleNamespace(
+                        current=SimpleNamespace(get_value=lambda: -1.0e4)
+                    )
+                ],
+                new_tf_coils=[
+                    SimpleNamespace(
+                        current=SimpleNamespace(get_value=lambda: -8.0e4)
+                    )
+                ],
+                length_target=1.9,
+                cc_threshold=0.05,
+                curvature_threshold=100.0,
+                coil_surface_threshold=0.015,
+                plasma_vessel_min_dist=0.04,
+                plasma_vessel_threshold=0.04,
+                poloidal_extent_threshold_rad=0.7853981633974483,
+                banana_current_max_A=1.6e4,
+                final_plasma_major_radius_m=in_bounds_lcfs_major_radius_m(),
+                final_plasma_minor_radius_m=in_bounds_lcfs_minor_radius_m(),
+                stage2_iota_runtime=object(),
+                Jw=SimpleNamespace(J=lambda: 0.1),
+                Jself=SimpleNamespace(
+                    J=lambda: 0.0,
+                    shortest_self_distance=lambda: 0.02,
+                ),
+                length_min_target=0.95,
+                width_min_threshold=0.05,
+                width_max_threshold=0.17,
+                self_intersect_min_distance=0.01,
+            )
+
+        self.assertEqual(state["field_objective"], 0.25)
+        self.assertEqual(squared_flux.recompute_calls, 1)
+        self.assertEqual(field.point_count, 6)
+        self.assertFalse(state["stage2_iota_solve_failed"])
+        self.assertGreaterEqual(field.clear_count, 1)
+
     def test_build_stage2_command_forwards_stage2_iota_hot_loop_flags(self):
         module = load_workflow_common_module()
 
@@ -1482,6 +1612,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
             "probe_stage2_seed_bootability",
             return_value={
                 "BOOZER_BOOTABLE": True,
+                "IOTA_NEAR_TARGET": True,
                 "IOTA_FEASIBLE": True,
                 "BOOTABILITY_REASON": "ok",
                 "BOOTABILITY_STAGE": "probe",
@@ -1499,6 +1630,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
         self.assertTrue(payload["STAGE2_ROOT_FIX_ENABLED"])
         self.assertEqual(payload["STAGE2_IOTA_MODE"], "report")
         self.assertTrue(payload["BOOZER_BOOTABLE"])
+        self.assertTrue(payload["IOTA_NEAR_TARGET"])
         self.assertTrue(payload["IOTA_FEASIBLE"])
         self.assertNotIn("RECOVERY_ATTEMPTED", payload)
         self.assertEqual(
@@ -1535,6 +1667,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
             "probe_stage2_seed_bootability",
             return_value={
                 "BOOZER_BOOTABLE": True,
+                "IOTA_NEAR_TARGET": True,
                 "IOTA_FEASIBLE": True,
                 "BOOTABILITY_REASON": "ok",
                 "BOOTABILITY_STAGE": "probe",
@@ -1594,6 +1727,7 @@ class Stage2IotaReportingTests(unittest.TestCase):
             "probe_stage2_seed_bootability",
             return_value={
                 "BOOZER_BOOTABLE": True,
+                "IOTA_NEAR_TARGET": True,
                 "IOTA_FEASIBLE": True,
                 "BOOTABILITY_REASON": "ok",
                 "BOOTABILITY_STAGE": "probe",

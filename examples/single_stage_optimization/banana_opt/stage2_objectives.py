@@ -85,6 +85,7 @@ def _new_derivative():
 
 def _reset_biot_savart_points_to_surface(biotsavart, surface) -> None:
     biotsavart.set_points(surface.gamma().reshape((-1, 3)))
+    biotsavart.clear_cached_properties()
 
 
 @dataclass

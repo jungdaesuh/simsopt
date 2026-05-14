@@ -255,40 +255,7 @@ def run_repair_case(
     blocking_reason = None
 
     if not bootability_passes(initial_probe):
-        if case_args.skip_recovery:
-            blocking_reason = "initial_probe_failed_skip_recovery"
-        else:
-            recovery_attempted = True
-            recovery_output_root = case_output_root / "recovery"
-            recovery_output_root.mkdir(parents=True, exist_ok=True)
-            recovery_payload = unified_runner.run_recovery_stage(
-                case_args,
-                original_stage2_bs_path=original_stage2_bs_path,
-                original_stage2_results_path=original_stage2_results_path,
-                original_stage2_results=stage2_results,
-                recovery_output_root=recovery_output_root,
-            )
-            recovery_termination_reason = recovery_payload.get(
-                "recovery_termination_reason"
-            )
-            if recovery_payload["status"] == "completed":
-                recovery_succeeded = bool(recovery_payload["recovery_succeeded"])
-                recovery_iters = recovery_payload["recovery_iters"]
-                handoff_status = recovery_payload["recovery_probe"]
-                if recovery_succeeded:
-                    selected_seed_source = (
-                        unified_runner.SEED_SOURCE_RECOVERED_STAGE2_DONOR
-                    )
-                    selected_stage2_bs_path = resolved_path(
-                        recovery_payload["recovered_bs_path"]
-                    )
-                    selected_results_path = resolved_path(
-                        recovery_payload["results_path"]
-                    )
-                else:
-                    blocking_reason = "recovery_failed"
-            else:
-                blocking_reason = "recovery_failed"
+        blocking_reason = unified_runner.BLOCKING_REASON_PRE_BOOZER_REPAIR_REQUIRED
 
     handoff_bootable = bootability_passes(handoff_status)
     case_payload.update(

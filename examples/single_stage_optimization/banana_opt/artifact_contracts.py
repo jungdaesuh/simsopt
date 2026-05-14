@@ -91,6 +91,7 @@ def _upgrade_legacy_stage2_iota_report_metadata(upgraded_results: dict) -> None:
         "STAGE2_IOTA_PROBE_SECONDS": None,
         "BOOTABILITY_STAGE2_BS_PATH": None,
         "BOOTABILITY_STAGE2_RESULTS_PATH": None,
+        "IOTA_NEAR_TARGET": None,
         "STAGE2_IOTA_HOT_LOOP_ENABLED": False,
         "STAGE2_IOTA_BOOTSTRAP_SECONDS": None,
         "STAGE2_IOTA_RUNTIME_SECONDS": None,

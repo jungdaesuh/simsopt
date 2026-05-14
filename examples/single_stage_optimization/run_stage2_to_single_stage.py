@@ -43,6 +43,19 @@ DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "outputs_stage2_to_single_stage"
 DEFAULT_SUMMARY_JSON = "stage2_to_single_stage_summary.json"
 DATABASE_EQUILIBRIA_DIR = SCRIPT_DIR.parents[1] / "DATABASE" / "EQUILIBRIA"
 RECOVERY_STAGE_THRESHOLDED_PHYSICS_ALM = "thresholded_physics_alm"
+LANE_STAGE2_HARDWARE = "stage2_hardware"
+LANE_PRE_BOOZER_REPAIR = "pre_boozer_repair"
+LANE_BOOZER_ACTIVATION = "boozer_activation"
+LANE_SINGLE_STAGE_TARGET = "single_stage_target"
+LANE_PROMOTION = "promotion"
+LANE_SEQUENCE = (
+    LANE_STAGE2_HARDWARE,
+    LANE_PRE_BOOZER_REPAIR,
+    LANE_BOOZER_ACTIVATION,
+    LANE_SINGLE_STAGE_TARGET,
+    LANE_PROMOTION,
+)
+BLOCKING_REASON_PRE_BOOZER_REPAIR_REQUIRED = "pre_boozer_repair_required"
 SEED_SOURCE_DIRECT_STAGE2_DONOR = "direct_stage2_donor"
 SEED_SOURCE_RECOVERED_STAGE2_DONOR = "recovered_stage2_donor"
 
@@ -490,6 +503,7 @@ def build_recovery_command(
     recovery_args = SimpleNamespace(
         python_executable=args.python_executable,
         stage2_bs_path=str(stage2_bs_path),
+        stage2_seed_role="recovery",
         output_root=str(recovery_output_root),
         allow_init_only_stage2_seed=args.allow_init_only_stage2_seed,
         equilibria_dir=args.equilibria_dir,
@@ -752,6 +766,23 @@ def handoff_results_payload(
     return payload
 
 
+def next_required_lane(
+    *,
+    initial_probe: dict[str, object] | None,
+    full_payload: dict[str, object] | None,
+    blocking_reason: str | None,
+) -> str:
+    if initial_probe is None:
+        return LANE_BOOZER_ACTIVATION
+    if blocking_reason == BLOCKING_REASON_PRE_BOOZER_REPAIR_REQUIRED:
+        return LANE_PRE_BOOZER_REPAIR
+    if full_payload is None:
+        return LANE_SINGLE_STAGE_TARGET
+    if full_payload.get("status") == "completed":
+        return LANE_PROMOTION
+    return LANE_SINGLE_STAGE_TARGET
+
+
 def build_summary(
     args: argparse.Namespace,
     *,
@@ -772,6 +803,12 @@ def build_summary(
         ),
         "goal_mode": args.goal_mode,
         "dry_run": bool(args.dry_run),
+        "lane_sequence": list(LANE_SEQUENCE),
+        "next_required_lane": next_required_lane(
+            initial_probe=initial_probe,
+            full_payload=full_payload,
+            blocking_reason=blocking_reason,
+        ),
         "stage2_input": {
             "source": stage2_input["source"],
             "stage2_bs_path": str(stage2_input["stage2_bs_path"]),
@@ -838,72 +875,16 @@ def main(argv: list[str] | None = None) -> int:
     seed_source = SEED_SOURCE_DIRECT_STAGE2_DONOR
 
     if not bootability_passes(initial_probe):
-        if args.skip_recovery:
-            if not args.force_full_single_stage_after_recovery_fail:
-                summary = build_summary(
-                    args,
-                    stage2_input=stage2_input,
-                    initial_probe=initial_probe,
-                    recovery_payload=None,
-                    full_payload=None,
-                    blocking_reason="initial_probe_failed_skip_recovery",
-                )
-                write_json(summary_path, summary)
-                return 0
-        else:
-            recovery_attempted = True
-            recovery_output_root = resolve_output_root(
-                args.recovery_output_root,
-                default_root=output_root / "recovery",
-            )
-            recovery_output_root.mkdir(parents=True, exist_ok=True)
-            recovery_payload = run_recovery_stage(
-                args,
-                original_stage2_bs_path=original_stage2_bs_path,
-                original_stage2_results_path=original_stage2_results_path,
-                original_stage2_results=stage2_results,
-                recovery_output_root=recovery_output_root,
-            )
-            recovery_termination_reason = recovery_payload.get(
-                "recovery_termination_reason"
-            )
-            if recovery_payload["status"] == "completed":
-                recovery_succeeded = bool(recovery_payload["recovery_succeeded"])
-                recovery_iters = recovery_payload["recovery_iters"]
-                if recovery_succeeded:
-                    handoff_bs_path = resolved_path(recovery_payload["recovered_bs_path"])
-                    handoff_warm_start_surface_stem = resolved_path(
-                        recovery_payload["warm_start_surface_stem"]
-                    )
-                    handoff_bootability = recovery_payload["recovery_probe"]
-                    seed_source = SEED_SOURCE_RECOVERED_STAGE2_DONOR
-            if args.recovery_only:
-                summary = build_summary(
-                    args,
-                    stage2_input=stage2_input,
-                    initial_probe=initial_probe,
-                    recovery_payload=recovery_payload,
-                    full_payload=None,
-                    blocking_reason=(
-                        None if recovery_succeeded else "recovery_only_not_bootable"
-                    ),
-                )
-                write_json(summary_path, summary)
-                return 0
-            if (
-                not recovery_succeeded
-                and not args.force_full_single_stage_after_recovery_fail
-            ):
-                summary = build_summary(
-                    args,
-                    stage2_input=stage2_input,
-                    initial_probe=initial_probe,
-                    recovery_payload=recovery_payload,
-                    full_payload=None,
-                    blocking_reason="recovery_failed",
-                )
-                write_json(summary_path, summary)
-                return 0
+        summary = build_summary(
+            args,
+            stage2_input=stage2_input,
+            initial_probe=initial_probe,
+            recovery_payload=None,
+            full_payload=None,
+            blocking_reason=BLOCKING_REASON_PRE_BOOZER_REPAIR_REQUIRED,
+        )
+        write_json(summary_path, summary)
+        return 0
 
     if args.recovery_only:
         summary = build_summary(
